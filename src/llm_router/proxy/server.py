@@ -89,6 +89,21 @@ DEFAULT_NUM_CTX = 32768
 _HOP = {"host", "content-length", "connection", "accept-encoding", "transfer-encoding",
         "keep-alive", "proxy-authorization", "te", "trailer", "upgrade"}
 
+# ``--tiers`` / ``LLM_ROUTER_PROXY_TIERS`` modes.
+#   off           the rewrite never runs.
+#   on            per-turn (PR #215): the classifier decides on every eligible
+#                 call; the conversation's first call is exempt (Key finding
+#                 1.2: a mid-task switch re-writes the whole prompt cache, and
+#                 Opus 5.5 / Sonnet 5.5 read cache at the same rate, so a
+#                 switch on a short task loses money).
+#   conversation  Phase 1.2b: the first call IS classified, and its tier holds
+#                 for the whole conversation via stickiness (escalating only
+#                 at a cold point or a clear rise in complexity).
+TIERS_OFF = "off"
+TIERS_ON = "on"
+TIERS_CONVERSATION = "conversation"
+TIER_MODES = (TIERS_OFF, TIERS_ON, TIERS_CONVERSATION)
+
 
 def validate_upstream(url: str) -> str:
     """Only Anthropic itself or a loopback test double may receive the client's
@@ -116,7 +131,7 @@ class ProxyConfig:
     warm_up: bool = True
     loop_max_consecutive: int = DEFAULT_MAX_CONSECUTIVE
     loop_repeat_window: int = DEFAULT_REPEAT_WINDOW
-    tiers: bool = False
+    tiers: str = TIERS_OFF
     tier_policy: str | None = None
     # Capability gating + compaction (llm_router.local_agent); None = off.
     local_agent: LocalAgentConfig | None = None
@@ -136,7 +151,7 @@ class ProxyConfig:
                                                       DEFAULT_MAX_CONSECUTIVE)),
             loop_repeat_window=int(os.environ.get("LLM_ROUTER_PROXY_LOOP_REPEAT_WINDOW",
                                                     DEFAULT_REPEAT_WINDOW)),
-            tiers=parse_on_off(os.environ.get("LLM_ROUTER_PROXY_TIERS", "off")),
+            tiers=parse_tiers_mode(os.environ.get("LLM_ROUTER_PROXY_TIERS", "off")),
             tier_policy=os.environ.get("LLM_ROUTER_PROXY_TIER_POLICY") or None,
             local_agent=LocalAgentConfig.from_env() if enabled_from_env() else None,
         )
@@ -149,6 +164,20 @@ def parse_on_off(raw: str) -> bool:
     if value in ("", "0", "off", "false", "no"):
         return False
     raise ValueError(f"expected on/off, got {raw!r}")
+
+
+def parse_tiers_mode(raw: str) -> str:
+    """``off`` / ``on`` (per-turn) / ``conversation`` (Phase 1.2b). Accepts the
+    old boolean spellings for ``off``/``on`` so a bare ``LLM_ROUTER_PROXY_TIERS=1``
+    from before this flag had a third value keeps meaning per-turn."""
+    value = str(raw or "").strip().lower()
+    if value in ("", "0", "off", "false", "no"):
+        return TIERS_OFF
+    if value in ("1", "on", "true", "yes"):
+        return TIERS_ON
+    if value == TIERS_CONVERSATION:
+        return TIERS_CONVERSATION
+    raise ValueError(f"expected one of {TIER_MODES}, got {raw!r}")
 
 
 def parse_hedge(raw: str) -> float | None:
@@ -195,7 +224,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
     guard = LoopGuard(cfg.loop_max_consecutive, cfg.loop_repeat_window)
     # Claude-tier rewrite (opt-in). A bad policy file fails here, at startup,
     # never per call.
-    tier_policy = ClaudeTierPolicy.load(cfg.tier_policy) if cfg.tiers else None
+    tier_policy = (ClaudeTierPolicy.load(cfg.tier_policy, conversation_level=(cfg.tiers == TIERS_CONVERSATION))
+                   if cfg.tiers != TIERS_OFF else None)
     sticky = Stickiness(tier_policy.cold_gap_s) if tier_policy is not None else None
 
     def _ollama_url() -> str:
@@ -473,6 +503,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
             "step_class": step_class(body, set(STEP_CLASSES)),
             "prev_tools": prev_tools(body),
             "decision": ledger.DECISION_FORWARDED, "added_latency_s": 0.0,
+            "tier_mode": cfg.tiers,
         }
         if not cfg.steps:
             row["reason"] = "routing_off"
@@ -546,7 +577,7 @@ llm-router proxy [--port N] [--steps continuation|off] [--step-budget-s S]
                  [--hedge-s S|off] [--model ollama/TAG] [--trim NAME[,NAME]]
                  [--num-ctx N] [--ollama-url URL] [--keep-alive -1|5m] [--no-warm-up]
                  [--loop-max-consecutive N] [--loop-repeat-window N]
-                 [--tiers on|off] [--tier-policy FILE.yaml] [--local-agent]
+                 [--tiers off|on|conversation] [--tier-policy FILE.yaml] [--local-agent]
 llm-router proxy stats [--days N] [--json]
 
 Opt-in, per session. Nothing is enabled until you point a session at it:
@@ -589,8 +620,9 @@ def cmd_proxy(argv: list[str]) -> int:
                      help="force a step to Anthropic after this many served-in-a-row for a session (0 disables)")
     ap.add_argument("--loop-repeat-window", type=int, default=env.loop_repeat_window,
                      help="reject a served tool call that repeats one of this many recent steps (0 disables)")
-    ap.add_argument("--tiers", default="on" if env.tiers else "off",
-                    help="Claude-tier rewrite: move easy calls to a cheaper Claude tier (opt-in)")
+    ap.add_argument("--tiers", default=env.tiers,
+                    help="Claude-tier rewrite (opt-in): off, on (per-turn, PR #215) or "
+                         "conversation (classify once at the conversation's start, Phase 1.2b)")
     ap.add_argument("--tier-policy", default=env.tier_policy,
                     help="tier policy YAML (default: the bundled proxy/claude_tiers.yaml)")
     ap.add_argument("--local-agent", action="store_true",
@@ -608,7 +640,7 @@ def cmd_proxy(argv: list[str]) -> int:
                           hedge_s=parse_hedge(a.hedge_s) if a.hedge_s is not None else env.hedge_s,
                           keep_alive=parse_keep_alive(a.keep_alive), warm_up=not a.no_warm_up,
                           ollama_url=a.ollama_url, loop_max_consecutive=a.loop_max_consecutive,
-                          loop_repeat_window=a.loop_repeat_window, tiers=parse_on_off(a.tiers),
+                          loop_repeat_window=a.loop_repeat_window, tiers=parse_tiers_mode(a.tiers),
                           tier_policy=a.tier_policy,
                           local_agent=(LocalAgentConfig.from_env() if a.local_agent else env.local_agent))
         app = build_app(cfg)
@@ -623,7 +655,7 @@ def cmd_proxy(argv: list[str]) -> int:
           f"hedge={cfg.hedge_s}s  budget={cfg.step_budget_s}s  "
           f"trim={'compact (local agent)' if cfg.local_agent else (cfg.trim or 'fast')}  "
           f"loop_guard(max_consecutive={cfg.loop_max_consecutive}, repeat_window={cfg.loop_repeat_window})  "
-          f"tiers={'on (' + (cfg.tier_policy or 'bundled policy') + ')' if cfg.tiers else 'off'}  "
+          f"tiers={cfg.tiers + ' (' + (cfg.tier_policy or 'bundled policy') + ')' if cfg.tiers != TIERS_OFF else 'off'}  "
           f"local_agent={'on' if cfg.local_agent else 'off'}")
     print(f"  enable per session: {enable_hint(a.host, a.port)}")
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning", access_log=False)

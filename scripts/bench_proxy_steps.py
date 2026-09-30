@@ -337,11 +337,15 @@ async def run_task(case: dict, arm: str, args, oracle_table: dict, first: dict, 
 
     oracle = Oracle(oracle_table, cid, workdir)
     local = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
-    # "tiered": no local serving, Claude-tier rewrite on (proxy.tiers).
-    steps = frozenset() if arm in ("baseline", "tiered") else frozenset({"continuation"})
+    # "tiered": no local serving, per-turn Claude-tier rewrite (proxy.tiers, PR #215).
+    # "tiered-conversation": no local serving, Phase 1.2b conversation-level rewrite.
+    tiered_arms = ("tiered", "tiered-conversation")
+    steps = frozenset() if arm in ("baseline", *tiered_arms) else frozenset({"continuation"})
+    tiers_mode = (ps.TIERS_CONVERSATION if arm == "tiered-conversation"
+                  else ps.TIERS_ON if arm == "tiered" else ps.TIERS_OFF)
     cfg = ps.ProxyConfig(steps=steps, step_budget_s=args.step_budget_s, model=args.model, trim=args.trim,
                          num_ctx=args.num_ctx, upstream="http://127.0.0.1:9", ledger_path=rows_path,
-                         tiers=arm == "tiered", tier_policy=args.tier_policy)
+                         tiers=tiers_mode, tier_policy=args.tier_policy)
     app = ps.build_app(cfg, client=httpx.AsyncClient(transport=httpx.MockTransport(oracle)),
                        backend_factory=lambda m: OllamaBackend(m, local, base_url=args.ollama_url,
                                                                num_ctx=args.num_ctx, hedge_s=args.hedge_s))
@@ -471,7 +475,8 @@ def main() -> int:
     ap.add_argument("--max-calls", type=int, default=14)
     ap.add_argument("--hedge-s", type=float, default=ps.DEFAULT_HEDGE_S)
     ap.add_argument("--no-warm-up", action="store_true")
-    ap.add_argument("--tier-policy", default=None, help="tier policy YAML for the `tiered` arm")
+    ap.add_argument("--tier-policy", default=None,
+                     help="tier policy YAML for the `tiered` / `tiered-conversation` arms")
     ap.add_argument("--requested-model", default=None,
                     help="replace the recorded request's model (e.g. to replay an Opus session)")
     args = ap.parse_args()

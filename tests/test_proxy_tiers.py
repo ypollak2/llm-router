@@ -276,6 +276,104 @@ async def test_subagent_with_its_own_first_turn_keeps_its_own_state(policy):
     assert (d.reason, d.served_model) == (pt.REASON_FIRST_CALL, OPUS)
 
 
+# ── conversation-level mode (Phase 1.2b, --tiers conversation) ──────────────
+
+
+def _conversation_policy(**overrides):
+    raw = {**_raw_policy()}
+    raw["stickiness"] = dict(raw.get("stickiness") or {}, **overrides)
+    return pt.ClaudeTierPolicy.from_dict(raw, conversation_level=True)
+
+
+async def test_conversation_mode_classifies_and_rewrites_the_first_call():
+    """The whole point of 1.2b: unlike per-turn mode, the first call is not
+    exempt -- it IS the conversation-level decision, and it is not billed as
+    a 'switch' (nothing was cached yet to re-write)."""
+    policy = _conversation_policy()
+    sticky = Stickiness()
+    d = await policy.decide(_first(), SID, sticky, classify=_classify("moderate"))
+    assert (d.reason, d.served_model, d.tier) == (pt.REASON_POLICY, SONNET, "sonnet")
+    assert d.switched is False and d.switch_cost_usd is None
+
+
+def _no_thinking(body: dict) -> dict:
+    """A request haiku can actually serve: no thinking type and no effort, so
+    the thinking floor never overrides a target haiku decision."""
+    body = copy.deepcopy(body)
+    body.pop("thinking", None)
+    body.pop("output_config", None)
+    return body
+
+
+async def test_conversation_mode_never_downgrades_back_once_committed():
+    """A later prompt that classifies cheaper than the conversation's opening
+    tier does not pull it back down -- only a cold point or a genuine rise
+    does (module docstring: 'escalate ... only ... when the complexity class
+    clearly rises')."""
+    policy = _conversation_policy()
+    sticky = Stickiness()
+    await policy.decide(_no_thinking(_first()), SID, sticky, classify=_classify("moderate"))  # -> sonnet
+    d = await policy.decide(_no_thinking(_req()), SID, sticky, classify=_classify("simple"))
+    assert (d.served_model, d.reason, d.switched) == (SONNET, pt.REASON_STICKY, False)
+
+
+async def test_conversation_mode_escalates_on_a_clear_complexity_rise():
+    policy = _conversation_policy()
+    sticky = Stickiness()
+    await policy.decide(_first(), SID, sticky, classify=_classify("moderate"))  # -> sonnet
+    d = await policy.decide(_req(), SID, sticky, classify=_classify("complex"))  # rises -> opus
+    assert (d.served_model, d.reason, d.switched) == (OPUS, pt.REASON_POLICY, True)
+
+
+async def test_conversation_mode_cold_point_still_allows_a_downward_move():
+    """A cold point resets stickiness regardless of direction: unlike a live
+    downgrade, there is no warm cache left to protect."""
+    clock = Clock()
+    policy = _conversation_policy()
+    sticky = Stickiness(cold_gap_s=policy.cold_gap_s, clock=clock)
+    await policy.decide(_no_thinking(_first()), SID, sticky, classify=_classify("moderate"))  # -> sonnet
+    clock.t += policy.cold_gap_s + 1
+    d = await policy.decide(_no_thinking(_req()), SID, sticky, classify=_classify("simple"))
+    assert (d.served_model, d.reason, d.switched, d.switch_cost_usd) == (HAIKU, pt.REASON_POLICY, True, 0.0)
+
+
+async def test_conversation_mode_thinking_floor_still_applies_on_the_first_call():
+    policy = _conversation_policy()
+    sticky = Stickiness()
+    d = await policy.decide(_first(thinking="enabled"), SID, sticky, classify=_classify("simple"))
+    # Haiku (the only tier accepting `enabled` thinking) fails on the fixture's
+    # `output_config.effort`, and no other tier accepts `enabled`: the floor
+    # has nowhere to land, so the first call keeps the requested tier.
+    assert (d.served_model, d.reason) == (OPUS, pt.REASON_THINKING_FLOOR)
+
+
+async def test_per_turn_mode_is_unaffected_by_conversation_level_default(policy):
+    """`policy` (the module fixture) is built with conversation_level unset
+    (False): the first call stays exempt, exactly as PR #215 shipped it."""
+    assert policy.conversation_level is False
+    sticky = Stickiness()
+    d = await policy.decide(_first(), SID, sticky, classify=_classify("moderate"))
+    assert (d.reason, d.served_model) == (pt.REASON_FIRST_CALL, OPUS)
+
+
+def test_classify_constructor_hook_is_used_when_no_call_override_is_given():
+    """The Phase 2 kNN scorer hook: a policy built with its own `classify`
+    is used without a server.py callsite change."""
+    calls = []
+
+    async def scorer(text):
+        calls.append(text)
+        return {"task_type": "code", "complexity": "moderate", "chain_head": []}
+
+    raw = {**_raw_policy()}
+    policy = pt.ClaudeTierPolicy.from_dict(raw, conversation_level=True, classify=scorer)
+    import asyncio
+
+    sticky = Stickiness()
+    d = asyncio.run(policy.decide(_first(), SID, sticky))
+    assert calls and d.served_model == SONNET
+
+
 # ── backends widening ────────────────────────────────────────────────────────
 
 
@@ -329,7 +427,7 @@ class Upstream:
         return httpx.Response(status, stream=httpx.ByteStream(body), headers={"content-type": ctype})
 
 
-def _app(tmp_path, upstream, *, tiers=True, **cfg):
+def _app(tmp_path, upstream, *, tiers=ps.TIERS_ON, **cfg):
     import yaml
 
     raw = _raw_policy()
@@ -422,28 +520,49 @@ async def test_decision_error_forwards_unchanged_and_says_why(tmp_path, monkeypa
 
 async def test_tiers_off_is_byte_identical_and_writes_no_tier_fields(tmp_path, moderate):
     up = Upstream()
-    app = _app(tmp_path, up, tiers=False)
+    app = _app(tmp_path, up, tiers=ps.TIERS_OFF)
     body = _req()
     await _post(app, body)
     assert up.requests[0].content == json.dumps(body).encode()
     assert "tier_reason" not in _rows(tmp_path)[0] and "served_model" not in _rows(tmp_path)[0]
+    assert _rows(tmp_path)[0]["tier_mode"] == "off"
+
+
+async def test_conversation_mode_end_to_end_rewrites_the_first_call(tmp_path, moderate):
+    """Server-level: `--tiers conversation` sends the FIRST call at a cheaper
+    tier (per-turn mode would forward it unchanged at OPUS), then holds that
+    tier for the rest of the conversation."""
+    up = Upstream()
+    app = _app(tmp_path, up, tiers=ps.TIERS_CONVERSATION)
+    r = await _post(app, _first())
+    assert r.status_code == 200 and SONNET.encode() in r.content
+    r2 = await _post(app, _req())
+    assert r2.status_code == 200 and SONNET.encode() in r2.content
+    sent = [json.loads(q.content)["model"] for q in up.requests]
+    assert sent == [SONNET, SONNET]  # both calls, including the first, ride the classified tier
+    first, second = _rows(tmp_path)
+    assert (first["tier_reason"], first["served_model"], first["tier_switch"]) == ("policy", SONNET, False)
+    assert (second["tier_reason"], second["served_model"]) in (("policy", SONNET), ("sticky", SONNET))
+    assert first["tier_mode"] == second["tier_mode"] == "conversation"
 
 
 def test_tier_env_and_cli_parsing(monkeypatch, tmp_path):
     monkeypatch.setenv("LLM_ROUTER_PROXY_TIERS", "on")
     monkeypatch.setenv("LLM_ROUTER_PROXY_TIER_POLICY", str(tmp_path / "x.yaml"))
     cfg = ps.ProxyConfig.from_env()
-    assert cfg.tiers is True and cfg.tier_policy == str(tmp_path / "x.yaml")
+    assert cfg.tiers == ps.TIERS_ON and cfg.tier_policy == str(tmp_path / "x.yaml")
+    monkeypatch.setenv("LLM_ROUTER_PROXY_TIERS", "conversation")
+    assert ps.ProxyConfig.from_env().tiers == ps.TIERS_CONVERSATION
     monkeypatch.setenv("LLM_ROUTER_PROXY_TIERS", "maybe")
     with pytest.raises(ValueError):
         ps.ProxyConfig.from_env()
     monkeypatch.delenv("LLM_ROUTER_PROXY_TIERS")
-    assert ps.ProxyConfig.from_env().tiers is False  # opt-in
+    assert ps.ProxyConfig.from_env().tiers == ps.TIERS_OFF  # opt-in
 
 
 def test_missing_policy_file_fails_at_startup(tmp_path):
     with pytest.raises(OSError):
-        ps.build_app(ps.ProxyConfig(tiers=True, tier_policy=str(tmp_path / "nope.yaml"),
+        ps.build_app(ps.ProxyConfig(tiers=ps.TIERS_ON, tier_policy=str(tmp_path / "nope.yaml"),
                                     upstream="http://127.0.0.1:9"))
 
 

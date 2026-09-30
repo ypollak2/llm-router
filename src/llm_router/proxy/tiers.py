@@ -13,13 +13,25 @@ The decision, per call, in order (the first that applies wins):
 ``config_pinned``   the requested id is in ``pinned_models``: unchanged.
 ``side_call``       no client tools (titles, probes): unchanged.
 ``user_pinned``     the transcript shows the user ran ``/model``: unchanged.
-``first_call``      the conversation's first call: unchanged.
+``first_call``      the conversation's first call, **in per-turn mode only**
+                    (``--tiers on``): unchanged. In conversation mode
+                    (``--tiers conversation``, ``conversation_level=True``)
+                    the first call is classified and rewritten exactly like
+                    any other call below -- there is no exemption -- and the
+                    tier it lands on then rides stickiness for the rest of
+                    the conversation. This is the Phase 1.2b change: the Key
+                    finding (1.2) was that per-turn switching loses money
+                    under prompt caching, so the decision that matters is the
+                    one made once, at the conversation's start.
 ``policy``          the router's own classifier (``choose_model`` ->
                     ``classify_signals(GATEWAY_POLICY)`` and
                     ``router._build_and_filter_chain``) over the newest human
                     prompt gives (task_type, complexity); ``route`` maps that
                     to a tier. Never above the requested tier unless
-                    ``allow_upgrade``.
+                    ``allow_upgrade``. A future Phase 2 kNN scorer replaces
+                    this call only: pass ``classify=`` to ``decide()`` (or a
+                    ``classify`` constructor argument), never a callsite
+                    change in ``server.py``.
 ``thinking_floor``  as ``policy``, raised to the cheapest tier that accepts
                     the request's ``thinking.type`` and, if it sets one,
                     ``output_config.effort`` (Haiku 4.5 takes neither adaptive
@@ -27,6 +39,14 @@ The decision, per call, in order (the first that applies wins):
 ``sticky``          the policy wanted a different tier, but the conversation
                     stays where it was (``cache_cost``): same complexity
                     class and the cache is warm.
+
+In conversation mode, a mid-conversation move (``class_changed``) only breaks
+stickiness when the new class ranks a HIGHER tier than the one the
+conversation is already sitting on (an escalation) -- never a downgrade back
+toward a cheaper tier once committed. A cold point (``cold_gap_s`` with no
+call) still resets stickiness either way, same as per-turn mode: "escalate
+within a conversation only at a cold point, or when the complexity class
+clearly rises."
 
 Model ids come from the YAML policy (``claude_tiers.yaml`` beside this module,
 or the file ``--tier-policy`` / ``LLM_ROUTER_PROXY_TIER_POLICY`` names), never from literals here.
@@ -95,7 +115,8 @@ class ClaudeTierPolicy:
 
     def __init__(self, tiers: list[Tier], route: dict[str, dict[str, str]], *,
                  allow_upgrade: bool = False, pinned_models: tuple[str, ...] = (),
-                 cold_gap_s: float = 3600.0, switch_after_first_call: bool = False) -> None:
+                 cold_gap_s: float = 3600.0, switch_after_first_call: bool = False,
+                 conversation_level: bool = False, classify=None) -> None:
         if not tiers:
             raise ValueError("tier policy has no tiers")
         self.tiers = tiers
@@ -112,6 +133,11 @@ class ClaudeTierPolicy:
         self.pinned = frozenset(filter(None, (_canonical(m) for m in pinned_models)))
         self.cold_gap_s = cold_gap_s
         self.switch_after_first_call = switch_after_first_call
+        self.conversation_level = conversation_level
+        # Phase 2 hook point: a kNN scorer replaces this callable only, never
+        # a callsite in server.py. ``decide()``'s own ``classify=`` argument
+        # (per call, mainly for tests) wins over this one when both are given.
+        self._classify = classify
         self._ids: dict[str, Tier] = {}
         for t in tiers:
             for mid in (t.model, *t.also):
@@ -120,7 +146,7 @@ class ClaudeTierPolicy:
     # ── construction ────────────────────────────────────────────────────────
 
     @classmethod
-    def from_dict(cls, data: dict) -> "ClaudeTierPolicy":
+    def from_dict(cls, data: dict, *, conversation_level: bool = False, classify=None) -> "ClaudeTierPolicy":
         tiers = []
         for t in data.get("tiers") or []:
             if not isinstance(t, dict) or not t.get("name") or not t.get("model"):
@@ -136,10 +162,12 @@ class ClaudeTierPolicy:
                    allow_upgrade=bool(data.get("allow_upgrade", False)),
                    pinned_models=tuple(data.get("pinned_models") or ()),
                    cold_gap_s=float(stick.get("cold_gap_s", 3600.0)),
-                   switch_after_first_call=bool(stick.get("switch_after_first_call", False)))
+                   switch_after_first_call=bool(stick.get("switch_after_first_call", False)),
+                   conversation_level=conversation_level, classify=classify)
 
     @classmethod
-    def load(cls, path: str | Path | None = None) -> "ClaudeTierPolicy":
+    def load(cls, path: str | Path | None = None, *, conversation_level: bool = False,
+              classify=None) -> "ClaudeTierPolicy":
         import yaml
 
         target = Path(path or DEFAULT_POLICY_PATH)
@@ -149,7 +177,7 @@ class ClaudeTierPolicy:
             raise ValueError(f"tier policy {target} is not valid YAML: {exc}") from None
         if not isinstance(data, dict):
             raise ValueError(f"tier policy {target} is not a mapping")
-        return cls.from_dict(data)
+        return cls.from_dict(data, conversation_level=conversation_level, classify=classify)
 
     # ── lookups ─────────────────────────────────────────────────────────────
 
@@ -191,10 +219,15 @@ class ClaudeTierPolicy:
         if user_pinned_model(body):
             return keep(REASON_USER_PINNED)
         key = conversation_key(body, session_id)
-        if is_first_call(body):
+        first = is_first_call(body)
+        if first and not self.conversation_level:
+            # Per-turn mode: the first call is exempt (the switch cost of a
+            # rewrite on the not-yet-cached prefix is the whole prompt).
             sticky.record(key, requested, None, REASON_FIRST_CALL)
             return keep(REASON_FIRST_CALL)
 
+        if classify is None:
+            classify = self._classify
         if classify is None:
             from llm_router.proxy.backends import choose_model
 
@@ -219,27 +252,37 @@ class ClaudeTierPolicy:
             reason = REASON_THINKING_FLOOR
 
         state = sticky.get(key)
-        if state is None:
+        if state is None and not first:
             # Mid-conversation but unseen (e.g. the proxy restarted): treat it as
             # last served on the requested model, class unknown, cache warm, so
             # the stickiness rules below apply instead of an immediate switch.
             state = ConvState(requested, None, time.time(), REASON_UNSEEN)
-        prev_model = state.model
+        # ``state`` stays None only for a genuine conversation-mode first call:
+        # there is no prior decision to be sticky to, so the classified target
+        # below applies directly -- this IS the conversation-level decision.
+        prev_model = state.model if state is not None else None
+        prev_tier = self.tier_of(prev_model) if state is not None else None
         served = target.model
         cold = state is not None and sticky.is_cold(state)
         # A first-call state carries no class (it was never classified), so it
         # is not a "class change": the conversation stays unless handed off.
         class_changed = state is not None and state.complexity is not None and state.complexity != cx
+        if self.conversation_level and class_changed and prev_tier is not None:
+            # Conversation mode only escalates (a class that ranks a HIGHER
+            # tier breaks stickiness); a class that would rank the same or a
+            # cheaper tier never pulls a committed conversation back down.
+            class_changed = self.rank[target.name] > self.rank[prev_tier.name]
         handoff = state is not None and self.switch_after_first_call and state.reason == REASON_FIRST_CALL
         if (state is not None and _canonical(prev_model) != _canonical(served)
                 and not class_changed and not cold and not handoff):
-            prev_tier = self.tier_of(prev_model)
             if prev_tier is not None and self._allowed(prev_tier, req_tier, thinking, effort):
                 served, target, reason = prev_model, prev_tier, REASON_STICKY
         if _canonical(served) == _canonical(requested):
             served = requested  # keep the client's own spelling when nothing changes
 
-        switched = _canonical(served) != _canonical(prev_model)
+        # A genuine first decision (state is None) is not a "switch": nothing
+        # was previously cached on a different model to re-write.
+        switched = state is not None and _canonical(served) != _canonical(prev_model)
         cost = None
         if switched:
             cost = 0.0 if cold else switch_cost_usd(served, state.prefix_tokens if state else None)

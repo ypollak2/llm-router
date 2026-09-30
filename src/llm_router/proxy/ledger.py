@@ -37,7 +37,9 @@ Row fields:
   edit_protocol, served_via   an edit-shaped step run through ``edit.py``'s
                   protocol: attempts and rejection kinds; ``edit_protocol``
 
-Claude-tier rewrite fields (only when the proxy runs with ``--tiers on``):
+Claude-tier rewrite fields (only when the proxy runs with ``--tiers on`` or
+``--tiers conversation``; ``tier_mode`` -- ``off`` / ``on`` / ``conversation``
+-- is written on every row, tiers on or off):
   served_model          the model the call was sent to (== requested_model
                         unless rewritten; the requested one again after a
                         rejected rewrite was retried)
