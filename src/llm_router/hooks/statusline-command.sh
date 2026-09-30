@@ -402,6 +402,31 @@ case "$enforce" in
     smart|advise)   parts+=("🛡  ${_SKY}smart${_RESET}") ;;
 esac
 
+# ── 🔌 Proxy-default down (llm-router install --proxy-default) ──────────────
+# Every session depends on this proxy once installed — a dead port fails
+# every API call, not just an opted-in one. Cheap: a raw TCP connect (0.3s
+# timeout, matching the Ollama idle-probe below), gated on the sentinel so a
+# user who never installed proxy-default pays nothing here at all.
+proxy_default_sentinel="$STATE_DIR/proxy_default.json"
+if [ -f "$proxy_default_sentinel" ]; then
+    proxy_down=$(CHZ_SENTINEL="$proxy_default_sentinel" python3 -c '
+import json, os, socket
+try:
+    d = json.load(open(os.environ["CHZ_SENTINEL"]))
+    port = int(d.get("port", 8787))
+except Exception:
+    raise SystemExit  # unreadable sentinel is not evidence of a dead proxy
+try:
+    with socket.create_connection(("127.0.0.1", port), timeout=0.3):
+        pass
+except OSError:
+    print(port)
+' 2>/dev/null)
+    if [ -n "$proxy_down" ]; then
+        parts+=("${_RED}🔌 proxy down:${proxy_down}${_RESET}")
+    fi
+fi
+
 # ── ❤ Health (mirrors llm_router.observability.surface_status, dependency-free) ────────────────
 # ok ✓      : a provider (cloud key, Claude subscription, or recently-active
 #             Ollama) is configured, and usage data is fresh.

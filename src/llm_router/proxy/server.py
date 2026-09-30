@@ -412,6 +412,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                    tier_switch=decision.switched, tier_switch_cost_usd=decision.switch_cost_usd,
                    tier_task_type=decision.task_type, tier_complexity=decision.complexity,
                    tier_complexity_score=decision.complexity_score,
+                   # decision.detail is always one of our own fixed reason
+                   # strings (escalation.REASON_*), never free text off the
+                   # request, so it needs no scrubbing — unlike the error
+                   # path above, which logs an exception message.
+                   tier_detail=decision.detail,
                    tier_decision_s=round(time.monotonic() - t0, 3))
         return decision
 

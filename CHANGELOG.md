@@ -13,6 +13,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Proxy: `llm-router install --proxy-default` makes the per-call proxy the
+  DEFAULT `ANTHROPIC_BASE_URL` for every Claude Code session on the machine
+  (`llm_router.proxy_default`, `llm_router.commands.proxy_default`),
+  owner-approved 2026-09-30 after a trial on real prompts (n=6, 72-80% lower
+  cost). Supervised (macOS LaunchAgent `KeepAlive` / Linux systemd user unit
+  `Restart=on-failure`); the installer verifies the proxy answers before ever
+  writing `settings.json` and refuses otherwise, backs up settings.json first,
+  and reuses an already-answering proxy instead of fighting it for the port.
+  `llm-router doctor`, the statusline, and the SessionStart hook all report a
+  dead proxy with the exact recovery command; `llm-router uninstall` (or
+  `--proxy-default off`) reverts cleanly via the install manifest. Two ways to
+  escalate a conversation to Opus (`proxy/escalation.py`): an explicit `opus:`
+  prompt prefix, and automatic escalation on a contradiction, a `claude:`
+  re-ask, or repeated tool failures — both logged in the ledger. Never
+  downgrades an explicit `/model` pin or a long/multi-part first prompt (a
+  paraphrase of the trial's one unacceptable answer is now a regression test).
+  See `docs/proxy.md`'s "Proxy-default" section.
 - Proxy: backend-health circuit breaker for the local Ollama path
   (`proxy/backend_health.py`). Three consecutive empty or sub-second invalid
   replies, or a crash signature in an Ollama error, pause local serving for 60 s

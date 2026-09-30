@@ -193,6 +193,11 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PROXY_BACKEND_COOLDOWN_S": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_TIERS": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_TIER_POLICY": ("llm_router", "proxy/server.py", 1),
+    # Escalation signals (proxy/escalation.py): the correction-signal
+    # tool-failure streak, and the long/multi-part first-prompt safety floor.
+    "LLM_ROUTER_PROXY_ESCALATION_TOOL_FAIL_N": ("llm_router", "proxy/escalation.py", 1),
+    "LLM_ROUTER_PROXY_LONG_PROMPT_WORDS": ("llm_router", "proxy/escalation.py", 1),
+    "LLM_ROUTER_PROXY_LONG_PROMPT_PARTS": ("llm_router", "proxy/escalation.py", 1),
     "LLM_ROUTER_LOCAL_AGENT": ("llm_router", "local_agent/__init__.py", 1),
     "LLM_ROUTER_LOCAL_AGENT_TOP_K": ("llm_router", "local_agent/__init__.py", 1),
     "LLM_ROUTER_LOCAL_AGENT_PROMPT_BUDGET": ("llm_router", "local_agent/__init__.py", 1),

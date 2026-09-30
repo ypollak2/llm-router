@@ -627,6 +627,61 @@ def _sync_pxpipe_anthropic_base_url() -> str:
     return "\n↩️  pxpipe unavailable — reverted Claude Code to Anthropic's default endpoint"
 
 
+def _check_proxy_default_health() -> str:
+    """Warn at session start if the default proxy (`commands/proxy_default.py`,
+    ``llm-router install --proxy-default``) is installed but not answering.
+
+    This CANNOT fix the session that is currently starting: ``settings.json``'s
+    ``env.ANTHROPIC_BASE_URL`` is read by Claude Code before its API client is
+    constructed, and this hook only runs after that — the exact same timing
+    `_sync_pxpipe_anthropic_base_url` above documents for its own
+    self-heal ("takes effect next session, not this one"). So unlike that
+    function, this one does not try to rewrite settings.json at all; it can
+    only tell the operator what is wrong and how to fix it before their next
+    call fails too. Investigated for this feature (2026-09-30): there is no
+    SessionStart hook mechanism that overrides the base URL for the session
+    already in flight.
+
+    Stdlib-only (a raw TCP connect, not `llm_router.proxy_default.proxy_health`)
+    so this hook keeps working even in a fresh subprocess where the `llm_router`
+    package import fails — same reasoning as the timeout_config import at the
+    top of this file.
+    """
+    sentinel_path = os.path.join(_state_dir(), "proxy_default.json")
+    if not os.path.exists(sentinel_path):
+        return ""  # proxy-default was never installed — nothing to check
+    try:
+        with open(sentinel_path) as fh:
+            sentinel = json.load(fh)
+        port = int(sentinel.get("port", 8787))
+    except Exception:
+        return ""  # an unreadable sentinel is not evidence of a dead proxy
+
+    import socket as _socket
+
+    try:
+        with _socket.create_connection(("127.0.0.1", port), timeout=1.0):
+            return ""  # answering — nothing to say
+    except OSError:
+        pass
+
+    # Literal, not imported from llm_router.proxy_default.LABEL: this hook is
+    # stdlib-only by design (see the docstring above) and must print the same
+    # string even when the package itself fails to import. Kept in sync by
+    # hand with proxy_default.LABEL; tests/test_session_start_proxy_default.py
+    # asserts the two agree.
+    label = "com.llm_router.proxy"
+    return (
+        f"\n⚠️  llm-router proxy-default is installed but not answering on "
+        f"127.0.0.1:{port} — every API call this session (and every session "
+        f"until this is fixed) will fail.\n"
+        f"    Recover with:  launchctl kickstart -k gui/$(id -u)/{label}"
+        f"   (macOS)  or  systemctl --user restart llm_router-proxy  (Linux)\n"
+        f"    Or disable it:  llm-router install --proxy-default off\n"
+        f"    Logs: {os.path.join(_state_dir(), 'logs', 'proxy.err.log')}"
+    )
+
+
 def _refresh_claude_usage() -> str:
     """Fetch fresh Claude subscription usage from the OAuth API with retries.
 
@@ -1415,6 +1470,11 @@ def main() -> None:
     # settings.json is read before this hook ever runs.
     hints += _ensure_pxpipe_running()
     hints += _sync_pxpipe_anthropic_base_url()
+
+    # 1c. Proxy-default (opt-in via `llm-router install --proxy-default`):
+    # warn loudly if it's installed but dead. Cannot self-heal this session
+    # (see the function's own docstring for why) — only the next one.
+    hints += _check_proxy_default_health()
 
     # 2. Select banner from cached subscription state (no OAuth taint in this path).
     # The cache is written by _refresh_claude_usage() during the previous session.
