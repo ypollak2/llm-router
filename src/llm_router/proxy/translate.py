@@ -170,11 +170,19 @@ def new_msg_id() -> str:
     return SERVED_MSG_ID_PREFIX + uuid.uuid4().hex[:22]
 
 
+# A trimmed request may carry the ORIGINAL client tool list under this key
+# (``local_agent.compact`` does): the model is shown a subset, but a call to any
+# tool the client actually offered is valid for the client and is accepted.
+# ``to_ollama`` never sends this key.
+VALIDATE_TOOLS_KEY = "x_llm_router_validate_tools"
+
+
 def from_ollama(resp: dict, body: dict) -> tuple[dict | None, str | None]:
     """``(anthropic_message, None)`` or ``(None, reason)`` -> caller falls back."""
     msg = resp.get("message") or {}
     text = _THINK_RE.sub("", msg.get("content") or "").strip()
-    schemas = {t["name"]: t.get("input_schema") or {} for t in body.get("tools") or []
+    schemas = {t["name"]: t.get("input_schema") or {}
+               for t in body.get(VALIDATE_TOOLS_KEY) or body.get("tools") or []
                if isinstance(t, dict) and t.get("name") and "input_schema" in t}
     blocks: list[dict] = []
     if text:

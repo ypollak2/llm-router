@@ -50,6 +50,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from llm_router.local_agent import LocalAgentConfig, enabled_from_env
+from llm_router.local_agent import capability as la_capability
 from llm_router.proxy import ledger
 from llm_router.proxy.backends import (
     BACKENDS,
@@ -116,6 +118,8 @@ class ProxyConfig:
     loop_repeat_window: int = DEFAULT_REPEAT_WINDOW
     tiers: bool = False
     tier_policy: str | None = None
+    # Capability gating + compaction (llm_router.local_agent); None = off.
+    local_agent: LocalAgentConfig | None = None
 
     @classmethod
     def from_env(cls) -> "ProxyConfig":
@@ -134,6 +138,7 @@ class ProxyConfig:
                                                     DEFAULT_REPEAT_WINDOW)),
             tiers=parse_on_off(os.environ.get("LLM_ROUTER_PROXY_TIERS", "off")),
             tier_policy=os.environ.get("LLM_ROUTER_PROXY_TIER_POLICY") or None,
+            local_agent=LocalAgentConfig.from_env() if enabled_from_env() else None,
         )
 
 
@@ -227,6 +232,12 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
             return {"warm_up": "failed", "error": ledger.scrub_detail(f"{type(exc).__name__}: {exc}"),
                     "seconds": round(time.monotonic() - t0, 2)}
 
+    local_agent = None
+    if cfg.local_agent is not None:
+        from llm_router.local_agent.proxy_step import LocalAgent
+
+        local_agent = LocalAgent(cfg.local_agent, http=http, ollama_url=_ollama_url)
+
     def write(row: dict) -> None:
         ledger.write_row(row, cfg.ledger_path)
 
@@ -256,14 +267,42 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
             row.update(decision=ledger.DECISION_FORWARDED, reason="policy_kept")
             row["added_latency_s"] = round(time.monotonic() - t0, 3)
             return None
+        if local_agent is not None:
+            gate = await local_agent.gate(body, cfg.steps, choice)
+            row["local_agent"] = gate.as_row()
+            if not gate.local:
+                guard.reset(session_id)
+                row.update(decision=ledger.DECISION_FORWARDED, reason=gate.reason)
+                row["added_latency_s"] = round(time.monotonic() - t0, 3)
+                return None
         message, err, reason = None, None, None
         try:
             backend = make_backend(choice["model"])
+            if local_agent is not None:
+                send, row["compaction"] = await local_agent.prepare(body)
+            else:
+                send = apply_trims(body, trims)
             message, err, backend_usage = await asyncio.wait_for(
-                backend.complete(apply_trims(body, trims), cfg.step_budget_s), timeout=cfg.step_budget_s)
+                backend.complete(send, cfg.step_budget_s), timeout=cfg.step_budget_s)
             row["backend_usage"] = backend_usage
             if err:
                 reason = "validation"
+            elif message is not None:
+                # The hard rule: an edit from the raw tool-call loop is never
+                # served; it goes to the validated edit protocol or to Claude.
+                verdict = la_capability.check_reply(
+                    message, body, edit_mode=cfg.local_agent.edit_mode if local_agent else "claude")
+                if local_agent is not None:
+                    row["local_agent"] = dict(row.get("local_agent") or {}, reply=verdict.as_row())
+                if verdict.route == la_capability.ROUTE_CLAUDE:
+                    message, err, reason = None, verdict.detail or verdict.reason, verdict.reason
+                elif verdict.route == la_capability.ROUTE_EDIT:
+                    message, err, row["edit_protocol"] = await local_agent.edit_step(
+                        verdict, message, body, backend, t0 + cfg.step_budget_s)
+                    if err:
+                        reason = "edit_protocol_failed"
+                    else:
+                        row["served_via"] = la_capability.ROUTE_EDIT
         except HedgeTimeout as exc:
             err, reason = str(exc), "hedge_timeout"
         except (asyncio.TimeoutError, httpx.TimeoutException):
@@ -507,7 +546,7 @@ llm-router proxy [--port N] [--steps continuation|off] [--step-budget-s S]
                  [--hedge-s S|off] [--model ollama/TAG] [--trim NAME[,NAME]]
                  [--num-ctx N] [--ollama-url URL] [--keep-alive -1|5m] [--no-warm-up]
                  [--loop-max-consecutive N] [--loop-repeat-window N]
-                 [--tiers on|off] [--tier-policy FILE.yaml]
+                 [--tiers on|off] [--tier-policy FILE.yaml] [--local-agent]
 llm-router proxy stats [--days N] [--json]
 
 Opt-in, per session. Nothing is enabled until you point a session at it:
@@ -554,6 +593,9 @@ def cmd_proxy(argv: list[str]) -> int:
                     help="Claude-tier rewrite: move easy calls to a cheaper Claude tier (opt-in)")
     ap.add_argument("--tier-policy", default=env.tier_policy,
                     help="tier policy YAML (default: the bundled proxy/claude_tiers.yaml)")
+    ap.add_argument("--local-agent", action="store_true",
+                    help="capability gating + tool retrieval/compaction for local steps "
+                         "(llm_router.local_agent; also LLM_ROUTER_LOCAL_AGENT=on). Off by default")
     a = ap.parse_args(argv)
 
     from llm_router.net_bind import refuse_public_bind_or_exit
@@ -567,7 +609,8 @@ def cmd_proxy(argv: list[str]) -> int:
                           keep_alive=parse_keep_alive(a.keep_alive), warm_up=not a.no_warm_up,
                           ollama_url=a.ollama_url, loop_max_consecutive=a.loop_max_consecutive,
                           loop_repeat_window=a.loop_repeat_window, tiers=parse_on_off(a.tiers),
-                          tier_policy=a.tier_policy)
+                          tier_policy=a.tier_policy,
+                          local_agent=(LocalAgentConfig.from_env() if a.local_agent else env.local_agent))
         app = build_app(cfg)
     except (ValueError, OSError) as exc:
         sys.stderr.write(f"llm-router proxy: {exc}\n")
@@ -577,9 +620,11 @@ def cmd_proxy(argv: list[str]) -> int:
 
     steps = ",".join(sorted(cfg.steps)) or "off (pass-through only)"
     print(f"llm-router proxy -> http://{a.host}:{a.port}  steps={steps}  "
-          f"hedge={cfg.hedge_s}s  budget={cfg.step_budget_s}s  trim={cfg.trim or 'fast'}  "
+          f"hedge={cfg.hedge_s}s  budget={cfg.step_budget_s}s  "
+          f"trim={'compact (local agent)' if cfg.local_agent else (cfg.trim or 'fast')}  "
           f"loop_guard(max_consecutive={cfg.loop_max_consecutive}, repeat_window={cfg.loop_repeat_window})  "
-          f"tiers={'on (' + (cfg.tier_policy or 'bundled policy') + ')' if cfg.tiers else 'off'}")
+          f"tiers={'on (' + (cfg.tier_policy or 'bundled policy') + ')' if cfg.tiers else 'off'}  "
+          f"local_agent={'on' if cfg.local_agent else 'off'}")
     print(f"  enable per session: {enable_hint(a.host, a.port)}")
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning", access_log=False)
     return 0

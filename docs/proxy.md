@@ -155,6 +155,62 @@ llm-router proxy --ollama-url http://127.0.0.1:11500
 Do not load the same 20 GB model in two servers at once on a 48 GB machine. In
 the spike, that produced empty or corrupted replies and a stuck runner.
 
+## Local agent: capability gating + compaction (`--local-agent`, off by default)
+
+`llm-router proxy --local-agent` (or `LLM_ROUTER_LOCAL_AGENT=on`) switches the
+serving path to `llm_router.local_agent`:
+
+- **Capability** (`local_agent/capability.py`). Before a local call, a step
+  must be an eligible continuation, the policy must name a tool-capable model,
+  the task type must be one of `research`/`analyze`/`code`/`query`, the
+  session's ask must not carry a multi-file-write signal (both gates are the
+  Codex sub-agent hook's own values), and the quality breaker for lever
+  `proxy` must be closed. Each refusal is a ledger `reason`.
+- **Compaction** (`local_agent/compact.py`). Each tool's name and description
+  start is embedded once with `nomic-embed-text` (cached in
+  `~/.llm-router/local_agent_tool_embeddings.json`). A step keeps the top-K
+  tools for (original ask + newest tool output), the tools the session already
+  used, and the edit tools; names and schemas are unchanged. History becomes
+  the user's ask (reminder blocks removed), the environment lines, the last N
+  tool exchanges and any older `Read` of a file they mention, at most ~5k
+  prompt tokens. The embedding model is called on the same Ollama as the
+  serving model, so a dedicated server needs `OLLAMA_MAX_LOADED_MODELS=2`
+  (with `1`, every embed call evicts the 20 GB model).
+- **Edits.** An `Edit`/`Write`/`MultiEdit`/`NotebookEdit` reply from the raw
+  tool-call loop is **never served, with or without `--local-agent`** (0/20
+  edits passed through that loop on fixtures). With `--local-agent`, a
+  single-file `Edit` whose target the session has read and that has no
+  uncommitted changes goes through `llm_router.edit`'s validated protocol
+  (JSON instructions, exact-once match against the file on disk, syntax gate,
+  up to 3 attempts with the rejection fed back) and is served as `Edit` calls;
+  anything else goes to Claude. `LLM_ROUTER_LOCAL_AGENT_EDIT=claude` sends
+  every edit-shaped step to Claude.
+
+| Env var | Default |
+|---|---|
+| `LLM_ROUTER_LOCAL_AGENT` | off |
+| `LLM_ROUTER_LOCAL_AGENT_TOP_K` | `6` retrieved tools (plus used and edit tools) |
+| `LLM_ROUTER_LOCAL_AGENT_PROMPT_BUDGET` | `5000` estimated prompt tokens |
+| `LLM_ROUTER_LOCAL_AGENT_KEEP_RESULTS` | `3` most recent tool exchanges |
+| `LLM_ROUTER_LOCAL_AGENT_TOOL_DESC_CHARS` | `600` chars of each offered tool's description |
+| `LLM_ROUTER_LOCAL_AGENT_EMBED_MODEL` | `nomic-embed-text` |
+| `LLM_ROUTER_LOCAL_AGENT_EDIT` | `protocol` (or `claude`) |
+
+**Measured 2026-09-30 (paired A/B, 15 pairs, the 6 Bash-heavy fixture tasks of
+the 2026-09-28 run, `qwen3-coder:30b` on a dedicated server, production
+defaults): no saving, so it stays off by default.** Compacted requests were
+4.1-4.9k real prompt tokens. While the Ollama backend was healthy, 9 of 24
+local attempts were served and none came back empty; 12 missed the 30 s step
+budget. The router policy kept 46 of 99 steps on Claude. Realized Claude cost
+(off − on, proxy ledger): −1.1% per task, 95% CI −6.4% to +4.3%; pass rate
+15/15 both arms; wall-clock 1.32x median. Twice the Metal backend faulted
+(`command buffer ... failed with status 5`) and every later request returned
+an empty reply in ~0.1 s until the server was restarted: all 29 empties in the
+run came from those windows, and the 2026-09-28 run's "18/18 empty" server log
+shows the same fault. Restart the dedicated server if `proxy stats` shows a run
+of fast `empty response` fallbacks. Report:
+`~/.rsi/research/llm-router-cursor-parity/p3-compaction-ab.md`.
+
 ## Metrics
 
 Each call writes one row to `~/.llm-router/proxy_calls.jsonl` with shape,
