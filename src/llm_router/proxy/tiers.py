@@ -10,7 +10,11 @@ drains that pool more slowly.
 The decision, per call, in order (the first that applies wins):
 
 ``unknown_model``   the requested model is not a configured tier: unchanged.
-``config_pinned``   the requested id is in ``pinned_models``: unchanged.
+``config_pinned``   the requested id is in ``pinned_models``: unchanged. Checked
+                    BEFORE ``explicit_opus_pin``, deliberately: an admin-level
+                    pin outranks a user's ``opus:`` text, so a request on a
+                    pinned id stays ``config_pinned`` (not escalated) even
+                    with that prefix -- a fail-TO-escalate, never a downgrade.
 ``side_call``       no client tools (titles, probes): unchanged.
 ``explicit_opus_pin`` the newest human turn starts with ``opus:``
                     (``proxy/escalation.py``): pinned to the Opus tier,
