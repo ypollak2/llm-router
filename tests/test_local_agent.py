@@ -214,7 +214,8 @@ async def test_capability_gates_in_order_with_reasons():
     multi = _body()
     multi["messages"][0]["content"][1]["text"] = "Refactor the entire codebase to use pathlib"
     d = await capability.can_serve_locally(_step(multi), b)
-    assert (d.reason, d.detail) == ("multi_file_write", "Refactor the entire codebase")
+    assert (d.reason, d.detail) == ("multi_file_write", "multi-file-write signal in the ask")
+    assert "Refactor" not in json.dumps(d.as_row())  # no prompt text in the ledger
     ok = await capability.can_serve_locally(_step(), b)
     assert (ok.route, ok.reason, ok.local) == (capability.ROUTE_LOCAL, "capable", True)
     closed = await capability.can_serve_locally(_step(), capability.BreakerCache(fn=Breaker(False)))
@@ -517,3 +518,11 @@ async def test_a_call_to_a_request_tool_outside_the_offered_subset_is_translated
     assert err == "unknown tool 'NotAClientTool'"
     from llm_router.proxy.translate import VALIDATE_TOOLS_KEY, to_ollama
     assert VALIDATE_TOOLS_KEY not in to_ollama(out, "m", num_ctx=8192)
+
+
+def test_text_plus_edit_reply_is_still_edit_shaped():
+    msg = {"content": [{"type": "text", "text": "Fixing it now."},
+                       {"type": "tool_use", "name": "Edit", "input": {"file_path": "/x", "old_string": "a",
+                                                                       "new_string": "b"}}]}
+    d = capability.check_reply(msg, _body(), edit_mode="claude")
+    assert (d.route, d.reason) == (capability.ROUTE_CLAUDE, "edit_to_claude")

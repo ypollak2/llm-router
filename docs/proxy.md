@@ -196,7 +196,20 @@ serving path to `llm_router.local_agent`:
 | `LLM_ROUTER_LOCAL_AGENT_EMBED_MODEL` | `nomic-embed-text` |
 | `LLM_ROUTER_LOCAL_AGENT_EDIT` | `protocol` (or `claude`) |
 
-MEASUREMENT_PLACEHOLDER
+**Measured 2026-09-30 (paired A/B, 15 pairs, the 6 Bash-heavy fixture tasks of
+the 2026-09-28 run, `qwen3-coder:30b` on a dedicated server, production
+defaults): no saving, so it stays off by default.** Compacted requests were
+4.1-4.9k real prompt tokens. While the Ollama backend was healthy, 9 of 24
+local attempts were served and none came back empty; 12 missed the 30 s step
+budget. The router policy kept 46 of 99 steps on Claude. Realized Claude cost
+(off − on, proxy ledger): −1.1% per task, 95% CI −6.4% to +4.3%; pass rate
+15/15 both arms; wall-clock 1.32x median. Twice the Metal backend faulted
+(`command buffer ... failed with status 5`) and every later request returned
+an empty reply in ~0.1 s until the server was restarted: all 29 empties in the
+run came from those windows, and the 2026-09-28 run's "18/18 empty" server log
+shows the same fault. Restart the dedicated server if `proxy stats` shows a run
+of fast `empty response` fallbacks. Report:
+`~/.rsi/research/llm-router-cursor-parity/p3-compaction-ab.md`.
 
 ## Metrics
 

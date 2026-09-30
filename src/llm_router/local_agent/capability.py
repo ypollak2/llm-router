@@ -91,7 +91,9 @@ class Decision:
     def as_row(self) -> dict:
         row = {"route": self.route, "reason": self.reason}
         if self.detail:
-            row["detail"] = self.detail[:200]
+            from llm_router.proxy.ledger import scrub_detail
+
+            row["detail"] = scrub_detail(self.detail)
         return row
 
 
@@ -148,9 +150,9 @@ async def can_serve_locally(step: Step, breaker: BreakerCache) -> Decision:
         return Decision(ROUTE_CLAUDE, "policy_kept")
     if step.task_type not in SUITABLE_TASK_TYPES:
         return Decision(ROUTE_CLAUDE, "task_type_unsuitable", f"task_type={step.task_type}")
-    m = MULTI_FILE_WRITE_SIGNALS.search(original_ask(step.body))
-    if m:
-        return Decision(ROUTE_CLAUDE, "multi_file_write", m.group(0))
+    if MULTI_FILE_WRITE_SIGNALS.search(original_ask(step.body)):
+        # A fixed detail: the matched phrase is the user's own text.
+        return Decision(ROUTE_CLAUDE, "multi_file_write", "multi-file-write signal in the ask")
     allowed, why = await breaker.allows(step.task_type)
     if not allowed:
         return Decision(ROUTE_CLAUDE, "breaker_open", why)

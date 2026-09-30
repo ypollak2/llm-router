@@ -22,6 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an **estimated** cost against the all-requested-model counterfactual. No
   savings claim: on the one live smoke (3 tasks, 23 calls) the
   switch-after-first-call variant cost more than all-Opus, so it ships off.
+- **`llm_router.local_agent`: capability gating + tool retrieval/compaction for
+  proxy steps** (`llm-router proxy --local-agent`, off by default). No savings
+  claim: a 15-pair A/B (2026-09-30) measured −1.1% realized cost change, 95% CI
+  −6.4% to +4.3%, with 9/24 healthy local attempts served. See `docs/proxy.md`.
+
+### Changed
+
+- **The proxy never serves an Edit/Write/MultiEdit/NotebookEdit reply from the
+  raw tool-call loop**, with or without `--local-agent`. Such a step falls back to
+  Claude (`reason: edit_to_claude`). With `--local-agent` it can instead go through
+  `llm_router.edit`'s validated protocol. Edits through the raw loop passed 0/20
+  on fixtures.
 
 ## [15.4.0] - 2026-09-29
 
