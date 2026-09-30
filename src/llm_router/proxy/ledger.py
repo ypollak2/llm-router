@@ -50,6 +50,9 @@ Claude-tier rewrite fields (only when the proxy runs with ``--tiers on`` or
   response_model        the model Anthropic's reply names: the rewrite checked
   tier, tier_reason     the tier chosen and why (``proxy.tiers`` REASON_*)
   tier_task_type, tier_complexity   the classifier's view of the newest prompt
+                        (``tier_complexity`` after the complexity_knn move, when on)
+  tier_complexity_score complexity_knn P(needs frontier); null unless the
+                        policy sets ``complexity_knn: true`` and it scored
   tier_switch           the conversation moved to a different model
   tier_switch_cost_usd  estimated cache re-write that move cost (``cache_cost``)
   tier_retry            {status, detail}: Anthropic refused the rewritten call

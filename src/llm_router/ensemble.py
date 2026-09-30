@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import os
 
-from llm_router import providers
+from llm_router import complexity_knn, providers
 from llm_router.classifier import (
     CLASSIFIER_SYSTEM_PROMPT,
     _parse_classification,
@@ -306,6 +306,40 @@ def _blend_complexity(
     return apply_complexity_floor(blended, task_type) if task_type else blended
 
 
+def _knn_vote(
+    blended: Complexity,
+    primary: ClassificationResult,
+    heur_complexity: Complexity,
+    heur_weight: float,
+    knn: "complexity_knn.ComplexityScore",
+    task_type: TaskType | None,
+) -> Complexity:
+    """Third weighted vote (Phase 2.1), on the frontier boundary only.
+
+    Each voter says "frontier" (complex or above) or "not": the LLM with its
+    confidence, the heuristic with its normalised signal score, complexity_knn
+    with its evidence share. The heavier side moves ``blended`` across the
+    boundary (``complexity_knn.frontier_complexity``); a tie keeps it. The
+    task-type floor still applies, so the vote can never under-route analysis.
+    """
+    frontier = _COMPLEXITY_RANK[Complexity.COMPLEX]
+    yes = no = 0.0
+    for cx, w in ((primary.complexity, max(primary.confidence, 0.1)),
+                  (heur_complexity, heur_weight)):
+        if _COMPLEXITY_RANK[cx] >= frontier:
+            yes += w
+        else:
+            no += w
+    if knn.needs_frontier:
+        yes += knn.evidence
+    else:
+        no += knn.evidence
+    if yes == no:
+        return blended
+    moved = complexity_knn.frontier_complexity(blended, yes > no)
+    return apply_complexity_floor(moved, task_type) if task_type else moved
+
+
 async def classify_ensemble(
     prompt: str,
     *,
@@ -341,13 +375,20 @@ async def classify_ensemble(
 
     task_type = winner if winner is not None else (heur.task_type or TaskType.QUERY)
     complexity = _blend_complexity(primary_res, heur.complexity, task_type)
+    knn_note = ""
+    if complexity_knn.enabled():
+        knn = await complexity_knn.complexity_score(prompt)
+        if knn is not None:
+            complexity = _knn_vote(complexity, primary_res, heur.complexity,
+                                   min(1.0, heur.score / _SCORE_NORM), knn, task_type)
+            knn_note = f"; knn={knn.score:.2f}"
     total = sum(votes.values())
     confidence = (votes.get(task_type, 0.0) / total) if total else primary_res.confidence
 
     return ClassificationResult(
         complexity=complexity,
         confidence=confidence,
-        reasoning=f"ensemble({'+'.join(models_used)}); margin={margin:.2f}",
+        reasoning=f"ensemble({'+'.join(models_used)}); margin={margin:.2f}{knn_note}",
         inferred_task_type=task_type,
         classifier_model="ensemble:" + "+".join(models_used),
         classifier_cost_usd=cost,

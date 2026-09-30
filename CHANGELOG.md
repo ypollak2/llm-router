@@ -47,6 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `conversation`). No default-on claim: this ships behind the flag pending a
   pre-registered paired A/B (see
   `~/.rsi/research/llm-router-cursor-parity/p12b-conversation-tiers-ab.md`).
+- `complexity_knn`: a learned 0-1 "needs frontier" score (kNN over labelled
+  prompts with κ-shrinkage, K=120, κ=3.0, T=0.1), a third vote in the ensemble
+  (`LLM_ROUTER_COMPLEXITY_KNN=on`) and a wrapper on the tier policy's `classify=`
+  hook (`complexity_knn: true` in `claude_tiers.yaml`). Artifact built locally by
+  `scripts/build_complexity_knn.py`, never committed. **Ships off.** On a
+  public benchmark proxy (n=12,900; held-out n=2,580) it beats the regex/length
+  heuristic (AUC 0.763 vs 0.482) but not a which-dataset-is-this baseline
+  (0.776), falls to 0.587 on unseen datasets, and 0 labelled owner prompts
+  exist to measure it where it would run.
 
 ## [15.4.0] - 2026-09-29
 

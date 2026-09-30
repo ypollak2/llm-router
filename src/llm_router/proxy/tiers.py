@@ -96,10 +96,43 @@ class TierDecision:
     task_type: str | None = None
     complexity: str | None = None
     chain_head: list = field(default_factory=list)
+    complexity_score: float | None = None  # complexity_knn P(needs frontier), when consulted
 
     @property
     def rewritten(self) -> bool:
         return self.served_model is not None and self.served_model != self.requested_model
+
+
+async def _default_classify(text: str) -> dict:
+    from llm_router.proxy.backends import choose_model
+
+    return await choose_model(text, None, anthropic=True)
+
+
+def with_complexity_knn(base=None):
+    """Wrap a ``classify`` callable with the Phase 2.1 learned score.
+
+    The wrapped result's ``complexity`` is moved across the frontier boundary
+    by ``complexity_knn`` (``frontier_complexity``) and carries
+    ``complexity_score``; when the score abstains (no artifact, embedder down)
+    the base classification is returned unchanged with ``complexity_score``
+    None. The module is looked up at call time so tests can stub it.
+    """
+    base = base or _default_classify
+
+    async def classify(text: str) -> dict:
+        from llm_router import complexity_knn
+
+        choice = dict(await base(text))
+        ks = await complexity_knn.complexity_score(text)
+        if ks is None:
+            choice["complexity_score"] = None
+            return choice
+        choice["complexity"] = complexity_knn.frontier_complexity(choice.get("complexity"), ks.needs_frontier)
+        choice["complexity_score"] = round(ks.score, 4)
+        return choice
+
+    return classify
 
 
 def _canonical(model: str | None) -> str | None:
@@ -116,7 +149,8 @@ class ClaudeTierPolicy:
     def __init__(self, tiers: list[Tier], route: dict[str, dict[str, str]], *,
                  allow_upgrade: bool = False, pinned_models: tuple[str, ...] = (),
                  cold_gap_s: float = 3600.0, switch_after_first_call: bool = False,
-                 conversation_level: bool = False, classify=None) -> None:
+                 conversation_level: bool = False, classify=None,
+                 complexity_knn: bool = False) -> None:
         if not tiers:
             raise ValueError("tier policy has no tiers")
         self.tiers = tiers
@@ -137,7 +171,10 @@ class ClaudeTierPolicy:
         # Phase 2 hook point: a kNN scorer replaces this callable only, never
         # a callsite in server.py. ``decide()``'s own ``classify=`` argument
         # (per call, mainly for tests) wins over this one when both are given.
-        self._classify = classify
+        # ``complexity_knn: true`` in the policy YAML plugs the Phase 2.1 score
+        # in exactly here, as a wrapper on that callable (off by default).
+        self.complexity_knn = complexity_knn
+        self._classify = with_complexity_knn(classify) if complexity_knn else classify
         self._ids: dict[str, Tier] = {}
         for t in tiers:
             for mid in (t.model, *t.also):
@@ -163,7 +200,8 @@ class ClaudeTierPolicy:
                    pinned_models=tuple(data.get("pinned_models") or ()),
                    cold_gap_s=float(stick.get("cold_gap_s", 3600.0)),
                    switch_after_first_call=bool(stick.get("switch_after_first_call", False)),
-                   conversation_level=conversation_level, classify=classify)
+                   conversation_level=conversation_level, classify=classify,
+                   complexity_knn=bool(data.get("complexity_knn", False)))
 
     @classmethod
     def load(cls, path: str | Path | None = None, *, conversation_level: bool = False,
@@ -229,10 +267,7 @@ class ClaudeTierPolicy:
         if classify is None:
             classify = self._classify
         if classify is None:
-            from llm_router.proxy.backends import choose_model
-
-            async def classify(text: str) -> dict:
-                return await choose_model(text, None, anthropic=True)
+            classify = _default_classify
 
         choice = await classify(tier_text(body))
         task, cx = choice.get("task_type"), choice.get("complexity")
@@ -288,4 +323,5 @@ class ClaudeTierPolicy:
             cost = 0.0 if cold else switch_cost_usd(served, state.prefix_tokens if state else None)
         sticky.record(key, served, cx, reason)
         return TierDecision(requested, served, target.name, reason, switched=switched, switch_cost_usd=cost,
-                            task_type=task, complexity=cx, chain_head=list(choice.get("chain_head") or [])[:4])
+                            task_type=task, complexity=cx, chain_head=list(choice.get("chain_head") or [])[:4],
+                            complexity_score=choice.get("complexity_score"))
