@@ -241,6 +241,9 @@ class ReActAgent:
     # empty run it was written to avoid. Resolved from discovery instead, so it
     # cannot rot again when the local inventory changes.
     model: str = field(default_factory=lambda: _default_local_model())
+    # Coupled to the shared LoopGuard cap (LLM_ROUTER_PROXY_LOOP_MAX_CONSECUTIVE,
+    # default 8): at 8 the cap cannot fire before the step bound does. Raising
+    # this alone would truncate long-but-varied runs at the guard's cap.
     max_steps: int = 8
     cwd: str | None = None
     cost_per_call_usd: float = 0.0
