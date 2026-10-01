@@ -38,6 +38,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   background refresh lands.
 
 ### Added
+- Local agent: the local ReAct loop (`llm_router.agentic.react.ReActAgent`, the
+  tier-0 agent) now shares the proxy's loop guard
+  (`llm_router.proxy.loop_guard.LoopGuard`) instead of relying on `max_steps`
+  alone. Before running, in each step, a candidate tool call (or set of tool
+  calls, for a model that emits several in one turn) is checked against the
+  same two conditions the proxy enforces: it is refused if it repeats a tool
+  call (name + args, exact match) served within the last
+  `LLM_ROUTER_PROXY_LOOP_REPEAT_WINDOW` served steps (default 3), or if the
+  session already served `LLM_ROUTER_PROXY_LOOP_MAX_CONSECUTIVE` steps in a
+  row (default 8) — same env vars, same defaults, imported rather than
+  reimplemented. On trip the loop stops immediately (the tool call is never
+  executed) and reports an empty output with an `error` naming
+  `loop_guard` and the tripped condition — the same "gave up" shape the loop
+  already uses for a client-level failure — so the milestone's acceptance
+  check fails it exactly as any other incomplete run, and the engine escalates
+  normally. A fresh `LoopGuard` is built per `run()` call so state never leaks
+  between milestones that reuse one `ReActAgent`. No behavior change when
+  neither condition trips.
 - Local edits: scoped zero-Claude edits (`LLM_ROUTER_ZERO_CLAUDE_SCOPE=edit`)
   are now lint-verified before they are written
   (`llm_router.local_agent.verify`). Previously the only gate was the syntax

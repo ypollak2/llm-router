@@ -12,6 +12,7 @@ from llm_router.agentic.react import (
     ToolCall,
     default_tool_executor,
 )
+from llm_router.proxy.loop_guard import REASON_LOOP_GUARD
 
 
 def _ledger(ms):
@@ -42,8 +43,11 @@ def test_react_runs_tool_loop_then_finishes():
 
 
 def test_react_is_bounded_never_loops_forever():
+    # Plan 3.6: a VARYING tool call each step, so this tests ``max_steps`` itself
+    # (the loop never finishes, period) independently of the loop guard, which
+    # has its own dedicated tests below for a model that keeps repeating.
     def always_tool(messages, tools):
-        return ChatTurn(tool_calls=[ToolCall("bash", {"command": "echo hi"})])
+        return ChatTurn(tool_calls=[ToolCall("bash", {"command": f"echo {len(messages)}"})])
 
     agent = ReActAgent(client=always_tool, executor=lambda n, a: "ok", max_steps=4)
     res = agent.run(Milestone("M1", "", lambda _a: AcceptanceResult(True)), [], 5.0)
@@ -98,3 +102,57 @@ def test_default_executor_rejects_path_traversal(tmp_path):
     out = ex("write_file", {"path": "../../escape.txt", "content": "x"})
     assert "tool error" in out and "escapes working directory" in out
     assert not (tmp_path.parent.parent / "escape.txt").exists()
+
+
+# ── loop guard (plan 3.6) — reuses llm_router.proxy.loop_guard ─────────────
+
+
+def test_react_loop_guard_stops_on_a_repeated_tool_call():
+    # Same tool, same args, every turn — the proxy's own runaway pattern
+    # (loop_guard.py: 44 consecutive repeats of one Read) reproduced locally.
+    calls = []
+
+    def repeating_client(messages, tools):
+        calls.append(1)
+        return ChatTurn(tool_calls=[ToolCall("bash", {"command": "echo hi"})])
+
+    agent = ReActAgent(client=repeating_client, executor=lambda n, a: "ok", max_steps=10)
+    res = agent.run(Milestone("M1", "", lambda _a: AcceptanceResult(True)), [], 5.0)
+    # Caught well before the step cap — not "ran out of max_steps".
+    assert len(calls) < 10
+    assert res.artifacts["steps"] < 10
+    assert REASON_LOOP_GUARD in res.artifacts["error"]
+    assert res.artifacts["output"] == ""  # same "gave up" shape as a client error
+    assert res.confidence < 0.5
+
+
+def test_react_loop_guard_trips_on_consecutive_cap_even_without_a_repeat():
+    # A DIFFERENT tool call every turn — never repeats, but the model is still
+    # not converging. The consecutive-served cap (not the repeat window) must
+    # catch this; it is the other half of the proxy's guard.
+    def ever_different_client(messages, tools):
+        return ChatTurn(tool_calls=[ToolCall("bash", {"command": f"echo {len(messages)}"})])
+
+    agent = ReActAgent(client=ever_different_client, executor=lambda n, a: "ok", max_steps=20)
+    res = agent.run(Milestone("M1", "", lambda _a: AcceptanceResult(True)), [], 5.0)
+    assert res.artifacts["steps"] < 20
+    assert REASON_LOOP_GUARD in res.artifacts["error"]
+    assert "consecutive_served_exceeded" in res.artifacts["error"]
+
+
+def test_react_loop_guard_does_not_trip_on_varied_tool_calls():
+    turns = iter([
+        ChatTurn(tool_calls=[ToolCall("bash", {"command": "echo 1"})]),
+        ChatTurn(tool_calls=[ToolCall("read_file", {"path": "a.py"})]),
+        ChatTurn(tool_calls=[ToolCall("bash", {"command": "echo 3"})]),
+        ChatTurn(content="DONE"),
+    ])
+
+    def client(messages, tools):
+        return next(turns)
+
+    agent = ReActAgent(client=client, executor=lambda n, a: "ok", max_steps=8)
+    res = agent.run(Milestone("M1", "", lambda _a: AcceptanceResult(True)), [], 5.0)
+    assert res.artifacts["error"] == ""
+    assert res.artifacts["output"] == "DONE"
+    assert res.artifacts["steps"] == 4
