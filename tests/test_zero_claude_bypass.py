@@ -95,6 +95,8 @@ def _run(prompt: str, home: Path, ollama_url: str, extra_env=None) -> dict | Non
     env["LLM_ROUTER_OLLAMA_URL"] = ollama_url
     env["LLM_ROUTER_OLLAMA_MODEL"] = STUB_MODEL   # matches /api/tags → passes §2.4 gate
     env["LLM_ROUTER_DISABLE_LLM_CLASSIFIERS"] = "1"
+    # Q&A routing is off by default (2026-10-01); these tests cover its machinery.
+    env["LLM_ROUTER_QA_ROUTING"] = "on"
     env["OPENAI_API_KEY"] = ""
     env["GEMINI_API_KEY"] = ""
     env["GOOGLE_API_KEY"] = ""

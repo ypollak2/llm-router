@@ -82,6 +82,12 @@ def _isolate_llm_router_writes(tmp_path, monkeypatch):
     # failed carrying the text of the Write call from the session running it:
     # a test that passes or fails according to what you were doing.
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "home"))
+    # Q&A routing is OFF by default since 2026-10-01 (owner decision; see
+    # tests/test_qa_not_routed.py). The suites that exercise the routing, draft,
+    # zero-Claude and enforcement machinery for Q&A prompts test that machinery,
+    # which stays reachable behind LLM_ROUTER_QA_ROUTING=on, so they run with it on.
+    # test_qa_not_routed.py sets the variable itself and tests the default.
+    monkeypatch.setenv("LLM_ROUTER_QA_ROUTING", "on")
 
 
 # ── Config-singleton isolation (CHZ-AUD-001) ────────────────────────────────

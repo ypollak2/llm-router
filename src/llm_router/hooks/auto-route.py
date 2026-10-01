@@ -4468,7 +4468,18 @@ def main() -> None:
     # analyze) but is soft for code — so its banner tone must match per task type,
     # never a blanket "you may answer directly" for a task the enforcer will block.
     _qa_task = task_type in ("query", "research", "generate", "analyze")
-    if _resolved_enforce in ("off", "shadow", "observe"):
+    # Owner decision 2026-10-01: development Q&A is answered by Claude directly.
+    # Measured on hook-routed prompts, local-model answers were acceptable 3-17%
+    # of the time vs 60-100% for Sonnet, and 0 of 1,217 drafts were used
+    # (~/.rsi/research/routing-experiment-2026-10-01). So a Q&A task is mapped to
+    # the passive "shadow" display in EVERY enforce mode: no route directive, no
+    # pending state (so enforce-route.py has nothing to hold a tool against) and
+    # no draft. Routing + coverage telemetry still run, and zero_claude_edit (it
+    # runs earlier, on edit-shaped prompts) is untouched. Code/edit tasks keep
+    # their mode semantics. LLM_ROUTER_QA_ROUTING=on restores the old behaviour.
+    _qa_quiet = _qa_task and os.environ.get(
+        "LLM_ROUTER_QA_ROUTING", "off").strip().lower() not in ("1", "on", "true", "yes")
+    if _qa_quiet or _resolved_enforce in ("off", "shadow", "observe"):
         _enforce_mode = "shadow"
     elif _resolved_enforce in ("advise", "advisory"):
         # Route everywhere, but NEVER block and NEVER nag. Distinct from "suggest":
@@ -5231,11 +5242,19 @@ def main() -> None:
 
     if _enforce_mode == "shadow":
         # Passive observation — no pending state, no blocking
-        directive = (
-            f"👁 OBSERVATION [{_enforce_mode}]: ✨ {task_type}/{complexity} ✨ "
-            f"would route to {tool_disp} → 🧠 {selected_model} [via {method}{stale_suffix}]"
-        )
-        indicator = f"👁 {task_type}/{complexity} ✨ {tool_disp} → 🧠 {selected_model}"
+        if _qa_quiet:
+            # Names no tool and no model: nothing here invites a route.
+            directive = (
+                f"👁 OBSERVATION [qa-direct]: {task_type}/{complexity} — "
+                f"Q&A is answered directly; no routing directive."
+            )
+            indicator = f"👁 {task_type}/{complexity} — answered directly"
+        else:
+            directive = (
+                f"👁 OBSERVATION [{_enforce_mode}]: ✨ {task_type}/{complexity} ✨ "
+                f"would route to {tool_disp} → 🧠 {selected_model} [via {method}{stale_suffix}]"
+            )
+            indicator = f"👁 {task_type}/{complexity} ✨ {tool_disp} → 🧠 {selected_model}"
         write_pending = False
     elif _enforce_mode == "advise":
         # Advise: a friendly suggestion that never blocks and never nags. No pending
@@ -5315,7 +5334,7 @@ def main() -> None:
     # blind draft was already suppressed (see DIRECT SKIP above). Tell the caller
     # WHY and what to do instead: answer from real context, or route WITH context
     # via llm_query(context=…) — never relay a context-free draft as an answer.
-    if not zero_claude and _is_context_dependent(prompt):
+    if not zero_claude and not _qa_quiet and _is_context_dependent(prompt):
         # ENF-FIX-2 (GAP-ENF-2): a context-dependent prompt that ALSO needs local
         # execution / repo ops can't be completed by a text-only door even WITH
         # context — so name the PROVISIONED tool-capable door (llm_act with
