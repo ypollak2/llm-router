@@ -87,6 +87,10 @@ class Reason(Enum):
     #: kept separate from UNHANDLED_EXCEPTION so a caught, expected parse
     #: failure is never counted as if the hook had crashed.
     PARSE_FAILURE = "parse_failure"
+    #: A background-task notification delivered as a prompt; not the user's turn.
+    SYSTEM_NOTIFICATION_BYPASS = "system_notification_bypass"
+    #: A sub-agent's hand-back report delivered as a prompt; not the user's turn.
+    SUBAGENT_REPORT_BYPASS = "subagent_report_bypass"
 
 
 @dataclass(frozen=True)
