@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 19
+# llm_router-hook-version: 20
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -8,6 +8,16 @@ Fires once when a new Claude Code session begins. Four jobs:
   3. Inject a compact routing table at position 0 of the context window,
      so routing rules are always salient regardless of session length.
   4. Reset the session stats tracker so session-end summary is accurate.
+
+Usage refresh (job 2) NEVER blocks session start (owner decision 2026-10-01).
+The banner line renders from the last known usage.json immediately (stale
+data is fine — labelled with its age); a fresh-enough cache
+(LLM_ROUTER_SESSION_START_USAGE_FRESH_S, default 300s) skips the refresh
+entirely, otherwise a single detached process re-invokes this script with
+``--background-usage-refresh`` to do the keychain + OAuth fetch out of band,
+gated by a cooldown (LLM_ROUTER_SESSION_START_USAGE_COOLDOWN_S, default 60s)
+so a burst of session starts can't pile up concurrent refreshes. See
+_refresh_claude_usage_nonblocking().
 
 Mode detection (auto):
   LLM_ROUTER_CLAUDE_SUBSCRIPTION=true → subscription mode (OAuth pressure cascade)
@@ -773,6 +783,167 @@ def _refresh_claude_usage() -> str:
     return "\n⚠️  Usage: refresh failed (50% pressure fallback)"
 
 
+def _usage_fresh_threshold_s() -> float:
+    """How young ``usage.json`` must be to skip a refresh entirely.
+
+    Owner decision 2026-10-01: the SessionStart hook must never block on the
+    OAuth usage fetch. Default 5 minutes.
+    """
+    try:
+        return float(os.environ.get("LLM_ROUTER_SESSION_START_USAGE_FRESH_S", "300"))
+    except (TypeError, ValueError):
+        return 300.0
+
+
+def _usage_refresh_cooldown_s() -> float:
+    """Minimum gap between background-refresh spawns, so a burst of fast
+    session starts (e.g. several terminal tabs opened together) cannot pile
+    up concurrent keychain + OAuth calls."""
+    try:
+        return float(os.environ.get("LLM_ROUTER_SESSION_START_USAGE_COOLDOWN_S", "60"))
+    except (TypeError, ValueError):
+        return 60.0
+
+
+def _usage_refresh_spawn_file() -> str:
+    return os.path.join(_state_dir(), "usage_refresh_spawn.txt")
+
+
+def _read_cached_usage() -> dict | None:
+    """Parsed ``usage.json``, or None when missing/unreadable/corrupt."""
+    usage_path = os.path.join(_state_dir(), "usage.json")
+    try:
+        with open(usage_path) as f:
+            return json.load(f)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _usage_json_age_sec(cached: dict | None) -> float | None:
+    """Age in seconds of ``cached``'s ``updated_at``, or None when ``cached``
+    is None or carries no usable timestamp."""
+    if not cached:
+        return None
+    try:
+        updated_at = float(cached.get("updated_at", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if updated_at <= 0:
+        return None
+    return time.time() - updated_at
+
+
+def _usage_refresh_recently_spawned(cooldown_s: float) -> bool:
+    """True when a background refresh was started within ``cooldown_s``."""
+    try:
+        age = time.time() - os.path.getmtime(_usage_refresh_spawn_file())
+    except OSError:
+        return False
+    return age < cooldown_s
+
+
+def _mark_usage_refresh_spawned() -> None:
+    """Record that a background refresh was just started (best effort)."""
+    path = _usage_refresh_spawn_file()
+    tmp = path + ".tmp"
+    try:
+        os.makedirs(_state_dir(), exist_ok=True)
+        with open(tmp, "w") as f:
+            f.write(str(time.time()))
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _spawn_background_usage_refresh() -> None:
+    """Detach a background process that runs the SAME keychain + OAuth
+    refresh this hook used to run inline (see ``_refresh_claude_usage``), so
+    SessionStart itself never waits on it.
+
+    Re-invokes this script with ``--background-usage-refresh``: the retry
+    logic, keychain read, and OAuth HTTP call are untouched — only WHERE they
+    run changes. Never raises; a failed spawn must not break session start.
+    """
+    try:
+        subprocess.Popen(
+            [sys.executable, __file__, "--background-usage-refresh"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        return  # never block/break session start on a failed spawn
+    _mark_usage_refresh_spawned()
+
+
+def _usage_hint_from_cache(cached: dict | None, age_sec: float | None) -> str:
+    """Render the banner usage line from the last known ``usage.json``
+    (already read by the caller) without ever waiting on a live refresh. Past
+    the fresh threshold, the line is explicitly labelled stale with its age
+    rather than presented as current data.
+    """
+    if not isinstance(cached, dict):
+        return "\n⚠️  Usage: no cached data yet — refreshing in background"
+
+    if cached.get("is_fallback"):
+        return "\n⚠️  Usage: last refresh failed (50% pressure fallback) — retrying in background"
+
+    session_pct = cached.get("session_pct", 0)
+    weekly_pct = cached.get("weekly_pct", 0)
+    sonnet_pct = cached.get("sonnet_pct", 0)
+    highest_pressure = cached.get("highest_pressure", 0)
+    pressure_str = f"session={session_pct:.0f}% weekly={weekly_pct:.0f}% sonnet={sonnet_pct:.0f}%"
+
+    age_note = ""
+    if age_sec is not None and age_sec > _usage_fresh_threshold_s():
+        age_note = f" (stale, {int(age_sec / 60)}m old)"
+
+    if highest_pressure >= 0.95:
+        return f"\n🔴 Usage: {pressure_str}{age_note} — ALL external (full pressure)"
+    if highest_pressure >= 0.85:
+        return f"\n🟡 Usage: {pressure_str}{age_note} — partial pressure active"
+    return f"\n✅ Usage: {pressure_str}{age_note}"
+
+
+def _refresh_claude_usage_nonblocking() -> str:
+    """Never block SessionStart on the OAuth usage fetch.
+
+    Owner decision 2026-10-01: returns promptly using the last known
+    ``usage.json`` (stale data is fine — labelled as such past the fresh
+    threshold). When the cache is stale or missing, kicks off exactly one
+    background refresh (``_spawn_background_usage_refresh``), gated by a
+    cooldown file so a burst of session starts cannot pile up concurrent
+    keychain/OAuth calls. The keychain read and OAuth call themselves
+    (``_refresh_claude_usage`` / ``_refresh_claude_usage_attempt``) are
+    unchanged — only WHERE/WHEN they run changes.
+    """
+    cached = _read_cached_usage()
+    age_sec = _usage_json_age_sec(cached)
+    # A fallback write (is_fallback) carries a current updated_at but holds no
+    # real data, so it must never count as fresh.
+    fresh = (
+        isinstance(cached, dict)
+        and not cached.get("is_fallback")
+        and age_sec is not None
+        and age_sec < _usage_fresh_threshold_s()
+    )
+
+    if not fresh and not _usage_refresh_recently_spawned(_usage_refresh_cooldown_s()):
+        _spawn_background_usage_refresh()
+
+    return _usage_hint_from_cache(cached, age_sec)
+
+
+def _run_background_usage_refresh_entrypoint() -> None:
+    """Entry point for the detached child spawned by
+    ``_spawn_background_usage_refresh``. Runs the exact retry/keychain/OAuth
+    logic that used to run inline in ``main()`` — unchanged — just out of
+    process so it can never block SessionStart.
+    """
+    _refresh_claude_usage()
+
+
 def _refresh_claude_usage_attempt() -> dict:
     """Single attempt to fetch Claude subscription usage via OAuth.
     
@@ -1495,12 +1666,16 @@ def main() -> None:
         _cached_sub = _CC_MODE
     banner = _select_banner(_cached_sub)
 
-    # 3. Refresh Claude usage from OAuth API — updates the cache for next session.
-    # Always attempt the refresh — if the OAuth token is present, we're in
-    # subscription mode regardless of LLM_ROUTER_CLAUDE_SUBSCRIPTION env var.
-    # This makes CC mode detection implicit (token present = CC mode) rather
-    # than requiring a .env file that hooks may not have access to.
-    usage_hint = _refresh_claude_usage()
+    # 3. Claude usage banner line — NEVER blocks on the OAuth API (owner
+    # decision 2026-10-01). Returns immediately from the last known
+    # usage.json (stale is fine, labelled as such) and, when that cache is
+    # stale or missing, detaches exactly one background process to refresh
+    # it for next time (cooldown-gated against pile-ups). If the OAuth token
+    # is present, we're in subscription mode regardless of
+    # LLM_ROUTER_CLAUDE_SUBSCRIPTION env var — this makes CC mode detection
+    # implicit (token present = CC mode) rather than requiring a .env file
+    # that hooks may not have access to.
+    usage_hint = _refresh_claude_usage_nonblocking()
     is_subscription = not usage_hint.startswith("\n⚠️")
 
     hints += usage_hint
@@ -1558,4 +1733,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # The detached child spawned by _spawn_background_usage_refresh() re-runs
+    # THIS file with this flag — it only does the usage refresh and writes
+    # usage.json, never the rest of SessionStart's work.
+    if "--background-usage-refresh" in sys.argv[1:]:
+        _run_background_usage_refresh_entrypoint()
+    else:
+        main()
