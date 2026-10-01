@@ -311,8 +311,8 @@ _VALID_EDIT_RESPONSE = json.dumps([
 ])
 
 # Plan 3.3: syntax-valid (ast.parse succeeds) but ruff-dirty — an unused
-# import (F401, in this repo's selected rule set: see pyproject.toml
-# [tool.ruff.lint]). Used to exercise the lint gate end to end: this edit
+# import (F401, under the ruff config the tests that need one write into the
+# fixture repo). Used to exercise the lint gate end to end: this edit
 # passes every check zero_claude_edit.py ran BEFORE plan 3.3 and must now be
 # caught before the write.
 _LINT_DIRTY_EDIT_RESPONSE = json.dumps([
@@ -468,6 +468,9 @@ def test_verify_blocks_lint_dirty_edit_and_preserves_original_bytes(tmp_path, re
     content, even transiently."""
     if shutil.which("ruff") is None and shutil.which("uvx") is None:
         pytest.skip("neither ruff nor uv/uvx on PATH — cannot exercise the real linter")
+    # The repo opts into a ruff rule set (a repo with no ruff config is not linted).
+    (repo / "pyproject.toml").write_text('[tool.ruff.lint]\nselect = ["F"]\n')
+    _commit_all(repo, "ruff config")
     _StubOllama.response_content = _LINT_DIRTY_EDIT_RESPONSE
     before = (repo / "foo.py").read_text()
     out = _run(
@@ -478,7 +481,21 @@ def test_verify_blocks_lint_dirty_edit_and_preserves_original_bytes(tmp_path, re
     assert out.get("decision") == "block"
     reason = out.get("reason", "")
     assert "claude:" in reason  # same escalation path a failed edit already had
+    assert "F401" in reason     # names the new violation
     assert (repo / "foo.py").read_text() == before
+
+
+def test_verify_skips_repo_without_ruff_config(tmp_path, repo, stub_ollama):
+    """No project ruff config -> no lint (ruff's built-in defaults are rules the
+    repo never opted into): the edit is written as before plan 3.3."""
+    _StubOllama.response_content = _LINT_DIRTY_EDIT_RESPONSE
+    out = _run(
+        "rename old_name to new_name in foo.py", tmp_path, repo, stub_ollama,
+        extra_env={"LLM_ROUTER_ZERO_CLAUDE_SCOPE": "edit"},
+    )
+    assert out is not None
+    assert "ZERO_CLAUDE_EDIT APPLIED" in out.get("reason", "")
+    assert (repo / "foo.py").read_text() == "import os\n\n\ndef new_name():\n    pass\n"
 
 
 def test_verify_disabled_allows_lint_dirty_write(tmp_path, repo, stub_ollama):

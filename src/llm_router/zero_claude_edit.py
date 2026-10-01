@@ -674,14 +674,15 @@ def maybe_replace(
     diffs = {f: short_diff(file_contents[f], new_contents[f], f) for f in changed_files}
 
     # Plan 3.3: one more gate before the write, after validation — lint the
-    # CANDIDATE text (never the real file; see verify.py's module docstring
+    # ORIGINAL and CANDIDATE text, block only on violations the edit adds
+    # (never the real file; see verify.py's module docstring
     # for why a temp copy and not write-then-rollback). A failure here is
     # routed through the exact same failed-edit path as a failed
     # generate_edits() above: block, write nothing, escalate to Claude. The
     # real files are untouched in every branch that returns before the write
     # loop below.
     from llm_router.local_agent.verify import verify_changed_files
-    verify_result = verify_changed_files(new_contents, changed_files, root, deadline_s)
+    verify_result = verify_changed_files(new_contents, file_contents, changed_files, root, deadline_s)
     if not verify_result.ok:
         reason = f"verification failed — {verify_result.reason}"
         for instr in instructions:
