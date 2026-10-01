@@ -187,3 +187,28 @@ class TestTheCache:
         coverage.clear()
         _write(store, '{"k":"o"}', '{"k":"o"}', '{"k":"o"}')
         assert coverage.snapshot().observed_n == 3
+
+
+def test_non_user_turns_are_counted_but_not_in_the_denominator(store):
+    """Notifications and sub-agent reports are not user prompts: recorded so the
+    hook's exits are accounted for, but they must not lower coverage_pct."""
+    coverage.record_observed("llm_query")
+    coverage.record_unobserved(coverage.Reason.CONTINUATION_BYPASS)
+    for _ in range(5):
+        coverage.record_unobserved(coverage.Reason.SYSTEM_NOTIFICATION_BYPASS)
+        coverage.record_unobserved(coverage.Reason.SUBAGENT_REPORT_BYPASS)
+    snap = coverage.snapshot()
+    assert snap.not_user_n == 10
+    assert snap.total_n == 2
+    assert snap.coverage_pct == 50.0
+    assert "SYSTEM_NOTIFICATION_BYPASS" not in snap.by_reason
+    assert snap.malformed_n == 0
+
+
+def test_store_with_only_non_user_turns_is_readable_and_unknown(store):
+    coverage.record_unobserved(coverage.Reason.SUBAGENT_REPORT_BYPASS)
+    snap = coverage.snapshot()
+    assert snap.readable
+    assert snap.not_user_n == 1
+    assert snap.coverage_pct is None
+    assert snap.render_pct() == "Unknown"

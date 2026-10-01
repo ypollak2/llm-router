@@ -140,3 +140,27 @@ def test_a_subagent_report_is_not_drafted_and_says_why(monkeypatch, tmp_path):
 def test_zero_claude_does_not_block_a_subagent_report(monkeypatch, tmp_path):
     _, _, out = _run(monkeypatch, tmp_path, AGENT_REPORT, zero_claude="on")
     assert '"block"' not in out
+
+
+# ── Both bypasses are counted in coverage, not lost to a fail-open ───────────
+# Live 2026-10-01: 596 fail_open rows "CHZ-FO-HOOK-COVERAGE-UNOBSERVED KeyError"
+# because neither reason was a member of coverage.Reason, so every such prompt
+# vanished from the coverage denominator.
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("prompt,reason", [
+    (NOTIFICATION, "SYSTEM_NOTIFICATION_BYPASS"),
+    (AGENT_REPORT, "SUBAGENT_REPORT_BYPASS"),
+])
+def test_bypass_is_recorded_in_coverage_not_fail_open(monkeypatch, tmp_path, prompt, reason):
+    import llm_router.coverage as coverage
+    import llm_router.failopen as failopen
+    recorded: list[str] = []
+    failed: list[str] = []
+    monkeypatch.setattr(coverage, "record_unobserved", lambda r: recorded.append(r.name))
+    monkeypatch.setattr(failopen, "record", lambda code, *a, **k: failed.append(code))
+    _run(monkeypatch, tmp_path, prompt)
+    assert recorded == [reason]
+    assert "CHZ-FO-HOOK-COVERAGE-UNOBSERVED" not in failed
