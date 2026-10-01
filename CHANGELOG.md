@@ -19,16 +19,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a 10 s HTTP timeout and a 2 s backoff each (about 79 s worst case by those
   timeouts). It now reads the last `usage.json`, labels it
   `(stale, Nm old)` in the banner when older than the fresh threshold, and,
-  only when the cache is missing, stale or a failed-refresh fallback, starts a
-  detached background process (the same script with
-  `--background-usage-refresh`, running the unchanged refresh logic). A
-  cooldown file (`usage_refresh_spawn.txt` in the state dir) prevents
-  concurrent refreshes from a burst of session starts, and a failed spawn
-  never breaks the hook. New env vars:
+  only when the cache is missing, pending (the placeholder
+  `install_hooks.seed_usage_json()` writes on every install), stale or a
+  failed-refresh fallback, starts a detached background process (the same
+  script with `--background-usage-refresh`, running the unchanged refresh
+  logic — or, under a standalone/frozen build, `<binary> run-hook <script>
+  --background-usage-refresh`, since `sys.executable` is the binary itself
+  there). The spawn claim (`usage_refresh_spawn.txt` in the state dir) is
+  taken under `llm_router.file_lock.exclusive_lock` so concurrent session
+  starts cannot both spawn, and a failed spawn never breaks the hook. A cache
+  missing its percentage fields (the pending seed) is never rendered as 0%.
+  `session_start_cc_pct.json` (session-end's delta baseline) is still written
+  on every session start — from the cached values when fresh, otherwise the
+  same 50% fallback marker the inline refresh used to write. New env vars:
   `LLM_ROUTER_SESSION_START_USAGE_FRESH_S` (default 300) and
-  `LLM_ROUTER_SESSION_START_USAGE_COOLDOWN_S` (default 60). With no cached
-  data the banner shows a warning-style usage line until the first background
-  refresh lands.
+  `LLM_ROUTER_SESSION_START_USAGE_COOLDOWN_S` (default 60). With no measured
+  cache yet the banner shows a warning-style usage line until the first
+  background refresh lands.
 
 ### Added
 - Local edits: scoped zero-Claude edits (`LLM_ROUTER_ZERO_CLAUDE_SCOPE=edit`)

@@ -833,51 +833,144 @@ def _usage_json_age_sec(cached: dict | None) -> float | None:
     return time.time() - updated_at
 
 
-def _usage_refresh_recently_spawned(cooldown_s: float) -> bool:
-    """True when a background refresh was started within ``cooldown_s``."""
+def _usage_refresh_marker_age() -> float | None:
+    """Seconds since the spawn marker was last claimed, or None if absent."""
     try:
-        age = time.time() - os.path.getmtime(_usage_refresh_spawn_file())
+        return time.time() - os.path.getmtime(_usage_refresh_spawn_file())
     except OSError:
-        return False
-    return age < cooldown_s
+        return None
 
 
-def _mark_usage_refresh_spawned() -> None:
-    """Record that a background refresh was just started (best effort)."""
+def _claim_usage_refresh_spawn(cooldown_s: float) -> bool:
+    """Atomically claim the right to start ONE background refresh.
+
+    Reuses ``llm_router.file_lock.exclusive_lock`` (already used by
+    ``session_store`` for its own cross-process critical section) rather than
+    a hand-rolled create/rename dance: a non-blocking ``flock`` on a sibling
+    ``.lock`` file serializes the check-then-touch of the marker across both
+    threads and processes, so two hooks racing at the same instant cannot
+    both see "stale" and both proceed. ``timeout=0`` means a hook that loses
+    the race returns immediately rather than waiting — SessionStart must
+    never block here either. Any failure (can't import, can't lock, read-only
+    state dir, ...) means no claim: a refresh that cannot even record itself
+    must not be able to pile up.
+    """
     path = _usage_refresh_spawn_file()
-    tmp = path + ".tmp"
     try:
+        from pathlib import Path
+
+        from llm_router.file_lock import exclusive_lock
+
         os.makedirs(_state_dir(), exist_ok=True)
-        with open(tmp, "w") as f:
-            f.write(str(time.time()))
-        os.replace(tmp, path)
+        with exclusive_lock(Path(path + ".lock"), timeout=0.0) as locked:
+            if not locked:
+                return False
+            age = _usage_refresh_marker_age()
+            if age is not None and age < cooldown_s:
+                return False
+            with open(path, "w") as f:
+                f.write(str(time.time()))
+            return True
+    except Exception:
+        return False
+
+
+def _release_usage_refresh_claim() -> None:
+    try:
+        os.unlink(_usage_refresh_spawn_file())
     except OSError:
         pass
+
+
+def _background_usage_refresh_argv() -> list[str]:
+    """argv that re-runs THIS script as the detached refresher.
+
+    From a standalone (frozen) build ``sys.executable`` is the binary, not an
+    interpreter, so a hook is launched as ``<binary> run-hook <script>``
+    (see ``install_hooks._python_exe`` and ``cli.py`` run-hook, which hands the
+    trailing args to the script as its argv). ``is_frozen`` is reused from
+    install_hooks rather than re-implemented; if llm_router cannot be imported
+    we are not in a frozen build, so the plain interpreter form is correct.
+    """
+    try:
+        from llm_router.install_hooks import is_frozen
+
+        frozen = is_frozen()
+    except Exception:
+        frozen = False
+    if frozen:
+        return [sys.executable, "run-hook", __file__, "--background-usage-refresh"]
+    return [sys.executable, __file__, "--background-usage-refresh"]
 
 
 def _spawn_background_usage_refresh() -> None:
     """Detach a background process that runs the SAME keychain + OAuth
     refresh this hook used to run inline (see ``_refresh_claude_usage``), so
-    SessionStart itself never waits on it.
+    SessionStart itself never waits on it. The caller holds the spawn claim.
 
-    Re-invokes this script with ``--background-usage-refresh``: the retry
-    logic, keychain read, and OAuth HTTP call are untouched — only WHERE they
-    run changes. Never raises; a failed spawn must not break session start.
+    The retry logic, keychain read, and OAuth HTTP call are untouched — only
+    WHERE they run changes. Never raises; a failed spawn releases the claim
+    (so the next session start retries) and must not break session start.
     """
     try:
         subprocess.Popen(
-            [sys.executable, __file__, "--background-usage-refresh"],
+            _background_usage_refresh_argv(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
     except Exception:
-        return  # never block/break session start on a failed spawn
-    _mark_usage_refresh_spawned()
+        _release_usage_refresh_claim()
+        return
 
 
-def _usage_hint_from_cache(cached: dict | None, age_sec: float | None) -> str:
+def _usage_is_measured(cached: object) -> bool:
+    """True only for a usage.json that carries real percentages.
+
+    ``install_hooks.seed_usage_json()`` writes ``{"pending": True, ...}`` with
+    no pct fields on every install; a cache missing the fields is equally "not
+    measured yet" and must never render as 0%.
+    """
+    if not isinstance(cached, dict) or cached.get("pending"):
+        return False
+    for key in ("session_pct", "weekly_pct", "sonnet_pct", "highest_pressure"):
+        v = cached.get(key)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return False
+    return True
+
+
+def _write_session_baseline(cached: object) -> None:
+    """Keep ``session_start_cc_pct.json`` (session-end's delta baseline)
+    written on EVERY session start, as the inline refresh used to.
+
+    Measured, non-fallback cache -> its values (no network). Otherwise
+    (pending/missing/unmeasured/fallback) -> the same 50% fallback marker
+    ``_refresh_claude_usage`` writes when a refresh fails. Only the baseline
+    file is written here, never usage.json, so a pending seed stays pending.
+    The background refresher overwrites the baseline when it succeeds.
+    """
+    if _usage_is_measured(cached) and not cached.get("is_fallback"):
+        snapshot = dict(cached)
+    else:
+        snapshot = {
+            "session_pct": 50,
+            "weekly_pct": 50,
+            "sonnet_pct": 50,
+            "highest_pressure": 0.5,
+            "updated_at": time.time(),
+            "is_fallback": True,
+        }
+    try:
+        os.makedirs(_state_dir(), exist_ok=True)
+        with open(os.path.join(_state_dir(), "session_start_cc_pct.json"), "w") as f:
+            json.dump(snapshot, f)
+    except OSError:
+        pass
+
+
+def _usage_hint_from_cache(cached: object, age_sec: float | None) -> str:
     """Render the banner usage line from the last known ``usage.json``
     (already read by the caller) without ever waiting on a live refresh. Past
     the fresh threshold, the line is explicitly labelled stale with its age
@@ -885,14 +978,16 @@ def _usage_hint_from_cache(cached: dict | None, age_sec: float | None) -> str:
     """
     if not isinstance(cached, dict):
         return "\n⚠️  Usage: no cached data yet — refreshing in background"
+    if not _usage_is_measured(cached):
+        return "\n⚠️  Usage: not measured yet — refreshing in background"
 
     if cached.get("is_fallback"):
         return "\n⚠️  Usage: last refresh failed (50% pressure fallback) — retrying in background"
 
-    session_pct = cached.get("session_pct", 0)
-    weekly_pct = cached.get("weekly_pct", 0)
-    sonnet_pct = cached.get("sonnet_pct", 0)
-    highest_pressure = cached.get("highest_pressure", 0)
+    session_pct = cached["session_pct"]
+    weekly_pct = cached["weekly_pct"]
+    sonnet_pct = cached["sonnet_pct"]
+    highest_pressure = cached["highest_pressure"]
     pressure_str = f"session={session_pct:.0f}% weekly={weekly_pct:.0f}% sonnet={sonnet_pct:.0f}%"
 
     age_note = ""
@@ -911,25 +1006,28 @@ def _refresh_claude_usage_nonblocking() -> str:
 
     Owner decision 2026-10-01: returns promptly using the last known
     ``usage.json`` (stale data is fine — labelled as such past the fresh
-    threshold). When the cache is stale or missing, kicks off exactly one
-    background refresh (``_spawn_background_usage_refresh``), gated by a
-    cooldown file so a burst of session starts cannot pile up concurrent
-    keychain/OAuth calls. The keychain read and OAuth call themselves
-    (``_refresh_claude_usage`` / ``_refresh_claude_usage_attempt``) are
-    unchanged — only WHERE/WHEN they run changes.
+    threshold). When the cache is stale, missing, pending (fresh install) or a
+    failed-refresh fallback, kicks off exactly one background refresh,
+    gated by an exclusive cooldown claim so a burst of session starts cannot
+    pile up concurrent keychain/OAuth calls. The session-end baseline is still
+    written on every start (``_write_session_baseline``). The keychain read and
+    OAuth call themselves (``_refresh_claude_usage`` /
+    ``_refresh_claude_usage_attempt``) are unchanged.
     """
     cached = _read_cached_usage()
     age_sec = _usage_json_age_sec(cached)
-    # A fallback write (is_fallback) carries a current updated_at but holds no
-    # real data, so it must never count as fresh.
+    # A fallback write carries a current updated_at but holds no real data, and
+    # a pending seed carries none: neither may count as fresh.
     fresh = (
-        isinstance(cached, dict)
+        _usage_is_measured(cached)
         and not cached.get("is_fallback")
         and age_sec is not None
         and age_sec < _usage_fresh_threshold_s()
     )
 
-    if not fresh and not _usage_refresh_recently_spawned(_usage_refresh_cooldown_s()):
+    _write_session_baseline(cached)
+
+    if not fresh and _claim_usage_refresh_spawn(_usage_refresh_cooldown_s()):
         _spawn_background_usage_refresh()
 
     return _usage_hint_from_cache(cached, age_sec)

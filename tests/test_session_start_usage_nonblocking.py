@@ -297,19 +297,228 @@ def test_spawn_failure_never_breaks_the_hook(hook, monkeypatch, state, exc):
     assert not (state / "usage_refresh_spawn.txt").exists()
 
 
-def test_unwritable_state_dir_never_breaks_the_hook(hook, monkeypatch, state):
-    """The cooldown marker write failing must not surface."""
-    monkeypatch.setattr(hook.subprocess, "Popen", _PopenRecorder())
+def test_claim_unavailable_lock_primitive_never_breaks_the_hook(hook, monkeypatch, state):
+    """exclusive_lock itself raising (e.g. file_lock unimportable) must also
+    degrade to no-claim rather than breaking the hook."""
+    popen = _PopenRecorder()
+    monkeypatch.setattr(hook.subprocess, "Popen", popen)
     _write_usage(state, age_s=3600)
 
-    def _boom(*a, **k):
-        raise OSError("read-only filesystem")
+    import llm_router.file_lock as fl
 
-    monkeypatch.setattr(hook.os, "replace", _boom)
+    def _raise(*a, **k):
+        raise RuntimeError("lock primitive unavailable")
+
+    monkeypatch.setattr(fl, "exclusive_lock", _raise)
 
     out, _ = _run_main(hook, monkeypatch)
 
     assert json.loads(out)["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    assert popen.calls == []
+
+
+# ── a cache that was never measured is not "0%" ─────────────────────────────
+
+def _write_pending_seed(state: Path) -> None:
+    """Exactly what install_hooks.seed_usage_json() writes on every install."""
+    (state / "usage.json").write_text(json.dumps({
+        "pending": True,
+        "seeded_at": time.time(),
+        "note": "placeholder written by `llm-router install`; "
+                "replaced on the first usage refresh",
+    }))
+
+
+def test_pending_seed_is_not_measured_and_triggers_refresh(hook, monkeypatch, state):
+    popen = _PopenRecorder()
+    monkeypatch.setattr(hook.subprocess, "Popen", popen)
+    _write_pending_seed(state)
+
+    hint = hook._refresh_claude_usage_nonblocking()
+
+    assert hint.startswith("\n⚠️")  # is_subscription = not startswith("\n⚠️")
+    assert "0%" not in hint
+    assert len(popen.calls) == 1
+
+
+def test_pending_seed_through_main_never_shows_zero_percent(hook, monkeypatch, state):
+    monkeypatch.setattr(hook.subprocess, "Popen", _PopenRecorder())
+    _write_pending_seed(state)
+
+    out, _ = _run_main(hook, monkeypatch)
+
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert "session=0%" not in ctx
+    assert "✅ Usage" not in ctx
+
+
+@pytest.mark.parametrize("missing", ["session_pct", "weekly_pct", "sonnet_pct",
+                                     "highest_pressure"])
+def test_cache_missing_pct_fields_is_not_measured(hook, monkeypatch, state, missing):
+    popen = _PopenRecorder()
+    monkeypatch.setattr(hook.subprocess, "Popen", popen)
+    data = {"session_pct": 10.0, "weekly_pct": 20.0, "sonnet_pct": 0.0,
+            "highest_pressure": 0.2, "updated_at": time.time(), "is_fallback": False}
+    del data[missing]
+    (state / "usage.json").write_text(json.dumps(data))
+
+    hint = hook._refresh_claude_usage_nonblocking()
+
+    assert hint.startswith("\n⚠️")
+    assert len(popen.calls) == 1
+
+
+def test_cache_with_non_numeric_pcts_is_not_measured(hook, monkeypatch, state):
+    popen = _PopenRecorder()
+    monkeypatch.setattr(hook.subprocess, "Popen", popen)
+    (state / "usage.json").write_text(json.dumps({
+        "session_pct": None, "weekly_pct": "n/a", "sonnet_pct": 0,
+        "highest_pressure": 0.1, "updated_at": time.time()}))
+
+    hint = hook._refresh_claude_usage_nonblocking()
+
+    assert hint.startswith("\n⚠️")
+    assert len(popen.calls) == 1
+
+
+# ── standalone (frozen) builds launch the child through run-hook ────────────
+
+def test_non_frozen_child_argv_is_interpreter_plus_script(hook, monkeypatch):
+    import llm_router.install_hooks as ih
+
+    monkeypatch.setattr(ih, "is_frozen", lambda: False)
+    assert hook._background_usage_refresh_argv() == [
+        sys.executable, hook.__file__, "--background-usage-refresh"]
+
+
+def test_frozen_child_argv_goes_through_run_hook(hook, monkeypatch, state):
+    """sys.executable IS the binary under PyInstaller: `<binary> script.py` is
+    an unknown argument. The child must be `<binary> run-hook <script> <flag>`."""
+    import llm_router.install_hooks as ih
+
+    monkeypatch.setattr(ih, "is_frozen", lambda: True)
+    monkeypatch.setattr(sys, "executable", "/opt/llm-router/llm-router")
+    popen = _PopenRecorder()
+    monkeypatch.setattr(hook.subprocess, "Popen", popen)
+    _write_usage(state, age_s=3600)
+
+    hook._refresh_claude_usage_nonblocking()
+
+    assert [c[0] for c in popen.calls] == [[
+        "/opt/llm-router/llm-router", "run-hook", hook.__file__,
+        "--background-usage-refresh"]]
+
+
+def test_run_hook_passes_the_background_flag_to_the_script(tmp_path):
+    """cli.py run-hook must present the script the argv it would have seen
+    launched directly, including --background-usage-refresh."""
+    from llm_router.cli import main as cli_main
+
+    out = tmp_path / "seen.json"
+    script = tmp_path / "probe-hook.py"
+    script.write_text(
+        "import json, sys\n"
+        f"json.dump({{'argv': sys.argv, 'file': __file__}}, open({str(out)!r}, 'w'))\n"
+    )
+    saved = sys.argv
+    try:
+        sys.argv = ["llm-router", "run-hook", str(script), "--background-usage-refresh"]
+        cli_main()
+    finally:
+        sys.argv = saved
+
+    seen = json.loads(out.read_text())
+    assert seen["argv"] == [str(script), "--background-usage-refresh"]
+    assert seen["file"] == str(script)
+
+
+# ── session-end's delta baseline is still written on every start ────────────
+
+def _snap(state: Path) -> dict:
+    return json.loads((state / "session_start_cc_pct.json").read_text())
+
+
+def test_baseline_written_from_fresh_cache_without_spawning(hook, monkeypatch, state):
+    popen = _PopenRecorder()
+    monkeypatch.setattr(hook.subprocess, "Popen", popen)
+    _write_usage(state, age_s=30)
+
+    hook._refresh_claude_usage_nonblocking()
+
+    snap = _snap(state)
+    assert (snap["session_pct"], snap["weekly_pct"]) == (12.0, 34.0)
+    assert snap["is_fallback"] is False
+    assert popen.calls == []
+
+
+def test_baseline_written_from_stale_measured_cache(hook, monkeypatch, state):
+    monkeypatch.setattr(hook.subprocess, "Popen", _PopenRecorder())
+    _write_usage(state, age_s=3600)
+
+    hook._refresh_claude_usage_nonblocking()
+
+    snap = _snap(state)
+    assert (snap["session_pct"], snap["weekly_pct"]) == (12.0, 34.0)
+    assert snap["is_fallback"] is False
+
+
+@pytest.mark.parametrize("shape", ["pending", "missing", "fallback", "corrupt"])
+def test_baseline_is_the_fallback_marker_when_nothing_was_measured(
+        hook, monkeypatch, state, shape):
+    monkeypatch.setattr(hook.subprocess, "Popen", _PopenRecorder())
+    if shape == "pending":
+        _write_pending_seed(state)
+    elif shape == "fallback":
+        _write_usage(state, age_s=1, is_fallback=True, session_pct=50, weekly_pct=50,
+                     highest_pressure=0.5)
+    elif shape == "corrupt":
+        (state / "usage.json").write_text("{nope")
+    usage_before = (state / "usage.json").read_text() if shape != "missing" else None
+
+    hook._refresh_claude_usage_nonblocking()
+
+    snap = _snap(state)
+    assert snap["is_fallback"] is True
+    assert (snap["session_pct"], snap["weekly_pct"], snap["sonnet_pct"]) == (50, 50, 50)
+    assert snap["highest_pressure"] == 0.5
+    # Only the baseline is written; usage.json (e.g. the pending seed) is not.
+    if usage_before is None:
+        assert not (state / "usage.json").exists()
+    else:
+        assert (state / "usage.json").read_text() == usage_before
+
+
+# ── the claim is exclusive under a real race ────────────────────────────────
+
+def _race(hook, n=8) -> int:
+    import threading
+
+    barrier = threading.Barrier(n)
+    results: list[bool] = []
+
+    def worker():
+        barrier.wait()
+        results.append(hook._claim_usage_refresh_spawn(60.0))
+
+    threads = [threading.Thread(target=worker) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return sum(results)
+
+
+def test_exactly_one_of_many_concurrent_claims_wins(hook, state):
+    assert _race(hook) == 1
+
+
+def test_exactly_one_concurrent_claim_wins_over_an_expired_marker(hook, state):
+    marker = state / "usage_refresh_spawn.txt"
+    marker.write_text("")
+    old = time.time() - 3600
+    os.utime(marker, (old, old))
+
+    assert _race(hook) == 1
 
 
 # ── the background child reuses the unchanged refresh ───────────────────────
