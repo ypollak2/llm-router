@@ -42,12 +42,14 @@ Two outcome actions:
 ``block``
     The turn is intercepted. ``applied=True`` means the edit was generated,
     validated (exact-once ``old_string`` match, syntax-checked — see
-    ``edit.apply_edits``) and WRITTEN to disk; the block message carries the
-    model, the changed files and a short diff. ``applied=False`` means an
-    edit was attempted and failed (could not be produced or validated) or a
-    named file resolved outside the repo root — per the owner's explicit
-    choice, failure blocks rather than silently falling through, and never
-    half-applies (``edit.apply_edits`` is already all-or-nothing).
+    ``edit.apply_edits``), lint-verified on a temp copy (plan 3.3, see
+    ``local_agent.verify``) and WRITTEN to disk; the block message carries
+    the model, the changed files and a short diff. ``applied=False`` means
+    an edit was attempted and failed (could not be produced, validated, or
+    verified) or a named file resolved outside the repo root — per the
+    owner's explicit choice, failure blocks rather than silently falling
+    through, and never half-applies (``edit.apply_edits`` is already
+    all-or-nothing, and the lint gate runs before any write at all).
 
 Every ``block`` message ends with the same escape hatch as full zero-Claude:
 prefix the prompt with ``claude:`` to redo the turn natively.
@@ -670,6 +672,25 @@ def maybe_replace(
 
     changed_files = [f for f in new_contents if new_contents[f] != file_contents.get(f)]
     diffs = {f: short_diff(file_contents[f], new_contents[f], f) for f in changed_files}
+
+    # Plan 3.3: one more gate before the write, after validation — lint the
+    # ORIGINAL and CANDIDATE text, block only on violations the edit adds
+    # (never the real file; see verify.py's module docstring
+    # for why a temp copy and not write-then-rollback). A failure here is
+    # routed through the exact same failed-edit path as a failed
+    # generate_edits() above: block, write nothing, escalate to Claude. The
+    # real files are untouched in every branch that returns before the write
+    # loop below.
+    from llm_router.local_agent.verify import verify_changed_files
+    verify_result = verify_changed_files(new_contents, file_contents, changed_files, root, deadline_s)
+    if not verify_result.ok:
+        reason = f"verification failed — {verify_result.reason}"
+        for instr in instructions:
+            _record_edit_ledger(instr.file, model, applied=False)
+        return ScopedEditOutcome(
+            "block", f"ZERO_CLAUDE_EDIT BLOCKED: {reason}", message=failure_message(reason), applied=False,
+        )
+
     for f in changed_files:
         (root / f).write_text(new_contents[f], encoding="utf-8")
     for instr in instructions:

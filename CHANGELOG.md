@@ -13,6 +13,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Local edits: scoped zero-Claude edits (`LLM_ROUTER_ZERO_CLAUDE_SCOPE=edit`)
+  are now lint-verified before they are written
+  (`llm_router.local_agent.verify`). Previously the only gate was the syntax
+  check, which lets through code that parses but fails the project's lint
+  (e.g. an unused import). The original and the candidate text are both
+  linted with `ruff check --output-format json` on temp copies that mirror the
+  repo-relative path (so `per-file-ignores` apply), using the project's own
+  ruff config; only violations NEW in the candidate (multiset of rule code +
+  message, not line numbers) block the write, so pre-existing lint debt does
+  not. A file whose repo has no ruff config (`.ruff.toml`, `ruff.toml`, or a
+  `pyproject.toml` with `[tool.ruff]`, found walking up to the repo root) is
+  not linted, nor is anything when neither `ruff` nor `uv`/`uvx` is on PATH:
+  syntax check only, as before. A new violation (named in the message), a
+  timeout, a ruff error, an unlintable original, or too little of the hook's
+  wall-clock budget left blocks the write and escalates to Claude through the
+  existing failed-edit path (`claude:` redo hint). The user's file is never
+  modified before the check passes. Only Python files are linted; no tests are
+  run. Opt out with `LLM_ROUTER_ZERO_CLAUDE_VERIFY=0`. Default ON; no pass-rate
+  or savings claim is made.
 - Local edits: the edit protocol's direct Ollama calls (the zero-Claude edit
   hook and the proxy's local-agent edit step) now send a JSON Schema as
   Ollama's `format` (`llm_router.local_agent.constrain`), so the reply is a
