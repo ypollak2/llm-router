@@ -108,11 +108,21 @@ def test_preexisting_violation_untouched_by_edit_passes(tmp_path):
 
 
 def test_line_shift_does_not_turn_old_debt_into_a_new_violation(tmp_path):
-    """Compared by (code, message), not line number: prepending lines moves
-    the old violation without adding one."""
+    """Compared by rule code, not line number: prepending lines moves the old
+    violation without adding one."""
     root = _repo(tmp_path, {"pyproject.toml": RUFF_F})
     shifted = '"""Doc."""\n\n# a\n# b\n' + DEBT_PY
     result = _verify(root, "debt.py", DEBT_PY, shifted)
+    assert result.ok, result.reason
+
+
+def test_renaming_already_unused_import_is_not_blamed_on_the_edit(tmp_path):
+    """The message embeds the name, so a (code, message) key would call an
+    unused `os` swapped for an unused `sys` a new F401."""
+    root = _repo(tmp_path, {"pyproject.toml": RUFF_F})
+    swapped = DEBT_PY.replace("import os", "import sys")
+    assert swapped != DEBT_PY
+    result = _verify(root, "debt.py", DEBT_PY, swapped)
     assert result.ok, result.reason
 
 

@@ -86,7 +86,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -189,13 +188,15 @@ def _ruff_config_for(repo_root: Path, rel: str) -> Path | None:
         directory = directory.parent
 
 
-_LINE_REF = re.compile(r"\bline \d+")
+def _key(entry: dict) -> str:
+    """Identity of a violation for baseline comparison: the rule code only.
 
-
-def _key(entry: dict) -> tuple[str, str]:
-    """Identity of a violation for baseline comparison: rule code + message,
-    never position (an edit shifts lines)."""
-    return (entry.get("code") or "syntax-error", _LINE_REF.sub("line N", entry.get("message", "")))
+    Not position (an edit shifts lines) and not the message, which embeds
+    names: renaming an already-unused variable, or swapping one unused import
+    for another, would otherwise be blamed on the edit. The cost is that an
+    edit which fixes one violation and adds another of the same code in the
+    same file goes unseen."""
+    return entry.get("code") or "syntax-error"
 
 
 class _Unverified(Exception):
