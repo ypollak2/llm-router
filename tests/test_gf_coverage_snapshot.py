@@ -203,3 +203,12 @@ def test_non_user_turns_are_counted_but_not_in_the_denominator(store):
     assert snap.coverage_pct == 50.0
     assert "SYSTEM_NOTIFICATION_BYPASS" not in snap.by_reason
     assert snap.malformed_n == 0
+
+
+def test_store_with_only_non_user_turns_is_readable_and_unknown(store):
+    coverage.record_unobserved(coverage.Reason.SUBAGENT_REPORT_BYPASS)
+    snap = coverage.snapshot()
+    assert snap.readable
+    assert snap.not_user_n == 1
+    assert snap.coverage_pct is None
+    assert snap.render_pct() == "Unknown"

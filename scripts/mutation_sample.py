@@ -148,8 +148,8 @@ MUTATIONS: list[Mutation] = [
     # ── verification / telemetry ─────────────────────────────────────────────
     Mutation(
         "M8", "verification", "src/llm_router/coverage.py",
-        'def record_unobserved(reason: Reason) -> None:\n    """Record that a prompt exited WITHOUT producing a routing directive."""\n    _record("u", reason.name)',
-        'def record_unobserved(reason: Reason) -> None:\n    """Record that a prompt exited WITHOUT producing a routing directive."""\n    return',
+        '    _record("n" if reason in NOT_USER_TURN else "u", reason.name)',
+        '    return',
         ["tests/telemetry/"],
         "Silently stops counting bypasses -- reinstates the I-1 blind spot exactly.",
     ),

@@ -63,7 +63,8 @@ _cached_snapshot: Coverage | None = None
 
 
 class Reason(Enum):
-    """Why a prompt produced no routing directive.
+    """Why a prompt produced no routing directive (or, for ``NOT_USER_TURN``,
+    why non-user input was skipped).
 
     One code per silent-bypass site in auto-route.py. Deliberately exhaustive:
     an ``other`` bucket would let a newly-added bypass accumulate inside an
@@ -273,7 +274,7 @@ def snapshot() -> Coverage:
     # Partial corruption still reports, because a partial count beats no count
     # as long as the total is not silently understated -- which is why malformed
     # lines are not simply skipped when they are all we have.
-    if malformed and observed == 0 and unobserved == 0:
+    if malformed and observed == 0 and unobserved == 0 and not_user == 0:
         _cached_snapshot = Coverage(readable=False, malformed_n=malformed)
         return _cached_snapshot
 
