@@ -10,6 +10,15 @@ Anti-stuck: the loop is hard-bounded by ``max_steps``; if the model never emits 
 final answer it stops and returns what it has (the milestone's objective
 acceptance check then decides pass/fail — the model's own claim is never trusted).
 Local-model reliability is best-effort by nature; confidence is reported low.
+
+Loop guard (plan 3.6): ``max_steps`` alone still lets a model burn its whole
+budget re-issuing the same tool call with no new information — the proxy
+found exactly this pattern (``src/llm_router/proxy/loop_guard.py``'s
+docstring: 44 consecutive repeats of the same ``Read``). This loop reuses
+that same :class:`~llm_router.proxy.loop_guard.LoopGuard` (same env
+thresholds, same repeat/consecutive semantics) rather than duplicating it, so
+a repeating or stalled tool loop stops early with the same ``loop_guard``
+reason the proxy uses, instead of running out the clock on ``max_steps``.
 """
 from __future__ import annotations
 
@@ -24,6 +33,7 @@ from typing import Any
 from llm_router.agentic.adapters import pack_prompt
 from llm_router.agentic.engine import AgentRunResult
 from llm_router.agentic.ledger import Milestone
+from llm_router.proxy.loop_guard import REASON_LOOP_GUARD, LoopGuard
 from llm_router.safe_subprocess import get_delegated_env
 
 
@@ -54,6 +64,13 @@ _SYSTEM = (
     "When done, reply with a short final message (no tool call). Be concrete — an "
     "objective check verifies your work, so make real changes."
 )
+
+# A fixed, non-empty key: each ``run()`` builds its own LoopGuard (state must
+# never leak between milestones that reuse one ReActAgent instance), so the
+# session dict only ever holds this one entry. A literal avoids the footgun of
+# ``milestone.id`` being empty — the guard treats a falsy session_id as "no
+# session" and silently disables itself.
+_LOOP_SESSION_ID = "react-loop"
 
 # Ollama tool schemas advertised to the model.
 DEFAULT_TOOLS: list[dict[str, Any]] = [
@@ -248,6 +265,10 @@ class ReActAgent:
         final = ""
         error = ""
         steps = 0
+        # Plan 3.6: the same guard the proxy uses (loop_guard.py), reused rather
+        # than duplicated — same env-configured thresholds, same repeat/consecutive
+        # semantics. Fresh instance per run: this agent is reused across milestones.
+        guard = LoopGuard()
         for steps in range(1, self.max_steps + 1):
             turn = self.client(messages, DEFAULT_TOOLS)
             if turn.error:
@@ -258,11 +279,26 @@ class ReActAgent:
             if not turn.tool_calls:
                 final = turn.content
                 break
+            exhausted = guard.exhausted(_LOOP_SESSION_ID)
+            if exhausted is not None:
+                # Already hit the consecutive-served cap: stop WITHOUT even
+                # trying this candidate, same as the proxy's forced fallback.
+                error = f"{REASON_LOOP_GUARD}: {exhausted}"
+                break
+            # Anthropic-shaped so loop_guard's tool-signature logic (name +
+            # canonical JSON input) is reused unchanged rather than re-derived.
+            candidate = {"content": [{"type": "tool_use", "name": tc.name, "input": tc.args}
+                                      for tc in turn.tool_calls]}
+            repeat = guard.repeat_reason(_LOOP_SESSION_ID, candidate)
+            if repeat is not None:
+                error = f"{REASON_LOOP_GUARD}: {repeat}"
+                break
             messages.append({"role": "assistant", "content": turn.content})
             for tc in turn.tool_calls:
                 result = self.executor(tc.name, tc.args)
                 actions.append({"tool": tc.name, "args": tc.args, "result": result[:500]})
                 messages.append({"role": "tool", "name": tc.name, "content": result})
+            guard.record_served(_LOOP_SESSION_ID, candidate)
 
         artifacts: dict[str, Any] = {
             "provider": "ollama-react",
