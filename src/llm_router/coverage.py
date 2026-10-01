@@ -93,6 +93,14 @@ class Reason(Enum):
     SUBAGENT_REPORT_BYPASS = "subagent_report_bypass"
 
 
+#: Bypasses for input that is not a user turn at all. They are recorded so the
+#: hook's exits stay accounted for, but kept OUT of the coverage denominator:
+#: the hook's own comments put notifications at ~26% and sub-agent reports at
+#: ~18% of UserPromptSubmit traffic, and counting them as "missed prompts" would
+#: drag ``coverage_pct`` under ``DEGRADED_BELOW_PCT`` on a healthy machine.
+NOT_USER_TURN = frozenset({Reason.SYSTEM_NOTIFICATION_BYPASS, Reason.SUBAGENT_REPORT_BYPASS})
+
+
 @dataclass(frozen=True)
 class Coverage:
     """Observed vs unobserved counts, and the rate they justify."""
@@ -105,6 +113,9 @@ class Coverage:
     #: Counted so an operator sees "3 malformed lines" rather than inferring a
     #: boolean from ``readable``. A store can be READABLE and still have some.
     malformed_n: int = 0
+    #: Non-user input the hook saw and skipped (see ``NOT_USER_TURN``). Not part
+    #: of ``total_n``; reported so the exclusion is visible, not silent.
+    not_user_n: int = 0
 
     @property
     def total_n(self) -> int:
@@ -174,8 +185,11 @@ def record_observed(tool: str) -> None:
 
 
 def record_unobserved(reason: Reason) -> None:
-    """Record that a prompt exited WITHOUT producing a routing directive."""
-    _record("u", reason.name)
+    """Record that a prompt exited WITHOUT producing a routing directive.
+
+    Non-user input (``NOT_USER_TURN``) is written as its own kind so it never
+    enters the denominator."""
+    _record("n" if reason in NOT_USER_TURN else "u", reason.name)
 
 
 def clear() -> None:
@@ -216,6 +230,7 @@ def snapshot() -> Coverage:
     unobserved = 0
     by_reason: dict[str, int] = {}
     malformed = 0
+    not_user = 0
     lines: list[str] = []
     try:
         with path.open("r", encoding="utf-8") as fh:
@@ -249,6 +264,8 @@ def snapshot() -> Coverage:
             unobserved += 1
             name = str(event.get("d", "")) or "UNKNOWN"
             by_reason[name] = by_reason.get(name, 0) + 1
+        elif event.get("k") == "n":
+            not_user += 1
         else:
             malformed += 1
 
@@ -265,5 +282,6 @@ def snapshot() -> Coverage:
         unobserved_n=unobserved,
         by_reason=by_reason,
         malformed_n=malformed,
+        not_user_n=not_user,
     )
     return _cached_snapshot
