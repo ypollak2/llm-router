@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 from llm_router.local_agent import LocalAgentConfig
-from llm_router.local_agent import capability, compact
+from llm_router.local_agent import capability, compact, constrain
 
 EMBED_CACHE_NAME = "local_agent_tool_embeddings.json"
 
@@ -58,7 +58,8 @@ def _lazy_embedder(http, ollama_url: Callable[[], str], model: str) -> compact.E
 def generator_for(backend) -> capability.GenerateFn:
     """A plain-text completion on the step's own backend: its
     ``generate_text`` if it has one (tests), else Ollama ``/api/chat`` with the
-    backend's model, URL, context size and keep-alive, thinking off."""
+    backend's model, URL, context size and keep-alive, thinking off, reply
+    constrained to the edit-pairs JSON schema (``constrain.py``)."""
     if hasattr(backend, "generate_text"):
         return backend.generate_text
 
@@ -70,9 +71,17 @@ def generator_for(backend) -> capability.GenerateFn:
             payload["keep_alive"] = backend.keep_alive
         t0 = time.monotonic()
         try:
+            # Constrain the reply to the edit-pairs schema (constrain.py); an
+            # older server that refuses a schema ``format`` gets the request
+            # again, unconstrained, exactly as it was sent before.
             r = await asyncio.wait_for(
-                backend.client.post(backend.base_url + "/api/chat", json=payload, timeout=timeout_s),
+                backend.client.post(backend.base_url + "/api/chat",
+                                    json=constrain.with_edit_format(payload), timeout=timeout_s),
                 timeout=timeout_s)
+            if constrain.is_format_rejection(r.status_code):
+                r = await asyncio.wait_for(
+                    backend.client.post(backend.base_url + "/api/chat", json=payload, timeout=timeout_s),
+                    timeout=max(0.001, timeout_s - (time.monotonic() - t0)))
             r.raise_for_status()
             data = r.json()
         except Exception:  # noqa: BLE001 - an empty attempt is fed back / counted as a rejection

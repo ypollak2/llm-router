@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Local edits: the edit protocol's direct Ollama calls (the zero-Claude edit
+  hook and the proxy's local-agent edit step) now send a JSON Schema as
+  Ollama's `format` (`llm_router.local_agent.constrain`), so the reply is a
+  parseable `[{file, old_string, new_string}]` array by construction. The
+  existing validator (exact-once match, syntax gate, 3 attempts) is unchanged
+  and still runs. Motivation: the one failure in the 20 edit fixtures
+  (`routing-golden-v1`, run `20260928T103518Z-postdeploy-e893c8d`, case c007)
+  never produced a parseable edit array; no new pass rate is claimed. A
+  server that refuses a schema `format` with HTTP 400 (Ollama < 0.5) is asked
+  again without it. The routed `llm_edit` MCP tool (any provider) is unchanged.
 - Proxy: `llm-router install --proxy-default` makes the per-call proxy the
   DEFAULT `ANTHROPIC_BASE_URL` for every Claude Code session on the machine
   (`llm_router.proxy_default`, `llm_router.commands.proxy_default`),

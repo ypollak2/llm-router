@@ -282,9 +282,14 @@ def _local_num_ctx(model: str | None = None) -> int | None:
 def call_ollama(
     prompt: str, model: str, timeout: int = 4,
     history: list[dict] | None = None, system_prompt: str | None = None,
+    format: dict | None = None,
 ) -> str | None:
-    """Call Ollama's /api/chat endpoint. Returns response text or None."""
-    body = json.dumps({
+    """Call Ollama's /api/chat endpoint. Returns response text or None.
+
+    ``format``: an optional JSON Schema sent as Ollama's ``format`` (structured
+    output). A server that refuses it with HTTP 400 (Ollama < 0.5 takes only
+    ``"json"``) is asked again without it, so the call works as before."""
+    payload = {
         "model": model,
         "messages": _chat_messages(prompt, history, system_prompt),
         "stream": True,
@@ -292,7 +297,10 @@ def call_ollama(
         "options": {"temperature": 0.3, "num_predict": _num_predict_for(timeout),
                     # I2: the same window as the agent loop (no reload thrash).
                     **({"num_ctx": _local_num_ctx(model)} if _local_num_ctx(model) else {})},
-    }).encode()
+    }
+    if format is not None:
+        payload["format"] = format
+    body = json.dumps(payload).encode()
     ollama_url = _get_ollama_url()
     req = urllib.request.Request(
         f"{ollama_url}/api/chat",
@@ -334,6 +342,8 @@ def call_ollama(
                     truncated = True
                     break
     except Exception as exc:                                 # noqa: BLE001
+        if format is not None and not parts and getattr(exc, "code", None) == 400:
+            return call_ollama(prompt, model, timeout, history=history, system_prompt=system_prompt)
         if not parts:
             _call_failure("ollama", model, _failure_reason(exc, timeout))
             return None, {}

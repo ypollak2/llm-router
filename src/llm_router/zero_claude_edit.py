@@ -465,6 +465,7 @@ def generate_edits(
     """
     from llm_router.edit import apply_edits, build_edit_prompt, parse_edit_response
     from llm_router.hooks.direct_executor import call_ollama
+    from llm_router.local_agent.constrain import EDIT_PAIRS_SCHEMA
 
     history: list[str] = []
     last_instructions: list = []
@@ -479,6 +480,7 @@ def generate_edits(
         prompt = build_edit_prompt(task, file_contents, feedback=feedback)
         response, _usage = call_ollama(
             prompt, model, int(round(call_timeout)), system_prompt=_EDIT_SYSTEM_PROMPT,
+            format=EDIT_PAIRS_SCHEMA,
         )
         if not response:
             history.append(f"attempt {attempt}: model returned no response")
