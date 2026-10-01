@@ -148,7 +148,19 @@ def test_the_broader_inheritance_count_is_recorded():
     # 55 -> 57 (Phase 0.2d): llm_router/edit_survival.py's two hardcoded
     # `git rev-parse` / `git log` calls moved in from scripts/northstar/;
     # neither runs caller-supplied argv. Same headroom as before the move.
-    assert len(inheriting) <= 57, (
+    # 57 -> 58 (session-start non-blocking usage refresh): one new site,
+    # `_spawn_background_usage_refresh()` in llm_router/hooks/session-start.py,
+    # Popen-ing `[sys.executable, __file__, "--background-usage-refresh"]`
+    # with no `env=`. Not caller- or model-supplied argv — it is a fixed
+    # re-invocation of this same hook script — so it does not belong in
+    # MODEL_ARGV_SITES. Deliberately left inheriting: the detached child
+    # re-derives its own state directory (LLM_ROUTER_HOME) and needs HOME +
+    # PATH to reach the macOS Keychain and do the OAuth usage fetch that used
+    # to run inline; narrowing its env to the MODEL_ARGV_SITES allowlist
+    # would risk breaking the keychain read, not reduce credential exposure
+    # (it inherits the operator's own already-trusted environment, not a
+    # model-chosen command's).
+    assert len(inheriting) <= 58, (
         f"{len(inheriting)} subprocess sites inherit the environment, up from "
         "51. If a new one runs caller-supplied argv, add it to "
         "MODEL_ARGV_SITES; if not, raise this number deliberately."
