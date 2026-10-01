@@ -821,11 +821,20 @@ def _read_cached_usage() -> dict | None:
 
 def _usage_json_age_sec(cached: dict | None) -> float | None:
     """Age in seconds of ``cached``'s ``updated_at``, or None when ``cached``
-    is None or carries no usable timestamp."""
+    is None or carries no usable timestamp.
+
+    A missing/null ``updated_at`` is unknown, not zero: coercing it to 0 would
+    make an absent timestamp compare as "infinitely old" (``time.time() - 0``)
+    rather than "no reading yet", so a missing key is read as None explicitly
+    before any numeric comparison.
+    """
     if not cached:
         return None
+    raw = cached.get("updated_at")
+    if raw is None:
+        return None
     try:
-        updated_at = float(cached.get("updated_at", 0) or 0)
+        updated_at = float(raw)
     except (TypeError, ValueError):
         return None
     if updated_at <= 0:
@@ -892,8 +901,15 @@ def _claim_usage_refresh_spawn(cooldown_s: float) -> bool:
 def _release_usage_refresh_claim() -> None:
     try:
         os.unlink(_usage_refresh_spawn_file())
-    except OSError:
-        pass
+    except OSError as _exc:
+        # T-14: still fail-open (a stuck marker just means the next session
+        # start waits out the cooldown instead of retrying immediately), but
+        # no longer silent about it.
+        try:
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-SESSION-START-USAGE-CLAIM-RELEASE", _exc)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _background_usage_refresh_argv() -> list[str]:
