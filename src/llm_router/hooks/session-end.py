@@ -674,6 +674,10 @@ def _format_cc_section(start: dict | None, current: dict, is_live: bool) -> list
     w_end = current.get("weekly_pct",  0.0)
     n_end = current.get("sonnet_pct",  0.0)
 
+    # A fallback baseline is a 50% placeholder, not a reading: a delta
+    # against it would be invented, so show end values with no delta.
+    if start and start.get("is_fallback"):
+        start = None
     s_start = start.get("session_pct") if start else None
     w_start = start.get("weekly_pct")  if start else None
     n_start = start.get("sonnet_pct")  if start else None

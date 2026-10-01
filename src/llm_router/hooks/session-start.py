@@ -857,9 +857,23 @@ def _claim_usage_refresh_spawn(cooldown_s: float) -> bool:
     """
     path = _usage_refresh_spawn_file()
     try:
-        from pathlib import Path
-
         from llm_router.file_lock import exclusive_lock
+    except Exception:
+        # Without the lock helper, fall back to the plain cooldown check. An
+        # import failure is permanent on that install, so failing closed here
+        # would switch the background refresh off for good.
+        try:
+            age = _usage_refresh_marker_age()
+            if age is not None and age < cooldown_s:
+                return False
+            os.makedirs(_state_dir(), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(str(time.time()))
+            return True
+        except Exception:
+            return False
+    try:
+        from pathlib import Path
 
         os.makedirs(_state_dir(), exist_ok=True)
         with exclusive_lock(Path(path + ".lock"), timeout=0.0) as locked:

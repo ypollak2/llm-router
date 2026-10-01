@@ -530,3 +530,29 @@ def test_background_entrypoint_runs_the_existing_refresh(hook, monkeypatch):
     hook._run_background_usage_refresh_entrypoint()
 
     assert calls == [1]
+
+
+def test_claim_falls_back_to_cooldown_when_lock_helper_cannot_import(hook, monkeypatch):
+    """An import failure is permanent on an install; it must not switch the
+    background refresh off for good."""
+    monkeypatch.setitem(sys.modules, "llm_router.file_lock", None)
+    assert hook._claim_usage_refresh_spawn(60.0) is True
+    assert hook._claim_usage_refresh_spawn(60.0) is False  # within cooldown
+
+
+def _load_session_end():
+    path = HOOK_PATH.parent / "session-end.py"
+    spec = importlib.util.spec_from_file_location("session_end_hook_cc_delta", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_session_end_shows_no_delta_against_a_fallback_baseline():
+    end = _load_session_end()
+    current = {"session_pct": 20.0, "weekly_pct": 40.0, "sonnet_pct": 0.0}
+    fallback = {"session_pct": 50.0, "weekly_pct": 50.0, "sonnet_pct": 0.0, "is_fallback": True}
+    text = "\n".join(end._format_cc_section(fallback, current, is_live=True))
+    assert "pp" not in text and "no change" not in text
+    real = {"session_pct": 10.0, "weekly_pct": 40.0, "sonnet_pct": 0.0}
+    assert "+10.0pp" in "\n".join(end._format_cc_section(real, current, is_live=True))
