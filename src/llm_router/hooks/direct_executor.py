@@ -342,8 +342,11 @@ def call_ollama(
                     truncated = True
                     break
     except Exception as exc:                                 # noqa: BLE001
-        if format is not None and not parts and getattr(exc, "code", None) == 400:
-            return call_ollama(prompt, model, timeout, history=history, system_prompt=system_prompt)
+        from llm_router.local_agent.constrain import is_format_rejection
+        if format is not None and not parts and is_format_rejection(getattr(exc, "code", None)):
+            # The retry gets what is left of this call's budget, not a fresh one.
+            remaining = max(1, int(deadline - time.monotonic()))
+            return call_ollama(prompt, model, remaining, history=history, system_prompt=system_prompt)
         if not parts:
             _call_failure("ollama", model, _failure_reason(exc, timeout))
             return None, {}
