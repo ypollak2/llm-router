@@ -173,7 +173,7 @@ def seeds_from(query: str) -> tuple[list[str], list[str]]:
 #     and `commit_message` are all the string value of some constant here, and
 #     are also ordinary words in generic questions ("how do you name an
 #     unregistered_parent row in a ledger schema"). With any-underscore
-#     eligibility 81 of 83 generic prompts built around this repo's lowercase
+#     eligibility 81 of 85 generic prompts built around this repo's lowercase
 #     constant values got a repository constant attached. UPPER_CASE with
 #     >=2 underscores is how a flag or marker is written on purpose
 #     (FROZEN_IN_GROUND_TRUTH, LLM_ROUTER_GROUND_TRUTH) and added 0 of those 83.
