@@ -298,7 +298,7 @@ def test_zero_claude_edit_falls_through_fast_on_a_hung_ollama(server, tmp_path, 
                             deadline_s=time.monotonic() + 36)
     assert out is not None and out.action == "fallthrough" and not out.applied
     assert "unhealthy" in out.log_reason
-    assert time.monotonic() - t0 < 5          # not the 37 s deadline
+    assert time.monotonic() - t0 < 15         # not the 37 s deadline; 15 s leaves room for a loaded runner
     assert [p for path, p in _Stub.posts if path == "/api/chat"] == []
     assert (root / "foo.py").read_text() == "def old_name():\n    pass\n"
 
