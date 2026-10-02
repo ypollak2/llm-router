@@ -693,6 +693,31 @@ def _keywords_for_retrieval(prompt: str) -> list[str]:
     return list(dict.fromkeys(codeish + prose))[:40]
 
 
+def _path_name_tokens(title: str) -> set[str]:
+    """A path-shaped title's lowercased BASENAME only ("okf.py"), never its stem.
+
+    ``_tokens()`` keeps a dotted/slashed form WHOLE (that is the point of it —
+    see its docstring), so ``_tokens("src/llm_router/okf.py")`` contains the
+    full relative path as one token, never the bare filename a human actually
+    types. Asking about a file by name ("explain okf.py") could never anchor a
+    doc whose title is more than one directory deep (okf_context_diagnosis.md
+    §3, root cause #3).
+
+    Only the basename WITH its extension is returned. The bare stem ("okf",
+    "api", "test", "base") is deliberately not: a stem is a common English or
+    technology word in almost any codebase, and promoting it to an anchor made
+    generic prompts ("best API for weather data", "BASE image for docker")
+    retrieve this repo's own api.py / base.py (independent review of PR #233,
+    reproduced on the real 1637-doc index). A token carrying a real source
+    extension is an explicit filename; a stem is not. Returns the empty set for
+    a title that is not path-shaped at all.
+    """
+    if "/" not in title and "\\" not in title:
+        return set()
+    base = title.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return {base} if base else set()
+
+
 def find_relevant(
     prompt: str,
     limit: int = 3,
@@ -788,10 +813,18 @@ def _seen_this_session(label: str) -> bool:
 
 
 def _anchor_tokens(concept: OKFConcept) -> set[str]:
-    """The names a prompt can NAME this doc by: its symbols and its path tokens."""
+    """The names a prompt can NAME this doc by: its symbols and its path tokens.
+
+    Includes the basename (with extension, never the bare stem) of a path-shaped
+    title (``_path_name_tokens``) in addition to ``_tokens(concept.title)``'s
+    whole-path token, so a prompt that writes an explicit filename the way a
+    human does ("okf.py") can anchor a doc titled with a longer relative path
+    ("src/llm_router/okf.py").
+    """
     out = {str(s).lower() for s in (concept.extra.get("key_symbols") or [])}
     out |= _tokens(concept.title)
     out |= _tokens(" ".join(concept.tags))
+    out |= _path_name_tokens(concept.title)
     return out
 
 

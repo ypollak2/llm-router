@@ -22,8 +22,20 @@ Outcomes per call:
 Usage (from a worktree, with Ollama up and nothing else using it):
 
     ollama ps                       # must be empty or only your model
-    uv run python scripts/measure_zce_warm.py --n 5 --states cold,legacy-warm,warm \\
-        --out /tmp/zce_measure.jsonl
+    uv run --no-project --with pytest --with-editable . python scripts/measure_zce_warm.py \\
+        --n 5 --states cold,legacy-warm,warm --out /tmp/zce_measure.jsonl
+
+The "served" count for each state is only as good as `fixture_test_passes`,
+which runs the fixture's own test with `sys.executable -m pytest`. That
+interpreter must have pytest importable, or every served edit silently comes
+back as `fixture_test_passes: false` -- a real "the fix broke the test"
+report indistinguishable from "pytest itself could not run". This script
+checks that up front and refuses to start otherwise (see
+`_require_pytest_or_die`); plain `uv run python scripts/measure_zce_warm.py`
+fails this check when it resolves to a tool env with no dev dependencies
+(e.g. ~/.local/share/uv/tools/llm-routing/bin/python) -- use the
+`--no-project --with pytest --with-editable .` form above, or any interpreter
+that already has pytest installed.
 
 Fixtures are read from --fixtures (default: the routing-experiment-2026-10-01
 fixtures) and COPIED; the originals are never modified. State goes to a
@@ -90,6 +102,70 @@ def _init_repo(path: Path) -> None:
         subprocess.run(cmd, cwd=path, check=True, capture_output=True, env=env)
 
 
+def _pytest_available(python: str, timeout: float = 15.0) -> bool:
+    """True iff `python -m pytest` can actually start.
+
+    This is the exact interpreter + invocation the per-fixture test run below
+    uses (`[python, "-m", "pytest", ...]`), so this check and that call either
+    both work or both fail for the same reason -- there is no second place
+    for "pytest is importable" to mean something different.
+    """
+    try:
+        r = subprocess.run([python, "-m", "pytest", "--version"],
+                           capture_output=True, text=True, timeout=timeout)
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _require_pytest_or_die(python: str) -> None:
+    """Fail loudly, before any Ollama/fixture work, if `python` cannot run
+    pytest -- rather than letting every served edit downstream silently come
+    back `fixture_test_passes: false` (the false 0/11 this function exists to
+    prevent: the uv tool env `~/.local/share/uv/tools/llm-routing/bin/python`
+    has no pytest, so every fixture test "failed" for a reason that had
+    nothing to do with the edit)."""
+    if _pytest_available(python):
+        return
+    print(
+        f"ERROR: pytest is not importable from {python}\n"
+        "Every fixture test below would silently report "
+        "fixture_test_passes=false for a reason that has nothing to do with "
+        "the edit being measured -- refusing to run.\n\n"
+        "Fix: run this script with an interpreter that has pytest, e.g.:\n\n"
+        "    uv run --no-project --with pytest --with-editable . python "
+        "scripts/measure_zce_warm.py ...\n",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+
+_NO_PYTEST_SIGNATURE = ("no module named pytest", "no module named 'pytest'")
+
+
+def _run_fixture_test(python: str, test_path, cwd) -> tuple[bool | None, str]:
+    """Run one fixture's test and report whether it passed -- or `None` (never
+    `False`) when it could not be run at all, with the reason.
+
+    `_require_pytest_or_die` catches the common case (the interpreter has no
+    pytest) before any of this runs. This still never collapses "could not
+    run" into "failed": a timeout, a missing binary, or -- belt and braces --
+    the same "no module named pytest" signature slipping through some other
+    way, all come back as (None, reason), not (False, "").
+    """
+    try:
+        r = subprocess.run([python, "-m", "pytest", "-q", "-x", str(test_path)],
+                           cwd=cwd, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        return None, "pytest run timed out after 60s"
+    except OSError as e:
+        return None, f"could not start {python} -m pytest: {e}"
+    combined = (r.stdout + r.stderr).lower()
+    if r.returncode != 0 and any(sig in combined for sig in _NO_PYTEST_SIGNATURE):
+        return None, f"pytest could not run ({python} has no pytest): {(r.stdout + r.stderr)[-200:]}"
+    return r.returncode == 0, ""
+
+
 def _classify(outcome, elapsed: float) -> tuple[str, str]:
     if outcome is None:
         return "other", "maybe_replace returned None (scope not enabled?)"
@@ -112,6 +188,8 @@ def main() -> int:
     ap.add_argument("--budget", type=float, default=HOOK_BUDGET_S)
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
+
+    _require_pytest_or_die(sys.executable)
 
     manifest = json.loads((args.fixtures / "manifest.json").read_text())
     work = Path(tempfile.mkdtemp(prefix="zce-measure-"))
@@ -145,12 +223,12 @@ def main() -> int:
             elapsed = time.monotonic() - t0
             label, reason = _classify(outcome, elapsed)
             test_ok = None
+            test_reason = ""
             if label == "served":
-                r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-x", entry["test"]],
-                                   cwd=repo, capture_output=True, text=True, timeout=60)
-                test_ok = r.returncode == 0
+                test_ok, test_reason = _run_fixture_test(sys.executable, entry["test"], repo)
             row = {"state": state, "idx": entry["idx"], "name": entry["name"], "outcome": label,
-                   "elapsed_s": round(elapsed, 2), "fixture_test_passes": test_ok, "reason": reason[:200]}
+                   "elapsed_s": round(elapsed, 2), "fixture_test_passes": test_ok,
+                   "reason": (test_reason or reason)[:200]}
             rows.append(row)
             print(json.dumps(row), flush=True)
     args.out.write_text("".join(json.dumps(r) + "\n" for r in rows))

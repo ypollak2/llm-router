@@ -1879,6 +1879,62 @@ def score_categories(text: str) -> dict[str, int]:
     return scores
 
 
+# ── Conversational vs executable "coordination" prompts ─────────────────────
+#
+# The heuristic "coordination" bucket (score_categories, no trailing "e") is
+# meant for EXECUTABLE git/deploy/command asks and stays enforced for those
+# (test_enf_coordination_bash_names_llm_act.py). But its topic layer carries
+# weak words (`test(s)`, `build`, `setup`, `version`, ...) and its format layer
+# carries `now`/`just`/`done`, so a conversational planning prompt scores it with
+# no command in it at all: "If the OKF works now, we need to rerun the tests to
+# understand how many prompts are routed ..." scores coordination=3 from
+# `tests` + `now` alone and was held on Bash (live, 2026-10-02).
+#
+# The narrowest signal that separates the two, reusing the bucket's own intent
+# layer. Precedence (first match wins):
+#   1. a backticked span, or a polite request for an intent verb ("can you push
+#      this") -> executable;
+#   2. a pure question (trailing "?") -> conversational ("should we push now?");
+#   3. any executable signal -- an intent-layer verb (git/deploy: push, deploy,
+#      release, commit, merge, ...) or a shell-tool invocation (`git x`, `pytest x`)
+#      -> executable, even behind a plan opener: "we need to deploy this now",
+#      "we have to run git push now" are still asks to run something, and must keep
+#      the llm_act delegate redirect;
+#   4. otherwise -> conversational. This covers both a plan opener ("we need to
+#      ...", "plan ...") and the case where the bucket scored from topic/format
+#      words alone, e.g. the live 2026-10-02 prompt ("... rerun the tests to
+#      understand ..."): `rerun`/`run` are NOT in the intent layer (the bucket
+#      removed them as false-positive prone), and "run" only counts here when it
+#      carries a shell-tool target ("run git push", "pytest -q"), so it stays
+#      conversational without reopening the gap.
+# Plan openers therefore need no pattern of their own: after step 3 they and the
+# topic-only fallback give the same answer. The classification itself is NOT
+# changed (task_type stays "coordination"), only whether the hook issues a
+# directive / pending hold.
+_COORD_BACKTICK_RE = re.compile(r"`[^`\n]+`")
+_COORD_SHELL_TOOL_RE = re.compile(
+    r"\b(?:git|gh|npm|npx|pnpm|yarn|pip3?|uv|pytest|docker|kubectl|cargo|ruff)\s+[\w.\-/]+",
+    re.IGNORECASE,
+)
+_COORD_POLITE_IMPERATIVE_RE = re.compile(
+    r"^\W*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:go ahead and\s+)?"
+    r"(?:push|pull|deploy|release|publish|commit|merge|sync|fetch|rebase)\b",
+    re.IGNORECASE,
+)
+_COORD_PURE_QUESTION_RE = re.compile(r"\?\s*$")
+
+
+def _is_conversational_coordination(prompt: str) -> bool:
+    """True when a "coordination"-bucket prompt names no concrete command to run."""
+    text = prompt.strip()
+    if _COORD_BACKTICK_RE.search(text) or _COORD_POLITE_IMPERATIVE_RE.match(text):
+        return False
+    if _COORD_PURE_QUESTION_RE.search(text):
+        return True
+    return not (SIGNALS["coordination"]["intent"].search(text)
+                or _COORD_SHELL_TOOL_RE.search(text))
+
+
 # ── LLM Classifiers ─────────────────────────────────────────────────────────
 
 CLASSIFY_PROMPT = (
@@ -4484,9 +4540,39 @@ def main() -> None:
     # no draft. Routing + coverage telemetry still run, and zero_claude_edit (it
     # runs earlier, on edit-shaped prompts) is untouched. Code/edit tasks keep
     # their mode semantics. LLM_ROUTER_QA_ROUTING=on restores the old behaviour.
-    _qa_quiet = _qa_task and os.environ.get(
-        "LLM_ROUTER_QA_ROUTING", "off").strip().lower() not in ("1", "on", "true", "yes")
-    if _qa_quiet or _resolved_enforce in ("off", "shadow", "observe"):
+    #
+    # Owner decision 2026-10-02 extends the same treatment to the two purely
+    # conversational TaskType values TaskType.COORDINATE ("coordinate") and
+    # TaskType.INTROSPECT ("introspect") — auto-route.py's own
+    # `_is_coordination_task` / `_is_introspection_task` fast paths, both
+    # advisory/local-state-only by design (types.py: "direct execution must
+    # never fire for task_type == coordinate"). enforce-route.py already
+    # exits unconditionally the moment pending.task_type is "coordinate" or
+    # "introspect" (no tool is ever actually held for either), so a HARD
+    # ENFORCEMENT banner claiming tools are held for them is the identical
+    # banner-honesty defect PR #228 fixed for Q&A — fixed here the same way.
+    #
+    # NOT the same as the separate, older "coordination" (no trailing "e")
+    # heuristic bucket scored by score_categories/VALID_CATEGORIES: that
+    # bucket stays enforced on purpose for executable asks (a conversational
+    # coordination prompt is quieted separately, just below) — a held-out real-traffic sample
+    # (n=251, 2026-09-28) showed it is dominated by executable git/deploy
+    # commands with an ambiguous target ("merge the PRs in that order"),
+    # which correctly redirect to llm_act (test_enf_coordination_bash_names_
+    # llm_act.py). Quieting that bucket too would silently defeat that
+    # redirect, so it is deliberately left out of this extension.
+    _conversational_task = task_type in ("coordinate", "introspect")
+    # Owner follow-up 2026-10-02: the older "coordination" bucket is still
+    # enforced for EXECUTABLE asks, but a conversational one (planning, status,
+    # "rerun X to understand Y" — no concrete command) is answered directly too.
+    # See _is_conversational_coordination for the signal and why it is the narrowest.
+    if task_type == "coordination" and _is_conversational_coordination(prompt):
+        _conversational_task = True
+    _qa_routing_on = os.environ.get(
+        "LLM_ROUTER_QA_ROUTING", "off").strip().lower() in ("1", "on", "true", "yes")
+    _qa_quiet = _qa_task and not _qa_routing_on
+    _conversational_quiet = _conversational_task and not _qa_routing_on
+    if _qa_quiet or _conversational_quiet or _resolved_enforce in ("off", "shadow", "observe"):
         _enforce_mode = "shadow"
     elif _resolved_enforce in ("advise", "advisory"):
         # Route everywhere, but NEVER block and NEVER nag. Distinct from "suggest":
@@ -5256,6 +5342,15 @@ def main() -> None:
                 f"Q&A is answered directly; no routing directive."
             )
             indicator = f"👁 {task_type}/{complexity} — answered directly"
+        elif _conversational_quiet:
+            # Same honesty fix, for coordinate/introspect: names no tool and
+            # no model, since enforce-route.py will never hold one for them.
+            directive = (
+                f"👁 OBSERVATION [conversational-direct]: {task_type}/{complexity} — "
+                f"coordination/introspection prompts are answered directly; "
+                f"no routing directive."
+            )
+            indicator = f"👁 {task_type}/{complexity} — answered directly"
         else:
             directive = (
                 f"👁 OBSERVATION [{_enforce_mode}]: ✨ {task_type}/{complexity} ✨ "
@@ -5341,7 +5436,7 @@ def main() -> None:
     # blind draft was already suppressed (see DIRECT SKIP above). Tell the caller
     # WHY and what to do instead: answer from real context, or route WITH context
     # via llm_query(context=…) — never relay a context-free draft as an answer.
-    if not zero_claude and not _qa_quiet and _is_context_dependent(prompt):
+    if not zero_claude and not _qa_quiet and not _conversational_quiet and _is_context_dependent(prompt):
         # ENF-FIX-2 (GAP-ENF-2): a context-dependent prompt that ALSO needs local
         # execution / repo ops can't be completed by a text-only door even WITH
         # context — so name the PROVISIONED tool-capable door (llm_act with

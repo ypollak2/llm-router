@@ -144,6 +144,7 @@ async def run_gemini_cli(
     working_dir: str | None = None,
     timeout: int | None = None,
     on_event: "Callable[[str, str], Awaitable[None]] | None" = None,
+    context_root: str | None = None,
 ) -> GeminiCLIResult:
     """Run a task through the Gemini CLI agent as a subprocess.
 
@@ -167,9 +168,16 @@ async def run_gemini_cli(
         prompt: The task or question to send to Gemini.
         model: Which Google model to use (default: ``"gemini-2.5-flash"``).
         working_dir: Working directory for the Gemini process.  Defaults
-            to the current working directory.
+            to the current working directory. This is also the subprocess
+            cwd, so callers that only want OKF context scoped to a project
+            (without moving where the Gemini subprocess actually runs)
+            should use ``context_root`` instead.
         timeout: Maximum seconds to wait before killing the process.
             Defaults to ``LLM_ROUTER_GEMINI_TIMEOUT`` env var (300s).
+        context_root: Project root to scope OKF context injection to,
+            independent of ``working_dir``/subprocess cwd. Defaults to
+            ``working_dir`` when not given, which is the pre-existing
+            behaviour.
 
     Returns:
         A ``GeminiCLIResult`` with the process output, model name, exit code,
@@ -180,7 +188,7 @@ async def run_gemini_cli(
 
     try:
         from llm_router.context_injection import inject
-        prompt = inject(prompt, root=working_dir)
+        prompt = inject(prompt, root=context_root if context_root is not None else working_dir)
     except Exception:                                        # noqa: BLE001
         pass
 

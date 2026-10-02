@@ -138,6 +138,7 @@ async def run_claude(
     working_dir: str | None = None,
     timeout: int | None = None,
     on_event: "Callable[[str, str], Awaitable[None]] | None" = None,
+    context_root: str | None = None,
 ) -> ClaudeResult:
     """Run a one-shot prompt through the `claude` CLI as a subprocess.
 
@@ -145,12 +146,17 @@ async def run_claude(
     ``asyncio.create_subprocess_exec`` (no shell — prompt is injection-safe). The
     environment is scrubbed of API keys/tokens; the CLI uses the subscription's
     own credentials. Never raises — all errors are captured in the result.
+
+    ``working_dir`` doubles as the subprocess cwd. ``context_root`` scopes OKF
+    context injection independently of it (defaulting to ``working_dir`` when
+    not given) — for a caller that knows the session's project scope but must
+    not move where the ``claude`` subprocess actually runs.
     """
     from llm_router.safe_subprocess import get_safe_env
 
     try:
         from llm_router.context_injection import inject
-        prompt = inject(prompt, root=working_dir)
+        prompt = inject(prompt, root=context_root if context_root is not None else working_dir)
     except Exception:                                        # noqa: BLE001
         pass
 
