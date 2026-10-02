@@ -29,6 +29,7 @@ EXECUTION_PATHS = [
     "claude_agent.py",
     "gemini_cli_agent.py",
     "tools/local_task.py",
+    "proxy/okf_context.py",
 ]
 
 
