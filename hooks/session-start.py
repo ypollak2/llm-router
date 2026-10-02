@@ -206,6 +206,39 @@ BANNER_LOCAL = """
 ╚════════════════════════════════════════════════════════════════╝
 """.strip()
 
+# Owner decision 2026-10-01: development Q&A is answered by Claude directly, never
+# routed to a local model (measured: local Q&A acceptable 3-17% vs 60-100% for
+# Sonnet). The default banner therefore teaches the model that, instead of the
+# simple/moderate/research -> llm_* table the routing banners above carry. Those
+# stay reachable behind LLM_ROUTER_QA_ROUTING=on (same switch as the hooks).
+_QUIET_BANNER_BODY = (
+    "Questions and analysis are not routed; answer them directly.",
+    "Code tasks and local bounded edits keep their routing.",
+)
+_QUIET_BANNER_MODES = {
+    "subscription": "subscription mode",
+    "api": "API-key mode",
+    "local": "local mode",
+}
+
+
+def _qa_routing_on() -> bool:
+    """True when the owner has re-enabled Q&A routing (LLM_ROUTER_QA_ROUTING=on)."""
+    return os.environ.get("LLM_ROUTER_QA_ROUTING", "off").strip().lower() in (
+        "1", "on", "true", "yes",
+    )
+
+
+def _quiet_banner(mode: str) -> str:
+    width = 64
+    title = f"  \u26a1 llm_router ACTIVE \u2014 {_QUIET_BANNER_MODES[mode]}"
+    rows = ["\u2554" + "\u2550" * width + "\u2557", "\u2551" + title.ljust(width) + "\u2551",
+            "\u2560" + "\u2550" * width + "\u2563"]
+    rows += ["\u2551" + ("  " + line).ljust(width) + "\u2551" for line in _QUIET_BANNER_BODY]
+    rows.append("\u255a" + "\u2550" * width + "\u255d")
+    return "\n".join(rows)
+
+
 # RED2-8-03: the banner must reflect ACTUAL provider availability, not just the
 # subscription flag. Claiming "API-key routing in effect" and naming cloud
 # providers when zero keys are configured (the README's own Ollama-first
@@ -293,11 +326,13 @@ def _localize_banner(banner: str) -> str:
 
 
 def _resolve_banner(is_subscription: bool) -> str:
+    qa_routing = _qa_routing_on()
     if is_subscription or _CC_MODE:
-        return _localize_banner(BANNER_SUBSCRIPTION)
+        return _localize_banner(BANNER_SUBSCRIPTION) if qa_routing else _quiet_banner("subscription")
     if _any_cloud_key():
-        return _localize_banner(BANNER_API_KEYS)
-    return _localize_banner(BANNER_LOCAL)  # honest: no cloud keys configured
+        return _localize_banner(BANNER_API_KEYS) if qa_routing else _quiet_banner("api")
+    # honest: no cloud keys configured
+    return _localize_banner(BANNER_LOCAL) if qa_routing else _quiet_banner("local")
 
 
 BANNER = _resolve_banner(_CC_MODE)

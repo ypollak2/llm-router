@@ -2535,6 +2535,23 @@ def _consume_unresolved_pending(session_id: str) -> dict | None:
     return pending
 
 
+def _consume_stale_pending_before_exit(session_id: str) -> None:
+    """Drop a previous turn's pending-route state on a user-turn early exit.
+
+    The hold in enforce-route.py keys on this state. Turns that end in an early
+    ``sys.exit(0)`` before the normal consume (``claude:`` prefix, strict-ack
+    continuation, llm_router self-reference) would otherwise leave a code turn's
+    pending alive, and PreToolUse would hold tools on a turn that was never
+    routed. Fail-open: a state-file error must never block the prompt.
+    """
+    if not session_id:
+        return
+    try:
+        _consume_unresolved_pending(session_id)
+    except Exception as exc:  # noqa: BLE001
+        _debug_log(f"consume stale pending before early exit failed (fail-open): {exc}")
+
+
 def _last_route_path(session_id: str) -> Path:
     return _router_dir() / f"last_route_{_safe_sid(session_id)}.json"
 
@@ -4154,6 +4171,7 @@ def main() -> None:
         else:
             _debug_log(f"[INVOCATION {invocation_id:.3f}] SELF_REFERENCE_BYPASS — llm_router-debug prompt, skipping routing")
             _coverage_unobserved("SELF_REFERENCE_BYPASS")
+            _consume_stale_pending_before_exit(str(hook_input.get("session_id", "") or ""))
             sys.exit(0)
 
     session_id = hook_input.get("session_id", "")
@@ -4236,6 +4254,7 @@ def main() -> None:
     if zero_claude and _EXPLICIT_CLAUDE_PREFIX_RE.match(prompt):
         _debug_log(f"[INVOCATION {invocation_id:.3f}] ZERO_CLAUDE EXPLICIT_NATIVE")
         _coverage_unobserved("EXPLICIT_CLAUDE_PREFIX")
+        _consume_stale_pending_before_exit(session_id)
         sys.exit(0)
 
     # ── v6.0 Visibility: Initialize HUD session state ─────────────────────────
@@ -4313,6 +4332,7 @@ def main() -> None:
         else:
             _debug_log(f"[INVOCATION {invocation_id:.3f}] CONTINUATION: bypass to host agent (strict ack)")
             _coverage_unobserved("CONTINUATION_BYPASS")
+            _consume_stale_pending_before_exit(session_id)
             sys.exit(0)
 
     previous_unrouted = _consume_unresolved_pending(session_id) if session_id else None
@@ -4468,7 +4488,18 @@ def main() -> None:
     # analyze) but is soft for code — so its banner tone must match per task type,
     # never a blanket "you may answer directly" for a task the enforcer will block.
     _qa_task = task_type in ("query", "research", "generate", "analyze")
-    if _resolved_enforce in ("off", "shadow", "observe"):
+    # Owner decision 2026-10-01: development Q&A is answered by Claude directly.
+    # Measured on hook-routed prompts, local-model answers were acceptable 3-17%
+    # of the time vs 60-100% for Sonnet, and 0 of 1,217 drafts were used
+    # (~/.rsi/research/routing-experiment-2026-10-01). So a Q&A task is mapped to
+    # the passive "shadow" display in EVERY enforce mode: no route directive, no
+    # pending state (so enforce-route.py has nothing to hold a tool against) and
+    # no draft. Routing + coverage telemetry still run, and zero_claude_edit (it
+    # runs earlier, on edit-shaped prompts) is untouched. Code/edit tasks keep
+    # their mode semantics. LLM_ROUTER_QA_ROUTING=on restores the old behaviour.
+    _qa_quiet = _qa_task and os.environ.get(
+        "LLM_ROUTER_QA_ROUTING", "off").strip().lower() not in ("1", "on", "true", "yes")
+    if _qa_quiet or _resolved_enforce in ("off", "shadow", "observe"):
         _enforce_mode = "shadow"
     elif _resolved_enforce in ("advise", "advisory"):
         # Route everywhere, but NEVER block and NEVER nag. Distinct from "suggest":
@@ -5231,11 +5262,19 @@ def main() -> None:
 
     if _enforce_mode == "shadow":
         # Passive observation — no pending state, no blocking
-        directive = (
-            f"👁 OBSERVATION [{_enforce_mode}]: ✨ {task_type}/{complexity} ✨ "
-            f"would route to {tool_disp} → 🧠 {selected_model} [via {method}{stale_suffix}]"
-        )
-        indicator = f"👁 {task_type}/{complexity} ✨ {tool_disp} → 🧠 {selected_model}"
+        if _qa_quiet:
+            # Names no tool and no model: nothing here invites a route.
+            directive = (
+                f"👁 OBSERVATION [qa-direct]: {task_type}/{complexity} — "
+                f"Q&A is answered directly; no routing directive."
+            )
+            indicator = f"👁 {task_type}/{complexity} — answered directly"
+        else:
+            directive = (
+                f"👁 OBSERVATION [{_enforce_mode}]: ✨ {task_type}/{complexity} ✨ "
+                f"would route to {tool_disp} → 🧠 {selected_model} [via {method}{stale_suffix}]"
+            )
+            indicator = f"👁 {task_type}/{complexity} ✨ {tool_disp} → 🧠 {selected_model}"
         write_pending = False
     elif _enforce_mode == "advise":
         # Advise: a friendly suggestion that never blocks and never nags. No pending
@@ -5315,7 +5354,7 @@ def main() -> None:
     # blind draft was already suppressed (see DIRECT SKIP above). Tell the caller
     # WHY and what to do instead: answer from real context, or route WITH context
     # via llm_query(context=…) — never relay a context-free draft as an answer.
-    if not zero_claude and _is_context_dependent(prompt):
+    if not zero_claude and not _qa_quiet and _is_context_dependent(prompt):
         # ENF-FIX-2 (GAP-ENF-2): a context-dependent prompt that ALSO needs local
         # execution / repo ops can't be completed by a text-only door even WITH
         # context — so name the PROVISIONED tool-capable door (llm_act with

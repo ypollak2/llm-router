@@ -16,6 +16,10 @@ import sys
 from pathlib import Path
 
 from llm_router import routing_health
+import pytest
+
+# Exercises the Q&A routing machinery, which is off by default (LLM_ROUTER_QA_ROUTING).
+pytestmark = pytest.mark.usefixtures("qa_routing_on")
 
 ROOT = Path(__file__).resolve().parents[1]
 D = "2026-09-24"

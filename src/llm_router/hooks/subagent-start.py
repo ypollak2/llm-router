@@ -26,8 +26,20 @@ Skips:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
+
+
+def _qa_routing_on() -> bool:
+    """True when the owner has re-enabled Q&A routing (LLM_ROUTER_QA_ROUTING=on).
+
+    Same switch, same parsing as session-start.py and auto-route.py. Off by
+    default since 2026-10-01: questions and analysis are answered directly.
+    """
+    return os.environ.get("LLM_ROUTER_QA_ROUTING", "off").strip().lower() in (
+        "1", "on", "true", "yes",
+    )
 
 
 # ── Registered-tool surface (CHZ-SURF-01) ────────────────────────────────────
@@ -153,22 +165,32 @@ def main() -> None:
     p = _read_pressure()
     status = _pressure_status(p)
 
-    # Routing table summary — mirrors CLAUDE.md and auto-route logic.
-    if status in ("LOW", "MEDIUM"):
-        routing_rules = (
-            "simple→Haiku (/model claude-haiku-4-5-20251001) | "
-            "moderate→Sonnet (current) | "
-            "complex→Opus (/model claude-opus-4-6) | "
-            f"research→{route_tool('llm_research')} MCP tool"
+    if _qa_routing_on():
+        # Routing table summary — mirrors CLAUDE.md and auto-route logic.
+        if status in ("LOW", "MEDIUM"):
+            routing_rules = (
+                "simple→Haiku (/model claude-haiku-4-5-20251001) | "
+                "moderate→Sonnet (current) | "
+                "complex→Opus (/model claude-opus-4-6) | "
+                f"research→{route_tool('llm_research')} MCP tool"
+            )
+        else:
+            # HIGH / CRITICAL — subscription pressure exceeded, use external providers
+            routing_rules = (
+                f"simple→{route_tool('llm_query')} (external) | "
+                f"moderate→{route_tool('llm_analyze')} (external) | "
+                f"complex→{route_tool('llm_code')} (external) | "
+                f"research→{route_tool('llm_research')} (external)"
+            )
+        directive_note = (
+            "\nYour own Agent tool calls are intercepted by the routing hook — "
+            "respect routing directives."
         )
     else:
-        # HIGH / CRITICAL — subscription pressure exceeded, use external providers
-        routing_rules = (
-            f"simple→{route_tool('llm_query')} (external) | "
-            f"moderate→{route_tool('llm_analyze')} (external) | "
-            f"complex→{route_tool('llm_code')} (external) | "
-            f"research→{route_tool('llm_research')} (external)"
-        )
+        # Owner decision 2026-10-01: questions and analysis are not routed, at any
+        # pressure level, so the agent is not taught an llm() table it must not use.
+        routing_rules = "complex→Opus | questions and analysis: answer directly"
+        directive_note = ""
 
     stale_note = (
         f"\n⚠️  Usage data >30min old — routing thresholds may be inaccurate. "
@@ -178,8 +200,8 @@ def main() -> None:
         f"[llm_router] Routing context for this agent:\n"
         f"Pressure: session={p['session']:.0%} sonnet={p['sonnet']:.0%} "
         f"weekly={p['weekly']:.0%} | {status}\n"
-        f"Rules: {routing_rules}\n"
-        f"Your own Agent tool calls are intercepted by the routing hook — respect routing directives."
+        f"Rules: {routing_rules}"
+        f"{directive_note}"
         f"{stale_note}"
     )
 
