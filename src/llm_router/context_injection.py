@@ -91,9 +91,23 @@ def inject(prompt: str, *, root: str | None = None, limit: int = 3,
         from pathlib import Path
 
         from llm_router import okf
-        scope = okf.project_root(Path(root)) if root else None
-        concepts = (okf.find_relevant(prompt, limit=limit, root=scope)
-                    if scope is not None else okf.find_relevant(prompt, limit=limit))
+        from llm_router.semantic.scope import resolve_scope_or_none
+
+        # OKF-SCOPE-05 (okf_context_diagnosis.md §3, root cause #5). An explicit
+        # root always answers (a caller that named a project meant it). Without
+        # one, this used to fall through to `find_relevant(prompt, limit=limit)`
+        # with no root at all — which resolves scope via `okf.project_root()`,
+        # i.e. `resolve_scope()`, which ALWAYS answers and falls back to the cwd
+        # itself when no `.git` is found. For the MCP server that cwd is `$HOME`,
+        # a bucket shared by every project on the machine, not "no project" — so
+        # an unscoped call did not inject nothing, it injected whatever had been
+        # written to that shared bucket by an unrelated repo.
+        #
+        # `resolve_scope_or_none()` makes the same walk but answers None when
+        # nothing actually identifies a project, so a caller with no real scope
+        # gets NO documents instead of the wrong ones.
+        scope = okf.project_root(Path(root)) if root else resolve_scope_or_none()
+        concepts = okf.find_relevant(prompt, limit=limit, root=scope) if scope is not None else []
         if concepts:
             body = okf.inject_context(prompt, concepts)
     except Exception:                                        # noqa: BLE001
