@@ -1284,6 +1284,9 @@ def _try_codex_subagent_delegation(
     or ``None`` to fall through to the existing model-pinned-spawn / DIRECT /
     CLI-delegation chain, unchanged.
     """
+    # Documented carve-out (owner, 2026-10-02): unlike the local-model direct path and
+    # the routing note, which are now opt-in, Codex delegation stays ON by default
+    # (opt out with LLM_ROUTER_AGENT_ROUTE_CODEX=off); it is measured separately.
     if os.environ.get("LLM_ROUTER_AGENT_ROUTE_CODEX", "on").strip().lower() in (
         "0", "off", "false", "no"):
         return None  # feature fully disabled — no ledger row, nothing was attempted

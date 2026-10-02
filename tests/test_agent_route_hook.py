@@ -330,14 +330,45 @@ class TestSubagentDirectGating:
 
         On hook-routed dev prompts, local-model answers were acceptable only
         3-24% of the time vs 55-100% for Sonnet (two blind graders,
-        calibration passed). With the var left unset entirely (the real
-        default a fresh shell sees), the gate must still return None —
-        the real sub-agent spawns normally instead of being answered by a
-        routed cheap model.
+        calibration passed). With the var unset (the real default a fresh
+        shell sees) the gate must return before any provider chain is built
+        or called. Environment-independent: build_chain / execute_chain are
+        stubbed so a call WOULD succeed; the only thing stopping it is the
+        gate. (An unreachable Ollama used to make this pass vacuously.)
         """
+        import llm_router.hooks.chain_builder as cb
+        import llm_router.hooks.direct_executor as de
+
+        calls = []
+
+        def _build_chain(*a, **k):
+            calls.append("build_chain")
+            return ["fake-model"]
+
+        def _execute_chain(*a, **k):
+            calls.append("execute_chain")
+            return de.DirectResult(
+                text="a routed answer", model=de.ModelSpec("ollama", "fake"),
+                latency_ms=1, input_tokens=1, output_tokens=1,
+            )
+
+        monkeypatch.setattr(cb, "build_chain", _build_chain)
+        monkeypatch.setattr(cb, "get_current_pressure", lambda: ("green", 0.0))
+        monkeypatch.setattr(cb, "needs_claude_tools", lambda *a, **k: False)
+        monkeypatch.setattr(de, "execute_chain", _execute_chain)
+        monkeypatch.setattr(de, "execute_agent", _execute_chain)
         mod = _load_hook_module()
+
+        # Control: opted in, the same stubs DO produce a result — proves the
+        # stubs make a call succeed, so the default's None is the gate's doing.
+        monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")
+        assert mod._try_direct_subagent("implement foo", "code", "simple", "s1") == "a routed answer"
+        assert calls == ["build_chain", "execute_chain"]
+
+        calls.clear()
         monkeypatch.delenv("LLM_ROUTER_SUBAGENT_DIRECT", raising=False)
         assert mod._try_direct_subagent("implement foo", "code", "simple", "s1") is None
+        assert calls == []  # gate returned before any chain was built or called
 
     def test_on_restores_the_gate_check(self, monkeypatch):
         """LLM_ROUTER_SUBAGENT_DIRECT=on re-opens the gate (still subject to the
@@ -1094,17 +1125,34 @@ class TestDefaultAgentCallPassesThroughCleanly:
     """
 
     def _run_main_in_process(self, mod, monkeypatch, tmp_path, prompt, extra_env=None):
+        """Run main() with the REAL default env for every routing switch.
+
+        Only HOME/LLM_ROUTER_HOME are redirected (so ledgers land in tmp_path)
+        and the Codex CLI subprocess is stubbed — never a real Codex call.
+        Returns the list of prompts the stub Codex received.
+        """
         (tmp_path / ".llm-router").mkdir(parents=True, exist_ok=True)
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
         monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
-        # Keep Codex/CLI delegation out of the way so this exercises the
-        # _allow_routed_spawn() model-pin branch deterministically — those
-        # are separate, already-covered mechanisms.
-        monkeypatch.setenv("LLM_ROUTER_AGENT_ROUTE_CODEX", "off")
-        monkeypatch.setenv("LLM_ROUTER_SUBAGENT_CLI_DELEGATION", "off")
+        for var in ("LLM_ROUTER_AGENT_ROUTE_CODEX", "LLM_ROUTER_SUBAGENT_CLI_DELEGATION",
+                    "LLM_ROUTER_SUBAGENT_DIRECT", "LLM_ROUTER_QA_ROUTING",
+                    "LLM_ROUTER_ALLOW_SUBAGENTS"):
+            monkeypatch.delenv(var, raising=False)
         for k, v in (extra_env or {}).items():
             monkeypatch.setenv(k, v)
+
+        from llm_router.codex_agent import CodexResult
+        codex_prompts: list[str] = []
+
+        async def _fake_run_codex(p, timeout=None, **kwargs):
+            codex_prompts.append(p)
+            return CodexResult(content="codex stub answer", model="gpt-5.5",
+                               exit_code=0, duration_sec=0.1)
+
+        monkeypatch.setattr("llm_router.codex_agent.is_codex_available", lambda: True)
+        monkeypatch.setattr("llm_router.codex_agent.run_codex", _fake_run_codex)
+
         payload = json.dumps({
             "hook_event_name": "PreToolUse",
             "tool_name": "Agent",
@@ -1112,30 +1160,62 @@ class TestDefaultAgentCallPassesThroughCleanly:
         })
         monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
         mod.main()
+        return codex_prompts
 
-    def test_default_env_no_deny_no_direct_no_note(self, tmp_path, monkeypatch, capsys):
+    def test_default_code_prompt_takes_the_codex_carve_out(self, tmp_path, monkeypatch, capsys):
+        """Real default env: a Codex-suitable (code) prompt is delegated to
+        Codex (LLM_ROUTER_AGENT_ROUTE_CODEX defaults on) — the documented
+        carve-out, measured separately. No local-model direct path is taken."""
         mod = _load_hook_module()
-        monkeypatch.delenv("LLM_ROUTER_SUBAGENT_DIRECT", raising=False)
-        monkeypatch.delenv("LLM_ROUTER_QA_ROUTING", raising=False)
-        monkeypatch.delenv("LLM_ROUTER_ALLOW_SUBAGENTS", raising=False)  # real default: "on"
-        self._run_main_in_process(
-            mod, monkeypatch, tmp_path, "implement a fix for the off-by-one bug",
-        )
+        prompt = "implement a fix for the off-by-one bug"
+        assert mod._classify_task_type(prompt) == "code"
+        # Savings DB logging is not under test (and writes to stdout via structlog).
+        monkeypatch.setattr(mod, "_log_cli_savings", lambda *a, **k: None)
+        seen = self._run_main_in_process(mod, monkeypatch, tmp_path, prompt)
         out = json.loads(capsys.readouterr().out)
-        # No deny/block — the real sub-agent spawn proceeds.
+        assert seen == [prompt]  # went to (stubbed) Codex, nothing else
+        assert out["decision"] == "block"
+        assert "Codex CLI" in out["reason"]
+        assert "codex stub answer" in out["reason"]
+        assert "routed_direct" not in out["reason"]
+
+    def test_default_unsuitable_prompt_spawns_normally(self, tmp_path, monkeypatch, capsys):
+        """Real default env, prompt NOT Codex-suitable (multi-file write):
+        no Codex, no local direct path, no deny, and no routing note in the
+        spawned prompt."""
+        mod = _load_hook_module()
+        prompt = "refactor the entire codebase across multiple files to rename Foo to Bar"
+        assert not mod._is_codex_suitable(
+            "general-purpose", mod._classify_task_type(prompt), prompt)
+        seen = self._run_main_in_process(mod, monkeypatch, tmp_path, prompt)
+        out = json.loads(capsys.readouterr().out)
+        assert seen == []  # Codex never called
         assert out.get("decision") != "block"
         hso = out["hookSpecificOutput"]
         assert hso["permissionDecision"] == "allow"
-        # No "prefer llm_router tools" note leaked into the spawned prompt.
+        assert "llm_router: routing (inherited)" not in hso["updatedInput"]["prompt"]
+
+    def test_codex_off_is_a_clean_passthrough(self, tmp_path, monkeypatch, capsys):
+        """Codex explicitly off: even a Codex-suitable prompt spawns normally —
+        no deny/block, no direct execution, no note, Codex untouched."""
+        mod = _load_hook_module()
+        seen = self._run_main_in_process(
+            mod, monkeypatch, tmp_path, "implement a fix for the off-by-one bug",
+            extra_env={"LLM_ROUTER_AGENT_ROUTE_CODEX": "off",
+                       "LLM_ROUTER_SUBAGENT_CLI_DELEGATION": "off"},
+        )
+        out = json.loads(capsys.readouterr().out)
+        assert seen == []
+        assert out.get("decision") != "block"
+        hso = out["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "allow"
         assert "llm_router: routing (inherited)" not in hso["updatedInput"]["prompt"]
 
     def test_qa_routing_on_restores_the_note(self, tmp_path, monkeypatch, capsys):
         mod = _load_hook_module()
-        monkeypatch.delenv("LLM_ROUTER_SUBAGENT_DIRECT", raising=False)
-        monkeypatch.setenv("LLM_ROUTER_QA_ROUTING", "on")
-        monkeypatch.delenv("LLM_ROUTER_ALLOW_SUBAGENTS", raising=False)
         self._run_main_in_process(
             mod, monkeypatch, tmp_path, "implement a fix for the off-by-one bug",
+            extra_env={"LLM_ROUTER_QA_ROUTING": "on", "LLM_ROUTER_AGENT_ROUTE_CODEX": "off"},
         )
         out = json.loads(capsys.readouterr().out)
         hso = out["hookSpecificOutput"]
