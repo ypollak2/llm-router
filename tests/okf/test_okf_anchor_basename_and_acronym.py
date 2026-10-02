@@ -140,7 +140,18 @@ def test_generic_acronym_does_not_match_an_unrelated_doc(store, monkeypatch):
 
 
 def test_lowercase_short_word_is_not_treated_as_an_acronym(store, monkeypatch):
-    """Only CAPS admits the acronym path; lowercase stays excluded by length."""
+    """Only CAPS admits the acronym path; lowercase stays excluded by length.
+
+    Residual, intentional: lowercase "okf" alone still retrieves nothing. It
+    is 3 characters with no path/underscore shape, below the >=5-char prose
+    floor and outside the caps-only acronym gate, so it is never collected as
+    a keyword at all. Fixing this would mean admitting any short lowercase
+    word that happens to be a project acronym, which reopens the exact
+    false-positive class _IDENTIFIER_SHAPED_RE's own docstring describes —
+    out of scope for this fix. "What does OKF mean" (caps) already works;
+    "what does okf mean" (lowercase) does not, and is left that way on
+    purpose.
+    """
     monkeypatch.setenv("LLM_ROUTER_PROJECT_ROOT", str(store / "repo-a"))
     assert okf.find_relevant("okf", base=store) == []
 
@@ -153,3 +164,146 @@ def test_acronym_promotion_requires_an_actual_stem_or_tag_match(store, monkeypat
     """
     monkeypatch.setenv("LLM_ROUTER_PROJECT_ROOT", str(store / "repo-a"))
     assert okf.find_relevant("INV needs a fix", base=store) == []
+
+
+# ── OKF-ANCHOR-02: a common tech acronym equalling a real stem must not
+#    anchor a generic, repo-agnostic question (independent review of #233,
+#    reproduced on the real 1637-doc llm-router index) ──────────────────────
+
+
+@pytest.fixture
+def store_with_common_acronym_stems(tmp_path: Path) -> Path:
+    """A store where api.py and cli.py genuinely exist, with no tag naming
+    them — a pure filename coincidence, the shape the review flagged."""
+    proj = tmp_path / "projects" / okf.project_slug(tmp_path / "repo-b")
+    proj.mkdir(parents=True)
+    (proj / "api.md").write_text(
+        textwrap.dedent("""\
+            ---
+            type: SourceFile
+            title: src/llm_router/api.py
+            description: HTTP endpoints for the router service.
+            tags: []
+            key_symbols: [create_app, route_request]
+            ---
+
+            Defines: create_app, route_request.
+            """),
+        encoding="utf-8",
+    )
+    (proj / "cli.md").write_text(
+        textwrap.dedent("""\
+            ---
+            type: SourceFile
+            title: src/llm_router/cli.py
+            description: Command-line entry point.
+            tags: []
+            key_symbols: [main, parse_args]
+            ---
+
+            Defines: main, parse_args.
+            """),
+        encoding="utf-8",
+    )
+    return tmp_path
+
+
+@pytest.fixture
+def store_with_tagged_acronym(tmp_path: Path) -> Path:
+    """A store where NO file is named api.py, but one doc is deliberately
+    TAGGED "api" — an author's own glossary entry, not a filename collision.
+    """
+    proj = tmp_path / "projects" / okf.project_slug(tmp_path / "repo-c")
+    proj.mkdir(parents=True)
+    (proj / "throttle.md").write_text(
+        textwrap.dedent("""\
+            ---
+            type: SourceFile
+            title: ops/throttle.py
+            description: Rate limiting for outbound calls.
+            tags: [api]
+            key_symbols: [throttle_request]
+            ---
+
+            Defines: throttle_request.
+            """),
+        encoding="utf-8",
+    )
+    return tmp_path
+
+
+def test_generic_tech_acronym_does_not_match_its_own_repos_file(
+    store_with_common_acronym_stems, monkeypatch,
+):
+    """A repo-agnostic question must not retrieve this repo's api.py/cli.py
+    just because they happen to exist and the question says "API" / "CLI".
+    """
+    monkeypatch.setenv("LLM_ROUTER_PROJECT_ROOT", str(store_with_common_acronym_stems / "repo-b"))
+    hits = okf.find_relevant(
+        "what's the best API for weather data in my app", base=store_with_common_acronym_stems)
+    assert _titles(hits) == [], f"leaked: {_titles(hits)}"
+    hits = okf.find_relevant(
+        "write a quick CLI tool in bash", base=store_with_common_acronym_stems)
+    assert _titles(hits) == [], f"leaked: {_titles(hits)}"
+
+
+def test_tagged_acronym_still_anchors_despite_the_stoplist(
+    store_with_tagged_acronym, monkeypatch,
+):
+    """A stoplisted acronym still anchors a doc the project deliberately
+    TAGGED with it — that is the project defining the term, not a filename
+    coincidence, so the stoplist must not block it.
+
+    ops/throttle.py's stem shares nothing with "api"; the only route to it is
+    the tag.
+    """
+    monkeypatch.setenv("LLM_ROUTER_PROJECT_ROOT", str(store_with_tagged_acronym / "repo-c"))
+    hits = okf.find_relevant("what does our API limiter do", base=store_with_tagged_acronym)
+    assert _titles(hits) == ["ops/throttle.py"], f"got: {_titles(hits)}"
+
+
+def test_tagged_acronym_does_not_leak_to_an_unrelated_stem_match(
+    store_with_common_acronym_stems, store_with_tagged_acronym, monkeypatch, tmp_path,
+):
+    """The critical regression this helper exists to prevent: tagging ONE
+    module "api" must not promote every OTHER module merely named api.py.
+
+    Builds one store holding BOTH the stem-only api.py (no tag) and the
+    tag-only throttle.py, so a pooled, project-wide anchor set would wrongly
+    let the acronym admit api.py too (that was PR A's initial, broken fix for
+    this review comment). Per-doc scoping must keep them apart.
+    """
+    combined = tmp_path / "combined"
+    proj = combined / "projects" / okf.project_slug(combined / "repo-d")
+    proj.mkdir(parents=True)
+    (proj / "api.md").write_text(
+        textwrap.dedent("""\
+            ---
+            type: SourceFile
+            title: src/llm_router/api.py
+            description: HTTP endpoints for the router service.
+            tags: []
+            key_symbols: [create_app, route_request]
+            ---
+
+            Defines: create_app, route_request.
+            """),
+        encoding="utf-8",
+    )
+    (proj / "throttle.md").write_text(
+        textwrap.dedent("""\
+            ---
+            type: SourceFile
+            title: ops/throttle.py
+            description: Rate limiting for outbound calls.
+            tags: [api]
+            key_symbols: [throttle_request]
+            ---
+
+            Defines: throttle_request.
+            """),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LLM_ROUTER_PROJECT_ROOT", str(combined / "repo-d"))
+    hits = okf.find_relevant("what's the best API for weather data in my app", base=combined)
+    assert _titles(hits) == ["ops/throttle.py"], f"got: {_titles(hits)}"

@@ -585,6 +585,25 @@ _LABEL_SHAPED_RE = re.compile(
 # never from shape alone.
 _ACRONYM_RE = re.compile(r"\b[A-Z]{2,5}\b")
 
+# Generic technology vocabulary that is also, coincidentally, a plausible
+# file stem in almost any codebase — api.py, cli.py, sdk.py, app.py and the
+# rest. OKF-ANCHOR-02 (independent review of PR #233, reproduced on the real
+# 1637-doc llm-router index): "best API for weather data in my app" matched
+# this repo's own api.py and control_plane/api.py; "write a quick CLI tool in
+# bash" matched cli.py x3; "SDK comparison for AWS vs GCP" matched sdk.py;
+# "review the APP structure" matched tui/app.py. A stem match alone is not
+# evidence the PROJECT defined the term — it is evidence almost any project
+# would have a file by that name. Kept small and documented on purpose: this
+# is a stoplist against known collisions, not a general acronym filter, and
+# widening it blindly would quietly re-admit real project acronyms (OKF is
+# not here, and must not be added without the same scrutiny).
+_COMMON_TECH_ACRONYMS = frozenset({
+    "api", "cli", "sdk", "app", "ui", "ux", "url", "uri", "json", "yaml",
+    "http", "https", "sql", "aws", "gcp", "css", "html", "js", "ts", "db",
+    "os", "cpu", "gpu", "ram", "ide", "mcp", "llm", "ai", "ml", "pr", "ci",
+    "cd",
+})
+
 # Identifiers and paths must be pulled out BEFORE lowercasing and BEFORE the
 # \b\w+\b pass, which splits on "." and "/" — that pass turns `okf.py` into
 # {"okf", "py"} and `src/llm_router/okf.py` into four unremarkable words, so a
@@ -798,27 +817,34 @@ def find_relevant(
     # Short acronyms ("OKF") are candidates (see _ACRONYM_RE) but shape alone
     # never promotes one to an anchor — that would reopen exactly the
     # >=6-char false-positive problem the comment above this function
-    # describes, just at a shorter length. A candidate is promoted only when
-    # it NAMES something the project actually defines: an indexed source
-    # file's own stem/basename, or a tag a concept's author deliberately
-    # wrote (the nearest thing this schema has to a glossary entry). Neither
-    # can be satisfied by an unrelated short word unless the project happens
-    # to have a file or tag by that exact name — at which point the project
-    # defined the term, the query did not guess it.
+    # describes, just at a shorter length. A candidate anchors a doc only
+    # when it NAMES something THAT DOC's author actually defines: the doc's
+    # own stem/basename, or a tag its author deliberately wrote (the nearest
+    # thing this schema has to a glossary entry) — checked per document in
+    # `_acronym_names_concept`, never pooled into the global `anchors` set.
+    #
+    # Pooling would leak across documents: OKF-ANCHOR-02 (independent review
+    # of #233, reproduced on the real 1637-doc llm-router index) found that a
+    # stem match alone promoted "api" project-wide the moment ANY file was
+    # named api.py — "best API for weather data in my app" then matched that
+    # file, and "SDK comparison for AWS vs GCP" matched sdk.py, purely
+    # because almost any codebase has a file by that name. A tag is kept as
+    # a promotion route even for such a stoplisted acronym (see
+    # _COMMON_TECH_ACRONYMS) because tagging a SPECIFIC doc "api" is its
+    # author defining the term for that doc, not an incidental filename —
+    # but it must stay scoped to that doc, or a project that tags one
+    # module "api" would reopen the leak for every other module that merely
+    # happens to be named api.py too.
     candidates = _acronym_candidates(prompt) & set(keywords)
-    if candidates:
-        defined: set[str] = set()
-        for c in concepts:
-            if _is_indexed_source(c):
-                defined |= _path_name_tokens(c.title)
-            defined |= {str(t).lower() for t in c.tags}
-        anchors |= candidates & defined
     scored = []
     for c in concepts:
         s = _score(c, keywords)
         if s < floor:
             continue
-        if _is_indexed_source(c) and not (anchors & _anchor_tokens(c)):
+        if _is_indexed_source(c) and not (
+            (anchors & _anchor_tokens(c))
+            or _acronym_names_concept(candidates, c)
+        ):
             continue
         scored.append((c, s))
     scored.sort(key=lambda x: x[1], reverse=True)
@@ -835,6 +861,25 @@ def _acronym_candidates(prompt: str) -> set[str]:
     check in ``find_relevant``.
     """
     return {m.group(0).lower() for m in _ACRONYM_RE.finditer(prompt or "")}
+
+
+def _acronym_names_concept(candidates: set[str], concept: "OKFConcept") -> bool:
+    """Does any acronym *candidate* actually name THIS doc, and only this doc?
+
+    Deliberately per-concept (OKF-ANCHOR-02): a doc's own tag names it
+    regardless of the common-tech stoplist (an author who tagged a module
+    "api" meant it), but a bare stem match is disqualified for a stoplisted
+    acronym — ``api.py`` existing is not evidence this doc is what "API" in
+    the prompt meant, it is evidence the repo has a file by a common name.
+    Checked against this concept's own tags/stem only, never a project-wide
+    pool, so tagging ONE module "api" cannot promote every OTHER module that
+    happens to be named api.py too.
+    """
+    if not candidates:
+        return False
+    if candidates & {str(t).lower() for t in concept.tags}:
+        return True
+    return bool((candidates & _path_name_tokens(concept.title)) - _COMMON_TECH_ACRONYMS)
 
 
 def _seen_this_session(label: str) -> bool:
