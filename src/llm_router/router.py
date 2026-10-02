@@ -2912,9 +2912,14 @@ async def _dispatch_model_loop(
                             await _notify(ctx, "info", f"⏳ {model_name} — generating...")
                         elif ev_type == "turn.completed":
                             await _notify(ctx, "info", f"✓ {model_name} — {text}")
+                    _codex_scope_root = _cli_scope_root()
                     codex_result = await run_codex(
-                        await _cli_prompt_with_context(prompt, "codex", caller_context, config, _cli_scope_root()),
-                        model=model_name, on_event=_codex_on_event
+                        await _cli_prompt_with_context(prompt, "codex", caller_context, config, _codex_scope_root),
+                        model=model_name, on_event=_codex_on_event,
+                        # OKF-SCOPE-06: context_root (not working_dir) — the
+                        # session's project scope is for OKF retrieval only
+                        # here, not for moving where the Codex subprocess runs.
+                        context_root=_codex_scope_root,
                     )
                     if not codex_result.success:
                         raise RuntimeError(
@@ -2945,9 +2950,12 @@ async def _dispatch_model_loop(
                     async def _gemini_on_event(ev_type: str, text: str) -> None:
                         if text:
                             await _notify(ctx, "info", f"⚡ gemini: {text}")
+                    _gemini_scope_root = _cli_scope_root()
                     gemini_result = await run_gemini_cli(
-                        await _cli_prompt_with_context(prompt, "gemini_cli", caller_context, config, _cli_scope_root()),
-                        model=model_name, on_event=_gemini_on_event
+                        await _cli_prompt_with_context(prompt, "gemini_cli", caller_context, config, _gemini_scope_root),
+                        model=model_name, on_event=_gemini_on_event,
+                        # OKF-SCOPE-06: see the codex branch above.
+                        context_root=_gemini_scope_root,
                     )
                     if not gemini_result.success:
                         raise RuntimeError(
@@ -2977,9 +2985,12 @@ async def _dispatch_model_loop(
                     async def _claude_on_event(ev_type: str, text: str) -> None:
                         if text:
                             await _notify(ctx, "info", f"⚡ claude: {text}")
+                    _claude_scope_root = _cli_scope_root()
                     claude_result = await run_claude(
-                        await _cli_prompt_with_context(prompt, "anthropic", caller_context, config, _cli_scope_root()),
-                        model=model_name, on_event=_claude_on_event
+                        await _cli_prompt_with_context(prompt, "anthropic", caller_context, config, _claude_scope_root),
+                        model=model_name, on_event=_claude_on_event,
+                        # OKF-SCOPE-06: see the codex branch above.
+                        context_root=_claude_scope_root,
                     )
                     if not claude_result.success:
                         raise RuntimeError(

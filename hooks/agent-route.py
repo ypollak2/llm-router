@@ -1071,6 +1071,28 @@ def _log_cli_savings(content: str, provider: str, model: str, duration_sec: floa
         pass
 
 
+def _delegation_scope_root() -> str | None:
+    """Project root to scope OKF context injection to for a CLI-delegated run.
+
+    This hook already runs with cwd inside the caller's repo (unlike the
+    long-lived MCP server, whose cwd is $HOME), so ``run_codex``/
+    ``run_gemini_cli``'s own ``cwd = working_dir or os.getcwd()`` fallback
+    already points the *subprocess* at the right place without any change
+    here. But ``working_dir`` also doubles as the OKF ``context_injection.inject``
+    scope, and this caller never passed one — leaving injection unscoped
+    (global, not this project) rather than correctly scoped.
+    ``resolve_scope_or_none()`` with no hint answers from the cwd exactly the
+    way the subprocess cwd already resolves, so passing it as ``context_root``
+    fixes OKF scope without touching where the subprocess runs.
+    """
+    try:
+        from llm_router.semantic.scope import resolve_scope_or_none
+        root = resolve_scope_or_none()
+        return str(root) if root is not None else None
+    except Exception:
+        return None
+
+
 def _try_cli_delegation(
     prompt: str, task_type: str, complexity: str, session_id: str,
     subagent_type: str = "general-purpose",
@@ -1111,13 +1133,14 @@ def _try_cli_delegation(
     except (TypeError, ValueError):
         pass
 
+    _scope_root = _delegation_scope_root()
     try:
         if is_codex_available():
             provider = "codex"
-            res = asyncio.run(run_codex(prompt, timeout=timeout))
+            res = asyncio.run(run_codex(prompt, timeout=timeout, context_root=_scope_root))
         elif is_gemini_cli_available():
             provider = "gemini-cli"
-            res = asyncio.run(run_gemini_cli(prompt, timeout=timeout))
+            res = asyncio.run(run_gemini_cli(prompt, timeout=timeout, context_root=_scope_root))
         else:
             return None
     except Exception:
@@ -1342,7 +1365,7 @@ def _try_codex_subagent_delegation(
         import asyncio
 
         from llm_router.codex_agent import run_codex
-        res = asyncio.run(run_codex(prompt, timeout=timeout))
+        res = asyncio.run(run_codex(prompt, timeout=timeout, context_root=_delegation_scope_root()))
     except Exception as e:
         _record_north_star_unit(
             "agent_route_codex", model="", outcome="codex_failed",

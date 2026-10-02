@@ -254,13 +254,14 @@ async def run_codex(
     working_dir: str | None = None,
     timeout: int | None = None,
     on_event: "Callable[[str, str], Awaitable[None]] | None" = None,
+    context_root: str | None = None,
 ) -> CodexResult:
     """Run a task through the Codex CLI agent as a subprocess.
 
     Invokes ``codex exec`` with an explicit argument list via
     ``asyncio.create_subprocess_exec`` — no shell expansion is involved,
     so the prompt string is safe from injection regardless of content.
-    
+
     SECURITY: Subprocess runs with a filtered environment that excludes
     all API keys and tokens to prevent exposure via /proc/[pid]/environ.
 
@@ -279,9 +280,18 @@ async def run_codex(
             Codex CLI default; both ``gpt-5.5`` and ``gpt-5.4`` work on
             ChatGPT-account auth, see :func:`_load_codex_models`).
         working_dir: Working directory for the Codex process.  Defaults
-            to the current working directory.
+            to the current working directory. This is also the subprocess
+            cwd, so callers that only want OKF context scoped to a project
+            (without moving where the Codex subprocess actually runs) should
+            use ``context_root`` instead.
         timeout: Maximum seconds to wait before killing the process.
             Defaults to ``LLM_ROUTER_CODEX_TIMEOUT`` env var (300s).
+        context_root: Project root to scope OKF context injection to,
+            independent of ``working_dir``/subprocess cwd. Defaults to
+            ``working_dir`` when not given, which is the pre-existing
+            behaviour. A router dispatch that knows the caller's session
+            scope but must not change where the Codex subprocess runs
+            passes this instead of ``working_dir``.
 
     Returns:
         A ``CodexResult`` with the process output, model name, exit code,
@@ -289,10 +299,10 @@ async def run_codex(
         in the result.
     """
     from llm_router.safe_subprocess import get_safe_env
-    
+
     try:
         from llm_router.context_injection import inject
-        prompt = inject(prompt, root=working_dir)
+        prompt = inject(prompt, root=context_root if context_root is not None else working_dir)
     except Exception:                                        # noqa: BLE001
         pass
 
