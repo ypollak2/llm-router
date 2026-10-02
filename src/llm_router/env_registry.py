@@ -287,6 +287,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_SEMANTIC_AUTOINDEX": ("llm_router", "semantic/autoindex.py", 1),
     "LLM_ROUTER_SEMANTIC_AUTOINDEX_COOLDOWN_S": ("llm_router", "semantic/autoindex.py", 1),
     "LLM_ROUTER_SEMANTIC_AUTOINDEX_MAX_FILES": ("llm_router", "semantic/autoindex.py", 1),
+    "LLM_ROUTER_SEMANTIC_AUTOINDEX_SCRATCH_PREFIXES": ("llm_router", "semantic/autoindex.py", 1),
     "LLM_ROUTER_SEMANTIC_CACHE": ("llm_router", "semantic_cache.py", 2),
     "LLM_ROUTER_SEMANTIC_CACHE_THRESHOLD": ("llm_router", "semantic_cache.py", 1),
     "LLM_ROUTER_SEMANTIC_CENTROIDS": ("llm_router", "semantic_classify.py", 1),

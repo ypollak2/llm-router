@@ -17,15 +17,33 @@ GUARDS, each with the reason it exists
   would seed a shared bucket with whatever happens to live there.
 * **never ``$HOME``, stated explicitly.** A user's home directory can itself
   be a git repo (dotfiles), so the git check alone would not catch it.
+* **never a scratch tempdir.** An agent sub-session routinely works out of a
+  disposable git worktree under ``/tmp``, ``/private/tmp``,
+  ``tempfile.gettempdir()`` or ``/var/folders`` (macOS) — a linked worktree's
+  ``.git`` is a plain *file*, not a directory, but it still satisfies the
+  git-repo guard above. Every fresh scratch path would otherwise seed a
+  never-cleaned ~5MB knowledge-store entry. Checked against the *realpath* of
+  the scope (symlinks such as macOS's ``/tmp`` -> ``/private/tmp`` resolved
+  first). Overridable via ``LLM_ROUTER_SEMANTIC_AUTOINDEX_SCRATCH_PREFIXES``
+  (``os.pathsep``-separated; empty string disables the guard entirely) so
+  tests running under pytest's own ``tmp_path`` — itself under a scratch
+  prefix — are not caught by it.
 * **a tracked-file-count cap.** ``git ls-files`` on a monorepo can return six
   figures. Indexing that in the background on every session is not what
   "automatic" was asked for; a repo over the cap is left for
   ``llm-router semantic index`` to be run by hand. Documented and overridable
-  via ``LLM_ROUTER_SEMANTIC_AUTOINDEX_MAX_FILES``.
+  via ``LLM_ROUTER_SEMANTIC_AUTOINDEX_MAX_FILES``. This check, and the
+  git-failure case (``git ls-files`` erroring), also claim the cooldown lock
+  on a skip — not just on a spawn — so a project that is permanently over
+  cap does not pay for a fresh ``git ls-files`` on every single call.
 * **a cooldown lock.** Two concurrent sessions, or two retrievals in the same
   session, must not both spawn a build. The lock is a timestamp file, not a
   PID file — a PID can be reused, and this only needs to know how recently a
-  build was last STARTED, not whether it is still running.
+  build was last STARTED (or last skipped as over-cap), not whether it is
+  still running. A lock directory that cannot be created at all (e.g. a
+  read-only filesystem) falls back to an in-process marker, so this process
+  still backs off for the cooldown instead of re-running git on every call —
+  it just cannot coordinate that backoff with other processes.
 * **behind an env flag, default ON** (``LLM_ROUTER_SEMANTIC_AUTOINDEX``), so an
   operator who wants no background process ever can turn it off.
 
@@ -39,6 +57,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -47,6 +66,14 @@ __all__ = ["maybe_start_background_index", "index_is_empty"]
 _DEFAULT_MAX_FILES = 20_000
 _DEFAULT_COOLDOWN_S = 3600.0
 _FAILOPEN_CODE = "CHZ-FO-SEMANTIC-AUTOINDEX"
+
+# Last-resort, in-process-only cooldown: used when the real lock FILE cannot
+# be written at all (its directory can't even be created — e.g. a read-only
+# filesystem). Keyed by the lock path so distinct scopes don't share a
+# backoff. This cannot coordinate across processes — that is what the lock
+# file is for — it only stops THIS process hammering `git ls-files` on every
+# call when the filesystem truly will not take the write.
+_inprocess_cooldown: "dict[str, float]" = {}
 
 
 def _enabled() -> bool:
@@ -84,8 +111,11 @@ def _recently_attempted(lock: Path, cooldown: float) -> bool:
     try:
         age = time.time() - lock.stat().st_mtime
     except OSError:
-        return False  # no lock, or unreadable — never attempted recently
-    return age < cooldown
+        pass  # no lock file, or unreadable — fall through to the in-process marker
+    else:
+        return age < cooldown
+    last = _inprocess_cooldown.get(str(lock))
+    return last is not None and (time.time() - last) < cooldown
 
 
 def _claim_lock(lock: Path, cooldown: float) -> bool:
@@ -109,7 +139,15 @@ def _claim_lock(lock: Path, cooldown: float) -> bool:
     (default one hour), not on every call — an acceptable cost for not
     needing a cross-platform file lock.
     """
-    lock.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        lock.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # The lock directory itself can't be created (e.g. read-only
+        # filesystem). Record an in-process marker so THIS process still
+        # backs off for the cooldown instead of re-running `git ls-files` on
+        # every call — see `_inprocess_cooldown`.
+        _inprocess_cooldown[str(lock)] = time.time()
+        return False
     now = str(time.time()).encode()
     try:
         fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -121,11 +159,66 @@ def _claim_lock(lock: Path, cooldown: float) -> bool:
             fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except OSError:
             return False
+    except OSError:
+        _inprocess_cooldown[str(lock)] = time.time()
+        return False
     try:
         os.write(fd, now)
     finally:
         os.close(fd)
     return True
+
+
+def _release_lock(lock: Path) -> None:
+    """Undo a successful ``_claim_lock`` after the thing it guarded failed to
+    start, so a Popen failure does not cause a full cooldown's worth of
+    blackout for something that never actually ran.
+
+    Deliberately not wrapped in its own ``try/except``: the only caller,
+    ``maybe_start_background_index``, already wraps its whole body in
+    ``except Exception as exc: failopen.record(...)``, so a failure here is
+    still recorded there instead of becoming a second, silent
+    ``except: pass`` write site (T-14 census).
+    """
+    lock.unlink(missing_ok=True)
+
+
+def _scratch_prefixes() -> "list[Path]":
+    """Realpath'd directories that are scratch space, never a real project.
+
+    ``LLM_ROUTER_SEMANTIC_AUTOINDEX_SCRATCH_PREFIXES`` overrides the list
+    (``os.pathsep``-separated; set to the empty string to disable the guard
+    entirely) — used by tests, which run under pytest's own ``tmp_path`` and
+    would otherwise always be excluded by this same guard.
+    """
+    raw = os.environ.get("LLM_ROUTER_SEMANTIC_AUTOINDEX_SCRATCH_PREFIXES")
+    if raw is not None:
+        if not raw.strip():
+            return []
+        candidates = [p for p in raw.split(os.pathsep) if p.strip()]
+    else:
+        candidates = [tempfile.gettempdir(), "/tmp", "/private/tmp", "/var/folders"]
+    prefixes = []
+    for candidate in candidates:
+        try:
+            prefixes.append(Path(candidate).resolve())
+        except OSError:
+            continue
+    return prefixes
+
+
+def _is_scratch_path(scope: Path) -> bool:
+    try:
+        real = scope.resolve()
+    except OSError:
+        return False
+    for prefix in _scratch_prefixes():
+        try:
+            real.relative_to(prefix)
+        except ValueError:
+            continue
+        return True
+    return False
 
 
 def _tracked_file_count(root: Path) -> "int | None":
@@ -186,6 +279,8 @@ def maybe_start_background_index(
         scope = resolve_scope(root)
         if scope == Path.home().resolve():
             return False
+        if _is_scratch_path(scope):
+            return False
         if not (scope / ".git").exists():
             return False
         if not index_is_empty(scope, base):
@@ -198,6 +293,12 @@ def maybe_start_background_index(
 
         count = _tracked_file_count(scope)
         if count is None or count > _max_files():
+            # A negative result still claims the lock (best-effort — it may
+            # fail, see `_claim_lock`): without this, a repo that is
+            # permanently over the cap, or whose `git ls-files` permanently
+            # errors, re-runs that synchronous git call on EVERY single
+            # pack.build(), forever, instead of once per cooldown.
+            _claim_lock(lock, cooldown)
             return False
 
         # Claimed BEFORE spawning, and atomically (see _claim_lock): the
@@ -211,15 +312,34 @@ def maybe_start_background_index(
         from llm_router.safe_subprocess import get_delegated_env
 
         env = get_delegated_env({"LLM_ROUTER_HOME": str(llm_router_home())})
-        subprocess.Popen(
-            [sys.executable, "-m", "llm_router.cli", "semantic", "index"],
-            cwd=str(scope),
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        # `env=` stays a literal keyword (not folded into a kwargs dict and
+        # splatted in): `test_r4_subprocess_env_allowlist.py` AST-scans call
+        # sites for a literal `env=` keyword to confirm this subprocess does
+        # not inherit the operator's full environment, and a call built as
+        # `subprocess.Popen(argv, **kwargs)` is invisible to that scan.
+        extra_kwargs: dict = {}
+        if sys.platform != "win32":
+            # Best-effort niceness for a background build sharing the box
+            # with the foreground session; `preexec_fn` isn't supported on
+            # Windows (Popen raises if it's set there).
+            extra_kwargs["preexec_fn"] = lambda: os.nice(10)
+        try:
+            subprocess.Popen(
+                [sys.executable, "-m", "llm_router.cli", "semantic", "index"],
+                cwd=str(scope),
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+                **extra_kwargs,
+            )
+        except Exception:
+            # The lock was claimed for a build that never actually started —
+            # release it so the next call retries immediately instead of
+            # waiting out a full cooldown for nothing.
+            _release_lock(lock)
+            raise
         return True
     except Exception as exc:  # noqa: BLE001 — never break the caller
         from llm_router import failopen
