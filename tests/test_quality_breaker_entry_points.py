@@ -118,6 +118,7 @@ def _run_agent_route(tmp_path: Path, prompt: str, open_key: str | None) -> tuple
     env["LLM_ROUTER_SUBAGENT_DIRECT"] = "on"
     env["LLM_ROUTER_SUBAGENT_MODEL_PIN"] = "off"
     env["LLM_ROUTER_ALLOW_SUBAGENTS"] = "off"  # so the routed-spawn path doesn't pre-empt the breaker check
+    env["LLM_ROUTER_AGENT_ROUTE_CODEX"] = "off"  # a real `codex` on the machine would otherwise be called
     env.pop("CLAUDE_CODE_SESSION_ID", None)
     result = subprocess.run([sys.executable, str(AGENT_ROUTE_HOOK)], input=payload,
                              capture_output=True, text=True, env=env)
