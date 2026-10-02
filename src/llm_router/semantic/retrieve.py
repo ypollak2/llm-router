@@ -142,6 +142,80 @@ def seeds_from(query: str) -> tuple[list[str], list[str]]:
     return idents, paths
 
 
+# A VALUE IS NOT A DEFINITION
+#
+# `FROZEN_IN_GROUND_TRUTH` found the gap this closes: a question named that
+# exact token, `seeds_from` correctly shaped it as a seed, and `find_definitions`
+# correctly found nothing — because the identifier in the index is `FROZEN`, the
+# variable; `FROZEN_IN_GROUND_TRUTH` is its VALUE, a string literal, not a
+# definition name. The index only answers "where is X defined", so a question
+# about a constant by its value was empty by that index's own contract. Two of
+# the five real questions in the 2026-10-02 recall benchmark were this shape
+# (FROZEN_IN_GROUND_TRUTH, LLM_ROUTER_GROUND_TRUTH).
+#
+# WHAT WAS TRIED AND REMOVED: a `git grep -F` fallback for any identifier the
+# index could not find. It lifted recall the same way and failed the precision
+# constraint: an independent probe of 33 generic non-repo questions got
+# repository text attached to 14 of them (42%), because DATABASE_URL, user_id,
+# max_retries and LOG_LEVEL are literally written somewhere in any repository
+# that handles env vars or secrets. Text occurring in the repo does not mean the
+# question is about the repo. A constant whose own first line holds the
+# identifier as a quoted literal is a much narrower claim, and it is measured
+# below; do not widen it to free text without re-running that probe.
+#
+# Only UPPER_CASE identifiers with at least two underscores qualify
+# (`_VALUE_ELIGIBLE`). Two measured reasons:
+#   - `_CAMEL` matches acronyms and product names (`API`, `SDK`, `GitHub`); they
+#     reach `seeds_from`'s output and are harmless there only because the index
+#     has no entity of that name. A value lookup must not inherit that.
+#   - A lowercase value is vocabulary, not a name. `agent_session`,
+#     `unregistered_parent`, `underdebited_parent`, `half_open`, `not_routed`
+#     and `commit_message` are all the string value of some constant here, and
+#     are also ordinary words in generic questions ("how do you name an
+#     unregistered_parent row in a ledger schema"). With any-underscore
+#     eligibility 81 of 85 generic prompts built around this repo's lowercase
+#     constant values got a repository constant attached. UPPER_CASE with
+#     >=2 underscores is how a flag or marker is written on purpose
+#     (FROZEN_IN_GROUND_TRUTH, LLM_ROUTER_GROUND_TRUTH) and added 0 of those 83.
+# Requiring the token to be quoted was also measured: it adds 0 collisions but
+# loses 2 of the 5 real questions, whose prompts name the token in plain prose.
+# Known residual: a third-party env var the repo happens to read, written in
+# upper case, still resolves (ANTHROPIC_BASE_URL, ENABLE_TOOL_SEARCH); it cannot
+# be told apart from FROZEN_IN_GROUND_TRUTH without knowing the repo.
+_VALUE_ELIGIBLE = re.compile(r"[A-Z0-9]+(?:_[A-Z0-9]+){2,}")
+_VALUE_MAX_PER_IDENT = 3
+_VALUE_MAX_TOTAL = 5
+
+
+def _constants_holding_value(conn: sqlite3.Connection, idents: list[str],
+                             defined: set[str]) -> list[sstore.Entity]:
+    """Constants whose first line holds an unresolved identifier as a string
+    literal: `FROZEN = "FROZEN_IN_GROUND_TRUTH"` answers `FROZEN_IN_GROUND_TRUTH`.
+
+    The index knows the constant as `FROZEN`, so a lookup by the value finds
+    nothing; the first line is already stored as the entity's signature, so this
+    is a plain query with no new column. Exact quoted match, not a substring, so
+    a name that merely appears inside a longer string does not count. Only
+    UPPER_CASE identifiers with >=2 underscores (see `_VALUE_ELIGIBLE`) are
+    tried: an acronym, a product name or a plain lowercase word is not a value
+    someone asks about by name.
+    """
+    out: list[sstore.Entity] = []
+    for name in idents:
+        if name in defined or not _VALUE_ELIGIBLE.fullmatch(name):
+            continue
+        rows = conn.execute(
+            "SELECT * FROM entity WHERE kind = 'constant' AND "
+            "(instr(signature, ?) > 0 OR instr(signature, ?) > 0) "
+            "ORDER BY relative_path, start_line LIMIT ?",  # stable tie-break: LIMIT keeps the same rows every run
+            (f'"{name}"', f"'{name}'", _VALUE_MAX_PER_IDENT),
+        ).fetchall()
+        out.extend(sstore._rows_to_entities(rows))
+        if len(out) >= _VALUE_MAX_TOTAL:
+            break
+    return out[:_VALUE_MAX_TOTAL]
+
+
 def retrieve(
     query: str,
     root: Path | str | None = None,
@@ -193,6 +267,20 @@ def retrieve(
                 if key not in seen:
                     seen.add(key)
                     found.append(entity)
+
+        # An identifier with no definition may still be the VALUE of a constant.
+        # These are named in the query outright, so they go first, ahead of
+        # whatever a long prompt's other identifiers happened to match.
+        try:
+            by_value = [
+                e for e in _constants_holding_value(
+                    conn, idents, {e.name for e in found})
+                if (e.relative_path, e.start_line) not in seen
+            ]
+        except sqlite3.DatabaseError as exc:
+            return RetrievalResult(status="unavailable", note=str(exc))
+        seen.update((e.relative_path, e.start_line) for e in by_value)
+        found = by_value + found
 
         if not found:
             return RetrievalResult(seeds=idents + paths, status="ok",

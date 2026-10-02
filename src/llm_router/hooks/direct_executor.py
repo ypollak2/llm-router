@@ -663,6 +663,7 @@ def execute_chain(
     Returns DirectResult on success, None if all models failed or only Claude remains.
     """
     _ollama_alive: bool | None = None  # lazily evaluated once per chain execution
+    _ollama_hung: str | None | object = _UNSET  # watchdog verdict, once per chain
     _ollama_installed: set[str] | None = _UNSET  # tag set, fetched once per chain
     system_prompt = _system_prompt(context)
 
@@ -755,6 +756,15 @@ def execute_chain(
                     continue
             elif not _ollama_model_available(model.model, _ollama_installed):
                 _give_up(model.model, "model not pulled")
+                continue
+            # Reachable and pulled is not the same as generating: a wedged
+            # runner leaves /api/tags answering while every call stalls to the
+            # deadline. The watchdog (rate-limited, persisted) says so up front.
+            if _ollama_hung is _UNSET:
+                from llm_router import ollama_watchdog
+                _ollama_hung = ollama_watchdog.gate()
+            if _ollama_hung:
+                _give_up(model.model, f"ollama hung ({_ollama_hung})")
                 continue
 
         if model.provider not in _FREE_PROVIDERS and _paid_budget_exhausted(model.provider):

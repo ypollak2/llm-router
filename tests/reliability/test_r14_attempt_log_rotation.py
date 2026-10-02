@@ -100,9 +100,20 @@ def _run_once(home: Path) -> tuple[int, int, list[str]]:
     return (PROCS * PER_PROC, survived, malformed)
 
 
+@pytest.mark.timeout(120)
 @pytest.mark.parametrize("run", [1, 2, 3])
 def test_no_record_is_lost_from_the_retained_window(tmp_path, run):
     """Three consecutive runs, zero loss inside the retained window.
+
+    `timeout(120)` overrides the suite's blanket 30s budget (pyproject.toml):
+    this test spawns 8 real "spawn"-context processes, which on a shared CI
+    runner means 8 fresh interpreter boot-ups contending with whatever the
+    other xdist workers are doing on the same handful of cores. All three
+    parametrisations timed out at exactly 30.0s on the SAME worker, on both
+    3.11 and 3.13, in PR #241 run 37046968434 — the work was still running,
+    not hung (see `_run_once`'s `p.join(timeout=180)`, which never fired).
+    Unloaded, this takes well under a second (see module docstring); 120s is
+    headroom for a loaded runner, not a new expectation of slowness.
 
     Rotation is *supposed* to drop old records — that is its job — so the
     assertion cannot be "everything written is still there". It is the stronger
@@ -154,6 +165,7 @@ def test_no_record_is_lost_from_the_retained_window(tmp_path, run):
     )
 
 
+@pytest.mark.timeout(120)
 def test_rotation_actually_fired(tmp_path):
     """The check on the check.
 
@@ -162,6 +174,10 @@ def test_rotation_actually_fired(tmp_path):
     workload stops crossing the size threshold (someone shrinks `_PAD`, or
     raises the 400 KB floor), this fails and says so instead of letting the
     suite report a green that proves nothing.
+
+    Same `timeout(120)` reasoning as `test_no_record_is_lost_from_the_retained_window`
+    above — this is the fourth `_run_once` call in the file and timed out
+    alongside the other three in PR #241 run 37046968434.
     """
     home = tmp_path / "fired"
     home.mkdir()

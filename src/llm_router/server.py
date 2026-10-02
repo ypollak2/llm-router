@@ -480,6 +480,10 @@ def _startup_verify_or_die() -> None:
 
 def main():
     """Start the MCP server (stdio transport by default)."""
+    # Entered directly (`python -m llm_router.server`) this bypasses cli.main();
+    # apply .env first so semantic/enforce/etc. settings are live. Idempotent.
+    from llm_router.env_loader import load_dotenv_files
+    load_dotenv_files()
     # Critical-module check runs FIRST — the enterprise verifier
     # below imports modules that may themselves be missing in a
     # stale install, which would surface as a confusing

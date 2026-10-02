@@ -22,11 +22,11 @@ MAX_WAIT=10  # seconds to wait for Ollama to become ready after starting
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 is_running() {
-    curl -sf "${OLLAMA_URL}/api/tags" -o /dev/null 2>&1
+    curl -sf -m 3 "${OLLAMA_URL}/api/tags" -o /dev/null 2>&1
 }
 
 has_model() {
-    curl -sf "${OLLAMA_URL}/api/tags" 2>/dev/null \
+    curl -sf -m 3 "${OLLAMA_URL}/api/tags" 2>/dev/null \
         | python3 -c "
 import json, sys, os
 data = json.load(sys.stdin)
@@ -38,7 +38,7 @@ sys.exit(0 if any(n == model or n.startswith(base) for n in names) else 1)
 }
 
 installed_models() {
-    curl -sf "${OLLAMA_URL}/api/tags" 2>/dev/null \
+    curl -sf -m 3 "${OLLAMA_URL}/api/tags" 2>/dev/null \
         | python3 -c "
 import json, sys
 skip = ('embed', 'bge-', 'gte-', 'e5-', 'all-minilm')

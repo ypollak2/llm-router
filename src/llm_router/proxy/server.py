@@ -655,6 +655,8 @@ Opt-in, per session. Nothing is enabled until you point a session at it:
 
 
 def cmd_proxy(argv: list[str]) -> int:
+    from llm_router.env_loader import load_dotenv_files
+    load_dotenv_files()  # LLM_ROUTER_PROXY_* etc. from .env; real env wins
     if argv and argv[0] in ("-h", "--help", "help"):
         print(USAGE)
         return 0

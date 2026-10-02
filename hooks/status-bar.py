@@ -20,6 +20,14 @@ import sys
 import time
 from datetime import datetime, timezone
 
+# .env -> os.environ for this process (llm_router.env_loader). The real
+# environment wins; without the package this is a no-op, as it always was.
+try:
+    from llm_router.env_loader import load_dotenv_files as _apply_dotenv
+    _apply_dotenv()
+except Exception:
+    pass
+
 
 # ── Registered-tool surface (CHZ-SURF-01) ────────────────────────────────────
 # Tool names are tier-dependent (LLM_ROUTER_SLIM). NEVER put a raw tool name in
