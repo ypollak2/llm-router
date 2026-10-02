@@ -36,7 +36,8 @@ def enabled() -> bool:
 _SEED_PATH = None
 
 
-def _session_seed_query(body: str, session_id: str | None) -> str | None:
+def _session_seed_query(body: str, session_id: str | None,
+                        root: str | None = None) -> str | None:
     """The retrieval query: the prompt plus the files the session just touched.
 
     I3b (2026-09-24). Retrieval is lexical — it needs an identifier or path in
@@ -55,7 +56,7 @@ def _session_seed_query(body: str, session_id: str | None) -> str | None:
             _SEED_PATH = re.compile(
                 r"[\w./-]+\.(?:py|md|toml|json|ya?ml|sh|ts|tsx|js|go|rs|java|rb)\b")
         paths: list[str] = []
-        for ev in load_events(session_id, limit=60):
+        for ev in load_events(session_id, limit=60, project_root=root):
             if ev.get("kind") == "tool_call":
                 paths += _SEED_PATH.findall(str(ev.get("content", "")))
         recent = list(dict.fromkeys(reversed(paths)))[:8]
@@ -64,10 +65,106 @@ def _session_seed_query(body: str, session_id: str | None) -> str | None:
         return None  # seeding is an improvement to retrieval, never a precondition
 
 
+#: Per-turn cap on the prior-turn text folded into a retrieval query. A
+#: follow-up needs the NOUNS of the last exchange, not a transcript.
+_PRIOR_TURN_CHARS = 600
+
+
+def _prior_turn_text(session_id: str | None, prompt: str,
+                     root: str | None = None) -> str | None:
+    """The previous user prompt and the assistant's last reply, newest of each.
+
+    Follow-ups ("do it", "fix that", "rerun it") carry no identifier of their
+    own, so lexical retrieval returns nothing for them (REPORT.md item 3, 2026-10-02:
+    15 of 40 real prompts). What they point at is the last exchange.
+
+    Same session only: `load_events` reads exactly this session's log inside this
+    project's bucket, so another session's turns are unreachable from here. The
+    current prompt is skipped by value (a hook may have recorded it already).
+    Bounded to two turns of `_PRIOR_TURN_CHARS`. Fail-open: `None` on any error.
+    """
+    if not session_id:
+        return None
+    try:
+        from llm_router.session_store import load_events
+        current = (prompt or "").strip()
+        user: str | None = None
+        reply: str | None = None
+        for ev in reversed(load_events(session_id, limit=40, project_root=root)):
+            content = str(ev.get("content") or "").strip()
+            if not content or content == current:
+                continue
+            # The assistant's side is recorded under more than one kind
+            # ("claude_answer" from the hook's transcript copy, "routed_qa",
+            # "assistant"), so it is recognised by role, not by kind.
+            if user is None and ev.get("kind") == "user_prompt":
+                user = content[:_PRIOR_TURN_CHARS]
+            elif reply is None and ev.get("role") == "assistant":
+                reply = content[:_PRIOR_TURN_CHARS]
+            if user is not None and reply is not None:
+                break
+        return "\n".join(p for p in (user, reply) if p) or None
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
+_NAMES_SOMETHING = None
+
+
+def _names_something(prompt: str) -> bool:
+    """True when the prompt carries its own retrieval anchor: a file path, a
+    snake_case identifier or a CamelCase symbol. Such a prompt can be retrieved
+    for as it stands, so it is not widened."""
+    global _NAMES_SOMETHING
+    if _NAMES_SOMETHING is None:
+        import re
+        _NAMES_SOMETHING = re.compile(
+            r"[\w./-]+\.(?:py|pyi|md|toml|json|ya?ml|sh|ts|tsx|js|go|rs|java|rb)\b"
+            r"|\b[A-Za-z]+_[A-Za-z0-9_]+\b"
+            r"|\b[A-Z][a-z0-9]+[A-Z][A-Za-z0-9]*\b")
+    return bool(_NAMES_SOMETHING.search(prompt or ""))
+
+
+def is_followup(prompt: str) -> bool:
+    """A reply to the previous turn: reply-shaped and with no anchor of its
+    own. The one gate every caller uses, so the proxy and the choke point can
+    never disagree about which prompts get the prior turn."""
+    try:
+        from llm_router.context_signal import is_reply_shaped
+        return is_reply_shaped(prompt) and not _names_something(prompt)
+    except Exception:                                        # noqa: BLE001
+        return False
+
+
+def _retrieval_query(prompt: str, session_id: str | None,
+                     root: str | None = None) -> str:
+    """What retrieval searches with: the prompt, plus the session's recent files
+    (I3b), plus - only for a context-dependent follow-up - the prior turn.
+
+    The follow-up gate is `context_signal.is_reply_shaped` AND the prompt
+    naming nothing retrievable itself, so a standalone prompt - or any prompt
+    that already carries a path or identifier - keeps exactly the query it
+    always had. Only the query changes; the prompt the model receives does not.
+    """
+    query = _session_seed_query(prompt, session_id, root) or prompt
+    if not session_id:
+        return query
+    try:
+        if is_followup(prompt):
+            prior = _prior_turn_text(session_id, prompt, root)
+            if prior:
+                query = f"{query}\n{prior}"
+    except Exception:                                        # noqa: BLE001
+        pass
+    return query
+
+
 def inject(prompt: str, *, root: str | None = None, limit: int = 3,
            session_id: str | None = None, task_type: str | None = None,
            target_provider: str | None = None,
-           session_tokens: int = 1200) -> str:
+           session_tokens: int = 1200,
+           retrieval_sid: str | None = None,
+           session_root: str | None = None) -> str:
     """Return *prompt* with relevant repo knowledge prepended, or unchanged.
 
     Fail-open in every direction: no knowledge, no match, a broken store or an
@@ -83,9 +180,19 @@ def inject(prompt: str, *, root: str | None = None, limit: int = 3,
     session — what was said AND what was actually done. `target_provider` is
     passed through to the privacy gate, so naming the provider is what keeps
     session content from reaching an external paid API under `local` mode.
+
+    `retrieval_sid` lets a caller that does not know its target provider
+    yet (the MCP `llm()` door chooses the model after this runs) use the session
+    for the RETRIEVAL QUERY only. No session text is added to the prompt, so
+    nothing session-derived can reach an external API through it.
+
+    `session_root` names the project whose session log to read. Left unset the
+    log is looked up under this process's cwd, which is right for a hook running
+    in the project and wrong for the MCP server (cwd=$HOME) and the proxy.
     """
     if not enabled() or not prompt:
         return prompt
+    query = _retrieval_query(prompt, session_id or retrieval_sid, session_root)
     body = prompt
     try:
         from pathlib import Path
@@ -107,7 +214,7 @@ def inject(prompt: str, *, root: str | None = None, limit: int = 3,
         # nothing actually identifies a project, so a caller with no real scope
         # gets NO documents instead of the wrong ones.
         scope = okf.project_root(Path(root)) if root else resolve_scope_or_none()
-        concepts = okf.find_relevant(prompt, limit=limit, root=scope) if scope is not None else []
+        concepts = okf.find_relevant(query, limit=limit, root=scope) if scope is not None else []
         if concepts:
             body = okf.inject_context(prompt, concepts)
     except Exception:                                        # noqa: BLE001
@@ -152,7 +259,7 @@ def inject(prompt: str, *, root: str | None = None, limit: int = 3,
         # seed, crowding out the function the user actually asked about.
         applied = _semantic_modes.apply(
             body, root=root,
-            seed_query=_session_seed_query(prompt, session_id) or prompt)
+            seed_query=query)
         body = applied.prompt
     except Exception:                                        # noqa: BLE001
         pass  # retrieval is an improvement to a call, never a precondition
@@ -164,6 +271,7 @@ def inject(prompt: str, *, root: str | None = None, limit: int = 3,
         block = build_session_context(
             session_id, max_tokens=session_tokens, query=prompt,
             task_type=task_type, target_provider=target_provider,
+            project_root=session_root,
         )
     except Exception:                                        # noqa: BLE001
         return body
@@ -173,7 +281,10 @@ def inject(prompt: str, *, root: str | None = None, limit: int = 3,
 def inject_system_prompt(system_prompt: str | None, objective: str,
                          *, root: str | None = None,
                          session_id: str | None = None,
-                         limit: int = 3) -> str | None:
+                         limit: int = 3,
+                         target_provider: str | None = None,
+                         session_tokens: int = 1200,
+                         session_root: str | None = None) -> str | None:
     """Attach knowledge to a SYSTEM prompt instead of a user prompt.
 
     The agent loop and the CLI agents carry the task in a system prompt and the
@@ -185,7 +296,10 @@ def inject_system_prompt(system_prompt: str | None, objective: str,
     if not enabled():
         return system_prompt
     try:
-        enriched = inject(objective, root=root, session_id=session_id, limit=limit)
+        enriched = inject(objective, root=root, session_id=session_id, limit=limit,
+                          target_provider=target_provider,
+                          session_tokens=session_tokens,
+                          session_root=session_root)
         if enriched == objective:
             return system_prompt
         block = enriched[: enriched.index(objective)].strip() if objective in enriched else enriched
