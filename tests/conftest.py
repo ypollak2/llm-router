@@ -613,6 +613,19 @@ def _reset_ollama_isolation():
                 os.environ[k] = v
 
 
+@pytest.fixture(autouse=True)
+def _ollama_watchdog_off_by_default(monkeypatch):
+    """The Ollama watchdog sends a real 1-token generate; no test may reach a real server.
+
+    On a box that runs Ollama, the zero-Claude edit and direct-executor tests
+    (which mock ``available_ollama_models``) would otherwise probe the
+    developer's live server. tests/test_ollama_watchdog.py turns it back on
+    against a local fake server.
+    """
+    monkeypatch.setenv("LLM_ROUTER_OLLAMA_WATCHDOG", "off")
+    monkeypatch.delenv("LLM_ROUTER_OLLAMA_WATCHDOG_RESTART", raising=False)
+
+
 # ── Provider-key hermeticity (GH-74) ────────────────────────────────────────
 # ``RouterConfig.available_providers`` is assembled straight from process env
 # vars (see ``RouterConfig._PROVIDER_MAP``), so anything that puts a real key

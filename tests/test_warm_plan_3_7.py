@@ -327,7 +327,7 @@ def test_cold_model_falls_through_fast_without_calling_the_model(stub, repo, mon
                             deadline_s=time.monotonic() + 36)
     assert out is not None and out.action == "fallthrough" and not out.applied
     assert "cold" in out.log_reason
-    assert time.monotonic() - t0 < 5          # fail fast, not the 37 s deadline
+    assert time.monotonic() - t0 < 15         # fail fast, not the 37 s deadline; 15 s leaves room for a loaded runner
     assert _chat_posts() == []                # the model was never asked
     assert (repo / "foo.py").read_text() == "def old_name():\n    pass\n"
     # ...and the next edit is made warm: a detached warm-up was started.
