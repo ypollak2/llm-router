@@ -27,6 +27,14 @@ from pathlib import Path
 import urllib.error
 import urllib.request
 
+# .env -> os.environ for this process (llm_router.env_loader). The real
+# environment wins; without the package this is a no-op, as it always was.
+try:
+    from llm_router.env_loader import load_dotenv_files as _apply_dotenv
+    _apply_dotenv()
+except Exception:
+    pass
+
 # ── Configuration ─────────────────────────────────────────────────────────────
 SNAPSHOT_LINE_THRESHOLD = 40       # Skip compression for small snapshots
 OLLAMA_BASE = os.environ.get("OLLAMA_HOST", "http://localhost:11434")

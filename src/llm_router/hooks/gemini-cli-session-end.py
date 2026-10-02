@@ -15,6 +15,14 @@ import json
 import sys
 import asyncio
 
+# .env -> os.environ for this process (llm_router.env_loader). The real
+# environment wins; without the package this is a no-op, as it always was.
+try:
+    from llm_router.env_loader import load_dotenv_files as _apply_dotenv
+    _apply_dotenv()
+except Exception:
+    pass
+
 
 async def get_session_summary() -> dict:
     """Gather session summary data.

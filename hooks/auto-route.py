@@ -195,50 +195,37 @@ try:
 except Exception:
     pass
 
-def _env_paths():
-    return [
-    Path.cwd() / ".env",  # CWD .env (hook runs from project root)
-    Path(__file__).resolve().parent.parent.parent.parent / ".env",  # dev: src/llm_router/hooks → project root
-    _router_home() / ".env",  # user-level config
-    Path.home() / ".env",
-]
+def _load_dotenv(load_into: "dict[str, str] | None" = None) -> None:
+    """Load .env files into `load_into` (default: os.environ); never override.
 
-
-def _load_dotenv() -> None:
-    """Load key=value pairs from .env files into os.environ (no override).
-
-    SEC-002/003: the working directory's .env is repository content. From it,
-    only provider API keys and non-endpoint LLM_ROUTER_* settings are loaded
-    (`llm_router.config.project_env_may_set`) — it must not choose where
-    prompts and keys are sent, nor inject PYTHONPATH/NODE_OPTIONS/DYLD_* into
-    this process and its children. If that rule cannot be imported, the
-    project file is skipped entirely rather than trusted.
+    One implementation, shared by every entry point: llm_router.env_loader.
+    The real environment always wins; the working directory's .env is filtered
+    (SEC-002/003). `load_into` lets tests load into a dict instead of os.environ.
     """
     try:
-        from llm_router.config import project_env_may_set
+        from llm_router.env_loader import load_dotenv_files
     except Exception:
-        project_env_may_set = None
-    project_env = Path.cwd() / ".env"
-    for env_path in _env_paths():
-        if not env_path.exists():
-            continue
-        untrusted = env_path == project_env
-        if untrusted and project_env_may_set is None:
-            continue
+        load_dotenv_files = None
+    if load_dotenv_files is not None:
+        load_dotenv_files(extra_paths=[Path(__file__).resolve().parent.parent.parent.parent / ".env"], target=load_into)
+        return
+    # llm_router is not importable (plugin bundle run by a bare interpreter):
+    # user-level files only. The project's own .env is never trusted without
+    # the SEC-002/003 filter that lives in llm_router.env_loader.
+    target = os.environ if load_into is None else load_into
+    for env_path in (_router_home() / ".env", Path.home() / ".env"):
         try:
-            for line in env_path.read_text().splitlines():
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                key = key.strip()
-                value = value.strip().strip("\"'")
-                if untrusted and not project_env_may_set(key):
-                    continue
-                if key and key not in os.environ:
-                    os.environ[key] = value
-        except OSError:
-            pass
+            text = env_path.read_text()
+        except (OSError, ValueError):
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            if key and key not in target:
+                target[key] = value.strip().strip("\"'")
 
 
 _load_dotenv()

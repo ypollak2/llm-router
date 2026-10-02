@@ -902,6 +902,10 @@ _KNOWN_SUBCOMMANDS = frozenset(
 def main() -> None:
     """Unified CLI: dispatches to MCP server or subcommands."""
     _make_output_encoding_safe()
+    # ~/.llm-router/.env -> os.environ, once, before any subcommand, the MCP
+    # server or the proxy reads a setting (real environment wins).
+    from llm_router.env_loader import load_dotenv_files
+    load_dotenv_files()
     args = sys.argv[1:]
 
     if args and args[0] in ("-h", "--help"):
