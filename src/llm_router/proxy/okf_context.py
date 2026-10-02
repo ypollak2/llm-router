@@ -36,6 +36,7 @@ from pathlib import Path
 from llm_router.local_agent import DEFAULT_MAX_PROMPT_TOKENS
 from llm_router.local_agent.compact import estimate_tokens, session_cwd
 from llm_router.proxy.steps import session_id_of, tier_text
+from llm_router.session_store import SENTINEL_OPEN as _SESSION_TAG
 
 #: Hard cap on the injected block, whatever room the request leaves.
 MAX_BLOCK_TOKENS = 1500
@@ -46,6 +47,10 @@ _LIMITS = (3, 2, 1)
 
 #: The sentinel okf.inject_context wraps retrieved documents in.
 _KNOWLEDGE_TAG = "<knowledge_context>"
+
+#: Session text a follow-up may carry into the local request. Small on purpose:
+#: the whole block shares ``MAX_BLOCK_TOKENS`` with the retrieved documents.
+SESSION_BLOCK_TOKENS = 300
 
 REASON_INJECTED = "injected"
 REASON_DISABLED = "disabled"
@@ -111,12 +116,29 @@ def attach(send: dict, original: dict, *,
             info.update(reason=REASON_NO_ROOM, room_tokens=room)
             return send, info
 
+        # A follow-up ("do it", "fix that") names nothing, so on its own it
+        # retrieves nothing. Only for those, hand the choke point this session
+        # (same id, same project root: it cannot read another session's log) so
+        # it can search with the prior turn and add a small prior-turn block.
+        # The target is the local tier, which is what the privacy gate asks.
+        # A standalone prompt takes the exact path it always took.
+        sid = None
+        if context_injection.is_followup(query):
+            sid = session_id_of(original)
+
         info["reason"] = REASON_NO_MATCH
         block = None
         for limit in _LIMITS:
-            block = context_injection.inject_system_prompt(
-                None, query, root=root, limit=limit)
-            if not block or _KNOWLEDGE_TAG not in block:
+            if sid:
+                block = context_injection.inject_system_prompt(
+                    None, query, root=root, limit=limit, session_id=sid,
+                    target_provider="local", session_tokens=SESSION_BLOCK_TOKENS,
+                    session_root=root)
+            else:
+                block = context_injection.inject_system_prompt(
+                    None, query, root=root, limit=limit)
+            if not block or (_KNOWLEDGE_TAG not in block
+                             and not (sid and _SESSION_TAG in block)):
                 # Nothing retrieved. (inject also attaches the repo-state line
                 # for any git repo; a project with no matching knowledge gets
                 # nothing from this module, not just that line.)

@@ -201,7 +201,7 @@ def _fake_inject(monkeypatch, sizes_by_limit: dict[int, int]):
     """Make the choke point return a knowledge block of a chosen size per limit."""
     calls: list[int] = []
 
-    def fake(system, objective, *, root=None, session_id=None, limit=3):
+    def fake(system, objective, *, root=None, session_id=None, limit=3, **_more):
         calls.append(limit)
         n = sizes_by_limit[limit]
         return "<knowledge_context>\n" + "x" * (n * 4) + "\n</knowledge_context>" if n else None

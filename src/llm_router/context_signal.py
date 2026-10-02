@@ -56,6 +56,44 @@ _ANAPHORA_RE = re.compile(r"\bthe\s+(rest|remaining|others?|ones?)\b", re.IGNORE
 
 
 
+# A short prompt that OPENS as a reply to the previous turn ("keep going", "do it",
+# "what about the npm?", "the third option..."). Measured 2026-10-02 on the 15
+# session/continuation prompts of the owner's real corpus: the deictic and
+# anaphora tests above missed 3 of the 12 whose repo and transcript still exist
+# (bare ordinal/"what about" openers carry no pronoun and no code noun).
+#
+# Anchored at the start and length-gated, because the same words open ordinary
+# standalone asks ("Next, implement pagination for the orders API", "Proceed with
+# the migration tonight"). A review of the first version found six such false
+# positives, so: bare acknowledgements/continuations count only when the whole
+# prompt is <= 3 words, and the phrase openers only up to the limits below.
+_FOLLOWUP_BARE_RE = re.compile(
+    r"^\s*(?:and\s+)?(?:"
+    r"continue|carry on|go on|go ahead|keep going|proceed|resume|"
+    r"do (?:it|that|them|both|this|those)|"
+    r"yes|yep|yeah|ok|okay|sure|"
+    r"again|once more|next|both|all of them|same|redo|retry"
+    r")\b",
+    re.IGNORECASE,
+)
+_FOLLOWUP_BARE_MAX_WORDS = 3
+
+_FOLLOWUP_PHRASE_RE = re.compile(
+    r"^\s*(?:(?:what|how) about\b|why (?:did|was)\b)", re.IGNORECASE)
+_FOLLOWUP_ORDINAL_RE = re.compile(
+    r"^\s*the (?:first|second|third|fourth|fifth|last|next|previous|other|same)\b",
+    re.IGNORECASE)
+_FOLLOWUP_ORDINAL_MAX_WORDS = 4
+
+
+def _opens_as_a_reply(prompt: str, n_words: int) -> bool:
+    return bool(
+        (n_words <= _FOLLOWUP_BARE_MAX_WORDS and _FOLLOWUP_BARE_RE.search(prompt))
+        or _FOLLOWUP_PHRASE_RE.search(prompt)
+        or (n_words <= _FOLLOWUP_ORDINAL_MAX_WORDS and _FOLLOWUP_ORDINAL_RE.search(prompt))
+    )
+
+
 # S3b. A RELATIVE `that`/`which` is not a deixis.
 #
 # `_DEICTIC_RE` treats a bare "that" as pointing at something in the user's
@@ -131,15 +169,24 @@ def _mask_relative_pronouns(prompt: str) -> str:
     return out
 
 
+def is_reply_shaped(prompt: str) -> bool:
+    """True when a SHORT prompt reads as a reply to the previous turn: a deictic
+    ("do it", "fix that"), a set anaphor ("the rest"), or an opener such as
+    "keep going" / "what about X". Narrower than `is_context_dependent`, which
+    also fires on code nouns ("the orders API", "install") that a standalone ask
+    contains just as often; those say nothing about a previous turn."""
+    p = prompt or ""
+    words = p.split()
+    if len(words) > 12:
+        return False
+    masked = _mask_relative_pronouns(p)
+    return bool(_DEICTIC_RE.search(masked) or _ANAPHORA_RE.search(masked)
+                or _opens_as_a_reply(p, len(words)))
+
+
 def is_context_dependent(prompt: str) -> bool:
     """True when the prompt references the user's local code/files/history/state."""
     p = prompt or ""
     if _CONTEXT_DEP_RE.search(p):
         return True
-    words = p.split()
-    # S3b: a relative `that`/`which` points inside the sentence, not at the
-    # user's state. Masked before the deixis check; see _mask_relative_pronouns.
-    masked = _mask_relative_pronouns(p)
-    return len(words) <= 12 and bool(
-        _DEICTIC_RE.search(masked) or _ANAPHORA_RE.search(masked)
-    )
+    return is_reply_shaped(p)
