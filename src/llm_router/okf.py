@@ -570,40 +570,6 @@ _LABEL_SHAPED_RE = re.compile(
     r"|[a-z]-[a-z])$",                               # "Q-J"
     re.I)
 
-# A bare ACRONYM: "OKF", "API", "CI". 2-5 letters, written in caps in the
-# ORIGINAL (not yet lowercased) prompt. It is never identifier-shaped (no
-# underscore, extension or slash) and never reaches the prose pass below
-# (<5 chars), so by construction it could not anchor even the one doc that
-# defines it — "what does OKF mean" and "explain okf.py" scored the right
-# file 3 but the acronym itself never entered `keywords` at all
-# (okf_context_diagnosis.md §3, root cause #3). Capitalisation, not length, is
-# the signal used to admit it: a short English word in running prose is not
-# written this way, so this does not reopen the >=6-char rule's false
-# positives above ("commit", "process", "working"). It is still only a
-# CANDIDATE here — find_relevant() promotes it to an anchor only when it
-# names something real (see _path_name_tokens and the glossary-tag check),
-# never from shape alone.
-_ACRONYM_RE = re.compile(r"\b[A-Z]{2,5}\b")
-
-# Generic technology vocabulary that is also, coincidentally, a plausible
-# file stem in almost any codebase — api.py, cli.py, sdk.py, app.py and the
-# rest. OKF-ANCHOR-02 (independent review of PR #233, reproduced on the real
-# 1637-doc llm-router index): "best API for weather data in my app" matched
-# this repo's own api.py and control_plane/api.py; "write a quick CLI tool in
-# bash" matched cli.py x3; "SDK comparison for AWS vs GCP" matched sdk.py;
-# "review the APP structure" matched tui/app.py. A stem match alone is not
-# evidence the PROJECT defined the term — it is evidence almost any project
-# would have a file by that name. Kept small and documented on purpose: this
-# is a stoplist against known collisions, not a general acronym filter, and
-# widening it blindly would quietly re-admit real project acronyms (OKF is
-# not here, and must not be added without the same scrutiny).
-_COMMON_TECH_ACRONYMS = frozenset({
-    "api", "cli", "sdk", "app", "ui", "ux", "url", "uri", "json", "yaml",
-    "http", "https", "sql", "aws", "gcp", "css", "html", "js", "ts", "db",
-    "os", "cpu", "gpu", "ram", "ide", "mcp", "llm", "ai", "ml", "pr", "ci",
-    "cd",
-})
-
 # Identifiers and paths must be pulled out BEFORE lowercasing and BEFORE the
 # \b\w+\b pass, which splits on "." and "/" — that pass turns `okf.py` into
 # {"okf", "py"} and `src/llm_router/okf.py` into four unremarkable words, so a
@@ -718,40 +684,38 @@ def _keywords_for_retrieval(prompt: str) -> list[str]:
     Code-shaped tokens (`find_relevant`, `src/llm_router/okf.py`) are extracted
     before the prose pass so that "." and "/" survive; they are what
     ``_IDENTIFIER_SHAPED_RE`` later accepts as evidence the prompt NAMES something.
-
-    Bare acronyms ("OKF") are pulled out separately: they are too short for the
-    prose pass and never identifier-shaped, so without this they could not even
-    be SCORED, let alone anchor anything (okf_context_diagnosis.md §3).
     """
     codeish = [m.group(0).lower() for m in _CODEISH_RE.finditer(prompt or "")]
     prose = [
         w for w in re.findall(r"\b\w{5,}\b", (prompt or "").lower())
         if not w.isdigit() and w not in _SCORE_STOPWORDS
     ]
-    acronyms = [m.group(0).lower() for m in _ACRONYM_RE.finditer(prompt or "")]
-    return list(dict.fromkeys(codeish + prose + acronyms))[:40]
+    return list(dict.fromkeys(codeish + prose))[:40]
 
 
 def _path_name_tokens(title: str) -> set[str]:
-    """A path-shaped title's basename and stem, lowercased ("okf.py", "okf").
+    """A path-shaped title's lowercased BASENAME only ("okf.py"), never its stem.
 
     ``_tokens()`` keeps a dotted/slashed form WHOLE (that is the point of it —
     see its docstring), so ``_tokens("src/llm_router/okf.py")`` contains the
     full relative path as one token, never the bare filename a human actually
     types. Asking about a file by name ("explain okf.py") could never anchor a
     doc whose title is more than one directory deep (okf_context_diagnosis.md
-    §3, root cause #3 — verified by direct function call, not inference).
-    Returns the empty set for a title that is not path-shaped at all.
+    §3, root cause #3).
+
+    Only the basename WITH its extension is returned. The bare stem ("okf",
+    "api", "test", "base") is deliberately not: a stem is a common English or
+    technology word in almost any codebase, and promoting it to an anchor made
+    generic prompts ("best API for weather data", "BASE image for docker")
+    retrieve this repo's own api.py / base.py (independent review of PR #233,
+    reproduced on the real 1637-doc index). A token carrying a real source
+    extension is an explicit filename; a stem is not. Returns the empty set for
+    a title that is not path-shaped at all.
     """
     if "/" not in title and "\\" not in title:
         return set()
     base = title.replace("\\", "/").rsplit("/", 1)[-1].lower()
-    out = {base} if base else set()
-    if "." in base:
-        stem = base.rsplit(".", 1)[0]
-        if stem:
-            out.add(stem)
-    return out
+    return {base} if base else set()
 
 
 def find_relevant(
@@ -814,72 +778,16 @@ def find_relevant(
     # Session-local labels join the anchor set, never the bulk-matching rules.
     anchors |= {k for k in keywords
                 if _LABEL_SHAPED_RE.match(k) and _seen_this_session(k)}
-    # Short acronyms ("OKF") are candidates (see _ACRONYM_RE) but shape alone
-    # never promotes one to an anchor — that would reopen exactly the
-    # >=6-char false-positive problem the comment above this function
-    # describes, just at a shorter length. A candidate anchors a doc only
-    # when it NAMES something THAT DOC's author actually defines: the doc's
-    # own stem/basename, or a tag its author deliberately wrote (the nearest
-    # thing this schema has to a glossary entry) — checked per document in
-    # `_acronym_names_concept`, never pooled into the global `anchors` set.
-    #
-    # Pooling would leak across documents: OKF-ANCHOR-02 (independent review
-    # of #233, reproduced on the real 1637-doc llm-router index) found that a
-    # stem match alone promoted "api" project-wide the moment ANY file was
-    # named api.py — "best API for weather data in my app" then matched that
-    # file, and "SDK comparison for AWS vs GCP" matched sdk.py, purely
-    # because almost any codebase has a file by that name. A tag is kept as
-    # a promotion route even for such a stoplisted acronym (see
-    # _COMMON_TECH_ACRONYMS) because tagging a SPECIFIC doc "api" is its
-    # author defining the term for that doc, not an incidental filename —
-    # but it must stay scoped to that doc, or a project that tags one
-    # module "api" would reopen the leak for every other module that merely
-    # happens to be named api.py too.
-    candidates = _acronym_candidates(prompt) & set(keywords)
     scored = []
     for c in concepts:
         s = _score(c, keywords)
         if s < floor:
             continue
-        if _is_indexed_source(c) and not (
-            (anchors & _anchor_tokens(c))
-            or _acronym_names_concept(candidates, c)
-        ):
+        if _is_indexed_source(c) and not (anchors & _anchor_tokens(c)):
             continue
         scored.append((c, s))
     scored.sort(key=lambda x: x[1], reverse=True)
     return [c for c, _s in scored[:limit]]
-
-
-def _acronym_candidates(prompt: str) -> set[str]:
-    """Bare acronym-shaped tokens actually written in caps in *prompt*.
-
-    Scanned straight off the prompt text, independent of ``_keywords_for_retrieval``'s
-    pooled list, so provenance is exact: an ordinary lowercase 5-letter prose word
-    (which the prose pass also admits, at >=5 chars) can never be mistaken for one
-    of these, and only genuine caps-written acronyms reach the anchor-promotion
-    check in ``find_relevant``.
-    """
-    return {m.group(0).lower() for m in _ACRONYM_RE.finditer(prompt or "")}
-
-
-def _acronym_names_concept(candidates: set[str], concept: "OKFConcept") -> bool:
-    """Does any acronym *candidate* actually name THIS doc, and only this doc?
-
-    Deliberately per-concept (OKF-ANCHOR-02): a doc's own tag names it
-    regardless of the common-tech stoplist (an author who tagged a module
-    "api" meant it), but a bare stem match is disqualified for a stoplisted
-    acronym — ``api.py`` existing is not evidence this doc is what "API" in
-    the prompt meant, it is evidence the repo has a file by a common name.
-    Checked against this concept's own tags/stem only, never a project-wide
-    pool, so tagging ONE module "api" cannot promote every OTHER module that
-    happens to be named api.py too.
-    """
-    if not candidates:
-        return False
-    if candidates & {str(t).lower() for t in concept.tags}:
-        return True
-    return bool((candidates & _path_name_tokens(concept.title)) - _COMMON_TECH_ACRONYMS)
 
 
 def _seen_this_session(label: str) -> bool:
@@ -907,10 +815,11 @@ def _seen_this_session(label: str) -> bool:
 def _anchor_tokens(concept: OKFConcept) -> set[str]:
     """The names a prompt can NAME this doc by: its symbols and its path tokens.
 
-    Includes the bare basename/stem of a path-shaped title (``_path_name_tokens``)
-    in addition to ``_tokens(concept.title)``'s whole-path token, so a prompt that
-    writes the filename the way a human actually does ("okf.py") can anchor a doc
-    titled with a longer relative path ("src/llm_router/okf.py").
+    Includes the basename (with extension, never the bare stem) of a path-shaped
+    title (``_path_name_tokens``) in addition to ``_tokens(concept.title)``'s
+    whole-path token, so a prompt that writes an explicit filename the way a
+    human does ("okf.py") can anchor a doc titled with a longer relative path
+    ("src/llm_router/okf.py").
     """
     out = {str(s).lower() for s in (concept.extra.get("key_symbols") or [])}
     out |= _tokens(concept.title)

@@ -1,27 +1,41 @@
-"""OKF anchor fix — a path's basename/stem and a project's own acronyms anchor it.
+"""OKF anchor fix — an explicit filename anchors the file it names.
 
 Diagnosis: ``~/.rsi/research/routing-experiment-2026-10-01/okf_context_diagnosis.md``
-§3, root cause #3. Two independent gaps, verified there by direct function calls
-against the real retrieval code before this fix:
+§3, root cause #3, narrowed after independent re-review (OKF-ANCHOR-02/03).
 
-1. ``_anchor_tokens(concept)`` ran ``_tokens(concept.title)`` on a path-shaped
-   title, and ``_tokens`` keeps a dotted/slashed form WHOLE — so
-   ``src/llm_router/okf.py`` tokenized to the full relative path, never to
-   ``okf.py`` or ``okf`` alone. A prompt that named the file the way a human
-   actually types it ("explain okf.py") could never anchor the doc.
-2. A bare acronym ("OKF") is 3 characters with no underscore, extension or
-   slash, so ``_keywords_for_retrieval`` never even collected it as a scorable
-   keyword, let alone an anchor. "What does OKF mean" could not have retrieved
-   the doc that answers it even with perfect project scoping.
+The only gap this fix closes: ``_anchor_tokens(concept)`` ran ``_tokens(concept.title)``
+on a path-shaped title, and ``_tokens`` keeps a dotted/slashed form WHOLE — so
+``src/llm_router/okf.py`` tokenized to the full relative path, never to
+``okf.py`` alone. A prompt that named the file the way a human actually types
+it ("explain okf.py") could never anchor the doc about it, even though the
+prompt token "okf.py" is already identifier-shaped and already an anchor
+CANDIDATE (``_IDENTIFIER_SHAPED_RE`` matches on the ``.py`` extension).
 
-Both are fixed narrowly: ``_anchor_tokens`` now also carries a path-shaped
-title's basename and stem (``_path_name_tokens``); a bare acronym is collected
-only when it is written in caps in the prompt (``_ACRONYM_RE`` /
-``_acronym_candidates`` — capitalisation, not length, is the signal, so this
-does not reopen the ">=6 chars" false-positive problem _IDENTIFIER_SHAPED_RE's
-own docstring describes), and it is promoted to an ANCHOR only when it names
-something the project actually defines: an indexed file's own stem, or a tag a
-concept's author wrote.
+Fixed narrowly: ``_anchor_tokens`` now also carries a path-shaped title's
+BASENAME, with its extension, via ``_path_name_tokens``. Nothing else changed.
+
+Two earlier, broader attempts at this fix were tried and both reverted after
+review, because both reopened the exact false-positive class
+``_IDENTIFIER_SHAPED_RE``'s own docstring warns about, just through a
+different door:
+
+1. Carrying the bare STEM too ("okf", not just "okf.py") let any short,
+   common word that happened to equal a real file's stem act as an anchor —
+   "BASE image for docker", "best API for weather data" matched this repo's
+   own base.py / api.py purely because a file by that name exists somewhere
+   in a 1637-doc index. Dropped: only the basename, never the stem, is
+   carried now.
+2. A bare capitalised acronym ("OKF", "API", "CLI") admitted as a keyword and
+   promoted via a doc's stem or tag, even behind a stoplist, still leaked:
+   13 of 13 non-stoplisted short stems from the real index (GC, BASE, TEST,
+   CORE, STATE, SSE, PII, TUI, TEAM, TEXT, COST, EDIT, FS, ...) reproduced the
+   same collision the stoplist was built to prevent, and the auto-applied
+   "py" tag (present on 1595 of 1637 real docs) made a tag-based route
+   abusable too. Dropped entirely: no acronym machinery of any kind remains.
+
+Residual, accepted: "what does OKF mean" and bare "okf" still retrieve
+nothing. Only an explicit filename (a token with a dot plus a known source
+extension, matched against a doc's basename) anchors; nothing shorter does.
 """
 from __future__ import annotations
 
@@ -69,6 +83,44 @@ def store(tmp_path: Path) -> Path:
     return tmp_path
 
 
+@pytest.fixture
+def store_with_real_stems(tmp_path: Path) -> Path:
+    """A store shaped like the real 1637-doc llm-router index: files whose
+    STEMS are common English/tech words, plus the near-universal "py" tag
+    that index auto-applies to almost every source doc (1595 of 1637 real
+    docs carry it). Neither a bare-stem match nor the "py" tag may anchor —
+    this is exactly the leak OKF-ANCHOR-02 found and this fix must not
+    reopen, under either route.
+    """
+    proj = tmp_path / "projects" / okf.project_slug(tmp_path / "repo-stems")
+    proj.mkdir(parents=True)
+    files = {
+        "api": "src/llm_router/api.py",
+        "cli": "src/llm_router/cli.py",
+        "base": "src/llm_router/base.py",
+        "gc": "src/llm_router/commands/gc.py",
+        "test": "src/llm_router/commands/test.py",
+        "core": "src/llm_router/observability/core.py",
+        "state": "src/llm_router/state.py",
+    }
+    for stem, title in files.items():
+        (proj / f"{stem}.md").write_text(
+            textwrap.dedent(f"""\
+                ---
+                type: SourceFile
+                title: {title}
+                description: A module named {stem}.
+                tags: [py]
+                key_symbols: [{stem}_entry]
+                ---
+
+                Defines: {stem}_entry.
+                """),
+            encoding="utf-8",
+        )
+    return tmp_path
+
+
 @pytest.fixture(autouse=True)
 def _clean_cache():
     okf.invalidate_cache()
@@ -80,7 +132,7 @@ def _titles(hits):
     return [c.title for c in hits]
 
 
-# ── the two headline questions the diagnosis names ───────────────────────────
+# ── the headline question the diagnosis names ────────────────────────────────
 
 
 def test_explain_okf_py_retrieves_the_doc(store, monkeypatch):
@@ -90,17 +142,22 @@ def test_explain_okf_py_retrieves_the_doc(store, monkeypatch):
     assert _titles(hits) == ["src/llm_router/okf.py"]
 
 
-def test_what_does_okf_mean_retrieves_the_doc(store, monkeypatch):
-    """The bare acronym, capitalised as a human actually writes it, must anchor too."""
-    monkeypatch.setenv("LLM_ROUTER_PROJECT_ROOT", str(store / "repo-a"))
-    hits = okf.find_relevant("what does OKF mean", base=store)
-    assert _titles(hits) == ["src/llm_router/okf.py"]
+# ── the basename fix in isolation: basename yes, bare stem no ────────────────
 
 
-# ── the basename/stem fix in isolation ────────────────────────────────────────
+def test_anchor_tokens_gains_the_basename_this_fix_adds():
+    """``_path_name_tokens`` is this fix's only addition to ``_anchor_tokens``,
+    and it contributes the basename ("okf.py") and nothing else — in
+    particular, never a bare stem on its own (OKF-ANCHOR-02's lesson).
 
+    A bare "okf" DOES still end up in the full anchor set below, same as on
+    origin/main (``_tokens(title)``'s generic word-split already produces it
+    from "src/llm_router/okf.py", independent of this fix, and is gated by
+    the score floor like any other token — untouched here). What matters is
+    that ``_path_name_tokens`` itself, this fix's new surface, is basename-only.
+    """
+    assert okf._path_name_tokens("src/llm_router/okf.py") == {"okf.py"}
 
-def test_anchor_tokens_carries_basename_and_stem():
     concept = okf.OKFConcept(
         path=Path("unused.md"),
         type="SourceFile",
@@ -112,7 +169,6 @@ def test_anchor_tokens_carries_basename_and_stem():
     )
     anchors = okf._anchor_tokens(concept)
     assert "okf.py" in anchors, "basename missing from anchor tokens"
-    assert "okf" in anchors, "stem missing from anchor tokens"
     # the pre-fix behaviour (whole-path token) must still be present too
     assert "src/llm_router/okf.py" in anchors
 
@@ -121,189 +177,50 @@ def test_path_name_tokens_empty_for_a_non_path_title():
     assert okf._path_name_tokens("Routing Policy Overview") == set()
 
 
-# ── the negative test: shape alone must not promote a generic acronym ────────
+def test_path_name_tokens_is_basename_only():
+    assert okf._path_name_tokens("src/llm_router/okf.py") == {"okf.py"}
 
 
-def test_generic_acronym_does_not_match_an_unrelated_doc(store, monkeypatch):
-    """A capitalised 3-letter word that names nothing in the project must not anchor.
+# ── the negative test: no bare-stem route, no tag route, for a realistic index ─
 
-    "CLI" and "WTF" are the acronym shape (2-5 caps letters) but match no indexed
-    file's stem and no concept's tag in this fixture, so neither may retrieve
-    billing/invoice_reconciler.py or src/llm_router/okf.py. Without the
-    stem/tag gate, EVERY capitalised short word would start matching whichever
-    doc happens to clear the score floor on incidental vocabulary — the same
-    failure mode OKF-INDEX-01 already fixed once for ordinary words.
+
+def test_generic_short_stem_prompts_do_not_match_real_style_stems(
+    store_with_real_stems, monkeypatch,
+):
+    """Generic, repo-agnostic prompts that happen to contain a capitalised
+    short word must not retrieve a file merely because that file's STEM
+    equals the word, and must not retrieve it via the near-universal "py"
+    tag either. Every doc in this fixture is tagged "py"; if the tag alone
+    could anchor, all of them would leak on every one of these prompts.
+    """
+    monkeypatch.setenv("LLM_ROUTER_PROJECT_ROOT", str(store_with_real_stems / "repo-stems"))
+    prompts = [
+        "how does GC work in Java",
+        "BASE image for docker",
+        "best API for weather data in my app",
+        "is PY good for data science",
+        "how do I TEST a flask endpoint",
+        "what is the CORE idea behind functional programming",
+        "how should I manage STATE in a react app",
+        "write a quick CLI tool in bash",
+    ]
+    for p in prompts:
+        hits = okf.find_relevant(p, base=store_with_real_stems)
+        assert _titles(hits) == [], f"leaked on {p!r}: {_titles(hits)}"
+
+
+# ── documented residual: no acronym or bare-stem path exists at all ──────────
+
+
+def test_what_does_okf_mean_is_unanswered(store, monkeypatch):
+    """Accepted residual: the bare acronym/stem "okf" (lowercase or caps) is
+    not identifier-shaped (no dot, slash or underscore) and is below the
+    >=5-char prose floor, so it is never collected as a scorable keyword at
+    all. "What does OKF mean" cannot retrieve the doc that answers it.
+    Explicit filenames ("okf.py") already work; the bare name does not, and
+    is left that way on purpose — see the module docstring above for why the
+    two broader fixes that could have closed this were both reverted.
     """
     monkeypatch.setenv("LLM_ROUTER_PROJECT_ROOT", str(store / "repo-a"))
-    assert okf.find_relevant("explain how the CLI should behave here", base=store) == []
-    assert okf.find_relevant("WTF is going on with this invoice", base=store) == []
-
-
-def test_lowercase_short_word_is_not_treated_as_an_acronym(store, monkeypatch):
-    """Only CAPS admits the acronym path; lowercase stays excluded by length.
-
-    Residual, intentional: lowercase "okf" alone still retrieves nothing. It
-    is 3 characters with no path/underscore shape, below the >=5-char prose
-    floor and outside the caps-only acronym gate, so it is never collected as
-    a keyword at all. Fixing this would mean admitting any short lowercase
-    word that happens to be a project acronym, which reopens the exact
-    false-positive class _IDENTIFIER_SHAPED_RE's own docstring describes —
-    out of scope for this fix. "What does OKF mean" (caps) already works;
-    "what does okf mean" (lowercase) does not, and is left that way on
-    purpose.
-    """
-    monkeypatch.setenv("LLM_ROUTER_PROJECT_ROOT", str(store / "repo-a"))
+    assert okf.find_relevant("what does OKF mean", base=store) == []
     assert okf.find_relevant("okf", base=store) == []
-
-
-def test_acronym_promotion_requires_an_actual_stem_or_tag_match(store, monkeypatch):
-    """The gate: a caps acronym only anchors a doc it actually names.
-
-    "INV" matches neither invoice_reconciler.py's stem nor okf.py's — it must
-    retrieve nothing, even though "invoice" words are nearby in the fixture.
-    """
-    monkeypatch.setenv("LLM_ROUTER_PROJECT_ROOT", str(store / "repo-a"))
-    assert okf.find_relevant("INV needs a fix", base=store) == []
-
-
-# ── OKF-ANCHOR-02: a common tech acronym equalling a real stem must not
-#    anchor a generic, repo-agnostic question (independent review of #233,
-#    reproduced on the real 1637-doc llm-router index) ──────────────────────
-
-
-@pytest.fixture
-def store_with_common_acronym_stems(tmp_path: Path) -> Path:
-    """A store where api.py and cli.py genuinely exist, with no tag naming
-    them — a pure filename coincidence, the shape the review flagged."""
-    proj = tmp_path / "projects" / okf.project_slug(tmp_path / "repo-b")
-    proj.mkdir(parents=True)
-    (proj / "api.md").write_text(
-        textwrap.dedent("""\
-            ---
-            type: SourceFile
-            title: src/llm_router/api.py
-            description: HTTP endpoints for the router service.
-            tags: []
-            key_symbols: [create_app, route_request]
-            ---
-
-            Defines: create_app, route_request.
-            """),
-        encoding="utf-8",
-    )
-    (proj / "cli.md").write_text(
-        textwrap.dedent("""\
-            ---
-            type: SourceFile
-            title: src/llm_router/cli.py
-            description: Command-line entry point.
-            tags: []
-            key_symbols: [main, parse_args]
-            ---
-
-            Defines: main, parse_args.
-            """),
-        encoding="utf-8",
-    )
-    return tmp_path
-
-
-@pytest.fixture
-def store_with_tagged_acronym(tmp_path: Path) -> Path:
-    """A store where NO file is named api.py, but one doc is deliberately
-    TAGGED "api" — an author's own glossary entry, not a filename collision.
-    """
-    proj = tmp_path / "projects" / okf.project_slug(tmp_path / "repo-c")
-    proj.mkdir(parents=True)
-    (proj / "throttle.md").write_text(
-        textwrap.dedent("""\
-            ---
-            type: SourceFile
-            title: ops/throttle.py
-            description: Rate limiting for outbound calls.
-            tags: [api]
-            key_symbols: [throttle_request]
-            ---
-
-            Defines: throttle_request.
-            """),
-        encoding="utf-8",
-    )
-    return tmp_path
-
-
-def test_generic_tech_acronym_does_not_match_its_own_repos_file(
-    store_with_common_acronym_stems, monkeypatch,
-):
-    """A repo-agnostic question must not retrieve this repo's api.py/cli.py
-    just because they happen to exist and the question says "API" / "CLI".
-    """
-    monkeypatch.setenv("LLM_ROUTER_PROJECT_ROOT", str(store_with_common_acronym_stems / "repo-b"))
-    hits = okf.find_relevant(
-        "what's the best API for weather data in my app", base=store_with_common_acronym_stems)
-    assert _titles(hits) == [], f"leaked: {_titles(hits)}"
-    hits = okf.find_relevant(
-        "write a quick CLI tool in bash", base=store_with_common_acronym_stems)
-    assert _titles(hits) == [], f"leaked: {_titles(hits)}"
-
-
-def test_tagged_acronym_still_anchors_despite_the_stoplist(
-    store_with_tagged_acronym, monkeypatch,
-):
-    """A stoplisted acronym still anchors a doc the project deliberately
-    TAGGED with it — that is the project defining the term, not a filename
-    coincidence, so the stoplist must not block it.
-
-    ops/throttle.py's stem shares nothing with "api"; the only route to it is
-    the tag.
-    """
-    monkeypatch.setenv("LLM_ROUTER_PROJECT_ROOT", str(store_with_tagged_acronym / "repo-c"))
-    hits = okf.find_relevant("what does our API limiter do", base=store_with_tagged_acronym)
-    assert _titles(hits) == ["ops/throttle.py"], f"got: {_titles(hits)}"
-
-
-def test_tagged_acronym_does_not_leak_to_an_unrelated_stem_match(
-    store_with_common_acronym_stems, store_with_tagged_acronym, monkeypatch, tmp_path,
-):
-    """The critical regression this helper exists to prevent: tagging ONE
-    module "api" must not promote every OTHER module merely named api.py.
-
-    Builds one store holding BOTH the stem-only api.py (no tag) and the
-    tag-only throttle.py, so a pooled, project-wide anchor set would wrongly
-    let the acronym admit api.py too (that was PR A's initial, broken fix for
-    this review comment). Per-doc scoping must keep them apart.
-    """
-    combined = tmp_path / "combined"
-    proj = combined / "projects" / okf.project_slug(combined / "repo-d")
-    proj.mkdir(parents=True)
-    (proj / "api.md").write_text(
-        textwrap.dedent("""\
-            ---
-            type: SourceFile
-            title: src/llm_router/api.py
-            description: HTTP endpoints for the router service.
-            tags: []
-            key_symbols: [create_app, route_request]
-            ---
-
-            Defines: create_app, route_request.
-            """),
-        encoding="utf-8",
-    )
-    (proj / "throttle.md").write_text(
-        textwrap.dedent("""\
-            ---
-            type: SourceFile
-            title: ops/throttle.py
-            description: Rate limiting for outbound calls.
-            tags: [api]
-            key_symbols: [throttle_request]
-            ---
-
-            Defines: throttle_request.
-            """),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("LLM_ROUTER_PROJECT_ROOT", str(combined / "repo-d"))
-    hits = okf.find_relevant("what's the best API for weather data in my app", base=combined)
-    assert _titles(hits) == ["ops/throttle.py"], f"got: {_titles(hits)}"
