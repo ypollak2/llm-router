@@ -1530,6 +1530,37 @@ def _ollama_contention_hint() -> str:
     return f"\n⚠️ {warning}" if warning else ""
 
 
+def _ollama_watchdog_hint() -> str:
+    """One line when the persisted watchdog state says the local Ollama is hung
+    (accepts connections, does not generate). Empty when fine, unknown or off."""
+    try:
+        from llm_router.ollama_watchdog import enabled, hung_hint
+        hint = hung_hint() if enabled() else None
+    except Exception:
+        return ""
+    return f"\n{hint}" if hint else ""
+
+
+def _ollama_watchdog_bg() -> None:
+    """Detach a hang check of the local Ollama (a real 1-token generate; /api/tags
+    cannot see a wedged runner). Non-blocking; rate-limited and single-flight inside
+    the module; restart is opt-in there (LLM_ROUTER_OLLAMA_WATCHDOG_RESTART)."""
+    try:
+        from llm_router.ollama_watchdog import enabled
+        if not enabled():
+            return
+        subprocess.Popen(
+            [sys.executable, "-m", "llm_router.ollama_watchdog"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            env=os.environ.copy(),
+        )
+    except Exception:
+        pass  # never block session start
+
+
 def _drain_judge_queue_bg() -> None:
     """Detach a background drain of the judge grading queue.
 
@@ -1889,6 +1920,7 @@ def main() -> None:
     hints += _latency_hint()
     hints += _preflight_check()
     hints += _ollama_contention_hint()
+    hints += _ollama_watchdog_hint()
 
     # 5. Trigger benchmark refresh in background if stale (v5.0 adaptive router).
     # Opt-in via LLM_ROUTER_AUTO_BENCHMARK_FETCH=1 (default off — local-first,
@@ -1918,6 +1950,9 @@ def main() -> None:
     # enqueues, so something has to grade sampled responses out of band.
     # Detached, never blocks session start.
     _drain_judge_queue_bg()
+
+    # 6c. Hang check of the local Ollama (detached; see _ollama_watchdog_bg).
+    _ollama_watchdog_bg()
 
     # Visible UI signal — Claude Code surfaces stderr as
     # "SessionStart:startup hook success: <msg>". Print the BANNER box first

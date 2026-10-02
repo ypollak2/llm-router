@@ -667,6 +667,16 @@ def maybe_replace(
         warm.warm_edit_model_bg(model)
         return ScopedEditOutcome("fallthrough", f"ZERO_CLAUDE_EDIT: cold model — {cold_reason}")
 
+    # The server answering /api/tags does not mean the runner generates: a hung
+    # Ollama (2026-10-02: 0% CPU, 16 days up) passes every check above and then
+    # burns the whole deadline. The watchdog is a rate-limited 1-token probe
+    # with a persisted breaker. Unlike an unreachable model this hands the turn
+    # to Claude (not a block): the work is still doable, just not here.
+    from llm_router import ollama_watchdog
+    hung_reason = ollama_watchdog.gate()
+    if hung_reason:
+        return ScopedEditOutcome("fallthrough", f"ZERO_CLAUDE_EDIT: local Ollama unhealthy — {hung_reason}")
+
     from llm_router.edit import read_file_for_edit
     file_contents: dict[str, str] = {}
     for rel in resolved:
