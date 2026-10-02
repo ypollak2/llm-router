@@ -294,6 +294,47 @@ def is_thinking_rejection(status: int, body_text: str) -> bool:
     return status == 400 and "thinking" in body_text.lower()
 
 
+# Claude Haiku 4.5 (model id ``claude-haiku-4-5-20251001``), per
+# platform.claude.com/docs/en/build-with-claude/extended-thinking and
+# platform.claude.com/docs/en/about-claude/models/overview (fetched
+# 2026-10-02): max output 64,000 tokens (vs 128K on Sonnet/Opus/Fable).
+HAIKU_MAX_OUTPUT_TOKENS = 64_000
+
+
+def for_haiku(body: dict) -> dict:
+    """A copy of ``body`` with the fields Haiku 4.5 rejects outright removed
+    or clamped, for the opt-in Haiku tier (``proxy/tiers.py``,
+    ``ClaudeTierPolicy``'s ``haiku_rewrite``).
+
+    Per platform.claude.com/docs/en/build-with-claude/extended-thinking
+    (fetched 2026-10-02): "If your model supports only extended thinking
+    (Claude Sonnet 4.5, Claude Opus 4.5, **Claude Haiku 4.5**, and earlier
+    Claude 4 models) ... `type: "adaptive"` returns a 400 error" -- Claude
+    Code's main-loop calls send exactly that type, so ``thinking`` (and any
+    ``context_management`` ``clear_thinking_*`` edit, which requires thinking
+    to be enabled) is dropped entirely rather than rewritten to the manual
+    ``enabled``/``budget_tokens`` form: that form forces Claude to think on
+    every call, a behavior change this narrow rewrite does not make.
+
+    Per platform.claude.com/docs/en/about-claude/models/overview (fetched
+    2026-10-02), the model comparison table lists Claude Haiku 4.5's "Default
+    effort" as "Not supported" -- the only model in the current lineup where
+    that row is not a level name -- so ``output_config`` (which carries only
+    ``effort`` on a Claude Code request) is dropped too.
+
+    ``max_tokens`` above Haiku's 64K output ceiling (same table, "Max
+    output") is clamped down rather than treated as ineligible: Claude Code
+    requests a fixed budget it does not need in full on an easy turn, so
+    clamping is safe and keeps more turns eligible.
+    """
+    out = without_thinking(body)
+    out.pop("output_config", None)
+    max_tokens = out.get("max_tokens")
+    if isinstance(max_tokens, int) and max_tokens > HAIKU_MAX_OUTPUT_TOKENS:
+        out["max_tokens"] = HAIKU_MAX_OUTPUT_TOKENS
+    return out
+
+
 def parse_sse_usage(buf: bytes) -> tuple[dict, str | None, str | None]:
     """``(usage, stop_reason, message_id)`` from a complete SSE body."""
     usage: dict = {}

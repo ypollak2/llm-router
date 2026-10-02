@@ -78,8 +78,9 @@ from llm_router.proxy.loop_guard import (
 )
 from llm_router.proxy.cache_cost import Stickiness, conversation_key
 from llm_router.proxy.steps import STEP_CLASSES, classify_text, prev_tools, session_id_of, step_class
-from llm_router.proxy.tiers import REASON_DECISION_ERROR, ClaudeTierPolicy
+from llm_router.proxy.tiers import REASON_DECISION_ERROR, REWRITE_HAIKU, ClaudeTierPolicy
 from llm_router.proxy.translate import (
+    for_haiku,
     has_served_turn,
     is_thinking_rejection,
     parse_sse_usage,
@@ -445,6 +446,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                     # The rewrite never ran, so neither did its switch.
                     row.update(served_model=row.get("requested_model"), tier_switch=False,
                                tier_switch_cost_usd=None)
+                    row.pop("tier_body_rewrite", None)
                 if on_retry is not None:
                     on_retry()
                 raw, body = original
@@ -566,9 +568,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         def _on_usage(usage) -> None:
             sticky.record_usage(key, usage)
 
-        if not decision.rewritten:
+        if not decision.rewritten and decision.body_rewrite is None:
             return await forward(request, raw, body, row, on_usage=_on_usage)
         sent = dict(body, model=decision.served_model)
+        if decision.body_rewrite == REWRITE_HAIKU:
+            # Haiku 4.5 400s on `thinking.type: adaptive` and has no effort
+            # parameter: serve it a body it accepts (translate.for_haiku).
+            sent = for_haiku(sent)
+            row["tier_body_rewrite"] = REWRITE_HAIKU
 
         def _on_retry() -> None:
             sticky.record(key, body.get("model"), decision.complexity, "tier_rejected")

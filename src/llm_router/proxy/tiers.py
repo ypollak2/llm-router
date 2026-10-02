@@ -52,6 +52,21 @@ The decision, per call, in order (the first that applies wins):
                     the request's ``thinking.type`` and, if it sets one,
                     ``output_config.effort`` (Haiku 4.5 takes neither adaptive
                     thinking nor effort; Claude Code sends both).
+``haiku_rewrite``   opt-in (``haiku_rewrite: true`` in the policy YAML, OFF
+                    by default): when the floor above would otherwise move a
+                    ``haiku``-targeted call up to ``sonnet`` purely because
+                    of ``thinking``/``effort``, AND the call is eligible
+                    (``ClaudeTierPolicy._haiku_eligible`` -- no image/document
+                    content anywhere in the transcript, only custom client
+                    tools, and the body's approximate size under
+                    ``HAIKU_MAX_CONTEXT_TOKENS``), the call stays on
+                    ``haiku`` and ``TierDecision.body_rewrite`` is set so
+                    ``server.py`` rewrites the body with
+                    ``proxy.translate.for_haiku`` before forwarding instead
+                    of raising the tier. Never bypasses ``allow_upgrade``,
+                    stickiness, or the escalation check below -- it only
+                    changes what happens when the policy already landed on
+                    ``haiku``.
 ``escalation``      checked after ``thinking_floor``, on EVERY call (not just
                     the first): ``escalation.correction_signal`` found a
                     contradiction, a ``claude:`` re-ask, or a run of failed
@@ -79,16 +94,26 @@ or the file ``--tier-policy`` / ``LLM_ROUTER_PROXY_TIER_POLICY`` names), never f
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from llm_router.proxy import escalation
 from llm_router.proxy.cache_cost import ConvState, Stickiness, conversation_key, switch_cost_usd
-from llm_router.proxy.steps import has_client_tools, is_first_call, tier_text, user_pinned_model
+from llm_router.proxy.steps import has_client_tools, is_first_call, non_system, tier_text, user_pinned_model
 
 DEFAULT_POLICY_PATH = Path(__file__).with_name("claude_tiers.yaml")
 THINKING_TYPES = ("enabled", "adaptive")
+
+# Claude Haiku 4.5's context window is 200K tokens, against 1M on Sonnet
+# 5.5/Opus 5.5/Fable 5.1 (platform.claude.com/docs/en/about-claude/models/
+# overview, fetched 2026-10-02). The limit below leaves a 25% margin under
+# that ceiling for the system prompt, tool schemas, and output this
+# chars/4 estimate (``token_budget.estimate_tokens``, a hot-path
+# approximation, not an exact count) does not see.
+HAIKU_MAX_CONTEXT_TOKENS = 150_000
+REWRITE_HAIKU = "haiku"
 
 REASON_UNKNOWN_MODEL = "unknown_model"
 REASON_CONFIG_PINNED = "config_pinned"
@@ -106,6 +131,9 @@ REASON_UNSEEN = "unseen"  # internal state marker, never a row's tier_reason
 REASON_EXPLICIT_OPUS_PIN = "explicit_opus_pin"
 REASON_ESCALATION = "escalation"  # detail carries escalation.REASON_* (contradiction/claude_reask/tool_failures)
 REASON_LONG_FIRST_PROMPT = "long_first_prompt_floor"
+# Phase "haiku-tier": opt-in body rewrite in place of the thinking floor, see
+# the module docstring's ``haiku_rewrite`` entry.
+REASON_HAIKU_REWRITE = "haiku_rewrite"
 
 
 @dataclass(frozen=True)
@@ -130,6 +158,7 @@ class TierDecision:
     chain_head: list = field(default_factory=list)
     complexity_score: float | None = None  # complexity_knn P(needs frontier), when consulted
     detail: str | None = None  # e.g. escalation.REASON_* when reason == REASON_ESCALATION
+    body_rewrite: str | None = None  # REWRITE_HAIKU when server.py must run translate.for_haiku on the body
 
     @property
     def rewritten(self) -> bool:
@@ -176,6 +205,77 @@ def _canonical(model: str | None) -> str | None:
     return pricing.resolve(model) or model.strip().lower()
 
 
+def _has_media(body: dict) -> bool:
+    """True when any message in the WHOLE transcript (not just the newest
+    turn -- ``steps._newest_turn_has_media`` is a different, narrower check
+    used for step eligibility) carries an image or document, including one
+    nested inside a ``tool_result``. Haiku serving is excluded on sight of
+    either: this rewrite only targets the narrow text-only class."""
+    for m in non_system(body.get("messages") or []):
+        content = m.get("content") if isinstance(m, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") in ("image", "document"):
+                return True
+            inner = block.get("content")
+            if block.get("type") == "tool_result" and isinstance(inner, list):
+                if any(isinstance(x, dict) and x.get("type") in ("image", "document") for x in inner):
+                    return True
+    return False
+
+
+def _has_mid_conversation_system_message(body: dict) -> bool:
+    """True when any entry in ``messages`` -- including the ones
+    ``non_system()`` filters out, which is the point here -- has
+    ``role: "system"``.
+
+    Found live, not in any doc: Claude Code 2.1.285 (beta flags
+    ``mid-conversation-system-2026-04-07`` and ``per-turn-control-2026-07-01``)
+    sends one of these on every call, carrying the per-turn
+    ``output_config.effort`` -- it is not an occasional mid-conversation
+    event, it is standard shape. ``for_haiku`` strips a top-level
+    ``output_config``, but this one lives on the message, which
+    ``non_system()``-based scans (``_has_media``, ``_only_custom_tools``)
+    never see, since they exist to skip exactly this role. Haiku 4.5
+    rejects the role outright -- a live smoke call got back
+    ``{"type":"invalid_request_error","message":"role 'system' is not
+    supported on this model"}`` -- and dropping the message instead of
+    the whole rewrite would silently discard real content (environment
+    info, reminders) and/or an effort change the turn actually made, so
+    this is an eligibility exclusion, not something ``for_haiku``
+    rewrites around."""
+    return any(isinstance(m, dict) and m.get("role") == "system" for m in body.get("messages") or [])
+
+
+def _only_custom_tools(body: dict) -> bool:
+    """True when every client tool is a plain custom function (no ``type``,
+    or ``type: "custom"``). Anthropic's built-in server tools (bash,
+    text_editor, computer, web_search, code_execution, ...) carry a
+    model-specific ``type`` id and are excluded from this narrow rewrite --
+    Claude Code's own tool calls are all custom (``tests/fixtures/proxy/
+    continuation_request.json`` has none with a ``type``)."""
+    for t in body.get("tools") or []:
+        if isinstance(t, dict) and t.get("type") not in (None, "custom"):
+            return False
+    return True
+
+
+def _approx_context_tokens(body: dict) -> int:
+    """Fast chars/4 estimate (``token_budget.estimate_tokens``) of what the
+    call sends as context: messages, system prompt, and tool schemas. A
+    hot-path approximation, not a token count Anthropic would bill -- the
+    eligibility check below leaves a 25% margin under Haiku's real 200K
+    window specifically because of this estimate's error."""
+    from llm_router.token_budget import estimate_tokens
+
+    parts = [json.dumps(body.get("messages") or []), json.dumps(body.get("system") or ""),
+             json.dumps(body.get("tools") or [])]
+    return estimate_tokens("".join(parts))
+
+
 class ClaudeTierPolicy:
     """(task_type, complexity) -> Claude tier, with the no-downgrade rules."""
 
@@ -183,7 +283,7 @@ class ClaudeTierPolicy:
                  allow_upgrade: bool = False, pinned_models: tuple[str, ...] = (),
                  cold_gap_s: float = 3600.0, switch_after_first_call: bool = False,
                  conversation_level: bool = False, classify=None,
-                 complexity_knn: bool = False) -> None:
+                 complexity_knn: bool = False, haiku_rewrite: bool = False) -> None:
         if not tiers:
             raise ValueError("tier policy has no tiers")
         self.tiers = tiers
@@ -207,6 +307,9 @@ class ClaudeTierPolicy:
         # ``complexity_knn: true`` in the policy YAML plugs the Phase 2.1 score
         # in exactly here, as a wrapper on that callable (off by default).
         self.complexity_knn = complexity_knn
+        # ``haiku_rewrite: true`` serves eligible turns on the Haiku tier by
+        # rewriting the body (see ``_haiku_eligible``); OFF by default.
+        self.haiku_rewrite = haiku_rewrite
         self._classify = with_complexity_knn(classify) if complexity_knn else classify
         self._ids: dict[str, Tier] = {}
         for t in tiers:
@@ -234,7 +337,8 @@ class ClaudeTierPolicy:
                    cold_gap_s=float(stick.get("cold_gap_s", 3600.0)),
                    switch_after_first_call=bool(stick.get("switch_after_first_call", False)),
                    conversation_level=conversation_level, classify=classify,
-                   complexity_knn=bool(data.get("complexity_knn", False)))
+                   complexity_knn=bool(data.get("complexity_knn", False)),
+                   haiku_rewrite=bool(data.get("haiku_rewrite", False)))
 
     @classmethod
     def load(cls, path: str | Path | None = None, *, conversation_level: bool = False,
@@ -264,10 +368,36 @@ class ClaudeTierPolicy:
     def _accepts(tier: Tier, thinking: str | None, effort: bool) -> bool:
         return (thinking is None or thinking in tier.thinking) and (not effort or tier.effort)
 
-    def _allowed(self, tier: Tier, requested: Tier, thinking: str | None, effort: bool) -> bool:
+    def _allowed(self, tier: Tier, requested: Tier, thinking: str | None, effort: bool,
+                 haiku_ok: bool = False) -> bool:
         if not self.allow_upgrade and self.rank[tier.name] > self.rank[requested.name]:
             return False
-        return self._accepts(tier, thinking, effort)
+        return self._accepts(tier, thinking, effort) or self._rewritable(tier, haiku_ok)
+
+    def _rewritable(self, tier: Tier, haiku_ok: bool) -> bool:
+        """True when ``tier`` is the Haiku tier and this body may be rewritten for it."""
+        haiku = self.by_name.get("haiku")
+        return bool(haiku_ok and haiku is not None and tier.name == haiku.name)
+
+    def _haiku_eligible(self, body: dict) -> bool:
+        """The narrow class of turns the Haiku rewrite may serve.
+
+        Needs ``haiku_rewrite`` on, a ``haiku`` tier in the policy, no images or
+        documents anywhere in the conversation, only custom (client-defined)
+        tools -- Anthropic built-in/server tools are not assumed to be
+        supported -- no mid-conversation ``role: "system"`` message
+        (``_has_mid_conversation_system_message`` -- Haiku 400s on the role
+        itself, and this is the gate that currently excludes real Claude Code
+        2.1.285 traffic, which sends one on every call) -- and an approximate
+        context under ``HAIKU_MAX_CONTEXT_TOKENS`` (Haiku 4.5's window is
+        200K, the other tiers' is 1M). Whether the turn is simple/mechanical
+        is the classifier's call, made by ``decide``.
+        """
+        if not self.haiku_rewrite or "haiku" not in self.by_name:
+            return False
+        if _has_media(body) or not _only_custom_tools(body) or _has_mid_conversation_system_message(body):
+            return False
+        return _approx_context_tokens(body) <= HAIKU_MAX_CONTEXT_TOKENS
 
     # ── the decision ────────────────────────────────────────────────────────
 
@@ -332,11 +462,15 @@ class ClaudeTierPolicy:
         reason = REASON_POLICY
         if not self.allow_upgrade and self.rank[target.name] > self.rank[req_tier.name]:
             target = req_tier
+        haiku_ok = self._haiku_eligible(body)
         if not self._accepts(target, thinking, effort):
-            floor = next((t for t in self.tiers[self.rank[target.name]:]
-                          if self._allowed(t, req_tier, thinking, effort)), None)
-            target = floor or req_tier
-            reason = REASON_THINKING_FLOOR
+            if self._rewritable(target, haiku_ok):
+                reason = REASON_HAIKU_REWRITE  # stay on Haiku; the body is rewritten for it
+            else:
+                floor = next((t for t in self.tiers[self.rank[target.name]:]
+                              if self._allowed(t, req_tier, thinking, effort, haiku_ok)), None)
+                target = floor or req_tier
+                reason = REASON_THINKING_FLOOR
 
         detail = None
         if opus_tier is not None and self.rank[opus_tier.name] >= self.rank[target.name]:
@@ -382,7 +516,7 @@ class ClaudeTierPolicy:
         handoff = state is not None and self.switch_after_first_call and state.reason == REASON_FIRST_CALL
         if (state is not None and _canonical(prev_model) != _canonical(served)
                 and not class_changed and not cold and not handoff):
-            if prev_tier is not None and self._allowed(prev_tier, req_tier, thinking, effort):
+            if prev_tier is not None and self._allowed(prev_tier, req_tier, thinking, effort, haiku_ok):
                 served, target, reason = prev_model, prev_tier, REASON_STICKY
         if _canonical(served) == _canonical(requested):
             served = requested  # keep the client's own spelling when nothing changes
@@ -394,6 +528,12 @@ class ClaudeTierPolicy:
         if switched:
             cost = 0.0 if cold else switch_cost_usd(served, state.prefix_tokens if state else None)
         sticky.record(key, served, cx, reason)
+        # Rewrite exactly when the FINAL target is Haiku and the body as sent
+        # would not be accepted by it (escalation / stickiness that moved the
+        # target off Haiku clear this).
+        body_rewrite = (REWRITE_HAIKU if self._rewritable(target, haiku_ok)
+                        and not self._accepts(target, thinking, effort) else None)
         return TierDecision(requested, served, target.name, reason, switched=switched, switch_cost_usd=cost,
+                            body_rewrite=body_rewrite,
                             task_type=task, complexity=cx, chain_head=list(choice.get("chain_head") or [])[:4],
                             complexity_score=choice.get("complexity_score"), detail=detail)

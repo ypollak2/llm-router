@@ -55,6 +55,8 @@ Claude-tier rewrite fields (only when the proxy runs with ``--tiers on`` or
                         policy sets ``complexity_knn: true`` and it scored
   tier_switch           the conversation moved to a different model
   tier_switch_cost_usd  estimated cache re-write that move cost (``cache_cost``)
+  tier_body_rewrite     "haiku" when the body was rewritten for Haiku (thinking and
+                        effort stripped, ``translate.for_haiku``); absent otherwise
   tier_retry            {status, detail}: Anthropic refused the rewritten call
                         and it was resent unchanged
   tier_detail           scrubbed error text when the decision itself failed

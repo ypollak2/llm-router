@@ -427,11 +427,12 @@ class Upstream:
         return httpx.Response(status, stream=httpx.ByteStream(body), headers={"content-type": ctype})
 
 
-def _app(tmp_path, upstream, *, tiers=ps.TIERS_ON, **cfg):
+def _app(tmp_path, upstream, *, tiers=ps.TIERS_ON, policy_overrides=None, **cfg):
     import yaml
 
     raw = _raw_policy()
     raw["stickiness"]["switch_after_first_call"] = True
+    raw.update(policy_overrides or {})
     policy_file = tmp_path / "tiers.yaml"
     policy_file.write_text(yaml.safe_dump(raw))
     config = ps.ProxyConfig(steps=frozenset(), upstream="http://127.0.0.1:9", tiers=tiers,
@@ -668,3 +669,289 @@ async def test_knn_on_but_abstaining_keeps_the_classifier_complexity(monkeypatch
     monkeypatch.setattr(complexity_knn, "complexity_score", _score(None))
     d = await _second_call(_knn_policy(True, "moderate"))
     assert (d.complexity, d.complexity_score, d.tier) == ("moderate", None, "sonnet")
+
+
+# ── opt-in Haiku tier (haiku_rewrite) ────────────────────────────────────────
+#
+# Haiku 4.5 400s on `thinking.type: adaptive` and has no effort parameter
+# (Anthropic API docs, fetched 2026-10-02), which is why the thinking floor
+# raises a simple turn to Sonnet. `haiku_rewrite: true` instead serves it on
+# Haiku with a rewritten body (translate.for_haiku).
+
+from llm_router.proxy import escalation as esc  # noqa: E402
+from llm_router.proxy.translate import HAIKU_MAX_OUTPUT_TOKENS, for_haiku  # noqa: E402
+
+
+def _haiku_policy(*, on=True, conversation_level=True):
+    raw = _raw_policy()
+    raw["stickiness"] = dict(raw.get("stickiness") or {}, switch_after_first_call=True)
+    raw["haiku_rewrite"] = on
+    return pt.ClaudeTierPolicy.from_dict(raw, conversation_level=conversation_level)
+
+
+def _no_system_reminders(body: dict) -> dict:
+    """The fixture's own ``role: "system"`` mid-conversation reminders
+    stripped out. Real Claude Code 2.1.285 traffic always carries these
+    (beta flags ``mid-conversation-system-2026-04-07`` /
+    ``per-turn-control-2026-07-01``) and Haiku 4.5 rejects the role outright
+    (live smoke call, 2026-10-02: ``{"type":"invalid_request_error",
+    "message":"role \'system\' is not supported on this model"}``), so
+    ``_haiku_eligible`` excludes any body that still has one -- see
+    ``test_a_real_shaped_continuation_keeps_the_sonnet_floor_today`` below.
+    Tests that exercise the REWRITE path use this helper to build a body
+    shaped like the eligible class instead of the ineligible-by-default
+    fixture."""
+    body = copy.deepcopy(body)
+    body["messages"] = [m for m in body["messages"] if not (isinstance(m, dict) and m.get("role") == "system")]
+    return body
+
+
+def _turns(*human_texts: str, model=OPUS) -> dict:
+    """Plain text turns sharing ONE conversation key (same messages[0])."""
+    body = _req(model)
+    msgs: list[dict] = []
+    for i, text in enumerate(human_texts):
+        if i:
+            msgs.append({"role": "assistant", "content": [{"type": "text", "text": "ok"}]})
+        msgs.append({"role": "user", "content": [{"type": "text", "text": text}]})
+    body["messages"] = msgs
+    return body
+
+
+def test_for_haiku_strips_exactly_the_fields_haiku_rejects():
+    body = _req()
+    body["thinking"] = {"type": "adaptive", "display": "omitted"}
+    body["context_management"] = {"edits": [{"type": "clear_thinking_20251015", "keep": "all"},
+                                            {"type": "clear_tool_uses_20250919"}]}
+    before = copy.deepcopy(body)
+    out = for_haiku(body)
+    assert body == before  # the input is never mutated
+    assert "thinking" not in out and "output_config" not in out
+    assert out["context_management"] == {"edits": [{"type": "clear_tool_uses_20250919"}]}  # only clear_thinking_* dropped
+    assert out["max_tokens"] == HAIKU_MAX_OUTPUT_TOKENS == 64_000
+    for kept in ("model", "messages", "system", "tools", "metadata", "stream"):
+        assert out[kept] == body[kept]
+    assert set(body) - set(out) == {"thinking", "output_config"}
+
+
+def test_for_haiku_drops_an_emptied_context_management_and_clamps_max_tokens():
+    body = _req()
+    body["max_tokens"] = 128_000
+    out = for_haiku(body)
+    assert "context_management" not in out  # its only edit was clear_thinking_*
+    assert out["max_tokens"] == 64_000
+    body["max_tokens"] = 4096
+    assert for_haiku(body)["max_tokens"] == 4096  # smaller values are left alone
+    body.pop("max_tokens")
+    assert "max_tokens" not in for_haiku(body)
+
+
+def test_bundled_policy_ships_haiku_rewrite_off():
+    assert pt.ClaudeTierPolicy.load().haiku_rewrite is False
+    assert _raw_policy()["haiku_rewrite"] is False
+
+
+async def test_flag_off_keeps_the_sonnet_floor_and_never_asks_for_a_rewrite():
+    policy = _haiku_policy(on=False)
+    d = await policy.decide(_first(), SID, Stickiness(), classify=_classify("simple"))
+    assert (d.served_model, d.reason, d.body_rewrite) == (SONNET, pt.REASON_THINKING_FLOOR, None)
+
+
+async def test_flag_on_serves_a_simple_adaptive_turn_on_haiku_with_a_rewrite_marker():
+    policy = _haiku_policy()
+    d = await policy.decide(_first(), SID, Stickiness(), classify=_classify("simple"))
+    assert (d.served_model, d.tier, d.reason, d.body_rewrite) == (HAIKU, "haiku", pt.REASON_HAIKU_REWRITE,
+                                                                  pt.REWRITE_HAIKU)
+    assert d.rewritten and d.switched is False  # a first decision is not a cache switch
+
+
+async def test_flag_on_does_not_touch_non_simple_turns():
+    policy = _haiku_policy()
+    d = await policy.decide(_first(), SID, Stickiness(), classify=_classify("moderate"))
+    assert (d.served_model, d.reason, d.body_rewrite) == (SONNET, pt.REASON_POLICY, None)
+
+
+async def test_a_body_haiku_already_accepts_needs_no_rewrite():
+    policy = _haiku_policy()
+    d = await policy.decide(_no_thinking(_first()), SID, Stickiness(), classify=_classify("simple"))
+    assert (d.served_model, d.reason, d.body_rewrite) == (HAIKU, pt.REASON_POLICY, None)
+
+
+IMG = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+
+
+def _later_turn(content) -> dict:
+    """A second call in the conversation `_turns("rename foo")` opened."""
+    body = _turns("rename foo", "and bar")
+    body["messages"][-1]["content"] = content
+    return body
+
+
+def _with_builtin_tool(body: dict) -> dict:
+    body = copy.deepcopy(body)
+    body["tools"].append({"type": "web_search_20250305", "name": "web_search"})
+    return body
+
+
+def _image_in_tool_result() -> dict:
+    body = _later_turn([{"type": "text", "text": "and bar"}])
+    body["messages"] += [
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_x", "name": "Read", "input": {}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_x", "content": [IMG]}]}]
+    return body
+
+
+@pytest.mark.parametrize("make", [
+    pytest.param(lambda: _later_turn([IMG, {"type": "text", "text": "what is this?"}]), id="image"),
+    pytest.param(_image_in_tool_result, id="image_in_tool_result"),
+    pytest.param(lambda: _with_builtin_tool(_later_turn([{"type": "text", "text": "and bar"}])), id="builtin_tool"),
+    pytest.param(lambda: _later_turn([{"type": "text", "text": "x " * 400_000}]), id="context_over_limit"),
+])
+async def test_ineligible_conversations_keep_the_sonnet_floor(make):
+    policy = _haiku_policy()
+    sticky = Stickiness()
+    opened = await policy.decide(_turns("rename foo"), SID, sticky, classify=_classify("simple"))
+    assert opened.served_model == HAIKU  # the same conversation WAS eligible before
+    d = await policy.decide(make(), SID, sticky, classify=_classify("simple"))
+    assert (d.served_model, d.reason, d.body_rewrite) == (SONNET, pt.REASON_THINKING_FLOOR, None)
+
+
+async def test_eligibility_helper_edges():
+    policy = _haiku_policy()
+    assert policy._haiku_eligible(_no_system_reminders(_req())) is True
+    assert pt._approx_context_tokens(_req()) < pt.HAIKU_MAX_CONTEXT_TOKENS
+    assert policy._haiku_eligible(_later_turn([{"type": "text", "text": "x " * 400_000}])) is False
+    assert _haiku_policy(on=False)._haiku_eligible(_req()) is False
+    # the fixture itself -- real recorded Claude Code traffic -- carries the
+    # mid-conversation `role: "system"` reminders Haiku rejects outright.
+    assert pt._has_mid_conversation_system_message(_req()) is True
+    assert policy._haiku_eligible(_req()) is False
+    assert pt._has_mid_conversation_system_message(_no_system_reminders(_req())) is False
+
+
+async def test_a_real_shaped_continuation_keeps_the_sonnet_floor_today():
+    """The honest, live-discovered limit: Claude Code 2.1.285 always sends a
+    mid-conversation `role: "system"` message (per-turn effort control), so
+    an otherwise-eligible real continuation -- no media, custom tools only,
+    small context -- still floors to Sonnet, not Haiku, until that message
+    is handled. The fixture IS this shape; this pins the behavior so a future
+    fix to lift it (e.g. folding the message into top-level `system`) has to
+    deliberately change this test, not silently regress past it."""
+    policy = _haiku_policy()
+    sticky = Stickiness()
+    await policy.decide(_first(), SID, sticky, classify=_classify("simple"))
+    d = await policy.decide(_req(), SID, sticky, classify=_classify("simple"))
+    assert pt._has_mid_conversation_system_message(_req()) is True
+    assert pt._has_media(_req()) is False and pt._only_custom_tools(_req()) is True
+    assert (d.served_model, d.reason, d.body_rewrite) == (SONNET, pt.REASON_THINKING_FLOOR, None)
+    # no `haiku` tier in the policy: the flag cannot do anything
+    no_haiku = pt.ClaudeTierPolicy.from_dict({
+        "tiers": [{"name": "sonnet", "model": SONNET, "thinking": ["adaptive"]}],
+        "route": {"default": {"simple": "sonnet"}}, "haiku_rewrite": True})
+    assert no_haiku._haiku_eligible(_req()) is False
+
+
+async def test_correction_signal_still_escalates_to_opus_over_a_haiku_conversation():
+    policy = _haiku_policy()
+    sticky = Stickiness()
+    ask = "rename foo to bar"
+    d1 = await policy.decide(_turns(ask), SID, sticky, classify=_classify("simple"))
+    assert (d1.served_model, d1.body_rewrite) == (HAIKU, pt.REWRITE_HAIKU)
+    d2 = await policy.decide(_turns(ask, "ok", "No, that's wrong. You changed the wrong function."),
+                             SID, sticky, classify=_classify("simple"))
+    assert (d2.served_model, d2.reason, d2.detail, d2.body_rewrite) == (OPUS, pt.REASON_ESCALATION,
+                                                                       esc.REASON_CONTRADICTION, None)
+
+
+async def test_explicit_opus_pin_wins_over_the_haiku_tier():
+    policy = _haiku_policy()
+    d = await policy.decide(_turns("opus: rename foo to bar"), SID, Stickiness(), classify=_classify("simple"))
+    assert (d.served_model, d.reason, d.body_rewrite) == (OPUS, pt.REASON_EXPLICIT_OPUS_PIN, None)
+
+
+async def test_stickiness_holds_a_committed_sonnet_conversation_off_haiku():
+    policy = _haiku_policy()
+    sticky = Stickiness()
+    await policy.decide(_turns("refactor this module"), SID, sticky, classify=_classify("moderate"))
+    d = await policy.decide(_turns("refactor this module", "now fix the typo"), SID, sticky,
+                            classify=_classify("simple"))
+    assert (d.served_model, d.reason, d.body_rewrite) == (SONNET, pt.REASON_STICKY, None)
+
+
+async def test_stickiness_holds_a_haiku_conversation_on_haiku_and_keeps_rewriting():
+    policy = _haiku_policy()
+    sticky = Stickiness()
+    await policy.decide(_turns("rename foo"), SID, sticky, classify=_classify("simple"))
+    d = await policy.decide(_turns("rename foo", "and bar"), SID, sticky, classify=_classify("simple"))
+    assert (d.served_model, d.body_rewrite) == (HAIKU, pt.REWRITE_HAIKU)
+    # ... until the conversation stops being eligible (an image arrives): back to the floor.
+    d = await policy.decide(_later_turn([IMG, {"type": "text", "text": "what is this?"}]), SID, sticky,
+                            classify=_classify("simple"))
+    assert (d.served_model, d.body_rewrite) == (SONNET, None)
+
+
+async def test_per_turn_mode_first_call_is_still_exempt_with_the_flag_on():
+    policy = _haiku_policy(conversation_level=False)
+    d = await policy.decide(_first(), SID, Stickiness(), classify=_classify("simple"))
+    assert (d.reason, d.served_model, d.body_rewrite) == (pt.REASON_FIRST_CALL, OPUS, None)
+
+
+async def test_a_client_that_asked_for_haiku_directly_is_rewritten_only_with_the_flag():
+    for on, want in ((True, pt.REWRITE_HAIKU), (False, None)):
+        d = await _haiku_policy(on=on).decide(_first(HAIKU), SID, Stickiness(), classify=_classify("simple"))
+        assert d.served_model == HAIKU and d.body_rewrite == want
+
+
+@pytest.fixture
+def simple(monkeypatch):
+    async def choose(text, pinned, *, anthropic=False):
+        return {"task_type": "query", "complexity": "simple", "chain_head": [], "model": None}
+    monkeypatch.setattr(pb, "choose_model", choose)
+
+
+async def test_haiku_rewrite_reaches_anthropic_without_thinking_or_effort_and_is_ledgered(tmp_path, simple):
+    up = Upstream()
+    app = _app(tmp_path, up, policy_overrides={"haiku_rewrite": True})
+    assert (await _post(app, _first())).status_code == 200
+    r = await _post(app, _no_system_reminders(_req()))
+    assert r.status_code == 200 and HAIKU.encode() in r.content
+    first, second = (json.loads(q.content) for q in up.requests)
+    assert first["model"] == OPUS and "thinking" in first  # the exempt first call is untouched
+    original = _no_system_reminders(_req())
+    assert second["model"] == HAIKU
+    assert "thinking" not in second and "output_config" not in second and "context_management" not in second
+    assert second["tools"] == original["tools"] and second["messages"] == original["messages"]
+    assert second["max_tokens"] == 64_000
+    row = _rows(tmp_path)[-1]
+    assert (row["served_model"], row["response_model"], row["tier"]) == (HAIKU, HAIKU, "haiku")
+    assert (row["tier_reason"], row["tier_body_rewrite"]) == (pt.REASON_HAIKU_REWRITE, "haiku")
+    assert "tier_body_rewrite" not in _rows(tmp_path)[0]
+
+
+async def test_haiku_rewrite_off_by_default_sends_sonnet_with_the_original_body(tmp_path, simple):
+    up = Upstream()
+    app = _app(tmp_path, up)
+    await _post(app, _first())
+    await _post(app, _req())
+    second = json.loads(up.requests[1].content)
+    original = _req()
+    assert second["model"] == SONNET
+    assert {k: v for k, v in second.items() if k != "model"} == {k: v for k, v in original.items() if k != "model"}
+    row = _rows(tmp_path)[-1]
+    assert row["tier_reason"] == pt.REASON_THINKING_FLOOR and "tier_body_rewrite" not in row
+
+
+async def test_a_rejected_haiku_call_is_resent_with_the_clients_own_bytes(tmp_path, simple):
+    err = json.dumps({"type": "error", "error": {"type": "invalid_request_error",
+                                                 "message": "adaptive thinking is not supported"}}).encode()
+    up = Upstream(responses=[(200, _sse(OPUS)), (400, err)])
+    app = _app(tmp_path, up, policy_overrides={"haiku_rewrite": True})
+    await _post(app, _first())
+    r = await _post(app, _no_system_reminders(_req()))
+    assert r.status_code == 200
+    assert [json.loads(q.content)["model"] for q in up.requests] == [OPUS, HAIKU, OPUS]
+    assert up.requests[2].content == json.dumps(_no_system_reminders(_req())).encode()
+    row = _rows(tmp_path)[-1]
+    assert row["tier_retry"]["status"] == 400 and row["served_model"] == OPUS
+    # The final call used the client's own body, so the row must not claim a rewrite.
+    assert "tier_body_rewrite" not in row

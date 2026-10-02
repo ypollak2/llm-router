@@ -17,7 +17,8 @@
 # never moved to a tier that would refuse it. Haiku 4.5 takes only
 # budget_tokens thinking and errors on effort, while Sonnet 5, Opus 5.5 and
 # Fable 5.1 reject budget_tokens (Anthropic API docs, checked 2026-09-29); Claude Code sends adaptive thinking plus effort on main-loop
-# calls, so those stay on Sonnet or above.
+# calls, so by default those stay on Sonnet or above. `haiku_rewrite` below
+# is the opt-in way to serve a narrow class of them on Haiku.
 tiers:
   - name: haiku
     model: claude-haiku-4-5
@@ -55,6 +56,25 @@ allow_upgrade: false
 # scripts/build_complexity_knn.py; without one it abstains. Off: it has not
 # been measured on real Claude Code prompts (0 labelled owner turns).
 complexity_knn: false
+
+# true: a turn the classifier routes to `haiku` (simple/mechanical) is served
+# ON Haiku instead of being raised to Sonnet by the thinking floor. The body is
+# rewritten for Haiku 4.5 (translate.for_haiku): `thinking` (adaptive 400s on
+# Haiku), `output_config` (effort is unsupported) and the clear_thinking_*
+# context edits are dropped, `max_tokens` is clamped to Haiku's 64K. Only when
+# the conversation has no images/documents, uses only client-defined tools,
+# carries no mid-conversation `role: "system"` message (Haiku 400s on that
+# role outright -- a live smoke call got "role 'system' is not supported on
+# this model"; Claude Code 2.1.285's own per-turn-control/mid-conversation-
+# system beta features send one on every call today, so this gate is
+# currently the live-traffic bottleneck, not the others) and stays under
+# ~150K tokens (Haiku's window is 200K). Escalation (`opus:`, correction
+# signals, failed tool runs) and conversation stickiness still apply, and a
+# 4xx from a rewritten call is retried once with the client's original
+# bytes. Off: Haiku was acceptable on 5/15 pilot Q&A prompts
+# against 15/15 for Sonnet and Opus, so it stays opt-in until the paired A/B
+# in the PR that added it has been run.
+haiku_rewrite: false
 
 # Requested model ids that are never rewritten (e.g. the model you pass with
 # `claude --model`, which the proxy cannot tell apart from the default).
