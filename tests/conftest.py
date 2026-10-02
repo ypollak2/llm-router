@@ -562,6 +562,40 @@ def _reset_config_singleton():
 
 
 @pytest.fixture(autouse=True)
+def _reset_active_agent():
+    """Clear the process-global active-agent context before and after each test.
+
+    ``llm_router.state._active_agent`` steers chain ordering in ``route_and_call``
+    (``_reorder_for_agent_context``). ``test_agent_context_routing`` sets it to
+    "codex" and only clears it in ``setup_method``, so whichever test ran next on
+    that xdist worker inherited a codex chain. The router claw-code tests then
+    failed intermittently (found by replaying a failing worker's exact order and
+    delta-debugging it down to that single pair).
+    """
+    from llm_router.state import set_active_agent
+    set_active_agent(None)
+    yield
+    set_active_agent(None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_coverage_cache():
+    """Drop the in-process coverage snapshot before and after each test.
+
+    ``llm_router.coverage`` memoises the parsed store in ``_cached_snapshot``.
+    ``test_r12_every_counter_has_a_reader`` reads ``interception_gaps`` after
+    driving its writer, which leaves ``CLASSIFY_FAILED=1`` cached; the next
+    test on that worker (``test_s1_..._reads_zero[interception_gaps]``) then
+    read 1.0 on a "fresh" database. Found by delta-debugging a failing worker's
+    order down to that pair.
+    """
+    from llm_router import coverage
+    coverage.reset_cache()
+    yield
+    coverage.reset_cache()
+
+
+@pytest.fixture(autouse=True)
 def _reset_health_tracker():
     """Reset the provider HealthTracker singleton before and after each test.
 
