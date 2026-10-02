@@ -103,39 +103,37 @@ _FREE_PROVIDERS   = {"ollama", "codex", "gemini_cli"}
 # ── .env loader ───────────────────────────────────────────────────────────────
 # Hooks run outside the MCP server process and don't inherit its env.
 # Load .env so LLM_ROUTER_CLAUDE_SUBSCRIPTION and other settings are available.
-def _env_paths():
-    return [
-    os.path.join(os.getcwd(), ".env"),  # CWD .env (hook runs from project root)
-    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), ".env"),
-    os.path.expanduser("~/.env"),
-    os.path.join(_state_dir(), ".env"),
-]
-
-
 def _load_dotenv(load_into: "dict[str, str] | None" = None) -> None:
-    """Load .env files into `load_into` (default: os.environ).
+    """Load .env files into `load_into` (default: os.environ); never override.
 
-    Passing an explicit dict lets tests exec/import this module's loader
-    without mutating global process env (audit P5: env-leakage class).
-    Existing keys in the target mapping are never overwritten.
+    One implementation, shared by every entry point: llm_router.env_loader.
+    The real environment always wins; the working directory's .env is filtered
+    (SEC-002/003). `load_into` lets tests load into a dict instead of os.environ.
     """
+    try:
+        from llm_router.env_loader import load_dotenv_files
+    except Exception:
+        load_dotenv_files = None
+    if load_dotenv_files is not None:
+        load_dotenv_files(extra_paths=[Path(__file__).resolve().parent.parent.parent.parent / ".env"], target=load_into)
+        return
+    # llm_router is not importable (plugin bundle run by a bare interpreter):
+    # user-level files only. The project's own .env is never trusted without
+    # the SEC-002/003 filter that lives in llm_router.env_loader.
     target = os.environ if load_into is None else load_into
-    for env_path in _env_paths():
-        if not os.path.exists(env_path):
-            continue
+    for env_path in (Path(_state_dir()) / ".env", Path.home() / ".env"):
         try:
-            with open(env_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    key, _, value = line.partition("=")
-                    key = key.strip()
-                    value = value.strip().strip("\"'")
-                    if key and key not in target:
-                        target[key] = value
-        except OSError:
-            pass
+            text = env_path.read_text()
+        except (OSError, ValueError):
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            if key and key not in target:
+                target[key] = value.strip().strip("\"'")
 
 
 _load_dotenv()
