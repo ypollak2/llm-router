@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import pathlib
 import threading
+import time
 
 import pytest
 
@@ -69,11 +70,26 @@ def _candidate(P, tid):
 
 
 def _unserialised_admit(self, candidate, prompt, *, threshold=0.9):
-    """The pre-fix body verbatim: no lock, no re-read."""
+    """The pre-fix body, with the read-modify-write window held open.
+
+    The defect itself needs no help: `existing.duplicate_count += 1` is
+    always a read then a write with nothing between them. What was left to
+    luck was whether another thread's read-modify-write happened to land
+    *inside* that window often enough, across 21 admits on 7 threads, to
+    actually lose a count on whatever machine ran the test. Under xdist
+    contention that window is sometimes narrow enough that all 22 increments
+    land cleanly serialised by accident — "recorded 22/22, no loss" — which
+    is exactly backwards: it is the anti-vacuity test, the one proving the
+    unfixed code COULD lose a write, that then fails. The sleep below widens
+    the window deterministically so every concurrent pair of admits on the
+    same duplicate is guaranteed to overlap, regardless of host load.
+    """
     dup_id, reason = self.find_duplicate(prompt, threshold=threshold)
     if dup_id:
         existing = self._index[dup_id]
-        existing.duplicate_count += 1
+        count = existing.duplicate_count
+        time.sleep(0.1)  # force the overlap; do not rely on scheduler luck
+        existing.duplicate_count = count + 1
         self._append(existing)
         self._reject(reason, {"task_id": candidate.task_id, "duplicate_of": dup_id})
         return False, reason
