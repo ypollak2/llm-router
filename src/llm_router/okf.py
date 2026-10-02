@@ -570,6 +570,21 @@ _LABEL_SHAPED_RE = re.compile(
     r"|[a-z]-[a-z])$",                               # "Q-J"
     re.I)
 
+# A bare ACRONYM: "OKF", "API", "CI". 2-5 letters, written in caps in the
+# ORIGINAL (not yet lowercased) prompt. It is never identifier-shaped (no
+# underscore, extension or slash) and never reaches the prose pass below
+# (<5 chars), so by construction it could not anchor even the one doc that
+# defines it — "what does OKF mean" and "explain okf.py" scored the right
+# file 3 but the acronym itself never entered `keywords` at all
+# (okf_context_diagnosis.md §3, root cause #3). Capitalisation, not length, is
+# the signal used to admit it: a short English word in running prose is not
+# written this way, so this does not reopen the >=6-char rule's false
+# positives above ("commit", "process", "working"). It is still only a
+# CANDIDATE here — find_relevant() promotes it to an anchor only when it
+# names something real (see _path_name_tokens and the glossary-tag check),
+# never from shape alone.
+_ACRONYM_RE = re.compile(r"\b[A-Z]{2,5}\b")
+
 # Identifiers and paths must be pulled out BEFORE lowercasing and BEFORE the
 # \b\w+\b pass, which splits on "." and "/" — that pass turns `okf.py` into
 # {"okf", "py"} and `src/llm_router/okf.py` into four unremarkable words, so a
@@ -684,13 +699,40 @@ def _keywords_for_retrieval(prompt: str) -> list[str]:
     Code-shaped tokens (`find_relevant`, `src/llm_router/okf.py`) are extracted
     before the prose pass so that "." and "/" survive; they are what
     ``_IDENTIFIER_SHAPED_RE`` later accepts as evidence the prompt NAMES something.
+
+    Bare acronyms ("OKF") are pulled out separately: they are too short for the
+    prose pass and never identifier-shaped, so without this they could not even
+    be SCORED, let alone anchor anything (okf_context_diagnosis.md §3).
     """
     codeish = [m.group(0).lower() for m in _CODEISH_RE.finditer(prompt or "")]
     prose = [
         w for w in re.findall(r"\b\w{5,}\b", (prompt or "").lower())
         if not w.isdigit() and w not in _SCORE_STOPWORDS
     ]
-    return list(dict.fromkeys(codeish + prose))[:40]
+    acronyms = [m.group(0).lower() for m in _ACRONYM_RE.finditer(prompt or "")]
+    return list(dict.fromkeys(codeish + prose + acronyms))[:40]
+
+
+def _path_name_tokens(title: str) -> set[str]:
+    """A path-shaped title's basename and stem, lowercased ("okf.py", "okf").
+
+    ``_tokens()`` keeps a dotted/slashed form WHOLE (that is the point of it —
+    see its docstring), so ``_tokens("src/llm_router/okf.py")`` contains the
+    full relative path as one token, never the bare filename a human actually
+    types. Asking about a file by name ("explain okf.py") could never anchor a
+    doc whose title is more than one directory deep (okf_context_diagnosis.md
+    §3, root cause #3 — verified by direct function call, not inference).
+    Returns the empty set for a title that is not path-shaped at all.
+    """
+    if "/" not in title and "\\" not in title:
+        return set()
+    base = title.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    out = {base} if base else set()
+    if "." in base:
+        stem = base.rsplit(".", 1)[0]
+        if stem:
+            out.add(stem)
+    return out
 
 
 def find_relevant(
@@ -753,6 +795,24 @@ def find_relevant(
     # Session-local labels join the anchor set, never the bulk-matching rules.
     anchors |= {k for k in keywords
                 if _LABEL_SHAPED_RE.match(k) and _seen_this_session(k)}
+    # Short acronyms ("OKF") are candidates (see _ACRONYM_RE) but shape alone
+    # never promotes one to an anchor — that would reopen exactly the
+    # >=6-char false-positive problem the comment above this function
+    # describes, just at a shorter length. A candidate is promoted only when
+    # it NAMES something the project actually defines: an indexed source
+    # file's own stem/basename, or a tag a concept's author deliberately
+    # wrote (the nearest thing this schema has to a glossary entry). Neither
+    # can be satisfied by an unrelated short word unless the project happens
+    # to have a file or tag by that exact name — at which point the project
+    # defined the term, the query did not guess it.
+    candidates = _acronym_candidates(prompt) & set(keywords)
+    if candidates:
+        defined: set[str] = set()
+        for c in concepts:
+            if _is_indexed_source(c):
+                defined |= _path_name_tokens(c.title)
+            defined |= {str(t).lower() for t in c.tags}
+        anchors |= candidates & defined
     scored = []
     for c in concepts:
         s = _score(c, keywords)
@@ -763,6 +823,18 @@ def find_relevant(
         scored.append((c, s))
     scored.sort(key=lambda x: x[1], reverse=True)
     return [c for c, _s in scored[:limit]]
+
+
+def _acronym_candidates(prompt: str) -> set[str]:
+    """Bare acronym-shaped tokens actually written in caps in *prompt*.
+
+    Scanned straight off the prompt text, independent of ``_keywords_for_retrieval``'s
+    pooled list, so provenance is exact: an ordinary lowercase 5-letter prose word
+    (which the prose pass also admits, at >=5 chars) can never be mistaken for one
+    of these, and only genuine caps-written acronyms reach the anchor-promotion
+    check in ``find_relevant``.
+    """
+    return {m.group(0).lower() for m in _ACRONYM_RE.finditer(prompt or "")}
 
 
 def _seen_this_session(label: str) -> bool:
@@ -788,10 +860,17 @@ def _seen_this_session(label: str) -> bool:
 
 
 def _anchor_tokens(concept: OKFConcept) -> set[str]:
-    """The names a prompt can NAME this doc by: its symbols and its path tokens."""
+    """The names a prompt can NAME this doc by: its symbols and its path tokens.
+
+    Includes the bare basename/stem of a path-shaped title (``_path_name_tokens``)
+    in addition to ``_tokens(concept.title)``'s whole-path token, so a prompt that
+    writes the filename the way a human actually does ("okf.py") can anchor a doc
+    titled with a longer relative path ("src/llm_router/okf.py").
+    """
     out = {str(s).lower() for s in (concept.extra.get("key_symbols") or [])}
     out |= _tokens(concept.title)
     out |= _tokens(" ".join(concept.tags))
+    out |= _path_name_tokens(concept.title)
     return out
 
 
