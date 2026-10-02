@@ -54,6 +54,7 @@ call that triggered it.
 
 from __future__ import annotations
 
+import functools
 import os
 import subprocess
 import sys
@@ -183,6 +184,26 @@ def _release_lock(lock: Path) -> None:
     lock.unlink(missing_ok=True)
 
 
+def _lower_priority(pid: int) -> None:
+    """Renice the background build from the parent, after it has started.
+
+    Done here rather than via ``preexec_fn``: the caller can be a
+    multithreaded server process, where code run between fork and exec is
+    unsafe. A child that already exited is fine to miss; anything else is
+    recorded, not raised, because the build itself started correctly.
+    """
+    if not hasattr(os, "setpriority"):
+        return
+    try:
+        os.setpriority(os.PRIO_PROCESS, pid, 10)
+    except ProcessLookupError:
+        return
+    except OSError as exc:
+        from llm_router import failopen
+
+        failopen.record(_FAILOPEN_CODE, exc)
+
+
 def _scratch_prefixes() -> "list[Path]":
     """Realpath'd directories that are scratch space, never a real project.
 
@@ -191,7 +212,15 @@ def _scratch_prefixes() -> "list[Path]":
     entirely) — used by tests, which run under pytest's own ``tmp_path`` and
     would otherwise always be excluded by this same guard.
     """
-    raw = os.environ.get("LLM_ROUTER_SEMANTIC_AUTOINDEX_SCRATCH_PREFIXES")
+    return _resolved_scratch_prefixes(
+        os.environ.get("LLM_ROUTER_SEMANTIC_AUTOINDEX_SCRATCH_PREFIXES")
+    )
+
+
+@functools.lru_cache(maxsize=8)
+def _resolved_scratch_prefixes(raw: "str | None") -> "list[Path]":
+    # Cached per override value: resolving four paths on every retrieval
+    # call is measurable on the hot path, and the answer never changes.
     if raw is not None:
         if not raw.strip():
             return []
@@ -317,14 +346,8 @@ def maybe_start_background_index(
         # sites for a literal `env=` keyword to confirm this subprocess does
         # not inherit the operator's full environment, and a call built as
         # `subprocess.Popen(argv, **kwargs)` is invisible to that scan.
-        extra_kwargs: dict = {}
-        if sys.platform != "win32":
-            # Best-effort niceness for a background build sharing the box
-            # with the foreground session; `preexec_fn` isn't supported on
-            # Windows (Popen raises if it's set there).
-            extra_kwargs["preexec_fn"] = lambda: os.nice(10)
         try:
-            subprocess.Popen(
+            proc = subprocess.Popen(
                 [sys.executable, "-m", "llm_router.cli", "semantic", "index"],
                 cwd=str(scope),
                 env=env,
@@ -332,7 +355,6 @@ def maybe_start_background_index(
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
-                **extra_kwargs,
             )
         except Exception:
             # The lock was claimed for a build that never actually started —
@@ -340,6 +362,7 @@ def maybe_start_background_index(
             # waiting out a full cooldown for nothing.
             _release_lock(lock)
             raise
+        _lower_priority(proc.pid)
         return True
     except Exception as exc:  # noqa: BLE001 — never break the caller
         from llm_router import failopen

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -256,11 +255,31 @@ def test_detached_build_is_niced(repo, monkeypatch):
         captured.update(kwargs)
         return _FakeProc()
 
+    reniced = []
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        os, "setpriority", lambda which, pid, prio: reniced.append((pid, prio)), raising=False
+    )
     started = autoindex.maybe_start_background_index(repo)
     assert started is True
-    if sys.platform != "win32":
-        assert "preexec_fn" in captured, "detached build must be niced on POSIX"
+    # Reniced from the parent, never via preexec_fn: the caller may be a
+    # multithreaded server where code between fork and exec is unsafe.
+    assert "preexec_fn" not in captured
+    assert reniced == [(999, 10)]
+
+
+def test_a_build_that_already_exited_is_not_an_error(repo, monkeypatch):
+    monkeypatch.setattr(autoindex, "_tracked_file_count", lambda root: 1)
+
+    class _FakeProc:
+        pid = 999
+
+    def gone(which, pid, prio):
+        raise ProcessLookupError(pid)
+
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: _FakeProc())
+    monkeypatch.setattr(os, "setpriority", gone, raising=False)
+    assert autoindex.maybe_start_background_index(repo) is True
 
 
 # ── the scratch-tempdir exclusion (finding 1) ───────────────────────────────
