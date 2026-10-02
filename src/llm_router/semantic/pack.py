@@ -97,6 +97,15 @@ def build(
     # empty" are different answers and only the first is a missing requirement.
     index_existed = sstore.index_path(scope, base).exists()
 
+    # A project with no index, or one with zero files in it, gets a detached
+    # `llm-router semantic index` started here — non-blocking, size-capped,
+    # cooldown-guarded (llm_router.semantic.autoindex, which never raises).
+    # This call's own answer is unaffected; the NEXT call to this project sees
+    # a built index.
+    from llm_router.semantic.autoindex import maybe_start_background_index
+
+    maybe_start_background_index(scope, base)
+
     result = retrieve.retrieve(query, root=scope, base=base, limit=limit)
     pack.snapshot_id = _snapshot_id(scope)
 
