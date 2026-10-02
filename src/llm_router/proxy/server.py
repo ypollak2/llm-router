@@ -50,9 +50,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from llm_router.local_agent import LocalAgentConfig, enabled_from_env
+from llm_router.local_agent import DEFAULT_MAX_PROMPT_TOKENS, LocalAgentConfig, enabled_from_env
 from llm_router.local_agent import capability as la_capability
-from llm_router.proxy import ledger
+from llm_router import failopen
+from llm_router.proxy import ledger, okf_context
+
 from llm_router.proxy.backend_health import (
     DEFAULT_COOLDOWN_S,
     DEFAULT_FAIL_N,
@@ -88,6 +90,10 @@ from llm_router.proxy.translate import (
     sse_response_model,
     without_thinking,
 )
+
+#: Upper bound on attaching repo knowledge to a local step (several git calls).
+OKF_ATTACH_TIMEOUT_S = 2.0
+
 
 ANTHROPIC_UPSTREAM = "https://api.anthropic.com"
 DEFAULT_PORT = 8787
@@ -338,6 +344,21 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 send, row["compaction"] = await local_agent.prepare(body)
             else:
                 send = apply_trims(body, trims)
+            # Repo knowledge for the local model (proxy.okf_context): the trimmed
+            # request is all it sees. Local path only, never the pass-through;
+            # fail-open; in a thread because retrieval and the repo-state line
+            # do file and git I/O. ``body`` (the client's request) is untouched.
+            # Bounded: repo_facts can run several git calls; a slow attach must
+            # not eat the step budget. On timeout the step goes ahead without it
+            # (the worker thread finishes on its own and its result is dropped).
+            try:
+                send, row["okf"] = await asyncio.wait_for(asyncio.to_thread(
+                    okf_context.attach, send, body,
+                    ceiling_tokens=cfg.local_agent.max_prompt_tokens if cfg.local_agent else DEFAULT_MAX_PROMPT_TOKENS),
+                    timeout=OKF_ATTACH_TIMEOUT_S)
+            except asyncio.TimeoutError as exc:
+                failopen.record("LR-FO-PROXY-OKF-ATTACH-TIMEOUT", exc)
+                row["okf"] = {"status": "timeout"}
             backend_t0 = time.monotonic()
             message, err, backend_usage = await asyncio.wait_for(
                 backend.complete(send, cfg.step_budget_s), timeout=cfg.step_budget_s)
