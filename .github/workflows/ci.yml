@@ -134,11 +134,15 @@ jobs:
           # loaded 15-core machine vs 152s with -n 4, 11,391 tests both ways,
           # no failure that depends on xdist.
           #
+          # --durations=10 prints the slowest tests so one creeping toward the 30s
+          # per-test timeout shows up in the log before it fails a run.
+          #
           # A stale xml from an earlier step must not be mistaken for this run's.
           rm -f /tmp/pytest-results.xml
           uv run pytest tests/ -q -n auto \
             --ignore=tests/test_agno_integration.py \
             --timeout=30 \
+            --durations=10 \
             --junit-xml=/tmp/pytest-results.xml &
           PYTEST_PID=$!
 

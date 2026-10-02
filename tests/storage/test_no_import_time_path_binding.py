@@ -26,9 +26,11 @@ developer happened to be doing at the time.
 from __future__ import annotations
 
 import ast
+import functools
 import importlib
 import os
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -206,6 +208,34 @@ _TRIGGERS = (
 )
 
 
+# `ast.get_source_segment` re-splits the WHOLE file on every call, and on 3.11 that
+# split is a pure-Python character loop (`ast._splitlines_no_ff`). The scanner
+# calls it once per AST node, so the cost is nodes x file-size: this test took
+# ~8s on a fast laptop and more than the 30s per-test timeout on a loaded 4-core
+# CI runner (test (3.11), PR #242, twice, deterministically). It was invisible
+# before because the CI watchdog gave up on 3.11 before the run got this far.
+# Split once per file instead; same line boundaries as the stdlib (\n, \r\n, \r
+# only, not str.splitlines' wider set), same slicing, so the segments are identical.
+_LINE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
+
+
+@functools.lru_cache(maxsize=8)
+def _source_lines(text: str) -> list[str]:
+    return _LINE.findall(text)
+
+
+def _segment(text: str, node: ast.AST) -> str:
+    """``ast.get_source_segment(text, node)`` without the per-call re-split."""
+    lines = _source_lines(text)
+    start, end = node.lineno - 1, node.end_lineno - 1
+    col, end_col = node.col_offset, node.end_col_offset
+    if end == start:
+        return lines[start].encode()[col:end_col].decode()
+    first = lines[start].encode()[col:].decode()
+    last = lines[end].encode()[:end_col].decode()
+    return "".join([first, *lines[start + 1:end], last])
+
+
 def _resolves_eagerly(value: ast.AST, text: str) -> bool:
     """True if this value resolves a home path *when the statement executes*.
 
@@ -222,7 +252,7 @@ def _resolves_eagerly(value: ast.AST, text: str) -> bool:
             # so check ancestry explicitly
             if _inside_deferred(value, node):
                 continue
-            seg = ast.get_source_segment(text, node) or ""
+            seg = _segment(text, node)
             head = seg.split("(")[0] + "("
             if any(t == head or seg.startswith(t) for t in _TRIGGERS):
                 return True
@@ -256,7 +286,7 @@ def _binding_sites():
             value = node.value
             if value is None:
                 return
-            seg = ast.get_source_segment(text, node) or ""
+            seg = _segment(text, node)
             if (rel, name) in _ALLOWED_STATIC:
                 return
             if "StatePathAttr(" in seg:
