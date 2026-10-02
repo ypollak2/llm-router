@@ -12,6 +12,8 @@ Text merely appearing in the repo must NOT make a question about the repo.
 """
 from __future__ import annotations
 
+import ast
+import re
 import subprocess
 from pathlib import Path
 
@@ -153,3 +155,96 @@ def test_value_hits_are_bounded(tmp_path):
     ix.index(root=repo, base=base)
     result = sretrieve.retrieve("explain SHARED_VALUE_TOKEN", root=repo, base=base)
     assert 0 < len(result.entities) <= sretrieve._VALUE_MAX_PER_IDENT
+
+
+# --- the collision class -----------------------------------------------------
+#
+# A lowercase constant value is vocabulary. These are string values of real
+# constants in this repository (budget_key.py, budget_lineage_reconciliation.py)
+# and also ordinary words in a generic question. A review found 3 of 9 prompts
+# built that way got a repository constant attached by the first version of the
+# value lookup, which accepted any underscore-shaped token.
+
+_COLLISION_PROMPTS = [
+    "how do I pick a session scope like agent_session in a generic app",
+    "how do you name an unregistered_parent row in a ledger schema",
+    "what does underdebited_parent mean in accounting software",
+]
+
+
+@pytest.fixture
+def collision_project(tmp_path: Path):
+    repo = _repo(tmp_path / "repo", {
+        "budget_key.py": 'SCOPE_AGENT_SESSION = "agent_session"\n',
+        "recon.py": ('UNREGISTERED = "unregistered_parent"\n'
+                     'UNDERDEBITED = "underdebited_parent"\n'),
+    })
+    base = tmp_path / "store"
+    ix.index(root=repo, base=base)
+    return repo, base
+
+
+@pytest.mark.parametrize("prompt", _COLLISION_PROMPTS)
+def test_a_lowercase_constant_value_in_a_generic_question_attaches_nothing(
+        collision_project, prompt):
+    repo, base = collision_project
+    result = sretrieve.retrieve(prompt, root=repo, base=base)
+    assert result.entities == [], [(e.relative_path, e.name) for e in result.entities]
+
+
+def test_a_single_underscore_upper_token_is_not_a_value_lookup(tmp_path):
+    repo = _repo(tmp_path / "repo", {"c.py": 'ENV_FAKE = "FAKE_KEY"\n'})
+    base = tmp_path / "store"
+    ix.index(root=repo, base=base)
+    result = sretrieve.retrieve("how do I rotate a FAKE_KEY", root=repo, base=base)
+    assert result.entities == []
+
+
+_SRC = Path(__file__).resolve().parents[2] / "src" / "llm_router"
+_WORDLIKE = re.compile(r"[a-z]+(?:_[a-z0-9]+)+")
+_TEMPLATES = [
+    "how do I name a column like {x} in a generic database schema",
+    "what does {x} usually mean in accounting software",
+    "is it a good idea to use {x} as a status value in a web app",
+    "how do I pick a {x} setting in a generic app",
+    "explain {x} to a new developer on any project",
+    "what is the best way to represent {x} in a REST API",
+]
+
+
+def _lowercase_constant_values() -> list[str]:
+    """Every module-level `NAME = "snake_case"` string in the package: the
+    population this lookup collides with, mined live so it grows with the repo."""
+    values: set[str] = set()
+    for path in sorted(_SRC.rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for node in tree.body:
+            if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)
+                    and _WORDLIKE.fullmatch(node.value.value)
+                    and all(isinstance(t, ast.Name) for t in node.targets)):
+                values.add(node.value.value)
+    return sorted(values)
+
+
+def test_no_lowercase_constant_value_in_the_package_attaches_to_a_generic_question(
+        tmp_path):
+    values = _lowercase_constant_values()
+    # An empty population passes everything; fail loudly if the mining broke.
+    assert len(values) >= 30, f"only {len(values)} values mined from {_SRC}"
+
+    body = "".join(f'C{i} = "{v}"\n' for i, v in enumerate(values))
+    repo = _repo(tmp_path / "repo", {"consts.py": body})
+    base = tmp_path / "store"
+    ix.index(root=repo, base=base)
+
+    hits = []
+    for i, value in enumerate(values):
+        prompt = _TEMPLATES[i % len(_TEMPLATES)].format(x=value)
+        result = sretrieve.retrieve(prompt, root=repo, base=base)
+        if result.entities:
+            hits.append((prompt, [e.name for e in result.entities]))
+    assert hits == [], f"{len(hits)}/{len(values)} generic prompts got attachments: {hits[:5]}"

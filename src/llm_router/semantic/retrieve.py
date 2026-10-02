@@ -163,11 +163,26 @@ def seeds_from(query: str) -> tuple[list[str], list[str]]:
 # identifier as a quoted literal is a much narrower claim, and it is measured
 # below; do not widen it to free text without re-running that probe.
 #
-# Only identifiers with an underscore between word characters qualify. `_CAMEL`
-# matches acronyms and product names (`API`, `SDK`, `GitHub`), which reach
-# `seeds_from`'s output and are harmless there only because the index has no
-# entity of that name; a value lookup must not inherit that.
-_VALUE_ELIGIBLE = re.compile(r"[A-Za-z0-9]_[A-Za-z0-9]")
+# Only UPPER_CASE identifiers with at least two underscores qualify
+# (`_VALUE_ELIGIBLE`). Two measured reasons:
+#   - `_CAMEL` matches acronyms and product names (`API`, `SDK`, `GitHub`); they
+#     reach `seeds_from`'s output and are harmless there only because the index
+#     has no entity of that name. A value lookup must not inherit that.
+#   - A lowercase value is vocabulary, not a name. `agent_session`,
+#     `unregistered_parent`, `underdebited_parent`, `half_open`, `not_routed`
+#     and `commit_message` are all the string value of some constant here, and
+#     are also ordinary words in generic questions ("how do you name an
+#     unregistered_parent row in a ledger schema"). With any-underscore
+#     eligibility 81 of 83 generic prompts built around this repo's lowercase
+#     constant values got a repository constant attached. UPPER_CASE with
+#     >=2 underscores is how a flag or marker is written on purpose
+#     (FROZEN_IN_GROUND_TRUTH, LLM_ROUTER_GROUND_TRUTH) and added 0 of those 83.
+# Requiring the token to be quoted was also measured: it adds 0 collisions but
+# loses 2 of the 5 real questions, whose prompts name the token in plain prose.
+# Known residual: a third-party env var the repo happens to read, written in
+# upper case, still resolves (ANTHROPIC_BASE_URL, ENABLE_TOOL_SEARCH); it cannot
+# be told apart from FROZEN_IN_GROUND_TRUTH without knowing the repo.
+_VALUE_ELIGIBLE = re.compile(r"[A-Z0-9]+(?:_[A-Z0-9]+){2,}")
 _VALUE_MAX_PER_IDENT = 3
 _VALUE_MAX_TOTAL = 5
 
@@ -181,17 +196,18 @@ def _constants_holding_value(conn: sqlite3.Connection, idents: list[str],
     nothing; the first line is already stored as the entity's signature, so this
     is a plain query with no new column. Exact quoted match, not a substring, so
     a name that merely appears inside a longer string does not count. Only
-    underscore-shaped identifiers (see `_VALUE_ELIGIBLE`) are tried: an acronym
-    or a product name is not a value someone asks about by name.
+    UPPER_CASE identifiers with >=2 underscores (see `_VALUE_ELIGIBLE`) are
+    tried: an acronym, a product name or a plain lowercase word is not a value
+    someone asks about by name.
     """
     out: list[sstore.Entity] = []
     for name in idents:
-        if name in defined or not _VALUE_ELIGIBLE.search(name):
+        if name in defined or not _VALUE_ELIGIBLE.fullmatch(name):
             continue
         rows = conn.execute(
             "SELECT * FROM entity WHERE kind = 'constant' AND "
             "(instr(signature, ?) > 0 OR instr(signature, ?) > 0) "
-            "ORDER BY relative_path, start_line LIMIT ?",
+            "ORDER BY relative_path, start_line LIMIT ?",  # stable tie-break: LIMIT keeps the same rows every run
             (f'"{name}"', f"'{name}'", _VALUE_MAX_PER_IDENT),
         ).fetchall()
         out.extend(sstore._rows_to_entities(rows))
