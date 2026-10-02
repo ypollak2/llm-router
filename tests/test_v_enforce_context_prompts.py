@@ -15,6 +15,10 @@ import io
 import json
 import sys
 from pathlib import Path
+import pytest
+
+# Exercises the Q&A routing machinery, which is off by default (LLM_ROUTER_QA_ROUTING).
+pytestmark = pytest.mark.usefixtures("qa_routing_on")
 
 HOOK = Path(__file__).resolve().parents[1] / "src" / "llm_router" / "hooks" / "auto-route.py"
 PROMPT = "why does the classifier in this repo return query for my prompt?"
@@ -55,11 +59,21 @@ def _run(monkeypatch, tmp_path, env):
     return out.getvalue(), list(home.glob("pending_route_*.json"))
 
 
-def test_context_prompt_is_enforced_by_default(monkeypatch, tmp_path):
+def test_context_prompt_is_enforced_when_qa_routing_is_on(monkeypatch, tmp_path):
+    """Q&A routing is off by default (2026-10-01); with it on, the V behaviour holds."""
     out, pending = _run(monkeypatch, tmp_path, {"LLM_ROUTER_ENFORCE": "smart"})
     assert "CONTEXT" in out, "premise: classified context-dependent"
     assert pending, "no pending route written — enforce-route has nothing to enforce"
     assert "context=" in out and "stateless routed model cannot see" not in out
+
+
+def test_context_prompt_is_not_enforced_by_default(monkeypatch, tmp_path):
+    """The real default (no LLM_ROUTER_QA_ROUTING): Q&A about the repo is answered
+    directly, so there is no directive and nothing for enforce-route to hold."""
+    out, pending = _run(monkeypatch, tmp_path, {"LLM_ROUTER_ENFORCE": "smart",
+                                                "LLM_ROUTER_QA_ROUTING": "off"})
+    assert not pending
+    assert "CONTEXT" not in out and "context=" not in out and "llm(" not in out, out
 
 
 def test_switch_off_restores_the_exemption(monkeypatch, tmp_path):

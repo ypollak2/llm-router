@@ -2,6 +2,10 @@
 availability, not claim "API-key routing in effect" when no cloud keys are set."""
 import importlib.util
 from pathlib import Path
+import pytest
+
+# Exercises the Q&A routing machinery, which is off by default (LLM_ROUTER_QA_ROUTING).
+pytestmark = pytest.mark.usefixtures("qa_routing_on")
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "src" / "llm_router" / "hooks" / "session-start.py"

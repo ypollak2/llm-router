@@ -21,6 +21,9 @@ from pathlib import Path
 
 import pytest
 
+# Exercises the Q&A routing machinery, which is off by default (LLM_ROUTER_QA_ROUTING).
+pytestmark = pytest.mark.usefixtures("qa_routing_on")
+
 HOOK = Path(__file__).resolve().parents[1] / "src" / "llm_router" / "hooks" / "auto-route.py"
 REPO_Q = "Can you take the last 10 days prompts and check if they are being routed?"
 WEB_Q = "What is the latest price of Claude Opus on OpenRouter today?"

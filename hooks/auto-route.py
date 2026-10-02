@@ -2535,6 +2535,23 @@ def _consume_unresolved_pending(session_id: str) -> dict | None:
     return pending
 
 
+def _consume_stale_pending_before_exit(session_id: str) -> None:
+    """Drop a previous turn's pending-route state on a user-turn early exit.
+
+    The hold in enforce-route.py keys on this state. Turns that end in an early
+    ``sys.exit(0)`` before the normal consume (``claude:`` prefix, strict-ack
+    continuation, llm_router self-reference) would otherwise leave a code turn's
+    pending alive, and PreToolUse would hold tools on a turn that was never
+    routed. Fail-open: a state-file error must never block the prompt.
+    """
+    if not session_id:
+        return
+    try:
+        _consume_unresolved_pending(session_id)
+    except Exception as exc:  # noqa: BLE001
+        _debug_log(f"consume stale pending before early exit failed (fail-open): {exc}")
+
+
 def _last_route_path(session_id: str) -> Path:
     return _router_dir() / f"last_route_{_safe_sid(session_id)}.json"
 
@@ -4154,6 +4171,7 @@ def main() -> None:
         else:
             _debug_log(f"[INVOCATION {invocation_id:.3f}] SELF_REFERENCE_BYPASS — llm_router-debug prompt, skipping routing")
             _coverage_unobserved("SELF_REFERENCE_BYPASS")
+            _consume_stale_pending_before_exit(str(hook_input.get("session_id", "") or ""))
             sys.exit(0)
 
     session_id = hook_input.get("session_id", "")
@@ -4236,6 +4254,7 @@ def main() -> None:
     if zero_claude and _EXPLICIT_CLAUDE_PREFIX_RE.match(prompt):
         _debug_log(f"[INVOCATION {invocation_id:.3f}] ZERO_CLAUDE EXPLICIT_NATIVE")
         _coverage_unobserved("EXPLICIT_CLAUDE_PREFIX")
+        _consume_stale_pending_before_exit(session_id)
         sys.exit(0)
 
     # ── v6.0 Visibility: Initialize HUD session state ─────────────────────────
@@ -4313,6 +4332,7 @@ def main() -> None:
         else:
             _debug_log(f"[INVOCATION {invocation_id:.3f}] CONTINUATION: bypass to host agent (strict ack)")
             _coverage_unobserved("CONTINUATION_BYPASS")
+            _consume_stale_pending_before_exit(session_id)
             sys.exit(0)
 
     previous_unrouted = _consume_unresolved_pending(session_id) if session_id else None

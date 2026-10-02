@@ -191,3 +191,49 @@ def test_zero_claude_edit_still_serves_bounded_edits(monkeypatch, tmp_path, mode
                                LLM_ROUTER_ZERO_CLAUDE_SCOPE="edit")
     assert seen == [EDIT_PROMPT]
     assert json.loads(out) == {"decision": "block", "reason": "edit applied by local model"}
+
+
+# ── Stale pending state must not outlive a user turn that exits early ─────────
+# auto-route.py has early sys.exit(0) sites (`claude:` prefix, strict-ack
+# continuation, llm_router self-reference) that sat BEFORE the consume of the
+# previous turn's pending state, so a code turn's pending survived into a turn
+# that was never routed and PreToolUse held its tools.
+
+def _hold_after(monkeypatch, tmp_path, tool="Edit"):
+    code, out = _tool_call(monkeypatch, tmp_path, "smart", tool)
+    return code != 0 or "deny" in out or "block" in out.lower()
+
+
+def _seed_pending_from_a_code_turn(monkeypatch, tmp_path):
+    _run_prompt(monkeypatch, tmp_path, CODE_PROMPT, "smart")
+    # Do NOT probe the hold here: enforce-route's first hold changes its state,
+    # which would make the later "no hold" assertions vacuous.
+    assert len(_pending(tmp_path)) == 1, "precondition: the code turn must leave pending state"
+
+
+@pytest.mark.parametrize("followup,extra,marker", [
+    ("claude: why does lru_cache keep references alive?", {"LLM_ROUTER_ZERO_CLAUDE": "1"}, "EXPLICIT_NATIVE"),
+    ("ok", {}, "CONTINUATION"),
+    ("yes", {}, "CONTINUATION"),
+    ("why is my llm_router hook not firing?", {}, "SELF_REFERENCE_BYPASS"),
+], ids=["claude-prefix", "continuation-ok", "continuation-yes", "self-reference"])
+def test_stale_pending_does_not_hold_tools_after_an_early_exit_user_turn(
+        monkeypatch, tmp_path, followup, extra, marker):
+    _seed_pending_from_a_code_turn(monkeypatch, tmp_path)
+    _, _, _, log = _run_prompt(monkeypatch, tmp_path, followup, "smart", **extra)
+    assert any(marker in line for line in log), (marker, log)  # took the early-exit path
+    assert _pending(tmp_path) == []
+    assert not _hold_after(monkeypatch, tmp_path, "Edit")
+    assert not _hold_after(monkeypatch, tmp_path, "Write")
+
+
+@pytest.mark.parametrize("prompt", [
+    "<task-notification>background job finished</task-notification>",
+    "Another Claude session sent a message: hello",
+], ids=["task-notification", "subagent-report"])
+def test_system_turns_leave_pending_alone(monkeypatch, tmp_path, prompt):
+    """Not user turns: a notification mid-task must not cancel the code turn's hold."""
+    _seed_pending_from_a_code_turn(monkeypatch, tmp_path)
+    _run_prompt(monkeypatch, tmp_path, prompt, "smart")
+    assert len(_pending(tmp_path)) == 1
+    assert _hold_after(monkeypatch, tmp_path)

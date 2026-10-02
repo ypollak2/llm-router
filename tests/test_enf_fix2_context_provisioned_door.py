@@ -23,6 +23,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Exercises the Q&A routing machinery, which is off by default (LLM_ROUTER_QA_ROUTING).
+pytestmark = pytest.mark.usefixtures("qa_routing_on")
+
 HOOK = Path(__file__).resolve().parents[1] / "src" / "llm_router" / "hooks" / "auto-route.py"
 
 

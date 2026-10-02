@@ -24,6 +24,9 @@ import pytest
 
 from llm_router.hooks import draft_usage as du
 
+# Exercises the Q&A routing machinery, which is off by default (LLM_ROUTER_QA_ROUTING).
+pytestmark = pytest.mark.usefixtures("qa_routing_on")
+
 
 @pytest.fixture(autouse=True)
 def _home(monkeypatch, tmp_path):

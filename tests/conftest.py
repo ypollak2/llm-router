@@ -82,12 +82,11 @@ def _isolate_llm_router_writes(tmp_path, monkeypatch):
     # failed carrying the text of the Write call from the session running it:
     # a test that passes or fails according to what you were doing.
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "home"))
-    # Q&A routing is OFF by default since 2026-10-01 (owner decision; see
-    # tests/test_qa_not_routed.py). The suites that exercise the routing, draft,
-    # zero-Claude and enforcement machinery for Q&A prompts test that machinery,
-    # which stays reachable behind LLM_ROUTER_QA_ROUTING=on, so they run with it on.
-    # test_qa_not_routed.py sets the variable itself and tests the default.
-    monkeypatch.setenv("LLM_ROUTER_QA_ROUTING", "on")
+    # Q&A routing is OFF by default since 2026-10-01 (owner decision), and the
+    # suite runs against that default. A Q&A-routing machinery suite opts in
+    # explicitly with the `qa_routing_on` fixture below. Clear any inherited value
+    # so a developer's shell cannot flip the default under test.
+    monkeypatch.delenv("LLM_ROUTER_QA_ROUTING", raising=False)
 
 
 # ── Config-singleton isolation (CHZ-AUD-001) ────────────────────────────────
@@ -1585,3 +1584,10 @@ def _isolate_dotenv(tmp_path, monkeypatch):
         return
     sandbox = tmp_path / "isolated.env"
     monkeypatch.setitem(RouterConfig.model_config, "env_file", (str(sandbox),))
+
+
+@pytest.fixture
+def qa_routing_on(monkeypatch):
+    """Opt a test (or module, via ``pytestmark = pytest.mark.usefixtures``) into the
+    legacy Q&A routing: directives, pending-route holds, drafts. Off by default."""
+    monkeypatch.setenv("LLM_ROUTER_QA_ROUTING", "on")

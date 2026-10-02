@@ -149,6 +149,9 @@ def test_zero_claude_does_not_block_a_subagent_report(monkeypatch, tmp_path):
 
 import pytest  # noqa: E402
 
+# Exercises the Q&A routing machinery, which is off by default (LLM_ROUTER_QA_ROUTING).
+pytestmark = pytest.mark.usefixtures("qa_routing_on")
+
 
 @pytest.mark.parametrize("prompt,reason", [
     (NOTIFICATION, "SYSTEM_NOTIFICATION_BYPASS"),

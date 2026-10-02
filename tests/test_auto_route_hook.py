@@ -16,6 +16,9 @@ import pytest
 # was unroutable in production.
 from llm_router.tool_surface import route_tool
 
+# Exercises the Q&A routing machinery, which is off by default (LLM_ROUTER_QA_ROUTING).
+pytestmark = pytest.mark.usefixtures("qa_routing_on")
+
 
 def _names_a_llm_router_tool(hint: str) -> bool:
     """True if the hint names SOME llm_router tool the caller can call.

@@ -22,6 +22,9 @@ import pytest
 
 from llm_router import quality_breaker as qb
 
+# Exercises the Q&A routing machinery, which is off by default (LLM_ROUTER_QA_ROUTING).
+pytestmark = pytest.mark.usefixtures("qa_routing_on")
+
 REPO_SRC = Path(__file__).resolve().parents[1] / "src"
 AUTO_ROUTE_HOOK = REPO_SRC / "llm_router" / "hooks" / "auto-route.py"
 AGENT_ROUTE_HOOK = REPO_SRC / "llm_router" / "hooks" / "agent-route.py"
