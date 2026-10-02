@@ -1892,6 +1892,58 @@ def score_categories(text: str) -> dict[str, int]:
     return scores
 
 
+# ── Conversational vs executable "coordination" prompts ─────────────────────
+#
+# The heuristic "coordination" bucket (score_categories, no trailing "e") is
+# meant for EXECUTABLE git/deploy/command asks and stays enforced for those
+# (test_enf_coordination_bash_names_llm_act.py). But its topic layer carries
+# weak words (`test(s)`, `build`, `setup`, `version`, ...) and its format layer
+# carries `now`/`just`/`done`, so a conversational planning prompt scores it with
+# no command in it at all: "If the OKF works now, we need to rerun the tests to
+# understand how many prompts are routed ..." scores coordination=3 from
+# `tests` + `now` alone and was held on Bash (live, 2026-10-02).
+#
+# The narrowest signal that separates the two, reusing the bucket's own intent
+# layer: a prompt is conversational when it names no concrete command to run —
+#   (a) it is a question or a plan ("?"-terminated, or opens with an interrogative
+#       / "we need|should to" / "plan"), or
+#   (b) the bucket's intent layer (git/deploy verbs) never matched AND no
+#       shell-tool invocation appears — the score came from topic/format words only.
+# A backticked span, or a polite request for an intent verb ("can you push this"),
+# is always executable. The classification itself is NOT changed (task_type stays
+# "coordination"), only whether the hook issues a directive / pending hold.
+_COORD_BACKTICK_RE = re.compile(r"`[^`\n]+`")
+_COORD_SHELL_TOOL_RE = re.compile(
+    r"\b(?:git|gh|npm|npx|pnpm|yarn|pip3?|uv|pytest|docker|kubectl|cargo|ruff)\s+[\w.\-/]+",
+    re.IGNORECASE,
+)
+_COORD_POLITE_IMPERATIVE_RE = re.compile(
+    r"^\W*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:go ahead and\s+)?"
+    r"(?:push|pull|deploy|release|publish|commit|merge|sync|fetch|rebase)\b",
+    re.IGNORECASE,
+)
+_COORD_QUESTION_OR_PLAN_RE = re.compile(
+    r"\?\s*$|^\W*(?:what|what's|whats|how|why|when|where|which|who|should|shall|"
+    r"do|does|did|is|are|was|were|plan|"
+    r"we\s+(?:need|should|must|have|want)\s+to|let'?s\s+(?:plan|see|figure|understand))\b",
+    re.IGNORECASE,
+)
+
+
+def _is_conversational_coordination(prompt: str) -> bool:
+    """True when a "coordination"-bucket prompt names no concrete command to run."""
+    text = prompt.strip()
+    if _COORD_BACKTICK_RE.search(text):
+        return False
+    if _COORD_POLITE_IMPERATIVE_RE.match(text) and not re.match(
+            r"^\W*(?:what|how|why|when|where|which|who)\b", text, re.IGNORECASE):
+        return False
+    if _COORD_QUESTION_OR_PLAN_RE.search(text):
+        return True
+    return (not SIGNALS["coordination"]["intent"].search(text)
+            and not _COORD_SHELL_TOOL_RE.search(text))
+
+
 # ── LLM Classifiers ─────────────────────────────────────────────────────────
 
 CLASSIFY_PROMPT = (
@@ -4511,13 +4563,20 @@ def main() -> None:
     #
     # NOT the same as the separate, older "coordination" (no trailing "e")
     # heuristic bucket scored by score_categories/VALID_CATEGORIES: that
-    # bucket stays enforced on purpose — a held-out real-traffic sample
+    # bucket stays enforced on purpose for executable asks (a conversational
+    # coordination prompt is quieted separately, just below) — a held-out real-traffic sample
     # (n=251, 2026-09-28) showed it is dominated by executable git/deploy
     # commands with an ambiguous target ("merge the PRs in that order"),
     # which correctly redirect to llm_act (test_enf_coordination_bash_names_
     # llm_act.py). Quieting that bucket too would silently defeat that
     # redirect, so it is deliberately left out of this extension.
     _conversational_task = task_type in ("coordinate", "introspect")
+    # Owner follow-up 2026-10-02: the older "coordination" bucket is still
+    # enforced for EXECUTABLE asks, but a conversational one (planning, status,
+    # "rerun X to understand Y" — no concrete command) is answered directly too.
+    # See _is_conversational_coordination for the signal and why it is the narrowest.
+    if task_type == "coordination" and _is_conversational_coordination(prompt):
+        _conversational_task = True
     _qa_routing_on = os.environ.get(
         "LLM_ROUTER_QA_ROUTING", "off").strip().lower() in ("1", "on", "true", "yes")
     _qa_quiet = _qa_task and not _qa_routing_on

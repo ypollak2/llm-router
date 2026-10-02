@@ -199,3 +199,65 @@ def test_routing_decision_is_still_logged(monkeypatch, tmp_path, prompt):
     _, decisions, _, _ = _run_prompt(monkeypatch, tmp_path, prompt, "smart")
     assert len(decisions) == 1
     assert decisions[0]["task_type"] in CONVERSATIONAL_TYPES
+
+
+# ── the older "coordination" heuristic bucket: conversational vs executable ──
+#
+# Live 2026-10-02: a planning prompt scored the "coordination" bucket from
+# topic/format words alone ("tests", "now") and held Bash. The bucket still routes
+# EXECUTABLE git/deploy asks (test_enf_coordination_bash_names_llm_act.py); only a
+# prompt that names no concrete command is answered directly.
+
+CONVERSATIONAL_COORDINATION_PROMPTS = [
+    "If the OKF works now, we need to rerun the tests to understand how many prompts "
+    "are routed and how the local models quality now",
+    "we need to plan the version bump and the setup, what comes first?",
+    "should we push now?",
+    "when do we deploy?",
+    "is the test suite green now?",
+]
+EXECUTABLE_COORDINATION_PROMPTS = [
+    "push to main",
+    "commit and push",
+    "git push origin main",
+    "deploy to production now",
+    "merge the PR",
+    "Run the test suite and commit the passing changes.",
+]
+
+
+@pytest.mark.parametrize("mode", ["smart", "hard"])
+@pytest.mark.parametrize("prompt", CONVERSATIONAL_COORDINATION_PROMPTS)
+def test_conversational_coordination_prompt_gets_no_directive_and_no_hold(
+        monkeypatch, tmp_path, mode, prompt):
+    out, decisions, drafted, _ = _run_prompt(monkeypatch, tmp_path, prompt, mode)
+    # It really is the older "coordination" bucket (not the "coordinate" fast path).
+    assert decisions[0]["task_type"] == "coordination", decisions
+    ctx = _context(out)
+    assert ctx, "a non-directive note is expected, not silence"
+    assert not any(w in ctx for w in _ROUTE_WORDS), ctx
+    assert _pending(tmp_path) == [] and drafted == []
+    for tool, command in (("Bash", "pytest -q"), ("Edit", "")):
+        code, tool_out = _tool_call(monkeypatch, tmp_path, mode, tool, command)
+        assert code == 0 and "deny" not in tool_out and "block" not in tool_out.lower(), tool_out
+
+
+@pytest.mark.parametrize("mode", ["smart", "hard"])
+@pytest.mark.parametrize("prompt", EXECUTABLE_COORDINATION_PROMPTS)
+def test_executable_coordination_prompt_keeps_its_directive_and_pending_route(
+        monkeypatch, tmp_path, mode, prompt):
+    out, decisions, _, _ = _run_prompt(monkeypatch, tmp_path, prompt, mode)
+    assert decisions[0]["task_type"] == "coordination", decisions
+    assert any(w in _context(out) for w in ("ROUTE", "SUGGESTED")), _context(out)
+    assert len(_pending(tmp_path)) == 1
+
+
+@pytest.mark.parametrize("mode", ["smart", "hard"])
+def test_conversational_coordination_qa_routing_env_restores_the_directive(
+        monkeypatch, tmp_path, mode):
+    out, decisions, _, _ = _run_prompt(
+        monkeypatch, tmp_path, CONVERSATIONAL_COORDINATION_PROMPTS[0], mode,
+        LLM_ROUTER_QA_ROUTING="on")
+    assert decisions[0]["task_type"] == "coordination"
+    assert any(w in _context(out) for w in ("ROUTE", "SUGGESTED")), _context(out)
+    assert len(_pending(tmp_path)) == 1
