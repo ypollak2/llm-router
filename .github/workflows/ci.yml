@@ -83,7 +83,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -125,25 +125,39 @@ jobs:
         run: |
           # Run pytest in the background so we can detect the aiosqlite thread hang.
           # pytest writes junit xml before the hang; we read that to determine pass/fail.
-          uv run pytest tests/ -q \
+          #
+          # -n auto: pytest-xdist, one worker per core. The serial suite had
+          # grown to ~11,400 tests: test (3.13) took 13m43s (run 37017536577)
+          # and test (3.11) outlived the 900s watchdog on main run 37019520395
+          # and on PR #240 run 37017536577 (twice), which then failed a healthy
+          # suite. Measured locally (same flags, clean HOME): serial 666s on a
+          # loaded 15-core machine vs 152s with -n 4, 11,391 tests both ways,
+          # no failure that depends on xdist.
+          #
+          # --durations=10 prints the slowest tests so one creeping toward the 30s
+          # per-test timeout shows up in the log before it fails a run.
+          #
+          # A stale xml from an earlier step must not be mistaken for this run's.
+          rm -f /tmp/pytest-results.xml
+          uv run pytest tests/ -q -n auto \
             --ignore=tests/test_agno_integration.py \
             --timeout=30 \
+            --durations=10 \
             --junit-xml=/tmp/pytest-results.xml &
           PYTEST_PID=$!
 
-          # Wait up to 900s for pytest to exit normally.
+          # Wait up to 1500s for pytest to exit normally.
           #
-          # Was 150s, sized for a ~2,700-test suite. The upstream-core sync took
-          # it to ~6,900, so the wait expired at 31% progress, the hang-handler
-          # fired on a pytest that was working perfectly, found no junit xml
-          # (not written yet) and reported failure. Nothing was broken; the
-          # watchdog was simply shorter than the work.
+          # History: 150s (sized for ~2,700 tests) -> 900s (~6,900 tests) -> here.
+          # Each time the suite outgrew the wait, the hang-handler fired on a
+          # pytest that was working perfectly, found no junit xml (it is only
+          # written when the run finishes) and reported failure. Nothing was
+          # broken; the watchdog was simply shorter than the work.
           #
-          # 900s is the ceiling, not the expectation: a healthy run finishes in
-          # ~4 minutes and exits the loop immediately. This only bounds the
-          # aiosqlite exit-hang the handler below exists for. timeout-minutes
+          # 1500s is the ceiling, not the expectation: with -n auto a healthy
+          # run is a few minutes and exits the loop immediately. timeout-minutes
           # on the job is raised to match, or the job dies before the loop can.
-          for i in $(seq 1 900); do
+          for i in $(seq 1 1500); do
             if ! kill -0 $PYTEST_PID 2>/dev/null; then
               wait $PYTEST_PID
               exit $?
@@ -151,8 +165,19 @@ jobs:
             sleep 1
           done
 
-          # Still running after 900s — pytest is hanging on exit (aiosqlite thread).
-          # Read the junit xml written before the hang to determine true pass/fail.
+          # Still running after 1500s. Two different situations look the same
+          # from here, and only the junit xml tells them apart: pytest writes it
+          # when the run FINISHES, so
+          #   xml present -> tests are done, the process hangs on exit (aiosqlite
+          #                  thread): judge by the xml.
+          #   xml absent  -> tests are still running: the suite exceeded its
+          #                  budget. That is a failure of the budget, not a pass
+          #                  and not an exit hang, and it says so.
+          if [ ! -s /tmp/pytest-results.xml ]; then
+            echo "::error::suite exceeded the 1500s budget: pytest is still running tests (no junit xml written yet), so this is NOT the aiosqlite exit hang. Raise the budget or speed the suite up."
+            kill $PYTEST_PID 2>/dev/null || true
+            exit 1
+          fi
           echo "pytest is hanging on exit — reading junit results..."
           python3 - <<'PY'
           import sys, xml.etree.ElementTree as ET
@@ -163,7 +188,7 @@ jobs:
               errors   = int(suite.get("errors",   0))
               tests    = int(suite.get("tests",     0))
               print(f"junit: {tests} tests, {failures} failures, {errors} errors")
-              sys.exit(1 if (failures or errors) else 0)
+              sys.exit(1 if (failures or errors or tests == 0) else 0)
           except Exception as e:
               print(f"Could not read junit xml: {e}")
               sys.exit(1)
