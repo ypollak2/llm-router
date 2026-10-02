@@ -282,9 +282,15 @@ def _local_num_ctx(model: str | None = None) -> int | None:
 def call_ollama(
     prompt: str, model: str, timeout: int = 4,
     history: list[dict] | None = None, system_prompt: str | None = None,
-    format: dict | None = None,
+    format: dict | None = None, keep_alive: int | str | None = None,
 ) -> str | None:
     """Call Ollama's /api/chat endpoint. Returns response text or None.
+
+    ``keep_alive``: sent as Ollama's top-level ``keep_alive`` when not None
+    (-1 = never unload). Opt-in rather than a default so a caller that talks to
+    several models does not pin them all resident and make them contend for one
+    slot; the zero-Claude edit path passes ``warm.edit_keep_alive()`` because
+    the server default (5 min) unloaded its model between prompts.
 
     ``format``: an optional JSON Schema sent as Ollama's ``format`` (structured
     output). A server that refuses it with HTTP 400 (Ollama < 0.5 takes only
@@ -300,6 +306,8 @@ def call_ollama(
     }
     if format is not None:
         payload["format"] = format
+    if keep_alive is not None:
+        payload["keep_alive"] = keep_alive
     body = json.dumps(payload).encode()
     ollama_url = _get_ollama_url()
     req = urllib.request.Request(
@@ -346,7 +354,8 @@ def call_ollama(
         if format is not None and not parts and is_format_rejection(getattr(exc, "code", None)):
             # The retry gets what is left of this call's budget, not a fresh one.
             remaining = max(1, int(deadline - time.monotonic()))
-            return call_ollama(prompt, model, remaining, history=history, system_prompt=system_prompt)
+            return call_ollama(prompt, model, remaining, history=history,
+                               system_prompt=system_prompt, keep_alive=keep_alive)
         if not parts:
             _call_failure("ollama", model, _failure_reason(exc, timeout))
             return None, {}

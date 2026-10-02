@@ -329,6 +329,10 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # Plan 3.3: gate for the pre-write lint check (ruff) on scoped zero-Claude
     # edits. Defaults ON — see local_agent/verify.py's _DEFAULT_ENABLED.
     "LLM_ROUTER_ZERO_CLAUDE_VERIFY": ("llm_router", "local_agent/verify.py", 1),
+    # Plan 3.7 (warm.py): keep the zero-Claude edit model resident, fail fast cold.
+    "LLM_ROUTER_LOCAL_KEEP_ALIVE": ("llm_router", "warm.py", 1),
+    "LLM_ROUTER_ZCE_COLD_BUDGET_S": ("llm_router", "warm.py", 1),
+    "LLM_ROUTER_ZCE_WARMUP": ("llm_router", "warm.py", 1),
     # ── indirect reads: DECLARED BY HAND, invisible to the AST scan ──
     # These are read through a VARIABLE, not a string literal:
     #     for env in (ALLOW_PUBLIC_ENV, LEGACY_SSE_ALLOW_PUBLIC_ENV):

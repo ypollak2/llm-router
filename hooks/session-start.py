@@ -1430,8 +1430,17 @@ def _validated_ollama_env_url(raw: str) -> str:
         return raw if raw == default else default
     return validate_ollama_url(raw) or default
 
+# The model _warm_edit_model_bg() loaded this session (with the edit call's own
+# num_ctx / keep_alive), so _warm_ollama_bg() does not reload it at server defaults.
+_EDIT_WARMED_MODEL: str | None = None
+
+
 def _warm_ollama_bg() -> None:
     """Fire-and-forget warm-up of the primary Ollama classification model.
+
+    Skips the model ``_warm_edit_model_bg`` has just loaded WITH the edit call's
+    num_ctx and keep_alive: warming it again here with the server defaults would
+    make Ollama reload it at a different context, undoing the edit warm-up.
 
     Ollama keeps models resident in memory after first use, but the very
     first call after a server restart (or after the keep-alive window
@@ -1465,6 +1474,11 @@ def _warm_ollama_bg() -> None:
             model = ""
     if not model:
         return          # nothing installed; nothing to warm
+    if _EDIT_WARMED_MODEL:
+        # The edit model was just loaded and pinned (keep_alive=-1). Warming any
+        # other model here would evict it on a box that holds one model, so the
+        # generic warm-up yields whenever the edit warm-up ran.
+        return
     base_url = _validated_ollama_env_url(
         os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
     ).rstrip("/")
@@ -1487,6 +1501,33 @@ def _warm_ollama_bg() -> None:
         # session start. If Ollama isn't installed/running, the next
         # routing call will discover that anyway via the chain fallback.
         pass
+
+
+def _warm_edit_model_bg() -> str | None:
+    """Plan 3.7: load the zero-Claude edit model with the SAME model/num_ctx/keep_alive
+    the edit call sends, so the first edit of the session finds it resident.
+    Detached; returns the model warmed, or None (scope off, opted out, no spawn)."""
+    global _EDIT_WARMED_MODEL
+    try:
+        from llm_router.warm import warm_edit_model_bg
+        _EDIT_WARMED_MODEL = warm_edit_model_bg()
+    except Exception:
+        _EDIT_WARMED_MODEL = None
+    return _EDIT_WARMED_MODEL
+
+
+def _ollama_contention_hint() -> str:
+    """Plan 3.7: warn when 2+ models are resident (they share one slot and have
+    evicted/corrupted each other). Only when zero-Claude edits are on, since that
+    is the path it breaks. Empty string when fine or unknown."""
+    if os.environ.get("LLM_ROUTER_ZERO_CLAUDE_SCOPE", "").strip().lower() != "edit":
+        return ""
+    try:
+        from llm_router.warm import dedicated_server_warning
+        warning = dedicated_server_warning()
+    except Exception:
+        return ""
+    return f"\n⚠️ {warning}" if warning else ""
 
 
 def _drain_judge_queue_bg() -> None:
@@ -1847,6 +1888,7 @@ def main() -> None:
     hints += _weekly_digest()
     hints += _latency_hint()
     hints += _preflight_check()
+    hints += _ollama_contention_hint()
 
     # 5. Trigger benchmark refresh in background if stale (v5.0 adaptive router).
     # Opt-in via LLM_ROUTER_AUTO_BENCHMARK_FETCH=1 (default off — local-first,
@@ -1867,6 +1909,9 @@ def main() -> None:
     # 6. Warm up Ollama's classifier model in the background so the first
     # prompt of the new session doesn't pay model-load latency on its
     # classification call. Detached, never blocks session start.
+    # 6a. First, load the zero-Claude edit model with the edit call's own
+    # num_ctx and keep_alive (plan 3.7); the generic warm-up then skips it.
+    _warm_edit_model_bg()
     _warm_ollama_bg()
 
     # 6b. Drain the judge grading queue in the background — the hot path only
