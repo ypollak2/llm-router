@@ -377,6 +377,21 @@ async def test_a_broken_attach_still_serves_the_step(home, tmp_path, policy, mon
     assert backend.calls[0]["system"] == CONDENSED_SYSTEM
 
 
+async def test_a_slow_attach_is_bounded_and_the_step_is_still_served(home, tmp_path, policy, monkeypatch):
+    import time as _time
+
+    from llm_router.proxy import server as proxy_server
+    repo = _repo(tmp_path, "repo-a")
+    monkeypatch.setattr(proxy_server, "OKF_ATTACH_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(okf_context, "attach", lambda *a, **k: (_time.sleep(1.0), (a[0], {}))[1])
+    backend, up = _Backend(), _Upstream()
+    t0 = _time.monotonic()
+    r = await _post(_app(tmp_path, up, backend), _request(repo))
+    assert r.status_code == 200 and up.requests == []
+    assert backend.calls[0]["system"] == CONDENSED_SYSTEM
+    assert _time.monotonic() - t0 < 0.9  # did not wait for the 1 s attach
+
+
 async def test_pass_through_to_claude_is_never_touched(home, tmp_path, monkeypatch):
     """When the policy keeps the step on Claude the upstream gets the client's
     bytes: no knowledge block, no attach call at all."""
