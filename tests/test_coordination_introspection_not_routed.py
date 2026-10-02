@@ -119,10 +119,10 @@ def _pending(tmp_path):
     return sorted((tmp_path / ".llm-router").glob("pending_route_*.json"))
 
 
-def _tool_call(monkeypatch, tmp_path, mode, tool, command=""):
+def _tool_call(monkeypatch, tmp_path, mode, tool, command="", **extra_env):
     """Run enforce-route.py main() for one tool call. Returns (exit_code, stdout)."""
     er = _load("enforce_route_noconv", "enforce-route.py")
-    _env(monkeypatch, tmp_path, mode)
+    _env(monkeypatch, tmp_path, mode, **extra_env)
     payload = {"session_id": SID, "tool_name": tool,
                "tool_input": {"command": command, "file_path": str(tmp_path / "x.py")}}
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
@@ -261,3 +261,59 @@ def test_conversational_coordination_qa_routing_env_restores_the_directive(
     assert decisions[0]["task_type"] == "coordination"
     assert any(w in _context(out) for w in ("ROUTE", "SUGGESTED")), _context(out)
     assert len(_pending(tmp_path)) == 1
+
+
+# A plan opener ("we need to ...") in front of a concrete command is still an ask
+# to run it, so the precedence is: pure question -> conversational; otherwise any
+# executable signal (intent verb / shell tool) -> executable; plan opener only
+# conversational when nothing executable is named.
+PLAN_OPENER_EXECUTABLE_PROMPTS = [
+    "we have to run git push now",
+    "we need to deploy this now",
+    "we want to release this now",
+    "we need to merge this PR before EOD",
+    "we need to pytest -q now",
+]
+
+
+@pytest.mark.parametrize("prompt", PLAN_OPENER_EXECUTABLE_PROMPTS)
+def test_plan_opener_before_a_command_is_executable_not_conversational(prompt):
+    ar = _load("auto_route_noconv", "auto-route.py")
+    assert ar._is_conversational_coordination(prompt) is False
+
+
+@pytest.mark.parametrize("prompt", [
+    "If the OKF works now, we need to rerun the tests to understand how many prompts "
+    "are routed and how the local models quality now",
+    "we need to plan the version bump and the setup, what comes first?",
+    "should we push now?",
+    "we need to run the tests again to see where the pipeline stands",
+])
+def test_plan_opener_without_a_command_is_still_conversational(prompt):
+    """`rerun`/`run` are not in the bucket's intent layer, and "run" only counts with a
+    shell-tool target (`run git push`); so the owner's prompt stays conversational."""
+    ar = _load("auto_route_noconv", "auto-route.py")
+    assert ar._is_conversational_coordination(prompt) is True
+
+
+@pytest.mark.parametrize("prompt", [
+    "we have to run git push now", "we want to release this now", "we need to pytest -q now"])
+def test_plan_opener_before_a_command_keeps_its_pending_route(monkeypatch, tmp_path, prompt):
+    """Same pending route (so the same hold semantics) as before the quieting."""
+    _, decisions, _, _ = _run_prompt(monkeypatch, tmp_path, prompt, "hard",
+                                     LLM_ROUTER_DELEGATE="on")
+    assert decisions[0]["task_type"] == "coordination", decisions
+    assert len(_pending(tmp_path)) == 1
+
+
+def test_plan_opener_before_git_push_keeps_the_llm_act_redirect(monkeypatch, tmp_path):
+    """hard + LLM_ROUTER_DELEGATE=on: Bash is held and the block names llm_act."""
+    _run_prompt(monkeypatch, tmp_path, "we have to run git push now", "hard",
+                LLM_ROUTER_DELEGATE="on")
+    _, tool_out = _tool_call(monkeypatch, tmp_path, "hard", "Bash",
+                             "pytest -q && git commit -am done",
+                             LLM_ROUTER_DELEGATE="on", LLM_ROUTER_SLIM="consolidated")
+    assert tool_out.strip(), "the Bash command must be held, not exempted to native"
+    verdict = json.loads(tool_out)
+    assert verdict["decision"] == "block"
+    assert "llm_act" in verdict["reason"], verdict["reason"]

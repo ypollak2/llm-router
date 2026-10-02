@@ -1904,14 +1904,26 @@ def score_categories(text: str) -> dict[str, int]:
 # `tests` + `now` alone and was held on Bash (live, 2026-10-02).
 #
 # The narrowest signal that separates the two, reusing the bucket's own intent
-# layer: a prompt is conversational when it names no concrete command to run —
-#   (a) it is a question or a plan ("?"-terminated, or opens with an interrogative
-#       / "we need|should to" / "plan"), or
-#   (b) the bucket's intent layer (git/deploy verbs) never matched AND no
-#       shell-tool invocation appears — the score came from topic/format words only.
-# A backticked span, or a polite request for an intent verb ("can you push this"),
-# is always executable. The classification itself is NOT changed (task_type stays
-# "coordination"), only whether the hook issues a directive / pending hold.
+# layer. Precedence (first match wins):
+#   1. a backticked span, or a polite request for an intent verb ("can you push
+#      this") -> executable;
+#   2. a pure question (trailing "?") -> conversational ("should we push now?");
+#   3. any executable signal -- an intent-layer verb (git/deploy: push, deploy,
+#      release, commit, merge, ...) or a shell-tool invocation (`git x`, `pytest x`)
+#      -> executable, even behind a plan opener: "we need to deploy this now",
+#      "we have to run git push now" are still asks to run something, and must keep
+#      the llm_act delegate redirect;
+#   4. otherwise -> conversational. This covers both a plan opener ("we need to
+#      ...", "plan ...") and the case where the bucket scored from topic/format
+#      words alone, e.g. the live 2026-10-02 prompt ("... rerun the tests to
+#      understand ..."): `rerun`/`run` are NOT in the intent layer (the bucket
+#      removed them as false-positive prone), and "run" only counts here when it
+#      carries a shell-tool target ("run git push", "pytest -q"), so it stays
+#      conversational without reopening the gap.
+# Plan openers therefore need no pattern of their own: after step 3 they and the
+# topic-only fallback give the same answer. The classification itself is NOT
+# changed (task_type stays "coordination"), only whether the hook issues a
+# directive / pending hold.
 _COORD_BACKTICK_RE = re.compile(r"`[^`\n]+`")
 _COORD_SHELL_TOOL_RE = re.compile(
     r"\b(?:git|gh|npm|npx|pnpm|yarn|pip3?|uv|pytest|docker|kubectl|cargo|ruff)\s+[\w.\-/]+",
@@ -1922,26 +1934,18 @@ _COORD_POLITE_IMPERATIVE_RE = re.compile(
     r"(?:push|pull|deploy|release|publish|commit|merge|sync|fetch|rebase)\b",
     re.IGNORECASE,
 )
-_COORD_QUESTION_OR_PLAN_RE = re.compile(
-    r"\?\s*$|^\W*(?:what|what's|whats|how|why|when|where|which|who|should|shall|"
-    r"do|does|did|is|are|was|were|plan|"
-    r"we\s+(?:need|should|must|have|want)\s+to|let'?s\s+(?:plan|see|figure|understand))\b",
-    re.IGNORECASE,
-)
+_COORD_PURE_QUESTION_RE = re.compile(r"\?\s*$")
 
 
 def _is_conversational_coordination(prompt: str) -> bool:
     """True when a "coordination"-bucket prompt names no concrete command to run."""
     text = prompt.strip()
-    if _COORD_BACKTICK_RE.search(text):
+    if _COORD_BACKTICK_RE.search(text) or _COORD_POLITE_IMPERATIVE_RE.match(text):
         return False
-    if _COORD_POLITE_IMPERATIVE_RE.match(text) and not re.match(
-            r"^\W*(?:what|how|why|when|where|which|who)\b", text, re.IGNORECASE):
-        return False
-    if _COORD_QUESTION_OR_PLAN_RE.search(text):
+    if _COORD_PURE_QUESTION_RE.search(text):
         return True
-    return (not SIGNALS["coordination"]["intent"].search(text)
-            and not _COORD_SHELL_TOOL_RE.search(text))
+    return not (SIGNALS["coordination"]["intent"].search(text)
+                or _COORD_SHELL_TOOL_RE.search(text))
 
 
 # ── LLM Classifiers ─────────────────────────────────────────────────────────
