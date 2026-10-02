@@ -102,7 +102,24 @@ def resolve_scope(hint: "str | Path | None" = None) -> Path:
     return _walk_to_repo_root(Path.cwd())
 
 
-def resolve_scope_or_none(hint: "str | Path | None" = None) -> Path | None:
+def find_repo_root(start: "str | Path") -> Path | None:
+    """Nearest ancestor of *start* containing `.git`, else None.
+
+    `_walk_to_repo_root` answers *start* itself when there is no repo, which is
+    right for a store that must be scoped somewhere. A caller that would rather
+    have no context than the wrong context needs the None.
+    """
+    here = Path(start).expanduser().resolve()
+    for candidate in (here, *here.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def resolve_scope_or_none(
+    hint: "str | Path | None" = None,
+    cwd: "str | Path | None" = None,
+) -> Path | None:
     """`resolve_scope`, but None when nothing actually identifies a project.
 
     `resolve_scope` always answers, falling back to the cwd itself when no `.git`
@@ -113,16 +130,16 @@ def resolve_scope_or_none(hint: "str | Path | None" = None) -> Path | None:
 
     So: an explicit hint or environment override answers; a cwd inside a repo
     answers; a cwd that is not in a repo answers None.
+
+    *cwd* stands in for the process cwd in that last step. A hook is told where
+    its calling session runs (the payload's ``cwd``), which is authoritative and
+    need not be where the hook process was spawned.
     """
     if hint is not None or any(
         os.environ.get(n, "").strip() for n in _ENV_NAMES
     ):
         return resolve_scope(hint)
-    here = Path.cwd().resolve()
-    for candidate in (here, *here.parents):
-        if (candidate / ".git").exists():
-            return candidate
-    return None
+    return find_repo_root(cwd if cwd is not None else Path.cwd())
 
 
 def scope_key(hint: "str | Path | None" = None, length: int = 16) -> str:

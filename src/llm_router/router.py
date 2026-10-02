@@ -1615,8 +1615,13 @@ def _baseline_cost(
         return 0.0
 
 
-def _cli_scope_root() -> str | None:
+def _cli_scope_root(hint: str | None = None) -> str | None:
     """Project root for a CLI-dispatch call, or None.
+
+    ``hint`` is the caller's already-resolved scope (``route_and_call``'s
+    ``_scope_root``: an explicit ``project_root`` or the MCP client's workspace
+    root). It wins over everything, because on the long-lived server the
+    process cwd is ``$HOME`` and the cwd walk below can only answer None.
 
     The MCP tool layer resolves the caller's workspace root for OKF retrieval;
     this is the same question for session context. LLM_ROUTER_PROJECT_ROOT is the
@@ -1632,7 +1637,7 @@ def _cli_scope_root() -> str | None:
     try:
         from llm_router.semantic.scope import resolve_scope_or_none
 
-        root = resolve_scope_or_none()
+        root = resolve_scope_or_none(hint)
         if root is not None:
             return str(root)
     except Exception as exc:                                 # noqa: BLE001
@@ -2482,6 +2487,11 @@ async def _dispatch_model_loop(
     model_override: str | None = None,
     ledger_route_id: str | None = None,
     pinned_model: str | None = None,
+    # OKF-SCOPE-06: the CALLER's project scope, resolved once by route_and_call
+    # (explicit project_root or MCP roots). The CLI branches below hand it to
+    # _cli_scope_root as a hint; without it they would fall back to the process
+    # cwd, which is $HOME on the long-lived server -> no scope -> no context.
+    scope_root: str | None = None,
 ) -> LLMResponse:
     """Execute the main model dispatch loop with primary + emergency fallback chains.
 
@@ -2898,7 +2908,7 @@ async def _dispatch_model_loop(
                 elif provider == "codex" and (
                     _brokered := await _maybe_broker_dispatch(
                         "codex", model_name,
-                        await _cli_prompt_with_context(prompt, "codex", caller_context, config, _cli_scope_root()),
+                        await _cli_prompt_with_context(prompt, "codex", caller_context, config, _cli_scope_root(scope_root)),
                     )
                 ) is not None:
                     # P1 phase 2: local Codex disabled (headless daemon) but the
@@ -2912,9 +2922,14 @@ async def _dispatch_model_loop(
                             await _notify(ctx, "info", f"⏳ {model_name} — generating...")
                         elif ev_type == "turn.completed":
                             await _notify(ctx, "info", f"✓ {model_name} — {text}")
+                    _codex_scope_root = _cli_scope_root(scope_root)
                     codex_result = await run_codex(
-                        await _cli_prompt_with_context(prompt, "codex", caller_context, config, _cli_scope_root()),
-                        model=model_name, on_event=_codex_on_event
+                        await _cli_prompt_with_context(prompt, "codex", caller_context, config, _codex_scope_root),
+                        model=model_name, on_event=_codex_on_event,
+                        # OKF-SCOPE-06: context_root (not working_dir) — the
+                        # session's project scope is for OKF retrieval only
+                        # here, not for moving where the Codex subprocess runs.
+                        context_root=_codex_scope_root,
                     )
                     if not codex_result.success:
                         raise RuntimeError(
@@ -2936,7 +2951,7 @@ async def _dispatch_model_loop(
                 elif provider == "gemini_cli" and (
                     _brokered := await _maybe_broker_dispatch(
                         "gemini_cli", model_name,
-                        await _cli_prompt_with_context(prompt, "gemini_cli", caller_context, config, _cli_scope_root()),
+                        await _cli_prompt_with_context(prompt, "gemini_cli", caller_context, config, _cli_scope_root(scope_root)),
                     )
                 ) is not None:
                     # P1 phase 2: local Gemini CLI disabled but the session broker ran it.
@@ -2945,9 +2960,12 @@ async def _dispatch_model_loop(
                     async def _gemini_on_event(ev_type: str, text: str) -> None:
                         if text:
                             await _notify(ctx, "info", f"⚡ gemini: {text}")
+                    _gemini_scope_root = _cli_scope_root(scope_root)
                     gemini_result = await run_gemini_cli(
-                        await _cli_prompt_with_context(prompt, "gemini_cli", caller_context, config, _cli_scope_root()),
-                        model=model_name, on_event=_gemini_on_event
+                        await _cli_prompt_with_context(prompt, "gemini_cli", caller_context, config, _gemini_scope_root),
+                        model=model_name, on_event=_gemini_on_event,
+                        # OKF-SCOPE-06: see the codex branch above.
+                        context_root=_gemini_scope_root,
                     )
                     if not gemini_result.success:
                         raise RuntimeError(
@@ -2977,9 +2995,12 @@ async def _dispatch_model_loop(
                     async def _claude_on_event(ev_type: str, text: str) -> None:
                         if text:
                             await _notify(ctx, "info", f"⚡ claude: {text}")
+                    _claude_scope_root = _cli_scope_root(scope_root)
                     claude_result = await run_claude(
-                        await _cli_prompt_with_context(prompt, "anthropic", caller_context, config, _cli_scope_root()),
-                        model=model_name, on_event=_claude_on_event
+                        await _cli_prompt_with_context(prompt, "anthropic", caller_context, config, _claude_scope_root),
+                        model=model_name, on_event=_claude_on_event,
+                        # OKF-SCOPE-06: see the codex branch above.
+                        context_root=_claude_scope_root,
                     )
                     if not claude_result.success:
                         raise RuntimeError(
@@ -4688,6 +4709,7 @@ async def route_and_call(
             suppress_ledger=suppress_ledger,
             model_override=model_override,  # CHZ-AUD-C-02: honor explicit pin
             ledger_route_id=_ledger_route_id,
+            scope_root=_scope_root,
         )
         # T3-S2 + T3-M1: combined timeout + cancel handling. Both failure
         # modes share the same cleanup contract — release the budget
