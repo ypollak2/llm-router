@@ -237,3 +237,22 @@ def test_system_turns_leave_pending_alone(monkeypatch, tmp_path, prompt):
     _run_prompt(monkeypatch, tmp_path, prompt, "smart")
     assert len(_pending(tmp_path)) == 1
     assert _hold_after(monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("prompt", [QA_PROMPT, QA_CONTEXT_PROMPT], ids=["plain", "context-dependent"])
+def test_session_store_still_captures_the_user_prompt_on_a_quiet_qa_turn(monkeypatch, tmp_path, prompt):
+    """Telemetry/context capture is not part of what was switched off: the quiet
+    Q&A path must still record the user_prompt event (the next turn's history)."""
+    import llm_router.session_store as real_session_store
+    events: list[dict] = []
+    monkeypatch.setattr(real_session_store, "record_event",
+                        lambda session_id, kind, content, **kw: events.append(
+                            {"session_id": session_id, "kind": kind, "content": content, **kw}))
+    out, decisions, _, _ = _run_prompt(monkeypatch, tmp_path, prompt, "smart")
+    assert decisions and decisions[0]["task_type"] in QA_TYPES  # really the quiet Q&A path
+    assert not any(w in _context(out) for w in _ROUTE_WORDS)
+    captured = [e for e in events if e["kind"] == "user_prompt"]
+    assert len(captured) == 1, events
+    assert captured[0]["session_id"] == SID
+    assert captured[0]["content"] == prompt
+    assert captured[0]["task_type"] in QA_TYPES

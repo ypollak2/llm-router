@@ -114,13 +114,13 @@ class TestPressureStatus:
         ctx = out["hookSpecificOutput"]["additionalContext"]
         assert "CRITICAL" in ctx
 
-    def test_low_pressure_uses_subscription_routing(self, tmp_path):
+    def test_low_pressure_uses_subscription_routing(self, tmp_path, qa_routing_on):
         _, out = _run("general", usage_json={"session_pct": 10.0, "sonnet_pct": 10.0, "weekly_pct": 10.0}, tmp_path=tmp_path)
         ctx = out["hookSpecificOutput"]["additionalContext"]
         assert "Haiku" in ctx or "haiku" in ctx.lower()
         assert "Opus" in ctx or "opus" in ctx.lower()
 
-    def test_high_pressure_uses_external_routing(self, tmp_path):
+    def test_high_pressure_uses_external_routing(self, tmp_path, qa_routing_on):
         _, out = _run("general", usage_json={"session_pct": 90.0, "sonnet_pct": 50.0, "weekly_pct": 50.0}, tmp_path=tmp_path)
         ctx = out["hookSpecificOutput"]["additionalContext"]
         assert "llm_query" in ctx or "llm_analyze" in ctx or "external" in ctx.lower()
@@ -165,3 +165,42 @@ class TestMissingUsageData:
         _, out = _run("general", usage_json={"session_pct": 0.86, "sonnet_pct": 0.30, "weekly_pct": 0.40}, tmp_path=tmp_path)
         ctx = out["hookSpecificOutput"]["additionalContext"]
         assert "HIGH" in ctx
+
+
+class TestQaNotRoutedByDefault:
+    """Owner decision 2026-10-01: a spawned agent is not taught to route Q&A.
+
+    The hook runs as a subprocess and inherits the environment, so the switch is
+    exercised exactly as the real hook reads it (LLM_ROUTER_QA_ROUTING).
+    """
+
+    LOW = {"session_pct": 10.0, "sonnet_pct": 10.0, "weekly_pct": 10.0}
+    HIGH = {"session_pct": 90.0, "sonnet_pct": 50.0, "weekly_pct": 50.0}
+    CRITICAL = {"session_pct": 50.0, "sonnet_pct": 50.0, "weekly_pct": 97.0}
+
+    def _ctx(self, usage, tmp_path):
+        code, out = _run("general", usage_json=usage, tmp_path=tmp_path)
+        assert code == 0 and out is not None
+        return out["hookSpecificOutput"]["additionalContext"]
+
+    def test_default_has_no_routing_table_at_any_pressure(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("LLM_ROUTER_QA_ROUTING", raising=False)
+        for name, usage in (("low", self.LOW), ("high", self.HIGH), ("critical", self.CRITICAL)):
+            ctx = self._ctx(usage, tmp_path / name)
+            for forbidden in ("llm(", "research→", "external", "llm_query", "llm_analyze",
+                              "simple→", "moderate→", "respect routing directives"):
+                assert forbidden not in ctx, (name, forbidden, ctx)
+            assert "answer directly" in ctx and "complex→Opus" in ctx, (name, ctx)
+
+    def test_default_keeps_the_pressure_line(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("LLM_ROUTER_QA_ROUTING", raising=False)
+        ctx = self._ctx(self.HIGH, tmp_path)
+        assert "Pressure: session=90%" in ctx and "HIGH" in ctx
+
+    def test_on_restores_the_routing_table(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LLM_ROUTER_QA_ROUTING", "on")
+        low = self._ctx(self.LOW, tmp_path / "low")
+        assert "research→" in low and "simple→Haiku" in low
+        assert "respect routing directives" in low
+        high = self._ctx(self.HIGH, tmp_path / "high")
+        assert "external" in high and "research→" in high

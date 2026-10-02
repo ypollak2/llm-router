@@ -212,8 +212,8 @@ BANNER_LOCAL = """
 # simple/moderate/research -> llm_* table the routing banners above carry. Those
 # stay reachable behind LLM_ROUTER_QA_ROUTING=on (same switch as the hooks).
 _QUIET_BANNER_BODY = (
-    "Questions and analysis: answer them directly.",
-    "Routing covers only local bounded edits and proxy tiering.",
+    "Questions and analysis are not routed; answer them directly.",
+    "Code tasks and local bounded edits keep their routing.",
 )
 _QUIET_BANNER_MODES = {
     "subscription": "subscription mode",

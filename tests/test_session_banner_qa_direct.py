@@ -51,7 +51,7 @@ _MODES = [
 def test_default_banner_says_qa_is_answered_directly(monkeypatch, subscription, cloud_key, qa_routing):
     banner = _banner(monkeypatch, subscription=subscription, cloud_key=cloud_key, qa_routing=qa_routing)
     assert "answer them directly" in banner, banner
-    assert "bounded edits" in banner and "tiering" in banner, banner
+    assert "not routed" in banner and "bounded edits" in banner, banner
     leaked = [w for w in _ROUTING_TABLE_WORDS if w in banner]
     assert leaked == [], (leaked, banner)
 
