@@ -468,6 +468,7 @@ def generate_edits(
     from llm_router.edit import apply_edits, build_edit_prompt, parse_edit_response
     from llm_router.hooks.direct_executor import call_ollama
     from llm_router.local_agent.constrain import EDIT_PAIRS_SCHEMA
+    from llm_router.warm import edit_keep_alive
 
     history: list[str] = []
     last_instructions: list = []
@@ -482,7 +483,7 @@ def generate_edits(
         prompt = build_edit_prompt(task, file_contents, feedback=feedback)
         response, _usage = call_ollama(
             prompt, model, int(round(call_timeout)), system_prompt=_EDIT_SYSTEM_PROMPT,
-            format=EDIT_PAIRS_SCHEMA,
+            format=EDIT_PAIRS_SCHEMA, keep_alive=edit_keep_alive(),
         )
         if not response:
             history.append(f"attempt {attempt}: model returned no response")
@@ -653,6 +654,18 @@ def maybe_replace(
         return ScopedEditOutcome(
             "block", f"ZERO_CLAUDE_EDIT BLOCKED: {reason}", message=failure_message(reason), applied=False,
         )
+
+    # Plan 3.7: a cold model plus the hook's ~37 s deadline is a predictable
+    # failure (0/5 cold-or-contended edits served live). One cheap /api/ps
+    # call; when the model is not resident and the deadline cannot cover a load
+    # plus an edit, hand the turn to Claude NOW (not a block: nothing went
+    # wrong) and start the warm-up so the next edit finds the model resident.
+    # Unknown state (Ollama unreachable, odd /api/ps) proceeds as before.
+    from llm_router import warm
+    cold_reason = warm.should_skip_cold(model, deadline_s)
+    if cold_reason:
+        warm.warm_edit_model_bg(model)
+        return ScopedEditOutcome("fallthrough", f"ZERO_CLAUDE_EDIT: cold model — {cold_reason}")
 
     from llm_router.edit import read_file_for_edit
     file_contents: dict[str, str] = {}
