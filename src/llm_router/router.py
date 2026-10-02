@@ -4658,13 +4658,24 @@ async def route_and_call(
             # earlier version of this comment calling it "a constant +252",
             # which would have been quoted later as a fixed cost.
             #
-            # No session_id: that would add the session-context block to every
-            # routed prompt, which is a larger decision than this seam and gets
-            # its own commit, its own shadow diff and its own gate.
+            # No `session_id`: that would add the session-context block to every
+            # routed prompt, and this door does not know its target provider yet,
+            # so the privacy gate could not be applied. `retrieval_sid` is
+            # the narrower thing: the session lets a follow-up ("do it") search
+            # with the prior turn's words, and no session text enters the prompt.
+            # Gated inside inject() on context_signal.is_reply_shaped, so a
+            # standalone prompt retrieves exactly as before.
             from llm_router import context_injection as _ctx_inject
+            try:
+                from llm_router.session_store import resolve_session_id as _rsid
+                _retr_sid = _rsid(None)
+            except Exception:  # noqa: BLE001 — a missing session is not a failure
+                _retr_sid = None
 
             _before = prompt
-            prompt = _ctx_inject.inject(prompt, root=_scope_root)
+            prompt = _ctx_inject.inject(
+                prompt, root=_scope_root, retrieval_sid=_retr_sid,
+                session_root=_scope_root)
             if prompt != _before and ctx is not None:
                 _spawn_bg(
                     _notify(ctx, "info", "📚 OKF: repo context attached"),
