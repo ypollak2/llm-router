@@ -1071,23 +1071,31 @@ def _log_cli_savings(content: str, provider: str, model: str, duration_sec: floa
         pass
 
 
-def _delegation_scope_root() -> str | None:
+def _delegation_scope_root(cwd: str | None = None) -> str | None:
     """Project root to scope OKF context injection to for a CLI-delegated run.
 
-    This hook already runs with cwd inside the caller's repo (unlike the
-    long-lived MCP server, whose cwd is $HOME), so ``run_codex``/
-    ``run_gemini_cli``'s own ``cwd = working_dir or os.getcwd()`` fallback
-    already points the *subprocess* at the right place without any change
-    here. But ``working_dir`` also doubles as the OKF ``context_injection.inject``
-    scope, and this caller never passed one — leaving injection unscoped
-    (global, not this project) rather than correctly scoped.
-    ``resolve_scope_or_none()`` with no hint answers from the cwd exactly the
-    way the subprocess cwd already resolves, so passing it as ``context_root``
-    fixes OKF scope without touching where the subprocess runs.
+    ``cwd`` is the hook payload's ``cwd`` field: Claude Code's statement of
+    where the calling session is running, and the authoritative answer. The
+    hook's own process cwd is only a fallback, because nothing guarantees the
+    two agree (a hook can be spawned from elsewhere).
+
+    A payload cwd inside a repo answers with that repo's root. One outside any
+    repo answers None unless an environment override names a project -- never
+    the directory itself, which would be a confidently wrong bucket (the same
+    OKF-SCOPE-05 rule ``resolve_scope_or_none`` applies to the process cwd).
+
+    ``working_dir`` doubles as the subprocess cwd, which is already correct
+    here, so this only feeds ``context_root`` -- it never moves the subprocess.
     """
     try:
-        from llm_router.semantic.scope import resolve_scope_or_none
-        root = resolve_scope_or_none()
+        from llm_router.semantic.scope import find_repo_root, resolve_scope_or_none
+        if cwd:
+            repo = find_repo_root(cwd)
+            if repo is not None:
+                return str(repo)
+        # No payload cwd, or it is outside any repo: an environment override may
+        # still name a project; otherwise the answer is None (OKF-SCOPE-05).
+        root = resolve_scope_or_none(cwd=cwd or None)
         return str(root) if root is not None else None
     except Exception:
         return None
@@ -1096,6 +1104,7 @@ def _delegation_scope_root() -> str | None:
 def _try_cli_delegation(
     prompt: str, task_type: str, complexity: str, session_id: str,
     subagent_type: str = "general-purpose",
+    cwd: str | None = None,
 ) -> str | None:
     """Phase 2 — delegate bigger/tool-heavy subagent work to a real external agent
     CLI (Codex / Gemini CLI) that brings its own toolchain and runs on an external
@@ -1133,7 +1142,7 @@ def _try_cli_delegation(
     except (TypeError, ValueError):
         pass
 
-    _scope_root = _delegation_scope_root()
+    _scope_root = _delegation_scope_root(cwd)
     try:
         if is_codex_available():
             provider = "codex"
@@ -1291,6 +1300,7 @@ def _codex_subagent_budget_increment() -> None:
 
 def _try_codex_subagent_delegation(
     prompt: str, task_type: str, complexity: str, subagent_type: str, session_id: str,
+    cwd: str | None = None,
 ) -> str | None:
     """NS3 — delegate a SUITABLE sub-agent spawn to Codex CLI before Claude
     ever spawns anything for it.
@@ -1365,7 +1375,7 @@ def _try_codex_subagent_delegation(
         import asyncio
 
         from llm_router.codex_agent import run_codex
-        res = asyncio.run(run_codex(prompt, timeout=timeout, context_root=_delegation_scope_root()))
+        res = asyncio.run(run_codex(prompt, timeout=timeout, context_root=_delegation_scope_root(cwd)))
     except Exception as e:
         _record_north_star_unit(
             "agent_route_codex", model="", outcome="codex_failed",
@@ -1506,7 +1516,8 @@ def main() -> None:
     # returns unconditionally, which is why Codex delegation was unreachable before
     # this change. See the NS3 docstring above _try_codex_subagent_delegation.
     _codex_delegated = _try_codex_subagent_delegation(
-        prompt, task_type, complexity, subagent_type, session_id)
+        prompt, task_type, complexity, subagent_type, session_id,
+        cwd=hook_input.get("cwd"))
     if _codex_delegated is not None:
         _write_agent_depth(session_id, current_depth)  # roll back: no real spawn happened
         _log_agent_call(subagent_type, prompt, "routed_codex_subagent")
@@ -1570,7 +1581,8 @@ def main() -> None:
     # What DIRECT didn't take (tool tasks, complex work) goes to a real external
     # agent CLI (Codex / Gemini) running on an external subscription. Savings
     # logged (host=claude_code_subagent_cli). Falls through on any failure.
-    _delegated = _try_cli_delegation(prompt, task_type, complexity, session_id, subagent_type)
+    _delegated = _try_cli_delegation(
+        prompt, task_type, complexity, session_id, subagent_type, cwd=hook_input.get("cwd"))
     if _delegated is not None:
         _write_agent_depth(session_id, current_depth)  # roll back: no real spawn happened
         _log_agent_call(subagent_type, prompt, "routed_cli_delegation")
