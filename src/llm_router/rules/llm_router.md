@@ -71,7 +71,8 @@ checked before you see it (grounded in a real changed file, keeps error lines/fi
 refs/exit codes, has the required sections) and comes back `accepted`, `rejected`, or
 `fallback`. **Only use the text when `status=accepted`** — on `rejected` or `fallback`
 (including when the flag is unset, which is the default) do the job yourself from
-`input_text`; that is expected, not a failure. Docstrings are edit-shaped work on a
+`input_text`; that is expected, not a failure. `accepted` means the structural checks passed, not that the text is true —
+skim it against the diff or output before using it. Docstrings are edit-shaped work on a
 known file, not a text job — use `llm_edit` for those instead.
 
 ## What to do

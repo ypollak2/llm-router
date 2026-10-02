@@ -69,6 +69,8 @@ async def test_unknown_job_is_a_fallback_without_a_call(monkeypatch):
     mock = _mock_route(monkeypatch, GOOD)
     out = await text_tools.llm_text_job("write_poem", "x", _ctx())
     assert mock.await_count == 0 and "Unknown job" in out and "status=fallback" in out
+    (row,) = _rows()
+    assert (row["job"], row["status"], row["attempts"]) == ("write_poem", "fallback", 0)
 
 
 async def test_accepted_on_first_attempt(monkeypatch):

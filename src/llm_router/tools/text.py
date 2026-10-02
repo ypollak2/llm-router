@@ -1048,6 +1048,9 @@ async def llm_text_job(
     ``accepted``, use the text as-is — do not rewrite or "improve" it, that
     defeats the point of routing this off the expensive model. If
     ``rejected`` or ``fallback``, do the job yourself from ``input_text``.
+    ``accepted`` means the checks above passed, not that the text is true: a
+    message that names a real file but misstates the change, or a summary
+    that keeps the refs but inverts the cause, can still pass.
 
     Args:
         job: One of "commit_message", "pr_description", "summarize_output".
@@ -1071,6 +1074,7 @@ async def llm_text_job(
     )
 
     if job not in JOB_NAMES:
+        record_text_job_outcome(job=job, model="none", status=STATUS_FALLBACK, attempts=0)
         return (
             f"Unknown job {job!r}. Supported: {', '.join(JOB_NAMES)}. "
             "_Structured: status=fallback, attempts=0_\n"
