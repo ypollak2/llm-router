@@ -385,7 +385,7 @@ def test_session_start_warms_edit_model_and_skips_the_generic_double_warm(stub, 
     assert body["model"] == MODEL and body["keep_alive"] == -1 and "num_ctx" in body["options"]
 
 
-def test_session_start_generic_warmup_still_runs_for_a_different_model(stub, monkeypatch):
+def test_session_start_generic_warmup_yields_to_the_edit_warmup(stub, monkeypatch):
     mod = _load_session_start("_ss_warm_2")
     monkeypatch.setenv("LLM_ROUTER_ZERO_CLAUDE_SCOPE", "edit")
     monkeypatch.setenv("LLM_ROUTER_OLLAMA_WARMUP_MODEL", "other-model:latest")
@@ -395,7 +395,8 @@ def test_session_start_generic_warmup_still_runs_for_a_different_model(stub, mon
     mod._warm_edit_model_bg()
     mod._warm_ollama_bg()
     models = [json.loads(a[a.index("-d") + 1])["model"] for a in spawned]
-    assert models == [MODEL, "other-model:latest"]
+    # A second model would evict the pinned edit model on a one-model box.
+    assert models == [MODEL]
 
 
 def test_session_start_scope_off_warms_nothing_extra(stub, monkeypatch):

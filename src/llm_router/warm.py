@@ -218,7 +218,7 @@ def warm_edit_model_bg(model: str | None = None) -> str | None:
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
-            env=os.environ.copy(),
+            env=os.environ.copy(),  # hardcoded argv, no credential-leak risk (R4 scope)
         )
         return model
     except Exception:                                            # noqa: BLE001

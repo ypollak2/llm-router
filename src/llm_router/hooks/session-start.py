@@ -1474,7 +1474,10 @@ def _warm_ollama_bg() -> None:
             model = ""
     if not model:
         return          # nothing installed; nothing to warm
-    if _EDIT_WARMED_MODEL and model.split(":")[0] == _EDIT_WARMED_MODEL.split(":")[0]:
+    if _EDIT_WARMED_MODEL:
+        # The edit model was just loaded and pinned (keep_alive=-1). Warming any
+        # other model here would evict it on a box that holds one model, so the
+        # generic warm-up yields whenever the edit warm-up ran.
         return
     base_url = _validated_ollama_env_url(
         os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
