@@ -4497,9 +4497,32 @@ def main() -> None:
     # no draft. Routing + coverage telemetry still run, and zero_claude_edit (it
     # runs earlier, on edit-shaped prompts) is untouched. Code/edit tasks keep
     # their mode semantics. LLM_ROUTER_QA_ROUTING=on restores the old behaviour.
-    _qa_quiet = _qa_task and os.environ.get(
-        "LLM_ROUTER_QA_ROUTING", "off").strip().lower() not in ("1", "on", "true", "yes")
-    if _qa_quiet or _resolved_enforce in ("off", "shadow", "observe"):
+    #
+    # Owner decision 2026-10-02 extends the same treatment to the two purely
+    # conversational TaskType values TaskType.COORDINATE ("coordinate") and
+    # TaskType.INTROSPECT ("introspect") — auto-route.py's own
+    # `_is_coordination_task` / `_is_introspection_task` fast paths, both
+    # advisory/local-state-only by design (types.py: "direct execution must
+    # never fire for task_type == coordinate"). enforce-route.py already
+    # exits unconditionally the moment pending.task_type is "coordinate" or
+    # "introspect" (no tool is ever actually held for either), so a HARD
+    # ENFORCEMENT banner claiming tools are held for them is the identical
+    # banner-honesty defect PR #228 fixed for Q&A — fixed here the same way.
+    #
+    # NOT the same as the separate, older "coordination" (no trailing "e")
+    # heuristic bucket scored by score_categories/VALID_CATEGORIES: that
+    # bucket stays enforced on purpose — a held-out real-traffic sample
+    # (n=251, 2026-09-28) showed it is dominated by executable git/deploy
+    # commands with an ambiguous target ("merge the PRs in that order"),
+    # which correctly redirect to llm_act (test_enf_coordination_bash_names_
+    # llm_act.py). Quieting that bucket too would silently defeat that
+    # redirect, so it is deliberately left out of this extension.
+    _conversational_task = task_type in ("coordinate", "introspect")
+    _qa_routing_on = os.environ.get(
+        "LLM_ROUTER_QA_ROUTING", "off").strip().lower() in ("1", "on", "true", "yes")
+    _qa_quiet = _qa_task and not _qa_routing_on
+    _conversational_quiet = _conversational_task and not _qa_routing_on
+    if _qa_quiet or _conversational_quiet or _resolved_enforce in ("off", "shadow", "observe"):
         _enforce_mode = "shadow"
     elif _resolved_enforce in ("advise", "advisory"):
         # Route everywhere, but NEVER block and NEVER nag. Distinct from "suggest":
@@ -5269,6 +5292,15 @@ def main() -> None:
                 f"Q&A is answered directly; no routing directive."
             )
             indicator = f"👁 {task_type}/{complexity} — answered directly"
+        elif _conversational_quiet:
+            # Same honesty fix, for coordinate/introspect: names no tool and
+            # no model, since enforce-route.py will never hold one for them.
+            directive = (
+                f"👁 OBSERVATION [conversational-direct]: {task_type}/{complexity} — "
+                f"coordination/introspection prompts are answered directly; "
+                f"no routing directive."
+            )
+            indicator = f"👁 {task_type}/{complexity} — answered directly"
         else:
             directive = (
                 f"👁 OBSERVATION [{_enforce_mode}]: ✨ {task_type}/{complexity} ✨ "
@@ -5354,7 +5386,7 @@ def main() -> None:
     # blind draft was already suppressed (see DIRECT SKIP above). Tell the caller
     # WHY and what to do instead: answer from real context, or route WITH context
     # via llm_query(context=…) — never relay a context-free draft as an answer.
-    if not zero_claude and not _qa_quiet and _is_context_dependent(prompt):
+    if not zero_claude and not _qa_quiet and not _conversational_quiet and _is_context_dependent(prompt):
         # ENF-FIX-2 (GAP-ENF-2): a context-dependent prompt that ALSO needs local
         # execution / repo ops can't be completed by a text-only door even WITH
         # context — so name the PROVISIONED tool-capable door (llm_act with
