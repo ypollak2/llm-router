@@ -107,6 +107,10 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_COMPLEXITY_KNN_ARTIFACT": ("llm_router", "complexity_knn.py", 1),
     "LLM_ROUTER_COMPLEXITY_KNN_THRESHOLD": ("llm_router", "complexity_knn.py", 1),
     "LLM_ROUTER_COMPRESS_RESPONSE": ("llm_router", "tools/text.py", 1),
+    # 2026-10-02: opt-in gate for llm_text_job (commit messages, PR
+    # descriptions, long-output summaries on a local model with a checked
+    # fallback). Off by default — see tools/text.py's _local_text_jobs_enabled.
+    "LLM_ROUTER_LOCAL_TEXT_JOBS": ("llm_router", "tools/text.py", 1),
     "LLM_ROUTER_CONFIDENCE_THRESHOLD": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_CONTEXT_OPTIMIZER": ("llm_router", "context.py", 1),
     "LLM_ROUTER_COST_PROFILE": ("llm_router", "repo_config.py", 1),
