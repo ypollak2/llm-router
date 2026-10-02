@@ -446,6 +446,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                     # The rewrite never ran, so neither did its switch.
                     row.update(served_model=row.get("requested_model"), tier_switch=False,
                                tier_switch_cost_usd=None)
+                    row.pop("tier_body_rewrite", None)
                 if on_retry is not None:
                     on_retry()
                 raw, body = original

@@ -953,3 +953,5 @@ async def test_a_rejected_haiku_call_is_resent_with_the_clients_own_bytes(tmp_pa
     assert up.requests[2].content == json.dumps(_no_system_reminders(_req())).encode()
     row = _rows(tmp_path)[-1]
     assert row["tier_retry"]["status"] == 400 and row["served_model"] == OPUS
+    # The final call used the client's own body, so the row must not claim a rewrite.
+    assert "tier_body_rewrite" not in row
