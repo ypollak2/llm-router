@@ -936,7 +936,28 @@ _SPAWN_ROUTING_NOTE = (
 )
 
 
+def _qa_routing_on() -> bool:
+    """True when the owner has re-enabled Q&A routing (LLM_ROUTER_QA_ROUTING=on).
+
+    Same switch, same parsing as session-start.py / subagent-start.py /
+    auto-route.py. Off by default: owner decision 2026-10-02, on measured
+    quality — on hook-routed dev prompts, local-model answers were acceptable
+    3-24% of the time vs 55-100% for Sonnet (two blind graders, calibration
+    passed). _SPAWN_ROUTING_NOTE tells a spawned subagent to prefer routing
+    its own substantive work to llm_router tools, which is the same policy
+    applied one layer down — so it follows the same switch rather than a new
+    one, and an owner who flips LLM_ROUTER_QA_ROUTING=on to restore the old
+    Q&A-routing behaviour gets it restored consistently everywhere, not just
+    in the main session.
+    """
+    return os.environ.get("LLM_ROUTER_QA_ROUTING", "off").strip().lower() in (
+        "1", "on", "true", "yes",
+    )
+
+
 def _with_routing_note(tool_input: dict) -> dict:
+    if not _qa_routing_on():
+        return tool_input
     ti = dict(tool_input)
     p = ti.get("prompt") or ""
     if "llm_router: routing (inherited)" not in p:
@@ -954,10 +975,15 @@ def _try_direct_subagent(
     by complexity+pressure, execute (tool-loop for file work, single-shot for
     Q&A), log savings tagged ``claude_code_subagent``, and return the result text.
 
+    Off by default: owner decision 2026-10-02, on measured quality — on
+    hook-routed dev prompts, local-model answers were acceptable only 3-24% of
+    the time vs 55-100% for Sonnet (two blind graders, calibration passed).
+    ``LLM_ROUTER_SUBAGENT_DIRECT=on`` restores this path.
+
     Returns the routed output, or None to fall back to a real spawn. Fire-and-
     forget: any failure returns None so the subagent path stays robust.
     """
-    if os.environ.get("LLM_ROUTER_SUBAGENT_DIRECT", "on").strip().lower() in ("0", "off", "false", "no"):
+    if os.environ.get("LLM_ROUTER_SUBAGENT_DIRECT", "off").strip().lower() in ("0", "off", "false", "no"):
         return None
     # Only DIRECT-execute up to the configured complexity ceiling — bigger work
     # would block the hook too long and is better off as a real (cheaper-tier) spawn.

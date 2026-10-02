@@ -325,6 +325,30 @@ class TestSubagentDirectGating:
         monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "off")
         assert mod._try_direct_subagent("implement foo", "code", "simple", "s1") is None
 
+    def test_default_is_disabled(self, monkeypatch):
+        """Owner decision 2026-10-02: DIRECT is OFF unless explicitly opted in.
+
+        On hook-routed dev prompts, local-model answers were acceptable only
+        3-24% of the time vs 55-100% for Sonnet (two blind graders,
+        calibration passed). With the var left unset entirely (the real
+        default a fresh shell sees), the gate must still return None —
+        the real sub-agent spawns normally instead of being answered by a
+        routed cheap model.
+        """
+        mod = _load_hook_module()
+        monkeypatch.delenv("LLM_ROUTER_SUBAGENT_DIRECT", raising=False)
+        assert mod._try_direct_subagent("implement foo", "code", "simple", "s1") is None
+
+    def test_on_restores_the_gate_check(self, monkeypatch):
+        """LLM_ROUTER_SUBAGENT_DIRECT=on re-opens the gate (still subject to the
+        complexity ceiling below it) — the opt-in actually does something."""
+        mod = _load_hook_module()
+        monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")
+        monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT_MAX_COMPLEXITY", "simple")
+        # complex > simple ceiling → still None, but via the ceiling check, not
+        # the kill switch — proves "on" actually passed the first gate.
+        assert mod._try_direct_subagent("implement foo", "code", "complex", "s1") is None
+
     def test_complexity_ceiling_blocks_complex(self, monkeypatch):
         """Tasks above the complexity ceiling are not DIRECT-executed."""
         mod = _load_hook_module()
@@ -338,6 +362,52 @@ class TestSubagentDirectGating:
         mod = _load_hook_module()
         r = mod._COMPLEXITY_RANK
         assert r["simple"] < r["moderate"] < r["complex"]
+
+
+class TestSpawnRoutingNoteGating:
+    """_SPAWN_ROUTING_NOTE ("prefer llm_router tools") follows the existing
+    LLM_ROUTER_QA_ROUTING switch (off by default since 2026-10-02 — same
+    quality evidence as TestSubagentDirectGating.test_default_is_disabled)."""
+
+    def test_default_no_note_injected(self, monkeypatch):
+        mod = _load_hook_module()
+        monkeypatch.delenv("LLM_ROUTER_QA_ROUTING", raising=False)
+        ti = {"prompt": "find the bug", "subagent_type": "general-purpose"}
+        out = mod._with_routing_note(ti)
+        assert out["prompt"] == "find the bug"
+        assert "llm_router: routing (inherited)" not in out["prompt"]
+
+    def test_explicit_off_no_note_injected(self, monkeypatch):
+        mod = _load_hook_module()
+        monkeypatch.setenv("LLM_ROUTER_QA_ROUTING", "off")
+        ti = {"prompt": "find the bug", "subagent_type": "general-purpose"}
+        out = mod._with_routing_note(ti)
+        assert out["prompt"] == "find the bug"
+
+    def test_on_injects_note(self, monkeypatch):
+        """LLM_ROUTER_QA_ROUTING=on restores the old behaviour."""
+        mod = _load_hook_module()
+        monkeypatch.setenv("LLM_ROUTER_QA_ROUTING", "on")
+        ti = {"prompt": "find the bug", "subagent_type": "general-purpose"}
+        out = mod._with_routing_note(ti)
+        assert "llm_router: routing (inherited)" in out["prompt"]
+        assert out["prompt"].startswith("find the bug")
+
+    def test_on_does_not_duplicate_an_existing_note(self, monkeypatch):
+        mod = _load_hook_module()
+        monkeypatch.setenv("LLM_ROUTER_QA_ROUTING", "on")
+        ti = {"prompt": "x" + mod._SPAWN_ROUTING_NOTE, "subagent_type": "general-purpose"}
+        out = mod._with_routing_note(ti)
+        assert out["prompt"].count("llm_router: routing (inherited)") == 1
+
+    def test_default_does_not_mutate_the_original_dict(self, monkeypatch):
+        """With the note off, the function must still be safe to call with the
+        original tool_input (no accidental in-place mutation elsewhere)."""
+        mod = _load_hook_module()
+        monkeypatch.delenv("LLM_ROUTER_QA_ROUTING", raising=False)
+        ti = {"prompt": "find the bug", "subagent_type": "general-purpose"}
+        out = mod._with_routing_note(ti)
+        assert out is ti or out == ti
 
 
 class TestCliDelegationGating:
@@ -1009,3 +1079,64 @@ class TestAgentRouteEndToEnd:
         assert "codex says: fixed at line 42" in out["reason"]
         assert "agent_route_codex" in out["reason"]
         assert "[NS1]" in out["reason"]
+
+
+class TestDefaultAgentCallPassesThroughCleanly:
+    """Owner decision 2026-10-02 (CI-gated): the real sub-agent spawn is
+    unaffected by default — no deny/block from the DIRECT or spawn-note
+    machinery, and no "prefer llm_router tools" note injected into its
+    prompt. Only ``LLM_ROUTER_SUBAGENT_DIRECT=on`` / ``LLM_ROUTER_QA_ROUTING=
+    on`` restore the old behaviour. These run main() in-process (not the
+    subprocess ``_run()`` helper) so the real, unforced env defaults for
+    LLM_ROUTER_SUBAGENT_DIRECT and LLM_ROUTER_QA_ROUTING are exercised —
+    ``_run()`` deliberately forces SUBAGENT_DIRECT=off for its *other*
+    (classification/depth/budget) tests, which would hide a regression here.
+    """
+
+    def _run_main_in_process(self, mod, monkeypatch, tmp_path, prompt, extra_env=None):
+        (tmp_path / ".llm-router").mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        # Keep Codex/CLI delegation out of the way so this exercises the
+        # _allow_routed_spawn() model-pin branch deterministically — those
+        # are separate, already-covered mechanisms.
+        monkeypatch.setenv("LLM_ROUTER_AGENT_ROUTE_CODEX", "off")
+        monkeypatch.setenv("LLM_ROUTER_SUBAGENT_CLI_DELEGATION", "off")
+        for k, v in (extra_env or {}).items():
+            monkeypatch.setenv(k, v)
+        payload = json.dumps({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Agent",
+            "tool_input": {"prompt": prompt, "subagent_type": "general-purpose"},
+        })
+        monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
+        mod.main()
+
+    def test_default_env_no_deny_no_direct_no_note(self, tmp_path, monkeypatch, capsys):
+        mod = _load_hook_module()
+        monkeypatch.delenv("LLM_ROUTER_SUBAGENT_DIRECT", raising=False)
+        monkeypatch.delenv("LLM_ROUTER_QA_ROUTING", raising=False)
+        monkeypatch.delenv("LLM_ROUTER_ALLOW_SUBAGENTS", raising=False)  # real default: "on"
+        self._run_main_in_process(
+            mod, monkeypatch, tmp_path, "implement a fix for the off-by-one bug",
+        )
+        out = json.loads(capsys.readouterr().out)
+        # No deny/block — the real sub-agent spawn proceeds.
+        assert out.get("decision") != "block"
+        hso = out["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "allow"
+        # No "prefer llm_router tools" note leaked into the spawned prompt.
+        assert "llm_router: routing (inherited)" not in hso["updatedInput"]["prompt"]
+
+    def test_qa_routing_on_restores_the_note(self, tmp_path, monkeypatch, capsys):
+        mod = _load_hook_module()
+        monkeypatch.delenv("LLM_ROUTER_SUBAGENT_DIRECT", raising=False)
+        monkeypatch.setenv("LLM_ROUTER_QA_ROUTING", "on")
+        monkeypatch.delenv("LLM_ROUTER_ALLOW_SUBAGENTS", raising=False)
+        self._run_main_in_process(
+            mod, monkeypatch, tmp_path, "implement a fix for the off-by-one bug",
+        )
+        out = json.loads(capsys.readouterr().out)
+        hso = out["hookSpecificOutput"]
+        assert "llm_router: routing (inherited)" in hso["updatedInput"]["prompt"]
