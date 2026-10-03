@@ -17,17 +17,38 @@ This module does three small things:
    the long-running MCP server see the same answer. (``provider_health.json`` is
    a write-only snapshot for ``doctor``; routing never reads it.)
 3. ``get_provider_reset_until`` -- the read side, consulted by
-   ``HealthTracker.is_healthy`` which is the single choke point for dispatch.
+   ``HealthTracker.is_healthy`` (router.py) and by ``execute_chain`` in
+   ``hooks/direct_executor.py``, which dispatches gemini/openai/ollama without
+   going through HealthTracker, so it checks this module directly.
 
 Rules: a reset in the past is expired; a reset further than 7 days away is
 capped at 7 days; an unparseable message yields ``None`` and the caller keeps
 its existing 15s cooldown; every read/write fails OPEN (a broken state file
 never blocks routing) and is accounted via ``failopen.record``.
 
-ASSUMPTION: the exact live Codex usage-limit wording was not capturable from
-the repo or git history. The text patterns here are deliberately generic
-("try again at/in ...", "resets at/in ...", any ISO timestamp) rather than a
-copy of one string. If real wording differs, add a case to the tests.
+How far a reset is trusted depends on where it came from (``source``):
+
+* ``header``   -- ``Retry-After`` / ``anthropic-ratelimit-*-reset``: up to 7 days.
+* ``absolute`` -- a full ISO timestamp directly after a reset verb: up to 7 days.
+* ``text``     -- a relative duration ("try again in 3 days") or a bare clock
+  time ("try again at 6:39 AM", "tomorrow at 06:39"): capped at 24h, because
+  prose is the least reliable source.
+
+Message text is only read where a reset verb sits at the start of its own clause
+right after a limit phrase ("usage limit ... try again in X"). "You should retry
+in 3 days" inside generic advice is NOT a reset report and keeps the 15s
+cooldown. Anthropic is never benched from text (headers only), and the last
+provider left in a chain is never benched beyond the 15s cooldown, so a
+misparse cannot become a multi-day outage. ``llm-router provider unban <name>``
+clears a bench by hand.
+
+UNVERIFIED ASSUMPTIONS: the exact live Codex usage-limit wording and the
+timezone of a bare clock time ("try again at 6:39 AM") were not capturable from
+the repo or git history. The text patterns are deliberately generic rather than
+a copy of one string, and a bare clock time is read as LOCAL time (how a CLI
+prints it to the person at the keyboard); if Codex prints UTC the bench is off
+by the UTC offset, bounded by the 24h text cap. If real wording differs, add a
+case to the tests.
 """
 
 from __future__ import annotations
@@ -39,7 +60,7 @@ import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from llm_router import failopen, paths
 from llm_router.file_lock import exclusive_lock
@@ -49,6 +70,10 @@ log = get_logger("llm_router.provider_reset")
 
 #: Longest we will ever skip a provider, however far away it claims the reset is.
 MAX_SKIP_SECONDS = 7 * 24 * 3600
+
+#: Longest a bench derived from message text (not a header, not an absolute
+#: timestamp) may last. Prose is the least reliable source.
+MAX_TEXT_SKIP_SECONDS = 24 * 3600
 
 #: Resets nearer than this are left to the existing in-process rate-limit
 #: cooldown (15s / Retry-After). Persisting a 20-second blip to disk would add
@@ -62,42 +87,52 @@ _ANTHROPIC_RESET_HEADERS = (
     "anthropic-ratelimit-output-tokens-reset",
 )
 
-#: A bare ISO timestamp (and only an ISO timestamp) appears anywhere in a log
-#: line, a correlation id, or an unrelated stack trace -- far more often than
-#: a real reset time. Both anchors below require the timestamp to directly
-#: follow a reset-ish verb ("try again at/on ...", "resets on ...", "reset:
-#: ..."), and the whole-message gate in `parse_reset_epoch` additionally
-#: requires a limit/quota/rate word to be present at all, so an ordinary
-#: "connection refused, please retry" with an incidental timestamp elsewhere
-#: in the line does not get parsed as a reset.
-_ISO_RE = re.compile(
-    r"(?:try again|retry|resets?|reset)\s*(?:tomorrow\s+)?(?:at|on|:)\s*"
-    r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)",
-    re.IGNORECASE,
-)
-
-#: Message must look like a limit/quota/rate-limit report at all before any
-#: message-text parsing is attempted (headers bypass this -- they are
-#: authoritative regardless of wording).
+#: A limit/quota/rate-limit phrase. Message text is only read AFTER one of
+#: these (headers bypass this -- they are authoritative regardless of wording).
 _LIMIT_SIGNAL_RE = re.compile(
     r"usage limit|rate.?limit|too many requests|quota|exhausted|\b429\b",
     re.IGNORECASE,
 )
 
-_REL_RE = re.compile(
-    r"(?:try again|retry|resets?)\s+in\s+(?:about\s+|approximately\s+)?"
-    r"(?:(?P<d>\d+)\s*d(?:ays?)?\b\s*)?"
-    r"(?:(?P<h>\d+)\s*h(?:ours?|rs?)?\b\s*)?"
-    r"(?:(?P<m>\d+)\s*m(?:in(?:ute)?s?)?\b\s*)?"
-    r"(?:(?P<s>\d+(?:\.\d+)?)\s*s(?:ec(?:ond)?s?)?\b)?",
+#: How far after the limit phrase the reset sentence may start.
+_VERB_WINDOW = 160
+
+#: The reset verb. ``retry``/``try again`` take "in/after/at", ``resets`` takes
+#: "in/at/on".
+_VERB_RE = re.compile(r"(?:try again|retry|resets?)\b", re.IGNORECASE)
+
+#: Words that may sit between the start of a clause and the reset verb. Anything
+#: else ("you should", "in general you may", "see docs and") makes it advice,
+#: not a report. A lead-in is the text after the last clause boundary between
+#: the limit phrase and the verb.
+_CLAUSE_LEADS = frozenset({
+    "", "or", "and", "then", "so", "please", "wait and", "you can", "you can now",
+    "will", "it will", "which will", "will be", "it will be",
+})
+
+_DURATION_RE = re.compile(
+    r"\s*(?:in|after)\s+(?:about\s+|approximately\s+)?"
+    r"(?:(?P<d>\d+)\s*d(?:ays?)?(?![a-z])\s*)?"
+    r"(?:(?P<h>\d+)\s*h(?:ours?|rs?)?(?![a-z])\s*)?"
+    r"(?:(?P<m>\d+)\s*m(?:in(?:ute)?s?)?(?![a-z])\s*)?"
+    r"(?:(?P<s>\d+(?:\.\d+)?)\s*s(?:ec(?:ond)?s?)?(?![a-z]))?",
     re.IGNORECASE,
 )
 
 _CLOCK_RE = re.compile(
-    r"(?:try again|retry|resets?)\s+(?:tomorrow\s+)?at\s+"
-    r"(?P<hour>\d{1,2}):(?P<minute>\d{2})\s*(?P<ampm>[ap]\.?m\.?)?",
+    r"\s*(?P<tom1>tomorrow\s+)?at\s+"
+    r"(?P<hour>\d{1,2}):(?P<minute>\d{2})\s*(?P<ampm>[ap]\.?m\.?)?"
+    r"(?P<tom2>\s+tomorrow)?",
     re.IGNORECASE,
 )
+
+_ISO_AFTER_VERB_RE = re.compile(
+    r"\s*(?:at|on|:)\s*"
+    r"(?P<ts>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)",
+    re.IGNORECASE,
+)
+
+_CLAUSE_SPLIT_RE = re.compile(r"[.;!?:,]\s+|[,)(]")
 
 
 def _state_file() -> Path:
@@ -132,35 +167,15 @@ def _from_headers(headers: Mapping[str, str], now: float) -> float | None:
     return None
 
 
-def _from_iso_text(text: str) -> float | None:
-    m = _ISO_RE.search(text)
-    if not m:
-        return None
-    try:
-        # Aware stamps use their own offset; naive ones are read as local time,
-        # which is how a CLI prints a reset to the person at the keyboard.
-        return datetime.fromisoformat(m.group(1).replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
-
-
-def _from_relative_text(text: str, now: float) -> float | None:
-    m = _REL_RE.search(text)
-    if not m:
-        return None
+def _duration_seconds(m: re.Match[str]) -> float | None:
     d, h, mi, s = (m.group(k) for k in ("d", "h", "m", "s"))
     if not (d or h or mi or s):
         return None
-    delta = (
-        float(d or 0) * 86400 + float(h or 0) * 3600 + float(mi or 0) * 60 + float(s or 0)
-    )
-    return now + delta if delta > 0 else None
+    delta = float(d or 0) * 86400 + float(h or 0) * 3600 + float(mi or 0) * 60 + float(s or 0)
+    return delta if delta > 0 else None
 
 
-def _from_clock_text(text: str, now: float) -> float | None:
-    m = _CLOCK_RE.search(text)
-    if not m:
-        return None
+def _clock_epoch(m: re.Match[str], now: float) -> float | None:
     hour, minute = int(m.group("hour")), int(m.group("minute"))
     ampm = (m.group("ampm") or "").lower().replace(".", "")
     if ampm == "pm" and hour != 12:
@@ -169,12 +184,78 @@ def _from_clock_text(text: str, now: float) -> float | None:
         hour = 0
     if hour > 23 or minute > 59:
         return None
+    # Bare clock time: LOCAL time, unverified (see module docstring).
     candidate = datetime.fromtimestamp(now).replace(
         hour=hour, minute=minute, second=0, microsecond=0
     )
-    if candidate.timestamp() <= now:
+    if m.group("tom1") or m.group("tom2"):
+        # An explicit "tomorrow" is the next calendar day, even when that clock
+        # time has not yet passed today.
+        candidate += timedelta(days=1)
+    elif candidate.timestamp() <= now:
         candidate += timedelta(days=1)  # a bare clock time means its next occurrence
     return candidate.timestamp()
+
+
+def _iso_epoch(stamp: str) -> float | None:
+    """Aware stamps use their own offset; naive ones are read as local time, as a
+    CLI prints it to the person at the keyboard."""
+    try:
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _from_message(text: str, now: float) -> tuple[float, str] | None:
+    """A reset from limit-report text, as ``(epoch, source)``; ``source`` is
+    ``"absolute"`` for an ISO timestamp and ``"text"`` otherwise."""
+    for limit in _LIMIT_SIGNAL_RE.finditer(text):
+        tail = text[limit.end(): limit.end() + _VERB_WINDOW]
+        for verb in _VERB_RE.finditer(tail):
+            lead = _CLAUSE_SPLIT_RE.split(tail[: verb.start()])[-1].strip().lower()
+            if lead not in _CLAUSE_LEADS:
+                continue
+            rest = tail[verb.end():]
+            m = _ISO_AFTER_VERB_RE.match(rest)
+            if m:
+                epoch = _iso_epoch(m.group("ts"))
+                if epoch is not None:
+                    return epoch, "absolute"
+            m = _CLOCK_RE.match(rest)
+            if m:
+                epoch = _clock_epoch(m, now)
+                if epoch is not None:
+                    return epoch, "text"
+            m = _DURATION_RE.match(rest)
+            if m:
+                secs = _duration_seconds(m)
+                if secs is not None:
+                    return now + secs, "text"
+    return None
+
+
+def parse_reset(
+    message: str | None,
+    headers: Mapping[str, str] | None = None,
+    now: float | None = None,
+) -> tuple[float | None, str]:
+    """``(epoch, source)`` with the per-source cap applied; ``(None, "")`` when
+    there is nothing actionable. ``source`` is ``header``, ``absolute`` or
+    ``text``. A reset already in the past is expired (``None``)."""
+    now = time.time() if now is None else now
+    epoch: float | None = None
+    source = ""
+    if headers:
+        epoch = _from_headers(headers, now)
+        source = "header"
+    if epoch is None and message:
+        found = _from_message(str(message), now)
+        if found is not None:
+            epoch, source = found
+    if epoch is None or epoch <= now:
+        return None, ""
+    cap = MAX_TEXT_SKIP_SECONDS if source == "text" else MAX_SKIP_SECONDS
+    return min(epoch, now + cap), source
 
 
 def parse_reset_epoch(
@@ -185,28 +266,9 @@ def parse_reset_epoch(
     """Epoch seconds at which the provider says it is usable again, or ``None``.
 
     Headers win over message text. A reset already in the past yields ``None``
-    (expired); one beyond 7 days is capped at 7 days.
+    (expired); one beyond its source's cap (7 days; 24h for plain text) is capped.
     """
-    now = time.time() if now is None else now
-    epoch: float | None = None
-    if headers:
-        epoch = _from_headers(headers, now)
-    if epoch is None and message:
-        text = str(message)
-        # Headers are authoritative regardless of wording; message text is
-        # not, so require it to actually look like a limit/quota report
-        # before trying to extract a time from it at all (CHZ-RESET-R-01 —
-        # otherwise an ordinary error whose text happens to mention a time
-        # gets misread as a reset).
-        if _LIMIT_SIGNAL_RE.search(text):
-            epoch = (
-                _from_iso_text(text)
-                or _from_relative_text(text, now)
-                or _from_clock_text(text, now)
-            )
-    if epoch is None or epoch <= now:
-        return None
-    return min(epoch, now + MAX_SKIP_SECONDS)
+    return parse_reset(message, headers, now)[0]
 
 
 # ------------------------------------------------------------------------ persist
@@ -289,19 +351,79 @@ def is_provider_reset_blocked(provider: str, now: float | None = None) -> bool:
     return get_provider_reset_until(provider, now) is not None
 
 
+def clear_provider_reset(provider: str | None = None) -> list[str]:
+    """Manually lift a bench: one provider, or every provider when ``None``.
+
+    Returns the names that were cleared. Never raises (fails open to ``[]``).
+    """
+    try:
+        path = _state_file()
+        if not path.exists():
+            return []
+        with exclusive_lock(path.with_suffix(path.suffix + ".lock")):
+            try:
+                providers = _load(path)
+            except (OSError, ValueError):
+                providers = {}
+            names = [str(n) for n in providers] if provider is None else (
+                [provider] if provider in providers else []
+            )
+            for n in names:
+                providers.pop(n, None)
+            if names:
+                tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+                tmp.write_text(json.dumps({"providers": providers}), encoding="utf-8")
+                tmp.replace(path)
+        return names
+    except Exception as exc:  # noqa: BLE001 -- must never break the caller
+        failopen.record("CHZ-FO-PROVIDER-RESET-WRITE", exc, detail=provider or "*")
+        return []
+
+
+#: Marks an exception whose reset has already been looked at, so the CLI
+#: branches (which parse the full output) and the generic handler (which sees
+#: the truncated message) record a failure once, not twice.
+_NOTED_ATTR = "_llm_router_reset_noted"
+
+
 def note_provider_error(
-    provider: str, exc: BaseException, headers: Mapping[str, str] | None = None
+    provider: str,
+    exc: BaseException,
+    headers: Mapping[str, str] | None = None,
+    *,
+    text: str | None = None,
+    alternatives: Sequence[str] | None = None,
 ) -> float | None:
     """Parse ``exc``/``headers`` for a reset and persist it. Never raises.
+
+    ``text`` overrides ``str(exc)`` when the caller holds the full output and
+    ``exc`` carries only a truncated copy. ``alternatives`` are the OTHER
+    providers in the chain being dispatched; when none of them is currently
+    usable, ``provider`` is the last one standing and is not benched beyond the
+    caller's 15s cooldown (a misparse must not become a multi-day outage).
+    ``None`` skips that check.
 
     Returns the persisted reset epoch, or ``None`` when nothing actionable was
     found (the caller then keeps its existing 15s cooldown).
     """
     try:
-        until = parse_reset_epoch(str(exc), headers)
+        if getattr(exc, _NOTED_ATTR, False):
+            return None
+        try:
+            setattr(exc, _NOTED_ATTR, True)
+        except Exception:  # noqa: BLE001 -- exceptions with __slots__
+            pass
+        until, source = parse_reset(text if text is not None else str(exc), headers)
         if until is None:
             return None
-        if record_provider_reset(provider, until, reason=str(exc)):
+        if provider == "anthropic" and source != "header":
+            return None  # subscription/API Anthropic: headers only, never prose
+        if alternatives is not None and not any(
+            a != provider and not is_provider_reset_blocked(a) for a in alternatives
+        ):
+            return None
+        reason = text if text is not None else str(exc)
+        if record_provider_reset(provider, until, reason=reason):
             return until
     except Exception as err:  # noqa: BLE001
         failopen.record("CHZ-FO-PROVIDER-RESET-PARSE", err, detail=provider)

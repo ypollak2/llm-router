@@ -2947,14 +2947,16 @@ async def _dispatch_model_loop(
                         # The chain error below keeps only the first 200 chars;
                         # a usage-limit reset time can sit past that, so parse
                         # the full CLI output first.
-                        provider_reset.note_provider_error(
-                            provider, RuntimeError(codex_result.content or "")
-                        )
-                        raise RuntimeError(
+                        _err = RuntimeError(
                             _format_subprocess_chain_error(
                                 "Codex", codex_result.exit_code, codex_result.content
                             )
                         )
+                        provider_reset.note_provider_error(
+                            provider, _err, text=codex_result.content or "",
+                            alternatives=[provider_from_model(m) for m in models_to_try],
+                        )
+                        raise _err
                     in_tokens = max(1, len(prompt) // 4)
                     out_tokens = max(1, len(codex_result.content) // 4)
                     response = LLMResponse(
@@ -2989,16 +2991,18 @@ async def _dispatch_model_loop(
                         # Same rationale as the Codex branch above: the chain
                         # error keeps only the first 200 chars, so parse the
                         # full CLI output for a reset time before truncating.
-                        provider_reset.note_provider_error(
-                            provider, RuntimeError(gemini_result.content or "")
-                        )
-                        raise RuntimeError(
+                        _err = RuntimeError(
                             _format_subprocess_chain_error(
                                 "Gemini CLI",
                                 gemini_result.exit_code,
                                 gemini_result.content,
                             )
                         )
+                        provider_reset.note_provider_error(
+                            provider, _err, text=gemini_result.content or "",
+                            alternatives=[provider_from_model(m) for m in models_to_try],
+                        )
+                        raise _err
                     in_tokens = max(1, len(prompt) // 4)
                     out_tokens = max(1, len(gemini_result.content) // 4)
                     response = LLMResponse(
@@ -3030,16 +3034,18 @@ async def _dispatch_model_loop(
                         # Same rationale as the Codex branch above: the chain
                         # error keeps only the first 200 chars, so parse the
                         # full CLI output for a reset time before truncating.
-                        provider_reset.note_provider_error(
-                            provider, RuntimeError(claude_result.content or "")
-                        )
-                        raise RuntimeError(
+                        _err = RuntimeError(
                             _format_subprocess_chain_error(
                                 "Claude CLI",
                                 claude_result.exit_code,
                                 claude_result.content,
                             )
                         )
+                        provider_reset.note_provider_error(
+                            provider, _err, text=claude_result.content or "",
+                            alternatives=[provider_from_model(m) for m in models_to_try],
+                        )
+                        raise _err
                     in_tokens = max(1, len(prompt) // 4)
                     out_tokens = max(1, len(claude_result.content) // 4)
                     response = LLMResponse(
@@ -3334,7 +3340,10 @@ async def _dispatch_model_loop(
             # anthropic-ratelimit-*-reset) benches the provider until then,
             # across processes. Independent of the classification below: the
             # Codex usage-limit text is not recognised as a rate limit.
-            provider_reset.note_provider_error(provider, e, _response_headers(e))
+            provider_reset.note_provider_error(
+                provider, e, _response_headers(e),
+                alternatives=[provider_from_model(m) for m in models_to_try],
+            )
             is_rate_limit = _is_rate_limit_error(e)
             is_content_filter = not is_rate_limit and _is_content_filter_error(e)
             is_auth = not is_rate_limit and not is_content_filter and _is_auth_error(e)
@@ -3561,7 +3570,10 @@ async def _dispatch_model_loop(
                     log.warning(
                         "Emergency fallback model %s failed: %s", model, e
                     )
-                    provider_reset.note_provider_error(provider, e, _response_headers(e))
+                    provider_reset.note_provider_error(
+                        provider, e, _response_headers(e),
+                        alternatives=[provider_from_model(m) for m in emergency_chain],
+                    )
                     # CHZ-AUD-A-01 (sibling): the emergency BUDGET fallback loop's
                     # provider-failure path must record the failed attempt in the
                     # execution ledger too — the primary loop already does, so

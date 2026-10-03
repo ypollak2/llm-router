@@ -96,10 +96,15 @@ class TestParse:
 
     def test_far_future_reset_is_capped_at_seven_days(self):
         now = 1_000_000.0
+        far = datetime.fromtimestamp(now + 90 * 24 * HOUR).strftime("%Y-%m-%d %H:%M")
         got = provider_reset.parse_reset_epoch(
-            "Usage limit reached, try again in 90 days", now=now
+            f"Usage limit reached, try again at {far}", now=now
         )
         assert got == now + provider_reset.MAX_SKIP_SECONDS
+        # A far header is capped the same way.
+        assert provider_reset.parse_reset_epoch(
+            "429", headers={"Retry-After": str(90 * 24 * HOUR)}, now=now
+        ) == now + provider_reset.MAX_SKIP_SECONDS
 
     def test_unrelated_timestamp_elsewhere_in_message_is_not_a_reset(self):
         """CHZ-RESET-R-01: an ISO-looking stamp not adjacent to a reset verb,
@@ -413,10 +418,12 @@ async def test_gemini_cli_usage_limit_is_parsed_from_full_content_not_truncated(
 
 
 @pytest.mark.asyncio
-async def test_claude_cli_usage_limit_is_parsed_from_full_content_not_truncated(
+async def test_claude_cli_usage_limit_text_never_benches_anthropic(
     temp_db, mock_env, monkeypatch
 ):
-    """Same as above, for the Claude Code CLI subscription-offload branch."""
+    """Anthropic is benched from headers only. A usage-limit sentence from the
+    Claude CLI (even one with a precise reset) must keep the 15s cooldown: a
+    misparse there would take out the one provider every chain ends on."""
     from llm_router.claude_agent import ClaudeResult
 
     # Defensive, same reason as the gemini_cli test above.
@@ -454,4 +461,357 @@ async def test_claude_cli_usage_limit_is_parsed_from_full_content_not_truncated(
                 TaskType.CODE, "refactor this function", profile=RoutingProfile.BALANCED
             )
 
-    assert provider_reset.get_provider_reset_until("anthropic") is not None
+    assert provider_reset.get_provider_reset_until("anthropic") is None
+    assert provider_reset.all_provider_resets() == {}
+
+
+# ===================================================== review round 1 (PR #247)
+#
+# Blocker 1: relative durations in generic advice are not reset reports.
+# Blocker 2: hooks/direct_executor.execute_chain is a second dispatch path.
+# Plus: "tomorrow at", the 24h text cap, anthropic header-only, last provider in
+# the chain, `provider unban`, and one record per failure.
+
+
+class TestTextIsOnlyReadWhereItIsAReport:
+    # Each of these mentions a limit AND a "retry in N" shape, but as advice,
+    # documentation, or an unrelated number. None may bench a provider.
+    INCIDENTAL = [
+        # The exact message from the review.
+        "429 Too Many Requests. For details on rate limits see our docs; in "
+        "general you should retry in 3 days if you keep seeing this.",
+        "Rate limit exceeded. You may retry in 2 days after upgrading your plan.",
+        "Quota exceeded for this project. Our docs recommend you retry in 5 days "
+        "for batch jobs, but the limit usually clears sooner.",
+        "HTTP 429. If this keeps happening, contact support, or generally wait and "
+        "retry in 3 days before filing a ticket.",
+        "Too many requests. Clients that sleep and retry in 7 days are not supported; "
+        "use exponential backoff.",
+        "Rate limited (429). See https://docs.example.com/limits -- a limit resets in "
+        "3 days for free tier accounts, paid tiers differ.",
+    ]
+
+    @pytest.mark.parametrize("message", INCIDENTAL)
+    def test_incidental_advice_is_not_a_reset(self, message):
+        assert provider_reset.parse_reset_epoch(message, now=time.time()) is None
+
+    @pytest.mark.parametrize("message", INCIDENTAL)
+    def test_incidental_advice_leaves_the_provider_usable(self, message):
+        assert provider_reset.note_provider_error("codex", RuntimeError(message)) is None
+        assert HealthTracker().is_healthy("codex")
+        assert provider_reset.all_provider_resets() == {}
+
+    @pytest.mark.parametrize(
+        "message, seconds",
+        [
+            # Codex / CLI shape: the verb opens the sentence right after the limit.
+            ("You've hit your usage limit. Try again in 3 hours.", 3 * HOUR),
+            ("You've hit your usage limit. Upgrade to Pro (https://openai.com/chatgpt/"
+             "pricing), or try again in 5h 30m.", 5 * HOUR + 30 * 60),
+            ("Rate limit reached for gpt-4o in organization org-x. Please try again in 1m30s.", 90),
+            ("Your usage limit resets in 2 hours.", 2 * HOUR),
+            ("Quota exhausted; it will reset in 90 minutes.", 90 * 60),
+        ],
+    )
+    def test_genuine_reports_still_parse(self, message, seconds):
+        now = 1_000_000.0
+        assert provider_reset.parse_reset_epoch(message, now=now) == now + seconds
+
+    def test_text_derived_bench_is_capped_at_24h(self):
+        now = 1_000_000.0
+        got = provider_reset.parse_reset_epoch(
+            "You've hit your usage limit. Try again in 4 days 7 hours.", now=now
+        )
+        assert got == now + provider_reset.MAX_TEXT_SKIP_SECONDS == now + 24 * HOUR
+
+    def test_absolute_timestamp_is_not_subject_to_the_text_cap(self):
+        now = time.time()
+        reset = now + 3 * 24 * HOUR
+        got = provider_reset.parse_reset_epoch(
+            f"Usage limit reached. Try again at {_local_iso(reset)}.", now=now
+        )
+        assert got == pytest.approx(reset, abs=60)
+
+    def test_header_is_not_subject_to_the_text_cap(self):
+        now = 1_000_000.0
+        assert provider_reset.parse_reset_epoch(
+            "429", headers={"Retry-After": str(3 * 24 * HOUR)}, now=now
+        ) == now + 3 * 24 * HOUR
+
+    def test_header_wins_over_incidental_text(self):
+        now = 1_000_000.0
+        got = provider_reset.parse_reset_epoch(
+            "Rate limit hit, you should retry in 3 days.",
+            headers={"Retry-After": "7200"}, now=now,
+        )
+        assert got == now + 7200
+
+
+class TestTomorrowQualifier:
+    def test_tomorrow_before_the_clock_time_means_the_next_calendar_day(self):
+        # 09:00 now; a bare "at 18:39" would be today, "tomorrow at 18:39" is not.
+        now = datetime(2026, 10, 3, 9, 0).timestamp()
+        got = provider_reset.parse_reset_epoch(
+            "Usage limit reached. Try again tomorrow at 6:39 PM.", now=now
+        )
+        # Tomorrow 18:39 is 33h39m away; text-derived benches are capped at 24h.
+        assert got == now + provider_reset.MAX_TEXT_SKIP_SECONDS
+        assert got > datetime(2026, 10, 3, 18, 39).timestamp(), "must not resolve to today"
+
+    def test_tomorrow_morning_after_a_late_night_limit(self):
+        now = datetime(2026, 10, 3, 22, 0).timestamp()
+        got = provider_reset.parse_reset_epoch(
+            "You've hit your usage limit. Try again tomorrow at 06:39.", now=now
+        )
+        assert datetime.fromtimestamp(got) == datetime(2026, 10, 4, 6, 39)
+
+    def test_trailing_tomorrow_is_honoured_too(self):
+        now = datetime(2026, 10, 3, 7, 0).timestamp()
+        got = provider_reset.parse_reset_epoch(
+            "Usage limit reached. Resets at 8:00 AM tomorrow.", now=now
+        )
+        assert got > datetime(2026, 10, 3, 8, 0).timestamp(), "must not resolve to today"
+
+
+class TestWhoMayBeBenched:
+    def test_anthropic_is_never_benched_from_text(self):
+        msg = "You've hit your usage limit. Try again at " + _local_iso(time.time() + 5 * HOUR)
+        assert provider_reset.note_provider_error("anthropic", RuntimeError(msg)) is None
+        assert HealthTracker().is_healthy("anthropic")
+
+    def test_anthropic_is_benched_from_its_reset_header(self):
+        stamp = (datetime.now(timezone.utc) + timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        until = provider_reset.note_provider_error(
+            "anthropic", RuntimeError("rate_limit_error"),
+            {"anthropic-ratelimit-tokens-reset": stamp},
+        )
+        assert until is not None
+        assert not HealthTracker().is_healthy("anthropic")
+
+    def test_last_provider_in_the_chain_is_not_benched(self):
+        msg = "You've hit your usage limit. Try again in 5 hours."
+        assert provider_reset.note_provider_error(
+            "codex", RuntimeError(msg), alternatives=["codex"]
+        ) is None
+        assert HealthTracker().is_healthy("codex")
+
+    def test_provider_with_a_usable_alternative_is_benched(self):
+        msg = "You've hit your usage limit. Try again in 5 hours."
+        assert provider_reset.note_provider_error(
+            "codex", RuntimeError(msg), alternatives=["codex", "gemini"]
+        ) is not None
+        assert not HealthTracker().is_healthy("codex")
+
+    def test_alternative_that_is_itself_benched_does_not_count(self):
+        now = time.time()
+        provider_reset.record_provider_reset("gemini", now + 5 * HOUR, now=now)
+        msg = "You've hit your usage limit. Try again in 5 hours."
+        assert provider_reset.note_provider_error(
+            "codex", RuntimeError(msg), alternatives=["codex", "gemini"]
+        ) is None
+        assert HealthTracker().is_healthy("codex")
+
+    def test_header_reset_gets_the_same_last_provider_protection(self):
+        assert provider_reset.note_provider_error(
+            "openai", RuntimeError("429"), {"Retry-After": "7200"}, alternatives=["openai"]
+        ) is None
+
+    def test_a_failure_is_recorded_once(self):
+        exc = RuntimeError("You've hit your usage limit. Try again in 5 hours.")
+        with patch.object(provider_reset, "record_provider_reset", return_value=True) as rec:
+            provider_reset.note_provider_error("codex", exc, alternatives=["codex", "gemini"])
+            provider_reset.note_provider_error("codex", exc, alternatives=["codex", "gemini"])
+        assert rec.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cli_failure_is_recorded_once_across_the_inner_and_generic_handler(
+    codex_first, monkeypatch
+):
+    reset = time.time() + 5 * HOUR
+    limit_msg = f"You've hit your usage limit. Try again at {_local_iso(reset)}."
+    calls = []
+    real = provider_reset.record_provider_reset
+
+    def _spy(*a, **k):
+        calls.append(a[0])
+        return real(*a, **k)
+
+    monkeypatch.setattr(provider_reset, "record_provider_reset", _spy)
+
+    async def _other_providers_fail(**kwargs):
+        raise RuntimeError("Simulated litellm failure")
+
+    with patch("litellm.acompletion", side_effect=_other_providers_fail), \
+         patch("llm_router.router.run_codex", return_value=_codex_failure(limit_msg)):
+        with pytest.raises(Exception):
+            await _route()
+    assert calls.count("codex") == 1
+
+
+# --------------------------------------------------- execute_chain (Blocker 2)
+
+
+class TestExecuteChainHonoursResets:
+    @pytest.fixture(autouse=True)
+    def _isolate(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", "g-test")
+        monkeypatch.setenv("OPENAI_API_KEY", "o-test")
+        monkeypatch.setattr(
+            "llm_router.hooks.direct_executor._paid_budget_exhausted", lambda p: False
+        )
+        monkeypatch.setattr(
+            "llm_router.hooks.direct_executor.available_ollama_models",
+            lambda timeout=0.5: {"qwen3.5", "qwen3.5:latest"},
+        )
+        monkeypatch.setattr("llm_router.hooks.direct_executor.ollama_is_alive", lambda **k: True)
+
+    @pytest.mark.parametrize("provider, fn", [("gemini", "call_gemini"), ("openai", "call_openai")])
+    def test_benched_provider_is_skipped(self, provider, fn):
+        from llm_router.hooks.direct_executor import ModelSpec, execute_chain
+
+        now = time.time()
+        provider_reset.record_provider_reset(provider, now + 5 * HOUR, now=now)
+        chain = [ModelSpec(provider, "m-1"), ModelSpec("ollama", "qwen3.5")]
+        with patch(f"llm_router.hooks.direct_executor.{fn}",
+                   return_value=("the benched provider answered", {})) as benched, \
+             patch("llm_router.hooks.direct_executor.call_ollama",
+                   return_value=("the fallback answered", {})):
+            result = execute_chain("hello", chain, "query")
+        assert benched.call_count == 0
+        assert result is not None and result.model.provider == "ollama"
+
+    def test_unbenched_provider_is_still_called(self):
+        from llm_router.hooks.direct_executor import ModelSpec, execute_chain
+
+        chain = [ModelSpec("gemini", "gemini-2.5-flash")]
+        with patch("llm_router.hooks.direct_executor.call_gemini",
+                   return_value=("gemini answered fine", {})) as gem:
+            result = execute_chain("hello", chain, "query")
+        assert gem.call_count == 1 and result is not None
+
+    def test_http_429_with_retry_after_benches_the_provider_for_next_time(self):
+        """call_gemini swallows its exception; the 429's headers must still reach
+        provider_reset, and the second chain must skip the provider entirely."""
+        import io
+        import urllib.error
+        from email.message import Message
+
+        from llm_router.hooks.direct_executor import ModelSpec, execute_chain
+
+        hdrs = Message()
+        hdrs["Retry-After"] = "7200"
+        err = urllib.error.HTTPError(
+            "https://generativelanguage.googleapis.com/x", 429, "Too Many Requests",
+            hdrs, io.BytesIO(b'{"error": "quota"}'),
+        )
+        chain = [ModelSpec("gemini", "gemini-2.5-flash"), ModelSpec("ollama", "qwen3.5")]
+        with patch("urllib.request.urlopen", side_effect=err) as urlopen, \
+             patch("llm_router.hooks.direct_executor.call_ollama",
+                   return_value=("the fallback answered", {})):
+            first = execute_chain("hello", chain, "query")
+            assert first is not None and first.model.provider == "ollama"
+            assert urlopen.call_count == 1
+            assert provider_reset.get_provider_reset_until("gemini") == pytest.approx(
+                time.time() + 7200, abs=10
+            )
+            second = execute_chain("hello", chain, "query")
+        assert second is not None
+        assert urlopen.call_count == 1, "the benched provider must not be called again"
+
+    def test_a_provider_call_that_raises_with_a_usage_limit_report_is_benched(self):
+        from llm_router.hooks.direct_executor import ModelSpec, execute_chain
+
+        boom = RuntimeError("You've hit your usage limit. Try again in 5 hours.")
+        chain = [ModelSpec("openai", "gpt-4o-mini"), ModelSpec("ollama", "qwen3.5")]
+        with patch("llm_router.hooks.direct_executor.call_openai", side_effect=boom), \
+             patch("llm_router.hooks.direct_executor.call_ollama",
+                   return_value=("the fallback answered", {})):
+            assert execute_chain("hello", chain, "query") is not None
+        assert provider_reset.get_provider_reset_until("openai") == pytest.approx(
+            time.time() + 5 * HOUR, abs=10
+        )
+
+    def test_a_chain_of_one_is_not_benched_by_its_own_failure(self):
+        import io
+        import urllib.error
+        from email.message import Message
+
+        from llm_router.hooks.direct_executor import ModelSpec, execute_chain
+
+        hdrs = Message()
+        hdrs["Retry-After"] = "7200"
+        err = urllib.error.HTTPError("https://x", 429, "Too Many Requests", hdrs, io.BytesIO(b""))
+        with patch("urllib.request.urlopen", side_effect=err):
+            assert execute_chain("hello", [ModelSpec("openai", "gpt-4o-mini")], "query") is None
+        assert provider_reset.all_provider_resets() == {}
+
+
+# ------------------------------------------------------ provider list / unban
+
+
+class TestProviderCommand:
+    def _bench(self, *names):
+        now = time.time()
+        for n in names:
+            provider_reset.record_provider_reset(n, now + 5 * HOUR, now=now)
+
+    def test_unban_clears_one_provider_only(self, capsys):
+        from llm_router.commands.provider import cmd_provider
+
+        self._bench("codex", "gemini")
+        cmd_provider(["unban", "codex"])
+        assert "Cleared: codex" in capsys.readouterr().out
+        assert HealthTracker().is_healthy("codex")
+        assert not HealthTracker().is_healthy("gemini")
+
+    def test_unban_all(self, capsys):
+        from llm_router.commands.provider import cmd_provider
+
+        self._bench("codex", "gemini")
+        cmd_provider(["unban", "--all"])
+        assert provider_reset.all_provider_resets() == {}
+        assert "codex" in capsys.readouterr().out
+
+    def test_unban_unknown_provider_says_so(self, capsys):
+        from llm_router.commands.provider import cmd_provider
+
+        self._bench("codex")
+        cmd_provider(["unban", "nope"])
+        assert "Nothing to clear" in capsys.readouterr().out
+        assert not HealthTracker().is_healthy("codex")
+
+    def test_unban_with_no_state_file_is_quiet(self, capsys):
+        from llm_router.commands.provider import cmd_provider
+
+        cmd_provider(["unban", "codex"])
+        assert "Nothing to clear" in capsys.readouterr().out
+
+    def test_list_shows_benched_providers_and_when(self, capsys):
+        from llm_router.commands.provider import cmd_provider
+
+        self._bench("codex")
+        cmd_provider(["list"])
+        out = capsys.readouterr().out
+        assert "codex: unavailable until" in out and "in 4h" in out
+
+    def test_list_when_nothing_is_benched(self, capsys):
+        from llm_router.commands.provider import cmd_provider
+
+        cmd_provider(["list"])
+        assert "No provider is benched" in capsys.readouterr().out
+
+    def test_cli_dispatches_provider(self, monkeypatch, capsys):
+        from llm_router import cli
+
+        self._bench("codex")
+        monkeypatch.setattr(sys, "argv", ["llm-router", "provider", "list"])
+        cli.main()
+        assert "codex: unavailable until" in capsys.readouterr().out
+
+    def test_unban_missing_name_exits_2(self):
+        from llm_router.commands.provider import cmd_provider
+
+        with pytest.raises(SystemExit) as e:
+            cmd_provider(["unban"])
+        assert e.value.code == 2
