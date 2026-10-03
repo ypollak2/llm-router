@@ -489,6 +489,11 @@ class TestTextIsOnlyReadWhereItIsAReport:
         "use exponential backoff.",
         "Rate limited (429). See https://docs.example.com/limits -- a limit resets in "
         "3 days for free tier accounts, paid tiers differ.",
+        # "you can" is advice, not a report.
+        "429 Too Many Requests. This is a rate limit. You can retry in 2 hours on "
+        "the free plan, upgrade for faster access.",
+        "Rate limit hit. You can retry in 3 days for safety, but it usually clears "
+        "within an hour.",
     ]
 
     @pytest.mark.parametrize("message", INCIDENTAL)
@@ -545,6 +550,52 @@ class TestTextIsOnlyReadWhereItIsAReport:
             headers={"Retry-After": "7200"}, now=now,
         )
         assert got == now + 7200
+
+
+class TestCodexDatedWording:
+    """Codex prints the reset as a dated clock time ("try again at Oct 6th, 2026
+    10:34 PM."). Wording as publicly reported, not captured from a live run."""
+
+    NOW = datetime(2026, 10, 3, 12, 0).timestamp()
+
+    @pytest.mark.parametrize(
+        "message, expected",
+        [
+            ("You've hit your usage limit. Upgrade to Pro (https://openai.com/chatgpt/pricing), "
+             "or try again at Oct 6th, 2026 10:34 PM.", datetime(2026, 10, 6, 22, 34)),
+            ("You've hit your usage limit. Try again at Oct 9th, 2026 3:31 PM.",
+             datetime(2026, 10, 9, 15, 31)),
+            ("You've hit your usage limit. Try again at October 5, 2026 9:05 AM.",
+             datetime(2026, 10, 5, 9, 5)),
+            # No year: the next such date.
+            ("You've hit your usage limit. Try again at Oct 7 6:39 AM.", datetime(2026, 10, 7, 6, 39)),
+        ],
+    )
+    def test_dated_reset_is_parsed(self, message, expected):
+        got = provider_reset.parse_reset_epoch(message, now=self.NOW)
+        assert datetime.fromtimestamp(got) == expected
+
+    def test_dated_reset_is_absolute_so_not_capped_at_24h(self):
+        got = provider_reset.parse_reset_epoch(
+            "You've hit your usage limit. Try again at Oct 6th, 2026 10:34 PM.", now=self.NOW
+        )
+        assert got - self.NOW > provider_reset.MAX_TEXT_SKIP_SECONDS
+
+    def test_a_dated_reset_far_ahead_is_capped_at_the_header_ceiling(self):
+        got = provider_reset.parse_reset_epoch(
+            "You've hit your usage limit. Try again at Apr 12th, 2027 3:31 PM.", now=self.NOW
+        )
+        assert got == self.NOW + provider_reset.MAX_SKIP_SECONDS
+
+    def test_a_non_month_word_is_not_a_date(self):
+        assert provider_reset.parse_reset_epoch(
+            "You've hit your usage limit. Try again at Foo 6th, 2026 10:34 PM.", now=self.NOW
+        ) is None
+
+    def test_dated_reset_in_the_past_is_expired(self):
+        assert provider_reset.parse_reset_epoch(
+            "You've hit your usage limit. Try again at Oct 1st, 2026 10:34 PM.", now=self.NOW
+        ) is None
 
 
 class TestTomorrowQualifier:
@@ -731,6 +782,68 @@ class TestExecuteChainHonoursResets:
         assert provider_reset.get_provider_reset_until("openai") == pytest.approx(
             time.time() + 5 * HOUR, abs=10
         )
+
+    def test_a_raising_provider_after_a_failed_one_is_not_benched(self):
+        """Same guard on the raising path: only providers LATER in the chain count."""
+        from llm_router.hooks.direct_executor import ModelSpec, execute_chain
+
+        boom = RuntimeError("You've hit your usage limit. Try again in 5 hours.")
+        chain = [ModelSpec("gemini", "gemini-2.5-flash"), ModelSpec("openai", "gpt-4o-mini")]
+        with patch("llm_router.hooks.direct_executor.call_gemini", return_value=(None, {})), \
+             patch("llm_router.hooks.direct_executor.call_openai", side_effect=boom):
+            assert execute_chain("hello", chain, "query") is None
+        assert provider_reset.get_provider_reset_until("openai") is None
+
+    def test_providers_that_already_failed_this_request_are_not_alternatives(self):
+        """[gemini, openai]: gemini fails (500), then openai reports a usage limit.
+        Benching openai would leave only the provider that just failed."""
+        import io
+        import urllib.error
+        from email.message import Message
+
+        from llm_router.hooks.direct_executor import ModelSpec, execute_chain
+
+        def _urlopen(req, timeout=None):
+            if "googleapis" in req.full_url:
+                raise urllib.error.HTTPError(req.full_url, 500, "boom", Message(), io.BytesIO(b""))
+            raise urllib.error.HTTPError(
+                req.full_url, 429, "Too Many Requests", Message(),
+                io.BytesIO(b"You've hit your usage limit. Try again in 5 hours."),
+            )
+
+        with patch("urllib.request.urlopen", side_effect=_urlopen):
+            chain = [ModelSpec("gemini", "gemini-2.5-flash"), ModelSpec("openai", "gpt-4o-mini")]
+            assert execute_chain("hello", chain, "query") is None
+        assert provider_reset.all_provider_resets() == {}
+
+    def test_a_provider_with_a_later_alternative_in_the_chain_is_benched(self):
+        import io
+        import urllib.error
+        from email.message import Message
+
+        from llm_router.hooks.direct_executor import ModelSpec, execute_chain
+
+        def _urlopen(req, timeout=None):
+            raise urllib.error.HTTPError(
+                req.full_url, 429, "Too Many Requests", Message(),
+                io.BytesIO(b"You've hit your usage limit. Try again in 5 hours."),
+            )
+
+        chain = [ModelSpec("openai", "gpt-4o-mini"), ModelSpec("ollama", "qwen3.5")]
+        with patch("urllib.request.urlopen", side_effect=_urlopen), \
+             patch("llm_router.hooks.direct_executor.call_ollama", return_value=("fallback ok", {})):
+            assert execute_chain("hello", chain, "query") is not None
+        assert provider_reset.get_provider_reset_until("openai") is not None
+
+    def test_failure_reason_logging_for_gemini_is_unchanged(self):
+        """The error is stashed for provider_reset; the existing reason an
+        attempt_log reader sees ("empty response") must not change."""
+        from llm_router.hooks import direct_executor as de
+
+        with patch("urllib.request.urlopen", side_effect=OSError("down")):
+            assert de.call_gemini("hi") == (None, {})
+        assert "gemini/gemini-2.5-flash" not in de._LAST_CALL_FAILURE
+        de._LAST_CALL_ERROR.pop("gemini/gemini-2.5-flash", None)
 
     def test_a_chain_of_one_is_not_benched_by_its_own_failure(self):
         import io

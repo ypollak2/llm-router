@@ -29,7 +29,8 @@ never blocks routing) and is accounted via ``failopen.record``.
 How far a reset is trusted depends on where it came from (``source``):
 
 * ``header``   -- ``Retry-After`` / ``anthropic-ratelimit-*-reset``: up to 7 days.
-* ``absolute`` -- a full ISO timestamp directly after a reset verb: up to 7 days.
+* ``absolute`` -- a dated timestamp directly after a reset verb (ISO, or Codex's
+  "at Oct 6th, 2026 10:34 PM"): up to 7 days.
 * ``text``     -- a relative duration ("try again in 3 days") or a bare clock
   time ("try again at 6:39 AM", "tomorrow at 06:39"): capped at 24h, because
   prose is the least reliable source.
@@ -106,7 +107,7 @@ _VERB_RE = re.compile(r"(?:try again|retry|resets?)\b", re.IGNORECASE)
 #: not a report. A lead-in is the text after the last clause boundary between
 #: the limit phrase and the verb.
 _CLAUSE_LEADS = frozenset({
-    "", "or", "and", "then", "so", "please", "wait and", "you can", "you can now",
+    "", "or", "and", "then", "so", "please", "wait and",
     "will", "it will", "which will", "will be", "it will be",
 })
 
@@ -129,6 +130,16 @@ _CLOCK_RE = re.compile(
 _ISO_AFTER_VERB_RE = re.compile(
     r"\s*(?:at|on|:)\s*"
     r"(?P<ts>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)",
+    re.IGNORECASE,
+)
+
+#: Codex prints the reset as a dated clock time: "try again at Oct 6th, 2026
+#: 10:34 PM." (wording reported publicly, not captured from a live run here).
+_MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+_DATE_NAME_RE = re.compile(
+    r"\s*(?:at|on)\s+(?P<mon>[A-Za-z]{3})[a-z]*\.?\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?,?\s+"
+    r"(?:(?P<year>\d{4}),?\s+)?"
+    r"(?:at\s+)?(?P<hour>\d{1,2}):(?P<minute>\d{2})\s*(?P<ampm>[ap]\.?m\.?)?",
     re.IGNORECASE,
 )
 
@@ -171,7 +182,8 @@ def _duration_seconds(m: re.Match[str]) -> float | None:
     d, h, mi, s = (m.group(k) for k in ("d", "h", "m", "s"))
     if not (d or h or mi or s):
         return None
-    delta = float(d or 0) * 86400 + float(h or 0) * 3600 + float(mi or 0) * 60 + float(s or 0)
+    # A component the message did not mention is simply not added.
+    delta = sum(float(v) * k for v, k in zip((d, h, mi, s), (86400, 3600, 60, 1)) if v)
     return delta if delta > 0 else None
 
 
@@ -206,6 +218,27 @@ def _iso_epoch(stamp: str) -> float | None:
         return None
 
 
+def _dated_epoch(m: re.Match[str], now: float) -> float | None:
+    mon = m.group("mon").lower()
+    if mon not in _MONTHS:
+        return None
+    hour, minute = int(m.group("hour")), int(m.group("minute"))
+    ampm = (m.group("ampm") or "").lower().replace(".", "")
+    if ampm == "pm" and hour != 12:
+        hour += 12
+    elif ampm == "am" and hour == 12:
+        hour = 0
+    year = int(m.group("year")) if m.group("year") else datetime.fromtimestamp(now).year
+    try:
+        # Local time, unverified (see module docstring).
+        epoch = datetime(year, _MONTHS.index(mon) + 1, int(m.group("day")), hour, minute).timestamp()
+        if not m.group("year") and epoch <= now:
+            epoch = datetime(year + 1, _MONTHS.index(mon) + 1, int(m.group("day")), hour, minute).timestamp()
+        return epoch
+    except ValueError:
+        return None
+
+
 def _from_message(text: str, now: float) -> tuple[float, str] | None:
     """A reset from limit-report text, as ``(epoch, source)``; ``source`` is
     ``"absolute"`` for an ISO timestamp and ``"text"`` otherwise."""
@@ -219,6 +252,11 @@ def _from_message(text: str, now: float) -> tuple[float, str] | None:
             m = _ISO_AFTER_VERB_RE.match(rest)
             if m:
                 epoch = _iso_epoch(m.group("ts"))
+                if epoch is not None:
+                    return epoch, "absolute"
+            m = _DATE_NAME_RE.match(rest)
+            if m:
+                epoch = _dated_epoch(m, now)
                 if epoch is not None:
                     return epoch, "absolute"
             m = _CLOCK_RE.match(rest)
@@ -397,11 +435,11 @@ def note_provider_error(
     """Parse ``exc``/``headers`` for a reset and persist it. Never raises.
 
     ``text`` overrides ``str(exc)`` when the caller holds the full output and
-    ``exc`` carries only a truncated copy. ``alternatives`` are the OTHER
-    providers in the chain being dispatched; when none of them is currently
-    usable, ``provider`` is the last one standing and is not benched beyond the
-    caller's 15s cooldown (a misparse must not become a multi-day outage).
-    ``None`` skips that check.
+    ``exc`` carries only a truncated copy. ``alternatives`` are the providers
+    still AHEAD of this request in its chain (not the ones that already ran and
+    failed); when none of them is currently usable, ``provider`` is the last one
+    standing and is not benched beyond the caller's 15s cooldown (a misparse
+    must not become a multi-day outage). ``None`` skips that check.
 
     Returns the persisted reset epoch, or ``None`` when nothing actionable was
     found (the caller then keeps its existing 15s cooldown).

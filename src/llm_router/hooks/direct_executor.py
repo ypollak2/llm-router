@@ -412,7 +412,7 @@ def call_gemini(
                 "output_tokens": usage.get("candidatesTokenCount", 0),
             }
     except Exception as exc:                                 # noqa: BLE001
-        _remember_http_error("gemini", model, exc, timeout)
+        _remember_http_error("gemini", model, exc)
         return None, {}
 
 
@@ -451,7 +451,7 @@ def call_openai(
                 "output_tokens": usage.get("completion_tokens", 0),
             }
     except Exception as exc:                                 # noqa: BLE001
-        _remember_http_error("openai", model, exc, timeout)
+        _remember_http_error("openai", model, exc)
         return None, {}
 
 
@@ -553,8 +553,7 @@ def _call_failure(provider: str, model: str, reason: str) -> None:
 _LAST_CALL_ERROR: dict[str, tuple[str, dict[str, str]]] = {}
 
 
-def _remember_http_error(provider: str, model: str, exc: BaseException,
-                         timeout: float = 0) -> None:
+def _remember_http_error(provider: str, model: str, exc: BaseException) -> None:
     try:
         headers = {str(k): str(v) for k, v in dict(getattr(exc, "headers", None) or {}).items()}
     except (TypeError, ValueError):
@@ -566,7 +565,6 @@ def _remember_http_error(provider: str, model: str, exc: BaseException,
     except Exception:                                        # noqa: BLE001
         body = ""
     _LAST_CALL_ERROR[f"{provider}/{model}"] = (f"{exc} {body}".strip(), headers)
-    _call_failure(provider, model, _failure_reason(exc, timeout))
 
 
 def _log_direct_reason(msg: str) -> None:
@@ -671,14 +669,14 @@ def _provider_reset_blocked(provider: str) -> bool:
         return False
 
 
-def _note_reset(model: ModelSpec, chain: list[ModelSpec], text: str,
+def _note_reset(model: ModelSpec, later: list[ModelSpec], text: str,
                 headers: dict[str, str]) -> None:
     """Record a failure's reported reset (once). Never raises."""
     try:
         from llm_router import provider_reset
         provider_reset.note_provider_error(
             model.provider, RuntimeError(text), headers or None,
-            alternatives=[m.provider for m in chain if m is not model],
+            alternatives=[m.provider for m in later],
         )
     except Exception:                                        # noqa: BLE001
         pass
@@ -840,7 +838,7 @@ def execute_chain(
         try:
             response, usage = call_fn(prompt, model.model, call_timeout, history, system_prompt)
         except Exception as exc:                             # noqa: BLE001
-            _note_reset(model, chain, str(exc), {})
+            _note_reset(model, chain[index + 1:], str(exc), {})
             _give_up(model.model, f"call raised: {type(exc).__name__}: {exc}"[:120],
                      int((time.monotonic() - t0) * 1000))
             continue
@@ -849,7 +847,7 @@ def execute_chain(
             _err_text, _err_headers = _LAST_CALL_ERROR.pop(
                 f"{model.provider}/{model.model}", ("", {}))
             if _err_text or _err_headers:
-                _note_reset(model, chain, _err_text, _err_headers)
+                _note_reset(model, chain[index + 1:], _err_text, _err_headers)
             _give_up(
                 model.model,
                 _LAST_CALL_FAILURE.pop(f"{model.provider}/{model.model}", "empty response"),

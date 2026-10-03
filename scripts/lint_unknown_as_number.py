@@ -62,14 +62,7 @@ DEFAULT_TARGET = REPO_ROOT / "src" / "llm_router"
 #: until three migrated tables were missing from it (S6).
 #:
 #: Keyed by ``"<path relative to repo root>:<function>"``.
-ALLOWLIST: dict[str, str] = {
-    "src/llm_router/provider_reset.py:_from_relative_text": (
-        "d/h/m/s are optional regex groups for a duration phrase like "
-        "'try again in 2h 15m' -- a component the message did not mention "
-        "(e.g. no days) genuinely contributes zero seconds, it is not an "
-        "unmeasured value standing in for zero."
-    ),
-}
+ALLOWLIST: dict[str, str] = {}
 
 _ZERO_LITERALS = (0, 0.0)
 

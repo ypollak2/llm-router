@@ -2954,7 +2954,7 @@ async def _dispatch_model_loop(
                         )
                         provider_reset.note_provider_error(
                             provider, _err, text=codex_result.content or "",
-                            alternatives=[provider_from_model(m) for m in models_to_try],
+                            alternatives=[provider_from_model(m) for m in models_to_try[attempt:]],
                         )
                         raise _err
                     in_tokens = max(1, len(prompt) // 4)
@@ -3000,7 +3000,7 @@ async def _dispatch_model_loop(
                         )
                         provider_reset.note_provider_error(
                             provider, _err, text=gemini_result.content or "",
-                            alternatives=[provider_from_model(m) for m in models_to_try],
+                            alternatives=[provider_from_model(m) for m in models_to_try[attempt:]],
                         )
                         raise _err
                     in_tokens = max(1, len(prompt) // 4)
@@ -3043,7 +3043,7 @@ async def _dispatch_model_loop(
                         )
                         provider_reset.note_provider_error(
                             provider, _err, text=claude_result.content or "",
-                            alternatives=[provider_from_model(m) for m in models_to_try],
+                            alternatives=[provider_from_model(m) for m in models_to_try[attempt:]],
                         )
                         raise _err
                     in_tokens = max(1, len(prompt) // 4)
@@ -3342,7 +3342,7 @@ async def _dispatch_model_loop(
             # Codex usage-limit text is not recognised as a rate limit.
             provider_reset.note_provider_error(
                 provider, e, _response_headers(e),
-                alternatives=[provider_from_model(m) for m in models_to_try],
+                alternatives=[provider_from_model(m) for m in models_to_try[attempt:]],
             )
             is_rate_limit = _is_rate_limit_error(e)
             is_content_filter = not is_rate_limit and _is_content_filter_error(e)
@@ -3572,7 +3572,7 @@ async def _dispatch_model_loop(
                     )
                     provider_reset.note_provider_error(
                         provider, e, _response_headers(e),
-                        alternatives=[provider_from_model(m) for m in emergency_chain],
+                        alternatives=[provider_from_model(m) for m in emergency_chain[attempt - len(models_to_try):]],
                     )
                     # CHZ-AUD-A-01 (sibling): the emergency BUDGET fallback loop's
                     # provider-failure path must record the failed attempt in the

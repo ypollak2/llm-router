@@ -129,7 +129,7 @@ def test_the_fixed_source_is_clean() -> None:
 # 111 -> 112 (Phase 0.2d): edit_survival.py moved from scripts/ into src/, and
 # its CLI-only load_rows() `float(row.get('ts', 0.0))` is now in the scan. Not
 # new code; northstar does not call load_rows.
-BASELINE = 113
+BASELINE = 112
 
 
 def _current_count() -> int:
