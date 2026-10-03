@@ -57,6 +57,16 @@ Claude-tier rewrite fields (only when the proxy runs with ``--tiers on`` or
   tier_switch_cost_usd  estimated cache re-write that move cost (``cache_cost``)
   tier_body_rewrite     "haiku" when the body was rewritten for Haiku (thinking and
                         effort stripped, ``translate.for_haiku``); absent otherwise
+  session_kind          organic | research | harness | headless, from the tag the
+                        SessionStart hook persisted (llm_router.session_kind);
+                        null = the session was never tagged. Tag only, never a filter.
+  tier_proposed         the policy table's tier for (task_type, complexity) BEFORE
+                        the no-upgrade clamp, thinking floor, escalation, stickiness
+                        and quota pressure; null where the classifier did not run
+  tier_policy_version   12-hex hash of claude_tiers.yaml + router version
+                        (proxy.tiers.policy_version); null when tiers are off
+  (session_kind, tier_proposed, tier_policy_version and tier_retry are present on
+   EVERY row, null when not computed, so a missing key never has to be read as 0.)
   tier_retry            {status, detail}: Anthropic refused the rewritten call
                         and it was resent unchanged
   tier_detail           scrubbed error text when the decision itself failed, or

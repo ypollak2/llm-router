@@ -119,6 +119,7 @@ or the file ``--tier-policy`` / ``LLM_ROUTER_PROXY_TIER_POLICY`` names), never f
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from dataclasses import dataclass, field
@@ -193,10 +194,30 @@ class TierDecision:
     body_rewrite: str | None = None  # REWRITE_HAIKU when server.py must run translate.for_haiku on the body
     quota_pressure: float | None = None  # max(session, weekly) 0-1 the decision saw, when readable
     quota_state: str | None = None  # quota_pressure.STATE_* (ok / stale / unknown / off)
+    # What the policy table said for (task_type, complexity), BEFORE the no-upgrade
+    # clamp, the thinking floor, escalation, stickiness and quota pressure moved it.
+    # None where the classifier never ran (the early keep / pin returns): not computed.
+    proposed_tier: str | None = None
 
     @property
     def rewritten(self) -> bool:
         return self.served_model is not None and self.served_model != self.requested_model
+
+
+def policy_version(path: str | Path | None = None) -> str:
+    """Identity of the tier policy a ledger row was decided under: a 12-hex
+    sha256 over the policy file's bytes plus the router version. Changes when
+    either the YAML or the router release changes, so rows from before and
+    after a policy edit are separable. ``"unreadable"`` if the file cannot be
+    read (never raises: it is called at proxy start and must not cost a call)."""
+    from llm_router import __version__
+
+    target = Path(path or DEFAULT_POLICY_PATH).expanduser()
+    try:
+        raw = target.read_bytes()
+    except OSError:
+        return "unreadable"
+    return hashlib.sha256(raw + b"\0" + str(__version__).encode("utf-8")).hexdigest()[:12]
 
 
 async def _default_classify(text: str) -> dict:
@@ -359,6 +380,9 @@ class ClaudeTierPolicy:
         if not 0.0 <= self.quota_cap_at <= self.quota_moderate_at:
             raise ValueError("quota_pressure needs 0 <= cap_at <= moderate_at")
         self._quota = quota
+        # Stamped on every proxy ledger row (tier_policy_version). ``load`` sets
+        # it from the file; a policy built from a dict has no file to hash.
+        self.policy_version: str | None = None
         self._ids: dict[str, Tier] = {}
         for t in tiers:
             for mid in (t.model, *t.also):
@@ -402,7 +426,9 @@ class ClaudeTierPolicy:
             raise ValueError(f"tier policy {target} is not valid YAML: {exc}") from None
         if not isinstance(data, dict):
             raise ValueError(f"tier policy {target} is not a mapping")
-        return cls.from_dict(data, conversation_level=conversation_level, classify=classify)
+        policy = cls.from_dict(data, conversation_level=conversation_level, classify=classify)
+        policy.policy_version = policy_version(target)
+        return policy
 
     # ── lookups ─────────────────────────────────────────────────────────────
 
@@ -560,6 +586,7 @@ class ClaudeTierPolicy:
         task, cx = choice.get("task_type"), choice.get("complexity")
 
         target = self.tier_for(task, cx) or req_tier
+        proposed = target.name  # pre-override: the policy table's own answer
         reason = REASON_POLICY
         if not self.allow_upgrade and self.rank[target.name] > self.rank[req_tier.name]:
             target = req_tier
@@ -654,4 +681,5 @@ class ClaudeTierPolicy:
         return TierDecision(requested, served, target.name, reason, switched=switched, switch_cost_usd=cost,
                             body_rewrite=body_rewrite,
                             task_type=task, complexity=cx, chain_head=list(choice.get("chain_head") or [])[:4],
-                            complexity_score=choice.get("complexity_score"), detail=detail)
+                            complexity_score=choice.get("complexity_score"), detail=detail,
+                            proposed_tier=proposed)

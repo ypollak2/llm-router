@@ -15,7 +15,11 @@ resolution happens at call time and is never cached).
 Row shape::
 
     {"ts": 1758975600.0, "session_id": "abc123", "file": "src/foo.py",
-     "model": "ollama/qwen3.5:latest", "applied": true, "survived": null}
+     "model": "ollama/qwen3.5:latest", "applied": true, "survived": null,
+     "session_kind": "organic"}
+
+``session_kind`` is the KPI tag from :mod:`llm_router.session_kind`
+(organic / research / harness / headless), or null if the session was never tagged.
 
 Field notes:
 
@@ -77,11 +81,22 @@ def _resolve_session_id() -> str | None:
         return None
 
 
+def _session_kind_of(session_id: str | None) -> str | None:
+    try:
+        from llm_router import session_kind
+
+        return session_kind.kind_of(session_id)
+    except Exception:  # noqa: BLE001 - a tag must never cost the ledger row
+        return None
+
+
 def record_edit_outcome(*, file: str, model: str, applied: bool) -> None:
     """Append one ledger row. Best-effort: never raises."""
+    sid = _resolve_session_id()
     row = {
         "ts": time.time(),
-        "session_id": _resolve_session_id(),
+        "session_id": sid,
+        "session_kind": _session_kind_of(sid),
         "file": file,
         "model": model,
         "applied": bool(applied),

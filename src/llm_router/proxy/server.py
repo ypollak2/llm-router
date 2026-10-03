@@ -81,6 +81,7 @@ from llm_router.proxy.loop_guard import (
 )
 from llm_router.proxy.cache_cost import Stickiness, conversation_key
 from llm_router.proxy.steps import STEP_CLASSES, classify_text, prev_tools, session_id_of, step_class
+from llm_router import session_kind
 from llm_router.proxy.tiers import REASON_DECISION_ERROR, REWRITE_HAIKU, ClaudeTierPolicy
 from llm_router.proxy.translate import (
     for_haiku,
@@ -432,11 +433,13 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             decision = await tier_policy.decide(body, row.get("session_id"), sticky)
         except Exception as exc:  # noqa: BLE001 - fail-safe: forward unchanged
             row.update(served_model=body.get("model"), tier=None, tier_reason=REASON_DECISION_ERROR,
+                       tier_proposed=None,
                        tier_switch=False, tier_switch_cost_usd=None, tier_complexity_score=None,
                        tier_detail=ledger.scrub_detail(f"{type(exc).__name__}: {exc}"),
                        tier_decision_s=round(time.monotonic() - t0, 3))
             return None
         row.update(served_model=decision.served_model, tier=decision.tier, tier_reason=decision.reason,
+                   tier_proposed=decision.proposed_tier,
                    tier_switch=decision.switched, tier_switch_cost_usd=decision.switch_cost_usd,
                    tier_task_type=decision.task_type, tier_complexity=decision.complexity,
                    tier_complexity_score=decision.complexity_score,
@@ -574,6 +577,12 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             "prev_tools": prev_tools(body),
             "decision": ledger.DECISION_FORWARDED, "added_latency_s": 0.0,
             "tier_mode": cfg.tiers,
+            # KPI instrumentation (G3): these keys exist on EVERY forwarded/served
+            # row, with an honest null when not computed, so "absent" never has to
+            # be read as 0. tier_proposed is filled by decide_tier.
+            "session_kind": session_kind.kind_of(session_id_of(body)),
+            "tier_policy_version": tier_policy.policy_version if tier_policy is not None else None,
+            "tier_proposed": None, "tier_retry": None,
         }
         if not cfg.steps:
             row["reason"] = "routing_off"

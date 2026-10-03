@@ -447,6 +447,7 @@ def _record_north_star_unit(lever: str, *, model: str, outcome: str, **meta) -> 
             "lever": lever,
             "model": model,
             "outcome": outcome,
+            "session_kind": _session_kind_of(meta.get("session_id") or _get_session_id()),
             **meta,
         }
         f = _north_star_ledger_file()
@@ -468,6 +469,15 @@ def _record_north_star_unit(lever: str, *, model: str, outcome: str, **meta) -> 
             failopen.record("CHZ-FO-NS3-NORTH-STAR-LEDGER", exc)
         except Exception:
             pass
+
+
+def _session_kind_of(session_id: str | None) -> str | None:
+    """KPI session tag (organic/research/harness/headless) or None if untagged."""
+    try:
+        from llm_router import session_kind
+        return session_kind.kind_of(session_id)
+    except Exception:
+        return None
 
 
 def _log_agent_call(subagent_type: str, prompt: str, decision: str) -> None:
@@ -500,6 +510,7 @@ def _log_agent_call(subagent_type: str, prompt: str, decision: str) -> None:
         "prompt": _scrub_agent_prompt(prompt[:500]),  # scrub + truncate
         "decision": decision,
         "session_id": _get_session_id(),
+        "session_kind": _session_kind_of(_get_session_id()),
     }
     history.append(entry)
     _append_agent_calls_ledger(entry)

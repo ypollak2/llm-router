@@ -1847,6 +1847,15 @@ def main() -> None:
     except Exception:
         pass
 
+    # KPI session tagging (organic / research / harness / headless): persisted
+    # per session so the proxy and the ledgers can tag rows. Fail-open.
+    try:
+        from llm_router import session_kind as _session_kind
+        if isinstance(_hook_input, dict):
+            _session_kind.tag_session(_hook_input.get("session_id"), _hook_input.get("cwd"))
+    except Exception:
+        pass
+
     _reset_session_stats()
     _reset_stale_health()
     # Clear orphaned per-session state files from crashed/killed sessions.
