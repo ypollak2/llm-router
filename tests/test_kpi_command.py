@@ -205,6 +205,14 @@ def test_d4_tier_mix_and_g3_completeness():
     assert rows_all["G3"]["n"] == 601
 
 
+def test_g3_null_decision_fields_do_not_count_as_complete():
+    """A key that is PRESENT but null means the field was never computed --
+    that is not the same as a complete row (G3 target >=99%)."""
+    rows = [_row(tier_proposed=None, tier_policy_version=None, tier_retry=None) for _ in range(60)]
+    _write_proxy_rows(rows)
+    assert _kpis()["G3"]["value"] == "0.0% (n=60)"
+
+
 def test_g3_untagged_proxy_rows_do_not_count_as_organic():
     _write_proxy_rows([_row(session_kind=None) for _ in range(100)])
     assert _kpis()["G3"]["value"].startswith("not measurable: ")
@@ -227,6 +235,41 @@ def test_g1_proxy_p95_against_the_200ms_gate():
 def test_o1_is_labelled_est_and_not_a_zero_when_empty():
     o1 = _kpis()["O1"]["value"]
     assert o1.startswith("not measurable: ")
+
+
+def test_o1_value_is_always_labelled_est(monkeypatch):
+    """O1 is a saving ESTIMATE (project rule: savings displays show 'est.' only).
+    Whatever dashboard_data.summary() returns, the printed value must carry it."""
+    from llm_router import dashboard_data as dd
+
+    class FakeSummary:
+        def display(self):
+            return "est. saved $42.00"
+
+        estimated_n = 500
+        estimated_usd = 42.0
+
+    monkeypatch.setattr(dd, "summary", lambda period: FakeSummary())
+    o1 = _kpis()["O1"]
+    assert "est." in o1["value"], o1
+    assert o1["measurable"] is True
+
+
+def test_o1_summary_failure_is_not_measurable_and_writes_nothing(monkeypatch, tmp_path):
+    """Read-only: an O1 read failure must not touch ~/.llm-router (not even via
+    the failopen counter -- this command never persists anything)."""
+    from llm_router import dashboard_data as dd
+    from llm_router import failopen
+
+    def boom(period):
+        raise RuntimeError("usage.db is locked")
+
+    monkeypatch.setattr(dd, "summary", boom)
+    home_files_before = sorted(failopen.store_path().parent.glob("*")) if failopen.store_path().parent.is_dir() else []
+    o1 = _kpis()["O1"]
+    assert o1["value"] == "not measurable: dashboard_data.summary() raised RuntimeError; see llm-router doctor"
+    home_files_after = sorted(failopen.store_path().parent.glob("*")) if failopen.store_path().parent.is_dir() else []
+    assert home_files_before == home_files_after
 
 
 def test_g2_reports_all_time_count_and_says_so():
