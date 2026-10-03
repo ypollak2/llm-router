@@ -239,7 +239,9 @@ def _g3_completeness(rows: list[dict]) -> dict:
         return _not_measurable("no proxy rows in window")
     if len(rows) < MIN_N:
         return _too_few(len(rows))
-    complete = sum(1 for r in rows if all(k in r for k in required))
+    # A key that is PRESENT but null is not complete: it means the decision
+    # field was never computed, not that it was recorded as "nothing".
+    complete = sum(1 for r in rows if all(r.get(k) is not None for k in required))
     return _rate_result(complete, len(rows), label="proxy row")
 
 
@@ -263,9 +265,9 @@ def _o1_quota_avoided(days: int) -> dict:
         s = summary(period)
         n = s.estimated_n
     except Exception as exc:  # noqa: BLE001
-        from llm_router import failopen
-        failopen.record("CHZ-FO-KPI-O1-SUMMARY", exc)
-        return _not_measurable("dashboard_data.summary() raised; see llm-router doctor")
+        # This command is read-only: a failure here is reported, not recorded via
+        # failopen (that would write to ~/.llm-router from a reporting command).
+        return _not_measurable(f"dashboard_data.summary() raised {type(exc).__name__}; see llm-router doctor")
     if n == 0:
         return _not_measurable(f"no routed calls with a recorded saving in period={period}")
     display = s.display()
