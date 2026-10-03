@@ -308,8 +308,15 @@ def call_ollama(
         payload["format"] = format
     if keep_alive is not None:
         payload["keep_alive"] = keep_alive
-    body = json.dumps(payload).encode()
     ollama_url = _get_ollama_url()
+    try:
+        from llm_router.local_context_guard import ContextOverflow, check_overflow
+        check_overflow(payload, num_ctx=_local_num_ctx(model), base_url=ollama_url,
+                       model=model, site="hooks.direct_executor.call_ollama")
+    except ContextOverflow:
+        _call_failure("ollama", model, "local_context_overflow")
+        return None, {}
+    body = json.dumps(payload).encode()
     req = urllib.request.Request(
         f"{ollama_url}/api/chat",
         data=body,
@@ -324,6 +331,7 @@ def call_ollama(
     parts: list[str] = []
     usage: dict = {}
     truncated = False
+    context_truncated = False
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310 — URL validated by _get_ollama_url (not localhost-only: a remote Ollama is supported)
             for raw in resp:
@@ -345,6 +353,26 @@ def call_ollama(
                         "input_tokens": chunk.get("prompt_eval_count", 0),
                         "output_tokens": chunk.get("eval_count", 0),
                     }
+                    # Ollama's own number says it truncated despite the
+                    # pre-call check above. Both signatures are RECORDED, but
+                    # only the strong one (prompt_eval_count reached the
+                    # window) degrades the answer: a low count is also what a
+                    # warm KV cache reports for a perfectly intact prompt, and
+                    # discarding good answers for that would be worse than the
+                    # disease. A degraded answer is treated like a time-cut
+                    # draft: labelled and marked incomplete.
+                    from llm_router.local_context_guard import (
+                        check_truncated,
+                        effective_window,
+                        estimate_payload_tokens,
+                    )
+                    _window, _ = effective_window(num_ctx=_local_num_ctx(model), base_url=ollama_url, model=model)
+                    _pec = chunk.get("prompt_eval_count")
+                    if check_truncated(_pec, estimate_payload_tokens(payload),
+                                       _window, site="hooks.direct_executor.call_ollama", model=model) \
+                            and _pec is not None and _pec >= _window:
+                        truncated = True
+                        context_truncated = True
                     break
                 if time.monotonic() >= deadline:
                     truncated = True
@@ -366,9 +394,13 @@ def call_ollama(
     if truncated:
         content = _trim_to_sentence(content)
         if not content:
-            _call_failure("ollama", model, f"timeout_{timeout:g}s")
+            _call_failure("ollama", model, "context_overflow" if context_truncated else f"timeout_{timeout:g}s")
             return None, {}
-        content += "\n\n_[draft cut off at the time limit \u2014 incomplete]_"
+        content += (
+            "\n\n_[draft incomplete \u2014 the prompt overflowed the model's context window]_"
+            if context_truncated else
+            "\n\n_[draft cut off at the time limit \u2014 incomplete]_"
+        )
     if not content.strip():
         _call_failure("ollama", model, "returned_empty_content")
     return content, usage

@@ -121,7 +121,8 @@ tests/hook_rendering/
 # The POST /ground contract — shipped surface, so it has to be readable by
 # someone who does not have this checkout.
 !/docs/GROUNDING_API.md
-# The KPI ledger: one row per change, required by the KPI change rule.
+# The per-change KPI ledger — a permanent record (one row per merged PR), same
+# category as /docs/repo_goals/ below, not a working note.
 !/docs/KPI-LEDGER.md
 !/docs/decisions/
 !/docs/decisions/**

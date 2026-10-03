@@ -267,6 +267,15 @@ async def call_llm(
     kwargs["model"] = _quirk.transform_model_name(kwargs["model"])
     kwargs = _quirk.transform_request(kwargs)
 
+    if model.startswith("ollama/"):
+        # Refuse to send what Ollama would silently truncate from the front
+        # (system prompt first) instead of finding out from a reply about the
+        # wrong thing. Raising here is caught by router.py's existing
+        # chain-failover `except Exception` with no further wiring.
+        from llm_router.local_context_guard import check_overflow
+        check_overflow({"messages": cached_messages}, num_ctx=kwargs.get("num_ctx"),
+                       model=kwargs["model"], site="providers.call_llm")
+
     response = await litellm.acompletion(**kwargs)  # llm_router: direct-ok (router provider layer)
     elapsed_ms = (time.monotonic() - start) * 1000
 
@@ -296,6 +305,16 @@ async def call_llm(
     # logic in session_spend._estimate_cost so both surfaces agree.
     _prompt_tokens = int(getattr(response.usage, "prompt_tokens", 0) or 0)
     _completion_tokens = int(getattr(response.usage, "completion_tokens", 0) or 0)
+    if model.startswith("ollama/"):
+        # LiteLLM maps Ollama's own prompt_eval_count onto usage.prompt_tokens
+        # for this provider; the preflight above already cleared this request,
+        # so a truncation signature here means the window this process assumed
+        # was wrong (cold server, another resident model, etc.) rather than a
+        # request this guard should have refused.
+        from llm_router.local_context_guard import check_truncated, effective_window, estimate_payload_tokens
+        _window, _ = effective_window(num_ctx=kwargs.get("num_ctx"), model=model)
+        check_truncated(_prompt_tokens, estimate_payload_tokens({"messages": cached_messages}), _window,
+                        site="providers.call_llm", model=model)
     try:
         cost = litellm.completion_cost(completion_response=response)
     except Exception:
@@ -452,6 +471,12 @@ async def call_llm_stream_events(
     kwargs["model"] = _quirk.transform_model_name(kwargs["model"])
     kwargs = _quirk.transform_request(kwargs)
 
+    if model.startswith("ollama/"):
+        # Same preflight as call_llm() — see local_context_guard module docstring.
+        from llm_router.local_context_guard import check_overflow
+        check_overflow({"messages": cached_messages}, num_ctx=kwargs.get("num_ctx"),
+                       model=kwargs["model"], site="providers.call_llm_stream_events")
+
     response = await litellm.acompletion(**kwargs)  # llm_router: direct-ok (router provider layer)
 
     collected_content: list[str] = []
@@ -490,6 +515,12 @@ async def call_llm_stream_events(
 
     elapsed_ms = (time.monotonic() - start) * 1000
     full_content = "".join(collected_content)
+
+    if model.startswith("ollama/") and input_tokens:
+        from llm_router.local_context_guard import check_truncated, effective_window, estimate_payload_tokens
+        _window, _ = effective_window(num_ctx=kwargs.get("num_ctx"), model=model)
+        check_truncated(input_tokens, estimate_payload_tokens({"messages": cached_messages}), _window,
+                        site="providers.call_llm_stream_events", model=model)
 
     # Plan 07 D.3 parity for the thinking-leak case. Evidence 2026-09-27: a
     # hybrid-reasoning model can burn the whole call on <think> and stream
