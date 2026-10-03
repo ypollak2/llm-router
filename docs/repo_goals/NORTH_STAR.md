@@ -4,6 +4,10 @@
 > Routine prompts are answered by free local or cheap models, with no API keys and no
 > change to how the user works — and every claim of quota saved is one we actually observed.
 
+See [KPIS.md](KPIS.md) for the KPI set (NS, O1, O2, the drivers and guardrails) that
+operationalizes this file's "How we know it is working" table, and
+[`../KPI-LEDGER.md`](../KPI-LEDGER.md) for how each PR has moved them.
+
 Source of the goal: `README.md:13-15`, `npm/package.json:4`. The clause about observed
 savings comes from the 15.2.0 correction (`CHANGELOG.md:45`, `CHANGELOG.md:83-88`).
 
