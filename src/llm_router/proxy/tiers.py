@@ -443,7 +443,16 @@ class ClaudeTierPolicy:
         200K, the other tiers' is 1M). Whether the turn is simple/mechanical
         is the classifier's call, made by ``decide``.
         """
-        if not self.haiku_rewrite or "haiku" not in self.by_name:
+        if not self.haiku_rewrite:
+            return False
+        return self._haiku_body_ok(body)
+
+    def _haiku_body_ok(self, body: dict) -> bool:
+        """Body-shape eligibility for Haiku (no media, custom tools only, no
+        mid-conversation system message, size), independent of the
+        ``haiku_rewrite`` flag: a body Haiku would 400 must never be sent to it,
+        rewritten or not."""
+        if "haiku" not in self.by_name:
             return False
         if _has_media(body) or not _only_custom_tools(body) or _has_mid_conversation_system_message(body):
             return False
@@ -624,6 +633,7 @@ class ClaudeTierPolicy:
             haiku = self.by_name.get("haiku")
             if (pressure is not None and pressure >= self.quota_moderate_at and cx == "moderate"
                     and haiku is not None and self.rank[target.name] > self.rank[haiku.name]
+                    and self._haiku_body_ok(body)
                     and self._allowed(haiku, req_tier, thinking, effort, haiku_ok)):
                 target, served, reason = haiku, haiku.model, REASON_QUOTA_PRESSURE
         if _canonical(served) == _canonical(requested):

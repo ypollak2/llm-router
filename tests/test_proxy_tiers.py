@@ -1155,3 +1155,40 @@ async def test_quota_fields_are_in_the_ledger(tmp_path, monkeypatch):
     await _post(app, _req())
     row = _rows(tmp_path)[-1]
     assert (row["tier_quota_pressure"], row["tier_quota_state"]) == (None, qp.STATE_UNKNOWN)
+
+
+async def test_at_90_percent_a_body_with_a_mid_conversation_system_message_stays_on_sonnet():
+    """Claude Code sends role:system mid-conversation on every call and Haiku
+    400s on it: the pressure step must not send such a body to Haiku."""
+    body = _req(thinking=None)
+    body.pop("output_config", None)
+    assert pt._has_mid_conversation_system_message(body)
+    for policy in (_qpolicy(0.92), _qpolicy(0.92, haiku_rewrite=True)):
+        d = await policy.decide(body, SID, Stickiness(), classify=_classify("moderate"))
+        assert (d.served_model, d.reason, d.body_rewrite) == (SONNET, pt.REASON_QUOTA_PRESSURE, None)
+    clean = _no_system_reminders(body)
+    d = await _qpolicy(0.92).decide(clean, SID, Stickiness(), classify=_classify("moderate"))
+    assert d.served_model == HAIKU
+
+
+def test_the_usage_read_is_cached_by_mtime_but_the_age_is_recomputed(tmp_path):
+    p = _usage(tmp_path / "u.json", weekly=40.0)
+    first = qp.read(p, now=None)
+    real = Path.read_text
+    calls = []
+
+    def counting(self, *a, **k):
+        calls.append(1)
+        return real(self, *a, **k)
+
+    Path.read_text = counting
+    try:
+        again = qp.read(p)
+        assert not calls and again.pressure == first.pressure == 0.4
+        assert qp.read(p, now=__import__("time").time() + 4000).state == qp.STATE_STALE
+        _usage(p, weekly=88.0)
+        st = p.stat()
+        __import__('os').utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))  # coarse-mtime filesystems
+        assert qp.read(p).pressure == 0.88 and calls
+    finally:
+        Path.read_text = real

@@ -53,6 +53,26 @@ def _pct(value) -> float | None:
     return max(0.0, min(100.0, float(value))) / 100.0
 
 
+_cache: dict = {}  # path -> ((mtime_ns, size), parsed); the age is always recomputed
+
+
+def _load(path: Path):
+    """Parsed usage.json, re-parsed only when its mtime/size change, so the
+    async hot path costs one stat() per call."""
+    try:
+        st = path.stat()
+        key = (st.st_mtime_ns, st.st_size)
+        hit = _cache.get(path)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        _cache.pop(path, None)
+        return None
+    _cache[path] = (key, data)
+    return data
+
+
 def read(path: str | Path | None = None, *, max_age_s: float = DEFAULT_MAX_AGE_S,
          now: float | None = None) -> QuotaReading:
     """The current pressure, or why there is none. Never raises."""
@@ -62,9 +82,8 @@ def read(path: str | Path | None = None, *, max_age_s: float = DEFAULT_MAX_AGE_S
         from llm_router import paths
 
         path = paths.state_path("usage.json")
-    try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    data = _load(Path(path))
+    if data is None:
         return QuotaReading(None, STATE_UNKNOWN)
     if not isinstance(data, dict) or data.get("pending") or data.get("is_fallback"):
         return QuotaReading(None, STATE_UNKNOWN)
