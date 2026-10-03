@@ -1,0 +1,336 @@
+"""`llm-router kpi`: the scorecard prints what the data supports and nothing else.
+
+Primary rule under test (project CLAUDE.md): unknown is never rendered as 0. Every
+KPI with no data must say "not measurable: <reason>", and a KPI with too little
+data must say "too few to tell". The numeric tests pin exact values on synthetic
+inputs, so a pass shows the command found something to count.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import time
+from pathlib import Path
+
+import pytest
+
+from llm_router import northstar as ns
+from llm_router import session_kind, usage_outcome
+from llm_router.commands import kpi
+from llm_router.proxy import ledger as pl
+
+ALL_KEYS = ("NS", "O1", "O2", "D1", "D2", "D3", "D4", "D5",
+            "G1_hook", "G1_proxy", "G2", "G3", "G4")
+
+
+# ── fixtures ────────────────────────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def _no_real_transcripts(monkeypatch, tmp_path):
+    """Every test reads an empty transcript dir unless it patches the readers, so
+    the suite never scans (or depends on) the operator's real ~/.claude/projects."""
+    d = tmp_path / "claude-projects"
+    d.mkdir()
+    monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(d))
+    monkeypatch.delenv("LLM_ROUTER_KPI_BENCHMARK_PATH", raising=False)
+    # failopen keeps process-global in-memory counts that another test on the same
+    # xdist worker may have left behind; G2 must start from nothing.
+    from llm_router import failopen
+
+    failopen.reset_unpersisted()
+    failopen.reset_cache()
+    yield
+    failopen.reset_unpersisted()
+    failopen.reset_cache()
+
+
+def _tag(sid: str, cwd: str) -> None:
+    session_kind.tag_session(sid, cwd, env={})
+
+
+@pytest.fixture
+def sessions():
+    """An organic, a research and an untagged session id (tags are real files in
+    the suite's isolated LLM_ROUTER_HOME)."""
+    session_kind._FOUND.clear()
+    _tag("s-org", "/Users/someone/Projects/app")
+    _tag("s-res", "/Users/someone/work/scratchpad/p1")
+    yield {"organic": "s-org", "research": "s-res", "untagged": "s-none"}
+    session_kind._FOUND.clear()
+
+
+def _unit(sid, kind="local_edit", outcome=ns.OUTCOME_USED, lever=None):
+    return {"session_id": sid, "kind": kind, "outcome": outcome, "lever": lever, "ts": time.time()}
+
+
+def _units(monkeypatch, rows):
+    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None: iter(rows))
+
+
+def _row(sid="s-org", **kw):
+    base = {"ts": time.time(), "session_id": sid, "session_kind": "organic", "tier": "sonnet",
+            "tier_proposed": "sonnet", "tier_policy_version": "v1", "tier_retry": False,
+            "added_latency_s": 0.01}
+    base.update(kw)
+    return base
+
+
+def _write_proxy_rows(rows):
+    path = pl.ledger_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+
+def _kpis(**kw):
+    return kpi.compute_scorecard(days=7, **kw)["kpis"]
+
+
+def _first_attempted_kind():
+    return sorted(ns.ATTEMPTED_KINDS)[0]
+
+
+# ── the rule: empty data is never a number ──────────────────────────────────
+
+def test_empty_data_is_not_measurable_never_a_false_zero():
+    k = _kpis()
+    assert set(k) == set(ALL_KEYS)  # something was checked: all 13 lines exist
+    # G4 is a point-in-time count of benched providers; "0 benched" is an
+    # observation, labelled as such, not an unknown rendered as zero.
+    for key in set(ALL_KEYS) - {"G4"}:
+        assert k[key]["value"].startswith("not measurable: "), (key, k[key])
+        assert k[key]["measurable"] is False and k[key]["n"] is None, key
+    assert "point-in-time" in k["G4"]["value"]
+
+
+def test_empty_rendering_has_no_bare_zero_rates():
+    text = kpi.render_scorecard(kpi.compute_scorecard(days=7))
+    assert text.count("not measurable") >= 12
+    assert not re.search(r"\b0(\.0+)?%", text)
+    assert "$0.00" not in text
+
+
+def test_below_fifty_says_too_few_to_tell(monkeypatch, sessions):
+    _units(monkeypatch, [_unit(sessions["organic"]) for _ in range(kpi.MIN_N - 1)])
+    k = _kpis()
+    for key in ("NS", "D1"):
+        assert k[key]["value"] == f"too few to tell (n={kpi.MIN_N - 1})", key
+        assert k[key]["measurable"] is False
+
+
+# ── NS / D1 / D2 ────────────────────────────────────────────────────────────
+
+def _mixed_units(sid):
+    attempted = _first_attempted_kind()
+    rows = [_unit(sid, attempted, ns.OUTCOME_USED) for _ in range(48)]
+    rows += [_unit(sid, attempted, ns.OUTCOME_REDO) for _ in range(16)]
+    rows += [_unit(sid, "claude_only", ns.OUTCOME_NOT_ROUTED) for _ in range(16)]
+    return rows
+
+
+def test_ns_d1_d2_exact_values(monkeypatch, sessions):
+    _units(monkeypatch, _mixed_units(sessions["organic"]))
+    k = _kpis()
+    assert k["NS"]["value"] == "60.0% (n=80)"      # 48 used / 80 units
+    assert k["D1"]["value"] == "80.0% (n=80)"      # 64 attempted / 80 units
+    assert k["D2"]["value"] == "75.0% (n=64)"      # 48 used / 64 attempted
+
+
+def test_research_and_untagged_sessions_are_excluded_by_default(monkeypatch, sessions):
+    rows = _mixed_units(sessions["organic"])
+    rows += _mixed_units(sessions["research"]) * 3
+    rows += _mixed_units(sessions["untagged"]) * 3
+    _units(monkeypatch, rows)
+    assert _kpis()["NS"]["value"] == "60.0% (n=80)"
+
+
+def test_include_research_widens_the_population_but_never_untagged(monkeypatch, sessions):
+    rows = _mixed_units(sessions["organic"]) + _mixed_units(sessions["research"])
+    rows += _mixed_units(sessions["untagged"])
+    _units(monkeypatch, rows)
+    assert _kpis(include_research=True)["NS"]["value"] == "60.0% (n=160)"
+
+
+def test_proxy_lever_counts_as_attempted(monkeypatch, sessions):
+    sid = sessions["organic"]
+    rows = [_unit(sid, "claude_only", ns.OUTCOME_USED, lever="proxy") for _ in range(50)]
+    _units(monkeypatch, rows)
+    assert _kpis()["D1"]["value"] == "100.0% (n=50)"
+
+
+# ── D3 ──────────────────────────────────────────────────────────────────────
+
+def test_d3_redo_rate_counts_decided_events_only(monkeypatch):
+    def v(outcome, kind="organic"):
+        return {"outcome": outcome, "session_kind": kind}
+
+    rows = ([v(usage_outcome.OUTCOME_USED)] * 45 + [v(usage_outcome.OUTCOME_REDONE)] * 15
+            + [v(usage_outcome.OUTCOME_UNKNOWN)] * 30
+            + [v(usage_outcome.OUTCOME_REDONE, "research")] * 99)
+    monkeypatch.setattr(usage_outcome, "judge_recent", lambda days=7, root=None: rows)
+    d3 = _kpis()["D3"]
+    assert d3["value"] == "25.0% (n=60)"           # 15 redone / (45 + 15); unknown is not in n
+    assert d3["unknown_window_open"] == 30
+
+
+def test_d3_all_unknown_is_not_measurable(monkeypatch):
+    rows = [{"outcome": usage_outcome.OUTCOME_UNKNOWN, "session_kind": "organic"}] * 80
+    monkeypatch.setattr(usage_outcome, "judge_recent", lambda days=7, root=None: rows)
+    assert _kpis()["D3"]["value"].startswith("not measurable: ")
+
+
+# ── proxy-ledger KPIs: D4, G1, G3 ───────────────────────────────────────────
+
+def test_d4_tier_mix_and_g3_completeness():
+    rows = [_row(tier="opus") for _ in range(10)] + [_row(tier="sonnet") for _ in range(40)]
+    rows += [_row(tier="haiku") for _ in range(50)]
+    rows += [_row(session_kind="research") for _ in range(500)]   # excluded
+    bad = _row()
+    del bad["tier_retry"]                                         # one incomplete organic row
+    rows.append(bad)
+    _write_proxy_rows(rows)
+    k = _kpis()
+    assert k["D4"]["value"].startswith("haiku=49.5%, sonnet=40.6%, opus=9.9%")  # n=101 organic
+    assert k["D4"]["n"] == 101
+    assert k["G3"]["value"] == "99.0% (n=101)"                    # 100 / 101 rows carry all keys
+    rows_all = _kpis(include_research=True)
+    assert rows_all["G3"]["n"] == 601
+
+
+def test_g3_untagged_proxy_rows_do_not_count_as_organic():
+    _write_proxy_rows([_row(session_kind=None) for _ in range(100)])
+    assert _kpis()["G3"]["value"].startswith("not measurable: ")
+
+
+def test_g1_proxy_p95_against_the_200ms_gate():
+    fast = [_row(added_latency_s=0.05) for _ in range(90)]
+    slow = [_row(added_latency_s=0.5) for _ in range(10)]
+    _write_proxy_rows(fast + slow)
+    g1 = _kpis()["G1_proxy"]
+    assert g1["value"] == "proxy decision p95=500ms (OVER the +200ms gate) (n=100)"
+    _write_proxy_rows([_row(added_latency_s=0.05) for _ in range(100)])
+    g1 = _kpis()["G1_proxy"]
+    assert g1["value"] == "proxy decision p95=50ms (within +200ms gate) (n=100)"
+    assert _kpis()["G1_hook"]["value"].startswith("not measurable: ")  # never instrumented
+
+
+# ── O1 / G2 / G4 ────────────────────────────────────────────────────────────
+
+def test_o1_is_labelled_est_and_not_a_zero_when_empty():
+    o1 = _kpis()["O1"]["value"]
+    assert o1.startswith("not measurable: ")
+
+
+def test_g2_reports_all_time_count_and_says_so():
+    from llm_router import failopen
+
+    for _ in range(3):
+        failopen.record("CHZ-FO-TEST", RuntimeError("x"))
+    failopen.reset_cache()
+    g2 = _kpis()["G2"]
+    assert g2["value"].startswith("3 fail-open event(s) recorded, ALL-TIME")
+    assert g2["by_code"] == {"CHZ-FO-TEST": 3}
+
+
+def test_g4_names_a_currently_benched_provider():
+    from llm_router import provider_reset
+
+    assert provider_reset.record_provider_reset("anthropic", time.time() + 3600, "test")
+    g4 = _kpis()["G4"]
+    assert g4["benched"] == ["anthropic"]
+    assert g4["value"].startswith("1 provider(s) currently benched: anthropic")
+
+
+# ── O2 / D5 from a configured frozen benchmark ──────────────────────────────
+
+def _bench(tmp_path, monkeypatch, content):
+    path = tmp_path / "bench.json"
+    path.write_text(content if isinstance(content, str) else json.dumps(content), encoding="utf-8")
+    monkeypatch.setenv("LLM_ROUTER_KPI_BENCHMARK_PATH", str(path))
+
+
+def test_o2_d5_read_the_configured_benchmark(monkeypatch, tmp_path):
+    _bench(tmp_path, monkeypatch, {
+        "generated_at": "2026-10-01T00:00:00Z",
+        "o2": {"acceptable_rate": 0.9, "n": 120},
+        "d5": {"accuracy": 0.7, "under_route_rate": 0.08, "n": 150}})
+    k = _kpis()
+    assert k["O2"]["value"] == "90.0% acceptable vs Claude (n=120, frozen set)"
+    assert k["D5"]["value"] == "70.0% exact-tier accuracy, under-route=8.0% (within <=10% gate) (n=150)"
+    _bench(tmp_path, monkeypatch, {"d5": {"accuracy": 0.7, "under_route_rate": 0.25, "n": 150}})
+    assert "OVER the <=10% gate" in _kpis()["D5"]["value"]
+
+
+@pytest.mark.parametrize("content", [
+    "{not json",
+    "[]",
+    {},
+    {"o2": {"acceptable_rate": 0.9}, "d5": {"accuracy": 0.7}},            # no n
+    {"o2": {"acceptable_rate": 0.9, "n": 0}, "d5": {"accuracy": 0.7, "n": 0}},
+])
+def test_unusable_benchmark_is_not_measurable(monkeypatch, tmp_path, content):
+    _bench(tmp_path, monkeypatch, content)
+    k = _kpis()
+    for key in ("O2", "D5"):
+        assert k[key]["value"].startswith("not measurable: "), (key, k[key])
+
+
+def test_small_benchmark_n_is_too_few(monkeypatch, tmp_path):
+    _bench(tmp_path, monkeypatch, {"o2": {"acceptable_rate": 1.0, "n": 10}})
+    assert _kpis()["O2"]["value"] == "too few to tell (n=10)"
+
+
+def test_missing_benchmark_file_is_not_measurable(monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_ROUTER_KPI_BENCHMARK_PATH", str(tmp_path / "absent.json"))
+    assert _kpis()["O2"]["value"].startswith("not measurable: ")
+
+
+# ── CLI surface ─────────────────────────────────────────────────────────────
+
+def test_write_weekly_writes_a_dated_markdown_scorecard(tmp_path, capsys):
+    out = tmp_path / "weekly"
+    assert kpi.cmd_kpi(["--days", "3", "--write-weekly", str(out)]) == 0
+    files = list(out.glob("kpi-????-??-??.md"))
+    assert len(files) == 1
+    body = files[0].read_text(encoding="utf-8")
+    assert body.startswith("# llm-router KPI scorecard")
+    assert "window 3d, organic only" in body
+    assert body.count("\n| ") >= 14          # header row + 13 KPI rows
+    assert "not measurable" in body
+    assert "wrote" in capsys.readouterr().out
+
+
+def test_json_output_matches_compute_scorecard_shape(capsys):
+    assert kpi.cmd_kpi(["--json", "--days", "2"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["window_days"] == 2 and data["include_research"] is False
+    assert set(data["kpis"]) == set(ALL_KEYS)
+
+
+def test_include_research_flag_is_parsed(capsys):
+    assert kpi.cmd_kpi(["--json", "--include", "research"]) == 0
+    assert json.loads(capsys.readouterr().out)["include_research"] is True
+
+
+def test_main_dispatches_kpi_to_cmd_kpi():
+    """cli.main() installs host config as a side effect, so its dispatch is read
+    from the AST: an `args[0] == "kpi"` branch whose body calls cmd_kpi."""
+    import ast
+
+    import llm_router.cli as cli
+
+    src = Path(cli.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    branches = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.If) and "'kpi'" in ast.unparse(n.test) and "args[0]" in ast.unparse(n.test)
+    ]
+    assert len(branches) == 1
+    assert "cmd_kpi(args[1:])" in ast.unparse(branches[0])
+    assert "llm-router kpi" in src  # help text
+
+
+def test_the_benchmark_env_var_is_registered():
+    from llm_router.env_registry import ENV_REGISTRY
+
+    assert "LLM_ROUTER_KPI_BENCHMARK_PATH" in ENV_REGISTRY
