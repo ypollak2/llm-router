@@ -76,6 +76,7 @@ Usage:
     llm-router routing-report   — routing accuracy and share over a window
     llm-router routing-health   — reach, context, USED and latency per day, with n
     llm-router northstar        — routed-and-used share, per session (NS1)
+    llm-router kpi              — NS/O1-O2/D1-D5/G1-G4 scorecard (KPI-SPEC)
     llm-router sessions         — list recorded sessions
     llm-router config           — show the resolved configuration
     llm-router profile          — show or auto-generate the routing profile
@@ -864,6 +865,7 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "routing-report",
         "routing-health",
         "northstar",
+        "kpi",
         "broker",
         "gateway",
         "proxy",
@@ -1025,6 +1027,10 @@ def main() -> None:
         # NS1: the North Star metric — per-session routed-and-used share.
         from llm_router.commands.northstar import cmd_northstar
         sys.exit(cmd_northstar(args[1:]))
+    elif args and args[0] == "kpi":
+        # KPI-SPEC scorecard: NS, O1-O2, D1-D5, G1-G4.
+        from llm_router.commands.kpi import cmd_kpi
+        sys.exit(cmd_kpi(args[1:]))
     elif args and args[0] == "invoice":
         from llm_router.commands.invoice import cmd_invoice
         sys.exit(cmd_invoice(args[1:]))

@@ -312,6 +312,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_SESSION_CONTEXT_DRAFT_BUDGET": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_SESSION_ID": ("llm_router", "hooks/auto-route.py", 2),
     "LLM_ROUTER_SESSION_KIND": ("llm_router", "session_kind.py", 1),
+    "LLM_ROUTER_KPI_BENCHMARK_PATH": ("llm_router", "commands/kpi.py", 1),
     "LLM_ROUTER_SESSION_PAID_CAP": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_SESSION_START_USAGE_COOLDOWN_S": ("llm_router", "hooks/session-start.py", 1),
     "LLM_ROUTER_SESSION_START_USAGE_FRESH_S": ("llm_router", "hooks/session-start.py", 1),
