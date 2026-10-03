@@ -276,6 +276,42 @@ def test_delegation_to_codex_is_judged_like_an_answer():
     assert (row["tool"], row["kind"], row["outcome"]) == ("llm_router_agent_route", "answer", "used")
 
 
+# ── sidechains (sub-agents) ──────────────────────────────────────────────────
+# A sub-agent's own tool calls run on a separate thread the human never saw as
+# "the" turn (same reasoning _human_text already applied). Without filtering
+# isSidechain records, a sub-agent's own routed call could be judged as an event
+# in its own right, and a sub-agent's edit could be wrongly counted as the main
+# thread's redo.
+
+def _mark_last_sidechain(t):
+    t.recs[-1]["isSidechain"] = True
+    return t
+
+
+def test_a_subagents_own_routed_call_produces_no_event():
+    t = T().human("investigate")
+    t.call("a1", LLM_TOOL, {"prompt": ASK, "task": "query"})
+    _mark_last_sidechain(t)
+    t.result("a1", ANSWER)
+    _mark_last_sidechain(t)
+    _turns(t, 3)
+    assert t.judge() == []
+
+
+def test_a_subagents_edit_to_the_same_file_is_not_the_main_threads_redo():
+    t = _routed_edit(T())
+    _apply(t)
+    # A sub-agent re-edits the same file afterwards. Counted against the main
+    # thread's routed event, this would read as "edited_differently" (redone).
+    t.call("s1", "Edit", {"file_path": "/repo/src/a.py",
+                          "old_string": "return 2", "new_string": "return 42"})
+    _mark_last_sidechain(t)
+    t.result("s1", "ok")
+    _mark_last_sidechain(t)
+    _turns(t, 3)
+    assert _only(t.judge()) == ("used", "applied_verbatim")
+
+
 # ── window and turn semantics ────────────────────────────────────────────────
 
 def test_tool_results_and_system_wrappers_are_not_human_turns():

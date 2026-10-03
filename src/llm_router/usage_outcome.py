@@ -217,6 +217,11 @@ def _annotate(records: list[dict]) -> list[_Rec]:
 
 
 def _events(recs: list[_Rec]) -> list[Event]:
+    # A sub-agent's own tool calls are not the main thread's routed decision: counting
+    # them here would judge a routed call (or a redo) against work the human never saw
+    # as "the" turn. Same exclusion as _human_text, applied consistently (CHZ verifier
+    # finding, 2026-10-03): this function and _claude_actions previously did not filter it.
+    recs = [r for r in recs if not r.rec.get("isSidechain")]
     results: dict[str, tuple[str, bool]] = {}
     for r in recs:
         if r.rec.get("type") != "user":
@@ -295,6 +300,8 @@ def _same_file(a: str, b: str) -> bool:
 def _claude_actions(window: list[_Rec]) -> list[dict]:
     acts = []
     for r in window:
+        if r.rec.get("isSidechain"):
+            continue
         for tu in _tool_uses(r.rec):
             name, inp = tu.get("name") or "", tu.get("input") or {}
             if name in ("Edit", "NotebookEdit"):
