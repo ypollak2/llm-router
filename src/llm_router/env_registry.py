@@ -198,6 +198,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PROXY_BACKEND_COOLDOWN_S": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_TIERS": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_TIER_POLICY": ("llm_router", "proxy/server.py", 1),
+    # Kill switch for the tier decision's quota-pressure step (off/0/false/no).
+    "LLM_ROUTER_PROXY_QUOTA_PRESSURE": ("llm_router", "proxy/quota_pressure.py", 1),
     # Escalation signals (proxy/escalation.py): the correction-signal
     # tool-failure streak, and the long/multi-part first-prompt safety floor.
     "LLM_ROUTER_PROXY_ESCALATION_TOOL_FAIL_N": ("llm_router", "proxy/escalation.py", 1),

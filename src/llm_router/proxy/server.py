@@ -439,6 +439,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                    # request, so it needs no scrubbing — unlike the error
                    # path above, which logs an exception message.
                    tier_detail=decision.detail,
+                   tier_quota_pressure=decision.quota_pressure, tier_quota_state=decision.quota_state,
                    tier_decision_s=round(time.monotonic() - t0, 3))
         return decision
 
