@@ -75,6 +75,14 @@ NOT_INSTRUMENTATION: dict[str, tuple[str, str]] = {
         "is a way of reporting it",
         "",
     ),
+    "llm_router.codex_window:snapshot": (
+        "the rolling Codex delegation BUDGET, a gate that decides whether the "
+        "next delegation is dispatched, not a degradation signal. It is read "
+        "on the operator surface by `llm-router status` (render_codex_window) "
+        "and every refusal it causes is a ledger row (window_tight / "
+        "window_exhausted) with the reason",
+        "llm_router/ui/status_premium.py",
+    ),
     "llm_router.cost:get_correction_count": (
         "a per-tool lookup used as a ROUTING INPUT, not a degradation signal: "
         "it is keyed by an argument and consumed by the router to lower a "

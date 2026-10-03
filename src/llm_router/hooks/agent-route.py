@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 9
+# llm_router-hook-version: 10
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -1283,6 +1283,11 @@ def _run_codex_agent(prompt: str, timeout: int, context_root: str | None):
         left = _delegation_time_left(timeout)
         if left < _MIN_RUN_SEC:
             return last, "no_time"
+        try:
+            from llm_router import codex_window
+            codex_window.record_delegation()  # every dispatch spends window quota
+        except Exception:
+            pass
         res = asyncio.run(run_codex(prompt, model=model, timeout=left, context_root=context_root))
         last = res
         if res and getattr(res, "success", False) and (res.content or "").strip():
@@ -1299,6 +1304,42 @@ def _run_codex_agent(prompt: str, timeout: int, context_root: str | None):
             continue
         return res, "failed"
     return last, "failed"
+
+
+def _is_deep_reasoning(prompt: str) -> bool:
+    """The repo's own deep-reasoning detector (reason_gate), False if unavailable."""
+    try:
+        from llm_router.reason_gate import needs_reasoning
+        return bool(needs_reasoning(prompt))
+    except Exception:
+        return False
+
+
+def _codex_window_declines(path: str, prompt: str, subagent_type: str, task_type: str,
+                           complexity: str, session_id: str) -> bool:
+    """True when the rolling 5h Codex window says not to dispatch this one.
+
+    An extra requirement on top of the caller's own gate, so it only narrows:
+    when under half the window budget remains, only complex or deep-reasoning
+    work is admitted; when it is spent, nothing is until a slot frees. A decline
+    is recorded with its reason (outcome ``window_tight`` / ``window_exhausted``).
+    Fails open: a broken counter must not stop delegation.
+    """
+    try:
+        from llm_router import codex_window
+        adm = codex_window.admit(complexity=complexity, deep_reasoning=_is_deep_reasoning(prompt))
+    except Exception:
+        return False
+    if adm.allowed:
+        return False
+    _record_north_star_unit(
+        "agent_route_codex", model="", outcome=f"window_{adm.tier}",
+        subagent_type=subagent_type, task_type=task_type,
+        complexity=complexity, session_id=session_id, path=path,
+        reason=adm.reason[:200], window_used=adm.state.used,
+        window_budget=adm.state.budget,
+    )
+    return True
 
 
 def _note_codex_failure(path: str, status: str, res, subagent_type: str,
@@ -1382,8 +1423,10 @@ def _try_cli_delegation(
             reason=f"Codex usage limit; benched until {_fmt_clock(_benched_until)}",
             path="cli_delegation",
         )
+    _codex_ok = _benched_until is None and not _codex_window_declines(
+        "cli_delegation", prompt, subagent_type, task_type, complexity, session_id)
     try:
-        if _benched_until is None and is_codex_available():
+        if _codex_ok and is_codex_available():
             provider = "codex"
             res, status = _run_codex_agent(prompt, timeout, _scope_root)
             if status != "ok":
@@ -1619,6 +1662,9 @@ def _try_codex_subagent_delegation(
             complexity=complexity, session_id=session_id, path="ns3",
             reason=f"Codex usage limit; benched until {_fmt_clock(benched_until)}",
         )
+        return None
+
+    if _codex_window_declines("ns3", prompt, subagent_type, task_type, complexity, session_id):
         return None
 
     # Reserve budget before dispatch — see _codex_subagent_budget_increment docstring.
