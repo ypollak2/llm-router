@@ -1126,11 +1126,28 @@ def _delegation_scope_root(cwd: str | None = None) -> str | None:
 _CODEX_DEFAULT_AGENT_MODEL = "gpt-6-astra"
 _CODEX_FALLBACK_AGENT_MODEL = "gpt-5.5"
 
-#: Default wall-clock allowance for one delegated run. The registered hook
-#: timeout (install_hooks._AGENT_ROUTE_HOOK_TIMEOUT_SEC = 320) is this + 20s; a
-#: hook past its timeout is killed SILENTLY, so raising this without raising
-#: that would drop the work with no trace.
-_CODEX_DEFAULT_TIMEOUT_SEC = 300
+#: The registered PreToolUse hook timeout and the margin it leaves below that
+#: for the delegation subprocess are install_hooks' numbers, imported rather
+#: than copied so they cannot drift (a hook past its timeout is killed
+#: SILENTLY, so raising one without raising the other drops the work with no
+#: trace). The bare-literal fallback covers the rare case this module runs
+#: somewhere install_hooks cannot be imported from; it must be kept equal to
+#: install_hooks._AGENT_ROUTE_HOOK_TIMEOUT_SEC / _DELEGATION_MARGIN_SEC.
+try:
+    from llm_router.install_hooks import (
+        _AGENT_ROUTE_HOOK_TIMEOUT_SEC as _HOOK_TIMEOUT_SEC,
+        _DELEGATION_MARGIN_SEC,
+    )
+except Exception:  # noqa: BLE001 -- fall back to the same numbers, literally
+    _HOOK_TIMEOUT_SEC = 320
+    _DELEGATION_MARGIN_SEC = 20
+
+#: Ceiling on the delegation timeout: the codex subprocess must finish, and
+#: this hook must still have time to read its output and exit, before Claude
+#: Code's wall-clock kill fires. Also the default -- measured: median 91s,
+#: 7/17 real tasks over 120s, max 223s.
+_CODEX_MAX_TIMEOUT_SEC = _HOOK_TIMEOUT_SEC - _DELEGATION_MARGIN_SEC
+_CODEX_DEFAULT_TIMEOUT_SEC = _CODEX_MAX_TIMEOUT_SEC
 _MIN_RUN_SEC = 15
 
 #: A usage-limit message with no parseable reset time still benches Codex for
@@ -1169,6 +1186,21 @@ def _delegation_timeout() -> int:
             "LLM_ROUTER_SUBAGENT_CLI_TIMEOUT", str(_CODEX_DEFAULT_TIMEOUT_SEC))))
     except (TypeError, ValueError):
         pass
+    if timeout > _CODEX_MAX_TIMEOUT_SEC:
+        try:
+            from llm_router import failopen
+            failopen.record(
+                "CHZ-FO-CODEX-TIMEOUT-CLAMPED",
+                detail=(
+                    f"LLM_ROUTER_SUBAGENT_CLI_TIMEOUT={timeout} exceeds the "
+                    f"installed hook timeout minus margin "
+                    f"({_CODEX_MAX_TIMEOUT_SEC}s); clamped to "
+                    f"{_CODEX_MAX_TIMEOUT_SEC}s"
+                ),
+            )
+        except Exception:  # noqa: BLE001 -- the clamp itself must not fail
+            pass
+        timeout = _CODEX_MAX_TIMEOUT_SEC
     return timeout
 
 

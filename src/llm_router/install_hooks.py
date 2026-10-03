@@ -720,7 +720,16 @@ _HOOK_DEFS = [
 # (verify.py, doctor.py, build_plugin_bundle.py, several tests that monkeypatch
 # or unpack it directly) that have nothing to do with timeouts. A side table
 # keeps this change local to the two places that actually register hooks.
+#
+# _DELEGATION_MARGIN_SEC is the gap agent-route.py's own delegation budget must
+# leave below this: the codex subprocess has to finish AND the hook has to read
+# its output and exit, inside this gap, before Claude Code's wall-clock kill
+# fires. agent-route.py imports both constants (fail-open to the same literals
+# if the import itself fails) so a LLM_ROUTER_SUBAGENT_CLI_TIMEOUT override can
+# never ask for more delegation time than the installed hook timeout allows —
+# that combination is a silent kill with no trace of why.
 _AGENT_ROUTE_HOOK_TIMEOUT_SEC = 320
+_DELEGATION_MARGIN_SEC = 20
 _HOOK_TIMEOUTS: dict[str, int] = {
     "llm_router-agent-route.py": _AGENT_ROUTE_HOOK_TIMEOUT_SEC,
 }
@@ -880,6 +889,27 @@ def _normalize_command(command: str) -> str:
     if script_path is not None:
         return f"python::{script_path}"
     return command
+
+
+def _existing_hook_timeout(
+    settings: dict, event: str, matcher: str, command: str
+) -> int | None:
+    """The ``"timeout"`` already registered for ``command``, or ``None``.
+
+    Looked up BEFORE calling ``_register_hook`` (which mutates in place), so an
+    upgrade-in-place can report what it changed, old → new, instead of just
+    "normalized".
+    """
+    normalized_cmd = _normalize_command(command)
+    hooks = settings.get("hooks", {})
+    event_hooks = hooks.get(event, []) if isinstance(hooks, dict) else []
+    for entry in event_hooks:
+        if not isinstance(entry, dict) or entry.get("matcher", "") != matcher:
+            continue
+        for hook in entry.get("hooks", []):
+            if isinstance(hook, dict) and _normalize_command(hook.get("command", "")) == normalized_cmd:
+                return hook.get("timeout")
+    return None
 
 
 def _hook_is_registered(
@@ -1305,11 +1335,18 @@ def install(force: bool = False) -> list[str]:
         actions.append(f"Copied {src_name} → {dst}")
 
         command = f"{_python_exe()} {dst}"
+        old_timeout = _existing_hook_timeout(settings, event, matcher, command)
         status = _register_hook(settings, event, matcher, command, timeout)
         if status == "added":
             actions.append(f"Registered {event} hook: {dst_name}")
         elif status == "updated":
-            actions.append(f"Normalized {event} hook: {dst_name}")
+            if timeout is not None and old_timeout != timeout:
+                actions.append(
+                    f"Normalized {event} hook: {dst_name} "
+                    f"(timeout {old_timeout if old_timeout is not None else 'none'} → {timeout})"
+                )
+            else:
+                actions.append(f"Normalized {event} hook: {dst_name}")
         else:
             actions.append(f"Hook already registered: {dst_name}")
 
@@ -1714,11 +1751,18 @@ def install_claw_code() -> list[str]:
         actions.append(f"Copied {src_name} → {dst}")
 
         command = f"{_python_exe()} {dst}"
+        old_timeout = _existing_hook_timeout(settings, event, matcher, command)
         status = _register_hook(settings, event, matcher, command, timeout)
         if status == "added":
             actions.append(f"Registered {event} hook: {dst_name}")
         elif status == "updated":
-            actions.append(f"Normalized {event} hook: {dst_name}")
+            if timeout is not None and old_timeout != timeout:
+                actions.append(
+                    f"Normalized {event} hook: {dst_name} "
+                    f"(timeout {old_timeout if old_timeout is not None else 'none'} → {timeout})"
+                )
+            else:
+                actions.append(f"Normalized {event} hook: {dst_name}")
         else:
             actions.append(f"Hook already registered: {dst_name}")
 

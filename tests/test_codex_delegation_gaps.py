@@ -163,6 +163,23 @@ def test_timeout_env_override_is_honoured(hook, monkeypatch):
     assert 40 <= codex.calls[0]["timeout"] <= 45
 
 
+def test_timeout_env_override_above_max_is_clamped(hook, monkeypatch):
+    """LLM_ROUTER_SUBAGENT_CLI_TIMEOUT=600 must not outlive the 320s-registered
+    hook: the override is clamped to the hook timeout minus the margin (300s),
+    not honoured as-is, and the clamp is recorded via failopen."""
+    monkeypatch.setenv("LLM_ROUTER_SUBAGENT_CLI_TIMEOUT", "600")
+    recorded = []
+    monkeypatch.setattr(
+        "llm_router.failopen.record",
+        lambda code, exc=None, *, detail="": recorded.append((code, detail)),
+    )
+    codex = _Codex(monkeypatch, [_ok("gpt-6-astra")])
+    _ns3(hook)
+    assert codex.calls[0]["timeout"] == hook._CODEX_MAX_TIMEOUT_SEC
+    assert codex.calls[0]["timeout"] < 320
+    assert any(code == "CHZ-FO-CODEX-TIMEOUT-CLAMPED" for code, _ in recorded)
+
+
 def test_registered_hook_timeout_outlives_the_delegation_timeout():
     """A hook killed at the host's wall clock dies silently, so the registered
     per-hook timeout must exceed the longest allowance delegation can use."""

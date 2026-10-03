@@ -495,6 +495,13 @@ class TestTextIsOnlyReadWhereItIsAReport:
         "the free plan, upgrade for faster access.",
         "Rate limit hit. You can retry in 3 days for safety, but it usually clears "
         "within an hour.",
+        # review round 2 (PR #254 follow-up): hedged hearsay around a bare "or" lead.
+        "Rate limit reached. You could wait a bit, or try again in 3 days if you "
+        "prefer, but it usually clears sooner.",
+        "I got a 429 once, people say wait or try again in 3 days but nobody "
+        "really knows.",
+        "Some folks say you might wait a while, or try again in 4 days, but I "
+        "generally just restart the client.",
     ]
 
     @pytest.mark.parametrize("message", INCIDENTAL)
