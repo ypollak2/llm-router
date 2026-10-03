@@ -60,6 +60,12 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_AGENT_ROUTE_ALLOW": ("llm_router", "hooks/agent-route.py", 1),
     "LLM_ROUTER_AGENT_ROUTE_CODEX": ("llm_router", "hooks/agent-route.py", 1),
     "LLM_ROUTER_AGENT_ROUTE_CODEX_DAILY_BUDGET": ("llm_router", "hooks/agent-route.py", 1),
+    # 2026-10-03: the Codex agent model used for subagent delegation (gpt-6-astra
+    # by default — see codex_agent/REPORT.txt: 13/17 vs Claude's 13/17 on
+    # identical real tasks, Wilson95 CIs overlapping). Previously hardcoded via
+    # omission (run_codex's own default, gpt-5.5, which the evidence never
+    # measured because that arm hit the account's quota on task 1).
+    "LLM_ROUTER_CODEX_AGENT_MODEL": ("llm_router", "hooks/agent-route.py", 1),
     # 2026-09-28: opt-in override that keeps agent-route active (Codex/DIRECT
     # routing) in a headless (CLAUDE_CODE_ENTRYPOINT=sdk-*) session. Default
     # off — see the headless-guard note in hooks/agent-route.py.

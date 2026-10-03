@@ -6,9 +6,10 @@ on every request. These tests pin the behaviour end to end: parse the reset,
 persist it where other processes can see it, skip the provider until it passes,
 and leave every other failure on the old 15s path.
 
-NOTE: the live Codex wording could not be captured; the messages below are
-representative shapes ("try again at <time>", an ISO stamp, "try again in 2h"),
-not a copy of one provider string.
+NOTE: most messages below are representative shapes ("try again at <time>", an
+ISO stamp, "try again in 2h"). The one exception is
+TestRealCapturedCodexQuotaMessage, which quotes the real Codex error line
+captured 2026-10-03.
 """
 
 from __future__ import annotations
@@ -494,6 +495,13 @@ class TestTextIsOnlyReadWhereItIsAReport:
         "the free plan, upgrade for faster access.",
         "Rate limit hit. You can retry in 3 days for safety, but it usually clears "
         "within an hour.",
+        # review round 2 (PR #254 follow-up): hedged hearsay around a bare "or" lead.
+        "Rate limit reached. You could wait a bit, or try again in 3 days if you "
+        "prefer, but it usually clears sooner.",
+        "I got a 429 once, people say wait or try again in 3 days but nobody "
+        "really knows.",
+        "Some folks say you might wait a while, or try again in 4 days, but I "
+        "generally just restart the client.",
     ]
 
     @pytest.mark.parametrize("message", INCIDENTAL)
@@ -622,6 +630,59 @@ class TestTomorrowQualifier:
             "Usage limit reached. Resets at 8:00 AM tomorrow.", now=now
         )
         assert got > datetime(2026, 10, 3, 8, 0).timestamp(), "must not resolve to today"
+
+
+class TestRealCapturedCodexQuotaMessage:
+    """The actual error line a ChatGPT Plus `codex exec` run emitted on hitting
+    its usage limit (captured 2026-10-03 in codex_agent/raw transcripts during
+    the routing experiment that motivated #247/#251 — only the error line is
+    quoted here, never any task content).
+
+    This wording joins the credits-purchase clause to "try again" with a bare
+    "or" and NO comma before it ("...more credits or try again at 11:33 PM."),
+    unlike every synthetic fixture elsewhere in this file, which has a comma
+    before "or" (see test_genuine_reports_still_parse's gpt pricing case). That
+    comma-less join put the whole clause in `_from_message`'s `lead`, which
+    `_CLAUSE_LEADS` could not match -- the real message did not parse at all
+    before the ``lead.endswith(" or")`` fix.
+    """
+
+    REAL_MESSAGE = (
+        "You've hit your usage limit. Upgrade to Pro "
+        "(https://chatgpt.com/explore/pro), visit "
+        "https://chatgpt.com/codex/settings/usage to purchase more credits "
+        "or try again at 11:33 PM."
+    )
+
+    def test_real_message_parses_same_day(self):
+        # 20:00 now; 11:33 PM has not happened yet today.
+        now = datetime(2026, 10, 3, 20, 0).timestamp()
+        got = provider_reset.parse_reset_epoch(self.REAL_MESSAGE, now=now)
+        assert got is not None, "the real captured quota message failed to parse"
+        assert datetime.fromtimestamp(got) == datetime(2026, 10, 3, 23, 33)
+
+    def test_real_message_parses_next_day_after_the_clock_time_has_passed(self):
+        # 00:30 now; 11:33 PM already happened today, so it means tomorrow's.
+        now = datetime(2026, 10, 4, 0, 30).timestamp()
+        got = provider_reset.parse_reset_epoch(self.REAL_MESSAGE, now=now)
+        assert got is not None
+        assert datetime.fromtimestamp(got) == datetime(2026, 10, 4, 23, 33)
+
+    def test_real_message_is_capped_at_24h(self):
+        # A bare clock time is a `text`-sourced reset, capped at 24h, not the
+        # 7-day header ceiling -- it is never more than a few hours out here.
+        now = datetime(2026, 10, 3, 20, 0).timestamp()
+        got = provider_reset.parse_reset_epoch(self.REAL_MESSAGE, now=now)
+        assert got - now < provider_reset.MAX_TEXT_SKIP_SECONDS == 24 * HOUR
+
+    def test_real_message_benches_codex_not_anthropic(self):
+        now = time.time()
+        msg = self.REAL_MESSAGE.replace(
+            "11:33 PM", (datetime.fromtimestamp(now) + timedelta(hours=1)).strftime("%I:%M %p")
+        )
+        assert provider_reset.note_provider_error("codex", RuntimeError(msg)) is not None
+        assert not HealthTracker().is_healthy("codex")
+        assert HealthTracker().is_healthy("anthropic")
 
 
 class TestWhoMayBeBenched:
