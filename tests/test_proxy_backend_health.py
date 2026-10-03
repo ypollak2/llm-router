@@ -241,7 +241,7 @@ def _ollama_client(status: int, lines: list[dict] | None = None, text: str | Non
 
 async def test_ollama_stream_error_line_is_reported_not_read_as_empty():
     client, _ = _ollama_client(200, [{"error": "decode() failed: Compute error."}])
-    b = pb.OllamaBackend("ollama/x", client, base_url="http://127.0.0.1:1", num_ctx=1024)
+    b = pb.OllamaBackend("ollama/x", client, base_url="http://127.0.0.1:1", num_ctx=32768)
     m, err, _usage = await b.complete(_req(), 5.0)
     assert m is None and "Compute error" in err
     assert bh.classify(err, "validation", 0.1) == bh.OUTCOME_CRASH
@@ -249,7 +249,7 @@ async def test_ollama_stream_error_line_is_reported_not_read_as_empty():
 
 async def test_ollama_http_500_body_is_in_the_error():
     client, _ = _ollama_client(500, text='{"error":"llama runner process has terminated: exit status 2"}')
-    b = pb.OllamaBackend("ollama/x", client, base_url="http://127.0.0.1:1", num_ctx=1024)
+    b = pb.OllamaBackend("ollama/x", client, base_url="http://127.0.0.1:1", num_ctx=32768)
     with pytest.raises(Exception) as ei:
         await b.complete(_req(), 5.0)
     assert "runner process has terminated" in str(ei.value)
@@ -273,7 +273,7 @@ async def test_ollama_probe_is_one_token_with_the_serving_num_ctx():
 ])
 async def test_ollama_probe_fails_on_crash_shapes(status, lines, text):
     client, _ = _ollama_client(status, lines, text)
-    b = pb.OllamaBackend("ollama/x", client, base_url="http://127.0.0.1:1", num_ctx=1024)
+    b = pb.OllamaBackend("ollama/x", client, base_url="http://127.0.0.1:1", num_ctx=32768)
     ok, detail = await b.probe(5.0)
     assert ok is False and detail
 

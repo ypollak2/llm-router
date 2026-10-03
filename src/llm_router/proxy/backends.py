@@ -46,6 +46,7 @@ import importlib
 import json
 from typing import Callable, Protocol
 
+from llm_router.local_context_guard import check_overflow, check_truncated, effective_window, estimate_payload_tokens
 from llm_router.proxy.steps import STEP_CONTINUATION, non_system, prev_tools
 from llm_router.proxy.translate import from_ollama, to_ollama
 
@@ -194,6 +195,11 @@ class OllamaBackend:
     async def complete(self, body: dict, timeout_s: float) -> tuple[dict | None, str | None, dict]:
         payload = to_ollama(body, self.model, num_ctx=self.num_ctx, max_predict=num_predict_for(body),
                             keep_alive=self.keep_alive, stream=True)
+        # Refuse to send what Ollama would silently truncate from the front
+        # (system prompt + tool definitions first) rather than find out from a
+        # reply about the wrong thing. See local_context_guard module docstring.
+        check_overflow(payload, num_ctx=self.num_ctx, base_url=self.base_url, model=self.model,
+                       site="proxy.OllamaBackend")
         objs: list[dict] = []
         first_token_s = None
         loop = asyncio.get_running_loop()
@@ -227,6 +233,15 @@ class OllamaBackend:
                  "eval_s": round((data.get("eval_duration") or 0) / 1e9, 2),
                  "load_s": round((data.get("load_duration") or 0) / 1e9, 2),
                  "first_token_s": first_token_s}
+        # Ollama's own count, checked against the estimate that cleared the
+        # preflight above: if it came back truncated anyway (a window this
+        # process does not know about, or a race with another resident
+        # model), account for it so an operator can see it happened.
+        window, _source = effective_window(num_ctx=self.num_ctx, base_url=self.base_url, model=self.model)
+        usage["context_truncated"] = check_truncated(
+            data.get("prompt_eval_count"), estimate_payload_tokens(payload), window,
+            site="proxy.OllamaBackend", model=self.model,
+        )
         message, err = from_ollama(data, body)
         return message, err, usage
 
