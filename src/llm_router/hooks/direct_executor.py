@@ -411,7 +411,8 @@ def call_gemini(
                 "input_tokens": usage.get("promptTokenCount", 0),
                 "output_tokens": usage.get("candidatesTokenCount", 0),
             }
-    except Exception:
+    except Exception as exc:                                 # noqa: BLE001
+        _remember_http_error("gemini", model, exc)
         return None, {}
 
 
@@ -449,7 +450,8 @@ def call_openai(
                 "input_tokens": usage.get("prompt_tokens", 0),
                 "output_tokens": usage.get("completion_tokens", 0),
             }
-    except Exception:
+    except Exception as exc:                                 # noqa: BLE001
+        _remember_http_error("openai", model, exc)
         return None, {}
 
 
@@ -541,6 +543,28 @@ def _failure_reason(exc: BaseException, timeout: float) -> str:
 
 def _call_failure(provider: str, model: str, reason: str) -> None:
     _LAST_CALL_FAILURE[f"{provider}/{model}"] = reason
+
+
+# The error text and response headers of the last failed HTTP call, keyed
+# "provider/model". ``call_gemini``/``call_openai`` swallow their exceptions and
+# return ``(None, {})``, which discards the one thing provider_reset needs: the
+# 429 body ("try again in ...") and its ``Retry-After`` header. They leave it
+# here and ``execute_chain`` reads it back with the chain in hand.
+_LAST_CALL_ERROR: dict[str, tuple[str, dict[str, str]]] = {}
+
+
+def _remember_http_error(provider: str, model: str, exc: BaseException) -> None:
+    try:
+        headers = {str(k): str(v) for k, v in dict(getattr(exc, "headers", None) or {}).items()}
+    except (TypeError, ValueError):
+        headers = {}
+    body = ""
+    try:
+        if hasattr(exc, "read"):
+            body = exc.read(2000).decode("utf-8", "replace")
+    except Exception:                                        # noqa: BLE001
+        body = ""
+    _LAST_CALL_ERROR[f"{provider}/{model}"] = (f"{exc} {body}".strip(), headers)
 
 
 def _log_direct_reason(msg: str) -> None:
@@ -635,6 +659,27 @@ def _paid_budget_exhausted(provider: str) -> bool:
 def _scrub(text):
     from llm_router.secret_scrubber import scrub_text
     return scrub_text(text) if isinstance(text, str) and text else text
+
+
+def _provider_reset_blocked(provider: str) -> bool:
+    try:
+        from llm_router import provider_reset
+        return provider_reset.is_provider_reset_blocked(provider)
+    except Exception:                                        # noqa: BLE001 -- fail open
+        return False
+
+
+def _note_reset(model: ModelSpec, later: list[ModelSpec], text: str,
+                headers: dict[str, str]) -> None:
+    """Record a failure's reported reset (once). Never raises."""
+    try:
+        from llm_router import provider_reset
+        provider_reset.note_provider_error(
+            model.provider, RuntimeError(text), headers or None,
+            alternatives=[m.provider for m in later],
+        )
+    except Exception:                                        # noqa: BLE001
+        pass
 
 
 def execute_chain(
@@ -771,6 +816,14 @@ def execute_chain(
             _give_up(f"{model.provider}/{model.model}", "budget exhausted or unreadable")
             continue
 
+        # A provider that reported a reset time is skipped until then. Same
+        # persisted record HealthTracker.is_healthy reads for the router.py path;
+        # this loop dispatches gemini/openai/ollama WITHOUT going through
+        # HealthTracker, so it has to ask provider_reset itself.
+        if _provider_reset_blocked(model.provider):
+            _give_up(f"{model.provider}/{model.model}", "unavailable until its reported reset")
+            continue
+
         call_fn = _PROVIDER_CALLS.get(model.provider)
         if not call_fn:
             _give_up(f"{model.provider}/{model.model}", "no call function for provider")
@@ -785,11 +838,16 @@ def execute_chain(
         try:
             response, usage = call_fn(prompt, model.model, call_timeout, history, system_prompt)
         except Exception as exc:                             # noqa: BLE001
+            _note_reset(model, chain[index + 1:], str(exc), {})
             _give_up(model.model, f"call raised: {type(exc).__name__}: {exc}"[:120],
                      int((time.monotonic() - t0) * 1000))
             continue
 
         if not response:
+            _err_text, _err_headers = _LAST_CALL_ERROR.pop(
+                f"{model.provider}/{model.model}", ("", {}))
+            if _err_text or _err_headers:
+                _note_reset(model, chain[index + 1:], _err_text, _err_headers)
             _give_up(
                 model.model,
                 _LAST_CALL_FAILURE.pop(f"{model.provider}/{model.model}", "empty response"),

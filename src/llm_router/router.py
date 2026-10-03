@@ -27,7 +27,7 @@ from typing import Any, AsyncIterator, TYPE_CHECKING
 from contextvars import ContextVar
 from uuid import uuid4
 
-from llm_router import cost, media, providers
+from llm_router import cost, media, provider_reset, providers
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -1395,6 +1395,18 @@ def _is_rate_limit_error(exc: Exception) -> bool:
         any(m in exc_str for m in _RATE_LIMIT_MARKERS)
         or "ratelimit" in exc_type
     )
+
+
+def _response_headers(exc: BaseException) -> dict[str, str]:
+    """HTTP response headers carried by a provider exception, or ``{}``."""
+    for attr in ("http_response", "_response"):
+        headers = getattr(getattr(exc, attr, None), "headers", None)
+        if headers:
+            try:
+                return {str(k): str(v) for k, v in dict(headers).items()}
+            except (TypeError, ValueError):
+                continue
+    return {}
 
 
 def _extract_retry_after(exc: Exception) -> int | None:
@@ -2932,11 +2944,19 @@ async def _dispatch_model_loop(
                         context_root=_codex_scope_root,
                     )
                     if not codex_result.success:
-                        raise RuntimeError(
+                        # The chain error below keeps only the first 200 chars;
+                        # a usage-limit reset time can sit past that, so parse
+                        # the full CLI output first.
+                        _err = RuntimeError(
                             _format_subprocess_chain_error(
                                 "Codex", codex_result.exit_code, codex_result.content
                             )
                         )
+                        provider_reset.note_provider_error(
+                            provider, _err, text=codex_result.content or "",
+                            alternatives=[provider_from_model(m) for m in models_to_try[attempt:]],
+                        )
+                        raise _err
                     in_tokens = max(1, len(prompt) // 4)
                     out_tokens = max(1, len(codex_result.content) // 4)
                     response = LLMResponse(
@@ -2968,13 +2988,21 @@ async def _dispatch_model_loop(
                         context_root=_gemini_scope_root,
                     )
                     if not gemini_result.success:
-                        raise RuntimeError(
+                        # Same rationale as the Codex branch above: the chain
+                        # error keeps only the first 200 chars, so parse the
+                        # full CLI output for a reset time before truncating.
+                        _err = RuntimeError(
                             _format_subprocess_chain_error(
                                 "Gemini CLI",
                                 gemini_result.exit_code,
                                 gemini_result.content,
                             )
                         )
+                        provider_reset.note_provider_error(
+                            provider, _err, text=gemini_result.content or "",
+                            alternatives=[provider_from_model(m) for m in models_to_try[attempt:]],
+                        )
+                        raise _err
                     in_tokens = max(1, len(prompt) // 4)
                     out_tokens = max(1, len(gemini_result.content) // 4)
                     response = LLMResponse(
@@ -3003,13 +3031,21 @@ async def _dispatch_model_loop(
                         context_root=_claude_scope_root,
                     )
                     if not claude_result.success:
-                        raise RuntimeError(
+                        # Same rationale as the Codex branch above: the chain
+                        # error keeps only the first 200 chars, so parse the
+                        # full CLI output for a reset time before truncating.
+                        _err = RuntimeError(
                             _format_subprocess_chain_error(
                                 "Claude CLI",
                                 claude_result.exit_code,
                                 claude_result.content,
                             )
                         )
+                        provider_reset.note_provider_error(
+                            provider, _err, text=claude_result.content or "",
+                            alternatives=[provider_from_model(m) for m in models_to_try[attempt:]],
+                        )
+                        raise _err
                     in_tokens = max(1, len(prompt) // 4)
                     out_tokens = max(1, len(claude_result.content) // 4)
                     response = LLMResponse(
@@ -3300,6 +3336,14 @@ async def _dispatch_model_loop(
             )
 
         except Exception as e:
+            # A reported reset time ("try again at 06:39", Retry-After: 7200,
+            # anthropic-ratelimit-*-reset) benches the provider until then,
+            # across processes. Independent of the classification below: the
+            # Codex usage-limit text is not recognised as a rate limit.
+            provider_reset.note_provider_error(
+                provider, e, _response_headers(e),
+                alternatives=[provider_from_model(m) for m in models_to_try[attempt:]],
+            )
             is_rate_limit = _is_rate_limit_error(e)
             is_content_filter = not is_rate_limit and _is_content_filter_error(e)
             is_auth = not is_rate_limit and not is_content_filter and _is_auth_error(e)
@@ -3525,6 +3569,10 @@ async def _dispatch_model_loop(
                     chain_attempts.append(model)
                     log.warning(
                         "Emergency fallback model %s failed: %s", model, e
+                    )
+                    provider_reset.note_provider_error(
+                        provider, e, _response_headers(e),
+                        alternatives=[provider_from_model(m) for m in emergency_chain[attempt - len(models_to_try):]],
                     )
                     # CHZ-AUD-A-01 (sibling): the emergency BUDGET fallback loop's
                     # provider-failure path must record the failed attempt in the

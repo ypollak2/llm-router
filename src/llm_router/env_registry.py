@@ -216,6 +216,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_GEMINI_SUBSCRIPTION": ("llm_router", "commands/demo.py", 3),
     "LLM_ROUTER_GEMINI_TIMEOUT": ("llm_router", "gemini_cli_agent.py", 1),
     "LLM_ROUTER_HEALTH_SNAPSHOT": ("llm_router", "health.py", 1),
+    "LLM_ROUTER_PROVIDER_RESET_PATH": ("llm_router", "provider_reset.py", 1),
     "LLM_ROUTER_HISTORY_RELAY": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_HOOK_SLOW_SECONDS": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_HTTP_TIMEOUT": ("llm_router", "hooks/session-end.py", 2),

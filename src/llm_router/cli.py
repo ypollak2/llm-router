@@ -30,6 +30,8 @@ Usage:
     llm-router doctor           — check that everything is wired up correctly
     llm-router okf status       — what knowledge is stored and injected for this project
     llm-router okf gc           — find stored model prose; --apply quarantines it
+    llm-router provider list    — providers skipped until a reported reset time
+    llm-router provider unban <name>  — lift that skip now (or --all)
     llm-router semantic status  — project scope, derived index, and selected arm
     llm-router semantic explain — what a prompt would retrieve, without sending it
     llm-router demo             — show routing decisions for sample prompts
@@ -873,6 +875,7 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "quickstart",
         "init-claude-memory",
         "okf",
+        "provider",
         "semantic",
         "sessions",
         "tui",
@@ -1043,6 +1046,9 @@ def main() -> None:
     elif args and args[0] == "okf":
         from llm_router.commands.okf import cmd_okf
         cmd_okf(args[1:])
+    elif args and args[0] == "provider":
+        from llm_router.commands.provider import cmd_provider
+        cmd_provider(args[1:])
     elif args and args[0] == "semantic":
         from llm_router.commands.semantic import cmd_semantic
         sys.exit(cmd_semantic(args[1:]))
