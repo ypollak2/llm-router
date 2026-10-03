@@ -707,6 +707,24 @@ _HOOK_DEFS = [
     ("session-end.py", "llm_router-session-end.py", "Stop", ""),
 ]
 
+# Codex delegation inside agent-route.py can run `codex exec` for up to five
+# minutes (LLM_ROUTER_SUBAGENT_CLI_TIMEOUT, default 300s — measured: median 91s,
+# 7/17 real tasks over 120s, max 223s). Claude Code's own PreToolUse wall-clock
+# kill defaults to 60s (see docs/MEASUREMENT.md, hook_liveness.py) and is silent
+# on expiry: no output, indistinguishable from "declined to route". Without a
+# per-hook override, a 300s codex subprocess is always killed before it can
+# finish. 320s gives the subprocess 20s of margin to exit and report.
+#
+# Keyed by installed_name (not source name) rather than added as a 5th _HOOK_DEFS
+# column: _HOOK_DEFS's 4-tuple shape is destructured in ~10 other call sites
+# (verify.py, doctor.py, build_plugin_bundle.py, several tests that monkeypatch
+# or unpack it directly) that have nothing to do with timeouts. A side table
+# keeps this change local to the two places that actually register hooks.
+_AGENT_ROUTE_HOOK_TIMEOUT_SEC = 320
+_HOOK_TIMEOUTS: dict[str, int] = {
+    "llm_router-agent-route.py": _AGENT_ROUTE_HOOK_TIMEOUT_SEC,
+}
+
 # Sidecar shell scripts session-start.py shells out to (start-ollama.sh,
 # start-pxpipe.sh) — not hook-event scripts themselves (no event/matcher to
 # register), just plain files that must land next to it. These were never
@@ -864,8 +882,17 @@ def _normalize_command(command: str) -> str:
     return command
 
 
-def _hook_is_registered(settings: dict, event: str, matcher: str, command: str) -> bool:
-    """Return True when the nested Claude Code hook settings contain a command."""
+def _hook_is_registered(
+    settings: dict, event: str, matcher: str, command: str, timeout: int | None = None
+) -> bool:
+    """Return True when the nested Claude Code hook settings contain a command.
+
+    ``timeout``, when given, must also match the registered entry's
+    ``"timeout"`` field — otherwise a hook whose command is unchanged but whose
+    required wall-clock override has drifted (e.g. after a code update raises
+    ``_AGENT_ROUTE_HOOK_TIMEOUT_SEC``) is wrongly reported as already correct
+    and the install() fast path skips re-registering it.
+    """
     normalized_cmd = _normalize_command(command)
     hooks = settings.get("hooks", {})
     event_hooks = hooks.get(event, []) if isinstance(hooks, dict) else []
@@ -874,12 +901,20 @@ def _hook_is_registered(settings: dict, event: str, matcher: str, command: str) 
             continue
         for hook in entry.get("hooks", []):
             if isinstance(hook, dict) and _normalize_command(hook.get("command", "")) == normalized_cmd:
+                if timeout is not None and hook.get("timeout") != timeout:
+                    return False
                 return True
     return False
 
 
-def _register_hook(settings: dict, event: str, matcher: str, command: str) -> str:
+def _register_hook(
+    settings: dict, event: str, matcher: str, command: str, timeout: int | None = None
+) -> str:
     """Add or normalize a hook registration.
+
+    ``timeout`` (seconds), when given, is written as the hook's ``"timeout"``
+    field, overriding the host's default wall-clock kill for this hook alone.
+    When ``None``, any existing ``"timeout"`` field on the entry is left as-is.
 
     Returns ``"added"``, ``"updated"``, or ``"existing"``.
     """
@@ -901,22 +936,29 @@ def _register_hook(settings: dict, event: str, matcher: str, command: str) -> st
                 matches.append((entry_idx, hook_idx))
 
     if not matches:
+        new_hook: dict = {"type": "command", "command": command}
+        if timeout is not None:
+            new_hook["timeout"] = timeout
         event_hooks.append({
             "matcher": matcher,
-            "hooks": [{"type": "command", "command": command}],
+            "hooks": [new_hook],
         })
         return "added"
 
     first_entry_idx, first_hook_idx = matches[0]
     first_entry = event_hooks[first_entry_idx]
     first_hook = first_entry["hooks"][first_hook_idx]
+    timeout_changed = timeout is not None and first_hook.get("timeout") != timeout
     changed = (
         first_hook.get("type") != "command"
         or first_hook.get("command", "") != command
         or len(matches) > 1
+        or timeout_changed
     )
     first_hook["type"] = "command"
     first_hook["command"] = command
+    if timeout is not None:
+        first_hook["timeout"] = timeout
 
     for entry_idx, hook_idx in reversed(matches[1:]):
         entry = event_hooks[entry_idx]
@@ -1227,6 +1269,7 @@ def install(force: bool = False) -> list[str]:
     for src_name, dst_name, event, matcher in _HOOK_DEFS:
         src = _HOOKS_SRC / src_name
         dst = hooks_dst() / dst_name
+        timeout = _HOOK_TIMEOUTS.get(dst_name)
 
         if not src.exists():
             actions.append(f"SKIP {src_name}: source not found at {src}")
@@ -1238,7 +1281,7 @@ def install(force: bool = False) -> list[str]:
                 if src.read_bytes() == dst.read_bytes():
                     # Check if registration is also correct
                     command = f"{_python_exe()} {dst}"
-                    already_registered = _hook_is_registered(settings, event, matcher, command)
+                    already_registered = _hook_is_registered(settings, event, matcher, command, timeout)
                     if already_registered:
                         continue
             except OSError:
@@ -1262,7 +1305,7 @@ def install(force: bool = False) -> list[str]:
         actions.append(f"Copied {src_name} → {dst}")
 
         command = f"{_python_exe()} {dst}"
-        status = _register_hook(settings, event, matcher, command)
+        status = _register_hook(settings, event, matcher, command, timeout)
         if status == "added":
             actions.append(f"Registered {event} hook: {dst_name}")
         elif status == "updated":
@@ -1475,7 +1518,7 @@ def uninstall() -> list[str]:
     settings = _load_settings()
 
     # Remove hook files and settings entries
-    for src_name, dst_name, event, _ in _HOOK_DEFS:
+    for src_name, dst_name, event, _matcher in _HOOK_DEFS:
         dst = hooks_dst() / dst_name
 
         if dst.exists():
@@ -1659,6 +1702,7 @@ def install_claw_code() -> list[str]:
     for src_name, dst_name, event, matcher in _CLAW_CODE_HOOK_DEFS:
         src = _HOOKS_SRC / src_name
         dst = hooks_dst / dst_name
+        timeout = _HOOK_TIMEOUTS.get(dst_name)
 
         if not src.exists():
             actions.append(f"SKIP {src_name}: source not found at {src}")
@@ -1670,7 +1714,7 @@ def install_claw_code() -> list[str]:
         actions.append(f"Copied {src_name} → {dst}")
 
         command = f"{_python_exe()} {dst}"
-        status = _register_hook(settings, event, matcher, command)
+        status = _register_hook(settings, event, matcher, command, timeout)
         if status == "added":
             actions.append(f"Registered {event} hook: {dst_name}")
         elif status == "updated":
@@ -1749,7 +1793,7 @@ def uninstall_claw_code() -> list[str]:
         except (json.JSONDecodeError, OSError):
             pass
 
-    for src_name, dst_name, event, _ in _CLAW_CODE_HOOK_DEFS:
+    for src_name, dst_name, event, _matcher in _CLAW_CODE_HOOK_DEFS:
         dst = hooks_dst / dst_name
         if dst.exists():
             dst.unlink()

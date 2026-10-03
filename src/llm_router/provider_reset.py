@@ -246,7 +246,17 @@ def _from_message(text: str, now: float) -> tuple[float, str] | None:
         tail = text[limit.end(): limit.end() + _VERB_WINDOW]
         for verb in _VERB_RE.finditer(tail):
             lead = _CLAUSE_SPLIT_RE.split(tail[: verb.start()])[-1].strip().lower()
-            if lead not in _CLAUSE_LEADS:
+            # A real Codex message (2026-10-03 capture) joins the credits-purchase
+            # clause to the retry clause with a bare "or" and no comma before it:
+            # "...to purchase more credits or try again at 11:33 PM." — the clause
+            # boundary regex only splits on punctuation, so `lead` here is the
+            # whole "...or" clause, not the bare connector "or" already allowed
+            # above. Accepting any lead that ENDS IN " or" (rather than requiring
+            # the full lead to equal "or") covers this without weakening the
+            # advice/report distinction: every INCIDENTAL advice fixture's lead
+            # ends in a different word ("should", "may", "can", "and", ...), so
+            # none of them newly match.
+            if lead not in _CLAUSE_LEADS and not lead.endswith(" or"):
                 continue
             rest = tail[verb.end():]
             m = _ISO_AFTER_VERB_RE.match(rest)
