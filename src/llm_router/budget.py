@@ -270,6 +270,26 @@ async def _compute_budget_state(provider: str) -> BudgetState:
     return await _api_provider_state(provider)
 
 
+def _as_fraction(value: Any) -> float:
+    """Normalise a quota/pressure field to the 0.0–1.0 scale it is read as.
+
+    usage.json is written by several independent hooks and they do not agree
+    on scale: hooks/session-start.py, hooks/session-end.py, and
+    hooks/usage-refresh.py all divide by 100 before writing ``highest_pressure``
+    (0.0–1.0), but hooks/auto-route.py's inline OAuth refresh writes the same
+    key as a raw 0–100 percentage. ``session_pct``/``weekly_pct``/``sonnet_pct``
+    are conventionally 0–100, but src/llm_router/quota_tracker.py's writer puts
+    them back as 0.0–1.0. Both scales exist in the wild in the same file, so
+    guess from magnitude rather than trusting one convention: a genuine
+    fraction is never > 1.0 (100% pressure is exactly 1.0), so anything larger
+    is a percentage and gets divided down. This is the same heuristic already
+    used by hooks/auto-route.py's ``_frac`` and hooks/subagent-start.py's
+    ``_norm``.
+    """
+    v = float(value)
+    return v / 100.0 if v > 1.0 else v
+
+
 async def _claude_subscription_state() -> BudgetState:
     """Compute pressure from the cached Claude quota snapshot.
 
@@ -277,6 +297,8 @@ async def _claude_subscription_state() -> BudgetState:
     and weekly Sonnet — so pressure reflects whichever limit is closest to
     exhaustion. The pre-computed ``highest_pressure`` field is used when present
     (written by the session-start hook); individual fields are the fallback.
+    Every field is read on whichever scale it was actually written on — see
+    ``_as_fraction``.
 
     File read is offloaded to a thread so the asyncio event loop is never
     blocked, even on slow filesystems (NFS, VeraCrypt volumes, etc.).
@@ -288,7 +310,10 @@ async def _claude_subscription_state() -> BudgetState:
     try:
         # Offload synchronous stat() to thread pool to avoid blocking event loop
         st_mtime = await asyncio.to_thread(lambda: _usage_json().stat().st_mtime)
-        age_sec = time.monotonic() - st_mtime
+        # st_mtime is wall-clock (time.time() epoch); time.monotonic() is an
+        # arbitrary, unrelated clock (process/boot-relative on most platforms)
+        # — diffing the two does not measure an age at all. Use time.time().
+        age_sec = time.time() - st_mtime
         if age_sec > _USAGE_STALENESS_LIMIT_SEC:
             return BudgetState(provider="anthropic", pressure=stale_floor, quota_pct=stale_floor)
     except OSError:
@@ -300,12 +325,12 @@ async def _claude_subscription_state() -> BudgetState:
         data: dict[str, Any] = json.loads(raw)
         # highest_pressure is the authoritative field (pre-computed by the hook)
         if "highest_pressure" in data:
-            pressure = min(float(data["highest_pressure"]) / 100.0 + _get_pending_pressure_offset("anthropic"), 1.0)
+            pressure = min(_as_fraction(data["highest_pressure"]) + _get_pending_pressure_offset("anthropic"), 1.0)
         else:
             # Fallback: compute from individual quota dimensions
-            session_pct = float(data.get("session_pct", 0.0)) / 100.0
-            weekly_pct = float(data.get("weekly_pct", 0.0)) / 100.0
-            sonnet_pct = float(data.get("sonnet_pct", 0.0)) / 100.0
+            session_pct = _as_fraction(data.get("session_pct", 0.0))
+            weekly_pct = _as_fraction(data.get("weekly_pct", 0.0))
+            sonnet_pct = _as_fraction(data.get("sonnet_pct", 0.0))
             pressure = min(max(session_pct, weekly_pct, sonnet_pct) + _get_pending_pressure_offset("anthropic"), 1.0)
         return BudgetState(
             provider="anthropic",
