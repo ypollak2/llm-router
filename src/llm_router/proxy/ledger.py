@@ -59,7 +59,15 @@ Claude-tier rewrite fields (only when the proxy runs with ``--tiers on`` or
                         effort stripped, ``translate.for_haiku``); absent otherwise
   tier_retry            {status, detail}: Anthropic refused the rewritten call
                         and it was resent unchanged
-  tier_detail           scrubbed error text when the decision itself failed
+  tier_detail           scrubbed error text when the decision itself failed, or
+                        which signal/keep a fixed-reason decision came from
+                        (escalation.REASON_*, or first_call /
+                        long_first_prompt_floor under ``quota_pressure``)
+  tier_quota_pressure   max(session, weekly) 0-1 the decision read from the
+                        cached usage.json (``proxy.quota_pressure``); null
+                        when unreadable or switched off
+  tier_quota_state      ok / stale / unknown / off -- only ``ok`` drives the
+                        ``quota_pressure`` step; the others change nothing
   tier_decision_s       time the decision added
 
 ``northstar`` joins ``msg_id`` of served rows to transcript assistant records

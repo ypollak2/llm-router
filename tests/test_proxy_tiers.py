@@ -955,3 +955,240 @@ async def test_a_rejected_haiku_call_is_resent_with_the_clients_own_bytes(tmp_pa
     assert row["tier_retry"]["status"] == 400 and row["served_model"] == OPUS
     # The final call used the client's own body, so the row must not claim a rewrite.
     assert "tier_body_rewrite" not in row
+
+
+# ── quota pressure (proxy/quota_pressure.py) ────────────────────────────────
+# Owner decision 2026-10-03: step down from Opus as the subscription quota
+# fills. The reading is injected through the policy's ``quota`` hook so no test
+# depends on the machine's usage.json; the reader itself is tested on files.
+
+from llm_router.proxy import quota_pressure as qp  # noqa: E402
+
+CONTRADICTION = "No, that's wrong. You changed the wrong function."
+
+
+def _qpolicy(pressure, state=qp.STATE_OK, *, conversation_level=True, **raw_overrides):
+    raw = {**_raw_policy(), **raw_overrides}
+    raw["stickiness"] = dict(raw.get("stickiness") or {}, switch_after_first_call=True)
+    return pt.ClaudeTierPolicy.from_dict(raw, conversation_level=conversation_level,
+                                         quota=lambda: qp.QuotaReading(pressure, state))
+
+
+def _usage(path, *, session=10.0, weekly=20.0, age=0.0, **extra):
+    import time
+
+    path.write_text(json.dumps({"session_pct": session, "weekly_pct": weekly, "sonnet_pct": 0.0,
+                                "updated_at": time.time() - age, **extra}))
+    return path
+
+
+def test_reader_takes_the_higher_of_session_and_weekly_as_a_fraction(tmp_path):
+    r = qp.read(_usage(tmp_path / "u.json", session=18.0, weekly=45.0))
+    assert (r.pressure, r.state) == (0.45, qp.STATE_OK)
+    r = qp.read(_usage(tmp_path / "u.json", session=82.0, weekly=45.0))
+    assert (r.pressure, r.state) == (0.82, qp.STATE_OK)
+
+
+def test_reader_reports_stale_unknown_and_off_instead_of_guessing(tmp_path, monkeypatch):
+    stale = qp.read(_usage(tmp_path / "u.json", weekly=95.0, age=3600), max_age_s=1800)
+    assert (stale.pressure, stale.state) == (0.95, qp.STATE_STALE)
+    assert qp.read(tmp_path / "missing.json").state == qp.STATE_UNKNOWN
+    (tmp_path / "bad.json").write_text("{not json")
+    assert qp.read(tmp_path / "bad.json").state == qp.STATE_UNKNOWN
+    (tmp_path / "seed.json").write_text(json.dumps({"pending": True, "seeded_at": 1}))
+    assert qp.read(tmp_path / "seed.json").state == qp.STATE_UNKNOWN
+    fallback = _usage(tmp_path / "fb.json", session=50, weekly=50, is_fallback=True)
+    assert qp.read(fallback) == qp.QuotaReading(None, qp.STATE_UNKNOWN)
+    (tmp_path / "nots.json").write_text(json.dumps({"session_pct": 90, "weekly_pct": 90}))
+    assert qp.read(tmp_path / "nots.json").state == qp.STATE_UNKNOWN  # no updated_at: age unknown
+    monkeypatch.setenv("LLM_ROUTER_PROXY_QUOTA_PRESSURE", "off")
+    assert qp.read(_usage(tmp_path / "u.json", weekly=95.0)) == qp.QuotaReading(None, qp.STATE_OFF)
+
+
+def test_bundled_policy_ships_the_proposed_thresholds():
+    policy = pt.ClaudeTierPolicy.load()
+    assert (policy.quota_enabled, policy.quota_cap_at, policy.quota_moderate_at, policy.quota_max_age_s) == \
+        (True, 0.70, 0.90, 1800.0)
+    with pytest.raises(ValueError, match="cap_at"):
+        pt.ClaudeTierPolicy.from_dict({**_raw_policy(), "quota_pressure": {"cap_at": 0.9, "moderate_at": 0.7}})
+    with pytest.raises(ValueError, match="mapping"):
+        pt.ClaudeTierPolicy.from_dict({**_raw_policy(), "quota_pressure": [0.7]})
+
+
+async def test_below_the_threshold_the_decision_is_unchanged():
+    for pressure in (0.0, 0.5, 0.69):
+        d = await _qpolicy(pressure).decide(_first(), SID, Stickiness(), classify=_classify("complex"))
+        assert (d.served_model, d.reason, d.quota_pressure, d.quota_state) == (OPUS, pt.REASON_POLICY,
+                                                                               pressure, qp.STATE_OK)
+
+
+async def test_at_75_percent_opus_is_capped_to_sonnet():
+    d = await _qpolicy(0.75).decide(_first(), SID, Stickiness(), classify=_classify("complex"))
+    assert (d.served_model, d.tier, d.reason, d.quota_pressure) == (SONNET, "sonnet", pt.REASON_QUOTA_PRESSURE, 0.75)
+    # A moderate turn is not moved further until moderate_at.
+    d = await _qpolicy(0.75).decide(_first(), SID, Stickiness(), classify=_classify("moderate"))
+    assert (d.served_model, d.reason) == (SONNET, pt.REASON_POLICY)
+
+
+async def test_per_turn_first_call_and_long_prompt_keeps_are_capped_with_their_reason_in_detail():
+    sticky = Stickiness()
+    policy = _qpolicy(0.75, conversation_level=False)
+    d = await policy.decide(_first(), SID, sticky, classify=_classify("complex"))
+    assert (d.served_model, d.reason, d.detail, d.switched) == (SONNET, pt.REASON_QUOTA_PRESSURE,
+                                                               pt.REASON_FIRST_CALL, False)
+    # remembered on Sonnet: the next same-class call is not a switch
+    nxt = await policy.decide(_req(), SID, sticky, classify=_classify("complex"))
+    assert (nxt.served_model, nxt.switched) == (SONNET, False)
+    long_brief = "\n".join(f"{i}. do part {i} of the migration across the whole repository" for i in range(1, 9))
+    d = await _qpolicy(0.75).decide(_turns(long_brief), SID, Stickiness(), classify=_classify("complex"))
+    assert (d.served_model, d.reason, d.detail) == (SONNET, pt.REASON_QUOTA_PRESSURE, pt.REASON_LONG_FIRST_PROMPT)
+
+
+async def test_pins_are_respected_under_pressure():
+    d = await _qpolicy(0.95).decide(_turns("opus: rename foo to bar"), SID, Stickiness(),
+                                    classify=_classify("complex"))
+    assert (d.served_model, d.reason, d.quota_pressure) == (OPUS, pt.REASON_EXPLICIT_OPUS_PIN, 0.95)
+    body = _req()
+    body["messages"].insert(0, {"role": "user", "content": "<command-name>/model</command-name>"})
+    d = await _qpolicy(0.95).decide(body, SID, Stickiness(), classify=_classify("complex"))
+    assert (d.served_model, d.reason) == (OPUS, pt.REASON_USER_PINNED)
+    pinned = _qpolicy(0.95, pinned_models=[OPUS])
+    d = await pinned.decide(_req(), SID, Stickiness(), classify=_classify("complex"))
+    assert (d.served_model, d.reason) == (OPUS, pt.REASON_CONFIG_PINNED)
+
+
+async def test_escalation_still_reaches_opus_and_is_logged_under_pressure():
+    for pressure, reason in ((0.5, pt.REASON_ESCALATION), (0.8, pt.REASON_ESCALATION_UNDER_PRESSURE),
+                             (0.99, pt.REASON_ESCALATION_UNDER_PRESSURE)):
+        policy, sticky = _qpolicy(pressure), Stickiness()
+        await policy.decide(_turns("rename foo to bar"), SID, sticky, classify=_classify("moderate"))
+        d = await policy.decide(_turns("rename foo to bar", "ok", CONTRADICTION), SID, sticky,
+                                classify=_classify("moderate"))
+        assert (d.served_model, d.reason, d.detail) == (OPUS, reason, esc.REASON_CONTRADICTION)
+
+
+async def test_stale_unknown_or_switched_off_pressure_changes_nothing(monkeypatch):
+    for state in (qp.STATE_STALE, qp.STATE_UNKNOWN, qp.STATE_OFF):
+        d = await _qpolicy(0.97 if state == qp.STATE_STALE else None, state).decide(
+            _first(), SID, Stickiness(), classify=_classify("complex"))
+        assert (d.served_model, d.reason, d.quota_state) == (OPUS, pt.REASON_POLICY, state)
+    off = _qpolicy(0.97, quota_pressure={"enabled": False})
+    off._quota = None
+    d = await off.decide(_first(), SID, Stickiness(), classify=_classify("complex"))
+    assert (d.served_model, d.quota_state) == (OPUS, qp.STATE_OFF)
+
+    def boom():
+        raise RuntimeError("reader broke")
+
+    broken = pt.ClaudeTierPolicy.from_dict(_raw_policy(), conversation_level=True, quota=boom)
+    d = await broken.decide(_first(), SID, Stickiness(), classify=_classify("complex"))
+    assert (d.served_model, d.quota_state) == (OPUS, qp.STATE_UNKNOWN)
+
+
+async def test_the_default_reader_uses_the_cached_usage_json_with_its_staleness_limit(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(home))
+    policy = pt.ClaudeTierPolicy.from_dict(_raw_policy(), conversation_level=True)
+    _usage(home / "usage.json", session=12.0, weekly=76.0)
+    d = await policy.decide(_first(), SID, Stickiness(), classify=_classify("complex"))
+    assert (d.served_model, d.quota_pressure, d.quota_state) == (SONNET, 0.76, qp.STATE_OK)
+    _usage(home / "usage.json", session=12.0, weekly=76.0, age=1801)
+    d = await policy.decide(_first(), SID, Stickiness(), classify=_classify("complex"))
+    assert (d.served_model, d.quota_state) == (OPUS, qp.STATE_STALE)
+    monkeypatch.setenv("LLM_ROUTER_PROXY_QUOTA_PRESSURE", "0")
+    _usage(home / "usage.json", weekly=96.0)
+    d = await policy.decide(_first(), SID, Stickiness(), classify=_classify("complex"))
+    assert (d.served_model, d.quota_state) == (OPUS, qp.STATE_OFF)
+
+
+async def test_stickiness_does_not_hold_a_conversation_on_opus_above_the_threshold():
+    readings = iter([0.4, 0.4, 0.75])
+    raw = {**_raw_policy()}
+    policy = pt.ClaudeTierPolicy.from_dict(raw, conversation_level=True,
+                                           quota=lambda: qp.QuotaReading(next(readings), qp.STATE_OK))
+    sticky = Stickiness()
+    d1 = await policy.decide(_first(), SID, sticky, classify=_classify("complex"))
+    d2 = await policy.decide(_req(), SID, sticky, classify=_classify("moderate"))
+    assert (d1.served_model, d2.served_model, d2.reason) == (OPUS, OPUS, pt.REASON_STICKY)
+    d3 = await policy.decide(_req(), SID, sticky, classify=_classify("moderate"))
+    assert (d3.served_model, d3.reason, d3.switched) == (SONNET, pt.REASON_QUOTA_PRESSURE, True)
+    assert sticky.get(conversation_key(_req(), SID)).model == SONNET
+
+
+async def test_at_90_percent_moderate_moves_to_haiku_only_where_haiku_takes_the_body():
+    # Claude Code's adaptive thinking + effort: the thinking floor keeps Sonnet.
+    d = await _qpolicy(0.92).decide(_first(), SID, Stickiness(), classify=_classify("moderate"))
+    assert (d.served_model, d.reason) == (SONNET, pt.REASON_POLICY)
+    # A body Haiku accepts as sent.
+    body = _first(thinking=None)
+    body.pop("output_config", None)
+    d = await _qpolicy(0.92).decide(body, SID, Stickiness(), classify=_classify("moderate"))
+    assert (d.served_model, d.reason, d.body_rewrite) == (HAIKU, pt.REASON_QUOTA_PRESSURE, None)
+    # haiku_rewrite on and an eligible conversation: Haiku with the rewrite marker.
+    d = await _qpolicy(0.92, haiku_rewrite=True).decide(_turns("refactor this module"), SID, Stickiness(),
+                                                       classify=_classify("moderate"))
+    assert (d.served_model, d.reason, d.body_rewrite) == (HAIKU, pt.REASON_QUOTA_PRESSURE, pt.REWRITE_HAIKU)
+    # complex is capped to Sonnet, not moved to Haiku
+    d = await _qpolicy(0.92, haiku_rewrite=True).decide(_turns("refactor this module"), SID, Stickiness(),
+                                                       classify=_classify("complex"))
+    assert (d.served_model, d.reason) == (SONNET, pt.REASON_QUOTA_PRESSURE)
+
+
+async def test_quota_fields_are_in_the_ledger(tmp_path, monkeypatch):
+    async def choose(text, pinned, *, anthropic=False):
+        return {"task_type": "code", "complexity": "complex", "chain_head": [], "model": None}
+
+    monkeypatch.setattr(pb, "choose_model", choose)
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(home))
+    _usage(home / "usage.json", session=30.0, weekly=80.0)
+    up = Upstream()
+    app = _app(tmp_path, up, tiers=ps.TIERS_CONVERSATION)
+    assert (await _post(app, _first())).status_code == 200
+    assert json.loads(up.requests[0].content)["model"] == SONNET
+    row = _rows(tmp_path)[-1]
+    assert (row["tier_reason"], row["served_model"]) == (pt.REASON_QUOTA_PRESSURE, SONNET)
+    assert (row["tier_quota_pressure"], row["tier_quota_state"]) == (0.8, qp.STATE_OK)
+    (home / "usage.json").unlink()
+    await _post(app, _req())
+    row = _rows(tmp_path)[-1]
+    assert (row["tier_quota_pressure"], row["tier_quota_state"]) == (None, qp.STATE_UNKNOWN)
+
+
+async def test_at_90_percent_a_body_with_a_mid_conversation_system_message_stays_on_sonnet():
+    """Claude Code sends role:system mid-conversation on every call and Haiku
+    400s on it: the pressure step must not send such a body to Haiku."""
+    body = _req(thinking=None)
+    body.pop("output_config", None)
+    assert pt._has_mid_conversation_system_message(body)
+    for policy in (_qpolicy(0.92), _qpolicy(0.92, haiku_rewrite=True)):
+        d = await policy.decide(body, SID, Stickiness(), classify=_classify("moderate"))
+        assert (d.served_model, d.reason, d.body_rewrite) == (SONNET, pt.REASON_QUOTA_PRESSURE, None)
+    clean = _no_system_reminders(body)
+    d = await _qpolicy(0.92).decide(clean, SID, Stickiness(), classify=_classify("moderate"))
+    assert d.served_model == HAIKU
+
+
+def test_the_usage_read_is_cached_by_mtime_but_the_age_is_recomputed(tmp_path):
+    p = _usage(tmp_path / "u.json", weekly=40.0)
+    first = qp.read(p, now=None)
+    real = Path.read_text
+    calls = []
+
+    def counting(self, *a, **k):
+        calls.append(1)
+        return real(self, *a, **k)
+
+    Path.read_text = counting
+    try:
+        again = qp.read(p)
+        assert not calls and again.pressure == first.pressure == 0.4
+        assert qp.read(p, now=__import__("time").time() + 4000).state == qp.STATE_STALE
+        _usage(p, weekly=88.0)
+        st = p.stat()
+        __import__('os').utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))  # coarse-mtime filesystems
+        assert qp.read(p).pressure == 0.88 and calls
+    finally:
+        Path.read_text = real

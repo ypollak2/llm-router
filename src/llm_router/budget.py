@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,9 @@ from llm_router.types import BudgetState, LOCAL_PROVIDERS
 from llm_router.routing_hints import detect_spend_anomaly, log_routing_decision
 
 from llm_router import paths
+from llm_router.logging import get_logger
+
+log = get_logger("llm_router.budget")
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
 # Per-provider cache: {provider: (BudgetState, cached_at)}
@@ -270,6 +274,68 @@ async def _compute_budget_state(provider: str) -> BudgetState:
     return await _api_provider_state(provider)
 
 
+# Count of times usage.json held an unusable pressure value and the reader
+# failed open (pressure 0.0: no provider skip, no premium cap). Exposed so a
+# test, or a status tool, can see that it happened instead of it being silent.
+_failopen_count = 0
+
+# highest_pressure is rounded to 4 places and the *_pct fields to 1, so a
+# consistent pair can differ by up to ~0.0005. Anything wider is a disagreement.
+_PRESSURE_CONSISTENCY_TOL = 0.01
+
+
+def _pct_to_fraction(value: Any) -> float | None:
+    """Read a session/weekly/sonnet_pct field (0-100 only) as a 0-1 fraction.
+
+    Returns None (unknown) for anything that is not a finite number in 0-100.
+    No magnitude guessing: a real 1% is 0.01, never 1.0.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    v = float(value)
+    if not math.isfinite(v) or v < 0.0 or v > 100.0:
+        return None
+    return v / 100.0
+
+
+def _pressure_from_usage(data: dict[str, Any]) -> float | None:
+    """Return Claude subscription pressure (0-1) from a usage.json dict, or
+    None when the file holds nothing trustworthy.
+
+    Scales are fixed, not guessed:
+      * ``highest_pressure`` is 0-1 (session-start, session-end, usage-refresh
+        and, since this fix, auto-route all write it that way).
+      * ``session_pct`` / ``weekly_pct`` / ``sonnet_pct`` are 0-100.
+
+    Files written by older hooks/auto-route.py hold ``highest_pressure`` on a
+    0-100 scale. That is recognised by comparing against the ``*_pct`` fields
+    (unambiguous, 0-100): when ``highest_pressure`` is above 1, or disagrees
+    with them, pressure is recomputed from the ``*_pct`` fields. A real 1%
+    written the legacy way (``highest_pressure == 1.0``) therefore reads 0.01.
+    """
+    fracs: list[float] = []
+    for key in ("session_pct", "weekly_pct", "sonnet_pct"):
+        if key in data:
+            frac = _pct_to_fraction(data[key])
+            if frac is None:
+                return None  # out-of-range / non-numeric: unknown, fail open
+            fracs.append(frac)
+    derived = max(fracs) if fracs else None
+
+    if "highest_pressure" not in data:
+        return derived
+
+    hp = data["highest_pressure"]
+    if isinstance(hp, bool) or not isinstance(hp, (int, float)) or not math.isfinite(float(hp)) or hp < 0:
+        return derived  # unusable; recompute from *_pct if we have them
+    hp = float(hp)
+    if hp <= 1.0 and (derived is None or abs(hp - derived) <= _PRESSURE_CONSISTENCY_TOL):
+        return hp
+    # hp > 1 (legacy 0-100) or contradicts the *_pct fields: trust the *_pct
+    # fields. With no *_pct fields to check against, hp > 1 is unknown.
+    return derived
+
+
 async def _claude_subscription_state() -> BudgetState:
     """Compute pressure from the cached Claude quota snapshot.
 
@@ -277,6 +343,8 @@ async def _claude_subscription_state() -> BudgetState:
     and weekly Sonnet — so pressure reflects whichever limit is closest to
     exhaustion. The pre-computed ``highest_pressure`` field is used when present
     (written by the session-start hook); individual fields are the fallback.
+    Scales are fixed per field and validated — see ``_pressure_from_usage``.
+    Unknown/out-of-range values fail open (pressure 0.0) and are counted.
 
     File read is offloaded to a thread so the asyncio event loop is never
     blocked, even on slow filesystems (NFS, VeraCrypt volumes, etc.).
@@ -288,7 +356,10 @@ async def _claude_subscription_state() -> BudgetState:
     try:
         # Offload synchronous stat() to thread pool to avoid blocking event loop
         st_mtime = await asyncio.to_thread(lambda: _usage_json().stat().st_mtime)
-        age_sec = time.monotonic() - st_mtime
+        # st_mtime is wall-clock (time.time() epoch); time.monotonic() is an
+        # arbitrary, unrelated clock (process/boot-relative on most platforms)
+        # — diffing the two does not measure an age at all. Use time.time().
+        age_sec = time.time() - st_mtime
         if age_sec > _USAGE_STALENESS_LIMIT_SEC:
             return BudgetState(provider="anthropic", pressure=stale_floor, quota_pct=stale_floor)
     except OSError:
@@ -298,15 +369,13 @@ async def _claude_subscription_state() -> BudgetState:
     try:
         raw: str = await asyncio.to_thread(_usage_json().read_text)
         data: dict[str, Any] = json.loads(raw)
-        # highest_pressure is the authoritative field (pre-computed by the hook)
-        if "highest_pressure" in data:
-            pressure = min(float(data["highest_pressure"]) / 100.0 + _get_pending_pressure_offset("anthropic"), 1.0)
-        else:
-            # Fallback: compute from individual quota dimensions
-            session_pct = float(data.get("session_pct", 0.0)) / 100.0
-            weekly_pct = float(data.get("weekly_pct", 0.0)) / 100.0
-            sonnet_pct = float(data.get("sonnet_pct", 0.0)) / 100.0
-            pressure = min(max(session_pct, weekly_pct, sonnet_pct) + _get_pending_pressure_offset("anthropic"), 1.0)
+        base = _pressure_from_usage(data)
+        if base is None:
+            global _failopen_count
+            _failopen_count += 1
+            log.warning("usage_json_failopen", reason="pressure_unknown_or_out_of_range")
+            return _neutral("anthropic")  # no provider skip, no premium cap
+        pressure = min(base + _get_pending_pressure_offset("anthropic"), 1.0)
         return BudgetState(
             provider="anthropic",
             pressure=pressure,

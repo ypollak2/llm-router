@@ -80,6 +80,31 @@ The decision, per call, in order (the first that applies wins):
                     stays where it was (``cache_cost``): same complexity
                     class and the cache is warm.
 
+``quota_pressure``  the LAST step, applied to whatever the steps above chose
+                    (including a tier ``sticky`` would hold, and the
+                    ``first_call`` / ``long_first_prompt_floor`` keeps, whose
+                    own reason then moves to ``detail``). The Claude
+                    subscription's pressure -- max(session %, weekly %) from
+                    the cached ``usage.json`` (``proxy/quota_pressure.py``,
+                    never a network call) -- at or above ``cap_at`` moves any
+                    tier above Sonnet down to Sonnet; at or above
+                    ``moderate_at`` a ``moderate`` turn also moves to Haiku when
+                    Haiku accepts the body as sent or ``haiku_rewrite`` makes
+                    it eligible (otherwise the thinking floor keeps it on
+                    Sonnet). Max quota drains in proportion to per-call cost,
+                    so this spends the remaining quota more slowly; a cache
+                    re-write on the switch is minor next to running out.
+                    Exempt: ``unknown_model``, ``config_pinned``,
+                    ``side_call``, ``explicit_opus_pin`` and ``user_pinned``
+                    (they return before it), and ``escalation`` -- which still
+                    reaches Opus, recorded as ``escalation_under_pressure``
+                    when pressure is at or above ``cap_at``. An unknown,
+                    stale or switched-off reading changes nothing (fail open);
+                    the reading's value and state are on every decision.
+                    Nothing changes at 98%+ either: the proxy forwards Claude
+                    Code's calls to Anthropic only, so there is no non-Claude
+                    tier to move to.
+
 In conversation mode, a mid-conversation move (``class_changed``) only breaks
 stickiness when the new class ranks a HIGHER tier than the one the
 conversation is already sitting on (an escalation) -- never a downgrade back
@@ -100,6 +125,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from llm_router.proxy import escalation
+from llm_router.proxy import quota_pressure as quota_pressure_mod
 from llm_router.proxy.cache_cost import ConvState, Stickiness, conversation_key, switch_cost_usd
 from llm_router.proxy.steps import has_client_tools, is_first_call, non_system, tier_text, user_pinned_model
 
@@ -134,6 +160,12 @@ REASON_LONG_FIRST_PROMPT = "long_first_prompt_floor"
 # Phase "haiku-tier": opt-in body rewrite in place of the thinking floor, see
 # the module docstring's ``haiku_rewrite`` entry.
 REASON_HAIKU_REWRITE = "haiku_rewrite"
+# Quota-aware tiers (proxy/quota_pressure.py), see the module docstring's
+# ``quota_pressure`` entry. Defaults pending owner approval (2026-10-03).
+REASON_QUOTA_PRESSURE = "quota_pressure"
+REASON_ESCALATION_UNDER_PRESSURE = "escalation_under_pressure"
+DEFAULT_QUOTA_CAP_AT = 0.70
+DEFAULT_QUOTA_MODERATE_AT = 0.90
 
 
 @dataclass(frozen=True)
@@ -159,6 +191,8 @@ class TierDecision:
     complexity_score: float | None = None  # complexity_knn P(needs frontier), when consulted
     detail: str | None = None  # e.g. escalation.REASON_* when reason == REASON_ESCALATION
     body_rewrite: str | None = None  # REWRITE_HAIKU when server.py must run translate.for_haiku on the body
+    quota_pressure: float | None = None  # max(session, weekly) 0-1 the decision saw, when readable
+    quota_state: str | None = None  # quota_pressure.STATE_* (ok / stale / unknown / off)
 
     @property
     def rewritten(self) -> bool:
@@ -283,7 +317,8 @@ class ClaudeTierPolicy:
                  allow_upgrade: bool = False, pinned_models: tuple[str, ...] = (),
                  cold_gap_s: float = 3600.0, switch_after_first_call: bool = False,
                  conversation_level: bool = False, classify=None,
-                 complexity_knn: bool = False, haiku_rewrite: bool = False) -> None:
+                 complexity_knn: bool = False, haiku_rewrite: bool = False,
+                 quota_pressure: dict | None = None, quota=None) -> None:
         if not tiers:
             raise ValueError("tier policy has no tiers")
         self.tiers = tiers
@@ -311,6 +346,19 @@ class ClaudeTierPolicy:
         # rewriting the body (see ``_haiku_eligible``); OFF by default.
         self.haiku_rewrite = haiku_rewrite
         self._classify = with_complexity_knn(classify) if complexity_knn else classify
+        # Quota pressure step (``quota_pressure:`` in the policy YAML). ``quota``
+        # is a ``() -> QuotaReading`` hook for tests; the default reads the
+        # cached usage.json with the configured staleness limit.
+        if quota_pressure is not None and not isinstance(quota_pressure, dict):
+            raise ValueError("quota_pressure must be a mapping")
+        qp = dict(quota_pressure or {})
+        self.quota_enabled = bool(qp.get("enabled", True))
+        self.quota_cap_at = float(qp.get("cap_at", DEFAULT_QUOTA_CAP_AT))
+        self.quota_moderate_at = float(qp.get("moderate_at", DEFAULT_QUOTA_MODERATE_AT))
+        self.quota_max_age_s = float(qp.get("max_age_s", quota_pressure_mod.DEFAULT_MAX_AGE_S))
+        if not 0.0 <= self.quota_cap_at <= self.quota_moderate_at:
+            raise ValueError("quota_pressure needs 0 <= cap_at <= moderate_at")
+        self._quota = quota
         self._ids: dict[str, Tier] = {}
         for t in tiers:
             for mid in (t.model, *t.also):
@@ -319,7 +367,8 @@ class ClaudeTierPolicy:
     # ── construction ────────────────────────────────────────────────────────
 
     @classmethod
-    def from_dict(cls, data: dict, *, conversation_level: bool = False, classify=None) -> "ClaudeTierPolicy":
+    def from_dict(cls, data: dict, *, conversation_level: bool = False, classify=None,
+                  quota=None) -> "ClaudeTierPolicy":
         tiers = []
         for t in data.get("tiers") or []:
             if not isinstance(t, dict) or not t.get("name") or not t.get("model"):
@@ -338,7 +387,8 @@ class ClaudeTierPolicy:
                    switch_after_first_call=bool(stick.get("switch_after_first_call", False)),
                    conversation_level=conversation_level, classify=classify,
                    complexity_knn=bool(data.get("complexity_knn", False)),
-                   haiku_rewrite=bool(data.get("haiku_rewrite", False)))
+                   haiku_rewrite=bool(data.get("haiku_rewrite", False)),
+                   quota_pressure=data.get("quota_pressure"), quota=quota)
 
     @classmethod
     def load(cls, path: str | Path | None = None, *, conversation_level: bool = False,
@@ -393,7 +443,16 @@ class ClaudeTierPolicy:
         200K, the other tiers' is 1M). Whether the turn is simple/mechanical
         is the classifier's call, made by ``decide``.
         """
-        if not self.haiku_rewrite or "haiku" not in self.by_name:
+        if not self.haiku_rewrite:
+            return False
+        return self._haiku_body_ok(body)
+
+    def _haiku_body_ok(self, body: dict) -> bool:
+        """Body-shape eligibility for Haiku (no media, custom tools only, no
+        mid-conversation system message, size), independent of the
+        ``haiku_rewrite`` flag: a body Haiku would 400 must never be sent to it,
+        rewritten or not."""
+        if "haiku" not in self.by_name:
             return False
         if _has_media(body) or not _only_custom_tools(body) or _has_mid_conversation_system_message(body):
             return False
@@ -401,10 +460,41 @@ class ClaudeTierPolicy:
 
     # ── the decision ────────────────────────────────────────────────────────
 
+    def _read_quota(self) -> "quota_pressure_mod.QuotaReading":
+        """The pressure reading for this call; any failure is ``unknown``."""
+        if not self.quota_enabled:
+            return quota_pressure_mod.QuotaReading(None, quota_pressure_mod.STATE_OFF)
+        try:
+            if self._quota is not None:
+                return self._quota()
+            return quota_pressure_mod.read(max_age_s=self.quota_max_age_s)
+        except Exception:  # noqa: BLE001 - fail open: a bad reading never costs a call
+            return quota_pressure_mod.QuotaReading(None, quota_pressure_mod.STATE_UNKNOWN)
+
+    def _pressure_cap(self, tier: Tier, pressure: float | None, thinking: str | None,
+                      effort: bool) -> Tier | None:
+        """The Sonnet tier when ``pressure`` is at or above ``cap_at`` and
+        ``tier`` ranks above Sonnet, else None (no change)."""
+        cap = self.by_name.get("sonnet")
+        if pressure is None or pressure < self.quota_cap_at or cap is None:
+            return None
+        if self.rank[tier.name] <= self.rank[cap.name] or not self._accepts(cap, thinking, effort):
+            return None
+        return cap
+
     async def decide(self, body: dict, session_id: str | None, sticky: Stickiness,
                      classify=None) -> TierDecision:
         """``classify(text) -> {"task_type", "complexity", "chain_head", ...}``
         defaults to ``backends.choose_model(text, None, anthropic=True)``."""
+        reading = self._read_quota()
+        # Only a fresh measurement drives the step; stale/unknown/off fail open.
+        pressure = reading.pressure if reading.state == quota_pressure_mod.STATE_OK else None
+        decision = await self._decide(body, session_id, sticky, classify, pressure)
+        decision.quota_pressure, decision.quota_state = reading.pressure, reading.state
+        return decision
+
+    async def _decide(self, body: dict, session_id: str | None, sticky: Stickiness,
+                      classify, pressure: float | None) -> TierDecision:
         requested = body.get("model") if isinstance(body.get("model"), str) else None
         req_tier = self.tier_of(requested)
 
@@ -430,6 +520,23 @@ class ClaudeTierPolicy:
                                 switched=_canonical(opus_tier.model) != _canonical(requested))
         if user_pinned_model(body):
             return keep(REASON_USER_PINNED)
+        thinking = (body.get("thinking") or {}).get("type") if isinstance(body.get("thinking"), dict) else None
+        thinking = thinking if thinking in THINKING_TYPES else None
+        oc = body.get("output_config")
+        effort = isinstance(oc, dict) and oc.get("effort") is not None
+
+        def keep_first(reason: str) -> TierDecision:
+            # A first-call keep, unless quota pressure caps it: then the capped
+            # tier is served and remembered (with the keep's own reason, so the
+            # post-first-call handoff still recognises it), and the keep's
+            # reason moves to ``detail``. Not a switch: nothing is cached yet.
+            cap = self._pressure_cap(req_tier, pressure, thinking, effort)
+            if cap is None:
+                sticky.record(key, requested, None, reason)
+                return keep(reason)
+            sticky.record(key, cap.model, None, reason)
+            return TierDecision(requested, cap.model, cap.name, REASON_QUOTA_PRESSURE, detail=reason)
+
         first = is_first_call(body)
         if first and escalation.first_prompt_is_long_or_multi_part(body):
             # Safety default: a first prompt that reads as a multi-part brief
@@ -438,13 +545,11 @@ class ClaudeTierPolicy:
             # t7-northstar). Skip the rewrite for THIS call and keep whatever
             # model Claude Code itself requested; the policy still applies
             # normally to every later call in the conversation.
-            sticky.record(key, requested, None, REASON_LONG_FIRST_PROMPT)
-            return keep(REASON_LONG_FIRST_PROMPT)
+            return keep_first(REASON_LONG_FIRST_PROMPT)
         if first and not self.conversation_level:
             # Per-turn mode: the first call is exempt (the switch cost of a
             # rewrite on the not-yet-cached prefix is the whole prompt).
-            sticky.record(key, requested, None, REASON_FIRST_CALL)
-            return keep(REASON_FIRST_CALL)
+            return keep_first(REASON_FIRST_CALL)
 
         if classify is None:
             classify = self._classify
@@ -453,10 +558,6 @@ class ClaudeTierPolicy:
 
         choice = await classify(tier_text(body))
         task, cx = choice.get("task_type"), choice.get("complexity")
-        thinking = (body.get("thinking") or {}).get("type") if isinstance(body.get("thinking"), dict) else None
-        thinking = thinking if thinking in THINKING_TYPES else None
-        oc = body.get("output_config")
-        effort = isinstance(oc, dict) and oc.get("effort") is not None
 
         target = self.tier_for(task, cx) or req_tier
         reason = REASON_POLICY
@@ -518,6 +619,23 @@ class ClaudeTierPolicy:
                 and not class_changed and not cold and not handoff):
             if prev_tier is not None and self._allowed(prev_tier, req_tier, thinking, effort, haiku_ok):
                 served, target, reason = prev_model, prev_tier, REASON_STICKY
+        if detail is not None:
+            # Escalation is exempt from the cap and still reaches Opus; under
+            # pressure that is recorded, since it spends the scarce quota.
+            if pressure is not None and pressure >= self.quota_cap_at and target is opus_tier:
+                reason = REASON_ESCALATION_UNDER_PRESSURE
+        else:
+            # Quota pressure, last: it caps whatever was chosen above, a tier
+            # stickiness would hold included.
+            cap = self._pressure_cap(target, pressure, thinking, effort)
+            if cap is not None:
+                target, served, reason = cap, cap.model, REASON_QUOTA_PRESSURE
+            haiku = self.by_name.get("haiku")
+            if (pressure is not None and pressure >= self.quota_moderate_at and cx == "moderate"
+                    and haiku is not None and self.rank[target.name] > self.rank[haiku.name]
+                    and self._haiku_body_ok(body)
+                    and self._allowed(haiku, req_tier, thinking, effort, haiku_ok)):
+                target, served, reason = haiku, haiku.model, REASON_QUOTA_PRESSURE
         if _canonical(served) == _canonical(requested):
             served = requested  # keep the client's own spelling when nothing changes
 
