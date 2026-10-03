@@ -132,7 +132,7 @@ def _ns_d1_d2(days: int, allowed: frozenset[str]) -> tuple[dict, dict, dict]:
     from llm_router import northstar as ns
     from llm_router import session_kind as sk
 
-    total = attempted = used = 0
+    total = attempted = used = untagged = 0
     kind_cache: dict[str, str | None] = {}
     for u in ns.units(days=days):
         sid = u["session_id"]
@@ -141,6 +141,8 @@ def _ns_d1_d2(days: int, allowed: frozenset[str]) -> tuple[dict, dict, dict]:
             kind = sk.kind_of(sid)
             kind_cache[sid] = kind
         if kind not in allowed:
+            if kind is None:
+                untagged += 1
             continue
         total += 1
         is_attempted = u["kind"] in ns.ATTEMPTED_KINDS or u.get("lever") == "proxy"
@@ -148,6 +150,11 @@ def _ns_d1_d2(days: int, allowed: frozenset[str]) -> tuple[dict, dict, dict]:
             attempted += 1
             if u["outcome"] == ns.OUTCOME_USED:
                 used += 1
+    if total == 0 and untagged:
+        why = (f"{untagged} unit(s) in window, all from sessions with no session-kind tag "
+               "(tagging starts once the SessionStart hook is deployed); untagged is never "
+               "counted as organic")
+        return _not_measurable(why), _not_measurable(why), _not_measurable(why)
     ns_result = _rate_result(used, total, label="unit")
     d1_result = _rate_result(attempted, total, label="unit")
     d2_result = _rate_result(used, attempted, label="attempt")

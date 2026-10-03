@@ -144,6 +144,14 @@ def test_research_and_untagged_sessions_are_excluded_by_default(monkeypatch, ses
     assert _kpis()["NS"]["value"] == "60.0% (n=80)"
 
 
+def test_all_untagged_units_explain_why_they_are_not_counted(monkeypatch, sessions):
+    _units(monkeypatch, _mixed_units(sessions["untagged"]))
+    k = _kpis()
+    for key in ("NS", "D1", "D2"):
+        assert k[key]["value"].startswith("not measurable: 80 unit(s) in window, all from"), key
+        assert "never counted as organic" in k[key]["value"]
+
+
 def test_include_research_widens_the_population_but_never_untagged(monkeypatch, sessions):
     rows = _mixed_units(sessions["organic"]) + _mixed_units(sessions["research"])
     rows += _mixed_units(sessions["untagged"])
