@@ -18,6 +18,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from llm_router.local_context_guard import ContextOverflow
 from llm_router.proxy import backends as pb
 from llm_router.proxy import ledger
 from llm_router.proxy import loop_guard
@@ -469,7 +470,10 @@ async def test_ollama_backend_streams_merges_tool_calls_and_sends_keep_alive():
 
 async def test_hedge_fires_when_first_token_is_late(tmp_path, policy):
     client, _ = _ollama_stream([{"message": {"content": "late"}, "done": True}], delay=1.0)
-    backend = pb.OllamaBackend("ollama/x", client, base_url="http://127.0.0.1:1", num_ctx=1024, hedge_s=0.05)
+    # num_ctx large enough that the real fixture request clears the new
+    # local_context_guard preflight — this test is about the hedge timing out,
+    # not about context size.
+    backend = pb.OllamaBackend("ollama/x", client, base_url="http://127.0.0.1:1", num_ctx=32768, hedge_s=0.05)
     with pytest.raises(pb.HedgeTimeout):
         await backend.complete(_req(), 5.0)
     up = Upstream()
@@ -1173,3 +1177,32 @@ def test_upstream_env_pointing_off_machine_is_refused_at_startup(monkeypatch, ca
     monkeypatch.setenv("LLM_ROUTER_PROXY_UPSTREAM", "https://collector.example/v1")
     assert ps.cmd_proxy(["--port", "0"]) == 2
     assert "refusing upstream" in capsys.readouterr().err
+
+
+async def test_oversized_request_never_reaches_ollama_and_is_refused_by_the_backend():
+    client, seen = _ollama_stream([{"message": {"content": "x"}, "done": True}])
+    backend = pb.OllamaBackend("ollama/x", client, base_url="http://127.0.0.1:1", num_ctx=1024)
+    with pytest.raises(ContextOverflow):
+        await backend.complete(_req(), 5.0)
+    assert seen == []  # the guard fired before any HTTP request left the process
+
+
+async def test_oversized_request_escalates_to_claude_with_a_recorded_reason(tmp_path, policy):
+    client, seen = _ollama_stream([{"message": {"content": "x"}, "done": True}])
+    backend = pb.OllamaBackend("ollama/x", client, base_url="http://127.0.0.1:1", num_ctx=1024)
+    up = Upstream()
+    await _post(_app(tmp_path, up, backend), _req())
+    (row,) = _rows(tmp_path)
+    assert row["decision"] == "fallback" and row["reason"] == "local_context_overflow"
+    assert len(up.requests) == 1 and seen == []
+
+
+async def test_ollama_reporting_a_full_window_marks_the_usage_truncated():
+    client, _ = _ollama_stream([
+        {"message": {"content": "ok"}, "done": False},
+        {"message": {"content": ""}, "done": True, "done_reason": "stop",
+         "prompt_eval_count": 32768, "eval_count": 3},
+    ])
+    backend = pb.OllamaBackend("ollama/x", client, base_url="http://127.0.0.1:1", num_ctx=32768)
+    _m, err, usage = await backend.complete(_req(), 5.0)
+    assert err is None and usage["context_truncated"] is True
