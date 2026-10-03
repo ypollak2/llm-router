@@ -80,6 +80,28 @@ haiku_rewrite: false
 # `claude --model`, which the proxy cannot tell apart from the default).
 pinned_models: []
 
+# Quota-aware tiers: the higher of the Claude subscription's session and weekly
+# usage, read from the cached ~/.llm-router/usage.json (never a network call on
+# the proxy path), steps calls down as the quota fills, because Max quota
+# drains in proportion to per-call cost (Opus 1.68x Sonnet, 6.15x Haiku).
+#   below cap_at          no change
+#   cap_at and above      nothing above Sonnet: Opus/Fable -> Sonnet, a tier
+#                         stickiness would hold included
+#   moderate_at and above also `moderate` turns -> Haiku where Haiku takes the
+#                         body (thinking floor still applies, so with Claude
+#                         Code's adaptive thinking that is Sonnet unless
+#                         haiku_rewrite makes the turn eligible)
+#   98%+                  nothing more: the proxy can only forward to Claude
+# Exempt: `opus:` pins, /model pins, pinned_models, and correction escalation
+# (still Opus, logged as escalation_under_pressure). A reading older than
+# max_age_s, a missing file or the refresh-failed fallback changes nothing.
+# Kill switch: LLM_ROUTER_PROXY_QUOTA_PRESSURE=off. Thresholds are fractions.
+quota_pressure:
+  enabled: true
+  cap_at: 0.70
+  moderate_at: 0.90
+  max_age_s: 1800
+
 stickiness:
   # Seconds without a call after which a conversation's prompt cache is
   # treated as cold, so a tier switch costs nothing extra. Claude Code writes
