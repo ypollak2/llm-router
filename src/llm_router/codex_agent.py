@@ -340,9 +340,18 @@ async def run_codex(
     # ChatGPT-authenticated backend regardless of that global default, so the
     # provider is pinned back to the built-in "openai" provider here — scoped
     # to this one subprocess call, no edit to the user's global config.
+    # --ignore-user-config: skips loading ~/.codex/config.toml entirely (auth
+    # still comes from CODEX_HOME). This repo's own installer can register
+    # llm_router as an MCP tool server inside that file — separate from the
+    # model_provider loop-back handled above — and an agentic Codex run that
+    # calls its own MCP tools could reach back into llm_router from inside a
+    # subprocess llm_router itself spawned. `-c model_provider=openai` below
+    # is a direct config override, not a config.toml read, so it still applies
+    # with the file ignored.
     args = [
         binary, "exec",
         "--json",
+        "--ignore-user-config",
         "-m", model,
         "-c", "model_provider=openai",
         "--color", "never",
@@ -447,6 +456,20 @@ async def run_codex(
                         )
                     except Exception:
                         pass
+            elif ev_type in ("error", "turn.failed"):
+                # Top-level failure events, NOT item.completed items. A ChatGPT
+                # usage-limit hit arrives only as these two (captured
+                # 2026-10-03: {"type":"error","message":"You've hit your usage
+                # limit ... try again at 11:33 PM."} then a turn.failed carrying
+                # the same text). Before this branch they were dropped and the
+                # caller saw "codex: empty completion (no output)", so the
+                # reset time never reached provider_reset and the quota wall
+                # was indistinguishable from a model that said nothing.
+                err = ev.get("error")
+                msg = err.get("message") if isinstance(err, dict) else ev.get("message")
+                msg = str(msg or "").strip()
+                if msg and msg not in codex_errors:  # the two events repeat it
+                    codex_errors.append(msg)
             elif ev_type in ("turn.started", "thread.started"):
                 if on_event:
                     try:

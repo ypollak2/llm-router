@@ -37,7 +37,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CODEX_PLUGIN_ROOT}/hooks/agent-route.py"
+            "command": "${CODEX_PLUGIN_ROOT}/hooks/agent-route.py",
+            "timeout": 320
           }
         ],
         "matcher": "Agent"

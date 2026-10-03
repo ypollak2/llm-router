@@ -111,6 +111,20 @@ _CLAUSE_LEADS = frozenset({
     "will", "it will", "which will", "will be", "it will be",
 })
 
+#: A bare "or" lead (see ``_from_message``) is trusted only across a span that
+#: names the kind of clause a real usage-limit report uses to offer a way out.
+_MONETIZATION_RE = re.compile(
+    r"upgrade|purchase|credits?|subscri|billing|\bplans?\b", re.IGNORECASE
+)
+
+#: ... and only when that same span carries none of these -- each one marks a
+#: suggestion as hedged advice, not a report of what the provider will do.
+_HEDGE_RE = re.compile(
+    r"\bcould\b|\bmight\b|\bmay\b|people say|if you prefer|\busually\b|"
+    r"\bprobably\b|nobody (?:really )?knows|\bI think\b|\bgenerally\b",
+    re.IGNORECASE,
+)
+
 _DURATION_RE = re.compile(
     r"\s*(?:in|after)\s+(?:about\s+|approximately\s+)?"
     r"(?:(?P<d>\d+)\s*d(?:ays?)?(?![a-z])\s*)?"
@@ -246,8 +260,33 @@ def _from_message(text: str, now: float) -> tuple[float, str] | None:
         tail = text[limit.end(): limit.end() + _VERB_WINDOW]
         for verb in _VERB_RE.finditer(tail):
             lead = _CLAUSE_SPLIT_RE.split(tail[: verb.start()])[-1].strip().lower()
-            if lead not in _CLAUSE_LEADS:
+            # A real Codex message (2026-10-03 capture) joins the credits-purchase
+            # clause to the retry clause with a bare "or" and no comma before it:
+            # "...to purchase more credits or try again at 11:33 PM." — the clause
+            # boundary regex only splits on punctuation, so `lead` here is the
+            # whole "...or" clause, not the bare connector "or" already allowed
+            # above. Accepting any lead that ENDS IN " or" (rather than requiring
+            # the full lead to equal "or") covers this without weakening the
+            # advice/report distinction: every INCIDENTAL advice fixture's lead
+            # ends in a different word ("should", "may", "can", "and", ...), so
+            # none of them newly match.
+            is_bare_or = lead == "or" or lead.endswith(" or")
+            if lead not in _CLAUSE_LEADS and not is_bare_or:
                 continue
+            if is_bare_or:
+                # "or" alone (bare, or at the end of a longer lead) is also how
+                # hedged ADVICE joins two suggestions: "you could wait a bit, or
+                # try again in 3 days if you prefer" and "people say wait or try
+                # again in 3 days but nobody really knows" both produce an "or"
+                # lead, exactly like the real Codex report's "...purchase more
+                # credits or try again at 11:33 PM." A bare "or" is trusted only
+                # when the span it joins (limit phrase .. verb) both names the
+                # kind of clause an actual usage-limit report uses -- upgrade,
+                # purchase, credits, a plan/subscription -- AND carries none of
+                # the hedge words that mark advice instead of a report.
+                span = tail[: verb.start()]
+                if not _MONETIZATION_RE.search(span) or _HEDGE_RE.search(span):
+                    continue
             rest = tail[verb.end():]
             m = _ISO_AFTER_VERB_RE.match(rest)
             if m:

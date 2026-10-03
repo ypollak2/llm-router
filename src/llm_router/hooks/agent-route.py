@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 8
+# llm_router-hook-version: 9
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -1117,6 +1117,225 @@ def _delegation_scope_root(cwd: str | None = None) -> str | None:
         return None
 
 
+# ── Codex delegation: model, time, quota ────────────────────────────────────
+# Measured 2026-10-01..03 (REPORT.txt, 17 real agent tasks through `codex exec`):
+# gpt-6-astra passed 13/17, the same as Claude on the same tasks. Wall time per
+# task: median 91s, 7 of 17 over 120s, max 223s -- so the old 120s default cut
+# off 41% of the work Codex could do. The ChatGPT Plus window then ran dry after
+# those 17 tasks ("...or try again at 11:33 PM."), and every later call failed.
+_CODEX_DEFAULT_AGENT_MODEL = "gpt-6-astra"
+_CODEX_FALLBACK_AGENT_MODEL = "gpt-5.5"
+
+#: The registered PreToolUse hook timeout and the margin it leaves below that
+#: for the delegation subprocess are install_hooks' numbers, imported rather
+#: than copied so they cannot drift (a hook past its timeout is killed
+#: SILENTLY, so raising one without raising the other drops the work with no
+#: trace). The bare-literal fallback covers the rare case this module runs
+#: somewhere install_hooks cannot be imported from; it must be kept equal to
+#: install_hooks._AGENT_ROUTE_HOOK_TIMEOUT_SEC / _DELEGATION_MARGIN_SEC.
+try:
+    from llm_router.install_hooks import (
+        _AGENT_ROUTE_HOOK_TIMEOUT_SEC as _HOOK_TIMEOUT_SEC,
+        _DELEGATION_MARGIN_SEC,
+    )
+except Exception:  # noqa: BLE001 -- fall back to the same numbers, literally
+    _HOOK_TIMEOUT_SEC = 320
+    _DELEGATION_MARGIN_SEC = 20
+
+#: Ceiling on the delegation timeout: the codex subprocess must finish, and
+#: this hook must still have time to read its output and exit, before Claude
+#: Code's wall-clock kill fires. Also the default -- measured: median 91s,
+#: 7/17 real tasks over 120s, max 223s.
+_CODEX_MAX_TIMEOUT_SEC = _HOOK_TIMEOUT_SEC - _DELEGATION_MARGIN_SEC
+_CODEX_DEFAULT_TIMEOUT_SEC = _CODEX_MAX_TIMEOUT_SEC
+_MIN_RUN_SEC = 15
+
+#: A usage-limit message with no parseable reset time still benches Codex for
+#: this long, rather than re-hitting a dead quota on every spawn.
+_UNPARSEABLE_QUOTA_BENCH_SEC = 3600
+
+_QUOTA_RE = re.compile(
+    r"usage limit|hit your .{0,40}limit|rate.?limit|quota|too many requests|"
+    r"credits? (?:have been )?(?:exhausted|depleted)",
+    re.IGNORECASE,
+)
+_MODEL_UNAVAILABLE_RE = re.compile(
+    r"model[^.]{0,80}(?:not found|not supported|does not exist|unavailable|"
+    r"not available|no access|do not have access|invalid|unknown)|"
+    r"(?:unknown|unsupported|invalid) model|"
+    r"not (?:supported|available) when using codex",
+    re.IGNORECASE,
+)
+
+#: Set on first delegation in this hook process; later attempts get only what is
+#: left of it, so NS3 timing out and the Phase-2 path retrying cannot stack two
+#: full timeouts past the hook's own kill time.
+_delegation_deadline: float | None = None
+
+
+def _codex_agent_model() -> str:
+    """Model passed to ``codex exec -m``. LLM_ROUTER_CODEX_AGENT_MODEL overrides."""
+    return (os.environ.get("LLM_ROUTER_CODEX_AGENT_MODEL", "").strip()
+            or _CODEX_DEFAULT_AGENT_MODEL)
+
+
+def _delegation_timeout() -> int:
+    timeout = _CODEX_DEFAULT_TIMEOUT_SEC
+    try:
+        timeout = max(_MIN_RUN_SEC, int(os.environ.get(
+            "LLM_ROUTER_SUBAGENT_CLI_TIMEOUT", str(_CODEX_DEFAULT_TIMEOUT_SEC))))
+    except (TypeError, ValueError):
+        pass
+    if timeout > _CODEX_MAX_TIMEOUT_SEC:
+        try:
+            from llm_router import failopen
+            failopen.record(
+                "CHZ-FO-CODEX-TIMEOUT-CLAMPED",
+                detail=(
+                    f"LLM_ROUTER_SUBAGENT_CLI_TIMEOUT={timeout} exceeds the "
+                    f"installed hook timeout minus margin "
+                    f"({_CODEX_MAX_TIMEOUT_SEC}s); clamped to "
+                    f"{_CODEX_MAX_TIMEOUT_SEC}s"
+                ),
+            )
+        except Exception:  # noqa: BLE001 -- the clamp itself must not fail
+            pass
+        timeout = _CODEX_MAX_TIMEOUT_SEC
+    return timeout
+
+
+def _delegation_time_left(configured: int) -> int:
+    """Seconds this hook process may still spend on external CLI delegation."""
+    global _delegation_deadline
+    now = time.monotonic()
+    if _delegation_deadline is None:
+        _delegation_deadline = now + configured
+    return int(_delegation_deadline - now)
+
+
+def _codex_bench_until() -> float | None:
+    """Epoch when Codex is usable again, or None when it is not benched."""
+    try:
+        from llm_router import provider_reset
+        return provider_reset.get_provider_reset_until("codex")
+    except Exception:
+        return None  # fail open: an unreadable bench file must not stop delegation
+
+
+def _fmt_clock(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch).strftime("%H:%M")
+
+
+def _bench_after_quota_failure(provider_key: str, text: str) -> float | None:
+    """Persist "``provider_key`` is out of quota until ...". Returns the reset
+    epoch, or None when nothing was benched. ``provider_key`` is ``"codex"`` for
+    the whole account or ``"codex:<model>"`` for one model."""
+    try:
+        from llm_router import provider_reset
+        parsed = provider_reset.parse_reset_epoch(text)
+        if parsed is not None:
+            return provider_reset.note_provider_error(
+                provider_key, RuntimeError(text), text=text)
+        if _QUOTA_RE.search(text):
+            until = time.time() + _UNPARSEABLE_QUOTA_BENCH_SEC
+            if provider_reset.record_provider_reset(provider_key, until, reason=text):
+                return until
+    except Exception as exc:
+        try:
+            from llm_router import failopen
+            failopen.record("CHZ-FO-AGENT-ROUTE-CODEX-BENCH", exc)
+        except Exception:
+            pass
+    return None
+
+
+def _run_codex_agent(prompt: str, timeout: int, context_root: str | None):
+    """Run one delegated task on Codex with the configured model.
+
+    Returns ``(res, status)``. ``status`` is ``"ok"``, ``"failed"``,
+    ``"benched"`` (this call hit the usage limit and Codex is now benched until
+    ``_codex_bench_until()``) or ``"no_time"`` (the shared wall-clock allowance
+    is spent; ``res`` is None).
+
+    The configured model is tried first. If it is out of quota or not offered to
+    this account, gpt-5.5 is tried within the SAME time allowance. Quota on the
+    fallback too means the whole account is dry, so Codex is benched; quota on
+    the primary alone benches only that model.
+    """
+    import asyncio
+
+    from llm_router.codex_agent import run_codex
+
+    primary = _codex_agent_model()
+    models = [primary]
+    if primary != _CODEX_FALLBACK_AGENT_MODEL:
+        models.append(_CODEX_FALLBACK_AGENT_MODEL)
+
+    last = None
+    for i, model in enumerate(models):
+        is_last = i == len(models) - 1
+        try:
+            from llm_router import provider_reset
+            if provider_reset.is_provider_reset_blocked(f"codex:{model}") and not is_last:
+                continue  # this model is benched; go straight to the fallback
+        except Exception:
+            pass
+        left = _delegation_time_left(timeout)
+        if left < _MIN_RUN_SEC:
+            return last, "no_time"
+        res = asyncio.run(run_codex(prompt, model=model, timeout=left, context_root=context_root))
+        last = res
+        if res and getattr(res, "success", False) and (res.content or "").strip():
+            return res, "ok"
+        text = str(getattr(res, "content", "") or "")
+        if _QUOTA_RE.search(text):
+            if not is_last:
+                _bench_after_quota_failure(f"codex:{model}", text)
+                continue
+            if _bench_after_quota_failure("codex", text) is not None:
+                return res, "benched"
+            return res, "failed"
+        if _MODEL_UNAVAILABLE_RE.search(text) and not is_last:
+            continue
+        return res, "failed"
+    return last, "failed"
+
+
+def _note_codex_failure(path: str, status: str, res, subagent_type: str,
+                        task_type: str, complexity: str, session_id: str) -> None:
+    """Record why a Codex delegation produced nothing. Never silent: a quota
+    hit becomes outcome ``codex_quota`` (and a stderr line naming the reset), any
+    other failure ``codex_failed`` with the CLI's own message."""
+    model = getattr(res, "model", "") if res else ""
+    if status == "benched":
+        until = _codex_bench_until()
+        when = _fmt_clock(until) if until else "later"
+        _record_north_star_unit(
+            "agent_route_codex", model=model, outcome="codex_quota",
+            subagent_type=subagent_type, task_type=task_type,
+            complexity=complexity, session_id=session_id, path=path,
+            reason=f"Codex usage limit hit; benched until {when}: "
+                   f"{getattr(res, 'content', '')}"[:200],
+        )
+        if os.environ.get("LLM_ROUTER_ROUTE_BANNER", "on").strip().lower() not in ("0", "off", "false", "no"):
+            try:
+                sys.stderr.write(
+                    f"⚠ Codex usage limit hit — sub-agents stay on Claude until {when}\n")
+            except Exception:
+                pass
+        return
+    if status == "no_time":
+        reason = "delegation wall-clock allowance already spent in this hook run"
+    else:
+        reason = str(getattr(res, "content", "") if res else "no CodexResult returned")
+    _record_north_star_unit(
+        "agent_route_codex", model=model, outcome="codex_failed",
+        subagent_type=subagent_type, task_type=task_type,
+        complexity=complexity, session_id=session_id, path=path,
+        reason=reason[:200],
+    )
+
+
 def _try_cli_delegation(
     prompt: str, task_type: str, complexity: str, session_id: str,
     subagent_type: str = "general-purpose",
@@ -1147,25 +1366,35 @@ def _try_cli_delegation(
     try:
         import asyncio
 
-        from llm_router.codex_agent import is_codex_available, run_codex
+        from llm_router.codex_agent import is_codex_available
         from llm_router.gemini_cli_agent import is_gemini_cli_available, run_gemini_cli
     except Exception:
         return None
 
-    timeout = 120
-    try:
-        timeout = max(15, int(os.environ.get("LLM_ROUTER_SUBAGENT_CLI_TIMEOUT", "120")))
-    except (TypeError, ValueError):
-        pass
-
+    timeout = _delegation_timeout()
     _scope_root = _delegation_scope_root(cwd)
+    _benched_until = _codex_bench_until()
+    if _benched_until is not None:
+        _record_north_star_unit(
+            "agent_route_codex", model="", outcome="benched",
+            subagent_type=subagent_type, task_type=task_type,
+            complexity=complexity, session_id=session_id,
+            reason=f"Codex usage limit; benched until {_fmt_clock(_benched_until)}",
+            path="cli_delegation",
+        )
     try:
-        if is_codex_available():
+        if _benched_until is None and is_codex_available():
             provider = "codex"
-            res = asyncio.run(run_codex(prompt, timeout=timeout, context_root=_scope_root))
+            res, status = _run_codex_agent(prompt, timeout, _scope_root)
+            if status != "ok":
+                _note_codex_failure("cli_delegation", status, res, subagent_type,
+                                    task_type, complexity, session_id)
         elif is_gemini_cli_available():
             provider = "gemini-cli"
-            res = asyncio.run(run_gemini_cli(prompt, timeout=timeout, context_root=_scope_root))
+            left = _delegation_time_left(timeout)
+            if left < _MIN_RUN_SEC:
+                return None
+            res = asyncio.run(run_gemini_cli(prompt, timeout=left, context_root=_scope_root))
         else:
             return None
     except Exception:
@@ -1378,37 +1607,37 @@ def _try_codex_subagent_delegation(
         )
         return None
 
-    timeout = 120
-    try:
-        timeout = max(15, int(os.environ.get("LLM_ROUTER_SUBAGENT_CLI_TIMEOUT", "120")))
-    except (TypeError, ValueError):
-        pass
+    timeout = _delegation_timeout()
+
+    # A benched Codex (usage limit, see provider_reset) is skipped BEFORE any
+    # budget is reserved or process spawned, and the skip is recorded.
+    benched_until = _codex_bench_until()
+    if benched_until is not None:
+        _record_north_star_unit(
+            "agent_route_codex", model="", outcome="benched",
+            subagent_type=subagent_type, task_type=task_type,
+            complexity=complexity, session_id=session_id, path="ns3",
+            reason=f"Codex usage limit; benched until {_fmt_clock(benched_until)}",
+        )
+        return None
 
     # Reserve budget before dispatch — see _codex_subagent_budget_increment docstring.
     _codex_subagent_budget_increment()
 
     try:
-        import asyncio
-
-        from llm_router.codex_agent import run_codex
-        res = asyncio.run(run_codex(prompt, timeout=timeout, context_root=_delegation_scope_root(cwd)))
+        res, status = _run_codex_agent(prompt, timeout, _delegation_scope_root(cwd))
     except Exception as e:
         _record_north_star_unit(
             "agent_route_codex", model="", outcome="codex_failed",
             subagent_type=subagent_type, task_type=task_type,
-            complexity=complexity, session_id=session_id,
+            complexity=complexity, session_id=session_id, path="ns3",
             reason=f"run_codex raised: {e}"[:200],
         )
         return None
 
-    if not res or not getattr(res, "success", False) or not (res.content or "").strip():
-        reason = getattr(res, "content", "") if res else "no CodexResult returned"
-        _record_north_star_unit(
-            "agent_route_codex", model=getattr(res, "model", ""), outcome="codex_failed",
-            subagent_type=subagent_type, task_type=task_type,
-            complexity=complexity, session_id=session_id,
-            reason=str(reason)[:200],
-        )
+    if status != "ok":
+        _note_codex_failure("ns3", status, res, subagent_type,
+                            task_type, complexity, session_id)
         return None
 
     if os.environ.get("LLM_ROUTER_ROUTE_BANNER", "on").strip().lower() not in ("0", "off", "false", "no"):

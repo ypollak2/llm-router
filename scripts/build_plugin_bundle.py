@@ -27,7 +27,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
-from llm_router.install_hooks import _HOOK_DEFS  # noqa: E402
+from llm_router.install_hooks import _HOOK_DEFS, _HOOK_TIMEOUTS  # noqa: E402
 
 # Claude Code and Codex use the same event names for the events we care about.
 # Cursor differs and is handled by its own installer (tasks 23–26).
@@ -51,12 +51,14 @@ def _hooks_json(root_var: str) -> dict:
     for src_name, installed_name, event, matcher in _HOOK_DEFS:
         if root_var == "${CODEX_PLUGIN_ROOT}" and event == "Stop" and src_name == "session-end.py":
             src_name = "codex-stop.py"
-        events.setdefault(event, {}).setdefault(matcher, []).append(
-            {
-                "type": "command",
-                "command": f"{root_var}/hooks/{src_name}",
-            }
-        )
+        handler: dict = {
+            "type": "command",
+            "command": f"{root_var}/hooks/{src_name}",
+        }
+        timeout = _HOOK_TIMEOUTS.get(installed_name)
+        if timeout is not None:
+            handler["timeout"] = timeout
+        events.setdefault(event, {}).setdefault(matcher, []).append(handler)
 
     out: dict[str, list] = {}
     for event, by_matcher in events.items():
