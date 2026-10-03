@@ -121,6 +121,8 @@ tests/hook_rendering/
 # The POST /ground contract — shipped surface, so it has to be readable by
 # someone who does not have this checkout.
 !/docs/GROUNDING_API.md
+# The KPI ledger: one row per change, required by the KPI change rule.
+!/docs/KPI-LEDGER.md
 !/docs/decisions/
 !/docs/decisions/**
 # The opt-in per-call proxy: user-facing enablement page, and the spike that
