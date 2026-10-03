@@ -398,6 +398,10 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LOCALAPPDATA": ("external_tool", "install_hooks.py", 1),
     "OLLAMA_BASE_URL": ("external_tool", "agentic/react.py", 8),
     "OLLAMA_BUDGET_MODELS": ("external_tool", "model_discovery.py", 1),
+    # Ollama server's own tuning knob (operator-set, not ours to default):
+    # the window `local_context_guard.effective_window` falls back to when no
+    # explicit `num_ctx` and no `/api/ps` reading are available.
+    "OLLAMA_CONTEXT_LENGTH": ("external_tool", "local_context_guard.py", 1),
     "OLLAMA_MODELS": ("external_tool", "model_discovery.py", 1),
     "OLLAMA_HOST": ("external_tool", "hooks/playwright-compress.py", 1),
     "OLLAMA_URL": ("external_tool", "commands/doctor.py", 2),

@@ -26,6 +26,13 @@ from pathlib import Path
 from llm_router import trace as _trace
 from llm_router.hooks import agent_writes as _writes
 from llm_router.hooks import context_budget as _budget
+from llm_router.local_context_guard import (
+    ContextOverflow,
+    check_overflow,
+    check_truncated,
+    effective_window,
+    estimate_payload_tokens,
+)
 
 
 # ── Tool Definitions (sent to the LLM) ───────────────────────────────────────
@@ -858,6 +865,23 @@ def run_agent_loop(
         _ctx = _num_ctx(model)
         if _ctx:
             payload["options"]["num_ctx"] = _ctx
+
+        try:
+            # Checked against the FULL payload (tools + format included, not
+            # just `messages`): `_budget.prune` above only trims old tool
+            # results and never accounts for tool-definition JSON size. See
+            # local_context_guard module docstring.
+            check_overflow(payload, num_ctx=_ctx, base_url=ollama_url, model=model,
+                           site="hooks.agent_loop")
+        except ContextOverflow as _exc:
+            _trace.emit("llm.error", iteration=iteration, error=str(_exc))
+            _trace.emit("loop.end", reason="local_context_overflow", iteration=iteration,
+                        tools_used=tools_used)
+            return (
+                f"Agent stopped after {iteration} iteration(s): the prompt would overflow "
+                f"the local model's context window ({_exc}). Escalating."
+            ) if tools_used else None
+
         body = json.dumps(payload).encode()
 
         req = urllib.request.Request(
@@ -884,6 +908,15 @@ def run_agent_loop(
             _trace.emit("loop.end", reason="llm_unreachable", iteration=iteration,
                         tools_used=tools_used)
             return None
+
+        # The pre-call check above is an estimate; this is Ollama's own number
+        # for what it actually evaluated. Recorded for `doctor` / `status`
+        # only (CHZ-FO-LOCAL-CTX-TRUNCATED) -- it does not change what this
+        # iteration does with the reply, since `check_overflow` already
+        # refused anything that should not have been sent in the first place.
+        _window, _ = effective_window(num_ctx=_ctx, base_url=ollama_url, model=model)
+        check_truncated(result.get("prompt_eval_count"), estimate_payload_tokens(payload),
+                        _window, site="hooks.agent_loop", model=model)
 
         msg = result.get("message", {})
         tool_calls = msg.get("tool_calls", [])

@@ -72,6 +72,7 @@ from llm_router.proxy.backends import (
     resolve_trims,
     tool_capable,
 )
+from llm_router.local_context_guard import ContextOverflow
 from llm_router.proxy.loop_guard import (
     DEFAULT_MAX_CONSECUTIVE,
     DEFAULT_REPEAT_WINDOW,
@@ -386,6 +387,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                         row["served_via"] = la_capability.ROUTE_EDIT
         except HedgeTimeout as exc:
             err, reason = str(exc), "hedge_timeout"
+        except ContextOverflow as exc:
+            # The backend refused to send a prompt Ollama would have silently
+            # truncated. Distinct reason so an operator can tell this apart
+            # from a genuine backend failure — see local_context_guard.
+            err, reason = str(exc), "local_context_overflow"
         except (asyncio.TimeoutError, httpx.TimeoutException):
             err, reason = f"exceeded step budget {cfg.step_budget_s}s", "budget_exceeded"
         except Exception as exc:  # noqa: BLE001 - any backend failure is a counted fallback
