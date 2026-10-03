@@ -55,15 +55,12 @@ async def test_spend_aggregation_sum_mode():
 
 # ── _claude_subscription_state: scale bug (highest_pressure, session/weekly/sonnet_pct) ──
 #
-# usage.json is written by several independent hooks that disagree on scale:
-#   - hooks/session-start.py, hooks/session-end.py, hooks/usage-refresh.py all
-#     divide by 100 before writing highest_pressure -> 0.0-1.0 fraction.
-#   - hooks/auto-route.py's inline OAuth refresh writes highest_pressure as a
-#     raw 0-100 percentage (no division).
-#   - src/llm_router/quota_tracker.py reads session_pct/weekly_pct assuming
-#     they are already 0.0-1.0, but the canonical hooks write them as 0-100.
-# Both scales exist in the same file in production. The reader must detect
-# magnitude rather than assume one convention.
+# Scales are fixed per field, not guessed:
+#   highest_pressure          0-1   (session-start, session-end, usage-refresh, auto-route)
+#   session/weekly/sonnet_pct 0-100
+# Files written by the OLD hooks/auto-route.py hold highest_pressure on 0-100;
+# those are recognised against the *_pct fields. Invariant: a real 1% must
+# never read as 100% (that would skip Claude as "budget exhausted").
 
 
 def _write_usage_json(tmp_path, monkeypatch, payload: dict) -> None:
@@ -77,69 +74,171 @@ def _write_usage_json(tmp_path, monkeypatch, payload: dict) -> None:
     return usage_path
 
 
-@pytest.mark.asyncio
-async def test_highest_pressure_fraction_scale_read_as_is(tmp_path, monkeypatch):
-    """Canonical writers (session-start/session-end/usage-refresh) store
-    highest_pressure already divided by 100 -> a 0.0-1.0 fraction. The reader
-    must not divide it again."""
+async def _pressure(tmp_path, monkeypatch, payload: dict) -> float:
     from llm_router import budget
 
-    _write_usage_json(tmp_path, monkeypatch, {"highest_pressure": 0.92, "updated_at": time.time()})
+    _write_usage_json(tmp_path, monkeypatch, {**payload, "updated_at": time.time()})
     budget.invalidate_cache("anthropic")
-
-    state = await budget._claude_subscription_state()
-
-    assert state.pressure == pytest.approx(0.92)
+    return (await budget._claude_subscription_state()).pressure
 
 
 @pytest.mark.asyncio
-async def test_highest_pressure_percent_scale_normalised(tmp_path, monkeypatch):
-    """hooks/auto-route.py's inline refresh writes highest_pressure as a raw
-    0-100 percentage (no /100 division) into the SAME usage.json. The reader
-    must detect this second scale and normalise it, not just stop dividing."""
-    from llm_router import budget
-
-    _write_usage_json(tmp_path, monkeypatch, {"highest_pressure": 92, "updated_at": time.time()})
-    budget.invalidate_cache("anthropic")
-
-    state = await budget._claude_subscription_state()
-
-    assert state.pressure == pytest.approx(0.92)
+async def test_highest_pressure_is_read_as_a_0_1_fraction(tmp_path, monkeypatch):
+    """Canonical writers store highest_pressure already divided by 100; the
+    reader must not divide it again (92% used to read 0.0092)."""
+    assert await _pressure(tmp_path, monkeypatch, {"highest_pressure": 0.92}) == pytest.approx(0.92)
 
 
 @pytest.mark.asyncio
-async def test_fallback_percent_scale_session_weekly_sonnet(tmp_path, monkeypatch):
-    """Fallback branch (no highest_pressure key): session_pct/weekly_pct/
-    sonnet_pct as written by the canonical hooks, raw 0-100 percentages."""
-    from llm_router import budget
-
-    _write_usage_json(
+async def test_current_writer_file_round_trips(tmp_path, monkeypatch):
+    """A file as written today: *_pct on 0-100, highest_pressure on 0-1."""
+    p = await _pressure(
         tmp_path, monkeypatch,
-        {"session_pct": 40.0, "weekly_pct": 90.0, "sonnet_pct": 10.0, "updated_at": time.time()},
+        {"session_pct": 40.0, "weekly_pct": 92.0, "sonnet_pct": 10.0, "highest_pressure": 0.92},
     )
-    budget.invalidate_cache("anthropic")
-
-    state = await budget._claude_subscription_state()
-
-    assert state.pressure == pytest.approx(0.90)
+    assert p == pytest.approx(0.92)
 
 
 @pytest.mark.asyncio
-async def test_fallback_fraction_scale_session_weekly_sonnet(tmp_path, monkeypatch):
-    """Regression guard: src/llm_router/quota_tracker.py's own writer puts
-    session_pct/weekly_pct back as an already-fractional 0.0-1.0 value. The
-    reader must not divide an already-fractional value a second time."""
+async def test_real_one_percent_session_right_after_reset_is_not_exhausted(tmp_path, monkeypatch):
+    """A real 1% session just after a quota reset must read 0.01: no provider
+    skip (>= 1.0) and no premium cap (>= 0.85)."""
+    p = await _pressure(
+        tmp_path, monkeypatch,
+        {"session_pct": 1.0, "weekly_pct": 0.0, "sonnet_pct": 0.0, "highest_pressure": 0.01},
+    )
+    assert p == pytest.approx(0.01)
+    assert p < 0.85 < 1.0
+
+
+@pytest.mark.asyncio
+async def test_pct_fields_alone_are_read_as_0_100(tmp_path, monkeypatch):
+    """No highest_pressure key: session/weekly/sonnet_pct are 0-100, so a
+    1.0 is 1%, not 100%."""
+    assert await _pressure(tmp_path, monkeypatch, {"session_pct": 1.0}) == pytest.approx(0.01)
+    assert await _pressure(
+        tmp_path, monkeypatch, {"session_pct": 40.0, "weekly_pct": 90.0, "sonnet_pct": 10.0},
+    ) == pytest.approx(0.90)
+
+
+@pytest.mark.asyncio
+async def test_legacy_0_100_highest_pressure_file_is_read_correctly(tmp_path, monkeypatch):
+    """Files written before the fix by hooks/auto-route.py carry
+    highest_pressure on 0-100 (unrounded). Consistent with the *_pct fields,
+    92 means 92%."""
+    p = await _pressure(
+        tmp_path, monkeypatch,
+        {"session_pct": 92.0, "weekly_pct": 30.0, "sonnet_pct": 0.0, "highest_pressure": 92.0},
+    )
+    assert p == pytest.approx(0.92)
+
+
+@pytest.mark.asyncio
+async def test_legacy_file_with_real_one_percent_never_reads_as_100(tmp_path, monkeypatch):
+    """The dangerous legacy case: old auto-route wrote highest_pressure=1.0
+    for a real 1%. 1.0 is a valid 0-1 value (100%), but it contradicts
+    session_pct=1.0, so pressure is recomputed from the *_pct fields."""
+    p = await _pressure(
+        tmp_path, monkeypatch,
+        {"session_pct": 1.0, "weekly_pct": 0.3, "sonnet_pct": 0.0, "highest_pressure": 1.0},
+    )
+    assert p == pytest.approx(0.01)
+
+
+@pytest.mark.asyncio
+async def test_legacy_0_100_highest_pressure_without_pct_fields_fails_open(tmp_path, monkeypatch):
+    """highest_pressure > 1 with nothing to check it against is unknown, not a
+    guess."""
     from llm_router import budget
 
-    _write_usage_json(
-        tmp_path, monkeypatch,
-        {"session_pct": 0.40, "weekly_pct": 0.90, "sonnet_pct": 0.10, "updated_at": time.time()},
+    before = budget._failopen_count
+    assert await _pressure(tmp_path, monkeypatch, {"highest_pressure": 92}) == 0.0
+    assert budget._failopen_count == before + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"session_pct": 250.0},
+        {"weekly_pct": -5.0},
+        {"session_pct": "lots"},
+        {"session_pct": 10.0, "sonnet_pct": float("nan")},
+        {"highest_pressure": 150},
+        {"highest_pressure": -0.2},
+        {"highest_pressure": float("nan")},
+        {"highest_pressure": "0.9"},
+    ],
+)
+async def test_out_of_range_value_fails_open_and_is_recorded(tmp_path, monkeypatch, payload):
+    """An out-of-range or non-numeric value is unknown: no skip, no cap
+    (pressure 0.0), and the fail-open is counted."""
+    from llm_router import budget
+
+    before = budget._failopen_count
+    assert await _pressure(tmp_path, monkeypatch, payload) == 0.0
+    assert budget._failopen_count == before + 1
+
+
+def _load_auto_route_hook():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "src" / "llm_router" / "hooks" / "auto-route.py"
+    spec = importlib.util.spec_from_file_location("auto_route_pressure_scale", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_auto_route_writes_highest_pressure_on_0_1_scale(tmp_path, monkeypatch):
+    """The source of the second scale: hooks/auto-route.py's inline refresh
+    must write highest_pressure as a 0-1 fraction like every other writer."""
+    import io
+    import sys
+
+    hook = _load_auto_route_hook()
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        hook.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(
+            returncode=0, stdout=json.dumps({"claudeAiOauth": {"accessToken": "t"}}),
+        ),
     )
-    budget.invalidate_cache("anthropic")
+    payload = {
+        "five_hour": {"utilization": 1.0},
+        "seven_day": {"utilization": 0.3},
+        "seven_day_sonnet": {"utilization": 0.0},
+    }
 
-    state = await budget._claude_subscription_state()
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
 
-    assert state.pressure == pytest.approx(0.90)
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(
+        hook.urllib.request, "urlopen", lambda *a, **k: _Resp(json.dumps(payload).encode()),
+    )
+
+    result = hook._fetch_usage_inline()
+
+    assert result is not None
+    assert result["session_pct"] == 1.0
+    assert result["highest_pressure"] == pytest.approx(0.01)
+    on_disk = json.loads((tmp_path / "home" / "usage.json").read_text())
+    assert on_disk["highest_pressure"] == pytest.approx(0.01)
+
+
+def test_hooks_mirror_of_auto_route_is_byte_identical():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    assert (root / "hooks" / "auto-route.py").read_bytes() == (
+        root / "src" / "llm_router" / "hooks" / "auto-route.py"
+    ).read_bytes()
 
 
 # ── _claude_subscription_state: staleness bug (monotonic vs wall-clock) ──────

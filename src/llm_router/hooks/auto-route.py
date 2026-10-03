@@ -593,7 +593,9 @@ def _fetch_usage_inline() -> dict | None:
             "weekly_pct":  round(w, 1),
             "sonnet_pct":  round(n, 1),
             "updated_at":  time.time(),
-            "highest_pressure": max(s, w, n),
+            # 0-1 fraction, like session-start / session-end / usage-refresh.
+            # (Was written as raw 0-100, which made a real 1% read as 100%.)
+            "highest_pressure": round(max(s, w, n) / 100.0, 4),
         }
         state_dir = str(_router_home())
         os.makedirs(state_dir, exist_ok=True)

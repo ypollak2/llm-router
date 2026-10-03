@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,9 @@ from llm_router.types import BudgetState, LOCAL_PROVIDERS
 from llm_router.routing_hints import detect_spend_anomaly, log_routing_decision
 
 from llm_router import paths
+from llm_router.logging import get_logger
+
+log = get_logger("llm_router.budget")
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
 # Per-provider cache: {provider: (BudgetState, cached_at)}
@@ -270,24 +274,66 @@ async def _compute_budget_state(provider: str) -> BudgetState:
     return await _api_provider_state(provider)
 
 
-def _as_fraction(value: Any) -> float:
-    """Normalise a quota/pressure field to the 0.0–1.0 scale it is read as.
+# Count of times usage.json held an unusable pressure value and the reader
+# failed open (pressure 0.0: no provider skip, no premium cap). Exposed so a
+# test, or a status tool, can see that it happened instead of it being silent.
+_failopen_count = 0
 
-    usage.json is written by several independent hooks and they do not agree
-    on scale: hooks/session-start.py, hooks/session-end.py, and
-    hooks/usage-refresh.py all divide by 100 before writing ``highest_pressure``
-    (0.0–1.0), but hooks/auto-route.py's inline OAuth refresh writes the same
-    key as a raw 0–100 percentage. ``session_pct``/``weekly_pct``/``sonnet_pct``
-    are conventionally 0–100, but src/llm_router/quota_tracker.py's writer puts
-    them back as 0.0–1.0. Both scales exist in the wild in the same file, so
-    guess from magnitude rather than trusting one convention: a genuine
-    fraction is never > 1.0 (100% pressure is exactly 1.0), so anything larger
-    is a percentage and gets divided down. This is the same heuristic already
-    used by hooks/auto-route.py's ``_frac`` and hooks/subagent-start.py's
-    ``_norm``.
+# highest_pressure is rounded to 4 places and the *_pct fields to 1, so a
+# consistent pair can differ by up to ~0.0005. Anything wider is a disagreement.
+_PRESSURE_CONSISTENCY_TOL = 0.01
+
+
+def _pct_to_fraction(value: Any) -> float | None:
+    """Read a session/weekly/sonnet_pct field (0-100 only) as a 0-1 fraction.
+
+    Returns None (unknown) for anything that is not a finite number in 0-100.
+    No magnitude guessing: a real 1% is 0.01, never 1.0.
     """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
     v = float(value)
-    return v / 100.0 if v > 1.0 else v
+    if not math.isfinite(v) or v < 0.0 or v > 100.0:
+        return None
+    return v / 100.0
+
+
+def _pressure_from_usage(data: dict[str, Any]) -> float | None:
+    """Return Claude subscription pressure (0-1) from a usage.json dict, or
+    None when the file holds nothing trustworthy.
+
+    Scales are fixed, not guessed:
+      * ``highest_pressure`` is 0-1 (session-start, session-end, usage-refresh
+        and, since this fix, auto-route all write it that way).
+      * ``session_pct`` / ``weekly_pct`` / ``sonnet_pct`` are 0-100.
+
+    Files written by older hooks/auto-route.py hold ``highest_pressure`` on a
+    0-100 scale. That is recognised by comparing against the ``*_pct`` fields
+    (unambiguous, 0-100): when ``highest_pressure`` is above 1, or disagrees
+    with them, pressure is recomputed from the ``*_pct`` fields. A real 1%
+    written the legacy way (``highest_pressure == 1.0``) therefore reads 0.01.
+    """
+    fracs: list[float] = []
+    for key in ("session_pct", "weekly_pct", "sonnet_pct"):
+        if key in data:
+            frac = _pct_to_fraction(data[key])
+            if frac is None:
+                return None  # out-of-range / non-numeric: unknown, fail open
+            fracs.append(frac)
+    derived = max(fracs) if fracs else None
+
+    if "highest_pressure" not in data:
+        return derived
+
+    hp = data["highest_pressure"]
+    if isinstance(hp, bool) or not isinstance(hp, (int, float)) or not math.isfinite(float(hp)) or hp < 0:
+        return derived  # unusable; recompute from *_pct if we have them
+    hp = float(hp)
+    if hp <= 1.0 and (derived is None or abs(hp - derived) <= _PRESSURE_CONSISTENCY_TOL):
+        return hp
+    # hp > 1 (legacy 0-100) or contradicts the *_pct fields: trust the *_pct
+    # fields. With no *_pct fields to check against, hp > 1 is unknown.
+    return derived
 
 
 async def _claude_subscription_state() -> BudgetState:
@@ -297,8 +343,8 @@ async def _claude_subscription_state() -> BudgetState:
     and weekly Sonnet — so pressure reflects whichever limit is closest to
     exhaustion. The pre-computed ``highest_pressure`` field is used when present
     (written by the session-start hook); individual fields are the fallback.
-    Every field is read on whichever scale it was actually written on — see
-    ``_as_fraction``.
+    Scales are fixed per field and validated — see ``_pressure_from_usage``.
+    Unknown/out-of-range values fail open (pressure 0.0) and are counted.
 
     File read is offloaded to a thread so the asyncio event loop is never
     blocked, even on slow filesystems (NFS, VeraCrypt volumes, etc.).
@@ -323,15 +369,13 @@ async def _claude_subscription_state() -> BudgetState:
     try:
         raw: str = await asyncio.to_thread(_usage_json().read_text)
         data: dict[str, Any] = json.loads(raw)
-        # highest_pressure is the authoritative field (pre-computed by the hook)
-        if "highest_pressure" in data:
-            pressure = min(_as_fraction(data["highest_pressure"]) + _get_pending_pressure_offset("anthropic"), 1.0)
-        else:
-            # Fallback: compute from individual quota dimensions
-            session_pct = _as_fraction(data.get("session_pct", 0.0))
-            weekly_pct = _as_fraction(data.get("weekly_pct", 0.0))
-            sonnet_pct = _as_fraction(data.get("sonnet_pct", 0.0))
-            pressure = min(max(session_pct, weekly_pct, sonnet_pct) + _get_pending_pressure_offset("anthropic"), 1.0)
+        base = _pressure_from_usage(data)
+        if base is None:
+            global _failopen_count
+            _failopen_count += 1
+            log.warning("usage_json_failopen", reason="pressure_unknown_or_out_of_range")
+            return _neutral("anthropic")  # no provider skip, no premium cap
+        pressure = min(base + _get_pending_pressure_offset("anthropic"), 1.0)
         return BudgetState(
             provider="anthropic",
             pressure=pressure,
