@@ -222,6 +222,9 @@ class PremiumStatusCommand:
             ),
             Text(""),
         ]
+        _codex = self.render_codex_window()
+        if str(_codex):
+            panels += [Panel(_codex, border_style=PALETTE.muted_border, expand=False), Text("")]
         # T-07: only when something actually degraded — a panel that is always
         # there and always empty is furniture, not a signal.
         _degraded = self.render_degraded_operations()
@@ -256,6 +259,16 @@ class PremiumStatusCommand:
         ]
 
         return Group(*panels)
+
+    def render_codex_window(self) -> Text:
+        """The rolling 5h Codex sub-agent budget: ``codex: 3/15 used this window,
+        resets 21:14``. Always shown -- an unspent window is a fact worth seeing."""
+        try:
+            from llm_router import codex_window
+
+            return Text(codex_window.status_line(), style=PALETTE.text_dim)
+        except Exception:  # noqa: BLE001 — status must still render
+            return Text()
 
     def render_degraded_operations(self) -> Text:
         """Fail-open counters (T-07). Empty Text when there is nothing to say.
