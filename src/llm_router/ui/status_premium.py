@@ -238,6 +238,13 @@ class PremiumStatusCommand:
                 Panel(_breaker, border_style=PALETTE.warning, expand=False),
                 Text(""),
             ]
+        # Providers benched until a reported reset time — same only-when-present rule.
+        _resets = self.render_provider_resets()
+        if str(_resets):
+            panels += [
+                Panel(_resets, border_style=PALETTE.warning, expand=False),
+                Text(""),
+            ]
         panels += [
             Panel(
                 Text("🔧  Quick Actions", style=f"bold {PALETTE.accent}")
@@ -296,6 +303,28 @@ class PremiumStatusCommand:
                     style=PALETTE.text_dim,
                 )
             out.append("run `llm-router northstar` for the full breakdown", style=PALETTE.text_dim)
+        except Exception:  # noqa: BLE001 — status must still render
+            return Text()
+        return out
+
+    def render_provider_resets(self) -> Text:
+        """Providers skipped until a reset time they reported. Empty ``Text``
+        when none are (same only-when-present rule as the panels above)."""
+        out = Text()
+        try:
+            import time
+
+            from llm_router import provider_reset
+
+            resets = provider_reset.all_provider_resets()
+            if not resets:
+                return out
+            out.append("⏳  Providers unavailable until reset\n", style=f"bold {PALETTE.warning}")
+            for name, until in sorted(resets.items()):
+                when = time.strftime("%H:%M", time.localtime(until))
+                if until - time.time() > 20 * 3600:
+                    when = time.strftime("%a %H:%M", time.localtime(until))
+                out.append(f"  {name} unavailable until {when}\n", style=PALETTE.text_dim)
         except Exception:  # noqa: BLE001 — status must still render
             return Text()
         return out

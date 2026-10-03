@@ -596,6 +596,26 @@ def _reset_coverage_cache():
 
 
 @pytest.fixture(autouse=True)
+def _reset_provider_reset_state():
+    """Delete the persisted provider "unavailable until" file around each test.
+
+    LLM_ROUTER_HOME is shared by every test in an xdist worker, and a recorded
+    reset would otherwise leave that provider blocked for later, unrelated tests.
+    """
+    from llm_router import provider_reset
+
+    def _clear():
+        try:
+            provider_reset._state_file().unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    _clear()
+    yield
+    _clear()
+
+
+@pytest.fixture(autouse=True)
 def _reset_health_tracker():
     """Reset the provider HealthTracker singleton before and after each test.
 

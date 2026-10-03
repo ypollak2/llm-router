@@ -227,8 +227,16 @@ class HealthTracker:
             provider: Provider name.
 
         Returns:
-            True if the provider's circuit breaker is closed or half-open.
+            True if the provider's circuit breaker is closed or half-open AND
+            the provider has not reported a reset time that is still in the
+            future (see ``llm_router.provider_reset``; persisted, so hook
+            processes and the MCP server agree). An unreadable reset record
+            fails open, i.e. does not block.
         """
+        from llm_router import provider_reset
+
+        if provider_reset.is_provider_reset_blocked(provider):
+            return False
         return self._get(provider).is_healthy()
 
     def record_success(self, provider: str) -> None:
