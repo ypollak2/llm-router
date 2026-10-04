@@ -12,6 +12,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `llm-router pi`: runs the Pi coding agent (`@earendil-works/pi-coding-agent`)
+  fully locally on one Ollama model, with a profile of Pi extensions in
+  `integrations/pi/` that close the gaps the 2026-10-04 harness-parity probes found
+  with qwen3.6: SIGINT now kills the running shell command; write/edit paths with a
+  dropped leading `/` or a mistyped working directory are repaired; a `question`
+  tool with a headless answer channel (UI, `LLM_ROUTER_PI_ANSWER`,
+  `LLM_ROUTER_PI_ANSWER_CMD`) plus a one-time nudge when the model asks in prose; a
+  `subagent` tool scoped to the working directory; a compaction that keeps the
+  user's request verbatim and labels tool output as tool output; and a pre-send
+  check that refuses a prompt Ollama would silently truncate. Image input is
+  opt-in (`--vision`). Measurements and limits: `integrations/pi/README.md`.
+
 ### Changed
 - SessionStart no longer blocks on the Claude usage refresh. The hook
   (`hooks/session-start.py`, hook version 19 -> 20) used to run the keychain

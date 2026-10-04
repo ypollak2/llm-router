@@ -122,6 +122,12 @@ exclude = [
     "src/llm_router/control_plane/reconciliation.py",
 ]
 
+# The local Pi agent profile (`llm-router pi`) lives at integrations/pi/ in the
+# repo; installed users get the same files at llm_router/_pi_profile. Resolved by
+# commands/pi.py:resolve_profile_dir(); tests/test_pi_profile.py checks the wheel.
+[tool.hatch.build.targets.wheel.force-include]
+"integrations/pi" = "llm_router/_pi_profile"
+
 [tool.hatch.build.targets.sdist]
 # Only ship: src/, pyproject.toml, LICENSE, README.md, CHANGELOG.md,
 # CHANGELOG-ARCHIVE.md (kept so CHANGELOG.md's link to it resolves), CONTRIBUTING.md

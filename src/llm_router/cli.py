@@ -66,6 +66,7 @@ Usage:
     llm-router serve            — run the HTTP route endpoint (loopback only)
     llm-router gateway          — run the OpenAI/Anthropic/Ollama-compatible gateway
     llm-router proxy [stats]    — opt-in per-call proxy for one Claude Code session (ANTHROPIC_BASE_URL)
+    llm-router pi               — run the Pi coding agent on a local Ollama model (local agent profile)
     llm-router broker           — run the session broker
     llm-router cp               — control-plane client commands
     llm-router run-hook <name>  — execute one installed hook by name (debugging)
@@ -869,6 +870,7 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "broker",
         "gateway",
         "proxy",
+        "pi",
         "invoice",
         "cp",
         "share",
@@ -1027,6 +1029,10 @@ def main() -> None:
         # NS1: the North Star metric — per-session routed-and-used share.
         from llm_router.commands.northstar import cmd_northstar
         sys.exit(cmd_northstar(args[1:]))
+    elif args and args[0] == "pi":
+        # Local agent profile: Pi + an Ollama model (integrations/pi/).
+        from llm_router.commands.pi import cmd_pi
+        sys.exit(cmd_pi(args[1:]))
     elif args and args[0] == "kpi":
         # KPI-SPEC scorecard: NS, O1-O2, D1-D5, G1-G4.
         from llm_router.commands.kpi import cmd_kpi
