@@ -67,7 +67,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # measured because that arm hit the account's quota on task 1).
     "LLM_ROUTER_CODEX_AGENT_MODEL": ("llm_router", "hooks/agent-route.py", 1),
     # 2026-10-03: delegations per rolling 5h Codex window (default 15, below the
-    # ~17 a ChatGPT Plus account managed before its usage limit). 0 disables.
+    # ~17 a ChatGPT Plus account managed before its usage limit). 0 blocks all
+    # Codex delegation (kill switch); it does not remove the cap.
     "LLM_ROUTER_CODEX_WINDOW_BUDGET": ("llm_router", "codex_window.py", 1),
     # 2026-09-28: opt-in override that keeps agent-route active (Codex/DIRECT
     # routing) in a headless (CLAUDE_CODE_ENTRYPOINT=sdk-*) session. Default

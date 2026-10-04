@@ -12,6 +12,8 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -142,10 +144,14 @@ def test_window_rolls_over_as_the_oldest_slots_age_out():
     assert codex_window.admit(complexity="moderate", deep_reasoning=False, now=later).allowed
 
 
-def test_zero_budget_disables_delegation(monkeypatch):
+def test_zero_budget_blocks_all_delegation(monkeypatch):
+    """0 is a kill switch (blocks everything), not "no cap"."""
     monkeypatch.setenv("LLM_ROUTER_CODEX_WINDOW_BUDGET", "0")
     adm = codex_window.admit(complexity="complex", deep_reasoning=True)
     assert not adm.allowed and "budget is 0" in adm.reason
+    res = codex_window.reserve(complexity="complex", deep_reasoning=True)
+    assert not res.allowed and res.token is None
+    assert codex_window.snapshot().used == 0
 
 
 # ---------------------------------------------------------------- status line
@@ -304,7 +310,147 @@ def test_a_broken_counter_does_not_stop_delegation(hook, monkeypatch):
         raise RuntimeError("counter broke")
 
     monkeypatch.setattr(codex_window, "admit", _boom)
+    monkeypatch.setattr(codex_window, "reserve", _boom)
+    monkeypatch.setattr(codex_window, "release", _boom)
     monkeypatch.setattr(codex_window, "record_delegation", _boom)
     codex = _Codex(monkeypatch)
     assert _ns3(hook) == "answer"
     assert len(codex.calls) == 1
+
+
+# ------------------------------------------------- reserve: decide + count, once
+
+
+def test_reserve_counts_the_slot_and_hands_back_a_token():
+    adm = codex_window.reserve(complexity="moderate", deep_reasoning=False)
+    assert adm.allowed and adm.token is not None
+    assert codex_window.snapshot().used == 1
+
+
+def test_a_declined_reserve_writes_nothing():
+    _seed(15)
+    adm = codex_window.reserve(complexity="complex", deep_reasoning=True)
+    assert not adm.allowed and adm.token is None
+    assert codex_window.snapshot().used == 15
+
+
+def test_reserve_applies_the_tight_rule_but_not_for_a_fallback():
+    _seed(9)  # tight: 6 of 15 left
+    assert not codex_window.reserve(complexity="moderate", deep_reasoning=False).allowed
+    assert codex_window.snapshot().used == 9
+    assert codex_window.reserve(
+        complexity="moderate", deep_reasoning=False, enforce_tier=False).allowed
+    assert codex_window.snapshot().used == 10
+
+
+def test_release_gives_the_slot_back():
+    _seed(5)
+    adm = codex_window.reserve(complexity="moderate", deep_reasoning=False)
+    assert codex_window.snapshot().used == 6
+    codex_window.release(adm.token)
+    assert codex_window.snapshot().used == 5
+    codex_window.release(adm.token)  # twice is harmless
+    codex_window.release(None)
+    assert codex_window.snapshot().used == 5
+
+
+def test_reserve_fails_open_when_the_state_path_is_unusable(monkeypatch):
+    def _boom():
+        raise OSError("no state dir")
+
+    monkeypatch.setattr(codex_window, "_state_file", _boom)
+    adm = codex_window.reserve(complexity="moderate", deep_reasoning=False)
+    assert adm.allowed and adm.token is None
+
+
+_CHILD = """
+import sys, time
+from llm_router import codex_window
+go_at = float(sys.argv[1])
+while time.time() < go_at:
+    time.sleep(0.001)
+a = codex_window.reserve(complexity="complex", deep_reasoning=True)
+print("1" if (a.allowed and a.token is not None) else "0")
+"""
+
+
+def test_eight_processes_at_14_of_15_admit_at_most_one():
+    """The review's race: admit() read the window unlocked and record_delegation()
+    wrote later, so 8 processes behind a barrier all saw 14/15 and all dispatched
+    (final used=20, budget=15). reserve() decides and counts under one lock.
+
+    The barrier is a shared wall-clock start time: every child imports first,
+    then spins until the same instant before it reserves."""
+    _seed(14)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(REPO / "src"), env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
+    go_at = time.time() + 12
+    procs = [
+        subprocess.Popen([sys.executable, "-c", _CHILD, repr(go_at)], env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for _ in range(8)
+    ]
+    outs = []
+    for p in procs:
+        out, err = p.communicate(timeout=90)
+        assert p.returncode == 0, err
+        outs.append(out.strip())
+    assert len(outs) == 8
+    admitted = outs.count("1")
+    assert admitted == 1, f"{admitted} of 8 admitted at 14/15: {outs}"
+    assert codex_window.snapshot().used == 15
+
+
+# ------------------------------------------- the hook reserves and gives back
+
+
+def test_the_hook_holds_one_slot_for_a_delegation_and_spends_it(hook, monkeypatch):
+    _seed(14)
+    _Codex(monkeypatch)
+    assert _ns3(hook, complexity="complex") == "answer"
+    assert codex_window.snapshot().used == 15  # reserved once, spent by the call
+
+
+def test_a_delegation_declined_before_any_codex_call_releases_its_slot(hook, monkeypatch):
+    _seed(3)
+    codex = _Codex(monkeypatch)
+    monkeypatch.setattr(hook, "_delegation_time_left", lambda configured: 0)  # no time left
+    assert _ns3(hook) is None
+    assert codex.calls == []
+    assert codex_window.snapshot().used == 3  # the reservation was handed back
+
+
+def test_phase2_gemini_path_releases_the_codex_reservation(hook, monkeypatch):
+    _seed(3)
+    monkeypatch.setattr("llm_router.hooks.chain_builder.needs_claude_tools", lambda *a, **k: True)
+    monkeypatch.setattr(hook, "_get_remaining_budget", lambda: 10.0)
+    monkeypatch.setattr("llm_router.codex_agent.is_codex_available", lambda: False)
+    monkeypatch.setattr("llm_router.gemini_cli_agent.is_gemini_cli_available", lambda: False)
+    codex = _Codex(monkeypatch)
+    assert hook._try_cli_delegation("fix the build", "code", "complex", "s") is None
+    assert codex.calls == []
+    assert codex_window.snapshot().used == 3
+
+
+def test_a_usage_limit_hit_mid_run_still_counts(hook, monkeypatch):
+    _seed(3)
+    _Codex(monkeypatch, [
+        CodexResult(content="You've hit your usage limit. Try again in 3 hours.",
+                    model="gpt-6-astra", exit_code=1, duration_sec=0.1),
+        CodexResult(content="You've hit your usage limit. Try again in 3 hours.",
+                    model="gpt-5.5", exit_code=1, duration_sec=0.1),
+    ])
+    assert _ns3(hook) is None
+    assert codex_window.snapshot().used == 5  # both dispatches spent a slot
+
+
+def test_a_fallback_is_refused_when_the_window_filled_in_between(hook, monkeypatch):
+    _seed(14)
+    codex = _Codex(monkeypatch, [
+        CodexResult(content="codex: unknown model gpt-6-astra", model="gpt-6-astra",
+                    exit_code=1, duration_sec=0.1),
+    ])
+    assert _ns3(hook, complexity="complex") is None  # primary took the 15th slot; the fallback finds none
+    assert codex.calls == ["gpt-6-astra"]
+    assert codex_window.snapshot().used == 15

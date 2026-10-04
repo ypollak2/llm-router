@@ -1250,6 +1250,15 @@ def _bench_after_quota_failure(provider_key: str, text: str) -> float | None:
 
 
 def _run_codex_agent(prompt: str, timeout: int, context_root: str | None):
+    """Run one delegated task on Codex (see ``_run_codex_agent_inner``); any window
+    slot still held when it returns -- no Codex call was made -- is handed back."""
+    try:
+        return _run_codex_agent_inner(prompt, timeout, context_root)
+    finally:
+        _release_reservation()
+
+
+def _run_codex_agent_inner(prompt: str, timeout: int, context_root: str | None):
     """Run one delegated task on Codex with the configured model.
 
     Returns ``(res, status)``. ``status`` is ``"ok"``, ``"failed"``,
@@ -1282,12 +1291,10 @@ def _run_codex_agent(prompt: str, timeout: int, context_root: str | None):
             pass
         left = _delegation_time_left(timeout)
         if left < _MIN_RUN_SEC:
+            _release_reservation()  # declined before any Codex call
             return last, "no_time"
-        try:
-            from llm_router import codex_window
-            codex_window.record_delegation()  # every dispatch spends window quota
-        except Exception:
-            pass
+        if not _spend_window_slot():  # every dispatch spends window quota
+            return last, "failed"  # window exhausted for the fallback dispatch
         res = asyncio.run(run_codex(prompt, model=model, timeout=left, context_root=context_root))
         last = res
         if res and getattr(res, "success", False) and (res.content or "").strip():
@@ -1315,6 +1322,27 @@ def _is_deep_reasoning(prompt: str) -> bool:
         return False
 
 
+#: The window slot reserved by ``_codex_window_declines`` and not yet spent on a
+#: Codex call: ``True`` when a slot is held, with its token in ``_held_token``.
+#: The hook is a one-shot process, so a module global is the right scope (same
+#: as ``_delegation_deadline``).
+_held_reservation = False
+_held_token = None
+
+
+def _release_reservation() -> None:
+    """Hand back a held slot that never reached a Codex call. No-op otherwise."""
+    global _held_reservation, _held_token
+    held, token = _held_reservation, _held_token
+    _held_reservation, _held_token = False, None
+    if held and token is not None:
+        try:
+            from llm_router import codex_window
+            codex_window.release(token)
+        except Exception:
+            pass
+
+
 def _codex_window_declines(path: str, prompt: str, subagent_type: str, task_type: str,
                            complexity: str, session_id: str) -> bool:
     """True when the rolling 5h Codex window says not to dispatch this one.
@@ -1323,14 +1351,23 @@ def _codex_window_declines(path: str, prompt: str, subagent_type: str, task_type
     when under half the window budget remains, only complex or deep-reasoning
     work is admitted; when it is spent, nothing is until a slot frees. A decline
     is recorded with its reason (outcome ``window_tight`` / ``window_exhausted``).
+
+    When the delegation is admitted this ALSO reserves its slot, deciding and
+    counting in one locked step (``codex_window.reserve``), so concurrent hook
+    processes cannot all pass a check that only one of them should. The slot is
+    spent by the first Codex call in ``_run_codex_agent``, or handed back by
+    ``_release_reservation`` if no call is made.
     Fails open: a broken counter must not stop delegation.
     """
+    global _held_reservation, _held_token
     try:
         from llm_router import codex_window
-        adm = codex_window.admit(complexity=complexity, deep_reasoning=_is_deep_reasoning(prompt))
+        adm = codex_window.reserve(
+            complexity=complexity, deep_reasoning=_is_deep_reasoning(prompt))
     except Exception:
         return False
     if adm.allowed:
+        _held_reservation, _held_token = True, adm.token
         return False
     _record_north_star_unit(
         "agent_route_codex", model="", outcome=f"window_{adm.tier}",
@@ -1340,6 +1377,22 @@ def _codex_window_declines(path: str, prompt: str, subagent_type: str, task_type
         window_budget=adm.state.budget,
     )
     return True
+
+
+def _spend_window_slot() -> bool:
+    """Account one Codex dispatch. The first uses the slot reserved at admission;
+    a later one (the gpt-5.5 fallback) reserves its own, refused only when the
+    window is exhausted. Returns False when that dispatch must not happen."""
+    global _held_reservation, _held_token
+    if _held_reservation:
+        _held_reservation, _held_token = False, None
+        return True
+    try:
+        from llm_router import codex_window
+        return codex_window.reserve(
+            complexity="complex", deep_reasoning=True, enforce_tier=False).allowed
+    except Exception:
+        return True
 
 
 def _note_codex_failure(path: str, status: str, res, subagent_type: str,
@@ -1442,6 +1495,8 @@ def _try_cli_delegation(
             return None
     except Exception:
         return None
+    finally:
+        _release_reservation()  # admitted for Codex but no Codex call made
 
     if not res or not getattr(res, "success", False) or not (res.content or "").strip():
         return None
