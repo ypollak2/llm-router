@@ -10,20 +10,23 @@ from __future__ import annotations
 import sys
 
 _HELP = """usage: llm-router calibrate [--models a,b,*glob*] [--budget-s N] [--tokens N]
-                             [--allow-paid] [--dry-run]
+                             [--allow-paid] [--yes] [--max-usd N] [--dry-run]
 
   --models      comma-separated model ids / substrings / globs (default: every local model)
   --budget-s    wall-clock budget for the whole run (default 300)
   --tokens      long-context recall size in tokens (default 8000)
   --allow-paid  also probe subscription and API models (spends quota or money;
                 the estimate is printed first)
+  --yes         required with --allow-paid and no --models when more than 3 paid models
+                would be probed
+  --max-usd     refuse to start if the estimated metered cost exceeds N (default 1.00)
   --dry-run     print the plan and estimate, send nothing
 """
 
 
 def _parse(args: list[str]) -> dict | None:
     opts: dict = {"models": None, "budget_s": None, "tokens": None,
-                  "allow_paid": False, "dry_run": False}
+                  "allow_paid": False, "dry_run": False, "yes": False, "max_usd": 1.0}
     i = 0
     while i < len(args):
         a = args[i]
@@ -31,7 +34,9 @@ def _parse(args: list[str]) -> dict | None:
             opts["allow_paid"] = True
         elif a == "--dry-run":
             opts["dry_run"] = True
-        elif a in ("--models", "--budget-s", "--tokens") and i + 1 < len(args):
+        elif a == "--yes":
+            opts["yes"] = True
+        elif a in ("--models", "--budget-s", "--tokens", "--max-usd") and i + 1 < len(args):
             val = args[i + 1]
             i += 1
             try:
@@ -39,6 +44,8 @@ def _parse(args: list[str]) -> dict | None:
                     opts["models"] = [m.strip() for m in val.split(",") if m.strip()]
                 elif a == "--budget-s":
                     opts["budget_s"] = float(val)
+                elif a == "--max-usd":
+                    opts["max_usd"] = float(val)
                 else:
                     opts["tokens"] = int(val)
             except ValueError:
@@ -88,9 +95,21 @@ def cmd_calibrate(args: list[str]) -> int:
               f"{' + some unpriced models' if any(e.usd is None for e in paid) else ''}"
               f"{' + subscription quota' if any('quota' in e.note for e in paid) else ''}. "
               f"Budget {budget:.0f}s.")
+    metered = sum(e.usd for e in estimates if e.usd)
+    if paid:
+        print(f"Total estimate: ${metered:.4f} metered across {len(paid)} paid model(s); "
+              f"cap ${opts['max_usd']:.2f} (--max-usd).")
     if opts["dry_run"]:
         print("--dry-run: nothing sent.")
         return 0
+    if len(paid) > 3 and not opts["models"] and not opts["yes"]:
+        print(f"{len(paid)} paid models would be probed without --models. Name them, or pass --yes.",
+              file=sys.stderr)
+        return 2
+    if metered > opts["max_usd"]:
+        print(f"Estimated ${metered:.4f} exceeds --max-usd ${opts['max_usd']:.2f}; nothing sent.",
+              file=sys.stderr)
+        return 2
 
     def completer_for(m):
         return cal.default_completer(m, probes.http_post, probes.ollama_base())
@@ -107,6 +126,8 @@ def cmd_calibrate(args: list[str]) -> int:
             f"{n}={'?' if p.ok is None else ('pass' if p.ok else 'FAIL')}" for n, p in mp.probes.items())
         print(f"  {mid}: ceiling={mp.tier_ceiling or 'none'}  [{marks}]")
         print(f"      {mp.tier_detail}")
+    for mid in report.unreachable:
+        print(f"  {mid}: unreachable, not recorded (any earlier measurement is kept)")
     for mid in report.out_of_budget:
         print(f"  {mid}: not finished within the {budget:.0f}s budget; not recorded")
     return 0 if report.profiles else 1

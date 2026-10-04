@@ -48,11 +48,25 @@ _TOOLS = [{"type": "function", "function": {
                    "required": ["key"]}}}]
 
 
+#: The ONLY failure texts that are ever stored in a profile. Model output and
+#: exception messages can carry secrets (a key echoed back, a URL with a token), so
+#: nothing a model or a provider said is persisted; a probe stores ``ok`` plus one of
+#: these fixed reasons.
+ERR_NO_RESPONSE = "no response"
+ERR_PROVIDER = "provider error"
+TRANSPORT_DETAILS = (ERR_NO_RESPONSE, ERR_PROVIDER)
+
+
 @dataclass
 class Reply:
     text: str = ""
     tool_calls: list[dict] = field(default_factory=list)   # [{"name":..., "arguments": {...}}]
     error: str | None = None
+
+
+def _safe_err(r: "Reply") -> str:
+    """The fixed category of a failed reply; anything else collapses to ERR_PROVIDER."""
+    return r.error if r.error in TRANSPORT_DETAILS else ERR_PROVIDER
 
 
 class Completer(Protocol):
@@ -85,8 +99,9 @@ class OllamaCompleter:
             body["tools"] = tools
         data = self._post(f"{self._base}/api/chat", body, timeout)
         if not isinstance(data, dict) or "message" not in data:
-            err = data.get("error") if isinstance(data, dict) else None
-            return Reply(error=str(err or "no response (timeout, unreachable or model failed to load)"))
+            if isinstance(data, dict) and data.get("error"):
+                return Reply(error=ERR_PROVIDER)
+            return Reply(error=ERR_NO_RESPONSE)
         msg = data["message"] or {}
         calls = []
         for tc in msg.get("tool_calls") or []:
@@ -116,8 +131,8 @@ class CloudCompleter:
             if self._entry.route_kind == "api":
                 return self._litellm(model, messages, tools, timeout)
             return self._cli(model, messages, timeout)
-        except Exception as exc:  # noqa: BLE001
-            return Reply(error=f"{type(exc).__name__}: {exc}"[:200])
+        except Exception:  # noqa: BLE001 - the message may carry a key; keep only the category
+            return Reply(error=ERR_PROVIDER)
 
     def _litellm(self, model, messages, tools, timeout) -> Reply:
         from llm_router import providers
@@ -152,13 +167,15 @@ class CloudCompleter:
                 from llm_router.gemini_cli_agent import run_gemini_cli
                 res = asyncio.run(run_gemini_cli(prompt, model=name, **kw))
         if not res.success:
-            return Reply(error=(res.content or "CLI failed")[:200])
+            return Reply(error=ERR_PROVIDER)
         return Reply(text=res.content)
 
 
 def default_completer(entry: ModelEntry, post: Callable[[str, dict, float], Any],
                       ollama_base: str) -> Completer:
-    if entry.route_kind == ROUTE_LOCAL:
+    if entry.route_kind == ROUTE_LOCAL or entry.provider == "ollama":
+        # Ollama cloud models are reached through the local daemon too; they stay
+        # on a non-local route, so calibrate still refuses them without --allow-paid.
         return OllamaCompleter(ollama_base, post)
     return CloudCompleter(entry)
 
@@ -184,10 +201,10 @@ def probe_json(c: Completer, model: str, timeout: float) -> ProbeResult:
                timeout=timeout)
     lat = time.monotonic() - t0
     if r.error:
-        return ProbeResult(False, r.error, lat)
+        return ProbeResult(False, _safe_err(r), lat)
     obj = _extract_json(r.text)
     ok = isinstance(obj, dict) and obj.get("a") == 17 and obj.get("b") == "x"
-    return ProbeResult(ok, "valid object with the expected values" if ok else f"got {r.text[:80]!r}", lat)
+    return ProbeResult(ok, "valid object with the expected values" if ok else "wrong value", lat)
 
 
 def apply_edit(source: str, old: str, new: str) -> str | None:
@@ -213,10 +230,10 @@ def probe_edit(c: Completer, model: str, timeout: float) -> ProbeResult:
                '"new_string": <replacement>}. Change as little as possible.'}], timeout=timeout)
     lat = time.monotonic() - t0
     if r.error:
-        return ProbeResult(False, r.error, lat)
+        return ProbeResult(False, _safe_err(r), lat)
     obj = _extract_json(r.text)
     if not isinstance(obj, dict):
-        return ProbeResult(False, f"no JSON edit in reply {r.text[:80]!r}", lat)
+        return ProbeResult(False, "no JSON edit in the reply", lat)
     edited = apply_edit(_EDIT_SOURCE, str(obj.get("old_string", "")), str(obj.get("new_string", "")))
     if edited is None:
         return ProbeResult(False, "old_string did not match the fixture exactly once", lat)
@@ -233,12 +250,12 @@ def probe_tool_call(c: Completer, model: str, timeout: float) -> ProbeResult:
     user = {"role": "user", "content": "What value is stored under the key 'alpha'? Use the lookup tool."}
     r1 = c.chat(model, [user], tools=_TOOLS, timeout=timeout)
     if r1.error:
-        return ProbeResult(False, r1.error, time.monotonic() - t0)
+        return ProbeResult(False, _safe_err(r1), time.monotonic() - t0)
     call = next((tc for tc in r1.tool_calls if tc.get("name") == "lookup"), None)
     if call is None:
         return ProbeResult(False, "no lookup tool call", time.monotonic() - t0)
     if str((call.get("arguments") or {}).get("key", "")).lower() != "alpha":
-        return ProbeResult(False, f"wrong arguments {call.get('arguments')}", time.monotonic() - t0)
+        return ProbeResult(False, "wrong arguments", time.monotonic() - t0)
     msgs = [user,
             {"role": "assistant", "content": r1.text or "",
              "tool_calls": [{"function": {"name": "lookup", "arguments": {"key": "alpha"}}}]},
@@ -246,7 +263,7 @@ def probe_tool_call(c: Completer, model: str, timeout: float) -> ProbeResult:
     r2 = c.chat(model, msgs, tools=_TOOLS, timeout=timeout)
     lat = time.monotonic() - t0
     if r2.error:
-        return ProbeResult(False, r2.error, lat)
+        return ProbeResult(False, _safe_err(r2), lat)
     ok = secret in (r2.text or "")
     return ProbeResult(ok, "called the tool and used its result" if ok
                        else "called the tool but did not use its result", lat)
@@ -265,9 +282,9 @@ def probe_vision(c: Completer, model: str, timeout: float) -> ProbeResult:
                    "What number is written in this image? Reply with the digits only."}],
                    timeout=timeout)
         if r.error:
-            return ProbeResult(False, r.error, time.monotonic() - t0)
+            return ProbeResult(False, _safe_err(r), time.monotonic() - t0)
         if code not in (r.text or ""):
-            return ProbeResult(False, f"read {r.text[:20]!r}, expected {code}", time.monotonic() - t0)
+            return ProbeResult(False, "misread the code", time.monotonic() - t0)
     return ProbeResult(True, f"read {VISION_TRIALS}/{VISION_TRIALS} random codes exactly",
                        time.monotonic() - t0)
 
@@ -291,10 +308,10 @@ def probe_long_context(c: Completer, model: str, timeout: float, *, tokens: int,
     r = c.chat(model, [{"role": "user", "content": prompt}], num_ctx=tokens + 1024, timeout=timeout)
     lat = time.monotonic() - t0
     if r.error:
-        return ProbeResult(False, r.error, lat, tokens)
+        return ProbeResult(False, _safe_err(r), lat, tokens)
     ok = code in (r.text or "")
     return ProbeResult(ok, f"recalled the needle at ~{tokens} tokens" if ok
-                       else f"missed the needle at ~{tokens} tokens: {r.text[:40]!r}", lat, tokens)
+                       else f"missed the needle at ~{tokens} tokens", lat, tokens)
 
 
 # --------------------------------------------------------------- orchestration
@@ -328,6 +345,7 @@ class CalibrationReport:
     skipped: list[tuple[str, str]] = field(default_factory=list)
     estimates: list[Estimate] = field(default_factory=list)
     out_of_budget: list[str] = field(default_factory=list)
+    unreachable: list[str] = field(default_factory=list)   # inconclusive: not recorded
 
 
 def select_models(inv: Inventory, patterns: list[str] | None, *, allow_paid: bool
@@ -348,9 +366,20 @@ def select_models(inv: Inventory, patterns: list[str] | None, *, allow_paid: boo
     return chosen, skipped
 
 
+def _is_transport(p: ProbeResult) -> bool:
+    return p.ok is False and p.detail in TRANSPORT_DETAILS
+
+
 def calibrate_model(entry: ModelEntry, c: Completer, *, tokens: int, probe_timeout: float,
                     deadline: float, clock: Callable[[], float]) -> ModelProfile | None:
-    """Run the suite for one model. ``None`` when the budget ran out first."""
+    """Run the suite for one model. ``None`` when the budget ran out first.
+
+    A profile with ``reachable=False`` means the run was INCONCLUSIVE: every probe hit
+    a transport error, or one of the two probes that qualify EASY (json, edit) did.
+    ``run_calibration`` does not record such a profile, so a flaky server can never
+    overwrite a good earlier measurement with "failed". A transport error on a later
+    probe is recorded as not run (``ok=None``), never as a failure of the model.
+    """
     probes: dict[str, ProbeResult] = {}
     plan: list[tuple[str, Callable[[float], ProbeResult]]] = [
         ("json", lambda t: probe_json(c, entry.id, t)),
@@ -366,17 +395,19 @@ def calibrate_model(entry: ModelEntry, c: Completer, *, tokens: int, probe_timeo
         left = deadline - clock()
         if left <= 1.0:
             return None
-        probes[name] = fn(min(probe_timeout, left))
-    reachable = any(p.ok is not None and not (p.ok is False and _is_transport_error(p.detail))
-                    for p in probes.values())
+        try:
+            probes[name] = fn(min(probe_timeout, left))
+        except Exception:  # noqa: BLE001 - the message may carry a secret; keep only the category
+            probes[name] = ProbeResult(False, ERR_PROVIDER)
+    inconclusive = (all(_is_transport(p) for p in probes.values())
+                    or any(_is_transport(probes[n]) for n in ("json", "edit") if n in probes))
+    if not inconclusive:
+        for name, p in list(probes.items()):
+            if _is_transport(p):
+                probes[name] = ProbeResult(None, p.detail, p.latency_s, p.size_tokens)
     return profile_mod.build_profile(
-        entry.id, probes, reachable=reachable,
+        entry.id, probes, reachable=not inconclusive,
         claims_tools=entry.cap("tools").state != CAP_NO, now=time.time())
-
-
-def _is_transport_error(detail: str) -> bool:
-    d = detail.lower()
-    return "no response" in d or "timeout" in d or "unreachable" in d or "failed to load" in d
 
 
 def run_calibration(
@@ -402,6 +433,8 @@ def run_calibration(
                                deadline=deadline, clock=clock)
         if prof is None:
             report.out_of_budget.append(m.id)
+        elif not prof.reachable:
+            report.unreachable.append(m.id)
         else:
             report.profiles[m.id] = prof
     return report

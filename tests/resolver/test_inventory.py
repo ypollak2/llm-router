@@ -105,6 +105,8 @@ def test_codex_api_key_login_is_metered_api_route():
     inv = collect(codex=("/bin/codex", "Logged in using an API key - sk-***abcd"))
     m = inv.get("codex/gpt-5.5")
     assert m.route_kind == "api" and m.authorized
+    assert not m.path_verified                                  # same rule as API keys
+    assert "calibrate --allow-paid" in m.path_detail
     assert "sk-" not in json.dumps(inventory_to_dict(inv))      # raw login output is never kept
 
 
@@ -146,6 +148,7 @@ def test_api_keys_are_listed_by_name_and_values_never_appear():
     m = inv.get("openai/gpt-5.5")
     assert m.route_kind == "api" and m.authorized
     assert not m.path_verified                       # a key is not a verified path
+    assert "inventory --verify" in m.path_detail
     assert m.quota.state == "metered" and m.price_in_per_mtok == 5.0
     assert not [x for x in inv.models if x.provider == "anthropic"]   # no key, no models
 

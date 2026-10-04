@@ -3,6 +3,8 @@ network or the real environment."""
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 from llm_router.lineage import Tier as RegTier
@@ -38,7 +40,8 @@ def ollama_server(models):
         if url.endswith("/api/tags"):
             return {"models": [{"name": n, "size": v.get("size", 1_000_000_000),
                                 "details": {"family": "fam", "parameter_size": "7B",
-                                            "quantization_level": "Q4"}}
+                                            "quantization_level": "Q4"},
+                                **v.get("tags_extra", {})}
                                for n, v in models.items()]}
         if url.endswith("/api/ps"):
             return {"models": [{"name": n, "context_length": v.get("run_ctx", 4096)}
@@ -55,6 +58,7 @@ def ollama_server(models):
                               "fam.context_length": v.get("ctx", 32768)}}
         if "caps" in v:
             out["capabilities"] = list(v["caps"])
+        out.update(v.get("show_extra", {}))
         return out
 
     return get, post
@@ -62,7 +66,7 @@ def ollama_server(models):
 
 def make_probes(*, ollama=None, claude=None, usage=None, codex=None, gemini=None,
                 env=None, resets=None, codex_pressure=None, registry=REGISTRY,
-                gemini_login=False):
+                gemini_login=False, ping=None, ping_cache=None, ollama_base=None):
     """claude/codex/gemini: a binary path string, or None for absent.
     codex: (path, login_status_text).  usage: (state, pressure)."""
     get, post = ollama_server(ollama)
@@ -75,7 +79,7 @@ def make_probes(*, ollama=None, claude=None, usage=None, codex=None, gemini=None
 
     return Probes(
         environ=dict(env or {}),
-        ollama_base=lambda: "http://127.0.0.1:11434",
+        ollama_base=lambda: ollama_base or "http://127.0.0.1:11434",
         http_get=get, http_post=post, run_cmd=run_cmd,
         find_claude=lambda: claude, find_codex=lambda: codex_path, find_gemini=lambda: gemini,
         codex_models=lambda: ["gpt-5.5"], gemini_models=lambda: ["gemini-2.5-flash"],
@@ -85,4 +89,6 @@ def make_probes(*, ollama=None, claude=None, usage=None, codex=None, gemini=None
         resets=lambda: dict(resets or {}),
         codex_pressure=lambda: codex_pressure,
         registry=lambda: registry, now=lambda: NOW,
+        ping=ping or (lambda provider, key: (_ for _ in ()).throw(AssertionError("auth ping must not run"))),
+        ping_cache=lambda: ping_cache or Path(tempfile.mkdtemp(prefix="ping-cache-")) / "c.json",
     )

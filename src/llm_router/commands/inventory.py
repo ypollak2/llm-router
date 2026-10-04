@@ -12,10 +12,12 @@ import json
 import sys
 from dataclasses import replace
 
-_HELP = """usage: llm-router inventory [--json] [--save]
+_HELP = """usage: llm-router inventory [--json] [--save] [--verify]
 
-  --json   machine-readable output (no secrets: variable names only)
-  --save   record this snapshot so a later run can flag models that were removed
+  --json    machine-readable output (no secrets: variable names only)
+  --save    record this snapshot so a later run can flag models that were removed
+  --verify  one zero-cost list-models call per API-key provider (no tokens used) to learn
+            whether the key is accepted; results are cached for 10 minutes. Off by default.
 """
 
 
@@ -23,7 +25,7 @@ def cmd_inventory(args: list[str]) -> int:
     if any(a in ("-h", "--help") for a in args):
         print(_HELP)
         return 0
-    unknown = [a for a in args if a not in ("--json", "--save")]
+    unknown = [a for a in args if a not in ("--json", "--save", "--verify")]
     if unknown:
         print(f"llm-router inventory: unknown argument {unknown[0]!r}", file=sys.stderr)
         print(_HELP, file=sys.stderr)
@@ -31,7 +33,7 @@ def cmd_inventory(args: list[str]) -> int:
     from llm_router.resolver import inventory as inv_mod
     from llm_router.resolver.types import inventory_to_dict
 
-    inv = inv_mod.collect_inventory(previous=inv_mod.load_snapshot())
+    inv = inv_mod.collect_inventory(previous=inv_mod.load_snapshot(), verify="--verify" in args)
     if "--save" in args:
         # A snapshot that already carries removed models would resurrect them on
         # the next run; save only what is present now.

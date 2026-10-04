@@ -161,7 +161,7 @@ def test_long_context_prompt_really_is_the_stated_size_and_asks_for_a_big_window
 def test_transport_failure_is_recorded_as_unreachable_not_as_incapable():
     class Down(FakeModel):
         def chat(self, *a, **k):
-            return Reply(error="no response (timeout, unreachable or model failed to load)")
+            return Reply(error="no response")
     prof = run_one(Down())
     assert prof.tier_ceiling is None and prof.reachable is False
 

@@ -18,15 +18,18 @@ touches the real Ollama, CLIs or environment. What is read:
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import time
 import urllib.request
+from urllib.parse import urlsplit
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from llm_router import paths
+from llm_router.resolver import auth_ping
 from llm_router.resolver import profile as profile_mod
 from llm_router.resolver.types import (
     CAP_NO,
@@ -70,7 +73,6 @@ _CLAUDE_ALIASES = ("opus", "sonnet", "haiku")
 _REGISTRY_TIER = {"local": None, "cheap": "EASY", "mid": "MEDIUM", "premium": "FRONTIER"}
 _REGISTRY_CAP = {"function-calling": "tools", "vision": "vision", "json": "json",
                  "reasoning": "thinking"}
-_LOOPBACK = ("127.0.0.1", "localhost", "::1", "[::1]")
 _ROUTE_ORDER = {ROUTE_LOCAL: 0, ROUTE_SUBSCRIPTION: 1, ROUTE_API: 2}
 
 
@@ -184,6 +186,8 @@ class Probes:
     resets: Callable[[], dict[str, float]] = _resets
     codex_pressure: Callable[[], float | None] = _codex_pressure
     registry: Callable[[], Any] = _registry
+    ping_cache: Callable[[], Path] = auth_ping.cache_path
+    ping: Callable[[str, str], int | None] = auth_ping.http_ping
     now: Callable[[], float] = time.time
 
 
@@ -236,15 +240,34 @@ def _ctx_from_model_info(info: Any) -> int | None:
     return None
 
 
+def _cloud_marker(name: str, tags_row: dict, show: dict) -> str | None:
+    """Why this Ollama model is hosted in the cloud, or None.
+
+    A loopback Ollama can LIST models it does not run: Ollama's cloud models are
+    served by a remote host and show up in ``/api/tags`` with ``remote_host`` /
+    ``remote_model`` (and a ``-cloud`` / ``:cloud`` tag). Deciding privacy from the
+    base URL alone calls them local, which is wrong in the one direction that
+    matters (a local-only request would send the prompt off the machine).
+    """
+    for src, label in ((tags_row, "/api/tags"), (show, "/api/show")):
+        for key in ("remote_host", "remote_model"):
+            if src.get(key):
+                return f"{label} reports {key}"
+    tag = name.lower().rsplit(":", 1)[-1]
+    if tag == "cloud" or tag.endswith("-cloud"):
+        return "model tag names a cloud variant"
+    return None
+
+
 def _inventory_ollama(p: Probes) -> tuple[list[ModelEntry], SourceStatus]:
     from llm_router.model_discovery import _is_completion_model
 
     base = p.ollama_base().rstrip("/")
+    host = _safe_host(base)
     tags = p.http_get(f"{base}/api/tags", HTTP_TIMEOUT_S)
     if not isinstance(tags, dict) or "models" not in tags:
-        return [], SourceStatus(False, f"Ollama not reachable at {_safe_host(base)}")
-    host = _safe_host(base)
-    local = host.split(":")[0].strip("[]") in {h.strip("[]") for h in _LOOPBACK} or host.startswith("[::1]")
+        return [], SourceStatus(False, f"Ollama not reachable at {host}")
+    local = _is_loopback(base)
     ps = p.http_get(f"{base}/api/ps", HTTP_TIMEOUT_S)
     loaded: dict[str, int | None] = {}
     if isinstance(ps, dict):
@@ -273,6 +296,7 @@ def _inventory_ollama(p: Probes) -> tuple[list[ModelEntry], SourceStatus]:
                 caps[cap_name] = Cap(CAP_UNKNOWN, SRC_DECLARED, "/api/show reported no capabilities")
         ctx = _ctx_from_model_info(show.get("model_info"))
         notes: list[str] = []
+        cloud_why = _cloud_marker(name, m, show)
         if not local:
             notes.append(f"remote Ollama host {host}: treated as non-local for privacy")
         run_ctx = loaded.get(name)
@@ -281,29 +305,71 @@ def _inventory_ollama(p: Probes) -> tuple[list[ModelEntry], SourceStatus]:
         details = m.get("details") or {}
         if details.get("parameter_size"):
             notes.append(f"{details.get('family', '')} {details['parameter_size']} {details.get('quantization_level', '')}".strip())
-        entries.append(ModelEntry(
-            id=f"ollama/{name}", provider="ollama", route_kind=ROUTE_LOCAL,
-            privacy=PRIVACY_LOCAL if local else PRIVACY_CLOUD,
-            exec_path=_safe_base(base), path_verified=True,
-            path_detail="listed by the running Ollama server",
-            authorized=True, auth_detail="local server, no credential",
-            quota=Quota("n/a", None, None, "local"),
+        common = dict(
+            id=f"ollama/{name}", provider="ollama", exec_path=_safe_base(base),
             capabilities=caps, context_window=ctx,
             context_source="ollama /api/show model_info" if ctx else "",
-            loaded=name in loaded, size_bytes=m.get("size"), notes=tuple(notes),
-        ))
+            loaded=name in loaded, size_bytes=m.get("size"),
+        )
+        if cloud_why:
+            # Served by Ollama's cloud through the local daemon: off-machine, spends the
+            # user's Ollama cloud allowance, so it is a cloud subscription route, never local.
+            notes.append(f"cloud-hosted model ({cloud_why}); prompts leave this machine")
+            entries.append(ModelEntry(
+                route_kind=ROUTE_SUBSCRIPTION, privacy=PRIVACY_CLOUD, path_verified=True,
+                path_detail="listed by the running Ollama server (cloud model)",
+                authorized=True,
+                auth_detail="cloud model; Ollama sign-in state is not inspected",
+                quota=Quota("unknown", None, None, "Ollama cloud allowance is not readable"),
+                notes=tuple(notes), **common))
+            continue
+        entries.append(ModelEntry(
+            route_kind=ROUTE_LOCAL, privacy=PRIVACY_LOCAL if local else PRIVACY_CLOUD,
+            path_verified=True, path_detail="listed by the running Ollama server",
+            authorized=True, auth_detail="local server, no credential",
+            quota=Quota("n/a", None, None, "local"), notes=tuple(notes), **common))
     return entries, SourceStatus(True, f"{len(entries)} model(s) at {host}")
 
 
-def _safe_base(base: str) -> str:
-    scheme = base.split("://", 1)[0] if "://" in base else "http"
-    return f"{scheme}://{_safe_host(base)}"
+def _is_loopback(base: str) -> bool:
+    """True only when the URL's HOST (not its path or userinfo) is a loopback address.
+
+    An SSH tunnel that forwards a remote GPU box to localhost is indistinguishable
+    from a local server here; docs/model-resolver.md says so.
+    """
+    try:
+        host = urlsplit(base).hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _safe_host(base: str) -> str:
-    """host:port only: a base URL may carry credentials in its userinfo."""
-    rest = base.split("://", 1)[-1]
-    return rest.split("@")[-1].split("/")[0]
+    """host[:port] taken from the parsed URL, so userinfo and path never reach output."""
+    try:
+        parts = urlsplit(base)
+        host = parts.hostname or "?"
+        port = parts.port
+    except ValueError:
+        return "?"
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{host}:{port}" if port else host
+
+
+def _safe_base(base: str) -> str:
+    try:
+        scheme = urlsplit(base).scheme or "http"
+    except ValueError:
+        scheme = "http"
+    return f"{scheme}://{_safe_host(base)}"
 
 
 # --------------------------------------------------------- subscription CLIs
@@ -369,6 +435,10 @@ def _inventory_codex(p: Probes, reg: Any, resets: dict[str, float]) -> tuple[lis
     kind = _codex_login_kind(out) if rc == 0 else "none"
     authorized = kind in ("chatgpt", "api_key")
     route = ROUTE_API if kind == "api_key" else ROUTE_SUBSCRIPTION
+    # A Codex API-key login is metered billing, so it follows the API-key rule: a
+    # login is evidence of a key, not of a working path. Credentials are never read,
+    # so no zero-cost ping is possible; only a calibration round-trip verifies it.
+    verified = authorized and kind != "api_key"
     pressure = p.codex_pressure() if kind != "api_key" else None
     quota = _quota_for("codex", resets, pressure=pressure,
                        pressure_detail="estimate from the local request counter" if pressure is not None
@@ -383,9 +453,11 @@ def _inventory_codex(p: Probes, reg: Any, resets: dict[str, float]) -> tuple[lis
         facts = _from_registry(_registry_meta(reg, f"openai/{name}"))
         entries.append(ModelEntry(
             id=f"codex/{name}", provider="codex", route_kind=route, privacy=PRIVACY_CLOUD,
-            exec_path=binary, path_verified=authorized,
-            path_detail="codex CLI is executable and reports a login" if authorized
-            else "codex CLI found but not logged in",
+            exec_path=binary, path_verified=verified,
+            path_detail=("codex CLI is executable and reports a login" if verified
+                         else "codex logs in with an API key (metered): not verified by a round-trip "
+                              "(`llm-router calibrate --allow-paid --models codex/...`)" if authorized
+                         else "codex CLI found but not logged in"),
             authorized=authorized, auth_detail=auth_detail, quota=quota,
             capabilities=facts["caps"], context_window=facts["context"],
             context_source="curated registry" if facts["context"] else "",
@@ -424,7 +496,28 @@ def _inventory_gemini(p: Probes, reg: Any, resets: dict[str, float]) -> tuple[li
 
 # ------------------------------------------------------------------ API keys
 
-def _inventory_api(p: Probes, reg: Any, resets: dict[str, float]) -> tuple[list[ModelEntry], list[str]]:
+def _verify_key(p: Probes, provider: str, env_name: str) -> tuple[bool | None, bool, str, str]:
+    """(path_verified, authorized, path_detail, auth_detail) from a zero-cost list-models call.
+
+    ``None`` for path_verified means "unchanged" (could not verify)."""
+    verdict, status = auth_ping.verify_provider(
+        provider, p.environ.get(env_name, ""), ping=p.ping, now=p.now(), cache=p.ping_cache())
+    if verdict == auth_ping.VERIFIED:
+        return (True, True, f"key accepted by {provider} (HTTP {status} on a list-models call; no tokens used)",
+                f"{env_name} is set and accepted")
+    if verdict == auth_ping.REJECTED:
+        return (False, False, f"key rejected by {provider} (HTTP {status}); not usable",
+                f"{env_name} is set but {provider} rejected it (HTTP {status})")
+    if verdict == auth_ping.UNREACHABLE:
+        return None, True, "unreachable: the list-models call got no response; not verified", f"{env_name} is set"
+    if verdict == auth_ping.UNEXPECTED:
+        return None, True, f"unexpected HTTP {status} from the list-models call; not verified", f"{env_name} is set"
+    return None, True, ("key present; no zero-cost check exists for this provider "
+                        "(`llm-router calibrate --allow-paid --models <one>`)"), f"{env_name} is set"
+
+
+def _inventory_api(p: Probes, reg: Any, resets: dict[str, float], *, verify: bool = False
+                   ) -> tuple[list[ModelEntry], list[str]]:
     names: list[str] = []
     entries: list[ModelEntry] = []
     try:
@@ -435,6 +528,12 @@ def _inventory_api(p: Probes, reg: Any, resets: dict[str, float]) -> tuple[list[
         if not p.environ.get(env_name):
             continue
         names.append(env_name)
+        verified: bool | None = None
+        authorized, path_detail = True, ("key present; not verified yet "
+                                         "(`llm-router inventory --verify`, or `calibrate --allow-paid`)")
+        auth_detail = f"{env_name} is set"
+        if verify:
+            verified, authorized, path_detail, auth_detail = _verify_key(p, provider, env_name)
         for meta in rows:
             if meta.provider != provider and not (
                     provider == "gemini" and meta.provider == "google"):
@@ -442,10 +541,8 @@ def _inventory_api(p: Probes, reg: Any, resets: dict[str, float]) -> tuple[list[
             facts = _from_registry(meta)
             entries.append(ModelEntry(
                 id=meta.id, provider=provider, route_kind=ROUTE_API, privacy=PRIVACY_CLOUD,
-                exec_path=f"api:{provider}", path_verified=False,
-                path_detail=("key present; not verified by a round-trip yet "
-                             "(`llm-router calibrate --allow-paid`)"),
-                authorized=True, auth_detail=f"{env_name} is set",
+                exec_path=f"api:{provider}", path_verified=bool(verified),
+                path_detail=path_detail, authorized=authorized, auth_detail=auth_detail,
                 quota=_quota_for(provider, resets, pressure=None,
                                  pressure_detail="pay-per-use; no quota window",
                                  state_if_ok="metered", unknown_state="metered"),
@@ -464,9 +561,11 @@ def collect_inventory(
     *,
     profiles: dict | None = None,
     previous: Inventory | None = None,
+    verify: bool = False,
 ) -> Inventory:
     """Detect the setup. ``profiles`` defaults to the stored calibration;
-    ``previous`` (an earlier snapshot) marks models that have since vanished."""
+    ``previous`` (an earlier snapshot) marks models that have since vanished;
+    ``verify`` makes one zero-cost list-models call per API-key provider."""
     p = probes or Probes()
     profs = profile_mod.load_profiles() if profiles is None else profiles
     try:
@@ -490,7 +589,7 @@ def collect_inventory(
             found, status = [], SourceStatus(False, f"probe failed: {type(exc).__name__}")
         models.extend(found)
         sources[name] = status
-    api_entries, key_names = _inventory_api(p, reg, resets)
+    api_entries, key_names = _inventory_api(p, reg, resets, verify=verify)
     models.extend(api_entries)
     sources["api_keys"] = SourceStatus(bool(key_names), f"{len(key_names)} provider key(s) set (names only)")
 
