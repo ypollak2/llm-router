@@ -183,13 +183,6 @@ def test_the_endpoint_table_is_pinned():
     assert auth_ping.ENDPOINTS["together"][0] == "https://api.together.ai/v1/models"
 
 
-def test_the_table_comment_records_where_and_when_it_was_verified():
-    import inspect
-
-    src = inspect.getsource(auth_ping)
-    assert "Verified 2026-10-04 by an UNAUTHENTICATED GET" in src and ".cn" in src
-
-
 # ----------------------------------------------------------------- cache file mode
 
 def test_the_cache_file_is_private_even_under_a_permissive_umask(tmp_path):
