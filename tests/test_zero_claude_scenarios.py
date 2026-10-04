@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -17,6 +18,48 @@ pytestmark = pytest.mark.usefixtures("qa_routing_on")
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOK_PATH = ROOT / "src" / "llm_router" / "hooks" / "auto-route.py"
+
+
+def _load_auto_route():
+    """Import auto-route.py in-process (hyphenated filename, not a package
+    module) so the subprocess timeout below can be derived from the hook's
+    own real budget rather than guessed. Same pattern as
+    tests/test_pressure_override_keys.py / tests/test_auto_route_signals.py."""
+    cached = sys.modules.get("auto_route_under_test_zero_claude_scenarios")
+    if cached is not None:
+        return cached
+    spec = importlib.util.spec_from_file_location(
+        "auto_route_under_test_zero_claude_scenarios", HOOK_PATH
+    )
+    assert spec and spec.loader, f"Could not load spec for {HOOK_PATH}"
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["auto_route_under_test_zero_claude_scenarios"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+# Root cause of a chronic CI flake (TimeoutExpired on this subprocess call,
+# seen on main and on PRs #261/#263 across 2026-10-03/04): the old flat
+# timeout=10 had no relationship to how long this hook subprocess is
+# actually allowed to run. Under pytest-xdist (`-n auto --dist loadgroup`),
+# sibling concurrency/timeout-stress tests sharing the same small CI runner
+# core count starve this hook of CPU; in isolation it finishes in well
+# under 1s. The hook's OWN documented budget is `_hook_budget_s()`
+# (55s default: 5s under the 60s timeout Claude Code registers in
+# settings.json) — so the test grants the same budget plus the same 5s
+# margin, instead of picking another arbitrary number.
+HOOK_SUBPROCESS_TIMEOUT = _load_auto_route()._hook_budget_s() + 5
+
+# pyproject.toml sets a blanket pytest-timeout ceiling of 30s for every test
+# in the suite. That is now BELOW our own subprocess timeout above (60s by
+# default), so without an override pytest's own watchdog would cut the test
+# off at 30s before the subprocess timeout we just derived ever gets a
+# chance to matter — silently re-introducing the same flake one layer up.
+# Give these specific tests (the ones that exercise the slow DIRECT-success
+# path via fake_ollama, as opposed to the dead-port tests that fail in
+# milliseconds) the same budget as the subprocess call itself, plus margin
+# for interpreter/pytest overhead around it.
+TEST_TIMEOUT = HOOK_SUBPROCESS_TIMEOUT + 15
 
 
 class _OllamaHandler(BaseHTTPRequestHandler):
@@ -102,7 +145,7 @@ def _run_zero_claude_hook(
         capture_output=True,
         text=True,
         env=env,
-        timeout=10,
+        timeout=HOOK_SUBPROCESS_TIMEOUT,
     )
     assert result.returncode == 0, result.stderr
     if not result.stdout.strip():
@@ -116,6 +159,7 @@ def _run_zero_claude_hook(
     return json.loads(result.stdout)
 
 
+@pytest.mark.timeout(TEST_TIMEOUT)
 def test_simple_prompt_completes_via_external_direct_execution(
     tmp_path: Path, fake_ollama: tuple[str, list[dict]]
 ) -> None:
@@ -194,6 +238,7 @@ def _replaced_flags(home_dir: Path) -> list[bool]:
     return [ns._invocation_replaced_turn(r["msgs"]) for r in records.values()]
 
 
+@pytest.mark.timeout(TEST_TIMEOUT)
 def test_replaced_turn_is_logged_so_northstar_counts_it_direct(
     tmp_path: Path, fake_ollama: tuple[str, list[dict]]
 ) -> None:
@@ -212,6 +257,7 @@ def test_replaced_turn_is_logged_so_northstar_counts_it_direct(
     assert _replaced_flags(tmp_path) == [True]
 
 
+@pytest.mark.timeout(TEST_TIMEOUT)
 def test_echo_draft_is_not_logged_as_replaced(
     tmp_path: Path, fake_ollama: tuple[str, list[dict]]
 ) -> None:
