@@ -490,3 +490,15 @@ def test_configured_model_is_read_from_claude_settings_model_key_only(tmp_path):
     p.write_text("nope")
     assert f(p) is None
     assert f(tmp_path / "missing.json") is None
+
+
+def test_assumed_easy_under_allow_unmeasured_carries_a_warning():
+    res = go("EASY", "", setup(E("ollama/new:7b", ceiling=None, basis="unmeasured")), allow_unmeasured=True)
+    assert res.model == "ollama/new:7b"
+    assert any("EASY is an assumption" in w for w in res.warnings)
+
+
+def test_non_positive_context_need_is_rejected_at_construction():
+    for bad in (0, -5):
+        with pytest.raises(ValueError, match="must be positive"):
+            Needs(context_tokens=bad)

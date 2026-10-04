@@ -61,6 +61,10 @@ class Needs:
     context_tokens: int | None = None
     local_only: bool = False
 
+    def __post_init__(self) -> None:
+        if self.context_tokens is not None and self.context_tokens <= 0:
+            raise ValueError(f"context_tokens must be positive, got {self.context_tokens}")
+
     @classmethod
     def parse(cls, spec: str | None) -> "Needs":
         """``"tools,vision,ctx=64000,local"``. ``long_context`` means 128k tokens."""
@@ -317,6 +321,9 @@ def _tail(configured: str | None, needs: Needs, inv: Inventory, warnings: list[s
 
 def _model_warnings(m: ModelEntry, needs: Needs, t: Tier) -> list[str]:
     out: list[str] = []
+    if m.tier_basis == "unmeasured":
+        out.append(f"{m.id}: no measurement and no registry class; EASY is an assumption "
+                   "(run `llm-router calibrate`)")
     if m.tier_basis == "prior":
         out.append(f"{m.id}: its {m.tier_ceiling} ceiling comes from the curated registry, not a "
                    "measurement on this setup (run `llm-router calibrate`)")
