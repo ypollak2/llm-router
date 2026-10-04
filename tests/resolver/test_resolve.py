@@ -437,6 +437,40 @@ def test_end_to_end_local_calibrated_plus_claude_subscription():
     assert local_only.status == STATUS_NO_ELIGIBLE
 
 
+def test_end_to_end_unauthenticated_claude_cli_is_never_eligible():
+    """Review fix (PR #260): a `claude` binary on PATH whose login is not confirmed
+    (auth status unknown, no oauthAccount marker, no usable usage reading) must not
+    be picked. Before the fix _inventory_claude hard-coded authorized=True and
+    path_verified=True, so this setup routed FRONTIER to claude_subscription/opus."""
+    probes = make_probes(claude="/bin/claude", usage=("unknown", None))
+    inv = inv_mod.collect_inventory(probes, profiles={})
+    claude = [m for m in inv.models if m.id.startswith("claude_subscription/")]
+    assert claude and not any(m.authorized or m.path_verified for m in claude)
+    s = Setup(inv, "anthropic/claude-opus-4-8")
+    res = resolve("FRONTIER", Needs(), s, now=NOW)
+    assert res.status == STATUS_NO_ELIGIBLE and res.model is None
+    assert res.keep_configured == "anthropic/claude-opus-4-8"
+    reasons = rejected(res)["claude_subscription/opus"]
+    assert any("not authorized" in r for r in reasons), reasons
+    assert any("execution path not verified" in r for r in reasons), reasons
+
+
+def test_end_to_end_logged_out_claude_cli_is_never_eligible_even_with_fresh_usage():
+    """`claude auth status` saying loggedIn=false is conclusive: a stale-but-ok usage
+    reading must not override it."""
+    probes = make_probes(claude="/bin/claude", usage=("ok", 0.1), claude_login="logged_out")
+    inv = inv_mod.collect_inventory(probes, profiles={})
+    res = resolve("FRONTIER", Needs(), Setup(inv, "anthropic/claude-opus-4-8"), now=NOW)
+    assert res.status == STATUS_NO_ELIGIBLE and res.model is None
+
+
+def test_end_to_end_logged_in_claude_cli_routes():
+    probes = make_probes(claude="/bin/claude", usage=("unknown", None), claude_login="logged_in")
+    inv = inv_mod.collect_inventory(probes, profiles={})
+    res = resolve("FRONTIER", Needs(), Setup(inv, "anthropic/claude-opus-4-8"), now=NOW)
+    assert res.status == STATUS_ROUTED and res.model == "claude_subscription/opus"
+
+
 # ------------------------------------------------------------------------- CLI
 
 def _cli(monkeypatch, tmp_path, **kw):

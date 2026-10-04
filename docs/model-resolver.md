@@ -23,7 +23,7 @@ thinking, json), and context window with its source.
 | Source | What is read | Never read |
 |---|---|---|
 | Ollama | `/api/tags`, `/api/show` (capabilities, context length), `/api/ps` (loaded) | anything else |
-| Claude Code subscription | `claude` binary path; cached `usage.json` via `proxy/quota_pressure.py` | credentials |
+| Claude Code subscription | `claude` binary path; login state from the first conclusive of: `claude auth status --json` (only the `loggedIn` boolean is parsed; 5 s timeout, allowlisted environment), presence (not value) of an `oauthAccount` key in `~/.claude.json`, a fresh (`ok`) cached `usage.json` via `proxy/quota_pressure.py`; usage pressure from that same file | credentials, tokens, the account email / org fields, the keychain |
 | Codex | binary path, `codex login status` (classified ChatGPT / API key / none; raw output dropped) | credentials |
 | Gemini CLI | binary path, whether a login file exists | its contents |
 | API providers | environment variable NAMES that are set | values |
@@ -137,7 +137,7 @@ and `llm-router resolve --tier X --needs tools,vision [--configured M] [--verify
 | Setup | Routes when | Otherwise |
 |---|---|---|
 | Local only | `calibrate` has measured a model (free); EASY/MEDIUM only, FRONTIER never | no eligible, keep configured |
-| Claude Code subscription only | `claude` CLI present; tiers from the registry class (prior), pressure from usage.json | pressure >= 99% or bench: no eligible |
+| Claude Code subscription only | `claude` CLI present AND a login is confirmed (see above); tiers from the registry class (prior), pressure from usage.json | login not confirmed (`claude CLI found but login not confirmed`), a confirmed logout, pressure >= 99% or bench: no eligible |
 | Codex only | `codex login status` shows a login; bench and request counter honoured | not logged in or benched: no eligible |
 | Gemini CLI only | binary plus a login file | no login: no eligible |
 | API keys only | key set AND verified: `--verify` (zero-cost list-models call, 200) or a `calibrate --allow-paid` round-trip | key only, or rejected (401/403): no eligible |
