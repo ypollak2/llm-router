@@ -53,8 +53,12 @@ key) stay `path verified = no` until checked:
   response or any other status leaves it unverified, labelled as such. The key goes
   only to its own provider's official https endpoint (`resolver/auth_ping.py`), in a
   header, never logged or stored; results are cached for 10 minutes under a
-  12-character fingerprint, never the key. Perplexity has no zero-cost endpoint and
-  is not pinged. Off by default so `inventory --json` is stable.
+  12-character fingerprint (file mode 0600), never the key. Redirects are never followed (a
+  redirect would forward the key to another host) and proxy environment variables are
+  ignored; a 3xx reads as "unexpected status", i.e. unverified. Perplexity has no zero-cost endpoint and
+  is not pinged. Moonshot keys issued on the China platform (`.cn`) are rejected by the
+  international endpoint and read as unverified. The endpoint table is pinned by a test and
+  was checked on 2026-10-04 with a keyless GET per URL (all answer 401/403, none redirect). Off by default so `inventory --json` is stable.
 * `calibrate --allow-paid --models <one>` for a full capability measurement (also
   verifies the path). Codex credentials are never read, so a Codex API-key login can
   only be verified this way.

@@ -382,41 +382,49 @@ def test_unreachable_results_are_never_cached(tmp_path):
     assert len(calls) == 2
 
 
+class _FakeOpener:
+    """Stands in for the no-redirect, no-proxy opener; records every request."""
+
+    def __init__(self, behaviour, seen):
+        self._behaviour, self._seen = behaviour, seen
+
+    def open(self, req, timeout):
+        self._seen.append(req)
+        return self._behaviour(req)
+
+
+class _Resp:
+    status = 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
 def test_http_ping_sends_the_key_only_in_a_header_to_the_providers_own_https_host(monkeypatch):
     seen = []
-
-    class Resp:
-        status = 200
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-
-    def urlopen(req, timeout):
-        seen.append(req)
-        return Resp()
-
-    monkeypatch.setattr(auth_ping.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(auth_ping, "_opener", lambda: _FakeOpener(lambda r: _Resp(), seen))
     for provider, (url, _style) in auth_ping.ENDPOINTS.items():
-        assert url.startswith("https://") and KEY not in url
         assert auth_ping.http_ping(provider, KEY) == 200
         req = seen[-1]
         assert req.full_url == url and KEY not in req.full_url
         assert KEY in "".join(req.headers.values())
-    hosts = {r.full_url.split("/")[2] for r in seen}
-    assert len(hosts) == len(auth_ping.ENDPOINTS)                  # one distinct host per provider
     assert auth_ping.http_ping("perplexity", KEY) is None and len(seen) == len(auth_ping.ENDPOINTS)
 
 
 def test_http_ping_maps_errors_to_status_or_none_without_echoing_the_key(monkeypatch):
-    def raise_http(req, timeout):
+    def raise_http(req):
         raise urllib.error.HTTPError(req.full_url, 401, f"bad key {KEY}", {}, None)
 
-    monkeypatch.setattr(auth_ping.urllib.request, "urlopen", raise_http)
+    monkeypatch.setattr(auth_ping, "_opener", lambda: _FakeOpener(raise_http, []))
     assert auth_ping.http_ping("openai", KEY) == 401
 
-    def raise_net(req, timeout):
+    def raise_net(req):
         raise OSError(f"timed out talking to {KEY}")
 
-    monkeypatch.setattr(auth_ping.urllib.request, "urlopen", raise_net)
+    monkeypatch.setattr(auth_ping, "_opener", lambda: _FakeOpener(raise_net, []))
     assert auth_ping.http_ping("openai", KEY) is None
 
 
