@@ -37,10 +37,67 @@ benchmarks: 20 real tasks with hidden tests (`plan_implement`, n=20), graded Q&A
 
 | ID | Guardrail | Definition |
 |---|---|---|
-| G1 | Added latency | Hook p95, proxy decision p95 (proxy path <= +200 ms). |
-| G2 | Silent failures per 100 calls | fail-open, truncation/overflow, Ollama hung — the rate must not go up, and every instance must be recorded. |
+| G1 | Added latency | Hook wall time, p50 / p95 per hook against that hook's budget; proxy decision p95 (proxy path <= +200 ms). |
+| G2 | Silent failures per 100 calls | Fail-open events per 100 calls over the window, overall, per code and the top five codes — the rate must not go up, and every instance must be recorded. Truncation/overflow and Ollama-hung are not wired into this counter yet. |
 | G3 | Ledger completeness | >= 99% of proxy rows with every decision field that can apply to them recorded (definition below). |
-| G4 | Wrongly benched providers | = 0. |
+| G4 | Wrongly benched providers | Wrong benches per 100 benches, with n; target = 0. A bench is wrong when the owner clears it with `llm-router provider unban` before it lapses, or a call to that provider succeeds before its reset time. |
+
+### How G1, G2 and G4 are measured
+
+`llm-router kpi` prints all three. Each line carries its n and window, and any case the
+data cannot support reads `not measurable: <reason>` or `too few to tell (n=N)` (N < 50),
+never a number standing in for "nothing happened".
+
+**G1 — hook latency.** Every instrumented hook appends one line per invocation to
+`hook_latency.jsonl` in the state directory: hook, event, `elapsed_ms`, `timed_out`, `ts`.
+`elapsed_ms` runs from the hook script's first statement (before its first `llm_router`
+import) to process exit; interpreter start-up before that line and teardown after exit are
+outside it. The write is one `O_APPEND` write with no lock, the file is capped at two
+generations of `LLM_ROUTER_HOOK_LATENCY_MAX_BYTES` (default 4 MiB), and
+`LLM_ROUTER_HOOK_LATENCY=off` disables it.
+
+- *Budgets* live in one table, `llm_router.hook_latency.HOOK_BUDGETS_MS`: `agent-route`
+  320 s and `auto-route` 60 s (the registered host timeouts); the rest are declared, not
+  derived — there was no live distribution to derive them from: 2 s for the per-prompt and
+  per-tool-call hooks (`status-bar`, `enforce-route`, `subagent-start`, `agent-depth-release`,
+  `cc-usage-track`), 5 s for `usage-refresh`, `playwright-compress` and `bash-compress`, 10 s
+  for `session-start` and `session-end`. Re-set them from the first week of real p95s. An
+  unlisted hook is held to 5 s.
+- `timed_out` means `elapsed_ms >= budget`. A hook the host kills at its timeout never
+  reaches exit and writes no row; kills are shown beside the log from the fail-open ledger
+  (`CHZ-HOOK-KILLED`).
+- *Not session-kind filtered*: a row carries no session id.
+- *Coverage*: the 12 hooks the installer registers for Claude Code, except `context-capture`.
+  It imports `llm_router` only inside functions, so arming the recorder would add the package
+  import to every call that otherwise exits early; it needs a stdlib-only recorder first. A
+  test fails if the installer registers a hook that is neither instrumented nor that one
+  named exception. `codex-stop.py` and the other host-specific scripts are not covered.
+- *Cost of recording it* is the PR's own guardrail, measured and stated in
+  [`../KPI-LEDGER.md`](../KPI-LEDGER.md): one `O_APPEND` write of ~110 bytes at exit, no lock,
+  no read.
+
+**G2 — silent failures per 100 calls.** Every `fail_open.jsonl` row now carries `ts`
+(`fail_open.jsonl` had no timestamp before; the field is new, not reused). The rate is
+timestamped events in the window / calls in the window x 100, overall and per code, with the
+top five codes listed. *Calls* are the instrumented-hook invocations plus the proxy ledger
+rows in the window, all session kinds — a fail-open row names no session, so the numerator
+cannot be filtered to organic and the denominator must not be. The window starts no earlier
+than the first timestamped evidence (a timestamped fail-open row or a recorded hook call),
+so the denominator never counts calls from a period the numerator could not see. Rows from
+before the timestamp existed cannot be placed in any window: they stay in a labelled
+`all-time:` line and are never guessed into one. A zero is reported as `0.00` only once a
+timestamped event is known to have been written; before that it is `not measurable`.
+
+**G4 — wrongly benched providers.** `provider_bench.jsonl` records every bench (provider,
+trigger `header` | `cli` | `text`, the persisted reset time, `ts`), every owner unban and every
+success of a provider while it was benched. The rate is wrong benches / benches recorded in
+the window x 100. A bench is judged only over the span it was the one in force (a later bench
+of the same provider replaces it), and a bench that is both unbanned and succeeded counts
+once. Zero benches in the window is `not measurable`. Below 50 benches the line gives the
+counts ("n=3 benches; 1 shown wrong so far"), not a rate. Benches still in force are reported
+separately: they can still turn out wrong, so the wrong count is a floor until they lapse. A
+call that was already in flight when a bench was recorded and then succeeded counts under the
+second rule. The providers benched right now are kept as a detail line.
 
 ### G3 in detail
 
@@ -86,8 +143,12 @@ directory does not change kind. The prompt hook tags a session at its next promp
 One line per KPI: `measured`, `blind` or `stale`, the one reason, and the n. **Blind** = no number (nothing to
 count, below 50, or not instrumented) or a number whose data carries no timestamp. **Stale** = a number whose newest
 data point is older than 48 h (live ledgers; `--stale-hours` to change) or 30 d (the frozen benchmark behind O2 and
-D5). G4 is a snapshot of the moment and G2 an all-time count, so their "measured" says so in its reason. Exit code 0 even when KPIs are blind; `--strict` exits 1 if any is blind (a stale KPI does not trip it). G1's
-hook-side latency is not instrumented anywhere, so it is permanently blind and `--strict` will not pass until it is.
+D5). Exit code 0 even when KPIs are blind; `--strict` exits 1 if any is blind (a stale KPI does not trip it).
+G1 (hook), G2 and G4 are read from their own logs (see "How G1, G2 and G4 are measured"); their newest data
+point is the newest hook row, the newest call in the G2 denominator, and the newest bench in the window. G1 (hook)
+is blind until a hook has recorded 50 invocations in the window. G4 is blind until 50 benches are recorded in the
+window, and benches are rare, so expect it blind for a long while: its line still gives the counts ("n=3 benches;
+1 shown wrong so far") and an old newest bench is not read as a stopped feed.
 
 ## Change rule
 
