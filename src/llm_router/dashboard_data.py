@@ -1249,6 +1249,44 @@ def summary(period: str, *, db_path: Path | str | None = None) -> Summary:
     )
 
 
+def newest_timestamp(*, db_path: Path | str | None = None) -> float | None:
+    """Epoch seconds (UTC) of the newest row in any table :func:`query_window`
+    reads, or ``None`` when there is no row or the DB cannot be read.
+
+    For ``llm-router kpi --health``: how old is the newest data point behind the
+    savings figure. Read-only (a ``mode=ro`` connection: this never creates the
+    DB or its WAL files). Each table is queried separately because the writers
+    disagree on the text format (``savings_stats`` stores ISO-8601 with a ``T``
+    and a UTC offset, the others SQLite's ``YYYY-MM-DD HH:MM:SS``), so a single
+    ``MAX`` across tables would compare the two formats as strings."""
+    db = Path(db_path) if db_path else _default_db_path()
+    if not db.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    newest: float | None = None
+    try:
+        for table in (_LEGACY_TABLE, *_PLATFORM_TABLES, _JSONL_TABLE):
+            if not _table_exists(conn, table) or "timestamp" not in _columns(conn, table):
+                continue
+            raw = conn.execute(f"SELECT MAX(timestamp) FROM {table}").fetchone()[0]  # nosec B608 - module constants
+            if not isinstance(raw, str):
+                continue
+            try:
+                when = datetime.fromisoformat(raw.replace(" ", "T"))
+            except ValueError:
+                continue
+            ts = (when if when.tzinfo else when.replace(tzinfo=timezone.utc)).timestamp()
+            newest = ts if newest is None else max(newest, ts)
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    return newest
+
+
 # ── The money line ────────────────────────────────────────────────────────────
 #
 # Every surface that prints money renders it through here. INV-COST-004 already
