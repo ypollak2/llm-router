@@ -82,6 +82,7 @@ from llm_router.proxy.loop_guard import (
 from llm_router.proxy.cache_cost import Stickiness, conversation_key
 from llm_router.proxy.steps import STEP_CLASSES, classify_text, prev_tools, session_id_of, step_class
 from llm_router import session_kind
+from llm_router.proxy import cost_accounting
 from llm_router.proxy.tiers import REASON_DECISION_ERROR, REWRITE_HAIKU, ClaudeTierPolicy
 from llm_router.proxy.translate import (
     for_haiku,
@@ -291,7 +292,15 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
 
         local_agent = LocalAgent(cfg.local_agent, http=http, ollama_url=_ollama_url)
 
+    prefixes = cost_accounting.PrefixTracker()
+
     def write(row: dict) -> None:
+        # Real Anthropic spend per call (PR 8). Never lets accounting cost a row.
+        try:
+            cost_accounting.annotate(row, prefixes.get(row.get("session_id")))
+            prefixes.update(row)
+        except Exception as exc:  # noqa: BLE001 - the ledger row matters more than its cost fields
+            failopen.record("LR-FO-PROXY-LEDGER-COST", exc)
         ledger.write_row(row, cfg.ledger_path)
 
     async def try_serve(body: dict, row: dict) -> dict | None:

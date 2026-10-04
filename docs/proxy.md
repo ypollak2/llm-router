@@ -356,6 +356,24 @@ escalating only at a cold point or a clear rise in complexity. See
 `~/.rsi/research/llm-router-cursor-parity/p12b-conversation-tiers-ab.md` for
 the paired A/B that gates making this the default.
 
+## Cost accounting: real Anthropic spend (`proxy.cost_accounting`)
+
+Claude Code's own `total_cost_usd` is **phantom** on a proxied session: it prices locally
+served tokens at list price (2026-10-03: $21.09 over 178 trials against a real spend of
+$0). The ledger is the source of truth. Every row carries `served_by` (`local` |
+`anthropic`), `anthropic_usage` (the real usage with the cache read/write split; all zeros
+when local, `null` when unknown), `anthropic_cost_usd` and `counterfactual_cost_usd` (a
+step-level estimate on the requested model; not summed). `proxy_session_cost()` gives per
+session the real spend, the estimated avoided amount and the Claude Code figure labelled
+`unreliable`. `llm-router kpi` prints O1 as `reconciled:` when at least 50 ledger calls are
+complete and consistent, else keeps the `est.` figure.
+
+`python scripts/reconcile_proxy_cost.py [--exclude SID ...]` (read-only) compares the
+ledger with transcript totals (sub-agent transcripts included): a fully forwarded session
+must match within 3%, a fully local one must carry exactly 0 Anthropic tokens. Calls the
+ledger bills that the transcript never records (title/side calls, interrupted turns) show
+as `not_in_transcript` and are real spend.
+
 ## Benchmark
 
 `scripts/bench_proxy_steps.py` replays the golden fixture tasks through the

@@ -80,6 +80,14 @@ Claude-tier rewrite fields (only when the proxy runs with ``--tiers on`` or
                         ``quota_pressure`` step; the others change nothing
   tier_decision_s       time the decision added
 
+Cost fields, on EVERY row (``proxy.cost_accounting``; null = unknown, never 0):
+  served_by, anthropic_usage, anthropic_cost_usd, counterfactual_cost_usd
+                        which side answered, the REAL Anthropic usage (zeros
+                        when local), its price, and the step's cost on the
+                        requested model. Claude Code's own ``total_cost_usd``
+                        is phantom on a proxied session: the ledger is the
+                        source of truth.
+
 ``northstar`` joins ``msg_id`` of served rows to transcript assistant records
 (``message.id``) to count those turns as routed.
 

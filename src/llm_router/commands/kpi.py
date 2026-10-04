@@ -28,7 +28,11 @@ SCOPE, stated rather than implied:
   ``dashboard_data.summary()``, the same canonical accessor every other
   savings surface uses (see ``commands/savings_report.py``) -- that table
   predates session tagging and carries no ``session_kind`` column. Shown as
-  "est." per the 2026-09-27 display rule, with its own note.
+  "est." per the 2026-09-27 display rule, with its own note. Where the proxy
+  ledger has >= ``MIN_N`` calls whose real Anthropic usage is recorded and
+  consistent (``proxy.cost_accounting``), O1 prints those RECONCILED figures
+  instead (real spend + counterfactual avoided); Claude Code's own
+  ``total_cost_usd`` is phantom on a proxied session and is never read.
 * **O2 and D5 need a frozen benchmark.** They do not come from live traffic.
   Configure ``LLM_ROUTER_KPI_BENCHMARK_PATH`` to a JSON file shaped
   ``{"generated_at": "...", "o2": {"acceptable_rate": 0.0-1.0, "n": int},
@@ -257,7 +261,42 @@ def _period_for_days(days: int) -> str:
     return "all"
 
 
+def _o1_reconciled(days: int) -> dict | None:
+    """O1 from the proxy ledger's REAL per-call usage (``proxy.cost_accounting``),
+    over sessions whose every row carries cost fields and passes the ledger's
+    own consistency check. ``None`` when fewer than ``MIN_N`` calls are
+    reconciled: the caller then keeps the "est." figure. Claude Code's own
+    ``total_cost_usd`` is never read here (phantom on a proxied session)."""
+    from llm_router.proxy import cost_accounting as ca
+    from llm_router.proxy import ledger as pl
+
+    rows = pl.read_rows(days=days)
+    by_session: dict[str, list[dict]] = {}
+    for r in rows:
+        by_session.setdefault(r.get("session_id") or "", []).append(r)
+    good = [rs for rs in by_session.values()
+            if all(ca.has_cost_fields(r) for r in rs) and ca.proxy_session_cost(rs)["reconciled"]]
+    calls = sum(len(rs) for rs in good)
+    if calls < MIN_N:
+        return None
+    sums = [ca.proxy_session_cost(rs) for rs in good]
+    real = sum(x["real_anthropic_usd"] for x in sums)
+    avoided = sum(x["est_avoided_usd"] for x in sums)
+    legacy = len(rows) - calls
+    value = (f"reconciled: ${avoided:.2f} avoided (counterfactual on the ledger's real usage), "
+             f"real Anthropic spend ${real:.2f} [period={_period_for_days(days)}; {len(good)} session(s), "
+             f"n={calls} calls; {legacy} ledger call(s) not reconciled, excluded; NOT session-kind filtered]")
+    return _measured(value, calls, reconciled=True, avoided_usd=round(avoided, 4),
+                      real_anthropic_usd=round(real, 4), sessions=len(good))
+
+
 def _o1_quota_avoided(days: int) -> dict:
+    try:
+        reconciled = _o1_reconciled(days)
+    except Exception:  # noqa: BLE001 -- a ledger read problem keeps the "est." figure
+        reconciled = None
+    if reconciled is not None:
+        return reconciled
     try:
         from llm_router.dashboard_data import summary
 
@@ -272,7 +311,7 @@ def _o1_quota_avoided(days: int) -> dict:
         return _not_measurable(f"no routed calls with a recorded saving in period={period}")
     display = s.display()
     note = (f"{display} [period={period}; NOT session-kind filtered -- usage.db predates "
-            "session tagging]")
+            "session tagging; not reconciled against the proxy ledger]")
     if n < MIN_N:
         return _too_few(n) | {"value": f"{TOO_FEW} ({display}, n={n})"}
     return _measured(note, n, estimated_usd=s.estimated_usd)

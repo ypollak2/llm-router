@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- proxy: real Anthropic spend per call and per session. Each ledger row records
+  `served_by`, the real Anthropic usage (cache read/write split; zeros when served
+  locally), its cost and a counterfactual; `proxy_session_cost()` reports real spend, the
+  estimated avoided amount and Claude Code's phantom `total_cost_usd` labelled
+  `unreliable`. `llm-router kpi` O1 prints reconciled figures when the ledger supports
+  them. `scripts/reconcile_proxy_cost.py` checks the ledger against transcripts.
 - `llm-router pi`: runs the Pi coding agent (`@earendil-works/pi-coding-agent`)
   fully locally on one Ollama model, with a profile of Pi extensions in
   `integrations/pi/` that close the gaps the 2026-10-04 harness-parity probes found
