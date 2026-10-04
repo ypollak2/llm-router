@@ -4237,6 +4237,17 @@ def main() -> None:
             from llm_router import failopen as _fo
             _fo.record("CHZ-FO-HOOK-SESSION-POINTER", _exc)
             pass
+        # KPI session tag, lazily: SessionStart tags a session once, so a session
+        # that was already running when tagging shipped (or is resumed without a
+        # SessionStart) was never tagged. Measured 2026-10-04: 311 of 2,737 proxy
+        # rows (11.4%) carried a null session_kind for that reason. A stat when
+        # the tag exists: tag_session never overwrites one.
+        try:
+            from llm_router import session_kind as _session_kind
+            _session_kind.tag_session(session_id, hook_input.get("cwd") or None)
+        except Exception as _exc:                                    # noqa: BLE001
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-SESSION-KIND-TAG", _exc)
     zero_claude = _zero_claude_enabled()
 
     # ── Scoped zero-Claude for edit-class prompts (LLM_ROUTER_ZERO_CLAUDE_SCOPE=edit) ──
