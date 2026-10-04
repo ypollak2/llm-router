@@ -16,7 +16,8 @@ always present; an unknown value is ``null``, never 0):
                           and write split (``ledger.normalize_usage``). All
                           zeros when served locally or when Anthropic answered
                           with an error status (nothing is billed). ``null``
-                          when a 2xx call has no usage on record (unknown).
+                          when a 2xx call has no usage on record or its stream
+                          was cut before the terminal message_delta (unknown).
   anthropic_cost_usd      that usage priced at the model it was sent to;
                           0.0 when served locally; ``null`` when unpriced.
   counterfactual_cost_usd what THIS step would have cost on the model the
@@ -59,16 +60,21 @@ def served_by(row: dict) -> str:
 
 
 def real_usage(row: dict) -> dict | None:
-    """The row's REAL Anthropic usage; zeros for a locally served row, ``None``
-    when unknown (a 2xx forwarded call that recorded no usage)."""
+    """The row's REAL Anthropic usage; zeros for a locally served row or an
+    error reply (nothing is billed), ``None`` when unknown: a 2xx forwarded
+    call that recorded no usage, or whose stream was cut (``stop_reason`` None:
+    the usage seen is a placeholder and the output under-counted). Either
+    signal alone makes the call unknown, so one bad signal cannot pass."""
     if served_by(row) == SERVED_BY_LOCAL:
         return dict(_ZERO_USAGE)
-    if isinstance(row.get("usage"), dict):
-        return ledger.normalize_usage(row["usage"])
     status = row.get("upstream_status")
     if isinstance(status, int) and status >= 400:
         return dict(_ZERO_USAGE)  # an error response bills nothing
-    return None
+    if not isinstance(row.get("usage"), dict):
+        return None
+    if "stop_reason" in row and row["stop_reason"] is None:
+        return None  # truncated: the terminal message_delta never arrived
+    return ledger.normalize_usage(row["usage"])
 
 
 def row_cost(row: dict) -> float | None:
@@ -106,11 +112,12 @@ def counterfactual(row: dict, prefix_ctx: int) -> float | None:
 
 
 def annotate(row: dict, prefix_ctx: int = 0) -> dict:
-    """Add the per-call cost fields to ``row`` in place and return it."""
+    """Add the per-call cost fields to ``row`` in place and return it. All four
+    values are computed before any is assigned: if one raises, the row gets
+    none of them (and ``has_cost_fields`` is False), never a partial set."""
     usage = real_usage(row)
-    row["served_by"] = served_by(row)
-    row["anthropic_usage"] = usage
-    if row["served_by"] == SERVED_BY_LOCAL:
+    by = served_by(row)
+    if by == SERVED_BY_LOCAL:
         cost: float | None = 0.0
     elif usage is None:
         cost = None
@@ -118,8 +125,10 @@ def annotate(row: dict, prefix_ctx: int = 0) -> dict:
         cost = 0.0
     else:
         cost = ledger.anthropic_cost(dict(row, usage=usage))
-    row["anthropic_cost_usd"] = None if cost is None else round(cost, 6)
     cf = counterfactual(row, prefix_ctx)
+    row["served_by"] = by
+    row["anthropic_usage"] = usage
+    row["anthropic_cost_usd"] = None if cost is None else round(cost, 6)
     row["counterfactual_cost_usd"] = None if cf is None else round(cf, 6)
     return row
 
@@ -146,8 +155,12 @@ class PrefixTracker:
         self._ctx[key] = ctx
 
 
+COST_FIELDS = ("served_by", "anthropic_usage", "anthropic_cost_usd", "counterfactual_cost_usd")
+
+
 def has_cost_fields(row: dict) -> bool:
-    return "served_by" in row and "anthropic_usage" in row
+    """All four per-call fields are present (null is a value: it means unknown)."""
+    return all(k in row for k in COST_FIELDS)
 
 
 def row_complete(row: dict) -> bool:

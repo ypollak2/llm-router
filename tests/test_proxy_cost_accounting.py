@@ -14,6 +14,7 @@ import json
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 from llm_router.proxy import cost_accounting as ca
@@ -36,7 +37,7 @@ def _usage(inp=10, out=100, read=40_000, w5=0, w1=2_000):
 
 def _fwd(sid="s1", msg="m1", usage=None, ts=1.0, **kw):
     r = {"ts": ts, "session_id": sid, "msg_id": msg, "decision": "forwarded", "requested_model": MODEL,
-         "served_model": MODEL, "upstream_status": 200, "usage": ledger.normalize_usage(usage or _usage())}
+         "served_model": MODEL, "upstream_status": 200, "stop_reason": "end_turn", "usage": ledger.normalize_usage(usage or _usage())}
     r.update(kw)
     return r
 
@@ -80,6 +81,32 @@ def test_unknown_usage_is_null_not_zero_but_an_error_status_bills_nothing():
     assert unreachable["anthropic_cost_usd"] == 0.0 and not any(unreachable["anthropic_usage"].values())
 
 
+def test_a_truncated_row_is_unknown_even_when_it_carries_placeholder_usage():
+    """stop_reason None on a 2xx = the stream was cut: the usage is message_start's
+    placeholder (output_tokens=1), so it must not price as a known call."""
+    r = ca.annotate(_fwd(stop_reason=None, usage=_usage(out=1)))
+    assert r["anthropic_usage"] is None and r["anthropic_cost_usd"] is None
+    assert ca.row_complete(r) is False
+    assert ca.proxy_session_cost([ca.annotate(_fwd(msg="ok")), r])["reconciled"] is False
+    # an error reply with no stop_reason is still a known zero: nothing is billed
+    err = ca.annotate(_fwd(stop_reason=None, upstream_status=529, usage=_usage(0, 0, 0, 0, 0)))
+    assert err["anthropic_cost_usd"] == 0.0 and ca.row_complete(err)
+
+
+def test_annotate_failure_leaves_no_partial_fields_and_the_row_is_not_annotated(monkeypatch):
+    def boom(row, prefix_ctx):
+        raise RuntimeError("counterfactual blew up")
+
+    monkeypatch.setattr(ca, "counterfactual", boom)
+    row = _fwd()
+    with pytest.raises(RuntimeError):
+        ca.annotate(row)
+    assert not any(k in row for k in ca.COST_FIELDS)
+    assert ca.has_cost_fields(row) is False
+    # and a row carrying only some of the four does not count as annotated either
+    assert ca.has_cost_fields({"served_by": "anthropic", "anthropic_usage": None}) is False
+
+
 def test_fallback_after_a_failed_local_attempt_is_anthropic_spend():
     r = ca.annotate(_fwd(decision="fallback", reason="validation", backend_usage={"output_tokens": 9}))
     assert r["served_by"] == "anthropic" and r["anthropic_cost_usd"] > 0
@@ -107,6 +134,121 @@ async def test_proxy_writes_cost_fields_on_forwarded_fallback_and_served_rows(tm
     assert len(up.requests) == 1  # the served step never reached Anthropic
     s = ca.proxy_session_cost(_rows(tmp_path))
     assert s["reconciled"] and s["real_anthropic_usd"] == pytest.approx(fb["anthropic_cost_usd"], abs=1e-4)
+
+
+def _sse(events: list[tuple[str, dict]]) -> bytes:
+    return "".join(f"event: {n}\ndata: {json.dumps(d)}\n\n" for n, d in events).encode()
+
+
+_START = ("message_start", {"type": "message_start", "message": {
+    "id": "msg_x", "type": "message", "role": "assistant", "model": "claude-sonnet-5",
+    "content": [], "stop_reason": None,
+    "usage": {"input_tokens": 3, "cache_read_input_tokens": 43_500, "cache_creation_input_tokens": 800,
+              "output_tokens": 1}}})
+_START_NO_USAGE = ("message_start", {"type": "message_start", "message": {
+    "id": "msg_x", "type": "message", "role": "assistant", "model": "claude-sonnet-5",
+    "content": [], "stop_reason": None}})
+_BLOCK = ("content_block_start", {"type": "content_block_start", "index": 0,
+                                  "content_block": {"type": "text", "text": ""}})
+_DELTA_NO_USAGE = ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}})
+_STOP = ("message_stop", {"type": "message_stop"})
+
+
+class _CutStream(httpx.AsyncByteStream):
+    """An upstream body that raises ``httpx.ReadError`` after its first chunk."""
+
+    def __init__(self, first: bytes):
+        self.first = first
+
+    async def __aiter__(self):
+        yield self.first
+        raise httpx.ReadError("connection reset")
+
+
+def _cut_upstream(first: bytes):
+    return lambda request: httpx.Response(200, stream=_CutStream(first),
+                                          headers={"content-type": "text/event-stream"})
+
+
+def _json_upstream(body: dict, status=200):
+    return lambda request: httpx.Response(status, stream=httpx.ByteStream(json.dumps(body).encode()),
+                                          headers={"content-type": "application/json"})
+
+
+def _sse_upstream(events):
+    return lambda request: httpx.Response(200, stream=httpx.ByteStream(_sse(events)),
+                                          headers={"content-type": "text/event-stream"})
+
+
+_LIVE_UNKNOWN = {
+    "sse_message_start_without_usage": (
+        _sse_upstream([_START_NO_USAGE, _BLOCK, _DELTA_NO_USAGE, _STOP]), "no_usage"),
+    "json_200_without_usage_key": (
+        _json_upstream({"id": "msg_j", "type": "message", "model": "claude-sonnet-5",
+                        "content": [], "stop_reason": "end_turn"}), "no_usage"),
+    "upstream_read_error_after_first_chunk": (_cut_upstream(_sse([_START_NO_USAGE])), "no_usage"),
+    "sse_cut_after_message_start": (_sse_upstream([_START, _BLOCK]), "truncated"),
+    "read_error_after_message_start": (_cut_upstream(_sse([_START, _BLOCK])), "truncated"),
+}
+
+
+async def _live_forward(tmp_path, upstream, sid):
+    app = _app(tmp_path, upstream, steps=frozenset())
+    try:
+        await _post(app, dict(_req(), metadata={"user_id": json.dumps({"session_id": sid})}))
+    except httpx.ReadError:
+        pass  # the cut stream propagates to the client; the ledger row is what matters
+    return [r for r in _rows(tmp_path) if r.get("session_id") == sid]
+
+
+@pytest.mark.parametrize("case", sorted(_LIVE_UNKNOWN))
+async def test_live_proxy_records_unknown_not_zero_for_a_reply_with_no_usable_usage(tmp_path, case):
+    """Through the real proxy (the shape a row actually has on disk): usage that
+    never arrived, or a stream cut before the terminal message_delta, is UNKNOWN."""
+    upstream, why = _LIVE_UNKNOWN[case]
+    rows = await _live_forward(tmp_path, upstream, "live-unk")
+    (row,) = rows
+    assert row["decision"] == "forwarded" and row["upstream_status"] == 200
+    assert row["usage"] is None and row["usage_unknown"] == why
+    assert row["served_by"] == "anthropic"
+    assert row["anthropic_usage"] is None, "unknown must be null, not zeros"
+    assert row["anthropic_cost_usd"] is None
+    s = ca.proxy_session_cost(rows)
+    assert s["reconciled"] is False and s["unknown_calls"] == 1
+    assert ca.check_forwarded(rows, 1.0)["ok"] is False
+
+
+async def test_live_proxy_complete_reply_is_still_known_and_reconciled(tmp_path):
+    rows = await _live_forward(tmp_path, Upstream(), "live-ok")
+    (row,) = rows
+    assert row["usage"]["cache_read_input_tokens"] == 43_500 and row["stop_reason"] == "end_turn"
+    assert row["anthropic_cost_usd"] > 0 and "usage_unknown" not in row
+    assert ca.proxy_session_cost(rows)["reconciled"] is True
+
+
+async def test_live_proxy_error_status_is_a_known_zero_not_unknown(tmp_path):
+    rows = await _live_forward(tmp_path, _json_upstream({"type": "error", "error": {"type": "overloaded"}}, 529),
+                               "live-err")
+    (row,) = rows
+    assert row["upstream_status"] == 529 and row["anthropic_cost_usd"] == 0.0
+    assert not any(row["anthropic_usage"].values())
+    assert ca.proxy_session_cost(rows)["reconciled"] is True
+
+
+async def test_kpi_o1_does_not_print_reconciled_for_live_rows_with_unknown_usage(tmp_path, kpi_env):
+    """60 live-proxy rows whose usage never arrived must not read as
+    'reconciled: $0.00 ... real Anthropic spend $0.00'."""
+    from llm_router.commands import kpi
+
+    rows = []
+    for i in range(60):
+        rows += await _live_forward(tmp_path / f"d{i}", _LIVE_UNKNOWN["json_200_without_usage_key"][0], "kpi-live")
+    assert len(rows) == 60 and all(r["anthropic_usage"] is None for r in rows)
+    for r in rows:
+        r["ts"] = time.time()
+    _write(rows)
+    o1 = kpi.compute_scorecard(days=7)["kpis"]["O1"]
+    assert "reconciled:" not in o1["value"] and not o1.get("reconciled")
 
 
 async def test_a_cost_accounting_bug_never_loses_the_ledger_row(tmp_path, monkeypatch):

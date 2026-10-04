@@ -273,6 +273,8 @@ def _o1_reconciled(days: int) -> dict | None:
     rows = pl.read_rows(days=days)
     by_session: dict[str, list[dict]] = {}
     for r in rows:
+        # Rows without a session_id share one "" bucket: a single bad row there
+        # vetoes the others, which fails safe (they fall back to the est. figure).
         by_session.setdefault(r.get("session_id") or "", []).append(r)
     good = [rs for rs in by_session.values()
             if all(ca.has_cost_fields(r) for r in rs) and ca.proxy_session_cost(rs)["reconciled"]]

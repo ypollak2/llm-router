@@ -555,8 +555,19 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             response_model = data.get("model") if isinstance(data, dict) else None
         if isinstance(response_model, str):
             row["response_model"] = response_model
-        row["usage"] = ledger.normalize_usage(usage)
         row["stop_reason"] = stop
+        status = row.get("upstream_status")
+        if isinstance(status, int) and 200 <= status < 300 and (not usage or stop is None):
+            # A 2xx reply whose usage never arrived (no usage in the body or
+            # SSE) or whose stream ended before the terminal message_delta (cut,
+            # aborted, upstream read error): Anthropic billed SOMETHING, and what
+            # the proxy saw is a placeholder (message_start carries output_tokens=1).
+            # Unknown is null, never zeros (normalize_usage(None) is all zeros),
+            # so cost accounting cannot report it as a known $0.
+            row["usage"] = None
+            row["usage_unknown"] = "no_usage" if not usage else "truncated"
+        else:
+            row["usage"] = ledger.normalize_usage(usage)
         if msg_id and not row.get("msg_id"):
             row["msg_id"] = msg_id
 
