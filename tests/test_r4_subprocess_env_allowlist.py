@@ -160,7 +160,11 @@ def test_the_broader_inheritance_count_is_recorded():
     # would risk breaking the keychain read, not reduce credential exposure
     # (it inherits the operator's own already-trusted environment, not a
     # model-chosen command's).
-    assert len(inheriting) <= 58, (
+    # 58 -> 59 (llm-router pi): `pi_version()` in llm_router/commands/pi.py runs the
+    # fixed argv `<pi> --version` (the operator's own LLM_ROUTER_PI_BIN or `pi` on
+    # PATH) to warn about an untested Pi version. Not model- or caller-supplied argv;
+    # Pi reads its config from the environment, so it is left inheriting.
+    assert len(inheriting) <= 59, (
         f"{len(inheriting)} subprocess sites inherit the environment, up from "
         "51. If a new one runs caller-supplied argv, add it to "
         "MODEL_ARGV_SITES; if not, raise this number deliberately."
