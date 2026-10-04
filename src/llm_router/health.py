@@ -245,6 +245,11 @@ class HealthTracker:
         Args:
             provider: Provider name.
         """
+        # KPI G4: a success while the provider is benched means the bench was
+        # wrong. Reads the small reset file; writes only when it is benched.
+        from llm_router import provider_reset
+
+        provider_reset.note_provider_success(provider)
         had_failures = self._get(provider).consecutive_failures > 0
         self._get(provider).record_success()
         if had_failures:  # a breaker just cleared — refresh the shared snapshot

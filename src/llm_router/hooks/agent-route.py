@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 10
+# llm_router-hook-version: 11
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -45,6 +45,27 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+# -- KPI G1: record how long this invocation ran (llm_router.hook_latency) -----
+# The clock starts BEFORE the first llm_router import, so the package import is
+# inside the measurement. Armed only when run as a script: a test that imports
+# this file must not register an exit-time write. Fail-open: no llm_router on
+# the path means no row for this run; any other error is reported on stderr
+# (never stdout, which the host parses) and the hook carries on.
+import time as _hl_time
+
+_HOOK_T0 = _hl_time.monotonic()
+if __name__ == "__main__":
+    try:
+        from llm_router import hook_latency as _hook_latency
+
+        _hook_latency.begin("agent-route", "PreToolUse", _HOOK_T0)
+    except ImportError:
+        pass  # llm_router is not importable on this host: no recorder, no row
+    except Exception as _hl_exc:  # noqa: BLE001 -- timing must never break the hook
+        import sys as _hl_sys
+
+        print(f"llm-router: hook latency not recorded ({type(_hl_exc).__name__})", file=_hl_sys.stderr)
 
 
 # ── Registered-tool surface (CHZ-SURF-01) ────────────────────────────────────
@@ -1238,7 +1259,8 @@ def _bench_after_quota_failure(provider_key: str, text: str) -> float | None:
                 provider_key, RuntimeError(text), text=text)
         if _QUOTA_RE.search(text):
             until = time.time() + _UNPARSEABLE_QUOTA_BENCH_SEC
-            if provider_reset.record_provider_reset(provider_key, until, reason=text):
+            # source="cli": the text is a Codex CLI run's output (KPI G4 bench log).
+            if provider_reset.record_provider_reset(provider_key, until, reason=text, source="cli"):
                 return until
     except Exception as exc:
         try:
@@ -1247,6 +1269,22 @@ def _bench_after_quota_failure(provider_key: str, text: str) -> float | None:
         except Exception:
             pass
     return None
+
+
+def _note_codex_success(model: str) -> None:
+    """KPI G4: a Codex call succeeded. If that model's bench (or the whole
+    account's) was in force, the bench was wrong -- the model is logged. Never
+    raises; a failure is counted, not swallowed."""
+    try:
+        from llm_router import provider_reset
+        provider_reset.note_provider_success(f"codex:{model}")
+        provider_reset.note_provider_success("codex")
+    except Exception as exc:
+        try:
+            from llm_router import failopen
+            failopen.record("CHZ-FO-AGENT-ROUTE-CODEX-SUCCESS-NOTE", exc)
+        except Exception:
+            pass
 
 
 def _run_codex_agent(prompt: str, timeout: int, context_root: str | None):
@@ -1298,6 +1336,7 @@ def _run_codex_agent_inner(prompt: str, timeout: int, context_root: str | None):
         res = asyncio.run(run_codex(prompt, model=model, timeout=left, context_root=context_root))
         last = res
         if res and getattr(res, "success", False) and (res.content or "").strip():
+            _note_codex_success(model)
             return res, "ok"
         text = str(getattr(res, "content", "") or "")
         if _QUOTA_RE.search(text):

@@ -48,23 +48,30 @@ SCOPE, stated rather than implied:
   (``scripts/kpi_benchmark_template.json`` is not shipped; the shape is the
   contract). No path configured, or the file does not parse -> "not measured",
   the label the KPI spec itself uses for this gap.
-* **G4 is a point-in-time snapshot**, not a rate. ``provider_reset`` records
-  only "blocked until T"; it has no record of whether a block was ever
-  mistaken, so "wrongly benched" cannot be computed from it. What IS honest:
-  how many providers this process sees as blocked right now, and for how
-  long. A human confirms whether that is wrong; this command cannot.
-* **G1's hook-side p95 is not instrumented anywhere in this codebase** (no
-  module records per-invocation hook wall time to a ledger) -- printed as
-  "not measurable: hook latency is not instrumented" rather than silently
-  dropped. The proxy-side p95 (``added_latency_s`` in proxy_calls.jsonl) IS
-  real and is what this prints.
-* **G2** only reports the ``failopen`` counter population. It is an all-time
-  total, not a windowed one -- ``fail_open.jsonl`` rows carry no timestamp
-  (see ``llm_router.failopen._append``), so it cannot be split to "this
-  window" vs "before"; printed as a labelled all-time count, not folded into
-  a per-100-calls rate the data cannot support. Broader silent-failure
-  classes named in the spec (truncation/overflow, Ollama hung) are not wired
-  into this counter and are not claimed here.
+* **G1 hook latency** comes from ``hook_latency.jsonl`` (``llm_router.hook_latency``):
+  one row per hook invocation, p50 / p95 per hook against that hook's budget (the
+  one table ``hook_latency.HOOK_BUDGETS_MS``). NOT session-kind filtered -- a row
+  carries no session id. A hook the host KILLS at its timeout writes no row; kills
+  are shown from the fail-open ledger (``CHZ-HOOK-KILLED``). The proxy-side p95
+  (``added_latency_s`` in proxy_calls.jsonl) is the other half.
+* **G2 silent failures** is fail-open events per 100 calls over the window, from
+  the ``ts`` every ``failopen.record`` row now carries. "Calls" are the hook
+  invocations plus the proxy calls recorded in the window, all session kinds,
+  because a fail-open row names no session and the numerator cannot be filtered
+  to organic. Rows written before the timestamp existed cannot be placed in a
+  window; they stay in a labelled ALL-TIME line and are never guessed into one.
+  The window starts no earlier than the first timestamped evidence (a timestamped
+  fail-open row or a recorded hook call), so the denominator never counts calls
+  from a period the numerator could not see. Broader silent-failure classes named
+  in the spec (truncation/overflow, Ollama hung) are not wired into this counter
+  and are not claimed here.
+* **G4 wrongly benched providers** is wrong benches per 100 benches, from
+  ``provider_bench.jsonl`` (``llm_router.provider_bench_log``). A bench is wrong
+  when the owner cleared it with ``llm-router provider unban`` before it lapsed,
+  or a call to that provider succeeded before its reset time. Zero benches in the
+  window is "not measurable", never 0%; a bench still in force can still turn out
+  wrong and is reported separately. The providers benched right now (the old
+  point-in-time reading) is kept as a detail line.
 
 ``compute_scorecard()`` is the single computation; both the text renderer and
 ``--json`` read its output, so they cannot disagree with each other (the same
@@ -394,12 +401,17 @@ def _d4_tier_mix(pop: dict) -> dict:
                       cost_usd_by_tier={k: round(v, 4) for k, v in cost_by_tier.items()})
 
 
-def _g1_latency(pop: dict) -> tuple[dict, dict]:
-    hook_result = _not_measurable("hook latency is not instrumented (no ledger records it)")
+def _percentile(sorted_values: list[float], q: float) -> float:
+    """Nearest rank on the n-1 scale (the rule the proxy p95 always used)."""
+    k = max(0, min(len(sorted_values) - 1, round(q * (len(sorted_values) - 1))))
+    return sorted_values[k]
+
+
+def _g1_proxy(pop: dict) -> dict:
     seen = len(pop["window"])
     served_or_tried = [r for r in pop["allowed"] if isinstance(r.get("added_latency_s"), (int, float))]
     if not served_or_tried:
-        return hook_result, _not_measurable("no proxy decisions with added_latency_s in window", seen=seen)
+        return _not_measurable("no proxy decisions with added_latency_s in window", seen=seen)
     values = sorted(r["added_latency_s"] for r in served_or_tried)
     newest: float | None = None
     for r in served_or_tried:
@@ -408,12 +420,84 @@ def _g1_latency(pop: dict) -> tuple[dict, dict]:
     if n < MIN_N:
         out = _too_few(n, newest_ts=newest)
         out["seen"] = seen
-        return hook_result, out
-    k = max(0, min(n - 1, round(0.95 * (n - 1))))
-    p95 = values[k]
+        return out
+    p95 = _percentile(values, 0.95)
     gate = "within +200ms gate" if p95 <= 0.2 else "OVER the +200ms gate"
-    return hook_result, _measured(f"proxy decision p95={p95 * 1000:.0f}ms ({gate}) (n={n})", n,
-                                   newest_ts=newest, seen=seen, p95_s=round(p95, 4))
+    return _measured(f"proxy decision p95={p95 * 1000:.0f}ms ({gate}) (n={n})", n,
+                      newest_ts=newest, seen=seen, p95_s=round(p95, 4))
+
+
+def _in_window(ts: Any, since: float, until: float) -> bool:
+    """A row without a usable timestamp cannot be placed in a window: it is out,
+    never read as time zero."""
+    t = _num_ts(ts)
+    return t is not None and since <= t <= until
+
+
+def _g1_hook(days: int, now: float, killed: int | None) -> dict:
+    """p50 / p95 wall time per hook against that hook's budget.
+
+    ``killed`` is the number of ``CHZ-HOOK-KILLED`` events in the window, or
+    ``None`` when the fail-open ledger cannot say (no timestamped event exists
+    yet): a host kill leaves no row here, so it is reported beside the log.
+    """
+    from llm_router import hook_latency as hl
+
+    rows = hl.read_rows(since=now - days * 86400.0, until=now)
+    if not rows:
+        return _not_measurable(
+            "no hook invocation recorded in window (a hook records itself only after its "
+            "installed copy is updated to a version that carries the recorder)")
+    by_hook: dict[str, list[dict]] = {}
+    for r in rows:
+        by_hook.setdefault(str(r.get("hook")), []).append(r)
+
+    hooks: dict[str, dict] = {}
+    lines: list[str] = []
+    over: list[str] = []
+    worst: tuple[float, str, int] | None = None
+    thin = 0
+    for name in sorted(by_hook):
+        rs = by_hook[name]
+        values = sorted(float(r["elapsed_ms"]) for r in rs)
+        n = len(values)
+        budget = hl.budget_ms(name)
+        timed_out = sum(1 for r in rs if r.get("timed_out") is True)
+        entry: dict[str, Any] = {"n": n, "budget_ms": budget, "timed_out": timed_out}
+        if n < MIN_N:
+            thin += 1
+            lines.append(f"{name}: {TOO_FEW} (n={n}); budget {budget}ms; {timed_out} hit it")
+        else:
+            p50, p95 = _percentile(values, 0.50), _percentile(values, 0.95)
+            entry.update(p50_ms=round(p50, 1), p95_ms=round(p95, 1))
+            verdict = "within budget" if p95 <= budget else "OVER budget"
+            lines.append(f"{name}: p50={p50:.0f}ms p95={p95:.0f}ms vs {budget}ms budget "
+                         f"({verdict}); {timed_out} of {n} hit the budget")
+            if p95 > budget:
+                over.append(f"{name} p95={p95:.0f}ms>{budget}ms")
+            if worst is None or p95 / budget > worst[0]:
+                worst = (p95 / budget, name, round(p95))
+        hooks[name] = entry
+    if killed is None:
+        lines.append("killed by the host (leaves no row): not countable yet -- no timestamped "
+                     "fail-open event exists to count CHZ-HOOK-KILLED from")
+    else:
+        lines.append(f"killed by the host (leaves no row; CHZ-HOOK-KILLED in the fail-open "
+                     f"ledger): {killed} in window")
+
+    n_rows = len(rows)
+    newest = rows[-1]["ts"]                      # read_rows is oldest first
+    extra = {"hooks": hooks, "lines": lines, "killed": killed}
+    if worst is None:
+        return _too_few(n_rows, newest_ts=newest) | {
+            "value": f"{TOO_FEW} (n={n_rows} rows over {len(by_hook)} hook(s); need >={MIN_N} per hook)",
+            **extra}
+    tail = f"; {thin} hook(s) {TOO_FEW}" if thin else ""
+    if over:
+        head = f"OVER budget: {', '.join(over)}"
+    else:
+        head = f"all {len(by_hook) - thin} measurable hook(s) within budget (worst p95 {worst[1]} {worst[2]}ms)"
+    return _measured(f"{head}{tail} (n={n_rows} invocations)", n_rows, newest_ts=newest, **extra)
 
 
 # ── G3: ledger completeness, per row type and per field ──────────────────────
@@ -671,58 +755,143 @@ def _d5_classifier_accuracy(bench: dict | None) -> dict:
                       newest_ts=_bench_newest(bench), generated_at=bench.get("generated_at"))
 
 
-# ── G2: failopen, all-time only ───────────────────────────────────────────────
+# ── G2: fail-open events per 100 calls ─────────────────────────────────────────
 
-def _g2_silent_failures() -> dict:
+_TOP_CODES = 5
+
+
+def _g2_silent_failures(days: int, now: float, proxy_rows: list[dict]) -> dict:
+    from llm_router import failopen
+    from llm_router import hook_latency as hl
+
     try:
-        from llm_router import failopen
-
         snap = failopen.snapshot()
-        try:
-            newest = failopen.store_path().stat().st_mtime
-        except OSError:
-            newest = None
     except Exception as exc:  # noqa: BLE001
         return _not_measurable(f"failopen.snapshot() raised: {type(exc).__name__}")
     total = snap.total
     if total is None:
         return _not_measurable("fail-open store is present but unreadable")
-    if total == 0:
+
+    since_req = now - days * 86400.0
+    probe = failopen.windowed(until=now)
+    if not probe.readable:
+        return _not_measurable("fail-open store is present but unreadable")
+    hook_all = hl.read_rows(until=now)
+    evidence = [t for t in (probe.first_ts, hook_all[0]["ts"] if hook_all else None) if t is not None]
+    alltime = (f"all-time: {total} fail-open event(s) recorded, {probe.untimestamped} of them "
+               "from before per-event timestamps (cannot be placed in any window)")
+    if not evidence:
         return _not_measurable(
-            "no fail-open events recorded (cannot tell 'none occurred' from 'not recording')")
-    # Events carry no timestamp; the store file's last write is the newest one can say.
+            "no timestamped fail-open event and no recorded hook call exist yet, so there is "
+            "no window to take a rate over") | {"lines": [alltime]}
+
+    # The window starts at the first timestamped evidence, never earlier: the
+    # denominator must not count calls from a period the numerator cannot see.
+    since = max(since_req, min(evidence))
+    win = failopen.windowed(since=since, until=now)
+    hook_ts = [r["ts"] for r in hook_all if since <= r["ts"] <= now]
+    proxy_ts = [t for t in (_num_ts(r.get("ts")) for r in proxy_rows) if t is not None and since <= t <= now]
+    hook_calls, proxy_calls = len(hook_ts), len(proxy_ts)
+    calls = hook_calls + proxy_calls
+    newest = max(hook_ts + proxy_ts) if calls else None      # the feed's last sign of life
+    events = win.in_window
+    lines = [alltime]
+    if since > since_req:
+        lines.append(f"window starts at the first timestamped evidence, {_iso(since)} "
+                     f"(requested {days}d back)")
+    base = {"all_time_total": total, "untimestamped": probe.untimestamped, "events": events,
+            "calls": calls, "hook_calls": hook_calls, "proxy_calls": proxy_calls,
+            "window_start": round(since, 3), "lines": lines}
+
+    if calls == 0:
+        return _not_measurable(f"no hook invocation or proxy call recorded since {_iso(since)}") | base
+    if calls < MIN_N:
+        return _too_few(calls, newest_ts=newest) | {"value": f"{TOO_FEW} (n={calls} calls; {events} fail-open "
+                                                             f"event(s) so far)"} | base
+    if probe.first_ts is None:
+        return _not_measurable(
+            "no timestamped fail-open event has ever been recorded here, so 0 cannot be told "
+            "from 'timestamps are not being written'", seen=calls, newest_ts=newest) | base
+
+    by_code = dict(sorted(win.by_code.items(), key=lambda kv: (-kv[1], kv[0])))
+    top = list(by_code.items())[:_TOP_CODES]
+    rate = events / calls * 100.0
+    lines.insert(0, f"calls: {hook_calls} hook invocation(s) + {proxy_calls} proxy call(s), all "
+                    "session kinds (a fail-open row names no session)")
+    for i, (code, n) in enumerate(top):
+        lines.insert(1 + i, f"  {code}: {n / calls * 100.0:.2f} per 100 calls ({n})")
     return _measured(
-        f"{total} fail-open event(s) recorded, ALL-TIME (no per-event timestamp -- "
-        "cannot be windowed or turned into a per-100-calls rate)",
-        total, newest_ts=newest, all_time_total=total,
-        health_note="an all-time count, not a rate; its age is the store file's last write",
-        by_code=dict(sorted(snap.by_code.items(), key=lambda kv: -kv[1])[:8]),
+        f"{rate:.2f} per 100 calls ({events} events / {calls} calls, "
+        f"{(now - since) / 86400.0:.1f}d window)", calls, newest_ts=newest,
+        by_code=by_code,
+        by_code_per_100={c: round(n / calls * 100.0, 3) for c, n in by_code.items()},
+        top_codes=[{"code": c, "events": n, "per_100_calls": round(n / calls * 100.0, 3)}
+                                    for c, n in top],
+        rate_per_100=round(rate, 3), **{k: v for k, v in base.items() if k != "lines"},
+        lines=lines,
     )
 
 
-# ── G4: provider_reset, point-in-time ──────────────────────────────────────────
+def _killed_hooks(days: int, now: float) -> int | None:
+    """``CHZ-HOOK-KILLED`` events in the window, or ``None`` when no timestamped
+    fail-open event exists (the count would be a guess, not a zero)."""
+    from llm_router import failopen
 
-G4_HEALTH_NOTE = ("a snapshot of this moment, not a rate: it cannot go stale, and cannot show "
-                  "that a past bench was wrong")
+    probe = failopen.windowed(until=now)
+    if not probe.readable or probe.first_ts is None:
+        return None
+    by_code = failopen.windowed(since=now - days * 86400.0, until=now).by_code
+    # Timestamped events exist (checked above), so no entry is a real 0, not an unknown.
+    return by_code["CHZ-HOOK-KILLED"] if "CHZ-HOOK-KILLED" in by_code else 0
 
 
-def _g4_wrongly_benched() -> dict:
+# ── G4: wrongly benched providers ──────────────────────────────────────────────
+
+def _g4_wrongly_benched(days: int, now: float) -> dict:
+    from llm_router import provider_bench_log as bl
+    from llm_router import provider_reset
+
+    lines: list[str] = []
     try:
-        from llm_router import provider_reset
-
-        resets = provider_reset.all_provider_resets()
+        resets = provider_reset.all_provider_resets(now)
     except Exception as exc:  # noqa: BLE001
-        return _not_measurable(f"provider_reset read raised: {type(exc).__name__}")
-    n = len(resets)
-    now = time.time()  # a snapshot of this moment: as fresh as it can be
-    if n == 0:
-        return _measured("0 providers currently benched (point-in-time; cannot confirm "
-                          "any PAST bench was wrong)", 0, newest_ts=now,
-                          health_note=G4_HEALTH_NOTE)
-    names = ", ".join(sorted(resets))
-    return _measured(f"{n} provider(s) currently benched: {names} (point-in-time snapshot -- "
-                      "whether a bench is WRONG needs a human to say so)", n, newest_ts=now,
-                      health_note=G4_HEALTH_NOTE, benched=sorted(resets))
+        lines.append(f"benched right now: unreadable ({type(exc).__name__})")
+    else:
+        if resets:
+            lines.append("benched right now: " + ", ".join(
+                f"{n} until {_iso(u)}" for n, u in sorted(resets.items())) + " (point-in-time)")
+        else:
+            lines.append("benched right now: none (point-in-time)")
+
+    j = bl.judge(since=now - days * 86400.0, now=now)
+    base = {"benches": j.benches, "wrong": j.wrong, "wrong_by_unban": j.wrong_by_unban,
+            "wrong_by_success": j.wrong_by_success, "active": j.active,
+            "by_trigger": dict(j.by_trigger), "lines": lines}
+    if j.benches == 0:
+        return _not_measurable(
+            "no provider bench recorded in window (0 benches: 'none were wrong' cannot be told "
+            "from 'none happened')") | base
+    base["health_note"] = ("benches are rare events: an old newest bench is not a stopped feed, "
+                           "and a bench still in force can yet turn out wrong")
+    triggers = ", ".join(f"{t} {n}" for t, n in sorted(j.by_trigger.items()))
+    lines.append(f"benches by trigger: {triggers}")
+    lines.append(f"wrong: {j.wrong_by_unban} cleared by the owner (provider unban), "
+                 f"{j.wrong_by_success} succeeded before the reset time (a bench can be both)")
+    if j.active:
+        lines.append(f"{j.active} bench(es) still in force and not shown wrong -- they can "
+                     "still turn out wrong, so the wrong count is a floor")
+    if j.benches < MIN_N:
+        return _too_few(j.benches, newest_ts=j.newest_ts) | {
+            "value": f"{TOO_FEW} (n={j.benches} benches); {j.wrong} shown wrong so far (target 0)"} | base
+    # "None shown wrong" is not "none wrong": a bench that is still in force can
+    # yet turn out wrong (see the lines above), so this never says the target is met.
+    gate = "none shown wrong yet (target 0)" if j.wrong == 0 else "OVER the =0 target"
+    return _measured(
+        f"{j.wrong / j.benches * 100.0:.1f} wrong benches per 100 ({j.wrong} / {j.benches} benches, "
+        f"{days}d; {gate})", j.benches, newest_ts=j.newest_ts,
+        rate_per_100=round(j.wrong / j.benches * 100.0, 3), **{k: v for k, v in base.items() if k != "lines"},
+        lines=lines,
+    )
 
 
 # ── assembly ───────────────────────────────────────────────────────────────
@@ -740,14 +909,15 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
     d3_r = _d3_redo_rate(days, allowed, index)
     pop = _proxy_population(all_rows, days, allowed, now_ts)
     d4_r = _d4_tier_mix(pop)
-    g1_hook_r, g1_proxy_r = _g1_latency(pop)
+    g1_hook_r = _g1_hook(days, now_ts, _killed_hooks(days, now_ts))
+    g1_proxy_r = _g1_proxy(pop)
     g3_r = _g3_completeness(all_rows, days, now_ts, schema_since)
     o1_r = _o1_quota_avoided(days)
     bench = _load_benchmark()
     o2_r = _o2_quality_held(bench)
     d5_r = _d5_classifier_accuracy(bench)
-    g2_r = _g2_silent_failures()
-    g4_r = _g4_wrongly_benched()
+    g2_r = _g2_silent_failures(days, now_ts, all_rows)
+    g4_r = _g4_wrongly_benched(days, now_ts)
     return {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ts)),
         "generated_ts": now_ts,
@@ -826,9 +996,9 @@ _LABELS = {
     "D5": "D5  classifier accuracy",
     "G1_hook": "G1  added latency (hook)",
     "G1_proxy": "G1  added latency (proxy)",
-    "G2": "G2  silent failures",
+    "G2": "G2  silent failures (fail-open / 100 calls)",
     "G3": "G3  ledger completeness (target >=99%)",
-    "G4": "G4  wrongly benched providers",
+    "G4": "G4  wrongly benched providers (target 0)",
 }
 _ORDER = ("NS", "O1", "O2", "D1", "D2", "D3", "D4", "D5", "G1_hook", "G1_proxy", "G2", "G3", "G4")
 
@@ -862,12 +1032,14 @@ def render_scorecard(data: dict) -> str:
     for key in _ORDER:
         r = data["kpis"][key]
         lines.append(f"  {_LABELS[key]:<42s} {r['value']}")
+        for extra in r.get("lines", ()):
+            lines.append(f"      {extra}")
     lines.append("")
     lines.append(_join_line(data["joins"]))
     lines.append("O1 is never session-kind filtered (usage.db predates tagging); G3 is not "
-                  "session-kind filtered either (see KPIS.md). "
-                  "O2/D5 need LLM_ROUTER_KPI_BENCHMARK_PATH. G2/G4 are not windowed "
-                  "the same way as the rest -- see each line and the module docstring.")
+                  "session-kind filtered either (see KPIS.md); neither are G1 (hook), G2 and G4, "
+                  "whose rows carry no session id. "
+                  "O2/D5 need LLM_ROUTER_KPI_BENCHMARK_PATH. See each line and the module docstring.")
     return "\n".join(lines)
 
 
@@ -899,6 +1071,12 @@ def write_weekly(data: dict, out_dir: Path) -> Path:
     for key in _ORDER:
         r = data["kpis"][key]
         body.append(f"| {_LABELS[key]} | {r['value']} |")
+    details = [(key, r["lines"]) for key in _ORDER if (r := data["kpis"][key]).get("lines")]
+    if details:
+        body += ["", "## Details", ""]
+        for key, extra in details:
+            body.append(f"**{_LABELS[key].strip()}**")
+            body += [""] + [f"- {ln.strip()}" for ln in extra] + [""]
     path.write_text("\n".join(body) + "\n", encoding="utf-8")
     return path
 

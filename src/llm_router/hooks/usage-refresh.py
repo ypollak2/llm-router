@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 2
+# llm_router-hook-version: 3
 """PostToolUse hook — usage refresh + periodic savings awareness.
 
 After any llm_* MCP tool call:
@@ -18,6 +18,27 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+# -- KPI G1: record how long this invocation ran (llm_router.hook_latency) -----
+# The clock starts BEFORE the first llm_router import, so the package import is
+# inside the measurement. Armed only when run as a script: a test that imports
+# this file must not register an exit-time write. Fail-open: no llm_router on
+# the path means no row for this run; any other error is reported on stderr
+# (never stdout, which the host parses) and the hook carries on.
+import time as _hl_time
+
+_HOOK_T0 = _hl_time.monotonic()
+if __name__ == "__main__":
+    try:
+        from llm_router import hook_latency as _hook_latency
+
+        _hook_latency.begin("usage-refresh", "PostToolUse", _HOOK_T0)
+    except ImportError:
+        pass  # llm_router is not importable on this host: no recorder, no row
+    except Exception as _hl_exc:  # noqa: BLE001 -- timing must never break the hook
+        import sys as _hl_sys
+
+        print(f"llm-router: hook latency not recorded ({type(_hl_exc).__name__})", file=_hl_sys.stderr)
 
 # .env -> os.environ for this process (llm_router.env_loader). The real
 # environment wins; without the package this is a no-op, as it always was.
