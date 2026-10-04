@@ -404,6 +404,7 @@ def test_kpi_o1_prints_reconciled_figures_when_the_ledger_supports_them(kpi_env)
     assert "real Anthropic spend" in o1["value"] and "est." not in o1["value"].split("[")[0]
     assert o1["reconciled"] is True and o1["n"] == 80 and o1["real_anthropic_usd"] > 0
     assert "total_cost_usd" not in json.dumps(o1)
+    assert o1["newest_ts"] == max(r["ts"] for r in rows)  # the freshness gate reads this
 
 
 def test_kpi_o1_keeps_est_when_rows_are_legacy_or_unreconciled(kpi_env, monkeypatch):
