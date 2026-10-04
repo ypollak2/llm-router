@@ -32,6 +32,8 @@ Usage:
     llm-router okf gc           — find stored model prose; --apply quarantines it
     llm-router provider list    — providers skipped until a reported reset time
     llm-router provider unban <name>  — lift that skip now (or --all)
+    llm-router inventory [--json]     — models this machine can run: route, path, quota, privacy
+    llm-router calibrate [--models M] [--allow-paid] — measure per-model capability (local-only by default)
     llm-router semantic status  — project scope, derived index, and selected arm
     llm-router semantic explain — what a prompt would retrieve, without sending it
     llm-router demo             — show routing decisions for sample prompts
@@ -77,7 +79,7 @@ Usage:
     llm-router routing-report   — routing accuracy and share over a window
     llm-router routing-health   — reach, context, USED and latency per day, with n
     llm-router northstar        — routed-and-used share, per session (NS1)
-    llm-router kpi              — NS/O1-O2/D1-D5/G1-G4 scorecard (KPI-SPEC)
+    llm-router kpi              — NS/O1-O2/D1-D5/G1-G4 scorecard; --health: measured/blind/stale
     llm-router sessions         — list recorded sessions
     llm-router config           — show the resolved configuration
     llm-router profile          — show or auto-generate the routing profile
@@ -1061,6 +1063,14 @@ def main() -> None:
     elif args and args[0] == "provider":
         from llm_router.commands.provider import cmd_provider
         cmd_provider(args[1:])
+    elif args and args[0] == "inventory":
+        # Read-only: what models this machine can run (never prints a secret).
+        from llm_router.commands.inventory import cmd_inventory
+        sys.exit(cmd_inventory(args[1:]))
+    elif args and args[0] == "calibrate":
+        # Short per-model capability probes; local-only unless --allow-paid.
+        from llm_router.commands.calibrate import cmd_calibrate
+        sys.exit(cmd_calibrate(args[1:]))
     elif args and args[0] == "semantic":
         from llm_router.commands.semantic import cmd_semantic
         sys.exit(cmd_semantic(args[1:]))

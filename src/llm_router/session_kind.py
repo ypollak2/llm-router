@@ -29,6 +29,29 @@ Persistence: the SessionStart hook calls :func:`tag_session`, which writes
 nor environment, reads it back with :func:`kind_of`. ``None`` means "never
 tagged" (a session that predates this, or no hook ran) and is reported as its
 own bucket; it is never silently counted as organic.
+
+A session's kind is decided once, at its first sighting, and never changes: the
+tag file is write-once (only the explicit ``LLM_ROUTER_SESSION_KIND`` override
+replaces it). It used to be rewritten by every SessionStart, so a session
+resumed from another directory changed kind: 2026-10-03/04 one session's tag file
+(created 20:27Z) was rewritten at 23:00Z to ``research`` (cwd under ``~/.rsi``) and at
+19:33Z to ``organic`` (cwd ``$HOME``), while the proxy, which caches hits, kept
+stamping the first value, so one session read as two kinds across the ledgers.
+
+SessionStart alone leaves a session untagged when it was already running when
+the tagging hook was deployed, or is resumed without a SessionStart: 2026-10-04,
+311 of 2,737 proxy rows (11.4%) were written before the one tag that session
+ever got. The UserPromptSubmit hook therefore also calls :func:`tag_session` on
+every prompt (a stat when the tag exists), so such a session is tagged at its
+next prompt. Rows already written stay null: the ledger is append-only.
+
+Joining a tag onto a record that has none of its own (a north-star unit, a
+proxy row): :class:`KindIndex`. Precedence, first match wins: (1) the session's
+tag file; (2) the kind stamped on the record itself when it was written; (3)
+the kind stamped on that session's proxy rows, if they all agree. Nothing
+resolvable stays ``None``; a session whose proxy rows disagree with each other
+and has no tag file stays ``None`` too (source ``conflict``). ``None`` is never
+counted as organic by any reader.
 """
 from __future__ import annotations
 
@@ -36,6 +59,8 @@ import json
 import os
 import re
 import time
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 from llm_router import paths
@@ -87,11 +112,18 @@ def _tag_path(session_id: str) -> Path:
 
 
 def tag_session(session_id: str | None, cwd: str | None, *, env: dict | None = None) -> str | None:
-    """Classify and persist this session's kind. Returns the kind, or ``None``
-    when there is no session id to key it by. Best-effort write: never raises."""
+    """Classify and persist this session's kind, unless it already has one: the
+    first tag wins (see the module docstring), and the existing kind is returned.
+    ``LLM_ROUTER_SESSION_KIND`` is the one thing that replaces a tag. Returns the
+    kind, or ``None`` when there is no session id to key it by. Best-effort write:
+    never raises."""
     if not session_id:
         return None
     environ = os.environ if env is None else env
+    forced = (environ.get("LLM_ROUTER_SESSION_KIND") or "").strip().lower()
+    existing = kind_of(session_id)
+    if existing is not None and (forced not in VALID_KINDS or forced == existing):
+        return existing  # first tag wins; a forced kind rewrites only when it differs
     entrypoint = environ.get("CLAUDE_CODE_ENTRYPOINT")
     kind = classify(cwd=cwd, entrypoint=entrypoint, override=environ.get("LLM_ROUTER_SESSION_KIND"))
     try:
@@ -131,3 +163,58 @@ def kind_of(session_id: str | None) -> str | None:
         return None
     _FOUND[str(path)] = kind
     return kind
+
+
+# ── joining a kind onto records that carry none ──────────────────────────────
+
+SOURCE_TAG = "tag"              # the session's tag file
+SOURCE_STAMP = "stamp"          # stamped on the record itself when it was written
+SOURCE_LEDGER = "proxy_ledger"  # stamped on that session's proxy rows (all agreeing)
+SOURCE_CONFLICT = "conflict"    # proxy rows disagree and there is no tag file: unresolved
+
+
+@dataclass(frozen=True)
+class Resolution:
+    kind: str | None
+    source: str | None
+    #: A tag file exists and some of the session's proxy rows carry another kind.
+    ledger_disagrees: bool = False
+
+
+class KindIndex:
+    """Resolve a session's kind for a record that has none of its own.
+
+    Built once per report from the proxy ledger rows; every lookup of a session is
+    memoised, so reading the tag file costs one stat per distinct session, not one
+    per record."""
+
+    def __init__(self, ledger_rows: Iterable[dict] = ()) -> None:
+        self._ledger: dict[str, set[str]] = {}
+        self._tags: dict[str, str | None] = {}
+        for row in ledger_rows:
+            self.add(row.get("session_id"), row.get("session_kind"))
+
+    def add(self, session_id: object, kind: object) -> None:
+        """Record that a proxy row of ``session_id`` was stamped ``kind`` (ignored
+        unless both are usable: a null stamp is the absence of evidence)."""
+        if isinstance(session_id, str) and session_id and kind in VALID_KINDS:
+            self._ledger.setdefault(session_id, set()).add(kind)  # type: ignore[arg-type]
+
+    def _tag(self, session_id: str) -> str | None:
+        if session_id not in self._tags:
+            self._tags[session_id] = kind_of(session_id)
+        return self._tags[session_id]
+
+    def resolve(self, session_id: str | None, stamp: str | None = None) -> Resolution:
+        """``stamp`` is the kind the record itself was written with, if any."""
+        seen = self._ledger.get(session_id, set()) if isinstance(session_id, str) else set()
+        tag = self._tag(session_id) if isinstance(session_id, str) and session_id else None
+        if tag is not None:
+            return Resolution(tag, SOURCE_TAG, ledger_disagrees=bool(seen - {tag}))
+        if stamp in VALID_KINDS:
+            return Resolution(stamp, SOURCE_STAMP)
+        if len(seen) == 1:
+            return Resolution(next(iter(seen)), SOURCE_LEDGER)
+        if len(seen) > 1:
+            return Resolution(None, SOURCE_CONFLICT)
+        return Resolution(None, None)

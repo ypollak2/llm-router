@@ -4172,6 +4172,20 @@ def main() -> None:
                 prompt=prompt, prompt_len=len(prompt))
     except Exception:
         pass
+    # KPI session tag, lazily: SessionStart tags a session once, so a session that
+    # was already running when tagging shipped (or is resumed without a SessionStart)
+    # was never tagged. Measured 2026-10-04: 311 of 2,737 proxy rows (11.4%) carried a
+    # null session_kind for that reason. Before every bypass below (13% of invocations
+    # exit through one: a session whose prompts all bypass would stay untagged). A
+    # stat when the tag exists: tag_session never overwrites one.
+    _kind_sid = hook_input.get("session_id")
+    if isinstance(_kind_sid, str) and _kind_sid:
+        try:
+            from llm_router import session_kind as _session_kind
+            _session_kind.tag_session(_kind_sid, hook_input.get("cwd") or None)
+        except Exception as _exc:                                    # noqa: BLE001
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-SESSION-KIND-TAG", _exc)
     if not prompt.strip():
         # Audit T10 (§2.3): an empty/whitespace prompt must not silently become a
         # native Claude turn under zero-Claude — that leaks past "strict" mode.

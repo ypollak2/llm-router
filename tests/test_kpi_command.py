@@ -200,9 +200,12 @@ def test_d4_tier_mix_and_g3_completeness():
     k = _kpis()
     assert k["D4"]["value"].startswith("haiku=49.5%, sonnet=40.6%, opus=9.9%")  # n=101 organic
     assert k["D4"]["n"] == 101
-    assert k["G3"]["value"] == "99.0% (n=101)"                    # 100 / 101 rows carry all keys
-    rows_all = _kpis(include_research=True)
-    assert rows_all["G3"]["n"] == 601
+    # G3 is not session-kind filtered (completeness is the writer's property, and the
+    # tag is one of the fields under test): all 601 rows count, 600 carry every key.
+    assert k["G3"]["n"] == 601
+    assert k["G3"]["value"].startswith("99.8% (n=601; ")
+    assert _kpis(include_research=True)["G3"]["n"] == 601
+    assert _kpis(include_research=True)["D4"]["n"] == 601         # --include widens D4, not G3
 
 
 def test_g3_null_decision_fields_do_not_count_as_complete():
@@ -210,12 +213,22 @@ def test_g3_null_decision_fields_do_not_count_as_complete():
     that is not the same as a complete row (G3 target >=99%)."""
     rows = [_row(tier_proposed=None, tier_policy_version=None, tier_retry=None) for _ in range(60)]
     _write_proxy_rows(rows)
-    assert _kpis()["G3"]["value"] == "0.0% (n=60)"
+    g3 = _kpis()["G3"]
+    assert g3["value"].startswith("0.0% (n=60; ")
+    # The two decision fields were never computed; tier_retry's null is its legal value.
+    assert g3["fields"]["tier_policy_version"]["coverage"] == 0.0
+    assert g3["fields"]["tier_proposed"]["coverage"] == 0.0
+    assert g3["fields"]["tier_retry"]["coverage"] == 1.0
 
 
-def test_g3_untagged_proxy_rows_do_not_count_as_organic():
+def test_untagged_proxy_rows_are_not_organic_for_d4_but_count_against_g3():
+    """Untagged is never organic (D4/G1 exclude it), and it is a completeness failure
+    (G3 counts it): filtering G3 by the tag would hide the very rows it must report."""
     _write_proxy_rows([_row(session_kind=None) for _ in range(100)])
-    assert _kpis()["G3"]["value"].startswith("not measurable: ")
+    k = _kpis()
+    assert k["D4"]["value"].startswith("not measurable: ")
+    assert k["G3"]["value"].startswith("0.0% (n=100; ")
+    assert k["G3"]["fields"]["session_kind"]["coverage"] == 0.0
 
 
 def test_g1_proxy_p95_against_the_200ms_gate():
