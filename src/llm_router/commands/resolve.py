@@ -16,11 +16,13 @@ import sys
 from pathlib import Path
 
 _HELP = """usage: llm-router resolve --tier EASY|MEDIUM|FRONTIER [--needs tools,vision,thinking,json,long-context,ctx=N,local-only]
-                          [--configured MODEL] [--allow-unmeasured] [--require-measured] [--json]
+                          [--configured MODEL] [--allow-unmeasured] [--require-measured] [--verify] [--json]
 
   --configured        the model to keep when nothing qualifies (default: "model" in ~/.claude/settings.json)
   --allow-unmeasured  treat a model with no measurement and no registry class as EASY
   --require-measured  refuse tiers that rest on the registry prior instead of a calibration
+  --verify            first make one zero-cost list-models call per API-key provider (no tokens) so a
+                      key that works counts as a verified path; a rejected key is excluded
 """
 
 
@@ -36,7 +38,7 @@ def configured_model_from_claude_settings(path: Path | None = None) -> str | Non
 
 def _parse(args: list[str]) -> dict | None:
     opts: dict = {"tier": None, "needs": "", "configured": None, "json": False,
-                  "allow_unmeasured": False, "require_measured": False}
+                  "allow_unmeasured": False, "require_measured": False, "verify": False}
     i = 0
     while i < len(args):
         a = args[i]
@@ -46,6 +48,8 @@ def _parse(args: list[str]) -> dict | None:
             opts["allow_unmeasured"] = True
         elif a == "--require-measured":
             opts["require_measured"] = True
+        elif a == "--verify":
+            opts["verify"] = True
         elif a in ("--tier", "--needs", "--configured") and i + 1 < len(args):
             opts[a[2:]] = args[i + 1]
             i += 1
@@ -100,7 +104,8 @@ def cmd_resolve(args: list[str]) -> int:
         print(f"llm-router resolve: {exc}", file=sys.stderr)
         return 2
 
-    inv = inv_mod.collect_inventory(inv_mod.Probes(), previous=inv_mod.load_snapshot())
+    inv = inv_mod.collect_inventory(inv_mod.Probes(), previous=inv_mod.load_snapshot(),
+                                    verify=opts["verify"])
     configured = opts["configured"] or configured_model_from_claude_settings()
     res = resolve(tier, needs, Setup(inv, configured),
                   allow_unmeasured=opts["allow_unmeasured"],

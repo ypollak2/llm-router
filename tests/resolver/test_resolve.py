@@ -502,3 +502,65 @@ def test_non_positive_context_need_is_rejected_at_construction():
     for bad in (0, -5):
         with pytest.raises(ValueError, match="must be positive"):
             Needs(context_tokens=bad)
+
+
+# ---------------------------------------- review follow-ups (authorized, cloud Ollama, --verify)
+
+def test_the_authorized_hard_check_excludes_an_otherwise_perfect_model():
+    """Everything else about this model passes; only `authorized` is False."""
+    ok = E("claude_subscription/opus", route="subscription", ceiling="FRONTIER", basis="prior", pressure=0.1)
+    bad = E("codex/gpt-5.5", route="subscription", ceiling="FRONTIER", basis="prior", pressure=0.0,
+            authorized=False)
+    assert hard_failures(ok, Needs(), NOW) == []
+    assert hard_failures(bad, Needs(), NOW) == ["not authorized (not logged in)"]
+    res = go("FRONTIER", "", setup(bad, ok))
+    assert res.model == "claude_subscription/opus"                # bad has the lower pressure and would win
+    assert rejected(res)["codex/gpt-5.5"] == ("not authorized (not logged in)",)
+    assert "codex/gpt-5.5" not in [r.model for r in res.fallbacks]
+    only = go("FRONTIER", "", setup(bad))
+    assert only.status == STATUS_NO_ELIGIBLE
+
+
+def test_local_only_never_selects_a_cloud_model_listed_by_a_local_ollama():
+    models = {"qwen3:8b": {"caps": ["completion", "tools"]},
+              "evil-cloud:120b-cloud": {"caps": ["completion", "tools"]},
+              "viaremote:7b": {"caps": ["completion", "tools"],
+                               "tags_extra": {"remote_host": "https://ollama.com:443"}}}
+    inv = inv_mod.collect_inventory(make_probes(ollama=models), profiles={})
+    easy = {"json": ProbeResult(True), "edit": ProbeResult(True), "tool_call": ProbeResult(True),
+            "long_context": ProbeResult(True, size_tokens=8000)}
+    profs = {f"ollama/{n}": profile_mod.build_profile(f"ollama/{n}", easy, reachable=True, now=NOW) for n in models}
+    inv = inv_mod.collect_inventory(make_probes(ollama=models), profiles=profs)
+    s = Setup(inv, "ollama/qwen3:8b")
+    for tier in ("EASY", "MEDIUM"):
+        res = resolve(tier, Needs(local_only=True, tools=True), s, now=NOW)
+        assert res.model == "ollama/qwen3:8b", tier
+        assert all("privacy=local-only" in rejected(res)[i][0]
+                   for i in ("ollama/evil-cloud:120b-cloud", "ollama/viaremote:7b"))
+        assert all(r.model in (None, "ollama/qwen3:8b") for r in res.fallbacks)   # not even as a fallback
+    only_cloud = inv_mod.collect_inventory(make_probes(
+        ollama={"evil-cloud:120b-cloud": {"caps": ["completion", "tools"]}}), profiles={
+        "ollama/evil-cloud:120b-cloud": profile_mod.build_profile("ollama/evil-cloud:120b-cloud", easy, reachable=True)})
+    res = resolve("EASY", Needs(local_only=True), Setup(only_cloud, None), now=NOW)
+    assert res.status == STATUS_NO_ELIGIBLE and res.model is None
+
+
+def test_resolve_verify_flag_turns_a_working_key_into_a_routable_path(monkeypatch, tmp_path, capsys):
+    from llm_router.commands.resolve import cmd_resolve
+
+    _cli(monkeypatch, tmp_path)
+    calls = []
+
+    def ping(provider, key):
+        calls.append(provider)
+        return 200 if provider == "openai" else 401
+
+    probes = make_probes(env={"OPENAI_API_KEY": "sk-live-AAAABBBB", "XAI_API_KEY": "xai-CCCCDDDD"},
+                         ping=ping, ping_cache=tmp_path / "c.json")
+    monkeypatch.setattr(inv_mod, "Probes", lambda: probes)
+    assert cmd_resolve(["--tier", "FRONTIER", "--configured", "mine"]) == 3     # unverified keys: nothing routable
+    assert calls == []
+    assert cmd_resolve(["--tier", "FRONTIER", "--configured", "mine", "--verify"]) == 0
+    out = capsys.readouterr().out
+    assert "=> openai/gpt-5.5" in out and "sk-live" not in out and "xai-CCCC" not in out
+    assert sorted(set(calls)) == ["openai", "xai"]
