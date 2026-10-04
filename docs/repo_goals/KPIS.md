@@ -138,6 +138,22 @@ scorecard prints how many units joined a tag (by source) and how many stayed unt
 counted population comes from. A tag file is write-once: the first tag wins, so a session resumed from another
 directory does not change kind. The prompt hook tags a session at its next prompt when SessionStart never did.
 
+**Backfilled kinds (sessions from before tagging).** `llm-router kpi --backfill-tags [--dry-run]` derives a kind
+for each untagged session from the one record that survives it, its Claude Code transcript
+(`~/.claude/projects/*/<session_id>.jsonl`: the first `cwd` and `entrypoint`), with the same function the live tagger
+calls (`session_kind.classify_with_basis`), and appends it to a sidecar, `~/.llm-router/session_kind_backfill.jsonl`
+(mode 0600; `session_id`, `kind`, `source`, a coarse basis code and `ts`; no prompt text, no paths). The ledgers are
+never written, and deleting the sidecar restores the previous numbers exactly. Rules: the sidecar is the LAST step of
+the join (tag file, then the record's own stamp, then agreeing proxy-row stamps, then the sidecar), so a live tag
+always wins; it is write-once per session; a transcript that is missing, unreadable or carries neither field gives
+`unknown`, which never enters a KPI (it is not organic and not a kind); a session whose proxy rows conflict gets no
+row. Every affected line states its backfilled share, e.g. `n=29,128, 24,244 backfilled`. D4, G1 and G3 do not
+consult the sidecar (D4 and G1 read the kind each proxy row was written with, G3 is not kind-filtered).
+`llm-router kpi --validate-backfill` (read-only, counts only) re-runs the rules on sessions that already have a live
+kind and prints agreement and a confusion table; re-run it as live tags accumulate. One thing a transcript cannot
+show is the `LLM_ROUTER_SESSION_KIND` override: a session whose live kind came from it would be derived from its
+`cwd` and `entrypoint` instead, which the validation counts as a disagreement.
+
 ### `llm-router kpi --health`
 
 One line per KPI: `measured`, `blind` or `stale`, the one reason, and the n. **Blind** = no number (nothing to
@@ -177,7 +193,10 @@ One row per change goes in [`../KPI-LEDGER.md`](../KPI-LEDGER.md).
 - **Session tagging exists (PR #250) but covers only sessions that started or prompted after it
   deployed.** Every "live" measurement depends on excluding non-organic traffic, and on this machine
   2026-10-04 one session supplies all of the tagged units and rows. NS, D1 and D2 are readable only for
-  tagged sessions; the rest stay untagged, never organic. A tag file can only be created, not backfilled.
+  tagged sessions; the rest stay untagged, never organic, until `llm-router kpi --backfill-tags` has been run
+  (see "Session kind on NS, D1 and D2"). The backfill's own check has almost no live-tagged sessions to compare
+  against on this machine (2 tag files on 2026-10-04), so it shows the rules and their inputs agree, not that the
+  backfilled organic share is accurate; `--validate-backfill` gets more informative as live tags accumulate.
 - **The proxy ledger records policy version and the pre-override proposed tier since 2026-10-03.** D5 and D4
   rows written before that carry neither (G3 excludes them as before the schema start).
 - **O1 has not been reconciled against Claude Code's `total_cost_usd`.** Until it is,
