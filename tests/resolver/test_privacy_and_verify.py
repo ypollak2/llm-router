@@ -22,7 +22,7 @@ from llm_router.resolver import profile as profile_mod
 from llm_router.resolver.calibrate import ERR_NO_RESPONSE, Reply
 from llm_router.resolver.types import inventory_to_dict
 
-from .fakes import NOW, make_probes
+from .fakes import make_probes
 from .test_calibrate import FakeModel
 
 KEY = "sk-live-AAAABBBBCCCCDDDD1234"
