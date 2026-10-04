@@ -866,6 +866,8 @@ def _scan_proxy_ledger() -> tuple[dict[str, dict], "session_kind.KindIndex"]:
     served: dict[str, dict] = {}
     kinds = session_kind.KindIndex()
     for row in _iter_jsonl(path):
+        if not isinstance(row, dict):
+            continue
         kinds.add(row.get("session_id"), row.get("session_kind"))
         if row.get("decision") == "served" and isinstance(row.get("msg_id"), str):
             served[row["msg_id"]] = row

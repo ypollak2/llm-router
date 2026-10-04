@@ -88,6 +88,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -162,8 +163,9 @@ def _rate_result(numerator: int, denominator: int, *, label: str = "n",
 
 
 def _num_ts(raw: Any) -> float | None:
-    """``raw`` as epoch seconds when it is a real number, else None (a bool is not a time)."""
-    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+    """``raw`` as epoch seconds when it is a real, plausible number, else None (a bool,
+    NaN, infinity or a value past year 5000 is not a time a ledger row can carry)."""
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(raw) and abs(raw) < 1e11:
         return float(raw)
     return None
 
@@ -178,12 +180,20 @@ def _parse_ts(raw: Any) -> float | None:
             when = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
         except ValueError:
             return None
-        return (when if when.tzinfo else when.replace(tzinfo=timezone.utc)).timestamp()
+        try:
+            return _num_ts((when if when.tzinfo else when.replace(tzinfo=timezone.utc)).timestamp())
+        except (OverflowError, OSError, ValueError):
+            return None
     return None
 
 
 def _iso(ts: float | None) -> str | None:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)) if ts is not None else None
+    if ts is None:
+        return None
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _newer(current: float | None, ts: float | None) -> float | None:
@@ -340,7 +350,7 @@ def _d4_tier_mix(pop: dict) -> dict:
     (``TIER_COST_WEIGHT``). Population: organic sessions by default; research and
     harness are out unless ``--include research`` (harness never)."""
     seen = len(pop["window"])
-    tiered = [r for r in pop["allowed"] if r.get("tier")]
+    tiered = [r for r in pop["allowed"] if isinstance(r.get("tier"), str) and r["tier"]]
     if not tiered:
         return _not_measurable(
             f"no tiered proxy call from {pop['scope']} session in window "
@@ -426,8 +436,9 @@ def _usable_session(row: dict) -> bool:
 def g3_row_type(row: dict) -> str:
     """The row's type, which decides which G3 fields can apply to it:
 
+    ``tiers_off``       the proxy ran with ``--tiers off``: no policy, no version (even on a
+                        row it served itself: the version is null whenever tiers are off)
     ``served``          answered by a non-Claude backend before any tier decision ran
-    ``tiers_off``       the proxy ran with ``--tiers off``: no policy, no version
     ``side_call``       a call with no client tools (titles, summaries): never classified
     ``pinned``          model kept as requested (unknown/pinned model, ``opus:`` pin)
     ``first_call``      first-call floors: kept before the classifier runs
@@ -437,10 +448,10 @@ def g3_row_type(row: dict) -> str:
     """
     from llm_router.proxy import tiers as pt
 
-    if row.get("decision") == "served":
-        return "served"
     if row.get("tier_mode") == "off":
         return "tiers_off"
+    if row.get("decision") == "served":
+        return "served"
     reason = row.get("tier_reason")
     if reason is None:
         return "undecided"
@@ -510,6 +521,7 @@ def _g3_completeness(all_rows: list[dict], days: int, now: float,
     before = len(window) - len(counted)
     stats = {f: {"applicable": 0, "recorded": 0} for f in G3_FIELDS}
     by_type: dict[str, dict[str, int]] = {}
+    by_session: dict[str, int] = {}
     complete = no_field = 0
     newest: float | None = None
     for ts, r in counted:
@@ -520,6 +532,8 @@ def _g3_completeness(all_rows: list[dict], days: int, now: float,
             no_field += 1
             continue
         t["rows"] += 1
+        if _usable_session(r):
+            by_session[r["session_id"]] = by_session.get(r["session_id"], 0) + 1
         newest = _newer(newest, ts)
         ok = True
         for f in required:
@@ -538,6 +552,8 @@ def _g3_completeness(all_rows: list[dict], days: int, now: float,
         "field_first_seen": {f: _iso(t) for f, t in first.items()},
         "window_rows": len(window), "rows_before_schema": before, "undated_rows": undated,
         "rows_counted": n, "rows_no_applicable_field": no_field, "rows_by_type": by_type,
+        "counted_sessions": len(by_session),
+        "largest_session_share": round(max(by_session.values()) / n, 4) if by_session and n else None,
         "fields": {f: {"applicable": st["applicable"], "recorded": st["recorded"],
                        "not_applicable": len(counted) - st["applicable"],
                        "coverage": (round(st["recorded"] / st["applicable"], 4)
@@ -558,7 +574,8 @@ def _g3_completeness(all_rows: list[dict], days: int, now: float,
                 f"{f} {_pct(extras['fields'][f]['coverage'])}"
                 + (f" of {st['applicable']} applicable" if st["applicable"] < n else "")
                 for f, st in stats.items() if st["applicable"])
-            out["value"] = (f"{_pct(complete / n)} (n={n}; since {since_s[:10]}; {per_field}; "
+            out["value"] = (f"{_pct(complete / n)} (n={n}; since {since_s[:10]}; "
+                            f"{len(by_session)} session(s); {per_field}; "
                             f"{before} row(s) before schema excluded)")
     out.update(extras)
     return out
@@ -678,11 +695,16 @@ def _g2_silent_failures() -> dict:
         f"{total} fail-open event(s) recorded, ALL-TIME (no per-event timestamp -- "
         "cannot be windowed or turned into a per-100-calls rate)",
         total, newest_ts=newest, all_time_total=total,
+        health_note="an all-time count, not a rate; its age is the store file's last write",
         by_code=dict(sorted(snap.by_code.items(), key=lambda kv: -kv[1])[:8]),
     )
 
 
 # ── G4: provider_reset, point-in-time ──────────────────────────────────────────
+
+G4_HEALTH_NOTE = ("a snapshot of this moment, not a rate: it cannot go stale, and cannot show "
+                  "that a past bench was wrong")
+
 
 def _g4_wrongly_benched() -> dict:
     try:
@@ -695,11 +717,12 @@ def _g4_wrongly_benched() -> dict:
     now = time.time()  # a snapshot of this moment: as fresh as it can be
     if n == 0:
         return _measured("0 providers currently benched (point-in-time; cannot confirm "
-                          "any PAST bench was wrong)", 0, newest_ts=now)
+                          "any PAST bench was wrong)", 0, newest_ts=now,
+                          health_note=G4_HEALTH_NOTE)
     names = ", ".join(sorted(resets))
     return _measured(f"{n} provider(s) currently benched: {names} (point-in-time snapshot -- "
                       "whether a bench is WRONG needs a human to say so)", n, newest_ts=now,
-                      benched=sorted(resets))
+                      health_note=G4_HEALTH_NOTE, benched=sorted(resets))
 
 
 # ── assembly ───────────────────────────────────────────────────────────────
@@ -768,7 +791,9 @@ def compute_health(data: dict, *, stale_hours: float = STALE_LIVE_HOURS,
         newest = r.get("newest_ts")
         age_h = (now_ts - newest) / 3600 if newest is not None else None
         if not r["measurable"]:
-            state, reason, n = STATE_BLIND, r["reason"], r["seen"]
+            # "too few" has an n (the one behind the number); "nothing to count" has only
+            # the data points that existed and could not be used.
+            state, reason, n = STATE_BLIND, r["reason"], (r["n"] if r["n"] is not None else r["seen"])
         elif age_h is None:
             state, n = STATE_BLIND, r["n"]
             reason = "measured, but its data carries no timestamp: cannot tell how old it is"
@@ -778,6 +803,8 @@ def compute_health(data: dict, *, stale_hours: float = STALE_LIVE_HOURS,
         else:
             state, n = STATE_MEASURED, r["n"]
             reason = f"newest data point {_age(max(age_h, 0.0))} old"
+        if r.get("health_note") and state != STATE_BLIND:
+            reason = f"{reason} ({r['health_note']})"
         out[key] = {"state": state, "reason": reason, "n": n, "newest_ts": newest,
                     "newest": _iso(newest), "age_hours": round(age_h, 2) if age_h is not None else None,
                     "stale_after_hours": limit_h}
@@ -844,7 +871,7 @@ def render_scorecard(data: dict) -> str:
     return "\n".join(lines)
 
 
-def render_health(health: dict) -> str:
+def render_health(health: dict, *, strict: bool = False) -> str:
     lines = [
         f"llm-router kpi --health -- window={health['window_days']}d generated={health['generated_at']}",
         f"  stale = newest data point older than {_age(health['stale_after_hours'])} "
@@ -855,8 +882,9 @@ def render_health(health: dict) -> str:
         h = health["kpis"][key]
         lines.append(f"  {_LABELS[key]:<42s} {h['state']:<9s} n={str(h['n']):<7} {h['reason']}")
     c = health["counts"]
-    lines += ["", f"{c[STATE_MEASURED]} measured, {c[STATE_BLIND]} blind, {c[STATE_STALE]} stale "
-                  "(exit 0; --strict exits 1 if any KPI is blind)"]
+    verdict = ("exit 1: --strict and a KPI is blind" if strict and c[STATE_BLIND]
+               else "exit 0; --strict exits 1 if any KPI is blind")
+    lines += ["", f"{c[STATE_MEASURED]} measured, {c[STATE_BLIND]} blind, {c[STATE_STALE]} stale ({verdict})"]
     return "\n".join(lines)
 
 
@@ -910,7 +938,8 @@ def cmd_kpi(args: list[str]) -> int:
     exit_code = 0
     if parsed.health:
         health = compute_health(data, stale_hours=parsed.stale_hours)
-        print(json.dumps(health, indent=2, default=str) if parsed.json else render_health(health))
+        print(json.dumps(health, indent=2, default=str) if parsed.json
+              else render_health(health, strict=parsed.strict))
         if parsed.strict and health["counts"][STATE_BLIND]:
             exit_code = 1
     elif parsed.json:

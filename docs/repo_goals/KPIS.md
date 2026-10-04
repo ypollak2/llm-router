@@ -55,7 +55,7 @@ A row is **complete** when every field that can apply to its type is recorded:
 | Field | Owed on | Recorded means |
 |---|---|---|
 | `session_kind` | every row whose request names a session | non-null |
-| `tier_policy_version` | every row when tiers are on (not `--tiers off`) | non-null |
+| `tier_policy_version` | every row when tiers are on, a row the proxy served itself included (null by design under `--tiers off`) | non-null |
 | `tier_proposed` | rows where the classifier ran: not side calls, pinned/unknown models, first-call floors, locally served rows or tiers-off rows. A tier decision that raised, or is missing on a forwarded row with tiers on, is **owed** (a defect) | non-null |
 | `tier_retry` | every row | key present (null = "no retry happened") |
 
@@ -64,7 +64,7 @@ A row is **complete** when every field that can apply to its type is recorded:
   overridable: `--schema-since <date|ISO time|epoch>`.
 - **Reported, not hidden.** The overall rate (complete rows / counted rows), each field's coverage over the rows
   it is owed on, how many rows it is not owed on, the rows before the schema start that were excluded, and rows with
-  no usable timestamp (`--json`: `fields`, `rows_by_type`, `rows_before_schema`, `undated_rows`).
+  no usable timestamp, and how many sessions the counted rows come from (`--json`: `fields`, `rows_by_type`, `rows_before_schema`, `undated_rows`, `counted_sessions`, `largest_session_share`).
 - **Not measurable, not a rate.** No row in the window, every row before the schema start, or no row with an
   applicable field prints `not measurable: <reason>`, never 0% or 100%. Below 50 counted rows it prints
   `too few to tell`.
@@ -86,7 +86,7 @@ directory does not change kind. The prompt hook tags a session at its next promp
 One line per KPI: `measured`, `blind` or `stale`, the one reason, and the n. **Blind** = no number (nothing to
 count, below 50, or not instrumented) or a number whose data carries no timestamp. **Stale** = a number whose newest
 data point is older than 48 h (live ledgers; `--stale-hours` to change) or 30 d (the frozen benchmark behind O2 and
-D5). Exit code 0 even when KPIs are blind; `--strict` exits 1 if any is blind (a stale KPI does not trip it). G1's
+D5). G4 is a snapshot of the moment and G2 an all-time count, so their "measured" says so in its reason. Exit code 0 even when KPIs are blind; `--strict` exits 1 if any is blind (a stale KPI does not trip it). G1's
 hook-side latency is not instrumented anywhere, so it is permanently blind and `--strict` will not pass until it is.
 
 ## Change rule

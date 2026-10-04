@@ -5,19 +5,26 @@ Primary KPI: G3 (ledger completeness); enables NS/D1/D2 (they cannot be read wit
 the join). Guardrail: G2.
 
 The numbers these tests pin come from the real ledger of 2026-10-04: the old G3 read
-0.4% (n=2,214) on data that was near-complete, NS/D1/D2 read "not measurable" while
-the session tag sat on the proxy rows, D4 counted calls only. Every behavioural test
-builds the inputs the fix has to handle (side calls, pre-schema rows, null fields,
-untagged units) and asserts the REASON, not just a number. The rule they share is
-the repo's: an empty or all-excluded set reports "not measurable", never 0% or 100%.
+0.4% (n=2,214) on data that was near-complete, NS/D1/D2 had no per-unit tag (their
+"not measurable" text counted only the untagged units and skipped the tagged ones
+silently), D4 counted calls only. On that machine today the join adds nothing to the
+NS/D1/D2 VALUES (one session is tagged; the old code already read its tag file): what
+it adds is the stamp on every unit, the proxy-rows fallback, and the joined/untagged
+accounting. Every behavioural test builds the inputs the fix has to handle (side
+calls, pre-schema rows, null fields, untagged units) and asserts the REASON, not just
+a number. The rule they share is the repo's: an empty or all-excluded set reports
+"not measurable", never 0% or 100%.
 """
 
 from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import sqlite3
+import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -790,8 +797,9 @@ def test_schema_since_flag_is_parsed_and_rejects_nonsense(capsys):
         kpi.cmd_kpi(["--schema-since", "not-a-date"])
 
 
-def test_the_scorecard_never_writes_to_the_state_dir(tmp_path):
-    """kpi is read-only. The state dir is isolated per test; nothing may appear in it."""
+def test_the_scorecard_never_creates_files_in_the_state_dir(tmp_path):
+    """No file appears in the (isolated) state dir. This does not cover O1's pre-existing
+    dashboard_data.summary(), which opens usage.db read-write (no usage.db exists here)."""
     _write(_rows_at(60))
     state = paths.llm_router_home()
     before = sorted(p.name for p in state.iterdir())
@@ -815,3 +823,141 @@ def test_the_prompt_hook_tags_the_session_inside_a_fail_open_guard():
     assert tries and tries[-1].handlers
     handler_src = "".join(ast.unparse(h) for h in tries[-1].handlers)
     assert "CHZ-FO-SESSION-KIND-TAG" in handler_src              # a failure is counted, not swallowed
+
+
+# ═════════════════════════════ review findings (independent verifier, 2026-10-04) ═════════════════════════════
+
+def test_a_served_row_owes_no_policy_version_when_tiers_are_off():
+    """proxy/server.py writes tier_policy_version=None whenever tiers are off, served rows
+    included. Typing the row `served` before checking `tier_mode` made every locally
+    served row on a tiers-off proxy score incomplete."""
+    row = _classified(NOW - 5, decision="served", tier_mode="off", tier_policy_version=None,
+                      tier_reason=None, proposed=None, tier=None)
+    assert kpi.g3_row_type(row) == "tiers_off"
+    assert kpi.g3_required_fields(row) == ("session_kind", "tier_retry")
+    served_on = dict(row, tier_mode="conversation")
+    assert kpi.g3_row_type(served_on) == "served" and "tier_policy_version" in kpi.g3_required_fields(served_on)
+
+
+def test_g3_says_how_many_sessions_the_rows_come_from():
+    rows = _rows_at(90, sid="s-big") + _rows_at(10, sid="s-small", start=NOW - 900)
+    _write(rows)
+    g3 = _g3()
+    assert g3["counted_sessions"] == 2 and g3["largest_session_share"] == 0.9
+    assert "; 2 session(s); " in g3["value"]
+
+
+def _hook(tmp_path, payload: dict) -> Path:
+    """Run the real UserPromptSubmit hook in a scratch HOME; return its state dir."""
+    hook = REPO / "src/llm_router/hooks/auto-route.py"
+    home = tmp_path / "hookhome"
+    home.mkdir(exist_ok=True)
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(home), "LLM_ROUTER_HOME": str(home / ".llm-router"),
+           "LLM_ROUTER_ENFORCE": "off", "LLM_ROUTER_ZERO_CLAUDE": "0"}
+    subprocess.run([sys.executable, str(hook)], input=json.dumps(payload).encode(), capture_output=True,
+                   env=env, timeout=90)
+    return home / ".llm-router"
+
+
+@pytest.mark.parametrize("prompt", [
+    "   ",                                                       # empty prompt exit
+    "<task-notification>background task done</task-notification>",  # system-notification bypass
+    "Another Claude session sent a message: here is my report",  # sub-agent report bypass
+    "fix the llm_router hook that is broken",                    # self-reference bypass
+])
+def test_the_prompt_hook_tags_the_session_even_when_the_prompt_bypasses_routing(tmp_path, prompt):
+    """13% of real invocations exit through one of these before routing. A session whose
+    prompts all do (this repo's own development) must still get its tag."""
+    sid = "5d1c9a3e-77b2-4c10-8f0a-3b6e2d9c1a40"
+    state = _hook(tmp_path, {"session_id": sid, "prompt": prompt, "cwd": "/Users/x/work/scratchpad/p"})
+    tag = json.loads((state / f"session_kind_{sid}.json").read_text())
+    assert tag["kind"] == "research"                              # the cwd was passed, not dropped
+    assert tag["cwd"] == "/Users/x/work/scratchpad/p"
+
+
+def test_the_prompt_hook_does_not_flip_an_existing_tag(tmp_path):
+    sid = "6e2d0b4f-88c3-4d21-9a1b-4c7f3e0d2b51"
+    first = _hook(tmp_path, {"session_id": sid, "prompt": "   ", "cwd": "/Users/x/Projects/app"})
+    _hook(tmp_path, {"session_id": sid, "prompt": "   ", "cwd": "/Users/x/work/scratchpad/p"})
+    tag = json.loads((first / f"session_kind_{sid}.json").read_text())
+    assert (tag["kind"], tag["cwd"]) == ("organic", "/Users/x/Projects/app")
+
+
+def test_a_forced_kind_rewrites_a_tag_only_when_it_changes_it():
+    session_kind.tag_session("sess-f", "/Users/x/Projects/app", env={})
+    path = paths.state_path("session_kind_sess-f.json")
+    before = path.read_text()
+    session_kind.tag_session("sess-f", "/Users/x/Projects/app", env={"LLM_ROUTER_SESSION_KIND": "organic"})
+    assert path.read_text() == before                              # same kind: not rewritten on every prompt
+    session_kind.tag_session("sess-f", "/Users/x/Projects/app", env={"LLM_ROUTER_SESSION_KIND": "research"})
+    assert json.loads(path.read_text())["kind"] == "research"
+
+
+def test_the_stale_hours_flag_reaches_compute_health(capsys):
+    _write(_rows_at(80, start=time.time() - 30 * 3600))              # 30h old: fresh at 48h, stale at 12h
+    assert kpi.cmd_kpi(["--health", "--json", "--days", "3"]) == 0
+    assert json.loads(capsys.readouterr().out)["kpis"]["G3"]["state"] == "measured"
+    assert kpi.cmd_kpi(["--health", "--json", "--days", "3", "--stale-hours", "12"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["kpis"]["G3"]["state"] == "stale" and out["stale_after_hours"] == 12
+
+
+def test_the_strict_footer_says_when_it_exits_nonzero(capsys):
+    assert kpi.cmd_kpi(["--health", "--strict"]) == 1
+    assert "exit 1: --strict and a KPI is blind" in capsys.readouterr().out
+    assert kpi.cmd_kpi(["--health"]) == 0
+    assert "(exit 0; --strict exits 1 if any KPI is blind)" in capsys.readouterr().out
+
+
+def test_health_n_for_too_few_is_the_n_behind_the_number(monkeypatch):
+    rows = [{"outcome": usage_outcome.OUTCOME_USED, "session_id": "s", "session_kind": "organic", "ts": NOW - 5}] * 23
+    rows += [{"outcome": usage_outcome.OUTCOME_UNKNOWN, "session_id": "s", "session_kind": "organic"}] * 200
+    monkeypatch.setattr(usage_outcome, "judge_recent", lambda days=7, root=None: rows)
+    h = _health()["kpis"]["D3"]
+    assert h["state"] == "blind" and h["n"] == 23 and "n=23" in h["reason"]
+
+
+def test_snapshot_and_all_time_kpis_say_what_their_measured_means(monkeypatch):
+    from llm_router import failopen
+
+    failopen.record("CHZ-FO-TEST", RuntimeError("x"))
+    failopen.reset_cache()
+    h = kpi.compute_health(kpi.compute_scorecard(days=7))["kpis"]      # real clock: both are "now"
+    assert h["G4"]["state"] == "measured" and "cannot go stale" in h["G4"]["reason"]
+    assert h["G2"]["state"] == "measured" and "an all-time count, not a rate" in h["G2"]["reason"]
+
+
+def test_malformed_ledger_rows_do_not_crash_the_scorecard():
+    good = _rows_at(60)
+    junk = [{"ts": float("inf"), "session_id": "x"}, {"ts": 1e20}, {"ts": NOW - 1, "tier": ["opus"]},
+            {"ts": NOW - 1, "tier": {"a": 1}, "session_kind": "organic"},
+            {"ts": NOW - 2, "session_kind": "organic", "tier": 7}]
+    path = pl.ledger_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(r) for r in good + junk) + "\n[1, 2]\n42\n\"text\"\n", encoding="utf-8")
+    data = kpi.compute_scorecard(days=7, now=NOW)                    # must not raise
+    assert data["kpis"]["G3"]["measurable"] is True
+    assert data["kpis"]["D4"]["calls_by_tier"] == {"sonnet": 60}      # only string tiers are tiers
+    kpi.compute_health(data, now=NOW)
+    assert kpi._iso(float("inf")) is None and kpi._iso(1e20) is None
+    assert kpi._parse_ts("9999-12-31T00:00:00Z") is None            # past year 5000 is not a ledger time
+
+
+def test_newest_timestamp_opens_the_database_read_only(monkeypatch, tmp_path):
+    from llm_router import dashboard_data as dd
+
+    db = tmp_path / "usage.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE usage (timestamp TEXT)")
+    con.commit()
+    con.close()
+    opened = []
+    real = sqlite3.connect
+
+    def spy(target, *a, **k):
+        opened.append(str(target))
+        return real(target, *a, **k)
+
+    monkeypatch.setattr(dd.sqlite3, "connect", spy)
+    dd.newest_timestamp(db_path=db)
+    assert opened and all("mode=ro" in t and "uri" not in t.split("?")[0] for t in opened), opened

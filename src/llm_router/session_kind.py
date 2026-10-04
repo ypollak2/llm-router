@@ -34,9 +34,9 @@ A session's kind is decided once, at its first sighting, and never changes: the
 tag file is write-once (only the explicit ``LLM_ROUTER_SESSION_KIND`` override
 replaces it). It used to be rewritten by every SessionStart, so a session
 resumed from another directory changed kind: 2026-10-03/04 one session's tag file
-was rewritten twice (organic, research, organic, by the cwd of each start) while
-the proxy, which caches hits, kept stamping the first value, so one session read
-as two kinds across the ledgers.
+(created 20:27Z) was rewritten at 23:00Z to ``research`` (cwd under ``~/.rsi``) and at
+19:33Z to ``organic`` (cwd ``$HOME``), while the proxy, which caches hits, kept
+stamping the first value, so one session read as two kinds across the ledgers.
 
 SessionStart alone leaves a session untagged when it was already running when
 the tagging hook was deployed, or is resumed without a SessionStart: 2026-10-04,
@@ -120,11 +120,10 @@ def tag_session(session_id: str | None, cwd: str | None, *, env: dict | None = N
     if not session_id:
         return None
     environ = os.environ if env is None else env
-    forced = (environ.get("LLM_ROUTER_SESSION_KIND") or "").strip().lower() in VALID_KINDS
-    if not forced:
-        existing = kind_of(session_id)
-        if existing is not None:
-            return existing
+    forced = (environ.get("LLM_ROUTER_SESSION_KIND") or "").strip().lower()
+    existing = kind_of(session_id)
+    if existing is not None and (forced not in VALID_KINDS or forced == existing):
+        return existing  # first tag wins; a forced kind rewrites only when it differs
     entrypoint = environ.get("CLAUDE_CODE_ENTRYPOINT")
     kind = classify(cwd=cwd, entrypoint=entrypoint, override=environ.get("LLM_ROUTER_SESSION_KIND"))
     try:
