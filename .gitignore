@@ -186,3 +186,5 @@ results/
 
 # Release-time outcome audit artifacts (scripts/release/outcome_audit.py)
 /release-artifacts/
+# Resolver design + calibration reference (inventory/calibrate/resolve)
+!/docs/model-resolver.md
