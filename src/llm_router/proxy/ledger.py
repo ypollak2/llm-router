@@ -27,6 +27,9 @@ Row fields:
   added_latency_s     time the proxy added before Anthropic saw the call
                       (classification + a failed attempt); 0 when not tried
   upstream_status, usage (Anthropic usage, cache split), backend_usage
+  usage            null (with ``usage_unknown`` = no_usage | truncated) on a 2xx
+                   reply whose usage never arrived or whose stream ended before
+                   the terminal message_delta: UNKNOWN, not zero
   served_blocks   e.g. ["tool_use:Read"] for a served reply
   mixed_history   history contains a proxy-served turn
   thinking_retry  Anthropic rejected the mixed history over thinking and the
@@ -79,6 +82,14 @@ Claude-tier rewrite fields (only when the proxy runs with ``--tiers on`` or
   tier_quota_state      ok / stale / unknown / off -- only ``ok`` drives the
                         ``quota_pressure`` step; the others change nothing
   tier_decision_s       time the decision added
+
+Cost fields, on EVERY row (``proxy.cost_accounting``; null = unknown, never 0):
+  served_by, anthropic_usage, anthropic_cost_usd, counterfactual_cost_usd
+                        which side answered, the REAL Anthropic usage (zeros
+                        when local), its price, and the step's cost on the
+                        requested model. Claude Code's own ``total_cost_usd``
+                        is phantom on a proxied session: the ledger is the
+                        source of truth.
 
 ``northstar`` joins ``msg_id`` of served rows to transcript assistant records
 (``message.id``) to count those turns as routed.
@@ -276,7 +287,10 @@ def _price_tokens(model: str, *, input_tokens: int = 0, output_tokens: int = 0,
 
 def anthropic_cost(row: dict) -> float | None:
     """Estimated USD of the Anthropic side of one row, or None when unpriced.
-    Priced at the model the call was actually sent to."""
+    Priced at the model the call was actually sent to. A row whose usage is
+    recorded as null (unknown, see the module docstring) is unpriced."""
+    if "usage" in row and row["usage"] is None:
+        return None
     u = normalize_usage(row.get("usage"))
     return _price_tokens(row.get("served_model") or row.get("requested_model") or "",
                          input_tokens=u["input_tokens"],

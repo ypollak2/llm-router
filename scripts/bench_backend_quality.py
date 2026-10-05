@@ -738,6 +738,9 @@ def run_claude(prompt: str, sandbox: Path, model: str, timeout: int,
     usage = {
         "usage": d.get("usage"), "model_usage": d.get("modelUsage"),
         "num_turns": d.get("num_turns"), "total_cost_usd": d.get("total_cost_usd"),
+        # Phantom on a proxied session (prices local tokens at list): read the
+        # proxy ledger (proxy.cost_accounting.proxy_session_cost) for real spend.
+        "total_cost_usd_label": "unreliable",
     }
     return answer, ("claude reported is_error" if d.get("is_error") else None), usage
 
