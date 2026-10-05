@@ -83,7 +83,8 @@ Claude-tier rewrite fields (only when the proxy runs with ``--tiers on`` or
                         ``quota_pressure`` step; the others change nothing
   tier_decision_s       time the decision added
 
-Cost fields, on EVERY row (``proxy.cost_accounting``; null = unknown, never 0):
+Cost fields, on EVERY row (``proxy.cost_accounting``; for rows written since #261,
+null = unknown, never 0; rows written before #261 carry zeros for unknown usage):
   served_by, anthropic_usage, anthropic_cost_usd, counterfactual_cost_usd
                         which side answered, the REAL Anthropic usage (zeros
                         when local), its price, and the step's cost on the
