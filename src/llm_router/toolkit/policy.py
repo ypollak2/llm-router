@@ -44,8 +44,13 @@ SECRET_NAME_GLOBS = (
 SECRET_DIR_NAMES = frozenset({".ssh", ".aws", ".gnupg", ".kube", ".docker", ".git"})
 
 
+_PUBLIC_ENV_SUFFIXES = (".example", ".sample", ".template", ".dist")
+
+
 def is_secret_name(name: str) -> bool:
     base = os.path.basename(name.rstrip("/")).lower()
+    if base.startswith(".env.") and base.endswith(_PUBLIC_ENV_SUFFIXES):
+        return False                      # `.env.example` documents variables; it holds no values
     return any(fnmatch.fnmatch(base, g.lower()) for g in SECRET_NAME_GLOBS)
 
 

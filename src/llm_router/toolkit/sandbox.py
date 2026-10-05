@@ -333,10 +333,15 @@ def build_profile(write_roots: list[Path], *, deny_home_reads: bool = True) -> s
     lines.append("(deny mach-lookup " + " ".join(
         [f"(global-name {_q(n)})" for n in _DENY_MACH]
         + [f"(global-name-prefix {_q(n)})" for n in _DENY_MACH_PREFIX]) + ")")
+    # file-read-DATA, not file-read*: a test runner walks the tree and stat()s every entry, and
+    # one EPERM on a `.env` aborts its whole collection. The contents stay unreadable.
     for rx in _SECRET_READ_REGEXES:
-        lines.append(f'(deny file-read* (regex #"{rx}"))')
+        lines.append(f'(deny file-read-data (regex #"{rx}"))')
+    lines.append('(allow file-read-data (regex #"/\\.env\\.(example|sample|template|dist)$"))')
     # the CA bundle every TLS client library loads is named *.pem and is not a secret
-    lines.append('(allow file-read* (regex #"/cacert\\.pem$"))')
+    for rx in (r"/cacert\.pem$", r"^/(private/)?etc/ssl/", r"^/opt/homebrew/etc/(ca-certificates|openssl[^/]*)/",
+               r"^/usr/local/etc/(ca-certificates|openssl[^/]*)/", r"/certifi/[^/]*\.pem$"):
+        lines.append(f'(allow file-read-data (regex #"{rx}"))')
     if deny_home_reads:
         home = os.path.realpath(os.path.expanduser("~"))
         for sub in _HOME_READ_DENY:

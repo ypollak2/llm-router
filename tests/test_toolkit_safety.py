@@ -461,6 +461,31 @@ def test_script_cannot_read_secret_named_files_anywhere(env):
     assert r.text.count("BLOCKED") == 2 and CANARY not in r.text, r.text
 
 
+def test_env_example_is_not_a_secret_but_env_variants_are(env):
+    from llm_router.toolkit.policy import is_secret_name
+    assert not any(is_secret_name(n) for n in (".env.example", ".env.sample", ".env.template", ".env.dist"))
+    assert all(is_secret_name(n) for n in (".env", ".env.local", ".env.production", ".ENV"))
+    env.write_ws(".env.example", "KEY=\n")
+    assert env.run("read", path=".env.example").allowed
+
+
+@needs_sandbox
+def test_a_test_runner_can_stat_secret_files_but_not_read_them(env):
+    """pytest's collection stat()s every entry; one EPERM on a secret aborted the whole run
+    (found on the first benchmark task). Metadata is allowed, contents are not."""
+    stray = env.outside / ".env"
+    name = _script(env, f"""
+        import os
+        print("STAT_OK", os.stat({str(stray)!r}).st_size > 0)
+        try:
+            open({str(stray)!r}).read(); print("READ_OK")
+        except OSError:
+            print("READ_BLOCKED")
+    """)
+    r = env.run("bash", command=f"python {name}")
+    assert "STAT_OK True" in r.text and "READ_BLOCKED" in r.text and "READ_OK" not in r.text, r.text
+
+
 @needs_sandbox
 def test_the_ca_bundle_is_still_readable_for_tls_libraries(env):
     pytest.importorskip("certifi")

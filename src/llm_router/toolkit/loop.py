@@ -9,11 +9,13 @@ is a patch; the caller's tree is never written (and a fingerprint proves it).
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from llm_router.persist_redaction import persist_redact
 from llm_router.proxy.loop_guard import LoopGuard
 from llm_router.toolkit import result as R
 from llm_router.toolkit import sandbox, verify
@@ -166,6 +168,13 @@ def run_task(task: str, *, adapter, source: str | os.PathLike, verify_cmd: str |
             except AdapterError as exc:
                 stop = f"adapter: {exc}"[:200]
                 break
+            R.append_private_jsonl(run_dir / "transcript.jsonl", {
+                "kind": "assistant", "step": steps, "ms": reply.ms, "repaired": reply.repaired,
+                "content": persist_redact((reply.content or "")[:1500]),
+                "calls": [{"name": (c.get("function") or {}).get("name"),
+                           "args": persist_redact(json.dumps((c.get("function") or {}).get("arguments"),
+                                                             default=str)[:600])} for c in reply.tool_calls],
+                "tokens_in": reply.tokens_in, "tokens_out": reply.tokens_out})
             if reply.tokens_in is not None or reply.tokens_out is not None:
                 saw_usage = True
                 tin += reply.tokens_in or 0
