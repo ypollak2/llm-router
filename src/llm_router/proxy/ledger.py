@@ -357,7 +357,14 @@ def _net_avoided(rows: list[dict]) -> tuple[float, int]:
     steps: a run of N consecutive served steps is priced ONCE, at its first
     priceable step, because it is one point where a real Anthropic call was
     deferred, not N — see the module docstring for why summing every step in
-    the run double/triple-counted the local model's own extra internal turns."""
+    the run double/triple-counted the local model's own extra internal turns.
+
+    Unknown usage (``usage`` recorded as null, see :func:`usage_unknown`) is NOT
+    excluded here, and reads as zero tokens in two places: a ``nxt`` row with
+    unknown usage adds no extra cache-write cost (this keeps the figure an upper
+    bound, never below the truth), and an unknown ``prefix`` row gives a zero
+    prefix context (which prices the counterfactual low). Both are deliberate,
+    labelled approximations of an upper bound, not measurements."""
     total = 0.0
     n = 0
     for run, prefix, nxt in _served_runs(rows):
@@ -544,7 +551,8 @@ def stats(rows: list[dict]) -> dict:
     def _cc(rs: list[dict]) -> list[float]:
         return [normalize_usage(r.get("usage"))["cache_creation_input_tokens"] for r in rs]
 
-    cont_fwd = [r for r in to_anthropic if r.get("step_class")]
+    # Known usage only: a null-usage row would enter the medians (and their n) as 0.
+    cont_fwd = [r for r in to_anthropic if r.get("step_class") and not usage_unknown(r)]
     mixed = [r for r in cont_fwd if r.get("mixed_history")]
     clean = [r for r in cont_fwd if not r.get("mixed_history")]
 
@@ -608,7 +616,7 @@ def format_stats(s: dict) -> str:
         f"Anthropic est. cost: ${an['est_cost_usd']} over {an['calls']} calls "
         f"({an['unpriced_calls']} unpriced); net avoided (upper bound, not realized): "
         f"${an['net_avoided_usd']} (n={an['net_avoided_n']}, may be negative)",
-        f"cache_creation median: after a served turn {an['cache_creation_median_after_served_turn']} "
+        f"cache_creation median (known-usage rows only): after a served turn {an['cache_creation_median_after_served_turn']} "
         f"(n={an['after_served_n']}) vs clean history {an['cache_creation_median_clean_history']} (n={an['clean_n']})",
     ]
     t = s.get("tiers")
