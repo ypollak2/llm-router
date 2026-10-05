@@ -12,7 +12,11 @@ is skipped, not fatal.
 from __future__ import annotations
 
 import json
+import os
 import stat
+import subprocess
+import sys
+import textwrap
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -724,6 +728,136 @@ def test_sidecar_rows_hold_only_the_documented_fields(tmp_path):
     assert set(row) == {"session_id", "kind", "source", "basis", "ts"}
     assert row["source"] == "backfill"
     assert "PRIVATE" not in text and "secret" not in text
+
+
+# ── concurrency: the append is a locked, re-checked critical section ────────────
+
+def _row(sid, kind="organic"):
+    return {"session_id": sid, "kind": kind, "source": "backfill", "basis": "ordinary", "ts": NOW}
+
+
+def test_append_rows_skips_a_session_another_run_already_wrote():
+    """The deterministic core of the race: this run's snapshot was taken before another
+    run wrote. ``_append_rows`` must re-check inside its lock and write only what is
+    still missing -- and say how many that was."""
+    path = skb.sidecar_path()
+    assert skb._append_rows(path, [_row("a"), _row("b")]) == 2
+    assert skb._append_rows(path, [_row("b", "research"), _row("c"), _row("c")]) == 1  # b exists; c once
+    ids = [json.loads(line)["session_id"] for line in path.read_text(encoding="utf-8").splitlines()]
+    assert ids == ["a", "b", "c"]
+    assert skb.load_sidecar(path)["b"] == "organic"    # the first row is the one that stays
+
+
+def test_append_rows_refuses_to_write_without_the_lock(monkeypatch):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def never_held(_path, timeout=0):
+        yield False
+
+    monkeypatch.setattr(skb, "exclusive_lock", never_held)
+    with pytest.raises(OSError, match="could not lock"):
+        skb._append_rows(skb.sidecar_path(), [_row("a")])
+    assert not skb.sidecar_path().exists()    # nothing written, not even unlocked
+
+
+def test_backfill_report_says_when_a_concurrent_run_got_there_first(tmp_path, monkeypatch):
+    _write_transcript(tmp_path, "sid-raced", [{"type": "user", "cwd": "/Users/x/p"}])
+    pl.write_row(_proxy_row("sid-raced"))
+    real = skb._append_rows
+
+    def lose_the_race(path, rows):
+        real(path, rows)          # "the other run" writes the same row first ...
+        return real(path, rows)   # ... so this run's append finds it already there
+
+    monkeypatch.setattr(skb, "_append_rows", lose_the_race)
+    result = skb.backfill_sessions(root=tmp_path)
+    assert (result["new_rows"], result["written"]) == (1, 0)
+    assert "1 of them were already written by a concurrent run" in skb.render_backfill_report(result)
+    assert len(skb.sidecar_path().read_text(encoding="utf-8").splitlines()) == 1
+
+
+_RACER = textwrap.dedent("""
+    import json, sys, time
+    from pathlib import Path
+    from llm_router import session_kind_backfill as skb
+
+    idx, n, sync = int(sys.argv[1]), int(sys.argv[2]), Path(sys.argv[3])
+    real, calls = skb.load_sidecar, [0]
+
+    def gated(path=None):
+        out = real(path)
+        calls[0] += 1
+        if calls[0] == 1:   # the snapshot backfill_sessions decides "new" from: hold every
+            (sync / f"ready-{idx}").write_text("")   # process here until all have taken theirs
+            deadline = time.time() + 60
+            while len(list(sync.glob("ready-*"))) < n:
+                if time.time() > deadline:
+                    raise SystemExit("rendezvous timed out")
+                time.sleep(0.005)
+        elif calls[0] == 2:   # the re-check inside the lock: widen check-then-append so that
+            time.sleep(0.05)  # without the lock every process would still see "nothing there"
+        return out
+
+    skb.load_sidecar = gated
+    r = skb.backfill_sessions(with_units=False)
+    print(json.dumps({"written": r["written"], "new_rows": r["new_rows"]}))
+""")
+
+
+def test_six_concurrent_backfills_write_every_session_exactly_once(tmp_path):
+    """Six real processes, all holding a stale "nothing is in the sidecar yet" snapshot
+    (a rendezvous after the first read guarantees it), then writing at once. Without the
+    lock and the re-check each writes all N rows: 6N lines, interleaved mid-line."""
+    procs, n_sessions = 6, 400
+    root = tmp_path / "claude-projects"
+    sids = [f"c{i:03d}1c4e6a2-7b3d-4f58-9a10-2d6e8c0b4f70" for i in range(n_sessions)]
+    for sid in sids:
+        _write_transcript(root, sid, [{"type": "user", "cwd": "/Users/x/p", "entrypoint": "cli"}])
+    _write_proxy_ledger([_proxy_row(sid) for sid in sids])
+    sync = tmp_path / "sync"
+    sync.mkdir()
+    env = {**os.environ, "CLAUDE_PROJECTS_DIR": str(root), "OLLAMA_HOST": "127.0.0.1:1"}
+    children = [subprocess.Popen([sys.executable, "-c", _RACER, str(i), str(procs), str(sync)],
+                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                for i in range(procs)]
+    outs = [c.communicate(timeout=120) for c in children]
+    assert [c.returncode for c in children] == [0] * procs, [o[1][-400:] for o in outs]
+    reports = [json.loads(o[0].strip().splitlines()[-1]) for o in outs]
+    assert {r["new_rows"] for r in reports} == {n_sessions}    # every process believed all were new
+
+    lines = skb.sidecar_path().read_text(encoding="utf-8").splitlines()
+    rows = [json.loads(line) for line in lines]                # a torn line would not parse
+    assert all(set(r) == {"session_id", "kind", "source", "basis", "ts"} for r in rows)
+    got = [r["session_id"] for r in rows]
+    assert len(got) == len(set(got)) == n_sessions, f"{len(got)} rows for {n_sessions} sessions"
+    assert sorted(got) == sorted(sids)
+    assert sum(r["written"] for r in reports) == n_sessions    # each row written by exactly one run
+
+
+# ── the parent directory: 0700 only if this module made it ───────────────────────
+
+def test_a_directory_the_module_creates_is_0700(tmp_path, monkeypatch):
+    home = tmp_path / "fresh-home"
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(home))
+    assert not home.exists()
+    old = os.umask(0)   # the worst case: nothing masked off, so any looseness would show
+    try:
+        skb._append_rows(skb.sidecar_path(), [_row("a")])
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(home.stat().st_mode) == 0o700
+    assert stat.S_IMODE(skb.sidecar_path().stat().st_mode) == 0o600
+
+
+def test_an_existing_directory_is_never_chmodded(tmp_path, monkeypatch):
+    home = tmp_path / "users-own-dir"
+    home.mkdir()
+    home.chmod(0o755)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(home))
+    skb._append_rows(skb.sidecar_path(), [_row("a")])
+    assert stat.S_IMODE(home.stat().st_mode) == 0o755   # the user's choice, untouched
+    assert stat.S_IMODE(skb.sidecar_path().stat().st_mode) == 0o600
 
 
 # ── validation against live evidence ──────────────────────────────────────────

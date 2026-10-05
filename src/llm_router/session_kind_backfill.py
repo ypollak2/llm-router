@@ -19,6 +19,9 @@ CONTRACT (owner-approved, 2026-10-04):
 * Write-once per session: a ``session_id`` that already has a sidecar row (a resolved
   kind, or ``"unknown"``) is never re-derived or rewritten. Re-running
   ``--backfill-tags`` is therefore a no-op once every untagged session_id has one row.
+  Strict under concurrency too: the append takes a file lock and re-reads the sidecar
+  inside it (:func:`_append_rows`), so two runs started together never write the same
+  ``session_id`` twice and never interleave a line.
 * A live tag always wins: :meth:`session_kind.KindIndex.resolve` consults the sidecar
   LAST, only after the tag file, the record's own stamp, and the session's proxy rows
   all have nothing to say. This module never touches that precedence; it only supplies
@@ -51,6 +54,7 @@ from pathlib import Path
 from typing import Any
 
 from llm_router import edit_ledger, paths, session_kind, usage_outcome
+from llm_router.file_lock import exclusive_lock
 
 #: Evidence-insufficiency basis codes. ``session_kind.BASIS_*`` covers the rule-based
 #: ones once evidence exists; these three cover the ways it does not.
@@ -204,15 +208,40 @@ def derive_kind(session_id: str, root: Path | None = None,
 
 
 def _append_rows(path: Path, rows: list[dict[str, Any]]) -> int:
-    """Append-only, 0600 (``paths.private_opener``), matching
+    """Append ``rows`` whose ``session_id`` is not already in the sidecar; returns how
+    many were written. Append-only, 0600 (``paths.private_opener``), matching
     ``usage_outcome.record_outcomes``'s idiom -- except this write path RAISES on
     failure: it is a deliberate one-shot admin operation the owner asked for
-    (``kpi --backfill-tags``), not hot-path telemetry that must never block a session."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8", opener=paths.private_opener) as fh:
+    (``kpi --backfill-tags``), not hot-path telemetry that must never block a session.
+
+    CONCURRENCY. ``backfill_sessions`` decides what is new from a snapshot it took a
+    while ago (a transcript scan, seconds to minutes on a large corpus), so two runs
+    started together both believe every session is new. The write is therefore a
+    critical section: take ``file_lock.exclusive_lock`` on a sibling ``.lock`` file,
+    RE-READ the sidecar inside it, and append only what is still missing, in one
+    ``write`` call. Write-once is then strict -- no duplicate ``session_id`` rows, no
+    interleaved or torn lines -- not merely tolerated by the first-wins reader.
+
+    A directory this call creates is 0700 (the sidecar names sessions); an existing one
+    is left exactly as its owner made it. It is created BEFORE the lock is taken,
+    because ``exclusive_lock`` would otherwise create it with the default mode."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".lock")
+    with exclusive_lock(lock_path) as held:
+        if not held:
+            raise OSError(f"could not lock {lock_path} (is another --backfill-tags running?); "
+                          "nothing was written")
+        present = set(load_sidecar(path))
+        fresh: list[dict[str, Any]] = []
         for row in rows:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-    return len(rows)
+            if row["session_id"] not in present:
+                present.add(row["session_id"])
+                fresh.append(row)
+        if fresh:
+            payload = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in fresh)
+            with open(path, "a", encoding="utf-8", opener=paths.private_opener) as fh:
+                fh.write(payload)
+        return len(fresh)
 
 
 def backfill_sessions(*, dry_run: bool = False, home: Path | None = None,
@@ -365,6 +394,9 @@ def render_backfill_report(result: dict[str, Any]) -> str:
         f"{verb} {result['new_rows']} new sidecar row(s)"
         + ("" if result["dry_run"] else f" ({result['written']} written)") + ".",
     ]
+    if not result["dry_run"] and result["written"] < result["new_rows"]:
+        lines.append(f"{result['new_rows'] - result['written']} of them were already written by a "
+                     "concurrent run and were skipped (write-once).")
     if result["by_kind"]:
         lines.append("by kind: " + ", ".join(f"{k} {n}" for k, n in result["by_kind"].items()))
     if result["by_basis"]:

@@ -143,7 +143,10 @@ for each untagged session from the one record that survives it, its Claude Code 
 (`~/.claude/projects/*/<session_id>.jsonl`: the first `cwd` and `entrypoint`), with the same function the live tagger
 calls (`session_kind.classify_with_basis`), and appends it to a sidecar, `~/.llm-router/session_kind_backfill.jsonl`
 (mode 0600; `session_id`, `kind`, `source`, a coarse basis code and `ts`; no prompt text, no paths). The ledgers are
-never written, and deleting the sidecar restores the previous numbers exactly. Rules: the sidecar is the LAST step of
+never written, and deleting the sidecar restores the previous numbers exactly. The append is a locked critical
+section (a sibling `session_kind_backfill.jsonl.lock` file; the sidecar is re-read inside the lock), so two runs at once
+never write a session twice or interleave a line; a directory the command has to create is 0700, an existing one is
+left as its owner made it. Rules: the sidecar is the LAST step of
 the join (tag file, then the record's own stamp, then agreeing proxy-row stamps, then the sidecar), so a live tag
 always wins; it is write-once per session; a transcript that is missing, unreadable or carries neither field gives
 `unknown`, which never enters a KPI (it is not organic and not a kind); a session whose proxy rows conflict gets no
