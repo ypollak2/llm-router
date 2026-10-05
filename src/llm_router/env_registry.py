@@ -295,6 +295,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_QUOTAS_PATH": ("llm_router", "enterprise/quotas.py", 1),
     "LLM_ROUTER_QUOTA_DELAY": ("llm_router", "quota_tracker.py", 1),
     "LLM_ROUTER_QUOTA_RETRY": ("llm_router", "quota_tracker.py", 1),
+    "LLM_ROUTER_QUOTA_MAX_AGE": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_QUOTA_TTL": ("llm_router", "hooks/auto-route.py", 2),
     "LLM_ROUTER_RENDER_MODE": ("llm_router", "hooks/response_formatter.py", 1),
     "LLM_ROUTER_RESPONSE_ROUTER": ("llm_router", "commands/doctor.py", 3),

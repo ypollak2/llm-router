@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 41
+# llm_router-hook-version: 42
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -196,7 +196,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 41"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 42"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -733,7 +733,13 @@ def _refresh_child_env() -> dict[str, str] | None:
     allowlist helper is unavailable — same fallback as llm_router.file_lock)."""
     try:
         from llm_router.safe_subprocess import get_delegated_env
-    except Exception:
+    except Exception as _env_exc:  # noqa: BLE001
+        # Inherit (the pre-allowlist behaviour) but leave a count of it.
+        try:
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-USAGE-REFRESH-ENV", _env_exc)
+        except Exception:  # noqa: BLE001
+            _debug_log("usage refresh env helper unavailable")
         return None
     extra = {
         k: v for k, v in os.environ.items()
