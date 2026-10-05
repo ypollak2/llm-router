@@ -63,7 +63,8 @@ def test_local_models_beside_a_cloud_one_stay_local_and_a_cloud_word_inside_a_na
 
 @pytest.mark.parametrize("label", list(CLOUD_FIXTURES))
 def test_calibrate_never_probes_a_cloud_ollama_model_without_allow_paid(label):
-    inv = inv_mod.collect_inventory(make_probes(ollama=CLOUD_FIXTURES[label]), profiles={})
+    inv = inv_mod.collect_inventory(
+        make_probes(ollama=CLOUD_FIXTURES[label], ollama_signin="signed_in"), profiles={})
     chosen, skipped = cal.select_models(inv, None, allow_paid=False)
     assert chosen == [] and "--allow-paid" in skipped[0][1]
 
@@ -75,7 +76,7 @@ def test_calibrate_never_probes_a_cloud_ollama_model_without_allow_paid(label):
 
 
 def test_with_allow_paid_a_cloud_ollama_model_is_estimated_as_spend_and_reached_through_ollama():
-    inv = inv_mod.collect_inventory(make_probes(ollama=CLOUD_FIXTURES["-cloud tag"]), profiles={})
+    inv = inv_mod.collect_inventory(make_probes(ollama=CLOUD_FIXTURES["-cloud tag"], ollama_signin="signed_in"), profiles={})
     chosen, _ = cal.select_models(inv, None, allow_paid=True)
     assert [m.id for m in chosen] == ["ollama/evil:120b-cloud"]
     assert "quota" in cal.estimate_cost(chosen[0], 8000).note                    # not "local, no cost"
@@ -439,3 +440,149 @@ def test_cli_verify_flag_runs_the_ping_and_is_off_by_default(monkeypatch, tmp_pa
     assert cmd_inventory(["--json", "--verify"]) == 0
     out = capsys.readouterr().out
     assert calls == [("openai", KEY)] and KEY not in out
+
+
+# ------------------------------------- cloud-backed Ollama: sign-in is checked, not assumed
+#
+# #260's review: cloud-backed Ollama models got authorized=True / path_verified=True
+# unconditionally ("Ollama sign-in state is not inspected"), so
+# hard_failures(entry, Needs(tools=True), now) == [] and resolve("EASY", ...) routed to
+# the cloud model with zero rejections. The daemon's own `POST /api/me` (no model call,
+# no quota; only the HTTP status is read) is now the evidence.
+
+from llm_router.resolver import profile as _profile  # noqa: E402
+from llm_router.resolver.resolve import (  # noqa: E402
+    STATUS_NO_ELIGIBLE, Needs, Setup, hard_failures, resolve)
+
+from .fakes import NOW  # noqa: E402
+
+CLOUD = "ollama/evil:120b-cloud"
+_EASY = {"json": _profile.ProbeResult(True), "edit": _profile.ProbeResult(True),
+         "tool_call": _profile.ProbeResult(True),
+         "long_context": _profile.ProbeResult(True, size_tokens=8000)}
+
+
+def _cloud_inv(signin, local=False, profiles=None):
+    models = {"evil:120b-cloud": {"caps": CAPS}}
+    if local:
+        models["qwen3:8b"] = {"caps": CAPS}
+    return inv_mod.collect_inventory(make_probes(ollama=models, ollama_signin=signin),
+                                     profiles=profiles or {})
+
+
+def test_cloud_ollama_confirmed_signed_in_is_eligible():
+    m = _cloud_inv("signed_in").get(CLOUD)
+    assert m.authorized and m.path_verified and "signed in" in m.auth_detail
+    assert hard_failures(m, Needs(tools=True), NOW) == []
+
+
+def test_cloud_ollama_signed_out_is_excluded_with_the_reason():
+    m = _cloud_inv("signed_out").get(CLOUD)
+    assert not m.authorized and not m.path_verified
+    assert m.auth_detail == "Ollama cloud model; not signed in (POST /api/me returned 401)"
+    fails = hard_failures(m, Needs(tools=True), NOW)
+    assert any(f.startswith("not authorized") and "not signed in" in f for f in fails)
+    assert any(f.startswith("execution path not verified") for f in fails)
+
+
+@pytest.mark.parametrize("signin", ["unknown", "garbage", RuntimeError("boom " + KEY), TimeoutError()])
+def test_cloud_ollama_with_no_signal_error_or_timeout_is_excluded(signin):
+    m = _cloud_inv(signin).get(CLOUD)
+    assert not m.authorized and not m.path_verified
+    assert m.auth_detail == "Ollama cloud model; sign-in not confirmed"
+    assert m.path_detail == "Ollama cloud model; sign-in not confirmed"
+    assert KEY not in json.dumps(inventory_to_dict(_cloud_inv(signin)))     # exception text dropped
+    assert hard_failures(m, Needs(tools=True), NOW)
+
+
+def test_an_unverified_cloud_ollama_model_that_wins_every_axis_is_not_selected():
+    # Measured FRONTIER-capable cloud model vs a weaker configured local model: with
+    # sign-in unconfirmed the cloud model must be rejected and the configured model kept.
+    big = {**_EASY, "reasoning": _profile.ProbeResult(True)}
+    for signin in ("unknown", "signed_out"):
+        inv = _cloud_inv(signin, local=True, profiles={
+            CLOUD: _profile.build_profile(CLOUD, big, reachable=True, now=NOW)})
+        res = resolve("EASY", Needs(tools=True), Setup(inv, "ollama/qwen3:8b"), now=NOW)
+        assert res.model != CLOUD, signin
+        assert all(r.model != CLOUD for r in res.fallbacks), signin
+        rej = {r.model: r.reasons for r in res.rejected}
+        assert any("not authorized" in x for x in rej[CLOUD]), signin
+        assert res.keep_configured == "ollama/qwen3:8b"
+        assert any(r.kind == "configured" and r.model == "ollama/qwen3:8b" for r in res.fallbacks) \
+            or res.model == "ollama/qwen3:8b"
+    only = _cloud_inv("unknown", profiles={
+        CLOUD: _profile.build_profile(CLOUD, _EASY, reachable=True, now=NOW)})
+    res = resolve("EASY", Needs(tools=True), Setup(only, "mine"), now=NOW)
+    assert res.status == STATUS_NO_ELIGIBLE and res.model is None and res.keep_configured == "mine"
+    ok = _cloud_inv("signed_in", profiles={
+        CLOUD: _profile.build_profile(CLOUD, _EASY, reachable=True, now=NOW)})
+    assert resolve("EASY", Needs(tools=True), Setup(ok, "mine"), now=NOW).model == CLOUD
+
+
+def test_plain_local_ollama_models_are_unaffected_and_never_trigger_the_signin_probe():
+    calls = []
+    p = make_probes(ollama={"qwen3:8b": {"caps": CAPS}})
+    p.ollama_signin_status = lambda base: calls.append(base) or "signed_out"
+    m = inv_mod.collect_inventory(p, profiles={}).get("ollama/qwen3:8b")
+    assert (m.route_kind, m.privacy, m.authorized, m.path_verified) == ("local", "local", True, True)
+    assert m.auth_detail == "local server, no credential" and calls == []
+    # a signed-out account does not touch local models listed beside a cloud one
+    inv = _cloud_inv("signed_out", local=True)
+    q = inv.get("ollama/qwen3:8b")
+    assert q.authorized and q.path_verified and q.privacy == "local"
+
+
+def test_signin_is_probed_once_per_inventory_even_with_several_cloud_models():
+    calls = []
+    p = make_probes(ollama={"a:1b-cloud": {"caps": CAPS}, "b:1b-cloud": {"caps": CAPS}})
+    p.ollama_signin_status = lambda base: calls.append(base) or "signed_in"
+    inv = inv_mod.collect_inventory(p, profiles={})
+    assert calls == ["http://127.0.0.1:11434"] and all(m.authorized for m in inv.models)
+
+
+class _MeResp:
+    def __init__(self, status):
+        self.status = status
+
+    def read(self, *a):
+        raise AssertionError("the /api/me body must never be read")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+@pytest.mark.parametrize("status,expected", [
+    (200, "signed_in"), (401, "signed_out"), (403, "unknown"), (500, "unknown"),
+    (503, "unknown"), (302, "unknown"), (None, "unknown")])
+def test_ollama_signin_status_reads_only_the_http_status(monkeypatch, status, expected):
+    seen = []
+
+    def behaviour(req):
+        if status is None:
+            raise OSError(f"timed out {KEY}")
+        if status == 200:
+            return _MeResp(200)
+        raise urllib.error.HTTPError(req.full_url, status, f"body {KEY}", {}, None)
+
+    monkeypatch.setattr(auth_ping, "_opener", lambda: _FakeOpener(behaviour, seen))
+    assert inv_mod._ollama_signin_status("http://127.0.0.1:11434/") == expected
+    (req,) = seen
+    assert req.full_url == "http://127.0.0.1:11434/api/me" and req.get_method() == "POST"
+
+
+def test_ollama_signin_status_uses_the_shared_no_redirect_opener_and_a_5s_timeout(monkeypatch):
+    got = {}
+
+    class Op:
+        def open(self, req, timeout):
+            got["timeout"] = timeout
+            return _MeResp(200)
+
+    # the opener it is given is auth_ping's: redirects surface as an error status, not a re-send
+    assert auth_ping._NoRedirect().redirect_request(None, None, 302, "", {}, "http://evil/") is None
+    monkeypatch.setattr(auth_ping, "_opener", lambda: Op())
+    assert inv_mod._ollama_signin_status("http://127.0.0.1:11434") == "signed_in"
+    assert got["timeout"] == 5.0 == inv_mod.OLLAMA_ME_TIMEOUT_S

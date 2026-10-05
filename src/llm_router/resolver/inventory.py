@@ -3,7 +3,9 @@
 Every probe goes through :class:`Probes`, so tests substitute fakes and no test
 touches the real Ollama, CLIs or environment. What is read:
 
-* Ollama: ``/api/tags``, ``/api/show`` (per model) and ``/api/ps``. Nothing else.
+* Ollama: ``/api/tags``, ``/api/show`` (per model) and ``/api/ps``; and, only when
+  a cloud-backed model is listed, one ``POST /api/me`` (the daemon's own whoami: no
+  model call, no quota) of which only the HTTP status is read, never the body.
 * Claude Code subscription: the cached ``usage.json`` via
   ``proxy.quota_pressure`` (a local file, no network), the ``claude`` binary
   path, and login state from (in order) ``claude auth status --json``'s
@@ -26,6 +28,7 @@ import json
 import os
 import subprocess
 import time
+import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 from dataclasses import dataclass, field, replace
@@ -55,6 +58,13 @@ from llm_router.resolver.types import (
 HTTP_TIMEOUT_S = 2.0
 CMD_TIMEOUT_S = 8.0
 CLAUDE_AUTH_TIMEOUT_S = 5.0
+OLLAMA_ME_TIMEOUT_S = 5.0
+
+#: `_ollama_signin_status` return values. `UNKNOWN` is "not confirmed", never
+#: treated as signed in.
+_OLLAMA_SIGNED_IN = "signed_in"
+_OLLAMA_SIGNED_OUT = "signed_out"
+_OLLAMA_SIGNIN_UNKNOWN = "unknown"
 
 #: `_claude_auth_status` return values. Both named states are conclusive and
 #: short-circuit the weaker fallback signals; `UNKNOWN` is "not inspected",
@@ -182,6 +192,36 @@ def _claude_auth_status(binary: str) -> str:
     return _CLAUDE_LOGIN_UNKNOWN
 
 
+def _ollama_signin_status(base: str) -> str:
+    """Whether the local Ollama daemon is signed in to an Ollama cloud account.
+
+    ``POST {base}/api/me`` is the daemon's own whoami: it makes no model call and
+    spends no quota. Only the HTTP status is read: 200 -> signed in, 401 ->
+    signed out. The response body (account name, email, plan) is never read,
+    stored or logged, so no account PII can reach the caller. A fixed URL under
+    the already-validated Ollama base, a 5 s timeout, no proxy, no redirects
+    followed, and any other status, a timeout or any other error all come back
+    ``unknown`` -- never a sign-in. The exception text is discarded.
+    """
+    from llm_router.resolver.auth_ping import _opener
+
+    req = urllib.request.Request(
+        f"{base.rstrip('/')}/api/me", data=b"", method="POST",
+        headers={"Content-Type": "application/json"})
+    try:
+        with _opener().open(req, timeout=OLLAMA_ME_TIMEOUT_S) as resp:  # noqa: S310 - the configured Ollama base
+            status = int(resp.status)
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code)
+    except Exception:  # noqa: BLE001 - timeout/unreachable/etc: unknown, not a sign-in
+        return _OLLAMA_SIGNIN_UNKNOWN
+    if status == 200:
+        return _OLLAMA_SIGNED_IN
+    if status == 401:
+        return _OLLAMA_SIGNED_OUT
+    return _OLLAMA_SIGNIN_UNKNOWN
+
+
 def _claude_oauth_present() -> bool:
     """Whether Claude Code's own ``~/.claude.json`` has an ``oauthAccount`` key.
 
@@ -240,6 +280,7 @@ class Probes:
     run_cmd: Callable[[list[str], float], tuple[int, str]] = _run_cmd
     find_claude: Callable[[], str | None] = _find_claude
     claude_auth_status: Callable[[str], str] = _claude_auth_status
+    ollama_signin_status: Callable[[str], str] = _ollama_signin_status
     claude_oauth_present: Callable[[], bool] = _claude_oauth_present
     find_codex: Callable[[], str | None] = _find_codex
     find_gemini: Callable[[], str | None] = _find_gemini
@@ -340,6 +381,7 @@ def _inventory_ollama(p: Probes) -> tuple[list[ModelEntry], SourceStatus]:
                 loaded[m["name"]] = m.get("context_length")
 
     entries: list[ModelEntry] = []
+    signin: str | None = None     # probed lazily, once, only if a cloud model is listed
     for m in tags.get("models") or []:
         name = m.get("name")
         if not name or not _is_completion_model(name):
@@ -379,11 +421,17 @@ def _inventory_ollama(p: Probes) -> tuple[list[ModelEntry], SourceStatus]:
             # Served by Ollama's cloud through the local daemon: off-machine, spends the
             # user's Ollama cloud allowance, so it is a cloud subscription route, never local.
             notes.append(f"cloud-hosted model ({cloud_why}); prompts leave this machine")
+            if signin is None:
+                try:
+                    signin = p.ollama_signin_status(base)
+                except Exception:  # noqa: BLE001 - a broken probe is "not confirmed"
+                    signin = _OLLAMA_SIGNIN_UNKNOWN
+            authorized, auth_detail = _ollama_cloud_authorization(signin)
             entries.append(ModelEntry(
-                route_kind=ROUTE_SUBSCRIPTION, privacy=PRIVACY_CLOUD, path_verified=True,
-                path_detail="listed by the running Ollama server (cloud model)",
-                authorized=True,
-                auth_detail="cloud model; Ollama sign-in state is not inspected",
+                route_kind=ROUTE_SUBSCRIPTION, privacy=PRIVACY_CLOUD, path_verified=authorized,
+                path_detail=("listed by the running Ollama server (cloud model)" if authorized
+                             else "Ollama cloud model; sign-in not confirmed"),
+                authorized=authorized, auth_detail=auth_detail,
                 quota=Quota("unknown", None, None, "Ollama cloud allowance is not readable"),
                 notes=tuple(notes), **common))
             continue
@@ -393,6 +441,20 @@ def _inventory_ollama(p: Probes) -> tuple[list[ModelEntry], SourceStatus]:
             authorized=True, auth_detail="local server, no credential",
             quota=Quota("n/a", None, None, "local"), notes=tuple(notes), **common))
     return entries, SourceStatus(True, f"{len(entries)} model(s) at {host}")
+
+
+def _ollama_cloud_authorization(signin: str) -> tuple[bool, str]:
+    """(authorized, auth_detail) for a cloud-backed Ollama model.
+
+    Authorization is checked, never assumed: only a confirmed sign-in
+    (``POST /api/me`` -> 200) authorizes. Signed out and "could not tell" both
+    exclude the model through the hard-eligibility check in ``resolve``.
+    """
+    if signin == _OLLAMA_SIGNED_IN:
+        return True, "Ollama cloud model; signed in (POST /api/me returned 200; account details never read)"
+    if signin == _OLLAMA_SIGNED_OUT:
+        return False, "Ollama cloud model; not signed in (POST /api/me returned 401)"
+    return False, "Ollama cloud model; sign-in not confirmed"
 
 
 def _is_loopback(base: str) -> bool:
