@@ -874,7 +874,11 @@ def _g2_silent_failures(days: int, now: float, proxy_rows: list[dict]) -> dict:
     win = failopen.windowed(since=since, until=now)
     hook_ts = [r["ts"] for r in hook_all if since <= r["ts"] <= now]
     proxy_ts = [t for t in (_num_ts(r.get("ts")) for r in proxy_rows) if t is not None and since <= t <= now]
-    hook_calls, proxy_calls = len(hook_ts), len(proxy_ts)
+    # A host-killed hook writes no hook_latency row but DOES leave a CHZ-HOOK-KILLED
+    # event, which is in the numerator. Count it in the denominator too: it was an
+    # invocation. Without it the rate is biased upward by the kill rate.
+    hook_killed = win.by_code.get("CHZ-HOOK-KILLED", 0)
+    hook_calls, proxy_calls = len(hook_ts) + hook_killed, len(proxy_ts)
     calls = hook_calls + proxy_calls
     newest = max(hook_ts + proxy_ts) if calls else None      # the feed's last sign of life
     events = win.in_window
@@ -883,7 +887,8 @@ def _g2_silent_failures(days: int, now: float, proxy_rows: list[dict]) -> dict:
         lines.append(f"window starts at the first timestamped evidence, {_iso(since)} "
                      f"(requested {days}d back)")
     base = {"all_time_total": total, "untimestamped": probe.untimestamped, "events": events,
-            "calls": calls, "hook_calls": hook_calls, "proxy_calls": proxy_calls,
+            "calls": calls, "hook_calls": hook_calls, "hook_killed": hook_killed,
+            "proxy_calls": proxy_calls,
             "window_start": round(since, 3), "lines": lines}
 
     if calls == 0:
@@ -899,7 +904,8 @@ def _g2_silent_failures(days: int, now: float, proxy_rows: list[dict]) -> dict:
     by_code = dict(sorted(win.by_code.items(), key=lambda kv: (-kv[1], kv[0])))
     top = list(by_code.items())[:_TOP_CODES]
     rate = events / calls * 100.0
-    lines.insert(0, f"calls: {hook_calls} hook invocation(s) + {proxy_calls} proxy call(s), all "
+    lines.insert(0, f"calls: {hook_calls} hook invocation(s) (incl. {hook_killed} killed by the host, "
+                    f"which leave no latency row) + {proxy_calls} proxy call(s), all "
                     "session kinds (a fail-open row names no session)")
     for i, (code, n) in enumerate(top):
         lines.insert(1 + i, f"  {code}: {n / calls * 100.0:.2f} per 100 calls ({n})")

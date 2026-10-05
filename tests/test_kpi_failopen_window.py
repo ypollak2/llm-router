@@ -217,6 +217,21 @@ def test_events_per_100_calls_exact_with_hook_and_proxy_calls_pooled():
     assert g2["measurable"] is True and g2["n"] == 100 and g2["rate_per_100"] == 4.0
 
 
+def test_a_killed_invocation_is_in_the_denominator_because_it_is_in_the_numerator():
+    """A host-killed hook writes no hook_latency row but leaves CHZ-HOOK-KILLED.
+    98 rows + 2 killed = 100 invocations; 4 events (2 of them kills) = 4.00, not
+    4/98 = 4.08 (the rate biased upward by the kill rate)."""
+    _hook_calls(98, NOW - 2 * DAY)
+    for ts in (NOW - 3600, NOW - 60):
+        _event("CHZ-HOOK-KILLED", ts)
+    for ts in (NOW - 3000, NOW - 30):
+        _event("CHZ-FO-A", ts)
+    g2 = _g2(days=7)
+    assert g2["value"] == "4.00 per 100 calls (4 events / 100 calls, 2.0d window)"
+    assert (g2["hook_calls"], g2["hook_killed"], g2["proxy_calls"], g2["calls"]) == (100, 2, 0, 100)
+    assert g2["lines"][0].startswith("calls: 100 hook invocation(s) (incl. 2 killed by the host")
+
+
 def test_per_code_rates_and_only_the_top_five_are_listed():
     _hook_calls(100, NOW - 3600)
     counts = {"CHZ-FO-G": 1, "CHZ-FO-F": 2, "CHZ-FO-E": 3, "CHZ-FO-D": 4,
