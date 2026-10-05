@@ -52,6 +52,31 @@ the kind stamped on that session's proxy rows, if they all agree. Nothing
 resolvable stays ``None``; a session whose proxy rows disagree with each other
 and has no tag file stays ``None`` too (source ``conflict``). ``None`` is never
 counted as organic by any reader.
+
+A session from before tagging existed has no tag file and no stamped rows. For those
+(and only those) ``llm-router kpi --backfill-tags`` writes a SIDECAR,
+``session_kind_backfill.jsonl`` (module ``session_kind_backfill``): a kind derived from
+the Claude Code transcript's first ``cwd`` and ``entrypoint`` by the very rules above
+(:func:`classify_with_basis`), or ``unknown`` when the transcript cannot say. The sidecar
+is the LAST step of :meth:`KindIndex.resolve`, after the tag file, the record's own stamp
+and the proxy rows, so a live tag always wins; it is never consulted by :func:`kind_of`
+(the proxy hot path and :func:`tag_session`'s own write-once check), so it can never
+shadow or pre-empt a live tag. Deleting the file restores the earlier behaviour exactly.
+
+WHERE THE SIDECAR IS READ, AND WHERE IT IS NOT. It is read from disk only by a
+:class:`KindIndex` built with ``backfill=True`` (the default of this class), once per
+index, and only when a session reaches ``resolve``'s last step. The callers:
+
+* READS it: ``llm-router kpi`` (``commands/kpi.py``: its own ``KindIndex`` for D3 and
+  ``northstar.units(backfill=True)`` for NS, D1 and D2) and ``llm-router kpi
+  --backfill-tags`` / ``--validate-backfill`` (``session_kind_backfill``).
+* NEVER reads it: :func:`kind_of`, :func:`tag_session`, the proxy, every hook, and
+  everything that reaches ``northstar.build_sessions`` / ``units`` / ``report``
+  without asking, which includes the Stop hook's ``current_session_line``, the
+  quality breaker (called by the UserPromptSubmit, Agent and Stop hooks) and
+  ``llm-router northstar``. ``backfill`` is off by default all the way down
+  (``units`` -> ``build_sessions`` -> ``_scan_proxy_ledger``), so a new caller on a
+  hot path cannot start reading the file by accident.
 """
 from __future__ import annotations
 
@@ -84,23 +109,41 @@ def _norm(cwd: str | None) -> str:
     return text.replace("\\", "/").rstrip("/") + "/"
 
 
-def classify(*, cwd: str | None, entrypoint: str | None = None, override: str | None = None,
-             home: str | None = None) -> str:
-    """The session kind for these signals. Pure and deterministic; see the module
-    docstring for the precedence. An unrecognised ``override`` is ignored."""
+#: Which rule decided a kind. Coarse by design: a code, never a path or a prompt.
+BASIS_OVERRIDE = "override"            # LLM_ROUTER_SESSION_KIND
+BASIS_CWD_RSI = "cwd_rsi"              # cwd under ~/.rsi
+BASIS_CWD_SCRATCHPAD = "cwd_scratchpad"  # cwd has a ``scratchpad`` path part
+BASIS_CWD_SANDBOX = "cwd_sandbox"      # cwd under /tmp, /var/folders, ...
+BASIS_ENTRYPOINT_SDK = "entrypoint_sdk"  # CLAUDE_CODE_ENTRYPOINT starts with ``sdk``
+BASIS_ORDINARY = "ordinary"            # no research / harness / headless marker present
+
+
+def classify_with_basis(*, cwd: str | None, entrypoint: str | None = None,
+                        override: str | None = None, home: str | None = None) -> tuple[str, str]:
+    """``(kind, basis)`` for these signals: the one place the precedence lives, so the
+    live tagger and the backfill cannot drift apart. Pure and deterministic; see the
+    module docstring for the precedence. An unrecognised ``override`` is ignored."""
     forced = (override or "").strip().lower()
     if forced in VALID_KINDS:
-        return forced
+        return forced, BASIS_OVERRIDE
     path = _norm(cwd)
     base = _norm(home if home is not None else "~")
     parts = [p for p in path.split("/") if p]
-    if path.startswith(base + ".rsi/") or "scratchpad" in parts:
-        return KIND_RESEARCH
+    if path.startswith(base + ".rsi/"):
+        return KIND_RESEARCH, BASIS_CWD_RSI
+    if "scratchpad" in parts:
+        return KIND_RESEARCH, BASIS_CWD_SCRATCHPAD
     if any(path.startswith(p) for p in _SANDBOX_PREFIXES):
-        return KIND_HARNESS
+        return KIND_HARNESS, BASIS_CWD_SANDBOX
     if (entrypoint or "").strip().lower().startswith("sdk"):
-        return KIND_HEADLESS
-    return KIND_ORGANIC
+        return KIND_HEADLESS, BASIS_ENTRYPOINT_SDK
+    return KIND_ORGANIC, BASIS_ORDINARY
+
+
+def classify(*, cwd: str | None, entrypoint: str | None = None, override: str | None = None,
+             home: str | None = None) -> str:
+    """The session kind for these signals (see :func:`classify_with_basis`)."""
+    return classify_with_basis(cwd=cwd, entrypoint=entrypoint, override=override, home=home)[0]
 
 
 def _safe(session_id: str) -> str:
@@ -171,6 +214,7 @@ SOURCE_TAG = "tag"              # the session's tag file
 SOURCE_STAMP = "stamp"          # stamped on the record itself when it was written
 SOURCE_LEDGER = "proxy_ledger"  # stamped on that session's proxy rows (all agreeing)
 SOURCE_CONFLICT = "conflict"    # proxy rows disagree and there is no tag file: unresolved
+SOURCE_BACKFILL = "backfill"    # derived later from transcript metadata (the sidecar); last resort
 
 
 @dataclass(frozen=True)
@@ -188,9 +232,14 @@ class KindIndex:
     memoised, so reading the tag file costs one stat per distinct session, not one
     per record."""
 
-    def __init__(self, ledger_rows: Iterable[dict] = ()) -> None:
+    def __init__(self, ledger_rows: Iterable[dict] = (), *, backfill: bool = True) -> None:
         self._ledger: dict[str, set[str]] = {}
         self._tags: dict[str, str | None] = {}
+        #: ``backfill=False`` never reads the sidecar: what the backfill command itself
+        #: uses to ask "does live evidence already resolve this session?", and what
+        #: ``northstar`` passes on every path except ``llm-router kpi``.
+        self._use_backfill = backfill
+        self._backfill: dict[str, str] | None = None  # loaded on first need, once per index
         for row in ledger_rows:
             self.add(row.get("session_id"), row.get("session_kind"))
 
@@ -199,6 +248,22 @@ class KindIndex:
         unless both are usable: a null stamp is the absence of evidence)."""
         if isinstance(session_id, str) and session_id and kind in VALID_KINDS:
             self._ledger.setdefault(session_id, set()).add(kind)  # type: ignore[arg-type]
+
+    def _backfilled(self, session_id: object) -> str | None:
+        """The sidecar's kind for ``session_id`` (a usable kind only), or ``None``. Read
+        lazily and once: an index that never needs it never opens the file."""
+        if not self._use_backfill or not isinstance(session_id, str) or not session_id:
+            return None
+        if self._backfill is None:
+            try:
+                from llm_router import session_kind_backfill
+                self._backfill = session_kind_backfill.load_sidecar()
+            except Exception:  # noqa: BLE001 - an unreadable sidecar is "no backfill", not a crash
+                self._backfill = {}
+        kind = self._backfill.get(session_id)
+        # "unknown" (and anything hand-edited into the file) is not a kind: it resolves to
+        # nothing, so such a session stays exactly as invisible as an untagged one.
+        return kind if kind in VALID_KINDS else None
 
     def _tag(self, session_id: str) -> str | None:
         if session_id not in self._tags:
@@ -217,4 +282,7 @@ class KindIndex:
             return Resolution(next(iter(seen)), SOURCE_LEDGER)
         if len(seen) > 1:
             return Resolution(None, SOURCE_CONFLICT)
+        backfilled = self._backfilled(session_id)
+        if backfilled is not None:
+            return Resolution(backfilled, SOURCE_BACKFILL)
         return Resolution(None, None)

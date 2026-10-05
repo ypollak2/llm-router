@@ -26,11 +26,29 @@ SCOPE, stated rather than implied:
   rows, honestly, rather than silently falling back to "everything".
   A unit's or event's kind is resolved by ``session_kind.KindIndex``: the
   session's tag file first, then the kind stamped on the record, then the kind
-  stamped on that session's proxy rows. NS/D1/D2 units and D3 events go through
-  it; the scorecard prints how many units joined a tag and how many stayed
-  untagged (``joins``). D4/G1 read the kind each proxy row was written with:
-  rows from before tagging existed stay untagged, so D4's population is the
-  tagged rows only, as before.
+  stamped on that session's proxy rows, then (last resort) the backfill sidecar --
+  see ``--backfill-tags`` below. NS/D1/D2 units and D3 events go through it; the
+  scorecard prints how many units joined a tag and how many stayed untagged
+  (``joins``), and states how much of each affected KPI's n was backfilled, e.g.
+  "n=3,674 (1,210 backfilled)". D4/G1 read the kind each proxy row was written
+  with: rows from before tagging existed stay untagged, so D4's population is the
+  tagged rows only, as before -- the sidecar is never consulted for D4/G1.
+* **``--backfill-tags [--dry-run]``** derives a ``session_kind`` for every session
+  (in a ledger, or with a north-star unit) that has no live evidence, from its
+  Claude Code transcript's ``cwd``/``entrypoint`` (``session_kind.classify_with_basis``
+  -- the SAME rules the live tagger uses), and appends one row per session to the sidecar
+  ``session_kind_backfill.jsonl`` (``session_kind_backfill.py``). Insufficient
+  evidence -> ``"unknown"``, never ``"organic"``. Write-once per session; a live
+  tag always wins (the sidecar is consulted only as ``KindIndex.resolve``'s last
+  resort); deleting the sidecar restores the pre-backfill behaviour exactly. The
+  sidecar is read ONLY by ``kpi`` itself (NS/D1/D2 through ``northstar.units(backfill=True)``,
+  D3 through its own ``KindIndex``) and by ``--backfill-tags`` / ``--validate-backfill``:
+  never by the proxy, any hook, the Stop line or the quality breaker (``backfill`` is
+  off by default in ``northstar``; see ``session_kind``'s docstring). The
+  original ledgers are read, never written. ``--dry-run`` reports what would be
+  written and writes nothing. ``--validate-backfill`` (read-only, counts only) runs
+  the same rules on sessions that DO have a live kind and prints agreement and a
+  confusion table.
 * **G3 is NOT session-kind filtered.** Completeness is a property of the writer,
   and the session tag is one of the fields under test: filtering rows by
   ``session_kind`` first drops exactly the rows that lack it, so the field read
@@ -144,9 +162,11 @@ def _not_measurable(reason: str, *, seen: int = 0, newest_ts: float | None = Non
             "reason": reason, "seen": seen, "newest_ts": newest_ts}
 
 
-def _too_few(n: int, *, newest_ts: float | None = None) -> dict[str, Any]:
-    return {"value": f"{TOO_FEW} (n={n})", "n": n, "measurable": False,
-            "reason": f"{TOO_FEW}: n={n}, need {MIN_N}", "seen": n, "newest_ts": newest_ts}
+def _too_few(n: int, *, newest_ts: float | None = None, backfilled: int = 0) -> dict[str, Any]:
+    note = f", {backfilled:,} backfilled" if backfilled else ""
+    return {"value": f"{TOO_FEW} (n={n}{note})", "n": n, "measurable": False,
+            "reason": f"{TOO_FEW}: n={n}, need {MIN_N}", "seen": n, "newest_ts": newest_ts,
+            "backfilled": backfilled}
 
 
 def _measured(value: str, n: int, *, newest_ts: float | None = None, **extra: Any) -> dict[str, Any]:
@@ -160,16 +180,21 @@ def _pct(x: float, digits: int = 1) -> str:
 
 
 def _rate_result(numerator: int, denominator: int, *, label: str = "n",
-                 newest_ts: float | None = None, seen: int | None = None) -> dict[str, Any]:
+                 newest_ts: float | None = None, seen: int | None = None,
+                 backfilled: int = 0) -> dict[str, Any]:
+    """``backfilled`` is how many of ``denominator`` resolved their session_kind from
+    the backfill sidecar (``session_kind.SOURCE_BACKFILL``) rather than a live tag,
+    stamp or ledger agreement -- stated on the line, never folded in silently."""
     seen_n = seen if seen is not None else denominator
     if denominator <= 0:
         return _not_measurable(f"no {label} in window", seen=seen_n)
     if denominator < MIN_N:
-        out = _too_few(denominator, newest_ts=newest_ts)
+        out = _too_few(denominator, newest_ts=newest_ts, backfilled=backfilled)
         out["seen"] = seen_n
         return out
-    return _measured(f"{_pct(numerator / denominator)} (n={denominator})", denominator,
-                      newest_ts=newest_ts, seen=seen_n,
+    note = f", {backfilled:,} backfilled" if backfilled else ""
+    return _measured(f"{_pct(numerator / denominator)} (n={denominator}{note})", denominator,
+                      newest_ts=newest_ts, seen=seen_n, backfilled=backfilled,
                       numerator=numerator, denominator=denominator)
 
 
@@ -241,13 +266,16 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index) -> tuple[dict, dict, di
     from llm_router import northstar as ns
 
     window = joined = untagged = conflicting = total = attempted = used = 0
+    backfilled_total = backfilled_attempted = 0
     by_source: dict[str, int] = {}
     by_kind: dict[str, int] = {}
     by_session: dict[str, int] = {}  # counted units per session: how concentrated the population is
     disagree: set[str] = set()
     checked: set[str] = set()
     newest: float | None = None
-    for u in ns.units(days=days):
+    # backfill=True: this KPI is the one reader that resolves a unit's kind from the
+    # backfill sidecar. northstar.units() leaves it off for every hot-path caller.
+    for u in ns.units(days=days, backfill=True):
         window += 1
         sid = u.get("session_id")
         if "session_kind" in u:
@@ -269,11 +297,16 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index) -> tuple[dict, dict, di
         if kind not in allowed:
             continue
         total += 1
+        is_backfilled = source == session_kind.SOURCE_BACKFILL
+        if is_backfilled:
+            backfilled_total += 1
         by_session[str(sid)] = by_session.get(str(sid), 0) + 1
         newest = _newer(newest, _parse_ts(u.get("ts")))
         is_attempted = u["kind"] in ns.ATTEMPTED_KINDS or u.get("lever") == "proxy"
         if is_attempted:
             attempted += 1
+            if is_backfilled:
+                backfilled_attempted += 1
             if u["outcome"] == ns.OUTCOME_USED:
                 used += 1
     joins = {"window_units": window, "joined": joined, "untagged": untagged,
@@ -294,9 +327,12 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index) -> tuple[dict, dict, di
                    f"{joined} joined to a tag ({kinds}), {untagged} untagged (never counted as organic)")
         out = _not_measurable(why, seen=window)
         return out, dict(out), dict(out), joins
-    return (_rate_result(used, total, label="unit", newest_ts=newest, seen=window),
-            _rate_result(attempted, total, label="unit", newest_ts=newest, seen=window),
-            _rate_result(used, attempted, label="attempt", newest_ts=newest, seen=window),
+    return (_rate_result(used, total, label="unit", newest_ts=newest, seen=window,
+                         backfilled=backfilled_total),
+            _rate_result(attempted, total, label="unit", newest_ts=newest, seen=window,
+                         backfilled=backfilled_total),
+            _rate_result(used, attempted, label="attempt", newest_ts=newest, seen=window,
+                         backfilled=backfilled_attempted),
             joins)
 
 
@@ -306,10 +342,11 @@ def _d3_redo_rate(days: int, allowed: frozenset[str], index) -> dict:
     from llm_router import usage_outcome as uo
 
     rows = uo.judge_recent(days=days)
-    used = redone = unknown = 0
+    used = redone = unknown = backfilled = 0
     newest: float | None = None
     for r in rows:
-        if index.resolve(r.get("session_id"), stamp=r.get("session_kind")).kind not in allowed:
+        res = index.resolve(r.get("session_id"), stamp=r.get("session_kind"))
+        if res.kind not in allowed:
             continue
         if r["outcome"] == uo.OUTCOME_USED:
             used += 1
@@ -318,9 +355,12 @@ def _d3_redo_rate(days: int, allowed: frozenset[str], index) -> dict:
         else:
             unknown += 1
             continue
+        if res.source == session_kind.SOURCE_BACKFILL:
+            backfilled += 1
         newest = _newer(newest, _num_ts(r.get("ts")))
     decided = used + redone
-    result = _rate_result(redone, decided, label="decided event", newest_ts=newest, seen=len(rows))
+    result = _rate_result(redone, decided, label="decided event", newest_ts=newest, seen=len(rows),
+                          backfilled=backfilled)
     result["unknown_window_open"] = unknown
     return result
 
@@ -1141,9 +1181,34 @@ def cmd_kpi(args: list[str]) -> int:
                      help="with --health: exit 1 if any KPI is blind (default exit 0)")
     ap.add_argument("--stale-hours", type=float, default=STALE_LIVE_HOURS,
                      help=f"with --health: a live KPI is stale past this age (default {STALE_LIVE_HOURS:.0f})")
+    ap.add_argument("--backfill-tags", action="store_true",
+                     help="derive a session_kind for every ledger session with no live tag, from "
+                          "its Claude Code transcript (same rules as the live tagger), and append it "
+                          "to the sidecar session_kind_backfill.jsonl; a live tag always wins and "
+                          "deleting the sidecar restores the untagged behaviour exactly")
+    ap.add_argument("--dry-run", action="store_true",
+                     help="with --backfill-tags: report what would be written; write nothing")
+    ap.add_argument("--validate-backfill", action="store_true",
+                     help="read-only: run the backfill rules on sessions that already have a live "
+                          "kind and report agreement plus a confusion table (counts only)")
     parsed = ap.parse_args(args)
+    if parsed.dry_run and not parsed.backfill_tags:
+        ap.error("--dry-run needs --backfill-tags")
     if parsed.strict and not parsed.health:
         ap.error("--strict needs --health")
+    if parsed.validate_backfill:
+        from llm_router import session_kind_backfill as skb
+
+        verdict = skb.validate_against_live()
+        print(json.dumps(verdict, indent=2) if parsed.json else skb.render_validation(verdict))
+        return 0
+    if parsed.backfill_tags:
+        from llm_router import session_kind_backfill as skb
+
+        result = skb.backfill_sessions(dry_run=parsed.dry_run)
+        print(json.dumps(result, indent=2, sort_keys=False) if parsed.json
+              else skb.render_backfill_report(result))
+        return 0
     since = None
     if parsed.schema_since is not None:
         since = _parse_ts(parsed.schema_since)

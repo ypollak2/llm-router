@@ -65,7 +65,7 @@ def _unit(sid, kind="local_edit", outcome=ns.OUTCOME_USED, lever=None):
 
 
 def _units(monkeypatch, rows):
-    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None: iter(rows))
+    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False: iter(rows))
 
 
 def _row(sid="s-org", **kw):
