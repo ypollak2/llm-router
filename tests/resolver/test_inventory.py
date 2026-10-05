@@ -91,6 +91,136 @@ def test_claude_cli_absent_yields_no_models():
     assert not inv.sources["claude"].ok
 
 
+# ---------------------------------------------- Claude Code: login (CLAUDE-AUTH-01)
+#
+# #259 hard-coded authorized=True/path_verified=True whenever the `claude`
+# binary was merely found on PATH, with "login state is not inspected" as the
+# comment -- unlike Codex (`codex login status`) and Gemini CLI (oauth file
+# presence), which both really check. Reproduced: a fake Probes where
+# find_claude() returns a path but usage_reading() reports state="unknown"
+# (never logged in) still resolved to claude_subscription/opus with no hard
+# failures. These tests pin the real check: `_claude_authorization` must never
+# default to authorized.
+
+def test_claude_logged_in_via_auth_status_is_eligible():
+    inv = collect(claude="/bin/claude", claude_login="logged_in", usage=("unknown", None))
+    opus = inv.get("claude_subscription/opus")
+    assert opus.authorized and opus.path_verified
+    assert "loggedIn=true" in opus.auth_detail
+    assert inv.sources["claude"].ok
+
+
+def test_claude_logged_out_via_auth_status_is_excluded_with_reason():
+    # usage.json reads "ok" (the weakest fallback signal would say yes), but an
+    # explicit logged-out verdict from `claude auth status` must still win.
+    inv = collect(claude="/bin/claude", claude_login="logged_out", usage=("ok", 0.1))
+    opus = inv.get("claude_subscription/opus")
+    assert not opus.authorized and not opus.path_verified
+    assert "loggedIn=false" in opus.auth_detail
+    assert not inv.sources["claude"].ok
+
+
+def test_claude_oauth_presence_is_eligible_when_auth_status_is_unknown():
+    inv = collect(claude="/bin/claude", claude_login="unknown", claude_oauth=True,
+                   usage=("unknown", None))
+    opus = inv.get("claude_subscription/opus")
+    assert opus.authorized and opus.path_verified
+    assert "oauthAccount" in opus.auth_detail
+
+
+def test_claude_fresh_usage_reading_is_eligible_when_the_other_two_signals_are_unknown():
+    inv = collect(claude="/bin/claude", claude_login="unknown", claude_oauth=False,
+                   usage=("ok", 0.92))
+    opus = inv.get("claude_subscription/opus")
+    assert opus.authorized and opus.path_verified
+    assert "credentials are never read" in opus.auth_detail
+
+
+def test_claude_no_signal_confirms_login_is_excluded_with_an_explicit_reason():
+    """The reviewer's exact reproduction: a claude binary with no other
+    provider, usage.json unknown, no oauth file, no auth-status confirmation."""
+    inv = collect(claude="/bin/claude", claude_login="unknown", claude_oauth=False,
+                   usage=("unknown", None))
+    opus = inv.get("claude_subscription/opus")
+    assert not opus.authorized and not opus.path_verified
+    assert opus.auth_detail == "claude CLI found but login not confirmed"
+    assert not inv.sources["claude"].ok
+
+
+def test_claude_auth_status_binary_missing_is_unknown_not_a_login(monkeypatch):
+    """The subcommand hanging, erroring or simply not existing on an older CLI
+    must never read as logged in."""
+    def boom(*args, **kwargs):
+        raise FileNotFoundError("no such file")
+
+    monkeypatch.setattr(inv_mod.subprocess, "run", boom)
+    assert inv_mod._claude_auth_status("/bin/claude") == "unknown"
+
+
+def test_claude_auth_status_timeout_is_unknown_not_a_login(monkeypatch):
+    import subprocess as _subprocess
+
+    def boom(*args, **kwargs):
+        raise _subprocess.TimeoutExpired(cmd=["claude", "auth", "status"], timeout=5.0)
+
+    monkeypatch.setattr(inv_mod.subprocess, "run", boom)
+    assert inv_mod._claude_auth_status("/bin/claude") == "unknown"
+
+
+def test_claude_auth_status_nonzero_exit_is_unknown_not_a_login(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(inv_mod.subprocess, "run",
+                        lambda *a, **k: SimpleNamespace(returncode=1, stdout=""))
+    assert inv_mod._claude_auth_status("/bin/claude") == "unknown"
+
+
+def test_claude_auth_status_unparsable_output_is_unknown_not_a_login(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(inv_mod.subprocess, "run",
+                        lambda *a, **k: SimpleNamespace(returncode=0, stdout="not json"))
+    assert inv_mod._claude_auth_status("/bin/claude") == "unknown"
+
+
+def test_claude_auth_status_reads_only_the_loggedin_field_never_pii(monkeypatch):
+    """The command's JSON also carries email/orgId/orgName; none of that may
+    reach the return value."""
+    from types import SimpleNamespace
+
+    payload = json.dumps({"loggedIn": True, "email": "SECRET@example.com",
+                          "orgId": "org_SECRET", "orgName": "Secret Org"})
+    monkeypatch.setattr(inv_mod.subprocess, "run",
+                        lambda *a, **k: SimpleNamespace(returncode=0, stdout=payload))
+    result = inv_mod._claude_auth_status("/bin/claude")
+    assert result == "logged_in"
+    assert "SECRET" not in result and "@" not in result
+
+
+def test_claude_auth_status_logged_in_false_is_logged_out(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(inv_mod.subprocess, "run",
+                        lambda *a, **k: SimpleNamespace(returncode=0, stdout=json.dumps({"loggedIn": False})))
+    assert inv_mod._claude_auth_status("/bin/claude") == "logged_out"
+
+
+def test_claude_oauth_present_checks_key_presence_only(monkeypatch, tmp_path):
+    from llm_router import install_hooks
+
+    cfg = tmp_path / ".claude.json"
+    monkeypatch.setattr(install_hooks, "_CLAUDE_JSON_PATH", cfg)
+
+    assert inv_mod._claude_oauth_present() is False      # no file at all
+
+    cfg.write_text(json.dumps({"someOtherKey": 1}), encoding="utf-8")
+    assert inv_mod._claude_oauth_present() is False      # file exists, key absent
+
+    cfg.write_text(json.dumps({"oauthAccount": {"email": "SECRET@example.com"}}),
+                   encoding="utf-8")
+    assert inv_mod._claude_oauth_present() is True       # presence only; value never read
+
+
 # ------------------------------------------------------------------------ Codex
 
 def test_codex_chatgpt_login_is_subscription_and_verified():

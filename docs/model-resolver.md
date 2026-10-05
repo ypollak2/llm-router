@@ -23,7 +23,7 @@ thinking, json), and context window with its source.
 | Source | What is read | Never read |
 |---|---|---|
 | Ollama | `/api/tags`, `/api/show` (capabilities, context length), `/api/ps` (loaded) | anything else |
-| Claude Code subscription | `claude` binary path; cached `usage.json` via `proxy/quota_pressure.py` | credentials |
+| Claude Code subscription | `claude` binary path; login state from the first conclusive of: `claude auth status --json` (only the `loggedIn` boolean is parsed; 5 s timeout, allowlisted environment), presence (not value) of an `oauthAccount` key in `~/.claude.json`, a fresh (`ok`) cached `usage.json` via `proxy/quota_pressure.py`; usage pressure from that same file | credentials, tokens, the account email / org fields, the keychain |
 | Codex | binary path, `codex login status` (classified ChatGPT / API key / none; raw output dropped) | credentials |
 | Gemini CLI | binary path, whether a login file exists | its contents |
 | API providers | environment variable NAMES that are set | values |
@@ -106,3 +106,46 @@ harnesses, so they are not a like-for-like ranking**:
 Wilson 95% intervals are wide (for 15/20, [53%, 89%]); Astra's review notes a 15/20 tie
 is weak evidence of equivalence. They are shown to explain why a local model is
 measured before it is trusted, not as a user-independent order. No code reads them.
+
+## Resolver
+
+`resolve(tier, needs, setup) -> Resolution{status, model, route, fallbacks[], warnings[], reason, rejected[], keep_configured}`
+and `llm-router resolve --tier X --needs tools,vision [--configured M] [--verify] [--json]`
+(exit 0 routed, 3 no eligible model, 2 bad arguments). Pure function of the
+`Setup` it is given; it executes nothing and is not wired into live routing.
+
+1. **Hard eligibility, never averaged.** Every failing reason is recorded per model.
+   Present in the inventory; privacy (`local-only` needs a local model); authorized;
+   execution path verified; quota not benched and below 99%; each required
+   capability (`yes` required; a measured `no` beats a declared `yes`; `unknown`
+   fails); context fits the trusted window (declared window capped by measured
+   recall; unknown fails).
+2. **Tier qualification.** The model's ceiling must reach the tier. Unmeasured models
+   with no registry class are out unless `allow_unmeasured` (then EASY only);
+   `require_measured` refuses ceilings that rest on a prior. A model that failed
+   calibration is out for every tier.
+3. **Pick** among the qualified: tightest tier fit, not quota-pressured (>= 85%),
+   measured over prior, local < subscription < API, lower price, lower pressure, id.
+4. **Ladder:** other qualified models, then lower-tier models flagged `below_tier`
+   (with a warning: using one is an explicit decision), then the configured model
+   (`keep_configured`) or "ask the user". Under `local-only` a configured model that is
+   not known to be local is replaced by "ask the user". With nothing qualified the
+   status is `no_eligible`, `model` is None, and nothing is downgraded silently.
+
+### Supported setups
+
+| Setup | Routes when | Otherwise |
+|---|---|---|
+| Local only | `calibrate` has measured a model (free); EASY/MEDIUM only, FRONTIER never | no eligible, keep configured |
+| Claude Code subscription only | `claude` CLI present AND a login is confirmed (see above); tiers from the registry class (prior), pressure from usage.json | login not confirmed (`claude CLI found but login not confirmed`), a confirmed logout, pressure >= 99% or bench: no eligible |
+| Codex only | `codex login status` shows a login; bench and request counter honoured | not logged in or benched: no eligible |
+| Gemini CLI only | binary plus a login file | no login: no eligible |
+| API keys only | key set AND verified: `--verify` (zero-cost list-models call, 200) or a `calibrate --allow-paid` round-trip | key only, or rejected (401/403): no eligible |
+| Mixed | all of the above, cheapest route among equal tier fits | falls down the ladder |
+| privacy = local-only | only models that run on a loopback Ollama (cloud-backed Ollama models are excluded) | no eligible, ask the user |
+| Degraded (benched, 99% quota, vanished model, stale inventory) | the rest of the setup | reason per model, warnings |
+
+Remaining before this can be wired into routing: the classifier output contract, a
+measured FRONTIER probe suite, the Astra P3 end-to-end gate (>= 30 representative tasks per
+supported setup, >= 95% valid dispatches), Gemini CLI quota and API spend caps as pressure
+inputs, and a shadow-first wiring PR.

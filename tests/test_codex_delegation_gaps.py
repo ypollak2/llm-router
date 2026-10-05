@@ -180,6 +180,68 @@ def test_timeout_env_override_above_max_is_clamped(hook, monkeypatch):
     assert any(code == "CHZ-FO-CODEX-TIMEOUT-CLAMPED" for code, _ in recorded)
 
 
+def _old_buggy_time_left(now: float, configured: int = 300) -> int:
+    """The formula ``_delegation_time_left`` used before the fix:
+    ``int((start + configured) - now)`` with ``start == now`` on the first
+    call. Reproduced here (not imported) so this test keeps failing on the old
+    *shape* of the bug even if some other change moves the real function
+    around; it is the historical baseline the regression below is proven
+    against (see also: ``git show origin/main:.../agent-route.py``, where this
+    is the literal body)."""
+    deadline = now + configured
+    return int(deadline - now)
+
+
+@pytest.mark.parametrize("now", [
+    # Found by a deterministic (fixed-seed) scan of realistic time.monotonic()
+    # magnitudes -- 0s, 5s, 60s, 1h, 1d, 1wk, 30d, 1yr of uptime -- for values
+    # where int((now + 300) - now) != 300. Hit rate varied sharply by magnitude
+    # (worst observed: ~1.9% in the 3600-7200s band, ~0.001% at ~1yr uptime),
+    # which is why this was flaky rather than always-broken: whether a given
+    # `time.monotonic()` reading lands on a bad value depends on which bits
+    # survive rounding `now + 300` to the nearest double, not on uptime length
+    # alone. Each value below is independently confirmed (verify_real_code
+    # probe, run against the actual pre-fix module) to make the OLD formula
+    # return 299 instead of 300.
+    3896.5427575079307,
+    3962.1870727779465,
+    4080.3139951291764,
+    130920.45627983283,
+    1048517.1332137372,
+])
+def test_delegation_time_left_survives_float_cancellation(hook, now, monkeypatch):
+    """CHZ: _delegation_time_left(300) must return exactly 300 on the first
+    call, for every monotonic() value -- not 299.
+
+    Regression for the bug behind the flaky
+    test_timeout_env_override_above_max_is_clamped (`assert 299 == 300`):
+    the old implementation formed `deadline = now + configured` and later
+    computed `int(deadline - now)`. Even on the very first call -- zero real
+    elapsed time, same `now` on both sides -- rounding `now + configured` to
+    the nearest representable float can land a hair below the true sum, and
+    `int()` truncates that down to configured-1. This asserts the OLD formula
+    really does fail on each `now` below (so the test is proven against a
+    real bug, not a hypothetical one), then asserts the CURRENT hook is fixed.
+    """
+    assert _old_buggy_time_left(now) == 299, (
+        f"fixture value {now!r} no longer reproduces the historical bug -- "
+        "pick a new one with a deterministic scan before trusting this test"
+    )
+    monkeypatch.setattr(hook.time, "monotonic", lambda: now)
+    assert hook._delegation_time_left(300) == 300
+
+
+def test_delegation_time_left_never_exceeds_configured(hook, monkeypatch):
+    """However elapsed time lands, the budget handed to Codex must never be
+    MORE than configured -- the one invariant the PR requires explicitly."""
+    clock = {"t": 5000.0}
+    monkeypatch.setattr(hook.time, "monotonic", lambda: clock["t"])
+    assert hook._delegation_time_left(300) <= 300
+    for delta in (0.0, 1e-9, 0.3, 1.0, 50.7, 300.0, 1000.0):
+        clock["t"] = 5000.0 + delta
+        assert hook._delegation_time_left(300) <= 300
+
+
 def test_registered_hook_timeout_outlives_the_delegation_timeout():
     """A hook killed at the host's wall clock dies silently, so the registered
     per-hook timeout must exceed the longest allowance delegation can use."""
