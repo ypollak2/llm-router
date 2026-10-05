@@ -61,9 +61,17 @@ def test_no_events_is_an_empty_judgement_not_a_clean_one():
     assert (j.benches, j.wrong, j.active) == (0, 0, 0)
 
 
-@pytest.mark.parametrize("until", ["soon", None, True, object()])
+@pytest.mark.parametrize("until", ["soon", None, True, object(), float("nan"), float("inf"), float("-inf")])
 def test_log_bench_never_raises_on_a_non_numeric_until_and_writes_no_row(until):
+    from llm_router import failopen
+
+    failopen.reset_unpersisted()
     bl.log_bench("codex", "cli", until, NOW)          # must not raise
+    # Its own code, distinct from a disk-write failure (CHZ-FO-BENCH-LOG-WRITE).
+    failopen.reset_cache()
+    by_code = failopen.snapshot().by_code
+    assert by_code.get("CHZ-FO-BENCH-LOG-ARG") == 1 and "CHZ-FO-BENCH-LOG-WRITE" not in by_code
+    failopen.reset_unpersisted()
     assert not bl.store_path().exists() or _rows() == []
     assert _judge().benches == 0
 
@@ -454,3 +462,10 @@ def test_health_judges_g4_by_its_newest_bench_and_says_benches_are_rare():
     later = NOW + 3 * DAY
     h = kpi.compute_health(kpi.compute_scorecard(days=7, now=later), now=later)["kpis"]["G4"]
     assert h["state"] == "stale"
+
+
+def test_judge_drops_a_non_finite_until_row_read_from_disk():
+    bl.store_path().parent.mkdir(parents=True, exist_ok=True)
+    bl.store_path().write_text(
+        '{"kind":"bench","provider":"codex","trigger":"cli","until":NaN,"ts":%s}\n' % (NOW - HOUR))
+    assert _judge().benches == 0

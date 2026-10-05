@@ -46,6 +46,7 @@ succeeded before the reset time, and the definition counts it.
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import dataclass, field
 
@@ -93,10 +94,11 @@ def _write(row: dict) -> None:
 
 def log_bench(provider: str, trigger: str, until: float, now: float | None = None) -> None:
     """A provider was benched until ``until``. Never raises."""
-    if not (isinstance(until, (int, float)) and not isinstance(until, bool)):
+    if not _num(until):
         # ``judge`` drops a bench row with a non-numeric ``until`` anyway, so write
-        # nothing; record the miss rather than raising out of the routing path.
-        failopen.record("CHZ-FO-BENCH-LOG-WRITE", TypeError("non-numeric until"),
+        # nothing; record the miss (its own code: a caller bug, not a disk failure) rather
+        # than raising out of the routing path.
+        failopen.record("CHZ-FO-BENCH-LOG-ARG", TypeError("non-finite or non-numeric until"),
                         detail=str(provider)[:40])
         return
     _write({
@@ -132,7 +134,8 @@ def log_success(provider: str, until: float, now: float | None = None) -> None:
 
 
 def _num(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    """A usable timestamp: a real, finite number (not bool, NaN or inf)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def read_events(until: float | None = None) -> list[dict]:

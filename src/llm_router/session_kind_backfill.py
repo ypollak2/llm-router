@@ -279,8 +279,8 @@ def _append_rows(path: Path, rows: list[dict[str, Any]]) -> int:
                     pass
             except OSError as exc:
                 if exc.errno in _UNWRITABLE_ERRNOS or isinstance(exc, PermissionError):
-                    raise OSError(exc.errno, f"cannot write {lock_path} ({exc.strerror}: permission "
-                                  "denied or read-only filesystem); nothing was written") from exc
+                    raise OSError(exc.errno, f"cannot write {lock_path} ({exc.strerror}); "
+                                  "nothing was written") from exc
             raise OSError(f"could not lock {lock_path} (is another --backfill-tags running?); "
                           "nothing was written")
         present = set(load_sidecar(path))
