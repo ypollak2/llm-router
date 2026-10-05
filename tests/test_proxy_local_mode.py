@@ -600,3 +600,36 @@ def test_env_var_is_the_default_for_the_flag(monkeypatch):
     monkeypatch.setattr(ps, "_local_agent_preflight", lambda cfg: ["nope"])
     assert ps.cmd_proxy(["--model", MODEL, "--no-warm-up"]) == 2
     assert os.environ[local_mode.ENV_MODE] == "local-agent"
+
+
+# ── output cap ───────────────────────────────────────────────────────────────
+
+
+async def test_local_mode_sends_the_larger_output_cap_to_ollama_and_off_mode_keeps_200(tmp_path):
+    seen = []
+
+    def handler(request):
+        if request.url.port == 11999:
+            seen.append(json.loads(request.content)["options"]["num_predict"])
+            lines = [{"message": {"role": "assistant", "content": "Done."}, "done": False},
+                     {"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop",
+                      "prompt_eval_count": 10, "eval_count": 2}]
+            return httpx.Response(200, stream=httpx.ByteStream("".join(json.dumps(x) + "\n" for x in lines).encode()))
+        return httpx.Response(200, stream=httpx.ByteStream(b"{}"), headers={"content-type": "application/json"})
+
+    for serve, expected in (("local-agent", local_mode.LOCAL_NUM_PREDICT), ("off", 200)):
+        cfg = ps.ProxyConfig(upstream="http://127.0.0.1:9", ledger_path=tmp_path / f"{serve}.jsonl", model=MODEL,
+                             trim="none", serve=serve, hedge_s=None, warm_up=False,
+                             kill_switch=tmp_path / "kill", ollama_url="http://127.0.0.1:11999")
+
+        async def policy(text, pinned):
+            return {"task_type": "code", "complexity": "moderate", "chain_head": [MODEL], "model": MODEL}
+
+        orig, ps.choose_model = ps.choose_model, policy
+        try:
+            app = ps.build_app(cfg, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                               breaker_fn=Breaker())
+            await _post(app, _first_call() if serve == "local-agent" else _req())
+        finally:
+            ps.choose_model = orig
+        assert seen[-1] == expected, (serve, seen)

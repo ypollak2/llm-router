@@ -282,8 +282,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             return backend_factory(model)
         for prefix, cls in BACKENDS.items():
             if model.startswith(prefix):
+                extra = {"num_predict": local_mode.LOCAL_NUM_PREDICT} if lm is not None else {}
                 return cls(model, http, base_url=_ollama_url(), num_ctx=cfg.num_ctx,
-                           hedge_s=cfg.hedge_s, keep_alive=cfg.keep_alive)
+                           hedge_s=cfg.hedge_s, keep_alive=cfg.keep_alive, **extra)
         raise ValueError(f"no backend for {model}")
 
     async def warm_up() -> dict:

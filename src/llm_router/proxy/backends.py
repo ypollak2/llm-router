@@ -184,7 +184,12 @@ class OllamaBackend:
 
     def __init__(self, model: str, client, *, base_url: str, num_ctx: int,
                  hedge_s: float | None = DEFAULT_HEDGE_S,
-                 keep_alive: int | str | None = DEFAULT_KEEP_ALIVE) -> None:
+                 keep_alive: int | str | None = DEFAULT_KEEP_ALIVE,
+                 num_predict: int | None = None) -> None:
+        # ``num_predict`` overrides the 200/700 per-step caps (sized for the
+        # ``fast`` trim). Only ``--serve local-agent`` sets it: a full Claude Code
+        # prompt makes the model emit several parallel tool calls or a whole file.
+        self.num_predict = num_predict
         self.model = model.split("/", 1)[1] if model.startswith("ollama/") else model
         self.client = client
         self.base_url = base_url.rstrip("/")
@@ -193,7 +198,7 @@ class OllamaBackend:
         self.keep_alive = keep_alive
 
     async def complete(self, body: dict, timeout_s: float) -> tuple[dict | None, str | None, dict]:
-        payload = to_ollama(body, self.model, num_ctx=self.num_ctx, max_predict=num_predict_for(body),
+        payload = to_ollama(body, self.model, num_ctx=self.num_ctx, max_predict=self.num_predict or num_predict_for(body),
                             keep_alive=self.keep_alive, stream=True)
         # Refuse to send what Ollama would silently truncate from the front
         # (system prompt + tool definitions first) rather than find out from a

@@ -68,6 +68,11 @@ MIN_NUM_CTX = 32_768
 #: A, n=438: first-token median 2.4 s, p90 15.9 s, max 25.6 s).
 DEFAULT_STEP_BUDGET_S = 120.0
 
+#: Output cap per local step. The stock 200 (after Read/Bash) and 700 caps were sized for
+#: the trimmed request; with the full prompt, 3 of 3 ``triple_read`` soak sessions had their
+#: first reply (three parallel Read calls) rejected as "truncated at num_predict" at 200.
+LOCAL_NUM_PREDICT = 2048
+
 KILL_SWITCH_NAME = "local_agent_kill"
 
 # Ledger reasons written by this mode (in addition to the existing ones).
