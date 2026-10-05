@@ -22,7 +22,7 @@ thinking, json), and context window with its source.
 
 | Source | What is read | Never read |
 |---|---|---|
-| Ollama | `/api/tags`, `/api/show` (capabilities, context length), `/api/ps` (loaded) | anything else |
+| Ollama | `/api/tags`, `/api/show` (capabilities, context length), `/api/ps` (loaded); only when a cloud-backed model is listed, one `POST /api/me` (the daemon's own whoami: no model call, no quota) of which **only the HTTP status** is read (5 s timeout, no proxy, no redirects) | the `/api/me` response body (account name, email, plan), `~/.ollama` key files, anything else |
 | Claude Code subscription | `claude` binary path; login state from the first conclusive of: `claude auth status --json` (only the `loggedIn` boolean is parsed; 5 s timeout, allowlisted environment), presence (not value) of an `oauthAccount` key in `~/.claude.json`, a fresh (`ok`) cached `usage.json` via `proxy/quota_pressure.py`; usage pressure from that same file | credentials, tokens, the account email / org fields, the keychain |
 | Codex | binary path, `codex login status` (classified ChatGPT / API key / none; raw output dropped) | credentials |
 | Gemini CLI | binary path, whether a login file exists | its contents |
@@ -38,6 +38,23 @@ never selects it and `calibrate` treats it as paid. The server URL is parsed wit
 local. **Limit:** an SSH tunnel that forwards a remote GPU box to `localhost` is
 indistinguishable from a local server; treat such a setup as local only if you
 accept that.
+
+**Ollama cloud models are authorized only when sign-in is confirmed.** A cloud-backed
+model (above) runs through the daemon's Ollama account, so being listed proves nothing
+about access. The inventory asks the daemon once (`POST /api/me`, status only): `200`
+means signed in and the model is eligible; `401` means signed out (`not signed in`);
+any other status, a timeout, an unreachable daemon or an unparsable result is
+`Ollama cloud model; sign-in not confirmed`. Both non-`200` outcomes set
+`authorized=False` and `path_verified=False`, so the existing hard checks exclude the
+model (never a fallback, never selected) and the configured model is kept. Local
+Ollama models are not affected and never trigger the probe. Evidence for the signal:
+Ollama's `server/routes.go` registers `POST /api/me` (`WhoamiHandler`, which asks
+ollama.com for the account and answers `401 unauthorized` plus a sign-in link when
+signed out, `503` when the account is unavailable); the endpoint is also in the
+installed 0.32.13 binary, and on this development machine the live daemon answered
+`401` (signed out). `docs.ollama.com` documents no whoami command or endpoint, so
+this relies on a route that is not in the public API reference; if a future Ollama
+changes it the result degrades to `unknown`, i.e. excluded, never to authorized.
 
 Unknown stays unknown: an unreadable or stale quota reading is `unknown`, never
 0%; an Ollama build that reports no capabilities leaves them `unknown`, never
