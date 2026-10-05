@@ -521,8 +521,8 @@ def test_preflight_refuses_when_the_ledger_or_kill_switch_is_unwritable(tmp_path
 
 def test_preflight_overflow_guard_is_a_real_self_test(tmp_path, monkeypatch):
     assert local_mode.overflow_guard_active(32768) is None
-    monkeypatch.setattr(local_mode, "check_overflow", lambda *a, **k: None)
-    assert "did not refuse" in local_mode.overflow_guard_active(32768)
+    monkeypatch.setattr(local_mode, "estimate_payload_tokens", lambda payload: 1)
+    assert "did not exceed the window" in local_mode.overflow_guard_active(32768)
     assert any("overflow guard not active" in p for p in _pre(tmp_path))
 
 

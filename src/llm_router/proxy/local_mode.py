@@ -47,6 +47,7 @@ from llm_router.local_context_guard import (
     DEFAULT_RESERVED_OUTPUT_TOKENS,
     ContextOverflow,
     check_overflow,
+    effective_window,
     estimate_payload_tokens,
 )
 from llm_router.proxy.steps import non_system
@@ -428,12 +429,14 @@ def overflow_guard_active(num_ctx: int) -> str | None:
 
     if "check_overflow" not in inspect.getsource(backends.OllamaBackend.complete):
         return "OllamaBackend.complete does not call the overflow guard"
+    # The same two numbers check_overflow compares, without calling it: a call
+    # that refuses records a fail-open event, and a startup self-test must not
+    # leave a phantom overflow in the operator's counters.
     probe = {"model": "x", "messages": [{"role": "user", "content": "a" * (num_ctx * 5)}]}
-    try:
-        check_overflow(probe, num_ctx=num_ctx, site="proxy.local_mode.preflight")
-    except ContextOverflow:
-        return None
-    return "the overflow guard did not refuse a payload larger than the window"
+    window, _source = effective_window(num_ctx=num_ctx)
+    if estimate_payload_tokens(probe) <= window - DEFAULT_RESERVED_OUTPUT_TOKENS:
+        return "the overflow guard's estimate did not exceed the window for a payload larger than it"
+    return None
 
 
 def writable(path: Path) -> str | None:
