@@ -880,7 +880,12 @@ def _g2_silent_failures(days: int, now: float, proxy_rows: list[dict]) -> dict:
     hook_killed = win.by_code.get("CHZ-HOOK-KILLED", 0)
     hook_calls, proxy_calls = len(hook_ts) + hook_killed, len(proxy_ts)
     calls = hook_calls + proxy_calls
-    newest = max(hook_ts + proxy_ts) if calls else None      # the feed's last sign of life
+    observed = len(hook_ts) + len(proxy_ts)                 # calls that left a row
+    kill_ts = win.last_ts_by_code.get("CHZ-HOOK-KILLED")
+    # Every timestamp that counts toward ``calls``, kill events included; the list
+    # can be empty only when calls == 0.
+    stamps = hook_ts + proxy_ts + ([kill_ts] if hook_killed and kill_ts is not None else [])
+    newest = max(stamps) if stamps else None                 # the feed's last sign of life
     events = win.in_window
     lines = [alltime]
     if since > since_req:
@@ -893,6 +898,13 @@ def _g2_silent_failures(days: int, now: float, proxy_rows: list[dict]) -> dict:
 
     if calls == 0:
         return _not_measurable(f"no hook invocation or proxy call recorded since {_iso(since)}") | base
+    if observed == 0:
+        # Every counted call is a host kill: the denominator is the numerator's own
+        # events, so the rate would be 100% by construction. Say so, don't print it.
+        return _not_measurable(
+            f"n={calls} call(s) from killed hooks only (no hook_latency row or proxy call in "
+            f"the window since {_iso(since)}), so a rate would be 100% by construction",
+            seen=calls, newest_ts=newest) | base
     if calls < MIN_N:
         return _too_few(calls, newest_ts=newest) | {"value": f"{TOO_FEW} (n={calls} calls; {events} fail-open "
                                                              f"event(s) so far)"} | base

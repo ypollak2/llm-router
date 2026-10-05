@@ -164,6 +164,9 @@ class FailOpenWindow:
     #: written on this machine, which a rate must not read as "no failures".
     first_ts: float | None = None
     readable: bool = True
+    #: The latest in-window ``ts`` per site code (so a report can say when a
+    #: code last fired without re-reading the store).
+    last_ts_by_code: dict[str, float] = field(default_factory=dict)
 
     @property
     def in_window(self) -> int:
@@ -344,6 +347,7 @@ def windowed(since: float | None = None, until: float | None = None) -> FailOpen
         return FailOpenWindow(readable=False)
 
     by_code: dict[str, int] = {}
+    last_ts_by_code: dict[str, float] = {}
     untimestamped = 0
     first_ts: float | None = None
     valid = malformed = 0
@@ -371,7 +375,10 @@ def windowed(since: float | None = None, until: float | None = None) -> FailOpen
         if (since is not None and ts < since) or (until is not None and ts > until):
             continue
         by_code[code] = by_code.get(code, 0) + 1
+        if ts > last_ts_by_code.get(code, float("-inf")):
+            last_ts_by_code[code] = float(ts)
 
     if malformed and not valid:
         return FailOpenWindow(readable=False)
-    return FailOpenWindow(by_code=by_code, untimestamped=untimestamped, first_ts=first_ts)
+    return FailOpenWindow(by_code=by_code, untimestamped=untimestamped, first_ts=first_ts,
+                          last_ts_by_code=last_ts_by_code)
