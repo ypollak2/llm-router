@@ -106,3 +106,9 @@ def test_lock_timeout_is_a_failure_not_an_unlocked_write(monkeypatch):
     with pytest.raises(OSError):
         us.record("k1", "kept", "terminal")
     assert not us.ledger_path().exists()
+
+
+def test_write_lock_file_is_0600():
+    us.record("msg_1", "kept", "terminal")
+    lock = us.ledger_path().with_name(us.LEDGER_FILENAME + ".write.lock")
+    assert stat.S_IMODE(os.stat(lock).st_mode) == 0o600

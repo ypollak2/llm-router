@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import {
-  bandText, clock, parseFeed, parseReceipt, press, pressedText, receiptArgv, redoPrompt,
+  bandText, clock, parseFeed, parseReceipt, press, pressedText, receiptArgv, redoPrompt, REDO_MARK,
   safeModel, shouldShow, signalArgv, usd,
 } from '../../src/llm_router/mods/llm-router-receipt/hooks/logic.mjs'
 
@@ -65,6 +65,7 @@ test('keys: r records redone and builds a redo prompt that quotes nothing', () =
   assert.ok(prompt.startsWith('claude:'), 'uses the router\'s explicit-Claude prefix')
   assert.ok(prompt.includes('ollama/qwen3-coder:30b'))
   assert.ok(prompt.length < 200)
+  assert.ok(prompt.endsWith(REDO_MARK), 'ends with the sentinel usage_outcome skips')
 })
 
 test('keys: no band, no event', () => {

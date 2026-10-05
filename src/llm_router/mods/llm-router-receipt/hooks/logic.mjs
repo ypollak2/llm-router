@@ -81,10 +81,14 @@ export function signalArgv(routerArgv, key, signal, surface) {
  * northstar's redo detection both read that prefix), and quotes nothing from
  * the conversation.
  */
+export const REDO_MARK = '[receipt-band:redo]'
+
 export function redoPrompt(receipt) {
+  // REDO_MARK tells usage_outcome not to count this prompt as an override: the press is
+  // already one user_signal row in D3. Keep in step with usage_outcome.BAND_REDO_MARK.
   return (
     'claude: Please redo your previous answer yourself, on Claude. ' +
-    `It was served by ${safeModel(receipt.model)} and I want Claude's own answer instead.`
+    `It was served by ${safeModel(receipt.model)} and I want Claude's own answer instead. ${REDO_MARK}`
   )
 }
 

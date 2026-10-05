@@ -9,6 +9,7 @@ as a decided redo event. These tests fail if keep ever raises NS, D1 or D2.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pytest
 
@@ -98,3 +99,39 @@ def test_lines_present_with_no_presses_at_all(monkeypatch):
     _d3_rows(monkeypatch, used=0, redone=0)
     text = kpi.render_scorecard(_card())
     assert "user_kept n=0 " in text and "user_redone n=0 " in text
+
+
+def test_one_r_press_counts_once_in_d3_when_both_sources_see_it(monkeypatch):
+    """The band's `r` submits a `claude:` prompt (the override detector sees it) AND records a
+    user_signal row. Both describe ONE redo; D3 must count it once, not twice."""
+    mjs = (Path(__file__).resolve().parents[1] / "src/llm_router/mods/llm-router-receipt/hooks/logic.mjs").read_text()
+    assert f"REDO_MARK = '{usage_outcome.BAND_REDO_MARK}'" in mjs   # the mod and the detector agree
+    band_prompt = ("claude: Please redo your previous answer yourself, on Claude. "
+                   f"It was served by ollama/x and I want Claude's own answer instead. {usage_outcome.BAND_REDO_MARK}")
+
+    def rec(n, **kw):
+        return {"timestamp": f"2026-10-01T10:00:{n:02d}Z", **kw}
+
+    ask = "what does the retry decorator in the http client do when the server returns a 503 status"
+    records = [
+        rec(1, type="user", message={"role": "user", "content": "explain"}),
+        rec(2, type="assistant", message={"content": [{"type": "tool_use", "id": "a1",
+            "name": "mcp__llm_router__llm", "input": {"prompt": ask, "task": "query"}}]}),
+        rec(3, type="user", message={"content": [{"type": "tool_result", "tool_use_id": "a1",
+            "content": "It retries with backoff and gives up after five attempts"}]}),
+        rec(4, type="user", message={"role": "user", "content": band_prompt}),
+    ]
+    monkeypatch.setattr(usage_outcome, "judge_recent", lambda days=7, root=None: usage_outcome.judge_transcript(
+        records, session_id="s-org", kind_lookup=session_kind.kind_of) + [
+        {"outcome": usage_outcome.OUTCOME_USED, "session_kind": "organic"}] * 45)
+    before = _card()["kpis"]["D3"]
+    assert (before["redone"], before["used"]) == (0, 45)       # the band prompt alone is not an override
+    user_signal.record("msg_band1", "redone", "terminal")
+    after = _card()["kpis"]["D3"]
+    assert after["redone"] == 1 and after["used"] == 45
+    assert after["user_redone"] == 1
+    assert after["seen"] == before["seen"] + 1                 # decided rose by exactly 1
+
+    # a human's own `claude:` override still counts (the marker is the band's alone)
+    records[-1] = rec(4, type="user", message={"role": "user", "content": "claude: answer that yourself"})
+    assert _card()["kpis"]["D3"]["redone"] == 2

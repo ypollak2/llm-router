@@ -258,3 +258,67 @@ def test_uninstall_without_record_never_leaves_an_empty_variable(claude_home):
     sp.write_text(json.dumps({"env": {"CLAUDE_CODE_PLUGIN_DIRS": str(rb.mod_dest())}}))
     rb.uninstall()
     assert "CLAUDE_CODE_PLUGIN_DIRS" not in json.loads(sp.read_text())["env"]
+
+
+# ── concurrent writers (review finding: unlocked read-modify-write) ──────────
+
+def _inject_after_first_read(monkeypatch, sp: Path, writes: int = 1, skip: int = 0):
+    """After our read of settings.json inside the locked merge (``skip`` earlier reads are
+    install's pre-flight validation), another writer (Claude Code takes no lock of ours)
+    adds a key before we replace the file."""
+    real_read, state = rb._read_settings, {"n": 0, "seen": 0}
+
+    def read(path):
+        out = real_read(path)
+        if Path(path) == sp:
+            state["seen"] += 1
+        if Path(path) == sp and state["seen"] > skip and state["n"] < writes:
+            state["n"] += 1
+            data = json.loads(sp.read_text())
+            data[f"foreign{state['n']}"] = "kept"
+            sp.write_text(json.dumps(data))
+        return out
+
+    monkeypatch.setattr(rb, "_read_settings", read)
+
+
+def test_install_does_not_lose_a_key_written_between_read_and_replace(claude_home, monkeypatch):
+    sp = claude_home / "settings.json"
+    sp.write_text('{"model": "opus"}\n')
+    _inject_after_first_read(monkeypatch, sp, skip=1)
+    rb.install()
+    data = json.loads(sp.read_text())
+    assert data["foreign1"] == "kept" and data["model"] == "opus"
+    assert str(rb.mod_dest()) in data["env"]["CLAUDE_CODE_PLUGIN_DIRS"]
+
+
+def test_uninstall_does_not_lose_a_key_written_between_read_and_replace(claude_home, monkeypatch):
+    sp = claude_home / "settings.json"
+    sp.write_text('{"model": "opus"}\n')
+    rb.install()
+    _inject_after_first_read(monkeypatch, sp)
+    rb.uninstall()
+    data = json.loads(sp.read_text())
+    assert data["foreign1"] == "kept" and "env" not in data
+
+
+def test_a_settings_file_that_keeps_changing_aborts_and_keeps_every_foreign_key(claude_home, monkeypatch, capsys):
+    sp = claude_home / "settings.json"
+    sp.write_text('{"model": "opus"}\n')
+    _inject_after_first_read(monkeypatch, sp, writes=99, skip=1)
+    assert rb.cmd_mod(["install"]) == 1
+    assert "kept changing" in capsys.readouterr().err
+    data = json.loads(sp.read_text())
+    assert data["foreign1"] == "kept" and "env" not in data
+    assert not rb.mod_dest().exists() and not list(rb.mod_dest().parent.glob("*.staging"))
+
+
+def test_a_refused_install_leaves_an_existing_install_intact(claude_home):
+    sp = claude_home / "settings.json"
+    sp.write_text("{}\n")
+    rb.install()
+    marker = rb.mod_dest() / "marker"
+    marker.write_text("still here")
+    sp.write_text("{not json")
+    assert rb.cmd_mod(["install"]) == 1
+    assert marker.read_text() == "still here"

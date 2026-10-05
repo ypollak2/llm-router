@@ -31,6 +31,7 @@ one ``os.write`` of a complete line on an ``O_APPEND`` descriptor
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -70,7 +71,10 @@ def record(key: str, signal: str, surface: str, *, now: float | None = None) -> 
     path.parent.mkdir(parents=True, exist_ok=True)
     from llm_router.file_lock import exclusive_lock
 
-    with exclusive_lock(path.with_name(path.name + ".write.lock"), timeout=LOCK_TIMEOUT_S) as locked:
+    lock_path = path.with_name(path.name + ".write.lock")
+    if not lock_path.exists():  # file_lock opens "a+" at the umask default; make it 0600 first
+        os.close(os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600))
+    with exclusive_lock(lock_path, timeout=LOCK_TIMEOUT_S) as locked:
         if not locked:
             raise OSError(f"could not lock {path.name} within {LOCK_TIMEOUT_S}s; signal not recorded")
         capped_log.append(path, data, MAX_BYTES)

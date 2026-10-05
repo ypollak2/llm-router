@@ -140,9 +140,31 @@ def _read_settings(path: Path) -> tuple[dict, bytes | None]:
     return data, raw
 
 
-def _write_settings(path: Path, data: dict) -> None:
+class SettingsChanged(RuntimeError):
+    """settings.json changed between our read and our replace (a writer that does not
+    take our lock, i.e. Claude Code itself). The merge is redone on the fresh content."""
+
+
+_MAX_ATTEMPTS = 5
+_LOCK_TIMEOUT_S = 5.0
+_UNCHECKED = object()
+
+
+def _current_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _write_settings(path: Path, data: dict, expect: object = _UNCHECKED) -> None:
     """Atomic replace that keeps the file's mode (a 0600 settings file holding
-    secrets in ``env`` stays 0600) and writes through a symlink to its target."""
+    secrets in ``env`` stays 0600) and writes through a symlink to its target.
+
+    ``expect`` is the bytes this merge was computed from (None: the file did not
+    exist). Just before the replace the file is read again; if it is not those bytes
+    someone else wrote meanwhile and :class:`SettingsChanged` is raised instead of
+    overwriting their change."""
     path = Path(os.path.realpath(path))
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".llm-router-mod.tmp")
@@ -151,10 +173,35 @@ def _write_settings(path: Path, data: dict) -> None:
     except FileNotFoundError:
         mode = 0o600
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
-    os.chmod(tmp, mode)
-    os.replace(tmp, path)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+        os.chmod(tmp, mode)
+        if expect is not _UNCHECKED and _current_bytes(path) != expect:
+            raise SettingsChanged(str(path))
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _settings_transaction(spath: Path, attempt) -> list[str]:
+    """Run ``attempt()`` (read, merge, write with ``expect``) under an advisory lock, and
+    again on fresh content each time it raises :class:`SettingsChanged`. After
+    :data:`_MAX_ATTEMPTS` it gives up with a clear error: a concurrent key is never dropped."""
+    from llm_router.file_lock import exclusive_lock
+
+    lock = paths.state_path("settings.json.write.lock")
+    with exclusive_lock(lock, timeout=_LOCK_TIMEOUT_S) as locked:
+        if not locked:
+            raise OSError(f"could not lock {lock.name} within {_LOCK_TIMEOUT_S}s; {spath} not touched")
+        for _ in range(_MAX_ATTEMPTS):
+            try:
+                return attempt()
+            except SettingsChanged:
+                continue
+    raise OSError(f"{spath} kept changing under us ({_MAX_ATTEMPTS} attempts); nothing was written, "
+                  "run the command again")
 
 
 def _record_path() -> Path:
@@ -162,53 +209,76 @@ def _record_path() -> Path:
 
 
 def install() -> list[str]:
-    """Copy the mod and point Claude Code at it. Safe to run twice."""
+    """Copy the mod and point Claude Code at it. Safe to run twice.
+
+    The settings read-merge-write runs under an advisory lock and is re-checked just
+    before the replace (see :func:`_settings_transaction`). The mod is staged beside
+    ``dest`` first and swapped in only after the settings write succeeded, so a
+    refusal or a failure leaves an existing install untouched. A re-install that finds
+    ``dest`` already named leaves settings (and so the backup) alone: the backup is
+    always the file as it was before the FIRST change."""
     actions: list[str] = []
     src, dest = mod_source(), mod_dest()
     if not (src / ".claude-plugin" / "plugin.json").exists():
         raise FileNotFoundError(f"mod source missing: {src}")
-    _read_settings(_settings_path())  # refuse a malformed settings file before touching anything
-    if dest.exists():
-        shutil.rmtree(dest)
-    shutil.copytree(src, dest, ignore=shutil.ignore_patterns("*.test.ts", "*.test.tsx"))
+    spath = _settings_path()
+    _read_settings(spath)  # refuse a malformed settings file before touching anything
+    staging = dest.with_name(dest.name + ".staging")
+    if staging.exists():
+        shutil.rmtree(staging)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, staging, ignore=shutil.ignore_patterns("*.test.ts", "*.test.tsx"))
     exe = shutil.which("llm-router")
     if exe:
         # Claude Code's PATH is not always the shell's: name the executable.
-        (dest / "hooks" / "router-cmd.mjs").write_text(
+        (staging / "hooks" / "router-cmd.mjs").write_text(
             f"export const ROUTER_ARGV = {json.dumps([exe])}\n", encoding="utf-8")
     actions.append(f"copied the mod to {dest}" + ("" if exe else " (llm-router not on PATH: the mod will look it up at run time)"))
 
-    spath = _settings_path()
-    settings, raw = _read_settings(spath)
-    env = settings.get("env")
-    current = env.get(PLUGIN_DIRS_VAR) if isinstance(env, dict) else None
-    entries = [p for p in (current or "").split(os.pathsep) if p]
-    if str(dest) in entries:
-        actions.append(f"{PLUGIN_DIRS_VAR} already names {dest}; settings unchanged")
-        return actions
+    record: dict = {}
 
-    record = {"had_env": isinstance(env, dict), "had_var": current is not None,
-              "had_file": raw is not None, "dest": str(dest), "backup": None}
-    if raw is not None:
-        backup = spath.with_name(spath.name + _SETTINGS_BACKUP_SUFFIX)
-        with open(backup, "wb", opener=paths.private_opener) as fh:
-            fh.write(raw)
-        record["backup"] = str(backup)
-        actions.append(f"backed up {spath} to {backup}")
-    new_env = dict(env) if isinstance(env, dict) else {}
-    new_env[PLUGIN_DIRS_VAR] = os.pathsep.join(entries + [str(dest)])
-    settings["env"] = new_env
-    _write_settings(spath, settings)
-    rpath = _record_path()
-    rpath.parent.mkdir(parents=True, exist_ok=True)
-    with open(rpath, "w", encoding="utf-8", opener=paths.private_opener) as fh:
-        json.dump(record, fh)
-    actions.append(f"added {dest} to {PLUGIN_DIRS_VAR} in {spath} (takes effect in the next session)")
+    def attempt() -> list[str]:
+        settings, raw = _read_settings(spath)
+        env = settings.get("env")
+        current = env.get(PLUGIN_DIRS_VAR) if isinstance(env, dict) else None
+        entries = [p for p in (current or "").split(os.pathsep) if p]
+        if str(dest) in entries:
+            return [f"{PLUGIN_DIRS_VAR} already names {dest}; settings unchanged"]
+        out: list[str] = []
+        record.update({"had_env": isinstance(env, dict), "had_var": current is not None,
+                       "had_file": raw is not None, "dest": str(dest), "backup": None})
+        if raw is not None:
+            backup = spath.with_name(spath.name + _SETTINGS_BACKUP_SUFFIX)
+            with open(backup, "wb", opener=paths.private_opener) as fh:
+                fh.write(raw)
+            record["backup"] = str(backup)
+            out.append(f"backed up {spath} to {backup}")
+        new_env = dict(env) if isinstance(env, dict) else {}
+        new_env[PLUGIN_DIRS_VAR] = os.pathsep.join(entries + [str(dest)])
+        settings["env"] = new_env
+        _write_settings(spath, settings, expect=raw)
+        out.append(f"added {dest} to {PLUGIN_DIRS_VAR} in {spath} (takes effect in the next session)")
+        return out
+
+    try:
+        actions += _settings_transaction(spath, attempt)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    if dest.exists():
+        shutil.rmtree(dest)
+    os.replace(staging, dest)
+    if record:
+        rpath = _record_path()
+        rpath.parent.mkdir(parents=True, exist_ok=True)
+        with open(rpath, "w", encoding="utf-8", opener=paths.private_opener) as fh:
+            json.dump(record, fh)
     return actions
 
 
 def uninstall() -> list[str]:
-    """Undo :func:`install`. Safe to run twice, and when never installed."""
+    """Undo :func:`install`. Safe to run twice, and when never installed. Same locked,
+    re-checked read-merge-write as install."""
     actions: list[str] = []
     dest = mod_dest()
     rpath = _record_path()
@@ -217,13 +287,16 @@ def uninstall() -> list[str]:
     except (OSError, ValueError):
         # No record: never invent a key the person did not have.
         record = {"had_env": True, "had_var": False, "had_file": True, "backup": None}
-
     spath = _settings_path()
-    settings, raw = _read_settings(spath)
-    env = settings.get("env")
-    current = env.get(PLUGIN_DIRS_VAR) if isinstance(env, dict) else None
-    entries = [p for p in (current or "").split(os.pathsep) if p]
-    if str(dest) in entries:
+
+    def attempt() -> list[str]:
+        out: list[str] = []
+        settings, raw = _read_settings(spath)
+        env = settings.get("env")
+        current = env.get(PLUGIN_DIRS_VAR) if isinstance(env, dict) else None
+        entries = [p for p in (current or "").split(os.pathsep) if p]
+        if str(dest) not in entries:
+            return [f"{PLUGIN_DIRS_VAR} does not name {dest}; settings unchanged"]
         entries = [p for p in entries if p != str(dest)]
         new_env = dict(env)
         if entries:
@@ -244,26 +317,47 @@ def uninstall() -> list[str]:
             # is kept, and the file is written structurally instead.
             original, _ = _read_settings(backup)
             if original == settings:
-                spath.write_bytes(backup.read_bytes())  # keeps the file's own mode
+                _write_raw(spath, backup.read_bytes(), expect=raw)  # keeps the file's own mode
                 backup.unlink(missing_ok=True)
                 restored = True
-                actions.append(f"restored {spath} from {backup}")
+                out.append(f"restored {spath} from {backup}")
         if not restored:
             if not settings and not record.get("had_file", True):
+                if _current_bytes(spath) != raw:
+                    raise SettingsChanged(str(spath))
                 spath.unlink(missing_ok=True)
-                actions.append(f"removed {spath} (it did not exist before install)")
+                out.append(f"removed {spath} (it did not exist before install)")
             else:
-                _write_settings(spath, settings)
-                actions.append(f"removed {dest} from {PLUGIN_DIRS_VAR} in {spath}")
+                _write_settings(spath, settings, expect=raw)
+                out.append(f"removed {dest} from {PLUGIN_DIRS_VAR} in {spath}")
             if backup is not None:
                 backup.unlink(missing_ok=True)
-    else:
-        actions.append(f"{PLUGIN_DIRS_VAR} does not name {dest}; settings unchanged")
+        return out
+
+    actions += _settings_transaction(spath, attempt)
     rpath.unlink(missing_ok=True)
     if dest.exists():
         shutil.rmtree(dest)
         actions.append(f"removed {dest}")
     return actions
+
+
+def _write_raw(path: Path, raw: bytes, *, expect: bytes | None) -> None:
+    """Restore exact bytes: the same atomic, mode-keeping, re-checked replace."""
+    path = Path(os.path.realpath(path))
+    tmp = path.with_name(path.name + ".llm-router-mod.tmp")
+    mode = stat.S_IMODE(path.stat().st_mode)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(raw)
+        os.chmod(tmp, mode)
+        if _current_bytes(path) != expect:
+            raise SettingsChanged(str(path))
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
