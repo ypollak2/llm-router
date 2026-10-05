@@ -13,6 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- toolkit: a router-owned tool layer, phase 1 (`src/llm_router/toolkit/`). Seven tools (read,
+  search, list, edit, write, bash, finish) behind one permission function that runs in code
+  before every call and logs every decision; a throwaway workspace (a copy; the caller's tree is
+  never written and a fingerprint proves it); a macOS `sandbox-exec` profile that denies network
+  and writes outside the workspace, proven by a probe at startup, with `bash` OFF when it cannot
+  be proven; kill switch (`LLM_ROUTER_TOOLLAYER=off`, `~/.llm-router/KILL`); budgets on steps,
+  time, tokens and bytes written; and a verifier that alone decides `used` (V1: the supplied test
+  command passes after, nothing that passed before is lost, no test deleted or weakened).
+  `llm-router run --model M --verify CMD --workspace DIR "task"` returns a patch and a verdict
+  (propose-only). The execution ledger gains `verify` and `used` columns, NULL when unknown.
+  `hooks/agent_loop.py` now calls the toolkit executor (one executor); its public functions are
+  unchanged, and the secret deny-list now applies to it too.
 - proxy: real Anthropic spend per call and per session. Each ledger row records
   `served_by`, the real Anthropic usage (cache read/write split; zeros when served
   locally), its cost and a counterfactual; `proxy_session_cost()` reports real spend, the

@@ -28,7 +28,8 @@ def test_subprocess_run_calls_never_pass_shell_true():
 
 def test_run_command_parses_with_shlex():
     """The command is split into an argv list before execution."""
-    assert _tokenizes_with_shlex(_SRC.read_text())
+    # The tokenizer moved to the toolkit (agent_loop.py calls it): one executor.
+    assert _tokenizes_with_shlex((_SRC.parent.parent / "toolkit" / "tools.py").read_text())
 
 
 def _tokenizes_with_shlex(src: str) -> bool:

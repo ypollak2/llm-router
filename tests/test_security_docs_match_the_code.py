@@ -35,7 +35,8 @@ def test_run_command_really_does_not_use_a_shell():
            for kw in n.keywords
            if kw.arg == "shell" and getattr(kw.value, "value", False) is True]
     assert not bad, f"agent_loop.py now uses a shell at line(s) {bad}"
-    assert _tokenizes_with_shlex(AGENT_LOOP.read_text())
+    # The tokenizer moved to the toolkit (agent_loop.py calls it): one executor.
+    assert _tokenizes_with_shlex((ROOT / "src/llm_router/toolkit/tools.py").read_text())
 
 
 @pytest.mark.parametrize("name", sorted(DOCS))
