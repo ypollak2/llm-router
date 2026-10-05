@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 42
+# llm_router-hook-version: 43
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -196,7 +196,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 42"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 43"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -494,6 +494,9 @@ def _get_pressure() -> dict[str, float]:
     try:
         raw = json.loads(usage_path.read_text())
         age_s = time.time() - float(raw.get("updated_at", 0))
+        if age_s != age_s or age_s in (float("inf"), float("-inf")):
+            # NaN / inf updated_at: no usable age, so the reading is UNKNOWN.
+            return dict(_UNKNOWN_PRESSURE)
         is_fresh = age_s < ttl_seconds
 
         # KPI G1 (2026-10-05): this branch used to call _fetch_usage_inline()
@@ -718,9 +721,12 @@ def _usage_refresh_script_path() -> Path | None:
     return None
 
 
-# Beyond the allowlist (HOME/USER/PATH reach the macOS keychain; LLM_ROUTER_*
-# carries LLM_ROUTER_HOME), usage-refresh does an HTTPS call via urllib, which
-# honours these proxy / CA variables.
+# usage-refresh.py reads exactly these LLM_ROUTER_* vars (grep it): the state
+# dir and the tool-name tier. Never LLM_ROUTER_*TOKEN / *SECRET* vars.
+_REFRESH_CHILD_ROUTER_ENV = ("LLM_ROUTER_HOME", "LLM_ROUTER_SLIM")
+# Beyond the allowlist (HOME/USER/PATH reach the macOS keychain),
+# usage-refresh does an HTTPS call via urllib, which honours these proxy / CA
+# variables.
 _REFRESH_CHILD_NET_ENV = (
     "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
     "NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy",
@@ -743,7 +749,7 @@ def _refresh_child_env() -> dict[str, str] | None:
         return None
     extra = {
         k: v for k, v in os.environ.items()
-        if k.startswith("LLM_ROUTER_") or k in _REFRESH_CHILD_NET_ENV
+        if k in _REFRESH_CHILD_ROUTER_ENV or k in _REFRESH_CHILD_NET_ENV
     }
     return get_delegated_env(extra=extra)
 

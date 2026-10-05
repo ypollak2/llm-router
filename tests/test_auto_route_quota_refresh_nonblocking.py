@@ -282,6 +282,31 @@ def test_spawn_is_detached_and_env_is_minimal(sandbox, monkeypatch):
     assert "FAKE_PROVIDER_API_KEY" not in env
 
 
+def test_child_env_excludes_router_secrets(sandbox, monkeypatch):
+    hooks, home, tmp = sandbox
+    mod = _load_hook(hooks, monkeypatch, home)
+    secrets = ("LLM_ROUTER_TOKEN", "LLM_ROUTER_GATEWAY_TOKEN", "LLM_ROUTER_SCIM_TOKEN",
+               "LLM_ROUTER_CP_SIDECAR_TOKEN", "LLM_ROUTER_BROKER_SECRET_FILE")
+    for k in secrets:
+        monkeypatch.setenv(k, "s3cret")
+    monkeypatch.setenv("LLM_ROUTER_SLIM", "1")
+    env = mod._refresh_child_env()
+    assert not [k for k in secrets if k in env]
+    assert env["LLM_ROUTER_HOME"] == str(home) and env["LLM_ROUTER_SLIM"] == "1"
+
+
+@pytest.mark.parametrize("bad", ["NaN", "Infinity", "-Infinity"])
+def test_non_finite_updated_at_is_unknown(sandbox, monkeypatch, bad):
+    hooks, home, tmp = sandbox
+    (home / "usage.json").write_text(
+        '{"session_pct": 99, "weekly_pct": 99, "sonnet_pct": 99, "updated_at": %s}' % bad)
+    mod = _load_hook(hooks, monkeypatch, home)
+    monkeypatch.setattr(mod, "_spawn_background_usage_refresh", lambda: None)
+    p = mod._get_pressure()
+    assert p == {"session": 0.0, "sonnet": 0.0, "weekly": 0.0}
+    assert mod._apply_pressure_downgrade("complex", p) == ("complex", "")
+
+
 def _age_pressure(sandbox, monkeypatch, age_s, pct=99.0, ttl=None):
     hooks, home, tmp = sandbox
     _write_usage(home, age_s=age_s, session_pct=pct)
