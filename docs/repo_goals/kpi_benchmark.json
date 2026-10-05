@@ -1,0 +1,387 @@
+{
+  "generated_at": "2026-10-05T07:50:49Z",
+  "o2": {
+    "acceptable_rate": 0.782608695652174,
+    "n": 23,
+    "definition": "tasks Opus passed (hidden tests) that Haiku also passed"
+  },
+  "d5": {
+    "accuracy": 0.20833333333333334,
+    "under_route_rate": 0.0,
+    "n": 24,
+    "n_no_truth": 8,
+    "predicted_tier_counts": {
+      "haiku": 0,
+      "sonnet": 21,
+      "opus": 3
+    },
+    "note": "under-route is not informative when the classifier never predicts the cheapest tier (haiku): see predicted_tier_counts",
+    "definition": "production proxy classifier, effective tier, vs cheapest tier that passed hidden tests; no-pass tasks excluded"
+  },
+  "provenance": {
+    "source": "classifier-v2-release/ab/work/agentic/truth.jsonl (blind A/B, hidden unit tests, majority of junit grades)",
+    "n_tasks": 32,
+    "tiers": [
+      "haiku",
+      "sonnet",
+      "opus"
+    ],
+    "population": "single-repo (llm-router) mined commit tasks; not the real prompt pool; 72.7% of real prompts (3+ tool calls) have no truth",
+    "classifier": "llm_router.classify.classify_signals(GATEWAY_POLICY), effective mapping (haiku_rewrite false)",
+    "truth_not_used": "owner relabels and Opus-judge labels (complexity-v2/p_eval)"
+  },
+  "items": [
+    {
+      "id": "0dfc6166a8",
+      "pass": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "haiku",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "12d67f9303",
+      "pass": {
+        "haiku": false,
+        "sonnet": false,
+        "opus": false
+      },
+      "cheapest_tier": "none",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "2346834946",
+      "pass": {
+        "haiku": false,
+        "sonnet": false,
+        "opus": false
+      },
+      "cheapest_tier": "none",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "261f3573eb",
+      "pass": {
+        "haiku": false,
+        "sonnet": false,
+        "opus": false
+      },
+      "cheapest_tier": "none",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "2dc87aef88",
+      "pass": {
+        "haiku": false,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "sonnet",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "396d9f4b3f",
+      "pass": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "haiku",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "476267fd4a",
+      "pass": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "haiku",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "4e6b1697dd",
+      "pass": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "haiku",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "533ba6fe18",
+      "pass": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "haiku",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "54ad51654d",
+      "pass": {
+        "haiku": false,
+        "sonnet": false,
+        "opus": true
+      },
+      "cheapest_tier": "opus",
+      "predicted_raw": "opus",
+      "predicted_effective": "opus"
+    },
+    {
+      "id": "5ddfc61a91",
+      "pass": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "haiku",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "6e60098adf",
+      "pass": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "haiku",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "72967824a8",
+      "pass": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "haiku",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "73650c9543",
+      "pass": {
+        "haiku": false,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "sonnet",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "75182efb7a",
+      "pass": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "haiku",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "774d93eccd",
+      "pass": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "haiku",
+      "predicted_raw": "opus",
+      "predicted_effective": "opus"
+    },
+    {
+      "id": "785d144bfa",
+      "pass": {
+        "haiku": false,
+        "sonnet": false,
+        "opus": false
+      },
+      "cheapest_tier": "none",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "90bbe76b22",
+      "pass": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "haiku",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "951f3a2ff5",
+      "pass": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": false
+      },
+      "cheapest_tier": "haiku",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "99b242a66c",
+      "pass": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "haiku",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "a2dc0926cc",
+      "pass": {
+        "haiku": false,
+        "sonnet": false,
+        "opus": false
+      },
+      "cheapest_tier": "none",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "a75fbeda5f",
+      "pass": {
+        "haiku": false,
+        "sonnet": false,
+        "opus": false
+      },
+      "cheapest_tier": "none",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "afa90fc97b",
+      "pass": {
+        "haiku": false,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "sonnet",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "b19dcd8d80",
+      "pass": {
+        "haiku": false,
+        "sonnet": false,
+        "opus": false
+      },
+      "cheapest_tier": "none",
+      "predicted_raw": "opus",
+      "predicted_effective": "opus"
+    },
+    {
+      "id": "b26ba7ede7",
+      "pass": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "haiku",
+      "predicted_raw": "haiku",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "ba423f7f02",
+      "pass": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "haiku",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "bc2e308180",
+      "pass": {
+        "haiku": false,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "sonnet",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "ca933f9020",
+      "pass": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "haiku",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "ccf7ebd173",
+      "pass": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "haiku",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "d325079c69",
+      "pass": {
+        "haiku": false,
+        "sonnet": false,
+        "opus": false
+      },
+      "cheapest_tier": "none",
+      "predicted_raw": "opus",
+      "predicted_effective": "opus"
+    },
+    {
+      "id": "e6ca6e7066",
+      "pass": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "haiku",
+      "predicted_raw": "opus",
+      "predicted_effective": "opus"
+    },
+    {
+      "id": "ffc91cef58",
+      "pass": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "haiku",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    }
+  ]
+}

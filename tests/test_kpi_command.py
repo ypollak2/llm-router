@@ -353,6 +353,88 @@ def test_missing_benchmark_file_is_not_measurable(monkeypatch, tmp_path):
     assert _kpis()["O2"]["value"].startswith("not measurable: ")
 
 
+def test_missing_configured_file_carries_its_code_never_zero(monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_ROUTER_KPI_BENCHMARK_PATH", str(tmp_path / "absent.json"))
+    k = _kpis()
+    for key in ("O2", "D5"):
+        assert k[key]["measurable"] is False and k[key]["n"] is None
+        assert kpi.BENCH_MISSING in k[key]["value"] and "0%" not in k[key]["value"]
+    h = kpi.compute_health(kpi.compute_scorecard(days=7))["kpis"]
+    assert h["O2"]["state"] == "blind" and h["D5"]["state"] == "blind"
+
+
+@pytest.mark.parametrize("content", ["{not json", "[]", "null", ""])
+def test_malformed_file_fails_open_with_its_code(monkeypatch, tmp_path, content):
+    _bench(tmp_path, monkeypatch, content)
+    k = _kpis()                                    # does not raise
+    for key in ("O2", "D5"):
+        assert kpi.BENCH_MALFORMED in k[key]["value"], (key, k[key])
+        assert k[key]["measurable"] is False
+
+
+def test_unconfigured_names_neither_code(monkeypatch):
+    v = _kpis()["O2"]["value"]
+    assert "LLM_ROUTER_KPI_BENCHMARK_PATH" in v and "CHZ-KPI-BENCH" not in v
+
+
+def test_benchmark_older_than_30_days_is_stale_and_fresh_is_measured(monkeypatch, tmp_path):
+    def stamp(age_days):
+        t = time.time() - age_days * 86400
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+    body = {"o2": {"acceptable_rate": 0.8, "n": 60}, "d5": {"accuracy": 0.7, "n": 60}}
+    _bench(tmp_path, monkeypatch, {**body, "generated_at": stamp(29)})
+    h = kpi.compute_health(kpi.compute_scorecard(days=7))["kpis"]
+    assert h["O2"]["state"] == h["D5"]["state"] == "measured"
+    _bench(tmp_path, monkeypatch, {**body, "generated_at": stamp(31)})
+    h = kpi.compute_health(kpi.compute_scorecard(days=7))["kpis"]
+    assert h["O2"]["state"] == h["D5"]["state"] == "stale"
+
+
+def test_below_min_n_stays_blind_but_shows_the_unscored_rate_with_its_n(monkeypatch, tmp_path):
+    _bench(tmp_path, monkeypatch, {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                   "o2": {"acceptable_rate": 0.5, "n": 23},
+                                   "d5": {"accuracy": 0.25, "under_route_rate": 0.0, "n": 24}})
+    k = _kpis()
+    assert k["O2"]["measurable"] is False and k["O2"]["n"] == 23
+    assert k["O2"]["lines"] == ["unscored, below n=50: 50.0% acceptable (n=23)"]
+    assert k["D5"]["lines"] == ["unscored, below n=50: 25.0% exact-tier accuracy, under-route=0.0% (n=24)"]
+
+
+def test_d5_detail_line_qualifies_a_vacuous_under_route(monkeypatch, tmp_path):
+    base = {"accuracy": 0.2, "under_route_rate": 0.0, "n": 24}
+    never = {**base, "predicted_tier_counts": {"haiku": 0, "sonnet": 21, "opus": 3}}
+    _bench(tmp_path, monkeypatch, {"d5": never})
+    lines = _kpis()["D5"]["lines"]
+    assert any("haiku 0, sonnet 21, opus 3" in ln and "under-route rate is not informative" in ln
+               for ln in lines), lines
+    ok = {**base, "n": 60, "predicted_tier_counts": {"haiku": 5, "sonnet": 40, "opus": 15}}
+    _bench(tmp_path, monkeypatch, {"d5": ok})
+    k = _kpis()["D5"]
+    assert k["measurable"] and k["lines"] == ["classifier predicted: haiku 5, sonnet 40, opus 15"]
+
+
+def test_committed_benchmark_file_is_consistent_and_text_free():
+    path = Path(__file__).resolve().parent.parent / "docs" / "repo_goals" / "kpi_benchmark.json"
+    d = json.loads(path.read_text(encoding="utf-8"))
+    items = d["items"]
+    assert len(items) == d["provenance"]["n_tasks"] == 32           # something was checked
+    o2_pool = [i for i in items if i["pass"]["opus"]]
+    assert d["o2"]["n"] == len(o2_pool)
+    assert d["o2"]["acceptable_rate"] == sum(i["pass"]["haiku"] for i in o2_pool) / len(o2_pool)
+    rank = {"haiku": 0, "sonnet": 1, "opus": 2}
+    graded = [i for i in items if i["cheapest_tier"] in rank]
+    assert d["d5"]["n"] == len(graded) and d["d5"]["n_no_truth"] == len(items) - len(graded)
+    assert d["d5"]["accuracy"] == sum(i["predicted_effective"] == i["cheapest_tier"] for i in graded) / len(graded)
+    assert d["d5"]["under_route_rate"] == sum(rank[i["predicted_effective"]] < rank[i["cheapest_tier"]]
+                                              for i in graded) / len(graded)
+    assert all(set(i) == {"id", "pass", "cheapest_tier", "predicted_raw", "predicted_effective"}
+               for i in items)                                       # ids + labels only
+    counts = {t: sum(i["predicted_effective"] == t for i in graded) for t in rank}
+    assert d["d5"]["predicted_tier_counts"] == counts
+    assert "@" not in path.read_text() and "sk-" not in path.read_text()
+
+
 # ── CLI surface ─────────────────────────────────────────────────────────────
 
 def test_write_weekly_writes_a_dated_markdown_scorecard(tmp_path, capsys):

@@ -64,6 +64,10 @@ SCOPE, stated rather than implied:
   instead (real spend + counterfactual avoided); Claude Code's own
   ``total_cost_usd`` is phantom on a proxied session and is never read.
 * **O2 and D5 need a frozen benchmark.** They do not come from live traffic.
+  ``scripts/build_kpi_benchmark.py`` builds the file from the blind A/B truth
+  (committed copy: ``docs/repo_goals/kpi_benchmark.json``, ids and labels only).
+  A configured path that does not exist reports ``CHZ-KPI-BENCH-MISSING``, one that
+  does not parse ``CHZ-KPI-BENCH-MALFORMED``: both "not measurable", never 0%.
   Configure ``LLM_ROUTER_KPI_BENCHMARK_PATH`` to a JSON file shaped
   ``{"generated_at": "...", "o2": {"acceptable_rate": 0.0-1.0, "n": int},
   "d5": {"accuracy": 0.0-1.0, "under_route_rate": 0.0-1.0, "n": int}}``
@@ -821,14 +825,48 @@ def _benchmark_path() -> Path | None:
     return Path(raw).expanduser() if raw else None
 
 
+#: Reasons printed when the benchmark file is configured but cannot be used. The
+#: code is stable so an operator can grep for it; none of them is ever a 0%.
+BENCH_MISSING = "CHZ-KPI-BENCH-MISSING"
+BENCH_MALFORMED = "CHZ-KPI-BENCH-MALFORMED"
+
+
 def _load_benchmark() -> dict | None:
+    """The parsed benchmark, or None when unconfigured, missing or malformed.
+
+    A problem is never an exception and never a number: ``_bench_problem`` names it
+    (with a stable code) and O2/D5 report "not measurable" with that reason."""
     path = _benchmark_path()
     if path is None:
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    return data if isinstance(data, dict) else None
+
+
+def _bench_problem() -> str | None:
+    """Why a configured benchmark is unusable, with its code; None if fine or unset."""
+    path = _benchmark_path()
+    if path is None:
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return f"{BENCH_MISSING}: {path} does not exist"
+    except OSError as exc:
+        return f"{BENCH_MISSING}: {path} unreadable ({type(exc).__name__})"
+    except ValueError:
+        return f"{BENCH_MALFORMED}: {path} is not valid JSON"
+    if not isinstance(data, dict):
+        return f"{BENCH_MALFORMED}: {path} top level is not a JSON object"
+    return None
+
+
+def _no_bench_reason() -> str:
+    return _bench_problem() or (
+        "no LLM_ROUTER_KPI_BENCHMARK_PATH configured (KPI-SPEC calls this 'not measured')")
 
 
 def _bench_newest(bench: dict) -> float | None:
@@ -837,8 +875,7 @@ def _bench_newest(bench: dict) -> float | None:
 
 def _o2_quality_held(bench: dict | None) -> dict:
     if bench is None:
-        return _not_measurable(
-            "no LLM_ROUTER_KPI_BENCHMARK_PATH configured (KPI-SPEC calls this 'not measured')")
+        return _not_measurable(_no_bench_reason())
     o2 = bench.get("o2") if isinstance(bench, dict) else None
     if not isinstance(o2, dict) or "acceptable_rate" not in o2:
         return _not_measurable("benchmark file has no 'o2' section")
@@ -846,28 +883,47 @@ def _o2_quality_held(bench: dict | None) -> dict:
     if not isinstance(n, int) or n <= 0:
         return _not_measurable("benchmark 'o2.n' missing or zero")
     if n < MIN_N:
-        return _too_few(n, newest_ts=_bench_newest(bench))
+        return _too_few(n, newest_ts=_bench_newest(bench)) | {"lines": [
+            f"unscored, below n={MIN_N}: {_pct(o2['acceptable_rate'])} acceptable (n={n})"]}
     return _measured(f"{_pct(o2['acceptable_rate'])} acceptable vs Claude (n={n}, frozen set)", n,
                       newest_ts=_bench_newest(bench), generated_at=bench.get("generated_at"))
 
 
+def _d5_predicted_line(d5: dict) -> list[str]:
+    """The predicted tier distribution, plus a qualifier when the classifier never
+    predicted the cheapest tier: an under-route rate of 0% is then vacuous."""
+    counts = d5.get("predicted_tier_counts")
+    if not isinstance(counts, dict) or not counts:
+        return []
+    dist = ", ".join(f"{t} {counts[t]}" for t in ("haiku", "sonnet", "opus") if t in counts)
+    line = f"classifier predicted: {dist}"
+    if not counts.get("haiku"):
+        line += " -- never predicted haiku, so the under-route rate is not informative"
+    return [line]
+
+
 def _d5_classifier_accuracy(bench: dict | None) -> dict:
     if bench is None:
-        return _not_measurable("no LLM_ROUTER_KPI_BENCHMARK_PATH configured (KPI-SPEC calls this 'not measured')")
+        return _not_measurable(_no_bench_reason())
     d5 = bench.get("d5") if isinstance(bench, dict) else None
     if not isinstance(d5, dict) or "accuracy" not in d5:
         return _not_measurable("benchmark file has no 'd5' section")
     n = d5.get("n")
     if not isinstance(n, int) or n <= 0:
         return _not_measurable("benchmark 'd5.n' missing or zero")
-    if n < MIN_N:
-        return _too_few(n, newest_ts=_bench_newest(bench))
     under = d5.get("under_route_rate")
+    dist = _d5_predicted_line(d5)
+    if n < MIN_N:
+        under_n = f", under-route={_pct(under)}" if isinstance(under, (int, float)) else ""
+        return _too_few(n, newest_ts=_bench_newest(bench)) | {"lines": [
+            f"unscored, below n={MIN_N}: {_pct(d5['accuracy'])} exact-tier accuracy{under_n} (n={n})",
+            *dist]}
     under_s = f", under-route={_pct(under)}" if isinstance(under, (int, float)) else ""
     gate = "" if not isinstance(under, (int, float)) else (
         " (within <=10% gate)" if under <= 0.10 else " (OVER the <=10% gate)")
     return _measured(f"{_pct(d5['accuracy'])} exact-tier accuracy{under_s}{gate} (n={n})", n,
-                      newest_ts=_bench_newest(bench), generated_at=bench.get("generated_at"))
+                      newest_ts=_bench_newest(bench), generated_at=bench.get("generated_at"),
+                      lines=dist)
 
 
 # ── G2: fail-open events per 100 calls ─────────────────────────────────────────
