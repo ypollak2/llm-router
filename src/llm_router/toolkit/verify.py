@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import shlex
 import subprocess
 import tempfile
@@ -25,6 +26,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from llm_router.toolkit import sandbox
+from llm_router.toolkit.policy import is_control_relpath
 
 _TEST_FILE_PARTS = ("tests", "test")
 
@@ -55,6 +57,7 @@ class Verdict:
     new_failures: list[str] = field(default_factory=list)
     disappeared: list[str] = field(default_factory=list)
     weakened: list[str] = field(default_factory=list)
+    tampered: list[str] = field(default_factory=list)
     tail: str = ""
 
     def as_dict(self) -> dict:
@@ -178,6 +181,55 @@ def weakened_tests(baseline: Path, root: Path, frozen: set[str] | None = None) -
     return out
 
 
+# A .py file that registers pytest hooks/plugins or reaches into pytest's own machinery. Only
+# files the model ADDED or CHANGED are scanned. Deliberately broad: a false positive costs
+# used=False on a rare patch, a false negative is a verifier that can be told to say "passed".
+_HARNESS_RX = re.compile(
+    r"pytest_plugins|pluginmanager|hookwrapper|hookimpl|\bpytest_(?:runtest|collection|pyfunc|configure|"
+    r"sessionfinish|report|terminal|unconfigure|generate_tests|make_)\w*|\bmakereport\b|\b_pytest\b|"
+    r"\bTestReport\b")
+
+
+def _walk_rel(root: Path):
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in ("__pycache__", ".pytest_cache")]
+        for name in filenames:
+            yield os.path.relpath(os.path.join(dirpath, name), root)
+
+
+def _hits(path: Path) -> list[str]:
+    try:
+        return _HARNESS_RX.findall(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return []
+
+
+def harness_tampering(baseline: Path, root: Path) -> list[str]:
+    """Changes (added, modified, deleted) to anything that configures or hooks the test run.
+
+    The stronger of the two options (restore vs flag): restoring the originals would let a
+    run that depends on a model-added conftest silently pass on different code than the
+    model wrote; flagging makes the patch "not used" and a human reads it.
+    """
+    out: list[str] = []
+    base_files, now_files = set(_walk_rel(baseline)), set(_walk_rel(root))
+    for rel in sorted(base_files | now_files):
+        if is_control_relpath(rel):
+            if rel not in now_files:
+                out.append(f"{rel}: test-harness file deleted")
+            elif rel not in base_files:
+                out.append(f"{rel}: test-harness file added")
+            elif (baseline / rel).read_bytes() != (root / rel).read_bytes():
+                out.append(f"{rel}: test-harness file modified")
+        elif rel in now_files and rel.endswith(".py") and (
+                rel not in base_files or (baseline / rel).read_bytes() != (root / rel).read_bytes()):
+            now = _hits(root / rel)
+            was = _hits(baseline / rel) if rel in base_files else []
+            if len(now) > len(was):       # an old, untouched mention is not new tampering
+                out.append(f"{rel}: added or changed code touching pytest's machinery ({now[0]!r})")
+    return out
+
+
 def frozen_paths(command: str, root: Path) -> set[str]:
     """Workspace files/dirs the verify command names (the verifier's own tests)."""
     out: set[str] = set()
@@ -228,6 +280,7 @@ def verify(command: str, workspace: "sandbox.Workspace", *, python_dir: str | No
         v.after_passed = len(after.passed)
     frozen = frozen_paths(command, workspace.root)
     v.weakened = weakened_tests(workspace.baseline, workspace.root, frozen)
+    v.tampered = harness_tampering(workspace.baseline, workspace.root)
     if base.junit and after.junit:
         v.new_failures = sorted(after.failed - base.failed)
         v.disappeared = sorted(base.passed - after.passed - after.failed)
@@ -243,6 +296,8 @@ def verify(command: str, workspace: "sandbox.Workspace", *, python_dir: str | No
         v.reason = f"{len(v.new_failures)} new failing test(s)"
     elif v.disappeared:
         v.reason = f"{len(v.disappeared)} previously passing test(s) no longer run"
+    elif v.tampered:
+        v.reason = "test configuration, conftest or plugin files changed: " + "; ".join(v.tampered[:3])
     elif v.weakened:
         v.reason = "test files deleted or weakened: " + "; ".join(v.weakened[:3])
     elif not patch_nonempty:

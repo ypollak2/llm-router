@@ -61,6 +61,28 @@ def is_secret_relpath(rel: str) -> bool:
     return bool(parts) and any(is_secret_name(p) for p in parts)
 
 
+# ── test-harness control files ───────────────────────────────────────────────
+# Anything pytest (or the interpreter it runs in) loads BEFORE or AROUND a test and that can
+# therefore change what "passed" means: a conftest.py `pytest_runtest_makereport` hookwrapper
+# flips every failure to a pass without touching a test file. The model may not write these
+# (policy) and any change to them forces used=False (verifier), at any depth in the tree.
+CONTROL_FILE_NAMES = frozenset({
+    "conftest.py", "pytest.ini", ".pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml", "setup.py",
+    ".coveragerc", "sitecustomize.py", "usercustomize.py", "entry_points.txt", "pytest_plugins.py",
+})
+CONTROL_SUFFIXES = (".pth", ".egg-link")
+CONTROL_DIR_SUFFIXES = (".dist-info", ".egg-info")      # importlib.metadata finds pytest11 entry points here
+
+
+def is_control_relpath(rel: str) -> bool:
+    parts = Path(rel).parts
+    if not parts:
+        return False
+    name = parts[-1].lower()
+    return (name in CONTROL_FILE_NAMES or name.endswith(CONTROL_SUFFIXES)
+            or any(p.lower().endswith(CONTROL_DIR_SUFFIXES) for p in parts))
+
+
 # ── bash allowlist ───────────────────────────────────────────────────────────
 
 ALLOWED_PROGRAMS = frozenset({
@@ -185,6 +207,8 @@ class Policy:
             return _deny("secret", "that path is not available")
         if real in self.protected or any(p in real.parents for p in self.protected):
             return _deny("protected", f"{rel} is frozen: the verifier runs it")
+        if is_control_relpath(rel):
+            return _deny("protected", f"{rel} configures the test harness and is not editable")
         size = 0
         if tool == "write":
             content = args.get("content")

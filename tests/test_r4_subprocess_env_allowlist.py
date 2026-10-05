@@ -94,6 +94,29 @@ def test_the_agent_loop_does_not_inherit_the_environment():
         )
 
 
+def test_the_hook_command_path_hands_the_executor_the_allowlisted_env(monkeypatch, tmp_path):
+    """Behavioural, through hooks/agent_loop._run_command_line (the code path the hook executes):
+    the Popen that the toolkit executor makes gets the allowlisted env, never the parent's."""
+    import subprocess
+
+    from llm_router.hooks import agent_loop
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-HOOKcanary")
+    monkeypatch.setenv("TOTALLY_UNKNOWN_SECRET", "HOOKcanary")
+    seen: list[dict] = []
+    real = subprocess.Popen
+
+    def spy(*a, **kw):
+        seen.append(kw.get("env"))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(subprocess, "Popen", spy)
+    out = agent_loop._run_command_line("echo ok", tmp_path)
+    assert "ok" in out and seen, "the hook path started no subprocess (vacuous)"
+    for env in seen:
+        assert isinstance(env, dict) and "ANTHROPIC_API_KEY" not in env and "TOTALLY_UNKNOWN_SECRET" not in env
+
+
 def test_the_delegated_env_carries_no_provider_keys(monkeypatch):
     """The allowlist's defining property, including for an unknown name."""
     from llm_router.safe_subprocess import get_delegated_env

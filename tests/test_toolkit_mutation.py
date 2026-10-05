@@ -25,6 +25,8 @@ pytestmark = pytest.mark.timeout(240)
 SB = sandbox.prove_sandbox().proven
 SAFETY = "tests/test_toolkit_safety.py"
 LOOP = "tests/test_toolkit_loop.py"
+INTEG = "tests/test_toolkit_verifier_integrity.py"
+PARITY = "tests/test_agent_loop_hook_parity.py"
 
 P, S, T, V, L = ("toolkit/policy.py", "toolkit/sandbox.py", "toolkit/tools.py", "toolkit/verify.py",
                  "toolkit/loop.py")
@@ -82,6 +84,20 @@ MUTATIONS = [
      "apply_edits_exact_once", False),
     ("weakened-tests", V, "    v.weakened = weakened_tests(workspace.baseline, workspace.root, frozen)",
      "    v.weakened = []", SAFETY, "deleting or weakening or skipping or rewrites", True),
+    ("harness-tamper-flag", V, "    v.tampered = harness_tampering(workspace.baseline, workspace.root)", "    v.tampered = []",
+     INTEG, "every_harness_tamper or really_works", True),
+    ("harness-tamper-scans-config", V, "        if is_control_relpath(rel):\n            if rel not in now_files:",
+     "        if False:\n            if rel not in now_files:", INTEG, "every_harness_tamper", True),
+    ("harness-tamper-scans-hooks", V, "            if len(now) > len(was):", "            if False:", INTEG,
+     "every_harness_tamper", True),
+    ("control-file-policy", P, '        if is_control_relpath(rel):\n            return _deny("protected"',
+     '        if False:\n            return _deny("protected"', INTEG, "told_up_front", True),
+    ("hook-secret-deny", "hooks/agent_loop.py", "    if rel != \".\" and is_secret_relpath(rel):\n        raise PermissionError",
+     "    if False:\n        raise PermissionError", PARITY, "secret", False),
+    ("hook-command-guard", "hooks/agent_loop.py", "            allowed, refusal = _writes.guard_command(seg[\"argv\"])\n            if not allowed:",
+     "            allowed, refusal = True, ''\n            if not allowed:", PARITY, "decisions_match", False),
+    ("hook-blocklist", "hooks/agent_loop.py", "    if _BLOCKED_COMMANDS.search(cmd):\n        return f\"Error: Command blocked", 
+     "    if False:\n        return f\"Error: Command blocked", PARITY, "decisions_match", False),
     ("verifier-runs-after", V, "    elif after.rc != 0:", "    elif False:", LOOP, "does_not_fix", True),
     ("safety-flag-blocks-used", L, "if verdict.ok and res.safety_flags:", "if False:", LOOP, "frozen_test", True),
     ("used-needs-verifier", L, "res.used = True if verdict.ok else (False if verdict.ran else None)",
