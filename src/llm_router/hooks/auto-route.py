@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 39
+# llm_router-hook-version: 40
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -196,7 +196,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 39"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 40"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -708,8 +708,14 @@ def _spawn_background_usage_refresh() -> None:
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-    except Exception:
-        pass
+    except Exception as _spawn_exc:  # noqa: BLE001 — never break a turn
+        # Fail-open, NOT silent (failopen ratchet): a refresh that cannot be
+        # started means pressure keeps serving a stale number.
+        try:
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-USAGE-REFRESH-SPAWN", _spawn_exc)
+        except Exception:  # noqa: BLE001
+            _debug_log("usage refresh spawn failed")
 
 
 def _fetch_usage_inline() -> dict | None:
