@@ -10,6 +10,12 @@
     "under_route_rate": 0.0,
     "n": 24,
     "n_no_truth": 8,
+    "predicted_tier_counts": {
+      "haiku": 0,
+      "sonnet": 21,
+      "opus": 3
+    },
+    "note": "under-route is not informative when the classifier never predicts the cheapest tier (haiku): see predicted_tier_counts",
     "definition": "production proxy classifier, effective tier, vs cheapest tier that passed hidden tests; no-pass tasks excluded"
   },
   "provenance": {

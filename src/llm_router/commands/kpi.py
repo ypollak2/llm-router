@@ -857,6 +857,19 @@ def _o2_quality_held(bench: dict | None) -> dict:
                       newest_ts=_bench_newest(bench), generated_at=bench.get("generated_at"))
 
 
+def _d5_predicted_line(d5: dict) -> list[str]:
+    """The predicted tier distribution, plus a qualifier when the classifier never
+    predicted the cheapest tier: an under-route rate of 0% is then vacuous."""
+    counts = d5.get("predicted_tier_counts")
+    if not isinstance(counts, dict) or not counts:
+        return []
+    dist = ", ".join(f"{t} {counts[t]}" for t in ("haiku", "sonnet", "opus") if t in counts)
+    line = f"classifier predicted: {dist}"
+    if counts.get("haiku", 0) == 0:
+        line += " -- never predicted haiku, so the under-route rate is not informative"
+    return [line]
+
+
 def _d5_classifier_accuracy(bench: dict | None) -> dict:
     if bench is None:
         return _not_measurable(_no_bench_reason())
@@ -867,15 +880,18 @@ def _d5_classifier_accuracy(bench: dict | None) -> dict:
     if not isinstance(n, int) or n <= 0:
         return _not_measurable("benchmark 'd5.n' missing or zero")
     under = d5.get("under_route_rate")
+    dist = _d5_predicted_line(d5)
     if n < MIN_N:
         under_n = f", under-route={_pct(under)}" if isinstance(under, (int, float)) else ""
         return _too_few(n, newest_ts=_bench_newest(bench)) | {"lines": [
-            f"unscored, below n={MIN_N}: {_pct(d5['accuracy'])} exact-tier accuracy{under_n} (n={n})"]}
+            f"unscored, below n={MIN_N}: {_pct(d5['accuracy'])} exact-tier accuracy{under_n} (n={n})",
+            *dist]}
     under_s = f", under-route={_pct(under)}" if isinstance(under, (int, float)) else ""
     gate = "" if not isinstance(under, (int, float)) else (
         " (within <=10% gate)" if under <= 0.10 else " (OVER the <=10% gate)")
     return _measured(f"{_pct(d5['accuracy'])} exact-tier accuracy{under_s}{gate} (n={n})", n,
-                      newest_ts=_bench_newest(bench), generated_at=bench.get("generated_at"))
+                      newest_ts=_bench_newest(bench), generated_at=bench.get("generated_at"),
+                      lines=dist)
 
 
 # ── G2: fail-open events per 100 calls ─────────────────────────────────────────

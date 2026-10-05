@@ -401,6 +401,19 @@ def test_below_min_n_stays_blind_but_shows_the_unscored_rate_with_its_n(monkeypa
     assert k["D5"]["lines"] == ["unscored, below n=50: 25.0% exact-tier accuracy, under-route=0.0% (n=24)"]
 
 
+def test_d5_detail_line_qualifies_a_vacuous_under_route(monkeypatch, tmp_path):
+    base = {"accuracy": 0.2, "under_route_rate": 0.0, "n": 24}
+    never = {**base, "predicted_tier_counts": {"haiku": 0, "sonnet": 21, "opus": 3}}
+    _bench(tmp_path, monkeypatch, {"d5": never})
+    lines = _kpis()["D5"]["lines"]
+    assert any("haiku 0, sonnet 21, opus 3" in ln and "under-route rate is not informative" in ln
+               for ln in lines), lines
+    ok = {**base, "n": 60, "predicted_tier_counts": {"haiku": 5, "sonnet": 40, "opus": 15}}
+    _bench(tmp_path, monkeypatch, {"d5": ok})
+    k = _kpis()["D5"]
+    assert k["measurable"] and k["lines"] == ["classifier predicted: haiku 5, sonnet 40, opus 15"]
+
+
 def test_committed_benchmark_file_is_consistent_and_text_free():
     path = Path(__file__).resolve().parent.parent / "docs" / "repo_goals" / "kpi_benchmark.json"
     d = json.loads(path.read_text(encoding="utf-8"))
@@ -417,6 +430,8 @@ def test_committed_benchmark_file_is_consistent_and_text_free():
                                               for i in graded) / len(graded)
     assert all(set(i) == {"id", "pass", "cheapest_tier", "predicted_raw", "predicted_effective"}
                for i in items)                                       # ids + labels only
+    counts = {t: sum(i["predicted_effective"] == t for i in graded) for t in rank}
+    assert d["d5"]["predicted_tier_counts"] == counts
     assert "@" not in path.read_text() and "sk-" not in path.read_text()
 
 

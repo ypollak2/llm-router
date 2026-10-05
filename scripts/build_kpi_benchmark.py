@@ -58,31 +58,47 @@ def predict(text: str) -> tuple[str, str]:
     return raw, ("sonnet" if raw == "haiku" else raw)
 
 
-def build(truth_path: Path, repo: str) -> dict:
-    rows = [json.loads(line) for line in truth_path.read_text().splitlines() if line.strip()]
-    items, o2_hit, o2_n, d5_ok, d5_under, d5_n = [], 0, 0, 0, 0, 0
-    for r in rows:
-        raw, eff = predict(task_prompt(repo, r["commit_sha"]))
-        truth = r["cheapest_tier"]
-        items.append({"id": r["commit_sha"][:10], "pass": r["pass"], "cheapest_tier": truth,
-                      "predicted_raw": raw, "predicted_effective": eff})
-        if r["pass"]["opus"]:
+def aggregate(items: list[dict]) -> tuple[dict, dict]:
+    """O2 and D5 sections from items (pure: no git, no text)."""
+    o2_hit = o2_n = d5_ok = d5_under = d5_n = 0
+    counts = {t: 0 for t in RANK}
+    for it in items:
+        if it["pass"]["opus"]:
             o2_n += 1
-            o2_hit += bool(r["pass"]["haiku"])
+            o2_hit += bool(it["pass"]["haiku"])
+        truth, eff = it["cheapest_tier"], it["predicted_effective"]
         if truth in RANK:
             d5_n += 1
+            counts[eff] += 1
             d5_ok += eff == truth
             d5_under += RANK[eff] < RANK[truth]
+    o2 = {"acceptable_rate": o2_hit / o2_n if o2_n else 0.0, "n": o2_n,
+          "definition": "tasks Opus passed (hidden tests) that Haiku also passed"}
+    d5 = {"accuracy": d5_ok / d5_n if d5_n else 0.0,
+          "under_route_rate": d5_under / d5_n if d5_n else 0.0, "n": d5_n,
+          "n_no_truth": len(items) - d5_n,
+          "predicted_tier_counts": counts,
+          "note": ("under-route is not informative when the classifier never predicts "
+                   "the cheapest tier (haiku): see predicted_tier_counts"),
+          "definition": "production proxy classifier, effective tier, vs cheapest "
+                        "tier that passed hidden tests; no-pass tasks excluded"}
+    return o2, d5
+
+
+def build(truth_path: Path, repo: str) -> dict:
+    rows = [json.loads(line) for line in truth_path.read_text().splitlines() if line.strip()]
+    items = []
+    for r in rows:
+        raw, eff = predict(task_prompt(repo, r["commit_sha"]))
+        items.append({"id": r["commit_sha"][:10], "pass": r["pass"],
+                      "cheapest_tier": r["cheapest_tier"],
+                      "predicted_raw": raw, "predicted_effective": eff})
+    o2, d5 = aggregate(items)
     mtime = datetime.fromtimestamp(truth_path.stat().st_mtime, tz=timezone.utc)
     return {
         "generated_at": mtime.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "o2": {"acceptable_rate": o2_hit / o2_n if o2_n else 0.0, "n": o2_n,
-               "definition": "tasks Opus passed (hidden tests) that Haiku also passed"},
-        "d5": {"accuracy": d5_ok / d5_n if d5_n else 0.0,
-               "under_route_rate": d5_under / d5_n if d5_n else 0.0, "n": d5_n,
-               "n_no_truth": len(rows) - d5_n,
-               "definition": "production proxy classifier, effective tier, vs cheapest "
-                             "tier that passed hidden tests; no-pass tasks excluded"},
+        "o2": o2,
+        "d5": d5,
         "provenance": {
             "source": "classifier-v2-release/ab/work/agentic/truth.jsonl (blind A/B, "
                       "hidden unit tests, majority of junit grades)",
