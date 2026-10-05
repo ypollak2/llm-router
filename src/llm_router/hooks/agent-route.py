@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 10
+# llm_router-hook-version: 12
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -45,6 +45,27 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+# -- KPI G1: record how long this invocation ran (llm_router.hook_latency) -----
+# The clock starts BEFORE the first llm_router import, so the package import is
+# inside the measurement. Armed only when run as a script: a test that imports
+# this file must not register an exit-time write. Fail-open: no llm_router on
+# the path means no row for this run; any other error is reported on stderr
+# (never stdout, which the host parses) and the hook carries on.
+import time as _hl_time
+
+_HOOK_T0 = _hl_time.monotonic()
+if __name__ == "__main__":
+    try:
+        from llm_router import hook_latency as _hook_latency
+
+        _hook_latency.begin("agent-route", "PreToolUse", _HOOK_T0)
+    except ImportError:
+        pass  # llm_router is not importable on this host: no recorder, no row
+    except Exception as _hl_exc:  # noqa: BLE001 -- timing must never break the hook
+        import sys as _hl_sys
+
+        print(f"llm-router: hook latency not recorded ({type(_hl_exc).__name__})", file=_hl_sys.stderr)
 
 
 # ── Registered-tool surface (CHZ-SURF-01) ────────────────────────────────────
@@ -1170,7 +1191,7 @@ _MODEL_UNAVAILABLE_RE = re.compile(
 #: Set on first delegation in this hook process; later attempts get only what is
 #: left of it, so NS3 timing out and the Phase-2 path retrying cannot stack two
 #: full timeouts past the hook's own kill time.
-_delegation_deadline: float | None = None
+_delegation_started: float | None = None
 
 
 def _codex_agent_model() -> str:
@@ -1205,12 +1226,33 @@ def _delegation_timeout() -> int:
 
 
 def _delegation_time_left(configured: int) -> int:
-    """Seconds this hook process may still spend on external CLI delegation."""
-    global _delegation_deadline
+    """Seconds this hook process may still spend on external CLI delegation.
+
+    Computed as ``configured - elapsed`` from a stored START instant, not as
+    ``(start + configured) - now``: the latter rounds ``start + configured``
+    to the nearest representable float BEFORE subtracting ``now``, and on the
+    first call (where ``now == start``, same float, zero real elapsed time)
+    that rounding can land a hair below the true sum -- e.g. 299.99999999997
+    instead of exactly 300.0 -- which ``int()`` then truncates to 299. Sampled
+    first-call failure rates at realistic `time.monotonic()` magnitudes (see
+    PR description): up to ~1.9% in the worst binade, ~0.0002% at a typical
+    multi-day uptime. Subtracting the two monotonic readings directly avoids
+    forming that intermediate sum, so elapsed is exactly 0.0 on the first call
+    (``now - now`` is always exact in IEEE 754) and `configured - elapsed`
+    floors the same way the old (bug-free) arithmetic did for every later,
+    genuinely-fractional call.
+    """
+    global _delegation_started
     now = time.monotonic()
-    if _delegation_deadline is None:
-        _delegation_deadline = now + configured
-    return int(_delegation_deadline - now)
+    if _delegation_started is None:
+        _delegation_started = now
+    elapsed = now - _delegation_started
+    # `time.monotonic()` is documented never to go backward, so `elapsed` is
+    # never negative in practice and this upper clamp is not expected to ever
+    # bind -- it is here because the budget handed to Codex must STRUCTURALLY
+    # never exceed `configured`, not just as a consequence of relying on that
+    # clock guarantee holding on every platform.
+    return min(configured, max(0, int(configured - elapsed)))
 
 
 def _codex_bench_until() -> float | None:
@@ -1238,7 +1280,8 @@ def _bench_after_quota_failure(provider_key: str, text: str) -> float | None:
                 provider_key, RuntimeError(text), text=text)
         if _QUOTA_RE.search(text):
             until = time.time() + _UNPARSEABLE_QUOTA_BENCH_SEC
-            if provider_reset.record_provider_reset(provider_key, until, reason=text):
+            # source="cli": the text is a Codex CLI run's output (KPI G4 bench log).
+            if provider_reset.record_provider_reset(provider_key, until, reason=text, source="cli"):
                 return until
     except Exception as exc:
         try:
@@ -1247,6 +1290,22 @@ def _bench_after_quota_failure(provider_key: str, text: str) -> float | None:
         except Exception:
             pass
     return None
+
+
+def _note_codex_success(model: str) -> None:
+    """KPI G4: a Codex call succeeded. If that model's bench (or the whole
+    account's) was in force, the bench was wrong -- the model is logged. Never
+    raises; a failure is counted, not swallowed."""
+    try:
+        from llm_router import provider_reset
+        provider_reset.note_provider_success(f"codex:{model}")
+        provider_reset.note_provider_success("codex")
+    except Exception as exc:
+        try:
+            from llm_router import failopen
+            failopen.record("CHZ-FO-AGENT-ROUTE-CODEX-SUCCESS-NOTE", exc)
+        except Exception:
+            pass
 
 
 def _run_codex_agent(prompt: str, timeout: int, context_root: str | None):
@@ -1298,6 +1357,7 @@ def _run_codex_agent_inner(prompt: str, timeout: int, context_root: str | None):
         res = asyncio.run(run_codex(prompt, model=model, timeout=left, context_root=context_root))
         last = res
         if res and getattr(res, "success", False) and (res.content or "").strip():
+            _note_codex_success(model)
             return res, "ok"
         text = str(getattr(res, "content", "") or "")
         if _QUOTA_RE.search(text):
@@ -1325,7 +1385,7 @@ def _is_deep_reasoning(prompt: str) -> bool:
 #: The window slot reserved by ``_codex_window_declines`` and not yet spent on a
 #: Codex call: ``True`` when a slot is held, with its token in ``_held_token``.
 #: The hook is a one-shot process, so a module global is the right scope (same
-#: as ``_delegation_deadline``).
+#: as ``_delegation_started``).
 _held_reservation = False
 _held_token = None
 

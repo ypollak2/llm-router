@@ -323,6 +323,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_SESSION_ID": ("llm_router", "hooks/auto-route.py", 2),
     "LLM_ROUTER_SESSION_KIND": ("llm_router", "session_kind.py", 1),
     "LLM_ROUTER_KPI_BENCHMARK_PATH": ("llm_router", "commands/kpi.py", 1),
+    "LLM_ROUTER_HOOK_LATENCY": ("llm_router", "hook_latency.py", 1),
+    "LLM_ROUTER_HOOK_LATENCY_MAX_BYTES": ("llm_router", "hook_latency.py", 1),
     "LLM_ROUTER_PI_BIN": ("llm_router", "commands/pi.py", 1),
     "LLM_ROUTER_PI_CONTEXT": ("llm_router", "commands/pi.py", 1),
     "LLM_ROUTER_PI_MODEL": ("llm_router", "commands/pi.py", 1),

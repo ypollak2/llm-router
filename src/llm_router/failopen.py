@@ -36,11 +36,15 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from dataclasses import dataclass, field
 
 from llm_router.paths import state_path
 
-__all__ = ["record", "snapshot", "FailOpenCounts", "store_path", "clear", "reset_cache"]
+__all__ = [
+    "record", "snapshot", "windowed", "FailOpenCounts", "FailOpenWindow",
+    "store_path", "clear", "reset_cache",
+]
 
 _STORE_FILENAME = "fail_open.jsonl"
 
@@ -49,6 +53,10 @@ _STORE_FILENAME = "fail_open.jsonl"
 _MAX_EVENTS = 20_000
 
 _cached: FailOpenCounts | None = None
+
+#: Indirection so a test drives a fake clock without patching the global ``time``
+#: module, which pytest, xdist and the logger all share.
+_now = time.time
 
 #: T-07 (audit 2026-09-22). Fail-opens whose OWN store write failed.
 #:
@@ -137,6 +145,31 @@ class FailOpenCounts:
         return lines
 
 
+@dataclass(frozen=True)
+class FailOpenWindow:
+    """Fail-open events inside a time window (KPI G2).
+
+    Only rows that carry a ``ts`` can be placed in a window. Rows written before
+    per-event timestamps existed cannot, and are counted separately in
+    ``untimestamped`` rather than dropped (they are still part of the all-time
+    total) or guessed into a window.
+    """
+
+    #: Timestamped events with ``since <= ts <= until``, by site code.
+    by_code: dict[str, int] = field(default_factory=dict)
+    #: Rows with no usable ``ts``: real events whose time is unknown.
+    untimestamped: int = 0
+    #: The earliest ``ts`` of ANY timestamped row in the store, in or out of the
+    #: window. ``None`` when no row has one -- i.e. timestamps have never been
+    #: written on this machine, which a rate must not read as "no failures".
+    first_ts: float | None = None
+    readable: bool = True
+
+    @property
+    def in_window(self) -> int:
+        return sum(self.by_code.values())
+
+
 def store_path():
     """Path to the fail-open counter store, inside LLM_ROUTER_HOME when isolated."""
     return state_path(_STORE_FILENAME)
@@ -166,7 +199,10 @@ def record(code: str, exc: BaseException | None = None, *, detail: str = "") -> 
     """
     global _cached
     try:
-        payload = {"c": code}
+        # KPI G2: every event carries the wall-clock second it happened, so a
+        # rate can be taken over a window. Rows written before this field existed
+        # have none and stay in the all-time count only (see `windowed`).
+        payload = {"c": code, "ts": round(_now(), 3)}
         if exc is not None:
             payload["e"] = type(exc).__name__
         if detail:
@@ -289,3 +325,53 @@ def snapshot() -> FailOpenCounts:
         return _cached
     _cached = FailOpenCounts(by_code=by_code, unpersisted_by_code=unpersisted)
     return _cached
+
+
+def windowed(since: float | None = None, until: float | None = None) -> FailOpenWindow:
+    """Events inside ``[since, until]`` from the store. Never raises.
+
+    Reads the same tail of the file as :func:`snapshot` (the last ``_MAX_EVENTS``
+    lines), uncached: a window depends on its bounds, and the caller is a report,
+    not a hot path.
+    """
+    path = store_path()
+    if not path.exists():
+        return FailOpenWindow()
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            lines = fh.readlines()[-_MAX_EVENTS:]
+    except Exception:  # noqa: BLE001
+        return FailOpenWindow(readable=False)
+
+    by_code: dict[str, int] = {}
+    untimestamped = 0
+    first_ts: float | None = None
+    valid = malformed = 0
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+            code = str(row.get("c", ""))
+        except Exception:  # noqa: BLE001
+            malformed += 1
+            continue
+        if not code:
+            malformed += 1
+            continue
+        valid += 1
+        ts = row.get("ts")
+        # bool is an int subclass: `"ts": true` is not a timestamp.
+        if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+            untimestamped += 1
+            continue
+        if first_ts is None or ts < first_ts:
+            first_ts = float(ts)
+        if (since is not None and ts < since) or (until is not None and ts > until):
+            continue
+        by_code[code] = by_code.get(code, 0) + 1
+
+    if malformed and not valid:
+        return FailOpenWindow(readable=False)
+    return FailOpenWindow(by_code=by_code, untimestamped=untimestamped, first_ts=first_ts)

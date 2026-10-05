@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 37
+# llm_router-hook-version: 38
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -28,6 +28,27 @@ import tempfile
 import time
 import urllib.request
 from pathlib import Path
+
+# -- KPI G1: record how long this invocation ran (llm_router.hook_latency) -----
+# The clock starts BEFORE the first llm_router import, so the package import is
+# inside the measurement. Armed only when run as a script: a test that imports
+# this file must not register an exit-time write. Fail-open: no llm_router on
+# the path means no row for this run; any other error is reported on stderr
+# (never stdout, which the host parses) and the hook carries on.
+import time as _hl_time
+
+_HOOK_T0 = _hl_time.monotonic()
+if __name__ == "__main__":
+    try:
+        from llm_router import hook_latency as _hook_latency
+
+        _hook_latency.begin("auto-route", "UserPromptSubmit", _HOOK_T0)
+    except ImportError:
+        pass  # llm_router is not importable on this host: no recorder, no row
+    except Exception as _hl_exc:  # noqa: BLE001 -- timing must never break the hook
+        import sys as _hl_sys
+
+        print(f"llm-router: hook latency not recorded ({type(_hl_exc).__name__})", file=_hl_sys.stderr)
 
 # ── v6.0 Visibility: HUD integration ─────────────────────────────────────────
 try:
@@ -175,7 +196,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 37"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 38"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"

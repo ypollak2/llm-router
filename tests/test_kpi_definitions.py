@@ -703,7 +703,8 @@ def test_health_names_measured_blind_and_stale_with_one_reason_and_the_n(monkeyp
     assert (g3["state"], g3["n"]) == ("measured", 80) and "newest data point 1.0h old" in g3["reason"]
     assert d4["state"] == "measured"
     assert ns_["state"] == "blind" and ns_["reason"] == "no unit in window" and ns_["n"] == 0
-    assert h["kpis"]["G1_hook"]["state"] == "blind" and "not instrumented" in h["kpis"]["G1_hook"]["reason"]
+    assert h["kpis"]["G1_hook"]["state"] == "blind"                         # no hook row was written here
+    assert "no hook invocation recorded in window" in h["kpis"]["G1_hook"]["reason"]
     assert h["kpis"]["O2"]["state"] == "blind"
     assert h["counts"]["measured"] + h["counts"]["blind"] + h["counts"]["stale"] == len(kpi._ORDER)
 
@@ -917,14 +918,34 @@ def test_health_n_for_too_few_is_the_n_behind_the_number(monkeypatch):
     assert h["state"] == "blind" and h["n"] == 23 and "n=23" in h["reason"]
 
 
-def test_snapshot_and_all_time_kpis_say_what_their_measured_means(monkeypatch):
+def test_g1_hook_g2_and_g4_are_judged_from_their_own_logs(monkeypatch):
+    """G2 was an all-time count and G4 a snapshot of this moment, so --health had to say
+    "cannot go stale" / "not a rate" for them; G1's hook half was "not instrumented". All
+    three now read their own timestamped log, so health judges them like any other KPI:
+    by the newest data point behind the number, and blind below 50."""
     from llm_router import failopen
+    from llm_router import hook_latency as hl
+    from llm_router import provider_bench_log as bl
 
+    monkeypatch.setattr(failopen, "_now", lambda: NOW - 3600)
     failopen.record("CHZ-FO-TEST", RuntimeError("x"))
     failopen.reset_cache()
-    h = kpi.compute_health(kpi.compute_scorecard(days=7))["kpis"]      # real clock: both are "now"
-    assert h["G4"]["state"] == "measured" and "cannot go stale" in h["G4"]["reason"]
-    assert h["G2"]["state"] == "measured" and "an all-time count, not a rate" in h["G2"]["reason"]
+    for i in range(60):
+        hl.record("enforce-route", "PreToolUse", 10.0, now=NOW - 3600 - i)      # newest 1h old
+    for i in range(3):
+        bl.log_bench(f"p{i}", "cli", NOW + 3600, NOW - 3600)
+    h = _health()["kpis"]
+    assert (h["G1_hook"]["state"], h["G1_hook"]["n"]) == ("measured", 60)
+    assert "newest data point 1.0h old" in h["G1_hook"]["reason"]
+    assert (h["G2"]["state"], h["G2"]["n"]) == ("measured", 60)               # 60 hook calls, no proxy rows
+    assert "newest data point 1.0h old" in h["G2"]["reason"]
+    # 3 benches is below 50: blind, with the n behind it; the rare-event note is only for measured ones.
+    assert (h["G4"]["state"], h["G4"]["n"]) == ("blind", 3)
+    assert h["G4"]["reason"] == f"too few to tell: n=3, need {kpi.MIN_N}"
+
+    h = kpi.compute_health(kpi.compute_scorecard(days=30, now=NOW + 5 * DAY), now=NOW + 5 * DAY)["kpis"]
+    assert h["G1_hook"]["state"] == "stale" and h["G2"]["state"] == "stale"   # the feed stopped 5 days ago
+    assert h["G1_hook"]["reason"] == "newest data point is 5.0d old, over the 2.0d limit"
 
 
 def test_malformed_ledger_rows_do_not_crash_the_scorecard():

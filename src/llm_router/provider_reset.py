@@ -43,6 +43,11 @@ provider left in a chain is never benched beyond the 15s cooldown, so a
 misparse cannot become a multi-day outage. ``llm-router provider unban <name>``
 clears a bench by hand.
 
+Every bench, every owner unban and every success of a provider while it is
+benched is also appended to ``provider_bench.jsonl`` (``provider_bench_log``), so
+``llm-router kpi`` can say how many past benches were WRONG (KPI G4), not only
+how many providers are benched right now.
+
 UNVERIFIED ASSUMPTIONS: the exact live Codex usage-limit wording and the
 timezone of a bare clock time ("try again at 6:39 AM") were not capturable from
 the repo or git history. The text patterns are deliberately generic rather than
@@ -63,7 +68,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from llm_router import failopen, paths
+from llm_router import failopen, paths, provider_bench_log
 from llm_router.file_lock import exclusive_lock
 from llm_router.logging import get_logger
 
@@ -362,12 +367,18 @@ def record_provider_reset(
     until_epoch: float,
     reason: str = "",
     now: float | None = None,
+    *,
+    source: str = "",
 ) -> bool:
     """Persist "``provider`` unavailable until ``until_epoch``". Never raises.
 
     Returns True when the record was written. Resets nearer than
     ``MIN_PERSIST_SECONDS`` are not persisted (the in-process cooldown covers
     them) and return False without it being a failure.
+
+    ``source`` is where the reset time came from -- ``header``, ``cli`` or
+    ``text`` -- and is only recorded in the bench log (KPI G4); it does not
+    change what is persisted or enforced.
     """
     now = time.time() if now is None else now
     until_epoch = min(until_epoch, now + MAX_SKIP_SECONDS)
@@ -392,6 +403,7 @@ def record_provider_reset(
     except Exception as exc:  # noqa: BLE001 -- must never break routing
         failopen.record("CHZ-FO-PROVIDER-RESET-WRITE", exc, detail=provider)
         return False
+    provider_bench_log.log_bench(provider, source, until_epoch, now)
     log.warning(
         "provider_unavailable_until",
         provider=provider,
@@ -428,10 +440,12 @@ def is_provider_reset_blocked(provider: str, now: float | None = None) -> bool:
     return get_provider_reset_until(provider, now) is not None
 
 
-def clear_provider_reset(provider: str | None = None) -> list[str]:
+def clear_provider_reset(provider: str | None = None, now: float | None = None) -> list[str]:
     """Manually lift a bench: one provider, or every provider when ``None``.
 
     Returns the names that were cleared. Never raises (fails open to ``[]``).
+    Each cleared bench is logged as an owner unban (KPI G4); ``now`` is the time
+    that is logged.
     """
     try:
         path = _state_file()
@@ -445,16 +459,41 @@ def clear_provider_reset(provider: str | None = None) -> list[str]:
             names = [str(n) for n in providers] if provider is None else (
                 [provider] if provider in providers else []
             )
+            held = {n: providers.get(n) for n in names}
             for n in names:
                 providers.pop(n, None)
             if names:
                 tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
                 tmp.write_text(json.dumps({"providers": providers}), encoding="utf-8")
                 tmp.replace(path)
+        # KPI G4: the owner overrode these benches. `until` is what each entry
+        # held, so a bench that had already lapsed is not judged wrong.
+        for n in names:
+            entry = held.get(n)
+            provider_bench_log.log_unban(
+                n, entry.get("until") if isinstance(entry, dict) else None, now
+            )
         return names
     except Exception as exc:  # noqa: BLE001 -- must never break the caller
         failopen.record("CHZ-FO-PROVIDER-RESET-WRITE", exc, detail=provider or "*")
         return []
+
+
+def note_provider_success(provider: str, now: float | None = None) -> None:
+    """A call to ``provider`` just succeeded. Never raises.
+
+    If the provider is benched at this moment the bench was wrong by KPI G4's
+    definition (a call succeeded before the reset time), and that is logged.
+    Costs one read of the small reset file, which ``HealthTracker.is_healthy``
+    already does per candidate; nothing is written unless the provider is benched.
+    """
+    try:
+        now = time.time() if now is None else now
+        until = get_provider_reset_until(provider, now)
+        if until is not None:
+            provider_bench_log.log_success(provider, until, now)
+    except Exception as exc:  # noqa: BLE001 -- must never break the call it follows
+        failopen.record("CHZ-FO-PROVIDER-RESET-SUCCESS-NOTE", exc, detail=provider)
 
 
 #: Marks an exception whose reset has already been looked at, so the CLI
@@ -500,7 +539,11 @@ def note_provider_error(
         ):
             return None
         reason = text if text is not None else str(exc)
-        if record_provider_reset(provider, until, reason=reason):
+        # Where the reset time came from, for the bench log (KPI G4): a header,
+        # the full output of a CLI subprocess (callers that hold it pass
+        # ``text=``), or an API error message.
+        trigger = "header" if source == "header" else ("cli" if text is not None else "text")
+        if record_provider_reset(provider, until, reason=reason, source=trigger):
             return until
     except Exception as err:  # noqa: BLE001
         failopen.record("CHZ-FO-PROVIDER-RESET-PARSE", err, detail=provider)

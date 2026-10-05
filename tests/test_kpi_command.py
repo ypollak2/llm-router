@@ -95,12 +95,11 @@ def _first_attempted_kind():
 def test_empty_data_is_not_measurable_never_a_false_zero():
     k = _kpis()
     assert set(k) == set(ALL_KEYS)  # something was checked: all 13 lines exist
-    # G4 is a point-in-time count of benched providers; "0 benched" is an
-    # observation, labelled as such, not an unknown rendered as zero.
-    for key in set(ALL_KEYS) - {"G4"}:
+    for key in ALL_KEYS:
         assert k[key]["value"].startswith("not measurable: "), (key, k[key])
         assert k[key]["measurable"] is False and k[key]["n"] is None, key
-    assert "point-in-time" in k["G4"]["value"]
+    # G4's old point-in-time reading survives as a detail line, not as the value.
+    assert any("point-in-time" in ln for ln in k["G4"]["lines"])
 
 
 def test_empty_rendering_has_no_bare_zero_rates():
@@ -285,15 +284,18 @@ def test_o1_summary_failure_is_not_measurable_and_writes_nothing(monkeypatch, tm
     assert home_files_before == home_files_after
 
 
-def test_g2_reports_all_time_count_and_says_so():
+def test_g2_with_only_untimestamped_events_is_an_all_time_line_not_a_rate():
+    """Rows from before per-event timestamps cannot be placed in a window."""
     from llm_router import failopen
 
-    for _ in range(3):
-        failopen.record("CHZ-FO-TEST", RuntimeError("x"))
+    path = failopen.store_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join('{"c":"CHZ-FO-LEGACY","e":"X"}\n' for _ in range(3)), encoding="utf-8")
     failopen.reset_cache()
     g2 = _kpis()["G2"]
-    assert g2["value"].startswith("3 fail-open event(s) recorded, ALL-TIME")
-    assert g2["by_code"] == {"CHZ-FO-TEST": 3}
+    assert g2["value"].startswith("not measurable: ")
+    assert g2["lines"] == ["all-time: 3 fail-open event(s) recorded, 3 of them from before "
+                           "per-event timestamps (cannot be placed in any window)"]
 
 
 def test_g4_names_a_currently_benched_provider():
@@ -301,8 +303,10 @@ def test_g4_names_a_currently_benched_provider():
 
     assert provider_reset.record_provider_reset("anthropic", time.time() + 3600, "test")
     g4 = _kpis()["G4"]
-    assert g4["benched"] == ["anthropic"]
-    assert g4["value"].startswith("1 provider(s) currently benched: anthropic")
+    assert any(ln.startswith("benched right now: anthropic until ") for ln in g4["lines"]), g4
+    # One bench was recorded and nothing contradicted it: a count, never a rate.
+    assert g4["benches"] == 1 and g4["wrong"] == 0 and g4["active"] == 1
+    assert g4["value"].startswith("too few to tell (n=1 benches); 0 shown wrong so far")
 
 
 # ── O2 / D5 from a configured frozen benchmark ──────────────────────────────
