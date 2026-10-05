@@ -523,11 +523,11 @@ def _g1_hook(days: int, now: float, killed: int | None) -> dict:
                 worst = (p95 / budget, name, round(p95))
         hooks[name] = entry
     if killed is None:
-        lines.append("killed by the host (leaves no row): not countable yet -- no timestamped "
-                     "fail-open event exists to count CHZ-HOOK-KILLED from")
+        lines.append("killed by the host (leaves no row) (auto-route only): not countable yet -- no "
+                     "timestamped fail-open event exists to count CHZ-HOOK-KILLED from")
     else:
         lines.append(f"killed by the host (leaves no row; CHZ-HOOK-KILLED in the fail-open "
-                     f"ledger): {killed} in window")
+                     f"ledger) (auto-route only): {killed} in window")
 
     n_rows = len(rows)
     newest = rows[-1]["ts"]                      # read_rows is oldest first
