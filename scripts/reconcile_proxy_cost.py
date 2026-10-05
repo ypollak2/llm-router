@@ -14,6 +14,9 @@ and applies the two PR 8 checks:
   * FULLY FORWARDED session: ledger cost within ``--tolerance`` (default 3%).
   * FULLY LOCAL session:     ledger Anthropic tokens exactly 0.
 
+Unknown usage is null only on rows written since #261; older rows carry zeros
+for it, so a session spanning that change can look reconciled when it is not.
+
 Mixed sessions are reported, not pass/failed: for them the transcript prices the
 locally served turns at list price (the phantom), so a gap there is expected.
 

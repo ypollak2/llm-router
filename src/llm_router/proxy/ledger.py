@@ -83,7 +83,8 @@ Claude-tier rewrite fields (only when the proxy runs with ``--tiers on`` or
                         ``quota_pressure`` step; the others change nothing
   tier_decision_s       time the decision added
 
-Cost fields, on EVERY row (``proxy.cost_accounting``; null = unknown, never 0):
+Cost fields, on EVERY row (``proxy.cost_accounting``; for rows written since #261,
+null = unknown, never 0; rows written before #261 carry zeros for unknown usage):
   served_by, anthropic_usage, anthropic_cost_usd, counterfactual_cost_usd
                         which side answered, the REAL Anthropic usage (zeros
                         when local), its price, and the step's cost on the
@@ -285,6 +286,13 @@ def _price_tokens(model: str, *, input_tokens: int = 0, output_tokens: int = 0,
             + cache_creation_1h * rate_1h) / 1_000_000
 
 
+def usage_unknown(row: dict) -> bool:
+    """True for a post-#261 row whose ``usage`` is recorded as null (unknown: a 2xx
+    with no usage, or a truncated stream). Rows written before #261, and rows with no
+    ``usage`` key at all, carry zeros or nothing and are NOT unknown by this test."""
+    return "usage" in row and row["usage"] is None
+
+
 def anthropic_cost(row: dict) -> float | None:
     """Estimated USD of the Anthropic side of one row, or None when unpriced.
     Priced at the model the call was actually sent to. A row whose usage is
@@ -349,7 +357,14 @@ def _net_avoided(rows: list[dict]) -> tuple[float, int]:
     steps: a run of N consecutive served steps is priced ONCE, at its first
     priceable step, because it is one point where a real Anthropic call was
     deferred, not N — see the module docstring for why summing every step in
-    the run double/triple-counted the local model's own extra internal turns."""
+    the run double/triple-counted the local model's own extra internal turns.
+
+    Unknown usage (``usage`` recorded as null, see :func:`usage_unknown`) is NOT
+    excluded here, and reads as zero tokens in two places: a ``nxt`` row with
+    unknown usage adds no extra cache-write cost (this keeps the figure an upper
+    bound, never below the truth), and an unknown ``prefix`` row gives a zero
+    prefix context (which prices the counterfactual low). Both are deliberate,
+    labelled approximations of an upper bound, not measurements."""
     total = 0.0
     n = 0
     for run, prefix, nxt in _served_runs(rows):
@@ -432,7 +447,11 @@ def tier_stats(rows: list[dict]) -> dict | None:
     # is re-written, while a prefix another conversation already cached on the
     # target tier (Claude Code's shared system prompt and tools) is only read.
     observed_write = 0.0
+    usage_unknown_n = 0
     for r in switches:
+        if usage_unknown(r):  # unknown, not zero tokens: leave it out and count it
+            usage_unknown_n += 1
+            continue
         u = normalize_usage(r.get("usage"))
         observed_write += _price_tokens(r.get("served_model") or r.get("requested_model") or "",
                                         cache_creation_5m=u["cache_creation_5m"],
@@ -448,6 +467,7 @@ def tier_stats(rows: list[dict]) -> dict | None:
         "switch_rate": round(len(switches) / len(tiered), 4),
         "est_switch_cost_usd": round(sum(switch_cost), 4), "est_switch_cost_n": len(switch_cost),
         "switch_calls_cache_write_usd": round(observed_write, 4),
+        "switch_calls_usage_unknown": usage_unknown_n,
         "est_cost_usd": round(actual, 4),
         "est_counterfactual_requested_usd": round(counterfactual, 4),
         "est_saving_usd": round(counterfactual - actual, 4),
@@ -508,10 +528,14 @@ def stats(rows: list[dict]) -> dict:
                              "cache_creation_5m", "cache_creation_1h")}
     cost = 0.0
     unpriced = 0
+    usage_unknown_n = 0
     for r in to_anthropic:
-        u = normalize_usage(r.get("usage"))
-        for k in tokens:
-            tokens[k] += u[k]
+        if usage_unknown(r):  # unknown, not zero tokens: leave it out and count it
+            usage_unknown_n += 1
+        else:
+            u = normalize_usage(r.get("usage"))
+            for k in tokens:
+                tokens[k] += u[k]
         c = anthropic_cost(r)
         if c is None:
             unpriced += 1
@@ -527,7 +551,8 @@ def stats(rows: list[dict]) -> dict:
     def _cc(rs: list[dict]) -> list[float]:
         return [normalize_usage(r.get("usage"))["cache_creation_input_tokens"] for r in rs]
 
-    cont_fwd = [r for r in to_anthropic if r.get("step_class")]
+    # Known usage only: a null-usage row would enter the medians (and their n) as 0.
+    cont_fwd = [r for r in to_anthropic if r.get("step_class") and not usage_unknown(r)]
     mixed = [r for r in cont_fwd if r.get("mixed_history")]
     clean = [r for r in cont_fwd if not r.get("mixed_history")]
 
@@ -559,6 +584,7 @@ def stats(rows: list[dict]) -> dict:
         },
         "anthropic": {
             "calls": len(to_anthropic), "tokens": tokens,
+            "usage_unknown_calls": usage_unknown_n,
             "est_cost_usd": round(cost, 4), "unpriced_calls": unpriced,
             # UPPER BOUND, not a measured saving; may be negative — see the
             # module docstring ("NET AVOIDED") and paired_realized_saving().
@@ -585,11 +611,12 @@ def format_stats(s: dict) -> str:
         f"latency: served median {lat['served_median_s']}s (n={lat['served_n']}), "
         f"Anthropic median {lat['anthropic_median_s']}s (n={lat['anthropic_n']}), "
         f"added total {lat['added_total_s']}s, thinking retries {lat['thinking_retries']}",
-        f"Anthropic tokens: {an['tokens']}",
+        f"Anthropic tokens: {an['tokens']}  (excludes {an['usage_unknown_calls']} call(s) with "
+        "unknown usage: no usage on a 2xx, or a truncated stream)",
         f"Anthropic est. cost: ${an['est_cost_usd']} over {an['calls']} calls "
         f"({an['unpriced_calls']} unpriced); net avoided (upper bound, not realized): "
         f"${an['net_avoided_usd']} (n={an['net_avoided_n']}, may be negative)",
-        f"cache_creation median: after a served turn {an['cache_creation_median_after_served_turn']} "
+        f"cache_creation median (known-usage rows only): after a served turn {an['cache_creation_median_after_served_turn']} "
         f"(n={an['after_served_n']}) vs clean history {an['cache_creation_median_clean_history']} (n={an['clean_n']})",
     ]
     t = s.get("tiers")
@@ -600,7 +627,8 @@ def format_stats(s: dict) -> str:
             f"(retried unchanged {t['rewrite_retried_unchanged']}, reply model mismatch "
             f"{t['response_model_mismatch']}); switches {t['switches']} (rate {t['switch_rate']}), "
             f"est. switch cache cost ${t['est_switch_cost_usd']} (n={t['est_switch_cost_n']}; "
-            f"cache writes those calls actually paid ${t['switch_calls_cache_write_usd']})",
+            f"cache writes those calls actually paid ${t['switch_calls_cache_write_usd']}, "
+            f"excluding {t['switch_calls_usage_unknown']} switched call(s) with unknown usage)",
             f"  est. Anthropic cost ${t['est_cost_usd']} vs ${t['est_counterfactual_requested_usd']} "
             f"had every call run on its requested model: est. saving ${t['est_saving_usd']} "
             f"(n={t['priced_n']}; an ESTIMATE, the validated number is a paired A/B)",

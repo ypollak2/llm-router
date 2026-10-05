@@ -366,9 +366,9 @@ def test_the_report_window_follows_the_fake_now():
 
 def test_hook_kills_are_reported_beside_the_log_because_they_leave_no_row():
     _rows("enforce-route", 100.0, n=60)
-    assert "killed by the host (leaves no row; CHZ-HOOK-KILLED in the fail-open ledger): 2 in window" \
+    assert "killed by the host (leaves no row; CHZ-HOOK-KILLED in the fail-open ledger) (auto-route only): 2 in window" \
         in _g1(killed=2)["lines"]
-    assert any(ln.startswith("killed by the host (leaves no row): not countable yet")
+    assert any(ln.startswith("killed by the host (leaves no row) (auto-route only): not countable yet")
                for ln in _g1(killed=None)["lines"])
 
 

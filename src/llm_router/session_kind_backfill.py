@@ -47,6 +47,7 @@ CONTRACT (owner-approved, 2026-10-04):
 """
 from __future__ import annotations
 
+import errno
 import glob as _glob
 import json
 import re
@@ -240,6 +241,10 @@ def derive_kind(session_id: str, root: Path | None = None,
     return session_kind.classify_with_basis(cwd=cwd, entrypoint=entrypoint)
 
 
+#: errno values meaning "this location cannot be written", not "someone holds the lock".
+_UNWRITABLE_ERRNOS = frozenset({errno.EACCES, errno.EPERM, errno.EROFS})
+
+
 def _append_rows(path: Path, rows: list[dict[str, Any]]) -> int:
     """Append ``rows`` whose ``session_id`` is not already in the sidecar; returns how
     many were written. Append-only, 0600 (``paths.private_opener``), matching
@@ -258,10 +263,24 @@ def _append_rows(path: Path, rows: list[dict[str, Any]]) -> int:
     A directory this call creates is 0700 (the sidecar names sessions); an existing one
     is left exactly as its owner made it. It is created BEFORE the lock is taken,
     because ``exclusive_lock`` would otherwise create it with the default mode."""
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as exc:
+        raise OSError(exc.errno, f"cannot create {path.parent} ({exc.strerror}); "
+                      "nothing was written") from exc
     lock_path = path.with_name(path.name + ".lock")
     with exclusive_lock(lock_path) as held:
         if not held:
+            # ``exclusive_lock`` reports every failure as "not held". Tell contention
+            # (another run holds it) from a permission / read-only-filesystem error,
+            # which no amount of waiting fixes and would mislead the owner.
+            try:
+                with open(lock_path, "a+"):
+                    pass
+            except OSError as exc:
+                if exc.errno in _UNWRITABLE_ERRNOS or isinstance(exc, PermissionError):
+                    raise OSError(exc.errno, f"cannot write {lock_path} ({exc.strerror}); "
+                                  "nothing was written") from exc
             raise OSError(f"could not lock {lock_path} (is another --backfill-tags running?); "
                           "nothing was written")
         present = set(load_sidecar(path))
