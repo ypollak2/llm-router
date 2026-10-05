@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 
 # Exercises the Q&A routing machinery, which is off by default (LLM_ROUTER_QA_ROUTING).
-pytestmark = pytest.mark.usefixtures("qa_routing_on")
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOK_PATH = ROOT / "src" / "llm_router" / "hooks" / "auto-route.py"
@@ -55,11 +54,14 @@ HOOK_SUBPROCESS_TIMEOUT = _load_auto_route()._hook_budget_s() + 5
 # default), so without an override pytest's own watchdog would cut the test
 # off at 30s before the subprocess timeout we just derived ever gets a
 # chance to matter — silently re-introducing the same flake one layer up.
-# Give these specific tests (the ones that exercise the slow DIRECT-success
-# path via fake_ollama, as opposed to the dead-port tests that fail in
-# milliseconds) the same budget as the subprocess call itself, plus margin
+# Give these tests the same budget as the subprocess call itself, plus margin
 # for interpreter/pytest overhead around it.
 TEST_TIMEOUT = HOOK_SUBPROCESS_TIMEOUT + 15
+
+# Every test here shares _run_zero_claude_hook (subprocess budget HOOK_SUBPROCESS_TIMEOUT), so all of
+# them get the matching pytest-timeout. A per-test marker left three callers on the global 30 s limit,
+# which would hide a slow hook behind an opaque pytest kill (PR #265 review).
+pytestmark = [pytest.mark.usefixtures("qa_routing_on"), pytest.mark.timeout(TEST_TIMEOUT)]
 
 
 class _OllamaHandler(BaseHTTPRequestHandler):
@@ -159,7 +161,6 @@ def _run_zero_claude_hook(
     return json.loads(result.stdout)
 
 
-@pytest.mark.timeout(TEST_TIMEOUT)
 def test_simple_prompt_completes_via_external_direct_execution(
     tmp_path: Path, fake_ollama: tuple[str, list[dict]]
 ) -> None:
@@ -238,7 +239,6 @@ def _replaced_flags(home_dir: Path) -> list[bool]:
     return [ns._invocation_replaced_turn(r["msgs"]) for r in records.values()]
 
 
-@pytest.mark.timeout(TEST_TIMEOUT)
 def test_replaced_turn_is_logged_so_northstar_counts_it_direct(
     tmp_path: Path, fake_ollama: tuple[str, list[dict]]
 ) -> None:
@@ -257,7 +257,6 @@ def test_replaced_turn_is_logged_so_northstar_counts_it_direct(
     assert _replaced_flags(tmp_path) == [True]
 
 
-@pytest.mark.timeout(TEST_TIMEOUT)
 def test_echo_draft_is_not_logged_as_replaced(
     tmp_path: Path, fake_ollama: tuple[str, list[dict]]
 ) -> None:
