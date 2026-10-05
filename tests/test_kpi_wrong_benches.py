@@ -61,6 +61,13 @@ def test_no_events_is_an_empty_judgement_not_a_clean_one():
     assert (j.benches, j.wrong, j.active) == (0, 0, 0)
 
 
+@pytest.mark.parametrize("until", ["soon", None, True, object()])
+def test_log_bench_never_raises_on_a_non_numeric_until_and_writes_no_row(until):
+    bl.log_bench("codex", "cli", until, NOW)          # must not raise
+    assert not bl.store_path().exists() or _rows() == []
+    assert _judge().benches == 0
+
+
 def test_a_bench_nobody_contradicted_and_that_lapsed_is_not_wrong():
     bl.log_bench("codex", "cli", NOW - HOUR, NOW - 3 * HOUR)
     j = _judge()

@@ -93,6 +93,12 @@ def _write(row: dict) -> None:
 
 def log_bench(provider: str, trigger: str, until: float, now: float | None = None) -> None:
     """A provider was benched until ``until``. Never raises."""
+    if not (isinstance(until, (int, float)) and not isinstance(until, bool)):
+        # ``judge`` drops a bench row with a non-numeric ``until`` anyway, so write
+        # nothing; record the miss rather than raising out of the routing path.
+        failopen.record("CHZ-FO-BENCH-LOG-WRITE", TypeError("non-numeric until"),
+                        detail=str(provider)[:40])
+        return
     _write({
         "kind": "bench",
         "provider": provider,
