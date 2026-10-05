@@ -52,8 +52,9 @@ from urllib.parse import urlsplit
 
 from llm_router.local_agent import DEFAULT_MAX_PROMPT_TOKENS, LocalAgentConfig, enabled_from_env
 from llm_router.local_agent import capability as la_capability
+from llm_router.local_agent.compact import session_cwd as la_session_cwd
 from llm_router import failopen
-from llm_router.proxy import ledger, okf_context
+from llm_router.proxy import ledger, local_mode, okf_context
 
 from llm_router.proxy.backend_health import (
     DEFAULT_COOLDOWN_S,
@@ -80,12 +81,13 @@ from llm_router.proxy.loop_guard import (
     LoopGuard,
 )
 from llm_router.proxy.cache_cost import Stickiness, conversation_key
-from llm_router.proxy.steps import STEP_CLASSES, classify_text, prev_tools, session_id_of, step_class
+from llm_router.proxy.steps import STEP_CLASSES, classify_text, is_first_call, prev_tools, session_id_of, step_class
 from llm_router import session_kind
 from llm_router.proxy import cost_accounting
 from llm_router.proxy.tiers import REASON_DECISION_ERROR, REWRITE_HAIKU, ClaudeTierPolicy
 from llm_router.proxy.translate import (
     for_haiku,
+    to_ollama,
     has_served_turn,
     is_thinking_rejection,
     parse_sse_usage,
@@ -153,6 +155,10 @@ class ProxyConfig:
     local_agent: LocalAgentConfig | None = None
     backend_fail_n: int = DEFAULT_FAIL_N
     backend_cooldown_s: float = DEFAULT_COOLDOWN_S
+    # ``--serve``: "off" (default, byte-identical to before) or "local-agent"
+    # (proxy.local_mode). ``kill_switch`` overrides the kill-switch file path.
+    serve: str = local_mode.SERVE_OFF
+    kill_switch: Path | None = None
 
     @classmethod
     def from_env(cls) -> "ProxyConfig":
@@ -175,6 +181,7 @@ class ProxyConfig:
             backend_fail_n=int(os.environ.get("LLM_ROUTER_PROXY_BACKEND_FAIL_N", DEFAULT_FAIL_N)),
             backend_cooldown_s=float(os.environ.get("LLM_ROUTER_PROXY_BACKEND_COOLDOWN_S",
                                                     DEFAULT_COOLDOWN_S)),
+            serve=local_mode.parse_serve_mode(os.environ.get("LLM_ROUTER_PROXY_LOCAL_AGENT_MODE", "off")),
         )
 
 
@@ -230,10 +237,11 @@ def _error_json(message: str) -> bytes:
     return json.dumps({"type": "error", "error": {"type": "api_error", "message": message}}).encode()
 
 
-def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clock=None):
+def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clock=None, breaker_fn=None):
     """The Starlette app. ``client`` (an ``httpx.AsyncClient``),
-    ``backend_factory(model) -> Backend`` and the backend-health breaker's
-    ``health_clock`` are injectable for tests."""
+    ``backend_factory(model) -> Backend``, the backend-health breaker's
+    ``health_clock`` and the quality breaker (``breaker_fn``, local-agent mode)
+    are injectable for tests."""
     import httpx
     from starlette.applications import Starlette
     from starlette.requests import Request
@@ -251,6 +259,16 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     tier_policy = (ClaudeTierPolicy.load(cfg.tier_policy, conversation_level=(cfg.tiers == TIERS_CONVERSATION))
                    if cfg.tiers != TIERS_OFF else None)
     sticky = Stickiness(tier_policy.cold_gap_s) if tier_policy is not None else None
+    # ``--serve local-agent`` (proxy.local_mode); None means off, and then nothing
+    # below that mentions ``lm`` runs.
+    lm = None
+    if cfg.serve == local_mode.SERVE_LOCAL_AGENT:
+        if (cfg.trim or "").strip().lower() != "none" or tier_policy is not None \
+                or cfg.local_agent is not None or not (cfg.model or "").startswith("ollama/"):
+            raise ValueError("--serve local-agent needs --model ollama/<tag>, --trim none, --tiers off and "
+                             "local-agent compaction off")
+        lm = local_mode.LocalModeState(cfg.kill_switch)
+        lm_breaker = la_capability.BreakerCache(fn=breaker_fn)
 
     def _ollama_url() -> str:
         from llm_router.config import get_config, validate_ollama_url
@@ -315,7 +333,12 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                        detail=exhausted, added_latency_s=round(time.monotonic() - t0, 3))
             return None
         try:
-            choice = await choose_model(classify_text(body), cfg.model)
+            if lm is not None:
+                # P2: the pinned model serves; the policy is not consulted.
+                choice = {"task_type": "local_agent", "complexity": "pinned",
+                          "chain_head": [cfg.model], "model": cfg.model}
+            else:
+                choice = await choose_model(classify_text(body), cfg.model)
         except Exception as exc:  # noqa: BLE001 - any policy failure forwards the call
             guard.reset(session_id)
             row.update(decision=ledger.DECISION_FALLBACK, reason="policy_error",
@@ -354,7 +377,13 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             if local_agent is not None:
                 send, row["compaction"] = await local_agent.prepare(body)
             else:
-                send = apply_trims(body, trims)
+                src = body
+                if lm is not None:
+                    # Post-apply check of the edits served at the previous step.
+                    src, checks = local_mode.annotate_failed_checks(body, lm, la_session_cwd(body))
+                    if checks:
+                        row["post_apply_checks"] = checks
+                send = apply_trims(src, trims)
             # Repo knowledge for the local model (proxy.okf_context): the trimmed
             # request is all it sees. Local path only, never the pass-through;
             # fail-open; in a thread because retrieval and the repo-state line
@@ -383,11 +412,28 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 # The hard rule: an edit from the raw tool-call loop is never
                 # served; it goes to the validated edit protocol or to Claude.
                 verdict = la_capability.check_reply(
-                    message, body, edit_mode=cfg.local_agent.edit_mode if local_agent else "claude")
+                    message, body, edit_mode=cfg.local_agent.edit_mode if local_agent else "claude",
+                    raw_edit_checked=lm is not None)
                 if local_agent is not None:
                     row["local_agent"] = dict(row.get("local_agent") or {}, reply=verdict.as_row())
+                if lm is not None:
+                    row["local_mode_reply"] = verdict.as_row()
                 if verdict.route == la_capability.ROUTE_CLAUDE:
                     message, err, reason = None, verdict.detail or verdict.reason, verdict.reason
+                elif verdict.route == la_capability.ROUTE_EDIT and lm is not None:
+                    # P3: the validated edit protocol; if it cannot produce a
+                    # validated edit, the model's own raw edit is served and
+                    # checked after it is applied.
+                    from llm_router.local_agent.proxy_step import generator_for
+
+                    edited, edit_err, row["edit_protocol"] = await la_capability.run_edit_protocol(
+                        verdict, message, body, generator_for(backend), t0 + cfg.step_budget_s)
+                    if edit_err:
+                        row["edit_protocol"]["fallback"] = la_capability.REASON_RAW_EDIT_CHECKED
+                        row["served_via"] = la_capability.REASON_RAW_EDIT_CHECKED
+                    else:
+                        message = edited
+                        row["served_via"] = la_capability.ROUTE_EDIT
                 elif verdict.route == la_capability.ROUTE_EDIT:
                     message, err, row["edit_protocol"] = await local_agent.edit_step(
                         verdict, message, body, backend, t0 + cfg.step_budget_s)
@@ -395,6 +441,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                         reason = "edit_protocol_failed"
                     else:
                         row["served_via"] = la_capability.ROUTE_EDIT
+                elif lm is not None and verdict.reason == la_capability.REASON_RAW_EDIT_CHECKED:
+                    row["served_via"] = la_capability.REASON_RAW_EDIT_CHECKED
         except HedgeTimeout as exc:
             err, reason = str(exc), "hedge_timeout"
         except ContextOverflow as exc:
@@ -427,12 +475,60 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                        detail=repeat, added_latency_s=elapsed)
             return None
         guard.record_served(session_id, message)
+        if lm is not None:
+            lm.remember_edits(message)
         row.update(decision=ledger.DECISION_SERVED, reason=None, msg_id=message["id"],
                    added_latency_s=0.0,
                    served_blocks=[b["type"] + (":" + b["name"] if b.get("name") else "")
                                   for b in message["content"]],
                    served_stop_reason=message["stop_reason"])
         return message
+
+    async def local_step(body: dict, row: dict) -> dict | None:
+        """``--serve local-agent``: pin, decide, serve. Returns the served
+        message, or ``None`` after writing the reason and the egress notice."""
+        row["serve_mode"] = local_mode.SERVE_LOCAL_AGENT
+        if not local_mode.is_agent_turn(body):
+            row.update(decision=ledger.DECISION_FORWARDED, reason=local_mode.REASON_NOT_ELIGIBLE)
+            return None
+        key = conversation_key(body, row.get("session_id"))
+        pinned = lm.pin_of(key)
+        started_elsewhere = pinned is None and not is_first_call(body)
+        if started_elsewhere:
+            # Never migrate a conversation already on Claude (or one this
+            # process never saw the start of): its prompt cache lives there.
+            lm.set_pin(key, local_mode.PIN_CLAUDE)
+            pinned = local_mode.PIN_CLAUDE
+        payload = to_ollama(body, cfg.model.split("/", 1)[1], num_ctx=cfg.num_ctx, max_predict=1)
+        breaker_ok, breaker_detail = await lm_breaker.allows(None)
+        decision = local_mode.decide_local(body, local_mode.LocalSession(
+            key=key, pinned=pinned, kill_switch=lm.killed(), backend_healthy=not health.is_open(cfg.model),
+            breaker_closed=breaker_ok, breaker_detail=breaker_detail, payload=payload))
+        if started_elsewhere and decision.reason == local_mode.REASON_PINNED_CLAUDE:
+            decision = local_mode.LocalDecision(False, local_mode.REASON_STARTED_ELSEWHERE)
+        row["local_mode"] = dict(decision.as_row(), pin=pinned)
+        message = None
+        if decision.local:
+            if pinned is None:
+                lm.set_pin(key, local_mode.PIN_LOCAL)
+                row["local_mode"]["pin"] = local_mode.PIN_LOCAL
+            message = await try_serve(body, row)
+            if message is not None:
+                return message
+            # A failed local step: this step goes to Claude and the conversation
+            # stays there (one logged move, never back and forth).
+            lm.set_pin(key, local_mode.PIN_CLAUDE)
+            row["local_mode"]["pin_change"] = "local->claude"
+            reason = row.get("reason") or "validation"
+        else:
+            reason = decision.reason
+            row.update(decision=ledger.DECISION_FORWARDED, reason=reason, detail=decision.detail or None)
+            if pinned is None or reason in local_mode.STRUCTURAL_REASONS:
+                lm.set_pin(key, local_mode.PIN_CLAUDE)
+                row["local_mode"]["pin_change"] = f"{pinned or 'new'}->claude"
+        row["egress"] = True
+        print(local_mode.egress_notice(str(reason), row.get("session_id")), file=sys.stderr, flush=True)
+        return None
 
     async def decide_tier(body: dict, row: dict):
         """The tier rewrite's decision, written onto ``row``. Any error forwards
@@ -604,7 +700,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             "tier_policy_version": tier_policy.policy_version if tier_policy is not None else None,
             "tier_proposed": None, "tier_retry": None,
         }
-        if not cfg.steps:
+        if lm is not None:
+            message = await local_step(body, row)
+            if message is not None:
+                write(row)
+                if body.get("stream"):
+                    return Response(sse_from_message(message), media_type="text/event-stream")
+                return Response(json.dumps(message), media_type="application/json")
+        elif not cfg.steps:
             row["reason"] = "routing_off"
         elif row["step_class"] is None or row["step_class"] not in cfg.steps:
             row["reason"] = "not_eligible"
@@ -682,12 +785,50 @@ llm-router proxy [--port N] [--steps continuation|off] [--step-budget-s S]
                  [--num-ctx N] [--ollama-url URL] [--keep-alive -1|5m] [--no-warm-up]
                  [--loop-max-consecutive N] [--loop-repeat-window N]
                  [--tiers off|on|conversation] [--tier-policy FILE.yaml] [--local-agent]
-                 [--backend-fail-n N] [--backend-cooldown-s S]
+                 [--backend-fail-n N] [--backend-cooldown-s S] [--serve off|local-agent]
 llm-router proxy stats [--days N] [--json]
 
 Opt-in, per session. Nothing is enabled until you point a session at it:
     {enable_hint("127.0.0.1", DEFAULT_PORT)}
 """
+
+
+def _local_agent_preflight(cfg: ProxyConfig) -> list[str]:
+    """Why ``--serve local-agent`` must not start (empty = go). Loads the model
+    first if it is not resident (a refusal for "not loaded" would only send the
+    operator to run the same call by hand), then checks everything on the list."""
+    import httpx
+
+    from llm_router.config import get_config, validate_ollama_url
+
+    url = (validate_ollama_url(cfg.ollama_url) if cfg.ollama_url
+           else (get_config().effective_ollama_base_url or "http://localhost:11434"))
+    if not url:
+        return [f"unusable Ollama URL {cfg.ollama_url!r}"]
+
+    def get(u: str) -> dict:
+        r = httpx.get(u, timeout=5.0)
+        r.raise_for_status()
+        return r.json()
+
+    if cfg.model and cfg.model.startswith("ollama/"):
+        ctx, _note = local_mode.resident_context(url, cfg.model, get)
+        if ctx is None:
+            try:
+                OllamaBackend = BACKENDS["ollama/"]
+                backend = OllamaBackend(cfg.model, httpx.AsyncClient(), base_url=url, num_ctx=cfg.num_ctx,
+                                        hedge_s=None, keep_alive=cfg.keep_alive)
+                payload = {"model": backend.model, "messages": [{"role": "user", "content": "ok"}],
+                           "stream": False, "think": False, "keep_alive": cfg.keep_alive,
+                           "options": {"num_ctx": cfg.num_ctx, "num_predict": 1}}
+                httpx.post(url.rstrip("/") + "/api/chat", json=payload, timeout=300.0).raise_for_status()
+            except Exception as exc:  # noqa: BLE001 - the resident check below reports the refusal
+                return [f"could not load {cfg.model} on {url}: {type(exc).__name__}: {exc}"]
+    return local_mode.preflight(
+        model=cfg.model, trim=cfg.trim, ollama_url=url, num_ctx=cfg.num_ctx,
+        ledger_path=cfg.ledger_path or ledger.ledger_path(),
+        kill_path=cfg.kill_switch or local_mode.kill_switch_path(),
+        tiers_off=cfg.tiers == TIERS_OFF, compaction_off=cfg.local_agent is None, get=get)
 
 
 def cmd_proxy(argv: list[str]) -> int:
@@ -740,15 +881,34 @@ def cmd_proxy(argv: list[str]) -> int:
                          "or sub-second invalid replies (a crash signature stops it at once; 0 disables)")
     ap.add_argument("--backend-cooldown-s", type=float, default=env.backend_cooldown_s,
                     help="seconds before a one-token probe checks whether the backend recovered")
+    ap.add_argument("--serve", default=env.serve,
+                    help="off (default; byte-identical to before) or local-agent (opt-in): Claude Code steps "
+                         "answered by --model on this machine, conversations pinned local at their first call "
+                         "(also LLM_ROUTER_PROXY_LOCAL_AGENT_MODE). Refuses to start unless its preflight passes")
     a = ap.parse_args(argv)
 
     from llm_router.net_bind import refuse_public_bind_or_exit
 
     refuse_public_bind_or_exit(a.host, component="proxy")
     try:
+        serve = local_mode.parse_serve_mode(a.serve)
+    except ValueError as exc:
+        sys.stderr.write(f"llm-router proxy: {exc}\n")
+        return 2
+    if serve == local_mode.SERVE_LOCAL_AGENT:
+        # This mode's defaults: no trim; no 8 s first-token hedge and a longer
+        # budget (a conversation's first call pays 14-25 s of prompt evaluation).
+        if a.trim is None:
+            a.trim = "none"
+        if a.hedge_s is None:
+            a.hedge_s = "off"
+        if a.step_budget_s == DEFAULT_STEP_BUDGET_S:
+            a.step_budget_s = local_mode.DEFAULT_STEP_BUDGET_S
+    try:
         cfg = ProxyConfig(steps=parse_steps(a.steps), step_budget_s=a.step_budget_s, model=a.model,
                           trim=a.trim, num_ctx=a.num_ctx, upstream=env.upstream,
                           ledger_path=Path(a.ledger) if a.ledger else None,
+                          serve=serve,
                           hedge_s=parse_hedge(a.hedge_s) if a.hedge_s is not None else env.hedge_s,
                           keep_alive=parse_keep_alive(a.keep_alive), warm_up=not a.no_warm_up,
                           ollama_url=a.ollama_url, loop_max_consecutive=a.loop_max_consecutive,
@@ -756,6 +916,17 @@ def cmd_proxy(argv: list[str]) -> int:
                           tier_policy=a.tier_policy,
                           local_agent=(LocalAgentConfig.from_env() if a.local_agent else env.local_agent),
                           backend_fail_n=a.backend_fail_n, backend_cooldown_s=a.backend_cooldown_s)
+    except (ValueError, OSError) as exc:
+        sys.stderr.write(f"llm-router proxy: {exc}\n")
+        return 2
+    if serve == local_mode.SERVE_LOCAL_AGENT:
+        refusals = _local_agent_preflight(cfg)
+        if refusals:
+            sys.stderr.write("llm-router proxy: REFUSING to start --serve local-agent:\n")
+            for r in refusals:
+                sys.stderr.write(f"  - {r}\n")
+            return 2
+    try:
         app = build_app(cfg)
     except (ValueError, OSError) as exc:
         sys.stderr.write(f"llm-router proxy: {exc}\n")
@@ -772,5 +943,10 @@ def cmd_proxy(argv: list[str]) -> int:
           f"local_agent={'on' if cfg.local_agent else 'off'}  "
           f"backend_health(fail_n={cfg.backend_fail_n}, cooldown={cfg.backend_cooldown_s:g}s)")
     print(f"  enable per session: {enable_hint(a.host, a.port)}")
+    if serve == local_mode.SERVE_LOCAL_AGENT:
+        kill = cfg.kill_switch or local_mode.kill_switch_path()
+        for line in local_mode.banner_lines(model=cfg.model, num_ctx=cfg.num_ctx, kill_path=kill,
+                                            killed=kill.exists()):
+            print(line, flush=True)
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning", access_log=False)
     return 0

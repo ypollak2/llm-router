@@ -150,6 +150,14 @@ def _with_image_in_first_turn(body):
     return body
 
 
+def _two_turn_tool_result(body):
+    """A newest tool_result turn, but only two turns in all: not a continuation."""
+    body = copy.deepcopy(body)
+    turns = [m for m in body["messages"] if m["role"] != "system"]
+    body["messages"] = [turns[1], turns[2]]
+    return body
+
+
 def _with_served_history(body):
     body = copy.deepcopy(body)
     for m in body["messages"]:
@@ -192,6 +200,8 @@ CASES: dict[str, tuple] = {
                                        [("POST", "/v1/messages?beta=true", _with_image_in_newest_result(_req()))]),
     "older_turn_image_placeholder_served": ({}, CHAIN_LOCAL, [], [_ollama_chunks("Done.")],
                                             [("POST", "/v1/messages?beta=true", _with_image_in_first_turn(_req()))]),
+    "two_turn_tool_result_not_a_continuation": (
+        {}, CHAIN_LOCAL, [], [], [("POST", "/v1/messages?beta=true", _two_turn_tool_result(_req()))]),
     "forced_tool_choice_not_eligible": ({}, CHAIN_LOCAL, [], [],
                                         [("POST", "/v1/messages?beta=true", dict(_req(), tool_choice={"type": "any"}))]),
     "no_tools_side_call": ({}, CHAIN_LOCAL, [], [], [("POST", "/v1/messages?beta=true", dict(_req(), tools=[]))]),

@@ -234,6 +234,55 @@ shows the same fault. Restart the dedicated server if `proxy stats` shows a run
 of fast `empty response` fallbacks. Report:
 `~/.rsi/research/llm-router-cursor-parity/p3-compaction-ab.md`.
 
+## Serve mode: Claude Code on a local model (opt-in, `--serve local-agent`)
+
+Off by default (`--serve off`, env `LLM_ROUTER_PROXY_LOCAL_AGENT_MODE`), and with it off the proxy is
+byte-identical to what it was before the mode existed: `tests/test_proxy_off_golden.py` replays 19
+request scripts plus the startup banner against a golden recorded from `main` before the mode was written.
+
+```
+ollama serve   # OLLAMA_NUM_PARALLEL=1 OLLAMA_CONTEXT_LENGTH=32768, hand-run (Ollama.app cannot set the first)
+llm-router proxy --serve local-agent --model ollama/qwen3.6:35b-a3b-coding --ollama-url http://127.0.0.1:11434
+ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ENABLE_TOOL_SEARCH=true claude
+```
+
+Why it exists: the 2026-10-04 route probes found that the stock proxy served 0 of 9 Claude Code steps
+locally (the first call of every turn always went to Anthropic, the routing policy could keep a step on
+Claude, and an Edit/Write reply was never served), and that the default `fast` trim hides Skill, Agent, MCP
+and ToolSearch from the local model. This mode makes the three in-memory patches of that experiment real, for
+this mode only:
+
+| Patch | In this mode |
+|---|---|
+| P1 step class | every tool-carrying main-loop call is eligible (`local_mode.is_agent_turn`), not only tool_result continuations |
+| P2 policy | `choose_model` is not consulted; the pinned `--model` serves |
+| P3 edits | an Edit/Write reply is served: through the validated edit protocol when the file qualifies, else raw, and **every served edit is checked after it is applied** (at the next step, against the file on disk: the new text is there, a Write holds what was written, the file still parses; a failure is written into the tool result the local model sees, never forwarded to Anthropic) |
+
+**Pinning.** A conversation is decided at its first call and stays there. A conversation the proxy did not see
+start (a restart, `/compact`) is pinned to Claude and never moved local. A local step that fails moves the
+conversation to Claude once, with the reason in the ledger.
+
+**Eligibility** (`decide_local`, a rule stub the resolver will replace): no media anywhere in the conversation;
+estimated prompt <= 25,000 tokens (`local_context_guard.check_overflow`, plus a digit-aware estimate, because
+qwen tokenises each digit); backend healthy; quality breaker closed.
+
+**Never silent.** Every step not served locally has a ledger `reason` and `egress: true`, and prints one line on
+stderr saying it is being sent to Anthropic. Media and over-cap prompts are escalated with that reason, never
+replaced by a placeholder. The startup banner states the mode and the egress rule.
+
+**Kill switch.** `touch <state>/local_agent_kill` (the path is in the banner) sends every step to Anthropic from
+the next request, no restart; remove the file to resume.
+
+**Preflight.** The proxy refuses to start (message on stderr, exit 2) unless: `--model ollama/<tag>` is given
+and resident with `num_ctx >= 32768` (it is loaded first if absent); the Ollama server's own
+`OLLAMA_NUM_PARALLEL` is 1 (read from its process environment, so only a loopback server can be checked) and
+no runner has `-np` other than 1; `--trim none` (the default in this mode); `--tiers off`; compaction off; the
+overflow guard passes a self-test; the ledger and kill-switch directories are writable. In this mode the first-token
+hedge defaults to off and the step budget to 120 s (a conversation's first call evaluates a ~12k-token prompt).
+
+Not in this mode (later redesign PRs): thinking passthrough, images served locally, `--no-egress`, the ToolSearch
+loop-guard fix, AskUserQuestion repair, sub-agent inheritance.
+
 ## Metrics
 
 Each call writes one row to `~/.llm-router/proxy_calls.jsonl` with shape,
