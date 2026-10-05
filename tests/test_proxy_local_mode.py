@@ -605,7 +605,7 @@ def test_env_var_is_the_default_for_the_flag(monkeypatch):
 # ── output cap ───────────────────────────────────────────────────────────────
 
 
-async def test_local_mode_sends_the_larger_output_cap_to_ollama_and_off_mode_keeps_200(tmp_path):
+async def test_local_mode_sends_the_larger_output_cap_to_ollama_and_off_mode_keeps_its_own_cap(tmp_path):
     seen = []
 
     def handler(request):
@@ -617,7 +617,7 @@ async def test_local_mode_sends_the_larger_output_cap_to_ollama_and_off_mode_kee
             return httpx.Response(200, stream=httpx.ByteStream("".join(json.dumps(x) + "\n" for x in lines).encode()))
         return httpx.Response(200, stream=httpx.ByteStream(b"{}"), headers={"content-type": "application/json"})
 
-    for serve, expected in (("local-agent", local_mode.LOCAL_NUM_PREDICT), ("off", 200)):
+    for serve, expected in (("local-agent", local_mode.LOCAL_NUM_PREDICT), ("off", 700)):
         cfg = ps.ProxyConfig(upstream="http://127.0.0.1:9", ledger_path=tmp_path / f"{serve}.jsonl", model=MODEL,
                              trim="none", serve=serve, hedge_s=None, warm_up=False,
                              kill_switch=tmp_path / "kill", ollama_url="http://127.0.0.1:11999")
