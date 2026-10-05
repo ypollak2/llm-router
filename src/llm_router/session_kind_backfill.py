@@ -25,6 +25,14 @@ CONTRACT (owner-approved, 2026-10-04):
   the last-resort fallback. :func:`session_kind.kind_of` -- the proxy hot path and
   ``tag_session``'s own write-once check -- never reads the sidecar at all, so a
   backfilled kind can never shadow or pre-empt a live tag.
+* Who reads the sidecar (:func:`load_sidecar`) -- and who does not. Read: ``llm-router
+  kpi`` (NS, D1, D2 via ``northstar.units(backfill=True)``; D3 via its own
+  ``KindIndex``) and this module's own command (``--backfill-tags``,
+  ``--validate-backfill``). Not read, by construction (``backfill`` defaults to off in
+  ``northstar.units`` / ``build_sessions`` / ``_scan_proxy_ledger``): the proxy, every
+  hook, the Stop line (``northstar.current_session_line``), the quality breaker and
+  ``llm-router northstar``. ``tests/test_session_kind_backfill.py`` pins zero
+  ``load_sidecar`` calls on the Stop-line and quality-breaker paths.
 * Evidence insufficiency -> ``"unknown"``, never ``"organic"``. ``"unknown"`` is NOT a
   member of ``session_kind.VALID_KINDS``; ``KindIndex`` never resolves a session to it,
   so an ``unknown`` session stays exactly as invisible to the KPIs as an untagged one
@@ -103,9 +111,11 @@ def unit_session_ids(root: Path | None = None) -> set[str]:
     and D2 are computed from these transcript-derived units, and most of them belong to
     sessions that never appear in any ledger -- enumerating only the ledgers would leave
     exactly the sessions those KPIs need unresolved. Read-only (it parses transcripts;
-    it writes nothing), and slow on a large corpus -- a one-shot admin cost."""
+    it writes nothing), and slow on a large corpus -- a one-shot admin cost. Only the
+    session ids are used, so the sidecar is deliberately not consulted
+    (``build_sessions``' default ``backfill=False``)."""
     from llm_router import northstar
-    return set(northstar.build_sessions(days=None, root=root))
+    return set(northstar.build_sessions(days=None, root=root, backfill=False))
 
 
 def _proxy_kind_index(home: Path | None = None) -> "session_kind.KindIndex":

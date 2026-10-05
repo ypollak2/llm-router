@@ -268,14 +268,19 @@ its share renders as ``None`` / "too few to tell" per CLAUDE.md.
 Public surface
 ────────────────────────────────────────────────────────────────────────────
 
-``units(days=N, session_id=None, root=None) -> Iterator[dict]``
+``units(days=N, session_id=None, root=None, *, backfill=False) -> Iterator[dict]``
     One dict per unit: ``{"session_id", "ts" (iso8601 or None), "kind",
     "lever", "task_type", "model", "outcome", "signal", "session_kind",
     "session_kind_source"}``. ``session_kind`` is the KPI tag of the unit's
     session (organic / research / harness / headless), or ``None`` when no tag
     can be resolved (never read as organic); ``session_kind_source`` says where
-    it came from (``tag`` / ``stamp`` / ``proxy_ledger`` / ``conflict``, see
-    :class:`llm_router.session_kind.KindIndex`). A unit is stamped when it is
+    it came from (``tag`` / ``stamp`` / ``proxy_ledger`` / ``conflict`` / and,
+    only with ``backfill=True``, ``backfill``; see
+    :class:`llm_router.session_kind.KindIndex`). ``backfill`` is OFF by default:
+    ``units()`` is reached from hot paths that never use the kind (the Stop
+    hook's ``current_session_line`` and the quality breaker, which the
+    UserPromptSubmit and Agent hooks call), and the sidecar is read from disk. Only
+    ``llm-router kpi`` passes ``backfill=True``. A unit is stamped when it is
     built: transcript units have no writer of their own, and the one ledger
     that does write units (``north_star_units.jsonl``) already stamps each row,
     which is carried through as the unit's own stamp. ``lever`` is
@@ -857,14 +862,19 @@ def _agent_route_codex_units_for_session(sid: str, rows: list[dict]) -> list[Uni
     return units
 
 
-def _scan_proxy_ledger() -> tuple[dict[str, dict], "session_kind.KindIndex"]:
+def _scan_proxy_ledger(*, backfill: bool = False) -> tuple[dict[str, dict], "session_kind.KindIndex"]:
     """One pass over the proxy ledger: ``msg_id -> row`` for every served row, and
     the session-kind index built from the kinds those rows were stamped with. One
     pass because the ledger is large (18 MB on a busy machine) and ``build_sessions``
-    runs on the Stop hook."""
+    runs on the Stop hook.
+
+    ``backfill`` says whether the returned index may fall back to the session-kind
+    backfill sidecar (``session_kind_backfill.jsonl``) for a session with no live
+    evidence. Off by default: this scan runs on hot paths (see ``build_sessions``)
+    and only ``llm-router kpi`` consumes the resolved kind."""
     path = paths.state_path("proxy_calls.jsonl")
     served: dict[str, dict] = {}
-    kinds = session_kind.KindIndex()
+    kinds = session_kind.KindIndex(backfill=backfill)
     for row in _iter_jsonl(path):
         if not isinstance(row, dict):
             continue
@@ -1019,12 +1029,20 @@ def _first_user_turn(records: list[dict]) -> tuple[str | None, float | None]:
 
 
 def build_sessions(days: int | None, root: Path | None = None,
-                    session_id: str | None = None) -> dict[str, SessionUnits]:
+                    session_id: str | None = None, *,
+                    backfill: bool = False) -> dict[str, SessionUnits]:
     """Assemble every real, non-synthetic session in the last `days` days.
 
     Sub-agent sessions that join to a parent are folded in (their turns
     become sidechain_call units under the parent, their dispatch prompt is
     NOT counted as a user_prompt). Unjoined sessions are reported standalone.
+
+    ``backfill`` lets a unit's ``session_kind`` fall back to the backfill sidecar
+    when its session has no tag file, stamp or agreeing proxy-row stamp. It is OFF
+    by default because this function is reached from hot paths that never use the
+    kind: the Stop hook (``current_session_line`` -> ``report``) and the quality
+    breaker (``units()`` from the UserPromptSubmit, Agent and Stop hooks). Only
+    ``llm-router kpi`` passes ``backfill=True``.
     """
     root = root if root is not None else claude_projects_dir()
     cutoff = None
@@ -1036,7 +1054,7 @@ def build_sessions(days: int | None, root: Path | None = None,
     debug_records = _parse_debug_log()
     edit_outcome_rows = _load_edit_outcomes()
     codex_ledger_rows = _load_north_star_ledger()
-    proxy_served, kind_index = _scan_proxy_ledger()
+    proxy_served, kind_index = _scan_proxy_ledger(backfill=backfill)
 
     per_session: dict[str, SessionUnits] = {}
     parent_of: dict[str, str] = {}  # child session_id -> parent session_id
@@ -1248,9 +1266,11 @@ def _judge_routed_mcp(su: SessionUnits, records: list[dict]) -> None:
 # ── public surface ───────────────────────────────────────────────────────────
 
 def units(days: int | None = 30, session_id: str | None = None,
-          root: Path | None = None) -> Iterator[dict]:
-    """One dict per classified unit. See the module docstring for the shape."""
-    sessions = build_sessions(days=days, root=root, session_id=session_id)
+          root: Path | None = None, *, backfill: bool = False) -> Iterator[dict]:
+    """One dict per classified unit. See the module docstring for the shape.
+    ``backfill=True`` lets ``session_kind`` resolve from the backfill sidecar as a
+    last resort (``session_kind_source == "backfill"``); see ``build_sessions``."""
+    sessions = build_sessions(days=days, root=root, session_id=session_id, backfill=backfill)
     for sid in sorted(sessions):
         su = sessions[sid]
         ordered = sorted(su.units, key=lambda u: (u.ts is None, u.ts if u.ts is not None else 0.0))
@@ -1351,6 +1371,10 @@ def current_session_line(session_id: str, root: Path | None = None) -> str:
     it always clears a 2-day cutoff; the same window also bounds the sub-agent
     join search to recent activity, which is the only activity a live Stop
     hook could plausibly need to fold in.
+
+    Never reads the session-kind backfill sidecar: this line shows a share, not a
+    kind, and ``report()`` -> ``units()`` leaves ``backfill`` off (its default).
+    ``tests/test_session_kind_backfill.py`` pins zero ``load_sidecar`` calls here.
     """
     try:
         data = report(days=2, session_id=session_id, root=root)

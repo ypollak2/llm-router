@@ -62,6 +62,21 @@ is the LAST step of :meth:`KindIndex.resolve`, after the tag file, the record's 
 and the proxy rows, so a live tag always wins; it is never consulted by :func:`kind_of`
 (the proxy hot path and :func:`tag_session`'s own write-once check), so it can never
 shadow or pre-empt a live tag. Deleting the file restores the earlier behaviour exactly.
+
+WHERE THE SIDECAR IS READ, AND WHERE IT IS NOT. It is read from disk only by a
+:class:`KindIndex` built with ``backfill=True`` (the default of this class), once per
+index, and only when a session reaches ``resolve``'s last step. The callers:
+
+* READS it: ``llm-router kpi`` (``commands/kpi.py``: its own ``KindIndex`` for D3 and
+  ``northstar.units(backfill=True)`` for NS, D1 and D2) and ``llm-router kpi
+  --backfill-tags`` / ``--validate-backfill`` (``session_kind_backfill``).
+* NEVER reads it: :func:`kind_of`, :func:`tag_session`, the proxy, every hook, and
+  everything that reaches ``northstar.build_sessions`` / ``units`` / ``report``
+  without asking, which includes the Stop hook's ``current_session_line``, the
+  quality breaker (called by the UserPromptSubmit, Agent and Stop hooks) and
+  ``llm-router northstar``. ``backfill`` is off by default all the way down
+  (``units`` -> ``build_sessions`` -> ``_scan_proxy_ledger``), so a new caller on a
+  hot path cannot start reading the file by accident.
 """
 from __future__ import annotations
 
@@ -221,7 +236,8 @@ class KindIndex:
         self._ledger: dict[str, set[str]] = {}
         self._tags: dict[str, str | None] = {}
         #: ``backfill=False`` never reads the sidecar: what the backfill command itself
-        #: uses to ask "does live evidence already resolve this session?".
+        #: uses to ask "does live evidence already resolve this session?", and what
+        #: ``northstar`` passes on every path except ``llm-router kpi``.
         self._use_backfill = backfill
         self._backfill: dict[str, str] | None = None  # loaded on first need, once per index
         for row in ledger_rows:

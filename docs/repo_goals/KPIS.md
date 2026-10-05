@@ -149,6 +149,13 @@ always wins; it is write-once per session; a transcript that is missing, unreada
 `unknown`, which never enters a KPI (it is not organic and not a kind); a session whose proxy rows conflict gets no
 row. Every affected line states its backfilled share, e.g. `n=29,128, 24,244 backfilled`. D4, G1 and G3 do not
 consult the sidecar (D4 and G1 read the kind each proxy row was written with, G3 is not kind-filtered).
+**Where the sidecar is read, and where it is not.** It is read from disk only by `llm-router kpi` (NS, D1 and D2
+through `northstar.units(backfill=True)`; D3 through its own `KindIndex`) and by `--backfill-tags` /
+`--validate-backfill`. It is not read by the proxy, by any hook, by the Stop line (`northstar.current_session_line`,
+which runs on every turn), by the quality breaker (which the UserPromptSubmit, Agent and Stop hooks call) or by
+`llm-router northstar`: `backfill` is off by default in `northstar.units`, `build_sessions` and
+`_scan_proxy_ledger`, and `kpi` is the one caller that turns it on. `tests/test_session_kind_backfill.py` pins zero
+`load_sidecar` calls on the Stop-line and quality-breaker paths, and that `kpi` still resolves through it.
 `llm-router kpi --validate-backfill` (read-only, counts only) re-runs the rules on sessions that already have a live
 kind and prints agreement and a confusion table; re-run it as live tags accumulate. One thing a transcript cannot
 show is the `LLM_ROUTER_SESSION_KIND` override: a session whose live kind came from it would be derived from its

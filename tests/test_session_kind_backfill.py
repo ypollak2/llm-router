@@ -203,23 +203,24 @@ def test_end_to_end_real_units_resolve_via_backfill_and_revert_on_delete(tmp_pat
                                      "message": {"role": "user", "content": f"unrelated task {i}"},
                                      **extra}) + "\n")
 
-    def stamped():
+    def stamped(**kw):
         got: dict[str, set] = {}
-        for u in ns.units(days=None, root=root):
+        for u in ns.units(days=None, root=root, **kw):
             got.setdefault(u["session_id"], set()).add((u["session_kind"], u["session_kind_source"]))
         return got
 
-    never_had_one = stamped()
+    never_had_one = stamped(backfill=True)
     assert never_had_one == {organic: {(None, None)}, headless: {(None, None)}, bare: {(None, None)}}
 
     result = skb.backfill_sessions(root=root)
     assert (result["candidates"], result["candidates_only_from_units"], result["written"]) == (3, 3, 3)
     assert result["by_kind"] == {"organic": 1, "headless": 1, "unknown": 1}
-    assert stamped() == {organic: {("organic", "backfill")}, headless: {("headless", "backfill")},
-                         bare: {(None, None)}}   # unknown stays exactly as invisible as untagged
+    assert stamped(backfill=True) == {organic: {("organic", "backfill")}, headless: {("headless", "backfill")},
+                                     bare: {(None, None)}}   # unknown stays exactly as invisible as untagged
+    assert stamped() == never_had_one   # backfill is opt-in: the default ignores the sidecar
 
     skb.sidecar_path().unlink()
-    assert stamped() == never_had_one
+    assert stamped(backfill=True) == never_had_one
 
 
 def test_dry_run_writes_nothing(tmp_path):
@@ -311,7 +312,7 @@ def _mixed(sid):
 
 
 def _stream(monkeypatch, rows):
-    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None: iter(rows))
+    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False: iter(rows))
 
 
 def _write_proxy_ledger(rows):
@@ -470,6 +471,167 @@ def test_kindindex_backfill_false_never_reads_the_sidecar():
     assert session_kind.KindIndex([], backfill=False).resolve("s-off").kind is None
     res = session_kind.KindIndex([]).resolve("s-off")
     assert (res.kind, res.source) == ("organic", session_kind.SOURCE_BACKFILL)
+
+
+# ── where the sidecar is read: kpi yes, the hook / Stop-line path no ─────────────
+
+_UNTAGGED_SID = "d41e6a2c-7b3d-4f58-9a10-2d6e8c0b4f70"
+
+
+def _untagged_session(root: Path, sid: str = _UNTAGGED_SID, n: int = 3) -> str:
+    """A real transcript of recent user turns for a session with no tag, no stamp and no
+    proxy row: the only thing that can resolve its kind is the backfill sidecar."""
+    start = time.time() - 600
+    d = root / "-Users-x-proj"
+    d.mkdir(parents=True, exist_ok=True)
+    with (d / f"{sid}.jsonl").open("w", encoding="utf-8") as fh:
+        for i in range(n):
+            fh.write(json.dumps({"parentUuid": None, "isSidechain": False, "type": "user",
+                                 "uuid": f"u{i}", "timestamp": _iso_ts(start + i), "sessionId": sid,
+                                 "cwd": "/Users/x/app", "entrypoint": "cli",
+                                 "message": {"role": "user", "content": f"unrelated task {i}"}}) + "\n")
+    return sid
+
+
+def _count_sidecar_loads(monkeypatch) -> list:
+    calls: list = []
+    real = skb.load_sidecar
+
+    def counting(path=None):
+        calls.append(path)
+        return real(path)
+
+    monkeypatch.setattr(skb, "load_sidecar", counting)
+    return calls
+
+
+def test_stop_line_never_reads_the_sidecar_but_the_kpi_opt_in_does(tmp_path, monkeypatch):
+    """The Stop hook runs ``current_session_line`` on EVERY turn. It shows a share, not a
+    kind, so it must not open the sidecar: with an untagged session and a populated
+    sidecar (the one case that WOULD resolve through it) it makes zero loads. The control
+    below is the same fixture through the explicit ``backfill=True`` opt-in, so a zero is a
+    measurement, not an empty fixture."""
+    root = tmp_path / "claude-projects"
+    sid = _untagged_session(root)
+    _write_sidecar(sid)
+    calls = _count_sidecar_loads(monkeypatch)
+
+    line = ns.current_session_line(sid, root=root)
+    assert line.startswith("north star") and "unavailable" not in line
+    assert calls == []
+
+    stamps = {(u["session_kind"], u["session_kind_source"])
+              for u in ns.units(days=2, session_id=sid, root=root, backfill=True)}
+    assert stamps == {("organic", "backfill")}      # the fixture does resolve through the sidecar
+    assert len(calls) == 1                          # ... and that cost exactly one load
+
+
+def test_hook_callers_of_northstar_units_never_read_the_sidecar(tmp_path, monkeypatch):
+    """``quality_breaker`` reads ``northstar.units()`` for the UserPromptSubmit, Agent and
+    Stop hooks; ``llm-router northstar`` reads ``report()``. None of them uses the kind."""
+    from llm_router import quality_breaker
+
+    root = tmp_path / "claude-projects"
+    sid = _untagged_session(root)
+    _write_sidecar(sid)
+    calls = _count_sidecar_loads(monkeypatch)
+
+    quality_breaker._fetch_class_units("agent_route", None, None)
+    ns.report(days=2, session_id=sid, root=root)
+    list(ns.units(days=2, session_id=sid, root=root))
+    ns.build_sessions(days=2, root=root)
+    assert calls == []
+
+
+def test_kpi_still_resolves_the_same_fixture_through_the_sidecar(tmp_path, monkeypatch):
+    """Same untagged session, same populated sidecar, through the real (unstubbed)
+    ``ns.units`` that ``kpi`` calls: it must resolve to organic via the sidecar and say so."""
+    root = tmp_path / "claude-projects"
+    sid = _untagged_session(root, n=4)
+    _write_sidecar(sid)
+    calls = _count_sidecar_loads(monkeypatch)
+
+    k = kpi.compute_scorecard(days=7)
+    assert len(calls) >= 1
+    assert k["joins"]["joined_by_source"] == {"backfill": 4}
+    assert k["joins"]["joined_by_kind"] == {"organic": 4}
+    assert k["kpis"]["NS"]["backfilled"] == 4
+    assert "(n=4, 4 backfilled)" in k["kpis"]["NS"]["value"]
+
+
+def test_kpi_asks_northstar_for_the_backfill_explicitly(monkeypatch):
+    """The kpi path opts in by name rather than by a default, so flipping northstar's
+    default back on (the Stop-line regression) cannot be what keeps kpi working."""
+    asked: dict = {}
+
+    def fake_units(days=30, session_id=None, root=None, backfill=False):
+        asked["backfill"] = backfill
+        return iter([])
+
+    monkeypatch.setattr(ns, "units", fake_units)
+    kpi.compute_scorecard(days=7, now=NOW)
+    assert asked == {"backfill": True}
+
+
+def test_backfill_is_off_by_default_at_every_northstar_layer(monkeypatch):
+    seen: list = []
+    real = session_kind.KindIndex
+
+    class Spy(real):
+        def __init__(self, *a, backfill=True, **kw):
+            seen.append(backfill)
+            super().__init__(*a, backfill=backfill, **kw)
+
+    monkeypatch.setattr(session_kind, "KindIndex", Spy)
+    ns._scan_proxy_ledger()
+    ns._load_proxy_served()
+    ns.build_sessions(days=2)
+    list(ns.units(days=2))
+    assert seen == [False] * 4
+    ns._scan_proxy_ledger(backfill=True)
+    assert seen[-1] is True
+
+
+# ── the production stamping branch of the KPI join ───────────────────────────────
+
+def _stamped_rows(sid, kind, source, n=100):
+    """The shape ``northstar.units()`` really yields: it has already stamped each unit
+    with ``session_kind`` and ``session_kind_source``, so the KPI must trust that stamp
+    and not go back to its own index."""
+    return [dict(r, session_kind=kind, session_kind_source=source) for r in _mixed(sid)[:n]]
+
+
+def test_production_stamped_units_count_their_own_source_not_the_index(monkeypatch):
+    """No sidecar, no tag, no proxy rows: the KPI's own index has nothing for this
+    session, so the ``backfilled`` count can only come from the unit's own stamp."""
+    rows = (_stamped_rows("s-bf", "organic", "backfill", 40) + _stamped_rows("s-tag", "organic", "tag", 30)
+            + _stamped_rows("s-st", "organic", "stamp", 20) + _stamped_rows("s-px", "organic", "proxy_ledger", 10))
+    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False: iter(rows))
+    assert not skb.sidecar_path().exists()
+    k = kpi.compute_scorecard(days=7, now=NOW)
+    assert k["joins"]["joined_by_source"] == {"backfill": 40, "tag": 30, "stamp": 20, "proxy_ledger": 10}
+    assert k["kpis"]["NS"]["backfilled"] == 40
+    assert k["kpis"]["NS"]["n"] == 100
+    assert "n=100, 40 backfilled" in k["kpis"]["NS"]["value"]
+
+
+def test_production_stamp_of_none_is_not_rescued_by_the_index(monkeypatch):
+    """A unit that ``units()`` stamped ``None`` stays untagged even if the KPI's own index
+    could have resolved the session: the stamp is the one source of truth on this branch."""
+    _write_sidecar("s-none", kind="organic")
+    rows = _stamped_rows("s-none", None, None)
+    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False: iter(rows))
+    k = kpi.compute_scorecard(days=7, now=NOW)
+    assert k["kpis"]["NS"]["value"].startswith("not measurable: ")
+    assert k["joins"]["joined"] == 0 and k["joins"]["untagged"] == 100
+
+
+def test_production_stamp_of_a_non_organic_kind_is_excluded(monkeypatch):
+    rows = _stamped_rows("s-res", "research", "backfill")
+    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False: iter(rows))
+    k = kpi.compute_scorecard(days=7, now=NOW)
+    assert k["kpis"]["NS"]["value"].startswith("not measurable: ")
+    assert k["joins"]["joined_by_kind"] == {"research": 100}
 
 
 def test_classify_with_basis_agrees_with_classify_on_every_combination():

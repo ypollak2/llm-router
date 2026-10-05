@@ -488,7 +488,7 @@ def test_a_codex_unit_carries_the_stamp_its_ledger_row_was_written_with(tmp_path
 
 
 def _stream(monkeypatch, rows):
-    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None: iter(rows))
+    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False: iter(rows))
 
 
 def _unit(sid, kind="claude_main_call", outcome=ns.OUTCOME_NOT_ROUTED, lever=None, **kw):

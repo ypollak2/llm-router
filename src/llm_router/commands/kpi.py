@@ -41,6 +41,10 @@ SCOPE, stated rather than implied:
   evidence -> ``"unknown"``, never ``"organic"``. Write-once per session; a live
   tag always wins (the sidecar is consulted only as ``KindIndex.resolve``'s last
   resort); deleting the sidecar restores the pre-backfill behaviour exactly. The
+  sidecar is read ONLY by ``kpi`` itself (NS/D1/D2 through ``northstar.units(backfill=True)``,
+  D3 through its own ``KindIndex``) and by ``--backfill-tags`` / ``--validate-backfill``:
+  never by the proxy, any hook, the Stop line or the quality breaker (``backfill`` is
+  off by default in ``northstar``; see ``session_kind``'s docstring). The
   original ledgers are read, never written. ``--dry-run`` reports what would be
   written and writes nothing. ``--validate-backfill`` (read-only, counts only) runs
   the same rules on sessions that DO have a live kind and prints agreement and a
@@ -265,7 +269,9 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index) -> tuple[dict, dict, di
     disagree: set[str] = set()
     checked: set[str] = set()
     newest: float | None = None
-    for u in ns.units(days=days):
+    # backfill=True: this KPI is the one reader that resolves a unit's kind from the
+    # backfill sidecar. northstar.units() leaves it off for every hot-path caller.
+    for u in ns.units(days=days, backfill=True):
         window += 1
         sid = u.get("session_id")
         if "session_kind" in u:
