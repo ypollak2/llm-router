@@ -698,6 +698,11 @@ def test_hook_callers_of_northstar_units_never_read_the_sidecar(tmp_path, monkey
     ns.build_sessions(days=2, root=root)
     assert calls == []
 
+    # Control: the fixture is not empty -- the explicit opt-in resolves it through the sidecar.
+    stamps = {(u["session_kind"], u["session_kind_source"])
+              for u in ns.units(days=2, session_id=sid, root=root, backfill=True)}
+    assert stamps == {("organic", "backfill")} and len(calls) == 1
+
 
 def test_kpi_still_resolves_the_same_fixture_through_the_sidecar(tmp_path, monkeypatch):
     """Same untagged session, same populated sidecar, through the real (unstubbed)
