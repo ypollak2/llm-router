@@ -53,6 +53,7 @@ def test_transcript_path_cannot_inject_commands(tmp_path: Path) -> None:
 
     env = dict(os.environ)
     env["HOME"] = str(tmp_path)  # isolate ~/.llm-router
+    env["LLM_ROUTER_STATUSLINE"] = "full"  # the classic layout holds the code under test
     (tmp_path / ".llm-router").mkdir(exist_ok=True)
 
     subprocess.run(

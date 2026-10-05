@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- ux: a fast status line and a receipt band. The `statusLine` command now prints one short line
+  (`llm-router · smart · NS 0.0% n=3599 · Claude wk 41% · Codex 7/15 ↻21:14 · ⚠ hooks p95 3.0s auto-route`,
+  at most 200 characters, `n/a` for anything unknown, never 0) from a small cache that
+  `llm-router statusline --refresh` rebuilds in the background at most once a minute; the classic layout is
+  `LLM_ROUTER_STATUSLINE=full`. **The default no longer shows the folder, context bar and money segments** (nor the route mix, health and last-route segments); set `LLM_ROUTER_STATUSLINE=full` to get them back. New opt-in Claude Code mod `llm-router-receipt` (`llm-router mod install` /
+  `uninstall`): after a turn the proxy served off Claude it shows "served by <model> · cost · est. saved" with
+  `k` keep and `r` redo on Claude, and a `/router` pane with the last 10 routing decisions. Presses are
+  `user_signal` rows in `user_signals.jsonl`; `llm-router kpi` shows `user_kept` and `user_redone` under D3. A
+  keep is never counted as used (a passing test is), a redo is a D3 decided event.
 - proxy: real Anthropic spend per call and per session. Each ledger row records
   `served_by`, the real Anthropic usage (cache read/write split; zeros when served
   locally), its cost and a counterfactual; `proxy_session_cost()` reports real spend, the

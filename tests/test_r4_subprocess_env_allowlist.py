@@ -164,7 +164,11 @@ def test_the_broader_inheritance_count_is_recorded():
     # fixed argv `<pi> --version` (the operator's own LLM_ROUTER_PI_BIN or `pi` on
     # PATH) to warn about an untested Pi version. Not model- or caller-supplied argv;
     # Pi reads its config from the environment, so it is left inheriting.
-    assert len(inheriting) <= 59, (
+    # 59 -> 60 (status line tick): the Windows-only fallback of `_spawn_detached()` in
+    # llm_router/statusline_tick.py Popen-s the fixed refresher argv (`llm-router
+    # statusline --refresh`, or the operator's own LLM_ROUTER_STATUSLINE_REFRESH_CMD);
+    # not model- or caller-supplied. POSIX uses fork + execv.
+    assert len(inheriting) <= 60, (
         f"{len(inheriting)} subprocess sites inherit the environment, up from "
         "51. If a new one runs caller-supplied argv, add it to "
         "MODEL_ARGV_SITES; if not, raise this number deliberately."
