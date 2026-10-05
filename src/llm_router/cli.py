@@ -34,6 +34,7 @@ Usage:
     llm-router provider unban <name>  — lift that skip now (or --all)
     llm-router inventory [--json]     — models this machine can run: route, path, quota, privacy
     llm-router calibrate [--models M] [--allow-paid] — measure per-model capability (local-only by default)
+    llm-router resolve --tier T [--needs tools,vision] — what the resolver would pick (inspection only)
     llm-router semantic status  — project scope, derived index, and selected arm
     llm-router semantic explain — what a prompt would retrieve, without sending it
     llm-router demo             — show routing decisions for sample prompts
@@ -1071,6 +1072,10 @@ def main() -> None:
         # Short per-model capability probes; local-only unless --allow-paid.
         from llm_router.commands.calibrate import cmd_calibrate
         sys.exit(cmd_calibrate(args[1:]))
+    elif args and args[0] == "resolve":
+        # Inspect the resolver's decision for a tier + needs. Not live routing.
+        from llm_router.commands.resolve import cmd_resolve
+        sys.exit(cmd_resolve(args[1:]))
     elif args and args[0] == "semantic":
         from llm_router.commands.semantic import cmd_semantic
         sys.exit(cmd_semantic(args[1:]))

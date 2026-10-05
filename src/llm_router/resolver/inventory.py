@@ -5,8 +5,11 @@ touches the real Ollama, CLIs or environment. What is read:
 
 * Ollama: ``/api/tags``, ``/api/show`` (per model) and ``/api/ps``. Nothing else.
 * Claude Code subscription: the cached ``usage.json`` via
-  ``proxy.quota_pressure`` (a local file, no network) and the ``claude`` binary
-  path. Credentials are never opened.
+  ``proxy.quota_pressure`` (a local file, no network), the ``claude`` binary
+  path, and login state from (in order) ``claude auth status --json``'s
+  ``loggedIn`` field (no model call, no quota spent), the presence of an
+  ``oauthAccount`` key in ``~/.claude.json`` (presence only, value never read),
+  or a fresh ``usage.json`` reading. Credentials are never opened.
 * Codex: the binary path and ``codex login status`` (reads local login state,
   spends nothing). Only the classification (ChatGPT vs API key vs none) is kept,
   never the raw output.
@@ -21,6 +24,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import subprocess
 import time
 import urllib.request
 from urllib.parse import urlsplit
@@ -50,6 +54,14 @@ from llm_router.resolver.types import (
 
 HTTP_TIMEOUT_S = 2.0
 CMD_TIMEOUT_S = 8.0
+CLAUDE_AUTH_TIMEOUT_S = 5.0
+
+#: `_claude_auth_status` return values. Both named states are conclusive and
+#: short-circuit the weaker fallback signals; `UNKNOWN` is "not inspected",
+#: never treated as logged in.
+_CLAUDE_LOGGED_IN = "logged_in"
+_CLAUDE_LOGGED_OUT = "logged_out"
+_CLAUDE_LOGIN_UNKNOWN = "unknown"
 
 #: Chat providers an API key can unlock, with the variable NAME each is read
 #: from. Same names the router's config uses (``Config._PROVIDER_MAP``); media
@@ -136,6 +148,56 @@ def _find_claude() -> str | None:
     return find_claude_binary()
 
 
+def _claude_auth_status(binary: str) -> str:
+    """``claude auth status --json``: an official subcommand, no model call, no
+    quota spent (CLAUDE-AUTH-01). Only the boolean ``loggedIn`` field is read;
+    every other key the command reports (``email``, ``orgId``, ``orgName``,
+    ``authMethod``, ...) is discarded before this function returns, so no
+    account PII reaches the caller or any log. Runs with an allowlisted
+    environment (``safe_subprocess.get_delegated_env``, not a denylist) and a
+    short timeout: a missing subcommand, a non-zero exit, unparsable output, a
+    hang or any other error all come back ``unknown`` -- never a login.
+    """
+    from llm_router.safe_subprocess import get_delegated_env
+
+    try:
+        cp = subprocess.run(
+            [binary, "auth", "status", "--json"],
+            capture_output=True, text=True, timeout=CLAUDE_AUTH_TIMEOUT_S,
+            env=get_delegated_env(),
+        )
+    except Exception:  # noqa: BLE001 - timeout/missing-binary/etc: unknown, not a login
+        return _CLAUDE_LOGIN_UNKNOWN
+    if cp.returncode != 0:
+        return _CLAUDE_LOGIN_UNKNOWN
+    try:
+        data = json.loads(cp.stdout)
+    except ValueError:
+        return _CLAUDE_LOGIN_UNKNOWN
+    logged_in = data.get("loggedIn") if isinstance(data, dict) else None
+    if logged_in is True:
+        return _CLAUDE_LOGGED_IN
+    if logged_in is False:
+        return _CLAUDE_LOGGED_OUT
+    return _CLAUDE_LOGIN_UNKNOWN
+
+
+def _claude_oauth_present() -> bool:
+    """Whether Claude Code's own ``~/.claude.json`` has an ``oauthAccount`` key.
+
+    Presence only: the key's value (email, tokens, org, ...) is never read,
+    stored or logged, only whether it exists at all -- the second-strongest
+    signal when ``claude auth status`` is unavailable (CLAUDE-AUTH-01).
+    """
+    from llm_router.install_hooks import claude_json_path
+
+    try:
+        data = json.loads(claude_json_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and "oauthAccount" in data
+
+
 def _find_codex() -> str | None:
     from llm_router.codex_agent import find_codex_binary
 
@@ -177,6 +239,8 @@ class Probes:
     http_post: Callable[[str, dict, float], Any | None] = lambda u, b, t: _http_json("POST", u, b, t)
     run_cmd: Callable[[list[str], float], tuple[int, str]] = _run_cmd
     find_claude: Callable[[], str | None] = _find_claude
+    claude_auth_status: Callable[[str], str] = _claude_auth_status
+    claude_oauth_present: Callable[[], bool] = _claude_oauth_present
     find_codex: Callable[[], str | None] = _find_codex
     find_gemini: Callable[[], str | None] = _find_gemini
     codex_models: Callable[[], list[str]] = _codex_models
@@ -374,6 +438,37 @@ def _safe_base(base: str) -> str:
 
 # --------------------------------------------------------- subscription CLIs
 
+def _claude_authorization(p: Probes, binary: str, usage_state: str) -> tuple[bool, str]:
+    """(authorized, auth_detail) for the claude CLI (CLAUDE-AUTH-01).
+
+    Three zero-cost signals, strongest first; the first one that is conclusive
+    wins, including a negative verdict -- a confirmed logged-out status is not
+    overridden by a weaker, possibly-stale fallback:
+
+    1. ``claude auth status --json``'s ``loggedIn`` field: an official
+       subcommand, no model call, no quota spent.
+    2. The presence (not the value) of an ``oauthAccount`` key in Claude Code's
+       own ``~/.claude.json``.
+    3. llm-router's own ``usage.json`` reading, trusted only when it is fresh
+       (``state == "ok"``): it only ever populates after a real OAuth round
+       trip, so a fresh reading is itself evidence of an active login.
+
+    No signal confirms a login -> ``authorized=False`` with an explicit reason,
+    same as an unverified Codex API-key login: the CLI is then excluded by the
+    hard-eligibility check in ``resolve.hard_failures`` rather than assumed.
+    """
+    login = p.claude_auth_status(binary)
+    if login == _CLAUDE_LOGGED_IN:
+        return True, "claude auth status --json: loggedIn=true"
+    if login == _CLAUDE_LOGGED_OUT:
+        return False, "claude auth status --json: loggedIn=false"
+    if p.claude_oauth_present():
+        return True, "claude CLI present; ~/.claude.json has an oauthAccount entry (presence only; value never read)"
+    if usage_state == "ok":
+        return True, "claude CLI present; usage.json reads ok, which only happens after a real login; credentials are never read"
+    return False, "claude CLI found but login not confirmed"
+
+
 def _inventory_claude(p: Probes, reg: Any, resets: dict[str, float]) -> tuple[list[ModelEntry], SourceStatus]:
     binary = p.find_claude()
     if not binary:
@@ -387,6 +482,10 @@ def _inventory_claude(p: Probes, reg: Any, resets: dict[str, float]) -> tuple[li
     else:
         quota = _quota_for("anthropic", resets, pressure=None,
                            pressure_detail=f"usage.json {state}; pressure not trusted")
+    authorized, auth_detail = _claude_authorization(p, binary, state)
+    path_verified = authorized
+    path_detail = ("claude CLI is executable and reports a login" if path_verified
+                   else "claude CLI found but login not confirmed")
     entries = []
     for alias in _CLAUDE_ALIASES:
         meta = _alias_meta(reg, "anthropic", alias)
@@ -394,16 +493,15 @@ def _inventory_claude(p: Probes, reg: Any, resets: dict[str, float]) -> tuple[li
         entries.append(ModelEntry(
             id=f"claude_subscription/{alias}", provider="anthropic",
             route_kind=ROUTE_SUBSCRIPTION, privacy=PRIVACY_CLOUD, exec_path=binary,
-            path_verified=True, path_detail="claude CLI is an executable file",
-            authorized=True,
-            auth_detail="claude CLI present; login state is not inspected (credentials are never read)",
+            path_verified=path_verified, path_detail=path_detail,
+            authorized=authorized, auth_detail=auth_detail,
             quota=quota, capabilities=facts["caps"], context_window=facts["context"],
             context_source="curated registry" if facts["context"] else "",
             price_in_per_mtok=None, price_out_per_mtok=None,
             tier_ceiling=facts["prior"], tier_basis="prior" if facts["prior"] else "unmeasured",
             notes=((f"registry row {meta.id}",) if meta else ()),
         ))
-    return entries, SourceStatus(True, f"claude CLI at {binary}; usage.json {state}")
+    return entries, SourceStatus(authorized, f"claude CLI at {binary}; {auth_detail}")
 
 
 def _alias_meta(reg: Any, provider: str, alias: str) -> Any | None:

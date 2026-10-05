@@ -66,9 +66,13 @@ def ollama_server(models):
 
 def make_probes(*, ollama=None, claude=None, usage=None, codex=None, gemini=None,
                 env=None, resets=None, codex_pressure=None, registry=REGISTRY,
-                gemini_login=False, ping=None, ping_cache=None, ollama_base=None):
+                gemini_login=False, ping=None, ping_cache=None, ollama_base=None,
+                claude_login="unknown", claude_oauth=False):
     """claude/codex/gemini: a binary path string, or None for absent.
-    codex: (path, login_status_text).  usage: (state, pressure)."""
+    codex: (path, login_status_text).  usage: (state, pressure).
+    claude_login: "logged_in" / "logged_out" / "unknown" (the fake
+    `claude auth status --json` result). claude_oauth: whether the fake
+    `~/.claude.json` has an oauthAccount key."""
     get, post = ollama_server(ollama)
     codex_path, codex_text = codex if codex else (None, "")
 
@@ -81,7 +85,10 @@ def make_probes(*, ollama=None, claude=None, usage=None, codex=None, gemini=None
         environ=dict(env or {}),
         ollama_base=lambda: ollama_base or "http://127.0.0.1:11434",
         http_get=get, http_post=post, run_cmd=run_cmd,
-        find_claude=lambda: claude, find_codex=lambda: codex_path, find_gemini=lambda: gemini,
+        find_claude=lambda: claude,
+        claude_auth_status=lambda binary: claude_login,
+        claude_oauth_present=lambda: claude_oauth,
+        find_codex=lambda: codex_path, find_gemini=lambda: gemini,
         codex_models=lambda: ["gpt-5.5"], gemini_models=lambda: ["gemini-2.5-flash"],
         path_exists=lambda p: gemini_login and "oauth_creds" in p,
         usage_reading=lambda: SimpleNamespace(state=usage[0], pressure=usage[1]) if usage
