@@ -16,7 +16,8 @@ touches the real Ollama, CLIs or environment. What is read:
   spends nothing). Only the classification (ChatGPT vs API key vs none) is kept,
   never the raw output.
 * Gemini CLI: the binary path and whether a login file EXISTS (its contents are
-  never read).
+  never read). Existence is authorized-but-unverified;
+  only ``--verify`` with GEMINI_API_KEY (zero-cost list-models ping) verifies it.
 * API providers: environment variable NAMES that are set. Values are not stored.
 * Benches from ``provider_reset``; Codex pressure from ``quota_balance``.
 """
@@ -626,16 +627,38 @@ def _inventory_codex(p: Probes, reg: Any, resets: dict[str, float]) -> tuple[lis
     return entries, SourceStatus(authorized, f"codex CLI at {binary}; {auth_detail}")
 
 
-def _inventory_gemini(p: Probes, reg: Any, resets: dict[str, float]) -> tuple[list[ModelEntry], SourceStatus]:
+def _inventory_gemini(p: Probes, reg: Any, resets: dict[str, float], *, verify: bool = False
+                      ) -> tuple[list[ModelEntry], SourceStatus]:
+    """Gemini CLI has no offline whoami subcommand, so presence is never proof.
+
+    A login file or GEMINI_API_KEY makes the CLI *authorized but unverified*
+    (``path_verified=False``, which ``resolve`` excludes). Only ``verify=True`` with
+    GEMINI_API_KEY set runs the zero-cost list-models ping (same machinery and
+    redirect safety as every other API key); a 200 verifies the path. A login file
+    alone can never be verified here: its contents are never read.
+    """
     binary = p.find_gemini()
     if not binary:
         return [], SourceStatus(False, "gemini CLI not found")
-    if p.path_exists("~/.gemini/oauth_creds.json"):
+    has_login = bool(p.path_exists("~/.gemini/oauth_creds.json"))
+    has_key = bool(p.environ.get("GEMINI_API_KEY"))
+    path_verified = False
+    path_detail = "gemini CLI found but no login"
+    if has_login:
         authorized, auth_detail = True, "gemini login file present (contents not read)"
-    elif p.environ.get("GEMINI_API_KEY"):
+    elif has_key:
         authorized, auth_detail = True, "GEMINI_API_KEY is set"
     else:
         authorized, auth_detail = False, "no gemini login file and no GEMINI_API_KEY"
+    if authorized:
+        path_detail = ("gemini login or key present; not verified "
+                       "(`llm-router inventory --verify` checks GEMINI_API_KEY)")
+    if verify and has_key:
+        verified, _ok, key_detail, key_auth = _verify_key(p, "gemini", "GEMINI_API_KEY")
+        if verified:
+            path_verified, authorized, path_detail, auth_detail = True, True, key_detail, key_auth
+        elif verified is False and not has_login:
+            authorized, auth_detail, path_detail = False, key_auth, key_detail
     quota = _quota_for("gemini_cli", resets, pressure=None,
                        pressure_detail="no cheap local gemini quota reading")
     entries = []
@@ -643,9 +666,7 @@ def _inventory_gemini(p: Probes, reg: Any, resets: dict[str, float]) -> tuple[li
         facts = _from_registry(_registry_meta(reg, f"gemini/{name}"))
         entries.append(ModelEntry(
             id=f"gemini_cli/{name}", provider="gemini_cli", route_kind=ROUTE_SUBSCRIPTION,
-            privacy=PRIVACY_CLOUD, exec_path=binary, path_verified=authorized,
-            path_detail="gemini CLI is executable and a login exists" if authorized
-            else "gemini CLI found but no login",
+            privacy=PRIVACY_CLOUD, exec_path=binary, path_verified=path_verified, path_detail=path_detail,
             authorized=authorized, auth_detail=auth_detail, quota=quota,
             capabilities=facts["caps"], context_window=facts["context"],
             context_source="curated registry" if facts["context"] else "",
@@ -742,7 +763,7 @@ def collect_inventory(
     for name, fn in (("ollama", lambda: _inventory_ollama(p)),
                      ("claude", lambda: _inventory_claude(p, reg, resets)),
                      ("codex", lambda: _inventory_codex(p, reg, resets)),
-                     ("gemini_cli", lambda: _inventory_gemini(p, reg, resets))):
+                     ("gemini_cli", lambda: _inventory_gemini(p, reg, resets, verify=verify))):
         try:
             found, status = fn()
         except Exception as exc:  # noqa: BLE001 - one broken probe must not blank the inventory
