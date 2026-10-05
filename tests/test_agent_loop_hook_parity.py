@@ -52,7 +52,7 @@ ALLOWED = [
     "echo x > /dev/null", "echo x 2>/dev/null", "ls nonexistent 2>&1", "cat src/b.txt | head -2",
     "cat src/b.txt | sort | head -1", "echo a && echo b", "echo a || echo b", "false || echo recovered",
     "echo a; echo b", "true && echo yes", "ls missing_dir && echo not-reached", "which ls", "find src -name '*.py'",
-    "python3 -c 'print(1+1)'", "stat -f %z README.md", "du -s src",
+    "python3 -c 'print(1+1)'", "wc -w README.md", "du -s src",
     "echo 'quoted && still literal'", 'echo "a | b"',
 ]
 DENIED = [
