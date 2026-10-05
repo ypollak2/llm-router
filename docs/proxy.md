@@ -263,8 +263,9 @@ start (a restart, `/compact`) is pinned to Claude and never moved local. A local
 conversation to Claude once, with the reason in the ledger.
 
 **Eligibility** (`decide_local`, a rule stub the resolver will replace): no media anywhere in the conversation;
-estimated prompt <= 25,000 tokens (`local_context_guard.check_overflow`, plus a digit-aware estimate, because
-qwen tokenises each digit); backend healthy; quality breaker closed.
+estimated prompt <= 25,000 tokens (a digit-aware estimate fitted to real Ollama counts, within 1.02-1.21x of them on 7 payloads;
+`local_context_guard`'s chars/3.04 is 1.4x high on JSON tool schemas and 0.90x low on a 450-line log, so it stays the 32k window
+backstop in the backend instead); no media anywhere; backend healthy; quality breaker closed.
 
 **Never silent.** Every step not served locally has a ledger `reason` and `egress: true`, and prints one line on
 stderr saying it is being sent to Anthropic. Media and over-cap prompts are escalated with that reason, never

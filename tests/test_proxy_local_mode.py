@@ -450,6 +450,33 @@ def test_decide_local_rules_in_order():
     assert local_mode.decide_local(_first_call(), s(breaker_closed=False)).reason == "breaker_open"
 
 
+# (name, chars, digits, REAL prompt_eval_count) measured on qwen3.6:35b-a3b-coding,
+# Ollama 0.32.13, 2026-10-05: three real Claude Code first-call bodies, then a
+# continuation carrying logs / prose / code of different sizes.
+CALIBRATION = [
+    ("first, 15 tools", 51541, 490, 12229), ("first, 27 tools (no tool search + MCP)", 78492, 678, 18494),
+    ("cont + 150-line log", 54127, 3645, 16157), ("cont + 300-line log", 65203, 6865, 22077),
+    ("cont + prose", 63645, 435, 15246), ("cont + code", 52281, 1507, 15159),
+    ("cont + 450-line log", 76281, 10085, 27997),
+]
+
+
+@pytest.mark.parametrize("name,chars,digits,real", CALIBRATION)
+def test_the_cap_estimate_is_never_under_the_real_count_and_not_wildly_over(name, chars, digits, real):
+    text = "1" * digits + "a" * (chars - digits)
+    est = local_mode.estimate_prompt_tokens({"m": text})
+    assert 1.0 <= est / real <= 1.3, (name, est, real)
+
+
+def test_the_real_claude_code_mcp_body_is_under_the_cap_the_guards_own_estimate_refused_it():
+    chars, digits = 78492, 678  # real count 18,494
+    payload = {"m": "1" * digits + "a" * (chars - digits)}
+    assert local_mode.over_prompt_cap(payload) is None
+    from llm_router.local_context_guard import estimate_payload_tokens
+
+    assert estimate_payload_tokens(payload) > local_mode.PROMPT_CAP_TOKENS - 2000  # 26k by chars/3.04: the reason
+
+
 def test_the_cap_counts_digits_the_chars_per_token_guess_undercounts():
     digits = _payload(0)
     digits["messages"][0]["content"] = "1234567890" * 3_000  # 30,000 chars, 30,000 tokens in qwen
