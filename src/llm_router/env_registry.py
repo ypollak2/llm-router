@@ -336,6 +336,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_SLIM": ("llm_router", "tool_surface.py", 1),
     "LLM_ROUTER_STALE_PRESSURE_FLOOR": ("llm_router", "budget.py", 1),
     "LLM_ROUTER_STATE_DIR": ("llm_router", "surface_status.py", 1),
+    "LLM_ROUTER_STATUSLINE_REFRESH_CMD": ("llm_router", "statusline_tick.py", 1),
+    "LLM_ROUTER_STATUSLINE_SLOW_MS": ("llm_router", "statusline_refresh.py", 1),
     "LLM_ROUTER_STATUS_EVERY": ("llm_router", "hooks/status-bar-clawcode.py", 2),
     "LLM_ROUTER_STATUS_MODE": ("llm_router", "hooks/status-bar.py", 1),
     "LLM_ROUTER_STREAMING_JUDGE": ("llm_router", "streaming_judge.py", 1),
@@ -430,9 +432,10 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "RESPONSE": ("external_tool", "hooks/response-router.py", 1),
     "VAULT_ADDR": ("external_tool", "org_policy.py", 1),
     "_SESSION_BUDGET_WARNING": ("external_tool", "hooks/enforce-route.py", 1),
-    # ── platform  (3) ──
+    # ── platform  (4) ──
     "APPDATA": ("platform", "commands/doctor.py", 4),
     "NO_COLOR": ("platform", "commands/budget.py", 16),
+    "PATH": ("platform", "statusline_tick.py", 1),
     "XDG_CONFIG_HOME": ("platform", "install_hooks.py", 1),
     # ── test_only  (1) ──
     "PYTEST_CURRENT_TEST": ("test_only", "config.py", 4),

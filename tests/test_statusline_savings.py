@@ -157,6 +157,7 @@ def _run_statusline(home: Path, stdin_json: dict | None = None) -> str:
         **os.environ,
         "HOME": str(home),
         "LLM_ROUTER_ENFORCE": "soft",
+        "LLM_ROUTER_STATUSLINE": "full",  # the classic layout carries the money segment
         "NO_COLOR": "1",
         "PATH": os.pathsep.join(
             [str(pathlib.Path(sys.executable).parent), os.environ.get("PATH", "")]

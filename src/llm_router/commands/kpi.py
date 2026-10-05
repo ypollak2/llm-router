@@ -362,7 +362,39 @@ def _d3_redo_rate(days: int, allowed: frozenset[str], index) -> dict:
     result = _rate_result(redone, decided, label="decided event", newest_ts=newest, seen=len(rows),
                           backfilled=backfilled)
     result["unknown_window_open"] = unknown
+    result["used"], result["redone"] = used, redone
     return result
+
+
+def _fold_user_signals(d3: dict, days: int, now: float) -> dict:
+    """D3 with the receipt band's presses (``user_signal``) folded in.
+
+    OWNER RULE (2026-10-05): "used" needs a passing test, and a keep press is not one.
+    ``user_redone`` joins D3 as decided redo events (numerator and denominator);
+    ``user_kept`` is reported on its own line and is never added to anything: not to
+    D3's denominator, and never to NS, D1 or D2, which this function does not touch.
+    ``tests/test_user_signal_kpi.py`` fails if a keep ever moves NS, D1 or D2."""
+    from llm_router import user_signal
+
+    sig = user_signal.summarize(days, now=now)
+    kept, user_redone = sig["kept"], sig["redone"]
+    out = dict(d3)
+    if user_redone:
+        redone = d3.get("redone", 0) + user_redone
+        decided = d3.get("used", 0) + redone
+        out = _rate_result(redone, decided, label="decided event",
+                           newest_ts=_newer(d3.get("newest_ts"), sig["newest_ts"]),
+                           seen=(d3.get("seen") or 0) + user_redone, backfilled=d3.get("backfilled", 0))
+        out.update(unknown_window_open=d3.get("unknown_window_open"),
+                   used=d3.get("used", 0), redone=redone)
+    out["user_kept"], out["user_redone"] = kept, user_redone
+    out["lines"] = list(d3.get("lines", ())) + [
+        f"user_redone n={user_redone} (redo on Claude pressed on the receipt band; counted in D3 as "
+        "decided redo events; the row has no session id, so it is not session-kind filtered)",
+        f"user_kept n={kept} (keep pressed; shown only: never counted as used, so never in "
+        "NS, D1, D2 or D3's denominator)",
+    ]
+    return out
 
 
 # ── proxy ledger: the rows behind D4 and G1 ──────────────────────────────────
@@ -1007,7 +1039,7 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
     all_rows = pl.read_rows()
     index = sk.KindIndex(all_rows)
     ns_r, d1_r, d2_r, joins = _ns_d1_d2(days, allowed, index)
-    d3_r = _d3_redo_rate(days, allowed, index)
+    d3_r = _fold_user_signals(_d3_redo_rate(days, allowed, index), days, now_ts)
     pop = _proxy_population(all_rows, days, allowed, now_ts)
     d4_r = _d4_tier_mix(pop)
     g1_hook_r = _g1_hook(days, now_ts, _killed_hooks(days, now_ts))

@@ -81,6 +81,8 @@ Usage:
     llm-router routing-health   — reach, context, USED and latency per day, with n
     llm-router northstar        — routed-and-used share, per session (NS1)
     llm-router kpi              — NS/O1-O2/D1-D5/G1-G4 scorecard; --health: measured/blind/stale
+    llm-router statusline       — status line cache refresh (--refresh); prints the line otherwise
+    llm-router mod              — receipt band mod for Claude Code: install / uninstall (opt-in)
     llm-router sessions         — list recorded sessions
     llm-router config           — show the resolved configuration
     llm-router profile          — show or auto-generate the routing profile
@@ -870,6 +872,8 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "routing-health",
         "northstar",
         "kpi",
+        "statusline",
+        "mod",
         "broker",
         "gateway",
         "proxy",
@@ -1040,6 +1044,14 @@ def main() -> None:
         # KPI-SPEC scorecard: NS, O1-O2, D1-D5, G1-G4.
         from llm_router.commands.kpi import cmd_kpi
         sys.exit(cmd_kpi(args[1:]))
+    elif args and args[0] == "statusline":
+        # The status line's cache refresh (started by the status line itself).
+        from llm_router.statusline_refresh import cmd_statusline
+        sys.exit(cmd_statusline(args[1:]))
+    elif args and args[0] == "mod":
+        # The Claude Code receipt band mod: install / uninstall and its host calls.
+        from llm_router.receipt_band import cmd_mod
+        sys.exit(cmd_mod(args[1:]))
     elif args and args[0] == "invoice":
         from llm_router.commands.invoice import cmd_invoice
         sys.exit(cmd_invoice(args[1:]))
