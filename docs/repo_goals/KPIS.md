@@ -148,7 +148,8 @@ section (a sibling `session_kind_backfill.jsonl.lock` file; the sidecar is re-re
 never write a session twice or interleave a line; a directory the command has to create is 0700, an existing one is
 left as its owner made it. Rules: the sidecar is the LAST step of
 the join (tag file, then the record's own stamp, then agreeing proxy-row stamps, then the sidecar), so a live tag
-always wins; it is write-once per session; a transcript that is missing, unreadable or carries neither field gives
+always wins; it is write-once per session; a transcript that is missing, unreadable, carries neither field, or does not show both within its first 2 MiB (256 KiB
+per line) gives
 `unknown`, which never enters a KPI (it is not organic and not a kind); a session whose proxy rows conflict gets no
 row. Every affected line states its backfilled share, e.g. `n=29,128, 24,244 backfilled`. D4, G1 and G3 do not
 consult the sidecar (D4 and G1 read the kind each proxy row was written with, G3 is not kind-filtered).

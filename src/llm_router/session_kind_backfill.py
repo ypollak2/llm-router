@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import glob as _glob
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -61,6 +62,21 @@ from llm_router.file_lock import exclusive_lock
 BASIS_NO_TRANSCRIPT = "no_transcript"                  # no ~/.claude/projects/*/<sid>.jsonl file
 BASIS_UNREADABLE_TRANSCRIPT = "unreadable_transcript"  # file exists but not one line parsed as JSON
 BASIS_NO_CWD_EVIDENCE = "no_cwd_evidence"              # parsed fine, but no record carries cwd/entrypoint
+BASIS_EVIDENCE_CAP = "evidence_cap"                    # a read cap was hit before cwd AND entrypoint were seen
+
+#: How much of one transcript ``derive_kind`` will read. ``cwd`` and ``entrypoint`` sit on
+#: a transcript's first records, so the loop normally stops within a few KiB; the caps bound
+#: the cases where it would not (a field that never appears reads a multi-hundred-MiB file
+#: to EOF; one enormous line is read whole into memory). Hitting either cap before BOTH
+#: fields are seen is "unknown", never a guess: a missing ``entrypoint`` may be exactly an
+#: ``sdk*`` session that a partial read would have called organic.
+MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024
+MAX_LINE_BYTES = 256 * 1024
+
+#: What a session id looks like (Claude Code's are UUIDs, sub-agents' ``agent-<hex>``): the
+#: charset ``session_kind._safe`` keeps, starting alphanumeric so ``..`` and dotfiles cannot
+#: match. Anything else (a path separator above all) never reaches a glob.
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 #: Not in ``session_kind.VALID_KINDS`` by design -- see the module docstring.
 UNKNOWN_KIND = "unknown"
@@ -163,6 +179,8 @@ def _transcript_path(session_id: str, root: Path | None = None,
                      index: dict[str, Path] | None = None) -> Path | None:
     if index is not None:
         return index.get(session_id)
+    if not isinstance(session_id, str) or not _SESSION_ID_RE.fullmatch(session_id):
+        return None  # ``../../etc/passwd`` must never be interpolated into a glob pattern
     base = root if root is not None else _claude_projects_dir()
     matches = sorted(base.glob(f"*/{_glob.escape(session_id)}.jsonl"))
     return matches[0] if matches else None
@@ -171,22 +189,35 @@ def _transcript_path(session_id: str, root: Path | None = None,
 def derive_kind(session_id: str, root: Path | None = None,
                 index: dict[str, Path] | None = None) -> tuple[str, str]:
     """``(kind, basis)`` for ``session_id`` from its transcript alone. ``kind`` is
-    ``"unknown"`` when the transcript is missing, unreadable, or carries neither a
-    ``cwd`` nor an ``entrypoint`` field on any record -- NEVER ``"organic"`` as a
-    default: missing evidence must stay invisible, not get counted."""
+    ``"unknown"`` when the transcript is missing, unreadable, carries neither a ``cwd``
+    nor an ``entrypoint`` field on any record, or does not show both within
+    ``MAX_TRANSCRIPT_BYTES`` / ``MAX_LINE_BYTES`` -- NEVER ``"organic"`` as a default:
+    missing evidence must stay invisible, not get counted."""
     path = _transcript_path(session_id, root, index)
     if path is None:
         return UNKNOWN_KIND, BASIS_NO_TRANSCRIPT
     cwd: str | None = None
     entrypoint: str | None = None
     saw_any_row = False
+    capped = False
+    read = 0
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                if not line.strip():
+        with path.open("rb") as fh:
+            while True:
+                if read >= MAX_TRANSCRIPT_BYTES:
+                    capped = bool(fh.read(1))   # exactly at EOF is a complete read, not a cap hit
+                    break
+                raw = fh.readline(min(MAX_LINE_BYTES + 1, MAX_TRANSCRIPT_BYTES - read))
+                if not raw:
+                    break
+                read += len(raw)
+                if len(raw) > MAX_LINE_BYTES and not raw.endswith(b"\n"):
+                    capped = True               # one line longer than the cap: stop, do not slurp it
+                    break
+                if not raw.strip():
                     continue
                 try:
-                    row = json.loads(line)
+                    row = json.loads(raw.decode("utf-8", errors="replace"))
                 except ValueError:
                     continue
                 if not isinstance(row, dict):
@@ -200,6 +231,8 @@ def derive_kind(session_id: str, root: Path | None = None,
                     break
     except OSError:
         return UNKNOWN_KIND, BASIS_UNREADABLE_TRANSCRIPT
+    if capped and (cwd is None or entrypoint is None):
+        return UNKNOWN_KIND, BASIS_EVIDENCE_CAP
     if not saw_any_row:
         return UNKNOWN_KIND, BASIS_UNREADABLE_TRANSCRIPT
     if cwd is None and entrypoint is None:

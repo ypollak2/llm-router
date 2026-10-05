@@ -112,6 +112,158 @@ def test_derive_kind_never_defaults_to_organic_on_empty_file(tmp_path):
     assert kind == skb.UNKNOWN_KIND
 
 
+# ── derive_kind: bounded reads ───────────────────────────────────────────────
+
+class _CountingFile:
+    """Wraps a transcript file object and counts the bytes ``derive_kind`` pulls out."""
+    def __init__(self, fh, counter):
+        self._fh, self._counter = fh, counter
+
+    def __enter__(self):
+        self._fh.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._fh.__exit__(*exc)
+
+    def readline(self, *a):
+        data = self._fh.readline(*a)
+        self._counter["bytes"] += len(data)
+        return data
+
+    def read(self, *a):
+        data = self._fh.read(*a)
+        self._counter["bytes"] += len(data)
+        return data
+
+    def __iter__(self):
+        raise AssertionError("derive_kind must read with a bounded readline, not iterate lines")
+
+
+@pytest.fixture
+def bytes_read(monkeypatch):
+    counter = {"bytes": 0}
+    real_open = Path.open
+
+    def counting_open(self, *a, **kw):
+        fh = real_open(self, *a, **kw)
+        mode = a[0] if a else kw.get("mode", "r")
+        return _CountingFile(fh, counter) if (self.suffix == ".jsonl" and mode == "rb") else fh
+
+    monkeypatch.setattr(Path, "open", counting_open)
+    return counter
+
+
+def _junk(n_bytes: int, line_bytes: int = 200) -> bytes:
+    """Valid JSON lines with no cwd/entrypoint, ``n_bytes`` in all."""
+    body = b'{"type": "assistant", "pad": "' + b"x" * (line_bytes - 33) + b'"}\n'
+    assert len(body) == line_bytes
+    return body * (n_bytes // line_bytes)
+
+
+def _evidence(cwd="/Users/x/p", entrypoint="cli") -> bytes:
+    return (json.dumps({"type": "user", "cwd": cwd, "entrypoint": entrypoint}) + "\n").encode()
+
+
+def _raw_transcript(root: Path, sid: str, data: bytes) -> None:
+    d = root / "-Users-someone-project"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{sid}.jsonl").write_bytes(data)
+
+
+def test_derive_kind_stops_at_the_total_cap_and_says_unknown_not_organic(tmp_path, bytes_read):
+    """Evidence only AFTER the cap: it is never read, and the answer is unknown -- not
+    organic, which is what the partial read would otherwise look like."""
+    _raw_transcript(tmp_path, "sid-late", _junk(skb.MAX_TRANSCRIPT_BYTES + 100_000) + _evidence())
+    kind, basis = skb.derive_kind("sid-late", root=tmp_path)
+    assert (kind, basis) == (skb.UNKNOWN_KIND, skb.BASIS_EVIDENCE_CAP)
+    assert bytes_read["bytes"] <= skb.MAX_TRANSCRIPT_BYTES + 1   # the cap, plus the one peek byte
+
+
+def test_derive_kind_does_not_slurp_one_enormous_line(tmp_path, bytes_read):
+    _raw_transcript(tmp_path, "sid-huge", b'{"cwd": "' + b"x" * (6 * 1024 * 1024) + b'"}\n' + _evidence())
+    kind, basis = skb.derive_kind("sid-huge", root=tmp_path)
+    assert (kind, basis) == (skb.UNKNOWN_KIND, skb.BASIS_EVIDENCE_CAP)
+    assert bytes_read["bytes"] <= skb.MAX_LINE_BYTES + 1   # one bounded chunk, not 6 MiB
+
+
+def test_derive_kind_evidence_inside_the_cap_wins_and_the_rest_of_a_huge_file_is_not_read(tmp_path, bytes_read):
+    _raw_transcript(tmp_path, "sid-early", _evidence(entrypoint="sdk-cli") + _junk(3 * 1024 * 1024))
+    assert skb.derive_kind("sid-early", root=tmp_path) == ("headless", session_kind.BASIS_ENTRYPOINT_SDK)
+    assert bytes_read["bytes"] < 1024     # it stopped as soon as it had both fields
+
+
+def test_a_missing_entrypoint_past_the_cap_is_unknown_but_the_same_small_file_is_not(tmp_path):
+    """The false-organic channel the cap closes for big files: cwd seen, entrypoint never
+    seen. Inside the cap the whole file was read and the verdict stands (the existing
+    rule); past it, the unread remainder might hold an ``sdk`` entrypoint."""
+    cwd_only = (json.dumps({"type": "user", "cwd": "/Users/x/p"}) + "\n").encode()
+    _raw_transcript(tmp_path, "sid-small", cwd_only + _junk(50_000))
+    assert skb.derive_kind("sid-small", root=tmp_path) == ("organic", session_kind.BASIS_ORDINARY)
+    _raw_transcript(tmp_path, "sid-big", cwd_only + _junk(skb.MAX_TRANSCRIPT_BYTES + 50_000))
+    assert skb.derive_kind("sid-big", root=tmp_path) == (skb.UNKNOWN_KIND, skb.BASIS_EVIDENCE_CAP)
+
+
+def test_cap_boundaries_are_exact(tmp_path, monkeypatch):
+    monkeypatch.setattr(skb, "MAX_TRANSCRIPT_BYTES", 4096)
+    monkeypatch.setattr(skb, "MAX_LINE_BYTES", 1024)
+    # A file of EXACTLY the total cap, read completely, is a complete read: no cap hit.
+    _raw_transcript(tmp_path, "sid-exact", _junk(4096, 64))
+    assert skb.derive_kind("sid-exact", root=tmp_path) == (skb.UNKNOWN_KIND, skb.BASIS_NO_CWD_EVIDENCE)
+    # One byte more is a cap hit.
+    _raw_transcript(tmp_path, "sid-over", _junk(4096, 64) + b"\n")
+    assert skb.derive_kind("sid-over", root=tmp_path) == (skb.UNKNOWN_KIND, skb.BASIS_EVIDENCE_CAP)
+
+    def line_of(content_bytes: int) -> bytes:
+        row = json.dumps({"type": "user", "cwd": "/Users/x/p", "entrypoint": "cli", "pad": ""})
+        pad = content_bytes - len(row)
+        assert pad >= 0
+        return json.dumps({"type": "user", "cwd": "/Users/x/p", "entrypoint": "cli", "pad": "x" * pad}).encode() + b"\n"
+
+    # A line of exactly the per-line cap is read; one byte longer is a cap hit.
+    _raw_transcript(tmp_path, "sid-line-ok", line_of(1024))
+    assert skb.derive_kind("sid-line-ok", root=tmp_path) == ("organic", session_kind.BASIS_ORDINARY)
+    _raw_transcript(tmp_path, "sid-line-long", line_of(1025))
+    assert skb.derive_kind("sid-line-long", root=tmp_path) == (skb.UNKNOWN_KIND, skb.BASIS_EVIDENCE_CAP)
+
+
+# ── derive_kind: the glob fallback only accepts a session id, never a path ───────
+
+@pytest.mark.parametrize("bad", [
+    "../../etc/passwd", "../outside", "a/b", "a\\b", "/etc/passwd", "..", ".", "", ".hidden",
+    "x*", "x?", "x[ab]", "has space", "nul\x00byte", "é", "a" * 129,
+])
+def test_transcript_path_fallback_rejects_anything_that_is_not_a_session_id(tmp_path, bad):
+    root = tmp_path / "a" / "claude-projects"
+    (root / "-proj").mkdir(parents=True)
+    # Decoys a traversal or a glob metacharacter would reach.
+    (tmp_path / "a" / "etc").mkdir()
+    (tmp_path / "a" / "etc" / "passwd.jsonl").write_text(json.dumps({"cwd": "/tmp/sandbox"}) + "\n")
+    (root / "outside.jsonl").write_text(json.dumps({"cwd": "/tmp/sandbox"}) + "\n")
+    (root / "-proj" / "xa.jsonl").write_text(json.dumps({"cwd": "/tmp/sandbox"}) + "\n")
+    assert skb._transcript_path(bad, root) is None
+    assert skb.derive_kind(bad, root=root) == (skb.UNKNOWN_KIND, skb.BASIS_NO_TRANSCRIPT)
+
+
+def test_the_traversal_decoy_is_really_reachable_by_the_raw_pattern(tmp_path):
+    """Control for the test above: without the id check, ``../../etc/passwd`` would have
+    matched a file outside the projects directory, so the rejection is doing the work."""
+    root = tmp_path / "a" / "claude-projects"
+    (root / "-proj").mkdir(parents=True)
+    (tmp_path / "a" / "etc").mkdir()
+    decoy = tmp_path / "a" / "etc" / "passwd.jsonl"
+    decoy.write_text("{}\n")
+    raw = sorted(root.glob("*/" + __import__("glob").escape("../../etc/passwd") + ".jsonl"))
+    assert [p.resolve() for p in raw] == [decoy.resolve()]
+
+
+@pytest.mark.parametrize("good", ["d41e6a2c-7b3d-4f58-9a10-2d6e8c0b4f70", "agent-a1b2c3", "sid-organic", "s_1.2"])
+def test_transcript_path_fallback_still_finds_ordinary_session_ids(tmp_path, good):
+    _write_transcript(tmp_path, good, [{"type": "user", "cwd": "/Users/x/p"}])
+    assert skb._transcript_path(good, tmp_path) is not None
+    assert skb.derive_kind(good, root=tmp_path) == ("organic", session_kind.BASIS_ORDINARY)
+
+
 # ── backfill_sessions: write-once, live-wins, dry-run ─────────────────────────
 
 def test_write_once_second_run_adds_nothing(tmp_path):
