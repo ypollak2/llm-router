@@ -358,3 +358,47 @@ def test_normalize_call_repairs_mechanically_and_never_invents():
     assert a["edits"] == [{"old_string": "x", "new_string": "y"}]
     n, a, _ = normalize_call("read", {})
     assert a == {}
+
+
+# ── a busy Ollama must not look like a model that gave up ───────────────────
+
+
+def test_empty_server_replies_are_retried_not_treated_as_a_model_decision(iso, monkeypatch):
+    tmp, src = iso
+    import llm_router.toolkit.loop as loop_mod
+    monkeypatch.setattr(loop_mod, "_TRANSIENT_SLEEP_S", 0.0)
+    state = {"n": 0}
+
+    class Flaky(Scripted):
+        def chat(self, messages, tools, *, timeout_s):
+            state["n"] += 1
+            if state["n"] <= 2:
+                raise AdapterError("empty_reply: ollama returned no message and done=false", retryable=True)
+            return super().chat(messages, tools, timeout_s=timeout_s)
+
+    res = run_task("x", adapter=Flaky([call("write", path="a.txt", content="hi")]), source=src, workspace_parent=tmp)
+    assert res.status == "done" and res.changed_files == ["a.txt"] and res.steps == 2
+
+
+def test_persistent_server_faults_end_the_run_as_an_error_not_a_blocked_task(iso, monkeypatch):
+    tmp, src = iso
+    import llm_router.toolkit.loop as loop_mod
+    monkeypatch.setattr(loop_mod, "_TRANSIENT_SLEEP_S", 0.0)
+
+    class Dead(Scripted):
+        def chat(self, *a, **k):
+            raise AdapterError("empty_reply", retryable=True)
+
+    res = run_task("x", adapter=Dead([]), source=src, workspace_parent=tmp)
+    assert res.status == "error" and "empty_reply" in res.stop_reason
+
+
+def test_ollama_adapter_turns_an_empty_done_false_reply_into_a_retryable_error(monkeypatch):
+    import io
+    from llm_router.toolkit.adapters import ollama as O
+    body = json.dumps({"model": "", "message": {"role": "", "content": ""}, "done": False}).encode()
+    monkeypatch.setattr(O.urllib.request, "urlopen", lambda *a, **k: io.BytesIO(body))
+    monkeypatch.setattr(O, "check_overflow", lambda *a, **k: None)
+    with pytest.raises(AdapterError) as ei:
+        O.OllamaAdapter("m").chat([{"role": "user", "content": "x"}], [], timeout_s=5)
+    assert ei.value.retryable

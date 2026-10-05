@@ -173,7 +173,12 @@ TOOLKIT_NUM_CTX = 25000          # PLAN section 2.3: 25k-token cap for the local
 
 
 class AdapterError(Exception):
-    pass
+    """The model call failed. `retryable` marks a transient server-side condition (an empty
+    reply with done:false, which a busy or restarting Ollama returns), not a model decision."""
+
+    def __init__(self, message: str, *, retryable: bool = False):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 @dataclass
@@ -224,9 +229,13 @@ class OllamaAdapter:
                 result = json.loads(resp.read())
         except Exception as exc:  # noqa: BLE001
             raise AdapterError(f"llm_unreachable: {type(exc).__name__}: {exc}") from exc
+        if result.get("error"):
+            raise AdapterError(f"ollama_error: {str(result['error'])[:200]}", retryable=True)
         msg = result.get("message", {}) or {}
         content = msg.get("content", "") or ""
         calls = list(msg.get("tool_calls") or [])
+        if not content and not calls and not msg.get("thinking") and result.get("done") is not True:
+            raise AdapterError("empty_reply: ollama returned no message and done=false", retryable=True)
         repaired = False
         if not calls and content:
             calls = parse_constrained_call(content, names) if self.constrained else []

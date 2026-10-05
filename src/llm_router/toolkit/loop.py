@@ -25,6 +25,8 @@ from llm_router.toolkit.tools import TOOL_DEFINITIONS, ToolContext, execute, wra
 
 SAFETY_RULES = frozenset({"path_outside_workspace", "secret", "protected"})
 _MAX_NUDGES = 2
+_MAX_TRANSIENT = 4
+_TRANSIENT_SLEEP_S = 5.0
 
 
 @dataclass
@@ -143,7 +145,7 @@ def run_task(task: str, *, adapter, source: str | os.PathLike, verify_cmd: str |
     guard = LoopGuard(max_consecutive=0, repeat_window=3)
     tin = tout = 0
     saw_usage = False
-    steps = nudges = repeats = calls_made = 0
+    steps = nudges = repeats = calls_made = transient = 0
     finish: dict | None = None
     stop = "max_steps"
     try:
@@ -166,8 +168,16 @@ def run_task(task: str, *, adapter, source: str | os.PathLike, verify_cmd: str |
                 reply = adapter.chat(messages, TOOL_DEFINITIONS,
                                      timeout_s=min(b.call_timeout_s, max(5.0, b.max_seconds - elapsed)))
             except AdapterError as exc:
+                if exc.retryable and transient < _MAX_TRANSIENT:
+                    transient += 1
+                    steps -= 1                      # a transient server fault is not a model step
+                    R.append_private_jsonl(run_dir / "transcript.jsonl",
+                                           {"kind": "transient", "n": transient, "error": str(exc)[:200]})
+                    time.sleep(_TRANSIENT_SLEEP_S)
+                    continue
                 stop = f"adapter: {exc}"[:200]
                 break
+            transient = 0
             R.append_private_jsonl(run_dir / "transcript.jsonl", {
                 "kind": "assistant", "step": steps, "ms": reply.ms, "repaired": reply.repaired,
                 "content": persist_redact((reply.content or "")[:1500]),
