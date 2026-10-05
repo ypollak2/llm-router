@@ -276,7 +276,7 @@ def _result_text(block: dict) -> str:
     return " ".join(x.get("text", "") for x in _blocks(c) if isinstance(x, dict))
 
 
-def check_applied(pending: dict, result_block: dict, cwd: str | None) -> str | None:
+def check_applied(pending: dict, result_block: dict, cwd: str | None = None) -> str | None:
     """``None`` when the served edit is in place and the file still parses, else
     a short reason. Run at the step AFTER the edit, against the file on disk:
     that is the first moment the client has applied it."""
@@ -289,8 +289,13 @@ def check_applied(pending: dict, result_block: dict, cwd: str | None) -> str | N
     if not isinstance(path, str) or not path:
         return "edit without a file_path"
     p = Path(path).expanduser()
-    if not p.is_absolute() and cwd:
-        p = Path(cwd) / p
+    if not p.is_absolute():
+        # Claude Code's Write/Edit take absolute paths. A relative one is the
+        # local model dropping the leading "/" ("private/tmp/..."): the client
+        # resolves it under the working directory and reports success, so the
+        # file exists but not where the model meant (route A write probe, 2026-10-05).
+        return (f"file_path {path!r} is not absolute; it was resolved under the working directory, "
+                f"which is probably not the file you meant. Use the full absolute path")
     try:
         text = p.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:

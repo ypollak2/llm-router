@@ -370,6 +370,16 @@ async def test_write_is_served_and_compared_with_the_file_on_disk(env, tmp_path)
     assert "does not hold the content that was written" in json.dumps(backend.calls[1]["messages"])
 
 
+async def test_a_write_to_a_relative_path_is_flagged_because_the_model_dropped_the_slash(env, tmp_path):
+    rel = str(tmp_path / "n.txt").lstrip("/")  # "private/var/..." the way the probe saw it
+    backend = Backend(_ollama("", [_call("Write", {"file_path": rel, "content": "hi\n"})]), _ollama("Done."))
+    app = env.app(backend)
+    first = await _post(app, _first_call())
+    await _post(app, _next_turn(_first_call(), {"content": _served_blocks(first)}))
+    assert "is not absolute" in json.dumps(backend.calls[1]["messages"])
+    assert env.rows()[1]["post_apply_checks"][0]["ok"] is False
+
+
 async def test_a_client_error_on_the_edit_is_not_a_check_failure(env, tmp_path):
     target = tmp_path / "a.py"
     target.write_text("x = 1\n")
