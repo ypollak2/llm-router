@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 40
+# llm_router-hook-version: 41
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -196,7 +196,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 40"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 41"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -437,6 +437,38 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_
 _CC_MODE = os.environ.get("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "").lower() in ("true", "1", "yes")
 
 
+# Age (seconds) of the reading the last _get_pressure() call served, or None
+# when it served nothing from usage.json. Read by _stale_pressure_note().
+_PRESSURE_AGE_S: float | None = None
+
+_UNKNOWN_PRESSURE = {"session": 0.0, "sonnet": 0.0, "weekly": 0.0}
+
+
+def _quota_max_age_seconds() -> float:
+    """Age past which a usage.json reading is UNKNOWN, not merely stale.
+
+    Serving the cached value while a detached refresh runs is fine for
+    minutes-to-hours; a days-old 99% must not downgrade or override like a
+    fresh one (review finding on #271). Default 6 h, env-overridable.
+    """
+    try:
+        return float(os.environ.get("LLM_ROUTER_QUOTA_MAX_AGE", "21600"))
+    except ValueError:
+        return 21600.0
+
+
+def _stale_pressure_note() -> str:
+    """Marker for downgrade/override branches fed by data older than the TTL."""
+    age = _PRESSURE_AGE_S
+    try:
+        ttl = int(os.environ.get("LLM_ROUTER_QUOTA_TTL", "300"))
+    except ValueError:
+        ttl = 300
+    if age is None or age < ttl:
+        return ""
+    return f" [⚠️ STALE USAGE DATA {int(age // 60)}min old]"
+
+
 def _get_pressure() -> dict[str, float]:
     """Read per-bucket Claude subscription pressure from usage.json or SQLite.
 
@@ -450,6 +482,8 @@ def _get_pressure() -> dict[str, float]:
     - If cache stale (age >= TTL): attempt inline refresh before routing
     - If no cache or OAuth fails: use conservative fallback (0.0)
     """
+    global _PRESSURE_AGE_S
+    _PRESSURE_AGE_S = None
     usage_path = _router_home() / "usage.json"
     ttl_seconds = int(os.environ.get("LLM_ROUTER_QUOTA_TTL", "300"))
 
@@ -482,8 +516,14 @@ def _get_pressure() -> dict[str, float]:
         if not is_fresh and _claim_usage_refresh_spawn():
             _spawn_background_usage_refresh()
 
+        # Older than the max age: UNKNOWN, not a stale number to act on.
+        # (The refresh was already kicked off above.)
+        if age_s > _quota_max_age_seconds():
+            return dict(_UNKNOWN_PRESSURE)
+
         # Cache is fresh, or stale with a refresh now running in the
         # background — either way, the cached values are what routing sees.
+        _PRESSURE_AGE_S = age_s
         return {
             "session": _frac(raw, "session_pct"),
             "sonnet":  _frac(raw, "sonnet_pct"),
@@ -554,12 +594,12 @@ def _apply_pressure_downgrade(complexity: str, pressure: dict[str, float]) -> tu
 
     if sonnet_pct >= 0.95 or weekly_pct >= 0.95:
         if complexity == "complex":
-            return "moderate", " [⬇ sonnet-exhausted: complex→moderate]"
+            return "moderate", " [⬇ sonnet-exhausted: complex→moderate]" + _stale_pressure_note()
         if complexity == "moderate":
-            return "simple", " [⬇ sonnet-exhausted: moderate→simple]"
+            return "simple", " [⬇ sonnet-exhausted: moderate→simple]" + _stale_pressure_note()
     elif sonnet_pct >= 0.85:
         if complexity == "complex":
-            return "moderate", " [⬇ sonnet-high: complex→moderate]"
+            return "moderate", " [⬇ sonnet-high: complex→moderate]" + _stale_pressure_note()
 
     return complexity, ""
 
@@ -595,9 +635,13 @@ def _usage_refresh_spawn_file() -> str:
 def _usage_refresh_marker_age() -> float | None:
     """Seconds since the spawn marker was last touched, or None if absent."""
     try:
-        return time.time() - os.path.getmtime(_usage_refresh_spawn_file())
+        age = time.time() - os.path.getmtime(_usage_refresh_spawn_file())
     except OSError:
         return None
+    # A future-dated marker (clock skew, restored backup) has negative age and
+    # would sit "inside the cooldown" until the clock catches up: treat it as
+    # expired.
+    return age if age >= 0 else float("inf")
 
 
 def _claim_usage_refresh_spawn(cooldown_s: float | None = None) -> bool:
@@ -674,6 +718,30 @@ def _usage_refresh_script_path() -> Path | None:
     return None
 
 
+# Beyond the allowlist (HOME/USER/PATH reach the macOS keychain; LLM_ROUTER_*
+# carries LLM_ROUTER_HOME), usage-refresh does an HTTPS call via urllib, which
+# honours these proxy / CA variables.
+_REFRESH_CHILD_NET_ENV = (
+    "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+    "NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+)
+
+
+def _refresh_child_env() -> dict[str, str] | None:
+    """Minimal env for the detached refresh child (None = inherit, if the
+    allowlist helper is unavailable — same fallback as llm_router.file_lock)."""
+    try:
+        from llm_router.safe_subprocess import get_delegated_env
+    except Exception:
+        return None
+    extra = {
+        k: v for k, v in os.environ.items()
+        if k.startswith("LLM_ROUTER_") or k in _REFRESH_CHILD_NET_ENV
+    }
+    return get_delegated_env(extra=extra)
+
+
 def _spawn_background_usage_refresh() -> None:
     """Fire-and-forget the EXISTING usage-refresh hook with no stdin payload
     — the same invocation the statusline already uses to refresh out of
@@ -707,6 +775,7 @@ def _spawn_background_usage_refresh() -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            env=_refresh_child_env(),
         )
     except Exception as _spawn_exc:  # noqa: BLE001 — never break a turn
         # Fail-open, NOT silent (failopen ratchet): a refresh that cannot be
@@ -4696,7 +4765,7 @@ def main() -> None:
                 _critical_bucket, _critical_value = _critical
                 directive = (
                     f"⚡ SUBSCRIPTION OVERRIDE: {task_type}/{complexity} → /model claude-opus-4-6"
-                    f" [CRITICAL PRESSURE: {_critical_bucket}={_critical_value:.0%}] "
+                    f" [CRITICAL PRESSURE: {_critical_bucket}={_critical_value:.0%}]{_stale_pressure_note()} "
                     f"| Handle directly (subscription included). Do NOT call llm_* tools."
                 )
                 _debug_log(f"[INVOCATION {invocation_id:.3f}] CRITICAL PRESSURE: routing to Opus")

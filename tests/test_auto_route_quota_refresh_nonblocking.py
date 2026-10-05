@@ -160,27 +160,50 @@ def test_stdout_and_exit_code_match_fresh_cache_run(sandbox):
     assert decision(stale.stdout) == decision(fresh.stdout)
 
 
-def test_two_near_simultaneous_invocations_start_one_refresh(sandbox):
-    hooks, home, tmp = sandbox
-    _write_usage(home, age_s=900)
-    (tmp / "home").mkdir(exist_ok=True)
-    payload = json.dumps({
+def _payload(tmp: Path) -> str:
+    return json.dumps({
         "session_id": "t", "prompt": "what is the capital of france",
         "hook_event_name": "UserPromptSubmit", "cwd": str(tmp),
         "transcript_path": str(tmp / "t.jsonl"),
     })
-    procs = [
-        subprocess.Popen([sys.executable, str(hooks / "auto-route.py")],
-                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE, text=True, env=_env(home, tmp))
-        for _ in range(2)
-    ]
-    for p in procs:
-        p.communicate(payload, timeout=60)
-    assert _wait_for(home / "stub_started.log")
-    time.sleep(1.0)
-    started = (home / "stub_started.log").read_text().splitlines()
-    assert started == ["started"], f"expected exactly one refresh, got {started}"
+
+
+def test_concurrent_invocations_start_one_refresh(sandbox):
+    """6 hooks at once, 3 rounds, each round on a fresh marker. Weak alone (the
+    check-then-touch window is tiny) - the flock test below is the
+    deterministic guard; this one covers the real multi-process shape."""
+    hooks, home, tmp = sandbox
+    (tmp / "home").mkdir(exist_ok=True)
+    for rnd in range(3):
+        for f in ("usage_refresh_spawn.txt", "stub_started.log"):
+            (home / f).unlink(missing_ok=True)
+        _write_usage(home, age_s=900)
+        procs = [
+            subprocess.Popen([sys.executable, str(hooks / "auto-route.py")],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, env=_env(home, tmp))
+            for _ in range(6)
+        ]
+        for p in procs:
+            p.communicate(_payload(tmp), timeout=60)
+        assert _wait_for(home / "stub_started.log")
+        time.sleep(0.5)
+        started = (home / "stub_started.log").read_text().splitlines()
+        assert started == ["started"], f"round {rnd}: expected one refresh, got {started}"
+
+
+def test_claim_is_serialized_by_the_flock(sandbox):
+    """Deterministic: while another process holds the claim lock, a hook must
+    not spawn - even though the marker is absent and usage.json is stale."""
+    import fcntl
+    hooks, home, tmp = sandbox
+    _write_usage(home, age_s=900)
+    with open(home / "usage_refresh_spawn.txt.lock", "w") as lockf:
+        fcntl.flock(lockf, fcntl.LOCK_EX)
+        _run_hook(hooks, home, tmp)
+        time.sleep(1.0)
+        assert not (home / "stub_started.log").exists(), "spawned despite held claim lock"
+    assert not (home / "usage_refresh_spawn.txt").exists()
 
 
 def test_back_to_back_runs_do_not_respawn_within_cooldown(sandbox):
@@ -231,3 +254,72 @@ def test_missing_refresh_script_degrades_without_blocking(sandbox):
     _write_usage(home, age_s=900)
     elapsed, r = _run_hook(hooks, home, tmp)
     assert r.returncode == 0 and elapsed < 3.0
+
+
+def test_future_dated_marker_does_not_block_refresh(sandbox):
+    hooks, home, tmp = sandbox
+    _write_usage(home, age_s=900)
+    marker = home / "usage_refresh_spawn.txt"
+    marker.write_text("0")
+    future = time.time() + 30 * 86400
+    os.utime(marker, (future, future))
+    _run_hook(hooks, home, tmp)
+    assert _wait_for(home / "stub_started.log"), "a future-dated marker blocked the refresh"
+
+
+def test_spawn_is_detached_and_env_is_minimal(sandbox, monkeypatch):
+    hooks, home, tmp = sandbox
+    mod = _load_hook(hooks, monkeypatch, home)
+    monkeypatch.setenv("FAKE_PROVIDER_API_KEY", "sk-secret")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy:1")
+    seen = {}
+    monkeypatch.setattr(mod.subprocess, "Popen", lambda argv, **kw: seen.update(kw))
+    mod._spawn_background_usage_refresh()
+    assert seen.get("start_new_session") is True
+    env = seen["env"]
+    assert env["LLM_ROUTER_HOME"] == str(home)
+    assert "HOME" in env and "PATH" in env and env["HTTPS_PROXY"] == "http://proxy:1"
+    assert "FAKE_PROVIDER_API_KEY" not in env
+
+
+def _age_pressure(sandbox, monkeypatch, age_s, pct=99.0, ttl=None):
+    hooks, home, tmp = sandbox
+    _write_usage(home, age_s=age_s, session_pct=pct)
+    (home / "usage.json").write_text(json.dumps({
+        "session_pct": pct, "weekly_pct": pct, "sonnet_pct": pct,
+        "updated_at": time.time() - age_s,
+    }))
+    mod = _load_hook(hooks, monkeypatch, home)
+    monkeypatch.setattr(mod, "_spawn_background_usage_refresh", lambda: None)
+    monkeypatch.delenv("LLM_ROUTER_QUOTA_MAX_AGE", raising=False)
+    return mod
+
+
+def test_fresh_99_downgrades_without_stale_marker(sandbox, monkeypatch):
+    mod = _age_pressure(sandbox, monkeypatch, age_s=10)
+    p = mod._get_pressure()
+    assert mod._apply_pressure_downgrade("complex", p) == ("moderate", " [⬇ sonnet-exhausted: complex→moderate]")
+    assert mod._critical_pressure_reading(p) is not None
+
+
+def test_two_hour_old_99_downgrades_and_carries_stale_marker(sandbox, monkeypatch):
+    mod = _age_pressure(sandbox, monkeypatch, age_s=2 * 3600)
+    p = mod._get_pressure()
+    cx, suffix = mod._apply_pressure_downgrade("complex", p)
+    assert cx == "moderate" and "STALE USAGE DATA" in suffix
+    assert mod._critical_pressure_reading(p) is not None
+    assert "STALE USAGE DATA" in mod._stale_pressure_note()
+
+
+def test_seven_hour_old_99_is_unknown(sandbox, monkeypatch):
+    mod = _age_pressure(sandbox, monkeypatch, age_s=7 * 3600)
+    p = mod._get_pressure()
+    assert p == {"session": 0.0, "sonnet": 0.0, "weekly": 0.0}
+    assert mod._apply_pressure_downgrade("complex", p) == ("complex", "")
+    assert mod._critical_pressure_reading(p) is None
+
+
+def test_max_age_is_env_overridable(sandbox, monkeypatch):
+    mod = _age_pressure(sandbox, monkeypatch, age_s=7 * 3600)
+    monkeypatch.setenv("LLM_ROUTER_QUOTA_MAX_AGE", str(8 * 3600))
+    assert mod._get_pressure()["session"] == pytest.approx(0.99)
