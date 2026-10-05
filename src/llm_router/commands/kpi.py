@@ -865,7 +865,7 @@ def _d5_predicted_line(d5: dict) -> list[str]:
         return []
     dist = ", ".join(f"{t} {counts[t]}" for t in ("haiku", "sonnet", "opus") if t in counts)
     line = f"classifier predicted: {dist}"
-    if counts.get("haiku", 0) == 0:
+    if not counts.get("haiku"):
         line += " -- never predicted haiku, so the under-route rate is not informative"
     return [line]
 
