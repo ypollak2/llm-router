@@ -8,7 +8,9 @@ actually returned, so it is the source of truth; ``total_cost_usd`` is only
 ever shown next to it, labelled :data:`UNRELIABLE`.
 
 PER-CALL FIELDS, added to every ledger row by :func:`annotate` (the key is
-always present; an unknown value is ``null``, never 0):
+always present; for rows written since #261 an unknown value is ``null``, never 0.
+Rows written BEFORE #261 carry zeros for unknown usage and cannot be told apart
+from a real zero, so "unknown is null" is not a ledger-wide invariant):
 
   served_by               "local" (a non-Claude backend answered) | "anthropic"
                           (forwarded, or a local attempt that fell back)

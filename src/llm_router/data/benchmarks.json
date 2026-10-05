@@ -1,11 +1,11 @@
 {
-  "version": 3,
-  "generated_at": "2026-09-28T12:40:56.651317+00:00",
+  "version": 4,
+  "generated_at": "2026-10-05T13:21:37.790237+00:00",
   "sources": {
-    "lmsys_fetched_at": "2026-09-28T12:40:56.651317+00:00",
-    "aider_fetched_at": "2026-09-28T12:40:56.651317+00:00",
+    "lmsys_fetched_at": "2026-10-05T13:21:37.790237+00:00",
+    "aider_fetched_at": "2026-10-05T13:21:37.790237+00:00",
     "huggingface_fetched_at": null,
-    "litellm_fetched_at": "2026-09-28T12:40:56.651317+00:00"
+    "litellm_fetched_at": "2026-10-05T13:21:37.790237+00:00"
   },
   "raw_scores": {
     "anthropic/claude-haiku-4-5-20251001": {

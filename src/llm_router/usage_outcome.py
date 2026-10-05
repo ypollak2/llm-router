@@ -85,6 +85,10 @@ _REASK_TOOLS = frozenset({"Agent", "Task"})
 _NON_HUMAN_PREFIXES = ("<system-reminder", "<command-", "<local-command", "<task-notification",
                        "<user-prompt-submit-hook", "Caveat:")
 _OVERRIDE_RE = re.compile(r"^\s*(?:claude|native|opus)\s*:", re.IGNORECASE)
+# The receipt band's `r` prompt starts with `claude:` (so the proxy escalates) and ends with
+# this sentinel (hooks/logic.mjs REDO_MARK). The press is already one ``user_signal`` row that
+# D3 folds in (commands/kpi.py), so the override detector must not count the same redo again.
+BAND_REDO_MARK = "[receipt-band:redo]"
 _GIT_UNDO_RE = re.compile(r"\bgit\s+(?:checkout|restore|revert|reset|stash)\b")
 _JSON_BLOCK_RE = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
 _WORD_RE = re.compile(r"[a-z0-9]+")
@@ -376,7 +380,7 @@ def _judge_answer(ev: Event, window: list[_Rec], recs: list[_Rec]) -> tuple[str,
         return OUTCOME_UNKNOWN, "no_result"
     mine = _input_text(ev.tool_input)
     for r in window:
-        if r.human and _OVERRIDE_RE.match(r.human):
+        if r.human and _OVERRIDE_RE.match(r.human) and BAND_REDO_MARK not in r.human:
             return OUTCOME_REDONE, "overridden"
         for tu in _tool_uses(r.rec):
             if tu.get("id") == ev.event_id:

@@ -10,6 +10,26 @@
 # IMPORTANT: Must consume stdin — Claude Code pipes session JSON here.
 # Without reading it, the pipe blocks and Claude Code times out.
 
+# ── Fast path (the default) ──────────────────────────────────────────────────
+# Claude Code runs this command about once a second. The classic layout below
+# spawns a dozen python3 processes and queries sqlite (measured 380-680 ms per
+# run on a warm cache), so it cannot meet a 100 ms budget. The default is now
+# llm_router_statusline_tick.py: ONE short line (llm-router, mode, North Star
+# with n, Claude weekly quota, Codex window, a slow-hooks warning) read from a
+# small cache file that is refreshed in the background at most once a minute.
+# It never computes a KPI and never waits on the refresh; missing data prints
+# "n/a", never 0. LLM_ROUTER_STATUSLINE=full keeps the classic layout.
+# -I: the source tree's own types.py sits beside statusline_tick.py and would
+# shadow the stdlib module of that name if the script's folder were on sys.path.
+# -S: the tick is stdlib-only, and skipping site saves ~8 ms a tick.
+if [ "${LLM_ROUTER_STATUSLINE:-compact}" != "full" ]; then
+    _tick="${0%/*}/llm_router_statusline_tick.py"
+    [ -f "$_tick" ] || _tick="${0%/*}/../statusline_tick.py"
+    if [ -f "$_tick" ] && command -v python3 >/dev/null 2>&1; then
+        exec python3 -I -S "$_tick"
+    fi
+fi
+
 input=$(cat)
 session_cwd=$(printf '%s' "$input" | python3 -c "
 import json, sys

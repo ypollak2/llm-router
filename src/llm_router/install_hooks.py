@@ -519,6 +519,8 @@ def _backup_before_overwrite(dst: Path) -> Path | None:
 # the consolidated default. (src relative to the package dir, dst under ~/.claude/hooks/)
 _HOOK_SUPPORT_FILES: tuple[tuple[str, str], ...] = (
     ("tool_surface.py", "llm_router_tool_surface.py"),
+    # The status line's per-tick renderer (statusline-command.sh execs it).
+    ("statusline_tick.py", "llm_router_statusline_tick.py"),
 )
 
 

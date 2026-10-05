@@ -362,7 +362,39 @@ def _d3_redo_rate(days: int, allowed: frozenset[str], index) -> dict:
     result = _rate_result(redone, decided, label="decided event", newest_ts=newest, seen=len(rows),
                           backfilled=backfilled)
     result["unknown_window_open"] = unknown
+    result["used"], result["redone"] = used, redone
     return result
+
+
+def _fold_user_signals(d3: dict, days: int, now: float) -> dict:
+    """D3 with the receipt band's presses (``user_signal``) folded in.
+
+    OWNER RULE (2026-10-05): "used" needs a passing test, and a keep press is not one.
+    ``user_redone`` joins D3 as decided redo events (numerator and denominator);
+    ``user_kept`` is reported on its own line and is never added to anything: not to
+    D3's denominator, and never to NS, D1 or D2, which this function does not touch.
+    ``tests/test_user_signal_kpi.py`` fails if a keep ever moves NS, D1 or D2."""
+    from llm_router import user_signal
+
+    sig = user_signal.summarize(days, now=now)
+    kept, user_redone = sig["kept"], sig["redone"]
+    out = dict(d3)
+    if user_redone:
+        redone = d3.get("redone", 0) + user_redone
+        decided = d3.get("used", 0) + redone
+        out = _rate_result(redone, decided, label="decided event",
+                           newest_ts=_newer(d3.get("newest_ts"), sig["newest_ts"]),
+                           seen=(d3.get("seen") or 0) + user_redone, backfilled=d3.get("backfilled", 0))
+        out.update(unknown_window_open=d3.get("unknown_window_open"),
+                   used=d3.get("used", 0), redone=redone)
+    out["user_kept"], out["user_redone"] = kept, user_redone
+    out["lines"] = list(d3.get("lines", ())) + [
+        f"user_redone n={user_redone} (redo on Claude pressed on the receipt band; counted in D3 as "
+        "decided redo events; the row has no session id, so it is not session-kind filtered)",
+        f"user_kept n={kept} (keep pressed; shown only: never counted as used, so never in "
+        "NS, D1, D2 or D3's denominator)",
+    ]
+    return out
 
 
 # ── proxy ledger: the rows behind D4 and G1 ──────────────────────────────────
@@ -523,11 +555,11 @@ def _g1_hook(days: int, now: float, killed: int | None) -> dict:
                 worst = (p95 / budget, name, round(p95))
         hooks[name] = entry
     if killed is None:
-        lines.append("killed by the host (leaves no row): not countable yet -- no timestamped "
-                     "fail-open event exists to count CHZ-HOOK-KILLED from")
+        lines.append("killed by the host (leaves no row) (auto-route only): not countable yet -- no "
+                     "timestamped fail-open event exists to count CHZ-HOOK-KILLED from")
     else:
         lines.append(f"killed by the host (leaves no row; CHZ-HOOK-KILLED in the fail-open "
-                     f"ledger): {killed} in window")
+                     f"ledger) (auto-route only): {killed} in window")
 
     n_rows = len(rows)
     newest = rows[-1]["ts"]                      # read_rows is oldest first
@@ -874,20 +906,37 @@ def _g2_silent_failures(days: int, now: float, proxy_rows: list[dict]) -> dict:
     win = failopen.windowed(since=since, until=now)
     hook_ts = [r["ts"] for r in hook_all if since <= r["ts"] <= now]
     proxy_ts = [t for t in (_num_ts(r.get("ts")) for r in proxy_rows) if t is not None and since <= t <= now]
-    hook_calls, proxy_calls = len(hook_ts), len(proxy_ts)
+    # A host-killed hook writes no hook_latency row but DOES leave a CHZ-HOOK-KILLED
+    # event, which is in the numerator. Count it in the denominator too: it was an
+    # invocation. Without it the rate is biased upward by the kill rate.
+    hook_killed = win.by_code.get("CHZ-HOOK-KILLED", 0)
+    hook_calls, proxy_calls = len(hook_ts) + hook_killed, len(proxy_ts)
     calls = hook_calls + proxy_calls
-    newest = max(hook_ts + proxy_ts) if calls else None      # the feed's last sign of life
+    observed = len(hook_ts) + len(proxy_ts)                 # calls that left a row
+    kill_ts = win.last_ts_by_code.get("CHZ-HOOK-KILLED")
+    # Every timestamp that counts toward ``calls``, kill events included; the list
+    # can be empty only when calls == 0.
+    stamps = hook_ts + proxy_ts + ([kill_ts] if hook_killed and kill_ts is not None else [])
+    newest = max(stamps) if stamps else None                 # the feed's last sign of life
     events = win.in_window
     lines = [alltime]
     if since > since_req:
         lines.append(f"window starts at the first timestamped evidence, {_iso(since)} "
                      f"(requested {days}d back)")
     base = {"all_time_total": total, "untimestamped": probe.untimestamped, "events": events,
-            "calls": calls, "hook_calls": hook_calls, "proxy_calls": proxy_calls,
+            "calls": calls, "hook_calls": hook_calls, "hook_killed": hook_killed,
+            "proxy_calls": proxy_calls,
             "window_start": round(since, 3), "lines": lines}
 
     if calls == 0:
         return _not_measurable(f"no hook invocation or proxy call recorded since {_iso(since)}") | base
+    if observed == 0:
+        # Every counted call is a host kill: the denominator is the numerator's own
+        # events, so the rate would be 100% by construction. Say so, don't print it.
+        return _not_measurable(
+            f"n={calls} call(s) from killed hooks only (no hook_latency row or proxy call in "
+            f"the window since {_iso(since)}), so a rate would be 100% by construction",
+            seen=calls, newest_ts=newest) | base
     if calls < MIN_N:
         return _too_few(calls, newest_ts=newest) | {"value": f"{TOO_FEW} (n={calls} calls; {events} fail-open "
                                                              f"event(s) so far)"} | base
@@ -899,7 +948,8 @@ def _g2_silent_failures(days: int, now: float, proxy_rows: list[dict]) -> dict:
     by_code = dict(sorted(win.by_code.items(), key=lambda kv: (-kv[1], kv[0])))
     top = list(by_code.items())[:_TOP_CODES]
     rate = events / calls * 100.0
-    lines.insert(0, f"calls: {hook_calls} hook invocation(s) + {proxy_calls} proxy call(s), all "
+    lines.insert(0, f"calls: {hook_calls} hook invocation(s) (incl. {hook_killed} killed by the host, "
+                    f"which leave no latency row) + {proxy_calls} proxy call(s), all "
                     "session kinds (a fail-open row names no session)")
     for i, (code, n) in enumerate(top):
         lines.insert(1 + i, f"  {code}: {n / calls * 100.0:.2f} per 100 calls ({n})")
@@ -989,7 +1039,7 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
     all_rows = pl.read_rows()
     index = sk.KindIndex(all_rows)
     ns_r, d1_r, d2_r, joins = _ns_d1_d2(days, allowed, index)
-    d3_r = _d3_redo_rate(days, allowed, index)
+    d3_r = _fold_user_signals(_d3_redo_rate(days, allowed, index), days, now_ts)
     pop = _proxy_population(all_rows, days, allowed, now_ts)
     d4_r = _d4_tier_mix(pop)
     g1_hook_r = _g1_hook(days, now_ts, _killed_hooks(days, now_ts))
