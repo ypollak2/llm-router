@@ -208,6 +208,12 @@ One row per change goes in [`../KPI-LEDGER.md`](../KPI-LEDGER.md).
   (see "Session kind on NS, D1 and D2"). The backfill's own check has almost no live-tagged sessions to compare
   against on this machine (2 tag files on 2026-10-04), so it shows the rules and their inputs agree, not that the
   backfilled organic share is accurate; `--validate-backfill` gets more informative as live tags accumulate.
+  It is also near-circular: the backfill calls the same `classify_with_basis` as the live tagger, so agreement only
+  shows that a transcript's first `cwd` and `entrypoint` match what the hook saw. Two ways a backfilled "organic"
+  can be wrong are unmeasured: (a) a live `LLM_ROUTER_SESSION_KIND` override that forced research or harness leaves
+  no trace in a transcript, and (b) an `sdk*` entrypoint missing from a fully read transcript falls through to
+  organic. Sub-agents in an ordinary project directory cannot be told apart from a main session by these signals
+  either. All three push toward a false organic, so the backfilled organic population may be overstated.
 - **The proxy ledger records policy version and the pre-override proposed tier since 2026-10-03.** D5 and D4
   rows written before that carry neither (G3 excludes them as before the schema start).
 - **O1 has not been reconciled against Claude Code's `total_cost_usd`.** Until it is,
