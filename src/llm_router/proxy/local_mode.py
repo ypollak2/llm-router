@@ -378,8 +378,13 @@ Runner = Callable[[list[str]], str]
 
 
 def _run(cmd: list[str]) -> str:
+    from llm_router.safe_subprocess import get_delegated_env
+
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout
+        # Fixed argv (lsof / ps), but it still gets the allowlisted environment:
+        # nothing here needs a credential, and the R4 scan counts every site
+        # that inherits the whole environment.
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=5, env=get_delegated_env()).stdout
     except (OSError, subprocess.SubprocessError):
         return ""
 
