@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -225,6 +226,43 @@ def is_codex_plugin_available() -> bool:
     return _CODEX_PLUGIN_AVAILABLE
 
 
+#: ``codex exec --json`` emits one JSON event per line and a single event can
+#: carry a whole file or tool output. asyncio's default StreamReader limit is
+#: 64 KiB, which overflowed with "Separator is not found, and chunk exceed the
+#: limit" -- 73 of 143 discarded Codex delegations in the 7 days to 2026-10-06
+#: (~/.llm-router/north_star_units.jsonl). A line over ``_STDOUT_LINE_LIMIT`` is
+#: dropped (and flagged ``truncated``); once ``_STDOUT_TOTAL_CAP`` bytes have
+#: been read the process is stopped, so memory stays bounded either way.
+_STDOUT_LINE_LIMIT = 8 * 1024 * 1024
+_STDOUT_TOTAL_CAP = 64 * 1024 * 1024
+#: Non-JSON stdout lines kept as a diagnostic fallback (count, chars per line).
+_STDERR_CAP = 256 * 1024
+_NOISE_MAX_LINES = 20
+_NOISE_MAX_CHARS = 500
+
+
+async def _kill_tree(proc) -> None:
+    """Stop ``proc`` AND everything it spawned. Codex runs tools (shells, sleeps,
+    MCP servers) as grandchildren; ``proc.kill()`` alone orphaned them on a
+    timeout or cap breach. On POSIX the child leads its own session (see
+    ``start_new_session`` at spawn) so its pid is the process-group id: SIGTERM
+    the group, a short grace, then SIGKILL. Elsewhere, kill the child only."""
+    pid = getattr(proc, "pid", None)
+    if os.name == "posix" and isinstance(pid, int) and pid > 1:
+        for sig, grace in ((signal.SIGTERM, 1.0), (signal.SIGKILL, 0.0)):
+            try:
+                os.killpg(pid, sig)
+            except (ProcessLookupError, PermissionError):
+                break  # group already gone
+            if grace:
+                await asyncio.sleep(grace)
+        return
+    try:
+        proc.kill()
+    except (ProcessLookupError, AttributeError):
+        pass
+
+
 @dataclass
 class CodexResult:
     """Result from a single Codex CLI agent execution.
@@ -236,11 +274,19 @@ class CodexResult:
         exit_code: Process exit code.  ``0`` = success, ``124`` = timeout,
             ``1`` = general error or binary-not-found.
         duration_sec: Wall-clock execution time in seconds.
+        reason_code: Short machine-readable cause, set on EVERY failure (empty
+            on success): ``binary_missing``, ``timeout``, ``spawn_error``,
+            ``cli_error``, ``empty_completion``, ``nonzero_exit``. Callers
+            record it in the ledger so a failed delegation is never reasonless.
+        truncated: ``True`` when stdout was clipped (an over-long line was
+            dropped or the total-bytes cap was hit); the answer may be partial.
     """
     content: str
     model: str
     exit_code: int
     duration_sec: float
+    reason_code: str = ""
+    truncated: bool = False
 
     @property
     def success(self) -> bool:
@@ -311,6 +357,7 @@ async def run_codex(
         return CodexResult(
             content="Codex CLI not found. Install from https://openai.com/codex",
             model=model, exit_code=1, duration_sec=0.0,
+            reason_code="binary_missing",
         )
 
     cwd = working_dir or os.getcwd()
@@ -383,6 +430,8 @@ async def run_codex(
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             env=safe_env,
+            limit=_STDOUT_LINE_LIMIT,
+            start_new_session=(os.name == "posix"),
         )
 
         text_chunks: list[str] = []
@@ -392,90 +441,135 @@ async def run_codex(
 
         async def _drain_stderr() -> None:
             assert proc.stderr is not None
-            async for line in proc.stderr:
-                stderr_buf.append(line)
+            kept = 0
+            it = proc.stderr.__aiter__()
+            while True:  # keep draining so the child never blocks on a full pipe
+                try:
+                    line = await it.__anext__()
+                except StopAsyncIteration:
+                    break
+                except (ValueError, asyncio.LimitOverrunError):
+                    continue  # over-long stderr line: diagnostics only
+                if kept < _STDERR_CAP:
+                    stderr_buf.append(line)
+                    kept += len(line)
 
         stderr_task = asyncio.create_task(_drain_stderr())
 
         assert proc.stdout is not None
-        loop = asyncio.get_event_loop()
-        deadline = loop.time() + timeout
+        truncated = capped = False
+        total = 0
 
-        async for raw in proc.stdout:
-            if loop.time() > deadline:
-                proc.kill()
-                return CodexResult(
-                    content=f"Codex timed out after {timeout}s",
-                    model=model, exit_code=124,
-                    duration_sec=time.monotonic() - start,
-                )
-            line = raw.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
-            try:
-                ev = json.loads(line)
-            except json.JSONDecodeError:
-                # `codex exec --json` emits JSONL. A non-JSON line on stdout is
-                # the CLI talking, not the model answering — and treating it as
-                # content is how "Reading additional input from stdin..." was
-                # returned to the caller AS THE ANSWER. Observed twice on
-                # 2026-09-23, ~20s each, reported as a successful 70-token
-                # completion when the turn used 0 input and 0 output tokens.
-                #
-                # Kept, not dropped: it is the only diagnostic when nothing else
-                # arrives, which is exactly the failing case. Used solely as a
-                # last-resort fallback below, never mixed into real output.
-                cli_noise.append(line)
-                continue
-
-            ev_type = ev.get("type", "")
-            if ev_type == "item.completed":
-                item = ev.get("item", {}) or {}
-                # An error item carries `message`, not `text`, so the old code
-                # read "" and dropped it in silence. That is how
-                # `codex/gpt-4o-mini` — a model this CLI does not know — looked
-                # like an empty success instead of a routing error.
-                if item.get("type") == "error":
-                    codex_errors.append(str(item.get("message", "")).strip())
+        async def _consume() -> None:
+            nonlocal truncated, capped, total
+            lines = proc.stdout.__aiter__()
+            while True:
+                try:
+                    raw = await lines.__anext__()
+                except StopAsyncIteration:
+                    break
+                except (ValueError, asyncio.LimitOverrunError):
+                    # One line over _STDOUT_LINE_LIMIT: the reader discarded it
+                    # (its tail arrives as the next, non-JSON, "line"). Keep
+                    # going rather than lose the whole delegation.
+                    truncated = True
                     continue
-                text = item.get("text", "")
-                if text:
-                    text_chunks.append(text)
+                total += len(raw)
+                if total > _STDOUT_TOTAL_CAP:
+                    truncated = capped = True
+                    await _kill_tree(proc)
+                    break
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    # `codex exec --json` emits JSONL. A non-JSON line on stdout is
+                    # the CLI talking, not the model answering — and treating it as
+                    # content is how "Reading additional input from stdin..." was
+                    # returned to the caller AS THE ANSWER. Observed twice on
+                    # 2026-09-23, ~20s each, reported as a successful 70-token
+                    # completion when the turn used 0 input and 0 output tokens.
+                    #
+                    # Kept, not dropped: it is the only diagnostic when nothing else
+                    # arrives, which is exactly the failing case. Used solely as a
+                    # last-resort fallback below, never mixed into real output.
+                    if len(cli_noise) < _NOISE_MAX_LINES:
+                        cli_noise.append(line[:_NOISE_MAX_CHARS])
+                    continue
+
+                ev_type = ev.get("type", "")
+                if ev_type == "item.completed":
+                    item = ev.get("item", {}) or {}
+                    # An error item carries `message`, not `text`, so the old code
+                    # read "" and dropped it in silence. That is how
+                    # `codex/gpt-4o-mini` — a model this CLI does not know — looked
+                    # like an empty success instead of a routing error.
+                    if item.get("type") == "error":
+                        codex_errors.append(str(item.get("message", "")).strip())
+                        continue
+                    text = item.get("text", "")
+                    if text:
+                        text_chunks.append(text)
+                        if on_event:
+                            try:
+                                await on_event("item.completed", text[:120])
+                            except Exception:
+                                pass
+                elif ev_type == "turn.completed":
                     if on_event:
+                        usage = ev.get("usage", {})
                         try:
-                            await on_event("item.completed", text[:120])
+                            await on_event(
+                                "turn.completed",
+                                f"done — {usage.get('output_tokens','?')} tokens",
+                            )
                         except Exception:
                             pass
-            elif ev_type == "turn.completed":
-                if on_event:
-                    usage = ev.get("usage", {})
-                    try:
-                        await on_event(
-                            "turn.completed",
-                            f"done — {usage.get('output_tokens','?')} tokens",
-                        )
-                    except Exception:
-                        pass
-            elif ev_type in ("error", "turn.failed"):
-                # Top-level failure events, NOT item.completed items. A ChatGPT
-                # usage-limit hit arrives only as these two (captured
-                # 2026-10-03: {"type":"error","message":"You've hit your usage
-                # limit ... try again at 11:33 PM."} then a turn.failed carrying
-                # the same text). Before this branch they were dropped and the
-                # caller saw "codex: empty completion (no output)", so the
-                # reset time never reached provider_reset and the quota wall
-                # was indistinguishable from a model that said nothing.
-                err = ev.get("error")
-                msg = err.get("message") if isinstance(err, dict) else ev.get("message")
-                msg = str(msg or "").strip()
-                if msg and msg not in codex_errors:  # the two events repeat it
-                    codex_errors.append(msg)
-            elif ev_type in ("turn.started", "thread.started"):
-                if on_event:
-                    try:
-                        await on_event(ev_type, "")
-                    except Exception:
-                        pass
+                elif ev_type in ("error", "turn.failed"):
+                    # Top-level failure events, NOT item.completed items. A ChatGPT
+                    # usage-limit hit arrives only as these two (captured
+                    # 2026-10-03: {"type":"error","message":"You've hit your usage
+                    # limit ... try again at 11:33 PM."} then a turn.failed carrying
+                    # the same text). Before this branch they were dropped and the
+                    # caller saw "codex: empty completion (no output)", so the
+                    # reset time never reached provider_reset and the quota wall
+                    # was indistinguishable from a model that said nothing.
+                    err = ev.get("error")
+                    msg = err.get("message") if isinstance(err, dict) else ev.get("message")
+                    msg = str(msg or "").strip()
+                    if msg and msg not in codex_errors:  # the two events repeat it
+                        codex_errors.append(msg)
+                elif ev_type in ("turn.started", "thread.started"):
+                    if on_event:
+                        try:
+                            await on_event(ev_type, "")
+                        except Exception:
+                            pass
+
+        try:
+            await asyncio.wait_for(_consume(), timeout=timeout)
+        except asyncio.TimeoutError:
+            # A silent codex (no output) never reached the old per-line deadline
+            # check, so it could only be ended by the hook's outer kill.
+            await _kill_tree(proc)
+            stderr_task.cancel()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except Exception:  # noqa: BLE001 -- already timed out; best effort
+                pass
+            partial = "\n".join(text_chunks).strip()
+            return CodexResult(
+                content=(f"Codex timed out after {timeout}s"
+                         + (f"\n[partial output]\n{partial}" if partial else "")),
+                model=model, exit_code=124,
+                duration_sec=time.monotonic() - start,
+                reason_code="timeout", truncated=truncated,
+            )
+        except asyncio.CancelledError:
+            await _kill_tree(proc)  # never leave the tree running if cancelled
+            raise
 
         await proc.wait()
         await stderr_task
@@ -489,7 +583,8 @@ async def run_codex(
             return CodexResult(
                 content="codex: " + "; ".join(e for e in codex_errors if e),
                 model=model, exit_code=proc.returncode or 1,
-                duration_sec=duration,
+                duration_sec=duration, reason_code="cli_error",
+                truncated=truncated,
             )
         had_real_answer = bool(output)
         if not output and stderr_buf:
@@ -515,21 +610,26 @@ async def run_codex(
                 model=model,
                 exit_code=proc.returncode or 1,
                 duration_sec=duration,
+                reason_code=("output_cap_exceeded" if capped
+                             else "nonzero_exit" if proc.returncode
+                             else "empty_completion"),
+                truncated=truncated,
             )
 
+        # We killed it ourselves at the byte cap: the answer so far stands.
+        rc = 0 if capped else (proc.returncode or 0)
         return CodexResult(
             content=output, model=model,
-            exit_code=proc.returncode or 0, duration_sec=duration,
-        )
-    except asyncio.TimeoutError:
-        return CodexResult(
-            content=f"Codex timed out after {timeout}s",
-            model=model, exit_code=124, duration_sec=float(timeout),
+            exit_code=rc, duration_sec=duration,
+            reason_code=("output_cap_exceeded" if capped
+                         else "nonzero_exit" if rc else ""),
+            truncated=truncated,
         )
     except Exception as e:
         return CodexResult(
             content=f"Codex error: {e}",
             model=model, exit_code=1, duration_sec=time.monotonic() - start,
+            reason_code="spawn_error",
         )
 
 
