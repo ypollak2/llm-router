@@ -160,6 +160,16 @@ TIER_COST_WEIGHT = {"haiku": 1.0, "sonnet": 6.15 / 1.68, "opus": 6.15}
 G3_FIELDS = ("session_kind", "tier_policy_version", "tier_proposed", "tier_retry")
 _G3_PRESENCE_ONLY = frozenset({"tier_retry"})
 
+#: Fields added to the proxy ledger after G3 started (M0.5). Each is measured only on
+#: rows written at or after ITS OWN first appearance in the ledger, so rows from
+#: before the field existed never lower G3, and a field no row carries yet is simply
+#: not applicable (it does not make G3 "not measurable"). ``cls_ms`` and ``cls_arm``
+#: are null by design until the classifier runs (M1, M2), so only their presence is
+#: required. ``tier_haiku_block`` exists only when the policy proposed Haiku.
+G3_LATE_FIELDS = ("text_sha", "has_mid_system", "req_bytes", "cls_source", "cls_ms", "cls_arm",
+                  "cls_applied", "tier_haiku_block")
+_G3_LATE_PRESENCE_ONLY = frozenset({"cls_ms", "cls_arm"})
+
 
 def _not_measurable(reason: str, *, seen: int = 0, newest_ts: float | None = None) -> dict[str, Any]:
     return {"value": f"not measurable: {reason}", "n": None, "measurable": False,
@@ -648,8 +658,36 @@ def g3_required_fields(row: dict) -> tuple[str, ...]:
     return fields if _usable_session(row) else tuple(f for f in fields if f != "session_kind")
 
 
-def _g3_recorded(row: dict, field: str) -> bool:
-    return field in row if field in _G3_PRESENCE_ONLY else row.get(field) is not None
+def _g3_recorded(row: dict, field: str, presence_only: frozenset[str] = _G3_PRESENCE_ONLY) -> bool:
+    return field in row if field in presence_only else row.get(field) is not None
+
+
+def _g3_late_first_seen(all_rows: list[dict]) -> dict[str, float | None]:
+    """The timestamp of the first ledger row carrying each late field's key."""
+    first: dict[str, float | None] = {f: None for f in G3_LATE_FIELDS}
+    for r in all_rows:
+        ts = _num_ts(r.get("ts"))
+        if ts is None:
+            continue
+        for f in G3_LATE_FIELDS:
+            if f in r and (first[f] is None or ts < first[f]):
+                first[f] = ts
+    return first
+
+
+def _g3_late_required(row: dict, ts: float, late_first: dict[str, float | None]) -> tuple[str, ...]:
+    """The late fields owed by this row: those whose key already existed in the
+    ledger when the row was written. ``tier_haiku_block`` is owed only on a row the
+    policy proposed Haiku for."""
+    out = []
+    for f in G3_LATE_FIELDS:
+        t0 = late_first[f]
+        if t0 is None or ts < t0:
+            continue
+        if f == "tier_haiku_block" and row.get("tier_proposed") != "haiku":
+            continue
+        out.append(f)
+    return tuple(out)
 
 
 def _g3_completeness(all_rows: list[dict], days: int, now: float,
@@ -672,6 +710,7 @@ def _g3_completeness(all_rows: list[dict], days: int, now: float,
             return _not_measurable(f"no proxy row carries {', '.join(absent)} yet "
                                    "(the schema has not started)", seen=len(all_rows))
         since, source = max(t for t in first.values() if t is not None), "first row carrying every field"
+    late_first = _g3_late_first_seen(all_rows)
     cutoff = now - days * 86400 if days else None
     window: list[tuple[float, dict]] = []
     undated = 0
@@ -683,14 +722,14 @@ def _g3_completeness(all_rows: list[dict], days: int, now: float,
             window.append((ts, r))
     counted = [(ts, r) for ts, r in window if ts >= since]
     before = len(window) - len(counted)
-    stats = {f: {"applicable": 0, "recorded": 0} for f in G3_FIELDS}
+    stats = {f: {"applicable": 0, "recorded": 0} for f in G3_FIELDS + G3_LATE_FIELDS}
     by_type: dict[str, dict[str, int]] = {}
     by_session: dict[str, int] = {}
     complete = no_field = 0
     newest: float | None = None
     for ts, r in counted:
         rtype = g3_row_type(r)
-        required = g3_required_fields(r)
+        required = g3_required_fields(r) + _g3_late_required(r, ts, late_first)
         t = by_type.setdefault(rtype, {"rows": 0, "complete": 0})
         if not required:
             no_field += 1
@@ -702,7 +741,7 @@ def _g3_completeness(all_rows: list[dict], days: int, now: float,
         ok = True
         for f in required:
             stats[f]["applicable"] += 1
-            if _g3_recorded(r, f):
+            if _g3_recorded(r, f, presence_only=_G3_PRESENCE_ONLY | _G3_LATE_PRESENCE_ONLY):
                 stats[f]["recorded"] += 1
             else:
                 ok = False
@@ -713,7 +752,8 @@ def _g3_completeness(all_rows: list[dict], days: int, now: float,
     since_s = _iso(since)
     extras = {
         "schema_since": since_s, "schema_since_source": source,
-        "field_first_seen": {f: _iso(t) for f, t in first.items()},
+        "field_first_seen": {**{f: _iso(t) for f, t in first.items()},
+                             **{f: _iso(t) for f, t in late_first.items() if t is not None}},
         "window_rows": len(window), "rows_before_schema": before, "undated_rows": undated,
         "rows_counted": n, "rows_no_applicable_field": no_field, "rows_by_type": by_type,
         "counted_sessions": len(by_session),

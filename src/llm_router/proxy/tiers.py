@@ -305,6 +305,37 @@ def _has_mid_conversation_system_message(body: dict) -> bool:
     return any(isinstance(m, dict) and m.get("role") == "system" for m in body.get("messages") or [])
 
 
+# Public name for the ledger (proxy/server.py); the tests keep the private one.
+has_mid_conversation_system_message = _has_mid_conversation_system_message
+
+#: Why a body cannot go to Haiku, as ``tier_haiku_block`` in the ledger (M0.5).
+HAIKU_BLOCK_SYSTEM_MESSAGE = "system_message"
+HAIKU_BLOCK_MEDIA = "media"
+HAIKU_BLOCK_BUILTIN_TOOLS = "builtin_tools"
+HAIKU_BLOCK_CONTEXT = "context"
+HAIKU_BLOCK_NONE = "none"
+
+
+def haiku_block_reason(body: dict) -> str:
+    """The first reason this body cannot be sent to Haiku, else ``"none"``.
+
+    One of ``system_message | media | builtin_tools | context | none``. The checks
+    are the ones ``ClaudeTierPolicy._haiku_body_ok`` has always made, so a body is
+    eligible exactly when this returns ``"none"``. The mid-conversation system
+    message is listed first so the ledger attributes a body that fails several
+    checks to the one the fold (M0.7) would remove. The policy's own question
+    ("is there a haiku tier at all") is not a body property and is not asked here."""
+    if _has_mid_conversation_system_message(body):
+        return HAIKU_BLOCK_SYSTEM_MESSAGE
+    if _has_media(body):
+        return HAIKU_BLOCK_MEDIA
+    if not _only_custom_tools(body):
+        return HAIKU_BLOCK_BUILTIN_TOOLS
+    if _approx_context_tokens(body) > HAIKU_MAX_CONTEXT_TOKENS:
+        return HAIKU_BLOCK_CONTEXT
+    return HAIKU_BLOCK_NONE
+
+
 def _only_custom_tools(body: dict) -> bool:
     """True when every client tool is a plain custom function (no ``type``,
     or ``type: "custom"``). Anthropic's built-in server tools (bash,
@@ -480,9 +511,7 @@ class ClaudeTierPolicy:
         rewritten or not."""
         if "haiku" not in self.by_name:
             return False
-        if _has_media(body) or not _only_custom_tools(body) or _has_mid_conversation_system_message(body):
-            return False
-        return _approx_context_tokens(body) <= HAIKU_MAX_CONTEXT_TOKENS
+        return haiku_block_reason(body) == HAIKU_BLOCK_NONE
 
     # ── the decision ────────────────────────────────────────────────────────
 
