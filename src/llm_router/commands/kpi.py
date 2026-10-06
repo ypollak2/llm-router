@@ -1119,6 +1119,154 @@ def _local_shadow_line(summary: dict | None) -> str | None:
             "(provenance=runtime, served by ollama; informational, never in NS, D1 or D2)")
 
 
+# ── O3: offload share (see offload_share.py and KPIS.md) ───────────────────
+
+def _o3_from_units(units: list[dict], local_no_session: int = 0, n_escalations: int | None = None) -> dict:
+    """One O3 result over already-judged units. HEADLINE = human turns (first call of each
+    turn, see offload_share); per-call figures are the secondary line."""
+    from llm_router import offload_share as osh
+
+    calls = osh.summarize(units)
+    s = osh.summarize(osh.turn_units(units))
+    n, h, loc, cl = s["n"], s[osh.CLASS_HAIKU], s[osh.CLASS_LOCAL], s[osh.CLASS_CLAUDE]
+    counts = f"haiku {h['n']}, local {loc['n']}, claude {cl['n']}"
+    out_bd = {"unit": "human_turn", "n": n, "haiku_n": h["n"], "haiku_redone": h["redone"],
+              "local_n": loc["n"], "local_redone": loc["redone"], "claude_n": cl["n"],
+              "offload_kept": s["offload_kept"], "window_open": s["window_open"],
+              "local_no_session": local_no_session,
+              "per_call": {"n": calls["n"], "offload_kept": calls["offload_kept"],
+                           "haiku_n": calls[osh.CLASS_HAIKU]["n"], "haiku_redone": calls[osh.CLASS_HAIKU]["redone"],
+                           "local_n": calls[osh.CLASS_LOCAL]["n"], "window_open": calls["window_open"]}}
+    if n == 0:
+        out = _not_measurable("no organic turn in window")
+    elif n < MIN_N:
+        out = _too_few(n, newest_ts=s["newest_ts"])
+        out["lines"] = [f"turns so far: {counts}; no rate is printed below n={MIN_N}"]
+    else:
+        value = s["offload_kept"] / n
+        out = _measured(f"{_pct(value)} (n={n} turns, {s['window_open']} window-open)", n,
+                        newest_ts=s["newest_ts"], numerator=s["offload_kept"], denominator=n,
+                        meets_target=value >= osh.TARGET)
+
+        def redo(c: dict, name: str) -> str:
+            if c["n"] == 0:
+                return f"{name} not measurable: none in window"
+            return f"{name} {_rate_result(c['redone'], c['n'], label=name + ' unit')['value']}"
+
+        # Local units with no session id cannot be scoped to organic: always say so.
+        if local_no_session and loc["n"] == 0:
+            local_share = (f"local share unknown ({local_no_session:,} local unit(s) carry no "
+                           "session id, so O3 is a lower bound)")
+        else:
+            local_share = f"local share {_pct(loc['n'] / n)} ({loc['n']}/{n})"
+            if local_no_session:
+                local_share += (f" + {local_no_session:,} local unit(s) with no session id excluded "
+                                "(lower bound)")
+        out["lines"] = [
+            f"Haiku share {_pct(h['n'] / n)} ({h['n']}/{n} turns) | {local_share} | claude {cl['n']}/{n}",
+            f"redo rate (per turn): {redo(h, 'Haiku')} | {redo(loc, 'local')}",
+        ]
+        cn = calls["n"]
+        if cn >= MIN_N:
+            out["lines"].append(f"per call: {_pct(calls['offload_kept'] / cn)} (n={cn} calls; "
+                                f"{cn / n:.1f} calls per turn)")
+        else:
+            out["lines"].append(f"per call: too few to tell (n={cn} calls)")
+    if n_escalations is not None:
+        out_bd["n_escalations"] = n_escalations
+        out.setdefault("lines", []).append(
+            ("redo signal sparse: " if n_escalations < MIN_N else "redo signal: ")
+            + f"n_escalations={n_escalations} in window"
+            + (" (a low redo rate is NOT proven low: there is little signal to detect a redo)"
+               if n_escalations < MIN_N else ""))
+    out["breakdown"] = out_bd
+    return out
+
+
+def _o3_unit_inputs(days: int, index, now: float) -> tuple[list[dict], set[str], list[dict]]:
+    """(local units, receipt-band redone msg_ids, usage_outcome rows). Each source that
+    cannot be read yields nothing rather than breaking the scorecard."""
+    from llm_router import northstar as ns
+    from llm_router import usage_outcome as uo
+    from llm_router import user_signal
+
+    try:
+        local = list(ns.local_shadow_units(days=days))
+    except Exception:  # noqa: BLE001
+        local = []
+    try:
+        band = {k for k, row in user_signal.latest_by_key(since=now - days * 86400.0).items()
+                if row.get("signal") == user_signal.SIGNAL_REDONE}
+    except Exception:  # noqa: BLE001
+        band = set()
+    try:
+        outcomes = uo.judge_recent(days=days)
+    except Exception:  # noqa: BLE001
+        outcomes = []
+    return local, band, outcomes
+
+
+def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[dict],
+                      now: float, since_policy: str | None = None) -> dict:
+    from llm_router import offload_share as osh
+
+    try:
+        local, band, outcomes = _o3_unit_inputs(days, index, now)
+        built = osh.build_units(
+            all_rows, local, now=now, days=days, allowed=allowed,
+            kind_of=lambda sid, stamp: index.resolve(sid, stamp=stamp).kind,
+            band_redone=band, outcome_redos=outcomes)
+        res = _o3_from_units(built["units"], built["local_no_session"], built["n_escalations"])
+        res["excluded"] = {"side_call": built["side_call_excluded"], "untagged": built["untagged"],
+                           "other_kind": built["other_kind"], "local_no_session": built["local_no_session"]}
+        note = (f"{res['breakdown']['window_open']} turn(s) have fewer than {osh.REDO_TURNS} human turns "
+                f"after them (counted as not redone, may still change); excluded: "
+                f"{built['side_call_excluded']:,} Claude Code side call(s), "
+                f"{built['untagged']:,} untagged, {built['other_kind']:,} other-kind")
+        res["lines"] = list(res.get("lines", ())) + [note]
+        if since_policy:
+            res["since_policy"] = _o3_since_view(built["units"], all_rows, since_policy, now, days,
+                                                  built["local_no_session"])
+    except Exception as exc:  # noqa: BLE001 -- an O3 failure must not take the scorecard down
+        res = _not_measurable(f"O3 computation failed ({type(exc).__name__})")
+    return res
+
+
+def _o3_since_view(units: list[dict], all_rows: list[dict], version: str, now: float, days: int,
+                   local_no_session: int = 0) -> dict:
+    from llm_router import offload_share as osh
+
+    start = osh.policy_start(all_rows, version)
+    if start is None:
+        return {"version": version, "start_ts": None,
+                "since": _not_measurable(f"policy version {version} not seen in the proxy ledger"),
+                "before": None}
+    since = _o3_from_units([u for u in units if u["ts"] >= start], local_no_session)
+    before = _o3_from_units([u for u in units if u["ts"] < start], local_no_session)
+    return {"version": version, "start_ts": start, "start": _iso(start), "since": since, "before": before}
+
+
+def _o3_render_lines(o3: dict) -> list[str]:
+    """The O3 block as printed by `kpi`: one headline line, then detail lines."""
+    lines = [f"  {_LABELS['O3']:<42s} {o3['value']}"]
+    lines += [f"      {x}" for x in o3.get("lines", ())]
+    sp = o3.get("since_policy")
+    if sp:
+        def one(r: dict | None) -> str:
+            if r is None:
+                return "n/a"
+            if r.get("measurable"):
+                b = r["breakdown"]
+                return (f"{r['value']}; haiku {b['haiku_n']} (redone {b['haiku_redone']}), "
+                        f"local {b['local_n']} (redone {b['local_redone']})")
+            return r["value"]
+        head = f"since policy {sp['version']}" + (f" (first row {sp['start']})" if sp.get("start") else "")
+        lines.append(f"      {head}: {one(sp['since'])}")
+        if sp.get("before") is not None:
+            lines.append(f"      before it, same window: {one(sp['before'])}")
+    return lines
+
+
 def _proxy_shadow_summary(days: int) -> dict:
     """``local_shadow`` records the proxy's shadow mode wrote (``proxy/local_shadow``): a
     file of their own that ``units()`` and the proxy ledger never read, so this cannot move
@@ -1161,7 +1309,8 @@ def _proxy_shadow_line(s: dict | None) -> str | None:
 # ── assembly ───────────────────────────────────────────────────────────────
 
 def compute_scorecard(days: int = 7, *, include_research: bool = False,
-                      schema_since: float | None = None, now: float | None = None) -> dict:
+                      schema_since: float | None = None, now: float | None = None,
+                      since_policy: str | None = None) -> dict:
     from llm_router import session_kind as sk
     from llm_router.proxy import ledger as pl
 
@@ -1190,6 +1339,9 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         "joins": joins,
         # Informational only: not in "kpis", so not in _ORDER, --health or NS/D1/D2.
         "local_shadow": _local_shadow_summary(days),
+        # O3 is likewise outside "kpis": adding it there would change the key set, _ORDER and
+        # the --health counts that NS..G4 consumers read. Rendered as its own line.
+        "o3": _o3_offload_share(days, allowed, index, all_rows, now_ts, since_policy),
         "proxy_local_shadow": _proxy_shadow_summary(days),
         "kpis": {
             "NS": ns_r, "O1": o1_r, "O2": o2_r,
@@ -1213,6 +1365,29 @@ def _age(hours: float) -> str:
     return f"{hours:.1f}h" if hours < 48 else f"{hours / 24:.1f}d"
 
 
+def _health_entry(r: dict, limit_h: float, now_ts: float) -> dict:
+    newest = r.get("newest_ts")
+    age_h = (now_ts - newest) / 3600 if newest is not None else None
+    if not r["measurable"]:
+        # "too few" has an n (the one behind the number); "nothing to count" has only
+        # the data points that existed and could not be used.
+        state, reason, n = STATE_BLIND, r["reason"], (r["n"] if r["n"] is not None else r["seen"])
+    elif age_h is None:
+        state, n = STATE_BLIND, r["n"]
+        reason = "measured, but its data carries no timestamp: cannot tell how old it is"
+    elif age_h > limit_h:
+        state, n = STATE_STALE, r["n"]
+        reason = f"newest data point is {_age(age_h)} old, over the {_age(limit_h)} limit"
+    else:
+        state, n = STATE_MEASURED, r["n"]
+        reason = f"newest data point {_age(max(age_h, 0.0))} old"
+    if r.get("health_note") and state != STATE_BLIND:
+        reason = f"{reason} ({r['health_note']})"
+    return {"state": state, "reason": reason, "n": n, "newest_ts": newest,
+            "newest": _iso(newest), "age_hours": round(age_h, 2) if age_h is not None else None,
+            "stale_after_hours": limit_h}
+
+
 def compute_health(data: dict, *, stale_hours: float = STALE_LIVE_HOURS,
                    now: float | None = None) -> dict:
     """Per KPI: ``measured`` (a number, with a newest data point inside the stale
@@ -1223,33 +1398,16 @@ def compute_health(data: dict, *, stale_hours: float = STALE_LIVE_HOURS,
     now_ts = now if now is not None else data["generated_ts"]
     out: dict[str, dict] = {}
     for key in _ORDER:
-        r = data["kpis"][key]
         limit_h = STALE_BENCHMARK_DAYS * 24 if key in _BENCHMARK_KPIS else stale_hours
-        newest = r.get("newest_ts")
-        age_h = (now_ts - newest) / 3600 if newest is not None else None
-        if not r["measurable"]:
-            # "too few" has an n (the one behind the number); "nothing to count" has only
-            # the data points that existed and could not be used.
-            state, reason, n = STATE_BLIND, r["reason"], (r["n"] if r["n"] is not None else r["seen"])
-        elif age_h is None:
-            state, n = STATE_BLIND, r["n"]
-            reason = "measured, but its data carries no timestamp: cannot tell how old it is"
-        elif age_h > limit_h:
-            state, n = STATE_STALE, r["n"]
-            reason = f"newest data point is {_age(age_h)} old, over the {_age(limit_h)} limit"
-        else:
-            state, n = STATE_MEASURED, r["n"]
-            reason = f"newest data point {_age(max(age_h, 0.0))} old"
-        if r.get("health_note") and state != STATE_BLIND:
-            reason = f"{reason} ({r['health_note']})"
-        out[key] = {"state": state, "reason": reason, "n": n, "newest_ts": newest,
-                    "newest": _iso(newest), "age_hours": round(age_h, 2) if age_h is not None else None,
-                    "stale_after_hours": limit_h}
+        out[key] = _health_entry(data["kpis"][key], limit_h, now_ts)
     counts = {s: sum(1 for v in out.values() if v["state"] == s)
               for s in (STATE_MEASURED, STATE_BLIND, STATE_STALE)}
-    return {"generated_at": data["generated_at"], "window_days": data["window_days"],
-            "stale_after_hours": stale_hours, "benchmark_stale_after_days": STALE_BENCHMARK_DAYS,
-            "counts": counts, "kpis": out}
+    res = {"generated_at": data["generated_at"], "window_days": data["window_days"],
+           "stale_after_hours": stale_hours, "benchmark_stale_after_days": STALE_BENCHMARK_DAYS,
+           "counts": counts, "kpis": out}
+    if data.get("o3") is not None:  # outside "kpis" and "counts": see compute_scorecard
+        res["o3"] = _health_entry(data["o3"], stale_hours, now_ts)
+    return res
 
 
 _LABELS = {
@@ -1266,6 +1424,7 @@ _LABELS = {
     "G2": "G2  silent failures (fail-open / 100 calls)",
     "G3": "G3  ledger completeness (target >=99%)",
     "G4": "G4  wrongly benched providers (target 0)",
+    "O3": "O3  offload share (target >=60%)",
 }
 _ORDER = ("NS", "O1", "O2", "D1", "D2", "D3", "D4", "D5", "G1_hook", "G1_proxy", "G2", "G3", "G4")
 
@@ -1301,6 +1460,8 @@ def render_scorecard(data: dict) -> str:
         lines.append(f"  {_LABELS[key]:<42s} {r['value']}")
         for extra in r.get("lines", ()):
             lines.append(f"      {extra}")
+    if data.get("o3") is not None:
+        lines += _o3_render_lines(data["o3"])
     lines.append("")
     local_line = _local_shadow_line(data.get("local_shadow"))
     if local_line:
@@ -1326,6 +1487,9 @@ def render_health(health: dict, *, strict: bool = False) -> str:
     for key in _ORDER:
         h = health["kpis"][key]
         lines.append(f"  {_LABELS[key]:<42s} {h['state']:<9s} n={str(h['n']):<7} {h['reason']}")
+    if health.get("o3") is not None:
+        h = health["o3"]
+        lines.append(f"  {_LABELS['O3']:<42s} {h['state']:<9s} n={str(h['n']):<7} {h['reason']}")
     c = health["counts"]
     verdict = ("exit 1: --strict and a KPI is blind" if strict and c[STATE_BLIND]
                else "exit 0; --strict exits 1 if any KPI is blind")
@@ -1344,6 +1508,8 @@ def write_weekly(data: dict, out_dir: Path) -> Path:
     for key in _ORDER:
         r = data["kpis"][key]
         body.append(f"| {_LABELS[key]} | {r['value']} |")
+    if data.get("o3") is not None:
+        body.append(f"| {_LABELS['O3']} | {data['o3']['value']} |")
     details = [(key, r["lines"]) for key in _ORDER if (r := data["kpis"][key]).get("lines")]
     if details:
         body += ["", "## Details", ""]
@@ -1365,6 +1531,9 @@ def cmd_kpi(args: list[str]) -> int:
     ap.add_argument("--schema-since", metavar="WHEN", default=None,
                      help="G3: count proxy rows from WHEN (YYYY-MM-DD, an ISO time, or epoch "
                           "seconds) instead of from the first row that carries the fields")
+    ap.add_argument("--since-policy", metavar="VERSION", default=None,
+                     help="O3: also show offload share since the first proxy row stamped with this "
+                          "tier_policy_version (e.g. 7816b7cf5537), against the same window before it")
     ap.add_argument("--health", action="store_true",
                      help="per KPI: measured, blind or stale, with the one reason and the n")
     ap.add_argument("--strict", action="store_true",
@@ -1409,7 +1578,7 @@ def cmd_kpi(args: list[str]) -> int:
                 ap.error(f"--schema-since: cannot read {parsed.schema_since!r} as a date or epoch")
 
     data = compute_scorecard(days=parsed.days, include_research=(parsed.include == "research"),
-                             schema_since=since)
+                             schema_since=since, since_policy=parsed.since_policy)
 
     exit_code = 0
     if parsed.health:
