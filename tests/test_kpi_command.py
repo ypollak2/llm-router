@@ -418,7 +418,7 @@ def test_committed_benchmark_file_is_consistent_and_text_free():
     path = Path(__file__).resolve().parent.parent / "docs" / "repo_goals" / "kpi_benchmark.json"
     d = json.loads(path.read_text(encoding="utf-8"))
     items = d["items"]
-    assert len(items) == d["provenance"]["n_tasks"] == 32           # something was checked
+    assert len(items) == d["provenance"]["n_tasks"] >= 32           # something was checked (grows as truth is extended)
     o2_pool = [i for i in items if i["pass"]["opus"]]
     assert d["o2"]["n"] == len(o2_pool)
     assert d["o2"]["acceptable_rate"] == sum(i["pass"]["haiku"] for i in o2_pool) / len(o2_pool)
