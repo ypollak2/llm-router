@@ -292,3 +292,14 @@ def test_kpi_o3_reports_detector_flags_while_source4_is_disabled(monkeypatch, tm
     assert on["haiku_redone"] == 1 and on["per_call"]["haiku_redone"] == 2    # turn 1 and its continuation
     assert on["redo_detector_enabled"] is True and on["redo_detector_n"] == 1
     session_kind._FOUND.clear()
+
+
+def test_kpis_md_source4_validation_discloses_the_untagged_population():
+    """The validation numbers cited next to source 4 must carry the population they were measured on: 80% of the
+    sampled pairs come from sessions with no kind tag, which is not O3's organic population (PLAN M0.9 / 3.4)."""
+    from pathlib import Path
+    text = (Path(__file__).resolve().parent.parent / "docs" / "repo_goals" / "KPIS.md").read_text()
+    start = text.index("4. **Transcript detector (source 4, OFF).**")
+    para = text[start:text.index("\nA unit that shows no redo", start)]
+    assert "untagged" in para and "236 of 300" in para and "115 of 150" in para
+    assert "106" in para and "organic" in para and "owner" in para

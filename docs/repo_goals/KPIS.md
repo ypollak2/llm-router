@@ -73,6 +73,17 @@ session id.
    (`~/.rsi/research/primary-plan/redo/test_result.json`, not in this repo). Until then redo-based bars are
    "not informative".
 
+   **Population of that run (not O3's).** PLAN M0.9 asks for organic sessions plus b9f04425. The sampler applied no
+   session-kind filter. Of 524 pairs in the extended window (2026-08-30 to 2026-10-06), 106 come from the PLAN's
+   population (76 of them in W0) and 418 from sessions with no tag file and no ledger kind stamp (untagged: kind
+   unknown, never counted as organic here). Selected: 236 of 300 pairs (19 of 22 sessions) are untagged; test half:
+   115 of 150. The tag-less sessions pre-date tagging; a sidecar derived from their transcript cwd/entrypoint
+   (`session_kind_backfill.jsonl`, not a live tag) calls all 418 organic. 106 < 300, so the PLAN's own population
+   cannot supply the sample even after the one allowed extension; PLAN 3.4 makes the substitute population the
+   owner's decision and that decision is open. Precision and recall above are therefore measured mostly on
+   untagged sessions, and any PR that flips `REDO_SOURCE4_ENABLED` must quote this split with them. Split recorded in
+   `sample_meta.json` and `test_result.json` (`population_split`).
+
 A unit that shows no redo but has fewer than 2 human turns after it (a recent turn, or the end of
 a session) is counted as not redone and also counted as `window_open`; the count is in the
 headline value (`n=..., K window-open`) because it can still become a redo.
