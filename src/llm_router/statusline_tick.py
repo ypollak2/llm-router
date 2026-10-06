@@ -1,19 +1,25 @@
 """The status line's per-tick renderer. STDLIB ONLY, and it must stay that way.
 
 Claude Code runs the ``statusLine`` command about once a second. This file is
-what that command executes (``hooks/statusline-command.sh`` execs it; the
-installer copies it next to the hooks as ``llm_router_statusline_tick.py``), so
-everything here is on a one-second loop:
+what that command executes in debug mode (``LLM_ROUTER_STATUSLINE=fast``;
+``hooks/statusline-command.sh`` execs it; the installer copies it next to the
+hooks as ``llm_router_statusline_tick.py``), so everything here is on a
+one-second loop:
 
 * it never imports ``llm_router`` (the package import alone costs more than the
   whole tick budget) and never computes a KPI. It reads ONE small cache file,
-  ``statusline_cache.json``, that :mod:`llm_router.statusline_refresh` writes;
+  ``statusline_cache.json``, that :mod:`llm_router.statusline_refresh` writes,
+  and the Claude quota snapshot ``usage.json`` (session 5h / weekly / Sonnet %,
+  the numbers ``llm-router status`` prints), which the hooks keep fresh. Quota
+  is never fetched from here;
 * when that cache is missing or older than :data:`REFRESH_AFTER_S` it starts the
   refresher DETACHED and does not wait for it. At most one start per
   :data:`REFRESH_AFTER_S` (a timestamp file, not a lock: a hung refresher holds
   nothing a tick waits on), so a stuck refresh cannot delay a tick or pile up;
 * a value it does not have is printed as ``n/a``, never as 0. A cache older than
-  :data:`STALE_AFTER_S` is not data: every cached field reads ``n/a``;
+  :data:`STALE_AFTER_S` is not data: every cached field reads ``n/a``. A quota
+  snapshot older than ``LLM_ROUTER_USAGE_TTL_SEC`` (default 300 s, the same TTL
+  as the full layout's ``°`` marker) is still shown, with ``(stale <age>)``;
 * it reads nothing from stdin but drains it (Claude Code pipes the session JSON
   and times out a command that leaves the pipe full). The session JSON carries
   no prompt text today, and nothing from it is printed either way.
@@ -21,7 +27,7 @@ everything here is on a one-second loop:
 Output: one line, at most :data:`MAX_CHARS` characters (counted without the
 colour codes), e.g.::
 
-    llm-router · smart · NS 0.0% n=3599 · Claude wk 41% · Codex 7/15 ↻21:14 · ⚠ hooks p95 3.0s auto-route
+    llm-router · smart · NS 0.0% n=3599 · Claude 5h 12% wk 41% sonnet 3% · Codex 7/15 ↻21:14 · ⚠ hooks p95 3.0s auto-route
 """
 
 from __future__ import annotations
@@ -36,6 +42,13 @@ import time
 # machine's python3 they add ~15 ms to a tick, and the bar is 100 ms.
 
 CACHE_NAME = "statusline_cache.json"
+#: The Claude quota snapshot the hooks write (``llm-router status`` reads it too).
+USAGE_NAME = "usage.json"
+#: Past this age a quota snapshot is shown with a stale marker (the full
+#: layout's ``LLM_ROUTER_USAGE_TTL_SEC`` default).
+DEFAULT_USAGE_TTL_S = 300.0
+#: (usage.json key, label), in the order ``llm-router status`` lists them.
+_QUOTA_FIELDS = (("session_pct", "5h"), ("weekly_pct", "wk"), ("sonnet_pct", "sonnet"))
 REFRESH_STAMP_NAME = ".statusline-refresh.last"
 #: The cache is refreshed in the background at most this often.
 REFRESH_AFTER_S = 60.0
@@ -66,6 +79,55 @@ def read_cache(home: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def read_usage(home: str) -> dict | None:
+    try:
+        with open(os.path.join(home, USAGE_NAME), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def usage_ttl() -> float:
+    raw = os.environ.get("LLM_ROUTER_USAGE_TTL_SEC", "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_USAGE_TTL_S
+    return value if value > 0 else DEFAULT_USAGE_TTL_S
+
+
+def _age(seconds: float) -> str:
+    if seconds < 3600:
+        return f"{max(1, int(seconds // 60))}m"
+    if seconds < 48 * 3600:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
+
+
+def _quota(usage: dict | None, now: float, ttl: float) -> str:
+    """``Claude 5h 12% wk 41% sonnet 3%`` from a ``usage.json`` snapshot.
+
+    Unknown is ``n/a``, never 0: no file, the install placeholder (``pending``),
+    the failed-fetch snapshot (``is_fallback``: invented 50s), or a field that is
+    not a number. A snapshot past ``ttl`` is still shown, marked ``(stale <age>)``;
+    one with no ``updated_at`` has an unknown age and is marked ``(stale)``.
+    """
+    if not isinstance(usage, dict) or usage.get("pending") or usage.get("is_fallback"):
+        return "Claude n/a"
+    values = [(label, _num(usage.get(key))) for key, label in _QUOTA_FIELDS]
+    if all(v is None for _, v in values):
+        return "Claude n/a"
+    seg = "Claude " + " ".join(f"{label} {v:.0f}%" if v is not None else f"{label} n/a"
+                               for label, v in values)
+    updated = _num(usage.get("updated_at"))
+    if updated is None or updated <= 0:
+        return seg + " (stale)"
+    if now - updated > ttl:
+        seg += f" (stale {_age(now - updated)})"
+    return seg
+
+
 def _num(value) -> float | None:
     """A real number, or None. ``True`` is not a number here."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -94,8 +156,9 @@ def _clock(epoch: float) -> str:
     return time.strftime("%H:%M", time.localtime(epoch))
 
 
-def render(cache: dict | None, *, now: float, env_mode: str | None = None, color: bool = False) -> str:
-    """The status line for ``cache`` at ``now``. Pure: no I/O.
+def render(cache: dict | None, *, now: float, env_mode: str | None = None, color: bool = False,
+           usage: dict | None = None, usage_ttl_s: float = DEFAULT_USAGE_TTL_S) -> str:
+    """The status line for ``cache`` and the quota snapshot ``usage`` at ``now``. Pure: no I/O.
 
     ``env_mode`` is ``LLM_ROUTER_ENFORCE`` from this process's environment; it
     wins over the cached mode exactly as ``enforce_config`` lets it win.
@@ -120,8 +183,7 @@ def render(cache: dict | None, *, now: float, env_mode: str | None = None, color
     else:
         parts.append("NS n/a")
 
-    wk = _num((fresh or {}).get("claude_weekly_pct")) if fresh else None
-    parts.append(f"Claude wk {wk:.0f}%" if wk is not None else "Claude wk n/a")
+    parts.append(_quota(usage, now, usage_ttl_s))
 
     codex = (fresh or {}).get("codex") if fresh else None
     used = _num(codex.get("used")) if isinstance(codex, dict) else None
@@ -242,7 +304,8 @@ def main() -> int:
     cache = read_cache(home)
     maybe_refresh(home, cache, now)
     color = not os.environ.get("NO_COLOR")
-    sys.stdout.write(render(cache, now=now, env_mode=os.environ.get("LLM_ROUTER_ENFORCE"), color=color) + "\n")
+    sys.stdout.write(render(cache, now=now, env_mode=os.environ.get("LLM_ROUTER_ENFORCE"), color=color,
+                            usage=read_usage(home), usage_ttl_s=usage_ttl()) + "\n")
     return 0
 
 

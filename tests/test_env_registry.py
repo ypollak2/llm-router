@@ -112,6 +112,9 @@ _INDIRECT_READS = frozenset({
     # through a variable, so the literal-arg scan can't see them anymore.
     "LLM_ROUTER_TOKEN",
     "LLM_ROUTER_AUDIT_DISABLED",
+    # Read only by hooks/statusline-command.sh (bash, not Python): the switch to
+    # the debug fast status line. The scan walks *.py, so it cannot see it.
+    "LLM_ROUTER_STATUSLINE",
 })
 
 
