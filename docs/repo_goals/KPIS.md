@@ -190,6 +190,11 @@ press can therefore reach D3 twice: once as a `user_redone` row and once as that
 has no session id, so the two cannot be matched; D3 may overstate redos by up to the number of `r` presses. The
 `user_redone n=` line gives that bound.
 
+**Accepted (2026-10-06 review follow-up):** the same `claude:` prefix also makes one `r` press mark the preceding unit
+as redone in NS, D1 and D2, not only D3. This is accepted, not a bug: the press is the person asking for Claude's own
+answer to that unit, which is what a redo is. The detector in `usage_outcome` skips the override only when the prompt
+*ends with* the band's redo mark (`BAND_REDO_MARK`), so a prompt that merely quotes the mark is still an override.
+
 ### `llm-router kpi --health`
 
 One line per KPI: `measured`, `blind` or `stale`, the one reason, and the n. **Blind** = no number (nothing to

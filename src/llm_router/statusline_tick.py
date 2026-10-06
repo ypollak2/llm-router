@@ -83,9 +83,14 @@ def read_usage(home: str) -> dict | None:
     try:
         with open(os.path.join(home, USAGE_NAME), encoding="utf-8") as fh:
             data = json.load(fh)
+            mtime = os.fstat(fh.fileno()).st_mtime
     except (OSError, ValueError):
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    if _num(data.get("updated_at")) in (None, 0.0):
+        data["updated_at"] = mtime  # older snapshots lack it: file mtime, as the full layout does
+    return data
 
 
 def usage_ttl() -> float:

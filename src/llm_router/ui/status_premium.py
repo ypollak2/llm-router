@@ -19,6 +19,17 @@ from llm_router.ui.theme import PALETTE, progress_bar
 from llm_router import paths
 
 
+def _as_pct(value) -> Optional[float]:
+    """A usage percentage as a finite float, or None. Accepts numeric strings."""
+    if isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out == out and abs(out) != float("inf") else None
+
+
 class PremiumStatusCommand:
     """Premium status display for llm-router status command."""
 
@@ -90,9 +101,13 @@ class PremiumStatusCommand:
             ("Sonnet Monthly", pressure_data.get("sonnet_pct"), "30d window"),
         ]
 
-        for label, pct, window in quotas:
-            if pct is None:
+        for label, raw, window in quotas:
+            if raw is None:
                 lines.append(Text(f"  {label:<20} {'—':<16}  not reported  ·  {window}"))
+                continue
+            pct = _as_pct(raw)
+            if pct is None:
+                lines.append(Text(f"  {label:<20} {'—':<16}  n/a  ·  {window}"))
                 continue
             bar = progress_bar(pct, max_val=100.0, width=16)
             pct_color = (

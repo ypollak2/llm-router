@@ -889,6 +889,13 @@ def _o2_quality_held(bench: dict | None) -> dict:
                       newest_ts=_bench_newest(bench), generated_at=bench.get("generated_at"))
 
 
+def _d5_never_haiku(d5: dict) -> bool:
+    """True only when the benchmark says the cheapest tier was predicted zero times.
+    A missing ``haiku`` key (or no counts at all) is unknown, not zero."""
+    counts = d5.get("predicted_tier_counts")
+    return isinstance(counts, dict) and "haiku" in counts and not counts["haiku"]
+
+
 def _d5_predicted_line(d5: dict) -> list[str]:
     """The predicted tier distribution, plus a qualifier when the classifier never
     predicted the cheapest tier: an under-route rate of 0% is then vacuous."""
@@ -897,7 +904,7 @@ def _d5_predicted_line(d5: dict) -> list[str]:
         return []
     dist = ", ".join(f"{t} {counts[t]}" for t in ("haiku", "sonnet", "opus") if t in counts)
     line = f"classifier predicted: {dist}"
-    if not counts.get("haiku"):
+    if _d5_never_haiku(d5):
         line += " -- never predicted haiku, so the under-route rate is not informative"
     return [line]
 
@@ -919,11 +926,17 @@ def _d5_classifier_accuracy(bench: dict | None) -> dict:
             f"unscored, below n={MIN_N}: {_pct(d5['accuracy'])} exact-tier accuracy{under_n} (n={n})",
             *dist]}
     under_s = f", under-route={_pct(under)}" if isinstance(under, (int, float)) else ""
+    never = _d5_never_haiku(d5)
     gate = "" if not isinstance(under, (int, float)) else (
         " (within <=10% gate)" if under <= 0.10 else " (OVER the <=10% gate)")
-    return _measured(f"{_pct(d5['accuracy'])} exact-tier accuracy{under_s}{gate} (n={n})", n,
-                      newest_ts=_bench_newest(bench), generated_at=bench.get("generated_at"),
-                      lines=dist)
+    if never:  # an under-route rate is vacuous when the cheapest tier is never predicted
+        gate = " (never predicted haiku: under-route not informative)"
+    res = _measured(f"{_pct(d5['accuracy'])} exact-tier accuracy{under_s}{gate} (n={n})", n,
+                    newest_ts=_bench_newest(bench), generated_at=bench.get("generated_at"),
+                    lines=dist)
+    if never:
+        res["health_note"] = "never predicted haiku: under-route rate not informative"
+    return res
 
 
 # ── G2: fail-open events per 100 calls ─────────────────────────────────────────

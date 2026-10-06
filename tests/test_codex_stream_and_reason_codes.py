@@ -87,7 +87,7 @@ def test_total_bytes_cap_stops_the_process_and_records_truncation(monkeypatch, t
     t = time.monotonic()
     res = _run(monkeypatch, b, timeout=30)
     assert time.monotonic() - t < 15
-    assert res.truncated is True and res.content == "partial"
+    assert res.truncated is True and res.content == "partial\n\n" + codex_agent.TRUNCATION_MARKER
     assert res.reason_code == "output_cap_exceeded"  # not a clean answer
 
 
@@ -229,3 +229,16 @@ def test_ledger_row_for_every_failure_has_reason_and_code(monkeypatch, tmp_path,
     assert rows[0]["outcome"] == "codex_failed"
     assert rows[0]["reason_code"] == expect
     assert rows[0]["reason"].strip()
+
+
+def test_cap_breach_with_real_text_carries_a_truncation_marker(monkeypatch, tmp_path):
+    monkeypatch.setattr(codex_agent, "_STDOUT_TOTAL_CAP", 200_000, raising=False)
+    b = _fake_codex(tmp_path, f"""
+        import sys
+        sys.stdout.write({_event("partial")!r} + "\\n")
+        sys.stdout.flush()
+        while True:
+            sys.stdout.write("noise " * 1000 + "\\n"); sys.stdout.flush()
+    """)
+    res = _run(monkeypatch, b, timeout=30)
+    assert res.content.endswith("[truncated: output cap]") and res.content.startswith("partial")
