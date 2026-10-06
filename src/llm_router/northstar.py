@@ -860,7 +860,7 @@ def _load_north_star_ledger() -> list[dict]:
 # that is malformed (bad JSON, no str unit_id, verify not a dict, unknown status) is ignored,
 # and so is an orphan (a unit_id no unit has): neither can create or change a unit.
 
-VERIFY_STATUSES = ("pass_f2p", "pass_p2p", "fail", "unavailable", "not_applicable")
+VERIFY_STATUSES = ("pass_f2p", "pass_f2p_model", "pass_p2p", "fail", "unavailable", "not_applicable")
 _CODE_RX = re.compile(r"^[a-z0-9][a-z0-9_.:\-]{0,63}$")
 _MAX_FLAGS = 16
 
@@ -881,7 +881,7 @@ def _clean_verify(raw) -> dict | None:
     status = raw["verify_status"]
     flags = raw.get("verify_flags")
     flags = [f for f in flags if _code(f)][:_MAX_FLAGS] if isinstance(flags, list) else []
-    level = "V1" if status in ("pass_f2p", "pass_p2p", "fail") else None
+    level = "V1" if status in ("pass_f2p", "pass_f2p_model", "pass_p2p", "fail") else None
     return {
         "verify_level": level,
         "verify_status": status,

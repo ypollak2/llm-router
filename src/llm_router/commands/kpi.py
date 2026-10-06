@@ -344,7 +344,7 @@ def _verify_shadow(days: int) -> dict | None:
     c = {"verified": 0, "weak": 0, "unavailable": 0}
     for u in ns.units(days=days, backfill=True):
         s = (u.get("verify") or {}).get("verify_status")
-        if s == "pass_f2p":
+        if s in ("pass_f2p", "pass_f2p_model"):
             c["verified"] += 1
         elif s == "pass_p2p":
             c["weak"] += 1

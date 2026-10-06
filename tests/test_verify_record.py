@@ -202,3 +202,13 @@ def test_record_verify_round_trips_a_real_unit_result(tmp_path):
     assert v["verify_reason"] == "verify_unavailable:sandbox_unproven"
     with pytest.raises(ValueError):
         ns.verify_row(a["unit_id"], UnitResult(verify_status="used", reason="x"))
+
+
+def test_pass_f2p_model_from_verify_unit_is_recordable_and_joins(tmp_path):
+    """PR A added pass_f2p_model (a model-added test that fails on the baseline); a schema that did
+    not know it made record_verify raise and the unit's verdict was lost."""
+    p, proj = _setup(tmp_path)
+    a, _ = _codex(_units(proj))
+    ns.record_verify(a["unit_id"], UnitResult(verify_status="pass_f2p_model", reason="f2p_model", sandboxed=True))
+    v = _codex(_units(proj))[0]["verify"]
+    assert (v["verify_status"], v["verify_level"], v["verify_sandboxed"]) == ("pass_f2p_model", "V1", True)
