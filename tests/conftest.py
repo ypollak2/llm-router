@@ -34,6 +34,10 @@ from tests import _real_home_guard  # noqa: E402
 _SUITE_USER_HOME = _tempfile.mkdtemp(prefix="llm_router-suite-userhome-")
 os.environ["HOME"] = _SUITE_USER_HOME
 os.environ["USERPROFILE"] = _SUITE_USER_HOME
+# XDG_* would still name the runner's REAL home on Linux CI (XDG_CONFIG_HOME=/home/runner/.config
+# made test_t15_..._real_paths_are_used_when_nothing_is_set resolve outside the sandbox).
+for _x in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+    os.environ.pop(_x, None)
 _real_home_guard.install()
 
 
@@ -112,6 +116,8 @@ def _isolate_user_home(tmp_path_factory, monkeypatch):
     home = tmp_path_factory.mktemp("userhome")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+    for _x in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(_x, raising=False)
 
 
 @pytest.fixture(autouse=True)
