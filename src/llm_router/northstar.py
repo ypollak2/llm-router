@@ -333,6 +333,11 @@ UNIT_DRAFT = "draft"
 UNIT_DIRECT = "direct"
 UNIT_ROUTED_EDIT = "routed_edit"
 UNIT_AGENT_ROUTE_CODEX = "agent_route_codex"
+# P2 (local-usage plan): informational kind for local work. Deliberately NOT in
+# ALL_KINDS / ATTEMPTED_KINDS and never yielded by ``units()``: report(), the
+# quality breaker and kpi NS/D1/D2 all consume ``units()``, so a row there would
+# change their denominators. Read it via ``local_shadow_units()``.
+UNIT_LOCAL_SHADOW = "local_shadow"
 ALL_KINDS = (
     UNIT_USER_PROMPT, UNIT_CLAUDE_MAIN, UNIT_SIDECHAIN,
     UNIT_ROUTED_MCP, UNIT_DRAFT, UNIT_DIRECT,
@@ -351,6 +356,7 @@ _LEVER_OF_KIND = {
     UNIT_DIRECT: "direct",
     UNIT_ROUTED_EDIT: "llm_edit",
     UNIT_AGENT_ROUTE_CODEX: "agent_route_codex",
+    UNIT_LOCAL_SHADOW: "local_shadow",
 }
 
 # The MCP tool name llm_edit is registered under (server.py / tool_surface.py) —
@@ -1276,6 +1282,58 @@ def units(days: int | None = 30, session_id: str | None = None,
         ordered = sorted(su.units, key=lambda u: (u.ts is None, u.ts if u.ts is not None else 0.0))
         for u in ordered:
             yield u.to_dict()
+
+
+def local_shadow_units(days: int | None = 30, db_path: Path | None = None) -> Iterator[dict]:
+    """Local work as ``local_shadow`` rows, derived from ``usage.db``.
+
+    Source: ``routing_decisions`` rows with ``provenance='runtime'`` (the MCP
+    ``llm()`` / ``llm_edit`` path, written by ``router.py``'s finalizer) served by
+    ``final_provider='ollama'``. Derived rather than emitted: the rows already exist,
+    so there is no new write path to fail, drift or double-count. Read-only.
+
+    Never part of ``units()``, so never part of NS, D1, D2 or ``report()``. Each
+    dict: session_id, ts (iso8601), kind, lever, task_type, complexity, model,
+    latency_ms, outcome (always ``unknown``: no verdict path exists yet, P4),
+    provenance ("runtime"), shadow_tier.
+    """
+    import sqlite3
+
+    path = db_path or paths.state_path("usage.db")
+    if not Path(path).is_file():
+        return
+    where = "provenance = 'runtime' AND final_provider = 'ollama'"
+    args: tuple = ()
+    if days:
+        where += " AND timestamp >= datetime('now', ?)"
+        args = (f"-{int(days)} days",)
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
+    except sqlite3.Error:
+        return
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(routing_decisions)")}
+        sid = "session_id" if "session_id" in cols else "NULL"
+        tier = "shadow_tier" if "shadow_tier" in cols else "NULL"
+        rows = conn.execute(
+            f"SELECT {sid}, timestamp, task_type, complexity, final_model, latency_ms, {tier} "
+            f"FROM routing_decisions WHERE {where} ORDER BY timestamp, id", args,
+        ).fetchall()
+    except sqlite3.Error:
+        return
+    finally:
+        conn.close()
+    for session, ts, task_type, complexity, model, latency, shadow in rows:
+        try:
+            iso = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).isoformat()
+        except (TypeError, ValueError):
+            iso = None
+        yield {
+            "session_id": session, "ts": iso, "kind": UNIT_LOCAL_SHADOW,
+            "lever": _LEVER_OF_KIND[UNIT_LOCAL_SHADOW], "task_type": task_type,
+            "complexity": complexity, "model": model, "latency_ms": latency,
+            "outcome": OUTCOME_UNKNOWN, "provenance": "runtime", "shadow_tier": shadow,
+        }
 
 
 def _percentile(values: list[float], p: float) -> float | None:

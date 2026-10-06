@@ -646,6 +646,12 @@ MIGRATE_ROUTING_DECISIONS_ADD_SUBJECT = [
 ]
 """Plan 07 Cat E — enables (policy, subject, model) outcome aggregation for bandit selection."""
 
+MIGRATE_ROUTING_DECISIONS_ADD_SHADOW_TIER = [
+    "ALTER TABLE routing_decisions ADD COLUMN shadow_tier TEXT",
+]
+"""P2 local-usage plan: the tier a decision WOULD have had under
+``LLM_ROUTER_LOCAL_TIER=shadow`` ("local" or NULL). Log only; never read by routing."""
+
 MIGRATE_ROUTING_DECISIONS_ADD_PROVENANCE = [
     "ALTER TABLE routing_decisions ADD COLUMN provenance TEXT",
 ]
@@ -1092,6 +1098,7 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_ADD_QUOTA_SNAPSHOTS_TABLE
         + MIGRATE_ROUTING_DECISIONS_ADD_SUBJECT
         + MIGRATE_ROUTING_DECISIONS_ADD_PROVENANCE
+        + MIGRATE_ROUTING_DECISIONS_ADD_SHADOW_TIER
         # Defined in v6.2 and never applied: compression_stats was declared,
         # log_compression_stat wrote to it, and the table did not exist. The
         # write raised OperationalError straight into bash-compress's bare
@@ -1900,6 +1907,7 @@ async def log_routing_decision(
     response: str | None = None,
     requested_complexity: str | None = None,
     subject: str | None = None,
+    shadow_tier: str | None = None,
 ) -> None:
     """Persist a complete routing decision to the routing_decisions table.
 
@@ -1982,8 +1990,8 @@ async def log_routing_decision(
                 quality_mode, final_model, final_provider, success,
                 input_tokens, output_tokens, cost_usd, latency_ms, reason_code,
                 correlation_id, requested_complexity, complexity_downgraded, subject,
-                provenance, capabilities_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                provenance, capabilities_json, shadow_tier)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 _prompt_hash(prompt),
                 task_type,
@@ -2012,6 +2020,7 @@ async def log_routing_decision(
                 subject,
                 _write_provenance(),
                 capabilities_json,
+                shadow_tier,
             ),
         )
         await db.commit()

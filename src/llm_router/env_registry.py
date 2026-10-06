@@ -370,6 +370,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_ZERO_CLAUDE_VERIFY": ("llm_router", "local_agent/verify.py", 1),
     # Plan 3.7 (warm.py): keep the zero-Claude edit model resident, fail fast cold.
     "LLM_ROUTER_LOCAL_KEEP_ALIVE": ("llm_router", "warm.py", 1),
+    # P2 local-usage plan: shadow-only would-be "local" tier (log only, never routes).
+    "LLM_ROUTER_LOCAL_TIER": ("llm_router", "local_tier.py", 1),
     "LLM_ROUTER_ZCE_COLD_BUDGET_S": ("llm_router", "warm.py", 1),
     "LLM_ROUTER_ZCE_WARMUP": ("llm_router", "warm.py", 1),
     # ── indirect reads: DECLARED BY HAND, invisible to the AST scan ──

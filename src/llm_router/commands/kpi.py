@@ -1096,6 +1096,29 @@ def _g4_wrongly_benched(days: int, now: float) -> dict:
     )
 
 
+def _local_shadow_summary(days: int) -> dict:
+    """Count of local (shadow) units by task type. Reads ``northstar.local_shadow_units``,
+    a stream ``units()`` never yields, so this line cannot move NS, D1 or D2."""
+    from llm_router import northstar as ns
+
+    by_task: dict[str, int] = {}
+    try:
+        for u in ns.local_shadow_units(days=days):
+            key = u.get("task_type") or "unknown"
+            by_task[key] = by_task.get(key, 0) + 1
+    except Exception:  # noqa: BLE001 -- informational line must never break the scorecard
+        by_task = {}
+    return {"n": sum(by_task.values()), "by_task_type": dict(sorted(by_task.items()))}
+
+
+def _local_shadow_line(summary: dict | None) -> str | None:
+    if not summary or not summary.get("n"):
+        return None
+    by = ", ".join(f"{k} {v}" for k, v in sorted(summary["by_task_type"].items(), key=lambda kv: -kv[1]))
+    return (f"local (shadow): n={summary['n']}, by task type: {by} "
+            "(provenance=runtime, served by ollama; informational, never in NS, D1 or D2)")
+
+
 # ── assembly ───────────────────────────────────────────────────────────────
 
 def compute_scorecard(days: int = 7, *, include_research: bool = False,
@@ -1126,6 +1149,8 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         "window_days": days,
         "include_research": include_research,
         "joins": joins,
+        # Informational only: not in "kpis", so not in _ORDER, --health or NS/D1/D2.
+        "local_shadow": _local_shadow_summary(days),
         "kpis": {
             "NS": ns_r, "O1": o1_r, "O2": o2_r,
             "D1": d1_r, "D2": d2_r, "D3": d3_r, "D4": d4_r, "D5": d5_r,
@@ -1237,6 +1262,9 @@ def render_scorecard(data: dict) -> str:
         for extra in r.get("lines", ()):
             lines.append(f"      {extra}")
     lines.append("")
+    local_line = _local_shadow_line(data.get("local_shadow"))
+    if local_line:
+        lines.append(local_line)
     lines.append(_join_line(data["joins"]))
     lines.append("O1 is never session-kind filtered (usage.db predates tagging); G3 is not "
                   "session-kind filtered either (see KPIS.md); neither are G1 (hook), G2 and G4, "
