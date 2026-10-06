@@ -75,7 +75,7 @@ class Backend:
 
 
 class Upstream:
-    def __init__(self, payload: bytes | None = None, delay: float = 0.0, status: int = 200):
+    def __init__(self, payload: bytes | None = None, delay: float = 0.3, status: int = 200):
         self.payload = payload if payload is not None else _claude()
         self.delay, self.status, self.requests = delay, status, []
 

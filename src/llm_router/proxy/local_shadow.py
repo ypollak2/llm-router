@@ -96,7 +96,7 @@ def read_records(path: Path | None = None, days: float | None = None) -> list[di
                 except ValueError:
                     continue
                 if isinstance(rec, dict) and rec.get("kind") == KIND and (
-                        cutoff is None or float(rec.get("ts") or 0) >= cutoff):
+                        cutoff is None or (isinstance(rec.get("ts"), (int, float)) and rec["ts"] >= cutoff)):
                     out.append(rec)
     except OSError:
         return []
