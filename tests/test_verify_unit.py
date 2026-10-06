@@ -241,3 +241,142 @@ def test_selection_is_capped_and_skips_model_changed_tests(tmp_path):
     got, _ = VU.select_candidates(root, ["src/pkg/core.py"], exclude={"tests/test_imports_core.py"})
     assert "tests/test_imports_core.py" not in got
     assert VU.MAX_CANDIDATES == 60
+
+
+# ── review round: test data, helpers, edited tests, symlinks, known limits ───
+
+
+@pytest.fixture
+def datarepo(tmp_path):
+    root = tmp_path / "datarepo"
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "fixtures").mkdir()
+    (root / "src" / "pkg.py").write_text("def val():\n    return 1\n")
+    (root / "tests" / "data.json").write_text('{"v": 2}\n')
+    (root / "fixtures" / "expected.csv").write_text("2\n")
+    (root / "tests" / "test_val.py").write_text(
+        "import json\nfrom pathlib import Path\n\nfrom pkg import val\n\n\n"
+        "def test_json():\n    assert val() == json.load(open(Path(__file__).parent / 'data.json'))['v']\n\n\n"
+        "def test_csv():\n    assert val() == int(open(Path(__file__).parent.parent / 'fixtures' / 'expected.csv').read())\n")
+    return _init(root)
+
+
+DATA_ATTACKS = {
+    "tests/data.json": lambda r: (r / "tests" / "data.json").write_text('{"v": 1}\n'),
+    "tests .txt fixture": lambda r: (r / "tests" / "expected.txt").write_text("1\n"),
+    "tests .yaml fixture": lambda r: (r / "tests" / "cases.yaml").write_text("v: 1\n"),
+    "tests .csv fixture": lambda r: (r / "tests" / "data.csv").write_text("1\n"),
+    "snapshot file": lambda r: ((r / "tests" / "__snapshots__").mkdir(), (r / "tests" / "__snapshots__" / "t.ambr").write_text("1\n")),
+    "snapshots dir txt": lambda r: ((r / "tests" / "snapshots").mkdir(), (r / "tests" / "snapshots" / "t.txt").write_text("1\n")),
+    "fixture outside a test dir that a test names": lambda r: (r / "fixtures" / "expected.csv").write_text("1\n"),
+    "tests/helpers.py (support code)": lambda r: (r / "tests" / "helpers.py").write_text("X = 1\n"),
+}
+
+
+@real_sandbox
+@pytest.mark.parametrize("name", list(DATA_ATTACKS), ids=list(DATA_ATTACKS))
+def test_test_data_and_support_changes_are_never_eligible(datarepo, tmp_path, name):
+    def mutate(r: Path):
+        (r / "src" / "pkg.py").write_text("def val():\n    return 1  # trivial change\n")
+        DATA_ATTACKS[name](r)
+    r = verify_unit(datarepo, _patch(datarepo, tmp_path, mutate))
+    assert (r.verify_status, r.reason) == ("fail", "test_data_changed"), (name, r)
+    assert not r.used_eligible
+
+
+@pytest.fixture
+def helperrepo(tmp_path):
+    """A failing test whose assert lives in a source module; and one whose input can be special-cased."""
+    root = tmp_path / "helperrepo"
+    (root / "src" / "pkg").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "src" / "pkg" / "__init__.py").write_text("")
+    (root / "src" / "pkg" / "calc.py").write_text("def add(a, b):\n    return a - b\n")
+    (root / "src" / "pkg" / "check.py").write_text("def must_equal(a, b):\n    assert a == b\n")
+    (root / "tests" / "test_calc.py").write_text(
+        "from pkg.calc import add\nfrom pkg.check import must_equal\n\n\n"
+        "def test_add():\n    must_equal(add(1, 2), 3)\n")
+    return _init(root)
+
+
+@real_sandbox
+def test_known_limit_gutting_an_assert_helper_in_source_is_eligible_today(helperrepo, tmp_path):
+    """KNOWN LIMIT (not fixable statically; measured by the hidden-test precision bar). A fix flips this."""
+    r = verify_unit(helperrepo, _patch(helperrepo, tmp_path, lambda c: (c / "src" / "pkg" / "check.py").write_text(
+        "def must_equal(a, b):\n    pass\n")))
+    assert r.verify_status == "pass_f2p" and r.used_eligible, r
+
+
+@real_sandbox
+def test_known_limit_special_casing_the_test_input_in_source_is_eligible_today(helperrepo, tmp_path):
+    """KNOWN LIMIT: add() still wrong in general, right for the one input the test uses."""
+    r = verify_unit(helperrepo, _patch(helperrepo, tmp_path, lambda c: (c / "src" / "pkg" / "calc.py").write_text(
+        "def add(a, b):\n    if (a, b) == (1, 2):\n        return 3\n    return a - b\n")))
+    assert r.verify_status == "pass_f2p" and r.used_eligible, r
+
+
+@pytest.fixture
+def twotests(tmp_path):
+    root = tmp_path / "twotests"
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "src" / "pkg.py").write_text("def add(a, b):\n    return a - b\n")
+    (root / "tests" / "test_pkg.py").write_text(
+        "from pkg import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n\n\n"
+        "def test_zero():\n    assert add(0, 0) == 0\n")
+    (root / "tests" / "test_other.py").write_text("from pkg import add\n\n\ndef test_other():\n    assert add(2, 2) == 4\n")
+    return _init(root)
+
+
+@real_sandbox
+def test_renaming_a_passing_test_and_adding_a_dummy_is_tests_disappeared(twotests, tmp_path):
+    def mutate(r: Path):
+        _fix(r)
+        f = r / "tests" / "test_pkg.py"
+        f.write_text(f.read_text().replace("def test_zero", "def xtest_zero") + "\n\ndef test_dummy():\n    assert True\n")
+    r = verify_unit(twotests, _patch(twotests, tmp_path, mutate))
+    assert (r.verify_status, r.reason) == ("fail", "tests_disappeared"), r
+    assert not r.used_eligible
+
+
+@real_sandbox
+def test_a_legit_edit_to_a_test_file_still_works_and_is_not_sole_evidence(twotests, tmp_path):
+    def mutate(r: Path):
+        _fix(r)
+        f = r / "tests" / "test_pkg.py"
+        f.write_text(f.read_text() + "\n\ndef test_three():\n    assert add(1, 1) == 2\n")
+    r = verify_unit(twotests, _patch(twotests, tmp_path, mutate))
+    assert r.verify_status == "pass_f2p" and r.n_f2p >= 2, r      # test_other (own) + test_add (edited file)
+
+
+@real_sandbox
+def test_dropping_a_test_function_is_refused_by_the_early_weakened_check(twotests, tmp_path):
+    """Needs the early V.weakened_tests gate: verify() alone would report it as no_test_passed/other."""
+    def mutate(r: Path):
+        _fix(r)
+        f = r / "tests" / "test_pkg.py"
+        f.write_text("from pkg import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n")
+    r = verify_unit(twotests, _patch(twotests, tmp_path, mutate))
+    assert (r.verify_status, r.reason) == ("fail", "tests_weakened"), r
+
+
+@real_sandbox
+@pytest.mark.parametrize("target", ["/dev/zero", "/etc/passwd"])
+def test_a_symlink_in_the_patch_fails_closed_fast(broken, tmp_path, target):
+    import os
+    import time
+
+    def mutate(r: Path):
+        _fix(r)
+        os.symlink(target, r / "src" / "z.py")
+    patch = _patch(broken, tmp_path, mutate)
+    t0 = time.monotonic()
+    r = verify_unit(broken, patch, budget_s=20)
+    assert (r.verify_status, r.reason) == ("unavailable", "symlink_in_patch"), r
+    assert time.monotonic() - t0 < 15 and not r.used_eligible
+
+
+def test_an_oversized_patch_is_unavailable(broken):
+    r = verify_unit(broken, "+" * (VU.MAX_PATCH_BYTES + 1))
+    assert (r.verify_status, r.reason) == ("unavailable", "patch_too_large")

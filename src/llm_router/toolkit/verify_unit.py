@@ -19,11 +19,22 @@ Rules (VERIFIER_PLAN.md sections 2-5 and the owner decisions of 2026-10-06):
 * Fail closed: sandbox unproven, kill switch, timeout, OSError, an apply conflict -> unavailable;
   a repo with no pytest runner (or nothing to verify) -> not_applicable. Never pass.
 * The test output tail and the command are never part of the result.
+* Any change to non-.py test data (files under test/fixture/snapshot dirs, or a file a test
+  names), to test support code (a non-test .py under a test dir), or any symlink in the patch
+  is refused (fail / unavailable). A model-edited test file is also run on the baseline: a test
+  that passed there and no longer passes or exists after is `fail`/`tests_disappeared`.
+
+KNOWN LIMITS (not caught by any static f2p gate; measured by the hidden-test precision bar of
+VERIFIER_PLAN section 6, pinned by the `known_limit_*` tests so a future fix flips them on purpose):
+  1. Gutting an assertion helper that lives in a NON-test source module (src/pkg/check.py).
+  2. Special-casing the test's input in source code (`if (a, b) == (1, 2): return 3`).
+Both yield pass_f2p / used-eligible today.
 """
 from __future__ import annotations
 
 import ast
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -44,6 +55,11 @@ DEFAULT_BUDGET_S = 120.0
 MAX_BUDGET_S = 300.0
 MAX_CANDIDATES = 60
 _SRC_ROOTS = ("src", "lib")
+MAX_PATCH_BYTES = 2 * 1024 * 1024
+_TEST_DIR_PARTS = frozenset({"tests", "test", "testing", "fixtures", "fixture", "testdata", "test_data",
+                            "__snapshots__", "snapshots", "snapshot"})
+_SYMLINK_MODE_RX = re.compile(r"^(?:(?:new file|deleted file|old|new) mode 120000|index \w+\.\.\w+ 120000)\b",
+                              re.M)
 _SAFE_ENV = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
 
 
@@ -182,6 +198,44 @@ def changed_paths(baseline: Path, root: Path) -> list[str]:
                   if r not in now or r not in was or (baseline / r).read_bytes() != (root / r).read_bytes())
 
 
+def has_symlink(root: Path) -> bool:
+    """Any symlink under root (never follows one)."""
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        if any(os.path.islink(os.path.join(dirpath, n)) for n in dirnames + filenames):
+            return True
+    return False
+
+
+def _is_test_named(rel: str) -> bool:
+    name = Path(rel).name
+    return name.startswith("test_") or name.endswith("_test.py")
+
+
+def test_data_changes(baseline: Path, root: Path, changed: list[str]) -> list[str]:
+    """Changed files a test run can read as input: non-.py files under test/fixture/snapshot dirs,
+    non-.py files whose name a test mentions, and test-support .py (a non-test file under a test dir)."""
+    cheap = [r for r in changed if not (r.endswith(".py") and _is_test_named(r))]
+    if not cheap:
+        return []
+    texts = []
+    for rel in _rglob_py_tests(baseline):
+        try:
+            texts.append((baseline / rel).read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+    blob = "\n".join(texts)
+    out = []
+    for rel in cheap:
+        p = Path(rel)
+        in_test_dir = bool(_TEST_DIR_PARTS & set(p.parts[:-1]))
+        if rel.endswith(".py"):
+            if in_test_dir:
+                out.append(f"{rel}: test support code changed")
+        elif in_test_dir or p.name in blob:
+            out.append(f"{rel}: test data changed")
+    return out
+
+
 def _pytest_command(files: list[str]) -> str:
     return "pytest -q " + " ".join(shlex.quote(f) for f in files)
 
@@ -233,6 +287,10 @@ def verify_unit(repo: str | os.PathLike, patch: str, *, budget_s: float = DEFAUL
 def _judge(res: UnitResult, clock: _Clock, repo: Path, patch: str, cap: int, python_dir: str) -> None:
     if not patch or not patch.strip():
         raise _Stop(NOT_APPLICABLE, "empty_patch")
+    if len(patch.encode("utf-8", "replace")) > MAX_PATCH_BYTES:
+        raise _Stop(UNAVAILABLE, "patch_too_large")
+    if _SYMLINK_MODE_RX.search(patch):
+        raise _Stop(UNAVAILABLE, "symlink_in_patch")
     if not repo.is_dir():
         raise _Stop(UNAVAILABLE, "workspace_error")
     if not detect_pytest(repo):
@@ -255,6 +313,10 @@ def _judge(res: UnitResult, clock: _Clock, repo: Path, patch: str, cap: int, pyt
 def _judge_in(res: UnitResult, clock: _Clock, ws: "sandbox.Workspace", patch: str, cap: int,
               python_dir: str) -> None:
     apply_patch(ws.root, patch)
+    if has_symlink(ws.root):                    # before anything reads the copy
+        raise _Stop(UNAVAILABLE, "symlink_in_patch")
+    if clock.left() <= 1:
+        raise _Stop(UNAVAILABLE, "timeout")
     changed = changed_paths(ws.baseline, ws.root)
     if not changed:
         raise _Stop(NOT_APPLICABLE, "empty_patch")
@@ -263,6 +325,8 @@ def _judge_in(res: UnitResult, clock: _Clock, ws: "sandbox.Workspace", patch: st
         raise _Stop(FAIL, "harness_tampered")
     if V.weakened_tests(ws.baseline, ws.root):
         raise _Stop(FAIL, "tests_weakened")
+    if test_data_changes(ws.baseline, ws.root, changed):
+        raise _Stop(FAIL, "test_data_changed")
 
     changed_py = [r for r in changed if r.endswith(".py")]
     model_tests = [r for r in changed_py if V._is_test_path(r) and (ws.root / r).is_file()]
@@ -296,6 +360,16 @@ def _judge_in(res: UnitResult, clock: _Clock, ws: "sandbox.Workspace", patch: st
 
     if not verdict.ok:
         _classify_not_ok(res, verdict, base, after)
+
+    edited = [r for r in model_tests if (ws.baseline / r).is_file()]
+    if edited:
+        ecmd = _pytest_command(edited)
+        ebase = _run(clock, ecmd, ws.baseline, tmp, python_dir, "ebase")
+        eafter = _run(clock, ecmd, ws.root, tmp, python_dir, "eafter")
+        if not (ebase.junit and eafter.junit):
+            raise _Stop(UNAVAILABLE, "no_junit")
+        if ebase.passed - eafter.passed:
+            raise _Stop(FAIL, "tests_disappeared")
 
     f2p_model: list[str] = []
     if model_tests:
