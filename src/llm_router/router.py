@@ -28,6 +28,7 @@ from contextvars import ContextVar
 from uuid import uuid4
 
 from llm_router import cost, media, provider_reset, providers
+from llm_router import local_tier as _local_tier
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -2380,6 +2381,11 @@ async def _finalize_successful_route(
             response=response.content,
             requested_complexity=_cd.get("requested_complexity"),
             subject=_cd.get("subject"),
+            # P2 shadow: record-only. None unless LLM_ROUTER_LOCAL_TIER=shadow.
+            shadow_tier=_local_tier.would_be_tier(
+                _cd.get("task_type", task_type.value),
+                _cd.get("complexity", effective_complexity),
+            ),
         )
         if classification_data:
             if response.provider in {"claude_subscription", "subscription", "anthropic", "claude"}:
