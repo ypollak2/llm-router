@@ -190,13 +190,28 @@ def _seen_paths(body: dict, cwd: str | None) -> set[str]:
     return seen
 
 
+REASON_RAW_EDIT_CHECKED = "raw_edit_checked"
+
+
 def check_reply(message: dict, body: dict, *, edit_mode: str = "protocol",
-                dirty_fn: Callable[[Path, list[str]], list[str]] | None = None) -> Decision:
-    """Post-call gate: never serve an edit from the raw loop (see module doc)."""
+                dirty_fn: Callable[[Path, list[str]], list[str]] | None = None,
+                raw_edit_checked: bool = False) -> Decision:
+    """Post-call gate: never serve an edit from the raw loop (see module doc).
+
+    ``raw_edit_checked`` is the one exception, and only for the opt-in
+    ``--serve local-agent`` mode (``proxy.local_mode``): an edit that does not
+    qualify for the protocol is served raw instead of going to Claude, and the
+    caller then runs a post-apply check on the file. Default False keeps the
+    hard rule exactly as it was."""
     calls = _edit_calls(message)
     if not calls:
         return Decision(ROUTE_LOCAL, "non_edit_reply")
     names = sorted({c["name"] for c in calls})
+    if raw_edit_checked:
+        decision = check_reply(message, body, edit_mode="protocol", dirty_fn=dirty_fn)
+        if decision.route == ROUTE_CLAUDE:
+            return Decision(ROUTE_LOCAL, REASON_RAW_EDIT_CHECKED, f"{','.join(names)}: {decision.detail}")
+        return decision
     if edit_mode != "protocol":
         return Decision(ROUTE_CLAUDE, "edit_to_claude", f"edit-shaped ({','.join(names)}); edit mode claude")
     if any(n not in ("Edit", "MultiEdit") for n in names):

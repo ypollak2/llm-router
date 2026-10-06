@@ -1119,6 +1119,45 @@ def _local_shadow_line(summary: dict | None) -> str | None:
             "(provenance=runtime, served by ollama; informational, never in NS, D1 or D2)")
 
 
+def _proxy_shadow_summary(days: int) -> dict:
+    """``local_shadow`` records the proxy's shadow mode wrote (``proxy/local_shadow``): a
+    file of their own that ``units()`` and the proxy ledger never read, so this cannot move
+    NS, D1 or D2. Reason codes and numbers only."""
+    from llm_router.proxy import local_shadow
+
+    try:
+        recs = local_shadow.read_records(days=days)
+    except Exception:  # noqa: BLE001 -- informational line must never break the scorecard
+        recs = []
+    compared = [r for r in recs if r.get("agree") is not None]
+    lat = sorted(r["local_latency_s"] for r in recs if isinstance(r.get("local_latency_s"), (int, float)))
+    attempted = [r for r in recs if r.get("fallback_reason") not in ("skipped_busy", "not_eligible",
+                                                                      "media_present", "prompt_over_cap",
+                                                                      "kill_switch", "backend_unhealthy",
+                                                                      "breaker_open")]
+    judged = [r for r in attempted if r.get("schema_valid") is not None]
+    out = {"n": len(recs), "n_compared": len(compared),
+           "agree": sum(1 for r in compared if r["agree"]),
+           "args_equal": sum(1 for r in compared if r.get("args_equal")),
+           "schema_judged": len(judged), "schema_invalid": sum(1 for r in judged if r["schema_valid"] is False),
+           "no_comparison": sum(1 for r in recs if r.get("agree") is None),
+           "p90_latency_s": lat[min(len(lat) - 1, int(0.9 * len(lat)))] if lat else None}
+    return out
+
+
+def _proxy_shadow_line(s: dict | None) -> str | None:
+    if not s or not s.get("n"):
+        return None
+    c = s["n_compared"]
+    agree = f"{s['agree'] / c * 100:.0f}% ({s['agree']}/{c})" if c else "n/a (0 compared)"
+    args = f"{s['args_equal'] / c * 100:.0f}%" if c else "n/a"
+    sch = f"{s['schema_invalid'] / s['schema_judged'] * 100:.1f}%" if s["schema_judged"] else "n/a"
+    p90 = f"{s['p90_latency_s']:.1f}s" if s["p90_latency_s"] is not None else "n/a"
+    return (f"local shadow (proxy): n={s['n']}, tool-name agreement {agree}, args equal {args}, "
+            f"schema-invalid {sch}, p90 local latency {p90}, no comparison {s['no_comparison']}/{s['n']} "
+            "(reason codes only; informational, never in NS, D1 or D2)")
+
+
 # ── assembly ───────────────────────────────────────────────────────────────
 
 def compute_scorecard(days: int = 7, *, include_research: bool = False,
@@ -1151,6 +1190,7 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         "joins": joins,
         # Informational only: not in "kpis", so not in _ORDER, --health or NS/D1/D2.
         "local_shadow": _local_shadow_summary(days),
+        "proxy_local_shadow": _proxy_shadow_summary(days),
         "kpis": {
             "NS": ns_r, "O1": o1_r, "O2": o2_r,
             "D1": d1_r, "D2": d2_r, "D3": d3_r, "D4": d4_r, "D5": d5_r,
@@ -1265,6 +1305,9 @@ def render_scorecard(data: dict) -> str:
     local_line = _local_shadow_line(data.get("local_shadow"))
     if local_line:
         lines.append(local_line)
+    proxy_shadow_line = _proxy_shadow_line(data.get("proxy_local_shadow"))
+    if proxy_shadow_line:
+        lines.append(proxy_shadow_line)
     lines.append(_join_line(data["joins"]))
     lines.append("O1 is never session-kind filtered (usage.db predates tagging); G3 is not "
                   "session-kind filtered either (see KPIS.md); neither are G1 (hook), G2 and G4, "
