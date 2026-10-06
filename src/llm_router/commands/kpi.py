@@ -341,13 +341,15 @@ def _verify_shadow(days: int) -> dict | None:
     never read by NS, D1 or D2 (verifier PR B, shadow). None when no unit carries one."""
     from llm_router import northstar as ns
 
-    c = {"verified": 0, "weak": 0, "unavailable": 0}
+    c = {"verified": 0, "weak": 0, "failed": 0, "unavailable": 0}
     for u in ns.units(days=days, backfill=True):
         s = (u.get("verify") or {}).get("verify_status")
         if s in ("pass_f2p", "pass_f2p_model"):
             c["verified"] += 1
         elif s == "pass_p2p":
             c["weak"] += 1
+        elif s == "fail":
+            c["failed"] += 1
         elif s in ("unavailable", "not_applicable"):
             c["unavailable"] += 1
     return c if any(c.values()) else None
@@ -1188,7 +1190,7 @@ def render_scorecard(data: dict) -> str:
         if key == "D2" and data.get("verify_shadow"):
             v = data["verify_shadow"]
             lines.append(f"      verify (shadow): {v['verified']} verified, {v['weak']} weak, "
-                         f"{v['unavailable']} unavailable (informational; not in NS/D1/D2)")
+                         f"{v['failed']} failed, {v['unavailable']} unavailable (informational; not in NS/D1/D2)")
     lines.append("")
     lines.append(_join_line(data["joins"]))
     lines.append("O1 is never session-kind filtered (usage.db predates tagging); G3 is not "
