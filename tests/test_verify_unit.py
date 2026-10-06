@@ -102,21 +102,85 @@ def test_a_model_test_that_passes_on_the_baseline_is_not_counted(green, tmp_path
     assert not r.used_eligible
 
 
-@real_sandbox
-def test_a_model_test_that_fails_on_the_baseline_counts_but_is_never_the_sole_evidence(tmp_path):
+def _greet_repo(tmp_path: Path) -> Path:
     root = tmp_path / "greet"
     (root / "src").mkdir(parents=True)
     (root / "tests").mkdir()
     (root / "src" / "greet.py").write_text('def greet(n):\n    return "hi"\n')
     (root / "tests" / "test_greet.py").write_text('from greet import greet\n\n\ndef test_starts():\n    assert greet("a").startswith("hi")\n')
+    return _init(root)
+
+
+NEW_GREET = 'def greet(n):\n    return "hi " + n\n'
+NEW_TEST = 'from greet import greet\n\n\ndef test_name():\n    assert greet("a") == "hi a"\n'
+
+
+@real_sandbox
+def test_a_model_test_that_fails_before_and_passes_after_is_eligible_as_f2p_model(tmp_path):
+    root = _greet_repo(tmp_path)
+
+    def mutate(r: Path):
+        (r / "src" / "greet.py").write_text(NEW_GREET)
+        (r / "tests" / "test_greet_name.py").write_text(NEW_TEST)
+    r = verify_unit(root, _patch(root, tmp_path, mutate))
+    assert (r.verify_status, r.reason, r.n_f2p) == ("pass_f2p_model", "f2p_model", 1), r
+    assert r.used_eligible and r.sandboxed
+
+
+@real_sandbox
+def test_a_model_test_that_fails_before_with_an_import_error_counts(tmp_path):
+    """A new function and its test: on the baseline the test fails at collection."""
+    root = _greet_repo(tmp_path)
+
+    def mutate(r: Path):
+        (r / "src" / "greet.py").write_text('def greet(n):\n    return "hi"\n\n\ndef shout(n):\n    return n.upper()\n')
+        (r / "tests" / "test_shout.py").write_text('from greet import shout\n\n\ndef test_shout():\n    assert shout("a") == "A"\n')
+    r = verify_unit(root, _patch(root, tmp_path, mutate))
+    assert r.verify_status == "pass_f2p_model" and r.n_f2p == 1, r
+
+
+@real_sandbox
+def test_a_model_test_with_no_other_candidate_is_judged_on_its_own(tmp_path):
+    root = tmp_path / "solo"
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "src" / "mod.py").write_text("def f():\n    return 1\n")
+    (root / "tests" / "test_other.py").write_text("def test_x():\n    assert True\n")
     _init(root)
 
     def mutate(r: Path):
-        (r / "src" / "greet.py").write_text('def greet(n):\n    return "hi " + n\n')
-        (r / "tests" / "test_greet_name.py").write_text('from greet import greet\n\n\ndef test_name():\n    assert greet("a") == "hi a"\n')
+        (r / "src" / "mod.py").write_text("def f():\n    return 2\n")
+        (r / "tests" / "test_mod.py").write_text("from mod import f\n\n\ndef test_f():\n    assert f() == 2\n")
     r = verify_unit(root, _patch(root, tmp_path, mutate))
-    assert r.verify_status == "pass_p2p" and r.n_f2p == 1, r
-    assert "f2p_model_tests_only" in r.flags and not r.used_eligible
+    assert r.verify_status == "pass_f2p_model" and r.n_candidates == 0 and "model_tests_only" in r.flags, r
+
+
+@real_sandbox
+def test_a_model_test_unrelated_to_the_changed_code_is_not_eligible(tmp_path):
+    """Fails before, passes after, but only reaches the change transitively (imports an unchanged module)."""
+    root = tmp_path / "unrel"
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "src" / "c.py").write_text("def val():\n    return 1\n")
+    (root / "src" / "a.py").write_text("from c import val\n\n\ndef get():\n    return val()\n")
+    (root / "tests" / "test_a_old.py").write_text("from a import get\n\n\ndef test_old():\n    assert get() >= 0\n")
+    _init(root)
+
+    def mutate(r: Path):
+        (r / "src" / "c.py").write_text("def val():\n    return 2\n")
+        (r / "tests" / "test_a_new.py").write_text("from a import get\n\n\ndef test_new():\n    assert get() == 2\n")
+    r = verify_unit(root, _patch(root, tmp_path, mutate))
+    assert r.verify_status != "pass_f2p_model" and not r.used_eligible, r
+    assert "model_test_unrelated" in r.flags
+
+
+@real_sandbox
+def test_a_model_test_plus_a_broken_existing_test_fails(green, tmp_path):
+    def mutate(r: Path):
+        (r / "src" / "pkg.py").write_text("def add(a, b):\n    return a * b\n")      # breaks test_add (1+2)
+        (r / "tests" / "test_times.py").write_text("from pkg import add\n\n\ndef test_nine():\n    assert add(3, 3) == 9\n")
+    r = verify_unit(green, _patch(green, tmp_path, mutate))
+    assert r.verify_status == "fail" and not r.used_eligible, r
 
 
 @real_sandbox
@@ -229,9 +293,9 @@ def test_selection_picks_importers_then_name_then_neighbours(tmp_path):
     root = _fixture_repo(tmp_path / "fx")
     got, capped = VU.select_candidates(root, ["src/pkg/core.py"])
     assert got == ["tests/test_imports_core.py", "tests/test_imports_pkg_core.py",
-                   "tests/test_core.py", "src/pkg/test_local.py"]
+                   "tests/test_core.py"]
     assert not capped
-    assert VU.select_candidates(root, ["src/pkg/util.py"])[0] == ["tests/test_imports_util.py", "src/pkg/test_local.py"]
+    assert VU.select_candidates(root, ["src/pkg/util.py"])[0] == ["tests/test_imports_util.py"]
 
 
 def test_selection_is_capped_and_skips_model_changed_tests(tmp_path):
@@ -432,7 +496,7 @@ def test_editing_an_existing_test_file_is_never_eligible(twotests, tmp_path):
         f = r / "tests" / "test_pkg.py"
         f.write_text(f.read_text() + "\n\ndef test_three():\n    assert add(1, 1) == 2\n")
     r = verify_unit(twotests, _patch(twotests, tmp_path, mutate))
-    assert (r.verify_status, r.reason) == ("pass_p2p", "edited_tests") and r.n_f2p >= 2, r
+    assert (r.verify_status, r.reason) == ("pass_p2p", "edited_tests") and r.n_f2p >= 1, r
     assert "edited_existing_test" in r.flags and not r.used_eligible
 
 
@@ -509,7 +573,7 @@ def test_junit_rewrite_plus_forced_exit_code_is_not_eligible(broken, tmp_path):
 def test_the_junit_repro_really_works_without_the_cross_check(broken, tmp_path, monkeypatch):
     """Control: with the cross-check off the same patch is called eligible, so the test above proves the fix."""
     patch = _patch(broken, tmp_path, lambda r: (r / "src" / "pkg.py").write_text(JUNIT_REWRITE))
-    monkeypatch.setattr(VU, "report_mismatch", lambda run: False)
+    monkeypatch.setattr(VU, "report_mismatch", lambda run, path: False)
     assert verify_unit(broken, patch).used_eligible
 
 
@@ -518,6 +582,7 @@ def test_stdout_summary_parser():
     assert VU.stdout_summary("==== 3 passed, 1 skipped in 1.2s ====") == {"passed": 3, "skipped": 1}
     assert VU.stdout_summary("no tests ran in 0.01s") == {}
     assert VU.stdout_summary("nothing useful") is None
+    assert VU.stdout_summary("\x1b[31m1 failed\x1b[0m, \x1b[32m2 passed\x1b[0m in 0.1s") == {"failed": 1, "passed": 2}
 
 
 OBFUSCATED = '''import importlib
@@ -583,3 +648,92 @@ def test_known_limit_always_true_eq_object_is_eligible_today(expectedrepo, tmp_p
             "def add(a, b):\n    return Any()\n\n\ndef box(v):\n    return Any()\n")
     r = verify_unit(expectedrepo, _patch(expectedrepo, tmp_path, mutate))
     assert r.verify_status == "pass_f2p" and r.used_eligible, r
+
+
+# ── fourth review: honest runs must not be report_mismatch ───────────────────
+
+
+def _with_ini(repo: Path, tmp_path: Path, ini: str, fix=_fix) -> Path:
+    (repo / "pytest.ini").write_text(ini)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "ini")
+    return repo
+
+
+@real_sandbox
+@pytest.mark.parametrize("ini", ["[pytest]\naddopts = -q\n", "[pytest]\naddopts = -qq\n", "[pytest]\naddopts = --color=yes\n",
+                                 "[pytest]\naddopts = -q --color=yes\n"],
+                         ids=["addopts-q", "addopts-qq", "color-yes", "q-and-color"])
+def test_honest_one_line_fix_is_eligible_under_odd_addopts(broken, tmp_path, ini):
+    _with_ini(broken, tmp_path, ini)
+    r = verify_unit(broken, _patch(broken, tmp_path, _fix))
+    assert (r.verify_status, r.reason) == ("pass_f2p", "f2p"), r
+
+
+@real_sandbox
+def test_honest_fix_that_leaves_a_real_failure_fails_under_odd_addopts(green, tmp_path):
+    _with_ini(green, tmp_path, "[pytest]\naddopts = -qq --color=yes\n")
+    r = verify_unit(green, _patch(green, tmp_path, lambda c: (c / "src" / "pkg.py").write_text("def add(a, b):\n    return a - b\n")))
+    assert r.verify_status == "fail" and r.reason in ("new_failures", "tests_fail"), r
+
+
+TEARDOWN = (
+    "import pytest\nfrom pkg import add\n\n\n"
+    "@pytest.fixture\ndef res():\n    yield 1\n    raise RuntimeError('teardown boom')\n\n\n"
+    "def test_td(res):\n    assert add(1, 1) == 2\n")
+
+
+@pytest.fixture
+def tdrepo(broken):
+    (broken / "tests" / "test_td.py").write_text(TEARDOWN)
+    _git(broken, "add", "-A")
+    _git(broken, "commit", "-qm", "td")
+    return broken
+
+
+@real_sandbox
+def test_a_preexisting_teardown_error_is_not_a_report_mismatch(tdrepo, tmp_path):
+    """junit holds the pass and the error for one id; the summary says '1 passed, 1 error'."""
+    r = verify_unit(tdrepo, _patch(tdrepo, tmp_path, _fix))
+    assert (r.verify_status, r.reason) == ("unavailable", "baseline_failing"), r      # verify()'s rc rule, not a mismatch
+
+
+@real_sandbox
+def test_a_failing_test_plus_its_teardown_error_is_not_a_report_mismatch(tdrepo, tmp_path):
+    """One id, two junit entries (failure + error): counted, not set-collapsed."""
+    (tdrepo / "tests" / "test_td.py").write_text(TEARDOWN.replace("add(1, 1) == 2", "add(1, 1) == 3"))
+    _git(tdrepo, "add", "-A")
+    _git(tdrepo, "commit", "-qm", "td-fail")
+    r = verify_unit(tdrepo, _patch(tdrepo, tmp_path, _fix))
+    assert (r.verify_status, r.reason) == ("unavailable", "baseline_failing"), r
+    assert not r.used_eligible
+
+
+FORCE_EXIT0 = "import atexit\nimport os\nimport sys\n\n\ndef _x():\n    sys.stdout.flush()\n    os._exit(0)\n\n\natexit.register(_x)\n\n\n"
+
+
+@real_sandbox
+def test_exit_code_zero_while_a_test_fails_is_report_mismatch_via_the_rc_leg(twotests, tmp_path):
+    """junit and the printed summary agree (1 failed); ONLY the exit status lies. Needs the rc leg."""
+    def mutate(r: Path):
+        (r / "src" / "pkg.py").write_text(FORCE_EXIT0 + "def add(a, b):\n    if (a, b) == (1, 2):\n        return 3\n    return a - b\n")
+    r = verify_unit(twotests, _patch(twotests, tmp_path, mutate))
+    assert (r.verify_status, r.reason) == ("unavailable", "report_mismatch"), r
+    assert not r.used_eligible
+
+
+def test_a_test_named_source_module_is_never_a_candidate(tmp_path):
+    root = _fixture_repo(tmp_path / "fx")
+    (root / "src" / "pkg" / "test_delta.py").write_text("from pkg.core import X\n")      # source, named test_*
+    assert "src/pkg/test_delta.py" not in VU.select_candidates(root, ["src/pkg/core.py"])[0]
+    (root / "pytest.ini").write_text("[pytest]\ntestpaths = checks\n")
+    (root / "checks").mkdir()
+    (root / "checks" / "test_x.py").write_text("from pkg.core import X\n")
+    got = VU.select_candidates(root, ["src/pkg/core.py"])[0]
+    assert "checks/test_x.py" in got and "src/pkg/test_delta.py" not in got
+
+
+def test_the_sandbox_child_never_loads_a_dotenv(tmp_path):
+    """python-dotenv walks up from the interpreter dir and open()s a denied .env: PermissionError at import."""
+    la = sandbox.SandboxLauncher(tmp_path, tmp_path)
+    assert la.env()["PYTHON_DOTENV_DISABLED"] == "1"

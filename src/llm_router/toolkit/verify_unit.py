@@ -8,18 +8,23 @@ Rules (VERIFIER_PLAN.md sections 2-5 and the owner decisions of 2026-10-06):
 
 * The patch is applied (`git apply --check`, then `git apply`) to a throwaway copy made by
   `sandbox.create_workspace`. The caller's tree is never written.
-* Candidates are repo tests that import, or sit next to, the changed source files, capped
+* Candidates are repo tests (under tests/, test/ or `testpaths`) that import or sit next to the changed source files, capped
   at `max_candidates` files and by the wall-clock budget.
-* `pass_f2p` (a test that fails on the baseline passes after the patch, no new failures,
-  no tampering, no weakened tests) is the ONLY used-eligible status. `pass_p2p` is weak and
-  never used-eligible.
-* Tests the model added or edited count only if they fail when copied into the baseline,
-  and they are never the sole evidence: without an f2p test among the repo's own unmodified
-  tests the status is `pass_p2p` with the flag `f2p_model_tests_only`.
+* Used-eligible statuses (owner decisions 2026-10-06):
+    pass_f2p        a pre-existing test fails on the baseline and passes after the patch, with no new
+                    failures, no tampering, no weakened tests.
+    pass_f2p_model  no such test, but a test the MODEL ADDED fails on the baseline (copied into it) and
+                    passes after, where the file is NEW, sits under a test path, and imports a changed
+                    module (cheap check; a test that only reaches the change transitively does not
+                    count), every candidate that passed before still passes, and no existing test
+                    file was edited. Kept distinct from pass_f2p.
+  `pass_p2p` is weak and never used-eligible. A model test that already passes on the baseline, or
+  does not import the changed code, adds nothing (flags `model_test_passes_on_baseline`,
+  `model_test_unrelated`). A model test with no other candidate tests is judged on its own.
 * Fail closed: sandbox unproven, kill switch, timeout, OSError, an apply conflict -> unavailable;
   a repo with no pytest runner (or nothing to verify) -> not_applicable. Never pass.
 * The test output tail and the command are never part of the result.
-* ELIGIBILITY RULE (coarse on purpose): pass_f2p needs every changed path to be a .py file outside
+* ELIGIBILITY RULE (coarse on purpose): eligibility needs every changed path to be a .py file outside
   test/control paths, or a NEW test file. Any changed, renamed or deleted non-.py file anywhere
   (README, JSON, fixtures, snapshots, configs) -> `unavailable`/`non_python_change` (never used,
   never discarded: the patch is not judged wrong, only unverifiable by this gate). Editing an
@@ -30,9 +35,10 @@ Rules (VERIFIER_PLAN.md sections 2-5 and the owner decisions of 2026-10-06):
 * A model-edited test file is also run on the baseline: a test that passed there and no longer
   passes or exists after is `fail`/`tests_disappeared`.
 
-* Reports are cross-checked: pytest's junit file, its exit status and its printed summary must agree
-  (counts of passed and failed, rc==0 iff nothing failed), else `unavailable`/`report_mismatch`.
-  This catches a source module that rewrites the junit file or forces the exit code.
+* Reports are cross-checked: pytest's exit status vs the junit failure/error entries (counted, not a set)
+  is the main check; the printed summary is compared only when one is printed (ANSI stripped; `-qq`
+  prints none). A disagreement -> `unavailable`/`report_mismatch`. Catches a source module that
+  rewrites the junit file or forces the exit code.
 
 THREAT MODEL: HONEST-BUT-SLOPPY. The verifier assumes a model that makes mistakes, not one that
 attacks the harness. Known limits (no static or cross-check gate catches them; the hidden-test
@@ -41,10 +47,11 @@ by a `known_limit_*` test asserting the CURRENT (eligible) behaviour, so a futur
   1. Gutting an assertion helper that lives in a NON-test source module (src/pkg/check.py).
   2. Special-casing the test's input in source (`if (a, b) == (1, 2): return 3`).
   3. A source data module used as the expected values (src/expected.py) edited to match the output.
+  3b. A weak or trivial model-written test (pass_f2p_model): it can assert whatever the new code does.
   4. A returned object whose `__eq__` is always True.
   5. Deliberate in-process tampering that forges ALL channels at once (e.g. an obfuscated
      monkeypatch of pytest's TestReport: junit, summary and exit code then agree).
-Each yields pass_f2p / used-eligible today.
+Each yields used-eligible (pass_f2p, or pass_f2p_model for 3b) today.
 """
 from __future__ import annotations
 
@@ -58,6 +65,7 @@ import sys
 import tempfile
 import time
 import unicodedata
+import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -65,8 +73,9 @@ from llm_router.toolkit import sandbox
 from llm_router.toolkit import verify as V
 
 PASS_F2P, PASS_P2P, FAIL = "pass_f2p", "pass_p2p", "fail"
+PASS_F2P_MODEL = "pass_f2p_model"
 UNAVAILABLE, NOT_APPLICABLE = "unavailable", "not_applicable"
-STATUSES = (PASS_F2P, PASS_P2P, FAIL, UNAVAILABLE, NOT_APPLICABLE)
+STATUSES = (PASS_F2P, PASS_F2P_MODEL, PASS_P2P, FAIL, UNAVAILABLE, NOT_APPLICABLE)
 
 DEFAULT_BUDGET_S = 120.0
 MAX_BUDGET_S = 300.0
@@ -92,8 +101,9 @@ class UnitResult:
 
     @property
     def used_eligible(self) -> bool:
-        """pass_f2p only. pass_p2p is recorded as weak and never counts (owner decision)."""
-        return self.verify_status == PASS_F2P and self.sandboxed
+        """pass_f2p (a pre-existing test) or pass_f2p_model (a model-added test that fails on the
+        baseline). pass_p2p is recorded as weak and never counts (owner decision)."""
+        return self.verify_status in (PASS_F2P, PASS_F2P_MODEL) and self.sandboxed
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -164,14 +174,40 @@ def _imports(path: Path) -> set[str]:
     return out
 
 
+_TESTPATHS_RX = re.compile(r"^\s*testpaths\s*=\s*(.+)$", re.M)
+
+
+def test_roots(root: Path) -> set[str]:
+    """Directories (relative) tests live in: `testpaths` from the pytest config, plus tests/ and test/."""
+    out: set[str] = set()
+    for name in ("pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini"):
+        try:
+            text = (root / name).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for m in _TESTPATHS_RX.finditer(text):
+            out.update(t.strip("./") for t in re.findall(r"[\w./-]+", m.group(1)) if t.strip("./"))
+    return out
+
+
+def _under_test_path(rel: str, roots: set[str]) -> bool:
+    """A candidate must sit in a test dir. A `test_*.py` inside the source package is source."""
+    parts = Path(rel).parts[:-1]
+    if any(p in ("tests", "test") for p in parts):
+        return True
+    return any(rel == r or rel.startswith(r.rstrip("/") + "/") for r in roots)
+
+
 def select_candidates(root: Path, changed_src: list[str], exclude: set[str] | None = None,
                       cap: int = MAX_CANDIDATES) -> tuple[list[str], bool]:
-    """Existing test files in `root` that import, are named for, or sit next to the changed files.
+    """Existing test files in `root` that import, or are named for, the changed files, or sit in a
+    test dir next to them. They must live under a test path (tests/, test/, `testpaths`).
 
     Returns (candidates, was_capped). Order: importers, then test_<stem>.py, then same-directory
     tests; ties broken by path, so the selection is deterministic.
     """
     exclude = exclude or set()
+    roots = test_roots(root)
     wanted: set[str] = set()
     stems = {Path(r).stem for r in changed_src if Path(r).stem != "__init__"}
     dirs = {str(Path(r).parent) for r in changed_src}
@@ -179,7 +215,7 @@ def select_candidates(root: Path, changed_src: list[str], exclude: set[str] | No
         wanted |= module_names(r)
     scored: dict[str, int] = {}
     for rel in _rglob_py_tests(root):
-        if rel in exclude:
+        if rel in exclude or not _under_test_path(rel, roots):
             continue
         if wanted & _imports(root / rel):
             scored[rel] = 0
@@ -283,13 +319,15 @@ class _Clock:
         return int((time.monotonic() - self.t0) * 1000)
 
 
+_ANSI_RX = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _SUMMARY_RX = re.compile(r"^[= ]*(?P<body>(?:\d+ \w+(?:, )?)+|no tests ran) in [\d.]+s\b", re.M)
 
 
 def stdout_summary(tail: str) -> dict[str, int] | None:
-    """Counts from pytest's own final line ("1 failed, 2 passed in 0.1s"); None if there is none."""
+    """Counts from pytest's own final line ("1 failed, 2 passed in 0.1s"), ANSI stripped;
+    None if there is none (e.g. `-qq` prints no summary)."""
     found = None
-    for m in _SUMMARY_RX.finditer(tail):
+    for m in _SUMMARY_RX.finditer(_ANSI_RX.sub("", tail)):
         found = m.group("body")
     if found is None:
         return None
@@ -300,19 +338,32 @@ def stdout_summary(tail: str) -> dict[str, int] | None:
     return counts
 
 
-def report_mismatch(run: V.VerifyRun) -> bool:
-    """junit, pytest's exit code and pytest's printed summary must tell the same story. They come
-    from three channels; a source module that rewrites the junit file or the exit status breaks the tie."""
+def junit_failure_entries(path: Path) -> int | None:
+    """failure + error elements in the junit file, COUNTED (not a set: a failed test plus its
+    teardown error share one id but are two entries, as in pytest's own summary)."""
+    try:
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError):
+        return None
+    return sum(len(tc.findall("failure")) + len(tc.findall("error")) for tc in root.iter("testcase"))
+
+
+def report_mismatch(run: V.VerifyRun, junit_path: Path) -> bool:
+    """junit, pytest's exit code and (when printed) pytest's summary must tell the same story.
+    Main check: exit status vs junit failure entries. Summary leg only when a summary line exists."""
     if not run.junit:
         return False
+    n = junit_failure_entries(junit_path)
+    if n is None:
+        return True
+    if run.rc == 0 and n > 0:
+        return True
+    if run.rc == 1 and n == 0:
+        return True
     sm = stdout_summary(run.tail)
-    if sm is None:
+    if sm is not None and sm.get("failed", 0) + sm.get("errors", 0) != n:
         return True
-    out_failed = sm.get("failed", 0) + sm.get("errors", 0)
-    out_passed = sm.get("passed", 0) + sm.get("xpassed", 0)
-    if out_failed != len(run.failed) or out_passed != len(run.passed):
-        return True
-    return (run.rc == 0) != (out_failed == 0)
+    return False
 
 
 def _run(clock: _Clock, command: str, cwd: Path, tmp: Path, python_dir: str | None, tag: str) -> V.VerifyRun:
@@ -325,7 +376,7 @@ def _run(clock: _Clock, command: str, cwd: Path, tmp: Path, python_dir: str | No
         raise _Stop(UNAVAILABLE, "os_error") from None
     if run.timed_out:
         raise _Stop(UNAVAILABLE, "timeout")
-    if report_mismatch(run):
+    if report_mismatch(run, tmp / f"junit-{tag}.xml"):
         raise _Stop(UNAVAILABLE, "report_mismatch")
     return run
 
@@ -412,26 +463,28 @@ def _judge_in(res: UnitResult, clock: _Clock, ws: "sandbox.Workspace", patch: st
     res.n_candidates = len(candidates)
     if capped:
         res.flags.append("candidates_capped")
-    if not candidates:
-        if model_tests:
-            res.flags.append("model_tests_only")
+    if not candidates and not model_tests:
         raise _Stop(NOT_APPLICABLE, "no_candidates")
 
     tmp = Path(tempfile.mkdtemp(prefix="vu-", dir=str(ws.tmp)))
-    cmd = _pytest_command(candidates)
-    base = _run(clock, cmd, ws.baseline, tmp, python_dir, "base")
-    after = _run(clock, cmd, ws.root, tmp, python_dir, "after")
-    verdict = V.verify(cmd, ws, python_dir=python_dir, timeout_s=max(clock.left(), 1),
-                       baseline_run=base, after_run=after)
-    if not verdict.ran:
-        raise _Stop(UNAVAILABLE, "sandbox_unproven" if "sandbox not proven" in verdict.reason else "os_error")
-    res.sandboxed = verdict.sandboxed
-
-    # the repo's own (unmodified) tests: fail on the baseline, pass after
-    f2p_own = sorted(base.failed & after.passed) if base.junit and after.junit else []
-
-    if not verdict.ok:
-        _classify_not_ok(res, verdict, base, after)
+    f2p_own: list[str] = []
+    if candidates:
+        cmd = _pytest_command(candidates)
+        base = _run(clock, cmd, ws.baseline, tmp, python_dir, "base")
+        after = _run(clock, cmd, ws.root, tmp, python_dir, "after")
+        verdict = V.verify(cmd, ws, python_dir=python_dir, timeout_s=max(clock.left(), 1),
+                           baseline_run=base, after_run=after)
+        if not verdict.ran:
+            raise _Stop(UNAVAILABLE, "sandbox_unproven" if "sandbox not proven" in verdict.reason
+                        else "os_error")
+        res.sandboxed = verdict.sandboxed
+        # the repo's own (unmodified) tests: fail on the baseline, pass after
+        f2p_own = sorted(base.failed & after.passed) if base.junit and after.junit else []
+        if not verdict.ok:
+            _classify_not_ok(res, verdict, base, after)
+    else:
+        res.sandboxed = True            # proof passed in _judge; the runs below go through the launcher
+        res.flags.append("model_tests_only")
 
     edited = [r for r in model_tests if (ws.baseline / r).is_file()]
     if edited:
@@ -456,8 +509,21 @@ def _judge_in(res: UnitResult, clock: _Clock, ws: "sandbox.Workspace", patch: st
         if mafter.rc != 0 or not mafter.junit:
             raise _Stop(FAIL if mafter.junit and mafter.failed else UNAVAILABLE,
                         "model_tests_fail" if mafter.junit and mafter.failed else "no_junit")
-        f2p_model = sorted(mbase.failed & mafter.passed) if mbase.junit else []
-        if len(f2p_model) < len(mafter.passed):
+        if mbase.junit:
+            wanted = set().union(*(module_names(r) for r in changed_src)) if changed_src else set()
+            roots = test_roots(ws.baseline)
+            for r in model_tests:
+                if r in edited:
+                    continue
+                failed_before = [i for i in mbase.failed if _id_in_module(i, r)]
+                passed_after = [i for i in mafter.passed if _id_in_module(i, r)]
+                if not failed_before or not passed_after:
+                    continue
+                if not _under_test_path(r, roots) or not (wanted & _imports(ws.root / r)):
+                    res.flags.append("model_test_unrelated")
+                    continue
+                f2p_model += failed_before
+        if not f2p_model and "model_test_unrelated" not in res.flags:
             res.flags.append("model_test_passes_on_baseline")
 
     res.n_f2p = len(f2p_own) + len(f2p_model)
@@ -468,9 +534,17 @@ def _judge_in(res: UnitResult, clock: _Clock, ws: "sandbox.Workspace", patch: st
     if f2p_own:
         res.verify_status, res.reason = PASS_F2P, "f2p"
         return
-    if f2p_model:
-        res.flags.append("f2p_model_tests_only")
+    if f2p_model and not edited:
+        res.verify_status, res.reason = PASS_F2P_MODEL, "f2p_model"
+        return
+    if not candidates:
+        raise _Stop(NOT_APPLICABLE, "no_candidates")
     res.verify_status, res.reason = PASS_P2P, "no_f2p"
+
+
+def _id_in_module(test_id: str, rel: str) -> bool:
+    mod = ".".join(Path(rel).with_suffix("").parts)
+    return test_id.startswith((mod + "::", mod + ".")) or test_id == "::" + mod
 
 
 def _classify_not_ok(res: UnitResult, v: "V.Verdict", base: V.VerifyRun, after: V.VerifyRun) -> None:
