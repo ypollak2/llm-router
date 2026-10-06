@@ -125,9 +125,13 @@ def audit(event: str, args: tuple) -> None:
     elif event == "sqlite3.connect":
         if _inside(args[0], PROTECTED_SQLITE, resolve_links=True):
             _refuse("sqlite3.connect", args[0])
-    elif event in ("os.remove", "os.rename"):
+    elif event in ("os.remove", "os.rmdir", "os.mkdir", "os.truncate"):
         if _inside(args[0], PROTECTED_WRITE, resolve_links=False):
             _refuse(event, args[0])
+    elif event == "os.rename":  # also os.replace and shutil.move
+        for target in args[:2]:  # source AND destination: atomic writes rename INTO the dir
+            if _inside(target, PROTECTED_WRITE, resolve_links=False):
+                _refuse(event, target)
 
 
 _installed = False

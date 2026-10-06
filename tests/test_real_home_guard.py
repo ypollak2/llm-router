@@ -88,3 +88,28 @@ def test_suite_runs_with_sandboxed_home():
     assert str(g.TRUE_HOME / ".llm-router") in map(str, g.PROTECTED_SQLITE)
     # the guard is live in this very process
     assert g._installed is True
+
+
+def test_rename_into_protected_dir_is_refused(fake_real, tmp_path):
+    """The atomic-write pattern: write a tmp file elsewhere, then os.replace INTO the dir."""
+    llm, claude = fake_real
+    src = tmp_path / "staged.json"
+    src.write_text("{}")
+    with pytest.raises(PermissionError):
+        os.replace(src, claude / "settings.json")
+    assert src.exists() and not (claude / "settings.json").exists()
+
+
+def test_autouse_fixture_fails_a_test_whose_refusal_was_swallowed(fake_real):
+    """Drive `_real_home_untouched` by hand: it must raise when a refusal was recorded."""
+    from tests import conftest
+
+    llm, _ = fake_real
+    gen = conftest._real_home_untouched.__wrapped__()  # the undecorated generator
+    next(gen)
+    try:
+        sqlite3.connect(str(llm / "usage.db"))
+    except PermissionError:
+        pass  # swallowed, as a fail-open handler would
+    with pytest.raises(AssertionError, match="real state"):
+        next(gen)
