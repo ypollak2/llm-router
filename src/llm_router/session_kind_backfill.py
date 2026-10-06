@@ -321,12 +321,14 @@ def backfill_sessions(*, dry_run: bool = False, home: Path | None = None,
                session_kind.SOURCE_CONFLICT: 0}
     for sid in candidates:
         res = live.resolve(sid)
-        if res.source in skipped:
+        # the owner's override speaks for the session like a live tag does
+        source = session_kind.SOURCE_TAG if res.source == session_kind.SOURCE_OVERRIDE else res.source
+        if source in skipped:
             # Live evidence already speaks for this session (its tag file, or its proxy
             # rows' stamps -- agreeing, or in conflict). KindIndex never reaches the
             # sidecar in any of those cases, so a row here would be dead weight, and
             # for a conflict it would be a guess laid over a disagreement.
-            skipped[res.source] += 1
+            skipped[source] += 1
             continue
         kind, basis = derive_kind(sid, root, transcripts)
         by_kind[kind] = by_kind.get(kind, 0) + 1
@@ -380,7 +382,7 @@ def validate_against_live(*, home: Path | None = None,
     by_live_source = {session_kind.SOURCE_TAG: 0, session_kind.SOURCE_STAMP: 0}
     n = agree = unknown = conflicts = 0
     for sid in sorted(population):
-        live = session_kind.kind_of(sid)
+        live = session_kind.tag_kind_of(sid)  # the tag file: an override is not hook evidence
         source = session_kind.SOURCE_TAG
         if live is None:
             seen = stamps.get(sid, set())

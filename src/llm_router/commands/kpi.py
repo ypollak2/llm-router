@@ -421,7 +421,9 @@ def _proxy_population(all_rows: list[dict], days: int, allowed: frozenset[str], 
     kept: list[dict] = []
     untagged = other = 0
     for r in window:
-        kind = r.get("session_kind")
+        # The owner's override beats the kind the row was written with; with none, the
+        # stamp is all there is (a tag file is never joined on: see the docstring).
+        kind = session_kind.override_of(r.get("session_id")) or r.get("session_kind")
         if kind not in session_kind.VALID_KINDS:
             untagged += 1
         elif kind in allowed:

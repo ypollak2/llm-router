@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LLM_ROUTER_STATUSLINE=fast` and now shows the Claude 5h / weekly / Sonnet quota.
 
 ### Added
+- kpi: a session-kind override file, `~/.llm-router/session_kind_overrides.json` (`{sid: {kind, reason}}`). It beats the
+  tag file and a row's own stamp in every KPI reader (NS, D1, D2, D3, O3, D4/G1-proxy) and in the proxy's and
+  edit ledger's stamps; G3 is unchanged (writer completeness). `session_kind.overrides()`, `override_of()`,
+  `tag_kind_of()`. The `--backfill-tags` run leaves an overridden session alone and `--validate-backfill` still
+  compares the tag file. `tests/test_session_kind_override.py`.
 - status line: `LLM_ROUTER_STATUSLINE=both` prints the full line, then the fast (debug) line on a second
   row. Claude Code renders each printed line as its own row (docs: "Multiple lines"). Default, `full`
   and `fast` are unchanged; the `.env` reader is still never sourced (new test: `$(touch marker)` never runs).
