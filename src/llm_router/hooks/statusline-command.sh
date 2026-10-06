@@ -10,6 +10,48 @@
 # IMPORTANT: Must consume stdin — Claude Code pipes session JSON here.
 # Without reading it, the pipe blocks and Claude Code times out.
 
+# ── Debug mode: the fast line (opt-in) ───────────────────────────────────────
+# The default is the full layout below, unchanged from before PR #273 (owner
+# decision, reversing #273's fast-by-default). LLM_ROUTER_STATUSLINE=fast swaps
+# it for llm_router_statusline_tick.py: ONE short line (llm-router, mode, North
+# Star with n, Claude 5h / weekly / Sonnet quota from usage.json, Codex window,
+# a slow-hooks warning) read from cache files only; it never fetches, never
+# waits on its background refresh, and prints "n/a" (never 0) for unknown.
+# The real environment wins; otherwise the same key in the router's own .env
+# (${LLM_ROUTER_HOME:-~/.llm-router}/.env, the file the hooks already load) is
+# honoured, so the switch needs no edit to ~/.claude/settings.json.
+# LLM_ROUTER_STATUSLINE=both prints the full layout, then the fast line on a
+# second row (Claude Code renders each printed line as its own status row:
+# https://code.claude.com/docs/en/statusline, "Multiple lines"). Any other
+# value (unset, full, unknown) is the full layout only.
+# Pure bash on purpose: no extra process on a once-a-second loop.
+_sl_mode="${LLM_ROUTER_STATUSLINE:-}"
+if [ -z "$_sl_mode" ]; then
+    _sl_home="${LLM_ROUTER_HOME:-$HOME/.llm-router}"
+    _sl_home="${_sl_home/#\~/$HOME}"
+    if [ -f "$_sl_home/.env" ] && [ -r "$_sl_home/.env" ]; then
+        while IFS= read -r _sl_line || [ -n "$_sl_line" ]; do
+            _sl_line="${_sl_line#export }"
+            case "$_sl_line" in
+                LLM_ROUTER_STATUSLINE=*) _sl_mode="${_sl_line#LLM_ROUTER_STATUSLINE=}" ;;
+            esac
+        done < "$_sl_home/.env"
+    fi
+fi
+_sl_mode="${_sl_mode//\"/}"
+_sl_mode="${_sl_mode//\'/}"
+_sl_mode="${_sl_mode%%[[:space:]]*}"
+# -I: the source tree's own types.py sits beside statusline_tick.py and would
+# shadow the stdlib module of that name if the script's folder were on sys.path.
+# -S: the tick is stdlib-only, and skipping site saves ~8 ms a tick.
+_tick="${0%/*}/llm_router_statusline_tick.py"
+[ -f "$_tick" ] || _tick="${0%/*}/../statusline_tick.py"
+if [ "$_sl_mode" = "fast" ]; then
+    if [ -f "$_tick" ] && command -v python3 >/dev/null 2>&1; then
+        exec python3 -I -S "$_tick"
+    fi
+fi
+
 input=$(cat)
 session_cwd=$(printf '%s' "$input" | python3 -c "
 import json, sys
@@ -578,3 +620,9 @@ for i in "${!parts[@]}"; do
 done
 
 printf '%s\n' "$result"
+
+# both: the fast line goes second. Its stdin is /dev/null (the full part above
+# already consumed the session JSON); the tick reads caches only and never waits.
+if [ "$_sl_mode" = "both" ] && [ -f "$_tick" ] && command -v python3 >/dev/null 2>&1; then
+    python3 -I -S "$_tick" </dev/null
+fi

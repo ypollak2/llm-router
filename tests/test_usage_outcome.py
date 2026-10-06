@@ -396,3 +396,11 @@ def test_sweep_reads_transcripts_and_dry_run_writes_nothing(tmp_path):
 ])
 def test_similarity(a, b, expected):
     assert uo._similar(a, b) is expected
+
+
+def test_override_that_only_quotes_the_band_mark_is_still_redone():
+    from llm_router.usage_outcome import BAND_REDO_MARK
+
+    t = _routed_answer(T())
+    t.human(f"claude: answer that yourself, and do not paste {BAND_REDO_MARK} again please")
+    assert _only(t.judge()[:1]) == ("redone", "overridden")

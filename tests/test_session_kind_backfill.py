@@ -905,6 +905,35 @@ def test_append_rows_skips_a_session_another_run_already_wrote():
     assert skb.load_sidecar(path)["b"] == "organic"    # the first row is the one that stays
 
 
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="root ignores directory modes")
+def test_append_rows_reports_a_read_only_home_as_a_permission_error_not_a_lock_clash(monkeypatch, tmp_path):
+    home = tmp_path / "ro-home"
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(home))
+    ro_state = skb.sidecar_path().parent
+    ro_state.mkdir(parents=True, exist_ok=True)
+    ro_state.chmod(0o555)
+    try:
+        with pytest.raises(OSError) as ei:
+            skb._append_rows(skb.sidecar_path(), [_row("a")])
+        msg = str(ei.value)
+        assert "cannot write" in msg and "nothing was written" in msg
+        assert "another --backfill-tags running" not in msg
+        assert "denied: permission denied" not in msg.lower()
+        assert not skb.sidecar_path().exists()
+    finally:
+        ro_state.chmod(0o755)
+
+
+def test_append_rows_reports_an_uncreatable_state_dir_and_says_nothing_was_written(monkeypatch, tmp_path):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x")                                  # a file where the dir must go
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(blocker / "state"))
+    with pytest.raises(OSError) as ei:
+        skb._append_rows(skb.sidecar_path(), [_row("a")])
+    assert "cannot create" in str(ei.value) and "nothing was written" in str(ei.value)
+    assert "another --backfill-tags running" not in str(ei.value)
+
+
 def test_append_rows_refuses_to_write_without_the_lock(monkeypatch):
     from contextlib import contextmanager
 

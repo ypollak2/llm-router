@@ -29,7 +29,7 @@ benchmarks: 20 real tasks with hidden tests (`plan_implement`, n=20), graded Q&A
 |---|---|---|
 | D1 | Offered off Claude | % of organic prompts the router sends to local/Codex. |
 | D2 | Success when tried | % of local/Codex attempts that pass verification AND are used. |
-| D3 | Redo rate | % of routed outputs Claude redoes within 3 turns. |
+| D3 | Redo rate | % of routed outputs Claude redoes within 3 turns, plus the person's own `r` redo presses on the receipt band (see below). |
 | D4 | Tier mix | % of Claude turns **and** % of Claude quota cost on Opus/Sonnet/Haiku, printed side by side (source: `proxy_calls.jsonl`, tracked since PR #246). Cost is calls weighted by per-call cost, Haiku 1 : Sonnet 3.66 : Opus 6.15 (Opus is 1.68x Sonnet and 6.15x Haiku; `proxy/claude_tiers.yaml`, probe 2026-09-29, n=5 calls per model, pinned by a test). A tier with no weight (Fable) is left out of the weighted share and counted, never given a guessed weight. Organic sessions only, by the kind each proxy row was written with (rows from before tagging stay out): research and harness are excluded (`llm-router kpi --include research` adds research, never harness). |
 | D5 | Classifier accuracy | Exact tier vs. a truth set; too-weak (under-route) rate <= 10%. |
 
@@ -164,6 +164,36 @@ which runs on every turn), by the quality breaker (which the UserPromptSubmit, A
 kind and prints agreement and a confusion table; re-run it as live tags accumulate. One thing a transcript cannot
 show is the `LLM_ROUTER_SESSION_KIND` override: a session whose live kind came from it would be derived from its
 `cwd` and `entrypoint` instead, which the validation counts as a disagreement.
+
+### The receipt band's keep and redo presses (`user_signal`)
+
+The Claude Code mod `llm-router-receipt` (`llm-router mod install`) shows a band after a turn the proxy served
+off Claude, with two keys: `k` keep and `r` redo on Claude. Each press is one `user_signal` row in
+`user_signals.jsonl` under the router home (0600, locked append, capped): a route key (the served reply's
+`msg_id`), `ts`, `signal` (`kept` | `redone`) and `surface`, and nothing else. No prompt or answer text. Per key
+the last press wins, so pressing twice is one verdict.
+
+**Owner rule (2026-10-05): "used" requires a passing test.** A keep press is not a test, so it is never counted as
+used:
+
+| Signal | NS | D1 | D2 | D3 | Shown as |
+|---|---|---|---|---|---|
+| `kept` (`user_kept`) | never | never | never | never (not in the denominator either) | its own `user_kept n=...` line under D3 |
+| `redone` (`user_redone`) | never | never | never | yes: a decided redo event (numerator and denominator) | its own `user_redone n=...` line, and in D3 |
+
+`tests/test_user_signal_kpi.py` fails if a keep ever moves NS, D1, D2 or D3. A redo row carries no session id, so
+it is not session-kind filtered (the line says so).
+
+**Known overlap (unresolved):** the redo prompt the band submits starts with `claude:`, the router's explicit
+"answer on Claude" override, which `usage_outcome` / `northstar` already read as a redo of the routed turn. One `r`
+press can therefore reach D3 twice: once as a `user_redone` row and once as that detected override. The signal row
+has no session id, so the two cannot be matched; D3 may overstate redos by up to the number of `r` presses. The
+`user_redone n=` line gives that bound.
+
+**Accepted (2026-10-06 review follow-up):** the same `claude:` prefix also makes one `r` press mark the preceding unit
+as redone in NS, D1 and D2, not only D3. This is accepted, not a bug: the press is the person asking for Claude's own
+answer to that unit, which is what a redo is. The detector in `usage_outcome` skips the override only when the prompt
+*ends with* the band's redo mark (`BAND_REDO_MARK`), so a prompt that merely quotes the mark is still an override.
 
 ### `llm-router kpi --health`
 

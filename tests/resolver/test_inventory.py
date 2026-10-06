@@ -260,12 +260,60 @@ def test_codex_without_a_request_counter_has_unknown_pressure():
 
 # ----------------------------------------------------------------------- Gemini
 
-def test_gemini_cli_login_file_existence_authorizes_without_reading_it():
-    inv = collect(gemini="/bin/gemini", gemini_login=True)
-    m = inv.get("gemini_cli/gemini-2.5-flash")
-    assert m.authorized and m.path_verified and "not read" in m.auth_detail
-    inv2 = collect(gemini="/bin/gemini", gemini_login=False)
-    assert not inv2.get("gemini_cli/gemini-2.5-flash").authorized
+GEMINI_ID = "gemini_cli/gemini-2.5-flash"
+GEMINI_KEY = "AIzaSy-gemini-secret-0123456789"
+
+
+def test_gemini_cli_login_file_only_is_authorized_but_unverified():
+    m = collect(gemini="/bin/gemini", gemini_login=True).get(GEMINI_ID)
+    assert m.authorized and not m.path_verified and "not read" in m.auth_detail
+    assert "not verified" in m.path_detail
+    assert not collect(gemini="/bin/gemini").get(GEMINI_ID).authorized
+
+
+def test_gemini_cli_env_key_only_is_authorized_but_unverified_and_never_pinged():
+    m = collect(gemini="/bin/gemini", env={"GEMINI_API_KEY": GEMINI_KEY}).get(GEMINI_ID)
+    assert m.authorized and not m.path_verified
+    assert GEMINI_KEY not in repr(m)
+
+
+def _gemini_verified(tmp_path, status, *, login=False):
+    calls = []
+    p = make_probes(gemini="/bin/gemini", gemini_login=login, env={"GEMINI_API_KEY": GEMINI_KEY},
+                    ping=lambda provider, key: calls.append(provider) or status(),
+                    ping_cache=tmp_path / "c.json")
+    inv = inv_mod.collect_inventory(p, profiles={}, verify=True)
+    return inv.get(GEMINI_ID), calls
+
+
+def test_gemini_cli_verified_key_marks_the_path_verified(tmp_path):
+    m, calls = _gemini_verified(tmp_path, lambda: 200)
+    assert m.authorized and m.path_verified and "gemini" in calls
+    assert GEMINI_KEY not in repr(m)
+
+
+def test_gemini_cli_rejected_key_without_login_is_not_authorized(tmp_path):
+    m, _ = _gemini_verified(tmp_path, lambda: 401)
+    assert not m.authorized and not m.path_verified
+
+
+def test_gemini_cli_rejected_key_does_not_deauthorize_a_login_file(tmp_path):
+    m, _ = _gemini_verified(tmp_path, lambda: 401, login=True)
+    assert m.authorized and not m.path_verified
+
+
+def test_gemini_cli_timeout_or_unknown_stays_unverified_and_never_crashes(tmp_path):
+    # the real ping maps a timeout/transport error to None (test_auth_ping_network)
+    for status in (lambda: None, lambda: 500):
+        m, _ = _gemini_verified(tmp_path, status)
+        assert m is not None and m.authorized and not m.path_verified
+
+
+def test_gemini_cli_login_file_without_verify_never_calls_the_ping(tmp_path):
+    # make_probes' default ping raises if called
+    m = collect(gemini="/bin/gemini", gemini_login=True,
+                env={"GEMINI_API_KEY": GEMINI_KEY}).get(GEMINI_ID)
+    assert m.authorized and not m.path_verified
 
 
 # -------------------------------------------------------------------- API keys

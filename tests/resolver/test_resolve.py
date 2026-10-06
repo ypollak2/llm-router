@@ -598,3 +598,15 @@ def test_resolve_verify_flag_turns_a_working_key_into_a_routable_path(monkeypatc
     out = capsys.readouterr().out
     assert "=> openai/gpt-5.5" in out and "sk-live" not in out and "xai-CCCC" not in out
     assert sorted(set(calls)) == ["openai", "xai"]
+
+
+def test_gemini_cli_from_a_login_file_alone_is_never_picked_by_resolve():
+    from llm_router.resolver import inventory as inv_mod
+
+    from .fakes import make_probes
+
+    inv = inv_mod.collect_inventory(
+        make_probes(gemini="/bin/gemini", gemini_login=True), profiles={})
+    res = go("EASY", "tools", Setup(inv, "anthropic/claude-opus-4-8"))
+    assert res.status == STATUS_NO_ELIGIBLE
+    assert "execution path not verified" in " ".join(rejected(res)["gemini_cli/gemini-2.5-flash"])

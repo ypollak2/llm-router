@@ -297,6 +297,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_QUOTAS_PATH": ("llm_router", "enterprise/quotas.py", 1),
     "LLM_ROUTER_QUOTA_DELAY": ("llm_router", "quota_tracker.py", 1),
     "LLM_ROUTER_QUOTA_RETRY": ("llm_router", "quota_tracker.py", 1),
+    "LLM_ROUTER_QUOTA_MAX_AGE": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_QUOTA_TTL": ("llm_router", "hooks/auto-route.py", 2),
     "LLM_ROUTER_RENDER_MODE": ("llm_router", "hooks/response_formatter.py", 1),
     "LLM_ROUTER_RESPONSE_ROUTER": ("llm_router", "commands/doctor.py", 3),
@@ -338,6 +339,13 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_SLIM": ("llm_router", "tool_surface.py", 1),
     "LLM_ROUTER_STALE_PRESSURE_FLOOR": ("llm_router", "budget.py", 1),
     "LLM_ROUTER_STATE_DIR": ("llm_router", "surface_status.py", 1),
+    # Read by the shell script, not by Python: the AST scan cannot see it, so it
+    # is listed in tests/test_env_registry.py's _INDIRECT_READS. "fast" = the
+    # debug fast line only; "both" = the full line then the fast line on a second
+    # row; anything else (the default, "full") = the full status line only.
+    "LLM_ROUTER_STATUSLINE": ("llm_router", "hooks/statusline-command.sh", 1),
+    "LLM_ROUTER_STATUSLINE_REFRESH_CMD": ("llm_router", "statusline_tick.py", 1),
+    "LLM_ROUTER_STATUSLINE_SLOW_MS": ("llm_router", "statusline_refresh.py", 1),
     "LLM_ROUTER_STATUS_EVERY": ("llm_router", "hooks/status-bar-clawcode.py", 2),
     "LLM_ROUTER_STATUS_MODE": ("llm_router", "hooks/status-bar.py", 1),
     "LLM_ROUTER_STREAMING_JUDGE": ("llm_router", "streaming_judge.py", 1),
@@ -353,6 +361,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_SUPPRESS_PRICING_STALENESS": ("llm_router", "pricing.py", 1),
     "LLM_ROUTER_URL": ("llm_router", "commands/doctor.py", 1),
     "LLM_ROUTER_USAGE_DB_PATH": ("llm_router", "quota_savings.py", 1),
+    "LLM_ROUTER_USAGE_TTL_SEC": ("llm_router", "statusline_tick.py", 1),
     "LLM_ROUTER_USAGE_PATH": ("llm_router", "commands/invoice.py", 1),
     "LLM_ROUTER_WEEKLY_QUOTA_USD": ("llm_router", "quota_savings.py", 1),
     "LLM_ROUTER_WEEKLY_QUOTA_USD_OPUS_EQUIV": ("llm_router", "quota_savings.py", 1),
@@ -363,6 +372,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_ZERO_CLAUDE_VERIFY": ("llm_router", "local_agent/verify.py", 1),
     # Plan 3.7 (warm.py): keep the zero-Claude edit model resident, fail fast cold.
     "LLM_ROUTER_LOCAL_KEEP_ALIVE": ("llm_router", "warm.py", 1),
+    # P2 local-usage plan: shadow-only would-be "local" tier (log only, never routes).
+    "LLM_ROUTER_LOCAL_TIER": ("llm_router", "local_tier.py", 1),
     "LLM_ROUTER_ZCE_COLD_BUDGET_S": ("llm_router", "warm.py", 1),
     "LLM_ROUTER_ZCE_WARMUP": ("llm_router", "warm.py", 1),
     # ── indirect reads: DECLARED BY HAND, invisible to the AST scan ──
@@ -432,9 +443,10 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "RESPONSE": ("external_tool", "hooks/response-router.py", 1),
     "VAULT_ADDR": ("external_tool", "org_policy.py", 1),
     "_SESSION_BUDGET_WARNING": ("external_tool", "hooks/enforce-route.py", 1),
-    # ── platform  (3) ──
+    # ── platform  (4) ──
     "APPDATA": ("platform", "commands/doctor.py", 4),
     "NO_COLOR": ("platform", "commands/budget.py", 16),
+    "PATH": ("platform", "statusline_tick.py", 1),
     "XDG_CONFIG_HOME": ("platform", "install_hooks.py", 1),
     # ── test_only  (1) ──
     "PYTEST_CURRENT_TEST": ("test_only", "config.py", 4),

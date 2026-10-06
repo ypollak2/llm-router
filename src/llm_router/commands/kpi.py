@@ -64,6 +64,10 @@ SCOPE, stated rather than implied:
   instead (real spend + counterfactual avoided); Claude Code's own
   ``total_cost_usd`` is phantom on a proxied session and is never read.
 * **O2 and D5 need a frozen benchmark.** They do not come from live traffic.
+  ``scripts/build_kpi_benchmark.py`` builds the file from the blind A/B truth
+  (committed copy: ``docs/repo_goals/kpi_benchmark.json``, ids and labels only).
+  A configured path that does not exist reports ``CHZ-KPI-BENCH-MISSING``, one that
+  does not parse ``CHZ-KPI-BENCH-MALFORMED``: both "not measurable", never 0%.
   Configure ``LLM_ROUTER_KPI_BENCHMARK_PATH`` to a JSON file shaped
   ``{"generated_at": "...", "o2": {"acceptable_rate": 0.0-1.0, "n": int},
   "d5": {"accuracy": 0.0-1.0, "under_route_rate": 0.0-1.0, "n": int}}``
@@ -362,7 +366,39 @@ def _d3_redo_rate(days: int, allowed: frozenset[str], index) -> dict:
     result = _rate_result(redone, decided, label="decided event", newest_ts=newest, seen=len(rows),
                           backfilled=backfilled)
     result["unknown_window_open"] = unknown
+    result["used"], result["redone"] = used, redone
     return result
+
+
+def _fold_user_signals(d3: dict, days: int, now: float) -> dict:
+    """D3 with the receipt band's presses (``user_signal``) folded in.
+
+    OWNER RULE (2026-10-05): "used" needs a passing test, and a keep press is not one.
+    ``user_redone`` joins D3 as decided redo events (numerator and denominator);
+    ``user_kept`` is reported on its own line and is never added to anything: not to
+    D3's denominator, and never to NS, D1 or D2, which this function does not touch.
+    ``tests/test_user_signal_kpi.py`` fails if a keep ever moves NS, D1 or D2."""
+    from llm_router import user_signal
+
+    sig = user_signal.summarize(days, now=now)
+    kept, user_redone = sig["kept"], sig["redone"]
+    out = dict(d3)
+    if user_redone:
+        redone = d3.get("redone", 0) + user_redone
+        decided = d3.get("used", 0) + redone
+        out = _rate_result(redone, decided, label="decided event",
+                           newest_ts=_newer(d3.get("newest_ts"), sig["newest_ts"]),
+                           seen=(d3.get("seen") or 0) + user_redone, backfilled=d3.get("backfilled", 0))
+        out.update(unknown_window_open=d3.get("unknown_window_open"),
+                   used=d3.get("used", 0), redone=redone)
+    out["user_kept"], out["user_redone"] = kept, user_redone
+    out["lines"] = list(d3.get("lines", ())) + [
+        f"user_redone n={user_redone} (redo on Claude pressed on the receipt band; counted in D3 as "
+        "decided redo events; the row has no session id, so it is not session-kind filtered)",
+        f"user_kept n={kept} (keep pressed; shown only: never counted as used, so never in "
+        "NS, D1, D2 or D3's denominator)",
+    ]
+    return out
 
 
 # ── proxy ledger: the rows behind D4 and G1 ──────────────────────────────────
@@ -523,11 +559,11 @@ def _g1_hook(days: int, now: float, killed: int | None) -> dict:
                 worst = (p95 / budget, name, round(p95))
         hooks[name] = entry
     if killed is None:
-        lines.append("killed by the host (leaves no row): not countable yet -- no timestamped "
-                     "fail-open event exists to count CHZ-HOOK-KILLED from")
+        lines.append("killed by the host (leaves no row) (auto-route only): not countable yet -- no "
+                     "timestamped fail-open event exists to count CHZ-HOOK-KILLED from")
     else:
         lines.append(f"killed by the host (leaves no row; CHZ-HOOK-KILLED in the fail-open "
-                     f"ledger): {killed} in window")
+                     f"ledger) (auto-route only): {killed} in window")
 
     n_rows = len(rows)
     newest = rows[-1]["ts"]                      # read_rows is oldest first
@@ -789,14 +825,48 @@ def _benchmark_path() -> Path | None:
     return Path(raw).expanduser() if raw else None
 
 
+#: Reasons printed when the benchmark file is configured but cannot be used. The
+#: code is stable so an operator can grep for it; none of them is ever a 0%.
+BENCH_MISSING = "CHZ-KPI-BENCH-MISSING"
+BENCH_MALFORMED = "CHZ-KPI-BENCH-MALFORMED"
+
+
 def _load_benchmark() -> dict | None:
+    """The parsed benchmark, or None when unconfigured, missing or malformed.
+
+    A problem is never an exception and never a number: ``_bench_problem`` names it
+    (with a stable code) and O2/D5 report "not measurable" with that reason."""
     path = _benchmark_path()
     if path is None:
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    return data if isinstance(data, dict) else None
+
+
+def _bench_problem() -> str | None:
+    """Why a configured benchmark is unusable, with its code; None if fine or unset."""
+    path = _benchmark_path()
+    if path is None:
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return f"{BENCH_MISSING}: {path} does not exist"
+    except OSError as exc:
+        return f"{BENCH_MISSING}: {path} unreadable ({type(exc).__name__})"
+    except ValueError:
+        return f"{BENCH_MALFORMED}: {path} is not valid JSON"
+    if not isinstance(data, dict):
+        return f"{BENCH_MALFORMED}: {path} top level is not a JSON object"
+    return None
+
+
+def _no_bench_reason() -> str:
+    return _bench_problem() or (
+        "no LLM_ROUTER_KPI_BENCHMARK_PATH configured (KPI-SPEC calls this 'not measured')")
 
 
 def _bench_newest(bench: dict) -> float | None:
@@ -805,8 +875,7 @@ def _bench_newest(bench: dict) -> float | None:
 
 def _o2_quality_held(bench: dict | None) -> dict:
     if bench is None:
-        return _not_measurable(
-            "no LLM_ROUTER_KPI_BENCHMARK_PATH configured (KPI-SPEC calls this 'not measured')")
+        return _not_measurable(_no_bench_reason())
     o2 = bench.get("o2") if isinstance(bench, dict) else None
     if not isinstance(o2, dict) or "acceptable_rate" not in o2:
         return _not_measurable("benchmark file has no 'o2' section")
@@ -814,28 +883,60 @@ def _o2_quality_held(bench: dict | None) -> dict:
     if not isinstance(n, int) or n <= 0:
         return _not_measurable("benchmark 'o2.n' missing or zero")
     if n < MIN_N:
-        return _too_few(n, newest_ts=_bench_newest(bench))
+        return _too_few(n, newest_ts=_bench_newest(bench)) | {"lines": [
+            f"unscored, below n={MIN_N}: {_pct(o2['acceptable_rate'])} acceptable (n={n})"]}
     return _measured(f"{_pct(o2['acceptable_rate'])} acceptable vs Claude (n={n}, frozen set)", n,
                       newest_ts=_bench_newest(bench), generated_at=bench.get("generated_at"))
 
 
+def _d5_never_haiku(d5: dict) -> bool:
+    """True only when the benchmark says the cheapest tier was predicted zero times.
+    A missing ``haiku`` key (or no counts at all) is unknown, not zero."""
+    counts = d5.get("predicted_tier_counts")
+    return isinstance(counts, dict) and "haiku" in counts and not counts["haiku"]
+
+
+def _d5_predicted_line(d5: dict) -> list[str]:
+    """The predicted tier distribution, plus a qualifier when the classifier never
+    predicted the cheapest tier: an under-route rate of 0% is then vacuous."""
+    counts = d5.get("predicted_tier_counts")
+    if not isinstance(counts, dict) or not counts:
+        return []
+    dist = ", ".join(f"{t} {counts[t]}" for t in ("haiku", "sonnet", "opus") if t in counts)
+    line = f"classifier predicted: {dist}"
+    if _d5_never_haiku(d5):
+        line += " -- never predicted haiku, so the under-route rate is not informative"
+    return [line]
+
+
 def _d5_classifier_accuracy(bench: dict | None) -> dict:
     if bench is None:
-        return _not_measurable("no LLM_ROUTER_KPI_BENCHMARK_PATH configured (KPI-SPEC calls this 'not measured')")
+        return _not_measurable(_no_bench_reason())
     d5 = bench.get("d5") if isinstance(bench, dict) else None
     if not isinstance(d5, dict) or "accuracy" not in d5:
         return _not_measurable("benchmark file has no 'd5' section")
     n = d5.get("n")
     if not isinstance(n, int) or n <= 0:
         return _not_measurable("benchmark 'd5.n' missing or zero")
-    if n < MIN_N:
-        return _too_few(n, newest_ts=_bench_newest(bench))
     under = d5.get("under_route_rate")
+    dist = _d5_predicted_line(d5)
+    if n < MIN_N:
+        under_n = f", under-route={_pct(under)}" if isinstance(under, (int, float)) else ""
+        return _too_few(n, newest_ts=_bench_newest(bench)) | {"lines": [
+            f"unscored, below n={MIN_N}: {_pct(d5['accuracy'])} exact-tier accuracy{under_n} (n={n})",
+            *dist]}
     under_s = f", under-route={_pct(under)}" if isinstance(under, (int, float)) else ""
+    never = _d5_never_haiku(d5)
     gate = "" if not isinstance(under, (int, float)) else (
         " (within <=10% gate)" if under <= 0.10 else " (OVER the <=10% gate)")
-    return _measured(f"{_pct(d5['accuracy'])} exact-tier accuracy{under_s}{gate} (n={n})", n,
-                      newest_ts=_bench_newest(bench), generated_at=bench.get("generated_at"))
+    if never:  # an under-route rate is vacuous when the cheapest tier is never predicted
+        gate = " (never predicted haiku: under-route not informative)"
+    res = _measured(f"{_pct(d5['accuracy'])} exact-tier accuracy{under_s}{gate} (n={n})", n,
+                    newest_ts=_bench_newest(bench), generated_at=bench.get("generated_at"),
+                    lines=dist)
+    if never:
+        res["health_note"] = "never predicted haiku: under-route rate not informative"
+    return res
 
 
 # ── G2: fail-open events per 100 calls ─────────────────────────────────────────
@@ -874,20 +975,37 @@ def _g2_silent_failures(days: int, now: float, proxy_rows: list[dict]) -> dict:
     win = failopen.windowed(since=since, until=now)
     hook_ts = [r["ts"] for r in hook_all if since <= r["ts"] <= now]
     proxy_ts = [t for t in (_num_ts(r.get("ts")) for r in proxy_rows) if t is not None and since <= t <= now]
-    hook_calls, proxy_calls = len(hook_ts), len(proxy_ts)
+    # A host-killed hook writes no hook_latency row but DOES leave a CHZ-HOOK-KILLED
+    # event, which is in the numerator. Count it in the denominator too: it was an
+    # invocation. Without it the rate is biased upward by the kill rate.
+    hook_killed = win.by_code.get("CHZ-HOOK-KILLED", 0)
+    hook_calls, proxy_calls = len(hook_ts) + hook_killed, len(proxy_ts)
     calls = hook_calls + proxy_calls
-    newest = max(hook_ts + proxy_ts) if calls else None      # the feed's last sign of life
+    observed = len(hook_ts) + len(proxy_ts)                 # calls that left a row
+    kill_ts = win.last_ts_by_code.get("CHZ-HOOK-KILLED")
+    # Every timestamp that counts toward ``calls``, kill events included; the list
+    # can be empty only when calls == 0.
+    stamps = hook_ts + proxy_ts + ([kill_ts] if hook_killed and kill_ts is not None else [])
+    newest = max(stamps) if stamps else None                 # the feed's last sign of life
     events = win.in_window
     lines = [alltime]
     if since > since_req:
         lines.append(f"window starts at the first timestamped evidence, {_iso(since)} "
                      f"(requested {days}d back)")
     base = {"all_time_total": total, "untimestamped": probe.untimestamped, "events": events,
-            "calls": calls, "hook_calls": hook_calls, "proxy_calls": proxy_calls,
+            "calls": calls, "hook_calls": hook_calls, "hook_killed": hook_killed,
+            "proxy_calls": proxy_calls,
             "window_start": round(since, 3), "lines": lines}
 
     if calls == 0:
         return _not_measurable(f"no hook invocation or proxy call recorded since {_iso(since)}") | base
+    if observed == 0:
+        # Every counted call is a host kill: the denominator is the numerator's own
+        # events, so the rate would be 100% by construction. Say so, don't print it.
+        return _not_measurable(
+            f"n={calls} call(s) from killed hooks only (no hook_latency row or proxy call in "
+            f"the window since {_iso(since)}), so a rate would be 100% by construction",
+            seen=calls, newest_ts=newest) | base
     if calls < MIN_N:
         return _too_few(calls, newest_ts=newest) | {"value": f"{TOO_FEW} (n={calls} calls; {events} fail-open "
                                                              f"event(s) so far)"} | base
@@ -899,7 +1017,8 @@ def _g2_silent_failures(days: int, now: float, proxy_rows: list[dict]) -> dict:
     by_code = dict(sorted(win.by_code.items(), key=lambda kv: (-kv[1], kv[0])))
     top = list(by_code.items())[:_TOP_CODES]
     rate = events / calls * 100.0
-    lines.insert(0, f"calls: {hook_calls} hook invocation(s) + {proxy_calls} proxy call(s), all "
+    lines.insert(0, f"calls: {hook_calls} hook invocation(s) (incl. {hook_killed} killed by the host, "
+                    f"which leave no latency row) + {proxy_calls} proxy call(s), all "
                     "session kinds (a fail-open row names no session)")
     for i, (code, n) in enumerate(top):
         lines.insert(1 + i, f"  {code}: {n / calls * 100.0:.2f} per 100 calls ({n})")
@@ -977,6 +1096,29 @@ def _g4_wrongly_benched(days: int, now: float) -> dict:
     )
 
 
+def _local_shadow_summary(days: int) -> dict:
+    """Count of local (shadow) units by task type. Reads ``northstar.local_shadow_units``,
+    a stream ``units()`` never yields, so this line cannot move NS, D1 or D2."""
+    from llm_router import northstar as ns
+
+    by_task: dict[str, int] = {}
+    try:
+        for u in ns.local_shadow_units(days=days):
+            key = u.get("task_type") or "unknown"
+            by_task[key] = by_task.get(key, 0) + 1
+    except Exception:  # noqa: BLE001 -- informational line must never break the scorecard
+        by_task = {}
+    return {"n": sum(by_task.values()), "by_task_type": dict(sorted(by_task.items()))}
+
+
+def _local_shadow_line(summary: dict | None) -> str | None:
+    if not summary or not summary.get("n"):
+        return None
+    by = ", ".join(f"{k} {v}" for k, v in sorted(summary["by_task_type"].items(), key=lambda kv: -kv[1]))
+    return (f"local (shadow): n={summary['n']}, by task type: {by} "
+            "(provenance=runtime, served by ollama; informational, never in NS, D1 or D2)")
+
+
 # ── assembly ───────────────────────────────────────────────────────────────
 
 def compute_scorecard(days: int = 7, *, include_research: bool = False,
@@ -989,7 +1131,7 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
     all_rows = pl.read_rows()
     index = sk.KindIndex(all_rows)
     ns_r, d1_r, d2_r, joins = _ns_d1_d2(days, allowed, index)
-    d3_r = _d3_redo_rate(days, allowed, index)
+    d3_r = _fold_user_signals(_d3_redo_rate(days, allowed, index), days, now_ts)
     pop = _proxy_population(all_rows, days, allowed, now_ts)
     d4_r = _d4_tier_mix(pop)
     g1_hook_r = _g1_hook(days, now_ts, _killed_hooks(days, now_ts))
@@ -1007,6 +1149,8 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         "window_days": days,
         "include_research": include_research,
         "joins": joins,
+        # Informational only: not in "kpis", so not in _ORDER, --health or NS/D1/D2.
+        "local_shadow": _local_shadow_summary(days),
         "kpis": {
             "NS": ns_r, "O1": o1_r, "O2": o2_r,
             "D1": d1_r, "D2": d2_r, "D3": d3_r, "D4": d4_r, "D5": d5_r,
@@ -1118,6 +1262,9 @@ def render_scorecard(data: dict) -> str:
         for extra in r.get("lines", ()):
             lines.append(f"      {extra}")
     lines.append("")
+    local_line = _local_shadow_line(data.get("local_shadow"))
+    if local_line:
+        lines.append(local_line)
     lines.append(_join_line(data["joins"]))
     lines.append("O1 is never session-kind filtered (usage.db predates tagging); G3 is not "
                   "session-kind filtered either (see KPIS.md); neither are G1 (hook), G2 and G4, "

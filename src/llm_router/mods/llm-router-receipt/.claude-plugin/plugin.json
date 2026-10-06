@@ -1,0 +1,6 @@
+{
+  "name": "llm-router-receipt",
+  "version": "0.1.0",
+  "description": "llm-router receipt band: after a turn served off Claude, keep it (k) or redo it on Claude (r); /router shows the last routing decisions.",
+  "types": "./types/index.d.ts"
+}

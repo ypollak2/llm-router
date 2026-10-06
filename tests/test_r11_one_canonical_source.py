@@ -43,6 +43,7 @@ CANONICAL = {
 STATE_PATH_ALLOWED = {
     # The canonical resolver itself.
     "llm_router/paths.py": "owns the concept",
+    "llm_router/statusline_tick.py": "stdlib-only per-tick script: importing llm_router.paths would cost more than its 100 ms budget; mirrors paths.llm_router_home()",
     # Explicit `home=` override parameters: these branches are only reached
     # when a caller passes a directory ON PURPOSE, and each falls through to
     # paths.state_path() otherwise. Verified 2026-09-22.
