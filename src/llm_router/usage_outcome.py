@@ -380,7 +380,7 @@ def _judge_answer(ev: Event, window: list[_Rec], recs: list[_Rec]) -> tuple[str,
         return OUTCOME_UNKNOWN, "no_result"
     mine = _input_text(ev.tool_input)
     for r in window:
-        if r.human and _OVERRIDE_RE.match(r.human) and BAND_REDO_MARK not in r.human:
+        if r.human and _OVERRIDE_RE.match(r.human) and not r.human.rstrip().endswith(BAND_REDO_MARK):
             return OUTCOME_REDONE, "overridden"
         for tu in _tool_uses(r.rec):
             if tu.get("id") == ev.event_id:

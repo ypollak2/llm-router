@@ -420,3 +420,13 @@ def test_env_file_value_is_never_executed(tmp_path):
         (state / ".env").write_text(f"LLM_ROUTER_STATUSLINE={payload}\nX=$(touch {marker})\n")
         _run(_env(tmp_path, "true", fast=False))
         assert not marker.exists(), payload
+
+
+def test_quota_without_updated_at_falls_back_to_file_mtime(tmp_path):
+    usage = {k: v for k, v in _USAGE.items() if k != "updated_at"}
+    f = tmp_path / tick.USAGE_NAME
+    f.write_text(json.dumps(usage))
+    fresh = tick.read_usage(str(tmp_path))
+    assert tick._quota(fresh, fresh["updated_at"] + 10, 300.0) == "Claude 5h 12% wk 41% sonnet 3%"
+    os.utime(f, (NOW - 7200, NOW - 7200))
+    assert tick._quota(tick.read_usage(str(tmp_path)), NOW, 300.0).endswith(" (stale 2h)")

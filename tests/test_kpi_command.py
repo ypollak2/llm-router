@@ -486,3 +486,26 @@ def test_the_benchmark_env_var_is_registered():
     from llm_router.env_registry import ENV_REGISTRY
 
     assert "LLM_ROUTER_KPI_BENCHMARK_PATH" in ENV_REGISTRY
+
+
+def test_d5_missing_haiku_key_is_unknown_not_never_predicted(monkeypatch, tmp_path):
+    base = {"accuracy": 0.2, "under_route_rate": 0.0, "n": 24}
+    for counts in ({"sonnet": 21, "opus": 3}, {}):
+        _bench(tmp_path, monkeypatch, {"d5": {**base, "predicted_tier_counts": counts}})
+        lines = _kpis()["D5"]["lines"]
+        assert not any("never predicted haiku" in ln for ln in lines), lines
+
+
+def test_d5_measured_headline_drops_gate_wording_when_haiku_never_predicted(monkeypatch, tmp_path):
+    d5 = {"accuracy": 0.7, "under_route_rate": 0.0, "n": 150,
+          "predicted_tier_counts": {"haiku": 0, "sonnet": 100, "opus": 50}}
+    _bench(tmp_path, monkeypatch, {"generated_at": "2026-10-01T00:00:00Z", "d5": d5})
+    data = kpi.compute_scorecard(days=7)
+    v = data["kpis"]["D5"]["value"]
+    assert data["kpis"]["D5"]["measurable"] and "gate" not in v and "never predicted haiku" in v, v
+    health = kpi.compute_health(data, now=data["kpis"]["D5"]["newest_ts"] + 3600)["kpis"]["D5"]
+    assert "never predicted haiku" in health["reason"], health
+    # the qualifier is absent when haiku is predicted: the gate wording stays
+    _bench(tmp_path, monkeypatch, {"generated_at": "2026-10-01T00:00:00Z",
+                                   "d5": {**d5, "predicted_tier_counts": {"haiku": 5, "sonnet": 95, "opus": 50}}})
+    assert "(within <=10% gate)" in _kpis()["D5"]["value"]

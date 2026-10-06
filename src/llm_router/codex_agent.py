@@ -235,8 +235,11 @@ def is_codex_plugin_available() -> bool:
 #: been read the process is stopped, so memory stays bounded either way.
 _STDOUT_LINE_LIMIT = 8 * 1024 * 1024
 _STDOUT_TOTAL_CAP = 64 * 1024 * 1024
-#: Non-JSON stdout lines kept as a diagnostic fallback (count, chars per line).
 _STDERR_CAP = 256 * 1024
+
+#: Appended to the returned text when the stdout total cap killed the run: the answer is partial.
+TRUNCATION_MARKER = "[truncated: output cap]"
+#: Non-JSON stdout lines kept as a diagnostic fallback (count, chars per line).
 _NOISE_MAX_LINES = 20
 _NOISE_MAX_CHARS = 500
 
@@ -618,6 +621,8 @@ async def run_codex(
 
         # We killed it ourselves at the byte cap: the answer so far stands.
         rc = 0 if capped else (proc.returncode or 0)
+        if capped:
+            output = f"{output}\n\n{TRUNCATION_MARKER}"
         return CodexResult(
             content=output, model=model,
             exit_code=rc, duration_sec=duration,
