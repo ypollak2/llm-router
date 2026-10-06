@@ -206,6 +206,10 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # sub-second invalid replies before local serving pauses, and the pause.
     "LLM_ROUTER_PROXY_BACKEND_FAIL_N": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_BACKEND_COOLDOWN_S": ("llm_router", "proxy/server.py", 1),
+    # Opt-in serve mode (proxy/local_mode.py): off (default) or local-agent.
+    "LLM_ROUTER_PROXY_LOCAL_AGENT_MODE": ("llm_router", "proxy/server.py", 1),
+    # Opt-in SHADOW mode (proxy/local_shadow.py): off (default) or on.
+    "LLM_ROUTER_PROXY_LOCAL_SHADOW": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_TIERS": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_TIER_POLICY": ("llm_router", "proxy/server.py", 1),
     # Kill switch for the tier decision's quota-pressure step (off/0/false/no).
