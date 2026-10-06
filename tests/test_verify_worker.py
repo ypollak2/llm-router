@@ -529,15 +529,19 @@ def test_patches_are_deleted_after_a_verdict_expiry_and_a_failure(tmp_path):
 
 # ── concurrency ──────────────────────────────────────────────────────────────
 
-def _worker_proc(log: str, tag: str, started):
+def _worker_proc(log: str, tag: str, barrier):
     slot = Q.acquire_slot()
     if slot is None:
         os.write(os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT), f"{tag} noslot\n".encode())
         return
-    started.set()
+    first = {"done": False}
+
     def verify(repo, patch, budget_s):
-        time.sleep(0.03)
+        if not first["done"]:                 # both workers must be holding a unit at the same time
+            first["done"] = True
+            barrier.wait(60)
         return _ok_result()
+
     def rec(uid, r):
         os.write(os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT), f"{tag} {uid}\n".encode())
     W.drain(verify=verify, record=rec)
@@ -551,12 +555,12 @@ def test_two_workers_never_process_a_unit_twice(tmp_path):
         _enqueue(i, repo=repo, head=_head(repo))
     log = str(tmp_path / "log.txt")
     ctx = multiprocessing.get_context("fork")
-    ev = [ctx.Event(), ctx.Event()]
-    procs = [ctx.Process(target=_worker_proc, args=(log, f"w{i}", ev[i])) for i in range(2)]
+    barrier = ctx.Barrier(2)                  # deterministic overlap: no sleeps, no timing
+    procs = [ctx.Process(target=_worker_proc, args=(log, f"w{i}", barrier)) for i in range(2)]
     for p in procs:
         p.start()
     for p in procs:
-        p.join(120)
+        p.join(180)
         assert p.exitcode == 0
     lines = [ln.split() for ln in Path(log).read_text().splitlines()]
     uids = [u for _, u in lines if u != "noslot"]
@@ -866,6 +870,67 @@ def test_an_editable_install_that_escapes_the_copy_is_unavailable(tmp_path):
     assert recs == [("unavailable", "editable_points_outside")]
 
 
+def _strict_editable(venv: Path, mapping: dict[str, str]) -> None:
+    """setuptools STRICT editable style: a meta_path finder with a name -> real path mapping and NO
+    sys.path entry for the package."""
+    site = next(venv.glob("lib/python*/site-packages"))
+    (site / "__editable___x_finder.py").write_text(
+        "import sys, importlib.util\n"
+        f"MAPPING = {mapping!r}\n"
+        "class F:\n"
+        "    @classmethod\n"
+        "    def find_spec(cls, fullname, path=None, target=None):\n"
+        "        if fullname in MAPPING:\n"
+        "            d = MAPPING[fullname]\n"
+        "            return importlib.util.spec_from_file_location(\n"
+        "                fullname, d + '/__init__.py', submodule_search_locations=[d])\n"
+        "        return None\n"
+        "def install():\n"
+        "    if F not in sys.meta_path:\n"
+        "        sys.meta_path.append(F)\n")
+    (site / "__editable___x.pth").write_text("import __editable___x_finder; __editable___x_finder.install()\n")
+
+
+def _monorepo(tmp_path) -> Path:
+    repo = tmp_path / "mono"
+    (repo / "packages" / "x" / "pkg").mkdir(parents=True)
+    (repo / "packages" / "x" / "tests").mkdir()
+    (repo / "packages" / "x" / "pkg" / "__init__.py").write_text("def add(a, b):\n    return a - b\n")
+    (repo / "packages" / "x" / "tests" / "test_pkg.py").write_text(
+        "from pkg import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n")
+    (repo / ".gitignore").write_text(".venv/\n")
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    return repo
+
+
+@real_sandbox
+def test_monorepo_strict_editable_finder_is_caught_by_importing_the_packages(tmp_path):
+    """A meta_path finder maps `pkg` to the REAL packages/x/pkg: no sys.path entry, nothing under
+    src/ or the root. Only actually importing the package shows where it resolves."""
+    repo = _monorepo(tmp_path)
+    venv = _fake_venv(repo, editable=None)
+    _strict_editable(venv, {"pkg": str(repo / "packages" / "x" / "pkg")})
+    _enqueue(1, repo=repo, head=_head(repo))
+    recs = []
+    W.drain(verify=lambda *a, **k: pytest.fail("must not verify against the real tree"),
+            record=lambda uid, r: recs.append((r.verify_status, r.reason)))
+    assert recs == [("unavailable", "editable_points_outside")]
+
+
+@real_sandbox
+def test_monorepo_package_that_resolves_inside_the_copy_is_fine(tmp_path):
+    repo = _monorepo(tmp_path)
+    _fake_venv(repo, editable=None)
+    site = next((repo / ".venv").glob("lib/python*/site-packages"))
+    (site / "zz_in_copy.pth").write_text("")        # nothing maps pkg outside: it simply is not installed
+    _enqueue(1, repo=repo, head=_head(repo))
+    seen = []
+    W.drain(verify=lambda r, p, budget_s, **k: seen.append(k) or _ok_result(), record=lambda *a: None)
+    assert seen and "python_dir" in seen[0]
+
+
 @real_sandbox
 def test_a_venv_without_pytest_falls_back_to_the_default_interpreter(tmp_path):
     repo = _venv_repo(tmp_path)
@@ -893,3 +958,18 @@ def test_no_venv_means_the_default_interpreter(tmp_path):
     seen = []
     W.drain(verify=lambda r, p, budget_s, **k: seen.append(k) or _ok_result(), record=lambda *a: None)
     assert seen == [{}]
+
+
+def test_patch_and_marker_files_are_not_opened_through_a_symlink(tmp_path):
+    Q.ensure_dirs()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me")
+    Q.patch_path(_uid(1)).symlink_to(victim)
+    with pytest.raises(OSError):
+        _enqueue(1)
+    assert victim.read_text() == "keep me"
+    Q.patch_path(_uid(1)).unlink()
+    (Q._sub("pending") / f".{_uid(1)}.tmp").symlink_to(victim)
+    with pytest.raises(OSError):
+        _enqueue(1)
+    assert victim.read_text() == "keep me" and not Q.patch_path(_uid(1)).exists()

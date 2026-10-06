@@ -117,33 +117,70 @@ def _checkout(cwd: str, head: str, dest: Path, deadline: float) -> None:
 # the sandbox proves it for this repo: any sys.path entry (or package) that lives under the real tree
 # and is NOT shadowed by the copy means ``editable_points_outside`` (unavailable, never a verdict).
 _PROBE = r"""
-import importlib.util, os, sys
+import importlib, os, signal, sys
 real = os.path.realpath(sys.argv[1]); here = os.path.realpath(os.getcwd())
-if importlib.util.find_spec("pytest") is None:
+try:
+    import pytest  # noqa: F401
+except Exception:
     sys.exit(96)
-paths = [os.path.realpath(p) for p in sys.path if p and os.path.exists(p)]
 def under(p, root):
     return p == root or p.startswith(root + os.sep)
 prefix = os.path.realpath(sys.prefix)
+# 1. sys.path entries in the real tree that the copy does not shadow (cheap, catches .pth / egg-link)
+paths = [os.path.realpath(p) for p in sys.path if p and os.path.exists(p)]
 for i, p in enumerate(paths):
-    if under(p, real) and not under(p, here) and not under(p, prefix):   # the venv itself is fine
+    if under(p, real) and not under(p, here) and not under(p, prefix):
         twin = os.path.normpath(os.path.join(here, os.path.relpath(p, real)))
         if twin not in paths[:i]:
             sys.exit(97)
-for base in (os.path.join(here, "src"), here):
-    if not os.path.isdir(base):
+# 2. the authoritative check: import every top-level package/module of the copy, with this very
+#    interpreter, env and PYTHONPATH, and see where it RESOLVES (meta_path finders, strict editable
+#    installs and anything else included)
+SKIP = {".git", ".venv", "venv", "node_modules", "build", "dist", "__pycache__", "site-packages",
+        "tests", "test", "docs", "examples", "scripts"}
+def skipped(n):
+    return n in SKIP or n.startswith((".", "test", "conftest", "setup", "_"))
+names = set()
+def add_modules(d):
+    try:
+        for n in os.listdir(d):
+            if n.endswith(".py") and n[:-3].isidentifier() and not skipped(n[:-3]):
+                names.add(n[:-3])
+    except OSError:
+        pass
+roots = [here, os.path.join(here, "src"), os.path.join(here, "lib")]
+pk = os.path.join(here, "packages")
+if os.path.isdir(pk):
+    for n in os.listdir(pk):
+        roots += [os.path.join(pk, n), os.path.join(pk, n, "src")]
+for r in roots:
+    if os.path.isdir(r):
+        add_modules(r)
+for dirpath, dirnames, files in os.walk(here):
+    depth = os.path.relpath(dirpath, here).count(os.sep)
+    dirnames[:] = [d for d in dirnames if not skipped(d) and depth < 4]
+    if "__init__.py" in files and not skipped(os.path.basename(dirpath)):
+        parent = os.path.dirname(dirpath)
+        if not os.path.exists(os.path.join(parent, "__init__.py")):
+            names.add(os.path.basename(dirpath))
+class _Slow(BaseException):
+    pass
+def _alarm(sig, frame):
+    raise _Slow()
+signal.signal(signal.SIGALRM, _alarm)
+for name in sorted(names):
+    if not name.isidentifier():
         continue
-    for n in os.listdir(base):
-        name = n[:-3] if n.endswith(".py") else n
-        if not name.isidentifier() or name.startswith(("test", "conftest", "setup")):
-            continue
-        try:
-            spec = importlib.util.find_spec(name)
-        except Exception:
-            continue
-        origin = spec and (spec.origin or (list(spec.submodule_search_locations or [""])[0]))
-        if origin and under(os.path.realpath(origin), real) and not under(os.path.realpath(origin), here):
-            sys.exit(97)
+    signal.alarm(5)
+    try:
+        mod = importlib.import_module(name)
+    except BaseException:
+        continue                          # not importable here: the tests cannot import it either
+    finally:
+        signal.alarm(0)
+    origin = getattr(mod, "__file__", None) or (list(getattr(mod, "__path__", []) or [""])[0])
+    if origin and not under(os.path.realpath(origin), here):
+        sys.exit(97)                      # resolves outside the sandbox copy
 """
 
 

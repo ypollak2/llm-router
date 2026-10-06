@@ -251,7 +251,7 @@ def enqueue(uid: str, repo: str, head: str, patch: bytes, *, now: float | None =
         raise ValueError("bad unit_id")
     ensure_dirs()
     pp = patch_path(uid)
-    fd = os.open(pp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(pp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     try:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "wb") as fh:
@@ -275,7 +275,7 @@ def enqueue(uid: str, repo: str, head: str, patch: bytes, *, now: float | None =
 
 
 def _write_json(path: Path, obj: dict) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(obj, fh)
