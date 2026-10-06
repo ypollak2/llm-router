@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LLM_ROUTER_STATUSLINE=fast` and now shows the Claude 5h / weekly / Sonnet quota.
 
 ### Added
+- kpi: `llm-router kpi --since WHEN --until WHEN` pins an absolute window (replaces `--days`; rows outside it
+  never count; JSON gains `window`). Without the flags the output is unchanged (live-home JSON diff against
+  c2ed278: identical). `tests/test_kpi_window.py`.
 - status line: `LLM_ROUTER_STATUSLINE=both` prints the full line, then the fast (debug) line on a second
   row. Claude Code renders each printed line as its own row (docs: "Multiple lines"). Default, `full`
   and `fast` are unchanged; the `.env` reader is still never sourced (new test: `$(touch marker)` never runs).

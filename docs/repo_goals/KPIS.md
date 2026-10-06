@@ -76,6 +76,12 @@ version is not in the ledger the line says so; it does not print a number. The H
 (`~/.rsi/research/local-usage/haiku_guard/`, outside the repo) uses this same redo definition and
 the same headline unit: its n_haiku is Haiku-served human turns, not calls.
 
+*Absolute windows.* `--since WHEN --until WHEN` (a date, an ISO time or epoch seconds; both
+required) replace `--days`, and "now" becomes `--until`. Use them for every historical check: a
+relative window empties as the ledgers go quiet. Rows outside `[since, until]` never count, in any
+KPI. O1's `usage.db` estimate only exists relative to now, so under a window O1 prints the
+reconciled figure or "not measurable". The JSON gains a `window` key (absent without the flags).
+
 ## Drivers
 
 | ID | Driver | Definition |
