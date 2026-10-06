@@ -254,6 +254,7 @@ class ShadowRunner:
 
     async def _job(self, body: dict, base: dict, claude_reply) -> None:
         t0 = self._clock()
+        work = None
         local = None
         schema_valid: bool | None = None
         reason: str | None = None
@@ -267,8 +268,11 @@ class ShadowRunner:
                 try:
                     await work
                 except asyncio.CancelledError:
-                    if not work.cancelled():
-                        raise              # an outer cancellation of this job is never swallowed
+                    # Our own cancel of ``work`` is swallowed; a cancel of THIS job is not (``work``
+                    # is cancelled in both cases, so ``work.cancelled()`` cannot tell them apart).
+                    me = asyncio.current_task()
+                    if me is not None and getattr(me, "cancelling", lambda: 1)() > 0:
+                        raise
                 except Exception:  # noqa: BLE001 - the local call failed while stopping; reason is known
                     pass
                 reason = R_DROPPED if claude_reply in done else R_BUDGET
@@ -283,6 +287,8 @@ class ShadowRunner:
         except Exception:  # noqa: BLE001 - the shadow job must never surface an error
             reason = R_ERROR
         finally:
+            if work is not None and not work.done():
+                work.cancel()              # an outer cancel must not leave the local call running
             self._busy = False  # the model slot is free; waiting for Claude holds nothing
         latency = round(self._clock() - t0, 3)
         await self._write(base, claude_reply, local=local, latency=latency, schema_valid=schema_valid,

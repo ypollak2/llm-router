@@ -499,3 +499,31 @@ async def test_big_body_claude_response_is_not_delayed_by_shadow(env):
     off = min([await ttfb(False) for _ in range(3)])
     on = min([await ttfb(True) for _ in range(3)])
     assert on - off < 0.08, f"shadow added {(on - off) * 1000:.0f} ms (off {off * 1000:.0f}, on {on * 1000:.0f})"
+
+
+async def test_an_outer_cancel_of_a_job_is_not_swallowed_even_when_the_local_call_cancels_slowly():
+    """Cancelling the job also cancels its local call; a slow clean-up must not turn that into
+    'our own cancel' and send the job on to wait for Claude (900 s in production)."""
+    started = asyncio.Event()
+
+    async def slow_cancel(body):
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.3)               # slow clean-up
+            raise
+
+    runner = local_shadow.ShadowRunner(slow_cancel, budget_s=30.0, claude_wait_s=30.0)
+    fut = asyncio.get_running_loop().create_future()
+    runner.submit({"messages": []}, session_id="s", ts=1.0, claude_reply=fut)
+    await asyncio.wait_for(started.wait(), 2.0)
+    (job,) = list(runner._tasks)
+    fut.set_result({"ok": True, "calls": [], "msg_id": None})   # Claude answered: the job drops its local call ...
+    await asyncio.sleep(0.1)                                    # ... which is now cleaning up slowly
+    job.cancel()                                                # and the job itself is cancelled (shutdown)
+    t0 = time.monotonic()
+    await asyncio.wait({job}, timeout=3.0)
+    assert job.done() and job.cancelled(), "the job swallowed an outer cancellation"
+    assert time.monotonic() - t0 < 2.0
+    assert not runner.busy
