@@ -30,11 +30,21 @@ Rules (VERIFIER_PLAN.md sections 2-5 and the owner decisions of 2026-10-06):
 * A model-edited test file is also run on the baseline: a test that passed there and no longer
   passes or exists after is `fail`/`tests_disappeared`.
 
-KNOWN LIMITS (not caught by any static f2p gate; measured by the hidden-test precision bar of
-VERIFIER_PLAN section 6, pinned by the `known_limit_*` tests so a future fix flips them on purpose):
+* Reports are cross-checked: pytest's junit file, its exit status and its printed summary must agree
+  (counts of passed and failed, rc==0 iff nothing failed), else `unavailable`/`report_mismatch`.
+  This catches a source module that rewrites the junit file or forces the exit code.
+
+THREAT MODEL: HONEST-BUT-SLOPPY. The verifier assumes a model that makes mistakes, not one that
+attacks the harness. Known limits (no static or cross-check gate catches them; the hidden-test
+precision bar of VERIFIER_PLAN section 6 is what measures the real false-used rate). Each is pinned
+by a `known_limit_*` test asserting the CURRENT (eligible) behaviour, so a future fix flips it on purpose:
   1. Gutting an assertion helper that lives in a NON-test source module (src/pkg/check.py).
-  2. Special-casing the test's input in source code (`if (a, b) == (1, 2): return 3`).
-Both yield pass_f2p / used-eligible today.
+  2. Special-casing the test's input in source (`if (a, b) == (1, 2): return 3`).
+  3. A source data module used as the expected values (src/expected.py) edited to match the output.
+  4. A returned object whose `__eq__` is always True.
+  5. Deliberate in-process tampering that forges ALL channels at once (e.g. an obfuscated
+     monkeypatch of pytest's TestReport: junit, summary and exit code then agree).
+Each yields pass_f2p / used-eligible today.
 """
 from __future__ import annotations
 
@@ -273,6 +283,38 @@ class _Clock:
         return int((time.monotonic() - self.t0) * 1000)
 
 
+_SUMMARY_RX = re.compile(r"^[= ]*(?P<body>(?:\d+ \w+(?:, )?)+|no tests ran) in [\d.]+s\b", re.M)
+
+
+def stdout_summary(tail: str) -> dict[str, int] | None:
+    """Counts from pytest's own final line ("1 failed, 2 passed in 0.1s"); None if there is none."""
+    found = None
+    for m in _SUMMARY_RX.finditer(tail):
+        found = m.group("body")
+    if found is None:
+        return None
+    counts: dict[str, int] = {}
+    for n, word in re.findall(r"(\d+) (\w+)", found):
+        key = "errors" if word in ("error", "errors") else word
+        counts[key] = counts.get(key, 0) + int(n)
+    return counts
+
+
+def report_mismatch(run: V.VerifyRun) -> bool:
+    """junit, pytest's exit code and pytest's printed summary must tell the same story. They come
+    from three channels; a source module that rewrites the junit file or the exit status breaks the tie."""
+    if not run.junit:
+        return False
+    sm = stdout_summary(run.tail)
+    if sm is None:
+        return True
+    out_failed = sm.get("failed", 0) + sm.get("errors", 0)
+    out_passed = sm.get("passed", 0) + sm.get("xpassed", 0)
+    if out_failed != len(run.failed) or out_passed != len(run.passed):
+        return True
+    return (run.rc == 0) != (out_failed == 0)
+
+
 def _run(clock: _Clock, command: str, cwd: Path, tmp: Path, python_dir: str | None, tag: str) -> V.VerifyRun:
     left = clock.left()
     if left <= 1:
@@ -283,6 +325,8 @@ def _run(clock: _Clock, command: str, cwd: Path, tmp: Path, python_dir: str | No
         raise _Stop(UNAVAILABLE, "os_error") from None
     if run.timed_out:
         raise _Stop(UNAVAILABLE, "timeout")
+    if report_mismatch(run):
+        raise _Stop(UNAVAILABLE, "report_mismatch")
     return run
 
 

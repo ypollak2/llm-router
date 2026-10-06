@@ -466,3 +466,120 @@ def test_a_symlink_in_the_patch_fails_closed_fast(broken, tmp_path, target):
 def test_an_oversized_patch_is_unavailable(broken):
     r = verify_unit(broken, "+" * (VU.MAX_PATCH_BYTES + 1))
     assert (r.verify_status, r.reason) == ("unavailable", "patch_too_large")
+
+
+# ── third review: report channels + threat model (honest-but-sloppy) ─────────
+
+JUNIT_REWRITE = '''import atexit
+import os
+import re
+import sys
+
+
+def _scrub():
+    for a in sys.argv:
+        if a.startswith("--junit-xml="):
+            path = a.split("=", 1)[1]
+            txt = open(path).read()
+            txt = re.sub(r"<failure.*?</failure>", "", txt, flags=re.S)
+            txt = re.sub(r"<error.*?</error>", "", txt, flags=re.S)
+            open(path, "w").write(txt)
+    sys.stdout.flush()
+    os._exit(0)
+
+
+atexit.register(_scrub)
+
+
+def add(a, b):
+    return a - b
+'''
+
+
+@real_sandbox
+def test_junit_rewrite_plus_forced_exit_code_is_not_eligible(broken, tmp_path):
+    """The reviewer's repro: source rewrites the junit file in an atexit hook and exits 0."""
+    patch = _patch(broken, tmp_path, lambda r: (r / "src" / "pkg.py").write_text(JUNIT_REWRITE))
+    r = verify_unit(broken, patch)
+    assert (r.verify_status, r.reason) == ("unavailable", "report_mismatch"), r
+    assert not r.used_eligible
+
+
+@real_sandbox
+def test_the_junit_repro_really_works_without_the_cross_check(broken, tmp_path, monkeypatch):
+    """Control: with the cross-check off the same patch is called eligible, so the test above proves the fix."""
+    patch = _patch(broken, tmp_path, lambda r: (r / "src" / "pkg.py").write_text(JUNIT_REWRITE))
+    monkeypatch.setattr(VU, "report_mismatch", lambda run: False)
+    assert verify_unit(broken, patch).used_eligible
+
+
+def test_stdout_summary_parser():
+    assert VU.stdout_summary("x\n1 failed, 2 passed in 0.10s\n") == {"failed": 1, "passed": 2}
+    assert VU.stdout_summary("==== 3 passed, 1 skipped in 1.2s ====") == {"passed": 3, "skipped": 1}
+    assert VU.stdout_summary("no tests ran in 0.01s") == {}
+    assert VU.stdout_summary("nothing useful") is None
+
+
+OBFUSCATED = '''import importlib
+
+_m = importlib.import_module("_py" + "test.rep" + "orts")
+_T = getattr(_m, "Test" + "Report")
+_orig = _T.from_item_and_call.__func__
+
+
+def _forge(cls, item, call):
+    rep = _orig(cls, item, call)
+    rep.outcome = "passed"
+    return rep
+
+
+_T.from_item_and_call = classmethod(_forge)
+
+
+def add(a, b):
+    return a - b
+'''
+
+
+@real_sandbox
+def test_known_limit_obfuscated_in_process_report_forging_is_eligible_today(broken, tmp_path):
+    """KNOWN LIMIT (honest-but-sloppy threat model): forging pytest's reports in-process makes junit,
+    summary and exit code agree, so the cross-check cannot see it. Measured by the hidden-test bar."""
+    r = verify_unit(broken, _patch(broken, tmp_path, lambda c: (c / "src" / "pkg.py").write_text(OBFUSCATED)))
+    assert r.verify_status == "pass_f2p" and r.used_eligible, r
+
+
+@pytest.fixture
+def expectedrepo(tmp_path):
+    root = tmp_path / "expectedrepo"
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "src" / "expected.py").write_text("ADD_1_2 = 3\n")
+    (root / "src" / "pkg.py").write_text("def add(a, b):\n    return a - b\n\n\nclass Box:\n    def __init__(self, v):\n        self.v = v\n\n\ndef box(v):\n    return Box(v)\n")
+    (root / "tests" / "test_pkg.py").write_text(
+        "from expected import ADD_1_2\nfrom pkg import add, box\n\n\n"
+        "def test_add():\n    assert add(1, 2) == ADD_1_2\n\n\n"
+        "def test_box():\n    assert box(5) == 6\n")
+    return _init(root)
+
+
+@real_sandbox
+def test_known_limit_source_data_module_as_expected_values_is_eligible_today(expectedrepo, tmp_path):
+    """KNOWN LIMIT: the expected value lives in a source module and is edited to match the buggy output."""
+    def mutate(r: Path):
+        (r / "src" / "expected.py").write_text("ADD_1_2 = -1\n")
+        (r / "src" / "pkg.py").write_text("def add(a, b):\n    return a - b\n\n\ndef box(v):\n    return v + 1\n")
+    r = verify_unit(expectedrepo, _patch(expectedrepo, tmp_path, mutate))
+    assert r.verify_status == "pass_f2p" and r.used_eligible, r
+
+
+@real_sandbox
+def test_known_limit_always_true_eq_object_is_eligible_today(expectedrepo, tmp_path):
+    """KNOWN LIMIT: a return object whose __eq__ is always True satisfies any assert on it."""
+    def mutate(r: Path):
+        (r / "src" / "expected.py").write_text("ADD_1_2 = -1\n")
+        (r / "src" / "pkg.py").write_text(
+            "class Any:\n    def __eq__(self, other):\n        return True\n\n\n"
+            "def add(a, b):\n    return Any()\n\n\ndef box(v):\n    return Any()\n")
+    r = verify_unit(expectedrepo, _patch(expectedrepo, tmp_path, mutate))
+    assert r.verify_status == "pass_f2p" and r.used_eligible, r
