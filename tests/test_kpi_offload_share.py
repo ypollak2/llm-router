@@ -24,10 +24,18 @@ def _isolated(monkeypatch, tmp_path):
     d.mkdir()
     monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(d))
     monkeypatch.delenv("LLM_ROUTER_KPI_BENCHMARK_PATH", raising=False)
+    # G2 reads process-global fail-open counts another test on this worker may have left
+    # behind (CI 3.13 failure on e29c34f); the golden needs it to start from nothing.
+    from llm_router import failopen
+
+    failopen.reset_unpersisted()
+    failopen.reset_cache()
     session_kind._FOUND.clear()
     session_kind.tag_session("s-org", "/Users/someone/Projects/app", env={})
     yield
     session_kind._FOUND.clear()
+    failopen.reset_unpersisted()
+    failopen.reset_cache()
 
 
 def _build(rows, local=(), band=frozenset(), outcomes=()):
