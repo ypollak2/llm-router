@@ -18,6 +18,7 @@ SHADOW: only ``northstar.record_verify`` is called; no outcome, NS, D1 or D2 cha
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -29,6 +30,8 @@ import time
 from pathlib import Path
 
 from llm_router import verify_queue as Q
+from llm_router.toolkit import sandbox
+from llm_router.toolkit import verify as V
 from llm_router.toolkit import verify_unit as VU
 
 DEFAULT_BUDGET_S = VU.DEFAULT_BUDGET_S      # 120
@@ -70,7 +73,9 @@ def _checkout(cwd: str, head: str, dest: Path, deadline: float) -> None:
     if not hasattr(tarfile, "data_filter"):      # Python < 3.11.4: no safe extraction filter
         raise _Fail("verify_checkout_failed")
     env = Q._git_env()
-    p = subprocess.Popen(["git", "archive", "--format=tar", head], cwd=cwd, env=env,
+    if not Q._HEAD_RX.fullmatch(head):                # defence in depth: _valid already refuses this
+        raise _Fail("marker_invalid")
+    p = subprocess.Popen(["git", "archive", "--format=tar", "--end-of-options", head], cwd=cwd, env=env,
                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     timer = threading.Timer(max(1.0, deadline - time.monotonic()), p.kill)
     timer.start()
@@ -98,6 +103,76 @@ def _checkout(cwd: str, head: str, dest: Path, deadline: float) -> None:
         raise _Fail("verify_head_unavailable")
 
 
+# ── the repo's own interpreter ───────────────────────────────────────────────
+#
+# Repo tests need the repo's dependencies, so when ``<repo>/.venv/bin/python`` exists the tests run
+# with it, through two shims in a private dir (PATH puts the shim dir first inside the sandbox):
+#
+#   llmr-py   sets PYTHONPATH="$PWD/src:$PWD" and execs the venv python
+#   pytest    llmr-py -m pytest
+#
+# $PWD is the sandbox copy being tested (baseline or patched), so the copy shadows the user's REAL
+# tree. That matters because a venv with an editable install puts the real tree on sys.path: unless
+# the copy comes first, baseline == after (no f2p ever) or the wrong code is tested. A probe inside
+# the sandbox proves it for this repo: any sys.path entry (or package) that lives under the real tree
+# and is NOT shadowed by the copy means ``editable_points_outside`` (unavailable, never a verdict).
+_PROBE = r"""
+import importlib.util, os, sys
+real = os.path.realpath(sys.argv[1]); here = os.path.realpath(os.getcwd())
+if importlib.util.find_spec("pytest") is None:
+    sys.exit(96)
+paths = [os.path.realpath(p) for p in sys.path if p and os.path.exists(p)]
+def under(p, root):
+    return p == root or p.startswith(root + os.sep)
+prefix = os.path.realpath(sys.prefix)
+for i, p in enumerate(paths):
+    if under(p, real) and not under(p, here) and not under(p, prefix):   # the venv itself is fine
+        twin = os.path.normpath(os.path.join(here, os.path.relpath(p, real)))
+        if twin not in paths[:i]:
+            sys.exit(97)
+for base in (os.path.join(here, "src"), here):
+    if not os.path.isdir(base):
+        continue
+    for n in os.listdir(base):
+        name = n[:-3] if n.endswith(".py") else n
+        if not name.isidentifier() or name.startswith(("test", "conftest", "setup")):
+            continue
+        try:
+            spec = importlib.util.find_spec(name)
+        except Exception:
+            continue
+        origin = spec and (spec.origin or (list(spec.submodule_search_locations or [""])[0]))
+        if origin and under(os.path.realpath(origin), real) and not under(os.path.realpath(origin), here):
+            sys.exit(97)
+"""
+
+
+def _repo_python_dir(real_repo: str, checkout: Path, tmp: Path, budget: float) -> tuple[str | None, str | None]:
+    """``(python_dir, None)`` to run the tests with the repo's venv, ``(None, None)`` to keep the
+    default interpreter, ``(None, reason)`` when the venv would test the wrong tree."""
+    py = Path(real_repo) / ".venv" / "bin" / "python"
+    if not (py.is_file() and os.access(py, os.X_OK)) or sandbox.kill_switch_reason() \
+            or not sandbox.prove_sandbox().proven:
+        return None, None
+    shim = tmp / "shim"
+    shim.mkdir(mode=0o700)
+    for name, body in (("llmr-py", f'#!/bin/sh\nexport PYTHONPATH="$PWD/src:$PWD${{PYTHONPATH:+:$PYTHONPATH}}"\n'
+                                   f'exec {shlex.quote(str(py))} "$@"\n'),
+                       ("pytest", f'#!/bin/sh\nexec {shlex.quote(str(shim / "llmr-py"))} -m pytest "$@"\n')):
+        (shim / name).write_text(body)
+        os.chmod(shim / name, 0o700)
+    probe_tmp = tmp / "probe"
+    probe_tmp.mkdir(mode=0o700)
+    cmd = f"llmr-py -c {shlex.quote(_PROBE)} {shlex.quote(real_repo)}"
+    run = V.run_command(cmd, checkout, probe_tmp, python_dir=str(shim), timeout_s=min(30.0, max(budget, 1.0)),
+                        tag="probe")
+    if run.rc == 97:
+        return None, "editable_points_outside"
+    if run.rc == 0:
+        return str(shim), None
+    return None, None                           # no pytest in the venv / venv unusable: default interpreter
+
+
 def _run_unit(m: Q.Marker, verify) -> "VU.UnitResult":
     data = m.data
     pp = Q.patch_path(m.unit_id)
@@ -118,9 +193,14 @@ def _run_unit(m: Q.Marker, verify) -> "VU.UnitResult":
             _checkout(data["cwd"], data["head"], repo, started + budget)
         except _Fail as f:
             return _unavailable(f.reason)
+        python_dir, why = _repo_python_dir(data["cwd"], repo, tmp, budget - (time.monotonic() - started))
+        if why:
+            return _unavailable(why)
         left = budget - (time.monotonic() - started)
         if left < _MIN_VERIFY_S:
             return _unavailable("timeout")
+        if python_dir:
+            return verify(repo, patch, budget_s=left, python_dir=python_dir)
         return verify(repo, patch, budget_s=left)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -185,6 +265,11 @@ def drain(*, verify=VU.verify_unit, record=None, now: float | None = None,
     for m in Q.recover_stale_claims(now):
         _settle_unavailable(m, "verify_worker_crashed", record)
         counts["crashed"] += 1
+    for uid in Q.take_invalid():
+        try:
+            record(uid, _unavailable("marker_invalid"))
+        except Exception as exc:                 # noqa: BLE001
+            _failopen("CHZ-FO-VERIFY-RECORD", exc)
     for m in Q.pending():
         if Q.is_expired(m, now):
             c = Q.claim(m)

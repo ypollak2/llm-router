@@ -16,8 +16,10 @@ ttl_s``. The patch is the only place a user's source text lives; it is deleted a
 and after TTL expiry (24 h, owner decision 2026-10-06), and an orphan patch (no marker) is swept
 after the same TTL.
 
-Nothing here writes the user's tree: capture reads it through ``git`` with a TEMPORARY index
-(``GIT_INDEX_FILE``) and ``GIT_OPTIONAL_LOCKS=0``, so not even ``.git/index`` is refreshed.
+Nothing here writes the user's tree: capture only READS it (``git rev-parse``, ``ls-files``,
+``diff HEAD`` with ``GIT_OPTIONAL_LOCKS=0``, so not even ``.git/index`` is refreshed; untracked
+files are rendered to diff text in Python, no temporary index is involved). The whole capture runs
+under one wall-clock budget (CAPTURE_BUDGET_S): a stalled read (network FS) yields no marker.
 """
 from __future__ import annotations
 
@@ -52,6 +54,8 @@ UNIT_KIND = "agent_route_codex"
 TRUNCATION_MARKER = "[truncated: output cap]"   # codex_agent.TRUNCATION_MARKER (#283)
 _UID_RX = re.compile(r"^u_[0-9a-f]{16}$")
 _GIT_TIMEOUT_S = 5.0
+CAPTURE_BUDGET_S = 3.0                    # wall clock for the whole capture, reads included
+_HEAD_RX = re.compile(r"[0-9a-f]{40,64}")      # used with fullmatch: no trailing-newline slack
 _OFF = ("0", "off", "false", "no")
 
 
@@ -123,7 +127,7 @@ def _popen(args: list[str], cwd: str, env: dict[str, str]) -> subprocess.Popen:
 _UNUSUAL_PATH_RX = re.compile(rb'[\x00-\x1f"\\\x7f-\xff]|^ | $')
 
 
-def _new_file_diff(top: bytes, rel: bytes) -> bytes | None:
+def _new_file_diff(top: bytes, rel: bytes, limit: int = MAX_PATCH_BYTES) -> bytes | None:
     """The ``git diff`` text for ONE untracked file, built here instead of with ``git add -N`` +
     ``git diff`` (two more git spawns on the hook path). None = cannot be represented (binary, or
     a path git would have to quote). Round-trips through ``git apply`` (pinned by a test)."""
@@ -141,7 +145,7 @@ def _new_file_diff(top: bytes, rel: bytes) -> bytes | None:
         return None
     mode = b"100755" if st.st_mode & 0o111 else b"100644"
     with open(full, "rb") as fh:
-        data = fh.read(MAX_PATCH_BYTES + 1)
+        data = fh.read(limit + 1)
     if b"\0" in data:
         return None
     head += b"new file mode " + mode + b"\n"
@@ -156,7 +160,7 @@ def _new_file_diff(top: bytes, rel: bytes) -> bytes | None:
     return out + (b"\\ No newline at end of file\n" if no_eol else b"")
 
 
-def capture(cwd: str) -> tuple[tuple[str, str, bytes] | None, str]:
+def _capture(cwd: str) -> tuple[tuple[str, str, bytes] | None, str]:
     """``(toplevel, HEAD sha, patch)`` of the repo `cwd` is in, as ``git diff HEAD`` plus the
     untracked files, taken at the moment the delegation returned. ``(None, why)`` when there is
     nothing to verify (not a repo, no commit, empty diff) or it is too big; raises on a git failure
@@ -168,7 +172,7 @@ def capture(cwd: str) -> tuple[tuple[str, str, bytes] | None, str]:
         procs = [_popen(["rev-parse", "--show-toplevel", "HEAD"], cwd, env),
                  _popen(["ls-files", "-o", "--exclude-standard", "-z"], cwd, env),
                  _popen(["diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames",
-                         "HEAD"], cwd, env)]
+                         "HEAD", "--"], cwd, env)]
     except FileNotFoundError:
         return None, "no_git"
     timer = threading.Timer(_GIT_TIMEOUT_S, lambda: [p.kill() for p in procs])
@@ -199,7 +203,7 @@ def capture(cwd: str) -> tuple[tuple[str, str, bytes] | None, str]:
         return None, "too_many_untracked"
     topb, total = os.fsencode(top), len(patch)
     for rel in untracked:
-        piece = _new_file_diff(topb, rel)
+        piece = _new_file_diff(topb, rel, max(MAX_PATCH_BYTES - total, 0))
         if piece is None:
             return None, "untracked_unrepresentable"
         total += len(piece)
@@ -216,6 +220,29 @@ def capture(cwd: str) -> tuple[tuple[str, str, bytes] | None, str]:
 
 
 # ── markers ──────────────────────────────────────────────────────────────────
+
+def capture(cwd: str, budget_s: float | None = None) -> tuple[tuple[str, str, bytes] | None, str]:
+    """``_capture`` under ONE wall-clock budget. The git processes have their own timer, but the
+    ``lstat``/reads that render untracked files do not and can hang on a network filesystem: the
+    work runs in a daemon thread and, past the budget, the answer is ``(None, "capture_timeout")``
+    (no marker; the stray thread dies with the hook process)."""
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["ok"] = _capture(cwd)
+        except BaseException as exc:  # noqa: BLE001 -- re-raised in the caller's thread
+            box["err"] = exc
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(CAPTURE_BUDGET_S if budget_s is None else budget_s)
+    if t.is_alive():
+        return None, "capture_timeout"
+    if "err" in box:
+        raise box["err"]
+    return box["ok"]
+
 
 def enqueue(uid: str, repo: str, head: str, patch: bytes, *, now: float | None = None) -> Path:
     """Write the patch (0600) then the marker (atomic). No marker without its patch; a failed
@@ -290,6 +317,7 @@ def _valid(data) -> bool:
     return (isinstance(data, dict) and isinstance(data.get("unit_id"), str)
             and _UID_RX.match(data["unit_id"]) is not None
             and isinstance(data.get("cwd"), str) and isinstance(data.get("head"), str)
+            and _HEAD_RX.fullmatch(data["head"]) is not None      # a rev, never an option (--output=...)
             and isinstance(data.get("created_at"), (int, float))
             and not isinstance(data.get("created_at"), bool)
             and data.get("patch") == f"{data['unit_id']}.patch")
@@ -300,7 +328,7 @@ def _read_marker(path: Path) -> Marker | None:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return Marker(path, data) if _valid(data) else None
+    return Marker(path, data) if _valid(data) and data["unit_id"] == path.stem else None
 
 
 def _names(d: Path) -> list[str]:
@@ -315,16 +343,22 @@ def queue_nonempty() -> bool:
 
 
 def pending() -> list[Marker]:
-    """Valid pending markers, oldest first. A corrupt marker file is dropped with its patch."""
-    out: list[Marker] = []
+    """Valid pending markers, oldest first. Invalid ones are left for ``take_invalid``."""
+    out = [m for name in _names(_sub("pending")) if (m := _read_marker(_sub("pending") / name)) is not None]
+    return sorted(out, key=lambda m: m.data["created_at"])
+
+
+def take_invalid() -> list[str]:
+    """Delete every pending marker that fails validation (bad JSON, bad head, a patch ref that is
+    not ``<unit_id>.patch``, a unit_id that is not its file name) together with its patch, and
+    return their unit ids (the file stems) so the worker can record ``marker_invalid``."""
+    out: list[str] = []
     for name in _names(_sub("pending")):
         p = _sub("pending") / name
-        m = _read_marker(p)
-        if m is None:
+        if _read_marker(p) is None:
             discard_files(name[:-5], p)
-            continue
-        out.append(m)
-    return sorted(out, key=lambda m: m.data["created_at"])
+            out.append(name[:-5])
+    return out
 
 
 def is_expired(m: Marker, now: float) -> bool:

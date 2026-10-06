@@ -491,7 +491,10 @@ def test_a_corrupt_marker_is_dropped_with_its_patch():
     Q.ensure_dirs()
     (Q._sub("pending") / f"{_uid(1)}.json").write_text("{not json")
     Q.patch_path(_uid(1)).write_text("src")
+    recs = []
+    W.drain(verify=_ok_result, record=lambda uid, r: recs.append((uid, r.verify_status, r.reason)))
     assert Q.pending() == [] and not Q.patch_path(_uid(1)).exists()
+    assert recs == [(_uid(1), "unavailable", "marker_invalid")]           # not dropped silently
 
 
 # ── files are private ────────────────────────────────────────────────────────
@@ -700,3 +703,193 @@ def test_kpi_is_byte_identical_after_the_worker_has_run(tmp_path):
     assert after["verify_shadow"]["verified"] == 5
     stripped = "\n".join(ln for ln in kpi.render_scorecard(after).splitlines() if "verify (shadow)" not in ln)
     assert stripped == base_text
+
+
+# ── review fixes: marker validation, git `--`, capture budget ────────────────
+
+def _edit_marker(n: int, **fields) -> Path:
+    path = Q._sub("pending") / f"{_uid(n)}.json"
+    data = json.loads(path.read_text())
+    data.update(fields)
+    path.write_text(json.dumps(data))
+    return path
+
+
+def test_a_marker_head_that_is_an_option_is_refused_and_nothing_is_written(tmp_path):
+    repo = _repo(tmp_path)
+    target = tmp_path / "pwned.tar"
+    _enqueue(1, repo=repo, head=_head(repo))
+    _edit_marker(1, head=f"--output={target}")
+    recs = []
+    W.drain(verify=lambda *a, **k: pytest.fail("must not be reached"),
+            record=lambda uid, r: recs.append((uid, r.reason)))
+    assert not target.exists() and recs == [(_uid(1), "marker_invalid")]
+    assert not Q.queue_nonempty() and not Q.patch_path(_uid(1)).exists()
+    with pytest.raises(W._Fail):                     # defence in depth: the worker re-checks the head
+        W._checkout(str(repo), f"--output={target}", tmp_path / "x", time.monotonic() + 5)
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("head", ["", "HEAD", "abc", "g" * 40, "A" * 40, "0" * 39, "0" * 65, "0" * 40 + "\n--x", "0" * 40 + "\n"])
+def test_only_a_hex_sha_is_a_valid_head(head):
+    _enqueue(1)
+    _edit_marker(1, head=head)
+    assert Q.pending() == [] and Q.take_invalid() == [_uid(1)]
+
+
+def test_a_bad_patch_ref_is_refused_recorded_and_never_read(tmp_path):
+    repo = _repo(tmp_path)
+    victim = tmp_path / "victim.patch"
+    victim.write_text("diff --git a/x b/x\n")
+    _enqueue(1, repo=repo, head=_head(repo))
+    _enqueue(2, repo=repo, head=_head(repo))
+    _edit_marker(1, patch="../../victim.patch")                 # traversal
+    _edit_marker(2, patch=f"{_uid(1)}.patch")                   # another unit's patch
+    recs = {}
+    W.drain(verify=lambda *a, **k: pytest.fail("a bad marker must never reach verify"),
+            record=lambda uid, r: recs.__setitem__(uid, r.reason))
+    assert recs == {_uid(1): "marker_invalid", _uid(2): "marker_invalid"}
+    assert victim.exists() and not Q.queue_nonempty()
+
+
+def test_a_marker_whose_unit_id_is_not_its_file_name_is_refused():
+    _enqueue(1)
+    _edit_marker(1, unit_id=_uid(2), patch=f"{_uid(2)}.patch")
+    assert Q.pending() == [] and Q.take_invalid() == [_uid(1)]
+
+
+def test_git_calls_end_option_parsing(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "HEAD").write_text("an untracked file named like a rev\n")    # `git diff HEAD` is ambiguous without `--`
+    (repo / "src" / "pkg.py").write_text(FIXED)
+    got, why = Q.capture(str(repo))
+    assert why == "ok" and b"HEAD" in got[2] and b"+    return a + b" in got[2]
+
+
+def test_a_stalled_capture_yields_no_marker_within_the_budget(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    (repo / "src" / "new.py").write_text("X = 1\n")
+    monkeypatch.setattr(Q, "_new_file_diff", lambda *a, **k: time.sleep(5))     # a hung network read
+    t0 = time.monotonic()
+    assert Q.capture(str(repo), budget_s=0.3) == (None, "capture_timeout")
+    assert time.monotonic() - t0 < 2
+    mod = _load_hook_module()
+    _fake_codex(monkeypatch, mod, repo)
+    monkeypatch.setattr(Q, "CAPTURE_BUDGET_S", 0.3)
+    assert _delegate(mod, repo, monkeypatch) == "done: fixed add()" and not Q.queue_nonempty()
+
+
+def test_untracked_files_are_bounded_by_the_remaining_byte_budget(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "a.txt").write_bytes(b"x" * (Q.MAX_PATCH_BYTES - 100))
+    (repo / "b.txt").write_bytes(b"y" * 5000)
+    assert Q.capture(str(repo)) == (None, "patch_too_large")
+
+
+# ── the repo's own interpreter (.venv) ───────────────────────────────────────
+
+def _fake_venv(repo: Path, *, editable: str | None, with_pytest: bool = True) -> Path:
+    """A real venv (no pip) whose site-packages sees the test runner's pytest and, when `editable`
+    is given, an editable-install style .pth pointing at that path. `VENVMARK` lives in its prefix."""
+    import pytest as _pt
+    venv = repo / ".venv"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True)
+    site = next(venv.glob("lib/python*/site-packages"))
+    if with_pytest:
+        (site / "zz_host.pth").write_text(str(Path(_pt.__file__).parent.parent) + "\n")
+    if editable:
+        (site / "__editable__.pth").write_text(editable + "\n")
+    (venv / "VENVMARK").write_text("x")
+    return venv
+
+
+def _venv_repo(tmp_path) -> Path:
+    repo = _repo(tmp_path)
+    (repo / ".gitignore").write_text(".venv/\n")
+    (repo / "tests" / "test_venvmark.py").write_text(
+        "import os, sys\nfrom pkg import add\n\n\ndef test_runs_in_the_repo_venv():\n"
+        "    assert os.path.exists(os.path.join(sys.prefix, 'VENVMARK'))\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "venv test")
+    return repo
+
+
+@real_sandbox
+def test_the_repo_venv_is_used_and_the_sandbox_copy_shadows_an_editable_install(tmp_path):
+    repo = _venv_repo(tmp_path)
+    _fake_venv(repo, editable=str(repo / "src"))          # the venv imports the REAL (still broken) tree
+    (repo / "src" / "pkg.py").write_text(FIXED)
+    fix = _git(repo, "diff", "HEAD")
+    _git(repo, "checkout", "--", "src/pkg.py")           # the user's tree is still broken
+    _enqueue(1, repo=repo, head=_head(repo), patch=fix.encode())
+    recs = []
+    W.drain(record=lambda uid, r: recs.append(r))
+    (r,) = recs
+    # f2p needs the venv python (VENVMARK test passes) AND the patched copy to win over the real tree
+    assert (r.verify_status, r.reason) == ("pass_f2p", "f2p"), r
+    assert r.n_f2p >= 1 and (repo / "src" / "pkg.py").read_text() != FIXED     # user's tree untouched
+
+
+@real_sandbox
+def test_flat_layout_copy_shadows_an_editable_install_of_the_real_root(tmp_path):
+    """No src/ dir: only the shim's PYTHONPATH=$PWD puts the sandbox copy ahead of the real tree."""
+    repo = tmp_path / "flat"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "pkg.py").write_text("def add(a, b):\n    return a - b\n")
+    (repo / "tests" / "test_pkg.py").write_text("from pkg import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n")
+    (repo / "tests" / "test_venvmark.py").write_text(
+        "import os, sys\nfrom pkg import add\n\n\ndef test_venv():\n"
+        "    assert os.path.exists(os.path.join(sys.prefix, 'VENVMARK'))\n")
+    (repo / ".gitignore").write_text(".venv/\n")
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    _fake_venv(repo, editable=str(repo))                    # the real (broken) root is on the venv's sys.path
+    (repo / "pkg.py").write_text(FIXED)
+    fix = _git(repo, "diff", "HEAD")
+    _git(repo, "checkout", "--", "pkg.py")
+    _enqueue(1, repo=repo, head=_head(repo), patch=fix.encode())
+    recs = []
+    W.drain(record=lambda uid, r: recs.append(r))
+    assert (recs[0].verify_status, recs[0].reason) == ("pass_f2p", "f2p"), recs[0]
+
+
+@real_sandbox
+def test_an_editable_install_that_escapes_the_copy_is_unavailable(tmp_path):
+    repo = _venv_repo(tmp_path)
+    (repo / "libs" / "inner").mkdir(parents=True)
+    _fake_venv(repo, editable=str(repo / "libs" / "inner"))    # under the real tree, not shadowed
+    _enqueue(1, repo=repo, head=_head(repo))
+    recs = []
+    W.drain(verify=lambda *a, **k: pytest.fail("must not verify against the wrong tree"),
+            record=lambda uid, r: recs.append((r.verify_status, r.reason)))
+    assert recs == [("unavailable", "editable_points_outside")]
+
+
+@real_sandbox
+def test_a_venv_without_pytest_falls_back_to_the_default_interpreter(tmp_path):
+    repo = _venv_repo(tmp_path)
+    _fake_venv(repo, editable=None, with_pytest=False)
+    _enqueue(1, repo=repo, head=_head(repo))
+    seen = []
+    W.drain(verify=lambda r, p, budget_s, **k: seen.append(k) or _ok_result(), record=lambda *a: None)
+    assert seen == [{}]                                    # no python_dir: the default interpreter
+
+
+@real_sandbox
+def test_the_venv_shims_are_handed_to_the_verifier(tmp_path):
+    repo = _venv_repo(tmp_path)
+    _fake_venv(repo, editable=str(repo / "src"))
+    _enqueue(1, repo=repo, head=_head(repo))
+    seen = []
+    W.drain(verify=lambda r, p, budget_s, python_dir=None: seen.append(python_dir) or _ok_result(),
+            record=lambda *a: None)
+    assert seen and seen[0] and seen[0].endswith("shim")
+
+
+def test_no_venv_means_the_default_interpreter(tmp_path):
+    repo = _repo(tmp_path)
+    _enqueue(1, repo=repo, head=_head(repo))
+    seen = []
+    W.drain(verify=lambda r, p, budget_s, **k: seen.append(k) or _ok_result(), record=lambda *a: None)
+    assert seen == [{}]
