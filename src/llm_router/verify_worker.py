@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shlex
 import shutil
 import signal
@@ -130,7 +129,6 @@ def _checkout(cwd: str, head: str, dest: Path, deadline: float) -> None:
 # deletes the junit report and exits 97, so the run is never a pass (unavailable/no_junit). Any failure to set the venv up (cannot run it, probe timeout or
 # crash) is ``unavailable``, never a silent fallback to the default interpreter; the one fallback is a
 # venv that simply has no pytest.
-_PATH_OK = re.compile(r"[\w ./+@-]+")
 _SKIP_WALK = {".git", ".venv", "venv", "node_modules", "__pycache__", "site-packages"}
 _MAX_PKG_ROOTS = 80
 
@@ -160,6 +158,19 @@ def pytest_sessionfinish(session, exitstatus):
 """
 
 
+def _path_ok(p: str) -> bool:
+    """Any real path is fine (the shims quote every piece with ``shlex.quote``); only what cannot be
+    one PYTHONPATH entry is refused: a ``:`` (the separator), a NUL or a newline."""
+    return bool(p) and not any(c in p for c in (":", "\0", "\n"))
+
+
+def _pythonpath_expr(rels: list[str], absolutes: list[str]) -> str:
+    """A shell word for PYTHONPATH: ``"$PWD"`` (the sandbox copy) and ``"$PWD"/<quoted rel>`` entries,
+    then quoted absolute dirs, joined with ``:``. No character allowlist: quoting does the work."""
+    parts = ['"$PWD"', *(f'"$PWD"/{shlex.quote(r)}' for r in dict.fromkeys(rels)), *map(shlex.quote, absolutes)]
+    return ":".join(parts)
+
+
 def _package_roots(checkout: Path) -> list[str]:
     """Relative dirs (of the copy) that should be on PYTHONPATH: the parent of every top-level package
     (a dir with __init__.py whose parent has none) and every src/ or lib/ dir, to any depth."""
@@ -180,7 +191,7 @@ def _package_roots(checkout: Path) -> list[str]:
                 parent = os.path.dirname(parent)
                 if parent:
                     cands.append(parent)
-        out += [c for c in cands if c not in out and _PATH_OK.fullmatch(c)]
+        out += [c for c in cands if c not in out and _path_ok(c)]
     return out[:_MAX_PKG_ROOTS]
 
 
@@ -198,7 +209,7 @@ def _venv_site_dirs(py: Path) -> list[str] | None:
         return None
     out = []
     for d in dirs:
-        if isinstance(d, str) and _PATH_OK.fullmatch(d) and d not in out:
+        if isinstance(d, str) and _path_ok(d) and d not in out:
             out.append(d)
     return out or None
 
@@ -217,14 +228,16 @@ def _repo_python_dir(real_repo: str, checkout: Path, tmp: Path, budget: float) -
     shim = tmp / "shim"
     shim.mkdir(mode=0o700)
     rels = ["src", "lib", *_package_roots(checkout)]
-    path = ":".join(["$PWD", *(f"$PWD/{r}" for r in dict.fromkeys(rels)), *sites, str(shim)])
+    if not _path_ok(str(shim)):
+        return None, "venv_probe_failed"
+    path = _pythonpath_expr(rels, [*sites, str(shim)])
     files = {
-        "llmr-py": f'#!/bin/sh\nexport PYTHONPATH="{path}"\nexec {shlex.quote(str(py))} -S "$@"\n',
+        "llmr-py": f'#!/bin/sh\nexport PYTHONPATH={path}\nexec {shlex.quote(str(py))} -S "$@"\n',
         "pytest": ('#!/bin/sh\nrm -f "$TMPDIR/llmr-outside"\n'
                    f'{shlex.quote(str(shim / "llmr-py"))} -m pytest -p _llmr_loadcheck "$@"\n'
                    'rc=$?\nif [ -e "$TMPDIR/llmr-outside" ]; then\n'
                    '  for a in "$@"; do case "$a" in --junit-xml=*) rm -f "${a#--junit-xml=}";; esac; done\n'
-                   '  exit 97\nfi\nexit $rc\n'),
+                   f'  exit {VU.OUTSIDE_COPY_RC}\nfi\nexit $rc\n'),
         "_llmr_loadcheck.py": _LOADCHECK.format(real=os.path.realpath(real_repo), sites=sites),
     }
     for name, body in files.items():
@@ -271,7 +284,12 @@ def _run_unit(m: Q.Marker, verify) -> "VU.UnitResult":
         if left < _MIN_VERIFY_S:
             return _unavailable("timeout")
         if python_dir:
-            return verify(repo, patch, budget_s=left, python_dir=python_dir)
+            res = verify(repo, patch, budget_s=left, python_dir=python_dir)
+            # A dependency that only imports through a .pth fails under -S and looks like
+            # baseline_failing: the flag tells the two apart in the record.
+            if res.verify_status != VU.PASS_F2P and "repo_venv_s" not in res.flags:
+                res.flags.append("repo_venv_s")
+            return res
         return verify(repo, patch, budget_s=left)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

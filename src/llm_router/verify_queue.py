@@ -395,13 +395,10 @@ def claim(m: Marker) -> Marker | None:
     """Take ownership of a pending marker: an atomic rename, so exactly one worker wins."""
     dest = _sub("claimed") / m.path.name
     try:
-        os.rename(m.path, dest)
+        os.utime(m.path)              # touch BEFORE the rename: the claim file is never visible with the
+        os.rename(m.path, dest)       # marker's old mtime, so the stale sweep cannot hand it to a second worker
     except OSError:
         return None
-    try:
-        os.utime(dest)
-    except OSError:
-        pass
     return Marker(dest, m.data)
 
 

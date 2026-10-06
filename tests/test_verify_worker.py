@@ -962,7 +962,7 @@ def test_a_module_loaded_from_the_real_tree_makes_the_run_unavailable(tmp_path):
     recs = []
     W.drain(record=lambda uid, r: recs.append(r))
     (r,) = recs
-    assert (r.verify_status, r.reason) == ("unavailable", "no_junit") and not r.used_eligible, r
+    assert (r.verify_status, r.reason) == ("unavailable", "loaded_outside_copy") and not r.used_eligible, r
 
 
 @real_sandbox
@@ -1047,3 +1047,73 @@ def test_a_marker_claimed_between_listing_and_reading_is_not_called_invalid(tmp_
         m.setattr(Path, "read_text", read_after_claim)
         assert Q.take_invalid() == []
     assert Q.patch_path(_uid(1)).exists() and (Q._sub("claimed") / name).exists()
+
+
+@real_sandbox
+@pytest.mark.parametrize("dirname", ["proj (copy)", "com~apple~CloudDocs", "it's", "a&b,c", "sp ace $HOME `x`", "q\"uote"])
+def test_venv_and_package_paths_with_shell_metacharacters_work(tmp_path, dirname):
+    """The shims quote every path; no character allowlist (iCloud dirs, '(copy)', apostrophes...)."""
+    base = tmp_path / dirname
+    base.mkdir()
+    repo = _repo(base, "repo")
+    (repo / "packages" / f"it's (x)~{dirname[:3]}" / "pkgq").mkdir(parents=True)
+    (repo / "packages" / f"it's (x)~{dirname[:3]}" / "pkgq" / "__init__.py").write_text("A = 1\n")
+    (repo / ".gitignore").write_text(".venv/\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "pkg")
+    _fake_venv(repo, editable=None)
+    checkout = tmp_path / "co"
+    checkout.mkdir()
+    W._checkout(str(repo), _head(repo), checkout, time.monotonic() + 30)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    shim, why = W._repo_python_dir(str(repo), checkout, scratch, 60)
+    assert why is None and shim, why
+    (scratch / "run").mkdir()
+    code = "import venvmark_pkg, pkgq, pkg; print('OK', venvmark_pkg.MARK, pkgq.A)"
+    run = V.run_command(f"llmr-py -c {shlex.quote(code)}", checkout, scratch / "run", python_dir=shim,
+                        timeout_s=30, tag="t")
+    assert "OK 1 1" in run.tail, run.tail
+
+
+def test_pythonpath_expression_quotes_every_piece():
+    expr = W._pythonpath_expr(["src", "a b/it's (x)"], ["/Users/me/com~apple~CloudDocs/p (copy)/.venv/lib", "/t/shim"])
+    out = subprocess.run(["sh", "-c", f'cd /usr && PYTHONPATH={expr}; printf "%s" "$PYTHONPATH"'],
+                         capture_output=True, text=True).stdout
+    assert out.split(":") == ["/usr", "/usr/src", "/usr/a b/it's (x)", "/Users/me/com~apple~CloudDocs/p (copy)/.venv/lib",
+                              "/t/shim"]
+    assert not W._path_ok("a:b") and not W._path_ok("a\nb") and W._path_ok("p (copy)/it's~&,")
+
+
+def test_a_claim_is_never_visible_with_the_markers_old_mtime(tmp_path):
+    """Deterministic repro of the residual double-claim: claim() used to rename and THEN touch, so a
+    stale sweep running between the two saw the old mtime and handed the unit back to pending while
+    its owner was working on it. The interleave is forced by hooking os.utime."""
+    _enqueue(1)
+    old = time.time() - 3600
+    marker_file = Q._sub("pending") / f"{_uid(1)}.json"
+    os.utime(marker_file, (old, old))
+    m = Q.pending()[0]
+    real_utime = os.utime
+
+    def utime_then_sweep(path, *a, **k):
+        Q.recover_stale_claims(time.time())              # the other worker's sweep, just before the touch lands
+        return real_utime(path, *a, **k)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(os, "utime", utime_then_sweep)
+        owned = Q.claim(m)
+    assert owned is not None
+    assert Q.pending() == []                              # not handed back to the queue...
+    assert Q.claim(m) is None                             # ...so a second worker cannot take it
+
+
+def test_results_from_the_repo_venv_carry_a_flag_unless_they_pass(tmp_path):
+    seen = {}
+    repo = _venv_repo(tmp_path)
+    _fake_venv(repo, editable=None)
+    for n, status in enumerate(["unavailable", "pass_f2p"]):
+        _enqueue(n + 1, repo=repo, head=_head(repo))
+    results = iter([UnitResult("unavailable", "baseline_failing"), _ok_result()])
+    W.drain(verify=lambda r, p, budget_s, python_dir=None: next(results),
+            record=lambda uid, r: seen.__setitem__(uid, list(r.flags)))
+    assert sorted(seen.values(), key=len) == [[], ["repo_venv_s"]]

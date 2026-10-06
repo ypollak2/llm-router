@@ -77,6 +77,9 @@ PASS_F2P_MODEL = "pass_f2p_model"
 UNAVAILABLE, NOT_APPLICABLE = "unavailable", "not_applicable"
 STATUSES = (PASS_F2P, PASS_F2P_MODEL, PASS_P2P, FAIL, UNAVAILABLE, NOT_APPLICABLE)
 
+#: Exit status a caller-supplied ``pytest`` shim returns when its load-check found a module loaded from
+#: outside the sandbox copy (verify_worker). Distinct from a crash: unavailable/loaded_outside_copy.
+OUTSIDE_COPY_RC = 97
 DEFAULT_BUDGET_S = 120.0
 MAX_BUDGET_S = 300.0
 MAX_CANDIDATES = 60
@@ -376,6 +379,8 @@ def _run(clock: _Clock, command: str, cwd: Path, tmp: Path, python_dir: str | No
         raise _Stop(UNAVAILABLE, "os_error") from None
     if run.timed_out:
         raise _Stop(UNAVAILABLE, "timeout")
+    if run.rc == OUTSIDE_COPY_RC:                  # the caller's pytest shim saw a module load from outside the copy
+        raise _Stop(UNAVAILABLE, "loaded_outside_copy")
     if report_mismatch(run, tmp / f"junit-{tag}.xml"):
         raise _Stop(UNAVAILABLE, "report_mismatch")
     return run
