@@ -162,7 +162,7 @@ def test_o3_value_on_a_fixture_with_known_answer():
     n = len(units)                      # every non-side-call row is a unit: haiku, sonnet, opus, local
     kept = (60 - 6) + 10                # haiku not redone + local
     assert o3["measurable"] and o3["n"] == n
-    assert o3["value"] == f"{kept / n * 100:.1f}% (n={n})"
+    assert o3["value"].startswith(f"{kept / n * 100:.1f}% (n={n} turns, ")
     b = o3["breakdown"]
     assert (b["haiku_n"], b["haiku_redone"], b["local_n"]) == (60, 6, 10)
     assert "Haiku 10.0% (n=60)" in o3["lines"][1]
@@ -261,3 +261,89 @@ def test_o3_failure_cannot_break_the_scorecard(monkeypatch):
     assert card["o3"]["value"].startswith("not measurable: O3 computation failed")
     assert json.dumps(card["kpis"], indent=1, sort_keys=True, default=str) == \
         (GOLDEN / "kpi_pre_o3_kpis.json").read_text()
+
+
+# ── human turn is the headline unit; per call is secondary ───────────────────
+
+def _agent_loop_rows(n_turns, calls_per_turn, *, first_tier, pv="v-new", t0=NOW - 86400, prefix="a"):
+    """Each turn: a first call on `first_tier`, then (calls_per_turn - 1) Sonnet continuations."""
+    rows = []
+    for i in range(n_turns):
+        sid, t = f"{prefix}{i}", t0 + i * 1000
+        rows.append(proxy_row(0, sid=sid, tier=first_tier, ts=t, kind="organic", pv=pv))
+        rows += [proxy_row(k, sid=sid, tier="sonnet", step="continuation", ts=t + k, kind="organic", pv=pv)
+                 for k in range(1, calls_per_turn)]
+        for k in (1, 2, 3):  # three later human turns close the window
+            rows.append(proxy_row(50 + k, sid=sid, tier="sonnet", ts=t + 100 * k, kind="organic", pv=pv))
+    return rows
+
+
+def test_headline_counts_turns_not_calls():
+    # 60 Haiku-first turns with 9 calls each, 60 Sonnet-first turns with 1 call each.
+    rows = _agent_loop_rows(60, 9, first_tier="haiku") + _agent_loop_rows(60, 1, first_tier="sonnet", prefix="b")
+    _write_ledger(rows)
+    o3 = kpi.compute_scorecard(days=7, now=NOW)["o3"]
+    b = o3["breakdown"]
+    # turns: per Haiku conv 1 haiku + 3 sonnet turns; per Sonnet conv 4 sonnet turns
+    assert b["unit"] == "human_turn" and b["n"] == 60 * 4 + 60 * 4 and b["haiku_n"] == 60
+    assert o3["value"].startswith(f"{60 / 480 * 100:.1f}% (n=480 turns")
+    # per call: 60 haiku-first convs contribute 9 haiku-or-sonnet calls but only the FIRST is
+    # Haiku (continuations are Sonnet here), so the call-level share differs from the turn-level one
+    pc = b["per_call"]
+    assert pc["n"] > b["n"] and pc["offload_kept"] == 60
+    assert any(ln.startswith("per call: ") and "calls per turn" in ln for ln in o3["lines"])
+
+
+def test_continuation_served_by_haiku_does_not_make_a_turn_offloaded():
+    rows = []
+    for i in range(60):  # first call Sonnet, then 8 Haiku continuations: the TURN is not offloaded
+        sid, t = f"c{i}", NOW - 86400 + i * 1000
+        rows.append(proxy_row(0, sid=sid, tier="sonnet", ts=t, kind="organic"))
+        rows += [proxy_row(k, sid=sid, tier="haiku", step="continuation", ts=t + k, kind="organic")
+                 for k in range(1, 9)]
+    _write_ledger(rows)
+    o3 = kpi.compute_scorecard(days=7, now=NOW)["o3"]
+    assert o3["breakdown"]["offload_kept"] == 0 and o3["breakdown"]["per_call"]["offload_kept"] == 480
+
+
+# ── redo signal ──────────────────────────────────────────────────────────────
+
+def test_escalation_under_pressure_is_a_redo_reason():
+    rows = _conv("s", NOW - 5000, escalation_after_turns=1)
+    for r in rows:
+        if r["tier_reason"] == "escalation":
+            r["tier_reason"] = "escalation_under_pressure"
+    assert all(u["redone"] for u in _u(rows) if u["class"] == "haiku")
+    assert "escalation_under_pressure" in osh.ESCALATION_REASONS and "escalation" in osh.ESCALATION_REASONS
+
+
+def test_redo_signal_sparse_is_stated_with_n_escalations():
+    rows = _population(n_haiku=60, haiku_redone=1, n_local=0, n_claude=40)
+    _write_ledger(rows)
+    o3 = kpi.compute_scorecard(days=7, now=NOW)["o3"]
+    assert o3["breakdown"]["n_escalations"] == 1
+    assert any(ln.startswith("redo signal sparse: n_escalations=1") and "NOT proven low" in ln
+               for ln in o3["lines"])
+
+
+# ── caveats ──────────────────────────────────────────────────────────────────
+
+def test_partly_attributable_local_still_prints_the_no_session_caveat(monkeypatch):
+    from llm_router import northstar as ns
+    _write_ledger(_population(n_haiku=0, haiku_redone=0, n_local=0, n_claude=100))
+    monkeypatch.setattr(ns, "local_shadow_units", lambda days=30, db_path=None: iter(
+        [{"session_id": "s-org", "ts": "2026-10-06T14:00:00+00:00"}] * 3
+        + [{"session_id": None, "ts": "2026-10-06T14:00:00+00:00"}] * 4))
+    o3 = kpi.compute_scorecard(days=7, now=NOW, since_policy="v-new")["o3"]
+    assert "4 local unit(s) with no session id excluded" in o3["lines"][0]
+    assert "4 local unit(s) with no session id excluded" in "".join(
+        o3["since_policy"]["since"].get("lines", ()))
+
+
+def test_window_open_turns_are_in_the_headline_value():
+    rows = _population(n_haiku=60, haiku_redone=0, n_local=0, n_claude=0)
+    # every conversation ends right after the Haiku call: the session ended, windows are open
+    short = [r for r in rows if r["tier"] == "haiku"]
+    _write_ledger(short)
+    o3 = kpi.compute_scorecard(days=7, now=NOW)["o3"]
+    assert o3["measurable"] and ", 60 window-open)" in o3["value"]

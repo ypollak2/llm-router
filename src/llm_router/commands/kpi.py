@@ -1121,25 +1121,30 @@ def _local_shadow_line(summary: dict | None) -> str | None:
 
 # ── O3: offload share (see offload_share.py and KPIS.md) ───────────────────
 
-def _o3_from_units(units: list[dict], local_no_session: int = 0) -> dict:
-    """One O3 result (headline + breakdown) over already-judged units."""
+def _o3_from_units(units: list[dict], local_no_session: int = 0, n_escalations: int | None = None) -> dict:
+    """One O3 result over already-judged units. HEADLINE = human turns (first call of each
+    turn, see offload_share); per-call figures are the secondary line."""
     from llm_router import offload_share as osh
 
-    s = osh.summarize(units)
+    calls = osh.summarize(units)
+    s = osh.summarize(osh.turn_units(units))
     n, h, loc, cl = s["n"], s[osh.CLASS_HAIKU], s[osh.CLASS_LOCAL], s[osh.CLASS_CLAUDE]
-    counts = (f"haiku {h['n']}, local {loc['n']}, claude {cl['n']}")
-    base = {"breakdown": {"n": n, "haiku_n": h["n"], "haiku_redone": h["redone"],
-                          "local_n": loc["n"], "local_redone": loc["redone"],
-                          "claude_n": cl["n"], "offload_kept": s["offload_kept"],
-                          "window_open": s["window_open"], "local_no_session": local_no_session}}
+    counts = f"haiku {h['n']}, local {loc['n']}, claude {cl['n']}"
+    out_bd = {"unit": "human_turn", "n": n, "haiku_n": h["n"], "haiku_redone": h["redone"],
+              "local_n": loc["n"], "local_redone": loc["redone"], "claude_n": cl["n"],
+              "offload_kept": s["offload_kept"], "window_open": s["window_open"],
+              "local_no_session": local_no_session,
+              "per_call": {"n": calls["n"], "offload_kept": calls["offload_kept"],
+                           "haiku_n": calls[osh.CLASS_HAIKU]["n"], "haiku_redone": calls[osh.CLASS_HAIKU]["redone"],
+                           "local_n": calls[osh.CLASS_LOCAL]["n"], "window_open": calls["window_open"]}}
     if n == 0:
-        out = _not_measurable("no organic unit in window")
+        out = _not_measurable("no organic turn in window")
     elif n < MIN_N:
         out = _too_few(n, newest_ts=s["newest_ts"])
-        out["lines"] = [f"units so far: {counts}; no rate is printed below n={MIN_N}"]
+        out["lines"] = [f"turns so far: {counts}; no rate is printed below n={MIN_N}"]
     else:
         value = s["offload_kept"] / n
-        out = _measured(f"{_pct(value)} (n={n})", n,
+        out = _measured(f"{_pct(value)} (n={n} turns, {s['window_open']} window-open)", n,
                         newest_ts=s["newest_ts"], numerator=s["offload_kept"], denominator=n,
                         meets_target=value >= osh.TARGET)
 
@@ -1148,18 +1153,33 @@ def _o3_from_units(units: list[dict], local_no_session: int = 0) -> dict:
                 return f"{name} not measurable: none in window"
             return f"{name} {_rate_result(c['redone'], c['n'], label=name + ' unit')['value']}"
 
-        # Local units with no session id cannot be scoped to organic: when they exist and none
-        # could be attributed, the local share is unknown, not 0.
-        if loc["n"] == 0 and local_no_session:
+        # Local units with no session id cannot be scoped to organic: always say so.
+        if local_no_session and loc["n"] == 0:
             local_share = (f"local share unknown ({local_no_session:,} local unit(s) carry no "
                            "session id, so O3 is a lower bound)")
         else:
             local_share = f"local share {_pct(loc['n'] / n)} ({loc['n']}/{n})"
+            if local_no_session:
+                local_share += (f" + {local_no_session:,} local unit(s) with no session id excluded "
+                                "(lower bound)")
         out["lines"] = [
-            f"Haiku share {_pct(h['n'] / n)} ({h['n']}/{n}) | {local_share} | claude {cl['n']}/{n}",
-            f"redo rate: {redo(h, 'Haiku')} | {redo(loc, 'local')}",
+            f"Haiku share {_pct(h['n'] / n)} ({h['n']}/{n} turns) | {local_share} | claude {cl['n']}/{n}",
+            f"redo rate (per turn): {redo(h, 'Haiku')} | {redo(loc, 'local')}",
         ]
-    out.update(base)
+        cn = calls["n"]
+        if cn >= MIN_N:
+            out["lines"].append(f"per call: {_pct(calls['offload_kept'] / cn)} (n={cn} calls; "
+                                f"{cn / n:.1f} calls per turn)")
+        else:
+            out["lines"].append(f"per call: too few to tell (n={cn} calls)")
+    if n_escalations is not None:
+        out_bd["n_escalations"] = n_escalations
+        out.setdefault("lines", []).append(
+            ("redo signal sparse: " if n_escalations < MIN_N else "redo signal: ")
+            + f"n_escalations={n_escalations} in window"
+            + (" (a low redo rate is NOT proven low: there is little signal to detect a redo)"
+               if n_escalations < MIN_N else ""))
+    out["breakdown"] = out_bd
     return out
 
 
@@ -1196,10 +1216,10 @@ def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[
             all_rows, local, now=now, days=days, allowed=allowed,
             kind_of=lambda sid, stamp: index.resolve(sid, stamp=stamp).kind,
             band_redone=band, outcome_redos=outcomes)
-        res = _o3_from_units(built["units"], built["local_no_session"])
+        res = _o3_from_units(built["units"], built["local_no_session"], built["n_escalations"])
         res["excluded"] = {"side_call": built["side_call_excluded"], "untagged": built["untagged"],
                            "other_kind": built["other_kind"], "local_no_session": built["local_no_session"]}
-        note = (f"{res['breakdown']['window_open']} unit(s) have fewer than {osh.REDO_TURNS} human turns "
+        note = (f"{res['breakdown']['window_open']} turn(s) have fewer than {osh.REDO_TURNS} human turns "
                 f"after them (counted as not redone, may still change); excluded: "
                 f"{built['side_call_excluded']:,} Claude Code side call(s), "
                 f"{built['untagged']:,} untagged, {built['other_kind']:,} other-kind")
@@ -1221,8 +1241,8 @@ def _o3_since_view(units: list[dict], all_rows: list[dict], version: str, now: f
         return {"version": version, "start_ts": None,
                 "since": _not_measurable(f"policy version {version} not seen in the proxy ledger"),
                 "before": None}
-    since = _o3_from_units([u for u in units if u["ts"] >= start])
-    before = _o3_from_units([u for u in units if u["ts"] < start])
+    since = _o3_from_units([u for u in units if u["ts"] >= start], local_no_session)
+    before = _o3_from_units([u for u in units if u["ts"] < start], local_no_session)
     return {"version": version, "start_ts": start, "start": _iso(start), "since": since, "before": before}
 
 

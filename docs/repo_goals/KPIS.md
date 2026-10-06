@@ -23,8 +23,12 @@ benchmarks: 20 real tasks with hidden tests (`plan_implement`, n=20), graded Q&A
 (`complexity-v2/p1`), and a 180-prompt tier set (`complexity-v2/p_eval`, n=180). Today:
 **Claude 15/20, local 3/20** (`plan_implement`, n=20).
 
-**O3 — Offload share.** (units served by a local model OR by Claude Haiku, and NOT redone) /
-(all units), organic sessions only, 7-day window. Target >=60%. Printed as one extra line in
+**O3 — Offload share.** (human turns served by a local model OR by Claude Haiku, and NOT redone) /
+(all human turns), organic sessions only, 7-day window. Target >=60%. **The headline unit is the
+human turn**: ~88% of proxy calls are tool-result continuations (about 8.5 calls per turn), so a
+per-call denominator is inflated by agent loops. A turn is offloaded when its FIRST call (the
+one whose `step_class` is not `continuation`) is served by Haiku or local and that call is not
+redone; the per-call share is printed as a secondary line (`per call: ...`). Printed as one extra line in
 `llm-router kpi` and `llm-router kpi --health` (outside NS, D1-D5 and the other KPIs: a test
 pins their output byte for byte, `tests/test_kpi_offload_share.py`). It is not part of the
 `--health` measured/blind/stale counts. Today: no figure is recorded here; run
@@ -58,13 +62,19 @@ session id.
    session, within 120 s of the unit, each verdict used once. Local units only (a verdict
    exists only for routed MCP events).
 
-A unit that shows no redo but has fewer than 2 human turns after it is counted as not redone and
-also counted as `window_open` on the line: it can still become a redo.
+A unit that shows no redo but has fewer than 2 human turns after it (a recent turn, or the end of
+a session) is counted as not redone and also counted as `window_open`; the count is in the
+headline value (`n=..., K window-open`) because it can still become a redo.
+
+**The redo signal is sparse.** On live data (2026-10-06) the proxy ledger holds 1 escalation
+row in ~26k, so a low redo rate says little. The line prints `redo signal sparse:
+n_escalations=N` (when N < 50) and the redo rate must not be read as proven low.
 
 *Since a policy version.* `--since-policy VERSION` adds `since policy VERSION` (units from the
 first proxy row stamped with that `tier_policy_version`) and `before it, same window`. If the
 version is not in the ledger the line says so; it does not print a number. The Haiku redo guard
-(`~/.rsi/research/local-usage/haiku_guard/`, outside the repo) uses this same redo definition.
+(`~/.rsi/research/local-usage/haiku_guard/`, outside the repo) uses this same redo definition and
+the same headline unit: its n_haiku is Haiku-served human turns, not calls.
 
 ## Drivers
 

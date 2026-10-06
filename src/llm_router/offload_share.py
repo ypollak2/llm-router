@@ -4,6 +4,13 @@ renders the result. The definition is in ``docs/repo_goals/KPIS.md`` (O3).
 
     O3 = (units served by a local model or by Haiku, and not redone) / (all units)
 
+HEADLINE UNIT = HUMAN TURN. ~88% of proxy calls are tool-result continuations (about 8.5
+calls per human turn), so a per-call denominator is inflated by agent loops. The headline
+counts turns: a turn is offloaded when its FIRST call is served by Haiku or local and the turn
+is not redone (the redo test below is applied to that first call, and covers its own turn and
+the next 2). Per-call figures are kept as a secondary line. A local unit from usage.db (an MCP
+call made inside a Claude turn) is its own turn-level unit.
+
 Units (organic sessions only, ``[now - days, now]``):
 
 * proxy-served Claude calls: ``proxy_calls.jsonl`` rows with ``decision`` forwarded or
@@ -117,7 +124,8 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
     ``band_redone``: msg_ids whose last receipt-band press is ``redone``.
     ``outcome_redos``: usage_outcome rows (any outcome; only ``redone`` is read).
     Returns ``{"units": [...], "side_call_excluded", "untagged", "other_kind",
-    "local_no_session"}``. A local unit with no ``session_id`` (usage.db rows written
+    "local_no_session", "n_escalations"}`` (escalation rows among the admitted units: how
+    much redo signal exists at all). A local unit with no ``session_id`` (usage.db rows written
     without one) cannot be scoped to organic sessions: it is excluded and counted in
     ``local_no_session``, so O3 is then a lower bound and the local share is unknown."""
     since = now - days * 86400.0
@@ -137,7 +145,7 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
         v.sort()
 
     units: list[dict] = []
-    side = untagged = other = local_no_session = 0
+    side = untagged = other = local_no_session = n_escalations = 0
 
     def admit(sid, stamp) -> bool:
         nonlocal untagged, other
@@ -166,7 +174,10 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
         if why is None and isinstance(r.get("msg_id"), str) and r["msg_id"] in band_redone:
             why = "receipt_band"
         units.append({"class": cls, "ts": ts, "session_id": sid, "redone": why is not None,
-                      "why": why, "window_open": open_ and why is None})
+                      "why": why, "window_open": open_ and why is None,
+                      "first": r.get("step_class") != "continuation"})
+        if r.get("tier_reason") in ESCALATION_REASONS:
+            n_escalations += 1
 
     for u in local_units:
         ts = _num(_iso_ts(u.get("ts")))
@@ -183,9 +194,9 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
         if why is None and _consume_event(redo_events.get(sid, []), ts):
             why = "usage_outcome"
         units.append({"class": CLASS_LOCAL, "ts": ts, "session_id": sid, "redone": why is not None,
-                      "why": why, "window_open": open_ and why is None})
+                      "why": why, "window_open": open_ and why is None, "first": True})
     return {"units": units, "side_call_excluded": side, "untagged": untagged, "other_kind": other,
-            "local_no_session": local_no_session}
+            "local_no_session": local_no_session, "n_escalations": n_escalations}
 
 
 def _iso_ts(raw: Any) -> Any:
@@ -208,6 +219,11 @@ def _consume_event(events: list[float], ts: float) -> bool:
         return False
     events.pop(best)
     return True
+
+
+def turn_units(units: list[dict]) -> list[dict]:
+    """The headline population: first call of each human turn (plus local MCP units)."""
+    return [u for u in units if u.get("first", True)]
 
 
 def summarize(units: list[dict]) -> dict:
