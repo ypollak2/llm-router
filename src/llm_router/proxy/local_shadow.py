@@ -37,6 +37,11 @@ SHADOW_NAME = "proxy_local_shadow.jsonl"
 KIND = "local_shadow"
 #: Wall budget of one local job (plan 5.1: p90 step latency <= 6 s on a fast model).
 DEFAULT_BUDGET_S = 20.0
+#: A request body this large (bytes of JSON) is over the 25k-token prompt cap whatever it holds:
+#: 25k tokens x 3.6 chars/token is 90 KB, and 4x that leaves a wide margin for the fields
+#: conversion drops. Decided from the length alone, so a multi-MB body costs the relay path
+#: (and the loop) nothing: no copy, no conversion, no estimate.
+RAW_BYTES_CAP = 400_000
 #: Longest the job waits for Claude's reply after local finished first.
 CLAUDE_WAIT_S = 900.0
 
@@ -253,14 +258,18 @@ class ShadowRunner:
         schema_valid: bool | None = None
         reason: str | None = None
         try:
-            work = asyncio.ensure_future(self._local_call(copy.deepcopy(body)))
+            body_copy = await asyncio.to_thread(copy.deepcopy, body)   # off the loop: bodies reach MBs
+            work = asyncio.ensure_future(self._local_call(body_copy))
             done, _ = await asyncio.wait({work, claude_reply}, timeout=self.budget_s,
                                          return_when=asyncio.FIRST_COMPLETED)
             if work not in done:
                 work.cancel()
                 try:
                     await work
-                except BaseException:  # noqa: BLE001 - cancelled or failed; the reason is already known
+                except asyncio.CancelledError:
+                    if not work.cancelled():
+                        raise              # an outer cancellation of this job is never swallowed
+                except Exception:  # noqa: BLE001 - the local call failed while stopping; reason is known
                     pass
                 reason = R_DROPPED if claude_reply in done else R_BUDGET
             else:

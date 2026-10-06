@@ -257,17 +257,31 @@ async def test_shadow_reads_no_file_and_gets_a_copy(env, monkeypatch):
     monkeypatch.setattr(local_mode, "annotate_failed_checks", _boom)
     monkeypatch.setattr(local_mode, "check_applied", _boom)
 
+    seen: list[dict] = []
+
     class Mutator(Backend):
         async def complete(self, body, timeout_s):
+            seen.append(body)
             body["messages"].clear()           # a hostile local job
             body["tools"].clear()
             return await super().complete(body, timeout_s)
 
-    body = _first_call()
+    original = _first_call()
+    snapshot = json.loads(json.dumps(original))
     up = Upstream()
-    await _step(env, Mutator(), up, body)
+    captured: list[dict] = []
+    real_submit = local_shadow.ShadowRunner.submit
+
+    def spy_submit(self, body, **kw):
+        captured.append(body)
+        return real_submit(self, body, **kw)
+
+    monkeypatch.setattr(local_shadow.ShadowRunner, "submit", spy_submit)
+    await _step(env, Mutator(), up, original)
     sent = json.loads(up.requests[0].content)
-    assert sent == body                                      # Claude saw the request unmodified
+    assert sent == snapshot                                  # Claude saw the request unmodified
+    assert seen and seen[0] is not captured[0]               # the backend got a COPY, not the proxy's object
+    assert captured[0] == snapshot and captured[0]["messages"]  # the original is intact after the job mutated its copy
     assert env.records()[0]["fallback_reason"] in (None, "schema_invalid")
 
 
@@ -387,3 +401,101 @@ def test_shadow_records_are_not_read_by_the_proxy_ledger(tmp_path):
     _write_records(f)
     assert ledger.read_rows(f) == [] or all(r.get("kind") == "local_shadow" for r in ledger.read_rows(f))
     assert local_shadow.shadow_path().name != ledger.ledger_path().name
+
+
+# ── nothing CPU-bound on the relay path (review of 7f4b65b) ──────────────────
+
+def _big_body(mb: float = 3.0) -> dict:
+    body = _first_call()
+    body["messages"][-1] = {"role": "user", "content": SECRET_PROMPT + "x" * int(mb * 1_000_000)}
+    return body
+
+
+def _spy_all(monkeypatch, on_loop, called):
+    import threading
+
+    from llm_router.proxy import local_mode
+
+    loop_thread = threading.get_ident()
+
+    def spy(name, fn):
+        def wrapper(*a, **k):
+            called.append(name)
+            if threading.get_ident() == loop_thread:
+                on_loop.append(name)
+            return fn(*a, **k)
+        return wrapper
+
+    monkeypatch.setattr(local_mode, "over_prompt_cap", spy("over_prompt_cap", local_mode.over_prompt_cap))
+    monkeypatch.setattr(local_mode, "estimate_prompt_tokens",
+                        spy("estimate_prompt_tokens", local_mode.estimate_prompt_tokens))
+    monkeypatch.setattr(ps, "to_ollama", spy("to_ollama", ps.to_ollama))
+    monkeypatch.setattr(local_shadow.copy, "deepcopy", spy("deepcopy", local_shadow.copy.deepcopy))
+
+
+async def test_a_multi_mb_body_costs_the_relay_path_no_cpu_at_all(env, monkeypatch):
+    """3 MB: decided from its length alone (over the cap whatever it holds); nothing is copied,
+    converted or estimated. On the loop these took ~100 ms of Claude's first byte."""
+    on_loop, called = [], []
+    _spy_all(monkeypatch, on_loop, called)
+    await _step(env, Backend(), Upstream(), _big_body(3.0))
+    assert called == [] and on_loop == []
+    (rec,) = env.records()
+    assert rec["fallback_reason"] == "prompt_over_cap" and rec["agree"] is None
+
+
+async def test_no_cpu_bound_work_runs_on_the_event_loop_thread_before_claude_is_forwarded(env, monkeypatch):
+    """A ~300 KB body is below the length shortcut: its estimate, deepcopy and conversion must
+    run in a worker thread (7.5 ms per 200 KB on the loop, 97 ms at 3 MB)."""
+    on_loop, called = [], []
+    _spy_all(monkeypatch, on_loop, called)
+    await _step(env, Backend(), Upstream(), _big_body(0.3))
+    assert {"deepcopy", "to_ollama", "over_prompt_cap"} <= set(called)      # the work did run ...
+    assert on_loop == [], f"CPU-bound on the event loop: {on_loop}"           # ... off the loop
+    assert env.records()
+
+
+async def test_the_local_backend_offloads_its_conversion_and_overflow_check(monkeypatch):
+    import threading
+
+    from llm_router.proxy import backends
+
+    loop_thread = threading.get_ident()
+    on_loop: list[str] = []
+
+    def spy(name, fn):
+        def wrapper(*a, **k):
+            if threading.get_ident() == loop_thread:
+                on_loop.append(name)
+            return fn(*a, **k)
+        return wrapper
+
+    monkeypatch.setattr(backends, "to_ollama", spy("to_ollama", backends.to_ollama))
+    monkeypatch.setattr(backends, "check_overflow", spy("check_overflow", backends.check_overflow))
+    monkeypatch.setattr(backends, "effective_window", lambda **k: (32768, "test"))
+
+    class Client:
+        def stream(self, *a, **k):
+            raise RuntimeError("stop after the CPU-bound prelude")
+
+    b = backends.OllamaBackend(MODEL, Client(), base_url="http://127.0.0.1:9", num_ctx=32768, hedge_s=None,
+                               offload_cpu=True)
+    with pytest.raises(RuntimeError):
+        await b.complete(_first_call(), 1.0)
+    assert on_loop == [], f"CPU-bound on the event loop: {on_loop}"
+
+
+async def test_big_body_claude_response_is_not_delayed_by_shadow(env):
+    """Loose timing guard (call-path tests above are the exact ones): 3 MB body, shadow on vs off."""
+    async def ttfb(shadow_on: bool) -> float:
+        app = env.app(Backend(), Upstream(delay=0.02), shadow=shadow_on)
+        t0 = time.monotonic()
+        await _post(app, _big_body(3.0))
+        dt = time.monotonic() - t0
+        if app.state.shadow is not None:
+            await app.state.shadow.drain()
+        return dt
+
+    off = min([await ttfb(False) for _ in range(3)])
+    on = min([await ttfb(True) for _ in range(3)])
+    assert on - off < 0.08, f"shadow added {(on - off) * 1000:.0f} ms (off {off * 1000:.0f}, on {on * 1000:.0f})"

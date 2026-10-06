@@ -293,6 +293,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             if model.startswith(prefix):
                 extra = ({"num_predict": local_mode.LOCAL_NUM_PREDICT}
                          if lm is not None or cfg.shadow else {})
+                if cfg.shadow:
+                    extra["offload_cpu"] = True
                 return cls(model, http, base_url=_ollama_url(), num_ctx=cfg.num_ctx,
                            hedge_s=cfg.hedge_s, keep_alive=cfg.keep_alive, **extra)
         raise ValueError(f"no backend for {model}")
@@ -545,7 +547,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         """The shadow job's local call, on a deep copy it is handed. Reads no file
         and executes nothing (no repo-knowledge attach, no post-apply check): the
         request is the only thing the model sees. ``(message, err, reason_code)``."""
-        if local_mode.has_media(body):
+        if await asyncio.to_thread(local_mode.has_media, body):
             return None, "media", local_mode.REASON_MEDIA
         if os.path.exists(cfg.kill_switch or local_mode.kill_switch_path()):
             return None, "kill switch", local_mode.REASON_KILL_SWITCH
@@ -553,7 +555,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             return None, "backend unhealthy", local_mode.REASON_BACKEND_UNHEALTHY
         payload = await asyncio.to_thread(to_ollama, body, cfg.model.split("/", 1)[1],
                                           num_ctx=cfg.num_ctx, max_predict=1)
-        if local_mode.over_prompt_cap(payload) is not None:
+        if await asyncio.to_thread(local_mode.over_prompt_cap, payload) is not None:
             return None, "prompt over cap", local_mode.REASON_PROMPT_CAP
         try:
             message, err, _usage = await make_backend(cfg.model).complete(body, shadow.budget_s)
@@ -573,7 +575,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     shadow = (local_shadow.ShadowRunner(shadow_local, budget_s=cfg.shadow_budget_s, path=cfg.shadow_path)
               if cfg.shadow else None)
 
-    def start_shadow(body: dict, row: dict):
+    def start_shadow(body: dict, row: dict, raw_size: int):
         """Start the detached local job for an agent step and return the callback
         ``forward`` calls once Claude's reply is complete. Starts nothing for a
         call that is not an agent step; never raises into the request."""
@@ -588,7 +590,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                                     "calls": local_shadow.calls_of_reply(buf, ctype) if status == 200 else None,
                                     "msg_id": row.get("msg_id")})
 
-            shadow.submit(body, session_id=row.get("session_id"), ts=row["ts"], claude_reply=fut)
+            shadow.submit(body, session_id=row.get("session_id"), ts=row["ts"], claude_reply=fut,
+                          eligible_reason=local_mode.REASON_PROMPT_CAP if raw_size > local_shadow.RAW_BYTES_CAP
+                          else None)
             return _on_reply
         except Exception as exc:  # noqa: BLE001 - shadow must never cost a call
             failopen.record("LR-FO-PROXY-SHADOW-START", exc)
@@ -794,7 +798,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 if body.get("stream"):
                     return Response(sse_from_message(message), media_type="text/event-stream")
                 return Response(json.dumps(message), media_type="application/json")
-        on_reply = start_shadow(body, row) if shadow is not None else None
+        on_reply = start_shadow(body, row, len(raw)) if shadow is not None else None
         if tier_policy is None:
             return await forward(request, raw, body, row, on_reply=on_reply)
         decision = await decide_tier(body, row)
