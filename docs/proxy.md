@@ -284,6 +284,22 @@ hedge defaults to off and the step budget to 120 s (a conversation's first call 
 Not in this mode (later redesign PRs): thinking passthrough, images served locally, `--no-egress`, the ToolSearch
 loop-guard fix, AskUserQuestion repair, sub-agent inheritance.
 
+## Shadow mode: measure the local model against Claude (opt-in, `--shadow on`)
+
+Off by default (`LLM_ROUTER_PROXY_LOCAL_SHADOW=on` is the env form). Needs `--model ollama/<tag>` and
+`--serve off`: shadow never serves. Every step is answered by Anthropic exactly as without the proxy;
+the local model answers a deep copy of each agent step in parallel and one `local_shadow` record per step
+goes to `proxy_local_shadow.jsonl` in the state dir (not `proxy_calls.jsonl`, so NS, D1 and D2 never read it).
+
+- Latency isolation: the local job is a detached task. It is dropped (`dropped_claude_first`) the moment
+  Claude's reply is complete, and has its own budget (`--shadow-budget-s`, default 20 s, `budget_exceeded`).
+- One local job at a time; a step that arrives while one runs is recorded as `skipped_busy`.
+- Local reads no file and runs no tool: no repo-knowledge attach, no post-apply check.
+- A record holds: `step_id`, `agree` (same tool names in the same order; two text-only replies agree),
+  `args_equal` (key order and surrounding whitespace ignored; null when names differ), `local_latency_s`,
+  `schema_valid`, `fallback_reason`. Reason codes and numbers only: no prompt, tool name, argument or reply.
+- `llm-router kpi` shows one informational line, `local shadow (proxy): ...`, next to `local (shadow)`.
+
 ## Metrics
 
 Each call writes one row to `~/.llm-router/proxy_calls.jsonl` with shape,

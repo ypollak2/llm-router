@@ -54,7 +54,7 @@ from llm_router.local_agent import DEFAULT_MAX_PROMPT_TOKENS, LocalAgentConfig, 
 from llm_router.local_agent import capability as la_capability
 from llm_router.local_agent.compact import session_cwd as la_session_cwd
 from llm_router import failopen
-from llm_router.proxy import ledger, local_mode, okf_context
+from llm_router.proxy import ledger, local_mode, local_shadow, okf_context
 
 from llm_router.proxy.backend_health import (
     DEFAULT_COOLDOWN_S,
@@ -159,6 +159,12 @@ class ProxyConfig:
     # (proxy.local_mode). ``kill_switch`` overrides the kill-switch file path.
     serve: str = local_mode.SERVE_OFF
     kill_switch: Path | None = None
+    # ``--shadow on`` (proxy.local_shadow): every step is served by Anthropic as
+    # usual; the local model answers a copy in parallel and only a comparison
+    # record is kept. ``shadow_path`` overrides the record file.
+    shadow: bool = False
+    shadow_budget_s: float = local_shadow.DEFAULT_BUDGET_S
+    shadow_path: Path | None = None
 
     @classmethod
     def from_env(cls) -> "ProxyConfig":
@@ -182,6 +188,7 @@ class ProxyConfig:
             backend_cooldown_s=float(os.environ.get("LLM_ROUTER_PROXY_BACKEND_COOLDOWN_S",
                                                     DEFAULT_COOLDOWN_S)),
             serve=local_mode.parse_serve_mode(os.environ.get("LLM_ROUTER_PROXY_LOCAL_AGENT_MODE", "off")),
+            shadow=local_shadow.parse_on_off(os.environ.get("LLM_ROUTER_PROXY_LOCAL_SHADOW", "off")),
         )
 
 
@@ -269,6 +276,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                              "local-agent compaction off")
         lm = local_mode.LocalModeState(cfg.kill_switch)
         lm_breaker = la_capability.BreakerCache(fn=breaker_fn)
+    if cfg.shadow and (lm is not None or not (cfg.model or "").startswith("ollama/")):
+        raise ValueError("--shadow on needs --model ollama/<tag> and --serve off (shadow never serves)")
 
     def _ollama_url() -> str:
         from llm_router.config import get_config, validate_ollama_url
@@ -282,7 +291,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             return backend_factory(model)
         for prefix, cls in BACKENDS.items():
             if model.startswith(prefix):
-                extra = {"num_predict": local_mode.LOCAL_NUM_PREDICT} if lm is not None else {}
+                extra = ({"num_predict": local_mode.LOCAL_NUM_PREDICT}
+                         if lm is not None or cfg.shadow else {})
                 return cls(model, http, base_url=_ollama_url(), num_ctx=cfg.num_ctx,
                            hedge_s=cfg.hedge_s, keep_alive=cfg.keep_alive, **extra)
         raise ValueError(f"no backend for {model}")
@@ -531,6 +541,59 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         print(local_mode.egress_notice(str(reason), row.get("session_id")), file=sys.stderr, flush=True)
         return None
 
+    async def shadow_local(body: dict):
+        """The shadow job's local call, on a deep copy it is handed. Reads no file
+        and executes nothing (no repo-knowledge attach, no post-apply check): the
+        request is the only thing the model sees. ``(message, err, reason_code)``."""
+        if local_mode.has_media(body):
+            return None, "media", local_mode.REASON_MEDIA
+        if os.path.exists(cfg.kill_switch or local_mode.kill_switch_path()):
+            return None, "kill switch", local_mode.REASON_KILL_SWITCH
+        if health.is_open(cfg.model):
+            return None, "backend unhealthy", local_mode.REASON_BACKEND_UNHEALTHY
+        payload = await asyncio.to_thread(to_ollama, body, cfg.model.split("/", 1)[1],
+                                          num_ctx=cfg.num_ctx, max_predict=1)
+        if local_mode.over_prompt_cap(payload) is not None:
+            return None, "prompt over cap", local_mode.REASON_PROMPT_CAP
+        try:
+            message, err, _usage = await make_backend(cfg.model).complete(body, shadow.budget_s)
+        except HedgeTimeout:
+            return None, "hedge", "hedge_timeout"
+        except ContextOverflow:
+            return None, "overflow", "local_context_overflow"
+        except (asyncio.TimeoutError, httpx.TimeoutException):
+            return None, "timeout", local_shadow.R_BUDGET
+        except Exception:  # noqa: BLE001 - recorded as a reason code, never raised
+            return None, "backend", local_shadow.R_BACKEND
+        if err:
+            backend_side = err.startswith(("empty response", "truncated", "ollama error"))
+            return None, "invalid", local_shadow.R_BACKEND if backend_side else local_shadow.R_SCHEMA
+        return message, None, None
+
+    shadow = (local_shadow.ShadowRunner(shadow_local, budget_s=cfg.shadow_budget_s, path=cfg.shadow_path)
+              if cfg.shadow else None)
+
+    def start_shadow(body: dict, row: dict):
+        """Start the detached local job for an agent step and return the callback
+        ``forward`` calls once Claude's reply is complete. Starts nothing for a
+        call that is not an agent step; never raises into the request."""
+        try:
+            if not local_mode.is_agent_turn(body):
+                return None
+            fut = asyncio.get_running_loop().create_future()
+
+            def _on_reply(status: int, buf: bytes, ctype: str) -> None:
+                if not fut.done():
+                    fut.set_result({"ok": status == 200,
+                                    "calls": local_shadow.calls_of_reply(buf, ctype) if status == 200 else None,
+                                    "msg_id": row.get("msg_id")})
+
+            shadow.submit(body, session_id=row.get("session_id"), ts=row["ts"], claude_reply=fut)
+            return _on_reply
+        except Exception as exc:  # noqa: BLE001 - shadow must never cost a call
+            failopen.record("LR-FO-PROXY-SHADOW-START", exc)
+            return None
+
     async def decide_tier(body: dict, row: dict):
         """The tier rewrite's decision, written onto ``row``. Any error forwards
         the call unchanged and says why: this path must never cost a call."""
@@ -559,7 +622,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         return decision
 
     async def forward(request: Request, raw: bytes, body: dict | None, row: dict | None, *,
-                      original: tuple[bytes, dict] | None = None, on_retry=None, on_usage=None):
+                      original: tuple[bytes, dict] | None = None, on_retry=None, on_usage=None,
+                      on_reply=None):
         """``original``: when ``raw`` is a tier-rewritten body, the client's own
         (bytes, body). A 4xx on the rewritten call (a parameter the target tier
         does not take, a model the account cannot use) is retried once with
@@ -597,6 +661,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                     up = await send(json.dumps(without_thinking(body)).encode())
                 else:
                     await up.aclose()
+                    if on_reply is not None:
+                        on_reply(up.status_code, b"", "")
                     return _finish_error(up.status_code, text.encode(), up.headers, row, t0)
         except httpx.HTTPError as exc:
             if row is not None:
@@ -604,6 +670,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                            detail=row.get("detail") or ledger.scrub_detail(f"upstream: {type(exc).__name__}"))
                 row["upstream_latency_s"] = round(time.monotonic() - t0, 3)
                 write(row)
+            if on_reply is not None:
+                on_reply(502, b"", "")
             return Response(_error_json("llm-router proxy: Anthropic upstream unreachable"),
                             status_code=502, media_type="application/json")
 
@@ -627,6 +695,13 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                     if on_usage is not None and up.status_code == 200:
                         on_usage(row.get("usage"))
                     write(row)
+                if on_reply is not None:
+                    # Last thing, after the final byte left: the shadow side learns
+                    # Claude's reply is complete. Never raises into the relay.
+                    try:
+                        on_reply(up.status_code, bytes(buf), up.headers.get("content-type", ""))
+                    except Exception as exc:  # noqa: BLE001
+                        failopen.record("LR-FO-PROXY-SHADOW-REPLY", exc)
 
         return StreamingResponse(relay(), status_code=up.status_code, headers=resp_headers)
 
@@ -719,18 +794,19 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 if body.get("stream"):
                     return Response(sse_from_message(message), media_type="text/event-stream")
                 return Response(json.dumps(message), media_type="application/json")
+        on_reply = start_shadow(body, row) if shadow is not None else None
         if tier_policy is None:
-            return await forward(request, raw, body, row)
+            return await forward(request, raw, body, row, on_reply=on_reply)
         decision = await decide_tier(body, row)
         if decision is None:
-            return await forward(request, raw, body, row)
+            return await forward(request, raw, body, row, on_reply=on_reply)
         key = conversation_key(body, row.get("session_id"))
 
         def _on_usage(usage) -> None:
             sticky.record_usage(key, usage)
 
         if not decision.rewritten and decision.body_rewrite is None:
-            return await forward(request, raw, body, row, on_usage=_on_usage)
+            return await forward(request, raw, body, row, on_usage=_on_usage, on_reply=on_reply)
         sent = dict(body, model=decision.served_model)
         if decision.body_rewrite == REWRITE_HAIKU:
             # Haiku 4.5 400s on `thinking.type: adaptive` and has no effort
@@ -742,7 +818,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             sticky.record(key, body.get("model"), decision.complexity, "tier_rejected")
 
         return await forward(request, json.dumps(sent).encode(), sent, row, original=(raw, body),
-                             on_retry=_on_retry, on_usage=_on_usage)
+                             on_retry=_on_retry, on_usage=_on_usage, on_reply=on_reply)
 
     @contextlib.asynccontextmanager
     async def lifespan(app):
@@ -762,6 +838,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     app = Starlette(routes=[Route("/{path:path}", handle, methods=methods)], lifespan=lifespan)
     app.state.http = http
     app.state.warm_up = warm_up
+    app.state.shadow = shadow
     return app
 
 
@@ -886,6 +963,13 @@ def cmd_proxy(argv: list[str]) -> int:
                     help="off (default; byte-identical to before) or local-agent (opt-in): Claude Code steps "
                          "answered by --model on this machine, conversations pinned local at their first call "
                          "(also LLM_ROUTER_PROXY_LOCAL_AGENT_MODE). Refuses to start unless its preflight passes")
+    ap.add_argument("--shadow", default=str(env.shadow and "on" or "off"),
+                    help="off (default) or on: every step is served by Anthropic as usual while --model answers "
+                         "a copy in parallel; only agreement, latency and reason codes are logged "
+                         "(proxy_local_shadow.jsonl). Needs --model ollama/<tag> and --serve off "
+                         "(also LLM_ROUTER_PROXY_LOCAL_SHADOW)")
+    ap.add_argument("--shadow-budget-s", type=float, default=local_shadow.DEFAULT_BUDGET_S,
+                    help="wall budget of one shadow job; it is dropped when Claude answers first")
     a = ap.parse_args(argv)
 
     from llm_router.net_bind import refuse_public_bind_or_exit
@@ -895,6 +979,14 @@ def cmd_proxy(argv: list[str]) -> int:
         serve = local_mode.parse_serve_mode(a.serve)
     except ValueError as exc:
         sys.stderr.write(f"llm-router proxy: {exc}\n")
+        return 2
+    try:
+        shadow_on = local_shadow.parse_on_off(a.shadow)
+    except ValueError as exc:
+        sys.stderr.write(f"llm-router proxy: --shadow: {exc}\n")
+        return 2
+    if shadow_on and (serve != local_mode.SERVE_OFF or not (a.model or "").startswith("ollama/")):
+        sys.stderr.write("llm-router proxy: --shadow on needs --model ollama/<tag> and --serve off\n")
         return 2
     if serve == local_mode.SERVE_LOCAL_AGENT:
         # This mode's defaults: no trim; no 8 s first-token hedge and a longer
@@ -909,7 +1001,7 @@ def cmd_proxy(argv: list[str]) -> int:
         cfg = ProxyConfig(steps=parse_steps(a.steps), step_budget_s=a.step_budget_s, model=a.model,
                           trim=a.trim, num_ctx=a.num_ctx, upstream=env.upstream,
                           ledger_path=Path(a.ledger) if a.ledger else None,
-                          serve=serve,
+                          serve=serve, shadow=shadow_on, shadow_budget_s=a.shadow_budget_s,
                           hedge_s=parse_hedge(a.hedge_s) if a.hedge_s is not None else env.hedge_s,
                           keep_alive=parse_keep_alive(a.keep_alive), warm_up=not a.no_warm_up,
                           ollama_url=a.ollama_url, loop_max_consecutive=a.loop_max_consecutive,
@@ -944,6 +1036,10 @@ def cmd_proxy(argv: list[str]) -> int:
           f"local_agent={'on' if cfg.local_agent else 'off'}  "
           f"backend_health(fail_n={cfg.backend_fail_n}, cooldown={cfg.backend_cooldown_s:g}s)")
     print(f"  enable per session: {enable_hint(a.host, a.port)}")
+    if cfg.shadow:
+        print(f"  SHADOW on: Claude serves every step; {cfg.model} answers a copy in parallel "
+              f"(1 job at a time, {cfg.shadow_budget_s:g}s budget, dropped when Claude answers first); "
+              f"reason-code records -> {local_shadow.shadow_path()}", flush=True)
     if serve == local_mode.SERVE_LOCAL_AGENT:
         kill = cfg.kill_switch or local_mode.kill_switch_path()
         for line in local_mode.banner_lines(model=cfg.model, num_ctx=cfg.num_ctx, kill_path=kill,
