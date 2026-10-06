@@ -17,7 +17,9 @@ SHADOW: only ``northstar.record_verify`` is called; no outcome, NS, D1 or D2 cha
 """
 from __future__ import annotations
 
+import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -106,108 +108,140 @@ def _checkout(cwd: str, head: str, dest: Path, deadline: float) -> None:
 # ── the repo's own interpreter ───────────────────────────────────────────────
 #
 # Repo tests need the repo's dependencies, so when ``<repo>/.venv/bin/python`` exists the tests run
-# with it, through two shims in a private dir (PATH puts the shim dir first inside the sandbox):
+# with it, through two shims in a private dir (PATH puts the shim dir first inside the sandbox).
 #
-#   llmr-py   sets PYTHONPATH="$PWD/src:$PWD" and execs the venv python
-#   pytest    llmr-py -m pytest
+# EDITABLE INSTALLS ARE DISABLED, NOT DETECTED. An editable install reaches the user's REAL tree only
+# through site-packages: ``.pth`` files, egg-links and the ``sys.meta_path`` finders those register.
+# Detecting every installer format is an arms race (namespace packages, renamed package dirs, lazy
+# submodules, strict-editable finders...), so the venv python runs with ``-S`` (no site processing:
+# no ``.pth`` line, no finder ever runs) and PYTHONPATH is built explicitly:
 #
-# $PWD is the sandbox copy being tested (baseline or patched), so the copy shadows the user's REAL
-# tree. That matters because a venv with an editable install puts the real tree on sys.path: unless
-# the copy comes first, baseline == after (no f2p ever) or the wrong code is tested. A probe inside
-# the sandbox proves it for this repo: any sys.path entry (or package) that lives under the real tree
-# and is NOT shadowed by the copy means ``editable_points_outside`` (unavailable, never a verdict).
-_PROBE = r"""
-import importlib, os, signal, sys
-real = os.path.realpath(sys.argv[1]); here = os.path.realpath(os.getcwd())
-try:
-    import pytest  # noqa: F401
-except Exception:
-    sys.exit(96)
-def under(p, root):
+#   the sandbox copy ($PWD = baseline or patched copy): $PWD, $PWD/src, $PWD/lib, and the parent dir
+#   of every top-level package found in the copy (monorepos, any depth), THEN the venv's own
+#   purelib/platlib (queried with ``python -S`` itself), THEN the shim dir (the load-check plugin).
+#
+# Regular installed dependencies still import from purelib; the user's package can only come from the
+# copy. COST (fail closed, documented): a dependency that needs a ``.pth`` to import (legacy namespace
+# packages, distutils-precedence) fails to import, the baseline fails, and the verdict is
+# unavailable (baseline_failing / tests_error), never a verdict on the wrong code.
+#
+# Belt and braces, a pytest plugin (``-p _llmr_loadcheck``) checks at session end that no loaded module
+# file lives in the user's real tree (outside the copy and the venv); if one does, the ``pytest`` shim
+# deletes the junit report and exits 97, so the run is never a pass (unavailable/no_junit). Any failure to set the venv up (cannot run it, probe timeout or
+# crash) is ``unavailable``, never a silent fallback to the default interpreter; the one fallback is a
+# venv that simply has no pytest.
+_PATH_OK = re.compile(r"[\w ./+@-]+")
+_SKIP_WALK = {".git", ".venv", "venv", "node_modules", "__pycache__", "site-packages"}
+_MAX_PKG_ROOTS = 80
+
+_LOADCHECK = """\
+import os, sys
+
+REAL = {real!r}
+SITES = {sites!r}
+
+
+def _under(p, root):
     return p == root or p.startswith(root + os.sep)
-prefix = os.path.realpath(sys.prefix)
-# 1. sys.path entries in the real tree that the copy does not shadow (cheap, catches .pth / egg-link)
-paths = [os.path.realpath(p) for p in sys.path if p and os.path.exists(p)]
-for i, p in enumerate(paths):
-    if under(p, real) and not under(p, here) and not under(p, prefix):
-        twin = os.path.normpath(os.path.join(here, os.path.relpath(p, real)))
-        if twin not in paths[:i]:
-            sys.exit(97)
-# 2. the authoritative check: import every top-level package/module of the copy, with this very
-#    interpreter, env and PYTHONPATH, and see where it RESOLVES (meta_path finders, strict editable
-#    installs and anything else included)
-SKIP = {".git", ".venv", "venv", "node_modules", "build", "dist", "__pycache__", "site-packages",
-        "tests", "test", "docs", "examples", "scripts"}
-def skipped(n):
-    return n in SKIP or n.startswith((".", "test", "conftest", "setup", "_"))
-names = set()
-def add_modules(d):
-    try:
-        for n in os.listdir(d):
-            if n.endswith(".py") and n[:-3].isidentifier() and not skipped(n[:-3]):
-                names.add(n[:-3])
-    except OSError:
-        pass
-roots = [here, os.path.join(here, "src"), os.path.join(here, "lib")]
-pk = os.path.join(here, "packages")
-if os.path.isdir(pk):
-    for n in os.listdir(pk):
-        roots += [os.path.join(pk, n), os.path.join(pk, n, "src")]
-for r in roots:
-    if os.path.isdir(r):
-        add_modules(r)
-for dirpath, dirnames, files in os.walk(here):
-    depth = os.path.relpath(dirpath, here).count(os.sep)
-    dirnames[:] = [d for d in dirnames if not skipped(d) and depth < 4]
-    if "__init__.py" in files and not skipped(os.path.basename(dirpath)):
-        parent = os.path.dirname(dirpath)
-        if not os.path.exists(os.path.join(parent, "__init__.py")):
-            names.add(os.path.basename(dirpath))
-class _Slow(BaseException):
-    pass
-def _alarm(sig, frame):
-    raise _Slow()
-signal.signal(signal.SIGALRM, _alarm)
-for name in sorted(names):
-    if not name.isidentifier():
-        continue
-    signal.alarm(5)
-    try:
-        mod = importlib.import_module(name)
-    except BaseException:
-        continue                          # not importable here: the tests cannot import it either
-    finally:
-        signal.alarm(0)
-    origin = getattr(mod, "__file__", None) or (list(getattr(mod, "__path__", []) or [""])[0])
-    if origin and not under(os.path.realpath(origin), here):
-        sys.exit(97)                      # resolves outside the sandbox copy
+
+
+def pytest_sessionfinish(session, exitstatus):
+    here = os.path.realpath(os.getcwd())
+    venv = [os.path.realpath(d) for d in SITES]
+    for mod in list(sys.modules.values()):
+        f = getattr(mod, "__file__", None)
+        if not isinstance(f, str):
+            continue
+        r = os.path.realpath(f)
+        if _under(r, REAL) and not _under(r, here) and not any(_under(r, v) for v in venv):
+            with open(os.path.join(os.environ.get("TMPDIR", "/tmp"), "llmr-outside"), "w") as fh:
+                fh.write(r)
+            return
 """
+
+
+def _package_roots(checkout: Path) -> list[str]:
+    """Relative dirs (of the copy) that should be on PYTHONPATH: the parent of every top-level package
+    (a dir with __init__.py whose parent has none) and every src/ or lib/ dir, to any depth."""
+    out: list[str] = []
+    for n, (dirpath, dirnames, files) in enumerate(os.walk(checkout)):
+        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_WALK and not d.startswith("."))
+        if n > 5000:
+            break
+        rel = os.path.relpath(dirpath, checkout)
+        parent = os.path.dirname(rel)
+        cands = []
+        if rel != "." and os.path.basename(rel) in ("src", "lib"):
+            cands.append(rel)
+        if "__init__.py" in files and rel != "." and parent \
+                and not os.path.exists(os.path.join(checkout, parent, "__init__.py")):
+            cands.append(parent)
+            while parent:                         # namespace packages: every ancestor may be the root
+                parent = os.path.dirname(parent)
+                if parent:
+                    cands.append(parent)
+        out += [c for c in cands if c not in out and _PATH_OK.fullmatch(c)]
+    return out[:_MAX_PKG_ROOTS]
+
+
+def _venv_site_dirs(py: Path) -> list[str] | None:
+    """The venv's purelib/platlib, asked of ``python -S`` itself. Under -S ``sys.prefix`` is the BASE
+    prefix (venv detection lives in ``site``), so the venv dir is passed as the sysconfig base."""
+    venv = str(py.parent.parent)
+    code = ("import sysconfig, json, sys; v = {'base': sys.argv[1], 'platbase': sys.argv[1]}; "
+            "print(json.dumps([sysconfig.get_path('purelib', vars=v), sysconfig.get_path('platlib', vars=v)]))")
+    try:
+        proc = subprocess.run([str(py), "-S", "-c", code, venv], env=Q._git_env(), capture_output=True, text=True,
+                              timeout=10, stdin=subprocess.DEVNULL)
+        dirs = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+    out = []
+    for d in dirs:
+        if isinstance(d, str) and _PATH_OK.fullmatch(d) and d not in out:
+            out.append(d)
+    return out or None
 
 
 def _repo_python_dir(real_repo: str, checkout: Path, tmp: Path, budget: float) -> tuple[str | None, str | None]:
     """``(python_dir, None)`` to run the tests with the repo's venv, ``(None, None)`` to keep the
-    default interpreter, ``(None, reason)`` when the venv would test the wrong tree."""
+    default interpreter (no venv, or the venv has no pytest), ``(None, reason)`` when the venv cannot
+    be used safely. See the block comment above: editable installs are disabled with ``-S``."""
     py = Path(real_repo) / ".venv" / "bin" / "python"
     if not (py.is_file() and os.access(py, os.X_OK)) or sandbox.kill_switch_reason() \
             or not sandbox.prove_sandbox().proven:
         return None, None
+    sites = _venv_site_dirs(py)
+    if sites is None:
+        return None, "venv_probe_failed"
     shim = tmp / "shim"
     shim.mkdir(mode=0o700)
-    for name, body in (("llmr-py", f'#!/bin/sh\nexport PYTHONPATH="$PWD/src:$PWD${{PYTHONPATH:+:$PYTHONPATH}}"\n'
-                                   f'exec {shlex.quote(str(py))} "$@"\n'),
-                       ("pytest", f'#!/bin/sh\nexec {shlex.quote(str(shim / "llmr-py"))} -m pytest "$@"\n')):
+    rels = ["src", "lib", *_package_roots(checkout)]
+    path = ":".join(["$PWD", *(f"$PWD/{r}" for r in dict.fromkeys(rels)), *sites, str(shim)])
+    files = {
+        "llmr-py": f'#!/bin/sh\nexport PYTHONPATH="{path}"\nexec {shlex.quote(str(py))} -S "$@"\n',
+        "pytest": ('#!/bin/sh\nrm -f "$TMPDIR/llmr-outside"\n'
+                   f'{shlex.quote(str(shim / "llmr-py"))} -m pytest -p _llmr_loadcheck "$@"\n'
+                   'rc=$?\nif [ -e "$TMPDIR/llmr-outside" ]; then\n'
+                   '  for a in "$@"; do case "$a" in --junit-xml=*) rm -f "${a#--junit-xml=}";; esac; done\n'
+                   '  exit 97\nfi\nexit $rc\n'),
+        "_llmr_loadcheck.py": _LOADCHECK.format(real=os.path.realpath(real_repo), sites=sites),
+    }
+    for name, body in files.items():
         (shim / name).write_text(body)
         os.chmod(shim / name, 0o700)
     probe_tmp = tmp / "probe"
     probe_tmp.mkdir(mode=0o700)
-    cmd = f"llmr-py -c {shlex.quote(_PROBE)} {shlex.quote(real_repo)}"
-    run = V.run_command(cmd, checkout, probe_tmp, python_dir=str(shim), timeout_s=min(30.0, max(budget, 1.0)),
-                        tag="probe")
-    if run.rc == 97:
-        return None, "editable_points_outside"
+    probe = "import sys\ntry:\n import pytest\nexcept ImportError:\n sys.exit(96)\n"
+    run = V.run_command(f"llmr-py -c {shlex.quote(probe)}", checkout, probe_tmp, python_dir=str(shim),
+                        timeout_s=min(30.0, max(budget, 1.0)), tag="probe")
+    if run.timed_out:
+        return None, "venv_probe_timeout"
     if run.rc == 0:
         return str(shim), None
-    return None, None                           # no pytest in the venv / venv unusable: default interpreter
+    if run.rc == 96:
+        return None, None                       # a venv without pytest: the default interpreter
+    return None, "venv_probe_failed"
 
 
 def _run_unit(m: Q.Marker, verify) -> "VU.UnitResult":

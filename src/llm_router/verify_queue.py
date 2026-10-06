@@ -323,10 +323,28 @@ def _valid(data) -> bool:
             and data.get("patch") == f"{data['unit_id']}.patch")
 
 
+_GONE = object()
+
+
 def _read_marker(path: Path) -> Marker | None:
+    """The marker, or None when the file is unreadable/invalid. Use ``_read_marker_or_gone`` when the
+    difference between "invalid" and "a worker just renamed it away" matters."""
+    got = _read_marker_or_gone(path)
+    return None if got is _GONE else got
+
+
+def _read_marker_or_gone(path: Path):
+    """``_GONE`` when the file vanished (another worker claimed or settled it between the directory
+    listing and the read: NOT an invalid marker, and its patch is not ours to delete)."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return _GONE
+    except OSError:
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError:
         return None
     return Marker(path, data) if _valid(data) and data["unit_id"] == path.stem else None
 
@@ -355,7 +373,10 @@ def take_invalid() -> list[str]:
     out: list[str] = []
     for name in _names(_sub("pending")):
         p = _sub("pending") / name
-        if _read_marker(p) is None:
+        got = _read_marker_or_gone(p)
+        if got is _GONE:
+            continue                  # claimed by another worker meanwhile: not invalid, not ours
+        if got is None:
             discard_files(name[:-5], p)
             out.append(name[:-5])
     return out
@@ -395,7 +416,9 @@ def recover_stale_claims(now: float) -> list[Marker]:
                 continue
         except OSError:
             continue
-        m = _read_marker(p)
+        m = _read_marker_or_gone(p)
+        if m is _GONE:
+            continue                  # its owner just settled it
         if m is None:
             discard_files(name[:-5], p)
             continue

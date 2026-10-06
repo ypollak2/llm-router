@@ -12,6 +12,7 @@ import hashlib
 import json
 import multiprocessing
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -26,6 +27,7 @@ from llm_router import verify_queue as Q
 from llm_router import verify_worker as W
 from llm_router.commands import kpi
 from llm_router.toolkit import sandbox
+from llm_router.toolkit import verify as V
 from llm_router.toolkit import verify_unit as VU
 from llm_router.toolkit.verify_unit import UnitResult
 from tests.test_agent_route_hook import _load_hook_module
@@ -564,7 +566,7 @@ def test_two_workers_never_process_a_unit_twice(tmp_path):
         assert p.exitcode == 0
     lines = [ln.split() for ln in Path(log).read_text().splitlines()]
     uids = [u for _, u in lines if u != "noslot"]
-    assert sorted(uids) == sorted(_uid(i) for i in range(n))              # each exactly once
+    assert sorted(uids) == sorted(_uid(i) for i in range(n)), lines       # each exactly once
     assert len({tag for tag, u in lines}) == 2, lines                     # both workers took part
     assert not Q.queue_nonempty()
 
@@ -793,26 +795,55 @@ def test_untracked_files_are_bounded_by_the_remaining_byte_budget(tmp_path):
 # ── the repo's own interpreter (.venv) ───────────────────────────────────────
 
 def _fake_venv(repo: Path, *, editable: str | None, with_pytest: bool = True) -> Path:
-    """A real venv (no pip) whose site-packages sees the test runner's pytest and, when `editable`
-    is given, an editable-install style .pth pointing at that path. `VENVMARK` lives in its prefix."""
+    """A real venv (no pip). With pytest, the test runner's site-packages entries are symlinked into the
+    venv's purelib (the worker runs it with -S, so a .pth could not carry them). `editable` writes an
+    editable-install style .pth pointing at that path, which -S must leave inert. venvmark_pkg is in its purelib."""
     import pytest as _pt
     venv = repo / ".venv"
     subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True)
     site = next(venv.glob("lib/python*/site-packages"))
     if with_pytest:
-        (site / "zz_host.pth").write_text(str(Path(_pt.__file__).parent.parent) + "\n")
+        host = Path(_pt.__file__).parent.parent
+        for e in host.iterdir():
+            if e.name != "__pycache__" and not (site / e.name).exists():
+                (site / e.name).symlink_to(e)
     if editable:
         (site / "__editable__.pth").write_text(editable + "\n")
-    (venv / "VENVMARK").write_text("x")
+    (site / "venvmark_pkg.py").write_text("MARK = 1\n")        # importable only through THIS venv's purelib
     return venv
+
+
+def _strict_editable(venv: Path, mapping: dict[str, str]) -> None:
+    """setuptools STRICT editable style: a meta_path finder with a name -> real dir mapping (namespace
+    dirs included) and NO sys.path entry, registered by a .pth line that runs at site time."""
+    site = next(venv.glob("lib/python*/site-packages"))
+    (site / "__editable___x_finder.py").write_text(
+        "import os, sys, importlib.machinery, importlib.util\n"
+        f"MAPPING = {mapping!r}\n"
+        "class F:\n"
+        "    @classmethod\n"
+        "    def find_spec(cls, fullname, path=None, target=None):\n"
+        "        d = MAPPING.get(fullname)\n"
+        "        if d is None:\n"
+        "            return None\n"
+        "        init = d + '/__init__.py'\n"
+        "        if os.path.exists(init):\n"
+        "            return importlib.util.spec_from_file_location(fullname, init, submodule_search_locations=[d])\n"
+        "        spec = importlib.machinery.ModuleSpec(fullname, None, is_package=True)\n"
+        "        spec.submodule_search_locations = [d]\n"
+        "        return spec\n"
+        "def install():\n"
+        "    if F not in sys.meta_path:\n"
+        "        sys.meta_path.append(F)\n")
+    (site / "__editable___x.pth").write_text("import __editable___x_finder; __editable___x_finder.install()\n")
 
 
 def _venv_repo(tmp_path) -> Path:
     repo = _repo(tmp_path)
     (repo / ".gitignore").write_text(".venv/\n")
     (repo / "tests" / "test_venvmark.py").write_text(
-        "import os, sys\nfrom pkg import add\n\n\ndef test_runs_in_the_repo_venv():\n"
-        "    assert os.path.exists(os.path.join(sys.prefix, 'VENVMARK'))\n")
+        "import venvmark_pkg\nfrom pkg import add\n\n\ndef test_runs_in_the_repo_venv():\n"
+        "    assert venvmark_pkg.MARK == 1\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "venv test")
     return repo
@@ -842,8 +873,8 @@ def test_flat_layout_copy_shadows_an_editable_install_of_the_real_root(tmp_path)
     (repo / "pkg.py").write_text("def add(a, b):\n    return a - b\n")
     (repo / "tests" / "test_pkg.py").write_text("from pkg import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n")
     (repo / "tests" / "test_venvmark.py").write_text(
-        "import os, sys\nfrom pkg import add\n\n\ndef test_venv():\n"
-        "    assert os.path.exists(os.path.join(sys.prefix, 'VENVMARK'))\n")
+        "import venvmark_pkg\nfrom pkg import add\n\n\ndef test_venv():\n"
+        "    assert venvmark_pkg.MARK == 1\n")
     (repo / ".gitignore").write_text(".venv/\n")
     _git(repo, "init", "-q")
     _git(repo, "add", "-A")
@@ -858,77 +889,102 @@ def test_flat_layout_copy_shadows_an_editable_install_of_the_real_root(tmp_path)
     assert (recs[0].verify_status, recs[0].reason) == ("pass_f2p", "f2p"), recs[0]
 
 
+_PRINT = ("import importlib, os\ntry:\n m = importlib.import_module({mod!r})\n"
+          " print('FILE', os.path.realpath(m.__file__ or list(m.__path__)[0]))\n"
+          "except ImportError:\n print('IMPORTERROR')\n")
+
+#: (id, files {relpath: content}, finder mapping {name: real relpath}, module to import)
+ESCAPES = [
+    ("monorepo_strict", {"packages/x/pkg/__init__.py": "A = 1\n"}, {"pkg": "packages/x/pkg"}, "pkg"),
+    ("depth5", {"a/b/c/d/e/deep/__init__.py": "A = 1\n"}, {"deep": "a/b/c/d/e/deep"}, "deep"),
+    ("testkit_name", {"packages/x/testkit/__init__.py": "A = 1\n"}, {"testkit": "packages/x/testkit"}, "testkit"),
+    ("underscore_name", {"packages/x/_priv/__init__.py": "A = 1\n"}, {"_priv": "packages/x/_priv"}, "_priv"),
+    ("lazy_submodule", {"packages/x/lazy/__init__.py": "", "packages/x/lazy/heavy.py": "A = 1\n"},
+     {"lazy": "packages/x/lazy"}, "lazy.heavy"),
+    ("namespace", {"packages/x/ns/sub/__init__.py": "A = 1\n"}, {"ns": "packages/x/ns"}, "ns.sub"),
+    ("package_dir_rename", {"python_src/renamed_dir/__init__.py": "A = 1\n"},
+     {"renamed": "python_src/renamed_dir"}, "renamed"),
+]
+
+
 @real_sandbox
-def test_an_editable_install_that_escapes_the_copy_is_unavailable(tmp_path):
-    repo = _venv_repo(tmp_path)
-    (repo / "libs" / "inner").mkdir(parents=True)
-    _fake_venv(repo, editable=str(repo / "libs" / "inner"))    # under the real tree, not shadowed
-    _enqueue(1, repo=repo, head=_head(repo))
-    recs = []
-    W.drain(verify=lambda *a, **k: pytest.fail("must not verify against the wrong tree"),
-            record=lambda uid, r: recs.append((r.verify_status, r.reason)))
-    assert recs == [("unavailable", "editable_points_outside")]
-
-
-def _strict_editable(venv: Path, mapping: dict[str, str]) -> None:
-    """setuptools STRICT editable style: a meta_path finder with a name -> real path mapping and NO
-    sys.path entry for the package."""
-    site = next(venv.glob("lib/python*/site-packages"))
-    (site / "__editable___x_finder.py").write_text(
-        "import sys, importlib.util\n"
-        f"MAPPING = {mapping!r}\n"
-        "class F:\n"
-        "    @classmethod\n"
-        "    def find_spec(cls, fullname, path=None, target=None):\n"
-        "        if fullname in MAPPING:\n"
-        "            d = MAPPING[fullname]\n"
-        "            return importlib.util.spec_from_file_location(\n"
-        "                fullname, d + '/__init__.py', submodule_search_locations=[d])\n"
-        "        return None\n"
-        "def install():\n"
-        "    if F not in sys.meta_path:\n"
-        "        sys.meta_path.append(F)\n")
-    (site / "__editable___x.pth").write_text("import __editable___x_finder; __editable___x_finder.install()\n")
-
-
-def _monorepo(tmp_path) -> Path:
+@pytest.mark.parametrize("case", ESCAPES, ids=[c[0] for c in ESCAPES])
+def test_no_editable_install_style_can_make_the_tests_import_the_real_tree(tmp_path, case):
+    _, files, mapping, module = case
     repo = tmp_path / "mono"
-    (repo / "packages" / "x" / "pkg").mkdir(parents=True)
-    (repo / "packages" / "x" / "tests").mkdir()
-    (repo / "packages" / "x" / "pkg" / "__init__.py").write_text("def add(a, b):\n    return a - b\n")
-    (repo / "packages" / "x" / "tests" / "test_pkg.py").write_text(
-        "from pkg import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n")
+    for rel, text in files.items():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text(text)
     (repo / ".gitignore").write_text(".venv/\n")
     _git(repo, "init", "-q")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "base")
-    return repo
-
-
-@real_sandbox
-def test_monorepo_strict_editable_finder_is_caught_by_importing_the_packages(tmp_path):
-    """A meta_path finder maps `pkg` to the REAL packages/x/pkg: no sys.path entry, nothing under
-    src/ or the root. Only actually importing the package shows where it resolves."""
-    repo = _monorepo(tmp_path)
     venv = _fake_venv(repo, editable=None)
-    _strict_editable(venv, {"pkg": str(repo / "packages" / "x" / "pkg")})
-    _enqueue(1, repo=repo, head=_head(repo))
-    recs = []
-    W.drain(verify=lambda *a, **k: pytest.fail("must not verify against the real tree"),
-            record=lambda uid, r: recs.append((r.verify_status, r.reason)))
-    assert recs == [("unavailable", "editable_points_outside")]
+    _strict_editable(venv, {name: str(repo / rel) for name, rel in mapping.items()})
+    real = os.path.realpath(repo)
+    code = _PRINT.format(mod=module)
+    # control: without the fix (the venv python as-is) the finder really does reach the real tree
+    ctl = subprocess.run([str(venv / "bin" / "python"), "-c", code], cwd=tmp_path, capture_output=True,
+                         text=True, env={"PATH": "/usr/bin:/bin"})
+    assert "FILE " + real in ctl.stdout, (ctl.stdout, ctl.stderr)
+    # the worker's setup
+    checkout = tmp_path / "co"
+    checkout.mkdir()
+    W._checkout(str(repo), _head(repo), checkout, time.monotonic() + 30)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    shim, why = W._repo_python_dir(str(repo), checkout, scratch, 60)
+    assert why is None and shim, why
+    run = V.run_command(f"llmr-py -c {shlex.quote(code)}", checkout, scratch / "run", python_dir=shim,
+                        timeout_s=30, tag="t") if (scratch / "run").mkdir() is None else None
+    assert real not in run.tail.replace(os.path.realpath(checkout), "")
+    if mapping and module != "renamed":
+        assert "FILE " + os.path.realpath(checkout) in run.tail, run.tail        # the sandbox copy
+    else:
+        assert "IMPORTERROR" in run.tail, run.tail                                # fail closed: no import
 
 
 @real_sandbox
-def test_monorepo_package_that_resolves_inside_the_copy_is_fine(tmp_path):
-    repo = _monorepo(tmp_path)
+def test_a_module_loaded_from_the_real_tree_makes_the_run_unavailable(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "extra").mkdir()
+    (repo / "extra" / "outside_mod.py").write_text("X = 1\n")
+    tp = repo / "tests" / "test_pkg.py"            # the candidate test itself loads a module from the REAL tree
+    tp.write_text(f"import sys\nsys.path.insert(0, {str(repo / 'extra')!r})\nimport outside_mod\n" + tp.read_text())
+    (repo / ".gitignore").write_text(".venv/\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "outside")
     _fake_venv(repo, editable=None)
-    site = next((repo / ".venv").glob("lib/python*/site-packages"))
-    (site / "zz_in_copy.pth").write_text("")        # nothing maps pkg outside: it simply is not installed
-    _enqueue(1, repo=repo, head=_head(repo))
-    seen = []
-    W.drain(verify=lambda r, p, budget_s, **k: seen.append(k) or _ok_result(), record=lambda *a: None)
-    assert seen and "python_dir" in seen[0]
+    (repo / "src" / "pkg.py").write_text(FIXED)
+    fix = _git(repo, "diff", "HEAD")
+    _git(repo, "checkout", "--", "src/pkg.py")
+    _enqueue(1, repo=repo, head=_head(repo), patch=fix.encode())
+    recs = []
+    W.drain(record=lambda uid, r: recs.append(r))
+    (r,) = recs
+    assert (r.verify_status, r.reason) == ("unavailable", "no_junit") and not r.used_eligible, r
+
+
+@real_sandbox
+def test_a_venv_probe_timeout_or_crash_is_unavailable_never_a_fallback(tmp_path, monkeypatch):
+    repo = _venv_repo(tmp_path)
+    _fake_venv(repo, editable=None)
+    checkout = tmp_path / "co"
+    checkout.mkdir()
+    for n, (run, want) in enumerate([(V.VerifyRun(rc=None, timed_out=True), "venv_probe_timeout"),
+                                     (V.VerifyRun(rc=1, timed_out=False), "venv_probe_failed"),
+                                     (V.VerifyRun(rc=-9, timed_out=False), "venv_probe_failed")]):
+        monkeypatch.setattr(V, "run_command", lambda *a, _r=run, **k: _r)
+        scratch = tmp_path / f"s{n}"
+        scratch.mkdir()
+        assert W._repo_python_dir(str(repo), checkout, scratch, 30) == (None, want)
+    # a venv python that cannot even report its site dirs
+    (repo / ".venv" / "bin" / "python").unlink()
+    (repo / ".venv" / "bin" / "python").write_text("#!/bin/sh\nexit 3\n")
+    os.chmod(repo / ".venv" / "bin" / "python", 0o755)
+    scratch = tmp_path / "s9"
+    scratch.mkdir()
+    assert W._repo_python_dir(str(repo), checkout, scratch, 30) == (None, "venv_probe_failed")
 
 
 @real_sandbox
@@ -973,3 +1029,21 @@ def test_patch_and_marker_files_are_not_opened_through_a_symlink(tmp_path):
     with pytest.raises(OSError):
         _enqueue(1)
     assert victim.read_text() == "keep me" and not Q.patch_path(_uid(1)).exists()
+
+
+def test_a_marker_claimed_between_listing_and_reading_is_not_called_invalid(tmp_path, monkeypatch):
+    """Regression (found under load): a worker listing the queue while another claims a marker saw an
+    unreadable file, called it invalid and deleted the claimed unit's patch / recorded marker_invalid
+    a second time. Vanished is not invalid."""
+    _enqueue(1)
+    name = f"{_uid(1)}.json"
+    real_read = Path.read_text
+
+    def read_after_claim(self, *a, **k):
+        if self.name == name and self.parent.name == "pending":
+            os.rename(self, Q._sub("claimed") / name)          # the other worker wins the race right here
+        return real_read(self, *a, **k)
+    with monkeypatch.context() as m:
+        m.setattr(Path, "read_text", read_after_claim)
+        assert Q.take_invalid() == []
+    assert Q.patch_path(_uid(1)).exists() and (Q._sub("claimed") / name).exists()
