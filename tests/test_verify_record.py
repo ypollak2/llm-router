@@ -155,9 +155,9 @@ def test_kpi_numbers_are_byte_identical_with_and_without_verify_records(tmp_path
     dump = lambda d: json.dumps(d, sort_keys=True)  # noqa: E731
     assert dump(with_v["kpis"]) == dump(base["kpis"])          # every KPI, NS/D1/D2 included
     assert dump(with_v["joins"]) == dump(base["joins"])
-    assert with_v["verify_shadow"] == {"verified": 1, "weak": 1, "unavailable": 0}
+    assert with_v["verify_shadow"] == {"verified": 1, "weak": 1, "failed": 0, "unavailable": 0}
     text = kpi.render_scorecard(with_v)
-    line = "verify (shadow): 1 verified, 1 weak, 0 unavailable"
+    line = "verify (shadow): 1 verified, 1 weak, 0 failed, 0 unavailable"
     assert line in text
     stripped = "\n".join(ln for ln in text.splitlines() if "verify (shadow)" not in ln)
     assert stripped == base_text                                # nothing else in the render moved
@@ -212,3 +212,16 @@ def test_pass_f2p_model_from_verify_unit_is_recordable_and_joins(tmp_path):
     ns.record_verify(a["unit_id"], UnitResult(verify_status="pass_f2p_model", reason="f2p_model", sandboxed=True))
     v = _codex(_units(proj))[0]["verify"]
     assert (v["verify_status"], v["verify_level"], v["verify_sandboxed"]) == ("pass_f2p_model", "V1", True)
+
+
+def test_verify_shadow_counts_every_status_in_its_own_bucket(tmp_path):
+    """pass_f2p and pass_f2p_model are both 'verified'; fail is counted (not dropped); the rest are
+    weak / unavailable. Removing the pass_f2p_model case or the fail case must turn this red."""
+    rows = [_codex_row(1_800_000_200.0 + i) for i in range(6)]
+    p, proj = _setup(tmp_path, rows)
+    ids = [u["unit_id"] for u in _codex(_units(proj)) if u["ts"] and u["outcome"] == "unknown"][-6:]
+    statuses = ["pass_f2p", "pass_f2p_model", "pass_p2p", "fail", "unavailable", "not_applicable"]
+    _append(p, *[_vrow(uid, st, "x") for uid, st in zip(ids, statuses)])
+    assert kpi._verify_shadow(100000) == {"verified": 2, "weak": 1, "failed": 1, "unavailable": 2}
+    line = "verify (shadow): 2 verified, 1 weak, 1 failed, 2 unavailable"
+    assert line in kpi.render_scorecard(kpi.compute_scorecard(days=100000, now=NOW))
