@@ -12,12 +12,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- status line: the default is the full layout again, byte-for-byte as before #273 (owner decision,
+  reversing #273's fast-by-default; `tests/test_statusline_default_full.py` compares it with the
+  pre-#273 script on 9 fixture states). The fast line is the opt-in debug mode
+  `LLM_ROUTER_STATUSLINE=fast` and now shows the Claude 5h / weekly / Sonnet quota.
+
 ### Added
-- ux: a fast status line and a receipt band. The `statusLine` command now prints one short line
-  (`llm-router · smart · NS 0.0% n=3599 · Claude wk 41% · Codex 7/15 ↻21:14 · ⚠ hooks p95 3.0s auto-route`,
+- ux: a fast status line (opt-in debug mode) and a receipt band. With `LLM_ROUTER_STATUSLINE=fast` the
+  `statusLine` command prints one short line
+  (`llm-router · smart · NS 0.0% n=3599 · Claude 5h 12% wk 41% sonnet 3% · Codex 7/15 ↻21:14 · ⚠ hooks p95 3.0s auto-route`,
   at most 200 characters, `n/a` for anything unknown, never 0) from a small cache that
-  `llm-router statusline --refresh` rebuilds in the background at most once a minute; the classic layout is
-  `LLM_ROUTER_STATUSLINE=full`. **The default no longer shows the folder, context bar and money segments** (nor the route mix, health and last-route segments); set `LLM_ROUTER_STATUSLINE=full` to get them back. New opt-in Claude Code mod `llm-router-receipt` (`llm-router mod install` /
+  `llm-router statusline --refresh` rebuilds in the background at most once a minute, plus the Claude quota
+  snapshot `usage.json` (the 5h / weekly / Sonnet numbers `llm-router status` shows; past
+  `LLM_ROUTER_USAGE_TTL_SEC`, default 300 s, they are shown with `(stale <age>)`). The default is the full
+  layout, unchanged. The switch is read from the environment or, failing that, from
+  `~/.llm-router/.env` (`LLM_ROUTER_STATUSLINE=fast`), so no `settings.json` edit is needed. New opt-in Claude Code mod `llm-router-receipt` (`llm-router mod install` /
   `uninstall`): after a turn the proxy served off Claude it shows "served by <model> · cost · est. saved" with
   `k` keep and `r` redo on Claude, and a `/router` pane with the last 10 routing decisions. Presses are
   `user_signal` rows in `user_signals.jsonl`; `llm-router kpi` shows `user_kept` and `user_redone` under D3. A

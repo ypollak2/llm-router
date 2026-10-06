@@ -337,6 +337,10 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_SLIM": ("llm_router", "tool_surface.py", 1),
     "LLM_ROUTER_STALE_PRESSURE_FLOOR": ("llm_router", "budget.py", 1),
     "LLM_ROUTER_STATE_DIR": ("llm_router", "surface_status.py", 1),
+    # Read by the shell script, not by Python: the AST scan cannot see it, so it
+    # is listed in tests/test_env_registry.py's _INDIRECT_READS. "fast" = the
+    # debug fast line; anything else (the default) = the full status line.
+    "LLM_ROUTER_STATUSLINE": ("llm_router", "hooks/statusline-command.sh", 1),
     "LLM_ROUTER_STATUSLINE_REFRESH_CMD": ("llm_router", "statusline_tick.py", 1),
     "LLM_ROUTER_STATUSLINE_SLOW_MS": ("llm_router", "statusline_refresh.py", 1),
     "LLM_ROUTER_STATUS_EVERY": ("llm_router", "hooks/status-bar-clawcode.py", 2),
@@ -354,6 +358,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_SUPPRESS_PRICING_STALENESS": ("llm_router", "pricing.py", 1),
     "LLM_ROUTER_URL": ("llm_router", "commands/doctor.py", 1),
     "LLM_ROUTER_USAGE_DB_PATH": ("llm_router", "quota_savings.py", 1),
+    "LLM_ROUTER_USAGE_TTL_SEC": ("llm_router", "statusline_tick.py", 1),
     "LLM_ROUTER_USAGE_PATH": ("llm_router", "commands/invoice.py", 1),
     "LLM_ROUTER_WEEKLY_QUOTA_USD": ("llm_router", "quota_savings.py", 1),
     "LLM_ROUTER_WEEKLY_QUOTA_USD_OPUS_EQUIV": ("llm_router", "quota_savings.py", 1),
