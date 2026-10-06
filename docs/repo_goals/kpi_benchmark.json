@@ -1,26 +1,26 @@
 {
-  "generated_at": "2026-10-06T07:13:15Z",
+  "generated_at": "2026-10-06T07:53:10Z",
   "o2": {
-    "acceptable_rate": 0.7906976744186046,
-    "n": 43,
+    "acceptable_rate": 0.782608695652174,
+    "n": 46,
     "definition": "tasks Opus passed (hidden tests) that Haiku also passed"
   },
   "d5": {
-    "accuracy": 0.1702127659574468,
-    "under_route_rate": 0.02127659574468085,
-    "n": 47,
-    "n_no_truth": 20,
+    "accuracy": 0.18,
+    "under_route_rate": 0.02,
+    "n": 50,
+    "n_no_truth": 21,
     "predicted_tier_counts": {
       "haiku": 0,
-      "sonnet": 35,
-      "opus": 12
+      "sonnet": 37,
+      "opus": 13
     },
     "note": "under-route is not informative when the classifier never predicts the cheapest tier (haiku): see predicted_tier_counts",
     "definition": "production proxy classifier, effective tier, vs cheapest tier that passed hidden tests; no-pass tasks excluded"
   },
   "provenance": {
     "source": "classifier-v2-release/ab/work/agentic/truth.jsonl (blind A/B, hidden unit tests, majority of junit grades)",
-    "n_tasks": 67,
+    "n_tasks": 71,
     "tiers": [
       "haiku",
       "sonnet",
@@ -285,6 +285,17 @@
       "predicted_effective": "sonnet"
     },
     {
+      "id": "5adaae6e0f",
+      "pass": {
+        "haiku": false,
+        "sonnet": false,
+        "opus": false
+      },
+      "cheapest_tier": "none",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
       "id": "5d03303320",
       "pass": {
         "haiku": false,
@@ -527,6 +538,17 @@
       "predicted_effective": "sonnet"
     },
     {
+      "id": "a2e70462ee",
+      "pass": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "haiku",
+      "predicted_raw": "opus",
+      "predicted_effective": "opus"
+    },
+    {
       "id": "a75fbeda5f",
       "pass": {
         "haiku": false,
@@ -539,6 +561,17 @@
     },
     {
       "id": "afa90fc97b",
+      "pass": {
+        "haiku": false,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "sonnet",
+      "predicted_raw": "sonnet",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "b0c74591bc",
       "pass": {
         "haiku": false,
         "sonnet": true,
@@ -711,6 +744,17 @@
       },
       "cheapest_tier": "none",
       "predicted_raw": "haiku",
+      "predicted_effective": "sonnet"
+    },
+    {
+      "id": "eb762378fa",
+      "pass": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": true
+      },
+      "cheapest_tier": "haiku",
+      "predicted_raw": "sonnet",
       "predicted_effective": "sonnet"
     },
     {

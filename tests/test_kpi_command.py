@@ -422,7 +422,7 @@ def test_committed_benchmark_file_is_consistent_and_text_free():
     assert len({i["id"] for i in items}) == len(items)               # unique ids
     o2_pool = [i for i in items if i["pass"]["opus"]]
     assert d["o2"]["n"] == len(o2_pool)
-    assert d["o2"]["n"] > 0 and d["d5"]["n"] >= 47
+    assert d["o2"]["n"] > 0 and d["d5"]["n"] >= 50
     assert d["o2"]["acceptable_rate"] == sum(i["pass"]["haiku"] for i in o2_pool) / len(o2_pool)
     rank = {"haiku": 0, "sonnet": 1, "opus": 2}
     graded = [i for i in items if i["cheapest_tier"] in rank]
