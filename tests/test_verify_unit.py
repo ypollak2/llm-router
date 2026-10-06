@@ -270,7 +270,7 @@ DATA_ATTACKS = {
     "snapshot file": lambda r: ((r / "tests" / "__snapshots__").mkdir(), (r / "tests" / "__snapshots__" / "t.ambr").write_text("1\n")),
     "snapshots dir txt": lambda r: ((r / "tests" / "snapshots").mkdir(), (r / "tests" / "snapshots" / "t.txt").write_text("1\n")),
     "fixture outside a test dir that a test names": lambda r: (r / "fixtures" / "expected.csv").write_text("1\n"),
-    "tests/helpers.py (support code)": lambda r: (r / "tests" / "helpers.py").write_text("X = 1\n"),
+    "README comment tweak": lambda r: (r / "README.md").write_text("# hi\n"),
 }
 
 
@@ -281,8 +281,93 @@ def test_test_data_and_support_changes_are_never_eligible(datarepo, tmp_path, na
         (r / "src" / "pkg.py").write_text("def val():\n    return 1  # trivial change\n")
         DATA_ATTACKS[name](r)
     r = verify_unit(datarepo, _patch(datarepo, tmp_path, mutate))
-    assert (r.verify_status, r.reason) == ("fail", "test_data_changed"), (name, r)
+    assert (r.verify_status, r.reason) == ("unavailable", "non_python_change"), (name, r)
     assert not r.used_eligible
+
+
+@real_sandbox
+def test_test_support_code_change_is_refused(datarepo, tmp_path):
+    def mutate(r: Path):
+        (r / "src" / "pkg.py").write_text("def val():\n    return 1  # c\n")
+        (r / "tests" / "helpers.py").write_text("X = 1\n")
+    r = verify_unit(datarepo, _patch(datarepo, tmp_path, mutate))
+    assert (r.verify_status, r.reason) == ("fail", "test_support_changed"), r
+
+
+@pytest.fixture
+def dynrepo(tmp_path):
+    """Fixtures outside a test dir, opened by a computed name, a glob and a listdir."""
+    root = tmp_path / "dynrepo"
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "cfg").mkdir()
+    (root / "src" / "pkg.py").write_text("def val():\n    return 1\n")
+    (root / "cfg" / "expected.json").write_text('{"v": 2}\n')
+    (root / "tests" / "test_dyn.py").write_text(
+        "import glob, json, os\nfrom pathlib import Path\n\nfrom pkg import val\n\nCFG = Path(__file__).parent.parent / 'cfg'\n\n\n"
+        "def test_built_name():\n    assert val() == json.load(open(CFG / ('exp' + 'ected.json')))['v']\n\n\n"
+        "def test_glob():\n    assert val() == json.load(open(glob.glob(str(CFG / '*.json'))[0]))['v']\n\n\n"
+        "def test_listdir():\n    assert val() == json.load(open(CFG / os.listdir(CFG)[0]))['v']\n")
+    return _init(root)
+
+
+@real_sandbox
+def test_dynamic_name_glob_listdir_fixture_edit_is_not_eligible(dynrepo, tmp_path):
+    def mutate(r: Path):
+        (r / "cfg" / "expected.json").write_text('{"v": 1}\n')
+        (r / "src" / "pkg.py").write_text("def val():\n    return 1  # note\n")
+    r = verify_unit(dynrepo, _patch(dynrepo, tmp_path, mutate))
+    assert (r.verify_status, r.reason) == ("unavailable", "non_python_change"), r
+    assert not r.used_eligible
+
+
+@real_sandbox
+@pytest.mark.parametrize("where", ["cfg", "tests"])
+def test_a_fixture_rename_is_not_eligible(dynrepo, tmp_path, where):
+    (dynrepo / "tests" / "fx.json").write_text('{"v": 2}\n')
+    _git(dynrepo, "add", "-A")
+    _git(dynrepo, "commit", "-qm", "fx")
+    src = "cfg/expected.json" if where == "cfg" else "tests/fx.json"
+
+    def mutate(r: Path):
+        _git(r, "mv", src, src.replace(".json", "2.json"))
+        (r / "src" / "pkg.py").write_text("def val():\n    return 1  # note\n")
+    patch = _patch(dynrepo, tmp_path, mutate)
+    assert "rename from" in patch
+    r = verify_unit(dynrepo, patch)
+    assert (r.verify_status, r.reason) == ("unavailable", "non_python_change"), r
+
+
+@real_sandbox
+def test_a_cyrillic_lookalike_dir_is_suspicious(dynrepo, tmp_path):
+    def mutate(r: Path):
+        (r / "t\u0435sts").mkdir()                    # Cyrillic small ie
+        (r / "t\u0435sts" / "data.json").write_text("{}\n")
+        (r / "src" / "pkg.py").write_text("def val():\n    return 1  # note\n")
+    r = verify_unit(dynrepo, _patch(dynrepo, tmp_path, mutate))
+    assert (r.verify_status, r.reason) == ("unavailable", "suspicious_path"), r
+
+
+def test_suspicious_paths_unit():
+    assert VU.suspicious_paths(["src/ok.py", "README.md"], {"src/ok.py"}) == []
+    assert VU.suspicious_paths(["t\u0435sts/a.py"]) == ["t\u0435sts/a.py"]
+    assert VU.suspicious_paths(["\uff54ests/a.py"]) == ["\uff54ests/a.py"]          # fullwidth t: NFKC changes it
+    assert VU.suspicious_paths(["Src/pkg.py"], {"src/pkg.py"}) == ["Src/pkg.py"]      # case-fold collision
+
+
+@real_sandbox
+def test_a_readme_tweak_next_to_a_real_fix_is_not_eligible_recall_cost(broken, tmp_path):
+    def mutate(r: Path):
+        _fix(r)
+        (r / "README.md").write_text("# demo, now fixed\n")
+    r = verify_unit(broken, _patch(broken, tmp_path, mutate))
+    assert (r.verify_status, r.reason) == ("unavailable", "non_python_change"), r
+    assert not r.used_eligible
+
+
+@real_sandbox
+def test_a_pure_python_fix_is_still_eligible(broken, tmp_path):
+    assert verify_unit(broken, _patch(broken, tmp_path, _fix)).used_eligible
 
 
 @pytest.fixture
@@ -341,13 +426,14 @@ def test_renaming_a_passing_test_and_adding_a_dummy_is_tests_disappeared(twotest
 
 
 @real_sandbox
-def test_a_legit_edit_to_a_test_file_still_works_and_is_not_sole_evidence(twotests, tmp_path):
+def test_editing_an_existing_test_file_is_never_eligible(twotests, tmp_path):
     def mutate(r: Path):
         _fix(r)
         f = r / "tests" / "test_pkg.py"
         f.write_text(f.read_text() + "\n\ndef test_three():\n    assert add(1, 1) == 2\n")
     r = verify_unit(twotests, _patch(twotests, tmp_path, mutate))
-    assert r.verify_status == "pass_f2p" and r.n_f2p >= 2, r      # test_other (own) + test_add (edited file)
+    assert (r.verify_status, r.reason) == ("pass_p2p", "edited_tests") and r.n_f2p >= 2, r
+    assert "edited_existing_test" in r.flags and not r.used_eligible
 
 
 @real_sandbox
