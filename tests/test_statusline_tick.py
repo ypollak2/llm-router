@@ -369,3 +369,54 @@ def test_script_without_the_tick_falls_back_to_the_classic_layout(tmp_path):
                        env=_env(tmp_path, "true"), capture_output=True, text=True, timeout=60)
     assert r.returncode == 0 and r.stdout.strip() != ""
     assert not r.stdout.startswith("llm-router · ")
+
+
+# ── LLM_ROUTER_STATUSLINE=both: full line, then the fast line ────────────────
+
+def _both(tmp_path, **extra):
+    return _run({**_env(tmp_path, "true", fast=False), "LLM_ROUTER_STATUSLINE": "both", **extra})
+
+
+def test_both_prints_full_line_then_fast_line(tmp_path):
+    out, _ = _both(tmp_path)
+    lines = out.splitlines()
+    assert len(lines) == 2, out
+    assert not lines[0].startswith("llm-router · "), lines[0]
+    assert lines[1].startswith("llm-router · "), lines[1]
+    full, _ = _run(_env(tmp_path, "true", fast=False))
+    assert lines[0] == full.splitlines()[0]
+
+
+def test_both_from_env_file(tmp_path):
+    state = tmp_path / ".llm-router"
+    state.mkdir(exist_ok=True)
+    (state / ".env").write_text("LLM_ROUTER_STATUSLINE=both\n")
+    out, _ = _run(_env(tmp_path, "true", fast=False))
+    assert len(out.splitlines()) == 2 and out.splitlines()[1].startswith("llm-router · "), out
+
+
+@pytest.mark.parametrize("value,fast_only", [("fast", True), ("full", False), ("bogus", False), ("", False)])
+def test_other_values_stay_single_line(tmp_path, value, fast_only):
+    out, _ = _run({**_env(tmp_path, "true", fast=False), "LLM_ROUTER_STATUSLINE": value})
+    assert len(out.splitlines()) == 1, out
+    assert out.startswith("llm-router · ") is fast_only
+
+
+def test_both_fast_part_never_blocks_on_a_hung_refresher(tmp_path):
+    hang = f"{sys.executable} -c 'import time; time.sleep(30)'"
+    try:
+        out, dt = _run({**_env(tmp_path, hang, fast=False), "LLM_ROUTER_STATUSLINE": "both"})
+    finally:
+        subprocess.run(["pkill", "-f", "time.sleep(30)"], check=False)
+    assert len(out.splitlines()) == 2 and dt < 10, (dt, out)
+
+
+def test_env_file_value_is_never_executed(tmp_path):
+    """The .env is read with read/case, never sourced: $(...) and `...` stay text."""
+    state = tmp_path / ".llm-router"
+    state.mkdir(exist_ok=True)
+    marker = tmp_path / "PWNED"
+    for payload in (f"$(touch {marker})", f"`touch {marker}`", f"fast; touch {marker}"):
+        (state / ".env").write_text(f"LLM_ROUTER_STATUSLINE={payload}\nX=$(touch {marker})\n")
+        _run(_env(tmp_path, "true", fast=False))
+        assert not marker.exists(), payload

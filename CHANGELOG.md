@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LLM_ROUTER_STATUSLINE=fast` and now shows the Claude 5h / weekly / Sonnet quota.
 
 ### Added
+- status line: `LLM_ROUTER_STATUSLINE=both` prints the full line, then the fast (debug) line on a second
+  row. Claude Code renders each printed line as its own row (docs: "Multiple lines"). Default, `full`
+  and `fast` are unchanged; the `.env` reader is still never sourced (new test: `$(touch marker)` never runs).
 - ux: a fast status line (opt-in debug mode) and a receipt band. With `LLM_ROUTER_STATUSLINE=fast` the
   `statusLine` command prints one short line
   (`llm-router · smart · NS 0.0% n=3599 · Claude 5h 12% wk 41% sonnet 3% · Codex 7/15 ↻21:14 · ⚠ hooks p95 3.0s auto-route`,

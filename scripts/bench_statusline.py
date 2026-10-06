@@ -44,12 +44,15 @@ def _run(env: dict) -> float:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=200)
-    n = ap.parse_args().n
+    ap.add_argument("--mode", default="fast", choices=["fast", "both", "full"],
+                    help="LLM_ROUTER_STATUSLINE value; the 100 ms bar applies to fast only")
+    args = ap.parse_args()
+    n = args.n
     home = Path(tempfile.mkdtemp(prefix="statusline-bench-"))
     state = home / ".llm-router"
     state.mkdir()
     env = {"HOME": str(home), "LLM_ROUTER_HOME": str(state), "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-           "NO_COLOR": "1", "LLM_ROUTER_STATUSLINE_REFRESH_CMD": "true", "LLM_ROUTER_STATUSLINE": "fast"}
+           "NO_COLOR": "1", "LLM_ROUTER_STATUSLINE_REFRESH_CMD": "true", "LLM_ROUTER_STATUSLINE": args.mode}
     cache = state / "statusline_cache.json"
     stamp = state / ".statusline-refresh.last"
     payload = {"v": 1, "mode": "smart", "ns": {"pct": 0.0, "n": 3599}, "claude_weekly_pct": 41.0,
@@ -85,7 +88,10 @@ def main() -> int:
     for name, vals in results.items():
         p50, p95, mx = _p(vals, 0.5), _p(vals, 0.95), max(vals)
         verdict = "PASS" if p95 <= BAR_MS else "FAIL"
-        ok &= p95 <= BAR_MS
+        if args.mode != "fast":
+            verdict = "report-only"
+        else:
+            ok &= p95 <= BAR_MS
         print(f"{name:48s} n={len(vals)} p50={p50:6.1f}ms p95={p95:6.1f}ms max={mx:6.1f}ms  {verdict} (bar {BAR_MS:.0f}ms)")
     subprocess.run(["pkill", "-f", "time.sleep(60)"], check=False)
     return 0 if ok else 1
