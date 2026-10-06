@@ -88,6 +88,50 @@ def test_total_bytes_cap_stops_the_process_and_records_truncation(monkeypatch, t
     res = _run(monkeypatch, b, timeout=30)
     assert time.monotonic() - t < 15
     assert res.truncated is True and res.content == "partial"
+    assert res.reason_code == "output_cap_exceeded"  # not a clean answer
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX")
+@pytest.mark.parametrize("how", ["timeout", "cap"])
+def test_no_descendant_survives_a_kill(monkeypatch, tmp_path, how):
+    pidfile = tmp_path / "grandchild.pid"
+    if how == "cap":
+        monkeypatch.setattr(codex_agent, "_STDOUT_TOTAL_CAP", 50_000, raising=False)
+    tail = "sleep 300" if how == "timeout" else "yes noise"
+    b = tmp_path / "codex"
+    b.write_text(f"#!/bin/sh\nsleep 300 &\necho $! > {pidfile}\n{tail}\n")
+    b.chmod(0o755)
+    res = _run(monkeypatch, str(b), timeout=2)
+    assert res.reason_code in ("timeout", "output_cap_exceeded")
+    pid = int(pidfile.read_text())
+    try:
+        deadline = time.monotonic() + 3
+        while _alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not _alive(pid), f"ORPHAN ALIVE {pid}"
+    finally:
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+
+
+def test_timeout_keeps_partial_output(monkeypatch, tmp_path):
+    b = _fake_codex(tmp_path, f"""
+        import sys, time
+        sys.stdout.write({_event("half")!r} + "\\n"); sys.stdout.flush()
+        time.sleep(12)
+    """)
+    res = _run(monkeypatch, b, timeout=1)
+    assert res.reason_code == "timeout" and "half" in res.content
 
 
 # -- class 2: stdin ------------------------------------------------------------

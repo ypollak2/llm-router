@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -240,6 +241,28 @@ _NOISE_MAX_LINES = 20
 _NOISE_MAX_CHARS = 500
 
 
+async def _kill_tree(proc) -> None:
+    """Stop ``proc`` AND everything it spawned. Codex runs tools (shells, sleeps,
+    MCP servers) as grandchildren; ``proc.kill()`` alone orphaned them on a
+    timeout or cap breach. On POSIX the child leads its own session (see
+    ``start_new_session`` at spawn) so its pid is the process-group id: SIGTERM
+    the group, a short grace, then SIGKILL. Elsewhere, kill the child only."""
+    pid = getattr(proc, "pid", None)
+    if os.name == "posix" and isinstance(pid, int) and pid > 1:
+        for sig, grace in ((signal.SIGTERM, 1.0), (signal.SIGKILL, 0.0)):
+            try:
+                os.killpg(pid, sig)
+            except (ProcessLookupError, PermissionError):
+                break  # group already gone
+            if grace:
+                await asyncio.sleep(grace)
+        return
+    try:
+        proc.kill()
+    except (ProcessLookupError, AttributeError):
+        pass
+
+
 @dataclass
 class CodexResult:
     """Result from a single Codex CLI agent execution.
@@ -408,6 +431,7 @@ async def run_codex(
             cwd=cwd,
             env=safe_env,
             limit=_STDOUT_LINE_LIMIT,
+            start_new_session=(os.name == "posix"),
         )
 
         text_chunks: list[str] = []
@@ -453,7 +477,7 @@ async def run_codex(
                 total += len(raw)
                 if total > _STDOUT_TOTAL_CAP:
                     truncated = capped = True
-                    proc.kill()
+                    await _kill_tree(proc)
                     break
                 line = raw.decode("utf-8", errors="replace").strip()
                 if not line:
@@ -529,18 +553,23 @@ async def run_codex(
         except asyncio.TimeoutError:
             # A silent codex (no output) never reached the old per-line deadline
             # check, so it could only be ended by the hook's outer kill.
-            proc.kill()
+            await _kill_tree(proc)
             stderr_task.cancel()
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5)
             except Exception:  # noqa: BLE001 -- already timed out; best effort
                 pass
+            partial = "\n".join(text_chunks).strip()
             return CodexResult(
-                content=f"Codex timed out after {timeout}s",
+                content=(f"Codex timed out after {timeout}s"
+                         + (f"\n[partial output]\n{partial}" if partial else "")),
                 model=model, exit_code=124,
                 duration_sec=time.monotonic() - start,
                 reason_code="timeout", truncated=truncated,
             )
+        except asyncio.CancelledError:
+            await _kill_tree(proc)  # never leave the tree running if cancelled
+            raise
 
         await proc.wait()
         await stderr_task
@@ -592,13 +621,9 @@ async def run_codex(
         return CodexResult(
             content=output, model=model,
             exit_code=rc, duration_sec=duration,
-            reason_code="nonzero_exit" if rc else "", truncated=truncated,
-        )
-    except asyncio.TimeoutError:
-        return CodexResult(
-            content=f"Codex timed out after {timeout}s",
-            model=model, exit_code=124, duration_sec=float(timeout),
-            reason_code="timeout",
+            reason_code=("output_cap_exceeded" if capped
+                         else "nonzero_exit" if rc else ""),
+            truncated=truncated,
         )
     except Exception as e:
         return CodexResult(

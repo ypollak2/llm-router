@@ -1166,7 +1166,10 @@ except Exception:  # noqa: BLE001 -- fall back to the same numbers, literally
 #: Ceiling on the delegation timeout: the codex subprocess must finish, and
 #: this hook must still have time to read its output and exit, before Claude
 #: Code's wall-clock kill fires. Also the default -- measured: median 91s,
-#: 7/17 real tasks over 120s, max 223s.
+#: 7/17 real tasks over 120s, max 223s. Re-measured on the live ledger
+#: (``delegated`` rows with duration_sec, 7 days to 2026-10-06, N=46): p50 53s,
+#: p90 156s, p95 219s, max 260s, 6/46 over 120s -- so 300s clears the observed
+#: max and 120s would have cut 13%. Override: LLM_ROUTER_SUBAGENT_CLI_TIMEOUT.
 _CODEX_MAX_TIMEOUT_SEC = _HOOK_TIMEOUT_SEC - _DELEGATION_MARGIN_SEC
 _CODEX_DEFAULT_TIMEOUT_SEC = _CODEX_MAX_TIMEOUT_SEC
 _MIN_RUN_SEC = 15
@@ -1470,6 +1473,7 @@ def _note_codex_failure(path: str, status: str, res, subagent_type: str,
             complexity=complexity, session_id=session_id, path=path,
             reason=f"Codex usage limit hit; benched until {when}: "
                    f"{getattr(res, 'content', '')}"[:200],
+            reason_code="quota",
         )
         if os.environ.get("LLM_ROUTER_ROUTE_BANNER", "on").strip().lower() not in ("0", "off", "false", "no"):
             try:
@@ -1478,15 +1482,22 @@ def _note_codex_failure(path: str, status: str, res, subagent_type: str,
             except Exception:
                 pass
         return
+    # reason_code is the stable, queryable cause (never empty); reason is the
+    # CLI's free text. 143 codex_failed rows in the 7 days to 2026-10-06 had
+    # only the latter, so grouping them meant regexing prose.
     if status == "no_time":
         reason = "delegation wall-clock allowance already spent in this hook run"
+        code = "no_time"
+    elif res is None:
+        reason, code = "no CodexResult returned", "no_result"
     else:
-        reason = str(getattr(res, "content", "") if res else "no CodexResult returned")
+        reason = str(getattr(res, "content", "") or "")
+        code = getattr(res, "reason_code", "") or "unclassified"
     _record_north_star_unit(
         "agent_route_codex", model=model, outcome="codex_failed",
         subagent_type=subagent_type, task_type=task_type,
         complexity=complexity, session_id=session_id, path=path,
-        reason=reason[:200],
+        reason=(reason or code)[:200], reason_code=code,
     )
 
 
@@ -1793,6 +1804,7 @@ def _try_codex_subagent_delegation(
             subagent_type=subagent_type, task_type=task_type,
             complexity=complexity, session_id=session_id, path="ns3",
             reason=f"run_codex raised: {e}"[:200],
+            reason_code="run_codex_raised",
         )
         return None
 
@@ -1819,6 +1831,8 @@ def _try_codex_subagent_delegation(
         subagent_type=subagent_type, task_type=task_type,
         complexity=complexity, session_id=session_id,
         duration_sec=res.duration_sec,
+        **({"truncated": True} if getattr(res, "truncated", False) else {}),
+        **({"reason_code": res.reason_code} if getattr(res, "reason_code", "") else {}),
     )
     return res.content
 

@@ -1832,6 +1832,7 @@ def _try_codex_subagent_delegation(
         complexity=complexity, session_id=session_id,
         duration_sec=res.duration_sec,
         **({"truncated": True} if getattr(res, "truncated", False) else {}),
+        **({"reason_code": res.reason_code} if getattr(res, "reason_code", "") else {}),
     )
     return res.content
 
