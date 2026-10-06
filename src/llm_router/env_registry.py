@@ -339,7 +339,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_STATE_DIR": ("llm_router", "surface_status.py", 1),
     # Read by the shell script, not by Python: the AST scan cannot see it, so it
     # is listed in tests/test_env_registry.py's _INDIRECT_READS. "fast" = the
-    # debug fast line; anything else (the default) = the full status line.
+    # debug fast line only; "both" = the full line then the fast line on a second
+    # row; anything else (the default, "full") = the full status line only.
     "LLM_ROUTER_STATUSLINE": ("llm_router", "hooks/statusline-command.sh", 1),
     "LLM_ROUTER_STATUSLINE_REFRESH_CMD": ("llm_router", "statusline_tick.py", 1),
     "LLM_ROUTER_STATUSLINE_SLOW_MS": ("llm_router", "statusline_refresh.py", 1),

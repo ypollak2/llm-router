@@ -20,6 +20,10 @@
 # The real environment wins; otherwise the same key in the router's own .env
 # (${LLM_ROUTER_HOME:-~/.llm-router}/.env, the file the hooks already load) is
 # honoured, so the switch needs no edit to ~/.claude/settings.json.
+# LLM_ROUTER_STATUSLINE=both prints the full layout, then the fast line on a
+# second row (Claude Code renders each printed line as its own status row:
+# https://code.claude.com/docs/en/statusline, "Multiple lines"). Any other
+# value (unset, full, unknown) is the full layout only.
 # Pure bash on purpose: no extra process on a once-a-second loop.
 _sl_mode="${LLM_ROUTER_STATUSLINE:-}"
 if [ -z "$_sl_mode" ]; then
@@ -40,9 +44,9 @@ _sl_mode="${_sl_mode%%[[:space:]]*}"
 # -I: the source tree's own types.py sits beside statusline_tick.py and would
 # shadow the stdlib module of that name if the script's folder were on sys.path.
 # -S: the tick is stdlib-only, and skipping site saves ~8 ms a tick.
+_tick="${0%/*}/llm_router_statusline_tick.py"
+[ -f "$_tick" ] || _tick="${0%/*}/../statusline_tick.py"
 if [ "$_sl_mode" = "fast" ]; then
-    _tick="${0%/*}/llm_router_statusline_tick.py"
-    [ -f "$_tick" ] || _tick="${0%/*}/../statusline_tick.py"
     if [ -f "$_tick" ] && command -v python3 >/dev/null 2>&1; then
         exec python3 -I -S "$_tick"
     fi
@@ -616,3 +620,9 @@ for i in "${!parts[@]}"; do
 done
 
 printf '%s\n' "$result"
+
+# both: the fast line goes second. Its stdin is /dev/null (the full part above
+# already consumed the session JSON); the tick reads caches only and never waits.
+if [ "$_sl_mode" = "both" ] && [ -f "$_tick" ] && command -v python3 >/dev/null 2>&1; then
+    python3 -I -S "$_tick" </dev/null
+fi
