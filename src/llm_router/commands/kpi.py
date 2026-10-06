@@ -336,6 +336,23 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index) -> tuple[dict, dict, di
             joins)
 
 
+def _verify_shadow(days: int) -> dict | None:
+    """Informational counts of units in the window that carry a verify record. Counts only:
+    never read by NS, D1 or D2 (verifier PR B, shadow). None when no unit carries one."""
+    from llm_router import northstar as ns
+
+    c = {"verified": 0, "weak": 0, "unavailable": 0}
+    for u in ns.units(days=days, backfill=True):
+        s = (u.get("verify") or {}).get("verify_status")
+        if s == "pass_f2p":
+            c["verified"] += 1
+        elif s == "pass_p2p":
+            c["weak"] += 1
+        elif s in ("unavailable", "not_applicable"):
+            c["unavailable"] += 1
+    return c if any(c.values()) else None
+
+
 # ── D3: redo rate, from usage_outcome ────────────────────────────────────────
 
 def _d3_redo_rate(days: int, allowed: frozenset[str], index) -> dict:
@@ -1057,6 +1074,7 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         "window_days": days,
         "include_research": include_research,
         "joins": joins,
+        "verify_shadow": _verify_shadow(days),
         "kpis": {
             "NS": ns_r, "O1": o1_r, "O2": o2_r,
             "D1": d1_r, "D2": d2_r, "D3": d3_r, "D4": d4_r, "D5": d5_r,
@@ -1167,6 +1185,10 @@ def render_scorecard(data: dict) -> str:
         lines.append(f"  {_LABELS[key]:<42s} {r['value']}")
         for extra in r.get("lines", ()):
             lines.append(f"      {extra}")
+        if key == "D2" and data.get("verify_shadow"):
+            v = data["verify_shadow"]
+            lines.append(f"      verify (shadow): {v['verified']} verified, {v['weak']} weak, "
+                         f"{v['unavailable']} unavailable (informational; not in NS/D1/D2)")
     lines.append("")
     lines.append(_join_line(data["joins"]))
     lines.append("O1 is never session-kind filtered (usage.db predates tagging); G3 is not "

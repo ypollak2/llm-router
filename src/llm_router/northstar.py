@@ -298,6 +298,7 @@ Public surface
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
 import re
@@ -396,6 +397,7 @@ class Unit:
 
     def to_dict(self) -> dict:
         return {
+            "unit_id": unit_id(self.session_id, self.kind, self.ts),
             "session_id": self.session_id,
             "ts": (datetime.fromtimestamp(self.ts, tz=timezone.utc).isoformat()
                    if self.ts is not None else None),
@@ -408,6 +410,21 @@ class Unit:
             "session_kind": self.session_kind,
             "session_kind_source": self.session_kind_source,
         }
+
+
+def unit_id(session_id: str | None, kind: str, ts: float | None) -> str | None:
+    """Stable id a verify record joins on. Units had none (a unit is derived, not stored),
+    so it is derived too: ``u_`` + the first 16 hex of sha256 over ``session_id``, ``kind``
+    and the unit's own timestamp as ``to_dict`` prints it (UTC isoformat, microseconds).
+    Outcome, signal and model are left out on purpose: they can be revised later, the id
+    must not move. None when the unit has no session or no timestamp (not joinable).
+    Known limit: two units of one kind in one session with the identical timestamp share
+    an id; a verify record then attaches to both (never to a different session or kind)."""
+    if not session_id or ts is None:
+        return None
+    iso = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+    raw = f"{session_id}\x1f{kind}\x1f{iso}".encode("utf-8", "replace")
+    return "u_" + hashlib.sha256(raw).hexdigest()[:16]
 
 
 @dataclass
@@ -827,6 +844,93 @@ def _load_north_star_ledger() -> list[dict]:
         if isinstance(row, dict):
             rows.append(row)
     return rows
+
+
+# ── verify records (verifier PR B, SHADOW) ──────────────────────────────────
+#
+# A second append-only row type in north_star_units.jsonl: {"unit_id", "verify": {...}}.
+# Same file as the unit rows (one ledger, one chmod 0600, one rotation story). Safe there:
+# every existing reader selects unit rows by ``lever == "agent_route_codex"`` or by
+# ``session_id``, and a verify row carries neither. SHADOW: ``units()`` attaches the dict as
+# an optional ``verify`` key; no outcome, NS, D1 or D2 reads it (pinned by
+# tests/test_verify_record.py). Only reason codes and counts are stored, never a test tail,
+# a command or prompt text.
+#
+# Duplicates: LAST record for a unit_id wins (append-only; a re-verify supersedes). A row
+# that is malformed (bad JSON, no str unit_id, verify not a dict, unknown status) is ignored,
+# and so is an orphan (a unit_id no unit has): neither can create or change a unit.
+
+VERIFY_STATUSES = ("pass_f2p", "pass_p2p", "fail", "unavailable", "not_applicable")
+_CODE_RX = re.compile(r"^[a-z0-9][a-z0-9_.:\-]{0,63}$")
+_MAX_FLAGS = 16
+
+
+def _code(value) -> str | None:
+    return value if isinstance(value, str) and _CODE_RX.match(value) else None
+
+
+def _count(value) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _clean_verify(raw) -> dict | None:
+    """The stored shape, or None when ``raw`` is not a usable verify dict. Free text cannot
+    pass: reason and flags must be short lowercase codes, anything else is replaced or dropped."""
+    if not isinstance(raw, dict) or raw.get("verify_status") not in VERIFY_STATUSES:
+        return None
+    status = raw["verify_status"]
+    flags = raw.get("verify_flags")
+    flags = [f for f in flags if _code(f)][:_MAX_FLAGS] if isinstance(flags, list) else []
+    level = "V1" if status in ("pass_f2p", "pass_p2p", "fail") else None
+    return {
+        "verify_level": level,
+        "verify_status": status,
+        "verify_reason": _code(raw.get("verify_reason")) or "invalid_reason",
+        "verify_n_candidates": _count(raw.get("verify_n_candidates")),
+        "verify_n_f2p": _count(raw.get("verify_n_f2p")),
+        "verify_ms": _count(raw.get("verify_ms")),
+        "verify_sandboxed": raw.get("verify_sandboxed") is True,
+        "verify_flags": flags,
+    }
+
+
+def verify_row(uid: str, result) -> dict:
+    """The ledger row for one ``toolkit.verify_unit.UnitResult`` (duck-typed: verify_status,
+    reason, n_candidates, n_f2p, ms, sandboxed, flags). Pure; PR C decides who appends it."""
+    verify = _clean_verify({
+        "verify_status": result.verify_status, "verify_reason": result.reason,
+        "verify_n_candidates": result.n_candidates, "verify_n_f2p": result.n_f2p,
+        "verify_ms": result.ms, "verify_sandboxed": result.sandboxed, "verify_flags": result.flags,
+    })
+    if verify is None:
+        raise ValueError(f"unknown verify_status {result.verify_status!r}")
+    return {"unit_id": uid, "verify": verify}
+
+
+def record_verify(uid: str, result) -> None:
+    """Append one verify row (O_APPEND, 0600). Not called by any hook yet (PR C)."""
+    row = verify_row(uid, result)
+    path = _north_star_units_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as fh:
+        fh.write(json.dumps(row) + "\n")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def load_verify_records(rows: list[dict] | None = None) -> dict[str, dict]:
+    """``unit_id -> verify dict`` from the ledger, last record wins."""
+    out: dict[str, dict] = {}
+    for row in (_load_north_star_ledger() if rows is None else rows):
+        uid = row.get("unit_id")
+        if row.get("lever") is not None or not isinstance(uid, str):
+            continue
+        verify = _clean_verify(row.get("verify"))
+        if verify is not None:
+            out[uid] = verify
+    return out
 
 
 # `delegated` means Codex was dispatched and returned, NOT that its result was
@@ -1271,11 +1375,15 @@ def units(days: int | None = 30, session_id: str | None = None,
     ``backfill=True`` lets ``session_kind`` resolve from the backfill sidecar as a
     last resort (``session_kind_source == "backfill"``); see ``build_sessions``."""
     sessions = build_sessions(days=days, root=root, session_id=session_id, backfill=backfill)
+    verify = load_verify_records()  # SHADOW: attached, never read by an outcome or a KPI
     for sid in sorted(sessions):
         su = sessions[sid]
         ordered = sorted(su.units, key=lambda u: (u.ts is None, u.ts if u.ts is not None else 0.0))
         for u in ordered:
-            yield u.to_dict()
+            d = u.to_dict()
+            if d["unit_id"] in verify:
+                d["verify"] = dict(verify[d["unit_id"]])
+            yield d
 
 
 def _percentile(values: list[float], p: float) -> float | None:
