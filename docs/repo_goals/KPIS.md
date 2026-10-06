@@ -62,6 +62,17 @@ session id.
    session, within 120 s of the unit, each verdict used once. Local units only (a verdict
    exists only for routed MCP events).
 
+4. **Transcript detector (source 4, OFF).** `src/llm_router/redo_signal.py` reads the session's Claude Code
+   transcript and flags a human prompt that re-asks (`claude:` / `native:` / `opus:`), corrects, complains
+   ("that didn't work", "try again" ...) or repeats the previous prompt. A unit is redone by it when a
+   flagged prompt falls in the next 2 human turns. It is disabled (`offload_share.REDO_SOURCE4_ENABLED =
+   False`): it changes no unit, and `o3.breakdown.redo_detector_n` still reports how many flagged prompts it saw.
+   It may be enabled only by a PR that cites a validation run on blind labels with precision >= 0.80 and
+   >= 15 true positives. The one run so far did not meet that: pattern version v2, test half n=150 labelled
+   pairs (window 2026-08-30 to 2026-10-06, 12 labelled redo), precision 2/5 and recall 2/12
+   (`~/.rsi/research/primary-plan/redo/test_result.json`, not in this repo). Until then redo-based bars are
+   "not informative".
+
 A unit that shows no redo but has fewer than 2 human turns after it (a recent turn, or the end of
 a session) is counted as not redone and also counted as `window_open`; the count is in the
 headline value (`n=..., K window-open`) because it can still become a redo.
