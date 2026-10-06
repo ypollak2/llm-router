@@ -23,6 +23,49 @@ benchmarks: 20 real tasks with hidden tests (`plan_implement`, n=20), graded Q&A
 (`complexity-v2/p1`), and a 180-prompt tier set (`complexity-v2/p_eval`, n=180). Today:
 **Claude 15/20, local 3/20** (`plan_implement`, n=20).
 
+**O3 — Offload share.** (units served by a local model OR by Claude Haiku, and NOT redone) /
+(all units), organic sessions only, 7-day window. Target >=60%. Printed as one extra line in
+`llm-router kpi` and `llm-router kpi --health` (outside NS, D1-D5 and the other KPIs: a test
+pins their output byte for byte, `tests/test_kpi_offload_share.py`). It is not part of the
+`--health` measured/blind/stale counts. Today: no figure is recorded here; run
+`llm-router kpi --since-policy <version>`.
+
+Code: `src/llm_router/offload_share.py`. The line also shows Haiku share, local share, and the
+redo rate per class (Haiku, local) with n. Below n=50 (units, or units in a class) it prints
+`too few to tell (n=N)`, never a percentage; with no unit it prints `not measurable`.
+
+*Units.* (a) Proxy-served Claude calls: `proxy_calls.jsonl` rows with `decision` forwarded or
+fallback and no 4xx/5xx upstream status. Class **Haiku** when `served_model` (else
+`requested_model`) names Haiku, else Claude. Claude Code's own side calls (`tier_reason ==
+side_call`: titles, summaries) are excluded and counted: the router did not choose them and
+nobody redoes them. (b) Proxy rows with `decision == served` (a local backend answered): class
+**local**. (c) `northstar.local_shadow_units()` (PR #284, `usage.db`
+`provenance='runtime'`, `final_provider='ollama'`): class **local**. A local unit with no
+`session_id` cannot be scoped to organic sessions: it is excluded and counted, the local share
+prints as `unknown`, and O3 is a lower bound. Today every such row in `usage.db` has no
+session id.
+
+*Redone.* A unit is redone when any of:
+
+1. **Escalation.** A later proxy row of the same conversation (session), in the unit's own
+   human turn or the next 2 human turns, has `tier_reason` `escalation` or
+   `escalation_under_pressure`: the proxy's own detector (`proxy/escalation.py`): a `claude:`,
+   `native:` or `opus:` re-ask, a contradiction, or failed tools. A human turn starts at a
+   non-side-call row whose `step_class` is not `continuation`.
+2. **Receipt band.** `user_signals.jsonl` has a `redone` press (last press per key wins) for
+   the unit's `msg_id`.
+3. **usage_outcome.** A `redone` verdict (`usage_outcome.py`) for a routed event in the same
+   session, within 120 s of the unit, each verdict used once. Local units only (a verdict
+   exists only for routed MCP events).
+
+A unit that shows no redo but has fewer than 2 human turns after it is counted as not redone and
+also counted as `window_open` on the line: it can still become a redo.
+
+*Since a policy version.* `--since-policy VERSION` adds `since policy VERSION` (units from the
+first proxy row stamped with that `tier_policy_version`) and `before it, same window`. If the
+version is not in the ledger the line says so; it does not print a number. The Haiku redo guard
+(`~/.rsi/research/local-usage/haiku_guard/`, outside the repo) uses this same redo definition.
+
 ## Drivers
 
 | ID | Driver | Definition |

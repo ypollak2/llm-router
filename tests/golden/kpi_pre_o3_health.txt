@@ -1,0 +1,18 @@
+llm-router kpi --health -- window=7d generated=2026-10-06T15:20:00Z
+  stale = newest data point older than 2.0d (live ledgers) or 30d (frozen benchmark, O2/D5)
+
+  NS  non-Claude-and-used share (target >80%) blind     n=0       no unit in window
+  O1  quota avoided                          blind     n=0       no routed calls with a recorded saving in period=week
+  O2  quality held                           blind     n=0       no LLM_ROUTER_KPI_BENCHMARK_PATH configured (KPI-SPEC calls this 'not measured')
+  D1  offered off Claude                     blind     n=0       no unit in window
+  D2  success when tried                     blind     n=0       no unit in window
+  D3  redo rate                              blind     n=0       no decided event in window
+  D4  tier mix                               measured  n=120     newest data point 1.0h old
+  D5  classifier accuracy                    blind     n=0       no LLM_ROUTER_KPI_BENCHMARK_PATH configured (KPI-SPEC calls this 'not measured')
+  G1  added latency (hook)                   blind     n=0       no hook invocation recorded in window (a hook records itself only after its installed copy is updated to a version that carries the recorder)
+  G1  added latency (proxy)                  blind     n=120     no proxy decisions with added_latency_s in window
+  G2  silent failures (fail-open / 100 calls) blind     n=0       no timestamped fail-open event and no recorded hook call exist yet, so there is no window to take a rate over
+  G3  ledger completeness (target >=99%)     blind     n=120     no proxy row carries tier_retry yet (the schema has not started)
+  G4  wrongly benched providers (target 0)   blind     n=0       no provider bench recorded in window (0 benches: 'none were wrong' cannot be told from 'none happened')
+
+1 measured, 12 blind, 0 stale (exit 0; --strict exits 1 if any KPI is blind)
