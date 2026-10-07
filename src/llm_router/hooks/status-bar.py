@@ -583,17 +583,13 @@ def _refresh_argv() -> list[str]:
 
 
 def _spawn_refresh() -> None:
-    """Detach one refresher. Never raises."""
+    """Detach one refresher through the package's one detached-spawn helper
+    (fork + execv, own session, no stdio; the status line tick uses it too).
+    Never raises."""
     try:
-        import subprocess
+        from llm_router.statusline_tick import _spawn_detached
 
-        subprocess.Popen(
-            _refresh_argv(),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        _spawn_detached(_refresh_argv())
     except Exception:  # noqa: BLE001 -- no refresh this time; the next prompt retries
         return
 
