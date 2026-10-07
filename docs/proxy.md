@@ -527,11 +527,13 @@ proxy is currently up.
 forwards every request, bytes in and bytes out, to the main proxy on
 `LLM_ROUTER_PROXY_UPSTREAM_PORT` (default 8797). When the main proxy cannot be
 reached — connection refused, connect slower than 200 ms, or the connection
-drops before a response — or answers 5xx before any byte reached the client, the
-shim sends the same request once to `https://api.anthropic.com` with the same
+drops before a response — or answers a 5xx of its own (one without Anthropic's
+`request-id` header) before any byte reached the client, the shim sends the same request once to `https://api.anthropic.com` with the same
 headers and records a `proxy_down` event (`failopen.record`, so it lands in
 `~/.llm-router/fail_open.jsonl` and KPI G2; code and reason only, never headers
-or content). Once a response byte has gone out nothing is retried.
+or content). Once a response byte has gone out nothing is retried. An Anthropic
+5xx relayed by a working main proxy (for example 529 overloaded) is passed through
+unchanged: retrying it would double the load and count a healthy proxy as down.
 
 Why: `settings.json` env beats the process env, so a session already running
 cannot be pointed elsewhere, and the SessionStart warning below only reaches the

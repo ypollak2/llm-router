@@ -13,7 +13,9 @@ The shim owns that port instead and stays deliberately small:
   ``LLM_ROUTER_PROXY_UPSTREAM_PORT``);
 * when the main proxy cannot be reached (connection refused, connect slower
   than 200 ms, or the connection drops before a response arrives), or answers
-  5xx before any byte went to the client, the same request goes once to
+  5xx of its own (no Anthropic ``request-id``; an Anthropic 5xx such as 529
+  overloaded is passed through) before any byte went to the client, the same
+  request goes once to
   ``https://api.anthropic.com`` with the same headers, and a ``proxy_down``
   event is recorded in the fail-open store (``failopen.record``; KPI G2);
 * once a response byte has gone to the client nothing is retried: the model
@@ -166,7 +168,10 @@ class _Shim:
             reason = "disconnected"
         except httpx.HTTPError as exc:
             reason = f"client_error:{type(exc).__name__}"
-        if resp is not None and resp.status_code >= 500:
+        if resp is not None and resp.status_code >= 500 and "request-id" not in resp.headers:
+            # A 5xx with Anthropic's request-id is Anthropic's own answer (e.g.
+            # 529 overloaded) relayed by a working main proxy: pass it through.
+            # Only a 5xx the main proxy produced itself is a proxy failure.
             reason = f"upstream_5xx:{resp.status_code}"
             await resp.aclose()
             resp = None

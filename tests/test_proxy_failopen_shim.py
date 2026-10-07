@@ -278,6 +278,29 @@ def test_direct_retry_also_5xx_is_returned_not_retried_again(state):
     assert len(main_hits) == 1 and len(direct_hits) == 1
 
 
+def test_anthropic_5xx_relayed_by_a_healthy_main_proxy_is_not_proxy_down(state):
+    """A 5xx that carries Anthropic's ``request-id`` was produced by Anthropic
+    and relayed by a working main proxy (e.g. 529 overloaded). Retrying it
+    direct would double the load on an overloaded API and count a healthy
+    proxy as ``proxy_down`` in G2, so it is passed through as is."""
+    async def anthropic_overloaded(request, body):
+        return web.json_response({"served_by": "main", "type": "error",
+                                  "error": {"type": "overloaded_error"}},
+                                 status=529, headers={"request-id": "req_synthetic"})
+
+    async def run():
+        async with _Upstream(anthropic_overloaded) as main, _Upstream(_named("direct")) as direct:
+            async with _Shim(_cfg(main.port, direct.url)) as s:
+                status, headers, body = await _post(s.url)
+        return status, headers, json.loads(body), main.hits, direct.hits
+
+    status, headers, data, main_hits, direct_hits = asyncio.run(run())
+    assert status == 529 and data["served_by"] == "main"
+    assert {k.lower(): v for k, v in headers.items()}.get("request-id") == "req_synthetic"
+    assert len(main_hits) == 1 and direct_hits == []
+    assert _failopen_rows(state) == []
+
+
 def test_main_4xx_is_returned_as_is_without_retry(state):
     async def run():
         async with _Upstream(_status(400, "main")) as main, _Upstream(_named("direct")) as direct:

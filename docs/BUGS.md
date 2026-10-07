@@ -188,7 +188,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   built, so the SessionStart warning only reaches the next session (plan v16 C10, L16).
 - **Fix.** `src/llm_router/proxy/failopen_shim.py` (D-17 = A): a small shim owns 8787 and
   forwards to the main proxy on 8797; on refused / >200 ms connect / disconnect before a response,
-  or a 5xx before any byte went out, it sends the request once to api.anthropic.com and records
+  or a 5xx of the main proxy's own (no Anthropic `request-id`) before any byte went out, it sends the request once to api.anthropic.com and records
   `proxy_down` in `fail_open.jsonl` (G2). `llm-router install --proxy-default` installs both
   services (main first, then the shim) and writes settings.json only after both answer. The live
   machine still runs the main proxy on 8787: the port move needs the owner (`bootout` +
@@ -197,6 +197,10 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `Server` header the main proxy sends (uvicorn's own next to Anthropic's): in the smoke, 2 of 4
   calls went direct while the main proxy was up. The shim's upstream leg now uses httpx (h11),
   which relays it, as Claude Code's own client does.
+- **Found in review.** The first build also retried every 5xx direct, including Anthropic's own
+  (529 overloaded) relayed by a healthy main proxy: that doubles the request during an overload
+  and counts a working proxy as `proxy_down`. A 5xx carrying Anthropic's `request-id` is now passed
+  through (`test_anthropic_5xx_relayed_by_a_healthy_main_proxy_is_not_proxy_down`).
 - **Test.** `tests/test_proxy_failopen_shim.py` (fails on da31df7: the module does not exist):
   `test_main_down_goes_direct_and_records_proxy_down`,
   `test_main_disconnects_before_responding_goes_direct`, `test_connect_timeout_goes_direct`,
