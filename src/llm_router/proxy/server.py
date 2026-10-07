@@ -151,8 +151,10 @@ class ProxyConfig:
     step_budget_s: float = DEFAULT_STEP_BUDGET_S
     model: str | None = None
     trim: str | None = None
-    # None = the table value for ``model`` (llm_router.local_models, M3.4),
-    # resolved in __post_init__; an explicit int (--num-ctx, env) is kept.
+    # None = the table value for the model that serves (llm_router.local_models,
+    # M3.4). With ``model`` pinned it is resolved in __post_init__; with no pin
+    # it stays None, and make_backend lets each policy-chosen model resolve its
+    # own value. An explicit int (--num-ctx, env) applies to every model.
     num_ctx: int | None = None
     upstream: str = ANTHROPIC_UPSTREAM
     ollama_url: str | None = None
@@ -180,7 +182,7 @@ class ProxyConfig:
     shadow_path: Path | None = None
 
     def __post_init__(self) -> None:
-        if self.num_ctx is None:
+        if self.num_ctx is None and self.model:
             self.num_ctx = local_models.num_ctx(self.model)
 
     @classmethod
