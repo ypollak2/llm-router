@@ -636,6 +636,13 @@ def test_a_forked_transcript_copy_never_decides_the_verdict_by_file_order():
     # stamped in B: B's copy (used, 3 turns after) wins even though A's copy is redone
     units = _build(local=[_local(t, sid="sess-B", tool="toolu_F")], outcomes=[b, a])["la"]
     assert [(u["session_id"], u["redone"]) for u in units] == [("sess-B", False)]
+    # no stamped copy, and the redone copy has the HIGHER session id: redone still wins,
+    # in either file order (a lowest-session-id rule would pick A's "used" copy)
+    a_used = _outcome("toolu_F", outcome="used", sid="sess-A", turns_after=3)
+    b_redone = _outcome("toolu_F", outcome="redone", sid="sess-B", turns_after=1)
+    for order in ([a_used, b_redone], [b_redone, a_used]):
+        units = _build(local=[_local(t, sid="sess-old", tool="toolu_F")], outcomes=order)["la"]
+        assert [(u["why"], u["redone"]) for u in units] == [("usage_outcome", True)], units
 
 
 def _pending_population(n, *, t0):
