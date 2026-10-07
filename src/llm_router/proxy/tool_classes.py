@@ -13,7 +13,7 @@ it. ``prev_tool_class`` on the ledger row names the class of those calls:
 
 Read-only Bash: ``git status|log|diff|show|branch|blame`` (``git branch`` only with read-only
 flags), ``ls``, ``cat``, ``head``, ``tail``, ``wc``, ``find`` (no ``-exec``/``-delete``/
-``-fprint``), ``rg``, ``grep``, ``tree`` (no ``-o``), formatters run with ``--check``, plus
+``-fprint``), ``rg`` (no ``--pre``), ``grep``, ``tree`` (no ``-o``), formatters run with ``--check``, plus
 ``cd`` and ``pwd``, which only navigate. Parts joined by ``&&``, ``||``, ``;``, ``|`` or a
 newline must ALL be read-only. Any output redirection other than to ``/dev/null`` or ``2>&1``,
 command substitution, process substitution or a background ``&`` makes the command ``exec``.
@@ -77,6 +77,8 @@ def _segment_is_read_only(segment: str) -> bool:
     if not words:
         return False
     cmd, args = words[0].rsplit("/", 1)[-1], words[1:]
+    if cmd == "rg":
+        return not any(a == "--pre" or a.startswith("--pre=") for a in args)   # --pre runs a command
     if cmd in _PLAIN_READERS:
         return True
     if cmd == "find":

@@ -70,6 +70,8 @@ EXEC = [
     "cat `ls`",
     "ls &",
     "tree -o out.txt",
+    "rg --pre ./unzip-and-run pattern",  # --pre runs a command on every file it searches
+    "rg --pre=sh pattern src",
     "black src",
     "ruff check --fix src",
     "ruff format src",
