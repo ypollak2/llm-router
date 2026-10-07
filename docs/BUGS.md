@@ -251,11 +251,16 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Cause.** `context_prep.py` passed the user prompt through `truncate_to_budget`.
 - **Fix.** The prompt is never truncated. Over its allocation, `calculate_budget` already gives
   system and context less room; when the prompt alone exceeds the model window minus the output
-  reserve, `prepare_prompt` raises `local_context_guard.ContextOverflow`. Live impact was
-  limited: `router.py` uses only `full_system` from `prepare_prompt` and sends the raw prompt,
-  and it catches the exception and continues without the enrichment; the provider-level guard
-  and chain failover then handle a prompt that does not fit.
+  reserve, `prepare_prompt` raises `local_context_guard.ContextOverflow`. A system prompt
+  (the auto one is outside the budget's system allocation) that does not fit next to the
+  prompt in that window is dropped. Live impact was limited: `router.py` uses only
+  `full_system` from `prepare_prompt` and sends the raw prompt. It catches the exception with
+  `except Exception`, logs it at debug level and continues without the system prompt and
+  enrichment; it does not escalate. Escalation comes only from the provider preflight
+  (`providers.call_llm`, `ollama/` models) and chain failover.
 - **Test.** `tests/test_p01_context_loss.py::test_200k_prompt_is_intact_when_it_fits_the_window`,
   `::test_200k_prompt_raises_context_overflow_when_over_the_window`,
-  `::test_user_prompt_is_never_shortened` (12 cases); `tests/test_context_prep.py::test_long_user_prompt_never_truncated_for_small_model`
+  `::test_user_prompt_is_never_shortened` (12 cases, outcome pinned per case: 3 raise, 9
+  intact), `::test_prompt_plus_auto_system_prompt_fits_the_window` (4 cases);
+  `tests/test_context_prep.py::test_long_user_prompt_never_truncated_for_small_model`
   replaces the test that pinned the bug.

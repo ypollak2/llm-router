@@ -115,6 +115,10 @@ def prepare_prompt(
         system = truncate_to_budget(existing_system_prompt, budget.system_tokens)
     else:
         system = get_system_prompt(task_type, complexity)
+    # The auto system prompt is not in the budget's system allocation; drop
+    # whatever system text does not fit next to the uncut prompt in the window.
+    if estimate_tokens(system) > budget.model_limit - budget.output_reserve - user_tokens:
+        system = ""
 
     # ── Context retrieval ─────────────────────────────────────────────────────
     context = ""

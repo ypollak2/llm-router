@@ -195,6 +195,13 @@ def test_200k_prompt_raises_context_overflow_when_over_the_window():
         prepare_prompt(prompt, TaskType.CODE, Complexity.SIMPLE, "ollama/gemma4:latest")
 
 
+# Expected outcome per case (QUERY/MODERATE): the three prompts that alone do
+# not fit the window raise; every other prompt comes back intact. Pinned per
+# case so a spurious overflow on a prompt that fits fails the test.
+_OVERFLOWS = {("ollama/gemma4:latest", 60_000), ("ollama/gemma4:latest", 200_000),
+              ("ollama/qwen3.5", 200_000)}
+
+
 @pytest.mark.parametrize("model", ["openai/gpt-4o", "ollama/gemma4:latest", "ollama/qwen3.5"])
 @pytest.mark.parametrize("n_chars", [100, 20_000, 60_000, 200_000])
 def test_user_prompt_is_never_shortened(model, n_chars):
@@ -203,9 +210,31 @@ def test_user_prompt_is_never_shortened(model, n_chars):
     from llm_router.types import Complexity, TaskType
 
     prompt = ("q " * n_chars)[:n_chars]
-    try:
-        result = prepare_prompt(prompt, TaskType.QUERY, Complexity.MODERATE, model)
-    except ContextOverflow:
+    if (model, n_chars) in _OVERFLOWS:
+        with pytest.raises(ContextOverflow):
+            prepare_prompt(prompt, TaskType.QUERY, Complexity.MODERATE, model)
         return
+    result = prepare_prompt(prompt, TaskType.QUERY, Complexity.MODERATE, model)
     intact = result.user_prompt == prompt  # a bool: a 200k-char diff crashes pytest's repr
     assert intact, f"user prompt changed: {len(prompt)} -> {len(result.user_prompt)} chars"
+
+
+@pytest.mark.parametrize("slack", [0, 10, 50, 299])
+def test_prompt_plus_auto_system_prompt_fits_the_window(slack):
+    """A prompt just under the window must not be pushed over it by the
+    unbudgeted auto system prompt (up to ~300 tokens)."""
+    from llm_router.context_prep import prepare_prompt
+    from llm_router.token_budget import calculate_budget
+    from llm_router.types import Complexity, TaskType
+
+    model = "ollama/gemma4:latest"
+    b = calculate_budget(model, TaskType.QUERY, Complexity.MODERATE, 1)
+    window = b.model_limit - b.output_reserve
+    prompt = "q " * ((window - slack) * 2)
+    assert estimate_tokens(prompt) == window - slack
+    result = prepare_prompt(prompt, TaskType.QUERY, Complexity.MODERATE, model)
+    assert result.user_prompt == prompt
+    sent = estimate_tokens(prompt) + (estimate_tokens(result.full_system) if result.full_system else 0)
+    assert sent <= window, (sent, window)
+    if slack == 299:  # room for the auto system prompt: it is kept, not dropped
+        assert result.system
