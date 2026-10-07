@@ -25,8 +25,8 @@ import tests.test_tq007_daily_cap_downgrade as t
 from llm_router import router as router_module
 from llm_router.config import RouterConfig, get_config
 from llm_router.northstar import QA_TASK_TYPES
-from llm_router.router import _build_and_filter_chain, _strip_local_for_qa
-from llm_router.types import Complexity, LLMResponse, RoutingProfile, TaskType
+from llm_router.router import _QA_STRIP_PROVIDERS, _build_and_filter_chain, _strip_local_for_qa
+from llm_router.types import LOCAL_PROVIDERS, Complexity, LLMResponse, RoutingProfile, TaskType
 
 OLLAMA = "ollama/qwen3.5:latest"
 # The five task types MCP llm() / llm_* tools can route. Each is Q&A except code.
@@ -48,6 +48,17 @@ def test_strip_removes_ollama_and_keeps_order_for_qa(task_type):
 def test_strip_removes_openai_compat_local_servers():
     chain = ["openai_compat/llama", "openai/gpt-4o"]
     assert _strip_local_for_qa(chain, TaskType.QUERY) == ["openai/gpt-4o"]
+
+
+def test_the_strip_set_is_derived_from_types_local_providers():
+    # One source of truth: every provider in types.LOCAL_PROVIDERS is stripped, plus
+    # openai_compat (local inference server, absent from LOCAL_PROVIDERS). A provider
+    # added to types.LOCAL_PROVIDERS must be stripped without touching router.py.
+    assert _QA_STRIP_PROVIDERS == LOCAL_PROVIDERS | {"openai_compat"}
+    assert not hasattr(router_module, "_LOCAL_PROVIDERS")
+    for provider in sorted(LOCAL_PROVIDERS):
+        chain = [f"{provider}/m", "openai/gpt-4o"]
+        assert _strip_local_for_qa(chain, TaskType.QUERY) == ["openai/gpt-4o"], provider
 
 
 def test_strip_leaves_code_untouched():
