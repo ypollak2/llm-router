@@ -88,6 +88,14 @@ A unit that shows no redo but has fewer than 2 human turns after it (a recent tu
 a session) is counted as not redone and also counted as `window_open`; the count is in the
 headline value (`n=..., K window-open`) because it can still become a redo.
 
+*Session-kind override.* `~/.llm-router/session_kind_overrides.json`, `{session_id: {"kind": ..., "reason": ...}}`,
+names a session whose tag or whose rows' own stamps are wrong and cannot be rewritten (the ledgers are
+append-only). Precedence for every reader: override, then the tag file, then the row's own stamp. NS, D1, D2,
+D3, O3 and D4/G1-proxy all obey it, and so do the proxy's and the edit ledger's stamps for rows written after
+it. G3 does not change: it measures whether the writer recorded a `session_kind`, not which kind. The first
+entry is session b9f04425, a research session (p_eval REPORT.txt) that held 99.3% of the organic turn-first
+rows in the pinned window W0. The JSON `joins` still counts it, so `llm-router kpi --include research` shows it.
+
 **The redo signal is sparse.** On live data (2026-10-06) the proxy ledger holds 1 escalation
 row in ~26k, so a low redo rate says little. The line prints `redo signal sparse:
 n_escalations=N` (when N < 50) and the redo rate must not be read as proven low.
@@ -97,6 +105,12 @@ first proxy row stamped with that `tier_policy_version`) and `before it, same wi
 version is not in the ledger the line says so; it does not print a number. The Haiku redo guard
 (`~/.rsi/research/local-usage/haiku_guard/`, outside the repo) uses this same redo definition and
 the same headline unit: its n_haiku is Haiku-served human turns, not calls.
+
+*Absolute windows.* `--since WHEN --until WHEN` (a date, an ISO time or epoch seconds; both
+required) replace `--days`, and "now" becomes `--until`. Use them for every historical check: a
+relative window empties as the ledgers go quiet. Rows outside `[since, until]` never count, in any
+KPI. O1's `usage.db` estimate only exists relative to now, so under a window O1 prints the
+reconciled figure or "not measurable". The JSON gains a `window` key (absent without the flags).
 
 ## Drivers
 

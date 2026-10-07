@@ -1,0 +1,402 @@
+{
+ "cont_big_context|rewrite=False": [
+  "claude-opus-5-5",
+  "opus",
+  "sticky",
+  "sonnet",
+  null,
+  false
+ ],
+ "cont_big_context|rewrite=True": [
+  "claude-opus-5-5",
+  "opus",
+  "sticky",
+  "sonnet",
+  null,
+  false
+ ],
+ "cont_builtin_tool|rewrite=False": [
+  "claude-opus-5-5",
+  "opus",
+  "sticky",
+  "haiku",
+  null,
+  false
+ ],
+ "cont_builtin_tool|rewrite=True": [
+  "claude-opus-5-5",
+  "opus",
+  "sticky",
+  "haiku",
+  null,
+  false
+ ],
+ "cont_clean_adaptive_sonnet_first_msg_short|rewrite=False": [
+  "claude-sonnet-5-5",
+  "sonnet",
+  "policy",
+  "sonnet",
+  null,
+  false
+ ],
+ "cont_clean_adaptive_sonnet_first_msg_short|rewrite=True": [
+  "claude-sonnet-5-5",
+  "sonnet",
+  "policy",
+  "sonnet",
+  null,
+  false
+ ],
+ "cont_clean_haiku_model|rewrite=False": [
+  "claude-haiku-4-5",
+  "haiku",
+  "thinking_floor",
+  "haiku",
+  null,
+  false
+ ],
+ "cont_clean_haiku_model|rewrite=True": [
+  "claude-haiku-4-5",
+  "haiku",
+  "haiku_rewrite",
+  "haiku",
+  "haiku",
+  false
+ ],
+ "cont_clean_no_output_config|rewrite=False": [
+  "claude-opus-5-5",
+  "opus",
+  "sticky",
+  "sonnet",
+  null,
+  false
+ ],
+ "cont_clean_no_output_config|rewrite=True": [
+  "claude-opus-5-5",
+  "opus",
+  "sticky",
+  "sonnet",
+  null,
+  false
+ ],
+ "cont_clean_no_thinking|rewrite=False": [
+  "claude-opus-5-5",
+  "opus",
+  "sticky",
+  "sonnet",
+  null,
+  false
+ ],
+ "cont_clean_no_thinking|rewrite=True": [
+  "claude-opus-5-5",
+  "opus",
+  "sticky",
+  "sonnet",
+  null,
+  false
+ ],
+ "cont_clean_opus|rewrite=False": [
+  "claude-opus-5-5",
+  "opus",
+  "sticky",
+  "sonnet",
+  null,
+  false
+ ],
+ "cont_clean_opus|rewrite=True": [
+  "claude-opus-5-5",
+  "opus",
+  "sticky",
+  "sonnet",
+  null,
+  false
+ ],
+ "cont_clean_sonnet|rewrite=False": [
+  "claude-sonnet-5-5",
+  "sonnet",
+  "policy",
+  "opus",
+  null,
+  false
+ ],
+ "cont_clean_sonnet|rewrite=True": [
+  "claude-sonnet-5-5",
+  "sonnet",
+  "policy",
+  "opus",
+  null,
+  false
+ ],
+ "cont_fable|rewrite=False": [
+  "claude-fable-5-1",
+  "fable",
+  "sticky",
+  "haiku",
+  null,
+  false
+ ],
+ "cont_fable|rewrite=True": [
+  "claude-fable-5-1",
+  "fable",
+  "sticky",
+  "haiku",
+  null,
+  false
+ ],
+ "cont_media|rewrite=False": [
+  "claude-opus-5-5",
+  "opus",
+  "policy",
+  "opus",
+  null,
+  false
+ ],
+ "cont_media|rewrite=True": [
+  "claude-opus-5-5",
+  "opus",
+  "policy",
+  "opus",
+  null,
+  false
+ ],
+ "cont_system_haiku_model|rewrite=False": [
+  "claude-haiku-4-5",
+  "haiku",
+  "thinking_floor",
+  "opus",
+  null,
+  false
+ ],
+ "cont_system_haiku_model|rewrite=True": [
+  "claude-haiku-4-5",
+  "haiku",
+  "thinking_floor",
+  "opus",
+  null,
+  false
+ ],
+ "cont_system_no_output_config|rewrite=False": [
+  "claude-opus-5-5",
+  "opus",
+  "policy",
+  "opus",
+  null,
+  false
+ ],
+ "cont_system_no_output_config|rewrite=True": [
+  "claude-opus-5-5",
+  "opus",
+  "policy",
+  "opus",
+  null,
+  false
+ ],
+ "cont_system_no_thinking|rewrite=False": [
+  "claude-opus-5-5",
+  "opus",
+  "sticky",
+  "haiku",
+  null,
+  false
+ ],
+ "cont_system_no_thinking|rewrite=True": [
+  "claude-opus-5-5",
+  "opus",
+  "sticky",
+  "haiku",
+  null,
+  false
+ ],
+ "cont_system_opus|rewrite=False": [
+  "claude-opus-5-5",
+  "opus",
+  "sticky",
+  "sonnet",
+  null,
+  false
+ ],
+ "cont_system_opus|rewrite=True": [
+  "claude-opus-5-5",
+  "opus",
+  "sticky",
+  "sonnet",
+  null,
+  false
+ ],
+ "cont_system_sonnet|rewrite=False": [
+  "claude-sonnet-5-5",
+  "sonnet",
+  "policy",
+  "opus",
+  null,
+  false
+ ],
+ "cont_system_sonnet|rewrite=True": [
+  "claude-sonnet-5-5",
+  "sonnet",
+  "policy",
+  "opus",
+  null,
+  false
+ ],
+ "cont_unknown_model|rewrite=False": [
+  "gpt-5.5",
+  null,
+  "unknown_model",
+  null,
+  null,
+  false
+ ],
+ "cont_unknown_model|rewrite=True": [
+  "gpt-5.5",
+  null,
+  "unknown_model",
+  null,
+  null,
+  false
+ ],
+ "cont_user_pinned|rewrite=False": [
+  "claude-opus-5-5",
+  "opus",
+  "user_pinned",
+  null,
+  null,
+  false
+ ],
+ "cont_user_pinned|rewrite=True": [
+  "claude-opus-5-5",
+  "opus",
+  "user_pinned",
+  null,
+  null,
+  false
+ ],
+ "first_haiku_model|rewrite=False": [
+  "claude-haiku-4-5",
+  "haiku",
+  "thinking_floor",
+  "opus",
+  null,
+  false
+ ],
+ "first_haiku_model|rewrite=True": [
+  "claude-haiku-4-5",
+  "haiku",
+  "haiku_rewrite",
+  "opus",
+  "haiku",
+  false
+ ],
+ "first_long_prompt|rewrite=False": [
+  "claude-opus-5-5",
+  "opus",
+  "long_first_prompt_floor",
+  null,
+  null,
+  false
+ ],
+ "first_long_prompt|rewrite=True": [
+  "claude-opus-5-5",
+  "opus",
+  "long_first_prompt_floor",
+  null,
+  null,
+  false
+ ],
+ "first_no_thinking|rewrite=False": [
+  "claude-sonnet-5-5",
+  "sonnet",
+  "thinking_floor",
+  "haiku",
+  null,
+  false
+ ],
+ "first_no_thinking|rewrite=True": [
+  "claude-haiku-4-5",
+  "haiku",
+  "haiku_rewrite",
+  "haiku",
+  "haiku",
+  false
+ ],
+ "first_no_tools_pinned_opus_prefix|rewrite=False": [
+  "claude-opus-5-5",
+  "opus",
+  "explicit_opus_pin",
+  null,
+  null,
+  false
+ ],
+ "first_no_tools_pinned_opus_prefix|rewrite=True": [
+  "claude-opus-5-5",
+  "opus",
+  "explicit_opus_pin",
+  null,
+  null,
+  false
+ ],
+ "first_opus|rewrite=False": [
+  "claude-sonnet-5-5",
+  "sonnet",
+  "thinking_floor",
+  "haiku",
+  null,
+  false
+ ],
+ "first_opus|rewrite=True": [
+  "claude-haiku-4-5",
+  "haiku",
+  "haiku_rewrite",
+  "haiku",
+  "haiku",
+  false
+ ],
+ "first_sonnet_no_thinking|rewrite=False": [
+  "claude-sonnet-5-5",
+  "sonnet",
+  "thinking_floor",
+  "haiku",
+  null,
+  false
+ ],
+ "first_sonnet_no_thinking|rewrite=True": [
+  "claude-haiku-4-5",
+  "haiku",
+  "haiku_rewrite",
+  "haiku",
+  "haiku",
+  false
+ ],
+ "first_sonnet|rewrite=False": [
+  "claude-sonnet-5-5",
+  "sonnet",
+  "policy",
+  "sonnet",
+  null,
+  false
+ ],
+ "first_sonnet|rewrite=True": [
+  "claude-sonnet-5-5",
+  "sonnet",
+  "policy",
+  "sonnet",
+  null,
+  false
+ ],
+ "side_call_no_tools|rewrite=False": [
+  "claude-opus-5-5",
+  "opus",
+  "side_call",
+  null,
+  null,
+  false
+ ],
+ "side_call_no_tools|rewrite=True": [
+  "claude-opus-5-5",
+  "opus",
+  "side_call",
+  null,
+  null,
+  false
+ ]
+}

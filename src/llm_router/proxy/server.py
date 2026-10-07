@@ -53,7 +53,7 @@ from urllib.parse import urlsplit
 from llm_router.local_agent import DEFAULT_MAX_PROMPT_TOKENS, LocalAgentConfig, enabled_from_env
 from llm_router.local_agent import capability as la_capability
 from llm_router.local_agent.compact import session_cwd as la_session_cwd
-from llm_router import failopen
+from llm_router import failopen, prompt_key
 from llm_router.proxy import ledger, local_mode, local_shadow, okf_context
 
 from llm_router.proxy.backend_health import (
@@ -81,10 +81,14 @@ from llm_router.proxy.loop_guard import (
     LoopGuard,
 )
 from llm_router.proxy.cache_cost import Stickiness, conversation_key
-from llm_router.proxy.steps import STEP_CLASSES, classify_text, is_first_call, prev_tools, session_id_of, step_class
+from llm_router.proxy.steps import (
+    STEP_CLASSES, classify_text, is_first_call, newest_human_text, prev_tools, session_id_of, step_class,
+)
 from llm_router import session_kind
 from llm_router.proxy import cost_accounting
-from llm_router.proxy.tiers import REASON_DECISION_ERROR, REWRITE_HAIKU, ClaudeTierPolicy
+from llm_router.proxy.tiers import (
+    REASON_DECISION_ERROR, REWRITE_HAIKU, ClaudeTierPolicy, haiku_block_reason, has_mid_conversation_system_message,
+)
 from llm_router.proxy.translate import (
     for_haiku,
     to_ollama,
@@ -598,6 +602,18 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             failopen.record("LR-FO-PROXY-SHADOW-START", exc)
             return None
 
+    def request_fields(body: dict, raw: bytes) -> dict:
+        """The M0.5 ledger fields, derived from the request's shape and a hash of
+        its newest human text. Never the text itself. A failure leaves honest
+        nulls (and a fail-open record): this path must never cost a call."""
+        fields: dict = {"text_sha": None, "has_mid_system": None, "req_bytes": len(raw)}
+        try:
+            fields["text_sha"] = prompt_key.key(newest_human_text(body))
+            fields["has_mid_system"] = has_mid_conversation_system_message(body)
+        except Exception as exc:  # noqa: BLE001 - fail-safe: the ledger gets nulls, the call goes on
+            failopen.record("LR-FO-PROXY-LEDGER-FIELDS", exc)
+        return fields
+
     async def decide_tier(body: dict, row: dict):
         """The tier rewrite's decision, written onto ``row``. Any error forwards
         the call unchanged and says why: this path must never cost a call."""
@@ -623,6 +639,13 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                    tier_detail=decision.detail,
                    tier_quota_pressure=decision.quota_pressure, tier_quota_state=decision.quota_state,
                    tier_decision_s=round(time.monotonic() - t0, 3))
+        if decision.proposed_tier == "haiku":
+            # Why Haiku could not serve this body (M0.5): the prevalence of
+            # `system_message` is what tells whether the fold (M0.7) is needed.
+            try:
+                row["tier_haiku_block"] = haiku_block_reason(body)
+            except Exception as exc:  # noqa: BLE001 - fail-safe: no field, the call goes on
+                failopen.record("LR-FO-PROXY-HAIKU-BLOCK", exc)
         return decision
 
     async def forward(request: Request, raw: bytes, body: dict | None, row: dict | None, *,
@@ -779,6 +802,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             "session_kind": session_kind.kind_of(session_id_of(body)),
             "tier_policy_version": tier_policy.policy_version if tier_policy is not None else None,
             "tier_proposed": None, "tier_retry": None,
+            # M0.5: request-shape and prompt-hash fields, never prompt text. The
+            # classifier columns say the verdict still comes from the rules and
+            # nothing is applied; M1 shadow and M2 canary fill them in.
+            **request_fields(body, raw),
+            "cls_source": "rules", "cls_ms": None, "cls_arm": None, "cls_applied": False,
         }
         if lm is not None:
             message = await local_step(body, row)
