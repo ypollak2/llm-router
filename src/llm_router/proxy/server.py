@@ -423,6 +423,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # Bounded: repo_facts can run several git calls; a slow attach must
             # not eat the step budget. On timeout the step goes ahead without it
             # (the worker thread finishes on its own and its result is dropped).
+            okf_t0 = time.perf_counter()
             try:
                 send, row["okf"] = await asyncio.wait_for(asyncio.to_thread(
                     okf_context.attach, send, body,
@@ -431,6 +432,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             except asyncio.TimeoutError as exc:
                 failopen.record("LR-FO-PROXY-OKF-ATTACH-TIMEOUT", exc)
                 row["okf"] = {"status": "timeout"}
+            # P0.9: context building, not the decision; reported beside it (S6).
+            _add_phase(row, "okf_attach", (time.perf_counter() - okf_t0) * 1000.0)
             backend_t0 = time.monotonic()
             message, err, backend_usage = await asyncio.wait_for(
                 backend.complete(send, cfg.step_budget_s), timeout=cfg.step_budget_s)
@@ -629,6 +632,12 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             failopen.record("LR-FO-PROXY-LEDGER-FIELDS", exc)
         return fields
 
+    def _add_phase(row: dict, name: str, ms: float) -> None:
+        """Add ``ms`` to ``row["tier_phases_ms"][name]`` (P0.9-e; names and
+        milliseconds only, never request content)."""
+        phases = row.setdefault("tier_phases_ms", {})
+        phases[name] = round(phases.get(name, 0.0) + ms, 2)
+
     async def decide_tier(body: dict, row: dict):
         """The tier rewrite's decision, written onto ``row``. Any error forwards
         the call unchanged and says why: this path must never cost a call."""
@@ -654,13 +663,17 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                    tier_detail=decision.detail,
                    tier_quota_pressure=decision.quota_pressure, tier_quota_state=decision.quota_state,
                    tier_decision_s=round(time.monotonic() - t0, 3))
+        for name, ms in (decision.phases_ms or {}).items():
+            _add_phase(row, name, ms)
         if decision.proposed_tier == "haiku":
             # Why Haiku could not serve this body (M0.5): the prevalence of
             # `system_message` is what tells whether the fold (M0.7) is needed.
+            hb_t0 = time.perf_counter()
             try:
                 row["tier_haiku_block"] = haiku_block_reason(body, fold_system=tier_policy.haiku_folds_system)
             except Exception as exc:  # noqa: BLE001 - fail-safe: no field, the call goes on
                 failopen.record("LR-FO-PROXY-HAIKU-BLOCK", exc)
+            _add_phase(row, "haiku_checks", (time.perf_counter() - hb_t0) * 1000.0)
         return decision
 
     async def forward(request: Request, raw: bytes, body: dict | None, row: dict | None, *,
@@ -858,7 +871,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if decision.body_rewrite == REWRITE_HAIKU:
             # Haiku 4.5 400s on `thinking.type: adaptive` and has no effort
             # parameter: serve it a body it accepts (translate.for_haiku).
+            fold_t0 = time.perf_counter()
             sent = for_haiku(sent, fold_system=tier_policy.haiku_folds_system)
+            _add_phase(row, "fold", (time.perf_counter() - fold_t0) * 1000.0)
             row["tier_body_rewrite"] = REWRITE_HAIKU
 
         def _on_retry() -> None:

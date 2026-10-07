@@ -456,7 +456,7 @@ def moderate(monkeypatch):
     async def choose(text, pinned, *, anthropic=False):
         assert anthropic is True
         return {"task_type": "code", "complexity": "moderate", "chain_head": [], "model": None}
-    monkeypatch.setattr(pb, "choose_model", choose)
+    monkeypatch.setattr(pb, "tier_classify", choose)
 
 
 async def test_rewrite_reaches_anthropic_with_tools_untouched_and_is_ledgered(tmp_path, moderate):
@@ -506,7 +506,7 @@ async def test_auth_failure_on_a_rewrite_is_not_retried(tmp_path, moderate):
 async def test_decision_error_forwards_unchanged_and_says_why(tmp_path, monkeypatch):
     async def boom(text, pinned, *, anthropic=False):
         raise RuntimeError("classifier exploded")
-    monkeypatch.setattr(pb, "choose_model", boom)
+    monkeypatch.setattr(pb, "tier_classify", boom)
     up = Upstream()
     app = _app(tmp_path, up)
     await _post(app, _first())
@@ -906,7 +906,7 @@ async def test_a_client_that_asked_for_haiku_directly_is_rewritten_only_with_the
 def simple(monkeypatch):
     async def choose(text, pinned, *, anthropic=False):
         return {"task_type": "query", "complexity": "simple", "chain_head": [], "model": None}
-    monkeypatch.setattr(pb, "choose_model", choose)
+    monkeypatch.setattr(pb, "tier_classify", choose)
 
 
 async def test_haiku_rewrite_reaches_anthropic_without_thinking_or_effort_and_is_ledgered(tmp_path, simple):
@@ -1139,7 +1139,7 @@ async def test_quota_fields_are_in_the_ledger(tmp_path, monkeypatch):
     async def choose(text, pinned, *, anthropic=False):
         return {"task_type": "code", "complexity": "complex", "chain_head": [], "model": None}
 
-    monkeypatch.setattr(pb, "choose_model", choose)
+    monkeypatch.setattr(pb, "tier_classify", choose)
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("LLM_ROUTER_HOME", str(home))
