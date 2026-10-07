@@ -60,6 +60,17 @@ def home(tmp_path, monkeypatch):
         "LLM_ROUTER_CONFIDENCE_THRESHOLD",
     ):
         monkeypatch.delenv(key, raising=False)
+    # tests/test_memory.py "restores" profiles._db_path / _learned_routes_file
+    # with lambdas pinned to ITS temp dir, which then leak into later tests on
+    # the same xdist worker (CI run 37661937790, test (3.11)). Re-pin both to
+    # resolve per call through LLM_ROUTER_HOME, restored after this test.
+    from llm_router import paths
+    from llm_router.memory import profiles
+
+    monkeypatch.setattr(profiles, "_db_path", lambda: paths.state_path("usage.db"))
+    monkeypatch.setattr(
+        profiles, "_learned_routes_file", lambda: paths.state_path("learned_routes.json")
+    )
     return state
 
 
