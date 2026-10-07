@@ -255,6 +255,21 @@ def test_run_once_trip_writes_override_turns_policy_off_and_leaves_yaml_untouche
     assert again["action"] == "already_off" and len(notes) == 1
 
 
+def test_run_once_ignores_daily_audits_older_than_the_window(tmp_path, monkeypatch):
+    """Two low audit days a month ago are not today's evidence: after the owner deletes the
+    override, the guard must not trip again on them (audit_daily dated outside the 7-day window)."""
+    now = time.time()
+    audits = tmp_path / "audits"
+    _summary(audits, hg._utc_day(now - 31 * 86400.0), 7, 10, mtime=now - 31 * 86400.0)
+    _summary(audits, hg._utc_day(now - 30 * 86400.0), 7, 10, mtime=now - 30 * 86400.0)
+    monkeypatch.setenv("LLM_ROUTER_HAIKU_GUARD_AUDIT_DIR", str(audits))
+    policy = pt.ClaudeTierPolicy.load(_yaml(tmp_path, True))
+    ev = hg.run_once(policy, now=now, read_rows=lambda: [], notify=lambda r, e: None)
+    t = ev["triggers"]["audit_daily"]
+    assert ev["action"] == "ok" and not t["tripped"] and not t["evaluable"]
+    assert policy.haiku_rewrite is True and not hg.override_path().exists()
+
+
 def test_run_once_quiet_ledger_is_ok_and_writes_nothing_but_status(tmp_path):
     y = _yaml(tmp_path, True)
     policy = pt.ClaudeTierPolicy.load(y)

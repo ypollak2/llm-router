@@ -30,7 +30,8 @@ TRIGGERS (any one trips; a trigger below its minimum n is "not evaluable" and ne
 * ``audit_batch`` (ported, M0.8b): the newest audit summary with a ``haiku`` arm has n_rated >=
   ``AUDIT_MIN_N`` (30) and acceptable < ``AUDIT_MIN_ACCEPTABLE`` (75%).
 * ``audit_daily`` (D-20): the daily blind audit of Haiku-served turns is acceptable below 8/10
-  (``DAILY_AUDIT_MIN_RATE``, at n >= ``DAILY_AUDIT_MIN_N`` = 10) on 2 consecutive days.
+  (``DAILY_AUDIT_MIN_RATE``, at n >= ``DAILY_AUDIT_MIN_N`` = 10) on 2 consecutive days. The guard
+  looks only at audit days inside its ``WINDOW_DAYS`` window, so an old audit cannot trip it again.
 * ``tier_retry`` (D-20): among Haiku-decided calls (the router chose the ``haiku`` tier for a
   call the client sent to another model; side calls excluded), the share Anthropic refused and
   the proxy retried unchanged (``tier_retry`` set) is > 1% at n >= 100.
@@ -346,12 +347,16 @@ def audits_by_day(audits: list[dict]) -> dict[str, dict]:
     return out
 
 
-def audit_daily_trigger(audits: list[dict], day: str | None) -> dict:
+def audit_daily_trigger(audits: list[dict], day: str | None, *, since: float | None = None) -> dict:
     """D-20: Haiku acceptable < 8/10 on ``day`` and on the day before it, each at n >= 10.
-    Evaluable when ``day`` itself has n >= 10. ``day`` None = the newest audited date."""
+    Evaluable when ``day`` itself has n >= 10. ``day`` None = the newest audited date on or
+    after ``since`` (UTC day), so an old audit can never trip the guard again after the owner
+    deletes the override."""
     days = audits_by_day(audits)
     if day is None:
-        day = max(days) if days else None
+        floor = _utc_day(since) if since is not None else ""
+        recent = [d for d in days if d >= floor]
+        day = max(recent) if recent else None
     bar = f"< {DAILY_AUDIT_MIN_RATE * 10:.0f}/10 at n>={DAILY_AUDIT_MIN_N} on {DAILY_AUDIT_DAYS} consecutive days"
     if day is None or day not in days:
         return _trigger("audit_daily", n=0, k=0, min_n=DAILY_AUDIT_MIN_N, tripped=False, value="",
@@ -416,7 +421,7 @@ def evaluate(rows: list[dict], *, since: float, until: float, kinds: frozenset[s
         "redo": redo_trigger(rows, since=since, until=until, kinds=kinds, band_redone=band_redone,
                              kind_of=kind_of),
         "audit_batch": audit_batch_trigger(audits),
-        "audit_daily": audit_daily_trigger(audits, audit_day),
+        "audit_daily": audit_daily_trigger(audits, audit_day, since=since),
         "tier_retry": tier_retry_trigger(rows, since=since, until=until, kinds=kinds, kind_of=kind_of),
         "shadow": shadow_trigger(shadow_rows, until=until),
     }

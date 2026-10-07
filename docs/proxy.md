@@ -441,7 +441,7 @@ proxy. Triggers (one is enough; a trigger below its minimum n never trips):
 |---|---|
 | `redo` | Haiku-served human turns (O3 units and redo definition, last 7 days) n >= 30 and redo > 15% |
 | `audit_batch` | newest audit summary with a `haiku` arm: n >= 30 and acceptable < 75% |
-| `audit_daily` | daily blind audit acceptable < 8/10 (n >= 10) on 2 consecutive days |
+| `audit_daily` | daily blind audit acceptable < 8/10 (n >= 10) on 2 consecutive days, the newer one inside the last 7 days |
 | `tier_retry` | Haiku-decided calls: share refused and retried unchanged > 1% at n >= 100 |
 | `shadow` | Haiku-vs-Frontier shadow verdicts (14 days): acceptable < 26/30 at n >= 20 |
 
