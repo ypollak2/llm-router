@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
+import threading
 import time
 from pathlib import Path
 
@@ -287,6 +289,72 @@ async def test_a_long_history_is_assembled_off_the_request_path(tmp_path, monkey
     await app.state.cls_shadow.drain()
     assert len(fake.calls) == 5 and len(_records(tmp_path)) == 5
     assert all(c["assembled"].prompt.startswith("final prompt number") for c in fake.calls)
+
+
+async def test_assemble_never_holds_the_event_loop(tmp_path, monkeypatch, simple):
+    """The test above reads only the posting call's own decision time and drains after each post, so ``assemble``
+    run inline in the task (45+ ms of walking a long history on the loop) would pass it while stalling every
+    concurrent call. Here the loop itself is watched (the M1.3 check): ``assemble`` is made to take 150 ms
+    WITHOUT holding the GIL (a sleep), so a pass means it ran off the loop, not that threads interleaved.
+    A ticker records its gaps and asyncio debug logs any callback over 50 ms; a continuation is posted while
+    the assemble is in flight and must come back fast."""
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "shadow")
+    FakeClassifier(monkeypatch)
+    app = _shadow_app(tmp_path)
+    in_flight = threading.Event()
+
+    def slow_assemble(body):
+        in_flight.set()
+        time.sleep(0.15)
+        return assemble(body)
+    monkeypatch.setattr(ls, "assemble", slow_assemble)
+
+    loop = asyncio.get_running_loop()
+    gaps: list[float] = []
+    stop = False
+
+    async def ticker():
+        last = loop.time()
+        while not stop:
+            await asyncio.sleep(0.005)
+            now = loop.time()
+            gaps.append(now - last)
+            last = now
+
+    slow: list[str] = []
+
+    class Collect(logging.Handler):
+        def emit(self, record):
+            if "took" in record.getMessage():
+                slow.append(record.getMessage())
+    handler, alog = Collect(), logging.getLogger("asyncio")
+    was_debug, was_slow = loop.get_debug(), loop.slow_callback_duration
+    loop.set_debug(True)
+    loop.slow_callback_duration = 0.05
+    alog.addHandler(handler)
+    await asyncio.sleep(0)                               # debug timing applies from the NEXT loop step
+    tick = asyncio.ensure_future(ticker())
+    try:
+        for i in range(3):
+            in_flight.clear()
+            assert (await _post(app, _turn(f"long history turn {i}", sid=f"{i}" * 8 + SID[8:]))).status_code == 200
+            await asyncio.to_thread(in_flight.wait, 2.0)          # the assemble is now running
+            t = time.perf_counter()
+            cont = _req()                                    # a continuation (no new human turn)
+            assert (await _post(app, cont)).status_code == 200
+            assert time.perf_counter() - t < 0.12, "a continuation waited for the assemble"
+            await app.state.cls_shadow.drain()
+        stop = True
+        await tick
+    finally:
+        stop = True
+        alog.removeHandler(handler)
+        loop.set_debug(was_debug)
+        loop.slow_callback_duration = was_slow
+    assert len(gaps) > 20, f"the ticker barely ran ({len(gaps)} ticks)"
+    assert max(gaps) < 0.05, f"event loop was held for {max(gaps) * 1000:.0f} ms ({len(gaps)} ticks)"
+    assert slow == [], slow
+    assert len(_records(tmp_path)) == 3
 
 
 async def test_the_scheduling_cost_is_inside_the_ledgered_decision_time(tmp_path, monkeypatch, simple):
