@@ -586,6 +586,26 @@ def test_stdout_summary_parser():
     assert VU.stdout_summary("\x1b[31m1 failed\x1b[0m, \x1b[32m2 passed\x1b[0m in 0.1s") == {"failed": 1, "passed": 2}
 
 
+def _junit(path: Path, failures: int) -> Path:
+    cases = "".join(f'<testcase name="t{i}"><failure/></testcase>' for i in range(failures))
+    path.write_text(f'<testsuite>{cases}<testcase name="ok"/></testsuite>')
+    return path
+
+
+def test_report_mismatch_with_absent_failed_and_errors_counts(tmp_path):
+    """A summary with no "failed"/"errors" word ("3 passed") reports zero failures: absence is
+    handled explicitly, not coerced to 0 inside the comparison (S9 lint ratchet)."""
+    j0, j1 = _junit(tmp_path / "j0.xml", 0), _junit(tmp_path / "j1.xml", 1)
+    ok = V.VerifyRun(rc=0, junit=True, tail="3 passed in 0.10s\n")
+    assert VU.report_mismatch(ok, j0) is False                 # absent counts == 0 == junit
+    lie = V.VerifyRun(rc=1, junit=True, tail="3 passed in 0.10s\n")
+    assert VU.report_mismatch(lie, j1) is True                 # junit has 1 failure, summary says none
+    only_err = V.VerifyRun(rc=1, junit=True, tail="1 error, 2 passed in 0.10s\n")
+    assert VU.report_mismatch(only_err, j1) is False           # "failed" absent, "errors" present
+    no_summary = V.VerifyRun(rc=1, junit=True, tail="no summary line\n")
+    assert VU.report_mismatch(no_summary, j1) is False         # no summary at all: leg skipped
+
+
 OBFUSCATED = '''import importlib
 
 _m = importlib.import_module("_py" + "test.rep" + "orts")
