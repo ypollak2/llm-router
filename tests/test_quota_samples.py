@@ -55,7 +55,7 @@ def _rows(path: Path) -> list[dict]:
 def test_fresh_snapshot_is_measured():
     s = qs.sample_from_usage(FRESH, now=NOW)
     assert s == {"five_hour_pct": 12.0, "weekly_pct": 41.0,
-                 "updated_at": NOW - 60, "source": "measured"}
+                 "updated_at": NOW - 60, "five_hour_resets_at": None, "source": "measured"}
 
 
 def test_snapshot_older_than_30_min_is_stale_but_keeps_its_values():
@@ -100,7 +100,7 @@ def test_append_session_sample_writes_one_row_0600(home):
     assert row["ts"] == NOW and row["source"] == "measured"
     assert row["five_hour_pct"] == 12.0 and row["weekly_pct"] == 41.0
     assert set(row) <= {"session_id", "kind", "ts", "five_hour_pct", "weekly_pct",
-                        "updated_at", "source", "session_kind"}
+                        "updated_at", "five_hour_resets_at", "source", "session_kind"}
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
 
 
@@ -148,7 +148,7 @@ def test_tick_appends_history_at_most_every_300_s(home):
     rows = _rows(home / tick.HISTORY_NAME)
     assert [r["ts"] for r in rows] == [NOW, NOW + 300]
     assert rows[0] == {"ts": NOW, "five_hour_pct": 12.0, "weekly_pct": 41.0,
-                       "updated_at": NOW - 60, "source": "measured"}
+                       "updated_at": NOW - 60, "five_hour_resets_at": None, "source": "measured"}
     assert stat.S_IMODE(os.stat(home / tick.HISTORY_NAME).st_mode) == 0o600
 
 
@@ -245,6 +245,66 @@ def test_burn_counts_a_window_reset_and_keeps_the_burn_after_it(home):
     assert m["five_hour_delta_sum"] == pytest.approx(15.0)
     assert m["five_hour_resets"] == 1
     assert m["weekly_delta_sum"] == pytest.approx(2.0)
+
+
+R1 = "2026-10-08T02:29:59.848187+00:00"   # usage.json session_resets_at (ISO string)
+R2 = "2026-10-08T07:29:59.848187+00:00"   # the next 5h window
+
+
+def _sr(sid, kind, ts, h5, wk, resets_at):
+    row = _s(sid, kind, ts, h5, wk)
+    row["five_hour_resets_at"] = qs._epoch(resets_at)
+    return row
+
+
+def test_sample_carries_the_five_hour_reset_time():
+    s = qs.sample_from_usage(dict(FRESH, session_resets_at=R1), now=NOW)
+    assert s["five_hour_resets_at"] == pytest.approx(1791427799.848187)
+    assert qs.sample_from_usage(FRESH, now=NOW)["five_hour_resets_at"] is None
+    assert qs.sample_from_usage(dict(FRESH, session_resets_at="garbage"), now=NOW)["five_hour_resets_at"] is None
+    for usage in (dict(FRESH, session_resets_at=R1), dict(FRESH, session_resets_at="x"),
+                  dict(FRESH, session_resets_at=R1, is_fallback=True)):
+        assert tick.quota_sample(usage, NOW) == qs.sample_from_usage(usage, now=NOW), usage
+
+
+def test_reset_seen_by_reset_time_counts_the_new_reading_even_when_it_is_higher(home):
+    # 40 in window R1; the window rolls over to R2 and the session burns 50 there.
+    # The 50 points are this session's burn, not 50 - 40 = 10.
+    _write_samples(home, [_sr("A", "start", NOW, 40, 40, R1), _sr("A", "stop", NOW + 60, 50, 41, R2)])
+    _tag(home, "A", NOW)
+    m = qs.quota_burn(NOW - 1, NOW + 1000)["measured"]
+    assert m["five_hour_delta_sum"] == pytest.approx(50.0)
+    assert m["five_hour_resets"] == 1
+
+
+def test_small_drop_inside_one_window_is_not_a_reset(home):
+    # Same reset time, 45 -> 44.9 -> 46: jitter, burn 1.1, no reset (adding 44.9 would be a 40x error).
+    _write_samples(home, [_sr("A", "start", NOW, 45, 40, R1), _sr("A", "stop", NOW + 60, 44.9, 40, R1),
+                          _sr("A", "stop", NOW + 120, 46, 40, R1)])
+    _tag(home, "A", NOW)
+    m = qs.quota_burn(NOW - 1, NOW + 1000)["measured"]
+    assert m["five_hour_delta_sum"] == pytest.approx(1.1)
+    assert m["five_hour_resets"] == 0
+
+
+def test_reset_time_wins_over_the_drop_size(home):
+    # Same reset time on both readings: even a 10-pt drop is not a reset (burn 5, not 50 + 5).
+    _write_samples(home, [_sr("A", "start", NOW, 60, 40, R1), _sr("A", "stop", NOW + 60, 50, 40, R1),
+                          _sr("A", "stop", NOW + 120, 55, 40, R1)])
+    _tag(home, "A", NOW)
+    m = qs.quota_burn(NOW - 1, NOW + 1000)["measured"]
+    assert m["five_hour_delta_sum"] == pytest.approx(5.0)
+    assert m["five_hour_resets"] == 0
+
+
+def test_small_drop_without_a_reset_time_is_not_a_reset(home):
+    # weekly has no reset time in usage.json: 41 -> 40.8 -> 41.5 is jitter (burn 0.7), not a reset.
+    _write_samples(home, [_s("A", "start", NOW, 10, 41), _s("A", "stop", NOW + 60, 11, 40.8),
+                          _s("A", "stop", NOW + 120, 12, 41.5)])
+    _tag(home, "A", NOW)
+    m = qs.quota_burn(NOW - 1, NOW + 1000)["measured"]
+    assert m["weekly_delta_sum"] == pytest.approx(0.7)
+    assert m["five_hour_delta_sum"] == pytest.approx(2.0)
 
 
 def test_stale_samples_are_estimated_and_kept_out_of_the_measured_line(home):

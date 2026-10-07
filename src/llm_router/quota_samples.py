@@ -31,6 +31,7 @@ import math
 import os
 import random
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,10 @@ KINDS = ("start", "stop")
 SOURCE_MEASURED = "measured"
 SOURCE_STALE = "stale"
 _BOOT_RESAMPLES = 2000
+#: Two 5h reset times further apart than this name two different windows.
+RESET_TIME_TOLERANCE_S = 120.0
+#: With no reset time to decide, a drop smaller than this is jitter, not a reset.
+RESET_MIN_DROP_PTS = 5.0
 
 
 def _num(value: Any) -> float | None:
@@ -56,17 +61,36 @@ def _num(value: Any) -> float | None:
     return float(value)
 
 
+def _epoch(value: Any) -> float | None:
+    """Epoch seconds from ``usage.json``'s ``session_resets_at`` (ISO string or a
+    number); None when absent or unreadable. A naive time is read as UTC."""
+    if isinstance(value, str) and value:
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    v = _num(value)
+    return v if v is not None and 0 < v < float("inf") else None
+
+
 def sample_from_usage(usage: Any, *, now: float) -> dict[str, Any]:
-    """``{five_hour_pct, weekly_pct, updated_at, source}`` for one ``usage.json`` dict."""
+    """``{five_hour_pct, weekly_pct, updated_at, five_hour_resets_at, source}`` for
+    one ``usage.json`` dict. ``five_hour_resets_at`` tells a 5h window reset from
+    jitter in :func:`_burn`."""
+    resets_at = _epoch(usage.get("session_resets_at")) if isinstance(usage, dict) else None
     if not isinstance(usage, dict) or usage.get("pending") or usage.get("is_fallback"):
         return {"five_hour_pct": None, "weekly_pct": None,
                 "updated_at": _num(usage.get("updated_at")) if isinstance(usage, dict) else None,
-                "source": SOURCE_STALE}
+                "five_hour_resets_at": resets_at, "source": SOURCE_STALE}
     h5, wk = _num(usage.get("session_pct")), _num(usage.get("weekly_pct"))
     updated = _num(usage.get("updated_at"))
     fresh = updated is not None and updated > 0 and 0 <= now - updated <= STALE_AFTER_S
     measured = fresh and h5 is not None and wk is not None
     return {"five_hour_pct": h5, "weekly_pct": wk, "updated_at": updated,
+            "five_hour_resets_at": resets_at,
             "source": SOURCE_MEASURED if measured else SOURCE_STALE}
 
 
@@ -197,16 +221,25 @@ def _kind_for(session_id: str, rows: list[dict], tagged: dict[str, str]) -> str 
         return None
 
 
-def _burn(values: list[float]) -> tuple[float, int]:
-    """Sum of the increases between consecutive readings, and the count of drops
-    (a drop is the quota window resetting; the burn after it still counts)."""
+def _burn(values: list[float], resets_at: list[float | None] | None = None) -> tuple[float, int]:
+    """Sum of the increases between consecutive readings, and the count of window resets.
+
+    A reset is a changed 5h reset time (``resets_at``), or, where either reading has
+    no reset time, a drop of at least :data:`RESET_MIN_DROP_PTS`. After a reset the
+    window restarted at ~0, so the new reading is all burn, even when it is higher
+    than the old one. A smaller drop inside one window is jitter and burns nothing."""
     total, resets = 0.0, 0
-    for a, b in zip(values, values[1:]):
-        if b >= a:
-            total += b - a
-        else:
+    marks = resets_at if resets_at is not None else [None] * len(values)
+    for (a, b), (ra, rb) in zip(zip(values, values[1:]), zip(marks, marks[1:])):
+        known = ra is not None and rb is not None
+        if known and abs(rb - ra) > RESET_TIME_TOLERANCE_S:
             resets += 1
-            total += b  # the window restarted at ~0 and has burned b since
+            total += b
+        elif b >= a:
+            total += b - a
+        elif not known and a - b >= RESET_MIN_DROP_PTS:
+            resets += 1
+            total += b
     return total, resets
 
 
@@ -303,7 +336,8 @@ def quota_burn(since: float, until: float, *, include_research: bool = False) ->
         use, bucket = (good, measured) if len(good) >= 2 else (numeric, estimated)
         if len(use) < 2:
             continue
-        h5, resets = _burn([float(r["five_hour_pct"]) for r in use])
+        h5, resets = _burn([float(r["five_hour_pct"]) for r in use],
+                           [_num(r.get("five_hour_resets_at")) for r in use])
         wk, _ = _burn([float(r["weekly_pct"]) for r in use])
         bucket.append({"session_id": sid, "turns": turns, "five_hour": h5, "weekly": wk,
                        "resets": resets})

@@ -41,6 +41,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
 
 # subprocess / shlex are imported only on the rare path that needs them: on this
 # machine's python3 they add ~15 ms to a tick, and the bar is 100 ms.
@@ -310,22 +311,38 @@ def maybe_refresh(home: str, cache: dict | None, now: float) -> bool:
         return False
 
 
+def _epoch(value) -> float | None:
+    """Copy of ``quota_samples._epoch``: ``session_resets_at`` as epoch seconds."""
+    if isinstance(value, str) and value:
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    v = _num(value)
+    return v if v is not None and 0 < v < float("inf") else None
+
+
 def quota_sample(usage: dict | None, now: float) -> dict:
-    """``{five_hour_pct, weekly_pct, updated_at, source}`` from a usage.json dict.
+    """``{five_hour_pct, weekly_pct, updated_at, five_hour_resets_at, source}`` from a usage.json dict.
 
     The tick cannot import ``llm_router``, so this is a copy of
     ``quota_samples.sample_from_usage``; tests/test_quota_samples.py pins both to
     the same answers. ``measured`` needs real numbers no older than
     :data:`QUOTA_STALE_AFTER_S`; anything else is ``stale``, unknown values null."""
+    resets_at = _epoch(usage.get("session_resets_at")) if isinstance(usage, dict) else None
     if not isinstance(usage, dict) or usage.get("pending") or usage.get("is_fallback"):
         return {"five_hour_pct": None, "weekly_pct": None,
                 "updated_at": _num(usage.get("updated_at")) if isinstance(usage, dict) else None,
-                "source": "stale"}
+                "five_hour_resets_at": resets_at, "source": "stale"}
     h5, wk = _num(usage.get("session_pct")), _num(usage.get("weekly_pct"))
     updated = _num(usage.get("updated_at"))
     fresh = updated is not None and updated > 0 and 0 <= now - updated <= QUOTA_STALE_AFTER_S
     measured = fresh and h5 is not None and wk is not None
     return {"five_hour_pct": h5, "weekly_pct": wk, "updated_at": updated,
+            "five_hour_resets_at": resets_at,
             "source": "measured" if measured else "stale"}
 
 
