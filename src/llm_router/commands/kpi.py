@@ -81,6 +81,11 @@ SCOPE, stated rather than implied:
   are shown from the fail-open ledger (``CHZ-HOOK-KILLED``). The proxy-side half is
   G1_proxy: p50 / p95 of ``tier_decision_s`` in proxy_calls.jsonl, turn-first and
   continuation calls apart.
+* **classifier shadow** (informational, outside ``kpis``) is the local LLM classifier's
+  shadow log (``classifier_shadow.jsonl``, written by ``proxy/llm_shadow``): calls, sessions,
+  agreement with the rules' tier, tier distributions, cheap share, fallback rate, p50 / p95 ms,
+  drops and calls per turn. Organic sessions only unless research is included; hashes and
+  tiers only. See ``_classifier_shadow_summary`` for each definition.
 * **G2 silent failures** is fail-open events per 100 calls over the window, from
   the ``ts`` every ``failopen.record`` row now carries. "Calls" are the hook
   invocations plus the proxy calls recorded in the window, all session kinds,
@@ -1638,6 +1643,114 @@ def _proxy_shadow_line(s: dict | None) -> str | None:
             "(reason codes only; informational, never in NS, D1 or D2)")
 
 
+def _classifier_shadow_summary(days: float, win: "_Window | None" = None,
+                               allowed: "frozenset[str] | None" = None, index=None,
+                               ledger_rows: "list[dict] | None" = None) -> dict:
+    """The local LLM classifier's shadow log (``proxy/llm_shadow``, M1.6) in the window: how
+    often it answered, how often it agreed with the rules, how slow and how cheap it is.
+    Its own file, which ``units()`` and the proxy ledger never read, so it cannot move NS, D1
+    or D2. Hashes, tiers and numbers only.
+
+    Population: a record counts when its session resolves to an ``allowed`` kind (the stamp
+    the record was written with, the ledger and the tag file decide; no kind is never
+    organic). ``allowed=None`` counts every record. ``n`` is LLM calls (one row per call,
+    cache hits are never logged); ``fallback_rate`` is calls with no usable verdict
+    (timeout, parse error, cold model) over ``n``. ``agree`` compares the LLM's tier with
+    the rules' ``tier_proposed`` on answered calls where the rules proposed one; ``local``
+    counts as Haiku (it is Haiku-and-local-eligible). Both tier distributions and
+    ``cheap_share_llm`` are over the answered calls. ``p50_ms`` / ``p95_ms`` are over real
+    model calls (``source=llm``). ``calls_per_turn`` is calls over distinct
+    (session, text) turns. ``cls_applied_true`` counts ledger rows that say a verdict was
+    applied: it must be 0 while the classifier is shadow only."""
+    from llm_router.proxy import llm_shadow
+
+    try:
+        recs = llm_shadow.read_records(days=_wall_days(days, win))
+        if win is not None:
+            recs = [r for r in recs if win.covers(r.get("ts"))]
+    except Exception:  # noqa: BLE001 -- informational line must never break the scorecard
+        recs = []
+    kept: list[dict] = []
+    excluded = 0
+    for r in recs:
+        if allowed is None:
+            kept.append(r)
+            continue
+        stamp = r.get("session_kind")
+        kind = (index.resolve(r.get("session_id"), stamp).kind if index is not None
+                else (session_kind.override_of(r.get("session_id")) or stamp))
+        if kind in allowed:
+            kept.append(r)
+        else:
+            excluded += 1
+    calls = [r for r in kept if r.get("kind") == llm_shadow.KIND]
+    drops = sum(1 for r in kept if r.get("kind") == llm_shadow.KIND_DROP)
+    answered = [r for r in calls if r.get("source") in ("llm", "cache")]
+    model_ms = sorted(float(r["ms"]) for r in calls
+                      if r.get("source") == "llm" and isinstance(r.get("ms"), (int, float)))
+
+    def tier_of(r: dict, side: str) -> str | None:
+        t = (r.get(side) or {}).get("tier")
+        return t if isinstance(t, str) else None
+
+    def merged(t: str | None) -> str | None:
+        return "haiku" if t == "local" else t   # local = Haiku-and-local-eligible
+
+    compared = [r for r in answered if tier_of(r, "rules") and tier_of(r, "llm")]
+    llm_dist: dict[str, int] = {}
+    rules_dist: dict[str, int] = {}
+    for r in answered:
+        llm_dist[tier_of(r, "llm") or "none"] = llm_dist.get(tier_of(r, "llm") or "none", 0) + 1
+        rules_dist[tier_of(r, "rules") or "none"] = rules_dist.get(tier_of(r, "rules") or "none", 0) + 1
+    turns = {(r.get("session_id"), r.get("text_sha")) for r in calls}
+    n = len(calls)
+    agree = sum(1 for r in compared if merged(tier_of(r, "llm")) == tier_of(r, "rules"))
+    applied = [r for r in (ledger_rows or []) if "cls_applied" in r]
+    return {
+        "n": n,
+        "n_sessions": len({r.get("session_id") for r in calls}),
+        "n_answered": len(answered),
+        "agree": agree,
+        "n_compared": len(compared),
+        "agree_rate": round(agree / len(compared), 4) if compared else None,
+        "llm_tier_dist": dict(sorted(llm_dist.items())),
+        "rules_tier_dist": dict(sorted(rules_dist.items())),
+        "cheap_share_llm": (round(sum(1 for r in answered if tier_of(r, "llm") in ("local", "haiku"))
+                                  / len(answered), 4) if answered else None),
+        "fallback_rate": round((n - len(answered)) / n, 4) if n else None,
+        "p50_ms": round(_percentile(model_ms, 0.50), 1) if model_ms else None,
+        "p95_ms": round(_percentile(model_ms, 0.95), 1) if model_ms else None,
+        "drops": drops,
+        "drop_rate": round(drops / (n + drops), 4) if (n + drops) else None,
+        "calls_per_turn": round(n / len(turns), 4) if n else None,
+        "excluded_non_organic": excluded,
+        "cls_applied_true": sum(1 for r in applied if r["cls_applied"] is True) if ledger_rows is not None else None,
+        "ledger_rows": len(applied) if ledger_rows is not None else None,
+    }
+
+
+def _classifier_shadow_line(s: dict | None) -> str | None:
+    if not s or not (s.get("n") or s.get("drops")):
+        return None
+
+    def pct(x: float | None) -> str:
+        return "n/a" if x is None else f"{x * 100:.1f}%"
+
+    def ms(x: float | None) -> str:
+        return "n/a" if x is None else f"{x:.0f} ms"
+
+    agree = f"{s['agree']}/{s['n_compared']}" if s["n_compared"] else "n/a"
+    cpt = f"{s['calls_per_turn']:.2f}" if s["calls_per_turn"] is not None else "n/a"
+    few = f" ({TOO_FEW}: n < {MIN_N})" if s["n"] < MIN_N else ""
+    applied = ""
+    if s.get("cls_applied_true"):
+        applied = f", WARNING cls_applied true on {s['cls_applied_true']} ledger rows"
+    return (f"classifier shadow (proxy): n={s['n']} calls in {s['n_sessions']} sessions{few}, agree {agree}, "
+            f"cheap share {pct(s['cheap_share_llm'])}, fallback {pct(s['fallback_rate'])}, "
+            f"p50 {ms(s['p50_ms'])}, p95 {ms(s['p95_ms'])}, drops {s['drops']}, {cpt} calls/turn{applied} "
+            "(hashes and tiers only; informational, never in NS, D1 or D2)")
+
+
 # ── assembly ───────────────────────────────────────────────────────────────
 
 def compute_scorecard(days: int = 7, *, include_research: bool = False,
@@ -1690,6 +1803,7 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         "o3": _o3_with_caveat(
             _o3_offload_share(days, allowed, index, all_rows, now_ts, since_policy, win, g3_r)),
         "proxy_local_shadow": _proxy_shadow_summary(days, win),
+        "classifier_shadow": _classifier_shadow_summary(days, win, allowed, index, pop["allowed"]),
         "kpis": {
             "NS": ns_r, "O1": o1_r, "O2": o2_r,
             "D1": d1_r, "D2": d2_r, "D3": d3_r, "D4": d4_r, "D5": d5_r,
@@ -1832,6 +1946,9 @@ def render_scorecard(data: dict) -> str:
     proxy_shadow_line = _proxy_shadow_line(data.get("proxy_local_shadow"))
     if proxy_shadow_line:
         lines.append(proxy_shadow_line)
+    classifier_line = _classifier_shadow_line(data.get("classifier_shadow"))
+    if classifier_line:
+        lines.append(classifier_line)
     lines.append(_join_line(data["joins"]))
     lines.append("O1 is never session-kind filtered (usage.db predates tagging); G3 is not "
                   "session-kind filtered either (see KPIS.md); neither are G1 (hook), G2 and G4, "
