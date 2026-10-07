@@ -7,8 +7,18 @@ optional ``detail`` string (a fallback reason) is passed through
 ``secret_scrubber.scrub_text`` and cut to 200 chars.
 
 Row fields:
-  ts, session_id, msg_id, stream, requested_model, step_class
+  ts, session_id, msg_id, stream, requested_model
+  step_class      the kind of call (``proxy.steps.step_kind``): continuation |
+                  turn_first | subagent_first | side_call. Rows written before
+                  GE1 hold continuation or null (null = any other kind). Whether
+                  a call may be served is decided apart (``steps.step_class``).
   prev_tools      names of the tool calls the newest tool results answer
+  prev_tool_class ``proxy.tool_classes`` class of those calls (technical_op |
+                  edit | exec | agent | web | other), null when not a
+                  continuation. A Bash command is classified in memory and
+                  never stored.
+  step_ineligible why a continuation could not be served faithfully: media |
+                  server_tool | forced_tool_choice; null otherwise
   decision        served | forwarded | fallback
   reason          why not served: routing_off | not_eligible | policy_kept |
                   budget_exceeded | backend_error | validation |
@@ -552,7 +562,7 @@ def stats(rows: list[dict]) -> dict:
         return [normalize_usage(r.get("usage"))["cache_creation_input_tokens"] for r in rs]
 
     # Known usage only: a null-usage row would enter the medians (and their n) as 0.
-    cont_fwd = [r for r in to_anthropic if r.get("step_class") and not usage_unknown(r)]
+    cont_fwd = [r for r in to_anthropic if r.get("step_class") == "continuation" and not usage_unknown(r)]
     mixed = [r for r in cont_fwd if r.get("mixed_history")]
     clean = [r for r in cont_fwd if not r.get("mixed_history")]
 
