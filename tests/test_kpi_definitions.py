@@ -511,9 +511,11 @@ def test_units_without_a_stamp_are_joined_from_the_proxy_rows(monkeypatch):
     _write([{"ts": NOW, "session_id": "s-ledger", "session_kind": "organic"}] * 3)
     _stream(monkeypatch, _mixed("s-ledger") + _mixed("s-nothing") * 2)
     k = kpi.compute_scorecard(days=7, now=NOW)
-    assert k["kpis"]["NS"]["value"] == "30.0% (n=100)"           # 30 used / 100 organic units
+    assert k["kpis"]["NS"]["value"] == "0.0% (n=100)"            # strict-used (M0.2): no verify record
+    assert k["kpis_diag"]["NS_heuristic"]["value"] == "30.0% (n=100)"   # 30 used / 100 organic units
     assert k["kpis"]["D1"]["value"] == "60.0% (n=100)"
-    assert k["kpis"]["D2"]["value"] == "50.0% (n=60)"
+    assert k["kpis"]["D2"]["value"] == "0.0% (n=60)"
+    assert k["kpis_diag"]["D2_heuristic"]["value"] == "50.0% (n=60)"
     assert k["joins"]["window_units"] == 300
     assert (k["joins"]["joined"], k["joins"]["untagged"]) == (100, 200)
     assert k["joins"]["joined_by_source"] == {"proxy_ledger": 100}
@@ -542,7 +544,7 @@ def test_no_organic_unit_among_joined_ones_is_not_measurable_and_says_what_joine
         assert "100 joined to a tag (research 100)" in v and "100 untagged" in v
         assert k[key]["measurable"] is False and k[key]["n"] is None
     wide = kpi.compute_scorecard(days=7, include_research=True, now=NOW)["kpis"]
-    assert wide["NS"]["value"] == "30.0% (n=100)"                 # --include research widens, untagged stays out
+    assert wide["NS"]["value"] == "0.0% (n=100)"                  # --include research widens, untagged stays out (strict, M0.2)
 
 
 def test_all_untagged_units_keep_the_old_explanation(monkeypatch):

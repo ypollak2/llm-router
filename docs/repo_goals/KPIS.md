@@ -13,6 +13,11 @@ file itself is not reproduced or linked here beyond its name.
 **NS — Non-Claude-and-used share.** (prompts + LLM calls served by a non-Claude model AND
 used as-is) / (all prompts + LLM calls), organic sessions only. Target >80%. Today: **0%**
 (n=100 real, source: `results_p1_rerun.md`).
+`llm-router kpi` computes NS and D2 with the **strict-used** rule (`northstar.is_strict_used`, owner
+decision D-2): served by a non-Claude model AND `verify.verify_status` in {`pass_f2p`, `pass_f2p_model`}
+AND task type not Q&A (`northstar.QA_TASK_TYPES`) AND outcome not redo. A unit with no verify record never
+counts, a keep press adds nothing, and pass-to-pass never counts. The heuristic numerators
+(`outcome == "used"`) stay in `kpis_diag.NS_heuristic` / `D2_heuristic`, outside the KPI codes: "not a target".
 
 **O1 — Quota avoided (PRIMARY, per the 2026-09-28 amendment).** Claude quota-weighted cost
 avoided vs. the requested model. Shown only as "est." until reconciled with Claude Code's
