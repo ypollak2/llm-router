@@ -35,10 +35,6 @@ def _isolate_dynamic(monkeypatch, *, block: list[str]) -> None:
     - best_agentic_model() returns DYN so the dynamic pick resolves to it
     - repo_cfg carries the block list under test
     """
-    # M3.0 (D-14 = A) strips local models from every Q&A chain, and the agentic pin only
-    # applies to Q&A task types. These tests isolate the block guard on the agentic pin,
-    # so the M3.0 strip is neutralised here; it has its own tests (test_mcp_qa_no_local.py).
-    monkeypatch.setattr("llm_router.router._strip_local_for_qa", lambda models, task_type: models)
     monkeypatch.setattr("llm_router.claude_usage.get_claude_pressure", lambda: 0.0)
     monkeypatch.setattr(
         "llm_router.router.get_repo_config",

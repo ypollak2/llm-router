@@ -976,9 +976,11 @@ async def _build_and_filter_chain(
                 sorted(_blocked), getattr(task_type, "value", task_type), profile,
             )
 
-    # M3.0 (D-14 = A): Q&A never goes to a local provider. Last, so no injection or
-    # reorder above can bring one back. The model_override path returned earlier.
-    return _strip_local_for_qa(models_to_try, task_type)
+    # M3.0: the Q&A local strip is NOT applied here. This builder is shared with the
+    # proxy (proxy/backends.py policy_chain), whose routing must not change. The strip
+    # lives in route_and_call (primary chain, after the specialist and bandit steps) and
+    # at the emergency BUDGET build.
+    return models_to_try
 
 
 def _resolve_profile(
@@ -3474,6 +3476,8 @@ async def _dispatch_model_loop(
         emergency_chain = await _build_and_filter_chain(
             task_type, RoutingProfile.BUDGET, None, complexity_hint, Complexity.SIMPLE, config
         )
+        # M3.0 (D-14 = A): the shared builder no longer strips local, so strip here.
+        emergency_chain = _strip_local_for_qa(emergency_chain, task_type)
         if emergency_chain and emergency_chain != models_to_try:
             for attempt, model in enumerate(emergency_chain, start=len(models_to_try) + 1):
                 provider = provider_from_model(model)
@@ -4394,9 +4398,10 @@ async def route_and_call(
                 from llm_router import failopen
                 failopen.record("CHZ-FO-ROUTER-BANDIT-REORDER", _bandit_err)
 
-        # M3.0 (D-14 = A): subject specialist and bandit reorder above can re-add a
-        # local model, so strip again here, before the daily-cap step. An explicit
-        # model_override is the caller's own pin and is left alone.
+        # M3.0 (D-14 = A): Q&A never goes to a local provider. Applied here, after the
+        # chain build, the subject specialist and the bandit reorder (either can add a
+        # local model), and before the daily-cap step. An explicit model_override is the
+        # caller's own pin and is left alone.
         if models_to_try and not model_override:
             models_to_try = _strip_local_for_qa(models_to_try, task_type)
 

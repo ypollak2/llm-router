@@ -51,10 +51,6 @@ def _isolate(monkeypatch):
     E5 flakes: hermes3:8b is installed on the dev machine, so it shows up in
     CODE chains independently of the agentic pin logic.
     """
-    # M3.0 (D-14 = A) strips local models from every Q&A chain, and the agentic pin only
-    # applies to Q&A task types. These tests isolate the pin logic, so the strip is
-    # neutralised here; it has its own tests (test_mcp_qa_no_local.py).
-    monkeypatch.setattr("llm_router.router._strip_local_for_qa", lambda models, task_type: models)
     monkeypatch.setattr("llm_router.claude_usage.get_claude_pressure", lambda: 0.0)
     monkeypatch.setattr("llm_router.router.get_repo_config", lambda *a, **k: RepoConfig())
     monkeypatch.setattr("llm_router.router.is_codex_available", lambda: False)
