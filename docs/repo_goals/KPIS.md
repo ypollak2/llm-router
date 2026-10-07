@@ -193,7 +193,8 @@ overcount; the transcript cannot. A unit that is not joined has only the proxy's
 
 *Local answers accepted* (its own line under O3: `local answers: n served, n accepted, accept
 rate`). Reporting only and **never part of NS**: NS stays strict ("used" needs a passing test,
-owner rule 2026-10-05). Over the turn-level local units above:
+owner rule 2026-10-05). Over local turns (proxy-served, zero-Claude) plus local MCP answers
+(`local_assist`, which are explicitly not turns and stay out of O3's n and local share):
 
 - **redone** -- redone by the definition above;
 - **accepted** -- not redone, and either 2 human turns of the same session followed (no re-ask,

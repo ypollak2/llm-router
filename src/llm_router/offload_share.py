@@ -238,7 +238,9 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
     ``unjoined`` are KEPT IN and only counted; ``no_transcript`` counts the turn rows kept on the
     proxy-only rule because their session has no transcript (or the row has no message id).
     ``local_untagged`` / ``local_other_kind`` are the local answers among the ``untagged`` /
-    ``other_kind`` exclusions (the local answers line states them).
+    ``other_kind`` exclusions (the local answers line states them). A local answer is a local MCP
+    answer, a proxy-served row (``decision == "served"``) or a zero-Claude edit turn: the same
+    three sources as the line's served count.
     ``n_escalations`` counts escalation rows among the admitted units: how much redo signal exists
     at all. A local unit with no ``session_id`` (usage.db rows written without one) cannot be
     scoped to organic sessions: it is excluded and counted in ``local_no_session``, so the local
@@ -360,7 +362,7 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
             side += 1
             continue
         cls = _proxy_class(r)
-        if cls is None or not admit(r.get("session_id"), r.get("session_kind")):
+        if cls is None or not admit(r.get("session_id"), r.get("session_kind"), local=cls == CLASS_LOCAL):
             continue
         sid = r.get("session_id")
         conv = conv_of(sid) if isinstance(sid, str) else None
@@ -449,7 +451,7 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
         if not (isinstance(tid, str) and tid):
             edit_no_turn_id += 1
             continue
-        if (sid, tid) in seen_turns or not admit(sid, e.get("session_kind")):
+        if (sid, tid) in seen_turns or not admit(sid, e.get("session_kind"), local=True):
             continue
         seen_turns.add((sid, tid))
         conv = conv_of(sid)

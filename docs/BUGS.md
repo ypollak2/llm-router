@@ -31,7 +31,10 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   used, because with two sessions open it names the wrong one. Open at the time of writing.
 - **Test.** M0-3: at least 19 of 20 synthetic rows carry the calling session's own id across 2
   concurrent research sessions. #288 carries its own tests (a fresh pointer with no env stores
-  NULL). Not on `main` yet.
+  NULL). The hook payload's id is pinned on all three agent-route ledger paths (DIRECT, NS3
+  Codex, Phase 2 CLI delegation) by `test_every_agent_route_ledger_path_stamps_the_payload_session`;
+  a review mutation that passed main()'s own pointer-backed `session_id` to two of the three had
+  survived until that test was added. Not on `main` yet.
 
 ## 2. O3 counted more turns than the user typed
 

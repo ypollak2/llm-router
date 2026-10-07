@@ -720,6 +720,83 @@ def test_agent_route_stamps_the_payload_session_not_the_machine_wide_file(tmp_pa
     assert seen == ["sess-payload"]
 
 
+def _run_agent_route_main(tmp_path, monkeypatch, path):
+    """Drive agent-route main() down one of its three ledger paths and return the session ids
+    that reached savings_logger.log_direct_to_db. The machine-wide pointer says sess-pointer and
+    the hook's env has no session id, so the agent's own id (session_id) is the pointer's."""
+    import io
+    import sys
+    from types import SimpleNamespace
+
+    import llm_router.hooks.chain_builder as cb
+    import llm_router.hooks.direct_executor as de
+    from llm_router.hooks import savings_logger
+
+    from tests.test_agent_route_hook import _load_hook_module
+
+    home = tmp_path / ".llm-router"
+    home.mkdir()
+    (home / "session_id.txt").write_text("sess-pointer")
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(home))
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_ROUTE_BANNER", "off")
+    for k, v in (("LLM_ROUTER_SUBAGENT_DIRECT", "off"), ("LLM_ROUTER_AGENT_ROUTE_CODEX", "off"),
+                 ("LLM_ROUTER_ALLOW_SUBAGENTS", "off"), ("LLM_ROUTER_SUBAGENT_CLI_DELEGATION", "off")):
+        monkeypatch.setenv(k, v)
+    seen = []
+    monkeypatch.setattr(savings_logger, "log_direct_to_db", lambda **kw: seen.append(kw["session_id"]))
+    monkeypatch.setattr(savings_logger, "log_direct_savings", lambda **kw: None)
+    mod = _load_hook_module()
+    monkeypatch.setattr(mod, "_is_headless_entrypoint", lambda e: False)
+    monkeypatch.setattr(mod, "_govern_run", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "_record_north_star_unit", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "_release_reservation", lambda: None)
+    ok = SimpleNamespace(success=True, content="a routed answer", model="m", duration_sec=0.1,
+                         truncated=False, reason_code="")
+    if path == "direct":
+        monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")
+        monkeypatch.setattr(cb, "build_chain", lambda *a, **k: ["fake-model"])
+        monkeypatch.setattr(cb, "get_current_pressure", lambda: ("green", 0.0))
+        monkeypatch.setattr(cb, "needs_claude_tools", lambda *a, **k: False)
+        monkeypatch.setattr(de, "execute_chain", lambda *a, **k: de.DirectResult(
+            text="a routed answer", model=de.ModelSpec("ollama", "fake"), latency_ms=1,
+            input_tokens=1, output_tokens=1))
+    elif path == "codex":
+        monkeypatch.setenv("LLM_ROUTER_AGENT_ROUTE_CODEX", "on")
+        monkeypatch.setattr("llm_router.codex_agent.is_codex_available", lambda: True)
+        monkeypatch.setattr(mod, "_is_codex_suitable", lambda *a, **k: True)
+        monkeypatch.setattr(mod, "_codex_subagent_budget_remaining", lambda: 5)
+        monkeypatch.setattr(mod, "_codex_subagent_budget_increment", lambda: None)
+        monkeypatch.setattr(mod, "_codex_bench_until", lambda: None)
+        monkeypatch.setattr(mod, "_codex_window_declines", lambda *a, **k: False)
+        monkeypatch.setattr(mod, "_run_codex_agent", lambda *a, **k: (ok, "ok"))
+    else:
+        monkeypatch.setenv("LLM_ROUTER_SUBAGENT_CLI_DELEGATION", "on")
+        monkeypatch.setattr(cb, "needs_claude_tools", lambda *a, **k: True)
+        monkeypatch.setattr(mod, "_get_remaining_budget", lambda: 10.0)
+        monkeypatch.setattr(mod, "_codex_bench_until", lambda: None)
+        monkeypatch.setattr(mod, "_codex_window_declines", lambda *a, **k: False)
+        monkeypatch.setattr("llm_router.codex_agent.is_codex_available", lambda: True)
+        monkeypatch.setattr(mod, "_run_codex_agent", lambda *a, **k: (ok, "ok"))
+    assert mod._get_session_id() == "sess-pointer"  # premise: the agent's own id is the file's
+    payload = {"hook_event_name": "PreToolUse", "tool_name": "Agent", "session_id": "sess-payload",
+               "tool_input": {"prompt": "explain what a mutex is", "subagent_type": "general-purpose"}}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    try:
+        mod.main()
+    except SystemExit:
+        pass
+    return seen
+
+
+@pytest.mark.parametrize("path", ["direct", "codex", "cli"])
+def test_every_agent_route_ledger_path_stamps_the_payload_session(tmp_path, monkeypatch, path):
+    """All three agent-route paths that write a ledger row (DIRECT, NS3 Codex, Phase 2 CLI
+    delegation) stamp the hook payload's session id. Passing main()'s own session_id (which
+    falls back to the machine-wide pointer) would stamp the session that prompted last."""
+    assert _run_agent_route_main(tmp_path, monkeypatch, path) == ["sess-payload"]
+
+
 @pytest.mark.asyncio
 async def test_env_session_id_is_stamped_only_inside_an_mcp_tool_call(_router_db, monkeypatch):
     """CLAUDE_CODE_SESSION_ID is also in every Bash tool shell, so a gateway or route_server
@@ -790,6 +867,32 @@ def test_local_units_dropped_as_untagged_or_other_kind_are_counted_and_stated(mo
     assert la["breakdown"]["served"] == 0 and (la["breakdown"]["untagged"], la["breakdown"]["other_kind"]) == (2, 1)
     assert "2 local answer(s) from sessions with no kind tag" in la["lines"][0]
     assert "1 from a research/other-kind session" in la["lines"][0]
+
+
+def test_dropped_local_answers_are_counted_on_all_three_local_sources():
+    """Proxy-served local turns and zero-Claude edit turns dropped as untagged or other-kind are
+    local answers too (the line's served count reads all three sources), so they are counted
+    with the MCP ones. A forwarded (non-local) proxy row dropped the same way is not."""
+    t = NOW - 5000
+
+    def proxy(i, sid, decision):
+        return {"ts": t + i, "session_id": sid, "decision": decision, "msg_id": f"m{i}",
+                "step_class": "turn-first"}
+
+    def edit(i, sid):
+        return {"ts": t + 100 + i, "session_id": sid, "turn_id": f"turn{i}", "source": "zero_claude",
+                "applied": True}
+
+    kinds = {"s-none": None, "s-res": "research"}
+    built = osh.build_units(
+        [proxy(1, "s-none", "served"), proxy(2, "s-res", "served"), proxy(3, "s-none", "forwarded")],
+        [_local(t + 10, sid="s-none", tool="toolu_a")],
+        edit_rows=[edit(1, "s-none"), edit(2, "s-res"), edit(3, "s-res")],
+        now=NOW, days=7, allowed=ORG, kind_of=lambda sid, stamp: kinds[sid])
+    # untagged: served proxy + MCP + edit = 3 local, plus 1 forwarded that is not local (4 total)
+    assert (built["untagged"], built["local_untagged"]) == (4, 3)
+    # other kind: served proxy + 2 edit turns
+    assert (built["other_kind"], built["local_other_kind"]) == (3, 3)
 
 
 @pytest.mark.asyncio
