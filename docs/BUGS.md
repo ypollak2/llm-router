@@ -17,6 +17,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 7 | `edit_outcomes.jsonl` rows with no source | open, fix is plan task M0.3(c) |
 | 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | known, not fixed |
 | 9 | Classifier warm-up loaded `llmr-classifier` at the wrong `num_ctx` | fixed in #298 (M1.4, review 2) |
+| 10 | Three shadow tests raced the clock and failed `main` on a loaded runner | fixed in this change (test-only) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -173,3 +174,44 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   4096 and an omitted `context_length` return `llm`. Mutants run on head 2316f3f: warm-up
   without `options` fails both tests; `_is_loaded` returning True regardless of context fails
   the second.
+
+## 10. Three shadow tests raced the clock and failed `main` on a loaded runner
+
+- **Symptom.** `main` at 2ae21d9 (the #301 merge) was red: run 37656384812, job `test (3.13)`,
+  `tests/test_proxy_local_shadow.py::test_different_tool_disagrees - assert (None is False)`;
+  `test (3.11)` on the same commit passed. Two more were reported as load-sensitive:
+  `test_big_body_claude_response_is_not_delayed_by_shadow` ("shadow added 97 ms", once, on #281's
+  CI, green on rerun) and `tests/proxy/test_llm_classifier_shadow.py::test_assemble_never_holds_the_event_loop`
+  ("held for 108 ms", limit 50 ms; also 82 ms and 254 ms on runs 37668795388 and 37666629764, and
+  5 of 6 local runs at load average 77-127).
+- **Cause.** No product defect, and not #301 (it touches `decide_tier` and adds a no-op seam when the
+  classifier mode is off; the failing path is `local_shadow.py`, last changed in #294). All three
+  tests compared a wall clock with work that a loaded machine stretches.
+  1. `test_different_tool_disagrees`: the fake Claude replied after a fixed 0.3 s. Before local reaches
+     its backend the job makes four worker-thread hops (deepcopy, media scan, to_ollama, prompt cap).
+     When they took longer than 0.3 s the job saw Claude finish first, which is the documented
+     behaviour (`dropped_claude_first`), and wrote `agree=None`, `schema_valid=None`. The record was
+     correct and carried its reason code; the test read it as if local had answered. Reproduced on
+     a quiet machine by making `local_mode.has_media` sleep 0.5 s: 6 tests in the file failed, among
+     them this one with `assert (None is ...)`; with the fix the same 8 selected tests pass. The same
+     race sat under every test that expects local to win, not only the one that fired.
+  2. `test_big_body_...`: compared the wall time of a 3 MB POST with shadow on and off. Wall time
+     includes every moment the OS deschedules the process.
+  3. `test_assemble_never_holds_the_event_loop`: a 5 ms ticker and asyncio's slow-callback log, both
+     wall clock. With the loop CPU time sampled beside the wall gap, one failing run showed a 129 ms
+     wall gap against 33 ms of loop CPU, and the slow callback was the test's own `await _post(...)`.
+- **Fix.** Test-only. (1) `Upstream` takes the shadow runner and holds Claude's reply until the job's
+  `busy` flag drops, which happens after the job has chosen between "local answered" and "Claude
+  answered first"; `_step` does this whenever the fake backend has no gate (the dropped/budget tests
+  keep their gates and their real Claude-first order). (2) The guard measures `time.thread_time()` of
+  the loop thread: the only way shadow can delay Claude's first byte is work on that thread. (3) The
+  fake `assemble` blocks on a `threading.Event` that the test sets only after a continuation posted
+  during the block has come back; it asserts the worker thread is not the loop thread and that the
+  loop served the request while `assemble` was in flight. The wall-clock ticker is gone; the call-path
+  cost stays pinned by `test_a_long_history_is_assembled_off_the_request_path` and the G1_proxy p95
+  test, which read `tier_decision_s`.
+- **Test.** The three tests above, each 30 times in a row at load average ~80 (results in the PR).
+  Mutant for (3): `assemble(snapshot)` inline instead of `asyncio.to_thread(assemble, snapshot)` in
+  `llm_shadow._run` fails the new test (timeout; the loop cannot serve while it blocks).
+  Rule: a test that depends on a reply arriving "before" another must wait on that event, never on a
+  sleep length; a "loop not held" check must read the thread or the blocked work, not a wall gap.
