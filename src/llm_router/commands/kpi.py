@@ -1335,19 +1335,23 @@ def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[
                              assist=built["local_assist"])
         res["excluded"] = {"side_call": built["side_call_excluded"], "untagged": built["untagged"],
                            "other_kind": built["other_kind"], "local_no_session": built["local_no_session"],
-                           "subagent_first": built["subagent_first"], "meta_first": built["meta_first"],
-                           "unjoined": built["unjoined"], "no_transcript": built["no_transcript"],
+                           "subagent_first": built["subagent_first"],
                            "edit_no_session": built["edit_no_session"],
                            "edit_no_turn_id": built["edit_no_turn_id"]}
+        # NOT excluded: turn rows the transcript says were not a typed prompt's first answer. They
+        # stay in n (PLAN M0.3b, "unjoined rows stay in"); the counts say how big that gap is.
+        res["kept_in"] = {"meta_first": built["meta_first"], "unjoined": built["unjoined"],
+                          "no_transcript": built["no_transcript"]}
         note = (f"{res['breakdown']['window_open']} turn(s) have fewer than {osh.REDO_TURNS} human turns "
                 f"after them (counted as not redone, may still change); excluded: "
                 f"{built['side_call_excluded']:,} Claude Code side call(s), "
                 f"{built['subagent_first']:,} sub-agent first call(s), "
-                f"{built['meta_first']:,} injected-input first call(s), "
-                f"{built['unjoined']:,} call(s) not in their session's transcript, "
                 f"{built['untagged']:,} untagged, {built['other_kind']:,} other-kind; "
-                f"{built['no_transcript']:,} turn row(s) of sessions with no transcript stay in "
-                f"(they may include sub-agent first calls)")
+                f"kept in n although the transcript says they were not a typed prompt's first answer: "
+                f"{built['meta_first']:,} injected-input first call(s) (slash command, sub-agent "
+                f"hand-back, task notification), {built['unjoined']:,} call(s) in no message of their "
+                f"session's transcript; {built['no_transcript']:,} turn row(s) with no transcript "
+                f"(may include sub-agent first calls)")
         res["lines"] = list(res.get("lines", ())) + [note]
         cov = ((g3 or {}).get("fields") or {}).get("session_kind", {}).get("coverage")
         if isinstance(cov, (int, float)) and cov < O3_BOUND_BELOW:

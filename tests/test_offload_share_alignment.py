@@ -1,8 +1,9 @@
 """M0.3: O3 matches the owner's definition (PLAN M0.3).
 
 * (a) a local MCP unit is not a turn: reported as ``local_assist_n`` outside n and the numerator;
-* (b) only the first answer to a TYPED prompt is a turn (proxy ``msg_id`` joined to the transcript):
-  sub-agent calls, injected-input (meta) turns and calls the transcript never saw are not;
+* (b) the owner's turn definition (PLAN section 1.2 O3): a proxy row that is not a side call and not a
+  ``continuation``. The transcript join (proxy ``msg_id`` to ``message.id``) takes out sub-agent first
+  calls ONLY; unjoined rows stay in, and injected-input first calls stay in (both are counted);
 * (c) a zero-Claude edit is one local turn per (session_id, turn_id); ``llm_edit`` rows never are;
 * (d) G3 session_kind completeness < 95% prints ``o3.bound``.
 
@@ -117,19 +118,19 @@ def test_plan_fixture_n4_numerator1(_isolated, monkeypatch):
     assert (b["n"], b["offload_kept"], b["local_n"]) == (4, 1, 1)
     assert (b["local_assist_n"], b["local_assist_redone"]) == (1, 0)
     assert o3["excluded"]["subagent_first"] == 2
-    assert o3["excluded"]["unjoined"] == 0 and o3["excluded"]["meta_first"] == 0
-    assert o3["excluded"]["no_transcript"] == 0
+    assert o3["kept_in"] == {"meta_first": 0, "unjoined": 0, "no_transcript": 0}
     assert b["claude_n"] == 3
 
 
-def test_scorecard_counts_one_turn_per_typed_prompt_not_per_proxy_row(_isolated):
-    """M0.3 repair, end to end through the scorecard: a typed prompt's first answer is a turn (even
-    when the proxy flagged it side_call); a sub-agent call, a classifier call the transcript never
-    saw, the answer to a hand-back and a tool-loop continuation are not."""
+def test_scorecard_turns_follow_the_owner_definition_the_transcript_only_removes_subagents(_isolated):
+    """M0.3 review fix, end to end through the scorecard. Owner's rule: a turn is a proxy row that is
+    not a side call and not a continuation. The transcript takes out the sub-agent first call and
+    nothing else: the classifier calls it never saw and the answer to a hand-back STAY IN (counted
+    in ``kept_in``), and a row the proxy flagged side_call is NOT promoted to a turn."""
     _write_transcripts(_isolated,
                        ["u:typed", "a:m1", "u:tool", "a:m1c",       # typed turn + continuation
                         "u:typed", "a:m2",                           # typed turn, proxy flagged it side_call
-                        "u:meta", "a:peer"],                         # hand-back: not a human turn
+                        "u:meta", "a:peer"],                         # hand-back
                        ["sub1"])
     t = NOW - 3000
     _ledger([proxy_row(1, sid=SID, ts=t, kind="organic", msg_id="m1"),
@@ -140,10 +141,10 @@ def test_scorecard_counts_one_turn_per_typed_prompt_not_per_proxy_row(_isolated)
              proxy_row(6, sid=SID, ts=t + 170, kind="organic", msg_id="classifier-2"),
              proxy_row(7, sid=SID, ts=t + 200, kind="organic", msg_id="peer")])
     o3 = kpi.compute_scorecard(days=7, now=NOW)["o3"]
-    assert o3["breakdown"]["n"] == 2
-    assert o3["excluded"]["subagent_first"] == 1 and o3["excluded"]["meta_first"] == 1
-    assert o3["excluded"]["unjoined"] == 2 and o3["excluded"]["no_transcript"] == 0
-    assert o3["excluded"]["side_call"] == 0
+    assert o3["breakdown"]["n"] == 4                      # m1, classifier-1, classifier-2, peer
+    assert o3["excluded"]["subagent_first"] == 1 and o3["excluded"]["side_call"] == 1
+    assert o3["kept_in"] == {"meta_first": 1, "unjoined": 2, "no_transcript": 0}
+    assert "unjoined" not in o3["excluded"] and "meta_first" not in o3["excluded"]
 
 
 def test_llm_edit_routed_mcp_unit_is_still_joined_next_to_a_zero_claude_row(tmp_path, monkeypatch):
@@ -235,14 +236,13 @@ def _kw():
     return dict(now=NOW, days=7, allowed=frozenset({"organic"}), kind_of=lambda s, st: st)
 
 
-def test_calls_the_transcript_never_saw_are_not_turns_and_are_counted():
-    """M0.3 repair: 548 of the 813 'turns' of the one measured session were calls that no transcript
-    of that session holds (permission classifier, prompt suggestion, side queries)."""
+def test_calls_the_transcript_never_saw_stay_in_as_turns_and_are_counted():
+    """PLAN M0.3(b): "Unjoined rows stay in". (They were taken out by the first repair, which
+    swapped in a different turn definition; the owner's is restored.)"""
     rows = [proxy_row(1, sid=SID, kind="organic", msg_id="x"), proxy_row(2, sid=SID, kind="organic", msg_id="y")]
     built = osh.build_units(rows, [], thread_of=lambda sid, m: "orphan", **_kw())
-    assert osh.turn_units(built["units"]) == [] and built["unjoined"] == 2
+    assert len(osh.turn_units(built["units"])) == 2 and built["unjoined"] == 2
     assert built["subagent_first"] == 0 and built["no_transcript"] == 0
-    assert len(built["units"]) == 2          # still Claude calls for the per-call line
 
 
 def test_session_without_a_transcript_keeps_the_proxy_only_rule_and_says_so():
@@ -252,30 +252,77 @@ def test_session_without_a_transcript_keeps_the_proxy_only_rule_and_says_so():
     assert built["unjoined"] == 0 and built["subagent_first"] == 0
 
 
-def test_first_call_of_injected_input_is_not_a_turn():
+def test_first_call_of_injected_input_stays_a_turn_and_is_counted():
     rows = [proxy_row(1, sid=SID, kind="organic", msg_id="t"), proxy_row(2, sid=SID, kind="organic", msg_id="p")]
     built = osh.build_units(rows, [], thread_of=lambda sid, m: {"t": "turn", "p": "meta"}[m], **_kw())
-    assert len(osh.turn_units(built["units"])) == 1 and built["meta_first"] == 1
+    assert len(osh.turn_units(built["units"])) == 2 and built["meta_first"] == 1
 
 
-def test_transcript_overrules_the_proxy_step_class_and_the_side_call_flag():
-    rows = [proxy_row(1, sid=SID, kind="organic", msg_id="a", reason="side_call"),       # flagged, but a typed prompt's answer
-            proxy_row(2, sid=SID, kind="organic", msg_id="b", reason="side_call"),       # flagged and a continuation: still a side call
-            proxy_row(3, sid=SID, kind="organic", msg_id="c", step="continuation"),      # proxy says continuation, transcript says turn
-            proxy_row(4, sid=SID, kind="organic", msg_id="d")]                           # proxy says turn, transcript says continuation
-    roles = {"a": "turn", "b": "continuation", "c": "turn", "d": "continuation"}
-    built = osh.build_units(rows, [], thread_of=lambda sid, m: roles[m], **_kw())
-    assert [u["msg_id"] for u in osh.turn_units(built["units"])] == ["a", "c"]
-    assert built["side_call_excluded"] == 1
-    # no join: the flagged rows stay side calls
+def test_transcript_does_not_override_step_class_or_the_side_call_flag():
+    """The owner's rule is on the proxy row. Whatever role the transcript gives a row, only
+    ``sidechain`` changes the turn count."""
+    rows = [proxy_row(1, sid=SID, kind="organic", msg_id="a", reason="side_call"),       # flagged: not a turn
+            proxy_row(2, sid=SID, kind="organic", msg_id="b", step="continuation"),      # continuation: not a turn
+            proxy_row(3, sid=SID, kind="organic", msg_id="c"),                           # turn
+            proxy_row(4, sid=SID, kind="organic", msg_id="d")]                           # turn
+    roles = {"a": "turn", "b": "turn", "c": "continuation", "d": "continuation"}
+    with_join = osh.build_units(rows, [], thread_of=lambda sid, m: roles[m], **_kw())
     plain = osh.build_units(rows, [], **_kw())
-    assert plain["side_call_excluded"] == 2
+    assert [u["msg_id"] for u in osh.turn_units(with_join["units"])] == ["c", "d"]
+    assert [u["msg_id"] for u in osh.turn_units(plain["units"])] == ["c", "d"]
+    assert with_join["side_call_excluded"] == plain["side_call_excluded"] == 1
 
 
 def test_side_call_rows_of_a_session_with_no_transcript_stay_excluded():
     rows = [proxy_row(1, sid=SID, kind="organic", msg_id="a", reason="side_call")]
     built = osh.build_units(rows, [], thread_of=lambda sid, m: None, **_kw())
     assert built["side_call_excluded"] == 1 and built["units"] == []
+
+
+# ── performance: the transcript join is only paid for admitted sessions inside the window ──────
+
+def test_transcripts_are_read_only_for_admitted_sessions_inside_the_window():
+    """Review fix: the join used to run for every session in the whole ledger because the
+    conversation index called the lookup on every row. Red before: the lookup saw "old" (before the
+    window) and "res" (not an admitted kind)."""
+    t = NOW - 3000
+    rows = [proxy_row(1, sid="org", kind="organic", ts=t, msg_id="o1"),
+            proxy_row(2, sid="org", kind="organic", ts=t + 5, msg_id="o2", step="continuation"),
+            proxy_row(3, sid="res", kind="research", ts=t, msg_id="r1"),
+            proxy_row(4, sid="old", kind="organic", ts=NOW - 30 * 86400, msg_id="x1")]
+    seen: list[str] = []
+
+    def thread_of(sid, mid):
+        seen.append(sid)
+        return "turn"
+
+    kind = {"org": "organic", "res": "research", "old": "organic"}
+    built = osh.build_units(rows, [], thread_of=thread_of, now=NOW, days=7, allowed=frozenset({"organic"}),
+                            kind_of=lambda sid, st: kind[sid])
+    assert set(seen) == {"org"}
+    assert len(osh.turn_units(built["units"])) == 1
+
+
+def test_scorecard_reads_no_transcript_of_sessions_outside_the_window_or_kind(_isolated, monkeypatch):
+    from llm_router import o3_transcripts
+
+    opened: list[str] = []
+    real = o3_transcripts.thread_index
+
+    def spy(sid, **kw):
+        opened.append(sid)
+        return real(sid, **kw)
+
+    monkeypatch.setattr(o3_transcripts, "thread_index", spy)
+    t = NOW - 3000
+    _write_main(_isolated, "u:typed", "a:m1")
+    session_kind.tag_session("s-res", "/Users/someone/Projects/app", env={"LLM_ROUTER_SESSION_KIND": "research"})
+    _ledger([proxy_row(1, sid=SID, ts=t, kind="organic", msg_id="m1"),
+             proxy_row(2, sid="s-res", ts=t, kind="research", msg_id="r1"),
+             proxy_row(3, sid="s-old", ts=NOW - 30 * 86400, kind="organic", msg_id="x1")])
+    o3 = kpi.compute_scorecard(days=7, now=NOW)["o3"]
+    assert o3["breakdown"]["n"] == 1
+    assert opened == [SID]
 
 
 def test_continuation_rows_are_never_counted_as_unjoined_or_subagent_first():

@@ -1,15 +1,16 @@
 """Which thread a proxy call belongs to: a join of the proxy ledger's ``msg_id`` to the Claude Code
-transcripts (M0.3b).
+transcripts (M0.3b). O3 uses it to take sub-agent calls out of the turns and to COUNT, not remove, the
+turn rows that were not a typed prompt's first answer (``offload_share``: the owner's turn definition is
+the proxy row's, not the transcript's).
 
 A proxy row's ``msg_id`` is the API message id of its response. The same id is ``message.id`` on
 the transcript's assistant entry. The transcript says what the call was:
 
-``turn``          the FIRST assistant message of a main-thread turn that a typed prompt started
-                  (the only kind of call O3 counts as a human turn);
+``turn``          the FIRST assistant message of a main-thread turn that a typed prompt started;
 ``continuation``  a later assistant message of a main-thread turn (after a tool result);
 ``meta``          the first assistant message of a turn that no typed prompt started: a slash
                   command, a sub-agent hand-back or peer message, other ``isMeta`` input;
-``sidechain``     a sub-agent call. Claude Code writes a sub-agent's work in
+``sidechain``     a sub-agent call (the one role that takes a call out of O3's turns). Claude Code writes a sub-agent's work in
                   ``<projects>/<project>/<session>/subagents/**/agent-*.jsonl`` (every entry
                   ``isSidechain: true``; workflow agents sit one level deeper, under
                   ``subagents/workflows/wf_*``); older layouts mark ``isSidechain`` inside the main
