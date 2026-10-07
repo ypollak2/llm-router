@@ -541,7 +541,7 @@ next session. Measured 2026-10-07 (claude 2.1.292, `--setting-sources
 project,local`, base URL on a smoke port): with nothing listening, `claude -p`
 retried for 222.85 s and failed with `API Error: Connection refused` (n = 1);
 through the shim with the main proxy killed, 10/10 sessions answered and 10
-`proxy_down` rows were written (docs/BUGS.md #10).
+`proxy_down` rows were written (docs/BUGS.md #11).
 
 The shim imports neither `proxy/server.py` nor its dependencies, so a broken
 main-proxy deploy cannot take it down. It uses httpx for the upstream leg

@@ -1,6 +1,6 @@
 """P0.10 (D-17 = A): the fail-open shim in front of the main proxy.
 
-Bug this closes (docs/BUGS.md #10): with proxy-default installed,
+Bug this closes (docs/BUGS.md #11): with proxy-default installed,
 ``~/.claude/settings.json`` points every Claude Code session at
 127.0.0.1:8787. When the main proxy is down that port refuses connections and
 every new session's first API call fails; nothing in the router can change the
