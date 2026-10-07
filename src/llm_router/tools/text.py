@@ -982,13 +982,15 @@ async def llm_edit(
             file=instr.file,
             model=(resp.model if resp else "unknown"),
             applied=result.applied,
+            source="llm_edit",
         )
     if not result.edits:
         # Every attempt failed to even produce parseable instructions — still
         # worth a ledger row per requested file so the "0 uses" signal this
         # lever was built to fix is visible even on total failure.
         for path in file_contents:
-            record_edit_outcome(file=path, model=(resp.model if resp else "unknown"), applied=False)
+            record_edit_outcome(file=path, model=(resp.model if resp else "unknown"), applied=False,
+                                source="llm_edit")
 
     warnings = list(result.rejected_reasons)
     if read_notes:

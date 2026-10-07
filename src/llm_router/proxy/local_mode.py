@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from llm_router import local_models
 from llm_router.local_context_guard import (
     DEFAULT_RESERVED_OUTPUT_TOKENS,
     effective_window,
@@ -363,7 +364,8 @@ def egress_notice(reason: str, session_id: str | None) -> str:
             f"(reason: {reason}). Its prompt, files and tool output leave this machine.")
 
 
-def banner_lines(*, model: str | None, num_ctx: int, kill_path: Path, killed: bool) -> list[str]:
+def banner_lines(*, model: str | None, num_ctx: int | None, kill_path: Path, killed: bool) -> list[str]:
+    num_ctx = resolve_num_ctx(model, num_ctx)
     lines = [
         f"llm-router proxy: SERVE MODE = local-agent (opt-in). Claude Code steps are answered by "
         f"{model} on this machine; conversations are pinned local at their first call.",
@@ -433,6 +435,13 @@ def runner_np_values(runner: Runner = _run) -> list[int]:
     return out
 
 
+def resolve_num_ctx(model: str | None, num_ctx: int | None) -> int:
+    """An explicit window wins; None (no --num-ctx, no env) is the table value
+    for *model* (M3.4). ``ProxyConfig.num_ctx`` stays None when no model is
+    pinned, and the startup checks run before that is refused."""
+    return num_ctx if num_ctx is not None else local_models.num_ctx(model)
+
+
 def overflow_guard_active(num_ctx: int) -> str | None:
     """``None`` when the local-context guard really refuses an oversized prompt
     on this proxy's backend, else the reason it does not. A self-test, not a
@@ -483,11 +492,12 @@ def resident_context(base_url: str, model: str, get: Callable[[str], dict]) -> t
     return None, f"{bare} is not resident on {base_url}"
 
 
-def preflight(*, model: str | None, trim: str | None, ollama_url: str, num_ctx: int, ledger_path: Path,
+def preflight(*, model: str | None, trim: str | None, ollama_url: str, num_ctx: int | None, ledger_path: Path,
               kill_path: Path, tiers_off: bool, compaction_off: bool,
               get: Callable[[str], dict], runner: Runner = _run) -> list[str]:
     """Every reason local-agent mode must not start; empty means go. Each reason
     names what to change. ``llm-router proxy`` prints them and exits non-zero."""
+    num_ctx = resolve_num_ctx(model, num_ctx)
     problems: list[str] = []
     if not model or not model.startswith("ollama/"):
         problems.append("--model ollama/<tag> is required (the policy is not consulted in this mode)")

@@ -345,6 +345,32 @@ def test_resident_model_is_served_with_keep_alive(stub, repo, monkeypatch):
     assert _chat_posts() and all(p["keep_alive"] == -1 for p in _chat_posts())
 
 
+def test_applied_edit_row_carries_the_payload_session_id_not_the_pointer_files(stub, repo, monkeypatch):
+    """M0.3c: ``maybe_replace(session_id=...)`` is the hook payload's own id. The pointer file names a
+    DIFFERENT session (a concurrent one): the ledger row must still carry the payload's id, and with no
+    payload id the row carries null, never the pointer's guess."""
+    from llm_router import paths, session_store
+
+    monkeypatch.setenv("LLM_ROUTER_ZERO_CLAUDE_SCOPE", "edit")
+    monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    session_store.write_pointer("other-concurrent-session")
+    out = zce.maybe_replace(prompt="rename old_name to new_name in foo.py", cwd=str(repo),
+                            deadline_s=time.monotonic() + 120, session_id="payload-session")
+    assert out is not None and out.applied, out
+    ledger = paths.state_path("edit_outcomes.jsonl")
+    rows = [json.loads(ln) for ln in ledger.read_text().splitlines()]
+    assert [r["session_id"] for r in rows] == ["payload-session"]
+    assert rows[0]["source"] == "zero_claude"
+
+    (repo / "foo.py").write_text("def old_name():\n    pass\n")      # same edit again, no payload id
+    out = zce.maybe_replace(prompt="rename old_name to new_name in foo.py", cwd=str(repo),
+                            deadline_s=time.monotonic() + 120)
+    assert out is not None and out.applied, out
+    rows = [json.loads(ln) for ln in ledger.read_text().splitlines()]
+    assert rows[-1]["session_id"] is None and rows[-1]["source"] == "zero_claude"
+
+
 def test_unknown_ps_state_behaves_as_before(stub, repo, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_ZERO_CLAUDE_SCOPE", "edit")
     _Stub.ps_body = {"ok": True}              # e.g. a proxy that has no /api/ps

@@ -508,16 +508,11 @@ def constrained_decoding_enabled() -> bool:
     )
 
 
-# I2b (2026-09-24): families measured to hold 131072 on the GPU of this 52 GB
-# Mac (resident 32K/64K/128K: qwen3.5 6.6/8.1/10 GB, qwen3.8 18/18/17 GB).
-# qwen3-coder:30b is NOT here: 64K spilled 11% and 128K 45% of it to CPU
-# (49 / 70 GB), and every draft timed out. Unmeasured models get 32768.
-_LARGE_WINDOW_FAMILIES = ("qwen3.5", "qwen3.8")
-
-
 def _default_num_ctx(model: str | None) -> int:
-    name = (model or "").lower()
-    return 131072 if any(f in name for f in _LARGE_WINDOW_FAMILIES) else 32768
+    """Per-model default window: the single table in ``llm_router.local_models``
+    (M3.4). Measurements behind the values are recorded there."""
+    from llm_router.local_models import num_ctx
+    return num_ctx(model)
 
 
 def _num_ctx(model: str | None = None) -> int | None:

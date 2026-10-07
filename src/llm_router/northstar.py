@@ -784,7 +784,9 @@ def _fold_edit_ledger(su: SessionUnits, edit_call_units: list[Unit], rows: list[
         if not isinstance(row_ts, (int, float)):
             row_ts = None
         best: Unit | None = None
-        if row_ts is not None:
+        # A zero-Claude row comes from the UserPromptSubmit hook, not from an llm_edit tool call,
+        # so it must neither match nor drop a routed_mcp unit (M0.3c).
+        if row_ts is not None and row.get("source") != "zero_claude":
             for call in edit_call_units:
                 if call.ts is None or call.ts > row_ts:
                     continue
@@ -837,6 +839,8 @@ def _fold_orphan_edit_rows(
         row_file = row.get("file")
         if not isinstance(row_ts, (int, float)) or not row_file:
             continue
+        if row.get("source") == "zero_claude":
+            continue  # no llm_edit call exists for a hook-applied edit: nothing to join (M0.3c)
         best_sid: str | None = None
         best_unit: Unit | None = None
         for sid, call, files in all_edit_calls:
@@ -1344,14 +1348,17 @@ def local_shadow_units(days: int | None = 30, db_path: Path | None = None) -> It
     """Local work as ``local_shadow`` rows, derived from ``usage.db``.
 
     Source: ``routing_decisions`` rows with ``provenance='runtime'`` (the MCP
-    ``llm()`` / ``llm_edit`` path, written by ``router.py``'s finalizer) served by
+    ``llm()`` / ``llm_edit`` path, written by ``router.py``'s finalizer, and the hook's
+    DIRECT / agent-route rows written by ``log_direct_to_db``) served by
     ``final_provider='ollama'``. Derived rather than emitted: the rows already exist,
     so there is no new write path to fail, drift or double-count. Read-only.
 
     Never part of ``units()``, so never part of NS, D1, D2 or ``report()``. Each
     dict: session_id, ts (iso8601), kind, lever, task_type, complexity, model,
-    latency_ms, outcome (always ``unknown``: no verdict path exists yet, P4),
-    provenance ("runtime"), shadow_tier.
+    latency_ms, outcome (always ``unknown`` here; ``offload_share`` judges it),
+    provenance ("runtime"), shadow_tier, tool_use_id (the MCP call's ``tool_use`` id,
+    None on rows written before ``call_identity`` or with no MCP call), success (the
+    router's own 0/1 verdict on the answer, None when the column is absent).
     """
     import sqlite3
 
@@ -1371,15 +1378,17 @@ def local_shadow_units(days: int | None = 30, db_path: Path | None = None) -> It
         cols = {r[1] for r in conn.execute("PRAGMA table_info(routing_decisions)")}
         sid = "session_id" if "session_id" in cols else "NULL"
         tier = "shadow_tier" if "shadow_tier" in cols else "NULL"
+        tool = "tool_use_id" if "tool_use_id" in cols else "NULL"
+        ok = "success" if "success" in cols else "NULL"
         rows = conn.execute(
-            f"SELECT {sid}, timestamp, task_type, complexity, final_model, latency_ms, {tier} "
+            f"SELECT {sid}, timestamp, task_type, complexity, final_model, latency_ms, {tier}, {tool}, {ok} "
             f"FROM routing_decisions WHERE {where} ORDER BY timestamp, id", args,
         ).fetchall()
     except sqlite3.Error:
         return
     finally:
         conn.close()
-    for session, ts, task_type, complexity, model, latency, shadow in rows:
+    for session, ts, task_type, complexity, model, latency, shadow, tool_use, success in rows:
         try:
             iso = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).isoformat()
         except (TypeError, ValueError):
@@ -1389,6 +1398,7 @@ def local_shadow_units(days: int | None = 30, db_path: Path | None = None) -> It
             "lever": _LEVER_OF_KIND[UNIT_LOCAL_SHADOW], "task_type": task_type,
             "complexity": complexity, "model": model, "latency_ms": latency,
             "outcome": OUTCOME_UNKNOWN, "provenance": "runtime", "shadow_tier": shadow,
+            "tool_use_id": tool_use, "success": success,
         }
 
 

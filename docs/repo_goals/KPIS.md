@@ -56,11 +56,90 @@ fallback and no 4xx/5xx upstream status. Class **Haiku** when `served_model` (el
 `requested_model`) names Haiku, else Claude. Claude Code's own side calls (`tier_reason ==
 side_call`: titles, summaries) are excluded and counted: the router did not choose them and
 nobody redoes them. (b) Proxy rows with `decision == served` (a local backend answered): class
-**local**. (c) `northstar.local_shadow_units()` (PR #284, `usage.db`
-`provenance='runtime'`, `final_provider='ollama'`): class **local**. A local unit with no
-`session_id` cannot be scoped to organic sessions: it is excluded and counted, the local share
-prints as `unknown`, and O3 is a lower bound. Today every such row in `usage.db` has no
-session id.
+**local**. (c) `northstar.local_shadow_units()` (PR #284, `usage.db` `provenance='runtime'`,
+`final_provider='ollama'`): a local MCP `llm()` answer given INSIDE a Claude turn. Claude made
+that turn's first call, so it is **not a turn** (M0.3a): it sits outside both the numerator and the
+denominator and is printed on its own line (`local MCP answers inside Claude turns`, and as
+`o3.breakdown.local_assist_n` / `local_assist_redone`). One with no `session_id` cannot be scoped
+to organic sessions: it is excluded and counted (`local_no_session`). One local unit per MCP
+call: every `route_and_call` writes a row, so `llm_edit`'s retries (up to 3) and `llm_act`'s planner
+write several rows with one `tool_use_id`; those rows are one unit. A row with no `tool_use_id` is
+its own unit. A call whose every row has `success=0` (the router's own verdict: degraded, a
+failure finish reason, unusable output) is not served work: counted as `local_failed`, never a
+unit. Rows written before `call_identity` have no session id and stay unknown; they are never
+guessed into a session. Count them on a copy of `usage.db` with
+`select count(*) from routing_decisions where provenance='runtime' and final_provider='ollama' and session_id is null`.
+Rows are stamped only by an MCP server started after a release reaches its install: a
+long-lived Claude Code MCP server keeps running the code it started with, and Claude.app's
+servers run from whatever tree they were installed from. (d) **Zero-Claude edit
+turns** (M0.3c): the hook applied the edit and the whole turn was served locally, so there is
+no proxy row. `edit_outcomes.jsonl` rows with `source=zero_claude` and `applied=true` count as
+**one local turn per (session_id, turn_id)** (`turn_id` = `prompt_key.key(prompt)`, a text-free
+hash); a turn that edits a source file and a test file is still 1 turn. A `claude:` re-ask in
+the next turns marks it redone. Rows with `source=llm_edit` (or none) are never turns, and a
+row with no session id or no turn id is excluded and counted
+(`o3.excluded.edit_no_session`, `edit_no_turn_id`).
+
+*Session id and tool_use id on `routing_decisions`.* The MCP path (`llm()`, `llm_edit`, through
+`router.py`'s finalizer) stamps `session_id` from `CLAUDE_CODE_SESSION_ID`, which Claude Code puts
+in the MCP server's environment (checked on a live server 2026-10-06), and `tool_use_id` from the
+`tools/call` request's `_meta["claudecode/toolUseId"]` (Claude Code 2.1.291 sends it). The env id
+is stamped only inside an MCP tool call (a `tool_use_id` is bound): every Bash tool shell carries
+it too, so a gateway or `route_server` started from one would stamp that session on calls it
+serves for anyone. The hook's DIRECT path and agent-route stamp the hook payload's session id
+(agent-route's own id falls back to the machine-wide `session_id.txt`, so it is not used). The
+machine-wide `current_session.json` pointer is NOT used: the last session to prompt wins it, so
+it would attribute an answer to the wrong conversation. Ids only, shape-checked
+(`[A-Za-z0-9_.:-]{1,128}`); free text, a non-string or a placeholder (`sdk`, `unknown`) is stored
+as NULL (`src/llm_router/call_identity.py`).
+
+*Which proxy calls are turns* (M0.3b; the owner's definition, PLAN section 1.2 O3). A turn is a proxy
+row that is not a side call and whose `step_class` is not `continuation`, minus sub-agent first calls.
+The proxy row's `msg_id` is joined to the transcript's assistant `message.id` (`o3_transcripts`). The
+join changes exactly one thing; the rest of its roles are only counted:
+
+| Transcript role of the row | Counted as | Counter |
+|---|---|---|
+| sub-agent call (`isSidechain: true`, or `<session>/subagents/**/agent-*.jsonl`) | not a turn (per-call unit only, does not end a redo window) | `o3.excluded.subagent_first` |
+| first answer to injected input: slash command, sub-agent hand-back, peer message, task notification | **turn** (kept in) | `o3.kept_in.meta_first` |
+| message id in no message of a session that HAS a transcript (permission classifier, prompt suggestion, side query) | **turn** (kept in: "unjoined rows stay in") | `o3.kept_in.unjoined` |
+| session with no transcript at all, or a row with no message id | **turn** (proxy-only rule) | `o3.kept_in.no_transcript` |
+| anything else | by `step_class` | |
+
+A row the proxy flags `side_call` is never promoted to a turn, whatever the transcript says. The
+`kept_in` counters are the size of the gap between this definition and "the first answer to a typed
+prompt": they are reported so the owner can see it, and they do not change n.
+
+Typed prompt (used only by `o3_integrity.py`, never by the scorecard) = a `user` entry that is not a
+sidechain, not `isMeta`, has non-blank text and does not start with `<command-`. **Open owner decision:
+background task notifications have that shape too** (`promptSource=system`: 113 of the 209 typed prompts
+of the one qualifying W0 session, 54%), so a "human turn" here includes turns the harness started on a
+sub-agent completion, and the redo window of 2 human turns can span notifications rather than human
+replies. The definition is not changed here; O3 should not feed an M2/M4 bar before the owner decides.
+
+Measured on W0 (2026-09-29T09:41:51Z to 2026-10-06T09:41:52Z, `proxy_calls.jsonl` md5 627eef56, 26,096
+rows, one qualifying session b9f04425): the owner's rule counts **813 turns against 209 typed prompts =
+3.890**, outside the M0-2 band 0.90-1.10. Of the 813: 548 are calls in no transcript message, 162
+injected-input first calls and 103 first answers to a typed prompt (the transcript-decided count would be
+177 against 209 = 0.847, or 177 against the 184 prompts the proxy could have seen = 0.962; it is a
+different definition and needs a PLAN edit).
+
+*Bound* (M0.3d). When G3 `session_kind` completeness is below 95%, O3 prints `o3.bound` with
+`lower` and `upper`: the headline (untagged rows treated as non-organic) and the same number with
+untagged rows treated as organic, whichever is smaller and larger.
+
+*Integrity.* `$PP/scripts/o3_integrity.py --since --until` compares proxy turns with every typed
+transcript prompt per session and pooled over an absolute window (PLAN M0-2: 0.90-1.10; prompts older than
+the session's first proxy row are printed apart and still counted). Zero qualifying sessions is a FAIL. Two
+checks do not go through `offload_share`: no msg_id is counted as a turn twice, and the O3 turn count must
+equal a recount made from the ledger rows.
+
+*Owner-accepted warning (M0-2, 2026-10-07).* On W0 the integrity ratio is 813 / 209 = 3.89 on the only
+measurable session (b9f04425, research), outside the bar, so M0-2 FAILED. The owner accepted O3 as is,
+with a warning: `kpi`, `kpi --health`, `kpi --json` (`o3.caveat`, `o3.integrity`) and the weekly markdown
+all print "O3 turn count unvalidated: may overcount turns (integrity 3.89x ...)". The figures live in
+one place, `commands/kpi.py` `O3_INTEGRITY_GATE`. Do not read O3 as a bar for M2 or M4 until the turn
+count is validated; remove the warning only after `o3_integrity.py` passes.
 
 *Redone.* A unit is redone when any of:
 
@@ -71,9 +150,15 @@ session id.
    non-side-call row whose `step_class` is not `continuation`.
 2. **Receipt band.** `user_signals.jsonl` has a `redone` press (last press per key wins) for
    the unit's `msg_id`.
-3. **usage_outcome.** A `redone` verdict (`usage_outcome.py`) for a routed event in the same
-   session, within 120 s of the unit, each verdict used once. Local units only (a verdict
-   exists only for routed MCP events).
+3. **usage_outcome.** A `redone` verdict (`usage_outcome.py`) for the unit's routed event. Local
+   units only (a verdict exists only for routed MCP events). Joined exactly when the unit's
+   `tool_use_id` equals the verdict's `event_id` (the transcript's `tool_use` id); then the
+   transcript's session id replaces the stamped one (a server kept across `/clear` can still
+   carry the old id). `claude --fork-session` copies the history, ids included, so one id can
+   sit in two transcripts: the copy in the stamped session
+   wins; with none, a `redone` copy wins; ties break on session id, never on file order. A unit
+   with no `tool_use_id` falls back to: same session, within 120 s, each verdict used once and
+   never one already joined exactly.
 
 4. **Transcript detector (source 4, OFF).** `src/llm_router/redo_signal.py` reads the session's Claude Code
    transcript and flags a human prompt that re-asks (`claude:` / `native:` / `opus:`), corrects, complains
@@ -100,6 +185,45 @@ session id.
 A unit that shows no redo but has fewer than 2 human turns after it (a recent turn, or the end of
 a session) is counted as not redone and also counted as `window_open`; the count is in the
 headline value (`n=..., K window-open`) because it can still become a redo.
+For an exactly joined local unit the human turns after it are read from its transcript
+(`usage_outcome`'s `turns_after`), and the transcript decides both ways: it closes a window the
+proxy never saw, and it keeps a window open that the proxy would close. The proxy counts every
+non-continuation request as a human turn, a Task subagent's first call included, so it can
+overcount; the transcript cannot. A unit that is not joined has only the proxy's count.
+
+*Local answers accepted* (its own line under O3: `local answers: n served, n accepted, accept
+rate`). Reporting only and **never part of NS**: NS stays strict ("used" needs a passing test,
+owner rule 2026-10-05). Over local turns (proxy-served, zero-Claude) plus local MCP answers
+(`local_assist`, which are explicitly not turns and stay out of O3's n and local share):
+
+- **redone** -- redone by the definition above;
+- **accepted** -- not redone, and either 2 human turns of the same session followed (no re-ask,
+  correction or redo in the unit's turn or the next 2) or the person's last receipt-band press for
+  its `msg_id` is `kept`. A keep loses to a redo that lands later in the window;
+- **unjudged** -- not redone, and its exactly joined usage_outcome verdict is `unknown` for a
+  reason that will not resolve (`no_result`, `no_pairs`, `not_applied_seen`, `partly_applied`).
+  usage_outcome never rounds these to either side, and neither does this line: a local `llm_edit`
+  that failed every attempt is not an accepted answer, however many turns follow;
+- **pending** -- neither yet: counted and stated, never on either side. This includes an edit
+  whose verdict is `window_open` while its `so_far` says it is not applied yet.
+
+Accept rate = accepted / (accepted + redone). Below 50 decided it prints `too few to tell
+(n=N)`; with none decided, `not measurable`; never `0%` for unknown. Pending, unjudged and
+failed units and units with no session id are listed beside it, not in the rate. Because the usage_outcome verdict looks 3
+human turns ahead (`WINDOW_TURNS`), a redo in the third turn after an exactly joined unit also
+counts as redone; that is O3's own redo definition, kept as is. A routed call in a single-turn
+session has no human turn after it and stays pending.
+
+Known limits of the session id: (1) The stale-stamp correction (the transcript's session id
+replaces the stamped one) reads main-thread transcripts only. A call made by a subagent after
+`/clear` or an in-process resume is not joined, keeps the MCP server's old session id, and is
+judged against that session's turns. It usually ends pending, because the old session has no
+later turns, but it can be accepted when it does. (2) Claude Desktop and Cursor MCP servers
+have no `CLAUDE_CODE_SESSION_ID`; their rows stay NULL (unknown) by design.
+Local answers the line cannot judge are stated beside it and never dropped silently: no session
+id, flagged failed, from a session with no kind tag, or from a research/other-kind session (the
+last two are counted among O3's `untagged` / `other_kind` exclusions as well). Tests:
+`tests/test_local_session_accepted.py`.
 
 *Session-kind override.* `~/.llm-router/session_kind_overrides.json`, `{session_id: {"kind": ..., "reason": ...}}`,
 names a session whose tag or whose rows' own stamps are wrong and cannot be rewritten (the ledgers are

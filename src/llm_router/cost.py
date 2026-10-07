@@ -652,6 +652,13 @@ MIGRATE_ROUTING_DECISIONS_ADD_SHADOW_TIER = [
 """P2 local-usage plan: the tier a decision WOULD have had under
 ``LLM_ROUTER_LOCAL_TIER=shadow`` ("local" or NULL). Log only; never read by routing."""
 
+MIGRATE_ROUTING_DECISIONS_ADD_TOOL_USE_ID = [
+    "ALTER TABLE routing_decisions ADD COLUMN tool_use_id TEXT",
+]
+"""The Claude Code ``tool_use`` id of the MCP call that made the decision
+(``call_identity.tool_use_id``), NULL when there was none. An id only: it joins a row to
+its ``usage_outcome`` verdict (whose ``event_id`` is the same id)."""
+
 MIGRATE_ROUTING_DECISIONS_ADD_PROVENANCE = [
     "ALTER TABLE routing_decisions ADD COLUMN provenance TEXT",
 ]
@@ -1099,6 +1106,7 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_ROUTING_DECISIONS_ADD_SUBJECT
         + MIGRATE_ROUTING_DECISIONS_ADD_PROVENANCE
         + MIGRATE_ROUTING_DECISIONS_ADD_SHADOW_TIER
+        + MIGRATE_ROUTING_DECISIONS_ADD_TOOL_USE_ID
         # Defined in v6.2 and never applied: compression_stats was declared,
         # log_compression_stat wrote to it, and the table did not exist. The
         # write raised OperationalError straight into bash-compress's bare
@@ -1908,6 +1916,8 @@ async def log_routing_decision(
     requested_complexity: str | None = None,
     subject: str | None = None,
     shadow_tier: str | None = None,
+    session_id: str | None = None,
+    tool_use_id: str | None = None,
 ) -> None:
     """Persist a complete routing decision to the routing_decisions table.
 
@@ -1938,6 +1948,10 @@ async def log_routing_decision(
         output_tokens: Output tokens generated.
         cost_usd: Total cost of the LLM call.
         latency_ms: Total latency of the LLM call.
+        session_id: The Claude Code session that asked (``call_identity``), or None
+            when unknown. Never guessed: NULL is what O3 counts as "no session id".
+        tool_use_id: The MCP ``tool_use`` id behind the call, or None. Ids only:
+            no prompt or answer text is stored by either.
     """
     # Validate inputs before database insert
     _validate_routing_insert(final_model, final_provider, cost_usd)
@@ -1990,8 +2004,8 @@ async def log_routing_decision(
                 quality_mode, final_model, final_provider, success,
                 input_tokens, output_tokens, cost_usd, latency_ms, reason_code,
                 correlation_id, requested_complexity, complexity_downgraded, subject,
-                provenance, capabilities_json, shadow_tier)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                provenance, capabilities_json, shadow_tier, session_id, tool_use_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 _prompt_hash(prompt),
                 task_type,
@@ -2021,6 +2035,8 @@ async def log_routing_decision(
                 _write_provenance(),
                 capabilities_json,
                 shadow_tier,
+                session_id or None,
+                tool_use_id or None,
             ),
         )
         await db.commit()

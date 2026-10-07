@@ -16,6 +16,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 6 | Research session b9f04425 counted as organic | fixed in #291 (M0.0b) |
 | 7 | `edit_outcomes.jsonl` rows with no source | open, fix is plan task M0.3(c) |
 | 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | known, not fixed |
+| 9 | Classifier warm-up loaded `llmr-classifier` at the wrong `num_ctx` | fixed in #298 (M1.4, review 2) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -31,7 +32,10 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   used, because with two sessions open it names the wrong one. Open at the time of writing.
 - **Test.** M0-3: at least 19 of 20 synthetic rows carry the calling session's own id across 2
   concurrent research sessions. #288 carries its own tests (a fresh pointer with no env stores
-  NULL). Not on `main` yet.
+  NULL). The hook payload's id is pinned on all three agent-route ledger paths (DIRECT, NS3
+  Codex, Phase 2 CLI delegation) by `test_every_agent_route_ledger_path_stamps_the_payload_session`;
+  a review mutation that passed main()'s own pointer-backed `session_id` to two of the three had
+  survived until that test was added. Not on `main` yet.
 
 ## 2. O3 counted more turns than the user typed
 
@@ -140,3 +144,32 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   avoids the auto-detect.
 - **Test.** None yet. A fix needs a test that, with both variables unset and Ollama
   reachable, asserts the value the owner chooses.
+
+## 9. Classifier warm-up loaded `llmr-classifier` at the wrong `num_ctx`
+
+- **Symptom.** The first real classification after a warm-up still cost a model reload. In
+  `~/.ollama/logs/server.log` (Ollama 0.32.11, `OLLAMA_CONTEXT_LENGTH=131072`), the alias's
+  blob `sha256-dec52a44...` started at `-c 32768` at 2026-10-07 09:52:06 (+01:00), then
+  restarted at `-c 4096` at 09:52:32 (26 s later, the real call evicting the warm runner); the
+  same pair repeated at 09:55:27 and 09:56:03 (n=2 pairs). A reload is about 5 s against a
+  2.0 s budget (D-4), so the call that should have been fast timed out.
+- **Cause.** `_warm` posted `/api/chat` with no `options`, and Ollama loaded the alias at its
+  own default context. The real call (`_payload`) always sends `num_ctx 4096`. Ollama treats a
+  different `num_ctx` as a different runner, so the warm runner was evicted, not reused.
+  `_is_loaded` also reported any resident `llmr-classifier` as warm, whatever its
+  `context_length`, so an alias left at 32768 skipped the warm-up and the first real call paid
+  the reload inside its budget.
+- **Fix.** `src/llm_router/local_classifier.py`: `_warm` and `_payload` both take
+  `_options()`, so the two requests cannot drift apart. `_is_loaded` returns False for a
+  model resident at a `context_length` other than `NUM_CTX`, so the call reports `cold` and the
+  warm-up reloads it at 4096. A server that does not report `context_length` is taken at its
+  word. Not re-run against the live server (the shared Ollama was left undisturbed); the
+  loopback tests are the proof.
+- **Test.** In `tests/test_local_classifier.py`:
+  `test_cold_model_is_reported_and_warmed_once_per_30_seconds` asserts
+  `warm[0]["options"]["num_ctx"] == lc.NUM_CTX == 4096`;
+  `test_resident_at_the_wrong_context_is_cold_not_a_reload_inside_the_budget` asserts that an
+  alias resident at 32768 returns `cold` with no chat call and one warm-up at 4096, and that
+  4096 and an omitted `context_length` return `llm`. Mutants run on head 2316f3f: warm-up
+  without `options` fails both tests; `_is_loaded` returning True regardless of context fails
+  the second.
