@@ -2320,6 +2320,8 @@ async def _finalize_successful_route(
     _cd = classification_data or {}
     _unhinted = classification_data is None
     try:
+        from llm_router import call_identity as _call_identity
+
         await cost.log_routing_decision(
             prompt=prompt,
             task_type=_cd.get("task_type", task_type.value),
@@ -2386,6 +2388,12 @@ async def _finalize_successful_route(
                 _cd.get("task_type", task_type.value),
                 _cd.get("complexity", effective_complexity),
             ),
+            # Ids only, so O3 can scope and judge this answer. Not `_rt_sid`: that one
+            # falls back to the machine-wide pointer (last writer wins), and a wrong
+            # session is worse than none here. Only inside an MCP tool call: any process
+            # started from a Claude Code shell inherits its session id. See call_identity.py.
+            session_id=_call_identity.call_session_id(),
+            tool_use_id=_call_identity.tool_use_id(),
         )
         if classification_data:
             if response.provider in {"claude_subscription", "subscription", "anthropic", "claude"}:

@@ -70,6 +70,44 @@ A unit is redone when ANY of:
 A unit whose 2 following human turns have not happened yet and that shows no redo is
 counted as NOT redone and also counted in ``window_open``: it can still turn into a redo,
 so the number is stated with that count, never silently final.
+
+LOCAL UNIT = ONE CALL. Every ``route_and_call`` writes a row, so one MCP call can write
+several (``llm_edit`` retries up to 3 times; ``llm_act`` plans, then acts), all with the
+same ``tool_use_id``. Rows sharing a ``tool_use_id`` are one unit, at the time of the
+first; a row with no id is its own unit. Rows the router flagged ``success=0`` (its own
+verdict: degraded, a failure finish reason, unusable output) are not served work: a call
+with no successful row is counted in ``local_failed``, never a unit.
+
+LOCAL ANSWER JOIN (``tool_use_id``). A usage.db local unit written by the MCP path carries
+the ``tool_use`` id of the call (``call_identity``). When a ``usage_outcome`` row has that
+id as its ``event_id`` (the transcript's ``tool_use`` id), the join is exact: its session
+id (the transcript's own) replaces the stamped one, its verdict is the unit's
+usage_outcome redo (the 120 s time join is not used for it), and its ``turns_after`` (human
+turns that followed, from the transcript) closes the window once it reaches
+``REDO_TURNS``. That makes a local unit judgeable in a session the proxy never saw.
+A forked session (``claude --fork-session``) copies the history, ids included, so one id
+can sit in several transcripts: the copy in the stamped session wins; with none, a
+``redone`` copy wins; ties break on session id, never on file order. A verdict of
+``unknown`` for any reason but ``window_open`` (no_result, no_pairs, not_applied_seen,
+partly_applied) is never rounded to either side: the unit is ``unjudged``. An open-window
+verdict whose ``so_far`` says the edit is not applied yet stays pending.
+
+LOCAL ANSWERS ACCEPTED (``local_answers``; reporting only, never NS: "used" needs a
+passing test, owner rule 2026-10-05). Over every local answer: the local turns (proxy-served,
+zero-Claude) AND the local MCP answers (``local_assist``), which are not O3 turns but are
+still local answers:
+
+* redone   -- the unit is redone by the definition above;
+* accepted -- not redone, and either its window is closed (``REDO_TURNS`` human turns of
+  the same session followed with no re-ask, correction or redo) or the person's last
+  receipt-band press for its ``msg_id`` is ``kept``. A keep still loses to a redo that
+  lands later in the window: redone is decided first on every read;
+* unjudged -- not redone, and its exactly joined usage_outcome verdict is an unknown that
+  will not resolve (see the join above). Counted, never folded into either side;
+* pending  -- neither yet. Counted, never folded into either side.
+
+The accept rate is accepted / (accepted + redone); pending, unjudged and failed units and
+units with no session id are outside it and are stated beside it.
 """
 from __future__ import annotations
 
@@ -82,6 +120,7 @@ CLASS_CLAUDE = "claude"
 # transcript roles of a proxy call (o3_transcripts); duplicated names, not imported, to keep this module pure
 ROLE_META, ROLE_SIDECHAIN, ROLE_ORPHAN = "meta", "sidechain", "orphan"
 ESCALATION_REASONS = frozenset({"escalation", "escalation_under_pressure"})
+NOT_APPLIED_YET = frozenset({"not_applied_seen", "partly_applied"})  # usage_outcome so_far
 REDO_TURNS = 2          # the unit's own turn + the next 2 human turns
 REDO_SOURCE4_ENABLED = False   # PLAN M0.9: flipped by a follow-up PR that cites the validation result
 DETECTOR_MAP_SLACK_S = 2.0      # a prompt may be stamped this much AFTER the ledger row it caused
@@ -170,12 +209,15 @@ def policy_start(proxy_rows: Iterable[dict], version: str) -> float | None:
 def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: float, days: float,
                 kind_of, allowed: frozenset, band_redone: set[str] | frozenset = frozenset(),
                 outcome_redos: Iterable[dict] = (), edit_rows: Iterable[dict] = (),
-                thread_of=None, detector_flags=None) -> dict:
+                thread_of=None, detector_flags=None,
+                band_kept: set[str] | frozenset = frozenset()) -> dict:
     """Classified, redo-judged units in the window.
 
     ``kind_of(session_id, stamp)`` returns the resolved session kind or None.
     ``band_redone``: msg_ids whose last receipt-band press is ``redone``.
-    ``outcome_redos``: usage_outcome rows (any outcome; only ``redone`` is read).
+    ``band_kept``: msg_ids whose last receipt-band press is ``kept`` (sets ``kept``).
+    ``outcome_redos``: usage_outcome rows (any outcome). Joined exactly by ``event_id`` to a
+    local unit's ``tool_use_id``; otherwise only ``redone`` rows are read, by time.
     ``edit_rows``: ``edit_outcomes.jsonl`` rows; only applied ``source=zero_claude`` rows with a
     session id and a turn id make a unit (one local turn per (session_id, turn_id)).
     ``thread_of(session_id, msg_id)``: the transcript role of the call (``o3_transcripts``: ``turn``,
@@ -186,7 +228,8 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
     ``detector_flags(session_id)``: ``[(prompt ts, signal)]`` from ``redo_signal`` (source 4), called once
     per admitted session. Counted always; it marks units redone only when ``REDO_SOURCE4_ENABLED``.
     Returns ``{"units": [...], "local_assist": [...], "side_call_excluded", "untagged",
-    "other_kind", "local_no_session", "n_escalations", "subagent_first", "meta_first", "unjoined",
+    "other_kind", "local_no_session", "local_failed", "local_untagged", "local_other_kind",
+    "n_escalations", "subagent_first", "meta_first", "unjoined",
     "no_transcript", "edit_no_session", "edit_no_turn_id", "zero_claude_turns", "n_detector_flags",
     "n_detector_unmapped"}``. ``units`` holds
     turns and the other calls (``first`` False); ``local_assist`` holds the local MCP units (never
@@ -194,6 +237,11 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
     by what the transcript says: ``subagent_first`` are taken out of the turns, ``meta_first`` and
     ``unjoined`` are KEPT IN and only counted; ``no_transcript`` counts the turn rows kept on the
     proxy-only rule because their session has no transcript (or the row has no message id).
+    ``local_untagged`` / ``local_other_kind`` are the local answers among the ``untagged`` /
+    ``other_kind`` exclusions (the local answers line states them). A local answer is a local MCP
+    answer, a proxy-served row (``decision == "served"``) or a zero-Claude edit turn: the same
+    three sources as the line's served count, and counted per TURN like it (a proxy row only when
+    it begins a turn, an edit turn once however many rows it wrote).
     ``n_escalations`` counts escalation rows among the admitted units: how much redo signal exists
     at all. A local unit with no ``session_id`` (usage.db rows written without one) cannot be
     scoped to organic sessions: it is excluded and counted in ``local_no_session``, so the local
@@ -235,8 +283,20 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
             convs[sid] = _Conversation(by_session[sid], begins_turn)
         return convs[sid]
 
+    calls: dict[Any, list[dict]] = {}  # one local unit per MCP call (module doc)
+    for i, u in enumerate(local_units):
+        tid = u.get("tool_use_id")
+        calls.setdefault(tid if isinstance(tid, str) and tid else ("row", i), []).append(u)
+    outcomes = list(outcome_redos)
+    copies: dict[str, list[dict]] = {}
+    for o in outcomes:
+        if isinstance(o.get("event_id"), str):
+            copies.setdefault(o["event_id"], []).append(o)
+    joined = set(calls) & set(copies)
     redo_events: dict[str, list[float]] = {}
-    for o in outcome_redos:
+    for o in outcomes:
+        if o.get("event_id") in joined:
+            continue  # judged through its exact join; never reused by the time join
         ts, sid = _num(o.get("ts")), o.get("session_id")
         if o.get("outcome") == "redone" and ts is not None and isinstance(sid, str):
             redo_events.setdefault(sid, []).append(ts)
@@ -245,7 +305,8 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
 
     units: list[dict] = []
     assist: list[dict] = []
-    side = untagged = other = local_no_session = n_escalations = 0
+    side = untagged = other = local_no_session = local_failed = n_escalations = 0
+    local_untagged = local_other = 0
     subagent_first = meta_first = unjoined = no_transcript = edit_no_session = edit_no_turn_id = 0
 
     det_turns: dict[str, list[int]] = {}
@@ -281,14 +342,16 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
         ut = c.unit_turn(ts)
         return any(ut < t <= ut + REDO_TURNS for t in turns)
 
-    def admit(sid, stamp) -> bool:
-        nonlocal untagged, other
+    def admit(sid, stamp, *, local: bool = False) -> bool:
+        nonlocal untagged, other, local_untagged, local_other
         kind = kind_of(sid, stamp)
         if kind is None:
             untagged += 1
+            local_untagged += 1 if local else 0
             return False
         if kind not in allowed:
             other += 1
+            local_other += 1 if local else 0
             return False
         return True
 
@@ -300,7 +363,12 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
             side += 1
             continue
         cls = _proxy_class(r)
-        if cls is None or not admit(r.get("session_id"), r.get("session_kind")):
+        if cls is None:
+            continue
+        # A local ANSWER is a turn, as in the line's served count (turn_units: first-of-turn
+        # only), so a continuation or sub-agent-first row of a dropped session is not counted.
+        if not admit(r.get("session_id"), r.get("session_kind"),
+                     local=cls == CLASS_LOCAL and begins_turn(r)):
             continue
         sid = r.get("session_id")
         conv = conv_of(sid) if isinstance(sid, str) else None
@@ -324,33 +392,59 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
             why = "detector"
         units.append({"class": cls, "ts": ts, "session_id": sid, "redone": why is not None,
                       "why": why, "window_open": open_ and why is None, "first": first,
-                      "msg_id": r.get("msg_id")})
+                      "msg_id": r.get("msg_id"),
+                      "kept": isinstance(r.get("msg_id"), str) and r["msg_id"] in band_kept})
         if r.get("tier_reason") in ESCALATION_REASONS:
             n_escalations += 1
 
-    for u in local_units:
-        ts = _num(_iso_ts(u.get("ts")))
+    for key, rows in calls.items():
+        ts = _num(_iso_ts(rows[0].get("ts")))
         if ts is None or ts < since or ts > now:
             continue
-        sid = u.get("session_id")
+        stamp = rows[0].get("session_id")
+        ev = _pick_copy(copies.get(key, ()), stamp)
+        sid = stamp
+        if ev is not None and isinstance(ev.get("session_id"), str) and ev["session_id"]:
+            sid = ev["session_id"]  # the transcript's own session id wins over the stamp
         if not (isinstance(sid, str) and sid):
             local_no_session += 1  # cannot be scoped to organic: counted, never guessed
             continue
-        if not admit(sid, None):
+        if not admit(sid, None, local=True):
+            continue
+        if all(_failed(r) for r in rows):
+            local_failed += 1  # the router's own verdict: no usable answer was served
             continue
         conv = conv_of(sid)
         hit, open_ = conv.redone_after(ts) if conv else (False, True)
         why = "escalation" if hit else None
-        if why is None and _consume_event(redo_events.get(sid, []), ts):
+        unjudged = False
+        if ev is not None:
+            outcome, reason = ev.get("outcome"), ev.get("reason")
+            if why is None and outcome == "redone":
+                why = "usage_outcome"
+            after = ev.get("turns_after")
+            if isinstance(after, int) and not isinstance(after, bool):
+                # The transcript's human turns win both ways. The proxy counts every
+                # non-continuation request, a Task subagent's first call included, so it can
+                # close a window the transcript shows still open.
+                open_ = after < REDO_TURNS
+            if outcome not in ("used", "redone"):
+                if reason != "window_open":
+                    unjudged = True  # usage_outcome's unknown: never rounded to either side
+                elif ev.get("so_far", reason) in NOT_APPLIED_YET:
+                    open_ = True  # not applied so far, may still be: pending
+        elif why is None and _consume_event(redo_events.get(sid, []), ts):
             why = "usage_outcome"
         if why is None and detector_redone(sid, ts):
             why = "detector"
         assist.append({"class": CLASS_LOCAL, "ts": ts, "session_id": sid, "redone": why is not None,
-                       "why": why, "window_open": open_ and why is None, "first": True})
+                       "why": why, "window_open": open_ and why is None, "first": True,
+                       "kept": False, "joined": ev is not None, "unjudged": unjudged and why is None})
 
     # Zero-Claude edits: one local TURN per (session_id, turn_id). The hook served the whole turn,
     # so there is no proxy row for it; a `claude:` re-ask in the next turns marks it redone.
     seen_turns: set[tuple[str, str]] = set()
+    dropped_turns: set[tuple[str, str]] = set()  # turns admit() refused: counted once, not per row
     for e in sorted((e for e in edit_rows if isinstance(e, dict)), key=lambda e: _num(e.get("ts")) or 0.0):
         if e.get("source") != "zero_claude" or e.get("applied") is not True:
             continue  # llm_edit rows (and rows with no source) happen inside Claude turns
@@ -364,7 +458,10 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
         if not (isinstance(tid, str) and tid):
             edit_no_turn_id += 1
             continue
-        if (sid, tid) in seen_turns or not admit(sid, e.get("session_kind")):
+        if (sid, tid) in seen_turns or (sid, tid) in dropped_turns:
+            continue  # one turn, however many edit rows it wrote
+        if not admit(sid, e.get("session_kind"), local=True):
+            dropped_turns.add((sid, tid))
             continue
         seen_turns.add((sid, tid))
         conv = conv_of(sid)
@@ -374,11 +471,29 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
                       "why": why, "window_open": open_ and why is None, "first": True,
                       "zero_claude": True})
     return {"units": units, "local_assist": assist, "side_call_excluded": side, "untagged": untagged,
-            "other_kind": other, "local_no_session": local_no_session, "n_escalations": n_escalations,
+            "other_kind": other, "local_no_session": local_no_session, "local_failed": local_failed,
+            "local_untagged": local_untagged, "local_other_kind": local_other,
+            "n_escalations": n_escalations,
             "subagent_first": subagent_first, "meta_first": meta_first, "unjoined": unjoined,
             "no_transcript": no_transcript, "edit_no_session": edit_no_session,
             "edit_no_turn_id": edit_no_turn_id, "zero_claude_turns": len(seen_turns),
             "n_detector_flags": n_det, "n_detector_unmapped": n_det_unmapped}
+
+
+def _failed(row: dict) -> bool:
+    """The router flagged this answer failed (``success=0``); None (no column) is not."""
+    ok = row.get("success")
+    return ok is not None and not ok
+
+
+def _pick_copy(rows: Iterable[dict], stamp: Any) -> dict | None:
+    """The verdict for one tool_use id that may sit in several transcripts (a fork copies
+    the history): the copy in the stamped session, else a redone copy, else the lowest
+    session id. Never the order the transcripts were read in."""
+    rows = list(rows)
+    mine = [o for o in rows if isinstance(stamp, str) and stamp and o.get("session_id") == stamp]
+    return min(mine or rows, key=lambda o: (o.get("outcome") != "redone", str(o.get("session_id") or "")),
+               default=None)
 
 
 def _iso_ts(raw: Any) -> Any:
@@ -422,4 +537,26 @@ def summarize(units: list[dict]) -> dict:
         out["window_open"] += 1 if u["window_open"] else 0
         if out["newest_ts"] is None or u["ts"] > out["newest_ts"]:
             out["newest_ts"] = u["ts"]
+    return out
+
+
+def local_answers(units: list[dict]) -> dict:
+    """Counts only: local units served, accepted, redone, unjudged, pending (module doc).
+    Pass ``built["units"] + built["local_assist"]``: the proxy-served and zero-Claude local turns
+    AND the local MCP answers, which O3 keeps out of its turns but which are local answers."""
+    out = {"served": 0, "accepted": 0, "redone": 0, "unjudged": 0, "pending": 0, "kept": 0, "joined": 0}
+    for u in turn_units(units):
+        if u["class"] != CLASS_LOCAL:
+            continue
+        out["served"] += 1
+        out["kept"] += 1 if u.get("kept") else 0
+        out["joined"] += 1 if u.get("joined") else 0
+        if u["redone"]:
+            out["redone"] += 1
+        elif u.get("unjudged"):
+            out["unjudged"] += 1
+        elif not u["window_open"] or u.get("kept"):
+            out["accepted"] += 1
+        else:
+            out["pending"] += 1
     return out

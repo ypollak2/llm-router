@@ -1351,10 +1351,11 @@ def _o3_from_units(units: list[dict], local_no_session: int = 0, n_escalations: 
     return out
 
 
-def _o3_unit_inputs(days: int, index, now: float,
-                    win: "_Window | None" = None) -> tuple[list[dict], set[str], list[dict], list[dict]]:
-    """(local MCP units, receipt-band redone msg_ids, usage_outcome rows, edit_outcomes rows).
-    Each source that cannot be read yields nothing rather than breaking the scorecard."""
+def _o3_unit_inputs(days: int, index, now: float, win: "_Window | None" = None
+                    ) -> tuple[list[dict], set[str], list[dict], list[dict], set[str]]:
+    """(local MCP units, receipt-band redone msg_ids, usage_outcome rows, edit_outcomes rows,
+    receipt-band kept msg_ids). Each source that cannot be read yields nothing rather than
+    breaking the scorecard."""
     from llm_router import northstar as ns
     from llm_router import usage_outcome as uo
     from llm_router import user_signal
@@ -1364,11 +1365,12 @@ def _o3_unit_inputs(days: int, index, now: float,
     except Exception:  # noqa: BLE001
         local = []
     try:
-        band = {k for k, row in user_signal.latest_by_key(
-                    since=now - days * 86400.0, until=None if win is None else win.until).items()
-                if row.get("signal") == user_signal.SIGNAL_REDONE}
+        latest = user_signal.latest_by_key(
+            since=now - days * 86400.0, until=None if win is None else win.until)
     except Exception:  # noqa: BLE001
-        band = set()
+        latest = {}
+    band = {k for k, row in latest.items() if row.get("signal") == user_signal.SIGNAL_REDONE}
+    kept = {k for k, row in latest.items() if row.get("signal") == user_signal.SIGNAL_KEPT}
     try:
         outcomes = uo.judge_recent(days=_wall_days(days, win))
     except Exception:  # noqa: BLE001
@@ -1377,7 +1379,7 @@ def _o3_unit_inputs(days: int, index, now: float,
         edits = list(ns._load_edit_outcomes())
     except Exception:  # noqa: BLE001
         edits = []
-    return local, band, outcomes, edits
+    return local, band, outcomes, edits, kept
 
 
 #: Below this G3 session_kind completeness, O3 is printed with a bound (M0.3d): the untagged
@@ -1434,7 +1436,7 @@ def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[
     from llm_router import redo_signal
 
     try:
-        local, band, outcomes, edits = _o3_unit_inputs(days, index, now, win)
+        local, band, outcomes, edits, kept = _o3_unit_inputs(days, index, now, win)
         from llm_router import o3_transcripts
 
         thread_of = o3_transcripts.thread_lookup()
@@ -1447,16 +1449,23 @@ def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[
             return osh.build_units(
                 all_rows, local, now=now, days=days, allowed=allowed, kind_of=kind_of,
                 band_redone=band, outcome_redos=outcomes, edit_rows=edits, thread_of=thread_of,
-                detector_flags=detector_flags)
+                detector_flags=detector_flags, band_kept=kept)
 
         built = build()
         res = _o3_from_units(built["units"], built["local_no_session"], built["n_escalations"],
                              assist=built["local_assist"], n_detector_flags=built["n_detector_flags"])
+        res["local_answers"] = _local_answers_result(
+            osh.local_answers(built["units"] + built["local_assist"]), built["local_no_session"],
+            local_failed=built["local_failed"], local_untagged=built["local_untagged"],
+            local_other_kind=built["local_other_kind"])
         res["excluded"] = {"side_call": built["side_call_excluded"], "untagged": built["untagged"],
                            "other_kind": built["other_kind"], "local_no_session": built["local_no_session"],
                            "subagent_first": built["subagent_first"],
                            "edit_no_session": built["edit_no_session"],
-                           "edit_no_turn_id": built["edit_no_turn_id"]}
+                           "edit_no_turn_id": built["edit_no_turn_id"],
+                           "local_failed": built["local_failed"],
+                           "local_untagged": built["local_untagged"],
+                           "local_other_kind": built["local_other_kind"]}
         # NOT excluded: turn rows the transcript says were not a typed prompt's first answer. They
         # stay in n (PLAN M0.3b, "unjoined rows stay in"); the counts say how big that gap is.
         res["kept_in"] = {"meta_first": built["meta_first"], "unjoined": built["unjoined"],
@@ -1471,6 +1480,8 @@ def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[
                 f"hand-back, task notification), {built['unjoined']:,} call(s) in no message of their "
                 f"session's transcript; {built['no_transcript']:,} turn row(s) with no transcript "
                 f"(may include sub-agent first calls)")
+        if built["local_failed"]:
+            note += f", {built['local_failed']:,} local call(s) the router flagged failed (success=0)"
         res["lines"] = list(res.get("lines", ())) + [note]
         cov = ((g3 or {}).get("fields") or {}).get("session_kind", {}).get("coverage")
         if isinstance(cov, (int, float)) and cov < O3_BOUND_BELOW:
@@ -1524,12 +1535,51 @@ def _o3_since_view(units: list[dict], all_rows: list[dict], version: str, now: f
     return {"version": version, "start_ts": start, "start": _iso(start), "since": since, "before": before}
 
 
+def _local_answers_result(la: dict, local_no_session: int, *, local_failed: int = 0,
+                          local_untagged: int = 0, local_other_kind: int = 0) -> dict:
+    """The local answers line: served, accepted and the accept rate (offload_share.local_answers).
+    The rate is accepted / decided (accepted + redone); pending, unjudged, failed and
+    no-session units are stated beside it and never counted on either side. Below MIN_N
+    decided it prints ``too few to tell``; with nothing decided, ``not measurable``: never
+    0% for unknown."""
+    decided = la["accepted"] + la["redone"]
+    rate = _rate_result(la["accepted"], decided, label="decided local answer")
+    out = dict(rate)
+    out["breakdown"] = {**la, "decided": decided, "no_session": local_no_session, "failed": local_failed,
+                        "untagged": local_untagged, "other_kind": local_other_kind}
+    out["value"] = f"{la['served']} served, {la['accepted']} accepted, accept rate {rate['value']}"
+    detail = (f"{la['redone']} redone, {la['pending']} not decided yet (fewer than "
+              f"2 human turns after them, or an edit not applied yet); "
+              f"{la['unjudged']} with a usage verdict of unknown (no result, no edits, not "
+              f"applied): not judged; {la['kept']} kept on the receipt band; "
+              f"{la['joined']} joined to their transcript call by tool_use id")
+    if local_failed:
+        detail += (f"; {local_failed:,} flagged failed by the router (success=0): not served, "
+                   "not in any count")
+    if local_no_session:
+        detail += (f"; {local_no_session:,} local answer(s) with no session id: unknown, "
+                   "not judged and not in any count")
+    if local_untagged:
+        detail += (f"; {local_untagged:,} local answer(s) from sessions with no kind tag: "
+                   "not judged and not in any count")
+    if local_other_kind:
+        detail += (f"; {local_other_kind:,} from a research/other-kind session: "
+                   "not organic, not in any count")
+    out["lines"] = [detail]
+    return out
+
+
 def _o3_render_lines(o3: dict) -> list[str]:
-    """The O3 block as printed by `kpi`: one headline line, then detail lines."""
+    """The O3 block as printed by `kpi`: one headline line, then detail lines, then the
+    local answers line (its own line, outside NS and the other KPIs like O3 itself)."""
     lines = [f"  {_LABELS['O3']:<42s} {o3['value']}"]
     if o3.get("caveat"):
         lines.append(f"      WARNING: {o3['caveat']}")
     lines += [f"      {x}" for x in o3.get("lines", ())]
+    la = o3.get("local_answers")
+    if la is not None:
+        lines.append(f"  {_LABELS['O3_local']:<42s} {la['value']}")
+        lines += [f"      {x}" for x in la.get("lines", ())]
     sp = o3.get("since_policy")
     if sp:
         def one(r: dict | None) -> str:
@@ -1733,6 +1783,7 @@ _LABELS = {
     "G3": "G3  ledger completeness (target >=99%)",
     "G4": "G4  wrongly benched providers (target 0)",
     "O3": "O3  offload share (target >=60%)",
+    "O3_local": "local answers (accepted; never in NS)",
 }
 _ORDER = ("NS", "O1", "O2", "D1", "D2", "D3", "D4", "D5", "G1_hook", "G1_proxy", "G2", "G3", "G4")
 
@@ -1824,6 +1875,8 @@ def write_weekly(data: dict, out_dir: Path) -> Path:
     if data.get("o3") is not None:
         body.append(f"| {_LABELS['O3']} | {data['o3']['value']}"
                     + (f" (WARNING: {data['o3']['caveat']})" if data["o3"].get("caveat") else "") + " |")
+        if data["o3"].get("local_answers") is not None:
+            body.append(f"| {_LABELS['O3_local']} | {data['o3']['local_answers']['value']} |")
     details = [(key, r["lines"]) for key in _ORDER if (r := data["kpis"][key]).get("lines")]
     if details:
         body += ["", "## Details", ""]

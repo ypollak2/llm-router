@@ -372,6 +372,7 @@ def log_direct_to_db(
     even if the DB is locked or the import graph changes.
     """
     try:
+        from llm_router.call_identity import ledger_session_id as _ledger_session_id
         from llm_router.cost import (
             log_routing_decision as _cost_log_routing_decision,
             log_usage as _cost_log_usage,
@@ -465,6 +466,11 @@ def log_direct_to_db(
                 # DIRECT/hook-routed turn — a real, non-empty answer existed
                 # (`response` below) but was never handed to the judge queue.
                 response=response.content,
+                # The hook's own payload session id. It was accepted by this function
+                # and then dropped, so every DIRECT row landed with session_id NULL and
+                # O3 could not scope it to a session. Ids only: free text, a non-string
+                # or a placeholder ("sdk", "unknown") is stored as NULL.
+                session_id=_ledger_session_id(session_id),
             )
 
         # Persist. The standalone UserPromptSubmit hook is synchronous with no
