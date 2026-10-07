@@ -17,16 +17,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local provider. For `northstar.QA_TASK_TYPES` (query, research, generate, analyze and the other Q&A
   types) Ollama and OpenAI-compatible local servers are removed from the chain in `route_and_call`
   (after the specialist and bandit steps, before the daily-cap step) and from the emergency BUDGET
-  chain; the next provider in the existing order serves the call. Every `route_and_call` caller is
-  covered, not only MCP `llm()`: `llm_query`, `llm_analyze`, `llm_research`, `llm_generate`,
-  route_server/gateway, orchestrator decompose and `tools/fs`. `code` is unchanged and can still go
+  chain; the next provider in the existing order serves the call. Every `route_and_call` caller with a
+  Q&A task type is covered, not only MCP `llm()` (list by file, grep `route_and_call(`):
+  `tools/text.py` (`llm_query`, `llm_research`, `llm_generate`, `llm_analyze`, `llm_reason`,
+  `llm_text_job`), `tools/routing.py` (402, 589), `tools/agentic.py`, `tools/fs.py` (QUERY calls),
+  route_server/gateway, orchestrator, `context.py` (compaction summary), `quickstart.py`,
+  `commands/benchmark.py`, `tui/cli.py` and `integrations/agno.py`. Accepted D-14 = A side effect:
+  `llm_text_job` (opt-in `LLM_ROUTER_LOCAL_TEXT_JOBS=1`, task type GENERATE) no longer runs locally
+  once a cloud provider is configured; at merge base aceb366 its chain dispatched to
+  `ollama/qwen3.5:latest`, at this head to `openai/gpt-4o` or `gpt-4o-mini`. The flag is unset on
+  the owner's machine, so nothing changes live today. `code` is unchanged and can still go
   local. An explicit `model_override` is honored, and an install with only local providers keeps them
   (no empty chain). The shared `_build_and_filter_chain` is NOT changed, so the proxy
   (`proxy/backends.py` `policy_chain` -> `choose_model`) routes exactly as before
   (`tests/test_mcp_qa_no_local.py` pins it). Reason: real Q&A prompts, local qwen 4/37 acceptable
   vs Sonnet 34/37 (PLAN 0.3 [RX]); 65 local Q&A answers in 7 days [U]. Only processes that run
   `route_and_call` and are started after the deploy pick it up (uv-tool MCP servers).
-  `tests/test_mcp_qa_no_local.py` (20 tests; 4 mutations red).
+  `tests/test_mcp_qa_no_local.py` (25 tests; 5 mutations red, including the strip moved ahead of the
+  subject specialist).
 - status line: the default is the full layout again, byte-for-byte as before #273 (owner decision,
   reversing #273's fast-by-default; `tests/test_statusline_default_full.py` compares it with the
   pre-#273 script on 9 fixture states). The fast line is the opt-in debug mode

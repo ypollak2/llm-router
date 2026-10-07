@@ -86,8 +86,12 @@ def _response(model: str) -> LLMResponse:
     )
 
 
-async def _run(task_type, chain, model_override=None, emergency=None, fail=()):
-    """route_and_call with a stubbed chain, so only the post-build stages are under test."""
+async def _run(task_type, chain, model_override=None, emergency=None, fail=(), policy=None,
+               classification_data=None):
+    """route_and_call with a stubbed chain, so only the post-build stages are under test.
+
+    ``policy`` (a RoutingPolicy) and ``classification_data`` feed the real subject-specialist
+    step, which runs after the chain build."""
     called: list[str] = []
 
     async def fake_call_llm(model, *a, **k):
@@ -118,7 +122,7 @@ async def _run(task_type, chain, model_override=None, emergency=None, fail=()):
             p(patch(f"llm_router.router.cost.{fn}", new_callable=AsyncMock, return_value=0.0))
         p(patch("llm_router.router.cost.log_usage", new_callable=AsyncMock))
         p(patch("llm_router.policy.load_org_policy", return_value=None))
-        p(patch("llm_router.policy.get_active_policy", return_value=None))
+        p(patch("llm_router.policy.get_active_policy", return_value=policy))
         p(patch("llm_router.router.reserve_envelope", new_callable=AsyncMock, return_value=(None, True, "k")))
         p(patch("llm_router.router.commit_envelope", new_callable=AsyncMock))
         p(patch("llm_router.router.release_envelope", new_callable=AsyncMock))
@@ -130,6 +134,7 @@ async def _run(task_type, chain, model_override=None, emergency=None, fail=()):
             await router_module.route_and_call(
                 task_type, "hello", profile=RoutingProfile.BALANCED,
                 complexity_hint="moderate", model_override=model_override,
+                classification_data=classification_data,
             )
         finally:
             await router_module.drain_bg_tasks(2.0)
@@ -155,6 +160,42 @@ async def test_dispatch_still_calls_local_for_code():
 async def test_an_explicit_model_override_is_not_rerouted():
     """model_override is the caller's own pin, not routing: it is honored for Q&A too."""
     called = await _run(TaskType.QUERY, [OLLAMA, "openai/gpt-4o"], model_override=OLLAMA)
+    assert called[:1] == [OLLAMA], called
+
+
+def _specialist_policy(subject: str, model: str):
+    from llm_router.policy import RoutingPolicy
+
+    return RoutingPolicy(name="m30_specialist", description="test", specialists={subject: model})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task_type", MCP_QA)
+async def test_a_policy_specialist_cannot_put_a_local_model_back_for_qa(task_type):
+    """Position pin. The strip has to run AFTER the subject specialist, because the
+    specialist prepends its model to the chain and can name an ``ollama/*`` one. The
+    chain builder is stubbed with a clean cloud-only chain, so a strip placed right after
+    the build (before the specialist) sees nothing to remove and the specialist then
+    puts ollama first: this test is red for that placement (mutation M-e).
+    The control test below proves the stub is not hiding the step: the specialist really fires."""
+    called = await _run(
+        task_type, ["openai/gpt-4o", "openai/gpt-4o-mini"],
+        policy=_specialist_policy("general", OLLAMA),
+        classification_data={"subject": "general"},
+    )
+    assert called == ["openai/gpt-4o"], called
+
+
+@pytest.mark.asyncio
+async def test_the_specialist_step_really_puts_a_local_model_first_for_code():
+    """Control for the test above: same policy, same stub, a ``code`` task. The specialist
+    is applied (ollama is called first), so the Q&A result above is the strip's work and
+    not an inert specialist step."""
+    called = await _run(
+        TaskType.CODE, ["openai/gpt-4o", "openai/gpt-4o-mini"],
+        policy=_specialist_policy("general", OLLAMA),
+        classification_data={"subject": "general"},
+    )
     assert called[:1] == [OLLAMA], called
 
 
