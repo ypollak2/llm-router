@@ -45,7 +45,8 @@ def test_explicit_window_beats_env_override(monkeypatch):
 
 
 def test_override_zero_omits_num_ctx_from_payload(monkeypatch):
-    import io, json
+    import io
+    import json
     monkeypatch.setenv("LLM_ROUTER_LOCAL_NUM_CTX", "0")
     a = O.OllamaAdapter("qwen3.6:35b-a3b-coding", base_url="http://127.0.0.1:11434")
     assert a.num_ctx is None
