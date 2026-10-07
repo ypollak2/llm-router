@@ -1,7 +1,9 @@
 """Tests for the pure parts of m18_r3.py (amendment 2): tau_abs fit, abstain application, K1, staging."""
+import ast
 import inspect
 import os
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -92,7 +94,11 @@ def test_fit_refuses_e1_rows():
 def test_the_fit_file_is_written_before_e1_labels_are_loaded():
     src = inspect.getsource(R.analyze)
     assert src.index("fit_path.write_text") < src.index("ER.load_e1") < src.index("rows1 =")
-    assert "e1" not in inspect.getsource(R.fit_tau).replace('"e2"', "")
+    tree = ast.parse(textwrap.dedent(inspect.getsource(R.fit_tau)))
+    used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {
+        n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)} | {
+        n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    assert not [u for u in used if "e1" in u.lower()], "fit_tau must not reference E1 data"
 
 
 def test_k1_bars():

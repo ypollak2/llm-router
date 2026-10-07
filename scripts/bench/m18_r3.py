@@ -127,6 +127,7 @@ def preflight(repo):
 
 
 def collect(args):
+    os.environ.setdefault("LLM_ROUTER_SYNTHETIC", "1")  # benchmark traffic: keep its rows out of the production ledger
     repo = Path(args.repo).resolve()
     ver, msha = preflight(repo)
     os.environ["LLM_ROUTER_CLASSIFIER_BACKEND"] = "systemone"
