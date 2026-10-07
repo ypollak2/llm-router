@@ -246,3 +246,44 @@ async def test_the_proxy_still_routes_a_qa_step_to_the_local_model(mock_env):
         assert out["model"] is not None and out["model"].startswith("ollama/"), out
     finally:
         backends._chain_cache.clear()
+
+
+# --- strip-before-cap order (M3.0 x TQ-007) -------------------------------------------
+# The cap step downgrades to {ollama, codex, gemini_cli}. If the Q&A strip ran AFTER it,
+# a capped Q&A call would be served by Ollama, which D-14 = A forbids. Driven through the
+# TQ-007 harness (tests/test_tq007_daily_cap_downgrade._run) with TaskType.QUERY.
+CAP_CHAIN = ["openai/gpt-4o", "ollama/qwen2.5:7b"]
+
+
+@pytest.mark.asyncio
+async def test_a_capped_qa_call_is_not_served_by_ollama_hard_blocks():
+    """Cap hit, chain [openai, ollama], Q&A, enforce=hard: the strip removes ollama first,
+    so the cap step finds no free provider and blocks. Mutant (strip moved after the cap
+    step): the cap step keeps ollama as the free fallback and serves the call -> red."""
+    with pytest.raises(t.BudgetExceededError):
+        await t._run(CAP_CHAIN, task_cap=0.0001, enforce="hard", task_type=TaskType.QUERY)
+
+
+@pytest.mark.asyncio
+async def test_a_capped_qa_call_is_not_served_by_ollama_smart_blocks_without_claude():
+    """smart/soft fall through to Claude only when an anthropic model is in the chain.
+    Here there is none, so the capped Q&A call blocks; it is not handed to ollama or openai."""
+    with pytest.raises(t.BudgetExceededError):
+        await t._run(CAP_CHAIN, task_cap=0.0001, enforce="smart", task_type=TaskType.QUERY)
+
+
+@pytest.mark.asyncio
+async def test_a_capped_qa_call_falls_through_to_claude_not_ollama_when_claude_is_in_chain():
+    resp = await t._run(
+        ["openai/gpt-4o", "ollama/qwen2.5:7b", "anthropic/claude-sonnet-4-6"],
+        task_cap=0.0001, enforce="smart", task_type=TaskType.QUERY,
+    )
+    assert resp.provider == "anthropic", resp.model
+
+
+@pytest.mark.asyncio
+async def test_the_same_capped_chain_for_code_is_still_served_by_ollama():
+    """Control: same chain, same cap, task type CODE. Ollama is the free fallback, so the
+    Q&A blocks above are the strip's work, not an inert cap step."""
+    resp = await t._run(CAP_CHAIN, task_cap=0.0001, enforce="hard", task_type=TaskType.CODE)
+    assert resp.provider == "ollama", resp.model

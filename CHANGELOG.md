@@ -33,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`tests/test_mcp_qa_no_local.py` pins it). Reason: real Q&A prompts, local qwen 4/37 acceptable
   vs Sonnet 34/37 (PLAN 0.3 [RX]); 65 local Q&A answers in 7 days [U]. Only processes that run
   `route_and_call` and are started after the deploy pick it up (uv-tool MCP servers).
-  `tests/test_mcp_qa_no_local.py` (26 tests; 5 mutations red, including the strip moved ahead of the
+  `tests/test_mcp_qa_no_local.py` (30 tests; 6 mutations red, including the strip moved ahead of the
   subject specialist). The set of stripped providers is `types.LOCAL_PROVIDERS` (ollama, lm_studio,
   vllm, llamacpp) plus `openai_compat`, derived in one place (the former second literal set in
   `router.py` is gone; `test_the_strip_set_is_derived_from_types_local_providers` pins it).
@@ -44,8 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `route_and_call`. Once a daily spend cap is hit, the cap step confines the chain to the free
   providers (ollama, codex, gemini_cli); for a Q&A task type Ollama has already been removed, so
   Ollama is no longer the free fallback for Q&A task types. Only codex or gemini_cli can serve a
-  capped Q&A call; if neither is in the chain, the enforce mode decides as before (`hard` blocks,
-  `smart`/`soft` fall through to Claude). `code` still falls back to Ollama under the cap.
+  capped Q&A call. If neither is in the chain: `hard` blocks; `smart`/`soft` fall through to Claude
+  only when an anthropic model is in the chain, otherwise the call blocks (a paid non-Claude
+  provider is never called once the cap is hit). `code` still falls back to Ollama under the cap.
+  `tests/test_mcp_qa_no_local.py` pins the order (capped Q&A, chain [openai, ollama]: blocked, not
+  served by Ollama) through the TQ-007 `_run` harness with `TaskType.QUERY`; the mutant that moves
+  the strip after the cap step turns 3 of those tests red.
 - status line: the default is the full layout again, byte-for-byte as before #273 (owner decision,
   reversing #273's fast-by-default; `tests/test_statusline_default_full.py` compares it with the
   pre-#273 script on 9 fixture states). The fast line is the opt-in debug mode
