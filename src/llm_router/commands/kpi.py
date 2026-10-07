@@ -1306,27 +1306,6 @@ def _o3_unit_inputs(days: int, index, now: float,
     return local, band, outcomes, edits
 
 
-def _sidechain_lookup():
-    """``sidechain_of(session_id, msg_id)`` for ``offload_share.build_units``: reads each
-    session's transcripts once, on first use (M0.3b). True = sub-agent call, False = main
-    thread, None = the message id is in no transcript (unjoined, kept in O3 and counted)."""
-    from llm_router import o3_transcripts
-
-    cache: dict[str, dict[str, bool]] = {}
-
-    def of(sid: Any, mid: Any) -> bool | None:
-        if not (isinstance(sid, str) and sid and isinstance(mid, str) and mid):
-            return None
-        if sid not in cache:
-            try:
-                cache[sid] = o3_transcripts.sidechain_index([sid])
-            except Exception:  # noqa: BLE001 -- a transcript problem leaves rows unjoined
-                cache[sid] = {}
-        return cache[sid].get(mid)
-
-    return of
-
-
 #: Below this G3 session_kind completeness, O3 is printed with a bound (M0.3d): the untagged
 #: rows are in neither side of the headline, and may or may not be organic.
 O3_BOUND_BELOW = 0.95
@@ -1339,7 +1318,9 @@ def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[
 
     try:
         local, band, outcomes, edits = _o3_unit_inputs(days, index, now, win)
-        sidechain_of = _sidechain_lookup()
+        from llm_router import o3_transcripts
+
+        thread_of = o3_transcripts.thread_lookup()
 
         def build(untagged_organic: bool = False) -> dict:
             def kind_of(sid, stamp):
@@ -1347,22 +1328,25 @@ def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[
                 return "organic" if k is None and untagged_organic else k
             return osh.build_units(
                 all_rows, local, now=now, days=days, allowed=allowed, kind_of=kind_of,
-                band_redone=band, outcome_redos=outcomes, edit_rows=edits, sidechain_of=sidechain_of)
+                band_redone=band, outcome_redos=outcomes, edit_rows=edits, thread_of=thread_of)
 
         built = build()
         res = _o3_from_units(built["units"], built["local_no_session"], built["n_escalations"],
                              assist=built["local_assist"])
         res["excluded"] = {"side_call": built["side_call_excluded"], "untagged": built["untagged"],
                            "other_kind": built["other_kind"], "local_no_session": built["local_no_session"],
-                           "subagent_first": built["subagent_first"], "unjoined": built["unjoined"],
+                           "subagent_first": built["subagent_first"], "meta_first": built["meta_first"],
+                           "unjoined": built["unjoined"], "no_transcript": built["no_transcript"],
                            "edit_no_session": built["edit_no_session"],
                            "edit_no_turn_id": built["edit_no_turn_id"]}
         note = (f"{res['breakdown']['window_open']} turn(s) have fewer than {osh.REDO_TURNS} human turns "
                 f"after them (counted as not redone, may still change); excluded: "
                 f"{built['side_call_excluded']:,} Claude Code side call(s), "
                 f"{built['subagent_first']:,} sub-agent first call(s), "
+                f"{built['meta_first']:,} injected-input first call(s), "
+                f"{built['unjoined']:,} call(s) not in their session's transcript, "
                 f"{built['untagged']:,} untagged, {built['other_kind']:,} other-kind; "
-                f"{built['unjoined']:,} turn row(s) not found in a transcript stay in "
+                f"{built['no_transcript']:,} turn row(s) of sessions with no transcript stay in "
                 f"(they may include sub-agent first calls)")
         res["lines"] = list(res.get("lines", ())) + [note]
         cov = ((g3 or {}).get("fields") or {}).get("session_kind", {}).get("coverage")

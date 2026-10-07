@@ -1,7 +1,8 @@
 """M0.3: O3 matches the owner's definition (PLAN M0.3).
 
 * (a) a local MCP unit is not a turn: reported as ``local_assist_n`` outside n and the numerator;
-* (b) sub-agent first calls are not turns (proxy ``msg_id`` joined to the transcript);
+* (b) only the first answer to a TYPED prompt is a turn (proxy ``msg_id`` joined to the transcript):
+  sub-agent calls, injected-input (meta) turns and calls the transcript never saw are not;
 * (c) a zero-Claude edit is one local turn per (session_id, turn_id); ``llm_edit`` rows never are;
 * (d) G3 session_kind completeness < 95% prints ``o3.bound``.
 
@@ -42,14 +43,31 @@ def _isolated(monkeypatch, tmp_path):
     failopen.reset_cache()
 
 
-def _assistant_line(msg_id: str, *, sidechain: bool) -> str:
+def _assistant_line(msg_id: str, *, sidechain: bool = False) -> str:
     return json.dumps({"type": "assistant", "isSidechain": sidechain, "sessionId": SID,
                        "timestamp": "2026-10-06T10:00:00.000Z",
                        "message": {"id": msg_id, "role": "assistant", "content": []}})
 
 
-def _write_transcripts(proj: Path, main_ids, sub_ids) -> None:
-    (proj / f"{SID}.jsonl").write_text("".join(_assistant_line(m, sidechain=False) + "\n" for m in main_ids))
+def _user_line(kind: str = "typed", *, sidechain: bool = False) -> str:
+    """``typed``: a human prompt. ``tool``: a tool_result only. ``command``: a slash command.
+    ``meta``: injected input (peer / sub-agent hand-back, isMeta)."""
+    content: object = {"typed": "please do the thing", "command": "<command-name>/x</command-name>",
+                       "meta": "[Subagent hand-back] report",
+                       "tool": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}[kind]
+    return json.dumps({"type": "user", "isSidechain": sidechain, "isMeta": kind == "meta",
+                       "timestamp": "2026-10-06T10:00:00.000Z",
+                       "message": {"role": "user", "content": content}})
+
+
+def _write_main(proj: Path, *spec: str) -> None:
+    """``spec`` items: ``u:<kind>`` for a user entry, ``a:<msg id>`` for an assistant entry."""
+    lines = [_user_line(x[2:]) if x.startswith("u:") else _assistant_line(x[2:]) for x in spec]
+    (proj / f"{SID}.jsonl").write_text("".join(ln + "\n" for ln in lines))
+
+
+def _write_transcripts(proj: Path, main_spec, sub_ids) -> None:
+    _write_main(proj, *main_spec)
     sub = proj / SID / "subagents"
     sub.mkdir(parents=True)
     (sub / "agent-a1.jsonl").write_text("".join(_assistant_line(m, sidechain=True) + "\n" for m in sub_ids))
@@ -85,7 +103,8 @@ def _fixture_rows():
 # ── the combined fixture of the PLAN ─────────────────────────────────────────
 
 def test_plan_fixture_n4_numerator1(_isolated, monkeypatch):
-    _write_transcripts(_isolated, ["m1", "m2", "m3", "m4"], ["sub1", "sub1b", "sub2"])
+    _write_transcripts(_isolated, ["u:typed", "a:m1", "u:tool", "a:m2", "u:typed", "a:m3", "u:typed", "a:m4"],
+                       ["sub1", "sub1b", "sub2"])
     _ledger(_fixture_rows())
     turn = prompt_key.key("hash this typed prompt")
     _edit_rows([_edit(NOW - 2000, source="zero_claude", file="a.py", turn_id=turn),
@@ -98,8 +117,33 @@ def test_plan_fixture_n4_numerator1(_isolated, monkeypatch):
     assert (b["n"], b["offload_kept"], b["local_n"]) == (4, 1, 1)
     assert (b["local_assist_n"], b["local_assist_redone"]) == (1, 0)
     assert o3["excluded"]["subagent_first"] == 2
-    assert o3["excluded"]["unjoined"] == 0
+    assert o3["excluded"]["unjoined"] == 0 and o3["excluded"]["meta_first"] == 0
+    assert o3["excluded"]["no_transcript"] == 0
     assert b["claude_n"] == 3
+
+
+def test_scorecard_counts_one_turn_per_typed_prompt_not_per_proxy_row(_isolated):
+    """M0.3 repair, end to end through the scorecard: a typed prompt's first answer is a turn (even
+    when the proxy flagged it side_call); a sub-agent call, a classifier call the transcript never
+    saw, the answer to a hand-back and a tool-loop continuation are not."""
+    _write_transcripts(_isolated,
+                       ["u:typed", "a:m1", "u:tool", "a:m1c",       # typed turn + continuation
+                        "u:typed", "a:m2",                           # typed turn, proxy flagged it side_call
+                        "u:meta", "a:peer"],                         # hand-back: not a human turn
+                       ["sub1"])
+    t = NOW - 3000
+    _ledger([proxy_row(1, sid=SID, ts=t, kind="organic", msg_id="m1"),
+             proxy_row(2, sid=SID, ts=t + 5, kind="organic", msg_id="m1c", step="continuation"),
+             proxy_row(3, sid=SID, ts=t + 100, kind="organic", msg_id="m2", reason="side_call"),
+             proxy_row(4, sid=SID, ts=t + 150, kind="organic", msg_id="sub1"),
+             proxy_row(5, sid=SID, ts=t + 160, kind="organic", msg_id="classifier-1"),
+             proxy_row(6, sid=SID, ts=t + 170, kind="organic", msg_id="classifier-2"),
+             proxy_row(7, sid=SID, ts=t + 200, kind="organic", msg_id="peer")])
+    o3 = kpi.compute_scorecard(days=7, now=NOW)["o3"]
+    assert o3["breakdown"]["n"] == 2
+    assert o3["excluded"]["subagent_first"] == 1 and o3["excluded"]["meta_first"] == 1
+    assert o3["excluded"]["unjoined"] == 2 and o3["excluded"]["no_transcript"] == 0
+    assert o3["excluded"]["side_call"] == 0
 
 
 def test_llm_edit_routed_mcp_unit_is_still_joined_next_to_a_zero_claude_row(tmp_path, monkeypatch):
@@ -181,51 +225,121 @@ def test_subagent_first_call_is_not_a_turn_and_not_a_redo_boundary():
     kw = dict(now=NOW, days=7, allowed=frozenset({"organic"}), kind_of=lambda s, st: st)
     plain = osh.build_units(rows, [], **kw)
     assert [u["redone"] for u in plain["units"] if u["class"] == "haiku"] == [False]
-    sub = osh.build_units(rows, [], sidechain_of=lambda sid, m: {"s1": True, "s2": True}.get(m, False), **kw)
+    sub = osh.build_units(rows, [], thread_of=lambda sid, m: "sidechain" if m in ("s1", "s2") else "turn", **kw)
     assert [u["redone"] for u in sub["units"] if u["class"] == "haiku"] == [True]
     assert sub["subagent_first"] == 2 and sub["unjoined"] == 0
     assert len(osh.turn_units(sub["units"])) == 2          # the haiku turn and the escalation turn
 
 
-def test_unjoined_rows_stay_in_and_are_counted():
+def _kw():
+    return dict(now=NOW, days=7, allowed=frozenset({"organic"}), kind_of=lambda s, st: st)
+
+
+def test_calls_the_transcript_never_saw_are_not_turns_and_are_counted():
+    """M0.3 repair: 548 of the 813 'turns' of the one measured session were calls that no transcript
+    of that session holds (permission classifier, prompt suggestion, side queries)."""
     rows = [proxy_row(1, sid=SID, kind="organic", msg_id="x"), proxy_row(2, sid=SID, kind="organic", msg_id="y")]
-    built = osh.build_units(rows, [], now=NOW, days=7, allowed=frozenset({"organic"}),
-                            kind_of=lambda s, st: st, sidechain_of=lambda sid, m: None)
-    assert len(osh.turn_units(built["units"])) == 2 and built["unjoined"] == 2
-    assert built["subagent_first"] == 0
+    built = osh.build_units(rows, [], thread_of=lambda sid, m: "orphan", **_kw())
+    assert osh.turn_units(built["units"]) == [] and built["unjoined"] == 2
+    assert built["subagent_first"] == 0 and built["no_transcript"] == 0
+    assert len(built["units"]) == 2          # still Claude calls for the per-call line
+
+
+def test_session_without_a_transcript_keeps_the_proxy_only_rule_and_says_so():
+    rows = [proxy_row(1, sid=SID, kind="organic", msg_id="x"), proxy_row(2, sid=SID, kind="organic", msg_id="y")]
+    built = osh.build_units(rows, [], thread_of=lambda sid, m: None, **_kw())
+    assert len(osh.turn_units(built["units"])) == 2 and built["no_transcript"] == 2
+    assert built["unjoined"] == 0 and built["subagent_first"] == 0
+
+
+def test_first_call_of_injected_input_is_not_a_turn():
+    rows = [proxy_row(1, sid=SID, kind="organic", msg_id="t"), proxy_row(2, sid=SID, kind="organic", msg_id="p")]
+    built = osh.build_units(rows, [], thread_of=lambda sid, m: {"t": "turn", "p": "meta"}[m], **_kw())
+    assert len(osh.turn_units(built["units"])) == 1 and built["meta_first"] == 1
+
+
+def test_transcript_overrules_the_proxy_step_class_and_the_side_call_flag():
+    rows = [proxy_row(1, sid=SID, kind="organic", msg_id="a", reason="side_call"),       # flagged, but a typed prompt's answer
+            proxy_row(2, sid=SID, kind="organic", msg_id="b", reason="side_call"),       # flagged and a continuation: still a side call
+            proxy_row(3, sid=SID, kind="organic", msg_id="c", step="continuation"),      # proxy says continuation, transcript says turn
+            proxy_row(4, sid=SID, kind="organic", msg_id="d")]                           # proxy says turn, transcript says continuation
+    roles = {"a": "turn", "b": "continuation", "c": "turn", "d": "continuation"}
+    built = osh.build_units(rows, [], thread_of=lambda sid, m: roles[m], **_kw())
+    assert [u["msg_id"] for u in osh.turn_units(built["units"])] == ["a", "c"]
+    assert built["side_call_excluded"] == 1
+    # no join: the flagged rows stay side calls
+    plain = osh.build_units(rows, [], **_kw())
+    assert plain["side_call_excluded"] == 2
+
+
+def test_side_call_rows_of_a_session_with_no_transcript_stay_excluded():
+    rows = [proxy_row(1, sid=SID, kind="organic", msg_id="a", reason="side_call")]
+    built = osh.build_units(rows, [], thread_of=lambda sid, m: None, **_kw())
+    assert built["side_call_excluded"] == 1 and built["units"] == []
 
 
 def test_continuation_rows_are_never_counted_as_unjoined_or_subagent_first():
     rows = [proxy_row(1, sid=SID, kind="organic", msg_id="x"),
             proxy_row(2, sid=SID, kind="organic", msg_id="y", step="continuation")]
-    built = osh.build_units(rows, [], now=NOW, days=7, allowed=frozenset({"organic"}),
-                            kind_of=lambda s, st: st, sidechain_of=lambda sid, m: m == "y")
+    built = osh.build_units(rows, [], thread_of=lambda sid, m: "sidechain" if m == "y" else "turn", **_kw())
     assert built["subagent_first"] == 0 and built["unjoined"] == 0
 
 
-def test_sidechain_index_reads_main_and_subagent_files(_isolated):
-    _write_transcripts(_isolated, ["m1"], ["s1"])
-    idx = osh_transcripts().sidechain_index({SID})
-    assert idx == {"m1": False, "s1": True}
+def test_thread_index_reads_main_and_subagent_files(_isolated):
+    _write_transcripts(_isolated, ["u:typed", "a:m1"], ["s1"])
+    assert osh_transcripts().thread_index(SID) == {"m1": "turn", "s1": "sidechain"}
 
 
-def test_sidechain_index_reaches_workflow_agents_one_level_deeper(_isolated):
+def test_thread_index_reaches_workflow_agents_one_level_deeper(_isolated):
     wf = _isolated / SID / "subagents" / "workflows" / "wf_abc"
     wf.mkdir(parents=True)
     (wf / "agent-w1.jsonl").write_text(_assistant_line("w1", sidechain=True) + "\n")
-    assert osh_transcripts().sidechain_index({SID}) == {"w1": True}
+    assert osh_transcripts().thread_index(SID) == {"w1": "sidechain"}
 
 
-def test_sidechain_index_flags_isSidechain_entries_in_the_main_file(_isolated):
-    (_isolated / f"{SID}.jsonl").write_text(_assistant_line("m1", sidechain=False) + "\n"
+def test_thread_index_flags_isSidechain_entries_in_the_main_file(_isolated):
+    (_isolated / f"{SID}.jsonl").write_text(_user_line() + "\n" + _assistant_line("m1") + "\n"
                                             + _assistant_line("m2", sidechain=True) + "\n")
-    assert osh_transcripts().sidechain_index({SID}) == {"m1": False, "m2": True}
+    assert osh_transcripts().thread_index(SID) == {"m1": "turn", "m2": "sidechain"}
 
 
-def test_sidechain_index_ignores_other_sessions_and_bad_lines(_isolated):
+def test_thread_index_ignores_other_sessions_and_bad_lines(_isolated):
     (_isolated / "other.jsonl").write_text(_assistant_line("zz", sidechain=True) + "\n")
-    (_isolated / f"{SID}.jsonl").write_text("not json\n" + _assistant_line("m1", sidechain=False) + "\n")
-    assert osh_transcripts().sidechain_index({SID}) == {"m1": False}
+    (_isolated / f"{SID}.jsonl").write_text("not json\n" + _user_line() + "\n" + _assistant_line("m1") + "\n")
+    assert osh_transcripts().thread_index(SID) == {"m1": "turn"}
+
+
+def test_thread_roles_follow_what_started_the_turn(_isolated):
+    _write_main(_isolated,
+                "u:typed", "a:t1", "u:tool", "a:t1c", "u:tool", "a:t1d",       # one typed turn with 2 follow-ups
+                "u:command", "a:cmd",                                         # slash command: meta
+                "u:meta", "a:peer",                                           # peer / hand-back: meta
+                "u:typed", "u:meta", "a:t2",                                  # injected input after a typed prompt: still typed
+                "u:tool", "u:meta", "a:t2c",                                  # injected input inside a tool loop: continuation
+                "a:t2c2",                                                     # assistant after assistant: continuation
+                "u:typed", "a:t3", "a:t3")                                    # a message written twice: one role
+    assert osh_transcripts().thread_index(SID) == {
+        "t1": "turn", "t1c": "continuation", "t1d": "continuation", "cmd": "meta", "peer": "meta",
+        "t2": "turn", "t2c": "continuation", "t2c2": "continuation", "t3": "turn"}
+
+
+def test_thread_lookup_orphan_versus_no_transcript(_isolated):
+    _write_main(_isolated, "u:typed", "a:m1")
+    of = osh_transcripts().thread_lookup()
+    assert of(SID, "m1") == "turn"
+    assert of(SID, "not-in-it") == "orphan"            # the session has a transcript, the id is not in it
+    assert of("another-session", "m1") is None          # no transcript at all: nothing can be said
+    assert of(SID, None) is None and of(None, "m1") is None
+
+
+def test_typed_prompt_definition_matches_the_integrity_check():
+    ot = osh_transcripts()
+    typed = json.loads(_user_line("typed"))
+    assert ot.is_typed_prompt(typed)
+    assert not ot.is_typed_prompt(json.loads(_user_line("tool")))
+    assert not ot.is_typed_prompt(json.loads(_user_line("command")))
+    assert not ot.is_typed_prompt(json.loads(_user_line("meta")))
+    assert not ot.is_typed_prompt(json.loads(_user_line("typed", sidechain=True)))
 
 
 def osh_transcripts():

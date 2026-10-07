@@ -10,9 +10,23 @@ counts turns: a turn is offloaded when its FIRST call is served by Haiku or loca
 is not redone (the redo test below is applied to that first call, and covers its own turn and
 the next 2). Per-call figures are kept as a secondary line.
 
-A TURN is a proxy row that is not a side call, whose ``step_class`` is not ``continuation`` and
-that is not a sub-agent's first call (M0.3b: the proxy ``msg_id`` joined to the transcript, see
-``o3_transcripts``). Two more rules (M0.3):
+A TURN is the first proxy call of a human turn: a proxy row that is not a side call and whose
+``step_class`` is not ``continuation``, then corrected by the transcript (M0.3b, ``o3_transcripts``:
+the proxy ``msg_id`` joined to the session's transcript). When the join is available it decides:
+
+* a row is a turn only when its message is the first answer to a TYPED prompt in the main thread
+  (``turn``); a later answer in the same turn (``continuation``), a sub-agent call (``sidechain``)
+  and the first answer to injected input such as a slash command or a sub-agent hand-back
+  (``meta``) are not turns;
+* a row whose message id is in NO message of a session that has a transcript (``orphan``: a
+  permission classifier, a prompt suggestion, a side query) was never part of the conversation:
+  not a turn. Counted in ``unjoined``;
+* a row the proxy flagged ``side_call`` (no client tools) but the transcript shows as the first
+  answer to a typed prompt IS a turn: the flag is a request-shape heuristic, the transcript is
+  the conversation;
+* a session with no transcript at all keeps the proxy-only rule above (``no_transcript``).
+
+Two more rules (M0.3):
 
 * a local unit from usage.db (an MCP ``llm()`` call made INSIDE a Claude turn) is NOT a turn:
   Claude made the first call. It is reported apart (``local_assist``), outside both sides;
@@ -27,7 +41,7 @@ Units (organic sessions only, ``[now - days, now]``):
   (``served_model``, else ``requested_model``) names Haiku, else ``claude``.
   Claude Code's own side calls (``tier_reason == "side_call"``: titles, summaries) are
   NOT work the router could offload or the user could redo, so they are excluded and
-  counted;
+  counted (unless the transcript shows the call as a typed prompt's first answer, above);
 * proxy rows with ``decision == "served"``: answered by a local backend, class ``local``;
 * local units from ``northstar.local_shadow_units()`` (usage.db, ``final_provider='ollama'``):
   class ``local`` but NOT turns (``local_assist``, see above);
@@ -62,6 +76,8 @@ from typing import Any, Iterable
 CLASS_HAIKU = "haiku"
 CLASS_LOCAL = "local"
 CLASS_CLAUDE = "claude"
+# transcript roles of a proxy call (o3_transcripts); duplicated names, not imported, to keep this module pure
+ROLE_TURN, ROLE_META, ROLE_SIDECHAIN, ROLE_ORPHAN = "turn", "meta", "sidechain", "orphan"
 ESCALATION_REASONS = frozenset({"escalation", "escalation_under_pressure"})
 REDO_TURNS = 2          # the unit's own turn + the next 2 human turns
 OUTCOME_JOIN_S = 120.0  # usage_outcome event ts vs local unit ts
@@ -78,9 +94,9 @@ def _is_side_call(row: dict) -> bool:
     return row.get("tier_reason") == "side_call"
 
 
-def _proxy_class(row: dict) -> str | None:
+def _proxy_class(row: dict, *, allow_side_call: bool = False) -> str | None:
     """Class of a proxy row that counts as a unit, else None (not a unit)."""
-    if _is_side_call(row):
+    if _is_side_call(row) and not allow_side_call:
         return None
     decision = row.get("decision")
     if decision == "served":
@@ -97,15 +113,21 @@ def _proxy_class(row: dict) -> str | None:
 class _Conversation:
     """One session's proxy rows in time order, with human-turn numbers."""
 
-    def __init__(self, rows: list[dict], is_sub=None) -> None:
-        ordered = sorted((r for r in rows if _num(r.get("ts")) is not None and not _is_side_call(r)),
+    def __init__(self, rows: list[dict], begins_turn=None, counted=None) -> None:
+        """``begins_turn(row)``: the row starts a human turn (default: its ``step_class`` is not
+        ``continuation``). ``counted(row)``: the row is part of the conversation at all (default: it
+        is not a side call). Both let the transcript join overrule the proxy-only guess."""
+        begins = begins_turn or (lambda r: r.get("step_class") != "continuation")
+        keep = counted or (lambda r: not _is_side_call(r))
+        ordered = sorted((r for r in rows if _num(r.get("ts")) is not None and keep(r)),
                          key=lambda r: r["ts"])
         self.ts = [float(r["ts"]) for r in ordered]
         self.turn: list[int] = []
         t = 0
         for r in ordered:
-            # A sub-agent's first call is not a human turn: it must not end the unit's redo window.
-            if r.get("step_class") != "continuation" and not (is_sub is not None and is_sub(r)):
+            # A sub-agent's (or an injected prompt's) first call is not a human turn: it must not end
+            # the unit's redo window.
+            if begins(r):
                 t += 1
             self.turn.append(t)
         self.escalations = [(self.ts[i], self.turn[i]) for i, r in enumerate(ordered)
@@ -130,7 +152,7 @@ def policy_start(proxy_rows: Iterable[dict], version: str) -> float | None:
 def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: float, days: float,
                 kind_of, allowed: frozenset, band_redone: set[str] | frozenset = frozenset(),
                 outcome_redos: Iterable[dict] = (), edit_rows: Iterable[dict] = (),
-                sidechain_of=None) -> dict:
+                thread_of=None) -> dict:
     """Classified, redo-judged units in the window.
 
     ``kind_of(session_id, stamp)`` returns the resolved session kind or None.
@@ -138,12 +160,16 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
     ``outcome_redos``: usage_outcome rows (any outcome; only ``redone`` is read).
     ``edit_rows``: ``edit_outcomes.jsonl`` rows; only applied ``source=zero_claude`` rows with a
     session id and a turn id make a unit (one local turn per (session_id, turn_id)).
-    ``sidechain_of(session_id, msg_id)``: True for a sub-agent call, False for a main-thread call,
-    None when the message id is in no transcript (unjoined). None (the default) skips the join.
+    ``thread_of(session_id, msg_id)``: the transcript role of the call (``o3_transcripts``: ``turn``,
+    ``continuation``, ``meta``, ``sidechain``, ``orphan``), or None when the session has no
+    transcript. None for every row (the default) skips the join: the proxy-only rule decides.
     Returns ``{"units": [...], "local_assist": [...], "side_call_excluded", "untagged",
-    "other_kind", "local_no_session", "n_escalations", "subagent_first", "unjoined",
-    "edit_no_session", "edit_no_turn_id", "zero_claude_turns"}``. ``units`` holds turns and
-    continuation calls; ``local_assist`` holds the local MCP units (never turns). ``n_escalations``
+    "other_kind", "local_no_session", "n_escalations", "subagent_first", "meta_first", "unjoined",
+    "no_transcript", "edit_no_session", "edit_no_turn_id", "zero_claude_turns"}``. ``units`` holds
+    turns and the other calls (``first`` False); ``local_assist`` holds the local MCP units (never
+    turns). ``subagent_first``, ``meta_first`` and ``unjoined`` count the rows the proxy-only rule
+    would have counted as turns and the transcript says are not; ``no_transcript`` counts the turn
+    rows kept on the proxy-only rule because their session has no transcript. ``n_escalations``
     counts escalation rows among the admitted units: how much redo signal exists at all. A local
     unit with no ``session_id`` (usage.db rows written without one) cannot be scoped to organic
     sessions: it is excluded and counted in ``local_no_session``, so the local figures are then a
@@ -154,19 +180,27 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
         sid = r.get("session_id")
         if isinstance(sid, str) and sid:
             by_session.setdefault(sid, []).append(r)
-    sub_cache: dict[int, bool | None] = {}
+    role_cache: dict[int, str | None] = {}
 
-    def sub_of(r: dict) -> bool | None:
-        """True sub-agent call, False main thread, None unjoined. Memoised per row."""
-        if sidechain_of is None:
-            return False
+    def role_of(r: dict) -> str | None:
+        """Transcript role of a proxy row, None when there is no join (no ``thread_of``, no ids, or
+        the session has no transcript). Memoised per row."""
+        if thread_of is None:
+            return None
         k = id(r)
-        if k not in sub_cache:
-            mid, sid = r.get("msg_id"), r.get("session_id")
-            sub_cache[k] = sidechain_of(sid, mid) if isinstance(mid, str) and mid else None
-        return sub_cache[k]
+        if k not in role_cache:
+            mid = r.get("msg_id")
+            role_cache[k] = thread_of(r.get("session_id"), mid) if isinstance(mid, str) and mid else None
+        return role_cache[k]
 
-    conv = {sid: _Conversation(rows, lambda r: sub_of(r) is True) for sid, rows in by_session.items()}
+    def begins_turn(r: dict) -> bool:
+        role = role_of(r)
+        return (role == ROLE_TURN) if role is not None else r.get("step_class") != "continuation"
+
+    def counted(r: dict) -> bool:
+        return not _is_side_call(r) or role_of(r) == ROLE_TURN
+
+    conv = {sid: _Conversation(rows, begins_turn, counted) for sid, rows in by_session.items()}
 
     redo_events: dict[str, list[float]] = {}
     for o in outcome_redos:
@@ -179,7 +213,7 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
     units: list[dict] = []
     assist: list[dict] = []
     side = untagged = other = local_no_session = n_escalations = 0
-    subagent_first = unjoined = edit_no_session = edit_no_turn_id = 0
+    subagent_first = meta_first = unjoined = no_transcript = edit_no_session = edit_no_turn_id = 0
 
     def admit(sid, stamp) -> bool:
         nonlocal untagged, other
@@ -196,10 +230,11 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
         ts = _num(r.get("ts"))
         if ts is None or ts < since or ts > now:
             continue
-        if _is_side_call(r):
+        role = role_of(r)
+        if _is_side_call(r) and role != ROLE_TURN:
             side += 1
             continue
-        cls = _proxy_class(r)
+        cls = _proxy_class(r, allow_side_call=True)
         if cls is None or not admit(r.get("session_id"), r.get("session_kind")):
             continue
         sid = r.get("session_id")
@@ -207,14 +242,17 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
         why = "escalation" if hit else None
         if why is None and isinstance(r.get("msg_id"), str) and r["msg_id"] in band_redone:
             why = "receipt_band"
-        first = r.get("step_class") != "continuation"
-        if first and sidechain_of is not None:
-            sub = sub_of(r)
-            if sub is True:
-                first = False
+        first = begins_turn(r)
+        if thread_of is not None and r.get("step_class") != "continuation" and not first:
+            # the proxy-only rule would have counted this row as a turn; the transcript says no
+            if role == ROLE_SIDECHAIN:
                 subagent_first += 1
-            elif sub is None:
-                unjoined += 1  # stays in: counted as a turn, and said so
+            elif role == ROLE_META:
+                meta_first += 1
+            elif role == ROLE_ORPHAN:
+                unjoined += 1
+        elif thread_of is not None and first and role is None:
+            no_transcript += 1  # stays in on the proxy-only rule: counted, and said so
         units.append({"class": cls, "ts": ts, "session_id": sid, "redone": why is not None,
                       "why": why, "window_open": open_ and why is None, "first": first,
                       "msg_id": r.get("msg_id")})
@@ -264,7 +302,8 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
                       "zero_claude": True})
     return {"units": units, "local_assist": assist, "side_call_excluded": side, "untagged": untagged,
             "other_kind": other, "local_no_session": local_no_session, "n_escalations": n_escalations,
-            "subagent_first": subagent_first, "unjoined": unjoined, "edit_no_session": edit_no_session,
+            "subagent_first": subagent_first, "meta_first": meta_first, "unjoined": unjoined,
+            "no_transcript": no_transcript, "edit_no_session": edit_no_session,
             "edit_no_turn_id": edit_no_turn_id, "zero_claude_turns": len(seen_turns)}
 
 

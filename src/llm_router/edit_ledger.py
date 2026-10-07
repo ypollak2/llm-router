@@ -105,10 +105,18 @@ def record_edit_outcome(*, file: str, model: str, applied: bool, source: str | N
     """Append one ledger row; return its ``ts`` (None if nothing was written). Never raises.
 
     ``source`` is one of :data:`SOURCES` (anything else is stored as null). ``session_id`` is the
-    caller's own id (the hook passes its payload's id); when omitted the pointer-file resolver
-    is used, as before. ``turn_id`` is ``prompt_key.key(prompt)`` of the human turn, a text-free
-    hash, so one turn that edits several files can be counted once."""
-    sid = session_id if isinstance(session_id, str) and session_id else _resolve_session_id()
+    caller's own id (the hook passes its payload's id). When omitted, an ``llm_edit`` row (written
+    by the MCP server, which has no payload) is resolved through the pointer file, as before; a
+    ``zero_claude`` row stores NULL: the pointer names whichever session wrote last, and a guess
+    would credit the turn to the wrong session (O3 puts such rows in ``edit_no_session``).
+    ``turn_id`` is ``prompt_key.key(prompt)`` of the human turn, a text-free hash, so one turn that
+    edits several files can be counted once."""
+    if isinstance(session_id, str) and session_id:
+        sid = session_id
+    elif source == "zero_claude":
+        sid = None
+    else:
+        sid = _resolve_session_id()
     ts = time.time()
     row = {
         "ts": ts,
