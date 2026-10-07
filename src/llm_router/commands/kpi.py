@@ -1278,9 +1278,10 @@ def _local_shadow_line(summary: dict | None) -> str | None:
 # ── O3: offload share (see offload_share.py and KPIS.md) ───────────────────
 
 def _o3_from_units(units: list[dict], local_no_session: int = 0, n_escalations: int | None = None,
-                   n_detector_flags: int | None = None) -> dict:
+                   assist: list[dict] | None = None, n_detector_flags: int | None = None) -> dict:
     """One O3 result over already-judged units. HEADLINE = human turns (first call of each
-    turn, see offload_share); per-call figures are the secondary line."""
+    turn, see offload_share); per-call figures are the secondary line. ``assist`` = the local
+    MCP units: answers inside Claude turns, so NOT turns (reported apart, M0.3a)."""
     from llm_router import offload_share as osh
 
     calls = osh.summarize(units)
@@ -1291,6 +1292,8 @@ def _o3_from_units(units: list[dict], local_no_session: int = 0, n_escalations: 
               "local_n": loc["n"], "local_redone": loc["redone"], "claude_n": cl["n"],
               "offload_kept": s["offload_kept"], "window_open": s["window_open"],
               "local_no_session": local_no_session,
+              "local_assist_n": len(assist or ()),
+              "local_assist_redone": sum(1 for u in (assist or ()) if u["redone"]),
               "per_call": {"n": calls["n"], "offload_kept": calls["offload_kept"],
                            "haiku_n": calls[osh.CLASS_HAIKU]["n"], "haiku_redone": calls[osh.CLASS_HAIKU]["redone"],
                            "local_n": calls[osh.CLASS_LOCAL]["n"], "window_open": calls["window_open"]}}
@@ -1310,15 +1313,9 @@ def _o3_from_units(units: list[dict], local_no_session: int = 0, n_escalations: 
                 return f"{name} not measurable: none in window"
             return f"{name} {_rate_result(c['redone'], c['n'], label=name + ' unit')['value']}"
 
-        # Local units with no session id cannot be scoped to organic: always say so.
-        if local_no_session and loc["n"] == 0:
-            local_share = (f"local share unknown ({local_no_session:,} local unit(s) carry no "
-                           "session id, so O3 is a lower bound)")
-        else:
-            local_share = f"local share {_pct(loc['n'] / n)} ({loc['n']}/{n})"
-            if local_no_session:
-                local_share += (f" + {local_no_session:,} local unit(s) with no session id excluded "
-                                "(lower bound)")
+        # Local turns are proxy-served local calls and zero-Claude edit turns. The MCP-local
+        # answers (inside a Claude turn) are NOT turns: they are reported on their own line below.
+        local_share = f"local share {_pct(loc['n'] / n)} ({loc['n']}/{n})"
         out["lines"] = [
             f"Haiku share {_pct(h['n'] / n)} ({h['n']}/{n} turns) | {local_share} | claude {cl['n']}/{n}",
             f"redo rate (per turn): {redo(h, 'Haiku')} | {redo(loc, 'local')}",
@@ -1329,6 +1326,11 @@ def _o3_from_units(units: list[dict], local_no_session: int = 0, n_escalations: 
                                 f"{cn / n:.1f} calls per turn)")
         else:
             out["lines"].append(f"per call: too few to tell (n={cn} calls)")
+    if assist is not None and (assist or local_no_session):
+        out.setdefault("lines", []).append(
+            f"local MCP answers inside Claude turns (not turns, outside n and the numerator): "
+            f"{len(assist)} ({out_bd['local_assist_redone']} redone)"
+            + (f"; {local_no_session:,} more with no session id excluded" if local_no_session else ""))
     if n_escalations is not None:
         out_bd["n_escalations"] = n_escalations
         out.setdefault("lines", []).append(
@@ -1350,9 +1352,9 @@ def _o3_from_units(units: list[dict], local_no_session: int = 0, n_escalations: 
 
 
 def _o3_unit_inputs(days: int, index, now: float,
-                    win: "_Window | None" = None) -> tuple[list[dict], set[str], list[dict]]:
-    """(local units, receipt-band redone msg_ids, usage_outcome rows). Each source that
-    cannot be read yields nothing rather than breaking the scorecard."""
+                    win: "_Window | None" = None) -> tuple[list[dict], set[str], list[dict], list[dict]]:
+    """(local MCP units, receipt-band redone msg_ids, usage_outcome rows, edit_outcomes rows).
+    Each source that cannot be read yields nothing rather than breaking the scorecard."""
     from llm_router import northstar as ns
     from llm_router import usage_outcome as uo
     from llm_router import user_signal
@@ -1371,42 +1373,142 @@ def _o3_unit_inputs(days: int, index, now: float,
         outcomes = uo.judge_recent(days=_wall_days(days, win))
     except Exception:  # noqa: BLE001
         outcomes = []
-    return local, band, outcomes
+    try:
+        edits = list(ns._load_edit_outcomes())
+    except Exception:  # noqa: BLE001
+        edits = []
+    return local, band, outcomes, edits
+
+
+#: Below this G3 session_kind completeness, O3 is printed with a bound (M0.3d): the untagged
+#: rows are in neither side of the headline, and may or may not be organic.
+O3_BOUND_BELOW = 0.95
+
+
+#: M0-2, the O3 integrity gate (PLAN M0.3): O3 turns counted from the proxy ledger / typed prompts
+#: in the Claude Code transcript, over the pinned window W0, on the only session that qualified
+#: (>= 50 prompts, >= 1 proxy row). The bar was 0.90-1.10; the measured ratio is 3.89 (813 / 209), so the
+#: gate FAILED. The owner decision of 2026-10-07 is to accept O3 as is, with a warning, so every
+#: surface that prints O3 says so. This is the ONE place the figures live: ``o3_caveat()`` builds the
+#: text from them. Source of the figures: ``~/.rsi/research/primary-plan/gates/M0.3_o3_integrity_W0.json``
+#: (``o3_integrity.py --since 2026-09-29T09:41:51Z --until 2026-10-06T09:41:52Z``, exit 1).
+#: Re-run that script and edit THIS dict (and PLAN M0-2) when the turn definition changes.
+O3_INTEGRITY_GATE: dict[str, Any] = {
+    "gate": "M0-2",
+    "status": "owner-accepted with warning",
+    "accepted_on": "2026-10-07",
+    "turns": 813,
+    "typed_prompts": 209,
+    "bar": [0.90, 1.10],
+    "session": "b9f04425",
+    "session_kind": "research",
+    "sessions_measurable": 1,
+    "window": "2026-09-29T09:41:51Z..2026-10-06T09:41:52Z",
+}
+
+
+def o3_caveat(gate: dict[str, Any] | None = None) -> str:
+    """The one-line warning printed on every O3 surface (scorecard, --health, --json, weekly)."""
+    g = gate or O3_INTEGRITY_GATE
+    ratio = g["turns"] / g["typed_prompts"]
+    n = g["sessions_measurable"]
+    scope = "on the only measurable session" if n == 1 else f"across {n} measurable sessions"
+    return (f"O3 turn count unvalidated: may overcount turns (integrity {ratio:.2f}x {scope}, "
+            f"{g['session_kind']}; owner accepted {g['accepted_on']})")
+
+
+def _o3_with_caveat(o3: dict) -> dict:
+    """Attach the M0-2 warning to an O3 result: ``caveat`` (the text) and ``integrity`` (the figures,
+    with the ratio computed, so a JSON reader gets the number and not only the sentence)."""
+    g = O3_INTEGRITY_GATE
+    o3["caveat"] = o3_caveat()
+    o3["integrity"] = {**g, "ratio": round(g["turns"] / g["typed_prompts"], 3)}
+    return o3
 
 
 def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[dict],
                       now: float, since_policy: str | None = None,
-                      win: "_Window | None" = None) -> dict:
+                      win: "_Window | None" = None, g3: dict | None = None) -> dict:
     from llm_router import northstar as ns
     from llm_router import offload_share as osh
     from llm_router import redo_signal
 
     try:
-        local, band, outcomes = _o3_unit_inputs(days, index, now, win)
-        built = osh.build_units(
-            all_rows, local, now=now, days=days, allowed=allowed,
-            kind_of=lambda sid, stamp: index.resolve(sid, stamp=stamp).kind,
-            band_redone=band, outcome_redos=outcomes,
-            detector_flags=redo_signal.session_flags_loader(ns.claude_projects_dir()))
+        local, band, outcomes, edits = _o3_unit_inputs(days, index, now, win)
+        from llm_router import o3_transcripts
+
+        thread_of = o3_transcripts.thread_lookup()
+        detector_flags = redo_signal.session_flags_loader(ns.claude_projects_dir())
+
+        def build(untagged_organic: bool = False) -> dict:
+            def kind_of(sid, stamp):
+                k = index.resolve(sid, stamp=stamp).kind
+                return "organic" if k is None and untagged_organic else k
+            return osh.build_units(
+                all_rows, local, now=now, days=days, allowed=allowed, kind_of=kind_of,
+                band_redone=band, outcome_redos=outcomes, edit_rows=edits, thread_of=thread_of,
+                detector_flags=detector_flags)
+
+        built = build()
         res = _o3_from_units(built["units"], built["local_no_session"], built["n_escalations"],
-                             built["n_detector_flags"])
+                             assist=built["local_assist"], n_detector_flags=built["n_detector_flags"])
         res["excluded"] = {"side_call": built["side_call_excluded"], "untagged": built["untagged"],
-                           "other_kind": built["other_kind"], "local_no_session": built["local_no_session"]}
+                           "other_kind": built["other_kind"], "local_no_session": built["local_no_session"],
+                           "subagent_first": built["subagent_first"],
+                           "edit_no_session": built["edit_no_session"],
+                           "edit_no_turn_id": built["edit_no_turn_id"]}
+        # NOT excluded: turn rows the transcript says were not a typed prompt's first answer. They
+        # stay in n (PLAN M0.3b, "unjoined rows stay in"); the counts say how big that gap is.
+        res["kept_in"] = {"meta_first": built["meta_first"], "unjoined": built["unjoined"],
+                          "no_transcript": built["no_transcript"]}
         note = (f"{res['breakdown']['window_open']} turn(s) have fewer than {osh.REDO_TURNS} human turns "
                 f"after them (counted as not redone, may still change); excluded: "
                 f"{built['side_call_excluded']:,} Claude Code side call(s), "
-                f"{built['untagged']:,} untagged, {built['other_kind']:,} other-kind")
+                f"{built['subagent_first']:,} sub-agent first call(s), "
+                f"{built['untagged']:,} untagged, {built['other_kind']:,} other-kind; "
+                f"kept in n although the transcript says they were not a typed prompt's first answer: "
+                f"{built['meta_first']:,} injected-input first call(s) (slash command, sub-agent "
+                f"hand-back, task notification), {built['unjoined']:,} call(s) in no message of their "
+                f"session's transcript; {built['no_transcript']:,} turn row(s) with no transcript "
+                f"(may include sub-agent first calls)")
         res["lines"] = list(res.get("lines", ())) + [note]
+        cov = ((g3 or {}).get("fields") or {}).get("session_kind", {}).get("coverage")
+        if isinstance(cov, (int, float)) and cov < O3_BOUND_BELOW:
+            res["bound"] = _o3_bound(res, build(untagged_organic=True), float(cov))
+            res["lines"].append(res["bound"]["line"])
         if since_policy:
             res["since_policy"] = _o3_since_view(built["units"], all_rows, since_policy, now, days,
-                                                  built["local_no_session"])
+                                                  built["local_no_session"], built["local_assist"])
     except Exception as exc:  # noqa: BLE001 -- an O3 failure must not take the scorecard down
         res = _not_measurable(f"O3 computation failed ({type(exc).__name__})")
     return res
 
 
+def _o3_bound(headline: dict, alt_built: dict, coverage: float) -> dict:
+    """O3 as a range when ``session_kind`` is < 95% complete (M0.3d). ``untagged_excluded`` is the
+    headline (untagged rows treated as non-organic); ``untagged_included`` treats them as organic.
+    ``lower`` and ``upper`` are the smaller and larger of the two. Each end needs the headline's
+    minimum n, else it is None."""
+    alt = _o3_from_units(alt_built["units"], alt_built["local_no_session"], alt_built["n_escalations"],
+                         assist=alt_built["local_assist"])
+
+    def val(r: dict) -> float | None:
+        return (r["numerator"] / r["denominator"]) if r.get("measurable") else None
+
+    excl, incl = val(headline), val(alt)
+    both = [v for v in (excl, incl) if v is not None]
+    lower, upper = (min(both), max(both)) if both else (None, None)
+    out = {"g3_session_kind_coverage": round(coverage, 4), "untagged_excluded": excl,
+           "untagged_included": incl, "lower": lower, "upper": upper,
+           "n_untagged_excluded": headline.get("n"), "n_untagged_included": alt.get("n")}
+    out["line"] = (f"O3 bound (session_kind {_pct(coverage)} complete, below {_pct(O3_BOUND_BELOW)}): "
+                   + (f"{_pct(lower)} to {_pct(upper)} (untagged rows counted as non-organic, then as organic)"
+                      if lower is not None else "not measurable at both ends (n below the minimum)"))
+    return out
+
+
 def _o3_since_view(units: list[dict], all_rows: list[dict], version: str, now: float, days: int,
-                   local_no_session: int = 0) -> dict:
+                   local_no_session: int = 0, assist: list[dict] | None = None) -> dict:
     from llm_router import offload_share as osh
 
     start = osh.policy_start(all_rows, version)
@@ -1414,14 +1516,19 @@ def _o3_since_view(units: list[dict], all_rows: list[dict], version: str, now: f
         return {"version": version, "start_ts": None,
                 "since": _not_measurable(f"policy version {version} not seen in the proxy ledger"),
                 "before": None}
-    since = _o3_from_units([u for u in units if u["ts"] >= start], local_no_session)
-    before = _o3_from_units([u for u in units if u["ts"] < start], local_no_session)
+    a = assist or []
+    since = _o3_from_units([u for u in units if u["ts"] >= start], local_no_session,
+                           assist=[u for u in a if u["ts"] >= start])
+    before = _o3_from_units([u for u in units if u["ts"] < start], local_no_session,
+                            assist=[u for u in a if u["ts"] < start])
     return {"version": version, "start_ts": start, "start": _iso(start), "since": since, "before": before}
 
 
 def _o3_render_lines(o3: dict) -> list[str]:
     """The O3 block as printed by `kpi`: one headline line, then detail lines."""
     lines = [f"  {_LABELS['O3']:<42s} {o3['value']}"]
+    if o3.get("caveat"):
+        lines.append(f"      WARNING: {o3['caveat']}")
     lines += [f"      {x}" for x in o3.get("lines", ())]
     sp = o3.get("since_policy")
     if sp:
@@ -1530,7 +1637,8 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         "local_shadow": _local_shadow_summary(days, win),
         # O3 is likewise outside "kpis": adding it there would change the key set, _ORDER and
         # the --health counts that NS..G4 consumers read. Rendered as its own line.
-        "o3": _o3_offload_share(days, allowed, index, all_rows, now_ts, since_policy, win),
+        "o3": _o3_with_caveat(
+            _o3_offload_share(days, allowed, index, all_rows, now_ts, since_policy, win, g3_r)),
         "proxy_local_shadow": _proxy_shadow_summary(days, win),
         "kpis": {
             "NS": ns_r, "O1": o1_r, "O2": o2_r,
@@ -1605,6 +1713,8 @@ def compute_health(data: dict, *, stale_hours: float = STALE_LIVE_HOURS,
            "counts": counts, "kpis": out}
     if data.get("o3") is not None:  # outside "kpis" and "counts": see compute_scorecard
         res["o3"] = _health_entry(data["o3"], stale_hours, now_ts)
+        if data["o3"].get("caveat"):
+            res["o3"]["caveat"] = data["o3"]["caveat"]
     return res
 
 
@@ -1691,7 +1801,8 @@ def render_health(health: dict, *, strict: bool = False) -> str:
         lines.append(f"  {_LABELS[key]:<42s} {h['state']:<9s} n={str(h['n']):<7} {h['reason']}")
     if health.get("o3") is not None:
         h = health["o3"]
-        lines.append(f"  {_LABELS['O3']:<42s} {h['state']:<9s} n={str(h['n']):<7} {h['reason']}")
+        lines.append(f"  {_LABELS['O3']:<42s} {h['state']:<9s} n={str(h['n']):<7} {h['reason']}"
+                     + (f" | WARNING: {h['caveat']}" if h.get("caveat") else ""))
     c = health["counts"]
     verdict = ("exit 1: --strict and a KPI is blind" if strict and c[STATE_BLIND]
                else "exit 0; --strict exits 1 if any KPI is blind")
@@ -1711,7 +1822,8 @@ def write_weekly(data: dict, out_dir: Path) -> Path:
         r = data["kpis"][key]
         body.append(f"| {_LABELS[key]} | {r['value']} |")
     if data.get("o3") is not None:
-        body.append(f"| {_LABELS['O3']} | {data['o3']['value']} |")
+        body.append(f"| {_LABELS['O3']} | {data['o3']['value']}"
+                    + (f" (WARNING: {data['o3']['caveat']})" if data["o3"].get("caveat") else "") + " |")
     details = [(key, r["lines"]) for key in _ORDER if (r := data["kpis"][key]).get("lines")]
     if details:
         body += ["", "## Details", ""]

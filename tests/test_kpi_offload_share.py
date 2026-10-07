@@ -103,9 +103,10 @@ def test_usage_outcome_redo_marks_the_nearest_local_unit_once():
     out = [{"outcome": "redone", "session_id": "s-org", "ts": t + 30},
            {"outcome": "used", "session_id": "s-org", "ts": t + 1},
            {"outcome": "redone", "session_id": "other", "ts": t}]
-    units = osh.build_units([], local, now=t + 3600, days=7, allowed=ORG, band_redone=frozenset(),
-                            outcome_redos=out, kind_of=lambda sid, stamp: "organic")["units"]
-    assert [u["why"] for u in units] == ["usage_outcome", None]  # one verdict, one unit
+    built = osh.build_units([], local, now=t + 3600, days=7, allowed=ORG, band_redone=frozenset(),
+                            outcome_redos=out, kind_of=lambda sid, stamp: "organic")
+    assert built["units"] == []   # M0.3a: a local MCP unit is not a turn
+    assert [u["why"] for u in built["local_assist"]] == ["usage_outcome", None]  # one verdict, one unit
 
 
 def test_what_is_and_is_not_a_unit():
@@ -194,14 +195,18 @@ def test_per_class_redo_rate_is_too_few_when_the_class_is_small_even_if_total_is
     assert "local not measurable" in o3["lines"][1]
 
 
-def test_local_share_is_unknown_not_zero_when_local_units_have_no_session(monkeypatch):
+def test_mcp_local_units_without_session_are_reported_apart_not_as_a_lower_bound(monkeypatch):
+    # M0.3a (deliberate update of the pinned test): MCP-local units are not turns, so they no
+    # longer make the O3 headline a lower bound; they get their own line.
     from llm_router import northstar as ns
     _write_ledger(_population(n_haiku=0, haiku_redone=0, n_local=0, n_claude=100))
     monkeypatch.setattr(ns, "local_shadow_units", lambda days=30, db_path=None: iter(
         [{"session_id": None, "ts": "2026-10-06T14:00:00+00:00"}] * 7))
     o3 = kpi.compute_scorecard(days=7, now=NOW)["o3"]
-    assert "local share unknown (7 local unit(s) carry no session id" in o3["lines"][0]
-    assert "local share 0.0%" not in o3["lines"][0]
+    assert "lower bound" not in o3["lines"][0] and "local share 0.0% (0/100)" in o3["lines"][0]
+    assert "local MCP answers inside Claude turns" in "".join(o3["lines"])
+    assert "7 more with no session id excluded" in "".join(o3["lines"])
+    assert o3["breakdown"]["local_assist_n"] == 0 and o3["breakdown"]["local_no_session"] == 7
 
 
 def test_receipt_band_press_reaches_o3_through_the_scorecard():
@@ -329,15 +334,18 @@ def test_redo_signal_sparse_is_stated_with_n_escalations():
 # ── caveats ──────────────────────────────────────────────────────────────────
 
 def test_partly_attributable_local_still_prints_the_no_session_caveat(monkeypatch):
+    # M0.3a (deliberate update of the pinned test): the caveat moved from the headline line to the
+    # "local MCP answers inside Claude turns" line, and the 3 attributable units are not turns.
     from llm_router import northstar as ns
     _write_ledger(_population(n_haiku=0, haiku_redone=0, n_local=0, n_claude=100))
     monkeypatch.setattr(ns, "local_shadow_units", lambda days=30, db_path=None: iter(
         [{"session_id": "s-org", "ts": "2026-10-06T14:00:00+00:00"}] * 3
         + [{"session_id": None, "ts": "2026-10-06T14:00:00+00:00"}] * 4))
     o3 = kpi.compute_scorecard(days=7, now=NOW, since_policy="v-new")["o3"]
-    assert "4 local unit(s) with no session id excluded" in o3["lines"][0]
-    assert "4 local unit(s) with no session id excluded" in "".join(
-        o3["since_policy"]["since"].get("lines", ()))
+    joined = "".join(o3["lines"])
+    assert "3 (0 redone); 4 more with no session id excluded" in joined
+    assert o3["breakdown"]["local_assist_n"] == 3 and o3["breakdown"]["n"] == 100
+    assert "4 more with no session id excluded" in "".join(o3["since_policy"]["since"].get("lines", ()))
 
 
 def test_window_open_turns_are_in_the_headline_value():
@@ -347,3 +355,82 @@ def test_window_open_turns_are_in_the_headline_value():
     _write_ledger(short)
     o3 = kpi.compute_scorecard(days=7, now=NOW)["o3"]
     assert o3["measurable"] and ", 60 window-open)" in o3["value"]
+
+
+# ── M0-2: the O3 integrity warning (owner decision 2026-10-07) ───────────────
+
+_CAVEAT = ("O3 turn count unvalidated: may overcount turns (integrity 3.89x on the only "
+           "measurable session, research; owner accepted 2026-10-07)")
+
+
+def test_the_caveat_text_is_the_owner_wording_built_from_the_gate_constant():
+    assert kpi.O3_INTEGRITY_GATE["turns"] == 813 and kpi.O3_INTEGRITY_GATE["typed_prompts"] == 209
+    assert kpi.o3_caveat() == _CAVEAT
+
+
+def test_the_caveat_follows_the_constant_not_a_string_in_each_surface(monkeypatch, tmp_path, capsys):
+    monkeypatch.setitem(kpi.O3_INTEGRITY_GATE, "turns", 100)
+    monkeypatch.setitem(kpi.O3_INTEGRITY_GATE, "typed_prompts", 100)
+    new = _CAVEAT.replace("3.89x", "1.00x")
+    card = _golden_card()
+    assert card["o3"]["caveat"] == new and card["o3"]["integrity"]["ratio"] == 1.0
+    assert new in kpi.render_scorecard(card)
+    assert new in kpi.render_health(kpi.compute_health(card))
+    assert "3.89" not in kpi.render_scorecard(card) + kpi.render_health(kpi.compute_health(card))
+
+
+def test_the_caveat_scope_follows_sessions_measurable(monkeypatch):
+    assert "on the only measurable session" in kpi.o3_caveat()
+    monkeypatch.setitem(kpi.O3_INTEGRITY_GATE, "sessions_measurable", 3)
+    text = kpi.o3_caveat()
+    assert "across 3 measurable sessions" in text and "only measurable session" not in text
+    assert "3.89x" in text
+
+
+def test_json_carries_the_caveat_and_the_measured_ratio(capsys):
+    _write_ledger(fx.baseline_rows())
+    assert kpi.cmd_kpi(["--json"]) == 0
+    o3 = json.loads(capsys.readouterr().out)["o3"]
+    assert o3["caveat"] == _CAVEAT
+    assert o3["integrity"] == {**kpi.O3_INTEGRITY_GATE, "ratio": 3.89}
+    assert o3["integrity"]["status"] == "owner-accepted with warning" and o3["integrity"]["gate"] == "M0-2"
+
+
+def test_scorecard_prints_the_caveat_under_the_o3_line(capsys):
+    _write_ledger(fx.baseline_rows())
+    assert kpi.cmd_kpi([]) == 0
+    lines = capsys.readouterr().out.split("\n")
+    i = next(k for k, ln in enumerate(lines) if ln.startswith(f"  {kpi._LABELS['O3']}"))
+    assert lines[i + 1].strip() == f"WARNING: {_CAVEAT}"
+
+
+def test_health_prints_the_caveat_on_the_o3_line_and_in_json(capsys):
+    _write_ledger(fx.baseline_rows())
+    assert kpi.cmd_kpi(["--health"]) == 0
+    o3_line = [ln for ln in capsys.readouterr().out.split("\n")
+               if ln.startswith(f"  {kpi._LABELS['O3']}")]
+    assert len(o3_line) == 1 and o3_line[0].endswith(f"| WARNING: {_CAVEAT}")
+    assert kpi.cmd_kpi(["--health", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["o3"]["caveat"] == _CAVEAT
+
+
+def test_the_caveat_is_there_when_o3_is_blind_or_failed(monkeypatch):
+    _write_ledger(_population(n_haiku=5, haiku_redone=5, n_local=0, n_claude=3))
+    card = kpi.compute_scorecard(days=7, now=NOW)
+    assert not card["o3"]["measurable"] and card["o3"]["caveat"] == _CAVEAT
+    assert _CAVEAT in kpi.render_health(kpi.compute_health(card))
+    monkeypatch.setattr(osh, "build_units", lambda *a, **k: 1 / 0)
+    failed = _golden_card()["o3"]
+    assert failed["value"].startswith("not measurable: O3 computation failed") and failed["caveat"] == _CAVEAT
+
+
+def test_the_weekly_markdown_carries_the_caveat(tmp_path):
+    path = kpi.write_weekly(_golden_card(), tmp_path)
+    row = next(ln for ln in path.read_text().split("\n") if ln.startswith(f"| {kpi._LABELS['O3']}"))
+    assert f"(WARNING: {_CAVEAT})" in row
+
+
+def test_the_caveat_does_not_move_the_other_kpis():
+    card = _golden_card()
+    assert json.dumps(card["kpis"], indent=1, sort_keys=True, default=str) == \
+        (GOLDEN / "kpi_pre_o3_kpis.json").read_text()

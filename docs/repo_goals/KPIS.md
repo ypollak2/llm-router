@@ -56,11 +56,67 @@ fallback and no 4xx/5xx upstream status. Class **Haiku** when `served_model` (el
 `requested_model`) names Haiku, else Claude. Claude Code's own side calls (`tier_reason ==
 side_call`: titles, summaries) are excluded and counted: the router did not choose them and
 nobody redoes them. (b) Proxy rows with `decision == served` (a local backend answered): class
-**local**. (c) `northstar.local_shadow_units()` (PR #284, `usage.db`
-`provenance='runtime'`, `final_provider='ollama'`): class **local**. A local unit with no
-`session_id` cannot be scoped to organic sessions: it is excluded and counted, the local share
-prints as `unknown`, and O3 is a lower bound. Today every such row in `usage.db` has no
-session id.
+**local**. (c) `northstar.local_shadow_units()` (PR #284, `usage.db` `provenance='runtime'`,
+`final_provider='ollama'`): a local MCP `llm()` answer given INSIDE a Claude turn. Claude made
+that turn's first call, so it is **not a turn** (M0.3a): it sits outside both the numerator and the
+denominator and is printed on its own line (`local MCP answers inside Claude turns`, and as
+`o3.breakdown.local_assist_n` / `local_assist_redone`). One with no `session_id` cannot be scoped
+to organic sessions: it is excluded and counted (`local_no_session`). (d) **Zero-Claude edit
+turns** (M0.3c): the hook applied the edit and the whole turn was served locally, so there is
+no proxy row. `edit_outcomes.jsonl` rows with `source=zero_claude` and `applied=true` count as
+**one local turn per (session_id, turn_id)** (`turn_id` = `prompt_key.key(prompt)`, a text-free
+hash); a turn that edits a source file and a test file is still 1 turn. A `claude:` re-ask in
+the next turns marks it redone. Rows with `source=llm_edit` (or none) are never turns, and a
+row with no session id or no turn id is excluded and counted
+(`o3.excluded.edit_no_session`, `edit_no_turn_id`).
+
+*Which proxy calls are turns* (M0.3b; the owner's definition, PLAN section 1.2 O3). A turn is a proxy
+row that is not a side call and whose `step_class` is not `continuation`, minus sub-agent first calls.
+The proxy row's `msg_id` is joined to the transcript's assistant `message.id` (`o3_transcripts`). The
+join changes exactly one thing; the rest of its roles are only counted:
+
+| Transcript role of the row | Counted as | Counter |
+|---|---|---|
+| sub-agent call (`isSidechain: true`, or `<session>/subagents/**/agent-*.jsonl`) | not a turn (per-call unit only, does not end a redo window) | `o3.excluded.subagent_first` |
+| first answer to injected input: slash command, sub-agent hand-back, peer message, task notification | **turn** (kept in) | `o3.kept_in.meta_first` |
+| message id in no message of a session that HAS a transcript (permission classifier, prompt suggestion, side query) | **turn** (kept in: "unjoined rows stay in") | `o3.kept_in.unjoined` |
+| session with no transcript at all, or a row with no message id | **turn** (proxy-only rule) | `o3.kept_in.no_transcript` |
+| anything else | by `step_class` | |
+
+A row the proxy flags `side_call` is never promoted to a turn, whatever the transcript says. The
+`kept_in` counters are the size of the gap between this definition and "the first answer to a typed
+prompt": they are reported so the owner can see it, and they do not change n.
+
+Typed prompt (used only by `o3_integrity.py`, never by the scorecard) = a `user` entry that is not a
+sidechain, not `isMeta`, has non-blank text and does not start with `<command-`. **Open owner decision:
+background task notifications have that shape too** (`promptSource=system`: 113 of the 209 typed prompts
+of the one qualifying W0 session, 54%), so a "human turn" here includes turns the harness started on a
+sub-agent completion, and the redo window of 2 human turns can span notifications rather than human
+replies. The definition is not changed here; O3 should not feed an M2/M4 bar before the owner decides.
+
+Measured on W0 (2026-09-29T09:41:51Z to 2026-10-06T09:41:52Z, `proxy_calls.jsonl` md5 627eef56, 26,096
+rows, one qualifying session b9f04425): the owner's rule counts **813 turns against 209 typed prompts =
+3.890**, outside the M0-2 band 0.90-1.10. Of the 813: 548 are calls in no transcript message, 162
+injected-input first calls and 103 first answers to a typed prompt (the transcript-decided count would be
+177 against 209 = 0.847, or 177 against the 184 prompts the proxy could have seen = 0.962; it is a
+different definition and needs a PLAN edit).
+
+*Bound* (M0.3d). When G3 `session_kind` completeness is below 95%, O3 prints `o3.bound` with
+`lower` and `upper`: the headline (untagged rows treated as non-organic) and the same number with
+untagged rows treated as organic, whichever is smaller and larger.
+
+*Integrity.* `$PP/scripts/o3_integrity.py --since --until` compares proxy turns with every typed
+transcript prompt per session and pooled over an absolute window (PLAN M0-2: 0.90-1.10; prompts older than
+the session's first proxy row are printed apart and still counted). Zero qualifying sessions is a FAIL. Two
+checks do not go through `offload_share`: no msg_id is counted as a turn twice, and the O3 turn count must
+equal a recount made from the ledger rows.
+
+*Owner-accepted warning (M0-2, 2026-10-07).* On W0 the integrity ratio is 813 / 209 = 3.89 on the only
+measurable session (b9f04425, research), outside the bar, so M0-2 FAILED. The owner accepted O3 as is,
+with a warning: `kpi`, `kpi --health`, `kpi --json` (`o3.caveat`, `o3.integrity`) and the weekly markdown
+all print "O3 turn count unvalidated: may overcount turns (integrity 3.89x ...)". The figures live in
+one place, `commands/kpi.py` `O3_INTEGRITY_GATE`. Do not read O3 as a bar for M2 or M4 until the turn
+count is validated; remove the warning only after `o3_integrity.py` passes.
 
 *Redone.* A unit is redone when any of:
 

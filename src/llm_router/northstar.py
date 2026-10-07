@@ -784,7 +784,9 @@ def _fold_edit_ledger(su: SessionUnits, edit_call_units: list[Unit], rows: list[
         if not isinstance(row_ts, (int, float)):
             row_ts = None
         best: Unit | None = None
-        if row_ts is not None:
+        # A zero-Claude row comes from the UserPromptSubmit hook, not from an llm_edit tool call,
+        # so it must neither match nor drop a routed_mcp unit (M0.3c).
+        if row_ts is not None and row.get("source") != "zero_claude":
             for call in edit_call_units:
                 if call.ts is None or call.ts > row_ts:
                     continue
@@ -837,6 +839,8 @@ def _fold_orphan_edit_rows(
         row_file = row.get("file")
         if not isinstance(row_ts, (int, float)) or not row_file:
             continue
+        if row.get("source") == "zero_claude":
+            continue  # no llm_edit call exists for a hook-applied edit: nothing to join (M0.3c)
         best_sid: str | None = None
         best_unit: Unit | None = None
         for sid, call, files in all_edit_calls:
