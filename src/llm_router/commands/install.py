@@ -141,7 +141,7 @@ Usage:
                                      (claude-code, claude-desktop, cursor, copilot,
                                      windsurf, gemini-cli, codex, …)
   llm-router install --mode <mode>       Install mode (auto | gateway)
-  llm-router install --no-hosts          Claude Code only; skip other detected hosts (Codex)
+  llm-router install --no-hosts          Claude Code only; skip other detected hosts (Codex, Gemini CLI)
   llm-router install --project           Write AGENTS.md + CLAUDE.md (link) into the current
                                      repository so both agents read one set of rules
   llm-router install --proxy-default     Make the per-call proxy the DEFAULT ANTHROPIC_BASE_URL
@@ -178,6 +178,14 @@ def cmd_install(args: list[str]) -> int:
 # which is a distinct snippet: claude-code IS the default LLM Router install
 # target, and claude-desktop maps onto the existing `desktop` snippet.
 _HOST_ALIASES = {"claude-desktop": "desktop", "claude_desktop": "desktop"}
+
+# Hosts the README lists as planned: `--host <id>` reports the reason and exits
+# 2, and auto-detect reports them instead of skipping them silently (v16 P0.4).
+# Wiring them is v16 P2.12.
+_UNSUPPORTED_HOSTS = {
+    "pi": "not wired into `llm-router install` yet",
+    "kimi": "not wired into `llm-router install` yet",
+}
 
 
 def _run_install(flags: list[str]) -> None:
@@ -314,16 +322,28 @@ def _run_install(flags: list[str]) -> None:
     # ── Other hosts on this machine (auto-detect) ──────────────────────────
     # A user with Claude Code AND Codex wants both wired, both ways, from the
     # one command. --host still targets a single host; --no-hosts skips this.
+    # Every detected host is either wired here or reported with a reason
+    # (v16 P0.4): before, gemini-cli was detected and then silently skipped.
     installed_hosts = ["Claude Code"]
     if "--no-hosts" not in flags:
-        from llm_router.host_detect import detect_hosts
-        hosts = detect_hosts()
-        if hosts["codex"].present:
-            print(f"\n{_bold('  Codex CLI detected — installing...')}")
-            for a in _install_codex_files():
-                ok = a.lstrip().startswith("✓")
-                print(f"  {_green('✓') if ok else _dim('·')}  {a.lstrip('✓ ').strip()}")
-            installed_hosts.append("Codex CLI")
+        from llm_router import host_detect
+        _auto_wire = {
+            "codex": ("Codex CLI", _install_codex_files),
+            "gemini-cli": ("Gemini CLI", _install_gemini_cli_files),
+        }
+        for host_id, info in host_detect.detect_hosts().items():
+            if not info.present or host_id == "claude-code":
+                continue  # absent, or already wired by install() above
+            if host_id in _auto_wire:
+                label, install_fn = _auto_wire[host_id]
+                print(f"\n{_bold(f'  {label} detected — installing...')}")
+                for a in install_fn():
+                    ok = a.lstrip().startswith("✓")
+                    print(f"  {_green('✓') if ok else _dim('·')}  {a.lstrip('✓ ').strip()}")
+                installed_hosts.append(label)
+            else:
+                reason = _UNSUPPORTED_HOSTS.get(host_id, "no installer for this host")
+                print(f"  {host_id}: detected, not wired: {reason}")
 
     # ── Seats: which subscriptions are logged in (drives the free bucket) ──
     try:
@@ -1581,6 +1601,10 @@ def _install_host(host: str, mode: str = "auto") -> None:
     """Install config for non-Claude Code hosts (writes files for Codex; prints snippets for others)."""
     bold = "\033[1m" if _color_enabled() else ""
     reset = "\033[0m" if _color_enabled() else ""
+
+    if host in _UNSUPPORTED_HOSTS:
+        print(f"unsupported: {_UNSUPPORTED_HOSTS[host]}; planned in v16 P2.12")
+        sys.exit(2)
 
     hosts_to_show = list(_HOST_SNIPPETS.keys()) if host == "all" else [host]
     unknown = [h for h in hosts_to_show if h not in _HOST_SNIPPETS]

@@ -20,6 +20,10 @@ _HOSTS: dict[str, tuple[str, str]] = {
     "claude-code": ("claude", ".claude"),
     "codex": ("codex", ".codex"),
     "gemini-cli": ("gemini", ".gemini"),
+    # Detected so `llm-router install` can report them with a reason; no
+    # installer wires them yet (v16 P0.4; wiring is P2.12).
+    "pi": ("pi", ".pi"),
+    "kimi": ("kimi", ".kimi"),
 }
 
 
