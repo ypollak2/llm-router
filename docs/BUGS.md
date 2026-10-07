@@ -222,6 +222,19 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   (529 overloaded) relayed by a healthy main proxy: that doubles the request during an overload
   and counts a working proxy as `proxy_down`. A 5xx carrying Anthropic's `request-id` is now passed
   through (`test_anthropic_5xx_relayed_by_a_healthy_main_proxy_is_not_proxy_down`).
+- **Found in review (round 2).** With the shim on 8787, doctor, the statusline and the
+  SessionStart hook TCP-probed only the sentinel's `port`, which is now the shim's. The shim
+  always accepts, so all three read healthy while the main proxy was dead and every call
+  bypassed routing. Each check now also probes `upstream_port` and reports "routing bypassed"
+  with the main proxy's restart command; a dead shim names `com.llm_router.proxy-shim`.
+  Tests: `tests/test_doctor_proxy_default_shim.py` (doctor's section moved into
+  `_proxy_default_section` so it can be called; the mutant `_shim = False` turns 3 of its 4
+  tests red), and the `*_shim_*` / `*_main_proxy_*` tests in
+  `tests/test_session_start_proxy_default.py` and `tests/test_statusline_proxy_default.py`
+  (4 of them red on the pre-fix hooks). The settings.json guard also failed to catch a direct
+  `(Path.home() / ".claude" / "settings.json").write_text(...)` in the shim;
+  `test_runtime_failopen_surfaces_never_name_settings_json` now rejects any runtime string
+  constant naming `settings.json` or `.claude` in the fail-open files (that mutant: red).
 - **Test.** `tests/test_proxy_failopen_shim.py` (fails on da31df7: the module does not exist):
   `test_main_down_goes_direct_and_records_proxy_down`,
   `test_main_disconnects_before_responding_goes_direct`, `test_connect_timeout_goes_direct`,

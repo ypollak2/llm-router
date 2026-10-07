@@ -456,13 +456,22 @@ import json, os, socket
 try:
     d = json.load(open(os.environ["CHZ_SENTINEL"]))
     port = int(d.get("port", 8787))
+    up = d.get("upstream_port")
+    up = int(up) if up is not None else None
 except Exception:
     raise SystemExit  # unreadable sentinel is not evidence of a dead proxy
-try:
-    with socket.create_connection(("127.0.0.1", port), timeout=0.3):
-        pass
-except OSError:
+def answers(p):
+    try:
+        with socket.create_connection(("127.0.0.1", p), timeout=0.3):
+            return True
+    except OSError:
+        return False
+if not answers(port):
     print(port)
+elif up is not None and not answers(up):
+    # The fail-open shim owns `port` and accepts with the main proxy dead:
+    # calls still work but go direct, bypassing routing.
+    print(f"{up} (bypassed)")
 ' 2>/dev/null)
     if [ -n "$proxy_down" ]; then
         parts+=("${_RED}🔌 proxy down:${proxy_down}${_RESET}")

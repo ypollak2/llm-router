@@ -534,6 +534,10 @@ headers and records a `proxy_down` event (`failopen.record`, so it lands in
 or content). Once a response byte has gone out nothing is retried. An Anthropic
 5xx relayed by a working main proxy (for example 529 overloaded) is passed through
 unchanged: retrying it would double the load and count a healthy proxy as down.
+Known risk: on a disconnect before the response headers (`disconnected`), or a
+5xx of the main proxy's own, the main proxy may already have forwarded the request
+to Anthropic, so the direct retry can send it twice and it may be billed twice.
+The shim accepts that cost in exchange for not failing the call.
 
 Why: `settings.json` env beats the process env, so a session already running
 cannot be pointed elsewhere, and the SessionStart warning below only reaches the
@@ -556,8 +560,13 @@ live service change and an owner step.
 
 ### Fail-safe: what happens when the proxy is down
 
-Because every session depends on it once installed (with the shim, a dead main
-proxy no longer fails the call; the checks below still report it):
+Because every session depends on it once installed. With the shim, a dead main
+proxy no longer fails the call, but the shim still accepts on 8787, so a probe of
+that port alone would read healthy while every call bypassed routing. Each check
+below therefore probes the shim's port (`port` in `proxy_default.json`) **and** the
+main proxy's (`upstream_port`), and reports a dead main proxy as "routing
+bypassed" with the main proxy's recovery command, and a dead shim with the
+shim's (`com.llm_router.proxy-shim` / `llm_router-proxy-shim`):
 
 - **KeepAlive/`Restart=on-failure`** restarts a crashed process in place — the
   supervisor IS the watchdog. A separate polling watchdog process was
@@ -570,7 +579,7 @@ proxy no longer fails the call; the checks below still report it):
   TCP-probes the port, and prints the exact recovery command
   (`launchctl kickstart -k gui/$(id -u)/com.llm_router.proxy` /
   `systemctl --user restart llm_router-proxy`) plus the log path on failure.
-- **The statusline** shows `🔌 proxy down:<port>` in red the instant the probe
+- **The statusline** shows `🔌 proxy down:<port>` (or `proxy down:<upstream_port> (bypassed)` when only the main proxy behind the shim is dead) in red the instant the probe
   fails — gated on the sentinel, so a user who never installed proxy-default
   pays nothing extra here.
 - **The SessionStart hook** (`_check_proxy_default_health` in

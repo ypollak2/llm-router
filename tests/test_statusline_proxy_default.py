@@ -80,6 +80,44 @@ def test_segment_shown_when_dead(tmp_path):
     assert str(port) in out
 
 
+def test_segment_shown_when_shim_answers_but_main_proxy_is_dead(tmp_path):
+    """docs/BUGS.md #11 review: the shim on `port` always accepts, so the main
+    proxy's `upstream_port` must be probed too."""
+    home = tmp_path / "home"
+    (home / ".llm-router").mkdir(parents=True)
+    shim = _listening_socket()
+    dead = _listening_socket()
+    upstream = dead.getsockname()[1]
+    dead.close()
+    try:
+        (home / ".llm-router" / "proxy_default.json").write_text(
+            json.dumps({"port": shim.getsockname()[1], "upstream_port": upstream})
+        )
+        out = _run(home)
+        if not out.strip():
+            pytest.skip("statusline produced no output in this environment")
+        assert f"proxy down:{upstream} (bypassed)" in out
+    finally:
+        shim.close()
+
+
+def test_no_segment_when_shim_and_main_proxy_both_answer(tmp_path):
+    home = tmp_path / "home"
+    (home / ".llm-router").mkdir(parents=True)
+    shim, main = _listening_socket(), _listening_socket()
+    try:
+        (home / ".llm-router" / "proxy_default.json").write_text(json.dumps(
+            {"port": shim.getsockname()[1], "upstream_port": main.getsockname()[1]}
+        ))
+        out = _run(home)
+        if not out.strip():
+            pytest.skip("statusline produced no output in this environment")
+        assert "proxy down" not in out
+    finally:
+        shim.close()
+        main.close()
+
+
 def test_malformed_sentinel_does_not_crash_the_statusline(tmp_path):
     home = tmp_path / "home"
     (home / ".llm-router").mkdir(parents=True)

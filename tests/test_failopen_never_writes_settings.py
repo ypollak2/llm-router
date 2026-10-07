@@ -88,3 +88,42 @@ def test_install_is_reached_only_from_the_explicit_install_command():
     assert callers["install_proxy_default"] == ["commands/proxy_default.py:cmd_proxy_default"]
     reached_from = callers["cmd_proxy_default"]
     assert reached_from and all(c.startswith("commands/install.py:") for c in reached_from), reached_from
+
+
+def _live_string_constants(tree: ast.Module) -> list[ast.Constant]:
+    """String constants that can reach runtime: every str Constant except a bare
+    expression statement (docstrings and other no-op string statements)."""
+    inert = {id(n.value) for n in ast.walk(tree)
+             if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)}
+    return [n for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in inert]
+
+
+def test_runtime_failopen_surfaces_never_name_settings_json():
+    """The symbol check above misses a direct write such as
+    ``(Path.home() / ".claude" / "settings.json").write_text("{}")`` (review of
+    1fa0bd1: that mutant in ``failopen_shim._record_proxy_down`` left 3/3 green).
+    No runtime fail-open file may name the file or the ``.claude`` dir in code at
+    all; docstrings and comments are free to explain why."""
+    checked = 0
+    for path in _runtime_failopen_files():
+        for node in _live_string_constants(_tree(path)):
+            low = node.value.lower()
+            assert "settings.json" not in low and ".claude" not in low, (
+                f"{path.name}:{node.lineno} names {node.value!r}"
+            )
+        checked += 1
+    assert checked >= 3
+
+
+def test_the_settings_json_check_catches_a_direct_write():
+    """Guard on the guard: the mutant from the review is caught."""
+    mutant = ast.parse(
+        '"""settings.json in a docstring is fine."""\n'
+        "import pathlib\n"
+        "def _record_proxy_down():\n"
+        "    (pathlib.Path.home() / '.claude' / 'settings.json').write_text('{}')\n"
+    )
+    names = [n.value for n in _live_string_constants(mutant)]
+    assert "settings.json" in names and ".claude" in names
+    assert not any("docstring" in v for v in names)

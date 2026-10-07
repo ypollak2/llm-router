@@ -49,6 +49,7 @@ def test_hook_label_literal_matches_proxy_default_label():
     _load_hook_module()  # importable/parses cleanly
     src = HOOK_PATH.read_text()
     assert f'label = "{pd.LABEL}"' in src
+    assert f'shim_label = "{pd.SHIM_LABEL}"' in src
 
 
 def test_noop_when_never_installed(monkeypatch, tmp_path):
@@ -109,3 +110,58 @@ def test_defaults_to_the_documented_port_when_sentinel_omits_it(monkeypatch, tmp
     msg = mod._check_proxy_default_health()
     assert seen_ports == [pd.DEFAULT_PORT]
     assert f"127.0.0.1:{pd.DEFAULT_PORT}" in msg
+
+
+def _dead_port() -> int:
+    srv = _listening_socket()
+    port = srv.getsockname()[1]
+    srv.close()
+    return port
+
+
+def test_warns_routing_bypassed_when_shim_answers_but_main_proxy_is_dead(monkeypatch, tmp_path):
+    """docs/BUGS.md #11 review: with the fail-open shim, `port` is the shim's and
+    it always accepts. Probing it alone read healthy while the main proxy was
+    dead and every call bypassed routing."""
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    shim = _listening_socket()
+    try:
+        port, upstream = shim.getsockname()[1], _dead_port()
+        (tmp_path / "proxy_default.json").write_text(
+            json.dumps({"port": port, "upstream_port": upstream, "shim_label": pd.SHIM_LABEL})
+        )
+        msg = _load_hook_module()._check_proxy_default_health()
+        assert f"127.0.0.1:{upstream}" in msg
+        assert "bypassed" in msg
+        assert f"gui/$(id -u)/{pd.LABEL}" in msg
+    finally:
+        shim.close()
+
+
+def test_noop_when_shim_and_main_proxy_both_answer(monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    shim, main = _listening_socket(), _listening_socket()
+    try:
+        (tmp_path / "proxy_default.json").write_text(json.dumps(
+            {"port": shim.getsockname()[1], "upstream_port": main.getsockname()[1]}
+        ))
+        assert _load_hook_module()._check_proxy_default_health() == ""
+    finally:
+        shim.close()
+        main.close()
+
+
+def test_dead_shim_names_the_shim_service(monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    main = _listening_socket()
+    try:
+        port = _dead_port()
+        (tmp_path / "proxy_default.json").write_text(
+            json.dumps({"port": port, "upstream_port": main.getsockname()[1]})
+        )
+        msg = _load_hook_module()._check_proxy_default_health()
+        assert f"127.0.0.1:{port}" in msg
+        assert f"gui/$(id -u)/{pd.SHIM_LABEL}" in msg
+        assert "will fail" in msg
+    finally:
+        main.close()
