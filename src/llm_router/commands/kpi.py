@@ -1411,8 +1411,10 @@ def o3_caveat(gate: dict[str, Any] | None = None) -> str:
     """The one-line warning printed on every O3 surface (scorecard, --health, --json, weekly)."""
     g = gate or O3_INTEGRITY_GATE
     ratio = g["turns"] / g["typed_prompts"]
-    return (f"O3 turn count unvalidated: may overcount turns (integrity {ratio:.2f}x on the only "
-            f"measurable session, {g['session_kind']}; owner accepted {g['accepted_on']})")
+    n = g["sessions_measurable"]
+    scope = "on the only measurable session" if n == 1 else f"across {n} measurable sessions"
+    return (f"O3 turn count unvalidated: may overcount turns (integrity {ratio:.2f}x {scope}, "
+            f"{g['session_kind']}; owner accepted {g['accepted_on']})")
 
 
 def _o3_with_caveat(o3: dict) -> dict:

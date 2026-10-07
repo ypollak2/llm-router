@@ -379,6 +379,14 @@ def test_the_caveat_follows_the_constant_not_a_string_in_each_surface(monkeypatc
     assert "3.89" not in kpi.render_scorecard(card) + kpi.render_health(kpi.compute_health(card))
 
 
+def test_the_caveat_scope_follows_sessions_measurable(monkeypatch):
+    assert "on the only measurable session" in kpi.o3_caveat()
+    monkeypatch.setitem(kpi.O3_INTEGRITY_GATE, "sessions_measurable", 3)
+    text = kpi.o3_caveat()
+    assert "across 3 measurable sessions" in text and "only measurable session" not in text
+    assert "3.89x" in text
+
+
 def test_json_carries_the_caveat_and_the_measured_ratio(capsys):
     _write_ledger(fx.baseline_rows())
     assert kpi.cmd_kpi(["--json"]) == 0
