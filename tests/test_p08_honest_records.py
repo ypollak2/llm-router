@@ -233,3 +233,52 @@ def test_cc_usage_track_session_rule_matches_call_identity():
     for value in ("abc-123", "  9b1d7c2e-1111-4000-8000-000000000002 ", "sdk", "Unknown", "",
                   "has space", "x" * 129, None, 42, "toolu_01:ABC.def"):
         assert hook._ledger_session_id(value) == call_identity.ledger_session_id(value), value
+
+
+# ── G3 counts NULL as missing (P0.8 task 3) ──────────────────────────────────
+
+
+def test_g3_counts_null_as_missing_on_every_required_field():
+    """A NULL in a field G3 requires is "missing", never "recorded".
+
+    Only the outcome fields that are null by design (``tier_retry``: no retry
+    happened; ``cls_ms``/``cls_arm``: classifier not run yet) are presence-only.
+    This already held on da31df7; the test pins it now that P0.8 writes NULL for
+    unknowns instead of defaults.
+    """
+    from llm_router.commands import kpi
+
+    presence_only = kpi._G3_PRESENCE_ONLY | kpi._G3_LATE_PRESENCE_ONLY
+    value_fields = [f for f in kpi.G3_FIELDS + kpi.G3_LATE_FIELDS if f not in presence_only]
+    assert len(value_fields) >= 9, value_fields  # the check found something to check
+    for f in value_fields:
+        assert not kpi._g3_recorded({f: None}, f, presence_only=presence_only), f
+        assert not kpi._g3_recorded({}, f, presence_only=presence_only), f
+        assert kpi._g3_recorded({f: "x"}, f, presence_only=presence_only), f
+    for f in presence_only:
+        assert kpi._g3_recorded({f: None}, f, presence_only=presence_only), f
+        assert not kpi._g3_recorded({}, f, presence_only=presence_only), f
+
+
+# ── replay renders NULL as unknown (BUGS.md 14) ──────────────────────────────
+
+
+def test_replay_renders_null_confidence_and_task_type_as_unknown():
+    """P0.8 stores unmeasured confidence and unknown task types as NULL.
+
+    ``format_decision_line`` multiplied ``classifier_confidence`` by 100 and raised
+    TypeError on a NULL row (and printed ``None`` for a NULL task type).
+    """
+    from llm_router.commands import replay
+
+    row = {"timestamp": "2026-10-07 17:29:30", "task_type": None, "complexity": "moderate",
+           "final_model": "fake-smoke:1b", "classifier_confidence": None,
+           "reason_code": "direct", "cost_usd": 0.0}
+    text = replay.format_decision_line(row)
+    assert "Confidence: unknown" in text
+    assert "(unknown/moderate)" in text
+    assert "None" not in text
+
+    measured = dict(row, task_type="code", classifier_confidence=0.87)
+    text = replay.format_decision_line(measured)
+    assert "87%" in text and "(code/moderate)" in text

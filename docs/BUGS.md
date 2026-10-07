@@ -21,7 +21,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 11 | `usage` rows carried no session id | fixed in this change (v16 P0.8); live coverage pending deploy |
 | 12 | The Stop line's north star used the heuristic "used", kpi the strict rule | fixed in this change (v16 P0.8) |
 | 13 | Status bar priced its baseline at Opus and labelled it "vs Sonnet" | fixed in this change (v16 P0.8) |
-| 14 | `llm-router replay` raises TypeError on a row with NULL confidence | open, found in v16 P0.8, not fixed here |
+| 14 | `llm-router replay` raises TypeError on a row with NULL confidence | fixed in this change (v16 P0.8) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -238,10 +238,13 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 
 ## 14. `llm-router replay` raises TypeError on a row with NULL confidence
 
-- **Symptom.** `commands/replay.format_decision_line` computes
-  `decision.get("classifier_confidence", 0) * 100`; on a row whose confidence is NULL it raises
-  `TypeError`. The copy of `usage.db` (2026-10-07) already had 421 such successful rows out of
-  2,225 (router "unhinted" rows), before P0.8 added DIRECT rows to that set.
-- **Status.** Open. Not fixed in P0.8 (minimal change); the fix is to render "unknown".
-- **Test.** The fix must add a replay test over a NULL-confidence row.
-
+- **Symptom.** `commands/replay.format_decision_line` computed
+  `decision.get("classifier_confidence", 0) * 100`; on a row whose confidence is NULL it raised
+  `TypeError`, and a NULL task type printed as `None`. The copy of `usage.db` (2026-10-07) already
+  had 421 such successful rows out of 2,225 (router "unhinted" rows); P0.8 adds every DIRECT row
+  to that set.
+- **Cause.** `dict.get(key, default)` returns the stored None, not the default, for a NULL column.
+- **Fix.** A NULL confidence prints `Confidence: unknown`; a NULL task type, complexity or model
+  prints `unknown`. Measured values print as before.
+- **Test.** `test_replay_renders_null_confidence_and_task_type_as_unknown` (fails on da31df7 with
+  the TypeError; mutant that restores `.get("task_type", "unknown")` fails it too).
