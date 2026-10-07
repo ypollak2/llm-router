@@ -195,6 +195,12 @@ def build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:
     pressure allows - direct_executor skips them (can't call from hook).
     A caller outside zero-Claude mode can then fall through to Claude.
 
+    D-14 = A (P0.3): for a Q&A task type no local provider is in the chain, at
+    any complexity (``qa_policy.strip_local_for_qa``, the same rule MCP
+    ``route_and_call`` applies). When only local models were available the Q&A
+    chain is empty, so the hook falls through to Claude and the SDK raises
+    ``RoutingError``. ``code`` and other non-Q&A types are unchanged.
+
     Args:
         complexity: simple / moderate / complex / deep_reasoning
         zone: green / yellow / orange / red / critical
@@ -203,6 +209,14 @@ def build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:
     Returns:
         Ordered list of ModelSpec to try.
     """
+    from llm_router.qa_policy import strip_local_for_qa
+
+    return strip_local_for_qa(_build_chain(complexity, zone, task_type), task_type,
+                              keep_if_only_local=False)
+
+
+def _build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:
+    """``build_chain`` before the D-14 Q&A filter (the unchanged pre-P0.3 logic)."""
     ollama = _ollama_models()
     has_gemini = _has_gemini()
     has_openai = _has_openai()

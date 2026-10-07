@@ -62,7 +62,12 @@ from llm_router.health import get_tracker
 from llm_router.profiles import get_model_chain, provider_from_model
 from llm_router.receipt_store import compute_receipt, store_receipt
 from llm_router.tracing import set_span_attributes, traced_span
-from llm_router.types import BudgetExceededError, Complexity, CostBudgetExceeded, DeadlineExceeded, LLMResponse, LOCAL_PROVIDERS, RoutingProfile, TaskType, WallClockExceeded
+# M3.0 (PLAN D-14 = A): a Q&A task type is never served by a local provider through
+# ``route_and_call``. The rule and its provider set live in ``llm_router.qa_policy`` so the
+# hook DIRECT path and the SDK apply the same copy (P0.3); these names stay for callers.
+from llm_router.qa_policy import QA_STRIP_PROVIDERS as _QA_STRIP_PROVIDERS  # noqa: F401
+from llm_router.qa_policy import strip_local_for_qa as _strip_local_for_qa
+from llm_router.types import BudgetExceededError, Complexity, CostBudgetExceeded, DeadlineExceeded, LLMResponse, RoutingProfile, TaskType, WallClockExceeded
 from llm_router.tool_surface import route_call, route_tool# CHZ-SURF-01
 from llm_router.savings import net_saved
 
@@ -1172,45 +1177,6 @@ def _blocked_providers() -> frozenset[str]:
     """
     raw = os.environ.get("LLM_ROUTER_BLOCK_PROVIDERS", "")
     return frozenset(item.strip().lower() for item in raw.split(",") if item.strip())
-
-
-# Providers that run on the user's own machine. M3.0 (PLAN D-14 = A): a Q&A task type is
-# never served by one of these through ``route_and_call``. Evidence: real Q&A prompts, local
-# qwen 4/37 acceptable vs Sonnet 34/37 (PLAN §0.3 [RX]); 65 local Q&A answers in 7 days [U].
-# One source of truth: ``types.LOCAL_PROVIDERS`` (ollama, lm_studio, vllm, llamacpp) plus
-# ``openai_compat``, which is local by definition (config.py: "OpenAI-compatible local
-# inference (llama.cpp, vLLM, TGI, LM Studio)", base URL e.g. http://localhost:8080/v1) but
-# is not in ``LOCAL_PROVIDERS``. That set is shared with budget.py, so it is extended here
-# rather than changed there (M3.0 touches only routing). Do not add a literal set here.
-_QA_STRIP_PROVIDERS: frozenset[str] = LOCAL_PROVIDERS | {"openai_compat"}
-
-
-def _strip_local_for_qa(models: list[str], task_type: TaskType | str) -> list[str]:
-    """Drop local providers from a chain when the task type is Q&A (M3.0, D-14 = A).
-
-    The next provider in the chain's existing order serves the call, so nothing is
-    reordered. Code task types (and every non-Q&A type) pass through unchanged, so a
-    ``code`` task can still go local. Q&A is ``northstar.QA_TASK_TYPES`` (M0.2). If
-    nothing but local providers remain, the chain is returned as is (no empty chain).
-    The caller must not apply this to an explicit ``model_override``: that is the
-    caller's own pin, not routing.
-    """
-    from llm_router.northstar import QA_TASK_TYPES
-
-    if getattr(task_type, "value", task_type) not in QA_TASK_TYPES:
-        return models
-    kept = [m for m in models if provider_from_model(m) not in _QA_STRIP_PROVIDERS]
-    if not kept:
-        # Local is the only thing configured (an Ollama-only install). An empty chain
-        # would fail the call with "install Ollama", so keep it: M3.0 reroutes Q&A to
-        # the next provider, and here there is none.
-        return models
-    if len(kept) != len(models):
-        log.debug(
-            "M3.0: dropped %d local model(s) from the %s chain",
-            len(models) - len(kept), getattr(task_type, "value", task_type),
-        )
-    return kept
 
 
 # #27 / Option B — precision-tier routing cues. A SHORT prompt that demands an
