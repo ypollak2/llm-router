@@ -165,9 +165,11 @@ class TestExecutionLedgerContracts:
             "failed_attempt_cost_usd",
             "baseline_tokens",
             "adoption_method",
+            "verify",
+            "used",
         )
         assert contracts.EXECUTION_EVENTS_COLUMNS == expected
-        assert len(expected) == 36
+        assert len(expected) == 38
 
 
 class TestCapabilitiesContracts:
