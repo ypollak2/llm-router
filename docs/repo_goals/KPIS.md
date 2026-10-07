@@ -111,6 +111,13 @@ the session's first proxy row are printed apart and still counted). Zero qualify
 checks do not go through `offload_share`: no msg_id is counted as a turn twice, and the O3 turn count must
 equal a recount made from the ledger rows.
 
+*Owner-accepted warning (M0-2, 2026-10-07).* On W0 the integrity ratio is 813 / 209 = 3.89 on the only
+measurable session (b9f04425, research), outside the bar, so M0-2 FAILED. The owner accepted O3 as is,
+with a warning: `kpi`, `kpi --health`, `kpi --json` (`o3.caveat`, `o3.integrity`) and the weekly markdown
+all print "O3 turn count unvalidated: may overcount turns (integrity 3.89x ...)". The figures live in
+one place, `commands/kpi.py` `O3_INTEGRITY_GATE`. Do not read O3 as a bar for M2 or M4 until the turn
+count is validated; remove the warning only after `o3_integrity.py` passes.
+
 *Redone.* A unit is redone when any of:
 
 1. **Escalation.** A later proxy row of the same conversation (session), in the unit's own

@@ -355,3 +355,74 @@ def test_window_open_turns_are_in_the_headline_value():
     _write_ledger(short)
     o3 = kpi.compute_scorecard(days=7, now=NOW)["o3"]
     assert o3["measurable"] and ", 60 window-open)" in o3["value"]
+
+
+# ── M0-2: the O3 integrity warning (owner decision 2026-10-07) ───────────────
+
+_CAVEAT = ("O3 turn count unvalidated: may overcount turns (integrity 3.89x on the only "
+           "measurable session, research; owner accepted 2026-10-07)")
+
+
+def test_the_caveat_text_is_the_owner_wording_built_from_the_gate_constant():
+    assert kpi.O3_INTEGRITY_GATE["turns"] == 813 and kpi.O3_INTEGRITY_GATE["typed_prompts"] == 209
+    assert kpi.o3_caveat() == _CAVEAT
+
+
+def test_the_caveat_follows_the_constant_not_a_string_in_each_surface(monkeypatch, tmp_path, capsys):
+    monkeypatch.setitem(kpi.O3_INTEGRITY_GATE, "turns", 100)
+    monkeypatch.setitem(kpi.O3_INTEGRITY_GATE, "typed_prompts", 100)
+    new = _CAVEAT.replace("3.89x", "1.00x")
+    card = _golden_card()
+    assert card["o3"]["caveat"] == new and card["o3"]["integrity"]["ratio"] == 1.0
+    assert new in kpi.render_scorecard(card)
+    assert new in kpi.render_health(kpi.compute_health(card))
+    assert "3.89" not in kpi.render_scorecard(card) + kpi.render_health(kpi.compute_health(card))
+
+
+def test_json_carries_the_caveat_and_the_measured_ratio(capsys):
+    _write_ledger(fx.baseline_rows())
+    assert kpi.cmd_kpi(["--json"]) == 0
+    o3 = json.loads(capsys.readouterr().out)["o3"]
+    assert o3["caveat"] == _CAVEAT
+    assert o3["integrity"] == {**kpi.O3_INTEGRITY_GATE, "ratio": 3.89}
+    assert o3["integrity"]["status"] == "owner-accepted with warning" and o3["integrity"]["gate"] == "M0-2"
+
+
+def test_scorecard_prints_the_caveat_under_the_o3_line(capsys):
+    _write_ledger(fx.baseline_rows())
+    assert kpi.cmd_kpi([]) == 0
+    lines = capsys.readouterr().out.split("\n")
+    i = next(k for k, ln in enumerate(lines) if ln.startswith(f"  {kpi._LABELS['O3']}"))
+    assert lines[i + 1].strip() == f"WARNING: {_CAVEAT}"
+
+
+def test_health_prints_the_caveat_on_the_o3_line_and_in_json(capsys):
+    _write_ledger(fx.baseline_rows())
+    assert kpi.cmd_kpi(["--health"]) == 0
+    o3_line = [ln for ln in capsys.readouterr().out.split("\n")
+               if ln.startswith(f"  {kpi._LABELS['O3']}")]
+    assert len(o3_line) == 1 and o3_line[0].endswith(f"| WARNING: {_CAVEAT}")
+    assert kpi.cmd_kpi(["--health", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["o3"]["caveat"] == _CAVEAT
+
+
+def test_the_caveat_is_there_when_o3_is_blind_or_failed(monkeypatch):
+    _write_ledger(_population(n_haiku=5, haiku_redone=5, n_local=0, n_claude=3))
+    card = kpi.compute_scorecard(days=7, now=NOW)
+    assert not card["o3"]["measurable"] and card["o3"]["caveat"] == _CAVEAT
+    assert _CAVEAT in kpi.render_health(kpi.compute_health(card))
+    monkeypatch.setattr(osh, "build_units", lambda *a, **k: 1 / 0)
+    failed = _golden_card()["o3"]
+    assert failed["value"].startswith("not measurable: O3 computation failed") and failed["caveat"] == _CAVEAT
+
+
+def test_the_weekly_markdown_carries_the_caveat(tmp_path):
+    path = kpi.write_weekly(_golden_card(), tmp_path)
+    row = next(ln for ln in path.read_text().split("\n") if ln.startswith(f"| {kpi._LABELS['O3']}"))
+    assert f"(WARNING: {_CAVEAT})" in row
+
+
+def test_the_caveat_does_not_move_the_other_kpis():
+    card = _golden_card()
+    assert json.dumps(card["kpis"], indent=1, sort_keys=True, default=str) == \
+        (GOLDEN / "kpi_pre_o3_kpis.json").read_text()

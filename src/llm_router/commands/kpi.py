@@ -1385,6 +1385,45 @@ def _o3_unit_inputs(days: int, index, now: float,
 O3_BOUND_BELOW = 0.95
 
 
+#: M0-2, the O3 integrity gate (PLAN M0.3): O3 turns counted from the proxy ledger / typed prompts
+#: in the Claude Code transcript, over the pinned window W0, on the only session that qualified
+#: (>= 50 prompts, >= 1 proxy row). The bar was 0.90-1.10; the measured ratio is 3.89 (813 / 209), so the
+#: gate FAILED. The owner decision of 2026-10-07 is to accept O3 as is, with a warning, so every
+#: surface that prints O3 says so. This is the ONE place the figures live: ``o3_caveat()`` builds the
+#: text from them. Source of the figures: ``~/.rsi/research/primary-plan/gates/M0.3_o3_integrity_W0.json``
+#: (``o3_integrity.py --since 2026-09-29T09:41:51Z --until 2026-10-06T09:41:52Z``, exit 1).
+#: Re-run that script and edit THIS dict (and PLAN M0-2) when the turn definition changes.
+O3_INTEGRITY_GATE: dict[str, Any] = {
+    "gate": "M0-2",
+    "status": "owner-accepted with warning",
+    "accepted_on": "2026-10-07",
+    "turns": 813,
+    "typed_prompts": 209,
+    "bar": [0.90, 1.10],
+    "session": "b9f04425",
+    "session_kind": "research",
+    "sessions_measurable": 1,
+    "window": "2026-09-29T09:41:51Z..2026-10-06T09:41:52Z",
+}
+
+
+def o3_caveat(gate: dict[str, Any] | None = None) -> str:
+    """The one-line warning printed on every O3 surface (scorecard, --health, --json, weekly)."""
+    g = gate or O3_INTEGRITY_GATE
+    ratio = g["turns"] / g["typed_prompts"]
+    return (f"O3 turn count unvalidated: may overcount turns (integrity {ratio:.2f}x on the only "
+            f"measurable session, {g['session_kind']}; owner accepted {g['accepted_on']})")
+
+
+def _o3_with_caveat(o3: dict) -> dict:
+    """Attach the M0-2 warning to an O3 result: ``caveat`` (the text) and ``integrity`` (the figures,
+    with the ratio computed, so a JSON reader gets the number and not only the sentence)."""
+    g = O3_INTEGRITY_GATE
+    o3["caveat"] = o3_caveat()
+    o3["integrity"] = {**g, "ratio": round(g["turns"] / g["typed_prompts"], 3)}
+    return o3
+
+
 def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[dict],
                       now: float, since_policy: str | None = None,
                       win: "_Window | None" = None, g3: dict | None = None) -> dict:
@@ -1486,6 +1525,8 @@ def _o3_since_view(units: list[dict], all_rows: list[dict], version: str, now: f
 def _o3_render_lines(o3: dict) -> list[str]:
     """The O3 block as printed by `kpi`: one headline line, then detail lines."""
     lines = [f"  {_LABELS['O3']:<42s} {o3['value']}"]
+    if o3.get("caveat"):
+        lines.append(f"      WARNING: {o3['caveat']}")
     lines += [f"      {x}" for x in o3.get("lines", ())]
     sp = o3.get("since_policy")
     if sp:
@@ -1594,7 +1635,8 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         "local_shadow": _local_shadow_summary(days, win),
         # O3 is likewise outside "kpis": adding it there would change the key set, _ORDER and
         # the --health counts that NS..G4 consumers read. Rendered as its own line.
-        "o3": _o3_offload_share(days, allowed, index, all_rows, now_ts, since_policy, win, g3_r),
+        "o3": _o3_with_caveat(
+            _o3_offload_share(days, allowed, index, all_rows, now_ts, since_policy, win, g3_r)),
         "proxy_local_shadow": _proxy_shadow_summary(days, win),
         "kpis": {
             "NS": ns_r, "O1": o1_r, "O2": o2_r,
@@ -1669,6 +1711,8 @@ def compute_health(data: dict, *, stale_hours: float = STALE_LIVE_HOURS,
            "counts": counts, "kpis": out}
     if data.get("o3") is not None:  # outside "kpis" and "counts": see compute_scorecard
         res["o3"] = _health_entry(data["o3"], stale_hours, now_ts)
+        if data["o3"].get("caveat"):
+            res["o3"]["caveat"] = data["o3"]["caveat"]
     return res
 
 
@@ -1755,7 +1799,8 @@ def render_health(health: dict, *, strict: bool = False) -> str:
         lines.append(f"  {_LABELS[key]:<42s} {h['state']:<9s} n={str(h['n']):<7} {h['reason']}")
     if health.get("o3") is not None:
         h = health["o3"]
-        lines.append(f"  {_LABELS['O3']:<42s} {h['state']:<9s} n={str(h['n']):<7} {h['reason']}")
+        lines.append(f"  {_LABELS['O3']:<42s} {h['state']:<9s} n={str(h['n']):<7} {h['reason']}"
+                     + (f" | WARNING: {h['caveat']}" if h.get("caveat") else ""))
     c = health["counts"]
     verdict = ("exit 1: --strict and a KPI is blind" if strict and c[STATE_BLIND]
                else "exit 0; --strict exits 1 if any KPI is blind")
@@ -1775,7 +1820,8 @@ def write_weekly(data: dict, out_dir: Path) -> Path:
         r = data["kpis"][key]
         body.append(f"| {_LABELS[key]} | {r['value']} |")
     if data.get("o3") is not None:
-        body.append(f"| {_LABELS['O3']} | {data['o3']['value']} |")
+        body.append(f"| {_LABELS['O3']} | {data['o3']['value']}"
+                    + (f" (WARNING: {data['o3']['caveat']})" if data["o3"].get("caveat") else "") + " |")
     details = [(key, r["lines"]) for key in _ORDER if (r := data["kpis"][key]).get("lines")]
     if details:
         body += ["", "## Details", ""]
