@@ -108,7 +108,8 @@ class FakeOllama:
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
     for k in ("LLM_ROUTER_LOCAL_CLASSIFIER", "LLM_ROUTER_CLASSIFIER_MODEL",
-              "LLM_ROUTER_CLASSIFIER_KEEP_ALIVE", "LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS"):
+              "LLM_ROUTER_CLASSIFIER_KEEP_ALIVE", "LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS",
+              "LLM_ROUTER_CLASSIFIER_PROMPT"):
         monkeypatch.delenv(k, raising=False)
     lc._reset_state()
 
@@ -570,3 +571,197 @@ async def test_the_async_path_never_uses_the_sync_one(monkeypatch):
     monkeypatch.setattr(lc, "_post", forbidden)
     async with FakeOllama(monkeypatch):
         assert (await _ask()).source == "llm"
+
+
+# --- prompt v7: compact output, tier + margin only (PREREG-v2-amend1) ------------------------
+
+
+def _v7(tier: str = "sonnet", margin: int = 2, **over) -> str:
+    return json.dumps({"tier": tier, "margin": margin, **over})
+
+
+@pytest.fixture
+def v7(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_PROMPT", "v7")
+
+
+@pytest.mark.parametrize("name,md5", [
+    ("V7_SYSTEM", "a19cedef2c576aa38ad909429d505d71"),
+    ("V7_TAIL", "14cf8a44efcc7b3118547443be381b8b"),
+])
+def test_v7_strings_are_pinned_to_the_amendment(name, md5):
+    assert hashlib.md5(getattr(lc, name).encode()).hexdigest() == md5
+
+
+def test_v7_schema_is_pinned_and_strict():
+    assert hashlib.md5(json.dumps(lc.SCHEMA_V7, sort_keys=True).encode()).hexdigest() == \
+        "8ddc75a469c4f2757bd66c913831fbc1"
+    s = lc.SCHEMA_V7
+    assert s["additionalProperties"] is False and set(s["required"]) == {"tier", "margin"}
+    assert s["properties"]["tier"]["enum"] == ["haiku", "sonnet", "opus"]
+    assert s["properties"]["margin"] == {"type": "integer", "minimum": 1, "maximum": 3}
+
+
+def test_default_prompt_is_v6_and_a_typo_reads_as_v6(monkeypatch):
+    assert lc.prompt_version() == "v6"
+    for raw in ("v8", "compact", "", "  "):
+        monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_PROMPT", raw)
+        assert lc.prompt_version() == "v6"
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_PROMPT", " V7 ")
+    assert lc.prompt_version() == "v7"
+
+
+def test_v6_payload_is_unchanged_by_the_v7_code():
+    p = lc._payload("m", _assembled("x"))
+    assert p["messages"][0]["content"] == lc.RUBRIC and p["format"] == lc.SCHEMA
+    assert p["options"] == {"temperature": 0, "num_predict": 160, "num_ctx": 4096}
+
+
+def test_v7_payload_is_a_short_system_prompt_and_a_tiny_decode_budget(v7):
+    p = lc._payload("m", _assembled("do the thing"))
+    system, user = p["messages"]
+    assert system == {"role": "system", "content": lc.V7_SYSTEM}
+    assert user == {"role": "user", "content": lc.ITEM_TEMPLATE.format(
+        id="turn", context=_assembled().context, prompt="do the thing") + "\n\n" + lc.V7_TAIL}
+    assert p["format"] == lc.SCHEMA_V7 and p["think"] is False and p["stream"] is False
+    assert p["options"] == {"temperature": 0, "num_predict": 24, "num_ctx": 4096}
+    assert len(lc.V7_SYSTEM) < len(lc.RUBRIC) / 2          # the short system prompt
+    worst = json.dumps({"tier": "sonnet", "margin": 3})     # the longest valid answer, ~16 tokens at 3-4 chars
+    assert len(worst) <= 4 * lc.NUM_PREDICT_V7 - 8
+
+
+def test_v7_valid_answer_is_a_verdict_with_no_dims(v7):
+    v = lc.parse_verdict(_v7("haiku", 3), model="m", ms=7.0)
+    assert (v.source, v.ok, v.tier, v.margin, v.derivation) == ("llm", True, "haiku", 3, "direct")
+    assert (v.task_type, v.dims, v.qa, v.needs_repo_context, v.local_eligible) == (None,) * 5
+    assert (v.model, v.prompt_version, v.ms, v.complexity) == ("m", "v7", 7.0, "simple")
+    assert v.as_log()["tier"] == "haiku" and v.as_log()["margin"] == 3
+
+
+def test_v7_never_derives_local_because_it_asks_neither_field():
+    for tier in lc.MODEL_TIERS:
+        assert lc.parse_verdict(_v7(tier), prompt="v7").tier == tier
+
+
+@pytest.mark.parametrize("tier,margin", [(t, m) for t in ("haiku", "sonnet", "opus") for m in (1, 2, 3)])
+def test_v7_accepts_every_tier_and_margin(tier, margin):
+    v = lc.parse_verdict(_v7(tier, margin), prompt="v7")
+    assert (v.ok, v.tier, v.margin) == (True, tier, margin)
+
+
+@pytest.mark.parametrize("content", [
+    None, "", "not json", '{"tier": "sonnet", "margin": 2', "[]", "null", "{}", '"sonnet"',
+    '{"tier":"sonnet"}', '{"margin":2}',
+    _v7(extra="x"), _v7(reason="because"),
+    _v7("local"), _v7("gpt"), _v7("Sonnet"), _v7(None),
+    _v7(margin=0), _v7(margin=4), _v7(margin=-1), _v7(margin=2.5), _v7(margin="2"), _v7(margin=True),
+    _v7(margin=None),
+    _reply(),                                                 # a full v6 answer is not a v7 answer
+])
+def test_v7_malformed_output_is_a_parse_error_with_no_decision(content):
+    v = lc.parse_verdict(content, prompt="v7")  # type: ignore[arg-type]
+    assert v.source == "parse_error" and not v.ok
+    assert (v.tier, v.margin, v.dims, v.task_type) == (None, None, None, None)
+    assert v.prompt_version == "v7"
+
+
+def test_a_v7_answer_is_not_a_v6_answer():
+    assert lc.parse_verdict(_v7(), prompt="v6").source == "parse_error"
+
+
+def test_v7_rule_derivation_falls_back_to_direct_with_the_models_margin(v7):
+    v = lc.parse_verdict(_v7("opus", 1), derivation="rule")
+    assert (v.derivation, v.tier, v.margin) == ("direct", "opus", 1)
+
+
+def test_v7_classify_local_sends_the_compact_request(v7, monkeypatch):
+    seen = {}
+
+    def fake_post(model, assembled, timeout):
+        seen["payload"] = lc._payload(model, assembled)
+        return _v7("sonnet", 2)
+
+    monkeypatch.setattr(lc, "_post", fake_post)
+    v = lc.classify_local(_assembled(), model="m", timeout_s=1.0, derivation="rule")
+    assert (v.source, v.tier, v.margin, v.derivation, v.prompt_version) == ("llm", "sonnet", 2, "direct", "v7")
+    assert seen["payload"]["format"] == lc.SCHEMA_V7
+
+
+def test_v7_classify_local_malformed_output_keeps_the_rules(v7, monkeypatch):
+    monkeypatch.setattr(lc, "_post", lambda model, assembled, timeout: "sure! I think sonnet.")
+    v = lc.classify_local(_assembled(), timeout_s=1.0)
+    assert (v.source, v.ok, v.tier, v.prompt_version) == ("parse_error", False, None, "v7")
+
+
+def test_v7_classify_local_over_budget_is_a_timeout(v7, monkeypatch):
+    monkeypatch.setattr(lc, "_post", lambda model, assembled, timeout: time.sleep(2) or _v7())
+    v = lc.classify_local(_assembled(), timeout_s=0.1)
+    assert (v.source, v.ok, v.tier, v.prompt_version) == ("timeout", False, None, "v7")
+
+
+async def test_v7_async_end_to_end_over_http(v7, monkeypatch):
+    async with FakeOllama(monkeypatch, reply=_v7("opus", 3)) as fake:
+        v = await _ask()
+        assert (v.source, v.tier, v.margin, v.prompt_version, v.derivation) == ("llm", "opus", 3, "v7", "direct")
+        body = fake.chat[0]
+        assert body["format"] == lc.SCHEMA_V7 and body["options"]["num_predict"] == 24
+        assert body["messages"][0]["content"] == lc.V7_SYSTEM
+        assert (await _ask()).source == "cache"                       # same turn: one HTTP call
+        assert len(fake.chat) == 1
+
+
+async def test_v7_malformed_answer_over_http_falls_back_and_is_not_cached(v7, monkeypatch):
+    async with FakeOllama(monkeypatch, reply="the tier is sonnet") as fake:
+        v = await _ask()
+        assert (v.source, v.ok, v.tier, v.prompt_version) == ("parse_error", False, None, "v7")
+        await _ask()
+        assert len(fake.chat) == 2                                    # a bad answer is never served from the cache
+
+
+async def test_v7_over_budget_is_a_timeout_and_starts_the_cooldown(v7, monkeypatch):
+    async with FakeOllama(monkeypatch, reply=_v7(), delay=1.0) as fake:
+        t0 = time.perf_counter()
+        v = await _ask(timeout_s=0.2)
+        assert time.perf_counter() - t0 < 0.8
+        assert (v.source, v.ok, v.tier, v.prompt_version) == ("timeout", False, None, "v7")
+        assert (await _ask("s2", timeout_s=0.2)).source == "timeout"  # cooldown: no second request
+        assert len(fake.chat) == 1
+
+
+async def test_v7_fits_the_default_2s_budget_when_the_model_answers_in_time(v7, monkeypatch):
+    assert lc.DEFAULT_TIMEOUT_MS == 2000 and lc._timeout_s() == 2.0
+    async with FakeOllama(monkeypatch, reply=_v7("haiku", 2), delay=0.3):
+        v = await _ask()
+        assert v.ok and v.ms < 2000.0
+
+
+async def test_the_cache_key_separates_prompt_versions(monkeypatch):
+    async with FakeOllama(monkeypatch, reply=_v7("haiku", 1)) as fake:
+        monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_PROMPT", "v7")
+        assert (await _ask()).prompt_version == "v7"
+        monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_PROMPT", "v6")
+        fake.reply = _reply()
+        v = await _ask()
+        assert (v.source, v.prompt_version) == ("llm", "v6")           # not the v7 verdict from the cache
+        assert len(fake.chat) == 2
+
+
+async def test_v7_warm_up_uses_the_v7_options(v7, monkeypatch):
+    async with FakeOllama(monkeypatch, loaded=False) as fake:
+        assert (await _ask()).source == "cold"
+        for _ in range(50):
+            if fake.warm:
+                break
+            await asyncio.sleep(0.02)
+        assert fake.warm and fake.warm[0]["options"]["num_predict"] == 24
+        assert fake.warm[0]["options"]["num_ctx"] == 4096
+
+
+async def test_v7_asks_one_question_whatever_derivation_the_caller_names(v7, monkeypatch):
+    """v7 has no dims, so ``rule`` and ``direct`` are one question: one HTTP call, and a failed
+    verdict reports ``direct`` too."""
+    async with FakeOllama(monkeypatch, reply=_v7("sonnet", 2)) as fake:
+        a = await _ask(derivation="rule")
+        b = await _ask(derivation="direct")
+        assert (a.derivation, a.source, b.source, len(fake.chat)) == ("direct", "llm", "cache", 1)
+    assert lc.classify_local("", derivation="rule").derivation == "direct"

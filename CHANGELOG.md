@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- classifier (M1.8 round 2, PREREG-v2-amend1): prompt v7, a compact-output variant of the local classifier. Same
+  model (`llmr-classifier`), a short system prompt (the rubric's tier definitions, condensed) and a two-key answer,
+  `{"tier": haiku|sonnet|opus, "margin": 1|2|3}`, with `num_predict` 24 instead of 160. v6 decodes ~105 tokens
+  (p50 3,167 ms on this hardware, so it misses the 2.0 s D-4 budget on 121/121 tune items); v7 asks for ~15.
+  Selected with the new `LLM_ROUTER_CLASSIFIER_PROMPT=v7`. The default stays v6 and nothing routes on a verdict
+  today, so behaviour is unchanged unless the key is set. A v7 verdict has no dims: only the `direct` derivation
+  exists, and `task_type`, `qa`, `needs_repo_context` and `local_eligible` are `None` (a caller that needs them keeps
+  the rules' answer). The parser is strict (exactly two keys, tier in the enum, margin an int 1-3) and anything else
+  is `parse_error`, so the rules answer. The prompt strings and the schema are md5-pinned in tests.
 - routing (M3.0, owner decision D-14 = A): `route_and_call` no longer serves a Q&A task type from a
   local provider. For `northstar.QA_TASK_TYPES` (query, research, generate, analyze and the other Q&A
   types) Ollama and OpenAI-compatible local servers are removed from the chain in `route_and_call`

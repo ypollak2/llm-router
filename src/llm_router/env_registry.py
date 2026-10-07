@@ -383,6 +383,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # num_ctx, and a shared name would reload the runner back and forth.
     "LLM_ROUTER_CLASSIFIER_MODEL": ("llm_router", "local_classifier.py", 1),
     "LLM_ROUTER_CLASSIFIER_KEEP_ALIVE": ("llm_router", "local_classifier.py", 1),
+    # Classifier prompt: v6 (default, rubric) | v7 (compact tier+margin, PREREG-v2-amend1).
+    "LLM_ROUTER_CLASSIFIER_PROMPT": ("llm_router", "local_classifier.py", 1),
     "LLM_ROUTER_ZCE_COLD_BUDGET_S": ("llm_router", "warm.py", 1),
     "LLM_ROUTER_ZCE_WARMUP": ("llm_router", "warm.py", 1),
     # ── indirect reads: DECLARED BY HAND, invisible to the AST scan ──
