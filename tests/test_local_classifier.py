@@ -455,8 +455,13 @@ async def test_no_slow_callback_on_the_async_path_and_the_detector_works(monkeyp
     with a 50 ms slow-callback threshold, prove it fires for a real blocking call made from
     the loop (the sync ``classify_local``), then prove it is silent for ``classify_async``."""
     loop = asyncio.get_running_loop()
-    async with FakeOllama(monkeypatch, delay=0.3):
+    async with FakeOllama(monkeypatch, delay=0.3) as o:
         await _ask("warm-up")                            # connection set-up is not under test
+        # That answer proved the model resident, so the next call would skip /api/ps and never
+        # reach _is_loaded: a blocking call there would go unseen. Forget it, so the call under
+        # test runs the whole path (ps probe + chat).
+        lc._resident_until = 0.0
+        ps_before = o.ps_calls
         was_debug, was_slow = loop.get_debug(), loop.slow_callback_duration
         loop.set_debug(True)
         loop.slow_callback_duration = 0.05
@@ -476,6 +481,7 @@ async def test_no_slow_callback_on_the_async_path_and_the_detector_works(monkeyp
             with caplog.at_level(logging.WARNING, logger="asyncio"):
                 assert (await _ask("under-test")).source == "llm"
                 slow = [r.getMessage() for r in caplog.records if "took" in r.getMessage()]
+            assert o.ps_calls == ps_before + 1, "the call under test skipped _is_loaded"
             assert slow == []
         finally:
             loop.set_debug(was_debug)
