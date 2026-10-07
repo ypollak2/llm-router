@@ -353,13 +353,20 @@ async def policy_chain(text: str) -> tuple[str, str, list[str]]:
     from llm_router.config import get_config
     from llm_router.profiles import complexity_to_profile
     from llm_router.router import _build_and_filter_chain
+    from llm_router.types import Complexity, TaskType
 
     sig = classify_signals(text, GATEWAY_POLICY)
     key = (sig.task_type.value, sig.complexity.value)
+    from llm_router import local_classifier
+
+    if local_classifier.mode() != "off":
+        # shadow: logs beside the rules' answer, returns it unchanged.
+        # on: the local answer replaces it; the tier policy still maps it.
+        key = await asyncio.to_thread(local_classifier.apply, text, key[0], key[1], "proxy")
     if key not in _chain_cache:
-        c = sig.complexity
+        c = Complexity(key[1])
         _chain_cache[key] = await _build_and_filter_chain(
-            sig.task_type, complexity_to_profile(c), None, c, c, get_config())
+            TaskType(key[0]), complexity_to_profile(c), None, c, c, get_config())
     return key[0], key[1], _chain_cache[key]
 
 

@@ -41,6 +41,7 @@ real LaTeX.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 
@@ -632,6 +633,25 @@ async def classify(
     to the heuristic, so this never stalls routing.
     """
     sig = classify_signals(prompt, policy)
+
+    # Local (Ollama) classifier, LLM_ROUTER_LOCAL_CLASSIFIER=off|shadow|on. First
+    # in the chain, ahead of the embedding head and every cloud model. ``off``
+    # (default) skips this block entirely. shadow logs only; on feeds the answer.
+    if allow_llm:
+        from llm_router import local_classifier
+
+        if local_classifier.mode() != "off":
+            task, cx = await asyncio.to_thread(
+                local_classifier.apply, prompt, sig.task_type.value,
+                sig.complexity.value, "classify",
+            )
+            if (task, cx) != (sig.task_type.value, sig.complexity.value):
+                complexity = Complexity(cx)
+                if policy.apply_floor:  # the same floor _complexity applies
+                    complexity = apply_complexity_floor(complexity, task)
+                return ClassifySignal(TaskType(task), complexity, sig.score,
+                                      confident=True, method="local")
+
     if sig.confident or not allow_llm:
         return sig
 
