@@ -95,12 +95,15 @@ def test_string_system_prompt_is_read_too():
     assert out.context.startswith("Working directory: /a b/c\n")
 
 
+ASSISTANT_TEXT = "".join(f"{i:03d}|" for i in range(225))   # 900 chars, every 4-char block differs
+
+
 def test_caps():
     body = {"system": SYSTEM, "messages": [
         _user("a" * 400), _assistant(_text("one")),
         _user("b" * 400), _assistant(_text("two")),
         _user("c" * 400), _assistant(_text("three")),
-        _user("d" * 400), _assistant(_text("x" * 900)),
+        _user("d" * 400), _assistant(_text(ASSISTANT_TEXT)),
         _user("p" * 2500),
     ]}
     out = cls_input.assemble(body)
@@ -110,7 +113,9 @@ def test_caps():
     assert earlier[0].startswith("Earlier user prompt 1/3:\nbbb") and len(earlier[0].split("\n", 1)[1]) == 300
     assert earlier[2].startswith("Earlier user prompt 3/3:\nddd")
     tail = out.context.split("Assistant's last message before this prompt (tail):\n", 1)[1]
-    assert tail == "[...] " + "x" * 500                           # the last 500 chars, marked
+    assert len(ASSISTANT_TEXT) == 900
+    assert tail == "[...] " + ASSISTANT_TEXT[-500:]               # the last 500 chars, marked
+    assert tail != "[...] " + ASSISTANT_TEXT[:500]                # not the head
 
 
 def test_assistant_text_after_the_newest_prompt_is_not_context():

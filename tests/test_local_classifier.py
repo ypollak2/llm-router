@@ -56,8 +56,10 @@ class FakeOllama:
     """A loopback Ollama: /api/chat answers ``reply`` after ``delay``; /api/ps lists
     the alias when ``loaded``. A chat with no messages is a warm-up and is counted apart."""
 
-    def __init__(self, monkeypatch, *, reply=None, delay=0.0, loaded=True, status=200):
+    def __init__(self, monkeypatch, *, reply=None, delay=0.0, loaded=True, status=200,
+                 ps_delay=0.0):
         self.mp, self.reply, self.delay = monkeypatch, reply or _reply(), delay
+        self.ps_delay = ps_delay
         self.loaded, self.status = loaded, status
         self.chat: list[dict] = []
         self.warm: list[dict] = []
@@ -76,6 +78,7 @@ class FakeOllama:
 
         async def ps(request):
             self.ps_calls += 1
+            await asyncio.sleep(self.ps_delay)
             return web.json_response({"models": [{"name": ALIAS_TAGGED}] if self.loaded else []})
 
         app = web.Application()
@@ -293,6 +296,18 @@ async def test_timeout_then_cooldown_then_recovery(monkeypatch, clock):
         assert skipped.source == "timeout" and len(o.chat) == 1
         clock.t += 31
         assert (await _ask("c")).source == "llm" and len(o.chat) == 2
+
+
+async def test_the_budget_covers_ps_and_chat_together(monkeypatch):
+    """/api/ps (0.9 s) then /api/chat (0.9 s) each fit a 1.0 s budget alone; together they
+    must not: the overall budget, not a per-request one, bounds the call."""
+    async with FakeOllama(monkeypatch, ps_delay=0.9, delay=0.9) as o:
+        t0 = time.perf_counter()
+        v = await _ask("a", timeout_s=1.0)
+        elapsed = time.perf_counter() - t0
+        assert o.ps_calls == 1                           # the probe ran, so the slow ps was really hit
+        assert v.source == "timeout" and not v.ok
+        assert elapsed <= 1.0 + 0.25, elapsed            # an unbounded total would take ~1.8 s
 
 
 async def test_http_error_is_a_timeout_source(monkeypatch):
