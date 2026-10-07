@@ -125,18 +125,26 @@ def _human_text(content) -> str:
     return _REMINDER_RE.sub("", _text_of(content)).strip()
 
 
-def tier_text(body: dict, limit: int = 3000) -> str:
-    """What the tier decision classifies: the conversation's newest human
-    prompt. Tool output is left out on purpose, so the class (and with it the
-    tier) holds steady through a tool loop instead of moving with each
-    result's length, which would re-write the prompt cache mid-task."""
+def newest_human_text(body: dict) -> str:
+    """The conversation's newest human prompt, untruncated: the newest user
+    message that has text once tool results and ``<system-reminder>`` blocks are
+    removed. ``tier_text`` classifies the tail of this; ``prompt_key.key`` hashes
+    all of it, so the ledger's ``text_sha`` matches a hash of the typed prompt."""
     for m in reversed(non_system(body.get("messages") or [])):
         if m.get("role") != "user":
             continue
         text = _human_text(m.get("content"))
         if text:
-            return text[-limit:]
+            return text
     return ""
+
+
+def tier_text(body: dict, limit: int = 3000) -> str:
+    """What the tier decision classifies: the conversation's newest human
+    prompt. Tool output is left out on purpose, so the class (and with it the
+    tier) holds steady through a tool loop instead of moving with each
+    result's length, which would re-write the prompt cache mid-task."""
+    return newest_human_text(body)[-limit:]
 
 
 def user_pinned_model(body: dict) -> bool:
