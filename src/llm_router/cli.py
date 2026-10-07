@@ -13,12 +13,12 @@ Usage:
     llm-router install --host copilot-cli — write GitHub Copilot CLI config files
     llm-router install --host openclaw    — write OpenClaw config files
     llm-router install --host trae        — write Trae IDE config files
-    llm-router install --host pi          — write Pi coding agent (pi.dev) config files
+    llm-router install --host pi          — not supported by `llm-router install` yet (Pi coding agent)
     llm-router install --host factory     — confirm Factory Droid plugin manifest
     llm-router install --host desktop     — print Claude Desktop config snippet
     llm-router install --host copilot     — install VS Code / GitHub Copilot pull-routing configs
     llm-router install --host windsurf    — install Windsurf / Cascade pull-routing configs
-    llm-router install --host kimi        — install Kimi Code (Moonshot AI) pull-routing configs
+    llm-router install --host kimi        — not supported by `llm-router install` yet (Kimi Code)
     llm-router install --host all         — install / print all host configs
     llm-router uninstall        — remove hooks and MCP registration
     llm-router uninstall --purge — also delete ~/.llm-router/ (usage DB, .env, logs)

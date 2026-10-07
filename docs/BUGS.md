@@ -17,7 +17,8 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 7 | `edit_outcomes.jsonl` rows with no source | open, fix is plan task M0.3(c) |
 | 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | known, not fixed |
 | 9 | Classifier warm-up loaded `llmr-classifier` at the wrong `num_ctx` | fixed in #298 (M1.4, review 2) |
-| 10 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
+| 10 | README-advertised `--host pi` / `--host kimi` failed; detected gemini-cli skipped silently | fixed in this change (v16 P0.4) |
+| 11 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -175,7 +176,27 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   without `options` fails both tests; `_is_loaded` returning True regardless of context fails
   the second.
 
-## 10. Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP)
+## 10. README-advertised hosts failed install; a detected host was skipped silently
+
+- **Symptom.** On da31df7 the README "Works With" table listed `llm-router install --host pi`
+  and `--host kimi`. Both printed `Unknown host(s): ...` and exited 0. A plain
+  `llm-router install` detected gemini-cli and then said nothing about it.
+- **Cause.** `_install_host` only knew `_HOST_SNIPPETS`, which never had a `pi` or `kimi`
+  entry. The auto-detect block in `_run_install` checked `codex` by name and ignored every
+  other detected host.
+- **Fix.** v16 P0.4 (`fix/install-honesty`). README rows for Pi and Kimi say "planned (v16
+  P2.12)". `--host pi|kimi` prints `unsupported: <reason>; planned in v16 P2.12` and exits 2.
+  `_run_install` wires every detected host that has an installer (codex, gemini-cli) and
+  prints `<host>: detected, not wired: <reason>` for each other detected host. `host_detect`
+  now detects pi and kimi so they can be reported. Wiring Pi is P2.12.
+- **Test.** `tests/test_readme_hosts.py`: parses all 15 README rows; runs the real installer
+  for the 12 non-planned `--host` rows in an isolated HOME; checks exit 2 and the reason line
+  for pi and kimi; fake detection {claude-code, codex, gemini-cli, unknown} gives wired,
+  wired, wired, reported. 7 of its 9 tests fail on da31df7. Four mutants (drop gemini-cli
+  auto-wire; `exit 2` to `return`; drop the report line; pi not marked unsupported) each turn
+  a test red.
+
+## 11. Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP)
 
 - **Symptom.** D-14 = A says a Q&A task type is never served by a local provider. #297 (M3.0)
   enforced it in MCP `route_and_call` only. `hooks.chain_builder.build_chain`, which builds the
