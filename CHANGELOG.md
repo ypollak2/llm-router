@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LLM_ROUTER_STATUSLINE=fast` and now shows the Claude 5h / weekly / Sonnet quota.
 
 ### Added
+- proxy: classifier shadow seam (M1.6, PR 2 of the M1 plan). With `LLM_ROUTER_LOCAL_CLASSIFIER=shadow`, each
+  turn-first call also gets a local LLM verdict, logged next to the rules' verdict in `classifier_shadow.jsonl`
+  (hashes and tiers only). Shadow only: no tier changes, `cls_applied` is false on every row, continuations
+  never wait, at most 4 pending (more are dropped and counted). Default `off` makes zero Ollama calls.
+  `proxy/tiers.py` is untouched. `tests/proxy/test_llm_classifier_shadow.py`.
+- kpi: `classifier_shadow` (M1.7): n, sessions, agreement with the rules, tier distributions, cheap share,
+  fallback rate, p50/p95 ms, drops, calls per turn, from `classifier_shadow.jsonl`. Outside `kpis`, so NS, D1,
+  D2 and `--health` do not change. `tests/test_kpi_classifier_shadow.py`.
 - kpi: `llm-router kpi --since WHEN --until WHEN` pins an absolute window (replaces `--days`; rows outside it
   never count; JSON gains `window`). Without the flags the output is unchanged (live-home JSON diff against
   c2ed278: identical). `tests/test_kpi_window.py`.
