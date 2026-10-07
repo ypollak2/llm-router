@@ -160,8 +160,10 @@ EXECUTION_EVENTS_COLUMNS: tuple[str, ...] = (
     "failed_attempt_cost_usd",
     "baseline_tokens",
     "adoption_method",
+    "verify",
+    "used",
 )
-# Exactly 36 columns.
+# Exactly 38 columns.
 
 # ---------------------------------------------------------------------------
 # capabilities.py contracts

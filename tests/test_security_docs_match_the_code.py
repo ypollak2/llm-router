@@ -35,7 +35,17 @@ def test_run_command_really_does_not_use_a_shell():
            for kw in n.keywords
            if kw.arg == "shell" and getattr(kw.value, "value", False) is True]
     assert not bad, f"agent_loop.py now uses a shell at line(s) {bad}"
-    assert _tokenizes_with_shlex(AGENT_LOOP.read_text())
+    # The tokenizer moved to the toolkit (agent_loop.py calls it): one executor. So the
+    # shell-free property is checked on BOTH files, plus the call that joins them.
+    tools_tree = ast.parse((ROOT / "src/llm_router/toolkit/tools.py").read_text())
+    bad_tools = [n.lineno for n in ast.walk(tools_tree) if isinstance(n, ast.Call)
+                 for kw in n.keywords if kw.arg == "shell" and getattr(kw.value, "value", False) is True]
+    assert not bad_tools, f"toolkit/tools.py (the executor the hook calls) uses a shell at line(s) {bad_tools}"
+    assert _tokenizes_with_shlex((ROOT / "src/llm_router/toolkit/tools.py").read_text())
+    hook_calls = {ast.unparse(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    assert "_kit.run_pipelines" in hook_calls and "_writes.guard_command" in hook_calls, (
+        "agent_loop.py no longer calls the toolkit executor behind the allowlist guard: this test's "
+        "premise (the hook path is the toolkit path) is gone")
 
 
 @pytest.mark.parametrize("name", sorted(DOCS))

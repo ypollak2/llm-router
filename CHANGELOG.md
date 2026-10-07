@@ -56,6 +56,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LLM_ROUTER_STATUSLINE=fast` and now shows the Claude 5h / weekly / Sonnet quota.
 
 ### Added
+- toolkit: a router-owned tool layer, phase 1 (`src/llm_router/toolkit/`). Seven tools (read,
+  search, list, edit, write, bash, finish) behind one permission function that runs in code
+  before every call and logs every decision; a throwaway workspace (a copy; the caller's tree is
+  never written and a fingerprint proves it); a macOS `sandbox-exec` profile that denies network
+  and writes outside the workspace, proven by a probe at startup, with `bash` OFF when it cannot
+  be proven; kill switch (`LLM_ROUTER_TOOLLAYER=off`, `~/.llm-router/KILL`); budgets on steps,
+  time, tokens and bytes written; and a verifier that alone decides `used` (V1: the supplied test
+  command passes after, nothing that passed before is lost, no test deleted or weakened).
+  `llm-router run --model M --verify CMD --workspace DIR "task"` returns a patch and a verdict
+  (propose-only). The execution ledger gains `verify` and `used` columns, NULL when unknown.
+  `hooks/agent_loop.py` now calls the toolkit executor (one executor); its public functions are
+  unchanged, and the secret deny-list now applies to it too. The kill switch does NOT reach it:
+  `run_pipelines` honours `LLM_ROUTER_TOOLLAYER=off` / `~/.llm-router/KILL` only for a launched
+  (sandboxed) `llm-router run`, so the hook's launcher-less commands behave exactly as on main
+  (tests/test_agent_loop_hook_parity.py, `kill` tests). Because the auto-route local agent loop is on by default, this is a live
+  path: its file tools and commands now run through toolkit code (parity: 78 commands), and the
+  execution ledger migrates `ALTER TABLE execution_events ADD COLUMN verify TEXT` and
+  `... used INTEGER` the next time the live ledger is opened (additive, nullable). The local model's context window comes from the one table,
+  `local_models.num_ctx(model)` (32768 for qwen3.6).
 - hooks: `hook_latency.jsonl` rows can carry `phases_ms` (M4.1, hook tail attribution). `auto-route` (hook
   version 46) names `import`, `session_io`, `zce`, `classify`, `hud`, `db_write`, `draft_chain` (the whole draft
   chain: Ollama, Codex, Gemini CLI) and `cold_wait` (Ollama `load_duration`); `session-start` (version 23) names `import`, `session_io`, `reset_state`,
