@@ -537,7 +537,7 @@ def test_phase_calls_outside_a_hook_process_accumulate_nothing(monkeypatch):
     """The MCP server and the tests never call begin(): a phase there must not grow
     a dict for the life of a long-running process."""
     monkeypatch.setattr(hl, "_monotonic", _Clock(5.0))
-    with hl.phase("ollama"):
+    with hl.phase("draft_chain"):
         pass
     hl.add_phase("cold_wait", 12.0)
     hl.mark_main_start()
@@ -584,7 +584,7 @@ def test_a_real_auto_route_process_names_import_and_its_phases_fit_inside_elapse
     row = _run_auto_route(tmp_path, "hi")
     ph = row["phases_ms"]
     assert ph["import"] > 0
-    # cold_wait lives inside ollama/zce; every other phase is disjoint.
+    # cold_wait lives inside draft_chain/zce; every other phase is disjoint.
     assert sum(v for k, v in ph.items() if k != "cold_wait") <= row["elapsed_ms"] + 1.0
 
 
@@ -602,9 +602,9 @@ def test_a_real_auto_route_process_that_classifies_and_logs_names_those_phases(t
 
 
 #: Every phase name each hook may write. A phase in a code path a unit run does not reach
-#: (ollama needs a model, session-start spawns processes) is pinned here by reading the source.
+#: (draft_chain needs a model, session-start spawns processes) is pinned here by reading the source.
 _PHASE_NAMES = {
-    "auto-route": {"session_io", "zce", "hud", "classify", "db_write", "ollama"},
+    "auto-route": {"session_io", "zce", "hud", "classify", "db_write", "draft_chain"},
     "session-start": {"session_io", "reset_state", "ollama_up", "pxpipe", "proxy_health", "usage", "hints",
                       "bg_spawn", "banner", "rules_update"},
 }
@@ -619,7 +619,7 @@ def test_the_phase_names_a_hook_source_uses_are_exactly_the_documented_ones(name
     assert used == _PHASE_NAMES[name], (used ^ _PHASE_NAMES[name])
 
 
-def test_ollama_and_cold_wait_phase_names_are_pinned_in_the_executor():
+def test_cold_wait_phase_name_is_pinned_in_the_executor():
     src = (HOOKS / "direct_executor.py").read_text()
     assert 'add_phase("cold_wait"' in src
 

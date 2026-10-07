@@ -5283,7 +5283,11 @@ def main() -> None:
                 # allowed. Live, the write loop (which must call a tool) spent
                 # the whole 55s wandering on one.
                 from llm_router.hooks.direct_executor import execute_agent as _execute_agent
-                with _hl_phase("ollama"):
+                # phase "draft_chain" = wall time of the whole draft chain: ollama,
+                # codex and gemini_cli, plus paid models when
+                # LLM_ROUTER_FREE_TIER_DRAFTS=off. Not named "ollama": a slow Codex or
+                # Gemini-CLI draft must not be reported as an Ollama call.
+                with _hl_phase("draft_chain"):
                     _direct_result = _execute_agent(
                         prompt, _direct_chain, timeout=60, context=_session_ctx,
                         deadline_s=_loop_deadline(),
@@ -5321,7 +5325,7 @@ def main() -> None:
                 # to the text chain below, inside the same hook deadline.
                 if _local_agent_loop_enabled():
                     from llm_router.hooks.direct_executor import execute_agent as _execute_agent
-                    with _hl_phase("ollama"):
+                    with _hl_phase("draft_chain"):
                         _direct_result = _execute_agent(
                             prompt, _direct_chain, project_root=_draft_root,
                             timeout=OLLAMA_TIMEOUT, context=_session_ctx,
@@ -5333,7 +5337,7 @@ def main() -> None:
                         f"{'answered' if _direct_result else 'nothing, text chain next'}"
                     )
                 if not _direct_result:
-                    with _hl_phase("ollama"):
+                    with _hl_phase("draft_chain"):
                         _direct_result = _execute_chain(
                             prompt, _direct_chain, task_type,
                             timeout=OLLAMA_TIMEOUT, history=_history, context=_session_ctx,

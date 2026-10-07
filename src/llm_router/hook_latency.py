@@ -26,7 +26,7 @@ then carries ``"phases_ms":{"import":12.1,"session_io":3.4,"zce":0.2}``.
 the first ``llm_router`` import) to the moment ``main()`` begins. Phases are
 plain milliseconds that a reader subtracts from ``elapsed_ms`` to get "other"; a
 phase nested inside another is the reader's business (``cold_wait`` lives inside
-``ollama`` or ``zce``). A run that names no phase writes the same row as before.
+``draft_chain`` or ``zce``). A run that names no phase writes the same row as before.
 Outside a hook process (no ``begin`` call: the MCP server, tests) every phase call
 is a no-op, so nothing accumulates in a long-lived process. Cost: two clock reads
 and one dict update per phase, measured in ``scripts/bench_hook_latency.py micro``.
