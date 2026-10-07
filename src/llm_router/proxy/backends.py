@@ -46,6 +46,7 @@ import importlib
 import json
 from typing import Callable, Protocol
 
+from llm_router import local_models
 from llm_router.local_context_guard import check_overflow, check_truncated, effective_window, estimate_payload_tokens
 from llm_router.proxy.steps import STEP_CONTINUATION, non_system, prev_tools
 from llm_router.proxy.translate import from_ollama, to_ollama
@@ -182,24 +183,38 @@ class OllamaBackend:
     """Ollama ``/api/chat`` with native tool calls, thinking off, streamed so
     the first-token hedge can fire before a cold model finishes loading."""
 
-    def __init__(self, model: str, client, *, base_url: str, num_ctx: int,
+    def __init__(self, model: str, client, *, base_url: str, num_ctx: int | None = None,
                  hedge_s: float | None = DEFAULT_HEDGE_S,
-                 keep_alive: int | str | None = DEFAULT_KEEP_ALIVE) -> None:
+                 keep_alive: int | str | None = DEFAULT_KEEP_ALIVE,
+                 num_predict: int | None = None, offload_cpu: bool = False) -> None:
+        # ``num_predict`` overrides the 200/700 per-step caps (sized for the
+        # ``fast`` trim). Only ``--serve local-agent`` sets it: a full Claude Code
+        # prompt makes the model emit several parallel tool calls or a whole file.
+        self.num_predict = num_predict
+        # Shadow mode: the conversion and size checks (json over the whole prompt) run in a
+        # worker thread so they never stall the loop that is relaying Claude's reply.
+        self.offload_cpu = offload_cpu
         self.model = model.split("/", 1)[1] if model.startswith("ollama/") else model
         self.client = client
         self.base_url = base_url.rstrip("/")
-        self.num_ctx = num_ctx
+        # None: the per-model table value (llm_router.local_models, M3.4).
+        self.num_ctx = num_ctx if num_ctx is not None else local_models.num_ctx(self.model)
         self.hedge_s = hedge_s
         self.keep_alive = keep_alive
 
     async def complete(self, body: dict, timeout_s: float) -> tuple[dict | None, str | None, dict]:
-        payload = to_ollama(body, self.model, num_ctx=self.num_ctx, max_predict=num_predict_for(body),
-                            keep_alive=self.keep_alive, stream=True)
-        # Refuse to send what Ollama would silently truncate from the front
-        # (system prompt + tool definitions first) rather than find out from a
-        # reply about the wrong thing. See local_context_guard module docstring.
-        check_overflow(payload, num_ctx=self.num_ctx, base_url=self.base_url, model=self.model,
-                       site="proxy.OllamaBackend")
+        def _prepare() -> dict:
+            payload = to_ollama(body, self.model, num_ctx=self.num_ctx,
+                                max_predict=self.num_predict or num_predict_for(body),
+                                keep_alive=self.keep_alive, stream=True)
+            # Refuse to send what Ollama would silently truncate from the front
+            # (system prompt + tool definitions first) rather than find out from a
+            # reply about the wrong thing. See local_context_guard module docstring.
+            check_overflow(payload, num_ctx=self.num_ctx, base_url=self.base_url, model=self.model,
+                           site="proxy.OllamaBackend")
+            return payload
+
+        payload = await asyncio.to_thread(_prepare) if self.offload_cpu else _prepare()
         objs: list[dict] = []
         first_token_s = None
         loop = asyncio.get_running_loop()
@@ -237,11 +252,14 @@ class OllamaBackend:
         # preflight above: if it came back truncated anyway (a window this
         # process does not know about, or a race with another resident
         # model), account for it so an operator can see it happened.
-        window, _source = effective_window(num_ctx=self.num_ctx, base_url=self.base_url, model=self.model)
-        usage["context_truncated"] = check_truncated(
-            data.get("prompt_eval_count"), estimate_payload_tokens(payload), window,
-            site="proxy.OllamaBackend", model=self.model,
-        )
+        def _truncated():
+            window, _source = effective_window(num_ctx=self.num_ctx, base_url=self.base_url, model=self.model)
+            return check_truncated(
+                data.get("prompt_eval_count"), estimate_payload_tokens(payload), window,
+                site="proxy.OllamaBackend", model=self.model,
+            )
+
+        usage["context_truncated"] = await asyncio.to_thread(_truncated) if self.offload_cpu else _truncated()
         message, err = from_ollama(data, body)
         return message, err, usage
 

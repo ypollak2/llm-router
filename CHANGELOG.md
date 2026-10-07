@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- status line: the default is the full layout again, byte-for-byte as before #273 (owner decision,
+  reversing #273's fast-by-default; `tests/test_statusline_default_full.py` compares it with the
+  pre-#273 script on 9 fixture states). The fast line is the opt-in debug mode
+  `LLM_ROUTER_STATUSLINE=fast` and now shows the Claude 5h / weekly / Sonnet quota.
+
 ### Added
 - toolkit: a router-owned tool layer, phase 1 (`src/llm_router/toolkit/`). Seven tools (read,
   search, list, edit, write, bash, finish) behind one permission function that runs in code
@@ -24,13 +30,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `llm-router run --model M --verify CMD --workspace DIR "task"` returns a patch and a verdict
   (propose-only). The execution ledger gains `verify` and `used` columns, NULL when unknown.
   `hooks/agent_loop.py` now calls the toolkit executor (one executor); its public functions are
-  unchanged, and the secret deny-list now applies to it too.
-
-- ux: a fast status line and a receipt band. The `statusLine` command now prints one short line
-  (`llm-router · smart · NS 0.0% n=3599 · Claude wk 41% · Codex 7/15 ↻21:14 · ⚠ hooks p95 3.0s auto-route`,
+  unchanged, and the secret deny-list now applies to it too. The kill switch does NOT reach it:
+  `run_pipelines` honours `LLM_ROUTER_TOOLLAYER=off` / `~/.llm-router/KILL` only for a launched
+  (sandboxed) `llm-router run`, so the hook's launcher-less commands behave exactly as on main
+  (tests/test_agent_loop_hook_parity.py, `kill` tests). Because the auto-route local agent loop is on by default, this is a live
+  path: its file tools and commands now run through toolkit code (parity: 78 commands), and the
+  execution ledger migrates `ALTER TABLE execution_events ADD COLUMN verify TEXT` and
+  `... used INTEGER` the next time the live ledger is opened (additive, nullable). The local model's context window comes from the one table,
+  `local_models.num_ctx(model)` (32768 for qwen3.6).
+- hooks: `hook_latency.jsonl` rows can carry `phases_ms` (M4.1, hook tail attribution). `auto-route` (hook
+  version 46) names `import`, `session_io`, `zce`, `classify`, `hud`, `db_write`, `draft_chain` (the whole draft
+  chain: Ollama, Codex, Gemini CLI) and `cold_wait` (Ollama `load_duration`); `session-start` (version 23) names `import`, `session_io`, `reset_state`,
+  `ollama_up`, `pxpipe`, `proxy_health`, `usage`, `hints`, `bg_spawn`, `banner`, `rules_update`. A run that
+  names no phase writes the same row as before. Cost: `docs/measurements/2026-10-07-hook-phase-timing-overhead.md`.
+- kpi: `llm-router kpi --since WHEN --until WHEN` pins an absolute window (replaces `--days`; rows outside it
+  never count; JSON gains `window`). Without the flags the output is unchanged (live-home JSON diff against
+  c2ed278: identical). `tests/test_kpi_window.py`.
+- status line: `LLM_ROUTER_STATUSLINE=both` prints the full line, then the fast (debug) line on a second
+  row. Claude Code renders each printed line as its own row (docs: "Multiple lines"). Default, `full`
+  and `fast` are unchanged; the `.env` reader is still never sourced (new test: `$(touch marker)` never runs).
+- ux: a fast status line (opt-in debug mode) and a receipt band. With `LLM_ROUTER_STATUSLINE=fast` the
+  `statusLine` command prints one short line
+  (`llm-router · smart · NS 0.0% n=3599 · Claude 5h 12% wk 41% sonnet 3% · Codex 7/15 ↻21:14 · ⚠ hooks p95 3.0s auto-route`,
   at most 200 characters, `n/a` for anything unknown, never 0) from a small cache that
-  `llm-router statusline --refresh` rebuilds in the background at most once a minute; the classic layout is
-  `LLM_ROUTER_STATUSLINE=full`. **The default no longer shows the folder, context bar and money segments** (nor the route mix, health and last-route segments); set `LLM_ROUTER_STATUSLINE=full` to get them back. New opt-in Claude Code mod `llm-router-receipt` (`llm-router mod install` /
+  `llm-router statusline --refresh` rebuilds in the background at most once a minute, plus the Claude quota
+  snapshot `usage.json` (the 5h / weekly / Sonnet numbers `llm-router status` shows; past
+  `LLM_ROUTER_USAGE_TTL_SEC`, default 300 s, they are shown with `(stale <age>)`). The default is the full
+  layout, unchanged. The switch is read from the environment or, failing that, from
+  `~/.llm-router/.env` (`LLM_ROUTER_STATUSLINE=fast`), so no `settings.json` edit is needed. New opt-in Claude Code mod `llm-router-receipt` (`llm-router mod install` /
   `uninstall`): after a turn the proxy served off Claude it shows "served by <model> · cost · est. saved" with
   `k` keep and `r` redo on Claude, and a `/router` pane with the last 10 routing decisions. Presses are
   `user_signal` rows in `user_signals.jsonl`; `llm-router kpi` shows `user_kept` and `user_redone` under D3. A
@@ -52,6 +79,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user's request verbatim and labels tool output as tool output; and a pre-send
   check that refuses a prompt Ollama would silently truncate. Image input is
   opt-in (`--vision`). Measurements and limits: `integrations/pi/README.md`.
+- kpi: a session-kind override file, `~/.llm-router/session_kind_overrides.json` (`{sid: {kind, reason}}`). It beats the
+  tag file and a row's own stamp in every KPI reader (NS, D1, D2, D3, O3, D4/G1-proxy) and in the proxy's and
+  edit ledger's stamps; G3 is unchanged (writer completeness). `session_kind.overrides()`, `override_of()`,
+  `tag_kind_of()`. The `--backfill-tags` run leaves an overridden session alone and `--validate-backfill` still
+  compares the tag file. `tests/test_session_kind_override.py`.
 
 ### Changed
 - SessionStart no longer blocks on the Claude usage refresh. The hook

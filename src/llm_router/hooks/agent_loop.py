@@ -379,7 +379,6 @@ def _tool_call_schema(read_only: bool = False) -> dict:
 
 
 constrained_decoding_enabled = _ollama.constrained_decoding_enabled
-_LARGE_WINDOW_FAMILIES = _ollama._LARGE_WINDOW_FAMILIES
 _default_num_ctx = _ollama.default_num_ctx
 _num_ctx = _ollama.num_ctx
 _agent_temperature = _ollama.agent_temperature

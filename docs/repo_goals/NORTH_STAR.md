@@ -74,7 +74,7 @@ savings comes from the 15.2.0 correction (`CHANGELOG.md:45`, `CHANGELOG.md:83-88
 
 | Metric | Role | Today |
 |---|---|---|
-| **Routed-and-used share per session**: of all user prompts + all LLM calls in a session, the share routed to a non-Claude model AND used as-is (not discarded, not redone by Claude). Target: **every session >=50%, aiming for 70%** (owner, 2026-09-27). Measured by `llm-router northstar` | **Primary**: the North Star number | ~0%: 1/38,721 units used, median session 0%, n=300 sessions, 30 d (2026-09-27); routing attempted on 0.58% |
+| **Routed-and-used share per session**: of all user prompts + all LLM calls in a session, the share routed to a non-Claude model AND used as-is (not discarded, not redone by Claude). Target: **> 80%, pooled, organic, 7 days** (primary plan; replaces the 2026-09-27 per-session target of >=50% aiming for 70%). Measured by `llm-router kpi` (pooled) and `llm-router northstar` (per session) | **Primary**: the North Star number | ~0%: 1/38,721 units used, median session 0%, n=300 sessions, 30 d (2026-09-27); routing attempted on 0.58% |
 | Verified share of eligible Claude turns replaced or shortened, on real workload | Secondary | **Not computable yet**: production rows don't record whether the draft was used (`mode` NULL; see [audit](AUDIT-2026-09-24.md)). Last direct measure: 0 of 1,185 audited drafts used (`CHANGELOG.md:45`) |
 | Verified quota saved, with its n | Reported to each user | $0.11 verified (n=7) vs $483.14 unverified (n=46,099), maintainer ledger 2026-09-24 (`CHANGELOG.md:86-88`) |
 | Quality of routed answers vs Claude on the same tasks | Guardrail: must not drop | RouterArena and `docs/BACKEND-QUALITY.md` |

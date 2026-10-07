@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 38
+# llm_router-hook-version: 46
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -49,6 +49,19 @@ if __name__ == "__main__":
         import sys as _hl_sys
 
         print(f"llm-router: hook latency not recorded ({type(_hl_exc).__name__})", file=_hl_sys.stderr)
+
+# M4.1: name where the time went (phases_ms on the hook_latency row). Both are no-ops
+# unless the recorder was armed above, so a test that imports this file records nothing.
+try:
+    from llm_router.hook_latency import mark_main_start as _hl_mark_main, phase as _hl_phase
+except ImportError:  # llm_router is not importable on this host: no recorder, no phases
+    import contextlib as _hl_contextlib
+
+    def _hl_phase(name):  # noqa: ARG001
+        return _hl_contextlib.nullcontext()
+
+    def _hl_mark_main():
+        return None
 
 # ── v6.0 Visibility: HUD integration ─────────────────────────────────────────
 try:
@@ -196,7 +209,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 38"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 46"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -437,6 +450,38 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_
 _CC_MODE = os.environ.get("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "").lower() in ("true", "1", "yes")
 
 
+# Age (seconds) of the reading the last _get_pressure() call served, or None
+# when it served nothing from usage.json. Read by _stale_pressure_note().
+_PRESSURE_AGE_S: float | None = None
+
+_UNKNOWN_PRESSURE = {"session": 0.0, "sonnet": 0.0, "weekly": 0.0}
+
+
+def _quota_max_age_seconds() -> float:
+    """Age past which a usage.json reading is UNKNOWN, not merely stale.
+
+    Serving the cached value while a detached refresh runs is fine for
+    minutes-to-hours; a days-old 99% must not downgrade or override like a
+    fresh one (review finding on #271). Default 6 h, env-overridable.
+    """
+    try:
+        return float(os.environ.get("LLM_ROUTER_QUOTA_MAX_AGE", "21600"))
+    except ValueError:
+        return 21600.0
+
+
+def _stale_pressure_note() -> str:
+    """Marker for downgrade/override branches fed by data older than the TTL."""
+    age = _PRESSURE_AGE_S
+    try:
+        ttl = int(os.environ.get("LLM_ROUTER_QUOTA_TTL", "300"))
+    except ValueError:
+        ttl = 300
+    if age is None or age < ttl:
+        return ""
+    return f" [⚠️ STALE USAGE DATA {int(age // 60)}min old]"
+
+
 def _get_pressure() -> dict[str, float]:
     """Read per-bucket Claude subscription pressure from usage.json or SQLite.
 
@@ -450,6 +495,8 @@ def _get_pressure() -> dict[str, float]:
     - If cache stale (age >= TTL): attempt inline refresh before routing
     - If no cache or OAuth fails: use conservative fallback (0.0)
     """
+    global _PRESSURE_AGE_S
+    _PRESSURE_AGE_S = None
     usage_path = _router_home() / "usage.json"
     ttl_seconds = int(os.environ.get("LLM_ROUTER_QUOTA_TTL", "300"))
 
@@ -460,20 +507,39 @@ def _get_pressure() -> dict[str, float]:
     try:
         raw = json.loads(usage_path.read_text())
         age_s = time.time() - float(raw.get("updated_at", 0))
+        if age_s != age_s or age_s in (float("inf"), float("-inf")):
+            # NaN / inf updated_at: no usable age, so the reading is UNKNOWN.
+            return dict(_UNKNOWN_PRESSURE)
         is_fresh = age_s < ttl_seconds
 
-        # Always validate TTL, refresh if stale
-        if not is_fresh:
-            # Attempt inline refresh regardless of pressure level
-            fresh = _fetch_usage_inline()
-            if fresh:
-                return {
-                    "session": _frac(fresh, "session_pct"),
-                    "sonnet":  _frac(fresh, "sonnet_pct"),
-                    "weekly":  _frac(fresh, "weekly_pct"),
-                }
+        # KPI G1 (2026-10-05): this branch used to call _fetch_usage_inline()
+        # HERE, synchronously — a keychain read plus an OAuth HTTPS
+        # round-trip inline in the hook that gates every prompt. Measured on
+        # real usage (~/.llm-router/hook_latency.jsonl, n=64/21h): p50 124ms
+        # but p95 2910ms, and 13 of 15 runs over 1s followed a >300s gap
+        # since the previous auto-route invocation (cache had gone stale) —
+        # P(slow | gap>300s)=54% vs P(slow | gap<=300s)=5%.
+        #
+        # Fix: never block routing on the refresh. Use the stale cached
+        # value immediately (fail-safe direction unchanged — a stale number
+        # is still a real, known number; it is never zeroed or inflated just
+        # because it aged past the TTL) and kick off the SAME refresh out of
+        # process via the existing usage-refresh hook, deduped against an
+        # already-in-flight or hung child by the shared spawn marker (see
+        # _claim_usage_refresh_spawn — mirrors session-start.py's own
+        # non-blocking refresh and shares its marker file, so the two hooks
+        # cannot pile up concurrent keychain/OAuth calls between them).
+        if not is_fresh and _claim_usage_refresh_spawn():
+            _spawn_background_usage_refresh()
 
-        # Cache is fresh or refresh failed — use cached values
+        # Older than the max age: UNKNOWN, not a stale number to act on.
+        # (The refresh was already kicked off above.)
+        if age_s > _quota_max_age_seconds():
+            return dict(_UNKNOWN_PRESSURE)
+
+        # Cache is fresh, or stale with a refresh now running in the
+        # background — either way, the cached values are what routing sees.
+        _PRESSURE_AGE_S = age_s
         return {
             "session": _frac(raw, "session_pct"),
             "sonnet":  _frac(raw, "sonnet_pct"),
@@ -544,12 +610,12 @@ def _apply_pressure_downgrade(complexity: str, pressure: dict[str, float]) -> tu
 
     if sonnet_pct >= 0.95 or weekly_pct >= 0.95:
         if complexity == "complex":
-            return "moderate", " [⬇ sonnet-exhausted: complex→moderate]"
+            return "moderate", " [⬇ sonnet-exhausted: complex→moderate]" + _stale_pressure_note()
         if complexity == "moderate":
-            return "simple", " [⬇ sonnet-exhausted: moderate→simple]"
+            return "simple", " [⬇ sonnet-exhausted: moderate→simple]" + _stale_pressure_note()
     elif sonnet_pct >= 0.85:
         if complexity == "complex":
-            return "moderate", " [⬇ sonnet-high: complex→moderate]"
+            return "moderate", " [⬇ sonnet-high: complex→moderate]" + _stale_pressure_note()
 
     return complexity, ""
 
@@ -561,8 +627,189 @@ def _usage_json():
 # limits is small). At 70%+ the window is closing fast enough to justify the ~300ms
 # OAuth round-trip to get fresh data before every routing decision.
 _INLINE_REFRESH_PRESSURE_FLOOR = 0.70
-# Minimum interval between inline refreshes (avoid hammering the API on every prompt).
+# Minimum interval between refreshes (avoid hammering the API on every prompt).
+# Now the default cooldown for the DETACHED refresh spawn below — previously
+# unused here, since the refresh used to run inline on every stale read with
+# no throttle of its own beyond the TTL check.
 _INLINE_REFRESH_MIN_INTERVAL_SEC = 120  # 2 minutes
+
+
+def _usage_refresh_spawn_file() -> str:
+    """Marker whose mtime gates a new detached refresh spawn.
+
+    Same filename, under the same router state dir, as session-start.py's
+    own non-blocking refresh marker — sharing it means a SessionStart
+    refresh and an auto-route refresh within the same cooldown window don't
+    both hit the keychain + OAuth endpoint. Touched on claim, never
+    explicitly released: staleness past the cooldown IS the release, so a
+    child that hangs or is killed can't wedge future refreshes (see
+    ``_claim_usage_refresh_spawn``).
+    """
+    return str(_router_home() / "usage_refresh_spawn.txt")
+
+
+def _usage_refresh_marker_age() -> float | None:
+    """Seconds since the spawn marker was last touched, or None if absent."""
+    try:
+        age = time.time() - os.path.getmtime(_usage_refresh_spawn_file())
+    except OSError:
+        return None
+    # A future-dated marker (clock skew, restored backup) has negative age and
+    # would sit "inside the cooldown" until the clock catches up: treat it as
+    # expired.
+    return age if age >= 0 else float("inf")
+
+
+def _claim_usage_refresh_spawn(cooldown_s: float | None = None) -> bool:
+    """Atomically claim the right to start ONE detached refresh child.
+
+    Mirrors session-start.py's ``_claim_usage_refresh_spawn``: a
+    non-blocking ``flock`` on a sibling ``.lock`` file (via
+    ``llm_router.file_lock.exclusive_lock``) serializes the
+    check-then-touch of the marker across threads AND processes, so two
+    prompts arriving at the same instant cannot both see "no refresh
+    running" and both spawn one. ``timeout=0`` — auto-route must never
+    block here, win or lose the race. Any failure (can't import, can't
+    lock, read-only state dir, ...) means no claim, never a blocking wait.
+
+    ``cooldown_s`` defaults to ``_INLINE_REFRESH_MIN_INTERVAL_SEC`` read at
+    call time (not bound at def time) so a test can monkeypatch the module
+    constant and see it take effect without passing the argument.
+    """
+    if cooldown_s is None:
+        cooldown_s = _INLINE_REFRESH_MIN_INTERVAL_SEC
+    path = _usage_refresh_spawn_file()
+
+    def _claim_without_lock() -> bool:
+        try:
+            age = _usage_refresh_marker_age()
+            if age is not None and age < cooldown_s:
+                return False
+            os.makedirs(str(_router_home()), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(str(time.time()))
+            return True
+        except Exception:
+            return False
+
+    try:
+        from llm_router.file_lock import exclusive_lock
+    except Exception:
+        # Without the lock helper, degrade to the plain cooldown check
+        # rather than failing closed (an import failure here is permanent on
+        # this install, so failing closed would switch the refresh off for
+        # good — the cooldown file alone still prevents most overlap).
+        return _claim_without_lock()
+    try:
+        os.makedirs(str(_router_home()), exist_ok=True)
+        with exclusive_lock(Path(path + ".lock"), timeout=0.0) as locked:
+            if not locked:
+                return False
+            age = _usage_refresh_marker_age()
+            if age is not None and age < cooldown_s:
+                return False
+            with open(path, "w") as f:
+                f.write(str(time.time()))
+            return True
+    except Exception:
+        return False
+
+
+def _usage_refresh_script_path() -> Path | None:
+    """Locate the sibling usage-refresh hook next to this file.
+
+    install_hooks copies this repo's ``hooks/`` to ``~/.claude/hooks/`` with
+    an ``llm_router-`` prefix, so an installed auto-route runs as
+    ``llm_router-auto-route.py`` beside ``llm_router-usage-refresh.py``; in
+    the in-repo source tree (tests, dev checkouts) the sibling is the
+    unprefixed ``usage-refresh.py``. Both names are tried. Neither existing
+    means no detached refresh can be spawned — fails closed to "no
+    refresh", never to blocking the hook on one.
+    """
+    here = Path(__file__).resolve().parent
+    for name in ("llm_router-usage-refresh.py", "usage-refresh.py"):
+        candidate = here / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+# usage-refresh.py reads exactly these LLM_ROUTER_* vars (grep it): the state
+# dir and the tool-name tier. Never LLM_ROUTER_*TOKEN / *SECRET* vars.
+_REFRESH_CHILD_ROUTER_ENV = ("LLM_ROUTER_HOME", "LLM_ROUTER_SLIM")
+# Beyond the allowlist (HOME/USER/PATH reach the macOS keychain),
+# usage-refresh does an HTTPS call via urllib, which honours these proxy / CA
+# variables.
+_REFRESH_CHILD_NET_ENV = (
+    "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+    "NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+)
+
+
+def _refresh_child_env() -> dict[str, str] | None:
+    """Minimal env for the detached refresh child (None = inherit, if the
+    allowlist helper is unavailable — same fallback as llm_router.file_lock)."""
+    try:
+        from llm_router.safe_subprocess import get_delegated_env
+    except Exception as _env_exc:  # noqa: BLE001
+        # Inherit (the pre-allowlist behaviour) but leave a count of it.
+        try:
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-USAGE-REFRESH-ENV", _env_exc)
+        except Exception:  # noqa: BLE001
+            _debug_log("usage refresh env helper unavailable")
+        return None
+    extra = {
+        k: v for k, v in os.environ.items()
+        if k in _REFRESH_CHILD_ROUTER_ENV or k in _REFRESH_CHILD_NET_ENV
+    }
+    return get_delegated_env(extra=extra)
+
+
+def _spawn_background_usage_refresh() -> None:
+    """Fire-and-forget the EXISTING usage-refresh hook with no stdin payload
+    — the same invocation the statusline already uses to refresh out of
+    band (see ``statusline-command.sh``, which backgrounds
+    ``"$REFRESH_SCRIPT" </dev/null ...``). That script's
+    ``_oauth_refresh_and_write()`` does the keychain read, the OAuth call,
+    and the atomic ``usage.json`` write — with its own 429 backoff — so it
+    is reused here rather than reimplemented, leaving exactly one refresh
+    code path to keep correct.
+
+    Never blocks and never raises. The child's stdin/stdout/stderr are all
+    redirected to ``/dev/null``: stdin so it can't wait on a hook payload
+    that will never arrive (no payload is exactly what selects the
+    background-refresh branch in usage-refresh.py's ``main()``),
+    stdout/stderr so a slow or failing child can never bleed into THIS
+    hook's own stdout, which the host parses as the routing decision.
+    """
+    script = _usage_refresh_script_path()
+    if script is None:
+        return
+    try:
+        from llm_router.install_hooks import is_frozen
+        frozen = is_frozen()
+    except Exception:
+        frozen = False
+    argv = [sys.executable, "run-hook", str(script)] if frozen else [sys.executable, str(script)]
+    try:
+        subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            env=_refresh_child_env(),
+        )
+    except Exception as _spawn_exc:  # noqa: BLE001 — never break a turn
+        # Fail-open, NOT silent (failopen ratchet): a refresh that cannot be
+        # started means pressure keeps serving a stale number.
+        try:
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-USAGE-REFRESH-SPAWN", _spawn_exc)
+        except Exception:  # noqa: BLE001
+            _debug_log("usage refresh spawn failed")
 
 
 def _fetch_usage_inline() -> dict | None:
@@ -4066,6 +4313,7 @@ def main() -> None:
     # hand every later invocation a deadline that has already passed.
     global _HOOK_STARTED_AT
     _HOOK_STARTED_AT = time.monotonic()
+    _hl_mark_main()
 
     _mark("start")
     invocation_id = time.time()
@@ -4203,7 +4451,8 @@ def main() -> None:
     if isinstance(_kind_sid, str) and _kind_sid:
         try:
             from llm_router import session_kind as _session_kind
-            _session_kind.tag_session(_kind_sid, hook_input.get("cwd") or None)
+            with _hl_phase("session_io"):
+                _session_kind.tag_session(_kind_sid, hook_input.get("cwd") or None)
         except Exception as _exc:                                    # noqa: BLE001
             from llm_router import failopen as _fo
             _fo.record("CHZ-FO-SESSION-KIND-TAG", _exc)
@@ -4267,7 +4516,8 @@ def main() -> None:
             from llm_router.session_store import write_pointer as _write_pointer
             # X4: with the session's cwd, so llm(...) calls retrieve from the
             # caller's project (the MCP server's own cwd is $HOME).
-            _write_pointer(session_id, cwd=hook_input.get("cwd") or None)
+            with _hl_phase("session_io"):
+                _write_pointer(session_id, cwd=hook_input.get("cwd") or None)
         except Exception as _exc:                                    # noqa: BLE001
             from llm_router import failopen as _fo
             _fo.record("CHZ-FO-HOOK-SESSION-POINTER", _exc)
@@ -4287,11 +4537,13 @@ def main() -> None:
     # substituted text as prompt injection and either refuses it or retries.
     try:
         from llm_router import zero_claude_edit as _zce
-        _zce_outcome = _zce.maybe_replace(
-            prompt=prompt,
-            cwd=hook_input.get("cwd") or os.getcwd(),
-            deadline_s=_readonly_draft_deadline(),
-        )
+        with _hl_phase("zce"):
+            _zce_outcome = _zce.maybe_replace(
+                prompt=prompt,
+                cwd=hook_input.get("cwd") or os.getcwd(),
+                deadline_s=_readonly_draft_deadline(),
+                session_id=session_id or None,
+            )
     except Exception as _zce_exc:                                 # noqa: BLE001
         _zce_outcome = None
         from llm_router import failopen as _fo
@@ -4338,7 +4590,8 @@ def main() -> None:
         sys.exit(0)
 
     # ── v6.0 Visibility: Initialize HUD session state ─────────────────────────
-    initialize_hud()
+    with _hl_phase("hud"):
+        initialize_hud()
 
     # ── Sidecar pre-execution (opt-in via LLM_ROUTER_SIDECAR_PREFETCH=1) ────────
     # Deterministic patterns ("show me my routing today" / "git status" /
@@ -4491,7 +4744,8 @@ def main() -> None:
             tool       = "llm_query"
         method = "context-inherit"
     else:
-        result = classify_prompt(prompt)
+        with _hl_phase("classify"):
+            result = classify_prompt(prompt)
         if result is None:
             if zero_claude:
                 task_type = "query"
@@ -4543,7 +4797,7 @@ def main() -> None:
                 _critical_bucket, _critical_value = _critical
                 directive = (
                     f"⚡ SUBSCRIPTION OVERRIDE: {task_type}/{complexity} → /model claude-opus-4-6"
-                    f" [CRITICAL PRESSURE: {_critical_bucket}={_critical_value:.0%}] "
+                    f" [CRITICAL PRESSURE: {_critical_bucket}={_critical_value:.0%}]{_stale_pressure_note()} "
                     f"| Handle directly (subscription included). Do NOT call llm_* tools."
                 )
                 _debug_log(f"[INVOCATION {invocation_id:.3f}] CRITICAL PRESSURE: routing to Opus")
@@ -4634,15 +4888,16 @@ def main() -> None:
     # Log routing decision for later evaluation. Logging is already pinned to
     # stderr by _init_hook_logging() (audit §2.1), so no stdout guard is needed.
     try:
-        log_routing_decision(
-            task_type=task_type,
-            complexity=complexity,
-            classification_method=method,
-            selected_model=selected_model,
-            provider=provider,
-            # chz-surface-ok: telemetry field — logical name keyed to TOOL_MAP for analysis.
-            notes=f"routed via {tool}" if tool != TOOL_MAP.get(task_type) else None,
-        )
+        with _hl_phase("db_write"):
+            log_routing_decision(
+                task_type=task_type,
+                complexity=complexity,
+                classification_method=method,
+                selected_model=selected_model,
+                provider=provider,
+                # chz-surface-ok: telemetry field — logical name keyed to TOOL_MAP for analysis.
+                notes=f"routed via {tool}" if tool != TOOL_MAP.get(task_type) else None,
+            )
     except Exception as exc:
         # Tracking is best-effort and must never abort routing, but a swallowed
         # failure here means the dashboard silently loses this decision — record
@@ -4683,19 +4938,20 @@ def main() -> None:
             db_path = str(_router_home() / "usage.db")
             pressure = _get_pressure() if _CC_MODE else {"session_pct": 0.0, "weekly_pct": 0.0, "sonnet_pct": 0.0}
             was_downgraded = requested_complexity is not None and requested_complexity != complexity
-            _log_quota_snapshot_sync(
-                session_id=session_id,
-                prompt_sequence=prompt_sequence,
-                prompt_hash=None,  # Could add prompt hash here if needed
-                pressure=pressure,
-                routing_decision_id=None,  # Hook doesn't have access to this
-                final_model=selected_model,
-                final_provider=provider,
-                complexity_requested=requested_complexity,
-                complexity_used=complexity,
-                was_downgraded=was_downgraded,
-                db_path=db_path,
-            )
+            with _hl_phase("db_write"):
+                _log_quota_snapshot_sync(
+                    session_id=session_id,
+                    prompt_sequence=prompt_sequence,
+                    prompt_hash=None,  # Could add prompt hash here if needed
+                    pressure=pressure,
+                    routing_decision_id=None,  # Hook doesn't have access to this
+                    final_model=selected_model,
+                    final_provider=provider,
+                    complexity_requested=requested_complexity,
+                    complexity_used=complexity,
+                    was_downgraded=was_downgraded,
+                    db_path=db_path,
+                )
         except Exception:
             pass  # Silent failure — quota snapshot is optional enhancement
 
@@ -4706,13 +4962,14 @@ def main() -> None:
     if session_id:
         try:
             from llm_router import session_store as _session_store
-            _session_store.record_event(
-                session_id,
-                "user_prompt",
-                prompt,
-                role="user",
-                task_type=task_type,
-            )
+            with _hl_phase("session_io"):
+                _session_store.record_event(
+                    session_id,
+                    "user_prompt",
+                    prompt,
+                    role="user",
+                    task_type=task_type,
+                )
         except Exception as _exc:
             from llm_router import failopen as _fo
             _fo.record("CHZ-FO-HOOK-SESSION-RECORD", _exc)
@@ -4723,9 +4980,10 @@ def main() -> None:
         # already open and the turns before this one are complete, so it is where
         # the other half of the conversation gets persisted. Fail-open.
         try:
-            _n = _persist_assistant_turns(
-                hook_input.get("transcript_path", ""), session_id, current_prompt=prompt,
-            )
+            with _hl_phase("session_io"):
+                _n = _persist_assistant_turns(
+                    hook_input.get("transcript_path", ""), session_id, current_prompt=prompt,
+                )
             if _n:
                 _debug_log(
                     f"[INVOCATION {invocation_id:.3f}] PERSISTED {_n} Claude turn(s) to session store"
@@ -4743,9 +5001,10 @@ def main() -> None:
         try:
             from llm_router.hooks import draft_usage as _draft_usage
 
-            _verdict = _draft_usage.audit(
-                session_id, _last_assistant_text(hook_input.get("transcript_path", "")),
-            )
+            with _hl_phase("session_io"):
+                _verdict = _draft_usage.audit(
+                    session_id, _last_assistant_text(hook_input.get("transcript_path", "")),
+                )
             if _verdict is not None:
                 _outcome, _rec = _verdict
                 _debug_log(
@@ -5024,13 +5283,18 @@ def main() -> None:
                 # allowed. Live, the write loop (which must call a tool) spent
                 # the whole 55s wandering on one.
                 from llm_router.hooks.direct_executor import execute_agent as _execute_agent
-                _direct_result = _execute_agent(
-                    prompt, _direct_chain, timeout=60, context=_session_ctx,
-                    deadline_s=_loop_deadline(),
-                    project_root=hook_input.get("cwd") or os.getcwd(),
-                    session_id=session_id,
-                    read_only=task_type in ("query", "research", "analyze"),
-                )
+                # phase "draft_chain" = wall time of the whole draft chain: ollama,
+                # codex and gemini_cli, plus paid models when
+                # LLM_ROUTER_FREE_TIER_DRAFTS=off. Not named "ollama": a slow Codex or
+                # Gemini-CLI draft must not be reported as an Ollama call.
+                with _hl_phase("draft_chain"):
+                    _direct_result = _execute_agent(
+                        prompt, _direct_chain, timeout=60, context=_session_ctx,
+                        deadline_s=_loop_deadline(),
+                        project_root=hook_input.get("cwd") or os.getcwd(),
+                        session_id=session_id,
+                        read_only=task_type in ("query", "research", "analyze"),
+                    )
                 if _direct_result:
                     _debug_log(f"[INVOCATION {invocation_id:.3f}] AGENT LOOP SUCCESS")
             else:
@@ -5049,10 +5313,11 @@ def main() -> None:
                         f"[INVOCATION {invocation_id:.3f}] HISTORY RELAY OFF (privacy gate)"
                     )
                 else:
-                    _history = _load_conversation_history(
-                        hook_input.get("transcript_path", ""), prompt,
-                        session_id=session_id,
-                    )
+                    with _hl_phase("session_io"):
+                        _history = _load_conversation_history(
+                            hook_input.get("transcript_path", ""), prompt,
+                            session_id=session_id,
+                        )
                 _draft_root = hook_input.get("cwd") or os.getcwd()
                 # I4: the draft may open files. Read-only — it answers before
                 # Claude sees the prompt, so it may look at the repo, never
@@ -5060,25 +5325,27 @@ def main() -> None:
                 # to the text chain below, inside the same hook deadline.
                 if _local_agent_loop_enabled():
                     from llm_router.hooks.direct_executor import execute_agent as _execute_agent
-                    _direct_result = _execute_agent(
-                        prompt, _direct_chain, project_root=_draft_root,
-                        timeout=OLLAMA_TIMEOUT, context=_session_ctx,
-                        deadline_s=_readonly_draft_deadline(), read_only=True,
-                        session_id=session_id,
-                    )
+                    with _hl_phase("draft_chain"):
+                        _direct_result = _execute_agent(
+                            prompt, _direct_chain, project_root=_draft_root,
+                            timeout=OLLAMA_TIMEOUT, context=_session_ctx,
+                            deadline_s=_readonly_draft_deadline(), read_only=True,
+                            session_id=session_id,
+                        )
                     _debug_log(
                         f"[INVOCATION {invocation_id:.3f}] READ-ONLY DRAFT LOOP: "
                         f"{'answered' if _direct_result else 'nothing, text chain next'}"
                     )
                 if not _direct_result:
-                    _direct_result = _execute_chain(
-                        prompt, _direct_chain, task_type,
-                        timeout=OLLAMA_TIMEOUT, history=_history, context=_session_ctx,
-                        deadline_s=_hook_deadline(),
-                        # I1: the session store and a scoped semantic index.
-                        session_id=session_id,
-                        root=_draft_root,
-                    )
+                    with _hl_phase("draft_chain"):
+                        _direct_result = _execute_chain(
+                            prompt, _direct_chain, task_type,
+                            timeout=OLLAMA_TIMEOUT, history=_history, context=_session_ctx,
+                            deadline_s=_hook_deadline(),
+                            # I1: the session store and a scoped semantic index.
+                            session_id=session_id,
+                            root=_draft_root,
+                        )
 
             # S2-6: a draft that cites a file nobody mentioned and that does not
             # exist is not a weak answer, it is a fabricated one — and Stage 2 made
@@ -5750,14 +6017,15 @@ def main() -> None:
         # error, no log and no counter. The visibility now lives inside
         # record_event() too, but a discarded return value is the habit that
         # caused this and it should not survive in the source.
-        _ledger_ok = record_event(LedgerEvent(
-            session_id=session_id or os.environ.get("LLM_ROUTER_SESSION_ID", ""),
-            event_type="directive_injected",
-            task_type=str(task_type),
-            hook_input_tokens=len(_final_context) // 4,
-            metadata={"tool": str(tool), "method": str(method),
-                      "complexity": str(complexity)},
-        ))
+        with _hl_phase("db_write"):
+            _ledger_ok = record_event(LedgerEvent(
+                session_id=session_id or os.environ.get("LLM_ROUTER_SESSION_ID", ""),
+                event_type="directive_injected",
+                task_type=str(task_type),
+                hook_input_tokens=len(_final_context) // 4,
+                metadata={"tool": str(tool), "method": str(method),
+                          "complexity": str(complexity)},
+            ))
     except Exception as _exc:
         from llm_router import failopen as _fo
         _fo.record("CHZ-FO-HOOK-EXECUTION-LEDGER", _exc)

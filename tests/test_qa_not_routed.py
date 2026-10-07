@@ -181,7 +181,7 @@ def test_zero_claude_edit_still_serves_bounded_edits(monkeypatch, tmp_path, mode
     from llm_router import zero_claude_edit as zce
     seen: list[str] = []
 
-    def fake_maybe_replace(prompt, cwd, deadline_s):
+    def fake_maybe_replace(prompt, cwd, deadline_s, session_id=None):
         seen.append(prompt)
         return zce.ScopedEditOutcome(action="block", log_reason="ZERO_CLAUDE_EDIT APPLIED: test",
                                      message="edit applied by local model", applied=True)

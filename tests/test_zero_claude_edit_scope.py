@@ -446,6 +446,20 @@ def test_edit_prompt_is_replaced_applied_and_blocked_with_diff(tmp_path, repo, s
     assert (repo / "foo.py").read_text() == "def new_name():\n    pass\n"
 
 
+def test_applied_edit_ledger_row_carries_source_session_and_turn_id(tmp_path, repo, stub_ollama):
+    """M0.3c: the hook passes its payload's own session id and turn_id = prompt_key.key(prompt)."""
+    from llm_router import prompt_key
+
+    prompt = "rename old_name to new_name in foo.py"
+    out = _run(prompt, tmp_path, repo, stub_ollama, extra_env={"LLM_ROUTER_ZERO_CLAUDE_SCOPE": "edit"})
+    assert "ZERO_CLAUDE_EDIT APPLIED" in out.get("reason", "")
+    rows = [json.loads(ln) for ln in (tmp_path / ".llm-router" / "edit_outcomes.jsonl").read_text().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["source"] == "zero_claude" and rows[0]["session_id"] == "zce"
+    assert rows[0]["turn_id"] == prompt_key.key(prompt) and rows[0]["applied"] is True
+    assert prompt not in json.dumps(rows[0])
+
+
 def test_failed_edit_blocks_with_reason_and_changes_nothing(tmp_path, repo, stub_ollama):
     _StubOllama.response_content = "I cannot help with that."
     before = (repo / "foo.py").read_text()

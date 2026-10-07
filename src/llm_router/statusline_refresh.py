@@ -11,7 +11,10 @@ the file is older than a minute. The expensive work lives here:
                         when the KPI counted something; ``None`` = unknown.
 * ``claude_weekly_pct`` ``usage.json``'s ``weekly_pct``; ``None`` when the
                         snapshot is a fallback (``is_fallback``: invented 50s),
-                        unreadable, or older than :data:`QUOTA_STALE_S`.
+                        unreadable, or older than :data:`QUOTA_STALE_S`. The
+                        tick no longer prints this field: it reads
+                        ``usage.json`` itself (5h / weekly / Sonnet, stale
+                        marker past the TTL).
 * ``codex``             ``codex_window.snapshot()`` when the window file
                         exists; ``None`` when Codex has never been counted on
                         this machine (0/15 would claim a measurement).
@@ -207,6 +210,8 @@ def cmd_statusline(args: list[str]) -> int:
         return 0 if refresh() else 1
     from llm_router import statusline_tick as tick
 
-    print(tick.render(tick.read_cache(tick.router_home()), now=time.time(),
-                      env_mode=os.environ.get("LLM_ROUTER_ENFORCE")))
+    home = tick.router_home()
+    print(tick.render(tick.read_cache(home), now=time.time(),
+                      env_mode=os.environ.get("LLM_ROUTER_ENFORCE"),
+                      usage=tick.read_usage(home), usage_ttl_s=tick.usage_ttl()))
     return 0
