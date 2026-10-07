@@ -358,6 +358,12 @@ def call_ollama(
                         "input_tokens": chunk.get("prompt_eval_count", 0),
                         "output_tokens": chunk.get("eval_count", 0),
                     }
+                    # M4.1: Ollama's own model-load time, so a cold-model wait inside a
+                    # hook shows up as phases_ms.cold_wait (a no-op outside a hook).
+                    _load_ns = chunk.get("load_duration")
+                    if isinstance(_load_ns, (int, float)) and _load_ns > 0:
+                        from llm_router import hook_latency as _hook_latency
+                        _hook_latency.add_phase("cold_wait", _load_ns / 1e6)
                     # Ollama's own number says it truncated despite the
                     # pre-call check above. Both signatures are RECORDED, but
                     # only the strong one (prompt_eval_count reached the
