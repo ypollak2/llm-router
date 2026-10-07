@@ -168,7 +168,13 @@ def test_the_broader_inheritance_count_is_recorded():
     # llm_router/statusline_tick.py Popen-s the fixed refresher argv (`llm-router
     # statusline --refresh`, or the operator's own LLM_ROUTER_STATUSLINE_REFRESH_CMD);
     # not model- or caller-supplied. POSIX uses fork + execv.
-    assert len(inheriting) <= 60, (
+    # 60 -> 61 (status-bar cache, PLAN v16 P0.9-b): `_spawn_refresh()` in
+    # llm_router/hooks/status-bar.py Popen-s the fixed argv `[sys.executable,
+    # <this hook>, "--refresh-cache"]`, a re-invocation of the same script that
+    # computes the line the hook used to compute inline. Not model- or
+    # caller-supplied; it needs the hook's own env (LLM_ROUTER_HOME,
+    # LLM_ROUTER_STATUS_MODE, LLM_ROUTER_ENFORCE) to render the same line.
+    assert len(inheriting) <= 61, (
         f"{len(inheriting)} subprocess sites inherit the environment, up from "
         "51. If a new one runs caller-supplied argv, add it to "
         "MODEL_ARGV_SITES; if not, raise this number deliberately."

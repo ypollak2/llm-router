@@ -11,6 +11,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 1 | NULL `session_id` on local routing rows | fix open in #288 (M0.4), not merged |
 | 2 | O3 counted more turns than the user typed | open, fix is plan task M0.3 |
 | 3 | NS and D2 counted a heuristic "used" | open, fix is plan task M0.2 |
+| P09-5 | status-bar waited on a locked usage.db on every prompt | fixed in `perf/status-bar-cache` (P0.9 task 4) |
 | 4 | `G1_proxy` printed 0 ms | fixed in this change (M0.6) |
 | 5 | Haiku 400 on a mid-conversation system message | worked around (flag off); fold is plan task M0.7 |
 | 6 | Research session b9f04425 counted as organic | fixed in #291 (M0.0b) |
@@ -64,6 +65,20 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `NS_heuristic` / `D2_heuristic`, labelled "not a target".
 - **Test.** `tests/test_kpi_strict_used.py`, 11 cases (to be added by M0.2). Not on `main`
   yet. Until then, `docs/repo_goals/KPIS.md` says NS is the heuristic one.
+
+## P09-5. status-bar waited on a locked usage.db on every prompt
+
+- **Symptom.** status-bar p95 4,488 ms (n = 344) against the PRD's 300 ms [HL7]; p50 44 ms.
+- **Cause.** The UserPromptSubmit hook computed its line inline: `sqlite3.connect(usage.db,
+  timeout=2)` (a writer's lock costs up to 2 s per connect), a second connect for the session
+  call counts, and the Gemini quota read.
+- **Fix.** A detached refresher (`status-bar.py --refresh-cache`, one per 15 s at most)
+  computes the line into `status_bar_cache.json` (TTL 30 s). The hook reads that file, shows
+  a line up to 10 minutes old, and prints nothing rather than wait when there is none. The
+  refresher's own run writes no status-bar latency row (see P09-3).
+- **Test.** `tests/test_p09_status_bar_cache.py::test_the_prompt_path_never_waits_on_a_locked_usage_db`
+  (FAILS on da31df7: 2,016 ms), `test_a_stale_cache_returns_fast_shows_the_line_and_spawns_one_refresher`,
+  `test_the_refresher_survives_sqlite_raising_and_the_hook_still_shows_a_line`.
 
 ## 4. `G1_proxy` printed 0 ms
 
