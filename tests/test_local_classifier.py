@@ -1,302 +1,504 @@
-"""LLM_ROUTER_LOCAL_CLASSIFIER=off|shadow|on — the local Ollama classifier seam.
+"""The local classifier module (M1.1-M1.4): verdict v6, async-only calls, the Ollama contract.
 
-Rules under test: off is byte-identical routing and never touches Ollama; shadow
-logs the local answer next to the rules' answer and changes nothing; on feeds the
-local task_type/complexity to the router, hook and proxy; a timeout or malformed
-JSON falls back to the rules; no prompt text is ever persisted.
+Rules under test: the p_eval rubric strings are verbatim (md5-pinned); a verdict is
+the rubric's tier plus four extra fields and a margin; an answer is valid only if
+every key and every value is in range, else it is discarded; the proxy path never
+blocks the event loop, asks once per (session, prompt) and backs off after a
+failure; ``off`` makes zero Ollama calls; no function raises.
+
+Ollama is a real HTTP server on a loopback port (aiohttp), so the request that
+leaves the process is the request under test. Nothing here needs Ollama.
 """
 
 from __future__ import annotations
 
 import asyncio
-import importlib.util
+import hashlib
 import json
+import logging
 import time
-from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 
 from llm_router import local_classifier as lc
-from llm_router.classify import GATEWAY_POLICY, HOOK_POLICY, classify, classify_signals
 
 MARKER = "ZQX-SECRET-PROMPT-MARKER-7731"
-# Low-signal prompt: rules answer query/simple, so a local "opus" is a visible change.
-PROMPT = f"hmm {MARKER} thoughts?"
+ALIAS_TAGGED = "llmr-classifier:latest"
 
 
-def _reply(task="code", cx="complex", tier="opus"):
-    return json.dumps({"task_type": task, "complexity": cx, "tier": tier})
+def _dims(total: int) -> dict[str, int]:
+    """Six rubric scores (each 1-5) that sum to ``total`` (6..30)."""
+    extra, out = total - 6, {}
+    for d in lc.DIMS:
+        add = min(4, extra)
+        out[d] = 1 + add
+        extra -= add
+    assert sum(out.values()) == total
+    return out
+
+
+def _reply(total: int = 12, **over) -> str:
+    data = {**_dims(total), "needs_tools": True, "tier": "sonnet", "task_type": "code", "qa": False,
+            "needs_repo_context": True, "local_eligible": False, "reason": "one file, clear spec"}
+    data.update(over)
+    return json.dumps(data)
+
+
+def _assembled(prompt: str = f"fix the bug in parser.py {MARKER}") -> lc.Assembled:
+    ctx = "Working directory: /tmp/x\n\n(This is the FIRST prompt of the session: no prior context.)"
+    return lc.Assembled(ctx, prompt)
+
+
+class FakeOllama:
+    """A loopback Ollama: /api/chat answers ``reply`` after ``delay``; /api/ps lists
+    the alias when ``loaded``. A chat with no messages is a warm-up and is counted apart."""
+
+    def __init__(self, monkeypatch, *, reply=None, delay=0.0, loaded=True, status=200):
+        self.mp, self.reply, self.delay = monkeypatch, reply or _reply(), delay
+        self.loaded, self.status = loaded, status
+        self.chat: list[dict] = []
+        self.warm: list[dict] = []
+        self.ps_calls = 0
+
+    async def __aenter__(self) -> FakeOllama:
+        async def chat(request):
+            body = await request.json()
+            if body.get("messages") == []:
+                self.warm.append(body)
+                return web.json_response({"done": True})
+            self.chat.append(body)
+            await asyncio.sleep(self.delay)
+            return web.json_response({"message": {"role": "assistant", "content": self.reply}},
+                                     status=self.status)
+
+        async def ps(request):
+            self.ps_calls += 1
+            return web.json_response({"models": [{"name": ALIAS_TAGGED}] if self.loaded else []})
+
+        app = web.Application()
+        app.router.add_post("/api/chat", chat)
+        app.router.add_get("/api/ps", ps)
+        self.server = TestServer(app)
+        await self.server.start_server()
+        self.mp.setenv("LLM_ROUTER_OLLAMA_URL", str(self.server.make_url("")).rstrip("/"))
+        self.mp.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "shadow")
+        lc._reset_state()
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        await lc.aclose()
+        await self.server.close()
+        lc._reset_state()
+
+    @property
+    def requests(self) -> int:
+        return len(self.chat) + len(self.warm) + self.ps_calls
 
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
-    monkeypatch.delenv("LLM_ROUTER_LOCAL_CLASSIFIER", raising=False)
-    monkeypatch.setattr(lc, "_cool_until", 0.0)
-
-    async def no_cloud(*a, **k):  # the cloud chain after the local entry: unavailable here
-        raise RuntimeError("no classifier models")
-
-    monkeypatch.setattr("llm_router.classifier.classify_complexity", no_cloud)
+    for k in ("LLM_ROUTER_LOCAL_CLASSIFIER", "LLM_ROUTER_CLASSIFIER_MODEL",
+              "LLM_ROUTER_CLASSIFIER_KEEP_ALIVE", "LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS"):
+        monkeypatch.delenv(k, raising=False)
+    lc._reset_state()
 
 
 @pytest.fixture
-def ollama(monkeypatch):
-    """Fake Ollama. ``calls`` records every request; ``reply`` is what it says."""
-    state = {"calls": [], "reply": _reply(), "delay": 0.0}
-
-    def fake_post(model, text, timeout):
-        state["calls"].append((model, text))
-        time.sleep(state["delay"])
-        return state["reply"]
-
-    monkeypatch.setattr(lc, "_post", fake_post)
-    return state
+def clock(monkeypatch):
+    now = SimpleNamespace(t=1000.0)
+    monkeypatch.setattr(lc, "_now", lambda: now.t)
+    return now
 
 
-def _log_rows():
-    p = lc._log_path()
-    return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+async def _ask(text_sha: str = "s1", *, sid: str = "sess", **kw) -> lc.Verdict:
+    return await lc.classify_async(_assembled(), session_id=sid, text_sha=text_sha, **kw)
 
 
-def _all_home_text():
-    return "".join(p.read_text(errors="ignore") for p in Path.home().rglob("*") if p.is_file())
+# --- M1.2: the p_eval strings are verbatim -------------------------------------------------
 
 
-# ── mode parsing ──────────────────────────────────────────────────────────────
-
-@pytest.mark.parametrize("raw,want", [
-    (None, "off"), ("", "off"), ("off", "off"), ("on", "on"), ("ON ", "on"),
-    ("shadow", "shadow"), ("true", "off"), ("1", "off"), ("onn", "off"),
+@pytest.mark.parametrize("name,md5", [
+    ("RUBRIC", "0bc9f3af7aa57e56d4936eebc2b70d91"),
+    ("ITEM_TEMPLATE", "c55ab55028610f2e422e45350c2ff969"),
+    ("SINGLE_TAIL", "889e536fc2d86861eebb19210ea1b811"),
 ])
-def test_mode_only_accepts_the_three_words(monkeypatch, raw, want):
-    if raw is None:
-        monkeypatch.delenv("LLM_ROUTER_LOCAL_CLASSIFIER", raising=False)
-    else:
+def test_p_eval_strings_are_pinned(name, md5):
+    # md5 of the STRING, not of rubric.py (1bcb3f44...): that file lives outside the repo
+    assert hashlib.md5(getattr(lc, name).encode()).hexdigest() == md5
+
+
+def test_message_layout_is_the_p_eval_one_plus_v6_extra():
+    payload = lc._payload("m", _assembled("do the thing"))
+    system, user = payload["messages"]
+    assert system == {"role": "system", "content": lc.RUBRIC}
+    expected = (lc.ITEM_TEMPLATE.format(id="turn", context=_assembled().context, prompt="do the thing")
+                + "\n\n" + lc.SINGLE_TAIL + "\n\n" + lc.V6_EXTRA)
+    assert user == {"role": "user", "content": expected}
+    for key in ("task_type", "qa", "needs_repo_context", "local_eligible"):
+        assert key in lc.V6_EXTRA
+
+
+def test_plain_string_input_is_taken_as_the_prompt():
+    user = lc._payload("m", "just a string")["messages"][1]["content"]
+    assert "(no context)" in user and "just a string" in user
+
+
+def test_braces_in_a_prompt_survive_formatting():
+    user = lc._payload("m", _assembled("keep {not_a_field} as is"))["messages"][1]["content"]
+    assert "{not_a_field}" in user
+
+
+def test_schema_is_strict_with_enums():
+    s = lc.SCHEMA
+    assert s["additionalProperties"] is False and set(s["required"]) == set(s["properties"])
+    assert all(s["properties"][d] == {"type": "integer", "minimum": 1, "maximum": 5} for d in lc.DIMS)
+    assert s["properties"]["tier"]["enum"] == ["haiku", "sonnet", "opus"]
+    assert s["properties"]["task_type"]["enum"] == list(lc.TASK_TYPES)
+
+
+# --- M1.2: parsing, derivations, margin, local ------------------------------------------
+
+
+def test_valid_answer_becomes_a_verdict():
+    v = lc.parse_verdict(_reply(12), model="m", ms=5.0)
+    assert (v.source, v.ok, v.tier, v.task_type, v.qa, v.needs_repo_context, v.local_eligible) == \
+        ("llm", True, "sonnet", "code", False, True, False)
+    assert v.dims == _dims(12) and v.margin is None and v.derivation == "direct"
+    assert (v.model, v.prompt_version, v.ms, v.complexity) == ("m", "v6", 5.0, "moderate")
+
+
+@pytest.mark.parametrize("content", [
+    "", "not json", "[]", "null", "{}",
+    json.dumps({**json.loads(_reply()), "extra": 1}),
+    json.dumps({k: v for k, v in json.loads(_reply()).items() if k != "risk"}),
+    _reply(tier="local"),            # the rubric cannot say local: that is derived
+    _reply(tier="gpt"),
+    _reply(task_type="chat"),
+    _reply(qa="yes"),
+    _reply(needs_tools=1),
+    _reply(reason=7),
+    _reply(scope=0), _reply(scope=6), _reply(scope=2.5), _reply(scope="3"), _reply(scope=True),
+])
+def test_invalid_answers_are_parse_errors_with_no_decision(content):
+    v = lc.parse_verdict(content)
+    assert v.source == "parse_error" and not v.ok
+    assert (v.tier, v.task_type, v.dims, v.margin, v.qa) == (None, None, None, None, None)
+
+
+def test_none_content_does_not_raise():
+    assert lc.parse_verdict(None).source == "parse_error"  # type: ignore[arg-type]
+
+
+def test_direct_derivation_keeps_the_models_tier_and_has_no_margin():
+    v = lc.parse_verdict(_reply(30, tier="haiku"), derivation="direct")
+    assert (v.tier, v.margin) == ("haiku", None)
+
+
+@pytest.mark.parametrize("total,tier,margin", [
+    (6, "haiku", 8), (13, "haiku", 1),     # below T_h=14
+    (14, "sonnet", 0), (15, "sonnet", 1),  # [T_h, T_s)
+    (16, "opus", 0), (17, "opus", 1), (30, "opus", 14),
+])
+def test_rule_derivation_thresholds_and_margin(total, tier, margin):
+    v = lc.parse_verdict(_reply(total, tier="sonnet"), derivation="rule")
+    assert (v.tier, v.margin, v.derivation) == (tier, margin, "rule")
+
+
+def test_rule_derivation_thresholds_are_parameters():
+    v = lc.parse_verdict(_reply(10), derivation="rule", t_h=10, t_s=12)
+    assert (v.tier, v.margin) == ("sonnet", 0)
+
+
+@pytest.mark.parametrize("deriv,over,tier", [
+    ("direct", dict(tier="haiku", local_eligible=True, task_type="code"), "local"),
+    ("direct", dict(tier="haiku", local_eligible=True, task_type="query"), "haiku"),
+    ("direct", dict(tier="haiku", local_eligible=False, task_type="code"), "haiku"),
+    ("direct", dict(tier="sonnet", local_eligible=True, task_type="code"), "sonnet"),
+    ("rule", dict(tier="opus", local_eligible=True, task_type="code"), "local"),  # rule says haiku (sum 8)
+])
+def test_local_needs_haiku_and_eligible_and_code(deriv, over, tier):
+    total = 8 if deriv == "rule" else 12
+    assert lc.parse_verdict(_reply(total, **over), derivation=deriv).tier == tier
+
+
+async def test_local_survives_the_cache_and_the_shadow_record(monkeypatch):
+    reply = _reply(8, tier="haiku", local_eligible=True, task_type="code")
+    async with FakeOllama(monkeypatch, reply=reply):
+        first, again = await _ask(), await _ask()
+    assert (first.source, first.tier) == ("llm", "local")
+    assert (again.source, again.tier, again.local_eligible) == ("cache", "local", True)
+    assert again.as_log() == {"tier": "local", "task_type": "code", "margin": None, "qa": False,
+                              "needs_repo_context": True, "local_eligible": True, "derivation": "direct"}
+    assert MARKER not in json.dumps(again.as_log())
+
+
+def test_verdict_is_frozen():
+    v = lc.parse_verdict(_reply())
+    with pytest.raises(Exception):
+        v.tier = "opus"  # type: ignore[misc]
+
+
+# --- M1.4: configuration and the call contract ---------------------------------------------
+
+
+def test_mode_reads_anything_but_shadow_and_on_as_off(monkeypatch):
+    assert lc.mode() == "off"
+    for raw, want in [("shadow", "shadow"), (" ON ", "on"), ("true", "off"), ("1", "off"), ("", "off")]:
         monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", raw)
-    assert lc.mode() == want
+        assert lc.mode() == want
 
 
-# ── off is byte-identical ─────────────────────────────────────────────────────
-
-def test_off_never_calls_ollama_and_changes_nothing(ollama):
-    base = classify_signals(PROMPT, GATEWAY_POLICY)
-    out = asyncio.run(classify(PROMPT, policy=GATEWAY_POLICY))
-    assert (out.task_type, out.complexity, out.method) == (base.task_type, base.complexity, base.method)
-    assert ollama["calls"] == []
-    assert not lc._log_path().exists()
-    assert lc.apply(PROMPT, "query", "simple", "x") == ("query", "simple")
-
-
-def test_off_policy_chain_matches_the_rules(monkeypatch, ollama):
-    from llm_router.proxy import backends
-
-    seen = []
-
-    async def fake_chain(task, profile, *a):
-        seen.append((task.value, a[2].value))
-        return ["m"]
-
-    monkeypatch.setattr("llm_router.router._build_and_filter_chain", fake_chain)
-    backends._chain_cache.clear()
-    sig = classify_signals(PROMPT, GATEWAY_POLICY)
-    got = asyncio.run(backends.policy_chain(PROMPT))
-    assert got[:2] == (sig.task_type.value, sig.complexity.value)
-    assert ollama["calls"] == []
+def test_defaults_and_overrides(monkeypatch):
+    assert (lc._model(), lc._keep_alive(), lc._timeout_s()) == ("llmr-classifier", "30m", 2.0)
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_MODEL", "other")
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_KEEP_ALIVE", "5m")
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS", "99999")
+    assert (lc._model(), lc._keep_alive(), lc._timeout_s()) == ("other", "5m", 10.0)
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS", "abc")
+    assert lc._timeout_s() == 2.0
 
 
-# ── shadow logs, changes nothing ──────────────────────────────────────────────
+async def test_request_contract(monkeypatch):
+    async with FakeOllama(monkeypatch) as o:
+        v = await _ask()
+    assert v.source == "llm" and v.model == "llmr-classifier"
+    (body,) = o.chat
+    assert body["model"] == "llmr-classifier"
+    assert body["format"] == lc.SCHEMA
+    assert body["think"] is False and body["stream"] is False
+    assert body["keep_alive"] == "30m"
+    assert body["options"] == {"temperature": 0, "num_predict": 160, "num_ctx": 4096}
+    assert body["messages"][0]["content"] == lc.RUBRIC
 
-def test_shadow_logs_beside_rules_and_returns_rules(monkeypatch, ollama):
+
+async def test_model_and_keep_alive_come_from_the_environment(monkeypatch):
+    async with FakeOllama(monkeypatch, loaded=False) as o:
+        monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_MODEL", "llmr-classifier-38")
+        monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_KEEP_ALIVE", "10m")
+        v = await _ask()
+        assert v.source == "cold" and v.model == "llmr-classifier-38"
+        await asyncio.sleep(0.05)
+    assert o.warm[0]["model"] == "llmr-classifier-38" and o.warm[0]["keep_alive"] == "10m"
+
+
+async def test_timeout_then_cooldown_then_recovery(monkeypatch, clock):
+    async with FakeOllama(monkeypatch, delay=1.0) as o:
+        slow = await _ask("a", timeout_s=0.2)
+        assert (slow.source, slow.ok, slow.tier) == ("timeout", False, None) and slow.ms < 600
+        o.delay = 0.0
+        skipped = await _ask("b")                       # inside the 30 s cooldown: no request at all
+        assert skipped.source == "timeout" and len(o.chat) == 1
+        clock.t += 31
+        assert (await _ask("c")).source == "llm" and len(o.chat) == 2
+
+
+async def test_http_error_is_a_timeout_source(monkeypatch):
+    async with FakeOllama(monkeypatch, status=500):
+        assert (await _ask()).source == "timeout"
+
+
+async def test_unreachable_server_is_a_timeout_source(monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "shadow")
-    base = classify_signals(PROMPT, GATEWAY_POLICY)
-    out = asyncio.run(classify(PROMPT, policy=GATEWAY_POLICY))
-    assert out.method != "local"
-    assert (out.task_type, out.complexity) == (base.task_type, base.complexity)
-    assert len(ollama["calls"]) == 1
-    (row,) = _log_rows()
-    assert row["rules"] == {"task_type": base.task_type.value, "complexity": base.complexity.value}
-    assert row["local"]["tier"] == "opus" and row["local"]["task_type"] == "code"
-    assert row["surface"] == "classify"
+    monkeypatch.setenv("LLM_ROUTER_OLLAMA_URL", "http://127.0.0.1:1")  # nothing listens
+    try:
+        assert (await _ask(timeout_s=0.5)).source == "timeout"
+    finally:
+        await lc.aclose()
 
 
-def test_shadow_proxy_chain_is_unchanged(monkeypatch, ollama):
-    from llm_router.proxy import backends
-
-    async def fake_chain(task, profile, *a):
-        return ["m"]
-
-    monkeypatch.setattr("llm_router.router._build_and_filter_chain", fake_chain)
-    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "shadow")
-    backends._chain_cache.clear()
-    sig = classify_signals(PROMPT, GATEWAY_POLICY)
-    got = asyncio.run(backends.policy_chain(PROMPT))
-    assert got[:2] == (sig.task_type.value, sig.complexity.value)
-    assert _log_rows()[0]["surface"] == "proxy"
+@pytest.mark.parametrize("reply", ["{not json", "[]", json.dumps({"tier": "opus"}), _reply(tier="local"),
+                                   _reply(scope=9)])
+async def test_bad_answers_are_parse_errors_and_not_cached(monkeypatch, reply):
+    async with FakeOllama(monkeypatch, reply=reply) as o:
+        a, b = await _ask(), await _ask()
+    assert (a.source, b.source) == ("parse_error", "parse_error") and len(o.chat) == 2
 
 
-# ── on feeds the result ───────────────────────────────────────────────────────
-
-def test_on_feeds_router_classify(monkeypatch, ollama):
-    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
-    ollama["reply"] = _reply("analyze", "simple", "sonnet")  # tier decides: sonnet -> moderate
-    out = asyncio.run(classify(PROMPT, policy=GATEWAY_POLICY))
-    assert (out.task_type.value, out.complexity.value, out.method) == ("analyze", "moderate", "local")
+async def test_empty_message_content_is_a_parse_error(monkeypatch):
+    async with FakeOllama(monkeypatch) as o:
+        o.reply = None  # {"message": {"content": null}}
+        v = await _ask()
+    assert v.source == "parse_error"
 
 
-def test_on_applies_the_policy_floor_only_where_the_policy_has_one(monkeypatch, ollama):
-    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
-    ollama["reply"] = _reply("code", "simple", "haiku")
-    floored = asyncio.run(classify(PROMPT, policy=HOOK_POLICY))
-    unfloored = asyncio.run(classify(PROMPT, policy=GATEWAY_POLICY))
-    assert floored.complexity.value == "moderate"  # code floor
-    assert unfloored.complexity.value == "simple"
+async def test_cold_model_is_reported_and_warmed_once_per_30_seconds(monkeypatch, clock):
+    async with FakeOllama(monkeypatch, loaded=False) as o:
+        first = await _ask("a")
+        assert (first.source, first.ok) == ("cold", False)
+        await asyncio.sleep(0.05)
+        assert len(o.warm) == 1 and o.chat == []        # warm-up is a chat with no messages
+        assert o.warm[0]["model"] == "llmr-classifier"
+        assert (await _ask("b")).source == "cold"
+        await asyncio.sleep(0.05)
+        assert len(o.warm) == 1                          # same 30 s window
+        clock.t += 31
+        assert (await _ask("c")).source == "cold"
+        await asyncio.sleep(0.05)
+        assert len(o.warm) == 2
 
 
-def test_on_feeds_proxy_tier_policy(monkeypatch, ollama):
-    from llm_router.proxy import backends
-
-    seen = []
-
-    async def fake_chain(task, profile, *a):
-        seen.append((task.value, a[2].value))
-        return ["m"]
-
-    monkeypatch.setattr("llm_router.router._build_and_filter_chain", fake_chain)
-    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
-    ollama["reply"] = _reply("code", "complex", "opus")
-    backends._chain_cache.clear()
-    assert asyncio.run(backends.policy_chain(PROMPT))[:2] == ("code", "complex")
-    assert seen == [("code", "complex")]
+def test_untagged_alias_matches_latest():
+    assert lc._same_model("llmr-classifier", "llmr-classifier:latest")
+    assert lc._same_model("llmr-classifier:latest", "llmr-classifier")
+    assert not lc._same_model("llmr-classifier", "qwen3.5:latest")
 
 
-def _load_hook():
-    path = Path(__file__).resolve().parents[1] / "src" / "llm_router" / "hooks" / "auto-route.py"
-    spec = importlib.util.spec_from_file_location("auto_route_under_test", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+async def test_off_makes_zero_ollama_calls(monkeypatch):
+    async with FakeOllama(monkeypatch) as o:
+        monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "bogus")
+        v = await _ask()
+    assert (v.source, v.ok) == ("off", False) and o.requests == 0
 
 
-def test_hook_off_shadow_on(monkeypatch, ollama):
-    hook = _load_hook()
-    monkeypatch.setattr(hook, "DISABLE_LLM_CLASSIFIERS", True)
-    text = f"please look at the thing {MARKER}"
-    rules = hook._classify_prompt_rules(text)
-    assert hook.classify_prompt(text) == rules  # off
-    assert ollama["calls"] == []
-
-    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "shadow")
-    assert hook.classify_prompt(text) == rules
-    (row,) = _log_rows()
-    assert row["surface"] == "hook" and row["rules"]["task_type"] == rules["task_type"]
-
-    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
-    ollama["reply"] = _reply("code", "complex", "opus")
-    got = hook.classify_prompt(text)
-    assert (got["task_type"], got["complexity"], got["method"]) == ("code", "complex", "local")
+async def test_residency_is_checked_once_then_remembered(monkeypatch, clock):
+    async with FakeOllama(monkeypatch) as o:
+        await _ask("a")
+        await _ask("b")
+        assert o.ps_calls == 1                           # a good answer proves the model resident
+        clock.t += 21
+        await _ask("c")
+        assert o.ps_calls == 2
 
 
-# ── fallbacks ─────────────────────────────────────────────────────────────────
-
-def test_timeout_falls_back_to_rules_within_budget(monkeypatch, ollama):
-    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
-    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS", "100")
-    ollama["delay"] = 1.0
-    base = classify_signals(PROMPT, GATEWAY_POLICY)
-    t0 = time.monotonic()
-    out = asyncio.run(classify(PROMPT, policy=GATEWAY_POLICY))
-    assert time.monotonic() - t0 < 0.8
-    assert out.method != "local"
-    assert (out.task_type, out.complexity) == (base.task_type, base.complexity)
+# --- M1.3: async only, never block the loop ------------------------------------------------
 
 
-def test_failure_cools_down_so_a_dead_ollama_costs_one_budget(monkeypatch, ollama):
-    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS", "50")
-    ollama["delay"] = 0.5
-    assert lc.classify_local(PROMPT) is None
-    n = len(ollama["calls"])
-    assert lc.classify_local(PROMPT) is None
-    assert len(ollama["calls"]) == n  # second call never left the process
+async def test_ten_concurrent_classifications_overlap(monkeypatch):
+    async with FakeOllama(monkeypatch, delay=1.0) as o:
+        t0 = time.perf_counter()
+        out = await asyncio.gather(*[_ask(f"s{i}") for i in range(10)])
+        elapsed = time.perf_counter() - t0
+    assert all(v.source == "llm" for v in out) and len(o.chat) == 10
+    assert elapsed < 1.3, f"10 concurrent calls took {elapsed:.2f}s: something serialized or blocked"
 
 
-def test_connection_error_falls_back(monkeypatch):
-    def boom(model, text, timeout):
-        raise ConnectionRefusedError("no ollama")
+async def test_a_pending_classification_does_not_delay_other_work(monkeypatch):
+    async with FakeOllama(monkeypatch, delay=1.0):
+        pending = asyncio.ensure_future(_ask())
+        await asyncio.sleep(0.1)                         # the request is in flight
+        t0 = time.perf_counter()
+        lc.mode()                                        # what a continuation decide does here: no wait
+        await asyncio.sleep(0)
+        waited = time.perf_counter() - t0
+        assert waited < 0.05, f"event loop was held for {waited * 1000:.0f} ms"
+        assert not pending.done()
+        assert (await pending).source == "llm"
+
+
+async def test_no_slow_callback_on_the_async_path_and_the_detector_works(monkeypatch, caplog):
+    """A sleeping async fake would pass a blocking implementation. So: turn on asyncio debug
+    with a 50 ms slow-callback threshold, prove it fires for a real blocking call made from
+    the loop (the sync ``classify_local``), then prove it is silent for ``classify_async``."""
+    loop = asyncio.get_running_loop()
+    async with FakeOllama(monkeypatch, delay=0.3):
+        await _ask("warm-up")                            # connection set-up is not under test
+        was_debug, was_slow = loop.get_debug(), loop.slow_callback_duration
+        loop.set_debug(True)
+        loop.slow_callback_duration = 0.05
+        await asyncio.sleep(0)                           # debug timing applies from the NEXT loop step
+        try:
+            with monkeypatch.context() as m, caplog.at_level(logging.WARNING, logger="asyncio"):
+                def blocking_post(model, assembled, timeout):
+                    time.sleep(0.3)                      # what a sync call in the proxy would do
+                    return _reply()
+
+                m.setattr(lc, "_post", blocking_post)
+                lc.classify_local(_assembled(), timeout_s=2.0)   # WRONG on a loop: blocks 0.3 s
+                await asyncio.sleep(0)
+                assert [r for r in caplog.records if "took" in r.getMessage()], \
+                    "the slow-callback detector did not fire for a real blocking call"
+            caplog.clear()
+            with caplog.at_level(logging.WARNING, logger="asyncio"):
+                assert (await _ask("under-test")).source == "llm"
+                slow = [r.getMessage() for r in caplog.records if "took" in r.getMessage()]
+            assert slow == []
+        finally:
+            loop.set_debug(was_debug)
+            loop.slow_callback_duration = was_slow
+
+
+async def test_nine_calls_with_one_text_make_one_http_call(monkeypatch):
+    async with FakeOllama(monkeypatch, delay=0.2) as o:
+        together = await asyncio.gather(*[_ask() for _ in range(6)])    # in-flight dedupe
+        later = [await _ask() for _ in range(3)]                        # cache
+    assert len(o.chat) == 1
+    assert sorted(v.source for v in together + later) == ["cache"] * 8 + ["llm"]
+    assert len({(v.tier, v.task_type) for v in together + later}) == 1
+
+
+async def test_cancelling_a_waiter_does_not_cancel_the_shared_request(monkeypatch):
+    async with FakeOllama(monkeypatch, delay=0.3) as o:
+        leader = asyncio.ensure_future(_ask())
+        await asyncio.sleep(0.05)
+        follower = asyncio.ensure_future(_ask())
+        await asyncio.sleep(0.05)
+        follower.cancel()
+        assert (await leader).source == "llm"
+        assert (await _ask()).source == "cache" and len(o.chat) == 1
+
+
+async def test_cache_is_keyed_by_session_and_text(monkeypatch):
+    async with FakeOllama(monkeypatch) as o:
+        await _ask("a", sid="s1")
+        await _ask("a", sid="s2")
+        await _ask("b", sid="s1")
+        assert len(o.chat) == 3
+        assert (await _ask("a", sid="s1")).source == "cache"
+        assert (await _ask("a", sid="s1", derivation="rule")).source == "llm"   # another question
+
+
+async def test_cache_ttl_and_lru(monkeypatch, clock):
+    monkeypatch.setattr(lc, "CACHE_MAX", 2)
+    async with FakeOllama(monkeypatch) as o:
+        for sha in ("a", "b", "c"):
+            await _ask(sha)
+        assert len(lc._cache) == 2 and len(o.chat) == 3
+        assert (await _ask("c")).source == "cache"
+        assert (await _ask("a")).source == "llm"          # evicted
+        assert len(o.chat) == 4
+        clock.t += lc.CACHE_TTL_S + 1
+        assert (await _ask("a")).source == "llm"          # expired
+        assert len(o.chat) == 5
+
+
+async def test_a_failed_classification_is_shared_by_concurrent_callers(monkeypatch):
+    async with FakeOllama(monkeypatch, delay=1.0) as o:
+        out = await asyncio.gather(*[_ask(timeout_s=0.2) for _ in range(4)])
+    assert [v.source for v in out] == ["timeout"] * 4 and len(o.chat) == 1
+
+
+# --- the synchronous path, for the eval harness only --------------------------------------
+
+
+def test_classify_local_returns_a_verdict_and_never_raises(monkeypatch):
+    monkeypatch.setattr(lc, "_post", lambda model, assembled, timeout: _reply(14, tier="opus"))
+    v = lc.classify_local(_assembled(), derivation="rule")
+    assert (v.source, v.tier, v.margin) == ("llm", "sonnet", 0)
+
+    def boom(model, assembled, timeout):
+        raise OSError("down")
 
     monkeypatch.setattr(lc, "_post", boom)
-    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
-    assert lc.apply(PROMPT, "query", "simple", "x") == ("query", "simple")
+    assert lc.classify_local(_assembled()).source == "timeout"
+    assert lc.classify_local("   ").source == "parse_error"
 
 
-@pytest.mark.parametrize("bad", [
-    "", "not json", "[]", "null", "{}",
-    '{"task_type":"code","complexity":"complex"}',                      # missing key
-    '{"task_type":"code","complexity":"complex","tier":"gpt9"}',          # bad enum
-    '{"task_type":"poetry","complexity":"complex","tier":"opus"}',        # bad enum
-    '{"task_type":"code","complexity":"complex","tier":"opus","x":1}',    # extra key
-    '```json\n{"task_type":"code","complexity":"complex","tier":"opus"}\n```',  # not strict
-    '{"task_type":"code","complexity":"complex","tier":"opus"',           # truncated
-])
-def test_malformed_json_falls_back(monkeypatch, ollama, bad):
-    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
-    ollama["reply"] = bad
-    assert lc.classify_local(PROMPT) is None
-    assert lc.apply(PROMPT, "query", "simple", "x") == ("query", "simple")
-    out = asyncio.run(classify(PROMPT, policy=GATEWAY_POLICY))
-    assert out.method != "local"
+def test_classify_local_is_bounded_by_its_budget(monkeypatch):
+    monkeypatch.setattr(lc, "_post", lambda model, assembled, timeout: time.sleep(2) or _reply())
+    t0 = time.perf_counter()
+    assert lc.classify_local(_assembled(), timeout_s=0.1).source == "timeout"
+    assert time.perf_counter() - t0 < 1.0
 
 
-# ── privacy and shape ─────────────────────────────────────────────────────────
+async def test_the_async_path_never_uses_the_sync_one(monkeypatch):
+    """classify_local blocks its thread for up to the budget: it is for the eval harness."""
+    def forbidden(*a, **k):
+        raise AssertionError("classify_local called from the async path")
 
-def test_no_prompt_text_is_persisted(monkeypatch, ollama):
-    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "shadow")
-    asyncio.run(classify(PROMPT, policy=GATEWAY_POLICY))
-    lc.apply(PROMPT, "query", "simple", "hook")
-    assert _log_rows(), "nothing was logged, so the check below would be vacuous"
-    assert MARKER not in _all_home_text()
-    assert _log_rows()[0]["prompt_chars"] == len(PROMPT)
-
-
-def test_prompt_is_truncated_head_and_tail():
-    long = "HEAD" + "x" * 5000 + "TAIL"
-    t = lc.truncate(long)
-    assert len(t) <= lc.MAX_PROMPT_CHARS and t.startswith("HEAD") and t.endswith("TAIL")
-    assert lc.truncate("short") == "short"
-
-
-def test_request_carries_schema_keepalive_and_truncated_text(monkeypatch):
-    sent = {}
-
-    class R:
-        def read(self):
-            return json.dumps({"message": {"content": _reply()}}).encode()
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-    def fake_urlopen(req, timeout):
-        sent["body"] = json.loads(req.data)
-        sent["timeout"] = timeout
-        return R()
-
-    monkeypatch.setattr(lc.urllib.request, "urlopen", fake_urlopen)
-    v = lc.classify_local("A" * 9000, timeout_s=1.5)
-    assert v and v.tier == "opus" and v.complexity == "complex"
-    b = sent["body"]
-    assert b["keep_alive"] == "600s" and b["format"] == lc.SCHEMA and b["think"] is False
-    assert len(b["messages"][1]["content"]) <= lc.MAX_PROMPT_CHARS and sent["timeout"] == 1.5
-
-
-def test_on_is_the_first_entry_of_the_classifier_chain(monkeypatch, ollama):
-    from llm_router import classifier
-
-    monkeypatch.undo()  # drop the autouse no_cloud stub: this test uses the real chain function
-    monkeypatch.setattr(lc, "_post", lambda m, t, to: _reply("query", "simple", "haiku"))
-    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
-    monkeypatch.setattr(lc, "_cool_until", 0.0)
-    r = asyncio.run(classifier.classify_complexity("what does this function return? unique-" + str(time.time())))
-    assert r.classifier_model.startswith("ollama/") and r.complexity.value == "simple"
-    assert r.classifier_cost_usd == 0.0
+    monkeypatch.setattr(lc, "classify_local", forbidden)
+    monkeypatch.setattr(lc, "_post", forbidden)
+    async with FakeOllama(monkeypatch):
+        assert (await _ask()).source == "llm"
