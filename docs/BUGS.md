@@ -15,8 +15,10 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 5 | Haiku 400 on a mid-conversation system message | worked around (flag off); fold is plan task M0.7 |
 | 6 | Research session b9f04425 counted as organic | fixed in #291 (M0.0b) |
 | 7 | `edit_outcomes.jsonl` rows with no source | open, fix is plan task M0.3(c) |
-| 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | known, not fixed |
+| 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | fixed in P0.7 (`fix/learning-bugs`): one flag, default off |
 | 9 | Classifier warm-up loaded `llmr-classifier` at the wrong `num_ctx` | fixed in #298 (M1.4, review 2) |
+| 10 | Learned routes keyed by tool name, looked up by task type | fixed in P0.7 (`fix/learning-bugs`) |
+| 11 | Retrospective accuracy 100% at 0 corrections | fixed in P0.7 (`fix/learning-bugs`) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -134,16 +136,27 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 ## 8. `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off
 
 - **Symptom.** With `LLM_ROUTER_CLASSIFY_LOCAL_ONLY` and `LLM_ROUTER_DISABLE_LLM_CLASSIFIERS`
-  both unset, the hook's LLM classifier layer is off whenever Ollama is reachable.
-- **Cause.** `hooks/auto-route.py` (line 374 on this commit):
+  both unset, the hook's LLM classifier layer is off whenever Ollama is reachable, and on —
+  sending the prompt to a cloud API (layer 3) — whenever Ollama is unreachable and a Gemini or
+  OpenAI key is set.
+- **Cause.** `hooks/auto-route.py` (:387 at da31df7):
   `DISABLE_LLM_CLASSIFIERS = _ollama_reachable or not _has_api_key`. The comment above it says
-  local-only means "heuristic + Ollama", but this flag also gates layer 2 (Ollama, line 2435), so
-  the Ollama layer is off exactly when Ollama is reachable. Layer 3 (API, line 2445) is off with it.
-- **Fix.** None. Recorded as known and not fixed: the hook stays byte-identical until a task
-  that changes hooks (M3.4 / M4) owns it. Running with the variable set explicitly to `false`
-  avoids the auto-detect.
-- **Test.** None yet. A fix needs a test that, with both variables unset and Ollama
-  reachable, asserts the value the owner chooses.
+  local-only means "heuristic + Ollama", but this flag also gates layer 2 (Ollama), so the
+  Ollama layer is off exactly when Ollama is reachable. It also cost a 0.5 s `/api/tags` probe
+  at every hook start.
+- **Fix.** P0.7-c (plan v16, `fix/learning-bugs`, hook version 47). The layer is controlled
+  only by `LLM_ROUTER_HOOK_LLM_LAYER` (registered in `env_registry.py`), **default off**.
+  `LLM_ROUTER_DISABLE_LLM_CLASSIFIERS` is no longer read; with the layer on, layer 3 (cloud API)
+  additionally needs `LLM_ROUTER_CLASSIFY_LOCAL_ONLY=false`. This deliberately departs from the
+  gap analysis, which asked to switch the layer on when Ollama is present. Reasons: the hook
+  latency NFR, and the round-2 kill of the v7 LLM classifier — Cλ2 10.70 vs rules 9.58,
+  under-route 79/91 vs 47/91 (n = 91, `$PP/eval/results/tune_round2_20261007T151100.json`). The
+  flag stays off until a D-19 candidate passes its own pre-registration.
+- **Test.** `tests/test_p07_learning_bugs.py`: `test_p07c_default_off_with_ollama_reachable`,
+  `test_p07c_default_off_without_ollama_and_with_an_api_key` (red on da31df7: Ollama layer
+  called), `test_p07c_flag_on_calls_the_ollama_layer` (red on da31df7: not called),
+  `test_p07c_old_variables_no_longer_turn_the_layer_on` (red on da31df7),
+  `test_p07c_flag_on_keeps_the_cloud_api_layer_opt_in`, `test_p07c_flag_is_registered`.
 
 ## 9. Classifier warm-up loaded `llmr-classifier` at the wrong `num_ctx`
 
@@ -173,3 +186,35 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   4096 and an omitted `context_length` return `llm`. Mutants run on head 2316f3f: warm-up
   without `options` fails both tests; `_is_loaded` returning True regardless of context fails
   the second.
+
+## 10. Learned routes keyed by tool name, looked up by task type
+
+- **Symptom.** No user correction ever overrode a route. Three `llm_reroute` corrections of an
+  `llm_code` decision wrote `learned_routes.json` with the key `llm_code`; the hook asks for
+  `code` and found nothing.
+- **Cause.** `src/llm_router/memory/profiles.py` `build_learned_profile` (:102 at da31df7) keyed
+  the profile by `corrections.original_tool` (a tool name). `hooks/auto-route.py`
+  `_check_learned_override` (:3953) looks it up by the classified task type.
+- **Fix.** P0.7-a (`fix/learning-bugs`). The profile is keyed by task type through
+  `TOOL_TO_TASK_TYPE` (`llm_code→code`, `llm_query→query`, `llm_research→research`,
+  `llm_generate→generate`, `llm_analyze→analyze`; unknown names kept). For one release both
+  readers (`load_learned_profile` and the hook) accept an old tool-keyed file; a task-type key
+  wins over a legacy key for the same task.
+- **Test.** `tests/test_p07_learning_bugs.py::test_p07a_session_end_profile_feeds_the_hook_override`
+  (session-end `_build_and_save_learned_profile` output feeds `_check_learned_override('code', …)`
+  and the override fires; red on da31df7), `test_p07a_every_tool_key_maps_to_its_task_type`,
+  `test_p07a_reader_accepts_a_legacy_tool_keyed_file`, `test_p07a_task_type_key_wins_over_a_legacy_key`.
+
+## 11. Retrospective accuracy 100% at 0 corrections
+
+- **Symptom.** Every retrospective of a session in which nobody corrected a route printed
+  "Accuracy: 100%".
+- **Cause.** `src/llm_router/retrospective.py` `analyze_facts` (:234 at da31df7):
+  `accuracy = 1.0 - corrections / decisions`. With 0 corrections that is 1.0, a perfect score
+  measured from nothing: an uncorrected route is not a verified one.
+- **Fix.** P0.7-b (`fix/learning-bugs`). With 0 corrections `classification_accuracy` is
+  `None`, rendered "not measurable (no corrections)" by `_format_accuracy_pct`. With at least
+  one correction the ratio is unchanged.
+- **Test.** `tests/test_p07_learning_bugs.py::test_p07b_zero_corrections_is_not_measurable` and
+  `test_p07b_retrospective_file_says_not_measurable` (red on da31df7: 1.0 / no such text),
+  `test_p07b_with_corrections_is_still_a_number`.
