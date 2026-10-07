@@ -53,7 +53,7 @@ from urllib.parse import urlsplit
 from llm_router.local_agent import DEFAULT_MAX_PROMPT_TOKENS, LocalAgentConfig, enabled_from_env
 from llm_router.local_agent import capability as la_capability
 from llm_router.local_agent.compact import session_cwd as la_session_cwd
-from llm_router import failopen, prompt_key
+from llm_router import failopen, local_models, prompt_key
 from llm_router.proxy import ledger, local_mode, local_shadow, okf_context
 
 from llm_router.proxy.backend_health import (
@@ -107,7 +107,7 @@ OKF_ATTACH_TIMEOUT_S = 2.0
 ANTHROPIC_UPSTREAM = "https://api.anthropic.com"
 DEFAULT_PORT = 8787
 DEFAULT_STEP_BUDGET_S = 30.0
-DEFAULT_NUM_CTX = 32768
+DEFAULT_NUM_CTX = local_models.DEFAULT_NUM_CTX
 _HOP = {"host", "content-length", "connection", "accept-encoding", "transfer-encoding",
         "keep-alive", "proxy-authorization", "te", "trailer", "upgrade"}
 
@@ -127,6 +127,13 @@ TIERS_CONVERSATION = "conversation"
 TIER_MODES = (TIERS_OFF, TIERS_ON, TIERS_CONVERSATION)
 
 
+def _env_num_ctx() -> int | None:
+    """``LLM_ROUTER_PROXY_NUM_CTX`` as an int, or None when unset (the table
+    value for the model then applies; see ``ProxyConfig.__post_init__``)."""
+    raw = os.environ.get("LLM_ROUTER_PROXY_NUM_CTX", "").strip()
+    return int(raw) if raw else None
+
+
 def validate_upstream(url: str) -> str:
     """Only Anthropic itself or a loopback test double may receive the client's
     credentials. Anything else is refused at startup."""
@@ -144,7 +151,9 @@ class ProxyConfig:
     step_budget_s: float = DEFAULT_STEP_BUDGET_S
     model: str | None = None
     trim: str | None = None
-    num_ctx: int = DEFAULT_NUM_CTX
+    # None = the table value for ``model`` (llm_router.local_models, M3.4),
+    # resolved in __post_init__; an explicit int (--num-ctx, env) is kept.
+    num_ctx: int | None = None
     upstream: str = ANTHROPIC_UPSTREAM
     ollama_url: str | None = None
     ledger_path: Path | None = None
@@ -170,6 +179,10 @@ class ProxyConfig:
     shadow_budget_s: float = local_shadow.DEFAULT_BUDGET_S
     shadow_path: Path | None = None
 
+    def __post_init__(self) -> None:
+        if self.num_ctx is None:
+            self.num_ctx = local_models.num_ctx(self.model)
+
     @classmethod
     def from_env(cls) -> "ProxyConfig":
         steps_raw = os.environ.get("LLM_ROUTER_PROXY_STEPS", "continuation")
@@ -178,7 +191,7 @@ class ProxyConfig:
             step_budget_s=float(os.environ.get("LLM_ROUTER_PROXY_STEP_BUDGET_S", DEFAULT_STEP_BUDGET_S)),
             model=os.environ.get("LLM_ROUTER_PROXY_MODEL") or None,
             trim=os.environ.get("LLM_ROUTER_PROXY_TRIM") or None,
-            num_ctx=int(os.environ.get("LLM_ROUTER_PROXY_NUM_CTX", DEFAULT_NUM_CTX)),
+            num_ctx=_env_num_ctx(),
             upstream=os.environ.get("LLM_ROUTER_PROXY_UPSTREAM") or ANTHROPIC_UPSTREAM,
             hedge_s=parse_hedge(os.environ.get("LLM_ROUTER_PROXY_HEDGE_S", str(DEFAULT_HEDGE_S))),
             loop_max_consecutive=int(os.environ.get("LLM_ROUTER_PROXY_LOOP_MAX_CONSECUTIVE",
@@ -968,7 +981,7 @@ def cmd_proxy(argv: list[str]) -> int:
     ap.add_argument("--step-budget-s", type=float, default=env.step_budget_s)
     ap.add_argument("--model", default=env.model)
     ap.add_argument("--trim", default=env.trim)
-    ap.add_argument("--num-ctx", type=int, default=env.num_ctx)
+    ap.add_argument("--num-ctx", type=int, default=_env_num_ctx())
     ap.add_argument("--hedge-s", default=None, help="first-token deadline in seconds, or 'off'")
     ap.add_argument("--ollama-url", default=None, help="e.g. a dedicated tuned `ollama serve` (docs/proxy.md)")
     ap.add_argument("--keep-alive", default=str(DEFAULT_KEEP_ALIVE))

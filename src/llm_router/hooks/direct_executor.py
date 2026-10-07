@@ -271,12 +271,17 @@ def _num_predict_for(timeout: float) -> int:
 
 
 def _local_num_ctx(model: str | None = None) -> int | None:
-    """The shared local context window for *model* (see agent_loop._num_ctx)."""
+    """The shared local context window for *model* (see agent_loop._num_ctx).
+
+    ``_num_ctx`` applies the operator override and otherwise returns the table
+    value from ``llm_router.local_models``; if it cannot be imported the table
+    is read directly, so a draft never goes out with a different window."""
     try:
         from llm_router.hooks.agent_loop import _num_ctx
         return _num_ctx(model)
     except Exception:                                        # noqa: BLE001
-        return None
+        from llm_router.local_models import num_ctx
+        return num_ctx(model)
 
 
 def call_ollama(

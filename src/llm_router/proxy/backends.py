@@ -46,6 +46,7 @@ import importlib
 import json
 from typing import Callable, Protocol
 
+from llm_router import local_models
 from llm_router.local_context_guard import check_overflow, check_truncated, effective_window, estimate_payload_tokens
 from llm_router.proxy.steps import STEP_CONTINUATION, non_system, prev_tools
 from llm_router.proxy.translate import from_ollama, to_ollama
@@ -182,7 +183,7 @@ class OllamaBackend:
     """Ollama ``/api/chat`` with native tool calls, thinking off, streamed so
     the first-token hedge can fire before a cold model finishes loading."""
 
-    def __init__(self, model: str, client, *, base_url: str, num_ctx: int,
+    def __init__(self, model: str, client, *, base_url: str, num_ctx: int | None = None,
                  hedge_s: float | None = DEFAULT_HEDGE_S,
                  keep_alive: int | str | None = DEFAULT_KEEP_ALIVE,
                  num_predict: int | None = None, offload_cpu: bool = False) -> None:
@@ -196,7 +197,8 @@ class OllamaBackend:
         self.model = model.split("/", 1)[1] if model.startswith("ollama/") else model
         self.client = client
         self.base_url = base_url.rstrip("/")
-        self.num_ctx = num_ctx
+        # None: the per-model table value (llm_router.local_models, M3.4).
+        self.num_ctx = num_ctx if num_ctx is not None else local_models.num_ctx(self.model)
         self.hedge_s = hedge_s
         self.keep_alive = keep_alive
 
