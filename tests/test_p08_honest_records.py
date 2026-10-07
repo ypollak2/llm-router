@@ -1,0 +1,235 @@
+"""P0.8 honest records (R-EVL-1, NFR-NUM).
+
+Each test here failed on da31df7:
+
+* DIRECT rows wrote ``classifier_confidence=0.0``, ``classifier_latency_ms=0.0``,
+  ``budget_pct_used=0.0``, ``was_downshifted=0`` and ``quality_mode='balanced'``
+  for values the hook never measured (live copy: 63/63 DIRECT rows at 0.0), and an
+  unknown task type was logged as ``query``.
+* ``usage`` had no ``session_id`` column, so no usage row could be scoped to a session.
+* The Stop line's north star counted the heuristic ``outcome == used``, while
+  ``llm-router kpi`` counts the strict rule (``northstar.is_strict_used``).
+* The status bar priced its baseline at Opus and labelled it "vs Sonnet".
+"""
+from __future__ import annotations
+
+import asyncio
+import importlib.util
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+import pytest
+
+from llm_router.hooks.direct_executor import DirectResult, ModelSpec
+
+_REPO = Path(__file__).resolve().parent.parent
+_HOOKS = _REPO / "src" / "llm_router" / "hooks"
+
+
+def _ollama_result() -> DirectResult:
+    return DirectResult(
+        text="some answer",
+        model=ModelSpec(provider="ollama", model="qwen3.5:latest"),
+        latency_ms=6500,
+        input_tokens=120,
+        output_tokens=60,
+    )
+
+
+def _rows(db: Path, sql: str) -> list[tuple]:
+    con = sqlite3.connect(str(db))
+    try:
+        return con.execute(sql).fetchall()
+    finally:
+        con.close()
+
+
+# ── task 1: DIRECT unknowns are NULL, not defaults ──────────────────────────
+
+def test_direct_row_records_unmeasured_fields_as_null(temp_db):
+    from llm_router.hooks.savings_logger import log_direct_to_db
+
+    log_direct_to_db(_ollama_result(), prompt="hello", task_type="code",
+                     complexity="simple", classifier_type="heuristic")
+
+    rows = _rows(temp_db, "SELECT classifier_confidence, classifier_latency_ms, budget_pct_used, "
+                          "was_downshifted, quality_mode, task_type, reason_code FROM routing_decisions")
+    assert rows == [(None, None, None, None, None, "code", "direct")]
+
+
+def test_direct_unknown_task_type_is_null_with_raw_value(temp_db):
+    from llm_router.hooks.savings_logger import log_direct_to_db
+
+    log_direct_to_db(_ollama_result(), prompt="x", task_type="not-a-real-task-type",
+                     complexity="moderate", classifier_type="heuristic")
+
+    assert _rows(temp_db, "SELECT task_type, task_type_raw FROM routing_decisions") == [
+        (None, "not-a-real-task-type")]
+    assert _rows(temp_db, "SELECT task_type, task_type_raw FROM usage") == [
+        (None, "not-a-real-task-type")]
+
+
+def test_direct_known_task_type_leaves_raw_empty(temp_db):
+    from llm_router.hooks.savings_logger import log_direct_to_db
+
+    log_direct_to_db(_ollama_result(), prompt="x", task_type="analyze", complexity="moderate")
+
+    assert _rows(temp_db, "SELECT task_type, task_type_raw FROM usage") == [("analyze", None)]
+
+
+# ── task 2: usage.session_id ────────────────────────────────────────────────
+
+def _columns(db: Path, table: str) -> list[str]:
+    return [r[1] for r in _rows(db, f"PRAGMA table_info({table})")]
+
+
+def test_usage_session_id_migration_is_idempotent(temp_db):
+    from llm_router import cost
+
+    async def _open_twice() -> None:
+        for _ in range(2):
+            db = await cost._get_db()
+            await db.close()
+
+    asyncio.run(_open_twice())
+    cols = _columns(temp_db, "usage")
+    assert cols.count("session_id") == 1
+    assert cols.count("task_type_raw") == 1
+    assert _columns(temp_db, "routing_decisions").count("task_type_raw") == 1
+
+
+def test_direct_row_carries_the_payload_session_on_usage(temp_db):
+    from llm_router.hooks.savings_logger import log_direct_to_db
+
+    log_direct_to_db(_ollama_result(), prompt="x", task_type="code", complexity="simple",
+                     session_id="3f2a9c1e-0000-4000-8000-000000000001")
+    log_direct_to_db(_ollama_result(), prompt="x", task_type="code", complexity="simple",
+                     session_id="sdk")  # a placeholder, not a session
+
+    assert _rows(temp_db, "SELECT session_id FROM usage ORDER BY id") == [
+        ("3f2a9c1e-0000-4000-8000-000000000001",), (None,)]
+
+
+def test_log_usage_stamps_the_mcp_call_session(temp_db, monkeypatch):
+    from llm_router import call_identity, cost
+    from llm_router.types import LLMResponse, RoutingProfile, TaskType
+
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-mcp-42")
+    resp = LLMResponse(content="ok", model="gpt-4o-mini", input_tokens=37, output_tokens=11,
+                       cost_usd=0.0002, latency_ms=50.0, provider="openai")
+
+    async def _write() -> None:
+        await cost.log_usage(resp, TaskType.CODE, RoutingProfile.BALANCED)   # no tool call bound
+        token = call_identity.bind("toolu_01ABC")
+        try:
+            await cost.log_usage(resp, TaskType.CODE, RoutingProfile.BALANCED)
+        finally:
+            call_identity.reset(token)
+
+    asyncio.run(_write())
+    assert _rows(temp_db, "SELECT session_id FROM usage ORDER BY id") == [(None,), ("sess-mcp-42",)]
+
+
+def test_legacy_usage_table_accepts_null_task_type_after_migration(tmp_path, monkeypatch):
+    """A database created before this change has ``usage.task_type NOT NULL``; the
+    migration relaxes it once, keeps every row and its id, and is idempotent."""
+    db_path = tmp_path / "legacy.db"
+    con = sqlite3.connect(str(db_path))
+    con.execute("""CREATE TABLE usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')),
+        model TEXT NOT NULL, provider TEXT NOT NULL, task_type TEXT NOT NULL,
+        profile TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+        cost_usd REAL NOT NULL, latency_ms REAL NOT NULL, success INTEGER NOT NULL DEFAULT 1)""")
+    for i in range(5):
+        con.execute("INSERT INTO usage (model, provider, task_type, profile, input_tokens, "
+                    "output_tokens, cost_usd, latency_ms) VALUES ('m', 'p', 'code', 'balanced', ?, 1, 0, 1)",
+                    (i,))
+    con.execute("DELETE FROM usage WHERE id = 5")   # the sequence must survive the rebuild
+    con.commit()
+    con.close()
+    monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(db_path))
+    from llm_router import cost
+
+    async def _open_twice() -> None:
+        for _ in range(2):
+            db = await cost._get_db()
+            await db.close()
+
+    asyncio.run(_open_twice())
+    info = {r[1]: r[3] for r in _rows(db_path, "PRAGMA table_info(usage)")}
+    assert info["task_type"] == 0 and info["model"] == 1
+    assert _rows(db_path, "SELECT id, input_tokens FROM usage ORDER BY id") == [
+        (1, 0), (2, 1), (3, 2), (4, 3)]
+    assert _rows(db_path, "SELECT name FROM sqlite_master WHERE name LIKE 'usage%' AND type='table'") == [
+        ("usage",)]
+    idx = {r[0] for r in _rows(db_path, "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='usage'")}
+    assert {"idx_usage_provider_ts", "idx_usage_model_ts"} <= idx
+    con = sqlite3.connect(str(db_path))
+    con.execute("INSERT INTO usage (model, provider, task_type, profile, input_tokens, output_tokens, "
+                "cost_usd, latency_ms) VALUES ('m', 'p', NULL, 'balanced', 9, 1, 0, 1)")
+    con.commit()
+    assert con.execute("SELECT max(id) FROM usage").fetchone() == (6,)
+    con.close()
+
+
+def _load_hook(name: str, alias: str):
+    spec = importlib.util.spec_from_file_location(alias, _HOOKS / name)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[alias] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_cc_usage_track_writes_the_payload_session(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(home))
+    hook = _load_hook("cc-usage-track.py", "_p08_cc_usage_track")
+    payload = {"session_id": "9b1d7c2e-1111-4000-8000-000000000002", "tool_name": "Agent",
+               "tool_input": {"subagent_type": "Explore", "prompt": "p" * 40},
+               "tool_response": {"output": "r" * 40}, "duration_ms": 1200}
+    monkeypatch.setattr(sys, "stdin", __import__("io").StringIO(json.dumps(payload)))
+    with pytest.raises(SystemExit):
+        hook.main()
+    assert _rows(home / "usage.db", "SELECT provider, session_id FROM usage") == [
+        ("cc", "9b1d7c2e-1111-4000-8000-000000000002")]
+
+
+# ── task 4: one NS rule on user surfaces; status-bar label ──────────────────
+
+def _unit(sid: str, i: int, *, verified: bool) -> dict:
+    return {"session_id": sid, "kind": "routed_mcp", "lever": "mcp", "outcome": "used",
+            "model": "qwen3-coder:30b", "task_type": "code", "ts": 1_800_000_000.0 + i,
+            "verify": {"verify_status": "pass_f2p"} if verified else None}
+
+
+def test_stop_line_north_star_uses_the_strict_rule(monkeypatch):
+    from llm_router import northstar
+
+    sid = "sess-ns"
+    units = [_unit(sid, i, verified=i < 10) for i in range(northstar.MIN_UNITS)]
+    monkeypatch.setattr(northstar, "units", lambda **kw: iter(units))
+    # 50 units, all heuristic "used", 10 pass the strict rule: 20%, not 100%.
+    assert northstar.current_session_line(sid) == "north star (strict) 20% (n=50)"
+    strict = sum(northstar.is_strict_used(u) for u in units)
+    assert strict == 10
+
+
+def test_status_bar_baseline_label_names_the_priced_model():
+    hook = _load_hook("status-bar.py", "_p08_status_bar")
+    out = hook._savings_str_full({"today": (1.0, 2.0), "week": (1.0, 2.0), "month": (5.0, 58.0),
+                                  "session": (0.0, 0.0)})
+    assert "vs Sonnet" not in out
+    assert f"vs {hook.HOST_BASELINE_LABEL}:$58" in out
+    assert hook.HOST_BASELINE_LABEL == "Opus" and hook.HOST_BASELINE_TIER == "opus"
+
+
+def test_cc_usage_track_session_rule_matches_call_identity():
+    from llm_router import call_identity
+
+    hook = _load_hook("cc-usage-track.py", "_p08_cc_usage_track_rule")
+    for value in ("abc-123", "  9b1d7c2e-1111-4000-8000-000000000002 ", "sdk", "Unknown", "",
+                  "has space", "x" * 129, None, 42, "toolu_01:ABC.def"):
+        assert hook._ledger_session_id(value) == call_identity.ledger_session_id(value), value

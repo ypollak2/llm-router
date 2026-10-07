@@ -17,6 +17,11 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 7 | `edit_outcomes.jsonl` rows with no source | open, fix is plan task M0.3(c) |
 | 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | known, not fixed |
 | 9 | Classifier warm-up loaded `llmr-classifier` at the wrong `num_ctx` | fixed in #298 (M1.4, review 2) |
+| 10 | DIRECT rows wrote 0.0 / False / "balanced" for values nobody measured | fixed in this change (v16 P0.8) |
+| 11 | `usage` rows carried no session id | fixed in this change (v16 P0.8); live coverage pending deploy |
+| 12 | The Stop line's north star used the heuristic "used", kpi the strict rule | fixed in this change (v16 P0.8) |
+| 13 | Status bar priced its baseline at Opus and labelled it "vs Sonnet" | fixed in this change (v16 P0.8) |
+| 14 | `llm-router replay` raises TypeError on a row with NULL confidence | open, found in v16 P0.8, not fixed here |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -173,3 +178,70 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   4096 and an omitted `context_length` return `llm`. Mutants run on head 2316f3f: warm-up
   without `options` fails both tests; `_is_loaded` returning True regardless of context fails
   the second.
+
+## 10. DIRECT rows wrote 0.0 / False / "balanced" for values nobody measured
+
+- **Symptom.** Every DIRECT row in `routing_decisions` had `classifier_confidence = 0.0`,
+  `classifier_latency_ms = 0.0`, `budget_pct_used = 0.0` and `quality_mode = 'balanced'`:
+  63 of 63 `reason_code = 'direct'` rows in an rsync copy of `~/.llm-router/usage.db` taken
+  2026-10-07 (the plan's 7-day figure was 36/36 [UDB7]). A task type the hook could not map
+  was logged as `query`.
+- **Cause.** `savings_logger.log_direct_to_db` passed literals for fields the DIRECT path
+  never computes, and coerced an unknown task type to `TaskType.QUERY`. `usage.task_type` was
+  declared `NOT NULL`, so it could not hold "unknown" either.
+- **Fix.** Those five fields are passed as None and stored as NULL (`log_routing_decision`
+  now keeps a None `was_downshifted` as NULL). An unknown task type is NULL in both tables,
+  with the received label in the new `task_type_raw` column. `cost._relax_usage_task_type_notnull`
+  rebuilds `usage` once, inside `BEGIN IMMEDIATE`, keeping every row, id, index and the
+  AUTOINCREMENT sequence. On the copy: 1,388 rows kept, sequence 1,428 kept, both indexes
+  recreated. Smoke on the same copy (40 DIRECT rows: 30 through `sdk.route` with a fake model
+  chain, 10 through agent-route `_log_cli_savings`): 0 rows at 0.0, 40 NULL.
+- **Test.** `tests/test_p08_honest_records.py`: `test_direct_row_records_unmeasured_fields_as_null`,
+  `test_direct_unknown_task_type_is_null_with_raw_value`,
+  `test_legacy_usage_table_accepts_null_task_type_after_migration`. Each fails on da31df7.
+
+## 11. `usage` rows carried no session id
+
+- **Symptom.** No `usage` row could be scoped to a session: the table had no `session_id`
+  column (copy of the live `usage.db`, 2026-10-07, 1,388 rows).
+- **Cause.** `cost.log_usage` and the second writer, `hooks/cc-usage-track.py` (275 of 669
+  `usage` rows since 2026-09-30 on the copy, provider `cc`), never recorded one.
+- **Fix.** Additive migration `usage.session_id TEXT`. `log_usage` takes `session_id`; when
+  omitted it stamps `call_identity.call_session_id()` (the MCP call's own session, None
+  outside a tool call). The DIRECT path passes the hook payload's id. `cc-usage-track.py`
+  (hook version 2) adds the column if it is the first writer and stores the PostToolUse
+  payload's `session_id`. All writers store ids only; placeholders such as `sdk` are NULL.
+- **Test.** `test_usage_session_id_migration_is_idempotent`,
+  `test_direct_row_carries_the_payload_session_on_usage`, `test_log_usage_stamps_the_mcp_call_session`,
+  `test_cc_usage_track_writes_the_payload_session`, `test_cc_usage_track_session_rule_matches_call_identity`.
+  The live bar (session id on at least 99% of at least 100 post-deploy rows) is checked after deploy.
+
+## 12. The Stop line's north star used the heuristic "used", kpi the strict rule
+
+- **Symptom.** For one session the session-end/Stop line and `llm-router kpi` could show two
+  different north stars.
+- **Cause.** `northstar.current_session_line` divided heuristic `outcome == used` units by all
+  units; kpi's NS counts `is_strict_used` (PLAN M0.2, bug 3).
+- **Fix.** `report()` adds `strict_used` and `strict_share` per session, counted with
+  `is_strict_used` on attempted units, as kpi does. The line now prints
+  `north star (strict) N% (n=...)`. The heuristic stays a kpi diagnostic.
+- **Test.** `test_stop_line_north_star_uses_the_strict_rule` (50 heuristic-used units, 10 strict:
+  prints 20%, was 100%).
+
+## 13. Status bar priced its baseline at Opus and labelled it "vs Sonnet"
+
+- **Symptom.** The full status line read `(vs Sonnet:$58)` for a baseline priced at Opus rates.
+- **Cause.** WP-03 moved the price to `pricing.price_for("opus")` and left the label.
+- **Fix.** `HOST_BASELINE_TIER = "opus"` prices the baseline and `HOST_BASELINE_LABEL` names it,
+  so the two cannot drift (status-bar hook version 6).
+- **Test.** `test_status_bar_baseline_label_names_the_priced_model`.
+
+## 14. `llm-router replay` raises TypeError on a row with NULL confidence
+
+- **Symptom.** `commands/replay.format_decision_line` computes
+  `decision.get("classifier_confidence", 0) * 100`; on a row whose confidence is NULL it raises
+  `TypeError`. The copy of `usage.db` (2026-10-07) already had 421 such successful rows out of
+  2,225 (router "unhinted" rows), before P0.8 added DIRECT rows to that set.
+- **Status.** Open. Not fixed in P0.8 (minimal change); the fix is to render "unknown".
+- **Test.** The fix must add a replay test over a NULL-confidence row.
+
