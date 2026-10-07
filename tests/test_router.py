@@ -278,7 +278,8 @@ async def test_content_filter_error_is_silent_fallback(temp_db, mock_env, mock_l
 
 @pytest.mark.asyncio
 async def test_skips_model_when_budget_exhausts_mid_chain(temp_db, mock_env, mock_litellm_response, monkeypatch):
-    # Enable Ollama for this test so it gets injected in the chain
+    # Enable Ollama for this test so it gets injected in the chain. A code task: since M3.0
+    # (D-14 = A) a Q&A task type never keeps a local model.
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
     monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "llama3.2,qwen2.5-coder:7b")
     
@@ -317,7 +318,7 @@ async def test_skips_model_when_budget_exhausts_mid_chain(temp_db, mock_env, moc
                     with patch("llm_router.router.get_tracker", return_value=mock_tracker):
                         with patch("llm_router.chain_builder.build_chain", return_value=[]):
                             resp = await route_and_call(
-                                TaskType.QUERY, "Hello",
+                                TaskType.CODE, "Hello",
                                 profile=RoutingProfile.BALANCED,
                             )
 
@@ -354,10 +355,11 @@ async def test_claw_code_mode_injects_ollama_for_balanced_profile(
     monkeypatch.setenv("LLM_ROUTER_CLAW_CODE", "true")
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
     monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "llama3.2")
+    # code task: since M3.0 (D-14 = A) a Q&A task type never keeps a local model
     import llm_router.config as _config
     _config._config = None
 
-    await route_and_call(TaskType.QUERY, "Hello", profile=RoutingProfile.BALANCED)
+    await route_and_call(TaskType.CODE, "Hello", profile=RoutingProfile.BALANCED)
 
     call_kwargs = mock_acompletion.call_args.kwargs
     assert "ollama" in call_kwargs["model"], (
@@ -423,12 +425,13 @@ async def test_ollama_always_injected_for_balanced(
     monkeypatch.setenv("LLM_ROUTER_CLAW_CODE", "false")
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
     monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "llama3.2")
+    # code task: since M3.0 (D-14 = A) a Q&A task type never keeps a local model
     import llm_router.config as _config
     import llm_router.claude_usage as _usage
     _config._config = None
     _usage.set_claude_pressure(0.0)  # no subscription pressure
 
-    await route_and_call(TaskType.QUERY, "Hello", profile=RoutingProfile.BALANCED)
+    await route_and_call(TaskType.CODE, "Hello", profile=RoutingProfile.BALANCED)
 
     call_kwargs = mock_acompletion.call_args.kwargs
     assert "ollama" in call_kwargs["model"], (

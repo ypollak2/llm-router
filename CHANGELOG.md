@@ -13,6 +13,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- routing (M3.0, owner decision D-14 = A): `route_and_call` no longer serves a Q&A task type from a
+  local provider. For `northstar.QA_TASK_TYPES` (query, research, generate, analyze and the other Q&A
+  types) Ollama and OpenAI-compatible local servers are removed from the chain in `route_and_call`
+  (after the specialist and bandit steps, before the daily-cap step) and from the emergency BUDGET
+  chain; the next provider in the existing order serves the call. Every `route_and_call` caller with a
+  Q&A task type is covered, not only MCP `llm()` (list by file, grep `route_and_call(`):
+  `tools/text.py` (`llm_query`, `llm_research`, `llm_generate`, `llm_analyze`, `llm_reason`,
+  `llm_text_job`), `tools/routing.py` (402, 589), `tools/agentic.py`, `tools/fs.py` (QUERY calls),
+  route_server/gateway, orchestrator, `context.py` (compaction summary), `quickstart.py`,
+  `commands/benchmark.py`, `tui/cli.py` and `integrations/agno.py`. Accepted D-14 = A side effect:
+  `llm_text_job` (opt-in `LLM_ROUTER_LOCAL_TEXT_JOBS=1`, task type GENERATE) no longer runs locally
+  once a cloud provider is configured; at merge base aceb366 its chain dispatched to
+  `ollama/qwen3.5:latest`, at this head to `openai/gpt-4o` or `gpt-4o-mini`. The flag is unset on
+  the owner's machine, so nothing changes live today. `code` is unchanged and can still go
+  local. An explicit `model_override` is honored, and an install with only local providers keeps them
+  (no empty chain). The shared `_build_and_filter_chain` is NOT changed, so the proxy
+  (`proxy/backends.py` `policy_chain` -> `choose_model`) routes exactly as before
+  (`tests/test_mcp_qa_no_local.py` pins it). Reason: real Q&A prompts, local qwen 4/37 acceptable
+  vs Sonnet 34/37 (PLAN 0.3 [RX]); 65 local Q&A answers in 7 days [U]. Only processes that run
+  `route_and_call` and are started after the deploy pick it up (uv-tool MCP servers).
+  `tests/test_mcp_qa_no_local.py` (30 tests; 6 mutations red, including the strip moved ahead of the
+  subject specialist). The set of stripped providers is `types.LOCAL_PROVIDERS` (ollama, lm_studio,
+  vllm, llamacpp) plus `openai_compat`, derived in one place (the former second literal set in
+  `router.py` is gone; `test_the_strip_set_is_derived_from_types_local_providers` pins it).
+  Scope, stated plainly: this is the `route_and_call` path (and its emergency BUDGET chain). The
+  proxy's `policy_chain` -> `choose_model` -> `_build_and_filter_chain` does not call
+  `route_and_call` and is not changed.
+  Daily-cap interaction (D-14 intent): the strip runs BEFORE the TQ-007 daily-cap step in
+  `route_and_call`. Once a daily spend cap is hit, the cap step confines the chain to the free
+  providers (ollama, codex, gemini_cli); for a Q&A task type Ollama has already been removed, so
+  Ollama is no longer the free fallback for Q&A task types. Only codex or gemini_cli can serve a
+  capped Q&A call. If neither is in the chain: `hard` blocks; `smart`/`soft` fall through to Claude
+  only when an anthropic model is in the chain, otherwise the call blocks (a paid non-Claude
+  provider is never called once the cap is hit). `code` still falls back to Ollama under the cap.
+  `tests/test_mcp_qa_no_local.py` pins the order (capped Q&A, chain [openai, ollama]: blocked, not
+  served by Ollama) through the TQ-007 `_run` harness with `TaskType.QUERY`; the mutant that moves
+  the strip after the cap step turns 3 of those tests red.
 - status line: the default is the full layout again, byte-for-byte as before #273 (owner decision,
   reversing #273's fast-by-default; `tests/test_statusline_default_full.py` compares it with the
   pre-#273 script on 9 fixture states). The fast line is the opt-in debug mode
@@ -43,6 +80,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chain: Ollama, Codex, Gemini CLI) and `cold_wait` (Ollama `load_duration`); `session-start` (version 23) names `import`, `session_io`, `reset_state`,
   `ollama_up`, `pxpipe`, `proxy_health`, `usage`, `hints`, `bg_spawn`, `banner`, `rules_update`. A run that
   names no phase writes the same row as before. Cost: `docs/measurements/2026-10-07-hook-phase-timing-overhead.md`.
+- proxy: classifier shadow seam (M1.6, PR 2 of the M1 plan). With `LLM_ROUTER_LOCAL_CLASSIFIER=shadow`, each
+  turn-first call also gets a local LLM verdict, logged next to the rules' verdict in `classifier_shadow.jsonl`
+  (hashes and tiers only). Shadow only: no tier changes, `cls_applied` is false on every row, continuations
+  never wait, at most 4 pending (more are dropped and counted). Default `off` makes zero Ollama calls.
+  `proxy/tiers.py` is untouched. `tests/proxy/test_llm_classifier_shadow.py`.
+- kpi: `classifier_shadow` (M1.7): n, sessions, agreement with the rules, tier distributions, cheap share,
+  fallback rate, p50/p95 ms, drops, calls per turn, from `classifier_shadow.jsonl`. Outside `kpis`, so NS, D1,
+  D2 and `--health` do not change. `tests/test_kpi_classifier_shadow.py`.
 - kpi: `llm-router kpi --since WHEN --until WHEN` pins an absolute window (replaces `--days`; rows outside it
   never count; JSON gains `window`). Without the flags the output is unchanged (live-home JSON diff against
   c2ed278: identical). `tests/test_kpi_window.py`.
