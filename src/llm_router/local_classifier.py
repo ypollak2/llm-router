@@ -264,6 +264,12 @@ def parse_verdict(content: str, *, model: str = DEFAULT_MODEL, ms: float = 0.0,
                    model, PROMPT_VERSION, ms)
 
 
+def _options() -> dict:
+    """Shared by the real call and the warm-up. A load with no ``num_ctx`` gets the server's
+    default (32768 here), and the real call's 4096 then forces a second runner load."""
+    return {"temperature": 0, "num_predict": NUM_PREDICT, "num_ctx": NUM_CTX}
+
+
 def _payload(model: str, assembled: str) -> dict:
     ctx, prompt = getattr(assembled, "context", None), getattr(assembled, "prompt", None)
     if not isinstance(ctx, str) or not isinstance(prompt, str):
@@ -277,7 +283,7 @@ def _payload(model: str, assembled: str) -> dict:
         "stream": False,
         "think": False,
         "keep_alive": _keep_alive(),
-        "options": {"temperature": 0, "num_predict": NUM_PREDICT, "num_ctx": NUM_CTX},
+        "options": _options(),
     }
 
 
@@ -388,15 +394,23 @@ async def _is_loaded(model: str, budget: float) -> bool:
     async with _session().get(f"{_base_url()}/api/ps",
                               timeout=aiohttp.ClientTimeout(total=budget)) as resp:
         data = await resp.json(content_type=None)
-    names = [m.get("name") or m.get("model") or "" for m in (data or {}).get("models", [])]
-    return any(_same_model(model, n) for n in names if n)
+    for m in (data or {}).get("models", []):
+        name = m.get("name") or m.get("model") or ""
+        if name and _same_model(model, name):
+            # Resident at another context length: the real call (4096) would reload it, so
+            # report it cold and let the warm-up reload it at NUM_CTX. A server that does
+            # not report context_length is taken at its word.
+            ctx = m.get("context_length")
+            return ctx is None or ctx == NUM_CTX
+    return False
 
 
 async def _warm(model: str) -> None:
     try:
         async with _session().post(
             f"{_base_url()}/api/chat",
-            json={"model": model, "messages": [], "stream": False, "keep_alive": _keep_alive()},
+            json={"model": model, "messages": [], "stream": False, "keep_alive": _keep_alive(),
+                  "options": _options()},
             timeout=aiohttp.ClientTimeout(total=120),
         ) as resp:
             await resp.read()

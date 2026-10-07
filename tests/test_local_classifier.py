@@ -57,8 +57,9 @@ class FakeOllama:
     the alias when ``loaded``. A chat with no messages is a warm-up and is counted apart."""
 
     def __init__(self, monkeypatch, *, reply=None, delay=0.0, loaded=True, status=200,
-                 ps_delay=0.0):
+                 ps_delay=0.0, ctx=None):
         self.mp, self.reply, self.delay = monkeypatch, reply or _reply(), delay
+        self.ctx = ctx                                   # context_length /api/ps reports; None = omitted
         self.ps_delay = ps_delay
         self.loaded, self.status = loaded, status
         self.chat: list[dict] = []
@@ -79,7 +80,10 @@ class FakeOllama:
         async def ps(request):
             self.ps_calls += 1
             await asyncio.sleep(self.ps_delay)
-            return web.json_response({"models": [{"name": ALIAS_TAGGED}] if self.loaded else []})
+            entry = {"name": ALIAS_TAGGED}
+            if self.ctx is not None:
+                entry["context_length"] = self.ctx
+            return web.json_response({"models": [entry] if self.loaded else []})
 
         app = web.Application()
         app.router.add_post("/api/chat", chat)
@@ -152,6 +156,13 @@ def test_plain_string_input_is_taken_as_the_prompt():
 def test_braces_in_a_prompt_survive_formatting():
     user = lc._payload("m", _assembled("keep {not_a_field} as is"))["messages"][1]["content"]
     assert "{not_a_field}" in user
+
+
+def test_payload_keeps_the_last_2000_chars_of_the_prompt():
+    text = "".join(f"{i:03d}|" for i in range(625))          # 2500 chars, every 4-char block differs
+    user = lc._payload("m", lc.Assembled("ctx", text))["messages"][1]["content"]
+    assert lc.MAX_PROMPT_CHARS == 2000
+    assert text[-2000:] in user and text[:500] not in user   # the tail, never the head
 
 
 def test_schema_is_strict_with_enums():
@@ -346,6 +357,9 @@ async def test_cold_model_is_reported_and_warmed_once_per_30_seconds(monkeypatch
         await asyncio.sleep(0.05)
         assert len(o.warm) == 1 and o.chat == []        # warm-up is a chat with no messages
         assert o.warm[0]["model"] == "llmr-classifier"
+        # Ollama 0.32 loads a no-num_ctx request at the server default (32768), and the real
+        # call's 4096 then reloads the runner: the warm-up must ask for the same context.
+        assert o.warm[0]["options"]["num_ctx"] == lc.NUM_CTX == 4096
         assert (await _ask("b")).source == "cold"
         await asyncio.sleep(0.05)
         assert len(o.warm) == 1                          # same 30 s window
@@ -353,6 +367,22 @@ async def test_cold_model_is_reported_and_warmed_once_per_30_seconds(monkeypatch
         assert (await _ask("c")).source == "cold"
         await asyncio.sleep(0.05)
         assert len(o.warm) == 2
+
+
+async def test_resident_at_the_wrong_context_is_cold_not_a_reload_inside_the_budget(monkeypatch):
+    """/api/ps shows the alias at 32768: the real call asks for 4096 and would reload (~5 s)
+    under a 2 s budget. Report cold and warm it at 4096 instead."""
+    async with FakeOllama(monkeypatch, ctx=32768) as o:
+        v = await _ask("a")
+        await asyncio.sleep(0.05)
+        assert (v.source, o.chat) == ("cold", [])
+        assert len(o.warm) == 1 and o.warm[0]["options"]["num_ctx"] == 4096
+    lc._reset_state()
+    async with FakeOllama(monkeypatch, ctx=4096) as o:
+        assert (await _ask("a")).source == "llm"
+    lc._reset_state()
+    async with FakeOllama(monkeypatch) as o:             # server that omits context_length
+        assert (await _ask("a")).source == "llm"
 
 
 def test_untagged_alias_matches_latest():
@@ -391,16 +421,33 @@ async def test_ten_concurrent_classifications_overlap(monkeypatch):
 
 
 async def test_a_pending_classification_does_not_delay_other_work(monkeypatch):
+    """Plan test 2. A ticker that wakes every 10 ms is started BEFORE a 1 s classification and
+    measures how long the loop was held while it runs: a blocking call anywhere in ``_classify``
+    shows up as one big gap. (The continuation decide itself arrives in M1.6, which re-asserts
+    this on the real path.)"""
     async with FakeOllama(monkeypatch, delay=1.0):
+        gaps, stop = [], False
+
+        async def ticker():
+            last = time.perf_counter()
+            while not stop:
+                await asyncio.sleep(0.01)
+                now = time.perf_counter()
+                gaps.append(now - last)
+                last = now
+
+        tick = asyncio.ensure_future(ticker())
+        await asyncio.sleep(0.05)
         pending = asyncio.ensure_future(_ask())
         await asyncio.sleep(0.1)                         # the request is in flight
-        t0 = time.perf_counter()
         lc.mode()                                        # what a continuation decide does here: no wait
-        await asyncio.sleep(0)
-        waited = time.perf_counter() - t0
-        assert waited < 0.05, f"event loop was held for {waited * 1000:.0f} ms"
+        await asyncio.sleep(0.2)
         assert not pending.done()
         assert (await pending).source == "llm"
+        stop = True
+        await tick
+        assert len(gaps) > 50 and max(gaps) < 0.05, (
+            f"event loop was held for {max(gaps) * 1000:.0f} ms ({len(gaps)} ticks)")
 
 
 async def test_no_slow_callback_on_the_async_path_and_the_detector_works(monkeypatch, caplog):

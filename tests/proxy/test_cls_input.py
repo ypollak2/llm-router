@@ -95,6 +95,7 @@ def test_string_system_prompt_is_read_too():
     assert out.context.startswith("Working directory: /a b/c\n")
 
 
+PROMPT_TEXT = "".join(f"{i:03d}|" for i in range(625))        # 2500 chars, every 4-char block differs
 ASSISTANT_TEXT = "".join(f"{i:03d}|" for i in range(225))   # 900 chars, every 4-char block differs
 
 
@@ -104,10 +105,11 @@ def test_caps():
         _user("b" * 400), _assistant(_text("two")),
         _user("c" * 400), _assistant(_text("three")),
         _user("d" * 400), _assistant(_text(ASSISTANT_TEXT)),
-        _user("p" * 2500),
+        _user(PROMPT_TEXT),
     ]}
     out = cls_input.assemble(body)
-    assert out.prompt == "p" * 2000
+    assert out.prompt == PROMPT_TEXT[-2000:]                      # the LAST 2,000 chars (PLAN.md:915)
+    assert out.prompt != PROMPT_TEXT[:2000]
     earlier = [part for part in out.context.split("\n\n") if part.startswith("Earlier user prompt")]
     assert len(earlier) == 3                                      # b, c, d: the three newest
     assert earlier[0].startswith("Earlier user prompt 1/3:\nbbb") and len(earlier[0].split("\n", 1)[1]) == 300
