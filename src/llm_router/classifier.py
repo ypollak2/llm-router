@@ -187,24 +187,6 @@ async def classify_complexity(
 
         set_span_attributes(span, cache_hit=False)
 
-        # Local Ollama classifier: FIRST entry in the chain (LLM_ROUTER_LOCAL_CLASSIFIER=on).
-        # Unreachable, slow or malformed -> falls through to the cloud chain below.
-        from llm_router import local_classifier
-
-        if local_classifier.mode() == "on":
-            verdict = await asyncio.to_thread(local_classifier.classify_local, sanitized_prompt)
-            if verdict is not None:
-                set_span_attributes(span, classifier_model=f"ollama/{verdict.model}", tier=verdict.tier)
-                return ClassificationResult(
-                    complexity=Complexity(verdict.complexity),
-                    confidence=0.7,
-                    reasoning=f"local classifier tier={verdict.tier}",
-                    inferred_task_type=TaskType(verdict.task_type),
-                    classifier_model=f"ollama/{verdict.model}",
-                    classifier_cost_usd=0.0,
-                    classifier_latency_ms=verdict.latency_ms,
-                )
-
         config = get_config()
         available = config.available_providers
         tracker = get_tracker()

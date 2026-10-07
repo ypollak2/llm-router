@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 44
+# llm_router-hook-version: 43
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -196,7 +196,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 44"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 43"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -2355,7 +2355,7 @@ def classify_complexity(text: str, task_type: str) -> str:
     from llm_router.classify import HOOK_LIVE_POLICY, complexity_for
 
     return complexity_for(text, policy=HOOK_LIVE_POLICY, task_type=task_type).value
-def _classify_prompt_rules(text: str) -> dict | None:
+def classify_prompt(text: str) -> dict | None:
     """Classify using heuristic scoring → Ollama → cheap API → weak heuristic → auto."""
     stripped = text.strip()
 
@@ -2471,37 +2471,6 @@ def _classify_prompt_rules(text: str) -> dict | None:
         }
 
     return None
-
-
-# Fast paths whose answer is structural, not a difficulty judgement: the local
-# classifier never overrides or shadows these.
-_LOCAL_CLASSIFIER_SKIP_METHODS = frozenset({
-    "coordination-fast-path", "introspection-fast-path",
-})
-
-
-def classify_prompt(text: str) -> dict | None:
-    """Rules first (``_classify_prompt_rules``), then LLM_ROUTER_LOCAL_CLASSIFIER.
-
-    ``off`` (default) returns the rules' answer untouched. ``shadow`` logs the
-    local model's answer beside it and still returns the rules' answer. ``on``
-    swaps in the local task_type/complexity. Any failure keeps the rules.
-    """
-    result = _classify_prompt_rules(text)
-    if result is None or os.environ.get("LLM_ROUTER_LOCAL_CLASSIFIER", "").strip().lower() not in ("shadow", "on"):
-        return result
-    if result.get("method") in _LOCAL_CLASSIFIER_SKIP_METHODS or str(result.get("method", "")).startswith("benchmark"):
-        return result
-    try:
-        from llm_router import local_classifier
-
-        task, cx = local_classifier.apply(
-            text.strip(), str(result["task_type"]), str(result["complexity"]), "hook")
-        if (task, cx) != (result["task_type"], result["complexity"]):
-            result = {**result, "task_type": task, "complexity": cx, "method": "local"}
-    except Exception as exc:  # noqa: BLE001 - classification is optional, fail open
-        _debug_log(f"[local_classifier] skipped: {exc!r}")
-    return result
 
 
 # ── MCP Capability Map ───────────────────────────────────────────────────────
