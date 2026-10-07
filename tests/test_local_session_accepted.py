@@ -895,6 +895,30 @@ def test_dropped_local_answers_are_counted_on_all_three_local_sources():
     assert (built["other_kind"], built["local_other_kind"]) == (3, 3)
 
 
+def test_dropped_local_answers_are_counted_per_turn_not_per_row():
+    """One local turn is 1 turn row + 2 continuation rows. The served count reads the turn once
+    (turn_units: first-of-turn), so the untagged / other-kind counts must too, and an edit turn
+    that wrote several rows is one turn."""
+    t = NOW - 5000
+
+    def rows(sid):
+        return [{"ts": t + i, "session_id": sid, "decision": "served", "msg_id": f"{sid}-m{i}",
+                 "step_class": "turn-first" if i == 0 else "continuation"} for i in range(3)]
+
+    def edits(sid):
+        return [{"ts": t + 100 + i, "session_id": sid, "turn_id": "turn1", "source": "zero_claude",
+                 "applied": True} for i in range(3)]
+
+    kinds = {"s-none": None, "s-res": "research", "s-org": "organic"}
+    built = osh.build_units(rows("s-none") + rows("s-res") + rows("s-org"), [],
+                            edit_rows=edits("s-none") + edits("s-res"),
+                            now=NOW, days=7, allowed=ORG, kind_of=lambda sid, stamp: kinds[sid])
+    # per turn: 1 proxy turn + 1 edit turn in each dropped session
+    assert (built["local_untagged"], built["local_other_kind"]) == (2, 2)
+    # the organic session's same rows read as one served turn plus no edits
+    assert osh.local_answers(built["units"])["served"] == 1
+
+
 @pytest.mark.asyncio
 async def test_the_tool_use_id_is_reset_after_an_in_process_call_tool():
     """No protocol layer here: an embedder or a test calls ``call_tool`` directly with a

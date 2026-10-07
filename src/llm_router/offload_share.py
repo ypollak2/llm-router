@@ -240,7 +240,8 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
     ``local_untagged`` / ``local_other_kind`` are the local answers among the ``untagged`` /
     ``other_kind`` exclusions (the local answers line states them). A local answer is a local MCP
     answer, a proxy-served row (``decision == "served"``) or a zero-Claude edit turn: the same
-    three sources as the line's served count.
+    three sources as the line's served count, and counted per TURN like it (a proxy row only when
+    it begins a turn, an edit turn once however many rows it wrote).
     ``n_escalations`` counts escalation rows among the admitted units: how much redo signal exists
     at all. A local unit with no ``session_id`` (usage.db rows written without one) cannot be
     scoped to organic sessions: it is excluded and counted in ``local_no_session``, so the local
@@ -362,7 +363,12 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
             side += 1
             continue
         cls = _proxy_class(r)
-        if cls is None or not admit(r.get("session_id"), r.get("session_kind"), local=cls == CLASS_LOCAL):
+        if cls is None:
+            continue
+        # A local ANSWER is a turn, as in the line's served count (turn_units: first-of-turn
+        # only), so a continuation or sub-agent-first row of a dropped session is not counted.
+        if not admit(r.get("session_id"), r.get("session_kind"),
+                     local=cls == CLASS_LOCAL and begins_turn(r)):
             continue
         sid = r.get("session_id")
         conv = conv_of(sid) if isinstance(sid, str) else None
@@ -438,6 +444,7 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
     # Zero-Claude edits: one local TURN per (session_id, turn_id). The hook served the whole turn,
     # so there is no proxy row for it; a `claude:` re-ask in the next turns marks it redone.
     seen_turns: set[tuple[str, str]] = set()
+    dropped_turns: set[tuple[str, str]] = set()  # turns admit() refused: counted once, not per row
     for e in sorted((e for e in edit_rows if isinstance(e, dict)), key=lambda e: _num(e.get("ts")) or 0.0):
         if e.get("source") != "zero_claude" or e.get("applied") is not True:
             continue  # llm_edit rows (and rows with no source) happen inside Claude turns
@@ -451,7 +458,10 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
         if not (isinstance(tid, str) and tid):
             edit_no_turn_id += 1
             continue
-        if (sid, tid) in seen_turns or not admit(sid, e.get("session_kind"), local=True):
+        if (sid, tid) in seen_turns or (sid, tid) in dropped_turns:
+            continue  # one turn, however many edit rows it wrote
+        if not admit(sid, e.get("session_kind"), local=True):
+            dropped_turns.add((sid, tid))
             continue
         seen_turns.add((sid, tid))
         conv = conv_of(sid)
