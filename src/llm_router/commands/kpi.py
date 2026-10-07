@@ -78,8 +78,9 @@ SCOPE, stated rather than implied:
   one row per hook invocation, p50 / p95 per hook against that hook's budget (the
   one table ``hook_latency.HOOK_BUDGETS_MS``). NOT session-kind filtered -- a row
   carries no session id. A hook the host KILLS at its timeout writes no row; kills
-  are shown from the fail-open ledger (``CHZ-HOOK-KILLED``). The proxy-side p95
-  (``added_latency_s`` in proxy_calls.jsonl) is the other half.
+  are shown from the fail-open ledger (``CHZ-HOOK-KILLED``). The proxy-side half is
+  G1_proxy: p50 / p95 of ``tier_decision_s`` in proxy_calls.jsonl, turn-first and
+  continuation calls apart.
 * **G2 silent failures** is fail-open events per 100 calls over the window, from
   the ``ts`` every ``failopen.record`` row now carries. "Calls" are the hook
   invocations plus the proxy calls recorded in the window, all session kinds,
@@ -540,24 +541,53 @@ def _percentile(sorted_values: list[float], q: float) -> float:
     return sorted_values[k]
 
 
-def _g1_proxy(pop: dict) -> dict:
-    seen = len(pop["window"])
-    served_or_tried = [r for r in pop["allowed"] if isinstance(r.get("added_latency_s"), (int, float))]
-    if not served_or_tried:
-        return _not_measurable("no proxy decisions with added_latency_s in window", seen=seen)
-    values = sorted(r["added_latency_s"] for r in served_or_tried)
-    newest: float | None = None
-    for r in served_or_tried:
-        newest = _newer(newest, _num_ts(r.get("ts")))
+def _g1_segment(values: list[float]) -> dict[str, Any]:
+    """n, p50 and p95 (seconds) of one latency segment; percentiles are None below MIN_N."""
     n = len(values)
+    if n < MIN_N:
+        return {"n": n, "p50_s": None, "p95_s": None}
+    ordered = sorted(values)
+    return {"n": n, "p50_s": round(_percentile(ordered, 0.50), 4),
+            "p95_s": round(_percentile(ordered, 0.95), 4)}
+
+
+def _g1_proxy(pop: dict) -> dict:
+    """Proxy tier-decision latency: p50 / p95 of ``tier_decision_s`` with n, split into
+    turn-first and continuation calls. Side calls never run a classifier and are left
+    out (counted in ``side_call_excluded``). ``added_latency_s`` is not used: it is 0.0
+    on every forwarded row, which is why this KPI used to print 0 ms."""
+    seen = len(pop["window"])
+    first: list[float] = []
+    cont: list[float] = []
+    side = 0
+    newest: float | None = None
+    for r in pop["allowed"]:
+        v = r.get("tier_decision_s")
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        if r.get("tier_reason") == "side_call":
+            side += 1
+            continue
+        (cont if r.get("step_class") == "continuation" else first).append(float(v))
+        newest = _newer(newest, _num_ts(r.get("ts")))
+    n = len(first) + len(cont)
+    if not n:
+        return _not_measurable("no proxy decisions with tier_decision_s in window", seen=seen)
     if n < MIN_N:
         out = _too_few(n, newest_ts=newest)
         out["seen"] = seen
         return out
-    p95 = _percentile(values, 0.95)
-    gate = "within +200ms gate" if p95 <= 0.2 else "OVER the +200ms gate"
-    return _measured(f"proxy decision p95={p95 * 1000:.0f}ms ({gate}) (n={n})", n,
-                      newest_ts=newest, seen=seen, p95_s=round(p95, 4))
+    seg_first, seg_cont = _g1_segment(first), _g1_segment(cont)
+
+    def _fmt(name: str, seg: dict[str, Any]) -> str:
+        if seg["p50_s"] is None:
+            return f"{name} {TOO_FEW} (n={seg['n']})"
+        return (f"{name} p50={seg['p50_s'] * 1000:.0f}ms p95={seg['p95_s'] * 1000:.0f}ms "
+                f"(n={seg['n']})")
+
+    return _measured(f"{_fmt('turn-first', seg_first)} | {_fmt('continuation', seg_cont)}", n,
+                      newest_ts=newest, seen=seen, turn_first=seg_first, continuation=seg_cont,
+                      side_call_excluded=side)
 
 
 def _in_window(ts: Any, since: float, until: float) -> bool:

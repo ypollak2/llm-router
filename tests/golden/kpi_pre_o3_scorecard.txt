@@ -11,7 +11,7 @@ llm-router kpi -- window=7d (organic only) generated=2026-10-06T15:20:00Z
   D4  tier mix                               sonnet=80.0%, opus=20.0% (n=120) | cost-weighted (haiku 1 : sonnet 3.66 : opus 6.15 per call): sonnet=70.4%, opus=29.6%
   D5  classifier accuracy                    not measurable: no LLM_ROUTER_KPI_BENCHMARK_PATH configured (KPI-SPEC calls this 'not measured')
   G1  added latency (hook)                   not measurable: no hook invocation recorded in window (a hook records itself only after its installed copy is updated to a version that carries the recorder)
-  G1  added latency (proxy)                  not measurable: no proxy decisions with added_latency_s in window
+  G1  added latency (proxy)                  not measurable: no proxy decisions with tier_decision_s in window
   G2  silent failures (fail-open / 100 calls) not measurable: no timestamped fail-open event and no recorded hook call exist yet, so there is no window to take a rate over
       all-time: 0 fail-open event(s) recorded, 0 of them from before per-event timestamps (cannot be placed in any window)
   G3  ledger completeness (target >=99%)     not measurable: no proxy row carries tier_retry yet (the schema has not started)
