@@ -13,13 +13,20 @@ chain_builder.py. A test that finds nothing on the baseline proves nothing.
 from __future__ import annotations
 
 import io
+import os
 import re
 import tokenize
 from pathlib import Path
 
 from llm_router import pricing
 
-_SRC = Path(__file__).resolve().parents[1] / "src" / "llm_router"
+# RETIRED_IDS_SCAN_ROOT points the same test at another checkout's
+# src/llm_router (test-only; the baseline proof runs it against da31df7, where
+# it must fail with >= 1 hit). Unset: this checkout.
+_SRC = Path(
+    os.environ.get("RETIRED_IDS_SCAN_ROOT")
+    or Path(__file__).resolve().parents[1] / "src" / "llm_router"
+)
 
 # Not routing code. cc-usage-track.py prices Claude Code usage that already
 # happened; its model ids are lookup keys for observed rows, not targets.

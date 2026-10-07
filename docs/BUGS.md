@@ -212,4 +212,5 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Test.** `tests/test_no_retired_model_ids.py::test_routing_code_names_no_retired_model_id`
   scans the string literals in `src/llm_router/hooks/*.py` and `router.py` and prints how many
   it checked. On da31df7 it found 3 hits (auto-route.py:4799, chain_builder.py:188,
-  subagent-start.py:203); on head it finds 0.
+  subagent-start.py:203); on head it finds 0. To re-prove the baseline from head, run the
+  same test with `RETIRED_IDS_SCAN_ROOT=<da31df7 checkout>/src/llm_router`: it fails with 3 hits.
