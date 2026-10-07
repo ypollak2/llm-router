@@ -212,14 +212,24 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `timestamp`); the exceptions were swallowed by fail-open paths.
 - **Fix.** v16 P0.5 (`fix/semantic-cache-key`): `route_and_call` builds one
   `semantic_cache.CacheKey` before dispatch (raw prompt + `ctx_hash` = sha256 of caller
-  `context`, else the last two buffered messages, plus the caller's project scope) and passes it
+  `context`, else the last two buffered messages, plus the caller's `system_prompt` if given and
+  the caller's project scope) and passes it
   to `check` and, through the dispatch loop, to `store`. Exact-match pass on
   sha256(normalised text) + `ctx_hash` needs no Ollama (rows stored with embedding `''`, since
   the existing column is `NOT NULL`). Additive migration: `ctx_hash`, `text_hash`, `hit_count`,
   `last_hit_at`, and a `semantic_cache_lookups` table (one row per lookup, no prompt text). Both
   stats queries read that table and return `{hits, lookups, n}`.
-- **Test.** `tests/test_p05_semantic_cache_key.py` (6 tests; all 6 fail on da31df7):
+  Lookup rows older than `LLM_ROUTER_PERSIST_TTL_DAYS` are purged on every store, so the
+  stats period "all" covers at most that window.
+- **Test.** `tests/test_p05_semantic_cache_key.py` (8 tests):
   `test_same_request_hits_after_context_injection`, `test_context_is_part_of_the_key`,
   `test_key_uses_last_two_conversation_messages_when_no_caller_context`,
+  `test_caller_system_prompt_is_part_of_the_key`,
+  `test_old_lookups_are_purged_even_when_no_cache_row_expired`,
   `test_exact_hash_fallback_without_ollama`, `test_cost_cache_hit_stats_returns_true_counts_with_n`,
-  `test_session_end_cache_hit_stats_returns_true_counts_with_n`.
+  `test_session_end_cache_hit_stats_returns_true_counts_with_n`. All 8 fail on da31df7, but
+  only three fail for the bug itself: the second identical request reached a provider; "yes,
+  do it" was served across contexts; the same system prompt never hit. The other five fail
+  because the API they call (`make_key`, `_semantic_cache_key`, the lookups table) did not
+  exist, so their evidence is the single-flip mutants recorded in the v16 P0.5 gate file,
+  each of which turns at least one of these tests red.

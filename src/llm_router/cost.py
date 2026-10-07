@@ -3326,6 +3326,10 @@ async def get_cache_hit_stats(period: str = "today") -> dict:
 
     Args:
         period: Time window. One of "today", "week", "month", or "all".
+            "all" cannot reach further back than the physical retention TTL:
+            ``semantic_cache._purge_expired`` deletes lookups older than
+            ``LLM_ROUTER_PERSIST_TTL_DAYS`` (default 30), so "all" means the
+            last TTL days in practice.
 
     Returns:
         Dict with ``hits``, ``lookups``, ``n`` (= lookups), ``hit_rate_pct``

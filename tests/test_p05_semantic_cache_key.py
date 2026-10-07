@@ -69,7 +69,8 @@ def _injected(prompt: str, **_kw) -> str:
     return f"<repo_state>branch main, 3 dirty files</repo_state>\n{prompt}"
 
 
-async def _route(prompt: str, *, caller_context: str | None, calls: list, inject=_injected):
+async def _route(prompt: str, *, caller_context: str | None, calls: list, inject=_injected,
+                 system_prompt: str | None = None):
     import tests.test_tq007_daily_cap_downgrade as t
     from llm_router import router
 
@@ -106,7 +107,7 @@ async def _route(prompt: str, *, caller_context: str | None, calls: list, inject
         p(patch("llm_router.semantic_cache._get_embedding", side_effect=_fake_embedding))
         resp = await router.route_and_call(
             TaskType.QUERY, prompt, profile=RoutingProfile.BALANCED,
-            caller_context=caller_context,
+            caller_context=caller_context, system_prompt=system_prompt,
         )
         await router.drain_bg_tasks(3.0)
     return resp
@@ -176,9 +177,65 @@ def test_key_uses_last_two_conversation_messages_when_no_caller_context(cache_en
 
     assert make_key("yes, do it", context_text=router._recent_context_text(buf2)).ctx_hash == \
         make_key("yes, do it", context_text=router._recent_context_text(buf)).ctx_hash
+    # The second-to-last message counts too: two buffers whose LAST message is
+    # the same but whose second-to-last differs give different keys (a key
+    # built from get_recent(1) would collide here).
+    buf3 = get_session_buffer(pid + "-third", sid)
+    buf3.record("user", "delete the temp files?")
+    buf3.record("assistant", "Shall I go ahead?")
+    buf4 = get_session_buffer(pid + "-fourth", sid)
+    buf4.record("user", "push to production?")
+    buf4.record("assistant", "Shall I go ahead?")
+    assert make_key("yes, do it", context_text=router._recent_context_text(buf3)).ctx_hash != \
+        make_key("yes, do it", context_text=router._recent_context_text(buf4)).ctx_hash
     # An explicit caller context wins over the buffer.
     assert router._semantic_cache_key("yes, do it", "ctx A", None).ctx_hash == \
         router._semantic_cache_key("yes, do it", "ctx A", None).ctx_hash != k2.ctx_hash
+
+
+@pytest.mark.asyncio
+async def test_caller_system_prompt_is_part_of_the_key(cache_env):
+    """Same prompt and context under a different caller system prompt must miss."""
+    calls: list = []
+    await _route("summarise the diff", caller_context="ctx A", calls=calls,
+                 system_prompt="Answer in one line.")
+    other = await _route("summarise the diff", caller_context="ctx A", calls=calls,
+                         system_prompt="Answer as a numbered list.")
+    assert len(calls) == 2 and other.cache_hit is False, \
+        "an answer given under one system prompt was served under another"
+    again = await _route("summarise the diff", caller_context="ctx A", calls=calls,
+                         system_prompt="Answer in one line.")
+    assert len(calls) == 2 and again.cache_hit is True, "same system prompt must still hit"
+
+
+@pytest.mark.asyncio
+async def test_old_lookups_are_purged_even_when_no_cache_row_expired(cache_env, monkeypatch):
+    """The lookups log follows LLM_ROUTER_PERSIST_TTL_DAYS on its own clock."""
+    import time as _time
+
+    from llm_router import semantic_cache
+
+    monkeypatch.setenv("LLM_ROUTER_PERSIST_TTL_DAYS", "30")
+    resp = LLMResponse(content="stored", model="openai/gpt-4o", input_tokens=1, output_tokens=1,
+                       cost_usd=0.001, latency_ms=1.0, provider="openai")
+    k = semantic_cache.make_key("first", context_text="c")
+    with patch.object(semantic_cache, "_get_embedding", side_effect=_fake_embedding):
+        assert await semantic_cache.check("", TaskType.QUERY, key=k) is None  # creates a lookup
+    conn = sqlite3.connect(str(cache_env))
+    try:
+        conn.execute("UPDATE semantic_cache_lookups SET ts = ?", (_time.time() - 31 * 86_400,))
+        conn.commit()
+    finally:
+        conn.close()
+    with patch.object(semantic_cache, "_get_embedding", side_effect=_fake_embedding):
+        await semantic_cache.store("", TaskType.QUERY, resp, key=k)  # fresh row: nothing expires
+    conn = sqlite3.connect(str(cache_env))
+    try:
+        (n_lookups,) = conn.execute("SELECT COUNT(*) FROM semantic_cache_lookups").fetchone()
+        (n_rows,) = conn.execute("SELECT COUNT(*) FROM semantic_cache").fetchone()
+    finally:
+        conn.close()
+    assert (n_lookups, n_rows) == (0, 1)
 
 
 @pytest.mark.asyncio

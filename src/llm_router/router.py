@@ -2069,7 +2069,12 @@ def _recent_context_text(buf) -> str:
     return "\x1e".join(f"{m.role}:{m.content}" for m in buf.get_recent(2))
 
 
-def _semantic_cache_key(prompt: str, caller_context: str | None, scope_root: str | None):
+def _semantic_cache_key(
+    prompt: str,
+    caller_context: str | None,
+    scope_root: str | None,
+    system_prompt: str | None = None,
+):
     """P0.5 (R-CTX-7): the ONE semantic-cache key for this request.
 
     Built in ``route_and_call`` from the user's prompt BEFORE context injection
@@ -2079,6 +2084,8 @@ def _semantic_cache_key(prompt: str, caller_context: str | None, scope_root: str
     so a key rebuilt at store time would see a different conversation.
     Context = the caller's ``context`` if given, else the last two messages of
     this (project, session) buffer; scope = the caller's resolved project root.
+    A caller-supplied ``system_prompt`` is part of the key material too: the
+    same prompt under different instructions asks for a different answer.
     """
     from llm_router import semantic_cache
 
@@ -2091,6 +2098,8 @@ def _semantic_cache_key(prompt: str, caller_context: str | None, scope_root: str
             context_text = "recent:" + _recent_context_text(get_session_buffer(pid, sid))
         except Exception as exc:  # noqa: BLE001 — a missing buffer is an empty context
             log.debug("semantic cache context read failed: %s", exc)
+    if system_prompt:
+        context_text += "\x1fsystem:" + system_prompt
     scope = ""
     if scope_root:
         try:
@@ -4568,11 +4577,12 @@ async def route_and_call(
 
         # P0.5 (R-CTX-7): one key for check AND store — the raw prompt (before
         # OKF/<repo_state> injection below) plus a hash of the conversation
-        # context and the caller's scope. Built unconditionally so a
+        # context, the caller's system prompt (before context_prep enriches
+        # it below) and the caller's scope. Built unconditionally so a
         # model_override turn still stores under the same key.
         _semantic_key = None
         try:
-            _semantic_key = _semantic_cache_key(prompt, caller_context, _scope_root)
+            _semantic_key = _semantic_cache_key(prompt, caller_context, _scope_root, system_prompt)
         except Exception as _key_err:  # noqa: BLE001 — the cache is an optimisation
             log.debug("Semantic cache key failed: %s", _key_err)
 

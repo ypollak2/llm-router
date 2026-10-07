@@ -242,9 +242,11 @@ def _persist_ttl_seconds() -> float:
 
 
 async def _purge_expired(db) -> int:
-    """Physically delete TTL-expired rows from the ``semantic_cache`` table.
+    """Physically delete TTL-expired rows from ``semantic_cache`` and
+    ``semantic_cache_lookups`` (P0.5: the per-lookup hit/miss log, no prompt
+    text). Returns the number of ``semantic_cache`` rows deleted.
 
-    Scoped strictly to ``semantic_cache`` — never touches other tables in
+    Scoped strictly to those two tables — never touches the other tables in
     the shared usage.db (which also holds spend/usage rows owned by
     ``cost.py``). Sets ``PRAGMA secure_delete=ON`` on this connection so
     freed page bytes are zeroed immediately, satisfying raw-byte-grep
@@ -256,6 +258,16 @@ async def _purge_expired(db) -> int:
         return 0
     try:
         await db.execute("PRAGMA secure_delete=ON")
+        # Lookups expire on their own clock, whether or not a cache row expired.
+        # Own try: a database without the lookups table still purges the cache.
+        try:
+            await db.execute(
+                "DELETE FROM semantic_cache_lookups WHERE ts < ?",
+                (time.time() - ttl_seconds,),
+            )
+            await db.commit()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("semantic_cache: lookups purge failed: %s", exc)
         cursor = await db.execute(
             "SELECT COUNT(*) FROM semantic_cache WHERE created_at < datetime('now', ?)",
             (f"-{int(ttl_seconds)} seconds",),
@@ -267,10 +279,6 @@ async def _purge_expired(db) -> int:
         await db.execute(
             "DELETE FROM semantic_cache WHERE created_at < datetime('now', ?)",
             (f"-{int(ttl_seconds)} seconds",),
-        )
-        await db.execute(
-            "DELETE FROM semantic_cache_lookups WHERE ts < ?",
-            (time.time() - ttl_seconds,),
         )
         await db.commit()
         log.debug("semantic_cache: purged %d expired row(s) (ttl=%.0fd)", count, ttl_seconds / 86_400)
@@ -636,7 +644,7 @@ async def store(
             await db.commit()
             log.debug("semantic_cache: stored entry for %s", task_type.value)
             # B-02/B-03: physically purge TTL-expired rows on every store,
-            # scoped strictly to this table.
+            # scoped strictly to semantic_cache and semantic_cache_lookups.
             await _purge_expired(db)
         finally:
             await db.close()
