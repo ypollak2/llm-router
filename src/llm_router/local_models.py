@@ -37,14 +37,16 @@ def _name(model: str | None) -> str:
 def num_ctx(model: str | None = None) -> int:
     """The context window to request for *model* (``ollama/`` prefix optional).
 
-    An exact table entry wins. Otherwise another tag of a family whose
-    ``:latest`` is listed (``qwen3.5:9b``) takes that family's window, which is
-    what the earlier family match did; anything else gets ``DEFAULT_NUM_CTX``.
+    An exact table entry wins. Otherwise the bare base name is tried, because
+    Ollama reports an alias with a tag (``llmr-edit:latest`` in ``ollama list``,
+    ``/api/ps`` and ``/api/tags``) while the table keys it bare. Then another
+    tag of a family whose ``:latest`` is listed (``qwen3.5:9b``) takes that
+    family's window; anything else gets ``DEFAULT_NUM_CTX``.
     """
     name = _name(model)
     if name in NUM_CTX:
         return NUM_CTX[name]
     base = name.split(":", 1)[0]
     if base:
-        return NUM_CTX.get(f"{base}:latest", DEFAULT_NUM_CTX)
+        return NUM_CTX.get(base, NUM_CTX.get(f"{base}:latest", DEFAULT_NUM_CTX))
     return DEFAULT_NUM_CTX

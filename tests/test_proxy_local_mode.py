@@ -633,3 +633,32 @@ async def test_local_mode_sends_the_larger_output_cap_to_ollama_and_off_mode_kee
         finally:
             ps.choose_model = orig
         assert seen[-1] == expected, (serve, seen)
+
+
+def test_cmd_proxy_without_a_model_refuses_cleanly_with_the_table_default(monkeypatch, capsys):
+    """M3.4: no --model and no --num-ctx leaves ProxyConfig.num_ctx None. The
+    preflight runs before build_app and must not compare None to an int (it
+    raised TypeError on 690a850); it refuses for the missing model instead."""
+    import uvicorn
+
+    monkeypatch.delenv("LLM_ROUTER_PROXY_NUM_CTX", raising=False)
+    monkeypatch.delenv("LLM_ROUTER_PROXY_MODEL", raising=False)
+    started = []
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: started.append(1))
+    monkeypatch.setattr(local_mode, "server_num_parallel", lambda *a, **k: (1, "ok"))
+    monkeypatch.setattr(local_mode, "runner_np_values", lambda *a, **k: [])
+    rc = ps.cmd_proxy(["--serve", "local-agent", "--trim", "none", "--tiers", "off"])
+    err = capsys.readouterr().err
+    assert rc == 2 and not started
+    assert "REFUSING to start" in err and "--model ollama/<tag> is required" in err
+    assert "TypeError" not in err and "--num-ctx" not in err
+
+
+def test_preflight_and_banner_resolve_a_missing_window_from_the_table(tmp_path):
+    assert local_mode.resolve_num_ctx(None, None) == 32768
+    assert local_mode.resolve_num_ctx("ollama/qwen3.5:latest", None) == 131072
+    assert local_mode.resolve_num_ctx("ollama/qwen3.5:latest", 40000) == 40000
+    pre = _pre(tmp_path, num_ctx=None)
+    assert not any("--num-ctx" in p for p in pre)
+    lines = local_mode.banner_lines(model=MODEL, num_ctx=None, kill_path=tmp_path / "k", killed=False)
+    assert lines and "local-agent" in lines[0]

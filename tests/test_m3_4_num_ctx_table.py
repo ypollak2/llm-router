@@ -29,6 +29,11 @@ def test_table_is_the_planned_one():
     ("ollama/qwen3-coder:30b", 32768),     # provider prefix is ignored
     ("QWEN3.5:latest", 131072),
     ("qwen3.5:9b", 131072),                # another tag of a listed :latest family
+    ("llmr-classifier:latest", 4096),      # Ollama reports aliases with their tag
+    ("ollama/llmr-classifier:latest", 4096),
+    ("llmr-edit:latest", 16384),
+    ("ollama/llmr-edit:latest", 16384),
+    ("LLMR-Edit:Latest", 16384),
     ("qwen3.8:7b", 131072),
     ("some-new-model:7b", 32768),
     ("qwen3-coder:480b", 32768),
