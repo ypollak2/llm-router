@@ -76,6 +76,16 @@ complexity_knn: false
 # in the PR that added it has been run.
 haiku_rewrite: false
 
+# true: a body that carries mid-conversation `role: "system"` messages (the
+# blocker described above) is eligible for the Haiku rewrite too. The rewrite moves
+# each such message into a `<system-reminder>` text block of a user message
+# (translate.fold_system_messages): at the start of the next user message (after its
+# tool_result blocks), else appended to the previous one; the message's effort
+# control is dropped. The top-level `system` field is untouched, so the cache prefix
+# is kept. Only takes effect together with `haiku_rewrite: true`. Off: it is only
+# for the smoke proxy until the M2 canary decides (PLAN M0.7).
+haiku_fold_system: false
+
 # Requested model ids that are never rewritten (e.g. the model you pass with
 # `claude --model`, which the proxy cannot tell apart from the default).
 pinned_models: []

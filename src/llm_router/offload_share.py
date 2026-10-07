@@ -39,6 +39,13 @@ A unit is redone when ANY of:
    session whose timestamp is within ``OUTCOME_JOIN_S`` of the unit (local units only: a
    verdict exists only for routed MCP events), each verdict used at most once.
 
+4. detector (source 4, ``redo_signal.py``, OFF while ``REDO_SOURCE4_ENABLED`` is False): a human
+   prompt in the NEXT ``REDO_TURNS`` human turns (not the unit's own) that the transcript detector flags as a
+   re-ask, correction or repeat. A flagged prompt is placed on the ledger's turn count by timestamp (the first
+   human-turn row at or after it, within ``DETECTOR_MAP_MAX_GAP_S``); a flag with no such row is counted as
+   unmapped, never guessed. While the constant is False the flags are counted (``n_detector_flags``) and do
+   not change any unit. It is turned on by a PR that cites a validation run on blind labels (PLAN M0-7b).
+
 A unit whose 2 following human turns have not happened yet and that shows no redo is
 counted as NOT redone and also counted in ``window_open``: it can still turn into a redo,
 so the number is stated with that count, never silently final.
@@ -53,6 +60,9 @@ CLASS_LOCAL = "local"
 CLASS_CLAUDE = "claude"
 ESCALATION_REASONS = frozenset({"escalation", "escalation_under_pressure"})
 REDO_TURNS = 2          # the unit's own turn + the next 2 human turns
+REDO_SOURCE4_ENABLED = False   # PLAN M0.9: flipped by a follow-up PR that cites the validation result
+DETECTOR_MAP_SLACK_S = 2.0      # a prompt may be stamped this much AFTER the ledger row it caused
+DETECTOR_MAP_MAX_GAP_S = 120.0  # ... and at most this much before it (hooks run between prompt and call)
 OUTCOME_JOIN_S = 120.0  # usage_outcome event ts vs local unit ts
 TARGET = 0.60
 
@@ -99,6 +109,20 @@ class _Conversation:
         self.escalations = [(self.ts[i], self.turn[i]) for i, r in enumerate(ordered)
                             if r.get("tier_reason") in ESCALATION_REASONS]
         self.last_turn = t
+        # (ts of the first row of each human turn); human turn k starts at starts[k - 1]
+        self.starts = [self.ts[i] for i, r in enumerate(ordered) if r.get("step_class") != "continuation"]
+
+    def unit_turn(self, ts: float) -> int:
+        i = bisect.bisect_right(self.ts, ts)
+        return self.turn[i - 1] if i > 0 else 0
+
+    def turn_of_prompt(self, prompt_ts: float) -> int | None:
+        """Human turn number of a prompt stamped ``prompt_ts`` in a transcript: the first turn whose first
+        row is at or after it (minus the slack) and within DETECTOR_MAP_MAX_GAP_S. None when there is none."""
+        i = bisect.bisect_left(self.starts, prompt_ts - DETECTOR_MAP_SLACK_S)
+        if i >= len(self.starts) or self.starts[i] - prompt_ts > DETECTOR_MAP_MAX_GAP_S:
+            return None
+        return i + 1
 
     def redone_after(self, ts: float) -> tuple[bool, bool]:
         """(escalation in the unit's turn or the next REDO_TURNS, window still open)."""
@@ -117,12 +141,14 @@ def policy_start(proxy_rows: Iterable[dict], version: str) -> float | None:
 
 def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: float, days: float,
                 kind_of, allowed: frozenset, band_redone: set[str] | frozenset = frozenset(),
-                outcome_redos: Iterable[dict] = ()) -> dict:
+                outcome_redos: Iterable[dict] = (), detector_flags=None) -> dict:
     """Classified, redo-judged units in the window.
 
     ``kind_of(session_id, stamp)`` returns the resolved session kind or None.
     ``band_redone``: msg_ids whose last receipt-band press is ``redone``.
     ``outcome_redos``: usage_outcome rows (any outcome; only ``redone`` is read).
+    ``detector_flags(session_id)``: ``[(prompt ts, signal)]`` from ``redo_signal`` (source 4), called once
+    per admitted session. Counted always; it marks units redone only when ``REDO_SOURCE4_ENABLED``.
     Returns ``{"units": [...], "side_call_excluded", "untagged", "other_kind",
     "local_no_session", "n_escalations"}`` (escalation rows among the admitted units: how
     much redo signal exists at all). A local unit with no ``session_id`` (usage.db rows written
@@ -146,6 +172,36 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
 
     units: list[dict] = []
     side = untagged = other = local_no_session = n_escalations = 0
+    det_turns: dict[str, list[int]] = {}
+    n_det = n_det_unmapped = 0
+
+    def detector_turns(sid) -> list[int]:
+        """Human turn numbers of the session's flagged prompts (in the window), computed once per session."""
+        nonlocal n_det, n_det_unmapped
+        if detector_flags is None or sid not in conv:
+            return []
+        if sid not in det_turns:
+            try:
+                flags = list(detector_flags(sid))
+            except Exception:  # noqa: BLE001 -- an unreadable transcript yields no flags
+                flags = []
+            turns: set[int] = set()
+            for ft in sorted({f[0] for f in flags if _num(f[0]) is not None and since <= f[0] <= now}):
+                t = conv[sid].turn_of_prompt(ft)
+                if t is None:
+                    n_det_unmapped += 1
+                else:
+                    turns.add(t)
+            n_det += len(turns)
+            det_turns[sid] = sorted(turns)
+        return det_turns[sid]
+
+    def detector_redone(sid, ts) -> bool:
+        turns = detector_turns(sid)      # always evaluated, so the flags are counted while disabled
+        if not REDO_SOURCE4_ENABLED or sid not in conv:
+            return False
+        ut = conv[sid].unit_turn(ts)
+        return any(ut < t <= ut + REDO_TURNS for t in turns)
 
     def admit(sid, stamp) -> bool:
         nonlocal untagged, other
@@ -173,6 +229,8 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
         why = "escalation" if hit else None
         if why is None and isinstance(r.get("msg_id"), str) and r["msg_id"] in band_redone:
             why = "receipt_band"
+        if why is None and detector_redone(sid, ts):
+            why = "detector"
         units.append({"class": cls, "ts": ts, "session_id": sid, "redone": why is not None,
                       "why": why, "window_open": open_ and why is None,
                       "first": r.get("step_class") != "continuation"})
@@ -193,10 +251,13 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
         why = "escalation" if hit else None
         if why is None and _consume_event(redo_events.get(sid, []), ts):
             why = "usage_outcome"
+        if why is None and detector_redone(sid, ts):
+            why = "detector"
         units.append({"class": CLASS_LOCAL, "ts": ts, "session_id": sid, "redone": why is not None,
                       "why": why, "window_open": open_ and why is None, "first": True})
     return {"units": units, "side_call_excluded": side, "untagged": untagged, "other_kind": other,
-            "local_no_session": local_no_session, "n_escalations": n_escalations}
+            "local_no_session": local_no_session, "n_escalations": n_escalations,
+            "n_detector_flags": n_det, "n_detector_unmapped": n_det_unmapped}
 
 
 def _iso_ts(raw: Any) -> Any:

@@ -86,6 +86,10 @@ def _kpis(**kw):
     return kpi.compute_scorecard(days=7, **kw)["kpis"]
 
 
+def _diag(**kw):
+    return kpi.compute_scorecard(days=7, **kw)["kpis_diag"]
+
+
 def _first_attempted_kind():
     return sorted(ns.ATTEMPTED_KINDS)[0]
 
@@ -130,9 +134,14 @@ def _mixed_units(sid):
 def test_ns_d1_d2_exact_values(monkeypatch, sessions):
     _units(monkeypatch, _mixed_units(sessions["organic"]))
     k = _kpis()
-    assert k["NS"]["value"] == "60.0% (n=80)"      # 48 used / 80 units
+    # M0.2: NS and D2 count strict-used only; these units carry no verify record, so 0.
+    assert k["NS"]["value"] == "0.0% (n=80)"
     assert k["D1"]["value"] == "80.0% (n=80)"      # 64 attempted / 80 units
-    assert k["D2"]["value"] == "75.0% (n=64)"      # 48 used / 64 attempted
+    assert k["D2"]["value"] == "0.0% (n=64)"
+    # the old heuristic numerators, kept as diagnostics
+    d = _diag()
+    assert d["NS_heuristic"]["value"] == "60.0% (n=80)"      # 48 used / 80 units
+    assert d["D2_heuristic"]["value"] == "75.0% (n=64)"      # 48 used / 64 attempted
 
 
 def test_research_and_untagged_sessions_are_excluded_by_default(monkeypatch, sessions):
@@ -140,7 +149,8 @@ def test_research_and_untagged_sessions_are_excluded_by_default(monkeypatch, ses
     rows += _mixed_units(sessions["research"]) * 3
     rows += _mixed_units(sessions["untagged"]) * 3
     _units(monkeypatch, rows)
-    assert _kpis()["NS"]["value"] == "60.0% (n=80)"
+    assert _kpis()["NS"]["value"] == "0.0% (n=80)"
+    assert _diag()["NS_heuristic"]["value"] == "60.0% (n=80)"
 
 
 def test_all_untagged_units_explain_why_they_are_not_counted(monkeypatch, sessions):
@@ -155,7 +165,8 @@ def test_include_research_widens_the_population_but_never_untagged(monkeypatch, 
     rows = _mixed_units(sessions["organic"]) + _mixed_units(sessions["research"])
     rows += _mixed_units(sessions["untagged"])
     _units(monkeypatch, rows)
-    assert _kpis(include_research=True)["NS"]["value"] == "60.0% (n=160)"
+    assert _kpis(include_research=True)["NS"]["value"] == "0.0% (n=160)"
+    assert _diag(include_research=True)["NS_heuristic"]["value"] == "60.0% (n=160)"
 
 
 def test_proxy_lever_counts_as_attempted(monkeypatch, sessions):

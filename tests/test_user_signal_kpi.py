@@ -59,7 +59,7 @@ def test_keep_never_raises_ns_d1_d2(monkeypatch):
     _units(monkeypatch, used=20, redo=20, not_routed=40)
     _d3_rows(monkeypatch, used=45, redone=15)
     before = _card()["kpis"]
-    assert before["NS"]["value"] == "25.0% (n=80)"          # the fixture is measurable
+    assert before["NS"]["value"] == "0.0% (n=80)"           # the fixture is measurable (strict-used, M0.2)
     _press(500, "kept", "k")
     after = _card()["kpis"]
     for key in ("NS", "D1", "D2"):

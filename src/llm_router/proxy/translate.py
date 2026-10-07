@@ -301,7 +301,71 @@ def is_thinking_rejection(status: int, body_text: str) -> bool:
 HAIKU_MAX_OUTPUT_TOKENS = 64_000
 
 
-def for_haiku(body: dict) -> dict:
+def _fold_blocks(content) -> list[dict]:
+    """The content of a ``role: "system"`` message as user-message blocks: each text
+    block wrapped in ``<system-reminder>`` tags unless it already is (Claude Code wraps
+    its own), other blocks kept as they are."""
+    blocks = [{"type": "text", "text": content}] if isinstance(content, str) else \
+        [dict(b) if isinstance(b, dict) else {"type": "text", "text": str(b)} for b in content or []]
+    out = []
+    for b in blocks:
+        text = b.get("text")
+        if b.get("type") == "text" and isinstance(text, str) and not text.lstrip().startswith("<system-reminder>"):
+            b = dict(b, text=f"<system-reminder>\n{text}\n</system-reminder>")
+        out.append(b)
+    return out
+
+
+def _blocks_of(message: dict) -> list:
+    content = message.get("content")
+    return [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
+
+
+def fold_system_messages(messages: list) -> list:
+    """``messages`` with every mid-conversation ``role: "system"`` message moved into an
+    ordinary user message, as ``<system-reminder>`` text blocks (M0.7). Haiku 4.5
+    rejects the role itself ("role 'system' is not supported on this model").
+
+    Placement, per message (consecutive system messages travel together, in order):
+
+    - the next message is a user message: the text goes at its start, or, when it holds
+      ``tool_result`` blocks, right after the last of them (they must lead);
+    - otherwise the previous message is a user message: the text is appended to it;
+    - otherwise (assistant on both sides) it becomes a user message of its own.
+
+    The message-level ``effort`` control (``output_config``) is dropped with the message:
+    Haiku has no effort setting. ``messages`` itself and every message that is not
+    changed are left as they are (the caller keeps the original for its 4xx retry)."""
+    if not any(isinstance(m, dict) and m.get("role") == "system" for m in messages):
+        return messages
+    out: list = []
+    i, n = 0, len(messages)
+    while i < n:
+        m = messages[i]
+        if not (isinstance(m, dict) and m.get("role") == "system"):
+            out.append(m)
+            i += 1
+            continue
+        folded: list[dict] = []
+        while i < n and isinstance(messages[i], dict) and messages[i].get("role") == "system":
+            folded += _fold_blocks(messages[i].get("content"))
+            i += 1
+        nxt = messages[i] if i < n else None
+        prev = out[-1] if out else None
+        if isinstance(nxt, dict) and nxt.get("role") == "user":
+            blocks = _blocks_of(nxt)
+            at = max((k for k, b in enumerate(blocks) if isinstance(b, dict) and b.get("type") == "tool_result"),
+                     default=-1) + 1
+            out.append(dict(nxt, content=blocks[:at] + folded + blocks[at:]))
+            i += 1
+        elif isinstance(prev, dict) and prev.get("role") == "user":
+            out[-1] = dict(prev, content=_blocks_of(prev) + folded)
+        else:
+            out.append({"role": "user", "content": folded})
+    return out
+
+
+def for_haiku(body: dict, *, fold_system: bool = False) -> dict:
     """A copy of ``body`` with the fields Haiku 4.5 rejects outright removed
     or clamped, for the opt-in Haiku tier (``proxy/tiers.py``,
     ``ClaudeTierPolicy``'s ``haiku_rewrite``).
@@ -326,12 +390,19 @@ def for_haiku(body: dict) -> dict:
     output") is clamped down rather than treated as ineligible: Claude Code
     requests a fixed budget it does not need in full on an easy turn, so
     clamping is safe and keeps more turns eligible.
+
+    ``fold_system`` (policy ``haiku_fold_system``, M0.7): also move every
+    mid-conversation ``role: "system"`` message into a user message
+    (``fold_system_messages``). The top-level ``system`` field is not touched, so
+    the cache prefix is kept.
     """
     out = without_thinking(body)
     out.pop("output_config", None)
     max_tokens = out.get("max_tokens")
     if isinstance(max_tokens, int) and max_tokens > HAIKU_MAX_OUTPUT_TOKENS:
         out["max_tokens"] = HAIKU_MAX_OUTPUT_TOKENS
+    if fold_system and isinstance(out.get("messages"), list):
+        out["messages"] = fold_system_messages(out["messages"])
     return out
 
 

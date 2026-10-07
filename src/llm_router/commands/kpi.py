@@ -316,7 +316,7 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index,
     counts: how many units found a tag and how many stayed untagged."""
     from llm_router import northstar as ns
 
-    window = joined = untagged = conflicting = total = attempted = used = 0
+    window = joined = untagged = conflicting = total = attempted = used = used_heuristic = 0
     backfilled_total = backfilled_attempted = 0
     by_source: dict[str, int] = {}
     by_kind: dict[str, int] = {}
@@ -360,8 +360,12 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index,
             attempted += 1
             if is_backfilled:
                 backfilled_attempted += 1
-            if u["outcome"] == ns.OUTCOME_USED:
+            # NS and D2 count STRICT-used only (PLAN M0.2). The old heuristic numerator is
+            # kept as a diagnostic, outside KPI_CODES.
+            if ns.is_strict_used(u):
                 used += 1
+            if u["outcome"] == ns.OUTCOME_USED:
+                used_heuristic += 1
     joins = {"window_units": window, "joined": joined, "untagged": untagged,
              "untagged_conflicting": conflicting, "joined_by_source": by_source,
              "joined_by_kind": by_kind, "counted": total, "counted_sessions": len(by_session),
@@ -379,14 +383,45 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index,
             why = (f"{window} unit(s) in window, none from {_scope_phrase(allowed)} session: "
                    f"{joined} joined to a tag ({kinds}), {untagged} untagged (never counted as organic)")
         out = _not_measurable(why, seen=window)
-        return out, dict(out), dict(out), joins
-    return (_rate_result(used, total, label="unit", newest_ts=newest, seen=window,
-                         backfilled=backfilled_total),
+        joins["diag"] = {"NS_heuristic": _heuristic_diag(dict(out)), "D2_heuristic": _heuristic_diag(dict(out))}
+        return _strict_note(out), dict(out), _strict_note(dict(out)), joins
+    joins["diag"] = {
+        "NS_heuristic": _heuristic_diag(_rate_result(
+            used_heuristic, total, label="unit", newest_ts=newest, seen=window, backfilled=backfilled_total)),
+        "D2_heuristic": _heuristic_diag(_rate_result(
+            used_heuristic, attempted, label="attempt", newest_ts=newest, seen=window,
+            backfilled=backfilled_attempted)),
+    }
+    return (_strict_note(_rate_result(used, total, label="unit", newest_ts=newest, seen=window,
+                                      backfilled=backfilled_total)),
             _rate_result(attempted, total, label="unit", newest_ts=newest, seen=window,
                          backfilled=backfilled_total),
-            _rate_result(used, attempted, label="attempt", newest_ts=newest, seen=window,
-                         backfilled=backfilled_attempted),
+            _strict_note(_rate_result(used, attempted, label="attempt", newest_ts=newest, seen=window,
+                                      backfilled=backfilled_attempted)),
             joins)
+
+
+def _strict_note(result: dict) -> dict:
+    """Name the strict rule on a measured NS or D2 result: a ``reason`` and a printed line."""
+    from llm_router import northstar as ns
+
+    if not result.get("measurable"):
+        return result  # an unmeasurable result already carries its own reason; leave it as it was
+    result.setdefault("reason", ns.STRICT_RULE_TEXT)
+    result["lines"] = list(result.get("lines", ())) + [ns.STRICT_RULE_TEXT]
+    return result
+
+
+def _heuristic_diag(result: dict) -> dict:
+    """The pre-M0.2 numerator (heuristic outcome == used), shown beside the strict one."""
+    result = dict(result)
+    note = "heuristic outcome=used; not a target (strict NS and D2 are the targets, PLAN M0.2)"
+    if result.get("measurable"):
+        result["reason"] = note
+    else:
+        result["reason"] = f"{result.get('reason')} ({note})"
+    result["lines"] = [note]
+    return result
 
 
 # ── D3: redo rate, from usage_outcome ────────────────────────────────────────
@@ -1242,7 +1277,8 @@ def _local_shadow_line(summary: dict | None) -> str | None:
 
 # ── O3: offload share (see offload_share.py and KPIS.md) ───────────────────
 
-def _o3_from_units(units: list[dict], local_no_session: int = 0, n_escalations: int | None = None) -> dict:
+def _o3_from_units(units: list[dict], local_no_session: int = 0, n_escalations: int | None = None,
+                   n_detector_flags: int | None = None) -> dict:
     """One O3 result over already-judged units. HEADLINE = human turns (first call of each
     turn, see offload_share); per-call figures are the secondary line."""
     from llm_router import offload_share as osh
@@ -1300,6 +1336,15 @@ def _o3_from_units(units: list[dict], local_no_session: int = 0, n_escalations: 
             + f"n_escalations={n_escalations} in window"
             + (" (a low redo rate is NOT proven low: there is little signal to detect a redo)"
                if n_escalations < MIN_N else ""))
+    if n_detector_flags is not None:
+        # Source 4 (redo_signal.py): reported even while it is disabled, so its volume is visible before
+        # anyone proposes to count it (PLAN M0.9).
+        enabled = osh.REDO_SOURCE4_ENABLED
+        out_bd["redo_detector_n"] = n_detector_flags
+        out_bd["redo_detector_enabled"] = enabled
+        out.setdefault("lines", []).append(
+            f"redo detector (source 4, transcript): {n_detector_flags} flagged prompt(s) in window, "
+            + ("counted in redo" if enabled else "NOT counted in redo (disabled until validated)"))
     out["breakdown"] = out_bd
     return out
 
@@ -1332,15 +1377,19 @@ def _o3_unit_inputs(days: int, index, now: float,
 def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[dict],
                       now: float, since_policy: str | None = None,
                       win: "_Window | None" = None) -> dict:
+    from llm_router import northstar as ns
     from llm_router import offload_share as osh
+    from llm_router import redo_signal
 
     try:
         local, band, outcomes = _o3_unit_inputs(days, index, now, win)
         built = osh.build_units(
             all_rows, local, now=now, days=days, allowed=allowed,
             kind_of=lambda sid, stamp: index.resolve(sid, stamp=stamp).kind,
-            band_redone=band, outcome_redos=outcomes)
-        res = _o3_from_units(built["units"], built["local_no_session"], built["n_escalations"])
+            band_redone=band, outcome_redos=outcomes,
+            detector_flags=redo_signal.session_flags_loader(ns.claude_projects_dir()))
+        res = _o3_from_units(built["units"], built["local_no_session"], built["n_escalations"],
+                             built["n_detector_flags"])
         res["excluded"] = {"side_call": built["side_call_excluded"], "untagged": built["untagged"],
                            "other_kind": built["other_kind"], "local_no_session": built["local_no_session"]}
         note = (f"{res['breakdown']['window_open']} turn(s) have fewer than {osh.REDO_TURNS} human turns "
@@ -1458,6 +1507,7 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
     index = sk.KindIndex(all_rows)
     until_ts = None if win is None else win.until
     ns_r, d1_r, d2_r, joins = _ns_d1_d2(days, allowed, index, win)
+    kpis_diag = joins.pop("diag")
     d3_r = _fold_user_signals(_d3_redo_rate(days, allowed, index, win), days, now_ts)
     pop = _proxy_population(all_rows, days, allowed, now_ts, until=until_ts)
     d4_r = _d4_tier_mix(pop)
@@ -1487,6 +1537,9 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
             "D1": d1_r, "D2": d2_r, "D3": d3_r, "D4": d4_r, "D5": d5_r,
             "G1_hook": g1_hook_r, "G1_proxy": g1_proxy_r, "G2": g2_r, "G3": g3_r, "G4": g4_r,
         },
+        # Outside "kpis" (so outside KPI_CODES, _ORDER and --health): the heuristic NS and D2
+        # numerators, kept for comparison only.
+        "kpis_diag": kpis_diag,
     }
     if win is not None:  # only a windowed card carries the key: the default output is unchanged
         card["window_days"] = round(win.days, 6)
@@ -1605,6 +1658,10 @@ def render_scorecard(data: dict) -> str:
         lines.append(f"  {_LABELS[key]:<42s} {r['value']}")
         for extra in r.get("lines", ()):
             lines.append(f"      {extra}")
+    for key, r in (data.get("kpis_diag") or {}).items():
+        if not r.get("measurable"):
+            continue  # nothing to compare: the card stays as it was
+        lines.append(f"  {key:<42s} {r['value']}   [diagnostic, not a target]")
     if data.get("o3") is not None:
         lines += _o3_render_lines(data["o3"])
     lines.append("")

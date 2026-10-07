@@ -17,13 +17,14 @@ used as-is) / (all prompts + LLM calls), organic sessions only. Target **> 80%, 
 session is now tagged research by the override file (see "Session-kind override"), so the same
 command no longer counts it: on the pinned window W0 (2026-09-29T09:41:51Z to 2026-10-06T09:41:52Z)
 the count is 0.0% of 59 organic units, 25 of them backfilled (`llm-router kpi --since ... --until
-... --json` on a copy of `~/.llm-router`, 2026-10-07). Read the 4,300 as an upper bound on volume.
+... --json` on a copy of `~/.llm-router`, 2026-10-07). Read the 4,300 as an upper bound on volume. These figures were taken with the heuristic numerator (`outcome == "used"`), before the strict rule below merged (#294); they have not been recomputed under it.
 
-**Q&A never counts toward NS.** This is the owner's rule. As of this page the code does not yet
-enforce it: seven heuristic setters in `northstar.py` can mark a unit `used` whatever its task
-type, and NS counts `outcome == "used"`. The strict, verify-based rule (served by a non-Claude
-model, `verify_status` in {`pass_f2p`, `pass_f2p_model`}, not Q&A, not redone) is plan task M0.2;
-until it merges, NS here is the heuristic one.
+**Q&A never counts toward NS.** This is the owner's rule, and the code enforces it:
+`llm-router kpi` computes NS and D2 with the **strict-used** rule (`northstar.is_strict_used`, owner
+decision D-2): served by a non-Claude model AND `verify.verify_status` in {`pass_f2p`, `pass_f2p_model`}
+AND task type not Q&A (`northstar.QA_TASK_TYPES`) AND outcome not redo. A unit with no verify record never
+counts, a keep press adds nothing, and pass-to-pass never counts. The heuristic numerators
+(`outcome == "used"`) stay in `kpis_diag.NS_heuristic` / `D2_heuristic`, outside the KPI codes: "not a target".
 
 **O1 — Quota avoided (PRIMARY, per the 2026-09-28 amendment).** Claude quota-weighted cost
 avoided vs. the requested model. Shown only as "est." until reconciled with Claude Code's
@@ -73,6 +74,28 @@ session id.
 3. **usage_outcome.** A `redone` verdict (`usage_outcome.py`) for a routed event in the same
    session, within 120 s of the unit, each verdict used once. Local units only (a verdict
    exists only for routed MCP events).
+
+4. **Transcript detector (source 4, OFF).** `src/llm_router/redo_signal.py` reads the session's Claude Code
+   transcript and flags a human prompt that re-asks (`claude:` / `native:` / `opus:`), corrects, complains
+   ("that didn't work", "try again" ...) or repeats the previous prompt. A unit is redone by it when a
+   flagged prompt falls in the next 2 human turns. It is disabled (`offload_share.REDO_SOURCE4_ENABLED =
+   False`): it changes no unit, and `o3.breakdown.redo_detector_n` still reports how many flagged prompts it saw.
+   It may be enabled only by a PR that cites a validation run on blind labels with precision >= 0.80 and
+   >= 15 true positives. The one run so far did not meet that: pattern version v2, test half n=150 labelled
+   pairs (window 2026-08-30 to 2026-10-06, 12 labelled redo), precision 2/5 and recall 2/12
+   (`~/.rsi/research/primary-plan/redo/test_result.json`, not in this repo). Until then redo-based bars are
+   "not informative".
+
+   **Population of that run (not O3's).** PLAN M0.9 asks for organic sessions plus b9f04425. The sampler applied no
+   session-kind filter. Of 524 pairs in the extended window (2026-08-30 to 2026-10-06), 106 come from the PLAN's
+   population (76 of them in W0) and 418 from sessions with no tag file and no ledger kind stamp (untagged: kind
+   unknown, never counted as organic here). Selected: 236 of 300 pairs (19 of 22 sessions) are untagged; test half:
+   115 of 150. The tag-less sessions pre-date tagging; a sidecar derived from their transcript cwd/entrypoint
+   (`session_kind_backfill.jsonl`, not a live tag) calls all 418 organic. 106 < 300, so the PLAN's own population
+   cannot supply the sample even after the one allowed extension; PLAN 3.4 makes the substitute population the
+   owner's decision and that decision is open. Precision and recall above are therefore measured mostly on
+   untagged sessions, and any PR that flips `REDO_SOURCE4_ENABLED` must quote this split with them. Split recorded in
+   `sample_meta.json` and `test_result.json` (`population_split`).
 
 A unit that shows no redo but has fewer than 2 human turns after it (a recent turn, or the end of
 a session) is counted as not redone and also counted as `window_open`; the count is in the
@@ -126,7 +149,7 @@ Most are computed by research scripts outside this repository, not by `llm-route
 | ID | Driver | Definition |
 |---|---|---|
 | D1 | Offered off Claude | Attempted units / all organic units, pooled over the window (`kpi._ns_d1_d2`). A unit is *attempted* when its `kind` is in `northstar.ATTEMPTED_KINDS` or its `lever` is `proxy`. Today **4.5%** (193 of 4,300 units, 7 days, 2026-10-06, c2ed278; includes b9f04425, see NS above). |
-| D2 | Success when tried | Units with `outcome == "used"` / attempted units, same population (`kpi._ns_d1_d2`). The heuristic outcome, not yet the verify-based rule of M0.2. Today **0 of 193** (7 days, 2026-10-06, c2ed278). |
+| D2 | Success when tried | Strict-used units / attempted units, same population (`kpi._ns_d1_d2`). D2 uses the strict-used rule (see NS above), not the heuristic `outcome == "used"`. Today **0 of 193** (7 days, 2026-10-06, c2ed278, heuristic numerator; not recomputed under the strict rule). |
 | D3 | Redo rate | % of routed outputs Claude redoes within 3 turns, plus the person's own `r` redo presses on the receipt band (see below). **D3 uses a window of 3 turns (`usage_outcome.WINDOW_TURNS`); O3 uses 2 (`offload_share.REDO_TURNS`). The two are different windows: never mix them.** |
 | D4 | Tier mix | % of Claude turns **and** % of Claude quota cost on Opus/Sonnet/Haiku, printed side by side (source: `proxy_calls.jsonl`, tracked since PR #246). Cost is calls weighted by per-call cost, Haiku 1 : Sonnet 3.66 : Opus 6.15 (Opus is 1.68x Sonnet and 6.15x Haiku; `proxy/claude_tiers.yaml`, probe 2026-09-29, n=5 calls per model, pinned by a test). A tier with no weight (Fable) is left out of the weighted share and counted, never given a guessed weight. Organic sessions only, by the kind each proxy row was written with (rows from before tagging stay out): research and harness are excluded (`llm-router kpi --include research` adds research, never harness). |
 | D5 | Classifier accuracy | Exact tier vs. a truth set; too-weak (under-route) rate <= 10%. |
