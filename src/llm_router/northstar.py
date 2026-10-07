@@ -1416,7 +1416,9 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
 
     {"window_days": N, "generated_at": iso8601,
      "aggregate": {"n_sessions": int, "median": float|null, "p25": float|null,
-                   "max": float|null, "too_few": bool},
+                   "max": float|null, "too_few": bool,
+                   "strict_median": float|null, "strict_p25": float|null,
+                   "strict_max": float|null},
      "sessions": [{"session_id", "units", "used", "attempted", "unknown",
                    "redo", "share", "strict_used", "strict_share"}, ...],
      "by_kind": {"<kind>": {"units", "attempted", "used", "redo", "unknown"}}}
@@ -1458,6 +1460,7 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
 
     session_rows = []
     shares = []
+    strict_shares = []
     for sid, c in sorted(per_session_counts.items()):
         share = (c["used"] / c["units"]) if c["units"] >= MIN_UNITS and c["units"] else None
         session_rows.append({
@@ -1473,13 +1476,20 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
         })
         if share is not None:
             shares.append(share)
+            strict_shares.append(c["strict_used"] / c["units"])
 
+    # median/p25/max are the heuristic ``outcome == used`` share, kept for the JSON
+    # report and kpi diagnostics. The strict_* keys are the NS that user surfaces
+    # show (P0.8-b, plan §1.2): same sessions, strict numerator.
     aggregate = {
         "n_sessions": len(session_rows),
         "median": statistics.median(shares) if shares else None,
         "p25": _percentile(shares, 25) if shares else None,
         "max": max(shares) if shares else None,
         "too_few": len(shares) < 1,
+        "strict_median": statistics.median(strict_shares) if strict_shares else None,
+        "strict_p25": _percentile(strict_shares, 25) if strict_shares else None,
+        "strict_max": max(strict_shares) if strict_shares else None,
     }
     return {
         "window_days": days,

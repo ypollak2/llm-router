@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 18
+# llm_router-hook-version: 19
 """Stop hook — unified session summary: CC subscription delta + external routing costs."""
 
 from __future__ import annotations
@@ -550,7 +550,7 @@ def _query_cumulative_savings() -> list[tuple[str, int, int, int, float]]:
 def _aggregate(rows: list[dict]) -> dict[str, dict]:
     tools: dict[str, dict] = {}
     for r in rows:
-        tool    = r.get("task_type", "unknown")
+        tool    = r.get("task_type") or "unknown"  # P0.8: NULL = unknown (BUGS.md 16)
         model   = r.get("model", "?")
         in_tok  = r.get("input_tokens")  or 0
         out_tok = r.get("output_tokens") or 0
@@ -726,7 +726,7 @@ def _format_cc_model_section(cc_rows: list[dict]) -> list[str]:
         model = r.get("model", "?")
         if _is_test_model(model):
             continue
-        task  = r.get("task_type", "?")
+        task  = r.get("task_type") or "?"
         if model not in models:
             models[model] = {"count": 0, "tasks": {}}
         models[model]["count"] += 1

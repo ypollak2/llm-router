@@ -282,3 +282,79 @@ def test_replay_renders_null_confidence_and_task_type_as_unknown():
     measured = dict(row, task_type="code", classifier_confidence=0.87)
     text = replay.format_decision_line(measured)
     assert "87%" in text and "(code/moderate)" in text
+
+
+# ── readers of task_type survive NULL (review of #310, round 1) ─────────────
+
+
+def test_quality_report_renders_null_task_type_as_unknown(temp_db):
+    """P0.8 writes NULL task_type for an unknown DIRECT task type.
+
+    ``llm_quality_report`` formatted each task type with ``{task:<16}`` and raised
+    ``TypeError: unsupported format string passed to NoneType.__format__`` as soon
+    as one such row was in its window (reproduced on a copy of the live usage.db).
+    """
+    from llm_router.hooks.savings_logger import log_direct_to_db
+    from llm_router.tools.admin import llm_quality_report
+
+    log_direct_to_db(_ollama_result(), prompt="x", task_type="not_a_task_type_xyz",
+                     complexity="moderate", classifier_type="heuristic")
+    log_direct_to_db(_ollama_result(), prompt="y", task_type="code",
+                     complexity="simple", classifier_type="heuristic")
+    assert _rows(temp_db, "SELECT COUNT(*) FROM routing_decisions WHERE task_type IS NULL") == [(1,)]
+    # Under pytest the writer stamps provenance='test', which the report filters
+    # out. Mark the rows as real traffic, as they are on the live copy.
+    con = sqlite3.connect(str(temp_db))
+    con.execute("UPDATE routing_decisions SET provenance = 'runtime'")
+    con.commit()
+    con.close()
+
+    text = asyncio.run(llm_quality_report(days=7))
+    assert "BY TASK TYPE" in text  # the check found the rows it was meant to render
+    assert "  unknown " in text and "  code " in text
+    assert "None" not in text
+
+
+def test_session_end_routing_panels_render_null_task_type(monkeypatch):
+    """The Stop summary's routing panels read ``usage.task_type`` and formatted it
+    with ``{tool:<12}`` / ``{top_task:<12}``: a NULL row raised TypeError."""
+    hook = _load_hook("session-end.py", "_p08_session_end")
+    row = {"task_type": None, "model": "openai/gpt-4o", "provider": "openai",
+           "input_tokens": 10, "output_tokens": 5, "cost_usd": 0.01}
+
+    tools = hook._aggregate([row])
+    assert list(tools) == ["unknown"]
+    paid = "\n".join(hook._format_routing_section(tools, subscription=False))
+    assert "unknown" in paid and "None" not in paid
+
+    cc = "\n".join(hook._format_cc_model_section([dict(row, provider="subscription")]))
+    assert "gpt-4o" in cc and "None" not in cc
+
+
+def test_northstar_cli_shows_the_strict_rule_as_the_north_star(monkeypatch, capsys):
+    """Plan §1.2: the heuristic NS leaves user surfaces. ``llm-router northstar``
+    printed the heuristic ``outcome == used`` share as the North Star."""
+    from llm_router import northstar
+    from llm_router.commands import northstar as cli
+
+    sid = "sess-cli"
+    units = [_unit(sid, i, verified=i < 10) for i in range(northstar.MIN_UNITS)]
+    monkeypatch.setattr(northstar, "units", lambda **kw: iter(list(units)))
+    monkeypatch.setattr("llm_router.quality_breaker.open_classes", lambda: [])
+
+    assert cli.cmd_northstar(["--days", "7"]) == 0
+    out = capsys.readouterr().out
+    ns_lines = [ln for ln in out.splitlines() if ln.startswith("  sess-cli")]
+    assert len(ns_lines) == 1
+    # 50 units, all heuristic "used", 10 pass the strict rule: the NS is 20%.
+    assert "verified offload 20.0%" in ns_lines[0]
+    assert "median=20.0%" in out and "max=20.0%" in out
+    # The heuristic is still printed, but only under a diagnostic label.
+    assert "100.0% used" not in ns_lines[0]
+    assert "diagnostic: heuristic used=100.0%" in ns_lines[0]
+    assert "diagnostic (heuristic routed-and-used, not the NS): median=100.0%" in out
+    assert "routed-and-used share" not in out.splitlines()[0]
+
+    data = northstar.report(days=7)
+    assert data["aggregate"]["strict_median"] == pytest.approx(0.2)
+    assert data["aggregate"]["median"] == pytest.approx(1.0)

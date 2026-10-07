@@ -269,3 +269,38 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   prints `unknown`. Measured values print as before.
 - **Test.** `test_replay_renders_null_confidence_and_task_type_as_unknown` (fails on da31df7 with
   the TypeError; mutant that restores `.get("task_type", "unknown")` fails it too).
+
+## 16. `llm_quality_report` and the Stop summary raise TypeError on a NULL task type
+
+- **Symptom.** `llm_quality_report` raised `TypeError: unsupported format string passed to
+  NoneType.__format__` when any `routing_decisions` row in its window had a NULL task type
+  (reproduced by the #310 reviewer on a copy of `usage.db`: 5 such DIRECT rows broke
+  `llm_quality_report(days=7)`; deleting them fixed it). The session-end routing panels
+  (`_format_routing_section`, `_format_cc_model_section`) raised the same error on a NULL
+  `usage.task_type`.
+- **Cause.** P0.8 stores an unknown DIRECT task type as NULL (bug 11). These readers formatted
+  the value with `{task:<16}` / `{tool:<12}`, and `dict.get(key, default)` returns the stored
+  None (same class as bug 15). Before P0.8 no writer stored a NULL task type.
+- **Fix.** `tools/admin.py` renders NULL as `unknown` in the task-type table and the policy
+  event list. `session-end.py` `_aggregate` and the CC model panel use `get(...) or "unknown"`
+  (session-end hook version 19). Other `GROUP BY task_type` readers checked: community.py
+  filters `task_type IS NOT NULL`; dashboard/tui.py, dashboard/server.py (JS `|| '?'`),
+  session-end `_query_savings_by_task_type` and the `commands/northstar` dry run already map
+  None.
+- **Rule.** A column that P0.8 may leave NULL is rendered with `value or "unknown"`, never
+  `get(key, "unknown")` and never a bare format spec.
+- **Test.** `test_quality_report_renders_null_task_type_as_unknown`,
+  `test_session_end_routing_panels_render_null_task_type` (both fail on 25a2ece).
+
+## 17. `llm-router northstar` showed the heuristic share as the North Star
+
+- **Symptom.** The CLI printed "North Star — routed-and-used share" per session and its
+  aggregate median/p25/max from the heuristic `outcome == used`, after bug 13 moved the Stop
+  line to the strict rule. Plan §1.2: the heuristic NS leaves user surfaces (P0.8-b).
+- **Cause.** Bug 13's fix changed `current_session_line` only.
+- **Fix.** `report()["aggregate"]` adds `strict_median`, `strict_p25`, `strict_max` over the
+  same sessions (n >= MIN_UNITS). The CLI shows "verified offload" from the strict rule and
+  prints the heuristic only on lines labelled "diagnostic". The JSON keys `median`/`p25`/`max`
+  keep their meaning.
+- **Test.** `test_northstar_cli_shows_the_strict_rule_as_the_north_star` (50 heuristic-used
+  units, 10 strict: shows 20%, was 100%), `test_report_schema_is_pinned`.

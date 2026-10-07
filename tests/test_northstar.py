@@ -381,7 +381,10 @@ def test_report_schema_is_pinned(tmp_path):
 
     data = ns.report(days=None, session_id=sid, root=proj.parent)
     assert set(data.keys()) == {"window_days", "generated_at", "aggregate", "sessions", "by_kind"}
-    assert set(data["aggregate"].keys()) == {"n_sessions", "median", "p25", "max", "too_few"}
+    assert set(data["aggregate"].keys()) == {
+        "n_sessions", "median", "p25", "max", "too_few",
+        "strict_median", "strict_p25", "strict_max",  # P0.8-b: the NS user surfaces show
+    }
     assert set(data["sessions"][0].keys()) == {
         "session_id", "units", "used", "attempted", "unknown", "redo", "share",
         "strict_used", "strict_share",  # P0.8: the Stop line reads the strict rule
