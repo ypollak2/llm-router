@@ -1247,7 +1247,8 @@ def _local_shadow_line(summary: dict | None) -> str | None:
 
 # ── O3: offload share (see offload_share.py and KPIS.md) ───────────────────
 
-def _o3_from_units(units: list[dict], local_no_session: int = 0, n_escalations: int | None = None) -> dict:
+def _o3_from_units(units: list[dict], local_no_session: int = 0, n_escalations: int | None = None,
+                   n_detector_flags: int | None = None) -> dict:
     """One O3 result over already-judged units. HEADLINE = human turns (first call of each
     turn, see offload_share); per-call figures are the secondary line."""
     from llm_router import offload_share as osh
@@ -1305,6 +1306,15 @@ def _o3_from_units(units: list[dict], local_no_session: int = 0, n_escalations: 
             + f"n_escalations={n_escalations} in window"
             + (" (a low redo rate is NOT proven low: there is little signal to detect a redo)"
                if n_escalations < MIN_N else ""))
+    if n_detector_flags is not None:
+        # Source 4 (redo_signal.py): reported even while it is disabled, so its volume is visible before
+        # anyone proposes to count it (PLAN M0.9).
+        enabled = osh.REDO_SOURCE4_ENABLED
+        out_bd["redo_detector_n"] = n_detector_flags
+        out_bd["redo_detector_enabled"] = enabled
+        out.setdefault("lines", []).append(
+            f"redo detector (source 4, transcript): {n_detector_flags} flagged prompt(s) in window, "
+            + ("counted in redo" if enabled else "NOT counted in redo (disabled until validated)"))
     out["breakdown"] = out_bd
     return out
 
@@ -1337,15 +1347,19 @@ def _o3_unit_inputs(days: int, index, now: float,
 def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[dict],
                       now: float, since_policy: str | None = None,
                       win: "_Window | None" = None) -> dict:
+    from llm_router import northstar as ns
     from llm_router import offload_share as osh
+    from llm_router import redo_signal
 
     try:
         local, band, outcomes = _o3_unit_inputs(days, index, now, win)
         built = osh.build_units(
             all_rows, local, now=now, days=days, allowed=allowed,
             kind_of=lambda sid, stamp: index.resolve(sid, stamp=stamp).kind,
-            band_redone=band, outcome_redos=outcomes)
-        res = _o3_from_units(built["units"], built["local_no_session"], built["n_escalations"])
+            band_redone=band, outcome_redos=outcomes,
+            detector_flags=redo_signal.session_flags_loader(ns.claude_projects_dir()))
+        res = _o3_from_units(built["units"], built["local_no_session"], built["n_escalations"],
+                             built["n_detector_flags"])
         res["excluded"] = {"side_call": built["side_call_excluded"], "untagged": built["untagged"],
                            "other_kind": built["other_kind"], "local_no_session": built["local_no_session"]}
         note = (f"{res['breakdown']['window_open']} turn(s) have fewer than {osh.REDO_TURNS} human turns "

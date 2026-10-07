@@ -67,6 +67,28 @@ session id.
    session, within 120 s of the unit, each verdict used once. Local units only (a verdict
    exists only for routed MCP events).
 
+4. **Transcript detector (source 4, OFF).** `src/llm_router/redo_signal.py` reads the session's Claude Code
+   transcript and flags a human prompt that re-asks (`claude:` / `native:` / `opus:`), corrects, complains
+   ("that didn't work", "try again" ...) or repeats the previous prompt. A unit is redone by it when a
+   flagged prompt falls in the next 2 human turns. It is disabled (`offload_share.REDO_SOURCE4_ENABLED =
+   False`): it changes no unit, and `o3.breakdown.redo_detector_n` still reports how many flagged prompts it saw.
+   It may be enabled only by a PR that cites a validation run on blind labels with precision >= 0.80 and
+   >= 15 true positives. The one run so far did not meet that: pattern version v2, test half n=150 labelled
+   pairs (window 2026-08-30 to 2026-10-06, 12 labelled redo), precision 2/5 and recall 2/12
+   (`~/.rsi/research/primary-plan/redo/test_result.json`, not in this repo). Until then redo-based bars are
+   "not informative".
+
+   **Population of that run (not O3's).** PLAN M0.9 asks for organic sessions plus b9f04425. The sampler applied no
+   session-kind filter. Of 524 pairs in the extended window (2026-08-30 to 2026-10-06), 106 come from the PLAN's
+   population (76 of them in W0) and 418 from sessions with no tag file and no ledger kind stamp (untagged: kind
+   unknown, never counted as organic here). Selected: 236 of 300 pairs (19 of 22 sessions) are untagged; test half:
+   115 of 150. The tag-less sessions pre-date tagging; a sidecar derived from their transcript cwd/entrypoint
+   (`session_kind_backfill.jsonl`, not a live tag) calls all 418 organic. 106 < 300, so the PLAN's own population
+   cannot supply the sample even after the one allowed extension; PLAN 3.4 makes the substitute population the
+   owner's decision and that decision is open. Precision and recall above are therefore measured mostly on
+   untagged sessions, and any PR that flips `REDO_SOURCE4_ENABLED` must quote this split with them. Split recorded in
+   `sample_meta.json` and `test_result.json` (`population_split`).
+
 A unit that shows no redo but has fewer than 2 human turns after it (a recent turn, or the end of
 a session) is counted as not redone and also counted as `window_open`; the count is in the
 headline value (`n=..., K window-open`) because it can still become a redo.
