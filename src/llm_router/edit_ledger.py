@@ -16,13 +16,16 @@ Row shape::
 
     {"ts": 1758975600.0, "session_id": "abc123", "file": "src/foo.py",
      "model": "ollama/qwen3.5:latest", "applied": true, "survived": null,
-     "session_kind": "organic"}
+     "session_kind": "organic", "source": "zero_claude", "turn_id": "<16 hex>"}
 
 ``session_kind`` is the KPI tag from :mod:`llm_router.session_kind`
 (organic / research / harness / headless), or null if the session was never tagged.
 
 Field notes:
 
+* ``source`` / ``turn_id`` (M0.3) — see :data:`SOURCES`. ``turn_id`` is ``prompt_key.key(prompt)``,
+  a text-free hash of the human turn; O3 counts one local turn per (session_id, turn_id) among
+  applied ``zero_claude`` rows.
 * ``applied`` — True iff :func:`llm_router.edit.apply_edits` accepted the
   edit for this file: exact-once match, syntax-clean. This is "ready to use
   as-is", NOT proof Claude actually applied it — ``llm_edit`` never writes to
@@ -90,17 +93,33 @@ def _session_kind_of(session_id: str | None) -> str | None:
         return None
 
 
-def record_edit_outcome(*, file: str, model: str, applied: bool) -> None:
-    """Append one ledger row. Best-effort: never raises."""
-    sid = _resolve_session_id()
+#: Who produced the row. ``zero_claude``: the UserPromptSubmit hook applied the edit and the
+#: whole turn was served locally, so O3 counts it as ONE local turn per (session_id, turn_id).
+#: ``llm_edit``: the MCP tool answered inside a Claude turn, so it is never an O3 turn.
+#: A row with no source (written before M0.3) is treated like ``llm_edit``: never a turn.
+SOURCES = frozenset({"zero_claude", "llm_edit"})
+
+
+def record_edit_outcome(*, file: str, model: str, applied: bool, source: str | None = None,
+                        session_id: str | None = None, turn_id: str | None = None) -> float | None:
+    """Append one ledger row; return its ``ts`` (None if nothing was written). Never raises.
+
+    ``source`` is one of :data:`SOURCES` (anything else is stored as null). ``session_id`` is the
+    caller's own id (the hook passes its payload's id); when omitted the pointer-file resolver
+    is used, as before. ``turn_id`` is ``prompt_key.key(prompt)`` of the human turn, a text-free
+    hash, so one turn that edits several files can be counted once."""
+    sid = session_id if isinstance(session_id, str) and session_id else _resolve_session_id()
+    ts = time.time()
     row = {
-        "ts": time.time(),
+        "ts": ts,
         "session_id": sid,
         "session_kind": _session_kind_of(sid),
         "file": file,
         "model": model,
         "applied": bool(applied),
         "survived": None,
+        "source": source if source in SOURCES else None,
+        "turn_id": turn_id if isinstance(turn_id, str) and turn_id else None,
     }
     try:
         path = paths.state_path(LEDGER_FILENAME)
@@ -108,4 +127,5 @@ def record_edit_outcome(*, file: str, model: str, applied: bool) -> None:
         with open(path, "a", encoding="utf-8", opener=paths.private_opener) as fh:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
     except Exception:
-        pass
+        return None
+    return ts

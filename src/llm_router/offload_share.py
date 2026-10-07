@@ -8,8 +8,17 @@ HEADLINE UNIT = HUMAN TURN. ~88% of proxy calls are tool-result continuations (a
 calls per human turn), so a per-call denominator is inflated by agent loops. The headline
 counts turns: a turn is offloaded when its FIRST call is served by Haiku or local and the turn
 is not redone (the redo test below is applied to that first call, and covers its own turn and
-the next 2). Per-call figures are kept as a secondary line. A local unit from usage.db (an MCP
-call made inside a Claude turn) is its own turn-level unit.
+the next 2). Per-call figures are kept as a secondary line.
+
+A TURN is a proxy row that is not a side call, whose ``step_class`` is not ``continuation`` and
+that is not a sub-agent's first call (M0.3b: the proxy ``msg_id`` joined to the transcript, see
+``o3_transcripts``). Two more rules (M0.3):
+
+* a local unit from usage.db (an MCP ``llm()`` call made INSIDE a Claude turn) is NOT a turn:
+  Claude made the first call. It is reported apart (``local_assist``), outside both sides;
+* a zero-Claude edit (the hook applied it and the whole turn was served locally) is ONE local
+  turn per (session_id, turn_id), from the applied ``source=zero_claude`` rows of
+  ``edit_outcomes.jsonl``. ``llm_edit`` rows are never turns.
 
 Units (organic sessions only, ``[now - days, now]``):
 
@@ -20,8 +29,10 @@ Units (organic sessions only, ``[now - days, now]``):
   NOT work the router could offload or the user could redo, so they are excluded and
   counted;
 * proxy rows with ``decision == "served"``: answered by a local backend, class ``local``;
-* local units from ``northstar.local_shadow_units()`` (usage.db, ``final_provider='ollama'``),
-  class ``local``.
+* local units from ``northstar.local_shadow_units()`` (usage.db, ``final_provider='ollama'``):
+  class ``local`` but NOT turns (``local_assist``, see above);
+* applied ``source=zero_claude`` rows of ``edit_outcomes.jsonl``: one class ``local`` turn per
+  (session_id, turn_id).
 
 REDONE (one definition, shared with the Haiku redo guard):
 
@@ -86,14 +97,15 @@ def _proxy_class(row: dict) -> str | None:
 class _Conversation:
     """One session's proxy rows in time order, with human-turn numbers."""
 
-    def __init__(self, rows: list[dict]) -> None:
+    def __init__(self, rows: list[dict], is_sub=None) -> None:
         ordered = sorted((r for r in rows if _num(r.get("ts")) is not None and not _is_side_call(r)),
                          key=lambda r: r["ts"])
         self.ts = [float(r["ts"]) for r in ordered]
         self.turn: list[int] = []
         t = 0
         for r in ordered:
-            if r.get("step_class") != "continuation":
+            # A sub-agent's first call is not a human turn: it must not end the unit's redo window.
+            if r.get("step_class") != "continuation" and not (is_sub is not None and is_sub(r)):
                 t += 1
             self.turn.append(t)
         self.escalations = [(self.ts[i], self.turn[i]) for i, r in enumerate(ordered)
@@ -117,24 +129,44 @@ def policy_start(proxy_rows: Iterable[dict], version: str) -> float | None:
 
 def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: float, days: float,
                 kind_of, allowed: frozenset, band_redone: set[str] | frozenset = frozenset(),
-                outcome_redos: Iterable[dict] = ()) -> dict:
+                outcome_redos: Iterable[dict] = (), edit_rows: Iterable[dict] = (),
+                sidechain_of=None) -> dict:
     """Classified, redo-judged units in the window.
 
     ``kind_of(session_id, stamp)`` returns the resolved session kind or None.
     ``band_redone``: msg_ids whose last receipt-band press is ``redone``.
     ``outcome_redos``: usage_outcome rows (any outcome; only ``redone`` is read).
-    Returns ``{"units": [...], "side_call_excluded", "untagged", "other_kind",
-    "local_no_session", "n_escalations"}`` (escalation rows among the admitted units: how
-    much redo signal exists at all). A local unit with no ``session_id`` (usage.db rows written
-    without one) cannot be scoped to organic sessions: it is excluded and counted in
-    ``local_no_session``, so O3 is then a lower bound and the local share is unknown."""
+    ``edit_rows``: ``edit_outcomes.jsonl`` rows; only applied ``source=zero_claude`` rows with a
+    session id and a turn id make a unit (one local turn per (session_id, turn_id)).
+    ``sidechain_of(session_id, msg_id)``: True for a sub-agent call, False for a main-thread call,
+    None when the message id is in no transcript (unjoined). None (the default) skips the join.
+    Returns ``{"units": [...], "local_assist": [...], "side_call_excluded", "untagged",
+    "other_kind", "local_no_session", "n_escalations", "subagent_first", "unjoined",
+    "edit_no_session", "edit_no_turn_id", "zero_claude_turns"}``. ``units`` holds turns and
+    continuation calls; ``local_assist`` holds the local MCP units (never turns). ``n_escalations``
+    counts escalation rows among the admitted units: how much redo signal exists at all. A local
+    unit with no ``session_id`` (usage.db rows written without one) cannot be scoped to organic
+    sessions: it is excluded and counted in ``local_no_session``, so the local figures are then a
+    lower bound."""
     since = now - days * 86400.0
     by_session: dict[str, list[dict]] = {}
     for r in proxy_rows:
         sid = r.get("session_id")
         if isinstance(sid, str) and sid:
             by_session.setdefault(sid, []).append(r)
-    conv = {sid: _Conversation(rows) for sid, rows in by_session.items()}
+    sub_cache: dict[int, bool | None] = {}
+
+    def sub_of(r: dict) -> bool | None:
+        """True sub-agent call, False main thread, None unjoined. Memoised per row."""
+        if sidechain_of is None:
+            return False
+        k = id(r)
+        if k not in sub_cache:
+            mid, sid = r.get("msg_id"), r.get("session_id")
+            sub_cache[k] = sidechain_of(sid, mid) if isinstance(mid, str) and mid else None
+        return sub_cache[k]
+
+    conv = {sid: _Conversation(rows, lambda r: sub_of(r) is True) for sid, rows in by_session.items()}
 
     redo_events: dict[str, list[float]] = {}
     for o in outcome_redos:
@@ -145,7 +177,9 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
         v.sort()
 
     units: list[dict] = []
+    assist: list[dict] = []
     side = untagged = other = local_no_session = n_escalations = 0
+    subagent_first = unjoined = edit_no_session = edit_no_turn_id = 0
 
     def admit(sid, stamp) -> bool:
         nonlocal untagged, other
@@ -173,9 +207,17 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
         why = "escalation" if hit else None
         if why is None and isinstance(r.get("msg_id"), str) and r["msg_id"] in band_redone:
             why = "receipt_band"
+        first = r.get("step_class") != "continuation"
+        if first and sidechain_of is not None:
+            sub = sub_of(r)
+            if sub is True:
+                first = False
+                subagent_first += 1
+            elif sub is None:
+                unjoined += 1  # stays in: counted as a turn, and said so
         units.append({"class": cls, "ts": ts, "session_id": sid, "redone": why is not None,
-                      "why": why, "window_open": open_ and why is None,
-                      "first": r.get("step_class") != "continuation"})
+                      "why": why, "window_open": open_ and why is None, "first": first,
+                      "msg_id": r.get("msg_id")})
         if r.get("tier_reason") in ESCALATION_REASONS:
             n_escalations += 1
 
@@ -193,10 +235,37 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
         why = "escalation" if hit else None
         if why is None and _consume_event(redo_events.get(sid, []), ts):
             why = "usage_outcome"
+        assist.append({"class": CLASS_LOCAL, "ts": ts, "session_id": sid, "redone": why is not None,
+                       "why": why, "window_open": open_ and why is None, "first": True})
+
+    # Zero-Claude edits: one local TURN per (session_id, turn_id). The hook served the whole turn,
+    # so there is no proxy row for it; a `claude:` re-ask in the next turns marks it redone.
+    seen_turns: set[tuple[str, str]] = set()
+    for e in sorted((e for e in edit_rows if isinstance(e, dict)), key=lambda e: _num(e.get("ts")) or 0.0):
+        if e.get("source") != "zero_claude" or e.get("applied") is not True:
+            continue  # llm_edit rows (and rows with no source) happen inside Claude turns
+        ts = _num(e.get("ts"))
+        if ts is None or ts < since or ts > now:
+            continue
+        sid, tid = e.get("session_id"), e.get("turn_id")
+        if not (isinstance(sid, str) and sid):
+            edit_no_session += 1
+            continue
+        if not (isinstance(tid, str) and tid):
+            edit_no_turn_id += 1
+            continue
+        if (sid, tid) in seen_turns or not admit(sid, e.get("session_kind")):
+            continue
+        seen_turns.add((sid, tid))
+        hit, open_ = conv[sid].redone_after(ts) if sid in conv else (False, True)
+        why = "escalation" if hit else None
         units.append({"class": CLASS_LOCAL, "ts": ts, "session_id": sid, "redone": why is not None,
-                      "why": why, "window_open": open_ and why is None, "first": True})
-    return {"units": units, "side_call_excluded": side, "untagged": untagged, "other_kind": other,
-            "local_no_session": local_no_session, "n_escalations": n_escalations}
+                      "why": why, "window_open": open_ and why is None, "first": True,
+                      "zero_claude": True})
+    return {"units": units, "local_assist": assist, "side_call_excluded": side, "untagged": untagged,
+            "other_kind": other, "local_no_session": local_no_session, "n_escalations": n_escalations,
+            "subagent_first": subagent_first, "unjoined": unjoined, "edit_no_session": edit_no_session,
+            "edit_no_turn_id": edit_no_turn_id, "zero_claude_turns": len(seen_turns)}
 
 
 def _iso_ts(raw: Any) -> Any:

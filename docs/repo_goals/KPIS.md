@@ -43,11 +43,34 @@ fallback and no 4xx/5xx upstream status. Class **Haiku** when `served_model` (el
 `requested_model`) names Haiku, else Claude. Claude Code's own side calls (`tier_reason ==
 side_call`: titles, summaries) are excluded and counted: the router did not choose them and
 nobody redoes them. (b) Proxy rows with `decision == served` (a local backend answered): class
-**local**. (c) `northstar.local_shadow_units()` (PR #284, `usage.db`
-`provenance='runtime'`, `final_provider='ollama'`): class **local**. A local unit with no
-`session_id` cannot be scoped to organic sessions: it is excluded and counted, the local share
-prints as `unknown`, and O3 is a lower bound. Today every such row in `usage.db` has no
-session id.
+**local**. (c) `northstar.local_shadow_units()` (PR #284, `usage.db` `provenance='runtime'`,
+`final_provider='ollama'`): a local MCP `llm()` answer given INSIDE a Claude turn. Claude made
+that turn's first call, so it is **not a turn** (M0.3a): it sits outside both the numerator and the
+denominator and is printed on its own line (`local MCP answers inside Claude turns`, and as
+`o3.breakdown.local_assist_n` / `local_assist_redone`). One with no `session_id` cannot be scoped
+to organic sessions: it is excluded and counted (`local_no_session`). (d) **Zero-Claude edit
+turns** (M0.3c): the hook applied the edit and the whole turn was served locally, so there is
+no proxy row. `edit_outcomes.jsonl` rows with `source=zero_claude` and `applied=true` count as
+**one local turn per (session_id, turn_id)** (`turn_id` = `prompt_key.key(prompt)`, a text-free
+hash); a turn that edits a source file and a test file is still 1 turn. A `claude:` re-ask in
+the next turns marks it redone. Rows with `source=llm_edit` (or none) are never turns, and a
+row with no session id or no turn id is excluded and counted
+(`o3.excluded.edit_no_session`, `edit_no_turn_id`).
+
+*Sub-agent calls* (M0.3b). A sub-agent's first call is not a human turn. The proxy row's `msg_id`
+is joined to the transcript's assistant `message.id`; a row is a sub-agent call when that entry
+is `isSidechain: true` or sits in `<session>/subagents/**/agent-*.jsonl`. Such rows stay as
+per-call units but are not turns and do not end a unit's redo window
+(`o3.excluded.subagent_first`). A turn row whose `msg_id` is in no transcript stays in and is
+counted (`o3.excluded.unjoined`): on a research session that runs many sub-agents this is the
+rows of sub-agents whose transcripts do not exist, so O3 includes those sub-agent first calls.
+
+*Bound* (M0.3d). When G3 `session_kind` completeness is below 95%, O3 prints `o3.bound` with
+`lower` and `upper`: the headline (untagged rows treated as non-organic) and the same number with
+untagged rows treated as organic, whichever is smaller and larger.
+
+*Integrity.* `$PP/scripts/o3_integrity.py --since --until` compares proxy turns with typed
+transcript prompts per session and pooled over an absolute window (PLAN M0-2: 0.90-1.10).
 
 *Redone.* A unit is redone when any of:
 

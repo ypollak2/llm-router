@@ -103,9 +103,10 @@ def test_usage_outcome_redo_marks_the_nearest_local_unit_once():
     out = [{"outcome": "redone", "session_id": "s-org", "ts": t + 30},
            {"outcome": "used", "session_id": "s-org", "ts": t + 1},
            {"outcome": "redone", "session_id": "other", "ts": t}]
-    units = osh.build_units([], local, now=t + 3600, days=7, allowed=ORG, band_redone=frozenset(),
-                            outcome_redos=out, kind_of=lambda sid, stamp: "organic")["units"]
-    assert [u["why"] for u in units] == ["usage_outcome", None]  # one verdict, one unit
+    built = osh.build_units([], local, now=t + 3600, days=7, allowed=ORG, band_redone=frozenset(),
+                            outcome_redos=out, kind_of=lambda sid, stamp: "organic")
+    assert built["units"] == []   # M0.3a: a local MCP unit is not a turn
+    assert [u["why"] for u in built["local_assist"]] == ["usage_outcome", None]  # one verdict, one unit
 
 
 def test_what_is_and_is_not_a_unit():
@@ -194,14 +195,18 @@ def test_per_class_redo_rate_is_too_few_when_the_class_is_small_even_if_total_is
     assert "local not measurable" in o3["lines"][1]
 
 
-def test_local_share_is_unknown_not_zero_when_local_units_have_no_session(monkeypatch):
+def test_mcp_local_units_without_session_are_reported_apart_not_as_a_lower_bound(monkeypatch):
+    # M0.3a (deliberate update of the pinned test): MCP-local units are not turns, so they no
+    # longer make the O3 headline a lower bound; they get their own line.
     from llm_router import northstar as ns
     _write_ledger(_population(n_haiku=0, haiku_redone=0, n_local=0, n_claude=100))
     monkeypatch.setattr(ns, "local_shadow_units", lambda days=30, db_path=None: iter(
         [{"session_id": None, "ts": "2026-10-06T14:00:00+00:00"}] * 7))
     o3 = kpi.compute_scorecard(days=7, now=NOW)["o3"]
-    assert "local share unknown (7 local unit(s) carry no session id" in o3["lines"][0]
-    assert "local share 0.0%" not in o3["lines"][0]
+    assert "lower bound" not in o3["lines"][0] and "local share 0.0% (0/100)" in o3["lines"][0]
+    assert "local MCP answers inside Claude turns" in "".join(o3["lines"])
+    assert "7 more with no session id excluded" in "".join(o3["lines"])
+    assert o3["breakdown"]["local_assist_n"] == 0 and o3["breakdown"]["local_no_session"] == 7
 
 
 def test_receipt_band_press_reaches_o3_through_the_scorecard():
@@ -329,15 +334,18 @@ def test_redo_signal_sparse_is_stated_with_n_escalations():
 # ── caveats ──────────────────────────────────────────────────────────────────
 
 def test_partly_attributable_local_still_prints_the_no_session_caveat(monkeypatch):
+    # M0.3a (deliberate update of the pinned test): the caveat moved from the headline line to the
+    # "local MCP answers inside Claude turns" line, and the 3 attributable units are not turns.
     from llm_router import northstar as ns
     _write_ledger(_population(n_haiku=0, haiku_redone=0, n_local=0, n_claude=100))
     monkeypatch.setattr(ns, "local_shadow_units", lambda days=30, db_path=None: iter(
         [{"session_id": "s-org", "ts": "2026-10-06T14:00:00+00:00"}] * 3
         + [{"session_id": None, "ts": "2026-10-06T14:00:00+00:00"}] * 4))
     o3 = kpi.compute_scorecard(days=7, now=NOW, since_policy="v-new")["o3"]
-    assert "4 local unit(s) with no session id excluded" in o3["lines"][0]
-    assert "4 local unit(s) with no session id excluded" in "".join(
-        o3["since_policy"]["since"].get("lines", ()))
+    joined = "".join(o3["lines"])
+    assert "3 (0 redone); 4 more with no session id excluded" in joined
+    assert o3["breakdown"]["local_assist_n"] == 3 and o3["breakdown"]["n"] == 100
+    assert "4 more with no session id excluded" in "".join(o3["since_policy"]["since"].get("lines", ()))
 
 
 def test_window_open_turns_are_in_the_headline_value():
