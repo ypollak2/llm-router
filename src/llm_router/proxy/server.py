@@ -643,7 +643,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # Why Haiku could not serve this body (M0.5): the prevalence of
             # `system_message` is what tells whether the fold (M0.7) is needed.
             try:
-                row["tier_haiku_block"] = haiku_block_reason(body)
+                row["tier_haiku_block"] = haiku_block_reason(body, fold_system=tier_policy.haiku_folds_system)
             except Exception as exc:  # noqa: BLE001 - fail-safe: no field, the call goes on
                 failopen.record("LR-FO-PROXY-HAIKU-BLOCK", exc)
         return decision
@@ -843,7 +843,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if decision.body_rewrite == REWRITE_HAIKU:
             # Haiku 4.5 400s on `thinking.type: adaptive` and has no effort
             # parameter: serve it a body it accepts (translate.for_haiku).
-            sent = for_haiku(sent)
+            sent = for_haiku(sent, fold_system=tier_policy.haiku_folds_system)
             row["tier_body_rewrite"] = REWRITE_HAIKU
 
         def _on_retry() -> None:
