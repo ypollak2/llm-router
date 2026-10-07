@@ -157,6 +157,12 @@ class LedgerEvent:
     baseline_tokens: int | None = None              # Gap 2: actual_proxy (see soak/report.py)
     adoption_method: AdoptionMethod | None = None    # Gap 3: how verified_used was confirmed
 
+    # Tool layer (toolkit phase 1). `verify` names the verifier outcome ("V1:pass",
+    # "V1:fail", "V1:not_run"); `used` is True ONLY on a passing test run (V1).
+    # Both are NULL when unknown: a run nobody verified is not a failed run.
+    verify: str | None = None
+    used: bool | None = None
+
     # Orchestration overhead (INV-COST-005)
     hook_input_tokens: int | None = None
     hook_output_tokens: int | None = None
@@ -201,7 +207,7 @@ _COLUMNS: tuple[str, ...] = (
     # ALTER-migrated old DB end up with the same column SET (order doesn't need
     # to match _DDL's declared order; INSERT/SELECT are always by explicit name).
     "classifier_cost_usd", "failed_attempt_cost_usd", "baseline_tokens",
-    "adoption_method",
+    "adoption_method", "verify", "used",
 )
 
 _DDL = """
@@ -241,7 +247,9 @@ CREATE TABLE IF NOT EXISTS execution_events (
     classifier_cost_usd REAL,
     failed_attempt_cost_usd REAL,
     baseline_tokens INTEGER,
-    adoption_method TEXT
+    adoption_method TEXT,
+    verify TEXT,
+    used INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_exec_route ON execution_events(route_id);
 CREATE INDEX IF NOT EXISTS idx_exec_session ON execution_events(session_id);
@@ -260,6 +268,8 @@ _MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE execution_events ADD COLUMN failed_attempt_cost_usd REAL",
     "ALTER TABLE execution_events ADD COLUMN baseline_tokens INTEGER",
     "ALTER TABLE execution_events ADD COLUMN adoption_method TEXT",
+    "ALTER TABLE execution_events ADD COLUMN verify TEXT",
+    "ALTER TABLE execution_events ADD COLUMN used INTEGER",
 )
 
 

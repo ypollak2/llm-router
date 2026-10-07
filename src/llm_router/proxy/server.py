@@ -54,7 +54,7 @@ from llm_router.local_agent import DEFAULT_MAX_PROMPT_TOKENS, LocalAgentConfig, 
 from llm_router.local_agent import capability as la_capability
 from llm_router.local_agent.compact import session_cwd as la_session_cwd
 from llm_router import failopen, local_models, prompt_key
-from llm_router.proxy import ledger, local_mode, local_shadow, okf_context
+from llm_router.proxy import ledger, llm_shadow, local_mode, local_shadow, okf_context
 
 from llm_router.proxy.backend_health import (
     DEFAULT_COOLDOWN_S,
@@ -180,6 +180,9 @@ class ProxyConfig:
     shadow: bool = False
     shadow_budget_s: float = local_shadow.DEFAULT_BUDGET_S
     shadow_path: Path | None = None
+    # LLM_ROUTER_LOCAL_CLASSIFIER=shadow (proxy.llm_shadow, M1.6): the local classifier's
+    # verdict is logged next to the rules' and never applied. Overrides the record file.
+    classifier_shadow_path: Path | None = None
 
     def __post_init__(self) -> None:
         if self.num_ctx is None and self.model:
@@ -591,6 +594,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             return None, "invalid", local_shadow.R_BACKEND if backend_side else local_shadow.R_SCHEMA
         return message, None, None
 
+    # M1.6: schedules a detached classification per turn-first call when the mode is
+    # ``shadow``; a no-op (zero Ollama calls) when it is ``off``.
+    cls_shadow = llm_shadow.ShadowScheduler(cfg.classifier_shadow_path)
+
     shadow = (local_shadow.ShadowRunner(shadow_local, budget_s=cfg.shadow_budget_s, path=cfg.shadow_path)
               if cfg.shadow else None)
 
@@ -654,6 +661,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                    tier_detail=decision.detail,
                    tier_quota_pressure=decision.quota_pressure, tier_quota_state=decision.quota_state,
                    tier_decision_s=round(time.monotonic() - t0, 3))
+        if cls_shadow.maybe_schedule(body, row) != llm_shadow.OFF:
+            # The decision is made and on the row; scheduling the shadow call is part of
+            # what a turn-first call pays, so G1_proxy must see it (<= 30 ms is the bar).
+            row["tier_decision_s"] = round(time.monotonic() - t0, 3)
         if decision.proposed_tier == "haiku":
             # Why Haiku could not serve this body (M0.5): the prevalence of
             # `system_message` is what tells whether the fold (M0.7) is needed.
@@ -880,12 +891,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         yield
         if task is not None and not task.done():
             task.cancel()
+        await cls_shadow.aclose()
 
     methods = ["GET", "POST", "PUT", "DELETE", "HEAD", "PATCH", "OPTIONS"]
     app = Starlette(routes=[Route("/{path:path}", handle, methods=methods)], lifespan=lifespan)
     app.state.http = http
     app.state.warm_up = warm_up
     app.state.shadow = shadow
+    app.state.cls_shadow = cls_shadow
     return app
 
 
