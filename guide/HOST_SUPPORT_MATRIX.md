@@ -163,9 +163,10 @@ llm-router install --host gemini-cli
 
 ### ⚪ Pi Coding Agent (not installable today)
 
-> **Status 2026-09-24:** `llm-router install --host pi` fails with `Unknown host(s): pi`.
-> Pi wiring exists only in a legacy code path the documented command never reaches, so
-> everything below describes the intended integration, not something you can install.
+> **Status (v16 P0.4):** `llm-router install --host pi` prints `unsupported: <reason>; planned
+> in v16 P2.12` and exits 2. A plain `llm-router install` on a machine with Pi reports
+> `pi: detected, not wired: <reason>`. Everything below describes the intended integration
+> (v16 P2.12), not something you can install today.
 
 **Tier: Full Cost Optimization**
 
