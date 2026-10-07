@@ -372,6 +372,10 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_LOCAL_KEEP_ALIVE": ("llm_router", "warm.py", 1),
     # P2 local-usage plan: shadow-only would-be "local" tier (log only, never routes).
     "LLM_ROUTER_LOCAL_TIER": ("llm_router", "local_tier.py", 1),
+    # Local Ollama classifier (task_type + complexity + tier): off|shadow|on, default off.
+    "LLM_ROUTER_LOCAL_CLASSIFIER": ("llm_router", "local_classifier.py", 1),
+    "LLM_ROUTER_LOCAL_CLASSIFIER_MODEL": ("llm_router", "local_classifier.py", 1),
+    "LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS": ("llm_router", "local_classifier.py", 1),
     "LLM_ROUTER_ZCE_COLD_BUDGET_S": ("llm_router", "warm.py", 1),
     "LLM_ROUTER_ZCE_WARMUP": ("llm_router", "warm.py", 1),
     # ── indirect reads: DECLARED BY HAND, invisible to the AST scan ──
