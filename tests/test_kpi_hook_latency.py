@@ -41,10 +41,12 @@ def _clean(monkeypatch, tmp_path):
     monkeypatch.delenv("LLM_ROUTER_HOOK_LATENCY", raising=False)
     monkeypatch.delenv("LLM_ROUTER_HOOK_LATENCY_MAX_BYTES", raising=False)
     hl._pending = None
+    hl._phases.clear()
     failopen.reset_unpersisted()
     failopen.reset_cache()
     yield
     hl._pending = None
+    hl._phases.clear()
     failopen.reset_unpersisted()
     failopen.reset_cache()
 
@@ -477,6 +479,113 @@ def test_a_hook_that_exits_early_via_sys_exit_still_records(tmp_path):
     comes from atexit, so no exit path of the hook can skip it."""
     assert _run_hook("enforce-route", tmp_path).returncode == 0
     assert len([r for r in _lines() if r["hook"] == "enforce-route"]) == 1
+
+
+# ── phases (M4.1) ────────────────────────────────────────────────────────────
+
+
+class _Clock:
+    def __init__(self, t=100.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def test_a_run_that_names_no_phase_writes_the_row_it_always_did(monkeypatch):
+    monkeypatch.setattr(hl, "_monotonic", _Clock(100.25))
+    monkeypatch.setattr(hl, "_wall", lambda: NOW)
+    hl.begin("enforce-route", "PreToolUse", t0=100.0)
+    hl._finish()
+    (row,) = _lines()
+    assert "phases_ms" not in row
+    assert set(row) == {"hook", "event", "elapsed_ms", "timed_out", "ts"}
+
+
+def test_phases_are_summed_per_name_and_written_in_the_row(monkeypatch):
+    clock = _Clock(100.0)
+    monkeypatch.setattr(hl, "_monotonic", clock)
+    monkeypatch.setattr(hl, "_wall", lambda: NOW)
+    hl.begin("auto-route", "UserPromptSubmit", t0=100.0)
+    clock.t = 100.010
+    hl.mark_main_start()
+    for dur in (0.004, 0.0016):
+        with hl.phase("session_io"):
+            clock.t += dur
+    with hl.phase("zce"):
+        clock.t += 0.0005
+    clock.t = 100.5
+    hl._finish()
+    (row,) = _lines()
+    assert row["elapsed_ms"] == 500.0
+    assert row["phases_ms"] == {"import": 10.0, "session_io": 5.6, "zce": 0.5}
+    assert sum(row["phases_ms"].values()) <= row["elapsed_ms"]
+
+
+def test_mark_main_start_counts_once(monkeypatch):
+    clock = _Clock(100.0)
+    monkeypatch.setattr(hl, "_monotonic", clock)
+    hl.begin("auto-route", "UserPromptSubmit", t0=100.0)
+    clock.t = 100.2
+    hl.mark_main_start()
+    clock.t = 100.9
+    hl.mark_main_start()
+    assert hl._phases == {"import": pytest.approx(200.0)}
+
+
+def test_phase_calls_outside_a_hook_process_accumulate_nothing(monkeypatch):
+    """The MCP server and the tests never call begin(): a phase there must not grow
+    a dict for the life of a long-running process."""
+    monkeypatch.setattr(hl, "_monotonic", _Clock(5.0))
+    with hl.phase("ollama"):
+        pass
+    hl.add_phase("cold_wait", 12.0)
+    hl.mark_main_start()
+    assert hl._phases == {}
+
+
+def test_a_phase_records_on_sys_exit_and_never_swallows_it(monkeypatch):
+    clock = _Clock(100.0)
+    monkeypatch.setattr(hl, "_monotonic", clock)
+    hl.begin("auto-route", "UserPromptSubmit", t0=100.0)
+    with pytest.raises(SystemExit):
+        with hl.phase("zce"):
+            clock.t += 0.003
+            raise SystemExit(0)
+    with pytest.raises(ValueError):
+        with hl.phase("db_write"):
+            raise ValueError("boom")
+    assert hl._phases["zce"] == pytest.approx(3.0)
+    assert "db_write" in hl._phases
+
+
+def test_a_broken_phase_value_never_raises(monkeypatch):
+    monkeypatch.setattr(hl, "_monotonic", _Clock(1.0))
+    hl.begin("auto-route", "UserPromptSubmit", t0=1.0)
+    hl.add_phase("x", "not a number")  # type: ignore[arg-type]
+    hl.add_phase("y", None)  # type: ignore[arg-type]
+    assert hl._phases == {}
+
+
+def test_a_real_auto_route_process_names_import_and_its_phases_fit_inside_elapsed(tmp_path):
+    proc = _run_hook("auto-route", tmp_path)
+    assert proc.returncode == 0, proc.stderr.decode()
+    (row,) = [r for r in _lines() if r["hook"] == "auto-route"]
+    ph = row["phases_ms"]
+    assert ph["import"] > 0
+    # cold_wait lives inside ollama/zce; every other phase is disjoint.
+    assert sum(v for k, v in ph.items() if k != "cold_wait") <= row["elapsed_ms"] + 1.0
+
+
+@pytest.mark.parametrize("name", ["auto-route", "session-start"])
+def test_main_marks_the_import_phase_as_its_first_statement(name):
+    """The `import` phase only exists if main() marks the end of module import."""
+    tree = ast.parse((HOOKS / f"{name}.py").read_text())
+    (main,) = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main"]
+    first_calls = [n.value.func.id for n in main.body
+                   if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+                   and isinstance(n.value.func, ast.Name)]
+    assert "_hl_mark_main" in first_calls[:3], first_calls
 
 
 def test_importing_a_hook_as_a_module_arms_nothing(tmp_path):

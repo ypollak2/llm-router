@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 44
+# llm_router-hook-version: 45
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -49,6 +49,19 @@ if __name__ == "__main__":
         import sys as _hl_sys
 
         print(f"llm-router: hook latency not recorded ({type(_hl_exc).__name__})", file=_hl_sys.stderr)
+
+# M4.1: name where the time went (phases_ms on the hook_latency row). Both are no-ops
+# unless the recorder was armed above, so a test that imports this file records nothing.
+try:
+    from llm_router.hook_latency import mark_main_start as _hl_mark_main, phase as _hl_phase
+except ImportError:  # llm_router is not importable on this host: no recorder, no phases
+    import contextlib as _hl_contextlib
+
+    def _hl_phase(name):  # noqa: ARG001
+        return _hl_contextlib.nullcontext()
+
+    def _hl_mark_main():
+        return None
 
 # ── v6.0 Visibility: HUD integration ─────────────────────────────────────────
 try:
@@ -196,7 +209,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 44"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 45"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -4300,6 +4313,7 @@ def main() -> None:
     # hand every later invocation a deadline that has already passed.
     global _HOOK_STARTED_AT
     _HOOK_STARTED_AT = time.monotonic()
+    _hl_mark_main()
 
     _mark("start")
     invocation_id = time.time()
@@ -4437,7 +4451,8 @@ def main() -> None:
     if isinstance(_kind_sid, str) and _kind_sid:
         try:
             from llm_router import session_kind as _session_kind
-            _session_kind.tag_session(_kind_sid, hook_input.get("cwd") or None)
+            with _hl_phase("session_io"):
+                _session_kind.tag_session(_kind_sid, hook_input.get("cwd") or None)
         except Exception as _exc:                                    # noqa: BLE001
             from llm_router import failopen as _fo
             _fo.record("CHZ-FO-SESSION-KIND-TAG", _exc)
@@ -4501,7 +4516,8 @@ def main() -> None:
             from llm_router.session_store import write_pointer as _write_pointer
             # X4: with the session's cwd, so llm(...) calls retrieve from the
             # caller's project (the MCP server's own cwd is $HOME).
-            _write_pointer(session_id, cwd=hook_input.get("cwd") or None)
+            with _hl_phase("session_io"):
+                _write_pointer(session_id, cwd=hook_input.get("cwd") or None)
         except Exception as _exc:                                    # noqa: BLE001
             from llm_router import failopen as _fo
             _fo.record("CHZ-FO-HOOK-SESSION-POINTER", _exc)
@@ -4521,12 +4537,13 @@ def main() -> None:
     # substituted text as prompt injection and either refuses it or retries.
     try:
         from llm_router import zero_claude_edit as _zce
-        _zce_outcome = _zce.maybe_replace(
-            prompt=prompt,
-            cwd=hook_input.get("cwd") or os.getcwd(),
-            deadline_s=_readonly_draft_deadline(),
-            session_id=session_id or None,
-        )
+        with _hl_phase("zce"):
+            _zce_outcome = _zce.maybe_replace(
+                prompt=prompt,
+                cwd=hook_input.get("cwd") or os.getcwd(),
+                deadline_s=_readonly_draft_deadline(),
+                session_id=session_id or None,
+            )
     except Exception as _zce_exc:                                 # noqa: BLE001
         _zce_outcome = None
         from llm_router import failopen as _fo
@@ -4573,7 +4590,8 @@ def main() -> None:
         sys.exit(0)
 
     # ── v6.0 Visibility: Initialize HUD session state ─────────────────────────
-    initialize_hud()
+    with _hl_phase("hud"):
+        initialize_hud()
 
     # ── Sidecar pre-execution (opt-in via LLM_ROUTER_SIDECAR_PREFETCH=1) ────────
     # Deterministic patterns ("show me my routing today" / "git status" /
@@ -4726,7 +4744,8 @@ def main() -> None:
             tool       = "llm_query"
         method = "context-inherit"
     else:
-        result = classify_prompt(prompt)
+        with _hl_phase("classify"):
+            result = classify_prompt(prompt)
         if result is None:
             if zero_claude:
                 task_type = "query"
@@ -4869,15 +4888,16 @@ def main() -> None:
     # Log routing decision for later evaluation. Logging is already pinned to
     # stderr by _init_hook_logging() (audit §2.1), so no stdout guard is needed.
     try:
-        log_routing_decision(
-            task_type=task_type,
-            complexity=complexity,
-            classification_method=method,
-            selected_model=selected_model,
-            provider=provider,
-            # chz-surface-ok: telemetry field — logical name keyed to TOOL_MAP for analysis.
-            notes=f"routed via {tool}" if tool != TOOL_MAP.get(task_type) else None,
-        )
+        with _hl_phase("db_write"):
+            log_routing_decision(
+                task_type=task_type,
+                complexity=complexity,
+                classification_method=method,
+                selected_model=selected_model,
+                provider=provider,
+                # chz-surface-ok: telemetry field — logical name keyed to TOOL_MAP for analysis.
+                notes=f"routed via {tool}" if tool != TOOL_MAP.get(task_type) else None,
+            )
     except Exception as exc:
         # Tracking is best-effort and must never abort routing, but a swallowed
         # failure here means the dashboard silently loses this decision — record
@@ -4918,19 +4938,20 @@ def main() -> None:
             db_path = str(_router_home() / "usage.db")
             pressure = _get_pressure() if _CC_MODE else {"session_pct": 0.0, "weekly_pct": 0.0, "sonnet_pct": 0.0}
             was_downgraded = requested_complexity is not None and requested_complexity != complexity
-            _log_quota_snapshot_sync(
-                session_id=session_id,
-                prompt_sequence=prompt_sequence,
-                prompt_hash=None,  # Could add prompt hash here if needed
-                pressure=pressure,
-                routing_decision_id=None,  # Hook doesn't have access to this
-                final_model=selected_model,
-                final_provider=provider,
-                complexity_requested=requested_complexity,
-                complexity_used=complexity,
-                was_downgraded=was_downgraded,
-                db_path=db_path,
-            )
+            with _hl_phase("db_write"):
+                _log_quota_snapshot_sync(
+                    session_id=session_id,
+                    prompt_sequence=prompt_sequence,
+                    prompt_hash=None,  # Could add prompt hash here if needed
+                    pressure=pressure,
+                    routing_decision_id=None,  # Hook doesn't have access to this
+                    final_model=selected_model,
+                    final_provider=provider,
+                    complexity_requested=requested_complexity,
+                    complexity_used=complexity,
+                    was_downgraded=was_downgraded,
+                    db_path=db_path,
+                )
         except Exception:
             pass  # Silent failure — quota snapshot is optional enhancement
 
@@ -4941,13 +4962,14 @@ def main() -> None:
     if session_id:
         try:
             from llm_router import session_store as _session_store
-            _session_store.record_event(
-                session_id,
-                "user_prompt",
-                prompt,
-                role="user",
-                task_type=task_type,
-            )
+            with _hl_phase("session_io"):
+                _session_store.record_event(
+                    session_id,
+                    "user_prompt",
+                    prompt,
+                    role="user",
+                    task_type=task_type,
+                )
         except Exception as _exc:
             from llm_router import failopen as _fo
             _fo.record("CHZ-FO-HOOK-SESSION-RECORD", _exc)
@@ -4958,9 +4980,10 @@ def main() -> None:
         # already open and the turns before this one are complete, so it is where
         # the other half of the conversation gets persisted. Fail-open.
         try:
-            _n = _persist_assistant_turns(
-                hook_input.get("transcript_path", ""), session_id, current_prompt=prompt,
-            )
+            with _hl_phase("session_io"):
+                _n = _persist_assistant_turns(
+                    hook_input.get("transcript_path", ""), session_id, current_prompt=prompt,
+                )
             if _n:
                 _debug_log(
                     f"[INVOCATION {invocation_id:.3f}] PERSISTED {_n} Claude turn(s) to session store"
@@ -4978,9 +5001,10 @@ def main() -> None:
         try:
             from llm_router.hooks import draft_usage as _draft_usage
 
-            _verdict = _draft_usage.audit(
-                session_id, _last_assistant_text(hook_input.get("transcript_path", "")),
-            )
+            with _hl_phase("session_io"):
+                _verdict = _draft_usage.audit(
+                    session_id, _last_assistant_text(hook_input.get("transcript_path", "")),
+                )
             if _verdict is not None:
                 _outcome, _rec = _verdict
                 _debug_log(
@@ -5259,13 +5283,14 @@ def main() -> None:
                 # allowed. Live, the write loop (which must call a tool) spent
                 # the whole 55s wandering on one.
                 from llm_router.hooks.direct_executor import execute_agent as _execute_agent
-                _direct_result = _execute_agent(
-                    prompt, _direct_chain, timeout=60, context=_session_ctx,
-                    deadline_s=_loop_deadline(),
-                    project_root=hook_input.get("cwd") or os.getcwd(),
-                    session_id=session_id,
-                    read_only=task_type in ("query", "research", "analyze"),
-                )
+                with _hl_phase("ollama"):
+                    _direct_result = _execute_agent(
+                        prompt, _direct_chain, timeout=60, context=_session_ctx,
+                        deadline_s=_loop_deadline(),
+                        project_root=hook_input.get("cwd") or os.getcwd(),
+                        session_id=session_id,
+                        read_only=task_type in ("query", "research", "analyze"),
+                    )
                 if _direct_result:
                     _debug_log(f"[INVOCATION {invocation_id:.3f}] AGENT LOOP SUCCESS")
             else:
@@ -5284,10 +5309,11 @@ def main() -> None:
                         f"[INVOCATION {invocation_id:.3f}] HISTORY RELAY OFF (privacy gate)"
                     )
                 else:
-                    _history = _load_conversation_history(
-                        hook_input.get("transcript_path", ""), prompt,
-                        session_id=session_id,
-                    )
+                    with _hl_phase("session_io"):
+                        _history = _load_conversation_history(
+                            hook_input.get("transcript_path", ""), prompt,
+                            session_id=session_id,
+                        )
                 _draft_root = hook_input.get("cwd") or os.getcwd()
                 # I4: the draft may open files. Read-only — it answers before
                 # Claude sees the prompt, so it may look at the repo, never
@@ -5295,25 +5321,27 @@ def main() -> None:
                 # to the text chain below, inside the same hook deadline.
                 if _local_agent_loop_enabled():
                     from llm_router.hooks.direct_executor import execute_agent as _execute_agent
-                    _direct_result = _execute_agent(
-                        prompt, _direct_chain, project_root=_draft_root,
-                        timeout=OLLAMA_TIMEOUT, context=_session_ctx,
-                        deadline_s=_readonly_draft_deadline(), read_only=True,
-                        session_id=session_id,
-                    )
+                    with _hl_phase("ollama"):
+                        _direct_result = _execute_agent(
+                            prompt, _direct_chain, project_root=_draft_root,
+                            timeout=OLLAMA_TIMEOUT, context=_session_ctx,
+                            deadline_s=_readonly_draft_deadline(), read_only=True,
+                            session_id=session_id,
+                        )
                     _debug_log(
                         f"[INVOCATION {invocation_id:.3f}] READ-ONLY DRAFT LOOP: "
                         f"{'answered' if _direct_result else 'nothing, text chain next'}"
                     )
                 if not _direct_result:
-                    _direct_result = _execute_chain(
-                        prompt, _direct_chain, task_type,
-                        timeout=OLLAMA_TIMEOUT, history=_history, context=_session_ctx,
-                        deadline_s=_hook_deadline(),
-                        # I1: the session store and a scoped semantic index.
-                        session_id=session_id,
-                        root=_draft_root,
-                    )
+                    with _hl_phase("ollama"):
+                        _direct_result = _execute_chain(
+                            prompt, _direct_chain, task_type,
+                            timeout=OLLAMA_TIMEOUT, history=_history, context=_session_ctx,
+                            deadline_s=_hook_deadline(),
+                            # I1: the session store and a scoped semantic index.
+                            session_id=session_id,
+                            root=_draft_root,
+                        )
 
             # S2-6: a draft that cites a file nobody mentioned and that does not
             # exist is not a weak answer, it is a fabricated one — and Stage 2 made
@@ -5985,14 +6013,15 @@ def main() -> None:
         # error, no log and no counter. The visibility now lives inside
         # record_event() too, but a discarded return value is the habit that
         # caused this and it should not survive in the source.
-        _ledger_ok = record_event(LedgerEvent(
-            session_id=session_id or os.environ.get("LLM_ROUTER_SESSION_ID", ""),
-            event_type="directive_injected",
-            task_type=str(task_type),
-            hook_input_tokens=len(_final_context) // 4,
-            metadata={"tool": str(tool), "method": str(method),
-                      "complexity": str(complexity)},
-        ))
+        with _hl_phase("db_write"):
+            _ledger_ok = record_event(LedgerEvent(
+                session_id=session_id or os.environ.get("LLM_ROUTER_SESSION_ID", ""),
+                event_type="directive_injected",
+                task_type=str(task_type),
+                hook_input_tokens=len(_final_context) // 4,
+                metadata={"tool": str(tool), "method": str(method),
+                          "complexity": str(complexity)},
+            ))
     except Exception as _exc:
         from llm_router import failopen as _fo
         _fo.record("CHZ-FO-HOOK-EXECUTION-LEDGER", _exc)
