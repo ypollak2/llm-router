@@ -61,7 +61,17 @@ nobody redoes them. (b) Proxy rows with `decision == served` (a local backend an
 that turn's first call, so it is **not a turn** (M0.3a): it sits outside both the numerator and the
 denominator and is printed on its own line (`local MCP answers inside Claude turns`, and as
 `o3.breakdown.local_assist_n` / `local_assist_redone`). One with no `session_id` cannot be scoped
-to organic sessions: it is excluded and counted (`local_no_session`). (d) **Zero-Claude edit
+to organic sessions: it is excluded and counted (`local_no_session`). One local unit per MCP
+call: every `route_and_call` writes a row, so `llm_edit`'s retries (up to 3) and `llm_act`'s planner
+write several rows with one `tool_use_id`; those rows are one unit. A row with no `tool_use_id` is
+its own unit. A call whose every row has `success=0` (the router's own verdict: degraded, a
+failure finish reason, unusable output) is not served work: counted as `local_failed`, never a
+unit. Rows written before `call_identity` have no session id and stay unknown; they are never
+guessed into a session. Count them on a copy of `usage.db` with
+`select count(*) from routing_decisions where provenance='runtime' and final_provider='ollama' and session_id is null`.
+Rows are stamped only by an MCP server started after a release reaches its install: a
+long-lived Claude Code MCP server keeps running the code it started with, and Claude.app's
+servers run from whatever tree they were installed from. (d) **Zero-Claude edit
 turns** (M0.3c): the hook applied the edit and the whole turn was served locally, so there is
 no proxy row. `edit_outcomes.jsonl` rows with `source=zero_claude` and `applied=true` count as
 **one local turn per (session_id, turn_id)** (`turn_id` = `prompt_key.key(prompt)`, a text-free
@@ -69,6 +79,19 @@ hash); a turn that edits a source file and a test file is still 1 turn. A `claud
 the next turns marks it redone. Rows with `source=llm_edit` (or none) are never turns, and a
 row with no session id or no turn id is excluded and counted
 (`o3.excluded.edit_no_session`, `edit_no_turn_id`).
+
+*Session id and tool_use id on `routing_decisions`.* The MCP path (`llm()`, `llm_edit`, through
+`router.py`'s finalizer) stamps `session_id` from `CLAUDE_CODE_SESSION_ID`, which Claude Code puts
+in the MCP server's environment (checked on a live server 2026-10-06), and `tool_use_id` from the
+`tools/call` request's `_meta["claudecode/toolUseId"]` (Claude Code 2.1.291 sends it). The env id
+is stamped only inside an MCP tool call (a `tool_use_id` is bound): every Bash tool shell carries
+it too, so a gateway or `route_server` started from one would stamp that session on calls it
+serves for anyone. The hook's DIRECT path and agent-route stamp the hook payload's session id
+(agent-route's own id falls back to the machine-wide `session_id.txt`, so it is not used). The
+machine-wide `current_session.json` pointer is NOT used: the last session to prompt wins it, so
+it would attribute an answer to the wrong conversation. Ids only, shape-checked
+(`[A-Za-z0-9_.:-]{1,128}`); free text, a non-string or a placeholder (`sdk`, `unknown`) is stored
+as NULL (`src/llm_router/call_identity.py`).
 
 *Which proxy calls are turns* (M0.3b; the owner's definition, PLAN section 1.2 O3). A turn is a proxy
 row that is not a side call and whose `step_class` is not `continuation`, minus sub-agent first calls.
@@ -127,9 +150,15 @@ count is validated; remove the warning only after `o3_integrity.py` passes.
    non-side-call row whose `step_class` is not `continuation`.
 2. **Receipt band.** `user_signals.jsonl` has a `redone` press (last press per key wins) for
    the unit's `msg_id`.
-3. **usage_outcome.** A `redone` verdict (`usage_outcome.py`) for a routed event in the same
-   session, within 120 s of the unit, each verdict used once. Local units only (a verdict
-   exists only for routed MCP events).
+3. **usage_outcome.** A `redone` verdict (`usage_outcome.py`) for the unit's routed event. Local
+   units only (a verdict exists only for routed MCP events). Joined exactly when the unit's
+   `tool_use_id` equals the verdict's `event_id` (the transcript's `tool_use` id); then the
+   transcript's session id replaces the stamped one (a server kept across `/clear` can still
+   carry the old id). `claude --fork-session` copies the history, ids included, so one id can
+   sit in two transcripts: the copy in the stamped session
+   wins; with none, a `redone` copy wins; ties break on session id, never on file order. A unit
+   with no `tool_use_id` falls back to: same session, within 120 s, each verdict used once and
+   never one already joined exactly.
 
 4. **Transcript detector (source 4, OFF).** `src/llm_router/redo_signal.py` reads the session's Claude Code
    transcript and flags a human prompt that re-asks (`claude:` / `native:` / `opus:`), corrects, complains
@@ -156,6 +185,44 @@ count is validated; remove the warning only after `o3_integrity.py` passes.
 A unit that shows no redo but has fewer than 2 human turns after it (a recent turn, or the end of
 a session) is counted as not redone and also counted as `window_open`; the count is in the
 headline value (`n=..., K window-open`) because it can still become a redo.
+For an exactly joined local unit the human turns after it are read from its transcript
+(`usage_outcome`'s `turns_after`), and the transcript decides both ways: it closes a window the
+proxy never saw, and it keeps a window open that the proxy would close. The proxy counts every
+non-continuation request as a human turn, a Task subagent's first call included, so it can
+overcount; the transcript cannot. A unit that is not joined has only the proxy's count.
+
+*Local answers accepted* (its own line under O3: `local answers: n served, n accepted, accept
+rate`). Reporting only and **never part of NS**: NS stays strict ("used" needs a passing test,
+owner rule 2026-10-05). Over the turn-level local units above:
+
+- **redone** -- redone by the definition above;
+- **accepted** -- not redone, and either 2 human turns of the same session followed (no re-ask,
+  correction or redo in the unit's turn or the next 2) or the person's last receipt-band press for
+  its `msg_id` is `kept`. A keep loses to a redo that lands later in the window;
+- **unjudged** -- not redone, and its exactly joined usage_outcome verdict is `unknown` for a
+  reason that will not resolve (`no_result`, `no_pairs`, `not_applied_seen`, `partly_applied`).
+  usage_outcome never rounds these to either side, and neither does this line: a local `llm_edit`
+  that failed every attempt is not an accepted answer, however many turns follow;
+- **pending** -- neither yet: counted and stated, never on either side. This includes an edit
+  whose verdict is `window_open` while its `so_far` says it is not applied yet.
+
+Accept rate = accepted / (accepted + redone). Below 50 decided it prints `too few to tell
+(n=N)`; with none decided, `not measurable`; never `0%` for unknown. Pending, unjudged and
+failed units and units with no session id are listed beside it, not in the rate. Because the usage_outcome verdict looks 3
+human turns ahead (`WINDOW_TURNS`), a redo in the third turn after an exactly joined unit also
+counts as redone; that is O3's own redo definition, kept as is. A routed call in a single-turn
+session has no human turn after it and stays pending.
+
+Known limits of the session id: (1) The stale-stamp correction (the transcript's session id
+replaces the stamped one) reads main-thread transcripts only. A call made by a subagent after
+`/clear` or an in-process resume is not joined, keeps the MCP server's old session id, and is
+judged against that session's turns. It usually ends pending, because the old session has no
+later turns, but it can be accepted when it does. (2) Claude Desktop and Cursor MCP servers
+have no `CLAUDE_CODE_SESSION_ID`; their rows stay NULL (unknown) by design.
+Local answers the line cannot judge are stated beside it and never dropped silently: no session
+id, flagged failed, from a session with no kind tag, or from a research/other-kind session (the
+last two are counted among O3's `untagged` / `other_kind` exclusions as well). Tests:
+`tests/test_local_session_accepted.py`.
 
 *Session-kind override.* `~/.llm-router/session_kind_overrides.json`, `{session_id: {"kind": ..., "reason": ...}}`,
 names a session whose tag or whose rows' own stamps are wrong and cannot be rewritten (the ledgers are
