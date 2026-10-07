@@ -141,7 +141,7 @@ Usage:
                                      (claude-code, claude-desktop, cursor, copilot,
                                      windsurf, gemini-cli, codex, …)
   llm-router install --mode <mode>       Install mode (auto | gateway)
-  llm-router install --no-hosts          Claude Code only; skip other detected hosts (Codex)
+  llm-router install --no-hosts          Claude Code only; skip other detected hosts (Codex, Gemini CLI)
   llm-router install --project           Write AGENTS.md + CLAUDE.md (link) into the current
                                      repository so both agents read one set of rules
   llm-router install --proxy-default     Make the per-call proxy the DEFAULT ANTHROPIC_BASE_URL
@@ -183,8 +183,8 @@ _HOST_ALIASES = {"claude-desktop": "desktop", "claude_desktop": "desktop"}
 # 2, and auto-detect reports them instead of skipping them silently (v16 P0.4).
 # Wiring them is v16 P2.12.
 _UNSUPPORTED_HOSTS = {
-    "pi": "no installer writes Pi's MCP config (~/.pi/agent/mcp.json) yet",
-    "kimi": "no installer for Kimi Code; its MCP config path is not documented",
+    "pi": "not wired into `llm-router install` yet",
+    "kimi": "not wired into `llm-router install` yet",
 }
 
 
