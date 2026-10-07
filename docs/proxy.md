@@ -476,7 +476,11 @@ and `llm_router.commands.proxy_default` (orchestration). The install:
 
 1. writes a supervised service — a macOS LaunchAgent (`KeepAlive`) or a Linux
    systemd user unit (`Restart=on-failure`), running
-   `llm-router proxy --steps off --tiers conversation`;
+   `llm-router proxy --steps off --tiers conversation` on port **8797**, and,
+   once that answers, a second one for the **fail-open shim**
+   (`com.llm_router.proxy-shim` / `llm_router-proxy-shim`) on **8787**, the
+   port settings.json names (see "Fail-open shim" below; `shim=False` keeps the
+   old single-service layout);
 2. **reuses** a proxy already answering on the target port instead of
    installing a second one that would fight it for the port — this is how it
    stays compatible with a proxy the owner already runs by hand
@@ -497,9 +501,41 @@ the service, removes the sentinel (`~/.llm-router/proxy_default.json`), and
 restores `env` via the manifest replay — all three happen whether or not the
 proxy is currently up.
 
+### Fail-open shim (P0.10, D-17 = A)
+
+`llm-router proxy-shim` (`proxy/failopen_shim.py`) owns 127.0.0.1:8787 and
+forwards every request, bytes in and bytes out, to the main proxy on
+`LLM_ROUTER_PROXY_UPSTREAM_PORT` (default 8797). When the main proxy cannot be
+reached — connection refused, connect slower than 200 ms, or the connection
+drops before a response — or answers 5xx before any byte reached the client, the
+shim sends the same request once to `https://api.anthropic.com` with the same
+headers and records a `proxy_down` event (`failopen.record`, so it lands in
+`~/.llm-router/fail_open.jsonl` and KPI G2; code and reason only, never headers
+or content). Once a response byte has gone out nothing is retried.
+
+Why: `settings.json` env beats the process env, so a session already running
+cannot be pointed elsewhere, and the SessionStart warning below only reaches the
+next session. Measured 2026-10-07 (claude 2.1.292, `--setting-sources
+project,local`, base URL on a smoke port): with nothing listening, `claude -p`
+retried for 222.85 s and failed with `API Error: Connection refused` (n = 1);
+through the shim with the main proxy killed, 10/10 sessions answered and 10
+`proxy_down` rows were written (docs/BUGS.md #10).
+
+The shim imports neither `proxy/server.py` nor its dependencies, so a broken
+main-proxy deploy cannot take it down. It uses httpx for the upstream leg
+because aiohttp's client rejects the duplicate `Server` header the main proxy
+sends (uvicorn's next to Anthropic's).
+
+**Moving an existing install behind the shim** (the installer reuses a process
+it finds on 8787 and says "No fail-open shim installed"): stop the main proxy's
+LaunchAgent, change its `--port` to 8797, start it again (`launchctl bootout` +
+`bootstrap`), then install and bootstrap `com.llm_router.proxy-shim`. That is a
+live service change and an owner step.
+
 ### Fail-safe: what happens when the proxy is down
 
-Because every session depends on it once installed:
+Because every session depends on it once installed (with the shim, a dead main
+proxy no longer fails the call; the checks below still report it):
 
 - **KeepAlive/`Restart=on-failure`** restarts a crashed process in place — the
   supervisor IS the watchdog. A separate polling watchdog process was

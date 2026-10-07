@@ -17,6 +17,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 7 | `edit_outcomes.jsonl` rows with no source | open, fix is plan task M0.3(c) |
 | 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | known, not fixed |
 | 9 | Classifier warm-up loaded `llmr-classifier` at the wrong `num_ctx` | fixed in #298 (M1.4, review 2) |
+| 10 | A dead proxy fails every Claude Code session | fixed in this change (P0.10); live switch is an owner step |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -173,3 +174,36 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   4096 and an omitted `context_length` return `llm`. Mutants run on head 2316f3f: warm-up
   without `options` fails both tests; `_is_loaded` returning True regardless of context fails
   the second.
+
+## 10. A dead proxy fails every Claude Code session
+
+- **Symptom.** With proxy-default on, `~/.claude/settings.json` sets
+  `ANTHROPIC_BASE_URL=http://127.0.0.1:8787`. When the proxy process is down, every API call
+  of every session is refused. Smoke 2026-10-07 (claude 2.1.292, `--setting-sources
+  project,local`, base URL on smoke port 8788, nothing listening): `claude -p "say ok"` retried
+  for 222.85 s, then exited 1 with `API Error: Connection refused — a firewall or proxy may be
+  blocking it (ECONNREFUSED)` (n = 1, session 2af3ba44).
+- **Cause.** The proxy process itself owned the settings.json port, so its death left nothing
+  listening. `settings.json` env beats the process env, and hooks run after the API client is
+  built, so the SessionStart warning only reaches the next session (plan v16 C10, L16).
+- **Fix.** `src/llm_router/proxy/failopen_shim.py` (D-17 = A): a small shim owns 8787 and
+  forwards to the main proxy on 8797; on refused / >200 ms connect / disconnect before a response,
+  or a 5xx before any byte went out, it sends the request once to api.anthropic.com and records
+  `proxy_down` in `fail_open.jsonl` (G2). `llm-router install --proxy-default` installs both
+  services (main first, then the shim) and writes settings.json only after both answer. The live
+  machine still runs the main proxy on 8787: the port move needs the owner (`bootout` +
+  `bootstrap`).
+- **Found while fixing.** The first shim used aiohttp's client, which rejects the duplicate
+  `Server` header the main proxy sends (uvicorn's own next to Anthropic's): in the smoke, 2 of 4
+  calls went direct while the main proxy was up. The shim's upstream leg now uses httpx (h11),
+  which relays it, as Claude Code's own client does.
+- **Test.** `tests/test_proxy_failopen_shim.py` (fails on da31df7: the module does not exist):
+  `test_main_down_goes_direct_and_records_proxy_down`,
+  `test_main_disconnects_before_responding_goes_direct`, `test_connect_timeout_goes_direct`,
+  `test_main_5xx_before_bytes_retries_direct_once`, `test_no_retry_after_bytes_were_sent`,
+  `test_sse_passes_through_byte_for_byte_and_incrementally`, and
+  `test_duplicate_server_header_from_main_proxy_is_passed_not_bypassed` (fails with the aiohttp
+  client: `'direct' == 'main'`). `tests/test_proxy_default_orchestration.py` pins the two-service
+  install; `tests/test_failopen_never_writes_settings.py` pins that no fail-open path writes
+  settings.json outside `llm-router install --proxy-default`. Live: 10/10 smoke sessions
+  answered through the shim with the smoke main proxy killed, 10 `proxy_down` rows (PR body).

@@ -57,7 +57,7 @@ class _FailsToStartRunner:
 
 def test_install_refuses_and_never_writes_settings_when_proxy_never_answers(tmp_path, _sandbox):
     result = cmd.install_proxy_default(
-        port=18790, home=tmp_path / "svc_home", system="Darwin",
+        port=18790, shim=False, home=tmp_path / "svc_home", system="Darwin",
         runner=_NeverStartsRunner(), health_retries=2, health_interval_s=0.05,
     )
     assert result["ok"] is False
@@ -68,7 +68,7 @@ def test_install_refuses_and_never_writes_settings_when_proxy_never_answers(tmp_
 
 def test_install_refuses_and_never_writes_settings_when_activation_fails(tmp_path, _sandbox):
     result = cmd.install_proxy_default(
-        port=18791, home=tmp_path / "svc_home", system="Darwin", runner=_FailsToStartRunner(),
+        port=18791, shim=False, home=tmp_path / "svc_home", system="Darwin", runner=_FailsToStartRunner(),
     )
     assert result["ok"] is False
     assert "could not start" in result["error"]
@@ -111,7 +111,7 @@ def test_install_starts_a_new_service_and_wires_settings_once_healthy(tmp_path, 
 
     try:
         result = cmd.install_proxy_default(
-            port=port, home=service_home, system="Darwin",
+            port=port, shim=False, home=service_home, system="Darwin",
             runner=_start_a_real_listener_then_succeed, health_retries=5, health_interval_s=0.05,
         )
         assert result["ok"] is True and result["reused"] is False
@@ -193,7 +193,7 @@ def test_uninstall_stops_and_removes_the_service_and_sentinel(tmp_path):
         mp.setenv("LLM_ROUTER_HOME", str(tmp_path / "_router_state"))
         try:
             result = cmd.install_proxy_default(
-                port=port, home=service_home, system="Darwin",
+                port=port, shim=False, home=service_home, system="Darwin",
                 runner=_start_listener_then_succeed, health_retries=5, health_interval_s=0.05,
             )
             assert result["ok"] is True and result["reused"] is False
@@ -244,3 +244,145 @@ def test_cmd_proxy_default_on_returns_nonzero_and_prints_error_when_it_fails(tmp
     out = capsys.readouterr().out
     assert "boom" in out
     assert "Nothing in ~/.claude/settings.json was changed" in out
+
+
+# ── P0.10 (D-17 = A): the default install puts the fail-open shim on `port` ──
+#
+# The pre-P0.10 tests above pass `shim=False` explicitly: they pin the
+# settings.json gate, which must hold in both layouts. The tests below pin the
+# new default layout: main proxy on `upstream_port`, shim on `port`, and
+# settings.json naming the shim's port only after BOTH answer.
+
+def _free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+class _BindsPerService:
+    """Stands in for `launchctl load <plist>`: binds the port of whichever
+    service the command names, so each health poll sees exactly what a real
+    service manager would have started. `start` limits which labels come up."""
+
+    def __init__(self, ports: dict[str, int], start: set[str]):
+        self.ports, self.start, self.socks, self.calls = ports, start, [], []
+
+    def __call__(self, cmd, **kwargs):
+        self.calls.append(cmd)
+        for label, port in self.ports.items():
+            if f"{label}.plist" in cmd and label in self.start:
+                srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                srv.bind(("127.0.0.1", port))
+                srv.listen(1)
+                self.socks.append(srv)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    def close(self):
+        for s in self.socks:
+            s.close()
+
+
+def test_default_install_starts_main_on_upstream_port_and_shim_on_settings_port(tmp_path, _sandbox):
+    service_home = tmp_path / "svc_home"
+    port, upstream = _free_port(), _free_port()
+    runner = _BindsPerService({pd.LABEL: upstream, pd.SHIM_LABEL: port}, {pd.LABEL, pd.SHIM_LABEL})
+    try:
+        result = cmd.install_proxy_default(
+            port=port, upstream_port=upstream, home=service_home, system="Darwin",
+            runner=runner, health_retries=5, health_interval_s=0.05,
+        )
+        assert result["ok"] is True, result
+        main_dest, _ = pd.service_target("Darwin", service_home)
+        shim_dest, _ = pd.service_target("Darwin", service_home, label=pd.SHIM_LABEL)
+        assert f"<string>--port</string><string>{upstream}</string>" in main_dest.read_text()
+        shim_text = shim_dest.read_text()
+        assert "<string>proxy-shim</string>" in shim_text
+        assert f"<string>--port</string><string>{port}</string>" in shim_text
+        assert f"<string>--upstream-port</string><string>{upstream}</string>" in shim_text
+        # main first, then the shim: the shim must never come up pointing at nothing
+        assert [c for c in runner.calls] == [f"launchctl load {main_dest}", f"launchctl load {shim_dest}"]
+        data = json.loads(_sandbox.read_text())
+        assert data["env"]["ANTHROPIC_BASE_URL"] == f"http://127.0.0.1:{port}"
+        sentinel = pd.read_sentinel()
+        assert sentinel["port"] == port and sentinel["upstream_port"] == upstream
+        assert sentinel["shim_label"] == pd.SHIM_LABEL
+    finally:
+        runner.close()
+
+
+def test_default_install_refuses_when_the_shim_never_answers(tmp_path, _sandbox):
+    port, upstream = _free_port(), _free_port()
+    runner = _BindsPerService({pd.LABEL: upstream, pd.SHIM_LABEL: port}, {pd.LABEL})
+    try:
+        result = cmd.install_proxy_default(
+            port=port, upstream_port=upstream, home=tmp_path / "svc_home", system="Darwin",
+            runner=runner, health_retries=2, health_interval_s=0.05,
+        )
+        assert result["ok"] is False
+        assert "fail-open shim" in result["error"] and "did not answer" in result["error"]
+        assert not _sandbox.exists(), "settings.json must not name a port nothing answers on"
+        assert pd.read_sentinel() is None
+    finally:
+        runner.close()
+
+
+def test_default_install_refuses_when_the_main_proxy_never_answers(tmp_path, _sandbox):
+    port, upstream = _free_port(), _free_port()
+    runner = _BindsPerService({pd.LABEL: upstream, pd.SHIM_LABEL: port}, {pd.SHIM_LABEL})
+    try:
+        result = cmd.install_proxy_default(
+            port=port, upstream_port=upstream, home=tmp_path / "svc_home", system="Darwin",
+            runner=runner, health_retries=2, health_interval_s=0.05,
+        )
+        assert result["ok"] is False and "proxy service" in result["error"]
+        shim_dest, _ = pd.service_target("Darwin", tmp_path / "svc_home", label=pd.SHIM_LABEL)
+        assert not shim_dest.exists(), "the shim is installed only after the main proxy answers"
+        assert not _sandbox.exists()
+    finally:
+        runner.close()
+
+
+def test_reuse_of_an_occupied_port_says_no_shim_was_installed(tmp_path, _sandbox):
+    srv = _listening_socket()
+    try:
+        port = srv.getsockname()[1]
+        result = cmd.install_proxy_default(port=port, upstream_port=_free_port(),
+                                           home=tmp_path / "svc_home", system="Darwin")
+        assert result["ok"] is True and result["reused"] is True
+        assert any("No fail-open shim installed" in a for a in result["actions"])
+        shim_dest, _ = pd.service_target("Darwin", tmp_path / "svc_home", label=pd.SHIM_LABEL)
+        assert not shim_dest.exists()
+        assert pd.read_sentinel()["shim_label"] is None
+    finally:
+        srv.close()
+
+
+def test_uninstall_stops_and_removes_both_services(tmp_path, _sandbox):
+    service_home = tmp_path / "svc_home"
+    port, upstream = _free_port(), _free_port()
+    runner = _BindsPerService({pd.LABEL: upstream, pd.SHIM_LABEL: port}, {pd.LABEL, pd.SHIM_LABEL})
+    try:
+        result = cmd.install_proxy_default(
+            port=port, upstream_port=upstream, home=service_home, system="Darwin",
+            runner=runner, health_retries=5, health_interval_s=0.05,
+        )
+        assert result["ok"] is True
+    finally:
+        runner.close()
+    main_dest, _ = pd.service_target("Darwin", service_home)
+    shim_dest, _ = pd.service_target("Darwin", service_home, label=pd.SHIM_LABEL)
+    stops = []
+
+    def _record(cmd_, **kw):
+        stops.append(cmd_)
+        return subprocess.CompletedProcess(cmd_, 0, "", "")
+
+    actions = cmd.uninstall_proxy_default(home=service_home, system="Darwin", runner=_record)
+    assert stops == [f"launchctl unload {shim_dest}", f"launchctl unload {main_dest}"]
+    assert any("Stopped fail-open shim service" in a for a in actions)
+    assert any("Stopped proxy service" in a for a in actions)
+    assert not main_dest.exists() and not shim_dest.exists()
+    assert pd.read_sentinel() is None
