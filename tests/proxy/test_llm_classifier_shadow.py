@@ -31,7 +31,7 @@ from llm_router.proxy import llm_shadow as ls
 from llm_router.proxy import tiers as pt
 from tests.proxy.test_tier_decisions_golden import _shapes
 from tests.test_local_classifier import MARKER, FakeOllama, _reply
-from tests.test_proxy_tiers import Upstream, _app, _first, _post, _req, _rows
+from tests.test_proxy_tiers import OPUS, SONNET, Upstream, _app, _first, _post, _req, _rows
 
 SID = "11111111-2222-3333-4444-555555555555"
 LOG = "classifier_shadow.jsonl"
@@ -126,6 +126,53 @@ async def test_decisions_are_identical_with_mode_off_and_shadow_on_50_fixtures(
         scheduled += len(_records(tmp_path / f"{name}-shadow"))
     # the comparison is not vacuous: the classifier ran on the turn-first shapes
     assert len(fake.calls) == scheduled >= 8
+
+
+def _mid_conversation_turn_first() -> dict:
+    """A turn-first call in the middle of a conversation: earlier turns in the history,
+    the last message a human's text (not a tool_result), the client's tools attached,
+    Opus requested."""
+    body = _first()
+    body["messages"] = [
+        {"role": "user", "content": [{"type": "text", "text": "first question"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "first answer"}]},
+        {"role": "user", "content": [{"type": "text", "text": "now a second, different question"}]},
+    ]
+    body["metadata"] = {"user_id": json.dumps({"session_id": SID})}
+    return body
+
+
+async def test_golden_the_bytes_sent_upstream_on_a_switched_turn_first_call_are_mode_independent(
+        tmp_path, monkeypatch, simple):
+    """The switched path (server.py ``sent = dict(body, model=...)``): Opus requested,
+    the rules policy serves Sonnet. The upstream bytes with the mode ``shadow`` must
+    equal those with ``off`` AND equal the client's own body with only ``model``
+    changed, so a shadow-only edit of the body (or an edit in both modes) shows."""
+    fake = FakeClassifier(monkeypatch, delay=0.005)
+    sent: dict[str, list[bytes]] = {}
+    for mode in ("off", "shadow"):
+        monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", mode)
+        sub = tmp_path / mode
+        sub.mkdir()
+        up = Upstream()
+        app = _shadow_app(sub, up)
+        body = _mid_conversation_turn_first()
+        warm = dict(body, messages=body["messages"][:1])  # the conversation's first call: served as requested
+        assert (await _post(app, warm)).status_code == 200
+        assert (await _post(app, copy.deepcopy(body))).status_code == 200
+        await app.state.cls_shadow.drain()
+        _, second = _rows(sub)
+        # the path under test: a switch by the rules policy, at a turn-first step
+        assert (second["requested_model"], second["served_model"]) == (OPUS, SONNET)
+        assert second["tier_switch"] is True and second["tier_reason"] == "policy"
+        assert second["step_class"] != "continuation" and second["cls_applied"] is False
+        sent[mode] = [q.content for q in up.requests]
+        assert sent[mode][1] == json.dumps(dict(body, model=SONNET)).encode(), mode
+    # not vacuous: the shadow classified the switched call, and only in shadow mode
+    shadow_rows = _rows(tmp_path / "shadow")
+    assert [c["text_sha"] for c in fake.calls].count(shadow_rows[1]["text_sha"]) == 1
+    assert len(_records(tmp_path / "shadow")) == 2 and not (tmp_path / "off" / LOG).exists()
+    assert sent["off"] == sent["shadow"]
 
 
 # --- 2: only turn-first calls schedule; a continuation never waits ------------------------
