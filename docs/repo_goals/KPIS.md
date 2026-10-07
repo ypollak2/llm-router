@@ -11,8 +11,20 @@ file itself is not reproduced or linked here beyond its name.
 ## North Star and Outcomes
 
 **NS — Non-Claude-and-used share.** (prompts + LLM calls served by a non-Claude model AND
-used as-is) / (all prompts + LLM calls), organic sessions only. Target >80%. Today: **0%**
-(n=100 real, source: `results_p1_rerun.md`).
+used as-is) / (all prompts + LLM calls), organic sessions only. Target **> 80%, pooled, organic,
+7 days**. Today: **0.0%** (0 of 4,300 organic units, 7 days, 2026-10-06, `llm-router kpi --days 7
+--json` on c2ed278; 6 sessions, one research session, b9f04425, held 81.4% of those units). That
+session is now tagged research by the override file (see "Session-kind override"), so the same
+command no longer counts it: on the pinned window W0 (2026-09-29T09:41:51Z to 2026-10-06T09:41:52Z)
+the count is 0.0% of 59 organic units, 25 of them backfilled (`llm-router kpi --since ... --until
+... --json` on a copy of `~/.llm-router`, 2026-10-07). Read the 4,300 as an upper bound on volume. These figures were taken with the heuristic numerator (`outcome == "used"`), before the strict rule below merged (#294); they have not been recomputed under it.
+
+**Q&A never counts toward NS.** This is the owner's rule, and the code enforces it:
+`llm-router kpi` computes NS and D2 with the **strict-used** rule (`northstar.is_strict_used`, owner
+decision D-2): served by a non-Claude model AND `verify.verify_status` in {`pass_f2p`, `pass_f2p_model`}
+AND task type not Q&A (`northstar.QA_TASK_TYPES`) AND outcome not redo. A unit with no verify record never
+counts, a keep press adds nothing, and pass-to-pass never counts. The heuristic numerators
+(`outcome == "used"`) stay in `kpis_diag.NS_heuristic` / `D2_heuristic`, outside the KPI codes: "not a target".
 
 **O1 — Quota avoided (PRIMARY, per the 2026-09-28 amendment).** Claude quota-weighted cost
 avoided vs. the requested model. Shown only as "est." until reconciled with Claude Code's
@@ -31,8 +43,9 @@ one whose `step_class` is not `continuation`) is served by Haiku or local and th
 redone; the per-call share is printed as a secondary line (`per call: ...`). Printed as one extra line in
 `llm-router kpi` and `llm-router kpi --health` (outside NS, D1-D5 and the other KPIs: a test
 pins their output byte for byte, `tests/test_kpi_offload_share.py`). It is not part of the
-`--health` measured/blind/stale counts. Today: no figure is recorded here; run
-`llm-router kpi --since-policy <version>`.
+`--health` measured/blind/stale counts. Today: **0.6%** (7 of 1,183 turns, all Haiku, 7 days, 2026-10-06, c2ed278; 1,175 of those 1,183
+turns are the research session b9f04425, so without it O3 has 8 organic turns from 2 sessions and
+is not informative); per call 0.2% (23 of 10,085). Run `llm-router kpi --since-policy <version>`.
 
 Code: `src/llm_router/offload_share.py`. The line also shows Haiku share, local share, and the
 redo rate per class (Haiku, local) with n. Below n=50 (units, or units in a class) it prints
@@ -111,6 +124,28 @@ equal a recount made from the ledger rows.
    session, within 120 s of the unit, each verdict used once. Local units only (a verdict
    exists only for routed MCP events).
 
+4. **Transcript detector (source 4, OFF).** `src/llm_router/redo_signal.py` reads the session's Claude Code
+   transcript and flags a human prompt that re-asks (`claude:` / `native:` / `opus:`), corrects, complains
+   ("that didn't work", "try again" ...) or repeats the previous prompt. A unit is redone by it when a
+   flagged prompt falls in the next 2 human turns. It is disabled (`offload_share.REDO_SOURCE4_ENABLED =
+   False`): it changes no unit, and `o3.breakdown.redo_detector_n` still reports how many flagged prompts it saw.
+   It may be enabled only by a PR that cites a validation run on blind labels with precision >= 0.80 and
+   >= 15 true positives. The one run so far did not meet that: pattern version v2, test half n=150 labelled
+   pairs (window 2026-08-30 to 2026-10-06, 12 labelled redo), precision 2/5 and recall 2/12
+   (`~/.rsi/research/primary-plan/redo/test_result.json`, not in this repo). Until then redo-based bars are
+   "not informative".
+
+   **Population of that run (not O3's).** PLAN M0.9 asks for organic sessions plus b9f04425. The sampler applied no
+   session-kind filter. Of 524 pairs in the extended window (2026-08-30 to 2026-10-06), 106 come from the PLAN's
+   population (76 of them in W0) and 418 from sessions with no tag file and no ledger kind stamp (untagged: kind
+   unknown, never counted as organic here). Selected: 236 of 300 pairs (19 of 22 sessions) are untagged; test half:
+   115 of 150. The tag-less sessions pre-date tagging; a sidecar derived from their transcript cwd/entrypoint
+   (`session_kind_backfill.jsonl`, not a live tag) calls all 418 organic. 106 < 300, so the PLAN's own population
+   cannot supply the sample even after the one allowed extension; PLAN 3.4 makes the substitute population the
+   owner's decision and that decision is open. Precision and recall above are therefore measured mostly on
+   untagged sessions, and any PR that flips `REDO_SOURCE4_ENABLED` must quote this split with them. Split recorded in
+   `sample_meta.json` and `test_result.json` (`population_split`).
+
 A unit that shows no redo but has fewer than 2 human turns after it (a recent turn, or the end of
 a session) is counted as not redone and also counted as `window_open`; the count is in the
 headline value (`n=..., K window-open`) because it can still become a redo.
@@ -139,13 +174,32 @@ relative window empties as the ledgers go quiet. Rows outside `[since, until]` n
 KPI. O1's `usage.db` estimate only exists relative to now, so under a window O1 prints the
 reconciled figure or "not measurable". The JSON gains a `window` key (absent without the flags).
 
+### Plan metrics (O3-int, CU, Cλ2, CRAW, HP/HR, CFB, CLAT, QAUD, LPREC)
+
+These come from the owner's primary plan (a private research file, §1.2; not reproduced here).
+Most are computed by research scripts outside this repository, not by `llm-router kpi`. The
+"Computed by" column says where each one is, so that a number here is never mistaken for a
+`kpi` output. A rate carries its n; below its minimum n it is "not informative", never a pass.
+
+| ID | Definition | Today (n, source) | Computed by |
+|---|---|---|---|
+| O3-int | GUARD. O3 proxy turns / typed transcript human prompts, per session and pooled, over the pinned window W0. Bar 0.90-1.10. | 424/370 = 1.146 in b9f04425 (research findings, 2026-10-06) | plan task M0.3: `o3_integrity.py --since --until` (not in this repo) |
+| CU | GUARD. Under-route on real prompts: #{rank(pred) < rank(truth)} / n, tiers ordered local < haiku < sonnet < opus. | rules_eff 39/89 = 43.8% (E2 held-out, `~/.rsi/research/complexity-v2/p_eval/REPORT.txt`) | `eval_router.py` results |
+| Cλ2 | LEAD. Quality-weighted cost: per item c(pred) if pred >= truth, else c(pred) + 2·c(truth); c = haiku 1, sonnet 2.7, opus 6.15 (the p_eval table; D4 above uses its own weights, 3.66 for Sonnet, and the two are never mixed). | rules_eff 8.24, always-Opus 6.15, qwen rule 6.05 (n=89, p_eval) | `eval_router.py` results |
+| CRAW | GUARD. Raw cost mean c(pred); stops a disguised always-Opus. | rules_eff 2.86, qwen rule 3.91, always-Opus 6.15 (n=89, p_eval) | `eval_router.py` results |
+| HP / HR | LEAD. Haiku precision = #{pred in {local, haiku} and truth = haiku} / #{pred in {local, haiku}}; recall = same numerator / #{truth = haiku}. | HP <= 36% for every classifier tested (n=89, p_eval) | `eval_router.py` results |
+| CFB | GUARD. Classifier fallback: timeout, parse error, cold model or over budget, divided by LLM calls. | 8/30 = 27%, contended run (`~/.rsi/research/local-classifier/results/qwen3.5_latest__v2__tune.run1_contended.json`) | classifier eval; `classifier_shadow.jsonl` once shadow runs |
+| CLAT | GUARD. Warm LLM classifier latency p50 / p95 in ms, uncontended runs only (free memory >= 20%). | p50 1,350 / p95 2,297 ms, n=30, contended, so excluded by the rule (same file) | classifier eval |
+| QAUD | GUARD. Blind audit: share of sampled turns judged acceptable, `cannot_judge` excluded; model names stripped, 6 calibration items per batch. | none yet | audit scripts under the plan's `audit/` (not in this repo) |
+| LPREC | GUARD. Verifier precision against hidden tests; also false-used rate, unavailable rate, tampering. | not measured; the toolkit's own "used" was right 3 of 7 (toolkit `bench20.log`, interim) | plan task M3.6, `phase_d/report.json` |
+
 ## Drivers
 
 | ID | Driver | Definition |
 |---|---|---|
-| D1 | Offered off Claude | % of organic prompts the router sends to local/Codex. |
-| D2 | Success when tried | % of local/Codex attempts that pass verification AND are used. |
-| D3 | Redo rate | % of routed outputs Claude redoes within 3 turns, plus the person's own `r` redo presses on the receipt band (see below). |
+| D1 | Offered off Claude | Attempted units / all organic units, pooled over the window (`kpi._ns_d1_d2`). A unit is *attempted* when its `kind` is in `northstar.ATTEMPTED_KINDS` or its `lever` is `proxy`. Today **4.5%** (193 of 4,300 units, 7 days, 2026-10-06, c2ed278; includes b9f04425, see NS above). |
+| D2 | Success when tried | Strict-used units / attempted units, same population (`kpi._ns_d1_d2`). D2 uses the strict-used rule (see NS above), not the heuristic `outcome == "used"`. Today **0 of 193** (7 days, 2026-10-06, c2ed278, heuristic numerator; not recomputed under the strict rule). |
+| D3 | Redo rate | % of routed outputs Claude redoes within 3 turns, plus the person's own `r` redo presses on the receipt band (see below). **D3 uses a window of 3 turns (`usage_outcome.WINDOW_TURNS`); O3 uses 2 (`offload_share.REDO_TURNS`). The two are different windows: never mix them.** |
 | D4 | Tier mix | % of Claude turns **and** % of Claude quota cost on Opus/Sonnet/Haiku, printed side by side (source: `proxy_calls.jsonl`, tracked since PR #246). Cost is calls weighted by per-call cost, Haiku 1 : Sonnet 3.66 : Opus 6.15 (Opus is 1.68x Sonnet and 6.15x Haiku; `proxy/claude_tiers.yaml`, probe 2026-09-29, n=5 calls per model, pinned by a test). A tier with no weight (Fable) is left out of the weighted share and counted, never given a guessed weight. Organic sessions only, by the kind each proxy row was written with (rows from before tagging stay out): research and harness are excluded (`llm-router kpi --include research` adds research, never harness). |
 | D5 | Classifier accuracy | Exact tier vs. a truth set; too-weak (under-route) rate <= 10%. |
 
@@ -153,7 +207,7 @@ reconciled figure or "not measurable". The JSON gains a `window` key (absent wit
 
 | ID | Guardrail | Definition |
 |---|---|---|
-| G1 | Added latency | Hook wall time, p50 / p95 per hook against that hook's budget; proxy decision p95 (proxy path <= +200 ms). |
+| G1 | Added latency | Hook wall time, p50 / p95 per hook against that hook's budget; proxy `tier_decision_s` p50 / p95 with n, turn-first and continuation calls apart (`G1_proxy`). |
 | G2 | Silent failures per 100 calls | Fail-open events per 100 calls over the window, overall, per code and the top five codes — the rate must not go up, and every instance must be recorded. Truncation/overflow and Ollama-hung are not wired into this counter yet. |
 | G3 | Ledger completeness | >= 99% of proxy rows with every decision field that can apply to them recorded (definition below). |
 | G4 | Wrongly benched providers | Wrong benches per 100 benches, with n; target = 0. A bench is wrong when the owner clears it with `llm-router provider unban` before it lapses, or a call to that provider succeeds before its reset time. |
@@ -214,6 +268,22 @@ counts ("n=3 benches; 1 shown wrong so far"), not a rate. Benches still in force
 separately: they can still turn out wrong, so the wrong count is a floor until they lapse. A
 call that was already in flight when a bench was recorded and then succeeded counts under the
 second rule. The providers benched right now are kept as a detail line.
+
+**G1 — proxy decision latency (`G1_proxy`).** p50 and p95 of `tier_decision_s` (the time the tier
+decision added, `proxy_calls.jsonl`), with n, in two segments: *turn-first* (`step_class` is not
+`continuation`) and *continuation* (a tool-result follow-up). Claude Code side calls
+(`tier_reason == side_call`) run no classifier and are left out; their count is in the JSON
+(`side_call_excluded`). A segment below n=50 prints `too few to tell (n=N)` and its percentiles are
+null in the JSON. Percentiles are nearest rank on n-1. Same session-kind filter as D4 (organic; research
+with `--include research`).
+Why it changed: this KPI used to take the p95 of `added_latency_s`, which is 0.0 on 25,924 of 25,963
+forwarded rows (all-time ledger copy, 2026-10-07; it is only set on a few decision paths), so it printed
+0 ms (`docs/BUGS.md`). `tier_decision_s` is present on 25,397 of those 25,963 rows. First reading, W0,
+`--include research` (organic plus research, n=10,086 rows, side calls excluded): turn-first p50=4ms
+p95=83ms (n=1,181); continuation p50=4ms p95=21ms (n=8,905). An independent recompute from the raw
+ledger gave turn-first n=1,183 p50=4ms p95=83ms and continuation n=8,905 p50=4ms p95=21ms. Targets
+(primary plan): shadow <= 30 ms; with the LLM decision, turn-first <= its wait budget + 100 ms and
+continuation <= 30 ms.
 
 ### G3 in detail
 

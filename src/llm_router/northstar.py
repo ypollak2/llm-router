@@ -305,7 +305,7 @@ import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from llm_router import paths, session_kind
 
@@ -372,6 +372,21 @@ OUTCOME_NOT_ROUTED = "not_routed"
 # outcomes together (that schema has no separate "discarded" field).
 _REDO_LIKE_OUTCOMES = frozenset({OUTCOME_REDO, OUTCOME_DISCARDED})
 
+# Strict "used" (PLAN M0.2, owner decision D-2). NS and D2 count a unit only when a
+# non-Claude model served it AND its verify record shows a test that fails before the change
+# and passes after it AND it is not Q&A AND it was not redone. The heuristic outcome
+# "used" is neither required nor enough: a keep press adds nothing, pass-to-pass never counts.
+QA_TASK_TYPES = frozenset({
+    "query", "research", "generate", "analyze", "coordinate", "introspect",
+    "summary", "classification", "extraction",
+})
+STRICT_VERIFY = frozenset({"pass_f2p", "pass_f2p_model"})
+STRICT_RULE_TEXT = (
+    "strict-used: served by a non-Claude model AND verify_status in {pass_f2p, pass_f2p_model} "
+    "AND task_type not Q&A AND outcome not redo (a unit with no verify record never counts; "
+    "keep presses and the heuristic outcome add nothing)"
+)
+
 RELAY_MARKER_A = "🎯 LLM Router routed"
 RELAY_MARKER_B = "🎯 llm_router →"
 _EXPLICIT_CLAUDE_PREFIX_RE = re.compile(r"^\s*(?:claude|native|opus)\s*:\s*", re.IGNORECASE)
@@ -399,9 +414,12 @@ class Unit:
     kind_stamp: str | None = None  # session kind the unit's own ledger row was written with
     session_kind: str | None = None  # resolved by build_sessions; None = no tag resolvable
     session_kind_source: str | None = None
+    # Verify record for strict-used (M0.2): {"verify_status": ...}. None until a verifier
+    # (M3) attaches one, so no unit counts as strict-used before then.
+    verify: dict | None = None
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "session_id": self.session_id,
             "ts": (datetime.fromtimestamp(self.ts, tz=timezone.utc).isoformat()
                    if self.ts is not None else None),
@@ -414,6 +432,44 @@ class Unit:
             "session_kind": self.session_kind,
             "session_kind_source": self.session_kind_source,
         }
+        if self.verify is not None:  # the key appears only when set: other output is unchanged
+            out["verify"] = self.verify
+        return out
+
+
+def _unit_field(unit: Any, name: str) -> Any:
+    """``name`` of a Unit or of the dict ``Unit.to_dict()`` yields (what kpi reads)."""
+    if isinstance(unit, dict):
+        return unit.get(name)
+    return getattr(unit, name, None)
+
+
+def is_non_claude(unit: Any) -> bool:
+    """The unit's model is set and is not a Claude/Anthropic model, and the unit is not a
+    Claude main-loop call (or a Claude sub-agent call)."""
+    if _unit_field(unit, "kind") in (UNIT_CLAUDE_MAIN, UNIT_SIDECHAIN):
+        return False
+    model = _unit_field(unit, "model")
+    if not isinstance(model, str) or not model.strip():
+        return False
+    return not model.strip().lower().startswith(("claude", "anthropic"))
+
+
+def _verify_status(unit: Any) -> str | None:
+    verify = _unit_field(unit, "verify")
+    if isinstance(verify, dict):
+        status = verify.get("verify_status")
+    else:
+        status = getattr(verify, "verify_status", None)
+    return status if isinstance(status, str) else None
+
+
+def is_strict_used(unit: Any) -> bool:
+    """PLAN M0.2: the one rule behind NS and D2. See ``STRICT_RULE_TEXT``."""
+    return (is_non_claude(unit)
+            and _verify_status(unit) in STRICT_VERIFY
+            and _unit_field(unit, "task_type") not in QA_TASK_TYPES
+            and _unit_field(unit, "outcome") != OUTCOME_REDO)
 
 
 @dataclass

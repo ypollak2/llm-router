@@ -101,7 +101,8 @@ def test_kpi_byte_identical_with_and_without_local_shadow_rows(monkeypatch, tmp_
     without = kpi.compute_scorecard(days=7, now=1_800_000_000.0)
     text_without = kpi.render_scorecard(without)
     assert without["local_shadow"]["n"] == 0
-    assert without["kpis"]["NS"]["value"] == "25.0% (n=80)"   # fixture is measurable
+    assert without["kpis"]["NS"]["value"] == "0.0% (n=80)"   # fixture is measurable (strict-used, M0.2)
+    assert without["kpis_diag"]["NS_heuristic"]["value"] == "25.0% (n=80)"
 
     _make_db(home / "usage.db", ROWS)
     with_rows = kpi.compute_scorecard(days=7, now=1_800_000_000.0)

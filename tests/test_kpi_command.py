@@ -86,6 +86,10 @@ def _kpis(**kw):
     return kpi.compute_scorecard(days=7, **kw)["kpis"]
 
 
+def _diag(**kw):
+    return kpi.compute_scorecard(days=7, **kw)["kpis_diag"]
+
+
 def _first_attempted_kind():
     return sorted(ns.ATTEMPTED_KINDS)[0]
 
@@ -130,9 +134,14 @@ def _mixed_units(sid):
 def test_ns_d1_d2_exact_values(monkeypatch, sessions):
     _units(monkeypatch, _mixed_units(sessions["organic"]))
     k = _kpis()
-    assert k["NS"]["value"] == "60.0% (n=80)"      # 48 used / 80 units
+    # M0.2: NS and D2 count strict-used only; these units carry no verify record, so 0.
+    assert k["NS"]["value"] == "0.0% (n=80)"
     assert k["D1"]["value"] == "80.0% (n=80)"      # 64 attempted / 80 units
-    assert k["D2"]["value"] == "75.0% (n=64)"      # 48 used / 64 attempted
+    assert k["D2"]["value"] == "0.0% (n=64)"
+    # the old heuristic numerators, kept as diagnostics
+    d = _diag()
+    assert d["NS_heuristic"]["value"] == "60.0% (n=80)"      # 48 used / 80 units
+    assert d["D2_heuristic"]["value"] == "75.0% (n=64)"      # 48 used / 64 attempted
 
 
 def test_research_and_untagged_sessions_are_excluded_by_default(monkeypatch, sessions):
@@ -140,7 +149,8 @@ def test_research_and_untagged_sessions_are_excluded_by_default(monkeypatch, ses
     rows += _mixed_units(sessions["research"]) * 3
     rows += _mixed_units(sessions["untagged"]) * 3
     _units(monkeypatch, rows)
-    assert _kpis()["NS"]["value"] == "60.0% (n=80)"
+    assert _kpis()["NS"]["value"] == "0.0% (n=80)"
+    assert _diag()["NS_heuristic"]["value"] == "60.0% (n=80)"
 
 
 def test_all_untagged_units_explain_why_they_are_not_counted(monkeypatch, sessions):
@@ -155,7 +165,8 @@ def test_include_research_widens_the_population_but_never_untagged(monkeypatch, 
     rows = _mixed_units(sessions["organic"]) + _mixed_units(sessions["research"])
     rows += _mixed_units(sessions["untagged"])
     _units(monkeypatch, rows)
-    assert _kpis(include_research=True)["NS"]["value"] == "60.0% (n=160)"
+    assert _kpis(include_research=True)["NS"]["value"] == "0.0% (n=160)"
+    assert _diag(include_research=True)["NS_heuristic"]["value"] == "60.0% (n=160)"
 
 
 def test_proxy_lever_counts_as_attempted(monkeypatch, sessions):
@@ -230,16 +241,47 @@ def test_untagged_proxy_rows_are_not_organic_for_d4_but_count_against_g3():
     assert k["G3"]["fields"]["session_kind"]["coverage"] == 0.0
 
 
-def test_g1_proxy_p95_against_the_200ms_gate():
-    fast = [_row(added_latency_s=0.05) for _ in range(90)]
-    slow = [_row(added_latency_s=0.5) for _ in range(10)]
-    _write_proxy_rows(fast + slow)
+def test_g1_proxy_reports_tier_decision_s_split_turn_first_and_continuation():
+    """G1_proxy read ``added_latency_s``, which is 0.0 on every forwarded row, so it
+    printed 0 ms (BUGS.md). It now reads ``tier_decision_s``, split by turn-first
+    (``step_class`` != continuation) and continuation, side calls left out."""
+    first = [_row(tier_decision_s=(i + 1) / 1000, added_latency_s=0.0) for i in range(60)]
+    cont = [_row(step_class="continuation", tier_decision_s=0.004, added_latency_s=0.0)
+            for _ in range(60)]
+    side = [_row(tier_reason="side_call", tier_decision_s=5.0, added_latency_s=0.0)
+            for _ in range(10)]
+    _write_proxy_rows(first + cont + side)
     g1 = _kpis()["G1_proxy"]
-    assert g1["value"] == "proxy decision p95=500ms (OVER the +200ms gate) (n=100)"
-    _write_proxy_rows([_row(added_latency_s=0.05) for _ in range(100)])
-    g1 = _kpis()["G1_proxy"]
-    assert g1["value"] == "proxy decision p95=50ms (within +200ms gate) (n=100)"
+    # 60 values 1..60 ms: nearest rank on n-1 gives p50 = 31 ms, p95 = 57 ms.
+    assert g1["value"] == ("turn-first p50=31ms p95=57ms (n=60) | "
+                           "continuation p50=4ms p95=4ms (n=60)")
+    assert g1["measurable"] is True and g1["n"] == 120
+    assert g1["turn_first"] == {"n": 60, "p50_s": 0.031, "p95_s": 0.057}
+    assert g1["continuation"] == {"n": 60, "p50_s": 0.004, "p95_s": 0.004}
+    assert g1["side_call_excluded"] == 10
     assert _kpis()["G1_hook"]["value"].startswith("not measurable: ")  # never instrumented
+
+
+def test_g1_proxy_is_never_zero_when_forwarded_rows_added_nothing():
+    """The regression itself: added_latency_s all 0.0 must not read as 0 ms."""
+    _write_proxy_rows([_row(tier_decision_s=0.022, added_latency_s=0.0) for _ in range(100)])
+    g1 = _kpis()["G1_proxy"]
+    assert "p95=22ms" in g1["value"] and "p95=0ms" not in g1["value"]
+
+
+def test_g1_proxy_thin_segment_says_too_few_and_missing_field_is_not_measurable():
+    _write_proxy_rows([_row(tier_decision_s=0.01) for _ in range(60)]
+                      + [_row(step_class="continuation", tier_decision_s=0.01) for _ in range(5)])
+    g1 = _kpis()["G1_proxy"]
+    assert g1["value"] == ("turn-first p50=10ms p95=10ms (n=60) | "
+                           "continuation too few to tell (n=5)")
+    assert g1["continuation"] == {"n": 5, "p50_s": None, "p95_s": None}
+    _write_proxy_rows([_row(added_latency_s=0.05) for _ in range(100)])  # no tier_decision_s
+    g1 = _kpis()["G1_proxy"]
+    assert g1["value"] == "not measurable: no proxy decisions with tier_decision_s in window"
+    _write_proxy_rows([_row(tier_decision_s=0.01) for _ in range(20)])
+    g1 = _kpis()["G1_proxy"]
+    assert g1["value"] == "too few to tell (n=20)" and g1["measurable"] is False
 
 
 # ── O1 / G2 / G4 ────────────────────────────────────────────────────────────

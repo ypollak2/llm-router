@@ -78,8 +78,9 @@ SCOPE, stated rather than implied:
   one row per hook invocation, p50 / p95 per hook against that hook's budget (the
   one table ``hook_latency.HOOK_BUDGETS_MS``). NOT session-kind filtered -- a row
   carries no session id. A hook the host KILLS at its timeout writes no row; kills
-  are shown from the fail-open ledger (``CHZ-HOOK-KILLED``). The proxy-side p95
-  (``added_latency_s`` in proxy_calls.jsonl) is the other half.
+  are shown from the fail-open ledger (``CHZ-HOOK-KILLED``). The proxy-side half is
+  G1_proxy: p50 / p95 of ``tier_decision_s`` in proxy_calls.jsonl, turn-first and
+  continuation calls apart.
 * **G2 silent failures** is fail-open events per 100 calls over the window, from
   the ``ts`` every ``failopen.record`` row now carries. "Calls" are the hook
   invocations plus the proxy calls recorded in the window, all session kinds,
@@ -315,7 +316,7 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index,
     counts: how many units found a tag and how many stayed untagged."""
     from llm_router import northstar as ns
 
-    window = joined = untagged = conflicting = total = attempted = used = 0
+    window = joined = untagged = conflicting = total = attempted = used = used_heuristic = 0
     backfilled_total = backfilled_attempted = 0
     by_source: dict[str, int] = {}
     by_kind: dict[str, int] = {}
@@ -359,8 +360,12 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index,
             attempted += 1
             if is_backfilled:
                 backfilled_attempted += 1
-            if u["outcome"] == ns.OUTCOME_USED:
+            # NS and D2 count STRICT-used only (PLAN M0.2). The old heuristic numerator is
+            # kept as a diagnostic, outside KPI_CODES.
+            if ns.is_strict_used(u):
                 used += 1
+            if u["outcome"] == ns.OUTCOME_USED:
+                used_heuristic += 1
     joins = {"window_units": window, "joined": joined, "untagged": untagged,
              "untagged_conflicting": conflicting, "joined_by_source": by_source,
              "joined_by_kind": by_kind, "counted": total, "counted_sessions": len(by_session),
@@ -378,14 +383,45 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index,
             why = (f"{window} unit(s) in window, none from {_scope_phrase(allowed)} session: "
                    f"{joined} joined to a tag ({kinds}), {untagged} untagged (never counted as organic)")
         out = _not_measurable(why, seen=window)
-        return out, dict(out), dict(out), joins
-    return (_rate_result(used, total, label="unit", newest_ts=newest, seen=window,
-                         backfilled=backfilled_total),
+        joins["diag"] = {"NS_heuristic": _heuristic_diag(dict(out)), "D2_heuristic": _heuristic_diag(dict(out))}
+        return _strict_note(out), dict(out), _strict_note(dict(out)), joins
+    joins["diag"] = {
+        "NS_heuristic": _heuristic_diag(_rate_result(
+            used_heuristic, total, label="unit", newest_ts=newest, seen=window, backfilled=backfilled_total)),
+        "D2_heuristic": _heuristic_diag(_rate_result(
+            used_heuristic, attempted, label="attempt", newest_ts=newest, seen=window,
+            backfilled=backfilled_attempted)),
+    }
+    return (_strict_note(_rate_result(used, total, label="unit", newest_ts=newest, seen=window,
+                                      backfilled=backfilled_total)),
             _rate_result(attempted, total, label="unit", newest_ts=newest, seen=window,
                          backfilled=backfilled_total),
-            _rate_result(used, attempted, label="attempt", newest_ts=newest, seen=window,
-                         backfilled=backfilled_attempted),
+            _strict_note(_rate_result(used, attempted, label="attempt", newest_ts=newest, seen=window,
+                                      backfilled=backfilled_attempted)),
             joins)
+
+
+def _strict_note(result: dict) -> dict:
+    """Name the strict rule on a measured NS or D2 result: a ``reason`` and a printed line."""
+    from llm_router import northstar as ns
+
+    if not result.get("measurable"):
+        return result  # an unmeasurable result already carries its own reason; leave it as it was
+    result.setdefault("reason", ns.STRICT_RULE_TEXT)
+    result["lines"] = list(result.get("lines", ())) + [ns.STRICT_RULE_TEXT]
+    return result
+
+
+def _heuristic_diag(result: dict) -> dict:
+    """The pre-M0.2 numerator (heuristic outcome == used), shown beside the strict one."""
+    result = dict(result)
+    note = "heuristic outcome=used; not a target (strict NS and D2 are the targets, PLAN M0.2)"
+    if result.get("measurable"):
+        result["reason"] = note
+    else:
+        result["reason"] = f"{result.get('reason')} ({note})"
+    result["lines"] = [note]
+    return result
 
 
 # ── D3: redo rate, from usage_outcome ────────────────────────────────────────
@@ -540,24 +576,53 @@ def _percentile(sorted_values: list[float], q: float) -> float:
     return sorted_values[k]
 
 
-def _g1_proxy(pop: dict) -> dict:
-    seen = len(pop["window"])
-    served_or_tried = [r for r in pop["allowed"] if isinstance(r.get("added_latency_s"), (int, float))]
-    if not served_or_tried:
-        return _not_measurable("no proxy decisions with added_latency_s in window", seen=seen)
-    values = sorted(r["added_latency_s"] for r in served_or_tried)
-    newest: float | None = None
-    for r in served_or_tried:
-        newest = _newer(newest, _num_ts(r.get("ts")))
+def _g1_segment(values: list[float]) -> dict[str, Any]:
+    """n, p50 and p95 (seconds) of one latency segment; percentiles are None below MIN_N."""
     n = len(values)
+    if n < MIN_N:
+        return {"n": n, "p50_s": None, "p95_s": None}
+    ordered = sorted(values)
+    return {"n": n, "p50_s": round(_percentile(ordered, 0.50), 4),
+            "p95_s": round(_percentile(ordered, 0.95), 4)}
+
+
+def _g1_proxy(pop: dict) -> dict:
+    """Proxy tier-decision latency: p50 / p95 of ``tier_decision_s`` with n, split into
+    turn-first and continuation calls. Side calls never run a classifier and are left
+    out (counted in ``side_call_excluded``). ``added_latency_s`` is not used: it is 0.0
+    on every forwarded row, which is why this KPI used to print 0 ms."""
+    seen = len(pop["window"])
+    first: list[float] = []
+    cont: list[float] = []
+    side = 0
+    newest: float | None = None
+    for r in pop["allowed"]:
+        v = r.get("tier_decision_s")
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        if r.get("tier_reason") == "side_call":
+            side += 1
+            continue
+        (cont if r.get("step_class") == "continuation" else first).append(float(v))
+        newest = _newer(newest, _num_ts(r.get("ts")))
+    n = len(first) + len(cont)
+    if not n:
+        return _not_measurable("no proxy decisions with tier_decision_s in window", seen=seen)
     if n < MIN_N:
         out = _too_few(n, newest_ts=newest)
         out["seen"] = seen
         return out
-    p95 = _percentile(values, 0.95)
-    gate = "within +200ms gate" if p95 <= 0.2 else "OVER the +200ms gate"
-    return _measured(f"proxy decision p95={p95 * 1000:.0f}ms ({gate}) (n={n})", n,
-                      newest_ts=newest, seen=seen, p95_s=round(p95, 4))
+    seg_first, seg_cont = _g1_segment(first), _g1_segment(cont)
+
+    def _fmt(name: str, seg: dict[str, Any]) -> str:
+        if seg["p50_s"] is None:
+            return f"{name} {TOO_FEW} (n={seg['n']})"
+        return (f"{name} p50={seg['p50_s'] * 1000:.0f}ms p95={seg['p95_s'] * 1000:.0f}ms "
+                f"(n={seg['n']})")
+
+    return _measured(f"{_fmt('turn-first', seg_first)} | {_fmt('continuation', seg_cont)}", n,
+                      newest_ts=newest, seen=seen, turn_first=seg_first, continuation=seg_cont,
+                      side_call_excluded=side)
 
 
 def _in_window(ts: Any, since: float, until: float) -> bool:
@@ -1213,7 +1278,7 @@ def _local_shadow_line(summary: dict | None) -> str | None:
 # ── O3: offload share (see offload_share.py and KPIS.md) ───────────────────
 
 def _o3_from_units(units: list[dict], local_no_session: int = 0, n_escalations: int | None = None,
-                   assist: list[dict] | None = None) -> dict:
+                   assist: list[dict] | None = None, n_detector_flags: int | None = None) -> dict:
     """One O3 result over already-judged units. HEADLINE = human turns (first call of each
     turn, see offload_share); per-call figures are the secondary line. ``assist`` = the local
     MCP units: answers inside Claude turns, so NOT turns (reported apart, M0.3a)."""
@@ -1273,6 +1338,15 @@ def _o3_from_units(units: list[dict], local_no_session: int = 0, n_escalations: 
             + f"n_escalations={n_escalations} in window"
             + (" (a low redo rate is NOT proven low: there is little signal to detect a redo)"
                if n_escalations < MIN_N else ""))
+    if n_detector_flags is not None:
+        # Source 4 (redo_signal.py): reported even while it is disabled, so its volume is visible before
+        # anyone proposes to count it (PLAN M0.9).
+        enabled = osh.REDO_SOURCE4_ENABLED
+        out_bd["redo_detector_n"] = n_detector_flags
+        out_bd["redo_detector_enabled"] = enabled
+        out.setdefault("lines", []).append(
+            f"redo detector (source 4, transcript): {n_detector_flags} flagged prompt(s) in window, "
+            + ("counted in redo" if enabled else "NOT counted in redo (disabled until validated)"))
     out["breakdown"] = out_bd
     return out
 
@@ -1314,13 +1388,16 @@ O3_BOUND_BELOW = 0.95
 def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[dict],
                       now: float, since_policy: str | None = None,
                       win: "_Window | None" = None, g3: dict | None = None) -> dict:
+    from llm_router import northstar as ns
     from llm_router import offload_share as osh
+    from llm_router import redo_signal
 
     try:
         local, band, outcomes, edits = _o3_unit_inputs(days, index, now, win)
         from llm_router import o3_transcripts
 
         thread_of = o3_transcripts.thread_lookup()
+        detector_flags = redo_signal.session_flags_loader(ns.claude_projects_dir())
 
         def build(untagged_organic: bool = False) -> dict:
             def kind_of(sid, stamp):
@@ -1328,11 +1405,12 @@ def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[
                 return "organic" if k is None and untagged_organic else k
             return osh.build_units(
                 all_rows, local, now=now, days=days, allowed=allowed, kind_of=kind_of,
-                band_redone=band, outcome_redos=outcomes, edit_rows=edits, thread_of=thread_of)
+                band_redone=band, outcome_redos=outcomes, edit_rows=edits, thread_of=thread_of,
+                detector_flags=detector_flags)
 
         built = build()
         res = _o3_from_units(built["units"], built["local_no_session"], built["n_escalations"],
-                             assist=built["local_assist"])
+                             assist=built["local_assist"], n_detector_flags=built["n_detector_flags"])
         res["excluded"] = {"side_call": built["side_call_excluded"], "untagged": built["untagged"],
                            "other_kind": built["other_kind"], "local_no_session": built["local_no_session"],
                            "subagent_first": built["subagent_first"],
@@ -1493,6 +1571,7 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
     index = sk.KindIndex(all_rows)
     until_ts = None if win is None else win.until
     ns_r, d1_r, d2_r, joins = _ns_d1_d2(days, allowed, index, win)
+    kpis_diag = joins.pop("diag")
     d3_r = _fold_user_signals(_d3_redo_rate(days, allowed, index, win), days, now_ts)
     pop = _proxy_population(all_rows, days, allowed, now_ts, until=until_ts)
     d4_r = _d4_tier_mix(pop)
@@ -1522,6 +1601,9 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
             "D1": d1_r, "D2": d2_r, "D3": d3_r, "D4": d4_r, "D5": d5_r,
             "G1_hook": g1_hook_r, "G1_proxy": g1_proxy_r, "G2": g2_r, "G3": g3_r, "G4": g4_r,
         },
+        # Outside "kpis" (so outside KPI_CODES, _ORDER and --health): the heuristic NS and D2
+        # numerators, kept for comparison only.
+        "kpis_diag": kpis_diag,
     }
     if win is not None:  # only a windowed card carries the key: the default output is unchanged
         card["window_days"] = round(win.days, 6)
@@ -1640,6 +1722,10 @@ def render_scorecard(data: dict) -> str:
         lines.append(f"  {_LABELS[key]:<42s} {r['value']}")
         for extra in r.get("lines", ()):
             lines.append(f"      {extra}")
+    for key, r in (data.get("kpis_diag") or {}).items():
+        if not r.get("measurable"):
+            continue  # nothing to compare: the card stays as it was
+        lines.append(f"  {key:<42s} {r['value']}   [diagnostic, not a target]")
     if data.get("o3") is not None:
         lines += _o3_render_lines(data["o3"])
     lines.append("")

@@ -381,7 +381,8 @@ def test_kpi_shows_proxy_shadow_as_its_own_line_and_never_moves_ns_d1_d2(monkeyp
     without = kpi.compute_scorecard(days=7, now=1_800_000_000.0)
     text_without = kpi.render_scorecard(without)
     assert without["proxy_local_shadow"]["n"] == 0 and "local shadow (proxy)" not in text_without
-    assert without["kpis"]["NS"]["value"] == "25.0% (n=80)"
+    assert without["kpis"]["NS"]["value"] == "0.0% (n=80)"      # strict-used (M0.2)
+    assert without["kpis_diag"]["NS_heuristic"]["value"] == "25.0% (n=80)"
 
     _write_records(local_shadow.shadow_path())
     with_rows = kpi.compute_scorecard(days=7, now=1_800_000_000.0)
