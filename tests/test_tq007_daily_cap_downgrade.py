@@ -57,11 +57,12 @@ def _response(model: str) -> LLMResponse:
 
 
 async def _run(chain, *, task_cap=None, total_cap=None, spend=9999.0, enforce="hard",
-               prompt="hello", org_specialists=None, classification_data=None):
+               prompt="hello", org_specialists=None, classification_data=None,
+               task_type=TaskType.CODE):
     """Drive route_and_call with a given chain, cap, over-cap spend, enforce mode."""
     caps = {}
     if task_cap is not None:
-        caps["code"] = task_cap
+        caps[task_type.value] = task_cap
     if total_cap is not None:
         caps["_total"] = total_cap
     repo_cfg = RepoConfig(daily_caps=caps, enforce=enforce)
@@ -106,7 +107,7 @@ async def _run(chain, *, task_cap=None, total_cap=None, spend=9999.0, enforce="h
                 side_effect=lambda model, messages, **kw: _response(model)))
         from llm_router.router import route_and_call
         return await route_and_call(
-            TaskType.CODE, prompt, profile=RoutingProfile.BALANCED,
+            task_type, prompt, profile=RoutingProfile.BALANCED,
             classification_data=classification_data,
         )
 
