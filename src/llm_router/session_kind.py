@@ -6,7 +6,9 @@ sub-agent-heavy research session, so an unfiltered rate described that session,
 not how the owner works. This module tags; it never drops data. Every reader
 decides what to include.
 
-Kinds (precedence, first match wins)::
+Kinds (precedence, first match wins). The owner's override FILE comes first of all
+(``session_kind_overrides.json``, below); these are the rules that classify a session
+that has no override::
 
     1. LLM_ROUTER_SESSION_KIND=<kind>   explicit override (always wins)
     2. research   cwd is under ~/.rsi or contains a ``scratchpad`` path part
@@ -23,6 +25,22 @@ recognised from its own hooks. Claude Code transcripts carry no parent link
 SubagentStart payload has no child session id. Sub-agents spawned from an
 organic session therefore stay tagged by their own cwd/entrypoint, and the
 override env var is the way to mark one explicitly.
+
+Override file (2026-10-07, plan M0.0): ``session_kind_overrides.json`` in the state dir,
+``{session_id: {"kind": "<kind>", "reason": "<why>"}}``. It exists for a session whose
+tag, or whose rows' own stamps, say the wrong thing and cannot be rewritten (the ledgers
+are append-only): session b9f04425 is a research session, but 424 of its proxy rows are
+stamped ``organic`` and 751 carry no stamp, and it is 99.3% of the organic turn-first rows
+in the pinned window. Precedence for every reader: **override, then the tag file, then the
+record's own stamp**, then the rest of :meth:`KindIndex.resolve`. The override beats a
+record's stamp, so a row stamped ``organic`` for an overridden session is read as the
+override's kind. :func:`kind_of` (the proxy's stamp, the edit ledger's stamp, the usage
+outcome judge) applies it too, so rows written from now on carry the override's kind.
+:func:`tag_session` still writes what the SessionStart hook classified (the file is a record
+of what the hook saw) and reports the effective kind. :func:`tag_kind_of` is the tag file
+alone, for the one caller that must compare the tag with something else. The file is read
+with one ``stat`` per call and re-read when it changes; a missing, unreadable or malformed
+file, or entry, is "no override" and never raises. Only a valid kind counts.
 
 Persistence: the SessionStart hook calls :func:`tag_session`, which writes
 ``session_kind_<sid>.json`` in the state dir. The proxy, which sees neither cwd
@@ -146,6 +164,58 @@ def classify(*, cwd: str | None, entrypoint: str | None = None, override: str | 
     return classify_with_basis(cwd=cwd, entrypoint=entrypoint, override=override, home=home)[0]
 
 
+OVERRIDES_FILENAME = "session_kind_overrides.json"
+_OVERRIDES_CACHE: dict[str, tuple[tuple[int, int], dict[str, dict[str, str]]]] = {}
+
+
+def overrides_path() -> Path:
+    return paths.state_path(OVERRIDES_FILENAME)
+
+
+def overrides() -> dict[str, dict[str, str]]:
+    """``{session_id: {"kind", "reason"}}`` from the override file: valid entries only.
+
+    One ``stat`` per call; the file is parsed again only when its mtime or size changes.
+    Never raises: no file, an unreadable or non-object file, and an entry that is not
+    ``{"kind": <valid kind>, ...}`` all read as "no override" (that entry only)."""
+    path = overrides_path()
+    key = str(path)
+    try:
+        st = path.stat()
+    except OSError:
+        _OVERRIDES_CACHE.pop(key, None)
+        return {}
+    stamp = (st.st_mtime_ns, st.st_size)
+    hit = _OVERRIDES_CACHE.get(key)
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    out: dict[str, dict[str, str]] = {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - a broken file is "no overrides", never a crash
+        raw = None
+    if isinstance(raw, dict):
+        for sid, entry in raw.items():
+            if not isinstance(sid, str) or not sid or not isinstance(entry, dict):
+                continue
+            kind = entry.get("kind")
+            kind = kind.strip().lower() if isinstance(kind, str) else None
+            if kind not in VALID_KINDS:
+                continue
+            reason = entry.get("reason")
+            out[sid] = {"kind": kind, "reason": reason if isinstance(reason, str) else ""}
+    _OVERRIDES_CACHE[key] = (stamp, out)
+    return out
+
+
+def override_of(session_id: str | None) -> str | None:
+    """The owner's override kind for ``session_id``, or ``None``."""
+    if not session_id:
+        return None
+    entry = overrides().get(session_id)
+    return entry["kind"] if entry else None
+
+
 def _safe(session_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", session_id) or "unknown"
 
@@ -164,9 +234,9 @@ def tag_session(session_id: str | None, cwd: str | None, *, env: dict | None = N
         return None
     environ = os.environ if env is None else env
     forced = (environ.get("LLM_ROUTER_SESSION_KIND") or "").strip().lower()
-    existing = kind_of(session_id)
+    existing = tag_kind_of(session_id)
     if existing is not None and (forced not in VALID_KINDS or forced == existing):
-        return existing  # first tag wins; a forced kind rewrites only when it differs
+        return override_of(session_id) or existing  # first tag wins; a forced kind rewrites only when it differs
     entrypoint = environ.get("CLAUDE_CODE_ENTRYPOINT")
     kind = classify(cwd=cwd, entrypoint=entrypoint, override=environ.get("LLM_ROUTER_SESSION_KIND"))
     try:
@@ -183,15 +253,23 @@ def tag_session(session_id: str | None, cwd: str | None, *, env: dict | None = N
             from llm_router import failopen
             failopen.record("CHZ-FO-SESSION-KIND-TAG", exc)
         except Exception:  # noqa: BLE001
-            return kind
-    return kind
+            return override_of(session_id) or kind
+    return override_of(session_id) or kind
 
 
 _FOUND: dict[str, str] = {}  # tag path -> kind; only hits are cached (the proxy asks per request)
 
 
 def kind_of(session_id: str | None) -> str | None:
-    """The persisted kind for ``session_id``, or ``None`` if it was never tagged."""
+    """The kind for ``session_id``: the owner's override, else the persisted tag, else
+    ``None`` (never tagged)."""
+    if not session_id:
+        return None
+    return override_of(session_id) or tag_kind_of(session_id)
+
+
+def tag_kind_of(session_id: str | None) -> str | None:
+    """The persisted tag file's kind alone (no override), or ``None`` if never tagged."""
     if not session_id:
         return None
     path = _tag_path(session_id)
@@ -210,6 +288,7 @@ def kind_of(session_id: str | None) -> str | None:
 
 # ── joining a kind onto records that carry none ──────────────────────────────
 
+SOURCE_OVERRIDE = "override"    # the owner's override file: beats every source below
 SOURCE_TAG = "tag"              # the session's tag file
 SOURCE_STAMP = "stamp"          # stamped on the record itself when it was written
 SOURCE_LEDGER = "proxy_ledger"  # stamped on that session's proxy rows (all agreeing)
@@ -267,12 +346,15 @@ class KindIndex:
 
     def _tag(self, session_id: str) -> str | None:
         if session_id not in self._tags:
-            self._tags[session_id] = kind_of(session_id)
+            self._tags[session_id] = tag_kind_of(session_id)
         return self._tags[session_id]
 
     def resolve(self, session_id: str | None, stamp: str | None = None) -> Resolution:
         """``stamp`` is the kind the record itself was written with, if any."""
         seen = self._ledger.get(session_id, set()) if isinstance(session_id, str) else set()
+        forced = override_of(session_id) if isinstance(session_id, str) else None
+        if forced is not None:  # the owner's override: no tag, stamp or row can outvote it
+            return Resolution(forced, SOURCE_OVERRIDE, ledger_disagrees=bool(seen - {forced}))
         tag = self._tag(session_id) if isinstance(session_id, str) and session_id else None
         if tag is not None:
             return Resolution(tag, SOURCE_TAG, ledger_disagrees=bool(seen - {tag}))
