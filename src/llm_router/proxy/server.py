@@ -54,7 +54,7 @@ from llm_router.local_agent import DEFAULT_MAX_PROMPT_TOKENS, LocalAgentConfig, 
 from llm_router.local_agent import capability as la_capability
 from llm_router.local_agent.compact import session_cwd as la_session_cwd
 from llm_router import failopen, local_models, prompt_key
-from llm_router.proxy import ledger, local_mode, local_shadow, okf_context
+from llm_router.proxy import haiku_guard, ledger, local_mode, local_shadow, okf_context
 
 from llm_router.proxy.backend_health import (
     DEFAULT_COOLDOWN_S,
@@ -263,11 +263,13 @@ def _error_json(message: str) -> bytes:
     return json.dumps({"type": "error", "error": {"type": "api_error", "message": message}}).encode()
 
 
-def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clock=None, breaker_fn=None):
+def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clock=None, breaker_fn=None,
+              haiku_guard_run=None):
     """The Starlette app. ``client`` (an ``httpx.AsyncClient``),
     ``backend_factory(model) -> Backend``, the backend-health breaker's
-    ``health_clock`` and the quality breaker (``breaker_fn``, local-agent mode)
-    are injectable for tests."""
+    ``health_clock``, the quality breaker (``breaker_fn``, local-agent mode)
+    and the Haiku guard's run function (``haiku_guard_run(policy)``) are
+    injectable for tests."""
     import httpx
     from starlette.applications import Starlette
     from starlette.requests import Request
@@ -877,9 +879,17 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # In the background: the proxy serves (and hedges to Claude) while
             # the model loads.
             task = asyncio.create_task(_run())
+        # The Haiku guard (P0.11, D-20): runs now and hourly while the rewrite is
+        # on; a trip writes the override file and turns the live policy's
+        # rewrite off. It never edits the YAML.
+        guard_task = None
+        if tier_policy is not None and tier_policy.haiku_rewrite:
+            guard_task = asyncio.create_task(haiku_guard.guard_loop(tier_policy, run=haiku_guard_run))
         yield
         if task is not None and not task.done():
             task.cancel()
+        if guard_task is not None and not guard_task.done():
+            guard_task.cancel()
 
     methods = ["GET", "POST", "PUT", "DELETE", "HEAD", "PATCH", "OPTIONS"]
     app = Starlette(routes=[Route("/{path:path}", handle, methods=methods)], lifespan=lifespan)

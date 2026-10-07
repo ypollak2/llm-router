@@ -409,6 +409,10 @@ class ClaudeTierPolicy:
         # ``haiku_rewrite: true`` serves eligible turns on the Haiku tier by
         # rewriting the body (see ``_haiku_eligible``); OFF by default.
         self.haiku_rewrite = haiku_rewrite
+        # Set by ``load`` (and the proxy's Haiku guard) when the guard's override file
+        # (``proxy/haiku_guard.py``, ``tier_overrides.json``) turned the rewrite off: the
+        # override's {haiku_rewrite, reason, ts}. None = the YAML value stands.
+        self.haiku_override: dict | None = None
         # ``haiku_fold_system: true`` (M0.7, OFF by default) makes a body with a
         # mid-conversation ``role: "system"`` message eligible for Haiku: the rewrite
         # folds it into a user message (``translate.fold_system_messages``). Only
@@ -479,6 +483,11 @@ class ClaudeTierPolicy:
             raise ValueError(f"tier policy {target} is not a mapping")
         policy = cls.from_dict(data, conversation_level=conversation_level, classify=classify)
         policy.policy_version = policy_version(target)
+        # The Haiku guard's override file beats the YAML (P0.11, D-20): it can turn
+        # ``haiku_rewrite`` off, never on. Deleting the file restores the YAML value.
+        from llm_router.proxy import haiku_guard
+
+        haiku_guard.apply_override(policy)
         return policy
 
     # ── lookups ─────────────────────────────────────────────────────────────
