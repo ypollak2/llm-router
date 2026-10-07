@@ -37,7 +37,7 @@ class PreparedPrompt:
     Attributes:
         system: System prompt with behavioral rules for the model.
         context: Retrieved context (prior Q&A, code symbols, etc.).
-        user_prompt: The original user prompt (possibly truncated to fit budget).
+        user_prompt: The original user prompt, never truncated.
         budget: The token budget that governed this preparation.
         context_source: Description of where context came from (for debugging).
     """
@@ -90,9 +90,25 @@ def prepare_prompt(
 
     Returns:
         PreparedPrompt with all components assembled within budget.
+
+    Raises:
+        local_context_guard.ContextOverflow: the user prompt alone does not
+            fit the target model's window (minus the output reserve).
     """
     user_tokens = estimate_tokens(user_prompt)
     budget = calculate_budget(target_model, task_type, complexity, user_tokens)
+
+    # The user prompt is never truncated (P0.1): a cut request gets a confident
+    # answer to a question nobody asked. When it is over the allocation, the
+    # budget already gives system/context less room; when it alone exceeds the
+    # model window, the caller must pick a bigger model.
+    if user_tokens > budget.model_limit - budget.output_reserve:
+        from llm_router.local_context_guard import ContextOverflow
+
+        raise ContextOverflow(
+            f"user prompt ~{user_tokens} tokens exceeds {target_model} window "
+            f"({budget.model_limit} tokens, {budget.output_reserve} reserved for output)"
+        )
 
     # ── System prompt ─────────────────────────────────────────────────────────
     if existing_system_prompt:
@@ -138,13 +154,10 @@ def prepare_prompt(
         except Exception:
             pass  # Tree-sitter unavailable or parse failed
 
-    # ── User prompt (truncate if over budget) ─────────────────────────────────
-    final_user_prompt = truncate_to_budget(user_prompt, budget.user_tokens)
-
     return PreparedPrompt(
         system=system,
         context=context,
-        user_prompt=final_user_prompt,
+        user_prompt=user_prompt,
         budget=budget,
         context_source=context_source,
     )

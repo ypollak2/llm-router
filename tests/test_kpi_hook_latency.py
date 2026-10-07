@@ -697,8 +697,12 @@ def test_each_hook_starts_its_clock_before_its_first_llm_router_import(name):
 def test_each_hook_names_itself_and_its_event_as_the_installer_registers_it(name):
     from llm_router.install_hooks import _HOOK_DEFS
 
-    registered = {src: event for src, _dst, event, _m in _HOOK_DEFS}
-    assert registered[f"{name}.py"] == _EVENTS[name]
+    # session-end.py is registered on Stop and on SessionEnd (P0.1); its timer
+    # starts labelled Stop and is relabelled on SessionEnd (hook_latency.set_event).
+    registered: dict[str, set[str]] = {}
+    for src, _dst, event, _m in _HOOK_DEFS:
+        registered.setdefault(src, set()).add(event)
+    assert _EVENTS[name] in registered[f"{name}.py"]
     _t0, main_if, _ = _stanza(ast.parse((HOOKS / f"{name}.py").read_text()))
     (call,) = [n for n in ast.walk(main_if) if isinstance(n, ast.Call)
                and ast.unparse(n.func) == "_hook_latency.begin"]

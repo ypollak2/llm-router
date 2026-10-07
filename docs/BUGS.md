@@ -17,6 +17,10 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 7 | `edit_outcomes.jsonl` rows with no source | open, fix is plan task M0.3(c) |
 | 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | known, not fixed |
 | 9 | Classifier warm-up loaded `llmr-classifier` at the wrong `num_ctx` | fixed in #298 (M1.4, review 2) |
+| 10 | Session context store deleted after every turn | fixed in this change (v16 P0.1) |
+| 11 | Session context truncation dropped the newest events | fixed in this change (v16 P0.1) |
+| 12 | `build_context_messages` cut the caller's live context first | fixed in this change (v16 P0.1) |
+| 13 | `context_prep` truncated the user prompt | fixed in this change (v16 P0.1) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -173,3 +177,64 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   4096 and an omitted `context_length` return `llm`. Mutants run on head 2316f3f: warm-up
   without `options` fails both tests; `_is_loaded` returning True regardless of context fails
   the second.
+
+## 10. Session context store deleted after every turn
+
+- **Symptom.** The Session Context Accumulator's per-session JSONL
+  (`session_context_*.jsonl`) was gone after the first turn of every session, so routed
+  models got no durable context from turn 2 on (PLAN-v16 Appendix A, P0.1-a, "deleted every
+  turn" on da31df7).
+- **Cause.** `session-end.py` is registered on **Stop**, which Claude Code fires at the end of
+  every turn, not once per session. Its `main()` called `session_store.archive_session()`
+  unconditionally, so each turn deleted the store.
+- **Fix.** `main()` archives only when the payload's `hook_event_name` is `SessionEnd`, then
+  returns without rendering the summary a second time. The installer registers the same script
+  on SessionEnd (`_HOOK_DEFS`), keeping the Stop registration for the per-turn summary; the
+  plugin bundles carry the new event. `cleanup_old_sessions` still prunes by age. Existing
+  installs need `llm-router install --no-hosts` (there is no `--hooks-only` flag) to add the
+  SessionEnd entry to `~/.claude/settings.json`; until then the store is pruned by age only, never deleted per turn.
+- **Test.** `tests/test_session_end_context_archive.py`: `test_stop_never_archives`,
+  `test_session_end_archives_with_resolved_session_id`,
+  `test_session_file_survives_stop_with_its_events` (real store, 5 turns, line count
+  non-decreasing, deleted only on SessionEnd), `test_installer_registers_session_end_on_both_events`.
+
+## 11. Session context truncation dropped the newest events
+
+- **Symptom.** When a session's context exceeded `max_tokens`, the block injected into a routed
+  call held the oldest events and lost the newest, the ones the current question is about.
+- **Cause.** `session_store.build_session_context` orders records oldest to newest and then
+  called `token_budget.truncate_to_budget`, which keeps the head.
+- **Fix.** `truncate_to_budget(..., keep="tail")` keeps the end behind a
+  `[…older context truncated…]` marker and still fits the budget; `build_session_context` uses
+  it. The default stays `keep="head"` for every other caller.
+- **Test.** `tests/test_p01_context_loss.py::test_newest_event_present_in_200_of_200_over_budget_cases`
+  (Hypothesis, 200 generated over-budget sessions, the count is asserted and printed).
+
+## 12. `build_context_messages` cut the caller's live context first
+
+- **Symptom.** With an over-budget history, the `[Additional context]` block the caller passed
+  (layer 3, the live request's context) was cut or missing from the injected system message.
+- **Cause.** `context.build_context_messages` appended layer 3 last and then applied
+  `combined[:max_chars]`, so the hard cut always hit layer 3 first.
+- **Fix.** Layer 3 is held apart and never optimized, compacted or cut. Layers 1, 2a and 2b get
+  the budget left after it; if they still do not fit, whole layers are dropped lowest priority
+  first (2b, then 1) and the lowest remaining one is cut keeping its newest text.
+- **Test.** `tests/test_p01_context_loss.py`: four `test_layer3_intact_when_*` cases at 10x the
+  budget (summaries, session buffer, durable log, layer 3 itself) and
+  `test_lowest_layer_dropped_before_higher_ones`.
+
+## 13. `context_prep` truncated the user prompt
+
+- **Symptom.** `prepare_prompt` returned a `PreparedPrompt.user_prompt` cut to the budget's
+  user allocation with a `[truncated]` marker.
+- **Cause.** `context_prep.py` passed the user prompt through `truncate_to_budget`.
+- **Fix.** The prompt is never truncated. Over its allocation, `calculate_budget` already gives
+  system and context less room; when the prompt alone exceeds the model window minus the output
+  reserve, `prepare_prompt` raises `local_context_guard.ContextOverflow`. Live impact was
+  limited: `router.py` uses only `full_system` from `prepare_prompt` and sends the raw prompt,
+  and it catches the exception and continues without the enrichment; the provider-level guard
+  and chain failover then handle a prompt that does not fit.
+- **Test.** `tests/test_p01_context_loss.py::test_200k_prompt_is_intact_when_it_fits_the_window`,
+  `::test_200k_prompt_raises_context_overflow_when_over_the_window`,
+  `::test_user_prompt_is_never_shortened` (12 cases); `tests/test_context_prep.py::test_long_user_prompt_never_truncated_for_small_model`
+  replaces the test that pinned the bug.
