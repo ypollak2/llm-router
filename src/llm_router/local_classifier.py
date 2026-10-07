@@ -384,6 +384,24 @@ def _cache_put(key: tuple, verdict: Verdict) -> None:
         _cache.popitem(last=False)
 
 
+def _key(session_id: str | None, text_sha: str, model: str, derivation: str, t_h: int,
+         t_s: int) -> tuple:
+    """The model, derivation and thresholds are part of the key: a verdict is only
+    reusable by a caller that would have asked the same question."""
+    return (session_id or "", text_sha, model, derivation, t_h, t_s)
+
+
+def is_cached(session_id: str | None, text_sha: str, *, model: str | None = None,
+              derivation: str = DEFAULT_DERIVATION, t_h: int = T_H, t_s: int = T_S) -> bool:
+    """True when :func:`classify_async` would answer this turn from the cache. Reads
+    only (no request, no LRU reordering); the proxy seam uses it to skip a turn it
+    already classified instead of scheduling a task that returns at once."""
+    key = _key(session_id, text_sha, model or _model(),
+               derivation if derivation in DERIVATIONS else DEFAULT_DERIVATION, t_h, t_s)
+    entry = _cache.get(key)
+    return entry is not None and _now() < entry[0]
+
+
 def _same_model(configured: str, loaded: str) -> bool:
     def norm(name: str) -> str:
         return name if ":" in name else f"{name}:latest"
@@ -478,9 +496,7 @@ async def classify_async(assembled: str, *, session_id: str | None, text_sha: st
         derivation = DEFAULT_DERIVATION
     if mode() == "off":
         return _fail("off", model, derivation)
-    # the model, derivation and thresholds are part of the key: a verdict is only
-    # reusable by a caller that would have asked the same question
-    key = (session_id or "", text_sha, model, derivation, t_h, t_s)
+    key = _key(session_id, text_sha, model, derivation, t_h, t_s)
     hit = _cache_get(key)
     if hit is not None:
         return replace(hit, source="cache", ms=0.0)
