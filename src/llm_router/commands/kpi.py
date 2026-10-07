@@ -236,6 +236,41 @@ def _iso(ts: float | None) -> str | None:
         return None
 
 
+class _Window:
+    """An absolute window ``[since, until]`` (``--since`` / ``--until``).
+
+    ``days`` stays the relative form every reader already takes, so under a window the
+    scorecard hands them ``now=until`` and ``days=(until-since)/86400``. A reader that
+    anchors its cutoff to the wall clock instead (transcript mtimes, ``usage.db``,
+    ``read_rows(days=)``) is called with :attr:`wall_days`, which reaches back to
+    ``since``, and its rows are then cut to the window by :meth:`covers`."""
+
+    def __init__(self, since: float, until: float) -> None:
+        self.since, self.until = since, until
+
+    @property
+    def days(self) -> float:
+        return (self.until - self.since) / 86400.0
+
+    @property
+    def wall_days(self) -> int:
+        return max(1, math.ceil((time.time() - self.since) / 86400.0))
+
+    def covers(self, raw: Any) -> bool:
+        """A row with no usable timestamp cannot be placed in a window: it is out."""
+        ts = _parse_ts(raw)
+        return ts is not None and self.since <= ts <= self.until
+
+
+def _wall_days(days: float, window: "_Window | None") -> float:
+    return days if window is None else window.wall_days
+
+
+def _window_label(data: dict) -> str:
+    w = data.get("window")
+    return f"{w['since']}..{w['until']}" if w else f"{data['window_days']}d"
+
+
 def _newer(current: float | None, ts: float | None) -> float | None:
     if ts is None:
         return current
@@ -257,7 +292,8 @@ def _scope_phrase(allowed: frozenset[str]) -> str:
 
 # ── NS, D1, D2: from northstar's unit stream, session-kind joined ───────────
 
-def _ns_d1_d2(days: int, allowed: frozenset[str], index) -> tuple[dict, dict, dict, dict]:
+def _ns_d1_d2(days: int, allowed: frozenset[str], index,
+              win: "_Window | None" = None) -> tuple[dict, dict, dict, dict]:
     """Pooled (not per-session-median) totals over units whose session resolves to a
     kind in ``allowed``. Mirrors the attempted/used accounting
     ``northstar.report()`` already uses, so NS/D1/D2 cannot disagree with
@@ -279,7 +315,9 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index) -> tuple[dict, dict, di
     newest: float | None = None
     # backfill=True: this KPI is the one reader that resolves a unit's kind from the
     # backfill sidecar. northstar.units() leaves it off for every hot-path caller.
-    for u in ns.units(days=days, backfill=True):
+    for u in ns.units(days=_wall_days(days, win), backfill=True):
+        if win is not None and not win.covers(u.get("ts")):
+            continue
         window += 1
         sid = u.get("session_id")
         if "session_kind" in u:
@@ -342,10 +380,12 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index) -> tuple[dict, dict, di
 
 # ── D3: redo rate, from usage_outcome ────────────────────────────────────────
 
-def _d3_redo_rate(days: int, allowed: frozenset[str], index) -> dict:
+def _d3_redo_rate(days: int, allowed: frozenset[str], index, win: "_Window | None" = None) -> dict:
     from llm_router import usage_outcome as uo
 
-    rows = uo.judge_recent(days=days)
+    rows = uo.judge_recent(days=_wall_days(days, win))
+    if win is not None:
+        rows = [r for r in rows if win.covers(r.get("ts"))]
     used = redone = unknown = backfilled = 0
     newest: float | None = None
     for r in rows:
@@ -403,7 +443,8 @@ def _fold_user_signals(d3: dict, days: int, now: float) -> dict:
 
 # ── proxy ledger: the rows behind D4 and G1 ──────────────────────────────────
 
-def _proxy_population(all_rows: list[dict], days: int, allowed: frozenset[str], now: float) -> dict:
+def _proxy_population(all_rows: list[dict], days: int, allowed: frozenset[str], now: float,
+                      until: float | None = None) -> dict:
     """The proxy rows in the window, and the subset stamped with an allowed kind. A row's
     kind is the one it was WRITTEN with: rows from before tagging carry none and stay
     untagged (joining today's tag onto rows from before tagging existed would change
@@ -416,7 +457,7 @@ def _proxy_population(all_rows: list[dict], days: int, allowed: frozenset[str], 
         ts = _num_ts(r.get("ts"))
         if ts is None:
             undated += 1
-        elif cutoff is None or ts >= cutoff:
+        elif (cutoff is None or ts >= cutoff) and (until is None or ts <= until):
             window.append(r)
     kept: list[dict] = []
     untagged = other = 0
@@ -653,7 +694,7 @@ def _g3_recorded(row: dict, field: str) -> bool:
 
 
 def _g3_completeness(all_rows: list[dict], days: int, now: float,
-                     override_since: float | None) -> dict:
+                     override_since: float | None, until: float | None = None) -> dict:
     # Schema start: the first row that carries each field's key; a row counts once
     # EVERY field exists in the schema, so the start is the latest of those firsts.
     first: dict[str, float | None] = {f: None for f in G3_FIELDS}
@@ -679,7 +720,7 @@ def _g3_completeness(all_rows: list[dict], days: int, now: float,
         ts = _num_ts(r.get("ts"))
         if ts is None:
             undated += 1
-        elif cutoff is None or ts >= cutoff:
+        elif (cutoff is None or ts >= cutoff) and (until is None or ts <= until):
             window.append((ts, r))
     counted = [(ts, r) for ts, r in window if ts >= since]
     before = len(window) - len(counted)
@@ -757,7 +798,7 @@ def _period_for_days(days: int) -> str:
     return "all"
 
 
-def _o1_reconciled(days: int) -> dict | None:
+def _o1_reconciled(days: int, win: "_Window | None" = None) -> dict | None:
     """O1 from the proxy ledger's REAL per-call usage (``proxy.cost_accounting``),
     over sessions whose every row carries cost fields and passes the ledger's
     own consistency check. ``None`` when fewer than ``MIN_N`` calls are
@@ -766,7 +807,9 @@ def _o1_reconciled(days: int) -> dict | None:
     from llm_router.proxy import cost_accounting as ca
     from llm_router.proxy import ledger as pl
 
-    rows = pl.read_rows(days=days)
+    rows = pl.read_rows(days=_wall_days(days, win))
+    if win is not None:
+        rows = [r for r in rows if win.covers(r.get("ts"))]
     by_session: dict[str, list[dict]] = {}
     for r in rows:
         # Rows without a session_id share one "" bucket: a single bad row there
@@ -790,13 +833,17 @@ def _o1_reconciled(days: int) -> dict | None:
                       real_anthropic_usd=round(real, 4), sessions=len(good))
 
 
-def _o1_quota_avoided(days: int) -> dict:
+def _o1_quota_avoided(days: int, win: "_Window | None" = None) -> dict:
     try:
-        reconciled = _o1_reconciled(days)
+        reconciled = _o1_reconciled(days, win)
     except Exception:  # noqa: BLE001 -- a ledger read problem keeps the "est." figure
         reconciled = None
     if reconciled is not None:
         return reconciled
+    if win is not None:
+        # The "est." figure is usage.db's summary(period), a window relative to now.
+        return _not_measurable("no reconciled proxy calls in the absolute window, and the "
+                               "usage.db estimate only exists for a period relative to now")
     try:
         from llm_router.dashboard_data import newest_timestamp, summary
 
@@ -1096,14 +1143,16 @@ def _g4_wrongly_benched(days: int, now: float) -> dict:
     )
 
 
-def _local_shadow_summary(days: int) -> dict:
+def _local_shadow_summary(days: int, win: "_Window | None" = None) -> dict:
     """Count of local (shadow) units by task type. Reads ``northstar.local_shadow_units``,
     a stream ``units()`` never yields, so this line cannot move NS, D1 or D2."""
     from llm_router import northstar as ns
 
     by_task: dict[str, int] = {}
     try:
-        for u in ns.local_shadow_units(days=days):
+        for u in ns.local_shadow_units(days=_wall_days(days, win)):
+            if win is not None and not win.covers(u.get("ts")):
+                continue
             key = u.get("task_type") or "unknown"
             by_task[key] = by_task.get(key, 0) + 1
     except Exception:  # noqa: BLE001 -- informational line must never break the scorecard
@@ -1183,7 +1232,8 @@ def _o3_from_units(units: list[dict], local_no_session: int = 0, n_escalations: 
     return out
 
 
-def _o3_unit_inputs(days: int, index, now: float) -> tuple[list[dict], set[str], list[dict]]:
+def _o3_unit_inputs(days: int, index, now: float,
+                    win: "_Window | None" = None) -> tuple[list[dict], set[str], list[dict]]:
     """(local units, receipt-band redone msg_ids, usage_outcome rows). Each source that
     cannot be read yields nothing rather than breaking the scorecard."""
     from llm_router import northstar as ns
@@ -1191,27 +1241,29 @@ def _o3_unit_inputs(days: int, index, now: float) -> tuple[list[dict], set[str],
     from llm_router import user_signal
 
     try:
-        local = list(ns.local_shadow_units(days=days))
+        local = list(ns.local_shadow_units(days=_wall_days(days, win)))
     except Exception:  # noqa: BLE001
         local = []
     try:
-        band = {k for k, row in user_signal.latest_by_key(since=now - days * 86400.0).items()
+        band = {k for k, row in user_signal.latest_by_key(
+                    since=now - days * 86400.0, until=None if win is None else win.until).items()
                 if row.get("signal") == user_signal.SIGNAL_REDONE}
     except Exception:  # noqa: BLE001
         band = set()
     try:
-        outcomes = uo.judge_recent(days=days)
+        outcomes = uo.judge_recent(days=_wall_days(days, win))
     except Exception:  # noqa: BLE001
         outcomes = []
     return local, band, outcomes
 
 
 def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[dict],
-                      now: float, since_policy: str | None = None) -> dict:
+                      now: float, since_policy: str | None = None,
+                      win: "_Window | None" = None) -> dict:
     from llm_router import offload_share as osh
 
     try:
-        local, band, outcomes = _o3_unit_inputs(days, index, now)
+        local, band, outcomes = _o3_unit_inputs(days, index, now, win)
         built = osh.build_units(
             all_rows, local, now=now, days=days, allowed=allowed,
             kind_of=lambda sid, stamp: index.resolve(sid, stamp=stamp).kind,
@@ -1267,14 +1319,16 @@ def _o3_render_lines(o3: dict) -> list[str]:
     return lines
 
 
-def _proxy_shadow_summary(days: int) -> dict:
+def _proxy_shadow_summary(days: int, win: "_Window | None" = None) -> dict:
     """``local_shadow`` records the proxy's shadow mode wrote (``proxy/local_shadow``): a
     file of their own that ``units()`` and the proxy ledger never read, so this cannot move
     NS, D1 or D2. Reason codes and numbers only."""
     from llm_router.proxy import local_shadow
 
     try:
-        recs = local_shadow.read_records(days=days)
+        recs = local_shadow.read_records(days=_wall_days(days, win))
+        if win is not None:
+            recs = [r for r in recs if win.covers(r.get("ts"))]
     except Exception:  # noqa: BLE001 -- informational line must never break the scorecard
         recs = []
     compared = [r for r in recs if r.get("agree") is not None]
@@ -1310,45 +1364,63 @@ def _proxy_shadow_line(s: dict | None) -> str | None:
 
 def compute_scorecard(days: int = 7, *, include_research: bool = False,
                       schema_since: float | None = None, now: float | None = None,
-                      since_policy: str | None = None) -> dict:
+                      since_policy: str | None = None,
+                      since: float | None = None, until: float | None = None) -> dict:
+    """The scorecard over the last ``days`` days, or over the absolute window
+    ``[since, until]`` (epoch seconds; both or neither). A window replaces ``days`` and
+    ``now``: "now" becomes ``until``, so a historical check does not drift as time passes."""
     from llm_router import session_kind as sk
     from llm_router.proxy import ledger as pl
 
+    win: _Window | None = None
+    if since is not None or until is not None:
+        if since is None or until is None:
+            raise ValueError("an absolute window needs both since and until")
+        if not since < until:
+            raise ValueError("since must be before until")
+        win = _Window(since, until)
+        days, now = win.days, until
     now_ts = time.time() if now is None else now
     allowed = _allowed_kinds(include_research)
     all_rows = pl.read_rows()
     index = sk.KindIndex(all_rows)
-    ns_r, d1_r, d2_r, joins = _ns_d1_d2(days, allowed, index)
-    d3_r = _fold_user_signals(_d3_redo_rate(days, allowed, index), days, now_ts)
-    pop = _proxy_population(all_rows, days, allowed, now_ts)
+    until_ts = None if win is None else win.until
+    ns_r, d1_r, d2_r, joins = _ns_d1_d2(days, allowed, index, win)
+    d3_r = _fold_user_signals(_d3_redo_rate(days, allowed, index, win), days, now_ts)
+    pop = _proxy_population(all_rows, days, allowed, now_ts, until=until_ts)
     d4_r = _d4_tier_mix(pop)
     g1_hook_r = _g1_hook(days, now_ts, _killed_hooks(days, now_ts))
     g1_proxy_r = _g1_proxy(pop)
-    g3_r = _g3_completeness(all_rows, days, now_ts, schema_since)
-    o1_r = _o1_quota_avoided(days)
+    g3_r = _g3_completeness(all_rows, days, now_ts, schema_since, until=until_ts)
+    o1_r = _o1_quota_avoided(days, win)
     bench = _load_benchmark()
     o2_r = _o2_quality_held(bench)
     d5_r = _d5_classifier_accuracy(bench)
     g2_r = _g2_silent_failures(days, now_ts, all_rows)
     g4_r = _g4_wrongly_benched(days, now_ts)
-    return {
+    card = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ts)),
         "generated_ts": now_ts,
         "window_days": days,
         "include_research": include_research,
         "joins": joins,
         # Informational only: not in "kpis", so not in _ORDER, --health or NS/D1/D2.
-        "local_shadow": _local_shadow_summary(days),
+        "local_shadow": _local_shadow_summary(days, win),
         # O3 is likewise outside "kpis": adding it there would change the key set, _ORDER and
         # the --health counts that NS..G4 consumers read. Rendered as its own line.
-        "o3": _o3_offload_share(days, allowed, index, all_rows, now_ts, since_policy),
-        "proxy_local_shadow": _proxy_shadow_summary(days),
+        "o3": _o3_offload_share(days, allowed, index, all_rows, now_ts, since_policy, win),
+        "proxy_local_shadow": _proxy_shadow_summary(days, win),
         "kpis": {
             "NS": ns_r, "O1": o1_r, "O2": o2_r,
             "D1": d1_r, "D2": d2_r, "D3": d3_r, "D4": d4_r, "D5": d5_r,
             "G1_hook": g1_hook_r, "G1_proxy": g1_proxy_r, "G2": g2_r, "G3": g3_r, "G4": g4_r,
         },
     }
+    if win is not None:  # only a windowed card carries the key: the default output is unchanged
+        card["window_days"] = round(win.days, 6)
+        card["window"] = {"since": _iso(win.since), "until": _iso(win.until),
+                          "since_ts": win.since, "until_ts": win.until}
+    return card
 
 
 # ── --health: measured / blind / stale, per KPI ──────────────────────────────
@@ -1403,6 +1475,7 @@ def compute_health(data: dict, *, stale_hours: float = STALE_LIVE_HOURS,
     counts = {s: sum(1 for v in out.values() if v["state"] == s)
               for s in (STATE_MEASURED, STATE_BLIND, STATE_STALE)}
     res = {"generated_at": data["generated_at"], "window_days": data["window_days"],
+           **({"window": data["window"]} if data.get("window") else {}),
            "stale_after_hours": stale_hours, "benchmark_stale_after_days": STALE_BENCHMARK_DAYS,
            "counts": counts, "kpis": out}
     if data.get("o3") is not None:  # outside "kpis" and "counts": see compute_scorecard
@@ -1450,7 +1523,7 @@ def _join_line(joins: dict) -> str:
 
 def render_scorecard(data: dict) -> str:
     lines = [
-        f"llm-router kpi -- window={data['window_days']}d "
+        f"llm-router kpi -- window={_window_label(data)} "
         f"({'organic + research' if data['include_research'] else 'organic only'}) "
         f"generated={data['generated_at']}",
         "",
@@ -1479,7 +1552,7 @@ def render_scorecard(data: dict) -> str:
 
 def render_health(health: dict, *, strict: bool = False) -> str:
     lines = [
-        f"llm-router kpi --health -- window={health['window_days']}d generated={health['generated_at']}",
+        f"llm-router kpi --health -- window={_window_label(health)} generated={health['generated_at']}",
         f"  stale = newest data point older than {_age(health['stale_after_hours'])} "
         f"(live ledgers) or {health['benchmark_stale_after_days']:.0f}d (frozen benchmark, O2/D5)",
         "",
@@ -1502,7 +1575,7 @@ def write_weekly(data: dict, out_dir: Path) -> Path:
     date = time.strftime("%Y-%m-%d", time.gmtime())
     path = out_dir / f"kpi-{date}.md"
     body = ["# llm-router KPI scorecard", "",
-            f"Generated {data['generated_at']}, window {data['window_days']}d, "
+            f"Generated {data['generated_at']}, window {_window_label(data)}, "
             f"{'organic + research' if data['include_research'] else 'organic only'}.",
             "", "| KPI | Value |", "|---|---|"]
     for key in _ORDER:
@@ -1520,9 +1593,26 @@ def write_weekly(data: dict, out_dir: Path) -> Path:
     return path
 
 
+def _parse_when(raw: str) -> float | None:
+    """A ``--since`` / ``--until`` value as epoch seconds: an ISO date or time (naive = UTC)
+    or a bare epoch number. None when it is neither."""
+    ts = _parse_ts(raw)
+    if ts is None:
+        try:
+            ts = _num_ts(float(raw))
+        except ValueError:
+            return None
+    return ts
+
+
 def cmd_kpi(args: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="llm-router kpi", add_help=True)
     ap.add_argument("--days", type=int, default=7, help="window in days (default 7)")
+    ap.add_argument("--since", metavar="WHEN", default=None,
+                     help="absolute window start (YYYY-MM-DD, an ISO time, or epoch seconds); "
+                          "needs --until, and with it replaces --days")
+    ap.add_argument("--until", metavar="WHEN", default=None,
+                     help="absolute window end, same formats; needs --since")
     ap.add_argument("--include", choices=("research",), default=None,
                      help="also count research-tagged sessions (harness is never included)")
     ap.add_argument("--write-weekly", metavar="DIR", default=None,
@@ -1577,8 +1667,21 @@ def cmd_kpi(args: list[str]) -> int:
             except ValueError:
                 ap.error(f"--schema-since: cannot read {parsed.schema_since!r} as a date or epoch")
 
+    win_since = win_until = None
+    if (parsed.since is None) != (parsed.until is None):
+        ap.error("--since and --until must be given together")
+    if parsed.since is not None:
+        win_since, win_until = _parse_when(parsed.since), _parse_when(parsed.until)
+        if win_since is None:
+            ap.error(f"--since: cannot read {parsed.since!r} as a date, an ISO time or epoch seconds")
+        if win_until is None:
+            ap.error(f"--until: cannot read {parsed.until!r} as a date, an ISO time or epoch seconds")
+        if not win_since < win_until:
+            ap.error("--since must be before --until")
+
     data = compute_scorecard(days=parsed.days, include_research=(parsed.include == "research"),
-                             schema_since=since, since_policy=parsed.since_policy)
+                             schema_since=since, since_policy=parsed.since_policy,
+                             since=win_since, until=win_until)
 
     exit_code = 0
     if parsed.health:
