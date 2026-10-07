@@ -300,6 +300,26 @@ goes to `proxy_local_shadow.jsonl` in the state dir (not `proxy_calls.jsonl`, so
   `schema_valid`, `fallback_reason`. Reason codes and numbers only: no prompt, tool name, argument or reply.
 - `llm-router kpi` shows one informational line, `local shadow (proxy): ...`, next to `local (shadow)`.
 
+## Classifier shadow: log the local LLM's verdict next to the rules' (`LLM_ROUTER_LOCAL_CLASSIFIER=shadow`)
+
+Off by default. The proxy reads the mode from its environment at start (`~/.llm-router/.env` is loaded into
+it), so a change needs a proxy restart. With `shadow`, `decide_tier` hands each turn-first call to
+`proxy/llm_shadow.py` after the rules have decided. Nothing is applied: the tier, the reason and the forwarded
+bytes are what they are with the mode `off` (`cls_applied` is false on every ledger row). `on` is the later
+canary mode; until it exists it behaves as `shadow`.
+
+- Only turn-first calls: a continuation (never waits) and a side call (no client tools) schedule nothing.
+- One call per turn: a turn already answered (cache) or being answered is skipped. At most 4 classifications are
+  pending; a turn beyond that is dropped and counted, never queued. One Ollama slot (a semaphore of 1).
+- The request path only creates a task. The input is assembled in a worker thread (`cls_input.assemble` walks
+  the whole history: 45 ms on a 600-message one) and the call is `local_classifier.classify_async` (2.0 s budget).
+- One record per finished call to `classifier_shadow.jsonl` in the state dir, a `classifier_shadow_drop` record
+  per drop. Hashes (`text_sha`), tiers, numbers and reason codes only: no prompt text, no model `reason`.
+- `llm-router kpi` prints `classifier shadow (proxy): ...` and `--json` carries `classifier_shadow`
+  (`n, n_sessions, agree, llm_tier_dist, rules_tier_dist, cheap_share_llm, fallback_rate, p50_ms, p95_ms, drops,
+  calls_per_turn`, plus `n_compared`, `drop_rate`, `cls_applied_true`). Organic sessions only unless
+  `--include research`. The decision cost shows in G1_proxy: `tier_decision_s` includes the scheduling.
+
 ## Metrics
 
 Each call writes one row to `~/.llm-router/proxy_calls.jsonl` with shape,
