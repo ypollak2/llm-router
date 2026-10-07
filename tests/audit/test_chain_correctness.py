@@ -116,13 +116,16 @@ async def test_explicit_pin_wins_over_ollama_codex_claude_and_every_reorder(monk
     grouping, a non-balanced user routing policy, AND the QUOTA_BALANCED
     reorder pass to run in the same call, with an explicit per-task model
     pin set. The pin must still land at index 0.
+
+    Uses a ``code`` task: since M3.0 (D-14 = A) a Q&A task type such as ``analyze``
+    never keeps a local model, so the Ollama sanity check below needs a non-Q&A type.
     """
     monkeypatch.setattr("llm_router.router.is_codex_available", lambda: True)
     monkeypatch.setattr("llm_router.router.get_active_agent", lambda: "claude_code")
     monkeypatch.setattr(
         "llm_router.router.get_repo_config",
         lambda *a, **k: RepoConfig(
-            routing={"analyze": TaskRouteOverride(model="openai/gpt-4o-mini-PINNED")}
+            routing={"code": TaskRouteOverride(model="openai/gpt-4o-mini-PINNED")}
         ),
     )
     config = _FakeConfig(
@@ -131,7 +134,7 @@ async def test_explicit_pin_wins_over_ollama_codex_claude_and_every_reorder(monk
         routing_policy="cost",
     )
 
-    chain = await _chain(TaskType.ANALYZE, RoutingProfile.QUOTA_BALANCED, config)
+    chain = await _chain(TaskType.CODE, RoutingProfile.QUOTA_BALANCED, config)
 
     assert chain, "chain must not be empty"
     assert chain[0] == "openai/gpt-4o-mini-PINNED"
@@ -292,6 +295,8 @@ async def test_allow_models_restricts_chain_to_allowlist(monkeypatch):
     the provider-availability filter lets through in the first place (see the
     audit fix: unavailable-tier models, including unconfigured Ollama ones,
     are now correctly stripped before allow/block filtering ever runs).
+
+    A ``code`` task: since M3.0 (D-14 = A) a Q&A task type never keeps a local model.
     """
     monkeypatch.setattr(
         "llm_router.router.get_repo_config",
@@ -303,7 +308,7 @@ async def test_allow_models_restricts_chain_to_allowlist(monkeypatch):
         available_providers={"anthropic", "openai", "deepseek"},
         ollama_models=["ollama/qwen3:32b"],
     )
-    chain = await _chain(TaskType.ANALYZE, RoutingProfile.BALANCED, config)
+    chain = await _chain(TaskType.CODE, RoutingProfile.BALANCED, config)
     assert set(chain) == {"anthropic/claude-sonnet-4-6", "ollama/qwen3:32b"}
 
 
@@ -357,12 +362,13 @@ async def test_dedup_preserves_first_occurrence_not_last(monkeypatch):
     """ollama/qwen3:32b is already baked into the ANALYZE/BALANCED static chain.
     Injecting it again via all_ollama_models() creates a duplicate: the dedup
     step must keep the FRONT (first) occurrence, not the later static-chain one.
+    A ``code`` task: since M3.0 (D-14 = A) a Q&A task type never keeps a local model.
     """
     config = _FakeConfig(
         available_providers={"anthropic", "openai", "deepseek"},
         ollama_models=["ollama/qwen3:32b"],
     )
-    chain = await _chain(TaskType.ANALYZE, RoutingProfile.BALANCED, config)
+    chain = await _chain(TaskType.CODE, RoutingProfile.BALANCED, config)
     assert chain.count("ollama/qwen3:32b") == 1
     assert chain[0] == "ollama/qwen3:32b"
 

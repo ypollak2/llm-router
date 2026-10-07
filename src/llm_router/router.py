@@ -976,7 +976,9 @@ async def _build_and_filter_chain(
                 sorted(_blocked), getattr(task_type, "value", task_type), profile,
             )
 
-    return models_to_try
+    # M3.0 (D-14 = A): Q&A never goes to a local provider. Last, so no injection or
+    # reorder above can bring one back. The model_override path returned earlier.
+    return _strip_local_for_qa(models_to_try, task_type)
 
 
 def _resolve_profile(
@@ -1168,6 +1170,40 @@ def _blocked_providers() -> frozenset[str]:
     """
     raw = os.environ.get("LLM_ROUTER_BLOCK_PROVIDERS", "")
     return frozenset(item.strip().lower() for item in raw.split(",") if item.strip())
+
+
+# Providers that run on the user's own machine. M3.0 (PLAN D-14 = A): a Q&A task type is
+# never served by one of these through MCP ``llm()``. Evidence: real Q&A prompts, local
+# qwen 4/37 acceptable vs Sonnet 34/37 (PLAN §0.3 [RX]); 65 local Q&A answers in 7 days [U].
+_LOCAL_PROVIDERS: frozenset[str] = frozenset({"ollama", "openai_compat"})
+
+
+def _strip_local_for_qa(models: list[str], task_type: TaskType | str) -> list[str]:
+    """Drop local providers from a chain when the task type is Q&A (M3.0, D-14 = A).
+
+    The next provider in the chain's existing order serves the call, so nothing is
+    reordered. Code task types (and every non-Q&A type) pass through unchanged, so a
+    ``code`` task can still go local. Q&A is ``northstar.QA_TASK_TYPES`` (M0.2). If
+    nothing but local providers remain, the chain is returned as is (no empty chain).
+    The caller must not apply this to an explicit ``model_override``: that is the
+    caller's own pin, not routing.
+    """
+    from llm_router.northstar import QA_TASK_TYPES
+
+    if getattr(task_type, "value", task_type) not in QA_TASK_TYPES:
+        return models
+    kept = [m for m in models if provider_from_model(m) not in _LOCAL_PROVIDERS]
+    if not kept:
+        # Local is the only thing configured (an Ollama-only install). An empty chain
+        # would fail the call with "install Ollama", so keep it: M3.0 reroutes Q&A to
+        # the next provider, and here there is none.
+        return models
+    if len(kept) != len(models):
+        log.debug(
+            "M3.0: dropped %d local model(s) from the %s chain",
+            len(models) - len(kept), getattr(task_type, "value", task_type),
+        )
+    return kept
 
 
 # #27 / Option B — precision-tier routing cues. A SHORT prompt that demands an
@@ -4357,6 +4393,12 @@ async def route_and_call(
                 log.debug("Bandit reorder skipped (continuing): %s", _bandit_err)
                 from llm_router import failopen
                 failopen.record("CHZ-FO-ROUTER-BANDIT-REORDER", _bandit_err)
+
+        # M3.0 (D-14 = A): subject specialist and bandit reorder above can re-add a
+        # local model, so strip again here, before the daily-cap step. An explicit
+        # model_override is the caller's own pin and is left alone.
+        if models_to_try and not model_override:
+            models_to_try = _strip_local_for_qa(models_to_try, task_type)
 
         # TQ-007 (applied LAST — RED1-01/RED1-02 fix): a daily spend cap was
         # exceeded → confine the FINAL chain to free-local providers. This runs
