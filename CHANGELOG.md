@@ -56,6 +56,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LLM_ROUTER_STATUSLINE=fast` and now shows the Claude 5h / weekly / Sonnet quota.
 
 ### Added
+- kpi (v16 GE6, PRD S3): quota-burn baseline. SessionStart and Stop append
+  `{session_id, kind: start|stop, ts, five_hour_pct, weekly_pct, updated_at, source, session_kind}` to
+  `~/.llm-router/quota_samples.jsonl` from the cached `usage.json` (no network); the status-line tick
+  appends one `{ts, five_hour_pct, weekly_pct, updated_at, source}` row at most every 300 s to
+  `quota_history.jsonl`. A snapshot older than 30 min, a fallback or a pending one is `source: stale`
+  (unknown values null, never 0). New `llm-router kpi --quota-burn --since --until`: burn per session and
+  per human turn (one Stop = one turn; a 5h-window reset keeps the burn after it) from measured samples,
+  with session-clustered bootstrap CIs; stale samples form a separate line labelled estimated; coverage =
+  sessions with start and stop samples over every tagged session in the window (Wilson CI). Hook versions:
+  session-start 24, session-end 19. Tests: `tests/test_quota_samples.py`.
 - toolkit: a router-owned tool layer, phase 1 (`src/llm_router/toolkit/`). Seven tools (read,
   search, list, edit, write, bash, finish) behind one permission function that runs in code
   before every call and logs every decision; a throwaway workspace (a copy; the caller's tree is

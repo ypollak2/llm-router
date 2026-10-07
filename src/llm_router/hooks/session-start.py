@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 23
+# llm_router-hook-version: 24
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -1893,6 +1893,16 @@ def main() -> None:
         if isinstance(_hook_input, dict):
             with _hl_phase("session_io"):
                 _session_kind.tag_session(_hook_input.get("session_id"), _hook_input.get("cwd"))
+    except Exception:
+        pass
+
+    # GE6 / S3: one quota sample (cached usage.json, no network) per session
+    # start into quota_samples.jsonl; the Stop hook appends the matching rows.
+    try:
+        from llm_router import quota_samples as _quota_samples
+        if isinstance(_hook_input, dict):
+            with _hl_phase("session_io"):
+                _quota_samples.append_session_sample(_hook_input.get("session_id"), "start")
     except Exception:
         pass
 

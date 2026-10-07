@@ -16,6 +16,10 @@ one-second loop:
   refresher DETACHED and does not wait for it. At most one start per
   :data:`REFRESH_AFTER_S` (a timestamp file, not a lock: a hung refresher holds
   nothing a tick waits on), so a stuck refresh cannot delay a tick or pile up;
+* every :data:`HISTORY_INTERVAL_S` (300 s) it appends one row of the quota it
+  just read to ``quota_history.jsonl`` (GE6 / S3: the 5-minute series; one
+  ``stat`` of a stamp file per tick otherwise). Stale snapshots are recorded as
+  ``stale``, unknown values as null;
 * a value it does not have is printed as ``n/a``, never as 0. A cache older than
   :data:`STALE_AFTER_S` is not data: every cached field reads ``n/a``. A quota
   snapshot older than ``LLM_ROUTER_USAGE_TTL_SEC`` (default 300 s, the same TTL
@@ -55,6 +59,13 @@ REFRESH_AFTER_S = 60.0
 #: Past this age the cached values are not shown at all ("n/a").
 STALE_AFTER_S = 15 * 60.0
 MAX_CHARS = 200
+#: GE6 / S3: the 5-minute quota series (``llm_router.quota_samples`` reads it).
+HISTORY_NAME = "quota_history.jsonl"
+HISTORY_STAMP_NAME = ".quota_history.last"
+#: One history row at most this often (the quota TTL above).
+HISTORY_INTERVAL_S = 300.0
+#: A usage.json older than this is recorded ``stale``, not ``measured``.
+QUOTA_STALE_AFTER_S = 30 * 60.0
 #: Longest model / hook name the line will carry before it is cut.
 _NAME_MAX = 24
 
@@ -299,6 +310,52 @@ def maybe_refresh(home: str, cache: dict | None, now: float) -> bool:
         return False
 
 
+def quota_sample(usage: dict | None, now: float) -> dict:
+    """``{five_hour_pct, weekly_pct, updated_at, source}`` from a usage.json dict.
+
+    The tick cannot import ``llm_router``, so this is a copy of
+    ``quota_samples.sample_from_usage``; tests/test_quota_samples.py pins both to
+    the same answers. ``measured`` needs real numbers no older than
+    :data:`QUOTA_STALE_AFTER_S`; anything else is ``stale``, unknown values null."""
+    if not isinstance(usage, dict) or usage.get("pending") or usage.get("is_fallback"):
+        return {"five_hour_pct": None, "weekly_pct": None,
+                "updated_at": _num(usage.get("updated_at")) if isinstance(usage, dict) else None,
+                "source": "stale"}
+    h5, wk = _num(usage.get("session_pct")), _num(usage.get("weekly_pct"))
+    updated = _num(usage.get("updated_at"))
+    fresh = updated is not None and updated > 0 and 0 <= now - updated <= QUOTA_STALE_AFTER_S
+    measured = fresh and h5 is not None and wk is not None
+    return {"five_hour_pct": h5, "weekly_pct": wk, "updated_at": updated,
+            "source": "measured" if measured else "stale"}
+
+
+def maybe_append_history(home: str, usage: dict | None, now: float) -> bool:
+    """Append one ``quota_history.jsonl`` row when :data:`HISTORY_INTERVAL_S` has
+    passed since the last one (a stamp file's mtime, one ``stat`` a tick).
+    Append-only, 0600. Never raises; True when a row was written."""
+    try:
+        stamp = os.path.join(home, HISTORY_STAMP_NAME)
+        try:
+            if 0 <= now - os.path.getmtime(stamp) < HISTORY_INTERVAL_S:
+                return False
+        except OSError:
+            pass
+        os.makedirs(home, mode=0o700, exist_ok=True)
+        fd = os.open(stamp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.close(fd)
+        os.utime(stamp, (now, now))
+        row = {"ts": now}
+        row.update(quota_sample(usage, now))
+        fd = os.open(os.path.join(home, HISTORY_NAME), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
+        return True
+    except Exception:  # noqa: BLE001 -- a status line never fails over its history
+        return False
+
+
 def main() -> int:
     try:
         sys.stdin.buffer.read()
@@ -308,9 +365,11 @@ def main() -> int:
     home = router_home()
     cache = read_cache(home)
     maybe_refresh(home, cache, now)
+    usage = read_usage(home)
+    maybe_append_history(home, usage, now)
     color = not os.environ.get("NO_COLOR")
     sys.stdout.write(render(cache, now=now, env_mode=os.environ.get("LLM_ROUTER_ENFORCE"), color=color,
-                            usage=read_usage(home), usage_ttl_s=usage_ttl()) + "\n")
+                            usage=usage, usage_ttl_s=usage_ttl()) + "\n")
     return 0
 
 
