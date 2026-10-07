@@ -290,8 +290,9 @@ async def test_a_full_queue_counts_drops_and_raises_nothing(tmp_path, monkeypatc
 
 async def test_decision_p95_stays_under_30ms_with_a_2s_classifier(tmp_path, monkeypatch, simple):
     monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "shadow")
-    fake = FakeClassifier(monkeypatch, delay=2.0)
-    app = _shadow_app(tmp_path)
+    gate = asyncio.Event()                  # a classifier that never answers while the 200 calls are posted:
+    fake = FakeClassifier(monkeypatch, gate=gate)   # a 2 s sleep let a slow runner finish the first call mid-loop
+    app = _shadow_app(tmp_path)                     # (195 drops, a 5th task) because 200 posts took over 2 s
     for i in range(200):
         assert (await _post(app, _turn(f"task {i}: change line {i} of file{i}.py"))).status_code == 200
     sched = app.state.cls_shadow

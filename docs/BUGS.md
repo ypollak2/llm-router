@@ -18,7 +18,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | known, not fixed |
 | 9 | Classifier warm-up loaded `llmr-classifier` at the wrong `num_ctx` | fixed in #298 (M1.4, review 2) |
 | 10 | README-advertised `--host pi` / `--host kimi` failed; detected gemini-cli skipped silently | fixed in this change (v16 P0.4) |
-| 11 | Three shadow tests raced the clock and failed `main` on a loaded runner | fixed in this change (test-only) |
+| 11 | Four shadow tests raced the clock and failed `main` on a loaded runner | fixed in this change (test-only) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -196,7 +196,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   auto-wire; `exit 2` to `return`; drop the report line; pi not marked unsupported) each turn
   a test red.
 
-## 11. Three shadow tests raced the clock and failed `main` on a loaded runner
+## 11. Four shadow tests raced the clock and failed `main` on a loaded runner
 
 - **Symptom.** `main` at 2ae21d9 (the #301 merge) was red: run 37656384812, job `test (3.13)`,
   `tests/test_proxy_local_shadow.py::test_different_tool_disagrees - assert (None is False)`;
@@ -236,3 +236,9 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `llm_shadow._run` fails the new test (timeout; the loop cannot serve while it blocks).
   Rule: a test that depends on a reply arriving "before" another must wait on that event, never on a
   sleep length; a "loop not held" check must read the thread or the blocked work, not a wall gap.
+- **Fourth, found by the full-suite run on this change.**
+  `test_decision_p95_stays_under_30ms_with_a_2s_classifier` made the classifier slow with
+  `sleep(2.0)`. On a loaded machine the 200 sequential POSTs took more than 2 s, the first call
+  finished mid-loop, its slot was reused and the counts came out `drops == 195` instead of 196
+  (failed in isolation at load average ~70). The fake is now gated: it never answers until the test
+  ends. The p95 <= 30 ms bar is the product's own number and is left as it was.
