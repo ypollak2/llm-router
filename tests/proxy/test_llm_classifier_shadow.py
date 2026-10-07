@@ -151,7 +151,7 @@ async def test_a_continuation_is_not_delayed_by_a_pending_classification(tmp_pat
     fake = FakeClassifier(monkeypatch, gate=gate)
     app = _shadow_app(tmp_path)
     assert (await _post(app, _turn("rename the helper in util.py"))).status_code == 200
-    for _ in range(50):          # the detached task is running (stuck at the gate)
+    for _ in range(300):         # the detached task is running (stuck at the gate)
         await asyncio.sleep(0.01)
         if fake.calls:
             break
@@ -258,7 +258,7 @@ async def test_decision_p95_stays_under_30ms_with_a_2s_classifier(tmp_path, monk
 
 
 async def test_a_long_history_is_assembled_off_the_request_path(tmp_path, monkeypatch, simple):
-    """``assemble`` walks the whole history (45 ms on 600 messages): that must not be paid by the call."""
+    """``assemble`` walks the whole history (45 ms on 600 messages; the fixture is 900): that must not be paid by the call."""
     monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "shadow")
     fake = FakeClassifier(monkeypatch)
     app = _shadow_app(tmp_path)
@@ -266,7 +266,7 @@ async def test_a_long_history_is_assembled_off_the_request_path(tmp_path, monkey
     for i in range(5):
         body = _turn("x")
         msgs = []
-        for j in range(300):
+        for j in range(450):
             msgs.append({"role": "user", "content": [{"type": "text", "text": "<system-reminder>" + "r" * 3000
                                                       + "</system-reminder>\n" + "hello world " * 300}]})
             msgs.append({"role": "assistant", "content": [{"type": "text", "text": "ok " * 1000}]})
@@ -281,6 +281,7 @@ async def test_a_long_history_is_assembled_off_the_request_path(tmp_path, monkey
     assert min(assemble_ms) > 30, "fixture too small to show the effect"
     for b in turns:
         assert (await _post(app, b)).status_code == 200
+        await app.state.cls_shadow.drain()     # one at a time: a slow runner must not hit the pending cap
     secs = sorted(r["tier_decision_s"] for r in _rows(tmp_path))
     assert secs[len(secs) // 2] < 0.030        # the median call
     await app.state.cls_shadow.drain()
