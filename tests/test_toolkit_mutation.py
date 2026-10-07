@@ -56,7 +56,7 @@ MUTATIONS = [
      "if False:", SAFETY, "test_bash_is_denied", False),
     ("kill-switch-policy", P, "        why = sandbox.kill_switch_reason()\n        if why:\n            return _deny(\"kill\"",
      "        why = None\n        if why:\n            return _deny(\"kill\"", SAFETY, "env_kill_switch", False),
-    ("kill-switch-running-command", T, "if sandbox.kill_switch_reason():\n                    status = \"kill\"",
+    ("kill-switch-running-command", T, "if launcher is not None and sandbox.kill_switch_reason():\n                    status = \"kill\"",
      "if False:\n                    status = \"kill\"", SAFETY, "kill_switch_file", True),
     ("sandbox-network-deny", S, '"(deny network*)",', '"",', SAFETY, "proven_on_this_mac or detects_a_profile", True),
     ("sandbox-write-deny", S, '"(deny file-write*)",', '"",', SAFETY, "proven_on_this_mac or detects_a_profile", True),

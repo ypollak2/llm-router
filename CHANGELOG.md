@@ -30,7 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `llm-router run --model M --verify CMD --workspace DIR "task"` returns a patch and a verdict
   (propose-only). The execution ledger gains `verify` and `used` columns, NULL when unknown.
   `hooks/agent_loop.py` now calls the toolkit executor (one executor); its public functions are
-  unchanged, and the secret deny-list now applies to it too. The local model's context window comes from the one table,
+  unchanged, and the secret deny-list now applies to it too. The kill switch does NOT reach it:
+  `run_pipelines` honours `LLM_ROUTER_TOOLLAYER=off` / `~/.llm-router/KILL` only for a launched
+  (sandboxed) `llm-router run`, so the hook's launcher-less commands behave exactly as on main
+  (tests/test_agent_loop_hook_parity.py, `kill` tests). Because the auto-route local agent loop is on by default, this is a live
+  path: its file tools and commands now run through toolkit code (parity: 78 commands), and the
+  execution ledger migrates `ALTER TABLE execution_events ADD COLUMN verify TEXT` and
+  `... used INTEGER` the next time the live ledger is opened (additive, nullable). The local model's context window comes from the one table,
   `local_models.num_ctx(model)` (32768 for qwen3.6).
 - kpi: `llm-router kpi --since WHEN --until WHEN` pins an absolute window (replaces `--days`; rows outside it
   never count; JSON gains `window`). Without the flags the output is unchanged (live-home JSON diff against
