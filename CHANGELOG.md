@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LLM_ROUTER_STATUSLINE=fast` and now shows the Claude 5h / weekly / Sonnet quota.
 
 ### Added
+- hooks: `hook_latency.jsonl` rows can carry `phases_ms` (M4.1, hook tail attribution). `auto-route` (hook
+  version 46) names `import`, `session_io`, `zce`, `classify`, `hud`, `db_write`, `draft_chain` (the whole draft
+  chain: Ollama, Codex, Gemini CLI) and `cold_wait` (Ollama `load_duration`); `session-start` (version 23) names `import`, `session_io`, `reset_state`,
+  `ollama_up`, `pxpipe`, `proxy_health`, `usage`, `hints`, `bg_spawn`, `banner`, `rules_update`. A run that
+  names no phase writes the same row as before. Cost: `docs/measurements/2026-10-07-hook-phase-timing-overhead.md`.
 - proxy: classifier shadow seam (M1.6, PR 2 of the M1 plan). With `LLM_ROUTER_LOCAL_CLASSIFIER=shadow`, each
   turn-first call also gets a local LLM verdict, logged next to the rules' verdict in `classifier_shadow.jsonl`
   (hashes and tiers only). Shadow only: no tier changes, `cls_applied` is false on every row, continuations
