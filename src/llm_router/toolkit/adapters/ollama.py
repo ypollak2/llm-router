@@ -48,6 +48,9 @@ def num_ctx(model: str | None = None) -> int | None:
         return default_num_ctx(model)
 
 
+_env_num_ctx = num_ctx  # OllamaAdapter.__init__ has a parameter named num_ctx that shadows the function
+
+
 def agent_temperature() -> float:
     raw = os.environ.get("LLM_ROUTER_AGENT_TEMPERATURE", "").strip()
     try:
@@ -196,8 +199,9 @@ class OllamaAdapter:
                  temperature: float | None = None, constrained: bool = False, think: bool = False):
         self.model = model
         self.base_url = validated_ollama_url(base_url) if base_url else get_ollama_url()
-        # M3.4: one table, read through num_ctx(model); an explicit value still wins.
-        self.num_ctx = default_num_ctx(model) if num_ctx is None else num_ctx
+        # M3.4: one window for every local call: the env-aware num_ctx(model) (override, else the
+        # table); an explicit value still wins. None = accept the server's default.
+        self.num_ctx = _env_num_ctx(model) if num_ctx is None else num_ctx
         self.temperature = agent_temperature() if temperature is None else temperature
         self.constrained = constrained
         self.think = think
@@ -207,8 +211,10 @@ class OllamaAdapter:
         payload = {
             "model": self.model, "messages": messages, "tools": tools, "stream": False,
             "think": self.think,
-            "options": {"temperature": self.temperature, "num_ctx": self.num_ctx},
+            "options": {"temperature": self.temperature},
         }
+        if self.num_ctx is not None:
+            payload["options"]["num_ctx"] = self.num_ctx
         if self.constrained:
             payload["format"] = tool_call_schema(sorted(names))
         try:
