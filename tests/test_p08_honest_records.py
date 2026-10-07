@@ -260,7 +260,7 @@ def test_g3_counts_null_as_missing_on_every_required_field():
         assert not kpi._g3_recorded({}, f, presence_only=presence_only), f
 
 
-# ── replay renders NULL as unknown (BUGS.md 14) ──────────────────────────────
+# ── replay renders NULL as unknown (BUGS.md 15) ──────────────────────────────
 
 
 def test_replay_renders_null_confidence_and_task_type_as_unknown():

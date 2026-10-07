@@ -17,11 +17,12 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 7 | `edit_outcomes.jsonl` rows with no source | open, fix is plan task M0.3(c) |
 | 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | known, not fixed |
 | 9 | Classifier warm-up loaded `llmr-classifier` at the wrong `num_ctx` | fixed in #298 (M1.4, review 2) |
-| 10 | DIRECT rows wrote 0.0 / False / "balanced" for values nobody measured | fixed in this change (v16 P0.8) |
-| 11 | `usage` rows carried no session id | fixed in this change (v16 P0.8); live coverage pending deploy |
-| 12 | The Stop line's north star used the heuristic "used", kpi the strict rule | fixed in this change (v16 P0.8) |
-| 13 | Status bar priced its baseline at Opus and labelled it "vs Sonnet" | fixed in this change (v16 P0.8) |
-| 14 | `llm-router replay` raises TypeError on a row with NULL confidence | fixed in this change (v16 P0.8) |
+| 10 | README-advertised `--host pi` / `--host kimi` failed; detected gemini-cli skipped silently | fixed in this change (v16 P0.4) |
+| 11 | DIRECT rows wrote 0.0 / False / "balanced" for values nobody measured | fixed in this change (v16 P0.8) |
+| 12 | `usage` rows carried no session id | fixed in this change (v16 P0.8); live coverage pending deploy |
+| 13 | The Stop line's north star used the heuristic "used", kpi the strict rule | fixed in this change (v16 P0.8) |
+| 14 | Status bar priced its baseline at Opus and labelled it "vs Sonnet" | fixed in this change (v16 P0.8) |
+| 15 | `llm-router replay` raises TypeError on a row with NULL confidence | fixed in this change (v16 P0.8) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -179,7 +180,27 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   without `options` fails both tests; `_is_loaded` returning True regardless of context fails
   the second.
 
-## 10. DIRECT rows wrote 0.0 / False / "balanced" for values nobody measured
+## 10. README-advertised hosts failed install; a detected host was skipped silently
+
+- **Symptom.** On da31df7 the README "Works With" table listed `llm-router install --host pi`
+  and `--host kimi`. Both printed `Unknown host(s): ...` and exited 0. A plain
+  `llm-router install` detected gemini-cli and then said nothing about it.
+- **Cause.** `_install_host` only knew `_HOST_SNIPPETS`, which never had a `pi` or `kimi`
+  entry. The auto-detect block in `_run_install` checked `codex` by name and ignored every
+  other detected host.
+- **Fix.** v16 P0.4 (`fix/install-honesty`). README rows for Pi and Kimi say "planned (v16
+  P2.12)". `--host pi|kimi` prints `unsupported: <reason>; planned in v16 P2.12` and exits 2.
+  `_run_install` wires every detected host that has an installer (codex, gemini-cli) and
+  prints `<host>: detected, not wired: <reason>` for each other detected host. `host_detect`
+  now detects pi and kimi so they can be reported. Wiring Pi is P2.12.
+- **Test.** `tests/test_readme_hosts.py`: parses all 15 README rows; runs the real installer
+  for the 12 non-planned `--host` rows in an isolated HOME; checks exit 2 and the reason line
+  for pi and kimi; fake detection {claude-code, codex, gemini-cli, unknown} gives wired,
+  wired, wired, reported. 7 of its 9 tests fail on da31df7. Four mutants (drop gemini-cli
+  auto-wire; `exit 2` to `return`; drop the report line; pi not marked unsupported) each turn
+  a test red.
+
+## 11. DIRECT rows wrote 0.0 / False / "balanced" for values nobody measured
 
 - **Symptom.** Every DIRECT row in `routing_decisions` had `classifier_confidence = 0.0`,
   `classifier_latency_ms = 0.0`, `budget_pct_used = 0.0` and `quality_mode = 'balanced'`:
@@ -200,7 +221,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `test_direct_unknown_task_type_is_null_with_raw_value`,
   `test_legacy_usage_table_accepts_null_task_type_after_migration`. Each fails on da31df7.
 
-## 11. `usage` rows carried no session id
+## 12. `usage` rows carried no session id
 
 - **Symptom.** No `usage` row could be scoped to a session: the table had no `session_id`
   column (copy of the live `usage.db`, 2026-10-07, 1,388 rows).
@@ -216,7 +237,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `test_cc_usage_track_writes_the_payload_session`, `test_cc_usage_track_session_rule_matches_call_identity`.
   The live bar (session id on at least 99% of at least 100 post-deploy rows) is checked after deploy.
 
-## 12. The Stop line's north star used the heuristic "used", kpi the strict rule
+## 13. The Stop line's north star used the heuristic "used", kpi the strict rule
 
 - **Symptom.** For one session the session-end/Stop line and `llm-router kpi` could show two
   different north stars.
@@ -228,7 +249,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Test.** `test_stop_line_north_star_uses_the_strict_rule` (50 heuristic-used units, 10 strict:
   prints 20%, was 100%).
 
-## 13. Status bar priced its baseline at Opus and labelled it "vs Sonnet"
+## 14. Status bar priced its baseline at Opus and labelled it "vs Sonnet"
 
 - **Symptom.** The full status line read `(vs Sonnet:$58)` for a baseline priced at Opus rates.
 - **Cause.** WP-03 moved the price to `pricing.price_for("opus")` and left the label.
@@ -236,7 +257,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   so the two cannot drift (status-bar hook version 6).
 - **Test.** `test_status_bar_baseline_label_names_the_priced_model`.
 
-## 14. `llm-router replay` raises TypeError on a row with NULL confidence
+## 15. `llm-router replay` raises TypeError on a row with NULL confidence
 
 - **Symptom.** `commands/replay.format_decision_line` computed
   `decision.get("classifier_confidence", 0) * 100`; on a row whose confidence is NULL it raised
