@@ -17,6 +17,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 7 | `edit_outcomes.jsonl` rows with no source | open, fix is plan task M0.3(c) |
 | 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | known, not fixed |
 | 9 | Classifier warm-up loaded `llmr-classifier` at the wrong `num_ctx` | fixed in #298 (M1.4, review 2) |
+| 10 | Semantic cache never hit, ignored context, and reported a hit rate of 0 | fixed in this change (v16 P0.5) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -173,3 +174,31 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   4096 and an omitted `context_length` return `llm`. Mutants run on head 2316f3f: warm-up
   without `options` fails both tests; `_is_loaded` returning True regardless of context fails
   the second.
+
+## 10. Semantic cache never hit, ignored context, and reported a hit rate of 0
+
+- **Symptom.** (a) A routed request repeated within 24 h was never served from the semantic
+  cache. (b) Had the key matched, "yes, do it" answered in one conversation would have been
+  served verbatim in another: the key had no context. (c) With no Ollama the cache did nothing.
+  (d) `cost.get_cache_hit_stats` and the session-end hook's `_query_cache_hit_stats` always
+  returned zeros / `{}`, so the hit rate (R-CTX-7) could not be measured.
+- **Cause.** (a) `route_and_call` called `semantic_cache.check` with the user's raw prompt, but
+  `_finalize_successful_route` called `store` with the prompt after OKF / `<repo_state>`
+  injection. Different text means a different embedding and, because `<repo_state>` carries
+  numbers, a different C-03 discriminator. (b) No column bound an entry to its conversation.
+  (c) `check`/`store` returned early when `ollama_base_url` was unset. (d) Both queries named
+  columns `semantic_cache` never had (`was_hit`, `accessed_at`; `cache_hit`, `tokens_saved`,
+  `timestamp`); the exceptions were swallowed by fail-open paths.
+- **Fix.** v16 P0.5 (`fix/semantic-cache-key`): `route_and_call` builds one
+  `semantic_cache.CacheKey` before dispatch (raw prompt + `ctx_hash` = sha256 of caller
+  `context`, else the last two buffered messages, plus the caller's project scope) and passes it
+  to `check` and, through the dispatch loop, to `store`. Exact-match pass on
+  sha256(normalised text) + `ctx_hash` needs no Ollama (rows stored with embedding `''`, since
+  the existing column is `NOT NULL`). Additive migration: `ctx_hash`, `text_hash`, `hit_count`,
+  `last_hit_at`, and a `semantic_cache_lookups` table (one row per lookup, no prompt text). Both
+  stats queries read that table and return `{hits, lookups, n}`.
+- **Test.** `tests/test_p05_semantic_cache_key.py` (6 tests; all 6 fail on da31df7):
+  `test_same_request_hits_after_context_injection`, `test_context_is_part_of_the_key`,
+  `test_key_uses_last_two_conversation_messages_when_no_caller_context`,
+  `test_exact_hash_fallback_without_ollama`, `test_cost_cache_hit_stats_returns_true_counts_with_n`,
+  `test_session_end_cache_hit_stats_returns_true_counts_with_n`.
