@@ -118,8 +118,6 @@ def test_health_reports_ok_for_an_ollama_only_setup(tmp_path):
     (home / ".llm-router" / "usage.json").write_text("{}")  # fresh -> not stale
     env = {
         "HOME": str(home), "PATH": "/usr/bin:/bin", "TERM": "dumb",
-        # The classic layout this test pins (the default is now the fast tick).
-        "LLM_ROUTER_STATUSLINE": "full",
         # Explicitly no cloud provider keys — the reported configuration.
     }
     r = subprocess.run(["bash", str(_SCRIPT)], env=env, input="{}",

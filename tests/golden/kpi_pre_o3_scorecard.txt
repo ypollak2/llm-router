@@ -1,0 +1,22 @@
+llm-router kpi -- window=7d (organic only) generated=2026-10-06T15:20:00Z
+
+  NS  non-Claude-and-used share (target >80%) not measurable: no unit in window
+  O1  quota avoided                          not measurable: no routed calls with a recorded saving in period=week
+  O2  quality held                           not measurable: no LLM_ROUTER_KPI_BENCHMARK_PATH configured (KPI-SPEC calls this 'not measured')
+  D1  offered off Claude                     not measurable: no unit in window
+  D2  success when tried                     not measurable: no unit in window
+  D3  redo rate                              not measurable: no decided event in window
+      user_redone n=0 (redo on Claude pressed on the receipt band; counted in D3 as decided redo events; the row has no session id, so it is not session-kind filtered)
+      user_kept n=0 (keep pressed; shown only: never counted as used, so never in NS, D1, D2 or D3's denominator)
+  D4  tier mix                               sonnet=80.0%, opus=20.0% (n=120) | cost-weighted (haiku 1 : sonnet 3.66 : opus 6.15 per call): sonnet=70.4%, opus=29.6%
+  D5  classifier accuracy                    not measurable: no LLM_ROUTER_KPI_BENCHMARK_PATH configured (KPI-SPEC calls this 'not measured')
+  G1  added latency (hook)                   not measurable: no hook invocation recorded in window (a hook records itself only after its installed copy is updated to a version that carries the recorder)
+  G1  added latency (proxy)                  not measurable: no proxy decisions with tier_decision_s in window
+  G2  silent failures (fail-open / 100 calls) not measurable: no timestamped fail-open event and no recorded hook call exist yet, so there is no window to take a rate over
+      all-time: 0 fail-open event(s) recorded, 0 of them from before per-event timestamps (cannot be placed in any window)
+  G3  ledger completeness (target >=99%)     not measurable: no proxy row carries tier_retry yet (the schema has not started)
+  G4  wrongly benched providers (target 0)   not measurable: no provider bench recorded in window (0 benches: 'none were wrong' cannot be told from 'none happened')
+      benched right now: none (point-in-time)
+
+NS/D1/D2 units: 0 in window; 0 joined to a session-kind tag; 0 untagged (never counted as organic).
+O1 is never session-kind filtered (usage.db predates tagging); G3 is not session-kind filtered either (see KPIS.md); neither are G1 (hook), G2 and G4, whose rows carry no session id. O2/D5 need LLM_ROUTER_KPI_BENCHMARK_PATH. See each line and the module docstring.

@@ -213,6 +213,16 @@ class ClassificationResult:
     capabilities: CapabilityRequirement = field(default_factory=CapabilityRequirement)
     relevant_context: RelevantContext | None = None
 
+    @property
+    def shadow_tier(self) -> str | None:
+        """Would-be tier under ``LLM_ROUTER_LOCAL_TIER=shadow`` ("local" or None).
+
+        A property, not a field: cached results must not freeze a flag value.
+        Record-only; nothing in routing reads it."""
+        from llm_router import local_tier
+
+        return local_tier.would_be_tier(self.inferred_task_type, self.complexity)
+
     def header(self) -> str:
         """Format a one-line summary for CLI/MCP display.
 

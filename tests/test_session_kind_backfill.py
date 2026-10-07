@@ -496,10 +496,12 @@ def test_untagged_session_is_excluded_without_a_sidecar(monkeypatch):
 def test_kpi_ns_d1_d2_resolve_via_the_sidecar_and_state_the_backfilled_count(monkeypatch):
     _stream(monkeypatch, _mixed("s-backfilled"))
     _write_sidecar("s-backfilled")
-    k = kpi.compute_scorecard(days=7, now=NOW)["kpis"]
-    assert k["NS"]["value"] == "30.0% (n=100, 100 backfilled)"
+    card = kpi.compute_scorecard(days=7, now=NOW)
+    k = card["kpis"]
+    assert card["kpis_diag"]["NS_heuristic"]["value"] == "30.0% (n=100, 100 backfilled)"   # heuristic, M0.2 diag
+    assert k["NS"]["value"] == "0.0% (n=100, 100 backfilled)"
     assert k["D1"]["value"] == "60.0% (n=100, 100 backfilled)"
-    assert k["D2"]["value"] == "50.0% (n=60, 60 backfilled)"   # D2's n is attempted units only
+    assert k["D2"]["value"] == "0.0% (n=60, 60 backfilled)"    # D2's n is attempted units only; strict (M0.2)
     assert (k["NS"]["backfilled"], k["D1"]["backfilled"], k["D2"]["backfilled"]) == (100, 100, 60)
 
 
@@ -509,7 +511,7 @@ def test_backfilled_is_a_share_of_n_not_all_or_nothing(monkeypatch):
     _stream(monkeypatch, _mixed("s-live") + _mixed("s-backfilled"))
     _write_sidecar("s-backfilled")
     k = kpi.compute_scorecard(days=7, now=NOW)
-    assert k["kpis"]["NS"]["value"] == "30.0% (n=200, 100 backfilled)"
+    assert k["kpis"]["NS"]["value"] == "0.0% (n=200, 100 backfilled)"
     assert k["joins"]["joined_by_source"] == {"tag": 100, "backfill": 100}
 
 
@@ -553,7 +555,7 @@ def test_no_backfilled_note_when_nothing_is_backfilled(monkeypatch):
     _write_proxy_ledger([{"ts": NOW, "session_id": "s-ledger", "session_kind": "organic"}] * 3)
     _stream(monkeypatch, _mixed("s-ledger"))
     k = kpi.compute_scorecard(days=7, now=NOW)["kpis"]
-    assert k["NS"]["value"] == "30.0% (n=100)"   # the pre-backfill format, unchanged
+    assert k["NS"]["value"] == "0.0% (n=100)"   # the pre-backfill format, unchanged (strict-used, M0.2)
     assert k["NS"]["backfilled"] == 0
 
 
@@ -587,7 +589,7 @@ def test_deleting_the_sidecar_restores_identical_kpi_output(monkeypatch):
     never_had_one = kpi.compute_scorecard(days=7, now=NOW)
     _write_sidecar("s-gone")
     with_sidecar = kpi.compute_scorecard(days=7, now=NOW)
-    assert with_sidecar["kpis"]["NS"]["value"] == "30.0% (n=100, 100 backfilled)"
+    assert with_sidecar["kpis"]["NS"]["value"] == "0.0% (n=100, 100 backfilled)"
     assert with_sidecar != never_had_one
     skb.sidecar_path().unlink()
     assert kpi.compute_scorecard(days=7, now=NOW) == never_had_one
@@ -601,7 +603,7 @@ def test_corrupt_sidecar_does_not_break_the_scorecard(monkeypatch):
     with skb.sidecar_path().open("a", encoding="utf-8") as fh:
         fh.write("this line is not json\n")
     k = kpi.compute_scorecard(days=7, now=NOW)["kpis"]
-    assert k["NS"]["value"] == "30.0% (n=100, 100 backfilled)"
+    assert k["NS"]["value"] == "0.0% (n=100, 100 backfilled)"
 
 
 def test_health_still_works_with_a_sidecar(monkeypatch):

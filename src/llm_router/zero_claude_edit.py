@@ -564,6 +564,7 @@ def maybe_replace(
     prompt: str,
     cwd: str,
     deadline_s: float,
+    session_id: str | None = None,
 ) -> ScopedEditOutcome | None:
     """Entry point called from ``hooks/auto-route.py``'s ``main()``.
 
@@ -688,7 +689,7 @@ def maybe_replace(
     if new_contents is None:
         reason = fail_reason or "no edit instructions could be validated"
         for instr in instructions:
-            _record_edit_ledger(instr.file, model, applied=False)
+            _record_edit_ledger(instr.file, model, applied=False, session_id=session_id, prompt=prompt)
         return ScopedEditOutcome(
             "block", f"ZERO_CLAUDE_EDIT BLOCKED: {reason}", message=failure_message(reason), applied=False,
         )
@@ -709,7 +710,7 @@ def maybe_replace(
     if not verify_result.ok:
         reason = f"verification failed — {verify_result.reason}"
         for instr in instructions:
-            _record_edit_ledger(instr.file, model, applied=False)
+            _record_edit_ledger(instr.file, model, applied=False, session_id=session_id, prompt=prompt)
         return ScopedEditOutcome(
             "block", f"ZERO_CLAUDE_EDIT BLOCKED: {reason}", message=failure_message(reason), applied=False,
         )
@@ -717,7 +718,7 @@ def maybe_replace(
     for f in changed_files:
         (root / f).write_text(new_contents[f], encoding="utf-8")
     for instr in instructions:
-        _record_edit_ledger(instr.file, model, applied=True)
+        _record_edit_ledger(instr.file, model, applied=True, session_id=session_id, prompt=prompt)
 
     message = applied_message(model, changed_files, diffs, inferred)
     return ScopedEditOutcome(
@@ -727,9 +728,16 @@ def maybe_replace(
     )
 
 
-def _record_edit_ledger(file: str, model: str, applied: bool) -> None:
+def _record_edit_ledger(file: str, model: str, applied: bool, session_id: str | None = None,
+                        prompt: str | None = None) -> None:
+    """One ledger row per file. ``session_id`` is the hook payload's own id (not a guess from the
+    pointer file) and ``turn_id`` is ``prompt_key.key(prompt)``, so O3 counts a turn that edits
+    several files once (M0.3c). Neither the prompt nor any text is stored."""
     try:
+        from llm_router import prompt_key
         from llm_router.edit_ledger import record_edit_outcome
-        record_edit_outcome(file=file, model=f"ollama/{model}", applied=applied)
+        record_edit_outcome(file=file, model=f"ollama/{model}", applied=applied, source="zero_claude",
+                            session_id=session_id,
+                            turn_id=prompt_key.key(prompt) if prompt is not None else None)
     except Exception:                                            # noqa: BLE001
         pass

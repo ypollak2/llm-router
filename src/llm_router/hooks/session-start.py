@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 21
+# llm_router-hook-version: 22
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -899,9 +899,12 @@ def _usage_json_age_sec(cached: dict | None) -> float | None:
 def _usage_refresh_marker_age() -> float | None:
     """Seconds since the spawn marker was last claimed, or None if absent."""
     try:
-        return time.time() - os.path.getmtime(_usage_refresh_spawn_file())
+        age = time.time() - os.path.getmtime(_usage_refresh_spawn_file())
     except OSError:
         return None
+    # Future-dated marker (clock skew, restored backup): negative age must
+    # count as expired, not as "inside the cooldown" forever.
+    return age if age >= 0 else float("inf")
 
 
 def _claim_usage_refresh_spawn(cooldown_s: float) -> bool:

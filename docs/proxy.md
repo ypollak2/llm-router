@@ -131,7 +131,7 @@ client tools are never routed.
 | `--hedge-s` | `LLM_ROUTER_PROXY_HEDGE_S` | `8` (first-token deadline; `off` disables) |
 | `--model` | `LLM_ROUTER_PROXY_MODEL` | from policy. A pin changes *which* tool-capable model serves, never *whether* a step is routed. |
 | `--trim` | `LLM_ROUTER_PROXY_TRIM` | `fast`. Comma list of named trims or `module:function`. |
-| `--num-ctx` | `LLM_ROUTER_PROXY_NUM_CTX` | `32768` |
+| `--num-ctx` | `LLM_ROUTER_PROXY_NUM_CTX` | per model, from `llm_router.local_models.NUM_CTX` (`qwen3.5:latest` and `qwen3.8:latest` 131072, `llmr-edit` 16384, `llmr-classifier` 4096; 32768 for `qwen3-coder:30b`, `qwen3.6:35b-a3b-coding` and any unlisted model). Applies to the pinned `--model`, or to each model the policy picks when none is pinned. A value you set applies to every model. |
 | `--keep-alive` | (none) | `-1`: the model stays loaded until Ollama restarts |
 | `--no-warm-up` | (none) | a warm-up call runs in the background at start |
 | `--ollama-url` | (none) | the router's configured Ollama (e.g. a dedicated server, below) |
@@ -233,6 +233,72 @@ run came from those windows, and the 2026-09-28 run's "18/18 empty" server log
 shows the same fault. Restart the dedicated server if `proxy stats` shows a run
 of fast `empty response` fallbacks. Report:
 `~/.rsi/research/llm-router-cursor-parity/p3-compaction-ab.md`.
+
+## Serve mode: Claude Code on a local model (opt-in, `--serve local-agent`)
+
+Off by default (`--serve off`, env `LLM_ROUTER_PROXY_LOCAL_AGENT_MODE`), and with it off the proxy is
+byte-identical to what it was before the mode existed: `tests/test_proxy_off_golden.py` replays 19
+request scripts plus the startup banner against a golden recorded from `main` before the mode was written.
+
+```
+ollama serve   # OLLAMA_NUM_PARALLEL=1 OLLAMA_CONTEXT_LENGTH=32768, hand-run (Ollama.app cannot set the first)
+llm-router proxy --serve local-agent --model ollama/qwen3.6:35b-a3b-coding --ollama-url http://127.0.0.1:11434
+ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ENABLE_TOOL_SEARCH=true claude
+```
+
+Why it exists: the 2026-10-04 route probes found that the stock proxy served 0 of 9 Claude Code steps
+locally (the first call of every turn always went to Anthropic, the routing policy could keep a step on
+Claude, and an Edit/Write reply was never served), and that the default `fast` trim hides Skill, Agent, MCP
+and ToolSearch from the local model. This mode makes the three in-memory patches of that experiment real, for
+this mode only:
+
+| Patch | In this mode |
+|---|---|
+| P1 step class | every tool-carrying main-loop call is eligible (`local_mode.is_agent_turn`), not only tool_result continuations |
+| P2 policy | `choose_model` is not consulted; the pinned `--model` serves |
+| P3 edits | an Edit/Write reply is served: through the validated edit protocol when the file qualifies, else raw, and **every served edit is checked after it is applied** (at the next step, against the file on disk: the new text is there, a Write holds what was written, the file still parses; a failure is written into the tool result the local model sees, never forwarded to Anthropic) |
+
+**Pinning.** A conversation is decided at its first call and stays there. A conversation the proxy did not see
+start (a restart, `/compact`) is pinned to Claude and never moved local. A local step that fails moves the
+conversation to Claude once, with the reason in the ledger.
+
+**Eligibility** (`decide_local`, a rule stub the resolver will replace): no media anywhere in the conversation;
+estimated prompt <= 25,000 tokens (a digit-aware estimate fitted to real Ollama counts, within 1.02-1.21x of them on 7 payloads;
+`local_context_guard`'s chars/3.04 is 1.4x high on JSON tool schemas and 0.90x low on a 450-line log, so it stays the 32k window
+backstop in the backend instead); no media anywhere; backend healthy; quality breaker closed.
+
+**Never silent.** Every step not served locally has a ledger `reason` and `egress: true`, and prints one line on
+stderr saying it is being sent to Anthropic. Media and over-cap prompts are escalated with that reason, never
+replaced by a placeholder. The startup banner states the mode and the egress rule.
+
+**Kill switch.** `touch <state>/local_agent_kill` (the path is in the banner) sends every step to Anthropic from
+the next request, no restart; remove the file to resume.
+
+**Preflight.** The proxy refuses to start (message on stderr, exit 2) unless: `--model ollama/<tag>` is given
+and resident with `num_ctx >= 32768` (it is loaded first if absent); the Ollama server's own
+`OLLAMA_NUM_PARALLEL` is 1 (read from its process environment, so only a loopback server can be checked) and
+no runner has `-np` other than 1; `--trim none` (the default in this mode); `--tiers off`; compaction off; the
+overflow guard passes a self-test; the ledger and kill-switch directories are writable. In this mode the first-token
+hedge defaults to off and the step budget to 120 s (a conversation's first call evaluates a ~12k-token prompt).
+
+Not in this mode (later redesign PRs): thinking passthrough, images served locally, `--no-egress`, the ToolSearch
+loop-guard fix, AskUserQuestion repair, sub-agent inheritance.
+
+## Shadow mode: measure the local model against Claude (opt-in, `--shadow on`)
+
+Off by default (`LLM_ROUTER_PROXY_LOCAL_SHADOW=on` is the env form). Needs `--model ollama/<tag>` and
+`--serve off`: shadow never serves. Every step is answered by Anthropic exactly as without the proxy;
+the local model answers a deep copy of each agent step in parallel and one `local_shadow` record per step
+goes to `proxy_local_shadow.jsonl` in the state dir (not `proxy_calls.jsonl`, so NS, D1 and D2 never read it).
+
+- Latency isolation: the local job is a detached task. It is dropped (`dropped_claude_first`) the moment
+  Claude's reply is complete, and has its own budget (`--shadow-budget-s`, default 20 s, `budget_exceeded`).
+- One local job at a time; a step that arrives while one runs is recorded as `skipped_busy`.
+- Local reads no file and runs no tool: no repo-knowledge attach, no post-apply check.
+- A record holds: `step_id`, `agree` (same tool names in the same order; two text-only replies agree),
+  `args_equal` (key order and surrounding whitespace ignored; null when names differ), `local_latency_s`,
+  `schema_valid`, `fallback_reason`. Reason codes and numbers only: no prompt, tool name, argument or reply.
+- `llm-router kpi` shows one informational line, `local shadow (proxy): ...`, next to `local (shadow)`.
 
 ## Metrics
 

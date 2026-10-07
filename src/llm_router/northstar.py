@@ -305,7 +305,7 @@ import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from llm_router import paths, session_kind
 
@@ -333,6 +333,11 @@ UNIT_DRAFT = "draft"
 UNIT_DIRECT = "direct"
 UNIT_ROUTED_EDIT = "routed_edit"
 UNIT_AGENT_ROUTE_CODEX = "agent_route_codex"
+# P2 (local-usage plan): informational kind for local work. Deliberately NOT in
+# ALL_KINDS / ATTEMPTED_KINDS and never yielded by ``units()``: report(), the
+# quality breaker and kpi NS/D1/D2 all consume ``units()``, so a row there would
+# change their denominators. Read it via ``local_shadow_units()``.
+UNIT_LOCAL_SHADOW = "local_shadow"
 ALL_KINDS = (
     UNIT_USER_PROMPT, UNIT_CLAUDE_MAIN, UNIT_SIDECHAIN,
     UNIT_ROUTED_MCP, UNIT_DRAFT, UNIT_DIRECT,
@@ -351,6 +356,7 @@ _LEVER_OF_KIND = {
     UNIT_DIRECT: "direct",
     UNIT_ROUTED_EDIT: "llm_edit",
     UNIT_AGENT_ROUTE_CODEX: "agent_route_codex",
+    UNIT_LOCAL_SHADOW: "local_shadow",
 }
 
 # The MCP tool name llm_edit is registered under (server.py / tool_surface.py) —
@@ -365,6 +371,21 @@ OUTCOME_NOT_ROUTED = "not_routed"
 # report()'s per-session/per-kind "redo" count folds both confirmed-failure
 # outcomes together (that schema has no separate "discarded" field).
 _REDO_LIKE_OUTCOMES = frozenset({OUTCOME_REDO, OUTCOME_DISCARDED})
+
+# Strict "used" (PLAN M0.2, owner decision D-2). NS and D2 count a unit only when a
+# non-Claude model served it AND its verify record shows a test that fails before the change
+# and passes after it AND it is not Q&A AND it was not redone. The heuristic outcome
+# "used" is neither required nor enough: a keep press adds nothing, pass-to-pass never counts.
+QA_TASK_TYPES = frozenset({
+    "query", "research", "generate", "analyze", "coordinate", "introspect",
+    "summary", "classification", "extraction",
+})
+STRICT_VERIFY = frozenset({"pass_f2p", "pass_f2p_model"})
+STRICT_RULE_TEXT = (
+    "strict-used: served by a non-Claude model AND verify_status in {pass_f2p, pass_f2p_model} "
+    "AND task_type not Q&A AND outcome not redo (a unit with no verify record never counts; "
+    "keep presses and the heuristic outcome add nothing)"
+)
 
 RELAY_MARKER_A = "🎯 LLM Router routed"
 RELAY_MARKER_B = "🎯 llm_router →"
@@ -393,9 +414,12 @@ class Unit:
     kind_stamp: str | None = None  # session kind the unit's own ledger row was written with
     session_kind: str | None = None  # resolved by build_sessions; None = no tag resolvable
     session_kind_source: str | None = None
+    # Verify record for strict-used (M0.2): {"verify_status": ...}. None until a verifier
+    # (M3) attaches one, so no unit counts as strict-used before then.
+    verify: dict | None = None
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "session_id": self.session_id,
             "ts": (datetime.fromtimestamp(self.ts, tz=timezone.utc).isoformat()
                    if self.ts is not None else None),
@@ -408,6 +432,44 @@ class Unit:
             "session_kind": self.session_kind,
             "session_kind_source": self.session_kind_source,
         }
+        if self.verify is not None:  # the key appears only when set: other output is unchanged
+            out["verify"] = self.verify
+        return out
+
+
+def _unit_field(unit: Any, name: str) -> Any:
+    """``name`` of a Unit or of the dict ``Unit.to_dict()`` yields (what kpi reads)."""
+    if isinstance(unit, dict):
+        return unit.get(name)
+    return getattr(unit, name, None)
+
+
+def is_non_claude(unit: Any) -> bool:
+    """The unit's model is set and is not a Claude/Anthropic model, and the unit is not a
+    Claude main-loop call (or a Claude sub-agent call)."""
+    if _unit_field(unit, "kind") in (UNIT_CLAUDE_MAIN, UNIT_SIDECHAIN):
+        return False
+    model = _unit_field(unit, "model")
+    if not isinstance(model, str) or not model.strip():
+        return False
+    return not model.strip().lower().startswith(("claude", "anthropic"))
+
+
+def _verify_status(unit: Any) -> str | None:
+    verify = _unit_field(unit, "verify")
+    if isinstance(verify, dict):
+        status = verify.get("verify_status")
+    else:
+        status = getattr(verify, "verify_status", None)
+    return status if isinstance(status, str) else None
+
+
+def is_strict_used(unit: Any) -> bool:
+    """PLAN M0.2: the one rule behind NS and D2. See ``STRICT_RULE_TEXT``."""
+    return (is_non_claude(unit)
+            and _verify_status(unit) in STRICT_VERIFY
+            and _unit_field(unit, "task_type") not in QA_TASK_TYPES
+            and _unit_field(unit, "outcome") != OUTCOME_REDO)
 
 
 @dataclass
@@ -722,7 +784,9 @@ def _fold_edit_ledger(su: SessionUnits, edit_call_units: list[Unit], rows: list[
         if not isinstance(row_ts, (int, float)):
             row_ts = None
         best: Unit | None = None
-        if row_ts is not None:
+        # A zero-Claude row comes from the UserPromptSubmit hook, not from an llm_edit tool call,
+        # so it must neither match nor drop a routed_mcp unit (M0.3c).
+        if row_ts is not None and row.get("source") != "zero_claude":
             for call in edit_call_units:
                 if call.ts is None or call.ts > row_ts:
                     continue
@@ -775,6 +839,8 @@ def _fold_orphan_edit_rows(
         row_file = row.get("file")
         if not isinstance(row_ts, (int, float)) or not row_file:
             continue
+        if row.get("source") == "zero_claude":
+            continue  # no llm_edit call exists for a hook-applied edit: nothing to join (M0.3c)
         best_sid: str | None = None
         best_unit: Unit | None = None
         for sid, call, files in all_edit_calls:
@@ -1276,6 +1342,64 @@ def units(days: int | None = 30, session_id: str | None = None,
         ordered = sorted(su.units, key=lambda u: (u.ts is None, u.ts if u.ts is not None else 0.0))
         for u in ordered:
             yield u.to_dict()
+
+
+def local_shadow_units(days: int | None = 30, db_path: Path | None = None) -> Iterator[dict]:
+    """Local work as ``local_shadow`` rows, derived from ``usage.db``.
+
+    Source: ``routing_decisions`` rows with ``provenance='runtime'`` (the MCP
+    ``llm()`` / ``llm_edit`` path, written by ``router.py``'s finalizer, and the hook's
+    DIRECT / agent-route rows written by ``log_direct_to_db``) served by
+    ``final_provider='ollama'``. Derived rather than emitted: the rows already exist,
+    so there is no new write path to fail, drift or double-count. Read-only.
+
+    Never part of ``units()``, so never part of NS, D1, D2 or ``report()``. Each
+    dict: session_id, ts (iso8601), kind, lever, task_type, complexity, model,
+    latency_ms, outcome (always ``unknown`` here; ``offload_share`` judges it),
+    provenance ("runtime"), shadow_tier, tool_use_id (the MCP call's ``tool_use`` id,
+    None on rows written before ``call_identity`` or with no MCP call), success (the
+    router's own 0/1 verdict on the answer, None when the column is absent).
+    """
+    import sqlite3
+
+    path = db_path or paths.state_path("usage.db")
+    if not Path(path).is_file():
+        return
+    where = "provenance = 'runtime' AND final_provider = 'ollama'"
+    args: tuple = ()
+    if days:
+        where += " AND timestamp >= datetime('now', ?)"
+        args = (f"-{int(days)} days",)
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
+    except sqlite3.Error:
+        return
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(routing_decisions)")}
+        sid = "session_id" if "session_id" in cols else "NULL"
+        tier = "shadow_tier" if "shadow_tier" in cols else "NULL"
+        tool = "tool_use_id" if "tool_use_id" in cols else "NULL"
+        ok = "success" if "success" in cols else "NULL"
+        rows = conn.execute(
+            f"SELECT {sid}, timestamp, task_type, complexity, final_model, latency_ms, {tier}, {tool}, {ok} "
+            f"FROM routing_decisions WHERE {where} ORDER BY timestamp, id", args,
+        ).fetchall()
+    except sqlite3.Error:
+        return
+    finally:
+        conn.close()
+    for session, ts, task_type, complexity, model, latency, shadow, tool_use, success in rows:
+        try:
+            iso = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).isoformat()
+        except (TypeError, ValueError):
+            iso = None
+        yield {
+            "session_id": session, "ts": iso, "kind": UNIT_LOCAL_SHADOW,
+            "lever": _LEVER_OF_KIND[UNIT_LOCAL_SHADOW], "task_type": task_type,
+            "complexity": complexity, "model": model, "latency_ms": latency,
+            "outcome": OUTCOME_UNKNOWN, "provenance": "runtime", "shadow_tier": shadow,
+            "tool_use_id": tool_use, "success": success,
+        }
 
 
 def _percentile(values: list[float], p: float) -> float | None:
