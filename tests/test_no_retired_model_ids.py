@@ -98,3 +98,4 @@ def test_scanner_catches_the_baseline_shape(tmp_path):
     hits, n = _scan(sample, pricing.retired_models())
     assert n >= 3  # f-string parts tokenize separately on 3.12+
     assert sorted(h.split(": ", 1)[1] for h in hits) == ["claude-opus-4-6", "claude-sonnet-4"]
+
