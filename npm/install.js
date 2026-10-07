@@ -127,6 +127,10 @@ async function main() {
   }
 
   console.log('llm-routing: next step ->  llm-router install');
+  console.log(
+    'llm-routing: or, inside Claude Code ->  /plugin marketplace add ypollak2/llm-router' +
+      '  then  /plugin install llm-router@ypollak2'
+  );
 }
 
 main().catch((err) => fail('unexpected error during install.', err.stack || err.message));
