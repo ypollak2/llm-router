@@ -4,7 +4,7 @@ Measured 2026-10-07 on the machine this repo is developed on (macOS, Apple silic
 Python 3.13.14; not CI), while other jobs were running (load average 6-12 at the time, so
 the noise floor below is wider than in the 2026-10-04 recorder measurement). Produced by
 `scripts/bench_hook_latency.py` from the tree that adds `phases_ms` (hook versions:
-auto-route 45, session-start 23). The output below is the only source of the numbers.
+auto-route 46, session-start 23). The output below is the only source of the numbers.
 The budget for this change (PLAN M4.1) is 2 ms or less added per hook invocation.
 
 ## How

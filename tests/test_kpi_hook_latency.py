@@ -567,14 +567,61 @@ def test_a_broken_phase_value_never_raises(monkeypatch):
     assert hl._phases == {}
 
 
-def test_a_real_auto_route_process_names_import_and_its_phases_fit_inside_elapsed(tmp_path):
-    proc = _run_hook("auto-route", tmp_path)
+def _run_auto_route(tmp_path, prompt):
+    payload = dict(_PAYLOADS["auto-route"], prompt=prompt)
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "LLM_ROUTER_HOME": os.environ["LLM_ROUTER_HOME"],
+           "LLM_ROUTER_ENFORCE": "smart", "LANG": "en_US.UTF-8"}
+    proc = subprocess.run([sys.executable, str(HOOKS / "auto-route.py")], input=json.dumps(payload).encode(),
+                          env=env, capture_output=True, timeout=120)
     assert proc.returncode == 0, proc.stderr.decode()
     (row,) = [r for r in _lines() if r["hook"] == "auto-route"]
+    return row
+
+
+def test_a_real_auto_route_process_names_import_and_its_phases_fit_inside_elapsed(tmp_path):
+    row = _run_auto_route(tmp_path, "hi")
     ph = row["phases_ms"]
     assert ph["import"] > 0
     # cold_wait lives inside ollama/zce; every other phase is disjoint.
     assert sum(v for k, v in ph.items() if k != "cold_wait") <= row["elapsed_ms"] + 1.0
+
+
+def test_a_real_auto_route_process_names_the_plan_phases_it_ran(tmp_path):
+    """The phase NAMES are the contract with hook_tail.py and the plan (zce, session_io, ...):
+    a rename must fail here, not silently turn the time into 'other'."""
+    ph = _run_auto_route(tmp_path, "hi")["phases_ms"]
+    assert {"import", "session_io", "zce", "hud"} <= set(ph), ph
+    assert ph["session_io"] > 0 and ph["zce"] > 0, ph  # a real write_pointer and a real maybe_replace
+
+
+def test_a_real_auto_route_process_that_classifies_and_logs_names_those_phases(tmp_path):
+    ph = _run_auto_route(tmp_path, "explain the python GIL in one sentence")["phases_ms"]
+    assert {"import", "session_io", "zce", "hud", "classify", "db_write"} <= set(ph), ph
+
+
+#: Every phase name each hook may write. A phase in a code path a unit run does not reach
+#: (ollama needs a model, session-start spawns processes) is pinned here by reading the source.
+_PHASE_NAMES = {
+    "auto-route": {"session_io", "zce", "hud", "classify", "db_write", "ollama"},
+    "session-start": {"session_io", "reset_state", "ollama_up", "pxpipe", "proxy_health", "usage", "hints",
+                      "bg_spawn", "banner", "rules_update"},
+}
+
+
+@pytest.mark.parametrize("name", sorted(_PHASE_NAMES))
+def test_the_phase_names_a_hook_source_uses_are_exactly_the_documented_ones(name):
+    tree = ast.parse((HOOKS / f"{name}.py").read_text())
+    used = {n.args[0].value for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_hl_phase"
+            and n.args and isinstance(n.args[0], ast.Constant)}
+    assert used == _PHASE_NAMES[name], (used ^ _PHASE_NAMES[name])
+
+
+def test_ollama_and_cold_wait_phase_names_are_pinned_in_the_executor():
+    src = (HOOKS / "direct_executor.py").read_text()
+    assert 'add_phase("cold_wait"' in src
 
 
 @pytest.mark.parametrize("name", ["auto-route", "session-start"])
