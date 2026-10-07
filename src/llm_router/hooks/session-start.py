@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 22
+# llm_router-hook-version: 23
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -58,6 +58,19 @@ if __name__ == "__main__":
         import sys as _hl_sys
 
         print(f"llm-router: hook latency not recorded ({type(_hl_exc).__name__})", file=_hl_sys.stderr)
+
+# M4.1: name where the time went (phases_ms on the hook_latency row). Both are no-ops
+# unless the recorder was armed above, so a test that imports this file records nothing.
+try:
+    from llm_router.hook_latency import mark_main_start as _hl_mark_main, phase as _hl_phase
+except ImportError:  # llm_router is not importable on this host: no recorder, no phases
+    import contextlib as _hl_contextlib
+
+    def _hl_phase(name):  # noqa: ARG001
+        return _hl_contextlib.nullcontext()
+
+    def _hl_mark_main():
+        return None
 
 # Import timeout config from llm_router package if available
 try:
@@ -1853,6 +1866,7 @@ def _maybe_update_pull_routing_rules() -> None:
 
 
 def main() -> None:
+    _hl_mark_main()
     try:
         _hook_input = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):
@@ -1865,9 +1879,10 @@ def main() -> None:
     try:
         from llm_router import session_store as _session_store
         _real_session_id = _hook_input.get("session_id") if isinstance(_hook_input, dict) else None
-        if _real_session_id:
-            _session_store.write_pointer(_real_session_id)
-        _session_store.cleanup_old_sessions()
+        with _hl_phase("session_io"):
+            if _real_session_id:
+                _session_store.write_pointer(_real_session_id)
+            _session_store.cleanup_old_sessions()
     except Exception:
         pass
 
@@ -1876,42 +1891,48 @@ def main() -> None:
     try:
         from llm_router import session_kind as _session_kind
         if isinstance(_hook_input, dict):
-            _session_kind.tag_session(_hook_input.get("session_id"), _hook_input.get("cwd"))
+            with _hl_phase("session_io"):
+                _session_kind.tag_session(_hook_input.get("session_id"), _hook_input.get("cwd"))
     except Exception:
         pass
 
-    _reset_session_stats()
-    _reset_stale_health()
+    with _hl_phase("reset_state"):
+        _reset_session_stats()
+        _reset_stale_health()
     # Clear orphaned per-session state files from crashed/killed sessions.
     # Without this, stale files would block Bash/Edit in the new session
     # (pending_route_*.json) and leak old classification verdicts into the
     # length-heuristic fallback path (last_classification_*.json, INV-007).
     import glob as _glob
     _stale_globs = ("pending_route_*.json", "last_classification_*.json")
-    for _g in _stale_globs:
-        for _stale in _glob.glob(os.path.join(_state_dir(), _g)):
-            try:
-                os.unlink(_stale)
-            except OSError:
-                pass
+    with _hl_phase("reset_state"):
+        for _g in _stale_globs:
+            for _stale in _glob.glob(os.path.join(_state_dir(), _g)):
+                try:
+                    os.unlink(_stale)
+                except OSError:
+                    pass
 
     hints = ""
 
     # 1. Ensure Ollama is running (start it if needed)
-    hints += _ensure_ollama_running()
+    with _hl_phase("ollama_up"):
+        hints += _ensure_ollama_running()
 
     # 1b. pxpipe (opt-in): auto-start the local proxy for heavy-model context
     # compression, then sync Claude Code's own ANTHROPIC_BASE_URL to it (or
     # self-heal it away) so this session's settings.json reflects whether
     # pxpipe actually came up. Takes effect next session, not this one —
     # settings.json is read before this hook ever runs.
-    hints += _ensure_pxpipe_running()
-    hints += _sync_pxpipe_anthropic_base_url()
+    with _hl_phase("pxpipe"):
+        hints += _ensure_pxpipe_running()
+        hints += _sync_pxpipe_anthropic_base_url()
 
     # 1c. Proxy-default (opt-in via `llm-router install --proxy-default`):
     # warn loudly if it's installed but dead. Cannot self-heal this session
     # (see the function's own docstring for why) — only the next one.
-    hints += _check_proxy_default_health()
+    with _hl_phase("proxy_health"):
+        hints += _check_proxy_default_health()
 
     # 2. Select banner from cached subscription state (no OAuth taint in this path).
     # The cache is written by _refresh_claude_usage() during the previous session.
@@ -1941,62 +1962,71 @@ def main() -> None:
     # LLM_ROUTER_CLAUDE_SUBSCRIPTION env var — this makes CC mode detection
     # implicit (token present = CC mode) rather than requiring a .env file
     # that hooks may not have access to.
-    usage_hint = _refresh_claude_usage_nonblocking()
+    with _hl_phase("usage"):
+        usage_hint = _refresh_claude_usage_nonblocking()
     is_subscription = not usage_hint.startswith("\n⚠️")
 
     hints += usage_hint
-    hints += _seats_hint()
-    hints += _format_learned_memory()
-    hints += _weekly_digest()
-    hints += _latency_hint()
-    hints += _preflight_check()
-    hints += _ollama_contention_hint()
-    hints += _ollama_watchdog_hint()
+    with _hl_phase("hints"):
+        hints += _seats_hint()
+        hints += _format_learned_memory()
+        hints += _weekly_digest()
+        hints += _latency_hint()
+        hints += _preflight_check()
+        hints += _ollama_contention_hint()
+        hints += _ollama_watchdog_hint()
 
     # 5. Trigger benchmark refresh in background if stale (v5.0 adaptive router).
     # Opt-in via LLM_ROUTER_AUTO_BENCHMARK_FETCH=1 (default off — local-first,
     # no network fetch without consent). Runs as a detached subprocess so the
     # session start is never blocked when it does run.
-    _maybe_refresh_benchmarks_bg()
+    with _hl_phase("bg_spawn"):
+        _maybe_refresh_benchmarks_bg()
 
     # 5b. Refresh this project's OKF index in the background. A stale index does
     # not cause false rejections (the gates check disk), but it does cost
     # RETRIEVAL: find_relevant cannot return a document it has never seen, so a
     # prompt about a new module gets no context and falls through to Claude for
     # want of material rather than capability.
-    _maybe_reindex_okf_bg(
-        (_hook_input.get("cwd") if isinstance(_hook_input, dict) else None)
-        or os.getcwd()
-    )
+    with _hl_phase("bg_spawn"):
+        _maybe_reindex_okf_bg(
+            (_hook_input.get("cwd") if isinstance(_hook_input, dict) else None)
+            or os.getcwd()
+        )
 
     # 6. Warm up Ollama's classifier model in the background so the first
     # prompt of the new session doesn't pay model-load latency on its
     # classification call. Detached, never blocks session start.
     # 6a. First, load the zero-Claude edit model with the edit call's own
     # num_ctx and keep_alive (plan 3.7); the generic warm-up then skips it.
-    _warm_edit_model_bg()
-    _warm_ollama_bg()
+    with _hl_phase("bg_spawn"):
+        _warm_edit_model_bg()
+        _warm_ollama_bg()
 
     # 6b. Drain the judge grading queue in the background — the hot path only
     # enqueues, so something has to grade sampled responses out of band.
     # Detached, never blocks session start.
-    _drain_judge_queue_bg()
+    with _hl_phase("bg_spawn"):
+        _drain_judge_queue_bg()
 
     # 6c. Hang check of the local Ollama (detached; see _ollama_watchdog_bg).
-    _ollama_watchdog_bg()
+    with _hl_phase("bg_spawn"):
+        _ollama_watchdog_bg()
 
     # Visible UI signal — Claude Code surfaces stderr as
     # "SessionStart:startup hook success: <msg>". Print the BANNER box first
     # so the prominent ╔═══╗ routing summary is the first thing users see,
     # then the painting/welcome below it.
-    print(banner, file=sys.stderr)
-    print("", file=sys.stderr)
-    print(_render_welcome(is_subscription), file=sys.stderr)
+    with _hl_phase("banner"):
+        print(banner, file=sys.stderr)
+        print("", file=sys.stderr)
+        print(_render_welcome(is_subscription), file=sys.stderr)
 
     # Pull-routing auto-update: check if IDE rule files in the current
     # project are out of date compared to the bundled version in the package.
     # Runs at most once per day (gated by ~/.llm-router/last_rules_check).
-    _maybe_update_pull_routing_rules()
+    with _hl_phase("rules_update"):
+        _maybe_update_pull_routing_rules()
 
     print(json.dumps({
         "hookSpecificOutput": {

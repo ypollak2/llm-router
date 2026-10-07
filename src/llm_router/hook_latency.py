@@ -19,6 +19,18 @@ include interpreter start-up before the script's first line or interpreter
 teardown after ``atexit``; both are fixed costs the hook cannot see. The
 measured gap against an external stopwatch is in the PR that added this file.
 
+PHASES (M4.1). A hook may also name where its time went. ``phase(name)`` is a
+context manager that adds the block's wall time to ``phases_ms[name]``; the row
+then carries ``"phases_ms":{"import":12.1,"session_io":3.4,"zce":0.2}``.
+``mark_main_start()`` records ``import``: the time from the clock's start (before
+the first ``llm_router`` import) to the moment ``main()`` begins. Phases are
+plain milliseconds that a reader subtracts from ``elapsed_ms`` to get "other"; a
+phase nested inside another is the reader's business (``cold_wait`` lives inside
+``draft_chain`` or ``zce``). A run that names no phase writes the same row as before.
+Outside a hook process (no ``begin`` call: the MCP server, tests) every phase call
+is a no-op, so nothing accumulates in a long-lived process. Cost: two clock reads
+and one dict update per phase, measured in ``scripts/bench_hook_latency.py micro``.
+
 ``timed_out`` means ``elapsed_ms >= HOOK_BUDGETS_MS[hook]``: the invocation used
 its whole budget. A process the host KILLS at its timeout never reaches
 ``atexit``, so a kill leaves no row here; kills are counted separately
@@ -63,6 +75,9 @@ __all__ = [
     "DEFAULT_BUDGET_MS",
     "STORE_FILENAME",
     "begin",
+    "phase",
+    "add_phase",
+    "mark_main_start",
     "record",
     "read_rows",
     "store_path",
@@ -132,6 +147,8 @@ _wall = time.time
 #: The one invocation this process is timing: set by ``begin``, read at exit.
 _pending: dict | None = None
 _registered = False
+#: Milliseconds per named phase for the invocation in ``_pending`` (M4.1).
+_phases: dict[str, float] = {}
 
 
 def store_path() -> Path:
@@ -180,14 +197,64 @@ def begin(hook: str, event: str, t0: float | None = None) -> None:
         _pending = None
 
 
+def add_phase(name: str, ms: float) -> None:
+    """Add ``ms`` to the named phase of the invocation being timed. No-op when
+    nothing is being timed (not a hook process). Never raises."""
+    try:
+        if _pending is None:
+            return
+        _phases[name] = _phases.get(name, 0.0) + float(ms)
+    except Exception:  # noqa: BLE001 -- timing must never break the hook
+        return
+
+
+class _Phase:
+    """``with phase("zce"): ...`` -- never suppresses an exception or SystemExit."""
+
+    __slots__ = ("name", "t")
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.t = 0.0
+
+    def __enter__(self) -> "_Phase":
+        self.t = _monotonic()
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        add_phase(self.name, (_monotonic() - self.t) * 1000.0)
+        return False
+
+
+def phase(name: str) -> _Phase:
+    return _Phase(name)
+
+
+def mark_main_start() -> None:
+    """Record ``import``: clock start (before the first llm_router import) to now.
+    Call once, as the first statement of ``main()``. Never raises."""
+    try:
+        pending = _pending
+        if pending is not None and "import" not in _phases:
+            _phases["import"] = (_monotonic() - pending["t0"]) * 1000.0
+    except Exception:  # noqa: BLE001
+        return
+
+
 def _finish() -> None:
     pending = _pending
     if pending is None:
         return
-    record(pending["hook"], pending["event"], (_monotonic() - pending["t0"]) * 1000.0)
+    record(
+        pending["hook"], pending["event"], (_monotonic() - pending["t0"]) * 1000.0,
+        phases_ms=dict(_phases) if _phases else None,
+    )
 
 
-def record(hook: str, event: str, elapsed_ms: float, *, now: float | None = None) -> bool:
+def record(
+    hook: str, event: str, elapsed_ms: float, *, now: float | None = None,
+    phases_ms: dict[str, float] | None = None,
+) -> bool:
     """Append one row. Returns True when it was written. Never raises."""
     try:
         if _disabled():
@@ -200,6 +267,8 @@ def record(hook: str, event: str, elapsed_ms: float, *, now: float | None = None
             "timed_out": elapsed_ms >= budget_ms(hook),
             "ts": round(_wall() if now is None else now, 3),
         }
+        if phases_ms:
+            row["phases_ms"] = {str(k): round(float(v), 1) for k, v in phases_ms.items()}
         capped_log.append(
             store_path(), (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8"), max_bytes()
         )
