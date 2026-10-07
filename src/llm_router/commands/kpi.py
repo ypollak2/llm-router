@@ -75,8 +75,13 @@ SCOPE, stated rather than implied:
   contract). No path configured, or the file does not parse -> "not measured",
   the label the KPI spec itself uses for this gap.
 * **G1 hook latency** comes from ``hook_latency.jsonl`` (``llm_router.hook_latency``):
-  one row per hook invocation, p50 / p95 per hook against that hook's budget (the
-  one table ``hook_latency.HOOK_BUDGETS_MS``). NOT session-kind filtered -- a row
+  one row per hook invocation, p50 / p95 per hook against that hook's PRD bar (the
+  one table ``hook_latency.HOOK_BUDGETS_MS``: 300 ms per sync hook, 2 s
+  session-start, 100 ms statusline). The p50 / p95 are of ``router_added_ms``
+  (``hook_latency.router_added_ms``: elapsed minus the model phases ``draft_chain``,
+  ``zce_model``, ``cold_wait``; plain elapsed where a row names none), because a
+  local draft's model time is the answer, not overhead (PLAN v16 P0.9-f). The
+  elapsed p95 is printed beside it. NOT session-kind filtered -- a row
   carries no session id. A hook the host KILLS at its timeout writes no row; kills
   are shown from the fail-open ledger (``CHZ-HOOK-KILLED``). The proxy-side half is
   G1_proxy: p50 / p95 of ``tier_decision_s`` in proxy_calls.jsonl, turn-first and
@@ -657,20 +662,26 @@ def _g1_hook(days: int, now: float, killed: int | None) -> dict:
     thin = 0
     for name in sorted(by_hook):
         rs = by_hook[name]
-        values = sorted(float(r["elapsed_ms"]) for r in rs)
+        # Judged on router-added time (P0.9-f); read_rows guarantees elapsed_ms.
+        values = sorted(hl.router_added_ms(r) or 0.0 for r in rs)
+        elapsed = sorted(float(r["elapsed_ms"]) for r in rs)
         n = len(values)
         budget = hl.budget_ms(name)
         timed_out = sum(1 for r in rs if r.get("timed_out") is True)
+        model_rows = sum(1 for r in rs if hl.router_added_ms(r) != float(r["elapsed_ms"]))
         entry: dict[str, Any] = {"n": n, "budget_ms": budget, "timed_out": timed_out}
         if n < MIN_N:
             thin += 1
-            lines.append(f"{name}: {TOO_FEW} (n={n}); budget {budget}ms; {timed_out} hit it")
+            lines.append(f"{name}: {TOO_FEW} (n={n}); budget {budget}ms; {timed_out} hit the host timeout")
         else:
             p50, p95 = _percentile(values, 0.50), _percentile(values, 0.95)
-            entry.update(p50_ms=round(p50, 1), p95_ms=round(p95, 1))
+            p95_elapsed = _percentile(elapsed, 0.95)
+            entry.update(p50_ms=round(p50, 1), p95_ms=round(p95, 1),
+                         p95_elapsed_ms=round(p95_elapsed, 1), model_time_rows=model_rows)
             verdict = "within budget" if p95 <= budget else "OVER budget"
-            lines.append(f"{name}: p50={p50:.0f}ms p95={p95:.0f}ms vs {budget}ms budget "
-                         f"({verdict}); {timed_out} of {n} hit the budget")
+            lines.append(f"{name}: router-added p50={p50:.0f}ms p95={p95:.0f}ms vs {budget}ms budget "
+                         f"({verdict}); elapsed p95={p95_elapsed:.0f}ms; model time subtracted on "
+                         f"{model_rows} of {n}; {timed_out} hit the host timeout")
             if p95 > budget:
                 over.append(f"{name} p95={p95:.0f}ms>{budget}ms")
             if worst is None or p95 / budget > worst[0]:

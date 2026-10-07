@@ -17,6 +17,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 7 | `edit_outcomes.jsonl` rows with no source | open, fix is plan task M0.3(c) |
 | 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | known, not fixed |
 | 9 | Classifier warm-up loaded `llmr-classifier` at the wrong `num_ctx` | fixed in #298 (M1.4, review 2) |
+| P09-1 | G1 called a 16 s auto-route p95 "within budget" | fixed in `perf/hook-budgets` (P0.9 tasks 1-2) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -173,3 +174,26 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   4096 and an omitted `context_length` return `llm`. Mutants run on head 2316f3f: warm-up
   without `options` fails both tests; `_is_loaded` returning True regardless of context fails
   the second.
+
+## P09-1. G1 called a 16 s auto-route p95 "within budget"
+
+- **Symptom.** `llm-router kpi` G1 held each hook to `HOOK_BUDGETS_MS`, which held the host
+  timeouts (auto-route 60 s, agent-route 320 s) and declared 2-10 s budgets. Live p95s in
+  [HL7] (`$PP/v16/sources/HL7_hook_latency_to_20261007T1449Z.jsonl`, 2026-10-04T21:59Z to
+  2026-10-07T14:49Z): auto-route 16,040 ms (n = 345), session-start 16,178 ms (n = 65),
+  status-bar 4,488 ms (n = 344). Against the PRD (+300 ms sync p95, session-start 2 s,
+  statusline 100 ms) all three fail; the scorecard passed auto-route and session-start.
+  The statusline was not timed at all.
+- **Cause.** The table was written before any hook was timed and mixed two meanings: the
+  host's kill timeout (what `timed_out` means) and the latency bar the scorecard judges.
+- **Fix.** `HOOK_BUDGETS_MS` = the PRD bars (300 ms per sync hook, 2,000 ms session-start,
+  100 ms statusline); the host timeouts moved to `HOOK_TIMEOUTS_MS` and still decide
+  `timed_out`. G1 judges `router_added_ms` = elapsed minus the model phases (`draft_chain`,
+  `zce_model`, `cold_wait`; a `cold_wait` inside another model phase is subtracted once).
+  The statusline records a sampled row (`LLM_ROUTER_STATUSLINE_TIMING=1`, 1 call in 20)
+  through `python -m llm_router.hook_latency record-raw`.
+- **Test.** `tests/test_p09_hook_budgets.py`: `test_budgets_are_the_prd_bars`,
+  `test_kpi_fails_status_bar_at_the_measured_live_p95`,
+  `test_kpi_judges_router_added_and_reports_it_for_a_10s_draft`,
+  `test_the_row_carries_router_added_with_a_nested_cold_wait_subtracted_once`,
+  `test_statusline_timing_all_writes_a_statusline_row`.

@@ -10,6 +10,34 @@
 # IMPORTANT: Must consume stdin — Claude Code pipes session JSON here.
 # Without reading it, the pipe blocks and Claude Code times out.
 
+# >>> statusline timing (P0.9-c) ─────────────────────────────────────────────
+# LLM_ROUTER_STATUSLINE_TIMING=1 times 1 call in 20 (=all: every call) and
+# appends a hook_latency row (hook "statusline", PRD bar 100 ms) from a
+# BACKGROUNDED `python -m llm_router.hook_latency record-raw`, so the write is
+# not inside the number and never delays the line. Clock: perl Time::HiRes,
+# because macOS /bin/bash 3.2 has no EPOCHREALTIME. Unsampled calls pay only
+# the env test and $RANDOM below (no process). The sampled number excludes the
+# bash start-up before this line, as the hooks' numbers exclude the interpreter's.
+_slt_on="${LLM_ROUTER_STATUSLINE_TIMING:-}"
+_slt_t0=""
+if [ -n "$_slt_on" ] && [ "$_slt_on" != "0" ] && [ "$_slt_on" != "off" ]; then
+    if [ "$_slt_on" = "all" ] || [ $((RANDOM % 20)) -eq 0 ]; then
+        _slt_t0=$(perl -MTime::HiRes=time -e 'printf "%.0f",time*1000' 2>/dev/null)
+    fi
+fi
+_slt_finish() {
+    [ -n "$_slt_t0" ] || return 0
+    local _t1 _py
+    _t1=$(perl -MTime::HiRes=time -e 'printf "%.0f",time*1000' 2>/dev/null) || return 0
+    [ -n "$_t1" ] || return 0
+    _py="${_chz_py:-python3}"
+    ("$_py" -m llm_router.hook_latency record-raw statusline Statusline "$((_t1 - _slt_t0))" \
+        </dev/null >/dev/null 2>&1 &)
+    return 0
+}
+[ -n "$_slt_t0" ] && trap _slt_finish EXIT
+# <<< statusline timing ──────────────────────────────────────────────────────
+
 # ── Debug mode: the fast line (opt-in) ───────────────────────────────────────
 # The default is the full layout below, unchanged from before PR #273 (owner
 # decision, reversing #273's fast-by-default). LLM_ROUTER_STATUSLINE=fast swaps
@@ -48,6 +76,11 @@ _tick="${0%/*}/llm_router_statusline_tick.py"
 [ -f "$_tick" ] || _tick="${0%/*}/../statusline_tick.py"
 if [ "$_sl_mode" = "fast" ]; then
     if [ -f "$_tick" ] && command -v python3 >/dev/null 2>&1; then
+        # A timed call cannot exec (the EXIT trap would never run).
+        if [ -n "$_slt_t0" ]; then
+            python3 -I -S "$_tick"
+            exit $?
+        fi
         exec python3 -I -S "$_tick"
     fi
 fi

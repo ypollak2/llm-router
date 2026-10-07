@@ -94,10 +94,11 @@ def test_finish_without_begin_writes_nothing():
     assert not hl.store_path().exists()
 
 
-def test_timed_out_means_the_whole_budget_was_used():
-    budget = hl.HOOK_BUDGETS_MS["enforce-route"]
-    hl.record("enforce-route", "PreToolUse", budget - 0.1, now=NOW)
-    hl.record("enforce-route", "PreToolUse", budget, now=NOW)
+def test_timed_out_means_the_whole_host_timeout_was_used():
+    # P0.9: the budget table is the PRD bar; timed_out stays the host's timeout.
+    timeout = hl.timeout_ms("enforce-route")
+    hl.record("enforce-route", "PreToolUse", timeout - 0.1, now=NOW)
+    hl.record("enforce-route", "PreToolUse", timeout, now=NOW)
     assert [r["timed_out"] for r in _lines()] == [False, True]
 
 
@@ -287,10 +288,10 @@ def test_read_rows_window_is_inclusive_at_both_ends():
 # ── the budget table ─────────────────────────────────────────────────────────
 
 
-def test_agent_route_budget_is_the_registered_timeout():
+def test_agent_route_timeout_is_the_registered_timeout():
     from llm_router.install_hooks import _AGENT_ROUTE_HOOK_TIMEOUT_SEC
 
-    assert hl.HOOK_BUDGETS_MS["agent-route"] == _AGENT_ROUTE_HOOK_TIMEOUT_SEC * 1000 == 320_000
+    assert hl.timeout_ms("agent-route") == _AGENT_ROUTE_HOOK_TIMEOUT_SEC * 1000 == 320_000
 
 
 def test_an_unlisted_hook_is_held_to_the_default_not_to_no_budget():
@@ -327,21 +328,26 @@ def test_just_under_the_minimum_n_says_too_few_and_at_it_measures():
 
 
 def test_p50_p95_per_hook_against_its_own_budget_exact():
-    # enforce-route (budget 2000 ms): 100 x 100 ms and 10 x 5000 ms -> p95 is a slow one.
+    # P0.9: budgets are the PRD bars. enforce-route (300 ms): 100 x 100 ms and
+    # 10 x 5000 ms -> p95 is a slow one.
     _rows("enforce-route", 100.0, n=100, ts=NOW - 100)
     _rows("enforce-route", 5000.0, n=10, ts=NOW - 50)
-    # auto-route (budget 60000 ms): all 4000 ms -> within ITS budget although over enforce-route's.
-    _rows("auto-route", 4000.0, n=60, ts=NOW - 30)
+    # session-start (2000 ms): all 1500 ms -> within ITS bar although over enforce-route's.
+    _rows("session-start", 1500.0, n=60, ts=NOW - 30)
     g1 = _g1()
-    assert g1["hooks"]["enforce-route"] == {"n": 110, "budget_ms": 2000, "timed_out": 10,
-                                            "p50_ms": 100.0, "p95_ms": 5000.0}
-    assert g1["hooks"]["auto-route"] == {"n": 60, "budget_ms": 60_000, "timed_out": 0,
-                                         "p50_ms": 4000.0, "p95_ms": 4000.0}
-    assert g1["value"] == "OVER budget: enforce-route p95=5000ms>2000ms (n=170 invocations)"
-    assert g1["lines"][0] == ("auto-route: p50=4000ms p95=4000ms vs 60000ms budget "
-                              "(within budget); 0 of 60 hit the budget")
-    assert g1["lines"][1] == ("enforce-route: p50=100ms p95=5000ms vs 2000ms budget "
-                              "(OVER budget); 10 of 110 hit the budget")
+    assert g1["hooks"]["enforce-route"] == {"n": 110, "budget_ms": 300, "timed_out": 0,
+                                            "p50_ms": 100.0, "p95_ms": 5000.0,
+                                            "p95_elapsed_ms": 5000.0, "model_time_rows": 0}
+    assert g1["hooks"]["session-start"] == {"n": 60, "budget_ms": 2000, "timed_out": 0,
+                                            "p50_ms": 1500.0, "p95_ms": 1500.0,
+                                            "p95_elapsed_ms": 1500.0, "model_time_rows": 0}
+    assert g1["value"] == "OVER budget: enforce-route p95=5000ms>300ms (n=170 invocations)"
+    assert g1["lines"][0] == ("enforce-route: router-added p50=100ms p95=5000ms vs 300ms budget "
+                              "(OVER budget); elapsed p95=5000ms; model time subtracted on 0 of 110; "
+                              "0 hit the host timeout")
+    assert g1["lines"][1] == ("session-start: router-added p50=1500ms p95=1500ms vs 2000ms budget "
+                              "(within budget); elapsed p95=1500ms; model time subtracted on 0 of 60; "
+                              "0 hit the host timeout")
 
 
 def test_all_within_budget_names_the_worst_hook():
@@ -356,7 +362,7 @@ def test_a_thin_hook_is_named_not_averaged_into_the_rest():
     _rows("session-start", 9000.0, n=3)
     g1 = _g1()
     assert "1 hook(s) too few to tell" in g1["value"]
-    assert "session-start: too few to tell (n=3); budget 10000ms; 0 hit it" in g1["lines"]
+    assert "session-start: too few to tell (n=3); budget 2000ms; 0 hit the host timeout" in g1["lines"]
     assert "p95" not in g1["hooks"]["session-start"]
 
 
@@ -396,7 +402,7 @@ def test_the_scorecard_prints_the_per_hook_lines(monkeypatch):
     _rows("enforce-route", 100.0, n=60, ts=time.time() - 60)
     text = kpi.render_scorecard(kpi.compute_scorecard(days=7))
     assert "G1  added latency (hook)" in text
-    assert "enforce-route: p50=100ms p95=100ms vs 2000ms budget (within budget)" in text
+    assert "enforce-route: router-added p50=100ms p95=100ms vs 300ms budget (within budget)" in text
 
 
 # ── every instrumented hook, end to end and structurally ────────────────────
@@ -720,7 +726,9 @@ def test_every_registered_hook_is_instrumented_or_a_named_exception():
     assert registered - {"context-capture"} == set(_EVENTS), (
         "the installer registers a hook this test does not know (or dropped one): "
         f"{registered ^ (set(_EVENTS) | {'context-capture'})}")
-    assert set(hl.HOOK_BUDGETS_MS) == set(_EVENTS), "the budget table and the instrumented hooks differ"
+    # P0.9: plus "statusline", the shell status line timed through record-raw.
+    assert set(hl.HOOK_BUDGETS_MS) == set(_EVENTS) | {"statusline"}, (
+        "the budget table and the instrumented hooks differ")
     assert "hook_latency" not in (HOOKS / "context-capture.py").read_text()
 
 
