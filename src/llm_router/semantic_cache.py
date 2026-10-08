@@ -25,6 +25,7 @@ Every lookup is counted in ``semantic_cache_lookups`` so the hit rate has an n.
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
@@ -362,8 +363,20 @@ def _equivalence_veto(stored: "dict | None", incoming: dict) -> str | None:
     return None
 
 
+#: P0.6: set by ``route_server.route_payload_async`` while a call carries a
+#: caller-supplied system prompt. The cache key is the prompt and task type only,
+#: so a system prompt outside the prompt would let callers with different system
+#: prompts share one answer. Both ``check`` and ``store`` go through
+#: ``_cache_disabled``, so the call neither reads nor writes the cache.
+CALLER_SYSTEM_PROMPT: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "llm_router_semantic_cache_caller_system_prompt", default=False
+)
+
+
 def _cache_disabled() -> bool:
     """C-03: a per-request off switch. There was none."""
+    if CALLER_SYSTEM_PROMPT.get():
+        return True
     val = os.getenv("LLM_ROUTER_SEMANTIC_CACHE", "").strip().lower()
     return val in ("0", "off", "false", "no", "disable", "disabled")
 
