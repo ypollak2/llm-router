@@ -406,6 +406,28 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index,
             joins)
 
 
+def _verify_shadow(days: int) -> dict | None:
+    """Informational counts of units in the window that carry a verify record. Counts only:
+    never read by NS, D1 or D2 (verifier PR B, shadow). None when no unit carries one."""
+    from llm_router import northstar as ns
+
+    records = ns.load_verify_records()  # joined here, not via units(): NS/D2 must not see them
+    if not records:
+        return None
+    c = {"verified": 0, "weak": 0, "failed": 0, "unavailable": 0}
+    for u in ns.units(days=days, backfill=True):
+        s = (records.get(u.get("unit_id")) or {}).get("verify_status")
+        if s in ("pass_f2p", "pass_f2p_model"):
+            c["verified"] += 1
+        elif s == "pass_p2p":
+            c["weak"] += 1
+        elif s == "fail":
+            c["failed"] += 1
+        elif s in ("unavailable", "not_applicable"):
+            c["unavailable"] += 1
+    return c if any(c.values()) else None
+
+
 def _strict_note(result: dict) -> dict:
     """Name the strict rule on a measured NS or D2 result: a ``reason`` and a printed line."""
     from llm_router import northstar as ns
@@ -1820,6 +1842,7 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         "window_days": days,
         "include_research": include_research,
         "joins": joins,
+        "verify_shadow": _verify_shadow(days),
         # Informational only: not in "kpis", so not in _ORDER, --health or NS/D1/D2.
         "local_shadow": _local_shadow_summary(days, win),
         # O3 is likewise outside "kpis": adding it there would change the key set, _ORDER and
@@ -1959,6 +1982,10 @@ def render_scorecard(data: dict) -> str:
         lines.append(f"  {_LABELS[key]:<42s} {r['value']}")
         for extra in r.get("lines", ()):
             lines.append(f"      {extra}")
+        if key == "D2" and data.get("verify_shadow"):
+            v = data["verify_shadow"]
+            lines.append(f"      verify (shadow): {v['verified']} verified, {v['weak']} weak, "
+                         f"{v['failed']} failed, {v['unavailable']} unavailable (informational; not in NS/D1/D2)")
     for key, r in (data.get("kpis_diag") or {}).items():
         if not r.get("measurable"):
             continue  # nothing to compare: the card stays as it was
