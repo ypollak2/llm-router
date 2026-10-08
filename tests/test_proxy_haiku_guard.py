@@ -116,6 +116,12 @@ def test_tier_retry_2_of_100_trips_2_of_99_does_not():
     assert one["evaluable"] and not one["tripped"]
 
 
+def test_tier_retry_ignores_other_session_kinds():
+    rows = [dict(r, session_kind="research") for r in _retry_ledger(100, 2)]
+    t = _eval(rows)["triggers"]["tier_retry"]
+    assert (t["k"], t["n"], t["tripped"]) == (0, 0, False)
+
+
 def test_tier_retry_counts_only_router_decided_haiku_calls():
     rows = _retry_ledger(100, 2)
     side = [dict(r, tier_reason="side_call") for r in _retry_ledger(50, 50)]
@@ -268,6 +274,18 @@ def test_run_once_ignores_daily_audits_older_than_the_window(tmp_path, monkeypat
     t = ev["triggers"]["audit_daily"]
     assert ev["action"] == "ok" and not t["tripped"] and not t["evaluable"]
     assert policy.haiku_rewrite is True and not hg.override_path().exists()
+
+
+def test_run_once_without_a_policy_does_not_rewrite_an_existing_override():
+    """CLI / direct ``run_once(None)``: an override already on disk is left as written and no
+    second notification goes out, even when the triggers still trip."""
+    hg.write_override("earlier trip", NOW - 3600.0)
+    before = hg.override_path().read_text()
+    notes = []
+    ev = hg.run_once(None, now=NOW, read_rows=lambda: _redo_ledger(30, 6, NOW),
+                     notify=lambda r, e: notes.append(r))
+    assert ev["tripped"] == ["redo"] and ev["action"] == "already_off"
+    assert hg.override_path().read_text() == before and notes == []
 
 
 def test_run_once_quiet_ledger_is_ok_and_writes_nothing_but_status(tmp_path):
