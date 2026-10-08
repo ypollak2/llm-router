@@ -32,7 +32,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 20 | `build_context_messages` cut the caller's live context first | fixed in #307 (v16 P0.1) |
 | 21 | `context_prep` truncated the user prompt | fixed in #307 (v16 P0.1) |
 | P013-1 | `llm_act` wrote files into the MCP process cwd | fixed for the file tools in this change (P0.13); bash confinement is P2.9 |
-| 18 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
+| P03-1 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -539,7 +539,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   (read-only flag off, containment off, ReAct on the process cwd, Codex without cwd, roots
   ignored, env ignored) each turn at least one of them red.
 
-## 18. Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP)
+## P03-1. Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP)
 
 - **Symptom.** D-14 = A says a Q&A task type is never served by a local provider. #297 (M3.0)
   enforced it in MCP `route_and_call` only. `hooks.chain_builder.build_chain`, which builds the
