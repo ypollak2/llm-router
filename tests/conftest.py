@@ -611,6 +611,28 @@ def _reset_config_singleton():
 
 
 @pytest.fixture(autouse=True)
+def _reset_hook_latency_session():
+    """Clear ``hook_latency``'s session id before and after each test.
+
+    ``set_session`` keeps the id in a module global (one hook process = one
+    session). A test that runs a hook's ``main()`` in-process names a session,
+    and without this reset the id leaked onto rows written by later tests in the
+    same xdist worker (P0.9 repair round 1: test_kpi_hook_latency failed after
+    test_p09_session_start_bg). Only touches the module if a test imported it.
+    """
+    import sys as _sys
+
+    def _clear():
+        mod = _sys.modules.get("llm_router.hook_latency")
+        if mod is not None and hasattr(mod, "_session_id"):
+            mod._session_id = None
+
+    _clear()
+    yield
+    _clear()
+
+
+@pytest.fixture(autouse=True)
 def _reset_active_agent():
     """Clear the process-global active-agent context before and after each test.
 
