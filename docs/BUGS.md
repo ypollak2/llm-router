@@ -166,6 +166,13 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   (FAILS on da31df7: the fetch, the profile rebuild, the rescan check and the evaluator all ran
   inline), `test_stop_returns_while_a_5s_child_still_runs`,
   `test_cached_usage_is_live_only_while_fresh`, `test_the_child_writes_no_session_end_latency_row`.
+- **Follow-up (review of #325).** The first version spawned one child on every Stop, so a
+  burst of N Stops started N concurrent keychain + HTTPS children. The spawn now takes a 15 s
+  claim (`stop_background.claim`, as status-bar's refresher): `test_a_burst_of_stops_starts_one_child`,
+  `test_the_claim_expires_after_its_window` (both fail on e5148bc). Suite tests that run
+  `main()` in-process stub the spawn. Not claimed: a Stop wall-time gain. With the live fetch
+  stubbed in both arms the moved steps cost ~10 ms (reviewer's bench, n = 20 per arm); the
+  real saving (keychain + HTTPS, 8 s timeout) is not measured, so no number is given.
 
 ## 6. Research session b9f04425 counted as organic
 

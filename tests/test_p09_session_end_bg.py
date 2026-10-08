@@ -300,3 +300,34 @@ def test_an_agent_route_run_names_its_phases(state, monkeypatch, armed):
     assert {"import", "session_io", "budget_init", "depth", "classify", "codex_delegation",
             "direct_subagent", "cli_delegation", "limits", "emit"} <= ph, ph
 
+
+
+# ── P0.9 repair 1: one child per 15 s, not one per Stop ─────────────────────
+# A burst of N Stops used to start N concurrent keychain + HTTPS children.
+
+
+def test_a_burst_of_stops_starts_one_child(hook, state, monkeypatch):
+    import llm_router.statusline_tick as tick
+
+    started: list = []
+    monkeypatch.setattr(tick, "_spawn_detached", started.append)
+    for _ in range(5):
+        hook._spawn_background_stop_work()
+    assert len(started) == 1, started
+
+
+def test_the_claim_expires_after_its_window(hook, state):
+    t0 = 1_790_000_000.0
+    assert hook._claim_background_stop_work(now=t0) is True
+    assert hook._claim_background_stop_work(now=t0 + hook._STOP_BG_CLAIM_S - 1) is False
+    assert hook._claim_background_stop_work(now=t0 + hook._STOP_BG_CLAIM_S + 1) is True
+
+
+def test_an_unwritable_claim_starts_no_child(hook, state, monkeypatch):
+    import llm_router.statusline_tick as tick
+
+    started: list = []
+    monkeypatch.setattr(tick, "_spawn_detached", started.append)
+    monkeypatch.setattr(hook, "_state_dir", lambda: "/dev/null/not-a-dir")
+    hook._spawn_background_stop_work()
+    assert started == []

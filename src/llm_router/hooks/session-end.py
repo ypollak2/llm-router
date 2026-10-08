@@ -2358,10 +2358,40 @@ def _background_stop_work_argv() -> list[str]:
     return [sys.executable, __file__, "--background-stop-work"]
 
 
+_STOP_BG_CLAIM_FILENAME = "stop_background.claim"
+#: At most one background child per this many seconds, as status-bar's refresher:
+#: a burst of Stops starts one keychain read + HTTPS call, not one per Stop. The
+#: line reads usage.json up to ``_LIVE_USAGE_MAX_AGE_S`` old as live, so a Stop
+#: inside the window still shows the last child's reading.
+_STOP_BG_CLAIM_S = 15.0
+
+
+def _claim_background_stop_work(now: float | None = None) -> bool:
+    """True when this Stop may start the child: none was started in the last
+    ``_STOP_BG_CLAIM_S``. A lost race starts at most one extra. Never raises."""
+    try:
+        now = time.time() if now is None else now
+        path = os.path.join(_state_dir(), _STOP_BG_CLAIM_FILENAME)
+        try:
+            if 0 <= now - os.path.getmtime(path) < _STOP_BG_CLAIM_S:
+                return False
+        except OSError:  # no claim yet: this Stop takes it
+            pass
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(str(now))
+        os.utime(path, (now, now))
+        return True
+    except Exception:  # noqa: BLE001 -- no child this time; the next Stop retries
+        return False
+
+
 def _spawn_background_stop_work() -> None:
-    """Detach the child. Uses ``statusline_tick._spawn_detached`` (fork + execv,
-    no new subprocess site). Never raises: a failed spawn costs this turn's
-    usage refresh, never the Stop."""
+    """Detach the child, at most once per ``_STOP_BG_CLAIM_S``. Uses
+    ``statusline_tick._spawn_detached`` (fork + execv, no new subprocess site).
+    Never raises: a failed spawn costs this turn's usage refresh, never the Stop."""
+    if not _claim_background_stop_work():
+        return
     try:
         from llm_router.statusline_tick import _spawn_detached
 
