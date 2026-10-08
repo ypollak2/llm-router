@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import platform
+import shlex
 import socket
 import subprocess
 import sys
@@ -247,7 +248,7 @@ def launchd_activate_command(dest: Path, label: str) -> str:
     target = f"gui/$(id -u)/{label}"
     return (
         f"if launchctl print {target} >/dev/null 2>&1; then launchctl kickstart -k {target}; "
-        f"else launchctl load {dest}; fi"
+        f"else launchctl load {shlex.quote(str(dest))}; fi"
     )
 
 
@@ -276,7 +277,7 @@ def service_target(
 
 def deactivation_command(system: str, dest: Path, label: str = LABEL) -> str | None:
     if system == "Darwin":
-        return f"launchctl unload {dest}" if dest.exists() else None
+        return f"launchctl unload {shlex.quote(str(dest))}" if dest.exists() else None
     if system == "Linux":
         return f"systemctl --user disable --now {_SYSTEMD_UNITS[label]}"
     return None

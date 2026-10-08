@@ -251,6 +251,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_JUDGE_MODEL": ("llm_router", "judge_cascade.py", 1),
     "LLM_ROUTER_JUDGE_QUEUE_MAX_ENTRIES": ("llm_router", "judge.py", 1),
     "LLM_ROUTER_JUDGE_SAMPLE_RATE": ("llm_router", "judge.py", 1),
+    "LLM_ROUTER_BREAKER_LOCK_WAIT_S": ("llm_router", "hooks/agent-route.py", 3),
     "LLM_ROUTER_LIBRARIAN_MODEL": ("llm_router", "library/sealer.py", 1),
     "LLM_ROUTER_LOG_JSON": ("llm_router", "logging.py", 1),
     "LLM_ROUTER_LOG_LEVEL": ("llm_router", "logging.py", 1),
@@ -399,6 +400,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_DECISION_ABSTAIN_BELOW": ("llm_router", "decision_classifier.py", 1),
     # P1.7: truth labels (JSONL text_sha/session_id/truth) for kpi's "classifier shadow vs rules" line.
     "LLM_ROUTER_SHADOW_LABELS": ("llm_router", "commands/kpi.py", 1),
+    # P1.7-d: opt-in sample of shadow turns whose TEXT is kept in shadow_text.jsonl (0600) for the labeller.
+    "LLM_ROUTER_SHADOW_TEXT_SAMPLE": ("llm_router", "proxy/shadow_text.py", 1),
     "LLM_ROUTER_ZCE_COLD_BUDGET_S": ("llm_router", "warm.py", 1),
     "LLM_ROUTER_ZCE_WARMUP": ("llm_router", "warm.py", 1),
     # ── indirect reads: DECLARED BY HAND, invisible to the AST scan ──
@@ -437,7 +440,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "OPENROUTER_API_KEY": ("provider_credential", "commands/doctor.py", 1),
     "PERPLEXITY_API_KEY": ("provider_credential", "commands/demo.py", 1),
     "VAULT_TOKEN": ("provider_credential", "org_policy.py", 1),
-    # ── external_tool  (20) ──
+    # ── external_tool  (21) ──
     "CLAUDE_CODE_PATH": ("external_tool", "claude_agent.py", 1),
     # P0.13: the project root llm_act may write in, when the MCP client sends no roots.
     "CLAUDE_PROJECT_DIR": ("external_tool", "tools/agentic.py", 1),
@@ -469,6 +472,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "PORT": ("external_tool", "server.py", 1),
     "RESPONSE": ("external_tool", "hooks/response-router.py", 1),
     "VAULT_ADDR": ("external_tool", "org_policy.py", 1),
+    "ANTHROPIC_BASE_URL": ("external_tool", "hooks/session-start.py", 1),
     "_SESSION_BUDGET_WARNING": ("external_tool", "hooks/enforce-route.py", 1),
     # ── platform  (4) ──
     "APPDATA": ("platform", "commands/doctor.py", 4),

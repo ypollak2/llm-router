@@ -42,10 +42,12 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 27 | The quality report and the Stop summary raise TypeError on a NULL task type | fixed in this change (v16 P0.8) |
 | 28 | `llm-router northstar` showed the heuristic share as the North Star | fixed in this change (v16 P0.8) |
 | 29 | The claw-code Stop hook and the dashboard models panel raise TypeError on a NULL task type | fixed in this change (v16 P0.8 r1) |
-| AB-1 | Agent breaker called 4 parallel sibling spawns "nested agents" and blocked them | fixed in this change (hook version 14) |
+| AB-1 | Agent breaker called 4 parallel sibling spawns "nested agents" and blocked them | fixed in #334 (hook version 14) |
+| AB-2 | Agent breaker state lost updates, leaked pending entries, and was never cleaned up | fixed in this change (agent-route 15) |
 | P010-1 | A dead proxy fails every Claude Code session | fixed in this change (P0.10); live switch is an owner step |
 | P010-2 | The shim's 200 ms connect budget sent healthy-proxy traffic direct; shim restart cut 8787 | fixed in this change (P0.10 cutover repair) |
 | P013-1 | `llm_act` wrote files into the MCP process cwd | fixed for the file tools in this change (P0.13); bash confinement is P2.9 |
+| DT-1 | sdist shipped `integrations/pi/tests/*` and the receipt mod's `band.test.ts` | fixed in this change (deselected-test sweep) |
 | P0.14-a | Proxy ledger wrote 0 rows for 25 h and nothing flagged it | fixed in this change (P0.14) |
 | P011-1 | Haiku guard re-tripped on audit days older than its window | fixed in `feat/haiku-guard-in-repo` (P0.11, 3f4149b) |
 | P1.7-c-1 | Classifier shadow on: `assemble` held the GIL and delayed continuations | fixed in this change (v16 P1.7-c) |
@@ -60,6 +62,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | P09-9 | A session id named by one test leaked onto latency rows of later tests | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
 | CI-1 | `test_verify_unit` copytree of a fresh git repo raced git auto-maintenance (`maintenance.lock`) | fixed in this change (test-only; production unaffected) |
 | P03-1 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
+| PD-HEALTH-1 | SessionStart "proxy-default not answering" warned sessions that never routed through it, and stayed silent when settings.json lost the key | fixed in `fix/proxy-default-health-v2` (hook version 27) |
 | A.0-1 | `llm_router_agent_start_session` returned `agent_not_found` from every installed wheel | fixed in `feat/agt-a0` (v16 AGT A.0) |
 | A.0-2 | `llm_act` / `llm_delegate` / `llm_local_task` blocked the MCP event loop for the whole run | fixed in `feat/agt-a0` (v16 AGT A.0) |
 
@@ -759,6 +762,50 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   six top-level siblings (fails on the old hook: call 4 blocked), real depth 3 -> 4 still trips,
   concurrency cap, and the SubagentStart claim.
 
+## AB-2. Agent breaker state: lost updates, a leaked pending entry, no cleanup
+
+Review findings on #334 (AB-1), each reproduced before it was fixed.
+
+- **Symptom.** (a) 12 parallel PreToolUse[Agent] hooks left the in-flight count at 12, 8 and 10
+  and `pending` at 12, 4 and 8 on three reviewer runs; the new test lost an update in 20 of 20 runs
+  on 070f94f9 (in-flight or pending short of 12, as low as 1). (b) A Codex-delegated spawn (block branch) rolled the count
+  back but kept its `pending` entry; the next unrelated SubagentStart claimed it, so a fresh
+  depth-1 agent could inherit depth 3 and have a legitimate child blocked as depth 4. (c)
+  `_drop_pending` dropped the newest entry, not the caller's. (d) `agent_depth_<session>.json`
+  was never removed.
+- **Cause.** Every write was `write_text` on a read-modify-write with no lock; the pending
+  entry had no identity; the Codex branch did not call `_drop_pending`; the budget blocks and
+  the final "route to a cheap model" block (nothing spawns, no PostToolUse follows) rolled back
+  neither the count nor the entry.
+- **Fix.** Hook versions: agent-route 15, agent-depth-release 4, subagent-start 5,
+  session-end 23 (all four must be deployed; an older subagent-start ignores the new 3-field
+  entries and never claims them).
+  - Pending entries are `[ts, depth, token]`; token is the payload's `tool_use_id`, else a uuid.
+    Drop is by token. Readers accept entries of 2 or more fields.
+  - All three writers do a locked read-modify-write: `fcntl.flock` on a sidecar
+    `agent_depth_<session>.json.lock`, polled non-blocking for at most 0.25 s (the hooks' 300 ms
+    budget; `LLM_ROUTER_BREAKER_LOCK_WAIT_S` overrides it, the contention tests set 10 for 2-vCPU CI), then atomic replace (tmp + `os.replace`, mode 0600). On lock failure the hook logs
+    to stderr and proceeds unlocked, as before: it fails open and never stalls a spawn.
+    The in-flight count changes by delta inside the lock, not by absolute value.
+  - Every exit that spawns nothing (Codex, direct, CLI delegation, both budget blocks, the final
+    routed block) gives back its slot and its own pending entry in one locked update.
+  - session-end.py removes the state and lock file on the SessionEnd event (a SessionEnd hook
+    exists: session-end.py is registered on Stop and SessionEnd). The 200/200 caps on `pending`
+    and `agents` still bound a session that never ends cleanly.
+- **Limit that stays.** Without the SubagentStart hook (`subagent-start.py`) nothing claims the
+  queued depths, so every subagent counts as depth 1 and only `LLM_ROUTER_MAX_CONCURRENT_AGENTS`
+  bounds recursion; `LLM_ROUTER_MAX_AGENT_DEPTH` above 1 cannot trip. `llm-router doctor` now
+  warns when agent-route is registered in settings.json and SubagentStart is not (it already
+  reported a missing hook file).
+- **Rule.** Shared hook state that several processes write needs a lock and an atomic replace;
+  a queue entry needs an identity so the owner can retract exactly its own.
+- **Test.** `tests/test_agent_breaker_state.py`: `test_12_parallel_pretooluse_hooks_lose_no_update`
+  (20 runs), `test_parallel_release_and_claim_lose_no_update` (20 runs),
+  `test_codex_delegation_drops_its_pending_entry`,
+  `test_drop_pending_removes_this_spawns_entry_not_a_siblings`,
+  `test_lock_unavailable_fails_open_and_logs`, FIFO / TTL / registry / depth-0 / drop-on-block
+  coverage tests, `test_session_end_removes_breaker_state_and_lock`, doctor tests.
+
 ## P010-1. A dead proxy fails every Claude Code session
 
 - **Symptom.** With proxy-default on, `~/.claude/settings.json` sets
@@ -1229,6 +1276,22 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Test.** The two-file command above: 1 failed before, 34 passed after. Removing the
   fixture turns it red again.
 
+## DT-1. The sdist shipped two test directories the "/tests/" exclude never covered
+
+- **Symptom.** `pytest -m ""` on main 26468d34 failed
+  `tests/test_sdist_excludes_quarantined_tests.py::test_sdist_does_not_ship_the_active_test_suite`:
+  the sdist contained `integrations/pi/tests/*` (3 files) and
+  `src/llm_router/mods/llm-router-receipt/tests/band.test.ts`. CI never saw it: the test is
+  `slow`-marked and `addopts` deselects `slow`.
+- **Cause.** `"/tests/"` in `[tool.hatch.build.targets.sdist] exclude` is anchored to the repo
+  root, so it matches only `tests/`. Same anchoring lesson as `/agents/` and
+  `/_quarantined_tests/`, third instance.
+- **Fix.** Two exact-path excludes in `pyproject.toml`. An unanchored `tests/` was rejected: it
+  matches at any depth and could strip a package directory.
+- **Test.** `uv build --sdist`, then `tar tzf dist/*.tar.gz | grep -c /tests/`: 4 before,
+  0 after; `llm_router/agents/session.py` still present. The slow test above covers it when run
+  with `-m ""`.
+
 ## A.0-1. `llm_router_agent_start_session` returned `agent_not_found` from every installed wheel
 
 - **Symptom.** Installed from a wheel, `llm_router_agent_list` listed no agents and
@@ -1288,3 +1351,26 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   rewrites `objects/*` mid-copy (the stress run also failed on object directories).
 - **Test.** `tests/test_git_fixture_race.py` traces git's process starts under the hostile config: 1 failed
   without the fix (maintenance child seen), passes with it. It also asserts the trace saw the commit.
+
+## PD-HEALTH-1. The proxy-default health check never asked whether the session routes through the proxy
+
+- **Symptom (2026-10-08).** A session with no `ANTHROPIC_BASE_URL` printed "installed but not
+  answering on 127.0.0.1:8787 - every API call ... will fail". The opposite case went unreported:
+  the sentinel said enabled while `~/.claude/settings.json` had lost `env.ANTHROPIC_BASE_URL`, so
+  routing was off for hours with no warning.
+- **Cause.** `_check_proxy_default_health` read only `port` (and `upstream_port`) from
+  `~/.llm-router/proxy_default.json` and TCP-probed it. It never resolved the session's effective
+  base URL.
+- **Fix.** `_effective_base_url`: `os.environ` first (Claude Code applies settings `env` to hook
+  processes; the repo has no test proving that, so it falls back to project
+  `settings.local.json`, project `settings.json`, then user `settings.json`). Not routed to
+  `port` or `upstream_port` on localhost: one warning "routing is OFF" naming where the setting is
+  missing or points, plus `llm-router install --proxy-default`; host shown only through
+  `proxy_liveness._host_of` (no userinfo, path, query, bare key). Routed and down: the old warning
+  and per-hop probes unchanged. Not installed or `enabled: false`: silent. Still one local TCP
+  connect per hop, 1 s timeout. `upstream_port` is already written by `write_sentinel` on main; its
+  absence is handled (single-hop). Hook version 26 -> 27.
+- **Test.** `tests/test_session_start_proxy_default.py`: 3 new tests failed before the fix (not
+  routed + dead port, settings lost the key with proxy up, project override to another host with
+  credentials in the URL); routed-and-dead, not-installed, precedence and direct-upstream tests
+  pin the other cases.

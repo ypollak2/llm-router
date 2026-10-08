@@ -21,7 +21,9 @@ Each record carries the backend, the tier the client really ``requested`` on the
 whether the input was ``assemble_capped``; ``shadow_eval`` scores records against the rules.
 
 Each finished task appends one record to ``classifier_shadow.jsonl`` in the state
-dir: hashes, tiers, numbers and reason codes, never prompt text. A dropped turn
+dir: hashes, tiers, numbers and reason codes, never prompt text. The one exception is
+opt-in and separate: with ``LLM_ROUTER_SHADOW_TEXT_SAMPLE`` set, a sampled turn also
+leaves its text in ``shadow_text.jsonl`` (0600, see ``shadow_text``) for an offline labeller. A dropped turn
 appends a ``classifier_shadow_drop`` record. ``llm-router kpi`` reads both
 (``classifier_shadow`` line); nothing else does, so NS, D1 and D2 cannot move.
 
@@ -36,6 +38,7 @@ import time
 from pathlib import Path
 
 from llm_router import failopen, local_classifier, shadow_eval
+from llm_router.proxy import shadow_text
 from llm_router.proxy.cls_input import assemble
 from llm_router.proxy.steps import STEP_CONTINUATION, has_client_tools
 
@@ -170,10 +173,24 @@ class ShadowScheduler:
             return
         if verdict.source in ("off", "cache"):
             return  # mode switched off while queued, or another caller already logged this turn
+        await self._save_text(snapshot, assembled, fields)
         self._append({"kind": KIND, **fields, "llm": verdict.as_log(), "source": verdict.source,
                       "ms": verdict.ms, "model": verdict.model, "prompt_version": verdict.prompt_version,
                       "backend": local_classifier.backend(),
                       "assemble_capped": getattr(assembled, "capped", None)})
+
+    async def _save_text(self, snapshot: dict, assembled, fields: dict) -> None:
+        """The text sidecar (``shadow_text``): off unless ``LLM_ROUTER_SHADOW_TEXT_SAMPLE`` is set, and then
+        only a sampled turn does any work. Fail open: it never costs the shadow record its write."""
+        try:
+            if not shadow_text.wanted(fields.get("text_sha"), fields.get("ts")):
+                return
+            await asyncio.to_thread(shadow_text.maybe_record, shadow_text.sidecar_path(self.path),
+                                    snapshot, assembled.context, fields)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the exception type is recorded, never its message
+            failopen.record("LR-FO-PROXY-CLASSIFIER-SHADOW-TEXT", exc)
 
     def _append(self, rec: dict) -> None:
         target = self.path or shadow_path()
