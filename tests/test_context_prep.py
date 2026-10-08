@@ -81,15 +81,27 @@ class TestPreparePrompt:
         )
         assert result.user_prompt == original
 
-    def test_long_user_prompt_truncated_for_small_model(self):
-        # Create a very long prompt that exceeds gemma4's budget
+    def test_long_user_prompt_never_truncated_for_small_model(self):
+        # P0.1: was test_long_user_prompt_truncated_for_small_model, which pinned
+        # the bug. Over gemma4's window (8,192 - 1,200 reserve) -> ContextOverflow.
+        from llm_router.local_context_guard import ContextOverflow
+
         long_prompt = "Explain this code:\n" + "x = 1\n" * 5000
+        with pytest.raises(ContextOverflow):
+            prepare_prompt(
+                long_prompt,
+                TaskType.CODE, Complexity.SIMPLE, "ollama/gemma4:latest",
+            )
+
+    def test_prompt_over_allocation_but_inside_window_is_intact(self):
+        # Over the SIMPLE usable cap (4,000) but inside the window: intact, and
+        # the context allocation shrinks to make room.
+        prompt = "Explain this code:\n" + "x = 1\n" * 3300
         result = prepare_prompt(
-            long_prompt,
-            TaskType.CODE, Complexity.SIMPLE, "ollama/gemma4:latest",
+            prompt, TaskType.CODE, Complexity.SIMPLE, "ollama/gemma4:latest",
         )
-        assert len(result.user_prompt) < len(long_prompt)
-        assert "[truncated]" in result.user_prompt
+        assert result.user_prompt == prompt
+        assert result.budget.context_tokens == 0
 
     def test_prepared_prompt_is_frozen(self):
         """PreparedPrompt is immutable."""

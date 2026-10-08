@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 19
-"""Stop hook — unified session summary: CC subscription delta + external routing costs."""
+# llm_router-hook-version: 20
+"""Stop hook — unified session summary: CC subscription delta + external routing costs.
+
+Also registered on SessionEnd, where it only archives the session context store.
+"""
 
 from __future__ import annotations
 
@@ -2204,19 +2207,28 @@ def main() -> None:
     except (json.JSONDecodeError, EOFError):
         _hook_input = {}
 
-    # Session Context Accumulator: archive (delete) this session's durable
-    # JSONL event store now that the session is ending. Fail-open, single
-    # best-effort delete — never blocks the summary below. Resolution order:
-    # the real session_id from this hook's stdin payload, else env vars,
-    # else the pointer file written by session-start.py.
-    try:
-        from llm_router import session_store as _session_store
-        _explicit_sid = _hook_input.get("session_id") if isinstance(_hook_input, dict) else None
-        _sid = _session_store.resolve_session_id(_explicit_sid)
-        if _sid:
-            _session_store.archive_session(_sid)
-    except Exception:
-        pass
+    # This script is registered on Stop (fires after EVERY turn: per-turn
+    # summary) and on SessionEnd (fires once). Only SessionEnd archives
+    # (deletes) the session's durable JSONL event store; archiving on Stop
+    # wiped the context after turn 1 (P0.1, docs/BUGS.md). Resolution order:
+    # the real session_id from this hook's stdin payload, else env vars, else
+    # the pointer file written by session-start.py. Fail-open.
+    if isinstance(_hook_input, dict) and _hook_input.get("hook_event_name") == "SessionEnd":
+        try:
+            from llm_router import hook_latency as _hl
+            _hl.set_event("SessionEnd")
+        except Exception:
+            pass
+        try:
+            from llm_router import session_store as _session_store
+            _sid = _session_store.resolve_session_id(_hook_input.get("session_id"))
+            if _sid:
+                _session_store.archive_session(_sid)
+        except Exception:
+            pass
+        # Stop already rendered the summary for the last turn; SessionEnd
+        # output is not shown to the user, so do not render it twice.
+        return
 
     # GE6 / S3: one quota sample (cached usage.json, no network) per Stop, i.e.
     # per human turn, into quota_samples.jsonl. Fail-open.
