@@ -3317,59 +3317,64 @@ async def get_classifier_overhead(period: str = "today") -> dict:
 
 
 async def get_cache_hit_stats(period: str = "today") -> dict:
-    """Get prompt caching statistics.
-    
-    Analyzes semantic_cache table to compute cache hit ratio and savings.
-    
+    """Semantic-cache hit rate with its n (P0.5, R-CTX-7).
+
+    Reads ``semantic_cache_lookups``, one row per cache lookup (hit or miss)
+    written by ``semantic_cache.check``. It used to query ``was_hit`` and
+    ``accessed_at``, columns ``semantic_cache`` never had, so it raised on
+    every call and the fail-open path returned zeros.
+
     Args:
         period: Time window. One of "today", "week", "month", or "all".
-    
+            "all" cannot reach further back than the physical retention TTL:
+            ``semantic_cache._purge_expired`` deletes lookups older than
+            ``LLM_ROUTER_PERSIST_TTL_DAYS`` (default 30), so "all" means the
+            last TTL days in practice.
+
     Returns:
-        Dict with keys: total_requests, cache_hits, hit_rate_pct (0-100), 
-        estimated_saved_usd. Returns zeroed values if no cache data exists.
+        Dict with ``hits``, ``lookups``, ``n`` (= lookups), ``hit_rate_pct``
+        (0-100, 0.0 when n = 0), ``estimated_saved_usd`` (sum of the cached
+        rows' original cost over the hits), plus the legacy aliases
+        ``total_requests`` (= lookups) and ``cache_hits`` (= hits).
     """
     where_map = {
-        "today": "WHERE date(accessed_at, 'localtime') = date('now', 'localtime')",
-        "week": "WHERE accessed_at >= datetime('now', '-7 days')",
-        "month": "WHERE accessed_at >= datetime('now', '-30 days')",
+        "today": "WHERE date(ts, 'unixepoch', 'localtime') = date('now', 'localtime')",
+        "week": "WHERE ts >= CAST(strftime('%s', 'now', '-7 days') AS REAL)",
+        "month": "WHERE ts >= CAST(strftime('%s', 'now', '-30 days') AS REAL)",
         "all": "",
     }
     where = where_map.get(period, "")
-    
+
+    def _result(hits: int, lookups: int, saved: float) -> dict:
+        return {
+            "hits": hits,
+            "lookups": lookups,
+            "n": lookups,
+            "hit_rate_pct": (hits / lookups * 100) if lookups else 0.0,
+            "estimated_saved_usd": round(saved, 6),
+            "total_requests": lookups,
+            "cache_hits": hits,
+        }
+
     db = await _get_db()
     try:
-        # Check if semantic_cache table exists
         cursor = await db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache'"
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache_lookups'"
         )
         if not await cursor.fetchone():
-            return {"total_requests": 0, "cache_hits": 0, "hit_rate_pct": 0.0, "estimated_saved_usd": 0.0}
-        
-        # Query cache stats
+            return _result(0, 0, 0.0)
         cursor = await db.execute(
-            f"""SELECT COUNT(*), COUNT(CASE WHEN was_hit = 1 THEN 1 END)
-            FROM semantic_cache {where}"""
+            f"""SELECT COUNT(*), COALESCE(SUM(hit), 0), COALESCE(SUM(saved_usd), 0)
+            FROM semantic_cache_lookups {where}"""
         )
         row = await cursor.fetchone()
-        if not row or row[0] == 0:
-            return {"total_requests": 0, "cache_hits": 0, "hit_rate_pct": 0.0, "estimated_saved_usd": 0.0}
-        
-        total_requests, cache_hits = row
-        hit_rate = round(cache_hits / total_requests * 100) if total_requests > 0 else 0
-        
-        # Estimate savings from cache hits (assume avg call would cost ~$0.0001)
-        estimated_saved = cache_hits * 0.0001  # Conservative estimate
-        
-        return {
-            "total_requests": int(total_requests),
-            "cache_hits": int(cache_hits),
-            "hit_rate_pct": float(hit_rate),
-            "estimated_saved_usd": round(estimated_saved, 4),
-        }
+        if not row:
+            return _result(0, 0, 0.0)
+        return _result(int(row[1]), int(row[0]), float(row[2]))
     except Exception as exc:
         from llm_router import failopen
         failopen.record("CHZ-FO-COST-CACHE-STATS", exc)
-        return {"total_requests": 0, "cache_hits": 0, "hit_rate_pct": 0.0, "estimated_saved_usd": 0.0}
+        return _result(0, 0, 0.0)
     finally:
         await db.close()
 
