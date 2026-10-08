@@ -1871,6 +1871,15 @@ def _proxy_liveness_lines(live: dict | None) -> list[str]:
     return lines
 
 
+# ── P0.9-g: sync hooks, external wall clock and live, load recorded ─────────
+
+def _p09g(days: float, now: float) -> dict:
+    from llm_router import hook_latency as hl, hook_wall
+
+    return hook_wall.gate(hook_wall.read_rows(),
+                          hl.read_rows(since=now - days * 86400.0, until=now), days)
+
+
 # ── assembly ───────────────────────────────────────────────────────────────
 
 def compute_scorecard(days: int = 7, *, include_research: bool = False,
@@ -1927,6 +1936,9 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         # P0.14-a: is the proxy ledger alive? Outside "kpis" (a liveness check, not a KPI).
         "proxy_liveness": _proxy_liveness(now_ts, all_rows),
         "classifier_shadow": _classifier_shadow_summary(days, win, allowed, index, pop["allowed"]),
+        # P0.9-g: the five sync hooks, wall clock (hook_wall) AND live elapsed, load on every row.
+        # Outside "kpis" (a gate line, not a KPI): _ORDER and --health are unchanged.
+        "p09g": _p09g(days, now_ts),
         "kpis": {
             "NS": ns_r, "O1": o1_r, "O2": o2_r,
             "D1": d1_r, "D2": d2_r, "D3": d3_r, "D4": d4_r, "D5": d5_r,
@@ -2078,6 +2090,10 @@ def render_scorecard(data: dict) -> str:
         lines.append(classifier_line)
         lines += _classifier_vs_rules_lines(data.get("classifier_shadow"))
     lines += _proxy_liveness_lines(data.get("proxy_liveness"))
+    if data.get("p09g"):
+        from llm_router import hook_wall
+
+        lines += hook_wall.render_lines(data["p09g"])
     lines.append(_join_line(data["joins"]))
     lines.append("O1 is never session-kind filtered (usage.db predates tagging); G3 is not "
                   "session-kind filtered either (see KPIS.md); neither are G1 (hook), G2 and G4, "

@@ -1,0 +1,13 @@
+{
+  "session_id": "5f0c9a2e-7b31-4c8d-9e46-1a2b3c4d5e6f",
+  "transcript_path": "/tmp/hook-wall-fixture/projects/-Users-dev-llm-router/5f0c9a2e-7b31-4c8d-9e46-1a2b3c4d5e6f.jsonl",
+  "cwd": "/Users/dev/llm-router",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "git status --short && git log --oneline -5",
+    "description": "Show working tree status and recent commits"
+  },
+  "tool_use_id": "toolu_01HookWallEnforceRoute0001"
+}

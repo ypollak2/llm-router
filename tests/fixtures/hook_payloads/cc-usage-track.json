@@ -1,0 +1,31 @@
+{
+  "session_id": "5f0c9a2e-7b31-4c8d-9e46-1a2b3c4d5e6f",
+  "transcript_path": "/tmp/hook-wall-fixture/projects/-Users-dev-llm-router/5f0c9a2e-7b31-4c8d-9e46-1a2b3c4d5e6f.jsonl",
+  "cwd": "/Users/dev/llm-router",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Agent",
+  "tool_input": {
+    "subagent_type": "Explore",
+    "description": "Find hook latency writers",
+    "prompt": "List every file under src/llm_router that writes hook_latency.jsonl and say which function does the write. Report paths only."
+  },
+  "tool_response": {
+    "content": [
+      {
+        "type": "text",
+        "text": "src/llm_router/hook_latency.py: record() via capped_log.append\nsrc/llm_router/capped_log.py: append()"
+      }
+    ],
+    "totalDurationMs": 18432,
+    "totalTokens": 21877,
+    "totalToolUseCount": 6,
+    "usage": {
+      "input_tokens": 1204,
+      "output_tokens": 388,
+      "cache_read_input_tokens": 20285
+    }
+  },
+  "duration_ms": 18432,
+  "tool_use_id": "toolu_01HookWallCcUsageTrack01"
+}
