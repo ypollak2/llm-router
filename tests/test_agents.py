@@ -121,9 +121,9 @@ def test_registry_contains():
 
 
 def test_registry_from_yaml_parses_default_template(tmp_path):
-    """Verify the shipped config/agents.yaml template parses correctly."""
+    """Verify the shipped src/llm_router/data/agents.yaml template parses correctly."""
     project_root = Path(__file__).resolve().parent.parent
-    template = project_root / "config" / "agents.yaml"
+    template = project_root / "src" / "llm_router" / "data" / "agents.yaml"
     reg = AgentRegistry.from_yaml(template)
     assert "code-reviewer" in reg
     assert "trend-researcher" in reg
