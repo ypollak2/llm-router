@@ -332,6 +332,12 @@ canary mode; until it exists it behaves as `shadow`.
   its own: those numbers need `LLM_ROUTER_SHADOW_LABELS` (JSONL `{"text_sha", "session_id", "truth"}`); without
   it, or below 100 labeled turns, M1-12 reads `not informative`.
 
+  To label live turns, `LLM_ROUTER_SHADOW_TEXT_SAMPLE` (off by default; `on` = 30% of turns, or a rate in
+  (0, 1]) makes the proxy keep the text of a sampled shadow turn in `~/.llm-router/shadow_text.jsonl` (mode 0600,
+  at most 20 entries a UTC day): `{text_sha, session_id, ts, context, prompt}`. It is the only file in which the
+  proxy keeps prompt text. A turn with a secret pattern in it is skipped, router banners are cut out, and the
+  labeller deletes entries after 7 days or once labelled. The ledger and the shadow records stay hash-only.
+
 ## Metrics
 
 Each call writes one row to `~/.llm-router/proxy_calls.jsonl` with shape,
