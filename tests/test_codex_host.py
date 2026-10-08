@@ -202,3 +202,15 @@ def test_remove_subtree_leaves_a_multiline_value_it_cannot_take_whole():
 def test_remove_subtree_stops_at_a_header_it_cannot_parse():
     text = '[mcp_servers.llm_router]\ncommand = "c"\n["\\U0001F600"]\nk = 1\n'
     assert C.remove_toml_subtree(text, C.MCP_TABLE) == '["\\U0001F600"]\nk = 1\n'
+
+
+@pytest.mark.parametrize("indent", ["  ", "\t"])
+def test_remove_subtree_ends_at_an_indented_header(indent):
+    """CODEX-2: TOML allows an indented header. A user's indented [keep] right
+    after our table ended nothing, so it and its body went with our table."""
+    import tomllib
+    text = (f'[mcp_servers.llm_router]\ncommand = "c"\n{indent}[keep]\n{indent}k = 1\n'
+            f'{indent}[[mcp_servers.llm_router.tools.x]]\napproval_mode = "approve"\n')
+    out = C.remove_toml_subtree(text, C.MCP_TABLE)
+    assert out == f'{indent}[keep]\n{indent}k = 1\n'
+    assert tomllib.loads(out) == {"keep": {"k": 1}}

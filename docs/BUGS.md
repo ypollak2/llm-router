@@ -50,6 +50,8 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | GE6-1 | Quota-burn coverage kept owner-overridden sessions in the organic denominator | fixed in `feat/quota-samples` (#320, GE6 repair 1) |
 | GE6-2 | Branch hook version equal to main's after main moved on | fixed in `feat/quota-samples` (#320, GE6 repair round 1) |
 | CODEX-1 | Codex refused to start: `invalid transport in mcp_servers.llm_router` | fixed in this change (#323) |
+| CODEX-2 | Codex TOML removal could write an unparseable config.toml and dropped an indented user table | fixed in this change (#323 review follow-up) |
+| CLI-HELP-1 | `llm-router uninstall --help` ran a real uninstall; 20 more subcommands ignored `--help` | fixed in this change (#323 review follow-up) |
 | P09-1 | G1 called a 16 s auto-route p95 "within budget" | fixed in `perf/hook-budgets` (P0.9 tasks 1-2) |
 | P09-7 | Statusline timing rows carried no session id, and needed a python3 that imports llm_router | fixed in `perf/hook-budgets` (P0.9 repair 1) |
 | P09-8 | The statusline "wrapper adds < 5 ms" test failed under load | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
@@ -818,6 +820,14 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   not repeated under the 24 h WARN, and as a `_run_doctor` issue. The `doctor` test now asserts
   exactly one `proxy bypass:` issue naming the path and host, not the exit code. 15 mutants, all
   killed (see the PR body).
+- **Known limit.** A token with a dot between alphabetic labels still reads as a host:
+  `sk-ant.SECRETKEY999` prints as `sk-ant.secretkey999`, `abc.def` as `abc.def`. RFC 1123 cannot
+  tell such a token from a real name. A purely numeric last label (`secret.123`) is
+  `(unparseable)`. The review of #330 found it; it is disclosed, not fixed.
+- **Follow-up tests (#330 review).** `test_short_silence_does_not_count_future_dated_proxy_rows`
+  (upper bound of the 2 h window) and `test_decision_rows_older_than_24h_are_not_counted` (lower
+  bound of the decision window). Each is red under the mutant the review left alive (`t <= now_ts`
+  dropped from `short_silence`; `timestamp >= datetime(?)` dropped from `_decision_turns`).
 
 ## 18. Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP)
 
@@ -953,6 +963,56 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   and the `remove_toml_subtree` tests in `tests/test_codex_host.py`. Each of 10 mutants
   (one per code path, e.g. the legacy cleanup or the doctor branch disabled) turns one of
   them red.
+
+## CODEX-2. Codex TOML removal could write an unparseable config.toml and dropped an indented user table
+
+- **Symptom.** The #323 review fed an orphaned `[mcp_servers.llm_router.tools.x]` table holding
+  `w = [\n[1, 2]\n]` (a valid nested array) to the cleanup. The line-based cut read `[1, 2]` as a
+  header and returned `[1, 2]\n]`, which does not parse. Manifest replay of
+  `[mcp_servers.llm_router]` wrote such a cut unchecked and printed `✓ Removed`. Separately, a
+  user's indented `  [keep]` table right after an llm_router table was removed with it.
+- **Cause.** `install._clear_codex_orphan_tables` re-parsed the cut with tomllib, but no test
+  pinned that guard (a reviewer mutant that dropped it survived).
+  `install_manifest._remove_toml_table` (MCP_TABLE branch) had no re-parse at all.
+  `codex_host._HEADER_LINE` was anchored at column 0, so an indented header (legal TOML) did not
+  end the table being dropped.
+- **Fix.** `_remove_toml_table` re-parses the cut before it writes. If the cut does not parse, or
+  an llm_router server entry would remain, the file is left unchanged and the line is
+  `⚠ [mcp_servers.llm_router] left in <path>: <reason> ...; delete the ... tables by hand`.
+  `_HEADER_LINE` accepts leading spaces or tabs.
+- **Test.** `tests/test_codex_install.py::test_orphan_cleanup_refuses_an_edit_that_would_not_parse`
+  and `::test_legacy_uninstall_leaves_a_nested_array_table_unchanged` (red with the tomllib
+  re-parse removed from `_clear_codex_orphan_tables`);
+  `::test_manifest_replay_refuses_a_cut_that_would_not_parse` and
+  `::test_manifest_replay_reports_a_multiline_dotted_key_it_left` (red on main adf93a02);
+  `tests/test_codex_host.py::test_remove_subtree_ends_at_an_indented_header` (space and tab; red on
+  main).
+
+## CLI-HELP-1. `llm-router uninstall --help` ran a real uninstall
+
+- **Symptom.** During the #323 review, `llm-router uninstall --help` uninstalled. It edited the
+  review clone's `.vscode/mcp.json` and `.windsurf/mcp.json`. A scan of every subcommand with
+  `--help` (HOME and cwd in a temp dir) on adf93a02 found more. `uninstall` rewrote
+  `~/.claude/settings.json` and the cwd MCP files. `update` and `onboard` rewrote the hooks.
+  `init-claude-memory` wrote config. `budget`, `team`, `gain`, `doctor`, `summary`, `probe` and
+  `explain-dashboard` wrote state DBs. `broker` wrote a secret and kept running. `gateway` tried to
+  bind its port. `setup`, `init-policy`, `soak`, `tui`, `dashboard`, `routing-report` exited non-zero.
+  `routing-health` and `test` ran their report and self-test instead of printing help.
+- **Cause.** `cli.main` passed `args[1:]` to each handler. 21 of the 64 handlers never look for
+  `-h`/`--help`, so the flag was ignored and the command ran. `okf`, `provider`, `semantic`,
+  `sessions` and `benchmark` check only the first argument, so `okf gc --help` ran the gc dry run and
+  `provider list --help` listed providers.
+- **Fix.** `cli._subcommand_help` runs before dispatch. If a help flag is in the arguments and the
+  subcommand is not one that handles help itself (`_OWN_HELP_ANYWHERE`: argparse or an
+  all-arguments check; `_OWN_HELP_FIRST`: only `<cmd> --help`), it prints that subcommand's lines
+  from the module usage text and exits 0. It does not import the subcommand. An undocumented name
+  still gets the unknown-command error (exit 2).
+- **Test.** `tests/test_cli_help_is_inert.py` runs every subcommand dispatched in `cli.main` (64)
+  and every `<cmd> <sub>` form in the usage text (12) with `--help` in a subprocess. HOME and cwd
+  are seeded with host configs that contain llm_router entries. Each run must exit 0, print usage,
+  raise no traceback and change no file. On main adf93a02, 30 of the 76 cases fail (21
+  subcommands, 9 nested forms).
+  `test_the_cases_cover_every_subcommand` guards against an empty case list.
 
 ## P09-1. G1 called a 16 s auto-route p95 "within budget"
 
