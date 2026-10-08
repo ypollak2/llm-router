@@ -11,9 +11,14 @@ decided. The scheduler never changes that decision and never waits for the model
 * at most :data:`MAX_PENDING` classifications are pending (running or waiting for the
   single Ollama slot); a turn beyond that is dropped and counted, never queued;
 * the classification itself is a detached task: the input is assembled in a worker
-  thread (``assemble`` walks the whole history, 45 ms on a 600-message one) and the
-  call goes through ``local_classifier.classify_async``, so the event loop only
-  schedules a task. ``cls_applied`` stays false on every ledger row.
+  thread (``assemble`` reads at most the last 400 messages and stops once it has its
+  context, P1.7-c) and the call goes through ``local_classifier.classify_async``, so
+  the event loop only schedules a task. ``cls_applied`` stays false on every ledger row.
+
+The classifier backend is ``local_classifier``'s: ``LLM_ROUTER_CLASSIFIER_BACKEND=systemone``
+makes the shadow ask the decision model (``decision_classifier``, nimble:9b by default).
+Each record carries the backend, the tier the client really ``requested`` on the call and
+whether the input was ``assemble_capped``; ``shadow_eval`` scores records against the rules.
 
 Each finished task appends one record to ``classifier_shadow.jsonl`` in the state
 dir: hashes, tiers, numbers and reason codes, never prompt text. A dropped turn
@@ -30,7 +35,7 @@ import json
 import time
 from pathlib import Path
 
-from llm_router import failopen, local_classifier
+from llm_router import failopen, local_classifier, shadow_eval
 from llm_router.proxy.cls_input import assemble
 from llm_router.proxy.steps import STEP_CONTINUATION, has_client_tools
 
@@ -141,6 +146,9 @@ class ShadowScheduler:
                       "tier": row.get("tier_proposed")},
             "tier_reason_live": row.get("tier_reason"), "tier_live": row.get("tier"),
             "requested_tier": row.get("requested_model"), "policy_version": row.get("tier_policy_version"),
+            # The tier the client really requested on THIS call (P1.7, M1-12 clamp-aware cost):
+            # the record is its own join to the proxy row, no timestamp window needed.
+            "requested": shadow_eval.tier_name(row.get("requested_model")),
         }
 
     # -- the detached task ----------------------------------------------------------
@@ -163,7 +171,9 @@ class ShadowScheduler:
         if verdict.source in ("off", "cache"):
             return  # mode switched off while queued, or another caller already logged this turn
         self._append({"kind": KIND, **fields, "llm": verdict.as_log(), "source": verdict.source,
-                      "ms": verdict.ms, "model": verdict.model, "prompt_version": verdict.prompt_version})
+                      "ms": verdict.ms, "model": verdict.model, "prompt_version": verdict.prompt_version,
+                      "backend": local_classifier.backend(),
+                      "assemble_capped": getattr(assembled, "capped", None)})
 
     def _append(self, rec: dict) -> None:
         target = self.path or shadow_path()

@@ -40,7 +40,15 @@ from pathlib import Path
 from llm_router import paths
 
 LABEL = "com.llm_router.proxy"
+#: P0.10 (D-17 = A): the fail-open shim owns DEFAULT_PORT (the port
+#: settings.json names) and forwards to the main proxy on DEFAULT_UPSTREAM_PORT;
+#: when the main proxy is down it sends the call straight to Anthropic
+#: (`proxy/failopen_shim.py`).
+SHIM_LABEL = "com.llm_router.proxy-shim"
 DEFAULT_PORT = 8787
+DEFAULT_UPSTREAM_PORT = 8797
+#: launchd label -> systemd user unit name.
+_SYSTEMD_UNITS = {LABEL: "llm_router-proxy", SHIM_LABEL: "llm_router-proxy-shim"}
 DEFAULT_STEPS = "off"
 DEFAULT_TIERS = "conversation"
 _SENTINEL_NAME = "proxy_default.json"
@@ -70,16 +78,24 @@ def read_sentinel() -> dict | None:
         return None
 
 
-def write_sentinel(*, port: int, steps: str, tiers: str, label: str, system: str) -> None:
+def write_sentinel(
+    *, port: int, steps: str, tiers: str, label: str, system: str,
+    upstream_port: int | None = None, shim_label: str | None = None,
+) -> None:
+    """``port`` is the port settings.json names (the shim's, when there is
+    one); ``upstream_port`` is the main proxy behind the shim, None when the
+    main proxy itself owns ``port``."""
     p = sentinel_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(
         {
             "enabled": True,
             "port": port,
+            "upstream_port": upstream_port,
             "steps": steps,
             "tiers": tiers,
             "label": label,
+            "shim_label": shim_label,
             "system": system,
             "installed_at": time.time(),
         },
@@ -157,6 +173,51 @@ def render_launchd_plist(
 """
 
 
+def render_launchd_shim_plist(
+    python: str, home: Path, *, port: int, upstream_port: int, label: str = SHIM_LABEL,
+) -> str:
+    """The fail-open shim's LaunchAgent: same supervision as the main proxy
+    (RunAtLoad + KeepAlive), its own logs."""
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{python}</string>
+        <string>-m</string>
+        <string>llm_router.cli</string>
+        <string>proxy-shim</string>
+        <string>--port</string><string>{port}</string>
+        <string>--upstream-port</string><string>{upstream_port}</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>{home}/.llm-router/logs/proxy-shim.out.log</string>
+    <key>StandardErrorPath</key><string>{home}/.llm-router/logs/proxy-shim.err.log</string>
+</dict>
+</plist>
+"""
+
+
+def render_systemd_shim_unit(python: str, *, port: int, upstream_port: int) -> str:
+    return f"""[Unit]
+Description=LLM Router fail-open shim in front of the default Claude Code proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={python} -m llm_router.cli proxy-shim --port {port} --upstream-port {upstream_port}
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=default.target
+"""
+
+
 def render_systemd_user_unit(python: str, *, port: int, steps: str, tiers: str) -> str:
     # No `label` parameter: unlike a launchd plist, a systemd unit carries no
     # label field of its own -- `service_target` below is what maps `LABEL`
@@ -177,16 +238,19 @@ WantedBy=default.target
 """
 
 
-def service_target(system: str | None = None, home: Path | None = None) -> tuple[Path, str]:
+def service_target(
+    system: str | None = None, home: Path | None = None, label: str = LABEL,
+) -> tuple[Path, str]:
     """(destination file, activation command) for the current platform."""
     system = system or platform.system()
     home = home or Path.home()
     if system == "Darwin":
-        dest = home / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+        dest = home / "Library" / "LaunchAgents" / f"{label}.plist"
         return dest, f"launchctl load {dest}"
     if system == "Linux":
-        dest = home / ".config" / "systemd" / "user" / "llm_router-proxy.service"
-        return dest, "systemctl --user daemon-reload && systemctl --user enable --now llm_router-proxy"
+        unit = _SYSTEMD_UNITS[label]
+        dest = home / ".config" / "systemd" / "user" / f"{unit}.service"
+        return dest, f"systemctl --user daemon-reload && systemctl --user enable --now {unit}"
     raise RuntimeError(
         f"Automatic proxy-default install is not supported on {system!r}; "
         "run `llm-router proxy` under your own supervisor and set "
@@ -194,11 +258,11 @@ def service_target(system: str | None = None, home: Path | None = None) -> tuple
     )
 
 
-def deactivation_command(system: str, dest: Path) -> str | None:
+def deactivation_command(system: str, dest: Path, label: str = LABEL) -> str | None:
     if system == "Darwin":
         return f"launchctl unload {dest}" if dest.exists() else None
     if system == "Linux":
-        return "systemctl --user disable --now llm_router-proxy"
+        return f"systemctl --user disable --now {_SYSTEMD_UNITS[label]}"
     return None
 
 
@@ -234,6 +298,32 @@ def install_service(
     return dest, activate
 
 
+def install_shim_service(
+    python: str | None = None,
+    *,
+    system: str | None = None,
+    home: Path | None = None,
+    port: int = DEFAULT_PORT,
+    upstream_port: int = DEFAULT_UPSTREAM_PORT,
+    write: bool = True,
+) -> tuple[Path, str]:
+    """Render and (by default) write the fail-open shim's service file. Like
+    ``install_service``, it never starts anything."""
+    python = python or sys.executable
+    system = system or platform.system()
+    home = home or Path.home()
+    dest, activate = service_target(system, home, label=SHIM_LABEL)
+    content = (
+        render_launchd_shim_plist(python, home, port=port, upstream_port=upstream_port)
+        if system == "Darwin"
+        else render_systemd_shim_unit(python, port=port, upstream_port=upstream_port)
+    )
+    if write:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content)
+    return dest, activate
+
+
 def activate_service(dest: Path, activate_cmd: str, *, runner=subprocess.run) -> tuple[bool, str]:
     """Best-effort load/enable of the just-written service file.
 
@@ -250,8 +340,10 @@ def activate_service(dest: Path, activate_cmd: str, *, runner=subprocess.run) ->
         return False, str(exc)
 
 
-def deactivate_service(system: str, dest: Path, *, runner=subprocess.run) -> tuple[bool, str]:
-    cmd = deactivation_command(system, dest)
+def deactivate_service(
+    system: str, dest: Path, *, runner=subprocess.run, label: str = LABEL,
+) -> tuple[bool, str]:
+    cmd = deactivation_command(system, dest, label)
     if cmd is None:
         return True, ""
     try:

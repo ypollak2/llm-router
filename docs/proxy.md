@@ -311,14 +311,26 @@ canary mode; until it exists it behaves as `shadow`.
 - Only turn-first calls: a continuation (never waits) and a side call (no client tools) schedule nothing.
 - One call per turn: a turn already answered (cache) or being answered is skipped. At most 4 classifications are
   pending; a turn beyond that is dropped and counted, never queued. One Ollama slot (a semaphore of 1).
-- The request path only creates a task. The input is assembled in a worker thread (`cls_input.assemble` walks
-  the whole history: 45 ms on a 600-message one) and the call is `local_classifier.classify_async` (2.0 s budget).
+- The request path only creates a task. The input is assembled in a worker thread and the call is
+  `local_classifier.classify_async` (2.0 s budget). `cls_input.assemble` reads the history backwards, stops once
+  it holds the newest prompt, 3 earlier prompts and the assistant's last text, and reads at most 400 messages
+  back (P1.7-c: the old full walk held the GIL long enough to delay concurrent continuations; `docs/BUGS.md`
+  P1.7-c-1). A record whose input hit that window without its full context says `assemble_capped: true`.
+- The classifier is `local_classifier`'s backend: `LLM_ROUTER_CLASSIFIER_BACKEND=systemone` makes the shadow ask
+  the decision model on Ollama `/v1/systemone` (`nimble:9b` unless `LLM_ROUTER_DECISION_MODEL`).
 - One record per finished call to `classifier_shadow.jsonl` in the state dir, a `classifier_shadow_drop` record
   per drop. Hashes (`text_sha`), tiers, numbers and reason codes only: no prompt text, no model `reason`.
 - `llm-router kpi` prints `classifier shadow (proxy): ...` and `--json` carries `classifier_shadow`
   (`n, n_sessions, agree, llm_tier_dist, rules_tier_dist, cheap_share_llm, fallback_rate, p50_ms, p95_ms, drops,
   calls_per_turn`, plus `n_compared`, `drop_rate`, `cls_applied_true`). Organic sessions only unless
   `--include research`. The decision cost shows in G1_proxy: `tier_decision_s` includes the scheduling.
+- Each record carries `requested` (the tier of the call's own `requested_model`), `backend` and
+  `assemble_capped`. Under the shadow line, `kpi` prints one `classifier shadow vs rules [model]: ...` line per
+  classifier model (`--json`: `classifier_shadow.vs_rules`, from `llm_router/shadow_eval.py`): turns, sessions,
+  real requested tiers, fallbacks, agreement, and against rules_eff C-lambda2, M1-12 clamp-aware cost
+  (min(pick, requested)) with a session bootstrap, under-route and Haiku precision. A live turn has no truth of
+  its own: those numbers need `LLM_ROUTER_SHADOW_LABELS` (JSONL `{"text_sha", "session_id", "truth"}`); without
+  it, or below 100 labeled turns, M1-12 reads `not informative`.
 
 ## Metrics
 
@@ -524,7 +536,11 @@ and `llm_router.commands.proxy_default` (orchestration). The install:
 
 1. writes a supervised service — a macOS LaunchAgent (`KeepAlive`) or a Linux
    systemd user unit (`Restart=on-failure`), running
-   `llm-router proxy --steps off --tiers conversation`;
+   `llm-router proxy --steps off --tiers conversation` on port **8797**, and,
+   once that answers, a second one for the **fail-open shim**
+   (`com.llm_router.proxy-shim` / `llm_router-proxy-shim`) on **8787**, the
+   port settings.json names (see "Fail-open shim" below; `shim=False` keeps the
+   old single-service layout);
 2. **reuses** a proxy already answering on the target port instead of
    installing a second one that would fight it for the port — this is how it
    stays compatible with a proxy the owner already runs by hand
@@ -545,9 +561,52 @@ the service, removes the sentinel (`~/.llm-router/proxy_default.json`), and
 restores `env` via the manifest replay — all three happen whether or not the
 proxy is currently up.
 
+### Fail-open shim (P0.10, D-17 = A)
+
+`llm-router proxy-shim` (`proxy/failopen_shim.py`) owns 127.0.0.1:8787 and
+forwards every request, bytes in and bytes out, to the main proxy on
+`LLM_ROUTER_PROXY_UPSTREAM_PORT` (default 8797). When the main proxy cannot be
+reached — connection refused, connect slower than 200 ms, or the connection
+drops before a response — or answers a 5xx of its own (one without Anthropic's
+`request-id` header) before any byte reached the client, the shim sends the same request once to `https://api.anthropic.com` with the same
+headers and records a `proxy_down` event (`failopen.record`, so it lands in
+`~/.llm-router/fail_open.jsonl` and KPI G2; code and reason only, never headers
+or content). Once a response byte has gone out nothing is retried. An Anthropic
+5xx relayed by a working main proxy (for example 529 overloaded) is passed through
+unchanged: retrying it would double the load and count a healthy proxy as down.
+Known risk: on a disconnect before the response headers (`disconnected`), or a
+5xx of the main proxy's own, the main proxy may already have forwarded the request
+to Anthropic, so the direct retry can send it twice and it may be billed twice.
+The shim accepts that cost in exchange for not failing the call.
+
+Why: `settings.json` env beats the process env, so a session already running
+cannot be pointed elsewhere, and the SessionStart warning below only reaches the
+next session. Measured 2026-10-07 (claude 2.1.292, `--setting-sources
+project,local`, base URL on a smoke port): with nothing listening, `claude -p`
+retried for 222.85 s and failed with `API Error: Connection refused` (n = 1);
+through the shim with the main proxy killed, 10/10 sessions answered and 10
+`proxy_down` rows were written (docs/BUGS.md P010-1).
+
+The shim imports neither `proxy/server.py` nor its dependencies, so a broken
+main-proxy deploy cannot take it down. It uses httpx for the upstream leg
+because aiohttp's client rejects the duplicate `Server` header the main proxy
+sends (uvicorn's next to Anthropic's).
+
+**Moving an existing install behind the shim** (the installer reuses a process
+it finds on 8787 and says "No fail-open shim installed"): stop the main proxy's
+LaunchAgent, change its `--port` to 8797, start it again (`launchctl bootout` +
+`bootstrap`), then install and bootstrap `com.llm_router.proxy-shim`. That is a
+live service change and an owner step.
+
 ### Fail-safe: what happens when the proxy is down
 
-Because every session depends on it once installed:
+Because every session depends on it once installed. With the shim, a dead main
+proxy no longer fails the call, but the shim still accepts on 8787, so a probe of
+that port alone would read healthy while every call bypassed routing. Each check
+below therefore probes the shim's port (`port` in `proxy_default.json`) **and** the
+main proxy's (`upstream_port`), and reports a dead main proxy as "routing
+bypassed" with the main proxy's recovery command, and a dead shim with the
+shim's (`com.llm_router.proxy-shim` / `llm_router-proxy-shim`):
 
 - **KeepAlive/`Restart=on-failure`** restarts a crashed process in place — the
   supervisor IS the watchdog. A separate polling watchdog process was
@@ -560,7 +619,7 @@ Because every session depends on it once installed:
   TCP-probes the port, and prints the exact recovery command
   (`launchctl kickstart -k gui/$(id -u)/com.llm_router.proxy` /
   `systemctl --user restart llm_router-proxy`) plus the log path on failure.
-- **The statusline** shows `🔌 proxy down:<port>` in red the instant the probe
+- **The statusline** shows `🔌 proxy down:<port>` (or `proxy down:<upstream_port> (bypassed)` when only the main proxy behind the shim is dead) in red the instant the probe
   fails — gated on the sentinel, so a user who never installed proxy-default
   pays nothing extra here.
 - **The SessionStart hook** (`_check_proxy_default_health` in

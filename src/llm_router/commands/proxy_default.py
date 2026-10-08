@@ -93,9 +93,28 @@ def _wire_settings_env(port: int) -> str | None:
     return None
 
 
+def _start_and_wait(dest: Path, activate_cmd: str, port: int, what: str, *, runner, home: Path,
+                    log: str, health_retries: int, health_interval_s: float) -> str | None:
+    """Start one written service and poll its port. Returns an error or None."""
+    ok, detail = pd.activate_service(dest, activate_cmd, runner=runner)
+    if not ok:
+        return f"could not start the {what} service (`{activate_cmd}`): {detail or 'unknown error'}"
+    for _ in range(max(1, health_retries)):
+        if pd.proxy_health("127.0.0.1", port, timeout=1.0):
+            return None
+        time.sleep(health_interval_s)
+    return (
+        f"the {what} service was started but did not answer on 127.0.0.1:{port} "
+        f"within {health_retries * health_interval_s:.0f}s — refusing to change "
+        f"ANTHROPIC_BASE_URL. Check {home}/.llm-router/logs/{log}, then retry."
+    )
+
+
 def install_proxy_default(
     *,
     port: int = pd.DEFAULT_PORT,
+    upstream_port: int = pd.DEFAULT_UPSTREAM_PORT,
+    shim: bool = True,
     steps: str = pd.DEFAULT_STEPS,
     tiers: str = pd.DEFAULT_TIERS,
     home: Path | None = None,
@@ -108,22 +127,39 @@ def install_proxy_default(
 
     Never writes ``settings.json`` unless the proxy is confirmed answering
     first (either an already-running one, or one this call just started).
+
+    ``port`` is the port settings.json will name. With ``shim`` (the default,
+    P0.10 / D-17 = A) the fail-open shim listens there and the main proxy
+    listens on ``upstream_port``; both must answer before settings.json is
+    touched. ``shim=False`` keeps the pre-P0.10 layout (main proxy on ``port``).
     """
     runner = runner or subprocess.run
     system = system or platform.system()
     home = home or Path.home()
     actions: list[str] = []
+    shim = shim and upstream_port != port
+    main_port = upstream_port if shim else port
+    wait = {"runner": runner, "home": home, "health_retries": health_retries,
+            "health_interval_s": health_interval_s}
 
     if pd.proxy_health("127.0.0.1", port, timeout=1.0):
         actions.append(
             f"Found a proxy already answering on 127.0.0.1:{port} — reusing it "
             f"(no second service installed)."
         )
+        if shim:
+            actions.append(
+                "No fail-open shim installed: the port is already taken. If that process is "
+                "the main proxy, a dead proxy still breaks new sessions; see docs/proxy.md "
+                "'Fail-open shim' to move it behind the shim."
+            )
+        shim = False
+        main_port = port
         reused = True
     else:
         try:
             dest, activate_cmd = pd.install_service(
-                system=system, home=home, port=port, steps=steps, tiers=tiers,
+                system=system, home=home, port=main_port, steps=steps, tiers=tiers,
             )
         except RuntimeError as exc:
             return {"ok": False, "actions": actions, "error": str(exc), "reused": False}
@@ -134,30 +170,26 @@ def install_proxy_default(
         # deleting it without unloading first leaves the process orphaned and
         # still running. `uninstall_proxy_default()` (driven by the sentinel
         # this function writes below) is the sole owner of this file's full
-        # teardown: stop, THEN delete, in that order.
+        # teardown: stop, THEN delete, in that order. The shim file below
+        # follows the same rule.
         actions.append(f"Wrote {dest}")
-        ok, detail = pd.activate_service(dest, activate_cmd, runner=runner)
-        if not ok:
-            return {
-                "ok": False, "actions": actions, "reused": False,
-                "error": f"could not start the proxy service (`{activate_cmd}`): {detail or 'unknown error'}",
-            }
+        err = _start_and_wait(dest, activate_cmd, main_port, "proxy", log="proxy.err.log", **wait)
+        if err is not None:
+            return {"ok": False, "actions": actions, "reused": False, "error": err}
         actions.append(f"Started via `{activate_cmd}`")
-        healthy = False
-        for _ in range(max(1, health_retries)):
-            if pd.proxy_health("127.0.0.1", port, timeout=1.0):
-                healthy = True
-                break
-            time.sleep(health_interval_s)
-        if not healthy:
-            return {
-                "ok": False, "actions": actions, "reused": False,
-                "error": (
-                    f"the proxy service was started but did not answer on 127.0.0.1:{port} "
-                    f"within {health_retries * health_interval_s:.0f}s — refusing to change "
-                    f"ANTHROPIC_BASE_URL. Check {home}/.llm-router/logs/proxy.err.log, then retry."
-                ),
-            }
+        if shim:
+            sdest, sactivate = pd.install_shim_service(
+                system=system, home=home, port=port, upstream_port=upstream_port,
+            )
+            actions.append(f"Wrote {sdest}")
+            err = _start_and_wait(sdest, sactivate, port, "fail-open shim",
+                                  log="proxy-shim.err.log", **wait)
+            if err is not None:
+                return {"ok": False, "actions": actions, "reused": False, "error": err}
+            actions.append(
+                f"Started the fail-open shim via `{sactivate}` (127.0.0.1:{port} -> main proxy "
+                f"on :{upstream_port}, or api.anthropic.com when the main proxy is down)"
+            )
         reused = False
 
     err = _wire_settings_env(port)
@@ -168,7 +200,10 @@ def install_proxy_default(
         f"in ~/.claude/settings.json"
     )
 
-    pd.write_sentinel(port=port, steps=steps, tiers=tiers, label=pd.LABEL, system=system)
+    pd.write_sentinel(
+        port=port, steps=steps, tiers=tiers, label=pd.LABEL, system=system,
+        upstream_port=main_port if shim else None, shim_label=pd.SHIM_LABEL if shim else None,
+    )
     actions.append(f"Recorded proxy-default state in {pd.sentinel_path()}")
     return {"ok": True, "actions": actions, "error": None, "reused": reused}
 
@@ -190,13 +225,16 @@ def uninstall_proxy_default(*, home: Path | None = None, system: str | None = No
     if sentinel is None:
         return actions  # never installed, or already removed — nothing to do
 
-    try:
-        dest, _ = pd.service_target(system, home)
-    except RuntimeError:
-        dest = None
-    if dest is not None:
-        ok, detail = pd.deactivate_service(system, dest, runner=runner)
-        actions.append(f"Stopped proxy service{'' if ok else f' (best-effort: {detail})'}")
+    services = [(pd.LABEL, "proxy service")]
+    if sentinel.get("shim_label"):
+        services.insert(0, (sentinel["shim_label"], "fail-open shim service"))
+    for label, what in services:
+        try:
+            dest, _ = pd.service_target(system, home, label=label)
+        except (RuntimeError, KeyError):
+            continue
+        ok, detail = pd.deactivate_service(system, dest, runner=runner, label=label)
+        actions.append(f"Stopped {what}{'' if ok else f' (best-effort: {detail})'}")
         if dest.exists():
             try:
                 dest.unlink()

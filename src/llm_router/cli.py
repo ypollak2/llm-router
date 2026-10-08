@@ -70,6 +70,7 @@ Usage:
     llm-router serve            — run the HTTP route endpoint (loopback only)
     llm-router gateway          — run the OpenAI/Anthropic/Ollama-compatible gateway
     llm-router proxy [stats]    — opt-in per-call proxy for one Claude Code session (ANTHROPIC_BASE_URL)
+    llm-router proxy-shim       — fail-open shim: main proxy, or Anthropic directly when it is down
     llm-router pi               — run the Pi coding agent on a local Ollama model (local agent profile)
     llm-router broker           — run the session broker
     llm-router cp               — control-plane client commands
@@ -878,6 +879,7 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "broker",
         "gateway",
         "proxy",
+        "proxy-shim",
         "pi",
         "invoice",
         "cp",
@@ -1016,6 +1018,11 @@ def main() -> None:
         # ANTHROPIC_BASE_URL. Nothing installs or enables it.
         from llm_router.proxy.server import cmd_proxy
         sys.exit(cmd_proxy(args[1:]))
+    elif args and args[0] == "proxy-shim":
+        # P0.10 (D-17 = A): owns the settings.json port; forwards to the main
+        # proxy, or straight to Anthropic when the main proxy is down.
+        from llm_router.proxy.failopen_shim import main as shim_main
+        sys.exit(shim_main(args[1:]))
     elif args and args[0] == "broker":
         # Session broker: run from an INTERACTIVE terminal so the headless gateway
         # daemon can delegate gated backends (Codex/Gemini CLI) that need the

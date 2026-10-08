@@ -861,6 +861,72 @@ def _seats_report() -> list[str]:
     return lines
 
 
+def _proxy_default_section(issues: list[str]) -> None:
+    """Proxy-default health lines for `llm-router doctor`; appends to ``issues``."""
+    try:
+        from llm_router import proxy_default as _pd
+
+        _sentinel = _pd.read_sentinel()
+        if _sentinel is None:
+            print(f"    {_dim('not installed — llm-router install --proxy-default to enable')}")
+        else:
+            _port = _sentinel.get("port", _pd.DEFAULT_PORT)
+            # With the fail-open shim (docs/BUGS.md P010-1), `port` is the shim's
+            # and it accepts even when the main proxy behind it is dead, so the
+            # main proxy's own port is probed too.
+            _up = _sentinel.get("upstream_port")
+            _shim = _up is not None
+            if _pd.proxy_health("127.0.0.1", _port, timeout=1.0):
+                print(_ok(f"answering on 127.0.0.1:{_port}  (tiers={_sentinel.get('tiers')})"))
+                if _shim and _pd.proxy_health("127.0.0.1", _up, timeout=1.0):
+                    print(_ok(f"main proxy answering on 127.0.0.1:{_up} behind the fail-open shim"))
+                elif _shim:
+                    print(
+                        _fail(
+                            f"main proxy NOT answering on 127.0.0.1:{_up} — the fail-open "
+                            f"shim on :{_port} sends every call straight to "
+                            f"api.anthropic.com, so routing is bypassed",
+                            fix=(
+                                f"launchctl kickstart -k gui/$(id -u)/{_pd.LABEL}   "
+                                "(macOS)  or  systemctl --user restart llm_router-proxy  (Linux); "
+                                "logs: ~/.llm-router/logs/proxy.err.log"
+                            ),
+                        )
+                    )
+                    issues.append(
+                        f"main proxy not answering on port {_up}; the fail-open shim is "
+                        f"bypassing routing"
+                    )
+            elif _shim:
+                print(
+                    _fail(
+                        f"fail-open shim NOT answering on 127.0.0.1:{_port} — every new "
+                        f"Claude Code session's first call will fail",
+                        fix=(
+                            f"launchctl kickstart -k gui/$(id -u)/{_pd.SHIM_LABEL}   "
+                            "(macOS)  or  systemctl --user restart llm_router-proxy-shim  "
+                            "(Linux); logs: ~/.llm-router/logs/proxy-shim.err.log"
+                        ),
+                    )
+                )
+                issues.append(f"proxy-default is installed but not answering on port {_port}")
+            else:
+                print(
+                    _fail(
+                        f"NOT answering on 127.0.0.1:{_port} — every new Claude Code "
+                        f"session's first call will fail",
+                        fix=(
+                            "launchctl kickstart -k gui/$(id -u)/com.llm_router.proxy   "
+                            "(macOS)  or  systemctl --user restart llm_router-proxy  (Linux); "
+                            "logs: ~/.llm-router/logs/proxy.err.log"
+                        ),
+                    )
+                )
+                issues.append(f"proxy-default is installed but not answering on port {_port}")
+    except Exception as exc:  # noqa: BLE001 — doctor must still finish
+        print(f"    {_dim(f'proxy-default check unavailable: {exc}')}")
+
+
 def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     """Comprehensive health check — verify every component is wired up.
 
@@ -1504,31 +1570,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     # tell "llm-router set this" apart from a corporate proxy or pxpipe).
     print()
     print(_bold("  Proxy-default (ANTHROPIC_BASE_URL)"))
-    try:
-        from llm_router import proxy_default as _pd
-
-        _sentinel = _pd.read_sentinel()
-        if _sentinel is None:
-            print(f"    {_dim('not installed — llm-router install --proxy-default to enable')}")
-        else:
-            _port = _sentinel.get("port", _pd.DEFAULT_PORT)
-            if _pd.proxy_health("127.0.0.1", _port, timeout=1.0):
-                print(_ok(f"answering on 127.0.0.1:{_port}  (tiers={_sentinel.get('tiers')})"))
-            else:
-                print(
-                    _fail(
-                        f"NOT answering on 127.0.0.1:{_port} — every new Claude Code "
-                        f"session's first call will fail",
-                        fix=(
-                            "launchctl kickstart -k gui/$(id -u)/com.llm_router.proxy   "
-                            "(macOS)  or  systemctl --user restart llm_router-proxy  (Linux); "
-                            "logs: ~/.llm-router/logs/proxy.err.log"
-                        ),
-                    )
-                )
-                issues.append(f"proxy-default is installed but not answering on port {_port}")
-    except Exception as exc:  # noqa: BLE001 — doctor must still finish
-        print(f"    {_dim(f'proxy-default check unavailable: {exc}')}")
+    _proxy_default_section(issues)
 
     # P0.14-a: a project-level ANTHROPIC_BASE_URL (or a silent ledger) means the proxy
     # is "up" but nothing goes through it. Read-only; path and host only, never the value.

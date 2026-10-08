@@ -12,17 +12,22 @@ Two readers, one module, so ``kpi`` and ``doctor`` cannot disagree:
   ``routing_decisions`` recorded in the same window, and a WARN when the first is 0
   while either of the others is not. An empty set must not raise an alarm: no recorded
   turn means no warning, and a turn count that could not be read is ``None``, not 0.
+* :func:`short_silence` -- the earlier warning (P0.14-b): no proxy row in the last 2 h while
+  the hooks recorded at least 3 user turns in those 2 h. An empty set (0 turns) reports
+  nothing; a turn count that cannot be read is ``None`` and reports nothing.
 * :func:`doctor_findings` -- when the user settings make a localhost proxy the default,
   (a) every project-level ``.claude/settings.local.json`` / ``.claude/settings.json``
   under the current directory that overrides ``ANTHROPIC_BASE_URL`` (path and the
-  overriding value's HOST only: never the full URL, never a header, never a key), and
-  (b) the ledger being silent for 24 h while turns happened.
+  overriding value's HOST only: never the full URL, never a header, never a key, and a value
+  that is not a real hostname or IP prints as ``(unparseable)``), and (b) the ledger being
+  silent for 24 h (or, earlier, for 2 h) while turns happened.
 
 Read-only: nothing here writes a settings file or the ledger.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -34,9 +39,13 @@ from urllib.parse import urlsplit
 
 from llm_router import paths
 
-__all__ = ["WINDOW_HOURS", "liveness", "user_proxy_default", "find_overrides", "doctor_findings"]
+__all__ = ["WINDOW_HOURS", "SHORT_WINDOW_HOURS", "SHORT_MIN_TURNS", "liveness", "short_silence", "user_proxy_default", "find_overrides", "doctor_findings"]
 
 WINDOW_HOURS = 24.0
+#: P0.14-b early warning: 0 proxy rows in this window while >= SHORT_MIN_TURNS hook turns
+#: happened in it. Constants, not env keys: nobody needs to tune an alarm threshold.
+SHORT_WINDOW_HOURS = 2.0
+SHORT_MIN_TURNS = 3
 ENV_KEY = "ANTHROPIC_BASE_URL"
 
 #: The one hook whose invocation is a user turn (``status-bar`` is also UserPromptSubmit;
@@ -103,7 +112,7 @@ def liveness(*, now: float | None = None, proxy_rows: list[dict] | None = None,
         proxy_rows = pl.read_rows()
     stamps = [t for r in proxy_rows if (t := _ts(r)) is not None]
     n = sum(1 for t in stamps if since <= t <= now_ts)
-    newest = max(stamps) if stamps else None
+    newest = min(max(stamps), now_ts) if stamps else None   # a future-dated row is not 'newest'
     hook_turns = _hook_turns(since, now_ts)
     decisions = _decision_turns(since, now_ts)
     seen = [x for x in (hook_turns, decisions) if x]
@@ -120,18 +129,66 @@ def liveness(*, now: float | None = None, proxy_rows: list[dict] | None = None,
             "warn": warn, "message": message}
 
 
+def short_silence(*, now: float | None = None, proxy_rows: list[dict] | None = None) -> dict[str, Any]:
+    """P0.14-b: ``SHORT_WINDOW_HOURS`` with 0 proxy rows and ``SHORT_MIN_TURNS``+ hook turns.
+
+    ``hook_turns`` is ``None`` when the hook ledger cannot be read, and that never warns."""
+    now_ts = time.time() if now is None else now
+    since = now_ts - SHORT_WINDOW_HOURS * 3600.0
+    if proxy_rows is None:
+        from llm_router.proxy import ledger as pl
+
+        proxy_rows = pl.read_rows()
+    n = sum(1 for r in proxy_rows if (t := _ts(r)) is not None and since <= t <= now_ts)
+    turns = _hook_turns(since, now_ts)
+    warn = n == 0 and turns is not None and turns >= SHORT_MIN_TURNS
+    message = None
+    if warn:
+        message = (f"proxy ledger wrote 0 rows in the last {SHORT_WINDOW_HOURS:g} h while {turns} hook turns "
+                   "were recorded: sessions started recently are probably bypassing the proxy "
+                   "(if the proxy is not meant to be in use, ignore this)")
+    return {"window_hours": SHORT_WINDOW_HOURS, "proxy_rows": n, "hook_turns": turns,
+            "warn": warn, "message": message}
+
+
 # -- settings ---------------------------------------------------------------------
 
 
+_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+
+
+def _is_hostname(host: str) -> bool:
+    """RFC 1123 name with at least one dot, or exactly ``localhost``; or an IP address.
+
+    Anything else (a bare token, a key, a name with an underscore) is not a host and must
+    never be echoed: it may be a secret that was pasted into the wrong field."""
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    name = host[:-1] if host.endswith(".") else host
+    if len(name) > 253:
+        return False
+    labels = name.split(".")
+    if not all(_LABEL.fullmatch(lb) for lb in labels):
+        return False
+    if name == "localhost":
+        return True
+    return len(labels) >= 2 and not labels[-1].isdigit()
+
+
 def _host_of(value: object) -> str:
-    """``host[:port]`` of a URL-ish value, never userinfo, path or query."""
+    """``host[:port]`` of a URL-ish value, never userinfo, path or query.
+
+    Prints only a real hostname or IP; every other string is ``(unparseable)`` (P0.14-b)."""
     if not isinstance(value, str) or not value.strip():
         return "(empty)"
     raw = value.strip()
     try:
         parts = urlsplit(raw if "//" in raw else "//" + raw)
         host = parts.hostname
-        if not host:
+        if not host or not _is_hostname(host):
             return "(unparseable)"
         port = parts.port
     except ValueError:
@@ -228,7 +285,14 @@ def doctor_findings(cwd: Path | None = None, home: Path | None = None, *,
     out = [f"{o['path']} overrides {ENV_KEY} (user default {default}) with host {o['host']}: "
            "sessions started in this tree bypass the proxy"
            for o in find_overrides(Path(cwd) if cwd is not None else Path.cwd(), home)]
-    live = liveness(now=now)
+    from llm_router.proxy import ledger as pl
+
+    rows = pl.read_rows()
+    live = liveness(now=now, proxy_rows=rows)
     if live["warn"]:
         out.append(f"proxy is the configured default ({default}) but {live['message']}")
+    else:  # the 24 h warning already covers a ledger that has been silent for 2 h
+        short = short_silence(now=now, proxy_rows=rows)
+        if short["warn"]:
+            out.append(f"proxy is the configured default ({default}) but {short['message']}")
     return out

@@ -75,9 +75,16 @@ SCOPE, stated rather than implied:
   contract). No path configured, or the file does not parse -> "not measured",
   the label the KPI spec itself uses for this gap.
 * **G1 hook latency** comes from ``hook_latency.jsonl`` (``llm_router.hook_latency``):
-  one row per hook invocation, p50 / p95 per hook against that hook's budget (the
-  one table ``hook_latency.HOOK_BUDGETS_MS``). NOT session-kind filtered -- a row
-  carries no session id. A hook the host KILLS at its timeout writes no row; kills
+  one row per hook invocation, p50 / p95 per hook against that hook's PRD bar (the
+  one table ``hook_latency.HOOK_BUDGETS_MS``: 300 ms per sync hook, 2 s
+  session-start, 100 ms statusline). The p50 / p95 are of ``router_added_ms``
+  (``hook_latency.router_added_ms``: elapsed minus the model phases ``draft_chain``,
+  ``zce_model``, ``cold_wait``; plain elapsed where a row names none), because a
+  local draft's model time is the answer, not overhead (PLAN v16 P0.9-f). The
+  elapsed p95 is printed beside it. NOT session-kind filtered: since P0.9
+  (``hook_latency.set_session`` and ``record-raw``'s session-id argument) a row
+  can carry ``session_id``, but older rows and hooks that never name the session
+  carry none, and G1 does not join the id to session kinds. A hook the host KILLS at its timeout writes no row; kills
   are shown from the fail-open ledger (``CHZ-HOOK-KILLED``). The proxy-side half is
   G1_proxy: p50 / p95 of ``tier_decision_s`` in proxy_calls.jsonl, turn-first and
   continuation calls apart.
@@ -85,7 +92,11 @@ SCOPE, stated rather than implied:
   shadow log (``classifier_shadow.jsonl``, written by ``proxy/llm_shadow``): calls, sessions,
   agreement with the rules' tier, tier distributions, cheap share, fallback rate, p50 / p95 ms,
   drops and calls per turn. Organic sessions only unless research is included; hashes and
-  tiers only. See ``_classifier_shadow_summary`` for each definition.
+  tiers only. See ``_classifier_shadow_summary`` for each definition. Under it, one
+  ``classifier shadow vs rules`` line per classifier model (P1.7, ``llm_router.shadow_eval``):
+  C-lambda2, M1-12 clamp-aware cost on the REAL requested tier, under-route, Haiku precision
+  and n, against rules_eff. Truth comes from ``LLM_ROUTER_SHADOW_LABELS`` (a JSONL of
+  ``{text_sha, session_id, truth}``); without it those numbers are "not informative".
 * **G2 silent failures** is fail-open events per 100 calls over the window, from
   the ``ts`` every ``failopen.record`` row now carries. "Calls" are the hook
   invocations plus the proxy calls recorded in the window, all session kinds,
@@ -659,6 +670,16 @@ def _in_window(ts: Any, since: float, until: float) -> bool:
     return t is not None and since <= t <= until
 
 
+#: Hooks whose router-added bar PLAN v16 defers (S6: "16.1: agent-route
+#: router-added"). Their routed-model phases are not in ``hook_latency.MODEL_PHASES``,
+#: so the whole delegation counts against the 300 ms bar and G1 reports them OVER;
+#: the line says why, so an OVER here is not read as a P0.9 regression.
+_G1_DEFERRED = {
+    "agent-route": ("routed-model phases (codex_delegation, direct_subagent, cli_delegation) "
+                    "are not subtracted; router-added bar deferred to 16.1 (PLAN v16 S6)"),
+}
+
+
 def _g1_hook(days: int, now: float, killed: int | None) -> dict:
     """p50 / p95 wall time per hook against that hook's budget.
 
@@ -684,24 +705,33 @@ def _g1_hook(days: int, now: float, killed: int | None) -> dict:
     thin = 0
     for name in sorted(by_hook):
         rs = by_hook[name]
-        values = sorted(float(r["elapsed_ms"]) for r in rs)
+        # Judged on router-added time (P0.9-f); read_rows guarantees elapsed_ms.
+        values = sorted(hl.router_added_ms(r) or 0.0 for r in rs)
+        elapsed = sorted(float(r["elapsed_ms"]) for r in rs)
         n = len(values)
         budget = hl.budget_ms(name)
         timed_out = sum(1 for r in rs if r.get("timed_out") is True)
+        model_rows = sum(1 for r in rs if hl.router_added_ms(r) != float(r["elapsed_ms"]))
         entry: dict[str, Any] = {"n": n, "budget_ms": budget, "timed_out": timed_out}
         if n < MIN_N:
             thin += 1
-            lines.append(f"{name}: {TOO_FEW} (n={n}); budget {budget}ms; {timed_out} hit it")
+            lines.append(f"{name}: {TOO_FEW} (n={n}); budget {budget}ms; {timed_out} hit the host timeout")
         else:
             p50, p95 = _percentile(values, 0.50), _percentile(values, 0.95)
-            entry.update(p50_ms=round(p50, 1), p95_ms=round(p95, 1))
+            p95_elapsed = _percentile(elapsed, 0.95)
+            entry.update(p50_ms=round(p50, 1), p95_ms=round(p95, 1),
+                         p95_elapsed_ms=round(p95_elapsed, 1), model_time_rows=model_rows)
             verdict = "within budget" if p95 <= budget else "OVER budget"
-            lines.append(f"{name}: p50={p50:.0f}ms p95={p95:.0f}ms vs {budget}ms budget "
-                         f"({verdict}); {timed_out} of {n} hit the budget")
+            lines.append(f"{name}: router-added p50={p50:.0f}ms p95={p95:.0f}ms vs {budget}ms budget "
+                         f"({verdict}); elapsed p95={p95_elapsed:.0f}ms; model time subtracted on "
+                         f"{model_rows} of {n}; {timed_out} hit the host timeout")
             if p95 > budget:
                 over.append(f"{name} p95={p95:.0f}ms>{budget}ms")
             if worst is None or p95 / budget > worst[0]:
                 worst = (p95 / budget, name, round(p95))
+        if name in _G1_DEFERRED:
+            entry["deferred"] = _G1_DEFERRED[name]
+            lines[-1] += f"; NOTE: {_G1_DEFERRED[name]}"
         hooks[name] = entry
     if killed is None:
         lines.append("killed by the host (leaves no row) (auto-route only): not countable yet -- no "
@@ -1728,7 +1758,17 @@ def _classifier_shadow_summary(days: float, win: "_Window | None" = None,
     n = len(calls)
     agree = sum(1 for r in compared if merged(tier_of(r, "llm")) == tier_of(r, "rules"))
     applied = [r for r in (ledger_rows or []) if "cls_applied" in r]
+    try:
+        from llm_router import shadow_eval
+
+        vs_rules = shadow_eval.score_by_model(
+            calls, shadow_eval.load_labels(os.environ.get("LLM_ROUTER_SHADOW_LABELS", "").strip() or None))
+    except Exception:  # noqa: BLE001 -- informational line must never break the scorecard
+        vs_rules = {}
     return {
+        "vs_rules": vs_rules,
+        # R1 reads organic turn-first rows only; --include research widens the population.
+        "vs_rules_organic_only": allowed is not None and len(allowed) == 1,
         "n": n,
         "n_sessions": len({r.get("session_id") for r in calls}),
         "n_answered": len(answered),
@@ -1771,6 +1811,40 @@ def _classifier_shadow_line(s: dict | None) -> str | None:
             f"cheap share {pct(s['cheap_share_llm'])}, fallback {pct(s['fallback_rate'])}, "
             f"p50 {ms(s['p50_ms'])}, p95 {ms(s['p95_ms'])}, drops {s['drops']}, {cpt} calls/turn{applied} "
             "(hashes and tiers only; informational, never in NS, D1 or D2)")
+
+
+def _classifier_vs_rules_lines(s: dict | None) -> list[str]:
+    """One line per classifier model: the live-shadow score against rules_eff (P1.7)."""
+    out = []
+    scope = ("organic sessions" if (s or {}).get("vs_rules_organic_only")
+             else "NOT organic-only, so not R1 evidence")
+    for model, v in ((s or {}).get("vs_rules") or {}).items():
+        if not v.get("n_turns"):
+            continue
+        m12 = v["M1_12"]
+        head = (f"classifier shadow vs rules [{model}]: n={v['n_turns']} turns in {v['n_sessions']} sessions "
+                f"({scope}), requested tier real {v['n_joined']}/{v['n_turns']}, fallback {v['n_fallback']}, "
+                f"agree {v['agree']}/{v['n_turns']} (fallback counts as agree), "
+                f"assemble capped {v['n_capped']}, labeled {v['n_labeled']}")
+        if v.get("n_labeled"):
+            top = "/".join(str(c) for c in v.get("top3_session_counts") or [])
+            head += (f" in {v['n_labeled_sessions']} sessions (largest {v['largest_session_share']:.0%}, "
+                     f"top-3 sessions {top} labeled turns)")
+        a, r = v["arms"]["llm"], v["arms"]["rules_eff"]
+        if a is None:
+            body = (f"; raw cost clamp-aware llm {v['craw_clamp_llm']:.2f} vs rules {v['craw_clamp_rules_eff']:.2f} "
+                    "(no truth labels: C-lambda2, under-route and Haiku precision not computed)")
+        else:
+            boot = v["boot_c_lambda2_clamp_llm_minus_rules"]
+            hp = a["HP"]
+            body = (f"; C-lambda2 llm {a['c_lambda2']:.2f} vs rules {r['c_lambda2']:.2f}; "
+                    f"M1-12 C-lambda2-clamp llm {a['c_lambda2_clamp']:.2f} vs rules {r['c_lambda2_clamp']:.2f} "
+                    f"(diff {boot['diff']:+.2f}, session CI95 [{boot['ci95'][0]:+.2f}, {boot['ci95'][1]:+.2f}]); "
+                    f"under llm {a['under']['k']}/{a['under']['n']} vs rules {r['under']['k']}/{r['under']['n']}; "
+                    f"HP llm {hp['k']}/{hp['n']}")
+        out.append(f"{head}{body}; M1-12 {m12['verdict']} ({m12['why']}; cost only: R1 adoption also needs "
+                   "under-route llm <= rules) (informational, rules stay in charge)")
+    return out
 
 
 # ── P0.14-a: proxy ledger liveness ─────────────────────────────────────────
@@ -2002,6 +2076,7 @@ def render_scorecard(data: dict) -> str:
     classifier_line = _classifier_shadow_line(data.get("classifier_shadow"))
     if classifier_line:
         lines.append(classifier_line)
+        lines += _classifier_vs_rules_lines(data.get("classifier_shadow"))
     lines += _proxy_liveness_lines(data.get("proxy_liveness"))
     lines.append(_join_line(data["joins"]))
     lines.append("O1 is never session-kind filtered (usage.db predates tagging); G3 is not "
