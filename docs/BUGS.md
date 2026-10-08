@@ -592,6 +592,10 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   only on the new `capped` attribute: it guards equality, not the bug); 12 single-flip mutants of the change
   are each red. `test_a_long_history_is_assembled_off_the_request_path` now makes
   `assemble` slow on purpose (a 50 ms sleep), because the real one is no longer slow enough to show the effect.
-  Latency before/after (n >= 100 per arm at 0, 600 and 1,800 messages): see the PR and
-  `$PP/v16/p17c/` on the owner's machine.
+  Latency, shadow-on minus shadow-off continuation p95, n = 100 per arm per row, `scripts/bench_shadow_continuation.py`
+  run on main 7d857641 and on this change back to back per row (2026-10-08 ~14:55Z, free memory 88%, no Ollama model
+  resident, load1 15-25 from other agents): at 1,800 messages main +0.18 / +82.86 / +0.12 ms (agentic / all-text /
+  one-prompt), this change +1.04 / +0.06 / -0.13 ms; worst row of this change over 0, 600 and 1,800 messages +1.90 ms
+  (agentic, 600). The synthetic agentic and one-prompt shapes do not reproduce the 26.4 ms (main's `assemble` takes
+  ~3-6 ms on them); the all-text shape does (+18.3 ms at 600, +82.9 ms at 1,800). Raw rows: `$PP/v16/p17c/r3/`.
 
