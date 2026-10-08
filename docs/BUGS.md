@@ -36,6 +36,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | P09-1 | G1 called a 16 s auto-route p95 "within budget" | fixed in `perf/hook-budgets` (P0.9 tasks 1-2) |
 | P09-7 | Statusline timing rows carried no session id, and needed a python3 that imports llm_router | fixed in `perf/hook-budgets` (P0.9 repair 1) |
 | P09-8 | The statusline "wrapper adds < 5 ms" test failed under load | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
+| P09-9 | A session id named by one test leaked onto latency rows of later tests | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -641,3 +642,19 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   passes with 6 pytest runs in parallel plus 4-12 `yes` CPU burners (load1 38-65). Mutants:
   a perl start on the unsampled path turns the structural test red; a 200 ms sleep in the
   sampled path turns the timing test red.
+
+## P09-9. A session id named by one test leaked onto latency rows of later tests
+
+- **Symptom.** With all five P0.9 branches merged on main 56732137, the CI suite command
+  failed `tests/test_kpi_hook_latency.py::test_a_run_that_names_no_phase_writes_the_row_it_always_did`:
+  the row had an extra `session_id`. Deterministic in one process:
+  `pytest -p no:xdist -p no:randomly tests/test_p09_session_start_bg.py tests/test_kpi_hook_latency.py`.
+- **Cause.** `hook_latency.set_session` keeps the id in a module global, which is right for a
+  hook process (one invocation, one session). session-start's `main()` names its session
+  (#317), and its tests run `main()` in-process, so the id stayed set for every later test in
+  that worker. Each branch alone passed; the leak needs #317's caller and this branch's
+  `set_session` together.
+- **Fix (test only).** `tests/conftest.py::_reset_hook_latency_session` (autouse) clears the
+  id before and after each test, without importing the module when no test did.
+- **Test.** The two-file command above: 1 failed before, 34 passed after. Removing the
+  fixture turns it red again.
