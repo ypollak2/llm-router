@@ -8,7 +8,6 @@ live model.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
@@ -166,7 +165,8 @@ async def llm_delegate(
     if not wait:
         from llm_router.jobs import start_job
         return json.dumps(start_job("llm_delegate", run))
-    return await run
+    from llm_router.jobs import run_or_detach
+    return await run_or_detach("llm_delegate", run)
 
 
 async def _delegate(
@@ -215,8 +215,10 @@ async def _delegate(
 
     # AGT A.0: run_delegation is synchronous (model calls, subprocesses) and runs
     # for minutes; on the event loop it froze every other MCP call meanwhile.
-    result = await asyncio.to_thread(
-        run_delegation, task, milestones, adapters,
+    # Dedicated bounded pool, one run per project root (llm_router.agent_exec).
+    from llm_router.agent_exec import run_agent
+    result = await run_agent(
+        run_delegation, task, milestones, adapters, root=effective_workdir,
         baseline_cost_per_milestone=baseline_cost_per_milestone,
         budget_cap_usd=budget_usd,
         max_attempts_per_tier=max_attempts,
