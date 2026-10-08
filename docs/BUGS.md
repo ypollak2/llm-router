@@ -15,6 +15,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 5 | Haiku 400 on a mid-conversation system message | worked around (flag off); fold is plan task M0.7 |
 | P09-3 | A session-start background child wrote its own "session-start" latency row | fixed in `perf/session-start-bg` (P0.9) |
 | P09-4 | session-start ran Ollama start, `ollama list`, seats, usage.db and git inline | fixed in `perf/session-start-bg` (P0.9 task 3) |
+| P09-6 | Stop (session-end) ran a keychain read + HTTPS usage fetch and three maintenance jobs inline on every turn | fixed in `perf/session-end-bg` (P0.9 task 7) |
 | 6 | Research session b9f04425 counted as organic | fixed in #291 (M0.0b) |
 | 7 | `edit_outcomes.jsonl` rows with no source | open, fix is plan task M0.3(c) |
 | 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | known, not fixed |
@@ -133,6 +134,29 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   from cached usage and `additionalContext`.
 - **Test.** `tests/test_p09_session_start_bg.py::test_main_does_not_run_any_moved_step_inline`
   (FAILS on da31df7: all 17 steps ran inline), `test_main_returns_while_a_5s_background_phase_still_runs`.
+
+## P09-6. Stop (session-end) ran a keychain read + HTTPS usage fetch and three maintenance jobs inline on every turn
+
+- **Symptom.** session-end p95 3,353 ms (n = 252) against the PRD's +300 ms sync bar [HL7].
+  The Stop hook fires after every turn, so every turn paid it. The row carried no phases, so
+  nothing said where the time went.
+- **Cause.** `main()` called `_get_cc_usage()`, which ran `security find-generic-password`
+  and an HTTPS call to the usage endpoint (8 s timeout) inline, then rebuilt the learned
+  profile, ran the auto-profile rescan check and the model-evaluator check. The per-turn
+  line reads quota from `usage.json`; that fetch only refreshes it, and the other three feed
+  nothing on the line.
+- **Fix.** One detached child (`--background-stop-work`, fork + execv through
+  `statusline_tick._spawn_detached`, no new subprocess site) runs the fetch and the three jobs.
+  The sync path reads `usage.json`; a reading younger than 120 s counts as live (it still
+  becomes the next baseline). A note the child would have added to the full box goes to
+  `stop_notes.json` and the next Stop shows it once. The child turns the latency recorder off
+  (the P09-3 trap). session-end and agent-route now name their phases (`phases_ms`).
+  Found, not fixed: `_maybe_evaluate_models` imports `EVAL_CACHE_PATH`, which
+  `model_evaluator` no longer defines, so the 7-day model check is a no-op (it was inline too).
+- **Test.** `tests/test_p09_session_end_bg.py::test_stop_runs_none_of_the_moved_steps_inline`
+  (FAILS on da31df7: the fetch, the profile rebuild, the rescan check and the evaluator all ran
+  inline), `test_stop_returns_while_a_5s_child_still_runs`,
+  `test_cached_usage_is_live_only_while_fresh`, `test_the_child_writes_no_session_end_latency_row`.
 
 ## 6. Research session b9f04425 counted as organic
 
