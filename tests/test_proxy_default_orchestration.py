@@ -15,6 +15,7 @@ module ships for is built around.
 from __future__ import annotations
 
 import json
+import shlex
 import socket
 import subprocess
 
@@ -549,8 +550,6 @@ def test_own_layout_requires_the_sentinel_port_to_match(tmp_path, _sandbox):
 
 
 def test_launchctl_commands_quote_a_plist_path_with_a_space(tmp_path):
-    import shlex
-
     home = tmp_path / "Jane Doe"
     dest, activate = pd.service_target("Darwin", home)
     quoted = shlex.quote(str(dest))
@@ -561,17 +560,71 @@ def test_launchctl_commands_quote_a_plist_path_with_a_space(tmp_path):
     dest.write_text("x")
     assert pd.deactivation_command("Darwin", dest) == f"launchctl unload {quoted}"
     # The shell really parses it as one argument.
-    import subprocess as sp
-    out = sp.run(f"printf '%s|' {quoted}", shell=True, capture_output=True, text=True).stdout
+    out = subprocess.run(f"printf '%s|' {quoted}", shell=True, capture_output=True, text=True).stdout
     assert out == f"{dest}|"
 
 
 def test_stale_plist_note_quotes_a_path_with_a_space(tmp_path):
-    import shlex
-
     dest = tmp_path / "Jane Doe" / "x.plist"
     dest.parent.mkdir()
     dest.write_text("new")
     note = cmd._stale_plist_note(dest, "old", pd.LABEL)
     assert f"launchctl unload {shlex.quote(str(dest))}" in note
     assert f"launchctl load {shlex.quote(str(dest))}" in note
+
+
+def _main_activate(service_home):
+    dest, _ = pd.service_target("Darwin", service_home)
+    return pd.launchd_activate_command(dest, pd.LABEL)
+
+
+def _shim_activate(service_home):
+    dest, _ = pd.service_target("Darwin", service_home, label=pd.SHIM_LABEL)
+    return pd.launchd_activate_command(dest, pd.SHIM_LABEL)
+
+
+def test_shim_down_main_healthy_does_not_restart_the_main_proxy(tmp_path, _sandbox):
+    """`kickstart -k` on the loaded main job would drop its in-flight requests."""
+    port, upstream = _free_port(), _free_port()
+    _seed_sentinel(port, upstream)
+    main_up = _listener(upstream)
+    runner = _BindsPerService({pd.LABEL: upstream, pd.SHIM_LABEL: port}, {pd.SHIM_LABEL})
+    try:
+        home = tmp_path / "svc"
+        r = _install_both(home, port, upstream, runner)
+        assert r["ok"] is True, r
+        assert _main_activate(home) not in runner.calls, runner.calls
+        assert not any(f"{pd.LABEL}.plist" in c for c in runner.calls), runner.calls
+        assert _shim_activate(home) in runner.calls, runner.calls
+    finally:
+        runner.close()
+        main_up.close()
+
+
+def test_main_down_shim_up_still_activates_the_main_proxy(tmp_path, _sandbox):
+    port, upstream = _free_port(), _free_port()
+    _seed_sentinel(port, upstream)
+    shim_up = _listener(port)
+    runner = _BindsPerService({pd.LABEL: upstream, pd.SHIM_LABEL: port}, {pd.LABEL})
+    try:
+        home = tmp_path / "svc"
+        r = _install_both(home, port, upstream, runner)
+        assert r["ok"] is True, r
+        assert _main_activate(home) in runner.calls, runner.calls
+    finally:
+        runner.close()
+        shim_up.close()
+
+
+def test_both_down_activates_both_services(tmp_path, _sandbox):
+    port, upstream = _free_port(), _free_port()
+    _seed_sentinel(port, upstream)
+    runner = _BindsPerService({pd.LABEL: upstream, pd.SHIM_LABEL: port}, {pd.LABEL, pd.SHIM_LABEL})
+    try:
+        home = tmp_path / "svc"
+        r = _install_both(home, port, upstream, runner)
+        assert r["ok"] is True, r
+        assert _main_activate(home) in runner.calls, runner.calls
+        assert _shim_activate(home) in runner.calls, runner.calls
+    finally:
+        runner.close()
