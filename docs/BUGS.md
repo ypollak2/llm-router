@@ -11,6 +11,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 1 | NULL `session_id` on local routing rows | fix open in #288 (M0.4), not merged |
 | 2 | O3 counted more turns than the user typed | open, fix is plan task M0.3 |
 | 3 | NS and D2 counted a heuristic "used" | open, fix is plan task M0.2 |
+| P09-5 | status-bar waited on a locked usage.db on every prompt | fixed in `perf/status-bar-cache` (P0.9 task 4) |
 | 4 | `G1_proxy` printed 0 ms | fixed in this change (M0.6) |
 | 5 | Haiku 400 on a mid-conversation system message | worked around (flag off); fold is plan task M0.7 |
 | P09-3 | A session-start background child wrote its own "session-start" latency row | fixed in `perf/session-start-bg` (P0.9) |
@@ -49,6 +50,10 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | CODEX-1 | Codex refused to start: `invalid transport in mcp_servers.llm_router` | fixed in this change (#323) |
 | CODEX-2 | Codex TOML removal could write an unparseable config.toml and dropped an indented user table | fixed in this change (#323 review follow-up) |
 | CLI-HELP-1 | `llm-router uninstall --help` ran a real uninstall; 20 more subcommands ignored `--help` | fixed in this change (#323 review follow-up) |
+| P09-1 | G1 called a 16 s auto-route p95 "within budget" | fixed in `perf/hook-budgets` (P0.9 tasks 1-2) |
+| P09-7 | Statusline timing rows carried no session id, and needed a python3 that imports llm_router | fixed in `perf/hook-budgets` (P0.9 repair 1) |
+| P09-8 | The statusline "wrapper adds < 5 ms" test failed under load | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
+| P09-9 | A session id named by one test leaked onto latency rows of later tests | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -96,6 +101,20 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `NS_heuristic` / `D2_heuristic`, labelled "not a target".
 - **Test.** `tests/test_kpi_strict_used.py`, 11 cases (to be added by M0.2). Not on `main`
   yet. Until then, `docs/repo_goals/KPIS.md` says NS is the heuristic one.
+
+## P09-5. status-bar waited on a locked usage.db on every prompt
+
+- **Symptom.** status-bar p95 4,488 ms (n = 344) against the PRD's 300 ms [HL7]; p50 44 ms.
+- **Cause.** The UserPromptSubmit hook computed its line inline: `sqlite3.connect(usage.db,
+  timeout=2)` (a writer's lock costs up to 2 s per connect), a second connect for the session
+  call counts, and the Gemini quota read.
+- **Fix.** A detached refresher (`status-bar.py --refresh-cache`, one per 15 s at most)
+  computes the line into `status_bar_cache.json` (TTL 30 s). The hook reads that file, shows
+  a line up to 10 minutes old, and prints nothing rather than wait when there is none. The
+  refresher's own run writes no status-bar latency row (see P09-3).
+- **Test.** `tests/test_p09_status_bar_cache.py::test_the_prompt_path_never_waits_on_a_locked_usage_db`
+  (FAILS on da31df7: 2,016 ms), `test_a_stale_cache_returns_fast_shows_the_line_and_spawns_one_refresher`,
+  `test_the_refresher_survives_sqlite_raising_and_the_hook_still_shows_a_line`.
 
 ## 4. `G1_proxy` printed 0 ms
 
@@ -911,3 +930,91 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   raise no traceback and change no file. On main adf93a02, 30 of the 76 cases fail (21
   subcommands, 9 nested forms).
   `test_the_cases_cover_every_subcommand` guards against an empty case list.
+
+## P09-1. G1 called a 16 s auto-route p95 "within budget"
+
+- **Symptom.** `llm-router kpi` G1 held each hook to `HOOK_BUDGETS_MS`, which held the host
+  timeouts (auto-route 60 s, agent-route 320 s) and declared 2-10 s budgets. Live p95s in
+  [HL7] (`$PP/v16/sources/HL7_hook_latency_to_20261007T1449Z.jsonl`, 2026-10-04T21:59Z to
+  2026-10-07T14:49Z): auto-route 16,040 ms (n = 345), session-start 16,178 ms (n = 65),
+  status-bar 4,488 ms (n = 344). Against the PRD (+300 ms sync p95, session-start 2 s,
+  statusline 100 ms) all three fail; the scorecard passed auto-route and session-start.
+  The statusline was not timed at all.
+- **Cause.** The table was written before any hook was timed and mixed two meanings: the
+  host's kill timeout (what `timed_out` means) and the latency bar the scorecard judges.
+- **Fix.** `HOOK_BUDGETS_MS` = the PRD bars (300 ms per sync hook, 2,000 ms session-start,
+  100 ms statusline); the host timeouts moved to `HOOK_TIMEOUTS_MS` and still decide
+  `timed_out`. G1 judges `router_added_ms` = elapsed minus the model phases (`draft_chain`,
+  `zce_model`, `cold_wait`; a `cold_wait` inside another model phase is subtracted once).
+  The statusline records a sampled row (`LLM_ROUTER_STATUSLINE_TIMING=1`, 1 call in 20)
+  through `python -m llm_router.hook_latency record-raw`.
+- **Test.** `tests/test_p09_hook_budgets.py`: `test_budgets_are_the_prd_bars`,
+  `test_kpi_fails_status_bar_at_the_measured_live_p95`,
+  `test_kpi_judges_router_added_and_reports_it_for_a_10s_draft`,
+  `test_the_row_carries_router_added_with_a_nested_cold_wait_subtracted_once`,
+  `test_statusline_timing_all_writes_a_statusline_row`.
+
+## P09-7. Statusline timing rows carried no session id, and needed a python3 that imports llm_router
+
+- **Symptom.** The statusline wrote its row through
+  `record-raw statusline Statusline <ms>`, and `record-raw` took exactly 4 arguments, so no
+  row could carry `session_id`, although the statusline gets the session JSON on stdin.
+  With 0 rows carrying a session id, P0.9-c (`statusline p95 <= 100 ms over >= 200*`) cannot
+  count sessions (PLAN v16 §1.4 rule 4) or drop research and executor sessions (rule 8), so
+  it could never be judged. Separately, the writer ran `${_chz_py:-python3}`; `_chz_py` is
+  set only in the full layout when `usage.db` exists, so in the fast layout, or wherever bare
+  `python3` cannot import llm_router, the backgrounded write failed silently. The test hid
+  this with a `python3` shim that can import the checkout.
+- **Cause.** The raw writer was designed for the elapsed time only, and the interpreter
+  search lived inside the money segment.
+- **Fix.** `record-raw <hook> <event> <elapsed_ms> [<session_id>]`. The statusline matches
+  `"session_id"` in its stdin JSON in bash (no process) and passes it; the timed fast path
+  reads stdin itself and pipes it to the tick. The interpreter search is `_chz_find_py`
+  (one list, shared with the money segment) and runs inside the backgrounded child, after
+  the clock has stopped.
+- **Test.** `tests/test_p09_hook_budgets.py`:
+  `test_record_raw_puts_the_session_id_on_the_row`,
+  `test_record_raw_leaves_an_empty_session_id_off_the_row`,
+  `test_statusline_row_carries_the_session_id_from_stdin[full|fast]`,
+  `test_statusline_row_is_written_when_bare_python3_cannot_import_llm_router` (all 5 test ids
+  fail on 38516fc8 and pass on head).
+- **Same gap on auto-route.** auto-route never called `set_session`, so its rows (P0.9-d)
+  had no session id either. Fixed in `perf/auto-route-imports` (#326): `main()` calls it
+  right after the stdin JSON parses. Test:
+  `tests/test_p09_auto_route_imports.py::test_main_names_the_session_on_the_latency_row`
+  (fails on 21234081, passes on 45fe0104).
+
+## P09-8. The statusline "wrapper adds < 5 ms" test failed under load
+
+- **Symptom.** `tests/test_p09_hook_budgets.py::test_the_timing_wrapper_adds_under_5ms_per_call`
+  failed on CI (#312 at a28e7df5, test 3.11: added unsampled 1.83 ms, sampled 92.15 ms) and
+  6 of 6 times in review with 6 copies in parallel (load ~65; sampled 94-123 ms).
+- **Cause.** The test compared medians of three separate blocks (40 off, 40 at 1-in-20,
+  10 at every call). Under load a perl start-up costs tens of ms and the load drifts between
+  blocks, so the medians measured the machine, not the wrapper.
+- **Fix (test only).** The arms run interleaved and each is judged on its minimum (load only
+  adds time). The structural half is a separate, load-independent test: with a perl that
+  logs its starts, an unsampled call starts 0 perls and a sampled call exactly 2. The
+  statusline comment now says the t1 read includes one perl start-up (an upward bias
+  against the 100 ms bar).
+- **Test.** `test_the_timing_wrapper_adds_under_5ms_per_call` and
+  `test_the_unsampled_path_starts_no_process_and_a_sampled_call_two_clock_reads`: 12 of 12
+  passes with 6 pytest runs in parallel plus 4-12 `yes` CPU burners (load1 38-65). Mutants:
+  a perl start on the unsampled path turns the structural test red; a 200 ms sleep in the
+  sampled path turns the timing test red.
+
+## P09-9. A session id named by one test leaked onto latency rows of later tests
+
+- **Symptom.** With all five P0.9 branches merged on main 56732137, the CI suite command
+  failed `tests/test_kpi_hook_latency.py::test_a_run_that_names_no_phase_writes_the_row_it_always_did`:
+  the row had an extra `session_id`. Deterministic in one process:
+  `pytest -p no:xdist -p no:randomly tests/test_p09_session_start_bg.py tests/test_kpi_hook_latency.py`.
+- **Cause.** `hook_latency.set_session` keeps the id in a module global, which is right for a
+  hook process (one invocation, one session). session-start's `main()` names its session
+  (#317), and its tests run `main()` in-process, so the id stayed set for every later test in
+  that worker. Each branch alone passed; the leak needs #317's caller and this branch's
+  `set_session` together.
+- **Fix (test only).** `tests/conftest.py::_reset_hook_latency_session` (autouse) clears the
+  id before and after each test, without importing the module when no test did.
+- **Test.** The two-file command above: 1 failed before, 34 passed after. Removing the
+  fixture turns it red again.

@@ -115,6 +115,8 @@ _INDIRECT_READS = frozenset({
     # Read only by hooks/statusline-command.sh (bash, not Python): the switch to
     # the debug fast status line. The scan walks *.py, so it cannot see it.
     "LLM_ROUTER_STATUSLINE",
+    # Same script: the sampled statusline timing row (PLAN v16 P0.9-c).
+    "LLM_ROUTER_STATUSLINE_TIMING",
 })
 
 
