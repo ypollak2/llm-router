@@ -45,7 +45,6 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | P010-1 | A dead proxy fails every Claude Code session | fixed in this change (P0.10); live switch is an owner step |
 | P013-1 | `llm_act` wrote files into the MCP process cwd | fixed for the file tools in this change (P0.13); bash confinement is P2.9 |
 | P0.14-a | Proxy ledger wrote 0 rows for 25 h and nothing flagged it | fixed in this change (P0.14) |
-| 18 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
 | P011-1 | Haiku guard re-tripped on audit days older than its window | fixed in `feat/haiku-guard-in-repo` (P0.11, 3f4149b) |
 | P1.7-c-1 | Classifier shadow on: `assemble` held the GIL and delayed continuations | fixed in this change (v16 P1.7-c) |
 | GE6-1 | Quota-burn coverage kept owner-overridden sessions in the organic denominator | fixed in `feat/quota-samples` (#320, GE6 repair 1) |
@@ -866,8 +865,6 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   (upper bound of the 2 h window) and `test_decision_rows_older_than_24h_are_not_counted` (lower
   bound of the decision window). Each is red under the mutant the review left alive (`t <= now_ts`
   dropped from `short_silence`; `timestamp >= datetime(?)` dropped from `_decision_turns`).
-
-## 18. Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP)
 
 ## P03-1. Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP)
 
