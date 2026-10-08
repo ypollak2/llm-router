@@ -38,11 +38,13 @@ confinement work this deliberately does not yet do.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import shlex
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -155,6 +157,47 @@ def _run_check(check: str | list[str], cwd: Path, timeout: float) -> tuple[bool,
     return r.returncode == 0, tail
 
 
+# AGT A.0: the loop now runs in a worker thread, so two calls can overlap. The
+# loop's write/command policy is read from process-wide os.environ, which a call
+# with apply_writes=True changes for its duration; overlapping, a propose-only
+# call would see "apply", and the save/restore pairs could interleave and leave
+# "apply" set for good. This lock keeps one loop in flight at a time, which is
+# what the event loop enforced before; it is taken in the worker thread, so a
+# waiting call never blocks the MCP event loop.
+_AGENT_ENV_LOCK = threading.Lock()
+
+
+def _run_loop_scoped(run_agent_loop, objective: str, model: str, root: Path,
+                     budget_s: float, apply_writes: bool) -> str | None:
+    with _AGENT_ENV_LOCK:
+        # Scoped to this call. The `propose` default is right for a hook that fires
+        # on every prompt; a caller who submitted a task and named a workdir has
+        # asked for the work to happen.
+        prev_writes = os.environ.get("LLM_ROUTER_AGENT_WRITES")
+        prev_cmds = os.environ.get("LLM_ROUTER_AGENT_COMMANDS")
+        if apply_writes:
+            os.environ["LLM_ROUTER_AGENT_WRITES"] = "apply"
+            # Applying WRITES must not also unlock arbitrary COMMANDS. These were
+            # raised together, so asking for an edit on disk silently bought the
+            # whole allowlist as well. Set LLM_ROUTER_AGENT_COMMANDS deliberately if
+            # that is really wanted.
+        try:
+            return run_agent_loop(
+                prompt=objective,
+                model=model,
+                project_root=root,
+                timeout_per_call=90,
+                deadline_s=budget_s,
+            )
+        finally:
+            for key, prev in (("LLM_ROUTER_AGENT_WRITES", prev_writes),
+                              ("LLM_ROUTER_AGENT_COMMANDS", prev_cmds)):
+                if prev is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = prev
+
+
 async def llm_local_task(
     objective: str,
     workdir: str,
@@ -162,6 +205,7 @@ async def llm_local_task(
     model: str = DEFAULT_MODEL,
     budget_s: float = DEFAULT_BUDGET_S,
     apply_writes: bool = False,
+    wait: bool = True,
 ) -> str:
     """Run a whole multi-step task on a local model and report a typed result.
 
@@ -186,6 +230,10 @@ async def llm_local_task(
             False leaves the loop in its
             default ``propose`` mode, where it computes diffs and changes
             nothing.
+        wait: True (default) returns the result when the task ends. False
+            returns ``{"job_id": ...}`` at once; poll it with
+            ``llm_router_session(action="job", id=<job_id>)``. Either way the
+            loop and the check run in a worker thread, off the MCP event loop.
 
     Returns:
         A JSON object with ``status`` (one of the module's terminal statuses),
@@ -193,6 +241,11 @@ async def llm_local_task(
         and the model's own final ``report``. The report is the worker's
         account of what it did and is never evidence on its own.
     """
+    if not wait:
+        from llm_router.jobs import start_job
+        return json.dumps(start_job("llm_local_task", llm_local_task(
+            objective, workdir, acceptance_check=acceptance_check, model=model,
+            budget_s=budget_s, apply_writes=apply_writes, wait=True)))
     started = time.monotonic()
     root = Path(workdir).expanduser()
     if not root.is_dir():
@@ -211,18 +264,6 @@ async def llm_local_task(
             "changed_files": [], "check_passed": None, "elapsed_s": 0.0,
         })
 
-    # Scoped to this call. The `propose` default is right for a hook that fires
-    # on every prompt; a caller who submitted a task and named a workdir has
-    # asked for the work to happen.
-    prev_writes = os.environ.get("LLM_ROUTER_AGENT_WRITES")
-    prev_cmds = os.environ.get("LLM_ROUTER_AGENT_COMMANDS")
-    if apply_writes:
-        os.environ["LLM_ROUTER_AGENT_WRITES"] = "apply"
-        # Applying WRITES must not also unlock arbitrary COMMANDS. These were
-        # raised together, so asking for an edit on disk silently bought the
-        # whole allowlist as well. Set LLM_ROUTER_AGENT_COMMANDS deliberately if
-        # that is really wanted.
-
     try:
         from llm_router.context_injection import inject
         objective = inject(objective, root=str(root))
@@ -235,22 +276,11 @@ async def llm_local_task(
                 acceptance_check=acceptance_check, files_before=len(before))
     report, error = None, None
     try:
-        report = run_agent_loop(
-            prompt=objective,
-            model=model,
-            project_root=root,
-            timeout_per_call=90,
-            deadline_s=budget_s,
-        )
+        report = await asyncio.to_thread(
+            _run_loop_scoped, run_agent_loop, objective, model, root, budget_s,
+            apply_writes)
     except Exception as exc:                                   # noqa: BLE001
         error = f"{type(exc).__name__}: {exc}"
-    finally:
-        for key, prev in (("LLM_ROUTER_AGENT_WRITES", prev_writes),
-                          ("LLM_ROUTER_AGENT_COMMANDS", prev_cmds)):
-            if prev is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = prev
 
     after = _snapshot(root)
     changed = _changed(before, after)
@@ -263,7 +293,8 @@ async def llm_local_task(
         exhausted = any(m in text for m in _EXHAUSTION_MARKERS)
         remaining = budget_s - elapsed
         if acceptance_check and remaining > 0:
-            ok, check_out = _run_check(acceptance_check, root, remaining)
+            ok, check_out = await asyncio.to_thread(
+                _run_check, acceptance_check, root, remaining)
             check_passed = ok
             # Exhaustion loses to a passing check: if the objective is
             # demonstrably met, how many turns it took is not interesting.

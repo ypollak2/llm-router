@@ -80,7 +80,8 @@ def door_for_tool(name: str) -> str:
 
 
 async def llm_act(
-    task: str, budget_usd: float = 1.0, context: str = "", ctx: Context | None = None,
+    task: str, budget_usd: float = 1.0, context: str = "", wait: bool = True,
+    ctx: Context | None = None,
 ) -> str:
     """Agentic execution — do a real task end-to-end: decompose into milestones,
     run them on the cheapest capable tier *with tools* (files/commands/verify),
@@ -90,11 +91,15 @@ async def llm_act(
 
     *context* is optional conversation context handed to the delegated agents.
     Writes are confined to the caller's project root (MCP roots, else
-    ``$CLAUDE_PROJECT_DIR``); with no root the run is read-only (P0.13)."""
+    ``$CLAUDE_PROJECT_DIR``); with no root the run is read-only (P0.13).
+
+    *wait=False* returns ``{"job_id": ...}`` at once instead of the result; poll
+    it with ``llm_router_session(action="job", id=<job_id>)``."""
     _blocked = _quality_breaker_block("mcp_llm_act", "agentic")
     if _blocked:
         return _blocked
-    return await llm_delegate(task, budget_usd=budget_usd, context=context, ctx=ctx)
+    return await llm_delegate(task, budget_usd=budget_usd, context=context, wait=wait,
+                              ctx=ctx)
 
 
 async def llm(
@@ -171,12 +176,18 @@ async def llm_router_admin(action: str, value: str = "") -> str:
     return f"unknown admin action: {action!r} (try set_profile/import_profile/clear_cache/policy/budget)"
 
 
-async def llm_router_session(action: str, session_id: str = "", limit: int = 200) -> dict:
+async def llm_router_session(
+    action: str, session_id: str = "", limit: int = 200, id: str = "",  # noqa: A002
+) -> dict:
     """Agent-session door — collapses the simple llm_router_agent_* lifecycle tools
     into one *action* selector: list · check_budget · complete · lineage (all take
-    a session_id, or none). start/route carry richer params — call those tools
-    directly. Old tools stay registered underneath."""
+    a session_id, or none) · job (takes *id*, the ``job_id`` a ``wait=False``
+    ``llm_act`` / ``llm_delegate`` / ``llm_local_task`` returned). start/route carry
+    richer params — call those tools directly. Old tools stay registered underneath."""
     a = (action or "").lower()
+    if a == "job":
+        from llm_router.jobs import get_job
+        return get_job(id or session_id)
     if a == "list":
         return await llm_router_agent_list()
     if a == "check_budget":
@@ -186,7 +197,7 @@ async def llm_router_session(action: str, session_id: str = "", limit: int = 200
     if a == "lineage":
         return await llm_router_agent_lineage(session_id, limit=limit)
     return {"error": f"unknown/rich session action: {action!r}; "
-                     "use list/check_budget/complete/lineage, or start/route directly"}
+                     "use list/check_budget/complete/lineage/job, or start/route directly"}
 
 
 def register(mcp, should_register=None) -> None:

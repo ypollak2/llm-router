@@ -57,6 +57,8 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | P09-8 | The statusline "wrapper adds < 5 ms" test failed under load | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
 | P09-9 | A session id named by one test leaked onto latency rows of later tests | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
 | P03-1 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
+| A.0-1 | `llm_router_agent_start_session` returned `agent_not_found` from every installed wheel | fixed in `feat/agt-a0` (v16 AGT A.0) |
+| A.0-2 | `llm_act` / `llm_delegate` / `llm_local_task` blocked the MCP event loop for the whole run | fixed in `feat/agt-a0` (v16 AGT A.0) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -1138,3 +1140,46 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   id before and after each test, without importing the module when no test did.
 - **Test.** The two-file command above: 1 failed before, 34 passed after. Removing the
   fixture turns it red again.
+
+## A.0-1. `llm_router_agent_start_session` returned `agent_not_found` from every installed wheel
+
+- **Symptom.** Installed from a wheel, `llm_router_agent_list` listed no agents and
+  `llm_router_agent_start_session("code-reviewer")` returned
+  `{"error": "agent_not_found", "available_agents": []}`. From a source checkout it worked, so
+  no test saw it. Reproduced on b3dd351 by `tests/test_agt_a0_agents_yaml_wheel.py` (wheel
+  built with `uv build`, installed into a temp venv, cwd outside the repo, isolated HOME):
+  `ids=[]`, config path `<venv>/lib/python3.14/config/agents.yaml`, which does not exist.
+- **Cause.** The template lived at the repo root (`config/agents.yaml`), which is not in the
+  package. `tools/agents._default_config_path` fell back to
+  `Path(__file__).parents[3] / "config" / "agents.yaml"`: the repo root in a checkout, a
+  non-existent path under the venv in an install; a missing file means an empty registry.
+- **Fix.** The file moved to `src/llm_router/data/agents.yaml`; the fallback is
+  `importlib.resources.files("llm_router.data") / "agents.yaml"`. The env override and the
+  project `config/agents.yaml` walk-up are unchanged.
+- **Test.** `tests/test_agt_a0_agents_yaml_wheel.py::test_agents_yaml_found_from_installed_wheel`
+  builds and installs the wheel and asserts that `llm_router` was imported from the venv, the
+  three shipped ids are listed, and a `code-reviewer` session starts. Red on b3dd351, green on
+  the fix.
+
+## A.0-2. `llm_act` / `llm_delegate` / `llm_local_task` blocked the MCP event loop for the whole run
+
+- **Symptom.** While one `llm_act` ran, every other call to the MCP server waited for it, and
+  two `llm_act` calls took the sum of their times. On b3dd351,
+  `tests/test_agt_a0_async_agent_loops.py` measured a 30 s `llm_act` with a 20 ms ticker on the
+  loop: 1 tick, max lag 30018 ms; two parallel 3 s calls 6.09 s vs 3.03 s for one (ratio 2.007);
+  `llm_local_task` (2 s loop + 2 s check): 1 tick, max lag 4083 ms.
+- **Cause.** `tools/agentic.llm_delegate` called the synchronous `run_delegation` (model calls,
+  subprocesses) directly inside `async def`; `tools/local_task.llm_local_task` did the same with
+  `run_agent_loop` and `_run_check`.
+- **Fix.** All three run through `asyncio.to_thread`. The P0.13 project root is resolved before
+  the run starts, on the request. `llm_local_task` sets `LLM_ROUTER_AGENT_WRITES=apply` in the
+  process environment for its run, which is unsafe once two runs overlap (a propose-only run
+  would see `apply`, and the save/restore pairs could leave it set), so its loop runs under a
+  `threading.Lock` taken inside the worker thread: `llm_local_task` runs stay serial, as
+  before, without blocking the loop. New `wait=False` returns a job id
+  (`llm_router/jobs.py`), polled with `llm_router_session(action="job", id=...)`.
+- **Test.** `tests/test_agt_a0_async_agent_loops.py`: lag <= 100 ms with >= 1000 ticks during a
+  30 s `llm_act`; two parallel calls <= 1.3x one; `llm_local_task` lag <= 100 ms; `wait=False`
+  job polling for both tools; unknown job id. Red on b3dd351 (7 tests). The overlap test
+  `test_overlapping_local_tasks_never_leak_apply_writes` passes on b3dd351 (runs were serial)
+  and fails when the lock is removed (`['apply', None] != [None, None]`).

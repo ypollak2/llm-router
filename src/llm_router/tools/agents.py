@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from importlib import resources
 from pathlib import Path
 
 from llm_router.agents.registry import AgentNotFound, AgentRegistry
@@ -45,9 +46,10 @@ def _default_config_path() -> Path:
         candidate = parent / "config" / "agents.yaml"
         if candidate.exists():
             return candidate
-    # Fall back to the bundled template (next to this package)
-    pkg_dir = Path(__file__).resolve().parent.parent.parent.parent
-    return pkg_dir / "config" / "agents.yaml"
+    # Fall back to the template shipped inside the package. It lived at the repo
+    # root (config/agents.yaml) until AGT A.0, which no wheel contains, so every
+    # installed user got an empty registry and agent_not_found.
+    return Path(str(resources.files("llm_router.data").joinpath("agents.yaml")))
 
 
 def get_registry() -> AgentRegistry:

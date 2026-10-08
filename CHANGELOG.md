@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- agents (PLAN v16 AGT A.0): `llm_act`, `llm_delegate` and `llm_local_task` take `wait` (default
+  True). `wait=False` returns `{"job_id": ...}` at once; `llm_router_session(action="job", id=...)`
+  polls it (`running` / `done` / `failed`, with the tool's result). Jobs live in the MCP server
+  process and are forgotten on restart; an unknown id answers `unknown_job`.
 - proxy (PLAN v16 P0.11, owner decision D-20 = A): the Haiku guard (`proxy/haiku_guard.py`) runs in
   the proxy at start and hourly while `haiku_rewrite` is on. A trip (redo > 15% at n >= 30; audit
   batch < 75% at n >= 30; daily audit < 8/10 on 2 consecutive days; `tier_retry` > 1% at n >= 100
@@ -23,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   D-20 trigger has too little data to judge.
 
 ### Changed
+- agents (PLAN v16 AGT A.0): `agents.yaml` ships inside the package (`llm_router/data/agents.yaml`,
+  loaded with `importlib.resources`). It lived at the repo root, which no wheel contains, so every
+  installed user got `agent_not_found` (`docs/BUGS.md` A.0-1). A project `config/agents.yaml` and
+  `LLM_ROUTER_AGENTS_CONFIG` still override it.
+- agents (PLAN v16 AGT A.0): `run_delegation` (behind `llm_act` / `llm_delegate`) and
+  `llm_local_task`'s agent loop and acceptance check run in a worker thread (`asyncio.to_thread`), so
+  a long run no longer freezes every other MCP call (`docs/BUGS.md` A.0-2). `llm_local_task` runs
+  still go one at a time, because the loop's write mode is process-wide `os.environ`.
 - proxy (v16 P1.7-c): the classifier shadow's `cls_input.assemble` reads the history backwards, stops once it
   has its context and never reads more than 400 messages back. Same input as before whenever the context lies
   in that window (600-case fuzz against the old walk); it no longer holds the GIL long enough to delay
