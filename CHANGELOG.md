@@ -12,6 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- proxy (PLAN v16 P0.11, owner decision D-20 = A): the Haiku guard (`proxy/haiku_guard.py`) runs in
+  the proxy at start and hourly while `haiku_rewrite` is on. A trip (redo > 15% at n >= 30; audit
+  batch < 75% at n >= 30; daily audit < 8/10 on 2 consecutive days; `tier_retry` > 1% at n >= 100
+  Haiku-decided calls; shadow acceptable < 26/30 at n >= 20) writes `~/.llm-router/tier_overrides.json`
+  and turns the live rewrite off. `ClaudeTierPolicy.load` reads that override after the YAML. The
+  override can only turn the rewrite off, and the YAML is never edited. New
+  `llm-router kpi --haiku-watch --since --until` prints every trigger with its n and exits 1 when a
+  D-20 trigger has too little data to judge.
+
 ### Changed
 - proxy (v16 P1.7-c): the classifier shadow's `cls_input.assemble` reads the history backwards, stops once it
   has its context and never reads more than 400 messages back. Same input as before whenever the context lies
