@@ -21,6 +21,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 9 | Classifier warm-up loaded `llmr-classifier` at the wrong `num_ctx` | fixed in #298 (M1.4, review 2) |
 | 10 | README-advertised `--host pi` / `--host kimi` failed; detected gemini-cli skipped silently | fixed in this change (v16 P0.4) |
 | 11 | Four shadow tests raced the clock and failed `main` on a loaded runner | fixed in this change (test-only) |
+| P011-1 | Haiku guard re-tripped on audit days older than its window | fixed in `feat/haiku-guard-in-repo` (P0.11, 3f4149b) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -276,3 +277,18 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   finished mid-loop, its slot was reused and the counts came out `drops == 195` instead of 196
   (failed in isolation at load average ~70). The fake is now gated: it never answers until the test
   ends. The p95 <= 30 ms bar is the product's own number and is left as it was.
+
+## P011-1. Haiku guard re-tripped on audit days older than its window
+
+- **Symptom.** After the owner deleted `~/.llm-router/tier_overrides.json` to turn the Haiku
+  rewrite back on, the next guard run wrote the override again. Two low daily audits (7/10
+  and 7/10) from weeks earlier still counted as "2 consecutive days below 8/10". Found on
+  re-verification of P0.11 at b5f88b5 (unit test, synthetic audits; no live trip happened).
+- **Cause.** `run_once` evaluated `audit_daily` on the newest audited date at any age, not on
+  the dates inside the guard's 7-day window.
+- **Fix.** `audit_daily` in `run_once` looks only at audit days on or after the window start.
+  `kpi --haiku-watch` still names its own day. `audit_batch` is unchanged (newest summary at
+  any age, as ported from the research guard).
+- **Test.** `tests/test_proxy_haiku_guard.py::test_run_once_ignores_daily_audits_older_than_the_window`:
+  red on b5f88b5 (`assert 'trip' == 'ok'`), green on 3f4149b; mutant `recent = list(days)`
+  turns it red.
