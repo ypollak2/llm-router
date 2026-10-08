@@ -28,6 +28,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 16 | Critical-pressure override sent `/model claude-opus-4-6`, a retired id | fixed in this change (v16 P0.2) |
 | 17 | Semantic cache never hit, ignored context, and reported a hit rate of 0 | fixed in this change (v16 P0.5) |
 | P013-1 | `llm_act` wrote files into the MCP process cwd | fixed for the file tools in this change (P0.13); bash confinement is P2.9 |
+| 18 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -467,3 +468,31 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `test_codex_tier_is_confined_too`, `test_executor_without_cwd_is_read_only`). Six mutants
   (read-only flag off, containment off, ReAct on the process cwd, Codex without cwd, roots
   ignored, env ignored) each turn at least one of them red.
+
+## 18. Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP)
+
+- **Symptom.** D-14 = A says a Q&A task type is never served by a local provider. #297 (M3.0)
+  enforced it in MCP `route_and_call` only. `hooks.chain_builder.build_chain`, which builds the
+  chain for the hook DIRECT path (auto-route draft, agent-route subagent DIRECT) and for the
+  in-process SDK `llm_router.route`, still put Ollama first for every simple and moderate
+  Q&A prompt. On da31df7, 16 of the 18 cases (9 `QA_TASK_TYPES` x {simple, moderate}; the 2
+  `research` cases already returned `[]`) had a local provider in the chain, and
+  `route("what is X", task_type="query")` called Ollama once
+  (`tests/test_qa_policy_shared.py`, red run: 21 failed, 5 passed).
+- **Cause.** The filter and its provider set lived as private names in `router.py`
+  (`_strip_local_for_qa`, `_QA_STRIP_PROVIDERS`). The hook path cannot import `router`
+  (cold import ~3.6 s; import time was ~77% of the slow hook tail [M41]), so it had no copy.
+- **Fix.** New `src/llm_router/qa_policy.py` holds `QA_TASK_TYPES`, `QA_STRIP_PROVIDERS` and
+  `strip_local_for_qa`; it imports only `llm_router.types`, which the hook path already loads.
+  `router` and `northstar` import the names back (MCP behaviour unchanged). `build_chain`
+  applies the filter with `keep_if_only_local=False`: when only local models are available
+  the Q&A chain is empty, so the hook falls through to Claude and the SDK raises
+  `RoutingError`. MCP keeps its existing rule (an Ollama-only chain is kept, because an empty
+  chain fails the call). `code` and every non-Q&A type are unchanged.
+- **Test.** `tests/test_qa_policy_shared.py`: 18 parametrised cases (9 QA types x 2
+  complexities, each over all 5 pressure zones) assert no ollama, lm_studio, vllm, llamacpp or
+  openai_compat in the chain; `code` keeps local first; the SDK test patches the Ollama call
+  with a counter and asserts 0 calls; a subprocess test asserts that importing `qa_policy`
+  loads neither `router` nor `northstar`. Mutants (keep-only-local in the hook, no strip in
+  `build_chain`, inverted QA check, `openai_compat` dropped, `qa_policy` importing `router`)
+  each turn the file red.
