@@ -82,7 +82,8 @@ from llm_router.proxy.loop_guard import (
 )
 from llm_router.proxy.cache_cost import Stickiness, conversation_key
 from llm_router.proxy.steps import (
-    STEP_CLASSES, classify_text, is_first_call, newest_human_text, prev_tools, session_id_of, step_class,
+    STEP_CLASSES, classify_text, is_first_call, newest_human_text, prev_tool_class, prev_tools, session_id_of,
+    step_class, step_ineligible, step_kind,
 )
 from llm_router import session_kind
 from llm_router.proxy import cost_accounting
@@ -820,8 +821,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             "stream": bool(body.get("stream")), "requested_model": body.get("model"),
             "auth": ledger.auth_kind(request.headers),
             "mixed_history": has_served_turn(body), "thinking_retry": False,
-            "step_class": step_class(body, set(STEP_CLASSES)),
+            # GE1: the kind of call (continuation / turn_first / subagent_first /
+            # side_call), the class of the tools its results answer, and why a
+            # continuation could not be served faithfully. Serving eligibility is
+            # step_class(body, cfg.steps) below, not this label.
+            "step_class": step_kind(body),
             "prev_tools": prev_tools(body),
+            "prev_tool_class": prev_tool_class(body),
+            "step_ineligible": step_ineligible(body),
             "decision": ledger.DECISION_FORWARDED, "added_latency_s": 0.0,
             "tier_mode": cfg.tiers,
             # KPI instrumentation (G3): these keys exist on EVERY forwarded/served
@@ -845,7 +852,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 return Response(json.dumps(message), media_type="application/json")
         elif not cfg.steps:
             row["reason"] = "routing_off"
-        elif row["step_class"] is None or row["step_class"] not in cfg.steps:
+        elif step_class(body, cfg.steps) is None:
             row["reason"] = "not_eligible"
         else:
             message = await try_serve(body, row)
