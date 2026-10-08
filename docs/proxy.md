@@ -311,14 +311,26 @@ canary mode; until it exists it behaves as `shadow`.
 - Only turn-first calls: a continuation (never waits) and a side call (no client tools) schedule nothing.
 - One call per turn: a turn already answered (cache) or being answered is skipped. At most 4 classifications are
   pending; a turn beyond that is dropped and counted, never queued. One Ollama slot (a semaphore of 1).
-- The request path only creates a task. The input is assembled in a worker thread (`cls_input.assemble` walks
-  the whole history: 45 ms on a 600-message one) and the call is `local_classifier.classify_async` (2.0 s budget).
+- The request path only creates a task. The input is assembled in a worker thread and the call is
+  `local_classifier.classify_async` (2.0 s budget). `cls_input.assemble` reads the history backwards, stops once
+  it holds the newest prompt, 3 earlier prompts and the assistant's last text, and reads at most 400 messages
+  back (P1.7-c: the old full walk held the GIL long enough to delay concurrent continuations; `docs/BUGS.md`
+  P1.7-c-1). A record whose input hit that window without its full context says `assemble_capped: true`.
+- The classifier is `local_classifier`'s backend: `LLM_ROUTER_CLASSIFIER_BACKEND=systemone` makes the shadow ask
+  the decision model on Ollama `/v1/systemone` (`nimble:9b` unless `LLM_ROUTER_DECISION_MODEL`).
 - One record per finished call to `classifier_shadow.jsonl` in the state dir, a `classifier_shadow_drop` record
   per drop. Hashes (`text_sha`), tiers, numbers and reason codes only: no prompt text, no model `reason`.
 - `llm-router kpi` prints `classifier shadow (proxy): ...` and `--json` carries `classifier_shadow`
   (`n, n_sessions, agree, llm_tier_dist, rules_tier_dist, cheap_share_llm, fallback_rate, p50_ms, p95_ms, drops,
   calls_per_turn`, plus `n_compared`, `drop_rate`, `cls_applied_true`). Organic sessions only unless
   `--include research`. The decision cost shows in G1_proxy: `tier_decision_s` includes the scheduling.
+- Each record carries `requested` (the tier of the call's own `requested_model`), `backend` and
+  `assemble_capped`. Under the shadow line, `kpi` prints one `classifier shadow vs rules [model]: ...` line per
+  classifier model (`--json`: `classifier_shadow.vs_rules`, from `llm_router/shadow_eval.py`): turns, sessions,
+  real requested tiers, fallbacks, agreement, and against rules_eff C-lambda2, M1-12 clamp-aware cost
+  (min(pick, requested)) with a session bootstrap, under-route and Haiku precision. A live turn has no truth of
+  its own: those numbers need `LLM_ROUTER_SHADOW_LABELS` (JSONL `{"text_sha", "session_id", "truth"}`); without
+  it, or below 100 labeled turns, M1-12 reads `not informative`.
 
 ## Metrics
 
