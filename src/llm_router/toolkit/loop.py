@@ -163,7 +163,7 @@ def run_task(task: str, *, adapter, source: str | os.PathLike, verify_cmd: str |
                 stop = "token_budget"
                 break
             steps += 1
-            messages = _prune(messages, int(adapter.num_ctx * 2.6) if hasattr(adapter, "num_ctx") else 60000)
+            messages = _prune(messages, int(adapter.num_ctx * 2.6) if getattr(adapter, "num_ctx", None) else 60000)
             try:
                 reply = adapter.chat(messages, TOOL_DEFINITIONS,
                                      timeout_s=min(b.call_timeout_s, max(5.0, b.max_seconds - elapsed)))

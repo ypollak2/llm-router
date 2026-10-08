@@ -1007,7 +1007,7 @@ def _with_routing_note(tool_input: dict) -> dict:
 
 def _try_direct_subagent(
     prompt: str, task_type: str, complexity: str, session_id: str,
-    subagent_type: str = "general-purpose",
+    subagent_type: str = "general-purpose", ledger_session_id: str | None = None,
 ) -> str | None:
     """Run the subagent's task on a routed cheap model instead of spawning Opus.
 
@@ -1073,9 +1073,12 @@ def _try_direct_subagent(
             result=result, task_type=task_type, complexity=complexity,
             session_id=session_id, host="claude_code_subagent",
         )
+        # The ledger takes the hook payload's session id, never `session_id` above:
+        # that one falls back to the machine-wide session_id.txt (last SessionStart
+        # wins) and then to "unknown". log_direct_to_db stores only a valid id.
         log_direct_to_db(
             result=result, prompt=prompt, task_type=task_type,
-            complexity=complexity, classifier_type="agent-route", session_id=session_id,
+            complexity=complexity, classifier_type="agent-route", session_id=ledger_session_id,
         )
     except Exception:
         pass
@@ -1086,7 +1089,8 @@ def _try_direct_subagent(
 
 
 def _log_cli_savings(content: str, provider: str, model: str, duration_sec: float,
-                     prompt: str, task_type: str, complexity: str, session_id: str) -> None:
+                     prompt: str, task_type: str, complexity: str, session_id: str,
+                     ledger_session_id: str | None = None) -> None:
     """Log savings for a CLI-delegated subagent run. CLI agents don't report token
     counts, so estimate from text length (chars/4), the same heuristic cc-usage-track
     uses. host=claude_code_subagent_cli keeps delegation savings separately attributable."""
@@ -1103,9 +1107,9 @@ def _log_cli_savings(content: str, provider: str, model: str, duration_sec: floa
             result=synthetic, task_type=task_type, complexity=complexity,
             session_id=session_id, host="claude_code_subagent_cli",
         )
-        log_direct_to_db(
+        log_direct_to_db(  # the payload's session id: see _try_direct_subagent
             result=synthetic, prompt=prompt, task_type=task_type,
-            complexity=complexity, classifier_type="agent-route-cli", session_id=session_id,
+            complexity=complexity, classifier_type="agent-route-cli", session_id=ledger_session_id,
         )
     except Exception:
         pass
@@ -1169,7 +1173,10 @@ except Exception:  # noqa: BLE001 -- fall back to the same numbers, literally
 #: Ceiling on the delegation timeout: the codex subprocess must finish, and
 #: this hook must still have time to read its output and exit, before Claude
 #: Code's wall-clock kill fires. Also the default -- measured: median 91s,
-#: 7/17 real tasks over 120s, max 223s.
+#: 7/17 real tasks over 120s, max 223s. Re-measured on the live ledger
+#: (``delegated`` rows with duration_sec, 7 days to 2026-10-06, N=46): p50 53s,
+#: p90 156s, p95 219s, max 260s, 6/46 over 120s -- so 300s clears the observed
+#: max and 120s would have cut 13%. Override: LLM_ROUTER_SUBAGENT_CLI_TIMEOUT.
 _CODEX_MAX_TIMEOUT_SEC = _HOOK_TIMEOUT_SEC - _DELEGATION_MARGIN_SEC
 _CODEX_DEFAULT_TIMEOUT_SEC = _CODEX_MAX_TIMEOUT_SEC
 _MIN_RUN_SEC = 15
@@ -1473,6 +1480,7 @@ def _note_codex_failure(path: str, status: str, res, subagent_type: str,
             complexity=complexity, session_id=session_id, path=path,
             reason=f"Codex usage limit hit; benched until {when}: "
                    f"{getattr(res, 'content', '')}"[:200],
+            reason_code="quota",
         )
         if os.environ.get("LLM_ROUTER_ROUTE_BANNER", "on").strip().lower() not in ("0", "off", "false", "no"):
             try:
@@ -1481,22 +1489,29 @@ def _note_codex_failure(path: str, status: str, res, subagent_type: str,
             except Exception:
                 pass
         return
+    # reason_code is the stable, queryable cause (never empty); reason is the
+    # CLI's free text. 143 codex_failed rows in the 7 days to 2026-10-06 had
+    # only the latter, so grouping them meant regexing prose.
     if status == "no_time":
         reason = "delegation wall-clock allowance already spent in this hook run"
+        code = "no_time"
+    elif res is None:
+        reason, code = "no CodexResult returned", "no_result"
     else:
-        reason = str(getattr(res, "content", "") if res else "no CodexResult returned")
+        reason = str(getattr(res, "content", "") or "")
+        code = getattr(res, "reason_code", "") or "unclassified"
     _record_north_star_unit(
         "agent_route_codex", model=model, outcome="codex_failed",
         subagent_type=subagent_type, task_type=task_type,
         complexity=complexity, session_id=session_id, path=path,
-        reason=reason[:200],
+        reason=(reason or code)[:200], reason_code=code,
     )
 
 
 def _try_cli_delegation(
     prompt: str, task_type: str, complexity: str, session_id: str,
     subagent_type: str = "general-purpose",
-    cwd: str | None = None,
+    cwd: str | None = None, ledger_session_id: str | None = None,
 ) -> str | None:
     """Phase 2 — delegate bigger/tool-heavy subagent work to a real external agent
     CLI (Codex / Gemini CLI) that brings its own toolchain and runs on an external
@@ -1574,7 +1589,7 @@ def _try_cli_delegation(
             pass
 
     _log_cli_savings(res.content, provider, res.model, res.duration_sec,
-                     prompt, task_type, complexity, session_id)
+                     prompt, task_type, complexity, session_id, ledger_session_id)
     _govern_run(subagent_type, provider, res.model,
                 max(1, len(prompt) // 4), max(1, len(res.content) // 4), complexity)
     return res.content
@@ -1727,7 +1742,7 @@ def _verify_enqueue_marker(res, session_id: str, ts) -> None:
 
 def _try_codex_subagent_delegation(
     prompt: str, task_type: str, complexity: str, subagent_type: str, session_id: str,
-    cwd: str | None = None,
+    cwd: str | None = None, ledger_session_id: str | None = None,
 ) -> str | None:
     """NS3 — delegate a SUITABLE sub-agent spawn to Codex CLI before Claude
     ever spawns anything for it.
@@ -1817,6 +1832,7 @@ def _try_codex_subagent_delegation(
             subagent_type=subagent_type, task_type=task_type,
             complexity=complexity, session_id=session_id, path="ns3",
             reason=f"run_codex raised: {e}"[:200],
+            reason_code="run_codex_raised",
         )
         return None
 
@@ -1835,7 +1851,7 @@ def _try_codex_subagent_delegation(
             pass
 
     _log_cli_savings(res.content, "codex", res.model, res.duration_sec,
-                      prompt, task_type, complexity, session_id)
+                      prompt, task_type, complexity, session_id, ledger_session_id)
     _govern_run(subagent_type, "codex", res.model,
                 max(1, len(prompt) // 4), max(1, len(res.content) // 4), complexity)
     _delegated_ts = _record_north_star_unit(
@@ -1843,6 +1859,8 @@ def _try_codex_subagent_delegation(
         subagent_type=subagent_type, task_type=task_type,
         complexity=complexity, session_id=session_id,
         duration_sec=res.duration_sec,
+        **({"truncated": True} if getattr(res, "truncated", False) else {}),
+        **({"reason_code": res.reason_code} if getattr(res, "reason_code", "") else {}),
     )
     _verify_enqueue_marker(res, session_id, _delegated_ts)
     return res.content
@@ -1948,7 +1966,7 @@ def main() -> None:
     # this change. See the NS3 docstring above _try_codex_subagent_delegation.
     _codex_delegated = _try_codex_subagent_delegation(
         prompt, task_type, complexity, subagent_type, session_id,
-        cwd=hook_input.get("cwd"))
+        cwd=hook_input.get("cwd"), ledger_session_id=hook_input.get("session_id"))
     if _codex_delegated is not None:
         _write_agent_depth(session_id, current_depth)  # roll back: no real spawn happened
         _log_agent_call(subagent_type, prompt, "routed_codex_subagent")
@@ -1990,7 +2008,8 @@ def main() -> None:
     # Instead of merely blocking with advice, actually run the task on the
     # routed chain and hand the result back as the subagent's output. Savings
     # are logged (host=claude_code_subagent). Falls through on any failure.
-    _routed = (_try_direct_subagent(prompt, task_type, complexity, session_id, subagent_type)
+    _routed = (_try_direct_subagent(prompt, task_type, complexity, session_id, subagent_type,
+                                    ledger_session_id=hook_input.get("session_id"))
                if _qb_allowed else None)
     if not _qb_allowed:
         _log_agent_call(subagent_type, prompt,
@@ -2013,7 +2032,8 @@ def main() -> None:
     # agent CLI (Codex / Gemini) running on an external subscription. Savings
     # logged (host=claude_code_subagent_cli). Falls through on any failure.
     _delegated = _try_cli_delegation(
-        prompt, task_type, complexity, session_id, subagent_type, cwd=hook_input.get("cwd"))
+        prompt, task_type, complexity, session_id, subagent_type, cwd=hook_input.get("cwd"),
+        ledger_session_id=hook_input.get("session_id"))
     if _delegated is not None:
         _write_agent_depth(session_id, current_depth)  # roll back: no real spawn happened
         _log_agent_call(subagent_type, prompt, "routed_cli_delegation")

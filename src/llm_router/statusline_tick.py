@@ -1,19 +1,29 @@
 """The status line's per-tick renderer. STDLIB ONLY, and it must stay that way.
 
 Claude Code runs the ``statusLine`` command about once a second. This file is
-what that command executes (``hooks/statusline-command.sh`` execs it; the
-installer copies it next to the hooks as ``llm_router_statusline_tick.py``), so
-everything here is on a one-second loop:
+what that command executes in debug mode (``LLM_ROUTER_STATUSLINE=fast``;
+``hooks/statusline-command.sh`` execs it; the installer copies it next to the
+hooks as ``llm_router_statusline_tick.py``), so everything here is on a
+one-second loop:
 
 * it never imports ``llm_router`` (the package import alone costs more than the
   whole tick budget) and never computes a KPI. It reads ONE small cache file,
-  ``statusline_cache.json``, that :mod:`llm_router.statusline_refresh` writes;
+  ``statusline_cache.json``, that :mod:`llm_router.statusline_refresh` writes,
+  and the Claude quota snapshot ``usage.json`` (session 5h / weekly / Sonnet %,
+  the numbers ``llm-router status`` prints), which the hooks keep fresh. Quota
+  is never fetched from here;
 * when that cache is missing or older than :data:`REFRESH_AFTER_S` it starts the
   refresher DETACHED and does not wait for it. At most one start per
   :data:`REFRESH_AFTER_S` (a timestamp file, not a lock: a hung refresher holds
   nothing a tick waits on), so a stuck refresh cannot delay a tick or pile up;
+* every :data:`HISTORY_INTERVAL_S` (300 s) it appends one row of the quota it
+  just read to ``quota_history.jsonl`` (GE6 / S3: the 5-minute series; one
+  ``stat`` of a stamp file per tick otherwise). Stale snapshots are recorded as
+  ``stale``, unknown values as null;
 * a value it does not have is printed as ``n/a``, never as 0. A cache older than
-  :data:`STALE_AFTER_S` is not data: every cached field reads ``n/a``;
+  :data:`STALE_AFTER_S` is not data: every cached field reads ``n/a``. A quota
+  snapshot older than ``LLM_ROUTER_USAGE_TTL_SEC`` (default 300 s, the same TTL
+  as the full layout's ``°`` marker) is still shown, with ``(stale <age>)``;
 * it reads nothing from stdin but drains it (Claude Code pipes the session JSON
   and times out a command that leaves the pipe full). The session JSON carries
   no prompt text today, and nothing from it is printed either way.
@@ -21,7 +31,7 @@ everything here is on a one-second loop:
 Output: one line, at most :data:`MAX_CHARS` characters (counted without the
 colour codes), e.g.::
 
-    llm-router · smart · NS 0.0% n=3599 · Claude wk 41% · Codex 7/15 ↻21:14 · ⚠ hooks p95 3.0s auto-route
+    llm-router · smart · NS 0.0% n=3599 · Claude 5h 12% wk 41% sonnet 3% · Codex 7/15 ↻21:14 · ⚠ hooks p95 3.0s auto-route
 """
 
 from __future__ import annotations
@@ -31,17 +41,32 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
 
 # subprocess / shlex are imported only on the rare path that needs them: on this
 # machine's python3 they add ~15 ms to a tick, and the bar is 100 ms.
 
 CACHE_NAME = "statusline_cache.json"
+#: The Claude quota snapshot the hooks write (``llm-router status`` reads it too).
+USAGE_NAME = "usage.json"
+#: Past this age a quota snapshot is shown with a stale marker (the full
+#: layout's ``LLM_ROUTER_USAGE_TTL_SEC`` default).
+DEFAULT_USAGE_TTL_S = 300.0
+#: (usage.json key, label), in the order ``llm-router status`` lists them.
+_QUOTA_FIELDS = (("session_pct", "5h"), ("weekly_pct", "wk"), ("sonnet_pct", "sonnet"))
 REFRESH_STAMP_NAME = ".statusline-refresh.last"
 #: The cache is refreshed in the background at most this often.
 REFRESH_AFTER_S = 60.0
 #: Past this age the cached values are not shown at all ("n/a").
 STALE_AFTER_S = 15 * 60.0
 MAX_CHARS = 200
+#: GE6 / S3: the 5-minute quota series (``llm_router.quota_samples`` reads it).
+HISTORY_NAME = "quota_history.jsonl"
+HISTORY_STAMP_NAME = ".quota_history.last"
+#: One history row at most this often (the quota TTL above).
+HISTORY_INTERVAL_S = 300.0
+#: A usage.json older than this is recorded ``stale``, not ``measured``.
+QUOTA_STALE_AFTER_S = 30 * 60.0
 #: Longest model / hook name the line will carry before it is cut.
 _NAME_MAX = 24
 
@@ -64,6 +89,60 @@ def read_cache(home: str) -> dict | None:
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def read_usage(home: str) -> dict | None:
+    try:
+        with open(os.path.join(home, USAGE_NAME), encoding="utf-8") as fh:
+            data = json.load(fh)
+            mtime = os.fstat(fh.fileno()).st_mtime
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if _num(data.get("updated_at")) in (None, 0.0):
+        data["updated_at"] = mtime  # older snapshots lack it: file mtime, as the full layout does
+    return data
+
+
+def usage_ttl() -> float:
+    raw = os.environ.get("LLM_ROUTER_USAGE_TTL_SEC", "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_USAGE_TTL_S
+    return value if value > 0 else DEFAULT_USAGE_TTL_S
+
+
+def _age(seconds: float) -> str:
+    if seconds < 3600:
+        return f"{max(1, int(seconds // 60))}m"
+    if seconds < 48 * 3600:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
+
+
+def _quota(usage: dict | None, now: float, ttl: float) -> str:
+    """``Claude 5h 12% wk 41% sonnet 3%`` from a ``usage.json`` snapshot.
+
+    Unknown is ``n/a``, never 0: no file, the install placeholder (``pending``),
+    the failed-fetch snapshot (``is_fallback``: invented 50s), or a field that is
+    not a number. A snapshot past ``ttl`` is still shown, marked ``(stale <age>)``;
+    one with no ``updated_at`` has an unknown age and is marked ``(stale)``.
+    """
+    if not isinstance(usage, dict) or usage.get("pending") or usage.get("is_fallback"):
+        return "Claude n/a"
+    values = [(label, _num(usage.get(key))) for key, label in _QUOTA_FIELDS]
+    if all(v is None for _, v in values):
+        return "Claude n/a"
+    seg = "Claude " + " ".join(f"{label} {v:.0f}%" if v is not None else f"{label} n/a"
+                               for label, v in values)
+    updated = _num(usage.get("updated_at"))
+    if updated is None or updated <= 0:
+        return seg + " (stale)"
+    if now - updated > ttl:
+        seg += f" (stale {_age(now - updated)})"
+    return seg
 
 
 def _num(value) -> float | None:
@@ -94,8 +173,9 @@ def _clock(epoch: float) -> str:
     return time.strftime("%H:%M", time.localtime(epoch))
 
 
-def render(cache: dict | None, *, now: float, env_mode: str | None = None, color: bool = False) -> str:
-    """The status line for ``cache`` at ``now``. Pure: no I/O.
+def render(cache: dict | None, *, now: float, env_mode: str | None = None, color: bool = False,
+           usage: dict | None = None, usage_ttl_s: float = DEFAULT_USAGE_TTL_S) -> str:
+    """The status line for ``cache`` and the quota snapshot ``usage`` at ``now``. Pure: no I/O.
 
     ``env_mode`` is ``LLM_ROUTER_ENFORCE`` from this process's environment; it
     wins over the cached mode exactly as ``enforce_config`` lets it win.
@@ -120,8 +200,7 @@ def render(cache: dict | None, *, now: float, env_mode: str | None = None, color
     else:
         parts.append("NS n/a")
 
-    wk = _num((fresh or {}).get("claude_weekly_pct")) if fresh else None
-    parts.append(f"Claude wk {wk:.0f}%" if wk is not None else "Claude wk n/a")
+    parts.append(_quota(usage, now, usage_ttl_s))
 
     codex = (fresh or {}).get("codex") if fresh else None
     used = _num(codex.get("used")) if isinstance(codex, dict) else None
@@ -232,6 +311,98 @@ def maybe_refresh(home: str, cache: dict | None, now: float) -> bool:
         return False
 
 
+def _epoch(value) -> float | None:
+    """Copy of ``quota_samples._epoch``: ``session_resets_at`` as epoch seconds."""
+    if isinstance(value, str) and value:
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    v = _num(value)
+    return v if v is not None and 0 < v < float("inf") else None
+
+
+def quota_sample(usage: dict | None, now: float) -> dict:
+    """``{five_hour_pct, weekly_pct, updated_at, five_hour_resets_at, source}`` from a usage.json dict.
+
+    The tick cannot import ``llm_router``, so this is a copy of
+    ``quota_samples.sample_from_usage``; tests/test_quota_samples.py pins both to
+    the same answers. ``measured`` needs real numbers no older than
+    :data:`QUOTA_STALE_AFTER_S`; anything else is ``stale``, unknown values null."""
+    resets_at = _epoch(usage.get("session_resets_at")) if isinstance(usage, dict) else None
+    if not isinstance(usage, dict) or usage.get("pending") or usage.get("is_fallback"):
+        return {"five_hour_pct": None, "weekly_pct": None,
+                "updated_at": _num(usage.get("updated_at")) if isinstance(usage, dict) else None,
+                "five_hour_resets_at": resets_at, "source": "stale"}
+    h5, wk = _num(usage.get("session_pct")), _num(usage.get("weekly_pct"))
+    updated = _num(usage.get("updated_at"))
+    fresh = updated is not None and updated > 0 and 0 <= now - updated <= QUOTA_STALE_AFTER_S
+    measured = fresh and h5 is not None and wk is not None
+    return {"five_hour_pct": h5, "weekly_pct": wk, "updated_at": updated,
+            "five_hour_resets_at": resets_at,
+            "source": "measured" if measured else "stale"}
+
+
+def maybe_append_history(home: str, usage: dict | None, now: float) -> bool:
+    """Append one ``quota_history.jsonl`` row when :data:`HISTORY_INTERVAL_S` has
+    passed since the last one (a stamp file's mtime, one ``stat`` a tick).
+    Append-only, 0600. Never raises; True when a row was written.
+
+    Several Claude Code windows tick at once: the slot is claimed under a
+    non-blocking ``flock`` on the stamp, and the stamp's content (the last row's
+    ``ts``) is re-checked under it, so one window writes a slot and the rest skip."""
+    try:
+        stamp = os.path.join(home, HISTORY_STAMP_NAME)
+        try:
+            if 0 <= now - os.path.getmtime(stamp) < HISTORY_INTERVAL_S:
+                return False
+        except OSError:
+            pass
+        os.makedirs(home, mode=0o700, exist_ok=True)
+        fd = os.open(stamp, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            try:
+                import fcntl  # only on this once-per-slot path; absent on Windows
+            except ImportError:
+                fcntl = None
+            if fcntl is not None:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    return False  # another window is writing this slot
+            last = _num(_float_or_none(os.read(fd, 64)))
+            # Both directions: a window whose ``now`` was read a moment before the
+            # winner's sees a small negative gap, and that slot is still taken.
+            if last is not None and abs(now - last) < HISTORY_INTERVAL_S:
+                return False  # another window wrote this slot since our stat
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.ftruncate(fd, 0)
+            os.write(fd, repr(float(now)).encode("ascii"))
+            os.utime(stamp, (now, now))
+            row = {"ts": now}
+            row.update(quota_sample(usage, now))
+            hfd = os.open(os.path.join(home, HISTORY_NAME), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            try:
+                os.write(hfd, (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8"))
+            finally:
+                os.close(hfd)
+            return True
+        finally:
+            os.close(fd)  # also releases the flock
+    except Exception:  # noqa: BLE001 -- a status line never fails over its history
+        return False
+
+
+def _float_or_none(raw: bytes) -> float | None:
+    try:
+        return float(raw.decode("ascii").strip())
+    except (UnicodeDecodeError, ValueError):
+        return None
+
+
 def main() -> int:
     try:
         sys.stdin.buffer.read()
@@ -241,8 +412,11 @@ def main() -> int:
     home = router_home()
     cache = read_cache(home)
     maybe_refresh(home, cache, now)
+    usage = read_usage(home)
+    maybe_append_history(home, usage, now)
     color = not os.environ.get("NO_COLOR")
-    sys.stdout.write(render(cache, now=now, env_mode=os.environ.get("LLM_ROUTER_ENFORCE"), color=color) + "\n")
+    sys.stdout.write(render(cache, now=now, env_mode=os.environ.get("LLM_ROUTER_ENFORCE"), color=color,
+                            usage=usage, usage_ttl_s=usage_ttl()) + "\n")
     return 0
 
 

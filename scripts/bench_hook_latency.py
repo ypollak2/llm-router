@@ -83,9 +83,26 @@ warm = []
 for _ in range(2000):
     a = time.perf_counter(); hl.record("enforce-route", "PreToolUse", 12.3); warm.append(time.perf_counter() - a)
 warm.sort()
+# M4.1 phases: the cost of one `with phase(...)` while a hook is being timed, and of the
+# larger row (phases_ms) that the exit write then carries.
+hl.begin("auto-route", "UserPromptSubmit", time.monotonic())
+ph = []
+for _ in range(2000):
+    a = time.perf_counter()
+    with hl.phase("session_io"):
+        pass
+    ph.append(time.perf_counter() - a)
+ph.sort()
+rows = {"import": 12.3, "session_io": 4.5, "zce": 0.4, "classify": 0.2, "db_write": 3.1, "ollama": 0.0, "hud": 0.1}
+big = []
+for _ in range(2000):
+    a = time.perf_counter(); hl.record("auto-route", "UserPromptSubmit", 12.3, phases_ms=rows); big.append(time.perf_counter() - a)
+big.sort()
 print(json.dumps({"import_us": (t1 - t0) * 1e6, "begin_us": (t2 - t1) * 1e6,
                   "first_write_us": (t3 - t2) * 1e6, "warm_median_us": warm[1000] * 1e6,
-                  "warm_p95_us": warm[1900] * 1e6}))
+                  "warm_p95_us": warm[1900] * 1e6,
+                  "phase_ctx_median_us": ph[1000] * 1e6, "phase_ctx_p95_us": ph[1900] * 1e6,
+                  "warm_with_7_phases_median_us": big[1000] * 1e6}))
 """
 
 

@@ -67,6 +67,11 @@ The decision, per call, in order (the first that applies wins):
                     stickiness, or the escalation check below -- it only
                     changes what happens when the policy already landed on
                     ``haiku``.
+``haiku_fold_system`` opt-in (``haiku_fold_system: true`` in the policy YAML, OFF
+                    by default, only effective with ``haiku_rewrite``): a body
+                    with mid-conversation ``role: "system"`` messages is
+                    eligible for the rewrite too, because ``for_haiku`` folds
+                    them into user messages (M0.7).
 ``escalation``      checked after ``thinking_floor``, on EVERY call (not just
                     the first): ``escalation.correction_signal`` found a
                     contradiction, a ``claude:`` re-ask, or a run of failed
@@ -220,6 +225,25 @@ def policy_version(path: str | Path | None = None) -> str:
     return hashlib.sha256(raw + b"\0" + str(__version__).encode("utf-8")).hexdigest()[:12]
 
 
+def tier_model(name: str, path: str | Path | None = None) -> str | None:
+    """Model id of tier ``name`` in the policy the proxy loads, or None.
+
+    Same file the proxy reads: ``path``, else ``LLM_ROUTER_PROXY_TIER_POLICY``,
+    else the bundled ``claude_tiers.yaml``; parsed by ``ClaudeTierPolicy.load``.
+    Hooks use this instead of a literal model id (plan v16 P0.2: auto-route
+    kept sending ``/model claude-opus-4-6`` after the opus tier moved on).
+    None when the file is missing or invalid, or has no such tier.
+    """
+    import os
+
+    target = path or os.environ.get("LLM_ROUTER_PROXY_TIER_POLICY") or None
+    try:
+        tier = ClaudeTierPolicy.load(target).by_name.get(name)
+    except (OSError, ValueError, TypeError, ImportError):
+        return None
+    return tier.model if tier is not None else None
+
+
 async def _default_classify(text: str) -> dict:
     from llm_router.proxy.backends import choose_model
 
@@ -300,9 +324,47 @@ def _has_mid_conversation_system_message(body: dict) -> bool:
     supported on this model"}`` -- and dropping the message instead of
     the whole rewrite would silently discard real content (environment
     info, reminders) and/or an effort change the turn actually made, so
-    this is an eligibility exclusion, not something ``for_haiku``
-    rewrites around."""
+    by default this is an eligibility exclusion. With ``haiku_fold_system:
+    true`` (M0.7, off by default, smoke-tested only) ``for_haiku`` instead
+    folds each such message into a ``<system-reminder>`` text block of a user
+    message, keeping the text and dropping only the effort control. Whether
+    the CURRENT Claude Code still sends the message on every call is not
+    checked by this docstring: ``has_mid_system`` in the proxy ledger (M0.5)
+    measures it."""
     return any(isinstance(m, dict) and m.get("role") == "system" for m in body.get("messages") or [])
+
+
+# Public name for the ledger (proxy/server.py); the tests keep the private one.
+has_mid_conversation_system_message = _has_mid_conversation_system_message
+
+#: Why a body cannot go to Haiku, as ``tier_haiku_block`` in the ledger (M0.5).
+HAIKU_BLOCK_SYSTEM_MESSAGE = "system_message"
+HAIKU_BLOCK_MEDIA = "media"
+HAIKU_BLOCK_BUILTIN_TOOLS = "builtin_tools"
+HAIKU_BLOCK_CONTEXT = "context"
+HAIKU_BLOCK_NONE = "none"
+
+
+def haiku_block_reason(body: dict, *, fold_system: bool = False) -> str:
+    """The first reason this body cannot be sent to Haiku, else ``"none"``.
+
+    One of ``system_message | media | builtin_tools | context | none``. The checks
+    are the ones ``ClaudeTierPolicy._haiku_body_ok`` has always made, so a body is
+    eligible exactly when this returns ``"none"``. The mid-conversation system
+    message is listed first so the ledger attributes a body that fails several
+    checks to the one the fold (M0.7) would remove. With ``fold_system`` (the policy's
+    ``haiku_folds_system``) that check is skipped: ``translate.for_haiku`` folds the
+    message into a user message. The policy's own question ("is there a haiku tier at
+    all") is not a body property and is not asked here."""
+    if not fold_system and _has_mid_conversation_system_message(body):
+        return HAIKU_BLOCK_SYSTEM_MESSAGE
+    if _has_media(body):
+        return HAIKU_BLOCK_MEDIA
+    if not _only_custom_tools(body):
+        return HAIKU_BLOCK_BUILTIN_TOOLS
+    if _approx_context_tokens(body) > HAIKU_MAX_CONTEXT_TOKENS:
+        return HAIKU_BLOCK_CONTEXT
+    return HAIKU_BLOCK_NONE
 
 
 def _only_custom_tools(body: dict) -> bool:
@@ -339,7 +401,7 @@ class ClaudeTierPolicy:
                  cold_gap_s: float = 3600.0, switch_after_first_call: bool = False,
                  conversation_level: bool = False, classify=None,
                  complexity_knn: bool = False, haiku_rewrite: bool = False,
-                 quota_pressure: dict | None = None, quota=None) -> None:
+                 haiku_fold_system: bool = False, quota_pressure: dict | None = None, quota=None) -> None:
         if not tiers:
             raise ValueError("tier policy has no tiers")
         self.tiers = tiers
@@ -366,6 +428,17 @@ class ClaudeTierPolicy:
         # ``haiku_rewrite: true`` serves eligible turns on the Haiku tier by
         # rewriting the body (see ``_haiku_eligible``); OFF by default.
         self.haiku_rewrite = haiku_rewrite
+        # Set by ``load`` (and the proxy's Haiku guard) when the guard's override file
+        # (``proxy/haiku_guard.py``, ``tier_overrides.json``) turned the rewrite off: the
+        # override's {haiku_rewrite, reason, ts}. None = the YAML value stands.
+        self.haiku_override: dict | None = None
+        # ``haiku_fold_system: true`` (M0.7, OFF by default) makes a body with a
+        # mid-conversation ``role: "system"`` message eligible for Haiku: the rewrite
+        # folds it into a user message (``translate.fold_system_messages``). Only
+        # effective together with ``haiku_rewrite`` (``haiku_folds_system``).
+        if not isinstance(haiku_fold_system, bool):
+            raise ValueError(f"haiku_fold_system must be true or false, got {haiku_fold_system!r}")
+        self.haiku_fold_system = haiku_fold_system
         self._classify = with_complexity_knn(classify) if complexity_knn else classify
         # Quota pressure step (``quota_pressure:`` in the policy YAML). ``quota``
         # is a ``() -> QuotaReading`` hook for tests; the default reads the
@@ -412,6 +485,7 @@ class ClaudeTierPolicy:
                    conversation_level=conversation_level, classify=classify,
                    complexity_knn=bool(data.get("complexity_knn", False)),
                    haiku_rewrite=bool(data.get("haiku_rewrite", False)),
+                   haiku_fold_system=data.get("haiku_fold_system", False),
                    quota_pressure=data.get("quota_pressure"), quota=quota)
 
     @classmethod
@@ -428,6 +502,11 @@ class ClaudeTierPolicy:
             raise ValueError(f"tier policy {target} is not a mapping")
         policy = cls.from_dict(data, conversation_level=conversation_level, classify=classify)
         policy.policy_version = policy_version(target)
+        # The Haiku guard's override file beats the YAML (P0.11, D-20): it can turn
+        # ``haiku_rewrite`` off, never on. Deleting the file restores the YAML value.
+        from llm_router.proxy import haiku_guard
+
+        haiku_guard.apply_override(policy)
         return policy
 
     # ── lookups ─────────────────────────────────────────────────────────────
@@ -449,6 +528,12 @@ class ClaudeTierPolicy:
         if not self.allow_upgrade and self.rank[tier.name] > self.rank[requested.name]:
             return False
         return self._accepts(tier, thinking, effort) or self._rewritable(tier, haiku_ok)
+
+    @property
+    def haiku_folds_system(self) -> bool:
+        """True when a mid-conversation system message is folded for Haiku: the fold
+        runs inside the Haiku rewrite, so it needs ``haiku_rewrite`` as well."""
+        return self.haiku_fold_system and self.haiku_rewrite
 
     def _rewritable(self, tier: Tier, haiku_ok: bool) -> bool:
         """True when ``tier`` is the Haiku tier and this body may be rewritten for it."""
@@ -480,9 +565,7 @@ class ClaudeTierPolicy:
         rewritten or not."""
         if "haiku" not in self.by_name:
             return False
-        if _has_media(body) or not _only_custom_tools(body) or _has_mid_conversation_system_message(body):
-            return False
-        return _approx_context_tokens(body) <= HAIKU_MAX_CONTEXT_TOKENS
+        return haiku_block_reason(body, fold_system=self.haiku_folds_system) == HAIKU_BLOCK_NONE
 
     # ── the decision ────────────────────────────────────────────────────────
 
@@ -676,8 +759,11 @@ class ClaudeTierPolicy:
         # Rewrite exactly when the FINAL target is Haiku and the body as sent
         # would not be accepted by it (escalation / stickiness that moved the
         # target off Haiku clear this).
-        body_rewrite = (REWRITE_HAIKU if self._rewritable(target, haiku_ok)
-                        and not self._accepts(target, thinking, effort) else None)
+        # With the fold on, a body that carries a system message needs the rewrite even
+        # when Haiku takes its thinking/effort as sent.
+        needs_rewrite = (not self._accepts(target, thinking, effort)
+                         or (self.haiku_folds_system and _has_mid_conversation_system_message(body)))
+        body_rewrite = REWRITE_HAIKU if self._rewritable(target, haiku_ok) and needs_rewrite else None
         return TierDecision(requested, served, target.name, reason, switched=switched, switch_cost_usd=cost,
                             body_rewrite=body_rewrite,
                             task_type=task, complexity=cx, chain_head=list(choice.get("chain_head") or [])[:4],

@@ -286,3 +286,18 @@ def test_session_end_rejects_a_fallback_snapshot():
         "_get_cc_usage returns the cached snapshot without checking is_fallback, "
         "so the session summary quotes 50% as a measurement"
     )
+
+
+def test_status_quota_coerces_string_percentages_and_shows_na_when_unparseable(tmp_path):
+    from rich.console import Console
+    from llm_router.ui import status_premium as sp
+
+    cmd = sp.PremiumStatusCommand()
+    p = tmp_path / "usage.json"
+    p.write_text(json.dumps({"session_pct": "12.5", "weekly_pct": "lots", "sonnet_pct": 3}))
+    cmd.usage_json = p
+    con = Console(record=True, width=120)
+    con.print(cmd.render_subscription_quotas())
+    out = con.export_text()
+    assert "12%" in out or "13%" in out
+    assert "Weekly Usage" in out and "n/a" in out and "3%" in out

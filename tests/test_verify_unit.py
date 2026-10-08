@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from llm_router.toolkit import sandbox
+from llm_router.toolkit import verify as V
 from llm_router.toolkit import verify_unit as VU
 from llm_router.toolkit.verify_unit import verify_unit
 from tests.test_toolkit_verifier_integrity import ATTACKS
@@ -585,6 +586,26 @@ def test_stdout_summary_parser():
     assert VU.stdout_summary("\x1b[31m1 failed\x1b[0m, \x1b[32m2 passed\x1b[0m in 0.1s") == {"failed": 1, "passed": 2}
 
 
+def _junit(path: Path, failures: int) -> Path:
+    cases = "".join(f'<testcase name="t{i}"><failure/></testcase>' for i in range(failures))
+    path.write_text(f'<testsuite>{cases}<testcase name="ok"/></testsuite>')
+    return path
+
+
+def test_report_mismatch_with_absent_failed_and_errors_counts(tmp_path):
+    """A summary with no "failed"/"errors" word ("3 passed") reports zero failures: absence is
+    handled explicitly, not coerced to 0 inside the comparison (S9 lint ratchet)."""
+    j0, j1 = _junit(tmp_path / "j0.xml", 0), _junit(tmp_path / "j1.xml", 1)
+    ok = V.VerifyRun(rc=0, junit=True, tail="3 passed in 0.10s\n")
+    assert VU.report_mismatch(ok, j0) is False                 # absent counts == 0 == junit
+    lie = V.VerifyRun(rc=1, junit=True, tail="3 passed in 0.10s\n")
+    assert VU.report_mismatch(lie, j1) is True                 # junit has 1 failure, summary says none
+    only_err = V.VerifyRun(rc=1, junit=True, tail="1 error, 2 passed in 0.10s\n")
+    assert VU.report_mismatch(only_err, j1) is False           # "failed" absent, "errors" present
+    no_summary = V.VerifyRun(rc=1, junit=True, tail="no summary line\n")
+    assert VU.report_mismatch(no_summary, j1) is False         # no summary at all: leg skipped
+
+
 OBFUSCATED = '''import importlib
 
 _m = importlib.import_module("_py" + "test.rep" + "orts")
@@ -737,3 +758,32 @@ def test_the_sandbox_child_never_loads_a_dotenv(tmp_path):
     """python-dotenv walks up from the interpreter dir and open()s a denied .env: PermissionError at import."""
     la = sandbox.SandboxLauncher(tmp_path, tmp_path)
     assert la.env()["PYTHON_DOTENV_DISABLED"] == "1"
+
+
+def test_verify_judges_the_after_run_it_is_given_and_never_reruns_the_patched_copy(tmp_path, monkeypatch):
+    """M4: `after = run_command(...)` in place of `after_run or run_command(...)` passed every test.
+    verify_unit keeps its own after-run (it needs the per-test sets), so verify() must apply the verdict
+    to THAT run. A spy rerun returns a clean run; the supplied run has a failure. The verdict must follow
+    the supplied run, and run_command must never be called with tag='after'."""
+    root, base_dir, tmp = (tmp_path / n for n in ("root", "baseline", "tmp"))
+    for d in (root, base_dir, tmp):
+        d.mkdir()
+    ws = sandbox.Workspace(root=root, baseline=base_dir, tmp=tmp, parent=tmp_path, source=tmp_path)
+    monkeypatch.setattr(sandbox, "prove_sandbox", lambda **_: sandbox.SandboxStatus(True, "stub"))
+    calls: list[str] = []
+
+    def spy(command, cwd, tmp_dir, *, python_dir, timeout_s, tag):
+        calls.append(tag)
+        return V.VerifyRun(rc=0, junit=True, passed={"t::a"})          # a rerun would look clean
+
+    monkeypatch.setattr(V, "run_command", spy)
+    base = V.VerifyRun(rc=0, junit=True, passed={"t::a"})
+    supplied = V.VerifyRun(rc=1, junit=True, passed=set(), failed={"t::a"}, tail="SUPPLIED")
+    v = V.verify("pytest t", ws, baseline_run=base, after_run=supplied)
+    assert calls == [], calls                                           # neither run was redone
+    assert (v.ok, v.after_rc, v.tail) == (False, 1, "SUPPLIED"), v
+    assert "exit 1" in v.reason
+
+    calls.clear()
+    V.verify("pytest t", ws, baseline_run=base)                          # control: without after_run it does rerun
+    assert calls == ["after"], calls

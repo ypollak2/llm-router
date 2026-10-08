@@ -28,8 +28,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from mcp.server.mcpserver import MCPServer
-
+from llm_router.call_identity import IdentityMCPServer
 from llm_router.config import get_config
 from llm_router.health import get_tracker
 from llm_router.logging import configure_logging, get_logger
@@ -80,7 +79,9 @@ async def _lifespan(_server):
             pass  # best-effort flush; never block shutdown
 
 
-mcp = MCPServer("llm_router", lifespan=_lifespan)
+# IdentityMCPServer = MCPServer + the caller's tool_use id bound for each tool call, so a
+# routing_decisions row can be joined to its transcript event (call_identity.py).
+mcp = IdentityMCPServer("llm_router", lifespan=_lifespan)
 
 # Auto-update routing rules and hooks on startup if a newer version was installed via pip
 try:

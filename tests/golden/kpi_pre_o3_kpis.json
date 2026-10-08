@@ -1,0 +1,144 @@
+{
+ "D1": {
+  "measurable": false,
+  "n": null,
+  "newest_ts": null,
+  "reason": "no unit in window",
+  "seen": 0,
+  "value": "not measurable: no unit in window"
+ },
+ "D2": {
+  "measurable": false,
+  "n": null,
+  "newest_ts": null,
+  "reason": "no unit in window",
+  "seen": 0,
+  "value": "not measurable: no unit in window"
+ },
+ "D3": {
+  "lines": [
+   "user_redone n=0 (redo on Claude pressed on the receipt band; counted in D3 as decided redo events; the row has no session id, so it is not session-kind filtered)",
+   "user_kept n=0 (keep pressed; shown only: never counted as used, so never in NS, D1, D2 or D3's denominator)"
+  ],
+  "measurable": false,
+  "n": null,
+  "newest_ts": null,
+  "reason": "no decided event in window",
+  "redone": 0,
+  "seen": 0,
+  "unknown_window_open": 0,
+  "used": 0,
+  "user_kept": 0,
+  "user_redone": 0,
+  "value": "not measurable: no decided event in window"
+ },
+ "D4": {
+  "calls_by_tier": {
+   "opus": 24,
+   "sonnet": 96
+  },
+  "cost_usd_by_tier": {
+   "opus": 0.0006,
+   "sonnet": 0.0012
+  },
+  "cost_weighted_share": {
+   "opus": 0.2958,
+   "sonnet": 0.7042
+  },
+  "cost_weights": {
+   "haiku": 1.0,
+   "opus": 6.15,
+   "sonnet": 3.660714285714286
+  },
+  "measurable": true,
+  "n": 120,
+  "newest_ts": 1791296519.0,
+  "seen": 120,
+  "unweighted_calls": 0,
+  "value": "sonnet=80.0%, opus=20.0% (n=120) | cost-weighted (haiku 1 : sonnet 3.66 : opus 6.15 per call): sonnet=70.4%, opus=29.6%"
+ },
+ "D5": {
+  "measurable": false,
+  "n": null,
+  "newest_ts": null,
+  "reason": "no LLM_ROUTER_KPI_BENCHMARK_PATH configured (KPI-SPEC calls this 'not measured')",
+  "seen": 0,
+  "value": "not measurable: no LLM_ROUTER_KPI_BENCHMARK_PATH configured (KPI-SPEC calls this 'not measured')"
+ },
+ "G1_hook": {
+  "measurable": false,
+  "n": null,
+  "newest_ts": null,
+  "reason": "no hook invocation recorded in window (a hook records itself only after its installed copy is updated to a version that carries the recorder)",
+  "seen": 0,
+  "value": "not measurable: no hook invocation recorded in window (a hook records itself only after its installed copy is updated to a version that carries the recorder)"
+ },
+ "G1_proxy": {
+  "measurable": false,
+  "n": null,
+  "newest_ts": null,
+  "reason": "no proxy decisions with tier_decision_s in window",
+  "seen": 120,
+  "value": "not measurable: no proxy decisions with tier_decision_s in window"
+ },
+ "G2": {
+  "lines": [
+   "all-time: 0 fail-open event(s) recorded, 0 of them from before per-event timestamps (cannot be placed in any window)"
+  ],
+  "measurable": false,
+  "n": null,
+  "newest_ts": null,
+  "reason": "no timestamped fail-open event and no recorded hook call exist yet, so there is no window to take a rate over",
+  "seen": 0,
+  "value": "not measurable: no timestamped fail-open event and no recorded hook call exist yet, so there is no window to take a rate over"
+ },
+ "G3": {
+  "measurable": false,
+  "n": null,
+  "newest_ts": null,
+  "reason": "no proxy row carries tier_retry yet (the schema has not started)",
+  "seen": 120,
+  "value": "not measurable: no proxy row carries tier_retry yet (the schema has not started)"
+ },
+ "G4": {
+  "active": 0,
+  "benches": 0,
+  "by_trigger": {},
+  "lines": [
+   "benched right now: none (point-in-time)"
+  ],
+  "measurable": false,
+  "n": null,
+  "newest_ts": null,
+  "reason": "no provider bench recorded in window (0 benches: 'none were wrong' cannot be told from 'none happened')",
+  "seen": 0,
+  "value": "not measurable: no provider bench recorded in window (0 benches: 'none were wrong' cannot be told from 'none happened')",
+  "wrong": 0,
+  "wrong_by_success": 0,
+  "wrong_by_unban": 0
+ },
+ "NS": {
+  "measurable": false,
+  "n": null,
+  "newest_ts": null,
+  "reason": "no unit in window",
+  "seen": 0,
+  "value": "not measurable: no unit in window"
+ },
+ "O1": {
+  "measurable": false,
+  "n": null,
+  "newest_ts": null,
+  "reason": "no routed calls with a recorded saving in period=week",
+  "seen": 0,
+  "value": "not measurable: no routed calls with a recorded saving in period=week"
+ },
+ "O2": {
+  "measurable": false,
+  "n": null,
+  "newest_ts": null,
+  "reason": "no LLM_ROUTER_KPI_BENCHMARK_PATH configured (KPI-SPEC calls this 'not measured')",
+  "seen": 0,
+  "value": "not measurable: no LLM_ROUTER_KPI_BENCHMARK_PATH configured (KPI-SPEC calls this 'not measured')"
+ }
+}

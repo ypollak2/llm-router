@@ -185,7 +185,20 @@ _GEMINI_PRO = ModelSpec("gemini", "gemini-2.0-pro")
 _GPT4O_MINI = ModelSpec("openai", "gpt-4o-mini")
 _GPT4O = ModelSpec("openai", "gpt-4o")
 _CLAUDE_SONNET = ModelSpec("claude", "claude-sonnet-4-6", quota_cost=1.0)
-_CLAUDE_OPUS = ModelSpec("claude", "claude-opus-4-6", quota_cost=3.0)
+
+
+def _claude_opus() -> ModelSpec:
+    """Opus spec from the proxy's opus tier, never a literal (plan v16 P0.2).
+
+    Resolved on use, not at import: the policy load costs tens of ms and most
+    hook paths never build a complex chain. "opus" is Claude Code's alias.
+    """
+    try:
+        from llm_router.proxy.tiers import tier_model
+        model = tier_model("opus") or "opus"
+    except ImportError:
+        model = "opus"
+    return ModelSpec("claude", model, quota_cost=3.0)
 
 
 def build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:
@@ -195,6 +208,12 @@ def build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:
     pressure allows - direct_executor skips them (can't call from hook).
     A caller outside zero-Claude mode can then fall through to Claude.
 
+    D-14 = A (P0.3): for a Q&A task type no local provider is in the chain, at
+    any complexity (``qa_policy.strip_local_for_qa``, the same rule MCP
+    ``route_and_call`` applies). When only local models were available the Q&A
+    chain is empty, so the hook falls through to Claude and the SDK raises
+    ``RoutingError``. ``code`` and other non-Q&A types are unchanged.
+
     Args:
         complexity: simple / moderate / complex / deep_reasoning
         zone: green / yellow / orange / red / critical
@@ -203,6 +222,14 @@ def build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:
     Returns:
         Ordered list of ModelSpec to try.
     """
+    from llm_router.qa_policy import strip_local_for_qa
+
+    return strip_local_for_qa(_build_chain(complexity, zone, task_type), task_type,
+                              keep_if_only_local=False)
+
+
+def _build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:
+    """``build_chain`` before the D-14 Q&A filter (the unchanged pre-P0.3 logic)."""
     ollama = _ollama_models()
     has_gemini = _has_gemini()
     has_openai = _has_openai()
@@ -253,10 +280,10 @@ def build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:
     if complexity in ("complex", "deep_reasoning"):
         if zone == "green":
             # Plenty of quota — Claude Opus leads for max quality
-            return [_CLAUDE_OPUS] + mid_externals + ([] if high_risk else ollama)
+            return [_claude_opus()] + mid_externals + ([] if high_risk else ollama)
         elif zone == "yellow":
             # Comfortable — mid-tier externals lead, Claude Opus as premium fallback
-            return mid_externals + ([] if high_risk else ollama) + [_CLAUDE_OPUS]
+            return mid_externals + ([] if high_risk else ollama) + [_claude_opus()]
         elif zone == "orange":
             # Getting tight — mid-tier externals lead, Claude Sonnet as last resort
             return mid_externals + ([] if high_risk else ollama) + [_CLAUDE_SONNET]

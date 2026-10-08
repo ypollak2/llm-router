@@ -171,24 +171,43 @@ def _bash_block_reason(command: str) -> str | None:
     return None
 
 
+_READ_ONLY_REFUSAL = (
+    "tool error: read-only mode (no project root was resolved) — "
+    "{tool} refused; nothing was written"
+)
+
+
 def default_tool_executor(cwd: str | None = None, timeout: float = 30.0) -> ToolExecutor:
     """A bounded shell/file executor. Not a security sandbox — it caps time and
-    output; run delegated irreversible work behind the MGEE worktree gate."""
-    base = Path(cwd).resolve() if cwd else Path.cwd()
+    output; run delegated irreversible work behind the MGEE worktree gate.
+
+    P0.13 (R-LOC-7): *cwd* is the project root and every file path must resolve
+    inside it. ``cwd=None`` means no project root is known, and the executor is
+    then **read-only**: ``write_file`` and ``bash`` are refused and ``read_file``
+    stays confined to the process cwd. It used to fall back to the process cwd
+    *with writes*, and the MCP server's cwd is ``$HOME`` in the field, so a
+    local model's ``write_file`` landed in the owner's home directory.
+    """
+    read_only = not cwd
+    base = Path(cwd).resolve() if cwd else Path.cwd().resolve()
 
     def _resolve(path_arg: str) -> Path:
         # 🥷 Backslash-Security: using vibe-coding rules for Path Traversal & Directory Access
         # Relative paths resolve UNDER the working dir (a relative "marker.txt"
         # must land in cwd, not the process dir), and the result must stay within
         # base — a model-supplied "../../etc/passwd" is rejected, not followed.
+        # resolve() follows symlinks first, so a link inside base that points
+        # outside it is rejected too.
         p = Path(path_arg)
         resolved = (p if p.is_absolute() else base / p).resolve()
-        if base not in resolved.parents and resolved != base:
+        if not resolved.is_relative_to(base):
             raise ValueError(f"path escapes working directory: {path_arg}")
         return resolved
 
     def execute(name: str, args: dict[str, Any]) -> str:
         try:
+            if read_only and name in ("bash", "write_file"):
+                return _READ_ONLY_REFUSAL.format(tool=name)
             if name == "bash":
                 command = str(args.get("command", ""))
                 reason = _bash_block_reason(command)

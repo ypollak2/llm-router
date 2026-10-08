@@ -142,6 +142,15 @@ class BackendHealth:
             st.streak = 0
         return None
 
+    def is_open(self, key: str) -> bool:
+        """True while steps for ``key`` would be skipped without a probe (open
+        and still cooling down, or a probe in flight). Read-only: after the
+        cooldown this is False so the next step reaches ``admit`` and probes."""
+        st = self._states.get(key)
+        if st is None or st.opened_at is None:
+            return False
+        return st.probing or (self.clock() - st.opened_at) < self.cooldown_s
+
     async def admit(self, key: str, backend) -> tuple[bool, dict | None]:
         """``(send_the_step, ledger_info)``. ``(True, None)`` while closed."""
         if self.fail_n == 0:

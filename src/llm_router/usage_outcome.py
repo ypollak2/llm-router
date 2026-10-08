@@ -46,6 +46,10 @@ Verdict:
   (the pair was never applied and the file was never touched; it may have been
   applied by some means the transcript does not show), ``partly_applied``.
 
+``so_far`` is the reason the evidence gives now, before ``window_open`` hides it: an
+open-window edit reads ``applied_verbatim`` or ``not_applied_seen`` there. O3's local
+answers close their window after 2 turns and must not take an unapplied edit as used.
+
 Out of scope, stated rather than guessed: edits that a hook applies itself
 (ZERO_CLAUDE_EDIT) leave no tool call in the transcript, so they produce no
 event here. Whether a *human* later hand-edits the same lines is not visible.
@@ -380,7 +384,7 @@ def _judge_answer(ev: Event, window: list[_Rec], recs: list[_Rec]) -> tuple[str,
         return OUTCOME_UNKNOWN, "no_result"
     mine = _input_text(ev.tool_input)
     for r in window:
-        if r.human and _OVERRIDE_RE.match(r.human) and BAND_REDO_MARK not in r.human:
+        if r.human and _OVERRIDE_RE.match(r.human) and not r.human.rstrip().endswith(BAND_REDO_MARK):
             return OUTCOME_REDONE, "overridden"
         for tu in _tool_uses(r.rec):
             if tu.get("id") == ev.event_id:
@@ -412,6 +416,7 @@ def judge_transcript(records: list[dict], *, session_id: str | None = None,
             outcome, reason = _judge_edit(ev, window)
         else:
             outcome, reason = _judge_answer(ev, window, recs)
+        so_far = reason
         if not closed and outcome == OUTCOME_USED:
             outcome, reason = OUTCOME_UNKNOWN, "window_open"  # a redo could still land
         elif not closed and reason in ("not_applied_seen", "partly_applied"):
@@ -420,7 +425,7 @@ def judge_transcript(records: list[dict], *, session_id: str | None = None,
             "event_id": ev.event_id, "session_id": session_id,
             "session_kind": kind_lookup(session_id) if kind_lookup else None,
             "ts": ev.ts, "tool": ev.tool, "kind": ev.kind,
-            "outcome": outcome, "reason": reason,
+            "outcome": outcome, "reason": reason, "so_far": so_far,
             "turns_after": min(max_turn - ev.turn, WINDOW_TURNS), "window_closed": closed,
         })
     return rows

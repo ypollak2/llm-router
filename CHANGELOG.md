@@ -13,6 +13,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- proxy (PLAN v16 P0.11, owner decision D-20 = A): the Haiku guard (`proxy/haiku_guard.py`) runs in
+  the proxy at start and hourly while `haiku_rewrite` is on. A trip (redo > 15% at n >= 30; audit
+  batch < 75% at n >= 30; daily audit < 8/10 on 2 consecutive days; `tier_retry` > 1% at n >= 100
+  Haiku-decided calls; shadow acceptable < 26/30 at n >= 20) writes `~/.llm-router/tier_overrides.json`
+  and turns the live rewrite off. `ClaudeTierPolicy.load` reads that override after the YAML. The
+  override can only turn the rewrite off, and the YAML is never edited. New
+  `llm-router kpi --haiku-watch --since --until` prints every trigger with its n and exits 1 when a
+  D-20 trigger has too little data to judge.
+
+### Changed
+- routing (M3.0, owner decision D-14 = A): `route_and_call` no longer serves a Q&A task type from a
+  local provider. For `northstar.QA_TASK_TYPES` (query, research, generate, analyze and the other Q&A
+  types) Ollama and OpenAI-compatible local servers are removed from the chain in `route_and_call`
+  (after the specialist and bandit steps, before the daily-cap step) and from the emergency BUDGET
+  chain; the next provider in the existing order serves the call. Every `route_and_call` caller with a
+  Q&A task type is covered, not only MCP `llm()` (list by file, grep `route_and_call(`):
+  `tools/text.py` (`llm_query`, `llm_research`, `llm_generate`, `llm_analyze`, `llm_reason`,
+  `llm_text_job`), `tools/routing.py` (402, 589), `tools/agentic.py`, `tools/fs.py` (QUERY calls),
+  route_server/gateway, orchestrator, `context.py` (compaction summary), `quickstart.py`,
+  `commands/benchmark.py`, `tui/cli.py` and `integrations/agno.py`. Accepted D-14 = A side effect:
+  `llm_text_job` (opt-in `LLM_ROUTER_LOCAL_TEXT_JOBS=1`, task type GENERATE) no longer runs locally
+  once a cloud provider is configured; at merge base aceb366 its chain dispatched to
+  `ollama/qwen3.5:latest`, at this head to `openai/gpt-4o` or `gpt-4o-mini`. The flag is unset on
+  the owner's machine, so nothing changes live today. `code` is unchanged and can still go
+  local. An explicit `model_override` is honored, and an install with only local providers keeps them
+  (no empty chain). The shared `_build_and_filter_chain` is NOT changed, so the proxy
+  (`proxy/backends.py` `policy_chain` -> `choose_model`) routes exactly as before
+  (`tests/test_mcp_qa_no_local.py` pins it). Reason: real Q&A prompts, local qwen 4/37 acceptable
+  vs Sonnet 34/37 (PLAN 0.3 [RX]); 65 local Q&A answers in 7 days [U]. Only processes that run
+  `route_and_call` and are started after the deploy pick it up (uv-tool MCP servers).
+  `tests/test_mcp_qa_no_local.py` (30 tests; 6 mutations red, including the strip moved ahead of the
+  subject specialist). The set of stripped providers is `types.LOCAL_PROVIDERS` (ollama, lm_studio,
+  vllm, llamacpp) plus `openai_compat`, derived in one place (the former second literal set in
+  `router.py` is gone; `test_the_strip_set_is_derived_from_types_local_providers` pins it).
+  Scope, stated plainly: this is the `route_and_call` path (and its emergency BUDGET chain). The
+  proxy's `policy_chain` -> `choose_model` -> `_build_and_filter_chain` does not call
+  `route_and_call` and is not changed.
+  Daily-cap interaction (D-14 intent): the strip runs BEFORE the TQ-007 daily-cap step in
+  `route_and_call`. Once a daily spend cap is hit, the cap step confines the chain to the free
+  providers (ollama, codex, gemini_cli); for a Q&A task type Ollama has already been removed, so
+  Ollama is no longer the free fallback for Q&A task types. Only codex or gemini_cli can serve a
+  capped Q&A call. If neither is in the chain: `hard` blocks; `smart`/`soft` fall through to Claude
+  only when an anthropic model is in the chain, otherwise the call blocks (a paid non-Claude
+  provider is never called once the cap is hit). `code` still falls back to Ollama under the cap.
+  `tests/test_mcp_qa_no_local.py` pins the order (capped Q&A, chain [openai, ollama]: blocked, not
+  served by Ollama) through the TQ-007 `_run` harness with `TaskType.QUERY`; the mutant that moves
+  the strip after the cap step turns 3 of those tests red.
+- status line: the default is the full layout again, byte-for-byte as before #273 (owner decision,
+  reversing #273's fast-by-default; `tests/test_statusline_default_full.py` compares it with the
+  pre-#273 script on 9 fixture states). The fast line is the opt-in debug mode
+  `LLM_ROUTER_STATUSLINE=fast` and now shows the Claude 5h / weekly / Sonnet quota.
+
+### Added
+- kpi (v16 GE6, PRD S3): quota-burn baseline. SessionStart (inside the P0.9 background child, which
+  now receives the session id as its second argument) and Stop (not SessionEnd) append
+  `{session_id, kind: start|stop, ts, five_hour_pct, weekly_pct, updated_at, five_hour_resets_at, source, session_kind}` to
+  `~/.llm-router/quota_samples.jsonl` from the cached `usage.json` (no network); the status-line tick
+  appends one `{ts, five_hour_pct, weekly_pct, updated_at, five_hour_resets_at, source}` row at most every 300 s to
+  `quota_history.jsonl`. A snapshot older than 30 min, a fallback or a pending one is `source: stale`
+  (unknown values null, never 0). New `llm-router kpi --quota-burn --since --until`: burn per session and
+  per human turn (one Stop = one turn) from measured samples. A 5h-window reset is a changed
+  `session_resets_at` (> 120 s apart), or, with no reset time, a drop of >= 5 pts; after a reset the new
+  reading is all burn, even when it is higher than the old one; a smaller drop is jitter and burns nothing.
+  Results come with session-clustered bootstrap CIs; stale samples form a separate line labelled estimated; coverage =
+  sessions with start and stop samples over every tagged session in the window whose kind, after the
+  owner's `session_kind_overrides.json`, is in the population (Wilson CI). Several status-line windows
+  ticking together write one history row per slot (a non-blocking `flock` on the stamp). Hook versions:
+  session-start 25, session-end 21. Tests: `tests/test_quota_samples.py`.
 - toolkit: a router-owned tool layer, phase 1 (`src/llm_router/toolkit/`). Seven tools (read,
   search, list, edit, write, bash, finish) behind one permission function that runs in code
   before every call and logs every decision; a throwaway workspace (a copy; the caller's tree is
@@ -24,13 +92,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `llm-router run --model M --verify CMD --workspace DIR "task"` returns a patch and a verdict
   (propose-only). The execution ledger gains `verify` and `used` columns, NULL when unknown.
   `hooks/agent_loop.py` now calls the toolkit executor (one executor); its public functions are
-  unchanged, and the secret deny-list now applies to it too.
-
-- ux: a fast status line and a receipt band. The `statusLine` command now prints one short line
-  (`llm-router · smart · NS 0.0% n=3599 · Claude wk 41% · Codex 7/15 ↻21:14 · ⚠ hooks p95 3.0s auto-route`,
+  unchanged, and the secret deny-list now applies to it too. The kill switch does NOT reach it:
+  `run_pipelines` honours `LLM_ROUTER_TOOLLAYER=off` / `~/.llm-router/KILL` only for a launched
+  (sandboxed) `llm-router run`, so the hook's launcher-less commands behave exactly as on main
+  (tests/test_agent_loop_hook_parity.py, `kill` tests). Because the auto-route local agent loop is on by default, this is a live
+  path: its file tools and commands now run through toolkit code (parity: 78 commands), and the
+  execution ledger migrates `ALTER TABLE execution_events ADD COLUMN verify TEXT` and
+  `... used INTEGER` the next time the live ledger is opened (additive, nullable). The local model's context window comes from the one table,
+  `local_models.num_ctx(model)` (32768 for qwen3.6).
+- classifier (M1.8 round 3, default OFF): a decision-model backend for the local tier classifier,
+  `src/llm_router/decision_classifier.py`. `LLM_ROUTER_CLASSIFIER_BACKEND=systemone` makes
+  `classify_local` / `classify_async` call Ollama `POST /v1/systemone` (Ollama >= 0.35, default model
+  `nimble:9b`, `LLM_ROUTER_DECISION_MODEL`) with ONE `choice` question (haiku / sonnet / opus, the v7 tier
+  definitions). The `Verdict` gains `confidence` (p_max of the option probabilities, not the endpoint's own
+  concentration score) and `abstain`; `LLM_ROUTER_DECISION_ABSTAIN_BELOW` (default 0.0 = never) turns a low
+  p_max into `source="abstain"` with no tier, so the caller keeps the rules. Strict response check (three
+  probabilities summing to 1 +/- 0.02, choice = argmax), no prompt text stored. The default backend
+  (`chat`, prompt v6) is unchanged. Not routed live; the measurement is PREREG v2 amendment 2.
+- hooks: `hook_latency.jsonl` rows can carry `phases_ms` (M4.1, hook tail attribution). `auto-route` (hook
+  version 46) names `import`, `session_io`, `zce`, `classify`, `hud`, `db_write`, `draft_chain` (the whole draft
+  chain: Ollama, Codex, Gemini CLI) and `cold_wait` (Ollama `load_duration`); `session-start` (version 23) names `import`, `session_io`, `reset_state`,
+  `ollama_up`, `pxpipe`, `proxy_health`, `usage`, `hints`, `bg_spawn`, `banner`, `rules_update`. A run that
+  names no phase writes the same row as before. Cost: `docs/measurements/2026-10-07-hook-phase-timing-overhead.md`.
+- proxy: classifier shadow seam (M1.6, PR 2 of the M1 plan). With `LLM_ROUTER_LOCAL_CLASSIFIER=shadow`, each
+  turn-first call also gets a local LLM verdict, logged next to the rules' verdict in `classifier_shadow.jsonl`
+  (hashes and tiers only). Shadow only: no tier changes, `cls_applied` is false on every row, continuations
+  never wait, at most 4 pending (more are dropped and counted). Default `off` makes zero Ollama calls.
+  `proxy/tiers.py` is untouched. `tests/proxy/test_llm_classifier_shadow.py`.
+- kpi: `classifier_shadow` (M1.7): n, sessions, agreement with the rules, tier distributions, cheap share,
+  fallback rate, p50/p95 ms, drops, calls per turn, from `classifier_shadow.jsonl`. Outside `kpis`, so NS, D1,
+  D2 and `--health` do not change. `tests/test_kpi_classifier_shadow.py`.
+- kpi: `llm-router kpi --since WHEN --until WHEN` pins an absolute window (replaces `--days`; rows outside it
+  never count; JSON gains `window`). Without the flags the output is unchanged (live-home JSON diff against
+  c2ed278: identical). `tests/test_kpi_window.py`.
+- status line: `LLM_ROUTER_STATUSLINE=both` prints the full line, then the fast (debug) line on a second
+  row. Claude Code renders each printed line as its own row (docs: "Multiple lines"). Default, `full`
+  and `fast` are unchanged; the `.env` reader is still never sourced (new test: `$(touch marker)` never runs).
+- ux: a fast status line (opt-in debug mode) and a receipt band. With `LLM_ROUTER_STATUSLINE=fast` the
+  `statusLine` command prints one short line
+  (`llm-router · smart · NS 0.0% n=3599 · Claude 5h 12% wk 41% sonnet 3% · Codex 7/15 ↻21:14 · ⚠ hooks p95 3.0s auto-route`,
   at most 200 characters, `n/a` for anything unknown, never 0) from a small cache that
-  `llm-router statusline --refresh` rebuilds in the background at most once a minute; the classic layout is
-  `LLM_ROUTER_STATUSLINE=full`. **The default no longer shows the folder, context bar and money segments** (nor the route mix, health and last-route segments); set `LLM_ROUTER_STATUSLINE=full` to get them back. New opt-in Claude Code mod `llm-router-receipt` (`llm-router mod install` /
+  `llm-router statusline --refresh` rebuilds in the background at most once a minute, plus the Claude quota
+  snapshot `usage.json` (the 5h / weekly / Sonnet numbers `llm-router status` shows; past
+  `LLM_ROUTER_USAGE_TTL_SEC`, default 300 s, they are shown with `(stale <age>)`). The default is the full
+  layout, unchanged. The switch is read from the environment or, failing that, from
+  `~/.llm-router/.env` (`LLM_ROUTER_STATUSLINE=fast`), so no `settings.json` edit is needed. New opt-in Claude Code mod `llm-router-receipt` (`llm-router mod install` /
   `uninstall`): after a turn the proxy served off Claude it shows "served by <model> · cost · est. saved" with
   `k` keep and `r` redo on Claude, and a `/router` pane with the last 10 routing decisions. Presses are
   `user_signal` rows in `user_signals.jsonl`; `llm-router kpi` shows `user_kept` and `user_redone` under D3. A
@@ -52,6 +158,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user's request verbatim and labels tool output as tool output; and a pre-send
   check that refuses a prompt Ollama would silently truncate. Image input is
   opt-in (`--vision`). Measurements and limits: `integrations/pi/README.md`.
+- kpi: a session-kind override file, `~/.llm-router/session_kind_overrides.json` (`{sid: {kind, reason}}`). It beats the
+  tag file and a row's own stamp in every KPI reader (NS, D1, D2, D3, O3, D4/G1-proxy) and in the proxy's and
+  edit ledger's stamps; G3 is unchanged (writer completeness). `session_kind.overrides()`, `override_of()`,
+  `tag_kind_of()`. The `--backfill-tags` run leaves an overridden session alone and `--validate-backfill` still
+  compares the tag file. `tests/test_session_kind_override.py`.
 
 ### Changed
 - SessionStart no longer blocks on the Claude usage refresh. The hook

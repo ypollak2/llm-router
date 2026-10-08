@@ -368,7 +368,10 @@ def run_pipelines(parsed, *, cwd: Path, env: dict, timeout_s: float = 30,
                 if time.monotonic() >= deadline:
                     status = "timeout"
                     break
-                if sandbox.kill_switch_reason():
+                # The kill switch is the `llm-router run` tool layer's: only a launched
+                # (sandboxed) run honours it. The hook's launcher-less path (agent_loop)
+                # predates it and must not be switched off by LLM_ROUTER_TOOLLAYER=off.
+                if launcher is not None and sandbox.kill_switch_reason():
                     status = "kill"
                     break
                 if launcher is not None and time.monotonic() >= next_rss:

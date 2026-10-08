@@ -646,6 +646,19 @@ MIGRATE_ROUTING_DECISIONS_ADD_SUBJECT = [
 ]
 """Plan 07 Cat E — enables (policy, subject, model) outcome aggregation for bandit selection."""
 
+MIGRATE_ROUTING_DECISIONS_ADD_SHADOW_TIER = [
+    "ALTER TABLE routing_decisions ADD COLUMN shadow_tier TEXT",
+]
+"""P2 local-usage plan: the tier a decision WOULD have had under
+``LLM_ROUTER_LOCAL_TIER=shadow`` ("local" or NULL). Log only; never read by routing."""
+
+MIGRATE_ROUTING_DECISIONS_ADD_TOOL_USE_ID = [
+    "ALTER TABLE routing_decisions ADD COLUMN tool_use_id TEXT",
+]
+"""The Claude Code ``tool_use`` id of the MCP call that made the decision
+(``call_identity.tool_use_id``), NULL when there was none. An id only: it joins a row to
+its ``usage_outcome`` verdict (whose ``event_id`` is the same id)."""
+
 MIGRATE_ROUTING_DECISIONS_ADD_PROVENANCE = [
     "ALTER TABLE routing_decisions ADD COLUMN provenance TEXT",
 ]
@@ -1092,6 +1105,8 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_ADD_QUOTA_SNAPSHOTS_TABLE
         + MIGRATE_ROUTING_DECISIONS_ADD_SUBJECT
         + MIGRATE_ROUTING_DECISIONS_ADD_PROVENANCE
+        + MIGRATE_ROUTING_DECISIONS_ADD_SHADOW_TIER
+        + MIGRATE_ROUTING_DECISIONS_ADD_TOOL_USE_ID
         # Defined in v6.2 and never applied: compression_stats was declared,
         # log_compression_stat wrote to it, and the table did not exist. The
         # write raised OperationalError straight into bash-compress's bare
@@ -1900,6 +1915,9 @@ async def log_routing_decision(
     response: str | None = None,
     requested_complexity: str | None = None,
     subject: str | None = None,
+    shadow_tier: str | None = None,
+    session_id: str | None = None,
+    tool_use_id: str | None = None,
 ) -> None:
     """Persist a complete routing decision to the routing_decisions table.
 
@@ -1930,6 +1948,10 @@ async def log_routing_decision(
         output_tokens: Output tokens generated.
         cost_usd: Total cost of the LLM call.
         latency_ms: Total latency of the LLM call.
+        session_id: The Claude Code session that asked (``call_identity``), or None
+            when unknown. Never guessed: NULL is what O3 counts as "no session id".
+        tool_use_id: The MCP ``tool_use`` id behind the call, or None. Ids only:
+            no prompt or answer text is stored by either.
     """
     # Validate inputs before database insert
     _validate_routing_insert(final_model, final_provider, cost_usd)
@@ -1982,8 +2004,8 @@ async def log_routing_decision(
                 quality_mode, final_model, final_provider, success,
                 input_tokens, output_tokens, cost_usd, latency_ms, reason_code,
                 correlation_id, requested_complexity, complexity_downgraded, subject,
-                provenance, capabilities_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                provenance, capabilities_json, shadow_tier, session_id, tool_use_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 _prompt_hash(prompt),
                 task_type,
@@ -2012,6 +2034,9 @@ async def log_routing_decision(
                 subject,
                 _write_provenance(),
                 capabilities_json,
+                shadow_tier,
+                session_id or None,
+                tool_use_id or None,
             ),
         )
         await db.commit()
@@ -3292,59 +3317,64 @@ async def get_classifier_overhead(period: str = "today") -> dict:
 
 
 async def get_cache_hit_stats(period: str = "today") -> dict:
-    """Get prompt caching statistics.
-    
-    Analyzes semantic_cache table to compute cache hit ratio and savings.
-    
+    """Semantic-cache hit rate with its n (P0.5, R-CTX-7).
+
+    Reads ``semantic_cache_lookups``, one row per cache lookup (hit or miss)
+    written by ``semantic_cache.check``. It used to query ``was_hit`` and
+    ``accessed_at``, columns ``semantic_cache`` never had, so it raised on
+    every call and the fail-open path returned zeros.
+
     Args:
         period: Time window. One of "today", "week", "month", or "all".
-    
+            "all" cannot reach further back than the physical retention TTL:
+            ``semantic_cache._purge_expired`` deletes lookups older than
+            ``LLM_ROUTER_PERSIST_TTL_DAYS`` (default 30), so "all" means the
+            last TTL days in practice.
+
     Returns:
-        Dict with keys: total_requests, cache_hits, hit_rate_pct (0-100), 
-        estimated_saved_usd. Returns zeroed values if no cache data exists.
+        Dict with ``hits``, ``lookups``, ``n`` (= lookups), ``hit_rate_pct``
+        (0-100, 0.0 when n = 0), ``estimated_saved_usd`` (sum of the cached
+        rows' original cost over the hits), plus the legacy aliases
+        ``total_requests`` (= lookups) and ``cache_hits`` (= hits).
     """
     where_map = {
-        "today": "WHERE date(accessed_at, 'localtime') = date('now', 'localtime')",
-        "week": "WHERE accessed_at >= datetime('now', '-7 days')",
-        "month": "WHERE accessed_at >= datetime('now', '-30 days')",
+        "today": "WHERE date(ts, 'unixepoch', 'localtime') = date('now', 'localtime')",
+        "week": "WHERE ts >= CAST(strftime('%s', 'now', '-7 days') AS REAL)",
+        "month": "WHERE ts >= CAST(strftime('%s', 'now', '-30 days') AS REAL)",
         "all": "",
     }
     where = where_map.get(period, "")
-    
+
+    def _result(hits: int, lookups: int, saved: float) -> dict:
+        return {
+            "hits": hits,
+            "lookups": lookups,
+            "n": lookups,
+            "hit_rate_pct": (hits / lookups * 100) if lookups else 0.0,
+            "estimated_saved_usd": round(saved, 6),
+            "total_requests": lookups,
+            "cache_hits": hits,
+        }
+
     db = await _get_db()
     try:
-        # Check if semantic_cache table exists
         cursor = await db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache'"
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache_lookups'"
         )
         if not await cursor.fetchone():
-            return {"total_requests": 0, "cache_hits": 0, "hit_rate_pct": 0.0, "estimated_saved_usd": 0.0}
-        
-        # Query cache stats
+            return _result(0, 0, 0.0)
         cursor = await db.execute(
-            f"""SELECT COUNT(*), COUNT(CASE WHEN was_hit = 1 THEN 1 END)
-            FROM semantic_cache {where}"""
+            f"""SELECT COUNT(*), COALESCE(SUM(hit), 0), COALESCE(SUM(saved_usd), 0)
+            FROM semantic_cache_lookups {where}"""
         )
         row = await cursor.fetchone()
-        if not row or row[0] == 0:
-            return {"total_requests": 0, "cache_hits": 0, "hit_rate_pct": 0.0, "estimated_saved_usd": 0.0}
-        
-        total_requests, cache_hits = row
-        hit_rate = round(cache_hits / total_requests * 100) if total_requests > 0 else 0
-        
-        # Estimate savings from cache hits (assume avg call would cost ~$0.0001)
-        estimated_saved = cache_hits * 0.0001  # Conservative estimate
-        
-        return {
-            "total_requests": int(total_requests),
-            "cache_hits": int(cache_hits),
-            "hit_rate_pct": float(hit_rate),
-            "estimated_saved_usd": round(estimated_saved, 4),
-        }
+        if not row:
+            return _result(0, 0, 0.0)
+        return _result(int(row[1]), int(row[0]), float(row[2]))
     except Exception as exc:
         from llm_router import failopen
         failopen.record("CHZ-FO-COST-CACHE-STATS", exc)
-        return {"total_requests": 0, "cache_hits": 0, "hit_rate_pct": 0.0, "estimated_saved_usd": 0.0}
+        return _result(0, 0, 0.0)
     finally:
         await db.close()
 

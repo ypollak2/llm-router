@@ -192,6 +192,9 @@ def _settings_transaction(spath: Path, attempt) -> list[str]:
     from llm_router.file_lock import exclusive_lock
 
     lock = paths.state_path("settings.json.write.lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    if not lock.exists():  # file_lock opens "a+" at the umask default; make it 0600 first
+        os.close(os.open(lock, os.O_WRONLY | os.O_CREAT, 0o600))
     with exclusive_lock(lock, timeout=_LOCK_TIMEOUT_S) as locked:
         if not locked:
             raise OSError(f"could not lock {lock.name} within {_LOCK_TIMEOUT_S}s; {spath} not touched")

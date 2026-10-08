@@ -156,3 +156,42 @@ def test_the_hook_command_path_is_not_os_sandboxed_exactly_as_before(old):
     call = [n for n in ast.walk(ast.parse((ROOT / "src/llm_router/hooks/agent_loop.py").read_text()))
             if isinstance(n, ast.Call) and ast.unparse(n.func) == "_kit.run_pipelines"]
     assert len(call) == 1 and "launcher" not in {k.arg for k in call[0].keywords}
+
+
+# ── The tool-layer kill switch must NOT reach the hook (second deliberate-change audit) ──
+# LLM_ROUTER_TOOLLAYER=off / the KILL file switch off `llm-router run`. The auto-route local
+# agent loop is on by default and shares run_pipelines; before the fix every hook run_command
+# returned "Error: the tool layer was switched off" (even `ls`) while origin/main returned output.
+
+KILL_SWITCH_CMDS = ["ls src", "echo hello", "cat README.md", "cat src/b.txt | head -2", "echo a && echo b"]
+
+
+@pytest.fixture
+def kill_env(monkeypatch, tmp_path):
+    from llm_router.toolkit import sandbox
+    monkeypatch.setattr(sandbox, "kill_file", lambda: tmp_path / "KILL")
+    return sandbox
+
+
+@pytest.mark.parametrize("value", ["off", "0", "false"])
+@pytest.mark.parametrize("cmd", KILL_SWITCH_CMDS)
+def test_env_kill_switch_does_not_stop_the_hook_commands(proj, old, kill_env, monkeypatch, value, cmd):
+    monkeypatch.setenv("LLM_ROUTER_TOOLLAYER", value)
+    assert kill_env.kill_switch_reason(), "the switch itself must still be on for this test to mean anything"
+    before = old._run_command_line(cmd, proj)
+    after = new._run_command_line(cmd, proj)
+    assert "switched off" not in after and not after.startswith("Error"), after
+    assert after == before
+
+
+@pytest.mark.parametrize("cmd", KILL_SWITCH_CMDS)
+def test_kill_file_does_not_stop_the_hook_commands(proj, old, kill_env, cmd):
+    (kill_env.kill_file()).write_text("x")
+    assert kill_env.kill_switch_reason()
+    assert new._run_command_line(cmd, proj) == old._run_command_line(cmd, proj)
+
+
+@pytest.mark.parametrize("name,args", NON_SECRET_READS, ids=[f"{n}:{a.get('path')}" for n, a in NON_SECRET_READS])
+def test_env_kill_switch_does_not_change_the_hook_file_tools(proj, old, monkeypatch, name, args):
+    monkeypatch.setenv("LLM_ROUTER_TOOLLAYER", "off")
+    assert new.execute_tool(name, dict(args), proj) == old.execute_tool(name, dict(args), proj)

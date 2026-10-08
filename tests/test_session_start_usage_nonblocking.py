@@ -257,6 +257,19 @@ def test_spawns_again_after_cooldown_expires(hook, monkeypatch, state):
     assert len(popen.calls) == 2
 
 
+def test_future_dated_marker_does_not_block_spawn(hook, monkeypatch, state):
+    popen = _PopenRecorder()
+    monkeypatch.setattr(hook.subprocess, "Popen", popen)
+    _write_usage(state, age_s=3600)
+    marker = state / "usage_refresh_spawn.txt"
+    marker.write_text("")
+    future = time.time() + 30 * 86400
+    os.utime(marker, (future, future))
+
+    hook._refresh_claude_usage_nonblocking()
+    assert len(popen.calls) == 1
+
+
 def test_cooldown_is_tunable(hook, monkeypatch, state):
     popen = _PopenRecorder()
     monkeypatch.setattr(hook.subprocess, "Popen", popen)
