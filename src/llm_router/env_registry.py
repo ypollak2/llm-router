@@ -58,6 +58,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_AGENTS_CONFIG": ("llm_router", "tools/agents.py", 1),
     "LLM_ROUTER_AGENT_POLICY_MODE": ("llm_router", "router.py", 1),
     "LLM_ROUTER_AGENT_ROUTE_ALLOW": ("llm_router", "hooks/agent-route.py", 1),
+    "LLM_ROUTER_AGENT_SLOT_TTL_S": ("llm_router", "hooks/agent-route.py", 2),
     "LLM_ROUTER_AGENT_ROUTE_CODEX": ("llm_router", "hooks/agent-route.py", 1),
     "LLM_ROUTER_AGENT_ROUTE_CODEX_DAILY_BUDGET": ("llm_router", "hooks/agent-route.py", 1),
     # 2026-10-03: the Codex agent model used for subagent delegation (gpt-6-astra
