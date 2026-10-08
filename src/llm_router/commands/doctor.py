@@ -68,6 +68,30 @@ def _warn(text: str) -> str:
 
 # ── Hook utilities ──────────────────────────────────────────────────────────
 
+def _subagent_start_gap(settings_path: Path) -> str | None:
+    """Warning text if agent-route is registered but subagent-start is not, else None.
+
+    agent-route.py queues each child's nesting depth; only subagent-start.py (the
+    SubagentStart hook) claims it. Without that hook every subagent is depth 1.
+    """
+    try:
+        hooks = json.loads(settings_path.read_text()).get("hooks", {})
+    except (OSError, ValueError, AttributeError):
+        return None  # no readable settings: nothing to judge here
+
+    def _has(event: str, script: str) -> bool:
+        for entry in hooks.get(event) or []:
+            for h in (entry.get("hooks") or []) if isinstance(entry, dict) else []:
+                if script in str(h.get("command", "")):
+                    return True
+        return False
+
+    if _has("PreToolUse", "agent-route") and not _has("SubagentStart", "subagent-start"):
+        return ("SubagentStart hook not registered: every subagent counts as depth 1, so only "
+                "LLM_ROUTER_MAX_CONCURRENT_AGENTS bounds recursion — run `llm-router install --force`")
+    return None
+
+
 def _hook_version_num(path: Path) -> int:
     """Read the version number embedded in a hook file header."""
     _re = re.compile(r"#\s*llm_router-hook-version:\s*(\d+)")
@@ -1046,6 +1070,14 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
                         issues.append(f"Duplicate hook: {os.path.basename(_script)} ({_count}x in {_event})")
         except Exception:
             pass
+
+    # ── 1d. SubagentStart registration (agent breaker nesting depth) ───────
+    # Without it every subagent counts as depth 1 and only
+    # LLM_ROUTER_MAX_CONCURRENT_AGENTS bounds recursion (docs/BUGS.md, AB-2).
+    _ss_msg = _subagent_start_gap(_SETTINGS_PATH)
+    if _ss_msg:
+        print(_warn(_ss_msg))
+        issues.append("SubagentStart hook not registered — agent nesting depth is not tracked")
 
     # ── 2. Routing rules ───────────────────────────────────────────────────
     print(f"\n{_bold('  Routing rules')}")
