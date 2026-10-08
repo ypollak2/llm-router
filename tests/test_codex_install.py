@@ -236,6 +236,37 @@ def test_uninstall_removes_only_what_we_wrote(home):
     assert not (home / ".llm-router" / "hooks" / "codex-stop.py").exists()
 
 
+
+def test_uninstall_takes_tool_tables_codex_wrote_itself(home):
+    """"Always allow" in Codex writes [mcp_servers.llm_router.tools.<x>] that the
+    manifest never recorded. Leaving it without the server table makes Codex
+    refuse to start: config.toml:<line>:14 invalid transport."""
+    install._install_codex_files()
+    cfg = home / ".codex" / "config.toml"
+    cfg.write_text(cfg.read_text() + '\n[mcp_servers.llm_router.tools.llm_set_profile]\napproval_mode = "approve"\n')
+    install_manifest.apply_uninstall()
+    assert "llm_router" not in _toml(home)
+
+
+def test_install_without_binary_clears_orphaned_tool_tables(home, monkeypatch):
+    codex = home / ".codex"
+    codex.mkdir()
+    (codex / "config.toml").write_text('[mcp_servers.llm_router.tools.llm]\napproval_mode = "approve"\n')
+    monkeypatch.setattr("llm_router.install_hooks._build_mcp_entry", lambda: (None, ["WARN no binary"]))
+    install._install_codex_files()
+    assert not codex_host.has_orphan_mcp_tables(_toml(home))
+    assert "mcp_servers.llm_router" not in _toml(home)
+
+
+def test_reinstall_repairs_orphaned_tool_tables(home):
+    codex = home / ".codex"
+    codex.mkdir()
+    (codex / "config.toml").write_text('[mcp_servers.llm_router.tools.llm_set_profile]\napproval_mode = "approve"\n')
+    install._install_codex_files()
+    entry = codex_host.read_mcp_server(_toml(home))
+    assert entry["command"] == "/opt/llm/bin/llm-router"
+    assert entry["tools"]["llm_set_profile"] == {"approval_mode": "approve"}
+
 # ── Autodetect from the plain install ──────────────────────────────────────
 
 def test_plain_install_wires_codex_when_detected(home, monkeypatch, capsys):

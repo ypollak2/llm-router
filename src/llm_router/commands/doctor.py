@@ -138,6 +138,12 @@ def _codex_checks() -> tuple[list[str], list[str]]:
     if entry is None:
         lines.append(_fail("[mcp_servers.llm_router] missing from config.toml — Codex cannot see llm-router", fix=fix))
         issues.append("Codex MCP server not registered")
+    elif codex_host.has_orphan_mcp_tables(text):
+        lines.append(_fail(
+            "[mcp_servers.llm_router] has no command or url — Codex will not start (\"invalid transport\")",
+            fix=fix,
+        ))
+        issues.append("Codex MCP server table has no transport")
     else:
         problems = _mcp_command_problems(entry, "Codex")
         if problems:

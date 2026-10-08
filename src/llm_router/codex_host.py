@@ -165,6 +165,27 @@ def remove_toml_table(text: str, header_literal: str) -> str:
     return pat.sub("", text, count=1)
 
 
+def remove_toml_subtree(text: str, header_literal: str) -> str:
+    """Remove ``[header_literal]`` and every ``[header_literal.<...>]`` table.
+
+    Codex itself writes ``[mcp_servers.llm_router.tools.<tool>]`` when a user
+    picks "always allow" on a tool we did not pre-approve. Removing only the
+    tables we recorded leaves that one behind, and a server table with no
+    ``command`` or ``url`` makes Codex refuse to start ("invalid transport").
+    """
+    pat = re.compile(
+        r'(?m)^\[' + re.escape(header_literal) + r'(?:\.[^\]\n]+)?\][^\n]*(?:\n|$)(?:(?!\[).*(?:\n|$))*'
+    )
+    return pat.sub("", text)
+
+
+def has_orphan_mcp_tables(config_toml_text: str) -> bool:
+    """True when ``[mcp_servers.llm_router...]`` exists without a transport --
+    the state Codex rejects with "invalid transport"."""
+    entry = read_mcp_server(config_toml_text)
+    return entry is not None and not entry.get("command") and not entry.get("url")
+
+
 def toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)  # JSON string escaping is valid TOML basic-string escaping
 

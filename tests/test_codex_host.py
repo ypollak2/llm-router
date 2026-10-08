@@ -138,3 +138,24 @@ def test_marked_block_insert_replace_remove_preserve_user_text():
     assert v2.startswith(user) and v2.rstrip().endswith("## Later section")
     assert C.remove_marked_block(v2).strip() == (user + "\n## Later section").strip()
     assert C.upsert_marked_block("", "x") == f"{C.AGENTS_BLOCK_START}\nx\n{C.AGENTS_BLOCK_END}\n"
+
+
+def test_remove_subtree_takes_tool_tables_codex_wrote():
+    """Codex writes [mcp_servers.llm_router.tools.<x>] on "always allow". Left
+    behind without the server table, Codex refuses to start: "invalid transport"."""
+    text = ('[a]\nx = 1\n\n[mcp_servers.llm_router]\ncommand = "c"\n\n'
+            '[mcp_servers.llm_router.tools.llm]\napproval_mode = "approve"\n'
+            '[mcp_servers.llm_router_other]\ncommand = "keep"\n\n'
+            '[mcp_servers.llm_router.tools.llm_set_profile]\napproval_mode = "approve"\n')
+    out = C.remove_toml_subtree(text, C.MCP_TABLE)
+    assert "[a]\nx = 1" in out
+    assert '[mcp_servers.llm_router_other]\ncommand = "keep"' in out
+    assert "mcp_servers.llm_router]" not in out and "llm_router.tools" not in out
+
+
+def test_orphan_tool_tables_are_detected():
+    orphan = '[mcp_servers.llm_router.tools.llm]\napproval_mode = "approve"\n'
+    assert C.has_orphan_mcp_tables(orphan)
+    assert not C.has_orphan_mcp_tables('[mcp_servers.llm_router]\ncommand = "c"\n' + orphan)
+    assert not C.has_orphan_mcp_tables('[mcp_servers.llm_router]\nurl = "http://x"\n')
+    assert not C.has_orphan_mcp_tables("")

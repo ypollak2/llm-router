@@ -730,6 +730,10 @@ def _install_codex_files(mode: str = "mcp") -> list[str]:
     entry, warnings = _build_mcp_entry()
     if entry is None:
         actions.extend(f"  {w}" for w in warnings)
+        if codex_host.has_orphan_mcp_tables(text):
+            # Tool tables with no server table: Codex will not start at all.
+            text = codex_host.remove_toml_subtree(text, codex_host.MCP_TABLE)
+            actions.append(f"✓ Removed orphaned [{codex_host.MCP_TABLE}.*] tables from {config_toml}")
     else:
         command, args = entry["command"], list(entry.get("args") or [])
         text = codex_host.upsert_toml_table(
@@ -1180,6 +1184,13 @@ def uninstall_host_integrations() -> list[str]:
                 # llm_router-authored); the removal regex is ^-anchored + tested.
                 config_toml.write_text(updated)
                 actions.append(f"✓ Removed [model_providers.llm_router] from {config_toml}")
+            # Tool-approval tables outlive a manifest replay when Codex wrote
+            # them; with the server table gone they make Codex refuse to start.
+            from llm_router import codex_host
+            text = config_toml.read_text()
+            if codex_host.has_orphan_mcp_tables(text):
+                config_toml.write_text(codex_host.remove_toml_subtree(text, codex_host.MCP_TABLE))
+                actions.append(f"✓ Removed orphaned [{codex_host.MCP_TABLE}.*] tables from {config_toml}")
         config_yaml = codex_dir / "config.yaml"
         if config_yaml.exists():
             y = config_yaml.read_text()
