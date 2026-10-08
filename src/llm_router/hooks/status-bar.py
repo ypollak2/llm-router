@@ -9,6 +9,14 @@ Displays a two-mode status line:
 Time buckets: today, this week (Mon), this calendar month, all-time.
 Provider health: read from ~/.llm-router/health.json (written by background checks).
 Enforcement mode: read from LLM_ROUTER_ENFORCE env var.
+
+The hook only READS the line (PLAN v16 P0.9-b, status-bar p95 <= 300 ms). It is
+computed by a detached refresher (``--refresh-cache``) into
+``status_bar_cache.json`` (TTL 30 s). Live p95 was 4,488 ms (n = 344, [HL7]): two
+``sqlite3.connect(usage.db, timeout=2)`` calls that wait out a writer's lock, plus
+the Gemini quota read, all on the prompt's path. A stale line (up to
+``_CACHE_SERVE_MAX_AGE_S``) is shown while one refresher runs; with no usable
+cache the hook prints nothing this prompt rather than wait.
 """
 
 from __future__ import annotations
@@ -503,6 +511,102 @@ def _format_status() -> str:
     return "".join(parts)
 
 
+# ── Cache (P0.9-b): the hook reads, a detached refresher computes ─────────
+
+_CACHE_FILENAME = "status_bar_cache.json"
+_CLAIM_FILENAME = "status_bar_refresh.claim"
+#: A line younger than this is current; an older one triggers a refresh.
+_CACHE_TTL_S = 30.0
+#: A line older than this is not shown at all (savings and quota go stale).
+_CACHE_SERVE_MAX_AGE_S = 600.0
+#: At most one refresher is started per this many seconds.
+_REFRESH_CLAIM_S = 15.0
+
+
+def _cache_path() -> str:
+    return os.path.join(_state_dir(), _CACHE_FILENAME)
+
+
+def _claim_path() -> str:
+    return os.path.join(_state_dir(), _CLAIM_FILENAME)
+
+
+def _cache_key() -> str:
+    """The line depends on these settings; a cache written under others is unusable."""
+    return f"{STATUS_MODE}|{ENFORCE_MODE}"
+
+
+def _read_cache(now: float | None = None) -> tuple[str | None, float | None]:
+    """(line, age_s) from the cache, or (None, None) when missing, unreadable or
+    written under other settings. Never raises."""
+    try:
+        with open(_cache_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        ts, line = data.get("ts"), data.get("status")
+        if (data.get("key") != _cache_key() or not isinstance(line, str)
+                or isinstance(ts, bool) or not isinstance(ts, (int, float))):
+            return None, None
+        return line, max(0.0, (time.time() if now is None else now) - float(ts))
+    except Exception:  # noqa: BLE001 -- no cache is the first-run normal
+        return None, None
+
+
+def _write_cache(line: str) -> None:
+    """Atomically replace the cache. Never raises."""
+    try:
+        path = _cache_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"ts": time.time(), "key": _cache_key(), "status": line}, f)
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001 -- the next refresh tries again
+        return
+
+
+def _claim_refresh(now: float | None = None) -> bool:
+    """True when this call may start a refresher: none was started in the last
+    ``_REFRESH_CLAIM_S``. A lost race starts at most one extra. Never raises."""
+    try:
+        now = time.time() if now is None else now
+        path = _claim_path()
+        try:
+            if now - os.path.getmtime(path) < _REFRESH_CLAIM_S:
+                return False
+        except OSError:
+            pass
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(str(now))
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _refresh_argv() -> list[str]:
+    return [sys.executable, os.path.abspath(__file__), "--refresh-cache"]
+
+
+def _spawn_refresh() -> None:
+    """Detach one refresher through the package's one detached-spawn helper
+    (fork + execv, own session, no stdio; the status line tick uses it too).
+    Never raises."""
+    try:
+        from llm_router.statusline_tick import _spawn_detached
+
+        _spawn_detached(_refresh_argv())
+    except Exception:  # noqa: BLE001 -- no refresh this time; the next prompt retries
+        return
+
+
+def _refresh_cache() -> None:
+    """The refresher: compute the line (sqlite, Gemini quota, health) and cache it."""
+    try:
+        _write_cache(_format_status())
+    except Exception:  # noqa: BLE001 -- a broken refresh leaves the last good line
+        return
+
+
 # ── Throttle ───────────────────────────────────────────────────────────────
 
 def _should_show() -> bool:
@@ -531,16 +635,42 @@ def _should_show() -> bool:
 
 # ── Entry point ────────────────────────────────────────────────────────────
 
+try:
+    from llm_router.hook_latency import mark_main_start as _hl_mark_main, phase as _hl_phase
+except ImportError:  # llm_router is not importable on this host: no recorder, no phases
+    import contextlib as _hl_contextlib
+
+    def _hl_phase(name):  # noqa: ARG001
+        return _hl_contextlib.nullcontext()
+
+    def _hl_mark_main():
+        return None
+
+
 def main() -> None:
+    _hl_mark_main()
     try:
-        json.load(sys.stdin)
+        payload = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):
+        payload = {}
+    try:
+        from llm_router.hook_latency import set_session as _hl_set_session
+
+        _hl_set_session(payload.get("session_id") if isinstance(payload, dict) else None)
+    except Exception:  # noqa: BLE001 -- older llm_router: no session on the row
         pass
 
     if not _should_show():
         sys.exit(0)
 
-    status = _format_status()
+    with _hl_phase("read_cache"):
+        status, age = _read_cache()
+    if age is None or age > _CACHE_TTL_S:
+        with _hl_phase("spawn"):
+            if _claim_refresh():
+                _spawn_refresh()
+    if status is None or age is None or age > _CACHE_SERVE_MAX_AGE_S:
+        sys.exit(0)  # nothing current to show; the refresher fills it for next time
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
@@ -549,5 +679,15 @@ def main() -> None:
     }))
 
 
+def _entry(argv: list[str]) -> None:
+    if "--refresh-cache" in argv:
+        # The detached refresher re-runs this file, so the latency stanza armed a
+        # status-bar row for it; its sqlite time is not the hook's (BUGS P09-3).
+        os.environ["LLM_ROUTER_HOOK_LATENCY"] = "off"
+        _refresh_cache()
+    else:
+        main()
+
+
 if __name__ == "__main__":
-    main()
+    _entry(sys.argv[1:])
