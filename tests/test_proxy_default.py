@@ -52,7 +52,7 @@ def test_systemd_user_unit_has_restart_on_failure():
 def test_service_target_per_platform(tmp_path):
     mac_dest, mac_cmd = pd.service_target("Darwin", tmp_path)
     assert mac_dest == tmp_path / "Library" / "LaunchAgents" / f"{pd.LABEL}.plist"
-    assert "launchctl load" in mac_cmd
+    assert "launchctl load" in mac_cmd and "launchctl kickstart -k" in mac_cmd
 
     lin_dest, lin_cmd = pd.service_target("Linux", tmp_path)
     assert lin_dest.name == "llm_router-proxy.service" and "systemd/user" in str(lin_dest)
@@ -222,3 +222,75 @@ def test_install_shim_service_writes_under_the_given_home_only(tmp_path):
                                       port=9001, upstream_port=9002)
     assert dest.is_relative_to(tmp_path) and dest.exists()
     assert "<string>9002</string>" in dest.read_text()
+
+
+_FAKE_LAUNCHCTL = """#!/bin/bash
+# Reproduces macOS 26: `load` of a loaded job prints "Load failed: 5" and EXITS 0.
+state="$FAKE_LC_DIR/loaded"; echo "$1" >> "$FAKE_LC_DIR/calls"
+case "$1" in
+  print) [ -e "$state" ] && exit 0; exit 113;;
+  load) if [ -e "$state" ]; then echo "Load failed: 5: Input/output error" >&2; exit 0; fi
+        touch "$state"; exit 0;;
+  kickstart) [ -e "$state" ] && exit 0; exit 113;;
+  *) exit 64;;
+esac
+"""
+
+
+def _run_activation(tmp_path, cmd, loaded):
+    import os
+    import subprocess as sp
+
+    bin_dir, st = tmp_path / "bin", tmp_path / "lc"
+    bin_dir.mkdir(exist_ok=True)
+    st.mkdir(exist_ok=True)
+    lc = bin_dir / "launchctl"
+    lc.write_text(_FAKE_LAUNCHCTL)
+    lc.chmod(0o755)
+    (st / "calls").write_text("")
+    if loaded:
+        (st / "loaded").write_text("")
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "FAKE_LC_DIR": str(st)}
+    r = sp.run(cmd, shell=True, env=env, capture_output=True, text=True, timeout=15)
+    return r, (st / "calls").read_text().split()
+
+
+def test_macos_activation_kickstarts_a_loaded_service(tmp_path):
+    """`launchctl load` on a loaded job exits 0, so `load || kickstart` never kicks."""
+    for label in (pd.LABEL, pd.SHIM_LABEL):
+        dest, cmd = pd.service_target("Darwin", tmp_path, label=label)
+        assert "bootout" not in cmd and "bootstrap" not in cmd
+        r, calls = _run_activation(tmp_path, cmd, loaded=True)
+        assert r.returncode == 0
+        assert calls == ["print", "kickstart"], calls
+
+
+def test_macos_activation_loads_an_unloaded_service(tmp_path):
+    for label in (pd.LABEL, pd.SHIM_LABEL):
+        dest, cmd = pd.service_target("Darwin", tmp_path, label=label)
+        (tmp_path / label).mkdir()
+        r, calls = _run_activation(tmp_path / label, cmd, loaded=False)
+        assert r.returncode == 0
+        assert calls == ["print", "load"], calls
+
+
+def test_gateway_activation_shares_the_state_check(tmp_path, monkeypatch):
+    from llm_router import gateway_service as gs
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _, cmd = gs.gateway_service_target("Darwin")
+    r, calls = _run_activation(tmp_path, cmd, loaded=True)
+    assert calls == ["print", "kickstart"], calls
+
+
+def test_no_restart_advice_uses_launchctl_bootout_or_bootstrap():
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    files = [f for d in ("src", "hooks", "docs") for f in (root / d).rglob("*")
+             if f.suffix in {".py", ".md"} and "spikes" not in f.parts and f.name != "BUGS.md"]
+    assert len(files) > 50, "the scan must find the repo's files"
+    pat = re.compile(r"launchctl\s+(bootout|bootstrap)")
+    hits = [f"{f.relative_to(root)}:{n}" for f in files
+            for n, line in enumerate(f.read_text(errors="ignore").splitlines(), 1) if pat.search(line)]
+    assert hits == []

@@ -12,7 +12,7 @@ The shim owns that port instead and stays deliberately small:
   ``127.0.0.1:<upstream_port>`` (default 8797,
   ``LLM_ROUTER_PROXY_UPSTREAM_PORT``);
 * when the main proxy cannot be reached (connection refused, connect slower
-  than 200 ms, or the connection drops before a response arrives), or answers
+  than the connect budget (1 s, ``--connect-timeout-ms``), or the connection drops before a response arrives), or answers
   5xx of its own (no Anthropic ``request-id``; an Anthropic 5xx such as 529
   overloaded is passed through) before any byte went to the client, the same
   request goes once to
@@ -53,7 +53,12 @@ from aiohttp import web
 ANTHROPIC_URL = "https://api.anthropic.com"
 DEFAULT_PORT = 8787
 DEFAULT_UPSTREAM_PORT = 8797
-DEFAULT_CONNECT_TIMEOUT_S = 0.2
+#: 1 s, not 200 ms: a refused connect (the usual "main proxy is down") fails at
+#: once whatever the budget, so a larger budget costs nothing then. It only
+#: decides how long a connect that is merely slow may take before the call
+#: skips the router. 200 ms did that 58 times in 4 minutes at load ~25 with a
+#: healthy proxy (docs/BUGS.md P010-2).
+DEFAULT_CONNECT_TIMEOUT_S = 1.0
 #: Claude Code request bodies carry the whole conversation (images included);
 #: aiohttp's 1 MiB default would reject long sessions.
 MAX_REQUEST_BYTES = 512 * 1024 * 1024

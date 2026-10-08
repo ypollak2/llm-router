@@ -255,6 +255,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_LOG_JSON": ("llm_router", "logging.py", 1),
     "LLM_ROUTER_LOG_LEVEL": ("llm_router", "logging.py", 1),
     "LLM_ROUTER_MAX_AGENT_DEPTH": ("llm_router", "hooks/agent-route.py", 1),
+    "LLM_ROUTER_MAX_CONCURRENT_AGENTS": ("llm_router", "hooks/agent-route.py", 1),
     "LLM_ROUTER_METRICS_INCLUDE_PRESSURE": ("llm_router", "admin_api.py", 1),
     "LLM_ROUTER_MINI_SUMMARY_EVERY": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_OIDC_AUDIENCE": ("llm_router", "enterprise/oidc.py", 1),
@@ -398,6 +399,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_DECISION_ABSTAIN_BELOW": ("llm_router", "decision_classifier.py", 1),
     # P1.7: truth labels (JSONL text_sha/session_id/truth) for kpi's "classifier shadow vs rules" line.
     "LLM_ROUTER_SHADOW_LABELS": ("llm_router", "commands/kpi.py", 1),
+    # P1.7-d: opt-in sample of shadow turns whose TEXT is kept in shadow_text.jsonl (0600) for the labeller.
+    "LLM_ROUTER_SHADOW_TEXT_SAMPLE": ("llm_router", "proxy/shadow_text.py", 1),
     "LLM_ROUTER_ZCE_COLD_BUDGET_S": ("llm_router", "warm.py", 1),
     "LLM_ROUTER_ZCE_WARMUP": ("llm_router", "warm.py", 1),
     # ── indirect reads: DECLARED BY HAND, invisible to the AST scan ──

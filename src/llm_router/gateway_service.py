@@ -79,7 +79,9 @@ def gateway_service_target(system: str | None = None) -> tuple[Path, str]:
     system = system or platform.system()
     if system == "Darwin":
         dest = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
-        return dest, f"launchctl load {dest}"
+        from llm_router.proxy_default import launchd_activate_command
+
+        return dest, launchd_activate_command(dest, LABEL)
     if system == "Linux":
         dest = Path.home() / ".config" / "systemd" / "user" / "llm_router-gateway.service"
         return dest, "systemctl --user daemon-reload && systemctl --user enable --now llm_router-gateway"

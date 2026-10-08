@@ -305,6 +305,21 @@ def test_future_dated_decision_rows_are_not_counted():
     assert _card()["proxy_liveness"]["routing_decisions_24h"] == 1
 
 
+def test_decision_rows_older_than_24h_are_not_counted():
+    """Lower bound of the decision window (P0.14-b review survivor)."""
+    conn = _decisions_db()
+    _decision(conn, NOW - 25 * HOUR)
+    conn.commit()
+    conn.close()
+    live = _card()["proxy_liveness"]
+    assert live["routing_decisions_24h"] == 0 and live["warn"] is False
+    conn = _decisions_db()
+    _decision(conn, NOW - 3 * HOUR)
+    conn.commit()
+    conn.close()
+    assert _card()["proxy_liveness"]["routing_decisions_24h"] == 1
+
+
 def _decisions_db() -> sqlite3.Connection:
     db = paths.state_path("usage.db")
     db.parent.mkdir(parents=True, exist_ok=True)
@@ -365,6 +380,18 @@ def test_short_silence_needs_three_turns_and_no_recent_rows(tree):
     assert len(plv.doctor_findings(proj, home, now=NOW)) == 1
     _proxy_rows(1, age_h=0.5)                                      # a row inside the last 2 h
     assert plv.doctor_findings(proj, home, now=NOW) == []
+
+
+def test_short_silence_does_not_count_future_dated_proxy_rows(tree):
+    """Upper bound of the 2 h window (P0.14-b review survivor): a row stamped an
+    hour after now is not a row in the last 2 h."""
+    from llm_router import proxy_liveness as plv
+
+    _proxy_rows(2, age_h=-1)
+    _turns(3, age_h=1)
+    short = plv.short_silence(now=NOW)
+    assert short["proxy_rows"] == 0 and short["hook_turns"] == 3
+    assert short["warn"] is True
 
 
 def test_short_silence_empty_set_reports_nothing(tree):
