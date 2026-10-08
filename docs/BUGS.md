@@ -18,6 +18,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 6 | Research session b9f04425 counted as organic | fixed in #291 (M0.0b) |
 | 7 | `edit_outcomes.jsonl` rows with no source | open, fix is plan task M0.3(c) |
 | 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | fixed in P0.7 (`fix/learning-bugs`): one flag, default off |
+| P09-2 | Proxy tier decision took 1.2-2.2 s on rules-only turn-first calls | fixed in `perf/proxy-decision` (P0.9 task 6) |
 | 9 | Classifier warm-up loaded `llmr-classifier` at the wrong `num_ctx` | fixed in #298 (M1.4, review 2) |
 | 10 | README-advertised `--host pi` / `--host kimi` failed; detected gemini-cli skipped silently | fixed in this change (v16 P0.4) |
 | 11 | Four shadow tests raced the clock and failed `main` on a loaded runner | fixed in this change (test-only) |
@@ -191,6 +192,26 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Test.** `tests/test_offload_share_alignment.py` (to be added by M0.3): a turn that
   edits 2 files is 1 turn; an `llm_edit` row is no turn; a `zero_claude` row does not match
   or drop an `llm_edit` unit in `northstar._fold_edit_ledger`. Not on `main` yet.
+
+## P09-2. Proxy tier decision took 1.2-2.2 s on rules-only turn-first calls
+
+- **Symptom.** `tier_decision_s` was 1.208, 2.203 and 1.673 s on 3 of 6 live turn-first
+  rows (reasons haiku_rewrite, sticky, thinking_floor), against the PRD's 50 ms heuristic
+  bar [PL] (`$PP/v16/sources/PL_proxy_calls_since_20261007T1140Z.jsonl`, n = 15 rows).
+- **Cause.** Not the quota read (the plan's first hypothesis: `proxy.quota_pressure` parses
+  `usage.json` once per mtime and costs one `stat()` per call). The tier decision's
+  classifier was `backends.choose_model`, which builds a provider chain
+  (`router._build_and_filter_chain`: usage.db queries, dynamic routing, the Ollama model
+  list) on each new (task_type, complexity) key, inside the timed span. The decision reads
+  only the class. Measured on a copy of the live usage.db (2026-10-07, this machine under
+  load): first build 21.6 s, later new keys 67-107 ms, `classify_signals` 0.1-0.2 ms.
+- **Fix.** `backends.tier_classify`: the same `classify_signals(GATEWAY_POLICY)` class, chain
+  head only from the cache, never a build. The decision now writes `tier_phases_ms`
+  (`classify`, `quota_read`, `stickiness`, `haiku_checks`; `okf_attach` and `fold` beside it).
+- **Test.** `tests/test_p09_proxy_decision.py`:
+  `test_a_turn_first_decision_never_waits_on_a_chain_build` (a 1 s fake chain build; FAILS
+  on da31df7), `test_tier_classify_gives_the_same_class_as_choose_model`,
+  `test_a_slow_chain_build_does_not_reach_tier_decision_s`.
 
 ## 8. `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off
 

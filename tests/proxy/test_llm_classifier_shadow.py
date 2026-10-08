@@ -53,7 +53,7 @@ def simple(monkeypatch):
     """The rules classifier says moderate/code (the policy then proposes Sonnet)."""
     async def choose(text, pinned, *, anthropic=False):
         return {"task_type": "code", "complexity": "moderate", "chain_head": [], "model": None}
-    monkeypatch.setattr(pb, "choose_model", choose)
+    monkeypatch.setattr(pb, "tier_classify", choose)
 
 
 class FakeClassifier:
