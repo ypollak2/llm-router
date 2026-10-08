@@ -173,7 +173,7 @@ def test_end_to_end_fake_codex_delegation_to_a_joined_verify_record(tmp_path, mo
     assert (v["verify_status"], v["verify_level"], v["verify_sandboxed"]) == ("pass_f2p", "V1", True), v
     assert v["verify_n_f2p"] >= 1
     # 4. joined in units(); SHADOW: the outcome is not touched and no KPI moves
-    unit = next(u for u in ns.units(days=None, session_id=SID_MAIN, root=proj.parent)
+    unit = next(u for u in ns.units(days=None, session_id=SID_MAIN, root=proj.parent, verify_records=True)
                 if u["kind"] == ns.UNIT_AGENT_ROUTE_CODEX)
     assert unit["verify"]["verify_status"] == "pass_f2p"
     assert (unit["outcome"], unit["signal"]) == ("unknown", "agent_route_codex_delegated")
@@ -448,7 +448,7 @@ def test_expiry_is_recorded_in_the_ledger_and_joins(tmp_path):
     W.drain(verify=_ok_result)                                           # real record_verify
     proj = _project(tmp_path)
     _write_jsonl(proj / f"{SID_MAIN}.jsonl", [_user(SID_MAIN, "x", ts - 10)] + _bulk_user_prompts(SID_MAIN, 60, ts))
-    u = next(u for u in ns.units(days=None, session_id=SID_MAIN, root=proj.parent) if u["kind"] == "agent_route_codex")
+    u = next(u for u in ns.units(days=None, session_id=SID_MAIN, root=proj.parent, verify_records=True) if u["kind"] == "agent_route_codex")
     assert (u["verify"]["verify_status"], u["verify"]["verify_reason"]) == ("unavailable", "verify_expired")
     assert u["outcome"] == "unknown"
 

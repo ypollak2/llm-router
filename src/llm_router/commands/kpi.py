@@ -309,7 +309,8 @@ def _scope_phrase(allowed: frozenset[str]) -> str:
 # ── NS, D1, D2: from northstar's unit stream, session-kind joined ───────────
 
 def _ns_d1_d2(days: int, allowed: frozenset[str], index,
-              win: "_Window | None" = None) -> tuple[dict, dict, dict, dict]:
+              win: "_Window | None" = None,
+              units: list[dict] | None = None) -> tuple[dict, dict, dict, dict]:
     """Pooled (not per-session-median) totals over units whose session resolves to a
     kind in ``allowed``. Mirrors the attempted/used accounting
     ``northstar.report()`` already uses, so NS/D1/D2 cannot disagree with
@@ -318,7 +319,8 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index,
     ``northstar.units()`` stamps each unit with its session's kind (tag file, then
     the unit's own ledger stamp, then the session's proxy rows); a stream without the
     stamp is resolved here against ``index``. Returns the three results and the join
-    counts: how many units found a tag and how many stayed untagged."""
+    counts: how many units found a tag and how many stayed untagged. ``units`` is the
+    ``northstar.units(backfill=True)`` list when the caller already holds it."""
     from llm_router import northstar as ns
 
     window = joined = untagged = conflicting = total = attempted = used = used_heuristic = 0
@@ -331,7 +333,7 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index,
     newest: float | None = None
     # backfill=True: this KPI is the one reader that resolves a unit's kind from the
     # backfill sidecar. northstar.units() leaves it off for every hot-path caller.
-    for u in ns.units(days=_wall_days(days, win), backfill=True):
+    for u in (ns.units(days=_wall_days(days, win), backfill=True) if units is None else units):
         if win is not None and not win.covers(u.get("ts")):
             continue
         window += 1
@@ -406,26 +408,36 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index,
             joins)
 
 
-def _verify_shadow(days: int) -> dict | None:
-    """Informational counts of units in the window that carry a verify record. Counts only:
-    never read by NS, D1 or D2 (verifier PR B, shadow). None when no unit carries one."""
+VERIFY_SHADOW_KEYS = ("fail", "unavailable", "verified", "weak")
+
+
+def _verify_shadow(units: list[dict], win: "_Window | None" = None) -> dict:
+    """Informational counts of the given units that carry a verify record. Counts only:
+    never read by NS, D1 or D2 (verifier PR B, shadow). Always a dict with exactly
+    ``VERIFY_SHADOW_KEYS``, zero-filled when no unit carries a record, so
+    ``jq '.verify_shadow|keys'`` works on a ledger with no verify rows.
+
+    ``units`` is the list ``compute_scorecard`` already built for NS/D1/D2 (the same
+    ``northstar.units(backfill=True)`` pass): this does not walk the transcripts a second time."""
     from llm_router import northstar as ns
 
+    c = dict.fromkeys(VERIFY_SHADOW_KEYS, 0)
     records = ns.load_verify_records()  # joined here, not via units(): NS/D2 must not see them
     if not records:
-        return None
-    c = {"verified": 0, "weak": 0, "failed": 0, "unavailable": 0}
-    for u in ns.units(days=days, backfill=True):
+        return c
+    for u in units:
+        if win is not None and not win.covers(u.get("ts")):
+            continue
         s = (records.get(u.get("unit_id")) or {}).get("verify_status")
         if s in ("pass_f2p", "pass_f2p_model"):
             c["verified"] += 1
         elif s == "pass_p2p":
             c["weak"] += 1
         elif s == "fail":
-            c["failed"] += 1
+            c["fail"] += 1
         elif s in ("unavailable", "not_applicable"):
             c["unavailable"] += 1
-    return c if any(c.values()) else None
+    return c
 
 
 def _strict_note(result: dict) -> dict:
@@ -1822,7 +1834,9 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
     all_rows = pl.read_rows()
     index = sk.KindIndex(all_rows)
     until_ts = None if win is None else win.until
-    ns_r, d1_r, d2_r, joins = _ns_d1_d2(days, allowed, index, win)
+    from llm_router import northstar as _ns
+    unit_list = list(_ns.units(days=_wall_days(days, win), backfill=True))  # one pass: NS/D1/D2 and verify_shadow
+    ns_r, d1_r, d2_r, joins = _ns_d1_d2(days, allowed, index, win, unit_list)
     kpis_diag = joins.pop("diag")
     d3_r = _fold_user_signals(_d3_redo_rate(days, allowed, index, win), days, now_ts)
     pop = _proxy_population(all_rows, days, allowed, now_ts, until=until_ts)
@@ -1842,7 +1856,7 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         "window_days": days,
         "include_research": include_research,
         "joins": joins,
-        "verify_shadow": _verify_shadow(days),
+        "verify_shadow": _verify_shadow(unit_list, win),
         # Informational only: not in "kpis", so not in _ORDER, --health or NS/D1/D2.
         "local_shadow": _local_shadow_summary(days, win),
         # O3 is likewise outside "kpis": adding it there would change the key set, _ORDER and
@@ -1982,10 +1996,10 @@ def render_scorecard(data: dict) -> str:
         lines.append(f"  {_LABELS[key]:<42s} {r['value']}")
         for extra in r.get("lines", ()):
             lines.append(f"      {extra}")
-        if key == "D2" and data.get("verify_shadow"):
+        if key == "D2" and any((data.get("verify_shadow") or {}).values()):
             v = data["verify_shadow"]
             lines.append(f"      verify (shadow): {v['verified']} verified, {v['weak']} weak, "
-                         f"{v['failed']} failed, {v['unavailable']} unavailable (informational; not in NS/D1/D2)")
+                         f"{v['fail']} failed, {v['unavailable']} unavailable (informational; not in NS/D1/D2)")
     for key, r in (data.get("kpis_diag") or {}).items():
         if not r.get("measurable"):
             continue  # nothing to compare: the card stays as it was
