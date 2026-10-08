@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 16
+# llm_router-hook-version: 17
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -863,6 +863,8 @@ def _initialize_session_budget() -> float:
     allocated = base_budget * (1.0 - pressure)
     initial_budget = max(5.0, allocated)  # Minimum $5 always allocated
 
+    # An empty HOME has no ~/.llm-router yet; 0700 matches the repo state-dir convention.
+    budget_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     budget_file.write_text(json.dumps({
         "session_id": _get_session_id(),
         "initial": initial_budget,
