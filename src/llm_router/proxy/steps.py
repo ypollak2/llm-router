@@ -14,6 +14,15 @@ proxy's enabled set are ever considered; every other call passes through.
 Calls that carry a forced ``tool_choice``, images or documents in the newest
 turn, or no client tools are never eligible: the serving model could not honour
 them faithfully, and a pass-through costs nothing.
+
+Step KINDS (GE1 action census). The ledger's ``step_class`` field records what
+kind of call every request was, whether or not it may be served
+(:func:`step_kind`): ``continuation`` (the shape above), ``turn_first`` (the
+first call of a human turn: the newest user turn has text), ``subagent_first``
+(a sub-agent's first call) and ``side_call`` (no client tools: titles, probes,
+summaries). Only ``STEP_CLASSES`` may be served; the other kinds are labels.
+A continuation that cannot be served faithfully says why in
+:func:`step_ineligible`.
 """
 
 from __future__ import annotations
@@ -22,7 +31,17 @@ import json
 import re
 from typing import Callable
 
+from llm_router.proxy import tool_classes
+
 STEP_CONTINUATION = "continuation"
+STEP_TURN_FIRST = "turn_first"
+STEP_SIDE_CALL = "side_call"
+STEP_SUBAGENT_FIRST = "subagent_first"
+STEP_KINDS = (STEP_CONTINUATION, STEP_TURN_FIRST, STEP_SIDE_CALL, STEP_SUBAGENT_FIRST)
+
+#: Claude Code gives the main thread a sub-agent launcher and gives sub-agents none
+#: (a sub-agent cannot spawn another). ``Task`` is the older name of ``Agent``.
+_AGENT_LAUNCHERS = frozenset({"Agent", "Task"})
 
 
 def non_system(messages: list) -> list:
@@ -31,15 +50,29 @@ def non_system(messages: list) -> list:
     return [m for m in messages if isinstance(m, dict) and m.get("role") != "system"]
 
 
-def _is_continuation(body: dict) -> bool:
+def _newest_turn_kinds(body: dict) -> set | None:
+    """Block types of the newest user turn, or ``None`` when it cannot answer tools."""
     msgs = non_system(body.get("messages") or [])
     if len(msgs) < 3 or msgs[-1].get("role") != "user":
-        return False
+        return None
     content = msgs[-1].get("content")
     if not isinstance(content, list) or not content:
-        return False
-    kinds = {b.get("type") for b in content if isinstance(b, dict)}
-    return "tool_result" in kinds and kinds <= {"tool_result", "text"}
+        return None
+    return {b.get("type") for b in content if isinstance(b, dict)}
+
+
+def _is_continuation(body: dict) -> bool:
+    kinds = _newest_turn_kinds(body)
+    return kinds is not None and "tool_result" in kinds and kinds <= {"tool_result", "text"}
+
+
+def _is_continuation_kind(body: dict) -> bool:
+    """The continuation KIND for the ledger: as :func:`_is_continuation`, but images or
+    documents beside the tool results still make a continuation (one that
+    :func:`step_ineligible` marks ``media``). Serving keeps the strict predicate."""
+    kinds = _newest_turn_kinds(body)
+    return (kinds is not None and "tool_result" in kinds
+            and kinds <= {"tool_result", "text", "image", "document"})
 
 
 STEP_CLASSES: dict[str, Callable[[dict], bool]] = {
@@ -83,13 +116,63 @@ def step_class(body: dict, enabled: frozenset[str] | set[str]) -> str | None:
     return None
 
 
-def prev_tools(body: dict) -> list[str]:
-    """Names of the tool calls the newest tool results answer (shape only)."""
+def step_kind(body: dict) -> str:
+    """What kind of call ``body`` is (one of :data:`STEP_KINDS`), for the ledger.
+
+    ``subagent_first`` is inferred from the tool list: a first call whose tools hold
+    no ``Agent``/``Task`` launcher. A main session started with that tool disabled is
+    therefore counted as a sub-agent; both are actions, so the census's action total
+    does not move."""
+    if not _has_client_tools(body):
+        return STEP_SIDE_CALL
+    if _is_continuation_kind(body):
+        return STEP_CONTINUATION
+    if is_first_call(body):
+        names = {t.get("name") for t in body.get("tools") or [] if isinstance(t, dict)}
+        return STEP_TURN_FIRST if names & _AGENT_LAUNCHERS else STEP_SUBAGENT_FIRST
+    return STEP_TURN_FIRST
+
+
+def step_ineligible(body: dict) -> str | None:
+    """A LABEL, not a gate: what in a continuation the serving model could not
+    honour faithfully. ``media`` (images or documents in the newest turn) and
+    ``forced_tool_choice`` also stop serving (:func:`step_class`). ``server_tool``
+    (a tool with no ``input_schema``, run by Anthropic, not the client) does not:
+    :func:`step_class` still serves the call when a client tool exists and the
+    translator drops the server tools, so a row can hold ``decision=served``
+    beside ``step_ineligible=server_tool``. ``None`` for a continuation with none
+    of these and for every other kind of call."""
+    if step_kind(body) != STEP_CONTINUATION:
+        return None
+    if _newest_turn_has_media(body):
+        return "media"
+    if any(isinstance(t, dict) and "input_schema" not in t for t in body.get("tools") or []):
+        return "server_tool"
+    tc = body.get("tool_choice")
+    if isinstance(tc, dict) and tc.get("type") in ("tool", "any"):
+        return "forced_tool_choice"
+    return None
+
+
+def _prev_tool_uses(body: dict) -> list[dict]:
     msgs = non_system(body.get("messages") or [])
     if len(msgs) < 2 or not isinstance(msgs[-2].get("content"), list):
         return []
-    return [b.get("name", "") for b in msgs[-2]["content"]
-            if isinstance(b, dict) and b.get("type") == "tool_use"]
+    return [b for b in msgs[-2]["content"] if isinstance(b, dict) and b.get("type") == "tool_use"]
+
+
+def prev_tool_class(body: dict) -> str | None:
+    """The ``tool_classes`` class of the tool calls the newest tool results answer,
+    or ``None`` when the call is not a continuation (a side call included). A Bash
+    command is read here, in memory, and never returned or stored."""
+    if step_kind(body) != STEP_CONTINUATION:
+        return None
+    return tool_classes.step_tool_class((b.get("name"), b.get("input")) for b in _prev_tool_uses(body))
+
+
+def prev_tools(body: dict) -> list[str]:
+    """Names of the tool calls the newest tool results answer (shape only)."""
+    return [b.get("name", "") for b in _prev_tool_uses(body)]
 
 
 def _text_of(content) -> str:

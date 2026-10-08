@@ -31,7 +31,7 @@ def simple(monkeypatch):
     """The classifier says simple/code, so the policy proposes Haiku."""
     async def choose(text, pinned, *, anthropic=False):
         return {"task_type": "code", "complexity": "simple", "chain_head": [], "model": None}
-    monkeypatch.setattr(pb, "choose_model", choose)
+    monkeypatch.setattr(pb, "tier_classify", choose)
 
 
 def _typed(body: dict) -> str:
@@ -168,7 +168,7 @@ async def test_tier_haiku_block_covers_every_reason_and_is_absent_when_haiku_was
     async def choose(text, pinned, *, anthropic=False):
         return {"task_type": "code", "complexity": seen["complexity"], "chain_head": [], "model": None}
 
-    monkeypatch.setattr(pb, "choose_model", choose)
+    monkeypatch.setattr(pb, "tier_classify", choose)
     app = _app(tmp_path, Upstream())
     await _post(app, _first())
     for body in (_media(_req()), _builtin(_req()), _big(_req())):

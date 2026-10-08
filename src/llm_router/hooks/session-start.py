@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 24
+# llm_router-hook-version: 25
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -1923,9 +1923,10 @@ def _write_cached_hints(hints: str) -> None:
         return
 
 
-def _background_session_work_argv(cwd: str) -> list[str]:
+def _background_session_work_argv(cwd: str, session_id: str = "") -> list[str]:
     """argv that re-runs THIS script as the detached session-work child (frozen
-    builds go through ``run-hook``, as ``_background_usage_refresh_argv`` does)."""
+    builds go through ``run-hook``, as ``_background_usage_refresh_argv`` does).
+    The Claude Code session id rides along for the GE6 start sample."""
     try:
         from llm_router.install_hooks import is_frozen
 
@@ -1933,19 +1934,29 @@ def _background_session_work_argv(cwd: str) -> list[str]:
     except Exception:
         frozen = False
     if frozen:
-        return [sys.executable, "run-hook", __file__, "--background-session-work", cwd]
-    return [sys.executable, __file__, "--background-session-work", cwd]
+        return [sys.executable, "run-hook", __file__, "--background-session-work", cwd, session_id or ""]
+    return [sys.executable, __file__, "--background-session-work", cwd, session_id or ""]
 
 
-def _spawn_background_session_work(cwd: str) -> None:
+def _spawn_background_session_work(cwd: str, session_id: str = "") -> None:
     """Detach the child that does the session-start work the first prompt does
     not need. Never raises: a failed spawn costs the hints and warm-ups, never
     the session start."""
-    _spawn_detached(_background_session_work_argv(cwd))
+    _spawn_detached(_background_session_work_argv(cwd, session_id))
 
 
-def _run_background_session_work(cwd: str) -> None:
-    """The detached child: start Ollama, sync pxpipe, build the hint lines and
+def _quota_start_sample(session_id: str) -> None:
+    """GE6 / S3: one quota sample (cached usage.json, no network) for this
+    session's start into quota_samples.jsonl; the Stop hook appends the rest.
+    No session id (an older spawn) writes nothing: append_session_sample refuses it."""
+    from llm_router import quota_samples as _quota_samples
+
+    _quota_samples.append_session_sample(session_id, "start")
+
+
+def _run_background_session_work(cwd: str, session_id: str = "") -> None:
+    """The detached child: the GE6 quota start sample first (its time should be
+    the session's start, before seconds of Ollama start), then start Ollama, sync pxpipe, build the hint lines and
     cache them for the next session start, then the warm-ups, indexers, judge
     drain, watchdog and the daily rules refresh. Each step is fail-open, so one
     failure never skips the rest."""
@@ -1955,6 +1966,7 @@ def _run_background_session_work(cwd: str) -> None:
         except Exception:  # noqa: BLE001 -- one failed step must not skip the rest
             return ""
 
+    _step(_quota_start_sample, session_id)
     hints = ""
     hints += _step(_ensure_ollama_running)
     hints += _step(_ensure_pxpipe_running)
@@ -2074,13 +2086,15 @@ def main() -> None:
     with _hl_phase("hints"):
         hints += _read_cached_hints()
 
-    # 5-6c. Benchmarks, OKF index, model warm-ups, judge drain, watchdog, Ollama
-    # start, pxpipe, the slow hint lines and the daily rules refresh: one detached
-    # child (P0.9-a). Never blocks session start.
+    # 5-6c. GE6 quota start sample, benchmarks, OKF index, model warm-ups, judge
+    # drain, watchdog, Ollama start, pxpipe, the slow hint lines and the daily
+    # rules refresh: one detached child (P0.9-a). Never blocks session start.
+    _sid = _hook_input.get("session_id") if isinstance(_hook_input, dict) else None
     with _hl_phase("bg_spawn"):
         _spawn_background_session_work(
             (_hook_input.get("cwd") if isinstance(_hook_input, dict) else None)
-            or os.getcwd()
+            or os.getcwd(),
+            _sid if isinstance(_sid, str) else "",
         )
 
     # Visible UI signal — Claude Code surfaces stderr as
@@ -2118,10 +2132,11 @@ def _entry(argv: list[str]) -> None:
         # the usage refresh, writing usage.json, never the rest of SessionStart.
         _run_background_usage_refresh_entrypoint()
     elif "--background-session-work" in argv:
-        # The P0.9 child spawned by _spawn_background_session_work(); its cwd
-        # argument is the session's project directory.
+        # The P0.9 child spawned by _spawn_background_session_work(); its
+        # arguments are the session's project directory and its session id.
         i = argv.index("--background-session-work")
-        _run_background_session_work(argv[i + 1] if len(argv) > i + 1 else os.getcwd())
+        _run_background_session_work(argv[i + 1] if len(argv) > i + 1 else os.getcwd(),
+                                     argv[i + 2] if len(argv) > i + 2 else "")
     else:
         main()
 

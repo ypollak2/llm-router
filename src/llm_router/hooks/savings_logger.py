@@ -398,12 +398,15 @@ def log_direct_to_db(
         except Exception:
             pass
 
-        # Map the hook's string fields onto the typed enums the cost API wants,
-        # falling back to safe defaults if an unexpected value shows up.
+        # Map the hook's string fields onto the typed enums the cost API wants.
+        # P0.8: an unrecognised task type is stored as NULL with the label kept in
+        # task_type_raw. It used to be logged as QUERY, a value nobody classified.
         try:
-            _task = TaskType(task_type)
+            _task: TaskType | None = TaskType(task_type)
+            _task_raw: str | None = None
         except ValueError:
-            _task = TaskType.QUERY
+            _task = None
+            _task_raw = str(task_type)[:64] if task_type is not None else None
         try:
             _profile = RoutingProfile(profile)
         except ValueError:
@@ -437,21 +440,29 @@ def log_direct_to_db(
                 _profile,
                 success=_usable,
                 complexity=complexity,
+                session_id=_ledger_session_id(session_id) or "",
+                task_type_raw=_task_raw,
             )
+            # P0.8 (R-EVL-1): the DIRECT path measures none of the classifier
+            # confidence, its latency, budget pressure, a downshift or the quality
+            # mode, so each is NULL. They were written as 0.0 / False / "balanced"
+            # (live copy 2026-10-07: 63 of 63 DIRECT rows at confidence 0.0), which
+            # read as measured values.
             await _cost_log_routing_decision(
                 prompt=prompt,
-                task_type=task_type,
+                task_type=_task.value if _task is not None else None,
+                task_type_raw=_task_raw,
                 profile=_profile.value,
                 classifier_type=classifier_type,
                 classifier_model=None,
-                classifier_confidence=0.0,
-                classifier_latency_ms=0.0,
+                classifier_confidence=None,
+                classifier_latency_ms=None,
                 complexity=complexity,
                 recommended_model=model,
                 base_model=model,
-                was_downshifted=False,
-                budget_pct_used=0.0,
-                quality_mode="balanced",
+                was_downshifted=None,
+                budget_pct_used=None,
+                quality_mode=None,
                 final_model=model,
                 final_provider=provider,
                 success=_usable,

@@ -115,7 +115,10 @@ def test_kpi_byte_identical_with_and_without_local_shadow_rows(monkeypatch, tmp_
     # Rendered scorecard: identical except for the one local (shadow) line.
     extra = [ln for ln in text_with.splitlines() if ln.startswith("local (shadow)")]
     assert len(extra) == 1 and "n=3" in extra[0] and "query 2" in extra[0] and "code 1" in extra[0]
-    assert "\n".join(ln for ln in text_with.splitlines() if not ln.startswith("local (shadow)")) == text_without
+    # P0.14-a: the proxy ledger liveness line reads usage.db (unreadable before it exists), so it differs by design.
+    live = ("proxy_rows_24h:", "WARN proxy ledger")
+    assert "\n".join(ln for ln in text_with.splitlines() if not ln.startswith(("local (shadow)",) + live)) == \
+        "\n".join(ln for ln in text_without.splitlines() if not ln.startswith(live))
     assert "local (shadow)" not in text_without
 
 

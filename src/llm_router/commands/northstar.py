@@ -1,7 +1,12 @@
-"""`llm-router northstar` — the North Star metric (NS1): routed-and-used share.
+"""`llm-router northstar` — the North Star metric: verified offload (strict rule).
 
 See ``llm_router.northstar`` for the counting rules and outcome signals; this
 is only the CLI presentation.
+
+P0.8-b (plan §1.2): the NS shown here is the strict rule
+(``northstar.is_strict_used``), the same numerator as ``llm-router kpi`` and the
+Stop line. The heuristic routed-and-used share (``outcome == used``) is printed
+only as a labelled diagnostic.
 """
 
 from __future__ import annotations
@@ -74,25 +79,31 @@ def cmd_northstar(args: list[str]) -> int:
         print(json.dumps(data, indent=2, sort_keys=False))
         return 0
 
-    print(f"North Star — routed-and-used share (window: "
+    print(f"North Star — verified offload, strict rule (window: "
           f"{'single session' if parsed.session else f'{parsed.days}d'})\n")
 
     for row in data["sessions"]:
         n = row["units"]
         if n < ns.MIN_UNITS:
             share_s = f"{MIN_SAMPLE_NOTE} (n={n})"
+            diag_s = ""
         else:
-            share_s = f"{_fmt_pct(row['share'])} used  (n={n})"
+            share_s = f"verified offload {_fmt_pct(row['strict_share'])}  (n={n})"
+            diag_s = f"  diagnostic: heuristic used={_fmt_pct(row['share'])}"
         attempted_share = (row["attempted"] / n) if n else None
-        print(f"  {row['session_id'][:16]:16s}  {share_s:28s}  "
-              f"attempted={_fmt_pct(attempted_share):>7s}  unknown={row['unknown']}")
+        print(f"  {row['session_id'][:16]:16s}  {share_s:34s}  "
+              f"attempted={_fmt_pct(attempted_share):>7s}  unknown={row['unknown']}{diag_s}")
 
     agg = data["aggregate"]
     print()
     if agg["too_few"] or agg["n_sessions"] == 0:
         print(f"aggregate: {MIN_SAMPLE_NOTE} (n_sessions={agg['n_sessions']})")
     else:
-        print(f"aggregate over {agg['n_sessions']} session(s): "
+        n_counted = sum(1 for r in data["sessions"] if r["share"] is not None)
+        print(f"verified offload over {n_counted} session(s) with n>={ns.MIN_UNITS}: "
+              f"median={_fmt_pct(agg['strict_median'])}  "
+              f"p25={_fmt_pct(agg['strict_p25'])}  max={_fmt_pct(agg['strict_max'])}")
+        print(f"  diagnostic (heuristic routed-and-used, not the NS): "
               f"median={_fmt_pct(agg['median'])}  p25={_fmt_pct(agg['p25'])}  "
               f"max={_fmt_pct(agg['max'])}")
 

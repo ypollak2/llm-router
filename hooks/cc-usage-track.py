@@ -1,4 +1,4 @@
-# llm_router-hook-version: 1
+# llm_router-hook-version: 2
 """PostToolUse[Agent] hook — track Claude Code subscription model calls.
 
 Fires after every Agent subagent completes. Writes an estimated usage record
@@ -199,6 +199,29 @@ def _ensure_table(db: sqlite3.Connection) -> None:
             is_simulated INTEGER DEFAULT 0
         )"""
     )
+    # P0.8: the session column cost.py adds by migration. This hook can be the first
+    # writer on a database cost.py has not opened since the column was introduced.
+    try:
+        db.execute("ALTER TABLE usage ADD COLUMN session_id TEXT")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower():
+            raise
+
+
+def _ledger_session_id(value: object) -> str | None:
+    """The payload session id if it has the shape of an id, else None.
+
+    Inlined, like ``_is_synthetic_run``: the hook must run when llm_router is not
+    importable. Same rule as ``call_identity.ledger_session_id``; a test pins them.
+    """
+    import re as _re
+
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not _re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", value):
+        return None
+    return None if value.lower() in {"sdk", "unknown", "none", "null", "default"} else value
 
 
 def _log_to_db(
@@ -208,6 +231,7 @@ def _log_to_db(
     output_tokens: int,
     latency_ms: float,
     success: bool,
+    session_id: str | None = None,
 ) -> None:
     db_path = _db_path()
     if not db_path.parent.exists():
@@ -234,8 +258,9 @@ def _log_to_db(
                 """INSERT INTO usage
                    (model, provider, task_type, profile,
                     input_tokens, output_tokens, cost_usd, latency_ms, success,
-                    baseline_model, potential_cost_usd, saved_usd, is_simulated)
-                   VALUES (?, 'cc', 'code', 'balanced', ?, ?, 0.0, ?, ?, ?, ?, ?, ?)""",
+                    baseline_model, potential_cost_usd, saved_usd, is_simulated,
+                    session_id)
+                   VALUES (?, 'cc', 'code', 'balanced', ?, ?, 0.0, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     model,
                     input_tokens,
@@ -246,6 +271,7 @@ def _log_to_db(
                     potential,
                     saved,
                     1 if _is_synthetic_run() else 0,
+                    session_id,
                 ),
             )
             db.commit()
@@ -288,7 +314,8 @@ def main() -> None:
     output_tokens = max(1, len(result_text) // 4)
     latency_ms    = data.get("duration_ms", 0.0)
 
-    _log_to_db(model, baseline, input_tokens, output_tokens, float(latency_ms), success=True)
+    _log_to_db(model, baseline, input_tokens, output_tokens, float(latency_ms), success=True,
+               session_id=_ledger_session_id(data.get("session_id")))
     sys.exit(0)
 
 
