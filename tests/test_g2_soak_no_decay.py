@@ -88,7 +88,10 @@ def _inherited_code(out: dict | None) -> bool:
     return "code-context-inherit" in ctx
 
 
+# SESSIONS x TURNS hook subprocesses run in one test; the 30s global per-test
+# timeout (pyproject) killed it mid-soak, so this slow test never could pass.
 @pytest.mark.slow
+@pytest.mark.timeout(600)
 def test_soak_self_contained_prompts_never_latch():
     # per-turn-position: count self-contained turns and how many inherited code
     total_by_pos: dict[int, int] = defaultdict(int)

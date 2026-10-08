@@ -21,7 +21,6 @@ from llm_router.types import ModelCapability, ProviderTier, RoutingProfile, Task
 
 # ── Phase 1: Ollama Discovery Injection ───────────────────────────────────────
 
-@pytest.mark.requires_ollama
 class TestOllamaDiscoveryInjection:
     """Test Ollama live-discovery integration with env var fallback."""
 
@@ -89,13 +88,16 @@ class TestOllamaDiscoveryInjection:
         from llm_router.config import get_config
 
         cfg = get_config()
-        
-        # Mock the discovery cache to return live models
+
+        # all_ollama_models() skips the cache under pytest and requires a live
+        # probe. Stub both so the test needs no Ollama and no particular model.
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
         with patch("llm_router.discover.get_cached_ollama_models",
-                   return_value=["ollama/qwen3.5:latest", "ollama/llama2:latest"]):
+                   return_value=["ollama/model-a:latest", "ollama/llama2:latest"]), \
+             patch("llm_router.config.probe_ollama", return_value=True):
             models = cfg.all_ollama_models()
 
-        assert "ollama/qwen3.5:latest" in models
+        assert "ollama/model-a:latest" in models
         assert "ollama/llama2:latest" in models
 
     def test_config_all_ollama_models_falls_back_to_env_var(self, monkeypatch):
@@ -106,7 +108,8 @@ class TestOllamaDiscoveryInjection:
         monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "custom:latest,other:v1")
         cfg = get_config()
 
-        with patch("llm_router.discover.get_cached_ollama_models", return_value=[]):
+        with patch("llm_router.discover.get_cached_ollama_models", return_value=[]), \
+             patch("llm_router.config.probe_ollama", return_value=True):
             models = cfg.all_ollama_models()
 
         assert "ollama/custom:latest" in models

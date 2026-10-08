@@ -287,12 +287,13 @@ class TestRouterEdgeCases:
             mock_config.return_value.llm_router_monthly_budget = 0
             mock_config.return_value.available_providers = set()
             mock_config.return_value.compaction_mode = "off"
+            mock_config.return_value.llm_router_agentic_model = ""
             mock_config.return_value.compaction_threshold = 4000
             mock_config.return_value.ollama_models_for_profile.return_value = []
             mock_config.return_value.all_ollama_models.return_value = []
 
             with patch("llm_router.router.get_model_chain", return_value=["openai/gpt-4o"]):
-                with pytest.raises(ValueError, match="No available models"):
+                with pytest.raises(ValueError, match="No providers available"):
                     await route_and_call(TaskType.QUERY, "test")
 
     async def test_all_providers_unhealthy_skips_to_error(self):
@@ -312,6 +313,7 @@ class TestRouterEdgeCases:
             mock_config.return_value.llm_router_monthly_budget = 0
             mock_config.return_value.available_providers = {"openai"}
             mock_config.return_value.compaction_mode = "off"
+            mock_config.return_value.llm_router_agentic_model = ""
             mock_config.return_value.compaction_threshold = 4000
             mock_config.return_value.ollama_models_for_profile.return_value = []
             mock_config.return_value.all_ollama_models.return_value = []
