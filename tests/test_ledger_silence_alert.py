@@ -19,6 +19,12 @@ Pinned (6 fixtures + 1 mutant, R8 MUST P0.14-d):
 * idle (no hook turns), rows present, Codex-only turns, project-level override,
   sentinel ``routing_opt_out``  -> no SILENT on any surface
 * mutant: ``LIVENESS_WINDOW_MIN`` = 24 h  -> the outage fixture no longer fires
+
+Also pinned: Codex running this repo's own plugin (``auto-route.py`` under
+``~/.codex/plugins`` or ``CODEX_PLUGIN_ROOT``) does not fire; a session launched with its
+own ``ANTHROPIC_BASE_URL`` does not fire; the tail reader's chunk growth and rotated-file
+read; doctor's override findings survive a failing alert; the override rule agrees with
+session-start's ``_effective_base_url``.
 """
 
 from __future__ import annotations
@@ -42,6 +48,7 @@ from llm_router.commands import doctor, kpi
 from llm_router.proxy import ledger as pl
 
 HOOK_PATH = Path(__file__).parent.parent / "src" / "llm_router" / "hooks" / "session-start.py"
+HOST_ENV = ("CLAUDE_PLUGIN_ROOT", "CODEX_PLUGIN_ROOT", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")
 
 
 def _utc(s: str) -> float:
@@ -77,6 +84,10 @@ def _isolated(monkeypatch, tmp_path):
     monkeypatch.delenv("LLM_ROUTER_HOOK_LATENCY", raising=False)
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    # The host a hook row records comes from these (hook_latency.detect_host); the suite
+    # itself may run inside Claude Code or Codex, so none may leak in.
+    for var in HOST_ENV:
+        monkeypatch.delenv(var, raising=False)
     from llm_router import failopen
 
     failopen.reset_unpersisted()
@@ -326,20 +337,186 @@ def test_mutant_24h_window_makes_the_outage_fixture_fail(tmp_path, monkeypatch):
 # -- host on the hook row ------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("script, host", [
-    ("/Users/x/.claude/hooks/llm_router-auto-route.py", "claude_code"),
-    ("/plugin/hooks/auto-route.py", "claude_code"),
-    ("/Users/x/.llm-router/hooks/codex-auto-route.py", "codex"),
-    ("/Users/x/.llm-router/hooks/gemini-cli-auto-route.py", "gemini"),
-])
-def test_hook_row_records_the_host_from_the_installed_script_name(monkeypatch, script, host):
+def _run_hook(monkeypatch, script: str, *, ts: float | None = None, session_id: str | None = None) -> dict:
+    """The real write path a hook process takes: begin(), set_session(), _finish()."""
     monkeypatch.setattr(hl, "_pending", None)
+    monkeypatch.setattr(hl, "_session_id", None)
     monkeypatch.setattr(hl, "_registered", True)          # no atexit handler in the test process
     monkeypatch.setattr(hl.sys, "argv", [script])
+    if ts is not None:
+        monkeypatch.setattr(hl, "_wall", lambda: ts)
     hl.begin("auto-route", "UserPromptSubmit")
+    hl.set_session(session_id)
     hl._finish()
-    rows = hl.read_rows()
-    assert rows and rows[-1]["host"] == host
+    return hl.read_rows()[-1]
+
+
+CODEX_CACHE_SCRIPT = "/Users/x/.codex/plugins/cache/llm-router/hooks/auto-route.py"
+
+
+@pytest.mark.parametrize("script, env, host", [
+    ("/Users/x/.claude/hooks/llm_router-auto-route.py", {}, "claude_code"),
+    ("/plugin/hooks/auto-route.py", {"CLAUDE_PLUGIN_ROOT": "/plugin"}, "claude_code"),
+    ("/opt/hooks/auto-route.py", {"CLAUDE_CODE_ENTRYPOINT": "cli"}, "claude_code"),
+    ("/Users/x/.llm-router/hooks/codex-auto-route.py", {}, "codex"),
+    ("/Users/x/.llm-router/hooks/gemini-cli-auto-route.py", {}, "gemini"),
+    # .codex-plugin/hooks.json runs ${CODEX_PLUGIN_ROOT}/hooks/auto-route.py: same file name.
+    (CODEX_CACHE_SCRIPT, {}, "codex"),
+    (CODEX_CACHE_SCRIPT, {"CLAUDECODE": "1", "CLAUDE_CODE_ENTRYPOINT": "cli"}, "codex"),
+    ("/dev/llm-router/hooks/auto-route.py", {"CODEX_PLUGIN_ROOT": "/dev/llm-router", "CLAUDECODE": "1"}, "codex"),
+    # Nothing says which CLI: no host on the row (the reader falls back to the session tag).
+    ("/plugin/hooks/auto-route.py", {}, None),
+])
+def test_hook_row_records_the_host_only_on_positive_evidence(monkeypatch, script, env, host):
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    assert _run_hook(monkeypatch, script).get("host") == host
+
+
+@pytest.mark.parametrize("variant", ["codex_plugin_cache", "codex_plugin_root_from_a_claude_shell"])
+def test_codex_running_the_repos_own_plugin_does_not_fire(tmp_path, monkeypatch, variant):
+    """Review of 72ccc62f: Codex runs this repo's plugin as ``auto-route.py`` (no ``codex-``
+    prefix). Its turns were labelled ``claude_code`` and fired SILENT on a Codex-only half hour.
+    The tag is the one auto-route writes for a Codex session: cwd only, no entrypoint, organic."""
+    replay = Replay(tmp_path)
+    replay.sentinel()
+    replay.tags(entrypoint=None)
+    replay.proxy()
+    if variant == "codex_plugin_cache":
+        script = CODEX_CACHE_SCRIPT
+    else:
+        root = tmp_path / "llm-router-checkout"
+        (root / "hooks").mkdir(parents=True)
+        script = str(root / "hooks" / "auto-route.py")
+        monkeypatch.setenv("CODEX_PLUGIN_ROOT", str(root))
+        monkeypatch.setenv("CLAUDECODE", "1")           # Codex started from a Claude Code shell
+    turns = [(hhmmss, sid) for hhmmss, sid in TURNS if sid]
+    for hhmmss, sid in turns:
+        row = _run_hook(monkeypatch, script, ts=replay.t(_utc(f"2026-10-08T{hhmmss}")), session_id=sid)
+        assert row.get("host") == "codex"
+    s = plv.ledger_silence(now=replay.t(EVAL))
+    assert s["state"] == "quiet" and s["organic_cc_turns"] == 0
+    assert s["excluded"]["other_host"] >= 3
+    _assert_quiet_everywhere(replay, "quiet", monkeypatch)
+
+
+# -- a session launched with its own ANTHROPIC_BASE_URL -------------------------------------
+
+
+@pytest.mark.parametrize("value, cls", [
+    ("https://api.anthropic.com", "other"),
+    ("http://localhost:8787", "loopback:8787"),
+    ("http://127.0.0.1:9999/v1", "loopback:9999"),
+    ("sk-ant-not-a-url", "other"),
+])
+def test_hook_row_records_the_inherited_base_url_class_never_the_value(monkeypatch, value, cls):
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", value)
+    row = _run_hook(monkeypatch, "/Users/x/.claude/hooks/llm_router-auto-route.py")
+    assert row["base_url"] == cls
+    assert value not in hl.store_path().read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("base_url, state", [("other", "quiet"), ("loopback:9999", "quiet"),
+                                             ("loopback:8787", "SILENT"), (None, "SILENT")])
+def test_a_session_launched_with_its_own_base_url_does_not_fire(tmp_path, base_url, state):
+    """Same class as the project override: a session started with ``ANTHROPIC_BASE_URL`` in its
+    shell bypasses the proxy on purpose. A missing value (the 2026-10-08 fault) still fires."""
+    replay = Replay(tmp_path)
+    replay.sentinel()
+    replay.tags()
+    replay.proxy()
+    for hhmmss, sid in TURNS:
+        hl.record("auto-route", "UserPromptSubmit", 120.0, now=replay.t(_utc(f"2026-10-08T{hhmmss}")),
+                  session_id=sid or None, base_url=base_url)
+    s = plv.ledger_silence(now=replay.t(EVAL))
+    assert s["state"] == state
+    if state == "quiet":
+        assert s["excluded"]["env_override"] == 3
+
+
+# -- reading the hook ledger's tail -----------------------------------------------------------
+
+
+def _append_hook_rows(path: Path, stamps: list[float]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        for ts in stamps:
+            fh.write(json.dumps({"hook": "enforce-route", "event": "PreToolUse", "elapsed_ms": 40.0,
+                                 "timed_out": False, "ts": round(ts, 3), "session_id": ORGANIC_B,
+                                 "host": "claude_code", "pad": "x" * 60}) + "\n")
+
+
+def test_turns_behind_600kb_of_tool_rows_are_still_read(tmp_path):
+    """``_tail_dicts`` grows its chunk until it passes the window start: one 64 KB read
+    would see only the tool-hook rows after the last turn and report ``quiet``."""
+    replay = Replay(tmp_path).outage()
+    a, b = replay.t(_utc("2026-10-08T17:20:00")), replay.t(EVAL - 1)
+    n = 6000
+    _append_hook_rows(hl.store_path(), [a + (b - a) * i / n for i in range(n)])
+    assert hl.store_path().stat().st_size > 600_000
+    s = plv.ledger_silence(now=replay.t(EVAL))
+    assert s["state"] == "SILENT" and s["organic_cc_turns"] == 3
+
+
+def test_turns_in_the_just_rotated_file_are_still_read(tmp_path):
+    """The hook ledger rotated inside the window: the turns are in ``.1``, the live file
+    holds only later tool rows. ``_recent_hook_rows`` must read both."""
+    replay = Replay(tmp_path).outage()
+    live = hl.store_path()
+    live.rename(live.with_name(live.name + ".1"))
+    _append_hook_rows(live, [replay.t(_utc("2026-10-08T17:25:00"))])
+    s = plv.ledger_silence(now=replay.t(EVAL))
+    assert s["state"] == "SILENT" and s["organic_cc_turns"] == 3
+
+
+# -- doctor keeps its override findings when the alert cannot be computed ----------------------
+
+
+def test_doctor_keeps_override_findings_when_ledger_silence_raises(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text(
+        json.dumps({"env": {"ANTHROPIC_BASE_URL": "http://localhost:8787"}}), encoding="utf-8")
+    proj = tmp_path / "proj" / ".claude"
+    proj.mkdir(parents=True)
+    (proj / "settings.local.json").write_text(
+        json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://api.anthropic.com"}}), encoding="utf-8")
+
+    def boom(**_kw):
+        raise RuntimeError("ledger unreadable")
+
+    monkeypatch.setattr(plv, "ledger_silence", boom)
+    found = plv.doctor_findings(cwd=tmp_path / "proj", home=home)
+    assert any("overrides ANTHROPIC_BASE_URL" in f and "api.anthropic.com" in f for f in found)
+
+
+# -- one override rule: session-start (A.1, #342) and this alert agree --------------------------
+
+
+@pytest.mark.parametrize("local, project", [
+    ("https://api.anthropic.com", None),
+    (None, "https://api.anthropic.com"),
+    ("http://localhost:8787", "https://api.anthropic.com"),     # local wins, and it routes
+    ("https://api.anthropic.com", "http://localhost:8787"),     # local wins, and it bypasses
+    ("", "https://api.anthropic.com"),                          # empty does not win
+    (None, "http://127.0.0.1:8797"),
+    (None, None),
+])
+def test_project_override_matches_session_start_effective_base_url(tmp_path, monkeypatch, local, project):
+    """R8: the override rule is shared with A.1. session-start's ``_effective_base_url`` is
+    stdlib-only (it runs without ``llm_router``), so the two are pinned to agree instead."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))       # no user-level key
+    cwd = tmp_path / "proj"
+    (cwd / ".claude").mkdir(parents=True)
+    for name, value in (("settings.local.json", local), ("settings.json", project)):
+        if value is not None:
+            (cwd / ".claude" / name).write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": value}}),
+                                                encoding="utf-8")
+    ports = [8787, 8797]
+    mod = _load_session_start()
+    value, where = mod._effective_base_url(str(cwd))
+    start_says = where if (value and not mod._routes_to_local_port(value, ports)) else None
+    assert plv.project_override(str(cwd), ports) == start_says
 
 
 def test_statusline_does_not_show_the_alert():

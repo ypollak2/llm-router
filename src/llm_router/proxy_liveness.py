@@ -20,8 +20,8 @@ Two readers, one module, so ``kpi`` and ``doctor`` cannot disagree:
   SILENT when, in the last ``LIVENESS_WINDOW_MIN`` minutes, the proxy ledger has 0 rows,
   the hooks recorded at least one ORGANIC CLAUDE CODE turn, and the proxy-default
   sentinel is enabled and not opted out. A Codex or Gemini turn never goes through this
-  proxy and does not count; nor does a turn from a session whose project settings
-  legitimately point ``ANTHROPIC_BASE_URL`` elsewhere. Shown by ``kpi``, ``doctor`` and
+  proxy and does not count; nor does a turn from a session whose project settings, or
+  whose own launch environment, legitimately point ``ANTHROPIC_BASE_URL`` elsewhere. Shown by ``kpi``, ``doctor`` and
   SessionStart (never the statusline).
 * :func:`ledger_gaps` -- every interval longer than that window with no proxy row and at
   least one such turn, for a gate file (``kpi --json --since --until``).
@@ -264,6 +264,15 @@ def project_override(project: str | None, ports: list[int]) -> str | None:
     return None
 
 
+def _env_overrides(base_url: object, ports: list[int]) -> bool:
+    """True when a hook row's ``base_url`` (``loopback:<port>`` / ``loopback`` / ``other``)
+    says the session ran with a base URL that is not the proxy's."""
+    if not isinstance(base_url, str) or not base_url:
+        return False
+    head, _, port = base_url.partition(":")
+    return not (head == "loopback" and port.isdigit() and int(port) in ports)
+
+
 def _session_record(session_id: str) -> dict:
     """The SessionStart tag file (``session_kind_<sid>.json``): kind, cwd, entrypoint."""
     from llm_router import session_kind as sk
@@ -279,12 +288,18 @@ def _session_record(session_id: str) -> dict:
 def _classify_turns(rows: list[dict], ports: list[int]) -> tuple[list[dict], dict[str, int]]:
     """(organic Claude Code turns as ``{ts, session_id}``, excluded counts by reason).
 
-    Host: the row's ``host``. A row written before that field existed counts as Claude
-    Code only when its session's tag has an ``entrypoint`` (Claude Code exports
-    ``CLAUDE_CODE_ENTRYPOINT``; a Codex hook process does not)."""
+    Host: the row's ``host`` (written only on positive evidence, ``hook_latency.detect_host``).
+    A row without one counts as Claude Code only when its session's tag has an
+    ``entrypoint`` (Claude Code exports ``CLAUDE_CODE_ENTRYPOINT``; a Codex hook process
+    does not). Override, in Claude Code's precedence (the same order as session-start's
+    ``_effective_base_url``): the base URL the hook process inherited (``base_url`` on the
+    row: the launching shell or the merged settings ``env``), else the session's project
+    settings (:func:`project_override`). Either one pointing away from the proxy's ports is
+    a deliberate bypass. A missing user-level key is NOT one: that was the 2026-10-08 fault."""
     cache: dict[str, dict] = {}
     kept: list[dict] = []
-    excluded = {"other_host": 0, "not_organic": 0, "project_override": 0, "no_session": 0}
+    excluded = {"other_host": 0, "not_organic": 0, "env_override": 0, "project_override": 0,
+                "no_session": 0}
     for r in rows:
         if r.get("hook") != _TURN_HOOK or r.get("event") != _TURN_EVENT:
             continue
@@ -301,6 +316,8 @@ def _classify_turns(rows: list[dict], ports: list[int]) -> tuple[list[dict], dic
             excluded["other_host"] += 1
         elif rec["kind"] != "organic":
             excluded["not_organic"] += 1
+        elif _env_overrides(r.get("base_url"), ports):
+            excluded["env_override"] += 1
         elif rec["override"]:
             excluded["project_override"] += 1
         else:
@@ -520,7 +537,10 @@ def doctor_findings(cwd: Path | None = None, home: Path | None = None, *,
 
     The P0.14-d SILENT alert comes first and does not need the user settings to name the
     proxy: in the 2026-10-08 outage the missing user key WAS the fault."""
-    silence = ledger_silence(now=now)
+    try:  # its own guard: a failure here must not drop the override findings below
+        silence = ledger_silence(now=now)
+    except Exception:  # noqa: BLE001 -- an unreadable ledger is not a silent one
+        silence = {"silent": False, "message": None}
     out = [silence["message"]] if silence["silent"] else []
     default = user_proxy_default(home)
     if default is None:

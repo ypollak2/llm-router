@@ -501,12 +501,17 @@ class _Clock:
 def test_a_run_that_names_no_phase_writes_the_row_it_always_did(monkeypatch):
     monkeypatch.setattr(hl, "_monotonic", _Clock(100.25))
     monkeypatch.setattr(hl, "_wall", lambda: NOW)
+    # P0.14-d: ``host`` / ``base_url`` are written only when the process names its CLI or
+    # inherited a base URL (tests/test_ledger_silence_alert.py); here it does neither.
+    monkeypatch.setattr(hl.sys, "argv", ["/opt/hooks/enforce-route.py"])
+    for var in ("CLAUDE_PLUGIN_ROOT", "CODEX_PLUGIN_ROOT", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
+                "ANTHROPIC_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
     hl.begin("enforce-route", "PreToolUse", t0=100.0)
     hl._finish()
     (row,) = _lines()
     assert "phases_ms" not in row
-    # P0.14-d added ``host`` (the CLI that ran the hook) to every row a hook process writes.
-    assert set(row) == {"hook", "event", "elapsed_ms", "timed_out", "ts", "host"}
+    assert set(row) == {"hook", "event", "elapsed_ms", "timed_out", "ts"}
 
 
 def test_phases_are_summed_per_name_and_written_in_the_row(monkeypatch):

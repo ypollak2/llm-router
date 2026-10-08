@@ -40,9 +40,15 @@ ROUTER-ADDED TIME (PLAN v16 P0.9). A row whose run named a model phase
 ``router_added_ms`` = ``elapsed_ms`` minus the model time, with a ``cold_wait``
 reported inside another model phase subtracted once. ``set_session(id)`` adds
 ``session_id`` so a reader can count sessions. ``host`` names the CLI that ran the
-hook (``claude_code``, ``codex``, ``gemini``), read from the installed script's name
-(P0.14-d: a Codex turn never goes through the Claude Code proxy, so the ledger-silence
-alert must not count it). A row written before the field existed has no ``host``. A process the host KILLS at its timeout never reaches
+hook (``claude_code``, ``codex``, ``gemini``) and is written only on positive evidence
+(:func:`detect_host`: the installed script's name or directory, the plugin root the host
+exported, Claude Code's own environment); a row whose host could not be told has no
+``host`` (P0.14-d: a Codex turn never goes through the Claude Code proxy, so the
+ledger-silence alert must not count it, and Codex runs this repo's own plugin as
+``auto-route.py``). ``base_url`` is set when the hook process inherited a non-empty
+``ANTHROPIC_BASE_URL``: ``loopback:<port>`` or ``other``, never the value itself (a
+session launched with its own base URL bypasses the proxy on purpose). A row written
+before either field existed has neither. A process the host KILLS at its timeout never reaches
 ``atexit``, so a kill leaves no row here; kills are counted separately
 (``CHZ-HOOK-KILLED`` in the fail-open store, timestamped since the same PR) and
 ``llm-router kpi`` prints them beside this log.
@@ -220,17 +226,72 @@ def _disabled() -> bool:
 # -- write side ---------------------------------------------------------------
 
 
-def host_of_script(script: str) -> str:
-    """The CLI a hook script was installed for, from its file name: ``install`` copies
-    ``auto-route.py`` to ``codex-auto-route.py`` for Codex and ``gemini-cli-auto-route.py``
-    for Gemini CLI; every other name (``llm_router-auto-route.py``, a plugin's
-    ``auto-route.py``) is Claude Code's."""
-    name = os.path.basename(str(script or "")).lower()
+def _under(path: str, root: str) -> bool:
+    root = root.rstrip("/\\")
+    if not root:
+        return False
+    if path == root or path.startswith(root + os.sep) or path.startswith(root + "/"):
+        return True
+    try:
+        real, real_root = os.path.realpath(path), os.path.realpath(root)
+    except (OSError, ValueError):
+        return False
+    return real == real_root or real.startswith(real_root.rstrip(os.sep) + os.sep)
+
+
+def detect_host(script: str) -> str | None:
+    """The CLI that ran this hook process, or None when nothing says.
+
+    In order: the installed name (``install`` copies ``auto-route.py`` to
+    ``codex-auto-route.py`` / ``gemini-cli-auto-route.py``); a ``.codex`` / ``.gemini``
+    directory in the script's path (Codex caches plugins under ``~/.codex/plugins``); the
+    plugin root the host exported (``CODEX_PLUGIN_ROOT`` / ``CLAUDE_PLUGIN_ROOT``) when it
+    contains the script; Claude Code's own environment (``CLAUDE_CODE_ENTRYPOINT``,
+    ``CLAUDECODE``); a ``.claude`` directory in the path. A bare ``auto-route.py`` is NOT
+    Claude Code's by name: ``.codex-plugin/hooks.json`` runs that same file under Codex.
+    The Codex signals come first: Codex started from a Claude Code shell inherits
+    ``CLAUDECODE``."""
+    path = str(script or "")
+    name = os.path.basename(path).lower()
     if name.startswith("codex-"):
         return "codex"
     if name.startswith("gemini"):
         return "gemini"
-    return "claude_code"
+    parts = {p.lower() for p in path.replace("\\", "/").split("/")}
+    if ".codex" in parts:
+        return "codex"
+    if ".gemini" in parts:
+        return "gemini"
+    codex_root = (os.environ.get("CODEX_PLUGIN_ROOT") or "").strip()
+    if codex_root and _under(path, codex_root):
+        return "codex"
+    claude_root = (os.environ.get("CLAUDE_PLUGIN_ROOT") or "").strip()
+    if claude_root and _under(path, claude_root):
+        return "claude_code"
+    if (os.environ.get("CLAUDE_CODE_ENTRYPOINT") or "").strip() or (os.environ.get("CLAUDECODE") or "").strip():
+        return "claude_code"
+    if ".claude" in parts:
+        return "claude_code"
+    return None
+
+
+def base_url_class() -> str | None:
+    """``ANTHROPIC_BASE_URL`` as this hook process inherited it, reduced to
+    ``loopback:<port>`` / ``loopback`` / ``other``; None when unset or blank. Never the
+    value: it can carry a key pasted into the wrong field."""
+    value = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+    if not value:
+        return None
+    try:
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(value if "//" in value else "//" + value)
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        return "other"
+    if host in ("127.0.0.1", "localhost", "::1"):
+        return f"loopback:{port}" if port else "loopback"
+    return "other"
 
 
 def begin(hook: str, event: str, t0: float | None = None) -> None:
@@ -245,7 +306,8 @@ def begin(hook: str, event: str, t0: float | None = None) -> None:
         if _disabled() or _pending is not None:
             return
         _pending = {"hook": hook, "event": event, "t0": _monotonic() if t0 is None else t0,
-                    "host": host_of_script(sys.argv[0] if sys.argv else "")}
+                    "host": detect_host(sys.argv[0] if sys.argv else ""),
+                    "base_url": base_url_class()}
         if not _registered:
             # atexit runs handlers last-in-first-out, and this is registered
             # before any the hook adds later (hook_liveness.clear_marker), so it
@@ -378,13 +440,14 @@ def _finish() -> None:
     if phases and any(k in phases for k in MODEL_PHASES):
         added = max(0.0, elapsed - model_ms(phases, _nested_model_ms))
     record(pending["hook"], pending["event"], elapsed, phases_ms=phases,
-           router_added_ms=added, session_id=_session_id, host=pending.get("host"))
+           router_added_ms=added, session_id=_session_id, host=pending.get("host"),
+           base_url=pending.get("base_url"))
 
 
 def record(
     hook: str, event: str, elapsed_ms: float, *, now: float | None = None,
     phases_ms: dict[str, float] | None = None, router_added_ms: float | None = None,
-    session_id: str | None = None, host: str | None = None,
+    session_id: str | None = None, host: str | None = None, base_url: str | None = None,
 ) -> bool:
     """Append one row. Returns True when it was written. Never raises."""
     try:
@@ -406,6 +469,8 @@ def record(
             row["session_id"] = session_id
         if isinstance(host, str) and host:
             row["host"] = host
+        if isinstance(base_url, str) and base_url:
+            row["base_url"] = base_url
         capped_log.append(
             store_path(), (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8"), max_bytes()
         )
