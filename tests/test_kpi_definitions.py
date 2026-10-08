@@ -328,7 +328,7 @@ async def test_rows_written_by_the_real_proxy_are_complete_under_the_new_definit
     async def choose(text, pinned, *, anthropic=False):
         return {"task_type": "code", "complexity": "moderate", "chain_head": [], "model": None}
 
-    monkeypatch.setattr(pb, "choose_model", choose)
+    monkeypatch.setattr(pb, "tier_classify", choose)
     session_kind.tag_session(SID, "/Users/x/Projects/app", env={})
     app = _app(tmp_path, Upstream())
     await _post(app, _first())                                   # first_call

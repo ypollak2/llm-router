@@ -113,9 +113,10 @@ def format_decision_line(decision: dict) -> str:
 
     # Decision header with timestamp
     timestamp = format_timestamp(decision.get("timestamp", ""))
-    task = decision.get("task_type", "unknown")
-    complexity = decision.get("complexity", "unknown")
-    model = decision.get("final_model", "unknown")
+    # A NULL column comes back as None; P0.8 stores unmeasured values as NULL.
+    task = decision.get("task_type") or "unknown"
+    complexity = decision.get("complexity") or "unknown"
+    model = decision.get("final_model") or "unknown"
 
     lines.append(
         f"{timestamp} {Symbol.ARROW.value} "
@@ -124,12 +125,16 @@ def format_decision_line(decision: dict) -> str:
     )
 
     # Confidence
-    confidence = decision.get("classifier_confidence", 0) * 100
-    level = ConfidenceLevel.MEDIUM
-    stars = level.stars(confidence)
-    lines.append(
-        f"    {Symbol.STAR_FULL.value} Confidence: {stars} {int(confidence)}%"
-    )
+    raw_confidence = decision.get("classifier_confidence")
+    if raw_confidence is None:
+        lines.append(f"    {Symbol.STAR_FULL.value} Confidence: unknown")
+    else:
+        confidence = raw_confidence * 100
+        level = ConfidenceLevel.MEDIUM
+        stars = level.stars(confidence)
+        lines.append(
+            f"    {Symbol.STAR_FULL.value} Confidence: {stars} {int(confidence)}%"
+        )
 
     # Reasoning
     reason = decision.get("reason_code", "N/A")

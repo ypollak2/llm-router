@@ -7,8 +7,21 @@ optional ``detail`` string (a fallback reason) is passed through
 ``secret_scrubber.scrub_text`` and cut to 200 chars.
 
 Row fields:
-  ts, session_id, msg_id, stream, requested_model, step_class
+  ts, session_id, msg_id, stream, requested_model
+  step_class      the kind of call (``proxy.steps.step_kind``): continuation |
+                  turn_first | subagent_first | side_call. Rows written before
+                  GE1 hold continuation or null (null = any other kind). Whether
+                  a call may be served is decided apart (``steps.step_class``).
   prev_tools      names of the tool calls the newest tool results answer
+  prev_tool_class ``proxy.tool_classes`` class of those calls (technical_op |
+                  edit | exec | agent | web | other), null when not a
+                  continuation. A Bash command is classified in memory and
+                  never stored.
+  step_ineligible a label, not a gate: what in a continuation the serving model
+                  could not honour faithfully: media | server_tool |
+                  forced_tool_choice; null otherwise. media and
+                  forced_tool_choice also stop serving; server_tool does not
+                  (``steps.step_ineligible``)
   decision        served | forwarded | fallback
   reason          why not served: routing_off | not_eligible | policy_kept |
                   budget_exceeded | backend_error | validation |
@@ -72,6 +85,12 @@ Claude-tier rewrite fields (only when the proxy runs with ``--tiers on`` or
    EVERY row, null when not computed, so a missing key never has to be read as 0.)
   tier_retry            {status, detail}: Anthropic refused the rewritten call
                         and it was resent unchanged
+  tier_phases_ms        {name: ms} for the phases that ran (PLAN v16 P0.9-e):
+                        the decision (``classify``, ``quota_read``, ``stickiness``,
+                        ``haiku_checks``; their sum is held to the PRD's 50 ms
+                        heuristic bar) and context building beside it
+                        (``okf_attach`` on the local path, ``fold`` for the Haiku
+                        body rewrite). Names and numbers only; absent = not run
   tier_detail           scrubbed error text when the decision itself failed, or
                         which signal/keep a fixed-reason decision came from
                         (escalation.REASON_*, or first_call /
@@ -552,7 +571,7 @@ def stats(rows: list[dict]) -> dict:
         return [normalize_usage(r.get("usage"))["cache_creation_input_tokens"] for r in rs]
 
     # Known usage only: a null-usage row would enter the medians (and their n) as 0.
-    cont_fwd = [r for r in to_anthropic if r.get("step_class") and not usage_unknown(r)]
+    cont_fwd = [r for r in to_anthropic if r.get("step_class") == "continuation" and not usage_unknown(r)]
     mixed = [r for r in cont_fwd if r.get("mixed_history")]
     clean = [r for r in cont_fwd if not r.get("mixed_history")]
 

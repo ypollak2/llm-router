@@ -18,6 +18,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 6 | Research session b9f04425 counted as organic | fixed in #291 (M0.0b) |
 | 7 | `edit_outcomes.jsonl` rows with no source | open, fix is plan task M0.3(c) |
 | 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | fixed in P0.7 (`fix/learning-bugs`): one flag, default off |
+| P09-2 | Proxy tier decision took 1.2-2.2 s on rules-only turn-first calls | fixed in `perf/proxy-decision` (P0.9 task 6) |
 | 9 | Classifier warm-up loaded `llmr-classifier` at the wrong `num_ctx` | fixed in #298 (M1.4, review 2) |
 | 10 | README-advertised `--host pi` / `--host kimi` failed; detected gemini-cli skipped silently | fixed in this change (v16 P0.4) |
 | 11 | Four shadow tests raced the clock and failed `main` on a loaded runner | fixed in this change (test-only) |
@@ -31,12 +32,21 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 19 | Session context truncation dropped the newest events | fixed in #307 (v16 P0.1) |
 | 20 | `build_context_messages` cut the caller's live context first | fixed in #307 (v16 P0.1) |
 | 21 | `context_prep` truncated the user prompt | fixed in #307 (v16 P0.1) |
+| 22 | DIRECT rows wrote 0.0 / False / "balanced" for values nobody measured | fixed in this change (v16 P0.8) |
+| 23 | `usage` rows carried no session id | fixed in this change (v16 P0.8); live coverage pending deploy |
+| 24 | The Stop line's north star used the heuristic "used", kpi the strict rule | fixed in this change (v16 P0.8) |
+| 25 | Status bar priced its baseline at Opus and labelled it "vs Sonnet" | fixed in this change (v16 P0.8) |
+| 26 | `llm-router replay` raises TypeError on a row with NULL confidence | fixed in this change (v16 P0.8) |
+| 27 | The quality report and the Stop summary raise TypeError on a NULL task type | fixed in this change (v16 P0.8) |
+| 28 | `llm-router northstar` showed the heuristic share as the North Star | fixed in this change (v16 P0.8) |
+| 29 | The claw-code Stop hook and the dashboard models panel raise TypeError on a NULL task type | fixed in this change (v16 P0.8 r1) |
 | P013-1 | `llm_act` wrote files into the MCP process cwd | fixed for the file tools in this change (P0.13); bash confinement is P2.9 |
 | P0.14-a | Proxy ledger wrote 0 rows for 25 h and nothing flagged it | fixed in this change (P0.14) |
 | 18 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
 | P011-1 | Haiku guard re-tripped on audit days older than its window | fixed in `feat/haiku-guard-in-repo` (P0.11, 3f4149b) |
 | GE6-1 | Quota-burn coverage kept owner-overridden sessions in the organic denominator | fixed in `feat/quota-samples` (#320, GE6 repair 1) |
 | GE6-2 | Branch hook version equal to main's after main moved on | fixed in `feat/quota-samples` (#320, GE6 repair round 1) |
+| CODEX-1 | Codex refused to start: `invalid transport in mcp_servers.llm_router` | fixed in this change (#323) |
 | P03-1 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
 
 ## 1. NULL `session_id` on local routing rows
@@ -183,6 +193,26 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Test.** `tests/test_offload_share_alignment.py` (to be added by M0.3): a turn that
   edits 2 files is 1 turn; an `llm_edit` row is no turn; a `zero_claude` row does not match
   or drop an `llm_edit` unit in `northstar._fold_edit_ledger`. Not on `main` yet.
+
+## P09-2. Proxy tier decision took 1.2-2.2 s on rules-only turn-first calls
+
+- **Symptom.** `tier_decision_s` was 1.208, 2.203 and 1.673 s on 3 of 6 live turn-first
+  rows (reasons haiku_rewrite, sticky, thinking_floor), against the PRD's 50 ms heuristic
+  bar [PL] (`$PP/v16/sources/PL_proxy_calls_since_20261007T1140Z.jsonl`, n = 15 rows).
+- **Cause.** Not the quota read (the plan's first hypothesis: `proxy.quota_pressure` parses
+  `usage.json` once per mtime and costs one `stat()` per call). The tier decision's
+  classifier was `backends.choose_model`, which builds a provider chain
+  (`router._build_and_filter_chain`: usage.db queries, dynamic routing, the Ollama model
+  list) on each new (task_type, complexity) key, inside the timed span. The decision reads
+  only the class. Measured on a copy of the live usage.db (2026-10-07, this machine under
+  load): first build 21.6 s, later new keys 67-107 ms, `classify_signals` 0.1-0.2 ms.
+- **Fix.** `backends.tier_classify`: the same `classify_signals(GATEWAY_POLICY)` class, chain
+  head only from the cache, never a build. The decision now writes `tier_phases_ms`
+  (`classify`, `quota_read`, `stickiness`, `haiku_checks`; `okf_attach` and `fold` beside it).
+- **Test.** `tests/test_p09_proxy_decision.py`:
+  `test_a_turn_first_decision_never_waits_on_a_chain_build` (a 1 s fake chain build; FAILS
+  on da31df7), `test_tier_classify_gives_the_same_class_as_choose_model`,
+  `test_a_slow_chain_build_does_not_reach_tier_decision_s`.
 
 ## 8. `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off
 
@@ -514,6 +544,131 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `tests/test_context_prep.py::test_long_user_prompt_never_truncated_for_small_model`
   replaces the test that pinned the bug.
 
+## 22. DIRECT rows wrote 0.0 / False / "balanced" for values nobody measured
+
+- **Symptom.** Every DIRECT row in `routing_decisions` had `classifier_confidence = 0.0`,
+  `classifier_latency_ms = 0.0`, `budget_pct_used = 0.0` and `quality_mode = 'balanced'`:
+  63 of 63 `reason_code = 'direct'` rows in an rsync copy of `~/.llm-router/usage.db` taken
+  2026-10-07 (the plan's 7-day figure was 36/36 [UDB7]). A task type the hook could not map
+  was logged as `query`.
+- **Cause.** `savings_logger.log_direct_to_db` passed literals for fields the DIRECT path
+  never computes, and coerced an unknown task type to `TaskType.QUERY`. `usage.task_type` was
+  declared `NOT NULL`, so it could not hold "unknown" either.
+- **Fix.** Those five fields are passed as None and stored as NULL (`log_routing_decision`
+  now keeps a None `was_downshifted` as NULL). An unknown task type is NULL in both tables,
+  with the received label in the new `task_type_raw` column. `cost._relax_usage_task_type_notnull`
+  rebuilds `usage` once, inside `BEGIN IMMEDIATE`, keeping every row, id, index and the
+  AUTOINCREMENT sequence. On the copy: 1,388 rows kept, sequence 1,428 kept, both indexes
+  recreated. Smoke on the same copy (40 DIRECT rows: 30 through `sdk.route` with a fake model
+  chain, 10 through agent-route `_log_cli_savings`): 0 rows at 0.0, 40 NULL.
+- **Test.** `tests/test_p08_honest_records.py`: `test_direct_row_records_unmeasured_fields_as_null`,
+  `test_direct_unknown_task_type_is_null_with_raw_value`,
+  `test_legacy_usage_table_accepts_null_task_type_after_migration`. Each fails on da31df7.
+
+## 23. `usage` rows carried no session id
+
+- **Symptom.** No `usage` row could be scoped to a session: the table had no `session_id`
+  column (copy of the live `usage.db`, 2026-10-07, 1,388 rows).
+- **Cause.** `cost.log_usage` and the second writer, `hooks/cc-usage-track.py` (275 of 669
+  `usage` rows since 2026-09-30 on the copy, provider `cc`), never recorded one.
+- **Fix.** Additive migration `usage.session_id TEXT`. `log_usage` takes `session_id`; when
+  omitted it stamps `call_identity.call_session_id()` (the MCP call's own session, None
+  outside a tool call). The DIRECT path passes the hook payload's id. `cc-usage-track.py`
+  (hook version 2) adds the column if it is the first writer and stores the PostToolUse
+  payload's `session_id`. All writers store ids only; placeholders such as `sdk` are NULL.
+- **Test.** `test_usage_session_id_migration_is_idempotent`,
+  `test_direct_row_carries_the_payload_session_on_usage`, `test_log_usage_stamps_the_mcp_call_session`,
+  `test_cc_usage_track_writes_the_payload_session`, `test_cc_usage_track_session_rule_matches_call_identity`.
+  The live bar (session id on at least 99% of at least 100 post-deploy rows) is checked after deploy.
+
+## 24. The Stop line's north star used the heuristic "used", kpi the strict rule
+
+- **Symptom.** For one session the session-end/Stop line and `llm-router kpi` could show two
+  different north stars.
+- **Cause.** `northstar.current_session_line` divided heuristic `outcome == used` units by all
+  units; kpi's NS counts `is_strict_used` (PLAN M0.2, bug 3).
+- **Fix.** `report()` adds `strict_used` and `strict_share` per session, counted with
+  `is_strict_used` on attempted units, as kpi does. The line now prints
+  `north star (strict) N% (n=...)`. The heuristic stays a kpi diagnostic.
+- **Test.** `test_stop_line_north_star_uses_the_strict_rule` (50 heuristic-used units, 10 strict:
+  prints 20%, was 100%).
+
+## 25. Status bar priced its baseline at Opus and labelled it "vs Sonnet"
+
+- **Symptom.** The full status line read `(vs Sonnet:$58)` for a baseline priced at Opus rates.
+- **Cause.** WP-03 moved the price to `pricing.price_for("opus")` and left the label.
+- **Fix.** `HOST_BASELINE_TIER = "opus"` prices the baseline and `HOST_BASELINE_LABEL` names it,
+  so the two cannot drift (status-bar hook version 6).
+- **Test.** `test_status_bar_baseline_label_names_the_priced_model`.
+
+## 26. `llm-router replay` raises TypeError on a row with NULL confidence
+
+- **Symptom.** `commands/replay.format_decision_line` computed
+  `decision.get("classifier_confidence", 0) * 100`; on a row whose confidence is NULL it raised
+  `TypeError`, and a NULL task type printed as `None`. The copy of `usage.db` (2026-10-07) already
+  had 421 such successful rows out of 2,225 (router "unhinted" rows); P0.8 adds every DIRECT row
+  to that set.
+- **Cause.** `dict.get(key, default)` returns the stored None, not the default, for a NULL column.
+- **Fix.** A NULL confidence prints `Confidence: unknown`; a NULL task type, complexity or model
+  prints `unknown`. Measured values print as before.
+- **Test.** `test_replay_renders_null_confidence_and_task_type_as_unknown` (fails on da31df7 with
+  the TypeError; mutant that restores `.get("task_type", "unknown")` fails it too).
+
+## 27. The quality report and the Stop summary raise TypeError on a NULL task type
+
+- **Symptom.** The quality report tool (`tools/admin.py`) raised `TypeError: unsupported format string passed to
+  NoneType.__format__` when any `routing_decisions` row in its window had a NULL task type
+  (reproduced by the #310 reviewer on a copy of `usage.db`: 5 such DIRECT rows broke the
+  7-day report; deleting them fixed it). The session-end routing panels
+  (`_format_routing_section`, `_format_cc_model_section`) raised the same error on a NULL
+  `usage.task_type`.
+- **Cause.** P0.8 stores an unknown DIRECT task type as NULL (bug 22). These readers formatted
+  the value with `{task:<16}` / `{tool:<12}`, and `dict.get(key, default)` returns the stored
+  None (same class as bug 26). Before P0.8 no writer stored a NULL task type.
+- **Fix.** `tools/admin.py` renders NULL as `unknown` in the task-type table and the policy
+  event list. `session-end.py` `_aggregate` and the CC model panel use `get(...) or "unknown"`
+  (session-end hook version 19; 21 after main's #307 and #315 took 19 and 20). Other `GROUP BY task_type` readers checked: community.py
+  filters `task_type IS NOT NULL`; dashboard/tui.py, dashboard/server.py (JS `|| '?'`),
+  session-end `_query_savings_by_task_type` and the `commands/northstar` dry run already map
+  None. That sweep missed two readers; see bug 29.
+- **Rule.** A column that P0.8 may leave NULL is rendered with `value or "unknown"`, never
+  `get(key, "unknown")` and never a bare format spec.
+- **Test.** `test_quality_report_renders_null_task_type_as_unknown`,
+  `test_session_end_routing_panels_render_null_task_type` (both fail on 25a2ece).
+
+## 28. `llm-router northstar` showed the heuristic share as the North Star
+
+- **Symptom.** The CLI printed "North Star — routed-and-used share" per session and its
+  aggregate median/p25/max from the heuristic `outcome == used`, after bug 24 moved the Stop
+  line to the strict rule. Plan §1.2: the heuristic NS leaves user surfaces (P0.8-b).
+- **Cause.** Bug 24's fix changed `current_session_line` only.
+- **Fix.** `report()["aggregate"]` adds `strict_median`, `strict_p25`, `strict_max` over the
+  same sessions (n >= MIN_UNITS). The CLI shows "verified offload" from the strict rule and
+  prints the heuristic only on lines labelled "diagnostic". The JSON keys `median`/`p25`/`max`
+  keep their meaning.
+- **Test.** `test_northstar_cli_shows_the_strict_rule_as_the_north_star` (50 heuristic-used
+  units, 10 strict: shows 20%, was 100%), `test_report_schema_is_pinned`.
+
+## 29. The claw-code Stop hook and the dashboard models panel raise TypeError on a NULL task type
+
+- **Symptom.** `hooks/session-end-clawcode.py` (installed as a Stop hook, `install_hooks.py`)
+  exited 1 with `TypeError: unsupported format string passed to NoneType.__format__` when the
+  session had a paid `usage` row with a NULL task type. The #310 reviewer reproduced it on an
+  rsync copy of `~/.llm-router` with 3 seeded paid DIRECT rows of unknown task type (3 of 3
+  NULL): exit 1 and a traceback. `dashboard_enhanced.query_last_prompt_calls` returned the
+  NULL as None, and `cyber_grid._build_models_panel` formats it with `{c['task_type']:<10}`.
+- **Cause.** Bug 27's reader sweep checked `GROUP BY task_type` readers and the main
+  `session-end.py`, but not its claw-code sibling, which still read `r.get("task_type",
+  "unknown")` and formatted it with `{tool:<12}`, nor row-level readers of `usage`.
+- **Fix.** Both use `value or "unknown"` (claw-code hook version 3). A second sweep
+  (`get("task_type", ...)`, `["task_type"]` and every `SELECT ... task_type` under `src/` and
+  `hooks/`) found no other reader of `usage` or `routing_decisions` that raises on a NULL;
+  `commands/verify.py` prints one as `None` (cosmetic, not changed here).
+- **Rule.** A reader sweep greps for the column name across every hook copy and variant
+  (`*-clawcode.py`, `hooks/` and `src/llm_router/hooks/`), not only for `GROUP BY`.
+- **Test.** `test_clawcode_stop_hook_renders_null_task_type` (runs `main()` on a seeded
+  `usage.db`), `test_dashboard_last_prompt_calls_render_null_task_type`. Both fail on 15a1398e.
+
 ## P013-1. `llm_act` wrote files into the MCP process cwd
 
 - **Symptom.** A local model's `write_file` from `llm_act` landed in the directory the MCP
@@ -647,3 +802,30 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Check.** No test can know main's stamp at test time. The check is a command, run after
   each merge of origin/main:
   `for f in session-start session-end; do git show origin/main:src/llm_router/hooks/$f.py | sed -n 2p; sed -n 2p src/llm_router/hooks/$f.py; done`
+
+## CODEX-1. Codex refused to start: `invalid transport in mcp_servers.llm_router`
+
+- **Symptom.** Codex exited at startup with `~/.codex/config.toml:443:14 invalid transport
+  in mcp_servers.llm_router` (owner's machine, reported in #323). Codex raises this when a
+  `[mcp_servers.<name>]` table has neither `command` nor `url`.
+- **Cause.** Codex writes `[mcp_servers.llm_router.tools.<x>]` itself when the user picks
+  "always allow" on a tool the installer did not pre-approve. Manifest replay
+  (`install_manifest.apply_uninstall`) removed only the tables it had recorded, so Codex's own
+  tool table outlived the server table and left an `llm_router` server with no transport.
+  A binary-less `install` and the legacy `uninstall_host_integrations` fallback did not look
+  for that state either.
+- **Fix.** `codex_host.remove_toml_subtree` removes the whole `mcp_servers.llm_router`
+  subtree (any quoting or spacing in the header, and dotted keys under `[mcp_servers]` or at
+  the root); comment lines right above the next kept table stay. `has_orphan_mcp_tables`
+  detects the no-transport state for manifest replay, binary-less install, legacy uninstall
+  and `doctor`. Install and uninstall re-check after removal: `✓ Removed orphaned ...` is
+  printed only when the server is gone and the file parses; otherwise a `⚠ ... delete them by
+  hand` line names what is left (a dotted key whose value spans lines is not cut).
+- **Test.** `tests/test_codex_install.py::test_uninstall_takes_tool_tables_codex_wrote_itself`
+  and `::test_install_without_binary_clears_orphaned_tool_tables` (both red on main 75700df4:
+  the orphan table stays). Also `::test_legacy_uninstall_clears_orphaned_tool_tables`,
+  `::test_*_reports_orphans_it_could_not_remove`,
+  `tests/commands/test_doctor.py::TestRunDoctorHost::test_run_doctor_host_codex_orphan_tool_tables_say_invalid_transport`
+  and the `remove_toml_subtree` tests in `tests/test_codex_host.py`. Each of 10 mutants
+  (one per code path, e.g. the legacy cleanup or the doctor branch disabled) turns one of
+  them red.

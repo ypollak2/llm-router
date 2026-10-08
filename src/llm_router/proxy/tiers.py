@@ -39,9 +39,9 @@ The decision, per call, in order (the first that applies wins):
                     finding (1.2) was that per-turn switching loses money
                     under prompt caching, so the decision that matters is the
                     one made once, at the conversation's start.
-``policy``          the router's own classifier (``choose_model`` ->
-                    ``classify_signals(GATEWAY_POLICY)`` and
-                    ``router._build_and_filter_chain``) over the newest human
+``policy``          the router's own classifier (``backends.tier_classify`` ->
+                    ``classify_signals(GATEWAY_POLICY)``; no provider chain
+                    is built on this path, P0.9-e) over the newest human
                     prompt gives (task_type, complexity); ``route`` maps that
                     to a tier. Never above the requested tier unless
                     ``allow_upgrade``. A future Phase 2 kNN scorer replaces
@@ -203,6 +203,9 @@ class TierDecision:
     # clamp, the thinking floor, escalation, stickiness and quota pressure moved it.
     # None where the classifier never ran (the early keep / pin returns): not computed.
     proposed_tier: str | None = None
+    # Milliseconds per DECISION_PHASES name that ran (P0.9-e); a phase that did
+    # not run is absent, never 0.
+    phases_ms: dict = field(default_factory=dict)
 
     @property
     def rewritten(self) -> bool:
@@ -245,9 +248,62 @@ def tier_model(name: str, path: str | Path | None = None) -> str | None:
 
 
 async def _default_classify(text: str) -> dict:
-    from llm_router.proxy.backends import choose_model
+    # Looked up at call time so tests can stub ``backends.tier_classify``.
+    from llm_router.proxy import backends
 
-    return await choose_model(text, None, anthropic=True)
+    return await backends.tier_classify(text, None, anthropic=True)
+
+
+#: The decision's phases (PLAN v16 P0.9-e), in milliseconds on
+#: ``TierDecision.phases_ms`` and the ledger's ``tier_phases_ms``. Their sum is
+#: the "proxy decision" the PRD's 50 ms heuristic bar applies to.
+DECISION_PHASES: tuple[str, ...] = ("classify", "quota_read", "stickiness", "haiku_checks")
+
+
+class _Phases:
+    """Wall time per named phase. ``with phases("classify"): ...``."""
+
+    __slots__ = ("ms", "_name", "_t")
+
+    def __init__(self) -> None:
+        self.ms: dict[str, float] = {}
+
+    def __call__(self, name: str) -> "_Phases":
+        self._name = name
+        return self
+
+    def __enter__(self) -> "_Phases":
+        self._t = time.perf_counter()
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        self.add(self._name, (time.perf_counter() - self._t) * 1000.0)
+        return False
+
+    def add(self, name: str, ms: float) -> None:
+        self.ms[name] = self.ms.get(name, 0.0) + ms
+
+
+class _TimedSticky:
+    """The decision's view of ``Stickiness``: every lookup and write is timed
+    into the ``stickiness`` phase."""
+
+    __slots__ = ("_s", "_p")
+
+    def __init__(self, sticky: Stickiness, phases: _Phases) -> None:
+        self._s, self._p = sticky, phases
+
+    def get(self, key):
+        with self._p("stickiness"):
+            return self._s.get(key)
+
+    def record(self, *args, **kwargs):
+        with self._p("stickiness"):
+            return self._s.record(*args, **kwargs)
+
+    def is_cold(self, state) -> bool:
+        with self._p("stickiness"):
+            return self._s.is_cold(state)
 
 
 def with_complexity_knn(base=None):
@@ -594,16 +650,23 @@ class ClaudeTierPolicy:
     async def decide(self, body: dict, session_id: str | None, sticky: Stickiness,
                      classify=None) -> TierDecision:
         """``classify(text) -> {"task_type", "complexity", "chain_head", ...}``
-        defaults to ``backends.choose_model(text, None, anthropic=True)``."""
-        reading = self._read_quota()
+        defaults to ``backends.tier_classify(text, None, anthropic=True)``: the
+        class only, no provider chain built (P0.9-e), so ``chain_head`` / ``model``
+        are ``[]`` / None until another caller has cached that chain."""
+        phases = _Phases()
+        with phases("quota_read"):
+            reading = self._read_quota()
         # Only a fresh measurement drives the step; stale/unknown/off fail open.
         pressure = reading.pressure if reading.state == quota_pressure_mod.STATE_OK else None
-        decision = await self._decide(body, session_id, sticky, classify, pressure)
+        decision = await self._decide(body, session_id, _TimedSticky(sticky, phases), classify,
+                                      pressure, phases)
         decision.quota_pressure, decision.quota_state = reading.pressure, reading.state
+        decision.phases_ms = phases.ms
         return decision
 
     async def _decide(self, body: dict, session_id: str | None, sticky: Stickiness,
-                      classify, pressure: float | None) -> TierDecision:
+                      classify, pressure: float | None, phases: _Phases | None = None) -> TierDecision:
+        phases = phases if phases is not None else _Phases()
         requested = body.get("model") if isinstance(body.get("model"), str) else None
         req_tier = self.tier_of(requested)
 
@@ -616,7 +679,8 @@ class ClaudeTierPolicy:
             return keep(REASON_CONFIG_PINNED)
         if not has_client_tools(body):
             return keep(REASON_SIDE_CALL)
-        key = conversation_key(body, session_id)
+        with phases("stickiness"):
+            key = conversation_key(body, session_id)
         opus_tier = self.by_name.get("opus")
         if opus_tier is not None and escalation.explicit_opus_pin(body):
             # `opus:` — an explicit pin, never subject to the no-upgrade rule
@@ -665,7 +729,8 @@ class ClaudeTierPolicy:
         if classify is None:
             classify = _default_classify
 
-        choice = await classify(tier_text(body))
+        with phases("classify"):
+            choice = await classify(tier_text(body))
         task, cx = choice.get("task_type"), choice.get("complexity")
 
         target = self.tier_for(task, cx) or req_tier
@@ -673,7 +738,8 @@ class ClaudeTierPolicy:
         reason = REASON_POLICY
         if not self.allow_upgrade and self.rank[target.name] > self.rank[req_tier.name]:
             target = req_tier
-        haiku_ok = self._haiku_eligible(body)
+        with phases("haiku_checks"):
+            haiku_ok = self._haiku_eligible(body)
         if not self._accepts(target, thinking, effort):
             if self._rewritable(target, haiku_ok):
                 reason = REASON_HAIKU_REWRITE  # stay on Haiku; the body is rewritten for it
@@ -743,9 +809,11 @@ class ClaudeTierPolicy:
             haiku = self.by_name.get("haiku")
             if (pressure is not None and pressure >= self.quota_moderate_at and cx == "moderate"
                     and haiku is not None and self.rank[target.name] > self.rank[haiku.name]
-                    and self._haiku_body_ok(body)
                     and self._allowed(haiku, req_tier, thinking, effort, haiku_ok)):
-                target, served, reason = haiku, haiku.model, REASON_QUOTA_PRESSURE
+                with phases("haiku_checks"):
+                    body_ok = self._haiku_body_ok(body)
+                if body_ok:
+                    target, served, reason = haiku, haiku.model, REASON_QUOTA_PRESSURE
         if _canonical(served) == _canonical(requested):
             served = requested  # keep the client's own spelling when nothing changes
 
@@ -761,8 +829,9 @@ class ClaudeTierPolicy:
         # target off Haiku clear this).
         # With the fold on, a body that carries a system message needs the rewrite even
         # when Haiku takes its thinking/effort as sent.
-        needs_rewrite = (not self._accepts(target, thinking, effort)
-                         or (self.haiku_folds_system and _has_mid_conversation_system_message(body)))
+        with phases("haiku_checks"):
+            needs_rewrite = (not self._accepts(target, thinking, effort)
+                             or (self.haiku_folds_system and _has_mid_conversation_system_message(body)))
         body_rewrite = REWRITE_HAIKU if self._rewritable(target, haiku_ok) and needs_rewrite else None
         return TierDecision(requested, served, target.name, reason, switched=switched, switch_cost_usd=cost,
                             body_rewrite=body_rewrite,

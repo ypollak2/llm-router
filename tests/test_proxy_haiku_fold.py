@@ -315,7 +315,7 @@ def simple(monkeypatch):
 
     async def choose(text, pinned, *, anthropic=False):
         return {"task_type": "code", "complexity": "simple", "chain_head": [], "model": None}
-    monkeypatch.setattr(pb, "choose_model", choose)
+    monkeypatch.setattr(pb, "tier_classify", choose)
 
 
 async def test_proxy_forwards_a_folded_body_to_haiku_when_the_flag_is_on(tmp_path, simple):
