@@ -23,7 +23,11 @@ SANDBOX_OK = sandbox.prove_sandbox().proven
 real_sandbox = pytest.mark.skipif(not SANDBOX_OK, reason="sandbox not proven: the verifier does not run")
 pytestmark = pytest.mark.timeout(240)
 
-GIT = ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"]
+# gc.auto / maintenance.auto off: `git commit` otherwise spawns a detached `git maintenance run
+# --auto` that creates and removes .git/objects/maintenance.lock and rewrites objects while a test
+# copytree()s the repo (shutil.Error, CI run 37811026623). docs/BUGS.md has the entry.
+GIT = ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false",
+       "-c", "gc.auto=0", "-c", "maintenance.auto=false"]
 FIELDS = {"verify_status", "reason", "n_candidates", "n_f2p", "ms", "sandboxed", "flags"}
 
 
