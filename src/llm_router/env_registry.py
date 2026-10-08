@@ -202,6 +202,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PROXY_NUM_CTX": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_UPSTREAM": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_PORT": ("llm_router", "proxy/server.py", 1),
+    "LLM_ROUTER_PROXY_UPSTREAM_PORT": ("llm_router", "proxy/failopen_shim.py", 1),
     "LLM_ROUTER_PROXY_LOOP_MAX_CONSECUTIVE": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_LOOP_REPEAT_WINDOW": ("llm_router", "proxy/server.py", 1),
     # Backend-health breaker (proxy/backend_health.py): consecutive empty or
@@ -352,6 +353,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # debug fast line only; "both" = the full line then the fast line on a second
     # row; anything else (the default, "full") = the full status line only.
     "LLM_ROUTER_STATUSLINE": ("llm_router", "hooks/statusline-command.sh", 1),
+    "LLM_ROUTER_STATUSLINE_TIMING": ("llm_router", "hooks/statusline-command.sh", 1),
     "LLM_ROUTER_STATUSLINE_REFRESH_CMD": ("llm_router", "statusline_tick.py", 1),
     "LLM_ROUTER_STATUSLINE_SLOW_MS": ("llm_router", "statusline_refresh.py", 1),
     "LLM_ROUTER_STATUS_EVERY": ("llm_router", "hooks/status-bar-clawcode.py", 2),

@@ -178,6 +178,17 @@ class TestRunDoctorHost:
         assert "[mcp_servers.llm_router] missing" in lines
         assert any("untrusted" in i for i in issues) and any("not registered" in i for i in issues)
 
+    def test_run_doctor_host_codex_orphan_tool_tables_say_invalid_transport(self, capsys, tmp_path, monkeypatch):
+        """Tool tables with no server table: Codex refuses to start ("invalid
+        transport"). Doctor names that state and what the fix does."""
+        self._codex_home(tmp_path, monkeypatch, '[mcp_servers.llm_router.tools.llm]\napproval_mode = "approve"\n')
+        issues: list[str] = []
+        from llm_router.commands.doctor import _codex_report
+        lines = "\n".join(_codex_report(issues))
+        assert "has no command or url" in lines and "invalid transport" in lines
+        assert "llm-router uninstall" in lines and "llm-router install" in lines
+        assert "Codex MCP server table has no transport" in issues
+
     def test_run_doctor_host_codex_reports_forced_default_as_broken(self, capsys, tmp_path, monkeypatch):
         """A config with model_provider forced to llm_router (left over from an
         older llm_router install) must be flagged as broken, not healthy."""

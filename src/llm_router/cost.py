@@ -118,7 +118,7 @@ CREATE TABLE IF NOT EXISTS usage (
     timestamp TEXT DEFAULT (datetime('now')),
     model TEXT NOT NULL,
     provider TEXT NOT NULL,
-    task_type TEXT NOT NULL,
+    task_type TEXT,
     profile TEXT NOT NULL,
     input_tokens INTEGER NOT NULL,
     output_tokens INTEGER NOT NULL,
@@ -497,6 +497,71 @@ async def _relax_quota_snapshots_pct_notnull(db: aiosqlite.Connection) -> bool:
         return False
 
 
+async def _usage_task_type_notnull(db: aiosqlite.Connection) -> bool:
+    rows = await (await db.execute("PRAGMA table_info(usage)")).fetchall()
+    return any(r[1] == "task_type" and r[3] for r in rows)
+
+
+async def _relax_usage_task_type_notnull(db: aiosqlite.Connection) -> bool:
+    """Rebuild ``usage`` once so ``task_type`` accepts NULL (P0.8, R-EVL-1).
+
+    Databases created before P0.8 declared ``task_type TEXT NOT NULL``, so a task type
+    the writer could not recognise was logged as ``query``. The rebuild keeps the
+    table's own stored definition with only that constraint removed, copies every row
+    with its id, recreates the table's indexes and keeps the AUTOINCREMENT sequence.
+
+    It runs inside ``BEGIN IMMEDIATE`` and re-checks the constraint there, so two
+    processes opening the same database cannot both rebuild, and a failure leaves the
+    original table untouched. Returns True if a rebuild happened.
+    """
+    tmp = "usage_p08_nullable_task_type"
+    try:
+        if not await _usage_task_type_notnull(db):
+            return False
+        if db.in_transaction:
+            await db.commit()
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            if not await _usage_task_type_notnull(db):
+                await db.rollback()
+                return False  # another process rebuilt it first
+            row = await (await db.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'usage'"
+            )).fetchone()
+            new_sql, n_col = re.subn(r"\btask_type\s+TEXT\s+NOT\s+NULL", "task_type TEXT",
+                                     row[0], count=1, flags=re.IGNORECASE)
+            new_sql, n_name = re.subn(r"^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[\"`]?usage[\"`]?",
+                                      f"CREATE TABLE {tmp}", new_sql, count=1, flags=re.IGNORECASE)
+            if n_col != 1 or n_name != 1:
+                raise RuntimeError("usage schema has an unexpected shape; not rebuilt")
+            cols = ", ".join(f'"{r[1]}"' for r in await (
+                await db.execute("PRAGMA table_info(usage)")).fetchall())
+            index_sql = [r[0] for r in await (await db.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'usage' "
+                "AND sql IS NOT NULL")).fetchall()]
+            seq = await (await db.execute(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'usage'")).fetchone()
+            await db.execute(new_sql)
+            await db.execute(f"INSERT INTO {tmp} ({cols}) SELECT {cols} FROM usage")
+            await db.execute("DROP TABLE usage")
+            await db.execute(f"ALTER TABLE {tmp} RENAME TO usage")
+            for stmt in index_sql:
+                await db.execute(stmt)
+            if seq is not None:  # keep ids of deleted top rows from being reused
+                await db.execute("DELETE FROM sqlite_sequence WHERE name IN ('usage', ?)", (tmp,))
+                await db.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('usage', ?)",
+                                 (int(seq[0]),))
+            await db.commit()
+            return True
+        except BaseException:
+            await db.rollback()
+            raise
+    except Exception as exc:  # noqa: BLE001 — a migration must never break routing
+        from llm_router import failopen as _fo
+        _fo.record("CHZ-FO-COST-USAGE-TASK-TYPE-NULLABLE", exc)
+        return False
+
+
 MIGRATE_USAGE_ADD_TEAM = [
     "ALTER TABLE usage ADD COLUMN user_id TEXT",
     "ALTER TABLE usage ADD COLUMN project_id TEXT",
@@ -658,6 +723,20 @@ MIGRATE_ROUTING_DECISIONS_ADD_TOOL_USE_ID = [
 """The Claude Code ``tool_use`` id of the MCP call that made the decision
 (``call_identity.tool_use_id``), NULL when there was none. An id only: it joins a row to
 its ``usage_outcome`` verdict (whose ``event_id`` is the same id)."""
+
+MIGRATE_USAGE_ADD_SESSION_ID = [
+    "ALTER TABLE usage ADD COLUMN session_id TEXT",
+]
+"""P0.8 (R-EVL-1): the Claude Code session behind a ``usage`` row, NULL when unknown.
+Before this, no usage row could be scoped to a session at all. No default: historical
+rows genuinely have no session to report."""
+
+MIGRATE_ADD_TASK_TYPE_RAW = [
+    "ALTER TABLE usage ADD COLUMN task_type_raw TEXT",
+    "ALTER TABLE routing_decisions ADD COLUMN task_type_raw TEXT",
+]
+"""P0.8: a task type the writer could not map onto ``TaskType``. ``task_type`` is then
+NULL and the label it received is kept here, instead of being logged as ``query``."""
 
 MIGRATE_ROUTING_DECISIONS_ADD_PROVENANCE = [
     "ALTER TABLE routing_decisions ADD COLUMN provenance TEXT",
@@ -1107,6 +1186,8 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_ROUTING_DECISIONS_ADD_PROVENANCE
         + MIGRATE_ROUTING_DECISIONS_ADD_SHADOW_TIER
         + MIGRATE_ROUTING_DECISIONS_ADD_TOOL_USE_ID
+        + MIGRATE_USAGE_ADD_SESSION_ID
+        + MIGRATE_ADD_TASK_TYPE_RAW
         # Defined in v6.2 and never applied: compression_stats was declared,
         # log_compression_stat wrote to it, and the table did not exist. The
         # write raised OperationalError straight into bash-compress's bare
@@ -1128,6 +1209,10 @@ async def _get_db() -> aiosqlite.Connection:
     # Existing row VALUES are copied across unchanged — this is a constraint
     # fix, not a backfill of the historical zeros.
     await _relax_quota_snapshots_pct_notnull(db)
+
+    # P0.8: an unknown task type is stored as NULL, which the original
+    # `usage.task_type NOT NULL` refused.
+    await _relax_usage_task_type_notnull(db)
 
     # Idempotency guard for import_routing_quality_ledger: a route_id already
     # present must be rejected at the DB layer too, not just by the importer's
@@ -1191,11 +1276,14 @@ def _get_team_identity() -> tuple[str, str]:
 
 async def log_usage(
     response: LLMResponse,
-    task_type: TaskType,
+    task_type: TaskType | None,
     profile: RoutingProfile,
     success: bool = True,
     correlation_id: str | None = None,
     complexity: str = "moderate",
+    *,
+    session_id: str | None = None,
+    task_type_raw: str | None = None,
 ) -> None:
     """Persist a completed external LLM call to the usage database.
 
@@ -1212,6 +1300,12 @@ async def log_usage(
         correlation_id: Optional hex ID linking this DB row to the structlog
             trace for the same routing call (first 8 chars of UUID4).
         complexity: Task complexity level (simple, moderate, complex).
+        session_id: The caller's Claude Code session id (P0.8). Stored only if it is
+            an id (``call_identity.ledger_session_id``); placeholders become NULL.
+            Omitted, the MCP call's own session (``call_identity.call_session_id``)
+            is used, which is None outside an MCP tool call. Never guessed.
+        task_type_raw: The label a writer could not map onto ``TaskType``; pass it
+            with ``task_type=None`` so the row says "unknown" instead of a default.
     """
     # PRIMARY GUARD: a test must not write to the production database. See
     # `_refuse_unisolated_test_write` for why the fingerprint below was not enough.
@@ -1236,6 +1330,10 @@ async def log_usage(
         return
 
     user_id, project_id = _get_team_identity()
+    from llm_router import call_identity as _call_identity
+
+    ledger_sid = (_call_identity.call_session_id() if session_id is None
+                  else _call_identity.ledger_session_id(session_id))
     db = await _get_db()
     try:
         # Local providers (ollama, codex) are free — override any calculated cost
@@ -1273,12 +1371,13 @@ async def log_usage(
             """INSERT INTO usage (model, provider, task_type, profile,
                input_tokens, output_tokens, cost_usd, latency_ms, success,
                user_id, project_id, correlation_id, complexity,
-               baseline_model, potential_cost_usd, saved_usd, is_simulated)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               baseline_model, potential_cost_usd, saved_usd, is_simulated,
+               session_id, task_type_raw)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 response.model,
                 response.provider,
-                task_type.value,
+                task_type.value if task_type is not None else None,
                 profile.value,
                 response.input_tokens,
                 response.output_tokens,
@@ -1293,6 +1392,8 @@ async def log_usage(
                 potential_cost_usd,
                 saved_usd,
                 1 if _detect_synthetic() else 0,
+                ledger_sid,
+                task_type_raw if task_type is None else None,
             ),
         )
         await db.commit()
@@ -1891,18 +1992,18 @@ def _write_provenance() -> str:
 async def log_routing_decision(
     *,
     prompt: str,
-    task_type: str,
+    task_type: str | None,
     profile: str,
     classifier_type: str,
     classifier_model: str | None,
-    classifier_confidence: float,
-    classifier_latency_ms: float,
+    classifier_confidence: float | None,
+    classifier_latency_ms: float | None,
     complexity: str,
     recommended_model: str,
     base_model: str,
-    was_downshifted: bool,
-    budget_pct_used: float,
-    quality_mode: str,
+    was_downshifted: bool | None,
+    budget_pct_used: float | None,
+    quality_mode: str | None,
     final_model: str,
     final_provider: str,
     success: bool,
@@ -1918,6 +2019,7 @@ async def log_routing_decision(
     shadow_tier: str | None = None,
     session_id: str | None = None,
     tool_use_id: str | None = None,
+    task_type_raw: str | None = None,
 ) -> None:
     """Persist a complete routing decision to the routing_decisions table.
 
@@ -1952,6 +2054,8 @@ async def log_routing_decision(
             when unknown. Never guessed: NULL is what O3 counts as "no session id".
         tool_use_id: The MCP ``tool_use`` id behind the call, or None. Ids only:
             no prompt or answer text is stored by either.
+        task_type_raw: The label behind a NULL ``task_type`` (P0.8). A caller that
+            did not measure a classifier field passes None for it: NULL, never 0.0.
     """
     # Validate inputs before database insert
     _validate_routing_insert(final_model, final_provider, cost_usd)
@@ -2004,8 +2108,9 @@ async def log_routing_decision(
                 quality_mode, final_model, final_provider, success,
                 input_tokens, output_tokens, cost_usd, latency_ms, reason_code,
                 correlation_id, requested_complexity, complexity_downgraded, subject,
-                provenance, capabilities_json, shadow_tier, session_id, tool_use_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                provenance, capabilities_json, shadow_tier, session_id, tool_use_id,
+                task_type_raw)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 _prompt_hash(prompt),
                 task_type,
@@ -2017,7 +2122,7 @@ async def log_routing_decision(
                 complexity,
                 recommended_model,
                 base_model,
-                1 if was_downshifted else 0,
+                None if was_downshifted is None else (1 if was_downshifted else 0),
                 budget_pct_used,
                 quality_mode,
                 final_model,
@@ -2037,6 +2142,7 @@ async def log_routing_decision(
                 shadow_tier,
                 session_id or None,
                 tool_use_id or None,
+                task_type_raw,
             ),
         )
         await db.commit()

@@ -70,6 +70,7 @@ Usage:
     llm-router serve            — run the HTTP route endpoint (loopback only)
     llm-router gateway          — run the OpenAI/Anthropic/Ollama-compatible gateway
     llm-router proxy [stats]    — opt-in per-call proxy for one Claude Code session (ANTHROPIC_BASE_URL)
+    llm-router proxy-shim       — fail-open shim: main proxy, or Anthropic directly when it is down
     llm-router pi               — run the Pi coding agent on a local Ollama model (local agent profile)
     llm-router broker           — run the session broker
     llm-router cp               — control-plane client commands
@@ -878,6 +879,7 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "broker",
         "gateway",
         "proxy",
+        "proxy-shim",
         "pi",
         "invoice",
         "cp",
@@ -913,6 +915,49 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "run",
     }
 )
+
+
+_HELP_FLAGS = ("-h", "--help")
+# CLI-HELP-1: subcommands that print their own help for -h/--help in any
+# position (argparse, or an explicit check over all args).
+_OWN_HELP_ANYWHERE = frozenset({
+    "audit", "calibrate", "cp", "dev-refresh", "gc", "install", "inventory", "invoice",
+    "judge", "kpi", "last", "migrate", "mod", "northstar", "pi", "policy", "proxy",
+    "quickstart", "replay", "resolve", "retrospect", "run", "serve", "snapshot", "stats",
+    "statusline", "team-sync", "test-delta", "verify", "welcome",
+})
+# ...only when the flag comes straight after the subcommand (`okf --help`,
+# not `okf gc --help`).
+_OWN_HELP_FIRST = frozenset({"benchmark", "okf", "provider", "semantic", "sessions"})
+
+
+def _subcommand_help(args: list[str]) -> bool:
+    """Print help for ``llm-router <cmd> ... --help`` and return True when the
+    subcommand would not handle the flag itself.
+
+    CLI-HELP-1: every other subcommand ignored --help and ran: `uninstall --help`
+    uninstalled (and edited .vscode/mcp.json in the cwd), `update`/`onboard`
+    rewrote hooks, `gateway`/`broker` started servers. Help must be inert, so
+    the default is to answer here, from this module's usage text, without
+    importing the subcommand.
+    """
+    if len(args) < 2 or not any(a in _HELP_FLAGS for a in args[1:]):
+        return False
+    cmd = args[0]
+    if cmd in _OWN_HELP_ANYWHERE or (cmd in _OWN_HELP_FIRST and args[1] in _HELP_FLAGS):
+        return False
+    prefix = f"llm-router {cmd}"
+    lines = [ln.strip() for ln in (__doc__ or "").splitlines()
+             if ln.strip() == prefix or ln.strip().startswith(prefix + " ")]
+    if not lines:  # not a documented subcommand: the unknown-command path answers
+        return False
+    print("usage:")
+    for ln in lines:
+        print(f"  {ln}")
+    print()
+    print("options:")
+    print("  -h, --help    show this message and exit")
+    return True
 
 
 def main() -> None:
@@ -963,6 +1008,9 @@ def main() -> None:
             # the same fail-open contract the hooks apply internally.
             print(f"llm-router run-hook: {hook_path} failed: {exc}", file=sys.stderr)
             sys.exit(0)
+        return
+
+    if _subcommand_help(args):
         return
 
     if args and args[0] == "install":
@@ -1016,6 +1064,11 @@ def main() -> None:
         # ANTHROPIC_BASE_URL. Nothing installs or enables it.
         from llm_router.proxy.server import cmd_proxy
         sys.exit(cmd_proxy(args[1:]))
+    elif args and args[0] == "proxy-shim":
+        # P0.10 (D-17 = A): owns the settings.json port; forwards to the main
+        # proxy, or straight to Anthropic when the main proxy is down.
+        from llm_router.proxy.failopen_shim import main as shim_main
+        sys.exit(shim_main(args[1:]))
     elif args and args[0] == "broker":
         # Session broker: run from an INTERACTIVE terminal so the headless gateway
         # daemon can delegate gated backends (Codex/Gemini CLI) that need the

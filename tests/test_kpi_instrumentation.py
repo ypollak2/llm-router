@@ -41,7 +41,7 @@ def moderate(monkeypatch):
     async def choose(text, pinned, *, anthropic=False):
         return {"task_type": "code", "complexity": "moderate", "chain_head": [], "model": None}
 
-    monkeypatch.setattr(pb, "choose_model", choose)
+    monkeypatch.setattr(pb, "tier_classify", choose)
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -253,7 +253,7 @@ async def test_decision_error_row_still_has_every_key(tmp_path, monkeypatch):
     async def boom(text, pinned, *, anthropic=False):
         raise RuntimeError("classifier exploded")
 
-    monkeypatch.setattr(pb, "choose_model", boom)
+    monkeypatch.setattr(pb, "tier_classify", boom)
     up = Upstream()
     app = _app(tmp_path, up)
     await _post(app, _first())

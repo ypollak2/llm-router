@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 25
+# llm_router-hook-version: 26
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -731,23 +731,55 @@ def _check_proxy_default_health() -> str:
         with open(sentinel_path) as fh:
             sentinel = json.load(fh)
         port = int(sentinel.get("port", 8787))
+        upstream = sentinel.get("upstream_port")
+        upstream = int(upstream) if upstream is not None else None
     except Exception:
         return ""  # an unreadable sentinel is not evidence of a dead proxy
 
     import socket as _socket
 
-    try:
-        with _socket.create_connection(("127.0.0.1", port), timeout=1.0):
-            return ""  # answering — nothing to say
-    except OSError:
-        pass
+    def _answers(p: int) -> bool:
+        try:
+            with _socket.create_connection(("127.0.0.1", p), timeout=1.0):
+                return True
+        except OSError:
+            return False
 
-    # Literal, not imported from llm_router.proxy_default.LABEL: this hook is
-    # stdlib-only by design (see the docstring above) and must print the same
-    # string even when the package itself fails to import. Kept in sync by
-    # hand with proxy_default.LABEL; tests/test_session_start_proxy_default.py
-    # asserts the two agree.
+    # Literals, not imported from llm_router.proxy_default.LABEL / SHIM_LABEL:
+    # this hook is stdlib-only by design (see the docstring above) and must
+    # print the same strings even when the package itself fails to import.
+    # Kept in sync by hand; tests/test_session_start_proxy_default.py asserts
+    # they agree.
     label = "com.llm_router.proxy"
+    shim_label = "com.llm_router.proxy-shim"
+
+    if _answers(port):
+        # With the fail-open shim (docs/BUGS.md P010-1) `port` is the shim's, and
+        # the shim accepts even when the main proxy behind it is dead: probe
+        # the main proxy too, or a crash-looping proxy reads as healthy while
+        # every call silently bypasses routing.
+        if upstream is None or _answers(upstream):
+            return ""  # answering — nothing to say
+        return (
+            f"\n⚠️  llm-router main proxy is not answering on 127.0.0.1:{upstream} — "
+            f"the fail-open shim on :{port} is sending every call straight to "
+            f"api.anthropic.com, so routing is bypassed (recorded as proxy_down in "
+            f"fail_open.jsonl).\n"
+            f"    Recover with:  launchctl kickstart -k gui/$(id -u)/{label}"
+            f"   (macOS)  or  systemctl --user restart llm_router-proxy  (Linux)\n"
+            f"    Logs: {os.path.join(_state_dir(), 'logs', 'proxy.err.log')}"
+        )
+
+    if upstream is not None:
+        return (
+            f"\n⚠️  llm-router fail-open shim is installed but not answering on "
+            f"127.0.0.1:{port} — every API call this session (and every session "
+            f"until this is fixed) will fail.\n"
+            f"    Recover with:  launchctl kickstart -k gui/$(id -u)/{shim_label}"
+            f"   (macOS)  or  systemctl --user restart llm_router-proxy-shim  (Linux)\n"
+            f"    Or disable it:  llm-router install --proxy-default off\n"
+            f"    Logs: {os.path.join(_state_dir(), 'logs', 'proxy-shim.err.log')}"
+        )
     return (
         f"\n⚠️  llm-router proxy-default is installed but not answering on "
         f"127.0.0.1:{port} — every API call this session (and every session "

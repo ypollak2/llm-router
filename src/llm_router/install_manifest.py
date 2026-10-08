@@ -231,12 +231,31 @@ def _remove_toml_table(path: pathlib.Path, header: str) -> list[str]:
     if not path.exists() or not header:
         return []
     text = path.read_text()
-    # RED1-9-02: body stops at the next '[table]' line (^-anchored, MULTILINE) so
-    # adjacent tables not separated by a blank line are NOT swallowed.
-    pattern = re.compile(
-        rf'(?m)^\[{re.escape(header)}\][^\n]*\n(?:(?!\[).*(?:\n|$))*'
-    )
-    updated = pattern.sub("", text, count=1)
+    from llm_router import codex_host
+    if header == codex_host.MCP_TABLE:
+        # The whole server subtree, including tool tables Codex wrote itself:
+        # a leftover [mcp_servers.llm_router.tools.x] stops Codex from starting.
+        updated = codex_host.remove_toml_subtree(text, header)
+        # CODEX-2: the line-based cut can corrupt the file (a nested array line
+        # reads as a header) or leave a multi-line dotted key behind. Re-parse
+        # before writing, as install._clear_codex_orphan_tables does.
+        if updated != text:
+            import tomllib
+            try:
+                tomllib.loads(updated)
+                problem = "" if codex_host.read_mcp_server(updated) is None else "entries would remain"
+            except tomllib.TOMLDecodeError:
+                problem = "the file would no longer parse"
+            if problem:
+                return [f"⚠ [{header}] left in {path}: {problem} after the edit, so the file was "
+                        f"not changed; delete the [{header}...] tables by hand"]
+    else:
+        # RED1-9-02: body stops at the next '[table]' line (^-anchored, MULTILINE) so
+        # adjacent tables not separated by a blank line are NOT swallowed.
+        pattern = re.compile(
+            rf'(?m)^\[{re.escape(header)}\][^\n]*\n(?:(?!\[).*(?:\n|$))*'
+        )
+        updated = pattern.sub("", text, count=1)
     if updated != text:
         # RED2-10-05: no persistent .llm_router-bak — uninstall must leave nothing
         # llm_router-authored. The removal regex is ^-anchored and regression-tested

@@ -201,11 +201,242 @@ def test_doctor_reports_a_silent_ledger_when_proxy_is_default(tree):
 
 
 def test_doctor_run_prints_the_override_and_counts_it_as_an_issue(tree, capsys):
+    """P0.14-b: assert on the issues, not on the exit code (other checks make it non-zero anyway)."""
     home, proj = tree
     f = proj / ".claude" / "settings.local.json"
     _settings(f, {"ANTHROPIC_BASE_URL": f"https://api.anthropic.com/?k={SECRET}"})
     code, issues = doctor._run_doctor()
     out = capsys.readouterr().out
     assert str(f) in out and "api.anthropic.com" in out and SECRET not in out
-    assert any("api.anthropic.com" in i for i in issues)
-    assert code != 0
+    bypass = [i for i in issues if i.startswith("proxy bypass:")]
+    assert len(bypass) == 1
+    assert str(f) in bypass[0] and "api.anthropic.com" in bypass[0] and SECRET not in bypass[0]
+
+
+def test_doctor_run_without_override_adds_no_bypass_issue(tree, capsys):
+    code, issues = doctor._run_doctor()
+    assert [i for i in issues if i.startswith("proxy bypass:")] == []
+
+
+# -- P0.14-b: privacy, null-not-zero, windows, short silence -------------------------
+
+
+def test_a_bare_key_in_base_url_is_never_printed_as_a_host(tree, capsys):
+    """Reviewer plant: a key placed directly in ANTHROPIC_BASE_URL was printed as a lowercased host."""
+    from llm_router import proxy_liveness as plv
+
+    home, proj = tree
+    planted = "SECRETKEY999-bare-key"
+    f = proj / ".claude" / "settings.local.json"
+    _settings(f, {"ANTHROPIC_BASE_URL": planted})
+    assert plv.find_overrides(proj, home) == [{"path": str(f), "host": "(unparseable)"}]
+    text = "\n".join(plv.doctor_findings(proj, home, now=NOW))
+    assert "(unparseable)" in text and str(f) in text
+    assert planted.lower() not in text.lower()
+    doctor._run_doctor()
+    assert planted.lower() not in capsys.readouterr().out.lower()
+
+
+@pytest.mark.parametrize("value, shown", [
+    ("https://api.anthropic.com", "api.anthropic.com"),
+    ("API.Anthropic.COM:8443/x?k=1", "api.anthropic.com:8443"),
+    ("http://localhost:8787", "localhost:8787"),
+    ("127.0.0.1:8787", "127.0.0.1:8787"),
+    ("http://[::1]:8787/v1", "[::1]:8787"),
+    ("https://u:p@gw.example.com", "gw.example.com"),
+])
+def test_real_hosts_are_still_printed(value, shown):
+    from llm_router import proxy_liveness as plv
+
+    assert plv._host_of(value) == shown
+
+
+@pytest.mark.parametrize("value", [
+    "SECRETKEY999-bare-key", "sk-ant-api03-abc", "https://sk-ant-api03-abc", "host_with_underscore.com",
+    "a..b.com", "-bad.example.com", "bad-.example.com", "1234.5678", "x" * 64 + ".com", "http://",
+])
+def test_non_hostnames_are_unparseable(value):
+    from llm_router import proxy_liveness as plv
+
+    assert plv._host_of(value) == "(unparseable)"
+
+
+def test_unreadable_hook_count_is_null_not_zero_and_gives_no_warn(monkeypatch):
+    """Mutant: ``except -> return 0`` made an unreadable count a measured zero."""
+    from llm_router import proxy_liveness as plv
+
+    def boom(**_kw):
+        raise OSError("hook ledger unreadable")
+
+    monkeypatch.setattr(hl, "read_rows", boom)
+    live = plv.liveness(now=NOW, proxy_rows=[])
+    assert live["hook_turns_24h"] is None
+    assert live["routing_decisions_24h"] is None        # no usage.db either
+    assert live["proxy_rows_24h"] == 0
+    assert live["warn"] is False and live["message"] is None
+    assert "hook turns unreadable" in kpi._proxy_liveness_lines(live)[0]
+
+
+def test_unreadable_decision_count_is_null_not_zero_and_gives_no_warn():
+    db = paths.state_path("usage.db")
+    db.parent.mkdir(parents=True, exist_ok=True)
+    db.write_bytes(b"this is not a sqlite database" * 50)
+    live = _card()["proxy_liveness"]
+    assert live["routing_decisions_24h"] is None
+    assert live["hook_turns_24h"] == 0
+    assert live["warn"] is False
+
+
+def test_future_dated_proxy_rows_are_not_counted_and_newest_is_clamped():
+    _proxy_rows(3, age_h=-5)                 # five hours AFTER now
+    _turns(4)
+    live = _card()["proxy_liveness"]
+    assert live["proxy_rows_24h"] == 0
+    assert live["warn"] is True
+    assert live["newest_proxy_ts"] is not None and live["newest_proxy_ts"] <= NOW
+
+
+def test_future_dated_decision_rows_are_not_counted():
+    conn = _decisions_db()
+    _decision(conn, NOW + 5 * HOUR)
+    _decision(conn, NOW - 3 * HOUR)
+    conn.commit()
+    conn.close()
+    assert _card()["proxy_liveness"]["routing_decisions_24h"] == 1
+
+
+def test_decision_rows_older_than_24h_are_not_counted():
+    """Lower bound of the decision window (P0.14-b review survivor)."""
+    conn = _decisions_db()
+    _decision(conn, NOW - 25 * HOUR)
+    conn.commit()
+    conn.close()
+    live = _card()["proxy_liveness"]
+    assert live["routing_decisions_24h"] == 0 and live["warn"] is False
+    conn = _decisions_db()
+    _decision(conn, NOW - 3 * HOUR)
+    conn.commit()
+    conn.close()
+    assert _card()["proxy_liveness"]["routing_decisions_24h"] == 1
+
+
+def _decisions_db() -> sqlite3.Connection:
+    db = paths.state_path("usage.db")
+    db.parent.mkdir(parents=True, exist_ok=True)
+    from llm_router.cost import CREATE_ROUTING_DECISIONS_TABLE
+
+    conn = sqlite3.connect(db)
+    conn.execute(CREATE_ROUTING_DECISIONS_TABLE)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(routing_decisions)")}
+    if "reason_code" not in cols:
+        conn.execute("ALTER TABLE routing_decisions ADD COLUMN reason_code TEXT")
+    return conn
+
+
+def _decision(conn: sqlite3.Connection, ts: float, reason: str | None = None) -> None:
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(ts))
+    conn.execute("INSERT INTO routing_decisions (timestamp, task_type, reason_code) VALUES (?, 'code', ?)",
+                 (stamp, reason))
+
+
+def test_sidecar_backfill_rows_are_not_turns():
+    conn = _decisions_db()
+    for i in range(4):
+        _decision(conn, NOW - 3 * HOUR - i, "sidecar_backfill")
+    _decision(conn, NOW - 3 * HOUR, "routed")
+    conn.commit()
+    conn.close()
+    assert _card()["proxy_liveness"]["routing_decisions_24h"] == 1
+    conn = _decisions_db()
+    conn.execute("DELETE FROM routing_decisions WHERE reason_code = 'routed'")
+    conn.commit()
+    conn.close()
+    live = _card()["proxy_liveness"]
+    assert live["routing_decisions_24h"] == 0 and live["warn"] is False   # backfill alone is no alarm
+
+
+# -- short silence (doctor, 2 h) ---------------------------------------------------
+
+
+def test_short_silence_reports_zero_proxy_rows_in_2h_with_3_turns(tree):
+    from llm_router import proxy_liveness as plv
+
+    home, proj = tree
+    _proxy_rows(5, age_h=5)            # alive 5 h ago, silent for the last 2 h; 24 h window is fine
+    _turns(3, age_h=1)
+    findings = plv.doctor_findings(proj, home, now=NOW)
+    assert len(findings) == 1
+    assert "last 2 h" in findings[0] and "3 hook turns" in findings[0] and "127.0.0.1:8787" in findings[0]
+
+
+def test_short_silence_needs_three_turns_and_no_recent_rows(tree):
+    from llm_router import proxy_liveness as plv
+
+    home, proj = tree
+    _proxy_rows(5, age_h=5)
+    _turns(2, age_h=1)                                             # 2 < 3
+    assert plv.doctor_findings(proj, home, now=NOW) == []
+    _turns(1, age_h=1.5)                                           # now 3
+    assert len(plv.doctor_findings(proj, home, now=NOW)) == 1
+    _proxy_rows(1, age_h=0.5)                                      # a row inside the last 2 h
+    assert plv.doctor_findings(proj, home, now=NOW) == []
+
+
+def test_short_silence_does_not_count_future_dated_proxy_rows(tree):
+    """Upper bound of the 2 h window (P0.14-b review survivor): a row stamped an
+    hour after now is not a row in the last 2 h."""
+    from llm_router import proxy_liveness as plv
+
+    _proxy_rows(2, age_h=-1)
+    _turns(3, age_h=1)
+    short = plv.short_silence(now=NOW)
+    assert short["proxy_rows"] == 0 and short["hook_turns"] == 3
+    assert short["warn"] is True
+
+
+def test_short_silence_empty_set_reports_nothing(tree):
+    """0 turns, 0 rows: an empty set must not raise an alarm."""
+    from llm_router import proxy_liveness as plv
+
+    home, proj = tree
+    _proxy_rows(5, age_h=5)
+    assert plv.short_silence(now=NOW)["warn"] is False
+    assert plv.doctor_findings(proj, home, now=NOW) == []
+    _turns(5, age_h=3)                                             # turns outside the 2 h window
+    assert plv.doctor_findings(proj, home, now=NOW) == []
+
+
+def test_short_silence_unreadable_turn_count_is_null_and_silent(tree, monkeypatch):
+    from llm_router import proxy_liveness as plv
+
+    home, proj = tree
+    _proxy_rows(5, age_h=5)
+
+    def boom(**_kw):
+        raise OSError("x")
+
+    monkeypatch.setattr(hl, "read_rows", boom)
+    s = plv.short_silence(now=NOW)
+    assert s["hook_turns"] is None and s["warn"] is False
+    assert plv.doctor_findings(proj, home, now=NOW) == []
+
+
+def test_short_silence_is_not_repeated_when_the_24h_warn_already_fired(tree):
+    from llm_router import proxy_liveness as plv
+
+    home, proj = tree
+    _turns(4, age_h=1)                                             # 0 rows in 24 h and 4 turns in 2 h
+    findings = plv.doctor_findings(proj, home, now=NOW)
+    assert len(findings) == 1 and "last 24 h" in findings[0]
+
+
+def test_doctor_run_counts_the_short_silence_as_an_issue(tree):
+    real = time.time()
+    pl.ledger_path().parent.mkdir(parents=True, exist_ok=True)
+    pl.ledger_path().write_text(json.dumps({"ts": real - 5 * HOUR, "session_id": "s1", "model": "m"}) + "\n",
+                                encoding="utf-8")
+    for i in range(3):
+        assert hl.record("auto-route", "UserPromptSubmit", 12.0, now=real - HOUR - i)
+    code, issues = doctor._run_doctor()
+    bypass = [i for i in issues if i.startswith("proxy bypass:")]
+    assert len(bypass) == 1 and "last 2 h" in bypass[0]

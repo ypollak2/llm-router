@@ -178,3 +178,47 @@ def test_sentinel_round_trip(monkeypatch, tmp_path):
 def test_remove_sentinel_when_absent_does_not_raise(monkeypatch, tmp_path):
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
     pd.remove_sentinel()  # must not raise
+
+
+# ── P0.10: the fail-open shim's service files ────────────────────────────────
+
+def test_shim_launchd_plist_is_supervised_and_points_at_the_upstream_port():
+    out = pd.render_launchd_shim_plist("/opt/venv/bin/python", Path("/home/alice"),
+                                       port=8787, upstream_port=8797)
+    assert "<key>Label</key><string>com.llm_router.proxy-shim</string>" in out
+    assert "<string>proxy-shim</string>" in out
+    assert "<string>--port</string><string>8787</string>" in out
+    assert "<string>--upstream-port</string><string>8797</string>" in out
+    assert "<key>KeepAlive</key><true/>" in out and "<key>RunAtLoad</key><true/>" in out
+    assert "/home/alice/.llm-router/logs/proxy-shim.err.log" in out
+
+
+def test_shim_systemd_unit_restarts_on_failure():
+    out = pd.render_systemd_shim_unit("/opt/venv/bin/python", port=8787, upstream_port=8797)
+    assert "ExecStart=/opt/venv/bin/python -m llm_router.cli proxy-shim --port 8787 --upstream-port 8797" in out
+    assert "Restart=on-failure" in out
+
+
+def test_shim_service_target_per_platform(tmp_path):
+    mac_dest, mac_cmd = pd.service_target("Darwin", tmp_path, label=pd.SHIM_LABEL)
+    assert mac_dest == tmp_path / "Library" / "LaunchAgents" / "com.llm_router.proxy-shim.plist"
+    lin_dest, lin_cmd = pd.service_target("Linux", tmp_path, label=pd.SHIM_LABEL)
+    assert lin_dest.name == "llm_router-proxy-shim.service"
+    assert lin_cmd.endswith("enable --now llm_router-proxy-shim")
+    assert pd.deactivation_command("Linux", lin_dest, pd.SHIM_LABEL) == \
+        "systemctl --user disable --now llm_router-proxy-shim"
+
+
+def test_default_ports_put_the_shim_on_the_settings_port():
+    assert pd.DEFAULT_PORT == 8787 and pd.DEFAULT_UPSTREAM_PORT == 8797
+    from llm_router.proxy import failopen_shim
+
+    assert failopen_shim.DEFAULT_PORT == pd.DEFAULT_PORT
+    assert failopen_shim.DEFAULT_UPSTREAM_PORT == pd.DEFAULT_UPSTREAM_PORT
+
+
+def test_install_shim_service_writes_under_the_given_home_only(tmp_path):
+    dest, _ = pd.install_shim_service(python="/x/python", system="Darwin", home=tmp_path,
+                                      port=9001, upstream_port=9002)
+    assert dest.is_relative_to(tmp_path) and dest.exists()
+    assert "<string>9002</string>" in dest.read_text()

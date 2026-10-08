@@ -542,7 +542,11 @@ and `llm_router.commands.proxy_default` (orchestration). The install:
 
 1. writes a supervised service — a macOS LaunchAgent (`KeepAlive`) or a Linux
    systemd user unit (`Restart=on-failure`), running
-   `llm-router proxy --steps off --tiers conversation`;
+   `llm-router proxy --steps off --tiers conversation` on port **8797**, and,
+   once that answers, a second one for the **fail-open shim**
+   (`com.llm_router.proxy-shim` / `llm_router-proxy-shim`) on **8787**, the
+   port settings.json names (see "Fail-open shim" below; `shim=False` keeps the
+   old single-service layout);
 2. **reuses** a proxy already answering on the target port instead of
    installing a second one that would fight it for the port — this is how it
    stays compatible with a proxy the owner already runs by hand
@@ -563,9 +567,52 @@ the service, removes the sentinel (`~/.llm-router/proxy_default.json`), and
 restores `env` via the manifest replay — all three happen whether or not the
 proxy is currently up.
 
+### Fail-open shim (P0.10, D-17 = A)
+
+`llm-router proxy-shim` (`proxy/failopen_shim.py`) owns 127.0.0.1:8787 and
+forwards every request, bytes in and bytes out, to the main proxy on
+`LLM_ROUTER_PROXY_UPSTREAM_PORT` (default 8797). When the main proxy cannot be
+reached — connection refused, connect slower than 200 ms, or the connection
+drops before a response — or answers a 5xx of its own (one without Anthropic's
+`request-id` header) before any byte reached the client, the shim sends the same request once to `https://api.anthropic.com` with the same
+headers and records a `proxy_down` event (`failopen.record`, so it lands in
+`~/.llm-router/fail_open.jsonl` and KPI G2; code and reason only, never headers
+or content). Once a response byte has gone out nothing is retried. An Anthropic
+5xx relayed by a working main proxy (for example 529 overloaded) is passed through
+unchanged: retrying it would double the load and count a healthy proxy as down.
+Known risk: on a disconnect before the response headers (`disconnected`), or a
+5xx of the main proxy's own, the main proxy may already have forwarded the request
+to Anthropic, so the direct retry can send it twice and it may be billed twice.
+The shim accepts that cost in exchange for not failing the call.
+
+Why: `settings.json` env beats the process env, so a session already running
+cannot be pointed elsewhere, and the SessionStart warning below only reaches the
+next session. Measured 2026-10-07 (claude 2.1.292, `--setting-sources
+project,local`, base URL on a smoke port): with nothing listening, `claude -p`
+retried for 222.85 s and failed with `API Error: Connection refused` (n = 1);
+through the shim with the main proxy killed, 10/10 sessions answered and 10
+`proxy_down` rows were written (docs/BUGS.md P010-1).
+
+The shim imports neither `proxy/server.py` nor its dependencies, so a broken
+main-proxy deploy cannot take it down. It uses httpx for the upstream leg
+because aiohttp's client rejects the duplicate `Server` header the main proxy
+sends (uvicorn's next to Anthropic's).
+
+**Moving an existing install behind the shim** (the installer reuses a process
+it finds on 8787 and says "No fail-open shim installed"): stop the main proxy's
+LaunchAgent, change its `--port` to 8797, start it again (`launchctl bootout` +
+`bootstrap`), then install and bootstrap `com.llm_router.proxy-shim`. That is a
+live service change and an owner step.
+
 ### Fail-safe: what happens when the proxy is down
 
-Because every session depends on it once installed:
+Because every session depends on it once installed. With the shim, a dead main
+proxy no longer fails the call, but the shim still accepts on 8787, so a probe of
+that port alone would read healthy while every call bypassed routing. Each check
+below therefore probes the shim's port (`port` in `proxy_default.json`) **and** the
+main proxy's (`upstream_port`), and reports a dead main proxy as "routing
+bypassed" with the main proxy's recovery command, and a dead shim with the
+shim's (`com.llm_router.proxy-shim` / `llm_router-proxy-shim`):
 
 - **KeepAlive/`Restart=on-failure`** restarts a crashed process in place — the
   supervisor IS the watchdog. A separate polling watchdog process was
@@ -578,7 +625,7 @@ Because every session depends on it once installed:
   TCP-probes the port, and prints the exact recovery command
   (`launchctl kickstart -k gui/$(id -u)/com.llm_router.proxy` /
   `systemctl --user restart llm_router-proxy`) plus the log path on failure.
-- **The statusline** shows `🔌 proxy down:<port>` in red the instant the probe
+- **The statusline** shows `🔌 proxy down:<port>` (or `proxy down:<upstream_port> (bypassed)` when only the main proxy behind the shim is dead) in red the instant the probe
   fails — gated on the sentinel, so a user who never installed proxy-default
   pays nothing extra here.
 - **The SessionStart hook** (`_check_proxy_default_health` in
