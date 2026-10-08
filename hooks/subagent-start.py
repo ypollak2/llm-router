@@ -1,5 +1,5 @@
 """SubagentStart hook — inject routing context into every new agent's initial messages.
-# llm_router-hook-version: 2
+# llm_router-hook-version: 3
 
 Fires once when Claude spawns an agent (Agent tool call completes the PreToolUse
 gate and runAgent() starts). The hook's additionalContext is prepended to the
@@ -197,10 +197,16 @@ def main() -> None:
     if _qa_routing_on():
         # Routing table summary — mirrors CLAUDE.md and auto-route logic.
         if status in ("LOW", "MEDIUM"):
+            # The proxy's opus tier, never a literal (plan v16 P0.2).
+            try:
+                from llm_router.proxy.tiers import tier_model
+                opus_id = tier_model("opus") or "opus"
+            except ImportError:
+                opus_id = "opus"
             routing_rules = (
                 "simple→Haiku (/model claude-haiku-4-5-20251001) | "
                 "moderate→Sonnet (current) | "
-                "complex→Opus (/model claude-opus-4-6) | "
+                f"complex→Opus (/model {opus_id}) | "
                 f"research→{route_tool('llm_research')} MCP tool"
             )
         else:

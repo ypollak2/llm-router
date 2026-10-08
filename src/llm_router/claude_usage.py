@@ -9,6 +9,7 @@ One ``browser_evaluate(fetch(...))`` call returns everything -- no DOM scraping.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -306,18 +307,110 @@ def _time_until(iso_ts: str) -> str:
 # Read by profiles.py when building the model chain so Claude models are
 # demoted only when the quota is actually tight (>= 85%), not by default.
 _cached_pressure: float = 0.0
+# time.time() of the last set_claude_pressure call; None = never in this process.
+_cached_pressure_set_at: float | None = None
+
+# A pushed value is trusted for 300 s. After that (or if nothing was ever
+# pushed) the reading comes from usage.json, which the hooks refresh. Before
+# plan v16 P0.2 an MCP process that never saw llm_update_usage ran on 0.0 for
+# its whole life.
+_PUSH_FRESH_S = 300.0
+_FILE_CACHE_TTL_S = 60.0
+_FILE_STALE_AFTER_S = 30 * 60.0
+
+PressureReading = tuple[float | None, str, float | None]
+# usage.json path -> (computed_at, reading)
+_file_reading_cache: dict[str, tuple[float, PressureReading]] = {}
+
+
+def _reset_pressure_reading_cache() -> None:
+    """Drop the 60 s usage.json cache (tests)."""
+    _file_reading_cache.clear()
+
+
+def _as_epoch(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value:
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    return None
+
+
+def _reading_from_usage_json(now: float) -> PressureReading:
+    import json
+
+    from llm_router import paths
+    # Function-local: budget imports config/routing modules that reach back here.
+    from llm_router.budget import _pressure_from_usage
+
+    path = paths.state_path("usage.json")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        mtime = path.stat().st_mtime
+    except (OSError, ValueError):
+        return (None, "unknown", None)
+    if not isinstance(data, dict):
+        return (None, "unknown", None)
+    as_of = _as_epoch(data.get("updated_at"))
+    if as_of is None:
+        as_of = mtime
+    value = _pressure_from_usage(data)
+    if value is None:
+        return (None, "unknown", as_of)
+    if now - as_of > _FILE_STALE_AFTER_S:
+        return (None, "stale", as_of)
+    return (max(0.0, min(1.0, value)), "ok", as_of)
+
+
+def get_claude_pressure_reading() -> PressureReading:
+    """Return ``(value, state, as_of)`` for Claude subscription pressure.
+
+    ``value`` is ``highest_pressure`` (0.0–1.0) or ``None``; ``state`` is
+    ``"ok"``, ``"stale"`` or ``"unknown"``; ``as_of`` is the epoch second the
+    value describes, or ``None``.
+
+    A ``set_claude_pressure`` push from the last 300 s wins. Otherwise the value
+    comes from usage.json via ``budget._pressure_from_usage`` (cached 60 s).
+    ``updated_at`` older than 30 min is ``stale``; a missing, unreadable or
+    out-of-range file is ``unknown``. Stale and unknown carry no value, so
+    callers do not reorder the chain on them.
+    """
+    now = time.time()
+    if _cached_pressure_set_at is not None and now - _cached_pressure_set_at <= _PUSH_FRESH_S:
+        return (_cached_pressure, "ok", _cached_pressure_set_at)
+
+    from llm_router import paths
+
+    key = str(paths.state_path("usage.json"))
+    hit = _file_reading_cache.get(key)
+    if hit is not None and now - hit[0] < _FILE_CACHE_TTL_S:
+        return hit[1]
+    reading = _reading_from_usage_json(now)
+    _file_reading_cache[key] = (now, reading)
+    return reading
 
 
 def get_claude_pressure() -> float:
-    """Return the last-known Claude subscription pressure (0.0–1.0).
+    """Return Claude subscription pressure (0.0–1.0); 0.0 when stale or unknown.
 
     This is ``ClaudeSubscriptionUsage.highest_pressure`` — the raw maximum
     across session and weekly limits, without time-based discounting. Use this
     for the 99% hard cap check so the cap holds regardless of imminent resets.
 
-    Returns 0.0 (no pressure = use Claude) until ``set_claude_pressure`` is called.
+    Compatibility wrapper over ``get_claude_pressure_reading()``: stale or
+    unknown pressure reads as 0.0, the value every caller assumed before the
+    reading existed, so no pressure reordering happens on it.
     """
-    return _cached_pressure
+    value, _state, _as_of = get_claude_pressure_reading()
+    return value if value is not None else 0.0
 
 
 def set_claude_pressure(pressure: float) -> None:
@@ -328,8 +421,9 @@ def set_claude_pressure(pressure: float) -> None:
             Use the raw max (not effective_pressure) so the 99% hard cap
             is enforced unconditionally.
     """
-    global _cached_pressure
+    global _cached_pressure, _cached_pressure_set_at
     _cached_pressure = max(0.0, min(1.0, pressure))
+    _cached_pressure_set_at = time.time()
 
 
 def parse_api_response(data: dict) -> ClaudeSubscriptionUsage:
