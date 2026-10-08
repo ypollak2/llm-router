@@ -466,6 +466,7 @@ def generate_edits(
     out of the hook's time budget).
     """
     from llm_router.edit import apply_edits, build_edit_prompt, parse_edit_response
+    from llm_router.hook_latency import phase as _hl_phase
     from llm_router.hooks.direct_executor import call_ollama
     from llm_router.local_agent.constrain import EDIT_PAIRS_SCHEMA
     from llm_router.warm import edit_keep_alive
@@ -481,10 +482,13 @@ def generate_edits(
 
         feedback = history[-1] if history else None
         prompt = build_edit_prompt(task, file_contents, feedback=feedback)
-        response, _usage = call_ollama(
-            prompt, model, int(round(call_timeout)), system_prompt=_EDIT_SYSTEM_PROMPT,
-            format=EDIT_PAIRS_SCHEMA, keep_alive=edit_keep_alive(),
-        )
+        # P0.9: model time, so the hook's router_added_ms leaves it out (a no-op
+        # outside a hook process).
+        with _hl_phase("zce_model"):
+            response, _usage = call_ollama(
+                prompt, model, int(round(call_timeout)), system_prompt=_EDIT_SYSTEM_PROMPT,
+                format=EDIT_PAIRS_SCHEMA, keep_alive=edit_keep_alive(),
+            )
         if not response:
             history.append(f"attempt {attempt}: model returned no response")
             continue

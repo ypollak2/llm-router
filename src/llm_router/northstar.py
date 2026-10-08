@@ -298,6 +298,7 @@ Public surface
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
 import re
@@ -376,10 +377,8 @@ _REDO_LIKE_OUTCOMES = frozenset({OUTCOME_REDO, OUTCOME_DISCARDED})
 # non-Claude model served it AND its verify record shows a test that fails before the change
 # and passes after it AND it is not Q&A AND it was not redone. The heuristic outcome
 # "used" is neither required nor enough: a keep press adds nothing, pass-to-pass never counts.
-QA_TASK_TYPES = frozenset({
-    "query", "research", "generate", "analyze", "coordinate", "introspect",
-    "summary", "classification", "extraction",
-})
+# The set itself lives in ``qa_policy`` (one copy; the hook path imports it without northstar).
+from llm_router.qa_policy import QA_TASK_TYPES  # noqa: E402
 STRICT_VERIFY = frozenset({"pass_f2p", "pass_f2p_model"})
 STRICT_RULE_TEXT = (
     "strict-used: served by a non-Claude model AND verify_status in {pass_f2p, pass_f2p_model} "
@@ -420,6 +419,7 @@ class Unit:
 
     def to_dict(self) -> dict:
         out = {
+            "unit_id": unit_id(self.session_id, self.kind, self.ts),
             "session_id": self.session_id,
             "ts": (datetime.fromtimestamp(self.ts, tz=timezone.utc).isoformat()
                    if self.ts is not None else None),
@@ -470,6 +470,21 @@ def is_strict_used(unit: Any) -> bool:
             and _verify_status(unit) in STRICT_VERIFY
             and _unit_field(unit, "task_type") not in QA_TASK_TYPES
             and _unit_field(unit, "outcome") != OUTCOME_REDO)
+
+
+def unit_id(session_id: str | None, kind: str, ts: float | None) -> str | None:
+    """Stable id a verify record joins on. Units had none (a unit is derived, not stored),
+    so it is derived too: ``u_`` + the first 16 hex of sha256 over ``session_id``, ``kind``
+    and the unit's own timestamp as ``to_dict`` prints it (UTC isoformat, microseconds).
+    Outcome, signal and model are left out on purpose: they can be revised later, the id
+    must not move. None when the unit has no session or no timestamp (not joinable).
+    Known limit: two units of one kind in one session with the identical timestamp share
+    an id; a verify record then attaches to both (never to a different session or kind)."""
+    if not session_id or ts is None:
+        return None
+    iso = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+    raw = f"{session_id}\x1f{kind}\x1f{iso}".encode("utf-8", "replace")
+    return "u_" + hashlib.sha256(raw).hexdigest()[:16]
 
 
 @dataclass
@@ -893,6 +908,94 @@ def _load_north_star_ledger() -> list[dict]:
         if isinstance(row, dict):
             rows.append(row)
     return rows
+
+
+# ── verify records (verifier PR B, SHADOW) ──────────────────────────────────
+#
+# A second append-only row type in north_star_units.jsonl: {"unit_id", "verify": {...}}.
+# Same file as the unit rows (one ledger, one chmod 0600, one rotation story). Safe there:
+# every existing reader selects unit rows by ``lever == "agent_route_codex"`` or by
+# ``session_id``, and a verify row carries neither. SHADOW: ``units(verify_records=True)``
+# attaches the dict as an optional ``verify`` key. NS and D2 apply the strict-used rule, which
+# reads ``verify``, to ``units()`` called WITHOUT that flag, so no outcome, NS, D1 or D2 sees a
+# record (pinned by tests/test_verify_record.py). Only reason codes and counts are stored, never a test tail,
+# a command or prompt text.
+#
+# Duplicates: LAST record for a unit_id wins (append-only; a re-verify supersedes). A row
+# that is malformed (bad JSON, no str unit_id, verify not a dict, unknown status) is ignored,
+# and so is an orphan (a unit_id no unit has): neither can create or change a unit.
+
+VERIFY_STATUSES = ("pass_f2p", "pass_f2p_model", "pass_p2p", "fail", "unavailable", "not_applicable")
+_CODE_RX = re.compile(r"^[a-z0-9][a-z0-9_.:\-]{0,63}$")
+_MAX_FLAGS = 16
+
+
+def _code(value) -> str | None:
+    return value if isinstance(value, str) and _CODE_RX.match(value) else None
+
+
+def _count(value) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _clean_verify(raw) -> dict | None:
+    """The stored shape, or None when ``raw`` is not a usable verify dict. Free text cannot
+    pass: reason and flags must be short lowercase codes, anything else is replaced or dropped."""
+    if not isinstance(raw, dict) or raw.get("verify_status") not in VERIFY_STATUSES:
+        return None
+    status = raw["verify_status"]
+    flags = raw.get("verify_flags")
+    flags = [f for f in flags if _code(f)][:_MAX_FLAGS] if isinstance(flags, list) else []
+    level = "V1" if status in ("pass_f2p", "pass_f2p_model", "pass_p2p", "fail") else None
+    return {
+        "verify_level": level,
+        "verify_status": status,
+        "verify_reason": _code(raw.get("verify_reason")) or "invalid_reason",
+        "verify_n_candidates": _count(raw.get("verify_n_candidates")),
+        "verify_n_f2p": _count(raw.get("verify_n_f2p")),
+        "verify_ms": _count(raw.get("verify_ms")),
+        "verify_sandboxed": raw.get("verify_sandboxed") is True,
+        "verify_flags": flags,
+    }
+
+
+def verify_row(uid: str, result) -> dict:
+    """The ledger row for one ``toolkit.verify_unit.UnitResult`` (duck-typed: verify_status,
+    reason, n_candidates, n_f2p, ms, sandboxed, flags). Pure; PR C decides who appends it."""
+    verify = _clean_verify({
+        "verify_status": result.verify_status, "verify_reason": result.reason,
+        "verify_n_candidates": result.n_candidates, "verify_n_f2p": result.n_f2p,
+        "verify_ms": result.ms, "verify_sandboxed": result.sandboxed, "verify_flags": result.flags,
+    })
+    if verify is None:
+        raise ValueError(f"unknown verify_status {result.verify_status!r}")
+    return {"unit_id": uid, "verify": verify}
+
+
+def record_verify(uid: str, result) -> None:
+    """Append one verify row (O_APPEND, 0600). Not called by any hook yet (PR C)."""
+    row = verify_row(uid, result)
+    path = _north_star_units_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as fh:
+        fh.write(json.dumps(row) + "\n")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def load_verify_records(rows: list[dict] | None = None) -> dict[str, dict]:
+    """``unit_id -> verify dict`` from the ledger, last record wins."""
+    out: dict[str, dict] = {}
+    for row in (_load_north_star_ledger() if rows is None else rows):
+        uid = row.get("unit_id")
+        if row.get("lever") is not None or not isinstance(uid, str):
+            continue
+        verify = _clean_verify(row.get("verify"))
+        if verify is not None:
+            out[uid] = verify
+    return out
 
 
 # `delegated` means Codex was dispatched and returned, NOT that its result was
@@ -1332,16 +1435,24 @@ def _judge_routed_mcp(su: SessionUnits, records: list[dict]) -> None:
 # ── public surface ───────────────────────────────────────────────────────────
 
 def units(days: int | None = 30, session_id: str | None = None,
-          root: Path | None = None, *, backfill: bool = False) -> Iterator[dict]:
+          root: Path | None = None, *, backfill: bool = False,
+          verify_records: bool = False) -> Iterator[dict]:
     """One dict per classified unit. See the module docstring for the shape.
     ``backfill=True`` lets ``session_kind`` resolve from the backfill sidecar as a
-    last resort (``session_kind_source == "backfill"``); see ``build_sessions``."""
+    last resort (``session_kind_source == "backfill"``); see ``build_sessions``.
+    ``verify_records=True`` attaches the ledger's verify records as ``verify`` (SHADOW,
+    opt-in: the strict-used rule reads ``verify``, so NS and D2, which call this without
+    it, never see a record until the verifier is wired in on purpose)."""
     sessions = build_sessions(days=days, root=root, session_id=session_id, backfill=backfill)
+    verify = load_verify_records() if verify_records else {}
     for sid in sorted(sessions):
         su = sessions[sid]
         ordered = sorted(su.units, key=lambda u: (u.ts is None, u.ts if u.ts is not None else 0.0))
         for u in ordered:
-            yield u.to_dict()
+            d = u.to_dict()
+            if d["unit_id"] in verify:
+                d["verify"] = dict(verify[d["unit_id"]])
+            yield d
 
 
 def local_shadow_units(days: int | None = 30, db_path: Path | None = None) -> Iterator[dict]:
@@ -1416,9 +1527,11 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
 
     {"window_days": N, "generated_at": iso8601,
      "aggregate": {"n_sessions": int, "median": float|null, "p25": float|null,
-                   "max": float|null, "too_few": bool},
+                   "max": float|null, "too_few": bool,
+                   "strict_median": float|null, "strict_p25": float|null,
+                   "strict_max": float|null},
      "sessions": [{"session_id", "units", "used", "attempted", "unknown",
-                   "redo", "share"}, ...],
+                   "redo", "share", "strict_used", "strict_share"}, ...],
      "by_kind": {"<kind>": {"units", "attempted", "used", "redo", "unknown"}}}
 
     ``redo`` here folds both ``redo`` and ``discarded`` unit outcomes
@@ -1433,7 +1546,8 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
     for u in units(days=days, session_id=session_id, root=root):
         sid = u["session_id"]
         c = per_session_counts.setdefault(
-            sid, {"units": 0, "used": 0, "attempted": 0, "unknown": 0, "redo": 0},
+            sid, {"units": 0, "used": 0, "attempted": 0, "unknown": 0, "redo": 0,
+                  "strict_used": 0},
         )
         c["units"] += 1
         kind = u["kind"]
@@ -1442,6 +1556,8 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
         if kind in ATTEMPTED_KINDS or u["lever"] == "proxy":
             c["attempted"] += 1
             bk["attempted"] += 1
+            if is_strict_used(u):  # the kpi NS numerator (PLAN M0.2)
+                c["strict_used"] += 1
             outcome = u["outcome"]
             if outcome == OUTCOME_USED:
                 c["used"] += 1
@@ -1455,6 +1571,7 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
 
     session_rows = []
     shares = []
+    strict_shares = []
     for sid, c in sorted(per_session_counts.items()):
         share = (c["used"] / c["units"]) if c["units"] >= MIN_UNITS and c["units"] else None
         session_rows.append({
@@ -1465,16 +1582,25 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
             "unknown": c["unknown"],
             "redo": c["redo"],
             "share": share,
+            "strict_used": c["strict_used"],
+            "strict_share": (c["strict_used"] / c["units"]) if share is not None else None,
         })
         if share is not None:
             shares.append(share)
+            strict_shares.append(c["strict_used"] / c["units"])
 
+    # median/p25/max are the heuristic ``outcome == used`` share, kept for the JSON
+    # report and kpi diagnostics. The strict_* keys are the NS that user surfaces
+    # show (P0.8-b, plan §1.2): same sessions, strict numerator.
     aggregate = {
         "n_sessions": len(session_rows),
         "median": statistics.median(shares) if shares else None,
         "p25": _percentile(shares, 25) if shares else None,
         "max": max(shares) if shares else None,
         "too_few": len(shares) < 1,
+        "strict_median": statistics.median(strict_shares) if strict_shares else None,
+        "strict_p25": _percentile(strict_shares, 25) if strict_shares else None,
+        "strict_max": max(strict_shares) if strict_shares else None,
     }
     return {
         "window_days": days,
@@ -1486,7 +1612,12 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
 
 
 def current_session_line(session_id: str, root: Path | None = None) -> str:
-    """The Stop-line's compact item: 'north star 12% (n=87)' or 'too few to tell'.
+    """The Stop-line's compact item: 'north star (strict) 12% (n=87)' or 'too few to tell'.
+
+    P0.8 (NFR-NUM): the share is the strict rule (``is_strict_used``), the same
+    numerator ``llm-router kpi`` reports as NS. It was the heuristic ``outcome ==
+    used``, so this line and kpi could show two different north stars for one
+    session. The heuristic stays a kpi diagnostic only.
 
     Bounded to a 2-day window: this runs on every Stop event (every turn), and
     an unbounded ``days=None`` scan walks the ENTIRE ~/.claude/projects history
@@ -1509,7 +1640,7 @@ def current_session_line(session_id: str, root: Path | None = None) -> str:
         n = row["units"]
         if n < MIN_UNITS:
             return f"north star: too few to tell (n={n})"
-        pct = row["share"] * 100 if row["share"] is not None else 0.0
-        return f"north star {pct:.0f}% (n={n})"
+        pct = row["strict_share"] * 100
+        return f"north star (strict) {pct:.0f}% (n={n})"
     except Exception:  # noqa: BLE001 — never break a caller that renders a line
         return "north star: unavailable"

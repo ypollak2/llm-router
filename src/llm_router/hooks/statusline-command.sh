@@ -10,6 +10,63 @@
 # IMPORTANT: Must consume stdin — Claude Code pipes session JSON here.
 # Without reading it, the pipe blocks and Claude Code times out.
 
+# >>> statusline timing (P0.9-c) ─────────────────────────────────────────────
+# LLM_ROUTER_STATUSLINE_TIMING=1 times 1 call in 20 (=all: every call) and
+# appends a hook_latency row (hook "statusline", PRD bar 100 ms) from a
+# BACKGROUNDED `python -m llm_router.hook_latency record-raw`, so the write is
+# not inside the number and never delays the line. Clock: perl Time::HiRes,
+# because macOS /bin/bash 3.2 has no EPOCHREALTIME. Unsampled calls pay only
+# the env test and $RANDOM below (no process). The sampled number excludes the
+# bash start-up before this line, as the hooks' numbers exclude the interpreter's.
+_slt_on="${LLM_ROUTER_STATUSLINE_TIMING:-}"
+_slt_t0=""
+if [ -n "$_slt_on" ] && [ "$_slt_on" != "0" ] && [ "$_slt_on" != "off" ]; then
+    if [ "$_slt_on" = "all" ] || [ $((RANDOM % 20)) -eq 0 ]; then
+        _slt_t0=$(perl -MTime::HiRes=time -e 'printf "%.0f",time*1000' 2>/dev/null)
+    fi
+fi
+# A python that can import llm_router: sets $_chz_py, or leaves it empty. Shared
+# with the money segment below, which documents the resolution order.
+_chz_find_py() {
+    _chz_py=""
+    for _cand in \
+        "$(command -v llm-router 2>/dev/null | xargs -I{} head -1 {} 2>/dev/null | sed 's|^#!||' | awk '{print $1}')" \
+        "$(command -v llm_router 2>/dev/null | xargs -I{} head -1 {} 2>/dev/null | sed 's|^#!||' | awk '{print $1}')" \
+        "$(command -v python3 2>/dev/null)" \
+        "$(command -v python 2>/dev/null)" \
+        "$HOME/.local/pipx/venvs/llm-routing/bin/python" \
+        "$HOME/.local/bin/python3" \
+        "$HOME/Projects/llm-router/.venv/bin/python3" \
+        "$(dirname "$0")/../../.venv/bin/python3"; do
+        if [ -n "$_cand" ] && [ -x "$_cand" ] && "$_cand" -c "import llm_router" 2>/dev/null; then
+            _chz_py="$_cand"; break
+        fi
+    done
+}
+# The row carries the session id from the session JSON on stdin ($input), so a
+# reader can count sessions and drop research / executor ones (PLAN v16 §1.4
+# rules 4 and 8). Matched in bash (no process). The t1 clock is read inside a
+# freshly started perl, so every sampled number includes one perl start-up
+# (a few ms idle, more under load): a known upward bias against the 100 ms bar,
+# conservative for P0.9-c. The interpreter search runs in
+# the backgrounded child, after the clock stopped: the fast line and a full line
+# without usage.db never set $_chz_py, and a bare python3 that cannot import
+# llm_router would write no row.
+_slt_finish() {
+    [ -n "$_slt_t0" ] || return 0
+    local _t1 _sid="" _re='"session_id"[[:space:]]*:[[:space:]]*"([A-Za-z0-9._-]+)"'
+    _t1=$(perl -MTime::HiRes=time -e 'printf "%.0f",time*1000' 2>/dev/null) || return 0
+    [ -n "$_t1" ] || return 0
+    [[ "$input" =~ $_re ]] && _sid="${BASH_REMATCH[1]}"
+    ( { [ -n "$_chz_py" ] || _chz_find_py
+        [ -n "$_chz_py" ] && "$_chz_py" -m llm_router.hook_latency record-raw \
+            statusline Statusline "$((_t1 - _slt_t0))" "$_sid"
+      } </dev/null >/dev/null 2>&1 & )
+    return 0
+}
+[ -n "$_slt_t0" ] && trap _slt_finish EXIT
+# <<< statusline timing ──────────────────────────────────────────────────────
+
 # ── Debug mode: the fast line (opt-in) ───────────────────────────────────────
 # The default is the full layout below, unchanged from before PR #273 (owner
 # decision, reversing #273's fast-by-default). LLM_ROUTER_STATUSLINE=fast swaps
@@ -48,6 +105,13 @@ _tick="${0%/*}/llm_router_statusline_tick.py"
 [ -f "$_tick" ] || _tick="${0%/*}/../statusline_tick.py"
 if [ "$_sl_mode" = "fast" ]; then
     if [ -f "$_tick" ] && command -v python3 >/dev/null 2>&1; then
+        # A timed call cannot exec (the EXIT trap would never run). It reads the
+        # session JSON itself so the row can carry the session id, and hands it on.
+        if [ -n "$_slt_t0" ]; then
+            input=$(cat)
+            printf '%s' "$input" | python3 -I -S "$_tick"
+            exit $?
+        fi
         exec python3 -I -S "$_tick"
     fi
 fi
@@ -374,20 +438,8 @@ if [ -f "$USAGE_DB" ]; then
     #
     # The dev-checkout fallback was also wrong by one level. This script installs
     # to ~/.claude/hooks/, so ../../../ is $HOME's parent, not a checkout.
-    _chz_py=""
-    for _cand in \
-        "$(command -v llm-router 2>/dev/null | xargs -I{} head -1 {} 2>/dev/null | sed 's|^#!||' | awk '{print $1}')" \
-        "$(command -v llm_router 2>/dev/null | xargs -I{} head -1 {} 2>/dev/null | sed 's|^#!||' | awk '{print $1}')" \
-        "$(command -v python3 2>/dev/null)" \
-        "$(command -v python 2>/dev/null)" \
-        "$HOME/.local/pipx/venvs/llm-routing/bin/python" \
-        "$HOME/.local/bin/python3" \
-        "$HOME/Projects/llm-router/.venv/bin/python3" \
-        "$(dirname "$0")/../../.venv/bin/python3"; do
-        if [ -n "$_cand" ] && [ -x "$_cand" ] && "$_cand" -c "import llm_router" 2>/dev/null; then
-            _chz_py="$_cand"; break
-        fi
-    done
+    # The candidate list lives in _chz_find_py (top of this file).
+    _chz_find_py
 
     # "today" is every session since local midnight, unioned across all five
     # usage tables via dashboard_data.summary() — not this session, and not

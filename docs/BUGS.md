@@ -11,6 +11,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 1 | NULL `session_id` on local routing rows | fix open in #288 (M0.4), not merged |
 | 2 | O3 counted more turns than the user typed | open, fix is plan task M0.3 |
 | 3 | NS and D2 counted a heuristic "used" | open, fix is plan task M0.2 |
+| P09-5 | status-bar waited on a locked usage.db on every prompt | fixed in `perf/status-bar-cache` (P0.9 task 4) |
 | 4 | `G1_proxy` printed 0 ms | fixed in this change (M0.6) |
 | 5 | Haiku 400 on a mid-conversation system message | worked around (flag off); fold is plan task M0.7 |
 | P09-3 | A session-start background child wrote its own "session-start" latency row | fixed in `perf/session-start-bg` (P0.9) |
@@ -19,6 +20,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 6 | Research session b9f04425 counted as organic | fixed in #291 (M0.0b) |
 | 7 | `edit_outcomes.jsonl` rows with no source | open, fix is plan task M0.3(c) |
 | 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | fixed in P0.7 (`fix/learning-bugs`): one flag, default off |
+| P09-2 | Proxy tier decision took 1.2-2.2 s on rules-only turn-first calls | fixed in `perf/proxy-decision` (P0.9 task 6) |
 | 9 | Classifier warm-up loaded `llmr-classifier` at the wrong `num_ctx` | fixed in #298 (M1.4, review 2) |
 | 10 | README-advertised `--host pi` / `--host kimi` failed; detected gemini-cli skipped silently | fixed in this change (v16 P0.4) |
 | 11 | Four shadow tests raced the clock and failed `main` on a loaded runner | fixed in this change (test-only) |
@@ -28,7 +30,29 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 15 | MCP routing ran on Claude pressure 0.0 for the life of the process | fixed in this change (v16 P0.2) |
 | 16 | Critical-pressure override sent `/model claude-opus-4-6`, a retired id | fixed in this change (v16 P0.2) |
 | 17 | Semantic cache never hit, ignored context, and reported a hit rate of 0 | fixed in this change (v16 P0.5) |
+| 18 | Session context store deleted after every turn | fixed in #307 (v16 P0.1) |
+| 19 | Session context truncation dropped the newest events | fixed in #307 (v16 P0.1) |
+| 20 | `build_context_messages` cut the caller's live context first | fixed in #307 (v16 P0.1) |
+| 21 | `context_prep` truncated the user prompt | fixed in #307 (v16 P0.1) |
+| 22 | DIRECT rows wrote 0.0 / False / "balanced" for values nobody measured | fixed in this change (v16 P0.8) |
+| 23 | `usage` rows carried no session id | fixed in this change (v16 P0.8); live coverage pending deploy |
+| 24 | The Stop line's north star used the heuristic "used", kpi the strict rule | fixed in this change (v16 P0.8) |
+| 25 | Status bar priced its baseline at Opus and labelled it "vs Sonnet" | fixed in this change (v16 P0.8) |
+| 26 | `llm-router replay` raises TypeError on a row with NULL confidence | fixed in this change (v16 P0.8) |
+| 27 | The quality report and the Stop summary raise TypeError on a NULL task type | fixed in this change (v16 P0.8) |
+| 28 | `llm-router northstar` showed the heuristic share as the North Star | fixed in this change (v16 P0.8) |
+| 29 | The claw-code Stop hook and the dashboard models panel raise TypeError on a NULL task type | fixed in this change (v16 P0.8 r1) |
 | P013-1 | `llm_act` wrote files into the MCP process cwd | fixed for the file tools in this change (P0.13); bash confinement is P2.9 |
+| P0.14-a | Proxy ledger wrote 0 rows for 25 h and nothing flagged it | fixed in this change (P0.14) |
+| 18 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
+| P011-1 | Haiku guard re-tripped on audit days older than its window | fixed in `feat/haiku-guard-in-repo` (P0.11, 3f4149b) |
+| GE6-1 | Quota-burn coverage kept owner-overridden sessions in the organic denominator | fixed in `feat/quota-samples` (#320, GE6 repair 1) |
+| GE6-2 | Branch hook version equal to main's after main moved on | fixed in `feat/quota-samples` (#320, GE6 repair round 1) |
+| CODEX-1 | Codex refused to start: `invalid transport in mcp_servers.llm_router` | fixed in this change (#323) |
+| P09-1 | G1 called a 16 s auto-route p95 "within budget" | fixed in `perf/hook-budgets` (P0.9 tasks 1-2) |
+| P09-7 | Statusline timing rows carried no session id, and needed a python3 that imports llm_router | fixed in `perf/hook-budgets` (P0.9 repair 1) |
+| P09-8 | The statusline "wrapper adds < 5 ms" test failed under load | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
+| P09-9 | A session id named by one test leaked onto latency rows of later tests | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -76,6 +100,20 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `NS_heuristic` / `D2_heuristic`, labelled "not a target".
 - **Test.** `tests/test_kpi_strict_used.py`, 11 cases (to be added by M0.2). Not on `main`
   yet. Until then, `docs/repo_goals/KPIS.md` says NS is the heuristic one.
+
+## P09-5. status-bar waited on a locked usage.db on every prompt
+
+- **Symptom.** status-bar p95 4,488 ms (n = 344) against the PRD's 300 ms [HL7]; p50 44 ms.
+- **Cause.** The UserPromptSubmit hook computed its line inline: `sqlite3.connect(usage.db,
+  timeout=2)` (a writer's lock costs up to 2 s per connect), a second connect for the session
+  call counts, and the Gemini quota read.
+- **Fix.** A detached refresher (`status-bar.py --refresh-cache`, one per 15 s at most)
+  computes the line into `status_bar_cache.json` (TTL 30 s). The hook reads that file, shows
+  a line up to 10 minutes old, and prints nothing rather than wait when there is none. The
+  refresher's own run writes no status-bar latency row (see P09-3).
+- **Test.** `tests/test_p09_status_bar_cache.py::test_the_prompt_path_never_waits_on_a_locked_usage_db`
+  (FAILS on da31df7: 2,016 ms), `test_a_stale_cache_returns_fast_shows_the_line_and_spawns_one_refresher`,
+  `test_the_refresher_survives_sqlite_raising_and_the_hook_still_shows_a_line`.
 
 ## 4. `G1_proxy` printed 0 ms
 
@@ -210,6 +248,26 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Test.** `tests/test_offload_share_alignment.py` (to be added by M0.3): a turn that
   edits 2 files is 1 turn; an `llm_edit` row is no turn; a `zero_claude` row does not match
   or drop an `llm_edit` unit in `northstar._fold_edit_ledger`. Not on `main` yet.
+
+## P09-2. Proxy tier decision took 1.2-2.2 s on rules-only turn-first calls
+
+- **Symptom.** `tier_decision_s` was 1.208, 2.203 and 1.673 s on 3 of 6 live turn-first
+  rows (reasons haiku_rewrite, sticky, thinking_floor), against the PRD's 50 ms heuristic
+  bar [PL] (`$PP/v16/sources/PL_proxy_calls_since_20261007T1140Z.jsonl`, n = 15 rows).
+- **Cause.** Not the quota read (the plan's first hypothesis: `proxy.quota_pressure` parses
+  `usage.json` once per mtime and costs one `stat()` per call). The tier decision's
+  classifier was `backends.choose_model`, which builds a provider chain
+  (`router._build_and_filter_chain`: usage.db queries, dynamic routing, the Ollama model
+  list) on each new (task_type, complexity) key, inside the timed span. The decision reads
+  only the class. Measured on a copy of the live usage.db (2026-10-07, this machine under
+  load): first build 21.6 s, later new keys 67-107 ms, `classify_signals` 0.1-0.2 ms.
+- **Fix.** `backends.tier_classify`: the same `classify_signals(GATEWAY_POLICY)` class, chain
+  head only from the cache, never a build. The decision now writes `tier_phases_ms`
+  (`classify`, `quota_read`, `stickiness`, `haiku_checks`; `okf_attach` and `fold` beside it).
+- **Test.** `tests/test_p09_proxy_decision.py`:
+  `test_a_turn_first_decision_never_waits_on_a_chain_build` (a 1 s fake chain build; FAILS
+  on da31df7), `test_tier_classify_gives_the_same_class_as_choose_model`,
+  `test_a_slow_chain_build_does_not_reach_tier_decision_s`.
 
 ## 8. `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off
 
@@ -475,6 +533,197 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   exist, so their evidence is the single-flip mutants recorded in the v16 P0.5 gate file,
   each of which turns at least one of these tests red.
 
+## 18. Session context store deleted after every turn
+
+- **Symptom.** The Session Context Accumulator's per-session JSONL
+  (`session_context_*.jsonl`) was gone after the first turn of every session, so routed
+  models got no durable context from turn 2 on (PLAN-v16 Appendix A, P0.1-a, "deleted every
+  turn" on da31df7).
+- **Cause.** `session-end.py` is registered on **Stop**, which Claude Code fires at the end of
+  every turn, not once per session. Its `main()` called `session_store.archive_session()`
+  unconditionally, so each turn deleted the store.
+- **Fix.** `main()` archives only when the payload's `hook_event_name` is `SessionEnd`, then
+  returns without rendering the summary a second time. The installer registers the same script
+  on SessionEnd (`_HOOK_DEFS`), keeping the Stop registration for the per-turn summary; the
+  plugin bundles carry the new event. `cleanup_old_sessions` still prunes by age. Existing
+  installs need `llm-router install --no-hosts` (there is no `--hooks-only` flag) to add the
+  SessionEnd entry to `~/.claude/settings.json`; until then the store is pruned by age only, never deleted per turn.
+- **Test.** `tests/test_session_end_context_archive.py`: `test_stop_never_archives`,
+  `test_session_end_archives_with_resolved_session_id`,
+  `test_session_file_survives_stop_with_its_events` (real store, 5 turns, line count
+  non-decreasing, deleted only on SessionEnd), `test_installer_registers_session_end_on_both_events`.
+
+## 19. Session context truncation dropped the newest events
+
+- **Symptom.** When a session's context exceeded `max_tokens`, the block injected into a routed
+  call held the oldest events and lost the newest, the ones the current question is about.
+- **Cause.** `session_store.build_session_context` orders records oldest to newest and then
+  called `token_budget.truncate_to_budget`, which keeps the head.
+- **Fix.** `truncate_to_budget(..., keep="tail")` keeps the end behind a
+  `[…older context truncated…]` marker and still fits the budget; `build_session_context` uses
+  it. The default stays `keep="head"` for every other caller.
+- **Test.** `tests/test_p01_context_loss.py::test_newest_event_present_in_200_of_200_over_budget_cases`
+  (Hypothesis, 200 generated over-budget sessions, the count is asserted and printed).
+
+## 20. `build_context_messages` cut the caller's live context first
+
+- **Symptom.** With an over-budget history, the `[Additional context]` block the caller passed
+  (layer 3, the live request's context) was cut or missing from the injected system message.
+- **Cause.** `context.build_context_messages` appended layer 3 last and then applied
+  `combined[:max_chars]`, so the hard cut always hit layer 3 first.
+- **Fix.** Layer 3 is held apart and never optimized, compacted or cut. Layers 1, 2a and 2b get
+  the budget left after it; if they still do not fit, whole layers are dropped lowest priority
+  first (2b, then 1) and the lowest remaining one is cut keeping its newest text.
+- **Test.** `tests/test_p01_context_loss.py`: four `test_layer3_intact_when_*` cases at 10x the
+  budget (summaries, session buffer, durable log, layer 3 itself) and
+  `test_lowest_layer_dropped_before_higher_ones`.
+
+## 21. `context_prep` truncated the user prompt
+
+- **Symptom.** `prepare_prompt` returned a `PreparedPrompt.user_prompt` cut to the budget's
+  user allocation with a `[truncated]` marker.
+- **Cause.** `context_prep.py` passed the user prompt through `truncate_to_budget`.
+- **Fix.** The prompt is never truncated. Over its allocation, `calculate_budget` already gives
+  system and context less room; when the prompt alone exceeds the model window minus the output
+  reserve, `prepare_prompt` raises `local_context_guard.ContextOverflow`. A system prompt
+  (the auto one is outside the budget's system allocation) that does not fit next to the
+  prompt in that window is dropped. Live impact was limited: `router.py` uses only
+  `full_system` from `prepare_prompt` and sends the raw prompt. It catches the exception with
+  `except Exception`, logs it at debug level and continues without the system prompt and
+  enrichment; it does not escalate. Escalation comes only from the provider preflight
+  (`providers.call_llm`, `ollama/` models) and chain failover.
+- **Test.** `tests/test_p01_context_loss.py::test_200k_prompt_is_intact_when_it_fits_the_window`,
+  `::test_200k_prompt_raises_context_overflow_when_over_the_window`,
+  `::test_user_prompt_is_never_shortened` (12 cases, outcome pinned per case: 3 raise, 9
+  intact), `::test_prompt_plus_auto_system_prompt_fits_the_window` (4 cases);
+  `tests/test_context_prep.py::test_long_user_prompt_never_truncated_for_small_model`
+  replaces the test that pinned the bug.
+
+## 22. DIRECT rows wrote 0.0 / False / "balanced" for values nobody measured
+
+- **Symptom.** Every DIRECT row in `routing_decisions` had `classifier_confidence = 0.0`,
+  `classifier_latency_ms = 0.0`, `budget_pct_used = 0.0` and `quality_mode = 'balanced'`:
+  63 of 63 `reason_code = 'direct'` rows in an rsync copy of `~/.llm-router/usage.db` taken
+  2026-10-07 (the plan's 7-day figure was 36/36 [UDB7]). A task type the hook could not map
+  was logged as `query`.
+- **Cause.** `savings_logger.log_direct_to_db` passed literals for fields the DIRECT path
+  never computes, and coerced an unknown task type to `TaskType.QUERY`. `usage.task_type` was
+  declared `NOT NULL`, so it could not hold "unknown" either.
+- **Fix.** Those five fields are passed as None and stored as NULL (`log_routing_decision`
+  now keeps a None `was_downshifted` as NULL). An unknown task type is NULL in both tables,
+  with the received label in the new `task_type_raw` column. `cost._relax_usage_task_type_notnull`
+  rebuilds `usage` once, inside `BEGIN IMMEDIATE`, keeping every row, id, index and the
+  AUTOINCREMENT sequence. On the copy: 1,388 rows kept, sequence 1,428 kept, both indexes
+  recreated. Smoke on the same copy (40 DIRECT rows: 30 through `sdk.route` with a fake model
+  chain, 10 through agent-route `_log_cli_savings`): 0 rows at 0.0, 40 NULL.
+- **Test.** `tests/test_p08_honest_records.py`: `test_direct_row_records_unmeasured_fields_as_null`,
+  `test_direct_unknown_task_type_is_null_with_raw_value`,
+  `test_legacy_usage_table_accepts_null_task_type_after_migration`. Each fails on da31df7.
+
+## 23. `usage` rows carried no session id
+
+- **Symptom.** No `usage` row could be scoped to a session: the table had no `session_id`
+  column (copy of the live `usage.db`, 2026-10-07, 1,388 rows).
+- **Cause.** `cost.log_usage` and the second writer, `hooks/cc-usage-track.py` (275 of 669
+  `usage` rows since 2026-09-30 on the copy, provider `cc`), never recorded one.
+- **Fix.** Additive migration `usage.session_id TEXT`. `log_usage` takes `session_id`; when
+  omitted it stamps `call_identity.call_session_id()` (the MCP call's own session, None
+  outside a tool call). The DIRECT path passes the hook payload's id. `cc-usage-track.py`
+  (hook version 2) adds the column if it is the first writer and stores the PostToolUse
+  payload's `session_id`. All writers store ids only; placeholders such as `sdk` are NULL.
+- **Test.** `test_usage_session_id_migration_is_idempotent`,
+  `test_direct_row_carries_the_payload_session_on_usage`, `test_log_usage_stamps_the_mcp_call_session`,
+  `test_cc_usage_track_writes_the_payload_session`, `test_cc_usage_track_session_rule_matches_call_identity`.
+  The live bar (session id on at least 99% of at least 100 post-deploy rows) is checked after deploy.
+
+## 24. The Stop line's north star used the heuristic "used", kpi the strict rule
+
+- **Symptom.** For one session the session-end/Stop line and `llm-router kpi` could show two
+  different north stars.
+- **Cause.** `northstar.current_session_line` divided heuristic `outcome == used` units by all
+  units; kpi's NS counts `is_strict_used` (PLAN M0.2, bug 3).
+- **Fix.** `report()` adds `strict_used` and `strict_share` per session, counted with
+  `is_strict_used` on attempted units, as kpi does. The line now prints
+  `north star (strict) N% (n=...)`. The heuristic stays a kpi diagnostic.
+- **Test.** `test_stop_line_north_star_uses_the_strict_rule` (50 heuristic-used units, 10 strict:
+  prints 20%, was 100%).
+
+## 25. Status bar priced its baseline at Opus and labelled it "vs Sonnet"
+
+- **Symptom.** The full status line read `(vs Sonnet:$58)` for a baseline priced at Opus rates.
+- **Cause.** WP-03 moved the price to `pricing.price_for("opus")` and left the label.
+- **Fix.** `HOST_BASELINE_TIER = "opus"` prices the baseline and `HOST_BASELINE_LABEL` names it,
+  so the two cannot drift (status-bar hook version 6).
+- **Test.** `test_status_bar_baseline_label_names_the_priced_model`.
+
+## 26. `llm-router replay` raises TypeError on a row with NULL confidence
+
+- **Symptom.** `commands/replay.format_decision_line` computed
+  `decision.get("classifier_confidence", 0) * 100`; on a row whose confidence is NULL it raised
+  `TypeError`, and a NULL task type printed as `None`. The copy of `usage.db` (2026-10-07) already
+  had 421 such successful rows out of 2,225 (router "unhinted" rows); P0.8 adds every DIRECT row
+  to that set.
+- **Cause.** `dict.get(key, default)` returns the stored None, not the default, for a NULL column.
+- **Fix.** A NULL confidence prints `Confidence: unknown`; a NULL task type, complexity or model
+  prints `unknown`. Measured values print as before.
+- **Test.** `test_replay_renders_null_confidence_and_task_type_as_unknown` (fails on da31df7 with
+  the TypeError; mutant that restores `.get("task_type", "unknown")` fails it too).
+
+## 27. The quality report and the Stop summary raise TypeError on a NULL task type
+
+- **Symptom.** The quality report tool (`tools/admin.py`) raised `TypeError: unsupported format string passed to
+  NoneType.__format__` when any `routing_decisions` row in its window had a NULL task type
+  (reproduced by the #310 reviewer on a copy of `usage.db`: 5 such DIRECT rows broke the
+  7-day report; deleting them fixed it). The session-end routing panels
+  (`_format_routing_section`, `_format_cc_model_section`) raised the same error on a NULL
+  `usage.task_type`.
+- **Cause.** P0.8 stores an unknown DIRECT task type as NULL (bug 22). These readers formatted
+  the value with `{task:<16}` / `{tool:<12}`, and `dict.get(key, default)` returns the stored
+  None (same class as bug 26). Before P0.8 no writer stored a NULL task type.
+- **Fix.** `tools/admin.py` renders NULL as `unknown` in the task-type table and the policy
+  event list. `session-end.py` `_aggregate` and the CC model panel use `get(...) or "unknown"`
+  (session-end hook version 19; 21 after main's #307 and #315 took 19 and 20). Other `GROUP BY task_type` readers checked: community.py
+  filters `task_type IS NOT NULL`; dashboard/tui.py, dashboard/server.py (JS `|| '?'`),
+  session-end `_query_savings_by_task_type` and the `commands/northstar` dry run already map
+  None. That sweep missed two readers; see bug 29.
+- **Rule.** A column that P0.8 may leave NULL is rendered with `value or "unknown"`, never
+  `get(key, "unknown")` and never a bare format spec.
+- **Test.** `test_quality_report_renders_null_task_type_as_unknown`,
+  `test_session_end_routing_panels_render_null_task_type` (both fail on 25a2ece).
+
+## 28. `llm-router northstar` showed the heuristic share as the North Star
+
+- **Symptom.** The CLI printed "North Star — routed-and-used share" per session and its
+  aggregate median/p25/max from the heuristic `outcome == used`, after bug 24 moved the Stop
+  line to the strict rule. Plan §1.2: the heuristic NS leaves user surfaces (P0.8-b).
+- **Cause.** Bug 24's fix changed `current_session_line` only.
+- **Fix.** `report()["aggregate"]` adds `strict_median`, `strict_p25`, `strict_max` over the
+  same sessions (n >= MIN_UNITS). The CLI shows "verified offload" from the strict rule and
+  prints the heuristic only on lines labelled "diagnostic". The JSON keys `median`/`p25`/`max`
+  keep their meaning.
+- **Test.** `test_northstar_cli_shows_the_strict_rule_as_the_north_star` (50 heuristic-used
+  units, 10 strict: shows 20%, was 100%), `test_report_schema_is_pinned`.
+
+## 29. The claw-code Stop hook and the dashboard models panel raise TypeError on a NULL task type
+
+- **Symptom.** `hooks/session-end-clawcode.py` (installed as a Stop hook, `install_hooks.py`)
+  exited 1 with `TypeError: unsupported format string passed to NoneType.__format__` when the
+  session had a paid `usage` row with a NULL task type. The #310 reviewer reproduced it on an
+  rsync copy of `~/.llm-router` with 3 seeded paid DIRECT rows of unknown task type (3 of 3
+  NULL): exit 1 and a traceback. `dashboard_enhanced.query_last_prompt_calls` returned the
+  NULL as None, and `cyber_grid._build_models_panel` formats it with `{c['task_type']:<10}`.
+- **Cause.** Bug 27's reader sweep checked `GROUP BY task_type` readers and the main
+  `session-end.py`, but not its claw-code sibling, which still read `r.get("task_type",
+  "unknown")` and formatted it with `{tool:<12}`, nor row-level readers of `usage`.
+- **Fix.** Both use `value or "unknown"` (claw-code hook version 3). A second sweep
+  (`get("task_type", ...)`, `["task_type"]` and every `SELECT ... task_type` under `src/` and
+  `hooks/`) found no other reader of `usage` or `routing_decisions` that raises on a NULL;
+  `commands/verify.py` prints one as `None` (cosmetic, not changed here).
+- **Rule.** A reader sweep greps for the column name across every hook copy and variant
+  (`*-clawcode.py`, `hooks/` and `src/llm_router/hooks/`), not only for `GROUP BY`.
+- **Test.** `test_clawcode_stop_hook_renders_null_task_type` (runs `main()` on a seeded
+  `usage.db`), `test_dashboard_last_prompt_calls_render_null_task_type`. Both fail on 15a1398e.
+
 ## P013-1. `llm_act` wrote files into the MCP process cwd
 
 - **Symptom.** A local model's `write_file` from `llm_act` landed in the directory the MCP
@@ -504,3 +753,245 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `test_codex_tier_is_confined_too`, `test_executor_without_cwd_is_read_only`). Six mutants
   (read-only flag off, containment off, ReAct on the process cwd, Codex without cwd, roots
   ignored, env ignored) each turn at least one of them red.
+
+## P0.14-a. The proxy ledger wrote 0 rows for 25 hours and nothing said so
+
+- **Symptom.** `~/.llm-router/proxy_calls.jsonl` wrote 0 rows from 2026-10-07 12:47 to
+  2026-10-08 14:24 while hooks kept recording turns. `llm-router kpi` rendered "not measurable"
+  for the proxy KPIs and `doctor` printed the proxy as answering and healthy. The owner found it
+  by hand.
+- **Cause.** Every session ran from a directory whose `.claude/settings.local.json` set
+  `env.ANTHROPIC_BASE_URL` straight to `api.anthropic.com`, overriding the user-level localhost
+  proxy default. The proxy was up; no traffic reached it. `doctor` only probed the port, and `kpi`
+  had no line that compared the ledger with the turns the hooks saw.
+- **Fix.** New `llm_router/proxy_liveness.py`, read-only, used by both commands.
+  `kpi` prints `proxy_rows_24h: N (n=N ...)` with the hook turns (`auto-route` /
+  `UserPromptSubmit` rows in `hook_latency.jsonl`) and `routing_decisions` rows of the same 24 h,
+  and a `WARN` line when N is 0 and either count is above 0; `--json` carries the same fields under
+  `proxy_liveness`. A turn count that cannot be read is `null`, never 0, and no recorded turn means
+  no WARN. `doctor`, when the user settings make a localhost `ANTHROPIC_BASE_URL` the default,
+  lists every `.claude/settings.local.json` / `.claude/settings.json` under the current directory
+  (depth 3) whose value differs from it, as path plus host only (no userinfo, path or query), and
+  the silent-ledger case; both count as doctor issues. No new env key.
+- **Test.** `tests/test_proxy_ledger_liveness.py`, 11 tests, all red on 12038e46 (main) and green
+  here: zero rows plus turns warns (text and JSON; also with `routing_decisions` alone); rows
+  present, no turns, rows older than 24 h and non-turn hooks give no WARN; an override is detected
+  with path and host and without the secret; no override and a non-localhost default report nothing;
+  `doctor` prints the override and exits non-zero.
+
+## P0.14-b. P0.14-a printed a pasted key as a "host", and its guards were untested
+
+- **Symptom.** An independent review of #329 planted `SECRETKEY999-bare-key` as the value of
+  `ANTHROPIC_BASE_URL` in a project `settings.local.json`; `llm-router doctor` printed it (lowercased)
+  as the overriding host. The same review found three guards that no test pinned (an unreadable
+  count, future-dated rows, the `sidecar_backfill` exclusion), a `doctor` test whose
+  `assert code != 0` passes whatever happens, and a WARN that needed a full 24 h of silence.
+- **Cause.** `_host_of` prefixed `//` to any scheme-less string and printed `urlsplit(...).hostname`,
+  so any token without a slash was "a host". The guards existed in code but no test failed when they
+  were removed (reviewer mutants: 17 of 22 killed, 3 real survivors).
+- **Fix.** `_host_of` prints only an IP or an RFC 1123 name with at least one dot (or exactly
+  `localhost`), optional port; everything else is `(unparseable)`. `newest_proxy_ts` is clamped to
+  now. New `short_silence()`: 0 proxy rows in the last 2 h with at least 3 `auto-route` /
+  `UserPromptSubmit` turns in those 2 h; `doctor` reports it (and counts it as an issue) unless the
+  24 h WARN already fired. Constants `SHORT_WINDOW_HOURS`, `SHORT_MIN_TURNS`; no new env key.
+  An unreadable turn count stays `None` and never warns; 0 turns reports nothing.
+- **Test.** `tests/test_proxy_ledger_liveness.py`: bare-key plant through `find_overrides`,
+  `doctor_findings` and `_run_doctor`; real hosts still print; 10 non-hostnames are `(unparseable)`;
+  unreadable hook / decision count is `None` with no WARN; future-dated proxy and decision rows are
+  not counted and `newest_proxy_ts <= now`; `sidecar_backfill` rows are not turns; short silence at
+  2 vs 3 turns, with a recent row, with 0 turns, with turns outside 2 h, with an unreadable count,
+  not repeated under the 24 h WARN, and as a `_run_doctor` issue. The `doctor` test now asserts
+  exactly one `proxy bypass:` issue naming the path and host, not the exit code. 15 mutants, all
+  killed (see the PR body).
+
+## 18. Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP)
+
+- **Symptom.** D-14 = A says a Q&A task type is never served by a local provider. #297 (M3.0)
+  enforced it in MCP `route_and_call` only. `hooks.chain_builder.build_chain`, which builds the
+  chain for the hook DIRECT path (auto-route draft, agent-route subagent DIRECT) and for the
+  in-process SDK `llm_router.route`, still put Ollama first for every simple and moderate
+  Q&A prompt. On da31df7, 16 of the 18 cases (9 `QA_TASK_TYPES` x {simple, moderate}; the 2
+  `research` cases already returned `[]`) had a local provider in the chain, and
+  `route("what is X", task_type="query")` called Ollama once
+  (`tests/test_qa_policy_shared.py`, red run: 21 failed, 5 passed).
+- **Cause.** The filter and its provider set lived as private names in `router.py`
+  (`_strip_local_for_qa`, `_QA_STRIP_PROVIDERS`). The hook path cannot import `router`
+  (cold import ~3.6 s; import time was ~77% of the slow hook tail [M41]), so it had no copy.
+- **Fix.** New `src/llm_router/qa_policy.py` holds `QA_TASK_TYPES`, `QA_STRIP_PROVIDERS` and
+  `strip_local_for_qa`; it imports only `llm_router.types`, which the hook path already loads.
+  `router` and `northstar` import the names back (MCP behaviour unchanged). `build_chain`
+  applies the filter with `keep_if_only_local=False`: when only local models are available
+  the Q&A chain is empty, so the hook falls through to Claude and the SDK raises
+  `RoutingError`. MCP keeps its existing rule (an Ollama-only chain is kept, because an empty
+  chain fails the call). `code` and every non-Q&A type are unchanged.
+- **Test.** `tests/test_qa_policy_shared.py`: 18 parametrised cases (9 QA types x 2
+  complexities, each over all 5 pressure zones) assert no ollama, lm_studio, vllm, llamacpp or
+  openai_compat in the chain; `code` keeps local first; the SDK test patches the Ollama call
+  with a counter and asserts 0 calls; a subprocess test asserts that importing `qa_policy`
+  loads neither `router` nor `northstar`. Mutants (keep-only-local in the hook, no strip in
+  `build_chain`, inverted QA check, `openai_compat` dropped, `qa_policy` importing `router`)
+  each turn the file red.
+
+## P011-1. Haiku guard re-tripped on audit days older than its window
+
+- **Symptom.** After the owner deleted `~/.llm-router/tier_overrides.json` to turn the Haiku
+  rewrite back on, the next guard run wrote the override again. Two low daily audits (7/10
+  and 7/10) from weeks earlier still counted as "2 consecutive days below 8/10". Found on
+  re-verification of P0.11 at b5f88b5 (unit test, synthetic audits; no live trip happened).
+- **Cause.** `run_once` evaluated `audit_daily` on the newest audited date at any age, not on
+  the dates inside the guard's 7-day window.
+- **Fix.** `audit_daily` in `run_once` looks only at audit days on or after the window start.
+  `kpi --haiku-watch` still names its own day. `audit_batch` is unchanged (newest summary at
+  any age, as ported from the research guard).
+- **Test.** `tests/test_proxy_haiku_guard.py::test_run_once_ignores_daily_audits_older_than_the_window`:
+  red on b5f88b5 (`assert 'trip' == 'ok'`), green on 3f4149b; mutant `recent = list(days)`
+  turns it red.
+
+## GE6-1. Quota-burn coverage kept owner-overridden sessions in the organic denominator
+
+- **Symptom.** `kpi --quota-burn` coverage on a copy of `~/.llm-router` for
+  2026-10-01T10:28Z..2026-10-08T10:28Z reported 7 organic sessions; the owner's override file
+  moves 1 of those 7 to research, so the organic population is 6. Repro on a temp home:
+  sessions A and B tagged organic, both with start and stop samples, A overridden to
+  research: coverage 1/2 (rate 0.5), right answer 1/1. One overridden session a week caps
+  the GE6-a point estimate at 6/7 = 85.7%, below the 95% bar, whatever the sampling.
+- **Cause.** `quota_samples.quota_burn` (:314 at d287ef4) built the denominator from the raw
+  tag kind, `{sid for sid, k in tagged.items() if k in allowed}`, while the per-session loop
+  resolved kind through `_kind_for` (override, then tag). The overridden session counted as
+  "other kind" in the loop, so it was never covered, but stayed in the denominator.
+- **Fix.** The denominator uses `_kind_for(sid, [], tagged)`, the same resolution as the loop.
+  Rule: every count in one KPI resolves session kind through one function.
+- **Test.** `tests/test_quota_samples.py::test_coverage_denominator_applies_the_owner_override`
+  and `test_coverage_denominator_override_with_no_samples` (both red on d287ef4). Mutant:
+  restoring the raw-tag denominator fails both.
+
+## GE6-2. Branch hook version equal to main's after main moved on
+
+- **Symptom.** PR #320 changed `session-end.py` and stamped it `llm_router-hook-version: 20`
+  (main + 1 when the branch was cut). Main then reached 20 through 2020f374 (#315). Merging
+  the branch would have left session-end at 20, the same stamp as main for different code, so
+  an installed v20 could not say which of the two it was (plan v16 §5 risk 15: version =
+  main + 1).
+- **Cause.** The stamp was chosen once, at branch time, and never re-checked when
+  origin/main was merged in.
+- **Fix.** On the merge of origin/main (7d857641) both copies moved to 21. Rule: every merge
+  of origin/main into a branch that changes a hook re-checks each changed hook's stamp
+  against main's and sets it to main + 1.
+- **Check.** No test can know main's stamp at test time. The check is a command, run after
+  each merge of origin/main:
+  `for f in session-start session-end; do git show origin/main:src/llm_router/hooks/$f.py | sed -n 2p; sed -n 2p src/llm_router/hooks/$f.py; done`
+
+## CODEX-1. Codex refused to start: `invalid transport in mcp_servers.llm_router`
+
+- **Symptom.** Codex exited at startup with `~/.codex/config.toml:443:14 invalid transport
+  in mcp_servers.llm_router` (owner's machine, reported in #323). Codex raises this when a
+  `[mcp_servers.<name>]` table has neither `command` nor `url`.
+- **Cause.** Codex writes `[mcp_servers.llm_router.tools.<x>]` itself when the user picks
+  "always allow" on a tool the installer did not pre-approve. Manifest replay
+  (`install_manifest.apply_uninstall`) removed only the tables it had recorded, so Codex's own
+  tool table outlived the server table and left an `llm_router` server with no transport.
+  A binary-less `install` and the legacy `uninstall_host_integrations` fallback did not look
+  for that state either.
+- **Fix.** `codex_host.remove_toml_subtree` removes the whole `mcp_servers.llm_router`
+  subtree (any quoting or spacing in the header, and dotted keys under `[mcp_servers]` or at
+  the root); comment lines right above the next kept table stay. `has_orphan_mcp_tables`
+  detects the no-transport state for manifest replay, binary-less install, legacy uninstall
+  and `doctor`. Install and uninstall re-check after removal: `✓ Removed orphaned ...` is
+  printed only when the server is gone and the file parses; otherwise a `⚠ ... delete them by
+  hand` line names what is left (a dotted key whose value spans lines is not cut).
+- **Test.** `tests/test_codex_install.py::test_uninstall_takes_tool_tables_codex_wrote_itself`
+  and `::test_install_without_binary_clears_orphaned_tool_tables` (both red on main 75700df4:
+  the orphan table stays). Also `::test_legacy_uninstall_clears_orphaned_tool_tables`,
+  `::test_*_reports_orphans_it_could_not_remove`,
+  `tests/commands/test_doctor.py::TestRunDoctorHost::test_run_doctor_host_codex_orphan_tool_tables_say_invalid_transport`
+  and the `remove_toml_subtree` tests in `tests/test_codex_host.py`. Each of 10 mutants
+  (one per code path, e.g. the legacy cleanup or the doctor branch disabled) turns one of
+  them red.
+
+## P09-1. G1 called a 16 s auto-route p95 "within budget"
+
+- **Symptom.** `llm-router kpi` G1 held each hook to `HOOK_BUDGETS_MS`, which held the host
+  timeouts (auto-route 60 s, agent-route 320 s) and declared 2-10 s budgets. Live p95s in
+  [HL7] (`$PP/v16/sources/HL7_hook_latency_to_20261007T1449Z.jsonl`, 2026-10-04T21:59Z to
+  2026-10-07T14:49Z): auto-route 16,040 ms (n = 345), session-start 16,178 ms (n = 65),
+  status-bar 4,488 ms (n = 344). Against the PRD (+300 ms sync p95, session-start 2 s,
+  statusline 100 ms) all three fail; the scorecard passed auto-route and session-start.
+  The statusline was not timed at all.
+- **Cause.** The table was written before any hook was timed and mixed two meanings: the
+  host's kill timeout (what `timed_out` means) and the latency bar the scorecard judges.
+- **Fix.** `HOOK_BUDGETS_MS` = the PRD bars (300 ms per sync hook, 2,000 ms session-start,
+  100 ms statusline); the host timeouts moved to `HOOK_TIMEOUTS_MS` and still decide
+  `timed_out`. G1 judges `router_added_ms` = elapsed minus the model phases (`draft_chain`,
+  `zce_model`, `cold_wait`; a `cold_wait` inside another model phase is subtracted once).
+  The statusline records a sampled row (`LLM_ROUTER_STATUSLINE_TIMING=1`, 1 call in 20)
+  through `python -m llm_router.hook_latency record-raw`.
+- **Test.** `tests/test_p09_hook_budgets.py`: `test_budgets_are_the_prd_bars`,
+  `test_kpi_fails_status_bar_at_the_measured_live_p95`,
+  `test_kpi_judges_router_added_and_reports_it_for_a_10s_draft`,
+  `test_the_row_carries_router_added_with_a_nested_cold_wait_subtracted_once`,
+  `test_statusline_timing_all_writes_a_statusline_row`.
+
+## P09-7. Statusline timing rows carried no session id, and needed a python3 that imports llm_router
+
+- **Symptom.** The statusline wrote its row through
+  `record-raw statusline Statusline <ms>`, and `record-raw` took exactly 4 arguments, so no
+  row could carry `session_id`, although the statusline gets the session JSON on stdin.
+  With 0 rows carrying a session id, P0.9-c (`statusline p95 <= 100 ms over >= 200*`) cannot
+  count sessions (PLAN v16 §1.4 rule 4) or drop research and executor sessions (rule 8), so
+  it could never be judged. Separately, the writer ran `${_chz_py:-python3}`; `_chz_py` is
+  set only in the full layout when `usage.db` exists, so in the fast layout, or wherever bare
+  `python3` cannot import llm_router, the backgrounded write failed silently. The test hid
+  this with a `python3` shim that can import the checkout.
+- **Cause.** The raw writer was designed for the elapsed time only, and the interpreter
+  search lived inside the money segment.
+- **Fix.** `record-raw <hook> <event> <elapsed_ms> [<session_id>]`. The statusline matches
+  `"session_id"` in its stdin JSON in bash (no process) and passes it; the timed fast path
+  reads stdin itself and pipes it to the tick. The interpreter search is `_chz_find_py`
+  (one list, shared with the money segment) and runs inside the backgrounded child, after
+  the clock has stopped.
+- **Test.** `tests/test_p09_hook_budgets.py`:
+  `test_record_raw_puts_the_session_id_on_the_row`,
+  `test_record_raw_leaves_an_empty_session_id_off_the_row`,
+  `test_statusline_row_carries_the_session_id_from_stdin[full|fast]`,
+  `test_statusline_row_is_written_when_bare_python3_cannot_import_llm_router` (all 5 test ids
+  fail on 38516fc8 and pass on head).
+- **Same gap on auto-route.** auto-route never called `set_session`, so its rows (P0.9-d)
+  had no session id either. Fixed in `perf/auto-route-imports` (#326): `main()` calls it
+  right after the stdin JSON parses. Test:
+  `tests/test_p09_auto_route_imports.py::test_main_names_the_session_on_the_latency_row`
+  (fails on 21234081, passes on 45fe0104).
+
+## P09-8. The statusline "wrapper adds < 5 ms" test failed under load
+
+- **Symptom.** `tests/test_p09_hook_budgets.py::test_the_timing_wrapper_adds_under_5ms_per_call`
+  failed on CI (#312 at a28e7df5, test 3.11: added unsampled 1.83 ms, sampled 92.15 ms) and
+  6 of 6 times in review with 6 copies in parallel (load ~65; sampled 94-123 ms).
+- **Cause.** The test compared medians of three separate blocks (40 off, 40 at 1-in-20,
+  10 at every call). Under load a perl start-up costs tens of ms and the load drifts between
+  blocks, so the medians measured the machine, not the wrapper.
+- **Fix (test only).** The arms run interleaved and each is judged on its minimum (load only
+  adds time). The structural half is a separate, load-independent test: with a perl that
+  logs its starts, an unsampled call starts 0 perls and a sampled call exactly 2. The
+  statusline comment now says the t1 read includes one perl start-up (an upward bias
+  against the 100 ms bar).
+- **Test.** `test_the_timing_wrapper_adds_under_5ms_per_call` and
+  `test_the_unsampled_path_starts_no_process_and_a_sampled_call_two_clock_reads`: 12 of 12
+  passes with 6 pytest runs in parallel plus 4-12 `yes` CPU burners (load1 38-65). Mutants:
+  a perl start on the unsampled path turns the structural test red; a 200 ms sleep in the
+  sampled path turns the timing test red.
+
+## P09-9. A session id named by one test leaked onto latency rows of later tests
+
+- **Symptom.** With all five P0.9 branches merged on main 56732137, the CI suite command
+  failed `tests/test_kpi_hook_latency.py::test_a_run_that_names_no_phase_writes_the_row_it_always_did`:
+  the row had an extra `session_id`. Deterministic in one process:
+  `pytest -p no:xdist -p no:randomly tests/test_p09_session_start_bg.py tests/test_kpi_hook_latency.py`.
+- **Cause.** `hook_latency.set_session` keeps the id in a module global, which is right for a
+  hook process (one invocation, one session). session-start's `main()` names its session
+  (#317), and its tests run `main()` in-process, so the id stayed set for every later test in
+  that worker. Each branch alone passed; the leak needs #317's caller and this branch's
+  `set_session` together.
+- **Fix (test only).** `tests/conftest.py::_reset_hook_latency_session` (autouse) clears the
+  id before and after each test, without importing the module when no test did.
+- **Test.** The two-file command above: 1 failed before, 34 passed after. Removing the
+  fixture turns it red again.

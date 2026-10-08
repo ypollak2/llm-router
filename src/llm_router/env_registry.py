@@ -214,6 +214,10 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PROXY_LOCAL_SHADOW": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_TIERS": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_TIER_POLICY": ("llm_router", "proxy/server.py", 1),
+    # P0.11 (PLAN v16, D-20): the proxy's Haiku guard inputs (proxy/haiku_guard.py).
+    "LLM_ROUTER_HAIKU_GUARD_KINDS": ("llm_router", "proxy/haiku_guard.py", 1),
+    "LLM_ROUTER_HAIKU_GUARD_AUDIT_DIR": ("llm_router", "proxy/haiku_guard.py", 1),
+    "LLM_ROUTER_HAIKU_GUARD_SHADOW_VERDICTS": ("llm_router", "proxy/haiku_guard.py", 1),
     # Kill switch for the tier decision's quota-pressure step (off/0/false/no).
     "LLM_ROUTER_PROXY_QUOTA_PRESSURE": ("llm_router", "proxy/quota_pressure.py", 1),
     # Escalation signals (proxy/escalation.py): the correction-signal
@@ -348,6 +352,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # debug fast line only; "both" = the full line then the fast line on a second
     # row; anything else (the default, "full") = the full status line only.
     "LLM_ROUTER_STATUSLINE": ("llm_router", "hooks/statusline-command.sh", 1),
+    "LLM_ROUTER_STATUSLINE_TIMING": ("llm_router", "hooks/statusline-command.sh", 1),
     "LLM_ROUTER_STATUSLINE_REFRESH_CMD": ("llm_router", "statusline_tick.py", 1),
     "LLM_ROUTER_STATUSLINE_SLOW_MS": ("llm_router", "statusline_refresh.py", 1),
     "LLM_ROUTER_STATUS_EVERY": ("llm_router", "hooks/status-bar-clawcode.py", 2),

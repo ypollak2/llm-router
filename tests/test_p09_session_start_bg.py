@@ -80,7 +80,7 @@ def test_main_does_not_run_any_moved_step_inline(hook, monkeypatch):
     for name in MOVED:
         monkeypatch.setattr(hook, name, slow(name))
     spawned = []
-    monkeypatch.setattr(hook, "_spawn_background_session_work", lambda cwd: spawned.append(cwd),
+    monkeypatch.setattr(hook, "_spawn_background_session_work", lambda cwd, *_: spawned.append(cwd),
                         raising=False)  # absent before P0.9: the test then fails on the timing
     elapsed, out = _run_main(hook, monkeypatch)
     assert called == [], f"main() ran {called} inline"
@@ -92,7 +92,7 @@ def test_main_does_not_run_any_moved_step_inline(hook, monkeypatch):
 def test_main_returns_while_a_5s_background_phase_still_runs(hook, monkeypatch, tmp_path):
     """The real spawn path: the child is detached, so main() returns first."""
     marker = tmp_path / "child_done"
-    monkeypatch.setattr(hook, "_background_session_work_argv", lambda cwd: [
+    monkeypatch.setattr(hook, "_background_session_work_argv", lambda cwd, *_: [
         sys.executable, "-c",
         f"import time, pathlib; time.sleep(5); pathlib.Path({str(marker)!r}).write_text('done')"])
     elapsed, _out = _run_main(hook, monkeypatch)
@@ -128,7 +128,7 @@ def test_one_failing_step_does_not_skip_the_rest(hook, monkeypatch):
 
 
 def test_the_next_session_start_shows_the_cached_hints(hook, monkeypatch):
-    monkeypatch.setattr(hook, "_spawn_background_session_work", lambda cwd: None)
+    monkeypatch.setattr(hook, "_spawn_background_session_work", lambda cwd, *_: None)
     hook._write_cached_hints("\n💺 Seats: claude-max")
     _elapsed, out = _run_main(hook, monkeypatch)
     assert "💺 Seats: claude-max" in out["hookSpecificOutput"]["additionalContext"]
@@ -160,7 +160,7 @@ def test_a_background_child_writes_no_session_start_latency_row(hook, monkeypatc
 
 def test_the_hook_itself_keeps_the_recorder_on(hook, monkeypatch):
     monkeypatch.delenv("LLM_ROUTER_HOOK_LATENCY", raising=False)
-    monkeypatch.setattr(hook, "_spawn_background_session_work", lambda cwd: None)
+    monkeypatch.setattr(hook, "_spawn_background_session_work", lambda cwd, *_: None)
     monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
     monkeypatch.setattr(sys, "stdout", io.StringIO())
     hook._entry([])

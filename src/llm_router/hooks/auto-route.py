@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 48
+# llm_router-hook-version: 49
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -123,13 +123,8 @@ def _init_hook_logging() -> None:
         if not root.handlers:
             root.addHandler(_logging.StreamHandler(sys.stderr))
 
-try:
-    from llm_router.profiles import ROUTING_TABLE
-    from llm_router.types import RoutingProfile, TaskType
-except ImportError:
-    ROUTING_TABLE = {}
-    RoutingProfile = None
-    TaskType = None
+# P0.9 task 5: ``llm_router.profiles`` (yaml + model_aliases, ~43 ms of import) is
+# read only by ``_get_selected_model``, after a route is decided; it is imported there.
 
 
 # ── Registered-tool surface (CHZ-SURF-01) ────────────────────────────────────
@@ -209,7 +204,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 48"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 49"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -3970,9 +3965,15 @@ def _get_selected_model(task_type: str, complexity: str) -> tuple[str, str]:
     Returns:
         (model_name, provider) tuple. Falls back to ("unknown", "unknown") if not found.
     """
-    if not ROUTING_TABLE or not TaskType or not RoutingProfile:
+    try:
+        # Imported here, not at module level (P0.9 task 5: yaml + model_aliases).
+        from llm_router.profiles import ROUTING_TABLE
+        from llm_router.types import RoutingProfile, TaskType
+    except ImportError:
         return "unknown", "unknown"
-    
+    if not ROUTING_TABLE:
+        return "unknown", "unknown"
+
     try:
         # Map task_type string to TaskType enum
         task_map = {
@@ -4393,6 +4394,16 @@ def main() -> None:
             # test-fixture artifact read as a 6% production defect rate.
             _coverage_unobserved("PARSE_FAILURE")
         sys.exit(0)
+
+    # P0.9: the session id on this run's hook_latency row, so a reader can count
+    # sessions and drop research / executor ones (PLAN v16 §1.4 rules 4 and 8).
+    # set_session ignores a non-string id and never raises.
+    try:
+        from llm_router.hook_latency import set_session as _hl_set_session
+    except ImportError:  # llm_router without set_session: no session on the row
+        _hl_set_session = None
+    if _hl_set_session is not None and isinstance(hook_input, dict):
+        _hl_set_session(hook_input.get("session_id"))
 
     prompt = hook_input.get("prompt", "")
     # Tags for llm_router.routing_log.is_human: a benchmark session in a /tmp

@@ -53,7 +53,7 @@ def simple(monkeypatch):
     """The rules classifier says moderate/code (the policy then proposes Sonnet)."""
     async def choose(text, pinned, *, anthropic=False):
         return {"task_type": "code", "complexity": "moderate", "chain_head": [], "model": None}
-    monkeypatch.setattr(pb, "choose_model", choose)
+    monkeypatch.setattr(pb, "tier_classify", choose)
 
 
 class FakeClassifier:
@@ -185,7 +185,7 @@ async def test_a_continuation_and_a_side_call_never_schedule(tmp_path, monkeypat
     assert (await _post(app, dict(_req(), tools=[]))).status_code == 200     # side call
     await app.state.cls_shadow.drain()
     rows = _rows(tmp_path)
-    assert [r["step_class"] for r in rows] == ["continuation", None]
+    assert [r["step_class"] for r in rows] == ["continuation", "side_call"]
     assert fake.calls == [] and _records(tmp_path) == [] and app.state.cls_shadow.drops == 0
     sched = app.state.cls_shadow
     assert sched.maybe_schedule(_req(), {"step_class": "continuation", "text_sha": "x"}) == ls.SKIPPED_CONTINUATION

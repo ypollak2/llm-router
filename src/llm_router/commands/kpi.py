@@ -75,9 +75,16 @@ SCOPE, stated rather than implied:
   contract). No path configured, or the file does not parse -> "not measured",
   the label the KPI spec itself uses for this gap.
 * **G1 hook latency** comes from ``hook_latency.jsonl`` (``llm_router.hook_latency``):
-  one row per hook invocation, p50 / p95 per hook against that hook's budget (the
-  one table ``hook_latency.HOOK_BUDGETS_MS``). NOT session-kind filtered -- a row
-  carries no session id. A hook the host KILLS at its timeout writes no row; kills
+  one row per hook invocation, p50 / p95 per hook against that hook's PRD bar (the
+  one table ``hook_latency.HOOK_BUDGETS_MS``: 300 ms per sync hook, 2 s
+  session-start, 100 ms statusline). The p50 / p95 are of ``router_added_ms``
+  (``hook_latency.router_added_ms``: elapsed minus the model phases ``draft_chain``,
+  ``zce_model``, ``cold_wait``; plain elapsed where a row names none), because a
+  local draft's model time is the answer, not overhead (PLAN v16 P0.9-f). The
+  elapsed p95 is printed beside it. NOT session-kind filtered: since P0.9
+  (``hook_latency.set_session`` and ``record-raw``'s session-id argument) a row
+  can carry ``session_id``, but older rows and hooks that never name the session
+  carry none, and G1 does not join the id to session kinds. A hook the host KILLS at its timeout writes no row; kills
   are shown from the fail-open ledger (``CHZ-HOOK-KILLED``). The proxy-side half is
   G1_proxy: p50 / p95 of ``tier_decision_s`` in proxy_calls.jsonl, turn-first and
   continuation calls apart.
@@ -406,6 +413,28 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index,
             joins)
 
 
+def _verify_shadow(days: int) -> dict | None:
+    """Informational counts of units in the window that carry a verify record. Counts only:
+    never read by NS, D1 or D2 (verifier PR B, shadow). None when no unit carries one."""
+    from llm_router import northstar as ns
+
+    records = ns.load_verify_records()  # joined here, not via units(): NS/D2 must not see them
+    if not records:
+        return None
+    c = {"verified": 0, "weak": 0, "failed": 0, "unavailable": 0}
+    for u in ns.units(days=days, backfill=True):
+        s = (records.get(u.get("unit_id")) or {}).get("verify_status")
+        if s in ("pass_f2p", "pass_f2p_model"):
+            c["verified"] += 1
+        elif s == "pass_p2p":
+            c["weak"] += 1
+        elif s == "fail":
+            c["failed"] += 1
+        elif s in ("unavailable", "not_applicable"):
+            c["unavailable"] += 1
+    return c if any(c.values()) else None
+
+
 def _strict_note(result: dict) -> dict:
     """Name the strict rule on a measured NS or D2 result: a ``reason`` and a printed line."""
     from llm_router import northstar as ns
@@ -637,6 +666,16 @@ def _in_window(ts: Any, since: float, until: float) -> bool:
     return t is not None and since <= t <= until
 
 
+#: Hooks whose router-added bar PLAN v16 defers (S6: "16.1: agent-route
+#: router-added"). Their routed-model phases are not in ``hook_latency.MODEL_PHASES``,
+#: so the whole delegation counts against the 300 ms bar and G1 reports them OVER;
+#: the line says why, so an OVER here is not read as a P0.9 regression.
+_G1_DEFERRED = {
+    "agent-route": ("routed-model phases (codex_delegation, direct_subagent, cli_delegation) "
+                    "are not subtracted; router-added bar deferred to 16.1 (PLAN v16 S6)"),
+}
+
+
 def _g1_hook(days: int, now: float, killed: int | None) -> dict:
     """p50 / p95 wall time per hook against that hook's budget.
 
@@ -662,24 +701,33 @@ def _g1_hook(days: int, now: float, killed: int | None) -> dict:
     thin = 0
     for name in sorted(by_hook):
         rs = by_hook[name]
-        values = sorted(float(r["elapsed_ms"]) for r in rs)
+        # Judged on router-added time (P0.9-f); read_rows guarantees elapsed_ms.
+        values = sorted(hl.router_added_ms(r) or 0.0 for r in rs)
+        elapsed = sorted(float(r["elapsed_ms"]) for r in rs)
         n = len(values)
         budget = hl.budget_ms(name)
         timed_out = sum(1 for r in rs if r.get("timed_out") is True)
+        model_rows = sum(1 for r in rs if hl.router_added_ms(r) != float(r["elapsed_ms"]))
         entry: dict[str, Any] = {"n": n, "budget_ms": budget, "timed_out": timed_out}
         if n < MIN_N:
             thin += 1
-            lines.append(f"{name}: {TOO_FEW} (n={n}); budget {budget}ms; {timed_out} hit it")
+            lines.append(f"{name}: {TOO_FEW} (n={n}); budget {budget}ms; {timed_out} hit the host timeout")
         else:
             p50, p95 = _percentile(values, 0.50), _percentile(values, 0.95)
-            entry.update(p50_ms=round(p50, 1), p95_ms=round(p95, 1))
+            p95_elapsed = _percentile(elapsed, 0.95)
+            entry.update(p50_ms=round(p50, 1), p95_ms=round(p95, 1),
+                         p95_elapsed_ms=round(p95_elapsed, 1), model_time_rows=model_rows)
             verdict = "within budget" if p95 <= budget else "OVER budget"
-            lines.append(f"{name}: p50={p50:.0f}ms p95={p95:.0f}ms vs {budget}ms budget "
-                         f"({verdict}); {timed_out} of {n} hit the budget")
+            lines.append(f"{name}: router-added p50={p50:.0f}ms p95={p95:.0f}ms vs {budget}ms budget "
+                         f"({verdict}); elapsed p95={p95_elapsed:.0f}ms; model time subtracted on "
+                         f"{model_rows} of {n}; {timed_out} hit the host timeout")
             if p95 > budget:
                 over.append(f"{name} p95={p95:.0f}ms>{budget}ms")
             if worst is None or p95 / budget > worst[0]:
                 worst = (p95 / budget, name, round(p95))
+        if name in _G1_DEFERRED:
+            entry["deferred"] = _G1_DEFERRED[name]
+            lines[-1] += f"; NOTE: {_G1_DEFERRED[name]}"
         hooks[name] = entry
     if killed is None:
         lines.append("killed by the host (leaves no row) (auto-route only): not countable yet -- no "
@@ -1751,6 +1799,30 @@ def _classifier_shadow_line(s: dict | None) -> str | None:
             "(hashes and tiers only; informational, never in NS, D1 or D2)")
 
 
+# ── P0.14-a: proxy ledger liveness ─────────────────────────────────────────
+
+def _proxy_liveness(now: float, proxy_rows: list[dict]) -> dict:
+    from llm_router import proxy_liveness
+
+    return proxy_liveness.liveness(now=now, proxy_rows=proxy_rows)
+
+
+def _proxy_liveness_lines(live: dict | None) -> list[str]:
+    if not live:
+        return []
+    h = f"{live['window_hours']:g}"
+
+    def n(v: Any) -> str:
+        return "unreadable" if v is None else str(v)
+
+    lines = [f"proxy_rows_24h: {live['proxy_rows_24h']} (n={live['proxy_rows_24h']} proxy ledger row(s) "
+             f"in the {h} h to generated; hook turns {n(live['hook_turns_24h'])}, "
+             f"routing decisions {n(live['routing_decisions_24h'])})"]
+    if live.get("warn"):
+        lines.append(f"WARN {live['message']}")
+    return lines
+
+
 # ── assembly ───────────────────────────────────────────────────────────────
 
 def compute_scorecard(days: int = 7, *, include_research: bool = False,
@@ -1796,6 +1868,7 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         "window_days": days,
         "include_research": include_research,
         "joins": joins,
+        "verify_shadow": _verify_shadow(days),
         # Informational only: not in "kpis", so not in _ORDER, --health or NS/D1/D2.
         "local_shadow": _local_shadow_summary(days, win),
         # O3 is likewise outside "kpis": adding it there would change the key set, _ORDER and
@@ -1803,6 +1876,8 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         "o3": _o3_with_caveat(
             _o3_offload_share(days, allowed, index, all_rows, now_ts, since_policy, win, g3_r)),
         "proxy_local_shadow": _proxy_shadow_summary(days, win),
+        # P0.14-a: is the proxy ledger alive? Outside "kpis" (a liveness check, not a KPI).
+        "proxy_liveness": _proxy_liveness(now_ts, all_rows),
         "classifier_shadow": _classifier_shadow_summary(days, win, allowed, index, pop["allowed"]),
         "kpis": {
             "NS": ns_r, "O1": o1_r, "O2": o2_r,
@@ -1933,6 +2008,10 @@ def render_scorecard(data: dict) -> str:
         lines.append(f"  {_LABELS[key]:<42s} {r['value']}")
         for extra in r.get("lines", ()):
             lines.append(f"      {extra}")
+        if key == "D2" and data.get("verify_shadow"):
+            v = data["verify_shadow"]
+            lines.append(f"      verify (shadow): {v['verified']} verified, {v['weak']} weak, "
+                         f"{v['failed']} failed, {v['unavailable']} unavailable (informational; not in NS/D1/D2)")
     for key, r in (data.get("kpis_diag") or {}).items():
         if not r.get("measurable"):
             continue  # nothing to compare: the card stays as it was
@@ -1949,6 +2028,7 @@ def render_scorecard(data: dict) -> str:
     classifier_line = _classifier_shadow_line(data.get("classifier_shadow"))
     if classifier_line:
         lines.append(classifier_line)
+    lines += _proxy_liveness_lines(data.get("proxy_liveness"))
     lines.append(_join_line(data["joins"]))
     lines.append("O1 is never session-kind filtered (usage.db predates tagging); G3 is not "
                   "session-kind filtered either (see KPIS.md); neither are G1 (hook), G2 and G4, "
@@ -2046,16 +2126,37 @@ def cmd_kpi(args: list[str]) -> int:
                           "its Claude Code transcript (same rules as the live tagger), and append it "
                           "to the sidecar session_kind_backfill.jsonl; a live tag always wins and "
                           "deleting the sidecar restores the untagged behaviour exactly")
+    ap.add_argument("--quota-burn", action="store_true",
+                     help="S3 / GE6: Claude quota burn per session and per human turn from "
+                          "quota_samples.jsonl and quota_history.jsonl; needs --since and --until; "
+                          "stale samples are labelled estimated and kept out of the measured line")
     ap.add_argument("--dry-run", action="store_true",
                      help="with --backfill-tags: report what would be written; write nothing")
     ap.add_argument("--validate-backfill", action="store_true",
                      help="read-only: run the backfill rules on sessions that already have a live "
                           "kind and report agreement plus a confusion table (counts only)")
+    ap.add_argument("--haiku-watch", action="store_true",
+                     help="the daily Haiku Option A watch (PLAN v16 P0.11, D-20) over --since/--until: "
+                          "Haiku-decided calls, tier_retry, redo, blind audit and shadow triggers, each "
+                          "with its n; exit 1 when a D-20 trigger is not evaluable (the day fails)")
     parsed = ap.parse_args(args)
     if parsed.dry_run and not parsed.backfill_tags:
         ap.error("--dry-run needs --backfill-tags")
     if parsed.strict and not parsed.health:
         ap.error("--strict needs --health")
+    if parsed.quota_burn:
+        if parsed.since is None or parsed.until is None:
+            ap.error("--quota-burn needs --since and --until (an absolute window)")
+        q_since, q_until = _parse_when(parsed.since), _parse_when(parsed.until)
+        if q_since is None or q_until is None or not q_since < q_until:
+            ap.error("--quota-burn: --since and --until must be readable and since < until")
+        from llm_router import quota_samples
+
+        burn = quota_samples.quota_burn(q_since, q_until,
+                                        include_research=(parsed.include == "research"))
+        print(json.dumps(burn, indent=2, default=str) if parsed.json
+              else quota_samples.render_quota_burn(burn))
+        return 0
     if parsed.validate_backfill:
         from llm_router import session_kind_backfill as skb
 
@@ -2089,6 +2190,14 @@ def cmd_kpi(args: list[str]) -> int:
             ap.error(f"--until: cannot read {parsed.until!r} as a date, an ISO time or epoch seconds")
         if not win_since < win_until:
             ap.error("--since must be before --until")
+    if parsed.haiku_watch:
+        if win_since is None:
+            ap.error("--haiku-watch needs --since and --until (an absolute window)")
+        from llm_router.proxy import haiku_guard
+
+        watch = haiku_guard.watch(win_since, win_until)
+        print(json.dumps(watch, indent=2, default=str) if parsed.json else haiku_guard.render_watch(watch))
+        return 0 if watch["day_pass"] else 1
 
     data = compute_scorecard(days=parsed.days, include_research=(parsed.include == "research"),
                              schema_since=since, since_policy=parsed.since_policy,

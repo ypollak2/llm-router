@@ -33,6 +33,7 @@
      "injected": false,
      "reason": "no_scope"
     },
+    "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
     ],
@@ -44,6 +45,7 @@
     "session_id": "11111111-2222-3333-4444-555555555555",
     "session_kind": null,
     "step_class": "continuation",
+    "step_ineligible": null,
     "stop_reason": "end_turn",
     "stream": true,
     "task_type": "code",
@@ -159,6 +161,7 @@
      "injected": false,
      "reason": "no_scope"
     },
+    "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
     ],
@@ -170,6 +173,7 @@
     "session_id": "11111111-2222-3333-4444-555555555555",
     "session_kind": null,
     "step_class": "continuation",
+    "step_ineligible": null,
     "stop_reason": "end_turn",
     "stream": true,
     "task_type": "code",
@@ -291,6 +295,7 @@
      "injected": false,
      "reason": "no_scope"
     },
+    "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
     ],
@@ -302,6 +307,7 @@
     "session_id": "11111111-2222-3333-4444-555555555555",
     "session_kind": null,
     "step_class": "continuation",
+    "step_ineligible": null,
     "stop_reason": "end_turn",
     "stream": true,
     "task_type": "code",
@@ -419,6 +425,7 @@
      "injected": false,
      "reason": "no_scope"
     },
+    "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
     ],
@@ -430,6 +437,7 @@
     "session_id": "11111111-2222-3333-4444-555555555555",
     "session_kind": null,
     "step_class": "continuation",
+    "step_ineligible": null,
     "stop_reason": "end_turn",
     "stream": true,
     "task_type": "code",
@@ -550,6 +558,7 @@
      "injected": false,
      "reason": "no_scope"
     },
+    "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
     ],
@@ -564,6 +573,7 @@
     "session_id": "11111111-2222-3333-4444-555555555555",
     "session_kind": null,
     "step_class": "continuation",
+    "step_ineligible": null,
     "stream": false,
     "task_type": "code",
     "text_sha": "15927a87ba22852e",
@@ -630,6 +640,7 @@
      "injected": false,
      "reason": "no_scope"
     },
+    "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
     ],
@@ -645,6 +656,7 @@
     "session_id": "11111111-2222-3333-4444-555555555555",
     "session_kind": null,
     "step_class": "continuation",
+    "step_ineligible": null,
     "stream": true,
     "task_type": "code",
     "text_sha": "15927a87ba22852e",
@@ -712,6 +724,7 @@
      "injected": false,
      "reason": "no_scope"
     },
+    "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
     ],
@@ -723,6 +736,7 @@
     "session_id": "11111111-2222-3333-4444-555555555555",
     "session_kind": null,
     "step_class": "continuation",
+    "step_ineligible": null,
     "stop_reason": "end_turn",
     "stream": true,
     "task_type": "code",
@@ -825,6 +839,7 @@
     "has_mid_system": true,
     "mixed_history": false,
     "msg_id": "msg_upstream01",
+    "prev_tool_class": null,
     "prev_tools": [],
     "reason": "not_eligible",
     "req_bytes": 6321,
@@ -833,7 +848,8 @@
     "served_by": "anthropic",
     "session_id": "11111111-2222-3333-4444-555555555555",
     "session_kind": null,
-    "step_class": null,
+    "step_class": "subagent_first",
+    "step_ineligible": null,
     "stop_reason": "end_turn",
     "stream": true,
     "text_sha": "15927a87ba22852e",
@@ -929,6 +945,7 @@
     "has_mid_system": true,
     "mixed_history": false,
     "msg_id": "msg_upstream01",
+    "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
     ],
@@ -939,7 +956,8 @@
     "served_by": "anthropic",
     "session_id": "11111111-2222-3333-4444-555555555555",
     "session_kind": null,
-    "step_class": null,
+    "step_class": "continuation",
+    "step_ineligible": "forced_tool_choice",
     "stop_reason": "end_turn",
     "stream": true,
     "text_sha": "15927a87ba22852e",
@@ -1053,6 +1071,7 @@
      "injected": false,
      "reason": "no_scope"
     },
+    "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
     ],
@@ -1067,6 +1086,7 @@
     "session_id": "11111111-2222-3333-4444-555555555555",
     "session_kind": null,
     "step_class": "continuation",
+    "step_ineligible": null,
     "stream": true,
     "task_type": "code",
     "text_sha": "15927a87ba22852e",
@@ -1115,6 +1135,7 @@
      "injected": false,
      "reason": "no_scope"
     },
+    "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
     ],
@@ -1126,6 +1147,7 @@
     "session_id": "11111111-2222-3333-4444-555555555555",
     "session_kind": null,
     "step_class": "continuation",
+    "step_ineligible": null,
     "stop_reason": "end_turn",
     "stream": true,
     "task_type": "code",
@@ -1239,6 +1261,7 @@
     "has_mid_system": true,
     "mixed_history": true,
     "msg_id": "msg_upstream01",
+    "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
     ],
@@ -1250,6 +1273,7 @@
     "session_id": "11111111-2222-3333-4444-555555555555",
     "session_kind": null,
     "step_class": "continuation",
+    "step_ineligible": null,
     "stop_reason": "end_turn",
     "stream": true,
     "text_sha": "15927a87ba22852e",
@@ -1389,6 +1413,7 @@
     "has_mid_system": true,
     "mixed_history": false,
     "msg_id": "msg_upstream01",
+    "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
     ],
@@ -1399,7 +1424,8 @@
     "served_by": "anthropic",
     "session_id": "11111111-2222-3333-4444-555555555555",
     "session_kind": null,
-    "step_class": null,
+    "step_class": "continuation",
+    "step_ineligible": "media",
     "stop_reason": "end_turn",
     "stream": true,
     "text_sha": "15927a87ba22852e",
@@ -1495,6 +1521,7 @@
     "has_mid_system": true,
     "mixed_history": false,
     "msg_id": "msg_upstream01",
+    "prev_tool_class": null,
     "prev_tools": [
      "Edit"
     ],
@@ -1505,7 +1532,8 @@
     "served_by": "anthropic",
     "session_id": "11111111-2222-3333-4444-555555555555",
     "session_kind": null,
-    "step_class": null,
+    "step_class": "side_call",
+    "step_ineligible": null,
     "stop_reason": "end_turn",
     "stream": true,
     "text_sha": "15927a87ba22852e",
@@ -1619,6 +1647,7 @@
      "injected": false,
      "reason": "no_scope"
     },
+    "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
     ],
@@ -1633,6 +1662,7 @@
     "session_id": "11111111-2222-3333-4444-555555555555",
     "session_kind": null,
     "step_class": "continuation",
+    "step_ineligible": null,
     "stream": true,
     "task_type": "code",
     "text_sha": "15927a87ba22852e",
@@ -1787,6 +1817,7 @@
     "mixed_history": false,
     "model": null,
     "msg_id": "msg_upstream01",
+    "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
     ],
@@ -1798,6 +1829,7 @@
     "session_id": "11111111-2222-3333-4444-555555555555",
     "session_kind": null,
     "step_class": "continuation",
+    "step_ineligible": null,
     "stop_reason": "end_turn",
     "stream": true,
     "task_type": "code",
@@ -1894,6 +1926,7 @@
     "has_mid_system": true,
     "mixed_history": false,
     "msg_id": "msg_upstream01",
+    "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
     ],
@@ -1905,6 +1938,7 @@
     "session_id": "11111111-2222-3333-4444-555555555555",
     "session_kind": null,
     "step_class": "continuation",
+    "step_ineligible": null,
     "stop_reason": "end_turn",
     "stream": true,
     "text_sha": "15927a87ba22852e",
@@ -2000,6 +2034,7 @@
     "has_mid_system": false,
     "mixed_history": false,
     "msg_id": "msg_upstream01",
+    "prev_tool_class": null,
     "prev_tools": [
      "Read"
     ],
@@ -2010,7 +2045,8 @@
     "served_by": "anthropic",
     "session_id": "11111111-2222-3333-4444-555555555555",
     "session_kind": null,
-    "step_class": null,
+    "step_class": "turn_first",
+    "step_ineligible": null,
     "stop_reason": "end_turn",
     "stream": true,
     "text_sha": "e3b0c44298fc1c14",
@@ -2107,6 +2143,7 @@
     "has_mid_system": true,
     "mixed_history": false,
     "msg_id": null,
+    "prev_tool_class": null,
     "prev_tools": [],
     "reason": "routing_off",
     "req_bytes": 6321,
@@ -2114,7 +2151,8 @@
     "served_by": "anthropic",
     "session_id": "11111111-2222-3333-4444-555555555555",
     "session_kind": null,
-    "step_class": null,
+    "step_class": "subagent_first",
+    "step_ineligible": null,
     "stream": true,
     "text_sha": "15927a87ba22852e",
     "thinking_retry": false,
