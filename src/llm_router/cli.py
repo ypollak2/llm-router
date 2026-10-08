@@ -917,6 +917,49 @@ _KNOWN_SUBCOMMANDS = frozenset(
 )
 
 
+_HELP_FLAGS = ("-h", "--help")
+# CLI-HELP-1: subcommands that print their own help for -h/--help in any
+# position (argparse, or an explicit check over all args).
+_OWN_HELP_ANYWHERE = frozenset({
+    "audit", "calibrate", "cp", "dev-refresh", "gc", "install", "inventory", "invoice",
+    "judge", "kpi", "last", "migrate", "mod", "northstar", "pi", "policy", "proxy",
+    "quickstart", "replay", "resolve", "retrospect", "run", "serve", "snapshot", "stats",
+    "statusline", "team-sync", "test-delta", "verify", "welcome",
+})
+# ...only when the flag comes straight after the subcommand (`okf --help`,
+# not `okf gc --help`).
+_OWN_HELP_FIRST = frozenset({"benchmark", "okf", "provider", "semantic", "sessions"})
+
+
+def _subcommand_help(args: list[str]) -> bool:
+    """Print help for ``llm-router <cmd> ... --help`` and return True when the
+    subcommand would not handle the flag itself.
+
+    CLI-HELP-1: every other subcommand ignored --help and ran: `uninstall --help`
+    uninstalled (and edited .vscode/mcp.json in the cwd), `update`/`onboard`
+    rewrote hooks, `gateway`/`broker` started servers. Help must be inert, so
+    the default is to answer here, from this module's usage text, without
+    importing the subcommand.
+    """
+    if len(args) < 2 or not any(a in _HELP_FLAGS for a in args[1:]):
+        return False
+    cmd = args[0]
+    if cmd in _OWN_HELP_ANYWHERE or (cmd in _OWN_HELP_FIRST and args[1] in _HELP_FLAGS):
+        return False
+    prefix = f"llm-router {cmd}"
+    lines = [ln.strip() for ln in (__doc__ or "").splitlines()
+             if ln.strip() == prefix or ln.strip().startswith(prefix + " ")]
+    if not lines:  # not a documented subcommand: the unknown-command path answers
+        return False
+    print("usage:")
+    for ln in lines:
+        print(f"  {ln}")
+    print()
+    print("options:")
+    print("  -h, --help    show this message and exit")
+    return True
+
+
 def main() -> None:
     """Unified CLI: dispatches to MCP server or subcommands."""
     _make_output_encoding_safe()
@@ -965,6 +1008,9 @@ def main() -> None:
             # the same fail-open contract the hooks apply internally.
             print(f"llm-router run-hook: {hook_path} failed: {exc}", file=sys.stderr)
             sys.exit(0)
+        return
+
+    if _subcommand_help(args):
         return
 
     if args and args[0] == "install":

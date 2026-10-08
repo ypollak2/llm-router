@@ -16,6 +16,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 5 | Haiku 400 on a mid-conversation system message | worked around (flag off); fold is plan task M0.7 |
 | P09-3 | A session-start background child wrote its own "session-start" latency row | fixed in `perf/session-start-bg` (P0.9) |
 | P09-4 | session-start ran Ollama start, `ollama list`, seats, usage.db and git inline | fixed in `perf/session-start-bg` (P0.9 task 3) |
+| P09-6 | Stop (session-end) ran a keychain read + HTTPS usage fetch and three maintenance jobs inline on every turn | fixed in `perf/session-end-bg` (P0.9 task 7) |
 | 6 | Research session b9f04425 counted as organic | fixed in #291 (M0.0b) |
 | 7 | `edit_outcomes.jsonl` rows with no source | open, fix is plan task M0.3(c) |
 | 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | fixed in P0.7 (`fix/learning-bugs`): one flag, default off |
@@ -44,17 +45,19 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | P010-1 | A dead proxy fails every Claude Code session | fixed in this change (P0.10); live switch is an owner step |
 | P013-1 | `llm_act` wrote files into the MCP process cwd | fixed for the file tools in this change (P0.13); bash confinement is P2.9 |
 | P0.14-a | Proxy ledger wrote 0 rows for 25 h and nothing flagged it | fixed in this change (P0.14) |
-| 18 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
 | P011-1 | Haiku guard re-tripped on audit days older than its window | fixed in `feat/haiku-guard-in-repo` (P0.11, 3f4149b) |
 | P1.7-c-1 | Classifier shadow on: `assemble` held the GIL and delayed continuations | fixed in this change (v16 P1.7-c) |
 | GE6-1 | Quota-burn coverage kept owner-overridden sessions in the organic denominator | fixed in `feat/quota-samples` (#320, GE6 repair 1) |
 | GE6-2 | Branch hook version equal to main's after main moved on | fixed in `feat/quota-samples` (#320, GE6 repair round 1) |
 | CODEX-1 | Codex refused to start: `invalid transport in mcp_servers.llm_router` | fixed in this change (#323) |
+| CODEX-2 | Codex TOML removal could write an unparseable config.toml and dropped an indented user table | fixed in this change (#323 review follow-up) |
+| CLI-HELP-1 | `llm-router uninstall --help` ran a real uninstall; 20 more subcommands ignored `--help` | fixed in this change (#323 review follow-up) |
 | P09-1 | G1 called a 16 s auto-route p95 "within budget" | fixed in `perf/hook-budgets` (P0.9 tasks 1-2) |
 | P09-7 | Statusline timing rows carried no session id, and needed a python3 that imports llm_router | fixed in `perf/hook-budgets` (P0.9 repair 1) |
 | P09-8 | The statusline "wrapper adds < 5 ms" test failed under load | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
 | P09-9 | A session id named by one test leaked onto latency rows of later tests | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
 | CI-1 | `test_verify_unit` copytree of a fresh git repo raced git auto-maintenance (`maintenance.lock`) | fixed in this change (test-only; production unaffected) |
+| P03-1 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -171,6 +174,12 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   copy of `hook_latency.jsonl` + `.1` (2026-10-04T22:07Z to 2026-10-07T14:47Z, same 65 rows),
   28 rows fell in one burst (2026-10-06 05:07-05:08Z, 4.6-17.4 s). The other 37 read
   138 ms-11.3 s: 11 of them over 2 s, p95 11,045 ms. So the tail is not only the burst.
+  **Correction (P0.9 task 7 re-count, PLAN §1.4 rule 5 episodes = rows over the bar split by
+  gaps >= 60 s).** 10 of those 11 ran 2026-10-06 05:06:49-05:06:57Z, seconds before the 05:07
+  minute, so they belong to the same burst. Same copy, 66 rows to 2026-10-08T11:02Z: 39 over
+  2 s, 38 in one episode (05:06:49-05:08:04Z, share 0.974); outside it 1 of 28 rows is over
+  2 s and p95 is 723 ms. The tail before the fix was essentially the one burst
+  (`$PP/v16/p09/baseline_predeploy_20261008T1102Z.json`).
 - **Cause.** `main()` ran `start-ollama.sh` (waits up to 10 s), `ollama list`, a seats
   re-detect (2 s budget), two usage.db queries, an Ollama co-residency probe, the pxpipe sync,
   a `git` check for the OKF index and five process spawns before returning. Under a burst of
@@ -181,6 +190,36 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   from cached usage and `additionalContext`.
 - **Test.** `tests/test_p09_session_start_bg.py::test_main_does_not_run_any_moved_step_inline`
   (FAILS on da31df7: all 17 steps ran inline), `test_main_returns_while_a_5s_background_phase_still_runs`.
+
+## P09-6. Stop (session-end) ran a keychain read + HTTPS usage fetch and three maintenance jobs inline on every turn
+
+- **Symptom.** session-end p95 3,353 ms (n = 252) against the PRD's +300 ms sync bar [HL7].
+  The Stop hook fires after every turn, so every turn paid it. The row carried no phases, so
+  nothing said where the time went.
+- **Cause.** `main()` called `_get_cc_usage()`, which ran `security find-generic-password`
+  and an HTTPS call to the usage endpoint (8 s timeout) inline, then rebuilt the learned
+  profile, ran the auto-profile rescan check and the model-evaluator check. The per-turn
+  line reads quota from `usage.json`; that fetch only refreshes it, and the other three feed
+  nothing on the line.
+- **Fix.** One detached child (`--background-stop-work`, fork + execv through
+  `statusline_tick._spawn_detached`, no new subprocess site) runs the fetch and the three jobs.
+  The sync path reads `usage.json`; a reading younger than 120 s counts as live (it still
+  becomes the next baseline). A note the child would have added to the full box goes to
+  `stop_notes.json` and the next Stop shows it once. The child turns the latency recorder off
+  (the P09-3 trap). session-end and agent-route now name their phases (`phases_ms`).
+  Found, not fixed: `_maybe_evaluate_models` imports `EVAL_CACHE_PATH`, which
+  `model_evaluator` no longer defines, so the 7-day model check is a no-op (it was inline too).
+- **Test.** `tests/test_p09_session_end_bg.py::test_stop_runs_none_of_the_moved_steps_inline`
+  (FAILS on da31df7: the fetch, the profile rebuild, the rescan check and the evaluator all ran
+  inline), `test_stop_returns_while_a_5s_child_still_runs`,
+  `test_cached_usage_is_live_only_while_fresh`, `test_the_child_writes_no_session_end_latency_row`.
+- **Follow-up (review of #325).** The first version spawned one child on every Stop, so a
+  burst of N Stops started N concurrent keychain + HTTPS children. The spawn now takes a 15 s
+  claim (`stop_background.claim`, as status-bar's refresher): `test_a_burst_of_stops_starts_one_child`,
+  `test_the_claim_expires_after_its_window` (both fail on e5148bc). Suite tests that run
+  `main()` in-process stub the spawn. Not claimed: a Stop wall-time gain. With the live fetch
+  stubbed in both arms the moved steps cost ~10 ms (reviewer's bench, n = 20 per arm); the
+  real saving (keychain + HTTPS, 8 s timeout) is not measured, so no number is given.
 
 ## 6. Research session b9f04425 counted as organic
 
@@ -819,8 +858,16 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   not repeated under the 24 h WARN, and as a `_run_doctor` issue. The `doctor` test now asserts
   exactly one `proxy bypass:` issue naming the path and host, not the exit code. 15 mutants, all
   killed (see the PR body).
+- **Known limit.** A token with a dot between alphabetic labels still reads as a host:
+  `sk-ant.SECRETKEY999` prints as `sk-ant.secretkey999`, `abc.def` as `abc.def`. RFC 1123 cannot
+  tell such a token from a real name. A purely numeric last label (`secret.123`) is
+  `(unparseable)`. The review of #330 found it; it is disclosed, not fixed.
+- **Follow-up tests (#330 review).** `test_short_silence_does_not_count_future_dated_proxy_rows`
+  (upper bound of the 2 h window) and `test_decision_rows_older_than_24h_are_not_counted` (lower
+  bound of the decision window). Each is red under the mutant the review left alive (`t <= now_ts`
+  dropped from `short_silence`; `timestamp >= datetime(?)` dropped from `_decision_turns`).
 
-## 18. Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP)
+## P03-1. Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP)
 
 - **Symptom.** D-14 = A says a Q&A task type is never served by a local provider. #297 (M3.0)
   enforced it in MCP `route_and_call` only. `hooks.chain_builder.build_chain`, which builds the
@@ -954,6 +1001,56 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   and the `remove_toml_subtree` tests in `tests/test_codex_host.py`. Each of 10 mutants
   (one per code path, e.g. the legacy cleanup or the doctor branch disabled) turns one of
   them red.
+
+## CODEX-2. Codex TOML removal could write an unparseable config.toml and dropped an indented user table
+
+- **Symptom.** The #323 review fed an orphaned `[mcp_servers.llm_router.tools.x]` table holding
+  `w = [\n[1, 2]\n]` (a valid nested array) to the cleanup. The line-based cut read `[1, 2]` as a
+  header and returned `[1, 2]\n]`, which does not parse. Manifest replay of
+  `[mcp_servers.llm_router]` wrote such a cut unchecked and printed `✓ Removed`. Separately, a
+  user's indented `  [keep]` table right after an llm_router table was removed with it.
+- **Cause.** `install._clear_codex_orphan_tables` re-parsed the cut with tomllib, but no test
+  pinned that guard (a reviewer mutant that dropped it survived).
+  `install_manifest._remove_toml_table` (MCP_TABLE branch) had no re-parse at all.
+  `codex_host._HEADER_LINE` was anchored at column 0, so an indented header (legal TOML) did not
+  end the table being dropped.
+- **Fix.** `_remove_toml_table` re-parses the cut before it writes. If the cut does not parse, or
+  an llm_router server entry would remain, the file is left unchanged and the line is
+  `⚠ [mcp_servers.llm_router] left in <path>: <reason> ...; delete the ... tables by hand`.
+  `_HEADER_LINE` accepts leading spaces or tabs.
+- **Test.** `tests/test_codex_install.py::test_orphan_cleanup_refuses_an_edit_that_would_not_parse`
+  and `::test_legacy_uninstall_leaves_a_nested_array_table_unchanged` (red with the tomllib
+  re-parse removed from `_clear_codex_orphan_tables`);
+  `::test_manifest_replay_refuses_a_cut_that_would_not_parse` and
+  `::test_manifest_replay_reports_a_multiline_dotted_key_it_left` (red on main adf93a02);
+  `tests/test_codex_host.py::test_remove_subtree_ends_at_an_indented_header` (space and tab; red on
+  main).
+
+## CLI-HELP-1. `llm-router uninstall --help` ran a real uninstall
+
+- **Symptom.** During the #323 review, `llm-router uninstall --help` uninstalled. It edited the
+  review clone's `.vscode/mcp.json` and `.windsurf/mcp.json`. A scan of every subcommand with
+  `--help` (HOME and cwd in a temp dir) on adf93a02 found more. `uninstall` rewrote
+  `~/.claude/settings.json` and the cwd MCP files. `update` and `onboard` rewrote the hooks.
+  `init-claude-memory` wrote config. `budget`, `team`, `gain`, `doctor`, `summary`, `probe` and
+  `explain-dashboard` wrote state DBs. `broker` wrote a secret and kept running. `gateway` tried to
+  bind its port. `setup`, `init-policy`, `soak`, `tui`, `dashboard`, `routing-report` exited non-zero.
+  `routing-health` and `test` ran their report and self-test instead of printing help.
+- **Cause.** `cli.main` passed `args[1:]` to each handler. 21 of the 64 handlers never look for
+  `-h`/`--help`, so the flag was ignored and the command ran. `okf`, `provider`, `semantic`,
+  `sessions` and `benchmark` check only the first argument, so `okf gc --help` ran the gc dry run and
+  `provider list --help` listed providers.
+- **Fix.** `cli._subcommand_help` runs before dispatch. If a help flag is in the arguments and the
+  subcommand is not one that handles help itself (`_OWN_HELP_ANYWHERE`: argparse or an
+  all-arguments check; `_OWN_HELP_FIRST`: only `<cmd> --help`), it prints that subcommand's lines
+  from the module usage text and exits 0. It does not import the subcommand. An undocumented name
+  still gets the unknown-command error (exit 2).
+- **Test.** `tests/test_cli_help_is_inert.py` runs every subcommand dispatched in `cli.main` (64)
+  and every `<cmd> <sub>` form in the usage text (12) with `--help` in a subprocess. HOME and cwd
+  are seeded with host configs that contain llm_router entries. Each run must exit 0, print usage,
+  raise no traceback and change no file. On main adf93a02, 30 of the 76 cases fail (21
+  subcommands, 9 nested forms).
+  `test_the_cases_cover_every_subcommand` guards against an empty case list.
 
 ## P09-1. G1 called a 16 s auto-route p95 "within budget"
 

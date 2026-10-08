@@ -57,7 +57,11 @@ def _load_hook_module():
 @pytest.fixture()
 def hook(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
-    return _load_hook_module()
+    mod = _load_hook_module()
+    # P0.9: a Stop detaches a child that reads the keychain and calls the usage
+    # endpoint. These tests are about archiving; they must not start it.
+    monkeypatch.setattr(mod, "_spawn_background_stop_work", lambda: None, raising=False)
+    return mod
 
 
 def _run_main(mod, monkeypatch, payload) -> str:
