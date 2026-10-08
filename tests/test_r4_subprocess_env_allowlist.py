@@ -44,7 +44,10 @@ SRC = pathlib.Path(__file__).resolve().parents[1] / "src"
 #:
 #: ADD TO THIS LIST when a new site executes argv the caller supplies.
 MODEL_ARGV_SITES = {
-    "llm_router/hooks/agent_loop.py": "run_command tool: argv chosen by the model",
+    # The run_command executor moved out of hooks/agent_loop.py (which now calls it)
+    # into the toolkit: one executor, behind both the hook loop and `llm-router run`.
+    "llm_router/toolkit/tools.py": "bash/run_command tool: argv chosen by the model",
+    "llm_router/toolkit/verify.py": "verifier: the caller-supplied test command",
     "llm_router/tools/local_task.py": "acceptance check: argv from the caller",
 }
 
@@ -82,13 +85,36 @@ def test_the_scan_finds_subprocess_sites():
 def test_the_agent_loop_does_not_inherit_the_environment():
     """The specific site the audit found leaking."""
     sites = [s for s in _subprocess_sites()
-             if s[0] == "llm_router/hooks/agent_loop.py"]
-    assert sites, "no subprocess call in agent_loop.py — did it move?"
+             if s[0] == "llm_router/toolkit/tools.py"]
+    assert sites, "no subprocess call in toolkit/tools.py (the executor agent_loop calls) — did it move?"
     for rel, lineno, fn, passes_env in sites:
         assert passes_env, (
             f"{rel}:{lineno} calls {fn} without env= — a model-chosen command "
             "would inherit every credential in the process"
         )
+
+
+def test_the_hook_command_path_hands_the_executor_the_allowlisted_env(monkeypatch, tmp_path):
+    """Behavioural, through hooks/agent_loop._run_command_line (the code path the hook executes):
+    the Popen that the toolkit executor makes gets the allowlisted env, never the parent's."""
+    import subprocess
+
+    from llm_router.hooks import agent_loop
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-HOOKcanary")
+    monkeypatch.setenv("TOTALLY_UNKNOWN_SECRET", "HOOKcanary")
+    seen: list[dict] = []
+    real = subprocess.Popen
+
+    def spy(*a, **kw):
+        seen.append(kw.get("env"))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(subprocess, "Popen", spy)
+    out = agent_loop._run_command_line("echo ok", tmp_path)
+    assert "ok" in out and seen, "the hook path started no subprocess (vacuous)"
+    for env in seen:
+        assert isinstance(env, dict) and "ANTHROPIC_API_KEY" not in env and "TOTALLY_UNKNOWN_SECRET" not in env
 
 
 def test_the_delegated_env_carries_no_provider_keys(monkeypatch):

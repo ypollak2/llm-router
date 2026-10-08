@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Literal
 
 from llm_router.types import Complexity, TaskType
 
@@ -351,14 +352,32 @@ def fits_budget(text: str, budget_tokens: int) -> bool:
     return estimate_tokens(text) <= budget_tokens
 
 
-def truncate_to_budget(text: str, budget_tokens: int) -> str:
+_TAIL_MARKER = "[…older context truncated…]\n"
+
+
+def truncate_to_budget(
+    text: str, budget_tokens: int, *, keep: Literal["head", "tail"] = "head",
+) -> str:
     """Truncate text to fit within token budget, preserving whole lines.
 
-    Cuts from the end, preserving complete lines where possible.
-    Adds a "[truncated]" marker when truncation occurs.
+    ``keep="head"`` (default) cuts from the end and appends "[truncated]".
+    ``keep="tail"`` cuts from the start and keeps the newest text, for
+    chronological logs whose last line is the most recent event (P0.1:
+    head-keeping dropped the newest session event first).
     """
     if fits_budget(text, budget_tokens):
         return text
+
+    if keep == "tail":
+        char_limit = budget_tokens * 4 - len(_TAIL_MARKER)
+        if char_limit <= 0:
+            return _TAIL_MARKER.rstrip("\n")
+        tail = text[-char_limit:]
+        # Drop a partial first line when that keeps >70% of the slice.
+        first_newline = tail.find("\n")
+        if 0 <= first_newline < char_limit * 0.3:
+            tail = tail[first_newline + 1:]
+        return _TAIL_MARKER + tail
 
     # Approximate character limit
     char_limit = budget_tokens * 4 - 20  # Reserve space for marker
