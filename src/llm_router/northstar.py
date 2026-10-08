@@ -1527,9 +1527,11 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
 
     {"window_days": N, "generated_at": iso8601,
      "aggregate": {"n_sessions": int, "median": float|null, "p25": float|null,
-                   "max": float|null, "too_few": bool},
+                   "max": float|null, "too_few": bool,
+                   "strict_median": float|null, "strict_p25": float|null,
+                   "strict_max": float|null},
      "sessions": [{"session_id", "units", "used", "attempted", "unknown",
-                   "redo", "share"}, ...],
+                   "redo", "share", "strict_used", "strict_share"}, ...],
      "by_kind": {"<kind>": {"units", "attempted", "used", "redo", "unknown"}}}
 
     ``redo`` here folds both ``redo`` and ``discarded`` unit outcomes
@@ -1544,7 +1546,8 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
     for u in units(days=days, session_id=session_id, root=root):
         sid = u["session_id"]
         c = per_session_counts.setdefault(
-            sid, {"units": 0, "used": 0, "attempted": 0, "unknown": 0, "redo": 0},
+            sid, {"units": 0, "used": 0, "attempted": 0, "unknown": 0, "redo": 0,
+                  "strict_used": 0},
         )
         c["units"] += 1
         kind = u["kind"]
@@ -1553,6 +1556,8 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
         if kind in ATTEMPTED_KINDS or u["lever"] == "proxy":
             c["attempted"] += 1
             bk["attempted"] += 1
+            if is_strict_used(u):  # the kpi NS numerator (PLAN M0.2)
+                c["strict_used"] += 1
             outcome = u["outcome"]
             if outcome == OUTCOME_USED:
                 c["used"] += 1
@@ -1566,6 +1571,7 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
 
     session_rows = []
     shares = []
+    strict_shares = []
     for sid, c in sorted(per_session_counts.items()):
         share = (c["used"] / c["units"]) if c["units"] >= MIN_UNITS and c["units"] else None
         session_rows.append({
@@ -1576,16 +1582,25 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
             "unknown": c["unknown"],
             "redo": c["redo"],
             "share": share,
+            "strict_used": c["strict_used"],
+            "strict_share": (c["strict_used"] / c["units"]) if share is not None else None,
         })
         if share is not None:
             shares.append(share)
+            strict_shares.append(c["strict_used"] / c["units"])
 
+    # median/p25/max are the heuristic ``outcome == used`` share, kept for the JSON
+    # report and kpi diagnostics. The strict_* keys are the NS that user surfaces
+    # show (P0.8-b, plan §1.2): same sessions, strict numerator.
     aggregate = {
         "n_sessions": len(session_rows),
         "median": statistics.median(shares) if shares else None,
         "p25": _percentile(shares, 25) if shares else None,
         "max": max(shares) if shares else None,
         "too_few": len(shares) < 1,
+        "strict_median": statistics.median(strict_shares) if strict_shares else None,
+        "strict_p25": _percentile(strict_shares, 25) if strict_shares else None,
+        "strict_max": max(strict_shares) if strict_shares else None,
     }
     return {
         "window_days": days,
@@ -1597,7 +1612,12 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
 
 
 def current_session_line(session_id: str, root: Path | None = None) -> str:
-    """The Stop-line's compact item: 'north star 12% (n=87)' or 'too few to tell'.
+    """The Stop-line's compact item: 'north star (strict) 12% (n=87)' or 'too few to tell'.
+
+    P0.8 (NFR-NUM): the share is the strict rule (``is_strict_used``), the same
+    numerator ``llm-router kpi`` reports as NS. It was the heuristic ``outcome ==
+    used``, so this line and kpi could show two different north stars for one
+    session. The heuristic stays a kpi diagnostic only.
 
     Bounded to a 2-day window: this runs on every Stop event (every turn), and
     an unbounded ``days=None`` scan walks the ENTIRE ~/.claude/projects history
@@ -1620,7 +1640,7 @@ def current_session_line(session_id: str, root: Path | None = None) -> str:
         n = row["units"]
         if n < MIN_UNITS:
             return f"north star: too few to tell (n={n})"
-        pct = row["share"] * 100 if row["share"] is not None else 0.0
-        return f"north star {pct:.0f}% (n={n})"
+        pct = row["strict_share"] * 100
+        return f"north star (strict) {pct:.0f}% (n={n})"
     except Exception:  # noqa: BLE001 — never break a caller that renders a line
         return "north star: unavailable"
