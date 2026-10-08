@@ -85,7 +85,11 @@ SCOPE, stated rather than implied:
   shadow log (``classifier_shadow.jsonl``, written by ``proxy/llm_shadow``): calls, sessions,
   agreement with the rules' tier, tier distributions, cheap share, fallback rate, p50 / p95 ms,
   drops and calls per turn. Organic sessions only unless research is included; hashes and
-  tiers only. See ``_classifier_shadow_summary`` for each definition.
+  tiers only. See ``_classifier_shadow_summary`` for each definition. Under it, one
+  ``classifier shadow vs rules`` line per classifier model (P1.7, ``llm_router.shadow_eval``):
+  C-lambda2, M1-12 clamp-aware cost on the REAL requested tier, under-route, Haiku precision
+  and n, against rules_eff. Truth comes from ``LLM_ROUTER_SHADOW_LABELS`` (a JSONL of
+  ``{text_sha, session_id, truth}``); without it those numbers are "not informative".
 * **G2 silent failures** is fail-open events per 100 calls over the window, from
   the ``ts`` every ``failopen.record`` row now carries. "Calls" are the hook
   invocations plus the proxy calls recorded in the window, all session kinds,
@@ -1706,7 +1710,15 @@ def _classifier_shadow_summary(days: float, win: "_Window | None" = None,
     n = len(calls)
     agree = sum(1 for r in compared if merged(tier_of(r, "llm")) == tier_of(r, "rules"))
     applied = [r for r in (ledger_rows or []) if "cls_applied" in r]
+    try:
+        from llm_router import shadow_eval
+
+        vs_rules = shadow_eval.score_by_model(
+            calls, shadow_eval.load_labels(os.environ.get("LLM_ROUTER_SHADOW_LABELS", "").strip() or None))
+    except Exception:  # noqa: BLE001 -- informational line must never break the scorecard
+        vs_rules = {}
     return {
+        "vs_rules": vs_rules,
         "n": n,
         "n_sessions": len({r.get("session_id") for r in calls}),
         "n_answered": len(answered),
@@ -1749,6 +1761,32 @@ def _classifier_shadow_line(s: dict | None) -> str | None:
             f"cheap share {pct(s['cheap_share_llm'])}, fallback {pct(s['fallback_rate'])}, "
             f"p50 {ms(s['p50_ms'])}, p95 {ms(s['p95_ms'])}, drops {s['drops']}, {cpt} calls/turn{applied} "
             "(hashes and tiers only; informational, never in NS, D1 or D2)")
+
+
+def _classifier_vs_rules_lines(s: dict | None) -> list[str]:
+    """One line per classifier model: the live-shadow score against rules_eff (P1.7)."""
+    out = []
+    for model, v in ((s or {}).get("vs_rules") or {}).items():
+        if not v.get("n_turns"):
+            continue
+        m12 = v["M1_12"]
+        head = (f"classifier shadow vs rules [{model}]: n={v['n_turns']} turns in {v['n_sessions']} sessions, "
+                f"requested tier real {v['n_joined']}/{v['n_turns']}, fallback {v['n_fallback']}, "
+                f"agree {v['agree']}/{v['n_turns']}, labeled {v['n_labeled']}")
+        a, r = v["arms"]["llm"], v["arms"]["rules_eff"]
+        if a is None:
+            body = (f"; raw cost clamp-aware llm {v['craw_clamp_llm']:.2f} vs rules {v['craw_clamp_rules_eff']:.2f} "
+                    "(no truth labels: C-lambda2, under-route and Haiku precision not computed)")
+        else:
+            boot = v["boot_c_lambda2_clamp_llm_minus_rules"]
+            hp = a["HP"]
+            body = (f"; C-lambda2 llm {a['c_lambda2']:.2f} vs rules {r['c_lambda2']:.2f}; "
+                    f"M1-12 C-lambda2-clamp llm {a['c_lambda2_clamp']:.2f} vs rules {r['c_lambda2_clamp']:.2f} "
+                    f"(diff {boot['diff']:+.2f}, session CI95 [{boot['ci95'][0]:+.2f}, {boot['ci95'][1]:+.2f}]); "
+                    f"under llm {a['under']['k']}/{a['under']['n']} vs rules {r['under']['k']}/{r['under']['n']}; "
+                    f"HP llm {hp['k']}/{hp['n']}")
+        out.append(f"{head}{body}; M1-12 {m12['verdict']} ({m12['why']}) (informational, rules stay in charge)")
+    return out
 
 
 # ── assembly ───────────────────────────────────────────────────────────────
@@ -1949,6 +1987,7 @@ def render_scorecard(data: dict) -> str:
     classifier_line = _classifier_shadow_line(data.get("classifier_shadow"))
     if classifier_line:
         lines.append(classifier_line)
+        lines += _classifier_vs_rules_lines(data.get("classifier_shadow"))
     lines.append(_join_line(data["joins"]))
     lines.append("O1 is never session-kind filtered (usage.db predates tagging); G3 is not "
                   "session-kind filtered either (see KPIS.md); neither are G1 (hook), G2 and G4, "
