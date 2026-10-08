@@ -225,6 +225,25 @@ def policy_version(path: str | Path | None = None) -> str:
     return hashlib.sha256(raw + b"\0" + str(__version__).encode("utf-8")).hexdigest()[:12]
 
 
+def tier_model(name: str, path: str | Path | None = None) -> str | None:
+    """Model id of tier ``name`` in the policy the proxy loads, or None.
+
+    Same file the proxy reads: ``path``, else ``LLM_ROUTER_PROXY_TIER_POLICY``,
+    else the bundled ``claude_tiers.yaml``; parsed by ``ClaudeTierPolicy.load``.
+    Hooks use this instead of a literal model id (plan v16 P0.2: auto-route
+    kept sending ``/model claude-opus-4-6`` after the opus tier moved on).
+    None when the file is missing or invalid, or has no such tier.
+    """
+    import os
+
+    target = path or os.environ.get("LLM_ROUTER_PROXY_TIER_POLICY") or None
+    try:
+        tier = ClaudeTierPolicy.load(target).by_name.get(name)
+    except (OSError, ValueError, TypeError, ImportError):
+        return None
+    return tier.model if tier is not None else None
+
+
 async def _default_classify(text: str) -> dict:
     from llm_router.proxy.backends import choose_model
 

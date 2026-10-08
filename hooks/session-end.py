@@ -553,7 +553,7 @@ def _query_cumulative_savings() -> list[tuple[str, int, int, int, float]]:
 def _aggregate(rows: list[dict]) -> dict[str, dict]:
     tools: dict[str, dict] = {}
     for r in rows:
-        tool    = r.get("task_type") or "unknown"  # P0.8: NULL = unknown (BUGS.md 20)
+        tool    = r.get("task_type") or "unknown"  # P0.8: NULL = unknown (BUGS.md 22)
         model   = r.get("model", "?")
         in_tok  = r.get("input_tokens")  or 0
         out_tok = r.get("output_tokens") or 0

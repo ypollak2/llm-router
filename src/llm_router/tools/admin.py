@@ -375,7 +375,7 @@ async def llm_quality_report(days: int = 7) -> str:
         lines.append(section("BY TASK TYPE"))
         for task, count in report["by_task_type"].items():
             pct = count / report["total_decisions"]
-            # P0.8 stores an unknown task type as NULL (BUGS.md 20).
+            # P0.8 stores an unknown task type as NULL (BUGS.md 22).
             lines.append(row(f"  {task or 'unknown':<16} {count:>5}  ({pct:>5.0%})"))
         lines.append(HR)
 
