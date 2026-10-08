@@ -42,10 +42,12 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 27 | The quality report and the Stop summary raise TypeError on a NULL task type | fixed in this change (v16 P0.8) |
 | 28 | `llm-router northstar` showed the heuristic share as the North Star | fixed in this change (v16 P0.8) |
 | 29 | The claw-code Stop hook and the dashboard models panel raise TypeError on a NULL task type | fixed in this change (v16 P0.8 r1) |
+| P010-1 | A dead proxy fails every Claude Code session | fixed in this change (P0.10); live switch is an owner step |
 | P013-1 | `llm_act` wrote files into the MCP process cwd | fixed for the file tools in this change (P0.13); bash confinement is P2.9 |
 | P0.14-a | Proxy ledger wrote 0 rows for 25 h and nothing flagged it | fixed in this change (P0.14) |
 | 18 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
 | P011-1 | Haiku guard re-tripped on audit days older than its window | fixed in `feat/haiku-guard-in-repo` (P0.11, 3f4149b) |
+| P1.7-c-1 | Classifier shadow on: `assemble` held the GIL and delayed continuations | fixed in this change (v16 P1.7-c) |
 | GE6-1 | Quota-burn coverage kept owner-overridden sessions in the organic denominator | fixed in `feat/quota-samples` (#320, GE6 repair 1) |
 | GE6-2 | Branch hook version equal to main's after main moved on | fixed in `feat/quota-samples` (#320, GE6 repair round 1) |
 | CODEX-1 | Codex refused to start: `invalid transport in mcp_servers.llm_router` | fixed in this change (#323) |
@@ -724,6 +726,56 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Test.** `test_clawcode_stop_hook_renders_null_task_type` (runs `main()` on a seeded
   `usage.db`), `test_dashboard_last_prompt_calls_render_null_task_type`. Both fail on 15a1398e.
 
+## P010-1. A dead proxy fails every Claude Code session
+
+- **Symptom.** With proxy-default on, `~/.claude/settings.json` sets
+  `ANTHROPIC_BASE_URL=http://127.0.0.1:8787`. When the proxy process is down, every API call
+  of every session is refused. Smoke 2026-10-07 (claude 2.1.292, `--setting-sources
+  project,local`, base URL on smoke port 8788, nothing listening): `claude -p "say ok"` retried
+  for 222.85 s, then exited 1 with `API Error: Connection refused — a firewall or proxy may be
+  blocking it (ECONNREFUSED)` (n = 1, session 2af3ba44).
+- **Cause.** The proxy process itself owned the settings.json port, so its death left nothing
+  listening. `settings.json` env beats the process env, and hooks run after the API client is
+  built, so the SessionStart warning only reaches the next session (plan v16 C10, L16).
+- **Fix.** `src/llm_router/proxy/failopen_shim.py` (D-17 = A): a small shim owns 8787 and
+  forwards to the main proxy on 8797; on refused / >200 ms connect / disconnect before a response,
+  or a 5xx of the main proxy's own (no Anthropic `request-id`) before any byte went out, it sends the request once to api.anthropic.com and records
+  `proxy_down` in `fail_open.jsonl` (G2). `llm-router install --proxy-default` installs both
+  services (main first, then the shim) and writes settings.json only after both answer. The live
+  machine still runs the main proxy on 8787: the port move needs the owner (`bootout` +
+  `bootstrap`).
+- **Found while fixing.** The first shim used aiohttp's client, which rejects the duplicate
+  `Server` header the main proxy sends (uvicorn's own next to Anthropic's): in the smoke, 2 of 4
+  calls went direct while the main proxy was up. The shim's upstream leg now uses httpx (h11),
+  which relays it, as Claude Code's own client does.
+- **Found in review.** The first build also retried every 5xx direct, including Anthropic's own
+  (529 overloaded) relayed by a healthy main proxy: that doubles the request during an overload
+  and counts a working proxy as `proxy_down`. A 5xx carrying Anthropic's `request-id` is now passed
+  through (`test_anthropic_5xx_relayed_by_a_healthy_main_proxy_is_not_proxy_down`).
+- **Found in review (round 2).** With the shim on 8787, doctor, the statusline and the
+  SessionStart hook TCP-probed only the sentinel's `port`, which is now the shim's. The shim
+  always accepts, so all three read healthy while the main proxy was dead and every call
+  bypassed routing. Each check now also probes `upstream_port` and reports "routing bypassed"
+  with the main proxy's restart command; a dead shim names `com.llm_router.proxy-shim`.
+  Tests: `tests/test_doctor_proxy_default_shim.py` (doctor's section moved into
+  `_proxy_default_section` so it can be called; the mutant `_shim = False` turns 3 of its 4
+  tests red), and the `*_shim_*` / `*_main_proxy_*` tests in
+  `tests/test_session_start_proxy_default.py` and `tests/test_statusline_proxy_default.py`
+  (4 of them red on the pre-fix hooks). The settings.json guard also failed to catch a direct
+  `(Path.home() / ".claude" / "settings.json").write_text(...)` in the shim;
+  `test_runtime_failopen_surfaces_never_name_settings_json` now rejects any runtime string
+  constant naming `settings.json` or `.claude` in the fail-open files (that mutant: red).
+- **Test.** `tests/test_proxy_failopen_shim.py` (fails on da31df7: the module does not exist):
+  `test_main_down_goes_direct_and_records_proxy_down`,
+  `test_main_disconnects_before_responding_goes_direct`, `test_connect_timeout_goes_direct`,
+  `test_main_5xx_before_bytes_retries_direct_once`, `test_no_retry_after_bytes_were_sent`,
+  `test_sse_passes_through_byte_for_byte_and_incrementally`, and
+  `test_duplicate_server_header_from_main_proxy_is_passed_not_bypassed` (fails with the aiohttp
+  client: `'direct' == 'main'`). `tests/test_proxy_default_orchestration.py` pins the two-service
+  install; `tests/test_failopen_never_writes_settings.py` pins that no fail-open path writes
+  settings.json outside `llm-router install --proxy-default`. Live: 10/10 smoke sessions
+  answered through the shim with the smoke main proxy killed, 10 `proxy_down` rows (PR body).
+
 ## P013-1. `llm_act` wrote files into the MCP process cwd
 
 - **Symptom.** A local model's `write_file` from `llm_act` landed in the directory the MCP
@@ -846,6 +898,37 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Test.** `tests/test_proxy_haiku_guard.py::test_run_once_ignores_daily_audits_older_than_the_window`:
   red on b5f88b5 (`assert 'trip' == 'ok'`), green on 3f4149b; mutant `recent = list(days)`
   turns it red.
+
+## P1.7-c-1. Classifier shadow on: `assemble` held the GIL and delayed continuations
+
+- **Symptom.** With `LLM_ROUTER_LOCAL_CLASSIFIER=shadow`, continuation p95 was 26.4 ms against 0.7 ms with the
+  shadow off (1,800-message history, n = 100 per arm; #301 review). A continuation never schedules a
+  classification, so the delay came from another call's shadow work.
+- **Cause.** `cls_input.assemble` runs in a worker thread (`asyncio.to_thread`), which keeps it off the event
+  loop but not off the GIL. It walked the WHOLE history forwards and ran `_text_of` + `normalize` (reminder
+  regex, whitespace collapse) on every message, although the input uses only the newest prompt, 3 earlier
+  prompts and the assistant's last text. CPU time per call on #301's code (`thread_time`, best of 7,
+  synthetic fixtures of `scripts/bench_shadow_continuation.py`): 1,800 messages 5.4 ms (agentic shape),
+  5.7 ms (one prompt then a tool loop), 142 ms (every message text); 600 messages 46 ms (every message text).
+  While it runs, the loop thread waits for the GIL at each wake-up (switch interval 5 ms).
+- **Fix.** v16 P1.7-c: `assemble` scans backwards from the newest message, stops once it holds its context,
+  and reads at most `MAX_SCAN_MESSAGES` = 400 messages back. Output is identical whenever the context lies in
+  that window; beyond it the input lacks the older context, never claims "FIRST prompt", and the shadow record
+  says `assemble_capped: true` so a report can count such turns. CPU time at 1,800 messages: 0.30 ms
+  (agentic), 1.26 ms (one prompt + tool loop, the cap), 0.54 ms (every message text).
+- **Test.** `tests/proxy/test_cls_input.py`: `test_backward_scan_equals_the_forward_walk_on_600_random_histories`
+  (the #301 walk kept verbatim as the oracle), `test_the_scan_stops_once_it_has_its_context` (1,801 messages:
+  <= 30 `_human` calls, <= 30 extra message reads), `test_a_long_tool_loop_is_read_at_most_max_scan_messages_back`,
+  `test_capped_is_false_when_the_window_holds_the_whole_context`. All 4 fail on main 7d857641 (the fuzz test
+  only on the new `capped` attribute: it guards equality, not the bug); 12 single-flip mutants of the change
+  are each red. `test_a_long_history_is_assembled_off_the_request_path` now makes
+  `assemble` slow on purpose (a 50 ms sleep), because the real one is no longer slow enough to show the effect.
+  Latency, shadow-on minus shadow-off continuation p95, n = 100 per arm per row, `scripts/bench_shadow_continuation.py`
+  run on main 7d857641 and on this change back to back per row (2026-10-08 ~14:55Z, free memory 88%, no Ollama model
+  resident, load1 15-25 from other agents): at 1,800 messages main +0.18 / +82.86 / +0.12 ms (agentic / all-text /
+  one-prompt), this change +1.04 / +0.06 / -0.13 ms; worst row of this change over 0, 600 and 1,800 messages +1.90 ms
+  (agentic, 600). The synthetic agentic and one-prompt shapes do not reproduce the 26.4 ms (main's `assemble` takes
+  ~3-6 ms on them); the all-text shape does (+18.3 ms at 600, +82.9 ms at 1,800). Raw rows: `$PP/v16/p17c/r3/`.
 
 ## GE6-1. Quota-burn coverage kept owner-overridden sessions in the organic denominator
 
