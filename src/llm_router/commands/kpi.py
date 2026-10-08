@@ -53,7 +53,11 @@ SCOPE, stated rather than implied:
   and the session tag is one of the fields under test: filtering rows by
   ``session_kind`` first drops exactly the rows that lack it, so the field read
   100% by construction. G3 counts every row in the window, per row type and per
-  field, from the schema's start date (``g3_*`` below, KPIS.md).
+  field, from the schema's start date (``g3_*`` below, KPIS.md). That audit covers the
+  proxy's tier fields only. G3's VERDICT (``G3["prd"]``, PLAN v16 R8 P0.8-c) is the PRD
+  field list (R-EVL-1) per writer -- usage, routing_decisions, DIRECT, proxy -- with n;
+  there harness, headless and (without ``--include research``) research rows are
+  excluded and counted apart, while untagged rows stay in (``_g3_prd_writers``).
 * **O1 is NOT session-kind filtered.** It reads ``usage.db`` via
   ``dashboard_data.summary()``, the same canonical accessor every other
   savings surface uses (see ``commands/savings_report.py``) -- that table
@@ -948,6 +952,264 @@ def _g3_completeness(all_rows: list[dict], days: int, now: float,
                             f"{before} row(s) before schema excluded)")
     out.update(extras)
     return out
+
+
+# ── G3 verdict: the PRD field list, per writer (R-EVL-1; PLAN v16 R8 A.6, P0.8-c) ──
+#
+# The audit above reads the proxy's tier fields only. R-EVL-1 asks every request record
+# to carry ids, model, tier, reason, tokens, cost, latency and outcome, unknown = NULL.
+# Four writers produce such records, and each is scored on its own, because a complete
+# writer must not hide an incomplete one (2026-10-08: G3 read 93.0% over the proxy alone).
+# A writer with rows in the window owes n >= G3_PRD_MIN_N organic rows and >= G3_PRD_BAR
+# of them carrying every scored field. A writer with no rows prints "no traffic" and is
+# never a pass, so an empty writer cannot turn G3 green on its own (an empty set passes
+# everything); with no writer carrying traffic the verdict is "not informative".
+#
+# Population: rows of harness, headless (and research, unless --include research)
+# sessions are excluded and counted apart; the kind comes from session_kind.KindIndex,
+# the resolver NS/D1/D2/D3 use. Untagged rows STAY in: dropping them would drop exactly
+# the rows that lack a session id, so session_id would read complete by construction
+# (the defect the audit above documents for session_kind).
+
+G3_PRD_FIELDS = ("session_id", "task_id", "model", "tier", "reason", "tokens", "cost",
+                 "latency", "outcome")
+#: Reported with their coverage, never scored. task_id does not exist on any writer until
+#: P1.10 merges; that PR removes this entry, which starts scoring it.
+G3_PRD_UNSCORED = {"task_id": "not scored until P1.10 merges"}
+G3_PRD_MIN_N = 100
+G3_PRD_BAR = 0.99
+G3_PRD_WRITERS = ("usage", "routing_decisions", "direct", "proxy")
+G3_PRD_PASS, G3_PRD_FAIL, G3_PRD_NOT_INFORMATIVE = "PASS", "FAIL", "NOT INFORMATIVE"
+_PRD_NO_TRAFFIC = "no traffic"
+
+#: The usage.db columns that carry each PRD field (all must be non-null). An empty tuple
+#: is a field the writer's schema has no column for: it is scored, and always missing.
+#: ``direct`` rows are the routing_decisions rows with ``reason_code = 'direct'``
+#: (``hooks/savings_logger.log_direct_to_db``); ``routing_decisions`` is every other row.
+_PRD_ROUTING_COLUMNS = {
+    "session_id": ("session_id",), "task_id": ("task_id",), "model": ("final_model",),
+    "tier": ("complexity",), "reason": ("reason_code",),
+    "tokens": ("input_tokens", "output_tokens"), "cost": ("cost_usd",),
+    "latency": ("latency_ms",), "outcome": ("success",),
+}
+_PRD_SQL_COLUMNS = {
+    "usage": {
+        "session_id": ("session_id",), "task_id": ("task_id",), "model": ("model",),
+        "tier": ("complexity",), "reason": (),
+        "tokens": ("input_tokens", "output_tokens"), "cost": ("cost_usd",),
+        "latency": ("latency_ms",), "outcome": ("success",),
+    },
+    "routing_decisions": _PRD_ROUTING_COLUMNS,
+    "direct": _PRD_ROUTING_COLUMNS,
+}
+_PRD_SQL_TABLE = {"usage": "usage", "routing_decisions": "routing_decisions",
+                  "direct": "routing_decisions"}
+
+
+def _prd_session(sid: Any) -> str | None:
+    return sid if isinstance(sid, str) and sid not in ("", "unknown") else None
+
+
+def _prd_proxy_values(row: dict) -> dict[str, Any]:
+    """A proxy row's value for each PRD field (``proxy/ledger.py`` names the fields)."""
+    served = row.get("decision") == "served"
+    if served:
+        model = row.get("model")
+    elif row.get("tier_mode") in ("on", "conversation"):
+        model = row.get("served_model")
+    else:
+        model = row.get("requested_model")  # tiers off: the call is sent as requested
+    reason = row.get("tier_reason")
+    latency = row.get("upstream_latency_s")
+    return {
+        "session_id": _prd_session(row.get("session_id")),
+        "task_id": row.get("task_id"),
+        "model": model,
+        "tier": row.get("tier"),
+        "reason": reason if reason is not None else row.get("reason"),
+        "tokens": row.get("anthropic_usage"),       # null = usage unknown (cost_accounting)
+        "cost": row.get("anthropic_cost_usd"),
+        "latency": latency if latency is not None else row.get("route_latency_s"),
+        "outcome": row.get("decision") if served else row.get("upstream_status"),
+    }
+
+
+def _prd_db_path() -> Path:
+    try:
+        from llm_router.config import get_config
+
+        return Path(get_config().llm_router_db_path)
+    except Exception:  # noqa: BLE001 - an unreadable config still has a canonical path
+        from llm_router import paths
+
+        return paths.state_path("usage.db")
+
+
+def _prd_sql_records(cutoff: float | None, until: float | None
+                     ) -> tuple[dict[str, list[tuple[str | None, dict]]], dict[str, set[str]],
+                                dict[str, str]]:
+    """Per SQL writer: ``(session_id, {field: value})`` for every row in the window, the
+    fields its schema has no column for, and the writers that could not be read. A
+    missing database or table is no rows (no traffic); a read error is "unreadable"."""
+    import sqlite3
+
+    records: dict[str, list[tuple[str | None, dict]]] = {w: [] for w in _PRD_SQL_COLUMNS}
+    no_column: dict[str, set[str]] = {w: set() for w in _PRD_SQL_COLUMNS}
+    unreadable: dict[str, str] = {}
+    db = _prd_db_path()
+    if not db.exists():
+        return records, no_column, unreadable
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        return records, no_column, {w: f"usage.db unreadable: {exc}" for w in _PRD_SQL_COLUMNS}
+    # Text timestamps (``datetime('now')`` or ISO): prefilter on the date prefix, which
+    # orders the same in both forms, then place each row exactly with _parse_ts.
+    day_floor = (time.strftime("%Y-%m-%d", time.gmtime(cutoff - 86400))
+                 if cutoff is not None else None)
+    try:
+        for writer, mapping in _PRD_SQL_COLUMNS.items():
+            table = _PRD_SQL_TABLE[writer]
+            try:
+                cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+                if not cols:
+                    continue  # no table: no rows
+                wanted = sorted({c for cs in mapping.values() for c in cs} & cols
+                                | ({"timestamp"} & cols))
+                if "timestamp" not in cols:
+                    unreadable[writer] = f"{table} has no timestamp column"
+                    continue
+                where, args = [], []
+                if day_floor is not None:
+                    where.append("timestamp >= ?")
+                    args.append(day_floor)
+                if writer != "usage":
+                    if "reason_code" not in cols:
+                        if writer == "direct":
+                            continue  # no reason_code column: no row can be a DIRECT row
+                    else:
+                        where.append("reason_code = 'direct'" if writer == "direct"
+                                     else "(reason_code IS NULL OR reason_code != 'direct')")
+                sql = (f"SELECT {', '.join(wanted)} FROM {table}"
+                       + (f" WHERE {' AND '.join(where)}" if where else ""))
+                for raw in conn.execute(sql, args):
+                    row = dict(zip(wanted, raw))
+                    ts = _parse_ts(row.get("timestamp"))
+                    if ts is None or (cutoff is not None and ts < cutoff) or \
+                            (until is not None and ts > until):
+                        continue
+                    vals = {f: (row.get(cs[0]) if len(cs) == 1 else
+                                (tuple(row.get(c) for c in cs)
+                                 if all(row.get(c) is not None for c in cs) else None))
+                            if cs and set(cs) <= cols else None
+                            for f, cs in mapping.items()}
+                    vals["session_id"] = _prd_session(vals.get("session_id"))
+                    records[writer].append((vals["session_id"], vals))
+                no_column[writer] = {f for f, cs in mapping.items() if not cs or not set(cs) <= cols}
+            except sqlite3.Error as exc:
+                unreadable[writer] = f"{table} unreadable: {exc}"
+    finally:
+        conn.close()
+    return records, no_column, unreadable
+
+
+def _prd_writer_result(records: list[tuple[str | None, dict]], stamps: list[str | None],
+                       index, excluded_kinds: frozenset[str], no_column: set[str]) -> dict:
+    excluded: dict[str, int] = {}
+    organic: list[dict] = []
+    kinds: dict[tuple[str | None, str | None], str | None] = {}  # one resolve per session/stamp
+    for (sid, vals), stamp in zip(records, stamps):
+        if (sid, stamp) not in kinds:
+            kinds[(sid, stamp)] = index.resolve(sid, stamp).kind
+        kind = kinds[(sid, stamp)]
+        if kind in excluded_kinds:
+            excluded[kind] = excluded.get(kind, 0) + 1
+        else:
+            organic.append(vals)
+    n = len(organic)
+    scored = tuple(f for f in G3_PRD_FIELDS if f not in G3_PRD_UNSCORED)
+    complete = sum(1 for v in organic if all(v.get(f) is not None for f in scored))
+    fields = {}
+    for f in G3_PRD_FIELDS:
+        rec = sum(1 for v in organic if v.get(f) is not None)
+        fields[f] = {"recorded": rec, "missing": n - rec,
+                     "missing_pct": round((n - rec) / n, 4) if n else None,
+                     "scored": f not in G3_PRD_UNSCORED, "no_column": f in no_column}
+    if n == 0:
+        state = _PRD_NO_TRAFFIC
+    elif n < G3_PRD_MIN_N:
+        state = "not informative"
+    else:
+        state = "pass" if complete / n >= G3_PRD_BAR else "fail"
+    return {"state": state, "n": n, "complete": complete,
+            "complete_pct": round(complete / n, 4) if n else None,
+            "informative": n >= G3_PRD_MIN_N, "excluded": dict(sorted(excluded.items())),
+            "fields": fields}
+
+
+def _g3_prd_writers(all_rows: list[dict], days: float, now: float, index,
+                    include_research: bool, until: float | None = None) -> dict:
+    """The G3 verdict over the PRD field list, one result per writer (see the comment above)."""
+    from llm_router import session_kind as sk
+
+    excluded_kinds = frozenset({sk.KIND_HARNESS, sk.KIND_HEADLESS}
+                               | (set() if include_research else {sk.KIND_RESEARCH}))
+    cutoff = now - days * 86400 if days else None
+    proxy_rows = [r for r in all_rows
+                  if (ts := _num_ts(r.get("ts"))) is not None
+                  and (cutoff is None or ts >= cutoff) and (until is None or ts <= until)]
+    sql, no_column, unreadable = _prd_sql_records(cutoff, until)
+    writers: dict[str, dict] = {}
+    for w in G3_PRD_WRITERS:
+        if w in unreadable:
+            writers[w] = {"state": "unreadable", "reason": unreadable[w], "n": None}
+        elif w == "proxy":
+            recs = [(_prd_session(r.get("session_id")), _prd_proxy_values(r)) for r in proxy_rows]
+            writers[w] = _prd_writer_result(recs, [r.get("session_kind") for r in proxy_rows],
+                                            index, excluded_kinds, set())
+        else:
+            writers[w] = _prd_writer_result(sql[w], [None] * len(sql[w]), index, excluded_kinds,
+                                            no_column[w])
+    failing = [w for w, r in writers.items() if r["state"] == "fail"]
+    traffic = [w for w, r in writers.items() if r["state"] != _PRD_NO_TRAFFIC]
+    short = [w for w in traffic if writers[w]["state"] in ("not informative", "unreadable")]
+    if failing:
+        verdict, why = G3_PRD_FAIL, f"below {_pct(G3_PRD_BAR, 0)}: {', '.join(failing)}"
+    elif not traffic:
+        verdict, why = G3_PRD_NOT_INFORMATIVE, "no writer has traffic in the window"
+    elif short:
+        verdict, why = G3_PRD_NOT_INFORMATIVE, f"n < {G3_PRD_MIN_N} or unreadable: {', '.join(short)}"
+    else:
+        verdict, why = G3_PRD_PASS, f"every writer with traffic: {', '.join(traffic)}"
+    return {"verdict": verdict, "pass": verdict == G3_PRD_PASS, "why": why,
+            "min_n": G3_PRD_MIN_N, "bar": G3_PRD_BAR, "fields": list(G3_PRD_FIELDS),
+            "unscored": dict(G3_PRD_UNSCORED), "excluded_kinds": sorted(excluded_kinds),
+            "writers": writers}
+
+
+def _g3_prd_lines(prd: dict) -> list[str]:
+    lines = [f"verdict {prd['verdict']} ({prd['why']}): PRD fields per writer (R-EVL-1), "
+             f"each writer with traffic needs n>={prd['min_n']} organic rows and "
+             f">={_pct(prd['bar'], 0)} complete; the % above audits proxy tier fields only"]
+    for w, r in prd["writers"].items():
+        excl = ", ".join(f"{k} {v}" for k, v in r.get("excluded", {}).items())
+        excl = f"; excluded apart: {excl}" if excl else ""
+        if r["state"] == "unreadable":
+            lines.append(f"  {w}: unreadable ({r['reason']})")
+            continue
+        if r["state"] == _PRD_NO_TRAFFIC:
+            lines.append(f"  {w}: no traffic (0 organic rows{excl})")
+            continue
+        missing = ", ".join(
+            f"{f} {_pct(st['missing_pct'])}" + (" [no column]" if st["no_column"] else "")
+            for f, st in r["fields"].items() if st["scored"] and st["missing"])
+        unscored = ", ".join(
+            f"{f} {_pct(r['fields'][f]['recorded'] / r['n'])} recorded"
+            + (" [no column]" if r["fields"][f]["no_column"] else "") + f", {why}"
+            for f, why in prd["unscored"].items())
+        lines.append(f"  {w}: {r['state']} {_pct(r['complete_pct'])} complete (n={r['n']})"
+                     f"; missing: {missing or 'none'}{excl}; {unscored}")
+    return lines
 
 
 # ── O1: quota avoided (est.), not session-kind filtered ──────────────────────
@@ -1904,6 +2166,8 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
     g1_hook_r = _g1_hook(days, now_ts, _killed_hooks(days, now_ts))
     g1_proxy_r = _g1_proxy(pop)
     g3_r = _g3_completeness(all_rows, days, now_ts, schema_since, until=until_ts)
+    g3_r["prd"] = _g3_prd_writers(all_rows, days, now_ts, index, include_research, until=until_ts)
+    g3_r["lines"] = _g3_prd_lines(g3_r["prd"])
     o1_r = _o1_quota_avoided(days, win)
     bench = _load_benchmark()
     o2_r = _o2_quality_held(bench)
