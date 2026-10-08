@@ -26,6 +26,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 14 | Gateway doors: case-sensitive "auto", `stream` dropped, `max_tokens`/`temperature`/system dropped | fixed in this change (v16 P0.6) |
 | 15 | MCP routing ran on Claude pressure 0.0 for the life of the process | fixed in this change (v16 P0.2) |
 | 16 | Critical-pressure override sent `/model claude-opus-4-6`, a retired id | fixed in this change (v16 P0.2) |
+| 17 | Semantic cache never hit, ignored context, and reported a hit rate of 0 | fixed in this change (v16 P0.5) |
 | GE6-1 | Quota-burn coverage kept owner-overridden sessions in the organic denominator | fixed in `feat/quota-samples` (#320, GE6 repair 1) |
 
 ## 1. NULL `session_id` on local routing rows
@@ -398,6 +399,44 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   it checked. On da31df7 it found 3 hits (auto-route.py:4799, chain_builder.py:188,
   subagent-start.py:203); on head it finds 0. To re-prove the baseline from head, run the
   same test with `RETIRED_IDS_SCAN_ROOT=<da31df7 checkout>/src/llm_router`: it fails with 3 hits.
+
+## 17. Semantic cache never hit, ignored context, and reported a hit rate of 0
+
+- **Symptom.** (a) A routed request repeated within 24 h was never served from the semantic
+  cache. (b) Had the key matched, "yes, do it" answered in one conversation would have been
+  served verbatim in another: the key had no context. (c) With no Ollama the cache did nothing.
+  (d) `cost.get_cache_hit_stats` and the session-end hook's `_query_cache_hit_stats` always
+  returned zeros / `{}`, so the hit rate (R-CTX-7) could not be measured.
+- **Cause.** (a) `route_and_call` called `semantic_cache.check` with the user's raw prompt, but
+  `_finalize_successful_route` called `store` with the prompt after OKF / `<repo_state>`
+  injection. Different text means a different embedding and, because `<repo_state>` carries
+  numbers, a different C-03 discriminator. (b) No column bound an entry to its conversation.
+  (c) `check`/`store` returned early when `ollama_base_url` was unset. (d) Both queries named
+  columns `semantic_cache` never had (`was_hit`, `accessed_at`; `cache_hit`, `tokens_saved`,
+  `timestamp`); the exceptions were swallowed by fail-open paths.
+- **Fix.** v16 P0.5 (`fix/semantic-cache-key`): `route_and_call` builds one
+  `semantic_cache.CacheKey` before dispatch (raw prompt + `ctx_hash` = sha256 of caller
+  `context`, else the last two buffered messages, plus the caller's `system_prompt` if given and
+  the caller's project scope) and passes it
+  to `check` and, through the dispatch loop, to `store`. Exact-match pass on
+  sha256(normalised text) + `ctx_hash` needs no Ollama (rows stored with embedding `''`, since
+  the existing column is `NOT NULL`). Additive migration: `ctx_hash`, `text_hash`, `hit_count`,
+  `last_hit_at`, and a `semantic_cache_lookups` table (one row per lookup, no prompt text). Both
+  stats queries read that table and return `{hits, lookups, n}`.
+  Lookup rows older than `LLM_ROUTER_PERSIST_TTL_DAYS` are purged on every store, so the
+  stats period "all" covers at most that window.
+- **Test.** `tests/test_p05_semantic_cache_key.py` (8 tests):
+  `test_same_request_hits_after_context_injection`, `test_context_is_part_of_the_key`,
+  `test_key_uses_last_two_conversation_messages_when_no_caller_context`,
+  `test_caller_system_prompt_is_part_of_the_key`,
+  `test_old_lookups_are_purged_even_when_no_cache_row_expired`,
+  `test_exact_hash_fallback_without_ollama`, `test_cost_cache_hit_stats_returns_true_counts_with_n`,
+  `test_session_end_cache_hit_stats_returns_true_counts_with_n`. All 8 fail on da31df7, but
+  only three fail for the bug itself: the second identical request reached a provider; "yes,
+  do it" was served across contexts; the same system prompt never hit. The other five fail
+  because the API they call (`make_key`, `_semantic_cache_key`, the lookups table) did not
+  exist, so their evidence is the single-flip mutants recorded in the v16 P0.5 gate file,
+  each of which turns at least one of these tests red.
 
 ## GE6-1. Quota-burn coverage kept owner-overridden sessions in the organic denominator
 

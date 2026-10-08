@@ -14,20 +14,29 @@ Design:
   if the text is identical (different expected response shapes).
 - Thread safety: ``aiosqlite`` handles concurrent access via WAL mode.
 
-Only active when ``ollama_base_url`` is set — zero overhead otherwise.
+Key (P0.5, R-CTX-7): ``CacheKey`` = the user's raw prompt BEFORE any context
+injection, plus ``ctx_hash`` = sha256 of the conversation context (caller
+context, else the last two buffered messages) and the caller's project scope.
+``route_and_call`` builds it once and hands the same key to ``check`` and to
+``store``. Without Ollama the cache still works on an exact match:
+sha256(normalised text) + ``ctx_hash``, stored with an empty embedding.
+Every lookup is counted in ``semantic_cache_lookups`` so the hit rate has an n.
 """
 
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import json
 import logging
 import math
 import os
 import re
 import stat
+import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -129,8 +138,64 @@ async def _ensure_project_scope_column(db) -> None:
             # exact collisions this column exists to stop.
             await db.execute("ALTER TABLE semantic_cache ADD COLUMN discriminator TEXT")
             await db.commit()
+        # P0.5 (R-CTX-7). All additive. Legacy rows get ctx_hash='' and
+        # text_hash=NULL, which no real key ever equals, so they never match
+        # and age out on the TTL — the same self-healing path as project_scope.
+        for col, ddl in (
+            ("ctx_hash", "ctx_hash TEXT NOT NULL DEFAULT ''"),
+            ("text_hash", "text_hash TEXT"),
+            ("hit_count", "hit_count INTEGER DEFAULT 0"),
+            ("last_hit_at", "last_hit_at REAL"),
+        ):
+            if col not in cols:
+                await db.execute(f"ALTER TABLE semantic_cache ADD COLUMN {ddl}")
+                await db.commit()
+        await db.execute(CREATE_SEMANTIC_CACHE_LOOKUPS_TABLE)
+        await db.commit()
     except Exception as exc:  # noqa: BLE001 — migration failure must not break routing
         log.debug("semantic_cache project_scope migration skipped: %s", exc)
+
+
+# P0.5: one row per lookup, hit or miss — the denominator of the hit rate.
+# Derived values only: no prompt text, no hash of it.
+CREATE_SEMANTIC_CACHE_LOOKUPS_TABLE = """
+CREATE TABLE IF NOT EXISTS semantic_cache_lookups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    task_type TEXT NOT NULL,
+    hit INTEGER NOT NULL,
+    saved_usd REAL NOT NULL DEFAULT 0
+)
+"""
+
+
+@dataclass(frozen=True)
+class CacheKey:
+    """The one key both ``check`` and ``store`` use (P0.5).
+
+    ``text`` is the user's prompt before OKF / ``<repo_state>`` injection: the
+    injected block changes between turns (dirty-file list, last commit), so
+    keying on it made every stored answer unreachable. ``ctx_hash`` binds the
+    entry to its conversation, so a reply-shaped prompt ("yes, do it") is not
+    answered from a different conversation.
+    """
+
+    text: str
+    ctx_hash: str
+
+
+def _normalise(text: str) -> str:
+    return " ".join(text.split())
+
+
+def make_key(prompt: str, *, context_text: str = "", scope: str = "") -> CacheKey:
+    """Build the cache key for *prompt* in *context_text* within *scope*."""
+    material = f"{scope}\x00{context_text}".encode("utf-8")
+    return CacheKey(text=prompt, ctx_hash=hashlib.sha256(material).hexdigest())
+
+
+def _text_hash(text: str) -> str:
+    return hashlib.sha256(_normalise(text).encode("utf-8")).hexdigest()
 
 CREATE_SEMANTIC_CACHE_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_semantic_cache_type_time
@@ -178,9 +243,11 @@ def _persist_ttl_seconds() -> float:
 
 
 async def _purge_expired(db) -> int:
-    """Physically delete TTL-expired rows from the ``semantic_cache`` table.
+    """Physically delete TTL-expired rows from ``semantic_cache`` and
+    ``semantic_cache_lookups`` (P0.5: the per-lookup hit/miss log, no prompt
+    text). Returns the number of ``semantic_cache`` rows deleted.
 
-    Scoped strictly to ``semantic_cache`` — never touches other tables in
+    Scoped strictly to those two tables — never touches the other tables in
     the shared usage.db (which also holds spend/usage rows owned by
     ``cost.py``). Sets ``PRAGMA secure_delete=ON`` on this connection so
     freed page bytes are zeroed immediately, satisfying raw-byte-grep
@@ -192,6 +259,16 @@ async def _purge_expired(db) -> int:
         return 0
     try:
         await db.execute("PRAGMA secure_delete=ON")
+        # Lookups expire on their own clock, whether or not a cache row expired.
+        # Own try: a database without the lookups table still purges the cache.
+        try:
+            await db.execute(
+                "DELETE FROM semantic_cache_lookups WHERE ts < ?",
+                (time.time() - ttl_seconds,),
+            )
+            await db.commit()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("semantic_cache: lookups purge failed: %s", exc)
         cursor = await db.execute(
             "SELECT COUNT(*) FROM semantic_cache WHERE created_at < datetime('now', ?)",
             (f"-{int(ttl_seconds)} seconds",),
@@ -356,20 +433,26 @@ async def check(
     task_type: "TaskType",
     *,
     threshold: float | None = None,
+    key: CacheKey | None = None,
 ) -> "LLMResponse | None":
-    """Check the semantic cache for a recent equivalent prompt.
+    """Check the cache for a recent answer to the same request.
 
-    Embeds ``prompt`` via Ollama, then scans recent cache entries for the same
-    ``task_type`` and returns the cached response if similarity ≥ threshold.
+    Two passes, both scoped to ``task_type``, the project and ``key.ctx_hash``:
+    an exact match on sha256(normalised ``key.text``) — which needs no Ollama —
+    then, when Ollama is configured, the embedding scan with the C-03
+    equivalence veto. A hit bumps the row's ``hit_count``; every lookup that
+    reaches the database is counted in ``semantic_cache_lookups``.
 
     Args:
-        prompt: The user's prompt text.
+        prompt: The user's prompt text (used only when ``key`` is None).
         task_type: Task type used to scope the cache (code hits never match research hits).
         threshold: Cosine similarity threshold (0–1). Uses
-            ``LLM_ROUTER_SEMANTIC_CACHE_THRESHOLD`` env var or 0.95 default.
+            ``LLM_ROUTER_SEMANTIC_CACHE_THRESHOLD`` env var or the default.
+        key: The request's ``CacheKey``; ``route_and_call`` passes the same key
+            to ``store``. Defaults to ``make_key(prompt)`` (no context).
 
     Returns:
-        A cached ``LLMResponse`` on hit, or ``None`` on miss / Ollama unavailable.
+        A cached ``LLMResponse`` on hit, or ``None`` on miss.
     """
     if threshold is None:
         threshold = _get_threshold()
@@ -377,70 +460,103 @@ async def check(
         return None
     from llm_router.config import get_config
     config = get_config()
-    if not config.ollama_base_url:
-        return None
+    if key is None:
+        key = make_key(prompt)
+    text_hash = _text_hash(key.text)
+    embedding = (
+        _get_embedding(key.text, config.ollama_base_url)
+        if config.ollama_base_url else None
+    )
 
-    embedding = _get_embedding(prompt, config.ollama_base_url)
-    if embedding is None:
-        return None
-
+    best_sim = 0.0
+    best_row = None
+    rows: list = []
+    vetoed = 0
     try:
         from llm_router.cost import _get_db
         _repair_shared_db_perms(getattr(config, "llm_router_db_path", None))
         db = await _get_db()
         try:
             await _ensure_project_scope_column(db)
-            # Fetch the most recent entries within TTL for this task type AND
-            # this project (CHZ-ST-004: never match another project's entries).
+            scope = _project_scope()
+            ttl = f"-{_TTL_SECONDS} seconds"
+            # Pass 1: exact text in the same context (CHZ-ST-004 project scope).
             cursor = await db.execute(
                 """
-                SELECT embedding, response_content, response_model, response_cost_usd,
-                       discriminator
+                SELECT id, response_content, response_model, response_cost_usd
                 FROM semantic_cache
-                WHERE task_type = ?
-                  AND project_scope = ?
-                  AND created_at >= datetime('now', ?)
-                ORDER BY created_at DESC
-                LIMIT ?
+                WHERE task_type = ? AND project_scope = ? AND ctx_hash = ?
+                  AND text_hash = ? AND created_at >= datetime('now', ?)
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
                 """,
-                (task_type.value, _project_scope(), f"-{_TTL_SECONDS} seconds", _MAX_SCAN),
+                (task_type.value, scope, key.ctx_hash, text_hash, ttl),
             )
-            rows = await cursor.fetchall()
+            exact = await cursor.fetchone()
+            if exact is not None:
+                best_sim, best_row = 1.0, exact
+            elif embedding is not None:
+                # Pass 2: embedding scan, same context only.
+                cursor = await db.execute(
+                    """
+                    SELECT id, response_content, response_model, response_cost_usd,
+                           embedding, discriminator
+                    FROM semantic_cache
+                    WHERE task_type = ? AND project_scope = ? AND ctx_hash = ?
+                      AND embedding != '' AND created_at >= datetime('now', ?)
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (task_type.value, scope, key.ctx_hash, ttl, _MAX_SCAN),
+                )
+                rows = await cursor.fetchall()
+                incoming_disc = _discriminator(key.text)
+                for row in rows:
+                    try:
+                        sim = _cosine_similarity(embedding, json.loads(row[4]))
+                        if sim <= best_sim:
+                            continue
+                        # C-03: a close vector is a candidate, not a hit. Check that
+                        # the two prompts actually ask for the same thing before
+                        # letting this row win, and keep scanning if they do not --
+                        # a vetoed row must not shadow a genuinely equivalent one.
+                        try:
+                            stored_disc = json.loads(row[5]) if row[5] else None
+                        except Exception:
+                            stored_disc = None
+                        veto = _equivalence_veto(stored_disc, incoming_disc)
+                        if veto is not None:
+                            vetoed += 1
+                            log.debug("semantic_cache: VETO at sim=%.4f -- %s", sim, veto)
+                            continue
+                        best_sim = sim
+                        best_row = row
+                    except Exception:
+                        continue
+                if best_sim < threshold:
+                    best_row = None
+
+            now = time.time()
+            if best_row is not None:
+                await db.execute(
+                    "UPDATE semantic_cache SET hit_count = COALESCE(hit_count, 0) + 1, "
+                    "last_hit_at = ? WHERE id = ?",
+                    (now, best_row[0]),
+                )
+            await db.execute(
+                "INSERT INTO semantic_cache_lookups (ts, task_type, hit, saved_usd) "
+                "VALUES (?, ?, ?, ?)",
+                (now, task_type.value, 1 if best_row is not None else 0,
+                 float(best_row[3] or 0.0) if best_row is not None else 0.0),
+            )
+            await db.commit()
         finally:
             await db.close()
     except Exception as exc:
         log.debug("Semantic cache read failed: %s", exc)
         return None
 
-    incoming_disc = _discriminator(prompt)
-    best_sim = 0.0
-    best_row = None
-    vetoed = 0
-    for row in rows:
-        try:
-            cached_emb = json.loads(row[0])
-            sim = _cosine_similarity(embedding, cached_emb)
-            if sim <= best_sim:
-                continue
-            # C-03: a close vector is a candidate, not a hit. Check that the two
-            # prompts actually ask for the same thing before letting this row win,
-            # and keep scanning if they do not -- a vetoed row must not shadow a
-            # genuinely equivalent one further down.
-            try:
-                stored_disc = json.loads(row[4]) if row[4] else None
-            except Exception:
-                stored_disc = None
-            veto = _equivalence_veto(stored_disc, incoming_disc)
-            if veto is not None:
-                vetoed += 1
-                log.debug("semantic_cache: VETO at sim=%.4f -- %s", sim, veto)
-                continue
-            best_sim = sim
-            best_row = row
-        except Exception:
-            continue
-
-    if best_sim >= threshold and best_row is not None:
+    if best_row is not None:
         from llm_router.types import LLMResponse
         log.info(
             "semantic_cache: HIT (sim=%.3f ≥ %.2f, model=%s)",
@@ -469,31 +585,38 @@ async def store(
     prompt: str,
     task_type: "TaskType",
     response: "LLMResponse",
+    *,
+    key: CacheKey | None = None,
 ) -> None:
     """Store a prompt+response pair in the semantic cache.
 
-    Embeds the prompt and persists the embedding alongside the response
-    content for future similarity lookups.
+    Stores under ``key`` — the same key ``check`` used for this request — with
+    the embedding of ``key.text`` when Ollama is configured and answers, and an
+    empty embedding otherwise (exact-match only). The column is ``NOT NULL`` in
+    every existing ``usage.db`` and SQLite cannot drop that by ALTER, so "no
+    embedding" is spelled ``''`` rather than NULL.
 
     Args:
-        prompt: The original user prompt.
+        prompt: The original user prompt (used only when ``key`` is None).
         task_type: The task type of this call.
         response: The LLMResponse to cache.
+        key: The request's ``CacheKey``. Defaults to ``make_key(prompt)``.
     """
     if _cache_disabled():
         return
     from llm_router.config import get_config
     config = get_config()
-    if not config.ollama_base_url:
-        return
 
     # Don't cache failed or empty responses
     if not response.content or response.provider == "cache":
         return
 
-    embedding = _get_embedding(prompt, config.ollama_base_url)
-    if embedding is None:
-        return
+    if key is None:
+        key = make_key(prompt)
+    embedding = (
+        _get_embedding(key.text, config.ollama_base_url)
+        if config.ollama_base_url else None
+    )
 
     # D-01/D-04: redact BEFORE the row touches the shared usage.db. Wrapped
     # locally even though persist_redact() is already safe-failure, so an
@@ -515,23 +638,26 @@ async def store(
                 """
                 INSERT INTO semantic_cache
                     (task_type, project_scope, embedding, response_content,
-                     response_model, response_cost_usd, discriminator)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                     response_model, response_cost_usd, discriminator,
+                     ctx_hash, text_hash, hit_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                 """,
                 (
                     task_type.value,
                     _project_scope(),
-                    json.dumps(embedding),
+                    json.dumps(embedding) if embedding is not None else "",
                     safe_content,
                     response.model,
                     response.cost_usd,
-                    json.dumps(_discriminator(prompt)),
+                    json.dumps(_discriminator(key.text)),
+                    key.ctx_hash,
+                    _text_hash(key.text),
                 ),
             )
             await db.commit()
             log.debug("semantic_cache: stored entry for %s", task_type.value)
             # B-02/B-03: physically purge TTL-expired rows on every store,
-            # scoped strictly to this table.
+            # scoped strictly to semantic_cache and semantic_cache_lookups.
             await _purge_expired(db)
         finally:
             await db.close()
