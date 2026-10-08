@@ -15,8 +15,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import logging
+import socket
+import subprocess
+import threading
 import time
+import urllib.request
 from types import SimpleNamespace
 
 import pytest
@@ -450,11 +453,51 @@ async def test_a_pending_classification_does_not_delay_other_work(monkeypatch):
             f"event loop was held for {max(gaps) * 1000:.0f} ms ({len(gaps)} ticks)")
 
 
-async def test_no_slow_callback_on_the_async_path_and_the_detector_works(monkeypatch, caplog):
-    """A sleeping async fake would pass a blocking implementation. So: turn on asyncio debug
-    with a 50 ms slow-callback threshold, prove it fires for a real blocking call made from
-    the loop (the sync ``classify_local``), then prove it is silent for ``classify_async``."""
-    loop = asyncio.get_running_loop()
+class _LoopGuard:
+    """Records every call to a blocking primitive made on the event-loop thread.
+
+    Asserting on callback duration (asyncio debug ``slow_callback_duration``) measures the
+    runner: a callback preempted by a busy CI box looks as slow as a blocking one (0.137 s on
+    py3.11, 0.068 s on another PR, none of them blocking). What makes a path block the loop is
+    *which calls it makes*, so the guard watches those instead of the clock: ``time.sleep``,
+    joining a thread (``classify_local`` joins a worker; ``Thread.start`` itself is fine,
+    executors call it from the loop), ``urlopen``, a socket in
+    blocking mode, and starting a subprocess. Non-blocking sockets (asyncio's own) pass.
+
+    It does NOT catch other blocking primitives: file IO / ``open``, ``sqlite3``,
+    ``socket.getaddrinfo`` (DNS), lock and ``Event`` waits, ``os.system``, or an executor
+    future's ``.result()``. A path that blocks the loop through one of those passes this guard."""
+
+    def __init__(self, monkeypatch):
+        self.thread = threading.get_ident()
+        self.calls: list[str] = []
+        mp = monkeypatch
+
+        def wrap(owner, name, label=None, only_blocking_socket=False):
+            orig = getattr(owner, name)
+
+            def guarded(*a, **k):
+                if threading.get_ident() == self.thread and not (
+                        only_blocking_socket and a[0].gettimeout() == 0.0):
+                    self.calls.append(label or name)
+                    raise RuntimeError(f"blocking call {label or name} on the event-loop thread")
+                return orig(*a, **k)
+
+            mp.setattr(owner, name, guarded)
+
+        wrap(time, "sleep")
+        wrap(threading.Thread, "join", "Thread.join")
+        wrap(urllib.request, "urlopen")
+        wrap(subprocess.Popen, "__init__", "subprocess.Popen")
+        for name in ("connect", "send", "sendall", "recv", "recv_into", "accept"):
+            wrap(socket.socket, name, f"socket.{name}", only_blocking_socket=True)
+
+
+async def test_no_blocking_call_on_the_async_path_and_the_guard_works(monkeypatch):
+    """A sleeping async fake would pass a blocking implementation. So: install a guard that
+    records blocking primitives called on the loop thread, prove it fires for the real sync
+    path (``classify_local`` from the loop) and for an injected ``time.sleep``, then prove it
+    stays silent for the whole ``classify_async`` path (ps probe + chat). No clock involved."""
     async with FakeOllama(monkeypatch, delay=0.3) as o:
         await _ask("warm-up")                            # connection set-up is not under test
         # That answer proved the model resident, so the next call would skip /api/ps and never
@@ -462,30 +505,21 @@ async def test_no_slow_callback_on_the_async_path_and_the_detector_works(monkeyp
         # test runs the whole path (ps probe + chat).
         lc._resident_until = 0.0
         ps_before = o.ps_calls
-        was_debug, was_slow = loop.get_debug(), loop.slow_callback_duration
-        loop.set_debug(True)
-        loop.slow_callback_duration = 0.05
-        await asyncio.sleep(0)                           # debug timing applies from the NEXT loop step
-        try:
-            with monkeypatch.context() as m, caplog.at_level(logging.WARNING, logger="asyncio"):
-                def blocking_post(model, assembled, timeout):
-                    time.sleep(0.3)                      # what a sync call in the proxy would do
-                    return _reply()
-
-                m.setattr(lc, "_post", blocking_post)
-                lc.classify_local(_assembled(), timeout_s=2.0)   # WRONG on a loop: blocks 0.3 s
-                await asyncio.sleep(0)
-                assert [r for r in caplog.records if "took" in r.getMessage()], \
-                    "the slow-callback detector did not fire for a real blocking call"
-            caplog.clear()
-            with caplog.at_level(logging.WARNING, logger="asyncio"):
-                assert (await _ask("under-test")).source == "llm"
-                slow = [r.getMessage() for r in caplog.records if "took" in r.getMessage()]
-            assert o.ps_calls == ps_before + 1, "the call under test skipped _is_loaded"
-            assert slow == []
-        finally:
-            loop.set_debug(was_debug)
-            loop.slow_callback_duration = was_slow
+        with monkeypatch.context() as m:
+            guard = _LoopGuard(m)
+            m.setattr(lc, "_post", lambda model, assembled, timeout: _reply())
+            with pytest.raises(RuntimeError, match="Thread.join"):
+                lc.classify_local(_assembled(), timeout_s=2.0)       # WRONG on a loop: joins a thread
+            assert "Thread.join" in guard.calls, "the guard missed a sync classify on the loop"
+            guard.calls.clear()
+            with pytest.raises(RuntimeError, match="blocking call sleep"):
+                time.sleep(0.01)                         # what a sync call in the proxy would do
+            assert guard.calls == ["sleep"]
+            guard.calls.clear()
+            verdict = await _ask("under-test")
+            assert guard.calls == [], f"blocking call(s) on the event loop: {guard.calls}"
+            assert verdict.source == "llm"
+        assert o.ps_calls == ps_before + 1, "the call under test skipped _is_loaded"
 
 
 async def test_nine_calls_with_one_text_make_one_http_call(monkeypatch):
