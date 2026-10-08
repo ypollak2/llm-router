@@ -1226,3 +1226,11 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   rewrites `objects/*` mid-copy (the stress run also failed on object directories).
 - **Test.** `tests/test_git_fixture_race.py` traces git's process starts under the hostile config: 1 failed
   without the fix (maintenance child seen), passes with it. It also asserts the trace saw the commit.
+- **Second cause, found when CI failed again on the repair (3.13, `verify_head_unavailable`).** The
+  original `IndexError` was never the venv: `_checkout` closed the `git archive` pipe as soon as
+  `tarfile` read the end-of-archive blocks, while git was still writing the record padding; git died of
+  SIGPIPE, rc != 0 became `verify_head_unavailable`, and the verifier was never called. Timing-dependent,
+  so it passed on a Mac and flaked on CI (either Python). Fix: drain the pipe to EOF before closing.
+  Test: `test_checkout_drains_git_archive_padding_so_git_is_not_killed_by_sigpipe` (a stand-in git that
+  writes the padding late; red with `_Fail: verify_head_unavailable` before the fix).
+

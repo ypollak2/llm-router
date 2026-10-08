@@ -1260,3 +1260,27 @@ def test_results_from_the_repo_venv_carry_a_flag_unless_they_pass(tmp_path, monk
     W.drain(verify=lambda r, p, budget_s, python_dir=None: next(results),
             record=lambda uid, r: seen.__setitem__(uid, list(r.flags)))
     assert sorted(seen.values(), key=len) == [[], ["repo_venv_s"]]
+
+
+def test_checkout_drains_git_archive_padding_so_git_is_not_killed_by_sigpipe(tmp_path, monkeypatch):
+    """CI flake (`verify_head_unavailable` on a good repo): tarfile stops reading at the end-of-archive
+    blocks, the pipe was closed while git was still writing the record padding, git exited non-zero.
+    A stand-in `git archive` writes the tar, waits, THEN writes the padding and fails if the pipe closed."""
+    import io
+    import tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        info = tarfile.TarInfo("a.txt")
+        info.size = 2
+        tf.addfile(info, io.BytesIO(b"hi"))
+    data = buf.getvalue()
+    cut = len(data) - 4096                              # everything after is padding the reader never needs
+    assert data[cut:] == b"\0" * 4096 and cut % 512 == 0
+    script = (f"import sys, time\nout = sys.stdout.buffer\nd = {data!r}\nout.write(d[:{cut}]); out.flush()\n"
+              f"time.sleep(0.5)\nout.write(d[{cut}:]); out.flush()\n")
+    real = W.subprocess.Popen
+    monkeypatch.setattr(W.subprocess, "Popen", lambda args, **kw: real([sys.executable, "-c", script], **kw))
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    W._checkout(str(tmp_path), "a" * 40, dest, time.monotonic() + 30)       # raises _Fail before the fix
+    assert (dest / "a.txt").read_text() == "hi"

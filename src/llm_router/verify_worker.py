@@ -88,6 +88,11 @@ def _checkout(cwd: str, head: str, dest: Path, deadline: float) -> None:
                 if total > _MAX_CHECKOUT_BYTES:
                     raise _Fail("verify_repo_too_large")
                 tar.extract(member, dest, filter="data")
+        # tarfile stops at the end-of-archive blocks; git still writes the record padding. Closing
+        # the pipe before that makes git die of SIGPIPE (rc != 0) on a timing race: a good checkout
+        # recorded as verify_head_unavailable. Drain to EOF first (the timer bounds it).
+        while p.stdout.read(65536):
+            pass
     except tarfile.TarError:
         try:                                     # an empty/short stream: did git itself refuse?
             p.wait(timeout=2)
