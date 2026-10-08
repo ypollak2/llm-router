@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 46
+# llm_router-hook-version: 47
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -209,7 +209,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 46"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 47"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -328,63 +328,32 @@ def _hook_deadline() -> float:
     """The single monotonic instant every local-execution budget answers to."""
     return _HOOK_STARTED_AT + _hook_budget_s()
 CONFIDENCE_THRESHOLD = int(os.environ.get("LLM_ROUTER_CONFIDENCE_THRESHOLD", "2"))  # v7.5.0: Aggressive routing — route more with lower threshold
-# Privacy-first: classify locally only (heuristic + Ollama) by default.
-# Set LLM_ROUTER_CLASSIFY_LOCAL_ONLY=false to enable external classifiers.
-# D5: If the user has NOT explicitly set this flag AND Ollama is absent but
-# API keys are present, fall back to API classifiers automatically so new
-# users without Ollama still get accurate classification instead of heuristic-only.
-_local_only_raw = os.environ.get(
-    "LLM_ROUTER_CLASSIFY_LOCAL_ONLY",
-    os.environ.get("LLM_ROUTER_DISABLE_LLM_CLASSIFIERS", ""),
-).lower()
-if _local_only_raw in ("1", "true", "yes", "on"):
-    DISABLE_LLM_CLASSIFIERS = True
-elif _local_only_raw in ("0", "false", "no", "off"):
-    DISABLE_LLM_CLASSIFIERS = False
-else:
-    # Not explicitly set — auto-detect: stay local-only if Ollama reachable or
-    # no API keys are configured; allow API fallback otherwise.
-    _has_api_key = bool(
-        os.environ.get("GEMINI_API_KEY") or
-        os.environ.get("OPENAI_API_KEY") or
-        os.environ.get("GOOGLE_API_KEY")
-    )
-    # THIRD copy of this reader, found by auditing the nosec justifications
-    # rather than by the SSRF fix that corrected the other two. Same CHZ-SEC-06
-    # bypass: env-derived, unvalidated, straight into urlopen. `_load_dotenv`
-    # above reads Path.cwd()/".env", so a cloned repo could point this at
-    # file:// or a cloud-metadata address.
-    #
-    # Guarded import, failing CLOSED to localhost — this file runs as a
-    # standalone script and must not die on package resolution, but an
-    # unavailable validator must not mean an unchecked URL.
-    _ollama_url_raw = (
-        os.environ.get("LLM_ROUTER_OLLAMA_URL") or
-        os.environ.get("OLLAMA_BASE_URL") or
-        "http://localhost:11434"
-    )
-    try:
-        from llm_router.config import validate_ollama_url as _validate_ollama
-        _ollama_url_check = _validate_ollama(_ollama_url_raw) or "http://localhost:11434"
-    except Exception:
-        _ollama_url_check = (
-            _ollama_url_raw if _ollama_url_raw == "http://localhost:11434"
-            else "http://localhost:11434"
-        )
-    try:
-        import urllib.request as _urllib_req
-        # nosec B310 — URL validated above (scheme + host allowlist). The
-        # previous justification read "localhost Ollama only", which was false:
-        # the URL is env-derived. A remote Ollama is still supported, so
-        # "localhost only" would be wrong even now that it is checked.
-        with _urllib_req.urlopen(  # nosec B310
-            _urllib_req.Request(f"{_ollama_url_check}/api/tags", method="GET"),
-            timeout=0.5,
-        ):
-            _ollama_reachable = True
-    except Exception:
-        _ollama_reachable = False
-    DISABLE_LLM_CLASSIFIERS = _ollama_reachable or not _has_api_key
+# P0.7-c (plan v16): the hook's LLM classifier layers (2: Ollama, 3: cloud API)
+# are controlled ONLY by LLM_ROUTER_HOOK_LLM_LAYER, default off.
+#
+# Before this, an auto-detect set
+#     DISABLE_LLM_CLASSIFIERS = _ollama_reachable or not _has_api_key
+# when LLM_ROUTER_CLASSIFY_LOCAL_ONLY / LLM_ROUTER_DISABLE_LLM_CLASSIFIERS were
+# unset: the layer was off exactly when Ollama was reachable, and on — sending
+# the prompt to a cloud API — when it was not (docs/BUGS.md #8). It also cost a
+# 0.5 s /api/tags probe at every hook start.
+#
+# Default off, deliberately, rather than the "switch it on" the gap analysis
+# asked for: the hook latency NFR, and the round-2 kill of the v7 LLM classifier
+# (Clambda2 10.70 vs rules 9.58, under-route 79/91 vs 47/91, n=91,
+# $PP/eval/results/tune_round2_20261007T151100.json). It stays off until a D-19
+# candidate passes its own pre-registration.
+#
+# LLM_ROUTER_DISABLE_LLM_CLASSIFIERS is no longer read. With the layer on,
+# layer 3 (cloud API) additionally needs LLM_ROUTER_CLASSIFY_LOCAL_ONLY=false:
+# a prompt leaves the machine for classification only on an explicit opt-in.
+_HOOK_LLM_LAYER_ON = os.environ.get("LLM_ROUTER_HOOK_LLM_LAYER", "off").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+DISABLE_LLM_CLASSIFIERS = not _HOOK_LLM_LAYER_ON
+_API_CLASSIFIERS_ALLOWED = os.environ.get(
+    "LLM_ROUTER_CLASSIFY_LOCAL_ONLY", ""
+).strip().lower() in ("0", "false", "no", "off")
 
 # ── Flexible Routing Policy (v7.5.0) ──────────────────────────────────────────
 # Load active policy to customize routing behavior per user
@@ -2455,7 +2424,7 @@ def classify_prompt(text: str) -> dict | None:
             }
 
     # Layer 3: Cheap API model (Gemini Flash first — free tier, then GPT-4o-mini)
-    if not DISABLE_LLM_CLASSIFIERS and len(stripped) >= 10:
+    if not DISABLE_LLM_CLASSIFIERS and _API_CLASSIFIERS_ALLOWED and len(stripped) >= 10:
         api_result = classify_with_gemini(text) or classify_with_openai(text)
         if api_result:
             return {
@@ -3960,10 +3929,11 @@ def _check_learned_override(task_type: str, learned_routes: dict) -> tuple[str, 
     Returns:
         Tuple of (tool, method_suffix) if override applies, else None
     """
-    if task_type not in learned_routes:
+    # P0.7-a: profiles are keyed by task type. A file written before that fix
+    # is keyed by tool name ("llm_code"); accept it for one release.
+    route_data = learned_routes.get(task_type) or learned_routes.get(f"llm_{task_type}")
+    if not isinstance(route_data, dict):
         return None
-
-    route_data = learned_routes[task_type]
     confidence = route_data.get("confidence", 0)
 
     # Only apply if confidence >= 3 (locked in)
