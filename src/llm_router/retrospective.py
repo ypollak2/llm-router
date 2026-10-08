@@ -230,9 +230,16 @@ def analyze_facts(
     ]
     avg_conf = sum(_measured) / len(_measured) if _measured else 0.0
 
-    # Classification accuracy (based on correction ratio)
-    accuracy = 1.0 - (len(corrections) / len(decisions)) if decisions else 1.0
-    accuracy = max(0.0, min(1.0, accuracy))
+    # Classification accuracy (based on correction ratio).
+    #
+    # P0.7-b (plan v16): with 0 corrections this was 1.0 — a perfect score
+    # measured from nothing, since an uncorrected route is not a verified one.
+    # It is None ("not measurable (no corrections)") until a correction exists.
+    if corrections:
+        accuracy = 1.0 - (len(corrections) / len(decisions))
+        accuracy = max(0.0, min(1.0, accuracy))
+    else:
+        accuracy = None
 
     return {
         "total_calls": len(decisions),
@@ -562,7 +569,12 @@ def _format_accuracy_pct(facts: dict) -> str:
     treating "unmeasured" as 100%/0% accurate.
     """
     accuracy = facts.get("classification_accuracy")
-    return "n/a" if accuracy is None else f"{accuracy * 100:.0f}%"
+    if accuracy is not None:
+        return f"{accuracy * 100:.0f}%"
+    # P0.7-b: decisions exist but nobody corrected one — not a measurement.
+    if facts.get("total_calls") and not facts.get("correction_count"):
+        return "not measurable (no corrections)"
+    return "n/a"
 
 
 def write_retrospective_file(retro: dict, session_id: str = "") -> Path:

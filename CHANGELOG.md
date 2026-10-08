@@ -12,6 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- proxy (PLAN v16 P0.11, owner decision D-20 = A): the Haiku guard (`proxy/haiku_guard.py`) runs in
+  the proxy at start and hourly while `haiku_rewrite` is on. A trip (redo > 15% at n >= 30; audit
+  batch < 75% at n >= 30; daily audit < 8/10 on 2 consecutive days; `tier_retry` > 1% at n >= 100
+  Haiku-decided calls; shadow acceptable < 26/30 at n >= 20) writes `~/.llm-router/tier_overrides.json`
+  and turns the live rewrite off. `ClaudeTierPolicy.load` reads that override after the YAML. The
+  override can only turn the rewrite off, and the YAML is never edited. New
+  `llm-router kpi --haiku-watch --since --until` prints every trigger with its n and exits 1 when a
+  D-20 trigger has too little data to judge.
+
 ### Changed
 - routing (M3.0, owner decision D-14 = A): `route_and_call` no longer serves a Q&A task type from a
   local provider. For `northstar.QA_TASK_TYPES` (query, research, generate, analyze and the other Q&A
@@ -75,6 +85,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   execution ledger migrates `ALTER TABLE execution_events ADD COLUMN verify TEXT` and
   `... used INTEGER` the next time the live ledger is opened (additive, nullable). The local model's context window comes from the one table,
   `local_models.num_ctx(model)` (32768 for qwen3.6).
+- classifier (M1.8 round 3, default OFF): a decision-model backend for the local tier classifier,
+  `src/llm_router/decision_classifier.py`. `LLM_ROUTER_CLASSIFIER_BACKEND=systemone` makes
+  `classify_local` / `classify_async` call Ollama `POST /v1/systemone` (Ollama >= 0.35, default model
+  `nimble:9b`, `LLM_ROUTER_DECISION_MODEL`) with ONE `choice` question (haiku / sonnet / opus, the v7 tier
+  definitions). The `Verdict` gains `confidence` (p_max of the option probabilities, not the endpoint's own
+  concentration score) and `abstain`; `LLM_ROUTER_DECISION_ABSTAIN_BELOW` (default 0.0 = never) turns a low
+  p_max into `source="abstain"` with no tier, so the caller keeps the rules. Strict response check (three
+  probabilities summing to 1 +/- 0.02, choice = argmax), no prompt text stored. The default backend
+  (`chat`, prompt v6) is unchanged. Not routed live; the measurement is PREREG v2 amendment 2.
 - hooks: `hook_latency.jsonl` rows can carry `phases_ms` (M4.1, hook tail attribution). `auto-route` (hook
   version 46) names `import`, `session_io`, `zce`, `classify`, `hud`, `db_write`, `draft_chain` (the whole draft
   chain: Ollama, Codex, Gemini CLI) and `cold_wait` (Ollama `load_duration`); `session-start` (version 23) names `import`, `session_io`, `reset_state`,

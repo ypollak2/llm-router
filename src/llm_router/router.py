@@ -62,7 +62,12 @@ from llm_router.health import get_tracker
 from llm_router.profiles import get_model_chain, provider_from_model
 from llm_router.receipt_store import compute_receipt, store_receipt
 from llm_router.tracing import set_span_attributes, traced_span
-from llm_router.types import BudgetExceededError, Complexity, CostBudgetExceeded, DeadlineExceeded, LLMResponse, LOCAL_PROVIDERS, RoutingProfile, TaskType, WallClockExceeded
+# M3.0 (PLAN D-14 = A): a Q&A task type is never served by a local provider through
+# ``route_and_call``. The rule and its provider set live in ``llm_router.qa_policy`` so the
+# hook DIRECT path and the SDK apply the same copy (P0.3); these names stay for callers.
+from llm_router.qa_policy import QA_STRIP_PROVIDERS as _QA_STRIP_PROVIDERS  # noqa: F401
+from llm_router.qa_policy import strip_local_for_qa as _strip_local_for_qa
+from llm_router.types import BudgetExceededError, Complexity, CostBudgetExceeded, DeadlineExceeded, LLMResponse, RoutingProfile, TaskType, WallClockExceeded
 from llm_router.tool_surface import route_call, route_tool# CHZ-SURF-01
 from llm_router.savings import net_saved
 
@@ -1174,45 +1179,6 @@ def _blocked_providers() -> frozenset[str]:
     return frozenset(item.strip().lower() for item in raw.split(",") if item.strip())
 
 
-# Providers that run on the user's own machine. M3.0 (PLAN D-14 = A): a Q&A task type is
-# never served by one of these through ``route_and_call``. Evidence: real Q&A prompts, local
-# qwen 4/37 acceptable vs Sonnet 34/37 (PLAN §0.3 [RX]); 65 local Q&A answers in 7 days [U].
-# One source of truth: ``types.LOCAL_PROVIDERS`` (ollama, lm_studio, vllm, llamacpp) plus
-# ``openai_compat``, which is local by definition (config.py: "OpenAI-compatible local
-# inference (llama.cpp, vLLM, TGI, LM Studio)", base URL e.g. http://localhost:8080/v1) but
-# is not in ``LOCAL_PROVIDERS``. That set is shared with budget.py, so it is extended here
-# rather than changed there (M3.0 touches only routing). Do not add a literal set here.
-_QA_STRIP_PROVIDERS: frozenset[str] = LOCAL_PROVIDERS | {"openai_compat"}
-
-
-def _strip_local_for_qa(models: list[str], task_type: TaskType | str) -> list[str]:
-    """Drop local providers from a chain when the task type is Q&A (M3.0, D-14 = A).
-
-    The next provider in the chain's existing order serves the call, so nothing is
-    reordered. Code task types (and every non-Q&A type) pass through unchanged, so a
-    ``code`` task can still go local. Q&A is ``northstar.QA_TASK_TYPES`` (M0.2). If
-    nothing but local providers remain, the chain is returned as is (no empty chain).
-    The caller must not apply this to an explicit ``model_override``: that is the
-    caller's own pin, not routing.
-    """
-    from llm_router.northstar import QA_TASK_TYPES
-
-    if getattr(task_type, "value", task_type) not in QA_TASK_TYPES:
-        return models
-    kept = [m for m in models if provider_from_model(m) not in _QA_STRIP_PROVIDERS]
-    if not kept:
-        # Local is the only thing configured (an Ollama-only install). An empty chain
-        # would fail the call with "install Ollama", so keep it: M3.0 reroutes Q&A to
-        # the next provider, and here there is none.
-        return models
-    if len(kept) != len(models):
-        log.debug(
-            "M3.0: dropped %d local model(s) from the %s chain",
-            len(models) - len(kept), getattr(task_type, "value", task_type),
-        )
-    return kept
-
-
 # #27 / Option B — precision-tier routing cues. A SHORT prompt that demands an
 # exact, verifiable answer (arithmetic, a code-output value, a precise count) is the
 # one regime where a cheap local model gives confident-but-WRONG terse answers that
@@ -2064,6 +2030,52 @@ def _emit_quality_terminal(
         failopen.record("CHZ-FO-ROUTER-QUALITY-TERMINAL", exc)
 
 
+def _recent_context_text(buf) -> str:
+    """The last two buffered conversation messages, as one string (P0.5)."""
+    return "\x1e".join(f"{m.role}:{m.content}" for m in buf.get_recent(2))
+
+
+def _semantic_cache_key(
+    prompt: str,
+    caller_context: str | None,
+    scope_root: str | None,
+    system_prompt: str | None = None,
+):
+    """P0.5 (R-CTX-7): the ONE semantic-cache key for this request.
+
+    Built in ``route_and_call`` from the user's prompt BEFORE context injection
+    and handed to both ``semantic_cache.check`` and, through the dispatch loop,
+    to ``semantic_cache.store``. It must be built before dispatch: the success
+    path records this exchange into the session buffer before the store runs,
+    so a key rebuilt at store time would see a different conversation.
+    Context = the caller's ``context`` if given, else the last two messages of
+    this (project, session) buffer; scope = the caller's resolved project root.
+    A caller-supplied ``system_prompt`` is part of the key material too: the
+    same prompt under different instructions asks for a different answer.
+    """
+    from llm_router import semantic_cache
+
+    context_text = ""
+    if caller_context and caller_context.strip():
+        context_text = "caller:" + caller_context
+    else:
+        try:
+            pid, sid = _resolve_context_identity(None, None)
+            context_text = "recent:" + _recent_context_text(get_session_buffer(pid, sid))
+        except Exception as exc:  # noqa: BLE001 — a missing buffer is an empty context
+            log.debug("semantic cache context read failed: %s", exc)
+    if system_prompt:
+        context_text += "\x1fsystem:" + system_prompt
+    scope = ""
+    if scope_root:
+        try:
+            from llm_router.semantic.scope import scope_key
+            scope = scope_key(scope_root)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("semantic cache scope key failed: %s", exc)
+    return semantic_cache.make_key(prompt, context_text=context_text, scope=scope)
+
+
 async def _finalize_successful_route(
     *,
     response,
@@ -2083,6 +2095,7 @@ async def _finalize_successful_route(
     served_from_cache: bool = False,
     effective_complexity: str = "moderate",
     ledger_outcome: str | None = None,
+    semantic_key=None,
 ) -> None:
     """CHZ-AUD-B-05: single source of truth for the post-success finalization
     side-effects, called from EVERY success path: the primary success path, the
@@ -2515,7 +2528,8 @@ async def _finalize_successful_route(
     if task_type not in MEDIA_TASK_TYPES and not served_from_cache:
         try:
             from llm_router import semantic_cache
-            await semantic_cache.store(prompt, task_type, response)
+            # P0.5: store under the key check() used, not the injected prompt.
+            await semantic_cache.store(prompt, task_type, response, key=semantic_key)
         except Exception as _sc_err:
             log.debug("Semantic cache store failed (non-fatal): %s", _sc_err)
 
@@ -2561,6 +2575,8 @@ async def _dispatch_model_loop(
     # _cli_scope_root as a hint; without it they would fall back to the process
     # cwd, which is $HOME on the long-lived server -> no scope -> no context.
     scope_root: str | None = None,
+    # P0.5: the semantic-cache key route_and_call checked under; stored under it.
+    semantic_key=None,
 ) -> LLMResponse:
     """Execute the main model dispatch loop with primary + emergency fallback chains.
 
@@ -3332,6 +3348,7 @@ async def _dispatch_model_loop(
                     receipt=_receipt,
                     suppress_ledger=suppress_ledger,
                     effective_complexity=effective_complexity,
+                    semantic_key=semantic_key,
                 )
             except Exception as _fin_err:  # noqa: BLE001 — finalize never fails the turn
                 log.warning("finalize_successful_route failed (non-fatal): %s", _fin_err)
@@ -3596,6 +3613,7 @@ async def _dispatch_model_loop(
                             receipt=None,
                             suppress_ledger=suppress_ledger,
                             effective_complexity=effective_complexity,
+                            semantic_key=semantic_key,
                         )
                     except Exception as _fin_err:  # noqa: BLE001 — finalize never fails the turn
                         log.warning("finalize_successful_route (emergency) failed (non-fatal): %s", _fin_err)
@@ -4500,13 +4518,47 @@ async def route_and_call(
                 "  • Set LLM_ROUTER_CLAUDE_SUBSCRIPTION=true if you have Claude Pro/Max"
             )
 
-        # Semantic dedup cache — skip the LLM call entirely when an equivalent
-        # prompt was answered recently (cosine similarity ≥ 0.95 within 24 hours).
-        # Only active when Ollama is configured; silently skipped otherwise.
+        # Resolved ONCE, here, and reused by the semantic-cache key, context
+        # prep, OKF and enrichment below (moved above the cache check for
+        # P0.5). It once was computed further down, for OKF only, which is why
+        # context_prep never received it — see `_prepare` below.
+        #
+        # An explicit project_root wins: a caller that named a project meant it.
+        # Otherwise ask the MCP client for its workspace roots, the only
+        # per-connection signal a long-lived server has. `resolve_scope` then
+        # walks whatever comes back to its repo root, because the client reports
+        # whatever it likes and `result_cache` turns that string into a file
+        # path — a second spelling there orphans a database nothing reopens.
+        _scope_root: str | None = None
+        try:
+            _raw_root = project_root
+            if _raw_root is None:
+                from llm_router.mcp_roots import root_from_ctx as _root_from_ctx
+                _raw_root = await _root_from_ctx(ctx)
+            if _raw_root is not None:
+                from llm_router.semantic.scope import resolve_scope as _resolve_scope
+                _scope_root = str(_resolve_scope(_raw_root))
+        except Exception as _scope_err:  # noqa: BLE001 — scope is an improvement
+            log.debug("Project scope resolution failed: %s", _scope_err)
+
+        # P0.5 (R-CTX-7): one key for check AND store — the raw prompt (before
+        # OKF/<repo_state> injection below) plus a hash of the conversation
+        # context, the caller's system prompt (before context_prep enriches
+        # it below) and the caller's scope. Built unconditionally so a
+        # model_override turn still stores under the same key.
+        _semantic_key = None
+        try:
+            _semantic_key = _semantic_cache_key(prompt, caller_context, _scope_root, system_prompt)
+        except Exception as _key_err:  # noqa: BLE001 — the cache is an optimisation
+            log.debug("Semantic cache key failed: %s", _key_err)
+
+        # Semantic dedup cache — skip the LLM call entirely when the same request
+        # (same key) was answered recently: exact text, or cosine similarity ≥
+        # threshold when Ollama is configured. Within 24 hours.
         if task_type not in MEDIA_TASK_TYPES and not model_override:
             try:
                 from llm_router import semantic_cache
-                cached = await semantic_cache.check(prompt, task_type)
+                cached = await semantic_cache.check(prompt, task_type, key=_semantic_key)
                 if cached is not None:
                     await _notify(ctx, "info", "⚡ Semantic cache hit — skipping LLM call")
                     set_span_attributes(
@@ -4656,29 +4708,8 @@ async def route_and_call(
         # ── Context preparation (v7.7) ──────────────────────────────────────────
         # Enrich the system prompt with task-specific behavioral rules when the
         # caller hasn't provided a custom system prompt. This gives cheap models
-        # focused instructions that improve response quality.
-        # Resolved ONCE, here, and reused by context prep, OKF and enrichment
-        # below. It used to be computed forty lines further down, for OKF only,
-        # which is why context_prep never received it — see `_prepare` below.
-        #
-        # An explicit project_root wins: a caller that named a project meant it.
-        # Otherwise ask the MCP client for its workspace roots, the only
-        # per-connection signal a long-lived server has. `resolve_scope` then
-        # walks whatever comes back to its repo root, because the client reports
-        # whatever it likes and `result_cache` turns that string into a file
-        # path — a second spelling there orphans a database nothing reopens.
-        _scope_root: str | None = None
-        try:
-            _raw_root = project_root
-            if _raw_root is None:
-                from llm_router.mcp_roots import root_from_ctx as _root_from_ctx
-                _raw_root = await _root_from_ctx(ctx)
-            if _raw_root is not None:
-                from llm_router.semantic.scope import resolve_scope as _resolve_scope
-                _scope_root = str(_resolve_scope(_raw_root))
-        except Exception as _scope_err:  # noqa: BLE001 — scope is an improvement
-            log.debug("Project scope resolution failed: %s", _scope_err)
-
+        # focused instructions that improve response quality. `_scope_root` is
+        # resolved above, before the semantic-cache check.
         if system_prompt is None and task_type not in MEDIA_TASK_TYPES and models_to_try:
             try:
                 from llm_router.context_prep import prepare_prompt as _prepare
@@ -4835,6 +4866,7 @@ async def route_and_call(
             model_override=model_override,  # CHZ-AUD-C-02: honor explicit pin
             ledger_route_id=_ledger_route_id,
             scope_root=_scope_root,
+            semantic_key=_semantic_key,
         )
         # T3-S2 + T3-M1: combined timeout + cancel handling. Both failure
         # modes share the same cleanup contract — release the budget

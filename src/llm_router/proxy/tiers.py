@@ -225,6 +225,25 @@ def policy_version(path: str | Path | None = None) -> str:
     return hashlib.sha256(raw + b"\0" + str(__version__).encode("utf-8")).hexdigest()[:12]
 
 
+def tier_model(name: str, path: str | Path | None = None) -> str | None:
+    """Model id of tier ``name`` in the policy the proxy loads, or None.
+
+    Same file the proxy reads: ``path``, else ``LLM_ROUTER_PROXY_TIER_POLICY``,
+    else the bundled ``claude_tiers.yaml``; parsed by ``ClaudeTierPolicy.load``.
+    Hooks use this instead of a literal model id (plan v16 P0.2: auto-route
+    kept sending ``/model claude-opus-4-6`` after the opus tier moved on).
+    None when the file is missing or invalid, or has no such tier.
+    """
+    import os
+
+    target = path or os.environ.get("LLM_ROUTER_PROXY_TIER_POLICY") or None
+    try:
+        tier = ClaudeTierPolicy.load(target).by_name.get(name)
+    except (OSError, ValueError, TypeError, ImportError):
+        return None
+    return tier.model if tier is not None else None
+
+
 async def _default_classify(text: str) -> dict:
     from llm_router.proxy.backends import choose_model
 
@@ -409,6 +428,10 @@ class ClaudeTierPolicy:
         # ``haiku_rewrite: true`` serves eligible turns on the Haiku tier by
         # rewriting the body (see ``_haiku_eligible``); OFF by default.
         self.haiku_rewrite = haiku_rewrite
+        # Set by ``load`` (and the proxy's Haiku guard) when the guard's override file
+        # (``proxy/haiku_guard.py``, ``tier_overrides.json``) turned the rewrite off: the
+        # override's {haiku_rewrite, reason, ts}. None = the YAML value stands.
+        self.haiku_override: dict | None = None
         # ``haiku_fold_system: true`` (M0.7, OFF by default) makes a body with a
         # mid-conversation ``role: "system"`` message eligible for Haiku: the rewrite
         # folds it into a user message (``translate.fold_system_messages``). Only
@@ -479,6 +502,11 @@ class ClaudeTierPolicy:
             raise ValueError(f"tier policy {target} is not a mapping")
         policy = cls.from_dict(data, conversation_level=conversation_level, classify=classify)
         policy.policy_version = policy_version(target)
+        # The Haiku guard's override file beats the YAML (P0.11, D-20): it can turn
+        # ``haiku_rewrite`` off, never on. Deleting the file restores the YAML value.
+        from llm_router.proxy import haiku_guard
+
+        haiku_guard.apply_override(policy)
         return policy
 
     # ── lookups ─────────────────────────────────────────────────────────────

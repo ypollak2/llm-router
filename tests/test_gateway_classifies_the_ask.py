@@ -63,6 +63,17 @@ def _prompt(seen: list[dict]) -> str:
     return seen[-1]["prompt"]
 
 
+def _sent(seen: list[dict]) -> str:
+    """Everything the model receives: the system prompt and the prompt.
+
+    P0.6 forwards the caller's system prompt as ``system`` (it reaches
+    ``route_and_call`` as ``system_prompt``) instead of a ``system:`` line
+    inside ``prompt``, so "still reaches the model" checks both fields.
+    """
+    assert seen, "the endpoint never reached the router — the test proved nothing"
+    return f"{seen[-1].get('system') or ''}\n{seen[-1]['prompt']}"
+
+
 # ── the defect, per endpoint ──────────────────────────────────────────────────
 
 def test_openai_chat_ignores_the_system_prompt_when_classifying(client, captured):
@@ -139,7 +150,7 @@ def test_the_system_prompt_still_reaches_the_model(client, captured):
         "messages": [{"role": "system", "content": SYSTEM_BOILERPLATE},
                      {"role": "user", "content": ASK}],
     })
-    sent = _prompt(captured)
+    sent = _sent(captured)
     assert SYSTEM_BOILERPLATE.strip()[:60] in sent, "system prompt was dropped from the payload"
     assert ASK in sent
 
@@ -151,7 +162,7 @@ def test_the_anthropic_system_field_still_reaches_the_model(client, captured):
         "messages": [{"role": "user", "content": ASK}],
         "max_tokens": 64,
     })
-    assert SYSTEM_BOILERPLATE.strip()[:60] in _prompt(captured)
+    assert SYSTEM_BOILERPLATE.strip()[:60] in _sent(captured)
 
 
 def test_responses_instructions_still_reach_the_model(client, captured):
@@ -160,7 +171,7 @@ def test_responses_instructions_still_reach_the_model(client, captured):
         "instructions": SYSTEM_BOILERPLATE,
         "input": [{"role": "user", "content": ASK}],
     })
-    assert SYSTEM_BOILERPLATE.strip()[:60] in _prompt(captured)
+    assert SYSTEM_BOILERPLATE.strip()[:60] in _sent(captured)
 
 
 # ── a real ask must still classify up ─────────────────────────────────────────
