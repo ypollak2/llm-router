@@ -42,6 +42,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 27 | The quality report and the Stop summary raise TypeError on a NULL task type | fixed in this change (v16 P0.8) |
 | 28 | `llm-router northstar` showed the heuristic share as the North Star | fixed in this change (v16 P0.8) |
 | 29 | The claw-code Stop hook and the dashboard models panel raise TypeError on a NULL task type | fixed in this change (v16 P0.8 r1) |
+| AB-1 | Agent breaker called 4 parallel sibling spawns "nested agents" and blocked them | fixed in this change (hook version 14) |
 | P010-1 | A dead proxy fails every Claude Code session | fixed in this change (P0.10); live switch is an owner step |
 | P013-1 | `llm_act` wrote files into the MCP process cwd | fixed for the file tools in this change (P0.13); bash confinement is P2.9 |
 | P0.14-a | Proxy ledger wrote 0 rows for 25 h and nothing flagged it | fixed in this change (P0.14) |
@@ -58,6 +59,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | P09-9 | A session id named by one test leaked onto latency rows of later tests | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
 | P012-1 | `kpi verify_shadow` was None with 0 verify rows, keyed `failed`, and walked the transcripts twice | fixed in #287 (P0.12-a, #285 review nits) |
 | P012-2 | #287 reviewed FAIL: a verify fake without `python_dir` made the budget test environment-dependent, `LLM_ROUTER_VERIFY` defaulted to on in a "shadow" PR, six mutants survived | fixed in #287 (P0.12-a, review repair) |
+| CI-1 | `test_verify_unit` copytree of a fresh git repo raced git auto-maintenance (`maintenance.lock`) | fixed in this change (test-only; production unaffected) |
 | P03-1 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
 
 ## 1. NULL `session_id` on local routing rows
@@ -730,6 +732,32 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Test.** `test_clawcode_stop_hook_renders_null_task_type` (runs `main()` on a seeded
   `usage.db`), `test_dashboard_last_prompt_calls_render_null_task_type`. Both fail on 15a1398e.
 
+## AB-1. Agent breaker called 4 parallel sibling spawns "nested agents" and blocked them
+
+- **Symptom.** 2026-10-08 about 17:35Z, a top-level Claude Code session sent 6 Agent calls in
+  one message. Calls 1-3 started; 4-6 were blocked with `Agent loop circuit breaker: depth 3/3.
+  Too many nested agents.` No agent was nested. Minutes later single calls passed (n = 1
+  incident, reported by the owner; the installed hook was byte-identical to the repo's
+  `agent-route.py` at version 12).
+- **Cause.** `agent-route.py` kept ONE per-session counter in `agent_depth_<session>.json`:
+  +1 at PreToolUse[Agent], -1 at PostToolUse (`agent-depth-release.py`). That is agents in
+  flight, but it was compared with `LLM_ROUTER_MAX_AGENT_DEPTH` (3) and reported as nesting
+  depth. The 4th concurrent sibling saw 3 >= 3.
+- **Fix.** Nesting depth is now taken from the payload: no `agent_id` is the top-level session
+  (depth 0); a caller with `agent_id` is a subagent whose depth comes from a registry in the same
+  file. PreToolUse queues the child's depth (`pending`); `subagent-start.py` claims it for the
+  new `agent_id` (`agents`). A spawn is blocked when child depth > `LLM_ROUTER_MAX_AGENT_DEPTH`
+  (message: "Agent nesting limit"). An unknown `agent_id` counts as depth 1, never deeper. The
+  in-flight count stays as a separate runaway cap, `LLM_ROUTER_MAX_CONCURRENT_AGENTS` (default
+  16; message: "Too many agents in flight"). The release hook keeps the registry keys.
+  Hook versions: agent-route 14, agent-depth-release 3, subagent-start 4. Needs all three deployed.
+- **Rule.** A guard's counter and its limit must measure the same quantity, and the message must
+  name what was counted. A hook that cannot see a fact (the parent) says so and stays permissive
+  rather than inferring it from a proxy.
+- **Test.** `TestBreakerMeasuresNestingNotSiblings` in `tests/test_agent_route_hook.py`:
+  six top-level siblings (fails on the old hook: call 4 blocked), real depth 3 -> 4 still trips,
+  concurrency cap, and the SubagentStart claim.
+
 ## P010-1. A dead proxy fails every Claude Code session
 
 - **Symptom.** With proxy-default on, `~/.claude/settings.json` sets
@@ -1182,3 +1210,19 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Test.** The six tests listed in `docs/VERIFIER.md`, each red against its mutant and green on the head;
   `test_the_verifier_is_off_unless_opted_in`, `test_the_worker_only_expires_when_the_verifier_is_off`.
 
+## CI-1. `copytree` of a fixture repo raced git's background maintenance
+
+- **Symptom.** `tests/test_verify_unit.py::test_unproven_sandbox_is_unavailable_never_pass` failed on CI
+  Python 3.11 (PR #328 run 37811026623, and PR #287) with
+  `shutil.Error: [('.../broken/.git/objects/maintenance.lock', ...` raised by `_patch`'s `copytree`.
+- **Cause.** The fixture `_init` runs `git commit`; with auto-maintenance on, commit spawns a detached
+  `git maintenance run --auto` that creates and removes `.git/objects/maintenance.lock` and repacks
+  loose objects while the test copies `.git`. Reproduced locally with 4 parallel stress processes
+  (400 extra files, hostile global config `gc.auto=1`, `maintenance.auto=true`): 110 copytree races
+  in 240 repos (27, 28, 27, 28 of 60). Production is not affected: `sandbox.create_workspace` skips
+  `.git` and copies file by file, and `verify_unit`'s `model-baseline` copytree reads that `.git`-free baseline.
+- **Fix (test only).** `GIT` in `tests/test_verify_unit.py` passes `-c gc.auto=0 -c maintenance.auto=false`,
+  so no background child exists. A `*.lock` ignore was rejected: it hides one file while the child still
+  rewrites `objects/*` mid-copy (the stress run also failed on object directories).
+- **Test.** `tests/test_git_fixture_race.py` traces git's process starts under the hostile config: 1 failed
+  without the fix (maintenance child seen), passes with it. It also asserts the trace saw the commit.
