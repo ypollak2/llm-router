@@ -374,7 +374,9 @@ def maybe_append_history(home: str, usage: dict | None, now: float) -> bool:
                 except OSError:
                     return False  # another window is writing this slot
             last = _num(_float_or_none(os.read(fd, 64)))
-            if last is not None and 0 <= now - last < HISTORY_INTERVAL_S:
+            # Both directions: a window whose ``now`` was read a moment before the
+            # winner's sees a small negative gap, and that slot is still taken.
+            if last is not None and abs(now - last) < HISTORY_INTERVAL_S:
                 return False  # another window wrote this slot since our stat
             os.lseek(fd, 0, os.SEEK_SET)
             os.ftruncate(fd, 0)

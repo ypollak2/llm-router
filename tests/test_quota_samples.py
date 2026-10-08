@@ -201,6 +201,16 @@ def test_tick_history_rechecks_the_slot_under_the_lock(home):
     assert stamp.read_text() == repr(NOW + 300)
 
 
+def test_tick_history_slot_taken_by_a_window_whose_clock_read_was_later(home):
+    """Smoke on 4bc1651: 8 ticks together wrote 2 rows in 2 of 5 runs, because a
+    tick that read ``now`` just before the winner saw a negative gap and wrote."""
+    stamp = home / tick.HISTORY_STAMP_NAME
+    stamp.write_text(repr(NOW + 0.004))
+    os.utime(stamp, (NOW - 1000, NOW - 1000))
+    assert tick.maybe_append_history(str(home), FRESH, NOW) is False
+    assert not (home / tick.HISTORY_NAME).exists()
+
+
 def test_tick_history_and_session_sample_agree_on_the_rules():
     """The tick cannot import llm_router; its copy of the rules must not drift."""
     cases = [FRESH, dict(FRESH, updated_at=NOW - 1801), dict(FRESH, updated_at=NOW - 1800),
