@@ -33,6 +33,7 @@ from __future__ import annotations
 import copy
 import os
 import platform
+import shlex
 import subprocess
 import sys
 import time
@@ -117,7 +118,7 @@ def _stale_plist_note(dest: Path, before: str | None, label: str) -> str | None:
     return (
         f"NOTE {label}: the plist changed but launchd keeps the old one loaded, so this "
         f"restart does not apply it. Owner step (docs/proxy.md, 'Moving an existing install "
-        f"behind the shim'): `launchctl unload {dest}` then `launchctl load {dest}`."
+        f"behind the shim'): `launchctl unload {shlex.quote(str(dest))}` then `launchctl load {shlex.quote(str(dest))}`."
     )
 
 

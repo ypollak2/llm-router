@@ -510,3 +510,68 @@ def test_unchanged_plist_gets_no_note(tmp_path, _sandbox):
         assert not any(a.startswith("NOTE ") for a in r["actions"]), r["actions"]
     finally:
         runner.close()
+
+
+def test_shim_down_main_up_reactivates_the_shim_and_is_not_already_installed(tmp_path, _sandbox):
+    """Kills the mutant that drops the shim-port health check: with the shim dead and
+    the main proxy answering, install must not say "Already installed"; it (re)activates
+    the shim through `launchd_activate_command`."""
+    port, upstream = _free_port(), _free_port()
+    _seed_sentinel(port, upstream)
+    main_up = _listener(upstream)  # shim is down
+    runner = _BindsPerService({pd.LABEL: upstream, pd.SHIM_LABEL: port}, {pd.SHIM_LABEL})
+    try:
+        service_home = tmp_path / "svc"
+        r = _install_both(service_home, port, upstream, runner)
+        assert r["ok"] is True, r
+        assert not any("Already installed" in a for a in r["actions"]), r
+        shim_dest, _ = pd.service_target("Darwin", service_home, label=pd.SHIM_LABEL)
+        assert pd.launchd_activate_command(shim_dest, pd.SHIM_LABEL) in runner.calls, runner.calls
+    finally:
+        runner.close()
+        main_up.close()
+
+
+def test_own_layout_requires_the_sentinel_port_to_match(tmp_path, _sandbox):
+    """`prior.get("port") == port` is not redundant: a sentinel written for another
+    settings port, with label and upstream still matching and both requested ports
+    answering (a foreign process on the new port), must not be called "Already installed"."""
+    port, upstream = _free_port(), _free_port()
+    _seed_sentinel(port + 1 if port < 65000 else port - 1, upstream)
+    a, b = _listener(port), _listener(upstream)
+    try:
+        r = _install_both(tmp_path / "svc", port, upstream, lambda c, **k: subprocess.CompletedProcess(c, 0, "", ""))
+        assert not any("Already installed" in x for x in r["actions"]), r
+        assert any("Found a proxy already answering" in x for x in r["actions"]), r
+    finally:
+        a.close()
+        b.close()
+
+
+def test_launchctl_commands_quote_a_plist_path_with_a_space(tmp_path):
+    import shlex
+
+    home = tmp_path / "Jane Doe"
+    dest, activate = pd.service_target("Darwin", home)
+    quoted = shlex.quote(str(dest))
+    assert " " in str(dest) and quoted.startswith("'")
+    assert f"launchctl load {quoted}; fi" in activate
+    assert str(dest) not in activate.replace(quoted, "")
+    dest.parent.mkdir(parents=True)
+    dest.write_text("x")
+    assert pd.deactivation_command("Darwin", dest) == f"launchctl unload {quoted}"
+    # The shell really parses it as one argument.
+    import subprocess as sp
+    out = sp.run(f"printf '%s|' {quoted}", shell=True, capture_output=True, text=True).stdout
+    assert out == f"{dest}|"
+
+
+def test_stale_plist_note_quotes_a_path_with_a_space(tmp_path):
+    import shlex
+
+    dest = tmp_path / "Jane Doe" / "x.plist"
+    dest.parent.mkdir()
+    dest.write_text("new")
+    note = cmd._stale_plist_note(dest, "old", pd.LABEL)
+    assert f"launchctl unload {shlex.quote(str(dest))}" in note
+    assert f"launchctl load {shlex.quote(str(dest))}" in note
