@@ -27,6 +27,9 @@ This module scores those records with the PREREG v2 metrics, so the adoption rul
 * **M1-12 verdict.** ``pass`` when C-lambda2-clamp(llm) <= C-lambda2-clamp(rules_eff)
   on >= :data:`MIN_N` labeled turns and the largest session holds <= 60% of them;
   ``fail`` when the inequality does not hold on such a sample; else ``not informative``.
+  The verdict is cost only: R1 adoption also needs under-route(llm) <= under-route(rules_eff),
+  which the caller reads from ``arms``. ``agree`` counts fallback turns (llm = rules_eff) as
+  agreement; ``n_fallback`` says how many there are.
 
 Pure functions over records; nothing here reads prompt text (records hold none).
 """
@@ -196,7 +199,8 @@ def score(records: list[dict], labels: dict[tuple[str, str], str] | None = None)
     m = len(lab)
     sess = Counter(t["session_id"] for t in lab)
     share = round(sess.most_common(1)[0][1] / m, 4) if m else None
-    out.update({"n_labeled": m, "n_labeled_sessions": len(sess), "largest_session_share": share})
+    out.update({"n_labeled": m, "n_labeled_sessions": len(sess), "largest_session_share": share,
+                "top3_session_counts": [c for _, c in sess.most_common(3)]})   # statistics rule 4
     arms: dict = {}
     for arm in ("llm", "rules_eff"):
         if not m:

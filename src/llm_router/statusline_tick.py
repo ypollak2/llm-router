@@ -16,6 +16,10 @@ one-second loop:
   refresher DETACHED and does not wait for it. At most one start per
   :data:`REFRESH_AFTER_S` (a timestamp file, not a lock: a hung refresher holds
   nothing a tick waits on), so a stuck refresh cannot delay a tick or pile up;
+* every :data:`HISTORY_INTERVAL_S` (300 s) it appends one row of the quota it
+  just read to ``quota_history.jsonl`` (GE6 / S3: the 5-minute series; one
+  ``stat`` of a stamp file per tick otherwise). Stale snapshots are recorded as
+  ``stale``, unknown values as null;
 * a value it does not have is printed as ``n/a``, never as 0. A cache older than
   :data:`STALE_AFTER_S` is not data: every cached field reads ``n/a``. A quota
   snapshot older than ``LLM_ROUTER_USAGE_TTL_SEC`` (default 300 s, the same TTL
@@ -37,6 +41,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
 
 # subprocess / shlex are imported only on the rare path that needs them: on this
 # machine's python3 they add ~15 ms to a tick, and the bar is 100 ms.
@@ -55,6 +60,13 @@ REFRESH_AFTER_S = 60.0
 #: Past this age the cached values are not shown at all ("n/a").
 STALE_AFTER_S = 15 * 60.0
 MAX_CHARS = 200
+#: GE6 / S3: the 5-minute quota series (``llm_router.quota_samples`` reads it).
+HISTORY_NAME = "quota_history.jsonl"
+HISTORY_STAMP_NAME = ".quota_history.last"
+#: One history row at most this often (the quota TTL above).
+HISTORY_INTERVAL_S = 300.0
+#: A usage.json older than this is recorded ``stale``, not ``measured``.
+QUOTA_STALE_AFTER_S = 30 * 60.0
 #: Longest model / hook name the line will carry before it is cut.
 _NAME_MAX = 24
 
@@ -299,6 +311,98 @@ def maybe_refresh(home: str, cache: dict | None, now: float) -> bool:
         return False
 
 
+def _epoch(value) -> float | None:
+    """Copy of ``quota_samples._epoch``: ``session_resets_at`` as epoch seconds."""
+    if isinstance(value, str) and value:
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    v = _num(value)
+    return v if v is not None and 0 < v < float("inf") else None
+
+
+def quota_sample(usage: dict | None, now: float) -> dict:
+    """``{five_hour_pct, weekly_pct, updated_at, five_hour_resets_at, source}`` from a usage.json dict.
+
+    The tick cannot import ``llm_router``, so this is a copy of
+    ``quota_samples.sample_from_usage``; tests/test_quota_samples.py pins both to
+    the same answers. ``measured`` needs real numbers no older than
+    :data:`QUOTA_STALE_AFTER_S`; anything else is ``stale``, unknown values null."""
+    resets_at = _epoch(usage.get("session_resets_at")) if isinstance(usage, dict) else None
+    if not isinstance(usage, dict) or usage.get("pending") or usage.get("is_fallback"):
+        return {"five_hour_pct": None, "weekly_pct": None,
+                "updated_at": _num(usage.get("updated_at")) if isinstance(usage, dict) else None,
+                "five_hour_resets_at": resets_at, "source": "stale"}
+    h5, wk = _num(usage.get("session_pct")), _num(usage.get("weekly_pct"))
+    updated = _num(usage.get("updated_at"))
+    fresh = updated is not None and updated > 0 and 0 <= now - updated <= QUOTA_STALE_AFTER_S
+    measured = fresh and h5 is not None and wk is not None
+    return {"five_hour_pct": h5, "weekly_pct": wk, "updated_at": updated,
+            "five_hour_resets_at": resets_at,
+            "source": "measured" if measured else "stale"}
+
+
+def maybe_append_history(home: str, usage: dict | None, now: float) -> bool:
+    """Append one ``quota_history.jsonl`` row when :data:`HISTORY_INTERVAL_S` has
+    passed since the last one (a stamp file's mtime, one ``stat`` a tick).
+    Append-only, 0600. Never raises; True when a row was written.
+
+    Several Claude Code windows tick at once: the slot is claimed under a
+    non-blocking ``flock`` on the stamp, and the stamp's content (the last row's
+    ``ts``) is re-checked under it, so one window writes a slot and the rest skip."""
+    try:
+        stamp = os.path.join(home, HISTORY_STAMP_NAME)
+        try:
+            if 0 <= now - os.path.getmtime(stamp) < HISTORY_INTERVAL_S:
+                return False
+        except OSError:
+            pass
+        os.makedirs(home, mode=0o700, exist_ok=True)
+        fd = os.open(stamp, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            try:
+                import fcntl  # only on this once-per-slot path; absent on Windows
+            except ImportError:
+                fcntl = None
+            if fcntl is not None:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    return False  # another window is writing this slot
+            last = _num(_float_or_none(os.read(fd, 64)))
+            # Both directions: a window whose ``now`` was read a moment before the
+            # winner's sees a small negative gap, and that slot is still taken.
+            if last is not None and abs(now - last) < HISTORY_INTERVAL_S:
+                return False  # another window wrote this slot since our stat
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.ftruncate(fd, 0)
+            os.write(fd, repr(float(now)).encode("ascii"))
+            os.utime(stamp, (now, now))
+            row = {"ts": now}
+            row.update(quota_sample(usage, now))
+            hfd = os.open(os.path.join(home, HISTORY_NAME), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            try:
+                os.write(hfd, (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8"))
+            finally:
+                os.close(hfd)
+            return True
+        finally:
+            os.close(fd)  # also releases the flock
+    except Exception:  # noqa: BLE001 -- a status line never fails over its history
+        return False
+
+
+def _float_or_none(raw: bytes) -> float | None:
+    try:
+        return float(raw.decode("ascii").strip())
+    except (UnicodeDecodeError, ValueError):
+        return None
+
+
 def main() -> int:
     try:
         sys.stdin.buffer.read()
@@ -308,9 +412,11 @@ def main() -> int:
     home = router_home()
     cache = read_cache(home)
     maybe_refresh(home, cache, now)
+    usage = read_usage(home)
+    maybe_append_history(home, usage, now)
     color = not os.environ.get("NO_COLOR")
     sys.stdout.write(render(cache, now=now, env_mode=os.environ.get("LLM_ROUTER_ENFORCE"), color=color,
-                            usage=read_usage(home), usage_ttl_s=usage_ttl()) + "\n")
+                            usage=usage, usage_ttl_s=usage_ttl()) + "\n")
     return 0
 
 

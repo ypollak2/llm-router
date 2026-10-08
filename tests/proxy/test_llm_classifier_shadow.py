@@ -614,3 +614,23 @@ async def test_shadow_with_the_decision_backend_logs_nimble_and_the_real_request
     assert (rec["requested_tier"], rec["requested"]) == (OPUS, "opus") == (row["requested_model"], "opus")
     assert rec["assemble_capped"] is False
     assert "different question" not in json.dumps(rec) and "first answer" not in json.dumps(rec)   # no text
+
+
+@pytest.mark.parametrize("value", [None, "off", ""])
+async def test_shadow_off_with_the_decision_backend_asks_no_model(tmp_path, monkeypatch, simple, value):
+    """Default OFF with ``LLM_ROUTER_CLASSIFIER_BACKEND=systemone``: no /v1/systemone, no /api/chat, no record."""
+    from tests.test_decision_classifier import FakeOllama as DecisionOllama, _answer
+
+    async with DecisionOllama(monkeypatch, reply=_answer(0.7, 0.2, 0.1)) as ollama:   # sets shadow: override after
+        if value is None:
+            monkeypatch.delenv("LLM_ROUTER_LOCAL_CLASSIFIER")
+        else:
+            monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", value)
+        app = _shadow_app(tmp_path)
+        assert (await _post(app, _mid_conversation_turn_first())).status_code == 200
+        await app.state.cls_shadow.drain()
+        await app.state.cls_shadow.aclose()
+    assert (ollama.sys, ollama.chat, ollama.gen) == ([], [], [])
+    assert _records(tmp_path) == [] and not (tmp_path / LOG).exists()
+    (row,) = _rows(tmp_path)
+    assert row["cls_applied"] is False

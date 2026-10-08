@@ -1719,6 +1719,8 @@ def _classifier_shadow_summary(days: float, win: "_Window | None" = None,
         vs_rules = {}
     return {
         "vs_rules": vs_rules,
+        # R1 reads organic turn-first rows only; --include research widens the population.
+        "vs_rules_organic_only": allowed is not None and len(allowed) == 1,
         "n": n,
         "n_sessions": len({r.get("session_id") for r in calls}),
         "n_answered": len(answered),
@@ -1766,13 +1768,20 @@ def _classifier_shadow_line(s: dict | None) -> str | None:
 def _classifier_vs_rules_lines(s: dict | None) -> list[str]:
     """One line per classifier model: the live-shadow score against rules_eff (P1.7)."""
     out = []
+    scope = ("organic sessions" if (s or {}).get("vs_rules_organic_only")
+             else "NOT organic-only, so not R1 evidence")
     for model, v in ((s or {}).get("vs_rules") or {}).items():
         if not v.get("n_turns"):
             continue
         m12 = v["M1_12"]
-        head = (f"classifier shadow vs rules [{model}]: n={v['n_turns']} turns in {v['n_sessions']} sessions, "
-                f"requested tier real {v['n_joined']}/{v['n_turns']}, fallback {v['n_fallback']}, "
-                f"agree {v['agree']}/{v['n_turns']}, labeled {v['n_labeled']}")
+        head = (f"classifier shadow vs rules [{model}]: n={v['n_turns']} turns in {v['n_sessions']} sessions "
+                f"({scope}), requested tier real {v['n_joined']}/{v['n_turns']}, fallback {v['n_fallback']}, "
+                f"agree {v['agree']}/{v['n_turns']} (fallback counts as agree), "
+                f"assemble capped {v['n_capped']}, labeled {v['n_labeled']}")
+        if v.get("n_labeled"):
+            top = "/".join(str(c) for c in v.get("top3_session_counts") or [])
+            head += (f" in {v['n_labeled_sessions']} sessions (largest {v['largest_session_share']:.0%}, "
+                     f"top-3 sessions {top} labeled turns)")
         a, r = v["arms"]["llm"], v["arms"]["rules_eff"]
         if a is None:
             body = (f"; raw cost clamp-aware llm {v['craw_clamp_llm']:.2f} vs rules {v['craw_clamp_rules_eff']:.2f} "
@@ -1785,8 +1794,33 @@ def _classifier_vs_rules_lines(s: dict | None) -> list[str]:
                     f"(diff {boot['diff']:+.2f}, session CI95 [{boot['ci95'][0]:+.2f}, {boot['ci95'][1]:+.2f}]); "
                     f"under llm {a['under']['k']}/{a['under']['n']} vs rules {r['under']['k']}/{r['under']['n']}; "
                     f"HP llm {hp['k']}/{hp['n']}")
-        out.append(f"{head}{body}; M1-12 {m12['verdict']} ({m12['why']}) (informational, rules stay in charge)")
+        out.append(f"{head}{body}; M1-12 {m12['verdict']} ({m12['why']}; cost only: R1 adoption also needs "
+                   "under-route llm <= rules) (informational, rules stay in charge)")
     return out
+
+
+# ── P0.14-a: proxy ledger liveness ─────────────────────────────────────────
+
+def _proxy_liveness(now: float, proxy_rows: list[dict]) -> dict:
+    from llm_router import proxy_liveness
+
+    return proxy_liveness.liveness(now=now, proxy_rows=proxy_rows)
+
+
+def _proxy_liveness_lines(live: dict | None) -> list[str]:
+    if not live:
+        return []
+    h = f"{live['window_hours']:g}"
+
+    def n(v: Any) -> str:
+        return "unreadable" if v is None else str(v)
+
+    lines = [f"proxy_rows_24h: {live['proxy_rows_24h']} (n={live['proxy_rows_24h']} proxy ledger row(s) "
+             f"in the {h} h to generated; hook turns {n(live['hook_turns_24h'])}, "
+             f"routing decisions {n(live['routing_decisions_24h'])})"]
+    if live.get("warn"):
+        lines.append(f"WARN {live['message']}")
+    return lines
 
 
 # ── assembly ───────────────────────────────────────────────────────────────
@@ -1841,6 +1875,8 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         "o3": _o3_with_caveat(
             _o3_offload_share(days, allowed, index, all_rows, now_ts, since_policy, win, g3_r)),
         "proxy_local_shadow": _proxy_shadow_summary(days, win),
+        # P0.14-a: is the proxy ledger alive? Outside "kpis" (a liveness check, not a KPI).
+        "proxy_liveness": _proxy_liveness(now_ts, all_rows),
         "classifier_shadow": _classifier_shadow_summary(days, win, allowed, index, pop["allowed"]),
         "kpis": {
             "NS": ns_r, "O1": o1_r, "O2": o2_r,
@@ -1988,6 +2024,7 @@ def render_scorecard(data: dict) -> str:
     if classifier_line:
         lines.append(classifier_line)
         lines += _classifier_vs_rules_lines(data.get("classifier_shadow"))
+    lines += _proxy_liveness_lines(data.get("proxy_liveness"))
     lines.append(_join_line(data["joins"]))
     lines.append("O1 is never session-kind filtered (usage.db predates tagging); G3 is not "
                   "session-kind filtered either (see KPIS.md); neither are G1 (hook), G2 and G4, "
@@ -2085,6 +2122,10 @@ def cmd_kpi(args: list[str]) -> int:
                           "its Claude Code transcript (same rules as the live tagger), and append it "
                           "to the sidecar session_kind_backfill.jsonl; a live tag always wins and "
                           "deleting the sidecar restores the untagged behaviour exactly")
+    ap.add_argument("--quota-burn", action="store_true",
+                     help="S3 / GE6: Claude quota burn per session and per human turn from "
+                          "quota_samples.jsonl and quota_history.jsonl; needs --since and --until; "
+                          "stale samples are labelled estimated and kept out of the measured line")
     ap.add_argument("--dry-run", action="store_true",
                      help="with --backfill-tags: report what would be written; write nothing")
     ap.add_argument("--validate-backfill", action="store_true",
@@ -2099,6 +2140,19 @@ def cmd_kpi(args: list[str]) -> int:
         ap.error("--dry-run needs --backfill-tags")
     if parsed.strict and not parsed.health:
         ap.error("--strict needs --health")
+    if parsed.quota_burn:
+        if parsed.since is None or parsed.until is None:
+            ap.error("--quota-burn needs --since and --until (an absolute window)")
+        q_since, q_until = _parse_when(parsed.since), _parse_when(parsed.until)
+        if q_since is None or q_until is None or not q_since < q_until:
+            ap.error("--quota-burn: --since and --until must be readable and since < until")
+        from llm_router import quota_samples
+
+        burn = quota_samples.quota_burn(q_since, q_until,
+                                        include_research=(parsed.include == "research"))
+        print(json.dumps(burn, indent=2, default=str) if parsed.json
+              else quota_samples.render_quota_burn(burn))
+        return 0
     if parsed.validate_backfill:
         from llm_router import session_kind_backfill as skb
 

@@ -286,3 +286,37 @@ def test_capped_is_false_when_the_window_holds_the_whole_context():
     msgs = [_user("an old prompt")] + [m for j in range(1000) for m in _tool_pair(j)]
     msgs += [_user(f"p{k}") if k % 2 == 0 else _assistant(_text(f"a{k}")) for k in range(8)] + [_user("newest")]
     assert cls_input.assemble({"system": SYSTEM, "messages": msgs}).capped is False   # found all within the window
+
+
+# --- reviewer mutants (#327 review): the absolute bound and the cap boundary --------------------
+
+
+def test_the_scan_window_is_400_messages():
+    """The bound documented in CHANGELOG and docs/BUGS.md P1.7-c-1; the tests above use the constant."""
+    assert cls_input.MAX_SCAN_MESSAGES == 400
+
+
+def _filler(n):
+    """n messages that are neither a human prompt nor assistant text (a tool loop)."""
+    msgs = [m for j in range(n // 2 + 1) for m in _tool_pair(j)]
+    return msgs[-n:] if n else []
+
+
+def test_capped_starts_one_message_past_the_window():
+    """A prompt with exactly MAX_SCAN_MESSAGES messages before it has its whole history read: not capped,
+    and with no earlier prompt it is a first prompt. One message more and the window cannot see index 0."""
+    n = cls_input.MAX_SCAN_MESSAGES
+    inside = cls_input.assemble({"system": SYSTEM, "messages": _filler(n) + [_user("newest")]})
+    assert inside.prompt == "newest" and inside.capped is False and cls_input._FIRST in inside.context
+    past = cls_input.assemble({"system": SYSTEM, "messages": _filler(n + 1) + [_user("newest")]})
+    assert past.prompt == "newest" and past.capped is True and cls_input._FIRST not in past.context
+
+
+def test_the_newest_prompt_is_looked_for_only_within_the_window(monkeypatch):
+    """A human prompt more than MAX_SCAN_MESSAGES messages back is out of reach: nothing to classify."""
+    n = cls_input.MAX_SCAN_MESSAGES
+    calls = _counting(monkeypatch)
+    out = cls_input.assemble({"system": SYSTEM, "messages": [_user("an old prompt")] + _filler(n + 100)})
+    assert out.prompt == "" and len(calls) <= n
+    near = cls_input.assemble({"system": SYSTEM, "messages": [_user("an old prompt")] + _filler(n - 1)})
+    assert near.prompt == "an old prompt"
