@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- proxy (v16 P1.7-c): the classifier shadow's `cls_input.assemble` reads the history backwards, stops once it
+  has its context and never reads more than 400 messages back. Same input as before whenever the context lies
+  in that window (600-case fuzz against the old walk); it no longer holds the GIL long enough to delay
+  concurrent continuations (`docs/BUGS.md` P1.7-c-1). Shadow records gain `requested` (the call's real
+  requested tier), `backend` and `assemble_capped`; `kpi` gains a `classifier shadow vs rules [model]` line
+  (C-lambda2, M1-12 clamp-aware cost, under-route, Haiku precision, n; truth from
+  `LLM_ROUTER_SHADOW_LABELS`). Shadow stays off by default. `scripts/bench_shadow_continuation.py`.
 - routing (M3.0, owner decision D-14 = A): `route_and_call` no longer serves a Q&A task type from a
   local provider. For `northstar.QA_TASK_TYPES` (query, research, generate, analyze and the other Q&A
   types) Ollama and OpenAI-compatible local servers are removed from the chain in `route_and_call`

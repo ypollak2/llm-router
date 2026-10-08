@@ -250,12 +250,21 @@ def test_the_scan_stops_once_it_has_its_context(monkeypatch):
             msgs += _tool_pair(j)
         msgs.append(_assistant(_text(f"done {k}")))
     msgs.append(_user("the newest prompt"))
+    reads = []
+
+    class Seen(dict):                          # counts every message the scan looks at
+        def get(self, key, default=None):
+            if key == "role":
+                reads.append(1)
+            return super().get(key, default)
+    msgs = [Seen(m) for m in msgs]
     calls = _counting(monkeypatch)
     out = cls_input.assemble({"system": SYSTEM, "messages": msgs})
     assert out.prompt == "the newest prompt" and out.context == (
         "Working directory: /work/demo\n\nEarlier user prompt 1/3:\nask 197\n\nEarlier user prompt 2/3:\nask 198"
         "\n\nEarlier user prompt 3/3:\nask 199\n\nAssistant's last message before this prompt (tail):\ndone 199")
     assert len(msgs) == 1801 and len(calls) <= 30     # 1 + (3 turns x 9 messages), not 1,801
+    assert len(reads) <= 1801 + 30                    # non_system reads each role once; the scan ~28 more, not 400
 
 
 def test_a_long_tool_loop_is_read_at_most_max_scan_messages_back(monkeypatch):
