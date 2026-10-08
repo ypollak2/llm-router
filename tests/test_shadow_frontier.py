@@ -158,7 +158,7 @@ async def test_replays_the_original_bytes_and_sums_tokens_from_the_replays_own_u
     (pair,) = haiku_guard.read_jsonl(sf.pairs_dir() / f"{DAY}.jsonl")
     assert CANARY_CHEAP in pair["cheap_response"] and CANARY_FRONTIER in pair["frontier_response"]
     assert CANARY_PROMPT in pair["request_context"]
-    assert sf.day_totals(DAY) == (1, 1057)
+    assert sf.day_spend(DAY) == (1, 1057)
 
 
 async def test_not_rewritten_and_failed_cheap_calls_are_skipped_without_a_call(on):
@@ -178,7 +178,7 @@ async def test_a_failed_replay_is_a_ledger_row_counted_against_the_caps_and_stor
     assert [(r["outcome"], r["reason"]) for r in rows] == [(sf.OUT_REPLAY_FAILED, "ReadTimeout"),
                                                           (sf.OUT_REPLAY_FAILED, "status")]
     assert rows[1]["frontier_status"] == 529
-    assert sf.day_totals(DAY) == (2, 1800)  # unknown spend counts at the admission estimate
+    assert sf.day_spend(DAY) == (2, 1800)  # unknown spend counts at the admission estimate
     assert not sf.pairs_dir().exists()
 
 
@@ -198,7 +198,7 @@ async def test_at_most_20_frontier_calls_per_utc_day(on):
     await _sample(_shadow(), replay)  # the 21st is refused
     assert len(replay.calls) == 1
     assert _ledger()[-1]["reason"] == sf.R_CAP_CALLS
-    assert sf.day_totals(DAY)[0] == sf.MAX_CALLS_PER_DAY == 20
+    assert sf.day_spend(DAY)[0] == sf.MAX_CALLS_PER_DAY == 20
 
 
 async def test_failed_replays_count_toward_the_daily_call_cap(on):

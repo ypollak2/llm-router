@@ -211,7 +211,7 @@ def input_tokens(usage: Any) -> int | None:
     return sum(v for v in vals if isinstance(v, int) and not isinstance(v, bool))
 
 
-def day_totals(day: str) -> tuple[int, int]:
+def day_spend(day: str) -> tuple[int, int]:
     """(Frontier calls, Frontier input tokens) the shadow spent on ``day``. A failed replay
     counts as a call, and its input size counts at the estimate it was admitted with."""
     calls = tokens = 0
@@ -418,7 +418,7 @@ class FrontierShadow:
         quota = quota_skip(now, self._usage_path)
         if quota is not None:
             return quota
-        calls, tokens = day_totals(day)
+        calls, tokens = day_spend(day)
         if calls >= MAX_CALLS_PER_DAY:
             return R_CAP_CALLS
         if est is None:
