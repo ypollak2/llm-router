@@ -58,3 +58,35 @@ def test_selected_model_still_reads_the_routing_table():
         assert provider == want_provider
         assert model == (f"ollama/{mod.OLLAMA_MODEL}" if want_provider == "ollama" else head)
     assert mod._get_selected_model("nonsense", "complex") == ("unknown", "unknown")
+
+
+# ── P0.9 repair 1: the auto-route row carries the session id ────────────────
+# Without it P0.9-d ("auto-route calls > 5 s carry phases_ms, >= 20*") cannot
+# count sessions or drop research / executor ones (PLAN v16 §1.4 rules 4 and 8).
+
+
+def test_main_names_the_session_on_the_latency_row(monkeypatch, tmp_path):
+    import io
+
+    import llm_router.hook_latency as hl
+
+    seen: list = []
+    # raising=False: set_session ships with perf/hook-budgets (#312); main() must
+    # call it whether or not that is merged first.
+    monkeypatch.setattr(hl, "set_session", seen.append, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LLM_ROUTER_ZERO_CLAUDE", "off")
+    spec = importlib.util.spec_from_file_location("auto_route_sid", HOOK)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setattr(mod, "_router_dir", lambda: tmp_path / ".llm-router", raising=False)
+    monkeypatch.setattr(mod, "_debug_log", lambda *_a, **_k: None)
+    # An empty prompt returns before any routing: the session is named before that.
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(
+        {"prompt": "", "session_id": "sess-p09-d"})))
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    try:
+        mod.main()
+    except SystemExit as e:
+        assert e.code in (0, None)
+    assert seen == ["sess-p09-d"]
