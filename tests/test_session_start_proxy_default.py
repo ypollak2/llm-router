@@ -120,7 +120,7 @@ def _dead_port() -> int:
 
 
 def test_warns_routing_bypassed_when_shim_answers_but_main_proxy_is_dead(monkeypatch, tmp_path):
-    """docs/BUGS.md #11 review: with the fail-open shim, `port` is the shim's and
+    """docs/BUGS.md P010-1 review: with the fail-open shim, `port` is the shim's and
     it always accepts. Probing it alone read healthy while the main proxy was
     dead and every call bypassed routing."""
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))

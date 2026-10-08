@@ -4,7 +4,7 @@ With proxy-default installed, ``~/.claude/settings.json`` points every Claude
 Code session at ``http://127.0.0.1:8787``, and that setting beats the process
 env, so nothing started later can change it for a running session. When the
 main proxy is down, a port nobody listens on refuses the connection and every
-session's API calls fail until the proxy is back (docs/BUGS.md #11).
+session's API calls fail until the proxy is back (docs/BUGS.md P010-1).
 
 The shim owns that port instead and stays deliberately small:
 

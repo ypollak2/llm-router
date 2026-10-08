@@ -864,7 +864,7 @@ def _proxy_default_section(issues: list[str]) -> None:
             print(f"    {_dim('not installed — llm-router install --proxy-default to enable')}")
         else:
             _port = _sentinel.get("port", _pd.DEFAULT_PORT)
-            # With the fail-open shim (docs/BUGS.md #11), `port` is the shim's
+            # With the fail-open shim (docs/BUGS.md P010-1), `port` is the shim's
             # and it accepts even when the main proxy behind it is dead, so the
             # main proxy's own port is probed too.
             _up = _sentinel.get("upstream_port")

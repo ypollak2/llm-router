@@ -81,7 +81,7 @@ def test_segment_shown_when_dead(tmp_path):
 
 
 def test_segment_shown_when_shim_answers_but_main_proxy_is_dead(tmp_path):
-    """docs/BUGS.md #11 review: the shim on `port` always accepts, so the main
+    """docs/BUGS.md P010-1 review: the shim on `port` always accepts, so the main
     proxy's `upstream_port` must be probed too."""
     home = tmp_path / "home"
     (home / ".llm-router").mkdir(parents=True)

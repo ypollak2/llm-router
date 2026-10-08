@@ -1,6 +1,6 @@
 """`llm-router doctor`'s proxy-default section with the fail-open shim.
 
-docs/BUGS.md #11 review: with the shim installed, the sentinel's ``port`` is the
+docs/BUGS.md P010-1 review: with the shim installed, the sentinel's ``port`` is the
 shim's, and the shim accepts even when the main proxy behind it is dead. A probe
 of ``port`` alone printed "answering" while every call bypassed routing. The
 section must also probe ``upstream_port`` and name the right service to restart.
