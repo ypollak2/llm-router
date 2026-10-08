@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 22
+# llm_router-hook-version: 23
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -2456,6 +2456,25 @@ def main() -> None:
             _sid = _session_store.resolve_session_id(_hook_input.get("session_id"))
             if _sid:
                 _session_store.archive_session(_sid)
+        except Exception:
+            pass
+        # The agent breaker's per-session state (agent-route.py) is dead weight
+        # once the session ends; same name derivation as its _depth_file().
+        try:
+            import re as _re
+            from pathlib import Path as _P
+            # same precedence as agent-route.py's _get_session_id(): env first
+            _bsid = (os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+                     or str(_hook_input.get("session_id") or "").strip())
+            if _bsid:
+                _bsafe = _re.sub(r"[^A-Za-z0-9._-]", "_", _bsid) or "unknown"
+                _bbase = os.environ.get("LLM_ROUTER_HOME", "").strip()
+                _bdir = _P(_bbase).expanduser() if _bbase else _P.home() / ".llm-router"
+                for _suffix in ("", ".lock"):
+                    try:
+                        (_bdir / f"agent_depth_{_bsafe}.json{_suffix}").unlink()
+                    except FileNotFoundError:
+                        pass
         except Exception:
             pass
         # Stop already rendered the summary for the last turn; SessionEnd

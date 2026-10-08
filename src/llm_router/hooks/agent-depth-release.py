@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 3
+# llm_router-hook-version: 4
 """PostToolUse[Agent] hook — release the agent nesting-depth slot.
 
 The circuit breaker in agent-route.py (PreToolUse[Agent]) increments a
@@ -89,6 +89,50 @@ def _depth_file(session_id: str) -> Path:
     return _router_home() / f"agent_depth_{safe}.json"
 
 
+_LOCK_WAIT_S = 0.25  # hook latency budget; on timeout log and fail open (unlocked)
+
+
+def _lock(depth_file: Path):
+    """flock the sidecar lock file agent-route.py uses; None if it cannot be had."""
+    fh = None
+    try:
+        import fcntl
+        fd = os.open(f"{depth_file}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        fh = os.fdopen(fd, "a+")
+        deadline = time.monotonic() + _LOCK_WAIT_S
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fh
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.002)
+    except Exception as exc:  # noqa: BLE001
+        print(f"llm-router: agent breaker state lock unavailable ({type(exc).__name__}); "
+              f"continuing unlocked", file=sys.stderr)
+        if fh is not None:
+            fh.close()
+        return None
+
+
+def _atomic_write(path: Path, data: dict) -> None:
+    """tmp file + os.replace, mode 0600 (same scheme as agent-route.py)."""
+    import uuid
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(data))
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def main() -> None:
     try:
         hook_input = json.load(sys.stdin)
@@ -100,18 +144,25 @@ def main() -> None:
 
     session_id = _get_session_id()
     depth_file = _depth_file(session_id)
+    lock_fh = _lock(depth_file)
     try:
-        data = json.loads(depth_file.read_text())
-        if not isinstance(data, dict):
-            data = {}
-        depth = max(0, int(data.get("depth", 0)) - 1)
-    except (FileNotFoundError, json.JSONDecodeError, ValueError):
-        data, depth = {}, 0
+        try:
+            data = json.loads(depth_file.read_text())
+            if not isinstance(data, dict):
+                data = {}
+            depth = max(0, int(data.get("depth", 0)) - 1)
+        except (FileNotFoundError, json.JSONDecodeError, ValueError):
+            data, depth = {}, 0
 
-    # Keep the nesting registry ("agents"/"pending") agent-route.py and
-    # subagent-start.py keep in this same file; only the in-flight count moves.
-    data.update({"depth": depth, "session_id": session_id, "ts": time.time()})
-    depth_file.write_text(json.dumps(data))
+        # Keep the nesting registry ("agents"/"pending") agent-route.py and
+        # subagent-start.py keep in this same file; only the in-flight count moves.
+        data.update({"depth": depth, "session_id": session_id, "ts": time.time()})
+        _atomic_write(depth_file, data)
+    except Exception as exc:  # noqa: BLE001 -- fail open, say so
+        print(f"llm-router: agent depth not released ({type(exc).__name__})", file=sys.stderr)
+    finally:
+        if lock_fh is not None:
+            lock_fh.close()
     sys.exit(0)
 
 

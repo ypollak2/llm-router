@@ -1,5 +1,5 @@
 """SubagentStart hook — inject routing context into every new agent's initial messages.
-# llm_router-hook-version: 4
+# llm_router-hook-version: 5
 
 Fires once when Claude spawns an agent (Agent tool call completes the PreToolUse
 gate and runAgent() starts). The hook's additionalContext is prepended to the
@@ -197,18 +197,48 @@ def _claim_nesting_depth(payload: dict) -> None:
                 sid = "unknown"
         safe = re.sub(r"[^A-Za-z0-9._-]", "_", sid) or "unknown"
         path = _router_home() / f"agent_depth_{safe}.json"
-        data = json.loads(path.read_text())
-        now = time.time()
-        pending = [p for p in data.get("pending", []) if isinstance(p, list) and len(p) == 2
-                   and now - float(p[0]) < 120.0]
-        if not pending:
-            return
-        depth = int(pending.pop(0)[1])
-        agents = data.get("agents") if isinstance(data.get("agents"), dict) else {}
-        agents[agent_id] = depth
-        data["agents"] = dict(list(agents.items())[-200:])
-        data["pending"] = pending
-        path.write_text(json.dumps(data))
+        if not path.exists():
+            return  # no breaker state for this session: nothing was queued
+        lock_fh = None
+        try:
+            import fcntl
+            lock_fh = open(os.open(f"{path}.lock", os.O_RDWR | os.O_CREAT, 0o600), "a+")
+            deadline = time.monotonic() + 0.25  # hook latency budget, then fail open
+            while True:
+                try:
+                    fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.002)
+        except Exception as exc:  # noqa: BLE001
+            print(f"llm-router: agent breaker state lock unavailable ({type(exc).__name__}); "
+                  f"continuing unlocked", file=sys.stderr)
+            if lock_fh is not None:
+                lock_fh.close()
+                lock_fh = None
+        try:
+            data = json.loads(path.read_text())
+            now = time.time()
+            pending = [p for p in data.get("pending", []) if isinstance(p, list) and len(p) >= 2
+                       and now - float(p[0]) < 120.0]
+            if not pending:
+                return
+            depth = int(pending.pop(0)[1])  # FIFO: oldest entry
+            agents = data.get("agents") if isinstance(data.get("agents"), dict) else {}
+            agents[agent_id] = depth
+            data["agents"] = dict(list(agents.items())[-200:])
+            data["pending"] = pending
+            import uuid
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(json.dumps(data))
+            os.replace(tmp, path)
+        finally:
+            if lock_fh is not None:
+                lock_fh.close()
     except FileNotFoundError:
         return  # no breaker state for this session: nothing was queued
     except Exception as exc:  # noqa: BLE001 -- never break agent start; say so on stderr
