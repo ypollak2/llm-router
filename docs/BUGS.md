@@ -23,14 +23,15 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 11 | Four shadow tests raced the clock and failed `main` on a loaded runner | fixed in this change (test-only) |
 | 12 | Learned routes keyed by tool name, looked up by task type | fixed in P0.7 (`fix/learning-bugs`) |
 | 13 | Retrospective accuracy 100% at 0 corrections | fixed in P0.7 (`fix/learning-bugs`) |
-| 14 | DIRECT rows wrote 0.0 / False / "balanced" for values nobody measured | fixed in this change (v16 P0.8) |
-| 15 | `usage` rows carried no session id | fixed in this change (v16 P0.8); live coverage pending deploy |
-| 16 | The Stop line's north star used the heuristic "used", kpi the strict rule | fixed in this change (v16 P0.8) |
-| 17 | Status bar priced its baseline at Opus and labelled it "vs Sonnet" | fixed in this change (v16 P0.8) |
-| 18 | `llm-router replay` raises TypeError on a row with NULL confidence | fixed in this change (v16 P0.8) |
-| 19 | The quality report and the Stop summary raise TypeError on a NULL task type | fixed in this change (v16 P0.8) |
-| 20 | `llm-router northstar` showed the heuristic share as the North Star | fixed in this change (v16 P0.8) |
-| 21 | The claw-code Stop hook and the dashboard models panel raise TypeError on a NULL task type | fixed in this change (v16 P0.8 r1) |
+| 14 | Gateway doors: case-sensitive "auto", `stream` dropped, `max_tokens`/`temperature`/system dropped | fixed in this change (v16 P0.6) |
+| 15 | DIRECT rows wrote 0.0 / False / "balanced" for values nobody measured | fixed in this change (v16 P0.8) |
+| 16 | `usage` rows carried no session id | fixed in this change (v16 P0.8); live coverage pending deploy |
+| 17 | The Stop line's north star used the heuristic "used", kpi the strict rule | fixed in this change (v16 P0.8) |
+| 18 | Status bar priced its baseline at Opus and labelled it "vs Sonnet" | fixed in this change (v16 P0.8) |
+| 19 | `llm-router replay` raises TypeError on a row with NULL confidence | fixed in this change (v16 P0.8) |
+| 20 | The quality report and the Stop summary raise TypeError on a NULL task type | fixed in this change (v16 P0.8) |
+| 21 | `llm-router northstar` showed the heuristic share as the North Star | fixed in this change (v16 P0.8) |
+| 22 | The claw-code Stop hook and the dashboard models panel raise TypeError on a NULL task type | fixed in this change (v16 P0.8 r1) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -330,7 +331,41 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `test_p07b_retrospective_file_says_not_measurable` (red on da31df7: 1.0 / no such text),
   `test_p07b_with_corrections_is_still_a_number`.
 
-## 14. DIRECT rows wrote 0.0 / False / "balanced" for values nobody measured
+## 14. Gateway doors: case-sensitive "auto", `stream` dropped, three parameters dropped
+
+- **Symptom.** (a) A gateway request with `model` "Auto", "AUTO" or "llm-router-auto" got
+  HTTP 400 `Invalid model_override format: 'Auto'` instead of being routed. (b) A request
+  with `stream: true` to `/v1/chat/completions`, `/v1/responses` or `/v1/messages` got one
+  JSON body; the OpenAI and Anthropic SDKs expect SSE and fail inside their stream parser.
+  (c) A client's `max_tokens` and `temperature` never reached the model, and its system
+  prompt arrived as a `system:` line inside the user text. Reproduced at da31df7 by
+  `tests/test_p06_gateway_door_bugs.py`: 48 of its 59 tests fail there, 0 on the fix.
+- **Cause.** (a) `gateway._AUTO_SENTINELS` matched case-insensitively and passed the name
+  through, but `route_server.route_payload_async` compared it to `("auto",
+  "llm_router-auto")` exactly, so the rest reached `route_and_call` as a literal
+  `model_override`, which rejects a name without `/`. (b) `stream` was not declared on the
+  request models, so Pydantic dropped it. (c) `gateway._route` built the payload from
+  prompt, task type, complexity, model and project only.
+- **Fix.** `route_server.is_auto_model` (case-insensitive, stripped) is the one sentinel
+  test; the gateway imports it. `stream: bool = False` is declared on the three SSE request
+  models and `true` returns 400 `"streaming not supported yet (v16 A.2)"` before routing.
+  Ollama's `/api/chat` and `/api/generate` are not refused: their single `done: true`
+  object is a valid one-chunk NDJSON stream, and Ollama clients stream by default.
+  `_route` forwards `system`, `max_tokens`, `temperature` from every door (OpenAI
+  `system`/`developer` messages and `max_completion_tokens`; Responses `instructions` and
+  `max_output_tokens`; Anthropic `system`; Ollama `options.num_predict`/`temperature`).
+  Because the semantic cache keys on prompt and task type only, a call that carries a
+  caller system prompt now bypasses the cache (`semantic_cache.CALLER_SYSTEM_PROMPT`), so
+  callers with different system prompts cannot share an answer; P0.5 owns putting it in the
+  key.
+- **Test.** `tests/test_p06_gateway_door_bugs.py`: `test_sentinel_is_routed_on_every_door`,
+  `test_stream_true_is_an_explicit_400`, `test_every_post_route_is_classified_for_stream`,
+  `test_three_parameters_reach_route_payload`,
+  `test_semantic_cache_is_bypassed_while_a_caller_system_prompt_is_set`. Mutants: a
+  case-sensitive `is_auto_model` fails 17; no stream refusal fails 3; temperature dropped
+  from the payload fails 8; no cache bypass fails 1.
+
+## 15. DIRECT rows wrote 0.0 / False / "balanced" for values nobody measured
 
 - **Symptom.** Every DIRECT row in `routing_decisions` had `classifier_confidence = 0.0`,
   `classifier_latency_ms = 0.0`, `budget_pct_used = 0.0` and `quality_mode = 'balanced'`:
@@ -351,7 +386,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `test_direct_unknown_task_type_is_null_with_raw_value`,
   `test_legacy_usage_table_accepts_null_task_type_after_migration`. Each fails on da31df7.
 
-## 15. `usage` rows carried no session id
+## 16. `usage` rows carried no session id
 
 - **Symptom.** No `usage` row could be scoped to a session: the table had no `session_id`
   column (copy of the live `usage.db`, 2026-10-07, 1,388 rows).
@@ -367,7 +402,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `test_cc_usage_track_writes_the_payload_session`, `test_cc_usage_track_session_rule_matches_call_identity`.
   The live bar (session id on at least 99% of at least 100 post-deploy rows) is checked after deploy.
 
-## 16. The Stop line's north star used the heuristic "used", kpi the strict rule
+## 17. The Stop line's north star used the heuristic "used", kpi the strict rule
 
 - **Symptom.** For one session the session-end/Stop line and `llm-router kpi` could show two
   different north stars.
@@ -379,7 +414,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Test.** `test_stop_line_north_star_uses_the_strict_rule` (50 heuristic-used units, 10 strict:
   prints 20%, was 100%).
 
-## 17. Status bar priced its baseline at Opus and labelled it "vs Sonnet"
+## 18. Status bar priced its baseline at Opus and labelled it "vs Sonnet"
 
 - **Symptom.** The full status line read `(vs Sonnet:$58)` for a baseline priced at Opus rates.
 - **Cause.** WP-03 moved the price to `pricing.price_for("opus")` and left the label.
@@ -387,7 +422,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   so the two cannot drift (status-bar hook version 6).
 - **Test.** `test_status_bar_baseline_label_names_the_priced_model`.
 
-## 18. `llm-router replay` raises TypeError on a row with NULL confidence
+## 19. `llm-router replay` raises TypeError on a row with NULL confidence
 
 - **Symptom.** `commands/replay.format_decision_line` computed
   `decision.get("classifier_confidence", 0) * 100`; on a row whose confidence is NULL it raised
@@ -400,7 +435,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Test.** `test_replay_renders_null_confidence_and_task_type_as_unknown` (fails on da31df7 with
   the TypeError; mutant that restores `.get("task_type", "unknown")` fails it too).
 
-## 19. The quality report and the Stop summary raise TypeError on a NULL task type
+## 20. The quality report and the Stop summary raise TypeError on a NULL task type
 
 - **Symptom.** The quality report tool (`tools/admin.py`) raised `TypeError: unsupported format string passed to
   NoneType.__format__` when any `routing_decisions` row in its window had a NULL task type
@@ -408,26 +443,26 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   7-day report; deleting them fixed it). The session-end routing panels
   (`_format_routing_section`, `_format_cc_model_section`) raised the same error on a NULL
   `usage.task_type`.
-- **Cause.** P0.8 stores an unknown DIRECT task type as NULL (bug 14). These readers formatted
+- **Cause.** P0.8 stores an unknown DIRECT task type as NULL (bug 15). These readers formatted
   the value with `{task:<16}` / `{tool:<12}`, and `dict.get(key, default)` returns the stored
-  None (same class as bug 18). Before P0.8 no writer stored a NULL task type.
+  None (same class as bug 19). Before P0.8 no writer stored a NULL task type.
 - **Fix.** `tools/admin.py` renders NULL as `unknown` in the task-type table and the policy
   event list. `session-end.py` `_aggregate` and the CC model panel use `get(...) or "unknown"`
   (session-end hook version 19; 20 after main's #307 took 19). Other `GROUP BY task_type` readers checked: community.py
   filters `task_type IS NOT NULL`; dashboard/tui.py, dashboard/server.py (JS `|| '?'`),
   session-end `_query_savings_by_task_type` and the `commands/northstar` dry run already map
-  None. That sweep missed two readers; see bug 21.
+  None. That sweep missed two readers; see bug 22.
 - **Rule.** A column that P0.8 may leave NULL is rendered with `value or "unknown"`, never
   `get(key, "unknown")` and never a bare format spec.
 - **Test.** `test_quality_report_renders_null_task_type_as_unknown`,
   `test_session_end_routing_panels_render_null_task_type` (both fail on 25a2ece).
 
-## 20. `llm-router northstar` showed the heuristic share as the North Star
+## 21. `llm-router northstar` showed the heuristic share as the North Star
 
 - **Symptom.** The CLI printed "North Star — routed-and-used share" per session and its
-  aggregate median/p25/max from the heuristic `outcome == used`, after bug 16 moved the Stop
+  aggregate median/p25/max from the heuristic `outcome == used`, after bug 17 moved the Stop
   line to the strict rule. Plan §1.2: the heuristic NS leaves user surfaces (P0.8-b).
-- **Cause.** Bug 16's fix changed `current_session_line` only.
+- **Cause.** Bug 17's fix changed `current_session_line` only.
 - **Fix.** `report()["aggregate"]` adds `strict_median`, `strict_p25`, `strict_max` over the
   same sessions (n >= MIN_UNITS). The CLI shows "verified offload" from the strict rule and
   prints the heuristic only on lines labelled "diagnostic". The JSON keys `median`/`p25`/`max`
@@ -435,7 +470,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Test.** `test_northstar_cli_shows_the_strict_rule_as_the_north_star` (50 heuristic-used
   units, 10 strict: shows 20%, was 100%), `test_report_schema_is_pinned`.
 
-## 21. The claw-code Stop hook and the dashboard models panel raise TypeError on a NULL task type
+## 22. The claw-code Stop hook and the dashboard models panel raise TypeError on a NULL task type
 
 - **Symptom.** `hooks/session-end-clawcode.py` (installed as a Stop hook, `install_hooks.py`)
   exited 1 with `TypeError: unsupported format string passed to NoneType.__format__` when the
@@ -443,7 +478,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   rsync copy of `~/.llm-router` with 3 seeded paid DIRECT rows of unknown task type (3 of 3
   NULL): exit 1 and a traceback. `dashboard_enhanced.query_last_prompt_calls` returned the
   NULL as None, and `cyber_grid._build_models_panel` formats it with `{c['task_type']:<10}`.
-- **Cause.** Bug 19's reader sweep checked `GROUP BY task_type` readers and the main
+- **Cause.** Bug 20's reader sweep checked `GROUP BY task_type` readers and the main
   `session-end.py`, but not its claw-code sibling, which still read `r.get("task_type",
   "unknown")` and formatted it with `{tool:<12}`, nor row-level readers of `usage`.
 - **Fix.** Both use `value or "unknown"` (claw-code hook version 3). A second sweep

@@ -160,7 +160,7 @@ def query_last_prompt_calls(db_path: str | Path | None = None,
         ).fetchall()
         conn.close()
         return [
-            {"model": r[0], "provider": r[1], "task_type": r[2] or "unknown",  # P0.8: NULL (BUGS.md 21)
+            {"model": r[0], "provider": r[1], "task_type": r[2] or "unknown",  # P0.8: NULL (BUGS.md 22)
              "cost": r[3], "in_tokens": r[4], "out_tokens": r[5]}
             for r in rows
             if r[0] and not _is_test_model(r[0])
