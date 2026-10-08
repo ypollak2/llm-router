@@ -17,6 +17,8 @@ import os
 import socket
 from pathlib import Path
 
+import pytest
+
 
 from llm_router import proxy_default as pd
 
@@ -33,6 +35,29 @@ def _load_hook_module():
         os.environ.clear()
         os.environ.update(saved)
     return mod
+
+
+@pytest.fixture(autouse=True)
+def _isolated_session(monkeypatch, tmp_path):
+    """No real HOME settings, no real cwd settings, no inherited ANTHROPIC_BASE_URL."""
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    home.mkdir()
+    proj.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.chdir(proj)
+
+
+def _sentinel(tmp_path, monkeypatch, text, *, routed=True):
+    """Write the sentinel; by default the session routes to its port (via the env)."""
+    text = text if isinstance(text, str) else json.dumps(text)
+    (tmp_path / "proxy_default.json").write_text(text)
+    try:
+        port = int(json.loads(text).get("port", 8787))
+    except Exception:
+        return
+    if routed:
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", f"http://127.0.0.1:{port}")
 
 
 def _listening_socket() -> socket.socket:
@@ -63,7 +88,7 @@ def test_noop_when_answering(monkeypatch, tmp_path):
     srv = _listening_socket()
     try:
         port = srv.getsockname()[1]
-        (tmp_path / "proxy_default.json").write_text(json.dumps({"port": port}))
+        _sentinel(tmp_path, monkeypatch, json.dumps({"port": port}))
         mod = _load_hook_module()
         assert mod._check_proxy_default_health() == ""
     finally:
@@ -77,7 +102,7 @@ def test_warns_with_recovery_command_when_dead(monkeypatch, tmp_path):
     srv = _listening_socket()
     port = srv.getsockname()[1]
     srv.close()
-    (tmp_path / "proxy_default.json").write_text(json.dumps({"port": port}))
+    _sentinel(tmp_path, monkeypatch, json.dumps({"port": port}))
     mod = _load_hook_module()
     msg = mod._check_proxy_default_health()
     assert f"127.0.0.1:{port}" in msg
@@ -87,7 +112,7 @@ def test_warns_with_recovery_command_when_dead(monkeypatch, tmp_path):
 
 def test_malformed_sentinel_is_not_treated_as_a_dead_proxy(monkeypatch, tmp_path):
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
-    (tmp_path / "proxy_default.json").write_text("not valid json {{{")
+    _sentinel(tmp_path, monkeypatch, "not valid json {{{")
     mod = _load_hook_module()
     assert mod._check_proxy_default_health() == ""
 
@@ -98,7 +123,7 @@ def test_defaults_to_the_documented_port_when_sentinel_omits_it(monkeypatch, tmp
     connectivity to it — `socket.create_connection` is stubbed to fail for
     every port, isolating the assertion to "what port did the hook check"."""
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
-    (tmp_path / "proxy_default.json").write_text(json.dumps({}))
+    _sentinel(tmp_path, monkeypatch, json.dumps({}))
     seen_ports = []
 
     def _fail(addr, timeout=None):
@@ -127,7 +152,7 @@ def test_warns_routing_bypassed_when_shim_answers_but_main_proxy_is_dead(monkeyp
     shim = _listening_socket()
     try:
         port, upstream = shim.getsockname()[1], _dead_port()
-        (tmp_path / "proxy_default.json").write_text(
+        _sentinel(tmp_path, monkeypatch, 
             json.dumps({"port": port, "upstream_port": upstream, "shim_label": pd.SHIM_LABEL})
         )
         msg = _load_hook_module()._check_proxy_default_health()
@@ -142,7 +167,7 @@ def test_noop_when_shim_and_main_proxy_both_answer(monkeypatch, tmp_path):
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
     shim, main = _listening_socket(), _listening_socket()
     try:
-        (tmp_path / "proxy_default.json").write_text(json.dumps(
+        _sentinel(tmp_path, monkeypatch, json.dumps(
             {"port": shim.getsockname()[1], "upstream_port": main.getsockname()[1]}
         ))
         assert _load_hook_module()._check_proxy_default_health() == ""
@@ -156,7 +181,7 @@ def test_dead_shim_names_the_shim_service(monkeypatch, tmp_path):
     main = _listening_socket()
     try:
         port = _dead_port()
-        (tmp_path / "proxy_default.json").write_text(
+        _sentinel(tmp_path, monkeypatch, 
             json.dumps({"port": port, "upstream_port": main.getsockname()[1]})
         )
         msg = _load_hook_module()._check_proxy_default_health()
@@ -164,4 +189,88 @@ def test_dead_shim_names_the_shim_service(monkeypatch, tmp_path):
         assert f"gui/$(id -u)/{pd.SHIM_LABEL}" in msg
         assert "will fail" in msg
     finally:
+        main.close()
+
+
+# -- PD-HEALTH-1: judge the session's own routing, not just the sentinel's port ----------
+
+
+def _settings(path: Path, url: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": url}}))
+
+
+def test_a_not_routed_session_is_not_told_the_proxy_is_dead(monkeypatch, tmp_path):
+    """2026-10-08: no ANTHROPIC_BASE_URL in the session, proxy port dead -> the old
+    "every API call will fail" warning was false. Now: routing-off line, no 'will fail'."""
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    _sentinel(tmp_path, monkeypatch, {"enabled": True, "port": _dead_port()}, routed=False)
+    msg = _load_hook_module()._check_proxy_default_health()
+    assert "routing is OFF" in msg and "will fail" not in msg
+    assert "~/.claude/settings.json env.ANTHROPIC_BASE_URL is missing" in msg
+    assert "llm-router install --proxy-default" in msg
+    assert len(msg.strip().splitlines()) == 2  # the warning and its one restore line
+
+
+def test_sentinel_enabled_but_settings_lost_the_key_warns_even_if_proxy_is_up(monkeypatch, tmp_path):
+    """The opposite miss: settings.json lost the key, proxy answers, routing silently off."""
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    srv = _listening_socket()
+    try:
+        _sentinel(tmp_path, monkeypatch, {"enabled": True, "port": srv.getsockname()[1]}, routed=False)
+        _settings(Path.home() / ".claude" / "settings.json", "")  # key present but empty
+        assert "routing is OFF" in _load_hook_module()._check_proxy_default_health()
+    finally:
+        srv.close()
+
+
+def test_a_project_override_naming_another_host_warns_without_printing_secrets(monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    _sentinel(tmp_path, monkeypatch, {"enabled": True, "port": _dead_port()}, routed=False)
+    _settings(Path.cwd() / ".claude" / "settings.local.json",
+              "https://user:s3cr3tpw@api.example.com:9443/v1?key=s3cr3tq")
+    msg = _load_hook_module()._check_proxy_default_health()
+    assert "routing is OFF" in msg and "settings.local.json" in msg
+    assert "api.example.com:9443" in msg
+    assert "s3cr3t" not in msg and "user:" not in msg and "/v1" not in msg
+
+
+def test_settings_precedence_when_env_is_absent(monkeypatch, tmp_path):
+    """Local beats project beats user, so a local override to the proxy port counts as routed."""
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    srv = _listening_socket()
+    try:
+        port = srv.getsockname()[1]
+        _sentinel(tmp_path, monkeypatch, {"enabled": True, "port": port}, routed=False)
+        _settings(Path.home() / ".claude" / "settings.json", "https://api.anthropic.com")
+        _settings(Path.cwd() / ".claude" / "settings.local.json", f"http://127.0.0.1:{port}")
+        assert _load_hook_module()._check_proxy_default_health() == ""
+    finally:
+        srv.close()
+
+
+def test_routed_and_dead_still_gets_the_failure_warning(monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    port = _dead_port()
+    _sentinel(tmp_path, monkeypatch, {"enabled": True, "port": port})
+    msg = _load_hook_module()._check_proxy_default_health()
+    assert "will fail" in msg and f"127.0.0.1:{port}" in msg and "routing is OFF" not in msg
+
+
+def test_not_installed_stays_silent_whatever_the_session_routes_to(monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:1")
+    assert _load_hook_module()._check_proxy_default_health() == ""
+
+
+def test_routed_to_the_main_proxy_directly_counts_as_routed(monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    shim, main = _listening_socket(), _listening_socket()
+    try:
+        _sentinel(tmp_path, monkeypatch, {"port": shim.getsockname()[1],
+                                          "upstream_port": main.getsockname()[1]}, routed=False)
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", f"http://localhost:{main.getsockname()[1]}")
+        assert _load_hook_module()._check_proxy_default_health() == ""
+    finally:
+        shim.close()
         main.close()

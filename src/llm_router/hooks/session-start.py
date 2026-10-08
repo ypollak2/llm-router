@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 26
+# llm_router-hook-version: 27
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -704,6 +704,57 @@ def _sync_pxpipe_anthropic_base_url() -> str:
     return "\n↩️  pxpipe unavailable — reverted Claude Code to Anthropic's default endpoint"
 
 
+def _effective_base_url(cwd: str) -> tuple[str | None, str]:
+    """(value, where) of ANTHROPIC_BASE_URL this session routes with; (None, "") when unset.
+
+    os.environ first: Claude Code applies settings ``env`` to the process, and hooks
+    inherit it, so the merged result is already there. Fallback for a launcher that does
+    not: the settings files in Claude Code's own precedence (project local, project,
+    user). Stdlib-only, no network (docs/BUGS.md PD-HEALTH-1)."""
+    v = os.environ.get("ANTHROPIC_BASE_URL")
+    if v and v.strip():
+        return v.strip(), "the environment"
+    for path in (
+        os.path.join(cwd, ".claude", "settings.local.json"),
+        os.path.join(cwd, ".claude", "settings.json"),
+        os.path.join(os.path.expanduser("~"), ".claude", "settings.json"),
+    ):
+        try:
+            with open(path) as fh:
+                env = json.load(fh).get("env")
+            v = env.get("ANTHROPIC_BASE_URL") if isinstance(env, dict) else None
+        except Exception:
+            continue
+        if isinstance(v, str) and v.strip():
+            return v.strip(), path
+    return None, ""
+
+
+def _routes_to_local_port(value: str | None, ports: list) -> bool:
+    from urllib.parse import urlsplit
+
+    if not value:
+        return False
+    try:
+        parts = urlsplit(value if "//" in value else "//" + value)
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        return False
+    return host in ("127.0.0.1", "localhost", "::1") and port in ports
+
+
+def _safe_host(value: str | None) -> str:
+    """host[:port] only, via the doctor's redacting helper; never userinfo, path or key."""
+    if not value:
+        return "(unset)"
+    try:
+        from llm_router.proxy_liveness import _host_of
+
+        return _host_of(value)
+    except Exception:
+        return "(not shown)"
+
+
 def _check_proxy_default_health() -> str:
     """Warn at session start if the default proxy (`commands/proxy_default.py`,
     ``llm-router install --proxy-default``) is installed but not answering.
@@ -735,6 +786,24 @@ def _check_proxy_default_health() -> str:
         upstream = int(upstream) if upstream is not None else None
     except Exception:
         return ""  # an unreadable sentinel is not evidence of a dead proxy
+
+    if sentinel.get("enabled") is False:
+        return ""
+    ports = [port] + ([upstream] if upstream is not None else [])
+    value, where = _effective_base_url(os.getcwd())
+    if not _routes_to_local_port(value, ports):
+        # Installed, but this session does not use it: a dead port is irrelevant,
+        # silent bypass is the problem.
+        missing = (
+            f"{where} sets it to {_safe_host(value)}" if value
+            else "~/.claude/settings.json env.ANTHROPIC_BASE_URL is missing "
+                 "(and no project settings or environment sets it)"
+        )
+        return (
+            f"\n⚠️  llm-router proxy-default is installed but this session does not route "
+            f"through 127.0.0.1:{port}: {missing}, so routing is OFF.\n"
+            f"    Restore (takes effect next session):  llm-router install --proxy-default"
+        )
 
     import socket as _socket
 
