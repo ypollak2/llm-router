@@ -46,6 +46,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | P010-1 | A dead proxy fails every Claude Code session | fixed in this change (P0.10); live switch is an owner step |
 | P010-2 | The shim's 200 ms connect budget sent healthy-proxy traffic direct; shim restart cut 8787 | fixed in this change (P0.10 cutover repair) |
 | P013-1 | `llm_act` wrote files into the MCP process cwd | fixed for the file tools in this change (P0.13); bash confinement is P2.9 |
+| DT-1 | sdist shipped `integrations/pi/tests/*` and the receipt mod's `band.test.ts` | fixed in this change (deselected-test sweep) |
 | P0.14-a | Proxy ledger wrote 0 rows for 25 h and nothing flagged it | fixed in this change (P0.14) |
 | P011-1 | Haiku guard re-tripped on audit days older than its window | fixed in `feat/haiku-guard-in-repo` (P0.11, 3f4149b) |
 | P1.7-c-1 | Classifier shadow on: `assemble` held the GIL and delayed continuations | fixed in this change (v16 P1.7-c) |
@@ -1227,6 +1228,22 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   id before and after each test, without importing the module when no test did.
 - **Test.** The two-file command above: 1 failed before, 34 passed after. Removing the
   fixture turns it red again.
+
+## DT-1. The sdist shipped two test directories the "/tests/" exclude never covered
+
+- **Symptom.** `pytest -m ""` on main 26468d34 failed
+  `tests/test_sdist_excludes_quarantined_tests.py::test_sdist_does_not_ship_the_active_test_suite`:
+  the sdist contained `integrations/pi/tests/*` (3 files) and
+  `src/llm_router/mods/llm-router-receipt/tests/band.test.ts`. CI never saw it: the test is
+  `slow`-marked and `addopts` deselects `slow`.
+- **Cause.** `"/tests/"` in `[tool.hatch.build.targets.sdist] exclude` is anchored to the repo
+  root, so it matches only `tests/`. Same anchoring lesson as `/agents/` and
+  `/_quarantined_tests/`, third instance.
+- **Fix.** Two exact-path excludes in `pyproject.toml`. An unanchored `tests/` was rejected: it
+  matches at any depth and could strip a package directory.
+- **Test.** `uv build --sdist`, then `tar tzf dist/*.tar.gz | grep -c /tests/`: 4 before,
+  0 after; `llm_router/agents/session.py` still present. The slow test above covers it when run
+  with `-m ""`.
 
 ## CI-1. `copytree` of a fixture repo raced git's background maintenance
 
