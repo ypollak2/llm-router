@@ -37,6 +37,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | P011-1 | Haiku guard re-tripped on audit days older than its window | fixed in `feat/haiku-guard-in-repo` (P0.11, 3f4149b) |
 | GE6-1 | Quota-burn coverage kept owner-overridden sessions in the organic denominator | fixed in `feat/quota-samples` (#320, GE6 repair 1) |
 | GE6-2 | Branch hook version equal to main's after main moved on | fixed in `feat/quota-samples` (#320, GE6 repair round 1) |
+| P012-1 | `kpi verify_shadow` was None with 0 verify rows, keyed `failed`, and walked the transcripts twice | fixed in #287 (P0.12-a, #285 review nits) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -644,3 +645,27 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Check.** No test can know main's stamp at test time. The check is a command, run after
   each merge of origin/main:
   `for f in session-start session-end; do git show origin/main:src/llm_router/hooks/$f.py | sed -n 2p; sed -n 2p src/llm_router/hooks/$f.py; done`
+
+## P012-1. `kpi verify_shadow` was None with 0 verify rows, keyed `failed`, and walked the transcripts twice
+
+- **Symptom.** On a copy of `~/.llm-router` (live/ excluded) with 0 verify rows,
+  `llm-router kpi --json | jq '.verify_shadow|keys'` errors: the value is `null`. With rows the
+  keys were `failed, unavailable, verified, weak`, not the `fail, unavailable, verified, weak`
+  that PLAN-v16 P0.12 task 6 checks. Found in the #285 review (c7066cb, PASS-WITH-NITS).
+- **Cause.** `_verify_shadow` returned None when no unit carried a record, named the bucket
+  `failed`, and called `northstar.units()` itself, a second pass over the transcripts after
+  `_ns_d1_d2` had made the first. Two review mutants survived: a lever row carrying a
+  `unit_id` was never tested as "not a verify record" (M6), and `unit_id` ignoring `kind` was
+  never tested (M8).
+- **Fix.** `kpi.VERIFY_SHADOW_KEYS = (fail, unavailable, verified, weak)`; `_verify_shadow(units, win)`
+  returns that dict zero-filled and takes the list `compute_scorecard` already built (one
+  `units()` pass, filtered to the window like NS/D2). The text line still prints only when a
+  count is non-zero, so the text with 0 rows is unchanged. The `test_verify_worker` joins now
+  pass `verify_records=True`, the opt-in #285 made final.
+- **Test.** `tests/test_verify_record.py`: `test_verify_shadow_is_a_zero_filled_dict_with_exactly_the_four_keys`,
+  `test_verify_shadow_uses_the_units_it_is_given_and_does_not_walk_them_again`,
+  `test_compute_scorecard_walks_the_units_once`,
+  `test_a_lever_row_that_carries_a_unit_id_is_not_a_verify_record` (red with the `lever` guard in
+  `load_verify_records` removed), `test_unit_id_differs_by_kind_for_the_same_session_and_timestamp`
+  (red with `kind` removed from the hash). Mutants run: key back to `failed`, None when empty,
+  second `ns.units` walk: each fails at least one of them.
