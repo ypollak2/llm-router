@@ -17,10 +17,16 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | P09-4 | session-start ran Ollama start, `ollama list`, seats, usage.db and git inline | fixed in `perf/session-start-bg` (P0.9 task 3) |
 | 6 | Research session b9f04425 counted as organic | fixed in #291 (M0.0b) |
 | 7 | `edit_outcomes.jsonl` rows with no source | open, fix is plan task M0.3(c) |
-| 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | known, not fixed |
+| 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | fixed in P0.7 (`fix/learning-bugs`): one flag, default off |
 | 9 | Classifier warm-up loaded `llmr-classifier` at the wrong `num_ctx` | fixed in #298 (M1.4, review 2) |
 | 10 | README-advertised `--host pi` / `--host kimi` failed; detected gemini-cli skipped silently | fixed in this change (v16 P0.4) |
 | 11 | Four shadow tests raced the clock and failed `main` on a loaded runner | fixed in this change (test-only) |
+| 12 | Learned routes keyed by tool name, looked up by task type | fixed in P0.7 (`fix/learning-bugs`) |
+| 13 | Retrospective accuracy 100% at 0 corrections | fixed in P0.7 (`fix/learning-bugs`) |
+| 14 | Gateway doors: case-sensitive "auto", `stream` dropped, `max_tokens`/`temperature`/system dropped | fixed in this change (v16 P0.6) |
+| 15 | MCP routing ran on Claude pressure 0.0 for the life of the process | fixed in this change (v16 P0.2) |
+| 16 | Critical-pressure override sent `/model claude-opus-4-6`, a retired id | fixed in this change (v16 P0.2) |
+| 17 | Semantic cache never hit, ignored context, and reported a hit rate of 0 | fixed in this change (v16 P0.5) |
 | P013-1 | `llm_act` wrote files into the MCP process cwd | fixed for the file tools in this change (P0.13); bash confinement is P2.9 |
 
 ## 1. NULL `session_id` on local routing rows
@@ -171,16 +177,27 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 ## 8. `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off
 
 - **Symptom.** With `LLM_ROUTER_CLASSIFY_LOCAL_ONLY` and `LLM_ROUTER_DISABLE_LLM_CLASSIFIERS`
-  both unset, the hook's LLM classifier layer is off whenever Ollama is reachable.
-- **Cause.** `hooks/auto-route.py` (line 374 on this commit):
+  both unset, the hook's LLM classifier layer is off whenever Ollama is reachable, and on —
+  sending the prompt to a cloud API (layer 3) — whenever Ollama is unreachable and a Gemini or
+  OpenAI key is set.
+- **Cause.** `hooks/auto-route.py` (:387 at da31df7):
   `DISABLE_LLM_CLASSIFIERS = _ollama_reachable or not _has_api_key`. The comment above it says
-  local-only means "heuristic + Ollama", but this flag also gates layer 2 (Ollama, line 2435), so
-  the Ollama layer is off exactly when Ollama is reachable. Layer 3 (API, line 2445) is off with it.
-- **Fix.** None. Recorded as known and not fixed: the hook stays byte-identical until a task
-  that changes hooks (M3.4 / M4) owns it. Running with the variable set explicitly to `false`
-  avoids the auto-detect.
-- **Test.** None yet. A fix needs a test that, with both variables unset and Ollama
-  reachable, asserts the value the owner chooses.
+  local-only means "heuristic + Ollama", but this flag also gates layer 2 (Ollama), so the
+  Ollama layer is off exactly when Ollama is reachable. It also cost a 0.5 s `/api/tags` probe
+  at every hook start.
+- **Fix.** P0.7-c (plan v16, `fix/learning-bugs`, hook version 47). The layer is controlled
+  only by `LLM_ROUTER_HOOK_LLM_LAYER` (registered in `env_registry.py`), **default off**.
+  `LLM_ROUTER_DISABLE_LLM_CLASSIFIERS` is no longer read; with the layer on, layer 3 (cloud API)
+  additionally needs `LLM_ROUTER_CLASSIFY_LOCAL_ONLY=false`. This deliberately departs from the
+  gap analysis, which asked to switch the layer on when Ollama is present. Reasons: the hook
+  latency NFR, and the round-2 kill of the v7 LLM classifier — Cλ2 10.70 vs rules 9.58,
+  under-route 79/91 vs 47/91 (n = 91, `$PP/eval/results/tune_round2_20261007T151100.json`). The
+  flag stays off until a D-19 candidate passes its own pre-registration.
+- **Test.** `tests/test_p07_learning_bugs.py`: `test_p07c_default_off_with_ollama_reachable`,
+  `test_p07c_default_off_without_ollama_and_with_an_api_key` (red on da31df7: Ollama layer
+  called), `test_p07c_flag_on_calls_the_ollama_layer` (red on da31df7: not called),
+  `test_p07c_old_variables_no_longer_turn_the_layer_on` (red on da31df7),
+  `test_p07c_flag_on_keeps_the_cloud_api_layer_opt_in`, `test_p07c_flag_is_registered`.
 
 ## 9. Classifier warm-up loaded `llmr-classifier` at the wrong `num_ctx`
 
@@ -277,6 +294,149 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   finished mid-loop, its slot was reused and the counts came out `drops == 195` instead of 196
   (failed in isolation at load average ~70). The fake is now gated: it never answers until the test
   ends. The p95 <= 30 ms bar is the product's own number and is left as it was.
+
+## 12. Learned routes keyed by tool name, looked up by task type
+
+- **Symptom.** No user correction ever overrode a route. Three `llm_reroute` corrections of an
+  `llm_code` decision wrote `learned_routes.json` with the key `llm_code`; the hook asks for
+  `code` and found nothing.
+- **Cause.** `src/llm_router/memory/profiles.py` `build_learned_profile` (:102 at da31df7) keyed
+  the profile by `corrections.original_tool` (a tool name). `hooks/auto-route.py`
+  `_check_learned_override` (:3953) looks it up by the classified task type.
+- **Fix.** P0.7-a (`fix/learning-bugs`). The profile is keyed by task type through
+  `TOOL_TO_TASK_TYPE` (`llm_code→code`, `llm_query→query`, `llm_research→research`,
+  `llm_generate→generate`, `llm_analyze→analyze`; unknown names kept). For one release both
+  readers (`load_learned_profile` and the hook) accept an old tool-keyed file; a task-type key
+  wins over a legacy key for the same task.
+- **Test.** `tests/test_p07_learning_bugs.py::test_p07a_session_end_profile_feeds_the_hook_override`
+  (session-end `_build_and_save_learned_profile` output feeds `_check_learned_override('code', …)`
+  and the override fires; red on da31df7), `test_p07a_every_tool_key_maps_to_its_task_type`,
+  `test_p07a_reader_accepts_a_legacy_tool_keyed_file`, `test_p07a_task_type_key_wins_over_a_legacy_key`.
+
+## 13. Retrospective accuracy 100% at 0 corrections
+
+- **Symptom.** Every retrospective of a session in which nobody corrected a route printed
+  "Accuracy: 100%".
+- **Cause.** `src/llm_router/retrospective.py` `analyze_facts` (:234 at da31df7):
+  `accuracy = 1.0 - corrections / decisions`. With 0 corrections that is 1.0, a perfect score
+  measured from nothing: an uncorrected route is not a verified one.
+- **Fix.** P0.7-b (`fix/learning-bugs`). With 0 corrections `classification_accuracy` is
+  `None`, rendered "not measurable (no corrections)" by `_format_accuracy_pct`. With at least
+  one correction the ratio is unchanged.
+- **Test.** `tests/test_p07_learning_bugs.py::test_p07b_zero_corrections_is_not_measurable` and
+  `test_p07b_retrospective_file_says_not_measurable` (red on da31df7: 1.0 / no such text),
+  `test_p07b_with_corrections_is_still_a_number`.
+
+## 14. Gateway doors: case-sensitive "auto", `stream` dropped, three parameters dropped
+
+- **Symptom.** (a) A gateway request with `model` "Auto", "AUTO" or "llm-router-auto" got
+  HTTP 400 `Invalid model_override format: 'Auto'` instead of being routed. (b) A request
+  with `stream: true` to `/v1/chat/completions`, `/v1/responses` or `/v1/messages` got one
+  JSON body; the OpenAI and Anthropic SDKs expect SSE and fail inside their stream parser.
+  (c) A client's `max_tokens` and `temperature` never reached the model, and its system
+  prompt arrived as a `system:` line inside the user text. Reproduced at da31df7 by
+  `tests/test_p06_gateway_door_bugs.py`: 48 of its 59 tests fail there, 0 on the fix.
+- **Cause.** (a) `gateway._AUTO_SENTINELS` matched case-insensitively and passed the name
+  through, but `route_server.route_payload_async` compared it to `("auto",
+  "llm_router-auto")` exactly, so the rest reached `route_and_call` as a literal
+  `model_override`, which rejects a name without `/`. (b) `stream` was not declared on the
+  request models, so Pydantic dropped it. (c) `gateway._route` built the payload from
+  prompt, task type, complexity, model and project only.
+- **Fix.** `route_server.is_auto_model` (case-insensitive, stripped) is the one sentinel
+  test; the gateway imports it. `stream: bool = False` is declared on the three SSE request
+  models and `true` returns 400 `"streaming not supported yet (v16 A.2)"` before routing.
+  Ollama's `/api/chat` and `/api/generate` are not refused: their single `done: true`
+  object is a valid one-chunk NDJSON stream, and Ollama clients stream by default.
+  `_route` forwards `system`, `max_tokens`, `temperature` from every door (OpenAI
+  `system`/`developer` messages and `max_completion_tokens`; Responses `instructions` and
+  `max_output_tokens`; Anthropic `system`; Ollama `options.num_predict`/`temperature`).
+  Because the semantic cache keys on prompt and task type only, a call that carries a
+  caller system prompt now bypasses the cache (`semantic_cache.CALLER_SYSTEM_PROMPT`), so
+  callers with different system prompts cannot share an answer; P0.5 owns putting it in the
+  key.
+- **Test.** `tests/test_p06_gateway_door_bugs.py`: `test_sentinel_is_routed_on_every_door`,
+  `test_stream_true_is_an_explicit_400`, `test_every_post_route_is_classified_for_stream`,
+  `test_three_parameters_reach_route_payload`,
+  `test_semantic_cache_is_bypassed_while_a_caller_system_prompt_is_set`. Mutants: a
+  case-sensitive `is_auto_model` fails 17; no stream refusal fails 3; temperature dropped
+  from the payload fails 8; no cache bypass fails 1.
+
+## 15. MCP routing ran on Claude pressure 0.0 for the life of the process
+
+- **Symptom.** With `usage.json` at 0.80 (session 53%, weekly 80%; rsync copy taken
+  2026-10-07T17:53Z, n = 1 file), `claude_usage.get_claude_pressure()` on da31df7 returned
+  0.0. The MCP chain never demoted Claude and never fronted Codex, however tight the quota.
+- **Cause.** `get_claude_pressure()` returned an in-process cache that only
+  `set_claude_pressure` filled, and only the `llm_update_usage` tool calls that. An MCP
+  server that never saw that call kept the initial 0.0. The hooks kept `usage.json` fresh the
+  whole time; the MCP side never read it.
+- **Fix.** `claude_usage.get_claude_pressure_reading()` returns `(value, state, as_of)`. A
+  push from the last 300 s wins; otherwise the value comes from `usage.json` through
+  `budget._pressure_from_usage`, cached 60 s. `updated_at` older than 30 min is `stale`, a
+  missing or unreadable file is `unknown`, and neither carries a value.
+  `get_claude_pressure()` returns the value or 0.0, so stale and unknown keep the old
+  default and do not reorder the chain.
+- **Test.** `tests/test_mcp_claude_pressure.py`:
+  `test_get_claude_pressure_is_no_longer_zero_for_life` (0.0 on da31df7, 0.96 on head),
+  `test_stale_file_is_unknown_and_reads_as_zero`,
+  `test_high_pressure_puts_codex_before_claude` (`_build_and_filter_chain`, code/moderate,
+  `usage.json` at 0.96: Claude led on da31df7, Codex leads on head) and
+  `test_stale_pressure_leaves_the_order_unchanged`.
+
+## 16. Critical-pressure override sent `/model claude-opus-4-6`, a retired id
+
+- **Symptom.** At critical pressure, auto-route.py told Claude Code to switch to
+  `/model claude-opus-4-6`. The proxy's opus tier (`proxy/claude_tiers.yaml`) is
+  `claude-opus-5-5`. subagent-start.py and the hook chain builder named the same old id.
+- **Cause.** A literal model id in three hooks, which nothing tied to the tier policy.
+- **Fix.** `proxy.tiers.tier_model("opus")` reads the policy the proxy loads (the
+  `LLM_ROUTER_PROXY_TIER_POLICY` file, else the bundled YAML) through
+  `ClaudeTierPolicy.load`. The three hooks use it and fall back to Claude Code's `opus` alias,
+  never to a literal. `pricing.retired_models()` lists ids kept only to price old rows;
+  `claude-opus-4-6` is one of them for routing.
+- **Test.** `tests/test_no_retired_model_ids.py::test_routing_code_names_no_retired_model_id`
+  scans the string literals in `src/llm_router/hooks/*.py` and `router.py` and prints how many
+  it checked. On da31df7 it found 3 hits (auto-route.py:4799, chain_builder.py:188,
+  subagent-start.py:203); on head it finds 0. To re-prove the baseline from head, run the
+  same test with `RETIRED_IDS_SCAN_ROOT=<da31df7 checkout>/src/llm_router`: it fails with 3 hits.
+
+## 17. Semantic cache never hit, ignored context, and reported a hit rate of 0
+
+- **Symptom.** (a) A routed request repeated within 24 h was never served from the semantic
+  cache. (b) Had the key matched, "yes, do it" answered in one conversation would have been
+  served verbatim in another: the key had no context. (c) With no Ollama the cache did nothing.
+  (d) `cost.get_cache_hit_stats` and the session-end hook's `_query_cache_hit_stats` always
+  returned zeros / `{}`, so the hit rate (R-CTX-7) could not be measured.
+- **Cause.** (a) `route_and_call` called `semantic_cache.check` with the user's raw prompt, but
+  `_finalize_successful_route` called `store` with the prompt after OKF / `<repo_state>`
+  injection. Different text means a different embedding and, because `<repo_state>` carries
+  numbers, a different C-03 discriminator. (b) No column bound an entry to its conversation.
+  (c) `check`/`store` returned early when `ollama_base_url` was unset. (d) Both queries named
+  columns `semantic_cache` never had (`was_hit`, `accessed_at`; `cache_hit`, `tokens_saved`,
+  `timestamp`); the exceptions were swallowed by fail-open paths.
+- **Fix.** v16 P0.5 (`fix/semantic-cache-key`): `route_and_call` builds one
+  `semantic_cache.CacheKey` before dispatch (raw prompt + `ctx_hash` = sha256 of caller
+  `context`, else the last two buffered messages, plus the caller's `system_prompt` if given and
+  the caller's project scope) and passes it
+  to `check` and, through the dispatch loop, to `store`. Exact-match pass on
+  sha256(normalised text) + `ctx_hash` needs no Ollama (rows stored with embedding `''`, since
+  the existing column is `NOT NULL`). Additive migration: `ctx_hash`, `text_hash`, `hit_count`,
+  `last_hit_at`, and a `semantic_cache_lookups` table (one row per lookup, no prompt text). Both
+  stats queries read that table and return `{hits, lookups, n}`.
+  Lookup rows older than `LLM_ROUTER_PERSIST_TTL_DAYS` are purged on every store, so the
+  stats period "all" covers at most that window.
+- **Test.** `tests/test_p05_semantic_cache_key.py` (8 tests):
+  `test_same_request_hits_after_context_injection`, `test_context_is_part_of_the_key`,
+  `test_key_uses_last_two_conversation_messages_when_no_caller_context`,
+  `test_caller_system_prompt_is_part_of_the_key`,
+  `test_old_lookups_are_purged_even_when_no_cache_row_expired`,
+  `test_exact_hash_fallback_without_ollama`, `test_cost_cache_hit_stats_returns_true_counts_with_n`,
+  `test_session_end_cache_hit_stats_returns_true_counts_with_n`. All 8 fail on da31df7, but
+  only three fail for the bug itself: the second identical request reached a provider; "yes,
+  do it" was served across contexts; the same system prompt never hit. The other five fail
+  because the API they call (`make_key`, `_semantic_cache_key`, the lookups table) did not
+  exist, so their evidence is the single-flip mutants recorded in the v16 P0.5 gate file,
+  each of which turns at least one of these tests red.
 
 ## P013-1. `llm_act` wrote files into the MCP process cwd
 

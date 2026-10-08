@@ -137,7 +137,6 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_ENFORCE_CONTEXT": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_QA_ROUTING": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_DISABLE_CONTINUATION_BYPASS": ("llm_router", "hooks/auto-route.py", 1),
-    "LLM_ROUTER_DISABLE_LLM_CLASSIFIERS": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_DISABLE_SUBPROCESS_BACKENDS": ("llm_router", "router.py", 1),
     "LLM_ROUTER_DYNAMIC_LEADERBOARD_ORDERING": ("llm_router", "dynamic_routing.py", 1),
     "LLM_ROUTER_ENFORCE": ("llm_router", "commands/doctor.py", 9),
@@ -161,6 +160,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_OKF_AUTOINDEX": ("llm_router", "hooks/session-start.py", 1),
     "LLM_ROUTER_OKF_AUTOINDEX_TTL_H": ("llm_router", "hooks/session-start.py", 1),
     "LLM_ROUTER_HOOK_BUDGET_S": ("llm_router", "hooks/auto-route.py", 1),
+    # P0.7-c: the only switch for the hook's LLM classifier layers (default off).
+    "LLM_ROUTER_HOOK_LLM_LAYER": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_CONSTRAINED_TOOLS": ("llm_router", "hooks/agent_loop.py", 1),
     "LLM_ROUTER_AGENT_NUM_CTX": ("llm_router", "hooks/agent_loop.py", 1),
     "LLM_ROUTER_LOCAL_NUM_CTX": ("llm_router", "hooks/agent_loop.py", 1),
@@ -384,6 +385,11 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # num_ctx, and a shared name would reload the runner back and forth.
     "LLM_ROUTER_CLASSIFIER_MODEL": ("llm_router", "local_classifier.py", 1),
     "LLM_ROUTER_CLASSIFIER_KEEP_ALIVE": ("llm_router", "local_classifier.py", 1),
+    # M1.8 round 3: decision-model backend (Ollama /v1/systemone, nimble). Default OFF
+    # (backend "chat" = the v6 /api/chat classifier); see decision_classifier.py.
+    "LLM_ROUTER_CLASSIFIER_BACKEND": ("llm_router", "local_classifier.py", 1),
+    "LLM_ROUTER_DECISION_MODEL": ("llm_router", "decision_classifier.py", 1),
+    "LLM_ROUTER_DECISION_ABSTAIN_BELOW": ("llm_router", "decision_classifier.py", 1),
     "LLM_ROUTER_ZCE_COLD_BUDGET_S": ("llm_router", "warm.py", 1),
     "LLM_ROUTER_ZCE_WARMUP": ("llm_router", "warm.py", 1),
     # ── indirect reads: DECLARED BY HAND, invisible to the AST scan ──
