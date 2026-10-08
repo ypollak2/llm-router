@@ -23,10 +23,11 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 11 | Four shadow tests raced the clock and failed `main` on a loaded runner | fixed in this change (test-only) |
 | 12 | Learned routes keyed by tool name, looked up by task type | fixed in P0.7 (`fix/learning-bugs`) |
 | 13 | Retrospective accuracy 100% at 0 corrections | fixed in P0.7 (`fix/learning-bugs`) |
-| 14 | Session context store deleted after every turn | fixed in #307 (v16 P0.1) |
-| 15 | Session context truncation dropped the newest events | fixed in #307 (v16 P0.1) |
-| 16 | `build_context_messages` cut the caller's live context first | fixed in #307 (v16 P0.1) |
-| 17 | `context_prep` truncated the user prompt | fixed in #307 (v16 P0.1) |
+| 14 | Gateway doors: case-sensitive "auto", `stream` dropped, `max_tokens`/`temperature`/system dropped | fixed in this change (v16 P0.6) |
+| 15 | Session context store deleted after every turn | fixed in #307 (v16 P0.1) |
+| 16 | Session context truncation dropped the newest events | fixed in #307 (v16 P0.1) |
+| 17 | `build_context_messages` cut the caller's live context first | fixed in #307 (v16 P0.1) |
+| 18 | `context_prep` truncated the user prompt | fixed in #307 (v16 P0.1) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -326,7 +327,41 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `test_p07b_retrospective_file_says_not_measurable` (red on da31df7: 1.0 / no such text),
   `test_p07b_with_corrections_is_still_a_number`.
 
-## 14. Session context store deleted after every turn
+## 14. Gateway doors: case-sensitive "auto", `stream` dropped, three parameters dropped
+
+- **Symptom.** (a) A gateway request with `model` "Auto", "AUTO" or "llm-router-auto" got
+  HTTP 400 `Invalid model_override format: 'Auto'` instead of being routed. (b) A request
+  with `stream: true` to `/v1/chat/completions`, `/v1/responses` or `/v1/messages` got one
+  JSON body; the OpenAI and Anthropic SDKs expect SSE and fail inside their stream parser.
+  (c) A client's `max_tokens` and `temperature` never reached the model, and its system
+  prompt arrived as a `system:` line inside the user text. Reproduced at da31df7 by
+  `tests/test_p06_gateway_door_bugs.py`: 48 of its 59 tests fail there, 0 on the fix.
+- **Cause.** (a) `gateway._AUTO_SENTINELS` matched case-insensitively and passed the name
+  through, but `route_server.route_payload_async` compared it to `("auto",
+  "llm_router-auto")` exactly, so the rest reached `route_and_call` as a literal
+  `model_override`, which rejects a name without `/`. (b) `stream` was not declared on the
+  request models, so Pydantic dropped it. (c) `gateway._route` built the payload from
+  prompt, task type, complexity, model and project only.
+- **Fix.** `route_server.is_auto_model` (case-insensitive, stripped) is the one sentinel
+  test; the gateway imports it. `stream: bool = False` is declared on the three SSE request
+  models and `true` returns 400 `"streaming not supported yet (v16 A.2)"` before routing.
+  Ollama's `/api/chat` and `/api/generate` are not refused: their single `done: true`
+  object is a valid one-chunk NDJSON stream, and Ollama clients stream by default.
+  `_route` forwards `system`, `max_tokens`, `temperature` from every door (OpenAI
+  `system`/`developer` messages and `max_completion_tokens`; Responses `instructions` and
+  `max_output_tokens`; Anthropic `system`; Ollama `options.num_predict`/`temperature`).
+  Because the semantic cache keys on prompt and task type only, a call that carries a
+  caller system prompt now bypasses the cache (`semantic_cache.CALLER_SYSTEM_PROMPT`), so
+  callers with different system prompts cannot share an answer; P0.5 owns putting it in the
+  key.
+- **Test.** `tests/test_p06_gateway_door_bugs.py`: `test_sentinel_is_routed_on_every_door`,
+  `test_stream_true_is_an_explicit_400`, `test_every_post_route_is_classified_for_stream`,
+  `test_three_parameters_reach_route_payload`,
+  `test_semantic_cache_is_bypassed_while_a_caller_system_prompt_is_set`. Mutants: a
+  case-sensitive `is_auto_model` fails 17; no stream refusal fails 3; temperature dropped
+  from the payload fails 8; no cache bypass fails 1.
+
+## 15. Session context store deleted after every turn
 
 - **Symptom.** The Session Context Accumulator's per-session JSONL
   (`session_context_*.jsonl`) was gone after the first turn of every session, so routed
@@ -346,7 +381,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `test_session_file_survives_stop_with_its_events` (real store, 5 turns, line count
   non-decreasing, deleted only on SessionEnd), `test_installer_registers_session_end_on_both_events`.
 
-## 15. Session context truncation dropped the newest events
+## 16. Session context truncation dropped the newest events
 
 - **Symptom.** When a session's context exceeded `max_tokens`, the block injected into a routed
   call held the oldest events and lost the newest, the ones the current question is about.
@@ -358,7 +393,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Test.** `tests/test_p01_context_loss.py::test_newest_event_present_in_200_of_200_over_budget_cases`
   (Hypothesis, 200 generated over-budget sessions, the count is asserted and printed).
 
-## 16. `build_context_messages` cut the caller's live context first
+## 17. `build_context_messages` cut the caller's live context first
 
 - **Symptom.** With an over-budget history, the `[Additional context]` block the caller passed
   (layer 3, the live request's context) was cut or missing from the injected system message.
@@ -371,7 +406,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   budget (summaries, session buffer, durable log, layer 3 itself) and
   `test_lowest_layer_dropped_before_higher_ones`.
 
-## 17. `context_prep` truncated the user prompt
+## 18. `context_prep` truncated the user prompt
 
 - **Symptom.** `prepare_prompt` returned a `PreparedPrompt.user_prompt` cut to the budget's
   user allocation with a `[truncated]` marker.
