@@ -16,6 +16,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 5 | Haiku 400 on a mid-conversation system message | worked around (flag off); fold is plan task M0.7 |
 | P09-3 | A session-start background child wrote its own "session-start" latency row | fixed in `perf/session-start-bg` (P0.9) |
 | P09-4 | session-start ran Ollama start, `ollama list`, seats, usage.db and git inline | fixed in `perf/session-start-bg` (P0.9 task 3) |
+| P09-6 | Stop (session-end) ran a keychain read + HTTPS usage fetch and three maintenance jobs inline on every turn | fixed in `perf/session-end-bg` (P0.9 task 7) |
 | 6 | Research session b9f04425 counted as organic | fixed in #291 (M0.0b) |
 | 7 | `edit_outcomes.jsonl` rows with no source | open, fix is plan task M0.3(c) |
 | 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | fixed in P0.7 (`fix/learning-bugs`): one flag, default off |
@@ -172,6 +173,12 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   copy of `hook_latency.jsonl` + `.1` (2026-10-04T22:07Z to 2026-10-07T14:47Z, same 65 rows),
   28 rows fell in one burst (2026-10-06 05:07-05:08Z, 4.6-17.4 s). The other 37 read
   138 ms-11.3 s: 11 of them over 2 s, p95 11,045 ms. So the tail is not only the burst.
+  **Correction (P0.9 task 7 re-count, PLAN §1.4 rule 5 episodes = rows over the bar split by
+  gaps >= 60 s).** 10 of those 11 ran 2026-10-06 05:06:49-05:06:57Z, seconds before the 05:07
+  minute, so they belong to the same burst. Same copy, 66 rows to 2026-10-08T11:02Z: 39 over
+  2 s, 38 in one episode (05:06:49-05:08:04Z, share 0.974); outside it 1 of 28 rows is over
+  2 s and p95 is 723 ms. The tail before the fix was essentially the one burst
+  (`$PP/v16/p09/baseline_predeploy_20261008T1102Z.json`).
 - **Cause.** `main()` ran `start-ollama.sh` (waits up to 10 s), `ollama list`, a seats
   re-detect (2 s budget), two usage.db queries, an Ollama co-residency probe, the pxpipe sync,
   a `git` check for the OKF index and five process spawns before returning. Under a burst of
@@ -182,6 +189,36 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   from cached usage and `additionalContext`.
 - **Test.** `tests/test_p09_session_start_bg.py::test_main_does_not_run_any_moved_step_inline`
   (FAILS on da31df7: all 17 steps ran inline), `test_main_returns_while_a_5s_background_phase_still_runs`.
+
+## P09-6. Stop (session-end) ran a keychain read + HTTPS usage fetch and three maintenance jobs inline on every turn
+
+- **Symptom.** session-end p95 3,353 ms (n = 252) against the PRD's +300 ms sync bar [HL7].
+  The Stop hook fires after every turn, so every turn paid it. The row carried no phases, so
+  nothing said where the time went.
+- **Cause.** `main()` called `_get_cc_usage()`, which ran `security find-generic-password`
+  and an HTTPS call to the usage endpoint (8 s timeout) inline, then rebuilt the learned
+  profile, ran the auto-profile rescan check and the model-evaluator check. The per-turn
+  line reads quota from `usage.json`; that fetch only refreshes it, and the other three feed
+  nothing on the line.
+- **Fix.** One detached child (`--background-stop-work`, fork + execv through
+  `statusline_tick._spawn_detached`, no new subprocess site) runs the fetch and the three jobs.
+  The sync path reads `usage.json`; a reading younger than 120 s counts as live (it still
+  becomes the next baseline). A note the child would have added to the full box goes to
+  `stop_notes.json` and the next Stop shows it once. The child turns the latency recorder off
+  (the P09-3 trap). session-end and agent-route now name their phases (`phases_ms`).
+  Found, not fixed: `_maybe_evaluate_models` imports `EVAL_CACHE_PATH`, which
+  `model_evaluator` no longer defines, so the 7-day model check is a no-op (it was inline too).
+- **Test.** `tests/test_p09_session_end_bg.py::test_stop_runs_none_of_the_moved_steps_inline`
+  (FAILS on da31df7: the fetch, the profile rebuild, the rescan check and the evaluator all ran
+  inline), `test_stop_returns_while_a_5s_child_still_runs`,
+  `test_cached_usage_is_live_only_while_fresh`, `test_the_child_writes_no_session_end_latency_row`.
+- **Follow-up (review of #325).** The first version spawned one child on every Stop, so a
+  burst of N Stops started N concurrent keychain + HTTPS children. The spawn now takes a 15 s
+  claim (`stop_background.claim`, as status-bar's refresher): `test_a_burst_of_stops_starts_one_child`,
+  `test_the_claim_expires_after_its_window` (both fail on e5148bc). Suite tests that run
+  `main()` in-process stub the spawn. Not claimed: a Stop wall-time gain. With the live fetch
+  stubbed in both arms the moved steps cost ~10 ms (reviewer's bench, n = 20 per arm); the
+  real saving (keychain + HTTPS, 8 s timeout) is not measured, so no number is given.
 
 ## 6. Research session b9f04425 counted as organic
 
