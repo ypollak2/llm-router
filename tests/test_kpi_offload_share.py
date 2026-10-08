@@ -249,6 +249,8 @@ def test_other_kpis_are_byte_identical_to_the_pre_o3_golden():
     o3_lines = set(kpi._o3_render_lines(card["o3"]))
     full = kpi.render_scorecard(card).split("\n")
     assert o3_lines and o3_lines <= set(full)
+    # P0.14-a: the proxy ledger liveness line is new and time-dependent, so it is not in the golden.
+    full = [ln for ln in full if not ln.startswith(("proxy_rows_24h:", "WARN proxy ledger"))]
     assert "\n".join(ln for ln in full if ln not in o3_lines) == \
         (GOLDEN / "kpi_pre_o3_scorecard.txt").read_text()
     health = kpi.compute_health(card)

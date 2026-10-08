@@ -32,6 +32,11 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 20 | `build_context_messages` cut the caller's live context first | fixed in #307 (v16 P0.1) |
 | 21 | `context_prep` truncated the user prompt | fixed in #307 (v16 P0.1) |
 | P013-1 | `llm_act` wrote files into the MCP process cwd | fixed for the file tools in this change (P0.13); bash confinement is P2.9 |
+| P0.14-a | Proxy ledger wrote 0 rows for 25 h and nothing flagged it | fixed in this change (P0.14) |
+| 18 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
+| P011-1 | Haiku guard re-tripped on audit days older than its window | fixed in `feat/haiku-guard-in-repo` (P0.11, 3f4149b) |
+| GE6-1 | Quota-burn coverage kept owner-overridden sessions in the organic denominator | fixed in `feat/quota-samples` (#320, GE6 repair 1) |
+| GE6-2 | Branch hook version equal to main's after main moved on | fixed in `feat/quota-samples` (#320, GE6 repair round 1) |
 | P03-1 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
 
 ## 1. NULL `session_id` on local routing rows
@@ -539,6 +544,33 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   (read-only flag off, containment off, ReAct on the process cwd, Codex without cwd, roots
   ignored, env ignored) each turn at least one of them red.
 
+## P0.14-a. The proxy ledger wrote 0 rows for 25 hours and nothing said so
+
+- **Symptom.** `~/.llm-router/proxy_calls.jsonl` wrote 0 rows from 2026-10-07 12:47 to
+  2026-10-08 14:24 while hooks kept recording turns. `llm-router kpi` rendered "not measurable"
+  for the proxy KPIs and `doctor` printed the proxy as answering and healthy. The owner found it
+  by hand.
+- **Cause.** Every session ran from a directory whose `.claude/settings.local.json` set
+  `env.ANTHROPIC_BASE_URL` straight to `api.anthropic.com`, overriding the user-level localhost
+  proxy default. The proxy was up; no traffic reached it. `doctor` only probed the port, and `kpi`
+  had no line that compared the ledger with the turns the hooks saw.
+- **Fix.** New `llm_router/proxy_liveness.py`, read-only, used by both commands.
+  `kpi` prints `proxy_rows_24h: N (n=N ...)` with the hook turns (`auto-route` /
+  `UserPromptSubmit` rows in `hook_latency.jsonl`) and `routing_decisions` rows of the same 24 h,
+  and a `WARN` line when N is 0 and either count is above 0; `--json` carries the same fields under
+  `proxy_liveness`. A turn count that cannot be read is `null`, never 0, and no recorded turn means
+  no WARN. `doctor`, when the user settings make a localhost `ANTHROPIC_BASE_URL` the default,
+  lists every `.claude/settings.local.json` / `.claude/settings.json` under the current directory
+  (depth 3) whose value differs from it, as path plus host only (no userinfo, path or query), and
+  the silent-ledger case; both count as doctor issues. No new env key.
+- **Test.** `tests/test_proxy_ledger_liveness.py`, 11 tests, all red on 12038e46 (main) and green
+  here: zero rows plus turns warns (text and JSON; also with `routing_decisions` alone); rows
+  present, no turns, rows older than 24 h and non-turn hooks give no WARN; an override is detected
+  with path and host and without the secret; no override and a non-localhost default report nothing;
+  `doctor` prints the override and exits non-zero.
+
+## 18. Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP)
+
 ## P03-1. Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP)
 
 - **Symptom.** D-14 = A says a Q&A task type is never served by a local provider. #297 (M3.0)
@@ -566,3 +598,52 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   loads neither `router` nor `northstar`. Mutants (keep-only-local in the hook, no strip in
   `build_chain`, inverted QA check, `openai_compat` dropped, `qa_policy` importing `router`)
   each turn the file red.
+
+## P011-1. Haiku guard re-tripped on audit days older than its window
+
+- **Symptom.** After the owner deleted `~/.llm-router/tier_overrides.json` to turn the Haiku
+  rewrite back on, the next guard run wrote the override again. Two low daily audits (7/10
+  and 7/10) from weeks earlier still counted as "2 consecutive days below 8/10". Found on
+  re-verification of P0.11 at b5f88b5 (unit test, synthetic audits; no live trip happened).
+- **Cause.** `run_once` evaluated `audit_daily` on the newest audited date at any age, not on
+  the dates inside the guard's 7-day window.
+- **Fix.** `audit_daily` in `run_once` looks only at audit days on or after the window start.
+  `kpi --haiku-watch` still names its own day. `audit_batch` is unchanged (newest summary at
+  any age, as ported from the research guard).
+- **Test.** `tests/test_proxy_haiku_guard.py::test_run_once_ignores_daily_audits_older_than_the_window`:
+  red on b5f88b5 (`assert 'trip' == 'ok'`), green on 3f4149b; mutant `recent = list(days)`
+  turns it red.
+
+## GE6-1. Quota-burn coverage kept owner-overridden sessions in the organic denominator
+
+- **Symptom.** `kpi --quota-burn` coverage on a copy of `~/.llm-router` for
+  2026-10-01T10:28Z..2026-10-08T10:28Z reported 7 organic sessions; the owner's override file
+  moves 1 of those 7 to research, so the organic population is 6. Repro on a temp home:
+  sessions A and B tagged organic, both with start and stop samples, A overridden to
+  research: coverage 1/2 (rate 0.5), right answer 1/1. One overridden session a week caps
+  the GE6-a point estimate at 6/7 = 85.7%, below the 95% bar, whatever the sampling.
+- **Cause.** `quota_samples.quota_burn` (:314 at d287ef4) built the denominator from the raw
+  tag kind, `{sid for sid, k in tagged.items() if k in allowed}`, while the per-session loop
+  resolved kind through `_kind_for` (override, then tag). The overridden session counted as
+  "other kind" in the loop, so it was never covered, but stayed in the denominator.
+- **Fix.** The denominator uses `_kind_for(sid, [], tagged)`, the same resolution as the loop.
+  Rule: every count in one KPI resolves session kind through one function.
+- **Test.** `tests/test_quota_samples.py::test_coverage_denominator_applies_the_owner_override`
+  and `test_coverage_denominator_override_with_no_samples` (both red on d287ef4). Mutant:
+  restoring the raw-tag denominator fails both.
+
+## GE6-2. Branch hook version equal to main's after main moved on
+
+- **Symptom.** PR #320 changed `session-end.py` and stamped it `llm_router-hook-version: 20`
+  (main + 1 when the branch was cut). Main then reached 20 through 2020f374 (#315). Merging
+  the branch would have left session-end at 20, the same stamp as main for different code, so
+  an installed v20 could not say which of the two it was (plan v16 §5 risk 15: version =
+  main + 1).
+- **Cause.** The stamp was chosen once, at branch time, and never re-checked when
+  origin/main was merged in.
+- **Fix.** On the merge of origin/main (7d857641) both copies moved to 21. Rule: every merge
+  of origin/main into a branch that changes a hook re-checks each changed hook's stamp
+  against main's and sets it to main + 1.
+- **Check.** No test can know main's stamp at test time. The check is a command, run after
+  each merge of origin/main:
+  `for f in session-start session-end; do git show origin/main:src/llm_router/hooks/$f.py | sed -n 2p; sed -n 2p src/llm_router/hooks/$f.py; done`

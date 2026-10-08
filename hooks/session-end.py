@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 20
+# llm_router-hook-version: 21
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -2235,6 +2235,15 @@ def main() -> None:
         # Stop already rendered the summary for the last turn; SessionEnd
         # output is not shown to the user, so do not render it twice.
         return
+
+    # GE6 / S3: one quota sample (cached usage.json, no network) per Stop, i.e.
+    # per human turn, into quota_samples.jsonl. Fail-open.
+    try:
+        from llm_router import quota_samples as _quota_samples
+        if isinstance(_hook_input, dict):
+            _quota_samples.append_session_sample(_hook_input.get("session_id"), "stop")
+    except Exception:
+        pass
 
     session_start               = _read_session_start()
     paid_rows, cc_rows, free_rows = _query_session_data(session_start)
