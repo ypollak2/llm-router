@@ -390,6 +390,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_CLASSIFIER_BACKEND": ("llm_router", "local_classifier.py", 1),
     "LLM_ROUTER_DECISION_MODEL": ("llm_router", "decision_classifier.py", 1),
     "LLM_ROUTER_DECISION_ABSTAIN_BELOW": ("llm_router", "decision_classifier.py", 1),
+    # P1.7: truth labels (JSONL text_sha/session_id/truth) for kpi's "classifier shadow vs rules" line.
+    "LLM_ROUTER_SHADOW_LABELS": ("llm_router", "commands/kpi.py", 1),
     "LLM_ROUTER_ZCE_COLD_BUDGET_S": ("llm_router", "warm.py", 1),
     "LLM_ROUTER_ZCE_WARMUP": ("llm_router", "warm.py", 1),
     # ── indirect reads: DECLARED BY HAND, invisible to the AST scan ──

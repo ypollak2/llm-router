@@ -39,6 +39,7 @@ import tempfile
 import time
 from pathlib import Path
 
+os.environ.setdefault("LLM_ROUTER_SYNTHETIC", "1")  # benchmark traffic, never production spend
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
