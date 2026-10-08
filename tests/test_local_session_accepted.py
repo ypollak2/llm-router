@@ -124,6 +124,12 @@ async def _route_through_mcp(meta: dict | None) -> str:
 @pytest.fixture
 def _router_db(mock_env, temp_db, monkeypatch):
     monkeypatch.setattr("llm_router.router.is_codex_available", lambda: False)
+    # These tests send the SAME prompt through route_and_call several times and
+    # count one provider row per call. Since P0.5 the semantic cache works
+    # without Ollama (exact text + same context), so a repeat with an
+    # unchanged context is correctly served from cache and writes no row.
+    # The cache is not what these tests measure; turn it off.
+    monkeypatch.setenv("LLM_ROUTER_SEMANTIC_CACHE", "off")
     return temp_db
 
 

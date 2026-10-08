@@ -261,7 +261,7 @@ def test_g3_counts_null_as_missing_on_every_required_field():
         assert not kpi._g3_recorded({}, f, presence_only=presence_only), f
 
 
-# ── replay renders NULL as unknown (BUGS.md 21) ──────────────────────────────
+# ── replay renders NULL as unknown (BUGS.md 22) ──────────────────────────────
 
 
 def test_replay_renders_null_confidence_and_task_type_as_unknown():
@@ -361,7 +361,7 @@ def test_northstar_cli_shows_the_strict_rule_as_the_north_star(monkeypatch, caps
     assert data["aggregate"]["median"] == pytest.approx(1.0)
 
 
-# ── NULL task type in the claw-code Stop hook and the dashboard (BUGS.md 24) ──
+# ── NULL task type in the claw-code Stop hook and the dashboard (BUGS.md 25) ──
 
 def _seed_usage(db: Path, rows: list[tuple]) -> None:
     """A minimal ``usage`` table with rows stamped now (UTC), as the readers query it."""
