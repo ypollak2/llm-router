@@ -57,6 +57,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | P09-7 | Statusline timing rows carried no session id, and needed a python3 that imports llm_router | fixed in `perf/hook-budgets` (P0.9 repair 1) |
 | P09-8 | The statusline "wrapper adds < 5 ms" test failed under load | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
 | P09-9 | A session id named by one test leaked onto latency rows of later tests | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
+| CI-1 | `test_verify_unit` copytree of a fresh git repo raced git auto-maintenance (`maintenance.lock`) | fixed in this change (test-only; production unaffected) |
 | P03-1 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
 
 ## 1. NULL `session_id` on local routing rows
@@ -1165,3 +1166,20 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   id before and after each test, without importing the module when no test did.
 - **Test.** The two-file command above: 1 failed before, 34 passed after. Removing the
   fixture turns it red again.
+
+## CI-1. `copytree` of a fixture repo raced git's background maintenance
+
+- **Symptom.** `tests/test_verify_unit.py::test_unproven_sandbox_is_unavailable_never_pass` failed on CI
+  Python 3.11 (PR #328 run 37811026623, and PR #287) with
+  `shutil.Error: [('.../broken/.git/objects/maintenance.lock', ...` raised by `_patch`'s `copytree`.
+- **Cause.** The fixture `_init` runs `git commit`; with auto-maintenance on, commit spawns a detached
+  `git maintenance run --auto` that creates and removes `.git/objects/maintenance.lock` and repacks
+  loose objects while the test copies `.git`. Reproduced locally with 4 parallel stress processes
+  (400 extra files, hostile global config `gc.auto=1`, `maintenance.auto=true`): 110 copytree races
+  in 240 repos (27, 28, 27, 28 of 60). Production is not affected: `sandbox.create_workspace` skips
+  `.git` and copies file by file, and `verify_unit`'s `model-baseline` copytree reads that `.git`-free baseline.
+- **Fix (test only).** `GIT` in `tests/test_verify_unit.py` passes `-c gc.auto=0 -c maintenance.auto=false`,
+  so no background child exists. A `*.lock` ignore was rejected: it hides one file while the child still
+  rewrites `objects/*` mid-copy (the stress run also failed on object directories).
+- **Test.** `tests/test_git_fixture_race.py` traces git's process starts under the hostile config: 1 failed
+  without the fix (maintenance child seen), passes with it. It also asserts the trace saw the commit.
