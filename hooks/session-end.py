@@ -2613,7 +2613,7 @@ def main() -> None:
     except Exception:
         pass  # Graceful failure — never break session-end
 
-    # ── NS1: North Star line (routed-and-used share, this session) ───────────
+    # ── NS1: North Star line (strict verified share, this session) ───────────
     # PR #178 changes this box's savings text and another PR retitles it to
     # estimate-only; this block only APPENDS its own item, same pattern as the
     # routing-efficiency block above, so those two land without touching this.

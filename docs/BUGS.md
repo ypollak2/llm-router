@@ -30,6 +30,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 18 | `llm-router replay` raises TypeError on a row with NULL confidence | fixed in this change (v16 P0.8) |
 | 19 | The quality report and the Stop summary raise TypeError on a NULL task type | fixed in this change (v16 P0.8) |
 | 20 | `llm-router northstar` showed the heuristic share as the North Star | fixed in this change (v16 P0.8) |
+| 21 | The claw-code Stop hook and the dashboard models panel raise TypeError on a NULL task type | fixed in this change (v16 P0.8 r1) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -415,7 +416,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   (session-end hook version 19; 20 after main's #307 took 19). Other `GROUP BY task_type` readers checked: community.py
   filters `task_type IS NOT NULL`; dashboard/tui.py, dashboard/server.py (JS `|| '?'`),
   session-end `_query_savings_by_task_type` and the `commands/northstar` dry run already map
-  None.
+  None. That sweep missed two readers; see bug 21.
 - **Rule.** A column that P0.8 may leave NULL is rendered with `value or "unknown"`, never
   `get(key, "unknown")` and never a bare format spec.
 - **Test.** `test_quality_report_renders_null_task_type_as_unknown`,
@@ -433,3 +434,23 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   keep their meaning.
 - **Test.** `test_northstar_cli_shows_the_strict_rule_as_the_north_star` (50 heuristic-used
   units, 10 strict: shows 20%, was 100%), `test_report_schema_is_pinned`.
+
+## 21. The claw-code Stop hook and the dashboard models panel raise TypeError on a NULL task type
+
+- **Symptom.** `hooks/session-end-clawcode.py` (installed as a Stop hook, `install_hooks.py`)
+  exited 1 with `TypeError: unsupported format string passed to NoneType.__format__` when the
+  session had a paid `usage` row with a NULL task type. The #310 reviewer reproduced it on an
+  rsync copy of `~/.llm-router` with 3 seeded paid DIRECT rows of unknown task type (3 of 3
+  NULL): exit 1 and a traceback. `dashboard_enhanced.query_last_prompt_calls` returned the
+  NULL as None, and `cyber_grid._build_models_panel` formats it with `{c['task_type']:<10}`.
+- **Cause.** Bug 19's reader sweep checked `GROUP BY task_type` readers and the main
+  `session-end.py`, but not its claw-code sibling, which still read `r.get("task_type",
+  "unknown")` and formatted it with `{tool:<12}`, nor row-level readers of `usage`.
+- **Fix.** Both use `value or "unknown"` (claw-code hook version 3). A second sweep
+  (`get("task_type", ...)`, `["task_type"]` and every `SELECT ... task_type` under `src/` and
+  `hooks/`) found no other reader of `usage` or `routing_decisions` that raises on a NULL;
+  `commands/verify.py` prints one as `None` (cosmetic, not changed here).
+- **Rule.** A reader sweep greps for the column name across every hook copy and variant
+  (`*-clawcode.py`, `hooks/` and `src/llm_router/hooks/`), not only for `GROUP BY`.
+- **Test.** `test_clawcode_stop_hook_renders_null_task_type` (runs `main()` on a seeded
+  `usage.db`), `test_dashboard_last_prompt_calls_render_null_task_type`. Both fail on 15a1398e.

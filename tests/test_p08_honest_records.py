@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import io
 import json
 import sqlite3
 import sys
@@ -260,7 +261,7 @@ def test_g3_counts_null_as_missing_on_every_required_field():
         assert not kpi._g3_recorded({}, f, presence_only=presence_only), f
 
 
-# ── replay renders NULL as unknown (BUGS.md 15) ──────────────────────────────
+# ── replay renders NULL as unknown (BUGS.md 18) ──────────────────────────────
 
 
 def test_replay_renders_null_confidence_and_task_type_as_unknown():
@@ -358,3 +359,69 @@ def test_northstar_cli_shows_the_strict_rule_as_the_north_star(monkeypatch, caps
     data = northstar.report(days=7)
     assert data["aggregate"]["strict_median"] == pytest.approx(0.2)
     assert data["aggregate"]["median"] == pytest.approx(1.0)
+
+
+# ── NULL task type in the claw-code Stop hook and the dashboard (BUGS.md 21) ──
+
+def _seed_usage(db: Path, rows: list[tuple]) -> None:
+    """A minimal ``usage`` table with rows stamped now (UTC), as the readers query it."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    con = sqlite3.connect(str(db))
+    con.execute("CREATE TABLE usage (id INTEGER PRIMARY KEY, timestamp TEXT, success INTEGER, "
+                "task_type TEXT, model TEXT, provider TEXT, input_tokens INTEGER, "
+                "output_tokens INTEGER, cost_usd REAL)")
+    con.executemany("INSERT INTO usage (timestamp, success, task_type, model, provider, "
+                    "input_tokens, output_tokens, cost_usd) VALUES (?, 1, ?, ?, ?, ?, ?, ?)",
+                    [(now, *r) for r in rows])
+    con.commit()
+    con.close()
+
+
+def test_clawcode_stop_hook_renders_null_task_type(tmp_path, monkeypatch, capsys):
+    """``session-end-clawcode.py`` read ``r.get("task_type", "unknown")`` and formatted it
+    with ``{tool:<12}``: a paid row with a NULL task type made the Stop hook exit 1."""
+    import time
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(home))
+    (home / "session_start.txt").write_text(str(time.time() - 600))
+    _seed_usage(home / "usage.db", [
+        (None, "openai/gpt-4o", "openai", 100, 50, 0.01),
+        (None, "openai/gpt-4o", "openai", 100, 50, 0.01),
+        ("code", "openai/gpt-4o", "openai", 100, 50, 0.01),
+    ])
+    hook = _load_hook("session-end-clawcode.py", "_p08_session_end_clawcode")
+
+    paid, _free = hook._query_session_data(hook._read_session_start())
+    assert sum(r["task_type"] is None for r in paid) == 2  # the check sees the NULL rows
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
+    hook.main()  # raised TypeError before the fix
+    summary = json.loads(capsys.readouterr().out)["systemMessage"]
+    assert "  unknown " in summary and "  code " in summary
+    assert "None" not in summary
+
+
+def test_dashboard_last_prompt_calls_render_null_task_type(tmp_path):
+    """``query_last_prompt_calls`` passed a NULL ``usage.task_type`` through as None, and
+    the cyber-grid models panel formats it with ``{c['task_type']:<10}``."""
+    from rich.console import Console
+
+    from llm_router.hooks import cyber_grid
+    from llm_router.hooks.dashboard_enhanced import query_last_prompt_calls
+
+    db = tmp_path / "usage.db"
+    _seed_usage(db, [(None, "openai/gpt-4o", "openai", 100, 50, 0.01)])
+
+    calls = query_last_prompt_calls(db_path=db)
+    assert [c["task_type"] for c in calls] == ["unknown"]
+
+    panel = cyber_grid._build_models_panel({"db_path": str(db)})
+    assert panel is not None
+    console = Console(width=100, record=True, file=io.StringIO())
+    console.print(panel)
+    text = console.export_text()
+    assert "unknown" in text and "None" not in text
