@@ -220,6 +220,36 @@ def test_an_existing_loose_file_is_tightened_on_the_next_write(tmp_path, monkeyp
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+def test_the_state_dir_is_0700_created_and_tightened(tmp_path, monkeypatch):
+    monkeypatch.setenv(st.ENV, "1")
+    old = os.umask(0o000)
+    try:
+        fresh = tmp_path / "fresh" / "state"
+        assert _record(fresh / SIDE, "dir check") == st.WRITTEN
+        assert stat.S_IMODE(fresh.stat().st_mode) == 0o700
+        loose = tmp_path / "loose"
+        loose.mkdir()
+        loose.chmod(0o755)
+        assert _record(loose / SIDE, "dir check two") == st.WRITTEN
+        assert stat.S_IMODE(loose.stat().st_mode) == 0o700
+    finally:
+        os.umask(old)
+
+
+def test_the_lock_file_is_0600_created_and_tightened(tmp_path, monkeypatch):
+    monkeypatch.setenv(st.ENV, "1")
+    lock = tmp_path / (SIDE + st.LOCK_SUFFIX)
+    old = os.umask(0o000)
+    try:
+        assert _record(tmp_path / SIDE, "lock check") == st.WRITTEN
+        assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+        lock.chmod(0o644)
+        assert _record(tmp_path / SIDE, "lock check two") == st.WRITTEN
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+
+
 # --- banners ----------------------------------------------------------------------------------
 
 BANNERS = [

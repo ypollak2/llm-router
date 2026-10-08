@@ -184,9 +184,13 @@ def maybe_record(path: Path, body: dict, context: str, fields: dict) -> str:
     entry = {"text_sha": text_sha, "session_id": session_id, "ts": ts,
              "context": scrub(context), "prompt": scrub(_store(prompt))}
     line = json.dumps(entry, ensure_ascii=False) + "\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        os.chmod(path.parent, 0o700)  # an older, looser state dir is tightened like the file is
     lock_fd = os.open(str(path) + LOCK_SUFFIX, os.O_WRONLY | os.O_CREAT, 0o600)
     try:
+        with contextlib.suppress(OSError):
+            os.fchmod(lock_fd, 0o600)
         if fcntl is not None:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
