@@ -127,6 +127,12 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   copy of `hook_latency.jsonl` + `.1` (2026-10-04T22:07Z to 2026-10-07T14:47Z, same 65 rows),
   28 rows fell in one burst (2026-10-06 05:07-05:08Z, 4.6-17.4 s). The other 37 read
   138 ms-11.3 s: 11 of them over 2 s, p95 11,045 ms. So the tail is not only the burst.
+  **Correction (P0.9 task 7 re-count, PLAN §1.4 rule 5 episodes = rows over the bar split by
+  gaps >= 60 s).** 10 of those 11 ran 2026-10-06 05:06:49-05:06:57Z, seconds before the 05:07
+  minute, so they belong to the same burst. Same copy, 66 rows to 2026-10-08T11:02Z: 39 over
+  2 s, 38 in one episode (05:06:49-05:08:04Z, share 0.974); outside it 1 of 28 rows is over
+  2 s and p95 is 723 ms. The tail before the fix was essentially the one burst
+  (`$PP/v16/p09/baseline_predeploy_20261008T1102Z.json`).
 - **Cause.** `main()` ran `start-ollama.sh` (waits up to 10 s), `ollama list`, a seats
   re-detect (2 s budget), two usage.db queries, an Ollama co-residency probe, the pxpipe sync,
   a `git` check for the OKF index and five process spawns before returning. Under a burst of
