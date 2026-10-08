@@ -430,6 +430,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "VAULT_TOKEN": ("provider_credential", "org_policy.py", 1),
     # ── external_tool  (20) ──
     "CLAUDE_CODE_PATH": ("external_tool", "claude_agent.py", 1),
+    # P0.13: the project root llm_act may write in, when the MCP client sends no roots.
+    "CLAUDE_PROJECT_DIR": ("external_tool", "tools/agentic.py", 1),
     "CLAUDE_CODE_SESSION_ID": ("external_tool", "hooks/agent-depth-release.py", 3),
     # 2026-09-28: Claude Code's own headless-vs-interactive signal ("cli" for an
     # interactive session, "sdk-cli"/"sdk-py" for `-p`/SDK callers). Verified
