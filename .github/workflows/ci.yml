@@ -81,6 +81,19 @@ jobs:
       - name: Verify plugin distribution sync
         run: python scripts/ci/verify-plugin-sync.py
 
+  bugs-check:
+    # BUGS-1: bug entries are files (docs/bugs/<id>.md); this fails on a duplicate
+    # id, a missing Symptom/Cause/Fix/Test heading, an unresolved `BUGS.md <id>`
+    # reference in src/ or tests/, or a docs/BUGS.md that grew a table again.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check bug entries
+        run: |
+          python3 scripts/bugs_index.py --check
+          python3 scripts/bugs_index.py --write "$RUNNER_TEMP/bugs-index.md"
+          python3 scripts/bugs_index.py --check --index "$RUNNER_TEMP/bugs-index.md"
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
