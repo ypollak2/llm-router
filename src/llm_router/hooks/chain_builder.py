@@ -185,7 +185,20 @@ _GEMINI_PRO = ModelSpec("gemini", "gemini-2.0-pro")
 _GPT4O_MINI = ModelSpec("openai", "gpt-4o-mini")
 _GPT4O = ModelSpec("openai", "gpt-4o")
 _CLAUDE_SONNET = ModelSpec("claude", "claude-sonnet-4-6", quota_cost=1.0)
-_CLAUDE_OPUS = ModelSpec("claude", "claude-opus-4-6", quota_cost=3.0)
+
+
+def _claude_opus() -> ModelSpec:
+    """Opus spec from the proxy's opus tier, never a literal (plan v16 P0.2).
+
+    Resolved on use, not at import: the policy load costs tens of ms and most
+    hook paths never build a complex chain. "opus" is Claude Code's alias.
+    """
+    try:
+        from llm_router.proxy.tiers import tier_model
+        model = tier_model("opus") or "opus"
+    except ImportError:
+        model = "opus"
+    return ModelSpec("claude", model, quota_cost=3.0)
 
 
 def build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:
@@ -253,10 +266,10 @@ def build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:
     if complexity in ("complex", "deep_reasoning"):
         if zone == "green":
             # Plenty of quota — Claude Opus leads for max quality
-            return [_CLAUDE_OPUS] + mid_externals + ([] if high_risk else ollama)
+            return [_claude_opus()] + mid_externals + ([] if high_risk else ollama)
         elif zone == "yellow":
             # Comfortable — mid-tier externals lead, Claude Opus as premium fallback
-            return mid_externals + ([] if high_risk else ollama) + [_CLAUDE_OPUS]
+            return mid_externals + ([] if high_risk else ollama) + [_claude_opus()]
         elif zone == "orange":
             # Getting tight — mid-tier externals lead, Claude Sonnet as last resort
             return mid_externals + ([] if high_risk else ollama) + [_CLAUDE_SONNET]

@@ -43,6 +43,7 @@ bash scripts/<bucket>/<script>.sh
 | `benchmark_routing_decision.py` | Micro-benchmark of the routing-decision path, for before/after comparisons. |
 | `update_benchmarks.py` | Regenerates `docs/BENCHMARKS.md` from `src/llm_router/data/benchmarks.json`. Run by `.github/workflows/benchmarks.yml`. |
 | `eval_classifier.py` | Scores the prompt classifier against a labelled set. |
+| `m18_r3.py` | M1.8 round-3 runner for the decision-model backend (`collect` / `analyze`, tune split only). Needs the external eval harness: set `PP` to its directory. Tests: `tests/test_m18_r3.py` (skipped when `PP` is unset). |
 | `routerarena/` | RouterArena submission tooling — `build_submission.py`, `build_robustness.py`, `convert_to_jsonl.py`, `run_sub10_openrouter.py`. See [`submissions/routerarena/README.md`](../submissions/routerarena/README.md). |
 
 ## `dev/` — local development and demos
