@@ -800,7 +800,7 @@ def build_session_context(
     API such as ``openai``/``gemini``). Keeps the 3 newest events
     unconditionally plus any older event matching *task_type* or sharing a
     keyword with *query*, formats them, dedupes repeated blocks, and
-    truncates to *max_tokens*. Fails open to ``""``.
+    truncates to *max_tokens*, keeping the newest events. Fails open to ``""``.
     """
     try:
         mode = get_mode()
@@ -848,7 +848,9 @@ def build_session_context(
             return ""
 
         text = dedup_sections(text)
-        text = truncate_to_budget(text, max_tokens)
+        # Records are oldest -> newest, so keep the tail: the newest event is the
+        # one a routed model most needs (P0.1; head-keeping dropped it first).
+        text = truncate_to_budget(text, max_tokens, keep="tail")
         if not text.strip():
             return ""
 
