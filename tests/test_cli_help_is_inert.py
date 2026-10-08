@@ -47,6 +47,25 @@ def _nested() -> list[str]:
 _CASES = _dispatched() + _nested()
 
 
+def test_policy_is_among_the_checked_cases():
+    assert "policy" in _CASES and "policy" in cli._OWN_HELP_ANYWHERE
+
+
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_policy_help_creates_no_state_dir_and_shows_its_own_usage(flag, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    r = subprocess.run(
+        [sys.executable, "-m", "llm_router.cli", "policy", flag],
+        cwd=tmp_path, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=25,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(home), "NO_COLOR": "1", "TERM": "dumb",
+             "PYTHONPATH": str(_REPO / "src")},
+    )
+    assert r.returncode == 0, r.stderr[-800:]
+    assert "diff <policy_a>" in r.stdout, r.stdout
+    assert sorted(p.name for p in home.iterdir()) == [], "policy help created state under HOME"
+
+
 def test_the_cases_cover_every_subcommand():
     """An empty or short list would pass everything below."""
     assert len(_dispatched()) >= 60, _dispatched()
@@ -69,8 +88,11 @@ def _seed(base: Path) -> tuple[Path, Path]:
 
 
 def _snapshot(base: Path) -> dict[str, str]:
-    return {str(p.relative_to(base)): hashlib.sha256(p.read_bytes()).hexdigest()
-            for p in sorted(base.rglob("*")) if p.is_file()}
+    """Every file by content hash AND every directory: `policy --help` left only an
+    empty ~/.llm-router/policies, which a files-only snapshot cannot see."""
+    return {str(p.relative_to(base)) + ("/" if p.is_dir() else ""):
+            "dir" if p.is_dir() else hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(base.rglob("*")) if p.is_dir() or p.is_file()}
 
 
 @pytest.mark.parametrize("flag", ["--help", "-h"])
