@@ -437,7 +437,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "OPENROUTER_API_KEY": ("provider_credential", "commands/doctor.py", 1),
     "PERPLEXITY_API_KEY": ("provider_credential", "commands/demo.py", 1),
     "VAULT_TOKEN": ("provider_credential", "org_policy.py", 1),
-    # ── external_tool  (20) ──
+    # ── external_tool  (21) ──
     "CLAUDE_CODE_PATH": ("external_tool", "claude_agent.py", 1),
     # P0.13: the project root llm_act may write in, when the MCP client sends no roots.
     "CLAUDE_PROJECT_DIR": ("external_tool", "tools/agentic.py", 1),
@@ -469,6 +469,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "PORT": ("external_tool", "server.py", 1),
     "RESPONSE": ("external_tool", "hooks/response-router.py", 1),
     "VAULT_ADDR": ("external_tool", "org_policy.py", 1),
+    "ANTHROPIC_BASE_URL": ("external_tool", "hooks/session-start.py", 1),
     "_SESSION_BUDGET_WARNING": ("external_tool", "hooks/enforce-route.py", 1),
     # ── platform  (4) ──
     "APPDATA": ("platform", "commands/doctor.py", 4),
