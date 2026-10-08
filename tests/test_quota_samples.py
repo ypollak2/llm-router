@@ -441,23 +441,82 @@ def _load(name: str, mod_name: str):
     return mod
 
 
-def test_session_start_hook_appends_a_start_sample(home, monkeypatch):
+#: The P0.9 child's steps (tests/test_p09_session_start_bg.py MOVED).
+_CHILD_STEPS = ("_ensure_ollama_running", "_ensure_pxpipe_running", "_sync_pxpipe_anthropic_base_url",
+                "_seats_hint", "_format_learned_memory", "_weekly_digest", "_latency_hint",
+                "_preflight_check", "_ollama_contention_hint", "_ollama_watchdog_hint",
+                "_maybe_refresh_benchmarks_bg", "_maybe_reindex_okf_bg", "_warm_edit_model_bg",
+                "_warm_ollama_bg", "_drain_judge_queue_bg", "_ollama_watchdog_bg",
+                "_maybe_update_pull_routing_rules")
+
+
+def _session_start(monkeypatch):
     mod = _load("session-start.py", "ss_quota_samples")
-    for fn in ("_ensure_ollama_running", "_ensure_pxpipe_running", "_sync_pxpipe_anthropic_base_url",
-               "_refresh_claude_usage", "_format_learned_memory", "_weekly_digest", "_latency_hint",
-               "_preflight_check"):
-        if hasattr(mod, fn):
-            monkeypatch.setattr(mod, fn, lambda: "")
-    for fn in ("_maybe_refresh_benchmarks_bg", "_warm_ollama_bg", "_maybe_update_pull_routing_rules",
-               "_spawn_background_usage_refresh"):
-        if hasattr(mod, fn):
-            monkeypatch.setattr(mod, fn, lambda: None)
-    calls = []
+    monkeypatch.setattr(mod, "_refresh_claude_usage_nonblocking", lambda: "")
+    monkeypatch.setattr(mod, "_check_proxy_default_health", lambda: "")
+    return mod
+
+
+def test_session_start_main_samples_nothing_inline_and_hands_the_session_to_the_child(home, monkeypatch):
+    """GE6 task 1: the start sample is taken inside the P0.9 background child,
+    so main() passes the Claude Code session id to that child and writes nothing."""
+    mod = _session_start(monkeypatch)
+    calls, spawned = [], []
     monkeypatch.setattr(qs, "append_session_sample", lambda sid, kind, **k: calls.append((sid, kind)))
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"session_id": "cc-sess-1"})))
+    monkeypatch.setattr(mod, "_spawn_background_session_work",
+                        lambda cwd, session_id="": spawned.append((cwd, session_id)))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"session_id": "cc-sess-1", "cwd": "/tmp/p"})))
     monkeypatch.setattr(sys, "stdout", io.StringIO())
     mod.main()
-    assert calls == [("cc-sess-1", "start")]
+    assert calls == [], "main() took the quota sample inline"
+    assert spawned == [("/tmp/p", "cc-sess-1")]
+
+
+def test_the_background_child_takes_the_start_sample_before_any_slow_step(home, monkeypatch):
+    mod = _session_start(monkeypatch)
+    order = []
+    for name in _CHILD_STEPS:
+        monkeypatch.setattr(mod, name, (lambda n: lambda *a, **k: order.append(n) or "")(name))
+    monkeypatch.setattr(qs, "append_session_sample",
+                        lambda sid, kind, **k: order.append(("sample", sid, kind)))
+    mod._run_background_session_work("/tmp/p", "cc-sess-1")
+    assert order[0] == ("sample", "cc-sess-1", "start"), order[:3]
+    assert [o for o in order if isinstance(o, tuple)] == [("sample", "cc-sess-1", "start")]
+    assert set(_CHILD_STEPS) <= set(order), "a P0.9 step was skipped"
+
+
+def test_a_failing_start_sample_does_not_skip_the_child_steps(home, monkeypatch):
+    mod = _session_start(monkeypatch)
+    ran = []
+    for name in _CHILD_STEPS:
+        monkeypatch.setattr(mod, name, (lambda n: lambda *a, **k: ran.append(n) or "")(name))
+
+    def boom(*a, **k):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(qs, "append_session_sample", boom)
+    mod._run_background_session_work("/tmp/p", "cc-sess-1")
+    assert set(_CHILD_STEPS) <= set(ran)
+
+
+def test_the_child_argv_and_entry_carry_the_session_id(home, monkeypatch):
+    mod = _session_start(monkeypatch)
+    argv = mod._background_session_work_argv("/tmp/p", "cc-sess-1")
+    assert argv[-3:] == ["--background-session-work", "/tmp/p", "cc-sess-1"]
+    got = []
+    monkeypatch.setattr(mod, "_run_background_session_work", lambda cwd, session_id="": got.append((cwd, session_id)))
+    monkeypatch.setenv("LLM_ROUTER_HOOK_LATENCY", "on")  # _entry turns it off; monkeypatch restores it
+    mod._entry(argv[-3:])
+    mod._entry(["--background-session-work", "/tmp/q"])  # an older spawn without the id
+    assert got == [("/tmp/p", "cc-sess-1"), ("/tmp/q", "")]
+
+
+def test_the_child_without_a_session_id_writes_no_sample(home, monkeypatch):
+    mod = _session_start(monkeypatch)
+    for name in _CHILD_STEPS:
+        monkeypatch.setattr(mod, name, lambda *a, **k: "")
+    mod._run_background_session_work("/tmp/p", "")
+    assert not (home / qs.SAMPLES_NAME).exists()
 
 
 def test_session_end_hook_appends_a_stop_sample(home, monkeypatch):
@@ -468,3 +527,15 @@ def test_session_end_hook_appends_a_stop_sample(home, monkeypatch):
     monkeypatch.setattr(sys, "stdout", io.StringIO())
     mod.main()
     assert calls == [("cc-sess-1", "stop")]
+
+
+def test_session_end_event_writes_no_stop_sample(home, monkeypatch):
+    """SessionEnd only archives; one Stop sample per human turn, not one more at exit."""
+    mod = _load("session-end.py", "se_quota_samples_end")
+    calls = []
+    monkeypatch.setattr(qs, "append_session_sample", lambda sid, kind, **k: calls.append((sid, kind)))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(
+        {"session_id": "cc-sess-1", "hook_event_name": "SessionEnd"})))
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    mod.main()
+    assert calls == []
