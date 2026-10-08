@@ -89,7 +89,14 @@ def _depth_file(session_id: str) -> Path:
     return _router_home() / f"agent_depth_{safe}.json"
 
 
-_LOCK_WAIT_S = 0.25  # hook latency budget; on timeout log and fail open (unlocked)
+def _lock_wait_s() -> float:
+    """Seconds to wait for the state lock (default 0.25, inside the 300 ms hook budget)."""
+    try:
+        return max(0.0, float(os.environ.get("LLM_ROUTER_BREAKER_LOCK_WAIT_S", "0.25")))
+    except ValueError:
+        return 0.25
+
+
 
 
 def _lock(depth_file: Path):
@@ -99,7 +106,7 @@ def _lock(depth_file: Path):
         import fcntl
         fd = os.open(f"{depth_file}.lock", os.O_RDWR | os.O_CREAT, 0o600)
         fh = os.fdopen(fd, "a+")
-        deadline = time.monotonic() + _LOCK_WAIT_S
+        deadline = time.monotonic() + _lock_wait_s()
         while True:
             try:
                 fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -177,6 +177,14 @@ def _pressure_status(p: dict[str, float]) -> str:
     return "LOW"
 
 
+def _lock_wait_s() -> float:
+    """Seconds to wait for the state lock (default 0.25, inside the 300 ms hook budget)."""
+    try:
+        return max(0.0, float(os.environ.get("LLM_ROUTER_BREAKER_LOCK_WAIT_S", "0.25")))
+    except ValueError:
+        return 0.25
+
+
 def _claim_nesting_depth(payload: dict) -> None:
     """Register this new agent's nesting depth for agent-route.py's breaker.
 
@@ -203,7 +211,7 @@ def _claim_nesting_depth(payload: dict) -> None:
         try:
             import fcntl
             lock_fh = open(os.open(f"{path}.lock", os.O_RDWR | os.O_CREAT, 0o600), "a+")
-            deadline = time.monotonic() + 0.25  # hook latency budget, then fail open
+            deadline = time.monotonic() + _lock_wait_s()  # default 0.25 s, then fail open
             while True:
                 try:
                     fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)

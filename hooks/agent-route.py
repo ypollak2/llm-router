@@ -383,14 +383,21 @@ def _write_state(session_id: str, state: dict) -> None:
         raise
 
 
-_LOCK_WAIT_S = 0.25  # hook latency budget: wait this long for the state lock, then fail open
+def _lock_wait_s() -> float:
+    """Seconds to wait for the state lock (default 0.25, inside the 300 ms hook budget)."""
+    try:
+        return max(0.0, float(os.environ.get("LLM_ROUTER_BREAKER_LOCK_WAIT_S", "0.25")))
+    except ValueError:
+        return 0.25
+
+
 
 
 @contextlib.contextmanager
 def _state_lock(session_id: str):
     """Exclusive flock on a sidecar lock file (the state file's inode changes on replace).
 
-    Polls non-blocking for at most _LOCK_WAIT_S. On any failure to lock it logs to
+    Polls non-blocking for at most _lock_wait_s() (default 0.25 s, the hook latency budget). On any failure to lock it logs to
     stderr and yields anyway: the breaker fails open (the pre-lock behaviour)
     rather than stalling a spawn.
     """
@@ -401,7 +408,7 @@ def _state_lock(session_id: str):
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(f"{path}.lock", os.O_RDWR | os.O_CREAT, 0o600)
         fh = os.fdopen(fd, "a+")
-        deadline = time.monotonic() + _LOCK_WAIT_S
+        deadline = time.monotonic() + _lock_wait_s()
         while True:
             try:
                 fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)

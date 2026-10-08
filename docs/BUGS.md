@@ -779,7 +779,7 @@ Review findings on #334 (AB-1), each reproduced before it was fixed.
     Drop is by token. Readers accept entries of 2 or more fields.
   - All three writers do a locked read-modify-write: `fcntl.flock` on a sidecar
     `agent_depth_<session>.json.lock`, polled non-blocking for at most 0.25 s (the hooks' 300 ms
-    budget), then atomic replace (tmp + `os.replace`, mode 0600). On lock failure the hook logs
+    budget; `LLM_ROUTER_BREAKER_LOCK_WAIT_S` overrides it, the contention tests set 10 for 2-vCPU CI), then atomic replace (tmp + `os.replace`, mode 0600). On lock failure the hook logs
     to stderr and proceeds unlocked, as before: it fails open and never stalls a spawn.
     The in-flight count changes by delta inside the lock, not by absolute value.
   - Every exit that spawns nothing (Codex, direct, CLI delegation, both budget blocks, the final

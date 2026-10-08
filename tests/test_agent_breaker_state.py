@@ -30,7 +30,10 @@ RETRIEVAL = "list all files in src/"  # approved without routing: a real spawn
 def _env(tmp_path: Path, **extra: str) -> dict[str, str]:
     env = {**os.environ, "HOME": str(tmp_path), "LLM_ROUTER_HOME": str(tmp_path / ".llm-router"),
            "LLM_ROUTER_SUBAGENT_DIRECT": "off", "LLM_ROUTER_AGENT_ROUTE_CODEX": "off",
-           "LLM_ROUTER_SUBAGENT_MODEL_PIN": "off", "CLAUDE_CODE_SESSION_ID": "sess", **extra}
+           "LLM_ROUTER_SUBAGENT_MODEL_PIN": "off", "CLAUDE_CODE_SESSION_ID": "sess",
+           # CI runners have 2 vCPUs: give the lock a long wait so a stalled holder cannot
+           # turn a contention test into a fail-open one (production default is 0.25 s).
+           "LLM_ROUTER_BREAKER_LOCK_WAIT_S": "10", **extra}
     env.pop("CLAUDE_CODE_ENTRYPOINT", None)
     (tmp_path / ".llm-router").mkdir(parents=True, exist_ok=True)
     return env
@@ -154,7 +157,7 @@ def test_lock_unavailable_fails_open_and_logs(tmp_path):
     fcntl.flock(lock, fcntl.LOCK_EX)  # someone else holds the lock for the whole run
     try:
         t0 = time.monotonic()
-        p = _spawn(ROUTE, tmp_path, _pre(1))
+        p = _spawn(ROUTE, tmp_path, _pre(1), LLM_ROUTER_BREAKER_LOCK_WAIT_S="0.25")
         out, err = p.communicate(json.dumps(_pre(1)), timeout=60)
         assert p.returncode == 0 and "decision" not in out  # spawn approved, not stalled/blocked
         assert "lock unavailable" in err
