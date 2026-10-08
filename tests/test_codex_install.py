@@ -298,6 +298,61 @@ def test_legacy_uninstall_reports_orphans_it_could_not_remove(home):
     assert _toml(home) == _UNREMOVABLE
 
 
+# CODEX-2: a nested array line inside our table reads as a header to the
+# line-based cut, so the cut output does not parse. Only the tomllib re-parse
+# catches it; without it the corrupt text was written under a "✓ Removed".
+_NESTED_ARRAY = '[a]\nk = 1\n\n[mcp_servers.llm_router.tools.x]\nw = [\n[1, 2]\n]\n'
+
+
+def test_orphan_cleanup_refuses_an_edit_that_would_not_parse(home):
+    import tomllib
+    tomllib.loads(_NESTED_ARRAY)                      # valid before
+    assert codex_host.has_orphan_mcp_tables(_NESTED_ARRAY)
+    text, actions = install._clear_codex_orphan_tables(_NESTED_ARRAY, "config.toml")
+    assert text == _NESTED_ARRAY
+    assert len(actions) == 1 and actions[0].startswith("⚠") and "by hand" in actions[0], actions
+
+
+def test_legacy_uninstall_leaves_a_nested_array_table_unchanged(home):
+    codex = home / ".codex"
+    codex.mkdir()
+    (codex / "config.toml").write_text(_NESTED_ARRAY)
+    actions = install.uninstall_host_integrations()
+    assert _toml(home) == _NESTED_ARRAY
+    assert not any("✓ Removed orphaned" in a for a in actions), actions
+    assert any(a.startswith("⚠") and "by hand" in a for a in actions), actions
+
+
+def test_manifest_replay_refuses_a_cut_that_would_not_parse(home):
+    """CODEX-2: manifest replay of [mcp_servers.llm_router] wrote the cut
+    unchecked and printed ✓. Same nested-array input, server table this time."""
+    import tomllib
+    install._install_codex_files()
+    cfg = home / ".codex" / "config.toml"
+    header = f"[{codex_host.MCP_TABLE}]\n"
+    cfg.write_text(cfg.read_text().replace(header, header + "w = [\n[1, 2]\n]\n", 1))
+    tomllib.loads(_toml(home))
+    actions = install_manifest.apply_uninstall()
+    after = _toml(home)
+    tomllib.loads(after)                              # never left corrupt
+    assert codex_host.read_mcp_server(after)["w"] == [[1, 2]]
+    assert not any(f"✓ Removed [{codex_host.MCP_TABLE}]" in a for a in actions), actions
+    assert any(a.startswith(f"⚠ [{codex_host.MCP_TABLE}] left in") and "by hand" in a for a in actions), actions
+
+
+def test_manifest_replay_reports_a_multiline_dotted_key_it_left(home):
+    """The recorded server rewritten in dotted form, args spanning lines: the cut
+    takes `command` and leaves `args`, a server with no transport. Refuse it."""
+    install._install_codex_files()
+    cfg = home / ".codex" / "config.toml"
+    rewritten = '[mcp_servers]\nllm_router.command = "/opt/llm/bin/llm-router"\nllm_router.args = [\n  "x",\n]\n'
+    cfg.write_text(rewritten)
+    actions = install_manifest.apply_uninstall()
+    assert _toml(home) == rewritten
+    assert any(a.startswith(f"⚠ [{codex_host.MCP_TABLE}] left in") and "entries would remain" in a
+               for a in actions), actions
+
+
 def test_reinstall_repairs_orphaned_tool_tables(home):
     codex = home / ".codex"
     codex.mkdir()
