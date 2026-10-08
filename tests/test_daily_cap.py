@@ -98,5 +98,5 @@ class TestDailySpendCap:
                 with pytest.raises(BudgetExceededError) as exc_info:
                     await route_and_call(TaskType.QUERY, "hello")
                 msg = str(exc_info.value)
-                assert "midnight UTC" in msg
+                assert "local midnight" in msg
                 assert "0.05" in msg   # the limit

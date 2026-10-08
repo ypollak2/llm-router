@@ -196,10 +196,14 @@ def test_get_recent_hook_errors_no_data(temp_router_dir):
 def test_get_recent_hook_errors_invalid_json(temp_router_dir):
     """Test that invalid JSON in log is skipped gracefully."""
     log_file = temp_router_dir / "hook_errors.log"
+    # Relative to now (local, naive — what hook_health uses): a hardcoded date
+    # falls out of the 24h window and silently turns this into a time bomb.
+    t1 = (datetime.now() - timedelta(hours=2)).isoformat()
+    t2 = (datetime.now() - timedelta(hours=1)).isoformat()
     log_file.write_text(
-        '{"timestamp": "2026-04-16T12:00:00", "hook": "hook-a", "error": "Error 1"}\n'
+        f'{{"timestamp": "{t1}", "hook": "hook-a", "error": "Error 1"}}\n'
         'This is not JSON\n'
-        '{"timestamp": "2026-04-16T13:00:00", "hook": "hook-b", "error": "Error 2"}\n'
+        f'{{"timestamp": "{t2}", "hook": "hook-b", "error": "Error 2"}}\n'
     )
     
     errors = get_recent_hook_errors(hours=24)

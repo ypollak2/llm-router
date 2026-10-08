@@ -147,6 +147,7 @@ class TestRouterRateLimitSwitching:
             mock_config.return_value.llm_router_monthly_budget = 0
             mock_config.return_value.available_providers = {"gemini", "openai"}
             mock_config.return_value.compaction_mode = "off"
+            mock_config.return_value.llm_router_agentic_model = ""
             mock_config.return_value.compaction_threshold = 4000
             mock_config.return_value.ollama_models_for_profile.return_value = []
             mock_config.return_value.all_ollama_models.return_value = []
@@ -182,6 +183,7 @@ class TestRouterRateLimitSwitching:
             mock_config.return_value.llm_router_monthly_budget = 0
             mock_config.return_value.available_providers = {"openai"}
             mock_config.return_value.compaction_mode = "off"
+            mock_config.return_value.llm_router_agentic_model = ""
             mock_config.return_value.compaction_threshold = 4000
             mock_config.return_value.ollama_models_for_profile.return_value = []
             mock_config.return_value.all_ollama_models.return_value = []

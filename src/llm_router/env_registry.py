@@ -251,6 +251,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_JUDGE_MODEL": ("llm_router", "judge_cascade.py", 1),
     "LLM_ROUTER_JUDGE_QUEUE_MAX_ENTRIES": ("llm_router", "judge.py", 1),
     "LLM_ROUTER_JUDGE_SAMPLE_RATE": ("llm_router", "judge.py", 1),
+    "LLM_ROUTER_BREAKER_LOCK_WAIT_S": ("llm_router", "hooks/agent-route.py", 3),
     "LLM_ROUTER_LIBRARIAN_MODEL": ("llm_router", "library/sealer.py", 1),
     "LLM_ROUTER_LOG_JSON": ("llm_router", "logging.py", 1),
     "LLM_ROUTER_LOG_LEVEL": ("llm_router", "logging.py", 1),
