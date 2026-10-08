@@ -166,7 +166,9 @@ def remove_toml_table(text: str, header_literal: str) -> str:
 
 
 _KEY_SEGMENT = re.compile(r'\s*(?:"((?:[^"\\\n]|\\.)*)"|\'([^\'\n]*)\'|([A-Za-z0-9_-]+))\s*')
-_HEADER_LINE = re.compile(r'^\[\[?([^\[\]\n]*)\]\]?\s*(?:#.*)?$')
+# Leading whitespace is allowed: TOML permits an indented header, and a user's
+# indented [keep] after our table must end it, not be swallowed with it (CODEX-2).
+_HEADER_LINE = re.compile(r'^[ \t]*\[\[?([^\[\]\n]*)\]\]?\s*(?:#.*)?$')
 _KEY_VALUE_LINE = re.compile(r'^\s*([^=#\n]+?)\s*=')
 
 

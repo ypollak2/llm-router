@@ -67,6 +67,20 @@ if __name__ == "__main__":
 
         print(f"llm-router: hook latency not recorded ({type(_hl_exc).__name__})", file=_hl_sys.stderr)
 
+# P0.9: name where the time went (phases_ms on the hook_latency row), so a reader can
+# tell router time from routed-model time (the delegation phases). Both are no-ops
+# unless the recorder was armed above, so a test that imports this file records nothing.
+try:
+    from llm_router.hook_latency import mark_main_start as _hl_mark_main, phase as _hl_phase
+except ImportError:  # llm_router is not importable on this host: no recorder, no phases
+    import contextlib as _hl_contextlib
+
+    def _hl_phase(name):  # noqa: ARG001
+        return _hl_contextlib.nullcontext()
+
+    def _hl_mark_main():
+        return None
+
 
 # ── Registered-tool surface (CHZ-SURF-01) ────────────────────────────────────
 # Tool names are tier-dependent (LLM_ROUTER_SLIM). NEVER put a raw tool name in
@@ -1867,10 +1881,18 @@ def _try_codex_subagent_delegation(
 
 
 def main() -> None:
+    _hl_mark_main()
+    with _hl_phase("session_io"):
+        try:
+            hook_input = json.load(sys.stdin)
+        except (json.JSONDecodeError, EOFError):
+            sys.exit(0)  # approve: can't parse input
     try:
-        hook_input = json.load(sys.stdin)
-    except (json.JSONDecodeError, EOFError):
-        sys.exit(0)  # approve: can't parse input
+        from llm_router.hook_latency import set_session as _hl_set_session
+
+        _hl_set_session(hook_input.get("session_id") if isinstance(hook_input, dict) else None)
+    except Exception:  # noqa: BLE001 -- llm_router without set_session: no session on the row
+        pass
 
     tool_name = hook_input.get("tool_name", "")
     if tool_name != "Agent":
@@ -1896,7 +1918,8 @@ def main() -> None:
         sys.exit(0)  # approve: nothing to classify
 
     # ── Initialize session budget if not already done ──────────────────────────
-    _initialize_session_budget()
+    with _hl_phase("budget_init"):
+        _initialize_session_budget()
 
     # ── Always approve Explore subagents — they're pure retrieval ────────────
     if subagent_type == "Explore":
@@ -1914,9 +1937,10 @@ def main() -> None:
         sys.exit(0)
 
     # ── Circuit breaker: block if nesting too deep ──────────────────────────
-    session_id = _get_session_id()
-    current_depth = _read_agent_depth(session_id)
-    max_depth = _get_max_depth()
+    with _hl_phase("depth"):
+        session_id = _get_session_id()
+        current_depth = _read_agent_depth(session_id)
+        max_depth = _get_max_depth()
 
     if current_depth >= max_depth:
         # Active alert: a runaway-nesting breaker trip should page ops,
@@ -1957,16 +1981,18 @@ def main() -> None:
         sys.exit(0)
 
     # ── Classify reasoning task ──────────────────────────────────────────────
-    task_type = _classify_task_type(prompt)
-    complexity = _classify_complexity(prompt)
+    with _hl_phase("classify"):
+        task_type = _classify_task_type(prompt)
+        complexity = _classify_complexity(prompt)
 
     # ── NS3: suitable spawns → Codex CLI FIRST (external, free from Claude quota) ──
     # Must run before _allow_routed_spawn() below: that branch defaults to ON and
     # returns unconditionally, which is why Codex delegation was unreachable before
     # this change. See the NS3 docstring above _try_codex_subagent_delegation.
-    _codex_delegated = _try_codex_subagent_delegation(
-        prompt, task_type, complexity, subagent_type, session_id,
-        cwd=hook_input.get("cwd"), ledger_session_id=hook_input.get("session_id"))
+    with _hl_phase("codex_delegation"):  # routed model time when it runs
+        _codex_delegated = _try_codex_subagent_delegation(
+            prompt, task_type, complexity, subagent_type, session_id,
+            cwd=hook_input.get("cwd"), ledger_session_id=hook_input.get("session_id"))
     if _codex_delegated is not None:
         _write_agent_depth(session_id, current_depth)  # roll back: no real spawn happened
         _log_agent_call(subagent_type, prompt, "routed_codex_subagent")
@@ -2008,9 +2034,10 @@ def main() -> None:
     # Instead of merely blocking with advice, actually run the task on the
     # routed chain and hand the result back as the subagent's output. Savings
     # are logged (host=claude_code_subagent). Falls through on any failure.
-    _routed = (_try_direct_subagent(prompt, task_type, complexity, session_id, subagent_type,
-                                    ledger_session_id=hook_input.get("session_id"))
-               if _qb_allowed else None)
+    with _hl_phase("direct_subagent"):  # routed model time when it runs
+        _routed = (_try_direct_subagent(prompt, task_type, complexity, session_id, subagent_type,
+                                        ledger_session_id=hook_input.get("session_id"))
+                   if _qb_allowed else None)
     if not _qb_allowed:
         _log_agent_call(subagent_type, prompt,
                          f"breaker_open:{_qb_decision.reason if _qb_decision else 'agent_route'}")
@@ -2031,9 +2058,10 @@ def main() -> None:
     # What DIRECT didn't take (tool tasks, complex work) goes to a real external
     # agent CLI (Codex / Gemini) running on an external subscription. Savings
     # logged (host=claude_code_subagent_cli). Falls through on any failure.
-    _delegated = _try_cli_delegation(
-        prompt, task_type, complexity, session_id, subagent_type, cwd=hook_input.get("cwd"),
-        ledger_session_id=hook_input.get("session_id"))
+    with _hl_phase("cli_delegation"):  # routed model time when it runs
+        _delegated = _try_cli_delegation(
+            prompt, task_type, complexity, session_id, subagent_type, cwd=hook_input.get("cwd"),
+            ledger_session_id=hook_input.get("session_id"))
     if _delegated is not None:
         _write_agent_depth(session_id, current_depth)  # roll back: no real spawn happened
         _log_agent_call(subagent_type, prompt, "routed_cli_delegation")
@@ -2048,8 +2076,9 @@ def main() -> None:
         return
 
     # ── Estimate cost for this agent call ───────────────────────────────────
-    estimated_cost = _estimate_agent_cost(complexity, task_type)
-    remaining_budget = _get_remaining_budget()
+    with _hl_phase("limits"):
+        estimated_cost = _estimate_agent_cost(complexity, task_type)
+        remaining_budget = _get_remaining_budget()
     
     # ── Check resource limits ───────────────────────────────────────────────
     # Soft limit: warn if cost > 80% of remaining budget (informational only)
@@ -2174,11 +2203,12 @@ def main() -> None:
         f"Cost saved: subagent would use Opus for reasoning; {route_tool(tool)} uses {model_hint}."
     )
 
-    result = {
-        "decision": "block",
-        "reason": block_reason,
-    }
-    json.dump(result, sys.stdout)
+    with _hl_phase("emit"):
+        result = {
+            "decision": "block",
+            "reason": block_reason,
+        }
+        json.dump(result, sys.stdout)
 
 
 if __name__ == "__main__":

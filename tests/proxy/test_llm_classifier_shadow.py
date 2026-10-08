@@ -307,7 +307,9 @@ async def test_decision_p95_stays_under_30ms_with_a_2s_classifier(tmp_path, monk
 
 
 async def test_a_long_history_is_assembled_off_the_request_path(tmp_path, monkeypatch, simple):
-    """``assemble`` walks the whole history (45 ms on 600 messages; the fixture is 900): that must not be paid by the call."""
+    """``assemble`` must not be paid by the call. Since P1.7-c it reads only the tail of a long history (< 1 ms on
+    the 900-message fixture), so it is made slow here on purpose (50 ms per call, a sleep): run on the request path,
+    every call's decision time would exceed 30 ms."""
     monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "shadow")
     fake = FakeClassifier(monkeypatch)
     app = _shadow_app(tmp_path)
@@ -322,15 +324,19 @@ async def test_a_long_history_is_assembled_off_the_request_path(tmp_path, monkey
         msgs.append({"role": "user", "content": [{"type": "text", "text": f"final prompt number {i}"}]})
         body["messages"] = msgs
         turns.append(body)
-    assemble_ms = []
-    for b in turns:
+    slow_ms = []
+
+    def slow_assemble(body):
         t = time.perf_counter()
-        assemble(b)
-        assemble_ms.append((time.perf_counter() - t) * 1000)
-    assert min(assemble_ms) > 30, "fixture too small to show the effect"
+        time.sleep(0.05)
+        out = assemble(body)
+        slow_ms.append((time.perf_counter() - t) * 1000)
+        return out
+    monkeypatch.setattr(ls, "assemble", slow_assemble)
     for b in turns:
         assert (await _post(app, b)).status_code == 200
         await app.state.cls_shadow.drain()     # one at a time: a slow runner must not hit the pending cap
+    assert len(slow_ms) == 5 and min(slow_ms) >= 50, "the slow assemble did not run"
     secs = sorted(r["tier_decision_s"] for r in _rows(tmp_path))
     assert secs[len(secs) // 2] < 0.030        # the median call
     await app.state.cls_shadow.drain()
@@ -577,3 +583,54 @@ def test_is_cached_reads_without_asking(monkeypatch):
                   lc.parse_verdict(_reply(8)))
     assert lc.is_cached("s", "sha") is True and lc.is_cached("s", "other") is False
     assert lc.is_cached("s", "sha", model="another-model") is False
+
+
+# --- P1.7 live shadow: the decision-model backend, the real requested tier ------------------
+
+
+async def test_shadow_with_the_decision_backend_logs_nimble_and_the_real_requested_tier(
+        tmp_path, monkeypatch, simple):
+    """Owner decision 2026-10-08: nimble:9b runs in live shadow, the rules stay in charge. With
+    ``LLM_ROUTER_CLASSIFIER_BACKEND=systemone`` the shadow asks ``/v1/systemone`` (never ``/api/chat``),
+    the decision is the rules' (``cls_applied`` false, the same tier as mode ``off``), and the record carries the
+    tier the client requested on that very call, so M1-12 needs no timestamp join."""
+    from tests.test_decision_classifier import FakeOllama as DecisionOllama, _answer
+
+    off_dir = tmp_path / "off"
+    off_dir.mkdir()
+    assert (await _post(_shadow_app(off_dir), _mid_conversation_turn_first())).status_code == 200
+    (off_row,) = _rows(off_dir)
+    async with DecisionOllama(monkeypatch, reply=_answer(0.7, 0.2, 0.1)) as ollama:
+        app = _shadow_app(tmp_path)
+        assert (await _post(app, _mid_conversation_turn_first())).status_code == 200
+        await app.state.cls_shadow.drain()
+        await app.state.cls_shadow.aclose()
+    (row,) = _rows(tmp_path)
+    (rec,) = _records(tmp_path)
+    assert len(ollama.sys) == 1 and ollama.chat == []
+    assert row["cls_applied"] is False and row["tier"] == off_row["tier"] and row["served_model"] == off_row["served_model"]
+    assert (rec["model"], rec["backend"], rec["prompt_version"], rec["source"]) == ("nimble:9b", "systemone", "sys1", "llm")
+    assert rec["llm"]["tier"] == "haiku" and rec["llm"]["confidence"] == 0.7
+    assert (rec["requested_tier"], rec["requested"]) == (OPUS, "opus") == (row["requested_model"], "opus")
+    assert rec["assemble_capped"] is False
+    assert "different question" not in json.dumps(rec) and "first answer" not in json.dumps(rec)   # no text
+
+
+@pytest.mark.parametrize("value", [None, "off", ""])
+async def test_shadow_off_with_the_decision_backend_asks_no_model(tmp_path, monkeypatch, simple, value):
+    """Default OFF with ``LLM_ROUTER_CLASSIFIER_BACKEND=systemone``: no /v1/systemone, no /api/chat, no record."""
+    from tests.test_decision_classifier import FakeOllama as DecisionOllama, _answer
+
+    async with DecisionOllama(monkeypatch, reply=_answer(0.7, 0.2, 0.1)) as ollama:   # sets shadow: override after
+        if value is None:
+            monkeypatch.delenv("LLM_ROUTER_LOCAL_CLASSIFIER")
+        else:
+            monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", value)
+        app = _shadow_app(tmp_path)
+        assert (await _post(app, _mid_conversation_turn_first())).status_code == 200
+        await app.state.cls_shadow.drain()
+        await app.state.cls_shadow.aclose()
+    assert (ollama.sys, ollama.chat, ollama.gen) == ([], [], [])
+    assert _records(tmp_path) == [] and not (tmp_path / LOG).exists()
+    (row,) = _rows(tmp_path)
+    assert row["cls_applied"] is False

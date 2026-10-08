@@ -16,6 +16,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 5 | Haiku 400 on a mid-conversation system message | worked around (flag off); fold is plan task M0.7 |
 | P09-3 | A session-start background child wrote its own "session-start" latency row | fixed in `perf/session-start-bg` (P0.9) |
 | P09-4 | session-start ran Ollama start, `ollama list`, seats, usage.db and git inline | fixed in `perf/session-start-bg` (P0.9 task 3) |
+| P09-6 | Stop (session-end) ran a keychain read + HTTPS usage fetch and three maintenance jobs inline on every turn | fixed in `perf/session-end-bg` (P0.9 task 7) |
 | 6 | Research session b9f04425 counted as organic | fixed in #291 (M0.0b) |
 | 7 | `edit_outcomes.jsonl` rows with no source | open, fix is plan task M0.3(c) |
 | 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | fixed in P0.7 (`fix/learning-bugs`): one flag, default off |
@@ -41,18 +42,22 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 27 | The quality report and the Stop summary raise TypeError on a NULL task type | fixed in this change (v16 P0.8) |
 | 28 | `llm-router northstar` showed the heuristic share as the North Star | fixed in this change (v16 P0.8) |
 | 29 | The claw-code Stop hook and the dashboard models panel raise TypeError on a NULL task type | fixed in this change (v16 P0.8 r1) |
+| P010-1 | A dead proxy fails every Claude Code session | fixed in this change (P0.10); live switch is an owner step |
 | P013-1 | `llm_act` wrote files into the MCP process cwd | fixed for the file tools in this change (P0.13); bash confinement is P2.9 |
 | P0.14-a | Proxy ledger wrote 0 rows for 25 h and nothing flagged it | fixed in this change (P0.14) |
-| 18 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
 | P011-1 | Haiku guard re-tripped on audit days older than its window | fixed in `feat/haiku-guard-in-repo` (P0.11, 3f4149b) |
+| P1.7-c-1 | Classifier shadow on: `assemble` held the GIL and delayed continuations | fixed in this change (v16 P1.7-c) |
 | GE6-1 | Quota-burn coverage kept owner-overridden sessions in the organic denominator | fixed in `feat/quota-samples` (#320, GE6 repair 1) |
 | GE6-2 | Branch hook version equal to main's after main moved on | fixed in `feat/quota-samples` (#320, GE6 repair round 1) |
 | CODEX-1 | Codex refused to start: `invalid transport in mcp_servers.llm_router` | fixed in this change (#323) |
+| CODEX-2 | Codex TOML removal could write an unparseable config.toml and dropped an indented user table | fixed in this change (#323 review follow-up) |
+| CLI-HELP-1 | `llm-router uninstall --help` ran a real uninstall; 20 more subcommands ignored `--help` | fixed in this change (#323 review follow-up) |
 | P09-1 | G1 called a 16 s auto-route p95 "within budget" | fixed in `perf/hook-budgets` (P0.9 tasks 1-2) |
 | P09-7 | Statusline timing rows carried no session id, and needed a python3 that imports llm_router | fixed in `perf/hook-budgets` (P0.9 repair 1) |
 | P09-8 | The statusline "wrapper adds < 5 ms" test failed under load | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
 | P09-9 | A session id named by one test leaked onto latency rows of later tests | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
 | P012-1 | `kpi verify_shadow` was None with 0 verify rows, keyed `failed`, and walked the transcripts twice | fixed in #287 (P0.12-a, #285 review nits) |
+| P03-1 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -169,6 +174,12 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   copy of `hook_latency.jsonl` + `.1` (2026-10-04T22:07Z to 2026-10-07T14:47Z, same 65 rows),
   28 rows fell in one burst (2026-10-06 05:07-05:08Z, 4.6-17.4 s). The other 37 read
   138 ms-11.3 s: 11 of them over 2 s, p95 11,045 ms. So the tail is not only the burst.
+  **Correction (P0.9 task 7 re-count, PLAN §1.4 rule 5 episodes = rows over the bar split by
+  gaps >= 60 s).** 10 of those 11 ran 2026-10-06 05:06:49-05:06:57Z, seconds before the 05:07
+  minute, so they belong to the same burst. Same copy, 66 rows to 2026-10-08T11:02Z: 39 over
+  2 s, 38 in one episode (05:06:49-05:08:04Z, share 0.974); outside it 1 of 28 rows is over
+  2 s and p95 is 723 ms. The tail before the fix was essentially the one burst
+  (`$PP/v16/p09/baseline_predeploy_20261008T1102Z.json`).
 - **Cause.** `main()` ran `start-ollama.sh` (waits up to 10 s), `ollama list`, a seats
   re-detect (2 s budget), two usage.db queries, an Ollama co-residency probe, the pxpipe sync,
   a `git` check for the OKF index and five process spawns before returning. Under a burst of
@@ -179,6 +190,36 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   from cached usage and `additionalContext`.
 - **Test.** `tests/test_p09_session_start_bg.py::test_main_does_not_run_any_moved_step_inline`
   (FAILS on da31df7: all 17 steps ran inline), `test_main_returns_while_a_5s_background_phase_still_runs`.
+
+## P09-6. Stop (session-end) ran a keychain read + HTTPS usage fetch and three maintenance jobs inline on every turn
+
+- **Symptom.** session-end p95 3,353 ms (n = 252) against the PRD's +300 ms sync bar [HL7].
+  The Stop hook fires after every turn, so every turn paid it. The row carried no phases, so
+  nothing said where the time went.
+- **Cause.** `main()` called `_get_cc_usage()`, which ran `security find-generic-password`
+  and an HTTPS call to the usage endpoint (8 s timeout) inline, then rebuilt the learned
+  profile, ran the auto-profile rescan check and the model-evaluator check. The per-turn
+  line reads quota from `usage.json`; that fetch only refreshes it, and the other three feed
+  nothing on the line.
+- **Fix.** One detached child (`--background-stop-work`, fork + execv through
+  `statusline_tick._spawn_detached`, no new subprocess site) runs the fetch and the three jobs.
+  The sync path reads `usage.json`; a reading younger than 120 s counts as live (it still
+  becomes the next baseline). A note the child would have added to the full box goes to
+  `stop_notes.json` and the next Stop shows it once. The child turns the latency recorder off
+  (the P09-3 trap). session-end and agent-route now name their phases (`phases_ms`).
+  Found, not fixed: `_maybe_evaluate_models` imports `EVAL_CACHE_PATH`, which
+  `model_evaluator` no longer defines, so the 7-day model check is a no-op (it was inline too).
+- **Test.** `tests/test_p09_session_end_bg.py::test_stop_runs_none_of_the_moved_steps_inline`
+  (FAILS on da31df7: the fetch, the profile rebuild, the rescan check and the evaluator all ran
+  inline), `test_stop_returns_while_a_5s_child_still_runs`,
+  `test_cached_usage_is_live_only_while_fresh`, `test_the_child_writes_no_session_end_latency_row`.
+- **Follow-up (review of #325).** The first version spawned one child on every Stop, so a
+  burst of N Stops started N concurrent keychain + HTTPS children. The spawn now takes a 15 s
+  claim (`stop_background.claim`, as status-bar's refresher): `test_a_burst_of_stops_starts_one_child`,
+  `test_the_claim_expires_after_its_window` (both fail on e5148bc). Suite tests that run
+  `main()` in-process stub the spawn. Not claimed: a Stop wall-time gain. With the live fetch
+  stubbed in both arms the moved steps cost ~10 ms (reviewer's bench, n = 20 per arm); the
+  real saving (keychain + HTTPS, 8 s timeout) is not measured, so no number is given.
 
 ## 6. Research session b9f04425 counted as organic
 
@@ -688,6 +729,56 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Test.** `test_clawcode_stop_hook_renders_null_task_type` (runs `main()` on a seeded
   `usage.db`), `test_dashboard_last_prompt_calls_render_null_task_type`. Both fail on 15a1398e.
 
+## P010-1. A dead proxy fails every Claude Code session
+
+- **Symptom.** With proxy-default on, `~/.claude/settings.json` sets
+  `ANTHROPIC_BASE_URL=http://127.0.0.1:8787`. When the proxy process is down, every API call
+  of every session is refused. Smoke 2026-10-07 (claude 2.1.292, `--setting-sources
+  project,local`, base URL on smoke port 8788, nothing listening): `claude -p "say ok"` retried
+  for 222.85 s, then exited 1 with `API Error: Connection refused — a firewall or proxy may be
+  blocking it (ECONNREFUSED)` (n = 1, session 2af3ba44).
+- **Cause.** The proxy process itself owned the settings.json port, so its death left nothing
+  listening. `settings.json` env beats the process env, and hooks run after the API client is
+  built, so the SessionStart warning only reaches the next session (plan v16 C10, L16).
+- **Fix.** `src/llm_router/proxy/failopen_shim.py` (D-17 = A): a small shim owns 8787 and
+  forwards to the main proxy on 8797; on refused / >200 ms connect / disconnect before a response,
+  or a 5xx of the main proxy's own (no Anthropic `request-id`) before any byte went out, it sends the request once to api.anthropic.com and records
+  `proxy_down` in `fail_open.jsonl` (G2). `llm-router install --proxy-default` installs both
+  services (main first, then the shim) and writes settings.json only after both answer. The live
+  machine still runs the main proxy on 8787: the port move needs the owner (`bootout` +
+  `bootstrap`).
+- **Found while fixing.** The first shim used aiohttp's client, which rejects the duplicate
+  `Server` header the main proxy sends (uvicorn's own next to Anthropic's): in the smoke, 2 of 4
+  calls went direct while the main proxy was up. The shim's upstream leg now uses httpx (h11),
+  which relays it, as Claude Code's own client does.
+- **Found in review.** The first build also retried every 5xx direct, including Anthropic's own
+  (529 overloaded) relayed by a healthy main proxy: that doubles the request during an overload
+  and counts a working proxy as `proxy_down`. A 5xx carrying Anthropic's `request-id` is now passed
+  through (`test_anthropic_5xx_relayed_by_a_healthy_main_proxy_is_not_proxy_down`).
+- **Found in review (round 2).** With the shim on 8787, doctor, the statusline and the
+  SessionStart hook TCP-probed only the sentinel's `port`, which is now the shim's. The shim
+  always accepts, so all three read healthy while the main proxy was dead and every call
+  bypassed routing. Each check now also probes `upstream_port` and reports "routing bypassed"
+  with the main proxy's restart command; a dead shim names `com.llm_router.proxy-shim`.
+  Tests: `tests/test_doctor_proxy_default_shim.py` (doctor's section moved into
+  `_proxy_default_section` so it can be called; the mutant `_shim = False` turns 3 of its 4
+  tests red), and the `*_shim_*` / `*_main_proxy_*` tests in
+  `tests/test_session_start_proxy_default.py` and `tests/test_statusline_proxy_default.py`
+  (4 of them red on the pre-fix hooks). The settings.json guard also failed to catch a direct
+  `(Path.home() / ".claude" / "settings.json").write_text(...)` in the shim;
+  `test_runtime_failopen_surfaces_never_name_settings_json` now rejects any runtime string
+  constant naming `settings.json` or `.claude` in the fail-open files (that mutant: red).
+- **Test.** `tests/test_proxy_failopen_shim.py` (fails on da31df7: the module does not exist):
+  `test_main_down_goes_direct_and_records_proxy_down`,
+  `test_main_disconnects_before_responding_goes_direct`, `test_connect_timeout_goes_direct`,
+  `test_main_5xx_before_bytes_retries_direct_once`, `test_no_retry_after_bytes_were_sent`,
+  `test_sse_passes_through_byte_for_byte_and_incrementally`, and
+  `test_duplicate_server_header_from_main_proxy_is_passed_not_bypassed` (fails with the aiohttp
+  client: `'direct' == 'main'`). `tests/test_proxy_default_orchestration.py` pins the two-service
+  install; `tests/test_failopen_never_writes_settings.py` pins that no fail-open path writes
+  settings.json outside `llm-router install --proxy-default`. Live: 10/10 smoke sessions
+  answered through the shim with the smoke main proxy killed, 10 `proxy_down` rows (PR body).
+
 ## P013-1. `llm_act` wrote files into the MCP process cwd
 
 - **Symptom.** A local model's `write_file` from `llm_act` landed in the directory the MCP
@@ -767,8 +858,16 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   not repeated under the 24 h WARN, and as a `_run_doctor` issue. The `doctor` test now asserts
   exactly one `proxy bypass:` issue naming the path and host, not the exit code. 15 mutants, all
   killed (see the PR body).
+- **Known limit.** A token with a dot between alphabetic labels still reads as a host:
+  `sk-ant.SECRETKEY999` prints as `sk-ant.secretkey999`, `abc.def` as `abc.def`. RFC 1123 cannot
+  tell such a token from a real name. A purely numeric last label (`secret.123`) is
+  `(unparseable)`. The review of #330 found it; it is disclosed, not fixed.
+- **Follow-up tests (#330 review).** `test_short_silence_does_not_count_future_dated_proxy_rows`
+  (upper bound of the 2 h window) and `test_decision_rows_older_than_24h_are_not_counted` (lower
+  bound of the decision window). Each is red under the mutant the review left alive (`t <= now_ts`
+  dropped from `short_silence`; `timestamp >= datetime(?)` dropped from `_decision_turns`).
 
-## 18. Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP)
+## P03-1. Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP)
 
 - **Symptom.** D-14 = A says a Q&A task type is never served by a local provider. #297 (M3.0)
   enforced it in MCP `route_and_call` only. `hooks.chain_builder.build_chain`, which builds the
@@ -810,6 +909,37 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Test.** `tests/test_proxy_haiku_guard.py::test_run_once_ignores_daily_audits_older_than_the_window`:
   red on b5f88b5 (`assert 'trip' == 'ok'`), green on 3f4149b; mutant `recent = list(days)`
   turns it red.
+
+## P1.7-c-1. Classifier shadow on: `assemble` held the GIL and delayed continuations
+
+- **Symptom.** With `LLM_ROUTER_LOCAL_CLASSIFIER=shadow`, continuation p95 was 26.4 ms against 0.7 ms with the
+  shadow off (1,800-message history, n = 100 per arm; #301 review). A continuation never schedules a
+  classification, so the delay came from another call's shadow work.
+- **Cause.** `cls_input.assemble` runs in a worker thread (`asyncio.to_thread`), which keeps it off the event
+  loop but not off the GIL. It walked the WHOLE history forwards and ran `_text_of` + `normalize` (reminder
+  regex, whitespace collapse) on every message, although the input uses only the newest prompt, 3 earlier
+  prompts and the assistant's last text. CPU time per call on #301's code (`thread_time`, best of 7,
+  synthetic fixtures of `scripts/bench_shadow_continuation.py`): 1,800 messages 5.4 ms (agentic shape),
+  5.7 ms (one prompt then a tool loop), 142 ms (every message text); 600 messages 46 ms (every message text).
+  While it runs, the loop thread waits for the GIL at each wake-up (switch interval 5 ms).
+- **Fix.** v16 P1.7-c: `assemble` scans backwards from the newest message, stops once it holds its context,
+  and reads at most `MAX_SCAN_MESSAGES` = 400 messages back. Output is identical whenever the context lies in
+  that window; beyond it the input lacks the older context, never claims "FIRST prompt", and the shadow record
+  says `assemble_capped: true` so a report can count such turns. CPU time at 1,800 messages: 0.30 ms
+  (agentic), 1.26 ms (one prompt + tool loop, the cap), 0.54 ms (every message text).
+- **Test.** `tests/proxy/test_cls_input.py`: `test_backward_scan_equals_the_forward_walk_on_600_random_histories`
+  (the #301 walk kept verbatim as the oracle), `test_the_scan_stops_once_it_has_its_context` (1,801 messages:
+  <= 30 `_human` calls, <= 30 extra message reads), `test_a_long_tool_loop_is_read_at_most_max_scan_messages_back`,
+  `test_capped_is_false_when_the_window_holds_the_whole_context`. All 4 fail on main 7d857641 (the fuzz test
+  only on the new `capped` attribute: it guards equality, not the bug); 12 single-flip mutants of the change
+  are each red. `test_a_long_history_is_assembled_off_the_request_path` now makes
+  `assemble` slow on purpose (a 50 ms sleep), because the real one is no longer slow enough to show the effect.
+  Latency, shadow-on minus shadow-off continuation p95, n = 100 per arm per row, `scripts/bench_shadow_continuation.py`
+  run on main 7d857641 and on this change back to back per row (2026-10-08 ~14:55Z, free memory 88%, no Ollama model
+  resident, load1 15-25 from other agents): at 1,800 messages main +0.18 / +82.86 / +0.12 ms (agentic / all-text /
+  one-prompt), this change +1.04 / +0.06 / -0.13 ms; worst row of this change over 0, 600 and 1,800 messages +1.90 ms
+  (agentic, 600). The synthetic agentic and one-prompt shapes do not reproduce the 26.4 ms (main's `assemble` takes
+  ~3-6 ms on them); the all-text shape does (+18.3 ms at 600, +82.9 ms at 1,800). Raw rows: `$PP/v16/p17c/r3/`.
 
 ## GE6-1. Quota-burn coverage kept owner-overridden sessions in the organic denominator
 
@@ -871,6 +1001,56 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   and the `remove_toml_subtree` tests in `tests/test_codex_host.py`. Each of 10 mutants
   (one per code path, e.g. the legacy cleanup or the doctor branch disabled) turns one of
   them red.
+
+## CODEX-2. Codex TOML removal could write an unparseable config.toml and dropped an indented user table
+
+- **Symptom.** The #323 review fed an orphaned `[mcp_servers.llm_router.tools.x]` table holding
+  `w = [\n[1, 2]\n]` (a valid nested array) to the cleanup. The line-based cut read `[1, 2]` as a
+  header and returned `[1, 2]\n]`, which does not parse. Manifest replay of
+  `[mcp_servers.llm_router]` wrote such a cut unchecked and printed `✓ Removed`. Separately, a
+  user's indented `  [keep]` table right after an llm_router table was removed with it.
+- **Cause.** `install._clear_codex_orphan_tables` re-parsed the cut with tomllib, but no test
+  pinned that guard (a reviewer mutant that dropped it survived).
+  `install_manifest._remove_toml_table` (MCP_TABLE branch) had no re-parse at all.
+  `codex_host._HEADER_LINE` was anchored at column 0, so an indented header (legal TOML) did not
+  end the table being dropped.
+- **Fix.** `_remove_toml_table` re-parses the cut before it writes. If the cut does not parse, or
+  an llm_router server entry would remain, the file is left unchanged and the line is
+  `⚠ [mcp_servers.llm_router] left in <path>: <reason> ...; delete the ... tables by hand`.
+  `_HEADER_LINE` accepts leading spaces or tabs.
+- **Test.** `tests/test_codex_install.py::test_orphan_cleanup_refuses_an_edit_that_would_not_parse`
+  and `::test_legacy_uninstall_leaves_a_nested_array_table_unchanged` (red with the tomllib
+  re-parse removed from `_clear_codex_orphan_tables`);
+  `::test_manifest_replay_refuses_a_cut_that_would_not_parse` and
+  `::test_manifest_replay_reports_a_multiline_dotted_key_it_left` (red on main adf93a02);
+  `tests/test_codex_host.py::test_remove_subtree_ends_at_an_indented_header` (space and tab; red on
+  main).
+
+## CLI-HELP-1. `llm-router uninstall --help` ran a real uninstall
+
+- **Symptom.** During the #323 review, `llm-router uninstall --help` uninstalled. It edited the
+  review clone's `.vscode/mcp.json` and `.windsurf/mcp.json`. A scan of every subcommand with
+  `--help` (HOME and cwd in a temp dir) on adf93a02 found more. `uninstall` rewrote
+  `~/.claude/settings.json` and the cwd MCP files. `update` and `onboard` rewrote the hooks.
+  `init-claude-memory` wrote config. `budget`, `team`, `gain`, `doctor`, `summary`, `probe` and
+  `explain-dashboard` wrote state DBs. `broker` wrote a secret and kept running. `gateway` tried to
+  bind its port. `setup`, `init-policy`, `soak`, `tui`, `dashboard`, `routing-report` exited non-zero.
+  `routing-health` and `test` ran their report and self-test instead of printing help.
+- **Cause.** `cli.main` passed `args[1:]` to each handler. 21 of the 64 handlers never look for
+  `-h`/`--help`, so the flag was ignored and the command ran. `okf`, `provider`, `semantic`,
+  `sessions` and `benchmark` check only the first argument, so `okf gc --help` ran the gc dry run and
+  `provider list --help` listed providers.
+- **Fix.** `cli._subcommand_help` runs before dispatch. If a help flag is in the arguments and the
+  subcommand is not one that handles help itself (`_OWN_HELP_ANYWHERE`: argparse or an
+  all-arguments check; `_OWN_HELP_FIRST`: only `<cmd> --help`), it prints that subcommand's lines
+  from the module usage text and exits 0. It does not import the subcommand. An undocumented name
+  still gets the unknown-command error (exit 2).
+- **Test.** `tests/test_cli_help_is_inert.py` runs every subcommand dispatched in `cli.main` (64)
+  and every `<cmd> <sub>` form in the usage text (12) with `--help` in a subprocess. HOME and cwd
+  are seeded with host configs that contain llm_router entries. Each run must exit 0, print usage,
+  raise no traceback and change no file. On main adf93a02, 30 of the 76 cases fail (21
+  subcommands, 9 nested forms).
+  `test_the_cases_cover_every_subcommand` guards against an empty case list.
 
 ## P09-1. G1 called a 16 s auto-route p95 "within budget"
 

@@ -40,6 +40,19 @@ if __name__ == "__main__":
 
         print(f"llm-router: hook latency not recorded ({type(_hl_exc).__name__})", file=_hl_sys.stderr)
 
+# P0.9: name where the time went (phases_ms on the hook_latency row). Both are no-ops
+# unless the recorder was armed above, so a test that imports this file records nothing.
+try:
+    from llm_router.hook_latency import mark_main_start as _hl_mark_main, phase as _hl_phase
+except ImportError:  # llm_router is not importable on this host: no recorder, no phases
+    import contextlib as _hl_contextlib
+
+    def _hl_phase(name):  # noqa: ARG001
+        return _hl_contextlib.nullcontext()
+
+    def _hl_mark_main():
+        return None
+
 # .env -> os.environ for this process (llm_router.env_loader). The real
 # environment wins; without the package this is a no-op, as it always was.
 try:
@@ -212,21 +225,33 @@ def _read_json(path: str) -> dict | None:
         return None
 
 
+#: A cached usage.json younger than this counts as a live reading (P0.9). The
+#: background child refreshes it after every Stop, so on a normal turn it is
+#: seconds old; an older file still shows, but is not taken as the new baseline.
+_LIVE_USAGE_MAX_AGE_S = 120
+
+
 def _get_cc_usage() -> tuple[dict | None, dict | None, bool]:
-    """Return (start_snapshot, current_usage, is_live)."""
+    """Return (start_snapshot, current_usage, is_live).
+
+    P0.9: never fetches. The keychain read plus the HTTPS call to the usage
+    endpoint (``_fetch_live_usage``, 8 s timeout) ran inline on every Stop; it now
+    runs in the background child (``_run_background_stop_work``), which writes
+    usage.json for the next Stop. ``is_live`` means "measured within
+    ``_LIVE_USAGE_MAX_AGE_S``"."""
     start  = _read_json(_session_cc_snap_file())
-    live   = _fetch_live_usage()
-    if live:
-        return start, live, True
     cached = _read_json(_usage_json())
     # A snapshot flagged is_fallback is the placeholder session-start.py writes
     # when the OAuth fetch fails: session, weekly and sonnet all set to 50. The
     # session summary reported "quota used 5h 50%/wk 50%" from it, which is not
     # a reading — it is the shape of a failure. Returning None makes the caller
     # omit the quota rather than quote a number nobody measured.
-    if cached and cached.get("is_fallback"):
-        cached = None
-    return start, cached, False
+    if not isinstance(cached, dict) or cached.get("is_fallback"):
+        return start, None, False
+    ts = cached.get("updated_at")
+    fresh = (isinstance(ts, (int, float)) and not isinstance(ts, bool)
+             and 0 <= time.time() - float(ts) <= _LIVE_USAGE_MAX_AGE_S)
+    return start, cached, fresh
 
 
 def _render_quota_timeline(session_id: str | None, db_path: str) -> str:
@@ -2207,11 +2232,212 @@ def _condense(summary: str) -> str:
     return "⚡ llm_router · " + " · ".join(bits) + "  ·  `llm-router summary` for detail"
 
 
-def main() -> None:
+# -- P0.9 task 7: one detached child for what the per-turn line does not need ----
+# Live session-end (Stop) p95 was 3,353 ms (n = 252, [HL7]) against the PRD's
+# +300 ms sync bar. Every Stop ran, inline, a keychain read plus an HTTPS call to
+# the usage endpoint (8 s timeout), the learned-profile rebuild, the auto-profile
+# rescan and the model-evaluator check. The line reads quota from usage.json, which
+# that call only refreshes, so none of them feeds the line. main() now spawns ONE
+# child (``--background-stop-work``) for them. A note the child would have added to
+# the full box (profile rescanned, benchmarks updated) is shown by the NEXT Stop.
+
+#: Steps the child runs, in order; each is fail-open on its own.
+_STOP_BACKGROUND_STEPS = ("_fetch_live_usage", "_build_and_save_learned_profile",
+                          "_maybe_rescan_profile", "_maybe_evaluate_models")
+_STOP_NOTES_FILENAME = "stop_notes.json"
+#: A note older than this is dropped rather than shown.
+_STOP_NOTES_MAX_AGE_S = 24 * 3600
+
+
+def _stop_notes_path() -> str:
+    return os.path.join(_state_dir(), _STOP_NOTES_FILENAME)
+
+
+def _append_stop_note(note: str) -> None:
+    """Leave one line for the next full summary. Never raises."""
     try:
-        _hook_input = json.load(sys.stdin)
-    except (json.JSONDecodeError, EOFError):
-        _hook_input = {}
+        path = _stop_notes_path()
+        try:
+            with open(path, encoding="utf-8") as f:
+                notes = json.load(f)
+            if not isinstance(notes, list):
+                notes = []
+        except Exception:  # noqa: BLE001 -- missing or broken: start over
+            notes = []
+        notes.append({"ts": time.time(), "note": str(note)})
+        os.makedirs(_state_dir(), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(notes[-10:], f)
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001 -- a lost note costs one line, never the Stop
+        return
+
+
+def _pop_stop_notes() -> list[str]:
+    """Notes the child left, newest last; the file is removed so each shows once."""
+    path = _stop_notes_path()
+    claim = f"{path}.{os.getpid()}.claim"
+    try:
+        os.replace(path, claim)  # atomic: two Stops never both show a note
+    except OSError:
+        return []
+    try:
+        with open(claim, encoding="utf-8") as f:
+            notes = json.load(f)
+    except Exception:  # noqa: BLE001
+        notes = []
+    finally:
+        try:
+            os.remove(claim)
+        except OSError as _exc:
+            # Fail-open (a leftover claim file is litter, the notes were read),
+            # but not silent (T-14 ratchet).
+            try:
+                from llm_router import failopen as _fo
+                _fo.record("CHZ-FO-STOP-NOTES-CLAIM-REMOVE", _exc)
+            except Exception:  # noqa: BLE001
+                pass
+    now = time.time()
+    out = []
+    for n in notes if isinstance(notes, list) else []:
+        if (isinstance(n, dict) and isinstance(n.get("note"), str)
+                and isinstance(n.get("ts"), (int, float)) and now - float(n["ts"]) <= _STOP_NOTES_MAX_AGE_S):
+            out.append(n["note"])
+    return out
+
+
+def _maybe_rescan_profile() -> None:
+    """Moved from main() unchanged: the periodic service-configuration scan."""
+    from llm_router.auto_profile import should_rescan, rescan_and_update
+
+    if should_rescan():
+        updated, changes = rescan_and_update()
+        if updated and changes:
+            _append_stop_note(f"🔄 Profile updated: {', '.join(changes)}")
+
+
+def _maybe_evaluate_models() -> None:
+    """Moved from main() unchanged: the 7-day model benchmark. (Its import of
+    ``EVAL_CACHE_PATH`` fails on this tree -- model_evaluator renamed it to
+    ``_eval_cache_path()`` -- so it is a no-op today, as it was inline.)"""
+    import asyncio
+    from llm_router.model_evaluator import EVAL_CACHE_PATH, EVAL_TTL_SECONDS
+
+    should_eval = (
+        not EVAL_CACHE_PATH.exists() or
+        (time.time() - EVAL_CACHE_PATH.stat().st_mtime) > EVAL_TTL_SECONDS
+    )
+    if should_eval:
+        from llm_router.model_evaluator import evaluate_available_models
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(evaluate_available_models(task_types=["reasoning"]))
+        finally:
+            loop.close()
+        _append_stop_note("📊 Model benchmarks updated (next: 7 days)")
+
+
+def _run_background_stop_work() -> None:
+    """The detached child: every step in ``_STOP_BACKGROUND_STEPS``, each
+    fail-open, so one failure never skips the rest."""
+    for name in _STOP_BACKGROUND_STEPS:
+        try:
+            globals()[name]()
+        except Exception:  # noqa: BLE001 -- the child has no one to report to
+            continue
+
+
+def _background_stop_work_argv() -> list[str]:
+    """argv that re-runs THIS script as the child (frozen builds go through
+    ``run-hook``, as session-start's children do)."""
+    try:
+        from llm_router.install_hooks import is_frozen
+
+        frozen = is_frozen()
+    except Exception:  # noqa: BLE001
+        frozen = False
+    if frozen:
+        return [sys.executable, "run-hook", __file__, "--background-stop-work"]
+    return [sys.executable, __file__, "--background-stop-work"]
+
+
+_STOP_BG_CLAIM_FILENAME = "stop_background.claim"
+#: At most one background child per this many seconds, as status-bar's refresher:
+#: a burst of Stops starts one keychain read + HTTPS call, not one per Stop. The
+#: line reads usage.json up to ``_LIVE_USAGE_MAX_AGE_S`` old as live, so a Stop
+#: inside the window still shows the last child's reading.
+_STOP_BG_CLAIM_S = 15.0
+
+
+def _claim_background_stop_work(now: float | None = None) -> bool:
+    """True when this Stop may start the child: none was started in the last
+    ``_STOP_BG_CLAIM_S``. A lost race starts at most one extra. Never raises."""
+    try:
+        now = time.time() if now is None else now
+        path = os.path.join(_state_dir(), _STOP_BG_CLAIM_FILENAME)
+        try:
+            if 0 <= now - os.path.getmtime(path) < _STOP_BG_CLAIM_S:
+                return False
+        except OSError:  # no claim yet: this Stop takes it
+            pass
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(str(now))
+        os.utime(path, (now, now))
+        return True
+    except Exception:  # noqa: BLE001 -- no child this time; the next Stop retries
+        return False
+
+
+def _spawn_background_stop_work() -> None:
+    """Detach the child, at most once per ``_STOP_BG_CLAIM_S``. Uses
+    ``statusline_tick._spawn_detached`` (fork + execv, no new subprocess site).
+    Never raises: a failed spawn costs this turn's usage refresh, never the Stop."""
+    if not _claim_background_stop_work():
+        return
+    try:
+        from llm_router.statusline_tick import _spawn_detached
+
+        _spawn_detached(_background_stop_work_argv())
+    except Exception:  # noqa: BLE001
+        return
+
+
+class _Laps:
+    """Consecutive named phases over a long straight-line body without
+    re-indenting it: ``laps.next("name")`` closes the open phase and opens the
+    next; ``laps.end()`` closes the last. Same recorder as ``_hl_phase``."""
+
+    def __init__(self) -> None:
+        self._open = None
+
+    def next(self, name: str) -> None:
+        self.end()
+        self._open = _hl_phase(name)
+        self._open.__enter__()
+
+    def end(self) -> None:
+        if self._open is not None:
+            self._open.__exit__(None, None, None)
+            self._open = None
+
+
+def main() -> None:
+    _hl_mark_main()
+    with _hl_phase("session_io"):
+        try:
+            _hook_input = json.load(sys.stdin)
+        except (json.JSONDecodeError, EOFError):
+            _hook_input = {}
+    try:
+        from llm_router.hook_latency import set_session as _hl_set_session
+
+        _hl_set_session(_hook_input.get("session_id") if isinstance(_hook_input, dict) else None)
+    except Exception:  # noqa: BLE001 -- llm_router without set_session: no session on the row
+        pass
 
     # Verifier PR C (SHADOW): when delegated patches are waiting, start ONE detached
     # `python -m llm_router.verify_worker` (fixed argv, DEVNULL, own session, env allowlist,
@@ -2250,25 +2476,34 @@ def main() -> None:
         return
 
     # GE6 / S3: one quota sample (cached usage.json, no network) per Stop, i.e.
-    # per human turn, into quota_samples.jsonl. Fail-open.
-    try:
-        from llm_router import quota_samples as _quota_samples
-        if isinstance(_hook_input, dict):
-            _quota_samples.append_session_sample(_hook_input.get("session_id"), "stop")
-    except Exception:
-        pass
+    # per human turn, into quota_samples.jsonl. Fail-open. Runs before the P0.9
+    # child is spawned so it samples the usage.json this Stop will also render.
+    with _hl_phase("quota_sample"):
+        try:
+            from llm_router import quota_samples as _quota_samples
+            if isinstance(_hook_input, dict):
+                _quota_samples.append_session_sample(_hook_input.get("session_id"), "stop")
+        except Exception:
+            pass
 
-    session_start               = _read_session_start()
-    paid_rows, cc_rows, free_rows = _query_session_data(session_start)
-    tools                       = _aggregate(paid_rows) if paid_rows else {}
-    start, current, is_live     = _get_cc_usage()
-    _sync_import_savings_log()          # flush JSONL before cumulative query
-    cumulative                  = _query_cumulative_savings()
-    _build_and_save_learned_profile()   # v6.1: build profile from corrections
-
-
+    # P0.9: the live-usage fetch, learned-profile rebuild, rescan and model check
+    # run in one detached child; this Stop reads the usage.json it last wrote.
+    with _hl_phase("bg_spawn"):
+        _spawn_background_stop_work()
+    with _hl_phase("session_data"):
+        session_start               = _read_session_start()
+        paid_rows, cc_rows, free_rows = _query_session_data(session_start)
+        tools                       = _aggregate(paid_rows) if paid_rows else {}
+    with _hl_phase("cc_usage"):
+        start, current, is_live     = _get_cc_usage()
+    with _hl_phase("savings_sync"):
+        _sync_import_savings_log()          # flush JSONL before cumulative query
+    with _hl_phase("cumulative"):
+        cumulative                  = _query_cumulative_savings()
 
     # Try SessionSummaryDashboard (Rich) renderer; fall back to legacy ANSI
+    _laps = _Laps()
+    _laps.next("render")
     final_summary_output = ""
 
     if HAS_RICH_DASHBOARD:
@@ -2494,6 +2729,7 @@ def main() -> None:
         # Rich dashboard not available, use legacy ANSI formatting
         final_summary_output = _format(tools, cc_rows, free_rows, paid_rows, start, current, is_live, cumulative, session_start)
 
+    _laps.next("unverified_note")
     # savings_stats money nobody observed being used is kept OUT of the figures
     # above (savings.VERIFIED_SAVED_SQL) and shown here, labelled, instead.
     try:
@@ -2507,6 +2743,7 @@ def main() -> None:
         pass
 
     # Append session spend + real savings panel (v8.8.0)
+    _laps.next("spend")
     spend = _read_session_spend()
     if spend and spend.get("call_count", 0) > 0:
         total = spend.get("total_usd", 0.0)
@@ -2565,6 +2802,7 @@ def main() -> None:
     # Retrospective output removed per user preference
 
     # Append mid-session trends if any snapshots exist
+    _laps.next("trends")
     try:
         from llm_router.monitoring.periodic import load_session_snapshots, analyze_session_trends, format_trend_summary
         snapshots = load_session_snapshots()
@@ -2577,44 +2815,15 @@ def main() -> None:
     except Exception:
         pass  # Graceful failure — never break session-end
 
-    # Check for service configuration changes (periodic scan)
-    try:
-        from llm_router.auto_profile import should_rescan, rescan_and_update
-        if should_rescan():
-            updated, changes = rescan_and_update()
-            if updated and changes:
-                changes_str = ", ".join(changes)
-                config_note = f"\n  🔄 Profile updated: {changes_str}"
-                final_summary_output = final_summary_output.rstrip("  " + "═" * (WIDTH - 2)) + config_note + "\n" + "  " + "═" * (WIDTH - 2)
-    except Exception:
-        pass  # Graceful failure — never break session-end
-
-    # Check for model evaluation (7-day TTL — benchmark available models)
-    try:
-        import asyncio
-        from llm_router.model_evaluator import EVAL_CACHE_PATH, EVAL_TTL_SECONDS
-        
-        should_eval = (
-            not EVAL_CACHE_PATH.exists() or 
-            (time.time() - EVAL_CACHE_PATH.stat().st_mtime) > EVAL_TTL_SECONDS
-        )
-        
-        if should_eval:
-            from llm_router.model_evaluator import evaluate_available_models
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(evaluate_available_models(task_types=["reasoning"]))
-                loop.close()
-                eval_note = "\n  📊 Model benchmarks updated (next: 7 days)"
-                final_summary_output = final_summary_output.rstrip("  " + "═" * (WIDTH - 2)) + eval_note + "\n" + "  " + "═" * (WIDTH - 2)
-            except Exception:
-                pass  # Don't fail session if eval fails
-    except Exception:
-        pass  # Graceful failure
+    # Notes the background child left last turn (profile rescan, model check):
+    # shown once, by this Stop (P0.9).
+    _laps.next("notes")
+    for _note in _pop_stop_notes():
+        final_summary_output = final_summary_output.rstrip("  " + "═" * (WIDTH - 2)) + f"\n  {_note}\n" + "  " + "═" * (WIDTH - 2)
 
     # ── Add quota timeline for session-end reporting ──────────────────────────────
     # Shows per-prompt Claude quota pressure for audit and visibility.
+    _laps.next("quota_timeline")
     try:
         session_id = None
         try:
@@ -2632,6 +2841,7 @@ def main() -> None:
 
     # ── Add routing efficiency report (v10.2.0) ──────────────────────────────────
     # Shows model usage, token distribution, and detects wasteful routing patterns.
+    _laps.next("routing_section")
     try:
         from llm_router.hooks.lineage_integration import format_routing_section
 
@@ -2645,6 +2855,7 @@ def main() -> None:
     # PR #178 changes this box's savings text and another PR retitles it to
     # estimate-only; this block only APPENDS its own item, same pattern as the
     # routing-efficiency block above, so those two land without touching this.
+    _laps.next("northstar")
     try:
         from llm_router import northstar as _northstar
         _ns_session_id = None
@@ -2665,6 +2876,7 @@ def main() -> None:
     # ── NS4: quality breaker Stop-line item (only when something is open) ────
     # T-07 rule again: a line that is always here and always empty is
     # furniture, not a signal — so this only appends when a class is off.
+    _laps.next("quality_breaker")
     try:
         from llm_router import quality_breaker as _quality_breaker
         _qb_line = _quality_breaker.stop_line_summary()
@@ -2676,26 +2888,41 @@ def main() -> None:
     except Exception:
         pass  # Graceful failure — never break session-end
 
-    # CHZ-STOP-01: honour the verbosity mode before emitting.
-    _mode = _stop_hook_mode()
-    if _mode == "disabled":
-        pass  # no output at all; `llm_router summary` on demand
-    elif _mode == "condensed":
-        _line = _condense(final_summary_output)
-        if _line:
-            print(json.dumps({"systemMessage": _line}))
-    else:
-        print(json.dumps({"systemMessage": final_summary_output}))
+    _laps.end()
 
-    # Update the session-start snapshot AFTER the delta has been reported,
-    # so the NEXT session starts from today's end-of-session baseline.
-    if current and is_live:
-        try:
-            with open(_session_cc_snap_file(), "w") as f:
-                json.dump(current, f)
-        except OSError:
-            pass
+    # CHZ-STOP-01: honour the verbosity mode before emitting.
+    with _hl_phase("emit"):
+        _mode = _stop_hook_mode()
+        if _mode == "disabled":
+            pass  # no output at all; `llm_router summary` on demand
+        elif _mode == "condensed":
+            _line = _condense(final_summary_output)
+            if _line:
+                print(json.dumps({"systemMessage": _line}))
+        else:
+            print(json.dumps({"systemMessage": final_summary_output}))
+
+        # Update the session-start snapshot AFTER the delta has been reported,
+        # so the NEXT session starts from today's end-of-session baseline.
+        if current and is_live:
+            try:
+                with open(_session_cc_snap_file(), "w") as f:
+                    json.dump(current, f)
+            except OSError:
+                pass
+
+
+def _entry(argv: list[str]) -> None:
+    """Dispatch on argv: the detached background child, or the hook itself."""
+    if "--background-stop-work" in argv:
+        # The child re-runs this file, so the latency stanza at the top armed a
+        # "session-end" row for it too (the trap BUGS P09-3 found in
+        # session-start). The recorder checks this switch when it writes, at exit.
+        os.environ["LLM_ROUTER_HOOK_LATENCY"] = "off"
+        _run_background_stop_work()
+    else:
+        main()
 
 
 if __name__ == "__main__":
-    main()
+    _entry(sys.argv[1:])
