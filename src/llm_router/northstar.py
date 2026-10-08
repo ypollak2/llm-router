@@ -376,10 +376,8 @@ _REDO_LIKE_OUTCOMES = frozenset({OUTCOME_REDO, OUTCOME_DISCARDED})
 # non-Claude model served it AND its verify record shows a test that fails before the change
 # and passes after it AND it is not Q&A AND it was not redone. The heuristic outcome
 # "used" is neither required nor enough: a keep press adds nothing, pass-to-pass never counts.
-QA_TASK_TYPES = frozenset({
-    "query", "research", "generate", "analyze", "coordinate", "introspect",
-    "summary", "classification", "extraction",
-})
+# The set itself lives in ``qa_policy`` (one copy; the hook path imports it without northstar).
+from llm_router.qa_policy import QA_TASK_TYPES  # noqa: E402
 STRICT_VERIFY = frozenset({"pass_f2p", "pass_f2p_model"})
 STRICT_RULE_TEXT = (
     "strict-used: served by a non-Claude model AND verify_status in {pass_f2p, pass_f2p_model} "
