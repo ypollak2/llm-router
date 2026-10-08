@@ -43,7 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - agents (PLAN v16 AGT A.0): `run_delegation` (behind `llm_act` / `llm_delegate`) and
   `llm_local_task`'s agent loop and acceptance check run in a worker thread (`asyncio.to_thread`), so
   a long run no longer freezes every other MCP call (`docs/BUGS.md` A.0-2). `llm_local_task` runs
-  still go one at a time, because the loop's write mode is process-wide `os.environ`.
+  still go one at a time, because the loop's write mode is process-wide `os.environ`. A queued run
+  takes its file snapshot and starts its budget clock only once its turn comes, so it never reports
+  another run's edits as its own and its wait is not charged to its budget; the result carries
+  `queued_s` (`docs/BUGS.md` A.0-3). `wait=False` with a missing `workdir` answers `blocked` at once
+  instead of returning a job id.
 - proxy (v16 P1.7-c): the classifier shadow's `cls_input.assemble` reads the history backwards, stops once it
   has its context and never reads more than 400 messages back. Same input as before whenever the context lies
   in that window (600-case fuzz against the old walk); it no longer holds the GIL long enough to delay

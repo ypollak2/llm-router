@@ -163,8 +163,10 @@ def _run_check(check: str | list[str], cwd: Path, timeout: float) -> tuple[bool,
 # call would see "apply", and the save/restore pairs could interleave and leave
 # "apply" set for good. This lock keeps one loop in flight at a time, which is
 # what the event loop enforced before; it is taken in the worker thread, so a
-# waiting call never blocks the MCP event loop.
-_AGENT_ENV_LOCK = threading.Lock()
+# waiting call never blocks the MCP event loop. Reentrant: _run_task_serial holds
+# it for the whole run (snapshots, clock, check) and _run_loop_scoped takes it
+# again for the env window, so the window stays locked if called on its own.
+_AGENT_ENV_LOCK = threading.RLock()
 
 
 def _run_loop_scoped(run_agent_loop, objective: str, model: str, root: Path,
@@ -196,6 +198,58 @@ def _run_loop_scoped(run_agent_loop, objective: str, model: str, root: Path,
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = prev
+
+
+def _run_task_serial(run_agent_loop, objective: str, model: str, root: Path,
+                     budget_s: float, apply_writes: bool,
+                     acceptance_check: str | list[str] | None):
+    """One whole run, in a worker thread, under ``_AGENT_ENV_LOCK``.
+
+    Everything that tells this run apart from another one sits inside the lock:
+    the before snapshot, the budget clock, the loop, the after snapshot and the
+    check. With the snapshot and clock outside it (A.0 first cut, 96596f65), a
+    run queued behind another reported that run's edits as its own changed
+    files, and its wait for the lock was charged to its budget, so its check was
+    skipped or cut short (docs/BUGS.md A.0-3). ``queued_s`` is the lock wait.
+    """
+    asked = time.monotonic()
+    with _AGENT_ENV_LOCK:
+        started = time.monotonic()
+        queued = started - asked
+        before = _snapshot(root)
+        _trace.emit("task.start", objective=objective, workdir=str(root),
+                    model=model, budget_s=budget_s, apply_writes=apply_writes,
+                    acceptance_check=acceptance_check, files_before=len(before),
+                    queued_s=round(queued, 1))
+        report, error = None, None
+        try:
+            report = _run_loop_scoped(run_agent_loop, objective, model, root,
+                                      budget_s, apply_writes)
+        except Exception as exc:                               # noqa: BLE001
+            error = f"{type(exc).__name__}: {exc}"
+
+        after = _snapshot(root)
+        changed = _changed(before, after)
+        elapsed = time.monotonic() - started
+
+        if error is not None:
+            status, check_passed, check_out = FAILED, None, ""
+        else:
+            text = (report or "").lower()
+            exhausted = any(m in text for m in _EXHAUSTION_MARKERS)
+            remaining = budget_s - elapsed
+            if acceptance_check and remaining > 0:
+                ok, check_out = _run_check(acceptance_check, root, remaining)
+                check_passed = ok
+                # Exhaustion loses to a passing check: if the objective is
+                # demonstrably met, how many turns it took is not interesting.
+                status = VERIFIED_COMPLETE if ok else (INCOMPLETE if exhausted else FAILED_CHECK)
+            elif acceptance_check:
+                status, check_passed, check_out = INCOMPLETE, None, "no budget left to run the check"
+            else:
+                # No check means nothing proved this works. Never claim it did.
+                status, check_passed, check_out = (INCOMPLETE if exhausted else PROPOSED), None, ""
+    return report, error, changed, elapsed, queued, status, check_passed, check_out
 
 
 async def llm_local_task(
@@ -241,19 +295,20 @@ async def llm_local_task(
         and the model's own final ``report``. The report is the worker's
         account of what it did and is never evidence on its own.
     """
-    if not wait:
-        from llm_router.jobs import start_job
-        return json.dumps(start_job("llm_local_task", llm_local_task(
-            objective, workdir, acceptance_check=acceptance_check, model=model,
-            budget_s=budget_s, apply_writes=apply_writes, wait=True)))
-    started = time.monotonic()
     root = Path(workdir).expanduser()
     if not root.is_dir():
+        # Checked before any job starts: a bad workdir is an answer now, not a
+        # job id whose poll says the same thing later.
         return json.dumps({
             "status": BLOCKED,
             "reason": f"workdir is not a directory: {workdir}",
             "changed_files": [], "check_passed": None, "elapsed_s": 0.0,
         })
+    if not wait:
+        from llm_router.jobs import start_job
+        return json.dumps(start_job("llm_local_task", llm_local_task(
+            objective, workdir, acceptance_check=acceptance_check, model=model,
+            budget_s=budget_s, apply_writes=apply_writes, wait=True)))
 
     try:
         from llm_router.hooks.agent_loop import run_agent_loop
@@ -270,40 +325,10 @@ async def llm_local_task(
     except Exception:                                        # noqa: BLE001
         pass
 
-    before = _snapshot(root)
-    _trace.emit("task.start", objective=objective, workdir=str(root),
-                model=model, budget_s=budget_s, apply_writes=apply_writes,
-                acceptance_check=acceptance_check, files_before=len(before))
-    report, error = None, None
-    try:
-        report = await asyncio.to_thread(
-            _run_loop_scoped, run_agent_loop, objective, model, root, budget_s,
-            apply_writes)
-    except Exception as exc:                                   # noqa: BLE001
-        error = f"{type(exc).__name__}: {exc}"
-
-    after = _snapshot(root)
-    changed = _changed(before, after)
-    elapsed = time.monotonic() - started
-
-    if error is not None:
-        status, check_passed, check_out = FAILED, None, ""
-    else:
-        text = (report or "").lower()
-        exhausted = any(m in text for m in _EXHAUSTION_MARKERS)
-        remaining = budget_s - elapsed
-        if acceptance_check and remaining > 0:
-            ok, check_out = await asyncio.to_thread(
-                _run_check, acceptance_check, root, remaining)
-            check_passed = ok
-            # Exhaustion loses to a passing check: if the objective is
-            # demonstrably met, how many turns it took is not interesting.
-            status = VERIFIED_COMPLETE if ok else (INCOMPLETE if exhausted else FAILED_CHECK)
-        elif acceptance_check:
-            status, check_passed, check_out = INCOMPLETE, None, "no budget left to run the check"
-        else:
-            # No check means nothing proved this works. Never claim it did.
-            status, check_passed, check_out = (INCOMPLETE if exhausted else PROPOSED), None, ""
+    (report, error, changed, elapsed, queued, status, check_passed,
+     check_out) = await asyncio.to_thread(
+        _run_task_serial, run_agent_loop, objective, model, root, budget_s,
+        apply_writes, acceptance_check)
 
     _trace.emit("task.end", status=status, changed_files=changed,
                 check_passed=check_passed, elapsed_s=round(elapsed, 1),
@@ -315,6 +340,7 @@ async def llm_local_task(
         "check_passed": check_passed,
         "check_output": check_out[-1500:] if check_out else "",
         "elapsed_s": round(elapsed, 1),
+        "queued_s": round(queued, 1),
         "budget_s": budget_s,
         "writes_applied": bool(apply_writes),
         "error": error,

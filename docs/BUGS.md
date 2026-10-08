@@ -65,6 +65,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | PD-HEALTH-1 | SessionStart "proxy-default not answering" warned sessions that never routed through it, and stayed silent when settings.json lost the key | fixed in `fix/proxy-default-health-v2` (hook version 27) |
 | A.0-1 | `llm_router_agent_start_session` returned `agent_not_found` from every installed wheel | fixed in `feat/agt-a0` (v16 AGT A.0) |
 | A.0-2 | `llm_act` / `llm_delegate` / `llm_local_task` blocked the MCP event loop for the whole run | fixed in `feat/agt-a0` (v16 AGT A.0) |
+| A.0-3 | A queued `llm_local_task` reported another run's edits as its own, and its lock wait ate its budget | fixed in `feat/agt-a0` (v16 AGT A.0 repair 1) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -1334,6 +1335,26 @@ Review findings on #334 (AB-1), each reproduced before it was fixed.
   job polling for both tools; unknown job id. Red on b3dd351 (7 tests). The overlap test
   `test_overlapping_local_tasks_never_leak_apply_writes` passes on b3dd351 (runs were serial)
   and fails when the lock is removed (`['apply', None] != [None, None]`).
+
+## A.0-3. A queued `llm_local_task` reported another run's edits as its own, and its lock wait ate its budget
+
+- **Symptom.** Found by the independent review of #343 at 96596f65. Two `llm_local_task` runs on
+  one workdir: A wrote `a.txt`, B wrote nothing, and B's result said `changed_files=["a.txt"]`.
+  Two runs with a 1.0 s loop, `budget_s=1.5` and a passing check: A `verified_complete`, B
+  `incomplete` with "no budget left to run the check" at 2.0 s. Both were correct on main, where the
+  whole coroutine ran without yielding.
+- **Cause.** A.0-2 moved the loop into a worker thread under `_AGENT_ENV_LOCK`, but the before
+  snapshot and `started` stayed on the event loop, before the lock. A queued run snapshotted, waited
+  while the other run wrote, then diffed; and its budget clock ran while it waited.
+- **Fix.** `_run_task_serial` holds the lock (now an `RLock`, since `_run_loop_scoped` still takes
+  it for the env window) for the before snapshot, the clock, the loop, the after snapshot and the
+  check. The lock wait is reported as `queued_s`. Same pass: `wait=False` checks `workdir` before it
+  starts a job.
+- **Test.** `tests/test_agt_a0_local_task_serial.py`:
+  `test_overlapping_local_tasks_changed_files_attribution` (red: `B changed ['a.txt']`; green:
+  `B changed []`), `test_queued_local_task_budget_not_eaten_by_lock_wait` (red: second run
+  `incomplete`; green: both `verified_complete`, second `queued_s=1.0`),
+  `test_wait_false_rejects_a_bad_workdir_without_a_job` (red: `running`; green: `blocked`).
 
 ## CI-1. `copytree` of a fixture repo raced git's background maintenance
 
