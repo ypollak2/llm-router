@@ -434,26 +434,30 @@ def read_rows(since: float | None = None, until: float | None = None) -> list[di
 
 
 def _main(argv: list[str] | None = None) -> int:
-    """``python -m llm_router.hook_latency record-raw <hook> <event> <elapsed_ms>``
+    """``python -m llm_router.hook_latency record-raw <hook> <event> <elapsed_ms> [<session_id>]``
 
     Appends one row for a process that cannot import this module in-line (the
-    statusline shell command). Silent: exit 0 when written, 1 when not, 2 on a
-    usage error. Never prints on success, since a caller may be a status line."""
+    statusline shell command). The optional session id goes on the row, so a
+    reader can count sessions and drop research / executor ones (PLAN v16 §1.4
+    rules 4 and 8); an empty one is left off. Silent: exit 0 when written, 1
+    when not, 2 on a usage error. Never prints on success, since a caller may be
+    a status line."""
     import sys
 
     args = list(sys.argv[1:] if argv is None else argv)
-    if len(args) != 4 or args[0] != "record-raw":
-        print("usage: python -m llm_router.hook_latency record-raw <hook> <event> <elapsed_ms>",
-              file=sys.stderr)
+    if len(args) not in (4, 5) or args[0] != "record-raw":
+        print("usage: python -m llm_router.hook_latency record-raw <hook> <event> <elapsed_ms>"
+              " [<session_id>]", file=sys.stderr)
         return 2
-    _cmd, hook, event, raw = args
+    _cmd, hook, event, raw = args[:4]
+    sid = args[4].strip()[:128] if len(args) == 5 else ""
     try:
         elapsed = float(raw)
     except ValueError:
         return 2
     if not hook or elapsed != elapsed or elapsed < 0:  # NaN or negative
         return 2
-    return 0 if record(hook, event, elapsed) else 1
+    return 0 if record(hook, event, elapsed, session_id=sid or None) else 1
 
 
 if __name__ == "__main__":

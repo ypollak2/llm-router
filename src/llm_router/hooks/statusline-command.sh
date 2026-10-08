@@ -25,14 +25,40 @@ if [ -n "$_slt_on" ] && [ "$_slt_on" != "0" ] && [ "$_slt_on" != "off" ]; then
         _slt_t0=$(perl -MTime::HiRes=time -e 'printf "%.0f",time*1000' 2>/dev/null)
     fi
 fi
+# A python that can import llm_router: sets $_chz_py, or leaves it empty. Shared
+# with the money segment below, which documents the resolution order.
+_chz_find_py() {
+    _chz_py=""
+    for _cand in \
+        "$(command -v llm-router 2>/dev/null | xargs -I{} head -1 {} 2>/dev/null | sed 's|^#!||' | awk '{print $1}')" \
+        "$(command -v llm_router 2>/dev/null | xargs -I{} head -1 {} 2>/dev/null | sed 's|^#!||' | awk '{print $1}')" \
+        "$(command -v python3 2>/dev/null)" \
+        "$(command -v python 2>/dev/null)" \
+        "$HOME/.local/pipx/venvs/llm-routing/bin/python" \
+        "$HOME/.local/bin/python3" \
+        "$HOME/Projects/llm-router/.venv/bin/python3" \
+        "$(dirname "$0")/../../.venv/bin/python3"; do
+        if [ -n "$_cand" ] && [ -x "$_cand" ] && "$_cand" -c "import llm_router" 2>/dev/null; then
+            _chz_py="$_cand"; break
+        fi
+    done
+}
+# The row carries the session id from the session JSON on stdin ($input), so a
+# reader can count sessions and drop research / executor ones (PLAN v16 §1.4
+# rules 4 and 8). Matched in bash (no process). The interpreter search runs in
+# the backgrounded child, after the clock stopped: the fast line and a full line
+# without usage.db never set $_chz_py, and a bare python3 that cannot import
+# llm_router would write no row.
 _slt_finish() {
     [ -n "$_slt_t0" ] || return 0
-    local _t1 _py
+    local _t1 _sid="" _re='"session_id"[[:space:]]*:[[:space:]]*"([A-Za-z0-9._-]+)"'
     _t1=$(perl -MTime::HiRes=time -e 'printf "%.0f",time*1000' 2>/dev/null) || return 0
     [ -n "$_t1" ] || return 0
-    _py="${_chz_py:-python3}"
-    ("$_py" -m llm_router.hook_latency record-raw statusline Statusline "$((_t1 - _slt_t0))" \
-        </dev/null >/dev/null 2>&1 &)
+    [[ "$input" =~ $_re ]] && _sid="${BASH_REMATCH[1]}"
+    ( { [ -n "$_chz_py" ] || _chz_find_py
+        [ -n "$_chz_py" ] && "$_chz_py" -m llm_router.hook_latency record-raw \
+            statusline Statusline "$((_t1 - _slt_t0))" "$_sid"
+      } </dev/null >/dev/null 2>&1 & )
     return 0
 }
 [ -n "$_slt_t0" ] && trap _slt_finish EXIT
@@ -76,9 +102,11 @@ _tick="${0%/*}/llm_router_statusline_tick.py"
 [ -f "$_tick" ] || _tick="${0%/*}/../statusline_tick.py"
 if [ "$_sl_mode" = "fast" ]; then
     if [ -f "$_tick" ] && command -v python3 >/dev/null 2>&1; then
-        # A timed call cannot exec (the EXIT trap would never run).
+        # A timed call cannot exec (the EXIT trap would never run). It reads the
+        # session JSON itself so the row can carry the session id, and hands it on.
         if [ -n "$_slt_t0" ]; then
-            python3 -I -S "$_tick"
+            input=$(cat)
+            printf '%s' "$input" | python3 -I -S "$_tick"
             exit $?
         fi
         exec python3 -I -S "$_tick"
@@ -407,20 +435,8 @@ if [ -f "$USAGE_DB" ]; then
     #
     # The dev-checkout fallback was also wrong by one level. This script installs
     # to ~/.claude/hooks/, so ../../../ is $HOME's parent, not a checkout.
-    _chz_py=""
-    for _cand in \
-        "$(command -v llm-router 2>/dev/null | xargs -I{} head -1 {} 2>/dev/null | sed 's|^#!||' | awk '{print $1}')" \
-        "$(command -v llm_router 2>/dev/null | xargs -I{} head -1 {} 2>/dev/null | sed 's|^#!||' | awk '{print $1}')" \
-        "$(command -v python3 2>/dev/null)" \
-        "$(command -v python 2>/dev/null)" \
-        "$HOME/.local/pipx/venvs/llm-routing/bin/python" \
-        "$HOME/.local/bin/python3" \
-        "$HOME/Projects/llm-router/.venv/bin/python3" \
-        "$(dirname "$0")/../../.venv/bin/python3"; do
-        if [ -n "$_cand" ] && [ -x "$_cand" ] && "$_cand" -c "import llm_router" 2>/dev/null; then
-            _chz_py="$_cand"; break
-        fi
-    done
+    # The candidate list lives in _chz_find_py (top of this file).
+    _chz_find_py
 
     # "today" is every session since local midnight, unioned across all five
     # usage tables via dashboard_data.summary() — not this session, and not

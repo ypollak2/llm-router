@@ -642,6 +642,16 @@ def _in_window(ts: Any, since: float, until: float) -> bool:
     return t is not None and since <= t <= until
 
 
+#: Hooks whose router-added bar PLAN v16 defers (S6: "16.1: agent-route
+#: router-added"). Their routed-model phases are not in ``hook_latency.MODEL_PHASES``,
+#: so the whole delegation counts against the 300 ms bar and G1 reports them OVER;
+#: the line says why, so an OVER here is not read as a P0.9 regression.
+_G1_DEFERRED = {
+    "agent-route": ("routed-model phases (codex_delegation, direct_subagent, cli_delegation) "
+                    "are not subtracted; router-added bar deferred to 16.1 (PLAN v16 S6)"),
+}
+
+
 def _g1_hook(days: int, now: float, killed: int | None) -> dict:
     """p50 / p95 wall time per hook against that hook's budget.
 
@@ -691,6 +701,9 @@ def _g1_hook(days: int, now: float, killed: int | None) -> dict:
                 over.append(f"{name} p95={p95:.0f}ms>{budget}ms")
             if worst is None or p95 / budget > worst[0]:
                 worst = (p95 / budget, name, round(p95))
+        if name in _G1_DEFERRED:
+            entry["deferred"] = _G1_DEFERRED[name]
+            lines[-1] += f"; NOTE: {_G1_DEFERRED[name]}"
         hooks[name] = entry
     if killed is None:
         lines.append("killed by the host (leaves no row) (auto-route only): not countable yet -- no "

@@ -106,6 +106,18 @@ def test_kpi_judges_router_added_and_reports_it_for_a_10s_draft():
     assert "router-added p50=120ms p95=120ms vs 300ms budget" in g1["lines"][0]
 
 
+def test_kpi_says_the_agent_route_bar_is_deferred():
+    """agent-route's routed-model phases are not MODEL_PHASES, so it stays OVER
+    the 300 ms bar; PLAN v16 S6 defers that bar to 16.1 and the output says so."""
+    for i in range(60):
+        hl.record("agent-route", "PreToolUse", 63_720.0, now=NOW - 60 - i,
+                  phases_ms={"codex_delegation": 63_000.0})
+    g1 = kpi._g1_hook(7, NOW, 0)
+    ar = g1["hooks"]["agent-route"]
+    assert ar["p95_ms"] == 63_720.0 and "16.1" in ar["deferred"]
+    assert "codex_delegation" in g1["lines"][0] and "deferred to 16.1" in g1["lines"][0]
+
+
 # ── router_added_ms on the row ───────────────────────────────────────────────
 
 
@@ -260,6 +272,83 @@ def test_statusline_writes_nothing_when_timing_is_off(tmp_path):
     _run_statusline(home, _shim_python(tmp_path))
     time.sleep(0.3)
     assert not (home / ".llm-router" / "hook_latency.jsonl").exists()
+
+
+# ── P0.9 repair 1: the statusline row carries the session id ────────────────
+# Without it a reader cannot count sessions or drop research / executor ones
+# (PLAN v16 §1.4 rules 4 and 8), so P0.9-c could never be judged.
+
+SID = "0b9e7c1a-5d2f-4e3b-9a61-7f0c2d4e8b15"
+
+
+def test_record_raw_puts_the_session_id_on_the_row(tmp_path):
+    home = tmp_path / "h"
+    (home / ".llm-router").mkdir(parents=True)
+    r = subprocess.run([sys.executable, "-m", "llm_router.hook_latency", "record-raw",
+                        "statusline", "Statusline", "42", SID], env=_env(home),
+                       capture_output=True, text=True, timeout=20)
+    assert r.returncode == 0 and r.stdout == ""
+    (row,) = [json.loads(x) for x in (home / ".llm-router" / "hook_latency.jsonl").read_text().splitlines()]
+    assert (row["hook"], row["elapsed_ms"], row["session_id"]) == ("statusline", 42.0, SID)
+
+
+def test_record_raw_leaves_an_empty_session_id_off_the_row():
+    assert hl._main(["record-raw", "statusline", "Statusline", "42", "  "]) == 0
+    (row,) = _lines()
+    assert "session_id" not in row
+
+
+def test_record_raw_rejects_six_args():
+    assert hl._main(["record-raw", "x", "E", "1", SID, "extra"]) == 2
+    assert not hl.store_path().exists()
+
+
+def _wait_row(store: Path) -> dict:
+    deadline = time.monotonic() + 15
+    while not store.exists() and time.monotonic() < deadline:  # the write is backgrounded
+        time.sleep(0.05)
+    (row,) = [json.loads(x) for x in store.read_text().splitlines()]
+    return row
+
+
+def _run_statusline_with(home: Path, bindir: Path, stdin: str, **extra) -> None:
+    env = _env(home, PATH=f"{bindir}:{os.environ.get('PATH', '')}", **extra)
+    r = subprocess.run(["bash", str(STATUSLINE)], input=stdin, env=env,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+
+
+@pytest.mark.skipif(shutil.which("perl") is None, reason="needs perl (the macOS clock)")
+@pytest.mark.parametrize("mode", ["full", "fast"])
+def test_statusline_row_carries_the_session_id_from_stdin(tmp_path, mode):
+    home = tmp_path / "h"
+    (home / ".llm-router").mkdir(parents=True)
+    _run_statusline_with(home, _shim_python(tmp_path),
+                         json.dumps({"cwd": "/tmp", "session_id": SID}),
+                         LLM_ROUTER_STATUSLINE_TIMING="all", LLM_ROUTER_STATUSLINE=mode)
+    row = _wait_row(home / ".llm-router" / "hook_latency.jsonl")
+    assert row["hook"] == "statusline" and row.get("session_id") == SID
+
+
+@pytest.mark.skipif(shutil.which("perl") is None, reason="needs perl (the macOS clock)")
+def test_statusline_row_is_written_when_bare_python3_cannot_import_llm_router(tmp_path):
+    """The fast line, and a full line without usage.db, never resolve $_chz_py.
+    The row must still be written through an interpreter that imports
+    llm_router (here: the one behind the `llm-router` CLI), not bare python3."""
+    home = tmp_path / "h"
+    (home / ".llm-router").mkdir(parents=True)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    py3 = bindir / "python3"
+    py3.write_text("#!/bin/sh\nexit 1\n")  # cannot import anything
+    py3.chmod(0o755)
+    cli = bindir / "llm-router"
+    cli.write_text(f"#!{sys.executable}\nraise SystemExit(0)\n")
+    cli.chmod(0o755)
+    _run_statusline_with(home, bindir, json.dumps({"cwd": "/tmp", "session_id": SID}),
+                         LLM_ROUTER_STATUSLINE_TIMING="all")
+    row = _wait_row(home / ".llm-router" / "hook_latency.jsonl")
+    assert row["hook"] == "statusline" and row.get("session_id") == SID
 
 
 def _wrapper_only_script(tmp_path: Path) -> Path:

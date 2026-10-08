@@ -27,6 +27,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 15 | MCP routing ran on Claude pressure 0.0 for the life of the process | fixed in this change (v16 P0.2) |
 | 16 | Critical-pressure override sent `/model claude-opus-4-6`, a retired id | fixed in this change (v16 P0.2) |
 | P09-1 | G1 called a 16 s auto-route p95 "within budget" | fixed in `perf/hook-budgets` (P0.9 tasks 1-2) |
+| P09-7 | Statusline timing rows carried no session id, and needed a python3 that imports llm_router | fixed in `perf/hook-budgets` (P0.9 repair 1) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -421,3 +422,28 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `test_kpi_judges_router_added_and_reports_it_for_a_10s_draft`,
   `test_the_row_carries_router_added_with_a_nested_cold_wait_subtracted_once`,
   `test_statusline_timing_all_writes_a_statusline_row`.
+
+## P09-7. Statusline timing rows carried no session id, and needed a python3 that imports llm_router
+
+- **Symptom.** The statusline wrote its row through
+  `record-raw statusline Statusline <ms>`, and `record-raw` took exactly 4 arguments, so no
+  row could carry `session_id`, although the statusline gets the session JSON on stdin.
+  With 0 rows carrying a session id, P0.9-c (`statusline p95 <= 100 ms over >= 200*`) cannot
+  count sessions (PLAN v16 §1.4 rule 4) or drop research and executor sessions (rule 8), so
+  it could never be judged. Separately, the writer ran `${_chz_py:-python3}`; `_chz_py` is
+  set only in the full layout when `usage.db` exists, so in the fast layout, or wherever bare
+  `python3` cannot import llm_router, the backgrounded write failed silently. The test hid
+  this with a `python3` shim that can import the checkout.
+- **Cause.** The raw writer was designed for the elapsed time only, and the interpreter
+  search lived inside the money segment.
+- **Fix.** `record-raw <hook> <event> <elapsed_ms> [<session_id>]`. The statusline matches
+  `"session_id"` in its stdin JSON in bash (no process) and passes it; the timed fast path
+  reads stdin itself and pipes it to the tick. The interpreter search is `_chz_find_py`
+  (one list, shared with the money segment) and runs inside the backgrounded child, after
+  the clock has stopped.
+- **Test.** `tests/test_p09_hook_budgets.py`:
+  `test_record_raw_puts_the_session_id_on_the_row`,
+  `test_record_raw_leaves_an_empty_session_id_off_the_row`,
+  `test_statusline_row_carries_the_session_id_from_stdin[full|fast]`,
+  `test_statusline_row_is_written_when_bare_python3_cannot_import_llm_router` (all 5 test ids
+  fail on 38516fc8 and pass on head).
