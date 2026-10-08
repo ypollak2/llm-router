@@ -64,6 +64,9 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | P03-1 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
 | LC-1 | The "no slow callback" classifier test failed on a loaded CI runner | fixed in this change (test-only) |
 | PD-HEALTH-1 | SessionStart "proxy-default not answering" warned sessions that never routed through it, and stayed silent when settings.json lost the key | fixed in `fix/proxy-default-health-v2` (hook version 27) |
+| A.0-1 | `llm_router_agent_start_session` returned `agent_not_found` from every installed wheel | fixed in `feat/agt-a0` (v16 AGT A.0) |
+| A.0-2 | `llm_act` / `llm_delegate` / `llm_local_task` blocked the MCP event loop for the whole run | fixed in `feat/agt-a0` (v16 AGT A.0) |
+| A.0-3 | A queued `llm_local_task` reported another run's edits as its own, and its lock wait ate its budget | fixed in `feat/agt-a0` (v16 AGT A.0 repair 1) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -1308,6 +1311,69 @@ Review findings on #334 (AB-1), each reproduced before it was fixed.
 - **Test.** `uv build --sdist`, then `tar tzf dist/*.tar.gz | grep -c /tests/`: 4 before,
   0 after; `llm_router/agents/session.py` still present. The slow test above covers it when run
   with `-m ""`.
+
+## A.0-1. `llm_router_agent_start_session` returned `agent_not_found` from every installed wheel
+
+- **Symptom.** Installed from a wheel, `llm_router_agent_list` listed no agents and
+  `llm_router_agent_start_session("code-reviewer")` returned
+  `{"error": "agent_not_found", "available_agents": []}`. From a source checkout it worked, so
+  no test saw it. Reproduced on b3dd351 by `tests/test_agt_a0_agents_yaml_wheel.py` (wheel
+  built with `uv build`, installed into a temp venv, cwd outside the repo, isolated HOME):
+  `ids=[]`, config path `<venv>/lib/python3.14/config/agents.yaml`, which does not exist.
+- **Cause.** The template lived at the repo root (`config/agents.yaml`), which is not in the
+  package. `tools/agents._default_config_path` fell back to
+  `Path(__file__).parents[3] / "config" / "agents.yaml"`: the repo root in a checkout, a
+  non-existent path under the venv in an install; a missing file means an empty registry.
+- **Fix.** The file moved to `src/llm_router/data/agents.yaml`; the fallback is
+  `importlib.resources.files("llm_router.data") / "agents.yaml"`. The env override and the
+  project `config/agents.yaml` walk-up are unchanged.
+- **Test.** `tests/test_agt_a0_agents_yaml_wheel.py::test_agents_yaml_found_from_installed_wheel`
+  builds and installs the wheel and asserts that `llm_router` was imported from the venv, the
+  three shipped ids are listed, and a `code-reviewer` session starts. Red on b3dd351, green on
+  the fix.
+
+## A.0-2. `llm_act` / `llm_delegate` / `llm_local_task` blocked the MCP event loop for the whole run
+
+- **Symptom.** While one `llm_act` ran, every other call to the MCP server waited for it, and
+  two `llm_act` calls took the sum of their times. On b3dd351,
+  `tests/test_agt_a0_async_agent_loops.py` measured a 30 s `llm_act` with a 20 ms ticker on the
+  loop: 1 tick, max lag 30018 ms; two parallel 3 s calls 6.09 s vs 3.03 s for one (ratio 2.007);
+  `llm_local_task` (2 s loop + 2 s check): 1 tick, max lag 4083 ms.
+- **Cause.** `tools/agentic.llm_delegate` called the synchronous `run_delegation` (model calls,
+  subprocesses) directly inside `async def`; `tools/local_task.llm_local_task` did the same with
+  `run_agent_loop` and `_run_check`.
+- **Fix.** All three run through `asyncio.to_thread`. The P0.13 project root is resolved before
+  the run starts, on the request. `llm_local_task` sets `LLM_ROUTER_AGENT_WRITES=apply` in the
+  process environment for its run, which is unsafe once two runs overlap (a propose-only run
+  would see `apply`, and the save/restore pairs could leave it set), so its loop runs under a
+  `threading.Lock` taken inside the worker thread: `llm_local_task` runs stay serial, as
+  before, without blocking the loop. New `wait=False` returns a job id
+  (`llm_router/jobs.py`), polled with `llm_router_session(action="job", id=...)`.
+- **Test.** `tests/test_agt_a0_async_agent_loops.py`: lag <= 100 ms with >= 1000 ticks during a
+  30 s `llm_act`; two parallel calls <= 1.3x one; `llm_local_task` lag <= 100 ms; `wait=False`
+  job polling for both tools; unknown job id. Red on b3dd351 (7 tests). The overlap test
+  `test_overlapping_local_tasks_never_leak_apply_writes` passes on b3dd351 (runs were serial)
+  and fails when the lock is removed (`['apply', None] != [None, None]`).
+
+## A.0-3. A queued `llm_local_task` reported another run's edits as its own, and its lock wait ate its budget
+
+- **Symptom.** Found by the independent review of #343 at 96596f65. Two `llm_local_task` runs on
+  one workdir: A wrote `a.txt`, B wrote nothing, and B's result said `changed_files=["a.txt"]`.
+  Two runs with a 1.0 s loop, `budget_s=1.5` and a passing check: A `verified_complete`, B
+  `incomplete` with "no budget left to run the check" at 2.0 s. Both were correct on main, where the
+  whole coroutine ran without yielding.
+- **Cause.** A.0-2 moved the loop into a worker thread under `_AGENT_ENV_LOCK`, but the before
+  snapshot and `started` stayed on the event loop, before the lock. A queued run snapshotted, waited
+  while the other run wrote, then diffed; and its budget clock ran while it waited.
+- **Fix.** `_run_task_serial` holds the lock (now an `RLock`, since `_run_loop_scoped` still takes
+  it for the env window) for the before snapshot, the clock, the loop, the after snapshot and the
+  check. The lock wait is reported as `queued_s`. Same pass: `wait=False` checks `workdir` before it
+  starts a job.
+- **Test.** `tests/test_agt_a0_local_task_serial.py`:
+  `test_overlapping_local_tasks_changed_files_attribution` (red: `B changed ['a.txt']`; green:
+  `B changed []`), `test_queued_local_task_budget_not_eaten_by_lock_wait` (red: second run
+  `incomplete`; green: both `verified_complete`, second `queued_s=1.0`),
+  `test_wait_false_rejects_a_bad_workdir_without_a_job` (red: `running`; green: `blocked`).
 
 ## CI-1. `copytree` of a fixture repo raced git's background maintenance
 

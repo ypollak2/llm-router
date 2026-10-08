@@ -1,6 +1,7 @@
 """Agent registry — load AgentProfile definitions from YAML config.
 
-Profiles live in `config/agents.yaml`. The registry is constructed once at
+Profiles ship in `llm_router/data/agents.yaml` (a project `config/agents.yaml`
+or `$LLM_ROUTER_AGENTS_CONFIG` overrides it). The registry is constructed once at
 process start; lookups are O(1). Hot-reload is not supported — restart the
 MCP server to pick up changes.
 """
