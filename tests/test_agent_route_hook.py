@@ -65,6 +65,8 @@ def _run(
     model_pin: bool = False,
     entrypoint: str | None = None,
     extra_env: dict[str, str] | None = None,
+    agent_id: str | None = None,
+    registry: dict[str, int] | None = None,
 ) -> tuple[int, dict | None]:
     """Run the agent-route hook with given parameters.
 
@@ -87,14 +89,17 @@ def _run(
     Returns:
         (exit_code, parsed_stdout_dict_or_None)
     """
-    payload = json.dumps({
+    hook_payload = {
         "hook_event_name": "PreToolUse",
         "tool_name": "Agent",
         "tool_input": {
             "prompt": prompt,
             "subagent_type": subagent_type,
         },
-    })
+    }
+    if agent_id is not None:  # fired from INSIDE a subagent (top-level has no agent_id)
+        hook_payload["agent_id"] = agent_id
+    payload = json.dumps(hook_payload)
 
     env = os.environ.copy()
     # DIRECT subagent execution makes live model calls — non-deterministic and
@@ -119,11 +124,12 @@ def _run(
         llmr_dir.mkdir(parents=True, exist_ok=True)
 
         # Write the per-session depth file if depth is specified
-        if agent_depth is not None and session_id is not None:
+        if (agent_depth is not None or registry is not None) and session_id is not None:
             _depth_path_for(tmp_path, session_id).write_text(json.dumps({
-                "depth": agent_depth,
+                "depth": agent_depth or 0,
                 "session_id": session_id,
                 "ts": 0,
+                **({"agents": registry} if registry is not None else {}),
             }))
 
         # Write session_id.txt (legacy fallback — only consulted when
@@ -156,6 +162,59 @@ def _run(
     return result.returncode, parsed
 
 
+class TestBreakerMeasuresNestingNotSiblings:
+    """Bug AB-1: 6 parallel Agent calls from ONE top-level session tripped a
+    "nested agents" breaker at call 4, because the in-flight count was compared
+    with the nesting limit."""
+
+    def test_six_top_level_siblings_all_approved(self, tmp_path):
+        outs = [
+            _run(f"list all files in src/ (task {i})", session_id="sib", max_depth="3",
+                 tmp_path=tmp_path)
+            for i in range(6)
+        ]
+        assert [o for _, o in outs] == [None] * 6  # none blocked
+        data = json.loads(_depth_path_for(tmp_path, "sib").read_text())
+        assert data["depth"] == 6  # six in flight, none of them nested
+
+    def test_sibling_subagents_of_one_subagent_are_approved(self, tmp_path):
+        for i in range(5):
+            _, out = _run(f"list all files in src/ ({i})", session_id="sib2", max_depth="3",
+                          tmp_path=tmp_path, agent_id="a-child", registry={"a-child": 1})
+            assert out is None
+
+    def test_real_nesting_deeper_than_limit_still_trips(self, tmp_path):
+        # depth-3 agent tries to spawn a depth-4 agent, with nothing else in flight
+        _, out = _run("analyze the codebase", session_id="deep", max_depth="3",
+                      tmp_path=tmp_path, agent_id="a3", registry={"a1": 1, "a2": 2, "a3": 3})
+        assert out is not None and out["decision"] == "block"
+        assert "nesting limit" in out["reason"].lower()
+        assert "depth 3" in out["reason"] and "depth 4" in out["reason"]
+
+    def test_depth_three_agent_is_the_last_allowed_level(self, tmp_path):
+        _, out = _run("list all files in src/", session_id="ok2", max_depth="3",
+                      tmp_path=tmp_path, agent_id="a2", registry={"a2": 2})
+        assert out is None  # depth 2 -> child at depth 3 == limit
+
+    def test_concurrency_cap_trips_and_names_itself(self, tmp_path):
+        _, out = _run("list all files in src/", session_id="cap", agent_depth=16,
+                      tmp_path=tmp_path, extra_env={"LLM_ROUTER_MAX_CONCURRENT_AGENTS": "16"})
+        assert out is not None and out["decision"] == "block"
+        assert "agents in flight" in out["reason"] and "nested" not in out["reason"].lower()
+
+    def test_subagent_start_claims_registered_depth(self, tmp_path):
+        _run("list all files in src/", session_id="reg", tmp_path=tmp_path,
+             agent_id="a1", registry={"a1": 1})  # queues child depth 2
+        start = Path(__file__).parent.parent / "src" / "llm_router" / "hooks" / "subagent-start.py"
+        env = {**os.environ, "HOME": str(tmp_path), "LLM_ROUTER_HOME": str(tmp_path / ".llm-router")}
+        env.pop("CLAUDE_CODE_SESSION_ID", None)
+        subprocess.run([sys.executable, str(start)], env=env, text=True, capture_output=True,
+                       input=json.dumps({"hook_event_name": "SubagentStart",
+                                         "agent_id": "a2", "agent_type": "general-purpose"}))
+        data = json.loads(_depth_path_for(tmp_path, "reg").read_text())
+        assert data["agents"]["a2"] == 2 and data["pending"] == []
+
+
 class TestDepthGuardBlocks:
     """Test that depth guard blocks when nesting exceeds max_depth."""
 
@@ -165,15 +224,15 @@ class TestDepthGuardBlocks:
             "analyze the codebase",
             subagent_type="general-purpose",
             session_id="test-session-1",
-            agent_depth=3,  # at max (3)
+            agent_id="caller", registry={"caller": 3},  # at max (3)
             max_depth="3",
             tmp_path=tmp_path,
         )
         assert code == 0
         assert out is not None
         assert out["decision"] == "block"
-        assert "circuit breaker" in out["reason"].lower()
-        assert "3/3" in out["reason"]
+        assert "nesting limit" in out["reason"].lower()
+        assert "depth 3" in out["reason"] and "limit of 3" in out["reason"]
 
     def test_above_max_depth_blocks(self, tmp_path):
         """When current_depth > max_depth, new Agent calls are blocked."""
@@ -181,15 +240,15 @@ class TestDepthGuardBlocks:
             "analyze the codebase",
             subagent_type="general-purpose",
             session_id="test-session-2",
-            agent_depth=4,  # above max (3)
+            agent_id="caller", registry={"caller": 4},  # above max (3)
             max_depth="3",
             tmp_path=tmp_path,
         )
         assert code == 0
         assert out is not None
         assert out["decision"] == "block"
-        assert "circuit breaker" in out["reason"].lower()
-        assert "4/3" in out["reason"]
+        assert "nesting limit" in out["reason"].lower()
+        assert "depth 4" in out["reason"] and "limit of 3" in out["reason"]
 
     def test_below_max_depth_approves_then_increments(self, tmp_path):
         """When current_depth < max_depth, Agent calls are approved and depth increments."""
@@ -596,14 +655,14 @@ class TestEnvVarOverride:
             "analyze the codebase",
             subagent_type="general-purpose",
             session_id="test-session-9",
-            agent_depth=5,  # at max (5)
+            agent_id="caller", registry={"caller": 5},  # at max (5)
             max_depth="5",
             tmp_path=tmp_path,
         )
         assert code == 0
         assert out is not None
         assert out["decision"] == "block"
-        assert "5/5" in out["reason"]
+        assert "depth 5" in out["reason"] and "limit of 5" in out["reason"]
 
     def test_env_var_max_depth_1(self, tmp_path):
         """LLM_ROUTER_MAX_AGENT_DEPTH=1 blocks at depth=1."""
@@ -611,14 +670,14 @@ class TestEnvVarOverride:
             "analyze",
             subagent_type="general-purpose",
             session_id="test-session-10",
-            agent_depth=1,  # at max (1)
+            agent_id="caller", registry={"caller": 1},  # at max (1)
             max_depth="1",
             tmp_path=tmp_path,
         )
         assert code == 0
         assert out is not None
         assert out["decision"] == "block"
-        assert "1/1" in out["reason"]
+        assert "depth 1" in out["reason"] and "limit of 1" in out["reason"]
 
     def test_env_var_invalid_defaults_to_3(self, tmp_path):
         """Invalid LLM_ROUTER_MAX_AGENT_DEPTH defaults to 3."""
@@ -626,14 +685,14 @@ class TestEnvVarOverride:
             "analyze",
             subagent_type="general-purpose",
             session_id="test-session-11",
-            agent_depth=3,  # at default (3)
+            agent_id="caller", registry={"caller": 3},  # at default (3)
             max_depth="not_a_number",
             tmp_path=tmp_path,
         )
         assert code == 0
         assert out is not None
         assert out["decision"] == "block"
-        assert "3/3" in out["reason"]
+        assert "depth 3" in out["reason"] and "limit of 3" in out["reason"]
 
 
 class TestDecisionReason:
@@ -645,14 +704,13 @@ class TestDecisionReason:
             "analyze",
             subagent_type="general-purpose",
             session_id="test-session-12",
-            agent_depth=2,
+            agent_id="caller", registry={"caller": 2},
             max_depth="2",
             tmp_path=tmp_path,
         )
         assert out is not None
-        assert "circuit breaker" in out["reason"].lower()
-        assert "2/2" in out["reason"]
-        assert "Too many nested agents" in out["reason"]
+        assert "nesting limit" in out["reason"].lower()
+        assert "depth 2" in out["reason"] and "limit of 2" in out["reason"]
         assert "llm_* MCP tools" in out["reason"]
 
 
@@ -756,14 +814,14 @@ class TestHeadlessGuard:
             "analyze",
             subagent_type="general-purpose",
             session_id="test-headless-2",
-            agent_depth=2,
+            agent_id="caller", registry={"caller": 2},
             max_depth="2",
             entrypoint="cli",
             tmp_path=tmp_path,
         )
         assert out is not None
         assert out["decision"] == "block"
-        assert "circuit breaker" in out["reason"].lower()
+        assert "nesting limit" in out["reason"].lower()
 
     def test_unset_entrypoint_is_treated_as_interactive(self, tmp_path):
         """No CLAUDE_CODE_ENTRYPOINT at all (stripped-down environment) must
@@ -772,14 +830,14 @@ class TestHeadlessGuard:
             "analyze",
             subagent_type="general-purpose",
             session_id="test-headless-3",
-            agent_depth=2,
+            agent_id="caller", registry={"caller": 2},
             max_depth="2",
             entrypoint=None,
             tmp_path=tmp_path,
         )
         assert out is not None
         assert out["decision"] == "block"
-        assert "circuit breaker" in out["reason"].lower()
+        assert "nesting limit" in out["reason"].lower()
 
     def test_claude_desktop_entrypoint_is_not_skipped(self, tmp_path):
         """The desktop app is interactive (a person is driving it), not a
@@ -788,14 +846,14 @@ class TestHeadlessGuard:
             "analyze",
             subagent_type="general-purpose",
             session_id="test-headless-4",
-            agent_depth=2,
+            agent_id="caller", registry={"caller": 2},
             max_depth="2",
             entrypoint="claude-desktop",
             tmp_path=tmp_path,
         )
         assert out is not None
         assert out["decision"] == "block"
-        assert "circuit breaker" in out["reason"].lower()
+        assert "nesting limit" in out["reason"].lower()
 
     def test_headless_override_env_restores_routing(self, tmp_path):
         """LLM_ROUTER_AGENT_ROUTE_HEADLESS=on is the opt-in escape hatch: a
@@ -805,7 +863,7 @@ class TestHeadlessGuard:
             "analyze",
             subagent_type="general-purpose",
             session_id="test-headless-5",
-            agent_depth=2,
+            agent_id="caller", registry={"caller": 2},
             max_depth="2",
             entrypoint="sdk-cli",
             extra_env={"LLM_ROUTER_AGENT_ROUTE_HEADLESS": "on"},
@@ -813,7 +871,7 @@ class TestHeadlessGuard:
         )
         assert out is not None
         assert out["decision"] == "block"
-        assert "circuit breaker" in out["reason"].lower()
+        assert "nesting limit" in out["reason"].lower()
 
 
 def _north_star_rows(tmp_path: Path) -> list[dict]:

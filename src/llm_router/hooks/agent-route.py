@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 13
+# llm_router-hook-version: 14
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -306,6 +306,14 @@ def _get_max_depth() -> int:
         return 3
 
 
+def _get_max_concurrent() -> int:
+    """LLM_ROUTER_MAX_CONCURRENT_AGENTS: runaway cap on agents in flight, default 16."""
+    try:
+        return int(os.environ.get("LLM_ROUTER_MAX_CONCURRENT_AGENTS", "16"))
+    except (ValueError, TypeError):
+        return 16
+
+
 def _get_session_id() -> str:
     """Return a session identifier unique to THIS Claude Code process.
 
@@ -341,23 +349,86 @@ def _depth_file(session_id: str) -> Path:
     return _router_home() / f"agent_depth_{safe}.json"
 
 
-def _read_agent_depth(session_id: str) -> int:
-    """Read current agent nesting depth for the given session."""
+def _read_state(session_id: str) -> dict:
+    """Whole per-session breaker state (never raises)."""
     try:
         data = json.loads(_depth_file(session_id).read_text())
-        return int(data.get("depth", 0))
-    except (FileNotFoundError, json.JSONDecodeError, ValueError):
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+
+def _write_state(session_id: str, state: dict) -> None:
+    """Persist breaker state, keeping the nesting registry keys other hooks wrote."""
+    state = dict(state)
+    state["depth"] = max(0, int(state.get("depth", 0)))
+    state["session_id"] = session_id
+    state["ts"] = time.time()
+    _depth_file(session_id).write_text(json.dumps(state))
+
+
+def _read_agent_depth(session_id: str) -> int:
+    """Agents currently in flight (spawned by PreToolUse, released by PostToolUse).
+
+    This is a CONCURRENCY count, not nesting depth. It used to be compared with
+    the nesting limit, so 4 parallel siblings from one top-level session
+    tripped a "nested agents" breaker (docs/BUGS.md, bug AB-1).
+    """
+    try:
+        return int(_read_state(session_id).get("depth", 0))
+    except (ValueError, TypeError):
         return 0
 
 
 def _write_agent_depth(session_id: str, depth: int) -> None:
-    """Persist agent nesting depth for the current session (never below 0)."""
-    depth = max(0, depth)
-    _depth_file(session_id).write_text(json.dumps({
-        "depth": depth,
-        "session_id": session_id,
-        "ts": time.time(),
-    }))
+    """Persist the in-flight agent count for the session (never below 0)."""
+    state = _read_state(session_id)
+    state["depth"] = depth
+    _write_state(session_id, state)
+
+
+# Nesting registry. A hook payload fired from inside a subagent carries
+# ``agent_id``; one fired by the top-level session does not. Claude Code gives
+# no parent link, so each spawn records the depth its child WILL have in a
+# short FIFO ("pending"), and subagent-start.py, which does see the child's
+# agent_id, claims the oldest entry into "agents". Siblings share a depth, so a
+# mis-ordered claim between siblings is harmless.
+_PENDING_TTL_S = 120.0
+_MAX_REGISTRY = 200
+
+
+def _caller_depth(hook_input: dict, state: dict) -> int:
+    """Nesting depth of the agent making this Agent call: 0 = top-level session.
+
+    A caller with an agent_id the registry never saw is at least depth 1 (it IS a
+    subagent); we do not guess deeper than we can prove.
+    """
+    agent_id = str(hook_input.get("agent_id") or "").strip()
+    if not agent_id:
+        return 0
+    agents = state.get("agents")
+    try:
+        return max(1, int(agents.get(agent_id, 1))) if isinstance(agents, dict) else 1
+    except (ValueError, TypeError):
+        return 1
+
+
+def _push_pending(session_id: str, child_depth: int) -> None:
+    state = _read_state(session_id)
+    now = time.time()
+    pending = [p for p in state.get("pending", []) if isinstance(p, list) and len(p) == 2
+               and now - float(p[0]) < _PENDING_TTL_S]
+    pending.append([now, child_depth])
+    state["pending"] = pending[-_MAX_REGISTRY:]
+    _write_state(session_id, state)
+
+
+def _drop_pending(session_id: str) -> None:
+    """Forget the newest pending entry: the spawn it announced never happened."""
+    state = _read_state(session_id)
+    if state.get("pending"):
+        state["pending"] = state["pending"][:-1]
+        _write_state(session_id, state)
 
 
 # ── Agent call tracking (for error recovery) ────────────────────────────────
@@ -1896,6 +1967,12 @@ def main() -> None:
     with _hl_phase("budget_init"):
         _initialize_session_budget()
 
+    # Announce the depth this spawn's child will have (claimed by subagent-start.py).
+    # Done before the Explore/allowlist exits: SubagentStart fires for those too and
+    # must not claim another spawn's entry. A block below drops it again.
+    _early_sid = _get_session_id()
+    _push_pending(_early_sid, _caller_depth(hook_input, _read_state(_early_sid)) + 1)
+
     # ── Always approve Explore subagents — they're pure retrieval ────────────
     if subagent_type == "Explore":
         _log_agent_call(subagent_type, prompt, "approved_explore")
@@ -1911,14 +1988,32 @@ def main() -> None:
         _log_agent_call(subagent_type, prompt, "approved_allowlist")
         sys.exit(0)
 
-    # ── Circuit breaker: block if nesting too deep ──────────────────────────
+    # ── Circuit breaker: real nesting depth, plus a concurrency runaway cap ────
     with _hl_phase("depth"):
         session_id = _get_session_id()
-        current_depth = _read_agent_depth(session_id)
+        state = _read_state(session_id)
+        caller_depth = _caller_depth(hook_input, state)
+        child_depth = caller_depth + 1
+        in_flight = _read_agent_depth(session_id)
         max_depth = _get_max_depth()
+        max_concurrent = _get_max_concurrent()
 
-    if current_depth >= max_depth:
-        # Active alert: a runaway-nesting breaker trip should page ops,
+    block_reason = None
+    if child_depth > max_depth:
+        block_reason = (
+            f"[llm_router] Agent nesting limit: this agent is at depth {caller_depth}; "
+            f"spawning would reach depth {child_depth}, over the limit of {max_depth} "
+            f"(LLM_ROUTER_MAX_AGENT_DEPTH). Use llm_* MCP tools directly instead."
+        )
+    elif in_flight >= max_concurrent:
+        block_reason = (
+            f"[llm_router] Too many agents in flight: {in_flight}/{max_concurrent} "
+            f"(LLM_ROUTER_MAX_CONCURRENT_AGENTS). Wait for some to finish."
+        )
+
+    if block_reason:
+        _drop_pending(session_id)
+        # Active alert: a runaway breaker trip should page ops,
         # not just silently block. Guarded so the hook never breaks.
         # stdout is the hook's JSON decision channel — structlog's default
         # sink is stdout, so redirect any alert logging to stderr to keep
@@ -1930,22 +2025,17 @@ def main() -> None:
             with contextlib.redirect_stdout(sys.stderr):
                 emit_alert(
                     RUNAWAY_BREAKER_TRIP,
-                    detail={"session_id": session_id, "depth": current_depth, "max_depth": max_depth},
+                    detail={"session_id": session_id, "nesting_depth": child_depth,
+                            "max_depth": max_depth, "in_flight": in_flight,
+                            "max_concurrent": max_concurrent},
                 )
         except Exception:
             pass
-        result = {
-            "decision": "block",
-            "reason": (
-                f"[llm_router] Agent loop circuit breaker: depth {current_depth}/{max_depth}. "
-                f"Too many nested agents. Use llm_* MCP tools directly instead."
-            ),
-        }
-        json.dump(result, sys.stdout)
+        json.dump({"decision": "block", "reason": block_reason}, sys.stdout)
         return
 
     # Increment depth before approving any non-Explore agent
-    _write_agent_depth(session_id, current_depth + 1)
+    _write_agent_depth(session_id, in_flight + 1)
 
     # ── Detect retrieval-only tasks ──────────────────────────────────────────
     if _is_retrieval_only(prompt):
@@ -1969,7 +2059,7 @@ def main() -> None:
             prompt, task_type, complexity, subagent_type, session_id,
             cwd=hook_input.get("cwd"), ledger_session_id=hook_input.get("session_id"))
     if _codex_delegated is not None:
-        _write_agent_depth(session_id, current_depth)  # roll back: no real spawn happened
+        _write_agent_depth(session_id, in_flight)  # roll back: no real spawn happened
         _log_agent_call(subagent_type, prompt, "routed_codex_subagent")
         json.dump({
             "decision": "block",
@@ -2017,7 +2107,8 @@ def main() -> None:
         _log_agent_call(subagent_type, prompt,
                          f"breaker_open:{_qb_decision.reason if _qb_decision else 'agent_route'}")
     if _routed is not None:
-        _write_agent_depth(session_id, current_depth)  # roll back: no real spawn happened
+        _write_agent_depth(session_id, in_flight)  # roll back: no real spawn happened
+        _drop_pending(session_id)
         _log_agent_call(subagent_type, prompt, "routed_direct")
         json.dump({
             "decision": "block",
@@ -2038,7 +2129,8 @@ def main() -> None:
             prompt, task_type, complexity, session_id, subagent_type, cwd=hook_input.get("cwd"),
             ledger_session_id=hook_input.get("session_id"))
     if _delegated is not None:
-        _write_agent_depth(session_id, current_depth)  # roll back: no real spawn happened
+        _write_agent_depth(session_id, in_flight)  # roll back: no real spawn happened
+        _drop_pending(session_id)
         _log_agent_call(subagent_type, prompt, "routed_cli_delegation")
         json.dump({
             "decision": "block",

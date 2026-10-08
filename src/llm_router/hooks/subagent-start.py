@@ -1,5 +1,5 @@
 """SubagentStart hook — inject routing context into every new agent's initial messages.
-# llm_router-hook-version: 3
+# llm_router-hook-version: 4
 
 Fires once when Claude spawns an agent (Agent tool call completes the PreToolUse
 gate and runAgent() starts). The hook's additionalContext is prepended to the
@@ -177,6 +177,44 @@ def _pressure_status(p: dict[str, float]) -> str:
     return "LOW"
 
 
+def _claim_nesting_depth(payload: dict) -> None:
+    """Register this new agent's nesting depth for agent-route.py's breaker.
+
+    agent-route.py (PreToolUse[Agent]) queues the depth the child will have; the
+    oldest queued entry is claimed here, where the child's agent_id is first known.
+    Same session id and file as agent-route.py. Never raises.
+    """
+    try:
+        import re
+        agent_id = str(payload.get("agent_id") or "").strip()
+        if not agent_id:
+            return
+        sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+        if not sid:
+            try:
+                sid = (_router_home() / "session_id.txt").read_text().strip()
+            except OSError:
+                sid = "unknown"
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", sid) or "unknown"
+        path = _router_home() / f"agent_depth_{safe}.json"
+        data = json.loads(path.read_text())
+        now = time.time()
+        pending = [p for p in data.get("pending", []) if isinstance(p, list) and len(p) == 2
+                   and now - float(p[0]) < 120.0]
+        if not pending:
+            return
+        depth = int(pending.pop(0)[1])
+        agents = data.get("agents") if isinstance(data.get("agents"), dict) else {}
+        agents[agent_id] = depth
+        data["agents"] = dict(list(agents.items())[-200:])
+        data["pending"] = pending
+        path.write_text(json.dumps(data))
+    except FileNotFoundError:
+        return  # no breaker state for this session: nothing was queued
+    except Exception as exc:  # noqa: BLE001 -- never break agent start; say so on stderr
+        print(f"llm-router: nesting depth not recorded ({type(exc).__name__})", file=sys.stderr)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -186,6 +224,8 @@ def main() -> None:
         sys.exit(0)
 
     agent_type = payload.get("agent_type", "")
+
+    _claim_nesting_depth(payload)
 
     # Explore agents are pure retrieval — routing context adds noise, not value.
     if agent_type == "Explore":
