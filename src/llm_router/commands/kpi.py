@@ -81,8 +81,10 @@ SCOPE, stated rather than implied:
   (``hook_latency.router_added_ms``: elapsed minus the model phases ``draft_chain``,
   ``zce_model``, ``cold_wait``; plain elapsed where a row names none), because a
   local draft's model time is the answer, not overhead (PLAN v16 P0.9-f). The
-  elapsed p95 is printed beside it. NOT session-kind filtered -- a row
-  carries no session id. A hook the host KILLS at its timeout writes no row; kills
+  elapsed p95 is printed beside it. NOT session-kind filtered: since P0.9
+  (``hook_latency.set_session`` and ``record-raw``'s session-id argument) a row
+  can carry ``session_id``, but older rows and hooks that never name the session
+  carry none, and G1 does not join the id to session kinds. A hook the host KILLS at its timeout writes no row; kills
   are shown from the fail-open ledger (``CHZ-HOOK-KILLED``). The proxy-side half is
   G1_proxy: p50 / p95 of ``tier_decision_s`` in proxy_calls.jsonl, turn-first and
   continuation calls apart.

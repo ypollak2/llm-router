@@ -45,7 +45,10 @@ _chz_find_py() {
 }
 # The row carries the session id from the session JSON on stdin ($input), so a
 # reader can count sessions and drop research / executor ones (PLAN v16 §1.4
-# rules 4 and 8). Matched in bash (no process). The interpreter search runs in
+# rules 4 and 8). Matched in bash (no process). The t1 clock is read inside a
+# freshly started perl, so every sampled number includes one perl start-up
+# (a few ms idle, more under load): a known upward bias against the 100 ms bar,
+# conservative for P0.9-c. The interpreter search runs in
 # the backgrounded child, after the clock stopped: the fast line and a full line
 # without usage.db never set $_chz_py, and a bare python3 that cannot import
 # llm_router would write no row.

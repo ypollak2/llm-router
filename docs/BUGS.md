@@ -30,6 +30,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | P013-1 | `llm_act` wrote files into the MCP process cwd | fixed for the file tools in this change (P0.13); bash confinement is P2.9 |
 | P09-1 | G1 called a 16 s auto-route p95 "within budget" | fixed in `perf/hook-budgets` (P0.9 tasks 1-2) |
 | P09-7 | Statusline timing rows carried no session id, and needed a python3 that imports llm_router | fixed in `perf/hook-budgets` (P0.9 repair 1) |
+| P09-8 | The statusline "wrapper adds < 5 ms" test failed under load | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -522,3 +523,22 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   right after the stdin JSON parses. Test:
   `tests/test_p09_auto_route_imports.py::test_main_names_the_session_on_the_latency_row`
   (fails on 21234081, passes on 45fe0104).
+
+## P09-8. The statusline "wrapper adds < 5 ms" test failed under load
+
+- **Symptom.** `tests/test_p09_hook_budgets.py::test_the_timing_wrapper_adds_under_5ms_per_call`
+  failed on CI (#312 at a28e7df5, test 3.11: added unsampled 1.83 ms, sampled 92.15 ms) and
+  6 of 6 times in review with 6 copies in parallel (load ~65; sampled 94-123 ms).
+- **Cause.** The test compared medians of three separate blocks (40 off, 40 at 1-in-20,
+  10 at every call). Under load a perl start-up costs tens of ms and the load drifts between
+  blocks, so the medians measured the machine, not the wrapper.
+- **Fix (test only).** The arms run interleaved and each is judged on its minimum (load only
+  adds time). The structural half is a separate, load-independent test: with a perl that
+  logs its starts, an unsampled call starts 0 perls and a sampled call exactly 2. The
+  statusline comment now says the t1 read includes one perl start-up (an upward bias
+  against the 100 ms bar).
+- **Test.** `test_the_timing_wrapper_adds_under_5ms_per_call` and
+  `test_the_unsampled_path_starts_no_process_and_a_sampled_call_two_clock_reads`: 12 of 12
+  passes with 6 pytest runs in parallel plus 4-12 `yes` CPU burners (load1 38-65). Mutants:
+  a perl start on the unsampled path turns the structural test red; a 200 ms sleep in the
+  sampled path turns the timing test red.

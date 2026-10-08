@@ -361,31 +361,74 @@ def _wrapper_only_script(tmp_path: Path) -> Path:
     return script
 
 
+def _counting_perl(tmp_path: Path, log: Path) -> Path:
+    """A `perl` on PATH that logs each start, then runs the real perl."""
+    bindir = tmp_path / "countbin"
+    bindir.mkdir()
+    shim = bindir / "perl"
+    shim.write_text(f'#!/bin/sh\necho x >> "{log}"\nexec "{shutil.which("perl")}" "$@"\n')
+    shim.chmod(0o755)
+    return bindir
+
+
+@pytest.mark.skipif(shutil.which("perl") is None, reason="needs perl (the macOS clock)")
+def test_the_unsampled_path_starts_no_process_and_a_sampled_call_two_clock_reads(tmp_path):
+    """The structural half of "the wrapper adds < 5 ms", independent of load:
+    an unsampled call starts no perl, a sampled call starts exactly two (t0, t1)."""
+    home = tmp_path / "h"
+    (home / ".llm-router").mkdir(parents=True)
+    script = _wrapper_only_script(tmp_path)
+    log = tmp_path / "perl_starts.log"
+    path = f"{_counting_perl(tmp_path, log)}:{_shim_python(tmp_path)}:{os.environ.get('PATH', '')}"
+
+    def starts(timing: str | None) -> int:
+        log.unlink(missing_ok=True)
+        extra = {"LLM_ROUTER_STATUSLINE_TIMING": timing} if timing else {}
+        subprocess.run(["bash", str(script)], env=_env(home, PATH=path, **extra),
+                       capture_output=True, timeout=20)
+        return len(log.read_text().splitlines()) if log.exists() else 0
+
+    assert [starts(None) for _ in range(5)] == [0] * 5
+    assert [starts("0") for _ in range(5)] == [0] * 5
+    assert [starts("all") for _ in range(5)] == [2] * 5
+    one_in_20 = [starts("1") for _ in range(40)]
+    assert set(one_in_20) <= {0, 2}, one_in_20
+    assert one_in_20.count(2) < 12, one_in_20  # P(>= 12 of 40 at p = 1/20) < 1e-7
+
+
 @pytest.mark.skipif(shutil.which("perl") is None, reason="needs perl (the macOS clock)")
 def test_the_timing_wrapper_adds_under_5ms_per_call(tmp_path):
     """At 1-in-20 sampling the wrapper's average cost per call is < 5 ms: the
     unsampled path starts no process, and a sampled call adds two perl clock
-    reads and one backgrounded fork."""
+    reads and one backgrounded fork.
+
+    Load-robust (review of #312: medians of separate blocks failed 6/6 at load
+    ~65 and on CI): the arms run interleaved, so a load change hits both, and
+    each arm is judged on its minimum, the best estimate of the intrinsic cost
+    when the noise is one-sided (a busy machine only ever adds time)."""
     home = tmp_path / "h"
     (home / ".llm-router").mkdir(parents=True)
     script = _wrapper_only_script(tmp_path)
     bindir = _shim_python(tmp_path)
 
-    def run(timing: str | None, n: int) -> list[float]:
+    def once(timing: str | None) -> float:
         extra = {"LLM_ROUTER_STATUSLINE_TIMING": timing} if timing else {}
         env = _env(home, PATH=f"{bindir}:{os.environ.get('PATH', '')}", **extra)
-        out = []
-        for _ in range(n):
-            t = time.perf_counter()
-            subprocess.run(["bash", str(script)], env=env, capture_output=True, timeout=20)
-            out.append((time.perf_counter() - t) * 1000.0)
-        return out
+        t = time.perf_counter()
+        subprocess.run(["bash", str(script)], env=env, capture_output=True, timeout=20)
+        return (time.perf_counter() - t) * 1000.0
 
-    off = run(None, 40)
-    sampled = run("1", 40)
-    every = run("all", 10)
-    added_unsampled = statistics.median(sampled) - statistics.median(off)
-    added_sampled = statistics.median(every) - statistics.median(off)
+    off: list[float] = []
+    sampled: list[float] = []
+    every: list[float] = []
+    for i in range(40):
+        off.append(once(None))
+        sampled.append(once("1"))
+        if i % 3 == 0:
+            every.append(once("all"))
+    added_unsampled = min(sampled) - min(off)
+    added_sampled = min(every) - min(off)
     # Mean added per call at 1-in-20: 19 unsampled + 1 sampled.
     per_call = (19 * max(added_unsampled, 0.0) + max(added_sampled, 0.0)) / 20
-    assert per_call < 5.0, (added_unsampled, added_sampled)
+    assert per_call < 5.0, (round(added_unsampled, 2), round(added_sampled, 2),
+                            round(statistics.median(off), 2))
