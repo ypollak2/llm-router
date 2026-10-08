@@ -31,6 +31,8 @@ implements (SessionStart hook check, doctor check, statusline warning).
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import os
 import platform
 import shlex
@@ -39,7 +41,7 @@ import sys
 import time
 from pathlib import Path
 
-from llm_router import install_manifest, proxy_default as pd
+from llm_router import install_manifest, paths, proxy_default as pd
 
 
 # ── ANSI helpers (respect NO_COLOR / non-tty) — same small block every
@@ -69,16 +71,24 @@ ENV_ANTHROPIC_BASE_URL = "ANTHROPIC_BASE_URL"
 ENV_TOOL_SEARCH = "ENABLE_TOOL_SEARCH"
 
 
-def _wire_settings_env(port: int) -> str | None:
+def _wire_settings_env(port: int, *, base_url_only: bool = False) -> tuple[str | None, Path | None]:
     """Set ``env.ANTHROPIC_BASE_URL`` / ``env.ENABLE_TOOL_SEARCH`` in
     ``~/.claude/settings.json``. Backs up first, records the WHOLE previous
     ``env`` value in the install manifest (never a blind key delete — other
     tools, or the user, may already keep entries there) so uninstall restores
-    it exactly. Returns an error string, or ``None`` on success."""
+    it exactly. Returns ``(error, backup_path)``: error is ``None`` on success,
+    backup_path is ``None`` when there was no file to back up.
+
+    ``base_url_only`` is the repair path (``doctor --fix-routing``): it sets
+    only ``ANTHROPIC_BASE_URL`` (one-key diff) and refuses to write an existing
+    file whose backup could not be taken."""
     from llm_router.install_hooks import _backup_before_overwrite, _load_settings, _save_settings, settings_path
 
     path = settings_path()
-    _backup_before_overwrite(path)  # no-op (returns None) when path doesn't exist yet
+    existed = path.exists()
+    backup = _backup_before_overwrite(path)  # no-op (returns None) when path doesn't exist yet
+    if base_url_only and existed and backup is None:
+        return f"could not back up {path}; nothing written", None
     data = _load_settings()
     if install_manifest.find("json_key", path, key="env") is None:
         had_key = "env" in data
@@ -86,12 +96,13 @@ def _wire_settings_env(port: int) -> str | None:
         install_manifest.record("json_key", path, key="env", had_key=had_key, previous=previous)
     env = data.setdefault("env", {})
     env[ENV_ANTHROPIC_BASE_URL] = f"http://127.0.0.1:{port}"
-    env[ENV_TOOL_SEARCH] = "true"
+    if not base_url_only:
+        env[ENV_TOOL_SEARCH] = "true"
     try:
         _save_settings(data)
     except OSError as exc:
-        return str(exc)
-    return None
+        return str(exc), backup
+    return None, backup
 
 
 def _start_and_wait(dest: Path, activate_cmd: str, port: int, what: str, *, runner, home: Path,
@@ -246,7 +257,7 @@ def install_proxy_default(
             )
         reused = False
 
-    err = _wire_settings_env(port)
+    err, _backup = _wire_settings_env(port)
     if err is not None:
         return {"ok": False, "actions": actions, "reused": reused, "error": f"could not update settings.json: {err}"}
     actions.append(
@@ -308,6 +319,206 @@ def uninstall_proxy_default(*, home: Path | None = None, system: str | None = No
         pd.remove_sentinel()
         actions.append("Removed proxy-default state sentinel")
     return actions
+
+
+# ── `llm-router doctor --fix-routing` (P0.14-c; owner decision D-R8-4 = explicit only) ──
+#
+# 2026-10-08: settings.json lost env.ANTHROPIC_BASE_URL in an unrecorded rewrite
+# while the sentinel still said enabled, and nothing put it back until a hand
+# restore three hours later. This is the explicit repair: no hook and no plain
+# `install` / `doctor` reaches it (tests/test_doctor_fix_routing.py and
+# tests/test_failopen_never_writes_settings.py pin that). It writes the one key
+# only when every condition below holds, and otherwise refuses with the reason.
+
+SETTINGS_WRITES_NAME = "settings_writes.jsonl"
+
+
+def env_block_sha256(env) -> str:
+    """sha256 of settings.json's ``env`` block. hooks/session-start.py
+    ``_env_block_sha256`` hashes the same bytes (stdlib-only copy, pinned by a
+    parity test), so its observe rows and the write rows below compare."""
+    blob = json.dumps(env if isinstance(env, dict) else None, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def routes_to_local_port(value: str | None, ports) -> bool:
+    """Same rule as hooks/session-start.py ``_routes_to_local_port`` (parity test)."""
+    from urllib.parse import urlsplit
+
+    if not value:
+        return False
+    try:
+        parts = urlsplit(value if "//" in value else "//" + value)
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        return False
+    return host in ("127.0.0.1", "localhost", "::1") and port in ports
+
+
+def _project_override(cwd: str) -> tuple[str | None, str]:
+    """(value, file) of the first project settings file under ``cwd`` that sets
+    ANTHROPIC_BASE_URL, local before shared (Claude Code's precedence, and the two
+    project files the SessionStart hook's ``_effective_base_url`` reads). Only
+    consulted once the user file is known not to set the key, so cwd == $HOME
+    (where the "project" file is the user file) finds nothing there."""
+    for name in ("settings.local.json", "settings.json"):
+        path = Path(cwd) / ".claude" / name
+        try:
+            env = json.loads(path.read_text()).get("env")
+        except (OSError, ValueError, AttributeError):
+            continue
+        v = env.get(ENV_ANTHROPIC_BASE_URL) if isinstance(env, dict) else None
+        if isinstance(v, str) and v.strip():
+            return v.strip(), str(path)
+    return None, ""
+
+
+def _append_settings_write(row: dict) -> None:
+    p = paths.state_path(SETTINGS_WRITES_NAME)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def _result(status: str, reason: str, diff: list[str] | None = None, backup: Path | None = None) -> dict:
+    return {"status": status, "reason": reason, "diff": diff or [],
+            "backup": str(backup) if backup is not None else None}
+
+
+def fix_routing(*, yes: bool = False, confirm=None, cwd: str | None = None) -> dict:
+    """Write ``env.ANTHROPIC_BASE_URL`` into ``~/.claude/settings.json`` only when
+    all hold: the sentinel is enabled and has no ``routing_opt_out``; the key is
+    absent there; no project settings file or environment variable overrides it;
+    the port settings.json would name AND the main proxy behind the shim answer.
+
+    ``confirm(diff_lines) -> bool`` asks the owner (interactive); without it,
+    ``yes`` must be True or nothing is written. Returns ``{"status": "written" |
+    "noop" | "refused" | "cancelled", "reason", "diff", "backup"}``."""
+    from llm_router.install_hooks import settings_path
+    from llm_router.proxy_liveness import _host_of
+
+    sentinel = pd.read_sentinel()
+    if sentinel is None:
+        return _result("refused", "proxy-default is not installed (no sentinel); "
+                                  "`llm-router install --proxy-default` installs it")
+    if sentinel.get("enabled") is not True:
+        return _result("refused", "the proxy-default sentinel is not enabled")
+    if sentinel.get("routing_opt_out"):
+        return _result("refused", "routing_opt_out is set: the key was removed on purpose "
+                                  "(`--decline`). `llm-router install --proxy-default` opts back in")
+    try:
+        port = int(sentinel.get("port", pd.DEFAULT_PORT))
+        up = sentinel.get("upstream_port")
+        main_port = int(up) if up is not None else port
+    except (TypeError, ValueError):
+        return _result("refused", f"the port in {pd.sentinel_path()} is unreadable")
+    ports = [port, main_port]
+
+    path = settings_path()
+    try:
+        data = json.loads(path.read_text()) if path.exists() else {}
+    except (OSError, ValueError):
+        return _result("refused", f"{path} does not parse as JSON; not touching it")
+    env = data.get("env", {}) if isinstance(data, dict) else None
+    if not isinstance(env, dict):
+        return _result("refused", f"{path} has no usable `env` object; not touching it")
+    current = env.get(ENV_ANTHROPIC_BASE_URL)
+    if current is not None and not isinstance(current, str):
+        return _result("refused", f"{path} env.ANTHROPIC_BASE_URL is not a string; not touching it")
+    if current is not None and current.strip():
+        if not routes_to_local_port(current, ports):
+            return _result("refused", f"{path} already sets ANTHROPIC_BASE_URL to {_host_of(current)}, "
+                                      f"not this proxy (:{port}); not ours to change")
+        dead = [p for p in dict.fromkeys(ports) if not pd.proxy_health("127.0.0.1", p, timeout=1.0)]
+        if dead:
+            return _result("refused", f"the key is present and points at this proxy, but nothing answers "
+                                      f"on 127.0.0.1:{', :'.join(map(str, dead))}. A settings write cannot "
+                                      f"fix that; `llm-router doctor` shows the restart command")
+        return _result("noop", f"{path} already routes through 127.0.0.1:{port} and the proxy answers; "
+                               f"nothing written")
+
+    pval, pwhere = _project_override(cwd or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
+    if pval is not None:
+        return _result("refused", f"project override: {pwhere} sets ANTHROPIC_BASE_URL to {_host_of(pval)} "
+                                  f"and takes precedence over {path}; change that file instead")
+    ev = (os.environ.get(ENV_ANTHROPIC_BASE_URL) or "").strip()
+    if ev and not routes_to_local_port(ev, ports):
+        return _result("refused", f"the environment sets ANTHROPIC_BASE_URL to {_host_of(ev)}; "
+                                  f"unset it first")
+    if not pd.proxy_health("127.0.0.1", port, timeout=1.0):
+        return _result("refused", f"nothing answers on 127.0.0.1:{port}; pointing settings.json at it "
+                                  f"would fail every call")
+    if main_port != port and not pd.proxy_health("127.0.0.1", main_port, timeout=1.0):
+        return _result("refused", f"the shim answers on :{port} but the main proxy on :{main_port} does "
+                                  f"not, so every call would bypass routing; restart it first")
+
+    new = f"http://127.0.0.1:{port}"
+    diff = [f"--- {path}", f"+++ {path}"]
+    if current is not None:
+        diff.append(f"-  env.{ENV_ANTHROPIC_BASE_URL}: {json.dumps(current)}")
+    diff.append(f"+  env.{ENV_ANTHROPIC_BASE_URL}: {json.dumps(new)}")
+    if not yes:
+        if confirm is None:
+            return _result("refused", "not interactive: re-run with --yes to write", diff)
+        if not confirm(diff):
+            return _result("cancelled", "nothing written", diff)
+
+    err, backup = _wire_settings_env(port, base_url_only=True)
+    if err is not None:
+        return _result("refused", f"could not update settings.json: {err}", diff, backup)
+    try:
+        after = json.loads(path.read_text()).get("env") or {}
+    except (OSError, ValueError, AttributeError):
+        after = {}
+    changed = sorted(f"env.{k}" for k in set(env) | set(after) if env.get(k) != after.get(k))
+    try:
+        _append_settings_write({
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "kind": "write",
+            "writer": "doctor --fix-routing", "path": str(path), "keys_changed": changed,
+            "backup": str(backup) if backup is not None else None,
+            "env_sha256": env_block_sha256(after),
+        })
+    except OSError:
+        pass  # the settings write itself succeeded; the record is best-effort
+    return _result("written", f"wrote env.{ENV_ANTHROPIC_BASE_URL}={new} (keys changed: "
+                              f"{', '.join(changed) or 'none'})", diff, backup)
+
+
+def decline_routing() -> dict:
+    """``doctor --fix-routing --decline``: set ``routing_opt_out`` so the key's
+    absence is treated as deliberate (no repair, no SessionStart warning)."""
+    if not pd.set_routing_opt_out():
+        return _result("refused", "proxy-default is not installed (no sentinel); nothing to decline")
+    return _result("declined", f"routing_opt_out set in {pd.sentinel_path()}: `--fix-routing` will not "
+                               f"write the key and SessionStart will not warn that routing is off. "
+                               f"`llm-router install --proxy-default` opts back in")
+
+
+def cmd_fix_routing(args: list[str]) -> int:
+    """``llm-router doctor --fix-routing [--yes] [--decline]``. Exit 0 when written,
+    already correct or declined; 1 when refused or cancelled."""
+    if "--decline" in args:
+        r = decline_routing()
+    else:
+        interactive = sys.stdin.isatty() and sys.stdout.isatty()
+
+        def _ask(diff: list[str]) -> bool:
+            for line in diff:
+                print(f"  {line}")
+            return input("  Write this one key? [y/N] ").strip().lower() in ("y", "yes")
+
+        r = fix_routing(yes="--yes" in args, confirm=_ask if interactive else None)
+        if r["status"] in ("written", "refused") and r["diff"]:
+            for line in r["diff"]:
+                print(f"  {line}")
+    ok = r["status"] in ("written", "noop", "declined")
+    mark = _green("✓") if ok else _red("✗")
+    print(f"  {mark}  fix-routing {r['status']}: {r['reason']}")
+    if r["backup"]:
+        print(f"     backup: {r['backup']}")
+    if r["status"] == "written":
+        print("     Takes effect in the next Claude Code session (settings.json is read at startup).")
+    return 0 if ok else 1
 
 
 # ── CLI entry point (dispatched from commands/install.py's `--proxy-default`) ──

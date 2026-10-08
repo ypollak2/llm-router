@@ -1782,7 +1782,7 @@ def _render_audit_report() -> list[str]:
 
 
 def cmd_doctor(args: list[str]) -> int:
-    """Execute: llm-router doctor [--host H] [--posture] [--explain-host]
+    """Execute: llm-router doctor [--host H] [--posture] [--explain-host] [--fix-routing [--yes|--decline]]
 
     Flags:
         --host H        Run host-specific checks (claude|vscode|cursor|codex|all)
@@ -1798,10 +1798,23 @@ def cmd_doctor(args: list[str]) -> int:
         --explain-host  Print the always-up-to-date explainer for why
                         the host runs on Opus and what routing can vs
                         can't save. Skips everything else.
+        --fix-routing   Explicit repair (P0.14-c): write the one key
+                        env.ANTHROPIC_BASE_URL into ~/.claude/settings.json
+                        when proxy-default is installed and every safety
+                        condition holds, else refuse with the reason. Asks
+                        y/N on a terminal; --yes writes non-interactively;
+                        --decline records the removal as deliberate
+                        (routing_opt_out). Skips everything else. Nothing
+                        else (no hook, no plain doctor/install) runs it.
 
     Returns:
         0 if all checks passed, 1 if issues found.
     """
+    if "--fix-routing" in args:
+        from llm_router.commands.proxy_default import cmd_fix_routing
+
+        return cmd_fix_routing(args)
+
     if "--audit" in args:
         # K5: everything an auditor would otherwise reconstruct by hand.
         for line in _render_audit_report():

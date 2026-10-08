@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 28
+# llm_router-hook-version: 29
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -755,6 +755,43 @@ def _safe_host(value: str | None) -> str:
         return "(not shown)"
 
 
+def _env_block_sha256(env) -> str:
+    """Same bytes as the doctor repair's env_block_sha256 (a parity test pins it)."""
+    import hashlib
+
+    blob = json.dumps(env if isinstance(env, dict) else None, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def _record_settings_observe(session_id) -> None:
+    """P0.14-c: one ``observe`` row per session start in settings_writes.jsonl, so the
+    next unexplained removal of env.ANTHROPIC_BASE_URL (2026-10-08, writer unknown) is
+    bracketed between two session starts. Read-only on settings.json; only when
+    proxy-default is installed (sentinel present); never prints the URL."""
+    state = _state_dir()
+    if not os.path.exists(os.path.join(state, "proxy_default.json")):
+        return
+    path = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+    row = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "kind": "observe",
+           "session_id": session_id if isinstance(session_id, str) else None,
+           "settings_exists": os.path.exists(path), "base_url_present": False,
+           "env_sha256": None, "mtime": None}
+    try:
+        row["mtime"] = os.stat(path).st_mtime
+        with open(path) as fh:
+            data = json.load(fh)
+        env = data.get("env") if isinstance(data, dict) else None
+        v = env.get("ANTHROPIC_BASE_URL") if isinstance(env, dict) else None
+        row["base_url_present"] = isinstance(v, str) and bool(v.strip())
+        row["env_sha256"] = _env_block_sha256(env)
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError):
+        row["base_url_present"] = None  # unreadable: unknown, not absent
+    with open(os.path.join(state, "settings_writes.jsonl"), "a") as fh:
+        fh.write(json.dumps(row, sort_keys=True) + "\n")
+
+
 def _check_proxy_default_health() -> str:
     """Warn at session start if the default proxy (`commands/proxy_default.py`,
     ``llm-router install --proxy-default``) is installed but not answering.
@@ -796,16 +833,23 @@ def _check_proxy_default_health() -> str:
     value, where = _effective_base_url(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
     if not _routes_to_local_port(value, ports):
         # Installed, but this session does not use it: a dead port is irrelevant,
-        # silent bypass is the problem.
+        # silent bypass is the problem. Unless the owner declined routing on
+        # purpose (`llm-router doctor --fix-routing --decline`, P0.14-c).
+        if sentinel.get("routing_opt_out"):
+            return ""
         missing = (
             f"{where} sets it to {_safe_host(value)}" if value
             else "~/.claude/settings.json env.ANTHROPIC_BASE_URL is missing "
                  "(and no project settings or environment sets it)"
         )
+        restore = "llm-router install --proxy-default" if value else (
+            "llm-router doctor --fix-routing  (or llm-router install --proxy-default); "
+            "removed on purpose: llm-router doctor --fix-routing --decline"
+        )
         return (
             f"\n⚠️  llm-router proxy-default is installed but this session does not route "
             f"through 127.0.0.1:{port}: {missing}, so routing is OFF.\n"
-            f"    Restore (takes effect next session):  llm-router install --proxy-default"
+            f"    Restore (takes effect next session):  {restore}"
         )
 
     import socket as _socket
@@ -2152,6 +2196,11 @@ def main() -> None:
     # (see the function's own docstring for why) — only the next one.
     with _hl_phase("proxy_health"):
         hints += _check_proxy_default_health()
+    with _hl_phase("session_io"):
+        try:
+            _record_settings_observe(_hook_input.get("session_id") if isinstance(_hook_input, dict) else None)
+        except Exception:  # noqa: BLE001 -- an observe row must never block session start
+            pass
 
     # 2. Select banner from cached subscription state (no OAuth taint in this path).
     # The cache is written by _refresh_claude_usage() during the previous session.

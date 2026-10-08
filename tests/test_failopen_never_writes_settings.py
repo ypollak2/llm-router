@@ -8,7 +8,9 @@ docstrings cannot satisfy it):
 1. The runtime fail-open surfaces (the ``proxy`` package, including the shim,
    and ``proxy_default.py``) never import or call a settings.json writer.
 2. In ``commands/proxy_default.py`` the only settings.json writer,
-   ``_wire_settings_env``, is called once, from ``install_proxy_default``.
+   ``_wire_settings_env``, is called from ``install_proxy_default`` and from
+   the explicit repair ``fix_routing`` (P0.14-c), which is reached only from
+   ``llm-router doctor --fix-routing`` (``commands/doctor.py:cmd_doctor``).
 3. ``install_proxy_default`` is called only from ``cmd_proxy_default``, which
    is reached only from the explicit ``llm-router install --proxy-default``
    command (``commands/install.py``).
@@ -73,9 +75,22 @@ def _calls_by_function(tree: ast.Module, callee: str) -> list[str]:
     return owners
 
 
-def test_settings_writer_is_called_only_by_the_install_function():
+def test_settings_writer_is_called_only_by_the_install_and_explicit_repair_functions():
     tree = _tree(SRC / "commands" / "proxy_default.py")
-    assert _calls_by_function(tree, "_wire_settings_env") == ["install_proxy_default"]
+    assert _calls_by_function(tree, "_wire_settings_env") == ["install_proxy_default", "fix_routing"]
+
+
+def test_explicit_repair_is_reached_only_from_doctor_fix_routing():
+    """P0.14-c (D-R8-4 = explicit only): ``fix_routing`` -> ``cmd_fix_routing`` ->
+    ``cmd_doctor`` and nothing else in the package."""
+    callers: dict[str, list[str]] = {}
+    for path in SRC.rglob("*.py"):
+        tree = _tree(path)
+        for callee in ("fix_routing", "cmd_fix_routing"):
+            for owner in _calls_by_function(tree, callee):
+                callers.setdefault(callee, []).append(f"{path.relative_to(SRC)}:{owner}")
+    assert callers["fix_routing"] == ["commands/proxy_default.py:cmd_fix_routing"]
+    assert callers["cmd_fix_routing"] == ["commands/doctor.py:cmd_doctor"]
 
 
 def test_install_is_reached_only_from_the_explicit_install_command():
