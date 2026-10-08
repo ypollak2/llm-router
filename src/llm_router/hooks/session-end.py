@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 20
+# llm_router-hook-version: 21
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
