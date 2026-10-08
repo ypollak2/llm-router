@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- verifier PR C (SHADOW, opt-in): pending_verify queue, detached `verify_worker`, Codex marker. **Off unless
+  `LLM_ROUTER_VERIFY=on`**; no outcome, NS, D1 or D2 changes. See `docs/VERIFIER.md`.
 - agents (PLAN v16 AGT A.0): `llm_act`, `llm_delegate` and `llm_local_task` take `wait` (default
   True). `wait=False` returns `{"job_id": ...}` at once; `llm_router_session(action="job", id=...)`
   polls it (`running` / `done` / `failed`, with the tool's result). Jobs live in the MCP server
