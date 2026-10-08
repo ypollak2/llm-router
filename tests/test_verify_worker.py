@@ -51,7 +51,7 @@ def _env(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_HOME", str(_home_dir(tmp_path)))
     monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(tmp_path / "claude_projects"))
     monkeypatch.setenv("LLM_ROUTER_AGENT_ROUTE_CODEX", "on")
-    monkeypatch.delenv("LLM_ROUTER_VERIFY", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_VERIFY", "on")       # opt-in flag: default is OFF (see the default tests)
     monkeypatch.delenv("LLM_ROUTER_VERIFY_BUDGET_S", raising=False)
     failopen.reset_cache()
     failopen.reset_unpersisted()
@@ -414,12 +414,151 @@ def test_budget_default_and_cap(monkeypatch):
 
 
 def test_the_unit_is_handed_the_remaining_budget_not_more_than_the_cap(tmp_path, monkeypatch):
+    """Environment-independent: the venv decision is stubbed to "default interpreter" (the other
+    direction is the next test), so a venv or a proven sandbox on the machine cannot change which
+    kwargs the verifier receives."""
     repo = _repo(tmp_path)
     _enqueue(1, repo=repo, head=_head(repo))
+    monkeypatch.setattr(W, "_repo_python_dir", lambda *a, **k: (None, None))
     monkeypatch.setenv("LLM_ROUTER_VERIFY_BUDGET_S", "500")
-    got = []
-    W.drain(verify=lambda r, p, budget_s: got.append(budget_s) or _ok_result(), record=lambda *a: None)
-    assert 0 < got[0] <= 300
+    got, recs = [], []
+    W.drain(verify=lambda r, p, budget_s, **k: got.append((budget_s, k)) or _ok_result(),
+            record=lambda uid, r: recs.append((r.verify_status, r.reason)))
+    assert got, recs                                   # recs says WHY the verifier was never called
+    assert 0 < got[0][0] <= 300 and got[0][1] == {}    # no python_dir: the default interpreter
+
+
+def test_the_unit_is_handed_the_repo_python_dir_when_a_venv_is_chosen(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    _enqueue(1, repo=repo, head=_head(repo))
+    monkeypatch.setattr(W, "_repo_python_dir", lambda *a, **k: ("/the/shim", None))
+    got, recs = [], []
+    W.drain(verify=lambda r, p, budget_s, python_dir=None: got.append((budget_s, python_dir)) or _ok_result(),
+            record=lambda uid, r: recs.append((r.verify_status, r.reason)))
+    assert got and got[0][1] == "/the/shim" and 0 < got[0][0] <= 120, recs
+
+
+def test_the_production_verifier_accepts_every_kwarg_the_worker_passes():
+    """The worker calls ``verify(repo, patch, budget_s=..[, python_dir=..])``. A verifier without
+    ``python_dir`` would TypeError into verify_worker_error whenever a venv is chosen; the default
+    ``VU.verify_unit`` is the only production callable and must accept both."""
+    import inspect
+    params = inspect.signature(VU.verify_unit).parameters
+    assert "budget_s" in params and "python_dir" in params
+    assert inspect.signature(W.drain).parameters["verify"].default is VU.verify_unit
+    assert inspect.signature(W.process).parameters["verify"].default is VU.verify_unit
+
+
+def test_a_verifier_without_python_dir_is_a_recorded_error_not_a_crash(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    _enqueue(1, repo=repo, head=_head(repo))
+    monkeypatch.setattr(W, "_repo_python_dir", lambda *a, **k: ("/the/shim", None))
+    recs = []
+    W.drain(verify=lambda r, p, budget_s: _ok_result(), record=lambda uid, r: recs.append(r.reason))
+    assert recs == ["verify_worker_error"] and not Q.queue_nonempty()
+
+
+# ── LLM_ROUTER_VERIFY is opt-in (shadow): unset == off ───────────────────────
+
+def test_the_verifier_is_off_unless_opted_in(tmp_path, monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_VERIFY", raising=False)
+    assert Q.enabled() is False
+    assert Q.enqueue_from_run(str(_repo(tmp_path)), session_id="s", ts=1.0) == "disabled"
+    _enqueue(1)
+    assert Q.spawn_worker_if_needed(cooldown_s=0.0) is False
+    for v in ("1", "on", "ON", "true", "yes"):
+        monkeypatch.setenv("LLM_ROUTER_VERIFY", v)
+        assert Q.enabled() is True, v
+    for v in ("", "0", "off", "false", "no", "junk"):
+        monkeypatch.setenv("LLM_ROUTER_VERIFY", v)
+        assert Q.enabled() is False, v
+
+
+def test_the_worker_only_expires_when_the_verifier_is_off(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_VERIFY", raising=False)
+    now = time.time()
+    _enqueue(1, now=now - 25 * 3600)
+    _enqueue(2, now=now)
+    recs = []
+    W.drain(verify=lambda *a, **k: pytest.fail("off: nothing is verified"), process_units=Q.enabled(),
+            record=lambda uid, r: recs.append((uid, r.reason)), now=now)
+    assert recs == [(_uid(1), "verify_expired")] and len(Q.pending()) == 1
+
+
+# ── mutation survivors of the first review (each killed by one test below) ───
+
+def test_a_unit_whose_worker_dies_three_times_is_given_up_on_the_third(tmp_path):
+    """MAX_ATTEMPTS 3 -> 99: the loop in the older test scales with the constant, so it survived."""
+    _enqueue(1)
+    old = time.time() - 3600
+    left = []
+    for attempt in (1, 2, 3):
+        c = Q.claim(Q.pending()[0])
+        assert c is not None
+        os.utime(c.path, (old, old))
+        left = Q.recover_stale_claims(time.time())
+        assert (len(left) == 1) == (attempt == 3), attempt        # only the 3rd crash exhausts it
+    assert [m.unit_id for m in left] == [_uid(1)] and Q.pending() == []
+
+
+def test_a_live_workers_claim_is_not_stolen_but_a_dead_ones_is():
+    """STALE_CLAIM_S 420 -> 1: a claim 60 s old is a worker mid-job (budget up to 300 s)."""
+    _enqueue(1)
+    c = Q.claim(Q.pending()[0])
+    for age, stolen in ((0, False), (60, False), (200, False), (3600, True)):
+        t = time.time() - age
+        os.utime(c.path, (t, t))
+        Q.recover_stale_claims(time.time())
+        assert (len(Q.pending()) == 1) == stolen, age
+        if stolen:
+            break
+    assert Q.STALE_CLAIM_S >= 300 + 60                              # budget cap + slack
+
+
+def test_claiming_touches_the_marker_so_the_claim_is_fresh(tmp_path):
+    """Removing os.utime before the rename: the claimed file kept the pending file's old mtime."""
+    _enqueue(1)
+    old = time.time() - 3600
+    pending_file = Q._sub("pending") / f"{_uid(1)}.json"
+    os.utime(pending_file, (old, old))
+    c = Q.claim(Q.pending()[0])
+    assert c is not None and time.time() - c.path.stat().st_mtime < 30
+
+
+def test_a_budget_under_the_minimum_never_reaches_the_verifier(tmp_path, monkeypatch):
+    """_MIN_VERIFY_S guard removed: a 1 s budget was handed to the verifier instead of `timeout`."""
+    repo = _repo(tmp_path)
+    _enqueue(1, repo=repo, head=_head(repo))
+    monkeypatch.setattr(W, "_repo_python_dir", lambda *a, **k: (None, None))
+    monkeypatch.setenv("LLM_ROUTER_VERIFY_BUDGET_S", "1")
+    recs = []
+    W.drain(verify=lambda *a, **k: pytest.fail("a unit with no time left must not be verified"),
+            record=lambda uid, r: recs.append((r.verify_status, r.reason)))
+    assert recs == [("unavailable", "timeout")]
+
+
+def test_one_run_processes_at_most_max_units_per_run():
+    """The MAX_UNITS_PER_RUN cap removed: 26 queued units, 25 processed, one left for the next run."""
+    assert W.MAX_UNITS_PER_RUN == 25
+    for n in range(26):
+        _enqueue(n)                                   # cwd /nonexistent: each settles fast, no verifier
+    recs = []
+    c = W.drain(verify=lambda *a, **k: pytest.fail("never reached"),
+                record=lambda uid, r: recs.append(r.reason))
+    assert c["processed"] == 25 and len(recs) == 25 and len(Q.pending()) == 1
+
+
+def test_an_oversized_patch_is_refused_before_anything_is_checked_out(tmp_path):
+    """The patch-size guard in _run_unit removed: an oversized patch was read and went on to the
+    checkout (here: verify_repo_missing) instead of being refused as patch_too_large."""
+    _enqueue(1, patch=b"x" * (Q.MAX_PATCH_BYTES + 1))
+    recs = []
+    W.drain(verify=lambda *a, **k: pytest.fail("never reached"), record=lambda uid, r: recs.append(r.reason))
+    assert recs == ["patch_too_large"] and not Q.queue_nonempty()
+    _enqueue(2, patch=b"x" * Q.MAX_PATCH_BYTES)       # exactly the limit is allowed through
+    recs.clear()
+    W.drain(verify=lambda *a, **k: pytest.fail("never reached"), record=lambda uid, r: recs.append(r.reason))
+    assert recs == ["verify_repo_missing"]
 
 
 # ── TTL ──────────────────────────────────────────────────────────────────────

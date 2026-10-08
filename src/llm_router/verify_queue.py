@@ -56,12 +56,15 @@ _UID_RX = re.compile(r"^u_[0-9a-f]{16}$")
 _GIT_TIMEOUT_S = 5.0
 CAPTURE_BUDGET_S = 3.0                    # wall clock for the whole capture, reads included
 _HEAD_RX = re.compile(r"[0-9a-f]{40,64}")      # used with fullmatch: no trailing-newline slack
-_OFF = ("0", "off", "false", "no")
+_ON = ("1", "on", "true", "yes")
 
 
 def enabled() -> bool:
-    """Kill switch: LLM_ROUTER_VERIFY=off stops capture and spawn (the worker only expires)."""
-    return os.environ.get("LLM_ROUTER_VERIFY", "on").strip().lower() not in _OFF
+    """Opt-in (SHADOW): capture and worker spawn run only when ``LLM_ROUTER_VERIFY`` is
+    ``1``/``on``/``true``/``yes``. UNSET means OFF: the PLAN-v16 (P0.12, C11) says the verifier stack
+    "lands in shadow" and is silent on this flag, so nothing is captured or spawned until the owner
+    opts in. The worker still expires and sweeps an existing queue when it is off."""
+    return os.environ.get("LLM_ROUTER_VERIFY", "").strip().lower() in _ON
 
 
 # ── ids and paths ────────────────────────────────────────────────────────────

@@ -57,6 +57,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | P09-8 | The statusline "wrapper adds < 5 ms" test failed under load | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
 | P09-9 | A session id named by one test leaked onto latency rows of later tests | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
 | P012-1 | `kpi verify_shadow` was None with 0 verify rows, keyed `failed`, and walked the transcripts twice | fixed in #287 (P0.12-a, #285 review nits) |
+| P012-2 | #287 reviewed FAIL: a verify fake without `python_dir` made the budget test environment-dependent, `LLM_ROUTER_VERIFY` defaulted to on in a "shadow" PR, six mutants survived | fixed in #287 (P0.12-a, review repair) |
 | P03-1 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
 
 ## 1. NULL `session_id` on local routing rows
@@ -1163,3 +1164,21 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `load_verify_records` removed), `test_unit_id_differs_by_kind_for_the_same_session_and_timestamp`
   (red with `kind` removed from the hash). Mutants run: key back to `failed`, None when empty,
   second `ns.units` walk: each fails at least one of them.
+
+## P012-2. #287 review FAIL: environment-dependent budget test, verifier on by default, six surviving mutants
+
+- **Symptom.** CI `test (3.11)` failed `test_the_unit_is_handed_the_remaining_budget_not_more_than_the_cap`
+  with `IndexError` at `got[0]`. The "shadow" PR captured source diffs and spawned a worker with no opt-in
+  (`LLM_ROUTER_VERIFY` unset meant on). The PR body cited a plan section that is not in the repo.
+- **Cause.** The test's fake verifier had no `**kwargs` and no stub of `_repo_python_dir`, so the outcome
+  depended on the machine (a venv plus a proven sandbox hands `python_dir=` to the verifier; the fake then
+  raises `TypeError`, `process()` records `verify_worker_error`, nothing is appended). `enabled()` read the
+  flag with default `"on"`. Review mutants: `MAX_ATTEMPTS` 3 to 99 (the retry loop used the constant),
+  `STALE_CLAIM_S` to 1, `os.utime` before the claim rename removed, `_MIN_VERIFY_S` guard removed,
+  `MAX_UNITS_PER_RUN` cap removed, patch-size guard in `_run_unit` removed.
+- **Fix.** Both directions of the venv decision are stubbed explicitly, one test each; the production
+  `verify_unit` signature is pinned. `enabled()` is opt-in (`1/on/true/yes`). `docs/VERIFIER.md` holds the
+  requirements. Hook versions are above main's.
+- **Test.** The six tests listed in `docs/VERIFIER.md`, each red against its mutant and green on the head;
+  `test_the_verifier_is_off_unless_opted_in`, `test_the_worker_only_expires_when_the_verifier_is_off`.
+
