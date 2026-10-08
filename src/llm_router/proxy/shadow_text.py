@@ -70,6 +70,10 @@ SKIP_SECRET = "skipped_secret"
 SKIP_CAP = "skipped_cap"
 SKIP_DUP = "skipped_duplicate"
 SKIP_LOCKED = "skipped_locked"
+SKIP_KIND = "skipped_session_kind"
+
+# The labeller never uses these (PREREG 3), so they would only fill the daily cap (AMEND2 1).
+SKIP_SESSION_KINDS = ("harness", "headless")
 
 
 def rate(raw: str | None = None) -> float:
@@ -168,6 +172,8 @@ def maybe_record(path: Path, body: dict, context: str, fields: dict) -> str:
         return NOT_SAMPLED
     if not sampled(text_sha, day, r):
         return NOT_SAMPLED
+    if fields.get("session_kind") in SKIP_SESSION_KINDS:
+        return SKIP_KIND
     prompt = newest_human_text(body)
     if not prompt.strip():
         return SKIP_EMPTY

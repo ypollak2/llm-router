@@ -346,3 +346,17 @@ def test_the_marker_list_is_the_pinned_one():
 def test_each_marker_alone_is_cut(marker):
     assert st.scrub(f"keep this {marker} drop this") == "keep this" + st.SCRUB_SUFFIX
     assert st.scrub(f"line one\n{marker} only\nline three") == f"line one\n{st.SCRUB_SUFFIX}\nline three"
+
+
+@pytest.mark.parametrize("kind,written", [("harness", False), ("headless", False), ("organic", True), ("research", True),
+                                           (None, True)])
+def test_harness_and_headless_turns_leave_no_text(tmp_path, monkeypatch, kind, written):
+    monkeypatch.setenv(st.ENV, "1")
+    f = {**_fields("a typed prompt"), "session_kind": kind}
+    got = st.maybe_record(tmp_path / SIDE, _body("a typed prompt"), "Working directory: /w", f)
+    assert got == (st.WRITTEN if written else st.SKIP_KIND)
+    assert (tmp_path / SIDE).exists() is written
+
+
+def test_the_skipped_kinds_are_the_labellers_excluded_ones():
+    assert st.SKIP_SESSION_KINDS == ("harness", "headless")  # AMEND2 SIDE_SKIP_KINDS pin
