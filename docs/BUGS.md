@@ -13,6 +13,8 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 3 | NS and D2 counted a heuristic "used" | open, fix is plan task M0.2 |
 | 4 | `G1_proxy` printed 0 ms | fixed in this change (M0.6) |
 | 5 | Haiku 400 on a mid-conversation system message | worked around (flag off); fold is plan task M0.7 |
+| P09-3 | A session-start background child wrote its own "session-start" latency row | fixed in `perf/session-start-bg` (P0.9) |
+| P09-4 | session-start ran Ollama start, `ollama list`, seats, usage.db and git inline | fixed in `perf/session-start-bg` (P0.9 task 3) |
 | 6 | Research session b9f04425 counted as organic | fixed in #291 (M0.0b) |
 | 7 | `edit_outcomes.jsonl` rows with no source | open, fix is plan task M0.3(c) |
 | 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | known, not fixed |
@@ -99,6 +101,38 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   Haiku accepts it) is plan task M0.7, behind a flag that stays off.
 - **Test.** Existing: `tests/test_proxy_tiers.py` (the body-eligibility tests). M0.7 adds a smoke on a separate proxy port: at least 19 of 20
   Haiku-decided calls served with no `tier_retry`.
+
+## P09-3. A session-start background child wrote its own "session-start" latency row
+
+- **Symptom.** A detached child that re-runs `session-start.py` (`--background-usage-refresh`:
+  keychain plus up to 3 OAuth attempts) arms the KPI G1 latency stanza at import like the hook
+  itself, so its whole runtime would be recorded as one `session-start` invocation. Found by
+  reading the code while adding the P0.9 child (`--background-session-work`), which would have
+  added one such row per session start. Not separable in [HL7]: rows carry no argv.
+- **Cause.** The stanza arms whenever `__name__ == "__main__"`, and a re-run of the file is
+  `__main__` too.
+- **Fix.** `_entry(argv)` sets `LLM_ROUTER_HOOK_LATENCY=off` for any `--background-*` child
+  before it runs; the recorder checks that switch when it writes at exit. The status-bar
+  refresher (`perf/status-bar-cache`) does the same.
+- **Test.** `tests/test_p09_session_start_bg.py::test_a_background_child_writes_no_session_start_latency_row`,
+  `test_the_hook_itself_keeps_the_recorder_on`.
+
+## P09-4. session-start ran Ollama start, `ollama list`, seats, usage.db and git inline
+
+- **Symptom.** session-start p95 16,178 ms (n = 65) against the PRD's 2,000 ms [HL7]. In a
+  copy of `hook_latency.jsonl` + `.1` (2026-10-04T22:07Z to 2026-10-07T14:47Z, same 65 rows),
+  28 rows fell in one burst (2026-10-06 05:07-05:08Z, 4.6-17.4 s). The other 37 read
+  138 ms-11.3 s: 11 of them over 2 s, p95 11,045 ms. So the tail is not only the burst.
+- **Cause.** `main()` ran `start-ollama.sh` (waits up to 10 s), `ollama list`, a seats
+  re-detect (2 s budget), two usage.db queries, an Ollama co-residency probe, the pxpipe sync,
+  a `git` check for the OKF index and five process spawns before returning. Under a burst of
+  concurrent session starts each of those contends with the others.
+- **Fix.** One detached child (`--background-session-work`) runs all of it. Its hint lines go
+  to `session_start_hints.json` and the next session start shows them (dropped after 24 h).
+  `main()` keeps the session tag, the stale-state reset, the proxy health line, the banner
+  from cached usage and `additionalContext`.
+- **Test.** `tests/test_p09_session_start_bg.py::test_main_does_not_run_any_moved_step_inline`
+  (FAILS on da31df7: all 17 steps ran inline), `test_main_returns_while_a_5s_background_phase_still_runs`.
 
 ## 6. Research session b9f04425 counted as organic
 
