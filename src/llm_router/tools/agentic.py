@@ -9,9 +9,13 @@ live model.
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
+
+from mcp.server.mcpserver import Context
 
 from llm_router.agentic.adapters import CodexAdapter
 from llm_router.agentic.planner import PlannerModel, PlanRejected, hybrid_plan
@@ -85,15 +89,51 @@ def _default_planner() -> PlannerModel:
     return planner_model
 
 
-def _default_adapters() -> dict[int, Any]:
+async def resolve_project_root(ctx: Any = None) -> Path | None:
+    """P0.13: the directory ``llm_act`` may write in, or None (read-only).
+
+    Order: the MCP client's roots (``mcp_roots.root_from_ctx``, which falls back
+    to the cwd the prompt hook recorded for this exact session), then
+    ``$CLAUDE_PROJECT_DIR``. Never the MCP process cwd: that is wherever the
+    host was launched (``$HOME`` in the field), not the caller's project.
+    A candidate must be an existing directory.
+    """
+    candidates: list[Path] = []
+    try:
+        from llm_router.mcp_roots import root_from_ctx
+        found = await root_from_ctx(ctx)
+        if found is not None:
+            candidates.append(Path(found))
+    except Exception:  # noqa: BLE001 — a failed lookup means "no root", never a crash
+        pass
+    env_dir = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
+    if env_dir:
+        candidates.append(Path(env_dir))
+    for cand in candidates:
+        try:
+            resolved = cand.expanduser().resolve()
+        except (OSError, RuntimeError):
+            continue
+        if resolved.is_dir():
+            return resolved
+    return None
+
+
+def _default_adapters(root: Path | None = None) -> dict[int, Any]:
     # tier 0 = local ReAct/Ollama agent (cheapest, best-effort); tier 1 = Codex.
+    # P0.13: both tiers work in the project root. No root → read-only: the
+    # ReAct executor refuses write_file/bash and Codex runs its read-only sandbox.
     from llm_router.agentic.react import ReActAgent
-    return {0: ReActAgent(tier=0), 1: CodexAdapter(tier=1)}
+    if root is None:
+        return {0: ReActAgent(tier=0, cwd=None),
+                1: CodexAdapter(tier=1, sandbox_mode="read-only")}
+    return {0: ReActAgent(tier=0, cwd=str(root)), 1: CodexAdapter(tier=1, cwd=str(root))}
 
 
 async def llm_delegate(
     task: str, budget_usd: float = 1.0, baseline_cost_per_milestone: float = 0.20,
     context: str = "", bounded: bool | None = None, workdir: str | None = None,
+    ctx: Context | None = None,
 ) -> str:
     """Agentic delegation: decompose *task* into milestones, run them on the
     cheapest capable tier with objective acceptance checks, escalate on failure
@@ -125,7 +165,8 @@ async def llm_delegate(
             bounded = False
 
     planner = (planner_factory or _default_planner)()
-    adapters = (adapters_factory or _default_adapters)()
+    project_root = await resolve_project_root(ctx)
+    adapters = adapters_factory() if adapters_factory else _default_adapters(project_root)
     try:
         milestones = await hybrid_plan(task, planner)
     except PlanRejected as exc:
@@ -149,9 +190,8 @@ async def llm_delegate(
     # way a caller working in a scratch directory can be verified against the
     # right tree. Left unresolved, a repo-reading check silently inspects
     # whatever directory the server happens to be in.
-    import os as _os
-
-    effective_workdir = workdir or _os.getcwd()
+    # P0.13: with a project root, the check inspects the tree the agent wrote in.
+    effective_workdir = workdir or (str(project_root) if project_root else os.getcwd())
 
     result = run_delegation(
         task, milestones, adapters,
@@ -162,6 +202,8 @@ async def llm_delegate(
         workdir=effective_workdir,
     )
     result["route_kind"] = route_kind
+    result["project_root"] = str(project_root) if project_root else None
+    result["read_only"] = project_root is None
     # Record the honest saving into llm_router's ledger (fail-open — never breaks the call).
     from llm_router.agentic.telemetry import record_delegation_savings
     await record_delegation_savings(result)
