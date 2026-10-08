@@ -526,6 +526,10 @@ class SandboxLauncher:
             "TMPDIR": str(self.tmp),
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONNOUSERSITE": "1",
+            # python-dotenv's find_dotenv() walks up from the interpreter's own directory (often
+            # inside the owner's home) and open()s a .env the sandbox denies: PermissionError at
+            # import time, so honest baselines fail. The child must never load a .env anyway.
+            "PYTHON_DOTENV_DISABLED": "1",
         })
         if (self.root / "src").is_dir():
             env["PYTHONPATH"] = str(self.root / "src")
