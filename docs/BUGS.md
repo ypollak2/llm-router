@@ -62,6 +62,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | P09-9 | A session id named by one test leaked onto latency rows of later tests | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
 | CI-1 | `test_verify_unit` copytree of a fresh git repo raced git auto-maintenance (`maintenance.lock`) | fixed in this change (test-only; production unaffected) |
 | P03-1 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
+| LC-1 | The "no slow callback" classifier test failed on a loaded CI runner | fixed in this change (test-only) |
 | PD-HEALTH-1 | SessionStart "proxy-default not answering" warned sessions that never routed through it, and stayed silent when settings.json lost the key | fixed in `fix/proxy-default-health-v2` (hook version 27) |
 | A.0-1 | `llm_router_agent_start_session` returned `agent_not_found` from every installed wheel | fixed in `feat/agt-a0` (v16 AGT A.0) |
 | A.0-2 | `llm_act` / `llm_delegate` / `llm_local_task` blocked the MCP event loop for the whole run | fixed in `feat/agt-a0` (v16 AGT A.0) |
@@ -1277,6 +1278,24 @@ Review findings on #334 (AB-1), each reproduced before it was fixed.
 - **Test.** The two-file command above: 1 failed before, 34 passed after. Removing the
   fixture turns it red again.
 
+## LC-1. The "no slow callback" classifier test failed on a loaded CI runner
+
+- **Symptom.** `tests/test_local_classifier.py::test_no_slow_callback_on_the_async_path_and_the_detector_works`
+  failed on CI py3.11 (run 37811026623 attempt 2: `Executing <...> took 0.137 seconds`), on #319
+  (68 ms) and earlier on #328 (docs only). None of those changes touched the classifier.
+- **Cause.** No blocking call exists on the `classify_async` path (aiohttp only; read in full).
+  The test asserted on asyncio debug `slow_callback_duration` = 50 ms, which is wall clock: a
+  callback preempted by a busy runner counts. Reproduced locally (macOS, py3.11.15) with 40
+  CPU burners and the threshold at 3 ms: the reported slow step was the test's own task
+  resuming, 1 of 6 runs; with no load, 0 of 1.
+- **Fix (test only).** `_LoopGuard` patches the blocking primitives (`time.sleep`,
+  `Thread.join`, `urlopen`, blocking-mode socket calls, `subprocess.Popen`) to record and raise
+  when called on the loop thread. The test proves the guard fires on the real sync
+  `classify_local` (it joins a worker) and on an injected sleep, then that `classify_async`
+  makes zero such calls. No clock, no threshold.
+- **Test.** `test_no_blocking_call_on_the_async_path_and_the_guard_works`. Mutants, each red:
+  `time.sleep(0.01)` in `_is_loaded`, a sync `urlopen` in `_classify`, a blocking
+  `socket.create_connection` in `_is_loaded`. The old test passed a 10 ms sleep.
 ## DT-1. The sdist shipped two test directories the "/tests/" exclude never covered
 
 - **Symptom.** `pytest -m ""` on main 26468d34 failed

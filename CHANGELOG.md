@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   True). `wait=False` returns `{"job_id": ...}` at once; `llm_router_session(action="job", id=...)`
   polls it (`running` / `done` / `failed`, with the tool's result). Jobs live in the MCP server
   process and are forgotten on restart; an unknown id answers `unknown_job`.
+- proxy (PLAN v16 GE4, OD-4 = A): Frontier shadow (`shadow_frontier.py`), **off by default**
+  (`LLM_ROUTER_SHADOW_FRONTIER=on` to enable). After a `tier_reason == haiku_rewrite` reply is relayed,
+  a background task replays the client's original bytes to the requested model; caps in code: 20 calls
+  and 400k input tokens per UTC day, paused at session >= 80% / weekly >= 85% / stale or unknown quota,
+  100% of Haiku turns for 14 days then 2%, one in flight. `python -m llm_router.shadow_frontier judge`
+  runs a blind A/B judge (isolated `claude -p`, `--no-session-persistence`, not via the proxy) into
+  `shadow_frontier/verdicts.jsonl`, the file the Haiku guard's `shadow` trigger reads. Ledgers hold no
+  prompt or response text; the pair text store is 0600 and kept 14 days.
 - proxy (PLAN v16 P0.11, owner decision D-20 = A): the Haiku guard (`proxy/haiku_guard.py`) runs in
   the proxy at start and hourly while `haiku_rewrite` is on. A trip (redo > 15% at n >= 30; audit
   batch < 75% at n >= 30; daily audit < 8/10 on 2 consecutive days; `tier_retry` > 1% at n >= 100

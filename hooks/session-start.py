@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 27
+# llm_router-hook-version: 28
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -790,7 +790,10 @@ def _check_proxy_default_health() -> str:
     if sentinel.get("enabled") is False:
         return ""
     ports = [port] + ([upstream] if upstream is not None else [])
-    value, where = _effective_base_url(os.getcwd())
+    # Project settings live under the project root Claude Code launched in, which
+    # hooks receive as CLAUDE_PROJECT_DIR; cwd is only a fallback (a hook's cwd can
+    # drift into a subdirectory).
+    value, where = _effective_base_url(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
     if not _routes_to_local_port(value, ports):
         # Installed, but this session does not use it: a dead port is irrelevant,
         # silent bypass is the problem.

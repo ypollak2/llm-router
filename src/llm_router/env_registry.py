@@ -58,6 +58,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_AGENTS_CONFIG": ("llm_router", "tools/agents.py", 1),
     "LLM_ROUTER_AGENT_POLICY_MODE": ("llm_router", "router.py", 1),
     "LLM_ROUTER_AGENT_ROUTE_ALLOW": ("llm_router", "hooks/agent-route.py", 1),
+    "LLM_ROUTER_AGENT_SLOT_TTL_S": ("llm_router", "hooks/agent-route.py", 2),
     "LLM_ROUTER_AGENT_ROUTE_CODEX": ("llm_router", "hooks/agent-route.py", 1),
     "LLM_ROUTER_AGENT_ROUTE_CODEX_DAILY_BUDGET": ("llm_router", "hooks/agent-route.py", 1),
     # 2026-10-03: the Codex agent model used for subagent delegation (gpt-6-astra
@@ -219,6 +220,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_HAIKU_GUARD_KINDS": ("llm_router", "proxy/haiku_guard.py", 1),
     "LLM_ROUTER_HAIKU_GUARD_AUDIT_DIR": ("llm_router", "proxy/haiku_guard.py", 1),
     "LLM_ROUTER_HAIKU_GUARD_SHADOW_VERDICTS": ("llm_router", "proxy/haiku_guard.py", 1),
+    # GE4 (PLAN v16, OD-4): the Frontier shadow switch, off unless on/1/true/yes (shadow_frontier.py).
+    "LLM_ROUTER_SHADOW_FRONTIER": ("llm_router", "shadow_frontier.py", 1),
     # Kill switch for the tier decision's quota-pressure step (off/0/false/no).
     "LLM_ROUTER_PROXY_QUOTA_PRESSURE": ("llm_router", "proxy/quota_pressure.py", 1),
     # Escalation signals (proxy/escalation.py): the correction-signal
