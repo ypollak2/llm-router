@@ -53,7 +53,7 @@ from urllib.parse import urlsplit
 from llm_router.local_agent import DEFAULT_MAX_PROMPT_TOKENS, LocalAgentConfig, enabled_from_env
 from llm_router.local_agent import capability as la_capability
 from llm_router.local_agent.compact import session_cwd as la_session_cwd
-from llm_router import failopen, local_models, prompt_key
+from llm_router import failopen, local_models, prompt_key, shadow_frontier
 from llm_router.proxy import haiku_guard, ledger, llm_shadow, local_mode, local_shadow, okf_context
 
 from llm_router.proxy.backend_health import (
@@ -88,7 +88,7 @@ from llm_router.proxy.steps import (
 from llm_router import session_kind
 from llm_router.proxy import cost_accounting
 from llm_router.proxy.tiers import (
-    REASON_DECISION_ERROR, REWRITE_HAIKU, ClaudeTierPolicy, haiku_block_reason, has_mid_conversation_system_message,
+    REASON_DECISION_ERROR, REASON_HAIKU_REWRITE, REWRITE_HAIKU, ClaudeTierPolicy, haiku_block_reason, has_mid_conversation_system_message,
 )
 from llm_router.proxy.translate import (
     for_haiku,
@@ -630,6 +630,33 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             failopen.record("LR-FO-PROXY-SHADOW-START", exc)
             return None
 
+    # GE4 (PLAN v16, OD-4): the Frontier shadow, OFF unless LLM_ROUTER_SHADOW_FRONTIER is on
+    # at startup. Off: None, nothing is attached, 0 Frontier calls.
+    frontier = shadow_frontier.FrontierShadow() if shadow_frontier.enabled() else None
+
+    def frontier_on_reply(request: Request, raw: bytes, row: dict, inner):
+        """Wrap ``inner`` (the local-shadow callback, or None) so that, once the Haiku reply
+        is complete, the client's original bytes are replayed to the requested model in the
+        background. Only schedules; the relay never waits on the replay."""
+        headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP}
+        headers["accept-encoding"] = "identity"
+        url = upstream + request.url.path + (("?" + request.url.query) if request.url.query else "")
+
+        async def replay(content: bytes):
+            return await shadow_frontier.replay_http(http, url, headers, content)
+
+        def _on_reply(status: int, buf: bytes, ctype: str) -> None:
+            if inner is not None:
+                try:
+                    inner(status, buf, ctype)
+                except Exception as exc:  # noqa: BLE001 - one shadow must not stop the other
+                    failopen.record("LR-FO-PROXY-SHADOW-REPLY", exc)
+            frontier.maybe_sample(raw, row.get("served_model"), row.get("requested_model"),
+                                  shadow_frontier.DOOR_PROXY, row.get("msg_id"), replay=replay,
+                                  cheap_status=status, cheap_reply=buf, cheap_ctype=ctype,
+                                  cheap_usage=row.get("usage"))
+        return _on_reply
+
     def request_fields(body: dict, raw: bytes) -> dict:
         """The M0.5 ledger fields, derived from the request's shape and a hash of
         its newest human text. Never the text itself. A failure leaves honest
@@ -880,6 +907,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         decision = await decide_tier(body, row)
         if decision is None:
             return await forward(request, raw, body, row, on_reply=on_reply)
+        if (frontier is not None and row.get("tier_reason") == REASON_HAIKU_REWRITE
+                and decision.served_model != body.get("model")):
+            on_reply = frontier_on_reply(request, raw, row, on_reply)
         key = conversation_key(body, row.get("session_id"))
 
         def _on_usage(usage) -> None:
@@ -924,6 +954,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if guard_task is not None and not guard_task.done():
             guard_task.cancel()
         await cls_shadow.aclose()
+        if frontier is not None:
+            await frontier.aclose()
 
     methods = ["GET", "POST", "PUT", "DELETE", "HEAD", "PATCH", "OPTIONS"]
     app = Starlette(routes=[Route("/{path:path}", handle, methods=methods)], lifespan=lifespan)
@@ -931,6 +963,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     app.state.warm_up = warm_up
     app.state.shadow = shadow
     app.state.cls_shadow = cls_shadow
+    app.state.frontier_shadow = frontier
     return app
 
 
