@@ -73,12 +73,13 @@ def _snapshot(base: Path) -> dict[str, str]:
             for p in sorted(base.rglob("*")) if p.is_file()}
 
 
+@pytest.mark.parametrize("flag", ["--help", "-h"])
 @pytest.mark.parametrize("argv", _CASES)
-def test_help_prints_usage_exits_0_and_changes_no_file(argv, tmp_path):
+def test_help_prints_usage_exits_0_and_changes_no_file(argv, flag, tmp_path):
     home, cwd = _seed(tmp_path)
     before = _snapshot(tmp_path)
     r = subprocess.run(
-        [sys.executable, "-m", "llm_router.cli", *argv.split(), "--help"],
+        [sys.executable, "-m", "llm_router.cli", *argv.split(), flag],
         cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=25,
         env={"PATH": "/usr/bin:/bin", "HOME": str(home), "NO_COLOR": "1", "TERM": "dumb",
              "PYTHONPATH": str(_REPO / "src"), "OLLAMA_HOST": "127.0.0.1:9",
@@ -87,17 +88,45 @@ def test_help_prints_usage_exits_0_and_changes_no_file(argv, tmp_path):
     out = _ANSI.sub("", r.stdout + r.stderr)
     after = _snapshot(tmp_path)
     changed = sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k))
-    assert changed == [], f"`llm-router {argv} --help` changed {changed}:\n{out[-800:]}"
+    assert changed == [], f"`llm-router {argv} {flag}` changed {changed}:\n{out[-800:]}"
     assert "Traceback" not in out, out[-800:]
-    assert r.returncode == 0, f"`llm-router {argv} --help` exited {r.returncode}:\n{out[-800:]}"
+    assert r.returncode == 0, f"`llm-router {argv} {flag}` exited {r.returncode}:\n{out[-800:]}"
     cmd = argv.split()[0]
     assert "usage" in out.lower() or re.search(rf"llm[-_]router {re.escape(cmd)}\b", out), out[-800:]
 
 
-def test_unknown_subcommand_with_help_is_still_an_error():
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_unknown_subcommand_with_help_is_still_an_error(flag):
     r = subprocess.run(
-        [sys.executable, "-m", "llm_router.cli", "nosuchcmd", "--help"],
+        [sys.executable, "-m", "llm_router.cli", "nosuchcmd", flag],
         stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=25,
         env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "PYTHONPATH": str(_REPO / "src")},
     )
     assert r.returncode == 2 and "unknown command 'nosuchcmd'" in r.stderr
+
+
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_a_dispatched_name_with_no_usage_line_never_runs(flag, monkeypatch, capsys):
+    """Fail closed (found in the #332 review): a dummy `zz-new` subcommand with no
+    line in the usage text made the guard return False, and the command ran."""
+    monkeypatch.setattr(cli, "__doc__", "llm-router\n  llm-router other\n")
+    monkeypatch.setattr(cli, "_KNOWN_SUBCOMMANDS", cli._KNOWN_SUBCOMMANDS | {"zz-new"})
+    assert cli._subcommand_help(["zz-new", flag]) is True      # registered, undocumented
+    assert "llm-router zz-new" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as e:                         # not registered anywhere
+        cli._subcommand_help(["zz-unreg", flag])
+    assert e.value.code == 2
+
+
+def test_every_dispatched_name_is_registered_so_help_cannot_fall_through():
+    """A subcommand added to main() however it is matched (`== "x"`, `in ("x", ...)`)
+    must be in _KNOWN_SUBCOMMANDS or an own-help set, else its --help answers
+    "unknown command" instead of running (inert, but wrong)."""
+    src = inspect.getsource(cli.main)
+    names = set(re.findall(r'args\[0\] == "([a-z][a-z0-9-]*)"', src))
+    for group in re.findall(r'args\[0\] in \(([^)]*)\)', src):
+        names |= set(re.findall(r'"([a-z][a-z0-9-]*)"', group))
+    names -= {"run-hook"}
+    assert len(names) >= 60, names
+    registered = cli._KNOWN_SUBCOMMANDS | cli._OWN_HELP_ANYWHERE | cli._OWN_HELP_FIRST
+    assert sorted(names - registered) == []

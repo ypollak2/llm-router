@@ -333,3 +333,76 @@ def test_an_unwritable_claim_starts_no_child(hook, state, monkeypatch):
     monkeypatch.setattr(hook, "_state_dir", lambda: "/dev/null/not-a-dir")
     hook._spawn_background_stop_work()
     assert started == []
+
+
+# ── #325 review gaps (mutation survivors) ────────────────────────────────────
+
+def test_the_background_steps_are_exactly_these_four_in_order(hook):
+    """The two tests above iterate ``_STOP_BACKGROUND_STEPS`` itself, so dropping a
+    step from it (the profile rescan) left them green."""
+    assert hook._STOP_BACKGROUND_STEPS == (
+        "_fetch_live_usage", "_build_and_save_learned_profile",
+        "_maybe_rescan_profile", "_maybe_evaluate_models")
+    for name in hook._STOP_BACKGROUND_STEPS:
+        assert callable(getattr(hook, name)), name
+
+
+def test_a_stale_stop_note_is_dropped_and_a_fresh_one_kept(hook, state):
+    now = time.time()
+    (state / "stop_notes.json").write_text(json.dumps([
+        {"ts": now - hook._STOP_NOTES_MAX_AGE_S - 60, "note": "stale note"},
+        {"ts": now - 60, "note": "fresh note"},
+    ]))
+    assert hook._pop_stop_notes() == ["fresh note"]
+    assert not (state / "stop_notes.json").exists(), "popped notes must not show twice"
+
+
+def test_a_stop_samples_quota_with_its_session_id_and_the_stop_label(hook, state, monkeypatch, tmp_path):
+    import llm_router.quota_samples as qs
+
+    seen: list[tuple] = []
+    monkeypatch.setattr(qs, "append_session_sample", lambda *a, **k: seen.append((a, k)))
+    _write_usage(state, time.time())
+    _trap_slow_steps(hook, monkeypatch, tmp_path)
+    monkeypatch.setattr(hook, "_spawn_background_stop_work", lambda: None)
+    _run_main(hook, monkeypatch)
+    assert seen == [(("sess-p09", "stop"), {})], seen
+
+
+def _stop_with_baseline(hook, state, monkeypatch, tmp_path, usage_age_s):
+    baseline = {"session_pct": 1.0, "weekly_pct": 2.0, "sonnet_pct": 3.0, "marker": "baseline"}
+    (state / "session_start_cc_pct.json").write_text(json.dumps(baseline))
+    _write_usage(state, time.time() - usage_age_s)
+    _trap_slow_steps(hook, monkeypatch, tmp_path)
+    monkeypatch.setattr(hook, "_spawn_background_stop_work", lambda: None)
+    _run_main(hook, monkeypatch)
+    return baseline, json.loads((state / "session_start_cc_pct.json").read_text())
+
+
+def test_stop_advances_the_cc_baseline_only_from_a_live_reading(hook, state, monkeypatch, tmp_path):
+    baseline, after = _stop_with_baseline(hook, state, monkeypatch, tmp_path, usage_age_s=5)
+    assert after["weekly_pct"] == 40.0 and after != baseline, "a live Stop advances the baseline"
+
+
+def test_stop_leaves_the_cc_baseline_alone_when_usage_is_cached(hook, state, monkeypatch, tmp_path):
+    """More than ``_LIVE_USAGE_MAX_AGE_S`` between turns: Stop shows the cached
+    reading but must not take it as the new baseline."""
+    baseline, after = _stop_with_baseline(
+        hook, state, monkeypatch, tmp_path, usage_age_s=hook._LIVE_USAGE_MAX_AGE_S + 60)
+    assert after == baseline
+
+
+def test_session_start_rewrites_the_baseline_a_cached_stop_left_behind(hook, state, monkeypatch, tmp_path):
+    """Item 4 of the #325 review: a long gap means Stop does not advance the baseline.
+    The next SessionStart does (hooks/session-start.py `_write_session_baseline`,
+    called on every start), from the measured cache even when it is stale."""
+    baseline, after = _stop_with_baseline(
+        hook, state, monkeypatch, tmp_path, usage_age_s=hook._LIVE_USAGE_MAX_AGE_S + 60)
+    assert after == baseline
+    start = _load(HOOKS / "session-start.py", "session_start_p09_baseline")
+    cached = json.loads((state / "usage.json").read_text())
+    cached.update(highest_pressure=0.4)
+    start._write_session_baseline(cached)
+    new = json.loads((state / "session_start_cc_pct.json").read_text())
+    assert new["weekly_pct"] == 40.0 and new != baseline
+    assert not new.get("is_fallback")
