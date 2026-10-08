@@ -46,6 +46,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | P010-1 | A dead proxy fails every Claude Code session | fixed in this change (P0.10); live switch is an owner step |
 | P010-2 | The shim's 200 ms connect budget sent healthy-proxy traffic direct; shim restart cut 8787 | fixed in this change (P0.10 cutover repair) |
 | P013-1 | `llm_act` wrote files into the MCP process cwd | fixed for the file tools in this change (P0.13); bash confinement is P2.9 |
+| DT-1 | sdist shipped `integrations/pi/tests/*` and the receipt mod's `band.test.ts` | fixed in this change (deselected-test sweep) |
 | P0.14-a | Proxy ledger wrote 0 rows for 25 h and nothing flagged it | fixed in this change (P0.14) |
 | P011-1 | Haiku guard re-tripped on audit days older than its window | fixed in `feat/haiku-guard-in-repo` (P0.11, 3f4149b) |
 | P1.7-c-1 | Classifier shadow on: `assemble` held the GIL and delayed continuations | fixed in this change (v16 P1.7-c) |
@@ -62,6 +63,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | P012-2 | #287 reviewed FAIL: a verify fake without `python_dir` made the budget test environment-dependent, `LLM_ROUTER_VERIFY` defaulted to on in a "shadow" PR, six mutants survived | fixed in #287 (P0.12-a, review repair) |
 | CI-1 | `test_verify_unit` copytree of a fresh git repo raced git auto-maintenance (`maintenance.lock`) | fixed in this change (test-only; production unaffected) |
 | P03-1 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
+| PD-HEALTH-1 | SessionStart "proxy-default not answering" warned sessions that never routed through it, and stayed silent when settings.json lost the key | fixed in `fix/proxy-default-health-v2` (hook version 27) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -1269,6 +1271,21 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   requirements. Hook versions are above main's.
 - **Test.** The six tests listed in `docs/VERIFIER.md`, each red against its mutant and green on the head;
   `test_the_verifier_is_off_unless_opted_in`, `test_the_worker_only_expires_when_the_verifier_is_off`.
+## DT-1. The sdist shipped two test directories the "/tests/" exclude never covered
+
+- **Symptom.** `pytest -m ""` on main 26468d34 failed
+  `tests/test_sdist_excludes_quarantined_tests.py::test_sdist_does_not_ship_the_active_test_suite`:
+  the sdist contained `integrations/pi/tests/*` (3 files) and
+  `src/llm_router/mods/llm-router-receipt/tests/band.test.ts`. CI never saw it: the test is
+  `slow`-marked and `addopts` deselects `slow`.
+- **Cause.** `"/tests/"` in `[tool.hatch.build.targets.sdist] exclude` is anchored to the repo
+  root, so it matches only `tests/`. Same anchoring lesson as `/agents/` and
+  `/_quarantined_tests/`, third instance.
+- **Fix.** Two exact-path excludes in `pyproject.toml`. An unanchored `tests/` was rejected: it
+  matches at any depth and could strip a package directory.
+- **Test.** `uv build --sdist`, then `tar tzf dist/*.tar.gz | grep -c /tests/`: 4 before,
+  0 after; `llm_router/agents/session.py` still present. The slow test above covers it when run
+  with `-m ""`.
 
 ## CI-1. `copytree` of a fixture repo raced git's background maintenance
 
@@ -1294,3 +1311,26 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   Test: `test_checkout_drains_git_archive_padding_so_git_is_not_killed_by_sigpipe` (a stand-in git that
   writes the padding late; red with `_Fail: verify_head_unavailable` before the fix).
 
+
+## PD-HEALTH-1. The proxy-default health check never asked whether the session routes through the proxy
+
+- **Symptom (2026-10-08).** A session with no `ANTHROPIC_BASE_URL` printed "installed but not
+  answering on 127.0.0.1:8787 - every API call ... will fail". The opposite case went unreported:
+  the sentinel said enabled while `~/.claude/settings.json` had lost `env.ANTHROPIC_BASE_URL`, so
+  routing was off for hours with no warning.
+- **Cause.** `_check_proxy_default_health` read only `port` (and `upstream_port`) from
+  `~/.llm-router/proxy_default.json` and TCP-probed it. It never resolved the session's effective
+  base URL.
+- **Fix.** `_effective_base_url`: `os.environ` first (Claude Code applies settings `env` to hook
+  processes; the repo has no test proving that, so it falls back to project
+  `settings.local.json`, project `settings.json`, then user `settings.json`). Not routed to
+  `port` or `upstream_port` on localhost: one warning "routing is OFF" naming where the setting is
+  missing or points, plus `llm-router install --proxy-default`; host shown only through
+  `proxy_liveness._host_of` (no userinfo, path, query, bare key). Routed and down: the old warning
+  and per-hop probes unchanged. Not installed or `enabled: false`: silent. Still one local TCP
+  connect per hop, 1 s timeout. `upstream_port` is already written by `write_sentinel` on main; its
+  absence is handled (single-hop). Hook version 26 -> 27.
+- **Test.** `tests/test_session_start_proxy_default.py`: 3 new tests failed before the fix (not
+  routed + dead port, settings lost the key with proxy up, project override to another host with
+  credentials in the URL); routed-and-dead, not-installed, precedence and direct-upstream tests
+  pin the other cases.

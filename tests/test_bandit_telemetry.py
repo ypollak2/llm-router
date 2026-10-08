@@ -250,9 +250,15 @@ class TestAggregateStatsIntegration:
             await db.close()
         assert "subject" in cols
 
-    async def test_aggregates_persisted_rows(self, temp_db):
+    async def test_aggregates_persisted_rows(self, temp_db, monkeypatch):
         """End-to-end: write rows via log_routing_decision, read via aggregate_stats."""
+        from llm_router import cost
         from llm_router.cost import log_routing_decision
+
+        # aggregate_stats trains only on provenance='runtime' (S4a). Under pytest
+        # the writer stamps 'test', so those rows are correctly excluded; this
+        # test needs rows that look like real traffic.
+        monkeypatch.setattr(cost, "_write_provenance", lambda: cost.PROVENANCE_RUNTIME)
         from llm_router.telemetry import aggregate_stats
 
         async def _log(model: str, success: bool, cost: float) -> None:

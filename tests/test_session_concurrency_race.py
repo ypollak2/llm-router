@@ -77,8 +77,13 @@ def test_cancel_is_not_overwritten_by_concurrent_record_step(tmp_path):
     def stepper():
         while not stop.is_set():
             try:
+                # Sample BEFORE the call: a step already in flight when cancel()
+                # commits may legitimately return after `cancelled` is set. Only a
+                # call that STARTED after cancel() returned and still succeeded is
+                # a violation. Sampling after the call flaked under load (xdist).
+                started_after_cancel = cancelled.is_set()
                 store.record_step(sid, 0.0001)
-                if cancelled.is_set():
+                if started_after_cancel:
                     post_cancel_successes["n"] += 1
             except TerminalStateViolation:
                 stop.set()
