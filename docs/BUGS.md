@@ -27,6 +27,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 15 | MCP routing ran on Claude pressure 0.0 for the life of the process | fixed in this change (v16 P0.2) |
 | 16 | Critical-pressure override sent `/model claude-opus-4-6`, a retired id | fixed in this change (v16 P0.2) |
 | 17 | Semantic cache never hit, ignored context, and reported a hit rate of 0 | fixed in this change (v16 P0.5) |
+| P1.7-c-1 | Classifier shadow on: `assemble` held the GIL and delayed continuations | fixed in this change (v16 P1.7-c) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -436,3 +437,30 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   because the API they call (`make_key`, `_semantic_cache_key`, the lookups table) did not
   exist, so their evidence is the single-flip mutants recorded in the v16 P0.5 gate file,
   each of which turns at least one of these tests red.
+
+## P1.7-c-1. Classifier shadow on: `assemble` held the GIL and delayed continuations
+
+- **Symptom.** With `LLM_ROUTER_LOCAL_CLASSIFIER=shadow`, continuation p95 was 26.4 ms against 0.7 ms with the
+  shadow off (1,800-message history, n = 100 per arm; #301 review). A continuation never schedules a
+  classification, so the delay came from another call's shadow work.
+- **Cause.** `cls_input.assemble` runs in a worker thread (`asyncio.to_thread`), which keeps it off the event
+  loop but not off the GIL. It walked the WHOLE history forwards and ran `_text_of` + `normalize` (reminder
+  regex, whitespace collapse) on every message, although the input uses only the newest prompt, 3 earlier
+  prompts and the assistant's last text. CPU time per call on #301's code (`thread_time`, best of 7,
+  synthetic fixtures of `scripts/bench_shadow_continuation.py`): 1,800 messages 5.4 ms (agentic shape),
+  5.7 ms (one prompt then a tool loop), 142 ms (every message text); 600 messages 46 ms (every message text).
+  While it runs, the loop thread waits for the GIL at each wake-up (switch interval 5 ms).
+- **Fix.** v16 P1.7-c: `assemble` scans backwards from the newest message, stops once it holds its context,
+  and reads at most `MAX_SCAN_MESSAGES` = 400 messages back. Output is identical whenever the context lies in
+  that window; beyond it the input lacks the older context, never claims "FIRST prompt", and the shadow record
+  says `assemble_capped: true` so a report can count such turns. CPU time at 1,800 messages: 0.30 ms
+  (agentic), 1.26 ms (one prompt + tool loop, the cap), 0.54 ms (every message text).
+- **Test.** `tests/proxy/test_cls_input.py`: `test_backward_scan_equals_the_forward_walk_on_600_random_histories`
+  (the #301 walk kept verbatim as the oracle), `test_the_scan_stops_once_it_has_its_context` (1,801 messages:
+  <= 30 `_human` calls, <= 30 extra message reads), `test_a_long_tool_loop_is_read_at_most_max_scan_messages_back`,
+  `test_capped_is_false_when_the_window_holds_the_whole_context`. 4/4 fail on main 7d857641; 12 single-flip
+  mutants of the change are each red. `test_a_long_history_is_assembled_off_the_request_path` now makes
+  `assemble` slow on purpose (a 50 ms sleep), because the real one is no longer slow enough to show the effect.
+  Latency before/after (n >= 100 per arm at 0, 600 and 1,800 messages): see the PR and
+  `$PP/v16/p17c/` on the owner's machine.
+
