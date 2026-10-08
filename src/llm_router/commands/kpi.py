@@ -2055,6 +2055,10 @@ def cmd_kpi(args: list[str]) -> int:
     ap.add_argument("--validate-backfill", action="store_true",
                      help="read-only: run the backfill rules on sessions that already have a live "
                           "kind and report agreement plus a confusion table (counts only)")
+    ap.add_argument("--haiku-watch", action="store_true",
+                     help="the daily Haiku Option A watch (PLAN v16 P0.11, D-20) over --since/--until: "
+                          "Haiku-decided calls, tier_retry, redo, blind audit and shadow triggers, each "
+                          "with its n; exit 1 when a D-20 trigger is not evaluable (the day fails)")
     parsed = ap.parse_args(args)
     if parsed.dry_run and not parsed.backfill_tags:
         ap.error("--dry-run needs --backfill-tags")
@@ -2106,6 +2110,14 @@ def cmd_kpi(args: list[str]) -> int:
             ap.error(f"--until: cannot read {parsed.until!r} as a date, an ISO time or epoch seconds")
         if not win_since < win_until:
             ap.error("--since must be before --until")
+    if parsed.haiku_watch:
+        if win_since is None:
+            ap.error("--haiku-watch needs --since and --until (an absolute window)")
+        from llm_router.proxy import haiku_guard
+
+        watch = haiku_guard.watch(win_since, win_until)
+        print(json.dumps(watch, indent=2, default=str) if parsed.json else haiku_guard.render_watch(watch))
+        return 0 if watch["day_pass"] else 1
 
     data = compute_scorecard(days=parsed.days, include_research=(parsed.include == "research"),
                              schema_since=since, since_policy=parsed.since_policy,
