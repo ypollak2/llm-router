@@ -165,6 +165,99 @@ def remove_toml_table(text: str, header_literal: str) -> str:
     return pat.sub("", text, count=1)
 
 
+_KEY_SEGMENT = re.compile(r'\s*(?:"((?:[^"\\\n]|\\.)*)"|\'([^\'\n]*)\'|([A-Za-z0-9_-]+))\s*')
+_HEADER_LINE = re.compile(r'^\[\[?([^\[\]\n]*)\]\]?\s*(?:#.*)?$')
+_KEY_VALUE_LINE = re.compile(r'^\s*([^=#\n]+?)\s*=')
+
+
+def _key_path(raw: str) -> list[str] | None:
+    """The segments of a TOML dotted key (``a."b" . 'c'`` -> a, b, c), or None."""
+    parts: list[str] = []
+    pos = 0
+    while True:
+        m = _KEY_SEGMENT.match(raw, pos)
+        if not m or m.end() == pos:
+            return None
+        basic, literal, bare = m.groups()
+        if basic is not None:
+            try:
+                basic = json.loads(f'"{basic}"')
+            except ValueError:
+                return None
+        parts.append(next(g for g in (basic, literal, bare) if g is not None))
+        pos = m.end()
+        if pos == len(raw):
+            return parts
+        if raw[pos] != ".":
+            return None
+        pos += 1
+
+
+def _whole_key_value(line: str) -> bool:
+    """True when ``line`` is a complete ``key = value`` on its own (a value that
+    spans lines is not: removing its first line would corrupt the file)."""
+    import tomllib
+    try:
+        tomllib.loads(line)
+    except tomllib.TOMLDecodeError:
+        return False
+    return True
+
+
+def remove_toml_subtree(text: str, header_literal: str) -> str:
+    """Remove ``[header_literal]``, every ``[header_literal.<...>]`` table, and
+    dotted keys that land inside it (``llm_router.tools.x.approval_mode = ...``
+    under ``[mcp_servers]``, or at the root), in any quoting or spacing.
+
+    Codex itself writes ``[mcp_servers.llm_router.tools.<tool>]`` when a user
+    picks "always allow" on a tool we did not pre-approve. Removing only the
+    tables we recorded leaves that one behind, and a server table with no
+    ``command`` or ``url`` makes Codex refuse to start ("invalid transport").
+
+    Comment lines at the end of a removed table, directly before a table that
+    stays, belong to that table and are kept. A dotted key whose value spans
+    lines is left alone; the caller re-checks and reports what remains.
+    """
+    target = _key_path(header_literal) or [header_literal]
+    out: list[str] = []
+    table: list[str] = []
+    dropping = False
+    trailing: list[str] = []  # comment/blank lines at the end of a dropped table
+    for line in text.splitlines(keepends=True):
+        header = _HEADER_LINE.match(line)
+        # A '[' line we cannot parse still ends the table above it (as the old
+        # regex did), so its body is never swallowed.
+        path = (_key_path(header.group(1)) or ["\0"]) if header else None
+        if path is not None:
+            inside = path[:len(target)] == target
+            if dropping and not inside:
+                while trailing and not trailing[0].strip():
+                    trailing.pop(0)
+                out.extend(trailing)
+            trailing = []
+            table, dropping = path, inside
+            if not dropping:
+                out.append(line)
+            continue
+        if dropping:
+            bare = line.strip()
+            trailing = trailing + [line] if not bare or bare.startswith("#") else []
+            continue
+        kv = _KEY_VALUE_LINE.match(line)
+        key = _key_path(kv.group(1)) if kv else None
+        if key is not None and (table + key)[:len(target)] == target and _whole_key_value(line):
+            continue
+        out.append(line)
+    return "".join(out)
+
+
+def has_orphan_mcp_tables(config_toml_text: str) -> bool:
+    """True when ``[mcp_servers.llm_router...]`` exists without a transport --
+    the state Codex rejects with "invalid transport"."""
+    entry = read_mcp_server(config_toml_text)
+    return entry is not None and not entry.get("command") and not entry.get("url")
+
+
 def toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)  # JSON string escaping is valid TOML basic-string escaping
 

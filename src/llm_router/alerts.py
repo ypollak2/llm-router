@@ -33,6 +33,8 @@ RUNAWAY_BREAKER_TRIP = "runaway_agent_breaker_trip"
 AGENT_EMERGENCY_STOP = "agent_emergency_stop"
 BUDGET_POSTGRES_FALLBACK = "budget_postgres_fallback"
 INVOICE_DISCREPANCY = "invoice_discrepancy"
+# The proxy's Haiku guard turned haiku_rewrite off (proxy/haiku_guard.py, PLAN v16 P0.11).
+HAIKU_GUARD_TRIP = "haiku_guard_trip"
 
 
 def _env_on(name: str) -> bool:
@@ -133,4 +135,5 @@ __all__ = [
     "AGENT_EMERGENCY_STOP",
     "BUDGET_POSTGRES_FALLBACK",
     "INVOICE_DISCREPANCY",
+    "HAIKU_GUARD_TRIP",
 ]

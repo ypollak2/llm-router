@@ -231,12 +231,18 @@ def _remove_toml_table(path: pathlib.Path, header: str) -> list[str]:
     if not path.exists() or not header:
         return []
     text = path.read_text()
-    # RED1-9-02: body stops at the next '[table]' line (^-anchored, MULTILINE) so
-    # adjacent tables not separated by a blank line are NOT swallowed.
-    pattern = re.compile(
-        rf'(?m)^\[{re.escape(header)}\][^\n]*\n(?:(?!\[).*(?:\n|$))*'
-    )
-    updated = pattern.sub("", text, count=1)
+    from llm_router import codex_host
+    if header == codex_host.MCP_TABLE:
+        # The whole server subtree, including tool tables Codex wrote itself:
+        # a leftover [mcp_servers.llm_router.tools.x] stops Codex from starting.
+        updated = codex_host.remove_toml_subtree(text, header)
+    else:
+        # RED1-9-02: body stops at the next '[table]' line (^-anchored, MULTILINE) so
+        # adjacent tables not separated by a blank line are NOT swallowed.
+        pattern = re.compile(
+            rf'(?m)^\[{re.escape(header)}\][^\n]*\n(?:(?!\[).*(?:\n|$))*'
+        )
+        updated = pattern.sub("", text, count=1)
     if updated != text:
         # RED2-10-05: no persistent .llm_router-bak — uninstall must leave nothing
         # llm_router-authored. The removal regex is ^-anchored and regression-tested

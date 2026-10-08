@@ -12,6 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- proxy (PLAN v16 P0.11, owner decision D-20 = A): the Haiku guard (`proxy/haiku_guard.py`) runs in
+  the proxy at start and hourly while `haiku_rewrite` is on. A trip (redo > 15% at n >= 30; audit
+  batch < 75% at n >= 30; daily audit < 8/10 on 2 consecutive days; `tier_retry` > 1% at n >= 100
+  Haiku-decided calls; shadow acceptable < 26/30 at n >= 20) writes `~/.llm-router/tier_overrides.json`
+  and turns the live rewrite off. `ClaudeTierPolicy.load` reads that override after the YAML. The
+  override can only turn the rewrite off, and the YAML is never edited. New
+  `llm-router kpi --haiku-watch --since --until` prints every trigger with its n and exits 1 when a
+  D-20 trigger has too little data to judge.
+
 ### Changed
 - routing (M3.0, owner decision D-14 = A): `route_and_call` no longer serves a Q&A task type from a
   local provider. For `northstar.QA_TASK_TYPES` (query, research, generate, analyze and the other Q&A
@@ -56,6 +66,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LLM_ROUTER_STATUSLINE=fast` and now shows the Claude 5h / weekly / Sonnet quota.
 
 ### Added
+- kpi (v16 GE6, PRD S3): quota-burn baseline. SessionStart (inside the P0.9 background child, which
+  now receives the session id as its second argument) and Stop (not SessionEnd) append
+  `{session_id, kind: start|stop, ts, five_hour_pct, weekly_pct, updated_at, five_hour_resets_at, source, session_kind}` to
+  `~/.llm-router/quota_samples.jsonl` from the cached `usage.json` (no network); the status-line tick
+  appends one `{ts, five_hour_pct, weekly_pct, updated_at, five_hour_resets_at, source}` row at most every 300 s to
+  `quota_history.jsonl`. A snapshot older than 30 min, a fallback or a pending one is `source: stale`
+  (unknown values null, never 0). New `llm-router kpi --quota-burn --since --until`: burn per session and
+  per human turn (one Stop = one turn) from measured samples. A 5h-window reset is a changed
+  `session_resets_at` (> 120 s apart), or, with no reset time, a drop of >= 5 pts; after a reset the new
+  reading is all burn, even when it is higher than the old one; a smaller drop is jitter and burns nothing.
+  Results come with session-clustered bootstrap CIs; stale samples form a separate line labelled estimated; coverage =
+  sessions with start and stop samples over every tagged session in the window whose kind, after the
+  owner's `session_kind_overrides.json`, is in the population (Wilson CI). Several status-line windows
+  ticking together write one history row per slot (a non-blocking `flock` on the stamp). Hook versions:
+  session-start 25, session-end 21. Tests: `tests/test_quota_samples.py`.
 - toolkit: a router-owned tool layer, phase 1 (`src/llm_router/toolkit/`). Seven tools (read,
   search, list, edit, write, bash, finish) behind one permission function that runs in code
   before every call and logs every decision; a throwaway workspace (a copy; the caller's tree is

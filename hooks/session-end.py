@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 20
+# llm_router-hook-version: 21
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -553,7 +553,7 @@ def _query_cumulative_savings() -> list[tuple[str, int, int, int, float]]:
 def _aggregate(rows: list[dict]) -> dict[str, dict]:
     tools: dict[str, dict] = {}
     for r in rows:
-        tool    = r.get("task_type", "unknown")
+        tool    = r.get("task_type") or "unknown"  # P0.8: NULL = unknown (BUGS.md 27)
         model   = r.get("model", "?")
         in_tok  = r.get("input_tokens")  or 0
         out_tok = r.get("output_tokens") or 0
@@ -729,7 +729,7 @@ def _format_cc_model_section(cc_rows: list[dict]) -> list[str]:
         model = r.get("model", "?")
         if _is_test_model(model):
             continue
-        task  = r.get("task_type", "?")
+        task  = r.get("task_type") or "?"
         if model not in models:
             models[model] = {"count": 0, "tasks": {}}
         models[model]["count"] += 1
@@ -2236,6 +2236,15 @@ def main() -> None:
         # output is not shown to the user, so do not render it twice.
         return
 
+    # GE6 / S3: one quota sample (cached usage.json, no network) per Stop, i.e.
+    # per human turn, into quota_samples.jsonl. Fail-open.
+    try:
+        from llm_router import quota_samples as _quota_samples
+        if isinstance(_hook_input, dict):
+            _quota_samples.append_session_sample(_hook_input.get("session_id"), "stop")
+    except Exception:
+        pass
+
     session_start               = _read_session_start()
     paid_rows, cc_rows, free_rows = _query_session_data(session_start)
     tools                       = _aggregate(paid_rows) if paid_rows else {}
@@ -2619,7 +2628,7 @@ def main() -> None:
     except Exception:
         pass  # Graceful failure — never break session-end
 
-    # ── NS1: North Star line (routed-and-used share, this session) ───────────
+    # ── NS1: North Star line (strict verified share, this session) ───────────
     # PR #178 changes this box's savings text and another PR retitles it to
     # estimate-only; this block only APPENDS its own item, same pattern as the
     # routing-efficiency block above, so those two land without touching this.
