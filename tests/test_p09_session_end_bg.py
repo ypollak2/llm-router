@@ -240,7 +240,8 @@ def test_a_stop_run_names_its_phases(hook, state, monkeypatch, tmp_path, armed):
     ph = set(armed._phases)
     assert {"import", "session_io", "session_data", "cc_usage", "savings_sync", "cumulative",
             "render", "unverified_note", "spend", "trends", "notes", "quota_timeline",
-            "routing_section", "northstar", "quality_breaker", "bg_spawn", "emit"} <= ph, ph
+            "routing_section", "northstar", "quality_breaker", "quota_sample", "bg_spawn",
+            "emit"} <= ph, ph
 
 
 #: Every phase name each hook may write (pinned by reading the source, as
@@ -248,7 +249,8 @@ def test_a_stop_run_names_its_phases(hook, state, monkeypatch, tmp_path, armed):
 _PHASE_NAMES = {
     "session-end": {"session_io", "session_data", "cc_usage", "savings_sync", "cumulative",
                     "render", "unverified_note", "spend", "trends", "notes", "quota_timeline",
-                    "routing_section", "northstar", "quality_breaker", "bg_spawn", "emit"},
+                    "routing_section", "northstar", "quality_breaker", "quota_sample", "bg_spawn",
+                    "emit"},
     "agent-route": {"session_io", "budget_init", "depth", "classify", "codex_delegation",
                     "direct_subagent", "cli_delegation", "limits", "emit"},
 }
