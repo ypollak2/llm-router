@@ -110,6 +110,24 @@ def _start_and_wait(dest: Path, activate_cmd: str, port: int, what: str, *, runn
     )
 
 
+def _stale_plist_note(dest: Path, before: str | None, label: str) -> str | None:
+    """`kickstart -k` does not re-read an edited plist: say so, never unload."""
+    if before is None or not dest.exists() or dest.read_text() == before:
+        return None
+    return (
+        f"NOTE {label}: the plist changed but launchd keeps the old one loaded, so this "
+        f"restart does not apply it. Owner step (docs/proxy.md, 'Moving an existing install "
+        f"behind the shim'): `launchctl unload {dest}` then `launchctl load {dest}`."
+    )
+
+
+def _read_or_none(path: Path) -> str | None:
+    try:
+        return path.read_text()
+    except OSError:
+        return None
+
+
 def install_proxy_default(
     *,
     port: int = pd.DEFAULT_PORT,
@@ -142,7 +160,21 @@ def install_proxy_default(
     wait = {"runner": runner, "home": home, "health_retries": health_retries,
             "health_interval_s": health_interval_s}
 
-    if pd.proxy_health("127.0.0.1", port, timeout=1.0):
+    prior = pd.read_sentinel() or {}
+    own_shim_layout = (
+        shim and prior.get("shim_label") == pd.SHIM_LABEL
+        and prior.get("port") == port and prior.get("upstream_port") == main_port
+    )
+    if own_shim_layout and pd.proxy_health("127.0.0.1", port, timeout=1.0) \
+            and pd.proxy_health("127.0.0.1", main_port, timeout=1.0):
+        # A re-run on a finished install: nothing to write or restart, and the
+        # sentinel must keep naming the shim so uninstall still removes it.
+        actions.append(
+            f"Already installed: shim on :{port} in front of the main proxy on :{main_port} — "
+            f"nothing written or restarted."
+        )
+        reused = True
+    elif not own_shim_layout and pd.proxy_health("127.0.0.1", port, timeout=1.0):
         actions.append(
             f"Found a proxy already answering on 127.0.0.1:{port} — reusing it "
             f"(no second service installed)."
@@ -151,13 +183,17 @@ def install_proxy_default(
             actions.append(
                 "No fail-open shim installed: the port is already taken. If that process is "
                 "the main proxy, a dead proxy still breaks new sessions; see docs/proxy.md "
-                "'Fail-open shim' to move it behind the shim."
+                "'Fail-open shim' to move it behind the shim (not done here: launchd does not "
+                "re-read an edited plist on `kickstart`, and bootout + bootstrap is what cut "
+                "8787 on 2026-10-08)."
             )
         shim = False
         main_port = port
         reused = True
     else:
         try:
+            _d, _ = pd.service_target(system, home)
+            before = _read_or_none(_d)
             dest, activate_cmd = pd.install_service(
                 system=system, home=home, port=main_port, steps=steps, tiers=tiers,
             )
@@ -173,15 +209,22 @@ def install_proxy_default(
         # teardown: stop, THEN delete, in that order. The shim file below
         # follows the same rule.
         actions.append(f"Wrote {dest}")
+        note = _stale_plist_note(dest, before, pd.LABEL)
+        if note:
+            actions.append(note)
         err = _start_and_wait(dest, activate_cmd, main_port, "proxy", log="proxy.err.log", **wait)
         if err is not None:
             return {"ok": False, "actions": actions, "reused": False, "error": err}
         actions.append(f"Started via `{activate_cmd}`")
         if shim:
+            sbefore = _read_or_none(pd.service_target(system, home, label=pd.SHIM_LABEL)[0])
             sdest, sactivate = pd.install_shim_service(
                 system=system, home=home, port=port, upstream_port=upstream_port,
             )
             actions.append(f"Wrote {sdest}")
+            snote = _stale_plist_note(sdest, sbefore, pd.SHIM_LABEL)
+            if snote:
+                actions.append(snote)
             err = _start_and_wait(sdest, sactivate, port, "fail-open shim",
                                   log="proxy-shim.err.log", **wait)
             if err is not None:
@@ -222,12 +265,20 @@ def uninstall_proxy_default(*, home: Path | None = None, system: str | None = No
     actions: list[str] = []
 
     sentinel = pd.read_sentinel()
-    if sentinel is None:
+    try:
+        shim_file, _ = pd.service_target(system, home, label=pd.SHIM_LABEL)
+    except RuntimeError:
+        shim_file = None
+    # A shim plist nobody recorded (hand-written, or left by an earlier run)
+    # is removed as well, with or without a sentinel.
+    shim_label = (sentinel or {}).get("shim_label") or (
+        pd.SHIM_LABEL if shim_file is not None and shim_file.exists() else None)
+    if sentinel is None and shim_label is None:
         return actions  # never installed, or already removed — nothing to do
 
-    services = [(pd.LABEL, "proxy service")]
-    if sentinel.get("shim_label"):
-        services.insert(0, (sentinel["shim_label"], "fail-open shim service"))
+    services = [(pd.LABEL, "proxy service")] if sentinel is not None else []
+    if shim_label:
+        services.insert(0, (shim_label, "fail-open shim service"))
     for label, what in services:
         try:
             dest, _ = pd.service_target(system, home, label=label)
@@ -242,8 +293,9 @@ def uninstall_proxy_default(*, home: Path | None = None, system: str | None = No
             except OSError as exc:
                 actions.append(f"WARN could not remove {dest}: {exc}")
 
-    pd.remove_sentinel()
-    actions.append("Removed proxy-default state sentinel")
+    if sentinel is not None:
+        pd.remove_sentinel()
+        actions.append("Removed proxy-default state sentinel")
     return actions
 
 

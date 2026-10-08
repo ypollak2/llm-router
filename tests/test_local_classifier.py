@@ -462,7 +462,11 @@ class _LoopGuard:
     *which calls it makes*, so the guard watches those instead of the clock: ``time.sleep``,
     joining a thread (``classify_local`` joins a worker; ``Thread.start`` itself is fine,
     executors call it from the loop), ``urlopen``, a socket in
-    blocking mode, and starting a subprocess. Non-blocking sockets (asyncio's own) pass."""
+    blocking mode, and starting a subprocess. Non-blocking sockets (asyncio's own) pass.
+
+    It does NOT catch other blocking primitives: file IO / ``open``, ``sqlite3``,
+    ``socket.getaddrinfo`` (DNS), lock and ``Event`` waits, ``os.system``, or an executor
+    future's ``.result()``. A path that blocks the loop through one of those passes this guard."""
 
     def __init__(self, monkeypatch):
         self.thread = threading.get_ident()
