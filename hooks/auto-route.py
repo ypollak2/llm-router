@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 47
+# llm_router-hook-version: 48
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -209,7 +209,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 47"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 48"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
