@@ -253,9 +253,11 @@ def frozen_paths(command: str, root: Path) -> set[str]:
 
 def verify(command: str, workspace: "sandbox.Workspace", *, python_dir: str | None = None,
            timeout_s: float = 300, patch_nonempty: bool = True,
-           baseline_run: VerifyRun | None = None) -> Verdict:
+           baseline_run: VerifyRun | None = None, after_run: VerifyRun | None = None) -> Verdict:
     """Type A verification. `baseline_run` may be passed when it was taken before
-    the model ran; otherwise it is taken now on the pristine baseline copy."""
+    the model ran; otherwise it is taken now on the pristine baseline copy.
+    `after_run` lets a caller that needs the per-test sets (verify_unit) run the
+    patched copy itself and have the same verdict logic applied to it."""
     v = Verdict(ran=False, command=command)
     status = sandbox.prove_sandbox()
     if not status.proven:
@@ -266,8 +268,8 @@ def verify(command: str, workspace: "sandbox.Workspace", *, python_dir: str | No
     try:
         base = baseline_run or run_command(command, workspace.baseline, tmp, python_dir=python_dir,
                                            timeout_s=timeout_s, tag="before")
-        after = run_command(command, workspace.root, tmp, python_dir=python_dir,
-                            timeout_s=timeout_s, tag="after")
+        after = after_run or run_command(command, workspace.root, tmp, python_dir=python_dir,
+                                         timeout_s=timeout_s, tag="after")
     except OSError as exc:
         v.reason = f"verifier could not start: {exc}"
         return v
