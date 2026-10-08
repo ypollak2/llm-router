@@ -65,6 +65,14 @@ class _StubOllama(BaseHTTPRequestHandler):
                         "prompt_eval_count": 10, "eval_count": 5})
 
 
+# P0.3 (D-14 = A at every door): a Q&A prompt is never served by a local provider any more.
+# The zero-Claude success test uses a CODE prompt, which still goes to the local stub; the
+# advisory-mode tests keep the Q&A prompt and now pin that no local draft is generated.
+# tests/test_zero_claude_scenarios.py pins the zero-Claude Q&A block.
+CODE_PROMPT = "Write a Python function that returns the nth Fibonacci number."
+QA_PROMPT = "What is the capital of France?"
+
+
 @pytest.fixture
 def stub_ollama():
     server = ThreadingHTTPServer(("127.0.0.1", 0), _StubOllama)
@@ -120,7 +128,7 @@ def _run(prompt: str, home: Path, ollama_url: str, extra_env=None) -> dict | Non
 
 def test_zero_claude_blocks_on_success(tmp_path, stub_ollama):
     """zero-Claude + healthy provider must BLOCK Claude, not approve."""
-    out = _run("What is the capital of France?", tmp_path, stub_ollama,
+    out = _run(CODE_PROMPT, tmp_path, stub_ollama,
                extra_env={"LLM_ROUTER_ZERO_CLAUDE": "1"})
     assert out is not None, "hook produced no output"
     assert out.get("decision") == "block", (
@@ -140,25 +148,27 @@ def test_default_mode_echoes_self_contained_outside_zero_claude(tmp_path, stub_o
     the turn-replacement fabrication risk the audit identified: _is_context_dependent
     is a fixed noun list with a ~60% false-negative rate, so "self-contained" could
     not be trusted to gate a turn-replacing block."""
-    out = _run("What is the capital of France?", tmp_path, stub_ollama)
+    out = _run(QA_PROMPT, tmp_path, stub_ollama)
     assert out is not None
-    assert out.get("decision") == "approve", (
+    assert out.get("decision") in (None, "approve"), (
         f"auto default must stay advisory outside zero-Claude, got {out.get('decision')!r}"
     )
-    # The advisory draft still reaches the assistant (via additionalContext).
-    assert "Paris" in json.dumps(out)
+    # P0.3 (D-14 = A): the Q&A draft used to come from the local stub ("Paris"). No local
+    # provider serves Q&A any more, so no draft is generated; the turn stays advisory.
+    assert "Paris" not in json.dumps(out)
 
 
 def test_explicit_echo_mode_stays_advisory(tmp_path, stub_ollama):
     """Opting into RENDER_MODE=echo keeps the old advisory behavior."""
     out = _run(
-        "What is the capital of France?", tmp_path, stub_ollama,
+        QA_PROMPT, tmp_path, stub_ollama,
         extra_env={"LLM_ROUTER_RENDER_MODE": "echo"},
     )
     assert out is not None
-    assert out.get("decision") == "approve", (
+    assert out.get("decision") in (None, "approve"), (
         f"explicit echo mode should stay advisory (approve), got {out.get('decision')!r}"
     )
+    assert "Paris" not in json.dumps(out)  # P0.3: no local Q&A draft
 
 
 def test_zero_claude_blocks_empty_prompt(tmp_path, stub_ollama):
