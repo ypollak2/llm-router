@@ -39,7 +39,10 @@ ROUTER-ADDED TIME (PLAN v16 P0.9). A row whose run named a model phase
 (``MODEL_PHASES``: ``draft_chain``, ``zce_model``, ``cold_wait``) also carries
 ``router_added_ms`` = ``elapsed_ms`` minus the model time, with a ``cold_wait``
 reported inside another model phase subtracted once. ``set_session(id)`` adds
-``session_id`` so a reader can count sessions. A process the host KILLS at its timeout never reaches
+``session_id`` so a reader can count sessions. ``host`` names the CLI that ran the
+hook (``claude_code``, ``codex``, ``gemini``), read from the installed script's name
+(P0.14-d: a Codex turn never goes through the Claude Code proxy, so the ledger-silence
+alert must not count it). A row written before the field existed has no ``host``. A process the host KILLS at its timeout never reaches
 ``atexit``, so a kill leaves no row here; kills are counted separately
 (``CHZ-HOOK-KILLED`` in the fail-open store, timestamped since the same PR) and
 ``llm-router kpi`` prints them beside this log.
@@ -71,6 +74,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -216,6 +220,19 @@ def _disabled() -> bool:
 # -- write side ---------------------------------------------------------------
 
 
+def host_of_script(script: str) -> str:
+    """The CLI a hook script was installed for, from its file name: ``install`` copies
+    ``auto-route.py`` to ``codex-auto-route.py`` for Codex and ``gemini-cli-auto-route.py``
+    for Gemini CLI; every other name (``llm_router-auto-route.py``, a plugin's
+    ``auto-route.py``) is Claude Code's."""
+    name = os.path.basename(str(script or "")).lower()
+    if name.startswith("codex-"):
+        return "codex"
+    if name.startswith("gemini"):
+        return "gemini"
+    return "claude_code"
+
+
 def begin(hook: str, event: str, t0: float | None = None) -> None:
     """Start timing this invocation; the row is written when the process exits.
 
@@ -227,7 +244,8 @@ def begin(hook: str, event: str, t0: float | None = None) -> None:
     try:
         if _disabled() or _pending is not None:
             return
-        _pending = {"hook": hook, "event": event, "t0": _monotonic() if t0 is None else t0}
+        _pending = {"hook": hook, "event": event, "t0": _monotonic() if t0 is None else t0,
+                    "host": host_of_script(sys.argv[0] if sys.argv else "")}
         if not _registered:
             # atexit runs handlers last-in-first-out, and this is registered
             # before any the hook adds later (hook_liveness.clear_marker), so it
@@ -360,13 +378,13 @@ def _finish() -> None:
     if phases and any(k in phases for k in MODEL_PHASES):
         added = max(0.0, elapsed - model_ms(phases, _nested_model_ms))
     record(pending["hook"], pending["event"], elapsed, phases_ms=phases,
-           router_added_ms=added, session_id=_session_id)
+           router_added_ms=added, session_id=_session_id, host=pending.get("host"))
 
 
 def record(
     hook: str, event: str, elapsed_ms: float, *, now: float | None = None,
     phases_ms: dict[str, float] | None = None, router_added_ms: float | None = None,
-    session_id: str | None = None,
+    session_id: str | None = None, host: str | None = None,
 ) -> bool:
     """Append one row. Returns True when it was written. Never raises."""
     try:
@@ -386,6 +404,8 @@ def record(
             row["router_added_ms"] = round(max(0.0, float(router_added_ms)), 1)
         if isinstance(session_id, str) and session_id:
             row["session_id"] = session_id
+        if isinstance(host, str) and host:
+            row["host"] = host
         capped_log.append(
             store_path(), (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8"), max_bytes()
         )
