@@ -210,7 +210,7 @@ def install_proxy_default(
         main_healthy = own_shim_layout and pd.proxy_health("127.0.0.1", main_port, timeout=1.0)
         if main_healthy:
             actions.append(
-                f"Main proxy on :{main_port} is healthy — not restarting it; starting only the shim."
+                f"Main proxy on :{main_port} is healthy — not restarting it; starting only the shim. Any change to the main proxy's plist is not applied while it keeps running — owner step (docs/proxy.md): unload then load the main job."
             )
         else:
             try:
