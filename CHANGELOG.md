@@ -34,6 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs a blind A/B judge (isolated `claude -p`, `--no-session-persistence`, not via the proxy) into
   `shadow_frontier/verdicts.jsonl`, the file the Haiku guard's `shadow` trigger reads. Ledgers hold no
   prompt or response text; the pair text store is 0600 and kept 14 days.
+- proxy (GE4 review fixes on #339): retention is now enforced when the shadow is off or paused
+  (pairs and `ledger.jsonl` rows older than 14 days are pruned at proxy start and at the start of every
+  judge run, before the flag/quota early returns); the daily 400k input-token cap admits a replay only
+  if the Haiku call's input size x 1.35 fits (the replay is tokenized by a different model; a replay
+  whose real count exceeds that ratio can still land over the cap by the excess, auditable from
+  `est_input_tokens` vs `input_tokens` in the ledger); a truncated or aborted Haiku reply (no
+  `stop_reason`, no SSE `message_stop`, cut JSON, client gone) is skipped (`cheap_incomplete`), not
+  replayed or paired.
 - proxy (PLAN v16 P0.11, owner decision D-20 = A): the Haiku guard (`proxy/haiku_guard.py`) runs in
   the proxy at start and hourly while `haiku_rewrite` is on. A trip (redo > 15% at n >= 30; audit
   batch < 75% at n >= 30; daily audit < 8/10 on 2 consecutive days; `tier_retry` > 1% at n >= 100
