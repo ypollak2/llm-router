@@ -32,6 +32,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 20 | `build_context_messages` cut the caller's live context first | fixed in #307 (v16 P0.1) |
 | 21 | `context_prep` truncated the user prompt | fixed in #307 (v16 P0.1) |
 | P013-1 | `llm_act` wrote files into the MCP process cwd | fixed for the file tools in this change (P0.13); bash confinement is P2.9 |
+| P0.14-a | Proxy ledger wrote 0 rows for 25 h and nothing flagged it | fixed in this change (P0.14) |
 | 18 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
 | P011-1 | Haiku guard re-tripped on audit days older than its window | fixed in `feat/haiku-guard-in-repo` (P0.11, 3f4149b) |
 
@@ -539,6 +540,31 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `test_codex_tier_is_confined_too`, `test_executor_without_cwd_is_read_only`). Six mutants
   (read-only flag off, containment off, ReAct on the process cwd, Codex without cwd, roots
   ignored, env ignored) each turn at least one of them red.
+
+## P0.14-a. The proxy ledger wrote 0 rows for 25 hours and nothing said so
+
+- **Symptom.** `~/.llm-router/proxy_calls.jsonl` wrote 0 rows from 2026-10-07 12:47 to
+  2026-10-08 14:24 while hooks kept recording turns. `llm-router kpi` rendered "not measurable"
+  for the proxy KPIs and `doctor` printed the proxy as answering and healthy. The owner found it
+  by hand.
+- **Cause.** Every session ran from a directory whose `.claude/settings.local.json` set
+  `env.ANTHROPIC_BASE_URL` straight to `api.anthropic.com`, overriding the user-level localhost
+  proxy default. The proxy was up; no traffic reached it. `doctor` only probed the port, and `kpi`
+  had no line that compared the ledger with the turns the hooks saw.
+- **Fix.** New `llm_router/proxy_liveness.py`, read-only, used by both commands.
+  `kpi` prints `proxy_rows_24h: N (n=N ...)` with the hook turns (`auto-route` /
+  `UserPromptSubmit` rows in `hook_latency.jsonl`) and `routing_decisions` rows of the same 24 h,
+  and a `WARN` line when N is 0 and either count is above 0; `--json` carries the same fields under
+  `proxy_liveness`. A turn count that cannot be read is `null`, never 0, and no recorded turn means
+  no WARN. `doctor`, when the user settings make a localhost `ANTHROPIC_BASE_URL` the default,
+  lists every `.claude/settings.local.json` / `.claude/settings.json` under the current directory
+  (depth 3) whose value differs from it, as path plus host only (no userinfo, path or query), and
+  the silent-ledger case; both count as doctor issues. No new env key.
+- **Test.** `tests/test_proxy_ledger_liveness.py`, 11 tests, all red on 12038e46 (main) and green
+  here: zero rows plus turns warns (text and JSON; also with `routing_decisions` alone); rows
+  present, no turns, rows older than 24 h and non-turn hooks give no WARN; an override is detected
+  with path and host and without the secret; no override and a non-localhost default report nothing;
+  `doctor` prints the override and exits non-zero.
 
 ## 18. Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP)
 
