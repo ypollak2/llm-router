@@ -109,8 +109,20 @@ def test_kpi_byte_identical_with_and_without_local_shadow_rows(monkeypatch, tmp_
     text_with = kpi.render_scorecard(with_rows)
     assert with_rows["local_shadow"] == {"n": 3, "by_task_type": {"code": 1, "query": 2}}
 
+    # G3's per-writer verdict (P0.8-c) reads usage.db's routing_decisions as a writer by
+    # definition (R-EVL-1). These rows sit outside the scorecard's fixed-now window, so its n
+    # stays 0; what moves is the schema it now finds (this fixture table lacks reason_code,
+    # cost_usd, ...: named "no_column"). Set that block aside; everything else is checked.
+    for card in (with_rows, without):
+        assert card["kpis"]["G3"]["prd"]["writers"]["routing_decisions"]["n"] == 0
+
+    def kpis(card):
+        out = dict(card["kpis"])
+        out["G3"] = {k: v for k, v in out["G3"].items() if k != "prd"}
+        return out
+
     # NS/D1/D2 and every other KPI: byte-identical.
-    assert json.dumps(with_rows["kpis"], sort_keys=True) == json.dumps(without["kpis"], sort_keys=True)
+    assert json.dumps(kpis(with_rows), sort_keys=True) == json.dumps(kpis(without), sort_keys=True)
     assert json.dumps(with_rows["joins"], sort_keys=True) == json.dumps(without["joins"], sort_keys=True)
     # Rendered scorecard: identical except for the one local (shadow) line.
     extra = [ln for ln in text_with.splitlines() if ln.startswith("local (shadow)")]
