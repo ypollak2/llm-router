@@ -739,7 +739,7 @@ def find_relevant(
     """
     base = _knowledge_dir() if base is None else base  # resolved per call, not at import
     if not _okf_enabled():
-        return []  # opt-in; see _okf_enabled() — off by default to avoid contamination
+        return []  # LLM_ROUTER_OKF=off; see _okf_enabled() — on by default (prose is never stored)
     concepts = _get_bundle(base, _as_root(root))
     if not concepts:
         return []
