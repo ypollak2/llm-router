@@ -45,6 +45,8 @@ def _state(tmp_path: Path, sid: str = "sess") -> dict:
 
 def _seed(tmp_path: Path, sid: str = "sess", **state) -> None:
     (tmp_path / ".llm-router").mkdir(parents=True, exist_ok=True)
+    if "slots" in state:  # the file's depth is derived from its slots
+        state.setdefault("depth", len(state["slots"]))
     _depth_path_for(tmp_path, sid).write_text(json.dumps({"depth": 0, "session_id": sid, "ts": 0, **state}))
 
 
@@ -95,22 +97,22 @@ def test_codex_delegation_drops_its_pending_entry(tmp_path, monkeypatch, capsys)
     mod.main()
     assert json.loads(capsys.readouterr().out)["decision"] == "block"
     st = _state(tmp_path)
-    assert st["depth"] == 0 and st["pending"] == []  # nothing spawned: nothing queued
+    assert st["depth"] == 0 and st.get("pending", []) == []  # nothing spawned: nothing queued
     _start_claim(tmp_path, "fresh")  # an unrelated depth-1 agent must not inherit depth 2
     assert "fresh" not in _state(tmp_path).get("agents", {})
 
 
-# ── 2. drop by token, not "newest" ───────────────────────────────────────────
+# ── 2. a commit records the spawn's token in both lists ──────────────────────
 
-def test_drop_pending_removes_this_spawns_entry_not_a_siblings(tmp_path, monkeypatch):
+def test_commit_spawn_records_pending_and_slot_by_token(tmp_path, monkeypatch):
     mod = _load_hook_module()
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
     (tmp_path / ".llm-router").mkdir()
-    mod._push_pending("s", 1, "mine")
-    mod._push_pending("s", 1, "sibling")  # pushed after mine, i.e. the newest
-    mod._drop_pending("s", "mine")
-    toks = [p[2] for p in mod._read_state("s")["pending"]]
-    assert toks == ["sibling"]
+    mod._commit_spawn("s", "mine", 1, take_slot=True)
+    mod._commit_spawn("s", "explore", 1, take_slot=False)  # no slot: nothing will release it
+    st = mod._read_state("s")
+    assert [p[2] for p in st["pending"]] == ["mine", "explore"]
+    assert [e[0] for e in st["slots"]] == ["mine"] and st["depth"] == 1
 
 
 def test_pending_token_is_tool_use_id_when_given(tmp_path):
@@ -135,7 +137,8 @@ def test_12_parallel_pretooluse_hooks_lose_no_update(tmp_path, run):
 @pytest.mark.parametrize("run", range(20))
 def test_parallel_release_and_claim_lose_no_update(tmp_path, run):
     now = time.time()
-    _seed(tmp_path, depth=4, pending=[[now, 2, f"t{i}"] for i in range(4)])
+    _seed(tmp_path, depth=4, slots=[[f"s{i}", now] for i in range(4)],
+          pending=[[now, 2, f"t{i}"] for i in range(4)])
     rel = {"hook_event_name": "PostToolUse", "tool_name": "Agent"}
     starts = [{"hook_event_name": "SubagentStart", "agent_id": f"c{i}", "agent_type": "Explore"}
               for i in range(4)]
@@ -162,6 +165,12 @@ def test_lock_unavailable_fails_open_and_logs(tmp_path):
         assert p.returncode == 0 and "decision" not in out  # spawn approved, not stalled/blocked
         assert "lock unavailable" in err
         assert time.monotonic() - t0 < 10
+        # the fallback is also logged to hook_errors.log: exactly one line (one lock
+        # attempt per PreToolUse run), schema of llm_router.hook_health, no prompt text
+        log = (tmp_path / ".llm-router" / "hook_errors.log").read_text()
+        rows = [json.loads(line) for line in log.splitlines()]
+        assert len(rows) == 1 and rows[0]["hook"] == "agent-route"
+        assert "lock unavailable" in rows[0]["error"] and RETRIEVAL not in log
     finally:
         lock.close()
 
@@ -183,19 +192,20 @@ def test_expired_pending_entry_is_not_claimed(tmp_path):
     assert "late" not in _state(tmp_path).get("agents", {})
 
 
-def test_push_discards_expired_entries(tmp_path, monkeypatch):
+def test_commit_discards_expired_entries(tmp_path, monkeypatch):
     mod = _load_hook_module()
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
     _seed(tmp_path, "s", pending=[[time.time() - 500, 3, "stale"]])
-    mod._push_pending("s", 1, "fresh")
+    mod._commit_spawn("s", "fresh", 1, take_slot=False)
     assert [p[2] for p in mod._read_state("s")["pending"]] == ["fresh"]
 
 
 def test_release_keeps_the_registry(tmp_path):
     now = time.time()
-    _seed(tmp_path, depth=2, agents={"a1": 1, "a2": 2}, pending=[[now, 3]])
+    _seed(tmp_path, depth=2, slots=[["x", now], ["y", now]], agents={"a1": 1, "a2": 2},
+          pending=[[now, 3]])
     p = _spawn(RELEASE, tmp_path, {})
-    p.communicate(json.dumps({"tool_name": "Agent"}), timeout=60)
+    p.communicate(json.dumps({"tool_name": "Agent", "tool_use_id": "x"}), timeout=60)
     st = _state(tmp_path)
     assert st["depth"] == 1 and st["agents"] == {"a1": 1, "a2": 2} and len(st["pending"]) == 1
 
@@ -213,7 +223,7 @@ def test_nesting_block_drops_its_pending_entry_and_keeps_in_flight(tmp_path):
                   agent_id="a3", registry={"a3": 3}, agent_depth=2)
     assert out["decision"] == "block"
     st = _state(tmp_path)
-    assert st["pending"] == [] and st["depth"] == 2
+    assert st.get("pending", []) == [] and st["depth"] == 2
 
 
 def test_concurrency_block_drops_its_pending_entry(tmp_path):
@@ -221,7 +231,7 @@ def test_concurrency_block_drops_its_pending_entry(tmp_path):
                   extra_env={"LLM_ROUTER_MAX_CONCURRENT_AGENTS": "16"})
     assert out["decision"] == "block"
     st = _state(tmp_path)
-    assert st["pending"] == [] and st["depth"] == 16
+    assert st.get("pending", []) == [] and st["depth"] == 16
 
 
 def test_reasoning_block_gives_back_slot_and_pending(tmp_path):
@@ -229,8 +239,8 @@ def test_reasoning_block_gives_back_slot_and_pending(tmp_path):
     _, out = _run("analyze the architecture tradeoffs in depth", session_id="sess", tmp_path=tmp_path,
                   extra_env={"LLM_ROUTER_ALLOW_SUBAGENTS": "off"})
     assert out is not None and out["decision"] == "block"
-    st = _state(tmp_path)
-    assert st["depth"] == 0 and st["pending"] == []
+    # a blocked spawn commits nothing: no state file at all on a fresh session
+    assert not _depth_path_for(tmp_path, "sess").exists()
 
 
 # ── 6. cleanup ───────────────────────────────────────────────────────────────
@@ -253,8 +263,9 @@ def test_registry_growth_caps_hold(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
     (tmp_path / ".llm-router").mkdir()
     for i in range(250):
-        mod._push_pending("s", 1, f"t{i}")
-    assert len(mod._read_state("s")["pending"]) == 200
+        mod._commit_spawn("s", f"t{i}", 1, take_slot=True)
+    st = mod._read_state("s")
+    assert len(st["pending"]) == 200 and len(st["slots"]) == 200
 
 
 # ── hook copies ──────────────────────────────────────────────────────────────
@@ -289,3 +300,244 @@ def test_doctor_quiet_when_subagent_start_registered_or_no_breaker(tmp_path):
     assert _subagent_start_gap(_settings(tmp_path, both)) is None
     assert _subagent_start_gap(_settings(tmp_path, {})) is None
     assert _subagent_start_gap(tmp_path / "missing.json") is None
+
+
+# ── review of #341, finding 1: leaked slots expire; release is by token ──────
+
+def _slots(n: int, age: float = 0.0, prefix: str = "s") -> list:
+    return [[f"{prefix}{i}", time.time() - age] for i in range(n)]
+
+
+def _pre_with_cap(tmp_path: Path, cap: int, **extra: str) -> dict | None:
+    p = _spawn(ROUTE, tmp_path, _pre(1), LLM_ROUTER_MAX_CONCURRENT_AGENTS=str(cap), **extra)
+    out, _ = p.communicate(json.dumps(_pre(1)), timeout=60)
+    return json.loads(out) if out.strip() else None
+
+
+def test_leaked_slot_expires_and_a_live_one_does_not(tmp_path):
+    _seed(tmp_path, slots=_slots(16, age=7200), depth=16)  # PostToolUse never fired
+    assert _pre_with_cap(tmp_path, 16) is None  # approved: every slot is past the 3600 s TTL
+    assert [e[0] for e in _state(tmp_path)["slots"]] == ["tu1"]  # pruned, then this spawn's
+    _seed(tmp_path, slots=_slots(16, age=60), depth=16)
+    out = _pre_with_cap(tmp_path, 16)
+    assert out and out["decision"] == "block" and "16/16" in out["reason"]
+
+
+def test_cap_counts_only_live_entries(tmp_path):
+    _seed(tmp_path, slots=_slots(15, age=0) + _slots(30, age=7200, prefix="old"))
+    assert _pre_with_cap(tmp_path, 16) is None  # 15 live of 45 stored: room for one
+    _seed(tmp_path, slots=_slots(16, age=0) + _slots(5, age=7200, prefix="old"))
+    assert _pre_with_cap(tmp_path, 16)["decision"] == "block"
+
+
+def test_slot_ttl_is_configurable(tmp_path):
+    _seed(tmp_path, slots=_slots(2, age=10))
+    assert _pre_with_cap(tmp_path, 2, LLM_ROUTER_AGENT_SLOT_TTL_S="5") is None  # 10 s > 5 s
+    _seed(tmp_path, slots=_slots(2, age=10))
+    assert _pre_with_cap(tmp_path, 2, LLM_ROUTER_AGENT_SLOT_TTL_S="60")["decision"] == "block"
+
+
+def test_legacy_bare_depth_count_ages_from_the_files_ts(tmp_path):
+    # a state file written before slots existed: the count leaked by the old code ages out
+    (tmp_path / ".llm-router").mkdir(parents=True, exist_ok=True)
+    _depth_path_for(tmp_path, "sess").write_text(json.dumps(
+        {"depth": 16, "session_id": "sess", "ts": time.time() - 7200}))
+    assert _pre_with_cap(tmp_path, 16) is None
+    _depth_path_for(tmp_path, "sess").write_text(json.dumps(
+        {"depth": 16, "session_id": "sess", "ts": time.time()}))
+    assert _pre_with_cap(tmp_path, 16)["decision"] == "block"
+
+
+def _release(tmp_path: Path, **payload) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(RELEASE)], env=_env(tmp_path), text=True,
+                          capture_output=True, input=json.dumps({"tool_name": "Agent", **payload}))
+
+
+def test_release_removes_its_own_slot_by_token(tmp_path):
+    _seed(tmp_path, slots=_slots(3))
+    _release(tmp_path, tool_use_id="s1")
+    st = _state(tmp_path)
+    assert [e[0] for e in st["slots"]] == ["s0", "s2"] and st["depth"] == 2
+
+
+def test_release_of_a_call_that_held_no_slot_frees_nothing(tmp_path):
+    _seed(tmp_path, slots=_slots(2))  # an Explore/routed-away call completes: it held no slot
+    _release(tmp_path, tool_use_id="explore-call")
+    assert [e[0] for e in _state(tmp_path)["slots"]] == ["s0", "s1"]
+
+
+def test_release_without_a_tool_use_id_frees_the_oldest(tmp_path):
+    _seed(tmp_path, slots=[["new", time.time()], ["old", time.time() - 100]])
+    _release(tmp_path)
+    assert [e[0] for e in _state(tmp_path)["slots"]] == ["new"]
+
+
+def test_pretooluse_then_release_round_trip(tmp_path):
+    p = _spawn(ROUTE, tmp_path, _pre(5))
+    p.communicate(json.dumps(_pre(5)), timeout=60)
+    assert [e[0] for e in _state(tmp_path)["slots"]] == ["tu5"]
+    _release(tmp_path, tool_use_id="tu5")
+    assert _state(tmp_path)["slots"] == [] and _state(tmp_path)["depth"] == 0
+
+
+# ── finding 2: the budget blocks spawn nothing and commit nothing ────────────
+
+def _main_to_budget_block(tmp_path, monkeypatch, capsys, estimated: float, remaining: float):
+    mod = _load_hook_module()
+    for k, v in {"HOME": str(tmp_path), "LLM_ROUTER_HOME": str(tmp_path / ".llm-router"),
+                 "CLAUDE_CODE_SESSION_ID": "sess", "LLM_ROUTER_ALLOW_SUBAGENTS": "off",
+                 "LLM_ROUTER_SUBAGENT_DIRECT": "off", "LLM_ROUTER_AGENT_ROUTE_CODEX": "off"}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT", raising=False)
+    monkeypatch.setattr(mod, "_try_codex_subagent_delegation", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "_try_cli_delegation", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "_estimate_agent_cost", lambda *a, **k: estimated)
+    monkeypatch.setattr(mod, "_get_remaining_budget", lambda *a, **k: remaining)
+    payload = {"hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_use_id": "tu-budget",
+               "tool_input": {"prompt": "analyze the architecture tradeoffs in depth",
+                              "subagent_type": "general-purpose"}}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    mod.main()
+    return json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize("estimated, remaining, text", [
+    (5.0, 1.0, "exceed session budget"),        # the remaining-budget block
+    (100.0, 1000.0, "per-agent limit"),         # the per-agent maximum block
+])
+def test_budget_blocks_leave_the_breaker_state_untouched(tmp_path, monkeypatch, capsys,
+                                                         estimated, remaining, text):
+    now = time.time()
+    _seed(tmp_path, slots=[["held", now]], pending=[[now, 1, "held"]])
+    before = _state(tmp_path)
+    out = _main_to_budget_block(tmp_path, monkeypatch, capsys, estimated, remaining)
+    assert out["decision"] == "block" and text in out["reason"]  # the branch under test ran
+    after = _state(tmp_path)
+    assert after["slots"] == before["slots"] and after["pending"] == before["pending"]
+    assert after["depth"] == 1  # no slot or pending entry was taken for the blocked spawn
+
+
+# ── finding 3: lock files are 0600 whatever the umask ────────────────────────
+
+def _run_umask0(script: Path, tmp_path: Path, payload: dict) -> None:
+    subprocess.run([sys.executable, str(script)], env=_env(tmp_path), text=True, capture_output=True,
+                   input=json.dumps(payload), preexec_fn=lambda: os.umask(0))
+
+
+@pytest.mark.parametrize("script, payload, seed", [
+    (ROUTE, _pre(1), False),
+    (RELEASE, {"tool_name": "Agent", "tool_use_id": "s0"}, True),
+    (START, {"hook_event_name": "SubagentStart", "agent_id": "c1", "agent_type": "Explore"}, True),
+])
+def test_lock_file_is_0600_under_umask_000(tmp_path, script, payload, seed):
+    if seed:
+        _seed(tmp_path, slots=_slots(1), pending=[[time.time(), 1, "t"]])
+    _run_umask0(script, tmp_path, payload)
+    lock = Path(f"{_depth_path_for(tmp_path, 'sess')}.lock")
+    assert lock.exists()
+    assert os.stat(lock).st_mode & 0o777 == 0o600
+    assert os.stat(_depth_path_for(tmp_path, "sess")).st_mode & 0o777 == 0o600
+
+
+# ── finding 4: one PreToolUse run takes the lock at most once ────────────────
+
+def _count_lock_acquisitions(tmp_path, monkeypatch, capsys, prompt: str, subagent_type: str):
+    mod = _load_hook_module()
+    for k, v in {"HOME": str(tmp_path), "LLM_ROUTER_HOME": str(tmp_path / ".llm-router"),
+                 "CLAUDE_CODE_SESSION_ID": "sess", "LLM_ROUTER_SUBAGENT_DIRECT": "off",
+                 "LLM_ROUTER_AGENT_ROUTE_CODEX": "off"}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT", raising=False)
+    (tmp_path / ".llm-router").mkdir(parents=True, exist_ok=True)
+    taken = []
+    real = mod._state_lock
+
+    def counting(sid):
+        taken.append(sid)
+        return real(sid)
+
+    monkeypatch.setattr(mod, "_state_lock", counting)
+    payload = {"hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_use_id": "tu",
+               "tool_input": {"prompt": prompt, "subagent_type": subagent_type}}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    try:
+        mod.main()
+    except SystemExit:
+        pass
+    capsys.readouterr()
+    return len(taken)
+
+
+@pytest.mark.parametrize("prompt, subagent_type, expected", [
+    (RETRIEVAL, "general-purpose", 1),                    # approved real spawn: one RMW
+    ("review the plan", "Explore", 1),                    # pending entry only
+    ("analyze the architecture tradeoffs in depth", "general-purpose", 1),  # routed spawn (default)
+])
+def test_an_approved_pretooluse_run_takes_the_lock_exactly_once(
+        tmp_path, monkeypatch, capsys, prompt, subagent_type, expected):
+    assert _count_lock_acquisitions(tmp_path, monkeypatch, capsys, prompt, subagent_type) == expected
+
+
+def test_a_blocked_pretooluse_run_takes_no_lock(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("LLM_ROUTER_ALLOW_SUBAGENTS", "off")  # reasoning block, nothing spawns
+    assert _count_lock_acquisitions(tmp_path, monkeypatch, capsys,
+                                    "analyze the architecture tradeoffs in depth",
+                                    "general-purpose") == 0
+
+
+# ── finding 5: SessionEnd racing a background agent's release ────────────────
+
+def test_release_after_session_end_recreates_neither_state_nor_lock(tmp_path):
+    _seed(tmp_path, "gone", slots=_slots(1))
+    Path(f"{_depth_path_for(tmp_path, 'gone')}.lock").write_text("")
+    r = subprocess.run([sys.executable, str(SESSION_END)], env=_env(tmp_path, CLAUDE_CODE_SESSION_ID="gone"),
+                       text=True, capture_output=True,
+                       input=json.dumps({"hook_event_name": "SessionEnd", "session_id": "gone"}))
+    assert r.returncode == 0, r.stderr
+    p = subprocess.run([sys.executable, str(RELEASE)], env=_env(tmp_path, CLAUDE_CODE_SESSION_ID="gone"),
+                       text=True, capture_output=True,
+                       input=json.dumps({"tool_name": "Agent", "tool_use_id": "s0"}))  # the late release
+    assert p.returncode == 0 and p.stderr == ""
+    assert sorted(f.name for f in (tmp_path / ".llm-router").glob("agent_depth_gone*")) == []
+
+
+def test_release_that_loses_the_race_after_the_exists_check_leaves_nothing(tmp_path, monkeypatch):
+    # SessionEnd removes the state between release's exists() check and its read.
+    spec = __import__("importlib.util").util.spec_from_file_location("release_hook", RELEASE)
+    mod = __import__("importlib.util").util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess")
+    _seed(tmp_path, slots=_slots(1))
+    state = _depth_path_for(tmp_path, "sess")
+    real_lock = mod._lock
+
+    def lock_then_vanish(depth_file):
+        fh = real_lock(depth_file)
+        state.unlink()  # SessionEnd wins the race
+        return fh
+
+    monkeypatch.setattr(mod, "_lock", lock_then_vanish)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"tool_name": "Agent", "tool_use_id": "s0"})))
+    mod.main()
+    assert sorted(f.name for f in (tmp_path / ".llm-router").glob("agent_depth_sess*")) == []
+
+
+# ── finding 6: fail-open lock fallbacks reach hook_errors.log ────────────────
+
+@pytest.mark.parametrize("script, payload, hook", [
+    (RELEASE, {"tool_name": "Agent", "tool_use_id": "s0"}, "agent-depth-release"),
+    (START, {"hook_event_name": "SubagentStart", "agent_id": "c1", "agent_type": "Explore"},
+     "subagent-start"),
+])
+def test_release_and_start_log_their_lock_fallback(tmp_path, script, payload, hook):
+    _seed(tmp_path, slots=_slots(1), pending=[[time.time(), 1, "t"]])
+    lock = open(f"{_depth_path_for(tmp_path, 'sess')}.lock", "a+")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        p = _spawn(script, tmp_path, payload, LLM_ROUTER_BREAKER_LOCK_WAIT_S="0.1")
+        p.communicate(json.dumps(payload), timeout=60)
+    finally:
+        lock.close()
+    rows = [json.loads(line) for line in (tmp_path / ".llm-router" / "hook_errors.log").read_text().splitlines()]
+    assert len(rows) == 1 and rows[0]["hook"] == hook and "lock unavailable" in rows[0]["error"]

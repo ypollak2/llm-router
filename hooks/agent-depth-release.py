@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 4
+# llm_router-hook-version: 5
 """PostToolUse[Agent] hook — release the agent nesting-depth slot.
 
 The circuit breaker in agent-route.py (PreToolUse[Agent]) increments a
@@ -25,6 +25,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 # -- KPI G1: record how long this invocation ran (llm_router.hook_latency) -----
@@ -90,11 +91,55 @@ def _depth_file(session_id: str) -> Path:
 
 
 def _lock_wait_s() -> float:
-    """Seconds to wait for the state lock (default 0.25, inside the 300 ms hook budget)."""
+    """Seconds to wait for the state lock, per acquisition (default 0.25).
+
+    This hook takes the lock once per run, so that is also the most it can add.
+    """
     try:
         return max(0.0, float(os.environ.get("LLM_ROUTER_BREAKER_LOCK_WAIT_S", "0.25")))
     except ValueError:
         return 0.25
+
+
+def _log_hook_error(message: str) -> None:
+    """One line in hook_errors.log (the llm_router.hook_health schema). Never raises."""
+    try:
+        home = _router_home()
+        home.mkdir(parents=True, exist_ok=True)
+        entry = {"timestamp": datetime.now().isoformat(), "hook": "agent-depth-release",
+                 "error": message[:200]}
+        with (home / "hook_errors.log").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _slot_ttl_s() -> float:
+    """Same bound as agent-route.py (LLM_ROUTER_AGENT_SLOT_TTL_S, default 3600 s)."""
+    try:
+        ttl = float(os.environ.get("LLM_ROUTER_AGENT_SLOT_TTL_S", "3600"))
+        return ttl if ttl > 0 else 3600.0
+    except (ValueError, TypeError):
+        return 3600.0
+
+
+def _live_slots(data: dict, now: float) -> list:
+    """In-flight entries [token, start_ts] younger than the TTL (mirrors agent-route.py)."""
+    raw = data.get("slots")
+    if not isinstance(raw, list):
+        try:
+            legacy, ts = max(0, int(data.get("depth", 0))), float(data.get("ts", 0))
+        except (ValueError, TypeError):
+            legacy, ts = 0, 0.0
+        raw = [[f"legacy{i}", ts] for i in range(legacy)]
+    ttl, live = _slot_ttl_s(), []
+    for e in raw:
+        try:
+            if isinstance(e, list) and len(e) >= 2 and now - float(e[1]) < ttl:
+                live.append([str(e[0]), float(e[1])])
+        except (ValueError, TypeError):
+            continue
+    return live
 
 
 
@@ -116,8 +161,10 @@ def _lock(depth_file: Path):
                     raise
                 time.sleep(0.002)
     except Exception as exc:  # noqa: BLE001
-        print(f"llm-router: agent breaker state lock unavailable ({type(exc).__name__}); "
-              f"continuing unlocked", file=sys.stderr)
+        _msg = (f"agent breaker state lock unavailable ({type(exc).__name__}); "
+                f"continuing unlocked")
+        print(f"llm-router: {_msg}", file=sys.stderr)
+        _log_hook_error(_msg)
         if fh is not None:
             fh.close()
         return None
@@ -148,22 +195,43 @@ def main() -> None:
 
     session_id = _get_session_id()
     depth_file = _depth_file(session_id)
+    if not depth_file.exists():
+        # SessionEnd (or a session that never took a slot) left no state. Writing here
+        # would recreate a stale file that nothing ever cleans, and so would the lock.
+        sys.exit(0)
+    token = str(hook_input.get("tool_use_id") or "").strip()
     lock_fh = _lock(depth_file)
     try:
         try:
             data = json.loads(depth_file.read_text())
             if not isinstance(data, dict):
                 data = {}
-            depth = max(0, int(data.get("depth", 0)) - 1)
-        except (FileNotFoundError, json.JSONDecodeError, ValueError):
-            data, depth = {}, 0
+        except FileNotFoundError:
+            # SessionEnd removed it between the check and the lock: do not recreate it,
+            # and remove the lock file _lock() just created.
+            Path(f"{depth_file}.lock").unlink(missing_ok=True)
+            return
+        except (json.JSONDecodeError, ValueError):
+            data = {}
+
+        now = time.time()
+        slots = _live_slots(data, now)
+        if token:
+            # Release THIS call's slot. No match is a no-op: an Explore/allowlisted/
+            # routed-away call never held one, and must not free a sibling's.
+            slots = [e for e in slots if e[0] != token]
+        elif slots:
+            slots.sort(key=lambda e: e[1])
+            slots.pop(0)  # host sent no tool_use_id: free the oldest (the old count semantics)
 
         # Keep the nesting registry ("agents"/"pending") agent-route.py and
-        # subagent-start.py keep in this same file; only the in-flight count moves.
-        data.update({"depth": depth, "session_id": session_id, "ts": time.time()})
+        # subagent-start.py keep in this same file; only the in-flight slots move.
+        data.update({"slots": slots, "depth": len(slots), "session_id": session_id, "ts": now})
         _atomic_write(depth_file, data)
     except Exception as exc:  # noqa: BLE001 -- fail open, say so
-        print(f"llm-router: agent depth not released ({type(exc).__name__})", file=sys.stderr)
+        _msg = f"agent depth not released ({type(exc).__name__})"
+        print(f"llm-router: {_msg}", file=sys.stderr)
+        _log_hook_error(_msg)
     finally:
         if lock_fh is not None:
             lock_fh.close()
