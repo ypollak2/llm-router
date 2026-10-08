@@ -2073,6 +2073,10 @@ def cmd_kpi(args: list[str]) -> int:
                           "its Claude Code transcript (same rules as the live tagger), and append it "
                           "to the sidecar session_kind_backfill.jsonl; a live tag always wins and "
                           "deleting the sidecar restores the untagged behaviour exactly")
+    ap.add_argument("--quota-burn", action="store_true",
+                     help="S3 / GE6: Claude quota burn per session and per human turn from "
+                          "quota_samples.jsonl and quota_history.jsonl; needs --since and --until; "
+                          "stale samples are labelled estimated and kept out of the measured line")
     ap.add_argument("--dry-run", action="store_true",
                      help="with --backfill-tags: report what would be written; write nothing")
     ap.add_argument("--validate-backfill", action="store_true",
@@ -2087,6 +2091,19 @@ def cmd_kpi(args: list[str]) -> int:
         ap.error("--dry-run needs --backfill-tags")
     if parsed.strict and not parsed.health:
         ap.error("--strict needs --health")
+    if parsed.quota_burn:
+        if parsed.since is None or parsed.until is None:
+            ap.error("--quota-burn needs --since and --until (an absolute window)")
+        q_since, q_until = _parse_when(parsed.since), _parse_when(parsed.until)
+        if q_since is None or q_until is None or not q_since < q_until:
+            ap.error("--quota-burn: --since and --until must be readable and since < until")
+        from llm_router import quota_samples
+
+        burn = quota_samples.quota_burn(q_since, q_until,
+                                        include_research=(parsed.include == "research"))
+        print(json.dumps(burn, indent=2, default=str) if parsed.json
+              else quota_samples.render_quota_burn(burn))
+        return 0
     if parsed.validate_backfill:
         from llm_router import session_kind_backfill as skb
 
