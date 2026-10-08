@@ -38,11 +38,13 @@ despite this hook being "on". See `_try_codex_subagent_delegation`.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -359,12 +361,86 @@ def _read_state(session_id: str) -> dict:
 
 
 def _write_state(session_id: str, state: dict) -> None:
-    """Persist breaker state, keeping the nesting registry keys other hooks wrote."""
+    """Persist breaker state atomically (tmp file + os.replace, mode 0600).
+
+    A reader never sees a half-written file. Callers that read-modify-write must
+    hold _state_lock; this function alone does not make a RMW safe.
+    """
     state = dict(state)
     state["depth"] = max(0, int(state.get("depth", 0)))
     state["session_id"] = session_id
     state["ts"] = time.time()
-    _depth_file(session_id).write_text(json.dumps(state))
+    path = _depth_file(session_id)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(state))
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
+def _lock_wait_s() -> float:
+    """Seconds to wait for the state lock (default 0.25, inside the 300 ms hook budget)."""
+    try:
+        return max(0.0, float(os.environ.get("LLM_ROUTER_BREAKER_LOCK_WAIT_S", "0.25")))
+    except ValueError:
+        return 0.25
+
+
+
+
+@contextlib.contextmanager
+def _state_lock(session_id: str):
+    """Exclusive flock on a sidecar lock file (the state file's inode changes on replace).
+
+    Polls non-blocking for at most _lock_wait_s() (default 0.25 s, the hook latency budget). On any failure to lock it logs to
+    stderr and yields anyway: the breaker fails open (the pre-lock behaviour)
+    rather than stalling a spawn.
+    """
+    fh = None
+    try:
+        import fcntl
+        path = _depth_file(session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(f"{path}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        fh = os.fdopen(fd, "a+")
+        deadline = time.monotonic() + _lock_wait_s()
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.002)
+    except Exception as exc:  # noqa: BLE001 -- never stall or break a spawn on the lock
+        print(f"llm-router: agent breaker state lock unavailable ({type(exc).__name__}); "
+              f"continuing unlocked", file=sys.stderr)
+        if fh is not None:
+            with contextlib.suppress(Exception):
+                fh.close()
+            fh = None
+    try:
+        yield
+    finally:
+        if fh is not None:
+            with contextlib.suppress(Exception):
+                fh.close()  # closing releases the flock
+
+
+def _update_state(session_id: str, mutate) -> None:
+    """Locked read-modify-write of the per-session state. Never raises."""
+    try:
+        with _state_lock(session_id):
+            state = _read_state(session_id)
+            mutate(state)
+            _write_state(session_id, state)
+    except Exception as exc:  # noqa: BLE001 -- fail open, say so
+        print(f"llm-router: agent breaker state not saved ({type(exc).__name__})", file=sys.stderr)
 
 
 def _read_agent_depth(session_id: str) -> int:
@@ -380,11 +456,15 @@ def _read_agent_depth(session_id: str) -> int:
         return 0
 
 
-def _write_agent_depth(session_id: str, depth: int) -> None:
-    """Persist the in-flight agent count for the session (never below 0)."""
-    state = _read_state(session_id)
-    state["depth"] = depth
-    _write_state(session_id, state)
+def _adjust_in_flight(session_id: str, delta: int) -> None:
+    """Atomically add ``delta`` to the in-flight agent count (never below 0)."""
+    def _m(state: dict) -> None:
+        try:
+            cur = int(state.get("depth", 0))
+        except (ValueError, TypeError):
+            cur = 0
+        state["depth"] = max(0, cur + delta)
+    _update_state(session_id, _m)
 
 
 # Nesting registry. A hook payload fired from inside a subagent carries
@@ -413,22 +493,39 @@ def _caller_depth(hook_input: dict, state: dict) -> int:
         return 1
 
 
-def _push_pending(session_id: str, child_depth: int) -> None:
-    state = _read_state(session_id)
-    now = time.time()
-    pending = [p for p in state.get("pending", []) if isinstance(p, list) and len(p) == 2
-               and now - float(p[0]) < _PENDING_TTL_S]
-    pending.append([now, child_depth])
-    state["pending"] = pending[-_MAX_REGISTRY:]
-    _write_state(session_id, state)
+def _push_pending(session_id: str, child_depth: int, token: str) -> None:
+    """Queue this spawn's child depth as [ts, depth, token]; token identifies the entry."""
+    def _m(state: dict) -> None:
+        now = time.time()
+        pending = [p for p in state.get("pending", []) if isinstance(p, list) and len(p) >= 2
+                   and now - float(p[0]) < _PENDING_TTL_S]
+        pending.append([now, child_depth, token])
+        state["pending"] = pending[-_MAX_REGISTRY:]
+    _update_state(session_id, _m)
 
 
-def _drop_pending(session_id: str) -> None:
-    """Forget the newest pending entry: the spawn it announced never happened."""
-    state = _read_state(session_id)
-    if state.get("pending"):
-        state["pending"] = state["pending"][:-1]
-        _write_state(session_id, state)
+def _drop_pending(session_id: str, token: str) -> None:
+    """Forget the pending entry THIS spawn pushed (by token): the spawn never happened.
+
+    Dropping "the newest" would remove a concurrent sibling's entry instead.
+    """
+    def _m(state: dict) -> None:
+        state["pending"] = [p for p in state.get("pending", [])
+                            if not (isinstance(p, list) and len(p) >= 3 and p[2] == token)]
+    _update_state(session_id, _m)
+
+
+def _abort_spawn(session_id: str, token: str) -> None:
+    """This spawn will not happen: give back its in-flight slot and its pending entry."""
+    def _m(state: dict) -> None:
+        try:
+            cur = int(state.get("depth", 0))
+        except (ValueError, TypeError):
+            cur = 0
+        state["depth"] = max(0, cur - 1)
+        state["pending"] = [p for p in state.get("pending", [])
+                            if not (isinstance(p, list) and len(p) >= 3 and p[2] == token)]
+    _update_state(session_id, _m)
 
 
 # ── Agent call tracking (for error recovery) ────────────────────────────────
@@ -1996,7 +2093,9 @@ def main() -> None:
     # Done before the Explore/allowlist exits: SubagentStart fires for those too and
     # must not claim another spawn's entry. A block below drops it again.
     _early_sid = _get_session_id()
-    _push_pending(_early_sid, _caller_depth(hook_input, _read_state(_early_sid)) + 1)
+    _pending_token = str(hook_input.get("tool_use_id") or "").strip() or uuid.uuid4().hex
+    _push_pending(_early_sid, _caller_depth(hook_input, _read_state(_early_sid)) + 1,
+                  _pending_token)
 
     # ── Always approve Explore subagents — they're pure retrieval ────────────
     if subagent_type == "Explore":
@@ -2037,7 +2136,7 @@ def main() -> None:
         )
 
     if block_reason:
-        _drop_pending(session_id)
+        _drop_pending(session_id, _pending_token)
         # Active alert: a runaway breaker trip should page ops,
         # not just silently block. Guarded so the hook never breaks.
         # stdout is the hook's JSON decision channel — structlog's default
@@ -2060,7 +2159,7 @@ def main() -> None:
         return
 
     # Increment depth before approving any non-Explore agent
-    _write_agent_depth(session_id, in_flight + 1)
+    _adjust_in_flight(session_id, 1)
 
     # ── Detect retrieval-only tasks ──────────────────────────────────────────
     if _is_retrieval_only(prompt):
@@ -2084,7 +2183,7 @@ def main() -> None:
             prompt, task_type, complexity, subagent_type, session_id,
             cwd=hook_input.get("cwd"), ledger_session_id=hook_input.get("session_id"))
     if _codex_delegated is not None:
-        _write_agent_depth(session_id, in_flight)  # roll back: no real spawn happened
+        _abort_spawn(session_id, _pending_token)  # no real spawn happened
         _log_agent_call(subagent_type, prompt, "routed_codex_subagent")
         json.dump({
             "decision": "block",
@@ -2132,8 +2231,7 @@ def main() -> None:
         _log_agent_call(subagent_type, prompt,
                          f"breaker_open:{_qb_decision.reason if _qb_decision else 'agent_route'}")
     if _routed is not None:
-        _write_agent_depth(session_id, in_flight)  # roll back: no real spawn happened
-        _drop_pending(session_id)
+        _abort_spawn(session_id, _pending_token)  # no real spawn happened
         _log_agent_call(subagent_type, prompt, "routed_direct")
         json.dump({
             "decision": "block",
@@ -2154,8 +2252,7 @@ def main() -> None:
             prompt, task_type, complexity, session_id, subagent_type, cwd=hook_input.get("cwd"),
             ledger_session_id=hook_input.get("session_id"))
     if _delegated is not None:
-        _write_agent_depth(session_id, in_flight)  # roll back: no real spawn happened
-        _drop_pending(session_id)
+        _abort_spawn(session_id, _pending_token)  # no real spawn happened
         _log_agent_call(subagent_type, prompt, "routed_cli_delegation")
         json.dump({
             "decision": "block",
@@ -2191,6 +2288,7 @@ def main() -> None:
                 f"Use llm_* MCP tools instead (typically cheaper and more efficient)."
             ),
         }
+        _abort_spawn(session_id, _pending_token)
         json.dump(result, sys.stdout)
         return
     
@@ -2206,6 +2304,7 @@ def main() -> None:
                 f"or use a series of llm_* MCP tool calls."
             ),
         }
+        _abort_spawn(session_id, _pending_token)
         json.dump(result, sys.stdout)
         return
 
@@ -2296,6 +2395,7 @@ def main() -> None:
     )
 
     with _hl_phase("emit"):
+        _abort_spawn(session_id, _pending_token)  # blocked: nothing spawns, nothing will release
         result = {
             "decision": "block",
             "reason": block_reason,

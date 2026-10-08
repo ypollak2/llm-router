@@ -2471,6 +2471,23 @@ def main() -> None:
                 _session_store.archive_session(_sid)
         except Exception:
             pass
+        # The agent breaker's per-session state (agent-route.py) is dead weight
+        # once the session ends; same name derivation as its _depth_file().
+        try:
+            import re as _re
+            from pathlib import Path as _P
+            # same precedence as agent-route.py's _get_session_id(): env first
+            _bsid = (os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+                     or str(_hook_input.get("session_id") or "").strip())
+            if _bsid:
+                _bsafe = _re.sub(r"[^A-Za-z0-9._-]", "_", _bsid) or "unknown"
+                _bbase = os.environ.get("LLM_ROUTER_HOME", "").strip()
+                _bdir = _P(_bbase).expanduser() if _bbase else _P.home() / ".llm-router"
+                for _suffix in ("", ".lock"):
+                    (_bdir / f"agent_depth_{_bsafe}.json{_suffix}").unlink(missing_ok=True)
+        except Exception as _exc:  # noqa: BLE001 -- fail open, say so
+            print(f"llm-router: agent breaker state not removed ({type(_exc).__name__})",
+                  file=sys.stderr)
         # Stop already rendered the summary for the last turn; SessionEnd
         # output is not shown to the user, so do not render it twice.
         return
