@@ -1107,10 +1107,14 @@ def test_a_claim_is_never_visible_with_the_markers_old_mtime(tmp_path):
     assert Q.claim(m) is None                             # ...so a second worker cannot take it
 
 
-def test_results_from_the_repo_venv_carry_a_flag_unless_they_pass(tmp_path):
+def test_results_from_the_repo_venv_carry_a_flag_unless_they_pass(tmp_path, monkeypatch):
+    """The flag logic of ``_run_unit``. The venv decision is stubbed: ``_repo_python_dir`` answers
+    "use the repo venv" only where the macOS sandbox is proven, so unstubbed this test passed on a
+    Mac and failed on the Linux CI runner (3.11), where the default interpreter is kept and no
+    flag is set."""
     seen = {}
     repo = _venv_repo(tmp_path)
-    _fake_venv(repo, editable=None)
+    monkeypatch.setattr(W, "_repo_python_dir", lambda *a, **k: (str(tmp_path), None))
     for n, status in enumerate(["unavailable", "pass_f2p"]):
         _enqueue(n + 1, repo=repo, head=_head(repo))
     results = iter([UnitResult("unavailable", "baseline_failing"), _ok_result()])
