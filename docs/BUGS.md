@@ -13,10 +13,14 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 3 | NS and D2 counted a heuristic "used" | open, fix is plan task M0.2 |
 | 4 | `G1_proxy` printed 0 ms | fixed in this change (M0.6) |
 | 5 | Haiku 400 on a mid-conversation system message | worked around (flag off); fold is plan task M0.7 |
+| P09-3 | A session-start background child wrote its own "session-start" latency row | fixed in `perf/session-start-bg` (P0.9) |
+| P09-4 | session-start ran Ollama start, `ollama list`, seats, usage.db and git inline | fixed in `perf/session-start-bg` (P0.9 task 3) |
 | 6 | Research session b9f04425 counted as organic | fixed in #291 (M0.0b) |
 | 7 | `edit_outcomes.jsonl` rows with no source | open, fix is plan task M0.3(c) |
 | 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | known, not fixed |
 | 9 | Classifier warm-up loaded `llmr-classifier` at the wrong `num_ctx` | fixed in #298 (M1.4, review 2) |
+| 10 | README-advertised `--host pi` / `--host kimi` failed; detected gemini-cli skipped silently | fixed in this change (v16 P0.4) |
+| 11 | Four shadow tests raced the clock and failed `main` on a loaded runner | fixed in this change (test-only) |
 | P09-1 | G1 called a 16 s auto-route p95 "within budget" | fixed in `perf/hook-budgets` (P0.9 tasks 1-2) |
 
 ## 1. NULL `session_id` on local routing rows
@@ -99,6 +103,38 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Test.** Existing: `tests/test_proxy_tiers.py` (the body-eligibility tests). M0.7 adds a smoke on a separate proxy port: at least 19 of 20
   Haiku-decided calls served with no `tier_retry`.
 
+## P09-3. A session-start background child wrote its own "session-start" latency row
+
+- **Symptom.** A detached child that re-runs `session-start.py` (`--background-usage-refresh`:
+  keychain plus up to 3 OAuth attempts) arms the KPI G1 latency stanza at import like the hook
+  itself, so its whole runtime would be recorded as one `session-start` invocation. Found by
+  reading the code while adding the P0.9 child (`--background-session-work`), which would have
+  added one such row per session start. Not separable in [HL7]: rows carry no argv.
+- **Cause.** The stanza arms whenever `__name__ == "__main__"`, and a re-run of the file is
+  `__main__` too.
+- **Fix.** `_entry(argv)` sets `LLM_ROUTER_HOOK_LATENCY=off` for any `--background-*` child
+  before it runs; the recorder checks that switch when it writes at exit. The status-bar
+  refresher (`perf/status-bar-cache`) does the same.
+- **Test.** `tests/test_p09_session_start_bg.py::test_a_background_child_writes_no_session_start_latency_row`,
+  `test_the_hook_itself_keeps_the_recorder_on`.
+
+## P09-4. session-start ran Ollama start, `ollama list`, seats, usage.db and git inline
+
+- **Symptom.** session-start p95 16,178 ms (n = 65) against the PRD's 2,000 ms [HL7]. In a
+  copy of `hook_latency.jsonl` + `.1` (2026-10-04T22:07Z to 2026-10-07T14:47Z, same 65 rows),
+  28 rows fell in one burst (2026-10-06 05:07-05:08Z, 4.6-17.4 s). The other 37 read
+  138 ms-11.3 s: 11 of them over 2 s, p95 11,045 ms. So the tail is not only the burst.
+- **Cause.** `main()` ran `start-ollama.sh` (waits up to 10 s), `ollama list`, a seats
+  re-detect (2 s budget), two usage.db queries, an Ollama co-residency probe, the pxpipe sync,
+  a `git` check for the OKF index and five process spawns before returning. Under a burst of
+  concurrent session starts each of those contends with the others.
+- **Fix.** One detached child (`--background-session-work`) runs all of it. Its hint lines go
+  to `session_start_hints.json` and the next session start shows them (dropped after 24 h).
+  `main()` keeps the session tag, the stale-state reset, the proxy health line, the banner
+  from cached usage and `additionalContext`.
+- **Test.** `tests/test_p09_session_start_bg.py::test_main_does_not_run_any_moved_step_inline`
+  (FAILS on da31df7: all 17 steps ran inline), `test_main_returns_while_a_5s_background_phase_still_runs`.
+
 ## 6. Research session b9f04425 counted as organic
 
 - **Symptom.** One session supplied 1,175 of the 1,183 organic turn-first rows in W0
@@ -174,6 +210,73 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   4096 and an omitted `context_length` return `llm`. Mutants run on head 2316f3f: warm-up
   without `options` fails both tests; `_is_loaded` returning True regardless of context fails
   the second.
+
+## 10. README-advertised hosts failed install; a detected host was skipped silently
+
+- **Symptom.** On da31df7 the README "Works With" table listed `llm-router install --host pi`
+  and `--host kimi`. Both printed `Unknown host(s): ...` and exited 0. A plain
+  `llm-router install` detected gemini-cli and then said nothing about it.
+- **Cause.** `_install_host` only knew `_HOST_SNIPPETS`, which never had a `pi` or `kimi`
+  entry. The auto-detect block in `_run_install` checked `codex` by name and ignored every
+  other detected host.
+- **Fix.** v16 P0.4 (`fix/install-honesty`). README rows for Pi and Kimi say "planned (v16
+  P2.12)". `--host pi|kimi` prints `unsupported: <reason>; planned in v16 P2.12` and exits 2.
+  `_run_install` wires every detected host that has an installer (codex, gemini-cli) and
+  prints `<host>: detected, not wired: <reason>` for each other detected host. `host_detect`
+  now detects pi and kimi so they can be reported. Wiring Pi is P2.12.
+- **Test.** `tests/test_readme_hosts.py`: parses all 15 README rows; runs the real installer
+  for the 12 non-planned `--host` rows in an isolated HOME; checks exit 2 and the reason line
+  for pi and kimi; fake detection {claude-code, codex, gemini-cli, unknown} gives wired,
+  wired, wired, reported. 7 of its 9 tests fail on da31df7. Four mutants (drop gemini-cli
+  auto-wire; `exit 2` to `return`; drop the report line; pi not marked unsupported) each turn
+  a test red.
+
+## 11. Four shadow tests raced the clock and failed `main` on a loaded runner
+
+- **Symptom.** `main` at 2ae21d9 (the #301 merge) was red: run 37656384812, job `test (3.13)`,
+  `tests/test_proxy_local_shadow.py::test_different_tool_disagrees - assert (None is False)`;
+  `test (3.11)` on the same commit passed. Two more were reported as load-sensitive:
+  `test_big_body_claude_response_is_not_delayed_by_shadow` ("shadow added 97 ms", once, on #281's
+  CI, green on rerun) and `tests/proxy/test_llm_classifier_shadow.py::test_assemble_never_holds_the_event_loop`
+  ("held for 108 ms", limit 50 ms; also 82 ms and 254 ms on runs 37668795388 and 37666629764, and
+  5 of 6 local runs at load average 77-127).
+- **Cause.** No product defect, and not #301 (it touches `decide_tier` and adds a no-op seam when the
+  classifier mode is off; the failing path is `local_shadow.py`, last changed in #294). All three
+  tests compared a wall clock with work that a loaded machine stretches.
+  1. `test_different_tool_disagrees`: the fake Claude replied after a fixed 0.3 s. Before local reaches
+     its backend the job makes four worker-thread hops (deepcopy, media scan, to_ollama, prompt cap).
+     When they took longer than 0.3 s the job saw Claude finish first, which is the documented
+     behaviour (`dropped_claude_first`), and wrote `agree=None`, `schema_valid=None`. The record was
+     correct and carried its reason code; the test read it as if local had answered. Reproduced on
+     a quiet machine by making `local_mode.has_media` sleep 0.5 s: 6 tests in the file failed, among
+     them this one with `assert (None is ...)`; with the fix the same 8 selected tests pass. The same
+     race sat under every test that expects local to win, not only the one that fired.
+  2. `test_big_body_...`: compared the wall time of a 3 MB POST with shadow on and off. Wall time
+     includes every moment the OS deschedules the process.
+  3. `test_assemble_never_holds_the_event_loop`: a 5 ms ticker and asyncio's slow-callback log, both
+     wall clock. With the loop CPU time sampled beside the wall gap, one failing run showed a 129 ms
+     wall gap against 33 ms of loop CPU, and the slow callback was the test's own `await _post(...)`.
+- **Fix.** Test-only. (1) `Upstream` takes the shadow runner and holds Claude's reply until the job's
+  `busy` flag drops, which happens after the job has chosen between "local answered" and "Claude
+  answered first"; `_step` does this whenever the fake backend has no gate (the dropped/budget tests
+  keep their gates and their real Claude-first order). (2) The guard measures `time.thread_time()` of
+  the loop thread: the only way shadow can delay Claude's first byte is work on that thread. (3) The
+  fake `assemble` blocks on a `threading.Event` that the test sets only after a continuation posted
+  during the block has come back; it asserts the worker thread is not the loop thread and that the
+  loop served the request while `assemble` was in flight. The wall-clock ticker is gone; the call-path
+  cost stays pinned by `test_a_long_history_is_assembled_off_the_request_path` and the G1_proxy p95
+  test, which read `tier_decision_s`.
+- **Test.** The three tests above, each 30 times in a row at load average ~80 (results in the PR).
+  Mutant for (3): `assemble(snapshot)` inline instead of `asyncio.to_thread(assemble, snapshot)` in
+  `llm_shadow._run` fails the new test (timeout; the loop cannot serve while it blocks).
+  Rule: a test that depends on a reply arriving "before" another must wait on that event, never on a
+  sleep length; a "loop not held" check must read the thread or the blocked work, not a wall gap.
+- **Fourth, found by the full-suite run on this change.**
+  `test_decision_p95_stays_under_30ms_with_a_2s_classifier` made the classifier slow with
+  `sleep(2.0)`. On a loaded machine the 200 sequential POSTs took more than 2 s, the first call
+  finished mid-loop, its slot was reused and the counts came out `drops == 195` instead of 196
+  (failed in isolation at load average ~70). The fake is now gated: it never answers until the test
+  ends. The p95 <= 30 ms bar is the product's own number and is left as it was.
 
 ## P09-1. G1 called a 16 s auto-route p95 "within budget"
 

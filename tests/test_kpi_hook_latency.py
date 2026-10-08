@@ -611,8 +611,8 @@ def test_a_real_auto_route_process_that_classifies_and_logs_names_those_phases(t
 #: (draft_chain needs a model, session-start spawns processes) is pinned here by reading the source.
 _PHASE_NAMES = {
     "auto-route": {"session_io", "zce", "hud", "classify", "db_write", "draft_chain"},
-    "session-start": {"session_io", "reset_state", "ollama_up", "pxpipe", "proxy_health", "usage", "hints",
-                      "bg_spawn", "banner", "rules_update"},
+    # P0.9: ollama_up, pxpipe and rules_update moved into the background child.
+    "session-start": {"session_io", "reset_state", "proxy_health", "usage", "hints", "bg_spawn", "banner"},
 }
 
 
@@ -703,8 +703,14 @@ def test_each_hook_starts_its_clock_before_its_first_llm_router_import(name):
 def test_each_hook_names_itself_and_its_event_as_the_installer_registers_it(name):
     from llm_router.install_hooks import _HOOK_DEFS
 
-    registered = {src: event for src, _dst, event, _m in _HOOK_DEFS}
-    assert registered[f"{name}.py"] == _EVENTS[name]
+    # Each hook is registered on exactly its one event, except session-end.py,
+    # which is on Stop and SessionEnd (P0.1); its timer starts labelled Stop and
+    # is relabelled on SessionEnd (hook_latency.set_event).
+    registered: dict[str, set[str]] = {}
+    for src, _dst, event, _m in _HOOK_DEFS:
+        registered.setdefault(src, set()).add(event)
+    expected = {_EVENTS[name]} | ({"SessionEnd"} if name == "session-end" else set())
+    assert registered[f"{name}.py"] == expected
     _t0, main_if, _ = _stanza(ast.parse((HOOKS / f"{name}.py").read_text()))
     (call,) = [n for n in ast.walk(main_if) if isinstance(n, ast.Call)
                and ast.unparse(n.func) == "_hook_latency.begin"]

@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 import time
 import urllib.request
 from pathlib import Path
@@ -33,6 +32,13 @@ from llm_router.local_context_guard import (
     effective_window,
     estimate_payload_tokens,
 )
+
+# One executor. The tool primitives, the command parser/runner and the Ollama
+# helpers live in llm_router.toolkit; this module keeps its hook-shaped loop and
+# the legacy tool names, and calls the shared code. The names below are kept as
+# wrappers/aliases because hooks, registries and tests import them from here.
+from llm_router.toolkit import tools as _kit
+from llm_router.toolkit.adapters import ollama as _ollama
 
 
 # ── Tool Definitions (sent to the LLM) ───────────────────────────────────────
@@ -170,6 +176,18 @@ def _resolve_path(path: str, project_root: Path) -> Path:
     return resolved
 
 
+def _deny_secret(path: Path, root: Path) -> None:
+    """The toolkit's secret deny-list applies to the hook loop too (PLAN section 0.8:
+    `.env` and key files inside the repo used to be readable)."""
+    from llm_router.toolkit.policy import is_secret_relpath
+    try:
+        rel = str(path.relative_to(root))
+    except ValueError:
+        return
+    if rel != "." and is_secret_relpath(rel):
+        raise PermissionError("that path is not available")
+
+
 def execute_tool(name: str, args: dict, project_root: Path) -> str:
     """Execute a tool call and return the result as a string."""
     # Every path this function reports must be relative to the SAME root that
@@ -184,33 +202,17 @@ def execute_tool(name: str, args: dict, project_root: Path) -> str:
     try:
         if name == "read_file":
             path = _resolve_path(args["path"], project_root)
+            _deny_secret(path, root)
             if not path.exists():
                 return f"Error: File not found: {args['path']}"
-            content = path.read_text(encoding="utf-8", errors="replace")
-            # Truncate very large files
             # Line range, so a large file can be read in usable pieces instead
-            # of being truncated into uselessness. Without this the cap below is
-            # merely restrictive: the model is told the read failed and has no
-            # cheaper way to succeed, so it reads again.
-            offset = args.get("offset")
-            limit = args.get("limit")
-            if offset is not None or limit is not None:
-                lines = content.splitlines(keepends=True)
-                try:
-                    start = max(0, int(offset or 0))
-                except (TypeError, ValueError):
-                    start = 0
-                try:
-                    count = int(limit) if limit is not None else 400
-                except (TypeError, ValueError):
-                    count = 400
-                selected = lines[start:start + max(1, count)]
-                content = (f"[lines {start + 1}-{start + len(selected)} of "
-                           f"{len(lines)}]\n" + "".join(selected))
+            # of being truncated into uselessness.
+            content = _kit.read_text(path, args.get("offset"), args.get("limit"))
             return _budget.truncate_tool_result(content)
 
         elif name == "write_file":
             path = _resolve_path(args["path"], project_root)
+            _deny_secret(path, root)
             content = args["content"]
             before = path.read_text(encoding="utf-8") if path.exists() else None
             allowed, message = _writes.guard(path, before, content, project_root)
@@ -222,6 +224,7 @@ def execute_tool(name: str, args: dict, project_root: Path) -> str:
 
         elif name == "edit_file":
             path = _resolve_path(args["path"], project_root)
+            _deny_secret(path, root)
             if not path.exists():
                 return f"Error: File not found: {args['path']}"
             content = path.read_text(encoding="utf-8")
@@ -240,38 +243,19 @@ def execute_tool(name: str, args: dict, project_root: Path) -> str:
 
         elif name == "list_files":
             path = _resolve_path(args["path"], project_root)
+            _deny_secret(path, root)
             if not path.is_dir():
                 return f"Error: Not a directory: {args['path']}"
-            pattern = args.get("pattern", "*")
-            files = sorted(str(f.relative_to(root)) for f in path.glob(pattern) if f.is_file())
+            files = _kit.list_glob(path, root, args.get("pattern", "*"))
             if not files:
                 return "(no matching files)"
             return _budget.truncate_tool_result("\n".join(files[:200]))
 
         elif name == "search_files":
             search_path = _resolve_path(args.get("path", "."), project_root)
-            file_pattern = args.get("file_pattern", "*.py")
-            pattern = args["pattern"]
-            regex = re.compile(pattern, re.IGNORECASE)
-            results = []
-            # K: rglob on a FILE yields nothing, so a search narrowed to one file
-            # reported "(no matches)" for text that was in it — and the model
-            # believed it. A named file is searched as-is, whatever its suffix.
-            candidates = [search_path] if search_path.is_file() else search_path.rglob(file_pattern)
-            for fpath in candidates:
-                if not fpath.is_file():
-                    continue
-                try:
-                    for i, line in enumerate(fpath.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-                        if regex.search(line):
-                            rel = fpath.relative_to(root)
-                            results.append(f"{rel}:{i}: {line.strip()}")
-                            if len(results) >= 50:
-                                break
-                except (OSError, UnicodeDecodeError):
-                    continue
-                if len(results) >= 50:
-                    break
+            _deny_secret(search_path, root)
+            # K: a named file is searched as-is, whatever its suffix.
+            results = _kit.search_text(search_path, root, args["pattern"], args.get("file_pattern", "*.py"))
             if not results:
                 return "(no matches)"
             return _budget.truncate_tool_result("\n".join(results))
@@ -337,59 +321,7 @@ FINISH_TOOL = "finish"
 # shell: the line is tokenized, EVERY segment passes the allowlist before ANY
 # runs, and pipes are chained here. Only `>/dev/null`, `2>/dev/null` and `2>&1`
 # are honoured; a redirect into a file is refused in favour of write_file.
-_SEQ_OPS = ("&&", "||", ";")
-
-
-def _parse_command_line(cmd: str):
-    """[(op_before, [segment, ...]), ...] or an error string. A segment is
-    {"argv": [...], "stdout_null": bool, "stderr_null": bool}."""
-    import shlex
-    lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
-    lex.whitespace_split = True
-    try:
-        tokens = list(lex)
-    except ValueError as exc:
-        return f"Error: could not parse command: {exc}"
-    pipelines, current, seg, op = [], [], {"argv": [], "stdout_null": False, "stderr_null": False}, None
-    i = 0
-    while i < len(tokens):
-        tok = tokens[i]
-        if tok in _SEQ_OPS or tok == "|":
-            if not seg["argv"]:
-                return f"Error: empty command around '{tok}'"
-            current.append(seg)
-            seg = {"argv": [], "stdout_null": False, "stderr_null": False}
-            if tok != "|":
-                pipelines.append((op, current))
-                current, op = [], tok
-        elif tok == ">&" and seg["argv"] and seg["argv"][-1] == "2" \
-                and i + 1 < len(tokens) and tokens[i + 1] == "1":
-            seg["argv"].pop()                      # `2>&1`: stderr joins stdout
-            seg["stderr_to_stdout"] = True
-            i += 1
-        elif tok in (">", ">>"):
-            target = tokens[i + 1] if i + 1 < len(tokens) else ""
-            to_stderr = bool(seg["argv"]) and seg["argv"][-1] == "2"
-            if target != "/dev/null":
-                return ("REFUSED: redirecting output into a file is not supported, so "
-                        "nothing was executed. Use write_file to create or change files.")
-            if to_stderr:
-                seg["argv"].pop()
-                seg["stderr_null"] = True
-            else:
-                seg["stdout_null"] = True
-            i += 1
-        elif tok and set(tok) <= set("();<>|&"):
-            return (f"REFUSED: '{tok}' needs a shell, and run_command has none, so "
-                    f"nothing was executed. Run one command at a time.")
-        else:
-            seg["argv"].append(tok)
-        i += 1
-    if not seg["argv"]:
-        return "Error: empty command"
-    current.append(seg)
-    pipelines.append((op, current))
-    return pipelines
+_parse_command_line = _kit.parse_command_line
 
 
 def _run_command_line(cmd: str, project_root: Path) -> str:
@@ -409,65 +341,11 @@ def _run_command_line(cmd: str, project_root: Path) -> str:
         from llm_router.safe_subprocess import get_delegated_env
         child_env = get_delegated_env()
     except Exception:  # noqa: BLE001
-        import os as _os
-        child_env = {"PATH": _os.defpath}
-    deadline = time.monotonic() + 30
-    outputs, last_ok = [], True
-    for op, segments in parsed:
-        if (op == "&&" and not last_ok) or (op == "||" and last_ok):
-            continue
-        # Stages run concurrently, chained by real OS pipes (not buffered and
-        # replayed): `head -1` on an unbounded producer (`yes | head -1`) must
-        # exit as soon as it has its line, not after the producer finishes —
-        # see test_yes_pipeline_terminates_early. The standard recipe for
-        # this: close the PARENT's copy of a stage's stdout immediately after
-        # handing it to the next stage's stdin (so the writer gets SIGPIPE,
-        # and no stray fd keeps the pipe artificially alive), read the final
-        # stage fully via communicate(), then wait() on every earlier stage
-        # bounded by the same deadline.
-        procs, prev_stdout = [], None
-        try:
-            for n, seg in enumerate(segments):
-                last = n == len(segments) - 1
-                p = subprocess.Popen(
-                    seg["argv"], cwd=str(project_root), env=child_env, text=True,
-                    stdin=prev_stdout,
-                    stdout=subprocess.DEVNULL if seg["stdout_null"] else subprocess.PIPE,
-                    stderr=(subprocess.DEVNULL if seg["stderr_null"] else
-                            subprocess.STDOUT if seg.get("stderr_to_stdout") else subprocess.PIPE),
-                )
-                if prev_stdout is not None:
-                    prev_stdout.close()          # let the upstream get SIGPIPE, no stray fd
-                prev_stdout = None if (last or seg["stdout_null"]) else p.stdout
-                procs.append(p)
-            out, err_last = procs[-1].communicate(timeout=max(0.1, deadline - time.monotonic()))
-            errs = []
-            for p in procs[:-1]:
-                p.wait(timeout=max(0.1, deadline - time.monotonic()))
-                if p.stderr is not None:
-                    errs.append(p.stderr.read())
-            errs.append(err_last or "")
-        except subprocess.TimeoutExpired:
-            for p in procs:
-                p.kill()
-            outputs.append("Error: Command timed out after 30s")
-            last_ok = False
-            break
-        except FileNotFoundError:
-            outputs.append(f"Error: command not found: {segments[0]['argv'][0]}")
-            last_ok = False
-            continue
-        text = out or ""
-        err = "".join(e for e in errs if e)
-        if err:
-            text += f"\nSTDERR:\n{err}"
-        rc = procs[-1].returncode
-        if rc != 0:
-            text += f"\n(exit code: {rc})"
-        last_ok = rc == 0
-        outputs.append(text)
-    output = "\n".join(o for o in outputs if o)
-    return _budget.truncate_tool_result(output) if output else "(no output)"
+        child_env = {"PATH": os.defpath}
+    # Execution (concurrent stages over real OS pipes, output cap, deadline) is
+    # the toolkit's; this hook-shaped path adds only its own allowlist above.
+    return _kit.run_pipelines(parsed, cwd=project_root, env=child_env, timeout_s=30,
+                              truncate_fn=_budget.truncate_tool_result)
 
 
 # I4 (2026-09-24): the tools a DRAFT may use. A draft answers the user's
@@ -500,111 +378,18 @@ def _tool_call_schema(read_only: bool = False) -> dict:
     }
 
 
-def constrained_decoding_enabled() -> bool:
-    """Default ON. `off` falls back to `tools=` plus the repair shim, which is
-    the pre-existing path and still reaches 100% — just slower."""
-    return os.environ.get("LLM_ROUTER_CONSTRAINED_TOOLS", "").strip().lower() not in (
-        "0", "off", "false", "no",
-    )
-
-
-def _default_num_ctx(model: str | None) -> int:
-    """Per-model default window: the single table in ``llm_router.local_models``
-    (M3.4). Measurements behind the values are recorded there."""
-    from llm_router.local_models import num_ctx
-    return num_ctx(model)
-
-
-def _num_ctx(model: str | None = None) -> int | None:
-    """Context window to request, or None to accept the server's default.
-
-    Left unset, llama.cpp runs with whatever the daemon was started with and
-    `--context-shift --keep 4` silently discards the OLDEST tokens on overflow —
-    the system prompt and the task — then answers about whatever survived. That
-    is not a hypothetical: measured here, a 33k-token prompt came back with
-    prompt_eval_count=16386 and the canary planted in the system prompt gone.
-    """
-    # I2 (2026-09-24): one window for EVERY local call. The server default is
-    # 8192, which a draft with session context overflows (oldest tokens — the
-    # system prompt — silently dropped), and a num_ctx that differs between
-    # calls forces a 3-6s model reload each time (measured on qwen3.8). So the
-    # draft path and this loop share LLM_ROUTER_LOCAL_NUM_CTX, default per model (I2b);
-    # the older agent-only override still wins when set.
-    #
-    # 131072 measured 2026-09-24 on qwen3.8 (52 GB Mac, 24k-token real prompt):
-    # 32K/64K/128K run with ~0 swap (+0.6 GB at 128K); 256K adds +5.5 GB swap.
-    # Prompt reading is ~200 tok/s at every size, so a 55s draft can use only
-    # ~10k tokens of context anyway; the large window serves long-budget work
-    # (llm_local_task). 262144 stays available via LLM_ROUTER_LOCAL_NUM_CTX.
-    raw = (os.environ.get("LLM_ROUTER_AGENT_NUM_CTX", "").strip()
-           or os.environ.get("LLM_ROUTER_LOCAL_NUM_CTX", "").strip())
-    if not raw:
-        return _default_num_ctx(model)
-    try:
-        value = int(raw)
-        return value if value > 0 else None
-    except ValueError:
-        return _default_num_ctx(model)
-
-
-def _agent_temperature() -> float:
-    """An action turn is a classification, not prose: sampling diversity is pure
-    downside. Field guidance for tool-calling turns is 0.0-0.2; the loop was
-    inheriting the server default, which for this model is 0.7."""
-    raw = os.environ.get("LLM_ROUTER_AGENT_TEMPERATURE", "").strip()
-    try:
-        value = float(raw)
-        return value if 0.0 <= value <= 2.0 else 0.1
-    except ValueError:
-        return 0.1
+constrained_decoding_enabled = _ollama.constrained_decoding_enabled
+_default_num_ctx = _ollama.default_num_ctx
+_num_ctx = _ollama.num_ctx
+_agent_temperature = _ollama.agent_temperature
 
 
 _MAX_ITERATIONS = 15  # Safety cap — prevent infinite loops
 
 
-_OLLAMA_URL_DEFAULT = "http://localhost:11434"
-
-
-def _validated_ollama_url(raw: str) -> str:
-    """Apply CHZ-SEC-06's scheme/host validation, failing CLOSED to localhost.
-
-    config.py validates this exact env input -- its docstring records that
-    LLM_ROUTER_OLLAMA_URL/OLLAMA_URL "reached urlopen with no scheme or host
-    validation, so file:// was accepted (local file read) and cloud-metadata
-    addresses were attempted -- a classic SSRF sink". That fix landed in
-    config.py only, and these hook modules kept their own unvalidated readers,
-    so the protection was bypassed by whichever path ran first:
-
-        input                                validator   hook reader
-        file:///etc/passwd                   BLOCKED     allowed
-        http://169.254.169.254/latest/...    BLOCKED     allowed
-        http://some-external-host            allowed     allowed   (by design)
-
-    Reachable without any local access: `_load_dotenv` in auto-route.py reads
-    `Path.cwd()/".env"`, so a cloned repository can set this variable.
-
-    Imported rather than reimplemented -- a second copy of the rules is what
-    produced this gap. The import is guarded because hook modules must not die
-    on a package-resolution problem, and an unavailable validator falls back to
-    the localhost default rather than to an unchecked URL: refusing to reach a
-    configured Ollama is a degraded feature, while honouring an unvalidated one
-    is the defect.
-    """
-    if not raw:
-        return _OLLAMA_URL_DEFAULT
-    try:
-        from llm_router.config import validate_ollama_url
-    except Exception:
-        return raw if raw == _OLLAMA_URL_DEFAULT else _OLLAMA_URL_DEFAULT
-    return validate_ollama_url(raw) or _OLLAMA_URL_DEFAULT
-
-
-def _get_ollama_url() -> str:
-    return _validated_ollama_url(
-        os.environ.get("LLM_ROUTER_OLLAMA_URL")
-        or os.environ.get("OLLAMA_BASE_URL")
-        or _OLLAMA_URL_DEFAULT
-    )
+_OLLAMA_URL_DEFAULT = _ollama.OLLAMA_URL_DEFAULT
+_validated_ollama_url = _ollama.validated_ollama_url
+_get_ollama_url = _ollama.get_ollama_url
 
 
 # Tool names the model may call — used to spot a tool call the model dumped
@@ -612,99 +397,19 @@ def _get_ollama_url() -> str:
 _TOOL_NAMES = "|".join(t["function"]["name"] for t in TOOL_DEFINITIONS)
 _TOOLCALL_TEXT_RE = re.compile(r'\{\s*"name"\s*:\s*"(?:' + _TOOL_NAMES + r')"', re.IGNORECASE)
 
-# Qwen's XML tool-call dialect. qwen3-coder:30b emits every tool call as
-#
-#     <function=read_file>
-#     <parameter=path>
-#     src/llm_router/hooks/auto-route.py
-#     </parameter>
-#     </function>
-#
-# and leaves Ollama's structured `tool_calls` field empty. The JSON shim above
-# does not match it, so `tools_used` stayed 0 and run_agent_loop discarded a
-# CORRECT tool call as "the model only chatted" (the `tools_used == 0` guard).
-# That is what produced the 2026-09-06 conclusion that a local model cannot
-# drive the loop: the model drove it fine and the parser could not hear it.
-# Closing tags are optional — the model frequently omits `</function>` and
-# closes with a stray `</tool_call>` instead, so the body runs to the next
-# `<function=` or end of string.
-_XML_FUNC_RE = re.compile(
-    r"<function[=\s]+([A-Za-z_][A-Za-z0-9_]*)\s*>(.*?)(?=</function>|<function[=\s]|\Z)",
-    re.DOTALL,
-)
-_XML_PARAM_RE = re.compile(
-    r"<parameter[=\s]+([A-Za-z_][A-Za-z0-9_]*)\s*>(.*?)(?=</parameter>|<parameter[=\s]|\Z)",
-    re.DOTALL,
-)
+_KNOWN_TOOLS = {t["function"]["name"] for t in TOOL_DEFINITIONS}
 
 
 def _repair_xml_toolcalls(content: str) -> list[dict]:
-    """Recover tool calls emitted in Qwen's ``<function=name>`` XML dialect.
-
-    Argument values are kept as stripped strings and never coerced: every tool
-    in TOOL_DEFINITIONS takes strings, and json-parsing the value would silently
-    turn a path like ``2.0.0`` or a pattern like ``true`` into something else.
-    Unknown tool names are dropped here rather than in execute_tool, so a model
-    hallucinating ``<function=grep>`` falls through to the next model instead of
-    burning an iteration on an "Unknown tool" string.
-    """
-    if not content or "<function" not in content:
-        return []
-    known = {t["function"]["name"] for t in TOOL_DEFINITIONS}
-    calls: list[dict] = []
-    for m in _XML_FUNC_RE.finditer(content):
-        name = m.group(1)
-        if name not in known:
-            continue
-        args = {k: v.strip() for k, v in _XML_PARAM_RE.findall(m.group(2))}
-        if args:
-            calls.append({"function": {"name": name, "arguments": args}})
-    return calls
+    """Recover tool calls emitted in Qwen's ``<function=name>`` XML dialect (shared
+    implementation: llm_router.toolkit.adapters.ollama)."""
+    return _ollama.repair_xml_toolcalls(content, _KNOWN_TOOLS)
 
 
 def _repair_toolcalls(content: str) -> list[dict]:
-    """Recover tool calls a model emitted as TEXT instead of structured output.
-
-    Small tool-capable models (observed: qwen2.5-coder:7b) frequently return
-    ``{"name": "write_file", "arguments": {...}}`` inside the assistant
-    ``content`` string and leave ``tool_calls`` empty. Without recovery the loop
-    sees "no tool calls", treats the blob as the final answer, and silently does
-    nothing. This brace-matches each embedded object and rebuilds the tool_calls
-    shape the executor expects. Empirically flips qwen2.5-coder:7b 0/3 → 3/3 on a
-    write-then-run task; a no-op (returns ``[]``) for well-behaved models.
-    """
-    if not content:
-        return []
-    if not _TOOLCALL_TEXT_RE.search(content):
-        return _repair_xml_toolcalls(content)
-    calls: list[dict] = []
-    for m in _TOOLCALL_TEXT_RE.finditer(content):
-        start = content.rfind("{", 0, m.start() + 1)
-        depth, i, in_str, esc = 0, start, False, False
-        while i < len(content):
-            c = content[i]
-            if esc:
-                esc = False
-            elif c == "\\":
-                esc = True
-            elif c == '"':
-                in_str = not in_str
-            elif not in_str and c == "{":
-                depth += 1
-            elif not in_str and c == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        obj = json.loads(content[start:i + 1])
-                        args = obj.get("arguments") or obj.get("parameters") or {}
-                        if isinstance(args, str):
-                            args = json.loads(args)
-                        calls.append({"function": {"name": obj["name"], "arguments": args}})
-                    except (ValueError, KeyError):
-                        pass
-                    break
-            i += 1
-    return calls
+    """Recover tool calls a model emitted as TEXT instead of structured output
+    (shared implementation: llm_router.toolkit.adapters.ollama)."""
+    return _ollama.repair_toolcalls(content, _KNOWN_TOOLS)
 
 
 def _parse_constrained(content: str) -> tuple[list[dict], str | None]:

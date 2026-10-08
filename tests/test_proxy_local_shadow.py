@@ -75,12 +75,24 @@ class Backend:
 
 
 class Upstream:
+    """Fake Anthropic. ``hold_for``: a ShadowRunner whose job must have DECIDED (local answered, failed,
+    or timed out) before Claude's reply is released, so a test that is about what a record says about
+    the local reply is not racing the worker-thread hops local makes before it reaches the backend."""
+
     def __init__(self, payload: bytes | None = None, delay: float = 0.3, status: int = 200):
         self.payload = payload if payload is not None else _claude()
         self.delay, self.status, self.requests = delay, status, []
+        self.hold_for: local_shadow.ShadowRunner | None = None
 
     async def __call__(self, request):
         self.requests.append(request)
+        if self.hold_for is not None:
+            # ``busy`` drops in the job's ``finally``, after it chose between "local answered" and
+            # "Claude answered first", so once it is false a late Claude reply cannot change the record.
+            async def _job_decided():
+                while self.hold_for.busy:
+                    await asyncio.sleep(0.001)
+            await asyncio.wait_for(_job_decided(), 30.0)
         if self.delay:
             await asyncio.sleep(self.delay)
         return httpx.Response(self.status, stream=httpx.ByteStream(self.payload),
@@ -116,8 +128,17 @@ async def _post(app, body):
         return await c.post("/v1/messages?beta=true", content=json.dumps(body), headers=headers)
 
 
-async def _step(env, backend, up, body=None, **cfg):
+async def _step(env, backend, up, body=None, local_first=None, **cfg):
+    """One agent step. ``local_first`` (default: whenever the fake backend answers at once, i.e. has
+    no gate) holds Claude's reply until the shadow job has decided, so the record always describes
+    local's reply. Without that the reply races ``Upstream.delay`` (0.3 s) against the job's thread
+    hops (copy, media scan, conversion, prompt cap) and a loaded runner records
+    ``dropped_claude_first`` instead (run 37656384812). Tests of the dropped/budget paths pass a gate."""
     app = env.app(backend, up, **cfg)
+    if local_first is None:
+        local_first = getattr(backend, "gate", None) is None
+    if local_first and app.state.shadow is not None:
+        up.hold_for = app.state.shadow
     resp = await _post(app, body or _first_call())
     await app.state.shadow.drain()
     return resp
@@ -487,19 +508,23 @@ async def test_the_local_backend_offloads_its_conversion_and_overflow_check(monk
 
 
 async def test_big_body_claude_response_is_not_delayed_by_shadow(env):
-    """Loose timing guard (call-path tests above are the exact ones): 3 MB body, shadow on vs off."""
-    async def ttfb(shadow_on: bool) -> float:
+    """Loose guard (call-path tests above are the exact ones): 3 MB body, shadow on vs off. Measured in
+    CPU time of the event-loop thread, not wall time: shadow can only delay Claude's first byte by
+    work it puts on the loop, and that is what thread CPU time counts. Wall time also counts every
+    moment a loaded runner deschedules the process, which put 97 ms on this test with no shadow
+    code involved (#281 CI). The 20 ms upstream sleep is wall time and is not in either number."""
+    async def loop_cpu(shadow_on: bool) -> float:
         app = env.app(Backend(), Upstream(delay=0.02), shadow=shadow_on)
-        t0 = time.monotonic()
+        c0 = time.thread_time()
         await _post(app, _big_body(3.0))
-        dt = time.monotonic() - t0
+        dt = time.thread_time() - c0
         if app.state.shadow is not None:
             await app.state.shadow.drain()
         return dt
 
-    off = min([await ttfb(False) for _ in range(3)])
-    on = min([await ttfb(True) for _ in range(3)])
-    assert on - off < 0.08, f"shadow added {(on - off) * 1000:.0f} ms (off {off * 1000:.0f}, on {on * 1000:.0f})"
+    off = min([await loop_cpu(False) for _ in range(3)])
+    on = min([await loop_cpu(True) for _ in range(3)])
+    assert on - off < 0.08, f"shadow added {(on - off) * 1000:.0f} ms of loop CPU (off {off * 1000:.0f}, on {on * 1000:.0f})"
 
 
 async def test_an_outer_cancel_of_a_job_is_not_swallowed_even_when_the_local_call_cancels_slowly():

@@ -238,6 +238,17 @@ def begin(hook: str, event: str, t0: float | None = None) -> None:
         _pending = None
 
 
+def set_event(event: str) -> None:
+    """Relabel the event of the invocation being timed. For a script registered
+    on two events (session-end: Stop and SessionEnd) that learns which one fired
+    only after reading stdin. No-op when nothing is being timed. Never raises."""
+    try:
+        if _pending is not None:
+            _pending["event"] = event
+    except Exception:  # noqa: BLE001 -- timing must never break the hook
+        return
+
+
 def add_phase(name: str, ms: float) -> None:
     """Add ``ms`` to the named phase of the invocation being timed. No-op when
     nothing is being timed (not a hook process). Never raises."""

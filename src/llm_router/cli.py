@@ -13,12 +13,12 @@ Usage:
     llm-router install --host copilot-cli — write GitHub Copilot CLI config files
     llm-router install --host openclaw    — write OpenClaw config files
     llm-router install --host trae        — write Trae IDE config files
-    llm-router install --host pi          — write Pi coding agent (pi.dev) config files
+    llm-router install --host pi          — not supported by `llm-router install` yet (Pi coding agent)
     llm-router install --host factory     — confirm Factory Droid plugin manifest
     llm-router install --host desktop     — print Claude Desktop config snippet
     llm-router install --host copilot     — install VS Code / GitHub Copilot pull-routing configs
     llm-router install --host windsurf    — install Windsurf / Cascade pull-routing configs
-    llm-router install --host kimi        — install Kimi Code (Moonshot AI) pull-routing configs
+    llm-router install --host kimi        — not supported by `llm-router install` yet (Kimi Code)
     llm-router install --host all         — install / print all host configs
     llm-router uninstall        — remove hooks and MCP registration
     llm-router uninstall --purge — also delete ~/.llm-router/ (usage DB, .env, logs)
@@ -48,6 +48,7 @@ Usage:
     llm-router budget set <p> <amt>  — set monthly cap in USD for provider p
     llm-router budget remove <p>     — clear the cap for provider p
     llm-router last [--count N]      — show your last N routing decisions (default: 5)
+    llm-router run --model M --verify CMD "task" — one task through the tool layer (propose-only patch)
     llm-router replay [--limit N]    — full transcript of routing decisions this session
     llm-router snapshot [--date DATE] — mid-session monitoring: accuracy trends and gap detection
     llm-router retrospect [--weekly] — IAF-style session debrief with routing directives
@@ -909,6 +910,7 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "policy",
         "explain-dashboard",
         "judge",
+        "run",
     }
 )
 
@@ -1200,6 +1202,10 @@ def main() -> None:
     elif args and args[0] == "audit":
         from llm_router.commands.audit import main as _audit_main
         sys.exit(_audit_main(args[1:]))
+    elif args and args[0] == "run":
+        # Router-owned tool layer, phase 1: propose-only, sandboxed, local Ollama.
+        from llm_router.commands.run import cmd_run
+        sys.exit(cmd_run(args[1:]))
     elif args and args[0] == "last":
         from llm_router.commands.last import main as _last_main
         sys.exit(_last_main(args[1:]))  # CFG-010: propagate the exit code
