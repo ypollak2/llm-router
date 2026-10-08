@@ -276,7 +276,7 @@ class _BindsPerService:
                 srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 srv.bind(("127.0.0.1", port))
-                srv.listen(1)
+                srv.listen(128)
                 self.socks.append(srv)
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
@@ -303,7 +303,8 @@ def test_default_install_starts_main_on_upstream_port_and_shim_on_settings_port(
         assert f"<string>--port</string><string>{port}</string>" in shim_text
         assert f"<string>--upstream-port</string><string>{upstream}</string>" in shim_text
         # main first, then the shim: the shim must never come up pointing at nothing
-        assert [c for c in runner.calls] == [f"launchctl load {main_dest}", f"launchctl load {shim_dest}"]
+        assert [c.split(" 2>")[0] for c in runner.calls] == [
+            f"launchctl load {main_dest}", f"launchctl load {shim_dest}"]
         data = json.loads(_sandbox.read_text())
         assert data["env"]["ANTHROPIC_BASE_URL"] == f"http://127.0.0.1:{port}"
         sentinel = pd.read_sentinel()
@@ -386,3 +387,53 @@ def test_uninstall_stops_and_removes_both_services(tmp_path, _sandbox):
     assert any("Stopped proxy service" in a for a in actions)
     assert not main_dest.exists() and not shim_dest.exists()
     assert pd.read_sentinel() is None
+
+
+def _install_both(service_home, port, upstream, runner):
+    return cmd.install_proxy_default(
+        port=port, upstream_port=upstream, home=service_home, system="Darwin",
+        runner=runner, health_retries=5, health_interval_s=0.05,
+    )
+
+
+def test_rerunning_install_on_a_finished_shim_install_keeps_the_shim_in_the_sentinel(tmp_path, _sandbox):
+    """Before the fix the re-run saw its own shim on the port, took the "reuse a
+    foreign proxy" branch and rewrote the sentinel with shim_label None, so
+    uninstall left the shim plist and a running shim behind."""
+    service_home = tmp_path / "svc_home"
+    port, upstream = _free_port(), _free_port()
+    runner = _BindsPerService({pd.LABEL: upstream, pd.SHIM_LABEL: port}, {pd.LABEL, pd.SHIM_LABEL})
+    try:
+        assert _install_both(service_home, port, upstream, runner)["ok"] is True
+        before = list(runner.calls)
+        again = _install_both(service_home, port, upstream, runner)
+        assert again["ok"] is True and again["reused"] is True, again
+        assert any("Already installed" in a for a in again["actions"])
+        assert runner.calls == before, "a finished install is not restarted"
+        sentinel = pd.read_sentinel()
+        assert sentinel["shim_label"] == pd.SHIM_LABEL and sentinel["upstream_port"] == upstream
+        assert json.loads(_sandbox.read_text())["env"]["ANTHROPIC_BASE_URL"] == f"http://127.0.0.1:{port}"
+    finally:
+        runner.close()
+    shim_dest, _ = pd.service_target("Darwin", service_home, label=pd.SHIM_LABEL)
+    cmd.uninstall_proxy_default(home=service_home, system="Darwin", runner=lambda c, **k: subprocess.CompletedProcess(c, 0, "", ""))
+    assert not shim_dest.exists()
+
+
+def test_uninstall_removes_a_shim_plist_that_no_sentinel_names(tmp_path, _sandbox):
+    service_home = tmp_path / "svc_home"
+    shim_dest, _ = pd.install_shim_service(system="Darwin", home=service_home, port=8787, upstream_port=8797)
+    assert shim_dest.exists() and pd.read_sentinel() is None
+    stops = []
+    actions = cmd.uninstall_proxy_default(
+        home=service_home, system="Darwin",
+        runner=lambda c, **k: stops.append(c) or subprocess.CompletedProcess(c, 0, "", ""),
+    )
+    assert stops == [f"launchctl unload {shim_dest}"]
+    assert not shim_dest.exists()
+    assert any("Stopped fail-open shim service" in a for a in actions)
+
+
+def test_uninstall_with_nothing_installed_does_nothing(tmp_path, _sandbox):
+    assert cmd.uninstall_proxy_default(home=tmp_path / "svc_home", system="Darwin",
+                                       runner=lambda c, **k: pytest.fail("ran " + c)) == []

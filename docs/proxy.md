@@ -566,7 +566,8 @@ proxy is currently up.
 `llm-router proxy-shim` (`proxy/failopen_shim.py`) owns 127.0.0.1:8787 and
 forwards every request, bytes in and bytes out, to the main proxy on
 `LLM_ROUTER_PROXY_UPSTREAM_PORT` (default 8797). When the main proxy cannot be
-reached — connection refused, connect slower than 200 ms, or the connection
+reached — connection refused, connect slower than the connect budget (1 s,
+`--connect-timeout-ms`), or the connection
 drops before a response — or answers a 5xx of its own (one without Anthropic's
 `request-id` header) before any byte reached the client, the shim sends the same request once to `https://api.anthropic.com` with the same
 headers and records a `proxy_down` event (`failopen.record`, so it lands in
@@ -594,9 +595,16 @@ sends (uvicorn's next to Anthropic's).
 
 **Moving an existing install behind the shim** (the installer reuses a process
 it finds on 8787 and says "No fail-open shim installed"): stop the main proxy's
-LaunchAgent, change its `--port` to 8797, start it again (`launchctl bootout` +
-`bootstrap`), then install and bootstrap `com.llm_router.proxy-shim`. That is a
-live service change and an owner step.
+LaunchAgent, change its `--port` to 8797, then install `com.llm_router.proxy-shim`.
+That is a live service change and an owner step. Restart a loaded service only
+with `launchctl kickstart -k gui/$(id -u)/<label>`; never `bootout` + `bootstrap`
+(the bootout can cut the API connection of the session running it, and the
+bootstrap right after it can fail with launchd I/O error 5 and leave 8787 dead,
+docs/BUGS.md P010-2). `kickstart` does not re-read an edited plist, so a plist
+change on a loaded service (such as the port move) is the one case that still
+needs the service unloaded first: run `llm-router install --proxy-default off`
+and install again, or `launchctl unload <plist>` then `launchctl load <plist>`
+when no session depends on 8787.
 
 ### Fail-safe: what happens when the proxy is down
 

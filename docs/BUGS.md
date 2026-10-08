@@ -42,6 +42,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 28 | `llm-router northstar` showed the heuristic share as the North Star | fixed in this change (v16 P0.8) |
 | 29 | The claw-code Stop hook and the dashboard models panel raise TypeError on a NULL task type | fixed in this change (v16 P0.8 r1) |
 | P010-1 | A dead proxy fails every Claude Code session | fixed in this change (P0.10); live switch is an owner step |
+| P010-2 | The shim's 200 ms connect budget sent healthy-proxy traffic direct; shim restart cut 8787 | fixed in this change (P0.10 cutover repair) |
 | P013-1 | `llm_act` wrote files into the MCP process cwd | fixed for the file tools in this change (P0.13); bash confinement is P2.9 |
 | P0.14-a | Proxy ledger wrote 0 rows for 25 h and nothing flagged it | fixed in this change (P0.14) |
 | 18 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
@@ -705,8 +706,8 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   or a 5xx of the main proxy's own (no Anthropic `request-id`) before any byte went out, it sends the request once to api.anthropic.com and records
   `proxy_down` in `fail_open.jsonl` (G2). `llm-router install --proxy-default` installs both
   services (main first, then the shim) and writes settings.json only after both answer. The live
-  machine still runs the main proxy on 8787: the port move needs the owner (`bootout` +
-  `bootstrap`).
+  machine still runs the main proxy on 8787: the port move needs the owner (see P010-2 for how
+  to restart a loaded service).
 - **Found while fixing.** The first shim used aiohttp's client, which rejects the duplicate
   `Server` header the main proxy sends (uvicorn's own next to Anthropic's): in the smoke, 2 of 4
   calls went direct while the main proxy was up. The shim's upstream leg now uses httpx (h11),
@@ -738,6 +739,49 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   install; `tests/test_failopen_never_writes_settings.py` pins that no fail-open path writes
   settings.json outside `llm-router install --proxy-default`. Live: 10/10 smoke sessions
   answered through the shim with the smoke main proxy killed, 10 `proxy_down` rows (PR body).
+
+## P010-2. The shim's 200 ms connect budget skipped the router; restarting the shim cut 8787
+
+- **Symptom.** Cutover 2026-10-08, machine load ~25: the shim logged 58 `fail_open
+  code=proxy_down` rows in 4 minutes while the main proxy on 8797 was healthy, so all traffic
+  bypassed the router. `--connect-timeout-ms 1000` stopped it (20 calls, 0 fail-opens, low
+  load). Separately, restarting the shim with `launchctl bootout` + `bootstrap` cut the API
+  connection of the Claude session that ran it, and the bootstrap failed to load (launchd I/O
+  error 5 right after bootout): 8787 stayed dead until a human reloaded it. The shim and main
+  plists were hand-written and hand-edited.
+- **Cause.** (1) `DEFAULT_CONNECT_TIMEOUT_S = 0.2`. A refused connect fails at once whatever the
+  budget, so the budget only decides how long a merely slow connect may take; 200 ms is too
+  tight for a loaded host. (2) Every restart instruction in the repo was bootout + bootstrap
+  (`docs/proxy.md`) and the installer's `launchctl load` fails on an already-loaded service.
+  (3) A re-run of `install --proxy-default` met its own shim on 8787, took the "reuse a foreign
+  proxy" branch and rewrote the sentinel with `shim_label` None, so uninstall left the shim
+  plist and process behind; uninstall also ignored a shim plist the sentinel did not name.
+- **Fix.** Default budget 1 s (`failopen_shim.DEFAULT_CONNECT_TIMEOUT_S`; a code default, not
+  env-only, because the installer-written plist passes no flag). Measured with
+  `scripts/shim_connect_probe.py`: connect to a local aiohttp server in another process,
+  n = 1,000 sequential connects per level (raw TCP and full httpx request) and 40 x 50-wide bursts (n = 2,000) per level, under 0 / 15 / 30 / 45
+  (and 90, bursts) busy-loop processes on a 15-core Mac, load1 up to 32.9: worst connect
+  38.7 ms (full httpx request; raw TCP connect worst 6.1 ms, burst worst 10.8 ms), 0 of 12,000 over 200 ms. CPU load
+  alone did not reproduce the incident, so 1 s is chosen from the incident's own evidence
+  (1000 ms: 0 of 20 at low load) with 25x headroom over the worst measured connect, and costs
+  nothing when the proxy is really down. The installer's macOS activation is `launchctl load
+  <plist> 2>/dev/null || launchctl kickstart -k gui/$(id -u)/<label>`; a finished install is
+  recognised and not rewritten or restarted; uninstall removes the shim plist with or without
+  a sentinel. Docs no longer name bootout/bootstrap. Doctor and the SessionStart hint already
+  used `kickstart -k` and doctor already probes the shim on 8787 (P010-1 round 2).
+- **Not done.** Moving an already-loaded main proxy from 8787 to 8797 from the installer:
+  launchd does not re-read an edited plist on `kickstart`, so it needs the service unloaded,
+  which drops 8787 while no shim stands in front of it. That stays an owner step
+  (`docs/proxy.md`).
+- **Rule.** Restart a loaded launchd service only with `launchctl kickstart -k`. Never run
+  bootout + bootstrap from inside a session that depends on the service.
+- **Test.** `test_connect_budget_is_1s_by_default`, `test_cli_without_a_flag_runs_with_the_1s_budget`
+  (`tests/test_proxy_failopen_shim.py`);
+  `test_macos_activation_restarts_a_loaded_service_with_kickstart_not_bootout`,
+  `test_no_restart_advice_uses_launchctl_bootout_or_bootstrap` (`tests/test_proxy_default.py`);
+  `test_rerunning_install_on_a_finished_shim_install_keeps_the_shim_in_the_sentinel`,
+  `test_uninstall_removes_a_shim_plist_that_no_sentinel_names`
+  (`tests/test_proxy_default_orchestration.py`). All red on 26468d34.
 
 ## P013-1. `llm_act` wrote files into the MCP process cwd
 

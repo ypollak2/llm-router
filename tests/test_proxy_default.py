@@ -222,3 +222,26 @@ def test_install_shim_service_writes_under_the_given_home_only(tmp_path):
                                       port=9001, upstream_port=9002)
     assert dest.is_relative_to(tmp_path) and dest.exists()
     assert "<string>9002</string>" in dest.read_text()
+
+
+def test_macos_activation_restarts_a_loaded_service_with_kickstart_not_bootout(tmp_path):
+    """`launchctl load` on a loaded service fails (launchd I/O error 5), so a re-run
+    must fall back to `kickstart -k`; bootout/bootstrap cut 8787 on 2026-10-08."""
+    for label in (pd.LABEL, pd.SHIM_LABEL):
+        _, cmd = pd.service_target("Darwin", tmp_path, label=label)
+        assert f"launchctl kickstart -k gui/$(id -u)/{label}" in cmd
+        assert "bootout" not in cmd and "bootstrap" not in cmd
+
+
+def test_no_restart_advice_uses_launchctl_bootout_or_bootstrap():
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    files = [f for d in ("src", "hooks", "docs") for f in (root / d).rglob("*")
+             if f.suffix in {".py", ".md"} and "spikes" not in f.parts and f.name != "BUGS.md"]
+    assert len(files) > 50, "the scan must find the repo's files"
+    pat = re.compile(r"launchctl\s+(bootout|bootstrap)")
+    hits = [f"{f.relative_to(root)}:{n}" for f in files
+            for n, line in enumerate(f.read_text(errors="ignore").splitlines(), 1) if pat.search(line)]
+    assert hits == []

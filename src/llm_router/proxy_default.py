@@ -246,7 +246,12 @@ def service_target(
     home = home or Path.home()
     if system == "Darwin":
         dest = home / "Library" / "LaunchAgents" / f"{label}.plist"
-        return dest, f"launchctl load {dest}"
+        # `load` fails on a service that is already loaded (launchd I/O error 5),
+        # so a re-run falls back to `kickstart -k`, which restarts in place.
+        # Never bootout + bootstrap: bootout can cut the caller's own API
+        # connection and the bootstrap right after it can fail silently
+        # (docs/BUGS.md P010-2).
+        return dest, f"launchctl load {dest} 2>/dev/null || launchctl kickstart -k gui/$(id -u)/{label}"
     if system == "Linux":
         unit = _SYSTEMD_UNITS[label]
         dest = home / ".config" / "systemd" / "user" / f"{unit}.service"
