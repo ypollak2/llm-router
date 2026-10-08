@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `semantic_cache_lookups` gains `project_scope` (additive migration; earlier rows are reported as
   unscoped). `llm-router kpi` and `llm_router_status(view="cache")` print lookups, hits and n per
   project; a project with fewer than 20 lookups prints "not informative" and no percentage.
+- agents (PLAN v16 AGT A.0): `llm_act`, `llm_delegate` and `llm_local_task` take `wait` (default
+  True). `wait=False` returns `{"job_id": ...}` at once; `llm_router_session(action="job", id=...)`
+  polls it (`running` / `done` / `failed`, with the tool's result). Jobs live in the MCP server
+  process and are forgotten on restart; an unknown id answers `unknown_job`.
 - proxy (PLAN v16 GE4, OD-4 = A): Frontier shadow (`shadow_frontier.py`), **off by default**
   (`LLM_ROUTER_SHADOW_FRONTIER=on` to enable). After a `tier_reason == haiku_rewrite` reply is relayed,
   a background task replays the client's original bytes to the requested model; caps in code: 20 calls
@@ -44,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the only place the proxy keeps prompt text; it is for labelling the shadow (`LLM_ROUTER_SHADOW_LABELS`).
 
 ### Changed
+- agents (PLAN v16 AGT A.0): `agents.yaml` ships inside the package (`llm_router/data/agents.yaml`,
+  loaded with `importlib.resources`). It lived at the repo root, which no wheel contains, so every
+  installed user got `agent_not_found` (`docs/BUGS.md` A.0-1). A project `config/agents.yaml` and
+  `LLM_ROUTER_AGENTS_CONFIG` still override it.
+- agents (PLAN v16 AGT A.0): `run_delegation` (behind `llm_act` / `llm_delegate`) and
+  `llm_local_task`'s agent loop and acceptance check run in a worker thread (`asyncio.to_thread`), so
+  a long run no longer freezes every other MCP call (`docs/BUGS.md` A.0-2). `llm_local_task` runs
+  still go one at a time, because the loop's write mode is process-wide `os.environ`. A queued run
+  takes its file snapshot and starts its budget clock only once its turn comes, so it never reports
+  another run's edits as its own and its wait is not charged to its budget; the result carries
+  `queued_s` (`docs/BUGS.md` A.0-3). `wait=False` with a missing `workdir` answers `blocked` at once
+  instead of returning a job id.
 - proxy (v16 P1.7-c): the classifier shadow's `cls_input.assemble` reads the history backwards, stops once it
   has its context and never reads more than 400 messages back. Same input as before whenever the context lies
   in that window (600-case fuzz against the old walk); it no longer holds the GIL long enough to delay

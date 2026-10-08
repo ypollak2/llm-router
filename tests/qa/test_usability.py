@@ -165,7 +165,7 @@ def test_agent_profile_hard_max_at_most_few_dollars():
 def test_default_agents_yaml_uses_sensible_budgets():
     """The shipped config defaults must look reasonable."""
     ROOT = Path(__file__).resolve().parent.parent.parent
-    reg = AgentRegistry.from_yaml(ROOT / "config" / "agents.yaml")
+    reg = AgentRegistry.from_yaml(ROOT / "src" / "llm_router" / "data" / "agents.yaml")
     for aid in reg.list_ids():
         profile = reg.get(aid)
         # No agent should default to over $1 — that's a footgun.
