@@ -427,6 +427,34 @@ off by default. With the default policy, a single-prompt task stays on its
 first-call model (replay: 22/22 calls on Opus, 0 switches), so the rewrite
 only takes effect after a cold gap or a complexity change.
 
+### Haiku guard (`proxy/haiku_guard.py`): `haiku_rewrite` turns itself off
+
+While the live policy has `haiku_rewrite: true`, the proxy runs a guard at
+start and then every hour. A trip writes `~/.llm-router/tier_overrides.json`
+(`{"haiku_rewrite": false, "reason", "ts"}`) and turns the running policy's
+rewrite off; the YAML is never edited. `ClaudeTierPolicy.load` reads the file
+after the YAML, so the override also holds across restarts. The override can
+only turn the rewrite off. To undo a trip, delete the file and restart the
+proxy. Triggers (one is enough; a trigger below its minimum n never trips):
+
+| Trigger | Trips when |
+|---|---|
+| `redo` | Haiku-served human turns (O3 units and redo definition, last 7 days) n >= 30 and redo > 15% |
+| `audit_batch` | newest audit summary with a `haiku` arm: n >= 30 and acceptable < 75% |
+| `audit_daily` | daily blind audit acceptable < 8/10 (n >= 10) on 2 consecutive days, the newer one inside the last 7 days |
+| `tier_retry` | Haiku-decided calls: share refused and retried unchanged > 1% at n >= 100 |
+| `shadow` | Haiku-vs-Frontier shadow verdicts (14 days): acceptable < 26/30 at n >= 20 |
+
+Every run appends one line to `~/.llm-router/haiku_guard.log`. The input file
+formats and the env overrides (`LLM_ROUTER_HAIKU_GUARD_KINDS`,
+`LLM_ROUTER_HAIKU_GUARD_AUDIT_DIR`, `LLM_ROUTER_HAIKU_GUARD_SHADOW_VERDICTS`)
+are in the module docstring. The daily watch prints every trigger with its n:
+
+    llm-router kpi --haiku-watch --since 2026-10-07 --until 2026-10-08 [--json]
+
+The command exits 1 when a D-20 trigger (`audit_daily`, `tier_retry` or
+`shadow`) is below its minimum n. That means the day cannot be judged.
+
 ### Key finding (1.2): per-turn switching does not pay; conversation-level might
 
 Per-turn tier switching loses money under prompt caching: a switch mid-task
