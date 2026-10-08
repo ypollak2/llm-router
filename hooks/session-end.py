@@ -2471,12 +2471,10 @@ def main() -> None:
                 _bbase = os.environ.get("LLM_ROUTER_HOME", "").strip()
                 _bdir = _P(_bbase).expanduser() if _bbase else _P.home() / ".llm-router"
                 for _suffix in ("", ".lock"):
-                    try:
-                        (_bdir / f"agent_depth_{_bsafe}.json{_suffix}").unlink()
-                    except FileNotFoundError:
-                        pass
-        except Exception:
-            pass
+                    (_bdir / f"agent_depth_{_bsafe}.json{_suffix}").unlink(missing_ok=True)
+        except Exception as _exc:  # noqa: BLE001 -- fail open, say so
+            print(f"llm-router: agent breaker state not removed ({type(_exc).__name__})",
+                  file=sys.stderr)
         # Stop already rendered the summary for the last turn; SessionEnd
         # output is not shown to the user, so do not render it twice.
         return

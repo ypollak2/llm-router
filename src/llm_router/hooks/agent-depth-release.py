@@ -126,10 +126,7 @@ def _atomic_write(path: Path, data: dict) -> None:
             fh.write(json.dumps(data))
         os.replace(tmp, path)
     except BaseException:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+        tmp.unlink(missing_ok=True)
         raise
 
 

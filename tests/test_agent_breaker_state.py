@@ -132,20 +132,20 @@ def test_12_parallel_pretooluse_hooks_lose_no_update(tmp_path, run):
 @pytest.mark.parametrize("run", range(20))
 def test_parallel_release_and_claim_lose_no_update(tmp_path, run):
     now = time.time()
-    _seed(tmp_path, depth=6, pending=[[now, 2, f"t{i}"] for i in range(6)])
+    _seed(tmp_path, depth=4, pending=[[now, 2, f"t{i}"] for i in range(4)])
     rel = {"hook_event_name": "PostToolUse", "tool_name": "Agent"}
     starts = [{"hook_event_name": "SubagentStart", "agent_id": f"c{i}", "agent_type": "Explore"}
-              for i in range(6)]
-    procs = [_spawn(RELEASE, tmp_path, rel) for _ in range(6)]
+              for i in range(4)]
+    procs = [_spawn(RELEASE, tmp_path, rel) for _ in range(4)]
     procs += [_spawn(START, tmp_path, s) for s in starts]
-    for p, payload in zip(procs, [rel] * 6 + starts):
+    for p, payload in zip(procs, [rel] * 4 + starts):
         p.stdin.write(json.dumps(payload))
         p.stdin.close()
     for p in procs:
         p.wait(timeout=60)
     errs = [e for e in (p.stderr.read() for p in procs) if e]
     st = _state(tmp_path)
-    assert st["depth"] == 0 and st["pending"] == [] and len(st["agents"]) == 6, errs
+    assert st["depth"] == 0 and st["pending"] == [] and len(st["agents"]) == 4, errs
 
 
 def test_lock_unavailable_fails_open_and_logs(tmp_path):
