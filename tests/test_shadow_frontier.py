@@ -213,10 +213,11 @@ async def test_at_most_400k_input_tokens_per_utc_day_including_the_next_call(on)
     _usage()
     _seed_ledger(_spent(1, 390_000))
     replay = FakeReplay()
-    await _sample(_shadow(), replay, usage={"input_tokens": 10_001})
+    await _sample(_shadow(), replay, usage={"input_tokens": 7_408})  # x1.35 = 10_001
     assert replay.calls == [] and _ledger()[-1]["reason"] == sf.R_CAP_TOKENS
-    await _sample(_shadow(), replay, usage={"input_tokens": 10_000})  # lands exactly on 400k
+    await _sample(_shadow(), replay, usage={"input_tokens": 7_407})  # x1.35 = 10_000: lands exactly on 400k
     assert len(replay.calls) == 1
+    assert sf.ADMIT_SAFETY == 1.35
     assert sf.MAX_INPUT_TOKENS_PER_DAY == 400_000
 
 
@@ -559,3 +560,112 @@ async def test_proxy_does_not_shadow_rows_that_are_not_haiku_rewrite(on, tmp_pat
     await app.state.frontier_shadow.drain()
     assert len(up.requests) == 2
     assert not sf.ledger_path().exists()
+
+
+# ── review fixes on #339 ────────────────────────────────────────────────────
+
+
+def _old_pair_file(day="2026-09-01"):
+    sf.pairs_dir().mkdir(parents=True, exist_ok=True)
+    f = sf.pairs_dir() / f"{day}.jsonl"
+    f.write_text('{"request_context": "secret"}\n')
+    return f
+
+
+def test_judge_prunes_old_pairs_even_when_the_flag_is_off(home):
+    f = _old_pair_file()
+    assert sf.judge_pending(clock=lambda: NOW)["status"] == "off"
+    assert not f.exists()
+
+
+def test_judge_prunes_old_pairs_even_when_quota_is_paused(on):
+    _usage(session=95.0)
+    f = _old_pair_file()
+    assert sf.judge_pending(clock=lambda: NOW)["status"] == sf.R_QUOTA_SESSION
+    assert not f.exists()
+
+
+async def test_proxy_start_prunes_old_pairs_with_the_flag_off(home, tmp_path):
+    f = _old_pair_file()
+    fresh = sf.pairs_dir() / f"{DAY}.jsonl"
+    fresh.write_text("{}\n")
+    ledger_old = {"day": "2026-09-01", "outcome": "skipped"}
+    _seed_ledger([ledger_old])
+    app = _app(tmp_path, SlowFrontierUpstream())
+    assert app.state.frontier_shadow is None
+    async with app.router.lifespan_context(app):
+        pass
+    assert not f.exists()
+    assert _ledger() == []
+
+
+def test_prune_at_start_without_a_shadow_dir_creates_nothing(home):
+    sf.prune_at_start(NOW)
+    assert not sf.shadow_dir().exists()
+
+
+def test_ledger_rows_older_than_retention_are_pruned_and_fresh_rows_kept(on):
+    keep = [{"day": "2026-09-24", "outcome": "skipped"}, {"day": DAY, "outcome": "replayed", "input_tokens": 5}]
+    _seed_ledger([{"day": "2026-09-23", "outcome": "skipped"}] + keep)
+    assert sf.prune_ledger(NOW) == 1
+    assert _ledger() == keep
+    assert stat.S_IMODE(sf.ledger_path().stat().st_mode) == 0o600
+    assert sf.prune_ledger(NOW) == 0
+
+
+def _cut_sse():
+    return CHEAP_REPLY[:CHEAP_REPLY.rindex(b"event: message_delta")]  # no stop_reason, no message_stop
+
+
+def _sse_without_message_stop():
+    return CHEAP_REPLY[:CHEAP_REPLY.rindex(b"event: message_stop")]
+
+
+JSON_OK = json.dumps({"id": "m", "stop_reason": "end_turn", "content": [{"type": "text", "text": "x"}],
+                      "usage": CHEAP_USAGE}).encode()
+
+
+@pytest.mark.parametrize("reply,ctype,complete", [
+    (CHEAP_REPLY, "text/event-stream", True),
+    (_cut_sse(), "text/event-stream", False),
+    (_sse_without_message_stop(), "text/event-stream", False),
+    (b"", "text/event-stream", False),
+    (JSON_OK, "application/json", True),
+    (JSON_OK[:-20], "application/json", False),
+    (json.dumps({"id": "m", "stop_reason": None, "usage": CHEAP_USAGE}).encode(), "application/json", False),
+    (b"", "application/json", False),
+])
+async def test_an_incomplete_cheap_reply_is_not_replayed_or_paired(on, reply, ctype, complete):
+    _usage()
+    replay = FakeReplay()
+    fs = _shadow()
+    fs.maybe_sample(RAW, HAIKU, OPUS, sf.DOOR_PROXY, "msg_1", replay=replay, cheap_status=200,
+                    cheap_reply=reply, cheap_ctype=ctype, cheap_usage=CHEAP_USAGE)
+    await fs.drain()
+    assert sf.reply_complete(reply, ctype) is complete
+    if complete:
+        assert len(replay.calls) == 1 and _ledger()[-1]["outcome"] == sf.OUT_REPLAYED
+    else:
+        assert replay.calls == []
+        assert _ledger()[-1]["reason"] == sf.R_CHEAP_INCOMPLETE
+        assert not sf.pairs_dir().exists()
+
+
+async def test_full_rate_window_is_exactly_14_days(on):
+    _usage()
+    replay = FakeReplay()
+    await _sample(_shadow(rng=0.999), replay)  # writes started.json at NOW
+    edge = NOW + sf.FULL_RATE_DAYS * 86400
+    assert sf.FULL_RATE_DAYS == 14
+    assert sf.sample_rate(edge - 1) == sf.FULL_RATE
+    assert sf.sample_rate(edge) == sf.STEADY_RATE  # day 14 exactly is already steady
+
+
+def test_two_pair_rows_with_one_task_id_are_judged_once(on):
+    _usage()
+    _pairs(1)
+    _pairs(1, ts0=NOW + 5)  # same task_id "t0", later ts
+    run = _judge_ok()
+    out = sf.judge_pending(run=run, rng=lambda: 0.1, clock=lambda: NOW)
+    assert len(run.calls) == 1 and out["judged"] == 1
+    assert len(haiku_guard.read_jsonl(sf.judge_ledger_path())) == 1

@@ -18,7 +18,14 @@ CAPS (all enforced here; OD-4 = A):
 * at most ``MAX_CALLS_PER_DAY`` (20) Frontier replays per UTC day;
 * at most ``MAX_INPUT_TOKENS_PER_DAY`` (400k) Frontier input tokens per UTC day, summed from
   each replay's own usage (input + cache read + cache write). A replay is skipped when the
-  Haiku call's input size (the same body) would take the day over the cap;
+  Haiku call's input size (the same body) times ``ADMIT_SAFETY`` (1.35: the replay is tokenized
+  by a different model, and a newer tokenizer can count ~35% more tokens for the same bytes)
+  would take the day over the cap. A replay whose real count exceeds that ratio can still land
+  over the cap by the excess; ``est_input_tokens`` and ``input_tokens`` in the ledger let you
+  audit the ratio;
+* a Haiku reply that is not complete (no ``stop_reason``; no ``message_stop`` in SSE; a cut
+  JSON body; the client went away mid-stream) is not replayed and not paired, so a truncated
+  answer cannot bias the verdicts the Haiku guard reads;
 * paused when ``usage.json`` says session >= 80% or weekly >= 85%, and when the reading is
   missing, a placeholder, or older than 30 minutes (unknown quota = no shadow);
 * at most one replay in flight; each replay is bounded by ``REPLAY_TIMEOUT_S`` and
@@ -47,6 +54,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import math
 import os
 import random
 import subprocess
@@ -78,6 +86,7 @@ FULL_RATE_DAYS = 14
 FULL_RATE = 1.0
 STEADY_RATE = 0.02
 RETENTION_DAYS = 14
+ADMIT_SAFETY = 1.35
 REPLAY_TIMEOUT_S = 300.0
 MAX_REPLY_BYTES = 8 * 1024 * 1024
 TEXT_CAP = 20_000
@@ -95,6 +104,7 @@ _CALL_OUTCOMES = (OUT_REPLAYED, OUT_REPLAY_FAILED)
 R_IN_FLIGHT = "in_flight"
 R_NOT_REWRITTEN = "not_rewritten"
 R_CHEAP_FAILED = "cheap_failed"
+R_CHEAP_INCOMPLETE = "cheap_incomplete"
 R_QUOTA_UNKNOWN = "quota_unknown"
 R_QUOTA_STALE = "quota_stale"
 R_QUOTA_SESSION = "quota_session"
@@ -215,7 +225,7 @@ def day_spend(day: str) -> tuple[int, int]:
     """(Frontier calls, Frontier input tokens) the shadow spent on ``day``. A failed replay
     counts as a call, and its input size counts at the estimate it was admitted with."""
     calls = tokens = 0
-    for r in _read_rows(ledger_path()):
+    for r in _read_rows(ledger_path()):  # bounded to RETENTION_DAYS by prune_ledger
         if r.get("day") != day or r.get("outcome") not in _CALL_OUTCOMES:
             continue
         calls += 1
@@ -223,6 +233,30 @@ def day_spend(day: str) -> tuple[int, int]:
         est = r.get("est_input_tokens")
         tokens += used if isinstance(used, int) else (est if isinstance(est, int) else 0)
     return calls, tokens
+
+
+def reply_complete(buf: bytes, ctype: str) -> bool:
+    """True when ``buf`` is a whole Anthropic reply: a ``stop_reason`` was delivered and, for
+    SSE, the stream reached ``message_stop``. A cut stream or body (client gone, upstream
+    dropped) is False."""
+    if "event-stream" in (ctype or ""):
+        _, stop, _ = parse_sse_usage(buf)
+        if stop is None:
+            return False
+        for line in buf.decode("utf-8", "replace").splitlines():
+            if line.startswith("data: "):
+                try:
+                    d = json.loads(line[6:])
+                except ValueError:
+                    continue
+                if isinstance(d, dict) and d.get("type") == "message_stop":
+                    return True
+        return False
+    try:
+        data = json.loads(buf or b"")
+    except ValueError:
+        return False
+    return isinstance(data, dict) and bool(data.get("stop_reason"))
 
 
 def sample_rate(now: float) -> float:
@@ -415,6 +449,8 @@ class FrontierShadow:
             return R_NOT_REWRITTEN
         if job["cheap_status"] != 200:
             return R_CHEAP_FAILED
+        if not reply_complete(job["cheap_reply"], job["cheap_ctype"]):
+            return R_CHEAP_INCOMPLETE
         quota = quota_skip(now, self._usage_path)
         if quota is not None:
             return quota
@@ -423,7 +459,7 @@ class FrontierShadow:
             return R_CAP_CALLS
         if est is None:
             return R_SIZE_UNKNOWN
-        if tokens + est > MAX_INPUT_TOKENS_PER_DAY:
+        if tokens + math.ceil(est * ADMIT_SAFETY) > MAX_INPUT_TOKENS_PER_DAY:
             return R_CAP_TOKENS
         if self._rng() >= sample_rate(now):
             return R_NOT_SAMPLED
@@ -494,6 +530,42 @@ def prune_pairs(now: float) -> list[str]:
     return gone
 
 
+def prune_ledger(now: float) -> int:
+    """Drop ``ledger.jsonl`` rows older than ``RETENTION_DAYS`` (by their ``day``). Rewrites the
+    file only when something is old. Returns the number dropped."""
+    path = ledger_path()
+    if not path.is_file():
+        return 0
+    cutoff = (datetime.fromtimestamp(now, tz=timezone.utc) - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%d")
+    rows = _read_rows(path)
+    keep = [r for r in rows if not (isinstance(r.get("day"), str) and r["day"] < cutoff)]
+    if len(keep) == len(rows):
+        return 0
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.unlink(missing_ok=True)
+    for r in keep:
+        _append_private(tmp, r)
+    if not keep:
+        tmp.touch(mode=0o600)
+    os.replace(tmp, path)
+    return len(rows) - len(keep)
+
+
+def prune_all(now: float) -> None:
+    """Retention for everything the shadow keeps. Runs whether or not the shadow is enabled."""
+    prune_pairs(now)
+    prune_ledger(now)
+
+
+def prune_at_start(now: float | None = None) -> None:
+    """Proxy start: enforce retention on whatever is on disk, flag on or off. Never raises."""
+    try:
+        if shadow_dir().is_dir():
+            prune_all(time.time() if now is None else now)
+    except Exception as exc:  # noqa: BLE001 - housekeeping must never stop the proxy
+        failopen.record("LR-FO-SHADOW-FRONTIER-PRUNE", exc)
+
+
 # ── blind A/B judge ─────────────────────────────────────────────────────────
 
 
@@ -556,13 +628,13 @@ def judge_pending(*, run: Callable[[str, str], dict] = claude_judge, rng: Callab
                   clock: Callable[[], float] = time.time, usage_path: Path | None = None) -> dict:
     """Judge every stored pair not yet attempted, within the caps. Returns a count summary."""
     summary = {"status": "ok", "judged": 0, "verdicts": 0, "cannot_judge": 0, "failed": 0}
+    now = clock()
+    prune_all(now)  # retention holds even when the shadow is off or paused
     if not enabled():
         return dict(summary, status="off")
-    now = clock()
     quota = quota_skip(now, usage_path)
     if quota is not None:
         return dict(summary, status=quota)
-    prune_pairs(now)
     day = _day(now)
     attempts = _read_rows(judge_ledger_path())
     tried = {r.get("task_id") for r in attempts}
