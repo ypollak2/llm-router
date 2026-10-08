@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the key is absent, no project settings file or environment value overrides it, and both the shim
   and the main proxy answer; otherwise it refuses with the reason. `--decline` sets
   `routing_opt_out`, which also silences SessionStart's "routing is OFF" warning. No hook or plain
-  install runs it. SessionStart (hook v29) appends one `observe` row per session to
+  install runs it. SessionStart (hook v30) appends one `observe` row per session to
   `~/.llm-router/settings_writes.jsonl` (key presence, env sha256, mtime) and the repair appends a
   `write` row, so the next unexplained removal is bracketed.
 - proxy (PLAN v16 GE4, OD-4 = A): Frontier shadow (`shadow_frontier.py`), **off by default**
