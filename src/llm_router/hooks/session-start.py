@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 28
+# llm_router-hook-version: 29
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -2095,6 +2095,19 @@ def main() -> None:
         _hook_input = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):
         _hook_input = {}
+
+    # Verifier PR C (SHADOW): when delegated patches are waiting, start ONE detached
+    # `python -m llm_router.verify_worker` (fixed argv, DEVNULL, own session, env allowlist,
+    # flock + cooldown; see llm_router.verify_queue). Never waits for it. Fail-open, recorded.
+    try:
+        from llm_router import verify_queue as _verify_queue
+        _verify_queue.spawn_worker_if_needed()
+    except Exception as _vq_exc:  # noqa: BLE001
+        try:
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-VERIFY-WORKER-SPAWN", _vq_exc)
+        except Exception:  # noqa: BLE001
+            pass
 
     # Session Context Accumulator: record Claude Code's real session_id (distinct
     # from SESSION_ID_FILE's fresh-per-session UUID above, which four other

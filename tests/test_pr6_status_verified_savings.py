@@ -333,8 +333,8 @@ def test_primary_metric_computation_unaffected_by_an_empty_today(tmp_path):
     conn.close()
 
     # Premise: Today really is empty.
-    today_totals = dashboard_data.query_window("today", db_path=db)
-    assert today_totals.calls == 0, "premise: today has no activity anywhere"
+    today_spend = dashboard_data.query_window("today", db_path=db)
+    assert today_spend.calls == 0, "premise: today has no activity anywhere"
 
     # The primary metric queries "lifetime", not "today" — it must still
     # pick up yesterday's rows and render, independent of Today being empty.

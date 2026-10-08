@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 23
+# llm_router-hook-version: 24
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -2438,6 +2438,19 @@ def main() -> None:
         _hl_set_session(_hook_input.get("session_id") if isinstance(_hook_input, dict) else None)
     except Exception:  # noqa: BLE001 -- llm_router without set_session: no session on the row
         pass
+
+    # Verifier PR C (SHADOW): when delegated patches are waiting, start ONE detached
+    # `python -m llm_router.verify_worker` (fixed argv, DEVNULL, own session, env allowlist,
+    # flock + cooldown; see llm_router.verify_queue). Never waits for it. Fail-open, recorded.
+    try:
+        from llm_router import verify_queue as _verify_queue
+        _verify_queue.spawn_worker_if_needed()
+    except Exception as _vq_exc:  # noqa: BLE001
+        try:
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-VERIFY-WORKER-SPAWN", _vq_exc)
+        except Exception:  # noqa: BLE001
+            pass
 
     # This script is registered on Stop (fires after EVERY turn: per-turn
     # summary) and on SessionEnd (fires once). Only SessionEnd archives

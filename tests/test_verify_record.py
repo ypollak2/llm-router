@@ -15,6 +15,7 @@ from tests.test_northstar import (SID_MAIN, _bulk_user_prompts, _home_dir, _proj
                                   _write_jsonl)
 
 NOW = 1_800_100_000.0
+ZERO_SHADOW = {"fail": 0, "unavailable": 0, "verified": 0, "weak": 0}
 
 
 @pytest.fixture(autouse=True)
@@ -77,6 +78,17 @@ def test_unit_id_is_stable_distinct_and_independent_of_outcome(tmp_path):
     assert ns.unit_id(None, "x", 1.0) is None and ns.unit_id("s", "x", None) is None
 
 
+def test_unit_id_differs_by_kind_for_the_same_session_and_timestamp():
+    """Guard: ``kind`` is part of the id. Without it a verify record for a codex unit would also
+    attach to a user prompt or main call that shares the session and timestamp."""
+    ts = 1_800_000_050.0
+    ids = {k: ns.unit_id(SID_MAIN, k, ts)
+           for k in (ns.UNIT_AGENT_ROUTE_CODEX, "user_prompt", "claude_main_call")}
+    assert all(i and i.startswith("u_") for i in ids.values())
+    assert len(set(ids.values())) == 3, ids
+    assert ns.unit_id(SID_MAIN, "user_prompt", ts) == ids["user_prompt"]  # still deterministic
+
+
 # ── join ─────────────────────────────────────────────────────────────────────
 
 def test_verify_joins_to_the_right_unit_only(tmp_path):
@@ -123,6 +135,24 @@ def test_malformed_later_record_does_not_erase_an_earlier_good_one(tmp_path):
     assert _codex(_units(proj))[0]["verify"]["verify_status"] == "pass_f2p"
 
 
+def test_a_lever_row_that_carries_a_unit_id_is_not_a_verify_record(tmp_path):
+    """Guard: a unit row (it has a ``lever``) is never a verify record, even when it carries a
+    ``unit_id`` and a well-formed ``verify`` dict. Without the lever check it would join."""
+    p, proj = _setup(tmp_path)
+    a, b = _codex(_units(proj))
+    lever_row = {**_codex_row(1_800_000_050.0), **_vrow(a["unit_id"], "pass_f2p")}
+    assert lever_row["lever"] == "agent_route_codex" and lever_row["unit_id"] == a["unit_id"]
+    assert ns.load_verify_records([lever_row]) == {}
+    _append(p, lever_row)
+    assert ns.load_verify_records() == {}
+    units = _units(proj)
+    assert not any("verify" in u for u in units)
+    assert kpi._verify_shadow(units) == dict.fromkeys(kpi.VERIFY_SHADOW_KEYS, 0)
+    _append(p, _vrow(a["unit_id"], "pass_p2p", "verified_weak"))   # the same id as a real record does join
+    assert ns.load_verify_records().keys() == {a["unit_id"]}
+    assert any(u.get("verify", {}).get("verify_status") == "pass_p2p" for u in _units(proj))
+
+
 def test_orphan_verify_record_creates_no_unit_and_changes_nothing(tmp_path):
     p, proj = _setup(tmp_path)
     before = _units(proj)
@@ -145,7 +175,7 @@ def test_kpi_numbers_are_byte_identical_with_and_without_verify_records(tmp_path
     for k in ("NS", "D1", "D2"):  # a real percentage, not "too few to tell"
         assert "%" in base["kpis"][k]["value"], base["kpis"][k]
     base_text = kpi.render_scorecard(base)
-    assert base["kpis"]["D2"]["value"] and base["verify_shadow"] is None
+    assert base["kpis"]["D2"]["value"] and base["verify_shadow"] == ZERO_SHADOW
 
     a, b = _codex(_units(proj))[:2]
     _append(p, _vrow(a["unit_id"], "pass_f2p"), _vrow(b["unit_id"], "pass_p2p", "verified_weak"),
@@ -155,7 +185,7 @@ def test_kpi_numbers_are_byte_identical_with_and_without_verify_records(tmp_path
     dump = lambda d: json.dumps(d, sort_keys=True)  # noqa: E731
     assert dump(with_v["kpis"]) == dump(base["kpis"])          # every KPI, NS/D1/D2 included
     assert dump(with_v["joins"]) == dump(base["joins"])
-    assert with_v["verify_shadow"] == {"verified": 1, "weak": 1, "failed": 0, "unavailable": 0}
+    assert with_v["verify_shadow"] == {"verified": 1, "weak": 1, "fail": 0, "unavailable": 0}
     text = kpi.render_scorecard(with_v)
     line = "verify (shadow): 1 verified, 1 weak, 0 failed, 0 unavailable"
     assert line in text
@@ -224,6 +254,41 @@ def test_verify_shadow_counts_every_status_in_its_own_bucket(tmp_path):
     ids = [u["unit_id"] for u in _codex(_units(proj)) if u["ts"] and u["outcome"] == "unknown"][-6:]
     statuses = ["pass_f2p", "pass_f2p_model", "pass_p2p", "fail", "unavailable", "not_applicable"]
     _append(p, *[_vrow(uid, st, "x") for uid, st in zip(ids, statuses)])
-    assert kpi._verify_shadow(100000) == {"verified": 2, "weak": 1, "failed": 1, "unavailable": 2}
+    assert kpi._verify_shadow(_units(proj)) == {"verified": 2, "weak": 1, "fail": 1, "unavailable": 2}
     line = "verify (shadow): 2 verified, 1 weak, 1 failed, 2 unavailable"
     assert line in kpi.render_scorecard(kpi.compute_scorecard(days=100000, now=NOW))
+
+
+# ── verify_shadow shape (PLAN-v16 P0.12 task 6) ──────────────────────────────
+
+def test_verify_shadow_is_a_zero_filled_dict_with_exactly_the_four_keys(tmp_path):
+    """``jq '.verify_shadow|keys'`` must work on a ledger with no verify rows: never None, and the
+    keys are fail, unavailable, verified, weak (jq sorts them)."""
+    _setup(tmp_path)
+    card = _scorecard()
+    assert card["verify_shadow"] == ZERO_SHADOW
+    assert sorted(card["verify_shadow"]) == ["fail", "unavailable", "verified", "weak"]
+    assert sorted(json.loads(json.dumps(card))["verify_shadow"]) == ["fail", "unavailable", "verified", "weak"]
+    assert "verify (shadow)" not in kpi.render_scorecard(card)   # zero rows: the text is unchanged
+
+
+def test_verify_shadow_uses_the_units_it_is_given_and_does_not_walk_them_again(tmp_path, monkeypatch):
+    """It takes the list; a second ``northstar.units`` call (the transcript walk) is a bug."""
+    p, proj = _setup(tmp_path)
+    a, _ = _codex(_units(proj))
+    _append(p, _vrow(a["unit_id"], "fail", "v1_tests_fail"))
+    units = _units(proj)
+    monkeypatch.setattr(ns, "units", lambda *a, **k: (_ for _ in ()).throw(AssertionError("units() called again")))
+    assert kpi._verify_shadow(units) == {"verified": 0, "weak": 0, "fail": 1, "unavailable": 0}
+    assert kpi._verify_shadow([]) == ZERO_SHADOW                 # a record whose unit is not in the list
+
+
+def test_compute_scorecard_walks_the_units_once(tmp_path, monkeypatch):
+    p, proj = _setup(tmp_path)
+    a, _ = _codex(_units(proj))
+    _append(p, _vrow(a["unit_id"]))
+    calls = []
+    real = ns.units
+    monkeypatch.setattr(ns, "units", lambda *a, **k: calls.append(1) or real(*a, **k))
+    assert _scorecard()["verify_shadow"]["verified"] == 1
+    assert len(calls) == 1, calls

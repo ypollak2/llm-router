@@ -220,6 +220,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_HAIKU_GUARD_KINDS": ("llm_router", "proxy/haiku_guard.py", 1),
     "LLM_ROUTER_HAIKU_GUARD_AUDIT_DIR": ("llm_router", "proxy/haiku_guard.py", 1),
     "LLM_ROUTER_HAIKU_GUARD_SHADOW_VERDICTS": ("llm_router", "proxy/haiku_guard.py", 1),
+    # GE4 (PLAN v16, OD-4): the Frontier shadow switch, off unless on/1/true/yes (shadow_frontier.py).
+    "LLM_ROUTER_SHADOW_FRONTIER": ("llm_router", "shadow_frontier.py", 1),
     # Kill switch for the tier decision's quota-pressure step (off/0/false/no).
     "LLM_ROUTER_PROXY_QUOTA_PRESSURE": ("llm_router", "proxy/quota_pressure.py", 1),
     # Escalation signals (proxy/escalation.py): the correction-signal
@@ -311,6 +313,10 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_QUOTA_RETRY": ("llm_router", "quota_tracker.py", 1),
     "LLM_ROUTER_QUOTA_MAX_AGE": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_QUOTA_TTL": ("llm_router", "hooks/auto-route.py", 2),
+    # Verifier PR C (SHADOW): kill switch for patch capture + worker spawn, and the per-unit
+    # verify budget (default 120 s, capped at 300 s).
+    "LLM_ROUTER_VERIFY": ("llm_router", "verify_queue.py", 1),
+    "LLM_ROUTER_VERIFY_BUDGET_S": ("llm_router", "verify_worker.py", 1),
     "LLM_ROUTER_RENDER_MODE": ("llm_router", "hooks/response_formatter.py", 1),
     "LLM_ROUTER_RESPONSE_ROUTER": ("llm_router", "commands/doctor.py", 3),
     "LLM_ROUTER_ROUTE_BANNER": ("llm_router", "hooks/agent-route.py", 2),

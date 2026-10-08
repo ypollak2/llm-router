@@ -665,7 +665,8 @@ def main() -> int:
         "tests": UPSTREAM_ROOT / "tests",
         "scripts": UPSTREAM_ROOT / "scripts",
         # Product DATA the package reads at runtime — the model registry
-        # (models.yaml), agent definitions (agents.yaml), signal weights.
+        # (models.yaml), signal weights. (agents.yaml ships inside the package
+        # since AGT A.0, so the src tree carries it.)
         # Not repo furniture: without it, model-registry freshness and agent
         # loading fail downstream with "config/models.yaml not found".
         # `deploy/` and `Docs/` are deliberately NOT trees here — a helm chart
