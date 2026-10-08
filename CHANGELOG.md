@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- semantic cache (PLAN v16 P0.5-b, R-CTX-7; the semantic cache is the result cache, D-R8-5):
+  `semantic_cache_lookups` gains `project_scope` (additive migration; earlier rows are reported as
+  unscoped). `llm-router kpi` and `llm_router_status(view="cache")` print lookups, hits and n per
+  project; a project with fewer than 20 lookups prints "not informative" and no percentage.
 - proxy (PLAN v16 GE4, OD-4 = A): Frontier shadow (`shadow_frontier.py`), **off by default**
   (`LLM_ROUTER_SHADOW_FRONTIER=on` to enable). After a `tier_reason == haiku_rewrite` reply is relayed,
   a background task replays the client's original bytes to the requested model; caps in code: 20 calls
