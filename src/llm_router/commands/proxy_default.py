@@ -118,7 +118,8 @@ def _stale_plist_note(dest: Path, before: str | None, label: str) -> str | None:
     return (
         f"NOTE {label}: the plist changed but launchd keeps the old one loaded, so this "
         f"restart does not apply it. Owner step (docs/proxy.md, 'Moving an existing install "
-        f"behind the shim'): `launchctl unload {shlex.quote(str(dest))}` then `launchctl load {shlex.quote(str(dest))}`."
+        f"behind the shim'): `launchctl unload {shlex.quote(str(dest))}` "
+        f"then `launchctl load {shlex.quote(str(dest))}`."
     )
 
 
@@ -192,31 +193,40 @@ def install_proxy_default(
         main_port = port
         reused = True
     else:
-        try:
-            _d, _ = pd.service_target(system, home)
-            before = _read_or_none(_d)
-            dest, activate_cmd = pd.install_service(
-                system=system, home=home, port=main_port, steps=steps, tiers=tiers,
+        # Own shim layout, main proxy answering, shim down: the main service is fine and
+        # `kickstart -k` on its loaded job would restart it and drop in-flight requests.
+        # Leave it alone and go straight to the shim.
+        main_healthy = own_shim_layout and pd.proxy_health("127.0.0.1", main_port, timeout=1.0)
+        if main_healthy:
+            actions.append(
+                f"Main proxy on :{main_port} is healthy — not restarting it; starting only the shim."
             )
-        except RuntimeError as exc:
-            return {"ok": False, "actions": actions, "error": str(exc), "reused": False}
-        # Deliberately NOT recorded in install_manifest as a generic "file":
-        # the manifest replay (commands/uninstall.py) removes "file" records
-        # by unlinking, with no unload/stop step — for a hook script copy
-        # that's correct, but this file backs a LIVE supervised process, and
-        # deleting it without unloading first leaves the process orphaned and
-        # still running. `uninstall_proxy_default()` (driven by the sentinel
-        # this function writes below) is the sole owner of this file's full
-        # teardown: stop, THEN delete, in that order. The shim file below
-        # follows the same rule.
-        actions.append(f"Wrote {dest}")
-        note = _stale_plist_note(dest, before, pd.LABEL)
-        if note:
-            actions.append(note)
-        err = _start_and_wait(dest, activate_cmd, main_port, "proxy", log="proxy.err.log", **wait)
-        if err is not None:
-            return {"ok": False, "actions": actions, "reused": False, "error": err}
-        actions.append(f"Started via `{activate_cmd}`")
+        else:
+            try:
+                _d, _ = pd.service_target(system, home)
+                before = _read_or_none(_d)
+                dest, activate_cmd = pd.install_service(
+                    system=system, home=home, port=main_port, steps=steps, tiers=tiers,
+                )
+            except RuntimeError as exc:
+                return {"ok": False, "actions": actions, "error": str(exc), "reused": False}
+            # Deliberately NOT recorded in install_manifest as a generic "file":
+            # the manifest replay (commands/uninstall.py) removes "file" records
+            # by unlinking, with no unload/stop step — for a hook script copy
+            # that's correct, but this file backs a LIVE supervised process, and
+            # deleting it without unloading first leaves the process orphaned and
+            # still running. `uninstall_proxy_default()` (driven by the sentinel
+            # this function writes below) is the sole owner of this file's full
+            # teardown: stop, THEN delete, in that order. The shim file below
+            # follows the same rule.
+            actions.append(f"Wrote {dest}")
+            note = _stale_plist_note(dest, before, pd.LABEL)
+            if note:
+                actions.append(note)
+            err = _start_and_wait(dest, activate_cmd, main_port, "proxy", log="proxy.err.log", **wait)
+            if err is not None:
+                return {"ok": False, "actions": actions, "reused": False, "error": err}
+            actions.append(f"Started via `{activate_cmd}`")
         if shim:
             sbefore = _read_or_none(pd.service_target(system, home, label=pd.SHIM_LABEL)[0])
             sdest, sactivate = pd.install_shim_service(
