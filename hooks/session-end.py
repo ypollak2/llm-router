@@ -2284,8 +2284,14 @@ def _pop_stop_notes() -> list[str]:
     finally:
         try:
             os.remove(claim)
-        except OSError:
-            pass
+        except OSError as _exc:
+            # Fail-open (a leftover claim file is litter, the notes were read),
+            # but not silent (T-14 ratchet).
+            try:
+                from llm_router import failopen as _fo
+                _fo.record("CHZ-FO-STOP-NOTES-CLAIM-REMOVE", _exc)
+            except Exception:  # noqa: BLE001
+                pass
     now = time.time()
     out = []
     for n in notes if isinstance(notes, list) else []:
