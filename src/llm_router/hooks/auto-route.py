@@ -4766,8 +4766,16 @@ def main() -> None:
             if complexity == "complex":
                 # Complex tasks truly need Opus
                 _critical_bucket, _critical_value = _critical
+                # The proxy's opus tier, never a literal: a hardcoded
+                # claude-opus-4-6 outlived the tier it named (plan v16 P0.2).
+                # "opus" is Claude Code's own alias if the policy is unreadable.
+                try:
+                    from llm_router.proxy.tiers import tier_model
+                    _opus_id = tier_model("opus") or "opus"
+                except ImportError:
+                    _opus_id = "opus"
                 directive = (
-                    f"⚡ SUBSCRIPTION OVERRIDE: {task_type}/{complexity} → /model claude-opus-4-6"
+                    f"⚡ SUBSCRIPTION OVERRIDE: {task_type}/{complexity} → /model {_opus_id}"
                     f" [CRITICAL PRESSURE: {_critical_bucket}={_critical_value:.0%}]{_stale_pressure_note()} "
                     f"| Handle directly (subscription included). Do NOT call llm_* tools."
                 )
