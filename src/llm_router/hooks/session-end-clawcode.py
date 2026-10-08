@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 2
+# llm_router-hook-version: 3
 """Stop hook (claw-code variant) — session summary: external routing costs + free-model savings.
 
 Identical to session-end.py but omits Claude Code subscription pressure sections
@@ -112,7 +112,7 @@ def _query_session_data(session_start: float) -> tuple[list[dict], list[dict]]:
 def _aggregate(rows: list[dict]) -> dict[str, dict]:
     tools: dict[str, dict] = {}
     for r in rows:
-        tool    = r.get("task_type", "unknown")
+        tool    = r.get("task_type") or "unknown"  # P0.8: NULL = unknown (BUGS.md 29)
         model   = r.get("model", "?")
         in_tok  = r.get("input_tokens")  or 0
         out_tok = r.get("output_tokens") or 0

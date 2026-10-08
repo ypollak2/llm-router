@@ -375,7 +375,8 @@ async def llm_quality_report(days: int = 7) -> str:
         lines.append(section("BY TASK TYPE"))
         for task, count in report["by_task_type"].items():
             pct = count / report["total_decisions"]
-            lines.append(row(f"  {task:<16} {count:>5}  ({pct:>5.0%})"))
+            # P0.8 stores an unknown task type as NULL (BUGS.md 27).
+            lines.append(row(f"  {task or 'unknown':<16} {count:>5}  ({pct:>5.0%})"))
         lines.append(HR)
 
     # By model — attributed decisions only. Percentages are of ATTRIBUTED, not of
@@ -879,7 +880,7 @@ async def llm_policy() -> str:
         if rows:
             lines += ["", "  Recent policy events (last 10):"]
             for ts, task, model, pol in rows:
-                lines.append(f"    {ts[:16]}  {task:<10}  {model or '?':<25}  {pol}")
+                lines.append(f"    {ts[:16]}  {task or 'unknown':<10}  {model or '?':<25}  {pol}")
         else:
             lines += ["", "  No policy enforcement events recorded yet."]
     except Exception:

@@ -365,6 +365,30 @@ async def policy_chain(text: str) -> tuple[str, str, list[str]]:
     return key[0], key[1], _chain_cache[key]
 
 
+async def tier_classify(text: str, pinned: str | None = None, *, anthropic: bool = True) -> dict:
+    """The Claude tier decision's classifier (``proxy.tiers``): the same
+    ``(task_type, complexity)`` as ``choose_model`` -- both are
+    ``classify_signals(text, GATEWAY_POLICY)`` -- without building a provider chain.
+
+    PLAN v16 P0.9-e. The tier decision reads only the class; the chain is
+    informational there (``chain_head``) and its build (``_build_and_filter_chain``:
+    three usage.db queries, dynamic routing, the Ollama model list) ran inside the
+    timed decision on every (task_type, complexity) cache miss: 1.2-2.2 s on 3 of
+    6 live turn-first rows [PL], 67-107 ms per new key and 21.6 s for the first
+    one on a copy of the live usage.db (2026-10-07). The chain head and model
+    now come from the cache only, ``[]`` / None until another caller has built
+    it. Same signature and return shape as ``choose_model`` so it is a drop-in
+    seam; ``pinned`` is accepted and ignored (no model is chosen here)."""
+    del pinned
+    from llm_router.classify import GATEWAY_POLICY, classify_signals
+
+    sig = classify_signals(text, GATEWAY_POLICY)
+    task, cx = sig.task_type.value, sig.complexity.value
+    chain = _chain_cache.get((task, cx)) or []
+    model = next((m for m in chain if tool_capable(m, anthropic=anthropic)), None)
+    return {"task_type": task, "complexity": cx, "chain_head": chain[:4], "model": model}
+
+
 async def choose_model(text: str, pinned: str | None, *, anthropic: bool = False) -> dict:
     """``{"task_type", "complexity", "chain_head", "model"}``; ``model`` is None
     when the policy keeps the call on Claude. With ``anthropic=True`` an

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 5
+# llm_router-hook-version: 6
 """UserPromptSubmit hook — enhanced savings + routing status bar.
 
 Displays a two-mode status line:
   compact (~80 chars):  📊 CC 45%s·28%w | 🦙✔ ⚙️✔ ☁️✔ | 💰 D:$1.42 W:$9.88 | 🛡️ enforce | 14.2x
-  full    (~140 chars): 📊 CC 45%s·28%w·61%♪ | Ollama✔ Codex✔ APIs✔ | 💰 D:$1.42 W:$9.88 M:$41.15 (vs Sonnet:$58) | enforce🛡️ | eff 14.2x
+  full    (~140 chars): 📊 CC 45%s·28%w·61%♪ | Ollama✔ Codex✔ APIs✔ | 💰 D:$1.42 W:$9.88 M:$41.15 (vs Opus:$58) | enforce🛡️ | eff 14.2x
 
 Time buckets: today, this week (Mon), this calendar month, all-time.
 Provider health: read from ~/.llm-router/health.json (written by background checks).
@@ -154,10 +154,15 @@ ENFORCE_MODE = os.environ.get("LLM_ROUTER_ENFORCE", "hard").lower()
 # while its structural check only fires on dict/list/tuple containers. A bare
 # float named ..._PER_M slips through both. Recorded as a lint gap — the lint is
 # an immutable asset for this work package and cannot be edited here.
+# P0.8: one name for the baseline, used both to price it and to label it. The label
+# said "vs Sonnet" while the price below was Opus's.
+HOST_BASELINE_TIER = "opus"
+HOST_BASELINE_LABEL = HOST_BASELINE_TIER.capitalize()
+
 try:
     from llm_router import pricing as _pricing
 
-    _host_price = _pricing.price_for("opus")
+    _host_price = _pricing.price_for(HOST_BASELINE_TIER)
 except ImportError:  # pragma: no cover — copied to ~/.claude/hooks/, runs standalone
     _host_price = None
 
@@ -380,7 +385,7 @@ def _savings_str_compact(savings: dict[str, tuple[float, float]]) -> str:
 
 
 def _savings_str_full(savings: dict[str, tuple[float, float]]) -> str:
-    """D:$1.42 W:$9.88 M:$41.15 (vs Sonnet:$58) — with baseline comparison."""
+    """D:$1.42 W:$9.88 M:$41.15 (vs Opus:$58) — with baseline comparison."""
     parts = []
     for label, key in [("D", "today"), ("W", "week"), ("M", "month")]:
         saved, _ = savings[key]
@@ -389,7 +394,7 @@ def _savings_str_full(savings: dict[str, tuple[float, float]]) -> str:
 
     month_saved, month_baseline = savings["month"]
     if month_baseline >= 0.01:
-        parts.append(f"{DIM}(vs Sonnet:${month_baseline:.0f}){RST}")
+        parts.append(f"{DIM}(vs {HOST_BASELINE_LABEL}:${month_baseline:.0f}){RST}")
 
     return " ".join(parts)
 
