@@ -17,8 +17,11 @@ Row fields:
                   edit | exec | agent | web | other), null when not a
                   continuation. A Bash command is classified in memory and
                   never stored.
-  step_ineligible why a continuation could not be served faithfully: media |
-                  server_tool | forced_tool_choice; null otherwise
+  step_ineligible a label, not a gate: what in a continuation the serving model
+                  could not honour faithfully: media | server_tool |
+                  forced_tool_choice; null otherwise. media and
+                  forced_tool_choice also stop serving; server_tool does not
+                  (``steps.step_ineligible``)
   decision        served | forwarded | fallback
   reason          why not served: routing_off | not_eligible | policy_kept |
                   budget_exceeded | backend_error | validation |

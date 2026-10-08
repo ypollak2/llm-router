@@ -62,6 +62,14 @@ def _media(body: dict) -> dict:
     return body
 
 
+def _top_level_media(body: dict) -> dict:
+    """An image block BESIDE the tool_result (not inside it) in the newest user turn."""
+    body = copy.deepcopy(body)
+    [m for m in body["messages"] if m["role"] == "user"][-1]["content"].append(
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA"}})
+    return body
+
+
 # ── step_kind ────────────────────────────────────────────────────────────────
 
 
@@ -95,6 +103,16 @@ def test_continuation_shape_is_kept_when_it_cannot_be_served_and_the_reason_is_r
     # serving eligibility itself is unchanged
     assert steps.step_class(media, {steps.STEP_CONTINUATION}) is None
     assert steps.step_class(forced, {steps.STEP_CONTINUATION}) is None
+
+
+def test_an_image_beside_the_tool_results_is_a_media_continuation_not_a_turn_first():
+    # Review of #314 (2026-10-08): the kind set {tool_result, image} was labelled
+    # turn_first with no ineligible reason.
+    body = _top_level_media(_req())
+    assert steps.step_kind(body) == steps.STEP_CONTINUATION
+    assert steps.step_ineligible(body) == "media"
+    assert steps.prev_tool_class(body) is not None
+    assert steps.step_class(body, {steps.STEP_CONTINUATION}) is None  # serving unchanged
 
 
 def test_step_classes_that_may_be_served_are_still_only_continuation():

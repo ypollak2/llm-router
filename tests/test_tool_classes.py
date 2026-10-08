@@ -38,6 +38,8 @@ READ_ONLY = [
     "git diff 2>&1 | head",
     "ls missing 2>/dev/null || ls",
     "LC_ALL=C grep -c x file",
+    "git diff --no-ext-diff",
+    "ls >/dev/null; pwd",
     "black --check src",
     "ruff format --check src",
     "isort --check-only src",
@@ -82,6 +84,19 @@ EXEC = [
     "git",
     "head 'unterminated",
     "diff <(ls a) <(ls b)",
+    # Programs that only read, made to run another program or to write (review of #314, 2026-10-08).
+    "GIT_EXTERNAL_DIFF=/tmp/x git diff",    # the env prefix makes git run /tmp/x
+    "GIT_PAGER=sh git log",
+    "RIPGREP_CONFIG_PATH=/tmp/rc rg x",     # a config file can add --pre
+    "git diff --ext-diff",
+    "git log -p --ext-diff",
+    "git show --textconv HEAD",
+    "prettier --check --write .",
+    "prettier --check -w .",
+    "prettier --check --write=src .",
+    "ruff format --check --fix src",
+    "ls > /dev/nullx",                      # a file named /dev/nullx, not /dev/null
+    "ls 2>/dev/null.log",
 ]
 
 

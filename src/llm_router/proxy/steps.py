@@ -50,15 +50,29 @@ def non_system(messages: list) -> list:
     return [m for m in messages if isinstance(m, dict) and m.get("role") != "system"]
 
 
-def _is_continuation(body: dict) -> bool:
+def _newest_turn_kinds(body: dict) -> set | None:
+    """Block types of the newest user turn, or ``None`` when it cannot answer tools."""
     msgs = non_system(body.get("messages") or [])
     if len(msgs) < 3 or msgs[-1].get("role") != "user":
-        return False
+        return None
     content = msgs[-1].get("content")
     if not isinstance(content, list) or not content:
-        return False
-    kinds = {b.get("type") for b in content if isinstance(b, dict)}
-    return "tool_result" in kinds and kinds <= {"tool_result", "text"}
+        return None
+    return {b.get("type") for b in content if isinstance(b, dict)}
+
+
+def _is_continuation(body: dict) -> bool:
+    kinds = _newest_turn_kinds(body)
+    return kinds is not None and "tool_result" in kinds and kinds <= {"tool_result", "text"}
+
+
+def _is_continuation_kind(body: dict) -> bool:
+    """The continuation KIND for the ledger: as :func:`_is_continuation`, but images or
+    documents beside the tool results still make a continuation (one that
+    :func:`step_ineligible` marks ``media``). Serving keeps the strict predicate."""
+    kinds = _newest_turn_kinds(body)
+    return (kinds is not None and "tool_result" in kinds
+            and kinds <= {"tool_result", "text", "image", "document"})
 
 
 STEP_CLASSES: dict[str, Callable[[dict], bool]] = {
@@ -111,7 +125,7 @@ def step_kind(body: dict) -> str:
     does not move."""
     if not _has_client_tools(body):
         return STEP_SIDE_CALL
-    if _is_continuation(body):
+    if _is_continuation_kind(body):
         return STEP_CONTINUATION
     if is_first_call(body):
         names = {t.get("name") for t in body.get("tools") or [] if isinstance(t, dict)}
@@ -120,10 +134,14 @@ def step_kind(body: dict) -> str:
 
 
 def step_ineligible(body: dict) -> str | None:
-    """Why a continuation could not be served faithfully: ``media`` (images or
-    documents in the newest turn), ``server_tool`` (a tool with no
-    ``input_schema``, run by Anthropic, not the client) or ``forced_tool_choice``.
-    ``None`` for an eligible continuation and for every other kind of call."""
+    """A LABEL, not a gate: what in a continuation the serving model could not
+    honour faithfully. ``media`` (images or documents in the newest turn) and
+    ``forced_tool_choice`` also stop serving (:func:`step_class`). ``server_tool``
+    (a tool with no ``input_schema``, run by Anthropic, not the client) does not:
+    :func:`step_class` still serves the call when a client tool exists and the
+    translator drops the server tools, so a row can hold ``decision=served``
+    beside ``step_ineligible=server_tool``. ``None`` for a continuation with none
+    of these and for every other kind of call."""
     if step_kind(body) != STEP_CONTINUATION:
         return None
     if _newest_turn_has_media(body):

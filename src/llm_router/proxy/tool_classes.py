@@ -17,6 +17,10 @@ flags), ``ls``, ``cat``, ``head``, ``tail``, ``wc``, ``find`` (no ``-exec``/``-d
 ``cd`` and ``pwd``, which only navigate. Parts joined by ``&&``, ``||``, ``;``, ``|`` or a
 newline must ALL be read-only. Any output redirection other than to ``/dev/null`` or ``2>&1``,
 command substitution, process substitution or a background ``&`` makes the command ``exec``.
+Refused although the program reads: ``git diff|log|show|blame`` with ``--ext-diff`` or
+``--textconv`` (they run a configured program), a formatter given ``--write``/``-w``/``--fix``
+beside ``--check``, and an environment prefix (``VAR=x cmd``) on anything but a plain reader
+(``GIT_EXTERNAL_DIFF=prog git diff`` runs ``prog``; ``RIPGREP_CONFIG_PATH`` can add ``--pre``).
 The list is conservative on purpose: a false ``technical_op`` would let a local model take a
 step that changes the user's files; a false ``exec`` only leaves a step with Claude.
 
@@ -56,9 +60,13 @@ _GIT_BRANCH_READ_FLAGS = frozenset({"-a", "-r", "-v", "-vv", "-l", "--list", "--
 _FIND_WRITES = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0",
                           "-fprintf", "-fls"})
 _FORMATTERS = frozenset({"black", "ruff", "isort", "prettier", "rustfmt", "cargo", "gofmt"})
+_FORMATTER_WRITES = frozenset({"--write", "-w", "--fix", "--fix-only"})
+_GIT_RUNS_PROGRAM = ("--ext-diff", "--textconv")   # run diff.external / a textconv driver
+#: Readers whose behaviour no environment variable can turn into running a program.
+_ENV_SAFE = _PLAIN_READERS - {"rg"}
 
 # Harmless redirections, removed before the "any other redirection" test.
-_SAFE_REDIRECT = re.compile(r"(?:\d?>>?|&>>?)\s*/dev/null|\d?>&\d")
+_SAFE_REDIRECT = re.compile(r"(?:\d?>>?|&>>?)\s*/dev/null(?![^\s;&|)])|\d?>&\d")
 _SPLIT = re.compile(r"&&|\|\||[;|\n]")
 _ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
@@ -72,11 +80,14 @@ def _segment_is_read_only(segment: str) -> bool:
         words = shlex.split(segment, posix=True)
     except ValueError:
         return False
+    env_prefix = False
     while words and _ENV_ASSIGN.match(words[0]):
-        words = words[1:]
+        words, env_prefix = words[1:], True
     if not words:
         return False
     cmd, args = words[0].rsplit("/", 1)[-1], words[1:]
+    if env_prefix and cmd not in _ENV_SAFE:
+        return False
     if cmd == "rg":
         return not any(a == "--pre" or a.startswith("--pre=") for a in args)   # --pre runs a command
     if cmd in _PLAIN_READERS:
@@ -105,6 +116,8 @@ def _git_is_read_only(args: list[str]) -> bool:
     sub, rest = args[i], args[i + 1:]
     if any(a == "--output" or a.startswith("--output=") for a in rest):
         return False
+    if any(a.startswith(_GIT_RUNS_PROGRAM) for a in rest):
+        return False
     if sub == "branch":
         return all(a in _GIT_BRANCH_READ_FLAGS for a in rest)
     return True
@@ -112,6 +125,8 @@ def _git_is_read_only(args: list[str]) -> bool:
 
 def _formatter_check_only(cmd: str, args: list[str]) -> bool:
     if not any(a in ("--check", "--check-only") for a in args):
+        return False
+    if any(a in _FORMATTER_WRITES or a.startswith("--write=") for a in args):
         return False
     if cmd == "ruff":
         return bool(args) and args[0] == "format"
