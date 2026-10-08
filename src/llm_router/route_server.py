@@ -32,6 +32,23 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from llm_router.savings import net_saved
 
 
+#: Model names that mean "let LLM Router pick", compared case-insensitively.
+AUTO_MODEL_NAMES = frozenset({"auto", "llm_router-auto", "llm-router-auto"})
+
+
+def is_auto_model(name: object) -> bool:
+    """True when ``name`` is an "auto" sentinel, in any case, padded or not.
+
+    P0.6 (R-AGT-1): the gateway's ``_AUTO_SENTINELS`` matched case-insensitively,
+    but this module compared ``model`` to ``("auto", "llm_router-auto")`` exactly.
+    "Auto", "AUTO" and "llm-router-auto" (the hyphenated product name) passed the
+    gateway untouched and then reached ``route_and_call`` as a literal
+    ``model_override``, which rejects a name with no ``/`` -> HTTP 400. One helper,
+    used by both, so the two lists cannot drift again.
+    """
+    return isinstance(name, str) and name.strip().lower() in AUTO_MODEL_NAMES
+
+
 async def route_payload_async(payload: dict) -> dict:
     """Run one routing call through LLM Router's FULL router and return a JSON-able
     result. This is the single routing core shared by both HTTP surfaces — this
@@ -54,22 +71,34 @@ async def route_payload_async(payload: dict) -> dict:
     # Gateway hosts should be able to request plain "auto"; all auto aliases mean
     # "let LLM Router pick".
     _override = payload.get("model_override") or payload.get("model")
-    if _override in ("auto", "llm_router-auto", "", None):
+    if not _override or is_auto_model(_override):
         _override = None
 
-    resp = await route_and_call(
-        task_type, prompt,
-        complexity_hint=payload.get("complexity") or None,
-        system_prompt=payload.get("system") or None,
-        model_override=_override,
-        max_tokens=payload.get("max_tokens"),
-        temperature=payload.get("temperature"),
-        # Stage A: the caller's project, for OKF retrieval scope. Both HTTP
-        # surfaces hand the router a plain dict, so this is the only place the key
-        # can survive the trip. Absent → scope falls back to env, then cwd, which
-        # is this process's launch directory and not the asker's.
-        project_root=payload.get("project_root") or None,
-    )
+    system = payload.get("system") or None
+    # P0.6: the semantic cache keys on ``prompt`` and task type only. Once the
+    # gateway forwards a caller's system prompt separately (instead of folding it
+    # into ``prompt``), two callers with different system prompts and the same
+    # question would share one cached answer. Bypass the cache for this call
+    # until the key carries the system prompt (P0.5 owns the key).
+    from llm_router import semantic_cache
+    _sc_token = semantic_cache.CALLER_SYSTEM_PROMPT.set(True) if system else None
+    try:
+        resp = await route_and_call(
+            task_type, prompt,
+            complexity_hint=payload.get("complexity") or None,
+            system_prompt=system,
+            model_override=_override,
+            max_tokens=payload.get("max_tokens"),
+            temperature=payload.get("temperature"),
+            # Stage A: the caller's project, for OKF retrieval scope. Both HTTP
+            # surfaces hand the router a plain dict, so this is the only place the
+            # key can survive the trip. Absent → scope falls back to env, then cwd,
+            # which is this process's launch directory and not the asker's.
+            project_root=payload.get("project_root") or None,
+        )
+    finally:
+        if _sc_token is not None:
+            semantic_cache.CALLER_SYSTEM_PROMPT.reset(_sc_token)
 
     # Surface this external route in the host-tagged savings pipeline so gateway /
     # LoopHole traffic shows up in the cross-surface indicators + savings_stats.

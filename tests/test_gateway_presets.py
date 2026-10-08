@@ -108,7 +108,10 @@ def test_responses_input_shapes_route_through_route_payload(monkeypatch):
     assert r.status_code == 200
     assert r.json()["output"][0]["content"][0]["text"] == "ok"
     assert calls[0]["model"] == "auto"
-    assert "system: be terse" in calls[0]["prompt"]
+    # P0.6: `instructions` is forwarded as the system prompt, not folded into
+    # the user text.
+    assert calls[0]["system"] == "be terse"
+    assert "be terse" not in calls[0]["prompt"]
     assert "user: hello" in calls[0]["prompt"]
 
 
