@@ -251,7 +251,10 @@ def _wilson(k: int, n: int) -> tuple[float | None, float | None]:
     den = 1 + z * z / n
     centre = (p + z * z / (2 * n)) / den
     half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / den
-    return max(0.0, centre - half), min(1.0, centre + half)
+    # At k=0 / k=n the exact bound is 0 / 1; the float sum leaves ~1e-17 behind.
+    lo = 0.0 if k == 0 else max(0.0, centre - half)
+    hi = 1.0 if k == n else min(1.0, centre + half)
+    return lo, hi
 
 
 def _boot_ratio(pairs: list[tuple[float, int]], seed: int = 0) -> tuple[float, float] | None:
@@ -311,7 +314,9 @@ def quota_burn(since: float, until: float, *, include_research: bool = False) ->
     n_measured_rows = n_stale_rows = 0
     excluded_kind = untagged = 0
     with_start = with_stop = covered = 0
-    sessions = {sid for sid, k in tagged.items() if k in allowed}
+    # The denominator resolves kind exactly as the loop below does (owner override,
+    # then tag): a tagged-organic session the owner moved to research is not organic.
+    sessions = {sid for sid in tagged if _kind_for(sid, [], tagged) in allowed}
     for sid, rows in by_session.items():
         kind = _kind_for(sid, rows, tagged)
         if kind is None:

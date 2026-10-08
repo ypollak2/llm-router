@@ -67,7 +67,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `session_resets_at` (> 120 s apart), or, with no reset time, a drop of >= 5 pts; after a reset the new
   reading is all burn, even when it is higher than the old one; a smaller drop is jitter and burns nothing.
   Results come with session-clustered bootstrap CIs; stale samples form a separate line labelled estimated; coverage =
-  sessions with start and stop samples over every tagged session in the window (Wilson CI). Hook versions:
+  sessions with start and stop samples over every tagged session in the window whose kind, after the
+  owner's `session_kind_overrides.json`, is in the population (Wilson CI). Several status-line windows
+  ticking together write one history row per slot (a non-blocking `flock` on the stamp). Hook versions:
   session-start 25, session-end 20. Tests: `tests/test_quota_samples.py`.
 - toolkit: a router-owned tool layer, phase 1 (`src/llm_router/toolkit/`). Seven tools (read,
   search, list, edit, write, bash, finish) behind one permission function that runs in code

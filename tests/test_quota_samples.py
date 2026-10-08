@@ -69,6 +69,13 @@ def test_exactly_30_min_is_still_measured():
     assert qs.sample_from_usage(dict(FRESH, updated_at=NOW - 1800), now=NOW)["source"] == "measured"
 
 
+def test_future_dated_snapshot_is_stale_in_both_copies():
+    """A clock-skewed updated_at in the future is not a measurement (tick copy too)."""
+    future = dict(FRESH, updated_at=NOW + 5)
+    assert qs.sample_from_usage(future, now=NOW)["source"] == "stale"
+    assert tick.quota_sample(future, NOW)["source"] == "stale"
+
+
 @pytest.mark.parametrize("usage", [
     None,
     {"pending": True},
@@ -170,11 +177,35 @@ def test_tick_history_is_append_only(home):
     assert len(path.read_text().splitlines()) == 2
 
 
+def test_tick_history_skips_a_slot_another_window_holds(home):
+    """Two windows tick together: the one holding the stamp's lock writes the slot."""
+    fcntl = pytest.importorskip("fcntl")
+    stamp = home / tick.HISTORY_STAMP_NAME
+    stamp.write_text("")
+    os.utime(stamp, (NOW - 1000, NOW - 1000))
+    with open(stamp, "r+") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert tick.maybe_append_history(str(home), FRESH, NOW) is False
+    assert not (home / tick.HISTORY_NAME).exists()
+    assert tick.maybe_append_history(str(home), FRESH, NOW) is True
+
+
+def test_tick_history_rechecks_the_slot_under_the_lock(home):
+    """The stat said "due", but another window wrote this slot in between."""
+    stamp = home / tick.HISTORY_STAMP_NAME
+    stamp.write_text(repr(NOW))
+    os.utime(stamp, (NOW - 1000, NOW - 1000))
+    assert tick.maybe_append_history(str(home), FRESH, NOW + 10) is False
+    assert not (home / tick.HISTORY_NAME).exists()
+    assert tick.maybe_append_history(str(home), FRESH, NOW + 300) is True
+    assert stamp.read_text() == repr(NOW + 300)
+
+
 def test_tick_history_and_session_sample_agree_on_the_rules():
     """The tick cannot import llm_router; its copy of the rules must not drift."""
     cases = [FRESH, dict(FRESH, updated_at=NOW - 1801), dict(FRESH, updated_at=NOW - 1800),
              {"pending": True}, dict(FRESH, is_fallback=True), None, {"session_pct": 1, "weekly_pct": 2},
-             dict(FRESH, session_pct=True)]
+             dict(FRESH, session_pct=True), dict(FRESH, updated_at=NOW + 5)]
     for usage in cases:
         assert tick.quota_sample(usage, NOW) == qs.sample_from_usage(usage, now=NOW), usage
     assert tick.HISTORY_INTERVAL_S == qs.HISTORY_INTERVAL_S
@@ -340,6 +371,48 @@ def test_coverage_counts_tagged_sessions_with_no_samples(home):
     assert cov["wilson_lo"] < 1 / 3 < cov["wilson_hi"]
 
 
+def _override(home: Path, sid: str, kind: str) -> None:
+    path = home / "session_kind_overrides.json"
+    data = json.loads(path.read_text()) if path.exists() else {}
+    data[sid] = {"kind": kind, "reason": "test"}
+    path.write_text(json.dumps(data))
+
+
+def test_coverage_denominator_applies_the_owner_override(home):
+    """GE6 repair 1: a tagged-organic session the owner moved to research leaves
+    the organic denominator (it was counted there but never covered: 1/2)."""
+    _write_samples(home, [_s("A", "start", NOW, 10, 40), _s("A", "stop", NOW + 60, 11, 40),
+                          _s("B", "start", NOW, 10, 40), _s("B", "stop", NOW + 60, 12, 41)])
+    _tag(home, "A", NOW)
+    _tag(home, "B", NOW)
+    _override(home, "A", "research")
+    r = qs.quota_burn(NOW - 1, NOW + 1000)
+    cov = r["coverage"]
+    assert (cov["sessions"], cov["covered"], cov["rate"]) == (1, 1, 1.0)
+    assert r["samples"]["sessions_other_kind"] == 1
+    both = qs.quota_burn(NOW - 1, NOW + 1000, include_research=True)["coverage"]
+    assert (both["sessions"], both["covered"]) == (2, 2)
+
+
+def test_coverage_denominator_override_with_no_samples(home):
+    """Unsampled tagged sessions follow the override too, both ways."""
+    _tag(home, "A", NOW)                       # organic tag, owner says research
+    _override(home, "A", "research")
+    cov = qs.quota_burn(NOW - 1, NOW + 1000)["coverage"]
+    assert cov["sessions"] == 0 and cov["rate"] is None
+    _tag(home, "R", NOW, kind="research")      # research tag, owner says organic
+    _override(home, "R", "organic")
+    cov = qs.quota_burn(NOW - 1, NOW + 1000)["coverage"]
+    assert (cov["sessions"], cov["covered"]) == (1, 0)
+
+
+def test_wilson_bounds_are_exact_at_the_edges():
+    assert qs._wilson(0, 7)[0] == 0.0
+    assert qs._wilson(7, 7)[1] == 1.0
+    lo, hi = qs._wilson(0, 7)
+    assert hi == pytest.approx(0.3543, abs=1e-4)
+
+
 def test_research_sessions_only_with_include_research(home):
     _write_samples(home, [_s("R", "start", NOW, 10, 40, sk="research"),
                           _s("R", "stop", NOW + 60, 14, 41, sk="research")])
@@ -420,6 +493,21 @@ def test_kpi_quota_burn_prints_measured_and_estimated(home, capsys):
     assert cmd_kpi(["--quota-burn", "--since", since, "--until", until, "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert data["measured"]["n_sessions"] == 1 and data["estimated"]["n_sessions"] == 1
+
+
+def test_kpi_quota_burn_include_research_reaches_the_population(home, capsys):
+    from llm_router.commands.kpi import cmd_kpi
+
+    _write_samples(home, [_s("R", "start", NOW, 10, 40, sk="research"),
+                          _s("R", "stop", NOW + 60, 14, 41, sk="research")])
+    _tag(home, "R", NOW, kind="research")
+    window = ["--quota-burn", "--since", "2026-10-05T00:00:00Z", "--until", "2026-10-12T00:00:00Z", "--json"]
+    assert cmd_kpi(window) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["population"] == "organic" and data["measured"]["n_sessions"] == 0
+    assert cmd_kpi(window + ["--include", "research"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["population"] == "organic + research" and data["measured"]["n_sessions"] == 1
 
 
 # ── hook wiring ──────────────────────────────────────────────────────────────
@@ -539,3 +627,10 @@ def test_session_end_event_writes_no_stop_sample(home, monkeypatch):
     monkeypatch.setattr(sys, "stdout", io.StringIO())
     mod.main()
     assert calls == []
+
+
+@pytest.mark.parametrize("name", ["session-start.py", "session-end.py"])
+def test_root_hook_copies_match_the_packaged_hooks(name):
+    """hooks/ is what a source checkout installs; it must carry the same samples."""
+    root = Path(__file__).resolve().parents[1] / "hooks" / name
+    assert root.read_bytes() == (HOOKS / name).read_bytes()

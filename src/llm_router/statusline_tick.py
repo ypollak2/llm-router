@@ -349,7 +349,11 @@ def quota_sample(usage: dict | None, now: float) -> dict:
 def maybe_append_history(home: str, usage: dict | None, now: float) -> bool:
     """Append one ``quota_history.jsonl`` row when :data:`HISTORY_INTERVAL_S` has
     passed since the last one (a stamp file's mtime, one ``stat`` a tick).
-    Append-only, 0600. Never raises; True when a row was written."""
+    Append-only, 0600. Never raises; True when a row was written.
+
+    Several Claude Code windows tick at once: the slot is claimed under a
+    non-blocking ``flock`` on the stamp, and the stamp's content (the last row's
+    ``ts``) is re-checked under it, so one window writes a slot and the rest skip."""
     try:
         stamp = os.path.join(home, HISTORY_STAMP_NAME)
         try:
@@ -358,19 +362,43 @@ def maybe_append_history(home: str, usage: dict | None, now: float) -> bool:
         except OSError:
             pass
         os.makedirs(home, mode=0o700, exist_ok=True)
-        fd = os.open(stamp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        os.close(fd)
-        os.utime(stamp, (now, now))
-        row = {"ts": now}
-        row.update(quota_sample(usage, now))
-        fd = os.open(os.path.join(home, HISTORY_NAME), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        fd = os.open(stamp, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            os.write(fd, (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8"))
+            try:
+                import fcntl  # only on this once-per-slot path; absent on Windows
+            except ImportError:
+                fcntl = None
+            if fcntl is not None:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    return False  # another window is writing this slot
+            last = _num(_float_or_none(os.read(fd, 64)))
+            if last is not None and 0 <= now - last < HISTORY_INTERVAL_S:
+                return False  # another window wrote this slot since our stat
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.ftruncate(fd, 0)
+            os.write(fd, repr(float(now)).encode("ascii"))
+            os.utime(stamp, (now, now))
+            row = {"ts": now}
+            row.update(quota_sample(usage, now))
+            hfd = os.open(os.path.join(home, HISTORY_NAME), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            try:
+                os.write(hfd, (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8"))
+            finally:
+                os.close(hfd)
+            return True
         finally:
-            os.close(fd)
-        return True
+            os.close(fd)  # also releases the flock
     except Exception:  # noqa: BLE001 -- a status line never fails over its history
         return False
+
+
+def _float_or_none(raw: bytes) -> float | None:
+    try:
+        return float(raw.decode("ascii").strip())
+    except (UnicodeDecodeError, ValueError):
+        return None
 
 
 def main() -> int:
