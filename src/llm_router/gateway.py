@@ -26,6 +26,7 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 from llm_router import paths
+from llm_router.route_server import is_auto_model
 
 
 
@@ -208,8 +209,9 @@ class _RoutedResult:
         self.model = _ModelRef(prov, bare)
 
 
-# "let the router choose" — never a real model name to be qualified.
-_AUTO_SENTINELS = frozenset({"auto", "llm_router-auto", "llm-router-auto"})
+# "let the router choose" — never a real model name to be qualified. The set and
+# its case-insensitive match live in route_server.is_auto_model (P0.6), so the
+# gateway and the routing core cannot disagree about what "auto" means.
 
 
 def _qualify_model(model: str | None, provider: str) -> str | None:
@@ -240,7 +242,7 @@ def _qualify_model(model: str | None, provider: str) -> str | None:
     """
     if not model:
         return model
-    if model.strip().lower() in _AUTO_SENTINELS:
+    if is_auto_model(model):
         return model
     return model if "/" in model else f"{provider}/{model}"
 
@@ -316,7 +318,9 @@ def _resolve_project_scope(request, body_value: str | None = None) -> str | None
 
 async def _route(prompt: str, task_type: str | None, complexity: str | None,
                  prefer_model: str | None = None, project_root: str | None = None,
-                 classify_text: str | None = None):
+                 classify_text: str | None = None, *,
+                 system: str | None = None, max_tokens: int | None = None,
+                 temperature: float | None = None):
     """Shared core for every wire-format endpoint: classify (if needed) → route
     through LLM Router's FULL router and adapt the result.
 
@@ -344,6 +348,11 @@ async def _route(prompt: str, task_type: str | None, complexity: str | None,
     opposite of what it is for. Passing ``None`` keeps the old behaviour, which
     is what the native ``/route`` endpoint wants: there, the caller's prompt IS
     the ask.
+
+    ``system``, ``max_tokens``, ``temperature`` (P0.6, R-AGT-1): the caller's own
+    values, forwarded to ``route_and_call``. They used to be dropped here, so a
+    client's ``max_tokens`` cap and ``temperature`` never reached the model, and
+    its system prompt arrived as a ``system:`` line inside the user text.
     """
     if not prompt.strip():
         raise HTTPException(status_code=400, detail="no prompt content")
@@ -359,6 +368,9 @@ async def _route(prompt: str, task_type: str | None, complexity: str | None,
             "complexity": complexity,
             "model": prefer_model,
             "project_root": project_root,
+            "system": system,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
         })
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -421,6 +433,45 @@ def _latest_user_turn(messages: list) -> str:
         if c:
             return str(c)
     return ""
+
+
+_SYSTEM_ROLES = ("system", "developer")
+
+
+def _content_text(c) -> str:
+    if isinstance(c, list):  # content-parts (OpenAI/Anthropic vision format)
+        c = " ".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("text"))
+    return str(c or "")
+
+
+def _split_system(messages) -> tuple[str | None, object]:
+    """Split ``system``/``developer`` turns out of a message list (P0.6).
+
+    Returns ``(system_text, remaining_messages)``. The system text is forwarded
+    as the real system prompt instead of a ``system:`` line in the user text.
+    When nothing but system turns is present, nothing is split: the request has
+    no other content to send, and routing it as before beats a 400.
+    """
+    if not isinstance(messages, list):
+        return None, messages
+    sys_parts, rest = [], []
+    for m in messages:
+        role = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
+        if role in _SYSTEM_ROLES:
+            c = m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
+            text = _content_text(c)
+            if text:
+                sys_parts.append(text)
+        else:
+            rest.append(m)
+    if not sys_parts or not rest:
+        return None, messages
+    return "\n\n".join(sys_parts), rest
+
+
+def _join_system(*parts: str | None) -> str | None:
+    joined = "\n\n".join(p for p in parts if p)
+    return joined or None
 
 
 def _flatten(messages: list) -> str:
@@ -650,6 +701,30 @@ def _refuse_tools_if_present(tools, tool_choice=None) -> None:
         raise HTTPException(status_code=400, detail=_TOOLS_UNSUPPORTED)
 
 
+STREAM_UNSUPPORTED = "streaming not supported yet (v16 A.2)"
+
+
+def _refuse_stream(stream: bool) -> None:
+    """P0.6 (R-AGT-3): ``stream: true`` is refused, not silently dropped.
+
+    The field was undeclared, so Pydantic discarded it and the client got one
+    JSON body where it expected an SSE stream. The OpenAI and Anthropic SDKs
+    then fail inside their stream parser, far from the cause. Until streaming
+    exists (A.2) the gateway says so in the client's own protocol.
+    """
+    if stream:
+        raise HTTPException(status_code=400, detail=STREAM_UNSUPPORTED)
+
+
+def _ollama_options(options: dict | None) -> tuple[int | None, float | None]:
+    """``(max_tokens, temperature)`` from Ollama's ``options`` (num_predict, temperature)."""
+    if not isinstance(options, dict):
+        return None, None
+    n = options.get("num_predict")
+    # Ollama's -1 / -2 mean "no limit" / "fill context": not a cap to forward.
+    return (n if isinstance(n, int) and n > 0 else None), options.get("temperature")
+
+
 def _finish_reason(result) -> str:
     """The real reason, where the backend reports one.
 
@@ -682,15 +757,26 @@ class _OAIRequest(BaseModel):
     # so Pydantic dropped it and the request looked like an ordinary completion.
     tools: list | None = None
     tool_choice: object | None = None
+    # P0.6: declared so they are seen. `stream` is refused (A.2 builds it); the
+    # rest are forwarded. `max_completion_tokens` is OpenAI's newer name.
+    stream: bool = False
+    max_tokens: int | None = None
+    max_completion_tokens: int | None = None
+    temperature: float | None = None
 
 
 @app.post("/v1/chat/completions")
 async def openai_chat(req: _OAIRequest, request: Request) -> dict:
+    _refuse_stream(req.stream)
     _refuse_tools_if_present(req.tools, req.tool_choice)
-    r = await _route(_flatten(req.messages), req.task_type, req.complexity,
+    system, messages = _split_system(req.messages)
+    r = await _route(_flatten(messages), req.task_type, req.complexity,
                      prefer_model=_qualify_model(req.model, "openai"),
                      project_root=_resolve_project_scope(request),
-                     classify_text=_latest_user_turn(req.messages))
+                     classify_text=_latest_user_turn(req.messages),
+                     system=system,
+                     max_tokens=req.max_completion_tokens or req.max_tokens,
+                     temperature=req.temperature)
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
         "object": "chat.completion",
@@ -716,21 +802,28 @@ class _ResponsesRequest(BaseModel):
     # calling surface, so this was the likeliest of the three to be hit.
     tools: list | None = None
     tool_choice: object | None = None
+    stream: bool = False  # P0.6: refused until A.2
+    max_output_tokens: int | None = None
+    temperature: float | None = None
 
 
 @app.post("/v1/responses")
 async def openai_responses(req: _ResponsesRequest, request: Request) -> dict:
+    _refuse_stream(req.stream)
     _refuse_tools_if_present(req.tools, req.tool_choice)
-    prompt = _flatten_responses_input(req.input)
-    # Classify BEFORE the instructions are prepended: `instructions` is the
-    # Responses API's system prompt, and folding it in is T-03 (see _route).
+    # `instructions` is the Responses API's system prompt; system/developer
+    # items in `input` are too. Both go to the model as its system prompt
+    # (P0.6), and neither is classified (T-03, see _route).
+    input_system, input_rest = _split_system(req.input)
+    prompt = _flatten_responses_input(input_rest)
     classify_text = _latest_user_turn_from_responses_input(req.input)
-    if req.instructions:
-        prompt = f"system: {req.instructions}\n{prompt}"
     r = await _route(prompt, req.task_type, req.complexity,
                      prefer_model=_qualify_model(req.model, "openai"),
                      project_root=_resolve_project_scope(request),
-                     classify_text=classify_text)
+                     classify_text=classify_text,
+                     system=_join_system(req.instructions, input_system),
+                     max_tokens=req.max_output_tokens,
+                     temperature=req.temperature)
     output_id = f"msg_{uuid.uuid4().hex[:24]}"
     return {
         "id": f"resp_{uuid.uuid4().hex[:24]}",
@@ -771,17 +864,22 @@ class _AnthropicRequest(BaseModel):
     # H-03: same gap on the Anthropic wire format.
     tools: list | None = None
     tool_choice: object | None = None
+    stream: bool = False  # P0.6: refused until A.2
+    temperature: float | None = None
 
 
 @app.post("/v1/messages")
 async def anthropic_messages(req: _AnthropicRequest, request: Request) -> dict:
+    _refuse_stream(req.stream)
     _refuse_tools_if_present(req.tools, req.tool_choice)
-    # `req.system` is sent to the model but never classified (T-03).
-    prompt = (f"system: {req.system}\n" if req.system else "") + _flatten(req.messages)
-    r = await _route(prompt, None, None,
+    # `req.system` is the model's system prompt and is never classified (T-03).
+    r = await _route(_flatten(req.messages), None, None,
                      prefer_model=_qualify_model(req.model, "anthropic"),
                      project_root=_resolve_project_scope(request),
-                     classify_text=_latest_user_turn(req.messages))
+                     classify_text=_latest_user_turn(req.messages),
+                     system=req.system or None,
+                     max_tokens=req.max_tokens,
+                     temperature=req.temperature)
     return {
         "id": f"msg_{uuid.uuid4().hex[:24]}",
         "type": "message",
@@ -804,11 +902,14 @@ class _OllamaChat(BaseModel):
     # `done: true` and nothing to say its tool definitions were dropped.
     tools: list | None = None
     tool_choice: object | None = None
+    options: dict | None = None  # P0.6: num_predict / temperature forwarded
 
 
 class _OllamaGenerate(BaseModel):
     model: str | None = None
     prompt: str
+    system: str | None = None  # P0.6: forwarded
+    options: dict | None = None
     # /api/generate has no `tools` in Ollama's own API. Declared anyway: a
     # client that sends one is asking for something this gateway cannot do, and
     # silently accepting the request is the defect regardless of whether the
@@ -820,10 +921,13 @@ class _OllamaGenerate(BaseModel):
 @app.post("/api/chat")
 async def ollama_chat(req: _OllamaChat, request: Request) -> dict:
     _refuse_tools_if_present(req.tools, req.tool_choice)
-    r = await _route(_flatten(req.messages), None, None,
+    system, messages = _split_system(req.messages)
+    max_tokens, temperature = _ollama_options(req.options)
+    r = await _route(_flatten(messages), None, None,
                      prefer_model=_qualify_model(req.model, "ollama"),
                      project_root=_resolve_project_scope(request),
-                     classify_text=_latest_user_turn(req.messages))
+                     classify_text=_latest_user_turn(req.messages),
+                     system=system, max_tokens=max_tokens, temperature=temperature)
     return {
         "model": f"{r.model.provider}/{r.model.model}",
         "message": {"role": "assistant", "content": r.text},
@@ -835,9 +939,12 @@ async def ollama_chat(req: _OllamaChat, request: Request) -> dict:
 @app.post("/api/generate")
 async def ollama_generate(req: _OllamaGenerate, request: Request) -> dict:
     _refuse_tools_if_present(req.tools, req.tool_choice)
+    max_tokens, temperature = _ollama_options(req.options)
     r = await _route(req.prompt, None, None,
                      prefer_model=_qualify_model(req.model, "ollama"),
-                     project_root=_resolve_project_scope(request))
+                     project_root=_resolve_project_scope(request),
+                     system=req.system or None,
+                     max_tokens=max_tokens, temperature=temperature)
     return {
         "model": f"{r.model.provider}/{r.model.model}",
         "response": r.text,
