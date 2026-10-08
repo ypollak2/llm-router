@@ -238,6 +238,19 @@ WantedBy=default.target
 """
 
 
+def launchd_activate_command(dest: Path, label: str) -> str:
+    """Restart a loaded launchd job in place, load an unloaded one.
+
+    `launchctl print` succeeds only for a loaded job (rc 113 otherwise), which
+    is the one signal that is reliable; `launchctl load` exits 0 either way.
+    """
+    target = f"gui/$(id -u)/{label}"
+    return (
+        f"if launchctl print {target} >/dev/null 2>&1; then launchctl kickstart -k {target}; "
+        f"else launchctl load {dest}; fi"
+    )
+
+
 def service_target(
     system: str | None = None, home: Path | None = None, label: str = LABEL,
 ) -> tuple[Path, str]:
@@ -246,12 +259,10 @@ def service_target(
     home = home or Path.home()
     if system == "Darwin":
         dest = home / "Library" / "LaunchAgents" / f"{label}.plist"
-        # `load` fails on a service that is already loaded (launchd I/O error 5),
-        # so a re-run falls back to `kickstart -k`, which restarts in place.
-        # Never bootout + bootstrap: bootout can cut the caller's own API
-        # connection and the bootstrap right after it can fail silently
-        # (docs/BUGS.md P010-2).
-        return dest, f"launchctl load {dest} 2>/dev/null || launchctl kickstart -k gui/$(id -u)/{label}"
+        # State check, not an exit code: on macOS 26 `launchctl load` of a loaded
+        # job prints "Load failed: 5" but EXITS 0, so `load || kickstart` never
+        # kicks. Never bootout + bootstrap (docs/BUGS.md P010-2).
+        return dest, launchd_activate_command(dest, label)
     if system == "Linux":
         unit = _SYSTEMD_UNITS[label]
         dest = home / ".config" / "systemd" / "user" / f"{unit}.service"

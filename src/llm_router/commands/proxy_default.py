@@ -110,6 +110,24 @@ def _start_and_wait(dest: Path, activate_cmd: str, port: int, what: str, *, runn
     )
 
 
+def _stale_plist_note(dest: Path, before: str | None, label: str) -> str | None:
+    """`kickstart -k` does not re-read an edited plist: say so, never unload."""
+    if before is None or not dest.exists() or dest.read_text() == before:
+        return None
+    return (
+        f"NOTE {label}: the plist changed but launchd keeps the old one loaded, so this "
+        f"restart does not apply it. Owner step (docs/proxy.md, 'Moving an existing install "
+        f"behind the shim'): `launchctl unload {dest}` then `launchctl load {dest}`."
+    )
+
+
+def _read_or_none(path: Path) -> str | None:
+    try:
+        return path.read_text()
+    except OSError:
+        return None
+
+
 def install_proxy_default(
     *,
     port: int = pd.DEFAULT_PORT,
@@ -174,6 +192,8 @@ def install_proxy_default(
         reused = True
     else:
         try:
+            _d, _ = pd.service_target(system, home)
+            before = _read_or_none(_d)
             dest, activate_cmd = pd.install_service(
                 system=system, home=home, port=main_port, steps=steps, tiers=tiers,
             )
@@ -189,15 +209,22 @@ def install_proxy_default(
         # teardown: stop, THEN delete, in that order. The shim file below
         # follows the same rule.
         actions.append(f"Wrote {dest}")
+        note = _stale_plist_note(dest, before, pd.LABEL)
+        if note:
+            actions.append(note)
         err = _start_and_wait(dest, activate_cmd, main_port, "proxy", log="proxy.err.log", **wait)
         if err is not None:
             return {"ok": False, "actions": actions, "reused": False, "error": err}
         actions.append(f"Started via `{activate_cmd}`")
         if shim:
+            sbefore = _read_or_none(pd.service_target(system, home, label=pd.SHIM_LABEL)[0])
             sdest, sactivate = pd.install_shim_service(
                 system=system, home=home, port=port, upstream_port=upstream_port,
             )
             actions.append(f"Wrote {sdest}")
+            snote = _stale_plist_note(sdest, sbefore, pd.SHIM_LABEL)
+            if snote:
+                actions.append(snote)
             err = _start_and_wait(sdest, sactivate, port, "fail-open shim",
                                   log="proxy-shim.err.log", **wait)
             if err is not None:
