@@ -216,7 +216,7 @@ def test_main_disconnects_before_responding_goes_direct(state):
 
 
 def test_connect_timeout_goes_direct(state, monkeypatch):
-    """A connect that exceeds the 200 ms budget is treated as down. A real
+    """A connect that exceeds the budget is treated as down. A real
     slow loopback connect cannot be produced reliably, so the connector's
     timeout error is injected for the main-proxy URL only."""
     import httpx
@@ -243,8 +243,10 @@ def test_connect_timeout_goes_direct(state, monkeypatch):
     assert [r["c"] for r in rows] == ["proxy_down"] and rows[0]["d"] == "connect_timeout"
 
 
-def test_connect_budget_is_200ms_by_default():
-    assert shim.ShimConfig().connect_timeout_s == pytest.approx(0.2)
+def test_connect_budget_is_1s_by_default():
+    # 200 ms fail-opened 58 times in 4 minutes at load ~25 with a healthy main
+    # proxy (docs/BUGS.md P010-2).
+    assert shim.ShimConfig().connect_timeout_s == pytest.approx(1.0)
     assert shim.ShimConfig().upstream_port == 8797
     assert shim.ShimConfig().port == 8787
 
@@ -523,3 +525,13 @@ def test_duplicate_server_header_from_main_proxy_is_passed_not_bypassed(state):
     assert "uvicorn" in servers and "cloudflare" in servers
     assert direct_hits == []
     assert _failopen_rows(state) == []
+
+
+def test_cli_without_a_flag_runs_with_the_1s_budget(monkeypatch):
+    """`llm-router proxy-shim` as the LaunchAgent runs it (no --connect-timeout-ms)."""
+    seen = []
+    monkeypatch.setattr(shim, "build_app", lambda cfg: seen.append(cfg))
+    monkeypatch.setattr(shim.web, "run_app", lambda *a, **k: None)
+    assert shim.main(["--port", "18787", "--upstream-port", "18797"]) == 0
+    assert shim.main(["--port", "18787", "--upstream-port", "18797", "--connect-timeout-ms", "50"]) == 0
+    assert [c.connect_timeout_s for c in seen] == [pytest.approx(1.0), pytest.approx(0.05)]

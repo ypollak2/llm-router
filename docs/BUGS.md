@@ -42,7 +42,9 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 27 | The quality report and the Stop summary raise TypeError on a NULL task type | fixed in this change (v16 P0.8) |
 | 28 | `llm-router northstar` showed the heuristic share as the North Star | fixed in this change (v16 P0.8) |
 | 29 | The claw-code Stop hook and the dashboard models panel raise TypeError on a NULL task type | fixed in this change (v16 P0.8 r1) |
+| AB-1 | Agent breaker called 4 parallel sibling spawns "nested agents" and blocked them | fixed in this change (hook version 14) |
 | P010-1 | A dead proxy fails every Claude Code session | fixed in this change (P0.10); live switch is an owner step |
+| P010-2 | The shim's 200 ms connect budget sent healthy-proxy traffic direct; shim restart cut 8787 | fixed in this change (P0.10 cutover repair) |
 | P013-1 | `llm_act` wrote files into the MCP process cwd | fixed for the file tools in this change (P0.13); bash confinement is P2.9 |
 | P0.14-a | Proxy ledger wrote 0 rows for 25 h and nothing flagged it | fixed in this change (P0.14) |
 | P011-1 | Haiku guard re-tripped on audit days older than its window | fixed in `feat/haiku-guard-in-repo` (P0.11, 3f4149b) |
@@ -56,6 +58,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | P09-7 | Statusline timing rows carried no session id, and needed a python3 that imports llm_router | fixed in `perf/hook-budgets` (P0.9 repair 1) |
 | P09-8 | The statusline "wrapper adds < 5 ms" test failed under load | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
 | P09-9 | A session id named by one test leaked onto latency rows of later tests | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
+| CI-1 | `test_verify_unit` copytree of a fresh git repo raced git auto-maintenance (`maintenance.lock`) | fixed in this change (test-only; production unaffected) |
 | P03-1 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
 | A.0-1 | `llm_router_agent_start_session` returned `agent_not_found` from every installed wheel | fixed in `feat/agt-a0` (v16 AGT A.0) |
 | A.0-2 | `llm_act` / `llm_delegate` / `llm_local_task` blocked the MCP event loop for the whole run | fixed in `feat/agt-a0` (v16 AGT A.0) |
@@ -730,6 +733,32 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Test.** `test_clawcode_stop_hook_renders_null_task_type` (runs `main()` on a seeded
   `usage.db`), `test_dashboard_last_prompt_calls_render_null_task_type`. Both fail on 15a1398e.
 
+## AB-1. Agent breaker called 4 parallel sibling spawns "nested agents" and blocked them
+
+- **Symptom.** 2026-10-08 about 17:35Z, a top-level Claude Code session sent 6 Agent calls in
+  one message. Calls 1-3 started; 4-6 were blocked with `Agent loop circuit breaker: depth 3/3.
+  Too many nested agents.` No agent was nested. Minutes later single calls passed (n = 1
+  incident, reported by the owner; the installed hook was byte-identical to the repo's
+  `agent-route.py` at version 12).
+- **Cause.** `agent-route.py` kept ONE per-session counter in `agent_depth_<session>.json`:
+  +1 at PreToolUse[Agent], -1 at PostToolUse (`agent-depth-release.py`). That is agents in
+  flight, but it was compared with `LLM_ROUTER_MAX_AGENT_DEPTH` (3) and reported as nesting
+  depth. The 4th concurrent sibling saw 3 >= 3.
+- **Fix.** Nesting depth is now taken from the payload: no `agent_id` is the top-level session
+  (depth 0); a caller with `agent_id` is a subagent whose depth comes from a registry in the same
+  file. PreToolUse queues the child's depth (`pending`); `subagent-start.py` claims it for the
+  new `agent_id` (`agents`). A spawn is blocked when child depth > `LLM_ROUTER_MAX_AGENT_DEPTH`
+  (message: "Agent nesting limit"). An unknown `agent_id` counts as depth 1, never deeper. The
+  in-flight count stays as a separate runaway cap, `LLM_ROUTER_MAX_CONCURRENT_AGENTS` (default
+  16; message: "Too many agents in flight"). The release hook keeps the registry keys.
+  Hook versions: agent-route 14, agent-depth-release 3, subagent-start 4. Needs all three deployed.
+- **Rule.** A guard's counter and its limit must measure the same quantity, and the message must
+  name what was counted. A hook that cannot see a fact (the parent) says so and stays permissive
+  rather than inferring it from a proxy.
+- **Test.** `TestBreakerMeasuresNestingNotSiblings` in `tests/test_agent_route_hook.py`:
+  six top-level siblings (fails on the old hook: call 4 blocked), real depth 3 -> 4 still trips,
+  concurrency cap, and the SubagentStart claim.
+
 ## P010-1. A dead proxy fails every Claude Code session
 
 - **Symptom.** With proxy-default on, `~/.claude/settings.json` sets
@@ -746,8 +775,8 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   or a 5xx of the main proxy's own (no Anthropic `request-id`) before any byte went out, it sends the request once to api.anthropic.com and records
   `proxy_down` in `fail_open.jsonl` (G2). `llm-router install --proxy-default` installs both
   services (main first, then the shim) and writes settings.json only after both answer. The live
-  machine still runs the main proxy on 8787: the port move needs the owner (`bootout` +
-  `bootstrap`).
+  machine still runs the main proxy on 8787: the port move needs the owner (see P010-2 for how
+  to restart a loaded service).
 - **Found while fixing.** The first shim used aiohttp's client, which rejects the duplicate
   `Server` header the main proxy sends (uvicorn's own next to Anthropic's): in the smoke, 2 of 4
   calls went direct while the main proxy was up. The shim's upstream leg now uses httpx (h11),
@@ -779,6 +808,65 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   install; `tests/test_failopen_never_writes_settings.py` pins that no fail-open path writes
   settings.json outside `llm-router install --proxy-default`. Live: 10/10 smoke sessions
   answered through the shim with the smoke main proxy killed, 10 `proxy_down` rows (PR body).
+
+## P010-2. The shim's 200 ms connect budget skipped the router; restarting the shim cut 8787
+
+- **Symptom.** Cutover 2026-10-08, machine load ~25: the shim logged 59 `fail_open
+  code=proxy_down` rows between 16:49:35 and 16:54:49Z. 37 were `connect_refused`
+  (16:49:35-16:50:51) while nothing listened on 8797 (the main proxy's pid started 16:50:44Z), so
+  the connect budget was not their cause. 22 were `connect_timeout` (16:52:02-16:54:49) against a
+  live listener; their cause is unproven (a synthetic load benchmark found 0 of 12,000 connects
+  over 200 ms; candidates are a stalled accept backlog or a stalled shim event loop).
+  `--connect-timeout-ms 1000` was then run (20 calls, 0 fail-opens, low load). Separately,
+  restarting the shim with `launchctl bootout` + `bootstrap` cut the API connection of the Claude
+  session that ran it, and the bootstrap failed to load (launchd I/O error 5 right after bootout):
+  8787 stayed dead until a human reloaded it. The shim and main plists were hand-written and
+  hand-edited.
+- **Cause.** (1) `DEFAULT_CONNECT_TIMEOUT_S = 0.2` was tight for a loaded host, and may explain
+  the 22 `connect_timeout` rows; that is not proven. A refused connect fails at once whatever the
+  budget. (2) Every restart instruction in the repo was bootout + bootstrap (`docs/proxy.md`),
+  and the installer's `launchctl load` does not restart a loaded service. Measured on macOS 26
+  (Darwin 25.5): `launchctl load <plist>` on an ALREADY-LOADED job prints "Load failed: 5:
+  Input/output error" but EXITS 0, so the first draft's `load 2>/dev/null || kickstart -k` never
+  reached `kickstart` and the restart silently did nothing. `launchctl print gui/$UID/<label>`
+  exits 0 only when loaded (113 once unloaded). Only the state check is reliable.
+  (3) A re-run of `install --proxy-default` met its own shim on 8787, took the "reuse a foreign
+  proxy" branch and rewrote the sentinel with `shim_label` None, so uninstall left the shim
+  plist and process behind; uninstall also ignored a shim plist the sentinel did not name.
+- **Fix.** Default budget 1 s (`failopen_shim.DEFAULT_CONNECT_TIMEOUT_S`; a code default, not
+  env-only, because the installer-written plist passes no flag). It is headroom, not a proven fix:
+  measured with `scripts/shim_connect_probe.py` (n = 1,000 sequential connects per level, raw TCP
+  and full httpx request, and 40 x 50-wide bursts, n = 2,000, per level, under 0 / 15 / 30 / 45
+  and 90 (bursts) busy-loop processes on a 15-core Mac, load1 up to 32.9) the worst connect was
+  38.7 ms (raw TCP worst 6.1 ms, burst worst 10.8 ms), 0 of 12,000 over 200 ms, so CPU load alone
+  did not reproduce the incident; 1 s is 25x the worst measured connect. A refused connect still
+  fails at once, but a black-holed connect now waits up to 1 s before going direct. The macOS
+  activation is a state check: `if launchctl print gui/$(id -u)/<label> >/dev/null 2>&1; then
+  launchctl kickstart -k ...; else launchctl load <plist>; fi` (also `gateway_service.py`, the
+  only other `launchctl load` in `src/`). `kickstart -k` does not re-read an edited plist, so when
+  the installer rewrites a plist whose content differs it prints one `NOTE` naming the owner step
+  (unload/load, `docs/proxy.md`) and never unloads the live service itself. A finished install
+  is recognised (both ports healthy, sentinel names the shim and upstream port) and not
+  rewritten or restarted; uninstall removes the shim plist with or without a sentinel. Docs no
+  longer name bootout/bootstrap. Doctor and the SessionStart hint already used `kickstart -k`.
+- **Not done.** Moving an already-loaded main proxy from 8787 to 8797 from the installer:
+  launchd does not re-read an edited plist on `kickstart`, so it needs the service unloaded,
+  which drops 8787 while no shim stands in front of it. That stays an owner step
+  (`docs/proxy.md`).
+- **Rule.** Restart a loaded launchd service only with `launchctl kickstart -k`. Never run
+  bootout + bootstrap from inside a session that depends on the service.
+- **Test.** `test_connect_budget_is_1s_by_default`, `test_cli_without_a_flag_runs_with_the_1s_budget`
+  (`tests/test_proxy_failopen_shim.py`);
+  `test_macos_activation_kickstarts_a_loaded_service`,
+  `test_macos_activation_loads_an_unloaded_service`, `test_gateway_activation_shares_the_state_check`
+  (a fake `launchctl` whose `load` exits 0 with "Load failed: 5" when loaded), `test_no_restart_advice_uses_launchctl_bootout_or_bootstrap` (`tests/test_proxy_default.py`);
+  `test_rerunning_install_on_a_finished_shim_install_keeps_the_shim_in_the_sentinel`,
+  `test_uninstall_removes_a_shim_plist_that_no_sentinel_names`,
+  `test_already_installed_needs_both_ports_healthy`,
+  `test_own_layout_requires_matching_sentinel_label_and_upstream_port`,
+  `test_changed_plist_is_reported_not_silently_restarted`
+  (`tests/test_proxy_default_orchestration.py`). The earlier ones are red on 26468d34; the
+  activation and changed-plist tests are red on ff1ffa3c.
 
 ## P013-1. `llm_act` wrote files into the MCP process cwd
 
@@ -1183,3 +1271,20 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   job polling for both tools; unknown job id. Red on b3dd351 (7 tests). The overlap test
   `test_overlapping_local_tasks_never_leak_apply_writes` passes on b3dd351 (runs were serial)
   and fails when the lock is removed (`['apply', None] != [None, None]`).
+
+## CI-1. `copytree` of a fixture repo raced git's background maintenance
+
+- **Symptom.** `tests/test_verify_unit.py::test_unproven_sandbox_is_unavailable_never_pass` failed on CI
+  Python 3.11 (PR #328 run 37811026623, and PR #287) with
+  `shutil.Error: [('.../broken/.git/objects/maintenance.lock', ...` raised by `_patch`'s `copytree`.
+- **Cause.** The fixture `_init` runs `git commit`; with auto-maintenance on, commit spawns a detached
+  `git maintenance run --auto` that creates and removes `.git/objects/maintenance.lock` and repacks
+  loose objects while the test copies `.git`. Reproduced locally with 4 parallel stress processes
+  (400 extra files, hostile global config `gc.auto=1`, `maintenance.auto=true`): 110 copytree races
+  in 240 repos (27, 28, 27, 28 of 60). Production is not affected: `sandbox.create_workspace` skips
+  `.git` and copies file by file, and `verify_unit`'s `model-baseline` copytree reads that `.git`-free baseline.
+- **Fix (test only).** `GIT` in `tests/test_verify_unit.py` passes `-c gc.auto=0 -c maintenance.auto=false`,
+  so no background child exists. A `*.lock` ignore was rejected: it hides one file while the child still
+  rewrites `objects/*` mid-copy (the stress run also failed on object directories).
+- **Test.** `tests/test_git_fixture_race.py` traces git's process starts under the hostile config: 1 failed
+  without the fix (maintenance child seen), passes with it. It also asserts the trace saw the commit.

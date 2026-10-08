@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 2
+# llm_router-hook-version: 3
 """PostToolUse[Agent] hook — release the agent nesting-depth slot.
 
 The circuit breaker in agent-route.py (PreToolUse[Agent]) increments a
@@ -102,15 +102,16 @@ def main() -> None:
     depth_file = _depth_file(session_id)
     try:
         data = json.loads(depth_file.read_text())
+        if not isinstance(data, dict):
+            data = {}
         depth = max(0, int(data.get("depth", 0)) - 1)
     except (FileNotFoundError, json.JSONDecodeError, ValueError):
-        depth = 0
+        data, depth = {}, 0
 
-    depth_file.write_text(json.dumps({
-        "depth": depth,
-        "session_id": session_id,
-        "ts": time.time(),
-    }))
+    # Keep the nesting registry ("agents"/"pending") agent-route.py and
+    # subagent-start.py keep in this same file; only the in-flight count moves.
+    data.update({"depth": depth, "session_id": session_id, "ts": time.time()})
+    depth_file.write_text(json.dumps(data))
     sys.exit(0)
 
 
