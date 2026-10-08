@@ -949,8 +949,15 @@ def _subcommand_help(args: list[str]) -> bool:
     prefix = f"llm-router {cmd}"
     lines = [ln.strip() for ln in (__doc__ or "").splitlines()
              if ln.strip() == prefix or ln.strip().startswith(prefix + " ")]
-    if not lines:  # not a documented subcommand: the unknown-command path answers
-        return False
+    if not lines:
+        # Fail closed: no usage line must never mean "run the command". A name
+        # nobody registered is answered as unknown (exit 2, nothing runs); a
+        # registered one gets a generic usage line.
+        if cmd not in _KNOWN_SUBCOMMANDS | _OWN_HELP_ANYWHERE | _OWN_HELP_FIRST:
+            print(f"llm-router: unknown command '{cmd}' — see 'llm-router --help'",
+                  file=sys.stderr)
+            sys.exit(2)
+        lines = [f"{prefix} [options]"]
     print("usage:")
     for ln in lines:
         print(f"  {ln}")
