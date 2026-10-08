@@ -24,7 +24,9 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 12 | Learned routes keyed by tool name, looked up by task type | fixed in P0.7 (`fix/learning-bugs`) |
 | 13 | Retrospective accuracy 100% at 0 corrections | fixed in P0.7 (`fix/learning-bugs`) |
 | 14 | Gateway doors: case-sensitive "auto", `stream` dropped, `max_tokens`/`temperature`/system dropped | fixed in this change (v16 P0.6) |
-| 15 | Semantic cache never hit, ignored context, and reported a hit rate of 0 | fixed in this change (v16 P0.5) |
+| 15 | MCP routing ran on Claude pressure 0.0 for the life of the process | fixed in this change (v16 P0.2) |
+| 16 | Critical-pressure override sent `/model claude-opus-4-6`, a retired id | fixed in this change (v16 P0.2) |
+| 17 | Semantic cache never hit, ignored context, and reported a hit rate of 0 | fixed in this change (v16 P0.5) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -358,7 +360,46 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   case-sensitive `is_auto_model` fails 17; no stream refusal fails 3; temperature dropped
   from the payload fails 8; no cache bypass fails 1.
 
-## 15. Semantic cache never hit, ignored context, and reported a hit rate of 0
+## 15. MCP routing ran on Claude pressure 0.0 for the life of the process
+
+- **Symptom.** With `usage.json` at 0.80 (session 53%, weekly 80%; rsync copy taken
+  2026-10-07T17:53Z, n = 1 file), `claude_usage.get_claude_pressure()` on da31df7 returned
+  0.0. The MCP chain never demoted Claude and never fronted Codex, however tight the quota.
+- **Cause.** `get_claude_pressure()` returned an in-process cache that only
+  `set_claude_pressure` filled, and only the `llm_update_usage` tool calls that. An MCP
+  server that never saw that call kept the initial 0.0. The hooks kept `usage.json` fresh the
+  whole time; the MCP side never read it.
+- **Fix.** `claude_usage.get_claude_pressure_reading()` returns `(value, state, as_of)`. A
+  push from the last 300 s wins; otherwise the value comes from `usage.json` through
+  `budget._pressure_from_usage`, cached 60 s. `updated_at` older than 30 min is `stale`, a
+  missing or unreadable file is `unknown`, and neither carries a value.
+  `get_claude_pressure()` returns the value or 0.0, so stale and unknown keep the old
+  default and do not reorder the chain.
+- **Test.** `tests/test_mcp_claude_pressure.py`:
+  `test_get_claude_pressure_is_no_longer_zero_for_life` (0.0 on da31df7, 0.96 on head),
+  `test_stale_file_is_unknown_and_reads_as_zero`,
+  `test_high_pressure_puts_codex_before_claude` (`_build_and_filter_chain`, code/moderate,
+  `usage.json` at 0.96: Claude led on da31df7, Codex leads on head) and
+  `test_stale_pressure_leaves_the_order_unchanged`.
+
+## 16. Critical-pressure override sent `/model claude-opus-4-6`, a retired id
+
+- **Symptom.** At critical pressure, auto-route.py told Claude Code to switch to
+  `/model claude-opus-4-6`. The proxy's opus tier (`proxy/claude_tiers.yaml`) is
+  `claude-opus-5-5`. subagent-start.py and the hook chain builder named the same old id.
+- **Cause.** A literal model id in three hooks, which nothing tied to the tier policy.
+- **Fix.** `proxy.tiers.tier_model("opus")` reads the policy the proxy loads (the
+  `LLM_ROUTER_PROXY_TIER_POLICY` file, else the bundled YAML) through
+  `ClaudeTierPolicy.load`. The three hooks use it and fall back to Claude Code's `opus` alias,
+  never to a literal. `pricing.retired_models()` lists ids kept only to price old rows;
+  `claude-opus-4-6` is one of them for routing.
+- **Test.** `tests/test_no_retired_model_ids.py::test_routing_code_names_no_retired_model_id`
+  scans the string literals in `src/llm_router/hooks/*.py` and `router.py` and prints how many
+  it checked. On da31df7 it found 3 hits (auto-route.py:4799, chain_builder.py:188,
+  subagent-start.py:203); on head it finds 0. To re-prove the baseline from head, run the
+  same test with `RETIRED_IDS_SCAN_ROOT=<da31df7 checkout>/src/llm_router`: it fails with 3 hits.
+
+## 17. Semantic cache never hit, ignored context, and reported a hit rate of 0
 
 - **Symptom.** (a) A routed request repeated within 24 h was never served from the semantic
   cache. (b) Had the key matched, "yes, do it" answered in one conversation would have been
