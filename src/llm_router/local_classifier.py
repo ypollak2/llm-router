@@ -1,6 +1,8 @@
 """Local (Ollama) LLM classifier: one verdict per human turn, prompt v6.
 
 ``LLM_ROUTER_LOCAL_CLASSIFIER`` = ``off`` (default) | ``shadow`` | ``on``.
+``LLM_ROUTER_CLASSIFIER_BACKEND`` = ``chat`` (default, the v6 ``/api/chat`` path below) |
+``systemone`` (a decision model on Ollama ``/v1/systemone``, see ``decision_classifier``).
 Any other value reads as ``off``, so a typo cannot switch behaviour. This module
 only *produces* verdicts. Nothing in it routes: the proxy seam (M1.6) logs a
 verdict next to the rules' verdict, and ``on`` is a later milestone.
@@ -38,7 +40,8 @@ TIERS = ("local", "haiku", "sonnet", "opus")
 MODEL_TIERS = ("haiku", "sonnet", "opus")  # what the rubric can say; ``local`` is derived
 DIMS = ("scope", "ambiguity", "repo_knowledge", "reasoning_depth", "execution_load", "risk")
 DERIVATIONS = ("direct", "rule")
-SOURCES = ("llm", "cache", "timeout", "parse_error", "cold", "off")
+SOURCES = ("llm", "cache", "timeout", "parse_error", "cold", "off", "abstain")
+BACKENDS = ("chat", "systemone")  # LLM_ROUTER_CLASSIFIER_BACKEND; anything else reads as ``chat``
 # complexity is only filled for callers that still key on it; tier is never derived from it.
 TIER_TO_COMPLEXITY = {"local": "simple", "haiku": "simple", "sonnet": "moderate", "opus": "complex"}
 
@@ -176,6 +179,10 @@ class Verdict:
     model: str
     prompt_version: str
     ms: float
+    # Decision-model backend only (decision_classifier.py); ``None``/``False`` for the chat backend.
+    # ``confidence`` is p_max; an abstained verdict has source "abstain", no tier, a confidence.
+    confidence: float | None = None
+    abstain: bool = False
 
     @property
     def ok(self) -> bool:
@@ -191,6 +198,7 @@ class Verdict:
             "tier": self.tier, "task_type": self.task_type, "margin": self.margin,
             "qa": self.qa, "needs_repo_context": self.needs_repo_context,
             "local_eligible": self.local_eligible, "derivation": self.derivation,
+            **({"confidence": self.confidence, "abstain": self.abstain} if self.confidence is not None else {}),
         }
 
 
@@ -199,7 +207,17 @@ def mode() -> str:
     return raw if raw in ("shadow", "on") else "off"
 
 
+def backend() -> str:
+    """``chat`` (default: /api/chat, prompt v6) or ``systemone`` (decision model, /v1/systemone)."""
+    raw = os.environ.get("LLM_ROUTER_CLASSIFIER_BACKEND", "").strip().lower()
+    return raw if raw in BACKENDS else "chat"
+
+
 def _model() -> str:
+    if backend() == "systemone":
+        from llm_router import decision_classifier
+
+        return decision_classifier._model()
     return os.environ.get("LLM_ROUTER_CLASSIFIER_MODEL", "").strip() or DEFAULT_MODEL
 
 
@@ -224,6 +242,10 @@ def _now() -> float:
 
 
 def _fail(source: str, model: str, derivation: str, ms: float = 0.0) -> Verdict:
+    if backend() == "systemone":
+        from llm_router import decision_classifier
+
+        return decision_classifier._fail(source, model, ms)
     return Verdict(None, None, None, None, None, None, None, derivation, source, model,
                    PROMPT_VERSION, ms)
 
@@ -291,12 +313,19 @@ def _payload(model: str, assembled: str) -> dict:
 
 
 def _post(model: str, assembled: str, timeout: float) -> str:
-    req = urllib.request.Request(
-        f"{_base_url()}/api/chat", data=json.dumps(_payload(model, assembled)).encode(),
-        headers={"Content-Type": "application/json"},
-    )
+    if backend() == "systemone":
+        from llm_router import decision_classifier
+
+        url, data = f"{_base_url()}{decision_classifier.ENDPOINT}", decision_classifier.payload(model, assembled)
+    else:
+        url, data = f"{_base_url()}/api/chat", _payload(model, assembled)
+    req = urllib.request.Request(url, data=json.dumps(data).encode(),
+                                 headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - local URL
-        return json.loads(resp.read()).get("message", {}).get("content", "")
+        raw = resp.read()
+    if backend() == "systemone":
+        return raw.decode()  # the whole body: decision_classifier.parse_answer reads the answers
+    return json.loads(raw).get("message", {}).get("content", "")
 
 
 def classify_local(assembled: str, *, model: str | None = None, timeout_s: float | None = None,
@@ -326,6 +355,14 @@ def classify_local(assembled: str, *, model: str | None = None, timeout_s: float
     ms = round((time.monotonic() - t0) * 1000.0, 1)
     if not box or isinstance(box[0], BaseException):
         return _fail("timeout", model, derivation, ms)
+    if backend() == "systemone":
+        from llm_router import decision_classifier
+
+        try:
+            body: object = json.loads(box[0])  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            body = None
+        return decision_classifier.parse_answer(body, model=model, ms=ms)
     return parse_verdict(box[0], model=model, ms=ms, derivation=derivation, t_h=t_h, t_s=t_s)  # type: ignore[arg-type]
 
 
@@ -387,8 +424,14 @@ def _cache_put(key: tuple, verdict: Verdict) -> None:
 def _key(session_id: str | None, text_sha: str, model: str, derivation: str, t_h: int,
          t_s: int) -> tuple:
     """The model, derivation and thresholds are part of the key: a verdict is only
-    reusable by a caller that would have asked the same question."""
-    return (session_id or "", text_sha, model, derivation, t_h, t_s)
+    reusable by a caller that would have asked the same question. The decision-model
+    backend adds its abstain threshold: a verdict made with another one is not reusable."""
+    variant = ""
+    if backend() == "systemone":
+        from llm_router import decision_classifier
+
+        variant = f"sys1:{decision_classifier.abstain_below()}"
+    return (session_id or "", text_sha, model, derivation, t_h, t_s, variant)
 
 
 def is_cached(session_id: str | None, text_sha: str, *, model: str | None = None,
@@ -419,17 +462,20 @@ async def _is_loaded(model: str, budget: float) -> bool:
             # report it cold and let the warm-up reload it at NUM_CTX. A server that does
             # not report context_length is taken at its word.
             ctx = m.get("context_length")
-            return ctx is None or ctx == NUM_CTX
+            # a decision model runs at its own default context: there is no 4096 to match
+            return ctx is None or ctx == NUM_CTX or backend() == "systemone"
     return False
 
 
 async def _warm(model: str) -> None:
+    if backend() == "systemone":  # load only, at the model's own context: no options
+        url, body = "/api/generate", {"model": model, "stream": False, "keep_alive": _keep_alive()}
+    else:
+        url, body = "/api/chat", {"model": model, "messages": [], "stream": False,
+                                  "keep_alive": _keep_alive(), "options": _options()}
     try:
         async with _session().post(
-            f"{_base_url()}/api/chat",
-            json={"model": model, "messages": [], "stream": False, "keep_alive": _keep_alive(),
-                  "options": _options()},
-            timeout=aiohttp.ClientTimeout(total=120),
+            f"{_base_url()}{url}", json=body, timeout=aiohttp.ClientTimeout(total=120),
         ) as resp:
             await resp.read()
     except Exception as exc:  # noqa: BLE001 - a failed warm-up only means the next call is cold again
@@ -454,6 +500,7 @@ async def _classify(key: tuple, assembled: str, model: str, budget: float, deriv
     """The one real request behind a key. Never raises."""
     global _cool_until, _resident_until
     t0 = time.perf_counter()
+    sysone = backend() == "systemone"
 
     def ms() -> float:
         return round((time.perf_counter() - t0) * 1000.0, 1)
@@ -463,7 +510,13 @@ async def _classify(key: tuple, assembled: str, model: str, budget: float, deriv
             if _now() >= _resident_until and not await _is_loaded(model, min(budget, 1.0)):
                 _kick_warmup(model)
                 return _fail("cold", model, derivation, ms())
-            async with _session().post(f"{_base_url()}/api/chat", json=_payload(model, assembled),
+            if sysone:
+                from llm_router import decision_classifier
+
+                url, req = decision_classifier.ENDPOINT, decision_classifier.payload(model, assembled)
+            else:
+                url, req = "/api/chat", _payload(model, assembled)
+            async with _session().post(f"{_base_url()}{url}", json=req,
                                        timeout=aiohttp.ClientTimeout(total=budget)) as resp:
                 if resp.status != 200:
                     raise aiohttp.ClientResponseError(resp.request_info, resp.history,
@@ -472,9 +525,14 @@ async def _classify(key: tuple, assembled: str, model: str, budget: float, deriv
     except Exception:  # noqa: BLE001 - unreachable, slow or refused: one cooldown, rules answer
         _cool_until = _now() + COOLDOWN_S
         return _fail("timeout", model, derivation, ms())
-    message = body.get("message") if isinstance(body, dict) else None
-    content = message.get("content", "") if isinstance(message, dict) else ""
-    verdict = parse_verdict(content, model=model, ms=ms(), derivation=derivation, t_h=t_h, t_s=t_s)
+    if sysone:
+        from llm_router import decision_classifier
+
+        verdict = decision_classifier.parse_answer(body, model=model, ms=ms())
+    else:
+        message = body.get("message") if isinstance(body, dict) else None
+        content = message.get("content", "") if isinstance(message, dict) else ""
+        verdict = parse_verdict(content, model=model, ms=ms(), derivation=derivation, t_h=t_h, t_s=t_s)
     if verdict.ok:
         _resident_until = _now() + PS_RECHECK_S
         _cache_put(key, verdict)

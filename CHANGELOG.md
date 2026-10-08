@@ -75,6 +75,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   execution ledger migrates `ALTER TABLE execution_events ADD COLUMN verify TEXT` and
   `... used INTEGER` the next time the live ledger is opened (additive, nullable). The local model's context window comes from the one table,
   `local_models.num_ctx(model)` (32768 for qwen3.6).
+- classifier (M1.8 round 3, default OFF): a decision-model backend for the local tier classifier,
+  `src/llm_router/decision_classifier.py`. `LLM_ROUTER_CLASSIFIER_BACKEND=systemone` makes
+  `classify_local` / `classify_async` call Ollama `POST /v1/systemone` (Ollama >= 0.35, default model
+  `nimble:9b`, `LLM_ROUTER_DECISION_MODEL`) with ONE `choice` question (haiku / sonnet / opus, the v7 tier
+  definitions). The `Verdict` gains `confidence` (p_max of the option probabilities, not the endpoint's own
+  concentration score) and `abstain`; `LLM_ROUTER_DECISION_ABSTAIN_BELOW` (default 0.0 = never) turns a low
+  p_max into `source="abstain"` with no tier, so the caller keeps the rules. Strict response check (three
+  probabilities summing to 1 +/- 0.02, choice = argmax), no prompt text stored. The default backend
+  (`chat`, prompt v6) is unchanged. Not routed live; the measurement is PREREG v2 amendment 2.
 - hooks: `hook_latency.jsonl` rows can carry `phases_ms` (M4.1, hook tail attribution). `auto-route` (hook
   version 46) names `import`, `session_io`, `zce`, `classify`, `hud`, `db_write`, `draft_chain` (the whole draft
   chain: Ollama, Codex, Gemini CLI) and `cold_wait` (Ollama `load_duration`); `session-start` (version 23) names `import`, `session_io`, `reset_state`,
