@@ -63,7 +63,7 @@ def _sentinel(tmp_path, monkeypatch, text, *, routed=True):
 def _listening_socket() -> socket.socket:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(("127.0.0.1", 0))
-    s.listen(1)
+    s.listen(8)  # several probes per test must not fill the accept backlog
     return s
 
 
@@ -274,3 +274,123 @@ def test_routed_to_the_main_proxy_directly_counts_as_routed(monkeypatch, tmp_pat
     finally:
         shim.close()
         main.close()
+
+
+# --- PD-HEALTH-1 mutation gaps (independent review, 2026-10-08) --------------------------
+
+
+def _msg() -> str:
+    return _load_hook_module()._check_proxy_default_health()
+
+
+def test_disabled_sentinel_is_silent_even_when_routed_and_dead(monkeypatch, tmp_path):
+    """Mutant: skip the `enabled: false` check -> a deliberately disabled proxy warns."""
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    _sentinel(tmp_path, monkeypatch, {"enabled": False, "port": _dead_port()})  # routed + dead
+    assert _msg() == ""
+    # and not-routed too: disabled means no routing expectation at all
+    monkeypatch.delenv("ANTHROPIC_BASE_URL")
+    assert _msg() == ""
+
+
+@pytest.mark.parametrize("url", [
+    "http://api.example.com:{port}",   # right port, wrong host
+    "http://127.0.0.2:{port}",         # loopback-ish but not the proxy host
+    "http://127.0.0.1:{other}",        # right host, wrong port
+    "http://127.0.0.1",                # right host, no port
+])
+def test_only_loopback_on_the_proxy_port_counts_as_routed(monkeypatch, tmp_path, url):
+    """Mutants: accept any host / accept any port in `_routes_to_local_port`.
+    A live listener on the proxy port means a loosened check falls through to ''."""
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    srv = _listening_socket()
+    try:
+        port = srv.getsockname()[1]
+        _sentinel(tmp_path, monkeypatch, {"enabled": True, "port": port}, routed=False)
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", url.format(port=port, other=port + 1))
+        assert "routing is OFF" in _msg()
+    finally:
+        srv.close()
+
+
+@pytest.mark.parametrize("local_to_proxy", [True, False])
+def test_project_local_settings_beat_project_settings(monkeypatch, tmp_path, local_to_proxy):
+    """Mutant: swap settings.local.json / settings.json precedence."""
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    srv = _listening_socket()
+    try:
+        port = srv.getsockname()[1]
+        _sentinel(tmp_path, monkeypatch, {"enabled": True, "port": port}, routed=False)
+        proxy, other = f"http://127.0.0.1:{port}", "https://api.anthropic.com"
+        _settings(Path.cwd() / ".claude" / "settings.local.json", proxy if local_to_proxy else other)
+        _settings(Path.cwd() / ".claude" / "settings.json", other if local_to_proxy else proxy)
+        assert (_msg() == "") is local_to_proxy
+    finally:
+        srv.close()
+
+
+def test_user_settings_are_the_last_fallback(monkeypatch, tmp_path):
+    """Mutant: drop the ~/.claude/settings.json fallback -> a routed session reads as OFF."""
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    srv = _listening_socket()
+    try:
+        port = srv.getsockname()[1]
+        _sentinel(tmp_path, monkeypatch, {"enabled": True, "port": port}, routed=False)
+        _settings(Path.home() / ".claude" / "settings.json", f"http://127.0.0.1:{port}")
+        assert _msg() == ""
+    finally:
+        srv.close()
+
+
+def test_scheme_less_base_url_is_parsed_as_host_port(monkeypatch, tmp_path):
+    """Mutant: urlsplit without the '//' prefix -> hostname is None for `127.0.0.1:PORT`."""
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    srv = _listening_socket()
+    try:
+        port = srv.getsockname()[1]
+        _sentinel(tmp_path, monkeypatch, {"enabled": True, "port": port}, routed=False)
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", f"127.0.0.1:{port}")
+        assert _msg() == ""
+    finally:
+        srv.close()
+
+
+def test_probe_connect_timeout_is_one_second(monkeypatch, tmp_path):
+    """Mutant: 1 s -> 5 s. Asserts the timeout handed to the probe, not wall-clock: this
+    hook blocks session start, so the budget is the contract."""
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    _sentinel(tmp_path, monkeypatch, {"enabled": True, "port": 8787})
+    seen: list = []
+
+    def _fake(addr, timeout=None, *a, **k):
+        seen.append(timeout)
+        raise OSError("refused")
+
+    monkeypatch.setattr(socket, "create_connection", _fake)
+    assert "will fail" in _msg()
+    assert seen == [1.0]
+
+
+def test_project_settings_are_read_from_claude_project_dir(monkeypatch, tmp_path):
+    """Hooks receive CLAUDE_PROJECT_DIR; a cwd that drifted into a subdirectory must not
+    hide the project's settings. Mutant: read os.getcwd() only."""
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    srv = _listening_socket()
+    try:
+        port = srv.getsockname()[1]
+        _sentinel(tmp_path, monkeypatch, {"enabled": True, "port": port}, routed=False)
+        root = tmp_path / "root"
+        sub = root / "pkg" / "deep"
+        sub.mkdir(parents=True)
+        _settings(root / ".claude" / "settings.json", f"http://127.0.0.1:{port}")
+        monkeypatch.chdir(sub)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(root))
+        assert _msg() == ""
+        # without the variable the cwd is the fallback, and it has no settings -> OFF
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR")
+        assert "routing is OFF" in _msg()
+        (sub / ".claude").mkdir()
+        _settings(sub / ".claude" / "settings.json", f"http://127.0.0.1:{port}")
+        assert _msg() == ""
+    finally:
+        srv.close()
