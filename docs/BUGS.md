@@ -27,6 +27,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 15 | MCP routing ran on Claude pressure 0.0 for the life of the process | fixed in this change (v16 P0.2) |
 | 16 | Critical-pressure override sent `/model claude-opus-4-6`, a retired id | fixed in this change (v16 P0.2) |
 | 17 | Semantic cache never hit, ignored context, and reported a hit rate of 0 | fixed in this change (v16 P0.5) |
+| P013-1 | `llm_act` wrote files into the MCP process cwd | fixed for the file tools in this change (P0.13); bash confinement is P2.9 |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -436,3 +437,33 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   because the API they call (`make_key`, `_semantic_cache_key`, the lookups table) did not
   exist, so their evidence is the single-flip mutants recorded in the v16 P0.5 gate file,
   each of which turns at least one of these tests red.
+
+## P013-1. `llm_act` wrote files into the MCP process cwd
+
+- **Symptom.** A local model's `write_file` from `llm_act` landed in the directory the MCP
+  server was started in (`$HOME` in the field, see `mcp_roots.py`), not in the caller's
+  project. On da31df7, `tests/test_llm_act_confinement.py` shows it: with the MCP cwd set to a
+  scratch directory and `CLAUDE_PROJECT_DIR` set to the project, `marker.txt` was written to
+  the MCP cwd; of 10 write targets outside the project, 3 were written (two into the MCP cwd,
+  one through a symlink-shaped path) and 7 refused; with no root at all, writes still went
+  through.
+- **Cause.** `tools/agentic._default_adapters` built `ReActAgent(tier=0)` with no `cwd`, so
+  `agentic/react.default_tool_executor` fell back to `Path.cwd()` with writes enabled. The
+  Codex tier (`CodexAdapter(tier=1)`) got no `-C` and ran `workspace-write` in the same
+  directory.
+- **Fix.** `tools/agentic.resolve_project_root` picks the root from the MCP client's roots
+  (`mcp_roots.root_from_ctx`, with its per-session hook-recorded cwd fallback), then
+  `$CLAUDE_PROJECT_DIR`; `llm_act` and `llm_delegate` take an optional MCP `ctx` for it. Both
+  tiers get that root as their cwd. No root means read-only: `default_tool_executor(cwd=None)`
+  refuses `write_file` and `bash`, and Codex runs `--sandbox read-only`. Every file path is
+  resolved (symlinks followed) and must be `is_relative_to` the root. The result JSON now says
+  `project_root` and `read_only`.
+- **Remaining gap.** A `bash` command can still redirect output outside the root (`echo x >
+  ../out/y.txt`); the regex denylist is not a sandbox. That belongs to P2.9 and is pinned by
+  the strict xfail `test_bash_redirect_outside_root_is_refused`.
+- **Test.** `tests/test_llm_act_confinement.py`: 6 tests fail on da31df7 and pass on the fix
+  (`test_write_lands_in_project_root_not_mcp_cwd`, `test_ten_outside_paths_refused_10_of_10`,
+  `test_no_root_is_read_only`, `test_mcp_client_roots_beat_claude_project_dir`,
+  `test_codex_tier_is_confined_too`, `test_executor_without_cwd_is_read_only`). Six mutants
+  (read-only flag off, containment off, ReAct on the process cwd, Codex without cwd, roots
+  ignored, env ignored) each turn at least one of them red.
