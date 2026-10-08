@@ -447,3 +447,8 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `test_statusline_row_carries_the_session_id_from_stdin[full|fast]`,
   `test_statusline_row_is_written_when_bare_python3_cannot_import_llm_router` (all 5 test ids
   fail on 38516fc8 and pass on head).
+- **Same gap on auto-route.** auto-route never called `set_session`, so its rows (P0.9-d)
+  had no session id either. Fixed in `perf/auto-route-imports` (#326): `main()` calls it
+  right after the stdin JSON parses. Test:
+  `tests/test_p09_auto_route_imports.py::test_main_names_the_session_on_the_latency_row`
+  (fails on 21234081, passes on 45fe0104).
