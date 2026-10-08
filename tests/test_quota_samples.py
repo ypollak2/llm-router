@@ -211,6 +211,23 @@ def test_tick_history_slot_taken_by_a_window_whose_clock_read_was_later(home):
     assert not (home / tick.HISTORY_NAME).exists()
 
 
+def test_tick_history_inside_the_interval_costs_one_stat_not_an_open(home, monkeypatch):
+    """GE6 review: the mtime check is the per-tick fast path. Inside the interval a
+    tick must not open (and flock) the stamp; the under-lock re-check is the
+    backstop for races, not the every-second path."""
+    assert tick.maybe_append_history(str(home), FRESH, NOW) is True
+    opened: list[str] = []
+    real_open = os.open
+
+    def counting_open(path, *a, **kw):
+        opened.append(str(path))
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr(tick.os, "open", counting_open)
+    assert tick.maybe_append_history(str(home), FRESH, NOW + 10) is False
+    assert opened == []
+
+
 def test_tick_history_and_session_sample_agree_on_the_rules():
     """The tick cannot import llm_router; its copy of the rules must not drift."""
     cases = [FRESH, dict(FRESH, updated_at=NOW - 1801), dict(FRESH, updated_at=NOW - 1800),
@@ -453,6 +470,35 @@ def test_history_series_summary(home):
     assert h["rows"] == 11 and h["stale"] == 1 and h["measured"] == 10
     assert h["slots"] == 24 and h["slots_filled"] == 11
     assert h["largest_gap_s"] == pytest.approx(3000)
+
+
+def test_history_slots_filled_counts_distinct_slots_not_rows(home):
+    """GE6 review: two rows in one 300 s slot (racing windows) fill one slot."""
+    with open(home / qs.HISTORY_NAME, "w") as fh:
+        for ts in (NOW + 10, NOW + 20, NOW + 310):
+            fh.write(json.dumps({"ts": ts, "five_hour_pct": 1, "weekly_pct": 2,
+                                 "updated_at": ts, "source": "measured"}) + "\n")
+    h = qs.quota_burn(NOW, NOW + 3600)["history"]
+    assert h["rows"] == 3 and h["slots_filled"] == 2 and h["slots"] == 12
+
+
+def test_session_samples_outside_the_window_are_ignored(home):
+    """GE6 review: a tagged session's samples before ``since`` or after ``until``
+    count neither for coverage nor for burn."""
+    _write_samples(home, [
+        _s("A", "start", NOW - 100, 10, 40),   # before the window
+        _s("A", "stop", NOW + 60, 12, 41),
+        _s("A", "stop", NOW + 120, 15, 42),
+        _s("A", "stop", NOW + 5000, 30, 50),   # after the window
+    ])
+    _tag(home, "A", NOW)
+    r = qs.quota_burn(NOW - 1, NOW + 1000)
+    cov = r["coverage"]
+    assert (cov["sessions"], cov["with_start"], cov["with_stop"], cov["covered"]) == (1, 0, 1, 0)
+    m = r["measured"]
+    assert m["n_turns"] == 2
+    assert m["five_hour_delta_sum"] == pytest.approx(3.0)
+    assert m["weekly_delta_sum"] == pytest.approx(1.0)
 
 
 def test_malformed_lines_are_skipped_and_counted(home):

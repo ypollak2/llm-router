@@ -28,6 +28,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 16 | Critical-pressure override sent `/model claude-opus-4-6`, a retired id | fixed in this change (v16 P0.2) |
 | 17 | Semantic cache never hit, ignored context, and reported a hit rate of 0 | fixed in this change (v16 P0.5) |
 | GE6-1 | Quota-burn coverage kept owner-overridden sessions in the organic denominator | fixed in `feat/quota-samples` (#320, GE6 repair 1) |
+| GE6-2 | Branch hook version equal to main's after main moved on | fixed in `feat/quota-samples` (#320, GE6 repair round 1) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -455,3 +456,19 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Test.** `tests/test_quota_samples.py::test_coverage_denominator_applies_the_owner_override`
   and `test_coverage_denominator_override_with_no_samples` (both red on d287ef4). Mutant:
   restoring the raw-tag denominator fails both.
+
+## GE6-2. Branch hook version equal to main's after main moved on
+
+- **Symptom.** PR #320 changed `session-end.py` and stamped it `llm_router-hook-version: 20`
+  (main + 1 when the branch was cut). Main then reached 20 through 2020f374 (#315). Merging
+  the branch would have left session-end at 20, the same stamp as main for different code, so
+  an installed v20 could not say which of the two it was (plan v16 §5 risk 15: version =
+  main + 1).
+- **Cause.** The stamp was chosen once, at branch time, and never re-checked when
+  origin/main was merged in.
+- **Fix.** On the merge of origin/main (7d857641) both copies moved to 21. Rule: every merge
+  of origin/main into a branch that changes a hook re-checks each changed hook's stamp
+  against main's and sets it to main + 1.
+- **Check.** No test can know main's stamp at test time. The check is a command, run after
+  each merge of origin/main:
+  `for f in session-start session-end; do git show origin/main:src/llm_router/hooks/$f.py | sed -n 2p; sed -n 2p src/llm_router/hooks/$f.py; done`
