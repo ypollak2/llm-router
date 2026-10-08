@@ -253,9 +253,49 @@ def test_install_without_binary_clears_orphaned_tool_tables(home, monkeypatch):
     codex.mkdir()
     (codex / "config.toml").write_text('[mcp_servers.llm_router.tools.llm]\napproval_mode = "approve"\n')
     monkeypatch.setattr("llm_router.install_hooks._build_mcp_entry", lambda: (None, ["WARN no binary"]))
-    install._install_codex_files()
-    assert not codex_host.has_orphan_mcp_tables(_toml(home))
+    actions = install._install_codex_files()
     assert "mcp_servers.llm_router" not in _toml(home)
+    assert not codex_host.has_orphan_mcp_tables(_toml(home))
+    assert any(a.startswith("✓ Removed orphaned") for a in actions)
+
+
+# A dotted key whose value spans lines cannot be cut line by line without
+# corrupting config.toml, so removal leaves it; the message must say so.
+_UNREMOVABLE = '[a]\nk = 1\n\n[mcp_servers]\nllm_router.args = [\n  "x",\n]\n'
+
+
+def test_install_without_binary_reports_orphans_it_could_not_remove(home, monkeypatch):
+    codex = home / ".codex"
+    codex.mkdir()
+    (codex / "config.toml").write_text(_UNREMOVABLE)
+    monkeypatch.setattr("llm_router.install_hooks._build_mcp_entry", lambda: (None, ["WARN no binary"]))
+    actions = install._install_codex_files()
+    assert not any("✓ Removed orphaned" in a for a in actions), actions
+    assert any("⚠" in a and "by hand" in a for a in actions), actions
+    assert "llm_router.args = [" in _toml(home)
+
+
+def test_legacy_uninstall_clears_orphaned_tool_tables(home):
+    """No manifest (a pre-manifest install, or one Codex extended): the legacy
+    host cleanup is the only path that sees the tool tables Codex wrote."""
+    codex = home / ".codex"
+    codex.mkdir()
+    (codex / "config.toml").write_text(
+        '[a]\nk = 1\n\n[mcp_servers.llm_router.tools.llm]\napproval_mode = "approve"\n')
+    actions = install.uninstall_host_integrations()
+    assert "llm_router" not in _toml(home)
+    assert "[a]\nk = 1" in _toml(home)
+    assert any(a.startswith("✓ Removed orphaned") for a in actions), actions
+
+
+def test_legacy_uninstall_reports_orphans_it_could_not_remove(home):
+    codex = home / ".codex"
+    codex.mkdir()
+    (codex / "config.toml").write_text(_UNREMOVABLE)
+    actions = install.uninstall_host_integrations()
+    assert not any("✓ Removed orphaned" in a for a in actions), actions
+    assert any("⚠" in a and "by hand" in a for a in actions), actions
+    assert _toml(home) == _UNREMOVABLE
 
 
 def test_reinstall_repairs_orphaned_tool_tables(home):

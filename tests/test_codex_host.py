@@ -159,3 +159,46 @@ def test_orphan_tool_tables_are_detected():
     assert not C.has_orphan_mcp_tables('[mcp_servers.llm_router]\ncommand = "c"\n' + orphan)
     assert not C.has_orphan_mcp_tables('[mcp_servers.llm_router]\nurl = "http://x"\n')
     assert not C.has_orphan_mcp_tables("")
+
+
+@pytest.mark.parametrize("text, kept", [
+    ('[a]\nk = 1\n\n[mcp_servers."llm_router".tools.x]\napproval_mode = "approve"\n', ["[a]", "k = 1"]),
+    ("[a]\nk = 1\n\n[mcp_servers.'llm_router'.tools.x]\napproval_mode = \"approve\"\n", ["[a]", "k = 1"]),
+    ('[a]\nk = 1\n\n[ mcp_servers . llm_router . tools . x ]\napproval_mode = "approve"\n', ["[a]", "k = 1"]),
+    ('[mcp_servers.llm_router.tools.x] # always allow\napproval_mode = "approve"\n[a]\nk = 1\n', ["[a]", "k = 1"]),
+    ('[mcp_servers]\nother = { command = "k" }\nllm_router.tools.x.approval_mode = "approve"\n',
+     ["[mcp_servers]", 'other = { command = "k" }']),
+    ('[mcp_servers]\n"llm_router" . tools.x = { approval_mode = "approve" }\n[a]\nk = 1\n', ["[mcp_servers]", "[a]", "k = 1"]),
+    ('mcp_servers.llm_router.tools.x.approval_mode = "approve"\n[a]\nk = 1\n', ["[a]", "k = 1"]),
+])
+def test_remove_subtree_takes_quoted_spaced_and_dotted_forms(text, kept):
+    """tomllib (has_orphan_mcp_tables) reads each of these as an llm_router server
+    with no transport; removal must take every one, or Codex stays broken."""
+    import tomllib
+    assert C.has_orphan_mcp_tables(text), text
+    out = C.remove_toml_subtree(text, C.MCP_TABLE)
+    assert C.read_mcp_server(tomllib.loads(out) and out) is None, out
+    for line in kept:
+        assert line in out.splitlines(), (line, out)
+
+
+def test_remove_subtree_keeps_the_comment_that_belongs_to_the_next_table():
+    text = ('[mcp_servers.llm_router]\ncommand = "c"\n# about command\nargs = []\n\n'
+            '# notes server, added by hand\n[mcp_servers.notes]\ncommand = "n"\n')
+    out = C.remove_toml_subtree(text, C.MCP_TABLE)
+    assert out == '# notes server, added by hand\n[mcp_servers.notes]\ncommand = "n"\n'
+
+
+def test_remove_subtree_leaves_a_multiline_value_it_cannot_take_whole():
+    """A dotted key whose value spans lines is left as it was: cutting its first
+    line would corrupt the file. The caller re-checks and reports it."""
+    import tomllib
+    text = '[mcp_servers]\nllm_router.args = [\n  "x",\n]\n'
+    out = C.remove_toml_subtree(text, C.MCP_TABLE)
+    tomllib.loads(out)
+    assert C.has_orphan_mcp_tables(out)
+
+
+def test_remove_subtree_stops_at_a_header_it_cannot_parse():
+    text = '[mcp_servers.llm_router]\ncommand = "c"\n["\\U0001F600"]\nk = 1\n'
+    assert C.remove_toml_subtree(text, C.MCP_TABLE) == '["\\U0001F600"]\nk = 1\n'

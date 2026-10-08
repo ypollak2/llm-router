@@ -141,7 +141,8 @@ def _codex_checks() -> tuple[list[str], list[str]]:
     elif codex_host.has_orphan_mcp_tables(text):
         lines.append(_fail(
             "[mcp_servers.llm_router] has no command or url — Codex will not start (\"invalid transport\")",
-            fix=fix,
+            fix="llm-router install (writes the command back; with no llm-router binary it strips the "
+                "leftover [mcp_servers.llm_router.*] tables) or llm-router uninstall (strips them all)",
         ))
         issues.append("Codex MCP server table has no transport")
     else:
