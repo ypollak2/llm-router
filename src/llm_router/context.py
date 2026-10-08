@@ -571,6 +571,34 @@ def format_session_summaries(summaries: list[dict]) -> str:
 # ── Context Assembly ─────────────────────────────────────────────────────────
 
 
+def _fit_layers_by_priority(layers: dict[str, str], budget_chars: int, sep: str) -> str:
+    """Fit the lower context layers into *budget_chars* (P0.1).
+
+    Priority is 2a (recent turns) > 1 (session summaries) > 2b (durable log).
+    Whole layers are kept in priority order while they fit; the first that does
+    not fit is cut, keeping its newest (tail) text; every lower layer is
+    dropped. The kept layers are returned in presentation order (1, 2a, 2b).
+    """
+    from llm_router.token_budget import truncate_to_budget
+
+    kept: dict[str, str] = {}
+    remaining = budget_chars
+    for key in ("2a", "1", "2b"):
+        text = layers.get(key)
+        if not text:
+            continue
+        cost = len(text) + (len(sep) if kept else 0)
+        if cost <= remaining:
+            kept[key] = text
+            remaining -= cost
+            continue
+        room = remaining - (len(sep) if kept else 0)
+        if room >= 64:  # below this a cut layer is just a marker
+            kept[key] = truncate_to_budget(text, room // 4, keep="tail")
+        break
+    return sep.join(kept[k] for k in ("1", "2a", "2b") if k in kept)
+
+
 async def build_context_messages(
     *,
     caller_context: str | None = None,
@@ -591,8 +619,11 @@ async def build_context_messages(
       2b. Durable session context (Session Context Accumulator, cross-process)
       3. Caller-supplied context (if any)
 
-    Context is optimized via the context_optimizer pipeline (v8.3.0),
-    then compacted if it still exceeds the token budget.
+    Layers 1-2b are optimized via the context_optimizer pipeline (v8.3.0),
+    then compacted if they still exceed the token budget left after layer 3.
+    If they still do not fit, whole layers are dropped lowest priority first
+    (2b, then 1) and the lowest remaining one is cut, keeping its newest text.
+    Layer 3 is never optimized or cut, even when it alone exceeds the budget.
 
     Args:
         caller_context: Optional explicit context from the MCP tool caller.
@@ -619,7 +650,10 @@ async def build_context_messages(
         system prompt and user prompt. May be empty if no context exists.
     """
     global _last_optimization
-    parts: list[str] = []
+    # Lower layers keyed by name; joined in presentation order (1, 2a, 2b) and,
+    # when over budget, dropped / cut in priority order (2a > 1 > 2b). Layer 3
+    # (the caller's live context) is held apart and never cut (P0.1).
+    layers: dict[str, str] = {}
 
     # CHZ-AUD-B-04: resolve (project_id, session_id) identity ONCE, up front,
     # so the in-process SessionBuffer (layer 2) and the durable Session
@@ -667,7 +701,7 @@ async def build_context_messages(
         summaries = await get_recent_session_summaries(limit=max_previous_sessions)
         session_context = format_session_summaries(summaries)
         if session_context:
-            parts.append(session_context)
+            layers["1"] = session_context
 
     # Layer 2: Current session messages. Same privacy gate as layer 1 — the
     # in-process buffer is verbatim session content and must not leak to
@@ -676,7 +710,7 @@ async def build_context_messages(
         buf = get_session_buffer(_ctx_project_id, _resolved_session_id)
         current_context = buf.format_for_injection(n=max_session_messages)
         if current_context:
-            parts.append(current_context)
+            layers["2a"] = current_context
 
     # Layer 2b: Durable session context (Session Context Accumulator) — user
     # prompts, tool calls, and routed Q&A recorded to a per-session JSONL
@@ -704,44 +738,50 @@ async def build_context_messages(
                 project_root=project_root,
             )
             if durable_context:
-                parts.append(durable_context)
+                layers["2b"] = durable_context
     except Exception as e:
         log.debug("Session context accumulator unavailable (non-fatal): %s", e)
 
-    # Layer 3: Caller-supplied context
-    if caller_context:
-        parts.append(f"[Additional context]\n{caller_context}")
+    # Layer 3: Caller-supplied context — the live request. Never optimized,
+    # compacted or cut: it is the one part the model cannot do without.
+    layer3 = f"[Additional context]\n{caller_context}" if caller_context else ""
 
-    if not parts:
+    if not layers and not layer3:
         _last_optimization = None
         return []
 
-    combined = "\n\n".join(parts)
-
-    # Context optimization (v8.3.0) — compress before sending to paid models
-    try:
-        import os
-        optimizer_mode = os.getenv("LLM_ROUTER_CONTEXT_OPTIMIZER", "auto").lower()
-        combined, opt_result = optimize_context(
-            combined, mode=optimizer_mode, is_free_model=is_free_model,
-        )
-        _last_optimization = opt_result
-        if opt_result.tokens_saved > 0:
-            log.info(
-                "Context optimized: %d → %d tokens (%.0f%% reduction, stages: %s)",
-                opt_result.original_tokens, opt_result.compressed_tokens,
-                opt_result.reduction_pct, ", ".join(opt_result.stages_applied),
-            )
-    except Exception as e:
-        log.debug("Context optimization failed (non-fatal): %s", e)
-        _last_optimization = None
-
-    # Compact if over budget (existing behavior)
-    combined, _ = await compact_structural(combined, threshold=max_context_tokens)
-
-    # Final hard truncation safety net
     max_chars = max_context_tokens * 4  # rough tokens→chars
-    if len(combined) > max_chars:
-        combined = combined[:max_chars] + "\n[... context truncated]"
+    sep = "\n\n"
+    lower_budget = max_chars - (len(layer3) + len(sep) if layer3 else 0)
+    lower = sep.join(layers[k] for k in ("1", "2a", "2b") if k in layers)
+    _last_optimization = None
 
+    if lower:
+        # Context optimization (v8.3.0) — compress before sending to paid models
+        try:
+            import os
+            optimizer_mode = os.getenv("LLM_ROUTER_CONTEXT_OPTIMIZER", "auto").lower()
+            lower, opt_result = optimize_context(
+                lower, mode=optimizer_mode, is_free_model=is_free_model,
+            )
+            _last_optimization = opt_result
+            if opt_result.tokens_saved > 0:
+                log.info(
+                    "Context optimized: %d → %d tokens (%.0f%% reduction, stages: %s)",
+                    opt_result.original_tokens, opt_result.compressed_tokens,
+                    opt_result.reduction_pct, ", ".join(opt_result.stages_applied),
+                )
+        except Exception as e:
+            log.debug("Context optimization failed (non-fatal): %s", e)
+
+        # Compact if over budget (existing behavior)
+        lower, _ = await compact_structural(lower, threshold=max(1, lower_budget // 4))
+
+        if len(lower) > lower_budget:
+            lower = _fit_layers_by_priority(layers, lower_budget, sep)
+
+    combined = sep.join(p for p in (lower, layer3) if p)
+    if not combined:
+        _last_optimization = None
+        return []
     return [{"role": "system", "content": combined}]

@@ -190,7 +190,6 @@ _ANTHROPIC: dict[str, Price] = {
     "claude-opus-5": Price("claude-opus-5", 5.00, 25.00),
     "claude-opus-4-8": Price("claude-opus-4-8", 5.00, 25.00),
     "claude-opus-4-7": Price("claude-opus-4-7", 5.00, 25.00),
-    "claude-opus-4-6": Price("claude-opus-4-6", 5.00, 25.00),
     "claude-opus-4-5": Price("claude-opus-4-5", 5.00, 25.00),
     "claude-sonnet-5": Price("claude-sonnet-5", 2.00, 10.00,
                              note="launch price, made permanent 2026-09-01; the "
@@ -227,6 +226,11 @@ _ANTHROPIC: dict[str, Price] = {
     # the bundled catalogue rather than smuggled in here.
     "claude-sonnet-4": Price("claude-sonnet-4", 3.00, 15.00, note="retired line; final list price"),
     "claude-3.5-sonnet": Price("claude-3.5-sonnet", 3.00, 15.00, note="retired line; final list price"),
+    # Retired for routing, not for pricing (plan v16 P0.2): the proxy's opus
+    # tier (proxy/claude_tiers.yaml) moved past it, yet three hooks still named
+    # it as the Opus target. Rows that used it keep pricing correctly here.
+    "claude-opus-4-6": Price("claude-opus-4-6", 5.00, 25.00,
+                             note="retired line for routing; superseded by the proxy opus tier"),
 }
 
 # cache_read is given explicitly wherever a provider does not use Anthropic's
@@ -507,6 +511,11 @@ def is_free(model: str) -> bool:
 
 def known_models() -> frozenset[str]:
     return frozenset(_PRICES)
+
+
+def retired_models() -> frozenset[str]:
+    """Models kept only to price historical rows. Routing code must never name one."""
+    return frozenset(k for k, v in _PRICES.items() if v.note.startswith("retired line"))
 
 
 def unverified_models() -> frozenset[str]:

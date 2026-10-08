@@ -22,6 +22,24 @@ for _k in [k for k in os.environ if k.startswith("LLM_ROUTER_")]:
     del os.environ[_k]
 os.environ["LLM_ROUTER_HOME"] = _tempfile.mkdtemp(prefix="llm_router-suite-home-")
 
+# 2026-10-06: the operator's live usage.db held 294 fixture rows written that day
+# (see tests/_real_home_guard.py). LLM_ROUTER_HOME alone is advisory: code that
+# resolves `Path.home() / ".llm-router"` at import or call time ignores it, and a
+# fail-open `except: pass` hides the write. So HOME itself is pointed at a tmp dir
+# for the whole session (before any module under test is imported, so import-time
+# constants resolve there too), and an audit hook REFUSES -- and records -- any
+# open/sqlite3.connect aimed at the real ~/.llm-router or ~/.claude.
+from tests import _real_home_guard  # noqa: E402
+
+_SUITE_USER_HOME = _tempfile.mkdtemp(prefix="llm_router-suite-userhome-")
+os.environ["HOME"] = _SUITE_USER_HOME
+os.environ["USERPROFILE"] = _SUITE_USER_HOME
+# XDG_* would still name the runner's REAL home on Linux CI (XDG_CONFIG_HOME=/home/runner/.config
+# made test_t15_..._real_paths_are_used_when_nothing_is_set resolve outside the sandbox).
+for _x in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+    os.environ.pop(_x, None)
+_real_home_guard.install()
+
 
 # ── G-D: prove the wheel is what is under test ──────────────────────────────
 def pytest_configure(config):
@@ -87,6 +105,33 @@ def _isolate_llm_router_writes(tmp_path, monkeypatch):
     # explicitly with the `qa_routing_on` fixture below. Clear any inherited value
     # so a developer's shell cannot flip the default under test.
     monkeypatch.delenv("LLM_ROUTER_QA_ROUTING", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_user_home(tmp_path_factory, monkeypatch):
+    """Point HOME / USERPROFILE at a per-test tmp dir (Path.home() follows it).
+
+    A SIBLING of `tmp_path`, not a child: several tests assert `tmp_path` is empty
+    after an installer ran, and a `userhome/` inside it would fail them."""
+    home = tmp_path_factory.mktemp("userhome")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    for _x in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(_x, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _real_home_untouched():
+    """Fail the test that tried to touch the real ~/.llm-router or ~/.claude.
+
+    The audit hook already raised PermissionError at the call site, but this codebase
+    is full of fail-open `except Exception: pass`, so the raise alone can be swallowed
+    and the test would stay green. The record cannot be swallowed.
+    """
+    before = len(_real_home_guard.VIOLATIONS)
+    yield
+    new = _real_home_guard.VIOLATIONS[before:]
+    assert not new, f"test touched the operator's real state: {new}"
 
 
 # ── Config-singleton isolation (CHZ-AUD-001) ────────────────────────────────
@@ -430,7 +475,11 @@ def no_providers_env(monkeypatch):
         llm_router_claw_code = False
         llm_router_claude_subscription = False
         llm_router_enforce = "soft"
-        llm_router_db_path = Path.home() / ".llm-router" / "routing.db"
+        # A tmp path, NOT `Path.home() / ".llm-router" / "routing.db"`: that was evaluated
+        # at class-definition time under the real HOME, and `cost._get_db` creates and
+        # writes whatever this names (test_router.py::test_no_providers_configured
+        # created ~/.llm-router/routing.db on every run).
+        llm_router_db_path = Path(_tempfile.mkdtemp(prefix="llm_router-empty-cfg-")) / "usage.db"
         token_budget = 10_000_000
         quality = QualityMode.BALANCED
         min_model_floor = "haiku"
@@ -777,7 +826,10 @@ async def _drain_judge_background_tasks():
     await drain_pending_judge_tasks()
 
 
-_REAL_HOME = __import__("pathlib").Path.home()
+# The REAL home, from the password database -- not `Path.home()`, which now follows the
+# sandboxed $HOME set at the top of this file and would make every "is this the real
+# home?" comparison below compare the sandbox with itself.
+_REAL_HOME = _real_home_guard.TRUE_HOME
 
 # ── Session-wide belt for the per-test `_no_repo_mutation` suspenders ────────
 # 2026-09-27: the operator's real ~/.codex/hooks.json accumulated 84

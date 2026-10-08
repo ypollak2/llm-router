@@ -80,9 +80,13 @@ def test_the_server_builds_against_these_models():
     They pass against a bare `mcp` install with no project code involved. Without
     this assertion they would be a statement about the dependency.
     """
+    from mcp.server.mcpserver import MCPServer
+
     import llm_router.server as server
 
-    assert type(server.mcp).__name__ == "MCPServer", (
-        f"server built a {type(server.mcp).__name__}, not MCPServer — the port "
+    # An MCPServer subclass is still the 2.x server: `call_identity.IdentityMCPServer` only
+    # binds the caller's tool_use id around each tool call. A 1.x `FastMCP` is not one.
+    assert isinstance(server.mcp, MCPServer), (
+        f"server built a {type(server.mcp).__name__}, not an MCPServer — the port "
         f"is incomplete or the module resolved an older copy"
     )

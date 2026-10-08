@@ -76,3 +76,20 @@ def test_resolved_session_id_wins_over_env_when_pointer_is_stale(tmp_path, monke
 
     row = _last_row(tmp_path)
     assert row["session_id"] == "env-session-xyz"
+
+
+def test_zero_claude_row_without_a_payload_session_id_is_null_not_the_pointer_guess(tmp_path):
+    """M0.3c / M0.4: a zero-Claude row carries the hook payload's own id or NULL. The pointer file
+    belongs to whichever session wrote last, so using it would credit a turn to the wrong session."""
+    session_store.write_pointer("pointer-session")
+
+    edit_ledger.record_edit_outcome(file="a.py", model="ollama/x", applied=True, source="zero_claude")
+    assert _last_row(tmp_path)["session_id"] is None
+
+    edit_ledger.record_edit_outcome(file="a.py", model="ollama/x", applied=True, source="zero_claude",
+                                    session_id="payload-session")
+    assert _last_row(tmp_path)["session_id"] == "payload-session"
+
+    # llm_edit runs in the MCP server, which has no payload: it still resolves through the pointer.
+    edit_ledger.record_edit_outcome(file="a.py", model="ollama/x", applied=True, source="llm_edit")
+    assert _last_row(tmp_path)["session_id"] == "pointer-session"

@@ -29,12 +29,10 @@ def constrained_decoding_enabled() -> bool:
     )
 
 
-_LARGE_WINDOW_FAMILIES = ("qwen3.5", "qwen3.8")
-
-
 def default_num_ctx(model: str | None) -> int:
-    name = (model or "").lower()
-    return 131072 if any(f in name for f in _LARGE_WINDOW_FAMILIES) else 32768
+    """Per-model window from the single table in ``llm_router.local_models`` (M3.4)."""
+    from llm_router.local_models import num_ctx as _table_num_ctx
+    return _table_num_ctx(model)
 
 
 def num_ctx(model: str | None = None) -> int | None:
@@ -48,6 +46,9 @@ def num_ctx(model: str | None = None) -> int | None:
         return value if value > 0 else None
     except ValueError:
         return default_num_ctx(model)
+
+
+_env_num_ctx = num_ctx  # OllamaAdapter.__init__ has a parameter named num_ctx that shadows the function
 
 
 def agent_temperature() -> float:
@@ -169,9 +170,6 @@ def parse_constrained_call(content: str, known: set[str]) -> list[dict]:
 
 # ── the router-owned loop's adapter ──────────────────────────────────────────
 
-TOOLKIT_NUM_CTX = 25000          # PLAN section 2.3: 25k-token cap for the local model
-
-
 class AdapterError(Exception):
     """The model call failed. `retryable` marks a transient server-side condition (an empty
     reply with done:false, which a busy or restarting Ollama returns), not a model decision."""
@@ -197,11 +195,13 @@ class OllamaAdapter:
 
     name = "ollama"
 
-    def __init__(self, model: str, *, base_url: str | None = None, num_ctx: int = TOOLKIT_NUM_CTX,
+    def __init__(self, model: str, *, base_url: str | None = None, num_ctx: int | None = None,
                  temperature: float | None = None, constrained: bool = False, think: bool = False):
         self.model = model
         self.base_url = validated_ollama_url(base_url) if base_url else get_ollama_url()
-        self.num_ctx = num_ctx
+        # M3.4: one window for every local call: the env-aware num_ctx(model) (override, else the
+        # table); an explicit value still wins. None = accept the server's default.
+        self.num_ctx = _env_num_ctx(model) if num_ctx is None else num_ctx
         self.temperature = agent_temperature() if temperature is None else temperature
         self.constrained = constrained
         self.think = think
@@ -211,8 +211,10 @@ class OllamaAdapter:
         payload = {
             "model": self.model, "messages": messages, "tools": tools, "stream": False,
             "think": self.think,
-            "options": {"temperature": self.temperature, "num_ctx": self.num_ctx},
+            "options": {"temperature": self.temperature},
         }
+        if self.num_ctx is not None:
+            payload["options"]["num_ctx"] = self.num_ctx
         if self.constrained:
             payload["format"] = tool_call_schema(sorted(names))
         try:
@@ -250,7 +252,7 @@ class OllamaAdapter:
 
 
 __all__ = [
-    "AdapterError", "AdapterReply", "OllamaAdapter", "TOOLKIT_NUM_CTX", "agent_temperature",
+    "AdapterError", "AdapterReply", "OllamaAdapter", "agent_temperature",
     "constrained_decoding_enabled", "default_num_ctx", "estimate_payload_tokens", "get_ollama_url",
     "num_ctx", "parse_constrained_call", "repair_toolcalls", "repair_xml_toolcalls",
     "tool_call_schema", "validated_ollama_url",

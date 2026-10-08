@@ -42,7 +42,7 @@ def _setup(tmp_path, extra_rows=()):
 
 
 def _units(proj):
-    return list(ns.units(days=None, session_id=SID_MAIN, root=proj.parent))
+    return list(ns.units(days=None, session_id=SID_MAIN, root=proj.parent, verify_records=True))
 
 
 def _codex(units):
@@ -163,7 +163,9 @@ def test_kpi_numbers_are_byte_identical_with_and_without_verify_records(tmp_path
     assert stripped == base_text                                # nothing else in the render moved
     lines = text.splitlines()
     d2 = next(i for i, ln in enumerate(lines) if ln.lstrip().startswith("D2 "))
-    assert "verify (shadow)" in lines[d2 + 1]                   # shown under D2
+    d3 = next(i for i, ln in enumerate(lines) if ln.lstrip().startswith("D3 "))
+    shadow = next(i for i, ln in enumerate(lines) if "verify (shadow)" in ln)
+    assert d2 < shadow < d3                                     # shown in D2's block, after its lines
 
 
 # ── privacy ──────────────────────────────────────────────────────────────────

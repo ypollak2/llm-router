@@ -29,7 +29,7 @@ import pathlib
 from llm_router.commands import install as install_module
 
 
-def test_install_codex_files_is_a_noop_at_the_real_home():
+def test_install_codex_files_is_a_noop_at_the_real_home(monkeypatch):
     """The exact shape of the historical bug: a test that forgot to patch home.
 
     Deliberately does NOT touch ``Path.home()``/``HOME`` at all. If
@@ -42,6 +42,13 @@ def test_install_codex_files_is_a_noop_at_the_real_home():
     line added 2026-09-27) and this test fails, because the raw installer runs
     and reports at least one action.
     """
+    # 2026-10-06: the suite now sandboxes $HOME for every test, so a bare `Path.home()`
+    # is no longer the real home. This test is ABOUT the real home, so it points
+    # `Path.home()` there explicitly -- safe, because the wrapper under test is a no-op
+    # and `tests/_real_home_guard.py` refuses any write that nevertheless got through.
+    from tests._real_home_guard import TRUE_HOME
+
+    monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: TRUE_HOME))
     real_home = pathlib.Path.home()
     before_exists = (real_home / ".codex" / "hooks.json").exists()
 

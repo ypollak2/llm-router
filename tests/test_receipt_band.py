@@ -322,3 +322,13 @@ def test_a_refused_install_leaves_an_existing_install_intact(claude_home):
     sp.write_text("{not json")
     assert rb.cmd_mod(["install"]) == 1
     assert marker.read_text() == "still here"
+
+
+def test_settings_write_lock_is_created_0600(claude_home):
+    from llm_router import paths
+
+    (claude_home / "settings.json").write_text(ORIGINAL)
+    lock = paths.state_path("settings.json.write.lock")
+    assert not lock.exists()
+    rb.install()
+    assert lock.exists() and stat.S_IMODE(os.stat(lock).st_mode) == 0o600

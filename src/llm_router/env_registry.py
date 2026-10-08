@@ -137,7 +137,6 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_ENFORCE_CONTEXT": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_QA_ROUTING": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_DISABLE_CONTINUATION_BYPASS": ("llm_router", "hooks/auto-route.py", 1),
-    "LLM_ROUTER_DISABLE_LLM_CLASSIFIERS": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_DISABLE_SUBPROCESS_BACKENDS": ("llm_router", "router.py", 1),
     "LLM_ROUTER_DYNAMIC_LEADERBOARD_ORDERING": ("llm_router", "dynamic_routing.py", 1),
     "LLM_ROUTER_ENFORCE": ("llm_router", "commands/doctor.py", 9),
@@ -161,6 +160,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_OKF_AUTOINDEX": ("llm_router", "hooks/session-start.py", 1),
     "LLM_ROUTER_OKF_AUTOINDEX_TTL_H": ("llm_router", "hooks/session-start.py", 1),
     "LLM_ROUTER_HOOK_BUDGET_S": ("llm_router", "hooks/auto-route.py", 1),
+    # P0.7-c: the only switch for the hook's LLM classifier layers (default off).
+    "LLM_ROUTER_HOOK_LLM_LAYER": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_CONSTRAINED_TOOLS": ("llm_router", "hooks/agent_loop.py", 1),
     "LLM_ROUTER_AGENT_NUM_CTX": ("llm_router", "hooks/agent_loop.py", 1),
     "LLM_ROUTER_LOCAL_NUM_CTX": ("llm_router", "hooks/agent_loop.py", 1),
@@ -207,6 +208,10 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # sub-second invalid replies before local serving pauses, and the pause.
     "LLM_ROUTER_PROXY_BACKEND_FAIL_N": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_BACKEND_COOLDOWN_S": ("llm_router", "proxy/server.py", 1),
+    # Opt-in serve mode (proxy/local_mode.py): off (default) or local-agent.
+    "LLM_ROUTER_PROXY_LOCAL_AGENT_MODE": ("llm_router", "proxy/server.py", 1),
+    # Opt-in SHADOW mode (proxy/local_shadow.py): off (default) or on.
+    "LLM_ROUTER_PROXY_LOCAL_SHADOW": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_TIERS": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_TIER_POLICY": ("llm_router", "proxy/server.py", 1),
     # Kill switch for the tier decision's quota-pressure step (off/0/false/no).
@@ -296,6 +301,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_QUOTAS_PATH": ("llm_router", "enterprise/quotas.py", 1),
     "LLM_ROUTER_QUOTA_DELAY": ("llm_router", "quota_tracker.py", 1),
     "LLM_ROUTER_QUOTA_RETRY": ("llm_router", "quota_tracker.py", 1),
+    "LLM_ROUTER_QUOTA_MAX_AGE": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_QUOTA_TTL": ("llm_router", "hooks/auto-route.py", 2),
     "LLM_ROUTER_RENDER_MODE": ("llm_router", "hooks/response_formatter.py", 1),
     "LLM_ROUTER_RESPONSE_ROUTER": ("llm_router", "commands/doctor.py", 3),
@@ -337,6 +343,11 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_SLIM": ("llm_router", "tool_surface.py", 1),
     "LLM_ROUTER_STALE_PRESSURE_FLOOR": ("llm_router", "budget.py", 1),
     "LLM_ROUTER_STATE_DIR": ("llm_router", "surface_status.py", 1),
+    # Read by the shell script, not by Python: the AST scan cannot see it, so it
+    # is listed in tests/test_env_registry.py's _INDIRECT_READS. "fast" = the
+    # debug fast line only; "both" = the full line then the fast line on a second
+    # row; anything else (the default, "full") = the full status line only.
+    "LLM_ROUTER_STATUSLINE": ("llm_router", "hooks/statusline-command.sh", 1),
     "LLM_ROUTER_STATUSLINE_REFRESH_CMD": ("llm_router", "statusline_tick.py", 1),
     "LLM_ROUTER_STATUSLINE_SLOW_MS": ("llm_router", "statusline_refresh.py", 1),
     "LLM_ROUTER_STATUS_EVERY": ("llm_router", "hooks/status-bar-clawcode.py", 2),
@@ -354,6 +365,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_SUPPRESS_PRICING_STALENESS": ("llm_router", "pricing.py", 1),
     "LLM_ROUTER_URL": ("llm_router", "commands/doctor.py", 1),
     "LLM_ROUTER_USAGE_DB_PATH": ("llm_router", "quota_savings.py", 1),
+    "LLM_ROUTER_USAGE_TTL_SEC": ("llm_router", "statusline_tick.py", 1),
     "LLM_ROUTER_USAGE_PATH": ("llm_router", "commands/invoice.py", 1),
     "LLM_ROUTER_WEEKLY_QUOTA_USD": ("llm_router", "quota_savings.py", 1),
     "LLM_ROUTER_WEEKLY_QUOTA_USD_OPUS_EQUIV": ("llm_router", "quota_savings.py", 1),
@@ -364,6 +376,20 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_ZERO_CLAUDE_VERIFY": ("llm_router", "local_agent/verify.py", 1),
     # Plan 3.7 (warm.py): keep the zero-Claude edit model resident, fail fast cold.
     "LLM_ROUTER_LOCAL_KEEP_ALIVE": ("llm_router", "warm.py", 1),
+    # P2 local-usage plan: shadow-only would-be "local" tier (log only, never routes).
+    "LLM_ROUTER_LOCAL_TIER": ("llm_router", "local_tier.py", 1),
+    # Local Ollama classifier (one v6 verdict per human turn): off|shadow|on, default off.
+    "LLM_ROUTER_LOCAL_CLASSIFIER": ("llm_router", "local_classifier.py", 1),
+    "LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS": ("llm_router", "local_classifier.py", 1),
+    # The classifier's own Ollama alias (M1.4): other callers load qwen3.5 at a different
+    # num_ctx, and a shared name would reload the runner back and forth.
+    "LLM_ROUTER_CLASSIFIER_MODEL": ("llm_router", "local_classifier.py", 1),
+    "LLM_ROUTER_CLASSIFIER_KEEP_ALIVE": ("llm_router", "local_classifier.py", 1),
+    # M1.8 round 3: decision-model backend (Ollama /v1/systemone, nimble). Default OFF
+    # (backend "chat" = the v6 /api/chat classifier); see decision_classifier.py.
+    "LLM_ROUTER_CLASSIFIER_BACKEND": ("llm_router", "local_classifier.py", 1),
+    "LLM_ROUTER_DECISION_MODEL": ("llm_router", "decision_classifier.py", 1),
+    "LLM_ROUTER_DECISION_ABSTAIN_BELOW": ("llm_router", "decision_classifier.py", 1),
     "LLM_ROUTER_ZCE_COLD_BUDGET_S": ("llm_router", "warm.py", 1),
     "LLM_ROUTER_ZCE_WARMUP": ("llm_router", "warm.py", 1),
     # ── indirect reads: DECLARED BY HAND, invisible to the AST scan ──

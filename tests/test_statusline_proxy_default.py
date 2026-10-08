@@ -35,8 +35,7 @@ def _listening_socket() -> socket.socket:
 
 
 def _run(home: Path) -> str:
-    # LLM_ROUTER_STATUSLINE=full: the proxy-down segment lives in the classic layout.
-    env = {"HOME": str(home), "PATH": "/usr/bin:/bin", "TERM": "dumb", "LLM_ROUTER_STATUSLINE": "full"}
+    env = {"HOME": str(home), "PATH": "/usr/bin:/bin", "TERM": "dumb"}
     r = subprocess.run(
         ["bash", str(_SCRIPT)], env=env, input="{}", capture_output=True, text=True, timeout=60,
     )

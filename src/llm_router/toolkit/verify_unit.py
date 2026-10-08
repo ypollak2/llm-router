@@ -361,8 +361,12 @@ def report_mismatch(run: V.VerifyRun, junit_path: Path) -> bool:
     if run.rc == 1 and n == 0:
         return True
     sm = stdout_summary(run.tail)
-    if sm is not None and sm.get("failed", 0) + sm.get("errors", 0) != n:
-        return True
+    if sm is not None:
+        # A summary with no "failed"/"errors" word (e.g. "3 passed") says zero failures; a key
+        # that is absent is summed as absent, not coerced to 0 inside the comparison.
+        reported = sum(sm[k] for k in ("failed", "errors") if k in sm)
+        if reported != n:
+            return True
     return False
 
 

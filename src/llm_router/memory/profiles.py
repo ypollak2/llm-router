@@ -43,6 +43,24 @@ def _db_path():
 # Threshold: require 3 corrections before locking a route
 CONFIDENCE_THRESHOLD = 3
 
+# P0.7-a (plan v16). ``corrections.original_tool`` holds the TOOL the router
+# chose ("llm_code"), but the hook looks learned routes up by TASK TYPE
+# (``_check_learned_override("code", ...)``). Keying the profile by the tool name
+# meant the two never met and no correction ever overrode a route. Profiles are
+# now keyed by task type; an unknown tool name is kept as-is.
+TOOL_TO_TASK_TYPE: dict[str, str] = {
+    "llm_code": "code",
+    "llm_query": "query",
+    "llm_research": "research",
+    "llm_generate": "generate",
+    "llm_analyze": "analyze",
+}
+
+
+def task_type_key(name: str) -> str:
+    """Learned-profile key for a tool name or task type (unknown names kept)."""
+    return TOOL_TO_TASK_TYPE.get(name, name)
+
 
 def fetch_corrections_history(days: int = 30) -> list[dict]:
     """Fetch corrections from the last N days.
@@ -99,7 +117,7 @@ def build_learned_profile() -> dict[str, LearnedRoute]:
     routes: dict[tuple[str, str], dict] = {}
 
     for corr in corrections:
-        task_type = corr.get("original_tool", "unknown")
+        task_type = task_type_key(corr.get("original_tool") or "unknown")
         corrected_model = corr.get("corrected_model", "unknown")
 
         key = (task_type, corrected_model)
@@ -174,15 +192,19 @@ def load_learned_profile() -> dict[str, LearnedRoute]:
 
     try:
         data = json.loads(_learned_routes_file().read_text())
-        return {
-            task: LearnedRoute(
+        # A file written before P0.7-a is keyed by tool name ("llm_code"); read
+        # it under the task type for one release. A task-type key wins over a
+        # legacy key for the same task.
+        profile: dict[str, LearnedRoute] = {}
+        for key in sorted(data, key=lambda k: k in TOOL_TO_TASK_TYPE, reverse=True):
+            route = data[key]
+            profile[task_type_key(key)] = LearnedRoute(
                 model=route["model"],
                 confidence=route["confidence"],
                 source=route["source"],
                 last_correction=route["last_correction"],
             )
-            for task, route in data.items()
-        }
+        return profile
     except (json.JSONDecodeError, KeyError):
         return {}
 
