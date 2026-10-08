@@ -24,6 +24,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 12 | Learned routes keyed by tool name, looked up by task type | fixed in P0.7 (`fix/learning-bugs`) |
 | 13 | Retrospective accuracy 100% at 0 corrections | fixed in P0.7 (`fix/learning-bugs`) |
 | 14 | Gateway doors: case-sensitive "auto", `stream` dropped, `max_tokens`/`temperature`/system dropped | fixed in this change (v16 P0.6) |
+| GE6-1 | Quota-burn coverage kept owner-overridden sessions in the organic denominator | fixed in `feat/quota-samples` (#320, GE6 repair 1) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -356,3 +357,21 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `test_semantic_cache_is_bypassed_while_a_caller_system_prompt_is_set`. Mutants: a
   case-sensitive `is_auto_model` fails 17; no stream refusal fails 3; temperature dropped
   from the payload fails 8; no cache bypass fails 1.
+
+## GE6-1. Quota-burn coverage kept owner-overridden sessions in the organic denominator
+
+- **Symptom.** `kpi --quota-burn` coverage on a copy of `~/.llm-router` for
+  2026-10-01T10:28Z..2026-10-08T10:28Z reported 7 organic sessions; the owner's override file
+  moves 1 of those 7 to research, so the organic population is 6. Repro on a temp home:
+  sessions A and B tagged organic, both with start and stop samples, A overridden to
+  research: coverage 1/2 (rate 0.5), right answer 1/1. One overridden session a week caps
+  the GE6-a point estimate at 6/7 = 85.7%, below the 95% bar, whatever the sampling.
+- **Cause.** `quota_samples.quota_burn` (:314 at d287ef4) built the denominator from the raw
+  tag kind, `{sid for sid, k in tagged.items() if k in allowed}`, while the per-session loop
+  resolved kind through `_kind_for` (override, then tag). The overridden session counted as
+  "other kind" in the loop, so it was never covered, but stayed in the denominator.
+- **Fix.** The denominator uses `_kind_for(sid, [], tagged)`, the same resolution as the loop.
+  Rule: every count in one KPI resolves session kind through one function.
+- **Test.** `tests/test_quota_samples.py::test_coverage_denominator_applies_the_owner_override`
+  and `test_coverage_denominator_override_with_no_samples` (both red on d287ef4). Mutant:
+  restoring the raw-tag denominator fails both.
