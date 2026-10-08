@@ -41,6 +41,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -116,6 +117,73 @@ def _changed(before: dict[str, str], after: dict[str, str]) -> list[str]:
     return sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
 
 
+def _git_state(root: Path) -> dict[str, str] | None:
+    """Dirty paths -> content digest, via `git status`; None if not a git repo.
+
+    The os.walk snapshot is capped at _SNAPSHOT_MAX_FILES, and the cap is hit in
+    walk order, so on a real repo files late in the walk (src/ after tests/ and
+    docs/) were never compared and `changed_files` came back [] after a real
+    edit (observed 2026-10-08). git enumerates the working tree itself, honours
+    .gitignore, and has no file cap. The digest keeps a file that was already
+    dirty before the run from being reported unless the run changed it again.
+    """
+    # Fixed minimal env: git needs PATH only, and must not see the operator's keys.
+    env = {"PATH": os.environ.get("PATH", os.defpath), "LC_ALL": "C"}
+    try:
+        r = subprocess.run(
+            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."],
+            cwd=str(root), capture_output=True, timeout=60, env=env,
+        )
+        top = subprocess.run(["git", "rev-parse", "--show-prefix"], cwd=str(root),
+                             capture_output=True, text=True, timeout=10, env=env)
+    except Exception:                                          # noqa: BLE001
+        return None
+    if r.returncode != 0 or top.returncode != 0:
+        return None
+    prefix = top.stdout.strip()          # root's path inside the repo, "" at top level
+    out: dict[str, str] = {}
+    entries = r.stdout.decode("utf-8", "surrogateescape").split("\0")
+    i = 0
+    while i < len(entries):
+        e = entries[i]
+        i += 1
+        if len(e) < 4:
+            continue
+        status, path = e[:2], e[3:]
+        if status[0] in "RC":            # rename/copy: next entry is the source path
+            i += 1
+        rel = path[len(prefix):] if prefix and path.startswith(prefix) else path
+        p = root / rel
+        try:
+            digest = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else "absent"
+        except OSError:
+            digest = "unreadable"
+        out[rel] = f"{status}:{digest}"
+    return out
+
+
+_SHELL_TOKENS = {";", "|", "||", "&&", "&", ">", ">>", "<", "<<", "2>", "2>&1", "&>"}
+_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_SHELL_REJECTED = (
+    "acceptance check uses shell syntax ({what}), but it is run WITHOUT a shell "
+    "(argv only; this is deliberate, see test_local_task_authority). Put the "
+    "command in an executable script and pass the script's path as "
+    "acceptance_check, e.g. a check.sh containing `HOME=$(mktemp -d) pytest -q`."
+)
+
+
+def _shell_syntax(argv: list[str]) -> str | None:
+    """Name the first shell construct in a string-derived argv, else None."""
+    if argv and _ENV_ASSIGN.match(argv[0]):
+        return f"environment assignment {argv[0].split('=', 1)[0]}="
+    for tok in argv:
+        if tok in _SHELL_TOKENS:
+            return f"operator {tok!r}"
+        if "$(" in tok or "`" in tok:
+            return "command substitution"
+    return None
+
+
 def _run_check(check: str | list[str], cwd: Path, timeout: float) -> tuple[bool, str]:
     """Run the caller's acceptance check. Its exit code is the verdict.
 
@@ -129,10 +197,25 @@ def _run_check(check: str | list[str], cwd: Path, timeout: float) -> tuple[bool,
     along (agent_loop.py: shlex.split + shell=False); this now matches it.
 
     A string is still accepted and split with `shlex`, so existing callers keep
-    working, but shell METACHARACTERS no longer mean anything: `;`, `|`, `&&`,
-    `$(...)` and redirections become literal arguments to one program.
+    working, but shell METACHARACTERS no longer mean anything. Since 2026-10-08
+    a string that contains them (NAME=value prefix, `;`, `|`, `&&`, `$(...)`,
+    redirection) is rejected with an explicit message instead of being run as
+    literal arguments, which failed with a bare FileNotFoundError. The fix for
+    the caller is a script: the check is argv, a script path is argv.
     """
-    argv = list(check) if isinstance(check, (list, tuple)) else shlex.split(check or "")
+    if isinstance(check, (list, tuple)):
+        argv = list(check)
+    else:
+        try:
+            argv = shlex.split(check or "")
+        except ValueError as exc:
+            return False, f"acceptance check could not be parsed: {exc}"
+        # A string is only split, never interpreted. Shell syntax therefore
+        # cannot work; say so up front instead of failing with a bare
+        # FileNotFoundError on "HOME=$(mktemp" (observed 2026-10-08).
+        what = _shell_syntax(argv)
+        if what:
+            return False, _SHELL_REJECTED.format(what=what)
     if not argv:
         return False, "acceptance check was empty"
     try:
@@ -169,8 +252,12 @@ async def llm_local_task(
         objective: What to accomplish. Written for a model that will read the
             repo itself — describe the goal, not the steps.
         workdir: The directory the task operates in. Files here may be modified.
-        acceptance_check: A shell command that exits 0 when the objective is
-            met (e.g. ``python3 -m pytest tests -q``). Without one the result
+        acceptance_check: A command that exits 0 when the objective is met,
+            given as an argv list or a plain string (e.g.
+            ``python3 -m pytest tests -q``). It is run WITHOUT a shell: for
+            env assignments, ``$(...)``, pipes, ``;``, ``&&`` or redirection,
+            put them in an executable script and pass its path; shell syntax in
+            a string is rejected with an error. Without one the result
             can never be ``verified_complete`` — an unverified success is
             reported as ``proposed``, because nothing established that it works.
         model: Ollama model to drive the loop.
@@ -229,10 +316,11 @@ async def llm_local_task(
     except Exception:                                        # noqa: BLE001
         pass
 
-    before = _snapshot(root)
+    git_before = _git_state(root)
+    before = _snapshot(root) if git_before is None else {}
     _trace.emit("task.start", objective=objective, workdir=str(root),
                 model=model, budget_s=budget_s, apply_writes=apply_writes,
-                acceptance_check=acceptance_check, files_before=len(before))
+                acceptance_check=acceptance_check, files_before=len(git_before if git_before is not None else before))
     report, error = None, None
     try:
         report = run_agent_loop(
@@ -252,8 +340,13 @@ async def llm_local_task(
             else:
                 os.environ[key] = prev
 
-    after = _snapshot(root)
-    changed = _changed(before, after)
+    if git_before is not None:
+        # git vanishing mid-run is the only way this is None; report nothing
+        # rather than invent a baseline.
+        git_after = _git_state(root)
+        changed = _changed(git_before, git_after) if git_after is not None else []
+    else:
+        changed = _changed(before, _snapshot(root))
     elapsed = time.monotonic() - started
 
     if error is not None:
