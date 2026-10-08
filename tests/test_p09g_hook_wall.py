@@ -241,6 +241,19 @@ def test_wall_verdict_is_on_cold_with_rows_above_the_load_bar_excluded_and_count
     assert w["cold"]["startup_gap_median_ms"] == 30.0
 
 
+def test_rows_above_the_load_bar_are_reported_separately_never_scored():
+    rows = _wall_rows("enforce-route", 100, n=200) + _wall_rows("enforce-route", 700, n=40, load=9.0)
+    live = _live("enforce-route", 50, n=200) + _live("enforce-route", 900, n=20, load=12.0)
+    g = hw.gate(rows, live, 7)
+    c, lv = g["hooks"]["enforce-route"]["wall"]["cold"], g["hooks"]["enforce-route"]["live"]
+    assert c["above_load"] == {"n": 40, "p50_ms": 700.0, "p95_ms": 700.0, "load1_median": 9.0}
+    assert c["p95_ms"] == 100.0 and lv["p95_ms"] == 50.0
+    assert lv["above_load"] == {"n": 20, "p50_ms": 900.0, "p95_ms": 900.0, "load1_median": 12.0}
+    line = next(ln for ln in hw.render_lines(g) if ln.startswith("enforce-route: "))
+    assert "(40 above load excluded: p50=700ms p95=700ms at load1 med=9.0, not scored)" in line
+    assert "(20 above load excluded: p50=900ms p95=900ms at load1 med=12.0, not scored, 0 load not recorded)" in line
+
+
 def test_wall_rows_split_on_load_before_or_after_and_unrecorded_load_is_excluded():
     rows = _wall_rows("bash-compress", 100, n=200)
     rows[0]["load1_after"] = 4.01
@@ -330,7 +343,8 @@ def test_kpi_prints_the_p09g_line_with_n_per_hook(monkeypatch):
     assert "P0.9-g sync hooks p95 <= 300ms" in text and "INSUFFICIENT" in text
     line = next(ln for ln in text.splitlines() if ln.startswith("enforce-route: "))
     assert "wall cold p50=120ms p95=120ms max=120ms n=200/200" in line
-    assert "live elapsed p95=40ms n=200/200 (5 above load excluded, 0 load not recorded) PASS" in line
+    assert ("live elapsed p95=40ms n=200/200 (5 above load excluded: p50=2000ms p95=2000ms at load1 med=7.0, "
+            "not scored, 0 load not recorded) PASS") in line
     cc = next(ln for ln in text.splitlines() if ln.startswith("cc-usage-track: "))
     assert "n=0/30*" in cc
     assert "per tool call (report only): enforce-route + bash-compress wall cold p95 sum = 240ms" in text

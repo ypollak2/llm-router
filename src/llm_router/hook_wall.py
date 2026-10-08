@@ -248,12 +248,23 @@ def _row_load(row: dict) -> float | None:
     return max(vals) if vals else None
 
 
+def _contended(values: list[float], loads: list[float]) -> dict[str, Any]:
+    """The rows above the load bar, reported separately and never scored (R8)."""
+    v = sorted(values)
+    return {"n": len(v), "p50_ms": round(_percentile(v, 0.50), 1), "p95_ms": round(_percentile(v, 0.95), 1),
+            "load1_median": round(statistics.median(loads), 2)}
+
+
 def wall_summary(rows: list[dict], hook: str, mode: str, max_load: float = MAX_LOAD) -> dict:
     """p50 / p95 / max wall time of one hook in one mode, rows above ``max_load``
-    (or with no load recorded) excluded and counted."""
+    (or with no load recorded) excluded and counted; the ones above the bar are
+    summarised separately under ``above_load``."""
     rs = [r for r in rows if r.get("hook") == hook and r.get("mode") == mode]
     ok = [r for r in rs if (_row_load(r) is not None and _row_load(r) <= max_load)]
     out: dict[str, Any] = {"n": len(ok), "excluded_load": len(rs) - len(ok), "max_load": max_load}
+    hi = [r for r in rs if (_row_load(r) is not None and _row_load(r) > max_load)]
+    if hi:
+        out["above_load"] = _contended([float(r["wall_ms"]) for r in hi], [_row_load(r) for r in hi])
     if not ok:
         return out
     walls = sorted(float(r["wall_ms"]) for r in ok)
@@ -301,6 +312,9 @@ def judge_live(live_rows: list[dict], days: float, max_load: float = MAX_LOAD) -
         need = LIVE_MIN_N[h]
         entry: dict[str, Any] = {"n": len(kept), "need": need, "excluded_load": len(rs) - len(kept),
                                  "load_not_recorded": unknown}
+        hi = [(float(r["elapsed_ms"]), v) for r, v in zip(rs, loads) if v is not None and v > max_load]
+        if hi:
+            entry["above_load"] = _contended([a for a, _ in hi], [b for _, b in hi])
         if len(kept) >= need:
             vals = sorted(float(r["elapsed_ms"]) for r in kept)
             p95 = _percentile(vals, 0.95)
@@ -337,6 +351,13 @@ def _ms(v: Any) -> str:
     return "-" if v is None else f"{v:.0f}ms"
 
 
+def _excluded(e: dict, what: str) -> str:
+    a = e.get("above_load")
+    seen = (f": p50={_ms(a['p50_ms'])} p95={_ms(a['p95_ms'])} at load1 med={a['load1_median']}, not scored"
+            if a else "")
+    return f"{e['excluded_load']} {what}{seen}"
+
+
 def render_lines(g: dict) -> list[str]:
     """The kpi / report lines: one head line, one per hook, one per-tool-call sum."""
     lines = [f"P0.9-g sync hooks p95 <= 300ms (wall cold n>={WALL_MIN_N} at load1<={g['max_load']:g}; "
@@ -346,13 +367,13 @@ def render_lines(g: dict) -> list[str]:
         c, wm = w["cold"], w["warm"]
         wall = (f"wall cold p50={_ms(c.get('p50_ms'))} p95={_ms(c.get('p95_ms'))} max={_ms(c.get('max_ms'))} "
                 f"n={c['n']}/{WALL_MIN_N} load1 med={c.get('load1_median', '-')} max={c.get('load1_max', '-')} "
-                f"({c['excluded_load']} above load excluded) {w['verdict']}; warm p95={_ms(wm.get('p95_ms'))} "
+                f"({_excluded(c, 'above load excluded')}) {w['verdict']}; warm p95={_ms(wm.get('p95_ms'))} "
                 f"n={wm['n']}")
         if c.get("startup_gap_median_ms") is not None:
             wall += f"; in-process p95={_ms(c.get('in_process_p95_ms'))}, start-up gap ~{_ms(c['startup_gap_median_ms'])}"
         star = "*" if h in LOW_VOLUME else ""
         live = (f"live elapsed p95={_ms(lv.get('p95_ms'))} n={lv['n']}/{lv['need']}{star} "
-                f"({lv['excluded_load']} above load excluded, {lv['load_not_recorded']} load not recorded) "
+                f"({_excluded(lv, 'above load excluded')}, {lv['load_not_recorded']} load not recorded) "
                 f"{lv['verdict']}")
         lines.append(f"{h}: {e['verdict']} | {wall} | {live}")
     er = g["hooks"]["enforce-route"]["wall"]["cold"].get("p95_ms")
@@ -425,7 +446,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{h:20s} {mode:4s} p50={_ms(s.get('p50_ms'))} p95={_ms(s.get('p95_ms'))} "
                       f"max={_ms(s.get('max_ms'))} n={s['n']} excluded_load={s['excluded_load']} "
                       f"load1 med={s.get('load1_median', '-')} max={s.get('load1_max', '-')} "
-                      f"start-up gap ~{_ms(s.get('startup_gap_median_ms'))}")
+                      f"start-up gap ~{_ms(s.get('startup_gap_median_ms'))}"
+                      + (f" | above load (not scored): n={s['above_load']['n']} "
+                         f"p50={_ms(s['above_load']['p50_ms'])} p95={_ms(s['above_load']['p95_ms'])} "
+                         f"load1 med={s['above_load']['load1_median']}" if s.get("above_load") else ""))
         return 0
 
     from llm_router import hook_latency
