@@ -20,10 +20,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 8 | `DISABLE_LLM_CLASSIFIERS` auto-detect turns the hook's Ollama layer off | known, not fixed |
 | 9 | Classifier warm-up loaded `llmr-classifier` at the wrong `num_ctx` | fixed in #298 (M1.4, review 2) |
 | 10 | README-advertised `--host pi` / `--host kimi` failed; detected gemini-cli skipped silently | fixed in this change (v16 P0.4) |
-| 11 | Session context store deleted after every turn | fixed in this change (v16 P0.1) |
-| 12 | Session context truncation dropped the newest events | fixed in this change (v16 P0.1) |
-| 13 | `build_context_messages` cut the caller's live context first | fixed in this change (v16 P0.1) |
-| 14 | `context_prep` truncated the user prompt | fixed in this change (v16 P0.1) |
+| 11 | Four shadow tests raced the clock and failed `main` on a loaded runner | fixed in this change (test-only) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -233,68 +230,49 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   auto-wire; `exit 2` to `return`; drop the report line; pi not marked unsupported) each turn
   a test red.
 
-## 11. Session context store deleted after every turn
+## 11. Four shadow tests raced the clock and failed `main` on a loaded runner
 
-- **Symptom.** The Session Context Accumulator's per-session JSONL
-  (`session_context_*.jsonl`) was gone after the first turn of every session, so routed
-  models got no durable context from turn 2 on (PLAN-v16 Appendix A, P0.1-a, "deleted every
-  turn" on da31df7).
-- **Cause.** `session-end.py` is registered on **Stop**, which Claude Code fires at the end of
-  every turn, not once per session. Its `main()` called `session_store.archive_session()`
-  unconditionally, so each turn deleted the store.
-- **Fix.** `main()` archives only when the payload's `hook_event_name` is `SessionEnd`, then
-  returns without rendering the summary a second time. The installer registers the same script
-  on SessionEnd (`_HOOK_DEFS`), keeping the Stop registration for the per-turn summary; the
-  plugin bundles carry the new event. `cleanup_old_sessions` still prunes by age. Existing
-  installs need `llm-router install --no-hosts` (there is no `--hooks-only` flag) to add the
-  SessionEnd entry to `~/.claude/settings.json`; until then the store is pruned by age only, never deleted per turn.
-- **Test.** `tests/test_session_end_context_archive.py`: `test_stop_never_archives`,
-  `test_session_end_archives_with_resolved_session_id`,
-  `test_session_file_survives_stop_with_its_events` (real store, 5 turns, line count
-  non-decreasing, deleted only on SessionEnd), `test_installer_registers_session_end_on_both_events`.
-
-## 12. Session context truncation dropped the newest events
-
-- **Symptom.** When a session's context exceeded `max_tokens`, the block injected into a routed
-  call held the oldest events and lost the newest, the ones the current question is about.
-- **Cause.** `session_store.build_session_context` orders records oldest to newest and then
-  called `token_budget.truncate_to_budget`, which keeps the head.
-- **Fix.** `truncate_to_budget(..., keep="tail")` keeps the end behind a
-  `[…older context truncated…]` marker and still fits the budget; `build_session_context` uses
-  it. The default stays `keep="head"` for every other caller.
-- **Test.** `tests/test_p01_context_loss.py::test_newest_event_present_in_200_of_200_over_budget_cases`
-  (Hypothesis, 200 generated over-budget sessions, the count is asserted and printed).
-
-## 13. `build_context_messages` cut the caller's live context first
-
-- **Symptom.** With an over-budget history, the `[Additional context]` block the caller passed
-  (layer 3, the live request's context) was cut or missing from the injected system message.
-- **Cause.** `context.build_context_messages` appended layer 3 last and then applied
-  `combined[:max_chars]`, so the hard cut always hit layer 3 first.
-- **Fix.** Layer 3 is held apart and never optimized, compacted or cut. Layers 1, 2a and 2b get
-  the budget left after it; if they still do not fit, whole layers are dropped lowest priority
-  first (2b, then 1) and the lowest remaining one is cut keeping its newest text.
-- **Test.** `tests/test_p01_context_loss.py`: four `test_layer3_intact_when_*` cases at 10x the
-  budget (summaries, session buffer, durable log, layer 3 itself) and
-  `test_lowest_layer_dropped_before_higher_ones`.
-
-## 14. `context_prep` truncated the user prompt
-
-- **Symptom.** `prepare_prompt` returned a `PreparedPrompt.user_prompt` cut to the budget's
-  user allocation with a `[truncated]` marker.
-- **Cause.** `context_prep.py` passed the user prompt through `truncate_to_budget`.
-- **Fix.** The prompt is never truncated. Over its allocation, `calculate_budget` already gives
-  system and context less room; when the prompt alone exceeds the model window minus the output
-  reserve, `prepare_prompt` raises `local_context_guard.ContextOverflow`. A system prompt
-  (the auto one is outside the budget's system allocation) that does not fit next to the
-  prompt in that window is dropped. Live impact was limited: `router.py` uses only
-  `full_system` from `prepare_prompt` and sends the raw prompt. It catches the exception with
-  `except Exception`, logs it at debug level and continues without the system prompt and
-  enrichment; it does not escalate. Escalation comes only from the provider preflight
-  (`providers.call_llm`, `ollama/` models) and chain failover.
-- **Test.** `tests/test_p01_context_loss.py::test_200k_prompt_is_intact_when_it_fits_the_window`,
-  `::test_200k_prompt_raises_context_overflow_when_over_the_window`,
-  `::test_user_prompt_is_never_shortened` (12 cases, outcome pinned per case: 3 raise, 9
-  intact), `::test_prompt_plus_auto_system_prompt_fits_the_window` (4 cases);
-  `tests/test_context_prep.py::test_long_user_prompt_never_truncated_for_small_model`
-  replaces the test that pinned the bug.
+- **Symptom.** `main` at 2ae21d9 (the #301 merge) was red: run 37656384812, job `test (3.13)`,
+  `tests/test_proxy_local_shadow.py::test_different_tool_disagrees - assert (None is False)`;
+  `test (3.11)` on the same commit passed. Two more were reported as load-sensitive:
+  `test_big_body_claude_response_is_not_delayed_by_shadow` ("shadow added 97 ms", once, on #281's
+  CI, green on rerun) and `tests/proxy/test_llm_classifier_shadow.py::test_assemble_never_holds_the_event_loop`
+  ("held for 108 ms", limit 50 ms; also 82 ms and 254 ms on runs 37668795388 and 37666629764, and
+  5 of 6 local runs at load average 77-127).
+- **Cause.** No product defect, and not #301 (it touches `decide_tier` and adds a no-op seam when the
+  classifier mode is off; the failing path is `local_shadow.py`, last changed in #294). All three
+  tests compared a wall clock with work that a loaded machine stretches.
+  1. `test_different_tool_disagrees`: the fake Claude replied after a fixed 0.3 s. Before local reaches
+     its backend the job makes four worker-thread hops (deepcopy, media scan, to_ollama, prompt cap).
+     When they took longer than 0.3 s the job saw Claude finish first, which is the documented
+     behaviour (`dropped_claude_first`), and wrote `agree=None`, `schema_valid=None`. The record was
+     correct and carried its reason code; the test read it as if local had answered. Reproduced on
+     a quiet machine by making `local_mode.has_media` sleep 0.5 s: 6 tests in the file failed, among
+     them this one with `assert (None is ...)`; with the fix the same 8 selected tests pass. The same
+     race sat under every test that expects local to win, not only the one that fired.
+  2. `test_big_body_...`: compared the wall time of a 3 MB POST with shadow on and off. Wall time
+     includes every moment the OS deschedules the process.
+  3. `test_assemble_never_holds_the_event_loop`: a 5 ms ticker and asyncio's slow-callback log, both
+     wall clock. With the loop CPU time sampled beside the wall gap, one failing run showed a 129 ms
+     wall gap against 33 ms of loop CPU, and the slow callback was the test's own `await _post(...)`.
+- **Fix.** Test-only. (1) `Upstream` takes the shadow runner and holds Claude's reply until the job's
+  `busy` flag drops, which happens after the job has chosen between "local answered" and "Claude
+  answered first"; `_step` does this whenever the fake backend has no gate (the dropped/budget tests
+  keep their gates and their real Claude-first order). (2) The guard measures `time.thread_time()` of
+  the loop thread: the only way shadow can delay Claude's first byte is work on that thread. (3) The
+  fake `assemble` blocks on a `threading.Event` that the test sets only after a continuation posted
+  during the block has come back; it asserts the worker thread is not the loop thread and that the
+  loop served the request while `assemble` was in flight. The wall-clock ticker is gone; the call-path
+  cost stays pinned by `test_a_long_history_is_assembled_off_the_request_path` and the G1_proxy p95
+  test, which read `tier_decision_s`.
+- **Test.** The three tests above, each 30 times in a row at load average ~80 (results in the PR).
+  Mutant for (3): `assemble(snapshot)` inline instead of `asyncio.to_thread(assemble, snapshot)` in
+  `llm_shadow._run` fails the new test (timeout; the loop cannot serve while it blocks).
+  Rule: a test that depends on a reply arriving "before" another must wait on that event, never on a
+  sleep length; a "loop not held" check must read the thread or the blocked work, not a wall gap.
+- **Fourth, found by the full-suite run on this change.**
+  `test_decision_p95_stays_under_30ms_with_a_2s_classifier` made the classifier slow with
+  `sleep(2.0)`. On a loaded machine the 200 sequential POSTs took more than 2 s, the first call
+  finished mid-loop, its slot was reused and the counts came out `drops == 195` instead of 196
+  (failed in isolation at load average ~70). The fake is now gated: it never answers until the test
+  ends. The p95 <= 30 ms bar is the product's own number and is left as it was.
