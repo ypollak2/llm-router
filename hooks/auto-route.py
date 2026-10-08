@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 46
+# llm_router-hook-version: 47
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -123,13 +123,8 @@ def _init_hook_logging() -> None:
         if not root.handlers:
             root.addHandler(_logging.StreamHandler(sys.stderr))
 
-try:
-    from llm_router.profiles import ROUTING_TABLE
-    from llm_router.types import RoutingProfile, TaskType
-except ImportError:
-    ROUTING_TABLE = {}
-    RoutingProfile = None
-    TaskType = None
+# P0.9 task 5: ``llm_router.profiles`` (yaml + model_aliases, ~43 ms of import) is
+# read only by ``_get_selected_model``, after a route is decided; it is imported there.
 
 
 # ── Registered-tool surface (CHZ-SURF-01) ────────────────────────────────────
@@ -209,7 +204,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 46"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 47"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -327,6 +322,24 @@ def _hook_budget_s() -> float:
 def _hook_deadline() -> float:
     """The single monotonic instant every local-execution budget answers to."""
     return _HOOK_STARTED_AT + _hook_budget_s()
+def _auto_detect_probe_url(raw: str) -> str:
+    """The URL the classifier auto-detect may probe (CHZ-SEC-06).
+
+    The default ``http://localhost:11434`` is returned as is: the validator returns
+    it unchanged and its fail-closed fallback is the same URL, so importing
+    ``llm_router.config`` for it (pydantic, ~105 ms of every prompt's import, P0.9
+    task 5) bought nothing. Any other URL is validated as before; an unsafe one or
+    an unavailable validator falls back to localhost."""
+    default = "http://localhost:11434"
+    if raw == default:
+        return default
+    try:
+        from llm_router.config import validate_ollama_url as _validate_ollama
+        return _validate_ollama(raw) or default
+    except Exception:
+        return default
+
+
 CONFIDENCE_THRESHOLD = int(os.environ.get("LLM_ROUTER_CONFIDENCE_THRESHOLD", "2"))  # v7.5.0: Aggressive routing — route more with lower threshold
 # Privacy-first: classify locally only (heuristic + Ollama) by default.
 # Set LLM_ROUTER_CLASSIFY_LOCAL_ONLY=false to enable external classifiers.
@@ -363,14 +376,7 @@ else:
         os.environ.get("OLLAMA_BASE_URL") or
         "http://localhost:11434"
     )
-    try:
-        from llm_router.config import validate_ollama_url as _validate_ollama
-        _ollama_url_check = _validate_ollama(_ollama_url_raw) or "http://localhost:11434"
-    except Exception:
-        _ollama_url_check = (
-            _ollama_url_raw if _ollama_url_raw == "http://localhost:11434"
-            else "http://localhost:11434"
-        )
+    _ollama_url_check = _auto_detect_probe_url(_ollama_url_raw)
     try:
         import urllib.request as _urllib_req
         # nosec B310 — URL validated above (scheme + host allowlist). The
@@ -4000,9 +4006,15 @@ def _get_selected_model(task_type: str, complexity: str) -> tuple[str, str]:
     Returns:
         (model_name, provider) tuple. Falls back to ("unknown", "unknown") if not found.
     """
-    if not ROUTING_TABLE or not TaskType or not RoutingProfile:
+    try:
+        # Imported here, not at module level (P0.9 task 5: yaml + model_aliases).
+        from llm_router.profiles import ROUTING_TABLE
+        from llm_router.types import RoutingProfile, TaskType
+    except ImportError:
         return "unknown", "unknown"
-    
+    if not ROUTING_TABLE:
+        return "unknown", "unknown"
+
     try:
         # Map task_type string to TaskType enum
         task_map = {
