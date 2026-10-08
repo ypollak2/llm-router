@@ -707,6 +707,10 @@ _HOOK_DEFS = [
     ("bash-compress.py", "llm_router-bash-compress.py", "PostToolUse", ""),
     ("context-capture.py", "llm_router-context-capture.py", "PostToolUse", ""),
     ("session-end.py", "llm_router-session-end.py", "Stop", ""),
+    # P0.1: the same script on SessionEnd is the only place the session context
+    # store is archived. Stop fires after every turn, so archiving there wiped
+    # the context after turn 1 (docs/BUGS.md).
+    ("session-end.py", "llm_router-session-end.py", "SessionEnd", ""),
 ]
 
 # Codex delegation inside agent-route.py can run `codex exec` for up to five
