@@ -201,3 +201,10 @@ def test_check_red_on_stale_index(tree: Path, tmp_path: Path) -> None:
     (tree / "docs" / "bugs" / "ZZ-4.md").write_text(_entry("ZZ-4"))  # entry added, index not regenerated
     stale = _run("bugs_index.py", "--root", str(tree), "--check", "--index", str(idx))
     assert stale.returncode != 0 and "stale" in (stale.stdout + stale.stderr).lower()
+
+
+def test_repo_does_not_gitignore_bug_entries() -> None:
+    """/docs/* is ignore-by-default; a new docs/bugs/<id>.md must not be silently dropped."""
+    for name in ("0001.md", "ZZ-1.md"):
+        r = _git(ROOT, "check-ignore", "-q", f"docs/bugs/{name}")
+        assert r.returncode == 1, f"docs/bugs/{name} is gitignored"
