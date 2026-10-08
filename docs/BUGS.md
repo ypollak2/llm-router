@@ -25,6 +25,10 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 12 | Learned routes keyed by tool name, looked up by task type | fixed in P0.7 (`fix/learning-bugs`) |
 | 13 | Retrospective accuracy 100% at 0 corrections | fixed in P0.7 (`fix/learning-bugs`) |
 | 14 | Gateway doors: case-sensitive "auto", `stream` dropped, `max_tokens`/`temperature`/system dropped | fixed in this change (v16 P0.6) |
+| 15 | MCP routing ran on Claude pressure 0.0 for the life of the process | fixed in this change (v16 P0.2) |
+| 16 | Critical-pressure override sent `/model claude-opus-4-6`, a retired id | fixed in this change (v16 P0.2) |
+| 17 | Semantic cache never hit, ignored context, and reported a hit rate of 0 | fixed in this change (v16 P0.5) |
+| P013-1 | `llm_act` wrote files into the MCP process cwd | fixed for the file tools in this change (P0.13); bash confinement is P2.9 |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -393,3 +397,110 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   `test_semantic_cache_is_bypassed_while_a_caller_system_prompt_is_set`. Mutants: a
   case-sensitive `is_auto_model` fails 17; no stream refusal fails 3; temperature dropped
   from the payload fails 8; no cache bypass fails 1.
+
+## 15. MCP routing ran on Claude pressure 0.0 for the life of the process
+
+- **Symptom.** With `usage.json` at 0.80 (session 53%, weekly 80%; rsync copy taken
+  2026-10-07T17:53Z, n = 1 file), `claude_usage.get_claude_pressure()` on da31df7 returned
+  0.0. The MCP chain never demoted Claude and never fronted Codex, however tight the quota.
+- **Cause.** `get_claude_pressure()` returned an in-process cache that only
+  `set_claude_pressure` filled, and only the `llm_update_usage` tool calls that. An MCP
+  server that never saw that call kept the initial 0.0. The hooks kept `usage.json` fresh the
+  whole time; the MCP side never read it.
+- **Fix.** `claude_usage.get_claude_pressure_reading()` returns `(value, state, as_of)`. A
+  push from the last 300 s wins; otherwise the value comes from `usage.json` through
+  `budget._pressure_from_usage`, cached 60 s. `updated_at` older than 30 min is `stale`, a
+  missing or unreadable file is `unknown`, and neither carries a value.
+  `get_claude_pressure()` returns the value or 0.0, so stale and unknown keep the old
+  default and do not reorder the chain.
+- **Test.** `tests/test_mcp_claude_pressure.py`:
+  `test_get_claude_pressure_is_no_longer_zero_for_life` (0.0 on da31df7, 0.96 on head),
+  `test_stale_file_is_unknown_and_reads_as_zero`,
+  `test_high_pressure_puts_codex_before_claude` (`_build_and_filter_chain`, code/moderate,
+  `usage.json` at 0.96: Claude led on da31df7, Codex leads on head) and
+  `test_stale_pressure_leaves_the_order_unchanged`.
+
+## 16. Critical-pressure override sent `/model claude-opus-4-6`, a retired id
+
+- **Symptom.** At critical pressure, auto-route.py told Claude Code to switch to
+  `/model claude-opus-4-6`. The proxy's opus tier (`proxy/claude_tiers.yaml`) is
+  `claude-opus-5-5`. subagent-start.py and the hook chain builder named the same old id.
+- **Cause.** A literal model id in three hooks, which nothing tied to the tier policy.
+- **Fix.** `proxy.tiers.tier_model("opus")` reads the policy the proxy loads (the
+  `LLM_ROUTER_PROXY_TIER_POLICY` file, else the bundled YAML) through
+  `ClaudeTierPolicy.load`. The three hooks use it and fall back to Claude Code's `opus` alias,
+  never to a literal. `pricing.retired_models()` lists ids kept only to price old rows;
+  `claude-opus-4-6` is one of them for routing.
+- **Test.** `tests/test_no_retired_model_ids.py::test_routing_code_names_no_retired_model_id`
+  scans the string literals in `src/llm_router/hooks/*.py` and `router.py` and prints how many
+  it checked. On da31df7 it found 3 hits (auto-route.py:4799, chain_builder.py:188,
+  subagent-start.py:203); on head it finds 0. To re-prove the baseline from head, run the
+  same test with `RETIRED_IDS_SCAN_ROOT=<da31df7 checkout>/src/llm_router`: it fails with 3 hits.
+
+## 17. Semantic cache never hit, ignored context, and reported a hit rate of 0
+
+- **Symptom.** (a) A routed request repeated within 24 h was never served from the semantic
+  cache. (b) Had the key matched, "yes, do it" answered in one conversation would have been
+  served verbatim in another: the key had no context. (c) With no Ollama the cache did nothing.
+  (d) `cost.get_cache_hit_stats` and the session-end hook's `_query_cache_hit_stats` always
+  returned zeros / `{}`, so the hit rate (R-CTX-7) could not be measured.
+- **Cause.** (a) `route_and_call` called `semantic_cache.check` with the user's raw prompt, but
+  `_finalize_successful_route` called `store` with the prompt after OKF / `<repo_state>`
+  injection. Different text means a different embedding and, because `<repo_state>` carries
+  numbers, a different C-03 discriminator. (b) No column bound an entry to its conversation.
+  (c) `check`/`store` returned early when `ollama_base_url` was unset. (d) Both queries named
+  columns `semantic_cache` never had (`was_hit`, `accessed_at`; `cache_hit`, `tokens_saved`,
+  `timestamp`); the exceptions were swallowed by fail-open paths.
+- **Fix.** v16 P0.5 (`fix/semantic-cache-key`): `route_and_call` builds one
+  `semantic_cache.CacheKey` before dispatch (raw prompt + `ctx_hash` = sha256 of caller
+  `context`, else the last two buffered messages, plus the caller's `system_prompt` if given and
+  the caller's project scope) and passes it
+  to `check` and, through the dispatch loop, to `store`. Exact-match pass on
+  sha256(normalised text) + `ctx_hash` needs no Ollama (rows stored with embedding `''`, since
+  the existing column is `NOT NULL`). Additive migration: `ctx_hash`, `text_hash`, `hit_count`,
+  `last_hit_at`, and a `semantic_cache_lookups` table (one row per lookup, no prompt text). Both
+  stats queries read that table and return `{hits, lookups, n}`.
+  Lookup rows older than `LLM_ROUTER_PERSIST_TTL_DAYS` are purged on every store, so the
+  stats period "all" covers at most that window.
+- **Test.** `tests/test_p05_semantic_cache_key.py` (8 tests):
+  `test_same_request_hits_after_context_injection`, `test_context_is_part_of_the_key`,
+  `test_key_uses_last_two_conversation_messages_when_no_caller_context`,
+  `test_caller_system_prompt_is_part_of_the_key`,
+  `test_old_lookups_are_purged_even_when_no_cache_row_expired`,
+  `test_exact_hash_fallback_without_ollama`, `test_cost_cache_hit_stats_returns_true_counts_with_n`,
+  `test_session_end_cache_hit_stats_returns_true_counts_with_n`. All 8 fail on da31df7, but
+  only three fail for the bug itself: the second identical request reached a provider; "yes,
+  do it" was served across contexts; the same system prompt never hit. The other five fail
+  because the API they call (`make_key`, `_semantic_cache_key`, the lookups table) did not
+  exist, so their evidence is the single-flip mutants recorded in the v16 P0.5 gate file,
+  each of which turns at least one of these tests red.
+
+## P013-1. `llm_act` wrote files into the MCP process cwd
+
+- **Symptom.** A local model's `write_file` from `llm_act` landed in the directory the MCP
+  server was started in (`$HOME` in the field, see `mcp_roots.py`), not in the caller's
+  project. On da31df7, `tests/test_llm_act_confinement.py` shows it: with the MCP cwd set to a
+  scratch directory and `CLAUDE_PROJECT_DIR` set to the project, `marker.txt` was written to
+  the MCP cwd; of 10 write targets outside the project, 3 were written (two into the MCP cwd,
+  one through a symlink-shaped path) and 7 refused; with no root at all, writes still went
+  through.
+- **Cause.** `tools/agentic._default_adapters` built `ReActAgent(tier=0)` with no `cwd`, so
+  `agentic/react.default_tool_executor` fell back to `Path.cwd()` with writes enabled. The
+  Codex tier (`CodexAdapter(tier=1)`) got no `-C` and ran `workspace-write` in the same
+  directory.
+- **Fix.** `tools/agentic.resolve_project_root` picks the root from the MCP client's roots
+  (`mcp_roots.root_from_ctx`, with its per-session hook-recorded cwd fallback), then
+  `$CLAUDE_PROJECT_DIR`; `llm_act` and `llm_delegate` take an optional MCP `ctx` for it. Both
+  tiers get that root as their cwd. No root means read-only: `default_tool_executor(cwd=None)`
+  refuses `write_file` and `bash`, and Codex runs `--sandbox read-only`. Every file path is
+  resolved (symlinks followed) and must be `is_relative_to` the root. The result JSON now says
+  `project_root` and `read_only`.
+- **Remaining gap.** A `bash` command can still redirect output outside the root (`echo x >
+  ../out/y.txt`); the regex denylist is not a sandbox. That belongs to P2.9 and is pinned by
+  the strict xfail `test_bash_redirect_outside_root_is_refused`.
+- **Test.** `tests/test_llm_act_confinement.py`: 6 tests fail on da31df7 and pass on the fix
+  (`test_write_lands_in_project_root_not_mcp_cwd`, `test_ten_outside_paths_refused_10_of_10`,
+  `test_no_root_is_read_only`, `test_mcp_client_roots_beat_claude_project_dir`,
+  `test_codex_tier_is_confined_too`, `test_executor_without_cwd_is_read_only`). Six mutants
+  (read-only flag off, containment off, ReAct on the process cwd, Codex without cwd, roots
+  ignored, env ignored) each turn at least one of them red.

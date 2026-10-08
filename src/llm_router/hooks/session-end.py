@@ -1204,29 +1204,35 @@ def _query_routing_logic(session_start: float | None = None) -> list[dict]:
 
 
 def _query_cache_hit_stats() -> dict:
-    """Query semantic_cache: return {total_requests, cache_hits, hit_rate_pct, estimated_saved_usd}."""
+    """Today's semantic-cache hit rate with its n (P0.5, R-CTX-7).
+
+    Reads ``semantic_cache_lookups`` (one row per lookup, hit or miss, written
+    by ``semantic_cache.check``). It used to query ``cache_hit``,
+    ``tokens_saved`` and ``timestamp`` on ``semantic_cache`` — none of which
+    exist — so it raised every time and returned ``{}``.
+
+    Returns {hits, lookups, n, hit_rate_pct, estimated_saved_usd} plus the
+    legacy aliases total_requests/cache_hits; {} when there were no lookups.
+    """
     if not os.path.exists(_db_path()):
         return {}
     try:
         conn = sqlite3.connect(_db_path())
-        cursor = conn.execute("""
-            SELECT
-                COUNT(*) as total_requests,
-                SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END) as cache_hits,
-                ROUND(SUM(CASE WHEN cache_hit = 1 THEN tokens_saved ELSE 0 END) * 0.003 / 1000, 4) as estimated_saved
-            FROM semantic_cache
-            WHERE date(timestamp, 'localtime') = date('now', 'localtime')
-        """)
-        row = cursor.fetchone()
-        conn.close()
-        if not row or row[0] == 0:
+        try:
+            row = conn.execute("""
+                SELECT COUNT(*), COALESCE(SUM(hit), 0), COALESCE(SUM(saved_usd), 0)
+                FROM semantic_cache_lookups
+                WHERE date(ts, 'unixepoch', 'localtime') = date('now', 'localtime')
+            """).fetchone()
+        finally:
+            conn.close()
+        if not row or not row[0]:
             return {}
-        total_requests, cache_hits, estimated_saved = row
-        cache_hits = cache_hits or 0
-        estimated_saved = float(estimated_saved) if estimated_saved else 0.0
-        hit_rate_pct = (cache_hits / total_requests) * 100 if total_requests > 0 else 0.0
-        return {"total_requests": total_requests, "cache_hits": cache_hits,
-                "hit_rate_pct": hit_rate_pct, "estimated_saved_usd": estimated_saved}
+        lookups, hits, saved = int(row[0]), int(row[1]), float(row[2])
+        return {"hits": hits, "lookups": lookups, "n": lookups,
+                "hit_rate_pct": hits / lookups * 100,
+                "estimated_saved_usd": round(saved, 6),
+                "total_requests": lookups, "cache_hits": hits}
     except Exception:
         return {}
 
@@ -1583,7 +1589,7 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
     if cache_stats:
         hr = cache_stats['hit_rate_pct']
         hr_color = _C_GREEN if hr >= 50 else _C_LABEL
-        quality_parts.append(f"{hr_color}{hr:.0f}%{_RESET} cache hit")
+        quality_parts.append(f"{hr_color}{hr:.0f}%{_RESET} cache hit (n={cache_stats['n']})")
 
     if quality_parts:
         lines.append(f"    {' · '.join(quality_parts)}")
