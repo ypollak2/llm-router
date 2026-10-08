@@ -41,6 +41,7 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | 29 | The claw-code Stop hook and the dashboard models panel raise TypeError on a NULL task type | fixed in this change (v16 P0.8 r1) |
 | P013-1 | `llm_act` wrote files into the MCP process cwd | fixed for the file tools in this change (P0.13); bash confinement is P2.9 |
 | 18 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
+| P011-1 | Haiku guard re-tripped on audit days older than its window | fixed in `feat/haiku-guard-in-repo` (P0.11, 3f4149b) |
 
 ## 1. NULL `session_id` on local routing rows
 
@@ -699,3 +700,18 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   loads neither `router` nor `northstar`. Mutants (keep-only-local in the hook, no strip in
   `build_chain`, inverted QA check, `openai_compat` dropped, `qa_policy` importing `router`)
   each turn the file red.
+
+## P011-1. Haiku guard re-tripped on audit days older than its window
+
+- **Symptom.** After the owner deleted `~/.llm-router/tier_overrides.json` to turn the Haiku
+  rewrite back on, the next guard run wrote the override again. Two low daily audits (7/10
+  and 7/10) from weeks earlier still counted as "2 consecutive days below 8/10". Found on
+  re-verification of P0.11 at b5f88b5 (unit test, synthetic audits; no live trip happened).
+- **Cause.** `run_once` evaluated `audit_daily` on the newest audited date at any age, not on
+  the dates inside the guard's 7-day window.
+- **Fix.** `audit_daily` in `run_once` looks only at audit days on or after the window start.
+  `kpi --haiku-watch` still names its own day. `audit_batch` is unchanged (newest summary at
+  any age, as ported from the research guard).
+- **Test.** `tests/test_proxy_haiku_guard.py::test_run_once_ignores_daily_audits_older_than_the_window`:
+  red on b5f88b5 (`assert 'trip' == 'ok'`), green on 3f4149b; mutant `recent = list(days)`
+  turns it red.
