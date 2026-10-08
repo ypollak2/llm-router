@@ -19,7 +19,11 @@ The shim owns that port instead and stays deliberately small:
   ``https://api.anthropic.com`` with the same headers, and a ``proxy_down``
   event is recorded in the fail-open store (``failopen.record``; KPI G2);
 * once a response byte has gone to the client nothing is retried: the model
-  has already started answering, and a replay would duplicate the turn.
+  has already started answering, and a replay would duplicate the turn;
+* a drop before response headers (``disconnected``) is still retried, although
+  the main proxy may already have sent the request to Anthropic. The client
+  has seen nothing, so its output is not duplicated, but that turn can be
+  billed twice. This follows the plan's "before any byte was sent" rule.
 
 It does not import ``proxy/server.py``. A bad deploy of the main proxy must not
 take the shim down with it, so the shim depends on aiohttp (server side), httpx
