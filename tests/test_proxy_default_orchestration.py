@@ -276,7 +276,7 @@ class _BindsPerService:
                 srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 srv.bind(("127.0.0.1", port))
-                srv.listen(1)
+                srv.listen(128)
                 self.socks.append(srv)
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
@@ -303,7 +303,9 @@ def test_default_install_starts_main_on_upstream_port_and_shim_on_settings_port(
         assert f"<string>--port</string><string>{port}</string>" in shim_text
         assert f"<string>--upstream-port</string><string>{upstream}</string>" in shim_text
         # main first, then the shim: the shim must never come up pointing at nothing
-        assert [c for c in runner.calls] == [f"launchctl load {main_dest}", f"launchctl load {shim_dest}"]
+        assert len(runner.calls) == 2
+        assert f"launchctl load {main_dest}" in runner.calls[0]
+        assert f"launchctl load {shim_dest}" in runner.calls[1]
         data = json.loads(_sandbox.read_text())
         assert data["env"]["ANTHROPIC_BASE_URL"] == f"http://127.0.0.1:{port}"
         sentinel = pd.read_sentinel()
@@ -386,3 +388,125 @@ def test_uninstall_stops_and_removes_both_services(tmp_path, _sandbox):
     assert any("Stopped proxy service" in a for a in actions)
     assert not main_dest.exists() and not shim_dest.exists()
     assert pd.read_sentinel() is None
+
+
+def _install_both(service_home, port, upstream, runner):
+    return cmd.install_proxy_default(
+        port=port, upstream_port=upstream, home=service_home, system="Darwin",
+        runner=runner, health_retries=5, health_interval_s=0.05,
+    )
+
+
+def test_rerunning_install_on_a_finished_shim_install_keeps_the_shim_in_the_sentinel(tmp_path, _sandbox):
+    """Before the fix the re-run saw its own shim on the port, took the "reuse a
+    foreign proxy" branch and rewrote the sentinel with shim_label None, so
+    uninstall left the shim plist and a running shim behind."""
+    service_home = tmp_path / "svc_home"
+    port, upstream = _free_port(), _free_port()
+    runner = _BindsPerService({pd.LABEL: upstream, pd.SHIM_LABEL: port}, {pd.LABEL, pd.SHIM_LABEL})
+    try:
+        assert _install_both(service_home, port, upstream, runner)["ok"] is True
+        before = list(runner.calls)
+        again = _install_both(service_home, port, upstream, runner)
+        assert again["ok"] is True and again["reused"] is True, again
+        assert any("Already installed" in a for a in again["actions"])
+        assert runner.calls == before, "a finished install is not restarted"
+        sentinel = pd.read_sentinel()
+        assert sentinel["shim_label"] == pd.SHIM_LABEL and sentinel["upstream_port"] == upstream
+        assert json.loads(_sandbox.read_text())["env"]["ANTHROPIC_BASE_URL"] == f"http://127.0.0.1:{port}"
+    finally:
+        runner.close()
+    shim_dest, _ = pd.service_target("Darwin", service_home, label=pd.SHIM_LABEL)
+    cmd.uninstall_proxy_default(home=service_home, system="Darwin", runner=lambda c, **k: subprocess.CompletedProcess(c, 0, "", ""))
+    assert not shim_dest.exists()
+
+
+def test_uninstall_removes_a_shim_plist_that_no_sentinel_names(tmp_path, _sandbox):
+    service_home = tmp_path / "svc_home"
+    shim_dest, _ = pd.install_shim_service(system="Darwin", home=service_home, port=8787, upstream_port=8797)
+    assert shim_dest.exists() and pd.read_sentinel() is None
+    stops = []
+    actions = cmd.uninstall_proxy_default(
+        home=service_home, system="Darwin",
+        runner=lambda c, **k: stops.append(c) or subprocess.CompletedProcess(c, 0, "", ""),
+    )
+    assert stops == [f"launchctl unload {shim_dest}"]
+    assert not shim_dest.exists()
+    assert any("Stopped fail-open shim service" in a for a in actions)
+    assert not any("sentinel" in a for a in actions), "no sentinel existed, none is removed"
+
+
+def test_uninstall_with_nothing_installed_does_nothing(tmp_path, _sandbox):
+    assert cmd.uninstall_proxy_default(home=tmp_path / "svc_home", system="Darwin",
+                                       runner=lambda c, **k: pytest.fail("ran " + c)) == []
+
+
+def _seed_sentinel(port, upstream, shim_label=pd.SHIM_LABEL):
+    pd.write_sentinel(port=port, steps=pd.DEFAULT_STEPS, tiers=pd.DEFAULT_TIERS, label=pd.LABEL,
+                      system="Darwin", upstream_port=upstream, shim_label=shim_label)
+
+
+def _listener(port):
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", port))
+    s.listen(128)
+    return s
+
+
+def test_already_installed_needs_both_ports_healthy(tmp_path, _sandbox):
+    port, upstream = _free_port(), _free_port()
+    _seed_sentinel(port, upstream)
+    shim_up = _listener(port)  # main proxy is down
+    runner = _BindsPerService({pd.LABEL: upstream, pd.SHIM_LABEL: port}, {pd.LABEL})
+    try:
+        r = _install_both(tmp_path / "svc", port, upstream, runner)
+        assert not any("Already installed" in a for a in r["actions"]), r
+        assert not any("Found a proxy already answering" in a for a in r["actions"]), r
+        assert any(pd.LABEL in c for c in runner.calls), "the dead main proxy is restarted"
+    finally:
+        runner.close()
+        shim_up.close()
+
+
+def test_own_layout_requires_matching_sentinel_label_and_upstream_port(tmp_path, _sandbox):
+    port, upstream = _free_port(), _free_port()
+    for label, up in ((None, upstream), (pd.SHIM_LABEL, upstream + 1)):
+        _seed_sentinel(port, up, shim_label=label)
+        a, b = _listener(port), _listener(upstream)
+        try:
+            r = _install_both(tmp_path / "svc", port, upstream, lambda c, **k: subprocess.CompletedProcess(c, 0, "", ""))
+            assert not any("Already installed" in x for x in r["actions"]), (label, up, r)
+            assert any("Found a proxy already answering" in x for x in r["actions"]), (label, up, r)
+        finally:
+            a.close()
+            b.close()
+
+
+def test_changed_plist_is_reported_not_silently_restarted(tmp_path, _sandbox):
+    service_home = tmp_path / "svc"
+    main_dest, _ = pd.service_target("Darwin", service_home)
+    main_dest.parent.mkdir(parents=True)
+    main_dest.write_text("<plist>hand edited, port 8787</plist>")
+    port, upstream = _free_port(), _free_port()
+    runner = _BindsPerService({pd.LABEL: upstream, pd.SHIM_LABEL: port}, {pd.LABEL, pd.SHIM_LABEL})
+    try:
+        r = _install_both(service_home, port, upstream, runner)
+        notes = [a for a in r["actions"] if a.startswith("NOTE ")]
+        assert len(notes) == 1 and pd.LABEL in notes[0] and "launchctl unload" in notes[0], r["actions"]
+        assert "docs/proxy.md" in notes[0]
+        assert not any(c.startswith("launchctl unload") for c in runner.calls), "never unloads by itself"
+    finally:
+        runner.close()
+
+
+def test_unchanged_plist_gets_no_note(tmp_path, _sandbox):
+    service_home = tmp_path / "svc"
+    port, upstream = _free_port(), _free_port()
+    pd.install_service(system="Darwin", home=service_home, port=upstream)
+    runner = _BindsPerService({pd.LABEL: upstream, pd.SHIM_LABEL: port}, {pd.LABEL, pd.SHIM_LABEL})
+    try:
+        r = _install_both(service_home, port, upstream, runner)
+        assert not any(a.startswith("NOTE ") for a in r["actions"]), r["actions"]
+    finally:
+        runner.close()
