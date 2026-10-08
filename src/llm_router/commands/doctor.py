@@ -1530,6 +1530,17 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     except Exception as exc:  # noqa: BLE001 — doctor must still finish
         print(f"    {_dim(f'proxy-default check unavailable: {exc}')}")
 
+    # P0.14-a: a project-level ANTHROPIC_BASE_URL (or a silent ledger) means the proxy
+    # is "up" but nothing goes through it. Read-only; path and host only, never the value.
+    try:
+        from llm_router import proxy_liveness as _pl
+
+        for _finding in _pl.doctor_findings():
+            print(f"    {_yellow(_finding)}")
+            issues.append(f"proxy bypass: {_finding}")
+    except Exception as exc:  # noqa: BLE001 — doctor must still finish
+        print(f"    {_dim(f'proxy bypass check unavailable: {exc}')}")
+
     # ── Provenance exclusions (T-21) ───────────────────────────────────────
     # The cutover's count was written to `provenance_meta` and read by nothing,
     # so "my lifetime savings dropped to $0 after upgrading" had no in-product

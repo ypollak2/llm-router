@@ -419,7 +419,9 @@ def test_other_kpis_are_byte_identical_with_attributable_accepted_local_answers(
     o3_lines = set(kpi._o3_render_lines(card["o3"]))
     full = kpi.render_scorecard(card).split("\n")
     # `local (shadow): n=...` is #284's informational count of local units (not this change).
-    rest = [ln for ln in full if ln not in o3_lines and not ln.startswith("local (shadow): ")]
+    rest = [ln for ln in full if ln not in o3_lines and not ln.startswith("local (shadow): ")
+            # P0.14-a: new, time-dependent proxy ledger liveness line; not in the golden.
+            and not ln.startswith(("proxy_rows_24h:", "WARN proxy ledger"))]
     assert "\n".join(rest) == (GOLDEN / "kpi_pre_o3_scorecard.txt").read_text()
 
 
