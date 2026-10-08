@@ -1,5 +1,5 @@
 """SubagentStart hook — inject routing context into every new agent's initial messages.
-# llm_router-hook-version: 5
+# llm_router-hook-version: 6
 
 Fires once when Claude spawns an agent (Agent tool call completes the PreToolUse
 gate and runAgent() starts). The hook's additionalContext is prepended to the
@@ -29,6 +29,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime
 
 # -- KPI G1: record how long this invocation ran (llm_router.hook_latency) -----
 # The clock starts BEFORE the first llm_router import, so the package import is
@@ -178,11 +179,27 @@ def _pressure_status(p: dict[str, float]) -> str:
 
 
 def _lock_wait_s() -> float:
-    """Seconds to wait for the state lock (default 0.25, inside the 300 ms hook budget)."""
+    """Seconds to wait for the state lock, per acquisition (default 0.25).
+
+    This hook takes the lock once per run, so that is also the most it can add.
+    """
     try:
         return max(0.0, float(os.environ.get("LLM_ROUTER_BREAKER_LOCK_WAIT_S", "0.25")))
     except ValueError:
         return 0.25
+
+
+def _log_hook_error(message: str) -> None:
+    """One line in hook_errors.log (the llm_router.hook_health schema). Never raises."""
+    try:
+        home = _router_home()
+        home.mkdir(parents=True, exist_ok=True)
+        entry = {"timestamp": datetime.now().isoformat(), "hook": "subagent-start",
+                 "error": message[:200]}
+        with (home / "hook_errors.log").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _claim_nesting_depth(payload: dict) -> None:
@@ -221,8 +238,10 @@ def _claim_nesting_depth(payload: dict) -> None:
                         raise
                     time.sleep(0.002)
         except Exception as exc:  # noqa: BLE001
-            print(f"llm-router: agent breaker state lock unavailable ({type(exc).__name__}); "
-                  f"continuing unlocked", file=sys.stderr)
+            _msg = (f"agent breaker state lock unavailable ({type(exc).__name__}); "
+                    f"continuing unlocked")
+            print(f"llm-router: {_msg}", file=sys.stderr)
+            _log_hook_error(_msg)
             if lock_fh is not None:
                 lock_fh.close()
                 lock_fh = None

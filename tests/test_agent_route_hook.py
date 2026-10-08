@@ -18,6 +18,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 HOOK_PATH = Path(__file__).parent.parent / "src" / "llm_router" / "hooks" / "agent-route.py"
@@ -127,6 +128,8 @@ def _run(
         if (agent_depth is not None or registry is not None) and session_id is not None:
             _depth_path_for(tmp_path, session_id).write_text(json.dumps({
                 "depth": agent_depth or 0,
+                # one live in-flight slot per count (expired slots do not count)
+                "slots": [[f"seed{i}", time.time()] for i in range(agent_depth or 0)],
                 "session_id": session_id,
                 "ts": 0,
                 **({"agents": registry} if registry is not None else {}),
