@@ -137,7 +137,6 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_ENFORCE_CONTEXT": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_QA_ROUTING": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_DISABLE_CONTINUATION_BYPASS": ("llm_router", "hooks/auto-route.py", 1),
-    "LLM_ROUTER_DISABLE_LLM_CLASSIFIERS": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_DISABLE_SUBPROCESS_BACKENDS": ("llm_router", "router.py", 1),
     "LLM_ROUTER_DYNAMIC_LEADERBOARD_ORDERING": ("llm_router", "dynamic_routing.py", 1),
     "LLM_ROUTER_ENFORCE": ("llm_router", "commands/doctor.py", 9),
@@ -161,6 +160,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_OKF_AUTOINDEX": ("llm_router", "hooks/session-start.py", 1),
     "LLM_ROUTER_OKF_AUTOINDEX_TTL_H": ("llm_router", "hooks/session-start.py", 1),
     "LLM_ROUTER_HOOK_BUDGET_S": ("llm_router", "hooks/auto-route.py", 1),
+    # P0.7-c: the only switch for the hook's LLM classifier layers (default off).
+    "LLM_ROUTER_HOOK_LLM_LAYER": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_CONSTRAINED_TOOLS": ("llm_router", "hooks/agent_loop.py", 1),
     "LLM_ROUTER_AGENT_NUM_CTX": ("llm_router", "hooks/agent_loop.py", 1),
     "LLM_ROUTER_LOCAL_NUM_CTX": ("llm_router", "hooks/agent_loop.py", 1),
