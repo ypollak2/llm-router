@@ -524,8 +524,9 @@ async def test_proxy_replays_haiku_rewrite_rows_in_the_background_without_delayi
     app = _app(tmp_path, up, policy_overrides={"haiku_rewrite": True})
     await _post(app, _first())  # first call: exempt, served as asked, never shadowed
     body = _no_system_reminders(_req())
-    r = await _post(app, body)
-    # The client has its whole Haiku reply while the replay is still blocked upstream.
+    # The client has its whole Haiku reply while the replay is still blocked upstream (a
+    # relay that waited on the replay would time out here instead of hanging the suite).
+    r = await asyncio.wait_for(_post(app, body), 10)
     assert r.status_code == 200 and HAIKU.encode() in r.content
     for _ in range(300):
         if len(up.requests) >= 3:
