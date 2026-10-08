@@ -458,8 +458,9 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 - **Test.** `tests/proxy/test_cls_input.py`: `test_backward_scan_equals_the_forward_walk_on_600_random_histories`
   (the #301 walk kept verbatim as the oracle), `test_the_scan_stops_once_it_has_its_context` (1,801 messages:
   <= 30 `_human` calls, <= 30 extra message reads), `test_a_long_tool_loop_is_read_at_most_max_scan_messages_back`,
-  `test_capped_is_false_when_the_window_holds_the_whole_context`. 4/4 fail on main 7d857641; 12 single-flip
-  mutants of the change are each red. `test_a_long_history_is_assembled_off_the_request_path` now makes
+  `test_capped_is_false_when_the_window_holds_the_whole_context`. All 4 fail on main 7d857641 (the fuzz test
+  only on the new `capped` attribute: it guards equality, not the bug); 12 single-flip mutants of the change
+  are each red. `test_a_long_history_is_assembled_off_the_request_path` now makes
   `assemble` slow on purpose (a 50 ms sleep), because the real one is no longer slow enough to show the effect.
   Latency before/after (n >= 100 per arm at 0, 600 and 1,800 messages): see the PR and
   `$PP/v16/p17c/` on the owner's machine.
