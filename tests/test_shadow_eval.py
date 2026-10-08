@@ -138,9 +138,47 @@ def test_kpi_carries_and_renders_the_vs_rules_line(tmp_path, monkeypatch):
     assert line.startswith("classifier shadow vs rules [nimble:9b]: n=5 turns in 3 sessions")
     assert "requested tier real 4/5" in line and "labeled 4" in line
     assert "M1-12 C-lambda2-clamp llm 5.35 vs rules 6.64" in line and "under llm 0/4 vs rules 1/4" in line
-    assert "HP llm 1/1" in line and "M1-12 not informative (4 labeled turns < 100)" in line
+    assert "HP llm 1/1" in line and "M1-12 not informative (4 labeled turns < 100; cost only" in line
+    # statistics rule 4: the largest-session share and the top-3 session sizes are printed, and so are
+    # the capped turns; the default population is organic only (R1)
+    assert "labeled 4 in 2 sessions (largest 50%, top-3 sessions 2/2 labeled turns)" in line
+    assert "assemble capped 0" in line and "(organic sessions)" in line
+    assert "fallback counts as agree" in line and "R1 adoption also needs under-route llm <= rules" in line
     monkeypatch.delenv("LLM_ROUTER_SHADOW_LABELS")
     (bare,) = kpi._classifier_vs_rules_lines(_summary())
     assert "labeled 0" in bare and "no truth labels" in bare and "raw cost clamp-aware llm 2.02 vs rules 3.05" in bare
     rendered = kpi.render_scorecard(kpi.compute_scorecard(7))
     assert "classifier shadow vs rules [nimble:9b]" in rendered
+
+
+# --- reviewer mutants (#327 review): each test below fails on one surviving mutant ------------
+
+
+def test_m1_12_is_informative_at_exactly_60_percent():
+    """Rule 4 excludes a sample only when one session holds MORE than 60%."""
+    recs, labels = _synthetic([60, 20, 20], 3, "haiku")       # 60/100 = 60%: not above the bar
+    v = se.score(recs, labels)
+    assert (v["n_labeled"], v["largest_session_share"]) == (100, 0.6)
+    assert v["M1_12"]["verdict"] == "pass" and v["top3_session_counts"] == [60, 20, 20]
+
+
+def test_a_missing_requested_tier_is_imputed_from_the_session_else_sonnet():
+    """v2 imputation: the session's most common requested tier, else Sonnet (never Opus)."""
+    alone = se.score([_rec("A", "a1", "opus", "opus", "opus", "some-unknown-model")])
+    assert alone["n_joined"] == 0 and alone["craw_clamp_llm"] == pytest.approx(2.7)    # opus clamped to sonnet
+    mixed = se.score([_rec("B", "b1", "sonnet", "sonnet", "sonnet", HAIKU),
+                      _rec("B", "b2", "sonnet", "sonnet", "sonnet", HAIKU),
+                      _rec("B", "b3", "sonnet", "sonnet", "sonnet", OPUS),
+                      _rec("B", "b4", "opus", "opus", "opus", "some-unknown-model")])
+    # b4 imputes haiku (2 of 3 real requests): clamp-aware cost 1.0 for b1, b2, b4 and 2.7 for b3
+    assert mixed["n_joined"] == 3 and mixed["craw_clamp_llm"] == pytest.approx((1.0 * 3 + 2.7) / 4)
+
+
+@pytest.mark.parametrize("rules,live,expected", [("sonnet", "sonnet", "sonnet"), ("opus", "opus", "opus"),
+                                                  ("haiku", "sonnet", "sonnet"), ("haiku", "haiku", "haiku")])
+def test_a_fallback_scores_rules_eff(rules, live, expected):
+    """M1.9 "fallback rules_eff": an unusable verdict takes the rules' effective tier, not a constant."""
+    for source in ("timeout", "parse_error", "cold"):
+        v = se.score([_rec("F", "f1", rules, live, None, OPUS, source=source)])
+        assert (v["n_fallback"], v["agree"]) == (1, 1)
+        assert v["craw_llm"] == pytest.approx(se.COST[expected]) == v["craw_rules_eff"]

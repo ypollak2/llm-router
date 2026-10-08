@@ -1719,6 +1719,8 @@ def _classifier_shadow_summary(days: float, win: "_Window | None" = None,
         vs_rules = {}
     return {
         "vs_rules": vs_rules,
+        # R1 reads organic turn-first rows only; --include research widens the population.
+        "vs_rules_organic_only": allowed is not None and len(allowed) == 1,
         "n": n,
         "n_sessions": len({r.get("session_id") for r in calls}),
         "n_answered": len(answered),
@@ -1766,13 +1768,20 @@ def _classifier_shadow_line(s: dict | None) -> str | None:
 def _classifier_vs_rules_lines(s: dict | None) -> list[str]:
     """One line per classifier model: the live-shadow score against rules_eff (P1.7)."""
     out = []
+    scope = ("organic sessions" if (s or {}).get("vs_rules_organic_only")
+             else "NOT organic-only, so not R1 evidence")
     for model, v in ((s or {}).get("vs_rules") or {}).items():
         if not v.get("n_turns"):
             continue
         m12 = v["M1_12"]
-        head = (f"classifier shadow vs rules [{model}]: n={v['n_turns']} turns in {v['n_sessions']} sessions, "
-                f"requested tier real {v['n_joined']}/{v['n_turns']}, fallback {v['n_fallback']}, "
-                f"agree {v['agree']}/{v['n_turns']}, labeled {v['n_labeled']}")
+        head = (f"classifier shadow vs rules [{model}]: n={v['n_turns']} turns in {v['n_sessions']} sessions "
+                f"({scope}), requested tier real {v['n_joined']}/{v['n_turns']}, fallback {v['n_fallback']}, "
+                f"agree {v['agree']}/{v['n_turns']} (fallback counts as agree), "
+                f"assemble capped {v['n_capped']}, labeled {v['n_labeled']}")
+        if v.get("n_labeled"):
+            top = "/".join(str(c) for c in v.get("top3_session_counts") or [])
+            head += (f" in {v['n_labeled_sessions']} sessions (largest {v['largest_session_share']:.0%}, "
+                     f"top-3 sessions {top} labeled turns)")
         a, r = v["arms"]["llm"], v["arms"]["rules_eff"]
         if a is None:
             body = (f"; raw cost clamp-aware llm {v['craw_clamp_llm']:.2f} vs rules {v['craw_clamp_rules_eff']:.2f} "
@@ -1785,7 +1794,8 @@ def _classifier_vs_rules_lines(s: dict | None) -> list[str]:
                     f"(diff {boot['diff']:+.2f}, session CI95 [{boot['ci95'][0]:+.2f}, {boot['ci95'][1]:+.2f}]); "
                     f"under llm {a['under']['k']}/{a['under']['n']} vs rules {r['under']['k']}/{r['under']['n']}; "
                     f"HP llm {hp['k']}/{hp['n']}")
-        out.append(f"{head}{body}; M1-12 {m12['verdict']} ({m12['why']}) (informational, rules stay in charge)")
+        out.append(f"{head}{body}; M1-12 {m12['verdict']} ({m12['why']}; cost only: R1 adoption also needs "
+                   "under-route llm <= rules) (informational, rules stay in charge)")
     return out
 
 
