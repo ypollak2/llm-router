@@ -622,7 +622,9 @@ class ClaudeTierPolicy:
     async def decide(self, body: dict, session_id: str | None, sticky: Stickiness,
                      classify=None) -> TierDecision:
         """``classify(text) -> {"task_type", "complexity", "chain_head", ...}``
-        defaults to ``backends.choose_model(text, None, anthropic=True)``."""
+        defaults to ``backends.tier_classify(text, None, anthropic=True)``: the
+        class only, no provider chain built (P0.9-e), so ``chain_head`` / ``model``
+        are ``[]`` / None until another caller has cached that chain."""
         phases = _Phases()
         with phases("quota_read"):
             reading = self._read_quota()

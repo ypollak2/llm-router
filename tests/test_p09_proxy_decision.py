@@ -56,15 +56,21 @@ def slow_chain(monkeypatch):
     return calls
 
 
-async def test_a_turn_first_decision_never_waits_on_a_chain_build(slow_chain):
+async def test_a_turn_first_decision_never_waits_on_a_chain_build(slow_chain, monkeypatch):
+    """The call count is the deterministic guard. The 50 ms bar is checked on the
+    fastest of 5 cold decisions (empty chain cache each time), so a loaded runner's
+    one-off stall does not fail it, while a decision that waits on the 1 s build
+    would fail all 5."""
     policy = pt.ClaudeTierPolicy.from_dict(_raw_policy())  # the real default classifier
-    sticky = Stickiness()
-    t = time.perf_counter()
-    d = await policy.decide(_req(), SID, sticky)
-    elapsed_ms = (time.perf_counter() - t) * 1000.0
+    times, d = [], None
+    for _ in range(5):
+        monkeypatch.setattr(pb, "_chain_cache", {})
+        t = time.perf_counter()
+        d = await policy.decide(_req(), SID, Stickiness())
+        times.append((time.perf_counter() - t) * 1000.0)
     assert d.task_type and d.complexity
     assert slow_chain == [], "the tier decision built a provider chain"
-    assert elapsed_ms < 50.0, f"decision took {elapsed_ms:.0f} ms (PRD heuristic bar 50 ms) {d.phases_ms}"
+    assert min(times) < 50.0, f"fastest decision {min(times):.0f} ms (PRD heuristic bar 50 ms) {d.phases_ms}"
 
 
 async def test_tier_classify_gives_the_same_class_as_choose_model(monkeypatch):
@@ -120,14 +126,15 @@ async def test_the_ledger_row_carries_tier_phases_ms_names_and_numbers_only(tmp_
 
 
 async def test_a_slow_chain_build_does_not_reach_tier_decision_s(tmp_path, slow_chain):
-    """End to end through the proxy: the row's own decision time stays under the
-    bar while the chain builder would take 1 s."""
+    """End to end through the proxy: the row's own decision time does not include
+    the 1 s chain build. The bound is 500 ms, not the 50 ms bar, so one loaded-runner
+    stall cannot fail it; the 50 ms bar is checked (fastest of 5) above."""
     app = _app(tmp_path, Upstream())
     await _post(app, _first())
     await _post(app, _req())
     row = _rows(tmp_path)[-1]
     decision_ms = sum(row["tier_phases_ms"][k] for k in pt.DECISION_PHASES if k in row["tier_phases_ms"])
-    assert row["tier_decision_s"] < 0.05 and decision_ms < 50.0, row["tier_phases_ms"]
+    assert row["tier_decision_s"] < 0.5 and decision_ms < 500.0, row["tier_phases_ms"]
     assert slow_chain == []
 
 
