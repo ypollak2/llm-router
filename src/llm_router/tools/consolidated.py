@@ -79,18 +79,22 @@ def door_for_tool(name: str) -> str:
     return DEPRECATED_TOOLS.get(name, name)
 
 
-async def llm_act(task: str, budget_usd: float = 1.0, context: str = "") -> str:
+async def llm_act(
+    task: str, budget_usd: float = 1.0, context: str = "", ctx: Context | None = None,
+) -> str:
     """Agentic execution — do a real task end-to-end: decompose into milestones,
     run them on the cheapest capable tier *with tools* (files/commands/verify),
     escalate on failure without redoing done work, and return an honest JSON
     result (outcome, per-milestone status, events, savings). This is the 1.0 name
     for agentic delegation; currently a thin alias of ``llm_delegate``.
 
-    *context* is optional conversation context handed to the delegated agents."""
+    *context* is optional conversation context handed to the delegated agents.
+    Writes are confined to the caller's project root (MCP roots, else
+    ``$CLAUDE_PROJECT_DIR``); with no root the run is read-only (P0.13)."""
     _blocked = _quality_breaker_block("mcp_llm_act", "agentic")
     if _blocked:
         return _blocked
-    return await llm_delegate(task, budget_usd=budget_usd, context=context)
+    return await llm_delegate(task, budget_usd=budget_usd, context=context, ctx=ctx)
 
 
 async def llm(
