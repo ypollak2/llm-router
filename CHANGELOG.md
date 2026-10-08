@@ -21,6 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   override can only turn the rewrite off, and the YAML is never edited. New
   `llm-router kpi --haiku-watch --since --until` prints every trigger with its n and exits 1 when a
   D-20 trigger has too little data to judge.
+- proxy (v16 P1.7-d, owner decision 2026-10-08 option B): `proxy/shadow_text.py`, an opt-in text sidecar for the
+  classifier shadow. With `LLM_ROUTER_SHADOW_TEXT_SAMPLE` set (`on` = 30% of turns, or a rate in (0, 1]; unset,
+  `off`, `0` and anything else = off, nothing hashed or written) a sampled turn that gets a `classifier_shadow`
+  record also appends `{text_sha, session_id, ts, context, prompt}` to `~/.llm-router/shadow_text.jsonl` (mode
+  0600, at most 20 entries per UTC day counted from the file). The sample is a function of `text_sha` and the
+  UTC day. Harness and headless sessions are not sampled. A text that matches a `secret_scrubber` pattern skips the turn; router banners (`⚡`, `ROUTE:`,
+  `[llm_router]`, ...) are cut out; the text is written nowhere else. An offline labeller reads this file and
+  deletes entries (older than 7 days, or labelled/skipped and from before today) under the same `flock`. This is
+  the only place the proxy keeps prompt text; it is for labelling the shadow (`LLM_ROUTER_SHADOW_LABELS`).
 
 ### Changed
 - proxy (v16 P1.7-c): the classifier shadow's `cls_input.assemble` reads the history backwards, stops once it
