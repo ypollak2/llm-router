@@ -1789,6 +1789,30 @@ def _classifier_vs_rules_lines(s: dict | None) -> list[str]:
     return out
 
 
+# ── P0.14-a: proxy ledger liveness ─────────────────────────────────────────
+
+def _proxy_liveness(now: float, proxy_rows: list[dict]) -> dict:
+    from llm_router import proxy_liveness
+
+    return proxy_liveness.liveness(now=now, proxy_rows=proxy_rows)
+
+
+def _proxy_liveness_lines(live: dict | None) -> list[str]:
+    if not live:
+        return []
+    h = f"{live['window_hours']:g}"
+
+    def n(v: Any) -> str:
+        return "unreadable" if v is None else str(v)
+
+    lines = [f"proxy_rows_24h: {live['proxy_rows_24h']} (n={live['proxy_rows_24h']} proxy ledger row(s) "
+             f"in the {h} h to generated; hook turns {n(live['hook_turns_24h'])}, "
+             f"routing decisions {n(live['routing_decisions_24h'])})"]
+    if live.get("warn"):
+        lines.append(f"WARN {live['message']}")
+    return lines
+
+
 # ── assembly ───────────────────────────────────────────────────────────────
 
 def compute_scorecard(days: int = 7, *, include_research: bool = False,
@@ -1841,6 +1865,8 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         "o3": _o3_with_caveat(
             _o3_offload_share(days, allowed, index, all_rows, now_ts, since_policy, win, g3_r)),
         "proxy_local_shadow": _proxy_shadow_summary(days, win),
+        # P0.14-a: is the proxy ledger alive? Outside "kpis" (a liveness check, not a KPI).
+        "proxy_liveness": _proxy_liveness(now_ts, all_rows),
         "classifier_shadow": _classifier_shadow_summary(days, win, allowed, index, pop["allowed"]),
         "kpis": {
             "NS": ns_r, "O1": o1_r, "O2": o2_r,
@@ -1988,6 +2014,7 @@ def render_scorecard(data: dict) -> str:
     if classifier_line:
         lines.append(classifier_line)
         lines += _classifier_vs_rules_lines(data.get("classifier_shadow"))
+    lines += _proxy_liveness_lines(data.get("proxy_liveness"))
     lines.append(_join_line(data["joins"]))
     lines.append("O1 is never session-kind filtered (usage.db predates tagging); G3 is not "
                   "session-kind filtered either (see KPIS.md); neither are G1 (hook), G2 and G4, "
@@ -2085,6 +2112,10 @@ def cmd_kpi(args: list[str]) -> int:
                           "its Claude Code transcript (same rules as the live tagger), and append it "
                           "to the sidecar session_kind_backfill.jsonl; a live tag always wins and "
                           "deleting the sidecar restores the untagged behaviour exactly")
+    ap.add_argument("--quota-burn", action="store_true",
+                     help="S3 / GE6: Claude quota burn per session and per human turn from "
+                          "quota_samples.jsonl and quota_history.jsonl; needs --since and --until; "
+                          "stale samples are labelled estimated and kept out of the measured line")
     ap.add_argument("--dry-run", action="store_true",
                      help="with --backfill-tags: report what would be written; write nothing")
     ap.add_argument("--validate-backfill", action="store_true",
@@ -2099,6 +2130,19 @@ def cmd_kpi(args: list[str]) -> int:
         ap.error("--dry-run needs --backfill-tags")
     if parsed.strict and not parsed.health:
         ap.error("--strict needs --health")
+    if parsed.quota_burn:
+        if parsed.since is None or parsed.until is None:
+            ap.error("--quota-burn needs --since and --until (an absolute window)")
+        q_since, q_until = _parse_when(parsed.since), _parse_when(parsed.until)
+        if q_since is None or q_until is None or not q_since < q_until:
+            ap.error("--quota-burn: --since and --until must be readable and since < until")
+        from llm_router import quota_samples
+
+        burn = quota_samples.quota_burn(q_since, q_until,
+                                        include_research=(parsed.include == "research"))
+        print(json.dumps(burn, indent=2, default=str) if parsed.json
+              else quota_samples.render_quota_burn(burn))
+        return 0
     if parsed.validate_backfill:
         from llm_router import session_kind_backfill as skb
 
