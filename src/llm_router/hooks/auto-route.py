@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 47
+# llm_router-hook-version: 48
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -209,7 +209,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 47"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 48"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -4765,8 +4765,16 @@ def main() -> None:
             if complexity == "complex":
                 # Complex tasks truly need Opus
                 _critical_bucket, _critical_value = _critical
+                # The proxy's opus tier, never a literal: a hardcoded
+                # claude-opus-4-6 outlived the tier it named (plan v16 P0.2).
+                # "opus" is Claude Code's own alias if the policy is unreadable.
+                try:
+                    from llm_router.proxy.tiers import tier_model
+                    _opus_id = tier_model("opus") or "opus"
+                except ImportError:
+                    _opus_id = "opus"
                 directive = (
-                    f"⚡ SUBSCRIPTION OVERRIDE: {task_type}/{complexity} → /model claude-opus-4-6"
+                    f"⚡ SUBSCRIPTION OVERRIDE: {task_type}/{complexity} → /model {_opus_id}"
                     f" [CRITICAL PRESSURE: {_critical_bucket}={_critical_value:.0%}]{_stale_pressure_note()} "
                     f"| Handle directly (subscription included). Do NOT call llm_* tools."
                 )
