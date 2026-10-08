@@ -723,6 +723,31 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
   with path and host and without the secret; no override and a non-localhost default report nothing;
   `doctor` prints the override and exits non-zero.
 
+## P0.14-b. P0.14-a printed a pasted key as a "host", and its guards were untested
+
+- **Symptom.** An independent review of #329 planted `SECRETKEY999-bare-key` as the value of
+  `ANTHROPIC_BASE_URL` in a project `settings.local.json`; `llm-router doctor` printed it (lowercased)
+  as the overriding host. The same review found three guards that no test pinned (an unreadable
+  count, future-dated rows, the `sidecar_backfill` exclusion), a `doctor` test whose
+  `assert code != 0` passes whatever happens, and a WARN that needed a full 24 h of silence.
+- **Cause.** `_host_of` prefixed `//` to any scheme-less string and printed `urlsplit(...).hostname`,
+  so any token without a slash was "a host". The guards existed in code but no test failed when they
+  were removed (reviewer mutants: 17 of 22 killed, 3 real survivors).
+- **Fix.** `_host_of` prints only an IP or an RFC 1123 name with at least one dot (or exactly
+  `localhost`), optional port; everything else is `(unparseable)`. `newest_proxy_ts` is clamped to
+  now. New `short_silence()`: 0 proxy rows in the last 2 h with at least 3 `auto-route` /
+  `UserPromptSubmit` turns in those 2 h; `doctor` reports it (and counts it as an issue) unless the
+  24 h WARN already fired. Constants `SHORT_WINDOW_HOURS`, `SHORT_MIN_TURNS`; no new env key.
+  An unreadable turn count stays `None` and never warns; 0 turns reports nothing.
+- **Test.** `tests/test_proxy_ledger_liveness.py`: bare-key plant through `find_overrides`,
+  `doctor_findings` and `_run_doctor`; real hosts still print; 10 non-hostnames are `(unparseable)`;
+  unreadable hook / decision count is `None` with no WARN; future-dated proxy and decision rows are
+  not counted and `newest_proxy_ts <= now`; `sidecar_backfill` rows are not turns; short silence at
+  2 vs 3 turns, with a recent row, with 0 turns, with turns outside 2 h, with an unreadable count,
+  not repeated under the 24 h WARN, and as a `_run_doctor` issue. The `doctor` test now asserts
+  exactly one `proxy bypass:` issue naming the path and host, not the exit code. 15 mutants, all
+  killed (see the PR body).
+
 ## 18. Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP)
 
 - **Symptom.** D-14 = A says a Q&A task type is never served by a local provider. #297 (M3.0)
