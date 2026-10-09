@@ -41,6 +41,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import threading
@@ -118,6 +119,167 @@ def _changed(before: dict[str, str], after: dict[str, str]) -> list[str]:
     return sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
 
 
+def _git(root: Path, *args: str, timeout: float = 60) -> subprocess.CompletedProcess | None:
+    # Fixed minimal env: git needs PATH only, and must not see the operator's keys.
+    env = {"PATH": os.environ.get("PATH", os.defpath), "LC_ALL": "C"}
+    try:
+        return subprocess.run(["git", *args], cwd=str(root), capture_output=True,
+                              timeout=timeout, env=env)
+    except Exception:                                          # noqa: BLE001
+        return None
+
+
+def _git_state(root: Path, since: str | None = None) -> dict | None:
+    """Working-tree state via `git`; None if git cannot describe ``root``.
+
+    Returns ``{"head": sha|None, "files": {path: "<status>:<digest>"},
+    "committed": [paths changed in since..HEAD]}``.
+
+    The os.walk snapshot is capped at _SNAPSHOT_MAX_FILES, and the cap is hit in
+    walk order, so on a real repo files late in the walk (src/ after tests/ and
+    docs/) were never compared and `changed_files` came back [] after a real
+    edit (observed 2026-10-08). git enumerates the working tree itself, honours
+    .gitignore, and has no file cap. The digest keeps a file that was already
+    dirty before the run from being reported unless the run changed it again.
+
+    Scope, deliberately: gitignored paths are NOT covered (see the
+    llm_local_task docstring). A rename is listed as BOTH its old and new path.
+    ``since`` (the HEAD sha recorded before the run) adds the paths a commit made
+    during the run moved, because `git status` is clean again after a commit.
+    """
+    top = _git(root, "rev-parse", "--show-prefix", timeout=10)
+    if top is None or top.returncode != 0:
+        return None
+    # A workdir that is not itself a repo but sits inside one that ignores it:
+    # `git status` succeeds and is empty whatever happens in there, which would
+    # report "nothing changed" for a run that changed everything. Hand it to the
+    # os.walk snapshot instead.
+    ign = _git(root, "check-ignore", "-q", "--", ".", timeout=10)
+    if ign is not None and ign.returncode == 0:
+        return None
+    r = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".")
+    if r is None or r.returncode != 0:
+        return None
+    head = _git(root, "rev-parse", "--verify", "-q", "HEAD", timeout=10)
+    head_sha = head.stdout.decode().strip() if head is not None and head.returncode == 0 else None
+    prefix = top.stdout.decode().strip()   # root's path inside the repo, "" at top level
+
+    def rel(path: str) -> str:
+        return path[len(prefix):] if prefix and path.startswith(prefix) else path
+
+    out: dict[str, str] = {}
+    entries = r.stdout.decode("utf-8", "surrogateescape").split("\0")
+    i = 0
+    while i < len(entries):
+        e = entries[i]
+        i += 1
+        if len(e) < 4:
+            continue
+        status, path = e[:2], rel(e[3:])
+        if status[0] in "RC" and i < len(entries):   # next entry is the source path
+            if status[0] == "R":
+                out[rel(entries[i])] = f"{status}:renamed-away"
+            i += 1
+        p = root / path
+        try:
+            digest = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else "absent"
+        except OSError:
+            digest = "unreadable"
+        out[path] = f"{status}:{digest}"
+
+    committed: list[str] = []
+    if since and head_sha and since != head_sha:
+        d = _git(root, "diff", "--name-only", "-z", "--no-renames", "--relative",
+                 f"{since}..{head_sha}", "--", ".")
+        if d is not None and d.returncode == 0:
+            committed = [x for x in d.stdout.decode("utf-8", "surrogateescape").split("\0") if x]
+    return {"head": head_sha, "files": out, "committed": committed}
+
+
+def _take_state(root: Path, like: dict | None = None) -> dict:
+    """Snapshot ``root``: git when it can, the capped os.walk otherwise.
+
+    ``like`` is the before-state; the after-state is taken the same way (and with
+    its HEAD as the commit baseline). Called inside ``_AGENT_ENV_LOCK``.
+    """
+    if like is None or like["kind"] == "git":
+        g = _git_state(root, since=like["head"] if like else None)
+        if g is not None:
+            return {"kind": "git", **g}
+        if like is not None:                       # git was there, now it is not
+            return {"kind": "lost"}
+    return {"kind": "walk", "files": _snapshot(root)}
+
+
+def _state_diff(before: dict, after: dict) -> tuple[list[str], str | None]:
+    """(changed paths, note). The note is set when the list cannot be trusted."""
+    if before["kind"] == "git":
+        if after["kind"] != "git":
+            return [], "git state unreadable after the run; changed_files is unknown"
+        changed = set(_changed(before["files"], after["files"])) | set(after["committed"])
+        return sorted(changed), None
+    return _changed(before["files"], after["files"]), None
+
+
+_SHELL_TOKENS = {";", "|", "||", "&&", "&", ">", ">>", "<", "<<", "2>", "2>&1", "&>"}
+_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_SHELL_REJECTED = (
+    "acceptance check uses shell syntax ({what}), but it is run WITHOUT a shell "
+    "(argv only; this is deliberate, see test_local_task_authority). Put the "
+    "command in an executable script and pass the script's path as "
+    "acceptance_check, e.g. a check.sh containing `HOME=$(mktemp -d) pytest -q`."
+)
+
+
+_PUNCT = set(";|&<>()")
+
+
+def _unquoted(text: str, needles: tuple[str, ...]) -> bool:
+    """True if any needle occurs outside single/double quotes in ``text``.
+
+    Inside quotes the check is argv, so the characters are literal arguments and
+    nothing is lost; only the unquoted ones were meant as shell.
+    """
+    quote, i = "", 0
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote:
+            if c == quote:
+                quote = ""
+        elif c in "'\"":
+            quote = c
+        elif any(text.startswith(n, i) for n in needles):
+            return True
+        i += 1
+    return False
+
+
+def _shell_syntax(check: str) -> str | None:
+    """Name the first UNQUOTED shell construct in a check string, else None.
+
+    Lexed with shlex in punctuation mode, so a quoted literal such as
+    ``python -c "print('`')"`` stays one word and is never mistaken for syntax.
+    """
+    try:
+        lex = shlex.shlex(check, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        lex.commenters = ""
+        toks = list(lex)
+    except ValueError:
+        return None
+    if toks and _ENV_ASSIGN.match(toks[0]):
+        return f"environment assignment {toks[0].split('=', 1)[0]}="
+    if _unquoted(check, ("`", "$(")):
+        return "command substitution"
+    for tok in toks:
+        if tok and set(tok) <= _PUNCT:
+            return f"operator {tok!r}"
+    return None
+
+
 def _run_check(check: str | list[str], cwd: Path, timeout: float) -> tuple[bool, str]:
     """Run the caller's acceptance check. Its exit code is the verdict.
 
@@ -131,10 +293,25 @@ def _run_check(check: str | list[str], cwd: Path, timeout: float) -> tuple[bool,
     along (agent_loop.py: shlex.split + shell=False); this now matches it.
 
     A string is still accepted and split with `shlex`, so existing callers keep
-    working, but shell METACHARACTERS no longer mean anything: `;`, `|`, `&&`,
-    `$(...)` and redirections become literal arguments to one program.
+    working, but shell METACHARACTERS no longer mean anything. Since 2026-10-08
+    a string that contains them (NAME=value prefix, `;`, `|`, `&&`, `$(...)`,
+    redirection) is rejected with an explicit message instead of being run as
+    literal arguments, which failed with a bare FileNotFoundError. The fix for
+    the caller is a script: the check is argv, a script path is argv.
     """
-    argv = list(check) if isinstance(check, (list, tuple)) else shlex.split(check or "")
+    if isinstance(check, (list, tuple)):
+        argv = list(check)
+    else:
+        try:
+            argv = shlex.split(check or "")
+        except ValueError as exc:
+            return False, f"acceptance check could not be parsed: {exc}"
+        # A string is only split, never interpreted. Shell syntax therefore
+        # cannot work; say so up front instead of failing with a bare
+        # FileNotFoundError on "HOME=$(mktemp" (observed 2026-10-08).
+        what = _shell_syntax(check or "")
+        if what:
+            return False, _SHELL_REJECTED.format(what=what)
     if not argv:
         return False, "acceptance check was empty"
     try:
@@ -216,10 +393,10 @@ def _run_task_serial(run_agent_loop, objective: str, model: str, root: Path,
     with _AGENT_ENV_LOCK:
         started = time.monotonic()
         queued = started - asked
-        before = _snapshot(root)
+        before = _take_state(root)
         _trace.emit("task.start", objective=objective, workdir=str(root),
                     model=model, budget_s=budget_s, apply_writes=apply_writes,
-                    acceptance_check=acceptance_check, files_before=len(before),
+                    acceptance_check=acceptance_check, files_before=len(before.get("files", ())),
                     queued_s=round(queued, 1))
         report, error = None, None
         try:
@@ -228,8 +405,8 @@ def _run_task_serial(run_agent_loop, objective: str, model: str, root: Path,
         except Exception as exc:                               # noqa: BLE001
             error = f"{type(exc).__name__}: {exc}"
 
-        after = _snapshot(root)
-        changed = _changed(before, after)
+        after = _take_state(root, like=before)
+        changed, changed_note = _state_diff(before, after)
         elapsed = time.monotonic() - started
 
         if error is not None:
@@ -249,7 +426,14 @@ def _run_task_serial(run_agent_loop, objective: str, model: str, root: Path,
             else:
                 # No check means nothing proved this works. Never claim it did.
                 status, check_passed, check_out = (INCOMPLETE if exhausted else PROPOSED), None, ""
-    return report, error, changed, elapsed, queued, status, check_passed, check_out
+    return report, error, changed, elapsed, queued, status, check_passed, check_out, changed_note
+
+
+_CHANGED_SCOPE = (
+    "git repo: paths whose `git status` entry or content changed during the run, "
+    "plus paths committed during it; renames list old and new path. Gitignored "
+    "files are NOT covered. Non-git workdir: capped content walk."
+)
 
 
 async def llm_local_task(
@@ -267,8 +451,12 @@ async def llm_local_task(
         objective: What to accomplish. Written for a model that will read the
             repo itself — describe the goal, not the steps.
         workdir: The directory the task operates in. Files here may be modified.
-        acceptance_check: A shell command that exits 0 when the objective is
-            met (e.g. ``python3 -m pytest tests -q``). Without one the result
+        acceptance_check: A command that exits 0 when the objective is met,
+            given as an argv list or a plain string (e.g.
+            ``python3 -m pytest tests -q``). It is run WITHOUT a shell: for
+            env assignments, ``$(...)``, pipes, ``;``, ``&&`` or redirection,
+            put them in an executable script and pass its path; shell syntax in
+            a string is rejected with an error. Without one the result
             can never be ``verified_complete`` — an unverified success is
             reported as ``proposed``, because nothing established that it works.
         model: Ollama model to drive the loop.
@@ -292,7 +480,10 @@ async def llm_local_task(
     Returns:
         A JSON object with ``status`` (one of the module's terminal statuses),
         ``changed_files``, ``check_passed``, ``check_output``, ``elapsed_s``
-        and the model's own final ``report``. The report is the worker's
+        ``changed_files_scope`` (what that list can and cannot see; gitignored
+        files are not covered, by design: hashing or stat-ing ignored trees such
+        as node_modules and .venv is unbounded, and what lives there is build
+        output, not the task's edits) and the model's own final ``report``. The report is the worker's
         account of what it did and is never evidence on its own.
     """
     root = Path(workdir).expanduser()
@@ -330,7 +521,7 @@ async def _local_task_run(objective: str, root: Path, acceptance_check: str | li
         pass
 
     (report, error, changed, elapsed, queued, status, check_passed,
-     check_out) = await run_agent(
+     check_out, changed_note) = await run_agent(
         _run_task_serial, run_agent_loop, objective, model, root, budget_s,
         apply_writes, acceptance_check, root=root)
 
@@ -341,6 +532,8 @@ async def _local_task_run(objective: str, root: Path, acceptance_check: str | li
         "status": status,
         "model": f"ollama/{model}",
         "changed_files": changed,
+        "changed_files_scope": _CHANGED_SCOPE,
+        "changed_files_note": changed_note,
         "check_passed": check_passed,
         "check_output": check_out[-1500:] if check_out else "",
         "elapsed_s": round(elapsed, 1),
