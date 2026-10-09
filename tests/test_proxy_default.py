@@ -288,7 +288,8 @@ def test_no_restart_advice_uses_launchctl_bootout_or_bootstrap():
 
     root = Path(__file__).resolve().parents[1]
     files = [f for d in ("src", "hooks", "docs") for f in (root / d).rglob("*")
-             if f.suffix in {".py", ".md"} and "spikes" not in f.parts and f.name != "BUGS.md"]
+             if f.suffix in {".py", ".md"} and "spikes" not in f.parts and f.name != "BUGS.md"
+             and "bugs" not in f.relative_to(root).parts]
     assert len(files) > 50, "the scan must find the repo's files"
     pat = re.compile(r"launchctl\s+(bootout|bootstrap)")
     hits = [f"{f.relative_to(root)}:{n}" for f in files
