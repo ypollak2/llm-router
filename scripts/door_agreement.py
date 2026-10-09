@@ -156,6 +156,12 @@ _HOOK_NO_LLM_ENV = {
     "LLM_ROUTER_DISABLE_LLM_CLASSIFIERS": "true",
     # P0.7-c and later: the only switch for layers 2+3; "off" is the default.
     "LLM_ROUTER_HOOK_LLM_LAYER": "off",
+    # da31df7: the hook resolves its Ollama model list at import, and with no fresh
+    # cache it probes Ollama's /api/tags (found by the DNS/connect guard: the probe
+    # swallows errors, so only a refusal it cannot catch exposed it). An explicit
+    # model name is the documented override that skips the probe. It names no
+    # installed model and nothing is loaded: the layer that would use it is off.
+    "LLM_ROUTER_OLLAMA_MODEL": "door-agreement-no-probe",
 }
 
 SITES: dict[str, Site] = {

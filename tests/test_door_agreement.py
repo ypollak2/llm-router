@@ -149,6 +149,7 @@ def test_cli_real_doors_counts_only_and_no_network(tmp_path):
     assert 0 <= p["task_type_disagree"] <= 4 and 0 <= p["tier_disagree"] <= 4
     assert len(d["corpus_sha256"]) == 64
     assert d["no_llm_switches"]["hook"]["env"]["LLM_ROUTER_CLASSIFY_LOCAL_ONLY"] == "true"
+    assert "LLM_ROUTER_OLLAMA_MODEL" in d["no_llm_switches"]["hook"]["env"]
     # gateway and proxy both classify with GATEWAY_POLICY; short prompts are not
     # truncated by tier_text, so the two must agree here.
     assert d["pairs"]["gateway|proxy"]["task_type_disagree"] == 0
