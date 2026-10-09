@@ -52,6 +52,7 @@ async def llm_gemini(
             task_type=TaskType.CODE,
             profile=RoutingProfile.BALANCED,
             success=result.success,
+            reason=cost.REASON_EXPLICIT_GEMINI_CLI,
         )
     except Exception:
         pass  # never let logging break the tool

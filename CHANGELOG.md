@@ -13,6 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- ledger completeness (PLAN v16 P0.8-d, D-29 = A; R-EVL-1, NFR-NUM): `usage` gains `reason`
+  (additive migration `MIGRATE_USAGE_ADD_REASON`; earlier rows stay NULL and `llm-router kpi` reports
+  them as missing, not back-filled). Every `usage` writer passes a short route code (`router_chain`,
+  `router_budget_fallback`, `direct`, `explicit_codex_tool`, `explicit_gemini_cli_tool`, `route_tool`,
+  `stream_tool`, `claude_code_subscription`); every `routing_decisions` writer sets `session_id` and
+  `reason_code` (the router falls back to `router_chain` / `router_unhinted` when classification
+  carries none; the sidecar backfill and judge-eval scripts set both). The kpi G3 per-writer check now
+  reads `usage.reason` instead of marking it "no column"; "no traffic" still never turns G3 green.
+  `cc-usage-track` hook version 2 -> 3. No prompt text is written to any ledger. A test enumerates
+  every `INSERT INTO usage|routing_decisions` in src/, hooks/ and scripts/ so a new writer without the
+  fields fails. Fixes `llm_stream`, which raised `TypeError` instead of writing its usage row
+  (`docs/bugs/P08D-1.md`).
 - hooks (PLAN v16 P0.9-g, AMEND R8 A.3): `scripts/hook_wall.py` (`llm_router.hook_wall`) times the five
   sync hooks with no latency MUST (`enforce-route`, `bash-compress`, `playwright-compress`,
   `cc-usage-track`, `subagent-start`) from outside, process start to exit, cold and warm, with

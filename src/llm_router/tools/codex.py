@@ -53,6 +53,7 @@ async def llm_codex(
             task_type=TaskType.CODE,
             profile=RoutingProfile.BALANCED,
             success=result.success,
+            reason=cost.REASON_EXPLICIT_CODEX,
         )
     except Exception:
         pass  # never let logging break the tool
