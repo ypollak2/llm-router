@@ -53,6 +53,9 @@ STEP_SUBAGENT_TURN = "subagent_turn"
 STEP_HARNESS_TURN = "harness_turn"
 STEP_KINDS = (STEP_CONTINUATION, STEP_TURN_FIRST, STEP_SIDE_CALL, STEP_SUBAGENT_FIRST,
               STEP_SUBAGENT_TURN, STEP_HARNESS_TURN)
+#: Not a kind: the ledger's ``step_class`` when labelling the call raised (``step_error``
+#: is then true). The proxy forwards it without classifying it (``server.step_fields``).
+STEP_UNKNOWN = "unknown"
 
 #: Where the newest user turn of a non-continuation call came from (:func:`turn_origin`).
 ORIGIN_TYPED = "typed"                    # main thread, human text
@@ -165,6 +168,22 @@ def step_kind(body: dict) -> str:
     if not main:
         return STEP_SUBAGENT_TURN
     return STEP_TURN_FIRST if _newest_turn_is_human(body) else STEP_HARNESS_TURN
+
+
+def step_fields(body: dict, on_error: Callable[[Exception], None] | None = None) -> dict:
+    """The GE1 ledger labels (``step_class``, ``prev_tools``, ``prev_tool_class``,
+    ``step_ineligible``) plus ``step_error``. Fail-open: if labelling raises, the row
+    says ``step_class == unknown`` with ``step_error`` true and empty labels, the
+    exception goes to ``on_error``, and the caller must not classify the call (NFR-FAIL)."""
+    try:
+        return {"step_class": step_kind(body), "prev_tools": prev_tools(body),
+                "prev_tool_class": prev_tool_class(body), "step_ineligible": step_ineligible(body),
+                "step_error": False}
+    except Exception as exc:  # noqa: BLE001 - a label must never cost a call
+        if on_error is not None:
+            on_error(exc)
+        return {"step_class": STEP_UNKNOWN, "prev_tools": [], "prev_tool_class": None,
+                "step_ineligible": None, "step_error": True}
 
 
 def step_ineligible(body: dict) -> str | None:

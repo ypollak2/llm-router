@@ -677,8 +677,9 @@ def _g1_proxy(pop: dict) -> dict:
     session count and the largest session's share; below ``G1_DECISION_MIN_N`` rows or
     ``G1_DECISION_MIN_SESSIONS`` sessions the segment says "not informative". Rows
     with a null ``step_class`` (pre-GE1 rows of any kind), ``subagent_first`` rows and,
-    since TURNFIRST-1, ``subagent_turn`` (a later sub-agent call) and ``harness_turn``
-    (a main-thread notification / command echo) rows are NOT turn-first and are
+    since TURNFIRST-1, ``subagent_turn`` (a later sub-agent call), ``harness_turn``
+    (a main-thread notification / command echo) and ``unknown`` (labelling raised,
+    ``step_error``; counted as ``step_error``) rows are NOT turn-first and are
     counted apart (``excluded``): null rows once made up the whole bucket and printed
     a 5 ms p95 (docs/bugs/P09-11.md); sub-agent calls were all of the classified
     turn_first rows (docs/bugs/TURNFIRST-1.md). Rows written before TURNFIRST-1 still
@@ -699,7 +700,7 @@ def _g1_proxy(pop: dict) -> dict:
     sched_by_session: dict[str, int] = {}
     side = 0
     excluded = {"no_step_class": 0, "subagent_first": 0, "subagent_turn": 0, "harness_turn": 0,
-                "turn_first_without_phases": 0}
+                "step_error": 0, "turn_first_without_phases": 0}
     newest: float | None = None
     for r in pop["allowed"]:
         step = r.get("step_class")
@@ -728,8 +729,11 @@ def _g1_proxy(pop: dict) -> dict:
             else:
                 no_sid += 1
         else:
-            excluded[step if step in ("subagent_first", "subagent_turn", "harness_turn")
-                     else "no_step_class"] += 1
+            if step == "unknown":
+                excluded["step_error"] += 1   # labelling raised (steps.STEP_UNKNOWN): not classified
+            else:
+                excluded[step if step in ("subagent_first", "subagent_turn", "harness_turn")
+                         else "no_step_class"] += 1
             continue
         newest = _newer(newest, _num_ts(r.get("ts")))
     n = len(first) + len(cont)
@@ -795,6 +799,7 @@ def _g1_proxy(pop: dict) -> dict:
         ("subagent_first", excluded["subagent_first"]),
         ("subagent_turn", excluded["subagent_turn"]),
         ("harness_turn", excluded["harness_turn"]),
+        ("unlabelled (step_error)", excluded["step_error"]),
         ("turn_first without tier_phases_ms", excluded["turn_first_without_phases"])) if c]
     if left_out:
         value += f" | not turn-first: {', '.join(left_out)}"

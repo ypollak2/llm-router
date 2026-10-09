@@ -161,6 +161,7 @@ REASON_THINKING_FLOOR = "thinking_floor"
 REASON_STICKY = "sticky"
 REASON_DECISION_ERROR = "decision_error"
 REASON_UNSEEN = "unseen"  # internal state marker, never a row's tier_reason
+STEP_ERROR = "step_error"  # tier_detail of decide_unclassified: the call could not be labelled
 # Phase "proxy-default": explicit/automatic escalation (proxy/escalation.py)
 # and the long-first-prompt safety floor. See that module's docstring for the
 # trial evidence behind each one.
@@ -791,6 +792,34 @@ class ClaudeTierPolicy:
                             arm_assignment=haiku_arm.ASSIGNED, arm_reason=haiku_arm.WHY_MATCHED + matched,
                             arm_bucket=bucket, arm_turn=turn_id,
                             chain_head=list(choice.get("chain_head") or [])[:4])
+
+    def decide_unclassified(self, body: dict, session_id: str | None, sticky: Stickiness) -> TierDecision:
+        """The decision for a call the proxy could not label (``step_class == unknown``,
+        ``step_error``): no classifier, no D-31 arm, stickiness read but not written. A
+        pinned model stays pinned; otherwise the conversation's last served tier holds
+        when the body is accepted on it as sent (a Haiku tier, which may need a body
+        rewrite, does not hold); otherwise the call is forwarded as sent
+        (``decision_error``). ``detail`` is ``step_error`` on every path."""
+        requested = body.get("model") if isinstance(body.get("model"), str) else None
+        req_tier = self.tier_of(requested)
+        name = req_tier.name if req_tier else None
+        if req_tier is None:
+            return TierDecision(requested, requested, None, REASON_UNKNOWN_MODEL, detail=STEP_ERROR)
+        if _canonical(requested) in self.pinned:
+            return TierDecision(requested, requested, name, REASON_CONFIG_PINNED, detail=STEP_ERROR)
+        if not has_client_tools(body):
+            return TierDecision(requested, requested, name, REASON_SIDE_CALL, detail=STEP_ERROR)
+        state = sticky.get(conversation_key(body, session_id))
+        prev = self.tier_of(state.model) if state is not None else None
+        thinking = (body.get("thinking") or {}).get("type") if isinstance(body.get("thinking"), dict) else None
+        thinking = thinking if thinking in THINKING_TYPES else None
+        oc = body.get("output_config")
+        effort = isinstance(oc, dict) and oc.get("effort") is not None
+        if (prev is not None and prev.name != "haiku" and self._accepts(prev, thinking, effort)
+                and (self.allow_upgrade or self.rank[prev.name] <= self.rank[req_tier.name])):
+            served = requested if _canonical(state.model) == _canonical(requested) else state.model
+            return TierDecision(requested, served, prev.name, REASON_STICKY, detail=STEP_ERROR)
+        return TierDecision(requested, requested, name, REASON_DECISION_ERROR, detail=STEP_ERROR)
 
     async def decide(self, body: dict, session_id: str | None, sticky: Stickiness,
                      classify=None) -> TierDecision:

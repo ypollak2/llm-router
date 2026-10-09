@@ -261,3 +261,60 @@ async def test_a_failure_in_turn_fields_leaves_the_ledger_row_fail_open(tmp_path
     assert (row["is_main_thread"], row["is_first_call"], row["turn_origin"], row["tier_text_len"]) == (
         None, None, None, None)
     assert row["step_class"] == "turn_first"
+
+
+# ── NFR-FAIL: a labelling error never costs the call ─────────────────────────
+
+def _raise(body):
+    raise RuntimeError("step_kind broke")
+
+
+@pytest.mark.parametrize("over,model,reason,served", [
+    ({}, "claude-sonnet-5-5", pt.REASON_DECISION_ERROR, "claude-sonnet-5-5"),
+    ({"pinned_models": ["claude-opus-5-5"], "haiku_rewrite": True, "haiku_arm_share": 1.0},
+     "claude-opus-5-5", pt.REASON_CONFIG_PINNED, "claude-opus-5-5"),
+], ids=["unpinned, no sticky state", "pinned, Haiku arm on"])
+async def test_step_kind_raising_forwards_the_call_unclassified(tmp_path, monkeypatch, over, model, reason, served):
+    from llm_router.proxy import server as ps
+    calls: list = []
+
+    async def choose(text, pinned, *, anthropic=False):
+        calls.append(text)
+        return {"task_type": "query", "complexity": "simple", "chain_head": [], "model": None}
+    monkeypatch.setattr(pb, "tier_classify", choose)
+    monkeypatch.setattr(steps, "step_kind", _raise)
+    recorded: list = []
+    monkeypatch.setattr(ps.failopen, "record", lambda code, exc=None, *a, **k: recorded.append(code))
+    up = Upstream()
+    app = _app(tmp_path, up, policy_overrides=over)
+    body = _body("what is a mutex?", "and a semaphore?", main=True, model=model)
+    body["metadata"] = {"user_id": json.dumps({"session_id": "s-arm"})}
+    assert (await _post(app, body)).status_code == 200
+    [row] = _rows(tmp_path)
+    assert (row["step_class"], row["step_error"]) == (steps.STEP_UNKNOWN, True)
+    assert (row["prev_tools"], row["prev_tool_class"], row["step_ineligible"]) == ([], None, None)
+    assert (row["tier_reason"], row["served_model"], row["tier_detail"]) == (reason, served, pt.STEP_ERROR)
+    assert "tier_arm" not in row and row.get("tier_task_type") is None
+    assert calls == [] and "LR-FO-PROXY-STEP-KIND" in recorded
+    assert json.loads(up.requests[0].content)["model"] == model   # forwarded as sent
+
+
+def test_an_unlabelled_call_keeps_the_conversation_sticky_tier():
+    policy = pt.ClaudeTierPolicy.load()
+    body = _body("what is a mutex?", "and a semaphore?", main=True, model="claude-opus-5-5")
+    body.pop("thinking", None)
+    sticky = Stickiness()
+    from llm_router.proxy.cache_cost import conversation_key
+    sonnet = policy.by_name["sonnet"].model
+    sticky.record(conversation_key(body, "s-1"), sonnet, "moderate", pt.REASON_POLICY)
+    d = policy.decide_unclassified(body, "s-1", sticky)
+    assert (d.reason, d.served_model, d.detail, d.task_type) == (pt.REASON_STICKY, sonnet, pt.STEP_ERROR, None)
+    haiku = policy.by_name["haiku"].model     # a Haiku tier may need a body rewrite: it does not hold
+    sticky.record(conversation_key(body, "s-1"), haiku, "simple", pt.REASON_POLICY)
+    d = policy.decide_unclassified(body, "s-1", sticky)
+    assert (d.reason, d.served_model) == (pt.REASON_DECISION_ERROR, "claude-opus-5-5")
+
+
+def test_a_well_formed_row_says_step_error_false():
+    f = steps.step_fields(_body("hi", "and?", main=True))
+    assert (f["step_class"], f["step_error"]) == (steps.STEP_TURN_FIRST, False)

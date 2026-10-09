@@ -614,3 +614,15 @@ def test_turnfirst1_default_turn_rule_used_by_the_haiku_guard():
     steps_ = ["turn_first", "subagent_turn", "subagent_turn", "harness_turn", "continuation", "turn_first"]
     rows = [proxy_row(i, sid=SID, kind="organic", ts=t + i, msg_id=f"m{i}", step=s) for i, s in enumerate(steps_)]
     assert osh._Conversation(rows).turn == [1, 1, 1, 2, 2, 3]
+
+
+def test_an_unlabelled_row_is_never_a_turn():
+    """``step_class == unknown`` (the proxy could not label the call, ``step_error``) is not a kind: not a
+    turn, not a redo-window boundary, counted with the null-step rows."""
+    t = NOW - 3000
+    rows = [proxy_row(1, sid=SID, kind="organic", ts=t, msg_id="a", tier="haiku"),
+            proxy_row(2, sid=SID, kind="organic", ts=t + 1, msg_id="u", step="unknown")]
+    built = osh.build_units(rows, [], thread_of=lambda sid, m: "turn", **_kw())
+    assert [u["msg_id"] for u in osh.turn_units(built["units"])] == ["a"]
+    assert built["no_step_class"] == 1
+    assert osh._Conversation(rows).turn == [1, 1]

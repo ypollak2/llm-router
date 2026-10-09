@@ -130,6 +130,7 @@ STEP_TURN_FIRST = "turn_first"   # proxy.steps.STEP_TURN_FIRST, duplicated to ke
 # turn unless the transcript puts it on the main thread, the same rule as ``subagent_first``).
 STEP_HARNESS_TURN = "harness_turn"
 STEP_SUBAGENT_TURN = "subagent_turn"
+STEP_UNKNOWN = "unknown"  # labelling raised (proxy.steps.STEP_UNKNOWN, step_error): not a kind, never a turn
 _BEGINS_TURN_KINDS = frozenset({STEP_TURN_FIRST, STEP_HARNESS_TURN})
 ESCALATION_REASONS = frozenset({"escalation", "escalation_under_pressure"})
 NOT_APPLIED_YET = frozenset({"not_applied_seen", "partly_applied"})  # usage_outcome so_far
@@ -247,7 +248,8 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
     "step_side_call"}``. ``step_side_call`` counts rows labelled
     ``side_call`` whose ``tier_reason`` is not (so ``side_call_excluded`` missed them). ``no_step_class``,
     ``step_subagent_first`` and ``step_subagent_turn`` count the admitted proxy rows left out of the turns
-    because their ``step_class`` is null (pre-GE1 rows), ``subagent_first`` or ``subagent_turn``. ``units`` holds
+    because their ``step_class`` is null (pre-GE1 rows) or ``unknown`` (labelling raised; both in
+    ``no_step_class``), ``subagent_first`` or ``subagent_turn``. ``units`` holds
     turns and the other calls (``first`` False); ``local_assist`` holds the local MCP units (never
     turns). ``subagent_first``, ``meta_first`` and ``unjoined`` count the turn-first rows
     by what the transcript says: ``subagent_first`` are taken out of the turns, ``meta_first`` and
@@ -402,7 +404,7 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
             why = "receipt_band"
         first = begins_turn(r)
         step = r.get("step_class")
-        if step is None:
+        if step is None or step == STEP_UNKNOWN:
             no_step_class += 1          # not a turn (first is False): counted, never guessed
         elif step == "subagent_first" and not first:
             step_subagent_first += 1    # the proxy's own label, no main-thread join: not a turn
