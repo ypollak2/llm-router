@@ -104,6 +104,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The warm-up now loads it through `/v1/systemone`; a refused warm-up is recorded once as
   `CHZ-FO-LOCAL-CLASSIFIER-WARMUP`; a unitless `LLM_ROUTER_CLASSIFIER_KEEP_ALIVE` (`-1`) is sent as an integer.
   See `docs/bugs/SYSONE-WARM-1.md`.
+- `llm_local_task` `changed_files` no longer lists the router's own state directory (`LLM_ROUTER_HOME`: ledger/index DBs and
+  their -wal/-shm sidecars) when it sits inside the task's workdir; excluded from both the git and walk snapshots
+  (`docs/bugs/SLT-2.md`; main CI 37926623089).
 
 ### Changed
 - kpi (PLAN v16 P0.9-e, `docs/bugs/P09-11.md`): G1_proxy's turn-first segment counts only
