@@ -443,7 +443,9 @@ def write_cache(state: str, session: str, seg: dict[str, str]) -> str:
 def _prune(state: str, keep_s: float = 2 * 86400) -> None:
     """Drop session caches nobody has read for two days (one file per session)."""
     cutoff = time.time() - keep_s
-    for p in glob.glob(os.path.join(state, "statusline_seg_*.kv")):
+    names = ("statusline_seg_*.kv", ".statusline-seg-*.lock", ".statusline_seg_spawn_*",
+             ".statusline_seg_sync_*")
+    for p in (q for pat in names for q in glob.glob(os.path.join(state, pat))):
         try:
             if os.path.getmtime(p) < cutoff:
                 os.unlink(p)

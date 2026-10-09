@@ -144,7 +144,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cache with `read`, and prints; output is byte-identical to the previous script on the default-layout
   fixtures (`tests/test_statusline_default_full.py`). A cache older than 90 s is printed with a
   `cached <age> ago` marker; the first render of a session still computes synchronously. The context figure
-  now reads the transcript from its tail. Measured with `scripts/statusline_wall.py` on one machine,
+  now reads the transcript from its tail. Cache values are digit-checked before any arithmetic; the interpreter probe runs only in the
+  detached child; the synchronous first-render call is rate-limited (5 s) and a missing cache prints
+  `segments pending`. Deploy `llm_router_statusline_segments.py` before the script. Measured with `scripts/statusline_wall.py` on one machine,
   2026-10-09, a copy of the live state (11 MB transcript, 1,637 last-route files): wall p95 22 ms cold
   (n = 219, load1 median 3.6) against 509 ms for the previous script (n = 190, load1 median 3.6); first
   render of a session 224 ms (n = 220). Not a live number: the PRD verdict is judged from

@@ -37,7 +37,7 @@ SID = "p09c-test-session"
 #: (macOS /bin/bash); nothing else.
 HOT_PATH_ALLOWED = {"date"}
 SHIMMED = ("cat", "date", "perl", "python3", "python", "sqlite3", "sed", "awk", "xargs", "head",
-           "basename", "dirname", "grep", "stat", "tr", "cut", "ls", "find", "sort", "mkdir", "touch")
+           "basename", "dirname", "grep", "stat", "tr", "cut", "ls", "find", "sort", "mkdir", "touch", "sleep")
 
 
 def _shims(tmp_path: Path) -> tuple[Path, Path]:
@@ -297,3 +297,92 @@ def test_harness_percentile_matches_hook_wall():
     s = sw.summarise(rows, "cold", 4.0)
     assert s["n"] == 10 and s["excluded_load"] == 1 and s["p95_ms"] < 100 and s["above_load_p95_ms"] == 999.0
     assert os.path.exists(sw.__file__)
+
+
+# ── repair round 1: the cache file is data, not code ─────────────────────────
+
+
+@pytest.mark.parametrize("key", ["ctx_pct", "session_pct", "weekly_pct", "mix_local", "mix_paid"])
+def test_a_malicious_cache_value_is_never_evaluated(home, tmp_path, key):
+    pwned = tmp_path / "PWNED"
+    _write_cache(home, age_s=5, usage="ok", session_pct="5", weekly_pct="5", ctx_human="1k",
+                 ctx_pct="5", mix_local="1", mix_paid="1")
+    kv = _read_kv(_cache(home))
+    kv[key] = f"a[$(touch {pwned})]"
+    _cache(home).write_text("".join(f"{k}={v}\n" for k, v in kv.items()))
+    out, _ = _run(home, tmp_path, _stdin(tmp_path))
+    assert not pwned.exists(), f"{key} was evaluated by the shell"
+    assert "smart" in out, "the render did not survive a bad cache value"
+
+
+# ── repair round 1: the render path never probes for an interpreter ──────────
+
+
+def test_a_stale_cache_render_does_not_wait_for_an_interpreter_probe(home, tmp_path):
+    (home / ".llm-router" / ".statusline_python").unlink()  # nothing remembered: a probe is needed
+    bindir, _log = _shims(tmp_path)
+    slow = bindir / "python3"  # every probe candidate that goes through PATH takes 3 s
+    slow.write_text('#!/bin/bash\nsleep 3\nexit 1\n')
+    slow.chmod(0o755)
+    _write_cache(home, age_s=45, last="code>query")
+    t0 = time.monotonic()
+    out, _ = _run(home, tmp_path, _stdin(tmp_path))
+    assert "code>query" in out
+    assert time.monotonic() - t0 < 2.5, "the render waited on the interpreter search"
+
+
+def test_with_no_usable_python_warm_renders_spawn_nothing_but_the_clock(home, tmp_path):
+    (home / ".llm-router" / ".statusline_python").unlink()
+    _write_cache(home, age_s=5, last="code>query")
+    out, spawned = _run(home, tmp_path, _stdin(tmp_path))
+    assert "code>query" in out and not (set(spawned) - HOT_PATH_ALLOWED), spawned
+
+
+# ── repair round 1: the synchronous path is rate-limited and visible ─────────
+
+
+def test_a_broken_refresher_costs_one_sync_call_per_five_seconds_and_says_so(home, tmp_path):
+    calls = tmp_path / "calls.log"
+    fake = tmp_path / "fakepy"
+    fake.write_text(f'#!/bin/bash\necho x >> {calls}\nexit 1\n')
+    fake.chmod(0o755)
+    (home / ".llm-router" / ".statusline_python").write_text(f"{fake}\n")
+    outs = [_run(home, tmp_path, _stdin(tmp_path))[0] for _ in range(3)]
+    assert calls.read_text().count("x") == 1, "every render paid the failing synchronous call"
+    assert all("segments pending" in o and "smart" in o for o in outs), outs
+
+
+def test_the_loser_of_a_first_render_race_renders_a_marker_not_a_bare_line(home, tmp_path):
+    import fcntl
+
+    lock = open(home / ".llm-router" / f".statusline-seg-{SID}.lock", "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        out, _ = _run(home, tmp_path, _stdin(tmp_path), shims=False)
+    finally:
+        lock.close()
+    assert "segments pending" in out and "proj" in out
+
+
+def test_a_plain_interpreter_answer_is_reprobed_after_its_ttl(home, tmp_path):
+    fake = tmp_path / "probe-me"
+    fake.write_text("#!/bin/bash\nexit 1\n")
+    fake.chmod(0o755)
+    stale = int(time.time()) - 3600
+    (home / ".llm-router" / ".statusline_python").write_text(f"{fake}\n{stale}\nplain\n")
+    _run(home, tmp_path, _stdin(tmp_path), shims=False)  # first render: sync, re-probes
+    lines = (home / ".llm-router" / ".statusline_python").read_text().split("\n")
+    assert lines[0] != str(fake) and lines[2] in {"full", "plain"}, lines
+
+
+def test_prune_removes_old_locks_and_markers_too(tmp_path):
+    names = ["statusline_seg_x.kv", ".statusline-seg-x.lock", ".statusline_seg_spawn_x",
+             ".statusline_seg_sync_x"]
+    old = time.time() - 3 * 86400
+    for n in names:
+        (tmp_path / n).write_text("")
+        os.utime(tmp_path / n, (old, old))
+    (tmp_path / ".statusline_seg_sync_fresh").write_text("")
+    seg._prune(str(tmp_path))
+    assert [n for n in names if (tmp_path / n).exists()] == []
+    assert (tmp_path / ".statusline_seg_sync_fresh").exists()

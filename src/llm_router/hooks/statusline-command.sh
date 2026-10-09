@@ -141,6 +141,9 @@ for v in (d.get("cwd", ""), d.get("transcript_path", ""), mid, sid):
     { IFS= read -r session_cwd; IFS= read -r transcript_path; IFS= read -r model_id; IFS= read -r _sid; } <<< "$_parsed"
     transcript_path="${transcript_path//$'\x01'/$'\n'}"
 else
+    # These regexes take the FIRST match anywhere in the JSON, not strictly the top-level
+    # key. The session JSON has each key once; a nested look-alike could only change a
+    # label (values reach a process through argv only), so this is documented, not guarded.
     _re='"cwd"[[:space:]]*:[[:space:]]*"([^"]*)"'
     [[ "$input" =~ $_re ]] && session_cwd="${BASH_REMATCH[1]}"
     _re='"transcript_path"[[:space:]]*:[[:space:]]*"([^"]*)"'
@@ -236,34 +239,55 @@ _seg_script="${0%/*}/llm_router_statusline_segments.py"
 printf -v _now '%(%s)T' -1 2>/dev/null || _now=$(date +%s 2>/dev/null)
 case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
 
-# Sets $_seg_py: the interpreter that imports llm_router (remembered in
-# .statusline_python), else the ambient python3 (money is then omitted, as before).
+# Sets $_seg_py: the interpreter that imports llm_router, else the ambient python3
+# (money is then omitted). .statusline_python holds three lines: path, epoch it was
+# probed, kind (full = imports llm_router, plain = it did not). A "plain" answer is
+# re-probed after 5 min and a "full" one after a day, so installing llm_router later
+# lights money up without anyone deleting a file. A file with only a path (older
+# writers, tests) is trusted. THIS FUNCTION PROBES (several `python -c "import
+# llm_router"`, ~100 ms each) and therefore only ever runs in the detached child, or
+# in the rate-limited first-render sync call -- never on a cache hit's render path.
 _seg_resolve_py() {
     _seg_py=""
-    [ -r "$_seg_py_file" ] && IFS= read -r _seg_py < "$_seg_py_file"
-    if [ -n "$_seg_py" ] && [ -x "$_seg_py" ]; then return 0; fi
+    local _ep="" _kind="" _ttl=86400
+    if [ -r "$_seg_py_file" ]; then
+        { IFS= read -r _seg_py; IFS= read -r _ep; IFS= read -r _kind; } < "$_seg_py_file"
+    fi
+    case "$_ep" in ''|*[!0-9]*) _ep="" ;; esac
+    [ "$_kind" = "plain" ] && _ttl=300
+    if [ -n "$_seg_py" ] && [ -x "$_seg_py" ]; then
+        if [ -z "$_ep" ] || [ $(( _now - _ep )) -lt "$_ttl" ]; then return 0; fi
+    fi
     _chz_find_py
     if [ -n "$_chz_py" ]; then
-        _seg_py="$_chz_py"
-        ( umask 077; printf '%s\n' "$_seg_py" > "$_seg_py_file" ) 2>/dev/null
+        _seg_py="$_chz_py"; _kind=full
     else
-        _seg_py="$(command -v python3 2>/dev/null)"
+        _seg_py="$(command -v python3 2>/dev/null)"; _kind=plain
     fi
+    [ -n "$_seg_py" ] && ( umask 077; printf '%s\n%s\n%s\n' "$_seg_py" "$_now" "$_kind" > "$_seg_py_file" ) 2>/dev/null
 }
 # $1 = "sync" to wait, anything else to detach.
-_seg_run() {
+_seg_exec() {
     _seg_resolve_py
     [ -n "$_seg_py" ] || return 0
     local -a _cmd
     # -I: the source tree's own types.py etc. sit beside the script and would
     # shadow the stdlib if its folder were on sys.path (as for the fast tick).
+    # Deploy order: llm_router_statusline_segments.py goes in BEFORE this script. If it
+    # is absent the fallback is `-m llm_router.statusline_segments` (works once the
+    # package is upgraded); if that fails too nothing is cached and the line shows
+    # "segments pending" instead of silently dropping the segments.
     if [ -f "$_seg_script" ]; then _cmd=("$_seg_py" -I "$_seg_script")
     else _cmd=("$_seg_py" -m llm_router.statusline_segments); fi
     _cmd+=(--state "$STATE_DIR" --session "$_sid" --transcript "$transcript_path" --model "$model_id")
+    "${_cmd[@]}" </dev/null >/dev/null 2>&1
+}
+_seg_run() {
     if [ "$1" = "sync" ]; then
-        "${_cmd[@]}" </dev/null >/dev/null 2>&1
+        _seg_exec
     else
-        ( "${_cmd[@]}" </dev/null >/dev/null 2>&1 & ) >/dev/null 2>&1
+        # Detached, probe included: the render never waits for an interpreter search.
+        ( _seg_exec & ) >/dev/null 2>&1
     fi
 }
 
@@ -289,12 +313,31 @@ _seg_load() {
             last_tok) s_last_tok="$v" ;;
         esac
     done < "$_seg_file"
+    # Every value used in arithmetic or a numeric test must be digits only: the file
+    # is data, and `$(( ))` / `[[ -gt ]]` evaluate their operands (a value such as
+    # a[$(cmd)] would run cmd). Anything else is dropped, i.e. the segment is hidden.
+    case "$s_session_pct" in ''|*[!0-9]*) s_session_pct="" ;; esac
+    case "$s_weekly_pct" in ''|*[!0-9]*) s_weekly_pct="" ;; esac
+    case "$s_ctx_pct" in ''|*[!0-9]*) s_ctx_pct="" ;; esac
+    case "$s_mix_local" in ''|*[!0-9]*) s_mix_local="" ;; esac
+    case "$s_mix_paid" in ''|*[!0-9]*) s_mix_paid="" ;; esac
+    case "$s_written" in ''|*[!0-9]*) s_written="" ;; esac
     [ "$s_v" = "1" ]
 }
 
 if ! _seg_load; then
-    _seg_run sync
-    _seg_load
+    # First render of a session (or a refresher that cannot produce a cache): compute
+    # synchronously, but at most once per 5 s per session, so a broken refresher costs
+    # one failed call per 5 s and not one per render.
+    _sync_file="$STATE_DIR/.statusline_seg_sync_${_sid}"
+    _last_sync=0
+    [ -r "$_sync_file" ] && IFS= read -r _last_sync < "$_sync_file"
+    case "$_last_sync" in ''|*[!0-9]*) _last_sync=0 ;; esac
+    if [ $(( _now - _last_sync )) -ge 5 ]; then
+        ( umask 077; printf '%s\n' "$_now" > "$_sync_file" ) 2>/dev/null
+        _seg_run sync
+        _seg_load
+    fi
 fi
 _seg_age=0
 case "$s_written" in ''|*[!0-9]*) ;; *) [ "$_now" -gt 0 ] && _seg_age=$(( _now - s_written )) ;; esac
@@ -412,7 +455,11 @@ if [ -n "$s_last" ]; then
 fi
 
 # ── Cache staleness: a cache the refresher stopped updating says so ──────────
-if [ "$s_v" = "1" ] && [ "$_seg_age" -ge "$_SEG_STALE_MARK" ]; then
+if [ "$s_v" != "1" ]; then
+    # No cache and none could be made right now (lock held by a racing first render,
+    # refresher broken, or the sync call rate-limited): say so.
+    parts+=("${_DIM}segments pending${_RESET}")
+elif [ "$_seg_age" -ge "$_SEG_STALE_MARK" ]; then
     if [ "$_seg_age" -ge 120 ]; then _age_txt="$(( _seg_age / 60 ))m"; else _age_txt="${_seg_age}s"; fi
     parts+=("${_DIM}cached ${_age_txt} ago${_RESET}")
 fi
