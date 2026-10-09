@@ -17,9 +17,14 @@ different claims.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _ast_assert import assert_in_strings  # noqa: E402
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -36,13 +41,12 @@ def _src() -> str:
     return STATUSLINE.read_text() + "\n" + SEGMENTS.read_text()
 
 
-def _fn(name: str) -> str:
-    """Source of one function of the segments module."""
-    import inspect
-
-    from llm_router import statusline_segments as seg
-
-    return inspect.getsource(getattr(seg, name))
+def _fn(name: str) -> ast.FunctionDef:
+    """One function of the segments module, as an AST (comments cannot satisfy an assertion)."""
+    for node in ast.parse(SEGMENTS.read_text()).body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"statusline_segments.{name} is gone")
 
 
 # ── the fabricated-quota bug ──────────────────────────────────────────────────
@@ -50,10 +54,10 @@ def _fn(name: str) -> str:
 
 def test_statusline_checks_the_fallback_flag():
     """Reading session_pct without checking is_fallback is the whole defect."""
-    quota_block = _fn("usage_segment")
-    assert "is_fallback" in quota_block, (
-        "the quota segment reads session_pct without checking is_fallback, so a "
-        "failed OAuth fetch renders 50% as though it were measured"
+    assert_in_strings(
+        _fn("usage_segment"), "is_fallback",
+        msg="the quota segment reads session_pct without checking is_fallback, so a "
+            "failed OAuth fetch renders 50% as though it were measured",
     )
 
 
@@ -126,29 +130,31 @@ def test_staleness_uses_one_clock():
     # Only the health probe's own function -- `getmtime` is used legitimately
     # elsewhere (newest last_route file), a different file and question.
     probe = _fn("health_segment")
-
-    # `updated_at` must be PREFERRED. mtime survives only as the fallback for
-    # snapshots written before that field existed — otherwise an old file would
-    # read as infinitely stale, and mtime remains a usable test control.
-    assert "updated_at" in probe, (
+    assert_in_strings(probe, "updated_at", msg=(
         "health still derives usage staleness from file mtime alone; it must "
         "prefer updated_at like the ° marker does, so the two ends of the line "
-        "cannot contradict each other"
-    )
-    assert probe.index("updated_at") < probe.index("getmtime"), (
+        "cannot contradict each other"))
+    updated_at = min(n.lineno for n in ast.walk(probe)
+                     if isinstance(n, ast.Constant) and n.value == "updated_at")
+    getmtime = min(n.lineno for n in ast.walk(probe)
+                   if isinstance(n, ast.Attribute) and n.attr == "getmtime")
+    assert updated_at < getmtime, (
         "mtime is consulted before updated_at, so the two clocks still disagree "
         "whenever both are available"
     )
 
+    # `updated_at` must be PREFERRED; mtime survives only as the fallback for snapshots
+    # written before that field existed (checked above by line order).
+
     # And the ° marker must be reading the same field.
-    assert "updated_at" in _fn("usage_segment")
+    assert_in_strings(_fn("usage_segment"), "updated_at")
 
 
 def test_health_treats_a_fallback_as_not_ok():
     """A green check beside an invented number is the worst combination."""
-    health_block = _fn("health_segment")
-    assert "is_fallback" in health_block, (
-        "health reports ok while the quota it sits beside is a placeholder"
+    assert_in_strings(
+        _fn("health_segment"), "is_fallback",
+        msg="health reports ok while the quota it sits beside is a placeholder",
     )
 
 

@@ -69,6 +69,14 @@ def _clean(value: object) -> str:
 # ── segments (each a port of the script's former inline ``python3 -c``) ──────
 
 
+def _age_s(now: float, stamp: object) -> float:
+    """Seconds since ``stamp``; a missing or unreadable stamp is 99999 (unknown, so stale)."""
+    try:
+        return now - float(stamp) if stamp is not None else 99999.0  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 99999.0
+
+
 def _refresh_script() -> str:
     return os.path.join(os.path.expanduser("~"), ".claude", "hooks", "llm_router-usage-refresh.py")
 
@@ -98,10 +106,8 @@ def usage_segment(state: str, now: float, env: dict[str, str]) -> dict[str, str]
         ttl = float(env.get("LLM_ROUTER_USAGE_TTL_SEC", "300"))
     except ValueError:
         ttl = 300.0
-    try:
-        age = now - float(data.get("updated_at", 0))
-    except (TypeError, ValueError):
-        age = 99999.0
+    # An absent or unreadable updated_at is "age unknown", which reads as stale (never fresh).
+    age = _age_s(now, data.get("updated_at"))
     # Byte-for-byte with the shell it replaces (test_statusline_default_full): the
     # old script computed the age only when the refresh script exists, so the
     # degree sign never rendered without it. Kept; changing it is its own change.
@@ -112,7 +118,7 @@ def usage_segment(state: str, now: float, env: dict[str, str]) -> dict[str, str]
 
         raw = str(data.get("session_resets_at", "") or "")
         if raw:
-            dt = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone()
+            dt = datetime.datetime.fromisoformat((raw[:-1] + "+00:00" if raw.endswith("Z") else raw)).astimezone()
             if dt >= datetime.datetime.now(datetime.timezone.utc).astimezone():
                 out["reset"] = dt.strftime("%-I:%M%p").lower()
     except Exception:  # noqa: BLE001
@@ -138,7 +144,7 @@ def maybe_refresh_usage(state: str, now: float, env: dict[str, str]) -> None:
         ttl, throttle = 300.0, 60.0
     try:
         with open(path, encoding="utf-8") as fh:
-            age = now - float(json.load(fh).get("updated_at", 0))
+            age = _age_s(now, json.load(fh).get("updated_at"))
     except Exception:  # noqa: BLE001
         age = 99999.0
     if age <= ttl:
@@ -371,7 +377,7 @@ def last_route_segment(state: str, now: float) -> dict[str, str]:
             tool = str(d.get("tool", "?")).replace("llm_", "")
             task = d.get("task_type", tool)
             out["last"] = (task + ">" + tool) if task != tool else tool
-            out["last_stale"] = "1" if (now - d.get("saved_at", 0)) >= 300 else "0"
+            out["last_stale"] = "1" if _age_s(now, d.get("saved_at")) >= 300 else "0"
         except Exception:  # noqa: BLE001
             out.pop("last", None)
     if out.get("last"):
@@ -383,7 +389,8 @@ def last_route_segment(state: str, now: float) -> dict[str, str]:
                 if not line:
                     continue
                 d = json.loads(line)
-                n = (d.get("input_tokens") or 0) + (d.get("output_tokens") or 0)
+                n = sum(v for v in (d.get("input_tokens"), d.get("output_tokens"))
+                        if isinstance(v, (int, float)))
                 if n > 0:
                     out["last_tok"] = ("%.1fk tok" % (n / 1000)) if n >= 1000 else ("%d tok" % n)
                 break
@@ -441,7 +448,7 @@ def _prune(state: str, keep_s: float = 2 * 86400) -> None:
             if os.path.getmtime(p) < cutoff:
                 os.unlink(p)
         except OSError:
-            pass
+            continue  # raced with another refresher, or not ours to remove: leave it
 
 
 def main(argv: list[str] | None = None) -> int:
