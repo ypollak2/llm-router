@@ -526,8 +526,7 @@ def _routing_decision_state(db_path: Path) -> _RoutingDecisionState:
         try:
             other = conn.execute(
                 "SELECT COUNT(*) FROM usage "
-                "WHERE date(timestamp,'localtime')=date('now','localtime') "
-                "AND COALESCE(provider, '') != 'cache'"
+                "WHERE date(timestamp,'localtime')=date('now','localtime')"
             ).fetchone()[0]
         except sqlite3.Error:
             other = 0

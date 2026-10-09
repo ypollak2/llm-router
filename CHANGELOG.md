@@ -28,8 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   paid / free / subscription excludes provider `cache` from all three (one definition,
   `llm_router/provider_classes.py`; hooks keep a checked `_CACHE_PROVIDER` copy): status-bar session
   calls, session-end paid rows, session-start weekly digest, claw-code session-end, the statusline
-  `mix_local`/`mix_paid` segment, the `share` card (`paid_calls`/`total_calls`), `digest`, the doctor
-  usage-vs-routing probe and the `routing_health` rates (cache rows get no bucket there: excluded). The
+  `mix_local`/`mix_paid` segment, the `share` card (`paid_calls`/`total_calls`), `digest`, the
+  `routing_health` rates (cache rows get no bucket there: excluded). The
   prompt-cache hit rate (`get_cache_savings`) leaves cache rows out of its denominator. Spend and
   savings are unchanged. Hook versions: status-bar 6 -> 7, session-end 24 -> 25, session-start 31 -> 32,
   session-end-clawcode 3 -> 4. Restart the MCP server to pick it up. See `docs/bugs/P08E-1.md`.
