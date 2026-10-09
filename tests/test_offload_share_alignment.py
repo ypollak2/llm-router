@@ -583,3 +583,25 @@ def test_step_class_side_call_without_the_side_call_reason_is_counted():
     built = osh.build_units(rows, [], **_kw())
     assert [u["msg_id"] for u in osh.turn_units(built["units"])] == ["c"]
     assert built["step_side_call"] == 1 and built["side_call_excluded"] == 1
+
+
+def test_turnfirst1_kinds_harness_turn_is_a_turn_and_subagent_turn_needs_a_main_thread_join():
+    """TURNFIRST-1 split two kinds out of ``turn_first``. A ``harness_turn`` (main-thread notification /
+    command echo) begins a turn as it did when it was labelled ``turn_first`` (the owner's definition keeps
+    injected input in n). A ``subagent_turn`` (a later sub-agent call) follows the ``subagent_first`` rule:
+    not a turn, and not a redo-window boundary, unless the transcript puts it on the main thread."""
+    t = NOW - 3000
+    rows = [proxy_row(1, sid=SID, kind="organic", ts=t, msg_id="a", tier="haiku"),
+            proxy_row(2, sid=SID, kind="organic", ts=t + 1, msg_id="s1", step="subagent_turn"),
+            proxy_row(3, sid=SID, kind="organic", ts=t + 2, msg_id="s2", step="subagent_turn"),
+            proxy_row(4, sid=SID, kind="organic", ts=t + 3, msg_id="h", step="harness_turn"),
+            proxy_row(5, sid=SID, kind="organic", ts=t + 4, msg_id="x", tier="opus", reason="escalation")]
+    plain = osh.build_units(rows, [], **_kw())
+    turns = osh.turn_units(plain["units"])
+    assert [u["msg_id"] for u in turns] == ["a", "h", "x"]
+    assert plain["step_subagent_turn"] == 2
+    assert turns[0]["redone"] is True     # the two sub-agent calls did not push the escalation out of the window
+    roles = {"a": "turn", "s1": "turn", "s2": "sidechain", "h": "meta", "x": "turn"}
+    joined = osh.build_units(rows, [], thread_of=lambda sid, m: roles[m], **_kw())
+    assert [u["msg_id"] for u in osh.turn_units(joined["units"])] == ["a", "s1", "h", "x"]
+    assert joined["step_subagent_turn"] == 1 and joined["meta_first"] == 1

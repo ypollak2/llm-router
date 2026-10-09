@@ -135,7 +135,8 @@ from llm_router.proxy import escalation, haiku_arm
 from llm_router.proxy import quota_pressure as quota_pressure_mod
 from llm_router.proxy.cache_cost import ConvState, Stickiness, conversation_key, switch_cost_usd
 from llm_router.proxy.steps import (
-    STEP_TURN_FIRST, has_client_tools, is_first_call, non_system, step_kind, tier_text, user_pinned_model,
+    STEP_HARNESS_TURN, STEP_SUBAGENT_TURN, STEP_TURN_FIRST, has_client_tools, is_first_call, non_system,
+    step_kind, tier_text, user_pinned_model,
 )
 
 DEFAULT_POLICY_PATH = Path(__file__).with_name("claude_tiers.yaml")
@@ -742,10 +743,15 @@ class ClaudeTierPolicy:
         haiku = self.by_name.get("haiku")
         if not has_client_tools(body):
             return stay(haiku_arm.WHY_SIDE_CALL)
-        if step_kind(body) != STEP_TURN_FIRST:
+        kind = step_kind(body)
+        if kind == STEP_SUBAGENT_TURN:
+            return stay(haiku_arm.WHY_NOT_MAIN_THREAD)  # sub-agent follow-up: SendMessage, notification
+        if kind == STEP_HARNESS_TURN:
+            return stay(haiku_arm.WHY_HARNESS_TURN)  # main thread, newest turn only a notification / echo
+        if kind != STEP_TURN_FIRST:
             return stay(haiku_arm.WHY_NOT_TURN_FIRST)  # continuation or sub-agent first call
         if not haiku_arm.is_main_thread(body):
-            return stay(haiku_arm.WHY_NOT_MAIN_THREAD)  # sub-agent follow-up (step_kind only sees first calls)
+            return stay(haiku_arm.WHY_NOT_MAIN_THREAD)  # unreachable since TURNFIRST-1; kept as a guard
         try:
             kind = session_kind.kind_of(session_id)
         except Exception:  # noqa: BLE001 - unknown kind: do not arm

@@ -83,7 +83,7 @@ from llm_router.proxy.loop_guard import (
 from llm_router.proxy.cache_cost import Stickiness, conversation_key
 from llm_router.proxy.steps import (
     STEP_CLASSES, classify_text, is_first_call, newest_human_text, prev_tool_class, prev_tools, session_id_of,
-    step_class, step_ineligible, step_kind,
+    step_class, step_ineligible, step_kind, turn_fields,
 )
 from llm_router import session_kind
 from llm_router.proxy import cost_accounting
@@ -667,10 +667,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         """The M0.5 ledger fields, derived from the request's shape and a hash of
         its newest human text. Never the text itself. A failure leaves honest
         nulls (and a fail-open record): this path must never cost a call."""
-        fields: dict = {"text_sha": None, "has_mid_system": None, "req_bytes": len(raw)}
+        fields: dict = {"text_sha": None, "has_mid_system": None, "req_bytes": len(raw),
+                        # TURNFIRST-1: which population a turn row belongs to (text-free).
+                        "is_main_thread": None, "is_first_call": None, "turn_origin": None,
+                        "tier_text_len": None}
         try:
             fields["text_sha"] = prompt_key.key(newest_human_text(body))
             fields["has_mid_system"] = has_mid_conversation_system_message(body)
+            fields.update(turn_fields(body))
         except Exception as exc:  # noqa: BLE001 - fail-safe: the ledger gets nulls, the call goes on
             failopen.record("LR-FO-PROXY-LEDGER-FIELDS", exc)
         return fields
@@ -887,7 +891,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             "auth": ledger.auth_kind(request.headers),
             "mixed_history": has_served_turn(body), "thinking_retry": False,
             # GE1: the kind of call (continuation / turn_first / subagent_first /
-            # side_call), the class of the tools its results answer, and why a
+            # subagent_turn / harness_turn / side_call), the class of the tools its results answer, and why a
             # continuation could not be served faithfully. Serving eligibility is
             # step_class(body, cfg.steps) below, not this label.
             "step_class": step_kind(body),

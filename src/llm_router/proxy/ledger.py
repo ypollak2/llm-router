@@ -9,9 +9,20 @@ optional ``detail`` string (a fallback reason) is passed through
 Row fields:
   ts, session_id, msg_id, stream, requested_model
   step_class      the kind of call (``proxy.steps.step_kind``): continuation |
-                  turn_first | subagent_first | side_call. Rows written before
-                  GE1 hold continuation or null (null = any other kind). Whether
-                  a call may be served is decided apart (``steps.step_class``).
+                  turn_first | subagent_first | subagent_turn | harness_turn |
+                  side_call. Rows written before GE1 hold continuation or null
+                  (null = any other kind); rows written before TURNFIRST-1 hold
+                  turn_first for every later sub-agent call and notification
+                  turn too (docs/bugs/TURNFIRST-1.md). Whether a call may be
+                  served is decided apart (``steps.step_class``).
+  is_main_thread, is_first_call, turn_origin, tier_text_len
+                  TURNFIRST-1 (``steps.turn_fields``), text-free: the call
+                  carries the Agent/Task launcher; it is the conversation's
+                  first call; where the newest user turn came from (typed |
+                  subagent_brief | task_notification | command | other_tag,
+                  null for a continuation or side call); the character length
+                  of the text the tier classifier reads. Null on a failure and
+                  absent on rows written before the fix.
   prev_tools      names of the tool calls the newest tool results answer
   prev_tool_class ``proxy.tool_classes`` class of those calls (technical_op |
                   edit | exec | agent | web | other), null when not a

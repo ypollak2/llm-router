@@ -97,6 +97,10 @@ as NULL (`src/llm_router/call_identity.py`).
 row that is not a side call and whose `step_class` is `turn_first`, minus sub-agent first calls. A row with
 no `step_class` (written before GE1) or labelled `subagent_first` is never a turn; they are counted in
 `o3.excluded.no_step_class` and `o3.excluded.step_subagent_first` (`docs/bugs/O3-STEP-1.md`).
+Since TURNFIRST-1 (`docs/bugs/TURNFIRST-1.md`) the proxy splits two kinds out of `turn_first`: a
+`harness_turn` (a main-thread turn whose newest user message is only a notification or command echo)
+is still a turn, as it was; a `subagent_turn` (a later sub-agent call) follows the `subagent_first`
+rule and is counted in `o3.excluded.step_subagent_turn` when no transcript join puts it on the main thread.
 The proxy row's `msg_id` is joined to the transcript's assistant `message.id` (`o3_transcripts`). The
 join changes exactly one thing; the rest of its roles are only counted:
 
@@ -362,8 +366,8 @@ segments. *Turn-first*: rows with `step_class == turn_first`, measured as the P0
 of `tier_phases_ms` over `proxy.tiers.DECISION_PHASES` (`classify`, `quota_read`, `stickiness`,
 `haiku_checks`); it prints n, the session count and the largest session's share, and says `not
 informative` below n=100 or with fewer than 2 sessions (P0.9-e MUST). Rows with a null `step_class`
-(pre-GE1 rows of any kind), `subagent_first` rows and turn-first rows without the decision phases are
-left out and counted on the line (`excluded` in the JSON); `tier_decision_s` (wall time, shadow
+(pre-GE1 rows of any kind), `subagent_first`, `subagent_turn` and `harness_turn` rows (TURNFIRST-1) and
+turn-first rows without the decision phases are left out and counted on the line (`excluded` in the JSON); `tier_decision_s` (wall time, shadow
 scheduling included) is never substituted for a missing phase sum (`docs/bugs/P09-11.md`).
 The phase sum does not include scheduling the classifier shadow, so that cost has its own
 segment (P09-13): `proxy/server.py` records `tier_shadow_schedule_ms` on a row only when a shadow

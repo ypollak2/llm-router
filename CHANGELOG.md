@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- proxy turn population (TURNFIRST-1, docs/bugs/TURNFIRST-1.md): `step_class == turn_first` labelled every later
+  sub-agent call and notification turn as a human turn; in the live ledger (2026-10-08 17:50 to 10-09 21:05) all 113
+  classified turn_first rows were Sonnet requests and 108 (95.6%) classed `code`, while the Opus main loop was never
+  classified. New kinds `subagent_turn` and `harness_turn`; `turn_first` is now a main-thread human turn. Every proxy
+  row gets text-free `is_main_thread`, `is_first_call`, `turn_origin` and `tier_text_len`. The tier classifier's human
+  text strips the shared harness-tag list (`groundtruth_sources.HARNESS_TAGS`) and matches a reminder's close tag at a
+  line start, so a quoted close tag no longer leaks the reminder; a notification-only turn keeps the sticky tier. The
+  Haiku arm, `kpi` G1_proxy, O3 and the Haiku guard read the new kinds. The P0.9-e turn-first p95, Haiku arm counts,
+  classifier mix and O3 turns must be recomputed on rows written after the deploy.
 - statusline first render (P0.9-c repair round 2, docs/bugs/STATUSLINE-COLD-1.md): the first render of a session built the segment
   cache inline (interpreter probe plus build, 80-200 ms; live p95 234 ms, n=47, after #370). It now starts the detached,
   single-flight builder and prints the line with `segments pending`; the cache lands for the next render. `scripts/statusline_wall.py`
