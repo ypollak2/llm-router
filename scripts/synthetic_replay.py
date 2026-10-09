@@ -184,7 +184,10 @@ def agent_calls(records: list[dict]) -> dict[str, dict]:
                 if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in ("Agent", "Task"):
                     inp = b.get("input") if isinstance(b.get("input"), dict) else {}
                     if inp.get("prompt"):
-                        out.setdefault(str(inp["prompt"]), inp)
+                        # the tool_use id rides along: PreToolUse at launch and PostToolUse at
+                        # the result must carry the SAME id (agent-route's in-flight slot is
+                        # released by it)
+                        out.setdefault(str(inp["prompt"]), dict(inp, _tool_use_id=b.get("id")))
     return out
 
 
@@ -1226,11 +1229,11 @@ class Replayer:
                     brief = latest_user_text(delta)
                     inp = dict(agent_inputs.get(brief) or {"description": "sub-agent", "prompt": brief,
                                                            "subagent_type": "general-purpose"})
+                    use_id = inp.pop("_tool_use_id", None) or f"toolu_replay_{rec['idx']:06d}"
                     launched.add(brief)
                     if hooks_on:
                         self.tools_seen["Agent"] += 1
-                        self.fire("PreToolUse", sid, rec, tool="Agent", tool_input=inp,
-                                  tool_use_id=f"toolu_replay_{rec['idx']:06d}")
+                        self.fire("PreToolUse", sid, rec, tool="Agent", tool_input=inp, tool_use_id=use_id)
                         self.fire("SubagentStart", sid, None, agent_type=inp.get("subagent_type"),
                                   agent_id=f"agent-{rec['idx']}")
                 else:
