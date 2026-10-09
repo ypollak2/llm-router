@@ -82,23 +82,30 @@ def test_main_does_not_run_any_moved_step_inline(hook, monkeypatch):
     spawned = []
     monkeypatch.setattr(hook, "_spawn_background_session_work", lambda cwd, *_: spawned.append(cwd),
                         raising=False)  # absent before P0.9: the test then fails on the timing
-    elapsed, out = _run_main(hook, monkeypatch)
+    # Asserted directly via the recorders, not by a wall-clock bound (P09-FLAKE-1).
+    _elapsed, out = _run_main(hook, monkeypatch)
     assert called == [], f"main() ran {called} inline"
     assert spawned == ["/tmp/project"], "exactly one background child, given the session cwd"
-    assert elapsed < 2.0, f"main() took {elapsed:.1f} s"
     assert out["hookSpecificOutput"]["hookEventName"] == "SessionStart"
 
 
 def test_main_returns_while_a_5s_background_phase_still_runs(hook, monkeypatch, tmp_path):
     """The real spawn path: the child is detached, so main() returns first."""
     marker = tmp_path / "child_done"
+    release = tmp_path / "child_release"
+    # The child blocks until the test releases it (60 s cap), so "main() returned
+    # first" holds however slow the runner is (P09-FLAKE-1).
     monkeypatch.setattr(hook, "_background_session_work_argv", lambda cwd, *_: [
         sys.executable, "-c",
-        f"import time, pathlib; time.sleep(5); pathlib.Path({str(marker)!r}).write_text('done')"])
-    elapsed, _out = _run_main(hook, monkeypatch)
-    assert elapsed < 2.0, f"main() took {elapsed:.1f} s"
+        "import time, pathlib\n"
+        f"r = pathlib.Path({str(release)!r}); t = time.monotonic()\n"
+        "while not r.exists() and time.monotonic() - t < 60: time.sleep(0.05)\n"
+        f"pathlib.Path({str(marker)!r}).write_text('done')"])
+    _elapsed, _out = _run_main(hook, monkeypatch)
     assert not marker.exists(), "main() waited for the child"
-    deadline = time.monotonic() + 20
+    assert not marker.exists(), "main() waited for the detached child"
+    release.write_text("go")
+    deadline = time.monotonic() + 90
     while not marker.exists() and time.monotonic() < deadline:
         time.sleep(0.1)
     assert marker.read_text() == "done", "the detached child never ran"

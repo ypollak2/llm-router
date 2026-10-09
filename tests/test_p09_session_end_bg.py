@@ -106,10 +106,12 @@ def test_stop_runs_none_of_the_moved_steps_inline(hook, state, monkeypatch, tmp_
     spawned = []
     monkeypatch.setattr(hook, "_spawn_background_stop_work", lambda: spawned.append(1),
                         raising=False)  # absent before P0.9: the test then fails on `called`
-    elapsed, _out = _run_main(hook, monkeypatch)
+    # The property is "none of the moved steps ran inline": asserted directly via
+    # the recorders, not by a wall-clock bound (BUGS P09-FLAKE-1: main()'s own
+    # synchronous work took 2.1 s on a loaded runner, which proved nothing).
+    _elapsed, _out = _run_main(hook, monkeypatch)
     assert called == [], f"Stop ran {called} inline"
     assert spawned == [1], "exactly one background child per Stop"
-    assert elapsed < 2.0, f"main() took {elapsed:.1f} s"
 
 
 def test_stop_returns_while_a_5s_child_still_runs(hook, state, monkeypatch, tmp_path):
@@ -117,13 +119,20 @@ def test_stop_returns_while_a_5s_child_still_runs(hook, state, monkeypatch, tmp_
     _write_usage(state, time.time())
     _trap_slow_steps(hook, monkeypatch, tmp_path)
     marker = tmp_path / "child_done"
+    release = tmp_path / "child_release"
+    # The child blocks until the test releases it (bounded at 60 s so it can never
+    # outlive the run), so "main() returned first" holds however slow the runner is.
     monkeypatch.setattr(hook, "_background_stop_work_argv", lambda: [
         sys.executable, "-c",
-        f"import time, pathlib; time.sleep(5); pathlib.Path({str(marker)!r}).write_text('done')"],
+        "import time, pathlib\n"
+        f"r = pathlib.Path({str(release)!r}); t = time.monotonic()\n"
+        "while not r.exists() and time.monotonic() - t < 60: time.sleep(0.05)\n"
+        f"pathlib.Path({str(marker)!r}).write_text('done')"],
         raising=False)
-    elapsed, _out = _run_main(hook, monkeypatch)
-    assert elapsed < 2.0, f"main() took {elapsed:.1f} s"
+    _elapsed, _out = _run_main(hook, monkeypatch)
     assert not marker.exists(), "main() waited for the child"
+    assert not marker.exists(), "main() waited for the detached child"
+    release.write_text("go")
     deadline = time.monotonic() + 20
     while not marker.exists() and time.monotonic() < deadline:
         time.sleep(0.1)
