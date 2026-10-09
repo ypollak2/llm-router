@@ -731,12 +731,13 @@ class ClaudeTierPolicy:
         except Exception:  # noqa: BLE001 - fail pinned: an arm error never moves a pinned call
             return stay(haiku_arm.WHY_CLASSIFY_ERROR)
         task, cx = choice.get("task_type"), choice.get("complexity")
-        if (task, cx) not in self.haiku_arm_eligible:
+        matched = haiku_arm.match(self.haiku_arm_eligible, task, cx)
+        if matched is None:
             return stay(haiku_arm.WHY_NOT_SIMPLE_QA, task, cx)
         return TierDecision(requested, haiku.model, haiku.name, REASON_HAIKU_REWRITE, switched=True,
                             task_type=task, complexity=cx, body_rewrite=REWRITE_HAIKU,
                             proposed_tier=haiku.name, arm=haiku_arm.ARM_NAME,
-                            arm_assignment=haiku_arm.ASSIGNED, arm_reason=haiku_arm.WHY_QUERY_SIMPLE,
+                            arm_assignment=haiku_arm.ASSIGNED, arm_reason=haiku_arm.WHY_MATCHED + matched,
                             arm_bucket=bucket, arm_turn=turn_id,
                             chain_head=list(choice.get("chain_head") or [])[:4])
 

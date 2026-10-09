@@ -103,7 +103,7 @@ def test_share_must_be_a_number_in_0_1(bad):
 async def test_in_bucket_simple_qa_is_served_on_haiku_and_labelled():
     d = await _decide(_policy(), _body(*TURN3), SID_IN)
     assert (d.reason, d.served_model, d.tier, d.body_rewrite) == (pt.REASON_HAIKU_REWRITE, HAIKU, "haiku", "haiku")
-    assert (d.arm, d.arm_assignment, d.arm_reason) == (arm.ARM_NAME, arm.ASSIGNED, arm.WHY_QUERY_SIMPLE)
+    assert (d.arm, d.arm_assignment, d.arm_reason) == (arm.ARM_NAME, arm.ASSIGNED, "matched:query/simple")
     assert d.arm_bucket == pytest.approx(arm.bucket(SID_IN, 5), abs=1e-6) and d.arm_bucket < SHARE
     assert (d.task_type, d.complexity) == ("query", "simple")
 
@@ -207,7 +207,7 @@ async def test_eligible_pairs_are_configurable_and_default_to_query_simple():
     wide = _policy(haiku_arm_eligible=["query/simple", "analyze/simple"])
     assert (await _decide(wide, _body(*TURN3), SID_IN, _classify("analyze", "simple"))).arm_assignment == arm.ASSIGNED
     assert (await _decide(_policy(), _body(*TURN3), SID_IN, _classify("analyze", "simple"))).arm_reason == arm.WHY_NOT_SIMPLE_QA
-    for bad in ([], "query/simple", ["query"]):
+    for bad in ([], "query/simple", ["query"], ["*/simple"]):
         with pytest.raises(ValueError, match="haiku_arm_eligible"):
             _policy(haiku_arm_eligible=bad)
 
@@ -323,7 +323,7 @@ async def test_ledger_rows_carry_the_arm_and_no_prompt_text(tmp_path, monkeypatc
     rows = ledger.read_rows(tmp_path / "proxy_calls.jsonl")
     t, o = rows
     assert (t["tier_reason"], t["tier_arm"], t["tier_arm_assignment"], t["tier_arm_reason"]) == (
-        pt.REASON_HAIKU_REWRITE, arm.ARM_NAME, arm.ASSIGNED, arm.WHY_QUERY_SIMPLE)
+        pt.REASON_HAIKU_REWRITE, arm.ARM_NAME, arm.ASSIGNED, "matched:query/simple")
     assert t["tier_arm_bucket"] == pytest.approx(arm.bucket(SID_IN, 5), abs=1e-6)
     assert (t["served_model"], t["tier_body_rewrite"]) == (HAIKU, "haiku")
     assert o["tier_reason"] == pt.REASON_CONFIG_PINNED and "tier_arm" not in o
@@ -355,3 +355,15 @@ async def test_haiku_4xx_retry_relabels_the_arm_row_as_not_a_haiku_row(tmp_path,
     assert row["served_model"] == OPUS and row["tier_retry"]["status"] == 400
     assert row["tier_arm_assignment"] == arm.TREATMENT_RETRIED
     assert row["tier_arm_turn"] == 5
+
+
+async def test_query_star_makes_query_moderate_eligible_and_default_does_not():
+    star = _policy(0.25, haiku_arm_eligible=["query/*"])
+    sid = _sid_for(5, 0.25)
+    for cx in ("simple", "moderate", "complex"):
+        d = await _decide(star, _body(*TURN3), sid, _classify("query", cx))
+        assert (d.arm_assignment, d.arm_reason) == (arm.ASSIGNED, "matched:query/*")
+    d = await _decide(star, _body(*TURN3), sid, _classify("code", "simple"))
+    assert d.arm_reason == arm.WHY_NOT_SIMPLE_QA
+    d = await _decide(_policy(0.25), _body(*TURN3), sid, _classify("query", "moderate"))
+    assert (d.arm_assignment, d.arm_reason, d.reason) == (arm.INELIGIBLE, arm.WHY_NOT_SIMPLE_QA, pt.REASON_CONFIG_PINNED)

@@ -98,7 +98,7 @@ pinned_models: []
 # (see proxy/haiku_arm.py). Needs haiku_rewrite: true (the Haiku guard's override turns
 # the arm off too). Read at proxy start: set 0 or delete the key and restart to kill it.
 # haiku_arm_share: 0.10
-# haiku_arm_eligible: [query/simple]   # optional (task/complexity) pairs; default exactly this
+# haiku_arm_eligible: [query/simple]   # optional task/complexity patterns (complexity may be *); default exactly this
 
 # Quota-aware tiers: the higher of the Claude subscription's session and weekly
 # usage, read from the cached ~/.llm-router/usage.json (never a network call on
