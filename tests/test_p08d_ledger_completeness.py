@@ -328,10 +328,19 @@ def test_g3_counts_the_new_fields_on_rows_from_the_real_writers(temp_db):
             success=True, input_tokens=1, output_tokens=1, cost_usd=0.0, latency_ms=1.0, **kw)
 
     async def _fill(reason, sid):
-        for _ in range(100):
-            await cost.log_usage(_resp(), TaskType.CODE, RoutingProfile.BALANCED,
-                                 session_id=sid or "", reason=reason)
-            await _rd(reason_code=reason, session_id=sid)
+        # One row through each real writer, then SQL doubling to 128: 256 opens of the
+        # database (each runs every migration) timed out CI at 30 s.
+        await cost.log_usage(_resp(), TaskType.CODE, RoutingProfile.BALANCED,
+                             session_id=sid or "", reason=reason)
+        await _rd(reason_code=reason, session_id=sid)
+        con = sqlite3.connect(temp_db)
+        for table in ("usage", "routing_decisions"):
+            cols = [r[1] for r in con.execute(f"PRAGMA table_info({table})") if r[1] != "id"]
+            lst = ", ".join(cols)
+            for _ in range(7):
+                con.execute(f"INSERT INTO {table} ({lst}) SELECT {lst} FROM {table}")
+        con.commit()
+        con.close()
 
     def _prd():
         return kpi.compute_scorecard(days=1)["kpis"]["G3"]["prd"]["writers"]
@@ -339,8 +348,8 @@ def test_g3_counts_the_new_fields_on_rows_from_the_real_writers(temp_db):
     assert _prd()["usage"]["state"] == _prd()["routing_decisions"]["state"] == "no traffic"
     asyncio.run(_fill("router_chain", "s-org"))
     w = _prd()
-    assert (w["usage"]["state"], w["usage"]["n"]) == ("pass", 100)
-    assert (w["routing_decisions"]["state"], w["routing_decisions"]["n"]) == ("pass", 100)
+    assert (w["usage"]["state"], w["usage"]["n"]) == ("pass", 128)
+    assert (w["routing_decisions"]["state"], w["routing_decisions"]["n"]) == ("pass", 128)
 
     con = sqlite3.connect(temp_db)
     con.execute("UPDATE usage SET reason = NULL WHERE id <= 10")
