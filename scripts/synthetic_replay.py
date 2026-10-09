@@ -15,10 +15,15 @@ WHAT IT DOES
     runs with that HOME, never the operator's.
   * Starts a stub upstream on an ephemeral 127.0.0.1 port that answers Anthropic
     ``/v1/messages`` (JSON and SSE), OpenAI ``/v1/chat/completions`` and Ollama
-    ``/api/tags`` with a tiny canned reply. No provider is ever called: every child also
-    loads ``scripts/_replay_netguard.py`` as ``sitecustomize``, which refuses any
-    connection that is not the stub or this run's proxy, and the run exits 1 if one was
-    attempted.
+    ``/api/tags`` with a tiny canned reply. No provider is ever called.
+  * WHAT THE NETWORK GUARD COVERS. Every child runs a scratch venv interpreter whose
+    ``sitecustomize`` is ``scripts/_replay_netguard.py`` with this run's allowlist BAKED
+    IN (see :class:`Scratch`): any Python process started with it, including a grandchild
+    whose environment was emptied, refuses every connection and DNS lookup that is not the
+    stub or this run's proxy, and the run exits 1 if one was attempted. The harness process
+    itself is guarded for the duration of the run. Non-Python network clients (``curl``,
+    ``wget``, ``nc``, ...) are shadowed by ``exit 1`` scripts first on PATH; a child that
+    drops that PATH or runs an absolute path such as ``/usr/bin/curl`` is NOT covered.
   * Tags every row it causes as synthetic through the two existing mechanisms:
     ``LLM_ROUTER_SYNTHETIC=1`` (``routing_quality.detect_synthetic``: usage.db
     provenance / session_spend ``synthetic``) and ``LLM_ROUTER_SESSION_KIND=harness``
@@ -26,11 +31,13 @@ WHAT IT DOES
     SessionStart tag file). Session ids are rewritten to ``synth-replay-<hash>``, which
     ``groundtruth_sources.is_synthetic_session`` reads as authored, so readers that
     filter on the id drop them too. No new field was added.
-  * Drives, per record: SessionStart once per session, then auto-route
-    (UserPromptSubmit) for ``turn_first``, agent-route (PreToolUse Agent) for
-    ``subagent``, the proxy for ``turn_first``/``continuation``, the gateway and SDK
-    classify paths and the MCP classify path; Stop after every turn and SessionEnd once
-    at the end, the order Claude Code fires them.
+  * Fires every hook ``hooks/hooks.json`` registers, per event and tool matcher, in host
+    order: SessionStart; UserPromptSubmit per ``turn_first``; PreToolUse / PostToolUse
+    per tool call (the parent's Agent call fires PreToolUse when the sub-agent launches,
+    then SubagentStart); Stop after every turn; SessionEnd last. auto-route and
+    agent-route are the hook doors; the others are timed and their ledgers scanned. A
+    registered hook that never ran is listed with the reason. Every record is also sent
+    to the proxy, and to the gateway / SDK / MCP classify paths.
   * Writes ``summary.json`` and ``summary.md`` to ``--out``: per-door decisions
     (distributions and field presence), latency p50/p95 with n, ledger field
     completeness per writer, archive behaviour, and a door-agreement matrix with Wilson
@@ -450,10 +457,15 @@ def free_port() -> int:
 
 # ── scratch environment ──────────────────────────────────────────────────────
 
-#: Switches that keep every child at $0 and in-process: no LLM classifier layer, no
-#: direct execution, no Codex/CLI delegation, no warm-up, watchdog, judge drain, OKF
-#: index, verify worker, pxpipe or benchmark fetch. Each name is read by the code it
-#: names (see the PR description for file:line); an unknown name is inert.
+#: Switches that keep every child at $0 and in-process. Where each is read:
+#:   LLM_ROUTER_HOOK_LLM_LAYER / CLASSIFY_LOCAL_ONLY   hooks/auto-route.py (Ollama / cloud classifier layers)
+#:   LLM_ROUTER_DIRECT_EXECUTION                       hooks/auto-route.py (draft answers via Ollama / paid model)
+#:   LLM_ROUTER_SUBAGENT_DIRECT / AGENT_ROUTE_CODEX / SUBAGENT_CLI_DELEGATION   hooks/agent-route.py
+#:   LLM_ROUTER_OLLAMA_WARMUP / OLLAMA_WATCHDOG / JUDGE_AUTODRAIN / OKF_AUTOINDEX / PXPIPE_ENABLED /
+#:   AUTO_BENCHMARK_FETCH                               hooks/session-start.py background work
+#:   LLM_ROUTER_VERIFY                                 verify_queue.py (verify worker spawn)
+#:   LITELLM_LOCAL_MODEL_COST_MAP / LITELLM_TELEMETRY  litellm (no cost-map download, no telemetry)
+#: An unknown name is inert; the guard, not these switches, is what makes the run $0.
 DISABLE_ENV = {
     "LLM_ROUTER_HOOK_LLM_LAYER": "off",
     "LLM_ROUTER_CLASSIFY_LOCAL_ONLY": "true",
@@ -472,36 +484,98 @@ DISABLE_ENV = {
     "LITELLM_TELEMETRY": "False",
 }
 
-#: Executables a child might shell out to that must never run for real here. Each is
-#: replaced by a script that exits 1 (``security`` would read the login Keychain).
-_SHADOWED_BINARIES = ("security", "ollama", "codex", "gemini", "claude", "npx", "launchctl",
-                      "systemctl", "open", "osascript")
+#: Executables a child might run that must never run for real here: network clients
+#: (``session-start.py`` and ``warm.py`` shell out to ``curl``), the Keychain reader
+#: (``security``: the Stop / SessionStart usage fetch), model CLIs and service managers.
+#: Each is replaced by a script that exits 1, FIRST on PATH. This covers a lookup through
+#: PATH only: a child that resets PATH to one without the scratch bin, or runs an absolute
+#: path such as /usr/bin/curl, is not covered (no such call is on a replayed path today).
+_SHADOWED_BINARIES = ("security", "curl", "wget", "nc", "ncat", "netcat", "telnet", "ftp", "ssh", "scp",
+                      "sftp", "rsync", "dig", "nslookup", "host", "ping", "http", "https", "aria2c",
+                      "ollama", "codex", "gemini", "claude", "npx", "npm", "pip", "uv", "uvx",
+                      "launchctl", "systemctl", "open", "osascript")
+
+
+def _venv_site_packages() -> str:
+    import sysconfig
+
+    return sysconfig.get_paths()["purelib"]
 
 
 class Scratch:
-    """The run's private world: HOME, LLM_ROUTER_HOME, guard, violations file, stub bin."""
+    """The run's private world: HOME, LLM_ROUTER_HOME, a guarded interpreter, the
+    violations file and a bin dir of shadowed executables.
+
+    THE GUARDED INTERPRETER. ``<root>/pyenv`` is a venv (no pip) whose site-packages
+    holds the guard as ``sitecustomize.py`` with this run's allowlist and violations path
+    BAKED IN, plus a ``.pth`` that adds the project's site-packages. Every child is started
+    with that interpreter, and ``sys.executable`` in a child is that interpreter, so a
+    grandchild started with an emptied environment (``safe_subprocess.get_delegated_env``
+    drops LLM_ROUTER_*; ``agent_loop`` passes only PATH) is still guarded: the guard needs
+    no environment variable. The project's console scripts (``llm-router``, ``litellm``,
+    ...) are re-pointed at it through shims in the scratch bin."""
 
     def __init__(self, root: Path, stub: StubServer, proxy_port: int | None) -> None:
         self.root = root
         self.home = root / "home"
         self.state = root / "state"
-        self.guard_dir = root / "guard"
         self.bin = root / "bin"
+        self.pyenv = root / "pyenv"
         self.violations = root / "net_violations.jsonl"
         self.workspace = root / "workspace"
         self.tmp = root / "tmp"
         self.marker = f"replay-{hashlib.sha256(str(root).encode()).hexdigest()[:12]}"
-        for d in (self.home, self.state, self.guard_dir, self.bin, self.workspace, self.tmp,
-                  self.home / ".claude" / "projects"):
+        for d in (self.home, self.state, self.bin, self.workspace, self.tmp, self.home / ".claude" / "projects"):
             d.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(GUARD_SRC, self.guard_dir / "sitecustomize.py")
+        self.violations.touch()
+        self.stub = stub
+        self.proxy_port = proxy_port
+        self.python = self._make_pyenv()
         for name in _SHADOWED_BINARIES:
             p = self.bin / name
             p.write_text("#!/bin/sh\nexit 1\n")
             p.chmod(0o755)
-        self.violations.touch()
-        self.stub = stub
-        self.proxy_port = proxy_port
+        self._shim_console_scripts()
+
+    def _make_pyenv(self) -> str:
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(self.pyenv)], check=True,
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=120)
+        python = self.pyenv / "bin" / "python"
+        # Without -S: the venv's prefix is set by site.py, so with -S sysconfig would name the
+        # BASE interpreter's site-packages. Anything outside the scratch venv is refused.
+        site = subprocess.run([str(python), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+                              check=True, capture_output=True, text=True, timeout=60).stdout.strip()
+        site_dir = Path(site).resolve()
+        if not site_dir.is_relative_to(self.pyenv.resolve()):
+            raise RuntimeError(f"scratch venv site-packages resolved outside the scratch root: {site_dir}")
+        site_dir.mkdir(parents=True, exist_ok=True)
+        (site_dir / "_replay_project.pth").write_text(
+            f"import site; site.addsitedir({_venv_site_packages()!r}); site.addsitedir({str(ROOT / 'src')!r})\n")
+        (site_dir / "sitecustomize.py").write_text(
+            GUARD_SRC.read_text(encoding="utf-8")
+            + "\n\n# Baked by scripts/synthetic_replay.py: active with or without any environment variable.\n"
+            + f"install(allow={self.allow()!r}, violations={str(self.violations)!r})\n", encoding="utf-8")
+        return str(python)
+
+    def _shim_console_scripts(self) -> None:
+        """``<project venv>/bin/<script>`` with a python shebang -> a scratch-bin shim that
+        runs the same script under the guarded interpreter."""
+        src_bin = Path(sys.executable).parent
+        for script in sorted(src_bin.iterdir()):
+            if script.name.startswith(("python", "activate", "pip")) or not script.is_file():
+                continue
+            if (self.bin / script.name).exists():
+                continue
+            try:
+                with script.open("rb") as fh:
+                    head = fh.read(512)
+            except OSError:
+                continue
+            # a python shebang, or uv's /bin/sh trampoline that execs the venv python
+            if head.startswith(b"#!") and b"python" in head.split(b"\n# -*-", 1)[0]:
+                shim = self.bin / script.name
+                shim.write_text(f'#!/bin/sh\nexec "{self.python}" "{script}" "$@"\n')
+                shim.chmod(0o755)
 
     def allow(self) -> str:
         items = [f"127.0.0.1:{self.stub.port}"]
@@ -516,16 +590,19 @@ class Scratch:
             "HOME": str(self.home),
             "LLM_ROUTER_HOME": str(self.state),
             "LLM_ROUTER_DB_PATH": str(self.state / "usage.db"),
-            "PATH": os.pathsep.join([str(self.bin), str(Path(sys.executable).parent), "/usr/bin", "/bin"]),
+            "PATH": os.pathsep.join([str(self.bin), str(self.pyenv / "bin"), "/usr/bin", "/bin"]),
             "LANG": "en_US.UTF-8",
             "TMPDIR": str(self.tmp),
-            "PYTHONPATH": os.pathsep.join([str(self.guard_dir), str(ROOT / "src")]),
+            "PYTHONPATH": str(ROOT / "src"),
             "PYTHONDONTWRITEBYTECODE": "1",
             # synthetic tagging: the existing mechanisms (module docstring)
             "LLM_ROUTER_SYNTHETIC": "1",
             "LLM_ROUTER_SESSION_KIND": "harness",
+            # ALLOW_STUBS also lifts cost.py's refusal to write stub rows into the REAL
+            # usage.db; safe here only because LLM_ROUTER_DB_PATH points into the scratch root.
             "LLM_ROUTER_ALLOW_STUBS": "1",
-            # network guard; REPLAY_MARKER finds this run's detached grandchildren
+            # the guard is baked into the interpreter; these two are informational.
+            # REPLAY_MARKER helps find this run's detached grandchildren (see descendants)
             "LLM_ROUTER_REPLAY_ALLOW": self.allow(),
             "LLM_ROUTER_REPLAY_VIOLATIONS": str(self.violations),
             "LLM_ROUTER_REPLAY_MARKER": self.marker,
@@ -548,33 +625,45 @@ class Scratch:
                 out.append({"kind": "unparseable"})
         return out
 
-    def descendants(self) -> list[int]:
-        """PIDs of live processes carrying this run's marker in their environment
-        (``/proc/<pid>/environ`` on Linux, ``ps -E`` on macOS): the children and the
-        detached grandchildren they spawned."""
-        needle = f"LLM_ROUTER_REPLAY_MARKER={self.marker}"
+    def descendants(self) -> list[int] | None:
+        """PIDs of every live process of this run other than this one: the children and
+        the detached grandchildren they spawned (``setsid``, so not in our process tree).
+
+        A process belongs to the run when its command line names the scratch root (every
+        child runs the scratch interpreter or a scratch-bin shim) or its environment holds
+        the run marker. Read from ``/proc`` on Linux, ``ps -ax -E`` on macOS (``-ax``: all
+        processes, not only those with a terminal). None = could not be read; the caller
+        must report that as unknown, never as zero."""
+        needle = f"LLM_ROUTER_REPLAY_MARKER={self.marker}".encode()
+        root = str(self.root).encode()
+        me = os.getpid()
         proc = Path("/proc")
-        if proc.is_dir():
+        if proc.is_dir() and (proc / "self" / "cmdline").exists():
             found = []
             for d in proc.iterdir():
-                if d.name.isdigit() and int(d.name) != os.getpid():
-                    try:
-                        if needle.encode() in (d / "environ").read_bytes().split(b"\0"):
-                            found.append(int(d.name))
-                    except OSError:
-                        continue
+                if not d.name.isdigit() or int(d.name) == me:
+                    continue
+                try:
+                    cmd = (d / "cmdline").read_bytes()
+                    env = (d / "environ").read_bytes()
+                except OSError:
+                    continue
+                if root in cmd or needle in env.split(b"\0"):
+                    found.append(int(d.name))
             return found
         try:
-            out = subprocess.run(["/bin/ps", "-E", "-ww", "-o", "pid=,command="], capture_output=True,
-                                 text=True, timeout=10, check=False).stdout
+            res = subprocess.run(["/bin/ps", "-ax", "-E", "-ww", "-o", "pid=,command="], capture_output=True,
+                                 timeout=20, check=False)
         except (OSError, subprocess.SubprocessError):
-            return []
+            return None
+        if res.returncode != 0:
+            return None
         pids = []
-        for line in out.splitlines():
-            if needle in line:
-                pid = int(line.split(None, 1)[0])
-                if pid != os.getpid():
-                    pids.append(pid)
+        for line in res.stdout.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) == 2 and parts[0].isdigit() and int(parts[0]) != me \
+                    and (root in parts[1] or needle in parts[1]):
+                pids.append(int(parts[0]))
         return pids
 
 
@@ -700,10 +789,11 @@ def _generic_name(rel: str) -> str:
 # ── child processes ──────────────────────────────────────────────────────────
 
 
-def run_hook(hook: str, payload: dict, env: dict[str, str], cwd: Path) -> tuple[int | None, str, float]:
+def run_hook(hook: str, payload: dict, env: dict[str, str], cwd: Path,
+             python: str = sys.executable) -> tuple[int | None, str, float]:
     """Run ``hooks/<hook>.py`` the way the host does: a fresh interpreter, the payload on
     stdin. Returns (exit code, or None when killed at the timeout; stdout; wall ms)."""
-    cmd = [sys.executable, str(HOOKS_DIR / f"{hook}.py")]
+    cmd = [python, str(HOOKS_DIR / f"{hook}.py")]
     t0 = time.perf_counter()
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL, env=env, cwd=str(cwd))
@@ -778,7 +868,7 @@ class Proxy:
         if self.port in FORBIDDEN_PORTS:
             raise RuntimeError(f"refusing forbidden port {self.port}")
         env = self.scratch.env(LLM_ROUTER_PROXY_UPSTREAM=self.scratch.stub.url)
-        cmd = [sys.executable, "-m", "llm_router.cli", "proxy", "--host", "127.0.0.1",
+        cmd = [self.scratch.python, "-m", "llm_router.cli", "proxy", "--host", "127.0.0.1",
                "--port", str(self.port), "--steps", "off", "--tiers", "conversation", "--no-warm-up"]
         with self.log.open("wb") as err:
             self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -860,6 +950,66 @@ def decision(rec: dict, door: str, **fields: Any) -> dict:
     return d
 
 
+HOOKS_JSON = ROOT / "hooks" / "hooks.json"
+#: Hooks whose output is a classification decision, and the door that owns each.
+DECISION_HOOKS = {"auto-route": "hook", "agent-route": "agent-route"}
+
+
+def load_hook_registry(path: Path = HOOKS_JSON) -> list[dict]:
+    """Every (event, matcher, hook) registered in hooks.json, in registration order:
+    the hooks Claude Code fires, and so the hooks this replay must fire."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    out = []
+    for event, groups in data.get("hooks", {}).items():
+        for group in groups:
+            for h in group.get("hooks", []):
+                name = Path(str(h.get("command", "")).split()[-1]).stem
+                out.append({"event": event, "matcher": group.get("matcher") or None, "hook": name})
+    return out
+
+
+def matcher_matches(matcher: str | None, tool: str | None) -> bool:
+    """Claude Code tool matcher: absent/empty matches everything; otherwise a regex
+    matched from the start of the tool name (``Agent``, ``llm_|mcp__llm_router__llm``)."""
+    import re
+
+    if not matcher:
+        return True
+    return tool is not None and re.match(matcher, tool) is not None
+
+
+def tool_calls(delta: list) -> list[tuple[dict, Any]]:
+    """``(tool_use block, its tool_result content or None)`` for each tool call in a delta."""
+    results: dict[str, Any] = {}
+    uses: list[dict] = []
+    for m in delta:
+        content = m.get("content") if isinstance(m, dict) else None
+        for b in content if isinstance(content, list) else []:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "tool_use":
+                uses.append(b)
+            elif b.get("type") == "tool_result":
+                results[str(b.get("tool_use_id"))] = b.get("content")
+    return [(u, results.get(str(u.get("id")))) for u in uses]
+
+
+def _result_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(_block_text(b) for b in content)
+    return ""
+
+
+def tool_response(tool: str, content: Any) -> dict:
+    """The PostToolUse ``tool_response`` shape Claude Code sends: Bash reports stdout."""
+    text = _result_text(content)
+    if tool == "Bash":
+        return {"stdout": text, "stderr": "", "interrupted": False, "isImage": False}
+    return {"content": [{"type": "text", "text": text}]}
+
+
 class Replayer:
     """Drives one corpus through the selected doors inside one Scratch."""
 
@@ -874,6 +1024,56 @@ class Replayer:
         self.proxy_tail = JsonlTail(scratch.state / "proxy_calls.jsonl")
         self.agent_tail = JsonlTail(scratch.state / "agent_calls_ledger.jsonl")
         self.hook_errors: Counter = Counter()
+        self.registry = load_hook_registry()
+        self.fired: Counter = Counter()        # (event, hook) -> runs
+        self.stdout_kinds: dict[str, Counter] = defaultdict(Counter)
+        self.tools_seen: Counter = Counter()
+        self.detached_probe: int | None = None
+
+    # -- events, as hooks.json routes them --
+    def fire(self, event: str, sid: str, rec: dict | None, tool: str | None = None, **extra: Any) -> None:
+        """Run every hook registered for ``event`` (and ``tool``, for tool events) in
+        registration order. Decision hooks run only when their door is selected."""
+        for entry in self.registry:
+            if entry["event"] != event or not matcher_matches(entry["matcher"], tool):
+                continue
+            hook = entry["hook"]
+            door = DECISION_HOOKS.get(hook)
+            if door is not None and door not in self.doors:
+                continue
+            self.fired[(event, hook)] += 1
+            if hook == "auto-route" and rec is not None:
+                self._auto_route(rec, extra["prompt"])
+            elif hook == "agent-route" and rec is not None:
+                self._agent_route(rec, extra["tool_input"], extra.get("tool_use_id"))
+            else:
+                self._lifecycle(hook, event, sid, **({"tool_name": tool} if tool else {}), **extra)
+
+    def hook_coverage(self) -> dict:
+        """Registered vs driven, with the reason for every hook that never ran."""
+        emitted = {e for (e, _h) in self.fired}
+        driven = {f"{e}:{h}": n for (e, h), n in sorted(self.fired.items())}
+        not_driven = []
+        for entry in self.registry:
+            key = f"{entry['event']}:{entry['hook']}"
+            if key in driven:
+                continue
+            door = DECISION_HOOKS.get(entry["hook"])
+            if door is not None and door not in self.doors:
+                why = f"door '{door}' not selected"
+            elif entry["event"] not in emitted:
+                why = "event not emitted (no hook door selected, or nothing in the corpus triggers it)"
+            elif entry["matcher"]:
+                why = f"no tool in the corpus matches '{entry['matcher']}'"
+            else:
+                why = "not reached"
+            not_driven.append({"event": entry["event"], "hook": entry["hook"], "matcher": entry["matcher"],
+                               "reason": why})
+        return {"registered": [f"{e['event']}:{e['hook']}" + (f"[{e['matcher']}]" if e["matcher"] else "")
+                               for e in self.registry],
+                "driven": driven, "not_driven": not_driven,
+                "stdout_kinds": {k: dict(sorted(v.items())) for k, v in sorted(self.stdout_kinds.items())},
+                "tools_in_corpus": dict(sorted(self.tools_seen.items()))}
 
     # -- plumbing --
     def _env(self, sid: str) -> dict[str, str]:
@@ -904,8 +1104,10 @@ class Replayer:
         return p
 
     def _lifecycle(self, hook: str, event: str, sid: str, **extra: Any) -> str:
-        rc, out, ms = run_hook(hook, self._payload(sid, event, **extra), self._env(sid), self.s.workspace)
+        rc, out, ms = run_hook(hook, self._payload(sid, event, **extra), self._env(sid), self.s.workspace,
+                               self.s.python)
         self.lifecycle.append({"hook": hook, "event": event, "wall_ms": ms, "rc": rc})
+        self.stdout_kinds[f"{event}:{hook}"][stdout_kind(out)] += 1
         if rc != 0:
             self.hook_errors[f"{hook}:{event}:rc={rc}"] += 1
         return out
@@ -929,7 +1131,8 @@ class Replayer:
         lc = self.s.state / f"last_classification_{sid}.json"
         before = lc.read_bytes() if lc.exists() else None
         rc, out, ms = run_hook("auto-route", self._payload(sid, "UserPromptSubmit", prompt=prompt),
-                               self._env(sid), self.s.workspace)
+                               self._env(sid), self.s.workspace, self.s.python)
+        self.stdout_kinds["UserPromptSubmit:auto-route"][stdout_kind(out)] += 1
         after = lc.read_bytes() if lc.exists() else None
         kind = stdout_kind(out)
         if rc != 0:
@@ -943,11 +1146,12 @@ class Replayer:
                                        task_type=j.get("task_type"), complexity=j.get("complexity"),
                                        layer=j.get("method")))
 
-    def _agent_route(self, rec: dict, tool_input: dict) -> None:
+    def _agent_route(self, rec: dict, tool_input: dict, tool_use_id: str | None = None) -> None:
         sid = rec["sid"]
         payload = self._payload(sid, "PreToolUse", tool_name="Agent", tool_input=tool_input,
-                                tool_use_id=f"toolu_replay_{rec['idx']:06d}")
-        rc, out, ms = run_hook("agent-route", payload, self._env(sid), self.s.workspace)
+                                tool_use_id=tool_use_id or f"toolu_replay_{rec['idx']:06d}")
+        rc, out, ms = run_hook("agent-route", payload, self._env(sid), self.s.workspace, self.s.python)
+        self.stdout_kinds["PreToolUse:agent-route"][stdout_kind(out)] += 1
         kind = stdout_kind(out)
         rows = [r for r in self.agent_tail.new_rows() if r.get("session_id") == sid]
         layer = rows[-1].get("decision") if rows else None
@@ -991,12 +1195,20 @@ class Replayer:
 
     # -- one session --
     def session(self, recs: list[dict], agent_inputs: dict[str, dict]) -> None:
+        """Host order: SessionStart; per turn UserPromptSubmit, then per step the tool
+        events (PreToolUse, PostToolUse) and the model request; SubagentStart when a
+        sub-agent is launched; Stop at the end of each turn; SessionEnd last."""
         sid = recs[0]["sid"]
         hooks_on = bool(self.doors & {"hook", "agent-route"})
         seq = [0]
         turns = sorted({r["turn"] for r in recs})
+        launched: set[str] = set()  # Agent briefs whose PreToolUse already fired at launch
         if hooks_on:
-            self._lifecycle("session-start", "SessionStart", sid, source="startup")
+            self.fire("SessionStart", sid, None, source="startup")
+            if self.detached_probe is None:  # evidence that detached grandchildren are visible
+                time.sleep(0.3)
+                live = self.s.descendants()
+                self.detached_probe = None if live is None else len(live)
         stop_checks = []
         for turn in turns:
             for rec in (r for r in recs if r["turn"] == turn):
@@ -1005,25 +1217,42 @@ class Replayer:
                     prompt = latest_user_text(delta)
                     if rec["main"]:
                         self._append_transcript(sid, delta[:-1], seq)
-                    if "hook" in self.doors:
-                        self._auto_route(rec, prompt)
+                    if hooks_on:
+                        self.fire("UserPromptSubmit", sid, rec, prompt=prompt)
                     if rec["main"]:
                         self._append_transcript(sid, delta[-1:], seq)
                 elif rec["step"] == "subagent":
+                    # the parent's Agent call: PreToolUse fires at launch, before the sub-agent runs
                     brief = latest_user_text(delta)
                     inp = dict(agent_inputs.get(brief) or {"description": "sub-agent", "prompt": brief,
                                                            "subagent_type": "general-purpose"})
-                    if "agent-route" in self.doors:
-                        self._agent_route(rec, inp)
-                        self._lifecycle("subagent-start", "SubagentStart", sid,
-                                        agent_type=inp.get("subagent_type"), agent_id=f"agent-{rec['idx']}")
-                elif rec["main"]:
-                    self._append_transcript(sid, delta, seq)
-                    if "agent-route" in self.doors and _has_agent_result(delta):
-                        for hook in ("cc-usage-track", "agent-depth-release"):
-                            self._lifecycle(hook, "PostToolUse", sid, tool_name="Agent",
-                                            tool_input=_agent_input(delta), tool_response={"content": [
-                                                {"type": "text", "text": "done"}]})
+                    launched.add(brief)
+                    if hooks_on:
+                        self.tools_seen["Agent"] += 1
+                        self.fire("PreToolUse", sid, rec, tool="Agent", tool_input=inp,
+                                  tool_use_id=f"toolu_replay_{rec['idx']:06d}")
+                        self.fire("SubagentStart", sid, None, agent_type=inp.get("subagent_type"),
+                                  agent_id=f"agent-{rec['idx']}")
+                else:
+                    calls = tool_calls(delta)
+                    if rec["main"]:
+                        self._append_transcript(sid, [m for m in delta if m.get("role") == "assistant"], seq)
+                    if hooks_on:
+                        for use, _res in calls:
+                            name = str(use.get("name"))
+                            inp = use.get("input") if isinstance(use.get("input"), dict) else {}
+                            if name in ("Agent", "Task") and str(inp.get("prompt")) in launched:
+                                continue  # fired when the sub-agent was launched
+                            self.tools_seen[name] += 1
+                            self.fire("PreToolUse", sid, rec, tool=name, tool_input=inp,
+                                      tool_use_id=str(use.get("id")))
+                        for use, res in calls:
+                            name = str(use.get("name"))
+                            inp = use.get("input") if isinstance(use.get("input"), dict) else {}
+                            self.fire("PostToolUse", sid, None, tool=name, tool_input=inp,
+                                      tool_use_id=str(use.get("id")), tool_response=tool_response(name, res))
+                    if rec["main"]:
+                        self._append_transcript(sid, [m for m in delta if m.get("role") != "assistant"], seq)
                 if "proxy" in self.doors:
                     self._proxy(rec)
                     if rec["step"] == "turn_first":
@@ -1031,27 +1260,14 @@ class Replayer:
                             self._proxy(rec, variant)
             if hooks_on:
                 had = self._context_file(sid) is not None
-                self._lifecycle("session-end", "Stop", sid, stop_hook_active=False)
+                self.fire("Stop", sid, None, stop_hook_active=False)
                 stop_checks.append({"turn": turn, "had_file": had, "has_file": self._context_file(sid) is not None})
         if hooks_on:
             lines = self._context_lines(sid)
             had = self._context_file(sid) is not None
-            self._lifecycle("session-end", "SessionEnd", sid, reason="other")
+            self.fire("SessionEnd", sid, None, reason="other")
             self.archive[sid] = [{"turns": len(turns), "stops": stop_checks, "lines_before_end": lines,
                                   "had_file_before_end": had, "has_file_after_end": self._context_file(sid) is not None}]
-
-
-def _has_agent_result(delta: list) -> bool:
-    return _agent_input(delta) is not None
-
-
-def _agent_input(delta: list) -> dict | None:
-    for m in delta:
-        content = m.get("content") if isinstance(m, dict) else None
-        for b in content if isinstance(content, list) else []:
-            if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in ("Agent", "Task"):
-                return b.get("input") if isinstance(b.get("input"), dict) else {}
-    return None
 
 
 def archive_checks(archive: dict[str, list]) -> dict:
@@ -1103,7 +1319,7 @@ def run_inprocess(scratch: Scratch, recs: list[dict], doors: set[str]) -> list[d
             fh.write(json.dumps({"idx": r["idx"], "step": r["step"], "request": r["request"],
                                  "prompt": latest_user_text(r["delta"]) if r["step"] in PROMPT_STEPS else None})
                      + "\n")
-    cmd = [sys.executable, str(Path(__file__).resolve()), "--_inproc-worker", str(jobs), str(results),
+    cmd = [scratch.python, str(Path(__file__).resolve()), "--_inproc-worker", str(jobs), str(results),
            ",".join(wanted)]
     proc = subprocess.run(cmd, env=scratch.env(), cwd=str(scratch.workspace), stdin=subprocess.DEVNULL,
                           stdout=subprocess.DEVNULL, stderr=(scratch.root / "inproc.stderr").open("wb"),
@@ -1162,8 +1378,10 @@ def _inproc_worker(jobs_path: str, out_path: str, doors_csv: str) -> int:  # pra
             if "gateway" in doors:
                 t0 = time.perf_counter()
                 try:
-                    text = gateway._latest_user_turn(job["request"]) or gateway._flatten(job["request"])
-                    tt, cx = real_classify(text)
+                    # gateway.anthropic_messages -> _route: classify_text if it has non-space text, else the
+                    # flattened prompt
+                    latest = gateway._latest_user_turn(job["request"])
+                    tt, cx = real_classify(latest if (latest or "").strip() else gateway._flatten(job["request"]))
                     emit({"idx": idx, "door": "gateway", "ok": True, "task_type": tt, "complexity": cx,
                           "layer": "classify_signals:gateway_policy",
                           "latency_ms": (time.perf_counter() - t0) * 1000.0})
@@ -1195,8 +1413,13 @@ def _inproc_worker(jobs_path: str, out_path: str, doors_csv: str) -> int:  # pra
                     res = loop.run_until_complete(ensemble.classify_for_routing(prompt))
                     tt = getattr(res.inferred_task_type, "value", res.inferred_task_type)
                     cx = getattr(res.complexity, "value", res.complexity)
+                    # "ensemble:none+none" = every local-model ballot failed (classifier._fallback_result)
+                    # and the label is the heuristic's alone; name that, never hide it behind "ensemble"
+                    models = str(res.classifier_model).split(":", 1)[-1].split("+")
+                    layer = "ensemble:heuristic_only(llm_failed)" if all(m in ("none", "") for m in models) \
+                        else "ensemble:llm+heuristic"
                     emit({"idx": idx, "door": "mcp", "ok": True, "task_type": tt, "complexity": cx,
-                          "layer": str(res.classifier_model).split(":", 1)[0],
+                          "layer": layer, "classifier_model": str(res.classifier_model),
                           "latency_ms": (time.perf_counter() - t0) * 1000.0})
                 except Exception as exc:  # noqa: BLE001
                     emit({"idx": idx, "door": "mcp", "error": type(exc).__name__,
@@ -1398,6 +1621,16 @@ def render_md(summary: dict) -> str:
               f" lines before SessionEnd {arch['lines_before_end']}"]
     for k, v in arch["checks"].items():
         lines.append(f"- {k}: **{v['verdict']}** ({v['detail']})")
+    hooks = det["hooks"]
+    lines += ["", "## Hooks driven (every hook hooks/hooks.json registers for an emitted event)", "",
+              f"- driven (event:hook = runs): {hooks['driven']}",
+              f"- tools in the corpus: {hooks['tools_in_corpus']}"]
+    if hooks["not_driven"]:
+        lines.append("- **not driven:**")
+        lines += [f"  - {h['event']}:{h['hook']}" + (f" [{h['matcher']}]" if h["matcher"] else "") + f": {h['reason']}"
+                  for h in hooks["not_driven"]]
+    else:
+        lines.append("- not driven: none")
     lines += ["", "## Hook latency (P0.9 mechanics)", "", "| hook:event | n | p50 ms (wall) | p95 ms (wall) |",
               "|---|---|---|---|"]
     for k, v in timing["lifecycle"].items():
@@ -1423,14 +1656,38 @@ def _git_sha() -> str | None:
 
 
 def _reap(scratch: Scratch, wait_s: float = 60.0) -> dict:
-    """Wait for this run's detached grandchildren (marker in their environment) to exit;
-    terminate, by PID, any that outlive ``wait_s``. Never matches by name."""
+    """Wait for this run's leftover processes (children and detached grandchildren) to
+    exit; terminate, by PID, any that outlive ``wait_s``. Never matches by name.
+
+    A positive control comes first: a canary child of the scratch interpreter must be
+    found by :meth:`Scratch.descendants`. When it is not, or the process table cannot be
+    read, the counts are ``"unknown"`` and ``detectable`` is False (the run then fails)."""
+    canary = subprocess.Popen([scratch.python, "-c", "import time; time.sleep(60)"], env=scratch.env(),
+                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        seen_canary = False
+        for _ in range(20):
+            pids = scratch.descendants()
+            if pids is not None and canary.pid in pids:
+                seen_canary = True
+                break
+            time.sleep(0.1)
+    finally:
+        canary.kill()
+        canary.wait(timeout=10)
+    if not seen_canary:
+        return {"detectable": False, "canary_seen": False, "seen_after_run": "unknown",
+                "terminated_after_wait": "unknown"}
     deadline = time.monotonic() + wait_s
-    pids = scratch.descendants()
+    pids = [p for p in (scratch.descendants() or []) if p != canary.pid]
     seen = len(pids)
     while pids and time.monotonic() < deadline:
         time.sleep(0.5)
-        pids = scratch.descendants()
+        current = scratch.descendants()
+        if current is None:
+            return {"detectable": False, "canary_seen": True, "seen_after_run": seen,
+                    "terminated_after_wait": "unknown"}
+        pids = [p for p in current if p != canary.pid]
     killed = 0
     for pid in pids:
         try:
@@ -1438,7 +1695,7 @@ def _reap(scratch: Scratch, wait_s: float = 60.0) -> dict:
             killed += 1
         except OSError:
             pass
-    return {"seen_after_run": seen, "terminated_after_wait": killed}
+    return {"detectable": True, "canary_seen": True, "seen_after_run": seen, "terminated_after_wait": killed}
 
 
 def run(corpus: Path, out: Path, doors: set[str], *, sessions: int | None = None,
@@ -1497,6 +1754,8 @@ def _run_in(scratch: Scratch, stub: StubServer, recs: list[dict], corpus: Path, 
         if proxy_cm:
             proxy_cm.__exit__()
     reaped = _reap(scratch)
+    if not reaped["detectable"]:
+        errors.append("lingering child processes could not be determined")
     violations = scratch.violation_rows()
     dec = [d for d in rep.decisions if d["door"] != "inproc-worker"]
     errors += [d["error"] for d in rep.decisions if d["door"] == "inproc-worker"]
@@ -1517,6 +1776,7 @@ def _run_in(scratch: Scratch, stub: StubServer, recs: list[dict], corpus: Path, 
             "ledgers": writer_completeness(scratch.state),
             "archive": archive_checks(rep.archive),
             "hook_exit_codes": dict(sorted(rep.hook_errors.items())),
+            "hooks": rep.hook_coverage(),
             "network": {"violations": len(violations),
                         "violation_kinds": _dist(violations, "kind") if violations else {},
                         "violation_targets": sorted({f"{v.get('host')}:{v.get('port')}" for v in violations})},
@@ -1529,6 +1789,7 @@ def _run_in(scratch: Scratch, stub: StubServer, recs: list[dict], corpus: Path, 
             "in_process_hooks": in_process_hook_latency(scratch.state),
             "stub_hits": dict(sorted(stub.hits.items())),
             "lingering_children": reaped,
+            "run_processes_live_0.3s_after_first_session_start": rep.detached_probe,
         },
         "run": {"git_sha": _git_sha(), "python": sys.version.split()[0],
                 "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

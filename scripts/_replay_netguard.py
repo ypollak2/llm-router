@@ -1,17 +1,22 @@
-"""Outbound-connection guard for ``scripts/synthetic_replay.py`` (installed as ``sitecustomize``).
+"""Outbound-connection guard for ``scripts/synthetic_replay.py``.
 
-The replay harness copies this file to ``<scratch>/guard/sitecustomize.py`` and puts that
-directory first on ``PYTHONPATH`` of every child it starts (hooks, the proxy), and calls
-:func:`install` in its own process for the in-process doors. Python imports
-``sitecustomize`` at start-up, so the guard is active before any hook or proxy code runs.
+The replay harness writes this file, followed by an ``install(...)`` call carrying the
+run's allowlist and violations path, as ``sitecustomize.py`` into the site-packages of a
+scratch venv, and starts every child with that venv's interpreter. Python imports
+``sitecustomize`` at start-up, so the guard is active before any hook or proxy code runs,
+with or without any environment variable: a grandchild started with an emptied
+environment is still guarded as long as it runs that interpreter (``sys.executable``).
+The harness also calls :func:`install` / :func:`uninstall` in its own process around a run.
 
-Every ``connect`` / ``connect_ex`` / ``create_connection`` / ``getaddrinfo`` to anything
-that is not on the allowlist is refused BEFORE a packet leaves the process: the call
-raises ``ConnectionRefusedError`` and one line is appended to the violations file. The
-harness fails the run when that file is non-empty, so a door that tries to reach a
-provider, an Ollama daemon or a live router port (8787/8797/8798) cannot pass silently.
+Every ``connect`` / ``connect_ex`` / ``getaddrinfo`` (``create_connection`` and every
+HTTP client built on ``socket`` go through these) to anything that is not on the
+allowlist is refused BEFORE a packet leaves the process: the call raises, and one line is
+appended to the violations file. The harness fails the run when that file is non-empty.
 
-Configuration (environment, read once at install):
+NOT covered: a process that does not run the scratch interpreter (a non-Python binary, a
+different Python). The harness shadows the network clients it knows of on PATH instead.
+
+Environment fallback (only when no baked call ran):
   LLM_ROUTER_REPLAY_ALLOW       comma list of ``host:port`` that may be contacted
   LLM_ROUTER_REPLAY_VIOLATIONS  file that receives one JSON line per refused attempt
 Unix-domain sockets are always allowed (no network). Nothing else is.

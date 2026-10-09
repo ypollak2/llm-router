@@ -8,6 +8,10 @@ What is pinned here, and why each matters:
   carries a synthetic tag, and no row claims to be real traffic;
 * the deterministic half of the summary is identical for a fixed corpus;
 * an empty or unreadable corpus exits non-zero without starting anything;
+* the guard is baked into the children's interpreter, so a grandchild with an emptied
+  environment is still guarded; network binaries on PATH are shadowed;
+* leftover processes are counted with a positive control, and "cannot tell" fails the run;
+* every hook hooks/hooks.json registers is driven, or listed with the reason it was not;
 * no fixture text reaches the outputs (counts and hashes only).
 
 These tests run real hook subprocesses, a real proxy and a local stub server, so they are
@@ -136,6 +140,65 @@ def test_a_door_pointed_off_the_stub_fails_the_run(tmp_path, monkeypatch):
     assert any(t.endswith(off.rsplit(":", 1)[1]) for t in net["violation_targets"])
 
 
+def test_guard_is_baked_into_the_child_interpreter(tmp_path):
+    """A child of the scratch interpreter with NO LLM_ROUTER_* variable (what
+    safe_subprocess.get_delegated_env or agent_loop's {"PATH": ...} would hand a
+    grandchild) is still guarded; curl on the scratch PATH is the shadow script."""
+    import shutil
+
+    with sr.StubServer() as stub:
+        scratch = sr.Scratch(tmp_path / "root", stub, None)
+        other = _closed_port()
+        code = (
+            "import socket, urllib.request\n"
+            f"urllib.request.urlopen('{stub.url}/v1/models', timeout=5).read()\n"
+            f"for target in [('127.0.0.1', {other}), ('example.org', 443)]:\n"
+            "    try:\n"
+            "        socket.create_connection(target, timeout=2)\n"
+            "        print('CONNECTED', target)\n"
+            "    except OSError:\n"
+            "        print('refused')\n"
+        )
+        out = subprocess.run([scratch.python, "-c", code], env={"PATH": "/usr/bin:/bin"},
+                             capture_output=True, text=True, timeout=60)
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.split() == ["refused", "refused"]
+        assert stub.hits["models"] == 1  # the allowed target was reached
+        assert len(scratch.violation_rows()) == 2
+        env = scratch.env()
+        for tool in ("curl", "wget", "nc", "security", "llm-router"):
+            found = shutil.which(tool, path=env["PATH"])
+            assert found and Path(found).parent == scratch.bin, tool
+        assert subprocess.run(["curl", "https://example.org"], env=env, timeout=30).returncode == 1
+
+
+def test_unknown_lingering_children_fail_the_run(tmp_path, monkeypatch):
+    """When the process table cannot be read, leftover processes are 'unknown', never 0,
+    and the run exits 1."""
+    monkeypatch.setattr(sr.Scratch, "descendants", lambda self: None)
+    rc = sr.run(FIXTURE, tmp_path / "out", {"gateway"}, sessions=1, work=tmp_path)
+    summary = json.loads((tmp_path / "out" / "summary.json").read_text())
+    lingering = summary["timing"]["lingering_children"]
+    assert rc == 1
+    assert lingering["detectable"] is False and lingering["terminated_after_wait"] == "unknown"
+    assert "lingering child processes could not be determined" in summary["deterministic"]["errors"]
+
+
+def test_hook_registry_is_derived_from_hooks_json():
+    reg = sr.load_hook_registry()
+    raw = json.loads((ROOT / "hooks" / "hooks.json").read_text())
+    n = sum(len(g["hooks"]) for groups in raw["hooks"].values() for g in groups)
+    assert len(reg) == n
+    names = {(e["event"], e["hook"]) for e in reg}
+    for pair in [("UserPromptSubmit", "status-bar"), ("PreToolUse", "enforce-route"),
+                 ("PostToolUse", "context-capture"), ("PostToolUse", "bash-compress"),
+                 ("PostToolUse", "playwright-compress"), ("PostToolUse", "usage-refresh")]:
+        assert pair in names
+    assert sr.matcher_matches(None, "Bash") and sr.matcher_matches("Agent", "Agent")
+    assert not sr.matcher_matches("Agent", "Bash")
+    assert sr.matcher_matches("llm_|mcp__llm_router__llm", "mcp__llm_router__llm_route")
+
+
 def test_guard_is_removed_from_the_harness_process_after_a_run(tmp_path):
     assert sr.run(FIXTURE, tmp_path / "out", {"gateway"}, sessions=1, work=tmp_path) == 0
     assert not getattr(socket, "_llm_router_replay_guard", False)
@@ -168,7 +231,25 @@ def test_full_replay_runs_every_door_with_no_outbound_connection(replay):
     for door in ("hook", "agent-route", "proxy", "gateway", "sdk", "mcp"):
         assert det["doors_summary"][door]["ok"] > 0, door
     assert det["doors_summary"]["proxy"]["calls"] == det["corpus"]["records"]
-    assert timing["lingering_children"]["terminated_after_wait"] == 0
+    lingering = timing["lingering_children"]
+    assert lingering["detectable"] is True and lingering["canary_seen"] is True
+    assert lingering["terminated_after_wait"] == 0
+
+
+@pytest.mark.timeout(300)
+def test_every_registered_hook_is_driven_or_explained(replay):
+    det = replay[1][0][0]["deterministic"]
+    hooks = det["hooks"]
+    registered = sr.load_hook_registry()
+    assert len(hooks["registered"]) == len(registered)
+    driven = set(hooks["driven"])
+    not_driven = {f"{h['event']}:{h['hook']}": h["reason"] for h in hooks["not_driven"]}
+    for e in registered:
+        key = f"{e['event']}:{e['hook']}"
+        assert (key in driven) != (key in not_driven), key
+    # the fixture has no router MCP tool call, so only the llm_-matcher hook stays undriven
+    assert set(not_driven) == {"PostToolUse:usage-refresh"}
+    assert "no tool in the corpus matches" in not_driven["PostToolUse:usage-refresh"]
 
 
 @pytest.mark.timeout(300)
