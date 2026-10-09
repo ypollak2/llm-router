@@ -1,0 +1,18 @@
+{
+  "session_id": "5f0c9a2e-7b31-4c8d-9e46-1a2b3c4d5e6f",
+  "transcript_path": "/tmp/hook-wall-fixture/projects/-Users-dev-llm-router/5f0c9a2e-7b31-4c8d-9e46-1a2b3c4d5e6f.jsonl",
+  "cwd": "/Users/dev/llm-router",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__playwright__browser_snapshot",
+  "tool_input": {},
+  "tool_response": {
+    "content": [
+      {
+        "type": "text",
+        "text": "- Page URL: http://localhost:5173/settings\n- Page Title: Settings - Router Console\n- Page Snapshot:\n```yaml\n- generic [ref=e1]:\n  - banner [ref=e2]:\n    - link \"Router Console\" [ref=e3] [cursor=pointer]:\n      - /url: /\n    - navigation [ref=e4]:\n      - link \"Dashboard\" [ref=e5] [cursor=pointer]:\n        - /url: /dashboard\n      - link \"Sessions\" [ref=e6] [cursor=pointer]:\n        - /url: /sessions\n      - link \"Routing\" [ref=e7] [cursor=pointer]:\n        - /url: /routing\n      - link \"Providers\" [ref=e8] [cursor=pointer]:\n        - /url: /providers\n      - link \"Budgets\" [ref=e9] [cursor=pointer]:\n        - /url: /budgets\n      - link \"Settings\" [ref=e10] [cursor=pointer]:\n        - /url: /settings\n  - main [ref=e20]:\n    - heading \"Settings\" [level=1] [ref=e21]\n    - paragraph [ref=e22]: Changes apply to new sessions only.\n    - group \"Default tier\" [ref=e30]:\n      - text: Default tier\n      - textbox \"Default tier\" [ref=e31]: value 0\n      - button \"Reset Default tier\" [ref=e32] [cursor=pointer]\n    - group \"Enforcement mode\" [ref=e33]:\n      - text: Enforcement mode\n      - textbox \"Enforcement mode\" [ref=e34]: value 1\n      - button \"Reset Enforcement mode\" [ref=e35] [cursor=pointer]\n    - group \"Daily budget (USD)\" [ref=e36]:\n      - text: Daily budget (USD)\n      - textbox \"Daily budget (USD)\" [ref=e37]: value 2\n      - button \"Reset Daily budget (USD)\" [ref=e38] [cursor=pointer]\n    - group \"Session cap (%)\" [ref=e39]:\n      - text: Session cap (%)\n      - textbox \"Session cap (%)\" [ref=e40]: value 3\n      - button \"Reset Session cap (%)\" [ref=e41] [cursor=pointer]\n    - group \"Weekly cap (%)\" [ref=e42]:\n      - text: Weekly cap (%)\n      - textbox \"Weekly cap (%)\" [ref=e43]: value 4\n      - button \"Reset Weekly cap (%)\" [ref=e44] [cursor=pointer]\n    - group \"Local model\" [ref=e45]:\n      - text: Local model\n      - textbox \"Local model\" [ref=e46]: value 5\n      - button \"Reset Local model\" [ref=e47] [cursor=pointer]\n    - group \"Ollama host\" [ref=e48]:\n      - text: Ollama host\n      - textbox \"Ollama host\" [ref=e49]: value 6\n      - button \"Reset Ollama host\" [ref=e50] [cursor=pointer]\n    - group \"Fallback provider\" [ref=e51]:\n      - text: Fallback provider\n      - textbox \"Fallback provider\" [ref=e52]: value 7\n      - button \"Reset Fallback provider\" [ref=e53] [cursor=pointer]\n    - group \"Telemetry\" [ref=e54]:\n      - text: Telemetry\n      - textbox \"Telemetry\" [ref=e55]: value 8\n      - button \"Reset Telemetry\" [ref=e56] [cursor=pointer]\n    - group \"Statusline mode\" [ref=e57]:\n      - text: Statusline mode\n      - textbox \"Statusline mode\" [ref=e58]: value 9\n      - button \"Reset Statusline mode\" [ref=e59] [cursor=pointer]\n    - status [ref=e80]: Saved 2 minutes ago\n    - alert [ref=e81]: Provider gemini unavailable (timeout)\n    - button \"Save\" [ref=e82] [cursor=pointer]\n    - button \"Cancel\" [ref=e83] [cursor=pointer]\n  - contentinfo [ref=e90]:\n    - text: llm-router console\n```"
+      }
+    ]
+  },
+  "tool_use_id": "toolu_01HookWallPlaywright00001"
+}

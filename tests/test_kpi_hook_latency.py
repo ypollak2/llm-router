@@ -511,7 +511,8 @@ def test_a_run_that_names_no_phase_writes_the_row_it_always_did(monkeypatch):
     hl._finish()
     (row,) = _lines()
     assert "phases_ms" not in row
-    assert set(row) == {"hook", "event", "elapsed_ms", "timed_out", "ts"}
+    # load1 (P0.9-g) is the 1-minute load at exit, on every hook row the OS can give it for.
+    assert set(row) - {"load1"} == {"hook", "event", "elapsed_ms", "timed_out", "ts"}
 
 
 def test_phases_are_summed_per_name_and_written_in_the_row(monkeypatch):

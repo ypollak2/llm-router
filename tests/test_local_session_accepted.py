@@ -424,6 +424,12 @@ def test_other_kpis_are_byte_identical_with_attributable_accepted_local_answers(
             # P0.5-b: per-project semantic-cache block reads usage.db; not in the golden either.
             and not ln.startswith(("proxy_rows_24h:", "WARN proxy ledger",
                                    "semantic cache (= result cache)"))]
+    # P0.9-g: the sync-hook wall/live gate lines are new and outside "kpis"; not in the golden.
+    from llm_router import hook_wall
+
+    p09g_lines = set(hook_wall.render_lines(card["p09g"]))
+    assert p09g_lines and p09g_lines <= set(rest)
+    rest = [ln for ln in rest if ln not in p09g_lines]
     assert "\n".join(rest) == (GOLDEN / "kpi_pre_o3_scorecard.txt").read_text()
 
 

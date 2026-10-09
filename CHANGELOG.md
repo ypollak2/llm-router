@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- hooks (PLAN v16 P0.9-g, AMEND R8 A.3): `scripts/hook_wall.py` (`llm_router.hook_wall`) times the five
+  sync hooks with no latency MUST (`enforce-route`, `bash-compress`, `playwright-compress`,
+  `cc-usage-track`, `subagent-start`) from outside, process start to exit, cold and warm, with
+  `os.getloadavg()` before and after every run (read outside the timed span). Payload fixtures in
+  `tests/fixtures/hook_payloads/`. Each hook's `hook_latency.jsonl` row now carries `load1`, read after
+  the clock stops. `llm-router kpi` prints a P0.9-g line per hook: wall cold p95 (n >= 200) AND live
+  `elapsed_ms` p95 (n >= 200; 30 for `cc-usage-track` / `subagent-start`) against 300 ms, rows above
+  load 4 excluded and counted.
 - semantic cache (PLAN v16 P0.5-b, R-CTX-7; the semantic cache is the result cache, D-R8-5):
   `semantic_cache_lookups` gains `project_scope` (additive migration; earlier rows are reported as
   unscoped). `llm-router kpi` and `llm_router_status(view="cache")` print lookups, hits and n per
