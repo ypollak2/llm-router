@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- semantic cache (PLAN v16 P0.5-b, R-CTX-7; the semantic cache is the result cache, D-R8-5):
+  `semantic_cache_lookups` gains `project_scope` (additive migration; earlier rows are reported as
+  unscoped). `llm-router kpi` and `llm_router_status(view="cache")` print lookups, hits and n per
+  project; a project with fewer than 20 lookups prints "not informative" and no percentage.
 - verifier PR C (SHADOW, opt-in): pending_verify queue, detached `verify_worker`, Codex marker. **Off unless
   `LLM_ROUTER_VERIFY=on`**; no outcome, NS, D1 or D2 changes. See `docs/VERIFIER.md`.
 - agents (PLAN v16 AGT A.0): `llm_act`, `llm_delegate` and `llm_local_task` take `wait` (default

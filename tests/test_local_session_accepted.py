@@ -421,7 +421,9 @@ def test_other_kpis_are_byte_identical_with_attributable_accepted_local_answers(
     # `local (shadow): n=...` is #284's informational count of local units (not this change).
     rest = [ln for ln in full if ln not in o3_lines and not ln.startswith("local (shadow): ")
             # P0.14-a: new, time-dependent proxy ledger liveness line; not in the golden.
-            and not ln.startswith(("proxy_rows_24h:", "WARN proxy ledger"))]
+            # P0.5-b: per-project semantic-cache block reads usage.db; not in the golden either.
+            and not ln.startswith(("proxy_rows_24h:", "WARN proxy ledger",
+                                   "semantic cache (= result cache)"))]
     assert "\n".join(rest) == (GOLDEN / "kpi_pre_o3_scorecard.txt").read_text()
 
 
