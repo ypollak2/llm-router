@@ -50,6 +50,10 @@ def _run(argv: list[str], **kw) -> subprocess.CompletedProcess:
 def test_agents_yaml_found_from_installed_wheel(tmp_path):
     uv = shutil.which("uv")
     if uv is None:
+        # A silent skip in CI would let the wheel regress unnoticed (the bug this
+        # test exists for passed every source-tree test). CI always has uv.
+        if os.environ.get("CI"):
+            pytest.fail("uv is required in CI to build the wheel; this test must run")
         pytest.skip("uv not available to build the wheel")
 
     dist = tmp_path / "dist"
