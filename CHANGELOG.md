@@ -65,6 +65,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deletes entries (older than 7 days, or labelled/skipped and from before today) under the same `flock`. This is
   the only place the proxy keeps prompt text; it is for labelling the shadow (`LLM_ROUTER_SHADOW_LABELS`).
 
+### Fixed
+- classifier (SYSONE-WARM-1): with `LLM_ROUTER_CLASSIFIER_BACKEND=systemone` the warm-up used `/api/generate`,
+  which Ollama refuses for a decision model (HTTP 400), so the model never loaded and every verdict was `cold`.
+  The warm-up now loads it through `/v1/systemone`; a refused warm-up is recorded once as
+  `CHZ-FO-LOCAL-CLASSIFIER-WARMUP`; a unitless `LLM_ROUTER_CLASSIFIER_KEEP_ALIVE` (`-1`) is sent as an integer.
+  See `docs/bugs/SYSONE-WARM-1.md`.
+
 ### Changed
 - agents (PLAN v16 AGT A.0): `agents.yaml` ships inside the package (`llm_router/data/agents.yaml`,
   loaded with `importlib.resources`). It lived at the repo root, which no wheel contains, so every

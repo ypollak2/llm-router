@@ -13,6 +13,7 @@ import hashlib
 import json
 import threading
 import time
+from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -323,7 +324,8 @@ class FakeOllama:
 
         async def generate(request):
             self.gen.append(await request.json())
-            return web.json_response({"done": True})
+            # a decision model on real Ollama: generate and chat are refused (verified live 2026-10-09)
+            return web.json_response({"error": f'"{(self.gen[-1])["model"]}" does not support generate'}, status=400)
 
         async def ps(request):
             entry = {"name": "nimble:9b"}
@@ -350,6 +352,13 @@ class FakeOllama:
         lc._reset_state()
 
 
+@pytest.fixture
+def clock(monkeypatch):
+    now = SimpleNamespace(t=1000.0)
+    monkeypatch.setattr(lc, "_now", lambda: now.t)
+    return now
+
+
 async def _ask(sha: str = "s1", **kw) -> lc.Verdict:
     return await lc.classify_async(_assembled(), session_id="sess", text_sha=sha, **kw)
 
@@ -367,12 +376,36 @@ async def test_a_decision_model_resident_at_its_own_context_is_not_cold(monkeypa
     assert v.source == "llm" and len(o.sys) == 1 and o.gen == []
 
 
-async def test_cold_model_is_warmed_by_a_load_only_call_without_options(monkeypatch):
+async def test_cold_model_is_warmed_through_the_systemone_endpoint(monkeypatch):
     async with FakeOllama(monkeypatch, loaded=False) as o:
         v = await _ask()
         await asyncio.sleep(0.05)
-    assert v.source == "cold" and v.prompt_version == "sys1" and o.sys == [] and o.chat == []
-    assert o.gen == [{"model": "nimble:9b", "stream": False, "keep_alive": "30m"}]  # no num_ctx: no reload later
+    assert v.source == "cold" and v.prompt_version == "sys1" and o.chat == []
+    assert o.gen == []  # /api/generate answers 400 "does not support generate" for a decision model
+    assert len(o.sys) == 1 and o.sys[0]["model"] == "nimble:9b" and o.sys[0]["keep_alive"] == "30m"
+    assert set(o.sys[0]) == {"model", "state", "questions", "keep_alive"}
+
+
+async def test_a_refused_warmup_is_recorded_once(monkeypatch, clock):
+    from llm_router import failopen
+
+    seen: list[tuple] = []
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, *, detail="": seen.append((code, detail)))
+    async with FakeOllama(monkeypatch, loaded=False, status=400, reply={"error": "nope"}) as o:
+        await _ask("a")
+        await asyncio.sleep(0.05)
+        clock.t += 31.0
+        await _ask("b")
+        await asyncio.sleep(0.05)
+    assert len(o.sys) == 2  # warmed twice (30 s apart), logged once
+    assert len(seen) == 1 and seen[0][0] == "CHZ-FO-LOCAL-CLASSIFIER-WARMUP" and "400" in seen[0][1]
+
+
+@pytest.mark.parametrize("raw,want", [("-1", -1), ("0", 0), ("300", 300), ("30m", "30m"), ("-1m", "-1m"), ("", "30m")])
+def test_keep_alive_unitless_numbers_are_sent_as_integers(monkeypatch, raw, want):
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_KEEP_ALIVE", raw)
+    assert lc._keep_alive() == want and type(lc._keep_alive()) is type(want)
+    assert dc.payload("m", _assembled())["keep_alive"] == want
 
 
 async def test_ok_verdicts_are_cached_and_the_cache_key_has_the_threshold(monkeypatch):
