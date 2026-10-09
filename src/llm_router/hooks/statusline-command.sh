@@ -253,7 +253,7 @@ _seg_resolve_py() {
     if [ -r "$_seg_py_file" ]; then
         { IFS= read -r _seg_py; IFS= read -r _ep; IFS= read -r _kind; } < "$_seg_py_file"
     fi
-    case "$_ep" in ''|*[!0-9]*) _ep="" ;; esac
+    _seg_int "$_ep" 10; _ep="$_n"
     [ "$_kind" = "plain" ] && _ttl=300
     if [ -n "$_seg_py" ] && [ -x "$_seg_py" ]; then
         if [ -z "$_ep" ] || [ $(( _now - _ep )) -lt "$_ttl" ]; then return 0; fi
@@ -291,6 +291,16 @@ _seg_run() {
     fi
 }
 
+# $1 = a value read from a file, $2 = max digits. Sets $_n to its base-10 value, or "" when
+# it is not 1..$2 plain digits. Length-capped (a 23-digit operand overflows `$(( ))` and
+# `[ -gt ]`) and forced to base 10 (a leading zero is octal to the shell: "08" is an error).
+_seg_int() {
+    _n=""
+    case "$1" in ''|*[!0-9]*) return 0 ;; esac
+    [ "${#1}" -le "$2" ] || return 0
+    _n=$((10#$1))
+}
+
 s_v="" s_written="" s_usage="" s_session_pct="" s_weekly_pct="" s_usage_stale="" s_reset=""
 s_ctx_human="" s_ctx_pct="" s_money="" s_mix_local="" s_mix_paid="" s_proxy_down=""
 s_health="" s_last="" s_last_stale="" s_last_tok=""
@@ -316,12 +326,12 @@ _seg_load() {
     # Every value used in arithmetic or a numeric test must be digits only: the file
     # is data, and `$(( ))` / `[[ -gt ]]` evaluate their operands (a value such as
     # a[$(cmd)] would run cmd). Anything else is dropped, i.e. the segment is hidden.
-    case "$s_session_pct" in ''|*[!0-9]*) s_session_pct="" ;; esac
-    case "$s_weekly_pct" in ''|*[!0-9]*) s_weekly_pct="" ;; esac
-    case "$s_ctx_pct" in ''|*[!0-9]*) s_ctx_pct="" ;; esac
-    case "$s_mix_local" in ''|*[!0-9]*) s_mix_local="" ;; esac
-    case "$s_mix_paid" in ''|*[!0-9]*) s_mix_paid="" ;; esac
-    case "$s_written" in ''|*[!0-9]*) s_written="" ;; esac
+    _seg_int "$s_session_pct" 3; s_session_pct="$_n"; [ -n "$s_session_pct" ] && [ "$s_session_pct" -gt 100 ] && s_session_pct=100
+    _seg_int "$s_weekly_pct" 3;  s_weekly_pct="$_n";  [ -n "$s_weekly_pct" ] && [ "$s_weekly_pct" -gt 100 ] && s_weekly_pct=100
+    _seg_int "$s_ctx_pct" 3;     s_ctx_pct="$_n";     [ -n "$s_ctx_pct" ] && [ "$s_ctx_pct" -gt 100 ] && s_ctx_pct=100
+    _seg_int "$s_mix_local" 9;   s_mix_local="$_n"
+    _seg_int "$s_mix_paid" 9;    s_mix_paid="$_n"
+    _seg_int "$s_written" 10;    s_written="$_n"
     [ "$s_v" = "1" ]
 }
 
@@ -332,7 +342,7 @@ if ! _seg_load; then
     _sync_file="$STATE_DIR/.statusline_seg_sync_${_sid}"
     _last_sync=0
     [ -r "$_sync_file" ] && IFS= read -r _last_sync < "$_sync_file"
-    case "$_last_sync" in ''|*[!0-9]*) _last_sync=0 ;; esac
+    _seg_int "$_last_sync" 10; _last_sync="${_n:-0}"
     if [ $(( _now - _last_sync )) -ge 5 ]; then
         ( umask 077; printf '%s\n' "$_now" > "$_sync_file" ) 2>/dev/null
         _seg_run sync
@@ -352,7 +362,7 @@ if [ "$s_v" = "1" ]; then
         _spawn_file="$STATE_DIR/.statusline_seg_spawn_${_sid}"
         _last_spawn=0
         [ -r "$_spawn_file" ] && IFS= read -r _last_spawn < "$_spawn_file"
-        case "$_last_spawn" in ''|*[!0-9]*) _last_spawn=0 ;; esac
+        _seg_int "$_last_spawn" 10; _last_spawn="${_n:-0}"
         if [ $(( _now - _last_spawn )) -ge 5 ]; then
             ( umask 077; printf '%s\n' "$_now" > "$_spawn_file" ) 2>/dev/null
             _seg_run async

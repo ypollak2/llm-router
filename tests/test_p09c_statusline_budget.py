@@ -386,3 +386,45 @@ def test_prune_removes_old_locks_and_markers_too(tmp_path):
     seg._prune(str(tmp_path))
     assert [n for n in names if (tmp_path / n).exists()] == []
     assert (tmp_path / ".statusline_seg_sync_fresh").exists()
+
+
+# ── repair round 2: digits are not enough (length, octal) ────────────────────
+
+
+def _render_with(home, tmp_path, **overrides):
+    _write_cache(home, age_s=5, usage="ok", session_pct="5", weekly_pct="5", ctx_human="1.0k",
+                 ctx_pct="5", mix_local="1", mix_paid="1")
+    kv = _read_kv(_cache(home))
+    kv.update(overrides)
+    _cache(home).write_text("".join(f"{k}={v}\n" for k, v in kv.items()))
+    bindir, log = _shims(tmp_path)
+    env = {"HOME": str(home), "PATH": str(bindir), "SPAWNLOG": str(log), "LANG": "en_US.UTF-8",
+           "NO_COLOR": "1", "LLM_ROUTER_ENFORCE": "smart"}
+    return subprocess.run(["/bin/bash", str(STATUSLINE)], input=_stdin(tmp_path), env=env,
+                          capture_output=True, text=True, timeout=4)  # a hang is a TimeoutExpired
+
+
+@pytest.mark.parametrize("digits", ["9" * 23, "9" * 19, "9" * 18])
+@pytest.mark.parametrize("key", ["ctx_pct", "session_pct", "mix_local", "written"])
+def test_an_overlong_number_neither_hangs_nor_prints_shell_errors(home, tmp_path, key, digits):
+    r = _render_with(home, tmp_path, **{key: digits})
+    assert r.returncode == 0 and "smart" in r.stdout
+    assert r.stderr == "", r.stderr
+
+
+@pytest.mark.parametrize("key", ["ctx_pct", "session_pct", "weekly_pct", "written"])
+def test_a_leading_zero_is_decimal_not_octal(home, tmp_path, key):
+    val = "08" if key != "written" else "0" + str(int(time.time()) - 5)
+    r = _render_with(home, tmp_path, **{key: val})
+    assert r.stderr == "", r.stderr
+    if key == "ctx_pct":
+        assert "🧠 1.0k" in r.stdout and "8%" in r.stdout
+    if key == "session_pct":
+        assert "8%/5h" in r.stdout
+    if key == "written":
+        assert "cached" not in r.stdout  # read as an age of ~5 s, not as an error
+
+
+def test_a_percentage_above_100_is_clamped(home, tmp_path):
+    r = _render_with(home, tmp_path, ctx_pct="999")
+    assert "100%" in r.stdout and r.stderr == ""
