@@ -6,6 +6,15 @@ description: |
   consult this file is deferred to Phase 1b.2; for now it is the canonical
   *target* the runtime will migrate to, validated by tests/test_standard_policy_mirror.py.
 
+  Local models: BALANCED, PREMIUM and REASONING chains name no `ollama/qwen3:32b`
+  (STALE-OLLAMA-1 — a one-machine default that most installs never had, silently
+  dropped at runtime). Installed Ollama models are not statically listed: the router
+  injects what discovery finds (config.all_ollama_models(), task-ordered by
+  router._task_aware_default_order) at the front of BUDGET/BALANCED chains at route
+  time. PREMIUM/REASONING get no local entry (they never had an injected one).
+  BUDGET still names ollama/qwen3.5:latest and ollama/hermes3:8b, which are subject
+  to the same drift and are filtered the same way (profiles.get_model_chain).
+
 # ── Behavior knobs (defaults; not overridden today) ───────────────────────────
 confidence_threshold: 4
 skip_acknowledgements: true
@@ -18,7 +27,6 @@ prefer_ollama: true
 # corresponding chains entries.
 workhorses:
   - ollama/qwen3.5:latest
-  - ollama/qwen3:32b
   - codex/gpt-4o
   - moonshot/moonshot-v1-128k
   - zhipu/glm-4
@@ -34,7 +42,6 @@ fallback_chain_complex:
   - openai/gpt-4o
   - openai/o3
   - xai/grok-3
-  - ollama/qwen3:32b
 
 specialists: {}
 
@@ -96,7 +103,6 @@ chains:
   balanced:
     query:
       - ollama/qwen3.5:latest
-      - ollama/qwen3:32b
       - codex/gpt-4o
       - moonshot/moonshot-v1-128k
       - zhipu/glm-4
@@ -105,12 +111,10 @@ chains:
       - anthropic/claude-sonnet-4-6
       - anthropic/claude-haiku-4-5-20251001
     research:
-      - ollama/qwen3:32b
       - minimax/MiniMax-Text-01
       - anthropic/claude-sonnet-4-6
       - openai/gpt-4o
     generate:
-      - ollama/qwen3:32b
       - codex/gpt-4o
       - arcee/arcee-nova
       - deepseek/deepseek-chat
@@ -119,7 +123,6 @@ chains:
       - anthropic/claude-sonnet-4-6
       - anthropic/claude-haiku-4-5-20251001
     analyze:
-      - ollama/qwen3:32b
       - codex/gpt-4o
       - zhipu/glm-4
       - deepseek/deepseek-reasoner
@@ -127,7 +130,6 @@ chains:
       - anthropic/claude-sonnet-4-6
       - anthropic/claude-haiku-4-5-20251001
     code:
-      - ollama/qwen3:32b
       - codex/gpt-4o
       - moonshot/moonshot-v1-128k
       - deepseek/deepseek-chat
@@ -146,8 +148,9 @@ chains:
       - elevenlabs/eleven_multilingual_v2
       - openai/tts-1-hd
 
-  # PREMIUM = Complexity.COMPLEX. Strong models lead; Ollama is last-resort only
-  # (complex tasks should NOT be answered by a local model unless every API is down).
+  # PREMIUM = Complexity.COMPLEX. Strong models lead. No local model is named:
+  # complex tasks should not be answered by a small local model, and the router
+  # injects discovered local models only into the BUDGET/BALANCED tiers.
   premium:
     query:
       - anthropic/claude-opus:latest
@@ -156,12 +159,10 @@ chains:
       - openai/gpt-4o
       - openai/o3
       - xai/grok-3
-      - ollama/qwen3:32b
     research:
       - anthropic/claude-opus:latest
       - minimax/MiniMax-Text-01
       - openai/o3
-      - ollama/qwen3:32b
     generate:
       - anthropic/claude-opus:latest
       - anthropic/claude-sonnet-4-6
@@ -169,14 +170,12 @@ chains:
       - deepseek/deepseek-chat
       - openai/gpt-4o
       - openai/o3
-      - ollama/qwen3:32b
     analyze:
       - anthropic/claude-opus:latest
       - anthropic/claude-sonnet-4-6
       - zhipu/glm-4
       - deepseek/deepseek-reasoner
       - openai/o3
-      - ollama/qwen3:32b
     code:
       - anthropic/claude-opus:latest
       - anthropic/claude-sonnet-4-6
@@ -184,7 +183,6 @@ chains:
       - deepseek/deepseek-reasoner
       - openai/gpt-4o
       - openai/o3
-      - ollama/qwen3:32b
     image:
       - openai/dall-e-3
       - fal/flux-pro
@@ -210,14 +208,14 @@ chains:
   #                            most expensive model ($10/$50 per 1M). Reached only
   #                            after the cheaper reasoning specialists have failed,
   #                            so its cost is spent only when nothing else sufficed.
-  #   6. Ollama local qwen3  — free absolute-last fallback; supports /think natively
+  #   (no local-model fallback is named here; see the description above)
   #
   # use_thinking=True is set by the router for ALL models in this chain;
   # only Anthropic and Gemini 2.5 Pro activate a provider-specific thinking
   # parameter — o3 and DeepSeek-R1 reason natively without an explicit flag.
   # REASONING = Complexity.DEEP_REASONING. Native reasoning models lead; Fable 5
-  # is the paid escalation ceiling above them; Ollama is the free last resort
-  # (the hardest problems should not fall to a local model first).
+  # is the paid escalation ceiling above them. The hardest problems should not
+  # fall to a local model, so none is named.
   reasoning:
     query:
       - deepseek/deepseek-reasoner
@@ -225,34 +223,29 @@ chains:
       - anthropic/claude-opus:latest
       - anthropic/claude-sonnet-4-6
       - anthropic/claude-fable-5
-      - ollama/qwen3:32b
     analyze:
       - deepseek/deepseek-reasoner
       - openai/o3
       - anthropic/claude-opus:latest
       - anthropic/claude-sonnet-4-6
       - anthropic/claude-fable-5
-      - ollama/qwen3:32b
     code:
       - deepseek/deepseek-reasoner
       - openai/o3
       - anthropic/claude-opus:latest
       - anthropic/claude-sonnet-4-6
       - anthropic/claude-fable-5
-      - ollama/qwen3:32b
     research:
       - deepseek/deepseek-reasoner
       - openai/o3
       - anthropic/claude-opus:latest
       - anthropic/claude-fable-5
-      - ollama/qwen3:32b
     generate:
       - deepseek/deepseek-reasoner
       - openai/o3
       - anthropic/claude-opus:latest
       - anthropic/claude-sonnet-4-6
       - anthropic/claude-fable-5
-      - ollama/qwen3:32b
     image:
       - openai/dall-e-3
       - fal/flux-pro

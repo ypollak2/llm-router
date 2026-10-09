@@ -382,6 +382,7 @@ async def test_a_broken_attach_still_serves_the_step(home, tmp_path, policy, mon
     assert backend.calls[0]["system"] == CONDENSED_SYSTEM
 
 
+@pytest.mark.timing
 async def test_a_slow_attach_is_bounded_and_the_step_is_still_served(home, tmp_path, policy, monkeypatch):
     import time as _time
 

@@ -108,6 +108,7 @@ def test_wall_clock_exceeded_coerces_floats() -> None:
 # ── 3. End-to-end semantics (mocked dispatcher) ──────────────────────────────
 
 
+@pytest.mark.timing
 @pytest.mark.asyncio
 async def test_wall_clock_cap_fires_when_dispatch_runs_long(
     monkeypatch: pytest.MonkeyPatch,

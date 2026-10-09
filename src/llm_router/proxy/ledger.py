@@ -100,7 +100,10 @@ Claude-tier rewrite fields (only when the proxy runs with ``--tiers on`` or
                         when unreadable or switched off
   tier_quota_state      ok / stale / unknown / off -- only ``ok`` drives the
                         ``quota_pressure`` step; the others change nothing
-  tier_decision_s       time the decision added
+  tier_decision_s       time the decision added (wall time, classifier-shadow scheduling included)
+  tier_shadow_schedule_ms
+                        ms spent scheduling the classifier shadow call (``llm_shadow``); present
+                        only on a row where one was scheduled; no request content (P09-13)
   tier_arm, tier_arm_assignment, tier_arm_reason, tier_arm_bucket, tier_arm_turn
                         D-31 Haiku experiment arm (``proxy.haiku_arm``); present only on a
                         turn whose hash fell inside ``haiku_arm_share``. ``tier_arm`` is the

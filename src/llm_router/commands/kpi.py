@@ -94,7 +94,9 @@ SCOPE, stated rather than implied:
   p50 / p95 of the P0.9-e decision, the sum of ``tier_phases_ms`` over
   ``proxy.tiers.DECISION_PHASES``, with n, sessions and the largest session's share
   ("not informative" below n=100 or 2 sessions); continuation p50 / p95 of
-  ``tier_decision_s``.
+  ``tier_decision_s``; and, only when rows carry it, the classifier-shadow scheduling cost
+  (``tier_shadow_schedule_ms`` on turn-first rows, p50 / p95 against the plan's 30 ms
+  target, same n / sessions / "not informative" rule as the turn-first decision).
 * **classifier shadow** (informational, outside ``kpis``) is the local LLM classifier's
   shadow log (``classifier_shadow.jsonl``, written by ``proxy/llm_shadow``): calls, sessions,
   agreement with the rules' tier, tier distributions, cheap share, fallback rate, p50 / p95 ms,
@@ -647,6 +649,8 @@ def _g1_segment(values: list[float]) -> dict[str, Any]:
 #: rows from more than one session. Below either, the line says "not informative".
 G1_DECISION_MIN_N = 100
 G1_DECISION_MIN_SESSIONS = 2
+#: Primary plan G1-proxy target: classifier-shadow scheduling <= 30 ms (p95 compared).
+SHADOW_SCHEDULE_TARGET_MS = 30.0
 
 
 def _decision_ms(phases: Any) -> float | None:
@@ -687,6 +691,8 @@ def _g1_proxy(pop: dict) -> dict:
     by_session: dict[str, int] = {}
     no_sid = 0
     cont: list[float] = []
+    sched: list[float] = []
+    sched_by_session: dict[str, int] = {}
     side = 0
     excluded = {"no_step_class": 0, "subagent_first": 0, "turn_first_without_phases": 0}
     newest: float | None = None
@@ -701,6 +707,11 @@ def _g1_proxy(pop: dict) -> dict:
                 continue
             cont.append(float(v))
         elif step == "turn_first":
+            sm = r.get("tier_shadow_schedule_ms")
+            if not isinstance(sm, bool) and isinstance(sm, (int, float)):
+                sched.append(float(sm) / 1000.0)
+                if r.get("session_id"):
+                    sched_by_session[r["session_id"]] = sched_by_session.get(r["session_id"], 0) + 1
             d = _decision_ms(r.get("tier_phases_ms"))
             if d is None:
                 excluded["turn_first_without_phases"] += 1
@@ -754,14 +765,34 @@ def _g1_proxy(pop: dict) -> dict:
         return f"{name} {nums} ({who})"
 
     value = f"{_fmt_first(seg_first)} | {_fmt('continuation', seg_cont)}"
+    seg_sched = None
+    if sched:
+        seg_sched = _g1_segment(sched)
+        seg_sched.update(
+            measure="tier_shadow_schedule_ms on turn_first rows", target_ms=SHADOW_SCHEDULE_TARGET_MS,
+            sessions=len(sched_by_session),
+            informative=(len(sched) >= G1_DECISION_MIN_N
+                         and len(sched_by_session) >= G1_DECISION_MIN_SESSIONS))
+        who = f"n={seg_sched['n']}, sessions={seg_sched['sessions']}"
+        if seg_sched["p50_s"] is None:
+            value += f" | shadow schedule not informative ({who})"
+        else:
+            nums = f"p50={seg_sched['p50_s'] * 1000:.0f}ms p95={seg_sched['p95_s'] * 1000:.0f}ms"
+            if not seg_sched["informative"]:
+                value += (f" | shadow schedule {nums} not informative ({who}; need "
+                          f"n>={G1_DECISION_MIN_N} from >={G1_DECISION_MIN_SESSIONS} sessions)")
+            else:
+                verdict = "within" if seg_sched["p95_s"] * 1000 <= SHADOW_SCHEDULE_TARGET_MS else "OVER"
+                value += f" | shadow schedule {nums} ({who}; {verdict} PLAN.md G1-proxy target {SHADOW_SCHEDULE_TARGET_MS:.0f}ms)"
     left_out = [f"{c:,} {label}" for label, c in (
         ("with no step_class", excluded["no_step_class"]),
         ("subagent_first", excluded["subagent_first"]),
         ("turn_first without tier_phases_ms", excluded["turn_first_without_phases"])) if c]
     if left_out:
         value += f" | not turn-first: {', '.join(left_out)}"
+    extra = {"shadow_schedule": seg_sched} if seg_sched is not None else {}
     return _measured(value, n, newest_ts=newest, seen=seen, turn_first=seg_first,
-                      continuation=seg_cont, side_call_excluded=side, excluded=excluded)
+                      continuation=seg_cont, side_call_excluded=side, excluded=excluded, **extra)
 
 
 def _in_window(ts: Any, since: float, until: float) -> bool:

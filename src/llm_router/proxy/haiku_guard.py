@@ -255,8 +255,18 @@ def is_haiku_decided(row: dict) -> bool:
     return not (isinstance(req, str) and HAIKU_TIER in req.lower())
 
 
+def is_haiku_served(row: dict) -> bool:
+    """Haiku actually answered: decided Haiku AND ``served_model`` is a Haiku model. A call whose
+    Haiku rewrite was refused and retried unchanged keeps ``tier == "haiku"`` but is served on
+    the original model (the proxy sets ``served_model`` back), so it is decided, not served."""
+    served = row.get("served_model")
+    return is_haiku_decided(row) and isinstance(served, str) and HAIKU_TIER in served.lower()
+
+
 def tier_retry_trigger(rows: list[dict], *, since: float, until: float, kinds: frozenset[str],
                        kind_of=None) -> dict:
+    # The denominator is Haiku-DECIDED on purpose: a retried row is the numerator, and it was
+    # served on the original model, so counting only served rows would make the rate 0 forever.
     kind_of = kind_of or _kind_resolver(rows)
     n = k = 0
     for r in rows:
@@ -529,6 +539,18 @@ async def guard_loop(policy, *, interval_s: float | None = None, run=None) -> No
 # ── the daily watch (``llm-router kpi --haiku-watch``) ──────────────────────
 
 
+def haiku_served_in_window(rows: list[dict], *, since: float, until: float, kinds: frozenset[str]) -> int:
+    """Calls in the window, of the guarded session kinds, that Haiku actually answered."""
+    kind_of = _kind_resolver(rows)
+    n = 0
+    for r in rows:
+        ts = _num(r.get("ts"))
+        if (ts is not None and since <= ts <= until and is_haiku_served(r)
+                and kind_of(r.get("session_id"), r.get("session_kind")) in kinds):
+            n += 1
+    return n
+
+
 def watch(since: float, until: float, *, rows: list[dict] | None = None) -> dict:
     """The D-20 daily watch over ``[since, until]``: every trigger evaluated with its n.
     ``day_pass`` is False when any D-20 trigger is not evaluable (n below its minimum)."""
@@ -538,8 +560,9 @@ def watch(since: float, until: float, *, rows: list[dict] | None = None) -> dict
     ev = evaluate(rows, since=since, until=until, band_redone=_band_redone(since, until),
                   audit_day=_utc_day(until - 1e-3))
     haiku_decided = ev["triggers"]["tier_retry"]["n"]
+    haiku_served = haiku_served_in_window(rows, since=since, until=until, kinds=guard_kinds())
     not_eval = [t for t in D20_TRIGGERS if not ev["triggers"][t]["evaluable"]]
-    ev.update(haiku_decided_calls=haiku_decided, not_evaluable=not_eval, day_pass=not not_eval,
+    ev.update(haiku_decided_calls=haiku_decided, haiku_served_calls=haiku_served, not_evaluable=not_eval, day_pass=not not_eval,
               override=read_override(), override_path=str(override_path()))
     return ev
 
@@ -547,7 +570,8 @@ def watch(since: float, until: float, *, rows: list[dict] | None = None) -> dict
 def render_watch(ev: dict) -> str:
     t = ev["triggers"]
     lines = [f"Haiku watch {_stamp(ev['since'])} .. {_stamp(ev['until'])} (kinds: {', '.join(ev['kinds'])})",
-             f"  Haiku-decided calls: n={ev['haiku_decided_calls']}"]
+             f"  Haiku-decided calls: n={ev['haiku_decided_calls']}"
+             f" (served on Haiku: n={ev['haiku_served_calls']})"]
     for name in TRIGGERS:
         x = t[name]
         state = "TRIPPED" if x["tripped"] else ("not tripped" if x["evaluable"] else "NOT EVALUABLE")

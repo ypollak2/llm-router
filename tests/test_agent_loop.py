@@ -153,6 +153,7 @@ class TestRunCommand:
         result = execute_tool("run_command", {"command": "rm -rf /"}, tmp_path)
         assert "blocked" in result
 
+    @pytest.mark.timing
     @pytest.mark.timeout(45)
     def test_command_timeout(self, tmp_path):
         result = execute_tool("run_command", {"command": "sleep 60"}, tmp_path)

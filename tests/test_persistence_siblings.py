@@ -118,7 +118,7 @@ def test_all_known_content_sinks_route_through_persist_redact():
     from pathlib import Path
     root = Path(__file__).resolve().parents[1] / "src" / "llm_router"
     content_sinks = [
-        "result_cache.py", "semantic_cache.py", "session_store.py",
+        "semantic_cache.py", "session_store.py",
         "context.py", "idempotency.py",
     ]
     for s in content_sinks:

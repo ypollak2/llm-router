@@ -30,6 +30,7 @@ class TestTokenRefreshStrategy:
         # First call triggers refresh (time since last refresh is infinite)
         assert token == "new_token"
 
+    @pytest.mark.timing
     @pytest.mark.asyncio
     async def test_refresh_on_interval(self):
         """Token is refreshed after refresh_interval seconds."""

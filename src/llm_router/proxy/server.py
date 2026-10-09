@@ -713,10 +713,17 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                        tier_arm_turn=decision.arm_turn)
         for name, ms in (decision.phases_ms or {}).items():
             _add_phase(row, name, ms)
-        if cls_shadow.maybe_schedule(body, row) != llm_shadow.OFF:
-            # The decision is made and on the row; scheduling the shadow call is part of
-            # what a turn-first call pays, so G1_proxy must see it (<= 30 ms is the bar).
+        t_sched = time.monotonic()
+        status = cls_shadow.maybe_schedule(body, row)
+        if status != llm_shadow.OFF:
+            # Scheduling the shadow call is part of the wall time a turn-first call pays, so
+            # it stays inside tier_decision_s (unchanged semantics). The decision phases
+            # exclude it, so it is also recorded on its own (milliseconds only, no request
+            # content) for the kpi "shadow schedule" figure, and only when a shadow call
+            # was actually scheduled (P09-13).
             row["tier_decision_s"] = round(time.monotonic() - t0, 3)
+            if status == llm_shadow.SCHEDULED:
+                row["tier_shadow_schedule_ms"] = round((time.monotonic() - t_sched) * 1000.0, 3)
         if decision.proposed_tier == "haiku" and decision.haiku_block is not None:
             # The decision already computed it (and timed it as haiku_checks):
             # reuse it rather than serializing the whole body a second time (P0.9-e).

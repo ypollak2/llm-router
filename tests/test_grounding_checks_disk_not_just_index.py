@@ -114,6 +114,7 @@ def test_one_subprocess_for_many_symbols(new_symbol, monkeypatch):
     )
 
 
+@pytest.mark.timing
 def test_the_check_is_fast_enough_for_the_draft_budget(new_symbol):
     t0 = time.monotonic()
     g.symbol_violations(f"Call {new_symbol}() here.", CTX, "x")

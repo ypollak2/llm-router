@@ -159,7 +159,14 @@ jobs:
           #
           # A stale xml from an earlier step must not be mistaken for this run's.
           rm -f /tmp/pytest-results.xml
+          #
+          # -m "not timing and ...": tests whose pass/fail is wall-clock speed
+          # (tagged `timing`, TIMING-1) run in the serial `timing` job below, not
+          # here, where parallel load makes them flake. `-m` on the command line
+          # REPLACES the `-m` in pyproject addopts, so the addopts exclusions
+          # are repeated verbatim; tests/test_timing_lane.py fails if they drift.
           uv run pytest tests/ -q -n auto --dist loadgroup \
+            -m "not timing and not slow and not requires_ollama and not requires_api_keys and not requires_codex" \
             --ignore=tests/test_agno_integration.py \
             --timeout=30 \
             --durations=10 \
@@ -203,6 +210,94 @@ jobs:
           import sys, xml.etree.ElementTree as ET
           try:
               root = ET.parse("/tmp/pytest-results.xml").getroot()
+              suite = root if root.tag == "testsuite" else root.find("testsuite")
+              failures = int(suite.get("failures", 0))
+              errors   = int(suite.get("errors",   0))
+              tests    = int(suite.get("tests",     0))
+              print(f"junit: {tests} tests, {failures} failures, {errors} errors")
+              sys.exit(1 if (failures or errors or tests == 0) else 0)
+          except Exception as e:
+              print(f"Could not read junit xml: {e}")
+              sys.exit(1)
+          PY
+          result=$?
+          kill $PYTEST_PID 2>/dev/null || true
+          exit $result
+
+  timing:
+    # TIMING-1: the tests tagged `timing` assert on wall-clock speed (elapsed,
+    # p95, event-loop lag, short real timeouts, sleep ordering). Under
+    # `-n auto` on a shared runner they flake with the thresholds unchanged, so
+    # they run here, alone, with no xdist (`-p no:xdist`): the machine is idle
+    # apart from the one test. Thresholds are NOT relaxed; this lane is the fix.
+    # LLM_ROUTER_RUN_PERF=1: tests/qa/test_performance.py is tagged `timing` and
+    # `performance`; conftest skips `performance` unless this is set, and a
+    # serial quiet job is the "dedicated, quiet perf run" that skip names.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    name: timing (${{ matrix.python-version }})
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+        continue-on-error: true
+        id: uv-setup
+      - name: Retry uv setup
+        if: steps.uv-setup.outcome == 'failure'
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: false
+
+      - name: Set up Python
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Run timing tests (serial)
+        shell: bash
+        env:
+          OPENAI_API_KEY: sk-test-dummy-key-for-ci-only-no-real-calls-made
+          LLM_ROUTER_RUN_PERF: "1"
+        run: |
+          # Same aiosqlite exit-hang watchdog as the `test` job: pytest writes
+          # the junit xml when the run finishes, and a hang on exit is judged
+          # by that xml. Serial run: the budget is the sum of these tests.
+          rm -f /tmp/pytest-timing.xml
+          uv run pytest tests/ -q -p no:xdist \
+            -m "timing and not slow and not requires_ollama and not requires_api_keys and not requires_codex" \
+            --ignore=tests/test_agno_integration.py \
+            --timeout=30 \
+            --durations=10 \
+            --junit-xml=/tmp/pytest-timing.xml &
+          PYTEST_PID=$!
+
+          for i in $(seq 1 1500); do
+            if ! kill -0 $PYTEST_PID 2>/dev/null; then
+              wait $PYTEST_PID
+              exit $?
+            fi
+            sleep 1
+          done
+
+          if [ ! -s /tmp/pytest-timing.xml ]; then
+            echo "::error::timing lane exceeded the 1500s budget: pytest is still running tests (no junit xml yet), not the aiosqlite exit hang."
+            kill $PYTEST_PID 2>/dev/null || true
+            exit 1
+          fi
+          echo "pytest is hanging on exit — reading junit results..."
+          python3 - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          try:
+              root = ET.parse("/tmp/pytest-timing.xml").getroot()
               suite = root if root.tag == "testsuite" else root.find("testsuite")
               failures = int(suite.get("failures", 0))
               errors   = int(suite.get("errors",   0))

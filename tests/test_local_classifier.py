@@ -291,6 +291,7 @@ async def test_request_contract(monkeypatch):
     assert body["messages"][0]["content"] == lc.RUBRIC
 
 
+@pytest.mark.timing
 async def test_model_and_keep_alive_come_from_the_environment(monkeypatch):
     async with FakeOllama(monkeypatch, loaded=False) as o:
         monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_MODEL", "llmr-classifier-38")
@@ -301,6 +302,7 @@ async def test_model_and_keep_alive_come_from_the_environment(monkeypatch):
     assert o.warm[0]["model"] == "llmr-classifier-38" and o.warm[0]["keep_alive"] == "10m"
 
 
+@pytest.mark.timing
 async def test_timeout_then_cooldown_then_recovery(monkeypatch, clock):
     async with FakeOllama(monkeypatch, delay=1.0) as o:
         slow = await _ask("a", timeout_s=0.2)
@@ -312,6 +314,7 @@ async def test_timeout_then_cooldown_then_recovery(monkeypatch, clock):
         assert (await _ask("c")).source == "llm" and len(o.chat) == 2
 
 
+@pytest.mark.timing
 async def test_the_budget_covers_ps_and_chat_together(monkeypatch):
     """/api/ps (0.9 s) then /api/chat (0.9 s) each fit a 1.0 s budget alone; together they
     must not: the overall budget, not a per-request one, bounds the call."""
@@ -353,6 +356,7 @@ async def test_empty_message_content_is_a_parse_error(monkeypatch):
     assert v.source == "parse_error"
 
 
+@pytest.mark.timing
 async def test_cold_model_is_reported_and_warmed_once_per_30_seconds(monkeypatch, clock):
     async with FakeOllama(monkeypatch, loaded=False) as o:
         first = await _ask("a")
@@ -372,6 +376,7 @@ async def test_cold_model_is_reported_and_warmed_once_per_30_seconds(monkeypatch
         assert len(o.warm) == 2
 
 
+@pytest.mark.timing
 async def test_resident_at_the_wrong_context_is_cold_not_a_reload_inside_the_budget(monkeypatch):
     """/api/ps shows the alias at 32768: the real call asks for 4096 and would reload (~5 s)
     under a 2 s budget. Report cold and warm it at 4096 instead."""
@@ -414,6 +419,7 @@ async def test_residency_is_checked_once_then_remembered(monkeypatch, clock):
 # --- M1.3: async only, never block the loop ------------------------------------------------
 
 
+@pytest.mark.timing
 async def test_ten_concurrent_classifications_overlap(monkeypatch):
     async with FakeOllama(monkeypatch, delay=1.0) as o:
         t0 = time.perf_counter()
@@ -423,6 +429,7 @@ async def test_ten_concurrent_classifications_overlap(monkeypatch):
     assert elapsed < 1.3, f"10 concurrent calls took {elapsed:.2f}s: something serialized or blocked"
 
 
+@pytest.mark.timing
 async def test_a_pending_classification_does_not_delay_other_work(monkeypatch):
     """Plan test 2. A ticker that wakes every 10 ms is started BEFORE a 1 s classification and
     measures how long the loop was held while it runs: a blocking call anywhere in ``_classify``
@@ -566,6 +573,7 @@ async def test_cache_ttl_and_lru(monkeypatch, clock):
         assert len(o.chat) == 5
 
 
+@pytest.mark.timing
 async def test_a_failed_classification_is_shared_by_concurrent_callers(monkeypatch):
     async with FakeOllama(monkeypatch, delay=1.0) as o:
         out = await asyncio.gather(*[_ask(timeout_s=0.2) for _ in range(4)])
@@ -588,6 +596,7 @@ def test_classify_local_returns_a_verdict_and_never_raises(monkeypatch):
     assert lc.classify_local("   ").source == "parse_error"
 
 
+@pytest.mark.timing
 def test_classify_local_is_bounded_by_its_budget(monkeypatch):
     monkeypatch.setattr(lc, "_post", lambda model, assembled, timeout: time.sleep(2) or _reply())
     t0 = time.perf_counter()

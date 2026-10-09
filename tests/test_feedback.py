@@ -36,6 +36,7 @@ class TestTokenFeedback:
         assert feedback.tokens_received == 10
         assert feedback.rate_tokens_per_sec > 0
 
+    @pytest.mark.timing
     def test_eta_calculation(self):
         """TokenFeedback.estimated_remaining_ms calculates ETA."""
         feedback = TokenFeedback(
