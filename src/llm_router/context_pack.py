@@ -449,8 +449,9 @@ def messages_for(door: str, *, messages: list | None = None,
 # ---------------------------------------------------------------------------
 
 def _project(request: str, root: str | None, session_id: str | None) -> str:
-    """OKF + semantic pack + repo state, via the one context choke point."""
-    if not root or not request:
+    """OKF + semantic pack + repo state, via the one context choke point.
+    Empty for no root and for a root at $HOME (``_is_home``)."""
+    if not root or not request or _is_home(root):
         return ""
     try:
         from llm_router.context_injection import inject
@@ -508,11 +509,22 @@ def _is_private(real: Path) -> bool:
         return False
 
 
+def _is_home(root: str | None) -> bool:
+    """True when ``root`` resolves to $HOME, which is never a project (D-43):
+    the home root holds copies of the user's private global rules."""
+    if not root:
+        return False
+    try:
+        return Path(root).resolve() == Path.home().resolve()
+    except OSError:
+        return True  # cannot tell: treat as home, withhold rather than leak
+
+
 def _instruction_paths(root: str | None) -> list[tuple[str, Path]]:
     # Project files only. Nothing under the user's private ~/.claude is read,
     # whatever path reaches it (project_root == $HOME, or a symlinked project
     # file): a pack can reach an external model, and no privacy gate covers it.
-    if not root:
+    if not root or _is_home(root):
         return []
     found = [(rel, Path(root) / rel) for rel in _INSTRUCTION_FILES]
     seen: set[Path] = set()

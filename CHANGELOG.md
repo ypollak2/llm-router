@@ -44,7 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   P1.2. Errors in any section yield an empty section. Formats: Claude Code transcript JSONL, Codex rollout
   JSONL, Anthropic Messages, OpenAI chat, Responses-API items. Instructions come from the project's
   CLAUDE.md, .claude/CLAUDE.md and AGENTS.md only; nothing under `~/.claude` is ever read, including via
-  `project_root == $HOME` or a symlink (owner decision D-43). `target_provider=` applies the session
+  `project_root == $HOME` or a symlink (owner decision D-43), and a `project_root` that resolves to
+  `$HOME` is no project at all: no instruction files and no project section are read from the home root. `target_provider=` applies the session
   privacy rule to `recent` (new `session_store.allows_session_content`, now shared with
   `build_session_context`; behaviour unchanged there); `context=` carries an MCP caller-context string
   that never qualifies for `mode="full"`; an unknown `door` raises `ValueError`. No door calls it yet

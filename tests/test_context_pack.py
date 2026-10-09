@@ -357,6 +357,19 @@ def test_project_root_at_home_does_not_reach_the_private_file(fake_home):
     assert pack.instructions == ""
 
 
+def test_project_root_at_home_is_no_project(fake_home, monkeypatch):
+    (fake_home / "AGENTS.md").write_text("# Copy\n- synthetic copied private rule\n")
+    (fake_home / "CLAUDE.md").write_text("# Home\n- synthetic home rule\n")
+    subprocess.run(["git", "init", "-q", str(fake_home)], check=True)
+    called = []
+    import llm_router.context_injection as ci
+    monkeypatch.setattr(ci, "inject", lambda *a, **k: called.append(1) or "x\n\nq")
+    for root in (str(fake_home), str(fake_home / "." / ".claude" / "..")):
+        pack = cp.build_pack("q", [], project_root=root, target_window=10, door="proxy")
+        assert pack.instructions == "" and pack.project == ""
+    assert called == []  # the project section is not even gathered
+
+
 def test_a_project_file_symlinked_to_the_private_file_is_not_read(tmp_path, fake_home):
     proj = tmp_path / "proj"
     proj.mkdir()
