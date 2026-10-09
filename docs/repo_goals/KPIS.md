@@ -101,6 +101,9 @@ Since TURNFIRST-1 (`docs/bugs/TURNFIRST-1.md`) the proxy splits two kinds out of
 `harness_turn` (a main-thread turn whose newest user message is only a notification or command echo)
 is still a turn, as it was; a `subagent_turn` (a later sub-agent call) follows the `subagent_first`
 rule and is counted in `o3.excluded.step_subagent_turn` when no transcript join puts it on the main thread.
+The label is read from the tool list, so a main session without the `Agent`/`Task` launcher (tool
+disabled, a restricted `-p` run) records its later turns as `subagent_turn` too: they drop out of the
+turn count unless the transcript join marks them `turn` or `meta`.
 The proxy row's `msg_id` is joined to the transcript's assistant `message.id` (`o3_transcripts`). The
 join changes exactly one thing; the rest of its roles are only counted:
 
