@@ -41,7 +41,11 @@ status: fixed in `fix/turn-first-population` (deploy: restart the proxy; rows wr
   still begins a turn, as it did; `subagent_turn` follows the `subagent_first` rule). A main session
   without the `Agent`/`Task` launcher (tool disabled, a restricted `-p` run) now records its later turns
   as `subagent_turn`, and they leave the O3 turn count unless the transcript join puts them on the main
-  thread. Residual: a reminder
+  thread. Labelling is fail-open (NFR-FAIL): if `step_kind` raises, the row says `step_class ==
+  unknown`, `step_error: true` (fail-open code `LR-FO-PROXY-STEP-KIND`) and the call is forwarded without
+  the classifier, the D-31 arm or the classifier shadow (`ClaudeTierPolicy.decide_unclassified`: pin kept,
+  sticky tier held when the body is accepted on it, else forwarded as sent, `tier_detail: step_error`);
+  `kpi` G1 counts such rows as `step_error`, O3 counts them with the null-step rows, never as turns. Residual: a reminder
   whose content holds a close tag alone on its own line still ends there.
 - **Test.** `tests/proxy/test_turn_population.py`: sub-agent first call vs mid-run SendMessage vs mid-run
   task notification vs main-thread typed / notification / command turns get the right kind, origin and
@@ -49,7 +53,9 @@ status: fixed in `fix/turn-first-population` (deploy: restart the proxy; rows wr
   and 300 random ones), nor does a close tag at a line start followed by text; a closed reminder that
   starts mid-line is stripped while other tags named inside a typed sentence are kept; the open-tag
   pattern cannot cross a newline or run past 200 attribute characters, and 1,000 adversarial lines on
-  3 MB finish under 200 ms (`timing`); an error in `turn_fields` leaves the row's other fields set; the tier classifier sees the prompt
+  3 MB finish under 200 ms (`timing`); an error in `turn_fields` leaves the row's other fields set; a
+  `step_kind` that raises still returns 200 with an `unknown` / `step_error` row, no classifier call and no
+  arm (pinned and unpinned), and an unlabelled call keeps a non-Haiku sticky tier; the tier classifier sees the prompt
   before a notification; every ledger row carries the four fields and no text. Consumer tests updated:
   `tests/test_proxy_step_kind.py`, `tests/test_kpi_command.py` (G1 excluded counts),
   `tests/test_proxy_haiku_arm.py` (notification turn -> `harness_turn`).

@@ -14,7 +14,11 @@ Row fields:
                   (null = any other kind); rows written before TURNFIRST-1 hold
                   turn_first for every later sub-agent call and notification
                   turn too (docs/bugs/TURNFIRST-1.md). Whether a call may be
-                  served is decided apart (``steps.step_class``).
+                  served is decided apart (``steps.step_class``). ``unknown``
+                  when labelling raised (``step_error`` true; prev_tools,
+                  prev_tool_class and step_ineligible are then empty); such a
+                  call is forwarded without classification.
+  step_error      true when the step labels could not be computed (fail-open)
   is_main_thread, is_first_call, turn_origin, tier_text_len
                   TURNFIRST-1 (``steps.turn_fields``), text-free: the call
                   carries the Agent/Task launcher; it is the conversation's
