@@ -700,6 +700,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                    tier_detail=decision.detail,
                    tier_quota_pressure=decision.quota_pressure, tier_quota_state=decision.quota_state,
                    tier_decision_s=round(time.monotonic() - t0, 3))
+        if decision.arm is not None:
+            # D-31 experiment arm: ids and enums only, never request text.
+            row.update(tier_arm=decision.arm, tier_arm_assignment=decision.arm_assignment,
+                       tier_arm_reason=decision.arm_reason, tier_arm_bucket=decision.arm_bucket)
         for name, ms in (decision.phases_ms or {}).items():
             _add_phase(row, name, ms)
         if cls_shadow.maybe_schedule(body, row) != llm_shadow.OFF:

@@ -90,6 +90,15 @@ haiku_fold_system: false
 # `claude --model`, which the proxy cannot tell apart from the default).
 pinned_models: []
 
+# D-31 experiment arm (default OFF: absent or 0). A fraction 0-1 of *simple Q&A* turns
+# (classifier says query/simple; main-thread human turn, past the first call, no opus:/
+# /model pin, no correction signal, a body Haiku accepts) is served on Haiku EVEN IF the
+# requested model is in pinned_models. Assignment is a hash of session_id + turn, not a
+# draw. Each in-share turn is logged with tier_arm / tier_arm_assignment / tier_arm_reason
+# (see proxy/haiku_arm.py). Needs haiku_rewrite: true (the Haiku guard's override turns
+# the arm off too). Read at proxy start: set 0 or delete the key and restart to kill it.
+# haiku_arm_share: 0.10
+
 # Quota-aware tiers: the higher of the Claude subscription's session and weekly
 # usage, read from the cached ~/.llm-router/usage.json (never a network call on
 # the proxy path), steps calls down as the quota fills, because Max quota

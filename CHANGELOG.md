@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- proxy (D-31 = A, experiment arm): `haiku_arm_share` in `claude_tiers.yaml` (default absent = off) serves that
+  fraction of *simple Q&A* turns (classifier `query`/`simple`, main-thread human turn past the first call, no
+  `opus:`/`/model` pin, no correction signal, a body Haiku accepts) on Haiku even when the requested model is in
+  `pinned_models`; every other pinned turn stays pinned. Assignment is `sha256(session_id|turn|salt)`, not a draw.
+  Ledger rows of in-share turns carry `tier_arm`, `tier_arm_assignment` (`treatment`/`ineligible`),
+  `tier_arm_reason`, `tier_arm_bucket`; treated rows have `tier_reason: haiku_rewrite`, so GE4 shadow pairs and the
+  Haiku watch count them. Needs `haiku_rewrite: true` (the Haiku guard override turns the arm off). Read at proxy
+  start: set 0 or delete the key and restart to kill it. No hook changed. See `docs/proxy.md`.
 - hooks (PLAN v16 P0.9-g, AMEND R8 A.3): `scripts/hook_wall.py` (`llm_router.hook_wall`) times the five
   sync hooks with no latency MUST (`enforce-route`, `bash-compress`, `playwright-compress`,
   `cc-usage-track`, `subagent-start`) from outside, process start to exit, cold and warm, with

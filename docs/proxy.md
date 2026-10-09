@@ -473,6 +473,27 @@ are in the module docstring. The daily watch prints every trigger with its n:
 The command exits 1 when a D-20 trigger (`audit_daily`, `tier_retry` or
 `shadow`) is below its minimum n. That means the day cannot be judged.
 
+### Haiku experiment arm (`proxy/haiku_arm.py`, D-31): Haiku volume despite `pinned_models`
+
+`pinned_models: [claude-opus-5-5]` leaves GE4-a and the daily Haiku watch with no Haiku rows. The arm is a
+narrow, logged exception, off unless `haiku_arm_share` is set (a fraction 0-1; absent or 0 = off).
+
+- **Which turns:** the hash `sha256(session_id|turn|salt)` must fall under the share (turn = number of non-system
+  messages, so a retried request lands in the same place), and then the existing rules must call it simple Q&A: a
+  main-thread human turn (`step_kind == turn_first`; side calls, tool-result continuations and sub-agent first
+  calls stay pinned), past the first call, no `opus:` / `/model` pin, no correction signal, a body Haiku accepts
+  (no media, no mid-conversation system message, under the context limit), and the classifier says `query` /
+  `simple`. No session id = never armed.
+- **Ledger:** only in-share turns get `tier_arm`, `tier_arm_assignment` (`treatment` / `ineligible`),
+  `tier_arm_reason`, `tier_arm_bucket`. A treated row has `tier_reason: haiku_rewrite` and `tier_body_rewrite: haiku`,
+  so GE4 shadow pairs and `kpi --haiku-watch` count it with no change. No prompt text. Audit a row by recomputing
+  `haiku_arm.bucket(session_id, turn)`.
+- **Kill switch:** the policy is read at proxy start. Set `haiku_arm_share: 0` (or delete the key) and restart the
+  proxy. `haiku_rewrite: false` (or the Haiku guard's override file) also turns the arm off, with no restart for
+  the guard's own live update.
+- **Cost note:** the turn after a treated one returns to the pinned model, so that call re-reads the Opus cache
+  prefix; a treated turn pays a cold Haiku prefix. Quota-pressure caps are unaffected (they only move calls down).
+
 ### Key finding (1.2): per-turn switching does not pay; conversation-level might
 
 Per-turn tier switching loses money under prompt caching: a switch mid-task
