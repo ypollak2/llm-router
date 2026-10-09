@@ -399,6 +399,24 @@ async def test_a_refused_warmup_is_recorded_once(monkeypatch, clock):
         await asyncio.sleep(0.05)
     assert len(o.sys) == 2  # warmed twice (30 s apart), logged once
     assert len(seen) == 1 and seen[0][0] == "CHZ-FO-LOCAL-CLASSIFIER-WARMUP" and "400" in seen[0][1]
+    assert "nope" in seen[0][1]  # the start of Ollama's error body
+
+
+async def test_distinct_warmup_failures_are_each_recorded_and_success_resets(monkeypatch):
+    from llm_router import failopen
+
+    seen: list[str] = []
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, *, detail="": seen.append(detail))
+    lc._reset_state()
+    lc._warm_failed("ClientConnectorError", OSError())
+    lc._warm_failed("ClientConnectorError", OSError())  # repeat: not recorded
+    lc._warm_failed("HTTP 400 refused")                 # a different failure: recorded
+    assert len(seen) == 2
+    async with FakeOllama(monkeypatch, loaded=False) as o:  # a 200 warm-up forgets what was seen
+        await lc._warm("nimble:9b")
+        assert len(o.sys) == 1
+    lc._warm_failed("HTTP 400 refused")                 # same failure after a success: recorded again
+    assert len(seen) == 3
 
 
 @pytest.mark.parametrize("raw,want", [("-1", -1), ("0", 0), ("300", 300), ("30m", "30m"), ("-1m", "-1m"), ("", "30m")])
