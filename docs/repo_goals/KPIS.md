@@ -353,6 +353,9 @@ informative` below n=100 or with fewer than 2 sessions (P0.9-e MUST). Rows with 
 (pre-GE1 rows of any kind), `subagent_first` rows and turn-first rows without the decision phases are
 left out and counted on the line (`excluded` in the JSON); `tier_decision_s` (wall time, shadow
 scheduling included) is never substituted for a missing phase sum (`docs/bugs/P09-11.md`).
+The phase sum does not include scheduling the classifier shadow (`proxy/server.py` adds that to
+`tier_decision_s` only), so since P09-11 no G1_proxy segment measures the "shadow <= 30 ms" target
+below; it is still on every turn-first row's `tier_decision_s`, which `kpi` does not print.
 *Continuation* (a tool-result follow-up): `tier_decision_s`. Claude Code side calls
 (`tier_reason == side_call` or `step_class == side_call`) run no classifier and are left out; their
 count is in the JSON (`side_call_excluded`). A segment below n=50 prints no percentiles and they are
