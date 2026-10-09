@@ -258,11 +258,7 @@ def test_statusline_timing_all_writes_a_statusline_row(tmp_path):
     home = tmp_path / "h"
     (home / ".llm-router").mkdir(parents=True)
     _run_statusline(home, _shim_python(tmp_path), LLM_ROUTER_STATUSLINE_TIMING="all")
-    store = home / ".llm-router" / "hook_latency.jsonl"
-    deadline = time.monotonic() + 15
-    while not store.exists() and time.monotonic() < deadline:  # the write is backgrounded
-        time.sleep(0.05)
-    (row,) = [json.loads(x) for x in store.read_text().splitlines()]
+    row = _wait_row(home / ".llm-router" / "hook_latency.jsonl")
     assert row["hook"] == "statusline" and row["elapsed_ms"] > 0
 
 
@@ -304,10 +300,22 @@ def test_record_raw_rejects_six_args():
 
 
 def _wait_row(store: Path) -> dict:
+    """The single row the backgrounded `record-raw` appends.
+
+    Wait for a complete line, not for the file: capped_log.append does
+    os.open(O_CREAT) then os.write, so the file exists, empty, for the gap
+    between the two (CI py3.11 run 37901401651 read it there: "expected 1, got
+    0"). The deadline is 15 s against a write that takes well under 1 s idle
+    (one python start-up); it is only reached when the writer is truly lost."""
     deadline = time.monotonic() + 15
-    while not store.exists() and time.monotonic() < deadline:  # the write is backgrounded
+    rows: list[dict] = []
+    while time.monotonic() < deadline:
+        text = store.read_text() if store.exists() else ""
+        if text.endswith("\n"):
+            rows = [json.loads(x) for x in text.splitlines()]
+            break
         time.sleep(0.05)
-    (row,) = [json.loads(x) for x in store.read_text().splitlines()]
+    (row,) = rows
     return row
 
 
