@@ -193,6 +193,7 @@ async def test_a_continuation_and_a_side_call_never_schedule(tmp_path, monkeypat
     assert sched.maybe_schedule(_turn("hi"), {"step_class": None, "text_sha": None}) == ls.SKIPPED_NO_KEY
 
 
+@pytest.mark.timing
 async def test_a_continuation_is_not_delayed_by_a_pending_classification(tmp_path, monkeypatch, simple):
     monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "shadow")
     gate = asyncio.Event()
@@ -288,6 +289,7 @@ async def test_a_full_queue_counts_drops_and_raises_nothing(tmp_path, monkeypatc
 # --- 5: the decision stays under 30 ms (p95) however slow the classifier ---------------------
 
 
+@pytest.mark.timing
 async def test_decision_p95_stays_under_30ms_with_a_2s_classifier(tmp_path, monkeypatch, simple):
     monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "shadow")
     gate = asyncio.Event()                  # a classifier that never answers while the 200 calls are posted:
@@ -306,6 +308,7 @@ async def test_decision_p95_stays_under_30ms_with_a_2s_classifier(tmp_path, monk
     await sched.aclose()
 
 
+@pytest.mark.timing
 async def test_a_long_history_is_assembled_off_the_request_path(tmp_path, monkeypatch, simple):
     """``assemble`` must not be paid by the call. Since P1.7-c it reads only the tail of a long history (< 1 ms on
     the 900-message fixture), so it is made slow here on purpose (50 ms per call, a sleep): run on the request path,

@@ -334,6 +334,7 @@ def _proxy(tmp_path, haiku_rewrite: bool, run):
     return ps.build_app(cfg, client=client, haiku_guard_run=run)
 
 
+@pytest.mark.timing
 async def test_proxy_start_runs_the_guard_and_a_trip_turns_the_live_policy_off(tmp_path):
     seen = []
 
@@ -358,6 +359,7 @@ async def test_proxy_with_the_rewrite_off_starts_no_guard(tmp_path):
     assert seen == []
 
 
+@pytest.mark.timing
 async def test_guard_loop_repeats_on_its_interval_and_survives_a_bad_run():
     calls = []
 

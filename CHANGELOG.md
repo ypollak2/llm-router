@@ -106,6 +106,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   See `docs/bugs/SYSONE-WARM-1.md`.
 
 ### Changed
+- ci/test infra (TIMING-1, D-34 = A): a `timing` pytest marker for tests whose verdict is wall-clock speed (elapsed, p95,
+  event-loop lag, short real timeouts, sleep ordering). 129 test functions in 54 files carry it; the parallel `test` job runs
+  `-m "not timing and ..."` and a new serial `timing (3.11)` / `timing (3.13)` job runs them with `-p no:xdist`. Thresholds and
+  assertions are unchanged. `LLM_ROUTER_RUN_PERF=1` now works (`conftest.py` read it after scrubbing it), so the 13 `tests/qa`
+  performance budgets run in that job. `tests/test_timing_lane.py` guards the marker, the CI expressions, the tagged-count floor
+  and new untagged clock assertions. See `docs/bugs/TIMING-1.md`.
 - kpi (PLAN v16 P0.9-e, `docs/bugs/P09-11.md`): G1_proxy's turn-first segment counts only
   `step_class == turn_first` rows and measures the P0.9-e decision (sum of `tier_phases_ms` over
   `proxy.tiers.DECISION_PHASES`), not `tier_decision_s`. Null-step rows (pre-GE1 / side calls),

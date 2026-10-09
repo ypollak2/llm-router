@@ -244,6 +244,7 @@ def test_pydantic_ai_detect_agent_id_reads_name():
 # Pillar 4: import performance (no framework dependency load)
 # ────────────────────────────────────────────────────────────────────────
 
+@pytest.mark.timing
 @pytest.mark.parametrize(
     "module_name,class_name,expected_name,available_flag",
     FRAMEWORKS,
@@ -286,6 +287,7 @@ def test_module_import_is_cheap(
 # Pillar 5: stub construction is O(1)
 # ────────────────────────────────────────────────────────────────────────
 
+@pytest.mark.timing
 @pytest.mark.parametrize(
     "module_name,class_name,expected_name,available_flag",
     FRAMEWORKS,

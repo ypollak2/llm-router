@@ -3,6 +3,7 @@
 Verifies the fix: Ollama health check no longer blocks server startup.
 """
 
+import pytest
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -22,6 +23,7 @@ EXPECTATIONS = _load_expectations()
 MAX_MS = EXPECTATIONS["performance"]["initialize_dynamic_routing_max_ms"]
 
 
+@pytest.mark.timing
 def test_startup_with_unreachable_ollama_is_fast() -> None:
     """initialize_dynamic_routing must complete < {MAX_MS}ms with Ollama unreachable."""
     from llm_router.dynamic_routing import initialize_dynamic_routing, reset_dynamic_routing
@@ -38,6 +40,7 @@ def test_startup_with_unreachable_ollama_is_fast() -> None:
     )
 
 
+@pytest.mark.timing
 def test_startup_completes_with_normal_ollama() -> None:
     """initialize_dynamic_routing must complete < {MAX_MS}ms in normal conditions."""
     from llm_router.dynamic_routing import initialize_dynamic_routing, reset_dynamic_routing

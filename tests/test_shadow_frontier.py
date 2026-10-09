@@ -273,6 +273,7 @@ async def test_sample_rate_is_100_percent_for_14_days_then_2_percent(on):
     assert (sf.FULL_RATE, sf.STEADY_RATE) == (1.0, 0.02)
 
 
+@pytest.mark.timing
 async def test_at_most_one_replay_in_flight(on):
     _usage()
     gate = asyncio.Event()
@@ -519,6 +520,7 @@ async def test_proxy_flag_off_makes_no_replay(home, tmp_path, simple):
     assert not sf.shadow_dir().exists()
 
 
+@pytest.mark.timing
 async def test_proxy_replays_haiku_rewrite_rows_in_the_background_without_delaying_the_response(on, tmp_path, simple):
     _usage(updated=time.time())
     up = SlowFrontierUpstream()

@@ -315,6 +315,7 @@ def _pgrep(pattern: str) -> list[str]:
     return subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True).stdout.split()
 
 
+@pytest.mark.timing
 @pytest.mark.timeout(90)
 def test_e2e_sigint_kills_the_running_shell_command(tmp_path):
     h = _harness()

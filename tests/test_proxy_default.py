@@ -81,6 +81,7 @@ def test_install_service_writes_under_the_given_home_only(tmp_path):
 
 # ── health ───────────────────────────────────────────────────────────────
 
+@pytest.mark.timing
 def test_proxy_health_true_when_listening():
     srv = _listening_socket()
     try:

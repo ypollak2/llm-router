@@ -238,6 +238,7 @@ def test_plugin_recheck_failure_is_non_fatal(
 # ── 5. Async safety: the re-probe is fast enough ─────────────────────────────
 
 
+@pytest.mark.timing
 def test_reprobe_returns_quickly(monkeypatch: pytest.MonkeyPatch) -> None:
     """The re-probe is bounded by find_codex_binary's speed. On local
     disk this is well under 10ms; the test asserts a generous 100ms

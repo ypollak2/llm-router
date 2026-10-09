@@ -62,6 +62,7 @@ async def test_same_root_via_symlink_is_the_same_root(tmp_path):
     assert p.peak == 1
 
 
+@pytest.mark.timing
 async def test_different_roots_stay_parallel(tmp_path):
     (tmp_path / "a").mkdir(), (tmp_path / "b").mkdir()
     p = _Probe()
@@ -100,6 +101,7 @@ async def test_llm_act_same_root_does_not_overlap(tmp_path, monkeypatch, temp_db
 
 
 # 2 ── bounded pool, visible 'queued' ───────────────────────────────────────
+@pytest.mark.timing
 async def test_pool_is_bounded_and_queued_jobs_say_queued(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_AGENT_WORKERS", "2")
     roots = []
@@ -154,6 +156,7 @@ async def test_agent_loops_do_not_use_the_default_executor(tmp_path):
 
 
 # 3 ── cancellation ─────────────────────────────────────────────────────────
+@pytest.mark.timing
 async def test_cancelled_wait_true_call_continues_as_a_pollable_job(tmp_path, caplog):
     started, release = threading.Event(), threading.Event()
 
@@ -206,6 +209,7 @@ async def test_cancel_while_queued_drops_the_run(tmp_path):
 
 
 # 4 ── GC guard ─────────────────────────────────────────────────────────────
+@pytest.mark.timing
 async def test_job_task_is_strongly_referenced_until_it_finishes():
     gate = asyncio.Event()
 

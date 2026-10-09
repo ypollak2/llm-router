@@ -162,6 +162,7 @@ class TestRoutingDecision:
         assert decision.task == "code/simple"
         assert decision.cost == 0.001
 
+    @pytest.mark.timing
     def test_format_hud_performance(self, decision):
         """Test HUD formatting completes in <10ms."""
         start = time.time()
@@ -433,6 +434,7 @@ class TestIntegration:
 class TestPerformance:
     """Test performance constraints for statusline rendering."""
 
+    @pytest.mark.timing
     def test_hud_rendering_speed(self):
         """Test HUD rendering completes in <100ms."""
         enable_colors()
@@ -452,6 +454,7 @@ class TestPerformance:
         # Average should be <1ms per call, total <100ms for 100
         assert elapsed < 100
 
+    @pytest.mark.timing
     def test_box_rendering_speed(self):
         """Test box drawing completes quickly."""
         start = time.time()

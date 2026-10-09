@@ -228,6 +228,7 @@ def _run(env: dict) -> tuple[str, float]:
     return r.stdout, time.perf_counter() - t0
 
 
+@pytest.mark.timing
 def test_hung_refresh_never_delays_a_tick_and_is_started_once(tmp_path):
     """A refresher that hangs for 20 s (a stuck KPI source) is started once and
     never waited on: every tick still returns at once."""
@@ -251,6 +252,7 @@ def test_hung_refresh_never_delays_a_tick_and_is_started_once(tmp_path):
     assert max(times) < 2.0, times  # 20 s if any tick waited on the hung refresher
 
 
+@pytest.mark.timing
 def test_wall_time_guard(tmp_path):
     """Loose CI guard (the bar itself, p95 <= 100 ms at n=200, is measured by
     scripts/bench_statusline.py): a tick doing real work takes seconds."""
@@ -406,6 +408,7 @@ def test_other_values_stay_single_line(tmp_path, value, fast_only):
     assert out.startswith("llm-router · ") is fast_only
 
 
+@pytest.mark.timing
 def test_both_fast_part_never_blocks_on_a_hung_refresher(tmp_path):
     hang = f"{sys.executable} -c 'import time; time.sleep(30)'"
     try:

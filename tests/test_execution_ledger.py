@@ -222,6 +222,7 @@ _costs = st.lists(
 # intentionally does real repeated sqlite I/O in a tight loop, unlike the rest of
 # the suite) so a slow-but-still-well-under-a-minute CI runner gets real headroom
 # instead of being interrupted mid-commit.
+@pytest.mark.timing
 @pytest.mark.timeout(90)
 @settings(max_examples=30, deadline=None)
 @given(attempts=_costs)

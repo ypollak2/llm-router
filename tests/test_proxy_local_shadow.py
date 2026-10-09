@@ -213,6 +213,7 @@ async def test_claude_error_is_recorded_not_compared(env):
 
 # ── latency isolation ────────────────────────────────────────────────────────
 
+@pytest.mark.timing
 async def test_a_hung_local_job_never_delays_claude_and_is_dropped(env):
     gate = asyncio.Event()                       # never set: local would hang forever
     backend, up = Backend(gate=gate), Upstream()
@@ -228,6 +229,7 @@ async def test_a_hung_local_job_never_delays_claude_and_is_dropped(env):
     assert rec["fallback_reason"] == "dropped_claude_first" and rec["agree"] is None
 
 
+@pytest.mark.timing
 async def test_local_runs_in_parallel_with_claude_not_after_it(env):
     """Claude takes 0.4 s; local starts during that window (not after it)."""
     seen = {}
@@ -244,6 +246,7 @@ async def test_local_runs_in_parallel_with_claude_not_after_it(env):
     assert env.records()[0]["agree"] is True
 
 
+@pytest.mark.timing
 async def test_local_budget_is_capped_when_claude_is_slower(env):
     gate = asyncio.Event()
     backend = Backend(gate=gate)
@@ -254,6 +257,7 @@ async def test_local_budget_is_capped_when_claude_is_slower(env):
 
 # ── bounded concurrency ──────────────────────────────────────────────────────
 
+@pytest.mark.timing
 async def test_at_most_one_local_job_at_a_time(env):
     gate = asyncio.Event()
     backend, up = Backend(gate=gate), Upstream(delay=0.3)
@@ -507,6 +511,7 @@ async def test_the_local_backend_offloads_its_conversion_and_overflow_check(monk
     assert on_loop == [], f"CPU-bound on the event loop: {on_loop}"
 
 
+@pytest.mark.timing
 async def test_big_body_claude_response_is_not_delayed_by_shadow(env):
     """Loose guard (call-path tests above are the exact ones): 3 MB body, shadow on vs off. Measured in
     CPU time of the event-loop thread, not wall time: shadow can only delay Claude's first byte by
@@ -527,6 +532,7 @@ async def test_big_body_claude_response_is_not_delayed_by_shadow(env):
     assert on - off < 0.08, f"shadow added {(on - off) * 1000:.0f} ms of loop CPU (off {off * 1000:.0f}, on {on * 1000:.0f})"
 
 
+@pytest.mark.timing
 async def test_an_outer_cancel_of_a_job_is_not_swallowed_even_when_the_local_call_cancels_slowly():
     """Cancelling the job also cancels its local call; a slow clean-up must not turn that into
     'our own cancel' and send the job on to wait for Claude (900 s in production)."""

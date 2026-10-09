@@ -65,6 +65,7 @@ async def test_symlink_to_same_dir_serialises(tmp_path):
     assert (await _run_two(d, link)).peak == 1
 
 
+@pytest.mark.timing
 async def test_different_dirs_stay_parallel(tmp_path):
     a, b = tmp_path / "a", tmp_path / "b"
     a.mkdir()
@@ -78,6 +79,7 @@ async def test_lock_key_for_missing_dir_falls_back_to_path(tmp_path):
     assert agent_exec._root_lock(missing) is not agent_exec._root_lock(tmp_path / "other")
 
 
+@pytest.mark.timing
 async def test_start_job_reports_queued_until_the_task_starts():
     async def coro() -> str:
         return json.dumps({"ok": 1})
@@ -91,6 +93,7 @@ async def test_start_job_reports_queued_until_the_task_starts():
     assert jobs.get_job(handle["job_id"])["status"] == "done"
 
 
+@pytest.mark.timing
 async def test_detached_job_is_listed_for_the_user(tmp_path):
     started, release = threading.Event(), threading.Event()
 

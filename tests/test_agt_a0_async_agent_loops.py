@@ -106,6 +106,7 @@ async def _with_lag_ticker(coro):
     return result, lags
 
 
+@pytest.mark.timing
 @pytest.mark.timeout(120)
 async def test_loop_lag_stays_under_100ms_during_a_30s_llm_act(slow_act):
     _, cold = await _with_lag_ticker(slow_act(0.0))
@@ -122,6 +123,7 @@ async def test_loop_lag_stays_under_100ms_during_a_30s_llm_act(slow_act):
     assert max(lags) <= MAX_LAG_S, f"max loop lag {max(lags):.3f}s"
 
 
+@pytest.mark.timing
 @pytest.mark.timeout(120)
 async def test_two_parallel_llm_act_calls_on_different_roots_take_max_not_sum(slow_act):
     run_s = 3.0
@@ -141,6 +143,7 @@ async def test_two_parallel_llm_act_calls_on_different_roots_take_max_not_sum(sl
     assert t_two <= PARALLEL_RATIO * t_one
 
 
+@pytest.mark.timing
 async def test_llm_act_wait_false_returns_job_id_and_job_polls_to_result(slow_act):
     from llm_router.tools.consolidated import llm_router_session
 
@@ -184,6 +187,7 @@ async def test_unknown_job_id_is_reported_not_invented():
 
 # ── llm_local_task: run_agent_loop and _run_check off the loop ───────────────
 
+@pytest.mark.timing
 @pytest.mark.timeout(60)
 async def test_llm_local_task_loop_and_check_do_not_block_the_loop(tmp_path, monkeypatch):
     from llm_router.tools import local_task as lt

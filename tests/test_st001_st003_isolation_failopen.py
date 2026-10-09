@@ -52,6 +52,7 @@ def test_safe_sid_neutralizes_traversal(evil: str) -> None:
     )
 
 
+@pytest.mark.timing
 def test_traversal_session_id_writes_no_file_outside_state_dir(tmp_path: Path) -> None:
     home = tmp_path / "home"
     (home / ".llm-router").mkdir(parents=True)
@@ -81,6 +82,7 @@ def test_traversal_session_id_writes_no_file_outside_state_dir(tmp_path: Path) -
     assert not strays, f"stray state files escaped: {strays}"
 
 
+@pytest.mark.timing
 def test_readonly_state_dir_fails_open(tmp_path: Path) -> None:
     home = tmp_path / "home"
     (home / ".llm-router").mkdir(parents=True)

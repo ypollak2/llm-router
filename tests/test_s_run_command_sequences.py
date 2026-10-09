@@ -46,6 +46,7 @@ def test_a_pipeline_runs(repo):
     assert subjects == {"c2", "c1"}, out
 
 
+@pytest.mark.timing
 def test_yes_pipeline_terminates_early(repo, monkeypatch):
     """`head` must bound an UNBOUNDED upstream by exiting the moment it has
     its line(s) — not after the producer finishes. If the pipeline stages

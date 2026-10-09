@@ -247,6 +247,7 @@ def test_an_apply_conflict_is_unavailable(broken, tmp_path):
     assert digest(broken) == before
 
 
+@pytest.mark.timing
 @real_sandbox
 def test_budget_exhausted_is_unavailable_timeout(broken, tmp_path):
     r = verify_unit(broken, _patch(broken, tmp_path, _fix), budget_s=0.5)
@@ -516,6 +517,7 @@ def test_dropping_a_test_function_is_refused_by_the_early_weakened_check(twotest
     assert (r.verify_status, r.reason) == ("fail", "tests_weakened"), r
 
 
+@pytest.mark.timing
 @real_sandbox
 @pytest.mark.parametrize("target", ["/dev/zero", "/etc/passwd"])
 def test_a_symlink_in_the_patch_fails_closed_fast(broken, tmp_path, target):
