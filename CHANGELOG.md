@@ -75,20 +75,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the only place the proxy keeps prompt text; it is for labelling the shadow (`LLM_ROUTER_SHADOW_LABELS`).
 
 ### Changed
-- statusline (PLAN v16 P0.9-c, bug `P09C-1`): the full status line is a cache read. Its sixteen
-  subprocesses per render (twelve `python3 -c`, a whole-transcript scan, `import llm_router` for the
-  money figure, `sqlite3`, an interpreter probe loop) moved into one detached refresher,
-  `statusline_segments.py` (shipped beside the hooks as `llm_router_statusline_segments.py`), which writes
-  `statusline_seg_<session>.kv` (TTL 30 s; also refreshed when the transcript is newer than the cache). The
-  script parses the session JSON with bash regexes (any backslash falls back to one python), reads the
-  cache with `read`, and prints; output is byte-identical to the previous script on the default-layout
-  fixtures (`tests/test_statusline_default_full.py`). A cache older than 90 s is printed with a
-  `cached <age> ago` marker; the first render of a session still computes synchronously. The context figure
-  now reads the transcript from its tail. Measured with `scripts/statusline_wall.py` on one machine,
-  2026-10-09, a copy of the live state (11 MB transcript, 1,637 last-route files): wall p95 22 ms cold
-  (n = 219, load1 median 3.6) against 509 ms for the previous script (n = 190, load1 median 3.6); first
-  render of a session 224 ms (n = 220). Not a live number: the PRD verdict is judged from
-  `hook_latency.jsonl` after deploy.
 - agents (PLAN v16 AGT A.0): `agents.yaml` ships inside the package (`llm_router/data/agents.yaml`,
   loaded with `importlib.resources`). It lived at the repo root, which no wheel contains, so every
   installed user got `agent_not_found` (`docs/BUGS.md` A.0-1). A project `config/agents.yaml` and
@@ -149,6 +135,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reversing #273's fast-by-default; `tests/test_statusline_default_full.py` compares it with the
   pre-#273 script on 9 fixture states). The fast line is the opt-in debug mode
   `LLM_ROUTER_STATUSLINE=fast` and now shows the Claude 5h / weekly / Sonnet quota.
+- statusline (PLAN v16 P0.9-c, bug `P09C-1`): the full status line is a cache read. Its sixteen
+  subprocesses per render (twelve `python3 -c`, a whole-transcript scan, `import llm_router` for the
+  money figure, `sqlite3`, an interpreter probe loop) moved into one detached refresher,
+  `statusline_segments.py` (shipped beside the hooks as `llm_router_statusline_segments.py`), which writes
+  `statusline_seg_<session>.kv` (TTL 30 s; also refreshed when the transcript is newer than the cache). The
+  script parses the session JSON with bash regexes (any backslash falls back to one python), reads the
+  cache with `read`, and prints; output is byte-identical to the previous script on the default-layout
+  fixtures (`tests/test_statusline_default_full.py`). A cache older than 90 s is printed with a
+  `cached <age> ago` marker; the first render of a session still computes synchronously. The context figure
+  now reads the transcript from its tail. Measured with `scripts/statusline_wall.py` on one machine,
+  2026-10-09, a copy of the live state (11 MB transcript, 1,637 last-route files): wall p95 22 ms cold
+  (n = 219, load1 median 3.6) against 509 ms for the previous script (n = 190, load1 median 3.6); first
+  render of a session 224 ms (n = 220). Not a live number: the PRD verdict is judged from
+  `hook_latency.jsonl` after deploy.
 
 ### Added
 - kpi (v16 GE6, PRD S3): quota-burn baseline. SessionStart (inside the P0.9 background child, which
