@@ -49,6 +49,7 @@ async def _server(adapters=None):
         await srv.stop()
 
 
+@pytest.mark.timing
 @pytest.mark.asyncio
 async def test_ping_reports_providers(broker_paths):
     async with _server():
@@ -81,6 +82,7 @@ async def test_socket_is_owner_only(broker_paths):
     assert mode == 0o600, f"socket must be 0600, got {oct(mode)}"
 
 
+@pytest.mark.timing
 @pytest.mark.asyncio
 async def test_bad_signature_rejected(broker_paths):
     """A frame signed with the WRONG secret must be rejected as unauthorized."""

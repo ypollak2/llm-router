@@ -1,0 +1,11 @@
+---
+id: HAIKU-SERVED-1
+status: fixed in `fix/haiku-counters-served-model`
+---
+## HAIKU-SERVED-1. A Haiku call retried on the original model still counted as Haiku-served
+
+- **Symptom (found in the independent review of #364).** When a Haiku-rewritten call 4xx's, the proxy retries with the original body (served on Opus). The `proxy_calls` row keeps `tier="haiku"` and `tier_reason="haiku_rewrite"` (the arm only relabels `tier_arm_assignment=treatment_retried_original`, pops `tier_body_rewrite`, sets `served_model` back and `tier_retry`). `haiku_guard.is_haiku_decided` is true for it, and the daily watch labelled that count as Haiku calls with no served-on-Haiku figure beside it.
+- **Cause.** One predicate ("router decided Haiku") stood for two questions: decided (right for the `tier_retry` rate, whose numerator is exactly these rows) and served (what the watch and any quality reading mean by Haiku).
+- **Audit of every selector of Haiku rows.** `offload_share._proxy_class` (feeds the `redo` trigger and O3 KPI) already keys on `served_model`: correct. `shadow_frontier`: the proxy schedules on `tier_reason == haiku_rewrite` but `FrontierShadow._gate` runs at reply time on the mutated row (`served == requested` after a retry) and records `skipped / not_rewritten`: correct, now pinned by a test; `shadow_frontier.TIER_REASON` is an unused constant. `ledger.stats` counts `reasons` by `tier_reason` (retried rows show as `haiku_rewrite`) next to `rewrite_retried_unchanged` and `served_model_mix`: a label, left as is. No selector under `scripts/` reads proxy rows for Haiku.
+- **Fix.** `haiku_guard.is_haiku_served` (decided AND `served_model` contains `haiku`) and `served_count`; `watch()` adds `haiku_served_calls` and the rendered line shows both. `tier_retry_trigger` stays on decided, with a comment: counting only served rows would make the retry rate 0 by construction.
+- **Test.** `tests/test_proxy_haiku_guard.py::test_served_on_haiku_is_not_the_same_as_decided_haiku` and `::test_watch_reports_served_next_to_decided_and_retries_stay_in_the_retry_trigger` (red on main: no `is_haiku_served`, no `haiku_served_calls`); `tests/test_shadow_frontier.py::test_a_haiku_rewrite_refused_and_retried_on_the_original_is_not_a_haiku_vs_frontier_pair` (green on main, regression pin).

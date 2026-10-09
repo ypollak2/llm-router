@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 3
+# llm_router-hook-version: 4
 """PostToolUse hook — usage refresh + periodic savings awareness.
 
 After any llm_* MCP tool call:
@@ -409,6 +409,13 @@ def main() -> None:
         return
 
     payload = json.loads(raw)
+
+    try:  # PG9: session id on this run's hook_latency row (from the parsed payload; never invented)
+        from llm_router.hook_latency import set_session as _hl_set_session
+
+        _hl_set_session(payload.get("session_id") if isinstance(payload, dict) else None)
+    except Exception:  # noqa: BLE001 -- llm_router without set_session: no session on the row
+        pass
 
     tool_name = payload.get("toolName", "")
     # CHZ-SURF-01: accept the consolidated doors, not just the `llm_` prefix.

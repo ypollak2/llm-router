@@ -147,6 +147,7 @@ def test_agno_adapter_error_message_names_the_pip_extra():
 # Performance: adapter overhead is minimal
 # ────────────────────────────────────────────────────────────────────────
 
+@pytest.mark.timing
 def test_agno_adapter_construction_is_constant_time():
     """Constructing AgnoAdapter is O(1) — no DB connection, no IO."""
     import time
@@ -162,6 +163,7 @@ def test_agno_adapter_construction_is_constant_time():
     assert p95_us < 100, f"AgnoAdapter construction p95 {p95_us:.0f}µs exceeds 100µs"
 
 
+@pytest.mark.timing
 def test_agno_module_import_is_cheap():
     """Importing the module fresh should take less than 100ms even on cold cache."""
     import importlib

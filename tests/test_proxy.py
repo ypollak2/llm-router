@@ -468,6 +468,7 @@ async def test_ollama_backend_streams_merges_tool_calls_and_sends_keep_alive():
     assert payload["model"] == "qwen3-coder:30b" and payload["options"]["num_predict"] == 700
 
 
+@pytest.mark.timing
 async def test_hedge_fires_when_first_token_is_late(tmp_path, policy):
     client, _ = _ollama_stream([{"message": {"content": "late"}, "done": True}], delay=1.0)
     # num_ctx large enough that the real fixture request clears the new
@@ -519,6 +520,7 @@ async def test_validation_failure_falls_back_to_anthropic(tmp_path, policy):
     assert row["msg_id"] == "msg_upstream01"
 
 
+@pytest.mark.timing
 async def test_budget_exceeded_falls_back_and_records_added_latency(tmp_path, policy):
     up = Upstream()
     backend = FakeBackend(_ollama("late"), delay=1.0)

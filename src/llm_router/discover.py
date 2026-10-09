@@ -535,6 +535,23 @@ def mark_ollama_ok() -> None:
         pass
 
 
+# One warning per model / per condition per process: ``get_model_chain`` calls the
+# filter on every route, so an unguarded WARNING would repeat on every request.
+_filter_warned: set[str] = set()
+
+
+def _warn_once(key: str, message: str, *args: object) -> None:
+    if key in _filter_warned:
+        return
+    _filter_warned.add(key)
+    log.warning(message, *args)
+
+
+def _reset_filter_warnings() -> None:
+    """Forget which filter warnings were already emitted (tests)."""
+    _filter_warned.clear()
+
+
 def filter_ollama_by_installed(chain: list[str]) -> list[str]:
     """Remove Ollama model entries whose model isn't in the installed cache.
 
@@ -544,17 +561,34 @@ def filter_ollama_by_installed(chain: list[str]) -> list[str]:
     against the discovery cache and drops models that aren't installed,
     preventing 50-second LiteLLM hangs on missing models.
 
+    A dropped model is logged at WARNING once per model per process (a chain that
+    names a model nobody installed is a config drift, not routine). An empty
+    discovery cache cannot validate anything, so the chain passes through
+    unmodified — that is logged once per process too, when the chain actually
+    names an ``ollama/*`` model.
+
     Non-Ollama entries pass through unchanged.
     """
     installed = set(get_cached_ollama_models())
     if not installed:
         # Cache empty — can't validate, let the chain through unmodified.
+        if any(m.startswith("ollama/") for m in chain):
+            _warn_once(
+                "cache-empty",
+                "Ollama discovery cache is empty — not validating ollama/* chain "
+                "entries against installed models (chain passed through unfiltered)",
+            )
         return chain
 
     result = []
     for model in chain:
         if model.startswith("ollama/") and model not in installed:
-            log.debug("Dropping %s — not installed in Ollama", model)
+            _warn_once(
+                f"dropped:{model}",
+                "Dropping %s from the routing chain — not installed in Ollama "
+                "(installed: %s)",
+                model, ", ".join(sorted(installed)),
+            )
             continue
         result.append(model)
     return result

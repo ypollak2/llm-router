@@ -273,6 +273,7 @@ async def test_sample_rate_is_100_percent_for_14_days_then_2_percent(on):
     assert (sf.FULL_RATE, sf.STEADY_RATE) == (1.0, 0.02)
 
 
+@pytest.mark.timing
 async def test_at_most_one_replay_in_flight(on):
     _usage()
     gate = asyncio.Event()
@@ -519,6 +520,7 @@ async def test_proxy_flag_off_makes_no_replay(home, tmp_path, simple):
     assert not sf.shadow_dir().exists()
 
 
+@pytest.mark.timing
 async def test_proxy_replays_haiku_rewrite_rows_in_the_background_without_delaying_the_response(on, tmp_path, simple):
     _usage(updated=time.time())
     up = SlowFrontierUpstream()
@@ -560,6 +562,39 @@ async def test_proxy_does_not_shadow_rows_that_are_not_haiku_rewrite(on, tmp_pat
     await app.state.frontier_shadow.drain()
     assert len(up.requests) == 2
     assert not sf.ledger_path().exists()
+
+
+class RefuseHaikuUpstream:
+    """Mocked Anthropic that 400s any Haiku request and serves the rest."""
+
+    def __init__(self):
+        self.models: list[str] = []
+
+    async def __call__(self, request):
+        model = json.loads(request.content)["model"]
+        self.models.append(model)
+        if "haiku" in model:
+            return httpx.Response(400, json={"type": "error", "error": {"message": "no"}})
+        return httpx.Response(200, stream=httpx.ByteStream(_sse(model)),
+                              headers={"content-type": "text/event-stream"})
+
+
+async def test_a_haiku_rewrite_refused_and_retried_on_the_original_is_not_a_haiku_vs_frontier_pair(on, tmp_path, simple):
+    """The row keeps tier_reason=haiku_rewrite but Opus answered: no replay, no pair."""
+    _usage(updated=time.time())
+    up = RefuseHaikuUpstream()
+    app = _app(tmp_path, up, policy_overrides={"haiku_rewrite": True})
+    await _post(app, _first())
+    r = await _post(app, _no_system_reminders(_req()))
+    assert r.status_code == 200
+    await app.state.frontier_shadow.drain()
+    assert "haiku" in up.models[1] and up.models[2] == OPUS and len(up.models) == 3  # refused Haiku, retry on Opus, no replay
+    proxy_row = haiku_guard.read_jsonl(tmp_path / "proxy_calls.jsonl")[-1]
+    assert proxy_row["tier_reason"] == pt.REASON_HAIKU_REWRITE and proxy_row["tier_retry"]["status"] == 400
+    assert proxy_row["served_model"] == OPUS
+    (row,) = _ledger()
+    assert (row["outcome"], row["reason"]) == (sf.OUT_SKIPPED, sf.R_NOT_REWRITTEN)
+    assert not sf.pairs_dir().exists()
 
 
 # ── review fixes on #339 ────────────────────────────────────────────────────

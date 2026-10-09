@@ -170,6 +170,7 @@ def test_a_full_log_rotates_to_one_previous_generation(monkeypatch):
     assert rows[-1]["elapsed_ms"] == 199.0
 
 
+@pytest.mark.timing
 def test_rotation_is_skipped_not_waited_for_when_another_writer_holds_the_lock(monkeypatch):
     from llm_router.file_lock import exclusive_lock
 
@@ -478,6 +479,26 @@ def test_a_real_hook_process_leaves_exactly_one_row(name, tmp_path):
     # Not an instant, and not longer than the whole subprocess took to run.
     assert 0 < row["elapsed_ms"] < (after - before) * 1000 + 50
     assert row["timed_out"] is False
+
+
+@pytest.mark.parametrize("name", sorted(_PAYLOADS))
+def test_every_writer_puts_the_payload_session_id_on_its_row(name, tmp_path):
+    """PG9: the row names the host session, so a reader can count sessions."""
+    assert _run_hook(name, tmp_path).returncode == 0
+    (row,) = [r for r in _lines() if r["hook"] == name]
+    assert row.get("session_id") == "t-s1", row
+
+
+@pytest.mark.parametrize("name", sorted(_PAYLOADS))
+def test_a_payload_without_a_session_id_leaves_it_null_never_invented(name, tmp_path):
+    payload = {k: v for k, v in _PAYLOADS[name].items() if k != "session_id"}
+    saved, _PAYLOADS[name] = _PAYLOADS[name], payload
+    try:
+        assert _run_hook(name, tmp_path).returncode == 0
+    finally:
+        _PAYLOADS[name] = saved
+    (row,) = [r for r in _lines() if r["hook"] == name]
+    assert row.get("session_id") is None and "session_id" not in row, row
 
 
 def test_a_hook_that_exits_early_via_sys_exit_still_records(tmp_path):

@@ -34,7 +34,6 @@ SRC = pathlib.Path(__file__).resolve().parents[2] / "src" / "llm_router"
 
 # Sites that open a SQLite connection and put it into WAL mode.
 _WAL_SITES = [
-    "result_cache.py",
     "agents/session.py",
     "dashboard/tui.py",
     "semantic/store.py",
@@ -87,7 +86,7 @@ def test_the_sync_sites_delegate_to_the_shared_helper():
     wrong orderings in the first place.
     """
     missing = []
-    for rel in ("result_cache.py", "agents/session.py", "dashboard/tui.py",
+    for rel in ("agents/session.py", "dashboard/tui.py",
                 "semantic/store.py", "semantic/traces.py"):
         text = (SRC / rel).read_text(encoding="utf-8")
         if "enable_wal(" not in text:

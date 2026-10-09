@@ -113,6 +113,7 @@ async def test_single_model_failure_falls_through_and_is_logged(routed_runtime):
     assert events[0].kwargs["fallback_reason"] == "provider_error"
 
 
+@pytest.mark.timing
 @pytest.mark.asyncio
 async def test_all_models_failing_raises_clear_terminal_error_without_hanging(
     routed_runtime,

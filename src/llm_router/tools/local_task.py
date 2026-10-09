@@ -85,10 +85,34 @@ _SKIP_DIRS = {
 }
 
 
+def _own_state_rel(root: Path) -> str | None:
+    """The router's own state dir (``LLM_ROUTER_HOME``) as a path relative to ``root``,
+    or None when it is outside it. It is bookkeeping (ledger/index DBs and their
+    -wal/-shm sidecars, written by the router itself, possibly while another task
+    runs), never a task's work, so it is never attributed to a run. It is inside
+    ``root`` when LLM_ROUTER_HOME is set into the project or the project is the
+    user's home directory (SLT-2)."""
+    try:
+        from llm_router.paths import llm_router_home
+        return os.path.relpath(llm_router_home().resolve(), root.resolve()).replace(os.sep, "/")
+    except (OSError, ValueError, ImportError):
+        return None
+
+
+def _in_own_state(rel: str, own: str | None) -> bool:
+    return bool(own) and not own.startswith("..") and own != "." and (
+        rel == own or rel.startswith(own + "/"))
+
+
 def _snapshot(root: Path) -> dict[str, str]:
     out: dict[str, str] = {}
     budget = _SNAPSHOT_MAX_BYTES
+    own = _own_state_rel(root)
     for dirpath, dirnames, filenames in os.walk(root):
+        if own and own != ".":
+            dirnames[:] = [d for d in dirnames
+                           if not _in_own_state(os.path.relpath(Path(dirpath) / d, root)
+                                                .replace(os.sep, "/"), own)]
         # Prune in place so os.walk never descends into them at all — the reason
         # this is os.walk and not rglob.
         dirnames[:] = [d for d in dirnames
@@ -168,6 +192,7 @@ def _git_state(root: Path, since: str | None = None) -> dict | None:
         return path[len(prefix):] if prefix and path.startswith(prefix) else path
 
     out: dict[str, str] = {}
+    own = _own_state_rel(root)
     entries = r.stdout.decode("utf-8", "surrogateescape").split("\0")
     i = 0
     while i < len(entries):
@@ -177,9 +202,11 @@ def _git_state(root: Path, since: str | None = None) -> dict | None:
             continue
         status, path = e[:2], rel(e[3:])
         if status[0] in "RC" and i < len(entries):   # next entry is the source path
-            if status[0] == "R":
+            if status[0] == "R" and not _in_own_state(rel(entries[i]), own):
                 out[rel(entries[i])] = f"{status}:renamed-away"
             i += 1
+        if _in_own_state(path, own):
+            continue
         p = root / path
         try:
             digest = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else "absent"
@@ -192,7 +219,8 @@ def _git_state(root: Path, since: str | None = None) -> dict | None:
         d = _git(root, "diff", "--name-only", "-z", "--no-renames", "--relative",
                  f"{since}..{head_sha}", "--", ".")
         if d is not None and d.returncode == 0:
-            committed = [x for x in d.stdout.decode("utf-8", "surrogateescape").split("\0") if x]
+            committed = [x for x in d.stdout.decode("utf-8", "surrogateescape").split("\0")
+                         if x and not _in_own_state(x, own)]
     return {"head": head_sha, "files": out, "committed": committed}
 
 

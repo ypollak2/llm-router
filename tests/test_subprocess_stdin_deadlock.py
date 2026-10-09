@@ -137,6 +137,7 @@ def _run_with_held_open_stdin(
     return rc, b"".join(stdout_chunks), b"".join(stderr_chunks)
 
 
+@pytest.mark.timing
 def test_safe_subprocess_exec_does_not_inherit_open_stdin(
     fake_cli_binary: Path,
 ) -> None:

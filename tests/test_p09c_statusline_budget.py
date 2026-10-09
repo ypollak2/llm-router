@@ -257,6 +257,7 @@ def test_a_part_that_fails_is_absent_not_zero(monkeypatch, tmp_path):
     assert "mix_local" not in out and "money" not in out and out["v"] == "1"
 
 
+@pytest.mark.timing
 def test_refresher_exits_at_once_when_another_holds_the_lock(home, tmp_path):
     import fcntl
 
@@ -318,6 +319,7 @@ def test_a_malicious_cache_value_is_never_evaluated(home, tmp_path, key):
 # ── repair round 1: the render path never probes for an interpreter ──────────
 
 
+@pytest.mark.timing
 def test_a_stale_cache_render_does_not_wait_for_an_interpreter_probe(home, tmp_path):
     (home / ".llm-router" / ".statusline_python").unlink()  # nothing remembered: a probe is needed
     bindir, _log = _shims(tmp_path)
@@ -341,6 +343,7 @@ def test_with_no_usable_python_warm_renders_spawn_nothing_but_the_clock(home, tm
 # ── repair round 1: the synchronous path is rate-limited and visible ─────────
 
 
+@pytest.mark.timing
 def test_a_broken_refresher_costs_one_sync_call_per_five_seconds_and_says_so(home, tmp_path):
     calls = tmp_path / "calls.log"
     fake = tmp_path / "fakepy"
@@ -404,6 +407,7 @@ def _render_with(home, tmp_path, **overrides):
                           capture_output=True, text=True, timeout=4)  # a hang is a TimeoutExpired
 
 
+@pytest.mark.timing
 @pytest.mark.parametrize("digits", ["9" * 23, "9" * 19, "9" * 18])
 @pytest.mark.parametrize("key", ["ctx_pct", "session_pct", "mix_local", "written"])
 def test_an_overlong_number_neither_hangs_nor_prints_shell_errors(home, tmp_path, key, digits):

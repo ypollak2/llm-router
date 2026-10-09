@@ -18,6 +18,7 @@ reserve at all — this is that same fix, applied to the same class of bug.
 """
 from __future__ import annotations
 
+import pytest
 import time
 from unittest.mock import patch
 
@@ -79,6 +80,7 @@ def test_last_agent_model_gets_whatever_remains():
     )
 
 
+@pytest.mark.timing
 def test_single_model_chain_gets_the_whole_deadline():
     """No fallback exists at all — a lone model must not be shortchanged by a
     reserve that has nothing behind it to protect."""
@@ -96,6 +98,7 @@ def test_single_model_chain_gets_the_whole_deadline():
     assert seen[0] > 29.0, f"the only model in the chain got only {seen[0]:.1f}s of a 30s deadline"
 
 
+@pytest.mark.timing
 def test_a_model_that_uses_its_whole_budget_and_answers_nothing_logs_timeout():
     """NS3: execute_agent used to log NOTHING per model — only the caller's one
     blanket "READ-ONLY DRAFT LOOP: nothing" line. Reproduce the exact failure

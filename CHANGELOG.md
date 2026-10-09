@@ -12,7 +12,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- one result store (PLAN v16 PG3 / P0.5-c, D-R8-5; docs/bugs/PG3-1.md): the legacy `result_cache`
+  (prompt-only key, BM25 "[Relevant prior answers]" injection in `context_prep`) is removed; the
+  semantic cache, keyed on (text, context hash, project scope), is the only result store.
+  Existing `~/.llm-router/result_cache.db` files are left on disk, unread and unmigrated.
+
 ### Added
+- hook latency rows carry the session (PLAN v16 gap PG9): `enforce-route`, `bash-compress`,
+  `playwright-compress`, `cc-usage-track`, `subagent-start`, `usage-refresh` and
+  `agent-depth-release` now call `hook_latency.set_session` with the `session_id` from the
+  payload they already parse (null when absent, never invented; no prompt text; no extra stdin
+  read). The statusline row and `agent-route` / `auto-route` / `status-bar` / `session-*` already
+  did. The P0.9-g live clause of `llm-router kpi` now prints `n_sessions` and the largest-session
+  share per hook, says "not informative (need >=2 sessions)" below two sessions and cannot PASS
+  there (an over-budget p95 still FAILs). Hook versions: enforce-route 15 -> 16, bash-compress
+  2 -> 3, playwright-compress 2 -> 3, cc-usage-track 3 -> 4, subagent-start 6 -> 7,
+  usage-refresh 3 -> 4, agent-depth-release 5 -> 6. Rows written before the deploy have no session
+  id and read as "not informative".
+- kpi G1_proxy: classifier-shadow scheduling cost (PLAN G1-proxy "shadow <= 30 ms"; `docs/bugs/P09-13.md`).
+  The proxy ledger row gains `tier_shadow_schedule_ms`, present only when a shadow call was scheduled
+  (milliseconds, no request content); `llm-router kpi` appends `shadow schedule p50 / p95 (n, sessions,
+  within/OVER 30ms target)` to G1_proxy from turn-first rows that carry it, "not informative" below
+  n=100 or 2 sessions. `tier_decision_s` is unchanged. Needs a proxy restart to start writing the field.
 - ledger completeness (PLAN v16 P0.8-d, D-32 = A; R-EVL-1, NFR-NUM): `usage` gains `reason`
   (additive migration `MIGRATE_USAGE_ADD_REASON`; earlier rows stay NULL and `llm-router kpi` reports
   them as missing, not back-filled). Every `usage` writer passes a short route code (`router_chain`,
@@ -99,11 +121,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the only place the proxy keeps prompt text; it is for labelling the shadow (`LLM_ROUTER_SHADOW_LABELS`).
 
 ### Fixed
+- Haiku guard (HAIKU-SERVED-1): a Haiku rewrite that Anthropic refused and the proxy retried on the original
+  model keeps `tier=haiku` / `tier_reason=haiku_rewrite` but is served on that model. `haiku_guard` now
+  separates `is_haiku_decided` (router chose Haiku; the `tier_retry` trigger's denominator, retried rows
+  stay in it) from the new `is_haiku_served` (`served_model` is Haiku), and `kpi --haiku-watch` reports
+  `haiku_served_calls` next to `haiku_decided_calls`. GE4 Frontier shadow was already safe (its reply-time gate
+  drops such rows as `not_rewritten`); a proxy test now pins that.
 - classifier (SYSONE-WARM-1): with `LLM_ROUTER_CLASSIFIER_BACKEND=systemone` the warm-up used `/api/generate`,
   which Ollama refuses for a decision model (HTTP 400), so the model never loaded and every verdict was `cold`.
   The warm-up now loads it through `/v1/systemone`; a refused warm-up is recorded once as
   `CHZ-FO-LOCAL-CLASSIFIER-WARMUP`; a unitless `LLM_ROUTER_CLASSIFIER_KEEP_ALIVE` (`-1`) is sent as an integer.
   See `docs/bugs/SYSONE-WARM-1.md`.
+- `llm_local_task` `changed_files` no longer lists the router's own state directory (`LLM_ROUTER_HOME`: ledger/index DBs and
+  their -wal/-shm sidecars) when it sits inside the task's workdir; excluded from both the git and walk snapshots
+  (`docs/bugs/SLT-2.md`; main CI 37926623089).
+- routing config (STALE-OLLAMA-1): `policies/standard.yaml` no longer names `ollama/qwen3:32b` (a default most
+  installs never had) in any BALANCED, PREMIUM or REASONING chain, `workhorses` or `fallback_chain_complex`.
+  Local models are injected at route time from discovery, so BALANCED/BUDGET routes are unchanged (chain per
+  profile x task type compared against the pre-fix chains with a fake 3-model cache,
+  `tests/test_stale_ollama_default.py`, n = 40 x 2 paths). Not unchanged: the session-start dynamic table was built
+  straight from `ROUTING_TABLE` with no installed-model filter, so it carried the uninstalled entry (and the static
+  RESEARCH chains too); on a machine that does have `qwen3:32b`, PREMIUM/REASONING lose it as their last entry.
+  `filter_ollama_by_installed` now logs a dropped uninstalled model at WARNING once per model per process, and
+  once when an empty discovery cache makes it skip validation; `get_model_chain` records a filter exception as
+  `CHZ-FO-PROFILES-OLLAMA-FILTER` instead of a bare `pass`. See `docs/bugs/STALE-OLLAMA-1.md`.
 
 ### Changed
 - kpi (`docs/bugs/O3-STEP-1.md`): O3 starts a human turn only at a row with `step_class == turn_first`
@@ -116,6 +157,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is a live label, so the Haiku guard's `redo` trigger (no transcript join) changes behaviour: those
   rows no longer count as turns or push an escalation out of the redo window. The golden kpi files hold
   no O3 line and do not change.
+- ci/test infra (TIMING-1, D-34 = A): a `timing` pytest marker for tests whose verdict is wall-clock speed (elapsed, p95,
+  event-loop lag, short real timeouts, sleep ordering). 129 test functions in 54 files carry it; the parallel `test` job runs
+  `-m "not timing and ..."` and a new serial `timing (3.11)` / `timing (3.13)` job runs them with `-p no:xdist`. Thresholds and
+  assertions are unchanged. `LLM_ROUTER_RUN_PERF=1` now works (`conftest.py` read it after scrubbing it), so the 13 `tests/qa`
+  performance budgets run in that job. `tests/test_timing_lane.py` guards the marker, the CI expressions, the tagged-count floor
+  and new untagged clock assertions. See `docs/bugs/TIMING-1.md`.
 - kpi (PLAN v16 P0.9-e, `docs/bugs/P09-11.md`): G1_proxy's turn-first segment counts only
   `step_class == turn_first` rows and measures the P0.9-e decision (sum of `tier_phases_ms` over
   `proxy.tiers.DECISION_PHASES`), not `tier_decision_s`. Null-step rows (pre-GE1 / side calls),

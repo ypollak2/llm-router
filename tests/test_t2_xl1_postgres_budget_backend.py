@@ -533,6 +533,7 @@ def _load_worker(args: tuple[str, str, float, int]) -> dict[str, object]:
         backend.close()
 
 
+@pytest.mark.timing
 @pytest.mark.skipif(
     not _DOCKER_AVAILABLE,
     reason="Docker daemon not reachable — Postgres integration test skipped",

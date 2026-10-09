@@ -56,7 +56,7 @@ Field notes:
   for rows that still land here with ``null``.
 
 Fail-silent, matching every other best-effort telemetry writer in this
-codebase (``tools/text.py``'s ``_cache_result``, ``_record_quality``) — a
+codebase (``tools/text.py``'s ``_record_quality``) — a
 broken ledger write must never break the ``llm_edit`` call the user is
 waiting on.
 """

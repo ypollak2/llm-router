@@ -28,7 +28,7 @@ from llm_router.signals.keyword import KeywordSignal
 from llm_router.signals.pii import PiiSignal
 
 
-pytestmark = pytest.mark.performance
+pytestmark = [pytest.mark.performance, pytest.mark.timing]
 
 
 # ────────────────────────────────────────────────────────────────────────
