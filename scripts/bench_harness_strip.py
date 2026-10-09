@@ -12,12 +12,14 @@ tag-free shape for comparison.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import statistics
 import sys
 import time
 from pathlib import Path
 
+os.environ.setdefault("LLM_ROUTER_SYNTHETIC", "1")  # benchmark traffic is not production
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from llm_router.proxy import steps  # noqa: E402
