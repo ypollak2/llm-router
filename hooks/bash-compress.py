@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 2
+# llm_router-hook-version: 3
 """PostToolUse hook — compress Bash command outputs via RTK-style filtering.
 
 After every bash tool call:
@@ -188,6 +188,13 @@ def main() -> None:
         payload = json.loads(sys.stdin.read())
     except (json.JSONDecodeError, OSError):
         sys.exit(0)
+
+    try:  # PG9: session id on this run's hook_latency row (from the parsed payload; never invented)
+        from llm_router.hook_latency import set_session as _hl_set_session
+
+        _hl_set_session(payload.get("session_id") if isinstance(payload, dict) else None)
+    except Exception:  # noqa: BLE001 -- llm_router without set_session: no session on the row
+        pass
 
     # Only fire for the shell tool. Matching is case-insensitive: Claude Code's
     # tool is `Bash`, and `"Bash".endswith("bash")` is False — that one capital
