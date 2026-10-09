@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 6
+# llm_router-hook-version: 7
 """UserPromptSubmit hook — enhanced savings + routing status bar.
 
 Displays a two-mode status line:
@@ -190,6 +190,7 @@ RST = "\033[0m"  # reset
 SEP = f"{DIM} │ {RST}"
 
 _FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
+_CACHE_PROVIDER = "cache"  # semantic-cache-served call: not paid/free/subscription (provider_classes.py)
 
 
 # ── Claude subscription credits ────────────────────────────────────────────
@@ -333,8 +334,9 @@ def _read_session_calls() -> tuple[int, int, int]:
         start_str = datetime.fromtimestamp(start, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         conn = sqlite3.connect(_usage_db(), timeout=2)
         rows = conn.execute(
-            "SELECT provider FROM usage WHERE timestamp >= ? AND success = 1",
-            (start_str,),
+            "SELECT provider FROM usage WHERE timestamp >= ? AND success = 1 "
+            "AND COALESCE(provider, '') != ?",
+            (start_str, _CACHE_PROVIDER),
         ).fetchall()
         conn.close()
         sub = free = paid = 0

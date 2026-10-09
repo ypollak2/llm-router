@@ -48,6 +48,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from llm_router.types import LLMResponse, TaskType
 
+from llm_router.provider_classes import CACHE_PROVIDER  # noqa: E402
+
 log = logging.getLogger("llm_router.semantic_cache")
 
 # Default similarity threshold — prompts with cosine similarity ≥ this value
@@ -595,7 +597,7 @@ async def check(
             output_tokens=0,
             cost_usd=0.0,   # cached — no API cost
             latency_ms=0.0,
-            provider="cache",
+            provider=CACHE_PROVIDER,
             cache_hit=True,
             cache_similarity=best_sim,
         )

@@ -158,3 +158,136 @@ def test_the_cache_hit_writer_is_the_registered_usage_writer():
 
     assert ("src/llm_router/cost.py", "usage") in EXPECTED_WRITERS
     assert not {k for k in _found() if k[1] == "usage"} - set(EXPECTED_WRITERS)
+
+
+# --- the "paid" predicate: a cache row is a call to nobody -------------------------------------
+
+import importlib.util  # noqa: E402
+import re  # noqa: E402
+import time  # noqa: E402
+
+from llm_router.provider_classes import CACHE_PROVIDER, is_cache_provider  # noqa: E402
+
+_REPO = Path(__file__).resolve().parent.parent
+_HOOK_DIRS = (_REPO / "hooks", _REPO / "src" / "llm_router" / "hooks")
+
+
+def _usage_db(tmp_path: Path) -> Path:
+    """1 paid (anthropic), 1 free (ollama), 1 cache row, all within the last minute."""
+    db = tmp_path / "usage.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE usage (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT "
+                 "CURRENT_TIMESTAMP, model TEXT, provider TEXT, task_type TEXT, input_tokens INT, "
+                 "output_tokens INT, cost_usd REAL, latency_ms REAL, success INT DEFAULT 1, "
+                 "is_simulated INT DEFAULT 0, cache_hit INT DEFAULT 0, cache_savings_usd REAL DEFAULT 0)")
+    for model, prov, itok, otok, cost in (("anthropic/claude-x", "anthropic", 10, 5, 0.01),
+                                          ("ollama/q", "ollama", 10, 5, 0.0),
+                                          ("cache/anthropic/claude-x", "cache", 0, 0, 0.0)):
+        conn.execute("INSERT INTO usage (model, provider, task_type, input_tokens, output_tokens, "
+                     "cost_usd, latency_ms) VALUES (?,?,?,?,?,?,?)", (model, prov, "code", itok, otok, cost, 1.0))
+    conn.commit()
+    conn.close()
+    return db
+
+
+def _load(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_provider_classes_is_the_one_definition():
+    assert CACHE_PROVIDER == "cache" and is_cache_provider("cache") and not is_cache_provider("ollama")
+    from llm_router.semantic_cache import CACHE_PROVIDER as sc_provider
+    assert sc_provider == CACHE_PROVIDER
+
+
+@pytest.mark.parametrize("hook", ["status-bar.py", "session-end.py", "session-start.py"])
+def test_hook_copies_name_the_cache_provider_and_stay_identical(hook):
+    texts = [(d / hook).read_text() for d in _HOOK_DIRS]
+    assert texts[0] == texts[1], f"{hook}: hooks/ and src/llm_router/hooks/ differ"
+    assert re.search(rf'^_CACHE_PROVIDER\s*=\s*"{CACHE_PROVIDER}"', texts[0], re.M)
+
+
+def test_the_clawcode_hook_names_the_cache_provider():
+    t = (_HOOK_DIRS[1] / "session-end-clawcode.py").read_text()
+    assert re.search(rf'^_CACHE_PROVIDER\s*=\s*"{CACHE_PROVIDER}"', t, re.M)
+
+
+def test_status_bar_session_calls_exclude_cache(tmp_path, monkeypatch):
+    db = _usage_db(tmp_path)
+    mod = _load(_HOOK_DIRS[0] / "status-bar.py", "sb_p08e")
+    start = tmp_path / "start.txt"
+    start.write_text(str(time.time() - 3600))
+    monkeypatch.setattr(mod, "_usage_db", lambda: str(db))
+    monkeypatch.setattr(mod, "_session_start_file", lambda: str(start))
+    assert mod._read_session_calls() == (0, 1, 1)  # (sub, free, paid): the cache row is in none
+
+
+def test_session_end_paid_rows_exclude_cache(tmp_path, monkeypatch):
+    db = _usage_db(tmp_path)
+    mod = _load(_HOOK_DIRS[0] / "session-end.py", "se_p08e")
+    monkeypatch.setattr(mod, "_db_path", lambda: str(db))
+    paid, cc, free = mod._query_session_data(time.time() - 3600)
+    assert [r["provider"] for r in paid] == ["anthropic"] and cc == []
+    assert [r["provider"] for r in free] == ["ollama"]
+
+
+def test_statusline_mix_excludes_cache(tmp_path):
+    from llm_router.statusline_segments import mix_segment
+    _usage_db(tmp_path)
+    assert mix_segment(str(tmp_path)) == {"mix_local": "1", "mix_paid": "1"}
+
+
+def test_share_card_and_digest_exclude_cache(tmp_path):
+    import asyncio
+
+    from llm_router.commands.share import _gather_stats
+    stats = _gather_stats(str(_usage_db(tmp_path)))
+    assert (stats.total_calls, stats.paid_calls, stats.free_calls) == (2, 1, 1)
+
+    from llm_router import digest
+    from llm_router.cost import _get_db  # noqa: F401  (digest reads through it)
+    import llm_router.config as cfg_mod
+    cfg_mod._config = None
+    import os
+    os.environ["LLM_ROUTER_DB_PATH"] = str(tmp_path / "usage.db")
+    cfg_mod._config = None
+    try:
+        data = asyncio.run(digest._fetch_period_data("all time"))
+    finally:
+        os.environ.pop("LLM_ROUTER_DB_PATH", None)
+        cfg_mod._config = None
+    assert data["calls"] == 2 and "cache" not in data["by_provider"]
+
+
+def test_routing_health_excludes_cache(tmp_path):
+    import datetime as dt
+
+    from llm_router.routing_health import routed_calls
+    db = _usage_db(tmp_path)
+    out = routed_calls(days=2, db=db, today=dt.date.today() + dt.timedelta(days=0))
+    day = next(iter(out.values()))
+    assert day["calls"] == 2 and day["local"] == 1 and day["claude"] == 1 and day["other"] == 0
+
+
+def test_prompt_cache_hit_rate_denominator_excludes_semantic_cache_rows(tmp_path, monkeypatch):
+    """usage.cache_hit is the provider prompt cache (nothing sets it on a semantic-cache row);
+    cache rows must not dilute its denominator."""
+    import asyncio
+
+    import llm_router.config as cfg_mod
+    from llm_router import cost
+    db = _usage_db(tmp_path)
+    conn = sqlite3.connect(str(db))
+    conn.execute("UPDATE usage SET cache_hit = 1, cache_savings_usd = 0.5 WHERE provider = 'anthropic'")
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(db))
+    cfg_mod._config = None
+    try:
+        r = asyncio.run(cost.get_cache_savings("all", include_simulated=True))
+    finally:
+        cfg_mod._config = None
+    assert r["total_calls_cached"] == 1 and r["cache_hit_rate"] == 50.0  # 1 of 2 real calls, not 1 of 3

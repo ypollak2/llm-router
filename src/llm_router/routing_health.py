@@ -101,6 +101,7 @@ def routed_calls(days: int = 7, db: Path | None = None,
         rows = con.execute(
             "SELECT date(timestamp), provider, COUNT(*) FROM usage "
             "WHERE date(timestamp) >= ? AND COALESCE(is_simulated, 0) = 0 "
+            "AND COALESCE(provider, '') != 'cache' "  # excluded from every rate (own bucket: none)
             "GROUP BY 1, 2", (since,)).fetchall()
     finally:
         con.close()

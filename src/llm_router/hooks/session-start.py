@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 31
+# llm_router-hook-version: 32
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -133,6 +133,7 @@ def _weekly_digest_file():
 _HOST_IN_PER_M_FALLBACK  = 4.0
 _HOST_OUT_PER_M_FALLBACK = 20.0
 _FREE_PROVIDERS   = {"ollama", "codex", "gemini_cli"}
+_CACHE_PROVIDER   = "cache"  # semantic-cache-served call: not a paid/free/subscription call (provider_classes.py)
 
 # ── .env loader ───────────────────────────────────────────────────────────────
 # Hooks run outside the MCP server process and don't inherit its env.
@@ -1444,6 +1445,8 @@ def _weekly_digest() -> str:
         calls = total_in = total_out = 0
         saved = 0.0
         for provider, cnt, in_tok, out_tok, cost in rows:
+            if provider == _CACHE_PROVIDER:
+                continue
             calls     += cnt
             total_in  += in_tok
             total_out += out_tok
