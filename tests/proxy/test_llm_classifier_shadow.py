@@ -383,7 +383,9 @@ async def test_assemble_never_holds_the_event_loop(tmp_path, monkeypatch, simple
 
 
 async def test_the_scheduling_cost_is_inside_the_ledgered_decision_time(tmp_path, monkeypatch, simple):
-    """G1_proxy reads ``tier_decision_s``: a slow seam must show up there, not hide after the stamp."""
+    """``tier_decision_s`` is wall time, scheduling included: a slow seam must show up there, not
+    hide after the stamp. (G1_proxy turn-first no longer reads it since P09-11; the scheduling
+    cost has its own row field, ``tier_shadow_schedule_ms``, and kpi line, P09-13.)"""
     monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "shadow")
     FakeClassifier(monkeypatch)
     app = _shadow_app(tmp_path)
@@ -396,6 +398,37 @@ async def test_the_scheduling_cost_is_inside_the_ledgered_decision_time(tmp_path
     assert (await _post(app, _turn("rename the helper in util.py"))).status_code == 200
     assert _rows(tmp_path)[0]["tier_decision_s"] >= 0.05
     await app.state.cls_shadow.drain()
+
+
+async def test_the_schedule_ms_field_is_on_the_row_only_when_a_shadow_call_was_scheduled(
+        tmp_path, monkeypatch, simple):
+    """P09-13: ``tier_shadow_schedule_ms`` is the time spent in the scheduling seam, recorded
+    only when the seam scheduled a call; ``tier_decision_s`` still contains it."""
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "shadow")
+    FakeClassifier(monkeypatch)
+    app = _shadow_app(tmp_path)
+    real = app.state.cls_shadow._maybe_schedule
+
+    def slow(body, row):
+        time.sleep(0.05)
+        return real(body, row)
+    monkeypatch.setattr(app.state.cls_shadow, "_maybe_schedule", slow)
+    assert (await _post(app, _turn("rename the helper in util.py"))).status_code == 200
+    row = _rows(tmp_path)[0]
+    assert row["tier_shadow_schedule_ms"] >= 50.0
+    assert row["tier_decision_s"] * 1000.0 + 1.0 >= row["tier_shadow_schedule_ms"]  # decision_s rounds to ms
+    assert set(row) & {"text", "prompt"} == set()
+    # A continuation: the seam answers "skipped_continuation" (nothing scheduled), so no field.
+    assert (await _post(app, _req())).status_code == 200
+    assert "tier_shadow_schedule_ms" not in _rows(tmp_path)[1]
+    await app.state.cls_shadow.drain()
+
+
+async def test_the_schedule_ms_field_is_absent_with_the_shadow_off(tmp_path, monkeypatch, simple):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "off")
+    app = _shadow_app(tmp_path)
+    assert (await _post(app, _turn("rename the helper in util.py"))).status_code == 200
+    assert "tier_shadow_schedule_ms" not in _rows(tmp_path)[0]
 
 
 # --- 6: the long-first-prompt floor still floors, and is still shadowed --------------------

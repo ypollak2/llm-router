@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2 -> 3, playwright-compress 2 -> 3, cc-usage-track 3 -> 4, subagent-start 6 -> 7,
   usage-refresh 3 -> 4, agent-depth-release 5 -> 6. Rows written before the deploy have no session
   id and read as "not informative".
+- kpi G1_proxy: classifier-shadow scheduling cost (PLAN G1-proxy "shadow <= 30 ms"; `docs/bugs/P09-13.md`).
+  The proxy ledger row gains `tier_shadow_schedule_ms`, present only when a shadow call was scheduled
+  (milliseconds, no request content); `llm-router kpi` appends `shadow schedule p50 / p95 (n, sessions,
+  within/OVER 30ms target)` to G1_proxy from turn-first rows that carry it, "not informative" below
+  n=100 or 2 sessions. `tier_decision_s` is unchanged. Needs a proxy restart to start writing the field.
 - ledger completeness (PLAN v16 P0.8-d, D-32 = A; R-EVL-1, NFR-NUM): `usage` gains `reason`
   (additive migration `MIGRATE_USAGE_ADD_REASON`; earlier rows stay NULL and `llm-router kpi` reports
   them as missing, not back-filled). Every `usage` writer passes a short route code (`router_chain`,
