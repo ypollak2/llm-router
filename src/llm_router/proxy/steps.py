@@ -37,6 +37,7 @@ adds the text-free columns that tell the populations apart on every row.
 
 from __future__ import annotations
 
+import bisect
 import json
 import re
 from typing import Callable
@@ -233,12 +234,21 @@ def classify_text(body: dict, limit: int = 1500) -> str:
 
 _MODEL_COMMAND = "<command-name>/model</command-name>"
 
-#: An opening harness tag at the start of a line (leading blanks allowed). The tag
-#: list is shared with the prompt-corpus filter (``groundtruth_sources.HARNESS_TAGS``);
-#: each entry is a name prefix, so ``local-command`` also opens ``local-command-stdout``.
+#: Harness tags. The tag list is shared with the prompt-corpus filter
+#: (``groundtruth_sources.HARNESS_TAGS``); each entry is a name prefix, so
+#: ``local-command`` also opens ``local-command-stdout``. An open tag counts at the start
+#: of a line (leading blanks allowed); ``<system-reminder>`` also counts mid-line, as it
+#: did before TURNFIRST-1. Attributes are bounded and single-line: an unbounded ``\s[^>]*``
+#: crossed newlines and made a body of line-start ``<command-name foo`` lines with no
+#: ``>`` quadratic (100 lines on 3 MB took 1.9 s, 1,000 took 19 s).
+_TAG_NAME = r"(?:" + "|".join(re.escape(t) for t in HARNESS_TAGS) + r")[\w-]*"
+_ATTRS = r"(?:[ \t][^>\n]{0,200})?"
 _HARNESS_OPEN_RE = re.compile(
-    r"^[ \t]*<(?P<name>(?:" + "|".join(re.escape(t) for t in HARNESS_TAGS) + r")[\w-]*)(?:\s[^>]*)?>",
+    r"^[ \t]*<(?P<name>" + _TAG_NAME + r")" + _ATTRS + r">"
+    r"|<(?P<sr>system-reminder)" + _ATTRS + r">",
     re.I | re.M)
+_HARNESS_CLOSE_RE = re.compile(r"</(?P<name>" + _TAG_NAME + r")>", re.I)
+_REST_OF_LINE_BLANK = re.compile(r"[ \t]*(?:\n|\Z)")
 _TASK_NOTIFICATION = "task-notification"
 _CAVEAT_TAG = "local-command-caveat"  # the old plain-text "Caveat: ..." line is filed under this tag
 
@@ -247,33 +257,66 @@ def _is_command_tag(name: str) -> bool:
     return name.startswith("command-") or name.startswith("local-command")
 
 
+def _alone_on_line(text: str, start: int, end: int) -> bool:
+    """Only blanks between the line start and ``start`` and between ``end`` and the line end."""
+    i = start
+    while i > 0 and text[i - 1] in " \t":
+        i -= 1
+    return (i == 0 or text[i - 1] == "\n") and _REST_OF_LINE_BLANK.match(text, end) is not None
+
+
+def _first_in(starts: list[int], ends: list[int], lo: int, hi: int) -> int | None:
+    """End of the first span whose start is in ``[lo, hi)``, else None."""
+    i = bisect.bisect_left(starts, lo)
+    return ends[i] if i < len(starts) and starts[i] < hi else None
+
+
 def _strip_block(text: str) -> tuple[str, set[str]]:
     """``text`` with every harness block removed, and the tag names removed.
 
-    An open tag counts only at the start of a line, so a tag named inside a
-    sentence is left alone. Its block ends at the first close tag that stands
-    alone on its own line, before the next open of the same tag at a line start;
-    only when there is none does the first close tag anywhere end it (a one-line
-    block), and an unclosed block runs to the next such open or the end. So a
-    literal ``</system-reminder>`` quoted inside a reminder (a CLAUDE.md that
-    mentions it) cannot end the block early and leak the rest of the reminder."""
+    A block ends at the first close tag of its name that stands alone on its own
+    line, before the next line-start open of the same tag; only when there is none
+    does the first close tag anywhere end it (a one-line block). An unclosed block
+    that opened at a line start runs to that next open or the end; an unclosed
+    ``<system-reminder>`` that opened mid-line is left as text (a tag named inside a
+    sentence). So a literal ``</system-reminder>`` quoted inside a reminder (a
+    CLAUDE.md that mentions it) cannot end the block early and leak the rest of the
+    reminder. Tags and closes are found in one pass each and looked up by bisection,
+    so the cost is linear in ``text`` whatever its shape."""
+    opens = [(m.start(), m.end(), (m.group("name") or m.group("sr")).lower(), m.group("name") is not None)
+             for m in _HARNESS_OPEN_RE.finditer(text)]
+    if not opens:
+        return text, set()
+    line_opens: dict[str, list[int]] = {}
+    for s, _e, name, at_line_start in opens:
+        if at_line_start:
+            line_opens.setdefault(name, []).append(s)
+    closes: dict[str, tuple[list[int], list[int]]] = {}
+    strict: dict[str, tuple[list[int], list[int]]] = {}
+    for c in _HARNESS_CLOSE_RE.finditer(text):
+        name = c.group("name").lower()
+        for table in ((closes, strict) if _alone_on_line(text, c.start(), c.end()) else (closes,)):
+            starts, ends = table.setdefault(name, ([], []))
+            starts.append(c.start())
+            ends.append(c.end())
     seen: set[str] = set()
     out: list[str] = []
     pos = 0
-    while True:
-        m = _HARNESS_OPEN_RE.search(text, pos)
-        if m is None:
-            out.append(text[pos:])
-            break
-        out.append(text[pos:m.start()])
-        name = m.group("name")
-        seen.add(name.lower())
-        esc = re.escape(name)
-        nxt = re.compile(r"^[ \t]*<" + esc + r"(?:\s[^>]*)?>", re.I | re.M).search(text, m.end())
-        limit = nxt.start() if nxt is not None else len(text)
-        close = (re.compile(r"^[ \t]*</" + esc + r">[ \t]*$", re.I | re.M).search(text, m.end(), limit)
-                 or re.compile(r"</" + esc + r">", re.I).search(text, m.end(), limit))
-        pos = close.end() if close is not None else limit
+    for s, e, name, at_line_start in opens:
+        if s < pos:
+            continue  # inside a block already removed
+        nl = line_opens.get(name, [])
+        i = bisect.bisect_left(nl, e)
+        limit = nl[i] if i < len(nl) else len(text)
+        end = _first_in(*strict.get(name, ([], [])), e, limit)
+        if end is None:
+            end = _first_in(*closes.get(name, ([], [])), e, limit)
+        if end is None and not at_line_start:
+            continue  # an unclosed tag inside a sentence is text
+        out.append(text[pos:s])
+        seen.add(name)
+        pos = end if end is not None else limit
+    out.append(text[pos:])
     return "".join(out), seen
 
 

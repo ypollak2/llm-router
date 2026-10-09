@@ -193,3 +193,71 @@ async def test_every_ledger_row_carries_the_text_free_turn_fields(tmp_path, monk
     ]
     raw = (tmp_path / "proxy_calls.jsonl").read_text()
     assert MARKER not in raw and "lexer" not in raw and "semaphore" not in raw
+
+
+# ── review of #394: mid-line reminders, the close-tag anchor, ReDoS, fail-open ─
+
+def test_a_reminder_that_starts_mid_line_is_still_stripped():
+    """The pre-TURNFIRST-1 pattern stripped a closed ``<system-reminder>`` block anywhere."""
+    content = [{"type": "text", "text": f"fix the parser <system-reminder>{MARKER}</system-reminder> please"}]
+    assert steps._human_text(content) == "fix the parser  please"
+    multi = f"fix it <system-reminder>\n{MARKER}\n</system-reminder>\nthanks"
+    assert steps._human_text(multi) == "fix it \nthanks"
+
+
+def test_other_harness_tags_still_open_only_at_a_line_start():
+    typed = f"my notes say <task-notification>{MARKER}</task-notification> is noise"
+    assert steps._human_text(typed) == typed
+
+
+def test_a_close_tag_at_a_line_start_followed_by_text_does_not_end_the_block():
+    reminder = ("<system-reminder>\nCLAUDE.md quotes this line:\n</system-reminder> is how a reminder ends\n"
+                f"{MARKER} private rule text\n</system-reminder>")
+    assert steps._human_text([{"type": "text", "text": reminder}, {"type": "text", "text": "go"}]) == "go"
+
+
+def test_tag_patterns_cannot_cross_a_newline_or_run_unbounded():
+    """The complexity guard: an attribute run is single-line and at most 200 characters, so an open
+    tag with no ``>`` cannot make the scan revisit the rest of the body."""
+    rx = steps._HARNESS_OPEN_RE
+    assert rx.search("<command-name foo\nbar>") is None
+    assert rx.search("<system-reminder a\n>") is None
+    assert rx.search("<command-name " + "a" * 201 + ">") is None
+    assert rx.search("<command-name " + "a" * 199 + ">") is not None
+    assert rx.search("<command-name>") is not None
+
+
+def _adversarial(n: int) -> list:
+    return [{"type": "text", "text": "\n".join("<command-name foo" for _ in range(n)) + "\n" + "x" * 3_000_000}]
+
+
+@pytest.mark.timing
+def test_line_start_open_tags_without_a_close_bracket_stay_linear():
+    """Review of #394: 1,000 such lines on a 3 MB body took 19 s before the fix (100 took 1.9 s)."""
+    import time
+    content = _adversarial(1_000)
+    t0 = time.perf_counter()
+    text, tags = steps._human_parts(content)
+    assert time.perf_counter() - t0 < 0.2
+    assert tags == frozenset() and text.startswith("<command-name foo")
+
+
+async def test_a_failure_in_turn_fields_leaves_the_ledger_row_fail_open(tmp_path, monkeypatch):
+    from llm_router import prompt_key
+    from llm_router.proxy import server as ps
+
+    async def choose(text, pinned, *, anthropic=False):
+        return {"task_type": "query", "complexity": "simple", "chain_head": [], "model": None}
+    monkeypatch.setattr(pb, "tier_classify", choose)
+
+    def boom(body):
+        raise RuntimeError("turn_fields broke")
+    monkeypatch.setattr(ps, "turn_fields", boom)
+    app = _app(tmp_path, Upstream())
+    body = _body("what is a mutex?", "and a semaphore?", main=True)
+    assert (await _post(app, body)).status_code == 200
+    [row] = _rows(tmp_path)
+    assert row["text_sha"] == prompt_key.key("and a semaphore?") and row["has_mid_system"] is False
+    assert (row["is_main_thread"], row["is_first_call"], row["turn_origin"], row["tier_text_len"]) == (
+        None, None, None, None)
+    assert row["step_class"] == "turn_first"
