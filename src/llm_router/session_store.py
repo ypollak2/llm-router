@@ -450,6 +450,36 @@ def get_mode() -> str:
         return "all"
 
 
+#: Providers that keep session content on this machine (privacy mode `local`).
+LOCAL_PROVIDERS = ("local", "ollama", "codex", "gemini_cli")
+
+
+def allows_session_content(target_provider: str | None) -> bool:
+    """Whether session content may go to *target_provider* under :func:`get_mode`.
+
+    The one rule for every path that sends session content to a model
+    (``build_session_context`` here, ``context_pack.build_pack`` for its
+    ``recent`` section): ``off`` allows nothing; ``local`` allows only
+    :data:`LOCAL_PROVIDERS`.
+
+    RED2-04: block context egress to ANY non-free-local provider under
+    `local` (was a two-provider allowlist that let Perplexity through).
+
+    S2-5: "local" itself belongs in the allowlist. The hook passes
+    `target_provider="local"` — a category, not a provider name, meaning "the
+    free-local draft chain", which the free-tier-drafts filter has already
+    guaranteed. It was not in the list, so setting
+    LLM_ROUTER_SESSION_CONTEXT=local silently returned "" for every draft: the
+    privacy setting most likely to be chosen by someone who wants context to
+    stay on the machine was the one that switched context off entirely, with
+    no error. Masked until now only because the default mode is `all`.
+    """
+    mode = get_mode()
+    if mode == "off":
+        return False
+    return not (mode == "local" and target_provider not in LOCAL_PROVIDERS)
+
+
 # ── Recording ────────────────────────────────────────────────────────────────
 
 def _content_hash(content: str) -> str:
@@ -802,23 +832,7 @@ def build_session_context(
     truncates to *max_tokens*, keeping the newest events. Fails open to ``""``.
     """
     try:
-        mode = get_mode()
-        if mode == "off":
-            return ""
-        # RED2-04: block context egress to ANY non-free-local provider under
-        # `local` (was a two-provider allowlist that let Perplexity through).
-        #
-        # S2-5: "local" itself belongs in the allowlist. The hook passes
-        # `target_provider="local"` — a category, not a provider name, meaning "the
-        # free-local draft chain", which the free-tier-drafts filter has already
-        # guaranteed. It was not in the list, so setting
-        # LLM_ROUTER_SESSION_CONTEXT=local silently returned "" for every draft: the
-        # privacy setting most likely to be chosen by someone who wants context to
-        # stay on the machine was the one that switched context off entirely, with
-        # no error. Masked until now only because the default mode is `all`.
-        if mode == "local" and target_provider not in (
-            "local", "ollama", "codex", "gemini_cli"
-        ):
+        if not allows_session_content(target_provider):
             return ""
 
         records = load_events(session_id, limit=200, project_root=project_root)

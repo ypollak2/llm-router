@@ -37,6 +37,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Existing `~/.llm-router/result_cache.db` files are left on disk, unread and unmigrated.
 
 ### Added
+- context-pack builder core (PLAN v16 P1.1 tasks 1, 2, 4-core; R-CTX-1/2/4): new library module
+  `llm_router/context_pack.py` with `build_pack(request, messages=None, *, session_id, transcript_path,
+  project_root, target_window, door) -> ContextPack` and `messages_for(door, ...)`. The request is kept
+  verbatim; `recent` is the last 7 messages with tool_use/tool_result rendered as text (a tool block over
+  4,000 chars keeps head 1,500 + `[…truncated N chars…]` + tail 1,500); `mode="full"` carries the whole
+  conversation when it, the request and the instructions fit 0.8 x `target_window` and the whole
+  conversation was read; only the last 2 MB of a transcript is read. `project` comes from
+  `context_injection.inject` (OKF, semantic pack, repo state), `instructions` is a CLAUDE.md/AGENTS.md
+  digest (headings and rule lines, <= 1,500 tokens, cached by content hash), `summary` stays `None` until
+  P1.2. Errors in any section yield an empty section. Formats: Claude Code transcript JSONL, Codex rollout
+  JSONL, Anthropic Messages, OpenAI chat, Responses-API items. Instructions come from the project's
+  CLAUDE.md, .claude/CLAUDE.md and AGENTS.md only; nothing under `~/.claude` is ever read, including via
+  `project_root == $HOME` or a symlink (owner decision D-43), and a `project_root` that resolves to
+  `$HOME` is no project at all: no instruction files and no project section are read from the home root. `target_provider=` applies the session
+  privacy rule to `recent` (new `session_store.allows_session_content`, now shared with
+  `build_session_context`; behaviour unchanged there); `context=` carries an MCP caller-context string
+  that never qualifies for `mode="full"`; an unknown `door` raises `ValueError`. No door calls it yet
+  (the 7 door PRs follow); no hook changed.
+- repo state reads are cheaper (PLAN v16 P1.1, context-pack 50 ms budget): `repo_facts.collect` runs two
+  git calls instead of five (`status --porcelain --branch --no-ahead-behind` and one `log` line); it needs
+  git >= 2.17, and on an older git it now returns no repo state instead of answering. New opt-in
+  `repo_facts.render(root, reuse=True)` (via `context_injection.inject(..., reuse_repo_state=True)`) reuses
+  the block for the same root while `.git/HEAD`, `.git/index` and `.git/logs/HEAD` are unchanged, for at
+  most 10 s; only the context pack opts in, so every existing caller still reads git on each call. Under
+  reuse an untracked file or unstaged edit can lag by up to 10 s. Benchmark
+  `scripts/bench/context_pack_bench.py` (synthetic, Apple M5 Pro, 2026-10-09, one run, n=100 each), door
+  shape = 10 MB transcript + temp git repo + CLAUDE.md + semantic default: before (5 git calls, no reuse)
+  p50 45.78 / p95 51.66 ms; after, every call reading git p50 32.05 / p95 34.84 ms; after, reuse hit p50
+  17.23 / p95 19.62 ms. Transcript only: 10 MB p50 0.71 / p95 0.78 ms; 1.99 MB parsed whole p50 5.61 /
+  p95 6.66 ms.
 - ledger completeness (PLAN v16 P0.8-e): a call the semantic cache answers now writes a `usage` row
   (`reason = "cache_hit"`, provider `cache`, model `cache/<cached model>`, 0 tokens, $0) carrying the
   caller's session id, and `semantic_cache_lookups` gains a nullable `session_id` (additive migration;
