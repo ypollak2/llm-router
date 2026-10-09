@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- statusline first render (P0.9-c repair round 2, docs/bugs/STATUSLINE-COLD-1.md): the first render of a session built the segment
+  cache inline (interpreter probe plus build, 80-200 ms; live p95 234 ms, n=47, after #370). It now starts the detached,
+  single-flight builder and prints the line with `segments pending`; the cache lands for the next render. `scripts/statusline_wall.py`
+  `first` mode now uses a new session per run (it had reused one id and skipped the path), plus a `first_ever` mode.
+  Bench, scratch HOME, 6000-line transcript, n=60 per mode: first-render p50/p95 79/82 ms -> 20/25 ms, first_ever 103/108 -> 21/23 ms.
 - test infra (LINEAGE-PERF-1, docs/bugs/LINEAGE-PERF-1.md): the `LineageStore.record` p95 <= 11 ms budget failed twice on shared
   runners (p95 64.77 and 34.61 ms, n=50, code unchanged) because it measured fsync latency. New deterministic test
   `tests/qa/test_lineage_record_mechanism.py` pins connects, closes, transactions, statements, python fsyncs and the

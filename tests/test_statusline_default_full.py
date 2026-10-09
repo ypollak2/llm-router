@@ -25,6 +25,9 @@ from pathlib import Path
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from statusline_prime import render_full  # noqa: E402
+
 from tests.test_statusline_savings import _seed_savings_log, _seed_usage_db
 
 REPO = Path(__file__).resolve().parents[1]
@@ -160,7 +163,9 @@ def test_default_output_matches_the_pre_273_script(tmp_path, name):
     # P0.9-c: the segments the script reads from its cache are computed by this file.
     shutil.copy2(SEGMENTS, hooks / "llm_router_statusline_segments.py")
     a = _run(old, home, extra, stdin)
-    b = _run(new, home, extra, stdin)
+    # New script: the first render starts the detached segment build (P0.9-c r2); the comparison
+    # is of the full line, so render again once the cache exists.
+    b = render_full(lambda: _run(new, home, extra, stdin), home)
     assert a.returncode == b.returncode == 0, (a.stderr, b.stderr)
     assert a.stdout.strip(), f"{name}: the reference printed nothing, the comparison is empty"
     assert b.stdout == a.stdout, f"{name}:\n pre-273: {a.stdout!r}\n now:     {b.stdout!r}"
