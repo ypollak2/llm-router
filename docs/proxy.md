@@ -483,11 +483,12 @@ narrow, logged exception, off unless `haiku_arm_share` is set (a fraction 0-1; a
   main-thread human turn (`step_kind == turn_first`; side calls, tool-result continuations and sub-agent first
   calls stay pinned), past the first call, no `opus:` / `/model` pin, no correction signal, a body Haiku accepts
   (no media, no mid-conversation system message, under the context limit), and the classifier says `query` /
-  `simple`. No session id = never armed.
+  `simple`. No session id = never armed. Sub-agent calls (no `Agent`/`Task` launcher in `tools`, on any call, not only the first) and sessions tagged headless / harness / research are never armed. `haiku_arm_eligible` (default `[query/simple]`) lists the `task/complexity` pairs that qualify.
 - **Ledger:** only in-share turns get `tier_arm`, `tier_arm_assignment` (`treatment` / `ineligible`),
-  `tier_arm_reason`, `tier_arm_bucket`. A treated row has `tier_reason: haiku_rewrite` and `tier_body_rewrite: haiku`,
+  `tier_arm_reason`, `tier_arm_bucket`, `tier_arm_turn`. If Anthropic refuses the Haiku call and the original body is retried, the row becomes `treatment_retried_original` (served on the pinned model); **Haiku counts must also require `served_model` to be Haiku**. A treated row has `tier_reason: haiku_rewrite` and `tier_body_rewrite: haiku`,
   so GE4 shadow pairs and `kpi --haiku-watch` count it with no change. No prompt text. Audit a row by recomputing
   `haiku_arm.bucket(session_id, turn)`.
+- **Requires `haiku_rewrite: true`**, which also turns the ordinary Haiku rewrite on for non-pinned traffic. `haiku_fold_system` decides whether bodies with mid-conversation `role: system` messages (every real Claude Code call today) are eligible; without it most real traffic is `haiku_body_blocked`.
 - **Kill switch:** the policy is read at proxy start. Set `haiku_arm_share: 0` (or delete the key) and restart the
   proxy. `haiku_rewrite: false` (or the Haiku guard's override file) also turns the arm off, with no restart for
   the guard's own live update.

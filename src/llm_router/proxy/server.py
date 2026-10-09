@@ -54,7 +54,7 @@ from llm_router.local_agent import DEFAULT_MAX_PROMPT_TOKENS, LocalAgentConfig, 
 from llm_router.local_agent import capability as la_capability
 from llm_router.local_agent.compact import session_cwd as la_session_cwd
 from llm_router import failopen, local_models, prompt_key, shadow_frontier
-from llm_router.proxy import haiku_guard, ledger, llm_shadow, local_mode, local_shadow, okf_context
+from llm_router.proxy import haiku_arm, haiku_guard, ledger, llm_shadow, local_mode, local_shadow, okf_context
 
 from llm_router.proxy.backend_health import (
     DEFAULT_COOLDOWN_S,
@@ -703,7 +703,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if decision.arm is not None:
             # D-31 experiment arm: ids and enums only, never request text.
             row.update(tier_arm=decision.arm, tier_arm_assignment=decision.arm_assignment,
-                       tier_arm_reason=decision.arm_reason, tier_arm_bucket=decision.arm_bucket)
+                       tier_arm_reason=decision.arm_reason, tier_arm_bucket=decision.arm_bucket,
+                       tier_arm_turn=decision.arm_turn)
         for name, ms in (decision.phases_ms or {}).items():
             _add_phase(row, name, ms)
         if cls_shadow.maybe_schedule(body, row) != llm_shadow.OFF:
@@ -748,6 +749,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                     row.update(served_model=row.get("requested_model"), tier_switch=False,
                                tier_switch_cost_usd=None)
                     row.pop("tier_body_rewrite", None)
+                    if row.get("tier_arm_assignment") == haiku_arm.ASSIGNED:
+                        # The arm's Haiku call was refused; the pinned model answered.
+                        row["tier_arm_assignment"] = haiku_arm.TREATMENT_RETRIED
                 if on_retry is not None:
                     on_retry()
                 raw, body = original

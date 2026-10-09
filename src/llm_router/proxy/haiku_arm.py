@@ -40,7 +40,35 @@ WHY_NOT_ABOVE_HAIKU = "requested_not_above_haiku"
 WHY_BODY = "haiku_body_blocked"
 WHY_NOT_SIMPLE_QA = "not_simple_qa"
 WHY_CLASSIFY_ERROR = "classify_error"
+WHY_NOT_MAIN_THREAD = "not_main_thread"
+WHY_SESSION_KIND = "session_kind"
 WHY_QUERY_SIMPLE = "simple_qa"  # the reason of an assigned row
+TREATMENT_RETRIED = "treatment_retried_original"  # Haiku 4xx'd; the original (pinned model) body was sent
+DEFAULT_ELIGIBLE = (("query", "simple"),)
+ORGANIC_KINDS = (None, "organic")  # None = never tagged; harness / research / headless are never armed
+_MAIN_THREAD_TOOLS = frozenset({"Agent", "Task"})
+
+
+def parse_eligible(value: object) -> tuple[tuple[str, str], ...]:
+    """``haiku_arm_eligible`` -> (task_type, complexity) pairs; missing = ``query/simple`` only."""
+    if value is None:
+        return DEFAULT_ELIGIBLE
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ValueError(f"haiku_arm_eligible must be a non-empty list of 'task/complexity', got {value!r}")
+    pairs = []
+    for v in value:
+        parts = str(v).split("/")
+        if len(parts) != 2 or not all(parts):
+            raise ValueError(f"haiku_arm_eligible entry must look like 'query/simple', got {v!r}")
+        pairs.append((parts[0], parts[1]))
+    return tuple(pairs)
+
+
+def is_main_thread(body: dict) -> bool:
+    """Claude Code gives the main thread a sub-agent launcher (``Agent``/``Task``) and a
+    sub-agent none, on every call, not only the first."""
+    names = {t.get("name") for t in body.get("tools") or [] if isinstance(t, dict)}
+    return bool(names & _MAIN_THREAD_TOOLS)
 
 
 def parse_share(value: object) -> float:

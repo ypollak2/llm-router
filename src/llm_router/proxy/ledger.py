@@ -101,15 +101,17 @@ Claude-tier rewrite fields (only when the proxy runs with ``--tiers on`` or
   tier_quota_state      ok / stale / unknown / off -- only ``ok`` drives the
                         ``quota_pressure`` step; the others change nothing
   tier_decision_s       time the decision added
-  tier_arm, tier_arm_assignment, tier_arm_reason, tier_arm_bucket
+  tier_arm, tier_arm_assignment, tier_arm_reason, tier_arm_bucket, tier_arm_turn
                         D-31 Haiku experiment arm (``proxy.haiku_arm``); present only on a
                         turn whose hash fell inside ``haiku_arm_share``. ``tier_arm`` is the
                         arm name; ``tier_arm_assignment`` is ``treatment`` (served on Haiku
                         despite ``pinned_models``; ``tier_reason`` is ``haiku_rewrite``, so
                         GE4 shadow pairs and the Haiku watch pick it up) or ``ineligible``
-                        (stayed ``config_pinned``); ``tier_arm_reason`` says why;
-                        ``tier_arm_bucket`` is sha256(session|turn|salt) as a fraction, so
-                        anyone can recompute the assignment. Absent = not in the arm
+                        (stayed ``config_pinned``), or ``treatment_retried_original`` (Haiku
+                        4xx'd and the pinned model answered: NOT a Haiku row);
+                        ``tier_arm_reason`` says why; ``tier_arm_turn`` is the turn id and
+                        ``tier_arm_bucket`` is bucket(session_id, turn) = sha256(session|turn|salt)
+                        as a full-precision fraction, so anyone can recompute the assignment. Absent = not in the arm
 
 Cost fields, on EVERY row (``proxy.cost_accounting``; for rows written since #261,
 null = unknown, never 0; rows written before #261 carry zeros for unknown usage):

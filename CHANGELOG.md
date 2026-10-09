@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pinned_models`; every other pinned turn stays pinned. Assignment is `sha256(session_id|turn|salt)`, not a draw.
   Ledger rows of in-share turns carry `tier_arm`, `tier_arm_assignment` (`treatment`/`ineligible`),
   `tier_arm_reason`, `tier_arm_bucket`; treated rows have `tier_reason: haiku_rewrite`, so GE4 shadow pairs and the
-  Haiku watch count them. Needs `haiku_rewrite: true` (the Haiku guard override turns the arm off). Read at proxy
+  Haiku watch count them. Needs `haiku_rewrite: true` (the Haiku guard override turns the arm off). Main-thread (Agent/Task tool present) organic or untagged sessions only; optional `haiku_arm_eligible: [query/simple]` pairs; a Haiku 4xx retried on the pinned model is relabelled `treatment_retried_original`; rows carry `tier_arm_turn`. Read at proxy
   start: set 0 or delete the key and restart to kill it. No hook changed. See `docs/proxy.md`.
 - hooks (PLAN v16 P0.9-g, AMEND R8 A.3): `scripts/hook_wall.py` (`llm_router.hook_wall`) times the five
   sync hooks with no latency MUST (`enforce-route`, `bash-compress`, `playwright-compress`,

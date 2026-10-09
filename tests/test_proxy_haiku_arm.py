@@ -45,6 +45,8 @@ def _body(*texts: str, model=OPUS, sid: str | None = None) -> dict:
             msgs.append({"role": "assistant", "content": [{"type": "text", "text": "ok"}]})
         msgs.append({"role": "user", "content": [{"type": "text", "text": t}]})
     body["messages"] = msgs
+    # the main thread carries the sub-agent launcher; a sub-agent does not
+    body["tools"] = body["tools"] + [{"name": "Agent", "description": "d", "input_schema": {"type": "object"}}]
     if sid:
         body["metadata"] = {"user_id": json.dumps({"session_id": sid})}
     return body
@@ -170,11 +172,44 @@ async def test_ineligible_in_bucket_turns_keep_the_pin_and_say_why(name, make, t
 async def test_first_call_and_subagent_first_call_stay_pinned():
     first = _body(TURN3[0])
     d = await _decide(_policy(), first, _sid_for(1))
-    assert (d.arm_assignment, d.arm_reason, d.reason) == (arm.INELIGIBLE, arm.WHY_NOT_TURN_FIRST,
-                                                          pt.REASON_CONFIG_PINNED)  # no Agent tool = sub-agent shape
-    first["tools"].append({"name": "Agent", "description": "d", "input_schema": {"type": "object"}})
-    d = await _decide(_policy(), first, _sid_for(1))
     assert (d.arm_reason, d.reason) == (arm.WHY_FIRST_CALL, pt.REASON_CONFIG_PINNED)
+    first["tools"] = [t for t in first["tools"] if t["name"] != "Agent"]
+    d = await _decide(_policy(), first, _sid_for(1))
+    assert d.arm_reason == arm.WHY_NOT_TURN_FIRST
+
+
+async def test_subagent_follow_up_turn_is_not_armed():
+    body = _body(*TURN3)
+    body["tools"] = [t for t in body["tools"] if t["name"] != "Agent"]  # newest message is text, 5 messages
+    d = await _decide(_policy(), body, SID_IN)
+    assert (d.reason, d.served_model, d.arm_assignment, d.arm_reason) == (
+        pt.REASON_CONFIG_PINNED, OPUS, arm.INELIGIBLE, arm.WHY_NOT_MAIN_THREAD)
+
+
+@pytest.mark.parametrize("kind,armed", [("headless", False), ("harness", False), ("research", False),
+                                        ("organic", True), (None, True)])
+async def test_only_organic_or_untagged_sessions_are_armed(monkeypatch, kind, armed):
+    from llm_router import session_kind
+    monkeypatch.setattr(session_kind, "kind_of", lambda sid: kind)
+    d = await _decide(_policy(), _body(*TURN3), SID_IN)
+    assert (d.arm_assignment == arm.ASSIGNED) is armed
+    if not armed:
+        assert (d.reason, d.arm_reason) == (pt.REASON_CONFIG_PINNED, arm.WHY_SESSION_KIND)
+
+
+async def test_turn_and_full_precision_bucket_are_recorded_and_recomputable():
+    d = await _decide(_policy(), _body(*TURN3), SID_IN)
+    assert d.arm_turn == 5 and d.arm_bucket == arm.bucket(SID_IN, d.arm_turn) < SHARE
+
+
+async def test_eligible_pairs_are_configurable_and_default_to_query_simple():
+    assert pt.ClaudeTierPolicy.from_dict(_raw()).haiku_arm_eligible == (("query", "simple"),)
+    wide = _policy(haiku_arm_eligible=["query/simple", "analyze/simple"])
+    assert (await _decide(wide, _body(*TURN3), SID_IN, _classify("analyze", "simple"))).arm_assignment == arm.ASSIGNED
+    assert (await _decide(_policy(), _body(*TURN3), SID_IN, _classify("analyze", "simple"))).arm_reason == arm.WHY_NOT_SIMPLE_QA
+    for bad in ([], "query/simple", ["query"]):
+        with pytest.raises(ValueError, match="haiku_arm_eligible"):
+            _policy(haiku_arm_eligible=bad)
 
 
 async def test_classifier_failure_stays_pinned():
@@ -293,3 +328,30 @@ async def test_ledger_rows_carry_the_arm_and_no_prompt_text(tmp_path, monkeypatc
     assert (t["served_model"], t["tier_body_rewrite"]) == (HAIKU, "haiku")
     assert o["tier_reason"] == pt.REASON_CONFIG_PINNED and "tier_arm" not in o
     assert secret not in (tmp_path / "proxy_calls.jsonl").read_text()
+
+
+async def test_haiku_4xx_retry_relabels_the_arm_row_as_not_a_haiku_row(tmp_path, monkeypatch):
+    from llm_router.proxy import backends as pb
+
+    async def choose(text, pinned, *, anthropic=False):
+        return {"task_type": "query", "complexity": "simple", "chain_head": [], "model": None}
+    monkeypatch.setattr(pb, "tier_classify", choose)
+    policy_file = tmp_path / "tiers.yaml"
+    policy_file.write_text(yaml.safe_dump(_raw()))
+    cfg = ps.ProxyConfig(steps=frozenset(), upstream="http://127.0.0.1:9", tiers=ps.TIERS_ON,
+                         tier_policy=str(policy_file), ledger_path=tmp_path / "proxy_calls.jsonl")
+    seen: list[str] = []
+    ok = Upstream()
+
+    def up(request):
+        seen.append(json.loads(request.content)["model"])
+        if len(seen) == 1:
+            return httpx.Response(400, json={"type": "error", "error": {"type": "invalid_request_error", "message": "no"}})
+        return ok(request)
+    app = ps.build_app(cfg, client=httpx.AsyncClient(transport=httpx.MockTransport(up)))
+    assert (await _post(app, _body(*TURN3, sid=SID_IN))).status_code == 200
+    assert seen == [HAIKU, OPUS]
+    row = ledger.read_rows(tmp_path / "proxy_calls.jsonl")[-1]
+    assert row["served_model"] == OPUS and row["tier_retry"]["status"] == 400
+    assert row["tier_arm_assignment"] == arm.TREATMENT_RETRIED
+    assert row["tier_arm_turn"] == 5
