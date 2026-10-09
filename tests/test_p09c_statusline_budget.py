@@ -27,6 +27,9 @@ from pathlib import Path
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from statusline_prime import render_full, wait_for_cache  # noqa: E402
+
 from llm_router import statusline_segments as seg
 
 REPO = Path(__file__).resolve().parent.parent
@@ -108,8 +111,10 @@ def _wait(predicate, timeout=20.0):
 
 
 def test_a_fresh_cache_render_starts_no_process_but_the_clock(home, tmp_path):
-    out0, _ = _run(home, tmp_path, _stdin(tmp_path))  # first render: fills the cache
-    assert _cache(home).exists()
+    _run(home, tmp_path, _stdin(tmp_path))  # first render: starts the detached build
+    assert wait_for_cache(home)
+    out0, _ = _run(home, tmp_path, _stdin(tmp_path))  # cached, nothing pending
+    assert "segments pending" not in out0
     out, spawned = _run(home, tmp_path, _stdin(tmp_path))
     assert out.strip(), "the warm render printed nothing"
     extra = set(spawned) - HOT_PATH_ALLOWED
@@ -120,10 +125,11 @@ def test_a_fresh_cache_render_starts_no_process_but_the_clock(home, tmp_path):
     assert out == out0, "a cached render differs from the synchronous one"
 
 
-def test_the_first_render_computes_synchronously_and_writes_the_cache(home, tmp_path):
+def test_the_first_render_prints_a_degraded_line_and_the_cache_lands_in_the_background(home, tmp_path):
     assert not _cache(home).exists()
     out, _ = _run(home, tmp_path, _stdin(tmp_path), shims=False)
-    assert "proj" in out and "smart" in out
+    assert "proj" in out and "smart" in out and "segments pending" in out
+    assert wait_for_cache(home), "the detached build never wrote the cache"
     kv = _read_kv(_cache(home))
     assert kv["v"] == "1" and kv["written"].isdigit() and kv["health"] in {"ok", "degraded", "idle", "down"}
 
@@ -131,7 +137,7 @@ def test_the_first_render_computes_synchronously_and_writes_the_cache(home, tmp_
 def test_context_is_read_from_the_transcript_on_the_first_render(home, tmp_path):
     t = tmp_path / "t.jsonl"
     t.write_text(json.dumps({"message": {"usage": {"input_tokens": 1000, "cache_read_input_tokens": 49000}}}) + "\n")
-    out, _ = _run(home, tmp_path, _stdin(tmp_path, transcript_path=str(t)), shims=False)
+    out = render_full(lambda: _run(home, tmp_path, _stdin(tmp_path, transcript_path=str(t)), shims=False)[0], home)
     assert "🧠 50.0k" in out and "25%" in out, out
 
 
@@ -344,14 +350,16 @@ def test_with_no_usable_python_warm_renders_spawn_nothing_but_the_clock(home, tm
 
 
 @pytest.mark.timing
-def test_a_broken_refresher_costs_one_sync_call_per_five_seconds_and_says_so(home, tmp_path):
+def test_a_broken_refresher_costs_one_background_launch_per_five_seconds_and_says_so(home, tmp_path):
     calls = tmp_path / "calls.log"
     fake = tmp_path / "fakepy"
     fake.write_text(f'#!/bin/bash\necho x >> {calls}\nexit 1\n')
     fake.chmod(0o755)
     (home / ".llm-router" / ".statusline_python").write_text(f"{fake}\n")
     outs = [_run(home, tmp_path, _stdin(tmp_path))[0] for _ in range(3)]
-    assert calls.read_text().count("x") == 1, "every render paid the failing synchronous call"
+    assert _wait(lambda: calls.exists() and calls.read_text().count("x") >= 1), "no launch was made"
+    time.sleep(0.5)  # a second launch from a later render would have landed by now
+    assert calls.read_text().count("x") == 1, "every render launched the failing builder"
     assert all("segments pending" in o and "smart" in o for o in outs), outs
 
 
@@ -373,7 +381,8 @@ def test_a_plain_interpreter_answer_is_reprobed_after_its_ttl(home, tmp_path):
     fake.chmod(0o755)
     stale = int(time.time()) - 3600
     (home / ".llm-router" / ".statusline_python").write_text(f"{fake}\n{stale}\nplain\n")
-    _run(home, tmp_path, _stdin(tmp_path), shims=False)  # first render: sync, re-probes
+    _run(home, tmp_path, _stdin(tmp_path), shims=False)  # first render: the detached build re-probes
+    assert wait_for_cache(home)
     lines = (home / ".llm-router" / ".statusline_python").read_text().split("\n")
     assert lines[0] != str(fake) and lines[2] in {"full", "plain"}, lines
 
@@ -432,3 +441,62 @@ def test_a_leading_zero_is_decimal_not_octal(home, tmp_path, key):
 def test_a_percentage_above_100_is_clamped(home, tmp_path):
     r = _render_with(home, tmp_path, ctx_pct="999")
     assert "100%" in r.stdout and r.stderr == ""
+
+
+# ── repair round 2: the first render of a session never builds inline ────────
+
+
+def _blocking_builder(tmp_path: Path, home: Path) -> tuple[Path, Path, Path]:
+    """A stand-in builder that records its start and pid, then blocks until released.
+    If the render waited for the builder, it could not return while this is blocked."""
+    started, pidf, release = tmp_path / "started.log", tmp_path / "builder.pid", tmp_path / "release"
+    fake = tmp_path / "blockpy"
+    fake.write_text(
+        "#!/bin/bash\n"
+        # pid first (atomic rename), then the start mark: a test that sees the mark can read the pid
+        f"echo $$ > {pidf}.tmp && mv {pidf}.tmp {pidf}\n"
+        f"echo x >> {started}\n"
+        f"for i in $(seq 1 300); do [ -e {release} ] && exit 1; sleep 0.1; done\n"
+        "exit 1\n"
+    )
+    fake.chmod(0o755)
+    (home / ".llm-router" / ".statusline_python").write_text(f"{fake}\n")
+    return started, pidf, release
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def test_the_first_render_returns_while_the_cache_build_is_still_running(home, tmp_path):
+    """Mechanism, not wall time: the builder is held open by the test. A render that built
+    the cache inline could not have returned before the builder exited (it would block for
+    the builder's own 30 s ceiling and the pid would be dead by now)."""
+    started, pidf, release = _blocking_builder(tmp_path, home)
+    out, _ = _run(home, tmp_path, _stdin(tmp_path), shims=False)
+    try:
+        assert "proj" in out and "smart" in out and "segments pending" in out, out
+        assert _wait(lambda: started.exists(), 10), "the render never started the builder"
+        pid = int(pidf.read_text().split()[0])
+        assert _alive(pid), "the builder had already exited when the render returned: it ran inline"
+        # single-flight: renders inside the 5 s window do not start a second builder
+        _run(home, tmp_path, _stdin(tmp_path), shims=False)
+        _run(home, tmp_path, _stdin(tmp_path), shims=False)
+        time.sleep(0.3)
+        assert started.read_text().count("x") == 1, "a second render started a second builder"
+    finally:
+        release.write_text("")
+        if pidf.exists():
+            _wait(lambda: not _alive(int(pidf.read_text().split()[0])), 10)
+
+
+def test_the_render_path_has_no_synchronous_builder_call():
+    """Static pin of the same fact: nothing on the script's render path waits for _seg_exec."""
+    text = STATUSLINE.read_text()
+    assert '_seg_run sync' not in text and '"sync"' not in text, "a synchronous builder call is back"
+    body = text.split("_seg_run() {", 1)[1].split("\n}", 1)[0]
+    assert "&" in body and "_seg_exec" in body, "_seg_run must detach the builder"
