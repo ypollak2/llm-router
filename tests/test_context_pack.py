@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -86,6 +87,24 @@ def test_full_mode_threshold_is_point_eight_of_the_window():
     at = cp.build_pack("r" * 40, msgs, target_window=window_at, door="proxy")
     below = cp.build_pack("r" * 40, msgs, target_window=int(whole / 0.8) - 2, door="proxy")
     assert at.mode == "full" and below.mode == "pack"
+
+
+def test_full_mode_boundary_is_inclusive_at_exactly_point_eight():
+    # 400 + 360 chars -> 100 + 90 tokens, request 40 chars -> 10: whole = 200.
+    msgs = [{"role": "user", "content": "u" * 400}, {"role": "assistant", "content": "a" * 360}]
+    assert cp.build_pack("r" * 40, msgs, target_window=250, door="proxy").mode == "full"
+    assert cp.build_pack("r" * 40, msgs, target_window=249, door="proxy").mode == "pack"
+
+
+def test_instructions_count_toward_the_full_mode_check(tmp_path):
+    msgs = [{"role": "user", "content": "u" * 400}, {"role": "assistant", "content": "a" * 360}]
+    bare = cp.build_pack("r" * 40, msgs, project_root=str(tmp_path), target_window=250,
+                         door="proxy")
+    assert bare.mode == "full" and bare.instructions == ""
+    (tmp_path / "CLAUDE.md").write_text("# Synthetic heading\n- synthetic rule\n")
+    ruled = cp.build_pack("r" * 40, msgs, project_root=str(tmp_path), target_window=250,
+                          door="proxy")
+    assert ruled.instructions and ruled.mode == "pack"
 
 
 def test_no_conversation_source_never_claims_full():
@@ -248,6 +267,27 @@ def test_tail_window_with_few_messages_drops_the_possibly_partial_oldest(tmp_pat
         {"role": "user", "content": "synthetic last ask"}]
 
 
+def test_a_whole_oldest_message_at_the_window_start_is_kept(tmp_path):
+    path = tmp_path / "huge_result.jsonl"
+    with open(path, "w") as fh:
+        fh.write(_cc("user", [{"type": "tool_result", "content": "r" * (cp.TAIL_BYTES + 200_000)}]))
+        fh.write(_cc("user", "synthetic follow-up"))
+        fh.write(_cc("assistant", [{"type": "text", "text": "synthetic reply"}], "mZ"))
+    assert cp.messages_for("hook", transcript_path=str(path)) == [
+        {"role": "user", "content": "synthetic follow-up"},
+        {"role": "assistant", "content": "synthetic reply"}]
+
+
+def test_reverse_path_drops_a_trailing_request_copy_and_keeps_seven(big_transcript, tmp_path):
+    src, n = big_transcript
+    path = tmp_path / "with_request.jsonl"
+    path.write_bytes(src.read_bytes() + _cc("user", "synthetic current request").encode())
+    pack = cp.build_pack("synthetic current request", transcript_path=str(path),
+                         target_window=10, door="hook")
+    assert [m["content"].split(" p")[0] for m in pack.recent] == [
+        f"synthetic turn {i}" for i in range(n - 7, n)]
+
+
 def test_partial_first_line_in_the_tail_window_is_dropped(tmp_path):
     path = tmp_path / "t.jsonl"
     path.write_bytes(b'{"broken": "' + b"z" * 100 + b'"}\n{"ok": 1}\n')
@@ -290,19 +330,41 @@ def test_instructions_digest_is_cached_by_file_hash(tmp_path, monkeypatch):
     assert len(calls) == 2 and "- two" in third.instructions
 
 
-def test_private_global_claude_md_is_not_read(tmp_path):
-    home = Path.home()  # the suite's sandboxed HOME (tests/conftest.py)
-    (home / ".claude").mkdir(exist_ok=True)
+@pytest.fixture
+def fake_home(tmp_path, monkeypatch):
+    """HOME pointed at a fresh tmp dir, so no test can touch a real ~/.claude."""
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
     (home / ".claude" / "CLAUDE.md").write_text("# Global\n- synthetic private rule\n")
-    try:
-        (tmp_path / "CLAUDE.md").write_text("# Project\n")
-        with_root = cp.build_pack("q", [], project_root=str(tmp_path), target_window=10,
-                                  door="proxy")
-        without = cp.build_pack("q", [], target_window=10, door="proxy")
-        assert with_root.instructions.splitlines() == ["[CLAUDE.md]", "# Project"]
-        assert without.instructions == ""
-    finally:
-        (home / ".claude" / "CLAUDE.md").unlink()
+    monkeypatch.setenv("HOME", str(home))
+    assert Path.home() == home
+    return home
+
+
+def test_private_global_claude_md_is_not_read(tmp_path, fake_home):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "CLAUDE.md").write_text("# Project\n")
+    with_root = cp.build_pack("q", [], project_root=str(proj), target_window=10, door="proxy")
+    without = cp.build_pack("q", [], target_window=10, door="proxy")
+    assert with_root.instructions.splitlines() == ["[CLAUDE.md]", "# Project"]
+    assert without.instructions == ""
+
+
+def test_project_root_at_home_does_not_reach_the_private_file(fake_home):
+    pack = cp.build_pack("q", [], project_root=str(fake_home), target_window=10, door="proxy")
+    assert "synthetic private rule" not in pack.instructions
+    assert pack.instructions == ""
+
+
+def test_a_project_file_symlinked_to_the_private_file_is_not_read(tmp_path, fake_home):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "CLAUDE.md").symlink_to(fake_home / ".claude" / "CLAUDE.md")
+    (proj / "AGENTS.md").write_text("# Agents\n- synthetic project rule\n")
+    pack = cp.build_pack("q", [], project_root=str(proj), target_window=10, door="proxy")
+    assert "synthetic private rule" not in pack.instructions
+    assert pack.instructions.splitlines() == ["[AGENTS.md]", "# Agents", "- synthetic project rule"]
 
 
 # --------------------------------------------------------------------------- hash
@@ -315,6 +377,18 @@ def test_stable_hash_is_deterministic():
     assert a == b
     assert _build(request="other").stable_hash != a.stable_hash
     assert _build(target_window=10**6).stable_hash != a.stable_hash  # full vs pack
+
+
+def test_stable_hash_covers_project_and_instructions(tmp_path, monkeypatch):
+    base = cp.build_pack("q", [], project_root=str(tmp_path), target_window=10, door="proxy")
+    (tmp_path / "CLAUDE.md").write_text("# Synthetic\n")
+    ruled = cp.build_pack("q", [], project_root=str(tmp_path), target_window=10, door="proxy")
+    assert ruled.instructions and ruled.stable_hash != base.stable_hash
+    monkeypatch.setattr(cp, "_project", lambda *a: "synthetic project A")
+    a = cp.build_pack("q", [], project_root=str(tmp_path), target_window=10, door="proxy")
+    monkeypatch.setattr(cp, "_project", lambda *a: "synthetic project B")
+    b = cp.build_pack("q", [], project_root=str(tmp_path), target_window=10, door="proxy")
+    assert a.project != b.project and a.stable_hash != b.stable_hash
 
 
 # --------------------------------------------------------------------------- fail open
@@ -434,6 +508,53 @@ def test_mcp_resolves_the_session_transcript_then_falls_back(tmp_path):
     assert cp.messages_for("mcp", session_id="../etc", projects_dir=projects) == []
 
 
+def test_mcp_caller_context_never_claims_full(tmp_path):
+    pack = cp.build_pack("q", session_id="no-such-session", context="synthetic caller context",
+                         target_window=10**6, door="mcp")
+    assert pack.mode == "pack"
+    assert pack.recent == [{"role": "user", "content": "synthetic caller context"}]
+
+
+def test_mcp_transcript_wins_over_caller_context(tmp_path, monkeypatch):
+    projects = tmp_path / "projects"
+    (projects / "p").mkdir(parents=True)
+    (projects / "p" / "sess-9.jsonl").write_text(GOLDEN.read_text())
+    import llm_router.northstar as ns
+    monkeypatch.setattr(ns, "claude_projects_dir", lambda: projects)
+    pack = cp.build_pack(REQUEST, session_id="sess-9", context="synthetic caller context",
+                         target_window=10**6, door="mcp")
+    assert pack.mode == "full" and len(pack.recent) == 29
+
+
+@pytest.mark.parametrize("mode,provider,kept", [
+    ("all", "openai", True),
+    ("local", "openai", False),
+    ("local", "ollama", True),
+    ("local", "local", True),
+    ("off", "ollama", False),
+])
+def test_target_provider_applies_the_session_privacy_rule(monkeypatch, mode, provider, kept):
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", mode)
+    pack = cp.build_pack(REQUEST, transcript_path=str(GOLDEN), target_window=10**6,
+                         door="hook", target_provider=provider)
+    assert (len(pack.recent) == 29) is kept
+    if not kept:
+        assert pack.recent == [] and pack.mode == "pack" and pack.request == REQUEST
+
+
+def test_no_target_provider_means_no_gate(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "off")
+    assert len(cp.build_pack(REQUEST, transcript_path=str(GOLDEN), target_window=10**6,
+                             door="hook").recent) == 29
+
+
+def test_unknown_door_is_rejected():
+    with pytest.raises(ValueError):
+        cp.build_pack("q", [], target_window=10, door="hooks")
+    with pytest.raises(ValueError):
+        cp.messages_for("unknown", messages=[])
+
+
 def test_every_door_name_is_accepted():
     for door in cp.DOORS:
         pack = cp.build_pack("q", [{"role": "user", "content": "a"}], target_window=10**4,
@@ -465,4 +586,39 @@ def test_build_p95_under_50ms_on_a_10mb_transcript(big_transcript):
         samples.append((time.perf_counter() - t0) * 1000)
     samples.sort()
     p95 = samples[math.ceil(0.95 * len(samples)) - 1]
-    assert p95 <= 50, f"p95={p95:.1f} ms over n={len(samples)}"
+    assert p95 <= 50, f"p95={p95:.1f} ms over n={len(samples)}: {[round(x,1) for x in samples]}"
+
+
+@pytest.mark.timing
+def test_build_p95_under_50ms_in_the_shape_doors_use(big_transcript, tmp_path):
+    """10 MB transcript + a real git project root + an instructions file, with
+    the semantic layer at its shipped default (no env override)."""
+    path, _ = big_transcript
+    root = tmp_path / "proj"
+    root.mkdir()
+    git = ["git", "-c", "user.name=s", "-c", "user.email=s@s", "-C", str(root)]
+    subprocess.run(["git", "init", "-q", "-b", "synthetic-branch", str(root)], check=True)
+    (root / "CLAUDE.md").write_text("# Synthetic\n- synthetic rule\n")
+    (root / "a.py").write_text("def synthetic_fn():\n    return 1\n")
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "-qm", "synthetic"], check=True)
+    (root / "b.txt").write_text("x")
+    # An established checkout, not one created this second: files written in
+    # the same second as the index are "racily clean", so every `git status`
+    # rewrites the index until that second has passed.
+    old = time.time() - 60
+    for f in ("CLAUDE.md", "a.py", "b.txt"):
+        os.utime(root / f, (old, old))
+    subprocess.run([*git, "status", "--porcelain"], check=True, capture_output=True)
+
+    def once():
+        t0 = time.perf_counter()
+        pack = cp.build_pack("synthetic question", transcript_path=str(path),
+                             project_root=str(root), target_window=200_000, door="hook")
+        return (time.perf_counter() - t0) * 1000, pack
+
+    _, pack = once()  # first build: imports and the first git read
+    assert "branch: synthetic-branch" in pack.project and pack.instructions
+    samples = sorted(once()[0] for _ in range(30))
+    p95 = samples[math.ceil(0.95 * len(samples)) - 1]
+    assert p95 <= 50, f"p95={p95:.1f} ms over n={len(samples)}: {[round(x,1) for x in samples]}"

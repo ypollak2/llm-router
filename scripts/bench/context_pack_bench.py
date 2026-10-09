@@ -7,6 +7,9 @@ HOME (it writes only to a temp dir):
     HOME=$(mktemp -d) python scripts/bench/context_pack_bench.py [--project-root PATH]
 
 Prints n, p50 and p95 per case. Synthetic text only; no real transcript is read.
+The door-shape case (the one the 50 ms bar is judged on, PLAN v16 D-43) builds a
+temp git repo with a CLAUDE.md, leaves the semantic layer at its shipped default,
+and runs with `repo_facts` read reuse on and off (off = every call runs git).
 """
 from __future__ import annotations
 
@@ -15,6 +18,7 @@ import json
 import math
 import os as _os
 import statistics
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -23,6 +27,7 @@ from pathlib import Path
 _os.environ.setdefault("LLM_ROUTER_SYNTHETIC", "1")
 
 from llm_router import context_pack as cp  # noqa: E402
+from llm_router import repo_facts  # noqa: E402
 
 
 def write_transcript(path: Path, target_bytes: int) -> None:
@@ -36,6 +41,21 @@ def write_transcript(path: Path, target_bytes: int) -> None:
             fh.write(line)
             size += len(line.encode())
             n += 1
+
+
+def make_repo(root: Path) -> None:
+    git = ["git", "-c", "user.name=s", "-c", "user.email=s@s", "-C", str(root)]
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "synthetic-branch", str(root)], check=True)
+    (root / "CLAUDE.md").write_text("# Synthetic\n- synthetic rule\n")
+    (root / "a.py").write_text("def synthetic_fn():\n    return 1\n")
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "-qm", "synthetic"], check=True)
+    (root / "b.txt").write_text("x")
+    old = time.time() - 60  # an established checkout (see the timing test)
+    for f in ("CLAUDE.md", "a.py", "b.txt"):
+        _os.utime(root / f, (old, old))
+    subprocess.run([*git, "status", "--porcelain"], check=True, capture_output=True)
 
 
 def run(label: str, n: int, **kw) -> None:
@@ -61,6 +81,15 @@ def main() -> None:
         write_transcript(small, cp.TAIL_BYTES - 5000)
         run("10 MB transcript", args.n, transcript_path=str(big))
         run("1.99 MB transcript (parsed whole)", args.n, transcript_path=str(small))
+        repo = Path(d) / "proj"
+        make_repo(repo)
+        ttl = repo_facts._REUSE_TTL_S
+        repo_facts._REUSE_TTL_S = 0.0
+        run("door shape, repo_facts reuse OFF", args.n, transcript_path=str(big),
+            project_root=str(repo))
+        repo_facts._REUSE_TTL_S = ttl
+        run("door shape, repo_facts reuse ON", args.n, transcript_path=str(big),
+            project_root=str(repo))
         if args.project_root:
             run("10 MB transcript + project_root", max(10, args.n // 3),
                 transcript_path=str(big), project_root=args.project_root)

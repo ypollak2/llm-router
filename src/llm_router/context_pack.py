@@ -147,10 +147,13 @@ def _render_block(block: Any, *, keep_tools: bool, cap: bool) -> str:
 def extract_turn_text(content: Any, *, keep_tools: bool = True, cap: bool = False) -> str:
     """Text of one transcript message ``content`` (a string or a block list).
 
-    The generalized form of ``hooks/auto-route.py::_extract_turn_text``: with
-    ``keep_tools=False`` it returns exactly what that function returns (text
-    blocks only); with ``keep_tools=True`` tool_use and tool_result blocks are
-    rendered as text, and ``cap=True`` elides any tool block over 4,000 chars.
+    The generalized form of ``hooks/auto-route.py::_extract_turn_text``. With
+    ``keep_tools=False`` it agrees with that function on Claude Code transcript
+    content (a string, or a list of dict blocks where only ``text`` blocks
+    count); it also accepts bare-string items and Responses-API
+    ``input_text`` / ``output_text`` blocks, which the hook's function drops.
+    With ``keep_tools=True`` tool_use and tool_result blocks are rendered as
+    text, and ``cap=True`` elides any tool block over 4,000 chars.
     """
     if isinstance(content, str):
         return content
@@ -272,6 +275,11 @@ def _joins(a: _Msg, b: _Msg) -> bool:
     return a.role == "user" and _only_tool_results(a) and _only_tool_results(b)
 
 
+def _can_continue(m: _Msg) -> bool:
+    """Whether an earlier entry could belong to ``m`` (see ``_joins``)."""
+    return bool(m.gid) or (m.role == "user" and _only_tool_results(m))
+
+
 def _merge(msgs: Iterable[_Msg | None]) -> list[_Msg]:
     """Drop empties; join consecutive entries of one message (``_joins``)."""
     out: list[_Msg] = []
@@ -324,11 +332,14 @@ def _parse_lines(data: bytes, parse, *, complete: bool) -> list[_Msg]:
         return _merge(entries(lines))
     # Incomplete conversation: mode can only be "pack", so only the newest
     # RECENT_N (+1 for a trailing duplicate of the request) messages matter.
-    # Walk backwards and stop once one more message than needed is collected.
-    # The oldest collected message is always dropped: it may be a partial group,
-    # cut either by this stop or by the start of the 2 MB window.
-    want = RECENT_N + 2
+    # Walk backwards and stop at the first entry that starts an older message
+    # once enough are collected: that stop proves the oldest collected message
+    # is whole. When the walk instead reaches the start of the 2 MB window, the
+    # oldest message may continue before it, so it is dropped if it is a kind
+    # that spans several entries (``_can_continue``).
+    want = RECENT_N + 1
     rev: list[_Msg] = []
+    stopped = False
     for m in entries(reversed(lines)):
         if m is None or not m.render(cap=False):
             continue
@@ -336,10 +347,13 @@ def _parse_lines(data: bytes, parse, *, complete: bool) -> list[_Msg]:
             rev[-1].blocks[:0] = m.blocks
             continue
         if len(rev) >= want:
+            stopped = True
             break
         rev.append(_Msg(m.role, list(m.blocks), m.gid))
+    if rev and not stopped and _can_continue(rev[-1]):
+        rev.pop()
     rev.reverse()
-    return rev[1:]
+    return rev
 
 
 def _transcript(path: str | os.PathLike, *, codex: bool) -> tuple[list[_Msg], bool]:
@@ -399,7 +413,7 @@ def _gather(door: str, *, messages: list | None = None, transcript_path: str | N
             # The caller's context string is what the caller chose to share,
             # not the conversation, so it never qualifies the pack for "full".
             return _merge([_Msg("user", _blocks(context))] if context else []), False
-        # hook, agent, and any other door: the Claude Code transcript first.
+        # hook and agent: the Claude Code transcript first.
         if not transcript_path and session_id:
             found = _resolve_session_transcript(session_id, projects_dir)
             transcript_path = str(found) if found else None
@@ -420,9 +434,11 @@ def messages_for(door: str, *, messages: list | None = None,
     from ``session_id``). proxy / sdk / gateway: the ``messages`` argument
     (Anthropic, OpenAI chat or Responses-API items). mcp: the transcript of the
     calling session (``call_identity``), else ``messages``, else the caller's
-    ``context`` string. codex: the rollout file at ``transcript_path``. Never
-    raises; returns ``[]`` when nothing is readable.
+    ``context`` string. codex: the rollout file at ``transcript_path``.
+    Returns ``[]`` when nothing is readable; raises ``ValueError`` only for a
+    ``door`` outside ``DOORS``.
     """
+    _check_door(door)
     msgs, _ = _gather(door, messages=messages, transcript_path=transcript_path,
                       session_id=session_id, context=context, projects_dir=projects_dir)
     return [{"role": m.role, "content": m.render(cap)} for m in msgs]
@@ -483,9 +499,19 @@ def _digest_file(path: Path) -> str:
     return hit
 
 
+def _is_private(real: Path) -> bool:
+    """True for anything under the user's ``~/.claude`` (resolved)."""
+    try:
+        real.relative_to((Path.home() / ".claude").resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
 def _instruction_paths(root: str | None) -> list[tuple[str, Path]]:
-    # Project files only. The user's private ~/.claude/CLAUDE.md is not read:
-    # a pack can reach an external model, and no privacy gate covers that file.
+    # Project files only. Nothing under the user's private ~/.claude is read,
+    # whatever path reaches it (project_root == $HOME, or a symlinked project
+    # file): a pack can reach an external model, and no privacy gate covers it.
     if not root:
         return []
     found = [(rel, Path(root) / rel) for rel in _INSTRUCTION_FILES]
@@ -497,6 +523,8 @@ def _instruction_paths(root: str | None) -> list[tuple[str, Path]]:
                 continue
             real = p.resolve()
         except OSError:
+            continue
+        if _is_private(real):
             continue
         if real not in seen:
             seen.add(real)
@@ -541,18 +569,52 @@ def _hash(request: str, recent: list[dict[str, str]], summary: str | None,
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
+def _session_content_allowed(target_provider: str) -> bool:
+    try:
+        from llm_router.session_store import allows_session_content
+        return allows_session_content(target_provider)
+    except Exception:                                        # noqa: BLE001
+        return False  # privacy gate: an unreadable rule withholds, never leaks
+
+
+def _check_door(door: str) -> None:
+    if door not in DOORS:
+        raise ValueError(f"unknown context door {door!r}; expected one of {DOORS}")
+
+
 def build_pack(request: str, messages: list | None = None, *,
                session_id: str | None = None, transcript_path: str | None = None,
                project_root: str | None = None, target_window: int,
-               door: str) -> ContextPack:
-    """Build the context pack for one request at one door. Never raises for
-    conversation, project or instructions errors; ``request`` is kept verbatim."""
+               door: str, context: str | None = None,
+               target_provider: str | None = None) -> ContextPack:
+    """Build the context pack for one request at one door.
+
+    ``context`` is a caller-supplied context string (the MCP ``llm(context=)``
+    argument). It is used only when no transcript is found and is never the
+    whole conversation, so it never qualifies the pack for ``mode="full"``.
+    The MCP recipe is ``build_pack(prompt, session_id=sid, context=ctx,
+    door="mcp", ...)``. ``messages`` means "this list IS the conversation".
+
+    ``target_provider`` is the privacy hook for doors: when given, ``recent``
+    (session content) is emptied unless ``session_store.allows_session_content``
+    allows that provider under the session-context privacy mode (``off``: never;
+    ``local``: free local providers only) — the rule ``build_session_context``
+    applies. ``None`` means the door has not chosen a provider and applies no
+    gate; a door that sends the pack to a model must pass it.
+
+    Raises ``ValueError`` for a ``door`` outside ``DOORS`` (a programming
+    error). Never raises for conversation, project or instructions errors;
+    ``request`` is kept verbatim.
+    """
+    _check_door(door)
     if isinstance(request, (bytes, bytearray)):
         request = bytes(request).decode("utf-8", errors="replace")
     elif not isinstance(request, str):
         request = "" if request is None else str(request)
     msgs, complete = _gather(door, messages=messages, transcript_path=transcript_path,
-                             session_id=session_id)
+                             session_id=session_id, context=context)
+    if target_provider is not None and not _session_content_allowed(target_provider):
+        msgs, complete = [], False
     # The current request is passed separately; a trailing copy of it in the
     # conversation would send it twice.
     if msgs and msgs[-1].role == "user" and msgs[-1].render(cap=False) == request.strip():

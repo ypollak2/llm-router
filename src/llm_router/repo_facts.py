@@ -25,13 +25,28 @@ Two rules keep this different in kind from that:
    history to compound — a wrong value is corrected by the next call, not carried.
 
 It is also small on purpose: a few dozen tokens against a payload measured at ~457.
+
+REUSE OF A READ (PLAN v16 P1.1)
+-------------------------------
+`render` runs five git subprocesses (~30 ms on a laptop), which alone used most
+of the context pack's 50 ms budget. It now reuses its last block for the same
+root while `.git/HEAD`, `.git/index` and `.git/logs/HEAD` are unchanged (stat
+mtime and size) and for at most `_REUSE_TTL_S` seconds. Rule 2 still holds: the
+block is replaced, never appended to, and a branch switch, commit, reset or
+staging change is seen on the next call. What can lag by up to the TTL is an
+edit to the working tree that touches none of those files (a new untracked file,
+an unstaged edit). `collect` is never cached.
 """
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 
 _TIMEOUT = 1.5
+_REUSE_TTL_S = 10.0
+_REUSE_MAX = 64
+_reuse: dict[str, tuple[tuple, float, str]] = {}
 
 
 def _git(args: list[str], root: str | None) -> str:
@@ -43,28 +58,47 @@ def _git(args: list[str], root: str | None) -> str:
         return ""
 
 
+def _branch(header: str) -> str:
+    """Branch name from a ``git status --branch`` header line ("" if detached)."""
+    rest = header[3:].strip()
+    for prefix in ("No commits yet on ", "Initial commit on "):
+        if rest.startswith(prefix):
+            return rest[len(prefix):].strip()
+    if rest.startswith("HEAD (no branch)"):
+        return ""
+    return rest.split("...", 1)[0].split(" ", 1)[0]
+
+
 def collect(root: str | None = None) -> dict[str, str]:
-    """Facts about the working tree right now. Empty dict outside a repo."""
+    """Facts about the working tree right now. Empty dict outside a repo.
+
+    Two git calls (status with its branch header, and one log line), not five:
+    each subprocess costs ~6 ms and this runs on the context pack's 50 ms path.
+    """
     if root and not (Path(root) / ".git").exists():
         return {}
-    branch = _git(["branch", "--show-current"], root)
-    if not branch and not _git(["rev-parse", "--git-dir"], root):
-        return {}
-
-    facts: dict[str, str] = {}
-    if branch:
-        facts["branch"] = branch
-    head = _git(["rev-parse", "--short", "HEAD"], root)
-    if head:
-        facts["head"] = head
-    subject = _git(["log", "-1", "--format=%s"], root)
-    if subject:
-        facts["last_commit"] = subject[:100]
-
     # `-uall`, not the default: plain porcelain collapses an untracked
     # directory to "src/", and "which file did I just touch" is the question
     # a continuation actually asks.
-    dirty = _git(["status", "--porcelain", "--untracked-files=all"], root)
+    status = _git(["status", "--porcelain", "--branch", "--no-ahead-behind",
+                   "--untracked-files=all"], root)
+    lines = status.splitlines()
+    if not lines or not lines[0].startswith("## "):
+        return {}  # not a repository, or git failed: say nothing rather than guess
+
+    facts: dict[str, str] = {}
+    branch = _branch(lines[0])
+    if branch:
+        facts["branch"] = branch
+    log = _git(["log", "-1", "--format=%h%x00%s"], root)
+    if log and "\x00" in log:
+        head, subject = log.split("\x00", 1)
+        if head:
+            facts["head"] = head
+        if subject:
+            facts["last_commit"] = subject[:100]
+
+    dirty = "\n".join(lines[1:])
     if dirty:
         lines = dirty.splitlines()
         facts["uncommitted"] = str(len(lines))
@@ -89,12 +123,68 @@ def collect(root: str | None = None) -> dict[str, str]:
     return facts
 
 
+def _git_dir(root: Path) -> Path | None:
+    dot = root / ".git"
+    if dot.is_dir():
+        return dot
+    if dot.is_file():  # a worktree: ".git" is "gitdir: <path>"
+        text = dot.read_text(encoding="utf-8", errors="replace").strip()
+        if text.startswith("gitdir:"):
+            gd = Path(text[len("gitdir:"):].strip())
+            return gd if gd.is_absolute() else root / gd
+    return None
+
+
+def _state_key(root: str) -> tuple | None:
+    """Stat of the files any branch switch, commit, reset or staging rewrites."""
+    gd = _git_dir(Path(root))
+    if gd is None:
+        return None
+    key = []
+    for name in ("HEAD", "index", "logs/HEAD"):
+        try:
+            st = (gd / name).stat()
+            key.append((st.st_mtime_ns, st.st_size))
+        except OSError:
+            key.append(None)
+    return tuple(key)
+
+
 def render(root: str | None = None) -> str:
     """One compact block, or "" when there is nothing to say.
 
     Deliberately labelled as observed state so a model cannot mistake it for an
     instruction, and so a reader of a draft can tell which parts were grounded.
+    Reuses the previous block for ``root`` while git state is unchanged and the
+    block is younger than ``_REUSE_TTL_S`` (module docstring). ``root=None``
+    (the cwd) is never reused.
     """
+    real = key = None
+    if root:
+        try:
+            real = str(Path(root).resolve())
+            key = _state_key(real)
+        except OSError:
+            key = None
+        if key is not None:
+            hit = _reuse.get(real)
+            if hit and hit[0] == key and time.monotonic() - hit[1] < _REUSE_TTL_S:
+                return hit[2]
+    block = _render_fresh(root)
+    if key is not None and real is not None:
+        try:
+            # Keyed AFTER the read: `git status` may refresh the index itself.
+            after = _state_key(real)
+        except OSError:
+            after = None
+        if after is not None:
+            if len(_reuse) >= _REUSE_MAX:
+                _reuse.clear()
+            _reuse[real] = (after, time.monotonic(), block)
+    return block
+
+
+def _render_fresh(root: str | None) -> str:
     facts = collect(root)
     if not facts:
         return ""

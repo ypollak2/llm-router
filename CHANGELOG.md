@@ -43,13 +43,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   digest (headings and rule lines, <= 1,500 tokens, cached by content hash), `summary` stays `None` until
   P1.2. Errors in any section yield an empty section. Formats: Claude Code transcript JSONL, Codex rollout
   JSONL, Anthropic Messages, OpenAI chat, Responses-API items. Instructions come from the project's
-  CLAUDE.md, .claude/CLAUDE.md and AGENTS.md only (the private ~/.claude/CLAUDE.md is not read). No door
-  calls it yet (the 7 door PRs follow); no hook changed. Benchmark `scripts/bench/context_pack_bench.py`
-  (synthetic transcripts, Apple M5 Pro, 2026-10-09, one run): 10 MB transcript n=100 p50 0.71 / p95
-  0.78 ms; 1.99 MB transcript parsed whole n=100 p50 5.55 / p95 6.58 ms; 10 MB transcript plus a project
-  root (this checkout, semantic source default, autoindex off) n=33 p50 54.82 / p95 59.38 ms. The 50 ms
-  budget holds without a project section and is missed with one: the cost is the existing
-  `context_injection.inject` path (git subprocesses, OKF, semantic retrieval), not the pack.
+  CLAUDE.md, .claude/CLAUDE.md and AGENTS.md only; nothing under `~/.claude` is ever read, including via
+  `project_root == $HOME` or a symlink (owner decision D-43). `target_provider=` applies the session
+  privacy rule to `recent` (new `session_store.allows_session_content`, now shared with
+  `build_session_context`; behaviour unchanged there); `context=` carries an MCP caller-context string
+  that never qualifies for `mode="full"`; an unknown `door` raises `ValueError`. No door calls it yet
+  (the 7 door PRs follow); no hook changed.
+- repo state reads are cheaper (PLAN v16 P1.1, context-pack 50 ms budget): `repo_facts.collect` runs two
+  git calls instead of five (`status --porcelain --branch` and one `log` line), and `repo_facts.render`
+  reuses its block for the same root while `.git/HEAD`, `.git/index` and `.git/logs/HEAD` are unchanged,
+  for at most 10 s. A commit, branch switch, reset or staging change is seen on the next call; an
+  untracked file or unstaged edit can lag by up to 10 s. Benchmark `scripts/bench/context_pack_bench.py`
+  (synthetic, Apple M5 Pro, 2026-10-09, one run, n=100 each), door shape = 10 MB transcript + temp git
+  repo + CLAUDE.md + semantic default: before (5 git calls, no reuse) p50 45.78 / p95 51.66 ms; after,
+  every call reading git p50 32.33 / p95 35.62 ms; after, reuse hit p50 17.30 / p95 19.90 ms. Transcript
+  only: 10 MB p50 0.71 / p95 0.78 ms; 1.99 MB parsed whole p50 5.53 / p95 6.73 ms.
 - ledger completeness (PLAN v16 P0.8-e): a call the semantic cache answers now writes a `usage` row
   (`reason = "cache_hit"`, provider `cache`, model `cache/<cached model>`, 0 tokens, $0) carrying the
   caller's session id, and `semantic_cache_lookups` gains a nullable `session_id` (additive migration;
