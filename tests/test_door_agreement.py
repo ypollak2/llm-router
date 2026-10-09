@@ -139,9 +139,11 @@ def test_cli_real_doors_counts_only_and_no_network(tmp_path):
     )
     assert proc.returncode == 0, proc.stderr
     # Nothing even tried to connect: every no-network switch held.
-    assert "outbound network is refused" not in proc.stderr
+    assert "refused during measurement" not in proc.stderr
     d = json.loads(out.read_text(encoding="utf-8"))
     assert d["n"] == 4
+    assert d["network_refusals"] == 0
+    assert d["labels"]["none_label"] == "<none>"
     assert set(d["pairs"]) == {"hook|gateway", "hook|proxy", "gateway|proxy"}
     p = d["pairs"]["hook|gateway"]
     assert 0 <= p["task_type_disagree"] <= 4 and 0 <= p["tier_disagree"] <= 4
@@ -171,3 +173,112 @@ def test_freeze_writes_0600_and_refuses_overwrite(da, tmp_path, monkeypatch, cap
     before = path.read_bytes()
     assert da.freeze_corpus(path) == 3
     assert path.read_bytes() == before
+
+
+# Shared-labels fixture: X can say "coordinate", Y can say "research"; neither
+# can say the other's, so those prompts are left out of the shared rate.
+SX = ["code", "query", "code", "coordinate"]
+SY = ["code", "code", "query", "research"]
+
+
+def _labels(seq):
+    table = {f"s{i}": (t, "simple") for i, t in enumerate(seq)}
+    return lambda text: table[text]
+
+
+def test_shared_labels_rate_excludes_site_only_labels(da):
+    prompts = [f"s{i}" for i in range(4)]
+    r = da.measure(prompts, {"x": _labels(SX), "y": _labels(SY)})
+    p = r["pairs"]["x|y"]
+    assert p["task_type_disagree"] == 3
+    sh = p["shared_labels_task_type"]
+    assert sh["vocab"] == ["code", "query"]
+    assert (sh["n"], sh["disagree"]) == (3, 2)
+    assert sh["wilson95"] == da.wilson95(2, 3)
+    assert p["shared_labels_tier"]["n"] == 4 and p["shared_labels_tier"]["disagree"] == 0
+
+
+def test_shared_labels_excludes_none(da):
+    r = da.measure(PROMPTS, {"a": _site(A), "c": _site(C)})
+    sh = r["pairs"]["a|c"]["shared_labels_task_type"]
+    assert sh["vocab"] == ["code"]
+    assert (sh["n"], sh["disagree"]) == (8, 0)
+
+
+def test_bucket_split_counts(da):
+    prompts = [f"s{i}" for i in range(4)]
+    r = da.measure(prompts, {"x": _labels(SX), "y": _labels(SY)},
+                   buckets=["old", "old", "new", "new"])
+    split = r["pairs"]["x|y"]["task_type_by_bucket"]
+    assert (split["old"]["n"], split["old"]["disagree"]) == (2, 1)
+    assert (split["new"]["n"], split["new"]["disagree"]) == (2, 2)
+    assert r["bucket_counts"] == {"new": 2, "old": 2}
+
+
+def test_network_guard_refuses_connect_and_dns_past_except_exception(da):
+    import socket
+
+    da.REFUSALS.clear()
+    undo = da._install_network_guard()
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        with pytest.raises(da.NetworkRefused):
+            try:
+                sock.connect(("127.0.0.1", 9))
+            except Exception:  # noqa: BLE001 — a door's fallback must not swallow it
+                pytest.fail("NetworkRefused was caught by except Exception")
+        with pytest.raises(da.NetworkRefused):
+            socket.getaddrinfo("example.com", 443)
+        with pytest.raises(da.NetworkRefused):
+            socket.create_connection(("127.0.0.1", 9))
+        assert da.REFUSALS == ["connect", "getaddrinfo", "create_connection"]
+    finally:
+        undo()
+        if sock is not None:
+            sock.close()
+        da.REFUSALS.clear()
+    assert socket.getaddrinfo("127.0.0.1", 9)  # restored
+
+
+def test_write_exclusive_leaves_nothing_on_a_crash(da, tmp_path):
+    path = tmp_path / "corpus.jsonl"
+
+    def lines():
+        yield "one\n"
+        raise RuntimeError("crash mid-write")
+
+    with pytest.raises(RuntimeError):
+        da.write_exclusive(path, lines())
+    assert not path.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_freeze_dates_sidecar_is_aligned_and_textless(da, tmp_path, monkeypatch, capsys):
+    import collections
+
+    rec = types.SimpleNamespace
+    day = 86400
+    fake = types.ModuleType("measure_low_signal_rate")
+    fake.collect_records = lambda: ([
+        rec(text="synthetic old", ts=1_758_585_600 + 3600),          # 2025-09-23 UTC
+        rec(text="synthetic new", ts=1_758_585_600 + 2 * day),        # 2025-09-25
+        rec(text="synthetic new", ts=1_758_585_600 + 3 * day),        # later repeat
+        rec(text="synthetic nots", ts=None),
+    ], collections.Counter())
+    monkeypatch.setitem(sys.modules, "measure_low_signal_rate", fake)
+    corpus = tmp_path / "c.jsonl"
+    texts = ["synthetic new", "synthetic old", "synthetic gone", "synthetic nots"]
+    corpus.write_text("".join(json.dumps({"i": i, "text": t}) + "\n" for i, t in enumerate(texts)),
+                      encoding="utf-8")
+    side = tmp_path / "dates.jsonl"
+    assert da.freeze_dates(corpus, side) == 0
+    assert stat.S_IMODE(side.stat().st_mode) == 0o600
+    raw = side.read_text(encoding="utf-8")
+    assert "synthetic" not in raw and "synthetic" not in capsys.readouterr().out
+    dates = da.read_dates(side, da.file_sha256(corpus), 4)
+    assert dates == ["2025-09-25", "2025-09-23", None, None]
+    assert da.date_buckets(dates, "2025-09-23") == [">2025-09-23", "<=2025-09-23", "undated", "undated"]
+    assert da.freeze_dates(corpus, side) == 3
+    with pytest.raises(ValueError):
+        da.read_dates(side, "0" * 64, 4)
