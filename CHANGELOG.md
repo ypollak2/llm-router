@@ -47,6 +47,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Existing `~/.llm-router/result_cache.db` files are left on disk, unread and unmigrated.
 
 ### Added
+- synthetic replay harness (owner decision D-42; test tooling, no product change): `scripts/synthetic_replay.py --corpus <jsonl>
+  --out <dir> [--doors hook,proxy,gateway,mcp,sdk,agent-route] [--sessions N]` drives synthetic sessions through every
+  classification door (auto-route and agent-route hooks as subprocesses, an `llm-router proxy` on an ephemeral port, the
+  gateway/SDK classify path, the MCP `classify_for_routing` path) and fires every hook `hooks/hooks.json` registers for the
+  events it emits (SessionStart, UserPromptSubmit, PreToolUse/PostToolUse per tool call, SubagentStart, Stop, SessionEnd) in
+  host order, under a scratch HOME and `LLM_ROUTER_HOME`; a registered hook that never ran is listed with the reason.
+  Upstream is a local stub. Children run a scratch venv interpreter whose `sitecustomize` is `scripts/_replay_netguard.py`
+  with the run's allowlist baked in, so any Python child, even one with an emptied environment, refuses every other
+  connection and the run exits 1; non-Python network clients are shadowed on PATH (absolute paths are not covered).
+  Leftover and detached processes are counted with a positive-control canary; "cannot tell" fails the run. Rows are
+  tagged with the existing mechanisms (`LLM_ROUTER_SYNTHETIC=1`, `LLM_ROUTER_ALLOW_STUBS=1` -> `provenance=test`,
+  `LLM_ROUTER_SESSION_KIND=harness`, `synth-replay-<hash>` session ids); no field was added. Writes `summary.json` /
+  `summary.md` (counts and hashes only): per-door decisions and field presence, latency p50/p95 with n, ledger completeness
+  per writer, P0.1-a archive checks and a pairwise door-agreement matrix with Wilson intervals. Synthetic results are
+  mechanics evidence only and never organic. Fixture: `tests/fixtures/synthetic_sessions/`; tests: `tests/test_synthetic_replay.py`.
 - ledger completeness (PLAN v16 P0.8-e): a call the semantic cache answers now writes a `usage` row
   (`reason = "cache_hit"`, provider `cache`, model `cache/<cached model>`, 0 tokens, $0) carrying the
   caller's session id, and `semantic_cache_lookups` gains a nullable `session_id` (additive migration;
