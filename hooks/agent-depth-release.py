@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 6
+# llm_router-hook-version: 7
 """PostToolUse[Agent] hook — release the agent nesting-depth slot.
 
 The circuit breaker in agent-route.py (PreToolUse[Agent]) increments a
@@ -196,6 +196,9 @@ def main() -> None:
         _hl_set_session(hook_input.get("session_id") if isinstance(hook_input, dict) else None)
     except Exception:  # noqa: BLE001 -- llm_router without set_session: no session on the row
         pass
+
+    if not isinstance(hook_input, dict):  # HOOKS-FAILOPEN-1: `[]`, `"x"`, `123` -> fail open like an empty payload
+        sys.exit(0)
 
     if hook_input.get("tool_name", "") != "Agent":
         sys.exit(0)

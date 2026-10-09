@@ -1,4 +1,4 @@
-# llm_router-hook-version: 4
+# llm_router-hook-version: 5
 """PostToolUse[Agent] hook — track Claude Code subscription model calls.
 
 Fires after every Agent subagent completes. Writes an estimated usage record
@@ -306,6 +306,9 @@ def main() -> None:
         _hl_set_session(data.get("session_id") if isinstance(data, dict) else None)
     except Exception:  # noqa: BLE001 -- llm_router without set_session: no session on the row
         pass
+
+    if not isinstance(data, dict):  # HOOKS-FAILOPEN-1: `[]`, `"x"`, `123` -> fail open like an empty payload
+        sys.exit(0)
 
     tool_name = data.get("tool_name", "")
     if tool_name != "Agent":
