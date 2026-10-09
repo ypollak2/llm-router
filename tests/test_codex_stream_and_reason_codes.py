@@ -75,6 +75,7 @@ def test_line_over_cap_is_dropped_flagged_and_run_survives(monkeypatch, tmp_path
     assert res.truncated is True
 
 
+@pytest.mark.timing
 def test_total_bytes_cap_stops_the_process_and_records_truncation(monkeypatch, tmp_path):
     monkeypatch.setattr(codex_agent, "_STDOUT_TOTAL_CAP", 200_000, raising=False)
     b = _fake_codex(tmp_path, f"""
@@ -99,6 +100,7 @@ def _alive(pid: int) -> bool:
     return True
 
 
+@pytest.mark.timing
 @pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX")
 @pytest.mark.parametrize("how", ["timeout", "cap"])
 def test_no_descendant_survives_a_kill(monkeypatch, tmp_path, how):
@@ -124,6 +126,7 @@ def test_no_descendant_survives_a_kill(monkeypatch, tmp_path, how):
             pass
 
 
+@pytest.mark.timing
 def test_timeout_keeps_partial_output(monkeypatch, tmp_path):
     b = _fake_codex(tmp_path, f"""
         import sys, time
@@ -158,6 +161,7 @@ def test_banner_only_is_a_coded_failure(monkeypatch, tmp_path):
 
 # -- class 3: slow / silent output -------------------------------------------
 
+@pytest.mark.timing
 def test_silent_hang_is_killed_at_the_timeout(monkeypatch, tmp_path):
     b = _fake_codex(tmp_path, """
         import time

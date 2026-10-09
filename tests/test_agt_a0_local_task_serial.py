@@ -50,6 +50,7 @@ async def test_overlapping_local_tasks_changed_files_attribution(tmp_path, monke
     assert b["changed_files"] == [], "B reported A's edit as its own"
 
 
+@pytest.mark.timing
 @pytest.mark.timeout(30)
 async def test_queued_local_task_budget_not_eaten_by_lock_wait(tmp_path, monkeypatch):
     """Two 1.0 s runs with budget 1.5 s each: the second waits ~1 s for the lock,

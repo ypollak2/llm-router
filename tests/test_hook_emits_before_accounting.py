@@ -30,6 +30,7 @@ the production symptom, reproduced deliberately.
 
 from __future__ import annotations
 
+import pytest
 import json
 import os
 import subprocess
@@ -106,6 +107,7 @@ def _run(env_extra: dict[str, str], tmp_home: Path, timeout: float):
     )
 
 
+@pytest.mark.timing
 def test_the_directive_is_emitted_even_when_the_ledger_write_hangs():
     """The regression test. Fails by timeout with empty stdout under the old ordering.
 
@@ -136,6 +138,7 @@ def test_the_directive_is_emitted_even_when_the_ledger_write_hangs():
         assert payload["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
 
 
+@pytest.mark.timing
 def test_the_hook_is_fast_when_the_ledger_is_not_stalled():
     """Control: without the shim the hook completes normally and emits the same shape.
 

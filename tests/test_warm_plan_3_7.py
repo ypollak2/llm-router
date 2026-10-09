@@ -310,6 +310,7 @@ def repo(tmp_path):
     return root
 
 
+@pytest.mark.timing
 def test_cold_model_falls_through_fast_without_calling_the_model(stub, repo, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_ZERO_CLAUDE_SCOPE", "edit")
     spawned = []

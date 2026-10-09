@@ -170,6 +170,7 @@ def test_a_full_log_rotates_to_one_previous_generation(monkeypatch):
     assert rows[-1]["elapsed_ms"] == 199.0
 
 
+@pytest.mark.timing
 def test_rotation_is_skipped_not_waited_for_when_another_writer_holds_the_lock(monkeypatch):
     from llm_router.file_lock import exclusive_lock
 

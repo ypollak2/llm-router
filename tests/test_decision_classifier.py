@@ -279,6 +279,7 @@ def test_classify_local_http_error_and_garbage_never_raise(monkeypatch):
     assert lc.classify_local(_assembled()).source == "parse_error"
 
 
+@pytest.mark.timing
 def test_classify_local_is_bounded_by_its_budget(monkeypatch):
     with _Sync(monkeypatch, delay=2.0):
         t0 = time.perf_counter()
@@ -376,6 +377,7 @@ async def test_a_decision_model_resident_at_its_own_context_is_not_cold(monkeypa
     assert v.source == "llm" and len(o.sys) == 1 and o.gen == []
 
 
+@pytest.mark.timing
 async def test_cold_model_is_warmed_through_the_systemone_endpoint(monkeypatch):
     async with FakeOllama(monkeypatch, loaded=False) as o:
         v = await _ask()
@@ -386,6 +388,7 @@ async def test_cold_model_is_warmed_through_the_systemone_endpoint(monkeypatch):
     assert set(o.sys[0]) == {"model", "state", "questions", "keep_alive"}
 
 
+@pytest.mark.timing
 async def test_a_refused_warmup_is_recorded_once(monkeypatch, clock):
     from llm_router import failopen
 

@@ -66,6 +66,7 @@ def test_the_byte_budget_is_capped(tmp_path, monkeypatch):
     assert len(snap) < 20, "the byte budget did not stop anything"
 
 
+@pytest.mark.timing
 def test_a_big_tree_completes_quickly(tmp_path):
     _tree(tmp_path, {"src/app.py": "real"})
     _tree(tmp_path, {f".venv/lib/python3.12/site-packages/pkg{i}/mod.py": "x" * 2000

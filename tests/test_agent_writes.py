@@ -271,6 +271,7 @@ def test_the_loop_stops_when_its_budget_is_spent(monkeypatch, tmp_path):
     assert calls["n"] == 0
 
 
+@pytest.mark.timing
 def test_an_exhausted_budget_after_real_work_reports_partial(monkeypatch, tmp_path):
     """Partial work is worth returning; a stall is not. The difference is whether
     any tool actually ran."""

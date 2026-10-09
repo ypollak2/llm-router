@@ -124,6 +124,7 @@ def no_real_process_calls(monkeypatch):
 
 # ── the probe ────────────────────────────────────────────────────────────────
 
+@pytest.mark.timing
 def test_healthy_server_passes(server):
     r = wd.probe_generation()
     assert r.ok is True and r.model == MODEL
@@ -133,6 +134,7 @@ def test_healthy_server_passes(server):
     assert body["keep_alive"] == -1
 
 
+@pytest.mark.timing
 def test_server_that_accepts_but_never_generates_is_detected_as_hung(server):
     _Stub.hang_generate = True
     t0 = time.monotonic()
@@ -141,6 +143,7 @@ def test_server_that_accepts_but_never_generates_is_detected_as_hung(server):
     assert time.monotonic() - t0 < 3          # bounded by the probe deadline
 
 
+@pytest.mark.timing
 def test_api_tags_alone_would_have_called_this_server_healthy(server):
     """The point of the module: the pre-flight the codebase already had passes."""
     _Stub.hang_generate = True
@@ -282,6 +285,7 @@ def test_direct_executor_skips_a_hung_ollama_without_calling_it(server):
     assert [p for path, p in _Stub.posts if path == "/api/chat"] == []
 
 
+@pytest.mark.timing
 def test_zero_claude_edit_falls_through_fast_on_a_hung_ollama(server, tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_ZERO_CLAUDE_SCOPE", "edit")
     root = tmp_path / "repo"

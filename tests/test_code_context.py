@@ -1,5 +1,6 @@
 """Tests for code_context module — AST-based symbol extraction."""
 
+import pytest
 import textwrap
 
 from llm_router.code_context import (
@@ -339,6 +340,7 @@ class TestFilePathRegexIsBounded:
     unbroken token is not.
     """
 
+    @pytest.mark.timing
     def test_pathological_token_stays_fast(self):
         import time
 
