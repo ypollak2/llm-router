@@ -51,14 +51,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that never qualifies for `mode="full"`; an unknown `door` raises `ValueError`. No door calls it yet
   (the 7 door PRs follow); no hook changed.
 - repo state reads are cheaper (PLAN v16 P1.1, context-pack 50 ms budget): `repo_facts.collect` runs two
-  git calls instead of five (`status --porcelain --branch` and one `log` line), and `repo_facts.render`
-  reuses its block for the same root while `.git/HEAD`, `.git/index` and `.git/logs/HEAD` are unchanged,
-  for at most 10 s. A commit, branch switch, reset or staging change is seen on the next call; an
-  untracked file or unstaged edit can lag by up to 10 s. Benchmark `scripts/bench/context_pack_bench.py`
-  (synthetic, Apple M5 Pro, 2026-10-09, one run, n=100 each), door shape = 10 MB transcript + temp git
-  repo + CLAUDE.md + semantic default: before (5 git calls, no reuse) p50 45.78 / p95 51.66 ms; after,
-  every call reading git p50 32.33 / p95 35.62 ms; after, reuse hit p50 17.30 / p95 19.90 ms. Transcript
-  only: 10 MB p50 0.71 / p95 0.78 ms; 1.99 MB parsed whole p50 5.53 / p95 6.73 ms.
+  git calls instead of five (`status --porcelain --branch --no-ahead-behind` and one `log` line); it needs
+  git >= 2.17, and on an older git it now returns no repo state instead of answering. New opt-in
+  `repo_facts.render(root, reuse=True)` (via `context_injection.inject(..., reuse_repo_state=True)`) reuses
+  the block for the same root while `.git/HEAD`, `.git/index` and `.git/logs/HEAD` are unchanged, for at
+  most 10 s; only the context pack opts in, so every existing caller still reads git on each call. Under
+  reuse an untracked file or unstaged edit can lag by up to 10 s. Benchmark
+  `scripts/bench/context_pack_bench.py` (synthetic, Apple M5 Pro, 2026-10-09, one run, n=100 each), door
+  shape = 10 MB transcript + temp git repo + CLAUDE.md + semantic default: before (5 git calls, no reuse)
+  p50 45.78 / p95 51.66 ms; after, every call reading git p50 32.05 / p95 34.84 ms; after, reuse hit p50
+  17.23 / p95 19.62 ms. Transcript only: 10 MB p50 0.71 / p95 0.78 ms; 1.99 MB parsed whole p50 5.61 /
+  p95 6.66 ms.
 - ledger completeness (PLAN v16 P0.8-e): a call the semantic cache answers now writes a `usage` row
   (`reason = "cache_hit"`, provider `cache`, model `cache/<cached model>`, 0 tokens, $0) carrying the
   caller's session id, and `semantic_cache_lookups` gains a nullable `session_id` (additive migration;

@@ -167,37 +167,47 @@ def test_an_unborn_branch_reports_its_name(tmp_path):
     assert f.get("branch") == "unborn" and "head" not in f
 
 
-def test_render_reuses_its_read_while_git_state_is_unchanged(repo, monkeypatch):
+def test_render_reuses_its_read_only_when_opted_in(repo, monkeypatch):
     repo_facts._reuse.clear()
-    first = repo_facts.render(str(repo))
+    first = repo_facts.render(str(repo), reuse=True)
     calls = _count_git(monkeypatch)
-    assert repo_facts.render(str(repo)) == first
+    assert repo_facts.render(str(repo), reuse=True) == first
     assert calls == []
+    repo_facts.render(str(repo))          # default: always reads git
+    assert len(calls) == 2
+
+
+def test_default_callers_see_an_edit_at_once(repo):
+    repo_facts._reuse.clear()
+    assert "uncommitted: 0" in repo_facts.render(str(repo), reuse=True)
+    (repo / "new.txt").write_text("n\n")       # touches no git file
+    assert "uncommitted: 1" in repo_facts.render(str(repo))
+    assert "uncommitted: 1" in repo_facts.render(str(repo))
 
 
 def test_a_commit_or_branch_switch_is_seen_on_the_next_render(repo):
     repo_facts._reuse.clear()
-    assert "first commit" in repo_facts.render(str(repo))
+    assert "first commit" in repo_facts.render(str(repo), reuse=True)
     (repo / "c.py").write_text("c = 1\n")
     subprocess.run(["git", "add", "."], cwd=repo, check=False)
     subprocess.run(["git", "commit", "-qm", "second commit"], cwd=repo, check=False)
-    assert "second commit" in repo_facts.render(str(repo))
+    assert "second commit" in repo_facts.render(str(repo), reuse=True)
     subprocess.run(["git", "checkout", "-q", "-b", "other-branch"], cwd=repo, check=False)
-    assert "branch: other-branch" in repo_facts.render(str(repo))
+    assert "branch: other-branch" in repo_facts.render(str(repo), reuse=True)
 
 
 def test_reuse_expires_after_the_ttl(repo, monkeypatch):
     repo_facts._reuse.clear()
-    repo_facts.render(str(repo))
+    repo_facts.render(str(repo), reuse=True)
     (repo / "untracked.py").write_text("u = 1\n")   # touches no git file
-    assert "uncommitted: 0" in repo_facts.render(str(repo))   # inside the TTL: reused
+    assert "uncommitted: 0" in repo_facts.render(str(repo), reuse=True)  # inside the TTL
     now = time.monotonic()
     monkeypatch.setattr(repo_facts.time, "monotonic", lambda: now + repo_facts._REUSE_TTL_S + 1)
-    assert "uncommitted: 1" in repo_facts.render(str(repo))
+    assert "uncommitted: 1" in repo_facts.render(str(repo), reuse=True)
 
 
 def test_render_without_a_root_is_never_reused(repo, monkeypatch):
     monkeypatch.chdir(repo)
     repo_facts._reuse.clear()
-    repo_facts.render(None)
+    repo_facts.render(None, reuse=True)
     assert repo_facts._reuse == {}

@@ -26,16 +26,21 @@ Two rules keep this different in kind from that:
 
 It is also small on purpose: a few dozen tokens against a payload measured at ~457.
 
-REUSE OF A READ (PLAN v16 P1.1)
--------------------------------
-`render` runs five git subprocesses (~30 ms on a laptop), which alone used most
-of the context pack's 50 ms budget. It now reuses its last block for the same
-root while `.git/HEAD`, `.git/index` and `.git/logs/HEAD` are unchanged (stat
-mtime and size) and for at most `_REUSE_TTL_S` seconds. Rule 2 still holds: the
-block is replaced, never appended to, and a branch switch, commit, reset or
-staging change is seen on the next call. What can lag by up to the TTL is an
-edit to the working tree that touches none of those files (a new untracked file,
-an unstaged edit). `collect` is never cached.
+COST AND OPT-IN REUSE (PLAN v16 P1.1)
+-------------------------------------
+A read used five git subprocesses (~30 ms on a laptop), most of the context
+pack's 50 ms budget. `collect` now uses two (`status --porcelain --branch` and
+one `log` line) and is never cached. It needs git >= 2.17 for
+`--no-ahead-behind`; on an older git the status call fails and `collect`
+returns {} (no repo state), where the five-call version still answered.
+
+`render(root, reuse=True)` may return the previous block for the same root
+while `.git/HEAD`, `.git/index` and `.git/logs/HEAD` are unchanged (stat mtime
+and size) and for at most `_REUSE_TTL_S` seconds. Only the context pack opts in.
+The default (`reuse=False`) always reads git, so existing callers see every
+edit at once. Under reuse a branch switch, commit, reset or staging change is
+seen on the next call; an unstaged edit or new untracked file can lag by up to
+the TTL. Rule 2 still holds: the block is replaced, never appended to.
 """
 from __future__ import annotations
 
@@ -150,17 +155,17 @@ def _state_key(root: str) -> tuple | None:
     return tuple(key)
 
 
-def render(root: str | None = None) -> str:
+def render(root: str | None = None, *, reuse: bool = False) -> str:
     """One compact block, or "" when there is nothing to say.
 
     Deliberately labelled as observed state so a model cannot mistake it for an
     instruction, and so a reader of a draft can tell which parts were grounded.
-    Reuses the previous block for ``root`` while git state is unchanged and the
-    block is younger than ``_REUSE_TTL_S`` (module docstring). ``root=None``
-    (the cwd) is never reused.
+    With ``reuse=True`` it may return the previous block for ``root`` while git
+    state is unchanged and the block is younger than ``_REUSE_TTL_S`` (module
+    docstring). ``reuse=False`` (default) and ``root=None`` always read git.
     """
     real = key = None
-    if root:
+    if root and reuse:
         try:
             real = str(Path(root).resolve())
             key = _state_key(real)
@@ -174,6 +179,9 @@ def render(root: str | None = None) -> str:
     if key is not None and real is not None:
         try:
             # Keyed AFTER the read: `git status` may refresh the index itself.
+            # Known ms-scale TOCTOU: a commit or staging change landing between
+            # the read and this stat is stored under the new key, so the old
+            # block can be reused for up to the TTL. Accepted for the pack only.
             after = _state_key(real)
         except OSError:
             after = None

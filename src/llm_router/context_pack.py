@@ -456,7 +456,8 @@ def _project(request: str, root: str | None, session_id: str | None) -> str:
     try:
         from llm_router.context_injection import inject
 
-        enriched = inject(request, root=root, retrieval_sid=session_id, session_root=root)
+        enriched = inject(request, root=root, retrieval_sid=session_id, session_root=root,
+                          reuse_repo_state=True)
         if enriched == request or not enriched.endswith(request):
             return ""
         return enriched[: len(enriched) - len(request)].strip()
