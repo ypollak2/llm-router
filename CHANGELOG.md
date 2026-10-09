@@ -32,6 +32,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Existing `~/.llm-router/result_cache.db` files are left on disk, unread and unmigrated.
 
 ### Added
+- context-pack builder core (PLAN v16 P1.1 tasks 1, 2, 4-core; R-CTX-1/2/4): new library module
+  `llm_router/context_pack.py` with `build_pack(request, messages=None, *, session_id, transcript_path,
+  project_root, target_window, door) -> ContextPack` and `messages_for(door, ...)`. The request is kept
+  verbatim; `recent` is the last 7 messages with tool_use/tool_result rendered as text (a tool block over
+  4,000 chars keeps head 1,500 + `[…truncated N chars…]` + tail 1,500); `mode="full"` carries the whole
+  conversation when it, the request and the instructions fit 0.8 x `target_window` and the whole
+  conversation was read; only the last 2 MB of a transcript is read. `project` comes from
+  `context_injection.inject` (OKF, semantic pack, repo state), `instructions` is a CLAUDE.md/AGENTS.md
+  digest (headings and rule lines, <= 1,500 tokens, cached by content hash), `summary` stays `None` until
+  P1.2. Errors in any section yield an empty section. Formats: Claude Code transcript JSONL, Codex rollout
+  JSONL, Anthropic Messages, OpenAI chat, Responses-API items. Instructions come from the project's
+  CLAUDE.md, .claude/CLAUDE.md and AGENTS.md only (the private ~/.claude/CLAUDE.md is not read). No door
+  calls it yet (the 7 door PRs follow); no hook changed. Benchmark `scripts/bench/context_pack_bench.py`
+  (synthetic transcripts, Apple M5 Pro, 2026-10-09, one run): 10 MB transcript n=100 p50 0.71 / p95
+  0.78 ms; 1.99 MB transcript parsed whole n=100 p50 5.55 / p95 6.58 ms; 10 MB transcript plus a project
+  root (this checkout, semantic source default, autoindex off) n=33 p50 54.82 / p95 59.38 ms. The 50 ms
+  budget holds without a project section and is missed with one: the cost is the existing
+  `context_injection.inject` path (git subprocesses, OKF, semantic retrieval), not the pack.
 - ledger completeness (PLAN v16 P0.8-e): a call the semantic cache answers now writes a `usage` row
   (`reason = "cache_hit"`, provider `cache`, model `cache/<cached model>`, 0 tokens, $0) carrying the
   caller's session id, and `semantic_cache_lookups` gains a nullable `session_id` (additive migration;
