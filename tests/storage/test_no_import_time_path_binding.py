@@ -43,14 +43,13 @@ SRC = pathlib.Path(__file__).resolve().parents[2] / "src" / "llm_router"
 
 def _runtime_stores() -> dict[str, pathlib.Path]:
     """Every runtime store, resolved now. Add a row when you add a store."""
-    from llm_router import paths, result_cache, routing_quality
+    from llm_router import paths, routing_quality
     from llm_router.quota_tracker import QuotaTracker
 
     stores: dict[str, pathlib.Path] = {
         "state root": paths.llm_router_home(),
         "routing ledger": routing_quality._default_ledger(),
         "quota usage.json": pathlib.Path(QuotaTracker.USAGE_JSON),
-        "result cache dir": result_cache._router_dir(),
         "execution ledger": pathlib.Path(
             os.environ.get("LLM_ROUTER_EXECUTION_LEDGER_DB")
             or paths.state_path("usage.db")
@@ -125,7 +124,6 @@ def test_store_invariant_is_not_vacuous():
     "module_name, resolver",
     [
         ("llm_router.routing_quality", "_default_ledger"),
-        ("llm_router.result_cache", "_router_dir"),
         ("llm_router.model_tracking", "_tracking_path"),
         ("llm_router.session_spend", "_session_spend_file"),
         ("llm_router.hook_health", "_router_dir"),
@@ -150,7 +148,6 @@ def test_resolution_survives_env_change_after_import(tmp_path, monkeypatch, modu
     "module_name, resolver",
     [
         ("llm_router.routing_quality", "_default_ledger"),
-        ("llm_router.result_cache", "_router_dir"),
         ("llm_router.model_tracking", "_tracking_path"),
     ],
 )

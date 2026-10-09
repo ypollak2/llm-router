@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- one result store (PLAN v16 PG3 / P0.5-c, D-R8-5; docs/bugs/PG3-1.md): the legacy `result_cache`
+  (prompt-only key, BM25 "[Relevant prior answers]" injection in `context_prep`) is removed; the
+  semantic cache, keyed on (text, context hash, project scope), is the only result store.
+  Existing `~/.llm-router/result_cache.db` files are left on disk, unread and unmigrated.
+
 ### Added
 - ledger completeness (PLAN v16 P0.8-d, D-32 = A; R-EVL-1, NFR-NUM): `usage` gains `reason`
   (additive migration `MIGRATE_USAGE_ADD_REASON`; earlier rows stay NULL and `llm-router kpi` reports

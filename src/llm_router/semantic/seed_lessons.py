@@ -185,7 +185,6 @@ def starter_records() -> list:
             ),
             suggested_action="one resolver, called by everything",
             affected_paths=["src/llm_router/semantic/scope.py",
-                            "src/llm_router/result_cache.py",
                             "src/llm_router/semantic_cache.py"],
             affected_symbols=["resolve_scope", "_project_scope", "_get_db_path"],
             evidence_ids=["commit:17ece24"],

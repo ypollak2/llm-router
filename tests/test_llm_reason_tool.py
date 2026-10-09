@@ -103,7 +103,6 @@ class TestLlmReasonRouting:
         with (
             patch("llm_router.tools.text.route_and_call", new_callable=AsyncMock) as mock_route,
             patch("llm_router.tools.text._announce_routing", new_callable=AsyncMock),
-            patch("llm_router.tools.text._cache_result"),
             patch("llm_router.tools.text._record_quality"),
             patch("llm_router.tools.text._format_response", return_value="formatted"),
             patch("llm_router.tools.text._apply_response_router", new_callable=AsyncMock, return_value="formatted"),
@@ -128,7 +127,6 @@ class TestLlmReasonRouting:
         with (
             patch("llm_router.tools.text.route_and_call", new_callable=AsyncMock, return_value=mock_response),
             patch("llm_router.tools.text._announce_routing", new_callable=AsyncMock) as mock_announce,
-            patch("llm_router.tools.text._cache_result"),
             patch("llm_router.tools.text._record_quality"),
             patch("llm_router.tools.text._format_response", return_value="formatted"),
             patch("llm_router.tools.text._apply_response_router", new_callable=AsyncMock, return_value="formatted"),
@@ -136,28 +134,6 @@ class TestLlmReasonRouting:
             await llm_reason("step by step reasoning", mock_ctx)
 
             mock_announce.assert_called_once_with(mock_ctx, "analyze", "deep_reasoning")
-
-    @pytest.mark.asyncio
-    async def test_caches_with_deep_reasoning_complexity(self, mock_ctx) -> None:
-        from llm_router.tools.text import llm_reason
-
-        mock_response = MagicMock()
-        mock_response.content = "Result"
-        mock_response.model = "deepseek/deepseek-reasoner"
-        mock_response.citations = []
-
-        with (
-            patch("llm_router.tools.text.route_and_call", new_callable=AsyncMock, return_value=mock_response),
-            patch("llm_router.tools.text._announce_routing", new_callable=AsyncMock),
-            patch("llm_router.tools.text._cache_result") as mock_cache,
-            patch("llm_router.tools.text._record_quality"),
-            patch("llm_router.tools.text._format_response", return_value="formatted"),
-            patch("llm_router.tools.text._apply_response_router", new_callable=AsyncMock, return_value="formatted"),
-        ):
-            prompt = "Think through this derivation step by step."
-            await llm_reason(prompt, mock_ctx)
-
-            mock_cache.assert_called_once_with(prompt, mock_response, "analyze", "deep_reasoning")
 
     @pytest.mark.asyncio
     async def test_applies_response_router(self, mock_ctx) -> None:
@@ -171,7 +147,6 @@ class TestLlmReasonRouting:
         with (
             patch("llm_router.tools.text.route_and_call", new_callable=AsyncMock, return_value=mock_response),
             patch("llm_router.tools.text._announce_routing", new_callable=AsyncMock),
-            patch("llm_router.tools.text._cache_result"),
             patch("llm_router.tools.text._record_quality"),
             patch("llm_router.tools.text._format_response", return_value="formatted response"),
             patch("llm_router.tools.text._apply_response_router", new_callable=AsyncMock, return_value="compressed response") as mock_router,
@@ -193,7 +168,6 @@ class TestLlmReasonRouting:
         with (
             patch("llm_router.tools.text.route_and_call", new_callable=AsyncMock, return_value=mock_response) as mock_route,
             patch("llm_router.tools.text._announce_routing", new_callable=AsyncMock),
-            patch("llm_router.tools.text._cache_result"),
             patch("llm_router.tools.text._record_quality"),
             patch("llm_router.tools.text._format_response", return_value="formatted"),
             patch("llm_router.tools.text._apply_response_router", new_callable=AsyncMock, return_value="formatted"),

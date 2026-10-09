@@ -81,7 +81,6 @@ LEAKY_INPUTS = {
 
 #: Every module that writes user content to disk and must redact first.
 PERSISTENCE_MODULES = (
-    "llm_router.result_cache",
     "llm_router.semantic_cache",
     "llm_router.idempotency",
     "llm_router.context",

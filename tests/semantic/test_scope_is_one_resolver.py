@@ -65,25 +65,18 @@ def test_okf_and_the_resolver_agree_from_a_subdirectory(repo, monkeypatch):
     assert okf.project_root() == resolve_scope()
 
 
-def test_both_caches_key_on_the_same_project_from_any_subdirectory(repo, monkeypatch):
+def test_the_cache_keys_on_the_same_project_from_any_subdirectory(repo, monkeypatch):
     """The regression that matters: same project, two corners, one namespace."""
-    from llm_router import result_cache, semantic_cache
+    from llm_router import semantic_cache
 
     monkeypatch.chdir(repo)
     sem_at_root = semantic_cache._project_scope()
-    res_at_root = result_cache._get_db_path(str(repo), "code")
 
     monkeypatch.chdir(repo / "src" / "deep")
     sem_at_sub = semantic_cache._project_scope()
-    res_at_sub = result_cache._get_db_path(str(repo / "src" / "deep"), "code")
 
     assert sem_at_root == sem_at_sub, (
         "the semantic cache split one project into two namespaces by cwd"
-    )
-    assert res_at_root == res_at_sub, (
-        f"the result cache put one project in two database files:\n"
-        f"  {res_at_root}\n  {res_at_sub}\n"
-        f"and neither is ever reopened to be purged"
     )
 
 
