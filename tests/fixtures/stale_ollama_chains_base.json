@@ -1,0 +1,529 @@
+{
+ "dynamic": {
+  "balanced/analyze": [
+   "ollama/qwen3-coder:30b",
+   "ollama/nimble:9b",
+   "ollama/qwen3.8",
+   "ollama/qwen3:32b",
+   "deepseek/deepseek-reasoner",
+   "openai/gpt-4o",
+   "anthropic/claude-sonnet-4-6",
+   "anthropic/claude-haiku-4-5-20251001"
+  ],
+  "balanced/audio": [
+   "openai/tts-1-hd"
+  ],
+  "balanced/code": [
+   "ollama/qwen3-coder:30b",
+   "ollama/qwen3.8",
+   "ollama/nimble:9b",
+   "ollama/qwen3:32b",
+   "deepseek/deepseek-chat",
+   "openai/gpt-4o",
+   "anthropic/claude-sonnet-4-6",
+   "anthropic/claude-haiku-4-5-20251001"
+  ],
+  "balanced/coordinate": [
+   "ollama/qwen3.8",
+   "ollama/nimble:9b",
+   "ollama/qwen3-coder:30b",
+   "anthropic/claude-sonnet-4-6"
+  ],
+  "balanced/generate": [
+   "ollama/nimble:9b",
+   "ollama/qwen3-coder:30b",
+   "ollama/qwen3.8",
+   "ollama/qwen3:32b",
+   "deepseek/deepseek-chat",
+   "openai/gpt-4o",
+   "anthropic/claude-sonnet-4-6",
+   "anthropic/claude-haiku-4-5-20251001"
+  ],
+  "balanced/image": [
+   "openai/dall-e-3"
+  ],
+  "balanced/introspect": [
+   "ollama/qwen3.8",
+   "ollama/nimble:9b",
+   "ollama/qwen3-coder:30b",
+   "anthropic/claude-sonnet-4-6"
+  ],
+  "balanced/query": [
+   "ollama/nimble:9b",
+   "ollama/qwen3-coder:30b",
+   "ollama/qwen3.8",
+   "ollama/qwen3.5:latest",
+   "ollama/qwen3:32b",
+   "deepseek/deepseek-chat",
+   "openai/gpt-4o",
+   "anthropic/claude-sonnet-4-6",
+   "anthropic/claude-haiku-4-5-20251001"
+  ],
+  "balanced/research": [
+   "ollama/nimble:9b",
+   "ollama/qwen3-coder:30b",
+   "ollama/qwen3.8",
+   "ollama/qwen3:32b",
+   "anthropic/claude-sonnet-4-6",
+   "openai/gpt-4o"
+  ],
+  "balanced/video": [],
+  "budget/analyze": [
+   "ollama/qwen3-coder:30b",
+   "ollama/nimble:9b",
+   "ollama/qwen3.8",
+   "ollama/hermes3:8b",
+   "deepseek/deepseek-reasoner",
+   "openai/gpt-4o-mini",
+   "anthropic/claude-haiku-4-5-20251001"
+  ],
+  "budget/audio": [
+   "openai/tts-1"
+  ],
+  "budget/code": [
+   "ollama/qwen3-coder:30b",
+   "ollama/qwen3.8",
+   "ollama/nimble:9b",
+   "ollama/hermes3:8b",
+   "deepseek/deepseek-chat",
+   "openai/gpt-4o-mini",
+   "anthropic/claude-haiku-4-5-20251001"
+  ],
+  "budget/coordinate": [
+   "ollama/qwen3.8",
+   "ollama/nimble:9b",
+   "ollama/qwen3-coder:30b",
+   "anthropic/claude-sonnet-4-6"
+  ],
+  "budget/generate": [
+   "ollama/nimble:9b",
+   "ollama/qwen3-coder:30b",
+   "ollama/qwen3.8",
+   "ollama/hermes3:8b",
+   "deepseek/deepseek-chat",
+   "openai/gpt-4o-mini",
+   "anthropic/claude-haiku-4-5-20251001"
+  ],
+  "budget/image": [
+   "openai/dall-e-2"
+  ],
+  "budget/introspect": [
+   "ollama/qwen3.8",
+   "ollama/nimble:9b",
+   "ollama/qwen3-coder:30b",
+   "anthropic/claude-sonnet-4-6"
+  ],
+  "budget/query": [
+   "ollama/nimble:9b",
+   "ollama/qwen3-coder:30b",
+   "ollama/qwen3.8",
+   "ollama/qwen3.5:latest",
+   "ollama/hermes3:8b",
+   "deepseek/deepseek-chat",
+   "openai/gpt-4o-mini",
+   "anthropic/claude-haiku-4-5-20251001"
+  ],
+  "budget/research": [
+   "ollama/nimble:9b",
+   "ollama/qwen3-coder:30b",
+   "ollama/qwen3.8",
+   "ollama/hermes3:8b",
+   "anthropic/claude-haiku-4-5-20251001",
+   "openai/gpt-4o-mini"
+  ],
+  "budget/video": [],
+  "premium/analyze": [
+   "anthropic/claude-opus-4-8",
+   "anthropic/claude-sonnet-4-6",
+   "deepseek/deepseek-reasoner",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o",
+   "openai/o3",
+   "ollama/qwen3:32b"
+  ],
+  "premium/audio": [
+   "openai/tts-1-hd"
+  ],
+  "premium/code": [
+   "anthropic/claude-opus-4-8",
+   "anthropic/claude-sonnet-4-6",
+   "deepseek/deepseek-reasoner",
+   "openai/gpt-4o",
+   "openai/gpt-4o-mini",
+   "openai/o3",
+   "ollama/qwen3:32b"
+  ],
+  "premium/coordinate": [
+   "anthropic/claude-sonnet-4-6",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o"
+  ],
+  "premium/generate": [
+   "anthropic/claude-opus-4-8",
+   "anthropic/claude-sonnet-4-6",
+   "deepseek/deepseek-chat",
+   "openai/gpt-4o",
+   "openai/gpt-4o-mini",
+   "openai/o3",
+   "ollama/qwen3:32b"
+  ],
+  "premium/image": [
+   "openai/dall-e-3"
+  ],
+  "premium/introspect": [
+   "anthropic/claude-sonnet-4-6",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o"
+  ],
+  "premium/query": [
+   "anthropic/claude-opus-4-8",
+   "anthropic/claude-sonnet-4-6",
+   "deepseek/deepseek-chat",
+   "openai/gpt-4o",
+   "openai/gpt-4o-mini",
+   "openai/o3",
+   "ollama/qwen3:32b"
+  ],
+  "premium/research": [
+   "anthropic/claude-opus-4-8",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o",
+   "openai/o3",
+   "ollama/qwen3:32b"
+  ],
+  "premium/video": [],
+  "reasoning/analyze": [
+   "deepseek/deepseek-reasoner",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o",
+   "openai/o3",
+   "anthropic/claude-opus-4-8",
+   "anthropic/claude-sonnet-4-6",
+   "anthropic/claude-fable-5",
+   "ollama/qwen3:32b"
+  ],
+  "reasoning/audio": [
+   "openai/tts-1-hd"
+  ],
+  "reasoning/code": [
+   "deepseek/deepseek-reasoner",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o",
+   "openai/o3",
+   "anthropic/claude-opus-4-8",
+   "anthropic/claude-sonnet-4-6",
+   "anthropic/claude-fable-5",
+   "ollama/qwen3:32b"
+  ],
+  "reasoning/coordinate": [
+   "anthropic/claude-sonnet-4-6",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o"
+  ],
+  "reasoning/generate": [
+   "deepseek/deepseek-reasoner",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o",
+   "openai/o3",
+   "anthropic/claude-opus-4-8",
+   "anthropic/claude-sonnet-4-6",
+   "anthropic/claude-fable-5",
+   "ollama/qwen3:32b"
+  ],
+  "reasoning/image": [
+   "openai/dall-e-3"
+  ],
+  "reasoning/introspect": [
+   "anthropic/claude-sonnet-4-6",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o"
+  ],
+  "reasoning/query": [
+   "deepseek/deepseek-reasoner",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o",
+   "openai/o3",
+   "anthropic/claude-opus-4-8",
+   "anthropic/claude-sonnet-4-6",
+   "anthropic/claude-fable-5",
+   "ollama/qwen3:32b"
+  ],
+  "reasoning/research": [
+   "deepseek/deepseek-reasoner",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o",
+   "openai/o3",
+   "anthropic/claude-opus-4-8",
+   "anthropic/claude-fable-5",
+   "ollama/qwen3:32b"
+  ],
+  "reasoning/video": []
+ },
+ "static": {
+  "balanced/analyze": [
+   "ollama/qwen3-coder:30b",
+   "ollama/nimble:9b",
+   "ollama/qwen3.8",
+   "anthropic/claude-sonnet-4-6",
+   "anthropic/claude-haiku-4-5-20251001",
+   "openai/gpt-4o",
+   "deepseek/deepseek-reasoner"
+  ],
+  "balanced/audio": [
+   "elevenlabs/eleven_multilingual_v2",
+   "openai/tts-1-hd"
+  ],
+  "balanced/code": [
+   "ollama/qwen3-coder:30b",
+   "ollama/qwen3.8",
+   "ollama/nimble:9b",
+   "anthropic/claude-sonnet-4-6",
+   "anthropic/claude-haiku-4-5-20251001",
+   "openai/gpt-4o",
+   "deepseek/deepseek-chat"
+  ],
+  "balanced/coordinate": [
+   "ollama/qwen3.8",
+   "ollama/nimble:9b",
+   "ollama/qwen3-coder:30b",
+   "anthropic/claude-sonnet-4-6"
+  ],
+  "balanced/generate": [
+   "ollama/nimble:9b",
+   "ollama/qwen3-coder:30b",
+   "ollama/qwen3.8",
+   "anthropic/claude-sonnet-4-6",
+   "anthropic/claude-haiku-4-5-20251001",
+   "openai/gpt-4o",
+   "deepseek/deepseek-chat"
+  ],
+  "balanced/image": [
+   "fal/flux-pro",
+   "openai/dall-e-3",
+   "stability/stable-diffusion-3"
+  ],
+  "balanced/introspect": [
+   "ollama/qwen3.8",
+   "ollama/nimble:9b",
+   "ollama/qwen3-coder:30b",
+   "anthropic/claude-sonnet-4-6"
+  ],
+  "balanced/query": [
+   "ollama/nimble:9b",
+   "ollama/qwen3-coder:30b",
+   "ollama/qwen3.8",
+   "anthropic/claude-sonnet-4-6",
+   "anthropic/claude-haiku-4-5-20251001",
+   "openai/gpt-4o",
+   "deepseek/deepseek-chat"
+  ],
+  "balanced/research": [
+   "ollama/nimble:9b",
+   "ollama/qwen3-coder:30b",
+   "ollama/qwen3.8",
+   "anthropic/claude-sonnet-4-6",
+   "ollama/qwen3:32b",
+   "openai/gpt-4o"
+  ],
+  "balanced/video": [
+   "fal/kling-video",
+   "runway/gen3a_turbo",
+   "replicate/minimax-video"
+  ],
+  "budget/analyze": [
+   "ollama/qwen3-coder:30b",
+   "ollama/nimble:9b",
+   "ollama/qwen3.8",
+   "anthropic/claude-haiku-4-5-20251001",
+   "deepseek/deepseek-reasoner",
+   "openai/gpt-4o-mini"
+  ],
+  "budget/audio": [
+   "openai/tts-1",
+   "elevenlabs/eleven_multilingual_v2"
+  ],
+  "budget/code": [
+   "ollama/qwen3-coder:30b",
+   "ollama/qwen3.8",
+   "ollama/nimble:9b",
+   "anthropic/claude-haiku-4-5-20251001",
+   "deepseek/deepseek-chat",
+   "openai/gpt-4o-mini"
+  ],
+  "budget/coordinate": [
+   "ollama/qwen3.8",
+   "ollama/nimble:9b",
+   "ollama/qwen3-coder:30b",
+   "anthropic/claude-sonnet-4-6"
+  ],
+  "budget/generate": [
+   "ollama/nimble:9b",
+   "ollama/qwen3-coder:30b",
+   "ollama/qwen3.8",
+   "anthropic/claude-haiku-4-5-20251001",
+   "deepseek/deepseek-chat",
+   "openai/gpt-4o-mini"
+  ],
+  "budget/image": [
+   "fal/flux-dev",
+   "stability/stable-diffusion-3",
+   "openai/dall-e-2"
+  ],
+  "budget/introspect": [
+   "ollama/qwen3.8",
+   "ollama/nimble:9b",
+   "ollama/qwen3-coder:30b",
+   "anthropic/claude-sonnet-4-6"
+  ],
+  "budget/query": [
+   "ollama/nimble:9b",
+   "ollama/qwen3-coder:30b",
+   "ollama/qwen3.8",
+   "anthropic/claude-haiku-4-5-20251001",
+   "deepseek/deepseek-chat",
+   "openai/gpt-4o-mini"
+  ],
+  "budget/research": [
+   "ollama/nimble:9b",
+   "ollama/qwen3-coder:30b",
+   "ollama/qwen3.8",
+   "anthropic/claude-haiku-4-5-20251001",
+   "ollama/hermes3:8b",
+   "openai/gpt-4o-mini"
+  ],
+  "budget/video": [
+   "fal/minimax-video",
+   "replicate/minimax-video"
+  ],
+  "premium/analyze": [
+   "anthropic/claude-sonnet-4-6",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o",
+   "openai/o3",
+   "anthropic/claude-opus-4-8",
+   "deepseek/deepseek-reasoner"
+  ],
+  "premium/audio": [
+   "elevenlabs/eleven_multilingual_v2",
+   "openai/tts-1-hd"
+  ],
+  "premium/code": [
+   "anthropic/claude-sonnet-4-6",
+   "openai/gpt-4o",
+   "openai/gpt-4o-mini",
+   "openai/o3",
+   "anthropic/claude-opus-4-8",
+   "deepseek/deepseek-reasoner"
+  ],
+  "premium/coordinate": [
+   "anthropic/claude-sonnet-4-6",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o"
+  ],
+  "premium/generate": [
+   "anthropic/claude-sonnet-4-6",
+   "openai/gpt-4o",
+   "openai/gpt-4o-mini",
+   "openai/o3",
+   "anthropic/claude-opus-4-8",
+   "deepseek/deepseek-chat"
+  ],
+  "premium/image": [
+   "openai/dall-e-3",
+   "fal/flux-pro",
+   "stability/stable-diffusion-3-ultra"
+  ],
+  "premium/introspect": [
+   "anthropic/claude-sonnet-4-6",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o"
+  ],
+  "premium/query": [
+   "anthropic/claude-sonnet-4-6",
+   "openai/gpt-4o",
+   "openai/gpt-4o-mini",
+   "openai/o3",
+   "anthropic/claude-opus-4-8",
+   "deepseek/deepseek-chat"
+  ],
+  "premium/research": [
+   "anthropic/claude-opus-4-8",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o",
+   "openai/o3",
+   "ollama/qwen3:32b"
+  ],
+  "premium/video": [
+   "runway/gen3a",
+   "fal/kling-video"
+  ],
+  "reasoning/analyze": [
+   "anthropic/claude-sonnet-4-6",
+   "deepseek/deepseek-reasoner",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o",
+   "openai/o3",
+   "anthropic/claude-opus-4-8",
+   "anthropic/claude-fable-5"
+  ],
+  "reasoning/audio": [
+   "elevenlabs/eleven_multilingual_v2",
+   "openai/tts-1-hd"
+  ],
+  "reasoning/code": [
+   "anthropic/claude-sonnet-4-6",
+   "deepseek/deepseek-reasoner",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o",
+   "openai/o3",
+   "anthropic/claude-opus-4-8",
+   "anthropic/claude-fable-5"
+  ],
+  "reasoning/coordinate": [
+   "anthropic/claude-sonnet-4-6",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o"
+  ],
+  "reasoning/generate": [
+   "anthropic/claude-sonnet-4-6",
+   "deepseek/deepseek-reasoner",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o",
+   "openai/o3",
+   "anthropic/claude-opus-4-8",
+   "anthropic/claude-fable-5"
+  ],
+  "reasoning/image": [
+   "openai/dall-e-3",
+   "fal/flux-pro",
+   "stability/stable-diffusion-3-ultra"
+  ],
+  "reasoning/introspect": [
+   "anthropic/claude-sonnet-4-6",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o"
+  ],
+  "reasoning/query": [
+   "anthropic/claude-sonnet-4-6",
+   "deepseek/deepseek-reasoner",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o",
+   "openai/o3",
+   "anthropic/claude-opus-4-8",
+   "anthropic/claude-fable-5"
+  ],
+  "reasoning/research": [
+   "deepseek/deepseek-reasoner",
+   "openai/gpt-4o-mini",
+   "openai/gpt-4o",
+   "openai/o3",
+   "anthropic/claude-opus-4-8",
+   "anthropic/claude-fable-5",
+   "ollama/qwen3:32b"
+  ],
+  "reasoning/video": [
+   "runway/gen3a",
+   "fal/kling-video"
+  ]
+ }
+}
