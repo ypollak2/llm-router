@@ -116,12 +116,23 @@ def test_statusline_today_savings_use_localtime():
     code and push someone to re-add the hand-rolled SQL that under-reported by
     2.7x — the defect this replaced.
     """
+    # P0.9-c: the figure is computed in statusline_segments (the script prints a
+    # cache of it). Python is checked on its AST, not its text (R13).
     sl = _read("hooks/statusline-command.sh")
     assert "date -u +" not in sl, "forced-UTC day boundary reintroduced"
-    assert "datetime.datetime.utcnow()" not in sl, "UTC log filter reintroduced"
-    assert "query_window" in sl, (
-        "statusline no longer delegates — whoever re-added its own savings query "
-        "also re-took ownership of the timezone boundary"
+    seg_path = Path(__file__).resolve().parents[1] / "src" / "llm_router" / "statusline_segments.py"
+    tree = ast.parse(seg_path.read_text(encoding="utf-8"))
+    assert not [s for s in string_constants(tree) if "utcnow" in s or "date('now')" in s], (
+        "UTC day boundary reintroduced in the statusline's segments"
+    )
+    delegates = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.ImportFrom) and n.module == "llm_router.dashboard_data"
+        and {a.name for a in n.names} >= {"summary"}
+    ]
+    assert delegates, (
+        "statusline no longer delegates to dashboard_data.summary() -- whoever re-added "
+        "its own savings query also re-took ownership of the timezone boundary"
     )
 
     from pathlib import Path as _P

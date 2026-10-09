@@ -30,6 +30,7 @@ from tests.test_statusline_savings import _seed_savings_log, _seed_usage_db
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "src" / "llm_router" / "hooks" / "statusline-command.sh"
 TICK = REPO / "src" / "llm_router" / "statusline_tick.py"
+SEGMENTS = REPO / "src" / "llm_router" / "statusline_segments.py"
 REFERENCE = REPO / "tests" / "fixtures" / "statusline-command.pre273.sh"
 #: sha256 of the reference as `git show 5575906^:...` printed it. A reference
 #: that drifts would compare the default against the wrong thing.
@@ -156,6 +157,8 @@ def test_default_output_matches_the_pre_273_script(tmp_path, name):
     shutil.copy2(REFERENCE, old)
     shutil.copy2(SCRIPT, new)
     shutil.copy2(TICK, hooks / "llm_router_statusline_tick.py")
+    # P0.9-c: the segments the script reads from its cache are computed by this file.
+    shutil.copy2(SEGMENTS, hooks / "llm_router_statusline_segments.py")
     a = _run(old, home, extra, stdin)
     b = _run(new, home, extra, stdin)
     assert a.returncode == b.returncode == 0, (a.stderr, b.stderr)

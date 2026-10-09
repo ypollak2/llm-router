@@ -134,4 +134,8 @@ def test_no_variable_regression_guard():
     test_gh50_statusline_defines_every_var.py's bare-read scan; this just
     anchors that the new block exists and uses the shared STATE_DIR."""
     body = _SCRIPT.read_text()
-    assert re.search(r'^proxy_default_sentinel="\$STATE_DIR/proxy_default\.json"', body, re.M)
+    # P0.9-c: the probe moved to the detached refresher (statusline_segments);
+    # the script renders what it cached under the same state dir.
+    seg = (_SCRIPT.parent.parent / "statusline_segments.py").read_text()
+    assert '"proxy_default.json"' in seg and "socket.create_connection" in seg
+    assert re.search(r'^\s*if \[ -n "\$s_proxy_down" \]', body, re.M)

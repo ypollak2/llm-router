@@ -205,13 +205,17 @@ def test_statusline_delegates_both_total_and_format():
     Delegating the FORMAT matters as much as the total: every surface invented
     its own money format, and the two that mattered disagreed.
     """
-    src = (REPO / "src" / "llm_router" / "hooks" / "statusline-command.sh").read_text()
+    # P0.9-c: the figure is computed by the detached refresher (statusline_segments),
+    # which calls summary() -- itself built on query_window -- and prints
+    # Summary.compact(); the script only prints the cached string.
+    root = REPO / "src" / "llm_router"
+    seg = (root / "statusline_segments.py").read_text()
+    src = (root / "hooks" / "statusline-command.sh").read_text() + seg
 
-    assert "render_money" in src, (
+    assert "dashboard_data import" in seg and "summary(" in seg and ".compact()" in seg, (
         "the statusline formats money itself instead of delegating to "
-        "render_money(), which is how the surfaces drifted apart"
+        "dashboard_data.summary().compact(), which is how the surfaces drifted apart"
     )
-    assert "query_window" in src, "statusline does not use the canonical aggregation"
     assert not re.search(r"SUM\(\s*cost", src, re.I), (
         "the statusline is running its own cost SQL again — the v9.3 drift class"
     )

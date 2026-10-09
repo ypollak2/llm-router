@@ -317,6 +317,9 @@ def test_statusline_reports_today_not_the_session():
     still holds; only the call site's name changed.
     """
     src = _statusline_source()
+    from pathlib import Path as _P
+
+    src += (_P(__file__).resolve().parents[1] / "src" / "llm_router" / "statusline_segments.py").read_text()
     assert 'summary("today"' in src, (
         "the statusline must use the canonical today-window aggregation "
         "(dashboard_data.summary(), which unions all five usage tables via "
