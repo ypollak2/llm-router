@@ -149,7 +149,7 @@ async def test_llm_act_wait_false_returns_job_id_and_job_polls_to_result(slow_ac
     returned_in = time.monotonic() - t0
     assert returned_in < 1.0, returned_in
     job_id = handle["job_id"]
-    assert handle["status"] == "running"
+    assert handle["status"] == "queued"  # task not started yet (#357 review)
 
     first = await llm_router_session(action="job", id=job_id)
     assert first["status"] == "running" and first["result"] is None
@@ -208,9 +208,9 @@ async def test_llm_local_task_wait_false_returns_job(tmp_path, monkeypatch):
                         lambda **kw: (time.sleep(0.5), "ok")[1])
     handle = json.loads(await lt.llm_local_task("o", str(tmp_path), wait=False))
     job = await llm_router_session(action="job", id=handle["job_id"])
-    assert job["status"] == "running"
+    assert job["status"] in ("queued", "running")
     deadline = time.monotonic() + 20
-    while job["status"] == "running" and time.monotonic() < deadline:
+    while job["status"] in ("queued", "running") and time.monotonic() < deadline:
         await asyncio.sleep(0.05)
         job = await llm_router_session(action="job", id=handle["job_id"])
     assert job["status"] == "done" and job["tool"] == "llm_local_task"

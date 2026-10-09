@@ -48,13 +48,15 @@ def mark_current(status: str, ctx: contextvars.Context | None = None) -> None:
 
 def _spawn(tool: str, coro: Coroutine[Any, Any, str]) -> tuple[str, asyncio.Task]:
     job_id = uuid.uuid4().hex
-    _jobs[job_id] = {"job_id": job_id, "tool": tool, "status": "running",
-                     "started_at": time.time(), "finished_at": None,
+    _jobs[job_id] = {"job_id": job_id, "tool": tool, "status": "queued",
+                     "detached": False, "started_at": time.time(), "finished_at": None,
                      "result": None, "error": None}
 
     async def _run() -> str | None:
         job = _jobs.get(job_id) or {}
         _current_job.set(job_id)
+        if job.get("status") == "queued":
+            job["status"] = "running"
         try:
             raw = await coro
             try:
@@ -92,6 +94,7 @@ async def run_or_detach(tool: str, coro: Coroutine[Any, Any, str]) -> str:
             task.cancel()
             log.warning("%s cancelled while queued (job %s dropped)", tool, job_id)
         else:
+            _jobs[job_id]["detached"] = True
             log.warning("%s caller cancelled; run continues as background job %s "
                         "(poll llm_router_session(action='job', id='%s'))",
                         tool, job_id, job_id)
@@ -103,6 +106,11 @@ def start_job(tool: str, coro: Coroutine[Any, Any, str]) -> dict[str, Any]:
     job_id, _task = _spawn(tool, coro)
     return {"job_id": job_id, "tool": tool, "status": _jobs[job_id]["status"],
             "poll": f"llm_router_session(action='job', id='{job_id}')"}
+
+
+def list_detached() -> list[dict[str, Any]]:
+    """Jobs whose wait=True caller was cancelled while they ran (newest last)."""
+    return [get_job(jid) for jid, j in list(_jobs.items()) if j.get("detached")]
 
 
 def get_job(job_id: str) -> dict[str, Any]:

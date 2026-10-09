@@ -186,7 +186,9 @@ async def llm_router_session(
     richer params — call those tools directly. Old tools stay registered underneath."""
     a = (action or "").lower()
     if a == "job":
-        from llm_router.jobs import get_job
+        from llm_router.jobs import get_job, list_detached
+        if id == "detached":
+            return {"detached": list_detached()}
         return get_job(id or session_id)
     if a == "list":
         return await llm_router_agent_list()
