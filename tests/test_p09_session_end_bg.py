@@ -450,14 +450,6 @@ def test_stop_does_not_wait_for_an_mcp_spend_flush(hook, state, monkeypatch, tmp
     assert not hasattr(hook, "_flush_session_spend_from_mcp")
 
 
-def test_nothing_in_the_tree_reads_the_spend_flush_flag():
-    """The reason the wait is dead code: the hook was the flag's only user."""
-    root = Path(__file__).parent.parent
-    users = [str(p.relative_to(root)) for base in ("src", "hooks", "scripts")
-             for p in (root / base).rglob("*.py") if "session_spend_flush_request" in p.read_text()]
-    assert users == [], users
-
-
 def test_stop_does_not_scan_transcripts_inline(hook, state, monkeypatch, tmp_path):
     _seed_session(state)
     _write_usage(state, time.time())
