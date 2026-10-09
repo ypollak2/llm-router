@@ -678,6 +678,31 @@ shim's (`com.llm_router.proxy-shim` / `llm_router-proxy-shim`):
   `tests/test_session_start_proxy_default.py`,
   `tests/test_statusline_proxy_default.py`).
 
+### Repairing a lost routing key: `llm-router doctor --fix-routing` (P0.14-c)
+
+On 2026-10-08 `settings.json` lost `env.ANTHROPIC_BASE_URL` in an unrecorded
+rewrite while the sentinel still said enabled, and routing stayed off for about
+three hours. `llm-router doctor --fix-routing` is the explicit repair. No hook,
+no plain `install` and no plain `doctor` runs it (owner decision D-R8-4). It
+writes that one key (with a backup, and nothing else) only when all of these hold:
+the sentinel is enabled and has no `routing_opt_out`; the key is absent from
+`~/.claude/settings.json`; no project `.claude/settings{.local,}.json` and no
+environment value names another endpoint; the shim's port and the main proxy's port
+both answer. Otherwise it refuses and names the reason. On a terminal it shows
+the diff and asks y/N. `--yes` writes without asking, and without a terminal it
+is required. A second run is a no-op.
+
+`--decline` records a deliberate removal (`routing_opt_out: true` in
+`proxy_default.json`). After that the repair refuses and SessionStart no longer
+prints "routing is OFF". `llm-router install --proxy-default` opts back in.
+`uninstall` removes the sentinel, so nothing is left to repair or warn about.
+
+Attribution: every SessionStart (with proxy-default installed) appends one
+`observe` row to `~/.llm-router/settings_writes.jsonl` with the key's presence,
+a sha256 of the `env` block and the file's mtime (never the URL). The repair
+appends a `write` row with the keys changed and the backup path. The next
+unexplained removal then falls between two session starts.
+
 ### Escalation to Opus (`proxy/escalation.py`)
 
 Directly motivated by the trial's one unacceptable answer:

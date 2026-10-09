@@ -56,11 +56,6 @@ def _hammer_reads(target: pathlib.Path, writer, n: int = 2000) -> float:
         t.join(timeout=2)
 
 
-def _non_atomic_writer(target: pathlib.Path, stop: threading.Event) -> None:
-    while not stop.is_set():
-        target.write_text(_PAYLOAD, encoding="utf-8")
-
-
 def _atomic_writer(target: pathlib.Path, stop: threading.Event) -> None:
     while not stop.is_set():
         tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
@@ -71,16 +66,56 @@ def _atomic_writer(target: pathlib.Path, stop: threading.Event) -> None:
         os.replace(tmp, target)
 
 
+def _old_pattern_write(target: pathlib.Path, mid_write) -> None:
+    """The pre-fix `Path.write_text` shape: truncate in place, then write.
+
+    `mid_write` runs in the window between the two steps. The real `write_text`
+    has that window too, but it is microseconds wide and only a scheduler
+    accident puts a reader inside it; here the window is held open on purpose.
+    """
+    with open(target, "w", encoding="utf-8") as fh:  # truncates immediately
+        fh.flush()
+        mid_write()
+        fh.write(_PAYLOAD)
+
+
+def _read_during_old_pattern_write(target: pathlib.Path) -> bool:
+    """True if a reader that opens mid-write sees an unparseable file. No timing."""
+    target.write_text(_PAYLOAD, encoding="utf-8")
+    truncated, read_done = threading.Event(), threading.Event()
+
+    def writer() -> None:
+        # Bounded waits: a hung reader must not hang the suite.
+        _old_pattern_write(
+            target, lambda: (truncated.set(), read_done.wait(timeout=5))
+        )
+
+    t = threading.Thread(target=writer, daemon=True)
+    t.start()
+    try:
+        assert truncated.wait(timeout=5), "writer never reached the truncated state"
+        try:
+            json.loads(target.read_text(encoding="utf-8"))
+            return False
+        except Exception:
+            return True
+    finally:
+        read_done.set()
+        t.join(timeout=5)
+
+
 def test_the_old_pattern_really_does_tear(tmp_path):
     """Anti-vacuity, and the reason this test exists at all.
 
-    If the non-atomic writer could not be made to fail here, the atomic test
-    below would be proving nothing about anything.
+    If the non-atomic pattern could not be made to fail here, the atomic test
+    below would be proving nothing about anything. The interleaving is forced
+    (reader runs while the writer is parked between truncate and write), so this
+    is deterministic rather than a race the scheduler may or may not lose.
     """
-    rate = _hammer_reads(tmp_path / "usage.json", _non_atomic_writer)
-    assert rate > 0.0, (
-        "the non-atomic writer produced zero torn reads on this machine, so the "
-        "atomic assertion below cannot demonstrate an improvement"
+    assert _read_during_old_pattern_write(tmp_path / "usage.json"), (
+        "a reader between truncate and write parsed the file, so the old "
+        "pattern is not demonstrably torn and the atomic assertion below "
+        "cannot demonstrate an improvement"
     )
 
 

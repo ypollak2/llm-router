@@ -340,6 +340,11 @@ def policy(monkeypatch):
         return dict(decision)
 
     monkeypatch.setattr(ps, "choose_model", _choose)
+    # The product budget (2 s) is wall-clock: a slow CI runner can exceed it while
+    # git/file I/O runs, fail the attach open and drop the block (main run
+    # 37906269660). Tests that are not about the timeout pin it far above any
+    # runner; test_a_slow_attach_is_bounded... sets its own small value after this.
+    monkeypatch.setattr(ps, "OKF_ATTACH_TIMEOUT_S", 60.0)
     return decision
 
 

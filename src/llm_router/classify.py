@@ -380,14 +380,53 @@ def apply_complexity_floor(complexity: Complexity, task_type: str | TaskType) ->
     return floor if _COMPLEXITY_RANK[floor] > _COMPLEXITY_RANK.get(complexity, 0) else complexity
 
 
+# ── Case-sensitive twins of the signal tables (PLAN v16 P0.9-e) ──────────────
+#
+# Every ``_SIGNALS`` pattern is IGNORECASE, and that is the slow part of scoring:
+# re cannot use its fast literal paths, so 18 patterns cost ~1.2 us per character,
+# up to ~3.5 ms on the 3,000-character text the proxy's tier decision classifies.
+# Each pattern whose source is ASCII with no upper-case letter outside an escape
+# also gets a twin without IGNORECASE, run on the text with its ASCII letters
+# lower-cased. The two find the same matches: lower-casing ASCII letters keeps
+# the length and every \w/\d/\s/\b boundary, and an ASCII-only pattern under
+# IGNORECASE matches a non-ASCII character only if that character folds to an
+# ASCII letter. Exactly four do (``_FOLDS_TO_ASCII``, the same set on Python
+# 3.11-3.14; tests/test_p09e_decision_work.py recomputes it over every code
+# point), so a text that holds one of them takes the original patterns. The
+# scores are then identical, which the same test checks against the originals.
+_FOLDS_TO_ASCII = re.compile("[\u0130\u0131\u017f\u212a]")
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def _case_sensitive_twin(pat: re.Pattern) -> re.Pattern | None:
+    src = pat.pattern
+    if not (pat.flags & re.IGNORECASE) or not src.isascii() or re.search(r"[A-Z]", re.sub(r"\\.", "", src)):
+        return None
+    return re.compile(src, pat.flags & ~re.IGNORECASE)
+
+
+_SIGNALS_CS: dict[str, dict[str, re.Pattern]] = {
+    category: {layer: twin for layer, pat in layers.items() if (twin := _case_sensitive_twin(pat)) is not None}
+    for category, layers in _SIGNALS.items()
+}
+
+
 def _score_categories(text: str) -> dict[str, int]:
     scores: dict[str, int] = {}
+    if text.isascii():
+        lowered = text.lower()
+    elif _FOLDS_TO_ASCII.search(text) is None:
+        lowered = text.translate(_ASCII_LOWER)
+    else:
+        lowered = None
     for category, layers in _SIGNALS.items():
+        twins = _SIGNALS_CS[category] if lowered is not None else {}
         total = 0
         for layer, weight in (("intent", _INTENT_W), ("topic", _TOPIC_W), ("format", _FORMAT_W)):
             pat = layers.get(layer)
             if pat:
-                matches = pat.findall(text)
+                twin = twins.get(layer)
+                matches = twin.findall(lowered) if twin is not None else pat.findall(text)
                 unique = len({m.lower() if isinstance(m, str) else m[0].lower() for m in matches})
                 total += unique * weight
         scores[category] = total
@@ -582,13 +621,18 @@ def reset_low_signal_counters() -> None:
     _total_classifications = 0
 
 
-def classify_signals(prompt: str, policy: ClassifyPolicy = HOOK_POLICY) -> ClassifySignal:
+def classify_signals(prompt: str, policy: ClassifyPolicy = HOOK_POLICY, *,
+                     capabilities: bool = True) -> ClassifySignal:
     """Deterministic task_type + complexity. Never raises, never blocks.
 
     Sync fast path shared by every caller. When ``confident`` is False the caller
     MAY escalate via :func:`classify` (async LLM); callers that must stay sync
     (the gateway endpoint, the hook pre-flight) use this result directly — it is
     always a valid routing decision.
+
+    ``capabilities=False`` skips the capability vector (it stays the empty
+    default): for a caller that reads only the class, such as the proxy's tier
+    decision (P0.9-e), where it was ~25% of the classify phase.
     """
     scores = _score_categories(prompt)
     best = max(scores, key=lambda k: scores.get(k, 0))
@@ -608,13 +652,15 @@ def classify_signals(prompt: str, policy: ClassifyPolicy = HOOK_POLICY) -> Class
     complexity = _complexity(prompt, task_type.value, policy)
     # CF-2: attach the capability vector (needs-tools? which kind?) from the single
     # shared predicate. Pure/sync/fail-open — never blocks a routing decision.
-    try:
-        from llm_router.capabilities import detect_capabilities
-        capabilities = detect_capabilities(prompt, task_type.value).required
-    except Exception:  # noqa: BLE001 — capability detection must never break classify
-        capabilities = CapabilityRequirement()
+    required = CapabilityRequirement()
+    if capabilities:
+        try:
+            from llm_router.capabilities import detect_capabilities
+            required = detect_capabilities(prompt, task_type.value).required
+        except Exception:  # noqa: BLE001 — capability detection must never break classify
+            required = CapabilityRequirement()
     return ClassifySignal(task_type, complexity, best_score, confident,
-                          capabilities=capabilities)
+                          capabilities=required)
 
 
 async def classify(

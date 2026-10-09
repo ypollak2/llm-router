@@ -218,6 +218,10 @@ class TierDecision:
     arm_reason: str | None = None
     arm_bucket: float | None = None
     arm_turn: int | None = None  # the turn id hashed with the session id
+    # ``haiku_block_reason(body)`` when the decision consulted the Haiku tier and so
+    # computed it (P0.9-e: computed at most once, and only then); None = not computed.
+    # The proxy reuses it for the ledger's ``tier_haiku_block`` instead of a second pass.
+    haiku_block: str | None = None
 
     @property
     def rewritten(self) -> bool:
@@ -294,6 +298,45 @@ class _Phases:
 
     def add(self, name: str, ms: float) -> None:
         self.ms[name] = self.ms.get(name, 0.0) + ms
+
+
+class _HaikuBlock:
+    """``haiku_block_reason`` of one request body, computed at most once per decision
+    and only when the decision actually consults the Haiku tier, timed into the
+    ``haiku_checks`` phase (P0.9-e).
+
+    The check serializes the whole body (``_approx_context_tokens``): 3-12 ms on the
+    0.5-2.8 MB bodies Claude Code sends, and it ran on every classified call -- twice
+    when the classifier proposed Haiku (the proxy re-ran it for ``tier_haiku_block``)
+    and up to three times with ``haiku_rewrite`` and quota pressure on. The verdict
+    is a pure function of the body, so computing it lazily and once changes no
+    decision."""
+
+    __slots__ = ("_body", "_fold", "_phases", "reason")
+
+    def __init__(self, body: dict, fold_system: bool, phases: "_Phases") -> None:
+        self._body, self._fold, self._phases = body, fold_system, phases
+        self.reason: str | None = None
+
+    def __call__(self) -> str:
+        if self.reason is None:
+            with self._phases("haiku_checks"):
+                self.reason = haiku_block_reason(self._body, fold_system=self._fold)
+        return self.reason
+
+
+class _Lazy:
+    """A bool computed on first use (``bool(x)``), then remembered."""
+
+    __slots__ = ("_fn", "_value")
+
+    def __init__(self, fn) -> None:
+        self._fn, self._value = fn, None
+
+    def __bool__(self) -> bool:
+        if self._value is None:
+            self._value = bool(self._fn())
+        return self._value
 
 
 class _TimedSticky:
@@ -610,12 +653,14 @@ class ClaudeTierPolicy:
         runs inside the Haiku rewrite, so it needs ``haiku_rewrite`` as well."""
         return self.haiku_fold_system and self.haiku_rewrite
 
-    def _rewritable(self, tier: Tier, haiku_ok: bool) -> bool:
-        """True when ``tier`` is the Haiku tier and this body may be rewritten for it."""
+    def _rewritable(self, tier: Tier, haiku_ok) -> bool:
+        """True when ``tier`` is the Haiku tier and this body may be rewritten for it.
+        ``haiku_ok`` is read last: in ``_decide`` it is lazy (``_Lazy``), so the body
+        check runs only when the Haiku tier is the one being considered."""
         haiku = self.by_name.get("haiku")
-        return bool(haiku_ok and haiku is not None and tier.name == haiku.name)
+        return haiku is not None and tier.name == haiku.name and bool(haiku_ok)
 
-    def _haiku_eligible(self, body: dict) -> bool:
+    def _haiku_eligible(self, body: dict, block: "_HaikuBlock | None" = None) -> bool:
         """The narrow class of turns the Haiku rewrite may serve.
 
         Needs ``haiku_rewrite`` on, a ``haiku`` tier in the policy, no images or
@@ -631,16 +676,17 @@ class ClaudeTierPolicy:
         """
         if not self.haiku_rewrite:
             return False
-        return self._haiku_body_ok(body)
+        return self._haiku_body_ok(body, block)
 
-    def _haiku_body_ok(self, body: dict) -> bool:
+    def _haiku_body_ok(self, body: dict, block: "_HaikuBlock | None" = None) -> bool:
         """Body-shape eligibility for Haiku (no media, custom tools only, no
         mid-conversation system message, size), independent of the
         ``haiku_rewrite`` flag: a body Haiku would 400 must never be sent to it,
         rewritten or not."""
         if "haiku" not in self.by_name:
             return False
-        return haiku_block_reason(body, fold_system=self.haiku_folds_system) == HAIKU_BLOCK_NONE
+        reason = block() if block is not None else haiku_block_reason(body, fold_system=self.haiku_folds_system)
+        return reason == HAIKU_BLOCK_NONE
 
     # ── the decision ────────────────────────────────────────────────────────
 
@@ -667,7 +713,8 @@ class ClaudeTierPolicy:
         return cap
 
     async def _pinned_or_arm(self, body: dict, session_id: str | None, classify, requested: str | None,
-                             req_tier: Tier, phases: _Phases) -> TierDecision:
+                             req_tier: Tier, phases: _Phases,
+                             block: "_HaikuBlock | None" = None) -> TierDecision:
         """A ``pinned_models`` request: kept, unless the D-31 arm takes the turn.
 
         The hash decides first, so the classifier runs only for the in-bucket turns
@@ -720,9 +767,7 @@ class ClaudeTierPolicy:
             return stay(haiku_arm.WHY_FIRST_CALL)  # per-turn mode exempts the first call
         if escalation.correction_signal(body) is not None:
             return stay(haiku_arm.WHY_CORRECTION)
-        with phases("haiku_checks"):
-            body_ok = self._haiku_body_ok(body)
-        if not body_ok:
+        if not self._haiku_body_ok(body, block):  # _HaikuBlock times itself under haiku_checks
             return stay(haiku_arm.WHY_BODY)
         classify = classify or self._classify or _default_classify
         try:
@@ -752,15 +797,19 @@ class ClaudeTierPolicy:
             reading = self._read_quota()
         # Only a fresh measurement drives the step; stale/unknown/off fail open.
         pressure = reading.pressure if reading.state == quota_pressure_mod.STATE_OK else None
+        block = _HaikuBlock(body, self.haiku_folds_system, phases)
         decision = await self._decide(body, session_id, _TimedSticky(sticky, phases), classify,
-                                      pressure, phases)
+                                      pressure, phases, block)
         decision.quota_pressure, decision.quota_state = reading.pressure, reading.state
         decision.phases_ms = phases.ms
+        decision.haiku_block = block.reason
         return decision
 
     async def _decide(self, body: dict, session_id: str | None, sticky: Stickiness,
-                      classify, pressure: float | None, phases: _Phases | None = None) -> TierDecision:
+                      classify, pressure: float | None, phases: _Phases | None = None,
+                      block: _HaikuBlock | None = None) -> TierDecision:
         phases = phases if phases is not None else _Phases()
+        block = block if block is not None else _HaikuBlock(body, self.haiku_folds_system, phases)
         requested = body.get("model") if isinstance(body.get("model"), str) else None
         req_tier = self.tier_of(requested)
 
@@ -770,7 +819,7 @@ class ClaudeTierPolicy:
         if req_tier is None:
             return keep(REASON_UNKNOWN_MODEL)
         if _canonical(requested) in self.pinned:
-            return await self._pinned_or_arm(body, session_id, classify, requested, req_tier, phases)
+            return await self._pinned_or_arm(body, session_id, classify, requested, req_tier, phases, block)
         if not has_client_tools(body):
             return keep(REASON_SIDE_CALL)
         with phases("stickiness"):
@@ -832,8 +881,9 @@ class ClaudeTierPolicy:
         reason = REASON_POLICY
         if not self.allow_upgrade and self.rank[target.name] > self.rank[req_tier.name]:
             target = req_tier
-        with phases("haiku_checks"):
-            haiku_ok = self._haiku_eligible(body)
+        # Lazy: the body check runs (once, timed as haiku_checks) only if a step
+        # below actually considers the Haiku tier.
+        haiku_ok = _Lazy(lambda: self._haiku_eligible(body, block))
         if not self._accepts(target, thinking, effort):
             if self._rewritable(target, haiku_ok):
                 reason = REASON_HAIKU_REWRITE  # stay on Haiku; the body is rewritten for it
@@ -904,9 +954,7 @@ class ClaudeTierPolicy:
             if (pressure is not None and pressure >= self.quota_moderate_at and cx == "moderate"
                     and haiku is not None and self.rank[target.name] > self.rank[haiku.name]
                     and self._allowed(haiku, req_tier, thinking, effort, haiku_ok)):
-                with phases("haiku_checks"):
-                    body_ok = self._haiku_body_ok(body)
-                if body_ok:
+                if self._haiku_body_ok(body, block):
                     target, served, reason = haiku, haiku.model, REASON_QUOTA_PRESSURE
         if _canonical(served) == _canonical(requested):
             served = requested  # keep the client's own spelling when nothing changes
@@ -923,10 +971,12 @@ class ClaudeTierPolicy:
         # target off Haiku clear this).
         # With the fold on, a body that carries a system message needs the rewrite even
         # when Haiku takes its thinking/effort as sent.
+        rewritable = self._rewritable(target, haiku_ok)
         with phases("haiku_checks"):
-            needs_rewrite = (not self._accepts(target, thinking, effort)
-                             or (self.haiku_folds_system and _has_mid_conversation_system_message(body)))
-        body_rewrite = REWRITE_HAIKU if self._rewritable(target, haiku_ok) and needs_rewrite else None
+            needs_rewrite = rewritable and (
+                not self._accepts(target, thinking, effort)
+                or (self.haiku_folds_system and _has_mid_conversation_system_message(body)))
+        body_rewrite = REWRITE_HAIKU if needs_rewrite else None
         return TierDecision(requested, served, target.name, reason, switched=switched, switch_cost_usd=cost,
                             body_rewrite=body_rewrite,
                             task_type=task, complexity=cx, chain_head=list(choice.get("chain_head") or [])[:4],

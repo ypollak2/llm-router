@@ -90,8 +90,11 @@ SCOPE, stated rather than implied:
   can carry ``session_id``, but older rows and hooks that never name the session
   carry none, and G1 does not join the id to session kinds. A hook the host KILLS at its timeout writes no row; kills
   are shown from the fail-open ledger (``CHZ-HOOK-KILLED``). The proxy-side half is
-  G1_proxy: p50 / p95 of ``tier_decision_s`` in proxy_calls.jsonl, turn-first and
-  continuation calls apart.
+  G1_proxy (proxy_calls.jsonl), two segments: turn-first (``step_class == turn_first``)
+  p50 / p95 of the P0.9-e decision, the sum of ``tier_phases_ms`` over
+  ``proxy.tiers.DECISION_PHASES``, with n, sessions and the largest session's share
+  ("not informative" below n=100 or 2 sessions); continuation p50 / p95 of
+  ``tier_decision_s``.
 * **classifier shadow** (informational, outside ``kpis``) is the local LLM classifier's
   shadow log (``classifier_shadow.jsonl``, written by ``proxy/llm_shadow``): calls, sessions,
   agreement with the rules' tier, tier distributions, cheap share, fallback rate, p50 / p95 ms,
@@ -640,33 +643,94 @@ def _g1_segment(values: list[float]) -> dict[str, Any]:
             "p95_s": round(_percentile(ordered, 0.95), 4)}
 
 
+#: PLAN v16 P0.9-e MUST: the turn-first decision figure is informative only at n >= 100
+#: rows from more than one session. Below either, the line says "not informative".
+G1_DECISION_MIN_N = 100
+G1_DECISION_MIN_SESSIONS = 2
+
+
+def _decision_ms(phases: Any) -> float | None:
+    """The P0.9-e proxy decision: the sum of ``tier_phases_ms`` over
+    ``proxy.tiers.DECISION_PHASES``. None when the row carries none of them (rows from
+    before the field, or a decision that returned before any phase ran): such a row
+    has no decision figure, and ``tier_decision_s`` (wall time, shadow scheduling
+    included) is a different measure that is never substituted for it."""
+    from llm_router.proxy.tiers import DECISION_PHASES
+
+    if not isinstance(phases, dict):
+        return None
+    vals = [v for v in (phases.get(p) for p in DECISION_PHASES)
+            if not isinstance(v, bool) and isinstance(v, (int, float))]
+    return float(sum(vals)) if vals else None
+
+
 def _g1_proxy(pop: dict) -> dict:
-    """Proxy tier-decision latency: p50 / p95 of ``tier_decision_s`` with n, split into
-    turn-first and continuation calls. Side calls never run a classifier and are left
-    out (counted in ``side_call_excluded``). ``added_latency_s`` is not used: it is 0.0
-    on every forwarded row, which is why this KPI used to print 0 ms."""
+    """Proxy tier-decision latency, two segments with n.
+
+    *turn-first*: rows whose ``step_class`` is ``turn_first`` (and not a side call by
+    ``tier_reason``), measured as the P0.9-e decision (:func:`_decision_ms`); rows
+    without the decision phases are left out and counted. Each n is printed with its
+    session count and the largest session's share; below ``G1_DECISION_MIN_N`` rows or
+    ``G1_DECISION_MIN_SESSIONS`` sessions the segment says "not informative". Rows
+    with a null ``step_class`` (pre-GE1 rows of any kind) and ``subagent_first`` rows
+    are NOT turn-first and are counted apart (``excluded``): they once made up the
+    whole bucket and printed a 5 ms p95 (docs/bugs/P09-11.md).
+
+    *continuation*: unchanged, p50 / p95 of ``tier_decision_s`` on ``step_class ==
+    continuation`` rows.
+
+    Side calls never run a classifier and are left out (``side_call_excluded``).
+    ``added_latency_s`` is not used: it is 0.0 on every forwarded row, which is why this
+    KPI used to print 0 ms."""
     seen = len(pop["window"])
     first: list[float] = []
+    by_session: dict[str, int] = {}
+    no_sid = 0
     cont: list[float] = []
     side = 0
+    excluded = {"no_step_class": 0, "subagent_first": 0, "turn_first_without_phases": 0}
     newest: float | None = None
     for r in pop["allowed"]:
-        v = r.get("tier_decision_s")
-        if isinstance(v, bool) or not isinstance(v, (int, float)):
-            continue
-        if r.get("tier_reason") == "side_call":
+        step = r.get("step_class")
+        if r.get("tier_reason") == "side_call" or step == "side_call":
             side += 1
             continue
-        (cont if r.get("step_class") == "continuation" else first).append(float(v))
+        if step == "continuation":
+            v = r.get("tier_decision_s")
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                continue
+            cont.append(float(v))
+        elif step == "turn_first":
+            d = _decision_ms(r.get("tier_phases_ms"))
+            if d is None:
+                excluded["turn_first_without_phases"] += 1
+                continue
+            first.append(d / 1000.0)
+            sid = r.get("session_id")
+            if sid:
+                by_session[sid] = by_session.get(sid, 0) + 1
+            else:
+                no_sid += 1
+        else:
+            excluded["subagent_first" if step == "subagent_first" else "no_step_class"] += 1
+            continue
         newest = _newer(newest, _num_ts(r.get("ts")))
     n = len(first) + len(cont)
     if not n:
-        return _not_measurable("no proxy decisions with tier_decision_s in window", seen=seen)
+        return _not_measurable("no proxy decisions in window (turn_first rows with tier_phases_ms, "
+                               "continuation rows with tier_decision_s)", seen=seen)
     if n < MIN_N:
         out = _too_few(n, newest_ts=newest)
         out["seen"] = seen
         return out
     seg_first, seg_cont = _g1_segment(first), _g1_segment(cont)
+    n_first = seg_first["n"]
+    seg_first.update(
+        measure="sum of tier_phases_ms over proxy.tiers.DECISION_PHASES",
+        sessions=len(by_session), no_session_id=no_sid,
+        largest_session_share=(round(max(by_session.values()) / n_first, 4)
+                               if by_session and n_first else None),
+        informative=(n_first >= G1_DECISION_MIN_N and len(by_session) >= G1_DECISION_MIN_SESSIONS))
 
     def _fmt(name: str, seg: dict[str, Any]) -> str:
         if seg["p50_s"] is None:
@@ -674,9 +738,30 @@ def _g1_proxy(pop: dict) -> dict:
         return (f"{name} p50={seg['p50_s'] * 1000:.0f}ms p95={seg['p95_s'] * 1000:.0f}ms "
                 f"(n={seg['n']})")
 
-    return _measured(f"{_fmt('turn-first', seg_first)} | {_fmt('continuation', seg_cont)}", n,
-                      newest_ts=newest, seen=seen, turn_first=seg_first, continuation=seg_cont,
-                      side_call_excluded=side)
+    def _fmt_first(seg: dict[str, Any]) -> str:
+        share = seg["largest_session_share"]
+        who = (f"n={seg['n']}, sessions={seg['sessions']}, largest session="
+               f"{_pct(share, 0) if share is not None else 'n/a'}")
+        if seg["no_session_id"]:
+            who += f", {seg['no_session_id']} without session id"
+        name = "turn-first decision"
+        if seg["p50_s"] is None:
+            return f"{name} not informative ({who})"
+        nums = f"p50={seg['p50_s'] * 1000:.0f}ms p95={seg['p95_s'] * 1000:.0f}ms"
+        if not seg["informative"]:
+            return (f"{name} {nums} not informative ({who}; need n>={G1_DECISION_MIN_N} "
+                    f"from >={G1_DECISION_MIN_SESSIONS} sessions)")
+        return f"{name} {nums} ({who})"
+
+    value = f"{_fmt_first(seg_first)} | {_fmt('continuation', seg_cont)}"
+    left_out = [f"{c:,} {label}" for label, c in (
+        ("with no step_class", excluded["no_step_class"]),
+        ("subagent_first", excluded["subagent_first"]),
+        ("turn_first without tier_phases_ms", excluded["turn_first_without_phases"])) if c]
+    if left_out:
+        value += f" | not turn-first: {', '.join(left_out)}"
+    return _measured(value, n, newest_ts=newest, seen=seen, turn_first=seg_first,
+                      continuation=seg_cont, side_call_excluded=side, excluded=excluded)
 
 
 def _in_window(ts: Any, since: float, until: float) -> bool:

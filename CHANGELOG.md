@@ -33,6 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `semantic_cache_lookups` gains `project_scope` (additive migration; earlier rows are reported as
   unscoped). `llm-router kpi` and `llm_router_status(view="cache")` print lookups, hits and n per
   project; a project with fewer than 20 lookups prints "not informative" and no percentage.
+- doctor (PLAN v16 R8 P0.14-c, owner decision D-R8-4 = explicit only): `llm-router doctor --fix-routing`
+  writes the one key `env.ANTHROPIC_BASE_URL` into `~/.claude/settings.json` (backup first, diff
+  shown, y/N or `--yes`) only when proxy-default is installed and enabled, `routing_opt_out` is unset,
+  the key is absent, no project settings file or environment value overrides it, and both the shim
+  and the main proxy answer; otherwise it refuses with the reason. `--decline` sets
+  `routing_opt_out`, which also silences SessionStart's "routing is OFF" warning. No hook or plain
+  install runs it. SessionStart (hook v31) appends one `observe` row per session to
+  `~/.llm-router/settings_writes.jsonl` (key presence, env sha256, mtime) and the repair appends a
+  `write` row, so the next unexplained removal is bracketed.
 - verifier PR C (SHADOW, opt-in): pending_verify queue, detached `verify_worker`, Codex marker. **Off unless
   `LLM_ROUTER_VERIFY=on`**; no outcome, NS, D1 or D2 changes. See `docs/VERIFIER.md`.
 - agents (PLAN v16 AGT A.0): `llm_act`, `llm_delegate` and `llm_local_task` take `wait` (default
@@ -73,11 +82,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deletes entries (older than 7 days, or labelled/skipped and from before today) under the same `flock`. This is
   the only place the proxy keeps prompt text; it is for labelling the shadow (`LLM_ROUTER_SHADOW_LABELS`).
 
+### Fixed
+- classifier (SYSONE-WARM-1): with `LLM_ROUTER_CLASSIFIER_BACKEND=systemone` the warm-up used `/api/generate`,
+  which Ollama refuses for a decision model (HTTP 400), so the model never loaded and every verdict was `cold`.
+  The warm-up now loads it through `/v1/systemone`; a refused warm-up is recorded once as
+  `CHZ-FO-LOCAL-CLASSIFIER-WARMUP`; a unitless `LLM_ROUTER_CLASSIFIER_KEEP_ALIVE` (`-1`) is sent as an integer.
+  See `docs/bugs/SYSONE-WARM-1.md`.
+
 ### Changed
+- kpi (PLAN v16 P0.9-e, `docs/bugs/P09-11.md`): G1_proxy's turn-first segment counts only
+  `step_class == turn_first` rows and measures the P0.9-e decision (sum of `tier_phases_ms` over
+  `proxy.tiers.DECISION_PHASES`), not `tier_decision_s`. Null-step rows (pre-GE1 / side calls),
+  `subagent_first` rows and turn-first rows without the decision phases are left out and counted on
+  the line; they had filled the segment, so its p95 described rows that do not decide a turn.
+  The segment prints n, sessions and the largest session's share, and `not informative` below n=100
+  or 2 sessions. The continuation segment is unchanged; no other KPI line changes.
 - agents (PLAN v16 AGT A.0): `agents.yaml` ships inside the package (`llm_router/data/agents.yaml`,
   loaded with `importlib.resources`). It lived at the repo root, which no wheel contains, so every
   installed user got `agent_not_found` (`docs/BUGS.md` A.0-1). A project `config/agents.yaml` and
   `LLM_ROUTER_AGENTS_CONFIG` still override it.
+- proxy (PLAN v16 P0.9-e, `docs/bugs/P09-12.md`): less work inside the tier decision's timed phases,
+  no decision changed. The Haiku body check (a `json.dumps` of the whole 0.5-2.8 MB body) now runs
+  at most once per call and only when the decision considers the Haiku tier; the ledger's
+  `tier_haiku_block` reuses its verdict instead of a second pass. The tier classifier skips the
+  capability detector it never read, and the signal scoring runs exact case-sensitive twins of its
+  IGNORECASE patterns. The proxy imports the classifier at start, not inside the first classified
+  call. `scripts/bench_proxy_decision.py` (200 fresh processes, 2026-10-09, load1 4.4-5.0, synthetic
+  corpus in the live turn-first mix): decision p95 11.0 -> 1.4 ms cold; classify p95 9.2 -> 1.3 ms,
+  haiku_checks p95 5.1 -> 1.0 ms (n=90 classified calls each).
 - agents (PLAN v16 AGT A.0): `run_delegation` (behind `llm_act` / `llm_delegate`) and
   `llm_local_task`'s agent loop and acceptance check run in a worker thread (`asyncio.to_thread`), so
   a long run no longer freezes every other MCP call (`docs/BUGS.md` A.0-2). `llm_local_task` runs

@@ -291,6 +291,12 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     tier_policy = (ClaudeTierPolicy.load(cfg.tier_policy, conversation_level=(cfg.tiers == TIERS_CONVERSATION))
                    if cfg.tiers != TIERS_OFF else None)
     sticky = Stickiness(tier_policy.cold_gap_s) if tier_policy is not None else None
+    if tier_policy is not None:
+        # P0.9-e: import the tier decision's classifier (its compiled pattern tables)
+        # at start. Imported lazily, it cost the first classified call after every
+        # proxy start ~8 ms inside the timed ``classify`` phase (--steps off, the
+        # live mode, has no warm-up). Only the import: no classification runs here.
+        import llm_router.classify  # noqa: F401
     # ``--serve local-agent`` (proxy.local_mode); None means off, and then nothing
     # below that mentions ``lm`` runs.
     lm = None
@@ -711,7 +717,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # The decision is made and on the row; scheduling the shadow call is part of
             # what a turn-first call pays, so G1_proxy must see it (<= 30 ms is the bar).
             row["tier_decision_s"] = round(time.monotonic() - t0, 3)
-        if decision.proposed_tier == "haiku":
+        if decision.proposed_tier == "haiku" and decision.haiku_block is not None:
+            # The decision already computed it (and timed it as haiku_checks):
+            # reuse it rather than serializing the whole body a second time (P0.9-e).
+            row["tier_haiku_block"] = decision.haiku_block
+        elif decision.proposed_tier == "haiku":
             # Why Haiku could not serve this body (M0.5): the prevalence of
             # `system_message` is what tells whether the fold (M0.7) is needed.
             hb_t0 = time.perf_counter()

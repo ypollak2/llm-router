@@ -283,7 +283,7 @@ Most are computed by research scripts outside this repository, not by `llm-route
 
 | ID | Guardrail | Definition |
 |---|---|---|
-| G1 | Added latency | Hook wall time, p50 / p95 per hook against that hook's budget; proxy `tier_decision_s` p50 / p95 with n, turn-first and continuation calls apart (`G1_proxy`). |
+| G1 | Added latency | Hook wall time, p50 / p95 per hook against that hook's budget; proxy decision p50 / p95 with n, turn-first (`step_class == turn_first`, P0.9-e decision phases) and continuation (`tier_decision_s`) apart (`G1_proxy`). |
 | G2 | Silent failures per 100 calls | Fail-open events per 100 calls over the window, overall, per code and the top five codes — the rate must not go up, and every instance must be recorded. Truncation/overflow and Ollama-hung are not wired into this counter yet. |
 | G3 | Ledger completeness | Verdict: every writer with traffic (usage, routing_decisions, DIRECT, proxy) has >= 100 organic rows and >= 99% of them carry every PRD field (R-EVL-1), with n per writer. Beside it, >= 99% of proxy rows with every decision field that can apply to them recorded (definition below). |
 | G4 | Wrongly benched providers | Wrong benches per 100 benches, with n; target = 0. A bench is wrong when the owner clears it with `llm-router provider unban` before it lapses, or a call to that provider succeeds before its reset time. |
@@ -345,11 +345,20 @@ separately: they can still turn out wrong, so the wrong count is a floor until t
 call that was already in flight when a bench was recorded and then succeeded counts under the
 second rule. The providers benched right now are kept as a detail line.
 
-**G1 — proxy decision latency (`G1_proxy`).** p50 and p95 of `tier_decision_s` (the time the tier
-decision added, `proxy_calls.jsonl`), with n, in two segments: *turn-first* (`step_class` is not
-`continuation`) and *continuation* (a tool-result follow-up). Claude Code side calls
-(`tier_reason == side_call`) run no classifier and are left out; their count is in the JSON
-(`side_call_excluded`). A segment below n=50 prints `too few to tell (n=N)` and its percentiles are
+**G1 — proxy decision latency (`G1_proxy`).** p50 and p95 from `proxy_calls.jsonl`, with n, in two
+segments. *Turn-first*: rows with `step_class == turn_first`, measured as the P0.9-e decision, the sum
+of `tier_phases_ms` over `proxy.tiers.DECISION_PHASES` (`classify`, `quota_read`, `stickiness`,
+`haiku_checks`); it prints n, the session count and the largest session's share, and says `not
+informative` below n=100 or with fewer than 2 sessions (P0.9-e MUST). Rows with a null `step_class`
+(pre-GE1 rows of any kind), `subagent_first` rows and turn-first rows without the decision phases are
+left out and counted on the line (`excluded` in the JSON); `tier_decision_s` (wall time, shadow
+scheduling included) is never substituted for a missing phase sum (`docs/bugs/P09-11.md`).
+The phase sum does not include scheduling the classifier shadow (`proxy/server.py` adds that to
+`tier_decision_s` only), so since P09-11 no G1_proxy segment measures the "shadow <= 30 ms" target
+below; it is still on every turn-first row's `tier_decision_s`, which `kpi` does not print.
+*Continuation* (a tool-result follow-up): `tier_decision_s`. Claude Code side calls
+(`tier_reason == side_call` or `step_class == side_call`) run no classifier and are left out; their
+count is in the JSON (`side_call_excluded`). A segment below n=50 prints no percentiles and they are
 null in the JSON. Percentiles are nearest rank on n-1. Same session-kind filter as D4 (organic; research
 with `--include research`).
 Why it changed: this KPI used to take the p95 of `added_latency_s`, which is 0.0 on 25,924 of 25,963
@@ -357,7 +366,8 @@ forwarded rows (all-time ledger copy, 2026-10-07; it is only set on a few decisi
 0 ms (`docs/BUGS.md`). `tier_decision_s` is present on 25,397 of those 25,963 rows. First reading, W0,
 `--include research` (organic plus research, n=10,086 rows, side calls excluded): turn-first p50=4ms
 p95=83ms (n=1,181); continuation p50=4ms p95=21ms (n=8,905). An independent recompute from the raw
-ledger gave turn-first n=1,183 p50=4ms p95=83ms and continuation n=8,905 p50=4ms p95=21ms. Targets
+ledger gave turn-first n=1,183 p50=4ms p95=83ms and continuation n=8,905 p50=4ms p95=21ms. (Those turn-first readings predate P09-11: that bucket was every row that was not a
+continuation, null-step rows included, measured as `tier_decision_s`.) Targets
 (primary plan): shadow <= 30 ms; with the LLM decision, turn-first <= its wait budget + 100 ms and
 continuation <= 30 ms.
 

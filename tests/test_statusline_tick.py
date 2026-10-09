@@ -240,9 +240,13 @@ def test_hung_refresh_never_delays_a_tick_and_is_started_once(tmp_path):
         times.append(dt)
         assert out.startswith("llm-router · "), out
         assert PROMPT not in out
-    deadline = time.time() + 5
-    while not marker.exists() and time.time() < deadline:
+    # Wait for the refresher's write, not for the marker to exist: open() creates
+    # it empty before write() lands, and a slow runner read '' in that window
+    # (docs/bugs/SLT-1.md).
+    deadline = time.time() + 15
+    while not (marker.exists() and marker.read_text()) and time.time() < deadline:
         time.sleep(0.05)
+    time.sleep(0.5)  # settle: a buggy second refresher's late write must land before the read
     assert marker.read_text() == "x", "exactly one refresh started across 5 ticks"
     assert max(times) < 2.0, times  # 20 s if any tick waited on the hung refresher
 
