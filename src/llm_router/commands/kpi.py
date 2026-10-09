@@ -2166,6 +2166,35 @@ def _p09g(days: float, now: float) -> dict:
                           hl.read_rows(since=now - days * 86400.0, until=now), days)
 
 
+# ── P0.5-b: semantic (= result) cache hit rate per project ─────────────────
+
+def _semantic_cache_by_project(days: int, now: float, win: "_Window | None" = None) -> dict:
+    """Per-project ``{project_scope, lookups, hits, n}`` from ``semantic_cache_lookups``.
+    Informational, outside "kpis". Read-only; an unreadable database is reported."""
+    from llm_router import semantic_cache as sc
+    from llm_router.config import get_config
+
+    try:
+        since = win.since if win is not None else now - days * 86_400
+        until = win.until if win is not None else None
+        stats = sc.per_project_hit_stats(get_config().llm_router_db_path, since=since, until=until)
+        current = sc._project_scope()
+    except Exception as exc:  # noqa: BLE001 -- informational line must never break the scorecard
+        return {"error": type(exc).__name__, "projects": []}
+    return {"projects": stats, "current_scope": current,
+            "min_informative": sc.MIN_INFORMATIVE_LOOKUPS}
+
+
+def _semantic_cache_lines(s: dict | None) -> list[str]:
+    from llm_router import semantic_cache as sc
+
+    if not s:
+        return []
+    if s.get("error"):
+        return [f"semantic cache (= result cache) hit rate per project: unreadable ({s['error']})"]
+    return sc.per_project_lines(s["projects"], current_scope=s.get("current_scope"))
+
+
 # ── assembly ───────────────────────────────────────────────────────────────
 
 def compute_scorecard(days: int = 7, *, include_research: bool = False,
@@ -2226,6 +2255,8 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         # P0.14-a: is the proxy ledger alive? Outside "kpis" (a liveness check, not a KPI).
         "proxy_liveness": _proxy_liveness(now_ts, all_rows,
                                           win.since if win is not None else now_ts - days * 86400.0),
+        # P0.5-b: outside "kpis" (informational; not in _ORDER or --health).
+        "semantic_cache": _semantic_cache_by_project(days, now_ts, win),
         "classifier_shadow": _classifier_shadow_summary(days, win, allowed, index, pop["allowed"]),
         # P0.9-g: the five sync hooks, wall clock (hook_wall) AND live elapsed, load on every row.
         # Outside "kpis" (a gate line, not a KPI): _ORDER and --health are unchanged.
@@ -2381,6 +2412,7 @@ def render_scorecard(data: dict) -> str:
         lines.append(classifier_line)
         lines += _classifier_vs_rules_lines(data.get("classifier_shadow"))
     lines += _proxy_liveness_lines(data.get("proxy_liveness"))
+    lines += _semantic_cache_lines(data.get("semantic_cache"))
     if data.get("p09g"):
         from llm_router import hook_wall
 
