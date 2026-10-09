@@ -241,45 +241,111 @@ def test_untagged_proxy_rows_are_not_organic_for_d4_but_count_against_g3():
     assert k["G3"]["fields"]["session_kind"]["coverage"] == 0.0
 
 
-def test_g1_proxy_reports_tier_decision_s_split_turn_first_and_continuation():
-    """G1_proxy read ``added_latency_s``, which is 0.0 on every forwarded row, so it
-    printed 0 ms (BUGS.md). It now reads ``tier_decision_s``, split by turn-first
-    (``step_class`` != continuation) and continuation, side calls left out."""
-    first = [_row(tier_decision_s=(i + 1) / 1000, added_latency_s=0.0) for i in range(60)]
-    cont = [_row(step_class="continuation", tier_decision_s=0.004, added_latency_s=0.0)
-            for _ in range(60)]
-    side = [_row(tier_reason="side_call", tier_decision_s=5.0, added_latency_s=0.0)
-            for _ in range(10)]
-    _write_proxy_rows(first + cont + side)
+def _phases(ms, **extra):
+    """tier_phases_ms whose DECISION_PHASES sum to ``ms`` (classify carries the rest)."""
+    return {"classify": ms - 1.0, "quota_read": 0.5, "stickiness": 0.25, "haiku_checks": 0.25, **extra}
+
+
+def _tf(ms, sid="s-org", **kw):
+    return _row(sid, step_class="turn_first", tier_phases_ms=_phases(ms), **kw)
+
+
+def test_g1_proxy_turn_first_counts_only_turn_first_rows_with_decision_phases():
+    """P09-11: the turn-first bucket took every row that was not continuation and not
+    side_call by tier_reason, so null-step rows (pre-GE1, any kind) filled it. Only
+    step_class == turn_first rows count, measured as the DECISION_PHASES sum; null-step,
+    subagent_first, side calls (by either label) and turn_first rows without the
+    phases are left out and counted."""
+    tf = [_row("s-a" if i < 90 else "s-b", step_class="turn_first", tier_decision_s=0.9,
+               tier_phases_ms=_phases(i + 1, okf_attach=999.0, fold=999.0)) for i in range(120)]
+    tf_no_phases = [_row(step_class="turn_first", tier_decision_s=0.005) for _ in range(30)]
+    tf_other_phases = [_row(step_class="turn_first", tier_decision_s=0.005,
+                            tier_phases_ms={"fold": 3.0}) for _ in range(5)]
+    null_step = [_row(tier_decision_s=0.005, tier_phases_ms=_phases(2)) for _ in range(50)]
+    subagent = [_row(step_class="subagent_first", tier_decision_s=0.005, tier_phases_ms=_phases(2))
+                for _ in range(7)]
+    side = ([_row(step_class="side_call", tier_decision_s=5.0) for _ in range(10)]
+            + [_row(step_class="turn_first", tier_reason="side_call", tier_decision_s=5.0,
+                    tier_phases_ms=_phases(500)) for _ in range(3)])
+    cont = [_row(step_class="continuation", tier_decision_s=0.004, tier_phases_ms=_phases(300),
+                 added_latency_s=0.0) for _ in range(60)]
+    _write_proxy_rows(tf + tf_no_phases + tf_other_phases + null_step + subagent + side + cont)
     g1 = _kpis()["G1_proxy"]
-    # 60 values 1..60 ms: nearest rank on n-1 gives p50 = 31 ms, p95 = 57 ms.
-    assert g1["value"] == ("turn-first p50=31ms p95=57ms (n=60) | "
-                           "continuation p50=4ms p95=4ms (n=60)")
-    assert g1["measurable"] is True and g1["n"] == 120
-    assert g1["turn_first"] == {"n": 60, "p50_s": 0.031, "p95_s": 0.057}
+    # 120 values 1..120 ms; nearest rank on n-1: p50 = sorted[60] = 61 ms, p95 = sorted[113] = 114 ms.
+    assert g1["value"] == (
+        "turn-first decision p50=61ms p95=114ms (n=120, sessions=2, largest session=75%) | "
+        "continuation p50=4ms p95=4ms (n=60) | not turn-first: 50 with no step_class, "
+        "7 subagent_first, 35 turn_first without tier_phases_ms")
+    assert g1["measurable"] is True and g1["n"] == 180
+    first = g1["turn_first"]
+    assert (first["n"], first["p50_s"], first["p95_s"]) == (120, 0.061, 0.114)
+    assert (first["sessions"], first["largest_session_share"], first["no_session_id"],
+            first["informative"]) == (2, 0.75, 0, True)
     assert g1["continuation"] == {"n": 60, "p50_s": 0.004, "p95_s": 0.004}
-    assert g1["side_call_excluded"] == 10
+    assert g1["side_call_excluded"] == 13
+    assert g1["excluded"] == {"no_step_class": 50, "subagent_first": 7,
+                              "turn_first_without_phases": 35}
+    assert g1["value"] in kpi.render_scorecard(kpi.compute_scorecard(days=7))
     assert _kpis()["G1_hook"]["value"].startswith("not measurable: ")  # never instrumented
+
+
+def test_g1_proxy_null_step_rows_cannot_pull_the_turn_first_p95_down():
+    """The regression itself: 2,000 null-step rows at 5 ms beside 100 real turn-first
+    decisions at 60 ms printed p95=5ms; the turn-first figure is the 60 ms."""
+    null_step = [_row(tier_decision_s=0.005) for _ in range(2000)]
+    tf = [_tf(60, sid="s-a" if i % 2 else "s-b", tier_decision_s=0.06) for i in range(100)]
+    _write_proxy_rows(null_step + tf)
+    g1 = _kpis()["G1_proxy"]
+    assert g1["value"].startswith("turn-first decision p50=60ms p95=60ms (n=100, sessions=2, "
+                                  "largest session=50%)")
+    assert "p95=5ms" not in g1["value"] and g1["turn_first"]["informative"] is True
+    assert g1["excluded"]["no_step_class"] == 2000
+
+
+def test_g1_proxy_turn_first_from_one_session_or_under_100_is_not_informative():
+    """P0.9-e MUST: min n 100 and more than one session."""
+    _write_proxy_rows([_tf(10) for _ in range(120)])
+    g1 = _kpis()["G1_proxy"]
+    assert g1["value"] == ("turn-first decision p50=10ms p95=10ms not informative (n=120, sessions=1, "
+                           "largest session=100%; need n>=100 from >=2 sessions) | "
+                           "continuation too few to tell (n=0)")
+    assert g1["turn_first"]["informative"] is False
+    # Two sessions but n < 100, plus a row with no session id (counted in n, not as a session).
+    _write_proxy_rows([_tf(10, sid="s-a") for _ in range(30)] + [_tf(10, sid="s-b") for _ in range(29)]
+                      + [_tf(10, sid=None)])
+    g1 = _kpis()["G1_proxy"]
+    assert g1["value"].startswith("turn-first decision p50=10ms p95=10ms not informative (n=60, "
+                                  "sessions=2, largest session=50%, 1 without session id; need n>=100 "
+                                  "from >=2 sessions)")
+    # Below MIN_N no percentile is printed at all.
+    _write_proxy_rows([_tf(10, sid="s-a") for _ in range(20)]
+                      + [_row(step_class="continuation", tier_decision_s=0.01) for _ in range(60)])
+    g1 = _kpis()["G1_proxy"]
+    assert g1["value"] == ("turn-first decision not informative (n=20, sessions=1, largest session=100%) | "
+                           "continuation p50=10ms p95=10ms (n=60)")
+    assert g1["turn_first"]["p95_s"] is None
 
 
 def test_g1_proxy_is_never_zero_when_forwarded_rows_added_nothing():
     """The regression itself: added_latency_s all 0.0 must not read as 0 ms."""
-    _write_proxy_rows([_row(tier_decision_s=0.022, added_latency_s=0.0) for _ in range(100)])
+    _write_proxy_rows([_row(step_class="continuation", tier_decision_s=0.022, added_latency_s=0.0)
+                       for _ in range(100)])
     g1 = _kpis()["G1_proxy"]
     assert "p95=22ms" in g1["value"] and "p95=0ms" not in g1["value"]
 
 
 def test_g1_proxy_thin_segment_says_too_few_and_missing_field_is_not_measurable():
-    _write_proxy_rows([_row(tier_decision_s=0.01) for _ in range(60)]
-                      + [_row(step_class="continuation", tier_decision_s=0.01) for _ in range(5)])
+    _write_proxy_rows([_row(step_class="continuation", tier_decision_s=0.01) for _ in range(60)]
+                      + [_tf(10, sid="s-a") for _ in range(5)])
     g1 = _kpis()["G1_proxy"]
-    assert g1["value"] == ("turn-first p50=10ms p95=10ms (n=60) | "
-                           "continuation too few to tell (n=5)")
-    assert g1["continuation"] == {"n": 5, "p50_s": None, "p95_s": None}
-    _write_proxy_rows([_row(added_latency_s=0.05) for _ in range(100)])  # no tier_decision_s
+    assert g1["value"] == ("turn-first decision not informative (n=5, sessions=1, largest session=100%) | "
+                           "continuation p50=10ms p95=10ms (n=60)")
+    assert g1["continuation"] == {"n": 60, "p50_s": 0.01, "p95_s": 0.01}
+    _write_proxy_rows([_row(added_latency_s=0.05) for _ in range(100)])  # no step, no decision field
     g1 = _kpis()["G1_proxy"]
-    assert g1["value"] == "not measurable: no proxy decisions with tier_decision_s in window"
-    _write_proxy_rows([_row(tier_decision_s=0.01) for _ in range(20)])
+    assert g1["value"] == ("not measurable: no proxy decisions in window (turn_first rows with "
+                           "tier_phases_ms, continuation rows with tier_decision_s)")
+    _write_proxy_rows([_row(step_class="continuation", tier_decision_s=0.01) for _ in range(20)])
     g1 = _kpis()["G1_proxy"]
     assert g1["value"] == "too few to tell (n=20)" and g1["measurable"] is False
 

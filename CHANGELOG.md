@@ -75,6 +75,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the only place the proxy keeps prompt text; it is for labelling the shadow (`LLM_ROUTER_SHADOW_LABELS`).
 
 ### Changed
+- kpi (PLAN v16 P0.9-e, `docs/bugs/P09-11.md`): G1_proxy's turn-first segment counts only
+  `step_class == turn_first` rows and measures the P0.9-e decision (sum of `tier_phases_ms` over
+  `proxy.tiers.DECISION_PHASES`), not `tier_decision_s`. Null-step rows (pre-GE1 / side calls),
+  `subagent_first` rows and turn-first rows without the decision phases are left out and counted on
+  the line; they had filled the segment, so its p95 described rows that do not decide a turn.
+  The segment prints n, sessions and the largest session's share, and `not informative` below n=100
+  or 2 sessions. The continuation segment is unchanged; no other KPI line changes.
 - agents (PLAN v16 AGT A.0): `agents.yaml` ships inside the package (`llm_router/data/agents.yaml`,
   loaded with `importlib.resources`). It lived at the repo root, which no wheel contains, so every
   installed user got `agent_not_found` (`docs/BUGS.md` A.0-1). A project `config/agents.yaml` and

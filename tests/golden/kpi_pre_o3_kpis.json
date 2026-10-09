@@ -77,9 +77,9 @@
   "measurable": false,
   "n": null,
   "newest_ts": null,
-  "reason": "no proxy decisions with tier_decision_s in window",
+  "reason": "no proxy decisions in window (turn_first rows with tier_phases_ms, continuation rows with tier_decision_s)",
   "seen": 120,
-  "value": "not measurable: no proxy decisions with tier_decision_s in window"
+  "value": "not measurable: no proxy decisions in window (turn_first rows with tier_phases_ms, continuation rows with tier_decision_s)"
  },
  "G2": {
   "lines": [
