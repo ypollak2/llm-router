@@ -453,8 +453,9 @@ def _blocking_builder(tmp_path: Path, home: Path) -> tuple[Path, Path, Path]:
     fake = tmp_path / "blockpy"
     fake.write_text(
         "#!/bin/bash\n"
+        # pid first (atomic rename), then the start mark: a test that sees the mark can read the pid
+        f"echo $$ > {pidf}.tmp && mv {pidf}.tmp {pidf}\n"
         f"echo x >> {started}\n"
-        f"echo $$ > {pidf}\n"
         f"for i in $(seq 1 300); do [ -e {release} ] && exit 1; sleep 0.1; done\n"
         "exit 1\n"
     )
@@ -489,7 +490,8 @@ def test_the_first_render_returns_while_the_cache_build_is_still_running(home, t
         assert started.read_text().count("x") == 1, "a second render started a second builder"
     finally:
         release.write_text("")
-        _wait(lambda: not _alive(int(pidf.read_text().split()[0])), 10)
+        if pidf.exists():
+            _wait(lambda: not _alive(int(pidf.read_text().split()[0])), 10)
 
 
 def test_the_render_path_has_no_synchronous_builder_call():
