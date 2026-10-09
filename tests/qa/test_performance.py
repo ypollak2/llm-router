@@ -60,7 +60,20 @@ def measure(func, iterations: int = 100) -> dict[str, float]:
 # LineageStore performance
 # ────────────────────────────────────────────────────────────────────────
 
-def test_perf_lineage_record_single_row_under_5ms(tmp_path: Path):
+def test_perf_lineage_record_p50_budget(tmp_path: Path):
+    """Wall-clock sanity bound on LineageStore.record: p50 <= 11 ms over 50 samples.
+
+    Provenance: the old name said 5 ms; no PRD or plan number backs it (grepped
+    PRD, PLAN-v16, QA strategy 2026-10-09). 11 ms is the last CI-spike loosening
+    (5 -> 10 -> 11). Real-hardware p95 measured 2026-10-09: ~0.7 ms macOS APFS,
+    ~2.3 ms Linux overlayfs (p50 ~1.2 ms).
+
+    This is p50, not p95: with n=50 the old p95 was the 3rd-worst sample, so
+    three disk stalls (6%) failed it; shared runners produced p95 of 64.77 and
+    34.61 ms with the code unchanged (docs/bugs/LINEAGE-PERF-1.md). One stall
+    cannot move a median. What record() does to the disk (connects, transactions,
+    fsync level) is pinned deterministically in test_lineage_record_mechanism.py.
+    """
     store = LineageStore(db_path=tmp_path / "lineage.db")
     counter = {"n": 0}
 
@@ -83,11 +96,9 @@ def test_perf_lineage_record_single_row_under_5ms(tmp_path: Path):
         store.record(rec)
 
     results = measure(op, iterations=50)
-    # Budget loosened from 5ms → 10ms → 11ms — CI shared runners occasionally
-    # spike to 10.3ms due to resource contention. Real-world hardware: <2ms.
-    # This is a p95 measurement; p50 is typically 0.5ms.
-    assert results["p95"] < 11.0, (
-        f"LineageStore.record p95 {results['p95']:.2f}ms exceeds budget 11ms"
+    assert results["p50"] <= 11.0, (
+        f"LineageStore.record p50 {results['p50']:.2f}ms exceeds budget 11ms "
+        f"(p95 {results['p95']:.2f}, max {results['max']:.2f})"
     )
 
 
