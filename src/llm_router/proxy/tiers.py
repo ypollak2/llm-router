@@ -795,11 +795,15 @@ class ClaudeTierPolicy:
 
     def decide_unclassified(self, body: dict, session_id: str | None, sticky: Stickiness) -> TierDecision:
         """The decision for a call the proxy could not label (``step_class == unknown``,
-        ``step_error``): no classifier, no D-31 arm, stickiness read but not written. A
-        pinned model stays pinned; otherwise the conversation's last served tier holds
-        when the body is accepted on it as sent (a Haiku tier, which may need a body
-        rewrite, does not hold); otherwise the call is forwarded as sent
-        (``decision_error``). ``detail`` is ``step_error`` on every path."""
+        ``step_error``): no classifier, no D-31 arm. This method reads stickiness and
+        does not write it (the request path's usage and tier-retry hooks still may). In
+        ``_decide``'s order: a ``pinned_models`` model stays pinned; a side call is kept;
+        an ``opus:`` pin is served on the Opus tier; a ``/model`` choice is kept (never
+        downgraded); otherwise the conversation's last served tier holds when the body
+        is accepted on it as sent (a Haiku tier, which may need a body rewrite, does
+        not hold); otherwise the call is forwarded as sent (``decision_error``).
+        ``detail`` is ``step_error`` on every path. A pin check that raises on the same
+        malformed body propagates and ``decide_tier`` forwards the call as sent."""
         requested = body.get("model") if isinstance(body.get("model"), str) else None
         req_tier = self.tier_of(requested)
         name = req_tier.name if req_tier else None
@@ -809,6 +813,13 @@ class ClaudeTierPolicy:
             return TierDecision(requested, requested, name, REASON_CONFIG_PINNED, detail=STEP_ERROR)
         if not has_client_tools(body):
             return TierDecision(requested, requested, name, REASON_SIDE_CALL, detail=STEP_ERROR)
+        opus_tier = self.by_name.get("opus")
+        if opus_tier is not None and escalation.explicit_opus_pin(body):
+            return TierDecision(requested, opus_tier.model, opus_tier.name, REASON_EXPLICIT_OPUS_PIN,
+                                switched=_canonical(opus_tier.model) != _canonical(requested),
+                                detail=STEP_ERROR)
+        if user_pinned_model(body):
+            return TierDecision(requested, requested, name, REASON_USER_PINNED, detail=STEP_ERROR)
         state = sticky.get(conversation_key(body, session_id))
         prev = self.tier_of(state.model) if state is not None else None
         thinking = (body.get("thinking") or {}).get("type") if isinstance(body.get("thinking"), dict) else None

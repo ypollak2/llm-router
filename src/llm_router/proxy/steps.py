@@ -172,14 +172,16 @@ def step_kind(body: dict) -> str:
 
 def step_fields(body: dict, on_error: Callable[[Exception], None] | None = None) -> dict:
     """The GE1 ledger labels (``step_class``, ``prev_tools``, ``prev_tool_class``,
-    ``step_ineligible``) plus ``step_error``. Fail-open: if labelling raises, the row
-    says ``step_class == unknown`` with ``step_error`` true and empty labels, the
-    exception goes to ``on_error``, and the caller must not classify the call (NFR-FAIL)."""
+    ``step_ineligible``) plus ``step_error``. Fail-open for these labels only: if
+    labelling raises, the row says ``step_class == unknown`` with ``step_error`` true
+    and empty labels, the exception goes to ``on_error``, and the caller must not
+    classify the call (NFR-FAIL). Other body-shape reads on the request path (for
+    example ``has_served_turn``, ``session_id_of``) are not guarded here."""
     try:
         return {"step_class": step_kind(body), "prev_tools": prev_tools(body),
                 "prev_tool_class": prev_tool_class(body), "step_ineligible": step_ineligible(body),
                 "step_error": False}
-    except Exception as exc:  # noqa: BLE001 - a label must never cost a call
+    except Exception as exc:  # noqa: BLE001 - a labelling error must not fail the call
         if on_error is not None:
             on_error(exc)
         return {"step_class": STEP_UNKNOWN, "prev_tools": [], "prev_tool_class": None,

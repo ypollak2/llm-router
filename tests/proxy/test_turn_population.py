@@ -265,6 +265,9 @@ async def test_a_failure_in_turn_fields_leaves_the_ledger_row_fail_open(tmp_path
 
 # ── NFR-FAIL: a labelling error never costs the call ─────────────────────────
 
+_REAL_STEP_KIND = steps.step_kind
+
+
 def _raise(body):
     raise RuntimeError("step_kind broke")
 
@@ -285,6 +288,13 @@ async def test_step_kind_raising_forwards_the_call_unclassified(tmp_path, monkey
     monkeypatch.setattr(steps, "step_kind", _raise)
     recorded: list = []
     monkeypatch.setattr(ps.failopen, "record", lambda code, exc=None, *a, **k: recorded.append(code))
+    from llm_router.proxy import llm_shadow
+    scheduled: list = []
+
+    def schedule(self, body, row):
+        scheduled.append(row.get("step_class"))
+        return llm_shadow.OFF
+    monkeypatch.setattr(llm_shadow.ShadowScheduler, "maybe_schedule", schedule)
     up = Upstream()
     app = _app(tmp_path, up, policy_overrides=over)
     body = _body("what is a mutex?", "and a semaphore?", main=True, model=model)
@@ -296,7 +306,14 @@ async def test_step_kind_raising_forwards_the_call_unclassified(tmp_path, monkey
     assert (row["tier_reason"], row["served_model"], row["tier_detail"]) == (reason, served, pt.STEP_ERROR)
     assert "tier_arm" not in row and row.get("tier_task_type") is None
     assert calls == [] and "LR-FO-PROXY-STEP-KIND" in recorded
+    assert scheduled == []                                        # no classifier shadow either
     assert json.loads(up.requests[0].content)["model"] == model   # forwarded as sent
+    # the same call, labelled: the shadow hook is reached (the check above is not vacuous)
+    monkeypatch.setattr(steps, "step_kind", _REAL_STEP_KIND)
+    (tmp_path / "labelled").mkdir()
+    app = _app(tmp_path / "labelled", Upstream(), policy_overrides=over)
+    assert (await _post(app, body)).status_code == 200
+    assert scheduled == ["turn_first"]
 
 
 def test_an_unlabelled_call_keeps_the_conversation_sticky_tier():
@@ -318,3 +335,29 @@ def test_an_unlabelled_call_keeps_the_conversation_sticky_tier():
 def test_a_well_formed_row_says_step_error_false():
     f = steps.step_fields(_body("hi", "and?", main=True))
     assert (f["step_class"], f["step_error"]) == (steps.STEP_TURN_FIRST, False)
+
+
+@pytest.mark.parametrize("newest,why", [
+    ("opus: think hard about this", pt.REASON_EXPLICIT_OPUS_PIN),
+    ("and a semaphore?", pt.REASON_USER_PINNED),
+], ids=["opus: pin", "/model pin"])
+def test_an_unlabelled_call_honours_the_users_pins_before_the_sticky_tier(newest, why):
+    """Review of #394: ``_decide`` honours an ``opus:`` pin and a ``/model`` choice (never downgraded)
+    before stickiness; the unlabelled path must too, or a sticky Sonnet would serve the turn."""
+    from llm_router.proxy.cache_cost import conversation_key
+    policy = pt.ClaudeTierPolicy.load()
+    turns = ["what is a mutex?", "<command-name>/model</command-name>", newest] if why == pt.REASON_USER_PINNED \
+        else ["what is a mutex?", newest]
+    body = _body(*turns, main=True, model="claude-opus-5-5")
+    sticky = Stickiness()
+    sticky.record(conversation_key(body, "s-1"), policy.by_name["sonnet"].model, "moderate", pt.REASON_POLICY)
+    d = policy.decide_unclassified(body, "s-1", sticky)
+    assert (d.reason, d.served_model, d.detail) == (why, "claude-opus-5-5", pt.STEP_ERROR)
+
+
+def test_a_different_tag_nested_inside_a_reminder_does_not_leak_the_reminder():
+    """Review of #394: an inner ``<command-name>`` block inside a reminder is skipped with it; the
+    reminder still ends at its own close tag."""
+    text = f"<system-reminder>\n{MARKER}\n<command-name>x</command-name>\nMORE-{MARKER}\n</system-reminder>\ntyped"
+    text_out, tags = steps._human_parts([{"type": "text", "text": text}])
+    assert text_out == "typed" and tags == {"system-reminder"}

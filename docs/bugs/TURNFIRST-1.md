@@ -32,9 +32,13 @@ status: fixed in `fix/turn-first-population` (deploy: restart the proxy; rows wr
   `<system-reminder>` mid-line too, as the old pattern did, when it is closed), and ends a block at the
   first close tag alone on its line (falling back to the first close tag only when there is none, for
   one-line blocks). Attributes are single-line and at most 200 characters, and opens and closes are found
-  in one pass each and paired by bisection: the first version's `\s[^>]*` crossed newlines, and 1,000
-  line-start `<command-name foo` lines with no `>` on a 3 MB body took 19.3 s (100 lines: 1.94 s), now
-  18 ms (150,000 lines: 52 ms; review of #394). A turn that is only harness messages is skipped by
+  in one pass each and paired by bisection (review of #394). The first version's `\s[^>]*` crossed
+  newlines. Body shape: one text block of N line-start `<command-name foo` lines with no `>`, followed
+  by 3,000,000 `x`. Before, one run each on the first version: N=100 took 1.94 s, N=1,000 took 19.3 s.
+  After, median of n=5 runs with `python3 scripts/bench_harness_strip.py` (2026-10-10, load1 ~1.4):
+  N=100 0.70 ms, N=1,000 0.83 ms, N=10,000 1.9 ms, N=150,000 18.5 ms; the worst other shape in the
+  script (150,000 uniquely named closed blocks, 9.2 MB) 215 ms. On 30 KB of tag-free text the strip
+  takes 0.007 ms against 0.004 ms for the pre-TURNFIRST-1 reminder regex (same script). A turn that is only harness messages is skipped by
   `newest_human_text`, so the tier keeps classifying the prompt before it. Consumers: the Haiku arm
   (`tiers._pinned_or_arm`: `subagent_turn` -> `not_main_thread`, `harness_turn` -> new `harness_turn`),
   `kpi` G1_proxy (both new kinds excluded and counted), `offload_share` / the Haiku guard (`harness_turn`
@@ -43,8 +47,12 @@ status: fixed in `fix/turn-first-population` (deploy: restart the proxy; rows wr
   as `subagent_turn`, and they leave the O3 turn count unless the transcript join puts them on the main
   thread. Labelling is fail-open (NFR-FAIL): if `step_kind` raises, the row says `step_class ==
   unknown`, `step_error: true` (fail-open code `LR-FO-PROXY-STEP-KIND`) and the call is forwarded without
-  the classifier, the D-31 arm or the classifier shadow (`ClaudeTierPolicy.decide_unclassified`: pin kept,
-  sticky tier held when the body is accepted on it, else forwarded as sent, `tier_detail: step_error`);
+  the classifier, the D-31 arm or the classifier shadow (`ClaudeTierPolicy.decide_unclassified`, in
+  `_decide`'s order: a `pinned_models` pin kept, an `opus:` pin served on Opus, a `/model` choice kept,
+  else the sticky tier held when the body is accepted on it, else forwarded as sent;
+  `tier_detail: step_error`; it reads stickiness and does not write it, the request path's usage and
+  tier-retry hooks still may). Only these labels are guarded: other body-shape reads on the request path
+  (`has_served_turn`, `session_id_of`) are as before;
   `kpi` G1 counts such rows as `step_error`, O3 counts them with the null-step rows, never as turns. Residual: a reminder
   whose content holds a close tag alone on its own line still ends there.
 - **Test.** `tests/proxy/test_turn_population.py`: sub-agent first call vs mid-run SendMessage vs mid-run
@@ -55,7 +63,9 @@ status: fixed in `fix/turn-first-population` (deploy: restart the proxy; rows wr
   pattern cannot cross a newline or run past 200 attribute characters, and 1,000 adversarial lines on
   3 MB finish under 200 ms (`timing`); an error in `turn_fields` leaves the row's other fields set; a
   `step_kind` that raises still returns 200 with an `unknown` / `step_error` row, no classifier call and no
-  arm (pinned and unpinned), and an unlabelled call keeps a non-Haiku sticky tier; the tier classifier sees the prompt
+  arm and no classifier-shadow scheduling (pinned and unpinned), an unlabelled call honours `opus:` and
+  `/model` before a sticky tier and keeps a non-Haiku sticky tier; a different tag nested in a reminder
+  does not leak the reminder; the tier classifier sees the prompt
   before a notification; every ledger row carries the four fields and no text. Consumer tests updated:
   `tests/test_proxy_step_kind.py`, `tests/test_kpi_command.py` (G1 excluded counts),
   `tests/test_proxy_haiku_arm.py` (notification turn -> `harness_turn`).

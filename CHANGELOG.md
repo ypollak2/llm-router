@@ -20,7 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row gets text-free `is_main_thread`, `is_first_call`, `turn_origin` and `tier_text_len`. The tier classifier's human
   text strips the shared harness-tag list (`groundtruth_sources.HARNESS_TAGS`) and matches a reminder's close tag at a
   line start, so a quoted close tag no longer leaks the reminder; a notification-only turn keeps the sticky tier. The
-  strip is linear (bounded single-line attributes; 1,000 adversarial lines on 3 MB: 19.3 s in the first draft, 18 ms).
+  strip is linear (bounded single-line attributes): 1,000 line-start `<command-name foo` lines with no `>` before 3 MB of
+  text took 19.3 s in the first draft (one run) and take 0.83 ms (median of n=5, `scripts/bench_harness_strip.py`).
   Labelling is fail-open: an error gives `step_class: unknown`, `step_error: true`, and the call is forwarded unclassified. The
   Haiku arm, `kpi` G1_proxy, O3 and the Haiku guard read the new kinds. The P0.9-e turn-first p95, Haiku arm counts,
   classifier mix and O3 turns must be recomputed on rows written after the deploy.
