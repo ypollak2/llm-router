@@ -221,8 +221,16 @@ def _model() -> str:
     return os.environ.get("LLM_ROUTER_CLASSIFIER_MODEL", "").strip() or DEFAULT_MODEL
 
 
-def _keep_alive() -> str:
-    return os.environ.get("LLM_ROUTER_CLASSIFIER_KEEP_ALIVE", "").strip() or DEFAULT_KEEP_ALIVE
+def _keep_alive() -> str | int:
+    """The env string, except that a unitless number ("-1", "300") is sent as an integer
+    (seconds; -1 = forever): Ollama parses a string with Go's time.ParseDuration and refuses
+    one without a unit. Parsed like ``warm.edit_keep_alive``: whatever ``int()`` accepts is an
+    integer ("+5", "1_000"); everything else, floats included, stays a string."""
+    raw = os.environ.get("LLM_ROUTER_CLASSIFIER_KEEP_ALIVE", "").strip() or DEFAULT_KEEP_ALIVE
+    try:
+        return int(raw)
+    except ValueError:
+        return raw
 
 
 def _timeout_s() -> float:
@@ -373,6 +381,7 @@ _inflight: dict[tuple, asyncio.Future] = {}
 _background: set[asyncio.Future] = set()
 _cool_until = 0.0  # no new request before this (monotonic): a timeout costs one budget, not one per prompt
 _warm_until = 0.0  # no new warm-up before this
+_warm_failures_seen: set[str] = set()  # failed warm-ups already recorded; cleared by a good one
 _resident_until = 0.0  # a good answer proves the model resident: skip /api/ps until then
 _http: aiohttp.ClientSession | None = None
 _http_loop: asyncio.AbstractEventLoop | None = None
@@ -398,6 +407,7 @@ async def aclose() -> None:
 def _reset_state() -> None:
     """Forget the cache, cooldowns and in-flight work. Tests only."""
     global _cool_until, _warm_until, _resident_until
+    _warm_failures_seen.clear()
     _cache.clear()
     _inflight.clear()
     _cool_until = _warm_until = _resident_until = 0.0
@@ -468,8 +478,12 @@ async def _is_loaded(model: str, budget: float) -> bool:
 
 
 async def _warm(model: str) -> None:
-    if backend() == "systemone":  # load only, at the model's own context: no options
-        url, body = "/api/generate", {"model": model, "stream": False, "keep_alive": _keep_alive()}
+    if backend() == "systemone":
+        # A decision model refuses /api/generate and /api/chat ("does not support generate"),
+        # so it loads only through its own endpoint; any state works, it is not cached.
+        from llm_router import decision_classifier
+
+        url, body = decision_classifier.ENDPOINT, decision_classifier.payload(model, "warm-up")
     else:
         url, body = "/api/chat", {"model": model, "messages": [], "stream": False,
                                   "keep_alive": _keep_alive(), "options": _options()}
@@ -477,11 +491,25 @@ async def _warm(model: str) -> None:
         async with _session().post(
             f"{_base_url()}{url}", json=body, timeout=aiohttp.ClientTimeout(total=120),
         ) as resp:
-            await resp.read()
+            raw = await resp.read()
+            if resp.status != 200:  # Ollama answers 400 {"error": ...}; no exception is raised for it
+                _warm_failed(f"HTTP {resp.status} {raw[:100].decode('utf-8', 'replace')}")
+            else:
+                _warm_failures_seen.clear()
     except Exception as exc:  # noqa: BLE001 - a failed warm-up only means the next call is cold again
-        from llm_router import failopen
+        _warm_failed(type(exc).__name__, exc)
 
-        failopen.record("CHZ-FO-LOCAL-CLASSIFIER-WARMUP", exc)
+
+def _warm_failed(detail: str, exc: BaseException | None = None) -> None:
+    """Record a failed warm-up once per distinct ``detail`` (it repeats every WARMUP_EVERY_S
+    while cold); a successful warm-up forgets what was seen, so a recurrence is recorded again."""
+    detail = f"{backend()} {detail}"
+    if detail in _warm_failures_seen:
+        return
+    _warm_failures_seen.add(detail)
+    from llm_router import failopen
+
+    failopen.record("CHZ-FO-LOCAL-CLASSIFIER-WARMUP", exc, detail=detail)
 
 
 def _kick_warmup(model: str) -> None:

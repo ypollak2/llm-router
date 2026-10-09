@@ -74,6 +74,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deletes entries (older than 7 days, or labelled/skipped and from before today) under the same `flock`. This is
   the only place the proxy keeps prompt text; it is for labelling the shadow (`LLM_ROUTER_SHADOW_LABELS`).
 
+### Fixed
+- classifier (SYSONE-WARM-1): with `LLM_ROUTER_CLASSIFIER_BACKEND=systemone` the warm-up used `/api/generate`,
+  which Ollama refuses for a decision model (HTTP 400), so the model never loaded and every verdict was `cold`.
+  The warm-up now loads it through `/v1/systemone`; a refused warm-up is recorded once as
+  `CHZ-FO-LOCAL-CLASSIFIER-WARMUP`; a unitless `LLM_ROUTER_CLASSIFIER_KEEP_ALIVE` (`-1`) is sent as an integer.
+  See `docs/bugs/SYSONE-WARM-1.md`.
+
 ### Changed
 - kpi (PLAN v16 P0.9-e, `docs/bugs/P09-11.md`): G1_proxy's turn-first segment counts only
   `step_class == turn_first` rows and measures the P0.9-e decision (sum of `tier_phases_ms` over

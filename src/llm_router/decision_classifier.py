@@ -65,7 +65,7 @@ def abstain_below() -> float:
     return v if math.isfinite(v) and 0.0 <= v <= 1.0 else 0.0
 
 
-def payload(model: str, assembled: str, keep_alive: str | None = None) -> dict:
+def payload(model: str, assembled: str, keep_alive: str | int | None = None) -> dict:
     ctx, prompt = getattr(assembled, "context", None), getattr(assembled, "prompt", None)
     if not isinstance(ctx, str) or not isinstance(prompt, str):
         ctx, prompt = "(no context)", str(assembled)
@@ -75,7 +75,7 @@ def payload(model: str, assembled: str, keep_alive: str | None = None) -> dict:
         "state": state,
         "questions": {QUESTION: {"type": "choice", "instructions": INSTRUCTIONS,
                                  "criteria": dict(CRITERIA)}},
-        "keep_alive": keep_alive or lc._keep_alive(),
+        "keep_alive": lc._keep_alive() if keep_alive is None else keep_alive,
     }
 
 
