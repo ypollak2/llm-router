@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 VICTIMS = [
     "tests/test_i3b_session_seeded_retrieval.py::test_the_session_seeds_retrieval",
@@ -22,6 +24,13 @@ VICTIMS = [
 ]
 
 
+# Nested pytest = a full interpreter start + conftest import + two real tests.
+# Measured alone: 12.8 s cold, ~1.3 s warm; under `-n auto` load (4-7) it hit the
+# suite-wide 30 s pytest-timeout (P12-FLAKE-1). 180 s is >10x the cold time; the
+# subprocess budget sits just inside it so a hang reports the child's output, not
+# a bare outer timeout. The group keeps two such nested runs off one worker.
+@pytest.mark.timeout(180)
+@pytest.mark.xdist_group("nested_pytest")
 def test_operator_settings_do_not_reach_the_suite(tmp_path):
     home = tmp_path / "home"
     (home / ".llm-router").mkdir(parents=True)
@@ -31,6 +40,6 @@ def test_operator_settings_do_not_reach_the_suite(tmp_path):
     env.update(HOME=str(home), LLM_ROUTER_SEMANTIC_HISTORY="shadow", LLM_ROUTER_ENFORCE="soft")
     r = subprocess.run([sys.executable, "-m", "pytest", *VICTIMS, "-q", "-rA", "-p", "no:randomly",
                         "-p", "no:cacheprovider"],
-                       cwd=ROOT, env=env, capture_output=True, text=True, timeout=300)
+                       cwd=ROOT, env=env, capture_output=True, text=True, timeout=170)
     assert r.returncode == 0, r.stdout[-2000:]
     assert r.stdout.count("PASSED tests/") == len(VICTIMS), r.stdout[-800:]  # not vacuous
