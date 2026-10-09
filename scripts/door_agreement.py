@@ -106,6 +106,32 @@ def _load_gateway() -> Classify:
     return classify
 
 
+def _load_proxy() -> Classify:
+    import asyncio
+
+    from llm_router import router
+    from llm_router.proxy import steps, tiers
+
+    # Trees before P0.9-e (da31df7 among them) classify through choose_model,
+    # which also builds the provider chain (usage.db queries, the Ollama model
+    # list). The tier decision reads only (task_type, complexity), computed before
+    # the chain, so the build is replaced by an empty chain. Later trees never call it.
+    async def _no_chain(*_a, **_k):
+        return []
+
+    router._build_and_filter_chain = _no_chain
+    loop = asyncio.new_event_loop()
+
+    def classify(text: str):
+        # The proxy classifies tier_text(body): the newest human text of the request
+        # (system-reminders and tool results stripped), tail-truncated to 3000 chars.
+        body = {"messages": [{"role": "user", "content": [{"type": "text", "text": text}]}]}
+        r = loop.run_until_complete(tiers._default_classify(steps.tier_text(body)))
+        return r.get("task_type"), r.get("complexity")
+
+    return classify
+
+
 def _load_hook_policy() -> Classify:
     from llm_router import classify as c
 
@@ -144,6 +170,19 @@ SITES: dict[str, Site] = {
             "gateway._classify (HTTP gateway and SDK door): classify_signals(GATEWAY_POLICY)",
             _load_gateway,
             no_llm_note="no LLM layer: heuristic only",
+        ),
+        Site(
+            "proxy",
+            "proxy/tiers.py _default_classify (turn-first tier decision) on "
+            "steps.tier_text of a one-user-message body holding the prompt",
+            _load_proxy,
+            # Importing the router imports LiteLLM, which fetches its model cost
+            # map from GitHub at import; this makes it use the bundled copy.
+            no_llm_env={"LITELLM_LOCAL_MODEL_COST_MAP": "True"},
+            no_llm_note="no LLM layer in the class; router._build_and_filter_chain "
+            "(usage.db + Ollama model list, used by choose_model on pre-P0.9-e trees) "
+            "is replaced by an empty chain because the class is computed before it; "
+            "LITELLM_LOCAL_MODEL_COST_MAP=True stops LiteLLM's import-time cost-map download",
         ),
         Site(
             "hook_policy",

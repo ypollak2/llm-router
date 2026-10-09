@@ -119,7 +119,7 @@ def test_cli_rejects_unknown_site(tmp_path):
 
 
 def test_cli_real_doors_counts_only_and_no_network(tmp_path):
-    """End to end on the real hook and gateway with synthetic prompts: the output is
+    """End to end on the real hook, gateway and proxy with synthetic prompts: the output is
     counts and hashes only, and the run completes under the network guard."""
     texts = [
         "write a python function that parses a csv file and returns rows",
@@ -132,19 +132,24 @@ def test_cli_real_doors_counts_only_and_no_network(tmp_path):
                       encoding="utf-8")
     out = tmp_path / "o.json"
     proc = subprocess.run(
-        [sys.executable, str(SCRIPT), "--corpus", str(corpus), "--sites", "hook,gateway",
+        [sys.executable, str(SCRIPT), "--corpus", str(corpus), "--sites", "hook,gateway,proxy",
          "--out", str(out)],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, timeout=180,
         env=dict(os.environ, HOME=str(tmp_path), LLM_ROUTER_HOME=str(tmp_path / ".llm-router")),
     )
     assert proc.returncode == 0, proc.stderr
+    # Nothing even tried to connect: every no-network switch held.
+    assert "outbound network is refused" not in proc.stderr
     d = json.loads(out.read_text(encoding="utf-8"))
     assert d["n"] == 4
-    assert set(d["pairs"]) == {"hook|gateway"}
+    assert set(d["pairs"]) == {"hook|gateway", "hook|proxy", "gateway|proxy"}
     p = d["pairs"]["hook|gateway"]
     assert 0 <= p["task_type_disagree"] <= 4 and 0 <= p["tier_disagree"] <= 4
     assert len(d["corpus_sha256"]) == 64
     assert d["no_llm_switches"]["hook"]["env"]["LLM_ROUTER_CLASSIFY_LOCAL_ONLY"] == "true"
+    # gateway and proxy both classify with GATEWAY_POLICY; short prompts are not
+    # truncated by tier_text, so the two must agree here.
+    assert d["pairs"]["gateway|proxy"]["task_type_disagree"] == 0
     dumped = out.read_text(encoding="utf-8") + proc.stdout + proc.stderr
     for t in texts[:3]:
         assert t not in dumped
