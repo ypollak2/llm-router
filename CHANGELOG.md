@@ -37,10 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plus the count where any listed site differs. Sites now: `hook` (auto-route.py `classify_prompt`), `gateway` (`gateway._classify`),
   `proxy` (`proxy/tiers._default_classify` on `steps.tier_text` of the prompt) and the reference `hook_policy` (`classify_signals(HOOK_POLICY)`, what `measure_low_signal_rate.py` called "hook"); the other P1.6
   sites are added one per wiring PR. `--freeze-corpus <path>` writes `measure_low_signal_rate.collect()`'s prompts once (mode 0600,
-  never overwritten). Output is counts and hashes only. No model calls: the hook's LLM layers are forced off by the env switches its
+  never overwritten, temp file hard-linked into place). Each pair also reports a shared-labels rate (only prompts where both
+  sites' labels are in the vocabulary both emitted), and `--freeze-dates` / `--dates` / `--date-cutoff` add a reproducible
+  split by prompt date from a counts-only per-line date sidecar. Output is counts and hashes only. No model calls: the hook's LLM layers are forced off by the env switches its
   code reads (`LLM_ROUTER_CLASSIFY_LOCAL_ONLY`, `LLM_ROUTER_DISABLE_LLM_CLASSIFIERS`, `LLM_ROUTER_HOOK_LLM_LAYER=off`), the proxy's pre-P0.9-e chain build is replaced by an empty chain,
-  `LITELLM_LOCAL_MODEL_COST_MAP=True` stops LiteLLM's import-time download, and every
-  outbound socket connect is refused during the run. Measure an older commit by putting its tree's `src` first on PYTHONPATH.
+  `LITELLM_LOCAL_MODEL_COST_MAP=True` stops LiteLLM's import-time download, `LLM_ROUTER_OLLAMA_MODEL` stops older hooks'
+  import-time Ollama probe, and DNS plus every outbound socket connect is refused during the run (a `BaseException`, and any
+  refusal fails the run). Measure an older commit by putting its tree's `src` first on PYTHONPATH.
 - ledger completeness (PLAN v16 P0.8-e): a call the semantic cache answers now writes a `usage` row
   (`reason = "cache_hit"`, provider `cache`, model `cache/<cached model>`, 0 tokens, $0) carrying the
   caller's session id, and `semantic_cache_lookups` gains a nullable `session_id` (additive migration;
