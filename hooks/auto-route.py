@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 49
+# llm_router-hook-version: 50
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -26,8 +26,8 @@ import subprocess
 import sys
 import tempfile
 import time
-import urllib.request
 from pathlib import Path
+
 
 # -- KPI G1: record how long this invocation ran (llm_router.hook_latency) -----
 # The clock starts BEFORE the first llm_router import, so the package import is
@@ -63,6 +63,22 @@ except ImportError:  # llm_router is not importable on this host: no recorder, n
     def _hl_mark_main():
         return None
 
+class _LazyUrllib:
+    """``urllib.request`` on first use. Importing it at start-up drags in http.client
+    and the email parser (~7 ms, measured with ``python -X importtime``) for a hook
+    that makes no HTTP call on most prompts. ``hook.urllib.request`` still resolves to
+    the real module, so a test that patches ``hook.urllib.request.urlopen`` is unchanged."""
+
+    @property
+    def request(self):
+        import urllib.request as _request
+
+        return _request
+
+
+urllib = _LazyUrllib()
+
+
 # ── v6.0 Visibility: HUD integration ─────────────────────────────────────────
 try:
     from llm_router.statusline_hud import initialize_hud
@@ -85,15 +101,21 @@ except ImportError:
 # "Tracked: …" debug line) would corrupt the payload and silently void routing.
 # configure_logging() re-points structlog at stdlib logging, whose handler
 # defaults to stderr, guaranteeing stdout stays JSON-only.
+# configure_logging_lazily runs the same configuration when structlog is first
+# imported instead of before: structlog + rich is 25-45 ms, wasted on a prompt that
+# never logs. Older llm_router builds without it fall back to configure_logging.
 try:
-    from llm_router.logging import configure_logging as _configure_logging
+    from llm_router.logging import configure_logging_lazily as _configure_logging
 except ImportError:
-    def _configure_logging(*args, **kwargs):
-        """Fallback: ensure stdlib logging never targets stdout."""
-        import logging as _logging
-        root = _logging.getLogger()
-        if not root.handlers:
-            root.addHandler(_logging.StreamHandler(sys.stderr))
+    try:
+        from llm_router.logging import configure_logging as _configure_logging
+    except ImportError:
+        def _configure_logging(*args, **kwargs):
+            """Fallback: ensure stdlib logging never targets stdout."""
+            import logging as _logging
+            root = _logging.getLogger()
+            if not root.handlers:
+                root.addHandler(_logging.StreamHandler(sys.stderr))
 
 
 def _router_home():
@@ -204,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 49"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 50"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -273,8 +295,18 @@ def _load_discovered_ollama_models() -> list[str]:
     now call `llm_router.model_discovery`.
     """
     try:
-        from llm_router.model_discovery import available_ollama_models
-        return available_ollama_models()
+        # No synchronous probe: this runs at import, on the host's critical path. A
+        # stale or missing cache is refreshed by a detached child for the next prompt
+        # (llm_router.model_discovery, "Hook path"); an older llm_router without the
+        # no-wait variant keeps the probing call.
+        try:
+            from llm_router.model_discovery import available_ollama_models_nowait
+        except ImportError:
+            from llm_router.model_discovery import available_ollama_models
+            return available_ollama_models()
+        # Only the real hook process starts the refresh child; a test that imports
+        # this file as a module must not.
+        return available_ollama_models_nowait(refresh=__name__ == "__main__")
     except Exception:                                        # noqa: BLE001
         return []
 
@@ -3413,9 +3445,11 @@ def _draft_context_budget() -> int:
         except ValueError:
             value = None
     if value is None:
+        # config_lite skips the pydantic-settings import (~31 ms) when no env var or
+        # .env file can name the field; the answer is then RouterConfig's own default.
         try:
-            from llm_router.config import get_config
-            value = int(getattr(get_config(), "session_context_max_tokens_draft", 0)) or None
+            from llm_router.config_lite import config_value
+            value = int(config_value("session_context_max_tokens_draft")) or None
         except Exception:  # noqa: BLE001 — config is optional in early-boot hooks
             value = None
     if value is None or value <= 0:

@@ -135,12 +135,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the only place the proxy keeps prompt text; it is for labelling the shadow (`LLM_ROUTER_SHADOW_LABELS`).
 
 ### Fixed
+- session-end / Stop (PLAN v16 PG4 / P2-G-3, bug `P09-SE-1`): two inline steps left the live p95 at 3,136 ms
+  (n = 79 Stop rows, 2026-10-08T21:34Z to 2026-10-09T13:44Z, load1 median 2.6). The 0.2 s sleep after a spend
+  "flush request" that nothing reads is removed (205 ms p50), and the north-star item (a scan of every transcript
+  touched in two days: p50 343, p95 1,819 ms) is computed by the detached child and cached in
+  `northstar_line.json`; the Stop shows the last cached share (the last child run: one turn old, more when Stops come
+  faster than the 15 s child claim; none on a session's first Stop). The cache expires after 600 s, is keyed by the Stop's stdin session id, and its refresh runs
+  before the usage fetch. Hook version 24 -> 26. Deploy: upgrade the `llm-routing` tool, copy `session-end.py` to
+  `~/.claude/hooks/llm_router-session-end.py`, then judge on `hook_latency.jsonl` after >= 200 organic Stop rows.
 - Haiku guard (HAIKU-SERVED-1): a Haiku rewrite that Anthropic refused and the proxy retried on the original
   model keeps `tier=haiku` / `tier_reason=haiku_rewrite` but is served on that model. `haiku_guard` now
   separates `is_haiku_decided` (router chose Haiku; the `tier_retry` trigger's denominator, retried rows
   stay in it) from the new `is_haiku_served` (`served_model` is Haiku), and `kpi --haiku-watch` reports
   `haiku_served_calls` next to `haiku_decided_calls`. GE4 Frontier shadow was already safe (its reply-time gate
   drops such rows as `not_rewritten`); a proxy test now pins that.
+- hooks (PLAN v16 PG4 / P2-G-3, `docs/bugs/AUTOROUTE-LAT-1.md`): the auto-route hook no longer imports
+  pydantic-settings, structlog + rich, the SDK, `importlib.metadata` or `urllib.request` on a routed prompt, and no
+  longer probes Ollama synchronously at import. Wall p95 (hook_wall, n = 200 cold, load1 <= 3.7) 194.9 -> 124.8 ms;
+  in-process p95 125.6 -> 73.1 ms. `llm_router.__init__` exports and `__version__` resolve on first use;
+  `config_lite.config_value` skips `get_config()` when nothing can set the field; `get_logger()` is lazy with
+  `configure_logging_lazily()` keeping structlog off stdout; `model_discovery.available_ollama_models_nowait()`
+  uses a stale cache and refreshes it in a detached child (at most one per 300 s). On the default path the hook no
+  longer runs `get_config()`'s key-export side effects (its drafts are free/local only). Hook version 49 -> 50.
 - classifier (SYSONE-WARM-1): with `LLM_ROUTER_CLASSIFIER_BACKEND=systemone` the warm-up used `/api/generate`,
   which Ollama refuses for a decision model (HTTP 400), so the model never loaded and every verdict was `cold`.
   The warm-up now loads it through `/v1/systemone`; a refused warm-up is recorded once as
@@ -161,6 +177,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CHZ-FO-PROFILES-OLLAMA-FILTER` instead of a bare `pass`. See `docs/bugs/STALE-OLLAMA-1.md`.
 
 ### Changed
+- kpi (`docs/bugs/O3-STEP-1.md`): O3 starts a human turn only at a row with `step_class == turn_first`
+  (minus transcript sub-agent calls, as KPIS.md already says). Null-step rows (pre-GE1) and
+  `subagent_first` rows are per-call units only: they no longer count as turns or end a redo window.
+  They are counted and printed (`o3.excluded.no_step_class`, `o3.excluded.step_subagent_first`; keys
+  added except that `o3.excluded.subagent_first` now counts only transcript-sidechain turn_first rows;
+  `o3.excluded.step_side_call` counts rows labelled side_call without that tier_reason). A
+  `subagent_first` row stays a turn when the transcript places it on the main thread. `subagent_first`
+  is a live label, so the Haiku guard's `redo` trigger (no transcript join) changes behaviour: those
+  rows no longer count as turns or push an escalation out of the redo window. The golden kpi files hold
+  no O3 line and do not change.
 - ci/test infra (TIMING-1, D-34 = A): a `timing` pytest marker for tests whose verdict is wall-clock speed (elapsed, p95,
   event-loop lag, short real timeouts, sleep ordering). 129 test functions in 54 files carry it; the parallel `test` job runs
   `-m "not timing and ..."` and a new serial `timing (3.11)` / `timing (3.13)` job runs them with `-p no:xdist`. Thresholds and

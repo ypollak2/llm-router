@@ -18,35 +18,62 @@ See README.md for full documentation.
 # filed from a checkout. When a sibling pyproject.toml exists we are demonstrably
 # running from source, and that file — not the stale metadata — is the truth.
 # Wheels do not ship pyproject.toml, so they still fall through to the metadata.
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as _pkg_version
-
-
-__version__ = ""
-
-# Kept as a module-level try-chain rather than a helper function: a `def` here
-# sits between the two import groups in this file and makes the re-exports below
-# E402. Behaviour is the same, and the file keeps the shape ruff expects.
-try:
-    import tomllib
-    from pathlib import Path as _Path
-
-    _pp = _Path(__file__).resolve().parent.parent.parent / "pyproject.toml"
-    if _pp.is_file():
-        _data = tomllib.load(_pp.open("rb"))
-        if _data.get("project", {}).get("name") in {"llm-routing", "llm_routing"}:
-            __version__ = _data["project"]["version"]
-except Exception:
-    pass
-
-if not __version__:
+def _resolve_version() -> str:
+    # Read on first access to ``__version__`` rather than at import: ``importlib.metadata``
+    # alone is ~9 ms of ``python -X importtime`` and every per-prompt hook paid it
+    # to resolve a string it never prints (PG4 / P2-G-3).
     try:
-        __version__ = _pkg_version("llm-routing")
-    except PackageNotFoundError:
-        __version__ = "0.0.0+unknown"
+        import tomllib
+        from pathlib import Path
 
-# Export response router for easy access
-from llm_router.response_router import route_response as route_response_explanations
-from llm_router.sdk import RouteResult, RoutingError, route
+        pp = Path(__file__).resolve().parent.parent.parent / "pyproject.toml"
+        if pp.is_file():
+            with pp.open("rb") as fh:
+                data = tomllib.load(fh)
+            if data.get("project", {}).get("name") in {"llm-routing", "llm_routing"}:
+                return data["project"]["version"]
+    except Exception:  # noqa: BLE001 -- fall through to the installed metadata
+        pass
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("llm-routing")
+    except PackageNotFoundError:
+        return "0.0.0+unknown"
+
+
+# Public re-exports, resolved on first access (PEP 562).
+#
+# ``import llm_router.<anything>`` runs this file first. It used to import
+# ``response_router`` and ``sdk`` eagerly, which pulled ``llm_router.types`` (and
+# the SDK's own imports) into every process that touched any submodule -- including
+# the per-prompt hooks, where that was ~14 ms of the ``import`` phase measured with
+# ``python -X importtime`` (PG4 / P2-G-3). ``from llm_router import route`` and
+# ``llm_router.route`` still work; the import just happens when the name is used.
 
 __all__ = ["route", "RouteResult", "RoutingError", "route_response_explanations"]
+
+_LAZY_EXPORTS = {
+    "route": ("llm_router.sdk", "route"),
+    "RouteResult": ("llm_router.sdk", "RouteResult"),
+    "RoutingError": ("llm_router.sdk", "RoutingError"),
+    "route_response_explanations": ("llm_router.response_router", "route_response"),
+}
+
+
+def __getattr__(name: str):
+    if name == "__version__":
+        globals()["__version__"] = value = _resolve_version()
+        return value
+    target = _LAZY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+
+    value = getattr(importlib.import_module(target[0]), target[1])
+    globals()[name] = value  # later lookups skip this function
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_LAZY_EXPORTS) | {"__version__"})
