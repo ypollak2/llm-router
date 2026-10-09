@@ -106,15 +106,68 @@ def test_kpi_judges_router_added_and_reports_it_for_a_10s_draft():
 
 
 def test_kpi_says_the_agent_route_bar_is_deferred():
-    """agent-route's routed-model phases are not MODEL_PHASES, so it stays OVER
-    the 300 ms bar; PLAN v16 S6 defers that bar to 16.1 and the output says so."""
+    """direct_subagent / cli_delegation are not MODEL_PHASES, so a row that
+    delegates through them stays OVER the 300 ms bar; PLAN v16 S6 defers that bar
+    to 16.1 and the output says so. (codex_delegation no longer does: HOOKMETRIC-1.)"""
     for i in range(60):
         hl.record("agent-route", "PreToolUse", 63_720.0, now=NOW - 60 - i,
-                  phases_ms={"codex_delegation": 63_000.0})
+                  phases_ms={"direct_subagent": 63_000.0})
     g1 = kpi._g1_hook(7, NOW, 0)
     ar = g1["hooks"]["agent-route"]
     assert ar["p95_ms"] == 63_720.0 and "16.1" in ar["deferred"]
-    assert "codex_delegation" in g1["lines"][0] and "deferred to 16.1" in g1["lines"][0]
+    assert "direct_subagent" in g1["lines"][0] and "deferred to 16.1" in g1["lines"][0]
+
+
+# ── HOOKMETRIC-1: a delegated Codex run is model time, not router overhead ────
+
+
+def _statusline_card(now=NOW):
+    from llm_router import statusline_refresh as sr
+    return {"kpis": {"G1_hook": kpi._g1_hook(7, now, 0)}}, sr
+
+
+def test_codex_delegation_is_model_time_and_does_not_trigger_the_statusline_warning():
+    # Rows as the recorder wrote them before the fix (no router_added_ms): 60 s
+    # delegation + 50 ms of router work.
+    for i in range(60):
+        hl.record("agent-route", "PreToolUse", 60_050.0, now=NOW - 60 - i,
+                  phases_ms={"import": 20.0, "codex_delegation": 60_000.0})
+    card, sr = _statusline_card()
+    ar = card["kpis"]["G1_hook"]["hooks"]["agent-route"]
+    assert ar["p95_ms"] == pytest.approx(50.0)          # judged on router-added
+    assert ar["p95_elapsed_ms"] == 60_050.0             # wall time still reported
+    assert ar["model_time_rows"] == 60
+    assert sr._hooks_slow(card) is None
+
+
+def test_a_900ms_row_with_no_model_phase_still_triggers_the_statusline_warning():
+    for i in range(60):
+        hl.record("agent-route", "PreToolUse", 900.0, now=NOW - 60 - i,
+                  phases_ms={"import": 20.0, "classify": 800.0})
+    card, sr = _statusline_card()
+    assert card["kpis"]["G1_hook"]["hooks"]["agent-route"]["p95_ms"] == 900.0
+    assert sr._hooks_slow(card) == {"hook": "agent-route", "p95_ms": 900.0}
+
+
+def test_hook_wall_live_clause_judges_router_added_too():
+    from llm_router import hook_wall
+    rows = [{"hook": "enforce-route", "elapsed_ms": 60_050.0, "ts": NOW, "session_id": f"s{i % 5}",
+             "phases_ms": {"codex_delegation": 60_000.0}} for i in range(300)]
+    live = hook_wall.judge_live(rows, 7)["enforce-route"]
+    assert live["p95_ms"] == pytest.approx(50.0)
+
+
+def test_the_recorder_subtracts_codex_delegation_and_a_nested_cold_wait_once(monkeypatch):
+    t = _fake_clock(monkeypatch)
+    hl.begin("agent-route", "PreToolUse", t0=1000.0)
+    with hl.phase("codex_delegation"):
+        t["now"] += 60.0
+        hl.add_phase("cold_wait", 5_000.0)   # inside the delegation: not subtracted twice
+    t["now"] += 0.05
+    hl._finish()
+    row = _lines()[-1]
+    assert row["router_added_ms"] == pytest.approx(50.0, abs=1.0)
+    assert row["elapsed_ms"] == pytest.approx(60_050.0, abs=1.0)
 
 
 # ── router_added_ms on the row ───────────────────────────────────────────────
