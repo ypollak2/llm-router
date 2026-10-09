@@ -99,6 +99,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the only place the proxy keeps prompt text; it is for labelling the shadow (`LLM_ROUTER_SHADOW_LABELS`).
 
 ### Fixed
+- Haiku guard (HAIKU-SERVED-1): a Haiku rewrite that Anthropic refused and the proxy retried on the original
+  model keeps `tier=haiku` / `tier_reason=haiku_rewrite` but is served on that model. `haiku_guard` now
+  separates `is_haiku_decided` (router chose Haiku; the `tier_retry` trigger's denominator, retried rows
+  stay in it) from the new `is_haiku_served` (`served_model` is Haiku), and `kpi --haiku-watch` reports
+  `haiku_served_calls` next to `haiku_decided_calls`. GE4 Frontier shadow was already safe (its reply-time gate
+  drops such rows as `not_rewritten`); a proxy test now pins that.
 - classifier (SYSONE-WARM-1): with `LLM_ROUTER_CLASSIFIER_BACKEND=systemone` the warm-up used `/api/generate`,
   which Ollama refuses for a decision model (HTTP 400), so the model never loaded and every verdict was `cold`.
   The warm-up now loads it through `/v1/systemone`; a refused warm-up is recorded once as
