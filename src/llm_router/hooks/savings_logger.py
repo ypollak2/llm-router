@@ -442,6 +442,7 @@ def log_direct_to_db(
                 complexity=complexity,
                 session_id=_ledger_session_id(session_id) or "",
                 task_type_raw=_task_raw,
+                reason="direct",
             )
             # P0.8 (R-EVL-1): the DIRECT path measures none of the classifier
             # confidence, its latency, budget pressure, a downshift or the quality

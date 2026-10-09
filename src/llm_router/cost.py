@@ -731,6 +731,30 @@ MIGRATE_USAGE_ADD_SESSION_ID = [
 Before this, no usage row could be scoped to a session at all. No default: historical
 rows genuinely have no session to report."""
 
+MIGRATE_USAGE_ADD_REASON = [
+    "ALTER TABLE usage ADD COLUMN reason TEXT",
+]
+"""P0.8-d (R-EVL-1): why a ``usage`` row was made, as a short code naming the route
+that made it (``router_chain``, ``direct``, ``claude_code_subscription``, ...; the
+vocabulary is the ``REASON_*`` constants below). NULL on every earlier row: no reason
+was recorded then, and the completeness check reports them as unknown rather than
+back-filling a guess. Never prompt text."""
+
+# The reason vocabulary for ``usage.reason`` and for ``routing_decisions.reason_code``
+# when the caller has no finer cause. A code names the writer path, so it is known
+# at the call site and is never derived from a prompt.
+REASON_ROUTER_CHAIN = "router_chain"
+REASON_ROUTER_UNHINTED = "router_unhinted"
+REASON_ROUTER_BUDGET_FALLBACK = "router_budget_fallback"
+REASON_DIRECT = "direct"
+REASON_EXPLICIT_CODEX = "explicit_codex_tool"
+REASON_EXPLICIT_GEMINI_CLI = "explicit_gemini_cli_tool"
+REASON_ROUTE_TOOL = "route_tool"
+REASON_STREAM_TOOL = "stream_tool"
+REASON_CLAUDE_CODE_SUBSCRIPTION = "claude_code_subscription"
+REASON_SIDECAR_BACKFILL = "sidecar_backfill"
+REASON_JUDGE_EVAL = "judge_eval"
+
 MIGRATE_ADD_TASK_TYPE_RAW = [
     "ALTER TABLE usage ADD COLUMN task_type_raw TEXT",
     "ALTER TABLE routing_decisions ADD COLUMN task_type_raw TEXT",
@@ -1187,6 +1211,7 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_ROUTING_DECISIONS_ADD_SHADOW_TIER
         + MIGRATE_ROUTING_DECISIONS_ADD_TOOL_USE_ID
         + MIGRATE_USAGE_ADD_SESSION_ID
+        + MIGRATE_USAGE_ADD_REASON
         + MIGRATE_ADD_TASK_TYPE_RAW
         # Defined in v6.2 and never applied: compression_stats was declared,
         # log_compression_stat wrote to it, and the table did not exist. The
@@ -1284,6 +1309,7 @@ async def log_usage(
     *,
     session_id: str | None = None,
     task_type_raw: str | None = None,
+    reason: str | None = None,
 ) -> None:
     """Persist a completed external LLM call to the usage database.
 
@@ -1306,6 +1332,9 @@ async def log_usage(
             is used, which is None outside an MCP tool call. Never guessed.
         task_type_raw: The label a writer could not map onto ``TaskType``; pass it
             with ``task_type=None`` so the row says "unknown" instead of a default.
+        reason: Short code for the route that made this row (the ``REASON_*``
+            constants), stored in ``usage.reason`` (P0.8-d). None is stored as NULL,
+            which the G3 completeness check counts as missing. Never prompt text.
     """
     # PRIMARY GUARD: a test must not write to the production database. See
     # `_refuse_unisolated_test_write` for why the fingerprint below was not enough.
@@ -1372,8 +1401,8 @@ async def log_usage(
                input_tokens, output_tokens, cost_usd, latency_ms, success,
                user_id, project_id, correlation_id, complexity,
                baseline_model, potential_cost_usd, saved_usd, is_simulated,
-               session_id, task_type_raw)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               session_id, task_type_raw, reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 response.model,
                 response.provider,
@@ -1394,6 +1423,7 @@ async def log_usage(
                 1 if _detect_synthetic() else 0,
                 ledger_sid,
                 task_type_raw if task_type is None else None,
+                (reason or None),
             ),
         )
         await db.commit()

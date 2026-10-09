@@ -11,6 +11,7 @@ from llm_router.ensemble import classify_for_routing
 from llm_router.cost import (
     _claude_cost, get_correction_count,
     get_daily_claude_breakdown, get_daily_claude_tokens, get_savings_summary,
+    REASON_ROUTE_TOOL, REASON_STREAM_TOOL,
     log_claude_usage, log_correction, log_usage,
 )
 from llm_router.input_validation import (
@@ -25,7 +26,7 @@ from llm_router.router import route_and_call
 from llm_router.statusline_hud import record_routing_decision
 from llm_router.tools.text import _read_hook_route_directive
 from llm_router.types import (
-    ClassificationResult, Complexity, QualityMode,
+    ClassificationResult, Complexity, LLMResponse, QualityMode,
     RoutingProfile, RoutingRecommendation, TaskType, _budget_bar,
 )
 from llm_router import pricing as _pricing
@@ -448,6 +449,7 @@ async def llm_route(
             profile=profile,
             success=True,
             complexity=classification.complexity.value,
+            reason=REASON_ROUTE_TOOL,
         )
     except Exception as e:
         await ctx.warning(f"Failed to log routing usage: {e}")
@@ -701,16 +703,27 @@ async def llm_stream(
 
     content = "".join(collected)
 
-    # Log usage
+    # Log usage. This call used to pass provider=/model=/input_tokens= keywords that
+    # log_usage does not take: it raised TypeError after the stream finished, so the
+    # stream tool wrote no usage row at all (docs/bugs/P08D-1.md).
     if meta:
-        await log_usage(
-            provider=meta.get("provider", provider_from_model(target_model)),
-            model=target_model,
-            input_tokens=meta.get("input_tokens", 0),
-            output_tokens=meta.get("output_tokens", 0),
-            cost_usd=meta.get("cost_usd", 0.0),
-            task_type=resolved_task.value,
-        )
+        try:
+            await log_usage(
+                LLMResponse(
+                    content=content,
+                    model=target_model,
+                    input_tokens=meta.get("input_tokens", 0),
+                    output_tokens=meta.get("output_tokens", 0),
+                    cost_usd=meta.get("cost_usd", 0.0),
+                    latency_ms=meta.get("latency_ms", 0.0),
+                    provider=meta.get("provider", provider_from_model(target_model)),
+                ),
+                task_type=resolved_task,
+                profile=profile,
+                reason=REASON_STREAM_TOOL,
+            )
+        except Exception as e:  # noqa: BLE001 - a ledger failure must not lose the answer
+            await ctx.warning(f"Failed to log stream usage: {e}")
 
     cost_str = f"${meta.get('cost_usd', 0):.6f}" if meta else "$?.??????"
     latency_str = f"{meta.get('latency_ms', 0):.0f}ms" if meta else "?ms"

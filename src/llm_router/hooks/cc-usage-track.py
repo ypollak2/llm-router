@@ -1,4 +1,4 @@
-# llm_router-hook-version: 2
+# llm_router-hook-version: 3
 """PostToolUse[Agent] hook — track Claude Code subscription model calls.
 
 Fires after every Agent subagent completes. Writes an estimated usage record
@@ -206,6 +206,12 @@ def _ensure_table(db: sqlite3.Connection) -> None:
     except sqlite3.OperationalError as exc:
         if "duplicate column name" not in str(exc).lower():
             raise
+    # P0.8-d: why the row was made (cost.MIGRATE_USAGE_ADD_REASON); same reason as above.
+    try:
+        db.execute("ALTER TABLE usage ADD COLUMN reason TEXT")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower():
+            raise
 
 
 def _ledger_session_id(value: object) -> str | None:
@@ -259,8 +265,9 @@ def _log_to_db(
                    (model, provider, task_type, profile,
                     input_tokens, output_tokens, cost_usd, latency_ms, success,
                     baseline_model, potential_cost_usd, saved_usd, is_simulated,
-                    session_id)
-                   VALUES (?, 'cc', 'code', 'balanced', ?, ?, 0.0, ?, ?, ?, ?, ?, ?, ?)""",
+                    session_id, reason)
+                   VALUES (?, 'cc', 'code', 'balanced', ?, ?, 0.0, ?, ?, ?, ?, ?, ?, ?,
+                           'claude_code_subscription')""",
                 (
                     model,
                     input_tokens,

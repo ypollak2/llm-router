@@ -52,6 +52,7 @@ from pathlib import Path
 if str(Path(__file__).resolve().parent.parent / "src") not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from llm_router.call_identity import ledger_session_id as _ledger_session_id
 from llm_router.cost import _get_db
 
 
@@ -148,15 +149,16 @@ async def backfill(
                 """
                 INSERT INTO routing_decisions (
                     timestamp, task_type, complexity, success,
-                    reason_code, correlation_id
+                    reason_code, correlation_id, session_id
                 )
-                VALUES (?, ?, ?, 0, 'sidecar_backfill', ?)
+                VALUES (?, ?, ?, 0, 'sidecar_backfill', ?, ?)
                 """,
                 (
                     record.iso_timestamp,
                     record.task_type,
                     record.complexity,
                     record.correlation_id,
+                    _ledger_session_id(record.session_id),
                 ),
             )
             inserted += 1

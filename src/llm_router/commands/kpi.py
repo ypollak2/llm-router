@@ -1007,7 +1007,7 @@ _PRD_ROUTING_COLUMNS = {
 _PRD_SQL_COLUMNS = {
     "usage": {
         "session_id": ("session_id",), "task_id": ("task_id",), "model": ("model",),
-        "tier": ("complexity",), "reason": (),
+        "tier": ("complexity",), "reason": ("reason",),
         "tokens": ("input_tokens", "output_tokens"), "cost": ("cost_usd",),
         "latency": ("latency_ms",), "outcome": ("success",),
     },
