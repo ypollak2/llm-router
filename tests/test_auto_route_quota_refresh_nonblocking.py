@@ -113,6 +113,7 @@ def _load_hook(hooks: Path, monkeypatch, home: Path):
     return mod
 
 
+@pytest.mark.timing
 def test_stale_cache_does_not_block_while_refresh_runs_in_background(sandbox):
     hooks, home, tmp = sandbox
     _write_usage(home, age_s=900)
@@ -125,6 +126,7 @@ def test_stale_cache_does_not_block_while_refresh_runs_in_background(sandbox):
     assert _wait_for(home / "stub_done", 15), "background refresh never finished"
 
 
+@pytest.mark.timing
 def test_stale_cache_is_no_slower_than_fresh_cache(sandbox):
     hooks, home, tmp = sandbox
     _write_usage(home, age_s=0)
@@ -168,6 +170,7 @@ def _payload(tmp: Path) -> str:
     })
 
 
+@pytest.mark.timing
 def test_concurrent_invocations_start_one_refresh(sandbox):
     """6 hooks at once, 3 rounds, each round on a fresh marker. Weak alone (the
     check-then-touch window is tiny) - the flock test below is the
@@ -206,6 +209,7 @@ def test_claim_is_serialized_by_the_flock(sandbox):
     assert not (home / "usage_refresh_spawn.txt").exists()
 
 
+@pytest.mark.timing
 def test_back_to_back_runs_do_not_respawn_within_cooldown(sandbox):
     hooks, home, tmp = sandbox
     _write_usage(home, age_s=900)
@@ -248,6 +252,7 @@ def test_missing_cache_still_falls_back_to_zero(sandbox, monkeypatch):
     assert mod._get_pressure() == {"session": 0.0, "sonnet": 0.0, "weekly": 0.0}
 
 
+@pytest.mark.timing
 def test_missing_refresh_script_degrades_without_blocking(sandbox):
     hooks, home, tmp = sandbox
     (hooks / "usage-refresh.py").unlink()

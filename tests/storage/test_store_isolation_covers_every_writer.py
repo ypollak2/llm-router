@@ -52,13 +52,6 @@ def test_quota_tracker_usage_json_is_sandboxed(tmp_path):
     _assert_sandboxed(Path(QuotaTracker.USAGE_JSON), tmp_path, "quota_tracker usage.json")
 
 
-def test_result_cache_dir_is_sandboxed(tmp_path):
-    """_ROUTER_DIR was a module-level constant evaluated at import time."""
-    from llm_router import result_cache
-
-    _assert_sandboxed(Path(result_cache._router_dir()), tmp_path, "result_cache dir")
-
-
 @pytest.mark.parametrize(
     "module_name, attr",
     [

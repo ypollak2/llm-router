@@ -112,6 +112,7 @@ def _run_main(mod, monkeypatch) -> tuple[str, float]:
 
 # ── session start never waits on the refresh ────────────────────────────────
 
+@pytest.mark.timing
 def test_main_returns_promptly_even_if_refresh_hangs(hook, monkeypatch, state):
     """The live refresh is patched to sleep 30 s; SessionStart must not call it."""
     popen = _PopenRecorder()
@@ -127,6 +128,7 @@ def test_main_returns_promptly_even_if_refresh_hangs(hook, monkeypatch, state):
     assert len(popen.calls) == 1  # the slow work was handed to a background process
 
 
+@pytest.mark.timing
 def test_main_returns_promptly_with_no_cache_and_hanging_refresh(hook, monkeypatch):
     popen = _PopenRecorder()
     monkeypatch.setattr(hook.subprocess, "Popen", popen)

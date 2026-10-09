@@ -302,6 +302,16 @@ outside it. The write is one `O_APPEND` write with no lock, the file is capped a
 generations of `LLM_ROUTER_HOOK_LATENCY_MAX_BYTES` (default 4 MiB), and
 `LLM_ROUTER_HOOK_LATENCY=off` disables it.
 
+- *Session id (PG9).* Every writer puts the host's `session_id` on its row, taken from the
+  payload the hook already parsed (`hook_latency.set_session`; the statusline passes it to
+  `record-raw`). A payload without one leaves the key out (null); it is never invented, and
+  no prompt text is written. The P0.9-g live clause prints `n`, `n_sessions` and the
+  largest session's share per hook (`hook_wall.judge_live`). Rows with no session id count
+  as `without session id`. Below `hook_wall.MIN_SESSIONS` (2) sessions the clause prints
+  "not informative (need >=2 sessions)" and cannot PASS (a p95 over budget still FAILs),
+  the same rule as the P0.9-e turn-first decision. Rows written before this change carry
+  no session id, so a live window that predates the deploy reads "not informative".
+
 - *Budgets* live in one table, `llm_router.hook_latency.HOOK_BUDGETS_MS`: `agent-route`
   320 s and `auto-route` 60 s (the registered host timeouts); the rest are declared, not
   derived — there was no live distribution to derive them from: 2 s for the per-prompt and
@@ -353,9 +363,15 @@ informative` below n=100 or with fewer than 2 sessions (P0.9-e MUST). Rows with 
 (pre-GE1 rows of any kind), `subagent_first` rows and turn-first rows without the decision phases are
 left out and counted on the line (`excluded` in the JSON); `tier_decision_s` (wall time, shadow
 scheduling included) is never substituted for a missing phase sum (`docs/bugs/P09-11.md`).
-The phase sum does not include scheduling the classifier shadow (`proxy/server.py` adds that to
-`tier_decision_s` only), so since P09-11 no G1_proxy segment measures the "shadow <= 30 ms" target
-below; it is still on every turn-first row's `tier_decision_s`, which `kpi` does not print.
+The phase sum does not include scheduling the classifier shadow, so that cost has its own
+segment (P09-13): `proxy/server.py` records `tier_shadow_schedule_ms` on a row only when a shadow
+call was actually scheduled (milliseconds only, no request content), and `G1_proxy` appends
+`| shadow schedule p50=..ms p95=..ms (n=.., sessions=..; within|OVER 30ms target)` from turn-first
+rows that carry it. The p95 is compared with the "shadow <= 30 ms" target below; the same gate
+applies: `not informative` below n=100 or with fewer than 2 sessions, and no percentile below n=50
+(`shadow_schedule` in the JSON). With the shadow off (the default) no row carries the field and
+the segment is absent from the line. `tier_decision_s` keeps its meaning (wall time, scheduling
+included) and is what the continuation segment reads.
 *Continuation* (a tool-result follow-up): `tier_decision_s`. Claude Code side calls
 (`tier_reason == side_call` or `step_class == side_call`) run no classifier and are left out; their
 count is in the JSON (`side_call_excluded`). A segment below n=50 prints no percentiles and they are
@@ -368,7 +384,7 @@ forwarded rows (all-time ledger copy, 2026-10-07; it is only set on a few decisi
 p95=83ms (n=1,181); continuation p50=4ms p95=21ms (n=8,905). An independent recompute from the raw
 ledger gave turn-first n=1,183 p50=4ms p95=83ms and continuation n=8,905 p50=4ms p95=21ms. (Those turn-first readings predate P09-11: that bucket was every row that was not a
 continuation, null-step rows included, measured as `tier_decision_s`.) Targets
-(primary plan): shadow <= 30 ms; with the LLM decision, turn-first <= its wait budget + 100 ms and
+(primary plan, `PLAN.md` G1-proxy "Shadow <= 30 ms"; `PLAN-v16.md` carries no separate figure): shadow <= 30 ms; with the LLM decision, turn-first <= its wait budget + 100 ms and
 continuation <= 30 ms.
 
 ### G3 in detail

@@ -95,6 +95,7 @@ def test_it_is_small_enough_to_carry(repo):
     )
 
 
+@pytest.mark.timing
 def test_it_is_fast_enough_to_run_on_every_call(repo):
     t0 = time.monotonic()
     repo_facts.render(str(repo))

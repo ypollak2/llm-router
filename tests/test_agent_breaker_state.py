@@ -154,6 +154,7 @@ def test_parallel_release_and_claim_lose_no_update(tmp_path, run):
     assert st["depth"] == 0 and st["pending"] == [] and len(st["agents"]) == 4, errs
 
 
+@pytest.mark.timing
 def test_lock_unavailable_fails_open_and_logs(tmp_path):
     _seed(tmp_path)
     lock = open(f"{_depth_path_for(tmp_path, 'sess')}.lock", "a+")

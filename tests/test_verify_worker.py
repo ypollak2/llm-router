@@ -388,6 +388,7 @@ def test_an_unreachable_head_is_unavailable_not_a_crash(tmp_path):
     assert recs == {_uid(1): "verify_head_unavailable", _uid(2): "verify_repo_missing"}
 
 
+@pytest.mark.timing
 def test_the_watchdog_ends_a_hung_unit(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     _enqueue(1, repo=repo, head=_head(repo))
@@ -911,6 +912,7 @@ def test_git_calls_end_option_parsing(tmp_path):
     assert why == "ok" and b"HEAD" in got[2] and b"+    return a + b" in got[2]
 
 
+@pytest.mark.timing
 def test_a_stalled_capture_yields_no_marker_within_the_budget(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     (repo / "src" / "new.py").write_text("X = 1\n")

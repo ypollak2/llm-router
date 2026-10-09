@@ -182,6 +182,7 @@ def test_the_real_refresher_process_fills_the_cache(hook, tmp_path):
     assert isinstance(line, str) and line.startswith("📊")
 
 
+@pytest.mark.timing
 def test_the_prompt_path_never_waits_on_a_locked_usage_db(hook, monkeypatch):
     """The live tail, reproduced: each ``sqlite3.connect(timeout=2)`` waits out a
     writer's lock. Two of them per prompt made ~4 s (live p95 4,488 ms)."""

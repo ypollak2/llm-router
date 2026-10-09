@@ -6,7 +6,7 @@ classification ("what model should handle this?") and dispatch ("send it").
 
 Pipeline:
   1. Calculate token budget for target model
-  2. Retrieve relevant prior context (Sprint 2 — result cache)
+  2. (removed, P0.5-c) prior-answer retrieval; the semantic cache is the result store
   3. Retrieve code context (Sprint 3 — AST/tree-sitter)
   4. Build system prompt (task-specific behavioral rules)
   5. Assemble final prompt within budget constraints
@@ -77,7 +77,7 @@ def prepare_prompt(
     """Prepare an optimized prompt for routing to an external model.
 
     This is the main entry point for the context preparation pipeline.
-    It calculates budget, retrieves context, and assembles the final prompt.
+    It calculates budget, assembles the final prompt.
 
     Args:
         user_prompt: The raw user prompt text.
@@ -86,7 +86,7 @@ def prepare_prompt(
         target_model: The model identifier this prompt will be sent to.
         existing_system_prompt: If the caller already specified a system prompt,
             it takes priority over the auto-generated one.
-        project_dir: Current project directory (for project-scoped cache lookups).
+        project_dir: Current project directory (scopes AST code context).
 
     Returns:
         PreparedPrompt with all components assembled within budget.
@@ -124,28 +124,17 @@ def prepare_prompt(
     context = ""
     context_source = "none"
 
-    # BM25 retrieval from result cache (Sprint 2)
-    try:
-        from llm_router.result_cache import format_context, search_results
-
-        cached = search_results(
-            query=user_prompt,
-            task_type=task_type.value,
-            project_dir=project_dir,
-            budget_tokens=budget.context_tokens,
-        )
-        if cached:
-            context = format_context(cached, max_tokens=budget.context_tokens)
-            context_source = f"cache({len(cached)} results)"
-    except Exception:
-        pass  # Cache unavailable — continue without context
+    # P0.5-c (D-R8-5): no retrieval of prior answers here. The semantic cache is
+    # the only result store and it answers a request only on an exact
+    # (text, context, project) key; the legacy BM25 neighbour injection fed
+    # answers from other model/system/context combinations into the prompt.
 
     # AST code context for code tasks (Sprint 3)
     if task_type in (TaskType.CODE, TaskType.ANALYZE) and project_dir:
         try:
             from llm_router.code_context import extract_code_context
 
-            # Allocate 70% of context budget to code, 30% to cache (if both available)
+            # Allocate context budget to code
             code_budget = budget.context_tokens * 7 // 10 if context else budget.context_tokens
             code_ctx = extract_code_context(user_prompt, project_dir, code_budget)
             if code_ctx:

@@ -85,6 +85,7 @@ class TestPartialDraftsAreSalvaged:
         assert "cut off" not in text
         assert usage["output_tokens"] == 9
 
+    @pytest.mark.timing
     def test_running_out_of_time_yields_a_labelled_partial_not_none(self, monkeypatch):
         chunks = [{"message": {"content": "The chain is built in chain_builder. "}},
                   {"message": {"content": "It returns empty for research tasks. "}},
@@ -97,6 +98,7 @@ class TestPartialDraftsAreSalvaged:
         assert text.rstrip().endswith(("_", "]_")), text[-40:]
         assert "Then the fallback nev" not in text, "cut mid-word instead of mid-sentence"
 
+    @pytest.mark.timing
     def test_too_little_to_be_worth_keeping_still_returns_none(self, monkeypatch):
         chunks = [{"message": {"content": "Th"}}]
         monkeypatch.setattr(de.urllib.request, "urlopen",

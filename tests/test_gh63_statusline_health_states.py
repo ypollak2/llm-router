@@ -202,6 +202,7 @@ def test_subscription_falsy_values_do_not_count_as_a_provider(tmp_path, value, u
     assert state == "down"
 
 
+@pytest.mark.timing
 def test_idle_ollama_activity_probe_reachable_is_idle(tmp_path, reachable_ollama):
     """(b) No keys, no subscription, last ollama/ entry ~2h old (past the
     30-min activity window), reachability probe succeeds → 'idle'.
@@ -244,6 +245,7 @@ def test_nothing_configured_probe_unreachable_is_down(tmp_path, unreachable_url)
     assert state == "down"
 
 
+@pytest.mark.timing
 def test_nothing_configured_probe_reachable_is_idle_not_down(tmp_path, reachable_ollama):
     """No keys, no activity ever logged (empty log) — but Ollama itself
     answers right now. Must not read 'down': the setup isn't broken, it's

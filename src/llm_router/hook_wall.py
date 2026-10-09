@@ -80,6 +80,9 @@ LOW_VOLUME = frozenset({"cc-usage-track", "subagent-start"})
 WALL_MIN_N = 200
 LIVE_MIN_N: dict[str, int] = {h: (30 if h in LOW_VOLUME else 200) for h in SYNC_HOOKS}
 NOT_INFORMATIVE_AFTER_DAYS = 14
+#: PG9: a live pass needs rows from at least this many sessions (the P0.9-e rule,
+#: kpi.G1_DECISION_MIN_SESSIONS); one session cannot show the hook is fast in general.
+MIN_SESSIONS = 2
 MAX_LOAD = 4.0
 STORE_FILENAME = "hook_wall.jsonl"
 DEFAULT_GAP_S = 0.5
@@ -315,10 +318,25 @@ def judge_live(live_rows: list[dict], days: float, max_load: float = MAX_LOAD) -
         hi = [(float(r["elapsed_ms"]), v) for r, v in zip(rs, loads) if v is not None and v > max_load]
         if hi:
             entry["above_load"] = _contended([a for a, _ in hi], [b for _, b in hi])
+        by_sid: dict[str, int] = {}
+        for r in kept:
+            sid = r.get("session_id")
+            if isinstance(sid, str) and sid:
+                by_sid[sid] = by_sid.get(sid, 0) + 1
+        entry.update(n_sessions=len(by_sid), no_session_id=len(kept) - sum(by_sid.values()),
+                     largest_session_share=(round(max(by_sid.values()) / len(kept), 4)
+                                            if by_sid and kept else None),
+                     informative=len(by_sid) >= MIN_SESSIONS)
         if len(kept) >= need:
             vals = sorted(float(r["elapsed_ms"]) for r in kept)
             p95 = _percentile(vals, 0.95)
-            entry.update(p95_ms=round(p95, 1), verdict=PASS if p95 <= budget_ms(h) else FAIL)
+            # PG9: one session (or none named) cannot prove the hook is fast across
+            # sessions. A breach still fails; a pass needs >= MIN_SESSIONS (as P0.9-e).
+            if p95 > budget_ms(h):
+                verdict = FAIL
+            else:
+                verdict = PASS if entry["informative"] else INSUFFICIENT
+            entry.update(p95_ms=round(p95, 1), verdict=verdict)
         elif h in LOW_VOLUME and days >= NOT_INFORMATIVE_AFTER_DAYS:
             entry["verdict"] = NOT_INFORMATIVE
         else:
@@ -372,9 +390,15 @@ def render_lines(g: dict) -> list[str]:
         if c.get("startup_gap_median_ms") is not None:
             wall += f"; in-process p95={_ms(c.get('in_process_p95_ms'))}, start-up gap ~{_ms(c['startup_gap_median_ms'])}"
         star = "*" if h in LOW_VOLUME else ""
+        share = lv.get("largest_session_share")
+        who = (f"n_sessions={lv.get('n_sessions', 0)}, largest session="
+               f"{'n/a' if share is None else f'{share:.0%}'}")
+        if lv.get("no_session_id"):
+            who += f", {lv['no_session_id']} without session id"
+        info = "" if lv.get("informative") else f" not informative (need >={MIN_SESSIONS} sessions)"
         live = (f"live elapsed p95={_ms(lv.get('p95_ms'))} n={lv['n']}/{lv['need']}{star} "
-                f"({_excluded(lv, 'above load excluded')}, {lv['load_not_recorded']} load not recorded) "
-                f"{lv['verdict']}")
+                f"[{who}{info}] ({_excluded(lv, 'above load excluded')}, "
+                f"{lv['load_not_recorded']} load not recorded) {lv['verdict']}")
         lines.append(f"{h}: {e['verdict']} | {wall} | {live}")
     er = g["hooks"]["enforce-route"]["wall"]["cold"].get("p95_ms")
     for post in ("bash-compress", "playwright-compress"):

@@ -518,6 +518,7 @@ def test_script_cannot_use_launchservices_to_start_another_process(env):
         subprocess.run(["/usr/bin/pkill", "-x", "Calculator"], capture_output=True)
 
 
+@pytest.mark.timing
 @needs_sandbox
 def test_memory_hog_is_killed_by_the_watchdog(env):
     env.launcher.max_rss_kb = 400 * 1024
@@ -546,6 +547,7 @@ def test_child_environment_has_no_secrets(env):
     assert "[]" in r.text.splitlines()[-1] if r.text.splitlines() else False
 
 
+@pytest.mark.timing
 @needs_sandbox
 def test_fork_bomb_is_contained(env):
     name = _script(env, """
@@ -567,6 +569,7 @@ def test_fork_bomb_is_contained(env):
     assert not _wait_gone(name), "fork-bomb children survived the kill"
 
 
+@pytest.mark.timing
 @needs_sandbox
 def test_huge_output_is_capped_and_killed(env):
     name = _script(env, """
@@ -580,6 +583,7 @@ def test_huge_output_is_capped_and_killed(env):
     assert "more than" in r.text and len(r.text) < 40_000, len(r.text)
 
 
+@pytest.mark.timing
 @needs_sandbox
 def test_long_running_command_is_killed_at_timeout(env):
     name = _script(env, """
@@ -592,6 +596,7 @@ def test_long_running_command_is_killed_at_timeout(env):
     assert not _wait_gone(name)
 
 
+@pytest.mark.timing
 @needs_sandbox
 def test_setsid_child_dies_with_its_parent_tree(env):
     marker = f"llmr-sleeper-{RUN_TAG}{os.getpid()}"
@@ -606,6 +611,7 @@ def test_setsid_child_dies_with_its_parent_tree(env):
     assert not _wait_gone(marker), "a setsid child survived the kill"
 
 
+@pytest.mark.timing
 @needs_sandbox
 def test_kill_switch_file_stops_a_running_command_and_blocks_next(env, tmp_path):
     name = _script(env, """
@@ -639,6 +645,7 @@ def test_env_kill_switch_denies_every_tool(env, monkeypatch):
 # ── E. SIGINT: the runner dies, the child tree dies (1, real process) ────────
 
 
+@pytest.mark.timing
 @needs_sandbox
 def test_sigint_to_the_runner_kills_the_child_group(tmp_path):
     runner = tmp_path / "runner.py"

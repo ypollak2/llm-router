@@ -56,6 +56,7 @@ def slow_chain(monkeypatch):
     return calls
 
 
+@pytest.mark.timing
 async def test_a_turn_first_decision_never_waits_on_a_chain_build(slow_chain, monkeypatch):
     """The call count is the deterministic guard. The 50 ms bar is checked on the
     fastest of 5 cold decisions (empty chain cache each time), so a loaded runner's

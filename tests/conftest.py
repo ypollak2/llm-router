@@ -18,6 +18,11 @@ import pytest
 # module imports the hook; per-test fixtures below still set what they need.
 import tempfile as _tempfile  # noqa: E402
 
+# TIMING-1: read the perf opt-in BEFORE the scrub below. It used to be read in
+# pytest_collection_modifyitems, after this loop had deleted it, so
+# LLM_ROUTER_RUN_PERF=1 could never take effect and tests/qa/test_performance.py
+# was skipped in every environment.
+_RUN_PERF = os.environ.get("LLM_ROUTER_RUN_PERF") == "1"
 for _k in [k for k in os.environ if k.startswith("LLM_ROUTER_")]:
     del os.environ[_k]
 os.environ["LLM_ROUTER_HOME"] = _tempfile.mkdtemp(prefix="llm_router-suite-home-")
@@ -269,7 +274,7 @@ def pytest_collection_modifyitems(config, items):  # noqa: ARG001 — pytest API
     # audit needs to be deterministically green. Skip the whole `performance`
     # marker unless explicitly opted in with LLM_ROUTER_RUN_PERF=1 (a dedicated,
     # quiet perf run). This subsumes the per-test perf entries in the skip list.
-    run_perf = os.environ.get("LLM_ROUTER_RUN_PERF") == "1"
+    run_perf = _RUN_PERF
     skip_perf = pytest.mark.skip(
         reason="performance latency-budget benchmark — non-deterministic on shared "
         "runners; set LLM_ROUTER_RUN_PERF=1 to run perf budgets"

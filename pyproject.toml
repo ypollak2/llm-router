@@ -265,6 +265,7 @@ markers = [
     "mcp_handshake: MCP protocol handshake conformance",
     "performance: latency/throughput measurement, not correctness",
     "routing_hermetic: routing with every external call stubbed",
+    "timing: pass/fail depends on wall-clock speed (elapsed/p95/loop-lag/short real timeouts/sleep ordering); excluded from the parallel CI job and run serially by the `timing` job (TIMING-1)",
 ]
 addopts = "-m 'not slow and not requires_ollama and not requires_api_keys and not requires_codex' -q --tb=short"
 
