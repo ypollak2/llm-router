@@ -110,7 +110,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (minus transcript sub-agent calls, as KPIS.md already says). Null-step rows (pre-GE1) and
   `subagent_first` rows are per-call units only: they no longer count as turns or end a redo window.
   They are counted and printed (`o3.excluded.no_step_class`, `o3.excluded.step_subagent_first`; keys
-  added, none renamed). The golden kpi files hold no O3 line and do not change.
+  added except that `o3.excluded.subagent_first` now counts only transcript-sidechain turn_first rows;
+  `o3.excluded.step_side_call` counts rows labelled side_call without that tier_reason). A
+  `subagent_first` row stays a turn when the transcript places it on the main thread. `subagent_first`
+  is a live label, so the Haiku guard's `redo` trigger (no transcript join) changes behaviour: those
+  rows no longer count as turns or push an escalation out of the redo window. The golden kpi files hold
+  no O3 line and do not change.
 - kpi (PLAN v16 P0.9-e, `docs/bugs/P09-11.md`): G1_proxy's turn-first segment counts only
   `step_class == turn_first` rows and measures the P0.9-e decision (sum of `tier_phases_ms` over
   `proxy.tiers.DECISION_PHASES`), not `tier_decision_s`. Null-step rows (pre-GE1 / side calls),

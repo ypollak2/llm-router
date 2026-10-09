@@ -1879,6 +1879,7 @@ def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[
                            "subagent_first": built["subagent_first"],
                            "no_step_class": built["no_step_class"],
                            "step_subagent_first": built["step_subagent_first"],
+                           "step_side_call": built["step_side_call"],
                            "edit_no_session": built["edit_no_session"],
                            "edit_no_turn_id": built["edit_no_turn_id"],
                            "local_failed": built["local_failed"],
@@ -1894,6 +1895,7 @@ def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[
                 f"{built['subagent_first']:,} sub-agent first call(s), "
                 f"{built['no_step_class']:,} with no step_class (not a turn), "
                 f"{built['step_subagent_first']:,} labelled subagent_first, "
+                f"{built['step_side_call']:,} labelled side_call, "
                 f"{built['untagged']:,} untagged, {built['other_kind']:,} other-kind; "
                 f"kept in n although the transcript says they were not a typed prompt's first answer: "
                 f"{built['meta_first']:,} injected-input first call(s) (slash command, sub-agent "

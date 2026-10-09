@@ -554,3 +554,32 @@ def test_scorecard_prints_the_null_step_exclusion_and_keeps_the_small_n_rule(mon
     assert o3["breakdown"]["n"] == 3 and o3["excluded"]["no_step_class"] == 60
     assert "no rate is printed below" in o3["lines"][0]       # n=3 < MIN_N: still "too few", not 60+3
     assert any("60 with no step_class (not a turn)" in line for line in o3["lines"])
+
+
+def test_subagent_first_label_is_a_turn_only_with_a_main_thread_join():
+    """A main session run with the Agent tool disabled is labelled ``subagent_first`` by the proxy
+    (steps.step_kind infers it from the tool list). A transcript join that puts the message on the main
+    thread keeps it a turn; no join, orphan, continuation or sidechain does not."""
+    t = NOW - 3000
+    rows = [proxy_row(i, sid=SID, kind="organic", ts=t + i, msg_id=m, step="subagent_first", tier="haiku")
+            for i, m in enumerate(["main", "meta", "side", "orphan", "cont"], start=1)]
+    roles = {"main": "turn", "meta": "meta", "side": "sidechain", "orphan": "orphan", "cont": "continuation"}
+    joined = osh.build_units(rows, [], thread_of=lambda sid, m: roles[m], **_kw())
+    assert [u["msg_id"] for u in osh.turn_units(joined["units"])] == ["main", "meta"]
+    assert joined["step_subagent_first"] == 3
+    plain = osh.build_units(rows, [], **_kw())
+    assert osh.turn_units(plain["units"]) == [] and plain["step_subagent_first"] == 5
+    nojoin = osh.build_units(rows, [], thread_of=lambda sid, m: None, **_kw())
+    assert osh.turn_units(nojoin["units"]) == []
+
+
+def test_step_class_side_call_without_the_side_call_reason_is_counted():
+    """tiers.py sets ``tier_reason == side_call`` only after the unknown-model / pinned checks, so a row
+    can be labelled side_call and still carry another reason: not a turn, and counted."""
+    t = NOW - 3000
+    rows = [proxy_row(1, sid=SID, kind="organic", ts=t, msg_id="a", step="side_call", reason="policy"),
+            proxy_row(2, sid=SID, kind="organic", ts=t + 1, msg_id="b", step="side_call", reason="side_call"),
+            proxy_row(3, sid=SID, kind="organic", ts=t + 2, msg_id="c")]
+    built = osh.build_units(rows, [], **_kw())
+    assert [u["msg_id"] for u in osh.turn_units(built["units"])] == ["c"]
+    assert built["step_side_call"] == 1 and built["side_call_excluded"] == 1
