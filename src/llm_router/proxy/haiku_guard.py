@@ -539,7 +539,7 @@ async def guard_loop(policy, *, interval_s: float | None = None, run=None) -> No
 # ── the daily watch (``llm-router kpi --haiku-watch``) ──────────────────────
 
 
-def served_count(rows: list[dict], *, since: float, until: float, kinds: frozenset[str]) -> int:
+def haiku_served_in_window(rows: list[dict], *, since: float, until: float, kinds: frozenset[str]) -> int:
     """Calls in the window, of the guarded session kinds, that Haiku actually answered."""
     kind_of = _kind_resolver(rows)
     n = 0
@@ -560,7 +560,7 @@ def watch(since: float, until: float, *, rows: list[dict] | None = None) -> dict
     ev = evaluate(rows, since=since, until=until, band_redone=_band_redone(since, until),
                   audit_day=_utc_day(until - 1e-3))
     haiku_decided = ev["triggers"]["tier_retry"]["n"]
-    haiku_served = served_count(rows, since=since, until=until, kinds=guard_kinds())
+    haiku_served = haiku_served_in_window(rows, since=since, until=until, kinds=guard_kinds())
     not_eval = [t for t in D20_TRIGGERS if not ev["triggers"][t]["evaluable"]]
     ev.update(haiku_decided_calls=haiku_decided, haiku_served_calls=haiku_served, not_evaluable=not_eval, day_pass=not not_eval,
               override=read_override(), override_path=str(override_path()))
