@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mix_local`/`mix_paid` segment, the `share` card (`paid_calls`/`total_calls`), `digest`, the
   `routing_health` rates (cache rows get no bucket there: excluded). The
   prompt-cache hit rate (`get_cache_savings`) leaves cache rows out of its denominator. Spend and
-  savings are unchanged. Hook versions: status-bar 6 -> 7, session-end 24 -> 25, session-start 31 -> 32,
+  savings are unchanged. Hook versions: status-bar 6 -> 7, session-end 26 -> 27, session-start 31 -> 32,
   session-end-clawcode 3 -> 4. Restart the MCP server to pick it up. See `docs/bugs/P08E-1.md`.
 - hook latency rows carry the session (PLAN v16 gap PG9): `enforce-route`, `bash-compress`,
   `playwright-compress`, `cc-usage-track`, `subagent-start`, `usage-refresh` and
