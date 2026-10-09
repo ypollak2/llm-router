@@ -28,8 +28,11 @@ import pytest
 _REPO = Path(__file__).resolve().parent.parent
 _SCAN = [_REPO / "src", _REPO / "hooks", _REPO / "scripts"]
 
-_INSERT = re.compile(
-    r"INSERT\s+(?:OR\s+\w+\s+)?INTO\s+(usage|routing_decisions)\s*\(([^)]*)\)", re.I)
+#: Any statement that puts rows INTO either table: INSERT [OR x] INTO, REPLACE INTO, and
+#: the same words inside executemany / f-strings. The column list is optional here on
+#: purpose: a writer without one must fail the scan, not escape it.
+_INTO = re.compile(
+    r"\b(?:INSERT(?:\s+OR\s+\w+)?|REPLACE)\s+INTO\s+(usage|routing_decisions)\b(\s*\(([^)]*)\))?", re.I)
 
 #: (path relative to the repo, table) -> the columns its INSERT must name.
 _USAGE_FIELDS = {"session_id", "reason"}
@@ -47,21 +50,52 @@ EXPECTED_WRITERS = {
 OTHER_DATABASE = {("src/llm_router/lineage/lineage_store.py", "routing_decisions")}
 
 
-def _found() -> dict[tuple[str, str], set[str]]:
+def _scan_text(text: str, rel: str,
+               out: dict[tuple[str, str], set[str]], unparsed: list[str]) -> None:
+    for m in _INTO.finditer(text):
+        table = m.group(1).lower()
+        if m.group(3) is None:
+            unparsed.append(f"{rel}: INTO {table} without a column list")
+            continue
+        cols = {c.strip() for c in m.group(3).split(",") if c.strip()}
+        out.setdefault((rel, table), set()).update(cols)
+
+
+def _scan(roots: list[Path], base: Path) -> tuple[dict[tuple[str, str], set[str]], list[str]]:
     out: dict[tuple[str, str], set[str]] = {}
-    for root in _SCAN:
-        for path in root.rglob("*.py"):
-            if ".venv" in path.parts or "__pycache__" in path.parts:
+    unparsed: list[str] = []
+    for root in roots:
+        for path in root.rglob("*"):
+            if not path.is_file() or ".venv" in path.parts or "__pycache__" in path.parts:
                 continue
-            for m in _INSERT.finditer(path.read_text(encoding="utf-8")):
-                cols = {c.strip() for c in m.group(2).split(",") if c.strip()}
-                out.setdefault((str(path.relative_to(_REPO)), m.group(1).lower()), set()).update(cols)
-    return out
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue  # binary
+            _scan_text(text, str(path.relative_to(base)), out, unparsed)
+    return out, unparsed
+
+
+def _found() -> dict[tuple[str, str], set[str]]:
+    found, unparsed = _scan(_SCAN, _REPO)
+    assert not unparsed, f"writers the scan cannot read: {unparsed}"
+    return found
+
+
+def test_a_column_less_insert_fails_the_scan(tmp_path):
+    """Mutation check: the scan must catch a writer that names no columns."""
+    (tmp_path / "zz.py").write_text('db.execute("INSERT INTO routing_decisions VALUES (1, 2)")\n')
+    (tmp_path / "yy.sh").write_text("sqlite3 x \"REPLACE INTO usage VALUES (1)\"\n")
+    (tmp_path / "ok.py").write_text('db.execute("INSERT OR REPLACE INTO usage (model, reason) VALUES (?, ?)")\n')
+    (tmp_path / "bin.dat").write_bytes(b"\xff\xfe\x00INTO usage")
+    found, unparsed = _scan([tmp_path], tmp_path)
+    assert len(unparsed) == 2 and any("zz.py" in u for u in unparsed) and any("yy.sh" in u for u in unparsed)
+    assert found == {("ok.py", "usage"): {"model", "reason"}}
 
 
 def test_the_writer_scan_finds_something():
     """An empty scan would pass every assertion below."""
-    assert len(_found()) >= 7
+    assert len(_found()) >= 6
 
 
 def test_every_usage_and_routing_decisions_writer_is_known():
@@ -317,3 +351,36 @@ def test_g3_counts_the_new_fields_on_rows_from_the_real_writers(temp_db):
     assert w["usage"]["state"] == "fail" and w["usage"]["fields"]["reason"]["missing"] == 10
     assert w["routing_decisions"]["state"] == "fail"
     assert w["routing_decisions"]["fields"]["session_id"]["missing"] == 10
+
+
+async def test_llm_stream_writes_exactly_one_usage_row_with_reason_and_session(temp_db, monkeypatch):
+    """The original bug was a kwarg TypeError nothing exercised: stream once, read the row."""
+    import llm_router.config as config_module
+    from llm_router import call_identity, providers
+    from llm_router.tools import routing
+
+    async def fake_stream(model, messages, **kw):
+        yield "hello "
+        yield "world"
+        yield "\n[META]" + json.dumps({"provider": "openai", "input_tokens": 37,
+                                       "output_tokens": 11, "cost_usd": 0.0002,
+                                       "latency_ms": 50.0})
+
+    class Ctx:
+        async def info(self, *a, **k): ...
+        async def warning(self, *a, **k): ...
+
+    monkeypatch.setattr(providers, "call_llm_stream", fake_stream)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-stream")
+    config_module._config = None
+    fn = getattr(routing.llm_stream, "fn", routing.llm_stream)
+    token = call_identity.bind("toolu_stream")
+    try:
+        out = await fn(prompt="hi", ctx=Ctx(), model="openai/gpt-4o-mini")
+    finally:
+        call_identity.reset(token)
+    assert "hello world" in out
+    con = sqlite3.connect(temp_db)
+    rows = con.execute("SELECT reason, session_id, input_tokens FROM usage").fetchall()
+    con.close()
+    assert rows == [("stream_tool", "sess-stream", 37)]
