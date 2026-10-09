@@ -235,26 +235,31 @@ class _Eager:
 
 def _bodies():
     big = _no_system_reminders(_req())
-    big["messages"][-1]["content"] = [{"type": "text", "text": "x " * 310_000}]
+    # Over the context limit the grid runs with (``_CONTEXT_LIMIT``); the real 150K-token
+    # limit would make every check a 600 KB json.dumps and the test minutes long.
+    big["messages"][-1]["content"] = [{"type": "text", "text": "x " * 15_000}]
     out = {"fixture": _req(), "clean": _no_system_reminders(_req()), "image": _image_in_tool_result(),
            "builtin": _with_builtin_tool(_no_system_reminders(_req())), "context": big}
     return out
 
 
+_CONTEXT_LIMIT = 5_000  # tokens; the "context" body is ~9K, every other body under 2.5K
+
 _FIELDS = ("requested_model", "served_model", "tier", "reason", "switched", "switch_cost_usd", "task_type",
            "complexity", "body_rewrite", "detail", "proposed_tier", "quota_pressure", "quota_state")
 
 
-async def _decide_all(monkeypatch, lazy_cls):
+async def _decide_all(monkeypatch, lazy_cls, name):
     monkeypatch.setattr(pt, "_Lazy", lazy_cls)
+    monkeypatch.setattr(pt, "HAIKU_MAX_CONTEXT_TOKENS", _CONTEXT_LIMIT)
     out = []
-    bodies = _bodies()
+    base = _bodies()[name]
     grid = itertools.product((True, False), (True, False), (True, False), (True, False), (None, 0.75, 0.95),
                              (OPUS, SONNET, HAIKU), ("adaptive", "enabled", None),
-                             ("simple", "moderate", "complex"), (None, HAIKU, SONNET), sorted(bodies))
-    for rewrite, fold, conv, handoff, pressure, model, thinking, cx, prev, name in grid:
+                             ("simple", "moderate", "complex"), (None, HAIKU, SONNET))
+    for rewrite, fold, conv, handoff, pressure, model, thinking, cx, prev in grid:
         policy = _policy(rewrite=rewrite, fold=fold, conversation=conv, handoff=handoff, pressure=pressure)
-        body = dict(bodies[name])
+        body = dict(base)
         body["model"] = model
         if thinking is None:
             body.pop("thinking", None)
@@ -269,16 +274,22 @@ async def _decide_all(monkeypatch, lazy_cls):
     return out
 
 
-async def test_lazy_haiku_checks_change_no_decision(monkeypatch):
+@pytest.mark.parametrize("name", sorted(_bodies()))
+async def test_lazy_haiku_checks_change_no_decision(monkeypatch, name):
     """Every combination of policy switches, quota pressure, requested model, thinking,
-    class, prior sticky model and body shape decides the same with the body check
-    evaluated lazily as with it evaluated up front (the old order)."""
-    lazy = await _decide_all(monkeypatch, pt._Lazy)
-    eager = await _decide_all(monkeypatch, _Eager)
-    assert len(lazy) == len(eager) == 2 ** 4 * 3 * 3 * 3 * 3 * 3 * 5
+    class and prior sticky model decides the same, per body shape, with the body check
+    evaluated lazily as with it evaluated up front (the old order). 3,888 decisions per
+    body shape, 19,440 in all."""
+    lazy = await _decide_all(monkeypatch, pt._Lazy, name)
+    eager = await _decide_all(monkeypatch, _Eager, name)
+    assert len(lazy) == len(eager) == 2 ** 4 * 3 ** 5
     diffs = [i for i, (a, b) in enumerate(zip(lazy, eager)) if a != b]
     assert diffs == [], f"{len(diffs)} decisions differ, first: {lazy[diffs[0]]} vs {eager[diffs[0]]}"
     # The grid reaches the Haiku paths, so the comparison is not vacuous.
     reasons = {row[0][3] for row in lazy}
-    assert {pt.REASON_HAIKU_REWRITE, pt.REASON_QUOTA_PRESSURE, pt.REASON_THINKING_FLOOR, pt.REASON_STICKY} <= reasons
-    assert any(row[0][8] == pt.REWRITE_HAIKU for row in lazy)
+    blocks = {pt.haiku_block_reason(_bodies()[name], fold_system=f) for f in (True, False)}
+    assert blocks != {pt.HAIKU_BLOCK_NONE} or name == "clean", (name, blocks)
+    assert {pt.REASON_QUOTA_PRESSURE, pt.REASON_THINKING_FLOOR, pt.REASON_STICKY} <= reasons
+    if name == "clean":  # the one shape Haiku may serve
+        assert pt.REASON_HAIKU_REWRITE in reasons
+        assert any(row[0][8] == pt.REWRITE_HAIKU for row in lazy)

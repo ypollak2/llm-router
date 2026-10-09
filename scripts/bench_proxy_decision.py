@@ -40,6 +40,8 @@ import tempfile
 import time
 from pathlib import Path
 
+os.environ.setdefault("LLM_ROUTER_SYNTHETIC", "1")  # benchmark traffic is not production
+
 PHASES = ("classify", "quota_read", "stickiness", "haiku_checks")
 SIZES = (65_000, 120_000, 300_000, 480_000, 560_000, 620_000, 680_000, 900_000, 1_900_000, 2_800_000)
 SONNET, OPUS = "claude-sonnet-5-5", "claude-opus-5-5"
