@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 24
+# llm_router-hook-version: 26
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -2019,39 +2019,15 @@ def _collect_report_data(
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
-def _flush_session_spend_from_mcp() -> None:
-    """Signal MCP server to flush in-memory session spend to disk.
-
-    SAVINGS fix: The MCP server holds SessionSpend in memory and updates
-    session_spend.json in real-time. But if the last routed call happens
-    just before session-end, there can be a brief window where the file
-    is stale. This function requests a flush to ensure the file reflects
-    all calls made in this session.
-
-    Implementation: Create a flag file; wait briefly for MCP to react;
-    then read the freshly-flushed file.
-    """
-    try:
-        flush_flag = os.path.join(_state_dir(), "session_spend_flush_request.txt")
-        with open(flush_flag, "w") as f:
-            f.write(str(time.time()))
-        time.sleep(0.2)  # Brief delay for MCP server to react
-        # Remove flag (cleanup)
-        try:
-            os.remove(flush_flag)
-        except OSError:
-            pass
-    except Exception:
-        pass  # Graceful failure — session-end always continues
-
-
 def _read_session_spend() -> dict | None:
     """Read the real-time session spend file if it exists.
 
-    SAVINGS fix: Call _flush_session_spend_from_mcp() first to ensure
-    the file contains the latest in-memory state from MCP server.
+    The MCP server rewrites it on every routed call. There is no flush request
+    to make: the hook used to drop a flush-request file and sleep
+    0.2 s for the server to react, but nothing in the tree reads that file, so
+    every Stop paid 205 ms (p50; n = 79 live rows) waiting on nobody (BUGS
+    P09-SE-1).
     """
-    _flush_session_spend_from_mcp()  # Ensure file is up-to-date
     try:
         with open(_session_spend_file()) as f:
             return json.load(f)
@@ -2242,7 +2218,8 @@ def _condense(summary: str) -> str:
 # the full box (profile rescanned, benchmarks updated) is shown by the NEXT Stop.
 
 #: Steps the child runs, in order; each is fail-open on its own.
-_STOP_BACKGROUND_STEPS = ("_fetch_live_usage", "_build_and_save_learned_profile",
+_STOP_BACKGROUND_STEPS = ("_refresh_northstar_line", "_fetch_live_usage",
+                          "_build_and_save_learned_profile",
                           "_maybe_rescan_profile", "_maybe_evaluate_models")
 _STOP_NOTES_FILENAME = "stop_notes.json"
 #: A note older than this is dropped rather than shown.
@@ -2340,6 +2317,79 @@ def _maybe_evaluate_models() -> None:
         _append_stop_note("📊 Model benchmarks updated (next: 7 days)")
 
 
+_NORTHSTAR_CACHE_FILENAME = "northstar_line.json"
+#: A cached north-star item older than this is not shown: no line beats a stale
+#: line that looks current (claim unwritable, spawn failed, a resumed session).
+_NORTHSTAR_MAX_AGE_S = 600.0
+#: The Stop's own stdin session id, set by main() and handed to the child on its
+#: argv, so concurrent sessions never read each other's id from the shared
+#: session_id.txt. None: fall back to that file.
+_STOP_SESSION_ID: str | None = None
+
+
+def _northstar_cache_path() -> str:
+    return os.path.join(_state_dir(), _NORTHSTAR_CACHE_FILENAME)
+
+
+def _read_session_id() -> str | None:
+    if _STOP_SESSION_ID:
+        return _STOP_SESSION_ID
+    try:
+        with open(_session_id_file()) as f:
+            return f.read().strip() or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _refresh_northstar_line() -> None:
+    """Child step: compute the north-star item and cache it for the next Stop.
+
+    ``northstar.current_session_line`` re-reads every Claude transcript touched
+    in the last two days (p50 343 ms, p95 1,819 ms, max 7,920 ms live, n = 79),
+    so the Stop no longer computes it: it shows the share as of the last child
+    run: one turn behind, or more when Stops come faster than the 15 s child
+    claim (BUGS P09-SE-1). Written atomically, keyed by session id so a
+    different session never shows this one's share; ``ts`` bounds its age.
+    """
+    sid = _read_session_id()
+    if not sid:
+        return
+    from llm_router import northstar as _northstar
+
+    line = _northstar.current_session_line(sid)
+    path = _northstar_cache_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"session_id": sid, "line": line, "ts": time.time()}, f)
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.remove(tmp)  # only still there when the write or replace failed
+        except OSError:
+            pass
+
+
+def _cached_northstar_line(session_id: str, now: float | None = None) -> str | None:
+    """The cached item for this session, or None (no child has finished one yet,
+    the cache belongs to another session, or it is older than
+    ``_NORTHSTAR_MAX_AGE_S``). Never raises."""
+    try:
+        with open(_northstar_cache_path(), encoding="utf-8") as f:
+            d = json.load(f)
+        if not (isinstance(d, dict) and d.get("session_id") == session_id
+                and isinstance(d.get("line"), str)):
+            return None
+        ts = d.get("ts")
+        now = time.time() if now is None else now
+        if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not 0 <= now - ts <= _NORTHSTAR_MAX_AGE_S:
+            return None
+        return d["line"]
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _run_background_stop_work() -> None:
     """The detached child: every step in ``_STOP_BACKGROUND_STEPS``, each
     fail-open, so one failure never skips the rest."""
@@ -2348,6 +2398,9 @@ def _run_background_stop_work() -> None:
             globals()[name]()
         except Exception:  # noqa: BLE001 -- the child has no one to report to
             continue
+
+
+_SESSION_ARG = "--session-id="
 
 
 def _background_stop_work_argv() -> list[str]:
@@ -2359,9 +2412,10 @@ def _background_stop_work_argv() -> list[str]:
         frozen = is_frozen()
     except Exception:  # noqa: BLE001
         frozen = False
+    sid_args = [f"{_SESSION_ARG}{_STOP_SESSION_ID}"] if _STOP_SESSION_ID else []
     if frozen:
-        return [sys.executable, "run-hook", __file__, "--background-stop-work"]
-    return [sys.executable, __file__, "--background-stop-work"]
+        return [sys.executable, "run-hook", __file__, "--background-stop-work", *sid_args]
+    return [sys.executable, __file__, "--background-stop-work", *sid_args]
 
 
 _STOP_BG_CLAIM_FILENAME = "stop_background.claim"
@@ -2432,6 +2486,9 @@ def main() -> None:
             _hook_input = json.load(sys.stdin)
         except (json.JSONDecodeError, EOFError):
             _hook_input = {}
+    global _STOP_SESSION_ID
+    if isinstance(_hook_input, dict) and isinstance(_hook_input.get("session_id"), str):
+        _STOP_SESSION_ID = _hook_input["session_id"].strip() or None
     try:
         from llm_router.hook_latency import set_session as _hl_set_session
 
@@ -2874,15 +2931,9 @@ def main() -> None:
     # routing-efficiency block above, so those two land without touching this.
     _laps.next("northstar")
     try:
-        from llm_router import northstar as _northstar
-        _ns_session_id = None
-        try:
-            with open(_session_id_file()) as f:
-                _ns_session_id = f.read().strip()
-        except Exception:
-            pass
-        if _ns_session_id:
-            _ns_line = _northstar.current_session_line(_ns_session_id)
+        _ns_session_id = _read_session_id()
+        _ns_line = _cached_northstar_line(_ns_session_id) if _ns_session_id else None
+        if _ns_line:  # the child's last result; nothing yet on a session's first Stop
             final_summary_output = (
                 final_summary_output.rstrip("  " + "═" * (WIDTH - 2))
                 + f"\n  {_ns_line}\n" + "  " + "═" * (WIDTH - 2)
@@ -2936,6 +2987,10 @@ def _entry(argv: list[str]) -> None:
         # "session-end" row for it too (the trap BUGS P09-3 found in
         # session-start). The recorder checks this switch when it writes, at exit.
         os.environ["LLM_ROUTER_HOOK_LATENCY"] = "off"
+        global _STOP_SESSION_ID
+        for a in argv:
+            if a.startswith(_SESSION_ARG) and a[len(_SESSION_ARG):]:
+                _STOP_SESSION_ID = a[len(_SESSION_ARG):]
         _run_background_stop_work()
     else:
         main()

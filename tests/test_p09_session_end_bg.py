@@ -97,6 +97,12 @@ def _trap_slow_steps(hook, monkeypatch, tmp_path):
     # evaluator would be due if the hook ran it inline.
     monkeypatch.setattr(me, "EVAL_CACHE_PATH", tmp_path / "no-evals.json", raising=False)
     monkeypatch.setattr(me, "EVAL_TTL_SECONDS", 1, raising=False)
+    # P09-SE-1: the north-star share is a child step now; computing it (a scan of
+    # every recent Claude transcript) inline is the 343 ms p50 / 1.8 s p95 phase.
+    import llm_router.northstar as ns
+
+    monkeypatch.setattr(ns, "current_session_line",
+                        lambda *a, **k: called.append("current_session_line") or "north star: spy")
     return called
 
 
@@ -168,7 +174,8 @@ def test_the_child_runs_every_moved_step_in_order(hook, state, monkeypatch):
         monkeypatch.setattr(hook, name, (lambda n: lambda *a, **k: ran.append(n))(name))
     hook._run_background_stop_work()
     assert ran == list(hook._STOP_BACKGROUND_STEPS)
-    assert ran[0] == "_fetch_live_usage"
+    assert ran[:2] == ["_refresh_northstar_line", "_fetch_live_usage"], (
+        "the cheap north-star refresh runs before the 8 s HTTPS usage fetch")
 
 
 def test_one_failing_child_step_does_not_skip_the_rest(hook, state, monkeypatch):
@@ -346,11 +353,11 @@ def test_an_unwritable_claim_starts_no_child(hook, state, monkeypatch):
 
 # ── #325 review gaps (mutation survivors) ────────────────────────────────────
 
-def test_the_background_steps_are_exactly_these_four_in_order(hook):
+def test_the_background_steps_are_exactly_these_five_in_order(hook):
     """The two tests above iterate ``_STOP_BACKGROUND_STEPS`` itself, so dropping a
     step from it (the profile rescan) left them green."""
     assert hook._STOP_BACKGROUND_STEPS == (
-        "_fetch_live_usage", "_build_and_save_learned_profile",
+        "_refresh_northstar_line", "_fetch_live_usage", "_build_and_save_learned_profile",
         "_maybe_rescan_profile", "_maybe_evaluate_models")
     for name in hook._STOP_BACKGROUND_STEPS:
         assert callable(getattr(hook, name)), name
@@ -415,3 +422,161 @@ def test_session_start_rewrites_the_baseline_a_cached_stop_left_behind(hook, sta
     new = json.loads((state / "session_start_cc_pct.json").read_text())
     assert new["weekly_pct"] == 40.0 and new != baseline
     assert not new.get("is_fallback")
+
+
+# ── P09-SE-1 (PLAN v16 PG4 / P2-G-3): the two phases that dominated the p95 ───
+# Live Stop rows (n = 79): `northstar` p50 343 / p95 1,819 ms, `spend` p50 205 ms
+# (a 0.2 s sleep waiting for an MCP flush that nothing reads). Asserted by which
+# steps run inline, never by wall-clock.
+
+
+def _seed_session(state: Path, sid: str = "sess-p09") -> None:
+    (state / "session_id.txt").write_text(sid)
+
+
+def test_stop_does_not_wait_for_an_mcp_spend_flush(hook, state, monkeypatch, tmp_path):
+    """No sleep and no flush-request file: nothing reads the flag, so the Stop
+    waited 0.2 s on nobody."""
+    _write_usage(state, time.time())
+    _trap_slow_steps(hook, monkeypatch, tmp_path)
+    monkeypatch.setattr(hook, "_spawn_background_stop_work", lambda: None)
+    (state / "session_spend.json").write_text(json.dumps(
+        {"call_count": 2, "total_usd": 0.01, "per_model": {}}))
+    slept: list[float] = []
+    monkeypatch.setattr(hook.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setenv("LLM_ROUTER_STOP_HOOK", "full")
+    _run_main(hook, monkeypatch)
+    assert slept == [], f"main() slept {slept}"
+    assert not (state / "session_spend_flush_request.txt").exists()
+    assert not hasattr(hook, "_flush_session_spend_from_mcp")
+
+
+def test_stop_does_not_scan_transcripts_inline(hook, state, monkeypatch, tmp_path):
+    _seed_session(state)
+    _write_usage(state, time.time())
+    called = _trap_slow_steps(hook, monkeypatch, tmp_path)
+    monkeypatch.setattr(hook, "_spawn_background_stop_work", lambda: None)
+    monkeypatch.setenv("LLM_ROUTER_STOP_HOOK", "full")
+    _e, out = _run_main(hook, monkeypatch)
+    assert "current_session_line" not in called, called
+    assert "north star" not in json.loads(out)["systemMessage"], "no child result yet: no line"
+
+
+def test_the_child_caches_the_north_star_and_the_next_stop_shows_it(hook, state, monkeypatch, tmp_path):
+    _seed_session(state)
+    _write_usage(state, time.time())
+    called = _trap_slow_steps(hook, monkeypatch, tmp_path)
+    monkeypatch.setattr(hook, "_spawn_background_stop_work", lambda: None)
+    monkeypatch.setenv("LLM_ROUTER_STOP_HOOK", "full")
+    hook._refresh_northstar_line()  # the child step
+    assert called == ["current_session_line"]
+    called.clear()
+    _e, out = _run_main(hook, monkeypatch)
+    assert "north star: spy" in json.loads(out)["systemMessage"]
+    assert called == [], f"the Stop recomputed {called}"
+    monkeypatch.setenv("LLM_ROUTER_STOP_HOOK", "condensed")
+    _e, out = _run_main(hook, monkeypatch)
+    assert "north star: spy" in json.loads(out)["systemMessage"]
+
+
+def test_a_cached_north_star_is_not_shown_to_another_session(hook, state, monkeypatch, tmp_path):
+    _seed_session(state, "session-A")
+    _trap_slow_steps(hook, monkeypatch, tmp_path)
+    hook._refresh_northstar_line()
+    assert hook._cached_northstar_line("session-A") == "north star: spy"
+    assert hook._cached_northstar_line("session-B") is None
+    assert hook._cached_northstar_line("") is None
+
+
+def test_a_broken_north_star_cache_is_a_miss_not_a_crash(hook, state):
+    (state / "northstar_line.json").write_text("{not json")
+    assert hook._cached_northstar_line("s") is None
+    (state / "northstar_line.json").write_text(json.dumps(["x"]))
+    assert hook._cached_northstar_line("s") is None
+
+
+# ── P09-SE-1 repair round 1 ──────────────────────────────────────────────────
+
+
+def test_a_stale_cached_north_star_is_dropped_and_a_fresh_one_shown(hook, state, monkeypatch, tmp_path):
+    _seed_session(state, "s1")
+    _trap_slow_steps(hook, monkeypatch, tmp_path)
+    hook._refresh_northstar_line()
+    path = state / "northstar_line.json"
+    now = time.time()
+    fresh = json.loads(path.read_text())
+    assert hook._cached_northstar_line("s1", now=fresh["ts"] + 5) == "north star: spy"
+    assert hook._cached_northstar_line("s1", now=fresh["ts"] + hook._NORTHSTAR_MAX_AGE_S + 1) is None
+    for bad in (None, "x", True, now + 3600):  # no ts, wrong type, or from the future
+        path.write_text(json.dumps({"session_id": "s1", "line": "L", "ts": bad}))
+        assert hook._cached_northstar_line("s1", now=now) is None, bad
+    path.write_text(json.dumps({"session_id": "s1", "line": "L"}))
+    assert hook._cached_northstar_line("s1", now=now) is None
+
+
+def test_a_stale_cache_prints_no_line_from_the_stop(hook, state, monkeypatch, tmp_path):
+    _seed_session(state)
+    _write_usage(state, time.time())
+    _trap_slow_steps(hook, monkeypatch, tmp_path)
+    monkeypatch.setattr(hook, "_spawn_background_stop_work", lambda: None)
+    monkeypatch.setenv("LLM_ROUTER_STOP_HOOK", "full")
+    (state / "northstar_line.json").write_text(json.dumps(
+        {"session_id": "sess-p09", "line": "north star: OLD", "ts": time.time() - 3 * 3600}))
+    _e, out = _run_main(hook, monkeypatch)
+    assert "north star" not in json.loads(out)["systemMessage"]
+
+
+def test_a_failed_cache_write_leaves_no_tmp_file(hook, state, monkeypatch, tmp_path):
+    _seed_session(state)
+    _trap_slow_steps(hook, monkeypatch, tmp_path)
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(hook.os, "replace", boom)
+    with pytest.raises(OSError):
+        hook._refresh_northstar_line()
+    assert [p.name for p in state.iterdir() if p.name.startswith("northstar_line")] == []
+
+
+def test_the_stop_keys_the_north_star_by_its_own_stdin_session_not_the_shared_file(
+        hook, state, monkeypatch, tmp_path):
+    """session_id.txt is shared by concurrent sessions; the Stop's stdin id is not."""
+    _write_usage(state, time.time())
+    _trap_slow_steps(hook, monkeypatch, tmp_path)
+    monkeypatch.setattr(hook, "_spawn_background_stop_work", lambda: None)
+    monkeypatch.setenv("LLM_ROUTER_STOP_HOOK", "full")
+    (state / "session_id.txt").write_text("other-session")
+    now = time.time()
+    (state / "northstar_line.json").write_text(json.dumps(
+        {"session_id": "other-session", "line": "north star: OTHER", "ts": now}))
+    _e, out = _run_main(hook, monkeypatch, {"session_id": "mine", "hook_event_name": "Stop"})
+    assert "north star" not in json.loads(out)["systemMessage"], "showed another session's line"
+    (state / "northstar_line.json").write_text(json.dumps(
+        {"session_id": "mine", "line": "north star: MINE", "ts": now}))
+    _e, out = _run_main(hook, monkeypatch, {"session_id": "mine", "hook_event_name": "Stop"})
+    assert "north star: MINE" in json.loads(out)["systemMessage"]
+
+
+def test_the_child_gets_the_stdin_session_id_and_caches_under_it(hook, state, monkeypatch, tmp_path):
+    _write_usage(state, time.time())
+    _trap_slow_steps(hook, monkeypatch, tmp_path)
+    monkeypatch.setattr(hook, "_spawn_background_stop_work", lambda: None)
+    (state / "session_id.txt").write_text("shared-file-id")
+    _run_main(hook, monkeypatch, {"session_id": "mine", "hook_event_name": "Stop"})
+    argv = hook._background_stop_work_argv()
+    assert "--session-id=mine" in argv and "--background-stop-work" in argv, argv
+    monkeypatch.delenv("LLM_ROUTER_HOOK_LATENCY", raising=False)  # _entry sets it; restore after
+    child = _load(name="session_end_child")  # a fresh process-like module state
+    monkeypatch.setattr(child, "_run_background_stop_work", lambda: None)
+    child._entry(argv[argv.index("--background-stop-work"):])
+    assert child._read_session_id() == "mine"
+    child._refresh_northstar_line()
+    assert json.loads((state / "northstar_line.json").read_text())["session_id"] == "mine"
+
+
+def test_without_a_stdin_session_id_the_shared_file_is_the_fallback(hook, state, monkeypatch, tmp_path):
+    _seed_session(state, "from-file")
+    _trap_slow_steps(hook, monkeypatch, tmp_path)
+    assert hook._read_session_id() == "from-file"
+    assert not any(a.startswith("--session-id") for a in hook._background_stop_work_argv())
