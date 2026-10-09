@@ -246,6 +246,7 @@ def test_hung_refresh_never_delays_a_tick_and_is_started_once(tmp_path):
     deadline = time.time() + 15
     while not (marker.exists() and marker.read_text()) and time.time() < deadline:
         time.sleep(0.05)
+    time.sleep(0.5)  # settle: a buggy second refresher's late write must land before the read
     assert marker.read_text() == "x", "exactly one refresh started across 5 ticks"
     assert max(times) < 2.0, times  # 20 s if any tick waited on the hung refresher
 
