@@ -75,6 +75,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the only place the proxy keeps prompt text; it is for labelling the shadow (`LLM_ROUTER_SHADOW_LABELS`).
 
 ### Changed
+- proxy (PLAN v16 P0.9-e, `docs/bugs/P09-12.md`): less work inside the tier decision's timed phases,
+  no decision changed. The Haiku body check (a `json.dumps` of the whole 0.5-2.8 MB body) now runs
+  at most once per call and only when the decision considers the Haiku tier; the ledger's
+  `tier_haiku_block` reuses its verdict instead of a second pass. The tier classifier skips the
+  capability detector it never read, and the signal scoring runs exact case-sensitive twins of its
+  IGNORECASE patterns. The proxy imports the classifier at start, not inside the first classified
+  call. `scripts/bench_proxy_decision.py` (200 fresh processes, 2026-10-09, load1 4.4-5.0, synthetic
+  corpus in the live turn-first mix): decision p95 11.0 -> 1.4 ms cold; classify p95 9.2 -> 1.3 ms,
+  haiku_checks p95 5.1 -> 1.0 ms (n=90 classified calls each).
 - agents (PLAN v16 AGT A.0): `agents.yaml` ships inside the package (`llm_router/data/agents.yaml`,
   loaded with `importlib.resources`). It lived at the repo root, which no wheel contains, so every
   installed user got `agent_not_found` (`docs/BUGS.md` A.0-1). A project `config/agents.yaml` and

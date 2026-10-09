@@ -382,7 +382,7 @@ async def tier_classify(text: str, pinned: str | None = None, *, anthropic: bool
     del pinned
     from llm_router.classify import GATEWAY_POLICY, classify_signals
 
-    sig = classify_signals(text, GATEWAY_POLICY)
+    sig = classify_signals(text, GATEWAY_POLICY, capabilities=False)  # the class only (P0.9-e)
     task, cx = sig.task_type.value, sig.complexity.value
     chain = _chain_cache.get((task, cx)) or []
     model = next((m for m in chain if tool_capable(m, anthropic=anthropic)), None)
