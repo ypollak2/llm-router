@@ -754,6 +754,9 @@ REASON_STREAM_TOOL = "stream_tool"
 REASON_CLAUDE_CODE_SUBSCRIPTION = "claude_code_subscription"
 REASON_SIDECAR_BACKFILL = "sidecar_backfill"
 REASON_JUDGE_EVAL = "judge_eval"
+# A call the semantic cache answered: a usage row with 0 tokens and $0 (nothing was billed,
+# nothing saved is claimed), written only so the call is attributable to its session.
+REASON_CACHE_HIT = "cache_hit"
 
 MIGRATE_ADD_TASK_TYPE_RAW = [
     "ALTER TABLE usage ADD COLUMN task_type_raw TEXT",

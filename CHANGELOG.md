@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- ledger completeness (PLAN v16 P0.8-e): a call the semantic cache answers now writes a `usage` row
+  (`reason = "cache_hit"`, provider `cache`, model `cache/<cached model>`, 0 tokens, $0) carrying the
+  caller's session id, and `semantic_cache_lookups` gains a nullable `session_id` (additive migration;
+  old rows stay NULL). Cache hits were previously invisible to per-session accounting. Spend and savings
+  are unchanged. No `routing_decisions` row is added for a replay (it would double-count judge, bandit
+  and offload inputs). Restart the MCP server to pick it up. See `docs/bugs/P08E-1.md`.
 - ledger completeness (PLAN v16 P0.8-d, D-32 = A; R-EVL-1, NFR-NUM): `usage` gains `reason`
   (additive migration `MIGRATE_USAGE_ADD_REASON`; earlier rows stay NULL and `llm-router kpi` reports
   them as missing, not back-filled). Every `usage` writer passes a short route code (`router_chain`,

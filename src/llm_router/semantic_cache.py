@@ -166,6 +166,13 @@ async def _ensure_project_scope_column(db) -> None:
                 "ADD COLUMN project_scope TEXT NOT NULL DEFAULT ''"
             )
             await db.commit()
+        # Cache-hit ledger row: which session asked. Additive and nullable --
+        # earlier rows, and lookups made outside an MCP tool call, stay NULL
+        # (unknown), never ''.
+        cur = await db.execute("PRAGMA table_info(semantic_cache_lookups)")
+        if "session_id" not in {row[1] for row in await cur.fetchall()}:
+            await db.execute("ALTER TABLE semantic_cache_lookups ADD COLUMN session_id TEXT")
+            await db.commit()
     except Exception as exc:  # noqa: BLE001 — migration failure must not break routing
         log.debug("semantic_cache project_scope migration skipped: %s", exc)
 
@@ -179,7 +186,8 @@ CREATE TABLE IF NOT EXISTS semantic_cache_lookups (
     task_type TEXT NOT NULL,
     hit INTEGER NOT NULL,
     saved_usd REAL NOT NULL DEFAULT 0,
-    project_scope TEXT NOT NULL DEFAULT ''
+    project_scope TEXT NOT NULL DEFAULT '',
+    session_id TEXT
 )
 """
 
@@ -488,6 +496,7 @@ async def check(
     rows: list = []
     vetoed = 0
     try:
+        from llm_router import call_identity as _call_identity
         from llm_router.cost import _get_db
         _repair_shared_db_perms(getattr(config, "llm_router_db_path", None))
         db = await _get_db()
@@ -560,9 +569,11 @@ async def check(
                 )
             await db.execute(
                 "INSERT INTO semantic_cache_lookups "
-                "(ts, task_type, hit, saved_usd, project_scope) VALUES (?, ?, ?, ?, ?)",
+                "(ts, task_type, hit, saved_usd, project_scope, session_id) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (now, task_type.value, 1 if best_row is not None else 0,
-                 float(best_row[3] or 0.0) if best_row is not None else 0.0, scope),
+                 float(best_row[3] or 0.0) if best_row is not None else 0.0, scope,
+                 _call_identity.call_session_id()),
             )
             await db.commit()
         finally:
