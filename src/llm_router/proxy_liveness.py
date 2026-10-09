@@ -15,6 +15,16 @@ Two readers, one module, so ``kpi`` and ``doctor`` cannot disagree:
 * :func:`short_silence` -- the earlier warning (P0.14-b): no proxy row in the last 2 h while
   the hooks recorded at least 3 user turns in those 2 h. An empty set (0 turns) reports
   nothing; a turn count that cannot be read is ``None`` and reports nothing.
+* :func:`ledger_silence` -- the alert (P0.14-d, 2026-10-08 outage: the ledger was silent
+  from 16:55:02Z for two hours while the 24 h count still held rows, so nothing warned).
+  SILENT when, in the last ``LIVENESS_WINDOW_MIN`` minutes, the proxy ledger has 0 rows,
+  the hooks recorded at least one ORGANIC CLAUDE CODE turn, and the proxy-default
+  sentinel is enabled and not opted out. A Codex or Gemini turn never goes through this
+  proxy and does not count; nor does a turn from a session whose project settings, or
+  whose own launch environment, legitimately point ``ANTHROPIC_BASE_URL`` elsewhere. Shown by ``kpi``, ``doctor`` and
+  SessionStart (never the statusline).
+* :func:`ledger_gaps` -- every interval longer than that window with no proxy row and at
+  least one such turn, for a gate file (``kpi --json --since --until``).
 * :func:`doctor_findings` -- when the user settings make a localhost proxy the default,
   (a) every project-level ``.claude/settings.local.json`` / ``.claude/settings.json``
   under the current directory that overrides ``ANTHROPIC_BASE_URL`` (path and the
@@ -39,13 +49,18 @@ from urllib.parse import urlsplit
 
 from llm_router import paths
 
-__all__ = ["WINDOW_HOURS", "SHORT_WINDOW_HOURS", "SHORT_MIN_TURNS", "liveness", "short_silence", "user_proxy_default", "find_overrides", "doctor_findings"]
+__all__ = ["WINDOW_HOURS", "SHORT_WINDOW_HOURS", "SHORT_MIN_TURNS", "LIVENESS_WINDOW_MIN", "liveness",
+           "short_silence", "ledger_silence", "ledger_gaps", "user_proxy_default", "find_overrides",
+           "doctor_findings"]
 
 WINDOW_HOURS = 24.0
 #: P0.14-b early warning: 0 proxy rows in this window while >= SHORT_MIN_TURNS hook turns
 #: happened in it. Constants, not env keys: nobody needs to tune an alarm threshold.
 SHORT_WINDOW_HOURS = 2.0
 SHORT_MIN_TURNS = 3
+#: P0.14-d alert window (R8 ``liveness_window_min``): 0 proxy rows in this many minutes while
+#: an organic Claude Code turn happened in them.
+LIVENESS_WINDOW_MIN = 30.0
 ENV_KEY = "ANTHROPIC_BASE_URL"
 
 #: The one hook whose invocation is a user turn (``status-bar`` is also UserPromptSubmit;
@@ -149,6 +164,246 @@ def short_silence(*, now: float | None = None, proxy_rows: list[dict] | None = N
                    "(if the proxy is not meant to be in use, ignore this)")
     return {"window_hours": SHORT_WINDOW_HOURS, "proxy_rows": n, "hook_turns": turns,
             "warn": warn, "message": message}
+
+
+# -- P0.14-d: the 30 min ledger-silence alert ----------------------------------------
+
+
+_TAIL_CHUNK = 65536
+_REORDER_SLACK_S = 120.0  # rows are appended at write time; concurrent writers reorder by seconds
+
+
+def _tail_dicts(path: Path, since: float) -> tuple[list[dict], bool]:
+    """Rows of a JSONL file from the end back to the first one older than ``since``.
+
+    Reads backwards in growing chunks, so SessionStart does not parse a 35 MB ledger to
+    learn whether its last row is recent. Returns (rows, reached): ``reached`` is True when
+    a row older than ``since`` (or the start of the file) was reached."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return [], False
+    chunk = _TAIL_CHUNK
+    while True:
+        start = max(0, size - chunk)
+        try:
+            with path.open("rb") as fh:
+                fh.seek(start)
+                data = fh.read(size - start)
+        except OSError:
+            return [], False
+        lines = data.split(b"\n")
+        if start > 0:
+            lines = lines[1:]  # the first line is cut by the seek
+        rows = []
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+        oldest = min((t for r in rows if (t := _ts(r)) is not None), default=None)
+        if start == 0 or (oldest is not None and oldest < since - _REORDER_SLACK_S):
+            return rows, True
+        chunk *= 4
+
+
+def _recent_hook_rows(since: float, until: float) -> list[dict]:
+    from llm_router import hook_latency as hl
+
+    path = hl.store_path()
+    rows, reached = _tail_dicts(path, since)
+    if not reached or not rows or min(_ts(r) or until for r in rows) >= since:
+        older, _ = _tail_dicts(path.with_name(path.name + ".1"), since)  # rotated just now
+        rows = older + rows
+    return [r for r in rows if (t := _ts(r)) is not None and since <= t <= until]
+
+
+def _sentinel() -> dict | None:
+    try:
+        data = json.loads(paths.state_path("proxy_default.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _sentinel_ports(sentinel: dict | None) -> list[int]:
+    ports = []
+    for key in ("port", "upstream_port"):
+        try:
+            if sentinel and sentinel.get(key) is not None:
+                ports.append(int(sentinel[key]))
+        except (TypeError, ValueError):
+            continue
+    return ports or [8787]
+
+
+def _routes_to(value: object, ports: list[int]) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parts = urlsplit(value.strip() if "//" in value else "//" + value.strip())
+        return parts.hostname in ("127.0.0.1", "localhost", "::1") and parts.port in ports
+    except ValueError:
+        return False
+
+
+def project_override(project: str | None, ports: list[int]) -> str | None:
+    """The project settings file that makes a session in ``project`` bypass the proxy on
+    purpose, else None. Claude Code's precedence: ``.claude/settings.local.json``, then
+    ``.claude/settings.json``; the first that sets a non-empty ``ANTHROPIC_BASE_URL`` wins,
+    and it is an override only when it does not point at the proxy's own ports."""
+    if not project:
+        return None
+    for name in _SETTINGS_FILES:
+        f = Path(project) / ".claude" / name
+        present, value = _env_base_url(f)
+        if present and isinstance(value, str) and value.strip():
+            return None if _routes_to(value, ports) else str(f)
+    return None
+
+
+def _env_overrides(base_url: object, ports: list[int]) -> bool:
+    """True when a hook row's ``base_url`` (``loopback:<port>`` / ``loopback`` / ``other``)
+    says the session ran with a base URL that is not the proxy's."""
+    if not isinstance(base_url, str) or not base_url:
+        return False
+    head, _, port = base_url.partition(":")
+    return not (head == "loopback" and port.isdigit() and int(port) in ports)
+
+
+def _session_record(session_id: str) -> dict:
+    """The SessionStart tag file (``session_kind_<sid>.json``): kind, cwd, entrypoint."""
+    from llm_router import session_kind as sk
+
+    try:
+        data = json.loads(sk._tag_path(session_id).read_text(encoding="utf-8"))
+        rec = data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        rec = {}
+    return {"kind": sk.kind_of(session_id), "cwd": rec.get("cwd"), "entrypoint": rec.get("entrypoint")}
+
+
+def _classify_turns(rows: list[dict], ports: list[int]) -> tuple[list[dict], dict[str, int]]:
+    """(organic Claude Code turns as ``{ts, session_id}``, excluded counts by reason).
+
+    Host: the row's ``host`` (written only on positive evidence, ``hook_latency.detect_host``).
+    A row without one counts as Claude Code only when its session's tag has an
+    ``entrypoint`` (Claude Code exports ``CLAUDE_CODE_ENTRYPOINT``; a Codex hook process
+    does not). Override, in Claude Code's precedence (the same order as session-start's
+    ``_effective_base_url``): the base URL the hook process inherited (``base_url`` on the
+    row: the launching shell or the merged settings ``env``), else the session's project
+    settings (:func:`project_override`). Either one pointing away from the proxy's ports is
+    a deliberate bypass. A missing user-level key is NOT one: that was the 2026-10-08 fault."""
+    cache: dict[str, dict] = {}
+    kept: list[dict] = []
+    excluded = {"other_host": 0, "not_organic": 0, "env_override": 0, "project_override": 0,
+                "no_session": 0}
+    for r in rows:
+        if r.get("hook") != _TURN_HOOK or r.get("event") != _TURN_EVENT:
+            continue
+        sid = r.get("session_id")
+        if not isinstance(sid, str) or not sid:
+            excluded["no_session"] += 1
+            continue
+        rec = cache.get(sid)
+        if rec is None:
+            rec = cache[sid] = _session_record(sid)
+            rec["override"] = project_override(rec["cwd"], ports)
+        host = r.get("host") or ("claude_code" if rec["entrypoint"] else None)
+        if host != "claude_code":
+            excluded["other_host"] += 1
+        elif rec["kind"] != "organic":
+            excluded["not_organic"] += 1
+        elif _env_overrides(r.get("base_url"), ports):
+            excluded["env_override"] += 1
+        elif rec["override"]:
+            excluded["project_override"] += 1
+        else:
+            kept.append({"ts": _ts(r), "session_id": sid})
+    return kept, excluded
+
+
+def _iso(ts: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+def ledger_silence(*, now: float | None = None, proxy_rows: list[dict] | None = None,
+                   hook_rows: list[dict] | None = None,
+                   window_min: float | None = None) -> dict[str, Any]:
+    """P0.14-d. ``state``: ``SILENT``; ``ok`` (proxy rows in the window); ``quiet`` (no organic
+    Claude Code turn in it); ``off`` (no sentinel, ``enabled: false`` or ``routing_opt_out``).
+
+    ``proxy_rows`` / ``hook_rows`` are ledgers the caller already read (``None`` reads only
+    the tail each needs). Read-only."""
+    now_ts = time.time() if now is None else now
+    minutes = LIVENESS_WINDOW_MIN if window_min is None else window_min
+    since = now_ts - minutes * 60.0
+    out: dict[str, Any] = {"window_min": minutes, "state": "off", "silent": False, "proxy_rows": None,
+                           "organic_cc_turns": None, "sessions": 0, "excluded": None,
+                           "newest_proxy_ts": None, "message": None}
+    sentinel = _sentinel()
+    if not sentinel or sentinel.get("enabled") is False or sentinel.get("routing_opt_out") is True:
+        return out
+    ports = _sentinel_ports(sentinel)
+    if proxy_rows is None:
+        from llm_router.proxy import ledger as pl
+
+        proxy_rows, _ = _tail_dicts(pl.ledger_path(), since)
+    stamps = [t for r in proxy_rows if (t := _ts(r)) is not None and t <= now_ts]
+    n = sum(1 for t in stamps if t >= since)
+    newest = max(stamps) if stamps else None
+    if hook_rows is None:
+        hook_rows = _recent_hook_rows(since, now_ts)
+    turns, excluded = _classify_turns(
+        [r for r in hook_rows if (t := _ts(r)) is not None and since <= t <= now_ts], ports)
+    sessions = len({t["session_id"] for t in turns})
+    out.update(proxy_rows=n, organic_cc_turns=len(turns), sessions=sessions, excluded=excluded,
+               newest_proxy_ts=newest)
+    if n:
+        out["state"] = "ok"
+    elif not turns:
+        out["state"] = "quiet"
+    else:
+        last = f"last proxy row {_iso(newest)}" if newest is not None else "no proxy row on record"
+        out.update(state="SILENT", silent=True, message=(
+            f"SILENT proxy ledger: 0 rows in the last {minutes:g} min while {len(turns)} organic "
+            f"Claude Code turn(s) in {sessions} session(s) were recorded and proxy-default is on "
+            f"(port {ports[0]}); {last}. Routing is probably OFF: check ~/.claude/settings.json "
+            "env.ANTHROPIC_BASE_URL and run `llm-router doctor`"))
+    return out
+
+
+def ledger_gaps(*, since: float, until: float, proxy_rows: list[dict],
+                hook_rows: list[dict] | None = None,
+                window_min: float | None = None) -> list[dict[str, Any]]:
+    """Every interval inside ``[since, until]`` longer than the alert window with no proxy row
+    and at least one organic Claude Code turn (the alert's own filters), oldest first.
+
+    ``start``/``end`` are the proxy rows that bound the gap, or the window edge
+    (``open_start`` / ``open_end``). The sentinel is not consulted: its past state is not
+    recorded, and a gate needs the gap either way."""
+    minutes = LIVENESS_WINDOW_MIN if window_min is None else window_min
+    if hook_rows is None:
+        from llm_router import hook_latency as hl
+
+        hook_rows = hl.read_rows(since=since, until=until)
+    turns, _ = _classify_turns([r for r in hook_rows if (t := _ts(r)) is not None and since <= t <= until],
+                               _sentinel_ports(_sentinel()))
+    turn_ts = sorted(t["ts"] for t in turns)
+    stamps = sorted(t for r in proxy_rows if (t := _ts(r)) is not None and since <= t <= until)
+    bounds = [since, *stamps, until]
+    gaps = []
+    for i, (a, b) in enumerate(zip(bounds, bounds[1:])):
+        if b - a <= minutes * 60.0:
+            continue
+        inside = sum(1 for t in turn_ts if a < t < b)
+        if inside:
+            gaps.append({"start": _iso(a), "end": _iso(b), "start_ts": a, "end_ts": b,
+                         "minutes": round((b - a) / 60.0, 1), "organic_cc_turns": inside,
+                         "open_start": i == 0, "open_end": i == len(bounds) - 2})
+    return gaps
 
 
 # -- settings ---------------------------------------------------------------------
@@ -278,20 +533,28 @@ def find_overrides(cwd: Path, home: Path | None = None) -> list[dict[str, str]]:
 
 def doctor_findings(cwd: Path | None = None, home: Path | None = None, *,
                     now: float | None = None) -> list[str]:
-    """Plain-text findings for ``doctor``; empty when the proxy is not the default or all is well."""
+    """Plain-text findings for ``doctor``; empty when all is well.
+
+    The P0.14-d SILENT alert comes first and does not need the user settings to name the
+    proxy: in the 2026-10-08 outage the missing user key WAS the fault."""
+    try:  # its own guard: a failure here must not drop the override findings below
+        silence = ledger_silence(now=now)
+    except Exception:  # noqa: BLE001 -- an unreadable ledger is not a silent one
+        silence = {"silent": False, "message": None}
+    out = [silence["message"]] if silence["silent"] else []
     default = user_proxy_default(home)
     if default is None:
-        return []
-    out = [f"{o['path']} overrides {ENV_KEY} (user default {default}) with host {o['host']}: "
-           "sessions started in this tree bypass the proxy"
-           for o in find_overrides(Path(cwd) if cwd is not None else Path.cwd(), home)]
+        return out
+    out += [f"{o['path']} overrides {ENV_KEY} (user default {default}) with host {o['host']}: "
+            "sessions started in this tree bypass the proxy"
+            for o in find_overrides(Path(cwd) if cwd is not None else Path.cwd(), home)]
     from llm_router.proxy import ledger as pl
 
     rows = pl.read_rows()
     live = liveness(now=now, proxy_rows=rows)
     if live["warn"]:
         out.append(f"proxy is the configured default ({default}) but {live['message']}")
-    else:  # the 24 h warning already covers a ledger that has been silent for 2 h
+    elif not silence["silent"]:  # the 24 h warning (or SILENT) already covers a 2 h silence
         short = short_silence(now=now, proxy_rows=rows)
         if short["warn"]:
             out.append(f"proxy is the configured default ({default}) but {short['message']}")

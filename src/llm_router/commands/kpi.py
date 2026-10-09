@@ -1861,10 +1861,14 @@ def _classifier_vs_rules_lines(s: dict | None) -> list[str]:
 
 # ── P0.14-a: proxy ledger liveness ─────────────────────────────────────────
 
-def _proxy_liveness(now: float, proxy_rows: list[dict]) -> dict:
+def _proxy_liveness(now: float, proxy_rows: list[dict], since: float) -> dict:
     from llm_router import proxy_liveness
 
-    return proxy_liveness.liveness(now=now, proxy_rows=proxy_rows)
+    live = proxy_liveness.liveness(now=now, proxy_rows=proxy_rows)
+    # P0.14-d: the 30 min alert, and every such gap in the card's window (for gate files).
+    live["ledger_silence"] = proxy_liveness.ledger_silence(now=now, proxy_rows=proxy_rows)
+    live["ledger_gaps"] = proxy_liveness.ledger_gaps(since=since, until=now, proxy_rows=proxy_rows)
+    return live
 
 
 def _proxy_liveness_lines(live: dict | None) -> list[str]:
@@ -1880,6 +1884,14 @@ def _proxy_liveness_lines(live: dict | None) -> list[str]:
              f"routing decisions {n(live['routing_decisions_24h'])})"]
     if live.get("warn"):
         lines.append(f"WARN {live['message']}")
+    silence = live.get("ledger_silence") or {}
+    if silence.get("silent"):
+        lines.append(silence["message"])
+    gaps = live.get("ledger_gaps") or []
+    if gaps:
+        lines.append(f"ledger_gaps: {len(gaps)} (" + "; ".join(
+            f"{g['start']} to {g['end']}, {g['minutes']:g} min, {g['organic_cc_turns']} organic turn(s)"
+            for g in gaps) + ")")
     return lines
 
 
@@ -1939,7 +1951,8 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
             _o3_offload_share(days, allowed, index, all_rows, now_ts, since_policy, win, g3_r)),
         "proxy_local_shadow": _proxy_shadow_summary(days, win),
         # P0.14-a: is the proxy ledger alive? Outside "kpis" (a liveness check, not a KPI).
-        "proxy_liveness": _proxy_liveness(now_ts, all_rows),
+        "proxy_liveness": _proxy_liveness(now_ts, all_rows,
+                                          win.since if win is not None else now_ts - days * 86400.0),
         "classifier_shadow": _classifier_shadow_summary(days, win, allowed, index, pop["allowed"]),
         "kpis": {
             "NS": ns_r, "O1": o1_r, "O2": o2_r,

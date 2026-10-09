@@ -447,11 +447,16 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "OPENROUTER_API_KEY": ("provider_credential", "commands/doctor.py", 1),
     "PERPLEXITY_API_KEY": ("provider_credential", "commands/demo.py", 1),
     "VAULT_TOKEN": ("provider_credential", "org_policy.py", 1),
-    # ── external_tool  (21) ──
+    # ── external_tool  (24) ──
     "CLAUDE_CODE_PATH": ("external_tool", "claude_agent.py", 1),
     # P0.13: the project root llm_act may write in, when the MCP client sends no roots.
     "CLAUDE_PROJECT_DIR": ("external_tool", "tools/agentic.py", 1),
     "CLAUDE_CODE_SESSION_ID": ("external_tool", "hooks/agent-depth-release.py", 3),
+    # P0.14-d: which CLI ran a hook (hook_latency.detect_host). Each host exports its own
+    # plugin root to plugin hooks; CLAUDECODE=1 is set by Claude Code for its children.
+    "CLAUDE_PLUGIN_ROOT": ("external_tool", "hook_latency.py", 1),
+    "CODEX_PLUGIN_ROOT": ("external_tool", "hook_latency.py", 1),
+    "CLAUDECODE": ("external_tool", "hook_latency.py", 1),
     # 2026-09-28: Claude Code's own headless-vs-interactive signal ("cli" for an
     # interactive session, "sdk-cli"/"sdk-py" for `-p`/SDK callers). Verified
     # empirically against a real `claude -p ... --output-format json` run

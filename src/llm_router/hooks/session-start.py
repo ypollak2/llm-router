@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 29
+# llm_router-hook-version: 30
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -861,6 +861,20 @@ def _check_proxy_default_health() -> str:
         f"    Or disable it:  llm-router install --proxy-default off\n"
         f"    Logs: {os.path.join(_state_dir(), 'logs', 'proxy.err.log')}"
     )
+
+
+def _check_ledger_silence() -> str:
+    """P0.14-d: 0 proxy ledger rows in the last 30 min while organic Claude Code turns were
+    recorded and proxy-default is on (``proxy_liveness.ledger_silence``; the same rule
+    ``kpi`` and ``doctor`` print). Reads only the ledgers' tails. Needs ``llm_router``;
+    without it, or on any error, says nothing (an unreadable ledger is not a silent one)."""
+    try:
+        from llm_router.proxy_liveness import ledger_silence
+
+        silence = ledger_silence()
+    except Exception:  # noqa: BLE001 -- a liveness check must never break session start
+        return ""
+    return f"\n⚠️  llm-router {silence['message']}" if silence.get("silent") else ""
 
 
 def _refresh_claude_usage() -> str:
@@ -2165,6 +2179,7 @@ def main() -> None:
     # (see the function's own docstring for why) — only the next one.
     with _hl_phase("proxy_health"):
         hints += _check_proxy_default_health()
+        hints += _check_ledger_silence()
 
     # 2. Select banner from cached subscription state (no OAuth taint in this path).
     # The cache is written by _refresh_claude_usage() during the previous session.
