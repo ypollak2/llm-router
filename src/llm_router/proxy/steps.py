@@ -262,10 +262,11 @@ _MODEL_COMMAND = "<command-name>/model</command-name>"
 #: ``>`` quadratic (100 lines on 3 MB took 1.9 s, 1,000 took 19 s).
 _TAG_NAME = r"(?:" + "|".join(re.escape(t) for t in HARNESS_TAGS) + r")[\w-]*"
 _ATTRS = r"(?:[ \t][^>\n]{0,200})?"
-_HARNESS_OPEN_RE = re.compile(
-    r"^[ \t]*<(?P<name>" + _TAG_NAME + r")" + _ATTRS + r">"
-    r"|<(?P<sr>system-reminder)" + _ATTRS + r">",
-    re.I | re.M)
+#: The pattern starts with a literal ``<`` so the scan skips ahead to each one (a
+#: ``^``-anchored alternation was ~20x slower on tag-free text); the line-start rule is
+#: checked per match (:func:`_line_start`).
+_HARNESS_OPEN_RE = re.compile(r"<(?P<name>" + _TAG_NAME + r")" + _ATTRS + r">", re.I)
+_MID_LINE_OK = "system-reminder"
 _HARNESS_CLOSE_RE = re.compile(r"</(?P<name>" + _TAG_NAME + r")>", re.I)
 _REST_OF_LINE_BLANK = re.compile(r"[ \t]*(?:\n|\Z)")
 _TASK_NOTIFICATION = "task-notification"
@@ -276,12 +277,17 @@ def _is_command_tag(name: str) -> bool:
     return name.startswith("command-") or name.startswith("local-command")
 
 
-def _alone_on_line(text: str, start: int, end: int) -> bool:
-    """Only blanks between the line start and ``start`` and between ``end`` and the line end."""
+def _line_start(text: str, start: int) -> int | None:
+    """The line's start when only blanks precede ``start`` on its line, else None."""
     i = start
     while i > 0 and text[i - 1] in " \t":
         i -= 1
-    return (i == 0 or text[i - 1] == "\n") and _REST_OF_LINE_BLANK.match(text, end) is not None
+    return i if i == 0 or text[i - 1] == "\n" else None
+
+
+def _alone_on_line(text: str, start: int, end: int) -> bool:
+    """Only blanks between the line start and ``start`` and between ``end`` and the line end."""
+    return _line_start(text, start) is not None and _REST_OF_LINE_BLANK.match(text, end) is not None
 
 
 def _first_in(starts: list[int], ends: list[int], lo: int, hi: int) -> int | None:
@@ -302,8 +308,14 @@ def _strip_block(text: str) -> tuple[str, set[str]]:
     CLAUDE.md that mentions it) cannot end the block early and leak the rest of the
     reminder. Tags and closes are found in one pass each and looked up by bisection,
     so the cost is linear in ``text`` whatever its shape."""
-    opens = [(m.start(), m.end(), (m.group("name") or m.group("sr")).lower(), m.group("name") is not None)
-             for m in _HARNESS_OPEN_RE.finditer(text)]
+    opens = []
+    for m in _HARNESS_OPEN_RE.finditer(text):
+        name = m.group("name").lower()
+        ls = _line_start(text, m.start())
+        if ls is not None:
+            opens.append((ls, m.end(), name, True))
+        elif name == _MID_LINE_OK:
+            opens.append((m.start(), m.end(), name, False))
     if not opens:
         return text, set()
     line_opens: dict[str, list[int]] = {}
