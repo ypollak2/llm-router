@@ -28,6 +28,10 @@ _SCRIPT = (
     / "src" / "llm_router" / "hooks" / "statusline-command.sh"
 )
 
+#: P0.9-c: the segments the script prints are computed by this module (cache, not
+#: inline `python3 -c`), so the log schema it reads is checked there.
+_SEGMENTS = _SCRIPT.parent.parent / "statusline_segments.py"
+
 # Set by the caller (Claude Code), by the shell itself, or by a `local`/loop
 # binding this crude scanner cannot see. Everything else must be assigned here.
 _EXTERNALLY_PROVIDED = {
@@ -133,7 +137,7 @@ def test_health_reports_ok_for_an_ollama_only_setup(tmp_path):
 def test_statusline_and_writer_agree_on_the_log_schema():
     """Guards the E2E above: if the writer's field names move, this fails loudly
     rather than letting the health check silently read nothing again."""
-    body = _SCRIPT.read_text()
+    body = _SCRIPT.read_text() + _SEGMENTS.read_text()
     assert 'r["timestamp"]' in body or "r['timestamp']" in body, (
         "statusline no longer reads a 'timestamp' field"
     )

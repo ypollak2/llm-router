@@ -438,8 +438,10 @@ def test_statusline_delegates_rather_than_computing_savings():
     import re as _re
     from pathlib import Path as _P
 
-    script = (_P(__file__).resolve().parents[1]
-              / "src" / "llm_router" / "hooks" / "statusline-command.sh").read_text()
+    root = _P(__file__).resolve().parents[1] / "src" / "llm_router"
+    # P0.9-c: the figure is computed by the detached refresher, not inline.
+    script = ((root / "hooks" / "statusline-command.sh").read_text()
+              + (root / "statusline_segments.py").read_text())
 
     assert "dashboard_data import" in script and "summary" in script, (
         "statusline no longer delegates to dashboard_data.summary() — it is "

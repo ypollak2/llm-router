@@ -21,9 +21,8 @@ is now independent of `ollama_recent` (an activity signal only). When neither
 holds, a cheap `/api/tags` reachability probe distinguishes a genuinely broken
 setup ("down") from one that's merely quiet ("idle" — the new state).
 
-This test drives the embedded python health snippet directly (extracted
-verbatim from the shell script, not reimplemented — a reimplementation could
-drift from what actually ships and pass while the real script stays broken).
+This test drives the shipped health function directly (statusline_segments.health_segment,
+the code the status line's refresher runs -- not a reimplementation).
 Every case backs the truth table with real files/sockets: a real synthetic
 savings_log.jsonl entry back-dated with `datetime.timedelta` (never a real
 30/120-minute wait), and a real ephemeral loopback socket standing in for
@@ -36,7 +35,6 @@ from __future__ import annotations
 import http.server
 import json
 import os
-import re
 import socket
 import subprocess
 import sys
@@ -57,27 +55,15 @@ _PROVIDER_KEYS = (
 )
 
 
-def _extract_health_snippet() -> str:
-    """Pull the embedded python -c body for the health check out of the .sh.
-
-    Anchored on `CHZ_OLLAMA_URL`, the env var GH#63's fix introduces for the
-    reachability probe — if a future edit drops it, this test fails loudly
-    instead of silently testing stale/duplicated python.
-    """
-    body = _SCRIPT.read_text()
-    m = re.search(
-        r"health=\$\([^\n]*CHZ_OLLAMA_URL[^\n]*python3 -c '\n(.*?)\n' 2>/dev/null\)",
-        body,
-        re.DOTALL,
-    )
-    assert m, (
-        "could not locate the health python snippet (CHZ_OLLAMA_URL anchor) — "
-        "did GH#63's fix move or get reverted?"
-    )
-    return m.group(1)
-
-
-_SNIPPET = _extract_health_snippet()
+# P0.9-c moved the health check out of the shell script (it was a `python3 -c`
+# process on the hot path) into statusline_segments.health_segment, the same code
+# run by the detached refresher that fills the cache the script reads. This test
+# drives that function in a subprocess, with the environment the refresher gets.
+_SNIPPET = (
+    "import os, sys, time\n"
+    "from llm_router.statusline_segments import health_segment\n"
+    "print(health_segment(os.environ['CHZ_STATE'], time.time(), dict(os.environ)))\n"
+)
 
 
 class _TagsHandler(http.server.BaseHTTPRequestHandler):
@@ -156,9 +142,8 @@ def _run_health(
         env.pop(k, None)  # ensure a clean slate regardless of the host's own env
     if provider_env:
         env.update(provider_env)
-    env["CHZ_SAVINGS_LOG"] = str(savings_log)
-    env["CHZ_USAGE_JSON"] = str(usage_json)
-    env["CHZ_OLLAMA_URL"] = ollama_url
+    env["CHZ_STATE"] = str(tmp_path)  # holds savings_log.jsonl and usage.json
+    env["OLLAMA_URL"] = ollama_url
 
     result = subprocess.run(
         [sys.executable, "-c", _SNIPPET],

@@ -521,6 +521,9 @@ _HOOK_SUPPORT_FILES: tuple[tuple[str, str], ...] = (
     ("tool_surface.py", "llm_router_tool_surface.py"),
     # The status line's per-tick renderer (statusline-command.sh execs it).
     ("statusline_tick.py", "llm_router_statusline_tick.py"),
+    # The full status line's segments (quota, context, money, health, last route),
+    # computed by a detached refresher into the cache the script reads (P0.9-c).
+    ("statusline_segments.py", "llm_router_statusline_segments.py"),
 )
 
 

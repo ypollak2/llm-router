@@ -116,43 +116,53 @@ if [ "$_sl_mode" = "fast" ]; then
     fi
 fi
 
-input=$(cat)
-session_cwd=$(printf '%s' "$input" | python3 -c "
+# ── Input: three fields out of the session JSON, in bash (P0.9-c) ────────────
+# These were three `python3 -c` processes (~20 ms each). Claude Code's JSON has
+# no backslashes in a normal path; if it does (escaped quote, \n, \uXXXX) the
+# regexes below could mis-read it, so ANY backslash sends the whole parse to one
+# python, which is exactly what the three one-liners did. Fields only ever reach
+# a process through argv/env (CHZ-SEC-07), never through source text.
+# `read -d ''` slurps stdin with no `cat` process; it returns 1 at EOF, which is not an error here.
+IFS= read -r -d '' input || true
+session_cwd="" transcript_path="" model_id="" _sid=""
+if [[ "$input" == *\\* ]]; then
+    _parsed=$(printf '%s' "$input" | python3 -c '
 import json, sys
 try:
     d = json.loads(sys.stdin.read())
-    print(d.get('cwd', ''))
 except Exception:
-    pass
-" 2>/dev/null)
-transcript_path=$(printf '%s' "$input" | python3 -c "
-import json, sys
-try:
-    d = json.loads(sys.stdin.read())
-    print(d.get('transcript_path', ''))
-except Exception:
-    pass
-" 2>/dev/null)
-model_id=$(printf '%s' "$input" | python3 -c "
-import json, sys
-try:
-    d = json.loads(sys.stdin.read())
-    m = d.get('model')
-    if isinstance(m, dict):
-        print(m.get('id', ''))
-    elif isinstance(m, str):
-        print(m)
-except Exception:
-    pass
-" 2>/dev/null)
+    d = {}
+m = d.get("model")
+mid = m.get("id", "") if isinstance(m, dict) else (m if isinstance(m, str) else "")
+sid = d.get("session_id", "")
+for v in (d.get("cwd", ""), d.get("transcript_path", ""), mid, sid):
+    print(str(v).replace("\n", "\x01"))
+' 2>/dev/null)
+    { IFS= read -r session_cwd; IFS= read -r transcript_path; IFS= read -r model_id; IFS= read -r _sid; } <<< "$_parsed"
+    transcript_path="${transcript_path//$'\x01'/$'\n'}"
+else
+    _re='"cwd"[[:space:]]*:[[:space:]]*"([^"]*)"'
+    [[ "$input" =~ $_re ]] && session_cwd="${BASH_REMATCH[1]}"
+    _re='"transcript_path"[[:space:]]*:[[:space:]]*"([^"]*)"'
+    [[ "$input" =~ $_re ]] && transcript_path="${BASH_REMATCH[1]}"
+    _re='"model"[[:space:]]*:[[:space:]]*\{[^}]*"id"[[:space:]]*:[[:space:]]*"([^"]*)"'
+    if [[ "$input" =~ $_re ]]; then
+        model_id="${BASH_REMATCH[1]}"
+    else
+        _re='"model"[[:space:]]*:[[:space:]]*"([^"]*)"'
+        [[ "$input" =~ $_re ]] && model_id="${BASH_REMATCH[1]}"
+    fi
+    _re='"session_id"[[:space:]]*:[[:space:]]*"([A-Za-z0-9._-]+)"'
+    [[ "$input" =~ $_re ]] && _sid="${BASH_REMATCH[1]}"
+fi
+[[ "$_sid" =~ ^[A-Za-z0-9._-]+$ ]] || _sid="default"
 
 STATE_DIR="$HOME/.llm-router"
 USAGE_JSON="$STATE_DIR/usage.json"
 USAGE_DB="$STATE_DIR/usage.db"
-# GH#50: read four times below (health check + last-route token suffix) and
-# never assigned, so every read expanded to "" and open("") threw into a
-# swallowed except — the health indicator reported 'no provider' forever on
-# any setup without a cloud key. Written by hooks/savings_logger.py.
+# GH#50: the health check and last-route token suffix read this log; it is now
+# read by statusline_segments.py (STATE_DIR/savings_log.jsonl), which defines it
+# the same way. Kept assigned here so the variable is never read unset.
 SAVINGS_LOG="$STATE_DIR/savings_log.jsonl"
 
 # ── Catppuccin Mocha palette (truecolor ANSI) ────────────────────────────────
@@ -178,313 +188,188 @@ if [ "${NO_COLOR:-}" != "" ]; then
     _PINK="" _RED="" _SKY="" _LAV=""
 fi
 
-# Pick color by 0–100 percentage threshold (green→yellow→red).
+# Pick color by 0–100 percentage threshold (green→yellow→red). Sets $_c (no
+# subshell: `$(_pct_color …)` cost a fork per call).
 _pct_color() {
     local pct=$1
-    if [ "$pct" -ge 80 ]; then printf '%s' "$_RED"
-    elif [ "$pct" -ge 50 ]; then printf '%s' "$_YELLOW"
-    else printf '%s' "$_GREEN"
+    if [ "$pct" -ge 80 ]; then _c="$_RED"
+    elif [ "$pct" -ge 50 ]; then _c="$_YELLOW"
+    else _c="$_GREEN"
     fi
 }
 
-# Render a fixed-width progress bar with intensity color.
+# Render a fixed-width progress bar with intensity color. Sets $_barout.
 _bar() {
     local pct=$1 width=${2:-10}
     [ "$pct" -lt 0 ] && pct=0
     [ "$pct" -gt 100 ] && pct=100
     local filled=$(( pct * width / 100 ))
     local empty=$(( width - filled ))
-    local color
-    color=$(_pct_color "$pct")
-    local bar=""
-    local i=0
+    _pct_color "$pct"
+    local bar="" i=0
     while [ $i -lt $filled ]; do bar+="█"; i=$((i+1)); done
     i=0
     while [ $i -lt $empty ]; do bar+="░"; i=$((i+1)); done
-    printf '%s%s%s%s░%s' "$color" "$bar" "$_DIM" "" "$_RESET" >/dev/null
-    printf '%s%s%s' "$color" "$bar" "$_RESET"
+    _barout="${_c}${bar}${_RESET}"
 }
 
-# Determine context cap from model id (suffix `[1m]` ⇒ 1_000_000, else 200_000).
-CONTEXT_LIMIT="${CC_CONTEXT_LIMIT:-200000}"
-case "$model_id" in
-    *\[1m\]*|*1m*) CONTEXT_LIMIT=1000000 ;;
-esac
+# ── The segments come from a cache, not from fourteen processes (P0.9-c) ─────
+# Everything below that used to be computed here -- quota, reset time, context
+# tokens, today's money, route mix, proxy probe, health, last route -- is computed
+# by ONE detached process (statusline_segments.py) into a per-session key=value
+# file that this script reads with `read` (no process, no eval). Measured before:
+# ~540 ms median over 16 subprocesses; the PRD bar is 100 ms. See that module for
+# the file format and the staleness rule.
+#
+#   cache missing / other schema  -> compute once, synchronously (first render of a
+#                                    session; also every run in a fresh test HOME)
+#   cache older than 30 s, or the transcript is newer than it
+#                                 -> render the cache, start a detached refresh
+#   cache older than 90 s         -> render it with a visible "cached <age>" marker
+_SEG_TTL=30
+_SEG_STALE_MARK=90
+_seg_file="$STATE_DIR/statusline_seg_${_sid}.kv"
+_seg_py_file="$STATE_DIR/.statusline_python"
+_seg_script="${0%/*}/llm_router_statusline_segments.py"
+[ -f "$_seg_script" ] || _seg_script="${0%/*}/../statusline_segments.py"
+# bash >= 4.2 has the clock built in; macOS /bin/bash 3.2 does not and pays one `date`.
+printf -v _now '%(%s)T' -1 2>/dev/null || _now=$(date +%s 2>/dev/null)
+case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
+
+# Sets $_seg_py: the interpreter that imports llm_router (remembered in
+# .statusline_python), else the ambient python3 (money is then omitted, as before).
+_seg_resolve_py() {
+    _seg_py=""
+    [ -r "$_seg_py_file" ] && IFS= read -r _seg_py < "$_seg_py_file"
+    if [ -n "$_seg_py" ] && [ -x "$_seg_py" ]; then return 0; fi
+    _chz_find_py
+    if [ -n "$_chz_py" ]; then
+        _seg_py="$_chz_py"
+        ( umask 077; printf '%s\n' "$_seg_py" > "$_seg_py_file" ) 2>/dev/null
+    else
+        _seg_py="$(command -v python3 2>/dev/null)"
+    fi
+}
+# $1 = "sync" to wait, anything else to detach.
+_seg_run() {
+    _seg_resolve_py
+    [ -n "$_seg_py" ] || return 0
+    local -a _cmd
+    # -I: the source tree's own types.py etc. sit beside the script and would
+    # shadow the stdlib if its folder were on sys.path (as for the fast tick).
+    if [ -f "$_seg_script" ]; then _cmd=("$_seg_py" -I "$_seg_script")
+    else _cmd=("$_seg_py" -m llm_router.statusline_segments); fi
+    _cmd+=(--state "$STATE_DIR" --session "$_sid" --transcript "$transcript_path" --model "$model_id")
+    if [ "$1" = "sync" ]; then
+        "${_cmd[@]}" </dev/null >/dev/null 2>&1
+    else
+        ( "${_cmd[@]}" </dev/null >/dev/null 2>&1 & ) >/dev/null 2>&1
+    fi
+}
+
+s_v="" s_written="" s_usage="" s_session_pct="" s_weekly_pct="" s_usage_stale="" s_reset=""
+s_ctx_human="" s_ctx_pct="" s_money="" s_mix_local="" s_mix_paid="" s_proxy_down=""
+s_health="" s_last="" s_last_stale="" s_last_tok=""
+_seg_load() {
+    s_v="" s_written="" s_usage="" s_session_pct="" s_weekly_pct="" s_usage_stale="" s_reset=""
+    s_ctx_human="" s_ctx_pct="" s_money="" s_mix_local="" s_mix_paid="" s_proxy_down=""
+    s_health="" s_last="" s_last_stale="" s_last_tok=""
+    [ -r "$_seg_file" ] || return 1
+    local k v
+    while IFS='=' read -r k v || [ -n "$k" ]; do
+        case "$k" in
+            v) s_v="$v" ;;                       written) s_written="$v" ;;
+            usage) s_usage="$v" ;;               session_pct) s_session_pct="$v" ;;
+            weekly_pct) s_weekly_pct="$v" ;;     usage_stale) s_usage_stale="$v" ;;
+            reset) s_reset="$v" ;;               ctx_human) s_ctx_human="$v" ;;
+            ctx_pct) s_ctx_pct="$v" ;;           money) s_money="$v" ;;
+            mix_local) s_mix_local="$v" ;;       mix_paid) s_mix_paid="$v" ;;
+            proxy_down) s_proxy_down="$v" ;;     health) s_health="$v" ;;
+            last) s_last="$v" ;;                 last_stale) s_last_stale="$v" ;;
+            last_tok) s_last_tok="$v" ;;
+        esac
+    done < "$_seg_file"
+    [ "$s_v" = "1" ]
+}
+
+if ! _seg_load; then
+    _seg_run sync
+    _seg_load
+fi
+_seg_age=0
+case "$s_written" in ''|*[!0-9]*) ;; *) [ "$_now" -gt 0 ] && _seg_age=$(( _now - s_written )) ;; esac
+if [ "$s_v" = "1" ]; then
+    _want=""
+    [ "$_seg_age" -ge "$_SEG_TTL" ] && _want=1
+    # The transcript grows with every turn: a context figure older than the last
+    # message is wrong, so a newer transcript asks for a refresh too (rate-limited below).
+    [ -n "$transcript_path" ] && [ "$transcript_path" -nt "$_seg_file" ] && [ "$_seg_age" -ge 3 ] && _want=1
+    if [ -n "$_want" ]; then
+        # At most one launch per 5 s per session: the marker holds the last launch's epoch.
+        _spawn_file="$STATE_DIR/.statusline_seg_spawn_${_sid}"
+        _last_spawn=0
+        [ -r "$_spawn_file" ] && IFS= read -r _last_spawn < "$_spawn_file"
+        case "$_last_spawn" in ''|*[!0-9]*) _last_spawn=0 ;; esac
+        if [ $(( _now - _last_spawn )) -ge 5 ]; then
+            ( umask 077; printf '%s\n' "$_now" > "$_spawn_file" ) 2>/dev/null
+            _seg_run async
+        fi
+    fi
+fi
 
 parts=()
 
 # ── 🤖 Claude subscription usage ─────────────────────────────────────────────
-# Live updates: fire a background refresh when usage.json gets older than
-# LLM_ROUTER_USAGE_TTL_SEC seconds (default 300 = 5 minutes). The statusline
-# renders whatever's currently on disk; the next render after the
-# background refresh completes picks up fresh percentages without
-# blocking the current draw.
-#
-# The refresh script (llm_router-usage-refresh.py) talks to claude.ai via
-# AppleScript / Playwright; we fire it nohup'd + stdout/stderr suppressed
-# so a refresh failure can't bleed into the statusline output.
-LLM_ROUTER_USAGE_TTL_SEC="${LLM_ROUTER_USAGE_TTL_SEC:-300}"
-REFRESH_SCRIPT="$HOME/.claude/hooks/llm_router-usage-refresh.py"
-if [ -f "$USAGE_JSON" ] && [ -x "$REFRESH_SCRIPT" ]; then
-    file_age_s=$(CHZ_USAGE_JSON="$USAGE_JSON" python3 -c '
-import json, time, os
-try:
-    d = json.load(open(os.environ["CHZ_USAGE_JSON"]))
-    print(int(time.time() - d.get("updated_at", 0)))
-except Exception:
-    print(99999)
-' 2>/dev/null)
-    if [ -n "$file_age_s" ] && [ "$file_age_s" -gt "$LLM_ROUTER_USAGE_TTL_SEC" ]; then
-        # Background refresh — fire & forget; statusline keeps drawing.
-        #
-        # Stampede guard via a timestamp file, NOT flock: flock is a Linux-only
-        # util and is absent on macOS, where `flock -n 9 || exit 0` failed with
-        # "command not found" and silently aborted EVERY refresh — so the quota
-        # never updated. A portable "last attempt" throttle launches at most one
-        # refresh per LLM_ROUTER_REFRESH_THROTTLE_SEC (default 60s) on any OS.
-        LAST_TRY="$STATE_DIR/.usage-refresh.last"
-        throttle="${LLM_ROUTER_REFRESH_THROTTLE_SEC:-60}"
-        do_refresh=1
-        if [ -f "$LAST_TRY" ]; then
-            try_age=$(CHZ_LAST_TRY="$LAST_TRY" python3 -c 'import os,time;print(int(time.time()-os.path.getmtime(os.environ["CHZ_LAST_TRY"])))' 2>/dev/null)
-            [ -n "$try_age" ] && [ "$try_age" -lt "$throttle" ] && do_refresh=0
-        fi
-        if [ "$do_refresh" = "1" ]; then
-            : > "$LAST_TRY" 2>/dev/null
-            ( "$REFRESH_SCRIPT" </dev/null >/dev/null 2>&1 & ) >/dev/null 2>&1 &
-            disown 2>/dev/null || true
-        fi
-    fi
-fi
-
 # is_fallback marks a snapshot session-start.py wrote when the OAuth fetch
 # FAILED: session/weekly/sonnet all set to 50. Rendering that as a measurement
 # told a user pacing a five-hour window that half of it was gone when the real
-# figure was 2%. Three identical 50s is not data.
-#
-# Absence of the key means measured, matching session-start.py's own reader —
-# the refresh hook's success path omits it, so defaulting the other way would
-# blank the quota on every healthy install.
-usage_is_fallback=$(CHZ_USAGE_JSON="$USAGE_JSON" python3 -c '
-import json, os
-try:
-    d = json.load(open(os.environ["CHZ_USAGE_JSON"]))
-    print("1" if d.get("is_fallback") else "0")
-except Exception:
-    print("1")   # unreadable is not measured either
-' 2>/dev/null)
-
-if [ -f "$USAGE_JSON" ] && [ "$usage_is_fallback" = "1" ]; then
+# figure was 2%. Three identical 50s is not data. (Decided in the segments file.)
+if [ "$s_usage" = "fallback" ]; then
     # Say what is true: the number is unknown, not zero and not fifty.
     parts+=("🤖 ${_DIM}quota unknown${_RESET}")
-elif [ -f "$USAGE_JSON" ]; then
-    session_pct=$(CHZ_USAGE_JSON="$USAGE_JSON" python3 -c 'import json,os; d=json.load(open(os.environ["CHZ_USAGE_JSON"])); print("%.0f" % d.get("session_pct",0))' 2>/dev/null)
-    weekly_pct=$(CHZ_USAGE_JSON="$USAGE_JSON" python3 -c 'import json,os; d=json.load(open(os.environ["CHZ_USAGE_JSON"])); print("%.0f" % d.get("weekly_pct",0))' 2>/dev/null)
-    if [ -n "$session_pct" ]; then
-        s_color=$(_pct_color "$session_pct")
-        w_color=$(_pct_color "$weekly_pct")
-        # Append a ° marker when the displayed numbers are stale beyond
-        # the TTL — gives the user a visual cue that a refresh is in
-        # flight (or that the refresh chain is broken).
-        stale_marker=""
-        if [ -n "$file_age_s" ] && [ "$file_age_s" -gt "$LLM_ROUTER_USAGE_TTL_SEC" ]; then
-            stale_marker="${_DIM}°${_RESET}"
-        fi
-        parts+=("🤖 ${s_color}${session_pct}%${_RESET}${_DIM}/5h${_RESET} ${w_color}${weekly_pct}%${_RESET}${_DIM}/wk${_RESET}${stale_marker}")
-    fi
+elif [ "$s_usage" = "ok" ] && [ -n "$s_session_pct" ]; then
+    _pct_color "$s_session_pct"; s_color="$_c"
+    _pct_color "${s_weekly_pct:-0}"; w_color="$_c"
+    # A ° marker when the displayed numbers are older than the TTL (a refresh is
+    # in flight, or the refresh chain is broken).
+    stale_marker=""
+    [ "$s_usage_stale" = "1" ] && stale_marker="${_DIM}°${_RESET}"
+    parts+=("🤖 ${s_color}${s_session_pct}%${_RESET}${_DIM}/5h${_RESET} ${w_color}${s_weekly_pct}%${_RESET}${_DIM}/wk${_RESET}${stale_marker}")
 fi
 
 # ── ⏰ Quota reset time ──────────────────────────────────────────────────────
-#
-# This could never render for as long as it existed: it reads
-# `session_resets_at`, and usage-refresh.py reduced the OAuth response to three
-# `utilization` floats and discarded the rest, so no writer produced the key.
-#
-# The field was there the whole time. session-end.py has always read
-# data["five_hour"]["resets_at"] from the same endpoint — four surfaces consumed
-# the key and only one writer knew it existed. usage-refresh.py now persists it,
-# which lights up this segment and the three others that were waiting on it.
-if [ -f "$USAGE_JSON" ] && [ "$usage_is_fallback" != "1" ]; then
-    reset_str=$(CHZ_USAGE_JSON="$USAGE_JSON" python3 -c '
-import json, datetime, os
-try:
-    d = json.load(open(os.environ["CHZ_USAGE_JSON"]))
-    raw = d.get("session_resets_at", "")
-    if not raw:
-        raise ValueError
-    raw = raw.replace("Z", "+00:00")
-    dt = datetime.datetime.fromisoformat(raw).astimezone()
-    if dt < datetime.datetime.now(datetime.timezone.utc).astimezone():
-        raise ValueError
-    print(dt.strftime("%-I:%M%p").lower())
-except Exception:
-    pass
-' 2>/dev/null)
-    if [ -n "$reset_str" ]; then
-        parts+=("⏰ ${_YELLOW}${reset_str}${_RESET}")
-    fi
+if [ "$s_usage" = "ok" ] && [ -n "$s_reset" ]; then
+    parts+=("⏰ ${_YELLOW}${s_reset}${_RESET}")
 fi
 
 # ── 📂 Working directory ─────────────────────────────────────────────────────
 if [ -n "$session_cwd" ]; then
-    dir_name=$(basename "$session_cwd")
+    dir_name="${session_cwd%/}"; dir_name="${dir_name##*/}"
     if [ -n "$dir_name" ] && [ "$dir_name" != "/" ]; then
         parts+=("📂 ${_BLUE}${dir_name}${_RESET}")
     fi
 fi
 
 # ── 🧠 Context tokens (with progress bar) ────────────────────────────────────
-if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
-    ctx_total=$(CHZ_TRANSCRIPT="$transcript_path" python3 -c '
-import json, os
-total = None
-try:
-    with open(os.environ["CHZ_TRANSCRIPT"]) as f:
-        for line in f:
-            try:
-                d = json.loads(line)
-            except Exception:
-                continue
-            msg = d.get("message")
-            if not isinstance(msg, dict):
-                continue
-            u = msg.get("usage")
-            if not isinstance(u, dict):
-                continue
-            tokens = (
-                u.get("input_tokens", 0)
-                + u.get("cache_creation_input_tokens", 0)
-                + u.get("cache_read_input_tokens", 0)
-            )
-            if tokens > 0:
-                total = tokens
-    print(total if total is not None else 0)
-except Exception:
-    print(0)
-' 2>/dev/null)
-    if [ -n "$ctx_total" ] && [ "$ctx_total" != "0" ]; then
-        ctx_pct=$(( ctx_total * 100 / CONTEXT_LIMIT ))
-        [ "$ctx_pct" -gt 100 ] && ctx_pct=100
-        ctx_human=$(CHZ_CTX_TOTAL="$ctx_total" python3 -c '
-import os
-try:
-    n = int(os.environ["CHZ_CTX_TOTAL"])
-except (KeyError, ValueError):
-    n = 0
-if n >= 1_000_000: print("%.1fM" % (n/1_000_000))
-elif n >= 1_000:   print("%.1fk" % (n/1_000))
-else:              print(str(n))
-' 2>/dev/null)
-        ctx_bar=$(_bar "$ctx_pct" 8)
-        parts+=("🧠 ${_PINK}${ctx_human}${_RESET} ${ctx_bar} ${_DIM}${ctx_pct}%${_RESET}")
-    fi
+if [ -n "$s_ctx_human" ] && [ -n "$s_ctx_pct" ]; then
+    _bar "$s_ctx_pct" 8
+    parts+=("🧠 ${_PINK}${s_ctx_human}${_RESET} ${_barout} ${_DIM}${s_ctx_pct}%${_RESET}")
 fi
 
-# (The hand-rolled `today_saved` computation that lived here — ~80 lines of
-#  SQL over `usage` plus a JSONL fallback — was removed, not just unhooked.
-#  Leaving it would have left a second savings computation in the file that
-#  nothing rendered: dead code that still looks authoritative to the next
-#  reader, and that the INV-COST-004 guard would keep failing on.)
-
 # ── 💰 Today's savings, via the CANONICAL aggregation ────────────────────────
-#
-# INV-COST-004: "the aggregation functions are the ONLY cost totals; surfaces
-# delegate." This surface did not delegate — it ran its own SQL over the legacy
-# `usage` table and reported the result as the day's total.
-#
-# That under-reports, and dashboard_data.py says why in its own docstring:
-# "Every consumer that wants to show today's calls / tokens / savings must UNION
-# across all sources or under-report." It unions five tables — claude_usage,
-# codex_usage, gemini_usage, legacy usage, and savings_stats.
-#
-# Measured on one day:
-#     usage alone            840 rows    $78.68
-#     savings_stats alone  1,109 rows   $102.88
-#     query_window (union) 2,215 rows   $205.19   <- the total
-#
-# The surfaces were not disagreeing about arithmetic. Each queried a SUBSET and
-# presented it as the whole, which is why three renderers showed three numbers
-# and no reader could tell which was right.
-#
-# LABELLED "today", because the previous bare `$102.31` sat beside a quota
-# percentage and read as SPEND — the opposite of its meaning.
-#
-# 57ms measured, which is why it is acceptable to call from a statusline at all;
-# if that regresses, drop the figure rather than caching a stale one.
-if [ -f "$USAGE_DB" ]; then
-    # A python that can import llm_router. The statusline runs under whatever
-    # `python3` the shell finds, which on a normal install is NOT the venv the
-    # package lives in — the first version of this silently produced nothing for
-    # exactly that reason, and the "never break the statusline" fallback hid it.
-    # Resolution order: the interpreter behind the installed CLI, then the
-    # AMBIENT python3/python, then pipx's venv, then a dev checkout. Each
-    # candidate is probed with `import llm_router` — presence on PATH is not
-    # evidence it can import the package.
-    #
-    # The ambient entries were added after G-D failed: inside a wheel venv the
-    # package IS importable but `llm_router` is not on PATH, so a resolver that only
-    # looked for the CLI found nothing and silently dropped the figure. The
-    # narrow version passed locally, where a dev checkout always matched.
-    #
-    # If none can import llm_router the figure is omitted rather than guessed.
-    # The CLI is `llm-router` with a HYPHEN. This loop probed for `llm_router`
-    # with an underscore, which is not an executable that has ever existed, so
-    # the highest-signal candidate — the interpreter behind the user's own
-    # install — never matched. The same naming confusion the #72/#82 sweeps
-    # chased through install.py and doctor.py had survived here, and the
-    # "never break the statusline" fallback below hid it perfectly: on a host
-    # where no other candidate could import llm_router the money figure simply
-    # vanished, with no error anywhere.
-    #
-    # The dev-checkout fallback was also wrong by one level. This script installs
-    # to ~/.claude/hooks/, so ../../../ is $HOME's parent, not a checkout.
-    # The candidate list lives in _chz_find_py (top of this file).
-    _chz_find_py
+# INV-COST-004: the figure is shaped by dashboard_data.Summary.compact() and
+# labelled "est." -- computed in statusline_segments.py (it needs `import
+# llm_router`, ~170 ms, which is why it can never sit on this path). Omitted when
+# no interpreter can import llm_router or the day is below the spend floor.
+if [ -n "$s_money" ]; then
+    parts+=("💰 ${_GREEN}${s_money}${_RESET}")
+fi
 
-    # "today" is every session since local midnight, unioned across all five
-    # usage tables via dashboard_data.summary() — not this session, and not
-    # spend (a bare dollar figure beside a quota percentage reads as money
-    # spent, which is why the figure below always carries "est").
-    #
-    # Delegates the FORMAT as well as the total. INV-COST-004 said surfaces
-    # delegate the aggregation; it did not say they delegate the rendering, so
-    # every surface invented its own money format and the two that mattered
-    # disagreed. Summary.compact() is now the only place this dollar figure is
-    # shaped (2026-09-27 product decision: ONE labelled estimate, merging
-    # realized+unverified — never "verified"/"unverified" wording, which used
-    # to sit beside this segment via render_money()/unverified_note()).
-    _money=""
-    [ -n "$_chz_py" ] && _money=$(CHZ_DB="$USAGE_DB" "$_chz_py" -c '
-import os, pathlib
-try:
-    from llm_router.dashboard_data import SPEND_FLOOR_USD, summary
-    s = summary("today", db_path=pathlib.Path(os.environ["CHZ_DB"]))
-    # Below the floor there is nothing worth showing -- omit the segment
-    # entirely rather than print "~$0.00 est." every render. Compared
-    # numerically (estimated_usd), never by parsing the compact() string.
-    print(s.compact() + "." if s.estimated_usd >= SPEND_FLOOR_USD else "")
-except Exception:
-    print("")            # never break the statusline over a reporting figure
-' 2>/dev/null)
-    if [ -n "$_money" ]; then
-        parts+=("💰 ${_GREEN}${_money}${_RESET}")
-    fi
-
-    # ⚖ route mix — local vs paid over the last 6h. Answers "is routing working
-    # right now", which quota does not: quota says what is left, this says
-    # whether it is being earned. Green only when local carries the majority.
-    _mix=$(sqlite3 "$USAGE_DB" "
-        SELECT
-          SUM(CASE WHEN model LIKE 'ollama/%' THEN 1 ELSE 0 END),
-          SUM(CASE WHEN model NOT LIKE 'ollama/%' THEN 1 ELSE 0 END)
-        FROM usage
-        WHERE timestamp >= datetime('now', '-6 hours');" 2>/dev/null)
-    _local=$(echo "$_mix" | cut -d'|' -f1)
-    _paid=$(echo "$_mix" | cut -d'|' -f2)
-    if [ -n "$_local" ] && [ $(( ${_local:-0} + ${_paid:-0} )) -gt 0 ]; then
-        if [ "${_local:-0}" -ge "${_paid:-0}" ]; then _mixc="$_GREEN"; else _mixc="$_YELLOW"; fi
-        parts+=("⚖ ${_mixc}${_local:-0}L/${_paid:-0}P${_RESET}")
-    fi
+# ⚖ route mix — local vs paid over the last 6h. Answers "is routing working
+# right now", which quota does not. Green only when local carries the majority.
+if [ -n "$s_mix_local" ] && [ -n "$s_mix_paid" ]; then
+    if [ "${s_mix_local:-0}" -ge "${s_mix_paid:-0}" ]; then _mixc="$_GREEN"; else _mixc="$_YELLOW"; fi
+    parts+=("⚖ ${_mixc}${s_mix_local:-0}L/${s_mix_paid:-0}P${_RESET}")
 fi
 
 # ── 🛡 Enforce mode ──────────────────────────────────────────────────────────
@@ -497,127 +382,18 @@ case "$enforce" in
 esac
 
 # ── 🔌 Proxy-default down (llm-router install --proxy-default) ──────────────
-# Every session depends on this proxy once installed — a dead port fails
-# every API call, not just an opted-in one. Cheap: a raw TCP connect (0.3s
-# timeout, matching the Ollama idle-probe below), gated on the sentinel so a
-# user who never installed proxy-default pays nothing here at all.
-proxy_default_sentinel="$STATE_DIR/proxy_default.json"
-if [ -f "$proxy_default_sentinel" ]; then
-    proxy_down=$(CHZ_SENTINEL="$proxy_default_sentinel" python3 -c '
-import json, os, socket
-try:
-    d = json.load(open(os.environ["CHZ_SENTINEL"]))
-    port = int(d.get("port", 8787))
-    up = d.get("upstream_port")
-    up = int(up) if up is not None else None
-except Exception:
-    raise SystemExit  # unreadable sentinel is not evidence of a dead proxy
-def answers(p):
-    try:
-        with socket.create_connection(("127.0.0.1", p), timeout=0.3):
-            return True
-    except OSError:
-        return False
-if not answers(port):
-    print(port)
-elif up is not None and not answers(up):
-    # The fail-open shim owns `port` and accepts with the main proxy dead:
-    # calls still work but go direct, bypassing routing.
-    print(f"{up} (bypassed)")
-' 2>/dev/null)
-    if [ -n "$proxy_down" ]; then
-        parts+=("${_RED}🔌 proxy down:${proxy_down}${_RESET}")
-    fi
+# Every session depends on this proxy once installed -- a dead port fails every
+# API call. Probed (raw TCP connect, 0.3 s timeout) by statusline_segments.py,
+# gated on the sentinel; shown from the cache, so it can lag by the cache TTL.
+if [ -n "$s_proxy_down" ]; then
+    parts+=("${_RED}🔌 proxy down:${s_proxy_down}${_RESET}")
 fi
 
-# ── ❤ Health (mirrors llm_router.observability.surface_status, dependency-free) ────────────────
-# ok ✓      : a provider (cloud key, Claude subscription, or recently-active
-#             Ollama) is configured, and usage data is fresh.
-# degraded ⚠: as ok, but usage data is stale (>30 min).
-# idle ○    : no cloud key/subscription and no Ollama activity in the last 30
-#             min, but a cheap reachability probe confirms Ollama is up —
-#             quiet, not broken (GH#63).
-# down ✗    : no cloud key/subscription configured AND Ollama is unreachable —
-#             the ONLY combination that earns the outage glyph (GH#63).
-health=$(CHZ_SAVINGS_LOG="$SAVINGS_LOG" CHZ_USAGE_JSON="$USAGE_JSON" CHZ_OLLAMA_URL="${OLLAMA_URL:-http://localhost:11434}" python3 -c '
-import json, os, time
-now = time.time()
-
-# GH#63: match install_hooks.check_api_keys() truthy parsing EXACTLY. A second,
-# divergent parser of LLM_ROUTER_CLAUDE_SUBSCRIPTION is how this class of bug
-# recurs — "1"/"true"/"yes", case-insensitive, same as doctor reports.
-keys = ("ANTHROPIC_API_KEY","OPENAI_API_KEY","GEMINI_API_KEY","DEEPSEEK_API_KEY","GROQ_API_KEY")
-subscription_on = os.environ.get("LLM_ROUTER_CLAUDE_SUBSCRIPTION","").lower() in ("1","true","yes")
-providers = any(os.environ.get(k) for k in keys) or subscription_on
-
-# Recent Ollama activity is an ACTIVITY signal, kept separate from "providers"
-# so it cannot stand in for "a provider is configured" (GH#63 root cause #1)
-# while still counting as live evidence routing is working (GH#63 root cause #2
-# is handled below: its ABSENCE no longer means "down" by itself).
-ollama_recent = False
-try:
-    from datetime import datetime
-    for line in reversed(open(os.environ["CHZ_SAVINGS_LOG"]).readlines()[-200:]):
-        r = json.loads(line)
-        m = r.get("model","")
-        if isinstance(m,str) and m.startswith("ollama/"):
-            ts = datetime.fromisoformat(r["timestamp"]).timestamp()
-            if now - ts <= 1800:
-                ollama_recent = True; break
-except Exception:
-    pass
-
-# ONE definition of stale, shared with the ° marker beside the quota.
-#
-# This compared the file MTIME against 1800s while the ° marker compared
-# `updated_at` INSIDE the json against 300s: two clocks and a 6x threshold gap,
-# on one file, at opposite ends of the same rendered line. They agreed only
-# because the data was far past both. `updated_at` wins because it describes the
-# data rather than the inode — it survives a copy, and a touch without a rewrite
-# cannot make it lie.
-#
-# A snapshot flagged is_fallback is never "ok" either. A green check sitting
-# beside an invented number is the worst available combination: it actively
-# certifies the thing that is wrong.
-stale = True
-fallback = False
-try:
-    _p = os.environ["CHZ_USAGE_JSON"]
-    with open(_p) as fh:
-        _u = json.load(fh)
-    fallback = bool(_u.get("is_fallback"))
-    # updated_at when the snapshot carries it, mtime otherwise. Preferring the
-    # embedded timestamp is what makes this agree with the ° marker; falling
-    # back to mtime keeps snapshots written before that field existed from
-    # reading as infinitely stale, and keeps mtime usable as a test control.
-    _ts = _u.get("updated_at")
-    _age = (now - float(_ts)) if _ts else (now - os.path.getmtime(_p))
-    stale = _age > 1800
-except Exception:
-    pass
-
-if providers or ollama_recent:
-    print("degraded" if (stale or fallback) else "ok")
-else:
-    # Nothing configured, no recent local activity. This script runs on every
-    # render (GH#50 history), so the probe must be cheap and MUST NOT raise:
-    # short timeout, any failure at all (network, DNS, missing stdlib bits)
-    # just means "treat as unreachable" — never propagate.
-    reachable = False
-    try:
-        import urllib.request
-        url = os.environ.get("CHZ_OLLAMA_URL","http://localhost:11434").rstrip("/") + "/api/tags"
-        with urllib.request.urlopen(urllib.request.Request(url, method="GET"), timeout=0.3):
-            reachable = True
-    except Exception:
-        reachable = False
-    print("idle" if reachable else "down")
-' 2>/dev/null)
-# A glyph with no noun is not actionable. `✗` now means "no provider keys/
-# subscription in env AND Ollama unreachable" — a real fault, distinct from
-# "○ idle" (Ollama reachable, just hasn't run recently) — the same defect as
-# the unlabelled money figure it sits beside.
-case "$health" in
+# ── ❤ Health (statusline_segments.health_segment; mirrors observability.surface_status) ──
+# ok ✓ / degraded ⚠ (usage data stale) / idle ○ (no provider activity, Ollama up)
+# / down ✗ (no provider configured AND Ollama unreachable -- the only outage glyph, GH#63).
+# A glyph with no noun is not actionable, hence the words.
+case "$s_health" in
     ok)       parts+=("${_GREEN}✓${_RESET}") ;;
     degraded) parts+=("${_YELLOW}⚠ stale${_RESET}") ;;
     idle)     parts+=("${_DIM}○ idle${_RESET}") ;;
@@ -627,47 +403,18 @@ esac
 # ── 🔀 Last route (always shown) ─────────────────────────────────────────────
 # Persistent: always render the most recent route. A dim ° marker is appended
 # when the route is older than 5 min, matching the quota segment's stale cue.
-# Output format from python: "<route>\t<stale>" where stale is "1" or "".
-last_raw=$(CHZ_STATE_DIR="$STATE_DIR" python3 -c '
-import json, glob, os, time
-files = glob.glob(os.path.join(os.environ["CHZ_STATE_DIR"], "last_route_*.json"))
-if files:
-    newest = max(files, key=os.path.getmtime)
-    try:
-        d = json.load(open(newest))
-        tool = d.get("tool", "?").replace("llm_", "")
-        task = d.get("task_type", tool)
-        route = (task + ">" + tool) if task != tool else tool
-        stale = "1" if (time.time() - d.get("saved_at", 0)) >= 300 else ""
-        print(route + "\t" + stale)
-    except Exception:
-        pass
-' 2>/dev/null)
-last="${last_raw%%$'\t'*}"
-last_stale="${last_raw##*$'\t'}"
-if [ -n "$last" ]; then
+if [ -n "$s_last" ]; then
     stale_marker=""
-    [ -n "$last_stale" ] && stale_marker="${_DIM}°${_RESET}"
-    # Token count of the most recent routed call (input+output), read from the
-    # savings log (last_route_*.json carries no token counts). Compact: "1.2k tok".
-    last_tok=$(CHZ_SAVINGS_LOG="$SAVINGS_LOG" python3 -c '
-import json, os
-try:
-    for line in reversed(open(os.environ["CHZ_SAVINGS_LOG"]).readlines()[-200:]):
-        line = line.strip()
-        if not line:
-            continue
-        d = json.loads(line)
-        n = (d.get("input_tokens") or 0) + (d.get("output_tokens") or 0)
-        if n > 0:
-            print(("%.1fk tok" % (n/1000)) if n >= 1000 else ("%d tok" % n))
-        break
-except Exception:
-    pass
-' 2>/dev/null)
+    [ "$s_last_stale" = "1" ] && stale_marker="${_DIM}°${_RESET}"
     tok_seg=""
-    [ -n "$last_tok" ] && tok_seg=" ${_DIM}${last_tok}${_RESET}"
-    parts+=("🔀 ${_MAUVE}${last}${_RESET}${stale_marker}${tok_seg}")
+    [ -n "$s_last_tok" ] && tok_seg=" ${_DIM}${s_last_tok}${_RESET}"
+    parts+=("🔀 ${_MAUVE}${s_last}${_RESET}${stale_marker}${tok_seg}")
+fi
+
+# ── Cache staleness: a cache the refresher stopped updating says so ──────────
+if [ "$s_v" = "1" ] && [ "$_seg_age" -ge "$_SEG_STALE_MARK" ]; then
+    if [ "$_seg_age" -ge 120 ]; then _age_txt="$(( _seg_age / 60 ))m"; else _age_txt="${_seg_age}s"; fi
+    parts+=("${_DIM}cached ${_age_txt} ago${_RESET}")
 fi
 
 # ── Assemble with dim middle-dot separators ──────────────────────────────────

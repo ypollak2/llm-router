@@ -26,8 +26,23 @@ REPO = Path(__file__).resolve().parent.parent
 STATUSLINE = REPO / "src" / "llm_router" / "hooks" / "statusline-command.sh"
 
 
+SEGMENTS = REPO / "src" / "llm_router" / "statusline_segments.py"
+
+
 def _src() -> str:
-    return STATUSLINE.read_text()
+    """The script plus the module that computes what it prints (P0.9-c: the
+    quota, reset and health logic moved out of inline `python3 -c` blocks into
+    statusline_segments, which a detached refresher runs into a cache)."""
+    return STATUSLINE.read_text() + "\n" + SEGMENTS.read_text()
+
+
+def _fn(name: str) -> str:
+    """Source of one function of the segments module."""
+    import inspect
+
+    from llm_router import statusline_segments as seg
+
+    return inspect.getsource(getattr(seg, name))
 
 
 # ── the fabricated-quota bug ──────────────────────────────────────────────────
@@ -35,8 +50,7 @@ def _src() -> str:
 
 def test_statusline_checks_the_fallback_flag():
     """Reading session_pct without checking is_fallback is the whole defect."""
-    src = _src()
-    quota_block = src.split("🤖 Claude subscription usage")[1].split("⏰")[0]
+    quota_block = _fn("usage_segment")
     assert "is_fallback" in quota_block, (
         "the quota segment reads session_pct without checking is_fallback, so a "
         "failed OAuth fetch renders 50% as though it were measured"
@@ -109,11 +123,9 @@ def test_staleness_uses_one_clock():
     """`°` compared updated_at against 300s while the health glyph at the other
     end of the same line compared file mtime against 1800s: two clocks, a 6x
     threshold gap, one file, one render."""
-    src = _src()
-    # Only the health probe's own python block — `getmtime` is used legitimately
-    # further down to find the newest transcript file, which is a different file
-    # and a different question.
-    probe = src.split("Health (mirrors")[1].split("' 2>/dev/null)")[0]
+    # Only the health probe's own function -- `getmtime` is used legitimately
+    # elsewhere (newest last_route file), a different file and question.
+    probe = _fn("health_segment")
 
     # `updated_at` must be PREFERRED. mtime survives only as the fallback for
     # snapshots written before that field existed — otherwise an old file would
@@ -129,14 +141,12 @@ def test_staleness_uses_one_clock():
     )
 
     # And the ° marker must be reading the same field.
-    quota = src.split("🤖 Claude subscription usage")[1].split("Quota reset")[0]
-    assert "updated_at" in quota
+    assert "updated_at" in _fn("usage_segment")
 
 
 def test_health_treats_a_fallback_as_not_ok():
     """A green check beside an invented number is the worst combination."""
-    src = _src()
-    health_block = src.split("Health (mirrors")[1]
+    health_block = _fn("health_segment")
     assert "is_fallback" in health_block, (
         "health reports ok while the quota it sits beside is a placeholder"
     )
