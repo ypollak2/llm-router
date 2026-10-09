@@ -220,7 +220,12 @@ REFUSALS: list[str] = []
 
 
 def _install_network_guard() -> Callable[[], None]:
-    """Refuse DNS and every outbound connect. Returns a function that undoes it."""
+    """Refuse, at the Python ``socket`` module level: ``socket.socket.connect`` /
+    ``connect_ex``, ``socket.create_connection``, ``socket.getaddrinfo`` and
+    ``socket.gethostbyname[_ex]``. That covers urllib, http.client, httpx and
+    asyncio clients. It does NOT cover code calling the raw ``_socket`` module, a
+    UDP ``sendto`` on an unconnected socket, or a subprocess (git provenance runs
+    in one). Returns a function that undoes it."""
     saved = {
         (socket.socket, "connect"): socket.socket.connect,
         (socket.socket, "connect_ex"): socket.socket.connect_ex,
@@ -553,9 +558,14 @@ def main(argv: list[str] | None = None) -> int:
             os.environ[var] = val
         switches[s] = {"env": dict(SITES[s].no_llm_env), "why": SITES[s].no_llm_note}
 
-    _install_network_guard()
-    classifiers = {s: SITES[s].load() for s in names}
-    result = measure(prompts, classifiers, buckets)
+    undo_guard = _install_network_guard()
+    try:
+        classifiers = {s: SITES[s].load() for s in names}
+        result = measure(prompts, classifiers, buckets)
+    except NetworkRefused:
+        pass  # recorded in REFUSALS; reported below with no output written
+    finally:
+        undo_guard()
     if REFUSALS:
         print(f"{len(REFUSALS)} network attempt(s) refused ({sorted(set(REFUSALS))}); "
               "a no-network switch did not hold, no output written", file=sys.stderr)
@@ -581,8 +591,10 @@ def main(argv: list[str] | None = None) -> int:
                              "the vocabulary both sites emitted on this corpus",
         },
         "no_llm_switches": switches,
-        "network_guard": "DNS (getaddrinfo, gethostbyname[_ex]) and socket connect/connect_ex/"
-                         "create_connection refused for the whole run; any attempt fails the run",
+        "network_guard": "Python socket module: getaddrinfo, gethostbyname[_ex], socket.connect/"
+                         "connect_ex, create_connection refused during load and measure; any "
+                         "attempt fails the run (exit 4, no output). Not covered: raw _socket, "
+                         "UDP sendto, subprocesses",
         "network_refusals": len(REFUSALS),
         **({"date_cutoff": args.date_cutoff, "dates_sha256": file_sha256(args.dates)} if args.dates else {}),
         **{k: v for k, v in result.items() if k != "n"},

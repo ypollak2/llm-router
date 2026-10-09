@@ -233,7 +233,7 @@ def test_network_guard_refuses_connect_and_dns_past_except_exception(da):
             socket.getaddrinfo("example.com", 443)
         with pytest.raises(da.NetworkRefused):
             socket.create_connection(("127.0.0.1", 9))
-        assert da.REFUSALS == ["connect", "getaddrinfo", "create_connection"]
+        assert sorted(da.REFUSALS) == sorted(["connect", "getaddrinfo", "create_connection"])
     finally:
         undo()
         if sock is not None:
@@ -283,3 +283,33 @@ def test_freeze_dates_sidecar_is_aligned_and_textless(da, tmp_path, monkeypatch,
     assert da.freeze_dates(corpus, side) == 3
     with pytest.raises(ValueError):
         da.read_dates(side, "0" * 64, 4)
+
+
+@pytest.mark.parametrize("when", ["load", "classify"])
+def test_unswallowed_refusal_exits_4_with_no_output(da, tmp_path, monkeypatch, when):
+    """A connection nobody catches propagates NetworkRefused (a BaseException);
+    main() must turn that into exit 4 with no output, not a traceback."""
+    import socket
+
+    def connect():
+        socket.create_connection(("127.0.0.1", 9))
+
+    def load():
+        if when == "load":
+            connect()
+        return lambda text: (connect(), ("code", "simple"))[1]
+
+    monkeypatch.setitem(da.SITES, "net", da.Site("net", "test site that connects", load))
+    monkeypatch.setitem(da.SITES, "quiet", da.Site("quiet", "test site", lambda: _site(A)))
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text("".join(json.dumps({"i": i, "text": p}) + "\n" for i, p in enumerate(PROMPTS)),
+                      encoding="utf-8")
+    out = tmp_path / "o.json"
+    da.REFUSALS.clear()
+    try:
+        assert da.main(["--corpus", str(corpus), "--sites", "net,quiet", "--out", str(out)]) == 4
+        assert da.REFUSALS
+    finally:
+        da.REFUSALS.clear()
+    assert not out.exists()
+    assert socket.getaddrinfo("127.0.0.1", 9)  # guard undone after the run
