@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- test infra (LINEAGE-PERF-1, docs/bugs/LINEAGE-PERF-1.md): the `LineageStore.record` p95 <= 11 ms budget failed twice on shared
+  runners (p95 64.77 and 34.61 ms, n=50, code unchanged) because it measured fsync latency. New deterministic test
+  `tests/qa/test_lineage_record_mechanism.py` pins connects, closes, transactions, statements, python fsyncs and the
+  synchronous level per `record()` call; the timing test is renamed `test_perf_lineage_record_p50_budget` and asserts p50. No product change.
 - hooks fail open on a non-object payload (docs/bugs/HOOKS-FAILOPEN-1.md): `[]`, `"x"` or `123` on stdin made
   agent-depth-release, agent-route, cc-usage-track, enforce-route, subagent-start and usage-refresh exit 1 with a traceback
   (bash-compress and playwright-compress on `123`; usage-refresh also on invalid JSON). They now exit 0 silently, like an
