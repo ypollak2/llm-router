@@ -1290,6 +1290,11 @@ def in_process_hook_latency(state: Path) -> dict[str, dict]:
     return out
 
 
+#: The labels every door's vocabulary has (the proxy/gateway rules classifier has no
+#: introspect / coordinate / coordination).
+SHARED_LABELS = frozenset({"query", "research", "analyze", "code", "generate"})
+
+
 def agreement_matrix(decisions: list[dict], steps: tuple[str, ...] | None = None) -> dict[str, dict]:
     """Pairwise disagreement on records both doors decided. task_type is compared as each
     door labels it (the vocabularies differ: the proxy has no introspect/coordinate);
@@ -1309,6 +1314,9 @@ def agreement_matrix(decisions: list[dict], steps: tuple[str, ...] | None = None
             for field, name in (("task_type", "task_type"), ("tier_norm", "tier")):
                 pairs = [(v[a].get(field), v[b].get(field)) for v in both if v[a].get(field) and v[b].get(field)]
                 res[name] = rate(sum(1 for x, y in pairs if x != y), len(pairs))
+            shared = [(v[a]["task_type"], v[b]["task_type"]) for v in both
+                      if v[a].get("task_type") in SHARED_LABELS and v[b].get("task_type") in SHARED_LABELS]
+            res["task_type_shared_labels"] = rate(sum(1 for x, y in shared if x != y), len(shared))
             res["task_type_pairs"] = dict(sorted(Counter(
                 f"{v[a].get('task_type')}|{v[b].get('task_type')}" for v in both
                 if v[a].get("task_type") and v[b].get("task_type")).items()))
@@ -1344,7 +1352,9 @@ def render_md(summary: dict) -> str:
         f"{det['synthetic_tagging']['rows_claiming_real']}; writers with no tag field at all: "
         f"{det['synthetic_tagging']['writers_without_any_tag_field']}",
         f"- **hook vs proxy task_type on turn_first**: "
-        f"{_fmt_rate((det['headline']['hook_vs_proxy_turn_first'] or {}).get('task_type'))}", "",
+        f"{_fmt_rate((det['headline']['hook_vs_proxy_turn_first'] or {}).get('task_type'))}; both labels in the "
+        f"shared 5: {_fmt_rate((det['headline']['hook_vs_proxy_turn_first'] or {}).get('task_type_shared_labels'))}",
+        "",
         "## Per door", "",
         "| door | calls | ok | task_type | tier | complexity | layer | p50 ms | p95 ms | n |",
         "|---|---|---|---|---|---|---|---|---|---|",
@@ -1362,9 +1372,11 @@ def render_md(summary: dict) -> str:
                      f"layer {d['layer']}")
     for title, key in (("turn_first only", "turn_first"), ("all steps", "all")):
         lines += ["", f"## Door agreement, {title} (disagreement rate, Wilson 95% CI)", "",
-                  "| pair | records | task_type disagree | tier disagree |", "|---|---|---|---|"]
+                  "| pair | records | task_type disagree | task_type disagree, both labels in the shared 5 | "
+                  "tier disagree |", "|---|---|---|---|---|"]
         for pair, r in det["agreement"][key].items():
-            lines.append(f"| {pair} | {r['records']} | {_fmt_rate(r['task_type'])} | {_fmt_rate(r['tier'])} |")
+            lines.append(f"| {pair} | {r['records']} | {_fmt_rate(r['task_type'])} | "
+                         f"{_fmt_rate(r['task_type_shared_labels'])} | {_fmt_rate(r['tier'])} |")
     env = det["proxy_envelope"]
     lines += ["", "## Proxy label vs request envelope (turn_first)", "",
               f"- proxy task_type with system+tools: {env.get('full')}",
