@@ -21,6 +21,11 @@ context, else the last two buffered messages) and the caller's project scope.
 ``store``. Without Ollama the cache still works on an exact match:
 sha256(normalised text) + ``ctx_hash``, stored with an empty embedding.
 Every lookup is counted in ``semantic_cache_lookups`` so the hit rate has an n.
+
+This is the PRD's "result cache" too (D-R8-5): one store, keyed on context. A
+second store would double the stale-answer surface. P0.5-b: each lookup row
+carries its ``project_scope``, so the hit rate is reported per project with its
+n (``per_project_hit_stats`` / ``per_project_lines``).
 """
 
 from __future__ import annotations
@@ -152,6 +157,15 @@ async def _ensure_project_scope_column(db) -> None:
                 await db.commit()
         await db.execute(CREATE_SEMANTIC_CACHE_LOOKUPS_TABLE)
         await db.commit()
+        # P0.5-b: per-project lookups. Rows logged before this column existed
+        # keep '' and are reported as unscoped, never attributed to a project.
+        cur = await db.execute("PRAGMA table_info(semantic_cache_lookups)")
+        if "project_scope" not in {row[1] for row in await cur.fetchall()}:
+            await db.execute(
+                "ALTER TABLE semantic_cache_lookups "
+                "ADD COLUMN project_scope TEXT NOT NULL DEFAULT ''"
+            )
+            await db.commit()
     except Exception as exc:  # noqa: BLE001 — migration failure must not break routing
         log.debug("semantic_cache project_scope migration skipped: %s", exc)
 
@@ -164,7 +178,8 @@ CREATE TABLE IF NOT EXISTS semantic_cache_lookups (
     ts REAL NOT NULL,
     task_type TEXT NOT NULL,
     hit INTEGER NOT NULL,
-    saved_usd REAL NOT NULL DEFAULT 0
+    saved_usd REAL NOT NULL DEFAULT 0,
+    project_scope TEXT NOT NULL DEFAULT ''
 )
 """
 
@@ -544,10 +559,10 @@ async def check(
                     (now, best_row[0]),
                 )
             await db.execute(
-                "INSERT INTO semantic_cache_lookups (ts, task_type, hit, saved_usd) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT INTO semantic_cache_lookups "
+                "(ts, task_type, hit, saved_usd, project_scope) VALUES (?, ?, ?, ?, ?)",
                 (now, task_type.value, 1 if best_row is not None else 0,
-                 float(best_row[3] or 0.0) if best_row is not None else 0.0),
+                 float(best_row[3] or 0.0) if best_row is not None else 0.0, scope),
             )
             await db.commit()
         finally:
@@ -699,3 +714,75 @@ async def evict(prompt: str, task_type: "TaskType") -> int:
     except Exception as exc:  # noqa: BLE001 — eviction must never break a route
         log.debug("semantic_cache eviction failed: %s", exc)
         return 0
+
+
+# ── P0.5-b: per-project hit rate with its n ────────────────────────────────
+
+#: Below this many lookups a project's hit rate is "not informative": counts are
+#: printed, a percentage is not (AMEND-R8 A.5, P0.5-b).
+MIN_INFORMATIVE_LOOKUPS = 20
+
+
+def per_project_hit_stats(
+    db_path: "str | Path", *, since: float | None = None, until: float | None = None,
+) -> list[dict]:
+    """``{project_scope, lookups, hits, n}`` per project from ``semantic_cache_lookups``.
+
+    Read-only (``mode=ro``): a reporting command never creates or migrates the
+    database. A table logged before P0.5-b has no ``project_scope`` column; its
+    rows are reported under ``''`` (unscoped). Missing file or table -> ``[]``.
+    Sorted by lookups, most first.
+    """
+    import sqlite3
+
+    path = Path(db_path)
+    if not path.exists():
+        return []
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(semantic_cache_lookups)")}
+        if not cols:
+            return []
+        scope_col = "project_scope" if "project_scope" in cols else "''"
+        where, args = [], []
+        if since is not None:
+            where.append("ts >= ?")
+            args.append(since)
+        if until is not None:
+            where.append("ts <= ?")
+            args.append(until)
+        sql = (f"SELECT {scope_col} AS scope, COUNT(*), COALESCE(SUM(hit), 0) "
+               f"FROM semantic_cache_lookups "
+               f"{'WHERE ' + ' AND '.join(where) if where else ''} "
+               f"GROUP BY scope ORDER BY COUNT(*) DESC, scope")
+        rows = conn.execute(sql, args).fetchall()
+    finally:
+        conn.close()
+    return [{"project_scope": scope or "", "lookups": int(n), "hits": int(h), "n": int(n)}
+            for scope, n, h in rows]
+
+
+def per_project_lines(stats: list[dict], *, current_scope: str | None = None) -> list[str]:
+    """Render ``per_project_hit_stats``: one line per project, n always shown.
+
+    A project with fewer than ``MIN_INFORMATIVE_LOOKUPS`` lookups prints
+    "not informative" and no percentage.
+    """
+    total = sum(s["n"] for s in stats)
+    lines = [f"semantic cache (= result cache) hit rate per project: "
+             f"n={total} lookup(s) in {len(stats)} project(s)"]
+    for s in stats:
+        scope = s["project_scope"]
+        if not scope:
+            name = "unscoped (logged before per-project counting)"
+        else:
+            name = f"project {scope[:12]}"
+            if current_scope and scope == current_scope:
+                name += " (this project)"
+        counts = f"lookups={s['lookups']} hits={s['hits']} n={s['n']}"
+        if s["n"] < MIN_INFORMATIVE_LOOKUPS:
+            verdict = f"not informative (n < {MIN_INFORMATIVE_LOOKUPS})"
+        else:
+            verdict = f"hit rate {s['hits'] / s['n'] * 100:.1f}%"
+        lines.append(f"  {name}: {counts} -- {verdict}")
+    return lines

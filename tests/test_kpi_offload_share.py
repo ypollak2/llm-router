@@ -250,7 +250,16 @@ def test_other_kpis_are_byte_identical_to_the_pre_o3_golden():
     full = kpi.render_scorecard(card).split("\n")
     assert o3_lines and o3_lines <= set(full)
     # P0.14-a: the proxy ledger liveness line is new and time-dependent, so it is not in the golden.
-    full = [ln for ln in full if not ln.startswith(("proxy_rows_24h:", "WARN proxy ledger"))]
+    # P0.5-b: so is the per-project semantic-cache block (it reads usage.db, not the proxy ledger);
+    # its own tests are tests/test_p05b_cache_hit_per_project.py.
+    full = [ln for ln in full if not ln.startswith(("proxy_rows_24h:", "WARN proxy ledger",
+                                                    "semantic cache (= result cache)"))]
+    # P0.9-g: the sync-hook wall/live gate lines are new and outside "kpis"; not in the golden.
+    from llm_router import hook_wall
+
+    p09g_lines = set(hook_wall.render_lines(card["p09g"]))
+    assert p09g_lines and p09g_lines <= set(full)
+    full = [ln for ln in full if ln not in p09g_lines]
     assert "\n".join(ln for ln in full if ln not in o3_lines) == \
         (GOLDEN / "kpi_pre_o3_scorecard.txt").read_text()
     health = kpi.compute_health(card)

@@ -13,13 +13,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- hooks (PLAN v16 P0.9-g, AMEND R8 A.3): `scripts/hook_wall.py` (`llm_router.hook_wall`) times the five
+  sync hooks with no latency MUST (`enforce-route`, `bash-compress`, `playwright-compress`,
+  `cc-usage-track`, `subagent-start`) from outside, process start to exit, cold and warm, with
+  `os.getloadavg()` before and after every run (read outside the timed span). Payload fixtures in
+  `tests/fixtures/hook_payloads/`. Each hook's `hook_latency.jsonl` row now carries `load1`, read after
+  the clock stops. `llm-router kpi` prints a P0.9-g line per hook: wall cold p95 (n >= 200) AND live
+  `elapsed_ms` p95 (n >= 200; 30 for `cc-usage-track` / `subagent-start`) against 300 ms, rows above
+  load 4 excluded and counted.
+- semantic cache (PLAN v16 P0.5-b, R-CTX-7; the semantic cache is the result cache, D-R8-5):
+  `semantic_cache_lookups` gains `project_scope` (additive migration; earlier rows are reported as
+  unscoped). `llm-router kpi` and `llm_router_status(view="cache")` print lookups, hits and n per
+  project; a project with fewer than 20 lookups prints "not informative" and no percentage.
 - doctor (PLAN v16 R8 P0.14-c, owner decision D-R8-4 = explicit only): `llm-router doctor --fix-routing`
   writes the one key `env.ANTHROPIC_BASE_URL` into `~/.claude/settings.json` (backup first, diff
   shown, y/N or `--yes`) only when proxy-default is installed and enabled, `routing_opt_out` is unset,
   the key is absent, no project settings file or environment value overrides it, and both the shim
   and the main proxy answer; otherwise it refuses with the reason. `--decline` sets
   `routing_opt_out`, which also silences SessionStart's "routing is OFF" warning. No hook or plain
-  install runs it. SessionStart (hook v30) appends one `observe` row per session to
+  install runs it. SessionStart (hook v31) appends one `observe` row per session to
   `~/.llm-router/settings_writes.jsonl` (key presence, env sha256, mtime) and the repair appends a
   `write` row, so the next unexplained removal is bracketed.
 - verifier PR C (SHADOW, opt-in): pending_verify queue, detached `verify_worker`, Codex marker. **Off unless

@@ -149,7 +149,7 @@ async def test_llm_act_wait_false_returns_job_id_and_job_polls_to_result(slow_ac
     returned_in = time.monotonic() - t0
     assert returned_in < 1.0, returned_in
     job_id = handle["job_id"]
-    assert handle["status"] == "running"
+    assert handle["status"] == "queued"  # task not started yet (#357 review)
 
     first = await llm_router_session(action="job", id=job_id)
     assert first["status"] == "running" and first["result"] is None
@@ -200,20 +200,47 @@ async def test_llm_local_task_loop_and_check_do_not_block_the_loop(tmp_path, mon
     assert max(lags) <= MAX_LAG_S
 
 
-async def test_llm_local_task_wait_false_returns_job(tmp_path, monkeypatch):
-    from llm_router.tools import local_task as lt
+async def _poll(job_id, want, deadline_s=60):
+    """Poll until the job's status is in *want* (no wall-clock assumption on speed)."""
     from llm_router.tools.consolidated import llm_router_session
+    end = time.monotonic() + deadline_s
+    job = await llm_router_session(action="job", id=job_id)
+    while job["status"] not in want and time.monotonic() < end:
+        await asyncio.sleep(0.02)
+        job = await llm_router_session(action="job", id=job_id)
+    assert job["status"] in want, job
+    return job
 
+
+async def test_llm_local_task_wait_false_returns_job(tmp_path, monkeypatch):
+    """Deterministic queued -> running -> done: a 1-worker pool is held busy by a
+    blocker, so the job provably waits in the queue; nothing here is timing-based."""
+    import concurrent.futures
+    import threading
+    from llm_router import agent_exec
+    from llm_router.tools import local_task as lt
+
+    monkeypatch.setattr(agent_exec, "_executor",
+                        concurrent.futures.ThreadPoolExecutor(max_workers=1))
+    blocker_in, release_blocker = threading.Event(), threading.Event()
+    pool_blocker = agent_exec._pool().submit(
+        lambda: (blocker_in.set(), release_blocker.wait(60)))
+    assert blocker_in.wait(10)
     monkeypatch.setattr("llm_router.hooks.agent_loop.run_agent_loop",
-                        lambda **kw: (time.sleep(0.5), "ok")[1])
-    handle = json.loads(await lt.llm_local_task("o", str(tmp_path), wait=False))
-    job = await llm_router_session(action="job", id=handle["job_id"])
-    assert job["status"] == "running"
-    deadline = time.monotonic() + 20
-    while job["status"] == "running" and time.monotonic() < deadline:
-        await asyncio.sleep(0.05)
-        job = await llm_router_session(action="job", id=handle["job_id"])
-    assert job["status"] == "done" and job["tool"] == "llm_local_task"
+                        lambda **kw: "ok")
+    try:
+        handle = json.loads(await lt.llm_local_task("o", str(tmp_path), wait=False))
+        job = await _poll(handle["job_id"], ("queued",))
+        await asyncio.sleep(0.2)  # still queued: the only worker is busy
+        assert (await _poll(handle["job_id"], ("queued",)))["status"] == "queued"
+        release_blocker.set()
+        job = await _poll(handle["job_id"], ("done", "failed"))
+    finally:
+        release_blocker.set()
+        pool_blocker.result(10)
+        ex, agent_exec._executor = agent_exec._executor, None
+        ex.shutdown(wait=True)
+    assert job["status"] == "done" and job["tool"] == "llm_local_task", job
     assert job["result"]["status"] == "proposed"
 
 

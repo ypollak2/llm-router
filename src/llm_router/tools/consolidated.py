@@ -139,8 +139,10 @@ async def llm(
 async def llm_router_status(view: str = "summary", period: str = "today") -> str:
     """Read-only status/observability door — collapses the many llm_* reporting
     tools into one *view* selector: summary/savings · session_savings · spend ·
-    usage · health · providers · gain. The old tools remain as aliases underneath."""
+    usage · health · providers · gain · cache. The old tools remain as aliases underneath."""
     v = (view or "summary").lower()
+    if v == "cache":
+        return _cache_view(period)
     if v in ("savings", "summary"):
         return await llm_savings()
     if v in ("session_savings", "session-savings"):
@@ -156,6 +158,26 @@ async def llm_router_status(view: str = "summary", period: str = "today") -> str
     if v == "gain":
         return await llm_gain(period=period)
     return await llm_savings()
+
+
+_CACHE_PERIOD_DAYS = {"today": 1, "week": 7, "month": 30}
+
+
+def _cache_view(period: str) -> str:
+    """P0.5-b: semantic (= result) cache hit rate per project, n always shown.
+    ``period`` today/week/month = last 1/7/30 days; anything else = all retained."""
+    import time
+
+    from llm_router import semantic_cache as sc
+    from llm_router.config import get_config
+
+    days = _CACHE_PERIOD_DAYS.get((period or "").lower())
+    since = time.time() - days * 86_400 if days else None
+    stats = sc.per_project_hit_stats(get_config().llm_router_db_path, since=since)
+    label = f"last {days} day(s)" if days else "all retained lookups"
+    lines = sc.per_project_lines(stats, current_scope=sc._project_scope())
+    lines[0] += f" [{label}]"
+    return "\n".join(lines)
 
 
 async def llm_router_admin(action: str, value: str = "") -> str:
@@ -186,7 +208,9 @@ async def llm_router_session(
     richer params — call those tools directly. Old tools stay registered underneath."""
     a = (action or "").lower()
     if a == "job":
-        from llm_router.jobs import get_job
+        from llm_router.jobs import get_job, list_detached
+        if id == "detached":
+            return {"detached": list_detached()}
         return get_job(id or session_id)
     if a == "list":
         return await llm_router_agent_list()

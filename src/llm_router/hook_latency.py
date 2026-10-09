@@ -31,6 +31,12 @@ Outside a hook process (no ``begin`` call: the MCP server, tests) every phase ca
 is a no-op, so nothing accumulates in a long-lived process. Cost: two clock reads
 and one dict update per phase, measured in ``scripts/bench_hook_latency.py micro``.
 
+LOAD (PLAN v16 P0.9-g). A hook row also carries ``load1``, the 1-minute load
+average (``os.getloadavg()[0]``) read in the exit handler after the clock has
+stopped, so it is not inside ``elapsed_ms``. A reader excludes and counts rows
+above the contention bar (``hook_wall.MAX_LOAD``) instead of averaging over a
+burst (AMEND R8 A.3). ``record-raw`` rows (the statusline) do not carry it.
+
 ``timed_out`` means ``elapsed_ms >= HOOK_TIMEOUTS_MS[hook]`` (the host's
 timeout, 60 s by default): the invocation used all the time the host gives it.
 The PRD latency bar a hook is judged against is ``HOOK_BUDGETS_MS``.
@@ -181,6 +187,7 @@ _OFF_VALUES = frozenset({"0", "off", "false", "no", "disabled"})
 # module (the process clock is shared with pytest, xdist and the logger).
 _monotonic = time.monotonic
 _wall = time.time
+_getloadavg = getattr(os, "getloadavg", None)  # absent on Windows: no load1 on the row
 
 #: The one invocation this process is timing: set by ``begin``, read at exit.
 _pending: dict | None = None
@@ -441,13 +448,22 @@ def _finish() -> None:
         added = max(0.0, elapsed - model_ms(phases, _nested_model_ms))
     record(pending["hook"], pending["event"], elapsed, phases_ms=phases,
            router_added_ms=added, session_id=_session_id, host=pending.get("host"),
-           base_url=pending.get("base_url"))
+           base_url=pending.get("base_url"), load1=_load1())
+
+
+def _load1() -> float | None:
+    """The 1-minute load average, or None where the OS cannot say. Never raises."""
+    try:
+        return _getloadavg()[0]
+    except Exception:  # noqa: BLE001 -- timing must never break the hook
+        return None
 
 
 def record(
     hook: str, event: str, elapsed_ms: float, *, now: float | None = None,
     phases_ms: dict[str, float] | None = None, router_added_ms: float | None = None,
     session_id: str | None = None, host: str | None = None, base_url: str | None = None,
+    load1: float | None = None,
 ) -> bool:
     """Append one row. Returns True when it was written. Never raises."""
     try:
@@ -471,6 +487,8 @@ def record(
             row["host"] = host
         if isinstance(base_url, str) and base_url:
             row["base_url"] = base_url
+        if isinstance(load1, (int, float)) and not isinstance(load1, bool) and load1 == load1:
+            row["load1"] = round(float(load1), 2)
         capped_log.append(
             store_path(), (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8"), max_bytes()
         )

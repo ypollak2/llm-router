@@ -1,0 +1,19 @@
+{
+  "session_id": "5f0c9a2e-7b31-4c8d-9e46-1a2b3c4d5e6f",
+  "transcript_path": "/tmp/hook-wall-fixture/projects/-Users-dev-llm-router/5f0c9a2e-7b31-4c8d-9e46-1a2b3c4d5e6f.jsonl",
+  "cwd": "/Users/dev/llm-router",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "uv run pytest -o addopts='' tests/test_p09_hook_budgets.py -v -k 'not statusline'",
+    "description": "Run the P0.9 budget tests"
+  },
+  "tool_response": {
+    "stdout": "============================= test session starts ==============================\nplatform darwin -- Python 3.14.6, pytest-9.0.2, pluggy-1.6.0 -- /Users/dev/llm-router/.venv/bin/python\nhypothesis profile 'default'\nrootdir: /Users/dev/llm-router\nconfigfile: pyproject.toml\nplugins: xdist-3.8.0, timeout-2.4.0, asyncio-1.3.0, hypothesis-6.165.10, anyio-4.13.0\ntimeout: 30.0s\ntimeout method: signal\ntimeout func_only: False\nasyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=session, asyncio_default_test_loop_scope=function\ncollecting ... collected 28 items / 5 deselected / 23 selected\n\ntests/test_p09_hook_budgets.py::test_budgets_are_the_prd_bars PASSED     [  4%]\ntests/test_p09_hook_budgets.py::test_timed_out_still_means_the_host_timeout_not_the_bar PASSED [  8%]\ntests/test_p09_hook_budgets.py::test_kpi_fails_status_bar_at_the_measured_live_p95 PASSED [ 13%]\ntests/test_p09_hook_budgets.py::test_kpi_judges_router_added_and_reports_it_for_a_10s_draft PASSED [ 17%]\ntests/test_p09_hook_budgets.py::test_kpi_says_the_agent_route_bar_is_deferred PASSED [ 21%]\ntests/test_p09_hook_budgets.py::test_the_row_carries_router_added_with_a_nested_cold_wait_subtracted_once PASSED [ 26%]\ntests/test_p09_hook_budgets.py::test_a_cold_wait_outside_any_model_phase_is_subtracted PASSED [ 30%]\ntests/test_p09_hook_budgets.py::test_zce_model_counts_as_model_time PASSED [ 34%]\ntests/test_p09_hook_budgets.py::test_a_row_without_model_phases_is_unchanged_and_judged_on_elapsed PASSED [ 39%]\ntests/test_p09_hook_budgets.py::test_router_added_for_rows_written_before_the_field_existed PASSED [ 43%]\ntests/test_p09_hook_budgets.py::test_set_session_puts_the_session_id_on_the_row PASSED [ 47%]\ntests/test_p09_hook_budgets.py::test_zero_claude_edit_times_its_model_call_as_zce_model PASSED [ 52%]\ntests/test_p09_hook_budgets.py::test_record_raw_writes_one_row PASSED    [ 56%]\ntests/test_p09_hook_budgets.py::test_record_raw_rejects_bad_usage_without_writing[args0] PASSED [ 60%]\ntests/test_p09_hook_budgets.py::test_record_raw_rejects_bad_usage_without_writing[args1] PASSED [ 65%]\ntests/test_p09_hook_budgets.py::test_record_raw_rejects_bad_usage_without_writing[args2] PASSED [ 69%]\ntests/test_p09_hook_budgets.py::test_record_raw_rejects_bad_usage_without_writing[args3] PASSED [ 73%]\ntests/test_p09_hook_budgets.py::test_record_raw_rejects_bad_usage_without_writing[args4] PASSED [ 78%]\ntests/test_p09_hook_budgets.py::test_record_raw_puts_the_session_id_on_the_row PASSED [ 82%]\ntests/test_p09_hook_budgets.py::test_record_raw_leaves_an_empty_session_id_off_the_row PASSED [ 86%]\ntests/test_p09_hook_budgets.py::test_record_raw_rejects_six_args PASSED  [ 91%]\ntests/test_p09_hook_budgets.py::test_the_unsampled_path_starts_no_process_and_a_sampled_call_two_clock_reads PASSED [ 95%]\ntests/test_p09_hook_budgets.py::test_the_timing_wrapper_adds_under_5ms_per_call PASSED [100%]\n\n======================= 23 passed, 5 deselected in 7.21s =======================\n",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false
+  },
+  "tool_use_id": "toolu_01HookWallBashCompress001"
+}

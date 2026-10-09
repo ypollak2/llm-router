@@ -53,7 +53,13 @@ def _pool() -> concurrent.futures.ThreadPoolExecutor:
 
 def _root_lock(root: str | Path) -> asyncio.Lock:
     per_loop = _locks.setdefault(asyncio.get_running_loop(), {})
-    return per_loop.setdefault(str(Path(root).expanduser().resolve()), asyncio.Lock())
+    root = Path(root).expanduser().resolve()
+    try:
+        stat = root.stat()
+        key = (stat.st_dev, stat.st_ino)
+    except OSError:
+        key = os.path.normcase(os.path.realpath(root))
+    return per_loop.setdefault(str(key), asyncio.Lock())
 
 
 async def run_agent(fn: Callable[..., Any], *args: Any, root: str | Path, **kw: Any) -> Any:
