@@ -94,7 +94,9 @@ it would attribute an answer to the wrong conversation. Ids only, shape-checked
 as NULL (`src/llm_router/call_identity.py`).
 
 *Which proxy calls are turns* (M0.3b; the owner's definition, PLAN section 1.2 O3). A turn is a proxy
-row that is not a side call and whose `step_class` is not `continuation`, minus sub-agent first calls.
+row that is not a side call and whose `step_class` is `turn_first`, minus sub-agent first calls. A row with
+no `step_class` (written before GE1) or labelled `subagent_first` is never a turn; they are counted in
+`o3.excluded.no_step_class` and `o3.excluded.step_subagent_first` (`docs/bugs/O3-STEP-1.md`).
 The proxy row's `msg_id` is joined to the transcript's assistant `message.id` (`o3_transcripts`). The
 join changes exactly one thing; the rest of its roles are only counted:
 

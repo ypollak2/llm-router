@@ -1877,6 +1877,8 @@ def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[
         res["excluded"] = {"side_call": built["side_call_excluded"], "untagged": built["untagged"],
                            "other_kind": built["other_kind"], "local_no_session": built["local_no_session"],
                            "subagent_first": built["subagent_first"],
+                           "no_step_class": built["no_step_class"],
+                           "step_subagent_first": built["step_subagent_first"],
                            "edit_no_session": built["edit_no_session"],
                            "edit_no_turn_id": built["edit_no_turn_id"],
                            "local_failed": built["local_failed"],
@@ -1890,6 +1892,8 @@ def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[
                 f"after them (counted as not redone, may still change); excluded: "
                 f"{built['side_call_excluded']:,} Claude Code side call(s), "
                 f"{built['subagent_first']:,} sub-agent first call(s), "
+                f"{built['no_step_class']:,} with no step_class (not a turn), "
+                f"{built['step_subagent_first']:,} labelled subagent_first, "
                 f"{built['untagged']:,} untagged, {built['other_kind']:,} other-kind; "
                 f"kept in n although the transcript says they were not a typed prompt's first answer: "
                 f"{built['meta_first']:,} injected-input first call(s) (slash command, sub-agent "

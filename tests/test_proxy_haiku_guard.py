@@ -33,7 +33,7 @@ def _turn(sid: str, ts: float, *, model: str = HAIKU, reason: str = "haiku_rewri
     return {"ts": ts, "session_id": sid, "session_kind": "organic", "decision": "forwarded",
             "upstream_status": 200, "requested_model": SONNET, "served_model": model,
             "tier": "haiku" if "haiku" in model else "sonnet", "tier_reason": reason,
-            "step_class": "first", "msg_id": f"msg_{sid}_{int(ts)}", **extra}
+            "step_class": "turn_first", "msg_id": f"msg_{sid}_{int(ts)}", **extra}
 
 
 def _redo_ledger(n_turns: int, n_redone: int, now: float = NOW) -> list[dict]:

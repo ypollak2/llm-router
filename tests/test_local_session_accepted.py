@@ -900,7 +900,7 @@ def test_dropped_local_answers_are_counted_on_all_three_local_sources():
 
     def proxy(i, sid, decision):
         return {"ts": t + i, "session_id": sid, "decision": decision, "msg_id": f"m{i}",
-                "step_class": "turn-first"}
+                "step_class": "turn_first"}
 
     def edit(i, sid):
         return {"ts": t + 100 + i, "session_id": sid, "turn_id": f"turn{i}", "source": "zero_claude",
@@ -926,7 +926,7 @@ def test_dropped_local_answers_are_counted_per_turn_not_per_row():
 
     def rows(sid):
         return [{"ts": t + i, "session_id": sid, "decision": "served", "msg_id": f"{sid}-m{i}",
-                 "step_class": "turn-first" if i == 0 else "continuation"} for i in range(3)]
+                 "step_class": "turn_first" if i == 0 else "continuation"} for i in range(3)]
 
     def edits(sid):
         return [{"ts": t + 100 + i, "session_id": sid, "turn_id": "turn1", "source": "zero_claude",

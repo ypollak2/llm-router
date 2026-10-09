@@ -106,6 +106,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   See `docs/bugs/SYSONE-WARM-1.md`.
 
 ### Changed
+- kpi (`docs/bugs/O3-STEP-1.md`): O3 starts a human turn only at a row with `step_class == turn_first`
+  (minus transcript sub-agent calls, as KPIS.md already says). Null-step rows (pre-GE1) and
+  `subagent_first` rows are per-call units only: they no longer count as turns or end a redo window.
+  They are counted and printed (`o3.excluded.no_step_class`, `o3.excluded.step_subagent_first`; keys
+  added, none renamed). The golden kpi files hold no O3 line and do not change.
 - kpi (PLAN v16 P0.9-e, `docs/bugs/P09-11.md`): G1_proxy's turn-first segment counts only
   `step_class == turn_first` rows and measures the P0.9-e decision (sum of `tier_phases_ms` over
   `proxy.tiers.DECISION_PHASES`), not `tier_decision_s`. Null-step rows (pre-GE1 / side calls),

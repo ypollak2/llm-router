@@ -509,3 +509,48 @@ def test_no_bound_when_session_kind_is_complete():
     _ledger(rows)
     o3 = kpi.compute_scorecard(days=7, now=NOW, schema_since=0.0)["o3"]
     assert "bound" not in o3
+
+
+# ── O3-STEP-1: a null step_class is not a kind, so it cannot start a turn ───────────────────────
+
+def test_null_step_and_subagent_first_rows_cannot_start_a_turn():
+    """Red on main: null-step rows (pre-GE1 rows) and ``subagent_first`` rows counted as turns, and as
+    human-turn boundaries of the redo window. Only ``step_class == turn_first`` starts a turn."""
+    t = NOW - 3000
+    rows = [proxy_row(1, sid=SID, kind="organic", ts=t, msg_id="a", tier="haiku"),                 # turn 1
+            proxy_row(2, sid=SID, kind="organic", ts=t + 1, msg_id="b", step=None),                 # old row
+            proxy_row(3, sid=SID, kind="organic", ts=t + 2, msg_id="c", step=None, tier="haiku"),   # old row
+            proxy_row(4, sid=SID, kind="organic", ts=t + 3, msg_id="d", step="subagent_first"),
+            proxy_row(5, sid=SID, kind="organic", ts=t + 4, msg_id="e", step="continuation"),
+            proxy_row(6, sid=SID, kind="organic", ts=t + 5, msg_id="f", reason="side_call", step=None),
+            proxy_row(7, sid=SID, kind="organic", ts=t + 6, msg_id="g")]                            # turn 2
+    for thread_of in (None, lambda sid, m: None):
+        built = osh.build_units(rows, [], thread_of=thread_of, **_kw())
+        assert [u["msg_id"] for u in osh.turn_units(built["units"])] == ["a", "g"]
+        assert len(built["units"]) == 6                      # per-call units are all still counted
+        assert built["side_call_excluded"] == 1
+        assert built["no_step_class"] == 2 and built["step_subagent_first"] == 1
+
+
+def test_null_step_rows_do_not_close_the_redo_window_of_a_turn():
+    """A Haiku turn followed by 3 null-step rows and then an escalation: the old rows are not human turns, so
+    the escalation is still inside the unit's window (turn 2) and the unit is redone. Red on main, where the 3
+    rows were turns 2-4 and pushed the escalation out of the window."""
+    t = NOW - 3000
+    rows = [proxy_row(1, sid=SID, kind="organic", ts=t, msg_id="a", tier="haiku")]
+    rows += [proxy_row(2 + i, sid=SID, kind="organic", ts=t + 1 + i, msg_id=f"n{i}", step=None) for i in range(3)]
+    rows += [proxy_row(9, sid=SID, kind="organic", ts=t + 10, msg_id="x", tier="opus", reason="escalation")]
+    turn = osh.turn_units(osh.build_units(rows, [], **_kw())["units"])
+    assert [u["msg_id"] for u in turn] == ["a", "x"]
+    assert turn[0]["redone"] is True and turn[0]["why"] == "escalation"
+
+
+def test_scorecard_prints_the_null_step_exclusion_and_keeps_the_small_n_rule(monkeypatch):
+    t = NOW - 3000
+    rows = [proxy_row(i, sid=SID, kind="organic", ts=t + i, msg_id=f"m{i}", step=None) for i in range(60)]
+    rows += [proxy_row(100 + i, sid=SID, kind="organic", ts=t + 100 + i, msg_id=f"t{i}") for i in range(3)]
+    fx.write_jsonl(paths.state_path("proxy_calls.jsonl"), rows)
+    o3 = kpi.compute_scorecard(days=7, now=NOW)["o3"]
+    assert o3["breakdown"]["n"] == 3 and o3["excluded"]["no_step_class"] == 60
+    assert "no rate is printed below" in o3["lines"][0]       # n=3 < MIN_N: still "too few", not 60+3
+    assert any("60 with no step_class (not a turn)" in line for line in o3["lines"])

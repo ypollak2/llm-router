@@ -11,7 +11,8 @@ is not redone (the redo test below is applied to that first call, and covers its
 the next 2). Per-call figures are kept as a secondary line.
 
 A TURN is the first proxy call of a human turn (PLAN section 1.2 O3, M0.3b): a proxy row that is not a
-side call and whose ``step_class`` is not ``continuation``, minus sub-agent first calls. The transcript
+side call and whose ``step_class`` is ``turn_first`` (a null label is not a kind: pre-GE1 rows and any unlabelled row are never
+a turn; ``subagent_first`` is not one either), minus sub-agent first calls. The transcript
 join (M0.3b, ``o3_transcripts``: the proxy ``msg_id`` joined to the transcript assistant ``message.id``)
 decides ONE thing: a row whose message is a sub-agent call (``sidechain``) is not a turn. Unjoined rows
 stay in: a session with no transcript, and a row whose id is in no message of a session that has one
@@ -53,7 +54,7 @@ A unit is redone when ANY of:
    ``escalation_under_pressure``. That is the proxy's own detector: a ``claude:`` /
    ``native:`` / ``opus:`` re-ask, a contradiction, or failed tools
    (``proxy/escalation.py``). A human turn starts at a non-side-call row whose
-   ``step_class`` is not ``continuation`` (a tool-result follow-up);
+   ``step_class`` is ``turn_first``; every other row, null-step rows included, is a follow-up;
 2. receipt band: ``user_signals.jsonl`` holds a ``redone`` press (last press per key wins)
    for the unit's ``msg_id``;
 3. usage_outcome: ``usage_outcome`` has a ``redone`` verdict for a routed event of the same
@@ -119,6 +120,7 @@ CLASS_LOCAL = "local"
 CLASS_CLAUDE = "claude"
 # transcript roles of a proxy call (o3_transcripts); duplicated names, not imported, to keep this module pure
 ROLE_META, ROLE_SIDECHAIN, ROLE_ORPHAN = "meta", "sidechain", "orphan"
+STEP_TURN_FIRST = "turn_first"   # proxy.steps.STEP_TURN_FIRST, duplicated to keep this module pure
 ESCALATION_REASONS = frozenset({"escalation", "escalation_under_pressure"})
 NOT_APPLIED_YET = frozenset({"not_applied_seen", "partly_applied"})  # usage_outcome so_far
 REDO_TURNS = 2          # the unit's own turn + the next 2 human turns
@@ -159,9 +161,9 @@ class _Conversation:
     """One session's proxy rows in time order, with human-turn numbers."""
 
     def __init__(self, rows: list[dict], begins_turn=None) -> None:
-        """``begins_turn(row)``: the row starts a human turn (default: its ``step_class`` is not
-        ``continuation``). Side calls are not part of the conversation."""
-        begins = begins_turn or (lambda r: r.get("step_class") != "continuation")
+        """``begins_turn(row)``: the row starts a human turn (default: its ``step_class`` is
+        ``turn_first``). Side calls are not part of the conversation."""
+        begins = begins_turn or (lambda r: r.get("step_class") == STEP_TURN_FIRST)
         ordered = sorted((r for r in rows if _num(r.get("ts")) is not None and not _is_side_call(r)),
                          key=lambda r: r["ts"])
         self.ts = [float(r["ts"]) for r in ordered]
@@ -231,7 +233,9 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
     "other_kind", "local_no_session", "local_failed", "local_untagged", "local_other_kind",
     "n_escalations", "subagent_first", "meta_first", "unjoined",
     "no_transcript", "edit_no_session", "edit_no_turn_id", "zero_claude_turns", "n_detector_flags",
-    "n_detector_unmapped"}``. ``units`` holds
+    "n_detector_unmapped", "no_step_class", "step_subagent_first"}``. ``no_step_class`` and
+    ``step_subagent_first`` count the admitted proxy rows left out of the turns because their ``step_class``
+    is null (pre-GE1 rows) or ``subagent_first``. ``units`` holds
     turns and the other calls (``first`` False); ``local_assist`` holds the local MCP units (never
     turns). ``subagent_first``, ``meta_first`` and ``unjoined`` count the turn-first rows
     by what the transcript says: ``subagent_first`` are taken out of the turns, ``meta_first`` and
@@ -269,8 +273,9 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
         return role_cache[k]
 
     def begins_turn(r: dict) -> bool:
-        # The owner's definition (not a side call, not a continuation) minus sub-agent first calls.
-        return r.get("step_class") != "continuation" and role_of(r) != ROLE_SIDECHAIN
+        # The owner's definition (not a side call, step_class turn_first) minus sub-agent first calls.
+        # A null step_class is not a kind: only rows written before GE1 (#313) carry one.
+        return r.get("step_class") == STEP_TURN_FIRST and role_of(r) != ROLE_SIDECHAIN
 
     convs: dict[str, "_Conversation"] = {}
 
@@ -308,6 +313,7 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
     side = untagged = other = local_no_session = local_failed = n_escalations = 0
     local_untagged = local_other = 0
     subagent_first = meta_first = unjoined = no_transcript = edit_no_session = edit_no_turn_id = 0
+    no_step_class = step_subagent_first = 0
 
     det_turns: dict[str, list[int]] = {}
     n_det = n_det_unmapped = 0
@@ -377,7 +383,12 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
         if why is None and isinstance(r.get("msg_id"), str) and r["msg_id"] in band_redone:
             why = "receipt_band"
         first = begins_turn(r)
-        if thread_of is not None and r.get("step_class") != "continuation":
+        step = r.get("step_class")
+        if step is None:
+            no_step_class += 1          # not a turn (first is False): counted, never guessed
+        elif step == "subagent_first":
+            step_subagent_first += 1    # the proxy's own label: not a turn
+        if thread_of is not None and step == STEP_TURN_FIRST:
             # a turn-first row on the proxy-only rule: say what the transcript makes of it
             role = role_of(r)
             if role == ROLE_SIDECHAIN:
@@ -477,7 +488,8 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
             "subagent_first": subagent_first, "meta_first": meta_first, "unjoined": unjoined,
             "no_transcript": no_transcript, "edit_no_session": edit_no_session,
             "edit_no_turn_id": edit_no_turn_id, "zero_claude_turns": len(seen_turns),
-            "n_detector_flags": n_det, "n_detector_unmapped": n_det_unmapped}
+            "n_detector_flags": n_det, "n_detector_unmapped": n_det_unmapped,
+            "no_step_class": no_step_class, "step_subagent_first": step_subagent_first}
 
 
 def _failed(row: dict) -> bool:
