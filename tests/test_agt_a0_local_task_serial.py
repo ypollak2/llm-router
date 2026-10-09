@@ -131,3 +131,28 @@ async def test_a_raising_job_reports_failed_with_the_error():
     assert job["error"] == "RuntimeError: worker fell over"
     assert job["result"] is None and job["finished_at"] is not None
     assert jid not in jobs._tasks
+
+
+# ── SLT-2: the router's own state dir is never a task's change ───────────────
+
+@pytest.mark.parametrize("git_repo", [True, False])
+async def test_router_state_dir_inside_workdir_is_not_attributed(tmp_path, monkeypatch, git_repo):
+    """LLM_ROUTER_HOME inside the workdir (the suite's layout, and a user whose
+    project is their home dir): a WAL write by the router mid-run is not the task's."""
+    import subprocess
+    from llm_router.tools import local_task as lt
+
+    if git_repo:
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    state = tmp_path / "home" / "knowledge" / "semantic"
+    state.mkdir(parents=True)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "home"))
+
+    def _loop(**kw):
+        (state / "index.sqlite-wal").write_bytes(b"router bookkeeping")
+        (tmp_path / "a.txt").write_text("from the task\n")
+        return "ok"
+
+    monkeypatch.setattr("llm_router.hooks.agent_loop.run_agent_loop", _loop)
+    out = json.loads(await lt.llm_local_task("A", str(tmp_path)))
+    assert out["changed_files"] == ["a.txt"], out["changed_files"]
