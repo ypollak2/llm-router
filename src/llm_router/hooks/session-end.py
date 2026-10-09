@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 24
+# llm_router-hook-version: 25
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -2019,39 +2019,15 @@ def _collect_report_data(
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
-def _flush_session_spend_from_mcp() -> None:
-    """Signal MCP server to flush in-memory session spend to disk.
-
-    SAVINGS fix: The MCP server holds SessionSpend in memory and updates
-    session_spend.json in real-time. But if the last routed call happens
-    just before session-end, there can be a brief window where the file
-    is stale. This function requests a flush to ensure the file reflects
-    all calls made in this session.
-
-    Implementation: Create a flag file; wait briefly for MCP to react;
-    then read the freshly-flushed file.
-    """
-    try:
-        flush_flag = os.path.join(_state_dir(), "session_spend_flush_request.txt")
-        with open(flush_flag, "w") as f:
-            f.write(str(time.time()))
-        time.sleep(0.2)  # Brief delay for MCP server to react
-        # Remove flag (cleanup)
-        try:
-            os.remove(flush_flag)
-        except OSError:
-            pass
-    except Exception:
-        pass  # Graceful failure — session-end always continues
-
-
 def _read_session_spend() -> dict | None:
     """Read the real-time session spend file if it exists.
 
-    SAVINGS fix: Call _flush_session_spend_from_mcp() first to ensure
-    the file contains the latest in-memory state from MCP server.
+    The MCP server rewrites it on every routed call. There is no flush request
+    to make: the hook used to drop a flush-request file and sleep
+    0.2 s for the server to react, but nothing in the tree reads that file, so
+    every Stop paid 205 ms (p50; n = 79 live rows) waiting on nobody (BUGS
+    P09-SE-1).
     """
-    _flush_session_spend_from_mcp()  # Ensure file is up-to-date
     try:
         with open(_session_spend_file()) as f:
             return json.load(f)
@@ -2242,7 +2218,8 @@ def _condense(summary: str) -> str:
 # the full box (profile rescanned, benchmarks updated) is shown by the NEXT Stop.
 
 #: Steps the child runs, in order; each is fail-open on its own.
-_STOP_BACKGROUND_STEPS = ("_fetch_live_usage", "_build_and_save_learned_profile",
+_STOP_BACKGROUND_STEPS = ("_fetch_live_usage", "_refresh_northstar_line",
+                          "_build_and_save_learned_profile",
                           "_maybe_rescan_profile", "_maybe_evaluate_models")
 _STOP_NOTES_FILENAME = "stop_notes.json"
 #: A note older than this is dropped rather than shown.
@@ -2338,6 +2315,58 @@ def _maybe_evaluate_models() -> None:
         finally:
             loop.close()
         _append_stop_note("📊 Model benchmarks updated (next: 7 days)")
+
+
+_NORTHSTAR_CACHE_FILENAME = "northstar_line.json"
+
+
+def _northstar_cache_path() -> str:
+    return os.path.join(_state_dir(), _NORTHSTAR_CACHE_FILENAME)
+
+
+def _read_session_id() -> str | None:
+    try:
+        with open(_session_id_file()) as f:
+            return f.read().strip() or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _refresh_northstar_line() -> None:
+    """Child step: compute the north-star item and cache it for the next Stop.
+
+    ``northstar.current_session_line`` re-reads every Claude transcript touched
+    in the last two days (p50 343 ms, p95 1,819 ms, max 7,920 ms live, n = 79),
+    so the Stop no longer computes it: it shows the share as of the last child
+    run: one turn behind, or more when Stops come faster than the 15 s child
+    claim (BUGS P09-SE-1). Written atomically,
+    keyed by session id so a different session never shows this one's share.
+    """
+    sid = _read_session_id()
+    if not sid:
+        return
+    from llm_router import northstar as _northstar
+
+    line = _northstar.current_session_line(sid)
+    path = _northstar_cache_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"session_id": sid, "line": line, "ts": time.time()}, f)
+    os.replace(tmp, path)
+
+
+def _cached_northstar_line(session_id: str) -> str | None:
+    """The cached item for this session, or None (no child has finished one yet,
+    or the cache belongs to another session). Never raises."""
+    try:
+        with open(_northstar_cache_path(), encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, dict) and d.get("session_id") == session_id and isinstance(d.get("line"), str):
+            return d["line"]
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 
 
 def _run_background_stop_work() -> None:
@@ -2874,15 +2903,9 @@ def main() -> None:
     # routing-efficiency block above, so those two land without touching this.
     _laps.next("northstar")
     try:
-        from llm_router import northstar as _northstar
-        _ns_session_id = None
-        try:
-            with open(_session_id_file()) as f:
-                _ns_session_id = f.read().strip()
-        except Exception:
-            pass
-        if _ns_session_id:
-            _ns_line = _northstar.current_session_line(_ns_session_id)
+        _ns_session_id = _read_session_id()
+        _ns_line = _cached_northstar_line(_ns_session_id) if _ns_session_id else None
+        if _ns_line:  # the child's last result; nothing yet on a session's first Stop
             final_summary_output = (
                 final_summary_output.rstrip("  " + "═" * (WIDTH - 2))
                 + f"\n  {_ns_line}\n" + "  " + "═" * (WIDTH - 2)
