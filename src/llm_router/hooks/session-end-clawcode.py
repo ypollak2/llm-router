@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 3
+# llm_router-hook-version: 4
 """Stop hook (claw-code variant) — session summary: external routing costs + free-model savings.
 
 Identical to session-end.py but omits Claude Code subscription pressure sections
@@ -81,6 +81,7 @@ def _session_start_iso(ts: float) -> str:
 
 
 _FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
+_CACHE_PROVIDER = "cache"  # semantic-cache-served call: not paid/free/subscription (provider_classes.py)
 
 
 def _query_session_data(session_start: float) -> tuple[list[dict], list[dict]]:
@@ -100,7 +101,7 @@ def _query_session_data(session_start: float) -> tuple[list[dict], list[dict]]:
             (_session_start_iso(session_start),),
         ).fetchall()
         conn.close()
-        all_rows = [dict(r) for r in rows]
+        all_rows = [dict(r) for r in rows if r["provider"] != _CACHE_PROVIDER]
         paid = [r for r in all_rows
                 if r.get("provider") not in _FREE_PROVIDERS | {"subscription"}]
         free = [r for r in all_rows if r.get("provider") in _FREE_PROVIDERS]

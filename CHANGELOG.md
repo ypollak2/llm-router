@@ -24,6 +24,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Existing `~/.llm-router/result_cache.db` files are left on disk, unread and unmigrated.
 
 ### Added
+- ledger completeness (PLAN v16 P0.8-e): a call the semantic cache answers now writes a `usage` row
+  (`reason = "cache_hit"`, provider `cache`, model `cache/<cached model>`, 0 tokens, $0) carrying the
+  caller's session id, and `semantic_cache_lookups` gains a nullable `session_id` (additive migration;
+  old rows stay NULL). Cache hits were previously invisible to per-session accounting. Spend and savings
+  are unchanged. No `routing_decisions` row is added for a replay (it would double-count judge, bandit
+  and offload inputs). Call counts now include cache hits as `usage` rows, so every surface that splits calls into
+  paid / free / subscription excludes provider `cache` from all three (one definition,
+  `llm_router/provider_classes.py`; hooks keep a checked `_CACHE_PROVIDER` copy): status-bar session
+  calls, session-end paid rows, session-start weekly digest, claw-code session-end, the statusline
+  `mix_local`/`mix_paid` segment, the `share` card (`paid_calls`/`total_calls`), `digest`, the
+  `routing_health` rates (cache rows get no bucket there: excluded). The
+  prompt-cache hit rate (`get_cache_savings`) leaves cache rows out of its denominator. Spend and
+  savings are unchanged. Hook versions: status-bar 6 -> 7, session-end 26 -> 27, session-start 31 -> 32,
+  session-end-clawcode 3 -> 4. Restart the MCP server to pick it up. See `docs/bugs/P08E-1.md`.
 - hook latency rows carry the session (PLAN v16 gap PG9): `enforce-route`, `bash-compress`,
   `playwright-compress`, `cc-usage-track`, `subagent-start`, `usage-refresh` and
   `agent-depth-release` now call `hook_latency.set_session` with the `session_id` from the

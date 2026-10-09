@@ -132,6 +132,8 @@ def _gather_stats(db_path: str | None = None) -> SavingsStats:
             ).fetchall()
             for r in rows:
                 prov = r["provider"] or ""
+                if prov == "cache":  # a cache-served call: not paid, free or subscription
+                    continue
                 in_tok = r["input_tokens"] or 0
                 out_tok = r["output_tokens"] or 0
                 cost = r["cost_usd"] or 0.0
@@ -153,7 +155,7 @@ def _gather_stats(db_path: str | None = None) -> SavingsStats:
 
             top_row = conn.execute(
                 "SELECT model, COUNT(*) as n FROM usage "
-                "WHERE success=1 AND provider NOT IN ('subscription','ollama','codex') "
+                "WHERE success=1 AND provider NOT IN ('subscription','ollama','codex','cache') "
                 "GROUP BY model ORDER BY n DESC LIMIT 1"
             ).fetchone()
             if top_row and top_row["model"]:

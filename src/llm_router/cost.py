@@ -754,6 +754,9 @@ REASON_STREAM_TOOL = "stream_tool"
 REASON_CLAUDE_CODE_SUBSCRIPTION = "claude_code_subscription"
 REASON_SIDECAR_BACKFILL = "sidecar_backfill"
 REASON_JUDGE_EVAL = "judge_eval"
+# A call the semantic cache answered: a usage row with 0 tokens and $0 (nothing was billed,
+# nothing saved is claimed), written only so the call is attributable to its session.
+REASON_CACHE_HIT = "cache_hit"
 
 MIGRATE_ADD_TASK_TYPE_RAW = [
     "ALTER TABLE usage ADD COLUMN task_type_raw TEXT",
@@ -4542,10 +4545,13 @@ async def get_cache_savings(period: str = "today", *,
         cached_calls, cached_savings = cached_row if cached_row else (0, 0.0)
 
         # Get total calls for hit rate
+        # P0.8-e: ``cache_hit`` here is the PROVIDER prompt cache (nothing writes it for
+        # semantic-cache rows), so rows the semantic cache answered stay out of the denominator.
         # T-05: the cache-hit RATE's denominator. Filtering the numerator and not
         # this would invent a rate above 100%.
         cursor = await db.execute(
-            f"SELECT COUNT(*) FROM usage WHERE {time_filter} {production_only(include_simulated)}")
+            f"SELECT COUNT(*) FROM usage WHERE {time_filter} {production_only(include_simulated)} "
+            f"AND COALESCE(provider, '') != 'cache'")
         total_row = await cursor.fetchone()
         total_calls = total_row[0] if total_row else 0
 

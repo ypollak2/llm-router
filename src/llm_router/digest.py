@@ -84,6 +84,8 @@ async def _fetch_period_data(period: str) -> dict[str, Any]:
     by_provider: dict[str, dict] = {}
 
     for provider, calls, in_tok, out_tok, cost in rows:
+        if provider == "cache":  # cache-served calls are not paid/free/subscription calls
+            continue
         baseline = _host_baseline(in_tok, out_tok)
         if provider in _FREE_PROVIDERS:
             saved = baseline

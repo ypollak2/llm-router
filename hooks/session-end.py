@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 26
+# llm_router-hook-version: 27
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -335,6 +335,7 @@ def _session_start_iso(ts: float) -> str:
 
 
 _FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
+_CACHE_PROVIDER = "cache"  # semantic-cache-served call: not paid/free/subscription (provider_classes.py)
 
 # D2: providers that have their own dedicated dashboard panel (rendered from
 # their own usage table). Codex is logged to BOTH `usage` (cost.log_usage forces
@@ -363,7 +364,8 @@ def _query_session_data(session_start: float) -> tuple[list[dict], list[dict], l
         conn.close()
         all_rows = [dict(r) for r in rows]
         # Exclude rows with test/mock model names at the data level
-        clean = [r for r in all_rows if not _is_test_model(r.get("model", ""))]
+        clean = [r for r in all_rows if not _is_test_model(r.get("model", ""))
+                 and r.get("provider") != _CACHE_PROVIDER]
         paid  = [r for r in clean
                  if r.get("provider") not in _FREE_PROVIDERS | {"subscription"}]
         cc    = [r for r in clean if r.get("provider") == "subscription"]

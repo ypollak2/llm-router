@@ -30,6 +30,7 @@ from uuid import uuid4
 from llm_router import cost, media, provider_reset, providers
 from llm_router.cost import (  # constants, so a test that patches ``cost`` keeps the codes
     REASON_ROUTER_BUDGET_FALLBACK,
+    REASON_CACHE_HIT,
     REASON_ROUTER_CHAIN,
     REASON_ROUTER_UNHINTED,
 )
@@ -4583,6 +4584,18 @@ async def route_and_call(
                         cost_usd=cached.cost_usd,
                         latency_ms=cached.latency_ms,
                     )
+                    # P0.8-e: the per-call ledger row. A cache hit left no row with the
+                    # caller's session_id anywhere (routing_decisions rejects provider
+                    # "cache"; the lookup row had no session), so per-session accounting
+                    # silently missed cache-served calls. 0 tokens and $0 from `cached`
+                    # itself, so spend and savings are unchanged; fail-open.
+                    try:
+                        await cost.log_usage(
+                            cached, task_type, profile, correlation_id=correlation_id,
+                            reason=REASON_CACHE_HIT,
+                        )
+                    except Exception as _cu_err:  # noqa: BLE001 — telemetry never breaks routing
+                        log.debug("cache-hit usage row failed (non-fatal): %s", _cu_err)
                     # AC-6/INV-ROUTE-005: semantic-cache hit is a bypassed terminal state.
                     _emit_ledger_terminal(correlation_id, "bypassed", route_succeeded=True, agent_session_id=agent_session_id)
                     # CHZ-AUD-B-05 (sibling): a cache-served turn is a real success

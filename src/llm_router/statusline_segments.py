@@ -281,7 +281,8 @@ def mix_segment(state: str) -> dict[str, str]:
             row = con.execute(
                 "SELECT SUM(CASE WHEN model LIKE 'ollama/%' THEN 1 ELSE 0 END),"
                 " SUM(CASE WHEN model NOT LIKE 'ollama/%' THEN 1 ELSE 0 END)"
-                " FROM usage WHERE timestamp >= datetime('now', '-6 hours')").fetchone()
+                " FROM usage WHERE timestamp >= datetime('now', '-6 hours')"
+                " AND COALESCE(provider, '') != 'cache'").fetchone()  # cache hits are not calls (provider_classes)
         finally:
             con.close()
     except Exception:  # noqa: BLE001
