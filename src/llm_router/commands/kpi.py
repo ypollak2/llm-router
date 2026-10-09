@@ -83,7 +83,7 @@ SCOPE, stated rather than implied:
   one table ``hook_latency.HOOK_BUDGETS_MS``: 300 ms per sync hook, 2 s
   session-start, 100 ms statusline). The p50 / p95 are of ``router_added_ms``
   (``hook_latency.router_added_ms``: elapsed minus the model phases ``draft_chain``,
-  ``zce_model``, ``cold_wait``; plain elapsed where a row names none), because a
+  ``zce_model``, ``codex_delegation``, ``cold_wait``; plain elapsed where a row names none), because a
   local draft's model time is the answer, not overhead (PLAN v16 P0.9-f). The
   elapsed p95 is printed beside it. NOT session-kind filtered: since P0.9
   (``hook_latency.set_session`` and ``record-raw``'s session-id argument) a row
@@ -803,11 +803,11 @@ def _in_window(ts: Any, since: float, until: float) -> bool:
 
 
 #: Hooks whose router-added bar PLAN v16 defers (S6: "16.1: agent-route
-#: router-added"). Their routed-model phases are not in ``hook_latency.MODEL_PHASES``,
-#: so the whole delegation counts against the 300 ms bar and G1 reports them OVER;
+#: router-added"). ``codex_delegation`` is in ``hook_latency.MODEL_PHASES`` (HOOKMETRIC-1); the
+#: other routed-model phases are not, so those delegations count against the 300 ms bar and G1 reports OVER;
 #: the line says why, so an OVER here is not read as a P0.9 regression.
 _G1_DEFERRED = {
-    "agent-route": ("routed-model phases (codex_delegation, direct_subagent, cli_delegation) "
+    "agent-route": ("routed-model phases (direct_subagent, cli_delegation) "
                     "are not subtracted; router-added bar deferred to 16.1 (PLAN v16 S6)"),
 }
 

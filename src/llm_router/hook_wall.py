@@ -40,7 +40,7 @@ CHILD ENVIRONMENT. A throwaway ``HOME`` and ``LLM_ROUTER_HOME`` (nothing under
 closed port: playwright-compress would otherwise make a local-model call, which is
 model time and is forbidden outside the 00:00-07:00 bench window (PLAN v16 L13).
 
-THE LIVE CLAUSE reads ``hook_latency.jsonl`` (``elapsed_ms``) over a window.
+THE LIVE CLAUSE reads ``hook_latency.jsonl`` (``router_added_ms``, else ``elapsed_ms``) over a window.
 ``hook_latency`` writes ``load1`` on each hook row; a row above ``MAX_LOAD`` is
 excluded and counted, a row without ``load1`` (written before that field) is kept
 and counted. Minimum n: 200 for the three per-tool hooks, 30 for the two
@@ -305,7 +305,8 @@ def judge_wall(rows: list[dict], max_load: float = MAX_LOAD) -> dict[str, dict]:
 
 
 def judge_live(live_rows: list[dict], days: float, max_load: float = MAX_LOAD) -> dict[str, dict]:
-    """Per hook, ``elapsed_ms`` p95 from ``hook_latency`` rows in the window."""
+    """Per hook, p95 from ``hook_latency`` rows in the window: ``router_added_ms``
+    where a row names a model phase, else ``elapsed_ms`` (HOOKMETRIC-1)."""
     out: dict[str, dict] = {}
     for h in SYNC_HOOKS:
         rs = [r for r in live_rows if r.get("hook") == h and _num(r.get("elapsed_ms")) is not None]
@@ -328,7 +329,9 @@ def judge_live(live_rows: list[dict], days: float, max_load: float = MAX_LOAD) -
                                             if by_sid and kept else None),
                      informative=len(by_sid) >= MIN_SESSIONS)
         if len(kept) >= need:
-            vals = sorted(float(r["elapsed_ms"]) for r in kept)
+            from llm_router import hook_latency
+
+            vals = sorted(float(hook_latency.router_added_ms(r) or 0.0) for r in kept)
             p95 = _percentile(vals, 0.95)
             # PG9: one session (or none named) cannot prove the hook is fast across
             # sessions. A breach still fails; a pass needs >= MIN_SESSIONS (as P0.9-e).

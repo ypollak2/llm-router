@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- hook budget judges router time, not delegated Codex time (HOOKMETRIC-1, docs/bugs/HOOKMETRIC-1.md): `codex_delegation` is now one of
+  `hook_latency.MODEL_PHASES`, so agent-route's `router_added_ms` excludes the synchronous Codex run and the statusline no longer shows
+  `hooks p95 57.8s agent-route` for it; the row-reader fallback and `hook_wall` live clause judge `router_added_ms` too. `elapsed_ms`
+  stays reported (`p95_elapsed_ms`). `direct_subagent` / `cli_delegation` are still not subtracted (deferred to 16.1).
 - test infra (LINEAGE-PERF-1, docs/bugs/LINEAGE-PERF-1.md): the `LineageStore.record` p95 <= 11 ms budget failed twice on shared
   runners (p95 64.77 and 34.61 ms, n=50, code unchanged) because it measured fsync latency. New deterministic test
   `tests/qa/test_lineage_record_mechanism.py` pins connects, closes, transactions, statements, python fsyncs and the

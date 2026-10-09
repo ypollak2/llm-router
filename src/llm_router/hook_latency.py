@@ -42,7 +42,7 @@ timeout, 60 s by default): the invocation used all the time the host gives it.
 The PRD latency bar a hook is judged against is ``HOOK_BUDGETS_MS``.
 
 ROUTER-ADDED TIME (PLAN v16 P0.9). A row whose run named a model phase
-(``MODEL_PHASES``: ``draft_chain``, ``zce_model``, ``cold_wait``) also carries
+(``MODEL_PHASES``: ``draft_chain``, ``zce_model``, ``codex_delegation``, ``cold_wait``) also carries
 ``router_added_ms`` = ``elapsed_ms`` minus the model time, with a ``cold_wait``
 reported inside another model phase subtracted once. ``set_session(id)`` adds
 ``session_id`` so a reader can count sessions. ``host`` names the CLI that ran the
@@ -179,7 +179,7 @@ DEFAULT_TIMEOUT_MS = 60_000
 #: zero-Claude edit's model call) and ``cold_wait`` (Ollama's own model-load
 #: time). ``cold_wait`` is usually reported from INSIDE one of the other two;
 #: the recorder knows when it is (``_model_depth``) and subtracts it once.
-MODEL_PHASES: tuple[str, ...] = ("draft_chain", "zce_model", "cold_wait")
+MODEL_PHASES: tuple[str, ...] = ("draft_chain", "zce_model", "codex_delegation", "cold_wait")
 
 _OFF_VALUES = frozenset({"0", "off", "false", "no", "disabled"})
 
@@ -418,7 +418,8 @@ def model_ms(phases_ms: dict | None, nested_ms: float = 0.0) -> float:
 def router_added_ms(row: dict) -> float | None:
     """The time the router added on one row: ``router_added_ms`` when the
     recorder wrote it; else, for a row written before it did,
-    ``elapsed_ms - (draft_chain + zce_model)``, plus ``cold_wait`` only when
+    ``elapsed_ms`` minus the outer model phases (``draft_chain``, ``zce_model``,
+    ``codex_delegation``), plus ``cold_wait`` only when
     neither of those is present (older rows cannot say where ``cold_wait`` was
     nested, so it is never subtracted twice: the reading errs high, not low);
     else ``elapsed_ms``. None for a row without a numeric ``elapsed_ms``."""
@@ -431,7 +432,7 @@ def router_added_ms(row: dict) -> float | None:
     phases = row.get("phases_ms")
     if not isinstance(phases, dict):
         return max(0.0, float(elapsed))
-    outer = {k: phases[k] for k in ("draft_chain", "zce_model") if k in phases}
+    outer = {k: phases[k] for k in MODEL_PHASES if k != "cold_wait" and k in phases}
     if not outer and "cold_wait" in phases:
         outer = {"cold_wait": phases["cold_wait"]}
     return max(0.0, float(elapsed) - model_ms(outer))
