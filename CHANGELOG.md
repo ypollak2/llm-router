@@ -126,7 +126,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "flush request" that nothing reads is removed (205 ms p50), and the north-star item (a scan of every transcript
   touched in two days: p50 343, p95 1,819 ms) is computed by the detached child and cached in
   `northstar_line.json`; the Stop shows the last cached share (the last child run: one turn old, more when Stops come
-  faster than the 15 s child claim; none on a session's first Stop). Hook version 24 -> 25. Deploy: upgrade the `llm-routing` tool, copy `session-end.py` to
+  faster than the 15 s child claim; none on a session's first Stop). The cache expires after 600 s, is keyed by the Stop's stdin session id, and its refresh runs
+  before the usage fetch. Hook version 24 -> 26. Deploy: upgrade the `llm-routing` tool, copy `session-end.py` to
   `~/.claude/hooks/llm_router-session-end.py`, then judge on `hook_latency.jsonl` after >= 200 organic Stop rows.
 - Haiku guard (HAIKU-SERVED-1): a Haiku rewrite that Anthropic refused and the proxy retried on the original
   model keeps `tier=haiku` / `tier_reason=haiku_rewrite` but is served on that model. `haiku_guard` now

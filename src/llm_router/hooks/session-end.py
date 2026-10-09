@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 25
+# llm_router-hook-version: 26
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -2218,7 +2218,7 @@ def _condense(summary: str) -> str:
 # the full box (profile rescanned, benchmarks updated) is shown by the NEXT Stop.
 
 #: Steps the child runs, in order; each is fail-open on its own.
-_STOP_BACKGROUND_STEPS = ("_fetch_live_usage", "_refresh_northstar_line",
+_STOP_BACKGROUND_STEPS = ("_refresh_northstar_line", "_fetch_live_usage",
                           "_build_and_save_learned_profile",
                           "_maybe_rescan_profile", "_maybe_evaluate_models")
 _STOP_NOTES_FILENAME = "stop_notes.json"
@@ -2318,6 +2318,13 @@ def _maybe_evaluate_models() -> None:
 
 
 _NORTHSTAR_CACHE_FILENAME = "northstar_line.json"
+#: A cached north-star item older than this is not shown: no line beats a stale
+#: line that looks current (claim unwritable, spawn failed, a resumed session).
+_NORTHSTAR_MAX_AGE_S = 600.0
+#: The Stop's own stdin session id, set by main() and handed to the child on its
+#: argv, so concurrent sessions never read each other's id from the shared
+#: session_id.txt. None: fall back to that file.
+_STOP_SESSION_ID: str | None = None
 
 
 def _northstar_cache_path() -> str:
@@ -2325,6 +2332,8 @@ def _northstar_cache_path() -> str:
 
 
 def _read_session_id() -> str | None:
+    if _STOP_SESSION_ID:
+        return _STOP_SESSION_ID
     try:
         with open(_session_id_file()) as f:
             return f.read().strip() or None
@@ -2339,8 +2348,8 @@ def _refresh_northstar_line() -> None:
     in the last two days (p50 343 ms, p95 1,819 ms, max 7,920 ms live, n = 79),
     so the Stop no longer computes it: it shows the share as of the last child
     run: one turn behind, or more when Stops come faster than the 15 s child
-    claim (BUGS P09-SE-1). Written atomically,
-    keyed by session id so a different session never shows this one's share.
+    claim (BUGS P09-SE-1). Written atomically, keyed by session id so a
+    different session never shows this one's share; ``ts`` bounds its age.
     """
     sid = _read_session_id()
     if not sid:
@@ -2351,22 +2360,34 @@ def _refresh_northstar_line() -> None:
     path = _northstar_cache_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"session_id": sid, "line": line, "ts": time.time()}, f)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"session_id": sid, "line": line, "ts": time.time()}, f)
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.remove(tmp)  # only still there when the write or replace failed
+        except OSError:
+            pass
 
 
-def _cached_northstar_line(session_id: str) -> str | None:
+def _cached_northstar_line(session_id: str, now: float | None = None) -> str | None:
     """The cached item for this session, or None (no child has finished one yet,
-    or the cache belongs to another session). Never raises."""
+    the cache belongs to another session, or it is older than
+    ``_NORTHSTAR_MAX_AGE_S``). Never raises."""
     try:
         with open(_northstar_cache_path(), encoding="utf-8") as f:
             d = json.load(f)
-        if isinstance(d, dict) and d.get("session_id") == session_id and isinstance(d.get("line"), str):
-            return d["line"]
+        if not (isinstance(d, dict) and d.get("session_id") == session_id
+                and isinstance(d.get("line"), str)):
+            return None
+        ts = d.get("ts")
+        now = time.time() if now is None else now
+        if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not 0 <= now - ts <= _NORTHSTAR_MAX_AGE_S:
+            return None
+        return d["line"]
     except Exception:  # noqa: BLE001
-        pass
-    return None
+        return None
 
 
 def _run_background_stop_work() -> None:
@@ -2379,6 +2400,9 @@ def _run_background_stop_work() -> None:
             continue
 
 
+_SESSION_ARG = "--session-id="
+
+
 def _background_stop_work_argv() -> list[str]:
     """argv that re-runs THIS script as the child (frozen builds go through
     ``run-hook``, as session-start's children do)."""
@@ -2388,9 +2412,10 @@ def _background_stop_work_argv() -> list[str]:
         frozen = is_frozen()
     except Exception:  # noqa: BLE001
         frozen = False
+    sid_args = [f"{_SESSION_ARG}{_STOP_SESSION_ID}"] if _STOP_SESSION_ID else []
     if frozen:
-        return [sys.executable, "run-hook", __file__, "--background-stop-work"]
-    return [sys.executable, __file__, "--background-stop-work"]
+        return [sys.executable, "run-hook", __file__, "--background-stop-work", *sid_args]
+    return [sys.executable, __file__, "--background-stop-work", *sid_args]
 
 
 _STOP_BG_CLAIM_FILENAME = "stop_background.claim"
@@ -2461,6 +2486,9 @@ def main() -> None:
             _hook_input = json.load(sys.stdin)
         except (json.JSONDecodeError, EOFError):
             _hook_input = {}
+    global _STOP_SESSION_ID
+    if isinstance(_hook_input, dict) and isinstance(_hook_input.get("session_id"), str):
+        _STOP_SESSION_ID = _hook_input["session_id"].strip() or None
     try:
         from llm_router.hook_latency import set_session as _hl_set_session
 
@@ -2959,6 +2987,10 @@ def _entry(argv: list[str]) -> None:
         # "session-end" row for it too (the trap BUGS P09-3 found in
         # session-start). The recorder checks this switch when it writes, at exit.
         os.environ["LLM_ROUTER_HOOK_LATENCY"] = "off"
+        global _STOP_SESSION_ID
+        for a in argv:
+            if a.startswith(_SESSION_ARG) and a[len(_SESSION_ARG):]:
+                _STOP_SESSION_ID = a[len(_SESSION_ARG):]
         _run_background_stop_work()
     else:
         main()
