@@ -945,6 +945,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         # The Haiku guard (P0.11, D-20): runs now and hourly while the rewrite is
         # on; a trip writes the override file and turns the live policy's
         # rewrite off. It never edits the YAML.
+        shadow_frontier.prune_at_start()  # retention of the pair store, flag on or off
         guard_task = None
         if tier_policy is not None and tier_policy.haiku_rewrite:
             guard_task = asyncio.create_task(haiku_guard.guard_loop(tier_policy, run=haiku_guard_run))

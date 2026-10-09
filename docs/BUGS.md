@@ -60,6 +60,8 @@ source. Counts from the owner's machine are read from `~/.llm-router` and the 20
 | P09-7 | Statusline timing rows carried no session id, and needed a python3 that imports llm_router | fixed in `perf/hook-budgets` (P0.9 repair 1) |
 | P09-8 | The statusline "wrapper adds < 5 ms" test failed under load | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
 | P09-9 | A session id named by one test leaked onto latency rows of later tests | fixed in `perf/hook-budgets` (P0.9 repair round 1, test-only) |
+| P012-1 | `kpi verify_shadow` was None with 0 verify rows, keyed `failed`, and walked the transcripts twice | fixed in #287 (P0.12-a, #285 review nits) |
+| P012-2 | #287 reviewed FAIL: a verify fake without `python_dir` made the budget test environment-dependent, `LLM_ROUTER_VERIFY` defaulted to on in a "shadow" PR, six mutants survived | fixed in #287 (P0.12-a, review repair) |
 | CI-1 | `test_verify_unit` copytree of a fresh git repo raced git auto-maintenance (`maintenance.lock`) | fixed in this change (test-only; production unaffected) |
 | P03-1 | Hook DIRECT and SDK served Q&A from local providers (D-14 held only in MCP) | fixed in this change (v16 P0.3) |
 | LC-1 | The "no slow callback" classifier test failed on a loaded CI runner | fixed in this change (test-only) |
@@ -1278,6 +1280,46 @@ Review findings on #334 (AB-1), each reproduced before it was fixed.
 - **Test.** The two-file command above: 1 failed before, 34 passed after. Removing the
   fixture turns it red again.
 
+## P012-1. `kpi verify_shadow` was None with 0 verify rows, keyed `failed`, and walked the transcripts twice
+
+- **Symptom.** On a copy of `~/.llm-router` (live/ excluded) with 0 verify rows,
+  `llm-router kpi --json | jq '.verify_shadow|keys'` errors: the value is `null`. With rows the
+  keys were `failed, unavailable, verified, weak`, not the `fail, unavailable, verified, weak`
+  that PLAN-v16 P0.12 task 6 checks. Found in the #285 review (c7066cb, PASS-WITH-NITS).
+- **Cause.** `_verify_shadow` returned None when no unit carried a record, named the bucket
+  `failed`, and called `northstar.units()` itself, a second pass over the transcripts after
+  `_ns_d1_d2` had made the first. Two review mutants survived: a lever row carrying a
+  `unit_id` was never tested as "not a verify record" (M6), and `unit_id` ignoring `kind` was
+  never tested (M8).
+- **Fix.** `kpi.VERIFY_SHADOW_KEYS = (fail, unavailable, verified, weak)`; `_verify_shadow(units, win)`
+  returns that dict zero-filled and takes the list `compute_scorecard` already built (one
+  `units()` pass, filtered to the window like NS/D2). The text line still prints only when a
+  count is non-zero, so the text with 0 rows is unchanged. The `test_verify_worker` joins now
+  pass `verify_records=True`, the opt-in #285 made final.
+- **Test.** `tests/test_verify_record.py`: `test_verify_shadow_is_a_zero_filled_dict_with_exactly_the_four_keys`,
+  `test_verify_shadow_uses_the_units_it_is_given_and_does_not_walk_them_again`,
+  `test_compute_scorecard_walks_the_units_once`,
+  `test_a_lever_row_that_carries_a_unit_id_is_not_a_verify_record` (red with the `lever` guard in
+  `load_verify_records` removed), `test_unit_id_differs_by_kind_for_the_same_session_and_timestamp`
+  (red with `kind` removed from the hash). Mutants run: key back to `failed`, None when empty,
+  second `ns.units` walk: each fails at least one of them.
+
+## P012-2. #287 review FAIL: environment-dependent budget test, verifier on by default, six surviving mutants
+
+- **Symptom.** CI `test (3.11)` failed `test_the_unit_is_handed_the_remaining_budget_not_more_than_the_cap`
+  with `IndexError` at `got[0]`. The "shadow" PR captured source diffs and spawned a worker with no opt-in
+  (`LLM_ROUTER_VERIFY` unset meant on). The PR body cited a plan section that is not in the repo.
+- **Cause.** The test's fake verifier had no `**kwargs` and no stub of `_repo_python_dir`, so the outcome
+  depended on the machine (a venv plus a proven sandbox hands `python_dir=` to the verifier; the fake then
+  raises `TypeError`, `process()` records `verify_worker_error`, nothing is appended). `enabled()` read the
+  flag with default `"on"`. Review mutants: `MAX_ATTEMPTS` 3 to 99 (the retry loop used the constant),
+  `STALE_CLAIM_S` to 1, `os.utime` before the claim rename removed, `_MIN_VERIFY_S` guard removed,
+  `MAX_UNITS_PER_RUN` cap removed, patch-size guard in `_run_unit` removed.
+- **Fix.** Both directions of the venv decision are stubbed explicitly, one test each; the production
+  `verify_unit` signature is pinned. `enabled()` is opt-in (`1/on/true/yes`). `docs/VERIFIER.md` holds the
+  requirements. Hook versions are above main's.
+- **Test.** The six tests listed in `docs/VERIFIER.md`, each red against its mutant and green on the head;
+  `test_the_verifier_is_off_unless_opted_in`, `test_the_worker_only_expires_when_the_verifier_is_off`.
 ## LC-1. The "no slow callback" classifier test failed on a loaded CI runner
 
 - **Symptom.** `tests/test_local_classifier.py::test_no_slow_callback_on_the_async_path_and_the_detector_works`
@@ -1391,6 +1433,14 @@ Review findings on #334 (AB-1), each reproduced before it was fixed.
   rewrites `objects/*` mid-copy (the stress run also failed on object directories).
 - **Test.** `tests/test_git_fixture_race.py` traces git's process starts under the hostile config: 1 failed
   without the fix (maintenance child seen), passes with it. It also asserts the trace saw the commit.
+- **Second cause, found when CI failed again on the repair (3.13, `verify_head_unavailable`).** The
+  original `IndexError` was never the venv: `_checkout` closed the `git archive` pipe as soon as
+  `tarfile` read the end-of-archive blocks, while git was still writing the record padding; git died of
+  SIGPIPE, rc != 0 became `verify_head_unavailable`, and the verifier was never called. Timing-dependent,
+  so it passed on a Mac and flaked on CI (either Python). Fix: drain the pipe to EOF before closing.
+  Test: `test_checkout_drains_git_archive_padding_so_git_is_not_killed_by_sigpipe` (a stand-in git that
+  writes the padding late; red with `_Fail: verify_head_unavailable` before the fix).
+
 
 ## PD-HEALTH-1. The proxy-default health check never asked whether the session routes through the proxy
 

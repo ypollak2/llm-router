@@ -541,3 +541,55 @@ def test_release_and_start_log_their_lock_fallback(tmp_path, script, payload, ho
         lock.close()
     rows = [json.loads(line) for line in (tmp_path / ".llm-router" / "hook_errors.log").read_text().splitlines()]
     assert len(rows) == 1 and rows[0]["hook"] == hook and "lock unavailable" in rows[0]["error"]
+
+
+# ── review gaps: release TTL prune, start's exists() guard, secret-free fallback log ──
+
+def test_release_prunes_expired_slots_and_keeps_live_ones(tmp_path):
+    """Mutant "release TTL never" survived: a no-match release must still drop slots
+    older than the TTL (a leaked slot) while a live sibling stays."""
+    _seed(tmp_path, slots=[["stale", time.time() - 7200], ["live", time.time()]])
+    p = subprocess.run([sys.executable, str(RELEASE)], env=_env(tmp_path), text=True, capture_output=True,
+                       input=json.dumps({"tool_name": "Agent", "tool_use_id": "unrelated"}))
+    assert p.returncode == 0, p.stderr
+    st = _state(tmp_path)
+    assert [e[0] for e in st["slots"]] == ["live"] and st["depth"] == 1
+
+
+def test_subagent_start_after_session_end_creates_no_state_and_no_lock(tmp_path):
+    """Mutant dropping start's path.exists() guard left a .lock file behind."""
+    assert not _depth_path_for(tmp_path, "sess").exists()
+    p = subprocess.run([sys.executable, str(START)], env=_env(tmp_path), text=True, capture_output=True,
+                       input=json.dumps({"hook_event_name": "SubagentStart", "agent_id": "late",
+                                         "agent_type": "general-purpose"}))
+    assert p.returncode == 0, p.stderr
+    assert sorted(f.name for f in (tmp_path / ".llm-router").glob("agent_depth_*")) == []
+
+
+_SECRET = "sk-FAKE-SECRET-do-not-log-9f3a"
+
+
+@pytest.mark.parametrize("script, payload, hook", [
+    (ROUTE, _pre(1), "agent-route"),
+    (RELEASE, {"tool_name": "Agent", "tool_use_id": "s0"}, "agent-depth-release"),
+    (START, {"hook_event_name": "SubagentStart", "agent_id": "c1", "agent_type": "Explore"},
+     "subagent-start"),
+])
+def test_lock_fallback_logs_the_error_class_never_its_message(tmp_path, script, payload, hook):
+    """Mutant logging str(exc) instead of type(exc).__name__ survived: the lock error
+    here carries a secret-looking message that must reach neither log nor stderr."""
+    _seed(tmp_path, slots=_slots(1), pending=[[time.time(), 1, "t"]])
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "sitecustomize.py").write_text(
+        "import fcntl\n"
+        "def _boom(*a, **k):\n"
+        f"    raise OSError({_SECRET!r})\n"
+        "fcntl.flock = _boom\n")
+    p = _spawn(script, tmp_path, payload, LLM_ROUTER_BREAKER_LOCK_WAIT_S="0",
+               PYTHONPATH=f"{shim}{os.pathsep}{os.environ.get('PYTHONPATH', '')}")
+    out, err = p.communicate(json.dumps(payload), timeout=60)
+    log = (tmp_path / ".llm-router" / "hook_errors.log").read_text()
+    assert "lock unavailable (OSError)" in log and "lock unavailable (OSError)" in err
+    assert _SECRET not in log and _SECRET not in err and _SECRET not in out
+    assert [json.loads(line)["hook"] for line in log.splitlines()] == [hook]

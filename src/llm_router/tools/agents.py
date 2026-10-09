@@ -14,6 +14,8 @@ SQLite handles until a tool actually fires.
 """
 from __future__ import annotations
 
+import atexit
+import contextlib
 import hashlib
 import os
 from importlib import resources
@@ -49,7 +51,24 @@ def _default_config_path() -> Path:
     # Fall back to the template shipped inside the package. It lived at the repo
     # root (config/agents.yaml) until AGT A.0, which no wheel contains, so every
     # installed user got an empty registry and agent_not_found.
-    return Path(str(resources.files("llm_router.data").joinpath("agents.yaml")))
+    return _packaged_agents_yaml()
+
+
+_resource_stack = contextlib.ExitStack()
+_packaged_path: Path | None = None
+
+
+def _packaged_agents_yaml() -> Path:
+    """Real filesystem path of the packaged agents.yaml.
+
+    ``resources.as_file`` extracts to a temp file when the package is not on disk
+    (zipimport), so this works from a zip; the extraction lives until exit."""
+    global _packaged_path
+    if _packaged_path is None:
+        _packaged_path = Path(_resource_stack.enter_context(
+            resources.as_file(resources.files("llm_router.data").joinpath("agents.yaml"))))
+        atexit.register(_resource_stack.close)
+    return _packaged_path
 
 
 def get_registry() -> AgentRegistry:
