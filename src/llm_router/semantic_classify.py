@@ -64,8 +64,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -110,6 +108,8 @@ def _embed_ollama(text: str, base_url: str) -> list[float] | None:
     on any error so the caller treats it as "backend unavailable" and abstains.
     """
     try:
+        import urllib.request  # lazy: http.client + email parser, ~8 ms, only when a backend is called
+
         payload = json.dumps({"model": _OLLAMA_EMBED_MODEL, "prompt": text}).encode()
         req = urllib.request.Request(
             f"{base_url}/api/embeddings",

@@ -31,8 +31,9 @@ from __future__ import annotations
 import json
 import os
 import time
-import urllib.request
 from pathlib import Path
+
+from llm_router.lazy_urllib import urllib  # urllib.request on first use, not at import
 
 DEFAULT_TTL_HOURS = 12.0
 _PROBE_TIMEOUT_S = 2.0
@@ -171,6 +172,81 @@ def available_ollama_models(*, allow_probe: bool = True) -> list[str]:
 
     return cached          # stale, or [] when there is no cache at all
 
+# ── Hook path: never wait on the network ─────────────────────────────────────
+#
+# ``auto-route.py`` runs ``available_ollama_models()`` while it is being imported,
+# before any prompt is looked at. With a stale or missing cache that was a live HTTP
+# probe on the host's critical path: up to ``_PROBE_TIMEOUT_S`` seconds when Ollama is
+# busy, and a failed connect on EVERY prompt when it is down (the failed probe never
+# refreshes the cache). ``available_ollama_models_nowait`` answers from env / cache
+# only (stale included: the same "stale beats nothing" rule) and starts the probe in a
+# detached child, throttled so a dead Ollama costs one child per window, not one per
+# prompt. The next prompt after the child finishes sees the fresh list.
+
+PROBE_RETRY_S = 300.0
+
+
+def _attempt_stamp_path() -> Path:
+    return _cache_path().with_name("discovery.probe_attempt")
+
+
+def _claim_probe_attempt(now: float | None = None) -> bool:
+    """True once per ``PROBE_RETRY_S``: stamps the attempt before the child starts, so
+    two prompts in the same instant start one probe, and a failed probe is not retried
+    on every prompt."""
+    now = time.time() if now is None else now
+    path = _attempt_stamp_path()
+    try:
+        try:
+            last = float(path.read_text().strip() or 0)
+        except (OSError, ValueError):
+            last = 0.0
+        if -1.0 <= now - last < PROBE_RETRY_S:  # -1: the stamp is written to 3 decimals
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{now:.3f}")
+        return True
+    except OSError:
+        return False  # cannot record the attempt: do not spawn unthrottled
+
+
+def _spawn_probe_child() -> bool:
+    """``python -m llm_router.model_discovery`` detached; never raises, never blocks."""
+    import subprocess
+    import sys
+
+    try:
+        # Pin the child to the state directory the parent resolved, so a parent running
+        # under an overridden home refreshes that cache and never another one.
+        env = dict(os.environ, LLM_ROUTER_HOME=str(_cache_path().parent))
+        subprocess.Popen(
+            [sys.executable, "-m", "llm_router.model_discovery"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True, env=env,
+        )
+        return True
+    except Exception:                                        # noqa: BLE001
+        return False
+
+
+def available_ollama_models_nowait(*, refresh: bool = True) -> list[str]:
+    """``available_ollama_models`` without the synchronous probe.
+
+    env override -> fresh cache -> stale cache -> []. When the cache is stale or
+    missing and ``refresh`` is true, a throttled detached child refreshes it for the
+    next caller.
+    """
+    from_env = _from_env()
+    if from_env:
+        return from_env
+    cached, age = _read_cache()
+    if cached and age <= _ttl_hours():
+        return cached
+    if refresh and _claim_probe_attempt():
+        _spawn_probe_child()
+    return cached
+
+
 def first_installed(prefer: tuple[str, ...] = ()) -> str | None:
     """The best local model that is ACTUALLY installed, or None.
 
@@ -195,3 +271,7 @@ def first_installed(prefer: tuple[str, ...] = ()) -> str | None:
             if have == want or have.split(":")[0] == want.split(":")[0]:
                 return have
     return installed[0]
+
+
+if __name__ == "__main__":  # the detached refresher started by available_ollama_models_nowait
+    available_ollama_models()

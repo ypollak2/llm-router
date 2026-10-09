@@ -14,8 +14,9 @@ import json
 import os
 import re
 import time
-import urllib.request
 from dataclasses import dataclass
+
+from llm_router.lazy_urllib import urllib  # urllib.request on first use, not at import
 
 # Sentinel distinguishing "tag list not yet fetched" from None ("fetch failed").
 _UNSET: set = object()  # type: ignore[assignment]
