@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- hook latency rows carry the session (PLAN v16 gap PG9): `enforce-route`, `bash-compress`,
+  `playwright-compress`, `cc-usage-track`, `subagent-start`, `usage-refresh` and
+  `agent-depth-release` now call `hook_latency.set_session` with the `session_id` from the
+  payload they already parse (null when absent, never invented; no prompt text; no extra stdin
+  read). The statusline row and `agent-route` / `auto-route` / `status-bar` / `session-*` already
+  did. The P0.9-g live clause of `llm-router kpi` now prints `n_sessions` and the largest-session
+  share per hook, says "not informative (need >=2 sessions)" below two sessions and cannot PASS
+  there (an over-budget p95 still FAILs). Hook versions: enforce-route 15 -> 16, bash-compress
+  2 -> 3, playwright-compress 2 -> 3, cc-usage-track 3 -> 4, subagent-start 6 -> 7,
+  usage-refresh 3 -> 4, agent-depth-release 5 -> 6. Rows written before the deploy have no session
+  id and read as "not informative".
 - ledger completeness (PLAN v16 P0.8-d, D-32 = A; R-EVL-1, NFR-NUM): `usage` gains `reason`
   (additive migration `MIGRATE_USAGE_ADD_REASON`; earlier rows stay NULL and `llm-router kpi` reports
   them as missing, not back-filled). Every `usage` writer passes a short route code (`router_chain`,
