@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 2
+# llm_router-hook-version: 3
 """PostToolUse hook — compress Playwright page snapshots via cheap LLM.
 
 After every browser_snapshot call:
@@ -250,6 +250,13 @@ def main() -> None:
         payload = json.loads(sys.stdin.read())
     except (json.JSONDecodeError, OSError):
         sys.exit(0)
+
+    try:  # PG9: session id on this run's hook_latency row (from the parsed payload; never invented)
+        from llm_router.hook_latency import set_session as _hl_set_session
+
+        _hl_set_session(payload.get("session_id") if isinstance(payload, dict) else None)
+    except Exception:  # noqa: BLE001 -- llm_router without set_session: no session on the row
+        pass
 
     # Only fire for browser_snapshot
     if not _payload.is_tool(payload, "browser_snapshot"):
