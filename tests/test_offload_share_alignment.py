@@ -605,3 +605,12 @@ def test_turnfirst1_kinds_harness_turn_is_a_turn_and_subagent_turn_needs_a_main_
     joined = osh.build_units(rows, [], thread_of=lambda sid, m: roles[m], **_kw())
     assert [u["msg_id"] for u in osh.turn_units(joined["units"])] == ["a", "s1", "h", "x"]
     assert joined["step_subagent_turn"] == 1 and joined["meta_first"] == 1
+
+
+def test_turnfirst1_default_turn_rule_used_by_the_haiku_guard():
+    """The Haiku guard builds conversations with the default ``begins_turn`` (no transcript join): a
+    ``harness_turn`` row begins a turn, a ``subagent_turn`` row does not."""
+    t = NOW - 3000
+    steps_ = ["turn_first", "subagent_turn", "subagent_turn", "harness_turn", "continuation", "turn_first"]
+    rows = [proxy_row(i, sid=SID, kind="organic", ts=t + i, msg_id=f"m{i}", step=s) for i, s in enumerate(steps_)]
+    assert osh._Conversation(rows).turn == [1, 1, 1, 2, 2, 3]
