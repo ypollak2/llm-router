@@ -21,7 +21,15 @@
 #
 # Prices are NOT read from here — llm_router.pricing owns those (INV-COST-004).
 #
-snapshot_date: 2026-07-10
+# Refresh 2026-10-09 (data fetched that day): prices, context windows and
+# deprecation notes re-read from each vendor page named in the entry's `source`;
+# artificialanalysis.ai/leaderboards/models was read for context windows. That
+# page publishes an Intelligence Index, cost-per-task and tokens/s only, so
+# quality_score (the repo's own normalisation, never documented) and
+# latency_p50_ms were NOT refreshed. Models without a fetchable value keep their
+# old value.
+#
+snapshot_date: 2026-10-09
 #
 # Schema (all required unless marked optional):
 #   id                       canonical "provider/model-name" string
@@ -37,7 +45,7 @@ snapshot_date: 2026-07-10
 #   notes (opt)              free text
 
 version: v0
-updated: "2026-07-10"
+updated: "2026-10-09"
 source: "https://artificialanalysis.ai/leaderboards/models"
 
 models:
@@ -93,13 +101,13 @@ models:
     provider: deepseek
     tier: cheap
     quality_score: 0.78
-    price_per_1m_input_usd: 0.14
-    price_per_1m_output_usd: 0.28
+    price_per_1m_input_usd: 0.30
+    price_per_1m_output_usd: 1.20
     latency_p50_ms: 1200
     context_window: 1000000
     capabilities: [function-calling, json, reasoning]
     source: "https://api-docs.deepseek.com/quick_start/pricing/"
-    notes: "V4 Flash. Legacy deepseek-chat/deepseek-reasoner aliases map here but DEPRECATE 2026-07-24 — migrate refs. quality_score estimated."
+    notes: "Id kept; DeepSeek now serves V4.1-Flash (old v4-flash name retired, routed to Flash). PEAK rate $0.30/$1.20; off-peak (weekends and outside 01-04/06-10 UTC Mon-Fri) is half. quality_score estimated, not refreshed."
 
   - id: xai/grok-4.1-fast
     provider: xai
@@ -173,13 +181,13 @@ models:
     provider: openai
     tier: mid
     quality_score: 0.86
-    price_per_1m_input_usd: 1.00
-    price_per_1m_output_usd: 6.00
+    price_per_1m_input_usd: 0.20
+    price_per_1m_output_usd: 1.20
     latency_p50_ms: 1400
     context_window: 400000
     capabilities: [function-calling, vision, json, reasoning]
     source: "https://developers.openai.com/api/docs/pricing"
-    notes: "GPT-5.6 preview, cheapest tier ($1/$6). quality_score & context_window estimated — confirm."
+    notes: "GPT-5.6 cheapest tier, repriced 2026-10-09 from $1/$6 to $0.20/$1.20. quality_score & context_window estimated, not refreshed."
 
   - id: openai/gpt-5.4
     provider: openai
@@ -197,13 +205,13 @@ models:
     provider: openai
     tier: mid
     quality_score: 0.90
-    price_per_1m_input_usd: 2.50
-    price_per_1m_output_usd: 15.00
+    price_per_1m_input_usd: 2.00
+    price_per_1m_output_usd: 12.00
     latency_p50_ms: 1600
-    context_window: 400000
+    context_window: 1000000
     capabilities: [function-calling, vision, json, reasoning]
     source: "https://developers.openai.com/api/docs/pricing"
-    notes: "GPT-5.6 preview, mid tier (matches 5.4 pricing). quality_score & context_window estimated — confirm."
+    notes: "GPT-5.6 mid tier, repriced 2026-10-09 from $2.50/$15 to $2/$12; context 1M per artificialanalysis.ai. quality_score estimated, not refreshed."
 
   - id: anthropic/claude-sonnet-5
     provider: anthropic
@@ -215,7 +223,7 @@ models:
     context_window: 1000000
     capabilities: [function-calling, vision, json, reasoning]
     source: "https://platform.claude.com/docs/en/about-claude/pricing"
-    notes: "Replaces claude-3.5-sonnet. INTRO pricing $2/$10 through 2026-08-31, then STANDARD $3/$15 — update on Sept 1. quality_score estimated."
+    notes: "Replaces claude-3.5-sonnet. $2/$10 is now the STANDARD price (the planned 2026-09-01 increase to $3/$15 was cancelled per the pricing page). quality_score estimated."
 
   - id: gemini/gemini-3-pro
     provider: gemini
@@ -248,10 +256,10 @@ models:
     price_per_1m_input_usd: 1.25
     price_per_1m_output_usd: 2.50
     latency_p50_ms: 1600
-    context_window: 2000000
+    context_window: 1000000
     capabilities: [function-calling, vision, json, reasoning]
-    source: "https://www.aipricing.guru/xai-pricing/"
-    notes: "Current Grok flagship (2026-04-30). Unusually low output ratio. quality_score estimated; confirm vs docs.x.ai."
+    source: "https://docs.x.ai/docs/models"
+    notes: "Grok flagship line (4.7 now exists at $2/$6, 500k ctx; not added). Prices <200k prompt. quality_score estimated, not refreshed."
 
   - id: mistral/mistral-large-latest
     provider: mistral
@@ -269,13 +277,13 @@ models:
     provider: deepseek
     tier: mid
     quality_score: 0.87
-    price_per_1m_input_usd: 1.74
-    price_per_1m_output_usd: 3.48
+    price_per_1m_input_usd: 1.32
+    price_per_1m_output_usd: 3.96
     latency_p50_ms: 2000
     context_window: 1000000
     capabilities: [function-calling, json, reasoning]
     source: "https://api-docs.deepseek.com/quick_start/pricing/"
-    notes: "V4 Pro flagship reasoning. Standard $1.74/$3.48; periodic 75% promo → $0.435/$0.87. quality_score estimated."
+    notes: "Now V4-Pro-0813. PEAK rate $1.32/$3.96; off-peak is half. quality_score estimated, not refreshed."
 
   - id: perplexity/sonar
     provider: perplexity
@@ -342,10 +350,10 @@ models:
     provider: openai
     tier: premium
     quality_score: 0.97
-    price_per_1m_input_usd: 5.00
-    price_per_1m_output_usd: 30.00
+    price_per_1m_input_usd: 4.00
+    price_per_1m_output_usd: 20.00
     latency_p50_ms: 6500
     context_window: 400000
     capabilities: [function-calling, vision, json, reasoning]
     source: "https://developers.openai.com/api/docs/pricing"
-    notes: "GPT-5.6 preview, top tier (matches 5.5 pricing). quality_score & context_window estimated — confirm."
+    notes: "GPT-5.6 top tier. $4/$20 is PROMO pricing through at least 2026-11-21 (was $5/$30); non-promo rate not published on the page. quality_score & context_window estimated, not refreshed."
