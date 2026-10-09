@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import statistics
 import subprocess
 import sys
 import time
@@ -404,39 +403,33 @@ def test_the_unsampled_path_starts_no_process_and_a_sampled_call_two_clock_reads
     assert one_in_20.count(2) < 12, one_in_20  # P(>= 12 of 40 at p = 1/20) < 1e-7
 
 
-@pytest.mark.skipif(shutil.which("perl") is None, reason="needs perl (the macOS clock)")
-def test_the_timing_wrapper_adds_under_5ms_per_call(tmp_path):
-    """At 1-in-20 sampling the wrapper's average cost per call is < 5 ms: the
-    unsampled path starts no process, and a sampled call adds two perl clock
-    reads and one backgrounded fork.
+# Foreground commands the wrapper runs (bash -x lines), per timing setting. The
+# wrapper is "< 5 ms per call" only while it stays this small; every extra
+# command, file write or sleep adds a line here. If you change the wrapper on
+# purpose, re-measure with `bash -x` and update these numbers in the same commit.
+_WRAPPER_TRACE_LINES = {None: 5, "0": 6, "all": 17}
 
-    Load-robust (review of #312: medians of separate blocks failed 6/6 at load
-    ~65 and on CI): the arms run interleaved, so a load change hits both, and
-    each arm is judged on its minimum, the best estimate of the intrinsic cost
-    when the noise is one-sided (a busy machine only ever adds time)."""
+
+def _wrapper_trace_lines(tmp_path: Path, timing: str | None) -> int:
     home = tmp_path / "h"
-    (home / ".llm-router").mkdir(parents=True)
-    script = _wrapper_only_script(tmp_path)
-    bindir = _shim_python(tmp_path)
+    (home / ".llm-router").mkdir(parents=True, exist_ok=True)
+    extra = {"LLM_ROUTER_STATUSLINE_TIMING": timing} if timing else {}
+    r = subprocess.run(["bash", "-x", str(_wrapper_only_script(tmp_path))],
+                       env=_env(home, PATH=f"{_shim_python(tmp_path)}:{os.environ.get('PATH', '')}",
+                                PS4="+TRACE ", **extra),
+                       capture_output=True, text=True, timeout=20)
+    return sum(1 for ln in r.stderr.splitlines() if ln.startswith("+TRACE "))
 
-    def once(timing: str | None) -> float:
-        extra = {"LLM_ROUTER_STATUSLINE_TIMING": timing} if timing else {}
-        env = _env(home, PATH=f"{bindir}:{os.environ.get('PATH', '')}", **extra)
-        t = time.perf_counter()
-        subprocess.run(["bash", str(script)], env=env, capture_output=True, timeout=20)
-        return (time.perf_counter() - t) * 1000.0
 
-    off: list[float] = []
-    sampled: list[float] = []
-    every: list[float] = []
-    for i in range(40):
-        off.append(once(None))
-        sampled.append(once("1"))
-        if i % 3 == 0:
-            every.append(once("all"))
-    added_unsampled = min(sampled) - min(off)
-    added_sampled = min(every) - min(off)
-    # Mean added per call at 1-in-20: 19 unsampled + 1 sampled.
-    per_call = (19 * max(added_unsampled, 0.0) + max(added_sampled, 0.0)) / 20
-    assert per_call < 5.0, (round(added_unsampled, 2), round(added_sampled, 2),
-                            round(statistics.median(off), 2))
+@pytest.mark.skipif(shutil.which("perl") is None, reason="needs perl (the macOS clock)")
+@pytest.mark.parametrize("timing", [None, "0", "all"])
+def test_the_timing_wrapper_adds_under_5ms_per_call(tmp_path, timing):
+    """The wrapper's per-call cost, measured by what it does, not by a clock.
+
+    Wall-clock bounds flaked on loaded xdist runners (main CI run 37926623089:
+    (2.04, 68.3, 10.57) against < 5.0). The cost is the foreground work: this
+    counts the commands the wrapper executes (bash -x), which is deterministic
+    under any load, and the process starts are pinned by
+    test_the_unsampled_path_starts_no_process_and_a_sampled_call_two_clock_reads.
+    A sleep, an extra file write or an extra command changes the count."""
+    assert _wrapper_trace_lines(tmp_path, timing) == _WRAPPER_TRACE_LINES[timing]
