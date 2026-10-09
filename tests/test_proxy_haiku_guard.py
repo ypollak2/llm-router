@@ -33,7 +33,7 @@ def _turn(sid: str, ts: float, *, model: str = HAIKU, reason: str = "haiku_rewri
     return {"ts": ts, "session_id": sid, "session_kind": "organic", "decision": "forwarded",
             "upstream_status": 200, "requested_model": SONNET, "served_model": model,
             "tier": "haiku" if "haiku" in model else "sonnet", "tier_reason": reason,
-            "step_class": "first", "msg_id": f"msg_{sid}_{int(ts)}", **extra}
+            "step_class": "turn_first", "msg_id": f"msg_{sid}_{int(ts)}", **extra}
 
 
 def _redo_ledger(n_turns: int, n_redone: int, now: float = NOW) -> list[dict]:
@@ -92,6 +92,24 @@ def test_redo_30_haiku_turns_6_redone_trips():
     r = ev["triggers"]["redo"]
     assert (r["k"], r["n"]) == (6, 30)  # 20% > 15%
     assert r["evaluable"] and r["tripped"] and ev["tripped"] == ["redo"]
+
+
+def test_subagent_first_rows_are_not_turns_for_the_redo_trigger():
+    """O3-STEP-1, live behaviour change: ``subagent_first`` is a live proxy label. The guard has no
+    transcript join, so those rows are not human turns: they neither count as Haiku turns nor push an
+    escalation out of the unit's 2-turn window. Base (counts them as turns): n=40 k=0; head: n=40 k=40."""
+    rows = []
+    for i in range(40):
+        t0 = NOW - 3600.0 - i * 60.0
+        sid = f"s{i}"
+        rows.append(_turn(sid, t0))
+        rows += [_turn(sid, t0 + 5.0 + j, model=SONNET, reason="policy", step_class="subagent_first")
+                 for j in range(2)]
+        rows.append(_turn(sid, t0 + 20.0, model=SONNET, reason="escalation"))
+    r = _eval(rows)["triggers"]["redo"]
+    assert (r["k"], r["n"]) == (40, 40) and r["tripped"]
+    only_sub = [_turn(f"u{i}", NOW - 3600.0 - i * 60.0, step_class="subagent_first") for i in range(40)]
+    assert _eval(only_sub)["triggers"]["redo"]["n"] == 0
 
 
 def test_redo_at_the_bar_does_not_trip_and_below_min_n_is_not_evaluable():

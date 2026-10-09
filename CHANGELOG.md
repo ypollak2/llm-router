@@ -155,6 +155,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CHZ-FO-PROFILES-OLLAMA-FILTER` instead of a bare `pass`. See `docs/bugs/STALE-OLLAMA-1.md`.
 
 ### Changed
+- kpi (`docs/bugs/O3-STEP-1.md`): O3 starts a human turn only at a row with `step_class == turn_first`
+  (minus transcript sub-agent calls, as KPIS.md already says). Null-step rows (pre-GE1) and
+  `subagent_first` rows are per-call units only: they no longer count as turns or end a redo window.
+  They are counted and printed (`o3.excluded.no_step_class`, `o3.excluded.step_subagent_first`; keys
+  added except that `o3.excluded.subagent_first` now counts only transcript-sidechain turn_first rows;
+  `o3.excluded.step_side_call` counts rows labelled side_call without that tier_reason). A
+  `subagent_first` row stays a turn when the transcript places it on the main thread. `subagent_first`
+  is a live label, so the Haiku guard's `redo` trigger (no transcript join) changes behaviour: those
+  rows no longer count as turns or push an escalation out of the redo window. The golden kpi files hold
+  no O3 line and do not change.
 - ci/test infra (TIMING-1, D-34 = A): a `timing` pytest marker for tests whose verdict is wall-clock speed (elapsed, p95,
   event-loop lag, short real timeouts, sleep ordering). 129 test functions in 54 files carry it; the parallel `test` job runs
   `-m "not timing and ..."` and a new serial `timing (3.11)` / `timing (3.13)` job runs them with `-p no:xdist`. Thresholds and

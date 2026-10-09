@@ -9,7 +9,7 @@ NOW = 1_791_300_000.0  # fixed clock: the goldens must not depend on time.time()
 
 
 def proxy_row(i: int, *, sid="s-org", tier="sonnet", model=None, reason="policy",
-              step=None, decision="forwarded", ts=None, pv="v-old", kind=None, **extra) -> dict:
+              step="turn_first", decision="forwarded", ts=None, pv="v-old", kind=None, **extra) -> dict:
     served = model or {"haiku": "claude-haiku-4-5-20251001", "sonnet": "claude-sonnet-5-5",
                        "opus": "claude-opus-5-5"}.get(tier)
     row = {"ts": ts if ts is not None else NOW - 3600 + i, "session_id": sid, "msg_id": f"msg_{sid}_{i}",
@@ -26,7 +26,7 @@ def proxy_row(i: int, *, sid="s-org", tier="sonnet", model=None, reason="policy"
 def baseline_rows(n: int = 120) -> list[dict]:
     """Plain Sonnet/Opus organic traffic: enough rows for D4/G1/G3 to be measurable."""
     return [proxy_row(i, tier="opus" if i % 5 == 0 else "sonnet",
-                      step="continuation" if i % 2 else None, kind="organic") for i in range(n)]
+                      step="continuation" if i % 2 else "turn_first", kind="organic") for i in range(n)]
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
