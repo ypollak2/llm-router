@@ -326,6 +326,48 @@ def test_g1_proxy_turn_first_from_one_session_or_under_100_is_not_informative():
     assert g1["turn_first"]["p95_s"] is None
 
 
+def _sched_rows(ms_values, sessions=("s-a", "s-b")):
+    return [_tf(10, sid=sessions[i % len(sessions)], tier_shadow_schedule_ms=ms)
+            for i, ms in enumerate(ms_values)]
+
+
+def test_g1_proxy_reports_the_shadow_scheduling_cost_against_the_30ms_target():
+    """P09-13: the phase sum excludes shadow scheduling, so it has its own segment, from
+    turn-first rows that carry ``tier_shadow_schedule_ms``. 120 values 1..120 ms: nearest rank
+    on n-1 gives p50 = 61 ms, p95 = 114 ms, which is over the 30 ms target."""
+    rows = _sched_rows(range(1, 121))
+    rows += [_tf(10) for _ in range(40)]                       # shadow off for these: no field
+    rows += [_row(step_class="continuation", tier_decision_s=0.01, tier_shadow_schedule_ms=999.0)
+             for _ in range(60)]                               # not turn-first: never counted
+    _write_proxy_rows(rows)
+    g1 = _kpis()["G1_proxy"]
+    assert "| shadow schedule p50=61ms p95=114ms (n=120, sessions=2; OVER 30ms target)" in g1["value"]
+    seg = g1["shadow_schedule"]
+    assert (seg["n"], seg["p50_s"], seg["p95_s"], seg["sessions"], seg["informative"],
+            seg["target_ms"]) == (120, 0.061, 0.114, 2, True, 30.0)
+    _write_proxy_rows(_sched_rows([5.0] * 100))
+    g1 = _kpis()["G1_proxy"]
+    assert "shadow schedule p50=5ms p95=5ms (n=100, sessions=2; within 30ms target)" in g1["value"]
+
+
+def test_g1_proxy_shadow_schedule_not_informative_cases_and_absent_when_shadow_off():
+    _write_proxy_rows(_sched_rows([5.0] * 120, sessions=("s-a",)))          # one session
+    g1 = _kpis()["G1_proxy"]
+    assert ("shadow schedule p50=5ms p95=5ms not informative (n=120, sessions=1; need n>=100 "
+            "from >=2 sessions)") in g1["value"]
+    assert g1["shadow_schedule"]["informative"] is False
+    _write_proxy_rows(_sched_rows([5.0] * 60))                               # n < 100
+    assert ("shadow schedule p50=5ms p95=5ms not informative (n=60, sessions=2; need n>=100 "
+            "from >=2 sessions)") in _kpis()["G1_proxy"]["value"]
+    _write_proxy_rows(_sched_rows([5.0] * 20) + [_tf(10) for _ in range(60)])  # n < MIN_N
+    g1 = _kpis()["G1_proxy"]
+    assert "shadow schedule not informative (n=20, sessions=2)" in g1["value"]
+    assert g1["shadow_schedule"]["p95_s"] is None
+    _write_proxy_rows([_tf(10, sid="s-a" if i % 2 else "s-b") for i in range(120)])  # shadow off
+    g1 = _kpis()["G1_proxy"]
+    assert "shadow schedule" not in g1["value"] and "shadow_schedule" not in g1
+
+
 def test_g1_proxy_is_never_zero_when_forwarded_rows_added_nothing():
     """The regression itself: added_latency_s all 0.0 must not read as 0 ms."""
     _write_proxy_rows([_row(step_class="continuation", tier_decision_s=0.022, added_latency_s=0.0)
