@@ -130,6 +130,30 @@ def test_tier_retry_counts_only_router_decided_haiku_calls():
     assert (t["k"], t["n"]) == (2, 100)
 
 
+def _retried_original(i: int = 0) -> dict:
+    """Haiku was decided, the rewrite 4xx'd, the proxy retried the original: served on Sonnet."""
+    return _turn("r", NOW - 600.0 - i, step_class="continuation", model=SONNET, reason="haiku_rewrite",
+                 tier_retry={"status": 400, "detail": "x"}) | {"tier": "haiku"}
+
+
+def test_served_on_haiku_is_not_the_same_as_decided_haiku():
+    normal = _turn("r", NOW - 10, step_class="continuation")
+    retried = _retried_original()
+    arm_served = _turn("r", NOW - 11, step_class="continuation", tier_arm_assignment="treatment")
+    arm_retried = dict(retried, tier_arm_assignment="treatment_retried_original")
+    assert [hg.is_haiku_decided(r) for r in (normal, retried, arm_served, arm_retried)] == [True] * 4
+    assert [hg.is_haiku_served(r) for r in (normal, retried, arm_served, arm_retried)] == [True, False, True, False]
+
+
+def test_watch_reports_served_next_to_decided_and_retries_stay_in_the_retry_trigger():
+    rows = _retry_ledger(10, 0) + [_retried_original(i) for i in range(3)]
+    ev = hg.watch(NOW - 86400.0, NOW, rows=rows)
+    assert (ev["haiku_decided_calls"], ev["haiku_served_calls"]) == (13, 10)
+    t = ev["triggers"]["tier_retry"]
+    assert (t["k"], t["n"]) == (3, 13)  # a retried row is the numerator: it must stay decided
+    assert "n=13 (served on Haiku: n=10)" in hg.render_watch(ev)
+
+
 def test_two_consecutive_7_of_10_days_trip(tmp_path):
     _summary(tmp_path, "2026-10-06", 7, 10)
     _summary(tmp_path, "2026-10-07", 7, 10)
