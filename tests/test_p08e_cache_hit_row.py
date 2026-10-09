@@ -20,7 +20,10 @@ import pytest
 
 from llm_router import call_identity
 from llm_router import semantic_cache as sc
-from tests.test_p05_semantic_cache_key import _fake_embedding, _route, cache_env  # noqa: F401
+from tests.test_p05_semantic_cache_key import _route
+from tests.test_p05_semantic_cache_key import cache_env as _p05_cache_env
+
+cache_env = _p05_cache_env  # re-exported fixture (a bare import would trip F811 on every use)
 
 SID = "11111111-aaaa-bbbb-cccc-222222222222"
 
