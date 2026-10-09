@@ -44,7 +44,7 @@ class AgentProfile:
     budget envelope consume them at runtime.
 
     Attributes:
-        id: Stable identifier (matches config/agents.yaml `id:` field).
+        id: Stable identifier (matches the `id:` field in the packaged llm_router/data/agents.yaml).
         description: Human-readable purpose. Surfaced in `llm_router_agent_list`.
         tier_preference: Ordered list of preferred model tiers — local /
             cheap / mid / premium. The selector tries these in order.

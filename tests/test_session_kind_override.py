@@ -215,7 +215,18 @@ def test_g3_measures_the_writer_so_the_override_does_not_change_it():
     g3_before = kpi.compute_scorecard(days=7, now=NOW)["kpis"]["G3"]
     assert g3_before["measurable"] is True
     _override()
-    assert kpi.compute_scorecard(days=7, now=NOW)["kpis"]["G3"] == g3_before
+    g3_after = kpi.compute_scorecard(days=7, now=NOW)["kpis"]["G3"]
+
+    def audit(g3):  # the proxy tier-field audit; "prd"/"lines" are the per-writer verdict
+        return {k: v for k, v in g3.items() if k not in ("prd", "lines")}
+
+    assert audit(g3_after) == audit(g3_before)
+    # The per-writer verdict (P0.8-c) scores the organic population, where the owner's
+    # override IS the session's kind: the overridden session's rows move out, counted apart.
+    before, after = g3_before["prd"]["writers"]["proxy"], g3_after["prd"]["writers"]["proxy"]
+    moved = after["excluded"].get("research", 0)
+    assert moved > 0 and before["excluded"].get("research", 0) == 0
+    assert after["n"] == before["n"] - moved
 
 
 def test_override_reaches_usage_outcome_redo_resolution():

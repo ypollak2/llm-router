@@ -73,8 +73,11 @@ def slow_act(tmp_path, monkeypatch, temp_db):
                         lambda: {0: _SlowAdapter(seconds["value"])})
 
     async def act(run_s: float, **kw) -> dict[str, Any]:
+        from llm_router.tools.agentic import llm_delegate
         from llm_router.tools.consolidated import llm_act
         seconds["value"] = run_s
+        if "workdir" in kw:   # distinct project roots run in parallel
+            return json.loads(await llm_delegate("do slow work", **kw))
         return json.loads(await llm_act("do slow work", **kw))
 
     act.project = project.resolve()
@@ -120,14 +123,17 @@ async def test_loop_lag_stays_under_100ms_during_a_30s_llm_act(slow_act):
 
 
 @pytest.mark.timeout(120)
-async def test_two_parallel_llm_act_calls_take_max_not_sum(slow_act):
+async def test_two_parallel_llm_act_calls_on_different_roots_take_max_not_sum(slow_act):
     run_s = 3.0
     await slow_act(0.0)  # warm-up: lazy imports would inflate the single-call time
     t0 = time.monotonic()
     one = await slow_act(run_s)
     t_one = time.monotonic() - t0
     t0 = time.monotonic()
-    a, b = await asyncio.gather(slow_act(run_s), slow_act(run_s))
+    d1, d2 = slow_act.project / "r1", slow_act.project / "r2"
+    d1.mkdir(), d2.mkdir()
+    a, b = await asyncio.gather(slow_act(run_s, workdir=str(d1)),
+                                slow_act(run_s, workdir=str(d2)))
     t_two = time.monotonic() - t0
     print(f"\nA.0-a parallel: n=2 calls of {run_s}s work; one={t_one:.2f}s "
           f"two_parallel={t_two:.2f}s ratio={t_two / t_one:.3f} (limit {PARALLEL_RATIO})")
