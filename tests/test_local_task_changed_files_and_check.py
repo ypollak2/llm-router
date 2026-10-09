@@ -132,3 +132,142 @@ def test_script_path_and_quoted_args_still_work(tmp_path):
     assert lt._run_check(["python3", "-c", "assert 1 > 0"],
                          tmp_path, 10)[0] is True
     assert lt._run_check('python3 -c "assert 1>0"', tmp_path, 10)[0] is True
+
+
+# --- review round 1 (PR #358): each test below failed against the first cut -----
+
+def _loop_doing(fn):
+    def run(**kw):
+        fn(kw["project_root"])
+        return "done"
+    return run
+
+
+def test_snapshots_are_taken_inside_the_serialised_section(wd, monkeypatch):
+    """Concurrent runs must not attribute each other's edits (A.0-3)."""
+    _repo(wd)
+    held = []
+    real = lt._take_state
+    monkeypatch.setattr(lt, "_take_state",
+                        lambda *a, **k: (held.append(lt._AGENT_ENV_LOCK._is_owned()), real(*a, **k))[1])
+    monkeypatch.setattr("llm_router.hooks.agent_loop.run_agent_loop", _fake_loop(wd))
+    _call(objective="x", workdir=str(wd), apply_writes=True)
+    assert held == [True, True], held
+
+
+def test_edit_then_commit_during_run_is_reported(wd, monkeypatch):
+    _repo(wd)
+
+    def work(root):
+        (root / "src" / "target.py").write_text("x = 5\n")
+        _git(root, "commit", "-qam", "model commit")
+    monkeypatch.setattr("llm_router.hooks.agent_loop.run_agent_loop", _loop_doing(work))
+    out = _call(objective="x", workdir=str(wd), apply_writes=True)
+    assert out["changed_files"] == ["src/target.py"], out
+
+
+def test_gitignored_edit_is_a_documented_limit(wd, monkeypatch):
+    _repo(wd)
+    (wd / ".gitignore").write_text("secret.env\n")
+    (wd / "secret.env").write_text("a=1\n")
+    _git(wd, "add", ".gitignore")
+    _git(wd, "commit", "-qm", "ignore")
+
+    def work(root):
+        (root / "secret.env").write_text("a=2\n")
+        (root / "src" / "target.py").write_text("x = 7\n")
+    monkeypatch.setattr("llm_router.hooks.agent_loop.run_agent_loop", _loop_doing(work))
+    out = _call(objective="x", workdir=str(wd), apply_writes=True)
+    assert out["changed_files"] == ["src/target.py"]
+    assert "gitignored" in out["changed_files_scope"].lower()
+    assert "gitignored" in (lt.llm_local_task.__doc__ or "").lower()
+
+
+def test_non_git_dir_inside_repo_that_ignores_it_falls_back(wd, monkeypatch):
+    _repo(wd)
+    (wd / ".gitignore").write_text("scratch/\n")
+    _git(wd, "add", ".gitignore")
+    _git(wd, "commit", "-qm", "ignore")
+    nested = wd / "scratch"
+    nested.mkdir()
+    (nested / "a.py").write_text("a = 1\n")
+    monkeypatch.setattr("llm_router.hooks.agent_loop.run_agent_loop",
+                        _loop_doing(lambda r: (r / "a.py").write_text("a = 2\n")))
+    out = _call(objective="x", workdir=str(nested), apply_writes=True)
+    assert out["changed_files"] == ["a.py"], out
+
+
+def test_rename_lists_old_and_new_path(wd, monkeypatch):
+    _repo(wd)
+    monkeypatch.setattr("llm_router.hooks.agent_loop.run_agent_loop",
+                        _loop_doing(lambda r: _git(r, "mv", "src/other.py", "src/moved.py")))
+    out = _call(objective="x", workdir=str(wd), apply_writes=True)
+    assert out["changed_files"] == ["src/moved.py", "src/other.py"], out
+
+
+def test_untracked_files_listed_individually_not_as_directory(wd, monkeypatch):
+    _repo(wd)
+
+    def work(root):
+        (root / "newdir").mkdir()
+        (root / "newdir" / "one.py").write_text("1\n")
+        (root / "newdir" / "two.py").write_text("2\n")
+    monkeypatch.setattr("llm_router.hooks.agent_loop.run_agent_loop", _loop_doing(work))
+    out = _call(objective="x", workdir=str(wd), apply_writes=True)
+    assert out["changed_files"] == ["newdir/one.py", "newdir/two.py"], out
+
+
+def test_subdirectory_workdir_strips_prefix_and_ignores_siblings(wd, monkeypatch):
+    _repo(wd)
+
+    def work(root):
+        (root / "target.py").write_text("x = 3\n")                    # inside workdir
+        (root.parent / "aaa" / "outside.txt").write_text("changed")   # sibling dir
+    monkeypatch.setattr("llm_router.hooks.agent_loop.run_agent_loop", _loop_doing(work))
+    out = _call(objective="x", workdir=str(wd / "src"), apply_writes=True)
+    assert out["changed_files"] == ["target.py"], out
+
+
+def test_already_dirty_file_edited_again_is_reported(wd, monkeypatch):
+    _repo(wd)
+    (wd / "src" / "other.py").write_text("y = 99\n")
+    monkeypatch.setattr("llm_router.hooks.agent_loop.run_agent_loop",
+                        _loop_doing(lambda r: (r / "src" / "other.py").write_text("y = 100\n")))
+    out = _call(objective="x", workdir=str(wd), apply_writes=True)
+    assert out["changed_files"] == ["src/other.py"], out
+
+
+def test_git_state_lost_after_run_says_so_instead_of_empty_list(wd, monkeypatch):
+    _repo(wd)
+    real, calls = lt._git_state, []
+
+    def flaky(root, since=None):
+        calls.append(1)
+        return real(root, since) if len(calls) == 1 else None
+    monkeypatch.setattr(lt, "_git_state", flaky)
+    monkeypatch.setattr("llm_router.hooks.agent_loop.run_agent_loop", _fake_loop(wd))
+    out = _call(objective="x", workdir=str(wd), apply_writes=True)
+    assert out["changed_files"] == []
+    assert "unknown" in out["changed_files_note"], out
+
+
+@pytest.mark.parametrize("check", [
+    "pytest -q 2> err.txt",
+    "pytest -q &> all.txt",
+    "pytest `which py`",
+    "echo $(date)",
+    "pytest -q 2>&1",
+])
+def test_more_unquoted_shell_syntax_rejected(tmp_path, check):
+    ok, msg = lt._run_check(check, tmp_path, timeout=5)
+    assert ok is False and "script" in msg.lower(), msg
+
+
+@pytest.mark.parametrize("check", [
+    "python3 -c \"assert '`' == chr(96)\"",
+    "python3 -c 'assert \"`\" == chr(96)'",
+    "python3 -c 'assert \"$(\" == chr(36)+chr(40)'",
+])
+def test_metacharacters_inside_quotes_are_literal_and_allowed(tmp_path, check):
+    ok, msg = lt._run_check(check, tmp_path, timeout=10)
+    assert ok is True, msg

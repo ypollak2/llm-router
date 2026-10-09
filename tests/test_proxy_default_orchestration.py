@@ -628,3 +628,24 @@ def test_both_down_activates_both_services(tmp_path, _sandbox):
         assert _shim_activate(home) in runner.calls, runner.calls
     finally:
         runner.close()
+
+
+def test_skipping_a_healthy_main_proxy_says_its_plist_edits_stay_unapplied(tmp_path, _sandbox):
+    """Review nit on #346: when the healthy main proxy is left running, any change to its
+    plist is not applied (kickstart would not re-read it either); the install output must say
+    so and name the owner step, instead of implying the main service is up to date."""
+    port, upstream = _free_port(), _free_port()
+    _seed_sentinel(port, upstream)
+    main_up = _listener(upstream)
+    runner = _BindsPerService({pd.LABEL: upstream, pd.SHIM_LABEL: port}, {pd.SHIM_LABEL})
+    try:
+        home = tmp_path / "svc"
+        r = _install_both(home, port, upstream, runner)
+        assert r["ok"] is True, r
+        text = "\n".join(r["actions"])
+        assert "not restarting it" in text, text
+        assert "plist" in text and "not applied" in text, text
+        assert "docs/proxy.md" in text, text
+    finally:
+        runner.close()
+        main_up.close()

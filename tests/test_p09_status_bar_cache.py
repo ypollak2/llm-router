@@ -65,19 +65,47 @@ def _no_sqlite(monkeypatch, mod):
     monkeypatch.setattr(mod.sqlite3, "connect", boom)
 
 
-def test_a_stale_cache_returns_fast_shows_the_line_and_spawns_one_refresher(hook, monkeypatch):
+def _forbid_sync_work(monkeypatch, mod):
+    """Make every synchronous-refresh route raise if the hot path touches it.
+
+    The regression this file guards (HL7: p95 4,488 ms) was usage fetch + sqlite
+    lock wait + subprocess wait on the prompt's path. Those calls, not the clock,
+    are the risk, so the test detects them by call. A wall-clock bound flaked on
+    CI Python 3.13 (69.3 ms vs 50 ms, PR #343) with nothing wrong in the hook.
+    """
+    import subprocess
+
+    def forbid(name):
+        def boom(*a, **k):
+            raise AssertionError(f"{name} ran synchronously on the status-bar hot path")
+        return boom
+
+    for fn in ("_format_status", "_refresh_cache", "_read_savings", "_read_session_calls",
+               "_read_claude_credits", "_read_provider_health"):
+        monkeypatch.setattr(mod, fn, forbid(fn))
+    for fn in ("run", "call", "check_call", "check_output"):
+        monkeypatch.setattr(subprocess, fn, forbid(f"subprocess.{fn}"))
+    monkeypatch.setattr(subprocess.Popen, "wait", forbid("Popen.wait"))
+    monkeypatch.setattr(subprocess.Popen, "communicate", forbid("Popen.communicate"))
+    monkeypatch.setattr(os, "waitpid", forbid("os.waitpid"))
+    monkeypatch.setattr(time, "sleep", forbid("time.sleep"))
+
+
+def test_a_stale_cache_returns_the_line_and_spawns_one_detached_refresher(hook, monkeypatch):
+    """No wall-clock bound: a synchronous refresh on the hot path fails by call."""
+    import llm_router.statusline_tick as tick
+
     _put_cache(hook, "📊 CC 40%s·70%w", age_s=60)
-    spawned = []
-    monkeypatch.setattr(hook, "_spawn_refresh", lambda: spawned.append(1))
+    detached = []
+    monkeypatch.setattr(tick, "_spawn_detached", lambda argv: detached.append(list(argv)))
     _no_sqlite(monkeypatch, hook)
-    hook._read_cache()  # warm the json import path outside the timed call
-    ms, out = _main(hook, monkeypatch)
-    assert ms < 50.0, f"status-bar took {ms:.1f} ms with a stale cache"
+    _forbid_sync_work(monkeypatch, hook)
+    _ms, out = _main(hook, monkeypatch)
     assert json.loads(out)["hookSpecificOutput"]["systemMessage"] == "📊 CC 40%s·70%w"
-    assert spawned == [1]
+    assert len(detached) == 1 and detached[0][-1] == "--refresh-cache", detached
     # A second prompt within the claim window starts no second refresher.
     _main(hook, monkeypatch)
-    assert spawned == [1]
+    assert len(detached) == 1
 
 
 def test_a_fresh_cache_spawns_nothing(hook, monkeypatch):

@@ -12,7 +12,8 @@ auditable; it doesn't replace the loop.
 Usage:
     from llm_router.agents import AgentRegistry, AgentSession, SessionStore
 
-    registry = AgentRegistry.from_yaml(Path("config/agents.yaml"))
+    from llm_router.tools.agents import get_registry   # finds the packaged agents.yaml
+    registry = get_registry()
     profile = registry.get("code-reviewer")
     store = SessionStore()
     session = store.create(agent_id=profile.id, budget_usd=profile.default_budget_usd)

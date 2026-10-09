@@ -112,6 +112,9 @@ tests/hook_rendering/
 !/docs/BENCHMARKS.md
 !/docs/releases/
 !/docs/releases/**
+# Bug entries, one file each (BUGS-1): /docs/* would keep them out of every clone.
+!/docs/bugs/
+!/docs/bugs/**
 # Public, user-facing docs. /docs/* is ignore-by-default because this
 # tree also holds internal strategy notes, so anything meant to SHIP has
 # to be un-ignored explicitly. A page that is written but never committed

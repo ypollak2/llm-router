@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- verifier PR C (SHADOW, opt-in): pending_verify queue, detached `verify_worker`, Codex marker. **Off unless
+  `LLM_ROUTER_VERIFY=on`**; no outcome, NS, D1 or D2 changes. See `docs/VERIFIER.md`.
+- agents (PLAN v16 AGT A.0): `llm_act`, `llm_delegate` and `llm_local_task` take `wait` (default
+  True). `wait=False` returns `{"job_id": ...}` at once; `llm_router_session(action="job", id=...)`
+  polls it (`running` / `done` / `failed`, with the tool's result). Jobs live in the MCP server
+  process and are forgotten on restart; an unknown id answers `unknown_job`.
 - proxy (PLAN v16 GE4, OD-4 = A): Frontier shadow (`shadow_frontier.py`), **off by default**
   (`LLM_ROUTER_SHADOW_FRONTIER=on` to enable). After a `tier_reason == haiku_rewrite` reply is relayed,
   a background task replays the client's original bytes to the requested model; caps in code: 20 calls
@@ -21,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs a blind A/B judge (isolated `claude -p`, `--no-session-persistence`, not via the proxy) into
   `shadow_frontier/verdicts.jsonl`, the file the Haiku guard's `shadow` trigger reads. Ledgers hold no
   prompt or response text; the pair text store is 0600 and kept 14 days.
+- proxy (GE4 review fixes on #339): retention is now enforced when the shadow is off or paused
+  (pairs and `ledger.jsonl` rows older than 14 days are pruned at proxy start and at the start of every
+  judge run, before the flag/quota early returns); the daily 400k input-token cap admits a replay only
+  if the Haiku call's input size x 1.35 fits (the replay is tokenized by a different model; a replay
+  whose real count exceeds that ratio can still land over the cap by the excess, auditable from
+  `est_input_tokens` vs `input_tokens` in the ledger); a truncated or aborted Haiku reply (no
+  `stop_reason`, no SSE `message_stop`, cut JSON, client gone) is skipped (`cheap_incomplete`), not
+  replayed or paired.
 - proxy (PLAN v16 P0.11, owner decision D-20 = A): the Haiku guard (`proxy/haiku_guard.py`) runs in
   the proxy at start and hourly while `haiku_rewrite` is on. A trip (redo > 15% at n >= 30; audit
   batch < 75% at n >= 30; daily audit < 8/10 on 2 consecutive days; `tier_retry` > 1% at n >= 100
@@ -40,6 +54,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the only place the proxy keeps prompt text; it is for labelling the shadow (`LLM_ROUTER_SHADOW_LABELS`).
 
 ### Changed
+- agents (PLAN v16 AGT A.0): `agents.yaml` ships inside the package (`llm_router/data/agents.yaml`,
+  loaded with `importlib.resources`). It lived at the repo root, which no wheel contains, so every
+  installed user got `agent_not_found` (`docs/BUGS.md` A.0-1). A project `config/agents.yaml` and
+  `LLM_ROUTER_AGENTS_CONFIG` still override it.
+- agents (PLAN v16 AGT A.0): `run_delegation` (behind `llm_act` / `llm_delegate`) and
+  `llm_local_task`'s agent loop and acceptance check run in a worker thread (`asyncio.to_thread`), so
+  a long run no longer freezes every other MCP call (`docs/BUGS.md` A.0-2). `llm_local_task` runs
+  still go one at a time, because the loop's write mode is process-wide `os.environ`. A queued run
+  takes its file snapshot and starts its budget clock only once its turn comes, so it never reports
+  another run's edits as its own and its wait is not charged to its budget; the result carries
+  `queued_s` (`docs/BUGS.md` A.0-3). `wait=False` with a missing `workdir` answers `blocked` at once
+  instead of returning a job id.
 - proxy (v16 P1.7-c): the classifier shadow's `cls_input.assemble` reads the history backwards, stops once it
   has its context and never reads more than 400 messages back. Same input as before whenever the context lies
   in that window (600-case fuzz against the old walk); it no longer holds the GIL long enough to delay

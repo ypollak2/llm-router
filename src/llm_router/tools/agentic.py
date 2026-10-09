@@ -133,7 +133,7 @@ def _default_adapters(root: Path | None = None) -> dict[int, Any]:
 async def llm_delegate(
     task: str, budget_usd: float = 1.0, baseline_cost_per_milestone: float = 0.20,
     context: str = "", bounded: bool | None = None, workdir: str | None = None,
-    ctx: Context | None = None,
+    wait: bool = True, ctx: Context | None = None,
 ) -> str:
     """Agentic delegation: decompose *task* into milestones, run them on the
     cheapest capable tier with objective acceptance checks, escalate on failure
@@ -151,7 +151,28 @@ async def llm_delegate(
     untoolable completion. ``None`` (default) auto-detects via
     :func:`should_route_bounded`; ``True``/``False`` force it. Bounded runs cap the
     plan to one milestone, derive the budget from model pricing, and record the
-    parent ledger row as ``route_kind="bounded_operational"``."""
+    parent ledger row as ``route_kind="bounded_operational"``.
+
+    *wait* (default True) returns the result when the run ends. ``wait=False``
+    returns ``{"job_id": ...}`` at once; poll it with
+    ``llm_router_session(action="job", id=<job_id>)``. Either way the run itself
+    executes in a worker thread, so it never blocks the MCP event loop (AGT A.0)."""
+    # P0.13: resolve the root NOW, while the request (and its MCP roots) is live;
+    # a background job must not re-resolve it after the call has returned.
+    project_root = await resolve_project_root(ctx)
+    run = _delegate(task, budget_usd, baseline_cost_per_milestone, context, bounded,
+                    workdir, project_root)
+    if not wait:
+        from llm_router.jobs import start_job
+        return json.dumps(start_job("llm_delegate", run))
+    from llm_router.jobs import run_or_detach
+    return await run_or_detach("llm_delegate", run)
+
+
+async def _delegate(
+    task: str, budget_usd: float, baseline_cost_per_milestone: float, context: str,
+    bounded: bool | None, workdir: str | None, project_root: Path | None,
+) -> str:
     from llm_router.bounded_operational import (
         MAX_BOUNDED_ATTEMPTS, MAX_BOUNDED_MILESTONES, bounded_op_budget_usd,
         should_route_bounded,
@@ -165,7 +186,6 @@ async def llm_delegate(
             bounded = False
 
     planner = (planner_factory or _default_planner)()
-    project_root = await resolve_project_root(ctx)
     adapters = adapters_factory() if adapters_factory else _default_adapters(project_root)
     try:
         milestones = await hybrid_plan(task, planner)
@@ -193,8 +213,12 @@ async def llm_delegate(
     # P0.13: with a project root, the check inspects the tree the agent wrote in.
     effective_workdir = workdir or (str(project_root) if project_root else os.getcwd())
 
-    result = run_delegation(
-        task, milestones, adapters,
+    # AGT A.0: run_delegation is synchronous (model calls, subprocesses) and runs
+    # for minutes; on the event loop it froze every other MCP call meanwhile.
+    # Dedicated bounded pool, one run per project root (llm_router.agent_exec).
+    from llm_router.agent_exec import run_agent
+    result = await run_agent(
+        run_delegation, task, milestones, adapters, root=effective_workdir,
         baseline_cost_per_milestone=baseline_cost_per_milestone,
         budget_cap_usd=budget_usd,
         max_attempts_per_tier=max_attempts,
