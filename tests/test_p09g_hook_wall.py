@@ -278,10 +278,13 @@ def test_wall_is_judged_on_each_hooks_latest_run_only():
     assert (w["run_id"], w["verdict"], w["cold"]["n"]) == ("new", hw.PASS, 200)
 
 
-def _live(hook, ms, *, n, load=1.0):
+def _live(hook, ms, *, n, load=1.0, sessions=3):
+    """``sessions`` distinct session ids round-robin; 0 = rows with no session id (pre-PG9)."""
     rows = []
     for i in range(n):
         r = {"hook": hook, "event": "E", "elapsed_ms": float(ms), "ts": NOW - 60 - i}
+        if sessions:
+            r["session_id"] = f"s{i % sessions}"
         if load is not None:
             r["load1"] = load
         rows.append(r)
@@ -331,9 +334,9 @@ def test_kpi_prints_the_p09g_line_with_n_per_hook(monkeypatch):
     for r in sum((_wall_rows(h, 120, n=200) for h in FIVE), []) + _wall_rows("bash-compress", 250, n=12, load=6.0):
         hw.capped_log.append(hw.store_path(), (json.dumps(r) + "\n").encode(), 1 << 22)
     for i in range(200):
-        hl.record("enforce-route", "PreToolUse", 40.0, now=NOW - 100 - i, load1=1.5)
+        hl.record("enforce-route", "PreToolUse", 40.0, now=NOW - 100 - i, load1=1.5, session_id=f"s{i % 3}")
     for i in range(5):
-        hl.record("enforce-route", "PreToolUse", 2000.0, now=NOW - 50 - i, load1=7.0)
+        hl.record("enforce-route", "PreToolUse", 2000.0, now=NOW - 50 - i, load1=7.0, session_id="s0")
     card = kpi.compute_scorecard(days=7, now=NOW)
     g = card["p09g"]
     assert g["hooks"]["enforce-route"]["live"]["n"] == 200
@@ -343,8 +346,8 @@ def test_kpi_prints_the_p09g_line_with_n_per_hook(monkeypatch):
     assert "P0.9-g sync hooks p95 <= 300ms" in text and "INSUFFICIENT" in text
     line = next(ln for ln in text.splitlines() if ln.startswith("enforce-route: "))
     assert "wall cold p50=120ms p95=120ms max=120ms n=200/200" in line
-    assert ("live elapsed p95=40ms n=200/200 (5 above load excluded: p50=2000ms p95=2000ms at load1 med=7.0, "
-            "not scored, 0 load not recorded) PASS") in line
+    assert ("live elapsed p95=40ms n=200/200 [n_sessions=3, largest session=34%] (5 above load excluded: "
+            "p50=2000ms p95=2000ms at load1 med=7.0, not scored, 0 load not recorded) PASS") in line
     cc = next(ln for ln in text.splitlines() if ln.startswith("cc-usage-track: "))
     assert "n=0/30*" in cc
     assert "per tool call (report only): enforce-route + bash-compress wall cold p95 sum = 240ms" in text
@@ -382,3 +385,40 @@ def test_the_script_entry_point_runs_from_a_checkout(tmp_path):
                            str(tmp_path / "none.jsonl")], env=env, capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.startswith("P0.9-g sync hooks")
+
+
+# ── PG9: the live clause counts sessions ─────────────────────────────────────
+
+
+def test_live_prints_n_sessions_and_the_largest_session_share():
+    rows = _live("enforce-route", 50, n=150, sessions=1)
+    for r in rows:
+        r["session_id"] = "big"
+    rows += [dict(r, session_id=f"o{i % 2}") for i, r in enumerate(_live("enforce-route", 50, n=50))]
+    lv = hw.judge_live(rows, 7)["enforce-route"]
+    assert (lv["n"], lv["n_sessions"], lv["largest_session_share"], lv["informative"]) == (200, 3, 0.75, True)
+    g = hw.gate(_wall_rows("enforce-route", 100, n=200), rows, 7)
+    line = next(ln for ln in hw.render_lines(g) if ln.startswith("enforce-route: "))
+    assert "n=200/200" in line and "n_sessions=3, largest session=75%" in line
+    assert "not informative" not in line.split("live elapsed")[1]
+
+
+def test_one_session_is_not_informative_and_cannot_pass_the_live_clause():
+    rows = _live("enforce-route", 50, n=200, sessions=1)
+    lv = hw.judge_live(rows, 7)["enforce-route"]
+    assert (lv["n_sessions"], lv["informative"], lv["verdict"]) == (1, False, hw.INSUFFICIENT)
+    g = hw.gate(_wall_rows("enforce-route", 100, n=200), rows, 7)
+    assert g["hooks"]["enforce-route"]["verdict"] == hw.INSUFFICIENT
+    line = next(ln for ln in hw.render_lines(g) if ln.startswith("enforce-route: "))
+    assert "n_sessions=1, largest session=100%" in line and "not informative (need >=2 sessions)" in line
+
+
+def test_rows_without_a_session_id_are_counted_not_guessed_and_a_breach_still_fails():
+    rows = _live("bash-compress", 400, n=200, sessions=0)
+    lv = hw.judge_live(rows, 7)["bash-compress"]
+    assert (lv["n_sessions"], lv["no_session_id"], lv["largest_session_share"]) == (0, 200, None)
+    assert lv["informative"] is False and lv["verdict"] == hw.FAIL
+    g = hw.gate(_wall_rows("bash-compress", 100, n=200), rows, 7)
+    line = next(ln for ln in hw.render_lines(g) if ln.startswith("bash-compress: "))
+    assert "n_sessions=0, largest session=n/a, 200 without session id not informative" in line.replace(
+        " not informative (need >=2 sessions)", " not informative")

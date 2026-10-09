@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 15
+# llm_router-hook-version: 16
 """PreToolUse[*] hook — enforce routing compliance.
 
 When auto-route.py issues a ⚡ MANDATORY ROUTE directive, it writes a
@@ -1020,6 +1020,13 @@ def main() -> None:
         hook_input = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):
         sys.exit(0)
+
+    try:  # PG9: session id on this run's hook_latency row (from the parsed payload; never invented)
+        from llm_router.hook_latency import set_session as _hl_set_session
+
+        _hl_set_session(hook_input.get("session_id") if isinstance(hook_input, dict) else None)
+    except Exception:  # noqa: BLE001 -- llm_router without set_session: no session on the row
+        pass
 
     _try_local_intercept(hook_input)
 

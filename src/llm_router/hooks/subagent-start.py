@@ -1,5 +1,5 @@
 """SubagentStart hook — inject routing context into every new agent's initial messages.
-# llm_router-hook-version: 6
+# llm_router-hook-version: 7
 
 Fires once when Claude spawns an agent (Agent tool call completes the PreToolUse
 gate and runAgent() starts). The hook's additionalContext is prepended to the
@@ -279,6 +279,13 @@ def main() -> None:
         payload = json.loads(sys.stdin.read())
     except Exception:
         sys.exit(0)
+
+    try:  # PG9: session id on this run's hook_latency row (from the parsed payload; never invented)
+        from llm_router.hook_latency import set_session as _hl_set_session
+
+        _hl_set_session(payload.get("session_id") if isinstance(payload, dict) else None)
+    except Exception:  # noqa: BLE001 -- llm_router without set_session: no session on the row
+        pass
 
     agent_type = payload.get("agent_type", "")
 
