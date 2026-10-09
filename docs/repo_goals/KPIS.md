@@ -302,6 +302,16 @@ outside it. The write is one `O_APPEND` write with no lock, the file is capped a
 generations of `LLM_ROUTER_HOOK_LATENCY_MAX_BYTES` (default 4 MiB), and
 `LLM_ROUTER_HOOK_LATENCY=off` disables it.
 
+- *Session id (PG9).* Every writer puts the host's `session_id` on its row, taken from the
+  payload the hook already parsed (`hook_latency.set_session`; the statusline passes it to
+  `record-raw`). A payload without one leaves the key out (null); it is never invented, and
+  no prompt text is written. The P0.9-g live clause prints `n`, `n_sessions` and the
+  largest session's share per hook (`hook_wall.judge_live`). Rows with no session id count
+  as `without session id`. Below `hook_wall.MIN_SESSIONS` (2) sessions the clause prints
+  "not informative (need >=2 sessions)" and cannot PASS (a p95 over budget still FAILs),
+  the same rule as the P0.9-e turn-first decision. Rows written before this change carry
+  no session id, so a live window that predates the deploy reads "not informative".
+
 - *Budgets* live in one table, `llm_router.hook_latency.HOOK_BUDGETS_MS`: `agent-route`
   320 s and `auto-route` 60 s (the registered host timeouts); the rest are declared, not
   derived — there was no live distribution to derive them from: 2 s for the per-prompt and

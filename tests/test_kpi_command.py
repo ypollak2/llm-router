@@ -341,13 +341,13 @@ def test_g1_proxy_reports_the_shadow_scheduling_cost_against_the_30ms_target():
              for _ in range(60)]                               # not turn-first: never counted
     _write_proxy_rows(rows)
     g1 = _kpis()["G1_proxy"]
-    assert "| shadow schedule p50=61ms p95=114ms (n=120, sessions=2; OVER 30ms target)" in g1["value"]
+    assert "| shadow schedule p50=61ms p95=114ms (n=120, sessions=2; OVER PLAN.md G1-proxy target 30ms)" in g1["value"]
     seg = g1["shadow_schedule"]
     assert (seg["n"], seg["p50_s"], seg["p95_s"], seg["sessions"], seg["informative"],
             seg["target_ms"]) == (120, 0.061, 0.114, 2, True, 30.0)
     _write_proxy_rows(_sched_rows([5.0] * 100))
     g1 = _kpis()["G1_proxy"]
-    assert "shadow schedule p50=5ms p95=5ms (n=100, sessions=2; within 30ms target)" in g1["value"]
+    assert "shadow schedule p50=5ms p95=5ms (n=100, sessions=2; within PLAN.md G1-proxy target 30ms)" in g1["value"]
 
 
 def test_g1_proxy_shadow_schedule_not_informative_cases_and_absent_when_shadow_off():

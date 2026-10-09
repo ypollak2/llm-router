@@ -783,7 +783,7 @@ def _g1_proxy(pop: dict) -> dict:
                           f"n>={G1_DECISION_MIN_N} from >={G1_DECISION_MIN_SESSIONS} sessions)")
             else:
                 verdict = "within" if seg_sched["p95_s"] * 1000 <= SHADOW_SCHEDULE_TARGET_MS else "OVER"
-                value += f" | shadow schedule {nums} ({who}; {verdict} {SHADOW_SCHEDULE_TARGET_MS:.0f}ms target)"
+                value += f" | shadow schedule {nums} ({who}; {verdict} PLAN.md G1-proxy target {SHADOW_SCHEDULE_TARGET_MS:.0f}ms)"
     left_out = [f"{c:,} {label}" for label, c in (
         ("with no step_class", excluded["no_step_class"]),
         ("subagent_first", excluded["subagent_first"]),
