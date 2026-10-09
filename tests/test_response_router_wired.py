@@ -86,7 +86,6 @@ async def test_each_mcp_tool_routes_its_return_value(captured_routes,
     )
     monkeypatch.setattr(text_tools, "route_and_call",
                         AsyncMock(return_value=fake_resp))
-    monkeypatch.setattr(text_tools, "_cache_result", lambda *a, **kw: None)
     monkeypatch.setattr(text_tools, "_record_quality", lambda *a, **kw: None)
     # Patch the formatter too — we're testing the wiring, not the
     # formatter. A real-shaped string lets the router shim see something

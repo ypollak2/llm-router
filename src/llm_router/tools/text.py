@@ -206,34 +206,6 @@ async def _apply_response_router(formatted: str) -> str:
         return formatted
 
 
-def _cache_result(
-    prompt: str,
-    resp: LLMResponse,
-    task_type: str,
-    complexity: str | None,
-) -> None:
-    """Store routed result in the BM25 cache for future context retrieval.
-
-    Non-blocking, fail-silent. Never interrupts the response flow.
-    """
-    try:
-        from llm_router.result_cache import store_result
-
-        store_result(
-            user_prompt=prompt,
-            response=resp.content or "",
-            task_type=task_type,
-            complexity=complexity or "moderate",
-            model_used=resp.model or "unknown",
-            tokens_in=resp.input_tokens or 0,
-            tokens_out=resp.output_tokens or 0,
-            cost_usd=resp.cost_usd or 0.0,
-            project_dir=os.getcwd(),
-        )
-    except Exception:
-        pass  # Cache storage is best-effort
-
-
 def _record_quality(resp: LLMResponse, task_type: str, complexity: str | None) -> None:
     """Score response quality and record for routing feedback.
 
@@ -567,7 +539,6 @@ async def llm_query(
         caller_context=context,
         route_directive_id=_read_hook_route_directive(),
     )
-    _cache_result(prompt, resp, "query", effective)
     _record_quality(resp, "query", effective)
     return await _apply_response_router(_format_response(resp, "query"))
 
@@ -659,7 +630,6 @@ async def llm_research(
         caller_context=context,
         route_directive_id=_read_hook_route_directive(),
     )
-    _cache_result(prompt, resp, "research", "moderate")
     _record_quality(resp, "research", "moderate")
 
     result = _apply_research_trust_contract(
@@ -707,7 +677,6 @@ async def llm_generate(
         caller_context=context,
         route_directive_id=_read_hook_route_directive(),
     )
-    _cache_result(prompt, resp, "generate", effective)
     _record_quality(resp, "generate", effective)
     return await _apply_response_router(_format_response(resp, "generate"))
 
@@ -751,7 +720,6 @@ async def llm_analyze(
         caller_context=context,
         route_directive_id=_read_hook_route_directive(),
     )
-    _cache_result(prompt, resp, "analyze", effective_complexity)
     _record_quality(resp, "analyze", effective_complexity)
     return await _apply_response_router(_format_response(resp, "analyze"))
 
@@ -795,7 +763,6 @@ async def llm_reason(
         caller_context=context,
         route_directive_id=_read_hook_route_directive(),
     )
-    _cache_result(prompt, resp, "analyze", "deep_reasoning")
     _record_quality(resp, "analyze", "deep_reasoning")
     return await _apply_response_router(_format_response(resp, "analyze"))
 
@@ -870,7 +837,6 @@ async def llm_code(
         caller_context=context,
         route_directive_id=_read_hook_route_directive(),
     )
-    _cache_result(prompt, resp, "code", effective)
     _record_quality(resp, "code", effective)
     # llm_code responses include code blocks (marked critical by the
     # response router and preserved verbatim) plus surrounding prose.

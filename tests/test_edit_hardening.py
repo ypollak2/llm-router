@@ -325,7 +325,7 @@ def test_record_edit_outcome_never_raises_on_bad_path(tmp_path, monkeypatch):
     blocker = tmp_path / "blocker"
     blocker.write_text("not a directory")
     monkeypatch.setenv("LLM_ROUTER_HOME", str(blocker / "sub"))
-    # Must not raise — fail-silent, matching _cache_result / _record_quality.
+    # Must not raise — fail-silent, matching _record_quality.
     record_edit_outcome(file="a.py", model="x", applied=True)
 
 
