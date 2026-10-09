@@ -418,8 +418,8 @@ async def test_the_schedule_ms_field_is_on_the_row_only_when_a_shadow_call_was_s
     assert row["tier_shadow_schedule_ms"] >= 50.0
     assert row["tier_decision_s"] * 1000.0 + 1.0 >= row["tier_shadow_schedule_ms"]  # decision_s rounds to ms
     assert set(row) & {"text", "prompt"} == set()
-    # The same turn again: the seam answers "known" (nothing scheduled), so no field.
-    assert (await _post(app, _turn("rename the helper in util.py"))).status_code == 200
+    # A continuation: the seam answers "skipped_continuation" (nothing scheduled), so no field.
+    assert (await _post(app, _req())).status_code == 200
     assert "tier_shadow_schedule_ms" not in _rows(tmp_path)[1]
     await app.state.cls_shadow.drain()
 
