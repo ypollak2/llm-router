@@ -57,7 +57,7 @@ def _write_proxy(rows: list[dict]) -> None:
     path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
 
-def _db() -> sqlite3.Connection:
+def _db(*, usage_reason: bool = True) -> sqlite3.Connection:
     conn = sqlite3.connect(str(kpi._prd_db_path()))
     conn.execute(cost.CREATE_TABLE)
     conn.execute(cost.CREATE_ROUTING_DECISIONS_TABLE)
@@ -66,6 +66,8 @@ def _db() -> sqlite3.Connection:
                 "ALTER TABLE routing_decisions ADD COLUMN session_id TEXT",
                 "ALTER TABLE routing_decisions ADD COLUMN reason_code TEXT"):
         conn.execute(sql)
+    if usage_reason:  # P0.8-d: an old-schema database is _db(usage_reason=False)
+        conn.execute(cost.MIGRATE_USAGE_ADD_REASON[0])
     return conn
 
 
@@ -85,13 +87,21 @@ def _decisions(conn, n: int, *, reason_code: str | None = "policy", sid: str | N
     conn.commit()
 
 
-def _usage(conn, n: int, *, sid: str | None = "s-org") -> None:
+def _usage(conn, n: int, *, sid: str | None = "s-org", reason: str | None = None,
+           with_reason: bool = False) -> None:
     for i in range(n):
-        conn.execute(
-            "INSERT INTO usage (timestamp, session_id, model, provider, task_type, profile, "
-            "complexity, input_tokens, output_tokens, cost_usd, latency_ms, success) "
-            "VALUES (?, ?, 'gpt-4o-mini', 'openai', 'code', 'balanced', 'simple', 10, 5, "
-            "0.0001, 300.0, 1)", (_stamp(i), sid))
+        if with_reason:
+            conn.execute(
+                "INSERT INTO usage (timestamp, session_id, model, provider, task_type, profile, "
+                "complexity, input_tokens, output_tokens, cost_usd, latency_ms, success, reason) "
+                "VALUES (?, ?, 'gpt-4o-mini', 'openai', 'code', 'balanced', 'simple', 10, 5, "
+                "0.0001, 300.0, 1, ?)", (_stamp(i), sid, reason))
+        else:
+            conn.execute(
+                "INSERT INTO usage (timestamp, session_id, model, provider, task_type, profile, "
+                "complexity, input_tokens, output_tokens, cost_usd, latency_ms, success) "
+                "VALUES (?, ?, 'gpt-4o-mini', 'openai', 'code', 'balanced', 'simple', 10, 5, "
+                "0.0001, 300.0, 1)", (_stamp(i), sid))
     conn.commit()
 
 
@@ -232,10 +242,10 @@ def test_research_rows_excluded_unless_included():
 
 # ── the field list against the real schemas ─────────────────────────────────
 
-def test_usage_has_no_reason_column_so_it_cannot_pass():
-    """The PRD asks for a reason on every record; the usage table has no such column.
-    That is scored as missing (named "[no column]"), never left out of the list."""
-    conn = _db()
+def test_usage_on_an_old_schema_has_no_reason_column_so_it_cannot_pass():
+    """A database from before P0.8-d has no usage.reason. That is scored as missing
+    (named "[no column]"), never left out of the list."""
+    conn = _db(usage_reason=False)
     _usage(conn, 120)
     conn.close()
     card = _card()
@@ -244,6 +254,60 @@ def test_usage_has_no_reason_column_so_it_cannot_pass():
     assert u["fields"]["reason"] == {"recorded": 0, "missing": 120, "missing_pct": 1.0,
                                      "scored": True, "no_column": True}
     assert "usage: fail 0.0% complete (n=120); missing: reason 100.0% [no column]" in _g3_text(card)
+
+
+def test_usage_reason_is_counted_and_null_reason_rows_are_missing():
+    """P0.8-d: the migrated column is scored. 120 rows with a reason pass; 120 rows of the
+    same shape without one (rows from before the column, or a writer that skips it) fail,
+    and nothing says "[no column]" because the column exists."""
+    _write_proxy([_proxy(i) for i in range(120)])
+    conn = _db()
+    _usage(conn, 120, reason="router_chain", with_reason=True)
+    conn.close()
+    u = _prd()["writers"]["usage"]
+    assert (u["state"], u["n"], u["complete"]) == ("pass", 120, 120)
+    assert u["fields"]["reason"]["no_column"] is False
+
+    conn = sqlite3.connect(str(kpi._prd_db_path()))
+    conn.execute("DELETE FROM usage")
+    conn.commit()
+    _usage(conn, 120)  # reason NULL
+    conn.close()
+    card = _card()
+    u = card["kpis"]["G3"]["prd"]["writers"]["usage"]
+    assert (u["state"], u["complete"]) == ("fail", 0)
+    assert u["fields"]["reason"] == {"recorded": 0, "missing": 120, "missing_pct": 1.0,
+                                     "scored": True, "no_column": False}
+    assert card["kpis"]["G3"]["prd"]["verdict"] == "FAIL"
+    assert "usage: fail 0.0% complete (n=120); missing: reason 100.0%" in _g3_text(card)
+    assert "reason 100.0% [no column]" not in _g3_text(card)
+
+
+def test_no_traffic_on_every_sql_writer_is_never_green():
+    """An empty usage.db (schema present, zero rows) and no proxy rows: every writer says
+    no traffic and the verdict is NOT INFORMATIVE, not PASS."""
+    conn = _db()
+    conn.close()
+    prd = _prd()
+    assert {w: r["state"] for w, r in prd["writers"].items()} == {
+        "usage": "no traffic", "routing_decisions": "no traffic", "direct": "no traffic",
+        "proxy": "no traffic"}
+    assert prd["verdict"] == "NOT INFORMATIVE" and prd["pass"] is False
+
+
+def test_a_complete_writer_beside_a_no_traffic_writer_is_pass_only_for_the_writer_with_traffic():
+    conn = _db()
+    _usage(conn, 120, reason="router_chain", with_reason=True)
+    conn.close()
+    prd = _prd()
+    assert prd["writers"]["routing_decisions"]["state"] == "no traffic"
+    assert prd["verdict"] == "PASS" and prd["why"] == "every writer with traffic: usage"
+    conn = sqlite3.connect(str(kpi._prd_db_path()))
+    conn.execute("DELETE FROM usage")
+    conn.commit()
+    _usage(conn, 99, reason="router_chain", with_reason=True)  # below n >= 100
+    conn.close()
+    assert _prd()["verdict"] == "NOT INFORMATIVE"
 
 
 def test_task_id_is_reported_not_scored_until_p1_10():
@@ -269,7 +333,7 @@ def test_direct_and_mcp_rows_are_separate_writers():
 
 def test_real_direct_writer_row_carries_every_scored_field(temp_db):
     """One row through the real DIRECT writer (hooks/savings_logger): the field map
-    reads the real schema. Its usage twin has no reason column."""
+    reads the real schema."""
     from llm_router.hooks.direct_executor import DirectResult, ModelSpec
     from llm_router.hooks.savings_logger import log_direct_to_db
 
@@ -280,8 +344,8 @@ def test_real_direct_writer_row_carries_every_scored_field(temp_db):
     prd = kpi.compute_scorecard(days=1)["kpis"]["G3"]["prd"]
     d, u = prd["writers"]["direct"], prd["writers"]["usage"]
     assert (d["state"], d["n"], d["complete"]) == ("not informative", 1, 1)
-    assert (u["n"], u["complete"]) == (1, 0)
-    assert [f for f, st in u["fields"].items() if st["scored"] and st["missing"]] == ["reason"]
+    # P0.8-d: the DIRECT writer's usage twin now records reason too.
+    assert (u["n"], u["complete"]) == (1, 1)
 
 
 def test_an_unreadable_database_is_not_informative_never_pass():

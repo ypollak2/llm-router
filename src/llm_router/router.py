@@ -28,6 +28,11 @@ from contextvars import ContextVar
 from uuid import uuid4
 
 from llm_router import cost, media, provider_reset, providers
+from llm_router.cost import (  # constants, so a test that patches ``cost`` keeps the codes
+    REASON_ROUTER_BUDGET_FALLBACK,
+    REASON_ROUTER_CHAIN,
+    REASON_ROUTER_UNHINTED,
+)
 from llm_router import local_tier as _local_tier
 
 if TYPE_CHECKING:
@@ -2434,7 +2439,9 @@ async def _finalize_successful_route(
             output_tokens=response.output_tokens,
             cost_usd=response.cost_usd,
             latency_ms=response.latency_ms,
-            reason_code=_cd.get("reason_code"),
+            reason_code=_cd.get("reason_code") or (
+                REASON_ROUTER_UNHINTED if _unhinted else REASON_ROUTER_CHAIN
+            ),
             correlation_id=correlation_id,
             response=response.content,
             requested_complexity=_cd.get("requested_complexity"),
@@ -3253,7 +3260,10 @@ async def _dispatch_model_loop(
                     log.debug("quality escalation check skipped: %s", _esc_err)
 
             tracker.record_success(provider)
-            await cost.log_usage(response, task_type, profile, correlation_id=correlation_id)
+            await cost.log_usage(
+                response, task_type, profile, correlation_id=correlation_id,
+                reason=REASON_ROUTER_CHAIN,
+            )
             # Phase 0 (Gap 1): credit the realistic $ baseline + classifier/failed-
             # attempt cost ONCE, on the accepted attempt only (R6 — rejected
             # attempts above stay cost-only). Fail-open: a computation error here
@@ -3558,7 +3568,11 @@ async def _dispatch_model_loop(
                         )
 
                     tracker.record_success(provider)
-                    await cost.log_usage(response, task_type, RoutingProfile.BUDGET, correlation_id=correlation_id)
+                    await cost.log_usage(
+                        response, task_type, RoutingProfile.BUDGET,
+                        correlation_id=correlation_id,
+                        reason=REASON_ROUTER_BUDGET_FALLBACK,
+                    )
                     # Phase 0 (Gap 1): symmetric with the primary accepted-attempt
                     # site above — same fail-open baseline derivation.
                     _classifier_cost_usd_eb = (

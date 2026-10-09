@@ -63,6 +63,7 @@ sys.path.insert(0, str(REPO_ROOT / "tests" / "fixtures"))
 from judge_eval_set import ITEMS  # noqa: E402
 
 from llm_router import cost  # noqa: E402
+from llm_router.call_identity import ledger_session_id as _ledger_session_id  # noqa: E402
 from llm_router import judge as judge_module  # noqa: E402
 from llm_router.judge import _evaluate_background  # noqa: E402
 
@@ -120,9 +121,12 @@ async def _insert_decision(task_type: str, answering_model: str) -> int:
         await db.execute(
             """INSERT INTO routing_decisions
                (timestamp, task_type, profile, complexity, final_model, final_provider,
-                success, input_tokens, output_tokens, cost_usd, latency_ms, judge_score)
-               VALUES (datetime('now'), ?, 'balanced', 'simple', ?, 'ollama', 1, 10, 10, 0.0, 100.0, NULL)""",
-            (task_type, answering_model),
+                success, input_tokens, output_tokens, cost_usd, latency_ms, judge_score,
+                reason_code, session_id)
+               VALUES (datetime('now'), ?, 'balanced', 'simple', ?, 'ollama', 1, 10, 10, 0.0, 100.0, NULL,
+                       'judge_eval', ?)""",
+            (task_type, answering_model,
+             _ledger_session_id(os.environ.get("CLAUDE_CODE_SESSION_ID"))),
         )
         await db.commit()
         cursor = await db.execute("SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1")
