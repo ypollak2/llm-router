@@ -584,8 +584,12 @@ def get_model_chain(
     try:
         from llm_router.discover import filter_ollama_by_installed
         chain = filter_ollama_by_installed(chain)
-    except Exception:
-        pass  # Never let filter failures break routing
+    except Exception as exc:  # noqa: BLE001 — fail open: an unfiltered chain beats no chain
+        # Without the filter the chain may name an uninstalled Ollama model (a
+        # ~50 s LiteLLM hang), so say that it was skipped (STALE-OLLAMA-1).
+        from llm_router import failopen
+        failopen.record("CHZ-FO-PROFILES-OLLAMA-FILTER", exc)
+        log.warning("Ollama installed-model filter failed — chain left unfiltered: %s", exc)
 
     # Warm-path: if Ollama responded successfully within the last 60 seconds,
     # ensure it leads the chain for simple/budget tasks (skip classifier overhead).

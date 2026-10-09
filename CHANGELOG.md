@@ -118,6 +118,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `llm_local_task` `changed_files` no longer lists the router's own state directory (`LLM_ROUTER_HOME`: ledger/index DBs and
   their -wal/-shm sidecars) when it sits inside the task's workdir; excluded from both the git and walk snapshots
   (`docs/bugs/SLT-2.md`; main CI 37926623089).
+- routing config (STALE-OLLAMA-1): `policies/standard.yaml` no longer names `ollama/qwen3:32b` (a default most
+  installs never had) in any BALANCED, PREMIUM or REASONING chain, `workhorses` or `fallback_chain_complex`.
+  Local models are injected at route time from discovery, so BALANCED/BUDGET routes are unchanged (chain per
+  profile x task type compared against the pre-fix chains with a fake 3-model cache,
+  `tests/test_stale_ollama_default.py`, n = 40 x 2 paths). Not unchanged: the session-start dynamic table was built
+  straight from `ROUTING_TABLE` with no installed-model filter, so it carried the uninstalled entry (and the static
+  RESEARCH chains too); on a machine that does have `qwen3:32b`, PREMIUM/REASONING lose it as their last entry.
+  `filter_ollama_by_installed` now logs a dropped uninstalled model at WARNING once per model per process, and
+  once when an empty discovery cache makes it skip validation; `get_model_chain` records a filter exception as
+  `CHZ-FO-PROFILES-OLLAMA-FILTER` instead of a bare `pass`. See `docs/bugs/STALE-OLLAMA-1.md`.
 
 ### Changed
 - kpi (PLAN v16 P0.9-e, `docs/bugs/P09-11.md`): G1_proxy's turn-first segment counts only
