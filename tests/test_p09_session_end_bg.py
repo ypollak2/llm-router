@@ -131,6 +131,7 @@ def test_stop_returns_while_a_5s_child_still_runs(hook, state, monkeypatch, tmp_
         raising=False)
     _elapsed, _out = _run_main(hook, monkeypatch)
     assert not marker.exists(), "main() waited for the child"
+    assert not marker.exists(), "main() waited for the detached child"
     release.write_text("go")
     deadline = time.monotonic() + 20
     while not marker.exists() and time.monotonic() < deadline:

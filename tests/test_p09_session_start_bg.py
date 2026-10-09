@@ -103,6 +103,7 @@ def test_main_returns_while_a_5s_background_phase_still_runs(hook, monkeypatch, 
         f"pathlib.Path({str(marker)!r}).write_text('done')"])
     _elapsed, _out = _run_main(hook, monkeypatch)
     assert not marker.exists(), "main() waited for the child"
+    assert not marker.exists(), "main() waited for the detached child"
     release.write_text("go")
     deadline = time.monotonic() + 90
     while not marker.exists() and time.monotonic() < deadline:
