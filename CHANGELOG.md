@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- ledger completeness (PLAN v16 P0.8-d, D-29 = A; R-EVL-1, NFR-NUM): `usage` gains `reason`
+- ledger completeness (PLAN v16 P0.8-d, D-32 = A; R-EVL-1, NFR-NUM): `usage` gains `reason`
   (additive migration `MIGRATE_USAGE_ADD_REASON`; earlier rows stay NULL and `llm-router kpi` reports
   them as missing, not back-filled). Every `usage` writer passes a short route code (`router_chain`,
   `router_budget_fallback`, `direct`, `explicit_codex_tool`, `explicit_gemini_cli_tool`, `route_tool`,
@@ -25,6 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every `INSERT INTO usage|routing_decisions` in src/, hooks/ and scripts/ so a new writer without the
   fields fails. Fixes `llm_stream`, which raised `TypeError` instead of writing its usage row
   (`docs/bugs/P08D-1.md`).
+- proxy (D-31 = A, amended 2026-10-09; experiment arm): `haiku_arm_share` in `claude_tiers.yaml` (default
+  absent = off) serves that fraction of eligible turns on Haiku even when the requested model is in
+  `pinned_models`; every other pinned turn stays pinned. `haiku_arm_eligible` lists `task_type/complexity`
+  patterns (`*` allowed for complexity; default exactly `[query/simple]`). Eligible means: a main-thread human turn
+  past the first call (the `Agent`/`Task` tool present on every call), an organic or untagged session (headless,
+  harness and research sessions never), no `opus:`/`/model` pin, no correction signal, and a body Haiku accepts.
+  Assignment is `sha256(session_id|turn|salt)`, not a draw. In-share rows carry `tier_arm`, `tier_arm_assignment`
+  (`treatment` / `treatment_retried_original` / `ineligible`), `tier_arm_reason` (`matched:<pattern>` or why not),
+  `tier_arm_bucket` and `tier_arm_turn`; counts of Haiku-served rows must also require `served_model` Haiku. Needs
+  `haiku_rewrite: true` (which also re-enables the ordinary Haiku rewrite for non-pinned traffic; the Haiku guard
+  override turns both off). Read at proxy start: set the share to 0 or delete the key and restart to stop it.
+  No hook changed. See `docs/proxy.md`.
 - hooks (PLAN v16 P0.9-g, AMEND R8 A.3): `scripts/hook_wall.py` (`llm_router.hook_wall`) times the five
   sync hooks with no latency MUST (`enforce-route`, `bash-compress`, `playwright-compress`,
   `cc-usage-track`, `subagent-start`) from outside, process start to exit, cold and warm, with

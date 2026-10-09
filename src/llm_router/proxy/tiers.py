@@ -130,10 +130,13 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from llm_router.proxy import escalation
+from llm_router import session_kind
+from llm_router.proxy import escalation, haiku_arm
 from llm_router.proxy import quota_pressure as quota_pressure_mod
 from llm_router.proxy.cache_cost import ConvState, Stickiness, conversation_key, switch_cost_usd
-from llm_router.proxy.steps import has_client_tools, is_first_call, non_system, tier_text, user_pinned_model
+from llm_router.proxy.steps import (
+    STEP_TURN_FIRST, has_client_tools, is_first_call, non_system, step_kind, tier_text, user_pinned_model,
+)
 
 DEFAULT_POLICY_PATH = Path(__file__).with_name("claude_tiers.yaml")
 THINKING_TYPES = ("enabled", "adaptive")
@@ -206,6 +209,15 @@ class TierDecision:
     # Milliseconds per DECISION_PHASES name that ran (P0.9-e); a phase that did
     # not run is absent, never 0.
     phases_ms: dict = field(default_factory=dict)
+    # D-31 experiment arm (``proxy/haiku_arm.py``). None unless the turn fell inside the
+    # arm's hash share: then ``arm`` is the arm name, ``arm_assignment`` is ``treatment``
+    # (served on Haiku despite the pin) or ``ineligible`` (stayed pinned), ``arm_reason``
+    # says why, ``arm_bucket`` is the hash position (re-computable from the ids).
+    arm: str | None = None
+    arm_assignment: str | None = None
+    arm_reason: str | None = None
+    arm_bucket: float | None = None
+    arm_turn: int | None = None  # the turn id hashed with the session id
     # ``haiku_block_reason(body)`` when the decision consulted the Haiku tier and so
     # computed it (P0.9-e: computed at most once, and only then); None = not computed.
     # The proxy reuses it for the ledger's ``tier_haiku_block`` instead of a second pass.
@@ -500,7 +512,8 @@ class ClaudeTierPolicy:
                  cold_gap_s: float = 3600.0, switch_after_first_call: bool = False,
                  conversation_level: bool = False, classify=None,
                  complexity_knn: bool = False, haiku_rewrite: bool = False,
-                 haiku_fold_system: bool = False, quota_pressure: dict | None = None, quota=None) -> None:
+                 haiku_fold_system: bool = False, quota_pressure: dict | None = None, quota=None,
+                 haiku_arm_share: float = 0.0, haiku_arm_eligible=None) -> None:
         if not tiers:
             raise ValueError("tier policy has no tiers")
         self.tiers = tiers
@@ -538,6 +551,10 @@ class ClaudeTierPolicy:
         if not isinstance(haiku_fold_system, bool):
             raise ValueError(f"haiku_fold_system must be true or false, got {haiku_fold_system!r}")
         self.haiku_fold_system = haiku_fold_system
+        # D-31: share of simple Q&A turns served on Haiku despite ``pinned_models``. 0 = off.
+        # Read once at load: changing it needs a proxy restart.
+        self.haiku_arm_share = haiku_arm.parse_share(haiku_arm_share)
+        self.haiku_arm_eligible = haiku_arm.parse_eligible(haiku_arm_eligible)
         self._classify = with_complexity_knn(classify) if complexity_knn else classify
         # Quota pressure step (``quota_pressure:`` in the policy YAML). ``quota``
         # is a ``() -> QuotaReading`` hook for tests; the default reads the
@@ -585,7 +602,9 @@ class ClaudeTierPolicy:
                    complexity_knn=bool(data.get("complexity_knn", False)),
                    haiku_rewrite=bool(data.get("haiku_rewrite", False)),
                    haiku_fold_system=data.get("haiku_fold_system", False),
-                   quota_pressure=data.get("quota_pressure"), quota=quota)
+                   quota_pressure=data.get("quota_pressure"), quota=quota,
+                   haiku_arm_share=data.get("haiku_arm_share"),
+                   haiku_arm_eligible=data.get("haiku_arm_eligible"))
 
     @classmethod
     def load(cls, path: str | Path | None = None, *, conversation_level: bool = False,
@@ -693,6 +712,80 @@ class ClaudeTierPolicy:
             return None
         return cap
 
+    async def _pinned_or_arm(self, body: dict, session_id: str | None, classify, requested: str | None,
+                             req_tier: Tier, phases: _Phases,
+                             block: "_HaikuBlock | None" = None) -> TierDecision:
+        """A ``pinned_models`` request: kept, unless the D-31 arm takes the turn.
+
+        The hash decides first, so the classifier runs only for the in-bucket turns
+        (about ``haiku_arm_share`` of them). Every gate below reuses an existing rule.
+        Stickiness is neither read nor written: a pinned conversation has no tier state."""
+        def keep() -> TierDecision:
+            return TierDecision(requested, requested, req_tier.name, REASON_CONFIG_PINNED)
+
+        # haiku_rewrite off (YAML, or the Haiku guard's override file) switches the arm off too.
+        if self.haiku_arm_share <= 0.0 or not self.haiku_rewrite:
+            return keep()
+        turn_id = len(non_system(body.get("messages") or []))
+        bucket = haiku_arm.in_arm(session_id, turn_id, self.haiku_arm_share)
+        if bucket is None:
+            return keep()
+
+        def stay(why: str, task: str | None = None, cx: str | None = None) -> TierDecision:
+            d = keep()
+            d.arm, d.arm_assignment, d.arm_reason, d.arm_bucket = (
+                haiku_arm.ARM_NAME, haiku_arm.INELIGIBLE, why, bucket)
+            d.arm_turn = turn_id
+            d.task_type, d.complexity = task, cx
+            return d
+
+        haiku = self.by_name.get("haiku")
+        if not has_client_tools(body):
+            return stay(haiku_arm.WHY_SIDE_CALL)
+        if step_kind(body) != STEP_TURN_FIRST:
+            return stay(haiku_arm.WHY_NOT_TURN_FIRST)  # continuation or sub-agent first call
+        if not haiku_arm.is_main_thread(body):
+            return stay(haiku_arm.WHY_NOT_MAIN_THREAD)  # sub-agent follow-up (step_kind only sees first calls)
+        try:
+            kind = session_kind.kind_of(session_id)
+        except Exception:  # noqa: BLE001 - unknown kind: do not arm
+            kind = "unknown"
+        if kind not in haiku_arm.ORGANIC_KINDS:
+            return stay(haiku_arm.WHY_SESSION_KIND)
+        if haiku is None:
+            return stay(haiku_arm.WHY_NO_HAIKU_TIER)
+        if self.rank[req_tier.name] <= self.rank[haiku.name]:
+            return stay(haiku_arm.WHY_NOT_ABOVE_HAIKU)
+        if escalation.explicit_opus_pin(body):
+            return stay(haiku_arm.WHY_OPUS_PIN)
+        if user_pinned_model(body):
+            return stay(haiku_arm.WHY_USER_PIN)
+        first = is_first_call(body)
+        if first and escalation.first_prompt_is_long_or_multi_part(body):
+            return stay(haiku_arm.WHY_LONG_FIRST_PROMPT)
+        if first and not self.conversation_level:
+            return stay(haiku_arm.WHY_FIRST_CALL)  # per-turn mode exempts the first call
+        if escalation.correction_signal(body) is not None:
+            return stay(haiku_arm.WHY_CORRECTION)
+        if not self._haiku_body_ok(body, block):  # _HaikuBlock times itself under haiku_checks
+            return stay(haiku_arm.WHY_BODY)
+        classify = classify or self._classify or _default_classify
+        try:
+            with phases("classify"):
+                choice = await classify(tier_text(body))
+        except Exception:  # noqa: BLE001 - fail pinned: an arm error never moves a pinned call
+            return stay(haiku_arm.WHY_CLASSIFY_ERROR)
+        task, cx = choice.get("task_type"), choice.get("complexity")
+        matched = haiku_arm.match(self.haiku_arm_eligible, task, cx)
+        if matched is None:
+            return stay(haiku_arm.WHY_NOT_SIMPLE_QA, task, cx)
+        return TierDecision(requested, haiku.model, haiku.name, REASON_HAIKU_REWRITE, switched=True,
+                            task_type=task, complexity=cx, body_rewrite=REWRITE_HAIKU,
+                            proposed_tier=haiku.name, arm=haiku_arm.ARM_NAME,
+                            arm_assignment=haiku_arm.ASSIGNED, arm_reason=haiku_arm.WHY_MATCHED + matched,
+                            arm_bucket=bucket, arm_turn=turn_id,
+                            chain_head=list(choice.get("chain_head") or [])[:4])
+
     async def decide(self, body: dict, session_id: str | None, sticky: Stickiness,
                      classify=None) -> TierDecision:
         """``classify(text) -> {"task_type", "complexity", "chain_head", ...}``
@@ -726,7 +819,7 @@ class ClaudeTierPolicy:
         if req_tier is None:
             return keep(REASON_UNKNOWN_MODEL)
         if _canonical(requested) in self.pinned:
-            return keep(REASON_CONFIG_PINNED)
+            return await self._pinned_or_arm(body, session_id, classify, requested, req_tier, phases, block)
         if not has_client_tools(body):
             return keep(REASON_SIDE_CALL)
         with phases("stickiness"):
