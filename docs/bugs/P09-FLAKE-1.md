@@ -20,3 +20,12 @@ status: fixed in this change (test-only; production unaffected)
   old tests fail (`main() took 2.7 s`) and the new ones pass; with a moved step called inline
   from main(), the first test fails on `called == []` and the second fails when main()
   waits on the child (child killed by a 3 s subprocess timeout: "the detached child never ran").
+- **Sibling (session-start).** Another PR's CI (head 0b5fd5b0, py3.11) failed
+  `tests/test_p09_session_start_bg.py::test_main_returns_while_a_5s_background_phase_still_runs`
+  with "the detached child never ran": same fixed 5 s child, a 20 s wait for it, and
+  `elapsed < 2.0` bounds in both that test and `test_main_does_not_run_any_moved_step_inline`.
+  Same fix: bounds dropped, child blocks on a release file written after main() returns
+  (90 s wait for the marker). Evidence: a 2.5 s delay in main()'s own `json.dumps` fails the
+  old tests (`main() took 2.5 s`), passes the new; a moved step called inline fails test 1;
+  `main()` waiting on the child (`subprocess.run(..., timeout=3)` in the spawn) fails test 2
+  (`TimeoutExpired`). File passes 20 of 20 runs (8 tests each) in an isolated HOME.
