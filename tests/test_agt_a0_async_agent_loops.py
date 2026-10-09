@@ -151,14 +151,21 @@ async def test_llm_act_wait_false_returns_job_id_and_job_polls_to_result(slow_ac
     job_id = handle["job_id"]
     assert handle["status"] == "queued"  # task not started yet (#357 review)
 
+    # queued -> running -> done. "queued" is legitimate for as long as the pool has
+    # not started the thread (run_agent marks it queued until then), so the first
+    # poll may see either; the contract is that the order never goes backwards and
+    # the job reaches a terminal state before a bounded deadline (A0-FLAKE-1).
+    rank = {"queued": 0, "running": 1, "done": 2, "failed": 2}
     first = await llm_router_session(action="job", id=job_id)
-    assert first["status"] == "running" and first["result"] is None
-
+    assert first["status"] in ("queued", "running") and first["result"] is None
     deadline = time.monotonic() + 30
-    job = first
-    while job["status"] == "running" and time.monotonic() < deadline:
+    job, seen = first, [first["status"]]
+    while job["status"] in ("queued", "running") and time.monotonic() < deadline:
         await asyncio.sleep(0.05)
         job = await llm_router_session(action="job", id=job_id)
+        seen.append(job["status"])
+    ranks = [rank[x] for x in seen]
+    assert ranks == sorted(ranks), seen
     print(f"\nA.0 wait=False: handle in {returned_in * 1000:.0f}ms, job done in "
           f"{job['elapsed_s']}s, status={job['status']}")
     assert job["status"] == "done", job
