@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- hooks fail open on a non-object payload (docs/bugs/HOOKS-FAILOPEN-1.md): `[]`, `"x"` or `123` on stdin made
+  agent-depth-release, agent-route, cc-usage-track, enforce-route, subagent-start and usage-refresh exit 1 with a traceback
+  (bash-compress and playwright-compress on `123`; usage-refresh also on invalid JSON). They now exit 0 silently, like an
+  empty payload. Hook versions: agent-depth-release 6 -> 7, agent-route 18 -> 19, bash-compress 3 -> 4, cc-usage-track 4 -> 5,
+  enforce-route 16 -> 17, playwright-compress 3 -> 4, subagent-start 7 -> 8, usage-refresh 4 -> 5.
 - one result store (PLAN v16 PG3 / P0.5-c, D-R8-5; docs/bugs/PG3-1.md): the legacy `result_cache`
   (prompt-only key, BM25 "[Relevant prior answers]" injection in `context_prep`) is removed; the
   semantic cache, keyed on (text, context hash, project scope), is the only result store.

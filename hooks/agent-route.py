@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 18
+# llm_router-hook-version: 19
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -2107,6 +2107,9 @@ def main() -> None:
         _hl_set_session(hook_input.get("session_id") if isinstance(hook_input, dict) else None)
     except Exception:  # noqa: BLE001 -- llm_router without set_session: no session on the row
         pass
+
+    if not isinstance(hook_input, dict):  # HOOKS-FAILOPEN-1: `[]`, `"x"`, `123` -> fail open like an empty payload
+        sys.exit(0)
 
     tool_name = hook_input.get("tool_name", "")
     if tool_name != "Agent":

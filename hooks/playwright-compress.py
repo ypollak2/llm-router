@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 3
+# llm_router-hook-version: 4
 """PostToolUse hook — compress Playwright page snapshots via cheap LLM.
 
 After every browser_snapshot call:
@@ -257,6 +257,9 @@ def main() -> None:
         _hl_set_session(payload.get("session_id") if isinstance(payload, dict) else None)
     except Exception:  # noqa: BLE001 -- llm_router without set_session: no session on the row
         pass
+
+    if not isinstance(payload, dict):  # HOOKS-FAILOPEN-1: `[]`, `"x"`, `123` -> fail open like an empty payload
+        sys.exit(0)
 
     # Only fire for browser_snapshot
     if not _payload.is_tool(payload, "browser_snapshot"):
