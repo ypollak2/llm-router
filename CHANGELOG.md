@@ -25,6 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `semantic_cache_lookups` gains `project_scope` (additive migration; earlier rows are reported as
   unscoped). `llm-router kpi` and `llm_router_status(view="cache")` print lookups, hits and n per
   project; a project with fewer than 20 lookups prints "not informative" and no percentage.
+- doctor (PLAN v16 R8 P0.14-c, owner decision D-R8-4 = explicit only): `llm-router doctor --fix-routing`
+  writes the one key `env.ANTHROPIC_BASE_URL` into `~/.claude/settings.json` (backup first, diff
+  shown, y/N or `--yes`) only when proxy-default is installed and enabled, `routing_opt_out` is unset,
+  the key is absent, no project settings file or environment value overrides it, and both the shim
+  and the main proxy answer; otherwise it refuses with the reason. `--decline` sets
+  `routing_opt_out`, which also silences SessionStart's "routing is OFF" warning. No hook or plain
+  install runs it. SessionStart (hook v31) appends one `observe` row per session to
+  `~/.llm-router/settings_writes.jsonl` (key presence, env sha256, mtime) and the repair appends a
+  `write` row, so the next unexplained removal is bracketed.
 - verifier PR C (SHADOW, opt-in): pending_verify queue, detached `verify_worker`, Codex marker. **Off unless
   `LLM_ROUTER_VERIFY=on`**; no outcome, NS, D1 or D2 changes. See `docs/VERIFIER.md`.
 - agents (PLAN v16 AGT A.0): `llm_act`, `llm_delegate` and `llm_local_task` take `wait` (default

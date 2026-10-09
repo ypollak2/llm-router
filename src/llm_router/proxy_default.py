@@ -104,6 +104,21 @@ def write_sentinel(
     ) + "\n")
 
 
+def set_routing_opt_out() -> bool:
+    """Record that the owner removed the routing key on purpose (P0.14-c):
+    ``routing_opt_out: true`` stops ``doctor --fix-routing`` from re-adding it
+    and the SessionStart "routing is OFF" warning. Keeps every other field.
+    ``write_sentinel`` (a fresh ``install --proxy-default``) writes a sentinel
+    without it, which is the way back in. False when there is no sentinel."""
+    data = read_sentinel()
+    if data is None:
+        return False
+    data["routing_opt_out"] = True
+    data["routing_opt_out_at"] = time.time()
+    sentinel_path().write_text(json.dumps(data, indent=2) + "\n")
+    return True
+
+
 def remove_sentinel() -> None:
     try:
         sentinel_path().unlink(missing_ok=True)
