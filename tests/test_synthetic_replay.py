@@ -25,6 +25,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -182,6 +183,53 @@ def test_unknown_lingering_children_fail_the_run(tmp_path, monkeypatch):
     assert rc == 1
     assert lingering["detectable"] is False and lingering["terminated_after_wait"] == "unknown"
     assert "lingering child processes could not be determined" in summary["deterministic"]["errors"]
+
+
+def test_an_unrelated_process_naming_the_root_is_never_counted_or_signalled(tmp_path):
+    """Ownership is the run marker or an exact scratch interpreter / shim argv, never a
+    command-line substring: a process of another interpreter whose argv names the scratch
+    root (the review's ``tail -f <root>/net_violations.jsonl``) is not counted and survives
+    the reap, while a real scratch-interpreter child is counted."""
+    with sr.StubServer() as stub:
+        scratch = sr.Scratch(tmp_path / "root", stub, None)
+        stranger = subprocess.Popen([sys.executable, "-c", "import time, sys; time.sleep(60)",
+                                     str(scratch.violations)], stdin=subprocess.DEVNULL)
+        owned = subprocess.Popen([scratch.python, "-c", "import time; time.sleep(60)"], env={"PATH": "/usr/bin:/bin"},
+                                 stdin=subprocess.DEVNULL)
+        try:
+            pids = None
+            for _ in range(30):  # wait until both are visible to the process table
+                pids = scratch.descendants()
+                if pids is not None and owned.pid in pids:
+                    break
+                time.sleep(0.1)
+            assert pids is not None and owned.pid in pids  # env-less, found by its exact argv[0]
+            assert stranger.pid not in pids
+            owned.kill()
+            owned.wait(timeout=10)
+            reaped = sr._reap(scratch, wait_s=1.0)
+            assert reaped["detectable"] is True and reaped["terminated_after_wait"] == 0
+            assert stranger.poll() is None  # never signalled
+        finally:
+            for p in (stranger, owned):
+                if p.poll() is None:
+                    p.kill()
+                    p.wait(timeout=10)
+
+
+def test_scratch_venv_is_isolated_and_writes_only_inside_the_scratch_root(tmp_path, monkeypatch):
+    with sr.StubServer() as stub:
+        scratch = sr.Scratch(tmp_path / "ok", stub, None)
+        cfg = (scratch.pyenv / "pyvenv.cfg").read_text()
+        assert "include-system-site-packages = false" in cfg
+        assert scratch.python != sys.executable
+        assert Path(scratch.python).parent.parent == scratch.pyenv
+        outside = tmp_path / "outside-site-packages"
+        outside.mkdir()
+        monkeypatch.setattr(sr.Scratch, "_site_packages", staticmethod(lambda python: outside.resolve()))
+        with pytest.raises(RuntimeError, match="outside the scratch root"):
+            sr.Scratch(tmp_path / "refused", stub, None)
+        assert list(outside.iterdir()) == []  # refused before any write
 
 
 def test_hook_registry_is_derived_from_hooks_json():

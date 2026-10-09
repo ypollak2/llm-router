@@ -546,9 +546,7 @@ class Scratch:
         python = self.pyenv / "bin" / "python"
         # Without -S: the venv's prefix is set by site.py, so with -S sysconfig would name the
         # BASE interpreter's site-packages. Anything outside the scratch venv is refused.
-        site = subprocess.run([str(python), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
-                              check=True, capture_output=True, text=True, timeout=60).stdout.strip()
-        site_dir = Path(site).resolve()
+        site_dir = self._site_packages(python)
         if not site_dir.is_relative_to(self.pyenv.resolve()):
             raise RuntimeError(f"scratch venv site-packages resolved outside the scratch root: {site_dir}")
         site_dir.mkdir(parents=True, exist_ok=True)
@@ -559,6 +557,11 @@ class Scratch:
             + "\n\n# Baked by scripts/synthetic_replay.py: active with or without any environment variable.\n"
             + f"install(allow={self.allow()!r}, violations={str(self.violations)!r})\n", encoding="utf-8")
         return str(python)
+
+    @staticmethod
+    def _site_packages(python: Path) -> Path:
+        return Path(subprocess.run([str(python), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+                                   check=True, capture_output=True, text=True, timeout=60).stdout.strip()).resolve()
 
     def _shim_console_scripts(self) -> None:
         """``<project venv>/bin/<script>`` with a python shebang -> a scratch-bin shim that
@@ -628,17 +631,30 @@ class Scratch:
                 out.append({"kind": "unparseable"})
         return out
 
+    def _owns(self, argv: list[str], env_entries: list[str] | None) -> bool:
+        """Ownership is never a substring of a command line. A process is this run's when
+        (a) its environment holds the run marker as a whole entry, or (b) its argv[0] is
+        exactly the scratch interpreter, or (c) argv[0] is a shell and argv[1] is exactly a
+        scratch-bin shim. ``env_entries`` None = environment unreadable (macOS: the tokens
+        ``ps -E`` prints after the command, matched whole, never as a substring)."""
+        marker = f"LLM_ROUTER_REPLAY_MARKER={self.marker}"
+        if env_entries is not None and marker in env_entries:
+            return True
+        if not argv:
+            return False
+        if argv[0] == self.python:
+            return True
+        if Path(argv[0]).name in ("sh", "bash", "dash", "zsh") and len(argv) > 1:
+            shim = Path(argv[1])
+            return shim.parent == self.bin and shim.exists()
+        return False
+
     def descendants(self) -> list[int] | None:
         """PIDs of every live process of this run other than this one: the children and
         the detached grandchildren they spawned (``setsid``, so not in our process tree).
-
-        A process belongs to the run when its command line names the scratch root (every
-        child runs the scratch interpreter or a scratch-bin shim) or its environment holds
-        the run marker. Read from ``/proc`` on Linux, ``ps -ax -E`` on macOS (``-ax``: all
-        processes, not only those with a terminal). None = could not be read; the caller
-        must report that as unknown, never as zero."""
-        needle = f"LLM_ROUTER_REPLAY_MARKER={self.marker}".encode()
-        root = str(self.root).encode()
+        Ownership: :meth:`_owns`. Read from ``/proc`` on Linux (exact argv and environment),
+        ``ps -ax -E`` on macOS (``-ax``: all processes, not only those with a terminal).
+        None = could not be read; the caller must report that as unknown, never as zero."""
         me = os.getpid()
         proc = Path("/proc")
         if proc.is_dir() and (proc / "self" / "cmdline").exists():
@@ -647,25 +663,27 @@ class Scratch:
                 if not d.name.isdigit() or int(d.name) == me:
                     continue
                 try:
-                    cmd = (d / "cmdline").read_bytes()
-                    env = (d / "environ").read_bytes()
+                    argv = [a.decode("utf-8", "replace") for a in (d / "cmdline").read_bytes().split(b"\0") if a]
+                    env = [e.decode("utf-8", "replace") for e in (d / "environ").read_bytes().split(b"\0") if e]
                 except OSError:
                     continue
-                if root in cmd or needle in env.split(b"\0"):
+                if self._owns(argv, env):
                     found.append(int(d.name))
             return found
         try:
             res = subprocess.run(["/bin/ps", "-ax", "-E", "-ww", "-o", "pid=,command="], capture_output=True,
-                                 timeout=20, check=False)
+                                 text=True, errors="replace", timeout=20, check=False)
         except (OSError, subprocess.SubprocessError):
             return None
         if res.returncode != 0:
             return None
         pids = []
         for line in res.stdout.splitlines():
-            parts = line.strip().split(None, 1)
-            if len(parts) == 2 and parts[0].isdigit() and int(parts[0]) != me \
-                    and (root in parts[1] or needle in parts[1]):
+            parts = line.strip().split()
+            if len(parts) < 2 or not parts[0].isdigit() or int(parts[0]) == me:
+                continue
+            tokens = parts[1:]  # argv then, with -E, the environment entries, space-joined
+            if self._owns(tokens, tokens):
                 pids.append(int(parts[0]))
         return pids
 
