@@ -193,11 +193,10 @@ def persist_redact(text: str) -> str:
         return text
 
     try:
-        from llm_router.config import get_config
-        config = get_config()
-        if getattr(config, "llm_router_persist_raw", False):
+        from llm_router.config_lite import config_value
+        if config_value("llm_router_persist_raw"):
             return text
-        if not getattr(config, "llm_router_persist_redaction", True):
+        if not config_value("llm_router_persist_redaction"):
             return text
     except Exception as exc:  # noqa: BLE001 — config unavailable, fail safe below
         log.debug("persist_redact: config lookup failed, redacting anyway: %s", exc)

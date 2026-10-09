@@ -127,6 +127,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stay in it) from the new `is_haiku_served` (`served_model` is Haiku), and `kpi --haiku-watch` reports
   `haiku_served_calls` next to `haiku_decided_calls`. GE4 Frontier shadow was already safe (its reply-time gate
   drops such rows as `not_rewritten`); a proxy test now pins that.
+- hooks (PLAN v16 PG4 / P2-G-3, `docs/bugs/AUTOROUTE-LAT-1.md`): the auto-route hook no longer imports
+  pydantic-settings, structlog + rich, the SDK, `importlib.metadata` or `urllib.request` on a routed prompt, and no
+  longer probes Ollama synchronously at import. Wall p95 (hook_wall, n = 200 cold, load1 <= 3.7) 194.9 -> 124.8 ms;
+  in-process p95 125.6 -> 73.1 ms. `llm_router.__init__` exports and `__version__` resolve on first use;
+  `config_lite.config_value` skips `get_config()` when nothing can set the field; `get_logger()` is lazy with
+  `configure_logging_lazily()` keeping structlog off stdout; `model_discovery.available_ollama_models_nowait()`
+  uses a stale cache and refreshes it in a detached child (at most one per 300 s). On the default path the hook no
+  longer runs `get_config()`'s key-export side effects (its drafts are free/local only). Hook version 49 -> 50.
 - classifier (SYSONE-WARM-1): with `LLM_ROUTER_CLASSIFIER_BACKEND=systemone` the warm-up used `/api/generate`,
   which Ollama refuses for a decision model (HTTP 400), so the model never loaded and every verdict was `cold`.
   The warm-up now loads it through `/v1/systemone`; a refused warm-up is recorded once as

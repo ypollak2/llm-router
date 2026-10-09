@@ -149,8 +149,8 @@ def _scrub_secrets(text: str) -> str:
             pass
 
     try:
-        from llm_router.config import get_config
-        persist_raw = bool(getattr(get_config(), "llm_router_persist_raw", False))
+        from llm_router.config_lite import config_value
+        persist_raw = bool(config_value("llm_router_persist_raw"))
     except Exception:
         persist_raw = False
 
@@ -441,11 +441,10 @@ def get_mode() -> str:
     except Exception:
         pass
     try:
-        from llm_router.config import get_config
-        config = get_config()
-        if not getattr(config, "session_context_enabled", True):
+        from llm_router.config_lite import config_value
+        if not config_value("session_context_enabled"):
             return "off"
-        share_external = getattr(config, "session_context_share_external", True)
+        share_external = config_value("session_context_share_external")
         return "all" if share_external else "local"
     except Exception:
         return "all"
@@ -516,8 +515,8 @@ def _persist_ttl_seconds() -> float:
     active. 0 (or lower) disables purging.
     """
     try:
-        from llm_router.config import get_config
-        days = float(getattr(get_config(), "llm_router_persist_ttl_days", 30))
+        from llm_router.config_lite import config_value
+        days = float(config_value("llm_router_persist_ttl_days"))
     except Exception:
         days = 30.0
     return max(days, 0.0) * 86_400
