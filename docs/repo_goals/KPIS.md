@@ -229,7 +229,8 @@ last two are counted among O3's `untagged` / `other_kind` exclusions as well). T
 names a session whose tag or whose rows' own stamps are wrong and cannot be rewritten (the ledgers are
 append-only). Precedence for every reader: override, then the tag file, then the row's own stamp. NS, D1, D2,
 D3, O3 and D4/G1-proxy all obey it, and so do the proxy's and the edit ledger's stamps for rows written after
-it. G3 does not change: it measures whether the writer recorded a `session_kind`, not which kind. The first
+it. The G3 proxy audit does not change: it measures whether the writer recorded a `session_kind`, not which
+kind; the G3 verdict's organic population (below) follows the override. The first
 entry is session b9f04425, a research session (p_eval REPORT.txt) that held 99.3% of the organic turn-first
 rows in the pinned window W0. The JSON `joins` still counts it, so `llm-router kpi --include research` shows it.
 
@@ -284,7 +285,7 @@ Most are computed by research scripts outside this repository, not by `llm-route
 |---|---|---|
 | G1 | Added latency | Hook wall time, p50 / p95 per hook against that hook's budget; proxy `tier_decision_s` p50 / p95 with n, turn-first and continuation calls apart (`G1_proxy`). |
 | G2 | Silent failures per 100 calls | Fail-open events per 100 calls over the window, overall, per code and the top five codes — the rate must not go up, and every instance must be recorded. Truncation/overflow and Ollama-hung are not wired into this counter yet. |
-| G3 | Ledger completeness | >= 99% of proxy rows with every decision field that can apply to them recorded (definition below). |
+| G3 | Ledger completeness | Verdict: every writer with traffic (usage, routing_decisions, DIRECT, proxy) has >= 100 organic rows and >= 99% of them carry every PRD field (R-EVL-1), with n per writer. Beside it, >= 99% of proxy rows with every decision field that can apply to them recorded (definition below). |
 | G4 | Wrongly benched providers | Wrong benches per 100 benches, with n; target = 0. A bench is wrong when the owner clears it with `llm-router provider unban` before it lapses, or a call to that provider succeeds before its reset time. |
 
 ### How G1, G2 and G4 are measured
@@ -388,6 +389,30 @@ A row is **complete** when every field that can apply to its type is recorded:
   `too few to tell`.
 - **Not session-kind filtered**, unlike NS, D1-D4 and G1: completeness is the writer's property and the tag is one
   of the fields under test. A row written while its session had no tag counts against `session_kind`.
+
+### G3 verdict: the PRD field list per writer (PLAN v16 R8, P0.8-c)
+
+The audit above reads the proxy's tier fields only; on 2026-10-08 it read 93.0% while no other writer was checked.
+The verdict (`--json`: `kpis.G3.prd`) scores four writers apart, each over the PRD field list: `session_id`,
+`task_id`, model, tier, reason, tokens, cost, latency, outcome. NULL is missing.
+
+| Writer | Rows | model / tier / reason / tokens / cost / latency / outcome |
+|---|---|---|
+| usage | `usage` table | `model` / `complexity` / **no column** / `input_tokens`+`output_tokens` / `cost_usd` / `latency_ms` / `success` |
+| routing_decisions | `routing_decisions`, `reason_code` not `direct` | `final_model` / `complexity` / `reason_code` / `input_tokens`+`output_tokens` / `cost_usd` / `latency_ms` / `success` |
+| DIRECT | `routing_decisions`, `reason_code = 'direct'` | as routing_decisions |
+| proxy | `proxy_calls.jsonl` | `model` if served, else `served_model` (tiers on) or `requested_model` (tiers off) / `tier` / `tier_reason`, else `reason` / `anthropic_usage` / `anthropic_cost_usd` / `upstream_latency_s`, else `route_latency_s` / `decision` if served, else `upstream_status` |
+
+- **Per writer, with n.** A writer with rows owes n >= 100 organic rows (below: not informative) and >= 99% of
+  them carrying every scored field. A writer with 0 rows prints `no traffic` and is never a pass; with no writer
+  carrying traffic the verdict is `NOT INFORMATIVE`. A database that cannot be read is `unreadable`, not empty.
+- **`task_id`** is reported with its coverage and not scored until P1.10 adds it.
+- **A field with no column is missing**, never dropped from the list: `usage` has no reason column, so the usage
+  writer fails until one exists. A NOT NULL column (tokens, cost, latency on `usage`) is never NULL, so a
+  placeholder 0 written there reads as recorded: G3 cannot see it.
+- **Population.** Harness, headless and (without `--include research`) research rows are excluded and counted
+  apart, the kind resolved as for NS and D3 (override, tag file, row stamp). Untagged rows stay in: dropping them
+  would drop exactly the rows that lack a session id.
 
 ### Session kind on NS, D1 and D2
 
