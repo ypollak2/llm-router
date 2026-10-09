@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 30
+# llm_router-hook-version: 31
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -905,6 +905,20 @@ def _check_proxy_default_health() -> str:
         f"    Or disable it:  llm-router install --proxy-default off\n"
         f"    Logs: {os.path.join(_state_dir(), 'logs', 'proxy.err.log')}"
     )
+
+
+def _check_ledger_silence() -> str:
+    """P0.14-d: 0 proxy ledger rows in the last 30 min while organic Claude Code turns were
+    recorded and proxy-default is on (``proxy_liveness.ledger_silence``; the same rule
+    ``kpi`` and ``doctor`` print). Reads only the ledgers' tails. Needs ``llm_router``;
+    without it, or on any error, says nothing (an unreadable ledger is not a silent one)."""
+    try:
+        from llm_router.proxy_liveness import ledger_silence
+
+        silence = ledger_silence()
+    except Exception:  # noqa: BLE001 -- a liveness check must never break session start
+        return ""
+    return f"\n⚠️  llm-router {silence['message']}" if silence.get("silent") else ""
 
 
 def _refresh_claude_usage() -> str:
@@ -2140,6 +2154,19 @@ def main() -> None:
     except (json.JSONDecodeError, EOFError):
         _hook_input = {}
 
+    # Verifier PR C (SHADOW): when delegated patches are waiting, start ONE detached
+    # `python -m llm_router.verify_worker` (fixed argv, DEVNULL, own session, env allowlist,
+    # flock + cooldown; see llm_router.verify_queue). Never waits for it. Fail-open, recorded.
+    try:
+        from llm_router import verify_queue as _verify_queue
+        _verify_queue.spawn_worker_if_needed()
+    except Exception as _vq_exc:  # noqa: BLE001
+        try:
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-VERIFY-WORKER-SPAWN", _vq_exc)
+        except Exception:  # noqa: BLE001
+            pass
+
     # Session Context Accumulator: record Claude Code's real session_id (distinct
     # from SESSION_ID_FILE's fresh-per-session UUID above, which four other
     # consumers depend on and must not be disturbed) so later hooks can resolve
@@ -2196,6 +2223,7 @@ def main() -> None:
     # (see the function's own docstring for why) — only the next one.
     with _hl_phase("proxy_health"):
         hints += _check_proxy_default_health()
+        hints += _check_ledger_silence()
     with _hl_phase("session_io"):
         try:
             _record_settings_observe(_hook_input.get("session_id") if isinstance(_hook_input, dict) else None)

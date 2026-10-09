@@ -38,7 +38,6 @@ confinement work this deliberately does not yet do.
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import os
@@ -49,6 +48,7 @@ import time
 from pathlib import Path
 
 from llm_router import trace as _trace
+from llm_router.agent_exec import run_agent
 
 # Terminal statuses. `verified_complete` is the ONLY one that means the work is
 # done, and it requires an acceptance check that actually ran and passed.
@@ -304,12 +304,16 @@ async def llm_local_task(
             "reason": f"workdir is not a directory: {workdir}",
             "changed_files": [], "check_passed": None, "elapsed_s": 0.0,
         })
+    run = _local_task_run(objective, root, acceptance_check, model, budget_s, apply_writes)
     if not wait:
         from llm_router.jobs import start_job
-        return json.dumps(start_job("llm_local_task", llm_local_task(
-            objective, workdir, acceptance_check=acceptance_check, model=model,
-            budget_s=budget_s, apply_writes=apply_writes, wait=True)))
+        return json.dumps(start_job("llm_local_task", run))
+    from llm_router.jobs import run_or_detach
+    return await run_or_detach("llm_local_task", run)
 
+
+async def _local_task_run(objective: str, root: Path, acceptance_check: str | list[str] | None,
+                          model: str, budget_s: float, apply_writes: bool) -> str:
     try:
         from llm_router.hooks.agent_loop import run_agent_loop
     except ImportError as exc:                                 # noqa: BLE001
@@ -326,9 +330,9 @@ async def llm_local_task(
         pass
 
     (report, error, changed, elapsed, queued, status, check_passed,
-     check_out) = await asyncio.to_thread(
+     check_out) = await run_agent(
         _run_task_serial, run_agent_loop, objective, model, root, budget_s,
-        apply_writes, acceptance_check)
+        apply_writes, acceptance_check, root=root)
 
     _trace.emit("task.end", status=status, changed_files=changed,
                 check_passed=check_passed, elapsed_s=round(elapsed, 1),

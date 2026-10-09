@@ -17,8 +17,9 @@ import json
 import sys
 from pathlib import Path
 
-from llm_router.policy_diff import Sample, diff_policies, format_diff_report
-from llm_router.types import TaskType
+# policy_diff / types are imported inside the functions that need them: importing
+# llm_router.policy builds a PolicyManager, which creates ~/.llm-router/policies, so a
+# module-level import made `llm-router policy --help` write to HOME.
 
 __all__ = ["cmd_policy"]
 
@@ -26,16 +27,20 @@ __all__ = ["cmd_policy"]
 # Default sample set used when no --samples file is supplied. Covers the
 # subjects that the classifier emits in production, weighted lightly toward
 # the ones that move most in policy diffs.
-_DEFAULT_SAMPLES: list[Sample] = [
-    Sample(id="default:general", subject="general"),
-    Sample(id="default:code", subject="code", task_type=TaskType.CODE),
-    Sample(id="default:medical", subject="medical"),
-    Sample(id="default:legal", subject="legal"),
-    Sample(id="default:finance", subject="finance"),
-    Sample(id="default:math", subject="math"),
-    Sample(id="default:physics", subject="physics"),
-    Sample(id="default:history", subject="history"),
-]
+def _default_samples() -> list:
+    from llm_router.policy_diff import Sample
+    from llm_router.types import TaskType
+
+    return [
+        Sample(id="default:general", subject="general"),
+        Sample(id="default:code", subject="code", task_type=TaskType.CODE),
+        Sample(id="default:medical", subject="medical"),
+        Sample(id="default:legal", subject="legal"),
+        Sample(id="default:finance", subject="finance"),
+        Sample(id="default:math", subject="math"),
+        Sample(id="default:physics", subject="physics"),
+        Sample(id="default:history", subject="history"),
+    ]
 
 
 def cmd_policy(args: list[str]) -> int:
@@ -61,7 +66,9 @@ def _cmd_diff(argv: list[str]) -> int:
     )
     opts = parser.parse_args(argv)
 
-    samples = _load_samples(opts.samples) if opts.samples else list(_DEFAULT_SAMPLES)
+    from llm_router.policy_diff import diff_policies, format_diff_report
+
+    samples = _load_samples(opts.samples) if opts.samples else _default_samples()
     if not samples:
         print(
             f"No samples loaded from {opts.samples}; aborting.",
@@ -79,9 +86,12 @@ def _cmd_diff(argv: list[str]) -> int:
     return 0
 
 
-def _load_samples(path: Path) -> list[Sample]:
+def _load_samples(path: Path) -> list:
     """Load Sample rows from a JSONL file; malformed lines are skipped."""
-    out: list[Sample] = []
+    from llm_router.policy_diff import Sample
+    from llm_router.types import TaskType
+
+    out: list = []
     if not path.is_file():
         return out
     with path.open("r", encoding="utf-8") as f:

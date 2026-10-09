@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 16
+# llm_router-hook-version: 18
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -678,7 +678,7 @@ def _north_star_ledger_file() -> Path:
     return _router_home() / "north_star_units.jsonl"
 
 
-def _record_north_star_unit(lever: str, *, model: str, outcome: str, **meta) -> None:
+def _record_north_star_unit(lever: str, *, model: str, outcome: str, **meta) -> float | None:
     """Append one North-Star routing unit as a JSON line — the NS1-readable
     signal for this lever (``lever="agent_route_codex"``).
 
@@ -686,7 +686,8 @@ def _record_north_star_unit(lever: str, *, model: str, outcome: str, **meta) -> 
     budget_exhausted / codex_unavailable / codex_failed), not only successes,
     so "0 Codex calls in 30 days" (the NS3 baseline) becomes distinguishable
     from "the lever ran N times and every one was correctly declined".
-    Fire-and-forget: a broken ledger must never break routing.
+    Fire-and-forget: a broken ledger must never break routing. Returns the row's ``ts``
+    (the unit id the verifier joins on derives from it), or None when nothing was written.
     """
     try:
         entry = {
@@ -705,6 +706,7 @@ def _record_north_star_unit(lever: str, *, model: str, outcome: str, **meta) -> 
             os.chmod(f, 0o600)
         except OSError:
             pass
+        return entry["ts"]
     except Exception as exc:
         # This is the NS1-readable signal for the whole lever — a silent loss
         # here is the exact failure mode this feature exists to avoid (see
@@ -716,6 +718,7 @@ def _record_north_star_unit(lever: str, *, model: str, outcome: str, **meta) -> 
             failopen.record("CHZ-FO-NS3-NORTH-STAR-LEDGER", exc)
         except Exception:
             pass
+    return None
 
 
 def _session_kind_of(session_id: str | None) -> str | None:
@@ -863,6 +866,8 @@ def _initialize_session_budget() -> float:
     allocated = base_budget * (1.0 - pressure)
     initial_budget = max(5.0, allocated)  # Minimum $5 always allocated
 
+    # An empty HOME has no ~/.llm-router yet; 0700 matches the repo state-dir convention.
+    budget_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     budget_file.write_text(json.dumps({
         "session_id": _get_session_id(),
         "initial": initial_budget,
@@ -1942,6 +1947,27 @@ def _codex_subagent_budget_increment() -> None:
             pass
 
 
+def _verify_enqueue_marker(res, session_id: str, ts) -> None:
+    """Verifier PR C (SHADOW): after a delegation returned successfully, capture
+    ``git diff HEAD`` + untracked files (in the dir Codex ran in: this process's cwd, since
+    ``run_codex(working_dir=None)``) into a 0600 patch file and append a pending_verify marker.
+    A truncated/capped run gets no marker. The detached ``verify_worker`` does the rest; nothing
+    here waits on it. Fail-open: any error writes no marker and records a failopen code, and the
+    turn is untouched."""
+    try:
+        from llm_router import verify_queue
+        verify_queue.enqueue_from_run(
+            os.getcwd(), session_id=session_id, ts=ts,
+            truncated=bool(getattr(res, "truncated", False)),
+            content=str(getattr(res, "content", "") or ""))
+    except Exception as exc:  # noqa: BLE001
+        try:
+            from llm_router import failopen
+            failopen.record("CHZ-FO-VERIFY-MARKER", exc)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _try_codex_subagent_delegation(
     prompt: str, task_type: str, complexity: str, subagent_type: str, session_id: str,
     cwd: str | None = None, ledger_session_id: str | None = None,
@@ -2056,7 +2082,7 @@ def _try_codex_subagent_delegation(
                       prompt, task_type, complexity, session_id, ledger_session_id)
     _govern_run(subagent_type, "codex", res.model,
                 max(1, len(prompt) // 4), max(1, len(res.content) // 4), complexity)
-    _record_north_star_unit(
+    _delegated_ts = _record_north_star_unit(
         "agent_route_codex", model=res.model, outcome="delegated",
         subagent_type=subagent_type, task_type=task_type,
         complexity=complexity, session_id=session_id,
@@ -2064,6 +2090,7 @@ def _try_codex_subagent_delegation(
         **({"truncated": True} if getattr(res, "truncated", False) else {}),
         **({"reason_code": res.reason_code} if getattr(res, "reason_code", "") else {}),
     )
+    _verify_enqueue_marker(res, session_id, _delegated_ts)
     return res.content
 
 

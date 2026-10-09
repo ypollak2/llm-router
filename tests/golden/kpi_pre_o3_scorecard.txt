@@ -15,6 +15,11 @@ llm-router kpi -- window=7d (organic only) generated=2026-10-06T15:20:00Z
   G2  silent failures (fail-open / 100 calls) not measurable: no timestamped fail-open event and no recorded hook call exist yet, so there is no window to take a rate over
       all-time: 0 fail-open event(s) recorded, 0 of them from before per-event timestamps (cannot be placed in any window)
   G3  ledger completeness (target >=99%)     not measurable: no proxy row carries tier_retry yet (the schema has not started)
+      verdict FAIL (below 99%: proxy): PRD fields per writer (R-EVL-1), each writer with traffic needs n>=100 organic rows and >=99% complete; the % above audits proxy tier fields only
+        usage: no traffic (0 organic rows)
+        routing_decisions: no traffic (0 organic rows)
+        direct: no traffic (0 organic rows)
+        proxy: fail 0.0% complete (n=120); missing: tokens 100.0%, cost 100.0%, latency 100.0%; task_id 0.0% recorded, not scored until P1.10 merges
   G4  wrongly benched providers (target 0)   not measurable: no provider bench recorded in window (0 benches: 'none were wrong' cannot be told from 'none happened')
       benched right now: none (point-in-time)
 

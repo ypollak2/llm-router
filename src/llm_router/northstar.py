@@ -268,8 +268,8 @@ its share renders as ``None`` / "too few to tell" per CLAUDE.md.
 Public surface
 ────────────────────────────────────────────────────────────────────────────
 
-``units(days=N, session_id=None, root=None, *, backfill=False) -> Iterator[dict]``
-    One dict per unit: ``{"session_id", "ts" (iso8601 or None), "kind",
+``units(days=N, session_id=None, root=None, *, backfill=False, verify_records=False) -> Iterator[dict]``
+    One dict per unit: ``{"session_id", "ts" (iso8601 or None), "kind", "unit_id",
     "lever", "task_type", "model", "outcome", "signal", "session_kind",
     "session_kind_source"}``. ``session_kind`` is the KPI tag of the unit's
     session (organic / research / harness / headless), or ``None`` when no tag
@@ -289,6 +289,23 @@ Public surface
     NS3/NS4 to slice by — NS4's quality breaker keys on ``(lever,
     task_type)``, so every unit of every lever, including these two, carries
     both fields).
+
+    ``unit_id`` is ``unit_id(session_id, kind, ts)``: ``"u_"`` + 16 hex of a sha256 over
+    session id, kind and the unit's timestamp (None when the unit has no session or no
+    timestamp). It is derived, not stored, so it never moves when an outcome is revised;
+    two kinds in one session at one timestamp get different ids. It is the key a verify
+    record joins on. ``verify_records=True`` (SHADOW, opt-in, default off) attaches the
+    ledger's verify record for that id as an optional ``verify`` dict; the strict-used rule
+    (NS, D1, D2) reads ``verify`` and is only ever fed units from a call without the flag.
+
+``unit_id(session_id, kind, ts) -> str | None``
+    The id above. Pure.
+
+``load_verify_records(rows=None) -> dict[str, dict]``
+    ``unit_id -> verify dict`` from the ledger (``north_star_units.jsonl``), last record
+    wins. A row with a ``lever`` is a unit row and is never a verify record; a malformed
+    row or an unknown status is ignored; an orphan id creates no unit. ``record_verify`` /
+    ``verify_row`` write and shape one (reason codes and counts only, no free text).
 
 ``report(days=N, session_id=None, root=None) -> dict``
     Computed by aggregating ``units()`` — see the schema in its own

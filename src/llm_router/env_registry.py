@@ -58,6 +58,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_AGENTS_CONFIG": ("llm_router", "tools/agents.py", 1),
     "LLM_ROUTER_AGENT_POLICY_MODE": ("llm_router", "router.py", 1),
     "LLM_ROUTER_AGENT_ROUTE_ALLOW": ("llm_router", "hooks/agent-route.py", 1),
+    "LLM_ROUTER_AGENT_WORKERS": ("llm_router", "agent_exec.py", 1),
     "LLM_ROUTER_AGENT_SLOT_TTL_S": ("llm_router", "hooks/agent-route.py", 2),
     "LLM_ROUTER_AGENT_ROUTE_CODEX": ("llm_router", "hooks/agent-route.py", 1),
     "LLM_ROUTER_AGENT_ROUTE_CODEX_DAILY_BUDGET": ("llm_router", "hooks/agent-route.py", 1),
@@ -313,6 +314,10 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_QUOTA_RETRY": ("llm_router", "quota_tracker.py", 1),
     "LLM_ROUTER_QUOTA_MAX_AGE": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_QUOTA_TTL": ("llm_router", "hooks/auto-route.py", 2),
+    # Verifier PR C (SHADOW): kill switch for patch capture + worker spawn, and the per-unit
+    # verify budget (default 120 s, capped at 300 s).
+    "LLM_ROUTER_VERIFY": ("llm_router", "verify_queue.py", 1),
+    "LLM_ROUTER_VERIFY_BUDGET_S": ("llm_router", "verify_worker.py", 1),
     "LLM_ROUTER_RENDER_MODE": ("llm_router", "hooks/response_formatter.py", 1),
     "LLM_ROUTER_RESPONSE_ROUTER": ("llm_router", "commands/doctor.py", 3),
     "LLM_ROUTER_ROUTE_BANNER": ("llm_router", "hooks/agent-route.py", 2),
@@ -443,11 +448,16 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "OPENROUTER_API_KEY": ("provider_credential", "commands/doctor.py", 1),
     "PERPLEXITY_API_KEY": ("provider_credential", "commands/demo.py", 1),
     "VAULT_TOKEN": ("provider_credential", "org_policy.py", 1),
-    # ── external_tool  (21) ──
+    # ── external_tool  (24) ──
     "CLAUDE_CODE_PATH": ("external_tool", "claude_agent.py", 1),
     # P0.13: the project root llm_act may write in, when the MCP client sends no roots.
     "CLAUDE_PROJECT_DIR": ("external_tool", "tools/agentic.py", 1),
     "CLAUDE_CODE_SESSION_ID": ("external_tool", "hooks/agent-depth-release.py", 3),
+    # P0.14-d: which CLI ran a hook (hook_latency.detect_host). Each host exports its own
+    # plugin root to plugin hooks; CLAUDECODE=1 is set by Claude Code for its children.
+    "CLAUDE_PLUGIN_ROOT": ("external_tool", "hook_latency.py", 1),
+    "CODEX_PLUGIN_ROOT": ("external_tool", "hook_latency.py", 1),
+    "CLAUDECODE": ("external_tool", "hook_latency.py", 1),
     # 2026-09-28: Claude Code's own headless-vs-interactive signal ("cli" for an
     # interactive session, "sdk-cli"/"sdk-py" for `-p`/SDK callers). Verified
     # empirically against a real `claude -p ... --output-format json` run

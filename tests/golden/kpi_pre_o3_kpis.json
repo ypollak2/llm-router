@@ -93,9 +93,336 @@
   "value": "not measurable: no timestamped fail-open event and no recorded hook call exist yet, so there is no window to take a rate over"
  },
  "G3": {
+  "lines": [
+   "verdict FAIL (below 99%: proxy): PRD fields per writer (R-EVL-1), each writer with traffic needs n>=100 organic rows and >=99% complete; the % above audits proxy tier fields only",
+   "  usage: no traffic (0 organic rows)",
+   "  routing_decisions: no traffic (0 organic rows)",
+   "  direct: no traffic (0 organic rows)",
+   "  proxy: fail 0.0% complete (n=120); missing: tokens 100.0%, cost 100.0%, latency 100.0%; task_id 0.0% recorded, not scored until P1.10 merges"
+  ],
   "measurable": false,
   "n": null,
   "newest_ts": null,
+  "prd": {
+   "bar": 0.99,
+   "excluded_kinds": [
+    "harness",
+    "headless",
+    "research"
+   ],
+   "fields": [
+    "session_id",
+    "task_id",
+    "model",
+    "tier",
+    "reason",
+    "tokens",
+    "cost",
+    "latency",
+    "outcome"
+   ],
+   "min_n": 100,
+   "pass": false,
+   "unscored": {
+    "task_id": "not scored until P1.10 merges"
+   },
+   "verdict": "FAIL",
+   "why": "below 99%: proxy",
+   "writers": {
+    "direct": {
+     "complete": 0,
+     "complete_pct": null,
+     "excluded": {},
+     "fields": {
+      "cost": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "latency": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "model": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "outcome": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "reason": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "session_id": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "task_id": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": false
+      },
+      "tier": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "tokens": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      }
+     },
+     "informative": false,
+     "n": 0,
+     "state": "no traffic"
+    },
+    "proxy": {
+     "complete": 0,
+     "complete_pct": 0.0,
+     "excluded": {},
+     "fields": {
+      "cost": {
+       "missing": 120,
+       "missing_pct": 1.0,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "latency": {
+       "missing": 120,
+       "missing_pct": 1.0,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "model": {
+       "missing": 0,
+       "missing_pct": 0.0,
+       "no_column": false,
+       "recorded": 120,
+       "scored": true
+      },
+      "outcome": {
+       "missing": 0,
+       "missing_pct": 0.0,
+       "no_column": false,
+       "recorded": 120,
+       "scored": true
+      },
+      "reason": {
+       "missing": 0,
+       "missing_pct": 0.0,
+       "no_column": false,
+       "recorded": 120,
+       "scored": true
+      },
+      "session_id": {
+       "missing": 0,
+       "missing_pct": 0.0,
+       "no_column": false,
+       "recorded": 120,
+       "scored": true
+      },
+      "task_id": {
+       "missing": 120,
+       "missing_pct": 1.0,
+       "no_column": false,
+       "recorded": 0,
+       "scored": false
+      },
+      "tier": {
+       "missing": 0,
+       "missing_pct": 0.0,
+       "no_column": false,
+       "recorded": 120,
+       "scored": true
+      },
+      "tokens": {
+       "missing": 120,
+       "missing_pct": 1.0,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      }
+     },
+     "informative": true,
+     "n": 120,
+     "state": "fail"
+    },
+    "routing_decisions": {
+     "complete": 0,
+     "complete_pct": null,
+     "excluded": {},
+     "fields": {
+      "cost": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "latency": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "model": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "outcome": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "reason": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "session_id": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "task_id": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": false
+      },
+      "tier": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "tokens": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      }
+     },
+     "informative": false,
+     "n": 0,
+     "state": "no traffic"
+    },
+    "usage": {
+     "complete": 0,
+     "complete_pct": null,
+     "excluded": {},
+     "fields": {
+      "cost": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "latency": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "model": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "outcome": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "reason": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "session_id": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "task_id": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": false
+      },
+      "tier": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      },
+      "tokens": {
+       "missing": 0,
+       "missing_pct": null,
+       "no_column": false,
+       "recorded": 0,
+       "scored": true
+      }
+     },
+     "informative": false,
+     "n": 0,
+     "state": "no traffic"
+    }
+   }
+  },
   "reason": "no proxy row carries tier_retry yet (the schema has not started)",
   "seen": 120,
   "value": "not measurable: no proxy row carries tier_retry yet (the schema has not started)"
