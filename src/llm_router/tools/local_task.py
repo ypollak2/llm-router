@@ -202,7 +202,7 @@ def _git_state(root: Path, since: str | None = None) -> dict | None:
             continue
         status, path = e[:2], rel(e[3:])
         if status[0] in "RC" and i < len(entries):   # next entry is the source path
-            if status[0] == "R":
+            if status[0] == "R" and not _in_own_state(rel(entries[i]), own):
                 out[rel(entries[i])] = f"{status}:renamed-away"
             i += 1
         if _in_own_state(path, own):

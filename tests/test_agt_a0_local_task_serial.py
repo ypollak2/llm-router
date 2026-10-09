@@ -156,3 +156,20 @@ async def test_router_state_dir_inside_workdir_is_not_attributed(tmp_path, monke
     monkeypatch.setattr("llm_router.hooks.agent_loop.run_agent_loop", _loop)
     out = json.loads(await lt.llm_local_task("A", str(tmp_path)))
     assert out["changed_files"] == ["a.txt"], out["changed_files"]
+
+
+def test_a_rename_out_of_the_router_state_dir_lists_only_the_destination(tmp_path, monkeypatch):
+    """A git rename whose source is inside LLM_ROUTER_HOME must not list that source."""
+    import subprocess
+    from llm_router.tools import local_task as lt
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "home").mkdir()
+    (tmp_path / "home" / "w").write_text("x\n")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+                   cwd=tmp_path, check=True)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "home"))
+    subprocess.run(["git", "mv", "home/w", "moved"], cwd=tmp_path, check=True)
+    files = lt._git_state(tmp_path)["files"]
+    assert "home/w" not in files and "moved" in files, files
