@@ -118,13 +118,21 @@ async def test_breaker_refusal_writes_one_row_in_usage_and_routing_decisions(cac
 
 @pytest.mark.asyncio
 async def test_a_ledger_failure_never_changes_the_refusal_reply(cache_env, monkeypatch):
+    import json
+    import time
+
     from llm_router import cost
     from llm_router.tools import consolidated
 
+    (cache_env.parent / qb.STATE_FILE).write_text(json.dumps({"classes": {
+        qb.class_key("mcp_llm", "code"): {"state": qb.OPEN, "opened_at": time.time(), "n": 20,
+                                          "failure_rate": 1.0}}}))
+
     async def _fail(*a, **k):
         raise RuntimeError("db down")
-    monkeypatch.setattr(cost, "log_breaker_refusal", _fail)
-    await consolidated._log_breaker_refusal("code")  # must not raise
+    monkeypatch.setattr(cost, "log_route_error", _fail)
+    out = await consolidated.llm("p", _Ctx(), task="code")  # must not raise
+    assert out.startswith("[llm_router] quality_breaker:")
 
 
 # ── 3. consumers exclude the breaker rows ───────────────────────────────────
