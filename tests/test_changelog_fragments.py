@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import importlib.util
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -11,8 +10,7 @@ import pytest
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "changelog_fragments.py"
 spec = importlib.util.spec_from_file_location("changelog_fragments", SCRIPT)
 cf = importlib.util.module_from_spec(spec)
-sys.modules["changelog_fragments"] = cf
-spec.loader.exec_module(cf)
+spec.loader.exec_module(cf)  # not registered in sys.modules (neighbour lint)
 
 BASE = """# Changelog
 
@@ -143,3 +141,34 @@ def test_check_bad_fragment_name_fails(repo):
     frag(repo, "bad.md", "x")
     commit(repo)
     assert cf.check("main", repo=repo) == 1
+
+
+def test_natural_sort_of_ids(env):
+    frag(env, "10.fixed.md", "ten")
+    frag(env, "9.fixed.md", "nine")
+    frag(env, "2.fixed.md", "two")
+    run_assemble(env)
+    t = (env / "CHANGELOG.md").read_text()
+    assert t.index("- two") < t.index("- nine") < t.index("- ten")
+
+
+def test_new_section_inserted_in_canonical_order(env):
+    frag(env, "A.removed.md", "gone")
+    frag(env, "B.changed.md", "chg")
+    run_assemble(env)
+    t = (env / "CHANGELOG.md").read_text().split("## [1.0.0]")[0]
+    assert t.index("### Added") < t.index("### Changed") < t.index("### Removed") < t.index("### Fixed")
+
+
+def test_duplicate_id_type_rejected(env):
+    frag(env, "N1.fixed.md", "a")
+    frag(env, "n1.fixed.md", "b")
+    if len(list((env / "changelog.d").glob("*.md"))) < 2:
+        pytest.skip("case-insensitive filesystem cannot hold both names")
+    with pytest.raises(ValueError):
+        run_assemble(env)
+
+
+def test_release_helper_stages_fragment_dir():
+    src = (SCRIPT.parent / "release_helper.py").read_text()
+    assert '"changelog.d/"' in src

@@ -261,6 +261,7 @@ def perform_release(
             ".factory-plugin/",
             "bench/routerarena/submission/router/llm_router_router.py",
             "CHANGELOG.md",
+            "changelog.d/",
             "README.md",
             "docs/",
             "scripts/",

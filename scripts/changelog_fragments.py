@@ -38,9 +38,15 @@ def parse_name(name: str) -> tuple[str, str] | None:
     return m["id"], m["type"]
 
 
+def natural_key(name: str) -> list:
+    """Digit runs compare as numbers: 9.fixed.md before 10.fixed.md."""
+    return [(0, int(t), "") if t.isdigit() else (1, 0, t.lower()) for t in re.split(r"(\d+)", name)]
+
+
 def fragments(frag_dir: Path) -> list[tuple[str, str, Path]]:
     out = []
-    for p in sorted(frag_dir.glob("*.md")):
+    seen: set[tuple[str, str]] = set()
+    for p in sorted(frag_dir.glob("*.md"), key=lambda q: natural_key(q.name)):
         if p.name == "README.md":
             continue
         parsed = parse_name(p.name)
@@ -48,6 +54,10 @@ def fragments(frag_dir: Path) -> list[tuple[str, str, Path]]:
             raise ValueError(f"bad fragment name {p.name!r}: want <id>.<type>.md, type in {sorted(SECTIONS)}")
         if not p.read_text(encoding="utf-8").strip():
             raise ValueError(f"empty fragment {p.name!r}")
+        key = (parsed[0].lower(), parsed[1])
+        if key in seen:
+            raise ValueError(f"duplicate fragment id/type {p.name!r} (names differ only by case)")
+        seen.add(key)
         out.append((parsed[0], parsed[1], p))
     return out
 
@@ -91,7 +101,11 @@ def assemble(changelog: Path = CHANGELOG, frag_dir: Path = FRAG_DIR,
         block = next((b for b in blocks if b[0] == title), None)
         if block is None:
             block = [title, []]
-            blocks.append(block)
+            # Insert before the first existing block that belongs later in SECTIONS order.
+            order = list(SECTIONS.values())
+            later = [i for i, b in enumerate(blocks)
+                     if b[0] in order and order.index(b[0]) > order.index(title)]
+            blocks.insert(later[0], block) if later else blocks.append(block)
         block[1].extend(new)
     parts = []
     for title, lines in blocks:
@@ -127,6 +141,13 @@ def check(base: str, strict: bool = False, repo: Path = ROOT) -> int:
     """Exit 1 on a malformed/empty fragment; a direct Unreleased edit warns (fails if strict)."""
     problems, warnings = [], []
     added = _git("diff", "--name-only", "--diff-filter=AM", f"{base}...HEAD", "--", "changelog.d", cwd=repo).split()
+    seen: set[tuple[str, str]] = set()
+    for f in sorted((repo / "changelog.d").glob("*.md")):
+        parsed = parse_name(f.name)
+        if parsed and (parsed[0].lower(), parsed[1]) in seen:
+            problems.append(f"{f.name}: duplicate id/type (differs only by case)")
+        elif parsed:
+            seen.add((parsed[0].lower(), parsed[1]))
     for f in added:
         name = Path(f).name
         if name == "README.md":
