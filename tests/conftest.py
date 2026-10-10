@@ -893,6 +893,10 @@ def _codex_home_fingerprint() -> dict[str, tuple[int, str] | None]:
         if not p.is_file():
             out[name] = None
             continue
+        if name == "config.toml":
+            # Live file (FLAKE-LAV-1): compare only llm_router's slice, content only.
+            out[name] = (0, hashlib.sha256(repr(_codex_config_slice(p)).encode()).hexdigest())
+            continue
         st = p.stat()
         digest = hashlib.sha256(p.read_bytes()).hexdigest()
         out[name] = (st.st_mtime_ns, digest)
@@ -1317,6 +1321,7 @@ _HOME_INSTALL_TARGETS = (
 _REPORT_ONLY = frozenset({
     "home:.claude.json",
     "home:.claude/settings.json",
+    "home:.codex/config.toml",
 })
 
 # GH#88: whole-file diffing of ~/.claude.json produced failures that were not
@@ -1352,6 +1357,45 @@ def _claude_json_mcp_slice(p: Path):
     except (OSError, json.JSONDecodeError):
         return "<unreadable>"
     return data.get("mcpServers", {}).get("llm_router")
+
+
+# Imported at conftest import, never inside the guard: the guard runs in teardown,
+# where a test may still have builtins.__import__ patched to fail (FLAKE-LAV-1).
+import tomllib as _tomllib  # noqa: E402
+
+
+def _codex_config_slice(p: Path):
+    """The only parts of ~/.codex/config.toml llm_router's installer writes.
+
+    FLAKE-LAV-1: same structure as GH#88/GH#92. A running Codex app/CLI appends
+    ``[projects."<path>"]`` trust tables to this file as it opens new
+    directories (the operator's copy: 1,200+ lines, mostly those), so whole-file
+    (bytes, mtime) diffing blamed whichever test's teardown sampled it
+    mid-write -- under xdist, on files that never touch Codex. The installer
+    writes ``[mcp_servers.llm_router]``, hook trust records
+    (``hooks.state``), ``[model_providers.llm_router]`` and the forced
+    ``model``/``model_provider`` defaults it removes; see ``codex_host`` / ``commands.install``. Everything else is somebody else's.
+    """
+    try:
+        if not p.is_file():
+            return None
+        text = p.read_text(encoding="utf-8")
+        data = _tomllib.loads(text)
+    except (OSError, _tomllib.TOMLDecodeError):
+        return "<unreadable>"
+    # `_install_codex_gateway_config` (commands/install.py) also writes
+    # [model_providers.llm_router] and removes a forced top-level
+    # model="auto" / model_provider="llm_router".
+    gateway = (data.get("model_providers") or {}).get("llm_router")
+    forced = (data.get("model") == "auto", data.get("model_provider") == "llm_router")
+    # Same shapes codex_host.read_mcp_server / read_trust_records return; inlined
+    # because those import tomllib lazily, which a patched __import__ breaks.
+    mcp = (data.get("mcp_servers") or {}).get("llm_router")
+    state = (data.get("hooks") or {}).get("state") or {}
+    trust = sorted(
+        (k, v.get("trusted_hash")) for k, v in state.items() if isinstance(v, dict) and v.get("trusted_hash")
+    )
+    return (mcp, trust, gateway, forced)
 
 
 def _claude_settings_slice(p: Path):
@@ -1444,6 +1488,9 @@ def _no_repo_mutation(request):
                 continue
             if label == "home:.claude/settings.json":
                 out[label] = _claude_settings_slice(p)
+                continue
+            if label == "home:.codex/config.toml":
+                out[label] = _codex_config_slice(p)
                 continue
             try:
                 out[label] = (p.read_bytes(), p.stat().st_mtime_ns) if p.is_file() else None
