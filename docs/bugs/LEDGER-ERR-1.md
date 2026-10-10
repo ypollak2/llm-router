@@ -33,7 +33,7 @@ status: fixed in `fix/llm-error-path-ledger-row`
   commands gain/last/replay/verify/doctor, hooks/session-end.py (v29, both copies; 5 queries). Judge enqueue skips these rows. Left alone: cost.py disclosure/by-id queries
   (`_count_unknown_provenance`, feedback by id), judge.py (reads rows that have a judge score; these never get one), tools/admin (policy_applied / judge_score filters select neither),
   commands/kpi G3 completeness (it scores how complete each writer's rows are; error and cache rows are rows of that writer and carry session/reason, same as the cache usage row),
-  lineage_* (a separate lineage.db table of the same name), `get_routing_savings` style readers that already filter `success = 1` only for error rows (cache rows were added to those above).
+  lineage_* (a separate lineage.db table of the same name).
 - **Test.** `tests/test_ledger_err1_error_row.py`: provider exception, no healthy candidate, wall-clock timeout and cancellation each write exactly one row with
   the caller's session id; success writes no error row; retry is two rows; no double row per correlation id; no prompt/exception text; NULL session outside an MCP call.
   `tests/test_ledger_err1_consumers.py` covers the consumer exclusion (4 of 5 fail without it) and `tests/test_ledger_err1_decision_consumers.py` (routing_decisions readers; fails with `SQL_REAL_DECISION` neutralised). `tests/test_ledger_err1_error_row.py` has 15 tests: both tables get exactly one row for provider exception, no healthy candidate, timeout, cancel; dedup spans both tables. With the `routing_decisions` write removed from `log_route_error`, 5 fail; with `router.py` reverted, the usage-row tests fail as before. `tests/test_p08e_cache_hit_row.py` now asserts the cache-hit routing row.
