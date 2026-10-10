@@ -18,7 +18,7 @@ response". Three causes, each addressed here:
 2. THE SESSION-START WARM-UP WARMED A DIFFERENT CONFIGURATION. It loaded
    ``first_installed()`` with the server-default context and a 5 minute
    keep-alive. The edit call then asks for ``num_ctx`` = ``agent_loop._num_ctx``
-   (131072 for the qwen3.5/3.8 families), and Ollama treats a different
+   (32768 since N20; was 131072 for qwen3.5/3.8), and Ollama treats a different
    ``num_ctx`` as a different runner: it reloads. The warm-up bought nothing for
    the first edit. ``warmup_payload`` builds the request with the SAME model,
    ``num_ctx`` and ``keep_alive`` the edit call uses.

@@ -131,7 +131,7 @@ client tools are never routed.
 | `--hedge-s` | `LLM_ROUTER_PROXY_HEDGE_S` | `8` (first-token deadline; `off` disables) |
 | `--model` | `LLM_ROUTER_PROXY_MODEL` | from policy. A pin changes *which* tool-capable model serves, never *whether* a step is routed. |
 | `--trim` | `LLM_ROUTER_PROXY_TRIM` | `fast`. Comma list of named trims or `module:function`. |
-| `--num-ctx` | `LLM_ROUTER_PROXY_NUM_CTX` | per model, from `llm_router.local_models.NUM_CTX` (`qwen3.5:latest` and `qwen3.8:latest` 131072, `llmr-edit` 16384, `llmr-classifier` 4096; 32768 for `qwen3-coder:30b`, `qwen3.6:35b-a3b-coding` and any unlisted model). Applies to the pinned `--model`, or to each model the policy picks when none is pinned. A value you set applies to every model. |
+| `--num-ctx` | `LLM_ROUTER_PROXY_NUM_CTX` | per model, from `llm_router.local_models.NUM_CTX` (`llmr-edit` 16384, `llmr-classifier` 4096; 32768 for every other model, including qwen3.5/3.8, so the server OLLAMA_CONTEXT_LENGTH is not overridden). Applies to the pinned `--model`, or to each model the policy picks when none is pinned. A value you set applies to every model. |
 | `--keep-alive` | (none) | `-1`: the model stays loaded until Ollama restarts |
 | `--no-warm-up` | (none) | a warm-up call runs in the background at start |
 | `--ollama-url` | (none) | the router's configured Ollama (e.g. a dedicated server, below) |

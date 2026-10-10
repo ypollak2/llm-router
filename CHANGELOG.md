@@ -17,7 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model whose `/api/show` capabilities lack `completion` (nimble:9b returned 400 "does not support generate" on every
   code route; fails open when `/api/show` is unavailable, the classifier still names its model directly). `keep_alive`
   no longer falls back to -1 (pin forever): `warm.edit_keep_alive()` and the proxy default are 600 s; an explicit `-1`
-  is still honoured.
+  is still honoured. `llmr-classifier` is also kept out of chains. The default `num_ctx` for qwen3.5/qwen3.8 is 32768 (was
+  131072), so it no longer overrides the server's `OLLAMA_CONTEXT_LENGTH`; env overrides unchanged. The proxy off-mode
+  golden now records `keep_alive: 600`.
 - local timeout demotion (LOCAL-TIMEOUT-1, docs/bugs/LOCAL-TIMEOUT-1.md): an `ollama/*` model that had just timed out
   led the next route again. In the live ledger (`routing_quality.jsonl`, 2026-10-10 08:34:22Z to 09:30:14Z),
   `ollama/qwen3-coder:30b` timed out at 120 s on 21 of the 21 code routes that tried it. Ollama's scheduler was stuck

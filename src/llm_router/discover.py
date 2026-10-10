@@ -137,6 +137,11 @@ def _is_embedding_model(name: str, meta: dict | None = None) -> bool:
 # model explicitly (decision_classifier.DEFAULT_MODEL) and never reads this list.
 _capability_cache: dict[tuple[str, str], bool] = {}
 
+#: Aliases that are classifier-only by construction. ``llmr-classifier`` is a qwen3.5
+#: Modelfile, so /api/show reports it as a normal chat model, yet it served an
+#: llm(task="code") call (M0-3 rerun2, B6). The classifier names it explicitly.
+_CLASSIFIER_ONLY_BASES = frozenset({"llmr-classifier"})
+
 
 def _ollama_show_capabilities(base_url: str, name: str) -> list[str] | None:
     """POST /api/show for ``name``; its ``capabilities`` list, or None when unknown."""
@@ -161,6 +166,8 @@ def ollama_can_generate(name: str) -> bool:
     cached (per process); a failed lookup is retried on the next call.
     """
     bare = name.split("/", 1)[1] if name.startswith("ollama/") else name
+    if bare.lower().split(":", 1)[0] in _CLASSIFIER_ONLY_BASES:
+        return False
     try:
         base = get_config().effective_ollama_base_url
     except Exception:

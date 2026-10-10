@@ -101,3 +101,15 @@ def test_n20_proxy_default_is_bounded_and_explicit_minus_one_honoured():
     assert backends.DEFAULT_KEEP_ALIVE == 600
     from llm_router.proxy.server import parse_keep_alive
     assert parse_keep_alive("-1") == -1
+
+
+def test_n20_qwen_default_window_does_not_override_the_server_context(monkeypatch):
+    from llm_router import local_models
+    for m in ("qwen3.8:latest", "qwen3.5:latest", "ollama/qwen3.8:latest"):
+        assert local_models.num_ctx(m) == 32768  # was 131072; /api/ps showed it overriding OLLAMA_CONTEXT_LENGTH
+
+
+def test_n19_classifier_alias_is_excluded_without_calling_ollama(monkeypatch):
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    assert discover.ollama_can_generate("ollama/llmr-classifier:latest") is False
+    assert discover.ollama_can_generate("ollama/llmr-edit:latest") is True
