@@ -360,3 +360,39 @@ def test_the_whole_tool_body_sits_inside_the_guard(fn):
     outside = [n for n in body if n is not withs[0]]
     assert not any(isinstance(sub, (ast.Return, ast.Raise, ast.Await))
                    for n in outside for sub in ast.walk(n))
+
+
+@pytest.mark.asyncio
+async def test_concurrent_calls_are_not_cross_credited(cache_env, monkeypatch):
+    """4 concurrent llm() calls, distinct tool_use ids: 2 write their own usage row, 2 write none. Each call
+    ends with exactly one usage and one routing_decisions row (the guard is per call, never shared)."""
+    from llm_router import cost
+    from llm_router.types import RoutingProfile, TaskType
+
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID)
+
+    async def _fake(prompt, ctx, **k):
+        tid = call_identity.tool_use_id()
+        await asyncio.sleep(0.01 * int(tid[-1]))  # interleave
+        if int(tid[-1]) % 2 == 0:
+            await cost.log_usage(_ok("ollama/x", []), TaskType.CODE, RoutingProfile.BUDGET,
+                                 correlation_id=f"cc{tid[-1]}00000", reason="router_chain")
+        return "r" + tid
+
+    monkeypatch.setattr(consolidated, "llm_code", _fake)
+
+    async def one(i):
+        tok = call_identity.bind(f"toolu_conc_{i}")
+        try:
+            return await consolidated.llm("x", _Ctx(), task="code")
+        finally:
+            call_identity.reset(tok)
+
+    outs = await asyncio.gather(*(one(i) for i in range(4)))
+    assert outs == [f"rtoolu_conc_{i}" for i in range(4)]
+    assert sorted(_q(cache_env, "SELECT reason FROM usage")) == [
+        ("error_unledgered_exit",), ("error_unledgered_exit",), ("router_chain",), ("router_chain",)]
+    assert len(_q(cache_env, "SELECT 1 FROM routing_decisions")) == 4
+    assert sorted(x[0] for x in _q(cache_env, "SELECT tool_use_id FROM routing_decisions")) == [
+        f"toolu_conc_{i}" for i in range(4)]
+    assert {x[0] for x in _q(cache_env, "SELECT session_id FROM usage")} == {SID}
