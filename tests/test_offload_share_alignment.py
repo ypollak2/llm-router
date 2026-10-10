@@ -583,3 +583,46 @@ def test_step_class_side_call_without_the_side_call_reason_is_counted():
     built = osh.build_units(rows, [], **_kw())
     assert [u["msg_id"] for u in osh.turn_units(built["units"])] == ["c"]
     assert built["step_side_call"] == 1 and built["side_call_excluded"] == 1
+
+
+def test_turnfirst1_kinds_harness_turn_is_a_turn_and_subagent_turn_needs_a_main_thread_join():
+    """TURNFIRST-1 split two kinds out of ``turn_first``. A ``harness_turn`` (main-thread notification /
+    command echo) begins a turn as it did when it was labelled ``turn_first`` (the owner's definition keeps
+    injected input in n). A ``subagent_turn`` (a later sub-agent call) follows the ``subagent_first`` rule:
+    not a turn, and not a redo-window boundary, unless the transcript puts it on the main thread."""
+    t = NOW - 3000
+    rows = [proxy_row(1, sid=SID, kind="organic", ts=t, msg_id="a", tier="haiku"),
+            proxy_row(2, sid=SID, kind="organic", ts=t + 1, msg_id="s1", step="subagent_turn"),
+            proxy_row(3, sid=SID, kind="organic", ts=t + 2, msg_id="s2", step="subagent_turn"),
+            proxy_row(4, sid=SID, kind="organic", ts=t + 3, msg_id="h", step="harness_turn"),
+            proxy_row(5, sid=SID, kind="organic", ts=t + 4, msg_id="x", tier="opus", reason="escalation")]
+    plain = osh.build_units(rows, [], **_kw())
+    turns = osh.turn_units(plain["units"])
+    assert [u["msg_id"] for u in turns] == ["a", "h", "x"]
+    assert plain["step_subagent_turn"] == 2
+    assert turns[0]["redone"] is True     # the two sub-agent calls did not push the escalation out of the window
+    roles = {"a": "turn", "s1": "turn", "s2": "sidechain", "h": "meta", "x": "turn"}
+    joined = osh.build_units(rows, [], thread_of=lambda sid, m: roles[m], **_kw())
+    assert [u["msg_id"] for u in osh.turn_units(joined["units"])] == ["a", "s1", "h", "x"]
+    assert joined["step_subagent_turn"] == 1 and joined["meta_first"] == 1
+
+
+def test_turnfirst1_default_turn_rule_used_by_the_haiku_guard():
+    """The Haiku guard builds conversations with the default ``begins_turn`` (no transcript join): a
+    ``harness_turn`` row begins a turn, a ``subagent_turn`` row does not."""
+    t = NOW - 3000
+    steps_ = ["turn_first", "subagent_turn", "subagent_turn", "harness_turn", "continuation", "turn_first"]
+    rows = [proxy_row(i, sid=SID, kind="organic", ts=t + i, msg_id=f"m{i}", step=s) for i, s in enumerate(steps_)]
+    assert osh._Conversation(rows).turn == [1, 1, 1, 2, 2, 3]
+
+
+def test_an_unlabelled_row_is_never_a_turn():
+    """``step_class == unknown`` (the proxy could not label the call, ``step_error``) is not a kind: not a
+    turn, not a redo-window boundary, counted with the null-step rows."""
+    t = NOW - 3000
+    rows = [proxy_row(1, sid=SID, kind="organic", ts=t, msg_id="a", tier="haiku"),
+            proxy_row(2, sid=SID, kind="organic", ts=t + 1, msg_id="u", step="unknown")]
+    built = osh.build_units(rows, [], thread_of=lambda sid, m: "turn", **_kw())
+    assert [u["msg_id"] for u in osh.turn_units(built["units"])] == ["a"]
+    assert built["no_step_class"] == 1
+    assert osh._Conversation(rows).turn == [1, 1]

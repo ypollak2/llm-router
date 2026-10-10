@@ -13,7 +13,8 @@ different for each human turn of a session).
 
 Eligibility (``tiers.ClaudeTierPolicy._pinned_or_arm``) reuses the existing rules and adds
 no classifier: the call must be a main-thread human turn (``steps.step_kind ==
-turn_first``), past the first call, with no ``opus:`` pin, ``/model`` pin or correction
+turn_first``; since TURNFIRST-1 a sub-agent follow-up is ``subagent_turn`` ->
+``not_main_thread`` and a notification-only turn ``harness_turn`` -> ``harness_turn``), past the first call, with no ``opus:`` pin, ``/model`` pin or correction
 signal, a body Haiku can take, and the router's own classifier must say
 ``query`` / ``simple``. Anything else stays pinned.
 """
@@ -41,6 +42,7 @@ WHY_BODY = "haiku_body_blocked"
 WHY_NOT_SIMPLE_QA = "not_simple_qa"
 WHY_CLASSIFY_ERROR = "classify_error"
 WHY_NOT_MAIN_THREAD = "not_main_thread"
+WHY_HARNESS_TURN = "harness_turn"  # main thread, newest turn only a notification or command echo
 WHY_SESSION_KIND = "session_kind"
 WHY_MATCHED = "matched:"  # + the pattern, the reason of an assigned row
 TREATMENT_RETRIED = "treatment_retried_original"  # Haiku 4xx'd; the original (pinned model) body was sent

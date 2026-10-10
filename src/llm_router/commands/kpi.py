@@ -676,9 +676,14 @@ def _g1_proxy(pop: dict) -> dict:
     without the decision phases are left out and counted. Each n is printed with its
     session count and the largest session's share; below ``G1_DECISION_MIN_N`` rows or
     ``G1_DECISION_MIN_SESSIONS`` sessions the segment says "not informative". Rows
-    with a null ``step_class`` (pre-GE1 rows of any kind) and ``subagent_first`` rows
-    are NOT turn-first and are counted apart (``excluded``): they once made up the
-    whole bucket and printed a 5 ms p95 (docs/bugs/P09-11.md).
+    with a null ``step_class`` (pre-GE1 rows of any kind), ``subagent_first`` rows and,
+    since TURNFIRST-1, ``subagent_turn`` (a later sub-agent call), ``harness_turn``
+    (a main-thread notification / command echo) and ``unknown`` (labelling raised,
+    ``step_error``; counted as ``step_error``) rows are NOT turn-first and are
+    counted apart (``excluded``): null rows once made up the whole bucket and printed
+    a 5 ms p95 (docs/bugs/P09-11.md); sub-agent calls were all of the classified
+    turn_first rows (docs/bugs/TURNFIRST-1.md). Rows written before TURNFIRST-1 still
+    say ``turn_first`` for those calls, so a window that spans the deploy is mixed.
 
     *continuation*: unchanged, p50 / p95 of ``tier_decision_s`` on ``step_class ==
     continuation`` rows.
@@ -694,7 +699,8 @@ def _g1_proxy(pop: dict) -> dict:
     sched: list[float] = []
     sched_by_session: dict[str, int] = {}
     side = 0
-    excluded = {"no_step_class": 0, "subagent_first": 0, "turn_first_without_phases": 0}
+    excluded = {"no_step_class": 0, "subagent_first": 0, "subagent_turn": 0, "harness_turn": 0,
+                "step_error": 0, "turn_first_without_phases": 0}
     newest: float | None = None
     for r in pop["allowed"]:
         step = r.get("step_class")
@@ -723,7 +729,11 @@ def _g1_proxy(pop: dict) -> dict:
             else:
                 no_sid += 1
         else:
-            excluded["subagent_first" if step == "subagent_first" else "no_step_class"] += 1
+            if step == "unknown":
+                excluded["step_error"] += 1   # labelling raised (steps.STEP_UNKNOWN): not classified
+            else:
+                excluded[step if step in ("subagent_first", "subagent_turn", "harness_turn")
+                         else "no_step_class"] += 1
             continue
         newest = _newer(newest, _num_ts(r.get("ts")))
     n = len(first) + len(cont)
@@ -787,6 +797,9 @@ def _g1_proxy(pop: dict) -> dict:
     left_out = [f"{c:,} {label}" for label, c in (
         ("with no step_class", excluded["no_step_class"]),
         ("subagent_first", excluded["subagent_first"]),
+        ("subagent_turn", excluded["subagent_turn"]),
+        ("harness_turn", excluded["harness_turn"]),
+        ("unlabelled (step_error)", excluded["step_error"]),
         ("turn_first without tier_phases_ms", excluded["turn_first_without_phases"])) if c]
     if left_out:
         value += f" | not turn-first: {', '.join(left_out)}"
@@ -1910,6 +1923,7 @@ def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[
                            "subagent_first": built["subagent_first"],
                            "no_step_class": built["no_step_class"],
                            "step_subagent_first": built["step_subagent_first"],
+                           "step_subagent_turn": built["step_subagent_turn"],
                            "step_side_call": built["step_side_call"],
                            "edit_no_session": built["edit_no_session"],
                            "edit_no_turn_id": built["edit_no_turn_id"],
@@ -1926,6 +1940,7 @@ def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[
                 f"{built['subagent_first']:,} sub-agent first call(s), "
                 f"{built['no_step_class']:,} with no step_class (not a turn), "
                 f"{built['step_subagent_first']:,} labelled subagent_first, "
+                f"{built['step_subagent_turn']:,} labelled subagent_turn, "
                 f"{built['step_side_call']:,} labelled side_call, "
                 f"{built['untagged']:,} untagged, {built['other_kind']:,} other-kind; "
                 f"kept in n although the transcript says they were not a typed prompt's first answer: "

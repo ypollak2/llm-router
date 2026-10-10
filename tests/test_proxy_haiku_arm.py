@@ -152,7 +152,12 @@ INELIGIBLE = [
     ("correction", lambda: _with("no, that's wrong"), "query", "simple", arm.WHY_CORRECTION),
     ("claude: re-ask", lambda: _with("claude: again"), "query", "simple", arm.WHY_CORRECTION),
     ("opus: pin", lambda: _with("opus: think hard"), "query", "simple", arm.WHY_OPUS_PIN),
-    ("/model pin", lambda: _with("<command-name>/model</command-name>"), "query", "simple", arm.WHY_USER_PIN),
+    # /model is a local command: its echo is an earlier turn, the newest one is typed (TURNFIRST-1 makes a
+    # newest turn that is only the echo a harness turn)
+    ("/model pin", lambda: _body(TURN3[0], "<command-name>/model</command-name>", TURN3[2]), "query", "simple",
+     arm.WHY_USER_PIN),
+    ("notification turn", lambda: _with("<task-notification>\n<status>completed</status>\n</task-notification>"),
+     "query", "simple", arm.WHY_HARNESS_TURN),
     ("image in body", _image, "query", "simple", arm.WHY_BODY),
     ("code edit task", lambda: _body(*TURN3), "code", "simple", arm.WHY_NOT_SIMPLE_QA),
     ("moderate query", lambda: _body(*TURN3), "query", "moderate", arm.WHY_NOT_SIMPLE_QA),

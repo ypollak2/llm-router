@@ -135,7 +135,8 @@ from llm_router.proxy import escalation, haiku_arm
 from llm_router.proxy import quota_pressure as quota_pressure_mod
 from llm_router.proxy.cache_cost import ConvState, Stickiness, conversation_key, switch_cost_usd
 from llm_router.proxy.steps import (
-    STEP_TURN_FIRST, has_client_tools, is_first_call, non_system, step_kind, tier_text, user_pinned_model,
+    STEP_HARNESS_TURN, STEP_SUBAGENT_TURN, STEP_TURN_FIRST, has_client_tools, is_first_call, non_system,
+    step_kind, tier_text, user_pinned_model,
 )
 
 DEFAULT_POLICY_PATH = Path(__file__).with_name("claude_tiers.yaml")
@@ -160,6 +161,7 @@ REASON_THINKING_FLOOR = "thinking_floor"
 REASON_STICKY = "sticky"
 REASON_DECISION_ERROR = "decision_error"
 REASON_UNSEEN = "unseen"  # internal state marker, never a row's tier_reason
+STEP_ERROR = "step_error"  # tier_detail of decide_unclassified: the call could not be labelled
 # Phase "proxy-default": explicit/automatic escalation (proxy/escalation.py)
 # and the long-first-prompt safety floor. See that module's docstring for the
 # trial evidence behind each one.
@@ -742,10 +744,15 @@ class ClaudeTierPolicy:
         haiku = self.by_name.get("haiku")
         if not has_client_tools(body):
             return stay(haiku_arm.WHY_SIDE_CALL)
-        if step_kind(body) != STEP_TURN_FIRST:
+        kind = step_kind(body)
+        if kind == STEP_SUBAGENT_TURN:
+            return stay(haiku_arm.WHY_NOT_MAIN_THREAD)  # sub-agent follow-up: SendMessage, notification
+        if kind == STEP_HARNESS_TURN:
+            return stay(haiku_arm.WHY_HARNESS_TURN)  # main thread, newest turn only a notification / echo
+        if kind != STEP_TURN_FIRST:
             return stay(haiku_arm.WHY_NOT_TURN_FIRST)  # continuation or sub-agent first call
         if not haiku_arm.is_main_thread(body):
-            return stay(haiku_arm.WHY_NOT_MAIN_THREAD)  # sub-agent follow-up (step_kind only sees first calls)
+            return stay(haiku_arm.WHY_NOT_MAIN_THREAD)  # unreachable since TURNFIRST-1; kept as a guard
         try:
             kind = session_kind.kind_of(session_id)
         except Exception:  # noqa: BLE001 - unknown kind: do not arm
@@ -785,6 +792,45 @@ class ClaudeTierPolicy:
                             arm_assignment=haiku_arm.ASSIGNED, arm_reason=haiku_arm.WHY_MATCHED + matched,
                             arm_bucket=bucket, arm_turn=turn_id,
                             chain_head=list(choice.get("chain_head") or [])[:4])
+
+    def decide_unclassified(self, body: dict, session_id: str | None, sticky: Stickiness) -> TierDecision:
+        """The decision for a call the proxy could not label (``step_class == unknown``,
+        ``step_error``): no classifier, no D-31 arm. This method reads stickiness and
+        does not write it (the request path's usage and tier-retry hooks still may). In
+        ``_decide``'s order: a ``pinned_models`` model stays pinned; a side call is kept;
+        an ``opus:`` pin is served on the Opus tier; a ``/model`` choice is kept (never
+        downgraded); otherwise the conversation's last served tier holds when the body
+        is accepted on it as sent (a Haiku tier, which may need a body rewrite, does
+        not hold); otherwise the call is forwarded as sent (``decision_error``).
+        ``detail`` is ``step_error`` on every path. A pin check that raises on the same
+        malformed body propagates and ``decide_tier`` forwards the call as sent."""
+        requested = body.get("model") if isinstance(body.get("model"), str) else None
+        req_tier = self.tier_of(requested)
+        name = req_tier.name if req_tier else None
+        if req_tier is None:
+            return TierDecision(requested, requested, None, REASON_UNKNOWN_MODEL, detail=STEP_ERROR)
+        if _canonical(requested) in self.pinned:
+            return TierDecision(requested, requested, name, REASON_CONFIG_PINNED, detail=STEP_ERROR)
+        if not has_client_tools(body):
+            return TierDecision(requested, requested, name, REASON_SIDE_CALL, detail=STEP_ERROR)
+        opus_tier = self.by_name.get("opus")
+        if opus_tier is not None and escalation.explicit_opus_pin(body):
+            return TierDecision(requested, opus_tier.model, opus_tier.name, REASON_EXPLICIT_OPUS_PIN,
+                                switched=_canonical(opus_tier.model) != _canonical(requested),
+                                detail=STEP_ERROR)
+        if user_pinned_model(body):
+            return TierDecision(requested, requested, name, REASON_USER_PINNED, detail=STEP_ERROR)
+        state = sticky.get(conversation_key(body, session_id))
+        prev = self.tier_of(state.model) if state is not None else None
+        thinking = (body.get("thinking") or {}).get("type") if isinstance(body.get("thinking"), dict) else None
+        thinking = thinking if thinking in THINKING_TYPES else None
+        oc = body.get("output_config")
+        effort = isinstance(oc, dict) and oc.get("effort") is not None
+        if (prev is not None and prev.name != "haiku" and self._accepts(prev, thinking, effort)
+                and (self.allow_upgrade or self.rank[prev.name] <= self.rank[req_tier.name])):
+            served = requested if _canonical(state.model) == _canonical(requested) else state.model
+            return TierDecision(requested, served, prev.name, REASON_STICKY, detail=STEP_ERROR)
+        return TierDecision(requested, requested, name, REASON_DECISION_ERROR, detail=STEP_ERROR)
 
     async def decide(self, body: dict, session_id: str | None, sticky: Stickiness,
                      classify=None) -> TierDecision:

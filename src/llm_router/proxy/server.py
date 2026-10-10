@@ -82,8 +82,8 @@ from llm_router.proxy.loop_guard import (
 )
 from llm_router.proxy.cache_cost import Stickiness, conversation_key
 from llm_router.proxy.steps import (
-    STEP_CLASSES, classify_text, is_first_call, newest_human_text, prev_tool_class, prev_tools, session_id_of,
-    step_class, step_ineligible, step_kind,
+    STEP_CLASSES, classify_text, is_first_call, newest_human_text, session_id_of,
+    step_class, step_fields, turn_fields,
 )
 from llm_router import session_kind
 from llm_router.proxy import cost_accounting
@@ -667,10 +667,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         """The M0.5 ledger fields, derived from the request's shape and a hash of
         its newest human text. Never the text itself. A failure leaves honest
         nulls (and a fail-open record): this path must never cost a call."""
-        fields: dict = {"text_sha": None, "has_mid_system": None, "req_bytes": len(raw)}
+        fields: dict = {"text_sha": None, "has_mid_system": None, "req_bytes": len(raw),
+                        # TURNFIRST-1: which population a turn row belongs to (text-free).
+                        "is_main_thread": None, "is_first_call": None, "turn_origin": None,
+                        "tier_text_len": None}
         try:
             fields["text_sha"] = prompt_key.key(newest_human_text(body))
             fields["has_mid_system"] = has_mid_conversation_system_message(body)
+            fields.update(turn_fields(body))
         except Exception as exc:  # noqa: BLE001 - fail-safe: the ledger gets nulls, the call goes on
             failopen.record("LR-FO-PROXY-LEDGER-FIELDS", exc)
         return fields
@@ -685,8 +689,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         """The tier rewrite's decision, written onto ``row``. Any error forwards
         the call unchanged and says why: this path must never cost a call."""
         t0 = time.monotonic()
+        unlabelled = bool(row.get("step_error"))
         try:
-            decision = await tier_policy.decide(body, row.get("session_id"), sticky)
+            if unlabelled:
+                # The call could not be labelled: no classification, no arm; the
+                # conversation's sticky tier (or the pin) holds, else it is forwarded as sent.
+                decision = tier_policy.decide_unclassified(body, row.get("session_id"), sticky)
+            else:
+                decision = await tier_policy.decide(body, row.get("session_id"), sticky)
         except Exception as exc:  # noqa: BLE001 - fail-safe: forward unchanged
             row.update(served_model=body.get("model"), tier=None, tier_reason=REASON_DECISION_ERROR,
                        tier_proposed=None,
@@ -714,7 +724,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         for name, ms in (decision.phases_ms or {}).items():
             _add_phase(row, name, ms)
         t_sched = time.monotonic()
-        status = cls_shadow.maybe_schedule(body, row)
+        status = llm_shadow.OFF if unlabelled else cls_shadow.maybe_schedule(body, row)
         if status != llm_shadow.OFF:
             # Scheduling the shadow call is part of the wall time a turn-first call pays, so
             # it stays inside tier_decision_s (unchanged semantics). The decision phases
@@ -887,13 +897,12 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             "auth": ledger.auth_kind(request.headers),
             "mixed_history": has_served_turn(body), "thinking_retry": False,
             # GE1: the kind of call (continuation / turn_first / subagent_first /
-            # side_call), the class of the tools its results answer, and why a
+            # subagent_turn / harness_turn / side_call), the class of the tools its results answer, and why a
             # continuation could not be served faithfully. Serving eligibility is
             # step_class(body, cfg.steps) below, not this label.
-            "step_class": step_kind(body),
-            "prev_tools": prev_tools(body),
-            "prev_tool_class": prev_tool_class(body),
-            "step_ineligible": step_ineligible(body),
+            # Fail-open (NFR-FAIL): a labelling error gives step_class "unknown" and
+            # step_error true; decide_tier then does not classify the call.
+            **step_fields(body, on_error=lambda exc: failopen.record("LR-FO-PROXY-STEP-KIND", exc)),
             "decision": ledger.DECISION_FORWARDED, "added_latency_s": 0.0,
             "tier_mode": cfg.tiers,
             # KPI instrumentation (G3): these keys exist on EVERY forwarded/served

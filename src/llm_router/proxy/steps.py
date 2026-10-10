@@ -18,26 +18,53 @@ them faithfully, and a pass-through costs nothing.
 Step KINDS (GE1 action census). The ledger's ``step_class`` field records what
 kind of call every request was, whether or not it may be served
 (:func:`step_kind`): ``continuation`` (the shape above), ``turn_first`` (the
-first call of a human turn: the newest user turn has text), ``subagent_first``
-(a sub-agent's first call) and ``side_call`` (no client tools: titles, probes,
-summaries). Only ``STEP_CLASSES`` may be served; the other kinds are labels.
-A continuation that cannot be served faithfully says why in
+first call of a MAIN-THREAD human turn: the newest user turn holds human text
+once harness tags are stripped), ``subagent_first`` (a sub-agent's first call),
+``subagent_turn`` (any later sub-agent call that is not a continuation: a
+SendMessage resume or a task notification mid-run), ``harness_turn`` (a
+main-thread call whose newest user turn is only harness messages: a
+``<task-notification>``, a command echo) and ``side_call`` (no client tools:
+titles, probes, summaries). Only ``STEP_CLASSES`` may be served; the other kinds
+are labels. A continuation that cannot be served faithfully says why in
 :func:`step_ineligible`.
+
+Before TURNFIRST-1 (docs/bugs/TURNFIRST-1.md) every non-first, non-continuation
+call was ``turn_first``, sub-agent calls and notifications included: 113 of 113
+classified turn_first rows in the live ledger (2026-10-08 17:50 to 10-09 21:05)
+were Sonnet sub-agent calls, 108 of them classed ``code``. :func:`turn_fields`
+adds the text-free columns that tell the populations apart on every row.
 """
 
 from __future__ import annotations
 
+import bisect
 import json
 import re
 from typing import Callable
 
+from llm_router.groundtruth_sources import _CAVEAT, HARNESS_TAGS
 from llm_router.proxy import tool_classes
 
 STEP_CONTINUATION = "continuation"
 STEP_TURN_FIRST = "turn_first"
 STEP_SIDE_CALL = "side_call"
 STEP_SUBAGENT_FIRST = "subagent_first"
-STEP_KINDS = (STEP_CONTINUATION, STEP_TURN_FIRST, STEP_SIDE_CALL, STEP_SUBAGENT_FIRST)
+STEP_SUBAGENT_TURN = "subagent_turn"
+STEP_HARNESS_TURN = "harness_turn"
+STEP_KINDS = (STEP_CONTINUATION, STEP_TURN_FIRST, STEP_SIDE_CALL, STEP_SUBAGENT_FIRST,
+              STEP_SUBAGENT_TURN, STEP_HARNESS_TURN)
+#: Not a kind: the ledger's ``step_class`` when labelling the call raised (``step_error``
+#: is then true). The proxy forwards it without classifying it (``server.step_fields``).
+STEP_UNKNOWN = "unknown"
+
+#: Where the newest user turn of a non-continuation call came from (:func:`turn_origin`).
+ORIGIN_TYPED = "typed"                    # main thread, human text
+ORIGIN_SUBAGENT_BRIEF = "subagent_brief"  # sub-agent, text from the parent (brief / SendMessage)
+ORIGIN_TASK_NOTIFICATION = "task_notification"
+ORIGIN_COMMAND = "command"                # <command-*> / <local-command-*> / "Caveat:" echo
+ORIGIN_OTHER_TAG = "other_tag"            # only other harness tags (reminders, agent-message, ...)
+TURN_ORIGINS = (ORIGIN_TYPED, ORIGIN_SUBAGENT_BRIEF, ORIGIN_TASK_NOTIFICATION, ORIGIN_COMMAND,
+                ORIGIN_OTHER_TAG)
 
 #: Claude Code gives the main thread a sub-agent launcher and gives sub-agents none
 #: (a sub-agent cannot spawn another). ``Task`` is the older name of ``Agent``.
@@ -116,21 +143,49 @@ def step_class(body: dict, enabled: frozenset[str] | set[str]) -> str | None:
     return None
 
 
+def is_main_thread(body: dict) -> bool:
+    """The call comes from the main thread: its tools hold an ``Agent``/``Task``
+    launcher, which Claude Code sends on every main-thread call and never to a
+    sub-agent. A main session run with that tool disabled reads as a sub-agent."""
+    names = {t.get("name") for t in body.get("tools") or [] if isinstance(t, dict)}
+    return bool(names & _AGENT_LAUNCHERS)
+
+
 def step_kind(body: dict) -> str:
     """What kind of call ``body`` is (one of :data:`STEP_KINDS`), for the ledger.
 
-    ``subagent_first`` is inferred from the tool list: a first call whose tools hold
-    no ``Agent``/``Task`` launcher. A main session started with that tool disabled is
-    therefore counted as a sub-agent; both are actions, so the census's action total
-    does not move."""
+    Sub-agent kinds are inferred from the tool list (:func:`is_main_thread`). A main
+    session started with the launcher disabled is therefore counted as a sub-agent;
+    both are actions, so the census's action total does not move. A first call keeps
+    its pre-TURNFIRST-1 label (``turn_first`` / ``subagent_first``) whatever its text."""
     if not _has_client_tools(body):
         return STEP_SIDE_CALL
     if _is_continuation_kind(body):
         return STEP_CONTINUATION
+    main = is_main_thread(body)
     if is_first_call(body):
-        names = {t.get("name") for t in body.get("tools") or [] if isinstance(t, dict)}
-        return STEP_TURN_FIRST if names & _AGENT_LAUNCHERS else STEP_SUBAGENT_FIRST
-    return STEP_TURN_FIRST
+        return STEP_TURN_FIRST if main else STEP_SUBAGENT_FIRST
+    if not main:
+        return STEP_SUBAGENT_TURN
+    return STEP_TURN_FIRST if _newest_turn_is_human(body) else STEP_HARNESS_TURN
+
+
+def step_fields(body: dict, on_error: Callable[[Exception], None] | None = None) -> dict:
+    """The GE1 ledger labels (``step_class``, ``prev_tools``, ``prev_tool_class``,
+    ``step_ineligible``) plus ``step_error``. Fail-open for these labels only: if
+    labelling raises, the row says ``step_class == unknown`` with ``step_error`` true
+    and empty labels, the exception goes to ``on_error``, and the caller must not
+    classify the call (NFR-FAIL). Other body-shape reads on the request path (for
+    example ``has_served_turn``, ``session_id_of``) are not guarded here."""
+    try:
+        return {"step_class": step_kind(body), "prev_tools": prev_tools(body),
+                "prev_tool_class": prev_tool_class(body), "step_ineligible": step_ineligible(body),
+                "step_error": False}
+    except Exception as exc:  # noqa: BLE001 - a labelling error must not fail the call
+        if on_error is not None:
+            on_error(exc)
+        return {"step_class": STEP_UNKNOWN, "prev_tools": [], "prev_tool_class": None,
+                "step_ineligible": None, "step_error": True}
 
 
 def step_ineligible(body: dict) -> str | None:
@@ -198,21 +253,192 @@ def classify_text(body: dict, limit: int = 1500) -> str:
     return (first[-limit:] + "\n" + "\n".join(outputs)[:limit]).strip()
 
 
-_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
 _MODEL_COMMAND = "<command-name>/model</command-name>"
+
+#: Harness tags. The tag list is shared with the prompt-corpus filter
+#: (``groundtruth_sources.HARNESS_TAGS``); each entry is a name prefix, so
+#: ``local-command`` also opens ``local-command-stdout``. An open tag counts at the start
+#: of a line (leading blanks allowed); ``<system-reminder>`` also counts mid-line, as it
+#: did before TURNFIRST-1. Attributes are bounded and single-line: an unbounded ``\s[^>]*``
+#: crossed newlines and made a body of line-start ``<command-name foo`` lines with no
+#: ``>`` quadratic (100 lines on 3 MB took 1.9 s, 1,000 took 19 s).
+_TAG_NAME = r"(?:" + "|".join(re.escape(t) for t in HARNESS_TAGS) + r")[\w-]*"
+_ATTRS = r"(?:[ \t][^>\n]{0,200})?"
+#: The pattern starts with a literal ``<`` so the scan skips ahead to each one (a
+#: ``^``-anchored alternation was ~20x slower on tag-free text); the line-start rule is
+#: checked per match (:func:`_line_start`).
+_HARNESS_OPEN_RE = re.compile(r"<(?P<name>" + _TAG_NAME + r")" + _ATTRS + r">", re.I)
+_MID_LINE_OK = "system-reminder"
+_HARNESS_CLOSE_RE = re.compile(r"</(?P<name>" + _TAG_NAME + r")>", re.I)
+_REST_OF_LINE_BLANK = re.compile(r"[ \t]*(?:\n|\Z)")
+_TASK_NOTIFICATION = "task-notification"
+_CAVEAT_TAG = "local-command-caveat"  # the old plain-text "Caveat: ..." line is filed under this tag
+
+
+def _is_command_tag(name: str) -> bool:
+    return name.startswith("command-") or name.startswith("local-command")
+
+
+def _line_start(text: str, start: int) -> int | None:
+    """The line's start when only blanks precede ``start`` on its line, else None."""
+    i = start
+    while i > 0 and text[i - 1] in " \t":
+        i -= 1
+    return i if i == 0 or text[i - 1] == "\n" else None
+
+
+def _alone_on_line(text: str, start: int, end: int) -> bool:
+    """Only blanks between the line start and ``start`` and between ``end`` and the line end."""
+    return _line_start(text, start) is not None and _REST_OF_LINE_BLANK.match(text, end) is not None
+
+
+def _first_in(starts: list[int], ends: list[int], lo: int, hi: int) -> int | None:
+    """End of the first span whose start is in ``[lo, hi)``, else None."""
+    i = bisect.bisect_left(starts, lo)
+    return ends[i] if i < len(starts) and starts[i] < hi else None
+
+
+def _strip_block(text: str) -> tuple[str, set[str]]:
+    """``text`` with every harness block removed, and the tag names removed.
+
+    A block ends at the first close tag of its name that stands alone on its own
+    line, before the next line-start open of the same tag; only when there is none
+    does the first close tag anywhere end it (a one-line block). An unclosed block
+    that opened at a line start runs to that next open or the end; an unclosed
+    ``<system-reminder>`` that opened mid-line is left as text (a tag named inside a
+    sentence). So a literal ``</system-reminder>`` quoted inside a reminder (a
+    CLAUDE.md that mentions it) cannot end the block early and leak the rest of the
+    reminder. Tags and closes are found in one pass each and looked up by bisection,
+    so the cost is linear in ``text`` whatever its shape."""
+    opens = []
+    for m in _HARNESS_OPEN_RE.finditer(text):
+        name = m.group("name").lower()
+        ls = _line_start(text, m.start())
+        if ls is not None:
+            opens.append((ls, m.end(), name, True))
+        elif name == _MID_LINE_OK:
+            opens.append((m.start(), m.end(), name, False))
+    if not opens:
+        return text, set()
+    line_opens: dict[str, list[int]] = {}
+    for s, _e, name, at_line_start in opens:
+        if at_line_start:
+            line_opens.setdefault(name, []).append(s)
+    closes: dict[str, tuple[list[int], list[int]]] = {}
+    strict: dict[str, tuple[list[int], list[int]]] = {}
+    for c in _HARNESS_CLOSE_RE.finditer(text):
+        name = c.group("name").lower()
+        for table in ((closes, strict) if _alone_on_line(text, c.start(), c.end()) else (closes,)):
+            starts, ends = table.setdefault(name, ([], []))
+            starts.append(c.start())
+            ends.append(c.end())
+    seen: set[str] = set()
+    out: list[str] = []
+    pos = 0
+    for s, e, name, at_line_start in opens:
+        if s < pos:
+            continue  # inside a block already removed
+        nl = line_opens.get(name, [])
+        i = bisect.bisect_left(nl, e)
+        limit = nl[i] if i < len(nl) else len(text)
+        end = _first_in(*strict.get(name, ([], [])), e, limit)
+        if end is None:
+            end = _first_in(*closes.get(name, ([], [])), e, limit)
+        if end is None and not at_line_start:
+            continue  # an unclosed tag inside a sentence is text
+        out.append(text[pos:s])
+        seen.add(name)
+        pos = end if end is not None else limit
+    out.append(text[pos:])
+    return "".join(out), seen
+
+
+def _human_parts(content) -> tuple[str, frozenset[str]]:
+    """(the turn's human text, the harness tags it held). Tool results, harness
+    blocks and the old plain-text ``Caveat:`` line are removed per text block;
+    the blocks that keep text are joined with one space."""
+    if isinstance(content, str):
+        texts = [content]
+    elif isinstance(content, list):
+        texts = [b.get("text", "") for b in content
+                 if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)]
+    else:
+        texts = []
+    kept: list[str] = []
+    seen: set[str] = set()
+    for text in texts:
+        rest, tags = _strip_block(text)
+        seen |= tags
+        rest = rest.strip()
+        if _CAVEAT.match(rest):
+            seen.add(_CAVEAT_TAG)
+            rest = rest.split("\n", 1)[1].strip() if "\n" in rest else ""
+        if rest:
+            kept.append(rest)
+    return " ".join(kept), frozenset(seen)
 
 
 def _human_text(content) -> str:
-    """A user turn's own text: tool results and Claude Code's
-    ``<system-reminder>`` blocks removed."""
-    return _REMINDER_RE.sub("", _text_of(content)).strip()
+    """A user turn's own text: tool results, Claude Code's harness blocks
+    (``<system-reminder>``, ``<task-notification>``, ``<command-*>``,
+    ``<local-command-*>``, ``<agent-message>``, ...) and ``Caveat:`` lines removed."""
+    return _human_parts(content)[0]
+
+
+def _newest_user_content(body: dict):
+    msgs = non_system(body.get("messages") or [])
+    if not msgs or msgs[-1].get("role") != "user":
+        return None
+    return msgs[-1].get("content")
+
+
+def _newest_turn_is_human(body: dict) -> bool:
+    """The newest user turn is something a person (or, in a sub-agent, its parent)
+    wrote: human text is left once harness blocks are stripped, or it held no
+    harness block at all (an image-only turn)."""
+    text, tags = _human_parts(_newest_user_content(body))
+    return bool(text) or not tags
+
+
+def turn_origin(body: dict) -> str | None:
+    """Where the newest user turn of a non-continuation call came from (one of
+    :data:`TURN_ORIGINS`); ``None`` for a continuation, a side call, or a request
+    whose newest message is not a user turn. A turn with human text is ``command``
+    when it also carries a command echo (a slash command and its expanded prompt),
+    else ``typed`` on the main thread and ``subagent_brief`` in a sub-agent. A turn
+    with no human text is named by its harness tags."""
+    if not _has_client_tools(body) or _is_continuation_kind(body):
+        return None
+    msgs = non_system(body.get("messages") or [])
+    if not msgs or msgs[-1].get("role") != "user":
+        return None
+    text, tags = _human_parts(msgs[-1].get("content"))
+    command = any(_is_command_tag(t) for t in tags)
+    if text or not tags:
+        if command:
+            return ORIGIN_COMMAND
+        return ORIGIN_TYPED if is_main_thread(body) else ORIGIN_SUBAGENT_BRIEF
+    if _TASK_NOTIFICATION in tags:
+        return ORIGIN_TASK_NOTIFICATION
+    return ORIGIN_COMMAND if command else ORIGIN_OTHER_TAG
+
+
+def turn_fields(body: dict) -> dict:
+    """The TURNFIRST-1 ledger columns, text-free: ``is_main_thread``,
+    ``is_first_call``, ``turn_origin`` and ``tier_text_len`` (the length in
+    characters of what the tier classifier reads, :func:`tier_text`; 0 when there
+    is no human text)."""
+    return {"is_main_thread": is_main_thread(body), "is_first_call": is_first_call(body),
+            "turn_origin": turn_origin(body), "tier_text_len": len(tier_text(body))}
 
 
 def newest_human_text(body: dict) -> str:
     """The conversation's newest human prompt, untruncated: the newest user
-    message that has text once tool results and ``<system-reminder>`` blocks are
-    removed. ``tier_text`` classifies the tail of this; ``prompt_key.key`` hashes
-    all of it, so the ledger's ``text_sha`` matches a hash of the typed prompt."""
+    message that has text once tool results and harness blocks are removed. A
+    turn that is only a notification or a command echo is skipped, so the tier
+    keeps classifying the prompt before it (the sticky tier holds). ``tier_text``
+    classifies the tail of this; ``prompt_key.key`` hashes all of it, so the
+    ledger's ``text_sha`` matches a hash of the typed prompt."""
     for m in reversed(non_system(body.get("messages") or [])):
         if m.get("role") != "user":
             continue
