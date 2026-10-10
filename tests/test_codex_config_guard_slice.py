@@ -54,3 +54,21 @@ def test_forced_default_model_keys_flipping_is_a_change(tmp_path):
     forced = 'model = "auto"\nmodel_provider = "llm_router"\n' + BASE
     assert _slice(tmp_path, forced) != _slice(tmp_path, BASE)
     assert _slice(tmp_path, 'model = "gpt-5"\n' + BASE) == _slice(tmp_path, BASE)
+
+
+def test_slice_never_imports_so_a_patched_import_cannot_break_teardown(tmp_path, monkeypatch):
+    import builtins
+
+    p = tmp_path / "config.toml"
+    p.write_text(BASE + MCP)
+    expected = _codex_config_slice(p)
+
+    real_import = builtins.__import__
+
+    def _no_imports(name, *a, **k):
+        if name.split(".")[0] in {"llm_router", "tomllib"}:
+            raise ImportError("simulated import failure")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_imports)
+    assert _codex_config_slice(p) == expected
