@@ -92,7 +92,7 @@ def test_session_end_hook_predicate_equals_the_shared_one():
     for rel in ("hooks/session-end.py", "src/llm_router/hooks/session-end.py"):
         text = (root / rel).read_text()
         ns: dict = {}
-        line = next(i for i, l in enumerate(text.splitlines()) if l.startswith("_REAL_DECISION = "))
+        line = next(i for i, ln in enumerate(text.splitlines()) if ln.startswith("_REAL_DECISION = "))
         block = "\n".join(text.splitlines()[line:line + 2])
-        exec(block, ns)  # noqa: S102 — two literal lines out of the repo's own hook
+        exec(block, ns)
         assert ns["_REAL_DECISION"] == SQL_REAL_DECISION, rel
