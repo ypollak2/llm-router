@@ -870,7 +870,7 @@ def cleanup_old_sessions(max_age_days: int = _TTL_DAYS) -> None:
         # Match both legacy flat files and project-scoped subdirs.
         stale = list(state_dir.glob("session_context_*.jsonl")) + list(
             state_dir.glob("projects/*/session_context_*.jsonl")
-        )
+        ) + list(state_dir.glob("projects/*/archive/session_context_*.jsonl"))
         for p in stale:
             try:
                 if p.stat().st_mtime < cutoff:
@@ -1023,13 +1023,86 @@ def merge_session_shards(session_id: str, apply: bool = False) -> dict[str, Any]
     return report
 
 
+def _archive_path(session_id: str, project_root: str | None = None) -> Path:
+    """Where SessionEnd parks *session_id*'s log until the session resumes or ages out."""
+    return _project_dir(project_root) / "archive" / f"session_context_{_sanitize(session_id)}.jsonl"
+
+
 def archive_session(session_id: str | None) -> None:
-    """Remove *session_id*'s durable log at session end (best-effort)."""
+    """Take *session_id*'s log out of the live store at session end (best-effort).
+
+    CONTEXT-RESUME-1: every ``claude --resume`` / ``--continue`` is its own SessionStart..SessionEnd
+    lifecycle under the SAME session id, so deleting here left the resumed session an empty store.
+    The log is now moved to ``projects/<id>/archive/`` (merged after any earlier archive of the same
+    id) and ``restore_session`` brings it back on ``SessionStart source=resume``. A session that is
+    never resumed leaves one file that ``cleanup_old_sessions`` removes after ``_TTL_DAYS``. With the
+    session-context kill switch off nothing is retained: the live log is deleted as before.
+    """
     try:
         if not session_id:
             return
         path = _session_path(session_id)
-        if path.exists():
+        if not path.exists():
+            return
+        if get_mode() == "off":
             path.unlink()
+            return
+        dest = _archive_path(session_id)
+        with exclusive_lock(_lock_path(path)) as locked:
+            if not locked:
+                _note_lock_timeout("session archive")
+                return
+            if not path.exists():
+                return
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                with open(dest, "ab") as out, open(path, "rb") as src:
+                    out.write(src.read())
+                path.unlink()
+            else:
+                os.replace(path, dest)
+            os.utime(dest, None)  # the retention clock starts at archive time, not last write
     except Exception:
         pass
+
+
+def restore_session(session_id: str | None) -> bool:
+    """Bring *session_id*'s archived log back as the live log (SessionStart source=resume).
+
+    The archive goes first, then anything already recorded live under this id, so the line count
+    never drops across a resume. The archive is consumed. Returns True if something was restored.
+    """
+    try:
+        if not session_id:
+            return False
+        arch = _archive_path(session_id)
+        if not arch.exists() or get_mode() == "off":
+            return False
+        path = _session_path(session_id)
+        with exclusive_lock(_lock_path(path)) as locked:
+            if not locked:
+                _note_lock_timeout("session restore")
+                return False
+            if not arch.exists():
+                return False
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data = arch.read_bytes()
+            if data and not data.endswith(b"\n"):
+                data += b"\n"
+            if path.exists():
+                data += path.read_bytes()
+            fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".restore_", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(data)
+                os.replace(tmp, path)
+            except Exception:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            arch.unlink()
+        return True
+    except Exception:
+        return False
