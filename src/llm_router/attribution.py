@@ -50,6 +50,8 @@ actually determines it, and it stays correct when the correlation breaks.
 
 from __future__ import annotations
 
+from llm_router.provider_classes import real_decision_sql
+
 import sqlite3
 from dataclasses import dataclass, field
 from enum import Enum
@@ -223,7 +225,7 @@ def routing_attribution(
         ctyp = "classifier_type" if "classifier_type" in cols else "NULL AS classifier_type"
         rows = conn.execute(
             f"SELECT final_model, {prov}, {ctyp} FROM routing_decisions "
-            f"WHERE timestamp >= {since_sql}"
+            f"WHERE timestamp >= {since_sql} AND {real_decision_sql(conn)}"
         ).fetchall()
     finally:
         conn.close()

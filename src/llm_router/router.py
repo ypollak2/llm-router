@@ -29,6 +29,12 @@ from uuid import uuid4
 
 from llm_router import cost, media, provider_reset, providers
 from llm_router.cost import (  # constants, so a test that patches ``cost`` keeps the codes
+    REASON_ERROR_ALL_FAILED,
+    REASON_ERROR_BUDGET,
+    REASON_ERROR_CANCELLED,
+    REASON_ERROR_DENIED,
+    REASON_ERROR_OTHER,
+    REASON_ERROR_TIMEOUT,
     REASON_ROUTER_BUDGET_FALLBACK,
     REASON_CACHE_HIT,
     REASON_ROUTER_CHAIN,
@@ -2493,7 +2499,8 @@ async def _finalize_successful_route(
             cost_usd=response.cost_usd,
             latency_ms=response.latency_ms,
             reason_code=_cd.get("reason_code") or (
-                REASON_ROUTER_UNHINTED if _unhinted else REASON_ROUTER_CHAIN
+                REASON_CACHE_HIT if ledger_outcome == "cache_hit"
+                else REASON_ROUTER_UNHINTED if _unhinted else REASON_ROUTER_CHAIN
             ),
             correlation_id=correlation_id,
             response=response.content,
@@ -2637,6 +2644,10 @@ async def _dispatch_model_loop(
     scope_root: str | None = None,
     # P0.5: the semantic-cache key route_and_call checked under; stored under it.
     semantic_key=None,
+    # LEDGER-ERR-1: the caller's own list, used AS the attempt list, so a failure that
+    # escapes this function (timeout, cancel, exhaustion) still tells the caller which
+    # model was being attempted. None keeps the old private list.
+    chain_attempts_out: list[str] | None = None,
 ) -> LLMResponse:
     """Execute the main model dispatch loop with primary + emergency fallback chains.
 
@@ -2680,7 +2691,8 @@ async def _dispatch_model_loop(
 
     last_error: Exception | None = None
     chain_errors: list[tuple[str, str]] = []  # (model, error_summary) for diagnostics
-    chain_attempts: list[str] = []  # models tried, for explainability
+    # models tried, for explainability
+    chain_attempts: list[str] = chain_attempts_out if chain_attempts_out is not None else []
     # CF-1 G2: real failed-attempt cost. Accumulates the billable cost of any attempt
     # that produced a response but was then REJECTED (gate/quality) before the chain
     # advanced. Pre-dispatch skips (health/budget/cost cap/policy) never bill, so they
@@ -3945,6 +3957,65 @@ def _response_is_usable(text: str) -> bool:
         return bool((text or "").strip())
 
 
+def _route_error_reason(exc: BaseException) -> str:
+    """The ``usage.reason`` code for a call that reached dispatch and failed (LEDGER-ERR-1)."""
+    if isinstance(exc, asyncio.CancelledError):
+        return REASON_ERROR_CANCELLED
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):  # incl. WallClockExceeded, DeadlineExceeded
+        return REASON_ERROR_TIMEOUT
+    if isinstance(exc, BudgetExceededError):
+        return REASON_ERROR_BUDGET
+    if isinstance(exc, RoutingDenied):
+        return REASON_ERROR_DENIED
+    if type(exc) is RuntimeError and str(exc).startswith("All models failed"):
+        return REASON_ERROR_ALL_FAILED
+    return REASON_ERROR_OTHER
+
+
+async def _record_route_error(
+    exc: BaseException,
+    task_type: TaskType,
+    profile: RoutingProfile,
+    correlation_id: str,
+    attempts: list[str],
+    models_to_try: list[str],
+    started_monotonic: float,
+    complexity: str = "moderate",
+) -> None:
+    """LEDGER-ERR-1: leave the failed call's one per-session ledger row. FAIL-OPEN.
+
+    M0-3 rerun 2026-10-10: calls that ended in an MCP tool error (all providers timed out,
+    every candidate skipped as unhealthy) wrote no ``usage`` / ``routing_decisions`` row,
+    so per-session accounting could not see them. Every writer ran only on success.
+
+    Runs from the three terminal handlers around dispatch. Shielded so a cancel that is
+    already unwinding cannot abort the insert half way; ``cost.log_route_error`` skips the
+    write when a row with this correlation id exists, so a late cancel after an answer was
+    recorded does not add a second row.
+    """
+    try:
+        import time as _time
+
+        from llm_router.quality_feedback import is_skip_marker
+
+        real = [a for a in attempts if not is_skip_marker(a)]
+        attempted = real[-1] if real else (models_to_try[0] if models_to_try else None)
+        await asyncio.shield(
+            cost.log_route_error(
+                task_type, profile,
+                reason=_route_error_reason(exc),
+                correlation_id=correlation_id,
+                attempted_model=attempted,
+                latency_ms=(_time.monotonic() - started_monotonic) * 1000.0,
+                complexity=complexity,
+            )
+        )
+    except BaseException as _err:  # noqa: BLE001 — telemetry never changes the failure
+        # A second cancel during the shielded write lands here too: the insert task keeps
+        # running; the original exception is what the caller must see.
+        log.debug("route-error usage row failed (non-fatal): %r", _err)
+
+
 @_ci_scope.traced
 async def route_and_call(
     task_type: TaskType,
@@ -4920,6 +4991,7 @@ async def route_and_call(
         # ``asyncio.timeout``) for Python 3.10 compatibility — the project
         # supports 3.10+. On timeout, release the budget reservation, write
         # a timeout audit row, and raise WallClockExceeded.
+        _attempt_trace: list[str] = []
         _dispatch_coro = _dispatch_model_loop(
             models_to_try=models_to_try,
             task_type=task_type,
@@ -4951,6 +5023,7 @@ async def route_and_call(
             ledger_route_id=_ledger_route_id,
             scope_root=_scope_root,
             semantic_key=_semantic_key,
+            chain_attempts_out=_attempt_trace,
         )
         # T3-S2 + T3-M1: combined timeout + cancel handling. Both failure
         # modes share the same cleanup contract — release the budget
@@ -5014,6 +5087,9 @@ async def route_and_call(
             else:
                 response = await _dispatch_coro
         except asyncio.CancelledError as _cancel_err:
+            await _record_route_error(_cancel_err, task_type, profile, correlation_id,
+                                      _attempt_trace, models_to_try, _dispatch_started,
+                                      effective_complexity)
             # T3-M1: external cancellation (parent agent killed, host
             # client disconnected, supervisor pulled the plug). The
             # routing path must release its budget reservation before
@@ -5027,6 +5103,9 @@ async def route_and_call(
             raise
         except asyncio.TimeoutError as _to_err:
             elapsed = _t.monotonic() - _dispatch_started
+            await _record_route_error(_to_err, task_type, profile, correlation_id,
+                                      _attempt_trace, models_to_try, _dispatch_started,
+                                      effective_complexity)
             async with _budget_lock():
                 _pending_spend = max(0.0, _pending_spend - _reservation)
             await release_envelope(_env_key, _reservation)
@@ -5050,7 +5129,10 @@ async def route_and_call(
                 cap_seconds=max_wall_clock_seconds,
                 elapsed_seconds=elapsed,
             ) from _to_err
-        except Exception:
+        except Exception as _disp_err:
+            await _record_route_error(_disp_err, task_type, profile, correlation_id,
+                                      _attempt_trace, models_to_try, _dispatch_started,
+                                      effective_complexity)
             # RED1-4-02: _dispatch_model_loop releases _pending_spend on its
             # all-models-failed tail (RuntimeError) but never the distributed
             # budget envelope, and route_and_call only caught Cancelled/Timeout —

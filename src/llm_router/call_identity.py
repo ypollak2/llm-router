@@ -45,14 +45,15 @@ one session on every call it later serves, for any host.
 Task identity (PLAN v16 P1.10, R-EVL-2). Three ids ride every ledger row:
 
 * ``session_id``: the Claude Code session (above), or the SDK caller's / a generated one.
-* ``task_id``: one human request. Host turns: ``sha256(session_id + ":" + human_turn_index)
-  [:16]``, where the index is a per-session counter the UserPromptSubmit hook advances
+* ``task_id``: one human request. Host turns: ``sha256(session_id + human_turn_index)[:16]``
+  (plain concatenation, as in the PLAN; session ids are fixed-length UUIDs), where the index is a per-session counter the UserPromptSubmit hook advances
   (``begin_turn``) and every other process reads (``turn_task_id``): the MCP server, the
   proxy and the sub-agent hooks all see the same id for the same turn. SDK / gateway / MCP
   callers may pass their own (``scope(task_id=...)``). When nothing names a task a row gets
-  a generated one (``sha256(session_id + ":untracked:" + trace_id)[:16]``), so a row is
-  never NULL because the host was unknown. Escalations and retries run inside one
-  ``scope`` and share its task_id.
+  a GENERATED stand-in, ``gen-<12 hex>`` (``GENERATED_PREFIX``): it keeps the row joinable
+  to its trace but is not a recorded task, so the G3 / P1.10-a counts treat it as missing
+  (``is_generated_task_id``). Escalations and retries run inside one ``scope`` and share
+  its task_id.
 * ``trace_id``: ``uuid4().hex`` minted per routed call (``scope`` mints a fresh one on
   entry), so a retry is a new trace of the same task.
 
@@ -86,6 +87,9 @@ _TRACE_ID: ContextVar[str | None] = ContextVar("llm_router_trace_id", default=No
 
 TASK_ID_LEN = 16
 TURN_STATE_DIR = "turn_state"
+GENERATED_PREFIX = "gen-"
+#: ``begin_turn`` deletes turn-state files untouched for this long (see ``_prune_turn_state``).
+TURN_STATE_TTL_S = 7 * 86400
 
 
 def clean_id(value: Any) -> str | None:
@@ -132,7 +136,12 @@ def tool_use_id_from_context(context: Any) -> str | None:
 
 def derive_task_id(session_id: str, turn_index: int) -> str:
     """The host task id of human turn ``turn_index`` of ``session_id`` (16 hex chars)."""
-    return hashlib.sha256(f"{session_id}:{int(turn_index)}".encode("utf-8")).hexdigest()[:TASK_ID_LEN]
+    return hashlib.sha256(f"{session_id}{int(turn_index)}".encode("utf-8")).hexdigest()[:TASK_ID_LEN]
+
+
+def is_generated_task_id(value: Any) -> bool:
+    """True for a stand-in minted because nothing named the task (``gen-<hex>``)."""
+    return isinstance(value, str) and value.startswith(GENERATED_PREFIX)
 
 
 def new_trace_id() -> str:
@@ -173,17 +182,43 @@ def begin_turn(session_id: Any) -> str | None:
     if sid is None:
         return None
     try:
-        prev = _read_turn_state(sid) or {}
-        idx = int(prev.get("turn_index", 0)) + 1
-        task = derive_task_id(sid, idx)
+        from llm_router.file_lock import exclusive_lock
+
         path = _turn_state_path(sid)
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps({"turn_index": idx, "task_id": task}), encoding="utf-8")
-        os.replace(tmp, path)
+        # Read-modify-write under an advisory lock: two hooks of one session (a resumed
+        # process, a sub-agent's prompt) must not both read N and write N+1.
+        with exclusive_lock(path.with_suffix(".lock"), timeout=2.0):
+            prev = _read_turn_state(sid) or {}
+            last = prev.get("turn_index")
+            idx = 1 if not isinstance(last, int) else last + 1  # no state: the first turn
+            task = derive_task_id(sid, idx)
+            tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+            tmp.write_text(json.dumps({"turn_index": idx, "task_id": task}), encoding="utf-8")
+            os.replace(tmp, path)
+        if idx == 1:  # a new session: the one moment housekeeping is cheap and bounded
+            _prune_turn_state(path.parent)
         return task
     except Exception:  # noqa: BLE001 -- identity must never break the hook
         return None
+
+
+def _prune_turn_state(directory) -> None:
+    """Delete turn-state files (``.json``, ``.lock``, stray ``.tmp``) untouched for
+    ``TURN_STATE_TTL_S``. Runs from ``begin_turn`` when a session's first turn is recorded,
+    so it costs one directory scan per new session, never per prompt. Never raises."""
+    import time
+
+    try:
+        cutoff = time.time() - TURN_STATE_TTL_S
+        for entry in os.scandir(directory):
+            try:
+                if entry.is_file() and entry.stat().st_mtime < cutoff:
+                    os.unlink(entry.path)
+            except OSError:
+                continue
+    except OSError:
+        return
 
 
 def turn_task_id(session_id: Any) -> str | None:
@@ -207,12 +242,12 @@ def current_trace_id() -> str | None:
 
 def resolve_task_id(session_id: Any = None, explicit: Any = None, trace_id: str | None = None) -> str:
     """The task id for a call: the caller's, else the bound one, else the session's current
-    human turn, else a generated one. Never None, never a placeholder."""
+    human turn, else a ``gen-`` stand-in (not counted as recorded). Never None."""
     tid = ledger_task_id(explicit) or current_task_id() or turn_task_id(session_id)
     if tid:
         return tid
     seed = f"{ledger_session_id(session_id) or ''}:untracked:{trace_id or current_trace_id() or new_trace_id()}"
-    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:TASK_ID_LEN]
+    return GENERATED_PREFIX + hashlib.sha256(seed.encode("utf-8")).hexdigest()[: TASK_ID_LEN - len(GENERATED_PREFIX)]
 
 
 def row_ids(session_id: Any = None) -> tuple[str, str]:

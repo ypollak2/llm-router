@@ -98,7 +98,7 @@
    "  usage: no traffic (0 organic rows)",
    "  routing_decisions: no traffic (0 organic rows)",
    "  direct: no traffic (0 organic rows)",
-   "  proxy: fail 0.0% complete (n=120); missing: task_id 100.0%, tokens 100.0%, cost 100.0%, latency 100.0%"
+   "  proxy: fail 0.0% complete (n=120); missing: tokens 100.0%, cost 100.0%, latency 100.0%; task_id 0.0% recorded, not scored until P1.10 merges"
   ],
   "measurable": false,
   "n": null,
@@ -123,7 +123,9 @@
    ],
    "min_n": 100,
    "pass": false,
-   "unscored": {},
+   "unscored": {
+    "task_id": "not scored until P1.10 merges"
+   },
    "verdict": "FAIL",
    "why": "below 99%: proxy",
    "writers": {
@@ -179,7 +181,7 @@
        "missing_pct": null,
        "no_column": false,
        "recorded": 0,
-       "scored": true
+       "scored": false
       },
       "tier": {
        "missing": 0,
@@ -252,7 +254,7 @@
        "missing_pct": 1.0,
        "no_column": false,
        "recorded": 0,
-       "scored": true
+       "scored": false
       },
       "tier": {
        "missing": 0,
@@ -325,7 +327,7 @@
        "missing_pct": null,
        "no_column": false,
        "recorded": 0,
-       "scored": true
+       "scored": false
       },
       "tier": {
        "missing": 0,
@@ -398,7 +400,7 @@
        "missing_pct": null,
        "no_column": false,
        "recorded": 0,
-       "scored": true
+       "scored": false
       },
       "tier": {
        "missing": 0,

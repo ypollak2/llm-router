@@ -313,19 +313,14 @@ def test_a_complete_writer_beside_a_no_traffic_writer_is_pass_only_for_the_write
     assert _prd()["verdict"] == "NOT INFORMATIVE"
 
 
-def test_task_id_is_scored_since_p1_10():
-    """P1.10 put task_id on every writer, so a row without one is missing (NULL), per writer."""
-    rows = [_proxy(i) for i in range(100)]
-    for r in rows[:5]:                       # 5 of 100 lose the id: 95% < 99%
-        r["task_id"] = None
-    _write_proxy(rows)
+def test_task_id_is_reported_not_scored_until_the_merge_date_is_set():
+    _write_proxy([_proxy(i) for i in range(100)])
     card = _card()
     px = card["kpis"]["G3"]["prd"]["writers"]["proxy"]
-    assert px["state"] == "fail"
-    assert px["fields"]["task_id"] == {"recorded": 95, "missing": 5, "missing_pct": 0.05,
-                                       "scored": True, "no_column": False}
-    assert "task_id 5.0%" in _g3_text(card)
-    assert card["kpis"]["G3"]["prd"]["unscored"] == {}
+    assert px["state"] == "pass"
+    assert px["fields"]["task_id"] == {"recorded": 100, "missing": 0, "missing_pct": 0.0,
+                                       "scored": False, "no_column": False}
+    assert card["kpis"]["G3"]["prd"]["unscored"] == {"task_id": "not scored until P1.10 merges"}
 
 
 def test_direct_and_mcp_rows_are_separate_writers():

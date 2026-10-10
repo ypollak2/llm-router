@@ -300,6 +300,23 @@ def is_thinking_rejection(status: int, body_text: str) -> bool:
 # 2026-10-02): max output 64,000 tokens (vs 128K on Sonnet/Opus/Fable).
 HAIKU_MAX_OUTPUT_TOKENS = 64_000
 
+# Claude Haiku 5.5 (model id ``claude-haiku-5-5``), fetched 2026-10-10 from
+# platform.claude.com/docs/en/models/haiku-5-5/overview ("Context window: 1M
+# tokens · Max output: 128K tokens") and .../migration-guide.
+HAIKU55_MODEL = "claude-haiku-5-5"
+HAIKU55_MAX_OUTPUT_TOKENS = 128_000
+
+
+def haiku_is_legacy(model: str | None) -> bool:
+    """True for every Haiku id but 5.5: the 4.5 rules (``for_haiku`` strips thinking and
+    effort, folds the system role, clamps to 64K) stay the default for any other id, so
+    a policy that still configures ``claude-haiku-4-5`` keeps working."""
+    return (model or "").strip().lower() != HAIKU55_MODEL
+
+
+def haiku_max_output_tokens(model: str | None) -> int:
+    return HAIKU_MAX_OUTPUT_TOKENS if haiku_is_legacy(model) else HAIKU55_MAX_OUTPUT_TOKENS
+
 
 def _fold_blocks(content) -> list[dict]:
     """The content of a ``role: "system"`` message as user-message blocks: each text
@@ -365,7 +382,7 @@ def fold_system_messages(messages: list) -> list:
     return out
 
 
-def for_haiku(body: dict, *, fold_system: bool = False) -> dict:
+def for_haiku(body: dict, *, fold_system: bool = False, model: str | None = None) -> dict:
     """A copy of ``body`` with the fields Haiku 4.5 rejects outright removed
     or clamped, for the opt-in Haiku tier (``proxy/tiers.py``,
     ``ClaudeTierPolicy``'s ``haiku_rewrite``).
@@ -395,12 +412,32 @@ def for_haiku(body: dict, *, fold_system: bool = False) -> dict:
     mid-conversation ``role: "system"`` message into a user message
     (``fold_system_messages``). The top-level ``system`` field is not touched, so
     the cache prefix is kept.
+
+    ``model`` is the Haiku the tier serves. For ``claude-haiku-5-5`` (anything else is
+    the 4.5 rule above) the rewrite is much narrower, per the migration guide
+    (platform.claude.com/docs/en/models/haiku-5-5/migration-guide, fetched 2026-10-10):
+    adaptive thinking, ``output_config.effort`` (all five levels) and mid-conversation
+    ``role: "system"`` messages are accepted, so they stay (no fold: it would also drop
+    the per-turn effort); only ``thinking.type: "enabled"`` with ``budget_tokens`` is a
+    400 there, so a body that carries it gets ``thinking: {"type": "adaptive"}`` instead,
+    and ``max_tokens`` is clamped to 128K (``haiku_block_reason`` also blocks it).
     """
-    out = without_thinking(body)
-    out.pop("output_config", None)
+    if not haiku_is_legacy(model):
+        thinking = body.get("thinking")
+        out = dict(body)
+        if isinstance(thinking, dict) and thinking.get("type") == "enabled":
+            # The guide's fix: {"type": "adaptive"} (display kept), not removal, so the
+            # client's clear_thinking_* context edits stay valid.
+            out["thinking"] = {k: v for k, v in thinking.items() if k != "budget_tokens"} | {"type": "adaptive"}
+    else:
+        out = without_thinking(body)
+        out.pop("output_config", None)
     max_tokens = out.get("max_tokens")
-    if isinstance(max_tokens, int) and max_tokens > HAIKU_MAX_OUTPUT_TOKENS:
-        out["max_tokens"] = HAIKU_MAX_OUTPUT_TOKENS
+    cap = haiku_max_output_tokens(model)
+    if isinstance(max_tokens, int) and max_tokens > cap:
+        out["max_tokens"] = cap
+    if not haiku_is_legacy(model):
+        return out
     if fold_system and isinstance(out.get("messages"), list):
         out["messages"] = fold_system_messages(out["messages"])
     return out

@@ -12,7 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- proxy Haiku tier on Claude Haiku 5.5 (HAIKU55-TIER-1, docs/bugs/HAIKU55-TIER-1.md): the Haiku rewrite rules now key
+  off the tier's `model`. With `claude-haiku-5-5` the body keeps adaptive thinking, effort and mid-conversation system
+  messages (no fold), `max_tokens` clamps to 128K, a body with sampling parameters or an assistant prefill (400 on 5.5)
+  or too large for the window (estimate x 1.3 tokenizer factor + max_tokens > 1M, 670,769 estimated tokens at 128K
+  max_tokens; owner decision 2026-10-10; calls over 100K prompt tokens bill at $0.50/$2.50 per MTok, up to 100K
+  $0.10/$0.50) goes up a tier
+  (`haiku_body_blocked`). Any other id keeps the 4.5 rules; the shipped default is still `claude-haiku-4-5`
+  (4.5 retires not sooner than 2026-10-15). Capabilities are from platform.claude.com, fetched 2026-10-10.
+
 ### Fixed
+- ledger (LEDGER-ERR-1, docs/bugs/LEDGER-ERR-1.md): an `llm` call that reached dispatch and failed (all providers timed out, no healthy candidate, wall-clock timeout, cancel) wrote no row with the caller's session id; in the M0-3 rerun (2026-10-10, n=20 calls, 2 sessions) 3 of 20 left none. It now writes one `usage` row (success=0, $0, attempted model, latency, `error_*` reason code), never a second for the same call. Call counts, the statusline mix, routing_report/routing_health and the dashboard call totals leave these rows out. Owner decision 2026-10-10: the same failed calls, and cache-served calls, also write one `routing_decisions` row (`reason_code` `error_*` / `cache_hit`, caller's session id) so the M0-3 gate query, which reads that table, sees every call; every routing-metric reader excludes them (`provider_classes.SQL_REAL_DECISION`). session-end hook v29. The gate count with this change is not yet re-measured.
 - local timeout demotion (LOCAL-TIMEOUT-1, docs/bugs/LOCAL-TIMEOUT-1.md): an `ollama/*` model that had just timed out
   led the next route again. In the live ledger (`routing_quality.jsonl`, 2026-10-10 08:34:22Z to 09:30:14Z),
   `ollama/qwen3-coder:30b` timed out at 120 s on 21 of the 21 code routes that tried it. Ollama's scheduler was stuck
@@ -70,13 +81,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (one routed call) on every ledger writer. Additive nullable columns `usage.task_id/trace_id`,
   `routing_decisions.task_id/trace_id` and `execution_events.task_id/trace_id` (`cost.MIGRATE_ADD_TASK_IDENTITY`,
   `execution_ledger._MIGRATIONS`); rows written before carry NULL. `task_id` and `trace_id` are also keys of every
-  `proxy_calls.jsonl` and `edit_outcomes.jsonl` row. Host turns use `sha256(session_id + ":" + human_turn_index)[:16]`: the
+  `proxy_calls.jsonl` and `edit_outcomes.jsonl` row. Host turns use `sha256(session_id + human_turn_index)[:16]`: the
   UserPromptSubmit hook (`auto-route.py`, version 51) advances a per-session counter (`<state>/turn_state/<session>.json`),
   and the MCP server, the proxy and the sub-agent hooks read the same id for the same turn. `route_and_call` and each MCP
   tool call run in a `call_identity.scope`: a fresh `trace_id` per call, one shared `task_id` for escalations and retries,
-  and a generated `task_id` when nothing names one, so a row is never NULL because the host is unknown. The SDK no longer
+  and a `gen-<hex>` stand-in `task_id` when nothing names one (joinable to its trace, but G3 does not count it as recorded). The turn counter is written under a lock; turn-state files older than 7 days are pruned when a session records its first turn. The SDK no longer
   stamps the placeholder `sdk`: `route(..., session_id=, task_id=)` takes the caller's ids, else a per-process `sdk-<hex>`
-  session. `cc-usage-track.py` (version 6) writes both ids. `kpi` G3 now scores `task_id` (`G3_PRD_UNSCORED` is empty).
+  session. `cc-usage-track.py` (version 6) writes both ids. `kpi` G3 keeps `task_id` unscored until `G3_TASK_ID_SCORED_FROM` (set to the merge time at merge) and then scores it only on rows at or after that time.
   Not covered: `model_tracking.jsonl`, coverage, intercepts and `provenance_meta` rows still carry no session or task id;
   `technical_ops` does not exist in the tree yet; HTTP headers and the MCP `task=` argument are A.3.
 - synthetic replay harness (owner decision D-42; test tooling, no product change): `scripts/synthetic_replay.py --corpus <jsonl>

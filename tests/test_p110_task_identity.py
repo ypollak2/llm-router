@@ -57,6 +57,12 @@ def _direct() -> DirectResult:
 
 # ── ids ──────────────────────────────────────────────────────────────────────
 
+def test_task_id_is_the_plan_formula_sha256_of_session_plus_turn():
+    import hashlib
+
+    assert ci.derive_task_id(SID, 3) == hashlib.sha256((SID + "3").encode()).hexdigest()[:16]
+
+
 def test_task_id_is_sha256_of_session_and_turn_16_hex():
     t1, t2 = ci.derive_task_id(SID, 1), ci.derive_task_id(SID, 2)
     assert HEX16.fullmatch(t1) and HEX16.fullmatch(t2)
@@ -100,7 +106,8 @@ def test_explicit_task_id_wins_and_placeholders_are_ignored(temp_db):
 
 def test_unknown_task_is_generated_never_none(temp_db):
     task, trace = ci.row_ids(None)
-    assert HEX16.fullmatch(task) and re.fullmatch(r"[0-9a-f]{32}", trace)
+    assert ci.is_generated_task_id(task) and len(task) == 16 and re.fullmatch(r"[0-9a-f]{32}", trace)
+    assert not ci.is_generated_task_id(ci.derive_task_id(SID, 1))
     with ci.scope(None) as (t1, _):
         pass
     with ci.scope(None) as (t2, _):
@@ -181,6 +188,26 @@ def test_failed_and_cache_rows_get_ids_without_passing_them(temp_db):
     trace = asyncio.run(_call())
     assert _rows(db_path, "SELECT success, reason, task_id, trace_id FROM usage") == [
         (0, "error_timeout", "caller-task-9", trace)]
+
+
+def test_398_error_row_carries_the_scope_ids_on_both_tables(temp_db):
+    """The real ``cost.log_route_error`` (LEDGER-ERR-1): no id passed, both rows stamped."""
+    from llm_router.config import get_config
+
+    db_path = Path(get_config().llm_router_db_path)
+    turn = ci.begin_turn(SID)
+
+    async def _call():
+        with ci.scope(SID) as (_, trace):
+            ok = await cost.log_route_error(TaskType.CODE, RoutingProfile.BALANCED,
+                                            reason=cost.REASON_ERROR_TIMEOUT, correlation_id="c-err",
+                                            attempted_model="openai/gpt-4o-mini", latency_ms=5.0)
+            return ok, trace
+
+    ok, trace = asyncio.run(_call())
+    assert ok
+    for table in ("usage", "routing_decisions"):
+        assert _rows(db_path, f"SELECT task_id, trace_id FROM {table}") == [(turn, trace)], table
 
 
 def test_explicit_ids_on_the_writer_win_over_the_scope(temp_db):
@@ -291,7 +318,7 @@ def test_proxy_row_identity_fields(temp_db):
     f = identity_fields(SID)
     assert f["task_id"] == turn and f["trace_id"]
     g = identity_fields(None)                              # a client with no session id
-    assert HEX16.fullmatch(g["task_id"]) and g["trace_id"]
+    assert ci.is_generated_task_id(g["task_id"]) and g["trace_id"]
 
 
 # ── SDK ──────────────────────────────────────────────────────────────────────
@@ -320,7 +347,7 @@ def test_sdk_stops_stamping_the_sdk_placeholder(temp_db, monkeypatch):
     rows = _rows(Path(get_config().llm_router_db_path),
                  "SELECT session_id, task_id FROM usage ORDER BY id")
     assert len(rows) == 2
-    assert rows[0][0].startswith("sdk-") and rows[0][0] != "sdk" and HEX16.fullmatch(rows[0][1])
+    assert rows[0][0].startswith("sdk-") and rows[0][0] != "sdk" and ci.is_generated_task_id(rows[0][1])
     assert rows[1] == ("caller-session-1", "caller-task-1")
     assert _rows(Path(get_config().llm_router_db_path),
                  "SELECT count(*) FROM routing_decisions WHERE session_id = 'sdk'") == [(0,)]
@@ -417,3 +444,66 @@ def test_g3_reads_task_id_from_the_real_writers(temp_db):
     assert not unreadable and len(recs["usage"]) == 120
     assert all(vals["task_id"] for _sid, vals in recs["usage"])
     assert "task_id" not in _no_col["usage"]
+
+
+# ── review fixes: lock, prune, generated ids not credited, G3 merge-date cutoff ──────────
+
+def test_concurrent_begin_turn_never_loses_an_increment(temp_db):
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(8) as ex:
+        got = list(ex.map(lambda _: ci.begin_turn(SID), range(40)))
+    assert len(set(got)) == 40                       # 40 distinct turns, none written twice
+    assert ci.turn_task_id(SID) in got
+
+
+def test_first_turn_prunes_old_turn_state_only(temp_db):
+    import os
+    import time
+
+    ci.begin_turn("old-session")
+    old = ci._turn_state_path("old-session")
+    stale = time.time() - ci.TURN_STATE_TTL_S - 60
+    os.utime(old, (stale, stale))
+    ci.begin_turn("fresh-session")                   # idx == 1: housekeeping runs
+    assert not old.exists() and ci._turn_state_path("fresh-session").exists()
+    ci.begin_turn("fresh-session")                   # idx == 2: no scan
+    assert ci._turn_state_path("fresh-session").exists()
+
+
+def test_generated_task_ids_are_not_credited_by_g3(temp_db, monkeypatch):
+    from llm_router.commands import kpi
+
+    async def _all():
+        for i in range(10):
+            with ci.scope(None):                     # no session, no turn: generated stand-in
+                await cost.log_usage(_resp(i), TaskType.CODE, RoutingProfile.BALANCED)
+
+    asyncio.run(_all())
+    recs, _nc, _un = kpi._prd_sql_records(None, None)
+    assert len(recs["usage"]) == 10 and all(v["task_id"] is None for _s, v in recs["usage"])
+
+
+def test_g3_scores_task_id_only_from_the_merge_date(temp_db, monkeypatch):
+    from llm_router.commands import kpi
+
+    class _Idx:
+        def resolve(self, sid, stamp):
+            class _K:
+                kind = "organic"
+            return _K()
+
+    cut = 1_000_000.0
+    rows = [(f"s{i}", {"session_id": f"s{i}", "task_id": None if i < 50 else "t", "model": "m",
+                       "tier": "t", "reason": "r", "tokens": (1, 1), "cost": 0.0, "latency": 1.0,
+                       "outcome": 1, "_ts": cut - 1000 if i < 50 else cut + 1000}) for i in range(100)]
+    stamps = [None] * 100
+    monkeypatch.setattr(kpi, "G3_TASK_ID_SCORED_FROM", None)
+    off = kpi._prd_writer_result(rows, stamps, _Idx(), frozenset(), set())
+    assert off["state"] == "pass" and off["fields"]["task_id"]["scored"] is False
+    assert off["fields"]["task_id"]["missing"] == 50              # reported, not scored
+    monkeypatch.setattr(kpi, "G3_TASK_ID_SCORED_FROM", cut)
+    on = kpi._prd_writer_result(rows, stamps, _Idx(), frozenset(), set())
+    assert on["state"] == "pass" and on["complete"] == 100        # NULL rows predate the cutoff
+    late = [(s_, {**v, "_ts": cut + 5}) for s_, v in rows]        # same rows, now after it
+    assert kpi._prd_writer_result(late, stamps, _Idx(), frozenset(), set())["state"] == "fail"

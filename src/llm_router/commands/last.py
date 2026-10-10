@@ -12,6 +12,7 @@ Example output:
   5 min ago  → routed to openai/gpt-4o (analysis/moderate) - $0.0062
 """
 
+from llm_router.provider_classes import real_decision_sql
 import argparse
 import sqlite3
 from datetime import datetime
@@ -49,7 +50,7 @@ def fetch_recent_decisions(
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        query = "SELECT * FROM routing_decisions WHERE success = 1 ORDER BY timestamp DESC LIMIT ?"
+        query = "SELECT * FROM routing_decisions WHERE success = 1 AND " + real_decision_sql(conn) + " ORDER BY timestamp DESC LIMIT ?"
         cursor.execute(query, (count,))
         rows = cursor.fetchall()
         conn.close()

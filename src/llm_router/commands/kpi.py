@@ -1114,10 +1114,28 @@ def _g3_completeness(all_rows: list[dict], days: int, now: float,
 
 G3_PRD_FIELDS = ("session_id", "task_id", "model", "tier", "reason", "tokens", "cost",
                  "latency", "outcome")
-#: Fields reported with their coverage but never scored. Empty since P1.10 (task_id is on
-#: every writer; rows written before it carry NULL and count as missing until they age out
-#: of the window).
-G3_PRD_UNSCORED: dict[str, str] = {}
+#: Reported with their coverage, never scored, until ``G3_TASK_ID_SCORED_FROM`` is set.
+G3_PRD_UNSCORED = {"task_id": "not scored until P1.10 merges"}
+#: PLAN v16 R8 task 7: "task_id counts from the P1.10 merge date (before that it is reported,
+#: not scored)". Epoch seconds. SET THIS TO THE MERGE TIME IN THE P1.10 MERGE COMMIT; until
+#: then None keeps task_id unscored. Once set, a row is scored on task_id only when its own
+#: timestamp is at or after it, so rows written before the columns existed never fail G3.
+G3_TASK_ID_SCORED_FROM: float | None = None
+
+
+def _g3_unscored() -> dict[str, str]:
+    if G3_TASK_ID_SCORED_FROM is None:
+        return dict(G3_PRD_UNSCORED)
+    since = time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime(G3_TASK_ID_SCORED_FROM))
+    return {"task_id": f"scored on rows since {since}, earlier rows reported only"}
+
+
+def _prd_task(value: Any) -> Any:
+    """A recorded task id, or None for NULL and for a generated stand-in
+    (``call_identity.GENERATED_PREFIX``): nothing named the task, so it is not credited."""
+    from llm_router import call_identity
+
+    return None if call_identity.is_generated_task_id(value) else value
 G3_PRD_MIN_N = 100
 G3_PRD_BAR = 0.99
 G3_PRD_WRITERS = ("usage", "routing_decisions", "direct", "proxy")
@@ -1165,7 +1183,8 @@ def _prd_proxy_values(row: dict) -> dict[str, Any]:
     latency = row.get("upstream_latency_s")
     return {
         "session_id": _prd_session(row.get("session_id")),
-        "task_id": row.get("task_id"),
+        "task_id": _prd_task(row.get("task_id")),
+        "_ts": _num_ts(row.get("ts")),
         "model": model,
         "tier": row.get("tier"),
         "reason": reason if reason is not None else row.get("reason"),
@@ -1246,6 +1265,8 @@ def _prd_sql_records(cutoff: float | None, until: float | None
                             if cs and set(cs) <= cols else None
                             for f, cs in mapping.items()}
                     vals["session_id"] = _prd_session(vals.get("session_id"))
+                    vals["task_id"] = _prd_task(vals.get("task_id"))
+                    vals["_ts"] = ts
                     records[writer].append((vals["session_id"], vals))
                 no_column[writer] = {f for f, cs in mapping.items() if not cs or not set(cs) <= cols}
             except sqlite3.Error as exc:
@@ -1269,14 +1290,24 @@ def _prd_writer_result(records: list[tuple[str | None, dict]], stamps: list[str 
         else:
             organic.append(vals)
     n = len(organic)
-    scored = tuple(f for f in G3_PRD_FIELDS if f not in G3_PRD_UNSCORED)
-    complete = sum(1 for v in organic if all(v.get(f) is not None for f in scored))
+    always = tuple(f for f in G3_PRD_FIELDS if f != "task_id")
+    task_from = G3_TASK_ID_SCORED_FROM
+
+    def _complete(v: dict) -> bool:
+        if not all(v.get(f) is not None for f in always):
+            return False
+        ts = v.get("_ts")
+        in_scope = task_from is not None and ts is not None and ts >= task_from
+        return not in_scope or v.get("task_id") is not None
+
+    complete = sum(1 for v in organic if _complete(v))
     fields = {}
     for f in G3_PRD_FIELDS:
         rec = sum(1 for v in organic if v.get(f) is not None)
         fields[f] = {"recorded": rec, "missing": n - rec,
                      "missing_pct": round((n - rec) / n, 4) if n else None,
-                     "scored": f not in G3_PRD_UNSCORED, "no_column": f in no_column}
+                     "scored": f != "task_id" or task_from is not None,
+                     "no_column": f in no_column}
     if n == 0:
         state = _PRD_NO_TRAFFIC
     elif n < G3_PRD_MIN_N:
@@ -1325,7 +1356,7 @@ def _g3_prd_writers(all_rows: list[dict], days: float, now: float, index,
         verdict, why = G3_PRD_PASS, f"every writer with traffic: {', '.join(traffic)}"
     return {"verdict": verdict, "pass": verdict == G3_PRD_PASS, "why": why,
             "min_n": G3_PRD_MIN_N, "bar": G3_PRD_BAR, "fields": list(G3_PRD_FIELDS),
-            "unscored": dict(G3_PRD_UNSCORED), "excluded_kinds": sorted(excluded_kinds),
+            "unscored": _g3_unscored(), "excluded_kinds": sorted(excluded_kinds),
             "writers": writers}
 
 
