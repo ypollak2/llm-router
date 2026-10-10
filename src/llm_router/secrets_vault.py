@@ -39,9 +39,34 @@ class EnvSecretsVault:
         return value or None
 
 
+class KeychainSecretsVault:
+    """Reads ``llm-router-<ENV_VAR>`` from the OS keychain (macOS ``security``,
+    Linux ``secret-tool``), then falls back to the environment. Select with
+    ``LLM_ROUTER_SECRETS_BACKEND=keychain``. The secret is returned to the caller
+    and never logged."""
+
+    def __init__(self, run=None, platform: str | None = None) -> None:
+        import subprocess
+
+        self._run = run or subprocess.run
+        self._platform = platform
+
+    def _lookup(self, env_name: str) -> str | None:
+        from llm_router.claude_creds import keychain_query
+
+        return keychain_query("llm-router-" + env_name, want_secret=True,
+                              platform=self._platform, run=self._run)[1]
+
+    def get_provider_key(self, provider: str) -> str | None:
+        env_name = PROVIDER_ENV.get(provider)
+        if env_name is None:
+            return None
+        return self._lookup(env_name) or EnvSecretsVault().get_provider_key(provider)
+
+
 _BackendFactory = Callable[[], SecretsVault]
 
-_BACKENDS: dict[str, _BackendFactory] = {"env": EnvSecretsVault}
+_BACKENDS: dict[str, _BackendFactory] = {"env": EnvSecretsVault, "keychain": KeychainSecretsVault}
 _vault: SecretsVault | None = None
 
 
@@ -84,6 +109,7 @@ def reset_vault_for_tests() -> None:
 __all__ = [
     "SecretsVault",
     "EnvSecretsVault",
+    "KeychainSecretsVault",
     "PROVIDER_ENV",
     "register_backend",
     "get_vault",
