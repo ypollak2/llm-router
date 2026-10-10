@@ -1192,3 +1192,44 @@ def test_the_usage_read_is_cached_by_mtime_but_the_age_is_recomputed(tmp_path):
         assert qp.read(p).pressure == 0.88 and calls
     finally:
         Path.read_text = real
+
+
+# ── HAIKU55-1: a current model the policy does not configure ─────────────────
+
+HAIKU55 = "claude-haiku-5-5"
+
+
+def _haiku55_usage(cache_read):
+    return {"input_tokens": 5, "cache_read_input_tokens": cache_read, "cache_creation_input_tokens": 1_000,
+            "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 1_000},
+            "output_tokens": 40}
+
+
+@pytest.mark.parametrize("cache_read, usd", [
+    # up to 100K prompt tokens: $0.10 in, $0.01 cache read, $0.20 1h write, $0.50 out
+    (30_000, (5 * 0.10 + 30_000 * 0.01 + 1_000 * 0.20 + 40 * 0.50) / 1e6),
+    # over 100K (5 + 150,000 + 1,000): $0.50 in, $0.05 read, $1.00 1h write, $2.50 out
+    (150_000, (5 * 0.50 + 150_000 * 0.05 + 1_000 * 1.00 + 40 * 2.50) / 1e6),
+])
+async def test_haiku_5_5_is_forwarded_unchanged_with_a_tier_label_and_a_cost(tmp_path, moderate, cache_read, usd):
+    """docs/BUGS.md HAIKU55-1: 215 live rows on 2026-10-09 named claude-haiku-5-5 and were
+    written with tier and cost null. The call stays as sent (moving it onto the Haiku tier's
+    claude-haiku-4-5 would change the model), but the row is labelled and priced."""
+    up = Upstream(responses=[(200, _sse(HAIKU55, usage=_haiku55_usage(cache_read)))])
+    app = _app(tmp_path, up)
+    assert (await _post(app, _req(HAIKU55))).status_code == 200
+    assert json.loads(up.requests[0].content)["model"] == HAIKU55
+    row = _rows(tmp_path)[-1]
+    assert (row["served_model"], row["tier"], row["tier_reason"]) == (HAIKU55, "haiku", "unknown_model")
+    assert row["anthropic_cost_usd"] == pytest.approx(usd, abs=1e-6)  # the row rounds to 6 dp
+
+
+async def test_unknown_model_label_is_a_word_match_only(policy):
+    sticky = Stickiness()
+    for model, label in [(HAIKU55, "haiku"), ("claude-sonnet-6", "sonnet"), ("claude-3-opus", "opus"),
+                         ("some-custom-fine-tune", None), ("gpt-5.5", None), ("claude-haikus-9", None)]:
+        d = await policy.decide(_req(model), SID, sticky, classify=_classify("simple"))
+        assert (d.reason, d.served_model, d.tier) == (pt.REASON_UNKNOWN_MODEL, model, label)
+        d = policy.decide_unclassified(_req(model), SID, sticky)
+        assert (d.reason, d.served_model, d.tier) == (pt.REASON_UNKNOWN_MODEL, model, label)
+    assert policy.tier_of(HAIKU55) is None  # never a routing tier

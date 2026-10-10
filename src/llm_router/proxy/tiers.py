@@ -10,6 +10,10 @@ drains that pool more slowly.
 The decision, per call, in order (the first that applies wins):
 
 ``unknown_model``   the requested model is not a configured tier: unchanged.
+                    The row's ``tier`` is the configured tier whose name is a
+                    word of the id (a Haiku 5.5 id -> ``haiku``), a label
+                    only: the call is never moved onto that tier's model
+                    (docs/BUGS.md HAIKU55-1). None when no tier name matches.
 ``config_pinned``   the requested id is in ``pinned_models``: unchanged. Checked
                     BEFORE ``explicit_opus_pin``, deliberately: an admin-level
                     pin outranks a user's ``opus:`` text, so a request on a
@@ -126,6 +130,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -634,6 +639,16 @@ class ClaudeTierPolicy:
     def tier_of(self, model: str | None) -> Tier | None:
         return self._ids.get(_canonical(model)) if model else None
 
+    def family_tier(self, model: str | None) -> str | None:
+        """The ledger label for a model that is NOT a configured tier: the name of
+        the configured tier that is a word of the id (a Haiku 5.5 id -> ``haiku``),
+        else None. A label only, never a routing target: serving such a request on
+        the tier's ``model`` would move Haiku 5.5 onto whatever older Haiku the
+        policy configures, a different and, for Haiku 4.5, ten times pricier model
+        (docs/BUGS.md HAIKU55-1). Model ids stay in the policy YAML, not here."""
+        words = set(re.split(r"[^a-z0-9]+", model.lower())) if model else set()
+        return next((t.name for t in self.tiers if t.name.lower() in words), None)
+
     def tier_for(self, task_type: str | None, complexity: str | None) -> Tier | None:
         name = (self.route.get(task_type or "") or {}).get(complexity or "") or \
             self.route["default"].get(complexity or "")
@@ -808,7 +823,8 @@ class ClaudeTierPolicy:
         req_tier = self.tier_of(requested)
         name = req_tier.name if req_tier else None
         if req_tier is None:
-            return TierDecision(requested, requested, None, REASON_UNKNOWN_MODEL, detail=STEP_ERROR)
+            return TierDecision(requested, requested, self.family_tier(requested), REASON_UNKNOWN_MODEL,
+                                detail=STEP_ERROR)
         if _canonical(requested) in self.pinned:
             return TierDecision(requested, requested, name, REASON_CONFIG_PINNED, detail=STEP_ERROR)
         if not has_client_tools(body):
@@ -863,7 +879,7 @@ class ClaudeTierPolicy:
             return TierDecision(requested, requested, req_tier.name if req_tier else None, reason, **kw)
 
         if req_tier is None:
-            return keep(REASON_UNKNOWN_MODEL)
+            return TierDecision(requested, requested, self.family_tier(requested), REASON_UNKNOWN_MODEL)
         if _canonical(requested) in self.pinned:
             return await self._pinned_or_arm(body, session_id, classify, requested, req_tier, phases, block)
         if not has_client_tools(body):
