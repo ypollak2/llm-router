@@ -87,6 +87,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Existing `~/.llm-router/result_cache.db` files are left on disk, unread and unmigrated.
 
 ### Added
+- door-agreement tool (PLAN v16 P1.6 task 0, P1.6-i): `scripts/door_agreement.py --corpus <jsonl> --sites hook,gateway[,...] --out <json>`
+  reports, per pair of classifier call sites, how many prompts get a different task_type and a different tier, with Wilson 95% CIs,
+  plus the count where any listed site differs. Sites now: `hook` (auto-route.py `classify_prompt`), `gateway` (`gateway._classify`),
+  `proxy` (`proxy/tiers._default_classify` on `steps.tier_text` of the prompt) and the reference `hook_policy` (`classify_signals(HOOK_POLICY)`, what `measure_low_signal_rate.py` called "hook"); the other P1.6
+  sites are added one per wiring PR. `--freeze-corpus <path>` writes `measure_low_signal_rate.collect()`'s prompts once (mode 0600,
+  never overwritten, temp file hard-linked into place). Each pair also reports a shared-labels rate (only prompts where both
+  sites' labels are in the vocabulary both emitted), and `--freeze-dates` / `--dates` / `--date-cutoff` add a reproducible
+  split by prompt date from a counts-only per-line date sidecar. Output is counts and hashes only. No model calls: the hook's LLM layers are forced off by the env switches its
+  code reads (`LLM_ROUTER_CLASSIFY_LOCAL_ONLY`, `LLM_ROUTER_DISABLE_LLM_CLASSIFIERS`, `LLM_ROUTER_HOOK_LLM_LAYER=off`), the proxy's pre-P0.9-e chain build is replaced by an empty chain,
+  `LITELLM_LOCAL_MODEL_COST_MAP=True` stops LiteLLM's import-time download, `LLM_ROUTER_OLLAMA_MODEL` stops older hooks'
+  import-time Ollama probe, and DNS plus every outbound socket connect is refused during the run (a `BaseException`, and any
+  refusal fails the run). Measure an older commit by putting its tree's `src` first on PYTHONPATH.
 - synthetic replay harness (owner decision D-42; test tooling, no product change): `scripts/synthetic_replay.py --corpus <jsonl>
   --out <dir> [--doors hook,proxy,gateway,mcp,sdk,agent-route] [--sessions N]` drives synthetic sessions through every
   classification door (auto-route and agent-route hooks as subprocesses, an `llm-router proxy` on an ephemeral port, the
