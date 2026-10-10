@@ -86,6 +86,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Existing `~/.llm-router/result_cache.db` files are left on disk, unread and unmigrated.
 
 ### Added
+- OKF ranking and semantic refresh (PLAN v16 P1.5, R-CTX-5 / R-CTX-6; DRAFT, do not merge before G0):
+  `okf.find_relevant` and `context_injection.inject` default to `limit=None`: every doc scoring at least
+  max(floor, 0.5 x top score), best first, until 1,500 tokens (`LLM_ROUTER_OKF_BUDGET`) instead of a fixed top 3.
+  The top doc is always kept and the identifier-anchor rule is unchanged; an explicit `limit=N` keeps the old top-N.
+  PostToolUse Edit/Write/MultiEdit queue the path in `semantic_dirty.txt` (context-capture 1 -> 2); every 10 distinct
+  queued files a detached child re-indexes them, and SessionStart (session-start 33 -> 34) drains the rest
+  (`LLM_ROUTER_SEMANTIC_REFRESH=0` turns it off; only projects that already have an index are queued). New
+  `semantic/extractors/typescript.py` (regex over a comment- and string-blanked skeleton: function, class,
+  interface/type/enum, arrow bindings, exports, imports, require) and `.ts .tsx .js .jsx` in the indexer. Not
+  covered: class methods, call sites, other languages (16.1). An index built before this change re-extracts once.
 - synthetic replay harness (owner decision D-42; test tooling, no product change): `scripts/synthetic_replay.py --corpus <jsonl>
   --out <dir> [--doors hook,proxy,gateway,mcp,sdk,agent-route] [--sessions N]` drives synthetic sessions through every
   classification door (auto-route and agent-route hooks as subprocesses, an `llm-router proxy` on an ephemeral port, the

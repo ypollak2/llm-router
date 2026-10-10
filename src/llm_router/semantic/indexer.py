@@ -30,11 +30,31 @@ from pathlib import Path
 
 from llm_router.semantic import store as sstore
 from llm_router.semantic.extractors import python as py_extractor
+from llm_router.semantic.extractors import typescript as ts_extractor
 from llm_router.semantic.scope import resolve_scope
 
-# Python only, deliberately. A second language is a second adapter, added when
-# something needs it — not a speculative abstraction over one implementation.
-_LANGUAGES = {".py": ("python", py_extractor)}
+# Python by `ast`, TS/JS by regex (PLAN v16 P1.5). A language is one adapter with
+# `extract(source, rel, hash)` and an EXTRACTOR_VERSION; nothing more abstract.
+_LANGUAGES = {
+    ".py": ("python", py_extractor),
+    ".ts": ("typescript", ts_extractor),
+    ".tsx": ("typescript", ts_extractor),
+    ".js": ("javascript", ts_extractor),
+    ".jsx": ("javascript", ts_extractor),
+}
+
+
+def extractor_version() -> str:
+    """One string naming every extractor's version.
+
+    The index re-extracts every file once when this changes (a changed extractor
+    must reach files whose bytes did not). Python alone keeps its bare version
+    string so an index built before TS/JS existed is not rebuilt for nothing.
+    """
+    versions = {name: mod.EXTRACTOR_VERSION for name, mod in _LANGUAGES.values()}
+    if set(versions) == {"python"}:
+        return versions["python"]
+    return ",".join(f"{k}={v}" for k, v in sorted(versions.items()))
 
 MAX_FILE_BYTES = 2_000_000
 
@@ -92,11 +112,10 @@ def index(
         previous = sstore.known_files(conn)
         # Z: a changed extractor re-extracts every file once — otherwise files
         # whose bytes did not change would never gain the new entity kinds.
-        from llm_router.semantic.extractors import python as _py_extractor
         _stored = conn.execute(
             "SELECT value FROM meta WHERE key = 'extractor_version'").fetchone()
         _known_before = dict(previous)
-        if not _stored or _stored[0] != _py_extractor.EXTRACTOR_VERSION:
+        if not _stored or _stored[0] != extractor_version():
             previous = {}
         seen: set[str] = set()
         parsed = skipped = failed = entity_count = 0
@@ -149,8 +168,77 @@ def index(
             conn.execute(
                 "INSERT INTO meta(key, value) VALUES('extractor_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (_py_extractor.EXTRACTOR_VERSION,))
+                (extractor_version(),))
 
+        return IndexResult(
+            root=str(scope), files_parsed=parsed, files_skipped=skipped,
+            files_failed=failed, files_forgotten=forgotten, entities=entity_count,
+        )
+    finally:
+        conn.close()
+
+
+def index_files(
+    rel_paths: list[str],
+    root: Path | str | None = None,
+    base: Path | None = None,
+) -> IndexResult:
+    """Re-index just *rel_paths* (relative to the project root).
+
+    The incremental path behind PLAN v16 P1.5 task 2: a file the session edited is
+    re-read now instead of waiting for the next full `index`. Differences from
+    `index`, each deliberate:
+
+    * the file list is the caller's, not `git ls-files`, so an UNTRACKED new file
+      (what a session creates) is indexed. A full `index` still only sees tracked
+      files and will forget it later if it stays untracked; the dirty queue puts
+      it back on the next edit.
+    * a named path that no longer exists is forgotten, the same rule as a file
+      git stopped listing.
+    * unsupported suffixes, oversize files and paths outside the root are
+      skipped exactly as in `index`. The same hash-then-parse-the-same-bytes rule
+      applies, and an unchanged file is a cheap skip.
+    """
+    scope = resolve_scope(root)
+    conn = sstore.connect(scope, base)
+    try:
+        previous = sstore.known_files(conn)
+        parsed = skipped = failed = forgotten = entity_count = 0
+        for rel in dict.fromkeys(rel_paths):
+            suffix = Path(rel).suffix
+            if suffix not in _LANGUAGES:
+                continue
+            language, extractor = _LANGUAGES[suffix]
+            path = _safe_path(scope, rel)
+            if path is None:
+                continue
+            try:
+                if not path.is_file():
+                    if rel in previous:
+                        sstore.forget_file(conn, rel)
+                        forgotten += 1
+                    continue
+                if path.stat().st_size > MAX_FILE_BYTES:
+                    continue
+                raw = path.read_bytes()
+            except OSError:
+                continue
+            file_hash = sstore.content_hash(raw)
+            if previous.get(rel) == file_hash:
+                skipped += 1
+                continue
+            extracted = extractor.extract(
+                raw.decode("utf-8", errors="replace"), rel, file_hash)
+            if extracted is None:
+                sstore.replace_file(conn, rel, language, file_hash,
+                                    "parse_failed", [], [])
+                failed += 1
+                continue
+            entities, relations = extracted
+            sstore.replace_file(conn, rel, language, file_hash,
+                                "parsed", entities, relations)
+            parsed += 1
+            entity_count += len(entities)
         return IndexResult(
             root=str(scope), files_parsed=parsed, files_skipped=skipped,
             files_failed=failed, files_forgotten=forgotten, entities=entity_count,

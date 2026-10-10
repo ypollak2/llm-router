@@ -718,13 +718,68 @@ def _path_name_tokens(title: str) -> set[str]:
     return {base} if base else set()
 
 
+_OKF_BUDGET_DEFAULT = 1500   # tokens of injected knowledge (PLAN v16 P1.5 task 1)
+_OKF_RELATIVE_CUTOFF = 0.5   # a doc must score >= this x the top score
+
+
+def _okf_budget_tokens() -> int:
+    try:
+        return max(1, int(os.environ.get("LLM_ROUTER_OKF_BUDGET", _OKF_BUDGET_DEFAULT)))
+    except ValueError:
+        return _OKF_BUDGET_DEFAULT
+
+
+def rank_within_budget(
+    scored: "list[tuple[OKFConcept, int]]",
+    floor: int,
+    budget_tokens: int,
+    relative: float = _OKF_RELATIVE_CUTOFF,
+) -> list[OKFConcept]:
+    """Docs scoring >= max(floor, relative x top score), best first, until the budget.
+
+    Replaces a fixed top-3. A fixed count is wrong in both directions: three docs
+    when one doc names the symbol (two are noise), and three when five docs all
+    name it (two are cut). The cutoff is relative to the best doc so a prompt that
+    names one file keeps only that file, and the budget bounds the block whatever
+    the index holds.
+
+    The top doc is always returned, even when it alone exceeds the budget: the
+    best match is the reason retrieval ran. Every later doc must fit whole; the
+    first that does not ends the list (rank order, never skip-and-fill, so a small
+    low-ranked doc cannot jump a bigger better one).
+    """
+    if not scored:
+        return []
+    from llm_router.token_budget import estimate_tokens
+
+    ranked = sorted(scored, key=lambda x: x[1], reverse=True)
+    cutoff = max(floor, relative * ranked[0][1])
+    out: list[OKFConcept] = []
+    used = 0
+    for concept, score in ranked:
+        if score < cutoff:
+            break
+        cost = estimate_tokens(concept.as_context_block())
+        if out and used + cost > budget_tokens:
+            break
+        out.append(concept)
+        used += cost
+    return out
+
+
 def find_relevant(
     prompt: str,
-    limit: int = 3,
+    limit: int | None = None,
     base: "Path | None" = None,
     root: "str | Path | None" = None,
+    budget_tokens: int | None = None,
 ) -> list[OKFConcept]:
     """Find OKF concepts most relevant to prompt via keyword overlap.
+
+    ``limit=None`` (the default) is ranked retrieval: every doc within
+    ``_OKF_RELATIVE_CUTOFF`` of the top score, best first, until ``budget_tokens``
+    (default 1,500, env ``LLM_ROUTER_OKF_BUDGET``) is spent. An explicit
+    ``limit`` keeps the old fixed top-N for callers that ask for a count.
 
     ``root`` is the project the CALLER is working in. Without it, scope falls back
     to ``$LLM_ROUTER_PROJECT_ROOT`` then the cwd, which is right for a hook — one
@@ -786,6 +841,10 @@ def find_relevant(
         if _is_indexed_source(c) and not (anchors & _anchor_tokens(c)):
             continue
         scored.append((c, s))
+    if limit is None:
+        return rank_within_budget(
+            scored, floor,
+            budget_tokens if budget_tokens is not None else _okf_budget_tokens())
     scored.sort(key=lambda x: x[1], reverse=True)
     return [c for c, _s in scored[:limit]]
 
