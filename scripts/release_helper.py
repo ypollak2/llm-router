@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import tomllib
+from datetime import date
 from pathlib import Path
 from typing import Sequence
 
@@ -236,6 +237,10 @@ def perform_release(
         print("   Versions:", ", ".join(f"{name}={value}" for name, value in verified.items()))
 
     print("3. Verifying changelog entry...")
+    if not dry_run:
+        # D-49: fold changelog.d/ fragments into [Unreleased] and cut it to this version.
+        run(["python3", "scripts/changelog_fragments.py", "assemble", "--version", version,
+             "--date", date.today().isoformat()], dry_run=dry_run)
     changelog_entry = extract_changelog_entry(version)
     print(f"   Found changelog section for v{version}")
 
