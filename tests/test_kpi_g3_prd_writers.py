@@ -313,14 +313,43 @@ def test_a_complete_writer_beside_a_no_traffic_writer_is_pass_only_for_the_write
     assert _prd()["verdict"] == "NOT INFORMATIVE"
 
 
-def test_task_id_is_reported_not_scored_until_the_merge_date_is_set():
-    _write_proxy([_proxy(i) for i in range(100)])
+def test_task_id_is_unscored_while_no_row_carries_one():
+    _write_proxy([_proxy(i, task_id=None) for i in range(100)])
     card = _card()
     px = card["kpis"]["G3"]["prd"]["writers"]["proxy"]
-    assert px["state"] == "pass"
-    assert px["fields"]["task_id"] == {"recorded": 100, "missing": 0, "missing_pct": 0.0,
-                                       "scored": False, "no_column": False}
+    assert px["state"] == "pass" and px.get("task_id_from") is None
+    assert px["fields"]["task_id"]["scored"] is False and px["fields"]["task_id"]["missing"] == 100
     assert card["kpis"]["G3"]["prd"]["unscored"] == {"task_id": "not scored until P1.10 merges"}
+
+
+def test_task_id_is_scored_from_the_first_real_row_and_earlier_rows_are_only_reported():
+    """PLAN :532 "from the P1.10 merge date", implemented as the first real task_id in the window."""
+    rows = [_proxy(i, task_id=None) for i in range(60)]           # before P1.10 went live
+    rows += [_proxy(i, task_id=f"t{i}") for i in range(60, 160)]  # after
+    _write_proxy(rows)
+    px = _card()["kpis"]["G3"]["prd"]["writers"]["proxy"]
+    assert px["task_id_from"] == rows[60]["ts"]
+    assert px["state"] == "pass" and px["complete"] == 160        # 60 NULL rows are not scored
+    assert px["fields"]["task_id"]["missing"] == 60 and px["fields"]["task_id"]["scored"] is True
+    rows[100]["task_id"] = None                                   # one post-start gap is scored
+    rows[101]["task_id"] = None
+    _write_proxy(rows)
+    px = _card()["kpis"]["G3"]["prd"]["writers"]["proxy"]
+    assert px["state"] == "fail" and px["complete"] == 158
+
+
+def test_generated_task_ids_never_start_the_scoring():
+    _write_proxy([_proxy(i, task_id=f"gen-{i:012x}") for i in range(120)])
+    px = _card()["kpis"]["G3"]["prd"]["writers"]["proxy"]
+    assert px.get("task_id_from") is None and px["fields"]["task_id"]["recorded"] == 0
+
+
+def test_the_override_replaces_the_automatic_start(monkeypatch):
+    rows = [_proxy(i, task_id=None) for i in range(100)]
+    _write_proxy(rows)
+    monkeypatch.setenv(kpi.G3_TASK_ID_FROM_ENV, str(rows[0]["ts"]))
+    px = _card()["kpis"]["G3"]["prd"]["writers"]["proxy"]
+    assert px["state"] == "fail" and px["task_id_from"] == rows[0]["ts"]   # forced on: all missing
 
 
 def test_direct_and_mcp_rows_are_separate_writers():

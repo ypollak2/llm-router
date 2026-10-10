@@ -96,7 +96,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tool call run in a `call_identity.scope`: a fresh `trace_id` per call, one shared `task_id` for escalations and retries,
   and a `gen-<hex>` stand-in `task_id` when nothing names one (joinable to its trace, but G3 does not count it as recorded). The turn counter is written under a lock; turn-state files older than 7 days are pruned when a session records its first turn. The SDK no longer
   stamps the placeholder `sdk`: `route(..., session_id=, task_id=)` takes the caller's ids, else a per-process `sdk-<hex>`
-  session. `cc-usage-track.py` (version 6) writes both ids. `kpi` G3 keeps `task_id` unscored until `G3_TASK_ID_SCORED_FROM` (set to the merge time at merge) and then scores it only on rows at or after that time.
+  session. `cc-usage-track.py` (version 6) writes both ids. `kpi` G3 scores `task_id` per writer only from the first row in the window that carries a real (non-NULL, non-`gen-`) task_id; earlier rows are reported, not scored, and a writer with none leaves it unscored. This implements PLAN v16 :532, "task_id counts from the P1.10 merge date", without a hard-coded date. Override: `LLM_ROUTER_G3_TASK_ID_FROM` (epoch seconds) or `kpi.G3_TASK_ID_SCORED_FROM`.
   Not covered: `model_tracking.jsonl`, coverage, intercepts and `provenance_meta` rows still carry no session or task id;
   `technical_ops` does not exist in the tree yet; HTTP headers and the MCP `task=` argument are A.3.
 - synthetic replay harness (owner decision D-42; test tooling, no product change): `scripts/synthetic_replay.py --corpus <jsonl>

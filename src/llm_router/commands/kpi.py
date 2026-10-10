@@ -1114,20 +1114,35 @@ def _g3_completeness(all_rows: list[dict], days: int, now: float,
 
 G3_PRD_FIELDS = ("session_id", "task_id", "model", "tier", "reason", "tokens", "cost",
                  "latency", "outcome")
-#: Reported with their coverage, never scored, until ``G3_TASK_ID_SCORED_FROM`` is set.
+#: The note printed while no writer has a recorded task_id yet.
 G3_PRD_UNSCORED = {"task_id": "not scored until P1.10 merges"}
 #: PLAN v16 R8 task 7: "task_id counts from the P1.10 merge date (before that it is reported,
-#: not scored)". Epoch seconds. SET THIS TO THE MERGE TIME IN THE P1.10 MERGE COMMIT; until
-#: then None keeps task_id unscored. Once set, a row is scored on task_id only when its own
-#: timestamp is at or after it, so rows written before the columns existed never fail G3.
+#: not scored)". Implemented automatically, per writer: task_id is scored only on rows at or
+#: after the first row in the window that carries a real (non-NULL, non-generated) task_id,
+#: which is the moment that writer's P1.10 code went live; earlier rows are reported only and
+#: a writer with no such row has task_id unscored. It cannot drift with rebases or a delayed
+#: deploy. Override (tests, or pinning a date): this constant, or the environment variable
+#: ``LLM_ROUTER_G3_TASK_ID_FROM`` (epoch seconds); either one replaces the automatic start.
 G3_TASK_ID_SCORED_FROM: float | None = None
+G3_TASK_ID_FROM_ENV = "LLM_ROUTER_G3_TASK_ID_FROM"
 
 
-def _g3_unscored() -> dict[str, str]:
-    if G3_TASK_ID_SCORED_FROM is None:
+def _task_id_override() -> float | None:
+    raw = os.environ.get(G3_TASK_ID_FROM_ENV, "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return G3_TASK_ID_SCORED_FROM
+
+
+def _g3_unscored(prd_writers: dict | None = None) -> dict[str, str]:
+    scored = [w for w, r in (prd_writers or {}).items() if r.get("task_id_from") is not None]
+    if not scored:
         return dict(G3_PRD_UNSCORED)
-    since = time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime(G3_TASK_ID_SCORED_FROM))
-    return {"task_id": f"scored on rows since {since}, earlier rows reported only"}
+    return {"task_id": "scored per writer from its first recorded task_id (" + ", ".join(scored)
+                       + "); earlier rows reported only"}
 
 
 def _prd_task(value: Any) -> Any:
@@ -1291,7 +1306,10 @@ def _prd_writer_result(records: list[tuple[str | None, dict]], stamps: list[str 
             organic.append(vals)
     n = len(organic)
     always = tuple(f for f in G3_PRD_FIELDS if f != "task_id")
-    task_from = G3_TASK_ID_SCORED_FROM
+    task_from = _task_id_override()
+    if task_from is None:  # automatic start: this writer's first row with a real task_id
+        real = [v["_ts"] for v in organic if v.get("task_id") is not None and v.get("_ts") is not None]
+        task_from = min(real) if real else None
 
     def _complete(v: dict) -> bool:
         if not all(v.get(f) is not None for f in always):
@@ -1314,10 +1332,13 @@ def _prd_writer_result(records: list[tuple[str | None, dict]], stamps: list[str 
         state = "not informative"
     else:
         state = "pass" if complete / n >= G3_PRD_BAR else "fail"
-    return {"state": state, "n": n, "complete": complete,
-            "complete_pct": round(complete / n, 4) if n else None,
-            "informative": n >= G3_PRD_MIN_N, "excluded": dict(sorted(excluded.items())),
-            "fields": fields}
+    out = {"state": state, "n": n, "complete": complete,
+           "complete_pct": round(complete / n, 4) if n else None,
+           "informative": n >= G3_PRD_MIN_N, "excluded": dict(sorted(excluded.items())),
+           "fields": fields}
+    if task_from is not None:  # absent = task_id unscored for this writer
+        out["task_id_from"] = task_from
+    return out
 
 
 def _g3_prd_writers(all_rows: list[dict], days: float, now: float, index,
@@ -1356,7 +1377,7 @@ def _g3_prd_writers(all_rows: list[dict], days: float, now: float, index,
         verdict, why = G3_PRD_PASS, f"every writer with traffic: {', '.join(traffic)}"
     return {"verdict": verdict, "pass": verdict == G3_PRD_PASS, "why": why,
             "min_n": G3_PRD_MIN_N, "bar": G3_PRD_BAR, "fields": list(G3_PRD_FIELDS),
-            "unscored": _g3_unscored(), "excluded_kinds": sorted(excluded_kinds),
+            "unscored": _g3_unscored(writers), "excluded_kinds": sorted(excluded_kinds),
             "writers": writers}
 
 

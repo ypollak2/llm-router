@@ -484,7 +484,8 @@ def test_generated_task_ids_are_not_credited_by_g3(temp_db, monkeypatch):
     assert len(recs["usage"]) == 10 and all(v["task_id"] is None for _s, v in recs["usage"])
 
 
-def test_g3_scores_task_id_only_from_the_merge_date(temp_db, monkeypatch):
+def test_g3_auto_start_per_writer_in_the_reader(temp_db, monkeypatch):
+    """Reader-level: 50 NULL rows then 50 real ones; scored only from the first real one."""
     from llm_router.commands import kpi
 
     class _Idx:
@@ -493,17 +494,14 @@ def test_g3_scores_task_id_only_from_the_merge_date(temp_db, monkeypatch):
                 kind = "organic"
             return _K()
 
-    cut = 1_000_000.0
-    rows = [(f"s{i}", {"session_id": f"s{i}", "task_id": None if i < 50 else "t", "model": "m",
-                       "tier": "t", "reason": "r", "tokens": (1, 1), "cost": 0.0, "latency": 1.0,
-                       "outcome": 1, "_ts": cut - 1000 if i < 50 else cut + 1000}) for i in range(100)]
-    stamps = [None] * 100
-    monkeypatch.setattr(kpi, "G3_TASK_ID_SCORED_FROM", None)
-    off = kpi._prd_writer_result(rows, stamps, _Idx(), frozenset(), set())
-    assert off["state"] == "pass" and off["fields"]["task_id"]["scored"] is False
-    assert off["fields"]["task_id"]["missing"] == 50              # reported, not scored
-    monkeypatch.setattr(kpi, "G3_TASK_ID_SCORED_FROM", cut)
-    on = kpi._prd_writer_result(rows, stamps, _Idx(), frozenset(), set())
-    assert on["state"] == "pass" and on["complete"] == 100        # NULL rows predate the cutoff
-    late = [(s_, {**v, "_ts": cut + 5}) for s_, v in rows]        # same rows, now after it
-    assert kpi._prd_writer_result(late, stamps, _Idx(), frozenset(), set())["state"] == "fail"
+    def _row(i, task):
+        return (f"s{i}", {"session_id": f"s{i}", "task_id": task, "model": "m", "tier": "t",
+                          "reason": "r", "tokens": (1, 1), "cost": 0.0, "latency": 1.0,
+                          "outcome": 1, "_ts": 1000.0 + i})
+
+    rows = [_row(i, None if i < 50 else "t") for i in range(100)]
+    res = kpi._prd_writer_result(rows, [None] * 100, _Idx(), frozenset(), set())
+    assert res.get("task_id_from") == 1050.0 and res["state"] == "pass" and res["complete"] == 100
+    none = kpi._prd_writer_result([_row(i, None) for i in range(100)], [None] * 100, _Idx(),
+                                  frozenset(), set())
+    assert none.get("task_id_from") is None and none["fields"]["task_id"]["scored"] is False
