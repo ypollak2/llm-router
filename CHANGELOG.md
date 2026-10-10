@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - ledger (LEDGER-ERR-1, docs/bugs/LEDGER-ERR-1.md): an `llm` call that reached dispatch and failed (all providers timed out, no healthy candidate, wall-clock timeout, cancel) wrote no row with the caller's session id; in the M0-3 rerun (2026-10-10, n=20 calls, 2 sessions) 3 of 20 left none. It now writes one `usage` row (success=0, $0, attempted model, latency, `error_*` reason code), never a second for the same call. Call counts, the statusline mix, routing_report/routing_health and the dashboard call totals leave these rows out. Owner decision 2026-10-10: the same failed calls, and cache-served calls, also write one `routing_decisions` row (`reason_code` `error_*` / `cache_hit`, caller's session id) so the M0-3 gate query, which reads that table, sees every call; every routing-metric reader excludes them (`provider_classes.SQL_REAL_DECISION`). session-end hook v29. The gate count with this change is not yet re-measured.
+- local timeout demotion (LOCAL-TIMEOUT-1, docs/bugs/LOCAL-TIMEOUT-1.md): an `ollama/*` model that had just timed out
+  led the next route again. In the live ledger (`routing_quality.jsonl`, 2026-10-10 08:34:22Z to 09:30:14Z),
+  `ollama/qwen3-coder:30b` timed out at 120 s on 21 of the 21 code routes that tried it. Ollama's scheduler was stuck
+  behind a nimble:9b load that could not fit, so only models already loaded answered. Now a local model that times out
+  goes to the end of the chain for `LLM_ROUTER_LOCAL_TIMEOUT_COOLDOWN_S` seconds (default 600, `0` = off). It is moved,
+  never dropped, and the cooldown is per process.
 - session context store across resume (CONTEXT-RESUME-1, docs/bugs/CONTEXT-RESUME-1.md): every `claude --resume` is its
   own SessionStart..SessionEnd under the same session id and SessionEnd deleted the store, so resumed sessions never held
   more than one process's events (live 2026-10-10: 4 and 7 lines at archive after 10 resumed turns each, vs 22 for a

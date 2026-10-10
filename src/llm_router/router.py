@@ -1419,6 +1419,57 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     )
 
 
+# LOCAL-TIMEOUT-1: when Ollama's scheduler is stuck on a model it cannot load, every
+# request for a NOT-yet-loaded model waits in its queue while loaded models keep
+# answering. Live 2026-10-10 (routing_quality.jsonl, 08:34:22Z-09:30:14Z):
+# ollama/qwen3-coder:30b led the code chain and timed out at 120 s on 21 of the 21
+# routes that tried it; the loaded qwen3.8 answered right after it. Every route paid
+# the full timeout because nothing remembered the one before. A local model that just
+# timed out now goes to the back of the chain for a cooldown. It is moved, not dropped,
+# and it leads again when the cooldown ends. The state is per process (the MCP server
+# lives as long as the session).
+_LOCAL_TIMEOUT_COOLDOWN_DEFAULT_S = 600.0
+_local_timeout_at: dict[str, float] = {}  # model -> time.monotonic() of its last timeout
+
+
+def _local_timeout_cooldown_s() -> float:
+    """``LLM_ROUTER_LOCAL_TIMEOUT_COOLDOWN_S`` (default 600). 0 turns demotion off."""
+    raw = os.environ.get("LLM_ROUTER_LOCAL_TIMEOUT_COOLDOWN_S", "").strip()
+    try:
+        value = float(raw) if raw else _LOCAL_TIMEOUT_COOLDOWN_DEFAULT_S
+    except ValueError:
+        value = _LOCAL_TIMEOUT_COOLDOWN_DEFAULT_S
+    return max(0.0, value)
+
+
+def _is_timeout_error(exc: BaseException) -> bool:
+    # litellm.Timeout (what the Ollama path raises) is not a TimeoutError subclass.
+    return isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower()
+
+
+def _note_local_timeout(model: str, exc: BaseException) -> None:
+    if model.startswith("ollama/") and _is_timeout_error(exc):
+        _local_timeout_at[model] = time.monotonic()
+
+
+def _demote_timed_out_local(models: list[str], exempt: str | None = None) -> list[str]:
+    """Move local models still inside their timeout cooldown to the end of *models*.
+
+    *exempt* is an explicit routing.yaml pin, which keeps its place (GH#64 exempts it
+    from the quality breaker for the same reason).
+    """
+    cooldown = _local_timeout_cooldown_s()
+    if cooldown <= 0 or not _local_timeout_at:
+        return models
+    now = time.monotonic()
+    cooling = {m for m, t in _local_timeout_at.items() if now - t < cooldown and m != exempt}
+    demoted = [m for m in models if m in cooling]
+    if not demoted or len(demoted) == len(models):
+        return models
+    log.info("Demoting %s for this route: timed out within the last %.0fs", demoted, cooldown)
+    return [m for m in models if m not in cooling] + demoted
+
+
 def _response_headers(exc: BaseException) -> dict[str, str]:
     """HTTP response headers carried by a provider exception, or ``{}``."""
     for attr in ("http_response", "_response"):
@@ -2731,6 +2782,8 @@ async def _dispatch_model_loop(
     policy_skipped: list[tuple[str, str]] = []  # (model, why)
     _policy_active_mode = _policy_mode() if routing_policy is not None else "off"
 
+    _chain_as_built = list(models_to_try)  # LOCAL-TIMEOUT-1: the emergency check compares against this
+    models_to_try = _demote_timed_out_local(models_to_try, exempt=pinned_model)
     for attempt, model in enumerate(models_to_try, start=1):
         provider = provider_from_model(model)
         model_name = model.split("/", 1)[1] if "/" in model else model
@@ -3433,6 +3486,7 @@ async def _dispatch_model_loop(
             )
 
         except Exception as e:
+            _note_local_timeout(model, e)  # LOCAL-TIMEOUT-1
             # A reported reset time ("try again at 06:39", Retry-After: 7200,
             # anthropic-ratelimit-*-reset) benches the provider until then,
             # across processes. Independent of the classification below: the
@@ -3531,7 +3585,8 @@ async def _dispatch_model_loop(
         )
         # M3.0 (D-14 = A): the shared builder no longer strips local, so strip here.
         emergency_chain = _strip_local_for_qa(emergency_chain, task_type)
-        if emergency_chain and emergency_chain != models_to_try:
+        if emergency_chain and emergency_chain != _chain_as_built:
+            emergency_chain = _demote_timed_out_local(emergency_chain)  # LOCAL-TIMEOUT-1
             for attempt, model in enumerate(emergency_chain, start=len(models_to_try) + 1):
                 provider = provider_from_model(model)
                 model_name = model.split("/", 1)[1] if "/" in model else model
