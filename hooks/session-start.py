@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 33
+# llm_router-hook-version: 34
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -1946,6 +1946,22 @@ def _maybe_reindex_okf_bg(cwd: str | None = None) -> None:
         pass                # never block session start
 
 
+def _maybe_refresh_semantic_bg(cwd: str | None = None) -> None:
+    """Index files a previous session edited but never reached the 10-file threshold for.
+
+    PLAN v16 P1.5 task 2. The PostToolUse hook queues edited paths and re-indexes
+    every 10; whatever is left in the queue when a session ends is picked up here,
+    in a detached child, so the first prompt is never delayed. A no-op when nothing
+    is queued.
+    """
+    try:
+        from llm_router.semantic import refresh
+
+        refresh.maybe_spawn(cwd or os.getcwd(), minimum=1)
+    except Exception:
+        pass                # never block session start
+
+
 def _repo_changed_since(root: str, since: float) -> bool:
     """Has any tracked source file been modified since *since*?
 
@@ -2143,6 +2159,7 @@ def _run_background_session_work(cwd: str, session_id: str = "") -> None:
 
     _step(_maybe_refresh_benchmarks_bg)
     _step(_maybe_reindex_okf_bg, cwd)
+    _step(_maybe_refresh_semantic_bg, cwd)
     _step(_warm_edit_model_bg)
     _step(_warm_ollama_bg)
     _step(_drain_judge_queue_bg)

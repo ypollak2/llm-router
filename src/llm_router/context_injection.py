@@ -159,7 +159,7 @@ def _retrieval_query(prompt: str, session_id: str | None,
     return query
 
 
-def inject(prompt: str, *, root: str | None = None, limit: int = 3,
+def inject(prompt: str, *, root: str | None = None, limit: int | None = None,
            session_id: str | None = None, task_type: str | None = None,
            target_provider: str | None = None,
            session_tokens: int = 1200,
@@ -281,7 +281,7 @@ def inject(prompt: str, *, root: str | None = None, limit: int = 3,
 def inject_system_prompt(system_prompt: str | None, objective: str,
                          *, root: str | None = None,
                          session_id: str | None = None,
-                         limit: int = 3,
+                         limit: int | None = None,
                          target_provider: str | None = None,
                          session_tokens: int = 1200,
                          session_root: str | None = None) -> str | None:
