@@ -55,9 +55,26 @@ async def test_floor_served_call_writes_its_real_usage_row(cache_env, caller):
     calls: list[str] = []
     await _real_router(_llm(), _provider(calls), chain=(CODER,))
     usage = _q(cache_env, "SELECT provider, model, success, input_tokens, output_tokens, reason, session_id FROM usage")
-    rd = _q(cache_env, "SELECT final_provider, reason_code FROM routing_decisions")
-    assert rd == [("ollama", "router_unhinted")], rd  # the floor path did serve the rejected answer
-    assert usage == [("ollama", CODER, 1, 7, 3, "router_chain", SID)], usage  # one real row, no safety net
+    rd = _q(cache_env, "SELECT final_provider, reason_code, success FROM routing_decisions")
+    assert rd == [("ollama", "router_unhinted", 0)], rd  # served the rejected answer; not counted as a success
+    # one real row, no safety net; success=0 + degraded_floor so success-filtered readers skip it
+    assert usage == [("ollama", CODER, 0, 7, 3, "degraded_floor", SID)], usage
+
+
+def test_degraded_floor_is_a_real_decision_for_every_predicate(cache_env, caller):
+    """Rule: attribution/mix/M0-3 include it (no predicate excludes it); success=0 keeps it out of success metrics."""
+    import sqlite3
+
+    from llm_router import provider_classes as pc
+    assert not pc.is_non_decision_reason("degraded_floor")
+    assert not pc.is_error_reason("degraded_floor")
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE usage (reason TEXT)")
+    con.execute("CREATE TABLE routing_decisions (reason_code TEXT, final_provider TEXT)")
+    con.execute("INSERT INTO usage VALUES ('degraded_floor')")
+    con.execute("INSERT INTO routing_decisions VALUES ('degraded_floor', 'ollama')")
+    assert con.execute(f"SELECT COUNT(*) FROM usage WHERE {pc.SQL_NOT_ERROR_ROW}").fetchone()[0] == 1
+    assert con.execute(f"SELECT COUNT(*) FROM routing_decisions WHERE {pc.SQL_REAL_DECISION}").fetchone()[0] == 1
 
 
 @pytest.mark.asyncio

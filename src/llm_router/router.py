@@ -2496,7 +2496,8 @@ async def _finalize_successful_route(
             # put every local model at a permanent disadvantage on no evidence
             # — the mirror image of the bug being fixed.
             success=(
-                False if getattr(response, "quality_degraded", False)
+                False if ledger_outcome == "degraded"  # N22: gate-rejected floor answer, not a win
+                else False if getattr(response, "quality_degraded", False)
                 else False if _finish_reason_is_failure(response)
                 else _response_is_usable(getattr(response, "content", "") or "")
             ),
@@ -2801,7 +2802,9 @@ async def _dispatch_model_loop(
         # rest of the chain fails. A local model that timed out in this call, or is still inside its
         # timeout cooldown, would only add its full timeout (120 s each) before that same floor is
         # served: M0-3 rerun3 spent 268 s on two llamacpp/classifier models after the coder answer
-        # failed the syntax gate. Skip it; a remote model still runs.
+        # failed the syntax gate. Skip it; a remote model still runs. The in-call flag deliberately skips
+        # EVERY later ollama model, not just the one that timed out: one local timeout means the local
+        # scheduler is stuck, and the next local model most likely hangs the same way.
         if (
             _best_rejected is not None
             and model.startswith("ollama/")
@@ -3880,7 +3883,7 @@ async def _dispatch_model_loop(
         try:
             await cost.log_usage(
                 _best_rejected, task_type, profile, correlation_id=correlation_id,
-                reason=REASON_ROUTER_CHAIN,
+                success=False, reason=cost.REASON_DEGRADED_FLOOR,
             )
         except Exception as _fu_err:  # noqa: BLE001 -- telemetry never fails the turn
             log.warning("exhaustion-floor usage row failed (non-fatal): %s", _fu_err)
