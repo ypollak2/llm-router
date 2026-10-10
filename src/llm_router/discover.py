@@ -167,9 +167,22 @@ def _configured_classifier_bases() -> frozenset[str]:
 
 
 def _is_non_code_model(bare: str) -> bool:
-    """True for a classifier-only or unnamed-import model, by role then by name prefix."""
+    """True for a classifier-only or unnamed-import model, by role then by name prefix.
+
+    ``LLM_ROUTER_LOCAL_ALLOW_MODELS`` (comma-separated exact names, tag optional) overrides
+    the name rules for a model the user deliberately named, e.g. a coder pulled as
+    ``llamacpp:...``. A debug line records each exclusion.
+    """
+    import os
+
     low = bare.lower()
-    return low.startswith(_NON_CODE_NAME_PREFIXES) or low.split(":", 1)[0] in _configured_classifier_bases()
+    allow = {a.strip().lower() for a in os.environ.get("LLM_ROUTER_LOCAL_ALLOW_MODELS", "").split(",") if a.strip()}
+    if low in allow or (":" not in low and f"{low}:latest" in allow) or low.removesuffix(":latest") in allow:
+        return False
+    if low.startswith(_NON_CODE_NAME_PREFIXES) or low.split(":", 1)[0] in _configured_classifier_bases():
+        log.debug("excluded %s from local code chains (classifier/unnamed-import name rule)", bare)
+        return True
+    return False
 
 
 def _ollama_show_capabilities(base_url: str, name: str) -> list[str] | None:

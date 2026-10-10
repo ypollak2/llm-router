@@ -186,3 +186,25 @@ def test_n19b_classifier_path_unaffected(monkeypatch):
     assert discover.ollama_can_generate("ollama/llmr-classifier-38") is False
     assert lc._model() == "llmr-classifier-38"
     assert lc.DEFAULT_MODEL == "llmr-classifier"
+
+
+def test_n19b_allow_list_overrides_name_rules(monkeypatch):
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    monkeypatch.delenv("OLLAMA_URL", raising=False)
+    monkeypatch.setattr(discover, "_capability_cache", {})
+    mine = "llamacpp:" + "b" * 64
+    assert discover.ollama_can_generate("ollama/" + mine) is False
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_ALLOW_MODELS", f" {mine.upper()} ,llmr-classifier-38")
+    assert discover.ollama_can_generate("ollama/" + mine) is True
+    assert discover.ollama_can_generate("ollama/llmr-classifier-38:latest") is True
+    # exact names only: the base classifier and other variants stay excluded
+    assert discover.ollama_can_generate("ollama/llmr-classifier:latest") is False
+    assert discover.ollama_can_generate("ollama/llmr-classifier-39") is False
+    assert discover.ollama_can_generate("ollama/llamacpp:" + "c" * 64) is False
+
+
+def test_n19b_exclusion_is_logged_at_debug(monkeypatch, capsys):
+    monkeypatch.delenv("LLM_ROUTER_LOCAL_ALLOW_MODELS", raising=False)
+    assert discover._is_non_code_model("llmr-classifier-38") is True
+    out = capsys.readouterr()
+    assert "excluded llmr-classifier-38" in out.out + out.err
