@@ -21,6 +21,7 @@ import secrets
 
 from llm_router.logging import configure_logging, get_logger
 from llm_router import paths
+from llm_router.provider_classes import SQL_NOT_ERROR_ROW
 from llm_router.paths import private_opener
 
 log = get_logger("llm_router.dashboard")
@@ -91,7 +92,7 @@ async def _get_stats() -> dict:
             c = await db.execute(
                 "SELECT COUNT(*), COALESCE(SUM(cost_usd),0), "
                 "COALESCE(SUM(input_tokens+output_tokens),0) "
-                "FROM usage WHERE date(timestamp,'localtime') = date('now','localtime')"
+                "FROM usage WHERE date(timestamp,'localtime') = date('now','localtime') AND " + SQL_NOT_ERROR_ROW
             )
             row = await c.fetchone()
             if row:
@@ -99,7 +100,7 @@ async def _get_stats() -> dict:
 
             c = await db.execute(
                 "SELECT COUNT(*), COALESCE(SUM(cost_usd),0) FROM usage "
-                "WHERE timestamp >= datetime('now','start of month')"
+                "WHERE timestamp >= datetime('now','start of month') AND " + SQL_NOT_ERROR_ROW
             )
             row = await c.fetchone()
             if row:

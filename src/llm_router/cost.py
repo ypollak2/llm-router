@@ -22,6 +22,7 @@ import aiosqlite
 
 from llm_router import pricing as _pricing
 from llm_router.provenance import Measured
+from llm_router.provider_classes import SQL_REAL_DECISION
 # R11: `state_path` comes from `llm_router.paths`, the canonical resolver.
 # The import from `config` here was unused and shadowed by the in-function
 # import below — two names for one concept is the class R11 removed.
@@ -757,6 +758,15 @@ REASON_JUDGE_EVAL = "judge_eval"
 # A call the semantic cache answered: a usage row with 0 tokens and $0 (nothing was billed,
 # nothing saved is claimed), written only so the call is attributable to its session.
 REASON_CACHE_HIT = "cache_hit"
+# A call that reached dispatch and ended in an error instead of an answer. One ``usage`` row
+# (success=0, 0 tokens, $0) per failed call, written by ``log_route_error``; the code names the
+# failure class, never the exception text (which can carry prompt fragments).
+REASON_ERROR_ALL_FAILED = "error_all_models_failed"
+REASON_ERROR_TIMEOUT = "error_timeout"
+REASON_ERROR_CANCELLED = "error_cancelled"
+REASON_ERROR_BUDGET = "error_budget_exceeded"
+REASON_ERROR_DENIED = "error_routing_denied"
+REASON_ERROR_OTHER = "error_exception"
 
 MIGRATE_ADD_TASK_TYPE_RAW = [
     "ALTER TABLE usage ADD COLUMN task_type_raw TEXT",
@@ -1435,6 +1445,96 @@ async def log_usage(
 
 
 
+async def log_route_error(
+    task_type: TaskType | None,
+    profile: RoutingProfile,
+    *,
+    reason: str,
+    correlation_id: str | None,
+    attempted_model: str | None = None,
+    latency_ms: float = 0.0,
+    complexity: str = "moderate",
+) -> bool:
+    """Write the one ``usage`` row of a call that reached dispatch and failed.
+
+    M0-3 rerun (2026-10-10): 3 of 20 ``llm`` calls ended in an MCP tool error and left no
+    ledger row with the caller's session id, because every writer ran only on success.
+    The row is attributed like any other (``log_usage`` resolves the caller's session),
+    names the model that was being attempted, carries ``success=0``, 0 tokens, $0, the
+    elapsed latency and an ``error_*`` reason code.
+
+    Never a second row: if a row already carries this ``correlation_id`` (an answer was
+    written before a late cancel, or this failure was already recorded) nothing is
+    written. Returns True when a row was written. The router wraps the call fail-open.
+    """
+    if correlation_id:
+        db = await _get_db()
+        try:
+            for _t in ("usage", "routing_decisions"):
+                cur = await db.execute(
+                    f"SELECT 1 FROM {_t} WHERE correlation_id = ? LIMIT 1", (correlation_id,)
+                )
+                if await cur.fetchone() is not None:
+                    return False
+        finally:
+            await db.close()
+    model = (attempted_model or "").strip()
+    provider = model.split("/", 1)[0] if "/" in model else (model or "none")
+    await log_usage(
+        LLMResponse(
+            content="",
+            model=model or "none",
+            input_tokens=0,
+            output_tokens=0,
+            cost_usd=0.0,
+            latency_ms=float(latency_ms or 0.0),
+            provider=provider,
+        ),
+        task_type,
+        profile,
+        success=False,
+        correlation_id=correlation_id,
+        reason=reason,
+    )
+    # Owner decision 2026-10-10: the M0-3 gate reads routing_decisions, so the failed call
+    # leaves its one runtime row there too (same session source as a success row). Its
+    # reason_code starts ``error_``, which every routing-metric reader excludes.
+    try:
+        from llm_router import call_identity as _ci
+
+        await log_routing_decision(
+            prompt="",
+            task_type=task_type.value if task_type is not None else None,
+            profile=profile.value,
+            classifier_type="unhinted",
+            classifier_model=None,
+            classifier_confidence=None,
+            classifier_latency_ms=None,
+            complexity=complexity,
+            recommended_model=model or "none",
+            base_model=model or "none",
+            was_downshifted=None,
+            budget_pct_used=None,
+            quality_mode=None,
+            final_model=model or "none",
+            final_provider=provider,
+            success=False,
+            input_tokens=0,
+            output_tokens=0,
+            cost_usd=0.0,
+            latency_ms=float(latency_ms or 0.0),
+            reason_code=reason,
+            correlation_id=correlation_id,
+            session_id=_ci.call_session_id(),
+            tool_use_id=_ci.tool_use_id(),
+        )
+    except Exception as _rd_err:  # noqa: BLE001 — the usage row above already stands
+        import logging
+
+        logging.getLogger("llm_router").debug("error routing_decisions row failed: %s", _rd_err)
+    return True
+
+
 async def log_correction(
     original_tool: str,
     original_model: str,
@@ -1595,11 +1695,16 @@ def routing_production_only(include_synthetic: bool = False, *, prefix: str = "A
     these rows into a number ALSO reports `unknown_provenance_rows`, so the
     denominator is visible rather than assumed.
     """
+    # Owner decision 2026-10-10: error and cache rows are attributable calls, never routing
+    # decisions; they are excluded here whatever `include_synthetic` says (that flag is about
+    # provenance, this is about what the row IS).
+    from llm_router.provider_classes import SQL_REAL_DECISION
     if include_synthetic:
-        return ""
+        return f"{prefix} {SQL_REAL_DECISION}".strip()
     from llm_router.attribution import UNATTRIBUTED_PROVENANCE
     marked = ", ".join(f"'{v}'" for v in sorted(UNATTRIBUTED_PROVENANCE))
-    return f"{prefix} (provenance IS NULL OR provenance NOT IN ({marked}))".strip()
+    return (f"{prefix} (provenance IS NULL OR provenance NOT IN ({marked})) "
+            f"AND {SQL_REAL_DECISION}").strip()
 
 
 ROUTING_UNKNOWN_PROVENANCE_SQL = "provenance IS NULL"
@@ -1827,8 +1932,11 @@ async def rate_routing_decision(decision_id: int | None, good: bool) -> int | No
     db = await _get_db()
     try:
         if decision_id is None:
+            # LEDGER-ERR-1: the latest REAL decision, not a failed or cache-served call's row.
+            from llm_router.provider_classes import real_decision_sql_async
             cursor = await db.execute(
-                "SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1"
+                "SELECT id FROM routing_decisions WHERE "
+                + await real_decision_sql_async(db) + " ORDER BY id DESC LIMIT 1"
             )
             row = await cursor.fetchone()
             if not row:
@@ -2090,8 +2198,12 @@ async def log_routing_decision(
         task_type_raw: The label behind a NULL ``task_type`` (P0.8). A caller that
             did not measure a classifier field passes None for it: NULL, never 0.0.
     """
-    # Validate inputs before database insert
-    _validate_routing_insert(final_model, final_provider, cost_usd)
+    # Validate inputs before database insert. A cache-served or failed call (LEDGER-ERR-1)
+    # names no real provider ("cache", or "none" when nothing was attempted); its reason_code
+    # is the whole reason it may skip the provider allowlist.
+    _non_call = bool(reason_code) and (reason_code == REASON_CACHE_HIT or reason_code.startswith("error_"))
+    if not _non_call:
+        _validate_routing_insert(final_model, final_provider, cost_usd)
 
     # THIS is the path that put 28,536 synthetic rows into a user's real database and
     # made the dashboard report a 69% gpt-4o-mini share the router never chose.
@@ -2190,7 +2302,7 @@ async def log_routing_decision(
         # and an out-of-band drain (`llm-router judge drain`, also spawned
         # detached from session start) does the actual grading with an
         # independent judge model. See llm_router.judge module docstring.
-        if success and response:
+        if success and response and not _non_call:
             try:
                 from llm_router.judge import enqueue_for_grading
                 # Get the ID of the row we just inserted
@@ -3432,7 +3544,8 @@ async def get_classifier_overhead(period: str = "today") -> dict:
         "all": "",
     }
     where = where_map.get(period, "")
-    
+    where = f"{where} {'AND' if where else 'WHERE'} {SQL_REAL_DECISION}"
+
     db = await _get_db()
     try:
         cursor = await db.execute(
@@ -3961,13 +4074,14 @@ async def get_model_latency_stats(window_days: int = 7) -> dict[str, dict]:
     db = await _get_db()
     try:
         cursor = await db.execute(
-            """
+            f"""
             SELECT final_model, latency_ms
             FROM routing_decisions
             WHERE timestamp >= datetime('now', ?)
               AND final_model IS NOT NULL
               AND success = 1
               AND latency_ms IS NOT NULL
+              AND {SQL_REAL_DECISION}
             ORDER BY final_model, latency_ms
             """,
             (f"-{window_days} days",),
@@ -4226,13 +4340,14 @@ async def get_model_failure_rates(window_days: int = 30) -> dict[str, float]:
     db = await _get_db()
     try:
         cursor = await db.execute(
-            """
+            f"""
             SELECT final_model,
                    COUNT(*) AS total,
                    SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS failures
             FROM routing_decisions
             WHERE timestamp >= datetime('now', ?)
               AND final_model IS NOT NULL
+              AND {SQL_REAL_DECISION}
             GROUP BY final_model
             HAVING total >= 5
             """,
@@ -4271,7 +4386,7 @@ async def get_model_acceptance_scores(window_days: int = 30) -> dict[str, float]
     db = await _get_db()
     try:
         cursor = await db.execute(
-            """
+            f"""
             SELECT final_model,
                    COUNT(*) AS rated,
                    SUM(CASE WHEN was_good = 1 THEN 1 ELSE 0 END) AS good
@@ -4279,6 +4394,7 @@ async def get_model_acceptance_scores(window_days: int = 30) -> dict[str, float]
             WHERE timestamp >= datetime('now', ?)
               AND final_model IS NOT NULL
               AND was_good IS NOT NULL
+              AND {SQL_REAL_DECISION}
             GROUP BY final_model
             HAVING rated >= 3
             """,

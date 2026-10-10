@@ -37,6 +37,8 @@ Read-only: nothing here writes a settings file or the ledger.
 
 from __future__ import annotations
 
+from llm_router.provider_classes import real_decision_sql
+
 import ipaddress
 import json
 import os
@@ -103,7 +105,7 @@ def _decision_turns(since: float, until: float) -> int | None:
             window = ("timestamp >= datetime(?, 'unixepoch') AND timestamp <= datetime(?, 'unixepoch')")
             try:  # backfilled sidecar rows are not turns; an older schema has no reason_code
                 q = (f"SELECT COUNT(*) FROM routing_decisions WHERE {window} "
-                     "AND COALESCE(reason_code,'') != 'sidecar_backfill'")
+                     "AND COALESCE(reason_code,'') != 'sidecar_backfill' AND " + real_decision_sql(conn))
                 return int(conn.execute(q, (since, until)).fetchone()[0])
             except sqlite3.OperationalError:
                 return int(conn.execute(f"SELECT COUNT(*) FROM routing_decisions WHERE {window}",
