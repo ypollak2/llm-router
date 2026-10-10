@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 27
+# llm_router-hook-version: 28
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -2513,7 +2513,7 @@ def main() -> None:
 
     # This script is registered on Stop (fires after EVERY turn: per-turn
     # summary) and on SessionEnd (fires once). Only SessionEnd archives
-    # (deletes) the session's durable JSONL event store; archiving on Stop
+    # (moves to the archive, restored on `--resume`: CONTEXT-RESUME-1) the session's durable JSONL event store; archiving on Stop
     # wiped the context after turn 1 (P0.1, docs/BUGS.md). Resolution order:
     # the real session_id from this hook's stdin payload, else env vars, else
     # the pointer file written by session-start.py. Fail-open.
