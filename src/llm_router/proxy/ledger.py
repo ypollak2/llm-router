@@ -324,8 +324,10 @@ def _price_tokens(model: str, *, input_tokens: int = 0, output_tokens: int = 0,
     and :func:`_net_avoided`'s counterfactual pricing cannot drift apart."""
     from llm_router import pricing
 
-    rates = pricing.rates_per_m(model)
-    rate_1h = pricing.cache_write_1h_rate(model)
+    # Prompt length picks the rate card of a prompt-length-priced model (Haiku 5.5).
+    prompt = input_tokens + cache_read_input_tokens + cache_creation_5m + cache_creation_1h
+    rates = pricing.rates_per_m(model, prompt_tokens=prompt)
+    rate_1h = pricing.cache_write_1h_rate(model, prompt_tokens=prompt)
     if rates is None or rate_1h is None:
         return None
     return (input_tokens * rates["input"] + output_tokens * rates["output"]

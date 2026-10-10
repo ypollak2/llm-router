@@ -140,6 +140,22 @@ class Price:
     cache_write: float | None = None
     verified: bool = True
     note: str = ""
+    # Prompt-length pricing (Claude Haiku 5.5): a request whose prompt, counted
+    # as input + cache-read + cache-write tokens, is OVER ``long_prompt_over``
+    # tokens pays ``long_input`` / ``long_output``, with cache rates derived from
+    # ``long_input`` by the standard ratios. ``None``: one rate at any length.
+    long_prompt_over: int | None = None
+    long_input: float | None = None
+    long_output: float | None = None
+
+    def at_prompt(self, prompt_tokens: int | None) -> "Price":
+        """This price, or its long-prompt rates when ``prompt_tokens`` is over the
+        threshold. ``None`` tokens (unknown length) keep the base rates."""
+        if (self.long_prompt_over is None or prompt_tokens is None
+                or prompt_tokens <= self.long_prompt_over):
+            return self
+        return Price(self.model_id, self.long_input, self.long_output,
+                     verified=self.verified, note=self.note)
 
     @property
     def cache_read_rate(self) -> float:
@@ -198,6 +214,15 @@ _ANTHROPIC: dict[str, Price] = {
     "claude-sonnet-4-5": Price("claude-sonnet-4-5", 3.00, 15.00),
     # $1.00/$5.00. The 0.80, 0.25 and 0.25 values this replaces were all wrong.
     "claude-haiku-4-5": Price("claude-haiku-4-5", 1.00, 5.00),
+    # Haiku 5.5 is priced by prompt length (pricing page, "Model pricing" and
+    # "Long context pricing", checked 2026-10-10): $0.10/$0.50 for prompts up to
+    # 100,000 tokens, $0.50/$2.50 over, where the prompt "counts all of its input
+    # tokens, including cache reads and cache writes". Cache rates are the
+    # standard ratios of whichever input rate applies ($0.01 / $0.125 / $0.20
+    # up to 100K, $0.05 / $0.625 / $1 over). Its absence left every Haiku 5.5
+    # proxy row unpriced (docs/BUGS.md HAIKU55-1).
+    "claude-haiku-5-5": Price("claude-haiku-5-5", 0.10, 0.50, long_prompt_over=100_000,
+                              long_input=0.50, long_output=2.50),
     "claude-sonnet-5-5": Price("claude-sonnet-5-5", 2.00, 10.00),
     # Fable 5.1: same $10/$50 as Fable 5, but "Cache hits and refreshes on
     # Claude Fable 5.1 ... are priced at 0.025x the base input price" (pricing
@@ -394,8 +419,13 @@ def resolve(model: str) -> str | None:
     return None
 
 
-def price_for(model: str, *, as_of: _dt.date | None = None) -> Price | None:
+def price_for(model: str, *, as_of: _dt.date | None = None,
+              prompt_tokens: int | None = None) -> Price | None:
     """:class:`Price` for ``model``, or ``None`` when unknown.
+
+    ``prompt_tokens`` (input + cache-read + cache-write tokens of one request)
+    selects a prompt-length-priced model's long-prompt rates (:meth:`Price.at_prompt`);
+    omitted, the base rates are returned.
 
     ``as_of`` is accepted for callers that price historical rows against a
     fixed date. No rate in this table currently varies by date — the one that
@@ -407,7 +437,7 @@ def price_for(model: str, *, as_of: _dt.date | None = None) -> Price | None:
     key = resolve(model)
     if key is None:
         return None
-    return _PRICES[key]
+    return _PRICES[key].at_prompt(prompt_tokens)
 
 
 def input_rate(model: str, *, as_of: _dt.date | None = None) -> float | None:
@@ -430,9 +460,10 @@ def cache_write_rate(model: str, *, as_of: _dt.date | None = None) -> float | No
     return None if p is None else p.cache_write_rate
 
 
-def cache_write_1h_rate(model: str, *, as_of: _dt.date | None = None) -> float | None:
+def cache_write_1h_rate(model: str, *, as_of: _dt.date | None = None,
+                        prompt_tokens: int | None = None) -> float | None:
     """Per-million rate for a 1-hour-TTL cache write (2x input), or ``None``."""
-    p = price_for(model, as_of=as_of)
+    p = price_for(model, as_of=as_of, prompt_tokens=prompt_tokens)
     return None if p is None else p.input * _CACHE_WRITE_1H_RATIO
 
 
@@ -451,7 +482,8 @@ def cost_usd(
     caller that cannot price a call must say so. Coercing to zero is how an
     unpriced model silently becomes free and inflates reported savings.
     """
-    p = price_for(model, as_of=as_of)
+    p = price_for(model, as_of=as_of,
+                  prompt_tokens=input_tokens + cache_read_tokens + cache_write_tokens)
     if p is None:
         return None
     return (
@@ -462,15 +494,16 @@ def cost_usd(
     )
 
 
-def rates_per_m(model: str, *, as_of: _dt.date | None = None) -> dict[str, float] | None:
+def rates_per_m(model: str, *, as_of: _dt.date | None = None,
+                prompt_tokens: int | None = None) -> dict[str, float] | None:
     """The four per-million rates as a plain dict, or ``None`` when unknown.
 
     Exists so the tables this module replaced can be *derived* rather than
     retyped. Callers that already speak
     ``{"input", "output", "cache_read", "cache_write"}`` keep their shape and
-    lose their literals.
+    lose their literals. ``prompt_tokens``: see :func:`price_for`.
     """
-    p = price_for(model, as_of=as_of)
+    p = price_for(model, as_of=as_of, prompt_tokens=prompt_tokens)
     if p is None:
         return None
     return {
