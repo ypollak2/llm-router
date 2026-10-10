@@ -13,7 +13,12 @@ import pytest
 
 from llm_router import router
 from llm_router.types import LLMResponse
-from tests.test_ledger_every_exit import SID, _llm, _q, _real_router, cache_env, caller  # noqa: F401
+from tests.test_ledger_every_exit import SID, _llm, _q, _real_router
+from tests.test_ledger_every_exit import cache_env as _cache_env
+from tests.test_ledger_every_exit import caller as _caller
+
+cache_env = _cache_env
+caller = _caller
 
 CODER = "ollama/qwen3-coder:30b"
 SLOW_A = "ollama/llamacpp:aaaa"
