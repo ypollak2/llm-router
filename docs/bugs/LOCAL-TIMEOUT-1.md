@@ -43,3 +43,12 @@ status: fixed in `fix/local-coder-timeout`
   parsed safely. On the base commit all 14 tests error (the helpers do not exist). Removing each change on its own
   fails at least one behaviour test: the primary demotion (3 fail), the emergency demotion (1), and the
   pre-demotion comparison (1).
+- **Follow-up (#400 review, `fix/review-followups-1010`).** The BUDGET emergency (backup) chain was reordered by
+  `_demote_timed_out_local`, but its `except` never called `_note_local_timeout`. So a local timeout there did not
+  start or refresh the cooldown, and the next route led with the same model again. The emergency loop now notes the
+  timeout first, the same way the primary loop does. The helper's own filter still applies: `ollama/*` and a timeout
+  type only. `asyncio.CancelledError` is a `BaseException` and never reaches the `except Exception`. A 4xx
+  (`litellm.BadRequestError`) is not a timeout. Tests in `tests/test_local_timeout_demotion.py`:
+  `test_a_timeout_in_the_emergency_chain_starts_the_cooldown` and `..._refreshes_the_cooldown` fail on
+  `origin/main` (a39731a7). `test_emergency_chain_non_timeout_errors_do_not_demote` and
+  `test_emergency_chain_cancellation_does_not_demote` are guards and pass on both.

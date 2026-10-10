@@ -3726,6 +3726,7 @@ async def _dispatch_model_loop(
                     )
 
                 except Exception as e:
+                    _note_local_timeout(model, e)  # LOCAL-TIMEOUT-1: same as the primary loop
                     chain_attempts.append(model)
                     log.warning(
                         "Emergency fallback model %s failed: %s", model, e

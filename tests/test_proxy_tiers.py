@@ -1224,6 +1224,31 @@ async def test_haiku_5_5_is_forwarded_unchanged_with_a_tier_label_and_a_cost(tmp
     assert row["anthropic_cost_usd"] == pytest.approx(usd, abs=1e-6)  # the row rounds to 6 dp
 
 
+@pytest.mark.parametrize("model", ["claude-haiku-5-5-20260901", "claude-haiku-5-5[1m]"])
+async def test_suffixed_haiku_5_5_rows_are_priced_on_the_tiered_card(tmp_path, model):
+    """#396 review: a dated or "[1m]" Haiku 5.5 id got the tier label but a null cost
+    (pricing.resolve returned None), which G3 counts as incomplete. Over 100K here."""
+    up = Upstream(responses=[(200, _sse(model, usage=_haiku55_usage(150_000)))])
+    app = _app(tmp_path, up)
+    assert (await _post(app, _req(model))).status_code == 200
+    assert json.loads(up.requests[0].content)["model"] == model
+    row = _rows(tmp_path)[-1]
+    assert (row["served_model"], row["tier"], row["tier_reason"]) == (model, "haiku", "unknown_model")
+    assert row["anthropic_cost_usd"] == pytest.approx(
+        (5 * 0.50 + 150_000 * 0.05 + 1_000 * 1.00 + 40 * 2.50) / 1e6, abs=1e-6)
+
+
+async def test_a_dated_tier_model_id_belongs_to_its_tier_like_its_1m_spelling(policy):
+    """#396 review side effect: tiers._canonical uses pricing.resolve, so a dated id of a
+    configured tier model now gets that tier, as its "[1m]" spelling already did, and is
+    tier-routed instead of forwarded as unknown_model. An unconfigured model stays a label."""
+    for model in (f"{OPUS}-20260901", f"{OPUS}[1m]"):
+        assert policy.tier_of(model) is policy.tier_of(OPUS)
+        d = await policy.decide(_first(model), SID, Stickiness(), classify=_classify("moderate"))
+        assert (d.reason, d.tier) == (pt.REASON_FIRST_CALL, policy.tier_of(OPUS).name)
+    assert policy.tier_of(f"{HAIKU55}-20260901") is None
+
+
 async def test_unknown_model_label_is_a_word_match_only(policy):
     sticky = Stickiness()
     for model, label in [(HAIKU55, "haiku"), ("claude-sonnet-6", "sonnet"), ("claude-3-opus", "opus"),
