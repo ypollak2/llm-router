@@ -207,32 +207,122 @@ def test_p16d_engine_has_no_async_or_llm_entry_points():
 
 # ── secrets ──────────────────────────────────────────────────────────────────
 
-SECRETS = (
-    ["sk-ant-api03-" + "Ab1_-" * 6 + "xyz%02d" % i for i in range(5)]
-    + ["sk-proj-" + "Qw3rTy" * 5 + "%02d" % i for i in range(5)]
-    + ["AKIA" + "ABCDEFGH12345%03d" % i for i in range(5)]
-    + ["AIza" + "SyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWY%02d" % i for i in range(5)]
-)
+_RNG = random.Random(42)
+_B62 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 
-def test_p16e_20_of_20_synthetic_secrets_local_only_and_refused_without_local():
-    assert len(SECRETS) == 20
+def _r(n, alpha=_B62):
+    return "".join(_RNG.choice(alpha) for _ in range(n))
+
+
+def _secrets() -> list[str]:
+    out = []
+    out += ["sk-ant-api03-" + _r(40, _B62 + "_-") for _ in range(4)]
+    out += ["sk-proj-" + _r(40, _B62 + "_-") for _ in range(4)]
+    out += ["sk-" + _r(48) for _ in range(2)]
+    out += ["AKIA" + _r(16, "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") for _ in range(3)]
+    out += ["AIza" + _r(35, _B62 + "_-") for _ in range(3)]
+    out += ["ghp_" + _r(36) for _ in range(3)] + ["github_pat_" + _r(60, _B62 + "_")]
+    out += ["xoxb-" + _r(12, "0123456789") + "-" + _r(24) for _ in range(5)]
+    out += ["-----BEGIN RSA PRIVATE KEY-----\n" + _r(64) + "\n-----END RSA PRIVATE KEY-----",
+            "-----BEGIN PRIVATE KEY-----\n" + _r(64), "-----BEGIN OPENSSH PRIVATE KEY-----\n" + _r(64)]
+    out += ["eyJ" + _r(20) + "." + _r(30) + "." + _r(30) for _ in range(3)]
+    out += ["postgres://app:" + _r(16) + "@db.internal:5432/prod" for _ in range(3)]
+    out += ["Authorization: Bearer " + _r(24) + "9" + _r(20) for _ in range(3)]
+    out += ['api_key = "' + _r(32) + '"', "SECRET_TOKEN: '" + _r(30) + "'", 'password = "' + _r(24) + '"']
+    return out
+
+
+SECRETS = _secrets()
+
+# Ordinary prose and code a coding assistant sees. None may be flagged (0 hits required).
+_NAMED_NEGATIVES = [
+    "explain Bearer authentication", "secret: sauce", "secret=None", "password = hash(raw)", "pip install sk-learn",
+    "send a request with an Authorization: header", "what is a bearer token", "sk-learn is not a package",
+    "password: str", "api_key: Optional[str] = None", "token = tokenizer.encode(text)", "AUTH_TOKEN = os.environ['X']",
+    "set password=<your password>", "secret = settings.SECRET", "def check_password(user, password):",
+    "-----BEGIN-----", "git commit sha 3f5d96eee34ed72b90f62ab462b8f452b6ca2d465c0beb6158dcb94b4a85b7f4",
+    "uuid 550e8400-e29b-41d4-a716-446655440000", "postgres://user:pass@localhost/db", "redis://localhost:6379",
+    "https://example.com/path?token=abc", "skip this: sk-", "AKIA is the AWS key prefix", "eyJ is base64 for {\"",
+    "xoxb tokens come from Slack", "ghp_ prefix means personal access token",
+]
+_TEMPLATES = ["explain %s", "write a function for %s", "fix the bug in %s", "why does %s fail", "refactor %s",
+              "add tests for %s", "review %s", "document %s"]
+_TOPICS = ["password hashing with bcrypt", "the Authorization header flow", "OAuth bearer token refresh",
+           "secret rotation policy", "API key management in a vault", "JWT expiry handling",
+           "the token bucket rate limiter", "SSH key generation", "a login form", "secrets scanning in CI",
+           "reading SECRET_KEY from settings", "the api_key parameter of the client", "private key storage",
+           "sk-learn pipeline", "AWS IAM roles", "session cookies", "CSRF tokens", "the auth middleware",
+           "a Bearer scheme parser", "hash(password + salt)", "token = None default", "env var API_KEY lookup",
+           "gh CLI authentication", "slack webhook retry", "database connection strings"]
+NEGATIVES = _NAMED_NEGATIVES + [t % topic for t in _TEMPLATES for topic in _TOPICS]
+
+
+def test_negative_set_is_large_enough_and_distinct():
+    assert len(NEGATIVES) >= 200 and len(set(NEGATIVES)) == len(NEGATIVES)
+
+
+def test_p16e_zero_false_positives_on_ordinary_strings():
+    hits = [t for t in NEGATIVES if engine._secret_names(t)]
+    assert hits == [], hits
+    assert not any(engine.decide(t, door="hook").local_only for t in NEGATIVES)
+
+
+def test_p16e_recall_40_of_40_synthetic_secrets():
+    assert len(SECRETS) == 40 and len(set(SECRETS)) == 40
+    missed = [s[:12] for s in SECRETS if not engine._secret_names("please debug this call, my key is %s thanks" % s)]
+    assert missed == []
+
+
+def test_p16e_secrets_local_only_and_refused_at_a_door_shaped_call():
     for s in SECRETS:
-        d = engine.decide("please debug this call, my key is %s thanks" % s, door="mcp")
+        text = "please debug this call, my key is %s thanks" % s
+        d = engine.decide(text, door="mcp")
         assert d.local_only and d.local_eligible
         assert s not in d.reason and "secret:" in d.reason, "reason names the pattern, never the secret"
         assert engine.secret_enforcement(d, "mcp", local_model_healthy=True) == "local_only"
-        with pytest.raises(engine.SecretLocalOnlyError, match="not sent"):
-            engine.require_local_or_refuse(d, "gateway", local_model_healthy=False)
+        assert engine.guard(text, door="mcp", local_model_healthy=True).local_only
+        for door in ("mcp", "gateway", "agent_route", "gemini_cli", "router", "hook"):
+            with pytest.raises(engine.SecretLocalOnlyError, match="not sent"):
+                engine.guard(text, door=door, local_model_healthy=False)
         # proxy only logs (D-28: a 400 would break a live Claude Code turn)
-        assert engine.secret_enforcement(d, "proxy", local_model_healthy=False) == "log_only"
-        engine.require_local_or_refuse(d, "proxy", local_model_healthy=False)
+        assert engine.guard(text, door="proxy", local_model_healthy=False).local_only
 
 
 def test_p16e_clean_prompts_are_not_local_only():
     ds = [engine.decide(p, door="hook") for p in synth(200, seed=2)]
     assert not any(d.local_only for d in ds)
     assert engine.secret_enforcement(ds[0], "mcp", local_model_healthy=False) == "none"
+    assert engine.guard("explain monads", door="gateway", local_model_healthy=False).local_only is False
+
+
+def test_sqlite_cache_is_0600_and_prunes_old_rows(tmp_path, monkeypatch):
+    import os
+    import sqlite3
+    monkeypatch.setenv("LLM_ROUTER_DECIDE_CACHE", "sqlite")
+    engine.decide("implement a retry decorator", door="router")
+    f = tmp_path / "decide_cache.sqlite"
+    assert (os.stat(f).st_mode & 0o777) == 0o600
+    c = sqlite3.connect(f)
+    c.execute("UPDATE decisions SET ts = ts - ?", (engine._TTL_S + 10,))
+    c.commit()
+    c.close()
+    engine.clear_cache(persistent=False)
+    assert engine.decide("implement a retry decorator", door="router").layer != "cache", "expired row ignored"
+    engine._db.clear()
+    c = sqlite3.connect(f)
+    c.execute("UPDATE decisions SET ts = ts - ?", (engine._TTL_S + 10,))
+    c.commit()
+    c.close()
+    engine._conn()  # open prunes
+    assert sqlite3.connect(f).execute("SELECT count(*) FROM decisions").fetchone()[0] == 0
+
+
+def test_decision_equality_ignores_layer_and_ms():
+    p = "refactor the router module"
+    miss = engine.decide(p, door="mcp")
+    hit = engine.decide(p, door="hook")
+    assert (miss.layer, hit.layer) != ("cache", "L1") and hit.layer == "cache" and miss == hit
 
 
 # ── abstain / L2 schema ──────────────────────────────────────────────────────

@@ -26,6 +26,7 @@ import json
 import logging
 import math
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -37,7 +38,6 @@ from typing import Literal
 from llm_router import ml_lexical, prompt_key
 from llm_router.classify import GATEWAY_POLICY, _score_categories, classify_signals
 from llm_router.paths import state_path
-from llm_router.secret_scrubber import SECRET_PATTERNS
 
 log = logging.getLogger("llm_router.engine")
 
@@ -77,7 +77,7 @@ class Decision:
     confidence: float | None
     calibrated: bool
     abstain: bool
-    layer: str
+    layer: str = field(compare=False)  # "cache" on a hit; origin layer is not part of the decision
     reason: str
     policy_version: str
     engine_version: str
@@ -175,6 +175,8 @@ def _apply_calibration(layer: str, raw: float, table: dict) -> tuple[float, bool
 # ── cache ────────────────────────────────────────────────────────────────────
 
 _LRU_MAX = 4096
+_TTL_S = 30 * 86400.0  # persistent rows older than this are ignored and pruned
+_MAX_ROWS = 50_000
 _lru: "OrderedDict[str, Decision]" = OrderedDict()
 _lru_lock = threading.Lock()
 _db: dict[str, sqlite3.Connection | None] = {}
@@ -193,16 +195,25 @@ def _conn() -> sqlite3.Connection | None:
         if path not in _db:
             try:
                 Path(path).parent.mkdir(parents=True, exist_ok=True)
+                os.close(os.open(path, os.O_CREAT | os.O_RDWR, 0o600))  # 0600 before sqlite makes it
                 c = sqlite3.connect(path, timeout=0.2, check_same_thread=False)
                 c.execute("PRAGMA journal_mode=WAL")
                 c.execute("PRAGMA synchronous=NORMAL")
                 c.execute("CREATE TABLE IF NOT EXISTS decisions (k TEXT PRIMARY KEY, v TEXT NOT NULL, ts REAL NOT NULL)")
+                _prune(c)
                 c.commit()
                 _db[path] = c
             except (sqlite3.Error, OSError) as exc:
                 log.warning("engine: decide cache disabled: %s", exc)
                 _db[path] = None
         return _db[path]
+
+
+def _prune(c: sqlite3.Connection) -> None:
+    """Drop rows past the TTL, then the oldest beyond ``_MAX_ROWS``. Run on open."""
+    c.execute("DELETE FROM decisions WHERE ts < ?", (time.time() - _TTL_S,))
+    c.execute("DELETE FROM decisions WHERE k IN (SELECT k FROM decisions ORDER BY ts DESC LIMIT -1 OFFSET ?)",
+              (_MAX_ROWS,))
 
 
 def clear_cache(*, persistent: bool = True) -> None:
@@ -240,7 +251,7 @@ def _cache_get(key: str, mode: str) -> Decision | None:
         return None
     try:
         with _db_lock:
-            row = c.execute("SELECT v FROM decisions WHERE k=?", (key,)).fetchone()
+            row = c.execute("SELECT v FROM decisions WHERE k=? AND ts >= ?", (key, time.time() - _TTL_S)).fetchone()
         d = Decision(**json.loads(row[0])) if row else None
     except (sqlite3.Error, ValueError, TypeError):
         return None
@@ -286,8 +297,49 @@ def _reason(s: str) -> str:
     return s if len(s) <= 120 else s[:119] + "…"
 
 
+#: High-precision secret shapes only (PLAN task 4, FP first). The scrubber's
+#: ``SECRET_PATTERNS`` redacts liberally ("password=x", "Bearer auth") and over-fires
+#: on coding prompts; blocking or localising a turn needs a stricter test.
+_SECRET_SHAPES = {
+    "anthropic_key": re.compile(r"\bsk-ant-[A-Za-z0-9_-]{32,}"),
+    "openai_key": re.compile(r"\bsk-(?:proj-|svcacct-)?(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}"),
+    "google_key": re.compile(r"\bAIza[0-9A-Za-z_-]{35,}"),
+    "aws_key_id": re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+    "github_token": re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,})"),
+    "slack_token": re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}"),
+    "private_key": re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    "jwt": re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+    "bearer_token": re.compile(r"\bBearer\s+(?=[A-Za-z0-9._~+/-]*\d)[A-Za-z0-9._~+/-]{30,}=*"),
+    "db_url_password": re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s:/@]+:(?![$<{])[^\s@/]{8,}@[\w.-]+", re.I),
+}
+#: ``api_key = "<literal>"`` style assignment of a quoted, high-entropy literal.
+_ASSIGN = re.compile(
+    r"\b(?:api[_-]?key|secret|token|passw(?:or)?d|auth)[\w-]*[\"']?\s*[:=]\s*[\"']([A-Za-z0-9+/=_-]{20,})[\"']", re.I)
+
+
+def _entropy(s: str) -> float:
+    n = len(s)
+    return -sum(c / n * math.log2(c / n) for c in (s.count(ch) for ch in set(s)))
+
+
 def _secret_names(text: str) -> list[str]:
-    return [name for name, pat in SECRET_PATTERNS.items() if pat.search(text)]
+    names = [name for name, pat in _SECRET_SHAPES.items() if pat.search(text)]
+    for m in _ASSIGN.finditer(text):
+        lit = m.group(1)
+        if any(c.isdigit() for c in lit) and any(c.isalpha() for c in lit) and _entropy(lit) >= 3.3:
+            names.append("assigned_literal")
+            break
+    return names
+
+
+def guard(text: str, *, door: str, local_model_healthy: bool, ctx_digest: str = "",
+          session_id: str | None = None, task_id: str | None = None) -> Decision:
+    """``decide`` plus D-28 enforcement, shaped like a door's call: returns the
+    Decision, or raises ``SecretLocalOnlyError`` (non-proxy doors, secret, no
+    healthy local model). The proxy never raises (log-only)."""
+    d = decide(text, ctx_digest=ctx_digest, door=door, session_id=session_id, task_id=task_id)
+    require_local_or_refuse(d, door, local_model_healthy=local_model_healthy)
+    return d
 
 
 def _lexical() -> ml_lexical.LexicalModel | None:

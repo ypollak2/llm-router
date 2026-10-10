@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `engine_lexical.json`, built by `scripts/build_engine_lexical.py`), abstain-to-safer-tier, secret `local_only`, and an
   LRU + `decide_cache.sqlite` cache. No LLM and no network on the sync path. Nothing calls it yet; the 7 call sites are
   separate PRs. Tests (`tests/test_engine_core.py`) use synthetic prompts and prove mechanics only, not accuracy.
+  Secrets use high-precision shapes only (0/200+ ordinary strings flagged); wiring PRs must ship abstain off / log-only until
+  `TAU` and `ENGINE_POLICY` are fitted and pre-registered on GT tune. The decide cache is 0600 with a 30-day TTL.
   New env vars: `LLM_ROUTER_DECIDE_CACHE`, `LLM_ROUTER_ENGINE_LEXICAL`, `LLM_ROUTER_ENGINE_CALIBRATION`.
 
 ### Fixed
