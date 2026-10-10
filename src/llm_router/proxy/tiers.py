@@ -510,6 +510,21 @@ def haiku_block_reason(body: dict, *, fold_system: bool = False, model: str | No
 
 
 def _has_haiku55_rejected_params(body: dict) -> bool:
+    """Per the migration guide: ``temperature`` != 1, ``top_p`` != 0.99, any ``top_k``, both
+    ``temperature`` and ``top_p``, an assistant prefill, ``thinking`` other than adaptive
+    (``enabled`` is rewritten to adaptive, so it passes; ``disabled`` 400s at effort xhigh/max;
+    ``between_tools`` is Sonnet 5.5 only), and ``max_tokens`` over 128K."""
+    if body.get("temperature") is not None and body.get("top_p") is not None:
+        return True
+    th = body.get("thinking")
+    ttype = th.get("type") if isinstance(th, dict) else None
+    if ttype not in (None, "adaptive", "enabled"):
+        oc = body.get("output_config")
+        effort = oc.get("effort") if isinstance(oc, dict) else None
+        if ttype != "disabled" or effort in ("xhigh", "max"):
+            return True
+    if isinstance(body.get("max_tokens"), int) and body["max_tokens"] > HAIKU55_MAX_OUTPUT_TOKENS:
+        return True
     if body.get("temperature") not in (None, 1):
         return True
     if body.get("top_p") not in (None, 0.99):
@@ -1091,9 +1106,7 @@ class ClaudeTierPolicy:
         with phases("haiku_checks"):
             needs_rewrite = rewritable and (
                 not self._accepts(target, thinking, effort)
-                or (self.haiku_folds_system and _has_mid_conversation_system_message(body))
-                or (not haiku_is_legacy(target.model) and isinstance(body.get("max_tokens"), int)
-                    and body["max_tokens"] > HAIKU55_MAX_OUTPUT_TOKENS))
+                or (self.haiku_folds_system and _has_mid_conversation_system_message(body)))
         body_rewrite = REWRITE_HAIKU if needs_rewrite else None
         return TierDecision(requested, served, target.name, reason, switched=switched, switch_cost_usd=cost,
                             body_rewrite=body_rewrite,

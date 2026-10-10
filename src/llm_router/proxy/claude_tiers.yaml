@@ -34,7 +34,7 @@ tiers:
     # On 5.5 haiku_fold_system is ignored (it takes the system role as sent) and the Haiku
     # context limit is 75K estimated tokens, not 150K: Haiku 5.5 costs 5x per token above
     # 100K prompt tokens ($0.10/$0.50 -> $0.50/$2.50 per MTok). Claude Haiku 4.5 retires
-    # not sooner than 2026-10-15 (platform.claude.com/docs/en/models/haiku-4-5/overview).
+    # not sooner than 2026-10-15 (platform.claude.com/docs/en/about-claude/model-deprecations).
   - name: sonnet
     model: claude-sonnet-5-5
     also: [claude-sonnet-5]

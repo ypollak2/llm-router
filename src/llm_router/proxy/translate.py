@@ -419,21 +419,25 @@ def for_haiku(body: dict, *, fold_system: bool = False, model: str | None = None
     adaptive thinking, ``output_config.effort`` (all five levels) and mid-conversation
     ``role: "system"`` messages are accepted, so they stay (no fold: it would also drop
     the per-turn effort); only ``thinking.type: "enabled"`` with ``budget_tokens`` is a
-    400 there, so a body that carries it loses ``thinking`` (adaptive is on by default),
-    and ``max_tokens`` is clamped to 128K.
+    400 there, so a body that carries it gets ``thinking: {"type": "adaptive"}`` instead,
+    and ``max_tokens`` is clamped to 128K (``haiku_block_reason`` also blocks it).
     """
     if not haiku_is_legacy(model):
         thinking = body.get("thinking")
-        out = without_thinking(body) if isinstance(thinking, dict) and thinking.get("type") == "enabled" else dict(body)
-        cap = HAIKU55_MAX_OUTPUT_TOKENS
-        if isinstance(out.get("max_tokens"), int) and out["max_tokens"] > cap:
-            out["max_tokens"] = cap
-        return out
-    out = without_thinking(body)
-    out.pop("output_config", None)
+        out = dict(body)
+        if isinstance(thinking, dict) and thinking.get("type") == "enabled":
+            # The guide's fix: {"type": "adaptive"} (display kept), not removal, so the
+            # client's clear_thinking_* context edits stay valid.
+            out["thinking"] = {k: v for k, v in thinking.items() if k != "budget_tokens"} | {"type": "adaptive"}
+    else:
+        out = without_thinking(body)
+        out.pop("output_config", None)
     max_tokens = out.get("max_tokens")
-    if isinstance(max_tokens, int) and max_tokens > HAIKU_MAX_OUTPUT_TOKENS:
-        out["max_tokens"] = HAIKU_MAX_OUTPUT_TOKENS
+    cap = haiku_max_output_tokens(model)
+    if isinstance(max_tokens, int) and max_tokens > cap:
+        out["max_tokens"] = cap
+    if not haiku_is_legacy(model):
+        return out
     if fold_system and isinstance(out.get("messages"), list):
         out["messages"] = fold_system_messages(out["messages"])
     return out

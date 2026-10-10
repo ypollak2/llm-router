@@ -54,12 +54,14 @@ def test_for_haiku_55_never_folds(name):
     assert for_haiku(SHAPES[name], fold_system=True, model=H55)["messages"] == SHAPES[name]["messages"]
 
 
-def test_for_haiku_55_drops_budget_thinking_and_clamps_to_128k():
+def test_for_haiku_55_turns_budget_thinking_into_adaptive_keeping_context_edits_and_clamps_to_128k():
     body = _eligible_body()
     body["thinking"] = {"type": "enabled", "budget_tokens": 8000}
+    body["context_management"] = {"edits": [{"type": "clear_thinking_20251015"}]}
     body["max_tokens"] = 200_000
     out = for_haiku(body, model=H55)
-    assert "thinking" not in out and out["output_config"] == {"effort": "high"}
+    assert out["thinking"] == {"type": "adaptive"} and out["output_config"] == {"effort": "high"}
+    assert out["context_management"] == body["context_management"]
     assert out["max_tokens"] == HAIKU55_MAX_OUTPUT_TOKENS == 128_000
     assert body["thinking"]["type"] == "enabled"  # input untouched (kept for the 4xx retry)
 
@@ -155,3 +157,37 @@ async def test_the_45_policy_is_unchanged_by_55_support():
     d = await policy.decide(body, SID, Stickiness(), classify=_classify("simple"))
     assert (d.served_model, d.body_rewrite) == (H45, pt.REWRITE_HAIKU)
     assert _policy55().haiku_folds_system is False
+
+
+# ── repair round 1 ───────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("extra", [
+    {"temperature": 1, "top_p": 0.99},                       # both set is a 400 even at the allowed values
+    {"thinking": {"type": "between_tools"}},                  # Sonnet 5.5 only
+    {"thinking": {"type": "disabled"}, "output_config": {"effort": "max"}},
+    {"thinking": {"type": "disabled"}, "output_config": {"effort": "xhigh"}},
+    {"max_tokens": 128_001},
+])
+def test_55_more_rejected_shapes_block(extra):
+    assert pt.haiku_block_reason(dict(_eligible_body(), **extra), model=H55) == "params"
+
+
+@pytest.mark.parametrize("extra", [
+    {"thinking": {"type": "disabled"}, "output_config": {"effort": "high"}},
+    {"thinking": {"type": "enabled", "budget_tokens": 2000}},   # rewritten to adaptive, not blocked
+    {"max_tokens": 128_000},
+])
+def test_55_accepted_shapes_do_not_block(extra):
+    assert pt.haiku_block_reason(dict(_eligible_body(), **extra), model=H55) == "none"
+
+
+@pytest.mark.parametrize("extra", [{"thinking": {"type": "between_tools"}}, {"max_tokens": 200_000}])
+@pytest.mark.parametrize("rewrite", [True, False])
+async def test_55_blocked_shapes_move_up_with_the_rewrite_flag_on_or_off(extra, rewrite):
+    d = await _decide(_policy55(haiku_rewrite=rewrite), dict(_eligible_body(), **extra))
+    assert (d.served_model, d.reason) == (SONNET, pt.REASON_HAIKU_BODY)
+
+
+def test_haiku_max_output_tokens_is_the_per_model_clamp():
+    from llm_router.proxy.translate import haiku_max_output_tokens
+    assert (haiku_max_output_tokens(H55), haiku_max_output_tokens(H45), haiku_max_output_tokens(None)) == (128_000, 64_000, 64_000)
