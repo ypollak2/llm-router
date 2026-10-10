@@ -42,21 +42,50 @@ tool call (a ``tool_use`` id is bound). ``CLAUDE_CODE_SESSION_ID`` is also in ev
 tool shell, so a gateway or ``route_server`` started from one would otherwise stamp that
 one session on every call it later serves, for any host.
 
+Task identity (PLAN v16 P1.10, R-EVL-2). Three ids ride every ledger row:
+
+* ``session_id``: the Claude Code session (above), or the SDK caller's / a generated one.
+* ``task_id``: one human request. Host turns: ``sha256(session_id + ":" + human_turn_index)
+  [:16]``, where the index is a per-session counter the UserPromptSubmit hook advances
+  (``begin_turn``) and every other process reads (``turn_task_id``): the MCP server, the
+  proxy and the sub-agent hooks all see the same id for the same turn. SDK / gateway / MCP
+  callers may pass their own (``scope(task_id=...)``). When nothing names a task a row gets
+  a generated one (``sha256(session_id + ":untracked:" + trace_id)[:16]``), so a row is
+  never NULL because the host was unknown. Escalations and retries run inside one
+  ``scope`` and share its task_id.
+* ``trace_id``: ``uuid4().hex`` minted per routed call (``scope`` mints a fresh one on
+  entry), so a retry is a new trace of the same task.
+
+The ids are bound in ContextVars (like ``tool_use_id``), so ``cost.log_usage`` and
+``cost.log_routing_decision`` stamp them without any caller passing them; a writer that
+runs outside a scope (a hook, a test) resolves them at write time. All of them are ids
+only (``clean_id`` shape), never prompt text.
+
 Light on purpose: ``savings_logger`` imports this inside the UserPromptSubmit hook, so
 the MCP server stack (+234 ms measured) loads only when ``IdentityMCPServer`` is used.
 """
 from __future__ import annotations
 
+import functools
+import hashlib
+import json
 import os
 import re
+import uuid
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from typing import Any
+from typing import Any, Iterator
 
 TOOL_USE_META_KEY = "claudecode/toolUseId"
 _ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 _PLACEHOLDERS = frozenset({"sdk", "unknown", "none", "null", "default"})
 
 _TOOL_USE_ID: ContextVar[str | None] = ContextVar("llm_router_tool_use_id", default=None)
+_TASK_ID: ContextVar[str | None] = ContextVar("llm_router_task_id", default=None)
+_TRACE_ID: ContextVar[str | None] = ContextVar("llm_router_trace_id", default=None)
+
+TASK_ID_LEN = 16
+TURN_STATE_DIR = "turn_state"
 
 
 def clean_id(value: Any) -> str | None:
@@ -101,6 +130,126 @@ def tool_use_id_from_context(context: Any) -> str | None:
     return clean_id(meta.get(TOOL_USE_META_KEY))
 
 
+def derive_task_id(session_id: str, turn_index: int) -> str:
+    """The host task id of human turn ``turn_index`` of ``session_id`` (16 hex chars)."""
+    return hashlib.sha256(f"{session_id}:{int(turn_index)}".encode("utf-8")).hexdigest()[:TASK_ID_LEN]
+
+
+def new_trace_id() -> str:
+    """A fresh per-call trace id (``uuid4().hex``)."""
+    return uuid.uuid4().hex
+
+
+def ledger_task_id(value: Any) -> str | None:
+    """A task id fit for a ledger column: an id (``clean_id``) that is not a placeholder."""
+    return ledger_session_id(value)
+
+
+def _turn_state_path(session_id: str):
+    from llm_router import paths
+
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)
+    return paths.state_path(TURN_STATE_DIR, f"{safe}.json")
+
+
+def _read_turn_state(session_id: str) -> dict | None:
+    try:
+        data = json.loads(_turn_state_path(session_id).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 -- absent, torn or unreadable: no turn state
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def begin_turn(session_id: Any) -> str | None:
+    """Advance ``session_id``'s human-turn counter and return the new turn's task id.
+
+    Called once per human prompt by the UserPromptSubmit hook. Persisted per session
+    (``<state>/turn_state/<session>.json``: counter + current task id, no text) so the
+    MCP server, the proxy and the sub-agent hooks, which are other processes, read the
+    same id with ``turn_task_id``. Fail-open: returns None, never raises, when the
+    session id is not an id or the state cannot be written.
+    """
+    sid = ledger_session_id(session_id)
+    if sid is None:
+        return None
+    try:
+        prev = _read_turn_state(sid) or {}
+        idx = int(prev.get("turn_index", 0)) + 1
+        task = derive_task_id(sid, idx)
+        path = _turn_state_path(sid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"turn_index": idx, "task_id": task}), encoding="utf-8")
+        os.replace(tmp, path)
+        return task
+    except Exception:  # noqa: BLE001 -- identity must never break the hook
+        return None
+
+
+def turn_task_id(session_id: Any) -> str | None:
+    """The task id of ``session_id``'s current human turn (``begin_turn``), else None."""
+    sid = ledger_session_id(session_id)
+    if sid is None:
+        return None
+    state = _read_turn_state(sid)
+    return ledger_task_id(state.get("task_id")) if state else None
+
+
+def current_task_id() -> str | None:
+    """The task id bound by the enclosing ``scope``, else None."""
+    return _TASK_ID.get()
+
+
+def current_trace_id() -> str | None:
+    """The trace id bound by the enclosing ``scope``, else None."""
+    return _TRACE_ID.get()
+
+
+def resolve_task_id(session_id: Any = None, explicit: Any = None, trace_id: str | None = None) -> str:
+    """The task id for a call: the caller's, else the bound one, else the session's current
+    human turn, else a generated one. Never None, never a placeholder."""
+    tid = ledger_task_id(explicit) or current_task_id() or turn_task_id(session_id)
+    if tid:
+        return tid
+    seed = f"{ledger_session_id(session_id) or ''}:untracked:{trace_id or current_trace_id() or new_trace_id()}"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:TASK_ID_LEN]
+
+
+def row_ids(session_id: Any = None) -> tuple[str, str]:
+    """``(task_id, trace_id)`` to stamp on a ledger row written now for ``session_id``."""
+    trace = current_trace_id() or new_trace_id()
+    return resolve_task_id(session_id, trace_id=trace), trace
+
+
+@contextmanager
+def scope(session_id: Any = None, task_id: Any = None) -> Iterator[tuple[str, str]]:
+    """Bind a fresh trace id and a task id for one routed call; yield ``(task_id, trace_id)``.
+
+    The task id is ``resolve_task_id``: ``task_id`` if the caller passed one, else the
+    enclosing scope's (so an escalation or retry run inside an outer scope shares it),
+    else the session's current human turn, else generated. The trace id is always new.
+    """
+    trace = new_trace_id()
+    task = resolve_task_id(session_id, explicit=task_id, trace_id=trace)
+    t_tok, r_tok = _TASK_ID.set(task), _TRACE_ID.set(trace)
+    try:
+        yield task, trace
+    finally:
+        _TRACE_ID.reset(r_tok)
+        _TASK_ID.reset(t_tok)
+
+
+def traced(func):
+    """Decorator: run an async routed-call function inside a ``scope`` (one trace per call).
+
+    The session is the MCP caller's (``call_session_id``). Arguments pass through untouched."""
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        with scope(call_session_id()):
+            return await func(*args, **kwargs)
+    return wrapper
+
+
 def bind(tool_use: str | None) -> Token:
     return _TOOL_USE_ID.set(clean_id(tool_use))
 
@@ -121,7 +270,9 @@ def __getattr__(name: str):
         async def call_tool(self, name, arguments, context=None):  # type: ignore[override]
             token = bind(tool_use_id_from_context(context))
             try:
-                return await super().call_tool(name, arguments, context)
+                # P1.10: every routed call of this tool call shares one task id.
+                with scope(call_session_id()):
+                    return await super().call_tool(name, arguments, context)
             finally:
                 reset(token)
 

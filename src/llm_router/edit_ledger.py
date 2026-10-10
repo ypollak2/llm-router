@@ -118,9 +118,17 @@ def record_edit_outcome(*, file: str, model: str, applied: bool, source: str | N
     else:
         sid = _resolve_session_id()
     ts = time.time()
+    try:  # P1.10: ids only; a row never fails over identity
+        from llm_router import call_identity
+
+        task_id, trace_id = call_identity.row_ids(sid)
+    except Exception:  # noqa: BLE001
+        task_id = trace_id = None
     row = {
         "ts": ts,
         "session_id": sid,
+        "task_id": task_id,
+        "trace_id": trace_id,
         "session_kind": _session_kind_of(sid),
         "file": file,
         "model": model,

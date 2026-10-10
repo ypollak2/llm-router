@@ -373,6 +373,7 @@ def log_direct_to_db(
     """
     try:
         from llm_router.call_identity import ledger_session_id as _ledger_session_id
+        from llm_router.call_identity import scope as _call_identity_scope
         from llm_router.cost import (
             log_routing_decision as _cost_log_routing_decision,
             log_usage as _cost_log_usage,
@@ -434,6 +435,12 @@ def log_direct_to_db(
         )
 
         async def _persist() -> None:
+            # P1.10: the usage row and the routing_decisions row of this turn share one
+            # task_id (the session's current human turn) and one trace_id.
+            with _call_identity_scope(_ledger_session_id(session_id)):
+                await _persist_rows()
+
+        async def _persist_rows() -> None:
             await _cost_log_usage(
                 response,
                 _task,

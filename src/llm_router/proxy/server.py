@@ -85,7 +85,7 @@ from llm_router.proxy.steps import (
     STEP_CLASSES, classify_text, is_first_call, newest_human_text, session_id_of,
     step_class, step_fields, turn_fields,
 )
-from llm_router import session_kind
+from llm_router import call_identity, session_kind
 from llm_router.proxy import cost_accounting
 from llm_router.proxy.tiers import (
     REASON_DECISION_ERROR, REASON_HAIKU_REWRITE, REWRITE_HAIKU, ClaudeTierPolicy, haiku_block_reason, has_mid_conversation_system_message,
@@ -144,6 +144,16 @@ def validate_upstream(url: str) -> str:
     if parts.scheme in ("http", "https") and parts.hostname in ("127.0.0.1", "localhost", "::1"):
         return url.rstrip("/")
     raise ValueError(f"refusing upstream {url!r}: only {ANTHROPIC_UPSTREAM} or a loopback address")
+
+
+def identity_fields(session_id: str | None) -> dict:
+    """P1.10: the ``task_id`` (the session's current human turn, else generated) and the
+    per-call ``trace_id`` of a proxy row. Null both when identity cannot be computed."""
+    try:
+        task_id, trace_id = call_identity.row_ids(session_id)
+    except Exception:  # noqa: BLE001 -- a ledger row never fails over identity
+        task_id = trace_id = None
+    return {"task_id": task_id, "trace_id": trace_id}
 
 
 @dataclass
@@ -909,6 +919,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # row, with an honest null when not computed, so "absent" never has to
             # be read as 0. tier_proposed is filled by decide_tier.
             "session_kind": session_kind.kind_of(session_id_of(body)),
+            **identity_fields(session_id_of(body)),
             "tier_policy_version": tier_policy.policy_version if tier_policy is not None else None,
             "tier_proposed": None, "tier_retry": None,
             # M0.5: request-shape and prompt-hash fields, never prompt text. The

@@ -40,6 +40,7 @@ def _isolated(monkeypatch, tmp_path):
 
 def _proxy(i: int, *, kind: str | None = "organic", sid: str | None = "s-org", **kw) -> dict:
     row = {"ts": NOW - 3600 + i, "session_id": sid, "session_kind": kind,
+           "task_id": f"task{i:04d}", "trace_id": f"trace{i:04d}",
            "decision": "forwarded", "tier_mode": "conversation",
            "requested_model": "claude-sonnet-4-6", "served_model": "claude-sonnet-4-6",
            "tier": "sonnet", "tier_reason": "policy", "tier_policy_version": "abc123def456",
@@ -66,6 +67,8 @@ def _db(*, usage_reason: bool = True) -> sqlite3.Connection:
                 "ALTER TABLE routing_decisions ADD COLUMN session_id TEXT",
                 "ALTER TABLE routing_decisions ADD COLUMN reason_code TEXT"):
         conn.execute(sql)
+    for sql in cost.MIGRATE_ADD_TASK_IDENTITY:  # P1.10: task_id / trace_id on both tables
+        conn.execute(sql)
     if usage_reason:  # P0.8-d: an old-schema database is _db(usage_reason=False)
         conn.execute(cost.MIGRATE_USAGE_ADD_REASON[0])
     return conn
@@ -81,9 +84,9 @@ def _decisions(conn, n: int, *, reason_code: str | None = "policy", sid: str | N
         model = None if null_model_every and i % null_model_every == 0 else "gpt-4o-mini"
         conn.execute(
             "INSERT INTO routing_decisions (timestamp, session_id, final_model, complexity, "
-            "reason_code, input_tokens, output_tokens, cost_usd, latency_ms, success) "
-            "VALUES (?, ?, ?, 'simple', ?, 10, 5, 0.0001, 300.0, 1)",
-            (_stamp(i), sid, model, reason_code))
+            "reason_code, input_tokens, output_tokens, cost_usd, latency_ms, success, task_id) "
+            "VALUES (?, ?, ?, 'simple', ?, 10, 5, 0.0001, 300.0, 1, ?)",
+            (_stamp(i), sid, model, reason_code, f"task{i:04d}"))
     conn.commit()
 
 
@@ -93,15 +96,15 @@ def _usage(conn, n: int, *, sid: str | None = "s-org", reason: str | None = None
         if with_reason:
             conn.execute(
                 "INSERT INTO usage (timestamp, session_id, model, provider, task_type, profile, "
-                "complexity, input_tokens, output_tokens, cost_usd, latency_ms, success, reason) "
-                "VALUES (?, ?, 'gpt-4o-mini', 'openai', 'code', 'balanced', 'simple', 10, 5, "
-                "0.0001, 300.0, 1, ?)", (_stamp(i), sid, reason))
+                "complexity, input_tokens, output_tokens, cost_usd, latency_ms, success, reason, "
+                "task_id) VALUES (?, ?, 'gpt-4o-mini', 'openai', 'code', 'balanced', 'simple', "
+                "10, 5, 0.0001, 300.0, 1, ?, ?)", (_stamp(i), sid, reason, f"task{i:04d}"))
         else:
             conn.execute(
                 "INSERT INTO usage (timestamp, session_id, model, provider, task_type, profile, "
-                "complexity, input_tokens, output_tokens, cost_usd, latency_ms, success) "
+                "complexity, input_tokens, output_tokens, cost_usd, latency_ms, success, task_id) "
                 "VALUES (?, ?, 'gpt-4o-mini', 'openai', 'code', 'balanced', 'simple', 10, 5, "
-                "0.0001, 300.0, 1)", (_stamp(i), sid))
+                "0.0001, 300.0, 1, ?)", (_stamp(i), sid, f"task{i:04d}"))
     conn.commit()
 
 
@@ -310,14 +313,19 @@ def test_a_complete_writer_beside_a_no_traffic_writer_is_pass_only_for_the_write
     assert _prd()["verdict"] == "NOT INFORMATIVE"
 
 
-def test_task_id_is_reported_not_scored_until_p1_10():
-    _write_proxy([_proxy(i) for i in range(100)])
+def test_task_id_is_scored_since_p1_10():
+    """P1.10 put task_id on every writer, so a row without one is missing (NULL), per writer."""
+    rows = [_proxy(i) for i in range(100)]
+    for r in rows[:5]:                       # 5 of 100 lose the id: 95% < 99%
+        r["task_id"] = None
+    _write_proxy(rows)
     card = _card()
     px = card["kpis"]["G3"]["prd"]["writers"]["proxy"]
-    assert px["state"] == "pass"
-    assert px["fields"]["task_id"] == {"recorded": 0, "missing": 100, "missing_pct": 1.0,
-                                       "scored": False, "no_column": False}
-    assert "task_id 0.0% recorded, not scored until P1.10 merges" in _g3_text(card)
+    assert px["state"] == "fail"
+    assert px["fields"]["task_id"] == {"recorded": 95, "missing": 5, "missing_pct": 0.05,
+                                       "scored": True, "no_column": False}
+    assert "task_id 5.0%" in _g3_text(card)
+    assert card["kpis"]["G3"]["prd"]["unscored"] == {}
 
 
 def test_direct_and_mcp_rows_are_separate_writers():

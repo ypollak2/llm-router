@@ -177,6 +177,9 @@ _HEX_FIXTURE_STEMS = (
 # phase0-*, finalsess, a01sess, tracedemo, smoketest-*, modetest, zctest,
 # unknown, ...) is a fixture or an unattributed row and must stay synthetic.
 _PRODUCTION_WRITER_SESSION_IDS = frozenset({"gateway", "sdk"})
+# P1.10: the SDK no longer stamps the literal "sdk"; it generates "sdk-<12 hex>" once per
+# process (sdk._sdk_session_id). Same writer, same exemption.
+_PRODUCTION_WRITER_SESSION_RE = re.compile(r"sdk-[0-9a-f]{12}")
 
 
 def is_synthetic_session(session_id: str | None) -> bool:
@@ -216,7 +219,7 @@ def is_synthetic_session(session_id: str | None) -> bool:
     if not session_id:
         return False
     sid = session_id.strip().lower()
-    if sid in _PRODUCTION_WRITER_SESSION_IDS:
+    if sid in _PRODUCTION_WRITER_SESSION_IDS or _PRODUCTION_WRITER_SESSION_RE.fullmatch(sid):
         return False
     if _TEST_SESSION.match(sid):
         return True

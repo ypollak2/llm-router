@@ -1114,9 +1114,10 @@ def _g3_completeness(all_rows: list[dict], days: int, now: float,
 
 G3_PRD_FIELDS = ("session_id", "task_id", "model", "tier", "reason", "tokens", "cost",
                  "latency", "outcome")
-#: Reported with their coverage, never scored. task_id does not exist on any writer until
-#: P1.10 merges; that PR removes this entry, which starts scoring it.
-G3_PRD_UNSCORED = {"task_id": "not scored until P1.10 merges"}
+#: Fields reported with their coverage but never scored. Empty since P1.10 (task_id is on
+#: every writer; rows written before it carry NULL and count as missing until they age out
+#: of the window).
+G3_PRD_UNSCORED: dict[str, str] = {}
 G3_PRD_MIN_N = 100
 G3_PRD_BAR = 0.99
 G3_PRD_WRITERS = ("usage", "routing_decisions", "direct", "proxy")
@@ -1349,7 +1350,7 @@ def _g3_prd_lines(prd: dict) -> list[str]:
             + (" [no column]" if r["fields"][f]["no_column"] else "") + f", {why}"
             for f, why in prd["unscored"].items())
         lines.append(f"  {w}: {r['state']} {_pct(r['complete_pct'])} complete (n={r['n']})"
-                     f"; missing: {missing or 'none'}{excl}; {unscored}")
+                     f"; missing: {missing or 'none'}{excl}" + (f"; {unscored}" if unscored else ""))
     return lines
 
 

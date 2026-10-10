@@ -58,6 +58,7 @@ from llm_router.gates import run_gates
 from llm_router.gemini_cli_agent import GEMINI_MODELS, is_gemini_cli_available, run_gemini_cli
 from llm_router import okf as _okf
 from llm_router import pricing as _pricing
+from llm_router import call_identity as _ci_scope  # P1.10: one trace per routed call
 from llm_router.logging import get_logger
 from llm_router.streaming_types import RouterStreamEvent
 from llm_router.compaction import compact_structural
@@ -3944,6 +3945,7 @@ def _response_is_usable(text: str) -> bool:
         return bool((text or "").strip())
 
 
+@_ci_scope.traced
 async def route_and_call(
     task_type: TaskType,
     prompt: str,

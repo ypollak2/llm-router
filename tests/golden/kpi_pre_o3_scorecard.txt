@@ -19,7 +19,7 @@ llm-router kpi -- window=7d (organic only) generated=2026-10-06T15:20:00Z
         usage: no traffic (0 organic rows)
         routing_decisions: no traffic (0 organic rows)
         direct: no traffic (0 organic rows)
-        proxy: fail 0.0% complete (n=120); missing: tokens 100.0%, cost 100.0%, latency 100.0%; task_id 0.0% recorded, not scored until P1.10 merges
+        proxy: fail 0.0% complete (n=120); missing: task_id 100.0%, tokens 100.0%, cost 100.0%, latency 100.0%
   G4  wrongly benched providers (target 0)   not measurable: no provider bench recorded in window (0 benches: 'none were wrong' cannot be told from 'none happened')
       benched right now: none (point-in-time)
 
