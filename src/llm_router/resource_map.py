@@ -27,7 +27,7 @@ from typing import Any, Callable
 SCHEMA = 1
 MAP_FILE_NAME = "resource_map.json"
 REFRESH_TTL_S = 300
-PROVENANCE = ("measured", "estimated", "default")
+PROVENANCE = ("measured", "estimated", "default", "stale")
 TIMESTAMP_KEYS = frozenset({"generated_at", "as_of", "reset_at"})
 
 # api key variable -> (chain provider, display name)
@@ -103,9 +103,24 @@ def _default_codex_counter() -> dict | None:
 
 
 def _default_gemini_quota() -> dict | None:
+    """Gemini quota with its source: a fresh ``gemini /stats`` cache entry is
+    ``measured``; our own request counter (it carries a ``date``) is
+    ``estimated``; no data at all is None (the caller labels that ``default``)."""
     try:
-        from llm_router.gemini_cli_quota import get_gemini_quota_status_sync
-        return get_gemini_quota_status_sync()
+        from llm_router import gemini_cli_quota as g
+
+        cached = g._load_quota_cache()
+        if cached:
+            src, data = ("estimated" if "date" in cached else "measured"), cached
+        else:
+            data = g._get_local_quota()
+            src = "estimated"
+        if not data:
+            return None
+        count = data.get("count", 0)
+        limit = data.get("daily_limit", DEFAULT_GEMINI_DAILY)
+        return {"provenance": src, "daily_limit": limit,
+                "pressure": min(1.0, max(0.0, count / limit if limit else 0.0))}
     except Exception:
         return None
 
@@ -170,7 +185,10 @@ class MapInputs:
     codex_counter: Callable[[], dict | None] = _default_codex_counter
     codex_sessions: Path | None = None
     gemini_quota: Callable[[], dict | None] = _default_gemini_quota
-    competence: dict | None = None          # local_eligibility.json contents
+    # local_eligibility.json contents ({model: {...}}). P2.10 writes that file;
+    # until it exists every row's competence is null, which means "not measured".
+    competence: dict | None = None
+    competence_path: Path | None = None
     policy: str | None = None
     codex_daily_limit: int = DEFAULT_CODEX_DAILY
     now: float | None = None
@@ -208,6 +226,17 @@ def _claude_row(seat, inp: MapInputs, now: float) -> dict:
     return row
 
 
+def _window_expired(win: dict, as_of: float, now: float, *, default_minutes: int) -> bool:
+    """True when the rate-limit window in *win* ended before *now*: its own
+    ``resets_at`` if it has one, else ``as_of`` plus ``window_minutes``."""
+    resets = win.get("resets_at")
+    if isinstance(resets, (int, float)):
+        return resets <= now
+    minutes = win.get("window_minutes")
+    minutes = minutes if isinstance(minutes, (int, float)) and minutes > 0 else default_minutes
+    return as_of + minutes * 60 <= now
+
+
 def _codex_row(seat, inp: MapInputs, now: float) -> dict:
     row = _row("codex", "subscription", "codex/codex-subscription", plan=seat.plan,
                marginal_cost={"value": 0.0, "label": "included in the ChatGPT seat"},
@@ -220,14 +249,20 @@ def _codex_row(seat, inp: MapInputs, now: float) -> dict:
     rl = codex_rate_limits(inp.codex_sessions) if inp.codex_sessions else None
     prim = (rl or {}).get("primary") if rl else None
     if isinstance(prim, dict) and isinstance(prim.get("used_percent"), (int, float)):
-        row["quota"]["pressure"] = quota_value(prim["used_percent"] / 100.0, "measured", rl["as_of"])
-        sec = rl.get("secondary")
-        if isinstance(sec, dict) and isinstance(sec.get("used_percent"), (int, float)):
-            row["quota"]["weekly_pressure"] = quota_value(sec["used_percent"] / 100.0, "measured", rl["as_of"])
-        resets = prim.get("resets_at")
-        if isinstance(resets, (int, float)):
-            row["reset_at"] = _iso(float(resets))
-        return row
+        if _window_expired(prim, rl["as_of"], now, default_minutes=300):
+            # The window this reading describes has reset: keep it visible as
+            # history, never as the current value, and fall through to the counter.
+            row["quota"]["last_rollout_pressure"] = quota_value(prim["used_percent"] / 100.0, "stale", rl["as_of"])
+        else:
+            row["quota"]["pressure"] = quota_value(prim["used_percent"] / 100.0, "measured", rl["as_of"])
+            sec = rl.get("secondary")
+            if (isinstance(sec, dict) and isinstance(sec.get("used_percent"), (int, float))
+                    and not _window_expired(sec, rl["as_of"], now, default_minutes=10080)):
+                row["quota"]["weekly_pressure"] = quota_value(sec["used_percent"] / 100.0, "measured", rl["as_of"])
+            resets = prim.get("resets_at")
+            if isinstance(resets, (int, float)):
+                row["reset_at"] = _iso(float(resets))
+            return row
     limit = inp.codex_daily_limit
     row["quota"]["daily_limit"] = quota_value(limit, "default", None)
     counter = inp.codex_counter()
@@ -253,8 +288,9 @@ def _gemini_row(seat, inp: MapInputs, now: float) -> dict:
     row["status"], row["reason"] = "connected", "gemini CLI logged in"
     q = inp.gemini_quota()
     if q:
+        prov = q.get("provenance", "estimated")
         row["quota"]["daily_limit"] = quota_value(q.get("daily_limit", DEFAULT_GEMINI_DAILY), "estimated", None)
-        row["quota"]["pressure"] = quota_value(q.get("pressure", 0.0), "estimated", None)
+        row["quota"]["pressure"] = quota_value(q.get("pressure", 0.0), prov, now)
     else:
         row["quota"]["daily_limit"] = quota_value(DEFAULT_GEMINI_DAILY, "default", None)
         row["quota"]["pressure"] = quota_value(0.0, "default", None)
@@ -278,10 +314,12 @@ def _ollama_rows(inp: MapInputs, now: float) -> list[dict]:
     if not isinstance(tags, dict) or "models" not in tags:
         return [_row("ollama", "local", "ollama", reason=f"Ollama not reachable at {base}")]
     rows = []
+    seen: set[str] = set()
     for m in tags.get("models") or []:
         name = m.get("name")
-        if not name:
+        if not name or name in seen:   # /api/tags can list a name twice
             continue
+        seen.add(name)
         show = inp.http_post(f"{base}/api/show", {"model": name})
         show = show if isinstance(show, dict) else {}
         reported = show.get("capabilities")
@@ -354,12 +392,23 @@ def _prioritise(rows: list[dict], policy: str, now: float) -> None:
         r["effective_priority"] = rank[r["chain_id"]]
 
 
+def _competence_default_path() -> Path:
+    from llm_router import paths
+    return paths.state_path("local_eligibility.json")
+
+
 def build(inputs: MapInputs | None = None) -> dict:
     """The map, built from *inputs* (default: this machine)."""
-    inp = inputs or MapInputs()
+    inp = inputs or MapInputs(competence_path=_competence_default_path())
     now = time.time() if inp.now is None else inp.now
     if inp.seats is None:
         inp.seats = _default_seats()
+    if inp.competence is None and inp.competence_path is not None:
+        try:
+            loaded = json.loads(inp.competence_path.read_text())
+            inp.competence = loaded if isinstance(loaded, dict) else None
+        except (OSError, ValueError):
+            pass
     if inp.codex_sessions is None:
         inp.codex_sessions = Path.home() / ".codex" / "sessions"
     seats = inp.seats
