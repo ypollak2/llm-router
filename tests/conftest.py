@@ -1317,6 +1317,7 @@ _HOME_INSTALL_TARGETS = (
 _REPORT_ONLY = frozenset({
     "home:.claude.json",
     "home:.claude/settings.json",
+    "home:.codex/config.toml",
 })
 
 # GH#88: whole-file diffing of ~/.claude.json produced failures that were not
@@ -1352,6 +1353,34 @@ def _claude_json_mcp_slice(p: Path):
     except (OSError, json.JSONDecodeError):
         return "<unreadable>"
     return data.get("mcpServers", {}).get("llm_router")
+
+
+def _codex_config_slice(p: Path):
+    """The only parts of ~/.codex/config.toml llm_router's installer writes.
+
+    FLAKE-LAV-1: same structure as GH#88/GH#92. A running Codex app/CLI appends
+    ``[projects."<path>"]`` trust tables to this file as it opens new
+    directories (the operator's copy: 1,200+ lines, mostly those), so whole-file
+    (bytes, mtime) diffing blamed whichever test's teardown sampled it
+    mid-write -- under xdist, on files that never touch Codex. The installer
+    writes ``[mcp_servers.llm_router]`` and hook trust records
+    (``hooks.state``); see ``codex_host``. Everything else is somebody else's.
+    """
+    from llm_router import codex_host
+
+    try:
+        if not p.is_file():
+            return None
+        text = p.read_text(encoding="utf-8")
+    except OSError:
+        return "<unreadable>"
+    import tomllib
+
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return "<unreadable>"
+    return (codex_host.read_mcp_server(text), sorted(codex_host.read_trust_records(text).items()))
 
 
 def _claude_settings_slice(p: Path):
@@ -1444,6 +1473,9 @@ def _no_repo_mutation(request):
                 continue
             if label == "home:.claude/settings.json":
                 out[label] = _claude_settings_slice(p)
+                continue
+            if label == "home:.codex/config.toml":
+                out[label] = _codex_config_slice(p)
                 continue
             try:
                 out[label] = (p.read_bytes(), p.stat().st_mtime_ns) if p.is_file() else None
