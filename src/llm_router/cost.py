@@ -757,6 +757,15 @@ REASON_JUDGE_EVAL = "judge_eval"
 # A call the semantic cache answered: a usage row with 0 tokens and $0 (nothing was billed,
 # nothing saved is claimed), written only so the call is attributable to its session.
 REASON_CACHE_HIT = "cache_hit"
+# A call that reached dispatch and ended in an error instead of an answer. One ``usage`` row
+# (success=0, 0 tokens, $0) per failed call, written by ``log_route_error``; the code names the
+# failure class, never the exception text (which can carry prompt fragments).
+REASON_ERROR_ALL_FAILED = "error_all_models_failed"
+REASON_ERROR_TIMEOUT = "error_timeout"
+REASON_ERROR_CANCELLED = "error_cancelled"
+REASON_ERROR_BUDGET = "error_budget_exceeded"
+REASON_ERROR_DENIED = "error_routing_denied"
+REASON_ERROR_OTHER = "error_exception"
 
 MIGRATE_ADD_TASK_TYPE_RAW = [
     "ALTER TABLE usage ADD COLUMN task_type_raw TEXT",
@@ -1433,6 +1442,58 @@ async def log_usage(
     finally:
         await db.close()
 
+
+
+async def log_route_error(
+    task_type: TaskType | None,
+    profile: RoutingProfile,
+    *,
+    reason: str,
+    correlation_id: str | None,
+    attempted_model: str | None = None,
+    latency_ms: float = 0.0,
+) -> bool:
+    """Write the one ``usage`` row of a call that reached dispatch and failed.
+
+    M0-3 rerun (2026-10-10): 3 of 20 ``llm`` calls ended in an MCP tool error and left no
+    ledger row with the caller's session id, because every writer ran only on success.
+    The row is attributed like any other (``log_usage`` resolves the caller's session),
+    names the model that was being attempted, carries ``success=0``, 0 tokens, $0, the
+    elapsed latency and an ``error_*`` reason code.
+
+    Never a second row: if a row already carries this ``correlation_id`` (an answer was
+    written before a late cancel, or this failure was already recorded) nothing is
+    written. Returns True when a row was written. The router wraps the call fail-open.
+    """
+    if correlation_id:
+        db = await _get_db()
+        try:
+            cur = await db.execute(
+                "SELECT 1 FROM usage WHERE correlation_id = ? LIMIT 1", (correlation_id,)
+            )
+            if await cur.fetchone() is not None:
+                return False
+        finally:
+            await db.close()
+    model = (attempted_model or "").strip()
+    provider = model.split("/", 1)[0] if "/" in model else (model or "none")
+    await log_usage(
+        LLMResponse(
+            content="",
+            model=model or "none",
+            input_tokens=0,
+            output_tokens=0,
+            cost_usd=0.0,
+            latency_ms=float(latency_ms or 0.0),
+            provider=provider,
+        ),
+        task_type,
+        profile,
+        success=False,
+        correlation_id=correlation_id,
+        reason=reason,
+    )
+    return True
 
 
 async def log_correction(
