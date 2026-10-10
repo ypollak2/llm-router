@@ -144,9 +144,12 @@ async def llm_router_status(view: str = "summary", period: str = "today") -> str
     if v == "cache":
         return _cache_view(period)
     if v == "map":
+        import asyncio
+
         from llm_router import resource_map
 
-        return resource_map.view_json()
+        # The build runs CLIs and Ollama HTTP: keep it off the event loop.
+        return await asyncio.to_thread(resource_map.view_json)
     if v in ("savings", "summary"):
         return await llm_savings()
     if v in ("session_savings", "session-savings"):

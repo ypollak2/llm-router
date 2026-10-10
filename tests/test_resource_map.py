@@ -213,3 +213,94 @@ def test_cli_table_and_bad_arg(home, tmp_path, monkeypatch, capsys):
 def test_roles_table():
     assert local_models.roles("ollama/nimble:9b") == frozenset({"decision"})
     assert local_models.roles("qwen3.5:latest") == frozenset({"generate"})
+
+
+# ── review fixes (#402) ─────────────────────────────────────────────────────
+
+def test_gemini_no_data_is_default_not_estimated(tmp_path):
+    g = row(rm.build(make_inputs(tmp_path, gemini=None)), "gemini_cli")
+    assert g["quota"]["daily_limit"]["provenance"] == "default"
+    assert g["quota"]["pressure"]["provenance"] == "default"
+
+
+def test_gemini_source_decides_label(tmp_path, monkeypatch):
+    from llm_router import gemini_cli_quota as gq
+
+    monkeypatch.setattr(gq, "_load_quota_cache", lambda: {"count": 150, "daily_limit": 1500, "tier": "t"})
+    stats = rm._default_gemini_quota()
+    assert stats == {"provenance": "measured", "daily_limit": 1500, "pressure": 0.1}
+    monkeypatch.setattr(gq, "_load_quota_cache", lambda: None)
+    monkeypatch.setattr(gq, "_get_local_quota", lambda: {"date": "d", "count": 15, "daily_limit": 1500})
+    assert rm._default_gemini_quota()["provenance"] == "estimated"
+    monkeypatch.setattr(gq, "_get_local_quota", lambda: None)
+    assert rm._default_gemini_quota() is None
+    g = row(rm.build(make_inputs(tmp_path, gemini={"provenance": "measured", "daily_limit": 1500, "pressure": 0.1})),
+            "gemini_cli")
+    assert g["quota"]["pressure"]["provenance"] == "measured"
+
+
+def _rollout(tmp_path, *, resets_at=None, as_of_age_s=0, window=300):
+    import os
+    d = tmp_path / "sess"
+    d.mkdir(exist_ok=True)
+    f = d / "rollout-s.jsonl"
+    prim = {"used_percent": 97.0, "window_minutes": window}
+    if resets_at is not None:
+        prim["resets_at"] = resets_at
+    f.write_text(json.dumps({"payload": {"rate_limits": {"primary": prim}}}) + "\n")
+    os.utime(f, (NOW - as_of_age_s, NOW - as_of_age_s))
+    inp = make_inputs(tmp_path)
+    inp.codex_sessions = d
+    return inp
+
+
+def test_expired_codex_rollout_is_stale_not_current(tmp_path):
+    c = row(rm.build(_rollout(tmp_path, resets_at=NOW - 3 * 86400, as_of_age_s=3 * 86400 + 60)), "codex")
+    assert c["quota"]["pressure"]["provenance"] != "measured"
+    assert c["quota"]["pressure"]["value"] != 0.97
+    assert c["quota"]["last_rollout_pressure"] == {"value": 0.97, "provenance": "stale", "as_of": rm._iso(NOW - 3 * 86400 - 60)}
+
+
+def test_codex_rollout_without_resets_at_expires_by_window(tmp_path):
+    old = row(rm.build(_rollout(tmp_path, as_of_age_s=6 * 3600)), "codex")     # 5 h window ended 1 h ago
+    assert "last_rollout_pressure" in old["quota"]
+    fresh = row(rm.build(_rollout(tmp_path, as_of_age_s=3600)), "codex")
+    assert fresh["quota"]["pressure"]["provenance"] == "measured" and fresh["quota"]["pressure"]["value"] == 0.97
+
+
+def test_ollama_duplicate_names_listed_once_priorities_contiguous(tmp_path):
+    data = rm.build(make_inputs(tmp_path, models=("qwen3.5:latest", "qwen3.5:latest", "other:1")))
+    names = [r["resource"] for r in data["resources"] if r["resource"].startswith("ollama/")]
+    assert names == ["ollama/qwen3.5:latest", "ollama/other:1"]
+    prios = sorted(r["effective_priority"] for r in data["resources"] if r["effective_priority"])
+    assert prios == list(range(1, len(prios) + 1))
+
+
+def test_mcp_view_map_runs_off_the_event_loop(home, monkeypatch):
+    import asyncio
+    import threading
+
+    from llm_router.tools.consolidated import llm_router_status
+
+    seen = {}
+
+    def fake():
+        seen["thread"] = threading.current_thread()
+        return "{}"
+    monkeypatch.setattr(rm, "view_json", fake)
+
+    async def go():
+        seen["loop"] = threading.current_thread()
+        return await llm_router_status(view="map")
+    assert asyncio.run(go()) == "{}"
+    assert seen["thread"] is not seen["loop"]
+
+
+def test_competence_loaded_from_file_when_present(tmp_path):
+    inp = make_inputs(tmp_path)
+    f = tmp_path / "elig.json"
+    f.write_text(json.dumps({"qwen3.5:latest": {"code": {"eligible": True}}}))
+    inp.competence_path = f
+    data = rm.build(inp)
+    assert row(data, "ollama/qwen3.5:latest")["competence"] == {"code": {"eligible": True}}
+    assert row(data, "ollama/nimble:9b")["competence"] is None
