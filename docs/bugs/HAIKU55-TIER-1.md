@@ -35,10 +35,16 @@ status: fixed in `feat/haiku-tier-5-5` (deploy: set the `haiku` tier in `~/.llm-
   every id but `claude-haiku-5-5` is the 4.5 rule set, unchanged). For 5.5: `for_haiku` keeps thinking
   (drops only budget-token `enabled`), effort and system messages, clamps `max_tokens` to 128K, never
   folds (`haiku_folds_system` is false); `haiku_block_reason` skips the system-role check, adds `params`
-  (sampling values 5.5 rejects, or a final assistant turn) and limits context to
-  `HAIKU55_MAX_CONTEXT_TOKENS = 75_000` estimated tokens, which is 100,000 / 1.3 for the tokenizer step
-  and keeps a call under the price step (above 100K it is still cheaper than Sonnet 5.5's $2/$10, so this
-  is a cost-predictability line, not a window line). A final guard in `decide` runs the body checks on
+  (sampling values 5.5 rejects, or a final assistant turn) and limits context
+  per request to `haiku55_context_limit(body) = (1_000_000 - max_tokens) / 1.3` estimated (chars/4)
+  tokens, `max_tokens` being the request's own or the 128K cap (`HAIKU55_MAX_CONTEXT_TOKENS` = 670,769, the
+  worst case). That is the owner's decision of 2026-10-10 (first 75K, the 100K price step / 1.3, then
+  "any call that fits the window"): `estimate * 1.3 + max_tokens <= 1M`, 1.3 being the documented tokenizer
+  increase over 4.5, which the chars/4 estimate tracks. Calls over 100,000 real prompt tokens bill at
+  $0.50/$2.50 per MTok, five times the base card, still below Sonnet 5.5's $2/$10. The arm's
+  `haiku_body_blocked` and the tier's own checks share `haiku_block_reason`, so both use the per-model limit
+  (4.5: 150K). Residual: the estimate is chars/4, so a token-dense body (JSON, code) can exceed the 1.3
+  factor and 400 on the window; the 4xx retry with the client's original bytes covers it. A final guard in `decide` runs the body checks on
   any Haiku 5.5 target, whichever path chose it, and moves a blocked call up a tier with reason
   `haiku_body_blocked` (`tier_haiku_block` names the check). The 4.5 native path is not guarded (as before).
   Residual: a request that names `claude-haiku-4-5` is `unknown_model` (labelled `haiku`, forwarded

@@ -155,13 +155,25 @@ THINKING_TYPES = ("enabled", "adaptive")
 # chars/4 estimate (``token_budget.estimate_tokens``, a hot-path
 # approximation, not an exact count) does not see.
 HAIKU_MAX_CONTEXT_TOKENS = 150_000
-# Claude Haiku 5.5: window 1M, but it is priced by prompt length -- $0.10/$0.50 per MTok
-# up to 100,000 prompt tokens and $0.50/$2.50 above (platform.claude.com/docs/en/models/
-# haiku-5-5/overview "Pricing", fetched 2026-10-10), so the limit is a cost line, not a
-# window line. 75,000 is that line over the chars/4 estimate below: Haiku 5.5's tokenizer
-# counts ~30% more tokens than 4.5's for the same text (migration guide, "Recount
-# tokens"), and 100,000 / 1.3 = 76,900.
-HAIKU55_MAX_CONTEXT_TOKENS = 75_000
+# Claude Haiku 5.5 (owner decision 2026-10-10: any call that fits the window may go to it).
+# The window is 1M tokens (platform.claude.com/docs/en/models/haiku-5-5/overview) and the
+# estimate below is chars/4, in units of the 4.5-era tokenizer; 5.5's tokenizer counts ~30%
+# more tokens for the same text (migration guide, "Recount tokens"). A request fits when
+#     estimate * 1.3 + max_tokens <= 1_000_000
+# so the limit is ``(1_000_000 - max_tokens) / 1.3`` estimated tokens, with max_tokens the
+# request's own (at most the 128K output cap, which ``haiku_block_reason`` also enforces),
+# or the 128K cap when it sets none: 670,769 at the worst case. Calls over 100,000 real
+# prompt tokens bill at the higher card, $0.50/$2.50 per MTok (up to 100K: $0.10/$0.50).
+HAIKU55_WINDOW_TOKENS = 1_000_000
+HAIKU55_TOKENIZER_FACTOR = 1.3
+HAIKU55_MAX_CONTEXT_TOKENS = int((HAIKU55_WINDOW_TOKENS - HAIKU55_MAX_OUTPUT_TOKENS) / HAIKU55_TOKENIZER_FACTOR)
+
+
+def haiku55_context_limit(body: dict) -> int:
+    """Largest estimated-token context that still fits Haiku 5.5's window for this request."""
+    mt = body.get("max_tokens")
+    mt = min(mt, HAIKU55_MAX_OUTPUT_TOKENS) if isinstance(mt, int) and mt > 0 else HAIKU55_MAX_OUTPUT_TOKENS
+    return int((HAIKU55_WINDOW_TOKENS - mt) / HAIKU55_TOKENIZER_FACTOR)
 REWRITE_HAIKU = "haiku"
 
 REASON_UNKNOWN_MODEL = "unknown_model"
@@ -491,7 +503,7 @@ def haiku_block_reason(body: dict, *, fold_system: bool = False, model: str | No
     ``claude-haiku-5-5`` gets the 4.5 checks above. Haiku 5.5 accepts the system role
     (platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages, fetched
     2026-10-10: "available on ... Claude Sonnet 5.5, and Claude Haiku 5.5"), so that check is
-    skipped, and the context limit is ``HAIKU55_MAX_CONTEXT_TOKENS``; instead a body that sets
+    skipped, and the context limit is ``haiku55_context_limit(body)``; instead a body that sets
     ``temperature`` != 1, ``top_p`` != 0.99, any ``top_k``, or ends on an assistant turn
     (prefill) is ``params``: each is a 400 there (migration guide, "Remove sampling
     parameters", "Replace assistant prefill")."""
@@ -504,7 +516,7 @@ def haiku_block_reason(body: dict, *, fold_system: bool = False, model: str | No
         return HAIKU_BLOCK_BUILTIN_TOOLS
     if not legacy and _has_haiku55_rejected_params(body):
         return HAIKU_BLOCK_PARAMS
-    if _approx_context_tokens(body) > (HAIKU_MAX_CONTEXT_TOKENS if legacy else HAIKU55_MAX_CONTEXT_TOKENS):
+    if _approx_context_tokens(body) > (HAIKU_MAX_CONTEXT_TOKENS if legacy else haiku55_context_limit(body)):
         return HAIKU_BLOCK_CONTEXT
     return HAIKU_BLOCK_NONE
 
@@ -746,7 +758,7 @@ class ClaudeTierPolicy:
         itself, and this is the gate that currently excludes real Claude Code
         2.1.285 traffic, which sends one on every call) -- and an approximate
         context under ``HAIKU_MAX_CONTEXT_TOKENS`` (Haiku 4.5's window is
-        200K, the other tiers' is 1M; ``HAIKU55_MAX_CONTEXT_TOKENS`` for Haiku 5.5). Whether the turn is simple/mechanical
+        200K, the other tiers' is 1M; ``haiku55_context_limit`` for Haiku 5.5). Whether the turn is simple/mechanical
         is the classifier's call, made by ``decide``.
         """
         if not self.haiku_rewrite:

@@ -16,7 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - proxy Haiku tier on Claude Haiku 5.5 (HAIKU55-TIER-1, docs/bugs/HAIKU55-TIER-1.md): the Haiku rewrite rules now key
   off the tier's `model`. With `claude-haiku-5-5` the body keeps adaptive thinking, effort and mid-conversation system
   messages (no fold), `max_tokens` clamps to 128K, a body with sampling parameters or an assistant prefill (400 on 5.5)
-  or over 75K estimated tokens (the price step at 100K prompt tokens, with the ~30% tokenizer increase) goes up a tier
+  or too large for the window (estimate x 1.3 tokenizer factor + max_tokens > 1M, 670,769 estimated tokens at 128K
+  max_tokens; owner decision 2026-10-10; calls over 100K prompt tokens bill at $0.50/$2.50 per MTok, up to 100K
+  $0.10/$0.50) goes up a tier
   (`haiku_body_blocked`). Any other id keeps the 4.5 rules; the shipped default is still `claude-haiku-4-5`
   (4.5 retires not sooner than 2026-10-15). Capabilities are from platform.claude.com, fetched 2026-10-10.
 

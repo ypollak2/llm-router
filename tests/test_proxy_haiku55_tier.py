@@ -101,14 +101,62 @@ def test_55_assistant_prefill_blocks():
     assert pt.haiku_block_reason(body, model=H55) == "params"
 
 
-def test_context_limit_is_per_model():
+def _body_of(est_tokens: int, **extra) -> dict:
+    """A later call of the conversation `_eligible_body()` opens: a short first prompt, then a
+    big user turn (so the first-call rules are off), the system reminder last."""
     body = _eligible_body()
-    body["messages"][0]["content"] = [{"type": "text", "text": "x" * (4 * 100_000)}]  # ~100K estimated
-    assert pt.haiku_block_reason(body, model=H55) == "context"          # over 75K
-    assert pt.haiku_block_reason(body, model=H45) == "system_message"   # 4.5: 150K limit, system role first
-    body["messages"] = body["messages"][:1]
-    assert pt.haiku_block_reason(body, model=H45) == "none"             # 100K < 150K
-    assert pt.HAIKU55_MAX_CONTEXT_TOKENS == 75_000 < 100_000 / 1.3
+    first, sysmsg = body["messages"]
+    body["messages"] = [first, {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+                        {"role": "user", "content": [{"type": "text", "text": "x" * 4 * est_tokens}]}, sysmsg]
+    body.update(dict({"max_tokens": 128_000}, **extra))
+    return body
+
+
+async def _later(policy, body):
+    sticky = Stickiness()
+    opener = _eligible_body()
+    opener["messages"] = opener["messages"][:1]
+    await policy.decide(opener, SID, sticky, classify=_classify("simple"))  # served on Haiku 5.5
+    return await policy.decide(body, SID, sticky, classify=_classify("simple"))
+
+
+def _no_system(body: dict) -> dict:
+    return dict(body, messages=[m for m in body["messages"] if m["role"] != "system"])
+
+
+def test_context_limit_is_per_model_and_the_55_one_guarantees_the_window():
+    from llm_router.proxy.tiers import haiku55_context_limit
+    assert pt.HAIKU55_MAX_CONTEXT_TOKENS == 670_769 == haiku55_context_limit({})
+    for mt in (None, 1_000, 32_000, 128_000):
+        lim = haiku55_context_limit({"max_tokens": mt} if mt else {})
+        assert lim * 1.3 + (mt or 128_000) <= 1_000_000 < (lim + 2) * 1.3 + (mt or 128_000)  # the largest that fits
+    assert haiku55_context_limit({"max_tokens": 1_000}) > haiku55_context_limit({"max_tokens": 128_000})
+    # 4.5 keeps its own 150K limit, 5.5 takes what 4.5 refuses
+    big = _body_of(200_000)
+    assert pt.haiku_block_reason(_no_system(big), model=H45) == "context"
+    assert pt.haiku_block_reason(big, model=H55) == "none"
+
+
+async def test_just_under_the_limit_goes_to_55_just_over_goes_up_a_tier():
+    from llm_router.proxy.tiers import haiku55_context_limit
+    limit = haiku55_context_limit({"max_tokens": 4096})
+    fixed = pt._approx_context_tokens(_body_of(0, max_tokens=4096))  # system prompt, tools, JSON framing
+    under = _body_of(limit - fixed - 50, max_tokens=4096)
+    over = _body_of(limit - fixed + 50, max_tokens=4096)
+    assert pt._approx_context_tokens(under) < limit < pt._approx_context_tokens(over)
+    assert (await _later(_policy55(), under)).served_model == H55
+    d = await _later(_policy55(), over)
+    assert (d.served_model, d.reason) == (SONNET, pt.REASON_HAIKU_BODY)
+    assert pt.haiku_block_reason(over, model=H55) == "context"
+
+
+async def test_the_arm_uses_the_same_per_model_limit():
+    policy = _policy55(haiku_arm_share=1.0)
+    assert policy._haiku_body_ok(_body_of(200_000)) is True   # over 4.5's 150K, inside 5.5's
+    assert policy._haiku_body_ok(_body_of(700_000)) is False
+    legacy = pt.ClaudeTierPolicy.from_dict(_raw_policy(), conversation_level=True)
+    assert legacy._haiku_body_ok(_no_system(_body_of(100_000))) is True
+    assert legacy._haiku_body_ok(_no_system(_body_of(200_000))) is False
 
 
 # ── the decision ─────────────────────────────────────────────────────────────
@@ -129,7 +177,7 @@ async def test_55_without_the_rewrite_flag_still_takes_what_it_accepts_natively(
 
 @pytest.mark.parametrize("mutate, why", [
     (lambda b: b.update(temperature=0.2), "params"),
-    (lambda b: b["messages"][0].update(content=[{"type": "text", "text": "x" * 400_000}]), "context"),
+    (lambda b: b["messages"][0].update(content=[{"type": "text", "text": "x" * 3_200_000}]), "context"),
     (lambda b: b["tools"].append({"type": "web_search_20250305", "name": "web_search"}), "builtin_tools"),
 ])
 async def test_a_body_55_cannot_take_moves_up_even_though_thinking_and_effort_are_accepted(mutate, why):
