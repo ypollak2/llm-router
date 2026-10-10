@@ -12,6 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- one classifier engine, core only (PLAN v16 P1.6, DRAFT, do not merge before G0): `llm_router.engine.decide(text, door=...)`
+  returns one frozen `Decision` with every R-CLS-2 field, from L1 heuristics (`ENGINE_POLICY`, equal to `GATEWAY_POLICY`
+  until the GT-500 tune refit), an optional pure-Python lexical L3 model (`ml_lexical.py`, artifact
+  `engine_lexical.json`, built by `scripts/build_engine_lexical.py`), abstain-to-safer-tier, secret `local_only`, and an
+  LRU + `decide_cache.sqlite` cache. No LLM and no network on the sync path. Nothing calls it yet; the 7 call sites are
+  separate PRs. Tests (`tests/test_engine_core.py`) use synthetic prompts and prove mechanics only, not accuracy.
+  New env vars: `LLM_ROUTER_DECIDE_CACHE`, `LLM_ROUTER_ENGINE_LEXICAL`, `LLM_ROUTER_ENGINE_CALIBRATION`.
+
 ### Fixed
 - local timeout demotion (LOCAL-TIMEOUT-1, docs/bugs/LOCAL-TIMEOUT-1.md): an `ollama/*` model that had just timed out
   led the next route again. In the live ledger (`routing_quality.jsonl`, 2026-10-10 08:34:22Z to 09:30:14Z),
