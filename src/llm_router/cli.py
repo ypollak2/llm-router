@@ -33,6 +33,7 @@ Usage:
     llm-router provider list    — providers skipped until a reported reset time
     llm-router provider unban <name>  — lift that skip now (or --all)
     llm-router inventory [--json]     — models this machine can run: route, path, quota, privacy
+    llm-router map [--json]           — the one resource map: seats, local models, keys, quota, priority
     llm-router calibrate [--models M] [--allow-paid] — measure per-model capability (local-only by default)
     llm-router resolve --tier T [--needs tools,vision] — what the resolver would pick (inspection only)
     llm-router semantic status  — project scope, derived index, and selected arm
@@ -922,7 +923,7 @@ _HELP_FLAGS = ("-h", "--help")
 # position (argparse, or an explicit check over all args).
 _OWN_HELP_ANYWHERE = frozenset({
     "audit", "calibrate", "cp", "dev-refresh", "gc", "install", "inventory", "invoice",
-    "judge", "kpi", "last", "migrate", "mod", "northstar", "pi", "policy", "proxy",
+    "judge", "kpi", "last", "map", "migrate", "mod", "northstar", "pi", "policy", "proxy",
     "quickstart", "replay", "resolve", "retrospect", "run", "serve", "snapshot", "stats",
     "statusline", "team-sync", "test-delta", "verify", "welcome",
 })
@@ -1142,6 +1143,9 @@ def main() -> None:
         # Read-only: what models this machine can run (never prints a secret).
         from llm_router.commands.inventory import cmd_inventory
         sys.exit(cmd_inventory(args[1:]))
+    elif args and args[0] == "map":
+        from llm_router.commands.map import cmd_map
+        sys.exit(cmd_map(args[1:]))
     elif args and args[0] == "calibrate":
         # Short per-model capability probes; local-only unless --allow-paid.
         from llm_router.commands.calibrate import cmd_calibrate

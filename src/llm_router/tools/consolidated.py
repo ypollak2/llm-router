@@ -139,10 +139,17 @@ async def llm(
 async def llm_router_status(view: str = "summary", period: str = "today") -> str:
     """Read-only status/observability door — collapses the many llm_* reporting
     tools into one *view* selector: summary/savings · session_savings · spend ·
-    usage · health · providers · gain · cache. The old tools remain as aliases underneath."""
+    usage · health · providers · gain · cache · map. The old tools remain as aliases underneath."""
     v = (view or "summary").lower()
     if v == "cache":
         return _cache_view(period)
+    if v == "map":
+        import asyncio
+
+        from llm_router import resource_map
+
+        # The build runs CLIs and Ollama HTTP: keep it off the event loop.
+        return await asyncio.to_thread(resource_map.view_json)
     if v in ("savings", "summary"):
         return await llm_savings()
     if v in ("session_savings", "session-savings"):

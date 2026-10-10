@@ -50,3 +50,22 @@ def num_ctx(model: str | None = None) -> int:
     if base:
         return NUM_CTX.get(base, NUM_CTX.get(f"{base}:latest", DEFAULT_NUM_CTX))
     return DEFAULT_NUM_CTX
+
+
+# What a local model may be asked to do. Ollama's ``/api/show`` capabilities
+# list says "completion" for a model that still 400s on a generate call when it
+# was built for one narrow job, so the roles are declared here, next to the
+# window. A model not listed here serves ``generate``. ``resource_map`` reads
+# this table; nothing else should guess a model's role from its name.
+# nimble:9b is the typed decision model (``decision_classifier.DEFAULT_MODEL``):
+# a generate call to it returns HTTP 400 (bug N19).
+ROLES: dict[str, frozenset[str]] = {
+    "nimble:9b": frozenset({"decision"}),
+}
+DEFAULT_ROLES: frozenset[str] = frozenset({"generate"})
+
+
+def roles(model: str | None = None) -> frozenset[str]:
+    """The roles *model* serves (``ollama/`` prefix optional); see :data:`ROLES`."""
+    name = _name(model)
+    return ROLES.get(name, DEFAULT_ROLES)
