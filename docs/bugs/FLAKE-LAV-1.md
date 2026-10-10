@@ -23,6 +23,6 @@ status: fixed in this change (test infrastructure only; production unaffected)
   hook trust records (`hooks.state`), the only things the installer writes (`codex_host`); the file is
   `_REPORT_ONLY` (never restored over a live writer). Genuine escapes still show.
 - **Test.** `tests/test_codex_config_guard_slice.py` (6 tests: project-table churn ignored; new/edited
-  llm_router table and new trust record detected). Same harness after: see PR body for the 50-run count.
+  llm_router table and new trust record detected). Same harness after: 50 of 50 runs passed (87 tests each; 15 workers, 90 CPU busy-loops, uvx ruff). Before: teardown ERRORs in 3 of ~35 comparable runs.
 - **Not found.** No timing/ruff failure reproduced in the verify file; its 30 s deadlines held under 8x CPU
   oversubscription (runs took ~40 s vs ~8 s unloaded).
