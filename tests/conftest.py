@@ -1367,8 +1367,9 @@ def _codex_config_slice(p: Path):
     directories (the operator's copy: 1,200+ lines, mostly those), so whole-file
     (bytes, mtime) diffing blamed whichever test's teardown sampled it
     mid-write -- under xdist, on files that never touch Codex. The installer
-    writes ``[mcp_servers.llm_router]`` and hook trust records
-    (``hooks.state``); see ``codex_host``. Everything else is somebody else's.
+    writes ``[mcp_servers.llm_router]``, hook trust records
+    (``hooks.state``), ``[model_providers.llm_router]`` and the forced
+    ``model``/``model_provider`` defaults it removes; see ``codex_host``. Everything else is somebody else's.
     """
     from llm_router import codex_host
 
@@ -1384,7 +1385,18 @@ def _codex_config_slice(p: Path):
         tomllib.loads(text)
     except tomllib.TOMLDecodeError:
         return "<unreadable>"
-    return (codex_host.read_mcp_server(text), sorted(codex_host.read_trust_records(text).items()))
+    data = tomllib.loads(text)
+    # `_install_codex_gateway_config` (commands/install.py) also writes
+    # [model_providers.llm_router] and removes a forced top-level
+    # model="auto" / model_provider="llm_router".
+    gateway = (data.get("model_providers") or {}).get("llm_router")
+    forced = (data.get("model") == "auto", data.get("model_provider") == "llm_router")
+    return (
+        codex_host.read_mcp_server(text),
+        sorted(codex_host.read_trust_records(text).items()),
+        gateway,
+        forced,
+    )
 
 
 def _claude_settings_slice(p: Path):

@@ -40,3 +40,17 @@ def test_a_new_hook_trust_record_is_a_change(tmp_path):
 
 def test_unparseable_toml_is_reported_not_raised(tmp_path):
     assert _slice(tmp_path, "[broken") == "<unreadable>"
+
+
+GATEWAY = '[model_providers.llm_router]\nname = "LLM Router"\nbase_url = "http://x"\n'
+
+
+def test_a_new_or_edited_gateway_provider_table_is_a_change(tmp_path):
+    assert _slice(tmp_path, BASE) != _slice(tmp_path, BASE + GATEWAY)
+    assert _slice(tmp_path, GATEWAY) != _slice(tmp_path, GATEWAY.replace("http://x", "http://y"))
+
+
+def test_forced_default_model_keys_flipping_is_a_change(tmp_path):
+    forced = 'model = "auto"\nmodel_provider = "llm_router"\n' + BASE
+    assert _slice(tmp_path, forced) != _slice(tmp_path, BASE)
+    assert _slice(tmp_path, 'model = "gpt-5"\n' + BASE) == _slice(tmp_path, BASE)
