@@ -767,6 +767,8 @@ REASON_ERROR_CANCELLED = "error_cancelled"
 REASON_ERROR_BUDGET = "error_budget_exceeded"
 REASON_ERROR_DENIED = "error_routing_denied"
 REASON_ERROR_OTHER = "error_exception"
+# N21: the quality breaker refused the call before dispatch (mirrors provider_classes.REASON_BREAKER_OPEN).
+REASON_BREAKER_OPEN = "breaker_open"
 
 MIGRATE_ADD_TASK_TYPE_RAW = [
     "ALTER TABLE usage ADD COLUMN task_type_raw TEXT",
@@ -1535,6 +1537,18 @@ async def log_route_error(
     return True
 
 
+async def log_breaker_refusal(task_type: TaskType | None, profile: RoutingProfile,
+                              *, correlation_id: str | None) -> bool:
+    """N21: write the one ``usage`` row and the one ``routing_decisions`` row of an ``llm()`` call the
+    quality breaker refused (``reason`` / ``reason_code`` ``breaker_open``, caller's session id, success=0,
+    $0, no model). Same writer, dedup and session source as ``log_route_error``; the shared predicates
+    (``provider_classes``) keep these rows out of routing metrics, bandit, judge and cost consumers."""
+    return await log_route_error(
+        task_type, profile, reason=REASON_BREAKER_OPEN, correlation_id=correlation_id,
+        attempted_model=None, latency_ms=0.0,
+    )
+
+
 async def log_correction(
     original_tool: str,
     original_model: str,
@@ -2201,7 +2215,9 @@ async def log_routing_decision(
     # Validate inputs before database insert. A cache-served or failed call (LEDGER-ERR-1)
     # names no real provider ("cache", or "none" when nothing was attempted); its reason_code
     # is the whole reason it may skip the provider allowlist.
-    _non_call = bool(reason_code) and (reason_code == REASON_CACHE_HIT or reason_code.startswith("error_"))
+    _non_call = bool(reason_code) and (
+        reason_code in (REASON_CACHE_HIT, REASON_BREAKER_OPEN) or reason_code.startswith("error_")
+    )
     if not _non_call:
         _validate_routing_insert(final_model, final_provider, cost_usd)
 
