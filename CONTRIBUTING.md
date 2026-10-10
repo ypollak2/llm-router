@@ -149,6 +149,16 @@ docs: add ElevenLabs setup guide
 test: add integration tests for image routing
 ```
 
+## Changelog
+
+Do not edit `CHANGELOG.md` in a PR (owner decision D-49: direct edits forced 7+ re-merges).
+Add one fragment, `changelog.d/<id>.<type>.md`, where `<type>` is `added`, `changed`,
+`deprecated`, `removed`, `fixed`, `security`, `docs` or `internal` (e.g. `N21.fixed.md`).
+The body is the bullet text. The release folds fragments into `## [Unreleased]`
+(`scripts/changelog_fragments.py assemble`) and deletes them. CI `changelog-check` fails on a
+malformed fragment and warns, for now, on a direct edit of `[Unreleased]`. This applies to
+agents too.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the MIT License.
