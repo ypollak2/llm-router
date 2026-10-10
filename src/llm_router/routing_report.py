@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from llm_router import paths
-from llm_router.provider_classes import not_error_row_sql
+from llm_router.provider_classes import not_error_row_sql, real_decision_sql
 
 def _home():
     return paths.llm_router_home()
@@ -270,7 +270,7 @@ def generate_report() -> str:
         try:
             srcs = con.execute(
                 "SELECT COALESCE(classifier_type,'?'), COUNT(*) FROM routing_decisions "
-                "GROUP BY 1 ORDER BY 2 DESC").fetchall()
+                "WHERE " + real_decision_sql(con) + " GROUP BY 1 ORDER BY 2 DESC").fetchall()
         except sqlite3.Error:
             srcs = []
     finally:

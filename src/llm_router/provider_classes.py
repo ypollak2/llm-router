@@ -26,6 +26,60 @@ ERROR_REASON_PREFIX = "error_"
 SQL_NOT_ERROR_ROW = "COALESCE(reason, '') NOT LIKE 'error\\_%' ESCAPE '\\'"
 
 
+#: LEDGER-ERR-1 / owner decision 2026-10-10: ``routing_decisions`` carries one ``provenance='runtime'``
+#: row per llm() call, so a failed call (``reason_code`` ``error_*``) and a cache-served call
+#: (``reason_code`` ``cache_hit``, ``final_provider`` ``cache``) have rows too. They are
+#: attributable calls, not routing decisions: routing quality, accuracy, shares and judge/ground-truth
+#: sampling must leave them out, exactly like the matching ``usage`` rows.
+REASON_CACHE_HIT_CODE = "cache_hit"
+
+#: SQL predicate (routing_decisions table): keep only rows that are real routing decisions.
+SQL_REAL_DECISION = (
+    "COALESCE(reason_code, '') NOT LIKE 'error\\_%' ESCAPE '\\' "
+    "AND COALESCE(reason_code, '') != 'cache_hit' "
+    "AND COALESCE(final_provider, '') != 'cache'"
+)
+
+
+def is_non_decision_reason(reason: object) -> bool:
+    """True for a ``reason_code`` that marks a cache-served or failed call."""
+    return reason == REASON_CACHE_HIT_CODE or is_error_reason(reason)
+
+
+def real_decision_sql(con, alias: str = "") -> str:
+    """``SQL_REAL_DECISION`` for a sync sqlite3 connection, optionally table-aliased. Each term is
+    kept only when its column exists (a database or fixture older than P0.8 has no such rows),
+    and the result is ``1`` when neither does."""
+    try:
+        cols = {r[1] for r in con.execute("PRAGMA table_info(routing_decisions)")}
+    except Exception:  # noqa: BLE001
+        return "1"
+    a = (alias.rstrip(".") + ".") if alias else ""
+    parts = []
+    if "reason_code" in cols:
+        parts.append(f"COALESCE({a}reason_code, '') NOT LIKE 'error\\_%' ESCAPE '\\'")
+        parts.append(f"COALESCE({a}reason_code, '') != 'cache_hit'")
+    if "final_provider" in cols:
+        parts.append(f"COALESCE({a}final_provider, '') != 'cache'")
+    return " AND ".join(parts) or "1"
+
+
+async def real_decision_sql_async(db) -> str:
+    """``real_decision_sql`` for an aiosqlite connection."""
+    try:
+        cur = await db.execute("PRAGMA table_info(routing_decisions)")
+        cols = {r[1] for r in await cur.fetchall()}
+    except Exception:  # noqa: BLE001
+        return "1"
+    parts = []
+    if "reason_code" in cols:
+        parts.append(SQL_REAL_DECISION.split(" AND ")[0])
+        parts.append("COALESCE(reason_code, '') != 'cache_hit'")
+    if "final_provider" in cols:
+        parts.append("COALESCE(final_provider, '') != 'cache'")
+    return " AND ".join(parts) or "1"
+
+
 def not_error_row_sql(con) -> str:
     """``SQL_NOT_ERROR_ROW`` for a sync sqlite3 connection, or ``1`` when the table has no
     ``reason`` column (a database older than P0.8-d has no error rows to exclude)."""

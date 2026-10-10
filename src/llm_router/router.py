@@ -2447,7 +2447,8 @@ async def _finalize_successful_route(
             cost_usd=response.cost_usd,
             latency_ms=response.latency_ms,
             reason_code=_cd.get("reason_code") or (
-                REASON_ROUTER_UNHINTED if _unhinted else REASON_ROUTER_CHAIN
+                REASON_CACHE_HIT if ledger_outcome == "cache_hit"
+                else REASON_ROUTER_UNHINTED if _unhinted else REASON_ROUTER_CHAIN
             ),
             correlation_id=correlation_id,
             response=response.content,
@@ -3923,6 +3924,7 @@ async def _record_route_error(
     attempts: list[str],
     models_to_try: list[str],
     started_monotonic: float,
+    complexity: str = "moderate",
 ) -> None:
     """LEDGER-ERR-1: leave the failed call's one per-session ledger row. FAIL-OPEN.
 
@@ -3949,6 +3951,7 @@ async def _record_route_error(
                 correlation_id=correlation_id,
                 attempted_model=attempted,
                 latency_ms=(_time.monotonic() - started_monotonic) * 1000.0,
+                complexity=complexity,
             )
         )
     except BaseException as _err:  # noqa: BLE001 — telemetry never changes the failure
@@ -5028,7 +5031,8 @@ async def route_and_call(
                 response = await _dispatch_coro
         except asyncio.CancelledError as _cancel_err:
             await _record_route_error(_cancel_err, task_type, profile, correlation_id,
-                                      _attempt_trace, models_to_try, _dispatch_started)
+                                      _attempt_trace, models_to_try, _dispatch_started,
+                                      effective_complexity)
             # T3-M1: external cancellation (parent agent killed, host
             # client disconnected, supervisor pulled the plug). The
             # routing path must release its budget reservation before
@@ -5043,7 +5047,8 @@ async def route_and_call(
         except asyncio.TimeoutError as _to_err:
             elapsed = _t.monotonic() - _dispatch_started
             await _record_route_error(_to_err, task_type, profile, correlation_id,
-                                      _attempt_trace, models_to_try, _dispatch_started)
+                                      _attempt_trace, models_to_try, _dispatch_started,
+                                      effective_complexity)
             async with _budget_lock():
                 _pending_spend = max(0.0, _pending_spend - _reservation)
             await release_envelope(_env_key, _reservation)
@@ -5069,7 +5074,8 @@ async def route_and_call(
             ) from _to_err
         except Exception as _disp_err:
             await _record_route_error(_disp_err, task_type, profile, correlation_id,
-                                      _attempt_trace, models_to_try, _dispatch_started)
+                                      _attempt_trace, models_to_try, _dispatch_started,
+                                      effective_complexity)
             # RED1-4-02: _dispatch_model_loop releases _pending_spend on its
             # all-models-failed tail (RuntimeError) but never the distributed
             # budget envelope, and route_and_call only caught Cancelled/Timeout —

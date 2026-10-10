@@ -314,6 +314,8 @@ Public surface
 
 from __future__ import annotations
 
+from llm_router.provider_classes import real_decision_sql
+
 import glob
 import hashlib
 import json
@@ -1504,6 +1506,7 @@ def local_shadow_units(days: int | None = 30, db_path: Path | None = None) -> It
         return
     try:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(routing_decisions)")}
+        where += f" AND {real_decision_sql(conn)}"
         sid = "session_id" if "session_id" in cols else "NULL"
         tier = "shadow_tier" if "shadow_tier" in cols else "NULL"
         tool = "tool_use_id" if "tool_use_id" in cols else "NULL"

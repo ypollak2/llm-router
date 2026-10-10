@@ -49,6 +49,7 @@ Example output:
   No issues detected. You're good! 🚀
 """
 
+from llm_router.provider_classes import real_decision_sql
 import argparse
 import json
 import os
@@ -248,7 +249,7 @@ def check_last_decisions(limit: int = 5) -> list[str]:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT timestamp, model, task_type, task_complexity, cost_usd FROM routing_decisions "
-            "WHERE is_real = 1 ORDER BY timestamp DESC LIMIT ?",
+            "WHERE is_real = 1 AND " + real_decision_sql(conn) + " ORDER BY timestamp DESC LIMIT ?",
             (limit,),
         )
         rows = cursor.fetchall()

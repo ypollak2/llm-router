@@ -217,3 +217,80 @@ async def test_outside_an_mcp_call_the_error_row_session_is_null(cache_env, monk
     with pytest.raises(RuntimeError):
         await _call(boom)
     assert _q(cache_env, "SELECT session_id, reason FROM usage") == [(None, "error_all_models_failed")]
+
+
+# ── owner decision 2026-10-10: the same calls also leave one routing_decisions row ──────────
+
+_RD = ("SELECT session_id, task_type, final_provider, final_model, reason_code, provenance, success, "
+       "cost_usd FROM routing_decisions ORDER BY id")
+
+
+def _both(db):
+    return _q(db, "SELECT COUNT(*) FROM usage")[0][0], _q(db, "SELECT COUNT(*) FROM routing_decisions")[0][0]
+
+
+@pytest.mark.asyncio
+async def test_provider_exception_writes_one_routing_decision_row(cache_env, caller):
+    def boom(model, messages, **kw):
+        raise RuntimeError("down")
+
+    from llm_router import cost
+
+    with pytest.raises(RuntimeError):
+        await _call(boom)
+    assert _both(cache_env) == (1, 1)
+    assert _q(cache_env, _RD) == [(SID, "code", "ollama", "ollama/qwen3-coder:30b",
+                                   "error_all_models_failed", cost._write_provenance(), 0, 0.0)]
+
+
+@pytest.mark.asyncio
+async def test_no_healthy_candidate_writes_one_row_in_each_table(cache_env, caller):
+    with pytest.raises(RuntimeError):
+        await _call(_ok, healthy=False, chain=("ollama/qwen3-coder:30b", "ollama/qwen3.8:latest"))
+    assert _both(cache_env) == (1, 1)
+    assert _q(cache_env, _RD)[0][:5] == (SID, "code", "ollama", "ollama/qwen3-coder:30b", "error_all_models_failed")
+
+
+@pytest.mark.asyncio
+async def test_timeout_writes_one_row_in_each_table(cache_env, caller):
+    async def slow(model, messages, **kw):
+        await asyncio.sleep(5)
+
+    from llm_router.types import WallClockExceeded
+
+    with pytest.raises(WallClockExceeded):
+        await _call(slow, max_wall_clock_seconds=0.05)
+    assert _both(cache_env) == (1, 1)
+    assert _q(cache_env, _RD)[0][0] == SID and _q(cache_env, _RD)[0][4] == "error_timeout"
+
+
+@pytest.mark.asyncio
+async def test_cancellation_writes_one_row_in_each_table(cache_env, caller):
+    started = asyncio.Event()
+
+    async def hang(model, messages, **kw):
+        started.set()
+        await asyncio.sleep(30)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _call(hang, started=started)
+    assert _both(cache_env) == (1, 1)
+    assert _q(cache_env, _RD)[0][4] == "error_cancelled"
+
+
+@pytest.mark.asyncio
+async def test_a_success_writes_one_row_in_each_table_and_no_error_row(cache_env, caller):
+    await _call(_ok)
+    assert _both(cache_env) == (1, 1)
+    assert _q(cache_env, "SELECT reason_code FROM routing_decisions") == [("router_unhinted",)]
+
+
+@pytest.mark.asyncio
+async def test_error_dedup_spans_both_tables(cache_env, caller):
+    from llm_router import cost
+
+    await cost.log_route_error(TaskType.CODE, RoutingProfile.BUDGET, reason=cost.REASON_ERROR_TIMEOUT,
+                               correlation_id="dup00001", attempted_model="ollama/x")
+    assert await cost.log_route_error(TaskType.CODE, RoutingProfile.BUDGET, reason=cost.REASON_ERROR_TIMEOUT,
+                                      correlation_id="dup00001", attempted_model="ollama/x") is False
+    assert _both(cache_env) == (1, 1)

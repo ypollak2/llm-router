@@ -26,7 +26,7 @@ from textual.widgets import Footer, Static
 from llm_router.tool_surface import route_tool  # CHZ-SURF-01
 
 from llm_router import paths
-from llm_router.provider_classes import not_error_row_sql
+from llm_router.provider_classes import not_error_row_sql, real_decision_sql
 from llm_router.sqlite_wal import enable_wal
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -300,12 +300,12 @@ def _fetch_data() -> DashboardData:
 
         # ── Routing decisions ─────────────────────────────────────────
         try:
-            row = conn.execute("SELECT COUNT(*) FROM routing_decisions").fetchone()
+            row = conn.execute("SELECT COUNT(*) FROM routing_decisions WHERE " + real_decision_sql(conn)).fetchone()
             d.total_decisions = row[0] if row else 0
 
             rows = conn.execute(
                 "SELECT classifier_type, COUNT(*) FROM routing_decisions "
-                "GROUP BY classifier_type"
+                "WHERE " + real_decision_sql(conn) + " GROUP BY classifier_type"
             ).fetchall()
             for r in rows:
                 ct = (r[0] or "").lower()
@@ -317,7 +317,7 @@ def _fetch_data() -> DashboardData:
                     d.api_count += r[1]
 
             row = conn.execute(
-                "SELECT COUNT(*) FROM routing_decisions WHERE cost_usd = 0 OR cost_usd IS NULL"
+                "SELECT COUNT(*) FROM routing_decisions WHERE (cost_usd = 0 OR cost_usd IS NULL) AND " + real_decision_sql(conn)
             ).fetchone()
             if row and d.total_decisions > 0:
                 d.zero_cost_pct = row[0] / d.total_decisions * 100

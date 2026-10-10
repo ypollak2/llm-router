@@ -21,9 +21,19 @@ status: fixed in `fix/llm-error-path-ledger-row`
   (`provider_classes.SQL_NOT_ERROR_ROW`, like the cache-row precedent): statusline mix, routing_report (counts and latency
   percentiles), routing_health, dashboard TUI/server today and month call counts. Share card, digest, session hooks and
   test_delta already filter `success = 1`. Other dashboard queries (per-task/profile breakdowns) still count them.
-- **Gate scope (read this).** The M0-3 gate query (`P0.0-m0.json` M0-3 sql) reads `routing_decisions` where `provenance='runtime'` only.
-  This change writes a `usage` row, not a `routing_decisions` row, so it does NOT change the literal gate count (15/20 on the rerun).
-  It closes the gap under an "any per-session ledger row" measure (17/20 + 3 error rows = 20/20 in that run, by construction, not re-measured).
+- **Gate scope (owner decision 2026-10-10).** The M0-3 gate query (`P0.0-m0.json` M0-3 sql) reads `routing_decisions` where `provenance='runtime'`.
+  So a failed call and a cache-served call (the #381 path) now ALSO write exactly one `routing_decisions` row: `provenance` from `_write_provenance()` (runtime in
+  production), the caller's `session_id` (same `call_identity` source as success rows), `task_type`, `final_provider`/`final_model` = the attempted model (or `cache`),
+  `reason_code` `error_*` / `cache_hit`, `success` 0 / 1, $0. `log_route_error` skips both tables when either already has a row for the call's correlation id.
+  These are attributable calls, not routing decisions: `provider_classes.SQL_REAL_DECISION` / `real_decision_sql(con)` (column-aware) excludes them from routing metrics.
+  The effect on the literal gate count has not been re-measured; it needs a fresh run.
+- **Routing_decisions readers.** Changed to exclude error/cache rows: cost.py (`routing_production_only`, so get_quality_report, get_router_efficiency, get_routing_savings_vs_sonnet;
+  get_classifier_overhead, get_model_latency_stats, get_model_failure_rates, get_model_acceptance_scores), telemetry (bandit training), community (3), misroute_audit,
+  retrospective, attribution, team_sync export, northstar, sidecar, test_delta, proxy_liveness, routing_report, dashboard TUI, ui/status_premium, tools/dashboard,
+  commands gain/last/replay/verify/doctor, hooks/session-end.py (v29, both copies; 5 queries). Judge enqueue skips these rows. Left alone: cost.py disclosure/by-id queries
+  (`_count_unknown_provenance`, feedback by id), judge.py (reads rows that have a judge score; these never get one), tools/admin (policy_applied / judge_score filters select neither),
+  commands/kpi G3 completeness (it scores how complete each writer's rows are; error and cache rows are rows of that writer and carry session/reason, same as the cache usage row),
+  lineage_* (a separate lineage.db table of the same name), `get_routing_savings` style readers that already filter `success = 1` only for error rows (cache rows were added to those above).
 - **Test.** `tests/test_ledger_err1_error_row.py`: provider exception, no healthy candidate, wall-clock timeout and cancellation each write exactly one row with
   the caller's session id; success writes no error row; retry is two rows; no double row per correlation id; no prompt/exception text; NULL session outside an MCP call.
-  `tests/test_ledger_err1_consumers.py` covers the consumer exclusion (4 of 5 fail without it; the fifth checks the helper). With `router.py` reverted to origin/main, 6 of the 9 error-row tests fail (3 pass vacuously: success path, direct no-double-row, no text); with all of `src/` reverted, 7 fail.
+  `tests/test_ledger_err1_consumers.py` covers the consumer exclusion (4 of 5 fail without it) and `tests/test_ledger_err1_decision_consumers.py` (routing_decisions readers; fails with `SQL_REAL_DECISION` neutralised). `tests/test_ledger_err1_error_row.py` has 15 tests: both tables get exactly one row for provider exception, no healthy candidate, timeout, cancel; dedup spans both tables. With the `routing_decisions` write removed from `log_route_error`, 5 fail; with `router.py` reverted, the usage-row tests fail as before. `tests/test_p08e_cache_hit_row.py` now asserts the cache-hit routing row.
