@@ -9,7 +9,12 @@ unblocked path (no wrong-tool dead-end).
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
+
 from mcp.server.mcpserver import Context
+
+from llm_router import call_identity
 
 from llm_router.tools.admin import (
     llm_budget,
@@ -68,23 +73,66 @@ def _quality_breaker_block(lever: str, task_type: str) -> str | None:
             f"Do this yourself instead of routing it.")
 
 
-async def _log_breaker_refusal(task: str) -> None:
-    """N21: a refused ``llm()`` call still gets its one session-attributed ledger row in ``usage`` and
-    ``routing_decisions`` (reason ``breaker_open``, $0). Fail-open: a ledger error never changes the reply."""
+#: LEDGER-EVERY-EXIT-1: outcome of a guarded call that wrote no row of its own and returned normally.
+_REASON_UNLEDGERED_RETURN = "error_unledgered_exit"
+
+
+async def _ledger_exit(guard, task: str, exc: BaseException | None, started: float,
+                       *, refused: bool = False) -> None:
+    """Write whichever of the call's two ledger rows (``usage``, ``routing_decisions``) is still
+    missing, once, with the caller's session id. FAIL-OPEN and shielded; never changes the reply or
+    the exception. A table the path already wrote is never written again."""
     try:
+        import time
         import uuid
 
         from llm_router import cost
+        from llm_router.router import _route_error_reason
         from llm_router.state import get_active_profile
         from llm_router.types import TaskType
 
+        missing = tuple(t for t in ("usage", "routing_decisions") if t not in guard.tables)
+        if not missing:
+            return
+        if refused:
+            reason = cost.REASON_BREAKER_OPEN
+        elif exc is not None:
+            reason = _route_error_reason(exc)
+        else:
+            reason = _REASON_UNLEDGERED_RETURN
         try:
             task_type = TaskType(task if task != "auto" else "query")
         except ValueError:
             task_type = None
-        await cost.log_breaker_refusal(task_type, get_active_profile(), correlation_id=uuid.uuid4().hex[:8])
-    except Exception:  # noqa: BLE001
+        await asyncio.shield(cost.log_route_error(
+            task_type, get_active_profile(), reason=reason, correlation_id=uuid.uuid4().hex[:8],
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            only=None if len(missing) == 2 else missing,
+        ))
+    except BaseException:  # noqa: BLE001 -- telemetry never changes the outcome
         pass
+
+
+@contextlib.asynccontextmanager
+async def _ledger_guard(task: str):
+    """LEDGER-EVERY-EXIT-1: one structural guarantee that a tool call leaves a ledger row on EVERY exit
+    (return, raised error, timeout, cancel). The writers (``cost.log_usage`` / ``log_routing_decision``)
+    report to the guard; on exit the missing table(s) get an ``error_*`` / ``breaker_open`` row, which
+    every non-decision predicate (``provider_classes``) already excludes. A hard kill (SIGKILL, OOM, power
+    loss) runs no handler and stays unledgered: nothing in-process can cover it."""
+    import time
+
+    guard, token = call_identity.open_ledger_guard()
+    started = time.monotonic()
+    try:
+        yield guard
+    except BaseException as exc:
+        call_identity.close_ledger_guard(token)
+        await _ledger_exit(guard, task, exc, started, refused=guard.refused)
+        raise
+    else:
+        call_identity.close_ledger_guard(token)
+        await _ledger_exit(guard, task, None, started, refused=guard.refused)
 
 
 def door_for_tool(name: str) -> str:
@@ -114,11 +162,13 @@ async def llm_act(
 
     *wait=False* returns ``{"job_id": ...}`` at once instead of the result; poll
     it with ``llm_router_session(action="job", id=<job_id>)``."""
-    _blocked = _quality_breaker_block("mcp_llm_act", "agentic")
-    if _blocked:
-        return _blocked
-    return await llm_delegate(task, budget_usd=budget_usd, context=context, wait=wait,
-                              ctx=ctx)
+    async with _ledger_guard("agentic") as guard:
+        _blocked = _quality_breaker_block("mcp_llm_act", "agentic")
+        if _blocked:
+            guard.refused = True
+            return _blocked
+        return await llm_delegate(task, budget_usd=budget_usd, context=context, wait=wait,
+                                  ctx=ctx)
 
 
 async def llm(
@@ -136,24 +186,25 @@ async def llm(
     llm_query/analyze/code/research/generate; those remain as aliases underneath."""
     complexity = _TIER_TO_COMPLEXITY.get((tier or "").lower(), "moderate")
     t = (task or "auto").lower()
-    _blocked = _quality_breaker_block("mcp_llm", t)
-    if _blocked:
-        await _log_breaker_refusal(t)
-        return _blocked
-    if t == "research":
-        return await llm_research(prompt, ctx, system_prompt=system_prompt, context=context)
-    if t == "analyze":
-        return await llm_analyze(prompt, ctx, complexity=complexity,
-                                 system_prompt=system_prompt, context=context)
-    if t == "code":
-        return await llm_code(prompt, ctx, complexity=complexity,
-                              system_prompt=system_prompt, context=context)
-    if t == "generate":
-        return await llm_generate(prompt, ctx, complexity=complexity,
+    async with _ledger_guard(t) as guard:
+        _blocked = _quality_breaker_block("mcp_llm", t)
+        if _blocked:
+            guard.refused = True
+            return _blocked
+        if t == "research":
+            return await llm_research(prompt, ctx, system_prompt=system_prompt, context=context)
+        if t == "analyze":
+            return await llm_analyze(prompt, ctx, complexity=complexity,
+                                     system_prompt=system_prompt, context=context)
+        if t == "code":
+            return await llm_code(prompt, ctx, complexity=complexity,
                                   system_prompt=system_prompt, context=context)
-    # auto / query — the general default
-    return await llm_query(prompt, ctx, complexity=complexity,
-                           system_prompt=system_prompt, context=context)
+        if t == "generate":
+            return await llm_generate(prompt, ctx, complexity=complexity,
+                                      system_prompt=system_prompt, context=context)
+        # auto / query — the general default
+        return await llm_query(prompt, ctx, complexity=complexity,
+                               system_prompt=system_prompt, context=context)
 
 
 async def llm_router_status(view: str = "summary", period: str = "today") -> str:
