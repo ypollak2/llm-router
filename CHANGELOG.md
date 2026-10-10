@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- session context store across resume (CONTEXT-RESUME-1, docs/bugs/CONTEXT-RESUME-1.md): every `claude --resume` is its
+  own SessionStart..SessionEnd under the same session id and SessionEnd deleted the store, so resumed sessions never held
+  more than one process's events (live 2026-10-10: 4 and 7 lines at archive after 10 resumed turns each, vs 22 for a
+  single process). SessionEnd now moves the store to `projects/<id>/archive/`; SessionStart `source=resume` restores it.
+  Archives are swept after 7 days. Hook versions: session-end 28, session-start 33.
 - proxy main-thread test (TURNFIRST-2, docs/bugs/TURNFIRST-2.md): a general-purpose sub-agent is sent the `Agent`
   tool, so the launcher-only test labelled its first call a main-thread `turn_first`. In the live ledger after the
   TURNFIRST-1 deploy (2026-10-10 00:15:07Z to 08:17:31Z, n=100 rows) 3 of the 4 `turn_first` rows were such first
