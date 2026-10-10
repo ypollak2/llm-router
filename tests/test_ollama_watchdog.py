@@ -131,7 +131,7 @@ def test_healthy_server_passes(server):
     body = _generates()[0]
     # a 1-token request that does not change how the model is held resident
     assert body["options"]["num_predict"] == 1 and body["stream"] is False
-    assert body["keep_alive"] == -1
+    assert body["keep_alive"] == 600
 
 
 @pytest.mark.timing

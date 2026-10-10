@@ -159,7 +159,7 @@ That run used a dedicated tuned server. The proxy's defaults follow it:
   That is about 3-5k prompt tokens instead of about 21k.
 - **Output cap.** `num_predict` is 200 after `Read`/`Bash`/no tool, and 700
   otherwise.
-- **Warm.** `keep_alive: -1` is sent on every call, plus one warm-up call at
+- **Warm.** `keep_alive: 600` (seconds; `--keep-alive -1` pins forever) is sent on every call, plus one warm-up call at
   start. A cold load took 8-110 s in that spike.
 - **Hedge.** 8 s to the first token.
 

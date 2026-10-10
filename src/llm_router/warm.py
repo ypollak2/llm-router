@@ -61,16 +61,21 @@ DEFAULT_COLD_BUDGET_S = 45.0
 _PS_TIMEOUT_S = 0.5
 
 
+#: Bounded fallback when LLM_ROUTER_LOCAL_KEEP_ALIVE is unset (N20).
+DEFAULT_KEEP_ALIVE_S = 600
+
+
 def edit_keep_alive() -> int | str:
-    """The ``keep_alive`` every edit-path Ollama call sends. Default -1 (never unload).
+    """The ``keep_alive`` every edit-path Ollama call sends. Default 600 s (bounded).
 
     ``LLM_ROUTER_LOCAL_KEEP_ALIVE`` overrides it with an integer (seconds, -1 =
-    forever) or an Ollama duration string such as ``"30m"``. An empty value falls
-    back to -1.
+    forever, honoured only when set explicitly) or an Ollama duration string such as
+    ``"30m"``. An empty or missing value falls back to ``DEFAULT_KEEP_ALIVE_S`` (N20: a
+    forever-pinned model contributed to an Ollama hang/eviction on 2026-10-10).
     """
     raw = os.environ.get("LLM_ROUTER_LOCAL_KEEP_ALIVE", "").strip()
     if not raw:
-        return -1
+        return DEFAULT_KEEP_ALIVE_S
     try:
         return int(raw)
     except ValueError:
