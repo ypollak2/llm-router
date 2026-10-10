@@ -394,6 +394,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_LOCAL_KEEP_ALIVE": ("llm_router", "warm.py", 1),
     # P2 local-usage plan: shadow-only would-be "local" tier (log only, never routes).
     "LLM_ROUTER_LOCAL_TIER": ("llm_router", "local_tier.py", 1),
+    # LOCAL-TIMEOUT-1: seconds a local model that just timed out stays at the back of the chain (0 = off).
+    "LLM_ROUTER_LOCAL_TIMEOUT_COOLDOWN_S": ("llm_router", "router.py", 1),
     # Local Ollama classifier (one v6 verdict per human turn): off|shadow|on, default off.
     "LLM_ROUTER_LOCAL_CLASSIFIER": ("llm_router", "local_classifier.py", 1),
     "LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS": ("llm_router", "local_classifier.py", 1),
