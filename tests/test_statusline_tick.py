@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from llm_router import statusline_tick as tick
+from tests.statusline_prime import wait_for_cache
 
 REPO = Path(__file__).resolve().parents[1]
 TICK = REPO / "src" / "llm_router" / "statusline_tick.py"
@@ -384,11 +385,18 @@ def _both(tmp_path, **extra):
 
 
 def test_both_prints_full_line_then_fast_line(tmp_path):
+    # A cold home's first render only starts the detached segment build and prints
+    # "segments pending"; the build lands later, at a time no test controls. Build
+    # the cache first so the `both` render and the full render below read the same
+    # one (docs/bugs/SLT-FLAKE-1.md).
+    _run(_env(tmp_path, "true", fast=False))
+    assert wait_for_cache(tmp_path), "the detached build never wrote the segment cache"
     out, _ = _both(tmp_path)
     lines = out.splitlines()
     assert len(lines) == 2, out
     assert not lines[0].startswith("llm-router · "), lines[0]
     assert lines[1].startswith("llm-router · "), lines[1]
+    assert "segments pending" not in lines[0], lines[0]
     full, _ = _run(_env(tmp_path, "true", fast=False))
     assert lines[0] == full.splitlines()[0]
 

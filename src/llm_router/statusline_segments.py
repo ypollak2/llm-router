@@ -278,11 +278,15 @@ def mix_segment(state: str) -> dict[str, str]:
 
         con = sqlite3.connect(db, timeout=2)
         try:
+            # = provider_classes.not_error_row_sql (stdlib-only hot path; test pins equality)
+            has_reason = any(r[1] == "reason" for r in con.execute("PRAGMA table_info(usage)"))
+            not_error = ("COALESCE(reason, '') NOT LIKE 'error\\_%' ESCAPE '\\' AND COALESCE(reason, '') != 'breaker_open'" if has_reason else "1")
             row = con.execute(
                 "SELECT SUM(CASE WHEN model LIKE 'ollama/%' THEN 1 ELSE 0 END),"
                 " SUM(CASE WHEN model NOT LIKE 'ollama/%' THEN 1 ELSE 0 END)"
                 " FROM usage WHERE timestamp >= datetime('now', '-6 hours')"
-                " AND COALESCE(provider, '') != 'cache'").fetchone()  # cache hits are not calls (provider_classes)
+                " AND COALESCE(provider, '') != 'cache'"
+                " AND " + not_error).fetchone()  # cache hits are not calls (provider_classes)
         finally:
             con.close()
     except Exception:  # noqa: BLE001

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 27
+# llm_router-hook-version: 30
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -336,6 +336,19 @@ def _session_start_iso(ts: float) -> str:
 
 _FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
 _CACHE_PROVIDER = "cache"  # semantic-cache-served call: not paid/free/subscription (provider_classes.py)
+# routing_decisions rows of a failed or cache-served call (LEDGER-ERR-1): not routing decisions.
+# Copy of provider_classes.SQL_REAL_DECISION (hooks cannot import the package); a test pins equality.
+_REAL_DECISION = ("COALESCE(reason_code, '') NOT LIKE 'error\\_%' ESCAPE '\\' "
+                  "AND COALESCE(reason_code, '') != 'cache_hit' AND COALESCE(reason_code, '') != 'breaker_open' AND COALESCE(final_provider, '') != 'cache'")
+
+
+def _real_decision(conn) -> str:
+    """_REAL_DECISION, or ``1`` when routing_decisions lacks its columns (older database)."""
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(routing_decisions)")}
+    except Exception:
+        return "1"
+    return _REAL_DECISION if {"reason_code", "final_provider"} <= cols else "1"
 
 # D2: providers that have their own dedicated dashboard panel (rendered from
 # their own usage table). Codex is logged to BOTH `usage` (cost.log_usage forces
@@ -1031,6 +1044,7 @@ def _query_router_efficiency() -> dict:
                 COUNT(CASE WHEN final_model = recommended_model THEN 1 END) as on_target
             FROM routing_decisions
             WHERE date(timestamp, 'localtime') = date('now', 'localtime')
+              AND """ + _real_decision(conn) + """
         """)
         row = cursor.fetchone()
         conn.close()
@@ -1075,7 +1089,7 @@ def _query_classifier_overhead() -> dict:
                 MAX(classifier_latency_ms) as max_ms
             FROM routing_decisions
             WHERE date(timestamp, 'localtime') = date('now', 'localtime')
-                AND classifier_latency_ms IS NOT NULL
+                AND classifier_latency_ms IS NOT NULL AND """ + _real_decision(conn) + """
         """)
         row = cursor.fetchone()
         conn.close()
@@ -1258,7 +1272,7 @@ def _query_session_metrics(session_start: float) -> dict:
             SELECT complexity, final_provider, latency_ms, cost_usd,
                    was_downshifted, timestamp
             FROM routing_decisions
-            WHERE timestamp >= ? AND (is_real = 1 OR is_real IS NULL)
+            WHERE timestamp >= ? AND (is_real = 1 OR is_real IS NULL) AND """ + _real_decision(conn) + """
             """,
             (session_iso,),
         ).fetchall()
@@ -1271,7 +1285,7 @@ def _query_session_metrics(session_start: float) -> dict:
                    COUNT(*) as day_calls
             FROM routing_decisions
             WHERE date(timestamp, 'localtime') >= date('now', '-15 days')
-              AND (is_real = 1 OR is_real IS NULL)
+              AND (is_real = 1 OR is_real IS NULL) AND """ + _real_decision(conn) + """
             GROUP BY day
             ORDER BY day
             """
@@ -2513,7 +2527,7 @@ def main() -> None:
 
     # This script is registered on Stop (fires after EVERY turn: per-turn
     # summary) and on SessionEnd (fires once). Only SessionEnd archives
-    # (deletes) the session's durable JSONL event store; archiving on Stop
+    # (moves to the archive, restored on `--resume`: CONTEXT-RESUME-1) the session's durable JSONL event store; archiving on Stop
     # wiped the context after turn 1 (P0.1, docs/BUGS.md). Resolution order:
     # the real session_id from this hook's stdin payload, else env vars, else
     # the pointer file written by session-start.py. Fail-open.
@@ -2664,7 +2678,7 @@ def main() -> None:
                         "SELECT final_model, COUNT(*) AS cnt "
                         "FROM routing_decisions "
                         "WHERE final_model IS NOT NULL AND final_model != '' "
-                        "  AND date(timestamp) >= date('now', '-14 days') "
+                        "  AND date(timestamp) >= date('now', '-14 days') AND " + _real_decision(_mb_conn) + " "
                         "GROUP BY final_model "
                         "ORDER BY cnt DESC "
                         "LIMIT 8"

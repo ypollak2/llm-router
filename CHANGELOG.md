@@ -12,7 +12,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- proxy Haiku tier on Claude Haiku 5.5 (HAIKU55-TIER-1, docs/bugs/HAIKU55-TIER-1.md): the Haiku rewrite rules now key
+  off the tier's `model`. With `claude-haiku-5-5` the body keeps adaptive thinking, effort and mid-conversation system
+  messages (no fold), `max_tokens` clamps to 128K, a body with sampling parameters or an assistant prefill (400 on 5.5)
+  or too large for the window (estimate x 1.3 tokenizer factor + max_tokens > 1M, 670,769 estimated tokens at 128K
+  max_tokens; owner decision 2026-10-10; calls over 100K prompt tokens bill at $0.50/$2.50 per MTok, up to 100K
+  $0.10/$0.50) goes up a tier
+  (`haiku_body_blocked`). Any other id keeps the 4.5 rules; the shipped default is still `claude-haiku-4-5`
+  (4.5 retires not sooner than 2026-10-15). Capabilities are from platform.claude.com, fetched 2026-10-10.
+
 ### Fixed
+- quality breaker (N21, docs/bugs/N21.md): units of `research` and `harness` sessions no longer feed the breaker. In the M0-3 rerun2 (2026-10-10, n=20 calls, 2 research-tagged sessions that discarded every answer on purpose) they opened `mcp_llm:code` for 24 h for every session. A breaker refusal in `llm()` now writes one `usage` and one `routing_decisions` row (`breaker_open`, caller's session, $0); the shared predicates (`SQL_NOT_ERROR_ROW`, `SQL_REAL_DECISION`) exclude them from routing metrics, bandit, judge and cost readers. session-end hook v30 (both copies), statusline literal updated. M0-3 gate count not re-measured.
+- suffixed Anthropic model ids (HAIKU55-1 follow-up, docs/bugs/HAIKU55-1.md): `pricing.resolve` returned None for
+  `claude-haiku-5-5-20260901` and `claude-haiku-5-5[1m]`, so such a proxy row would be labelled but unpriced and fail
+  G3. An Anthropic id with an 8-digit date suffix now resolves to its base entry. Exact matches still win. `[1m]` on
+  Haiku 5.5 uses its own tiered card. `claude-mythos-5-1` is priced from the pricing page ($10/$50, $0.25 cache read).
+  Behaviour change: the proxy tier policy resolves ids through the same function, so a dated id of a configured tier
+  model (`claude-opus-5-5-20260901`) now belongs to that tier and is tier-routed, as its `[1m]` spelling already was,
+  instead of being forwarded unchanged as `unknown_model`. `pinned_models` matching widens the same way.
+- emergency-chain local timeouts (LOCAL-TIMEOUT-1 follow-up, docs/bugs/LOCAL-TIMEOUT-1.md): a local timeout in the
+  BUDGET emergency chain now starts or refreshes the cooldown, as it already did in the primary chain.
+- ledger (LEDGER-ERR-1, docs/bugs/LEDGER-ERR-1.md): an `llm` call that reached dispatch and failed (all providers timed out, no healthy candidate, wall-clock timeout, cancel) wrote no row with the caller's session id; in the M0-3 rerun (2026-10-10, n=20 calls, 2 sessions) 3 of 20 left none. It now writes one `usage` row (success=0, $0, attempted model, latency, `error_*` reason code), never a second for the same call. Call counts, the statusline mix, routing_report/routing_health and the dashboard call totals leave these rows out. Owner decision 2026-10-10: the same failed calls, and cache-served calls, also write one `routing_decisions` row (`reason_code` `error_*` / `cache_hit`, caller's session id) so the M0-3 gate query, which reads that table, sees every call; every routing-metric reader excludes them (`provider_classes.SQL_REAL_DECISION`). session-end hook v29. The gate count with this change is not yet re-measured.
+- local timeout demotion (LOCAL-TIMEOUT-1, docs/bugs/LOCAL-TIMEOUT-1.md): an `ollama/*` model that had just timed out
+  led the next route again. In the live ledger (`routing_quality.jsonl`, 2026-10-10 08:34:22Z to 09:30:14Z),
+  `ollama/qwen3-coder:30b` timed out at 120 s on 21 of the 21 code routes that tried it. Ollama's scheduler was stuck
+  behind a nimble:9b load that could not fit, so only models already loaded answered. Now a local model that times out
+  goes to the end of the chain for `LLM_ROUTER_LOCAL_TIMEOUT_COOLDOWN_S` seconds (default 600, `0` = off). It is moved,
+  never dropped, and the cooldown is per process.
+- session context store across resume (CONTEXT-RESUME-1, docs/bugs/CONTEXT-RESUME-1.md): every `claude --resume` is its
+  own SessionStart..SessionEnd under the same session id and SessionEnd deleted the store, so resumed sessions never held
+  more than one process's events (live 2026-10-10: 4 and 7 lines at archive after 10 resumed turns each, vs 22 for a
+  single process). SessionEnd now moves the store to `projects/<id>/archive/`; SessionStart `source=resume` restores it.
+  Archives are swept after 7 days. Hook versions: session-end 28, session-start 33.
+- proxy main-thread test (TURNFIRST-2, docs/bugs/TURNFIRST-2.md): a general-purpose sub-agent is sent the `Agent`
+  tool, so the launcher-only test labelled its first call a main-thread `turn_first`. In the live ledger after the
+  TURNFIRST-1 deploy (2026-10-10 00:15:07Z to 08:17:31Z, n=100 rows) 3 of the 4 `turn_first` rows were such first
+  calls. `is_main_thread` now also needs no sub-agent marker: one of the lines Claude Code 2.1.296 puts in every
+  sub-agent's system prompt, or the `SubagentHandback` tool. The Haiku arm uses the same rule. P0.9-e and the Haiku
+  arm counts must be recomputed on rows written after the deploy.
+- proxy turn population (TURNFIRST-1, docs/bugs/TURNFIRST-1.md): `step_class == turn_first` labelled every later
+  sub-agent call and notification turn as a human turn; in the live ledger (2026-10-08 17:50 to 10-09 21:05) all 113
+  classified turn_first rows were Sonnet requests and 108 (95.6%) classed `code`, while the Opus main loop was never
+  classified. New kinds `subagent_turn` and `harness_turn`; `turn_first` is now a main-thread human turn. Every proxy
+  row gets text-free `is_main_thread`, `is_first_call`, `turn_origin` and `tier_text_len`. The tier classifier's human
+  text strips the shared harness-tag list (`groundtruth_sources.HARNESS_TAGS`) and matches a reminder's close tag at a
+  line start, so a quoted close tag no longer leaks the reminder; a notification-only turn keeps the sticky tier. The
+  strip is linear (bounded single-line attributes): 1,000 line-start `<command-name foo` lines with no `>` before 3 MB of
+  text took 19.3 s in the first draft (one run) and take 0.83 ms (median of n=5, `scripts/bench_harness_strip.py`).
+  Labelling is fail-open: an error gives `step_class: unknown`, `step_error: true`, and the call is forwarded unclassified. The
+  Haiku arm, `kpi` G1_proxy, O3 and the Haiku guard read the new kinds. The P0.9-e turn-first p95, Haiku arm counts,
+  classifier mix and O3 turns must be recomputed on rows written after the deploy.
+- statusline first render (P0.9-c repair round 2, docs/bugs/STATUSLINE-COLD-1.md): the first render of a session built the segment
+  cache inline (interpreter probe plus build, 80-200 ms; live p95 234 ms, n=47, after #370). It now starts the detached,
+  single-flight builder and prints the line with `segments pending`; the cache lands for the next render. `scripts/statusline_wall.py`
+  `first` mode now uses a new session per run (it had reused one id and skipped the path), plus a `first_ever` mode.
+  Bench, scratch HOME, 6000-line transcript, n=60 per mode: first-render p50/p95 79/82 ms -> 20/25 ms, first_ever 103/108 -> 21/23 ms.
 - hook budget judges router time, not delegated Codex time (HOOKMETRIC-1, docs/bugs/HOOKMETRIC-1.md): `codex_delegation` is now one of
   `hook_latency.MODEL_PHASES`, so agent-route's `router_added_ms` excludes the synchronous Codex run and the statusline no longer shows
   `hooks p95 57.8s agent-route` for it; the row-reader fallback and `hook_wall` live clause judge `router_added_ms` too. `elapsed_ms`
@@ -44,6 +99,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LITELLM_LOCAL_MODEL_COST_MAP=True` stops LiteLLM's import-time download, `LLM_ROUTER_OLLAMA_MODEL` stops older hooks'
   import-time Ollama probe, and DNS plus every outbound socket connect is refused during the run (a `BaseException`, and any
   refusal fails the run). Measure an older commit by putting its tree's `src` first on PYTHONPATH.
+- synthetic replay harness (owner decision D-42; test tooling, no product change): `scripts/synthetic_replay.py --corpus <jsonl>
+  --out <dir> [--doors hook,proxy,gateway,mcp,sdk,agent-route] [--sessions N]` drives synthetic sessions through every
+  classification door (auto-route and agent-route hooks as subprocesses, an `llm-router proxy` on an ephemeral port, the
+  gateway/SDK classify path, the MCP `classify_for_routing` path) and fires every hook `hooks/hooks.json` registers for the
+  events it emits (SessionStart, UserPromptSubmit, PreToolUse/PostToolUse per tool call, SubagentStart, Stop, SessionEnd) in
+  host order, under a scratch HOME and `LLM_ROUTER_HOME`; a registered hook that never ran is listed with the reason.
+  Upstream is a local stub. Children run a scratch venv interpreter whose `sitecustomize` is `scripts/_replay_netguard.py`
+  with the run's allowlist baked in, so any Python child, even one with an emptied environment, refuses every other
+  connection and the run exits 1; non-Python network clients are shadowed on PATH (absolute paths are not covered).
+  Leftover and detached processes are counted with a positive-control canary; "cannot tell" fails the run. Rows are
+  tagged with the existing mechanisms (`LLM_ROUTER_SYNTHETIC=1`, `LLM_ROUTER_ALLOW_STUBS=1` -> `provenance=test`,
+  `LLM_ROUTER_SESSION_KIND=harness`, `synth-replay-<hash>` session ids); no field was added. Writes `summary.json` /
+  `summary.md` (counts and hashes only): per-door decisions and field presence, latency p50/p95 with n, ledger completeness
+  per writer, P0.1-a archive checks and a pairwise door-agreement matrix with Wilson intervals. Synthetic results are
+  mechanics evidence only and never organic. Fixture: `tests/fixtures/synthetic_sessions/`; tests: `tests/test_synthetic_replay.py`.
 - ledger completeness (PLAN v16 P0.8-e): a call the semantic cache answers now writes a `usage` row
   (`reason = "cache_hit"`, provider `cache`, model `cache/<cached model>`, 0 tokens, $0) carrying the
   caller's session id, and `semantic_cache_lookups` gains a nullable `session_id` (additive migration;

@@ -17,9 +17,13 @@ import json
 import re
 import socket
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from statusline_prime import render_full  # noqa: E402
 
 _SCRIPT = (
     Path(__file__).resolve().parent.parent
@@ -35,6 +39,10 @@ def _listening_socket() -> socket.socket:
 
 
 def _run(home: Path) -> str:
+    return render_full(lambda: _run_once(home), home)
+
+
+def _run_once(home: Path) -> str:
     env = {"HOME": str(home), "PATH": "/usr/bin:/bin", "TERM": "dumb"}
     r = subprocess.run(
         ["bash", str(_SCRIPT)], env=env, input="{}", capture_output=True, text=True, timeout=60,

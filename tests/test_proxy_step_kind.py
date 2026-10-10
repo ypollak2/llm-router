@@ -39,10 +39,12 @@ def _first_call(*, main_thread: bool = True) -> dict:
     return body
 
 
-def _later_human_turn() -> dict:
+def _later_human_turn(*, main_thread: bool = True) -> dict:
     body = _req()
     body["messages"] = body["messages"] + [{"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
                                            {"role": "user", "content": [{"type": "text", "text": "next"}]}]
+    if main_thread:
+        body["tools"] = body["tools"] + [AGENT_TOOL]
     return body
 
 
@@ -77,9 +79,12 @@ def test_every_request_gets_a_step_kind():
     assert steps.step_kind(_req()) == steps.STEP_CONTINUATION
     assert steps.step_kind(_first_call()) == steps.STEP_TURN_FIRST
     assert steps.step_kind(_later_human_turn()) == steps.STEP_TURN_FIRST
+    # TURNFIRST-1: the same turn without the launcher is a sub-agent's later call, not a human turn
+    assert steps.step_kind(_later_human_turn(main_thread=False)) == steps.STEP_SUBAGENT_TURN
     assert steps.step_kind(dict(_req(), tools=[])) == steps.STEP_SIDE_CALL
     assert steps.step_kind({"messages": []}) == steps.STEP_SIDE_CALL
-    assert set(steps.STEP_KINDS) == {"continuation", "turn_first", "side_call", "subagent_first"}
+    assert set(steps.STEP_KINDS) == {"continuation", "turn_first", "side_call", "subagent_first",
+                                     "subagent_turn", "harness_turn"}
 
 
 def test_a_first_call_without_the_agent_tool_is_a_sub_agent_first_call():

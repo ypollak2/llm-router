@@ -60,6 +60,9 @@ from pathlib import Path
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from statusline_prime import render_full  # noqa: E402
+
 
 SCRIPT = (
     Path(__file__).parent.parent
@@ -132,6 +135,10 @@ def _seed_savings_log(home: Path, records: list[dict]) -> None:
 
 
 def _run_statusline(home: Path, stdin_json: dict | None = None) -> str:
+    return render_full(lambda: _run_statusline_once(home, stdin_json), home)
+
+
+def _run_statusline_once(home: Path, stdin_json: dict | None = None) -> str:
     """Run the statusline shell script with HOME pointed at the temp dir.
 
     The script consumes stdin (Claude Code pipes session JSON). Tests can

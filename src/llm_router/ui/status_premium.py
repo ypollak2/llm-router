@@ -5,6 +5,8 @@ Refactored from commands/status.py to use new UI components.
 
 from __future__ import annotations
 
+from llm_router.provider_classes import real_decision_sql
+
 import json
 import os
 from typing import Optional
@@ -180,7 +182,7 @@ class PremiumStatusCommand:
                 conn = sqlite3.connect(str(self.db_path))
                 rows = conn.execute(
                     "SELECT final_model as model, COUNT(*) as n "
-                    "FROM routing_decisions WHERE success=1 "
+                    f"FROM routing_decisions WHERE success=1 AND {real_decision_sql(conn)} "
                     "GROUP BY final_model ORDER BY n DESC LIMIT 3"
                 ).fetchall()
                 conn.close()

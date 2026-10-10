@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 32
+# llm_router-hook-version: 33
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -2187,6 +2187,11 @@ def main() -> None:
         with _hl_phase("session_io"):
             if _real_session_id:
                 _session_store.write_pointer(_real_session_id)
+                # CONTEXT-RESUME-1: `claude --resume` / `--continue` is a new SessionStart
+                # (source "resume") under the same session id, after the previous process's
+                # SessionEnd moved the store to the archive. Bring it back.
+                if _hook_input.get("source") == "resume":
+                    _session_store.restore_session(_real_session_id)
             _session_store.cleanup_old_sessions()
     except Exception:
         pass

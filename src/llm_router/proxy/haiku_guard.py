@@ -27,7 +27,8 @@ TRIGGERS (any one trips; a trigger below its minimum n is "not evaluable" and ne
   next 2, or a receipt-band ``redone`` press), sessions of the kinds in
   ``LLM_ROUTER_HAIKU_GUARD_KINDS`` (comma list, default ``organic``) only. No transcript join here
   (the research guard had none either), so a sub-agent first call the proxy labelled ``turn_first``
-  counts as a turn; rows labelled ``subagent_first`` or with no ``step_class`` do not (O3-STEP-1).
+  counts as a turn; rows labelled ``subagent_first``, ``subagent_turn`` or with no ``step_class`` do
+  not (O3-STEP-1, TURNFIRST-1); ``harness_turn`` rows do, as ``turn_first`` did before TURNFIRST-1.
 * ``audit_batch`` (ported, M0.8b): the newest audit summary with a ``haiku`` arm has n_rated >=
   ``AUDIT_MIN_N`` (30) and acceptable < ``AUDIT_MIN_ACCEPTABLE`` (75%).
 * ``audit_daily`` (D-20): the daily blind audit of Haiku-served turns is acceptable below 8/10

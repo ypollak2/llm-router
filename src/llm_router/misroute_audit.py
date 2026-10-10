@@ -55,6 +55,8 @@ inert until explicitly invoked.
 
 from __future__ import annotations
 
+from llm_router.provider_classes import SQL_REAL_DECISION
+
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -143,7 +145,7 @@ async def sample_unaudited_decisions(limit: int = 100) -> list[dict[str, Any]]:
         try:
             cursor = await db.execute(
                 "SELECT id, judge_score, complexity_downgraded, was_downshifted "
-                "FROM routing_decisions WHERE audit_verdict IS NULL "
+                "FROM routing_decisions WHERE audit_verdict IS NULL AND " + SQL_REAL_DECISION + " "
                 "ORDER BY id DESC LIMIT ?",
                 (limit,),
             )

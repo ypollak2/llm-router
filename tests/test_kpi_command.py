@@ -264,6 +264,11 @@ def test_g1_proxy_turn_first_counts_only_turn_first_rows_with_decision_phases():
     null_step = [_row(tier_decision_s=0.005, tier_phases_ms=_phases(2)) for _ in range(50)]
     subagent = [_row(step_class="subagent_first", tier_decision_s=0.005, tier_phases_ms=_phases(2))
                 for _ in range(7)]
+    # TURNFIRST-1: a sub-agent's later call and a main-thread notification turn are not turn-first;
+    # at 900 ms they would move the p95 if they were counted
+    subagent += [_row(step_class="subagent_turn", tier_phases_ms=_phases(900)) for _ in range(9)]
+    subagent += [_row(step_class="harness_turn", tier_phases_ms=_phases(900)) for _ in range(4)]
+    subagent += [_row(step_class="unknown", step_error=True, tier_phases_ms=_phases(900)) for _ in range(2)]
     side = ([_row(step_class="side_call", tier_decision_s=5.0) for _ in range(10)]
             + [_row(step_class="turn_first", tier_reason="side_call", tier_decision_s=5.0,
                     tier_phases_ms=_phases(500)) for _ in range(3)])
@@ -275,7 +280,8 @@ def test_g1_proxy_turn_first_counts_only_turn_first_rows_with_decision_phases():
     assert g1["value"] == (
         "turn-first decision p50=61ms p95=114ms (n=120, sessions=2, largest session=75%) | "
         "continuation p50=4ms p95=4ms (n=60) | not turn-first: 50 with no step_class, "
-        "7 subagent_first, 35 turn_first without tier_phases_ms")
+        "7 subagent_first, 9 subagent_turn, 4 harness_turn, 2 unlabelled (step_error), "
+        "35 turn_first without tier_phases_ms")
     assert g1["measurable"] is True and g1["n"] == 180
     first = g1["turn_first"]
     assert (first["n"], first["p50_s"], first["p95_s"]) == (120, 0.061, 0.114)
@@ -283,8 +289,8 @@ def test_g1_proxy_turn_first_counts_only_turn_first_rows_with_decision_phases():
             first["informative"]) == (2, 0.75, 0, True)
     assert g1["continuation"] == {"n": 60, "p50_s": 0.004, "p95_s": 0.004}
     assert g1["side_call_excluded"] == 13
-    assert g1["excluded"] == {"no_step_class": 50, "subagent_first": 7,
-                              "turn_first_without_phases": 35}
+    assert g1["excluded"] == {"no_step_class": 50, "subagent_first": 7, "subagent_turn": 9,
+                              "harness_turn": 4, "step_error": 2, "turn_first_without_phases": 35}
     assert g1["value"] in kpi.render_scorecard(kpi.compute_scorecard(days=7))
     assert _kpis()["G1_hook"]["value"].startswith("not measurable: ")  # never instrumented
 

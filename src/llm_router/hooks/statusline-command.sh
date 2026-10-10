@@ -224,8 +224,12 @@ _bar() {
 # ~540 ms median over 16 subprocesses; the PRD bar is 100 ms. See that module for
 # the file format and the staleness rule.
 #
-#   cache missing / other schema  -> compute once, synchronously (first render of a
-#                                    session; also every run in a fresh test HOME)
+#   cache missing / other schema  -> start the detached build (single-flight: one launch
+#                                    per 5 s per session, and the builder takes a lock) and
+#                                    render the rest of the line with a "segments pending"
+#                                    marker. NEVER compute inline: the interpreter probe
+#                                    plus the build cost 80-200 ms, and the old inline call
+#                                    was the live p95 tail (P0.9-c repair round 2).
 #   cache older than 30 s, or the transcript is newer than it
 #                                 -> render the cache, start a detached refresh
 #   cache older than 90 s         -> render it with a visible "cached <age>" marker
@@ -245,8 +249,8 @@ case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
 # re-probed after 5 min and a "full" one after a day, so installing llm_router later
 # lights money up without anyone deleting a file. A file with only a path (older
 # writers, tests) is trusted. THIS FUNCTION PROBES (several `python -c "import
-# llm_router"`, ~100 ms each) and therefore only ever runs in the detached child, or
-# in the rate-limited first-render sync call -- never on a cache hit's render path.
+# llm_router"`, ~100 ms each) and therefore only ever runs in the detached child -- never on the
+# render path.
 _seg_resolve_py() {
     _seg_py=""
     local _ep="" _kind="" _ttl=86400
@@ -266,7 +270,6 @@ _seg_resolve_py() {
     fi
     [ -n "$_seg_py" ] && ( umask 077; printf '%s\n%s\n%s\n' "$_seg_py" "$_now" "$_kind" > "$_seg_py_file" ) 2>/dev/null
 }
-# $1 = "sync" to wait, anything else to detach.
 _seg_exec() {
     _seg_resolve_py
     [ -n "$_seg_py" ] || return 0
@@ -283,12 +286,8 @@ _seg_exec() {
     "${_cmd[@]}" </dev/null >/dev/null 2>&1
 }
 _seg_run() {
-    if [ "$1" = "sync" ]; then
-        _seg_exec
-    else
-        # Detached, probe included: the render never waits for an interpreter search.
-        ( _seg_exec & ) >/dev/null 2>&1
-    fi
+    # Detached, probe included: the render never waits for an interpreter search or a build.
+    ( _seg_exec & ) >/dev/null 2>&1
 }
 
 # $1 = a value read from a file, $2 = max digits. Sets $_n to its base-10 value, or "" when
@@ -336,17 +335,16 @@ _seg_load() {
 }
 
 if ! _seg_load; then
-    # First render of a session (or a refresher that cannot produce a cache): compute
-    # synchronously, but at most once per 5 s per session, so a broken refresher costs
-    # one failed call per 5 s and not one per render.
+    # First render of a session (or a refresher that cannot produce a cache): build it
+    # DETACHED, at most once per 5 s per session, so a broken refresher costs one failed
+    # background run per 5 s and not one per render. The render goes on without it.
     _sync_file="$STATE_DIR/.statusline_seg_sync_${_sid}"
     _last_sync=0
     [ -r "$_sync_file" ] && IFS= read -r _last_sync < "$_sync_file"
     _seg_int "$_last_sync" 10; _last_sync="${_n:-0}"
     if [ $(( _now - _last_sync )) -ge 5 ]; then
         ( umask 077; printf '%s\n' "$_now" > "$_sync_file" ) 2>/dev/null
-        _seg_run sync
-        _seg_load
+        _seg_run
     fi
 fi
 _seg_age=0
@@ -365,7 +363,7 @@ if [ "$s_v" = "1" ]; then
         _seg_int "$_last_spawn" 10; _last_spawn="${_n:-0}"
         if [ $(( _now - _last_spawn )) -ge 5 ]; then
             ( umask 077; printf '%s\n' "$_now" > "$_spawn_file" ) 2>/dev/null
-            _seg_run async
+            _seg_run
         fi
     fi
 fi
@@ -467,7 +465,7 @@ fi
 # ── Cache staleness: a cache the refresher stopped updating says so ──────────
 if [ "$s_v" != "1" ]; then
     # No cache and none could be made right now (lock held by a racing first render,
-    # refresher broken, or the sync call rate-limited): say so.
+    # refresher broken, or the launch rate-limited): say so.
     parts+=("${_DIM}segments pending${_RESET}")
 elif [ "$_seg_age" -ge "$_SEG_STALE_MARK" ]; then
     if [ "$_seg_age" -ge 120 ]; then _age_txt="$(( _seg_age / 60 ))m"; else _age_txt="${_seg_age}s"; fi

@@ -10,6 +10,10 @@ drains that pool more slowly.
 The decision, per call, in order (the first that applies wins):
 
 ``unknown_model``   the requested model is not a configured tier: unchanged.
+                    The row's ``tier`` is the configured tier whose name is a
+                    word of the id (a Haiku 5.5 id -> ``haiku``), a label
+                    only: the call is never moved onto that tier's model
+                    (docs/BUGS.md HAIKU55-1). None when no tier name matches.
 ``config_pinned``   the requested id is in ``pinned_models``: unchanged. Checked
                     BEFORE ``explicit_opus_pin``, deliberately: an admin-level
                     pin outranks a user's ``opus:`` text, so a request on a
@@ -126,6 +130,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -134,8 +139,10 @@ from llm_router import session_kind
 from llm_router.proxy import escalation, haiku_arm
 from llm_router.proxy import quota_pressure as quota_pressure_mod
 from llm_router.proxy.cache_cost import ConvState, Stickiness, conversation_key, switch_cost_usd
+from llm_router.proxy.translate import HAIKU55_MAX_OUTPUT_TOKENS, haiku_is_legacy
 from llm_router.proxy.steps import (
-    STEP_TURN_FIRST, has_client_tools, is_first_call, non_system, step_kind, tier_text, user_pinned_model,
+    STEP_HARNESS_TURN, STEP_SUBAGENT_TURN, STEP_TURN_FIRST, has_client_tools, is_first_call, non_system,
+    step_kind, tier_text, user_pinned_model,
 )
 
 DEFAULT_POLICY_PATH = Path(__file__).with_name("claude_tiers.yaml")
@@ -148,6 +155,25 @@ THINKING_TYPES = ("enabled", "adaptive")
 # chars/4 estimate (``token_budget.estimate_tokens``, a hot-path
 # approximation, not an exact count) does not see.
 HAIKU_MAX_CONTEXT_TOKENS = 150_000
+# Claude Haiku 5.5 (owner decision 2026-10-10: any call that fits the window may go to it).
+# The window is 1M tokens (platform.claude.com/docs/en/models/haiku-5-5/overview) and the
+# estimate below is chars/4, in units of the 4.5-era tokenizer; 5.5's tokenizer counts ~30%
+# more tokens for the same text (migration guide, "Recount tokens"). A request fits when
+#     estimate * 1.3 + max_tokens <= 1_000_000
+# so the limit is ``(1_000_000 - max_tokens) / 1.3`` estimated tokens, with max_tokens the
+# request's own (at most the 128K output cap, which ``haiku_block_reason`` also enforces),
+# or the 128K cap when it sets none: 670,769 at the worst case. Calls over 100,000 real
+# prompt tokens bill at the higher card, $0.50/$2.50 per MTok (up to 100K: $0.10/$0.50).
+HAIKU55_WINDOW_TOKENS = 1_000_000
+HAIKU55_TOKENIZER_FACTOR = 1.3
+HAIKU55_MAX_CONTEXT_TOKENS = int((HAIKU55_WINDOW_TOKENS - HAIKU55_MAX_OUTPUT_TOKENS) / HAIKU55_TOKENIZER_FACTOR)
+
+
+def haiku55_context_limit(body: dict) -> int:
+    """Largest estimated-token context that still fits Haiku 5.5's window for this request."""
+    mt = body.get("max_tokens")
+    mt = min(mt, HAIKU55_MAX_OUTPUT_TOKENS) if isinstance(mt, int) and mt > 0 else HAIKU55_MAX_OUTPUT_TOKENS
+    return int((HAIKU55_WINDOW_TOKENS - mt) / HAIKU55_TOKENIZER_FACTOR)
 REWRITE_HAIKU = "haiku"
 
 REASON_UNKNOWN_MODEL = "unknown_model"
@@ -160,6 +186,7 @@ REASON_THINKING_FLOOR = "thinking_floor"
 REASON_STICKY = "sticky"
 REASON_DECISION_ERROR = "decision_error"
 REASON_UNSEEN = "unseen"  # internal state marker, never a row's tier_reason
+STEP_ERROR = "step_error"  # tier_detail of decide_unclassified: the call could not be labelled
 # Phase "proxy-default": explicit/automatic escalation (proxy/escalation.py)
 # and the long-first-prompt safety floor. See that module's docstring for the
 # trial evidence behind each one.
@@ -169,6 +196,9 @@ REASON_LONG_FIRST_PROMPT = "long_first_prompt_floor"
 # Phase "haiku-tier": opt-in body rewrite in place of the thinking floor, see
 # the module docstring's ``haiku_rewrite`` entry.
 REASON_HAIKU_REWRITE = "haiku_rewrite"
+# Haiku 5.5 only: the target was Haiku, the body as sent is one it cannot take (see
+# ``haiku_block_reason``), so the call moved up a tier; the ledger's ``tier_haiku_block`` says why.
+REASON_HAIKU_BODY = "haiku_body_blocked"
 # Quota-aware tiers (proxy/quota_pressure.py), see the module docstring's
 # ``quota_pressure`` entry. Defaults pending owner approval (2026-10-03).
 REASON_QUOTA_PRESSURE = "quota_pressure"
@@ -312,16 +342,16 @@ class _HaikuBlock:
     is a pure function of the body, so computing it lazily and once changes no
     decision."""
 
-    __slots__ = ("_body", "_fold", "_phases", "reason")
+    __slots__ = ("_body", "_fold", "_model", "_phases", "reason")
 
-    def __init__(self, body: dict, fold_system: bool, phases: "_Phases") -> None:
-        self._body, self._fold, self._phases = body, fold_system, phases
+    def __init__(self, body: dict, fold_system: bool, phases: "_Phases", model: str | None = None) -> None:
+        self._body, self._fold, self._model, self._phases = body, fold_system, model, phases
         self.reason: str | None = None
 
     def __call__(self) -> str:
         if self.reason is None:
             with self._phases("haiku_checks"):
-                self.reason = haiku_block_reason(self._body, fold_system=self._fold)
+                self.reason = haiku_block_reason(self._body, fold_system=self._fold, model=self._model)
         return self.reason
 
 
@@ -453,10 +483,11 @@ HAIKU_BLOCK_SYSTEM_MESSAGE = "system_message"
 HAIKU_BLOCK_MEDIA = "media"
 HAIKU_BLOCK_BUILTIN_TOOLS = "builtin_tools"
 HAIKU_BLOCK_CONTEXT = "context"
+HAIKU_BLOCK_PARAMS = "params"  # Haiku 5.5 only: sampling parameters or an assistant prefill it 400s on
 HAIKU_BLOCK_NONE = "none"
 
 
-def haiku_block_reason(body: dict, *, fold_system: bool = False) -> str:
+def haiku_block_reason(body: dict, *, fold_system: bool = False, model: str | None = None) -> str:
     """The first reason this body cannot be sent to Haiku, else ``"none"``.
 
     One of ``system_message | media | builtin_tools | context | none``. The checks
@@ -466,16 +497,65 @@ def haiku_block_reason(body: dict, *, fold_system: bool = False) -> str:
     checks to the one the fold (M0.7) would remove. With ``fold_system`` (the policy's
     ``haiku_folds_system``) that check is skipped: ``translate.for_haiku`` folds the
     message into a user message. The policy's own question ("is there a haiku tier at
-    all") is not a body property and is not asked here."""
-    if not fold_system and _has_mid_conversation_system_message(body):
+    all") is not a body property and is not asked here.
+
+    ``model`` is the Haiku the tier serves (``ClaudeTierPolicy.haiku_model``). Anything but
+    ``claude-haiku-5-5`` gets the 4.5 checks above. Haiku 5.5 accepts the system role
+    (platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages, fetched
+    2026-10-10: "available on ... Claude Sonnet 5.5, and Claude Haiku 5.5"), so that check is
+    skipped, and the context limit is ``haiku55_context_limit(body)``; instead a body that sets
+    ``temperature`` != 1, ``top_p`` != 0.99, any ``top_k``, or ends on an assistant turn
+    (prefill) is ``params``: each is a 400 there (migration guide, "Remove sampling
+    parameters", "Replace assistant prefill")."""
+    legacy = haiku_is_legacy(model)
+    if legacy and not fold_system and _has_mid_conversation_system_message(body):
         return HAIKU_BLOCK_SYSTEM_MESSAGE
     if _has_media(body):
         return HAIKU_BLOCK_MEDIA
     if not _only_custom_tools(body):
         return HAIKU_BLOCK_BUILTIN_TOOLS
-    if _approx_context_tokens(body) > HAIKU_MAX_CONTEXT_TOKENS:
+    if not legacy and _has_haiku55_rejected_params(body):
+        return HAIKU_BLOCK_PARAMS
+    if _approx_context_tokens(body) > (HAIKU_MAX_CONTEXT_TOKENS if legacy else haiku55_context_limit(body)):
         return HAIKU_BLOCK_CONTEXT
     return HAIKU_BLOCK_NONE
+
+
+def _has_haiku55_rejected_params(body: dict) -> bool:
+    """Per the migration guide: ``temperature`` != 1, ``top_p`` != 0.99, any ``top_k``, both
+    ``temperature`` and ``top_p``, an assistant prefill, ``thinking`` other than adaptive
+    (``enabled`` is rewritten to adaptive, so it passes; ``disabled`` 400s at effort xhigh/max;
+    ``between_tools`` is Sonnet 5.5 only), and ``max_tokens`` over 128K."""
+    if body.get("temperature") is not None and body.get("top_p") is not None:
+        return True
+    th = body.get("thinking")
+    ttype = th.get("type") if isinstance(th, dict) else None
+    if ttype not in (None, "adaptive", "enabled"):
+        oc = body.get("output_config")
+        effort = oc.get("effort") if isinstance(oc, dict) else None
+        if ttype != "disabled" or effort in ("xhigh", "max"):
+            return True
+        if ttype == "disabled":
+            # "With thinking: disabled, effort can't change mid-conversation: a per-message
+            # output_config.effort that differs from the level in effect returns a 400"
+            # (build-with-claude/effort, Haiku 5.5). In effect: the top-level effort, else
+            # the default `medium`, then each earlier per-message level.
+            level = effort or "medium"
+            for m in body.get("messages") or []:
+                moc = m.get("output_config") if isinstance(m, dict) and m.get("role") == "system" else None
+                if isinstance(moc, dict) and moc.get("effort") is not None:
+                    if moc["effort"] != level:
+                        return True
+    if isinstance(body.get("max_tokens"), int) and body["max_tokens"] > HAIKU55_MAX_OUTPUT_TOKENS:
+        return True
+    if body.get("temperature") not in (None, 1):
+        return True
+    if body.get("top_p") not in (None, 0.99):
+        return True
+    if body.get("top_k") is not None:
+        return True
+    msgs = body.get("messages")
+    return bool(msgs) and isinstance(msgs[-1], dict) and msgs[-1].get("role") == "assistant"
 
 
 def _only_custom_tools(body: dict) -> bool:
@@ -632,6 +712,16 @@ class ClaudeTierPolicy:
     def tier_of(self, model: str | None) -> Tier | None:
         return self._ids.get(_canonical(model)) if model else None
 
+    def family_tier(self, model: str | None) -> str | None:
+        """The ledger label for a model that is NOT a configured tier: the name of
+        the configured tier that is a word of the id (a Haiku 5.5 id -> ``haiku``),
+        else None. A label only, never a routing target: serving such a request on
+        the tier's ``model`` would move Haiku 5.5 onto whatever older Haiku the
+        policy configures, a different and, for Haiku 4.5, ten times pricier model
+        (docs/BUGS.md HAIKU55-1). Model ids stay in the policy YAML, not here."""
+        words = set(re.split(r"[^a-z0-9]+", model.lower())) if model else set()
+        return next((t.name for t in self.tiers if t.name.lower() in words), None)
+
     def tier_for(self, task_type: str | None, complexity: str | None) -> Tier | None:
         name = (self.route.get(task_type or "") or {}).get(complexity or "") or \
             self.route["default"].get(complexity or "")
@@ -648,10 +738,18 @@ class ClaudeTierPolicy:
         return self._accepts(tier, thinking, effort) or self._rewritable(tier, haiku_ok)
 
     @property
+    def haiku_model(self) -> str | None:
+        """The model the ``haiku`` tier serves (None without a haiku tier)."""
+        tier = self.by_name.get("haiku")
+        return tier.model if tier is not None else None
+
+    @property
     def haiku_folds_system(self) -> bool:
         """True when a mid-conversation system message is folded for Haiku: the fold
-        runs inside the Haiku rewrite, so it needs ``haiku_rewrite`` as well."""
-        return self.haiku_fold_system and self.haiku_rewrite
+        runs inside the Haiku rewrite, so it needs ``haiku_rewrite`` as well. Never for
+        Haiku 5.5, which takes the system role as sent (and the fold would drop the
+        per-turn effort it carries)."""
+        return self.haiku_fold_system and self.haiku_rewrite and haiku_is_legacy(self.haiku_model)
 
     def _rewritable(self, tier: Tier, haiku_ok) -> bool:
         """True when ``tier`` is the Haiku tier and this body may be rewritten for it.
@@ -671,7 +769,7 @@ class ClaudeTierPolicy:
         itself, and this is the gate that currently excludes real Claude Code
         2.1.285 traffic, which sends one on every call) -- and an approximate
         context under ``HAIKU_MAX_CONTEXT_TOKENS`` (Haiku 4.5's window is
-        200K, the other tiers' is 1M). Whether the turn is simple/mechanical
+        200K, the other tiers' is 1M; ``haiku55_context_limit`` for Haiku 5.5). Whether the turn is simple/mechanical
         is the classifier's call, made by ``decide``.
         """
         if not self.haiku_rewrite:
@@ -685,7 +783,8 @@ class ClaudeTierPolicy:
         rewritten or not."""
         if "haiku" not in self.by_name:
             return False
-        reason = block() if block is not None else haiku_block_reason(body, fold_system=self.haiku_folds_system)
+        reason = block() if block is not None else haiku_block_reason(
+            body, fold_system=self.haiku_folds_system, model=self.haiku_model)
         return reason == HAIKU_BLOCK_NONE
 
     # ── the decision ────────────────────────────────────────────────────────
@@ -742,10 +841,15 @@ class ClaudeTierPolicy:
         haiku = self.by_name.get("haiku")
         if not has_client_tools(body):
             return stay(haiku_arm.WHY_SIDE_CALL)
-        if step_kind(body) != STEP_TURN_FIRST:
+        kind = step_kind(body)
+        if kind == STEP_SUBAGENT_TURN:
+            return stay(haiku_arm.WHY_NOT_MAIN_THREAD)  # sub-agent follow-up: SendMessage, notification
+        if kind == STEP_HARNESS_TURN:
+            return stay(haiku_arm.WHY_HARNESS_TURN)  # main thread, newest turn only a notification / echo
+        if kind != STEP_TURN_FIRST:
             return stay(haiku_arm.WHY_NOT_TURN_FIRST)  # continuation or sub-agent first call
         if not haiku_arm.is_main_thread(body):
-            return stay(haiku_arm.WHY_NOT_MAIN_THREAD)  # sub-agent follow-up (step_kind only sees first calls)
+            return stay(haiku_arm.WHY_NOT_MAIN_THREAD)  # unreachable since TURNFIRST-1; kept as a guard
         try:
             kind = session_kind.kind_of(session_id)
         except Exception:  # noqa: BLE001 - unknown kind: do not arm
@@ -786,6 +890,46 @@ class ClaudeTierPolicy:
                             arm_bucket=bucket, arm_turn=turn_id,
                             chain_head=list(choice.get("chain_head") or [])[:4])
 
+    def decide_unclassified(self, body: dict, session_id: str | None, sticky: Stickiness) -> TierDecision:
+        """The decision for a call the proxy could not label (``step_class == unknown``,
+        ``step_error``): no classifier, no D-31 arm. This method reads stickiness and
+        does not write it (the request path's usage and tier-retry hooks still may). In
+        ``_decide``'s order: a ``pinned_models`` model stays pinned; a side call is kept;
+        an ``opus:`` pin is served on the Opus tier; a ``/model`` choice is kept (never
+        downgraded); otherwise the conversation's last served tier holds when the body
+        is accepted on it as sent (a Haiku tier, which may need a body rewrite, does
+        not hold); otherwise the call is forwarded as sent (``decision_error``).
+        ``detail`` is ``step_error`` on every path. A pin check that raises on the same
+        malformed body propagates and ``decide_tier`` forwards the call as sent."""
+        requested = body.get("model") if isinstance(body.get("model"), str) else None
+        req_tier = self.tier_of(requested)
+        name = req_tier.name if req_tier else None
+        if req_tier is None:
+            return TierDecision(requested, requested, self.family_tier(requested), REASON_UNKNOWN_MODEL,
+                                detail=STEP_ERROR)
+        if _canonical(requested) in self.pinned:
+            return TierDecision(requested, requested, name, REASON_CONFIG_PINNED, detail=STEP_ERROR)
+        if not has_client_tools(body):
+            return TierDecision(requested, requested, name, REASON_SIDE_CALL, detail=STEP_ERROR)
+        opus_tier = self.by_name.get("opus")
+        if opus_tier is not None and escalation.explicit_opus_pin(body):
+            return TierDecision(requested, opus_tier.model, opus_tier.name, REASON_EXPLICIT_OPUS_PIN,
+                                switched=_canonical(opus_tier.model) != _canonical(requested),
+                                detail=STEP_ERROR)
+        if user_pinned_model(body):
+            return TierDecision(requested, requested, name, REASON_USER_PINNED, detail=STEP_ERROR)
+        state = sticky.get(conversation_key(body, session_id))
+        prev = self.tier_of(state.model) if state is not None else None
+        thinking = (body.get("thinking") or {}).get("type") if isinstance(body.get("thinking"), dict) else None
+        thinking = thinking if thinking in THINKING_TYPES else None
+        oc = body.get("output_config")
+        effort = isinstance(oc, dict) and oc.get("effort") is not None
+        if (prev is not None and prev.name != "haiku" and self._accepts(prev, thinking, effort)
+                and (self.allow_upgrade or self.rank[prev.name] <= self.rank[req_tier.name])):
+            served = requested if _canonical(state.model) == _canonical(requested) else state.model
+            return TierDecision(requested, served, prev.name, REASON_STICKY, detail=STEP_ERROR)
+        return TierDecision(requested, requested, name, REASON_DECISION_ERROR, detail=STEP_ERROR)
+
     async def decide(self, body: dict, session_id: str | None, sticky: Stickiness,
                      classify=None) -> TierDecision:
         """``classify(text) -> {"task_type", "complexity", "chain_head", ...}``
@@ -797,7 +941,7 @@ class ClaudeTierPolicy:
             reading = self._read_quota()
         # Only a fresh measurement drives the step; stale/unknown/off fail open.
         pressure = reading.pressure if reading.state == quota_pressure_mod.STATE_OK else None
-        block = _HaikuBlock(body, self.haiku_folds_system, phases)
+        block = _HaikuBlock(body, self.haiku_folds_system, phases, self.haiku_model)
         decision = await self._decide(body, session_id, _TimedSticky(sticky, phases), classify,
                                       pressure, phases, block)
         decision.quota_pressure, decision.quota_state = reading.pressure, reading.state
@@ -809,7 +953,7 @@ class ClaudeTierPolicy:
                       classify, pressure: float | None, phases: _Phases | None = None,
                       block: _HaikuBlock | None = None) -> TierDecision:
         phases = phases if phases is not None else _Phases()
-        block = block if block is not None else _HaikuBlock(body, self.haiku_folds_system, phases)
+        block = block if block is not None else _HaikuBlock(body, self.haiku_folds_system, phases, self.haiku_model)
         requested = body.get("model") if isinstance(body.get("model"), str) else None
         req_tier = self.tier_of(requested)
 
@@ -817,7 +961,7 @@ class ClaudeTierPolicy:
             return TierDecision(requested, requested, req_tier.name if req_tier else None, reason, **kw)
 
         if req_tier is None:
-            return keep(REASON_UNKNOWN_MODEL)
+            return TierDecision(requested, requested, self.family_tier(requested), REASON_UNKNOWN_MODEL)
         if _canonical(requested) in self.pinned:
             return await self._pinned_or_arm(body, session_id, classify, requested, req_tier, phases, block)
         if not has_client_tools(body):
@@ -956,6 +1100,16 @@ class ClaudeTierPolicy:
                     and self._allowed(haiku, req_tier, thinking, effort, haiku_ok)):
                 if self._haiku_body_ok(body, block):
                     target, served, reason = haiku, haiku.model, REASON_QUOTA_PRESSURE
+        haiku = self.by_name.get("haiku")
+        if (haiku is not None and target.name == haiku.name and not haiku_is_legacy(haiku.model)
+                and not self._haiku_body_ok(body, block)):
+            # Haiku 5.5 takes adaptive thinking and effort as sent, so ``_accepts`` lets a
+            # body through without the body checks the rewrite path makes (cost line,
+            # sampling parameters, prefill, media, built-in tools). Run them here, on the
+            # final target, so no path (policy, stickiness, quota pressure) skips them.
+            up = next((t for t in self.tiers[self.rank[target.name] + 1:]
+                       if self._allowed(t, req_tier, thinking, effort, haiku_ok)), None) or req_tier
+            target, served, reason = up, up.model, REASON_HAIKU_BODY
         if _canonical(served) == _canonical(requested):
             served = requested  # keep the client's own spelling when nothing changes
 

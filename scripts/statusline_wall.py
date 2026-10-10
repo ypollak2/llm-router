@@ -21,9 +21,16 @@ MODES (one batch each, ``--runs`` timed runs per mode):
 * ``cold``   -- each run follows an idle gap (``--gap``, default 0.5 s), as a redraw
   follows model think time. Verdict mode, as in ``hook_wall.py``.
 * ``warm``   -- back to back.
-* ``first``  -- the segment cache and the remembered interpreter are deleted before
-  every run: the first render of a session, which pays the synchronous refresh.
-  REPORTED, NOT THE VERDICT (it happens once per session, not once per redraw).
+* ``first``  -- every run is a NEW session (a fresh ``session_id`` in the JSON, so no
+  per-session cache, sync marker or lock exists), the remembered interpreter kept:
+  the first render of a session. A cached session id is not a new session: the
+  per-session rate-limit marker survives and the first render is then skipped, which
+  is how this mode once reported ~18 ms for a path that really costs ~200 ms
+  (P0.9-c repair round 2).
+* ``first_ever`` -- as ``first`` but the remembered interpreter is deleted too (the
+  first render on a machine).
+  Both REPORTED, and gated by ``--first-bar`` (it happens once per session, not once
+  per redraw, but a user waits for it).
 
 Each run is preceded by three discarded priming runs per batch (bytecode, page cache).
 
@@ -56,7 +63,8 @@ MIN_N = 200
 MAX_LOAD = 4.0
 PRIMING_RUNS = 3
 RUN_TIMEOUT_S = 120.0
-CACHE_GLOBS = ("statusline_seg_*.kv", ".statusline_python", ".statusline_seg_spawn_*", "statusline_cache.json")
+CACHE_GLOBS = ("statusline_seg_*.kv", ".statusline_python", ".statusline_seg_spawn_*", ".statusline_seg_sync_*",
+               ".statusline-seg-*.lock", "statusline_cache.json")
 
 _clock = time.perf_counter
 
@@ -79,6 +87,16 @@ def time_one(cmd: list[str], payload: bytes, env: dict[str, str]) -> tuple[float
         proc.communicate()
         rc = None
     return (_clock() - t0) * 1000.0, rc
+
+
+def _with_new_session(payload: bytes, sid: str) -> bytes:
+    """The same session JSON under a session id nothing has cached."""
+    try:
+        d = json.loads(payload)
+    except ValueError:
+        return payload
+    d["session_id"] = sid
+    return json.dumps(d).encode()
 
 
 def _drop_cache(state: Path) -> None:
@@ -132,17 +150,20 @@ def measure(script: Path, home: Path, payload: bytes, *, runs: int, modes: list[
             for _ in range(PRIMING_RUNS):
                 time_one(cmd, payload, env)
             for seq in range(runs):
-                if mode == "first":
-                    _drop_cache(state)
+                run_payload = payload
+                if mode in ("first", "first_ever"):
+                    run_payload = _with_new_session(payload, f"wall-{run_id}-{seq}")
+                    if mode == "first_ever":
+                        _drop_cache(state)
                 elif mode == "cold":
                     time.sleep(gap_s)
                 if wait_s > 0:
                     _wait_for_load(max_load, wait_s)
                 offset = ledger.stat().st_size if ledger.exists() else 0
                 before = os.getloadavg()[0]
-                wall, rc = time_one(cmd, payload, env)
+                wall, rc = time_one(cmd, run_payload, env)
                 after = os.getloadavg()[0]
-                if mode == "first":
+                if mode in ("first", "first_ever"):
                     time.sleep(0.05)  # let the detached ledger child land its row
                 row = {"ts": round(time.time(), 3), "run_id": run_id, "mode": mode, "seq": seq,
                        "script": script.name, "wall_ms": round(wall, 2),
@@ -190,7 +211,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--home", type=Path, required=True, help="prepared $HOME to copy per batch")
     ap.add_argument("--input", type=Path, required=True, help="session JSON piped to stdin")
     ap.add_argument("--runs", type=int, default=200)
-    ap.add_argument("--modes", default="cold,warm,first")
+    ap.add_argument("--modes", default="cold,warm,first,first_ever")
+    ap.add_argument("--first-bar", type=float, default=BAR_MS, help="p95 bar for first/first_ever (reported verdict)")
     ap.add_argument("--gap", type=float, default=0.5)
     ap.add_argument("--path", default="/usr/bin:/bin", help="PATH of the child (put the venv bin first)")
     ap.add_argument("--max-load", type=float, default=MAX_LOAD)
@@ -210,6 +232,9 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"script": ns.script.name, **s}, sort_keys=True))
         if mode == "cold" and s["n"] >= ns.min_n:
             verdict = "PASS" if s["p95_ms"] <= ns.bar else "FAIL"
+        if mode in ("first", "first_ever") and s["n"] >= ns.min_n:
+            print(f"first-render {mode} (p95 <= {ns.first_bar:g} ms): "
+                  + ("PASS" if s["p95_ms"] <= ns.first_bar else "FAIL"))
     print(f"verdict (cold, p95 <= {ns.bar:g} ms, n >= {ns.min_n}, load1 <= {ns.max_load:g}): {verdict}")
     return 0 if verdict == "PASS" else 1
 

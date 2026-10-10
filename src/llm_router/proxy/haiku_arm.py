@@ -13,13 +13,16 @@ different for each human turn of a session).
 
 Eligibility (``tiers.ClaudeTierPolicy._pinned_or_arm``) reuses the existing rules and adds
 no classifier: the call must be a main-thread human turn (``steps.step_kind ==
-turn_first``), past the first call, with no ``opus:`` pin, ``/model`` pin or correction
+turn_first``; since TURNFIRST-1 a sub-agent follow-up is ``subagent_turn`` ->
+``not_main_thread`` and a notification-only turn ``harness_turn`` -> ``harness_turn``), past the first call, with no ``opus:`` pin, ``/model`` pin or correction
 signal, a body Haiku can take, and the router's own classifier must say
 ``query`` / ``simple``. Anything else stays pinned.
 """
 from __future__ import annotations
 
 import hashlib
+
+from llm_router.proxy import steps
 
 ARM_NAME = "haiku_simple_qa"
 SALT = "d31-haiku-arm-v1"
@@ -41,12 +44,12 @@ WHY_BODY = "haiku_body_blocked"
 WHY_NOT_SIMPLE_QA = "not_simple_qa"
 WHY_CLASSIFY_ERROR = "classify_error"
 WHY_NOT_MAIN_THREAD = "not_main_thread"
+WHY_HARNESS_TURN = "harness_turn"  # main thread, newest turn only a notification or command echo
 WHY_SESSION_KIND = "session_kind"
 WHY_MATCHED = "matched:"  # + the pattern, the reason of an assigned row
 TREATMENT_RETRIED = "treatment_retried_original"  # Haiku 4xx'd; the original (pinned model) body was sent
 DEFAULT_ELIGIBLE = (("query", "simple"),)
 ORGANIC_KINDS = (None, "organic")  # None = never tagged; harness / research / headless are never armed
-_MAIN_THREAD_TOOLS = frozenset({"Agent", "Task"})
 
 
 def parse_eligible(value: object) -> tuple[tuple[str, str], ...]:
@@ -75,10 +78,10 @@ def match(eligible: tuple[tuple[str, str], ...], task: str | None, cx: str | Non
 
 
 def is_main_thread(body: dict) -> bool:
-    """Claude Code gives the main thread a sub-agent launcher (``Agent``/``Task``) and a
-    sub-agent none, on every call, not only the first."""
-    names = {t.get("name") for t in body.get("tools") or [] if isinstance(t, dict)}
-    return bool(names & _MAIN_THREAD_TOOLS)
+    """The proxy's one main-thread test (``steps.is_main_thread``): an ``Agent``/``Task``
+    launcher and no sub-agent marker. A general-purpose sub-agent holds the launcher too
+    (TURNFIRST-2), so the launcher alone is not the test."""
+    return steps.is_main_thread(body)
 
 
 def parse_share(value: object) -> float:

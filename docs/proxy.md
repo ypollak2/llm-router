@@ -480,8 +480,9 @@ narrow, logged exception, off unless `haiku_arm_share` is set (a fraction 0-1; a
 
 - **Which turns:** the hash `sha256(session_id|turn|salt)` must fall under the share (turn = number of non-system
   messages, so a retried request lands in the same place), and then the existing rules must call it simple Q&A: a
-  main-thread human turn (`step_kind == turn_first`; side calls, tool-result continuations and sub-agent first
-  calls stay pinned), past the first call, no `opus:` / `/model` pin, no correction signal, a body Haiku accepts
+  main-thread human turn (`step_kind == turn_first`; side calls, tool-result continuations, sub-agent calls
+  (`subagent_first` / `subagent_turn`) and notification-only turns (`harness_turn`, arm reason `harness_turn`)
+  stay pinned), past the first call, no `opus:` / `/model` pin, no correction signal, a body Haiku accepts
   (no media, no mid-conversation system message, under the context limit), and the classifier says `query` /
   `simple`. No session id = never armed. Sub-agent calls (no `Agent`/`Task` launcher in `tools`, on any call, not only the first) and sessions tagged headless / harness / research are never armed. `haiku_arm_eligible` (default `[query/simple]`) lists the `task/complexity` patterns that qualify (complexity may be `*`); the matched pattern is logged as `tier_arm_reason: matched:<pattern>`. To run the widened arm: `haiku_arm_share: 0.25` + `haiku_arm_eligible: [query/*]` (with `haiku_rewrite: true`).
 - **Ledger:** only in-share turns get `tier_arm`, `tier_arm_assignment` (`treatment` / `ineligible`),

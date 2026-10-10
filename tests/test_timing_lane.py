@@ -153,6 +153,7 @@ _DATA = "monotonic() used as data: an injected age/deadline, no real wait or mea
 _LOWER = "only a lower bound on a real sleep: load can lengthen it, never break it"
 _GENEROUS = "deadline handed to a function is generous (>= 5 s) or already expired; no measurement"
 NOT_TIMING = {
+    "tests/test_local_timeout_demotion.py::test_a_timeout_in_the_emergency_chain_refreshes_the_cooldown": _DATA,
     "tests/test_readonly_draft_deadline.py::test_readonly_draft_deadline_never_goes_negative_on_an_already_late_hook": _DATA,
     "tests/qa/test_network_failures.py::test_rate_limit_recovers_after_custom_cooldown": _DATA,
     "tests/qa/test_network_failures.py::test_breaker_recovers_after_cooldown": _DATA,
@@ -165,6 +166,7 @@ NOT_TIMING = {
     "tests/test_edge_cases.py::TestCacheEdgeCases.test_ttl_boundary": _DATA,
     "tests/test_edge_cases.py::TestHealthEdgeCases.test_rapid_failure_and_recovery": _DATA,
     "tests/test_health.py::TestProviderHealth.test_recovers_after_cooldown": _DATA,
+    "tests/test_local_timeout_demotion.py::test_model_leads_again_once_the_cooldown_has_passed": _DATA,
     "tests/test_local_agent_verify.py::test_no_changed_files_is_a_trivial_pass": _GENEROUS,
     "tests/test_rate_limit.py::TestProviderHealthRateLimit.test_rate_limit_clears_after_cooldown": _DATA,
     "tests/test_routing_value.py::TestCircuitBreaker.test_rate_limit_recovers_after_cooldown": _DATA,
