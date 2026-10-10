@@ -165,6 +165,7 @@ NOT_TIMING = {
     "tests/test_edge_cases.py::TestCacheEdgeCases.test_ttl_boundary": _DATA,
     "tests/test_edge_cases.py::TestHealthEdgeCases.test_rapid_failure_and_recovery": _DATA,
     "tests/test_health.py::TestProviderHealth.test_recovers_after_cooldown": _DATA,
+    "tests/test_local_timeout_demotion.py::test_model_leads_again_once_the_cooldown_has_passed": _DATA,
     "tests/test_local_agent_verify.py::test_no_changed_files_is_a_trivial_pass": _GENEROUS,
     "tests/test_rate_limit.py::TestProviderHealthRateLimit.test_rate_limit_clears_after_cooldown": _DATA,
     "tests/test_routing_value.py::TestCircuitBreaker.test_rate_limit_recovers_after_cooldown": _DATA,
