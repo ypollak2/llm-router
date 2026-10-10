@@ -66,6 +66,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Existing `~/.llm-router/result_cache.db` files are left on disk, unread and unmigrated.
 
 ### Added
+- one resource map, core (PLAN v16 P1.8, branch `feat/map-core`, DRAFT, do not merge before G0): `llm-router map [--json]`
+  and `llm_router_status(view="map")` return the same JSON, built by `resource_map.build()` and written atomically to
+  `resource_map.json` (rebuilt when older than 300 s). One row per seat (claude, codex, gemini_cli), local model and API
+  key, with status and reason, quota values as `{value, provenance, as_of}` (measured / estimated / default),
+  marginal cost, capabilities, per-model limits (`num_ctx`, max context) and `effective_priority` from the routing policy.
+  Key values are never read. Not yet read by any chain builder (that is `feat/map-readers`), so routing is unchanged.
+  `local_models.ROLES` declares that `nimble:9b` serves `decision` only, so the map does not list it as a generate model (N19).
 - synthetic replay harness (owner decision D-42; test tooling, no product change): `scripts/synthetic_replay.py --corpus <jsonl>
   --out <dir> [--doors hook,proxy,gateway,mcp,sdk,agent-route] [--sessions N]` drives synthetic sessions through every
   classification door (auto-route and agent-route hooks as subprocesses, an `llm-router proxy` on an ephemeral port, the
