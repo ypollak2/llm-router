@@ -25,8 +25,8 @@ def _clean(monkeypatch):
 
 
 @pytest.mark.parametrize("model,window", [
-    ("qwen3.8:latest", 131072),
-    ("qwen3.5:latest", 131072),
+    ("qwen3.8:latest", 32768),
+    ("qwen3.5:latest", 32768),
     ("qwen3-coder:30b", 32768),     # 131072 spilled 45% to CPU
     ("some-new-model:7b", 32768),   # unmeasured: the window known to be safe
     (None, 32768),
@@ -45,7 +45,7 @@ def test_every_local_path_sizes_by_model():
     from llm_router.providers import _ollama_num_ctx
     assert de._local_num_ctx("qwen3-coder:30b") == 32768
     assert _ollama_num_ctx("ollama/qwen3-coder:30b") == 32768
-    assert _ollama_num_ctx("ollama/qwen3.8:latest") == 131072
+    assert _ollama_num_ctx("ollama/qwen3.8:latest") == 32768
 
 
 def test_the_draft_request_carries_the_models_window(monkeypatch):

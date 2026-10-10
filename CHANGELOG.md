@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - ledger on every exit (LEDGER-EVERY-EXIT-1, docs/bugs/LEDGER-EVERY-EXIT-1.md): one guard around the whole `llm()` and `llm_act()` body leaves one `usage` and one `routing_decisions` row (caller's session, $0, `error_*` / `breaker_open`, excluded from metrics by the shared predicates) on every exit, including failures before dispatch, `llm_act` refusals and silent returns; paths that already wrote are not doubled. A hard kill stays unledgered. Not re-measured on a live M0-3 run.
 - quality breaker (N21, docs/bugs/N21.md): units of `research` and `harness` sessions no longer feed the breaker. In the M0-3 rerun2 (2026-10-10, n=20 calls, 2 research-tagged sessions that discarded every answer on purpose) they opened `mcp_llm:code` for 24 h for every session. A breaker refusal in `llm()` now writes one `usage` and one `routing_decisions` row (`breaker_open`, caller's session, $0); the shared predicates (`SQL_NOT_ERROR_ROW`, `SQL_REAL_DECISION`) exclude them from routing metrics, bandit, judge and cost readers. session-end hook v30 (both copies), statusline literal updated. M0-3 gate count not re-measured.
+- local model hygiene (N19, N20; docs/bugs/N19.md, docs/bugs/N20.md): `all_ollama_models()` no longer lists an Ollama
+  model whose `/api/show` capabilities lack `completion` (nimble:9b returned 400 "does not support generate" on every
+  code route; fails open when `/api/show` is unavailable, the classifier still names its model directly). `keep_alive`
+  no longer falls back to -1 (pin forever): `warm.edit_keep_alive()` and the proxy default are 600 s; an explicit `-1`
+  is still honoured. `llmr-classifier` is also kept out of chains. The default `num_ctx` for qwen3.5/qwen3.8 is 32768 (was
+  131072), so it no longer overrides the server's `OLLAMA_CONTEXT_LENGTH`; env overrides unchanged. The proxy off-mode
+  golden now records `keep_alive: 600`.
 - suffixed Anthropic model ids (HAIKU55-1 follow-up, docs/bugs/HAIKU55-1.md): `pricing.resolve` returned None for
   `claude-haiku-5-5-20260901` and `claude-haiku-5-5[1m]`, so such a proxy row would be labelled but unpriced and fail
   G3. An Anthropic id with an 8-digit date suffix now resolves to its base entry. Exact matches still win. `[1m]` on
