@@ -143,7 +143,7 @@ def test_every_tier_reason_the_policy_can_emit_has_a_row_type():
                pt.REASON_FIRST_CALL, pt.REASON_LONG_FIRST_PROMPT}
     classifier_ran = {pt.REASON_POLICY, pt.REASON_THINKING_FLOOR, pt.REASON_STICKY,
                       pt.REASON_ESCALATION, pt.REASON_HAIKU_REWRITE, pt.REASON_QUOTA_PRESSURE,
-                      pt.REASON_ESCALATION_UNDER_PRESSURE}
+                      pt.REASON_ESCALATION_UNDER_PRESSURE, pt.REASON_HAIKU_BODY}
     assert reasons - decided - classifier_ran - {pt.REASON_UNSEEN} == set()
     for r in classifier_ran:
         assert kpi.g3_row_type(_classified(NOW, tier_reason=r)) == "classified", r

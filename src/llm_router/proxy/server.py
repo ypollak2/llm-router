@@ -743,7 +743,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # `system_message` is what tells whether the fold (M0.7) is needed.
             hb_t0 = time.perf_counter()
             try:
-                row["tier_haiku_block"] = haiku_block_reason(body, fold_system=tier_policy.haiku_folds_system)
+                row["tier_haiku_block"] = haiku_block_reason(body, fold_system=tier_policy.haiku_folds_system,
+                                                         model=tier_policy.haiku_model)
             except Exception as exc:  # noqa: BLE001 - fail-safe: no field, the call goes on
                 failopen.record("LR-FO-PROXY-HAIKU-BLOCK", exc)
             _add_phase(row, "haiku_checks", (time.perf_counter() - hb_t0) * 1000.0)
@@ -956,7 +957,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # Haiku 4.5 400s on `thinking.type: adaptive` and has no effort
             # parameter: serve it a body it accepts (translate.for_haiku).
             fold_t0 = time.perf_counter()
-            sent = for_haiku(sent, fold_system=tier_policy.haiku_folds_system)
+            sent = for_haiku(sent, fold_system=tier_policy.haiku_folds_system, model=tier_policy.haiku_model)
             _add_phase(row, "fold", (time.perf_counter() - fold_t0) * 1000.0)
             row["tier_body_rewrite"] = REWRITE_HAIKU
 

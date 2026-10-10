@@ -12,6 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- proxy Haiku tier on Claude Haiku 5.5 (HAIKU55-TIER-1, docs/bugs/HAIKU55-TIER-1.md): the Haiku rewrite rules now key
+  off the tier's `model`. With `claude-haiku-5-5` the body keeps adaptive thinking, effort and mid-conversation system
+  messages (no fold), `max_tokens` clamps to 128K, a body with sampling parameters or an assistant prefill (400 on 5.5)
+  or over 75K estimated tokens (the price step at 100K prompt tokens, with the ~30% tokenizer increase) goes up a tier
+  (`haiku_body_blocked`). Any other id keeps the 4.5 rules; the shipped default is still `claude-haiku-4-5`
+  (4.5 retires not sooner than 2026-10-15). Capabilities are from platform.claude.com, fetched 2026-10-10.
+
 ### Fixed
 - session context store across resume (CONTEXT-RESUME-1, docs/bugs/CONTEXT-RESUME-1.md): every `claude --resume` is its
   own SessionStart..SessionEnd under the same session id and SessionEnd deleted the store, so resumed sessions never held

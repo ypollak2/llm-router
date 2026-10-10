@@ -24,6 +24,17 @@ tiers:
     model: claude-haiku-4-5
     thinking: [enabled]
     effort: false
+    # To serve Claude Haiku 5.5 instead (proxy/translate.py and proxy/tiers.py key every
+    # Haiku rule off this `model`; docs/bugs/HAIKU55-TIER-1.md has the sources), replace the
+    # three lines above with:
+    #   model: claude-haiku-5-5
+    #   thinking: [adaptive]      # 5.5 takes adaptive thinking, rejects budget_tokens `enabled`
+    #                             # (and `disabled` with effort xhigh/max, so it is not listed)
+    #   (no `effort: false`)      # 5.5 takes all five effort levels
+    # On 5.5 haiku_fold_system is ignored (it takes the system role as sent) and the Haiku
+    # context limit is 75K estimated tokens, not 150K: Haiku 5.5 costs 5x per token above
+    # 100K prompt tokens ($0.10/$0.50 -> $0.50/$2.50 per MTok). Claude Haiku 4.5 retires
+    # not sooner than 2026-10-15 (platform.claude.com/docs/en/models/haiku-4-5/overview).
   - name: sonnet
     model: claude-sonnet-5-5
     also: [claude-sonnet-5]

@@ -161,9 +161,9 @@ def block_calls(monkeypatch):
     calls = []
     real = pt.haiku_block_reason
 
-    def counting(body, *, fold_system=False):
+    def counting(body, *, fold_system=False, model=None):
         calls.append(fold_system)
-        return real(body, fold_system=fold_system)
+        return real(body, fold_system=fold_system, model=model)
 
     monkeypatch.setattr(pt, "haiku_block_reason", counting)
     monkeypatch.setattr(ps, "haiku_block_reason", counting)
