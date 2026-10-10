@@ -1452,6 +1452,13 @@ def _note_local_timeout(model: str, exc: BaseException) -> None:
         _local_timeout_at[model] = time.monotonic()
 
 
+def _local_in_timeout_cooldown(model: str) -> bool:
+    """True when local *model* timed out within the cooldown (LOCAL-TIMEOUT-1 state)."""
+    t = _local_timeout_at.get(model)
+    cooldown = _local_timeout_cooldown_s()
+    return t is not None and cooldown > 0 and time.monotonic() - t < cooldown
+
+
 def _demote_timed_out_local(models: list[str], exempt: str | None = None) -> list[str]:
     """Move local models still inside their timeout cooldown to the end of *models*.
 
@@ -2489,7 +2496,8 @@ async def _finalize_successful_route(
             # put every local model at a permanent disadvantage on no evidence
             # — the mirror image of the bug being fixed.
             success=(
-                False if getattr(response, "quality_degraded", False)
+                False if ledger_outcome == "degraded"  # N22: gate-rejected floor answer, not a win
+                else False if getattr(response, "quality_degraded", False)
                 else False if _finish_reason_is_failure(response)
                 else _response_is_usable(getattr(response, "content", "") or "")
             ),
@@ -2782,11 +2790,29 @@ async def _dispatch_model_loop(
     policy_skipped: list[tuple[str, str]] = []  # (model, why)
     _policy_active_mode = _policy_mode() if routing_policy is not None else "off"
 
+    # N22: set when a local model times out in THIS call (see the skip at the top of the loop).
+    _local_timed_out_in_call = False
     _chain_as_built = list(models_to_try)  # LOCAL-TIMEOUT-1: the emergency check compares against this
     models_to_try = _demote_timed_out_local(models_to_try, exempt=pinned_model)
     for attempt, model in enumerate(models_to_try, start=1):
         provider = provider_from_model(model)
         model_name = model.split("/", 1)[1] if "/" in model else model
+
+        # N22: a rejected answer is already in hand, so the floor is what this call returns if the
+        # rest of the chain fails. A local model that timed out in this call, or is still inside its
+        # timeout cooldown, would only add its full timeout (120 s each) before that same floor is
+        # served: M0-3 rerun3 spent 268 s on two llamacpp/classifier models after the coder answer
+        # failed the syntax gate. Skip it; a remote model still runs. The in-call flag deliberately skips
+        # EVERY later ollama model, not just the one that timed out: one local timeout means the local
+        # scheduler is stuck, and the next local model most likely hangs the same way.
+        if (
+            _best_rejected is not None
+            and model.startswith("ollama/")
+            and model != pinned_model
+            and (_local_timed_out_in_call or _local_in_timeout_cooldown(model))
+        ):
+            chain_errors.append((model, "skipped:local_timeout_with_answer_in_hand"))
+            continue
 
         if not tracker.is_healthy(provider):
             await _notify(ctx, "warning", f"⚠️  {provider} unhealthy — trying next")
@@ -3487,6 +3513,8 @@ async def _dispatch_model_loop(
 
         except Exception as e:
             _note_local_timeout(model, e)  # LOCAL-TIMEOUT-1
+            if model.startswith("ollama/") and _is_timeout_error(e):
+                _local_timed_out_in_call = True  # N22
             # A reported reset time ("try again at 06:39", Retry-After: 7200,
             # anthropic-ratelimit-*-reset) benches the provider until then,
             # across processes. Independent of the classification below: the
@@ -3848,6 +3876,17 @@ async def _dispatch_model_loop(
         # rejected); accepting it here does not re-bill. Terminal state is 'accepted'
         # — an answer WAS returned — with the degradation captured in the logs above.
         _emit_ledger_terminal(correlation_id, "accepted", route_succeeded=True)
+        # N22: the floor answer was served, so its real usage row (tokens, cost, provider, the caller's
+        # session) must exist. Only the accepted-attempt path wrote one, so a floor-served call left
+        # just the LEDGER-EVERY-EXIT-1 safety-net row (provider=none, error_unledgered_exit, success=0).
+        # Rejected attempts never wrote usage, so this does not double count. Fail-open.
+        try:
+            await cost.log_usage(
+                _best_rejected, task_type, profile, correlation_id=correlation_id,
+                success=False, reason=cost.REASON_DEGRADED_FLOOR,
+            )
+        except Exception as _fu_err:  # noqa: BLE001 -- telemetry never fails the turn
+            log.warning("exhaustion-floor usage row failed (non-fatal): %s", _fu_err)
         # RED1-8-01: the floor answer's own cost is ALREADY inside
         # _failed_attempt_cost (billed when it was rejected), so subtract it to
         # avoid double-counting — settlement adds response.cost_usd back.

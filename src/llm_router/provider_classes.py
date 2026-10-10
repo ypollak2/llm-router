@@ -28,6 +28,11 @@ ERROR_REASON_PREFIX = "error_"
 #: served call and not a routing decision, so every predicate below leaves it out, like an error row.
 REASON_BREAKER_OPEN = "breaker_open"
 
+#: N22: exhaustion-floor answer (every candidate gate-rejected, best one served). A REAL served call, so no predicate
+#: below excludes it (attribution, mix, latency, M0-3 count it); it is written success=0, so readers that filter
+#: on success (quality, cost/savings, bandit) do not count it as a good answer.
+REASON_DEGRADED_FLOOR = "degraded_floor"
+
 #: SQL predicate (usage table, ``reason`` column) that keeps only rows that are not error rows
 #: (nor breaker-refusal rows).
 SQL_NOT_ERROR_ROW = (
