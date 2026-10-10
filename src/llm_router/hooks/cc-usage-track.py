@@ -1,4 +1,4 @@
-# llm_router-hook-version: 5
+# llm_router-hook-version: 6
 """PostToolUse[Agent] hook — track Claude Code subscription model calls.
 
 Fires after every Agent subagent completes. Writes an estimated usage record
@@ -207,11 +207,25 @@ def _ensure_table(db: sqlite3.Connection) -> None:
         if "duplicate column name" not in str(exc).lower():
             raise
     # P0.8-d: why the row was made (cost.MIGRATE_USAGE_ADD_REASON); same reason as above.
+    # P1.10: the task and trace ids (cost.MIGRATE_ADD_TASK_IDENTITY); same reason again.
+    for _col in ("reason", "task_id", "trace_id"):
+        try:
+            db.execute(f"ALTER TABLE usage ADD COLUMN {_col} TEXT")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+
+
+def _task_ids(session_id: str | None) -> tuple[str | None, str | None]:
+    """``(task_id, trace_id)`` for a row written now (``call_identity.row_ids``): the session's
+    current human turn, else a generated id. ``(None, None)`` when llm_router is not
+    importable: the hook must still run, and NULL says "unknown" where a guess would not."""
     try:
-        db.execute("ALTER TABLE usage ADD COLUMN reason TEXT")
-    except sqlite3.OperationalError as exc:
-        if "duplicate column name" not in str(exc).lower():
-            raise
+        from llm_router import call_identity as _ci
+
+        return _ci.row_ids(session_id)
+    except Exception:  # noqa: BLE001
+        return None, None
 
 
 def _ledger_session_id(value: object) -> str | None:
@@ -265,9 +279,9 @@ def _log_to_db(
                    (model, provider, task_type, profile,
                     input_tokens, output_tokens, cost_usd, latency_ms, success,
                     baseline_model, potential_cost_usd, saved_usd, is_simulated,
-                    session_id, reason)
+                    session_id, reason, task_id, trace_id)
                    VALUES (?, 'cc', 'code', 'balanced', ?, ?, 0.0, ?, ?, ?, ?, ?, ?, ?,
-                           'claude_code_subscription')""",
+                           'claude_code_subscription', ?, ?)""",
                 (
                     model,
                     input_tokens,
@@ -279,6 +293,7 @@ def _log_to_db(
                     saved,
                     1 if _is_synthetic_run() else 0,
                     session_id,
+                    *_task_ids(session_id),
                 ),
             )
             db.commit()

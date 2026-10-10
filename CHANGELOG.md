@@ -86,6 +86,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Existing `~/.llm-router/result_cache.db` files are left on disk, unread and unmigrated.
 
 ### Added
+- task identity (PLAN v16 P1.10, R-EVL-2; DRAFT, do not merge before G0): `task_id` (one human request) and `trace_id`
+  (one routed call) on every ledger writer. Additive nullable columns `usage.task_id/trace_id`,
+  `routing_decisions.task_id/trace_id` and `execution_events.task_id/trace_id` (`cost.MIGRATE_ADD_TASK_IDENTITY`,
+  `execution_ledger._MIGRATIONS`); rows written before carry NULL. `task_id` and `trace_id` are also keys of every
+  `proxy_calls.jsonl` and `edit_outcomes.jsonl` row. Host turns use `sha256(session_id + human_turn_index)[:16]`: the
+  UserPromptSubmit hook (`auto-route.py`, version 51) advances a per-session counter (`<state>/turn_state/<session>.json`),
+  and the MCP server, the proxy and the sub-agent hooks read the same id for the same turn. `route_and_call` and each MCP
+  tool call run in a `call_identity.scope`: a fresh `trace_id` per call, one shared `task_id` for escalations and retries,
+  and a `gen-<hex>` stand-in `task_id` when nothing names one (joinable to its trace, but G3 does not count it as recorded). The turn counter is written under a lock; turn-state files older than 7 days are pruned when a session records its first turn. The SDK no longer
+  stamps the placeholder `sdk`: `route(..., session_id=, task_id=)` takes the caller's ids, else a per-process `sdk-<hex>`
+  session. `cc-usage-track.py` (version 6) writes both ids. `kpi` G3 scores `task_id` per writer only from the first row in the window that carries a real (non-NULL, non-`gen-`) task_id; earlier rows are reported, not scored, and a writer with none leaves it unscored. This implements PLAN v16 :532, "task_id counts from the P1.10 merge date", without a hard-coded date. Override: `LLM_ROUTER_G3_TASK_ID_FROM` (epoch seconds) or `kpi.G3_TASK_ID_SCORED_FROM`.
+  Not covered: `model_tracking.jsonl`, coverage, intercepts and `provenance_meta` rows still carry no session or task id;
+  `technical_ops` does not exist in the tree yet; HTTP headers and the MCP `task=` argument are A.3.
 - synthetic replay harness (owner decision D-42; test tooling, no product change): `scripts/synthetic_replay.py --corpus <jsonl>
   --out <dir> [--doors hook,proxy,gateway,mcp,sdk,agent-route] [--sessions N]` drives synthetic sessions through every
   classification door (auto-route and agent-route hooks as subprocesses, an `llm-router proxy` on an ephemeral port, the

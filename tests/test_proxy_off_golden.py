@@ -54,7 +54,9 @@ CLIENT_HEADERS = {"authorization": f"Bearer {TOKEN}", "anthropic-version": "2023
 # Wall-clock fields: the only ledger values a correct run may change.
 # tier_phases_ms (P0.9-e) is per-phase wall time, volatile like tier_decision_s.
 _VOLATILE = {"ts", "route_latency_s", "upstream_latency_s", "added_latency_s", "tier_decision_s",
-             "tier_phases_ms"}
+             "tier_phases_ms",
+             # P1.10: per-call uuid and a generated-or-turn task id; random per run.
+             "task_id", "trace_id"}
 _VOLATILE_USAGE = {"first_token_s"}
 _ID_RE = re.compile(r"(toolu_lr|msg_lr)[0-9a-f]{22}")
 

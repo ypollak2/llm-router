@@ -441,7 +441,7 @@ The verdict (`--json`: `kpis.G3.prd`) scores four writers apart, each over the P
 - **Per writer, with n.** A writer with rows owes n >= 100 organic rows (below: not informative) and >= 99% of
   them carrying every scored field. A writer with 0 rows prints `no traffic` and is never a pass; with no writer
   carrying traffic the verdict is `NOT INFORMATIVE`. A database that cannot be read is `unreadable`, not empty.
-- **`task_id`** is reported with its coverage and not scored until P1.10 adds it.
+- **`task_id`** is scored per writer from the first row in the window that carries a real task_id (not NULL, not a `gen-` stand-in); earlier rows are reported with their coverage but not scored, and a writer with no such row leaves it unscored. This is PLAN v16 :532's "from the P1.10 merge date", derived from the data so it cannot drift with a delayed deploy. Override: `LLM_ROUTER_G3_TASK_ID_FROM` (epoch seconds).
 - **A field with no column is missing**, never dropped from the list: `usage` has no reason column, so the usage
   writer fails until one exists. A NOT NULL column (tokens, cost, latency on `usage`) is never NULL, so a
   placeholder 0 written there reads as recorded: G3 cannot see it.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 50
+# llm_router-hook-version: 51
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 50"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 51"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -4519,6 +4519,15 @@ def main() -> None:
             sys.exit(0)
 
     session_id = hook_input.get("session_id", "")
+
+    # P1.10: a human prompt is a new task. Advance the session's turn counter before any
+    # writer runs, so every row of this turn (hook, MCP, proxy, sub-agents) shares one task_id.
+    try:
+        from llm_router import call_identity as _ci_turn
+        _ci_turn.begin_turn(session_id)
+    except Exception as _exc:  # identity never blocks a prompt
+        from llm_router import failopen as _fo
+        _fo.record("CHZ-FO-HOOK-TURN-ID", _exc)
 
     # Refresh the session pointer on every prompt. It used to be written once by
     # session-start.py, so it went stale after the 6h TTL and a long session lost
