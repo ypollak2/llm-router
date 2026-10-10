@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- ledger (LEDGER-ERR-1, docs/bugs/LEDGER-ERR-1.md): an `llm` call that reached dispatch and failed (all providers timed out, no healthy candidate, wall-clock timeout, cancel) wrote no row with the caller's session id; in the M0-3 rerun (2026-10-10, n=20 calls, 2 sessions) 3 of 20 left none. It now writes one `usage` row (success=0, $0, attempted model, latency, `error_*` reason code), never a second for the same call.
+- ledger (LEDGER-ERR-1, docs/bugs/LEDGER-ERR-1.md): an `llm` call that reached dispatch and failed (all providers timed out, no healthy candidate, wall-clock timeout, cancel) wrote no row with the caller's session id; in the M0-3 rerun (2026-10-10, n=20 calls, 2 sessions) 3 of 20 left none. It now writes one `usage` row (success=0, $0, attempted model, latency, `error_*` reason code), never a second for the same call. Call counts, the statusline mix, routing_report/routing_health and the dashboard call totals leave these rows out. Scope: the M0-3 gate SQL reads `routing_decisions` only, so this does not change that gate's literal count (15/20); it closes the gap for an any-per-session-row measure.
 - proxy main-thread test (TURNFIRST-2, docs/bugs/TURNFIRST-2.md): a general-purpose sub-agent is sent the `Agent`
   tool, so the launcher-only test labelled its first call a main-thread `turn_first`. In the live ledger after the
   TURNFIRST-1 deploy (2026-10-10 00:15:07Z to 08:17:31Z, n=100 rows) 3 of the 4 `turn_first` rows were such first

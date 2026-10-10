@@ -26,6 +26,7 @@ from textual.widgets import Footer, Static
 from llm_router.tool_surface import route_tool  # CHZ-SURF-01
 
 from llm_router import paths
+from llm_router.provider_classes import not_error_row_sql
 from llm_router.sqlite_wal import enable_wal
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -240,7 +241,7 @@ def _fetch_data() -> DashboardData:
         row = conn.execute(
             "SELECT COUNT(*), COALESCE(SUM(cost_usd),0), "
             "COALESCE(SUM(input_tokens+output_tokens),0) "
-            "FROM usage WHERE date(timestamp,'localtime') = date('now','localtime')"
+            "FROM usage WHERE date(timestamp,'localtime') = date('now','localtime') AND " + not_error_row_sql(conn)
         ).fetchone()
         if row:
             d.today_calls, d.today_cost, d.today_tokens = row[0], row[1], row[2]
@@ -248,7 +249,7 @@ def _fetch_data() -> DashboardData:
         # ── Month ─────────────────────────────────────────────────────
         row = conn.execute(
             "SELECT COUNT(*), COALESCE(SUM(cost_usd),0) FROM usage "
-            "WHERE timestamp >= datetime('now','start of month')"
+            "WHERE timestamp >= datetime('now','start of month') AND " + not_error_row_sql(conn)
         ).fetchone()
         if row:
             d.month_calls, d.month_cost = row[0], row[1]

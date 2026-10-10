@@ -17,6 +17,13 @@ status: fixed in `fix/llm-error-path-ledger-row`
   `route_and_call` calls it from the three handlers around dispatch, shielded and fail-open; it skips when a row with the call's correlation id exists,
   so there is never a second row for one call. The dispatch loop shares its attempt list so the row names the model actually being tried.
   Pre-dispatch failures (empty chain, budget refusal before dispatch) are not covered.
+  Consumers that count usage rows without a `success = 1` filter now exclude error rows through one shared predicate
+  (`provider_classes.SQL_NOT_ERROR_ROW`, like the cache-row precedent): statusline mix, routing_report (counts and latency
+  percentiles), routing_health, dashboard TUI/server today and month call counts. Share card, digest, session hooks and
+  test_delta already filter `success = 1`. Other dashboard queries (per-task/profile breakdowns) still count them.
+- **Gate scope (read this).** The M0-3 gate query (`P0.0-m0.json` M0-3 sql) reads `routing_decisions` where `provenance='runtime'` only.
+  This change writes a `usage` row, not a `routing_decisions` row, so it does NOT change the literal gate count (15/20 on the rerun).
+  It closes the gap under an "any per-session ledger row" measure (17/20 + 3 error rows = 20/20 in that run, by construction, not re-measured).
 - **Test.** `tests/test_ledger_err1_error_row.py`: provider exception, no healthy candidate, wall-clock timeout and cancellation each write exactly one row with
   the caller's session id; success writes no error row; retry is two rows; no double row per correlation id; no prompt/exception text; NULL session outside an MCP call.
-  Fails on main (6 of 9 fail with the router change reverted).
+  `tests/test_ledger_err1_consumers.py` covers the consumer exclusion (4 of 5 fail without it; the fifth checks the helper). With `router.py` reverted to origin/main, 6 of the 9 error-row tests fail (3 pass vacuously: success path, direct no-double-row, no text); with all of `src/` reverted, 7 fail.

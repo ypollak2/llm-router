@@ -14,3 +14,27 @@ CACHE_PROVIDER = "cache"
 
 def is_cache_provider(provider: object) -> bool:
     return provider == CACHE_PROVIDER
+
+
+# LEDGER-ERR-1: a ``usage`` row whose reason starts ``error_`` is a call that reached
+# dispatch and FAILED (success=0, 0 tokens, $0, latency = time wasted). It exists so the
+# call is attributable to a session; it is not a served call, so call counts, the
+# local/paid mix and latency percentiles must leave it out, exactly like a cache row.
+ERROR_REASON_PREFIX = "error_"
+
+#: SQL predicate (usage table, ``reason`` column) that keeps only rows that are not error rows.
+SQL_NOT_ERROR_ROW = "COALESCE(reason, '') NOT LIKE 'error\\_%' ESCAPE '\\'"
+
+
+def not_error_row_sql(con) -> str:
+    """``SQL_NOT_ERROR_ROW`` for a sync sqlite3 connection, or ``1`` when the table has no
+    ``reason`` column (a database older than P0.8-d has no error rows to exclude)."""
+    try:
+        cols = {r[1] for r in con.execute("PRAGMA table_info(usage)")}
+    except Exception:  # noqa: BLE001
+        return "1"
+    return SQL_NOT_ERROR_ROW if "reason" in cols else "1"
+
+
+def is_error_reason(reason: object) -> bool:
+    return isinstance(reason, str) and reason.startswith(ERROR_REASON_PREFIX)
