@@ -1,5 +1,6 @@
 """Token savings analytics dashboard (RTK-style)."""
 
+from llm_router.provider_classes import real_decision_sql
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -148,7 +149,7 @@ class SavingsAnalytics:
                     session_id,
                     timestamp
                 FROM routing_decisions
-                WHERE timestamp >= ?
+                WHERE timestamp >= ? AND """ + real_decision_sql(conn) + """
                 ORDER BY timestamp DESC
                 """,
                 (cutoff,),
