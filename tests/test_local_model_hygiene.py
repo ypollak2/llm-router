@@ -203,8 +203,15 @@ def test_n19b_allow_list_overrides_name_rules(monkeypatch):
     assert discover.ollama_can_generate("ollama/llamacpp:" + "c" * 64) is False
 
 
-def test_n19b_exclusion_is_logged_at_debug(monkeypatch, capsys):
+def test_n19b_exclusion_is_logged_at_debug(monkeypatch):
+    class _Rec:
+        calls: list = []
+
+        def debug(self, msg, *args):
+            self.calls.append(msg % args)
+
+    rec = _Rec()
+    monkeypatch.setattr(discover, "log", rec)
     monkeypatch.delenv("LLM_ROUTER_LOCAL_ALLOW_MODELS", raising=False)
     assert discover._is_non_code_model("llmr-classifier-38") is True
-    out = capsys.readouterr()
-    assert "excluded llmr-classifier-38" in out.out + out.err
+    assert any("excluded llmr-classifier-38" in c for c in rec.calls)
