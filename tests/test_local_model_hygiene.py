@@ -88,11 +88,9 @@ def test_n19_unknown_verdict_expires_and_definite_verdict_is_rechecked(ollama, m
 
 
 def test_n19_budget_models_fallback_is_filtered(ollama, monkeypatch):
-    from llm_router.config import get_config
+    from llm_router.config import RouterConfig
     monkeypatch.setattr(discover, "get_cached_ollama_models", lambda: [])
-    cfg = get_config()
-    monkeypatch.setattr(type(cfg), "ollama_budget_models", "qwen3:8b,nimble:9b", raising=False)
-    monkeypatch.setenv("PYTEST_CURRENT_TEST", "")
+    cfg = RouterConfig(ollama_base_url=ollama, ollama_budget_models="qwen3:8b,nimble:9b")
     assert cfg.all_ollama_models() == ["ollama/qwen3:8b"]
 
 

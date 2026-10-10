@@ -81,7 +81,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable
 
-from llm_router import paths
+from llm_router import paths, session_kind
 
 STATE_FILE = "quality_breaker.json"
 
@@ -104,6 +104,19 @@ NOT_ROUTED = "not_routed"
 _FAILURE_OUTCOMES = frozenset({REDO, DISCARDED})
 
 UnitsFn = Callable[..., Iterable[dict]]
+
+#: N21 (docs/bugs/N21.md): units of these session kinds never feed the breaker. A research or
+#: harness session calls ``llm()`` on purpose and throws the answer away (M0-3 rerun2,
+#: 2026-10-10: 20 calls, each answered "DONE"), so its "discarded" outcome measures the
+#: experiment, not the router; those 20 units opened ``mcp_llm:code`` for 24 h for every
+#: session. ``headless`` (``claude -p`` doing real work), ``organic`` and an untagged
+#: session (``None``) still count: dropping untagged units would blind the breaker for any
+#: session whose SessionStart hook never ran.
+NON_ORGANIC_KINDS = frozenset({session_kind.KIND_RESEARCH, session_kind.KIND_HARNESS})
+
+
+def _counts_toward_breaker(u: dict) -> bool:
+    return u.get("session_kind") not in NON_ORGANIC_KINDS
 
 
 # ── env-overridable knobs (registered in env_registry.py) ───────────────────
@@ -277,7 +290,7 @@ def _fetch_class_units(lever: str, task_type: str | None, model: str | None,
                         *, units_fn: UnitsFn | None = None) -> list[dict]:
     """This class's routed units (``outcome != "not_routed"``), oldest first."""
     fn = units_fn or _default_units_fn
-    all_units = list(fn(days=lookback_days()))
+    all_units = [u for u in fn(days=lookback_days()) if _counts_toward_breaker(u)]
     matches = [
         u for u in all_units
         if u.get("lever") == lever
@@ -542,7 +555,7 @@ def dry_run(days: int | None = None, units_fn: UnitsFn | None = None) -> list[di
     """
     fn = units_fn or _default_units_fn
     win_days = days if days is not None else lookback_days()
-    all_units = list(fn(days=win_days))
+    all_units = [u for u in fn(days=win_days) if _counts_toward_breaker(u)]
 
     def _frozen_units_fn(**_kwargs):
         return all_units

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 29
+# llm_router-hook-version: 30
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -339,7 +339,7 @@ _CACHE_PROVIDER = "cache"  # semantic-cache-served call: not paid/free/subscript
 # routing_decisions rows of a failed or cache-served call (LEDGER-ERR-1): not routing decisions.
 # Copy of provider_classes.SQL_REAL_DECISION (hooks cannot import the package); a test pins equality.
 _REAL_DECISION = ("COALESCE(reason_code, '') NOT LIKE 'error\\_%' ESCAPE '\\' "
-                  "AND COALESCE(reason_code, '') != 'cache_hit' AND COALESCE(final_provider, '') != 'cache'")
+                  "AND COALESCE(reason_code, '') != 'cache_hit' AND COALESCE(reason_code, '') != 'breaker_open' AND COALESCE(final_provider, '') != 'cache'")
 
 
 def _real_decision(conn) -> str:
