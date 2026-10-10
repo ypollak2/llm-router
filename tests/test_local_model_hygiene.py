@@ -36,6 +36,9 @@ class _Stub(BaseHTTPRequestHandler):
 @pytest.fixture
 def ollama(monkeypatch):
     _Stub.caps = {"qwen3:8b": ["completion", "tools"], "nimble:9b": ["decision"], "emb:1": ["embedding"]}
+    for _m in ("qwen3-coder:30b", "qwen3.6:35b-a3b-coding", "qwen3.8:latest", "llmr-edit:latest",
+               "llmr-classifier-38:latest"):  # real caps of llmr-classifier-38: completion, vision, tools, thinking
+        _Stub.caps[_m] = ["completion", "vision", "tools", "thinking"]
     _Stub.show_status = 200
     _Stub.shows = []
     srv = HTTPServer(("127.0.0.1", 0), _Stub)
@@ -138,3 +141,48 @@ def test_n19_classifier_alias_is_excluded_without_calling_ollama(monkeypatch):
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
     assert discover.ollama_can_generate("ollama/llmr-classifier:latest") is False
     assert discover.ollama_can_generate("ollama/llmr-edit:latest") is True
+
+
+# N19b: the exact-name rule let llmr-classifier-38 and llamacpp:<hash> into code chains.
+@pytest.mark.parametrize("name", [
+    "ollama/llmr-classifier-38:latest", "ollama/llmr-classifier-38", "llmr-classifier-v2:latest",
+    "ollama/LLMR-Classifier:latest",
+    "ollama/llamacpp:44a38603922e14f1e3ae68c5d900cc39f2a925a9749d12ab6d268d75a01a399f",
+])
+def test_n19b_classifier_variants_and_unnamed_imports_excluded_without_calling_ollama(monkeypatch, name):
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    monkeypatch.delenv("OLLAMA_URL", raising=False)
+    monkeypatch.setattr(discover, "_capability_cache", {})
+    assert discover.ollama_can_generate(name) is False
+
+
+def test_n19b_stub_reporting_completion_still_excluded(ollama):
+    # every model the stub does not list answers caps=["completion"], like the real alias
+    assert discover.ollama_can_generate("ollama/llmr-classifier-38:latest") is False
+    assert "llmr-classifier-38:latest" not in _Stub.shows
+
+
+def test_n19b_coder_models_kept(ollama):
+    for m in ("ollama/qwen3-coder:30b", "ollama/qwen3.6:35b-a3b-coding", "ollama/qwen3.8:latest", "ollama/llmr-edit:latest"):
+        assert discover.ollama_can_generate(m) is True
+
+
+def test_n19b_configured_classifier_model_excluded_by_role(ollama, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_MODEL", "my-router-brain")
+    assert discover.ollama_can_generate("ollama/my-router-brain:latest") is False
+    monkeypatch.setenv("LLM_ROUTER_DECISION_MODEL", "other-decider:1")
+    assert discover.ollama_can_generate("ollama/other-decider:1") is False
+
+
+def test_n19b_cached_model_list_drops_variants(ollama, monkeypatch):
+    names = ("ollama/qwen3-coder:30b", "ollama/llmr-classifier-38:latest", "ollama/llamacpp:" + "a" * 64)
+    monkeypatch.setattr(discover, "_load_cache", lambda ttl=0: {m: {"provider": "ollama"} for m in names})
+    assert discover.get_cached_ollama_models() == ["ollama/qwen3-coder:30b"]
+
+
+def test_n19b_classifier_path_unaffected(monkeypatch):
+    from llm_router import local_classifier as lc
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_MODEL", "llmr-classifier-38")
+    assert discover.ollama_can_generate("ollama/llmr-classifier-38") is False
+    assert lc._model() == "llmr-classifier-38"
+    assert lc.DEFAULT_MODEL == "llmr-classifier"
