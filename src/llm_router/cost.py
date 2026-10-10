@@ -770,6 +770,9 @@ REASON_ERROR_DENIED = "error_routing_denied"
 REASON_ERROR_OTHER = "error_exception"
 # N21: the quality breaker refused the call before dispatch (mirrors provider_classes.REASON_BREAKER_OPEN).
 REASON_BREAKER_OPEN = "breaker_open"
+# N22: the exhaustion floor served a gate-rejected answer. A real served call (attribution, mix, latency, M0-3
+# include it) that is NOT a success: its usage row has success=0, so success-filtered quality/cost/bandit readers skip it.
+REASON_DEGRADED_FLOOR = "degraded_floor"
 
 MIGRATE_ADD_TASK_TYPE_RAW = [
     "ALTER TABLE usage ADD COLUMN task_type_raw TEXT",
