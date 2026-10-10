@@ -135,7 +135,13 @@ def _is_embedding_model(name: str, meta: dict | None = None) -> bool:
 # so it must not enter a routing chain (nimble:9b, a decision-only classifier,
 # failed in ~30 ms on every llm(task=code) call). The classifier path names its
 # model explicitly (decision_classifier.DEFAULT_MODEL) and never reads this list.
-_capability_cache: dict[tuple[str, str], bool] = {}
+#: (base_url, model) -> (verdict, expires_at). A definite answer lives 1 h (a re-pulled or
+#: replaced model gets a fresh verdict); an unknown one (Ollama down, /api/show erroring or
+#: 404, no ``capabilities``) is remembered as fail-open for 60 s so a route does not pay the
+#: 2 s timeout per model, since all_ollama_models() runs on every route.
+_capability_cache: dict[tuple[str, str], tuple[bool, float]] = {}
+_CAPABILITY_TTL_S = 3600.0
+_CAPABILITY_UNKNOWN_TTL_S = 60.0
 
 #: Aliases that are classifier-only by construction. ``llmr-classifier`` is a qwen3.5
 #: Modelfile, so /api/show reports it as a normal chat model, yet it served an
@@ -162,8 +168,8 @@ def ollama_can_generate(name: str) -> bool:
     """False only when Ollama says the model lacks the ``completion`` capability.
 
     Fails open: no base URL, /api/show unreachable, an older Ollama without
-    ``capabilities``, or any error all keep the model. Only a definite answer is
-    cached (per process); a failed lookup is retried on the next call.
+    ``capabilities``, or any error all keep the model. Answers are cached per process
+    (see ``_capability_cache``): 1 h when definite, 60 s when unknown.
     """
     bare = name.split("/", 1)[1] if name.startswith("ollama/") else name
     if bare.lower().split(":", 1)[0] in _CLASSIFIER_ONLY_BASES:
@@ -175,17 +181,21 @@ def ollama_can_generate(name: str) -> bool:
     if not base:
         return True
     key = (base, bare)
-    if key in _capability_cache:
-        return _capability_cache[key]
+    import time
+    now = time.monotonic()
+    hit = _capability_cache.get(key)
+    if hit and hit[1] > now:
+        return hit[0]
     try:
         caps = _ollama_show_capabilities(base, bare)
     except Exception as e:
         log.debug("Ollama /api/show failed for %s: %s", bare, e)
-        return True
+        caps = None
     if caps is None:
+        _capability_cache[key] = (True, now + _CAPABILITY_UNKNOWN_TTL_S)
         return True
     ok = "completion" in caps
-    _capability_cache[key] = ok
+    _capability_cache[key] = (ok, now + _CAPABILITY_TTL_S)
     return ok
 
 

@@ -29,6 +29,8 @@ so a future client can read older snapshots without coercion.
 
 from __future__ import annotations
 
+from llm_router.provider_classes import real_decision_sql
+
 from llm_router import paths
 import argparse
 import json
@@ -124,19 +126,19 @@ def _read_routing_table(conn: sqlite3.Connection) -> TableSnapshot:
         f"SELECT COUNT(*), COALESCE(SUM({cost_col}),0), "
         f"COALESCE(SUM({in_col}),0), COALESCE(SUM({out_col}),0) "
         f"FROM routing_decisions "
-        f"WHERE COALESCE(reason_code,'') != 'sidecar_backfill'"
+        f"WHERE COALESCE(reason_code,'') != 'sidecar_backfill' AND {real_decision_sql(conn)}"
     ).fetchone()
     rows, cost, in_tok, out_tok = row
     by_tier = dict(conn.execute(
         "SELECT COALESCE(complexity,'unknown'), COUNT(*) "
         "FROM routing_decisions "
-        "WHERE COALESCE(reason_code,'') != 'sidecar_backfill' "
+        f"WHERE COALESCE(reason_code,'') != 'sidecar_backfill' AND {real_decision_sql(conn)} "
         "GROUP BY complexity"
     ).fetchall())
     by_model = dict(conn.execute(
         "SELECT COALESCE(final_model,'unknown'), COUNT(*) "
         "FROM routing_decisions "
-        "WHERE COALESCE(reason_code,'') != 'sidecar_backfill' "
+        f"WHERE COALESCE(reason_code,'') != 'sidecar_backfill' AND {real_decision_sql(conn)} "
         "GROUP BY final_model"
     ).fetchall())
     return TableSnapshot(

@@ -11,6 +11,8 @@ for a future release once the server infrastructure is in place.
 
 from __future__ import annotations
 
+from llm_router.provider_classes import SQL_REAL_DECISION
+
 import json
 import logging
 
@@ -46,7 +48,7 @@ async def get_benchmark_stats() -> dict[str, dict]:
                    SUM(CASE WHEN was_good = 0 THEN 1 ELSE 0 END) as bad,
                    final_model
             FROM routing_decisions
-            WHERE task_type IS NOT NULL
+            WHERE task_type IS NOT NULL AND """ + SQL_REAL_DECISION + """
             GROUP BY task_type
             ORDER BY total DESC
             """
@@ -57,7 +59,7 @@ async def get_benchmark_stats() -> dict[str, dict]:
             """
             SELECT task_type, final_model, COUNT(*) as c
             FROM routing_decisions
-            WHERE final_model IS NOT NULL
+            WHERE final_model IS NOT NULL AND """ + SQL_REAL_DECISION + """
             GROUP BY task_type, final_model
             ORDER BY task_type, c DESC
             """
@@ -165,7 +167,7 @@ async def prepare_community_export() -> str:
             SELECT task_type, complexity, final_model, final_provider,
                    was_good, input_tokens, output_tokens, latency_ms
             FROM routing_decisions
-            WHERE task_type IS NOT NULL AND final_model IS NOT NULL
+            WHERE task_type IS NOT NULL AND final_model IS NOT NULL AND """ + SQL_REAL_DECISION + """
             ORDER BY id DESC
             LIMIT 1000
             """

@@ -68,7 +68,32 @@ def test_n19_fails_open_when_show_unavailable(ollama):
     _Stub.show_status = 500
     assert discover.ollama_can_generate("ollama/nimble:9b") is True
     assert discover.ollama_can_generate("ollama/nimble:9b") is True
-    assert len(_Stub.shows) == 2  # a failed lookup is not cached
+    assert len(_Stub.shows) == 1  # unknown is remembered (fail-open) for 60 s: no second /api/show
+
+
+def test_n19_unknown_verdict_expires_and_definite_verdict_is_rechecked(ollama, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("time.monotonic", lambda: clock[0])
+    _Stub.show_status = 404
+    discover.ollama_can_generate("ollama/nimble:9b")
+    clock[0] += 61
+    discover.ollama_can_generate("ollama/nimble:9b")
+    assert len(_Stub.shows) == 2
+    _Stub.show_status = 200
+    clock[0] += 61
+    assert discover.ollama_can_generate("ollama/nimble:9b") is False
+    clock[0] += 3601
+    _Stub.caps["nimble:9b"] = ["completion"]  # model replaced
+    assert discover.ollama_can_generate("ollama/nimble:9b") is True
+
+
+def test_n19_budget_models_fallback_is_filtered(ollama, monkeypatch):
+    from llm_router.config import get_config
+    monkeypatch.setattr(discover, "get_cached_ollama_models", lambda: [])
+    cfg = get_config()
+    monkeypatch.setattr(type(cfg), "ollama_budget_models", "qwen3:8b,nimble:9b", raising=False)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "")
+    assert cfg.all_ollama_models() == ["ollama/qwen3:8b"]
 
 
 def test_n19_fails_open_without_base_url(monkeypatch):
