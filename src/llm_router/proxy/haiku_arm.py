@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import hashlib
 
+from llm_router.proxy import steps
+
 ARM_NAME = "haiku_simple_qa"
 SALT = "d31-haiku-arm-v1"
 
@@ -48,7 +50,6 @@ WHY_MATCHED = "matched:"  # + the pattern, the reason of an assigned row
 TREATMENT_RETRIED = "treatment_retried_original"  # Haiku 4xx'd; the original (pinned model) body was sent
 DEFAULT_ELIGIBLE = (("query", "simple"),)
 ORGANIC_KINDS = (None, "organic")  # None = never tagged; harness / research / headless are never armed
-_MAIN_THREAD_TOOLS = frozenset({"Agent", "Task"})
 
 
 def parse_eligible(value: object) -> tuple[tuple[str, str], ...]:
@@ -77,10 +78,10 @@ def match(eligible: tuple[tuple[str, str], ...], task: str | None, cx: str | Non
 
 
 def is_main_thread(body: dict) -> bool:
-    """Claude Code gives the main thread a sub-agent launcher (``Agent``/``Task``) and a
-    sub-agent none, on every call, not only the first."""
-    names = {t.get("name") for t in body.get("tools") or [] if isinstance(t, dict)}
-    return bool(names & _MAIN_THREAD_TOOLS)
+    """The proxy's one main-thread test (``steps.is_main_thread``): an ``Agent``/``Task``
+    launcher and no sub-agent marker. A general-purpose sub-agent holds the launcher too
+    (TURNFIRST-2), so the launcher alone is not the test."""
+    return steps.is_main_thread(body)
 
 
 def parse_share(value: object) -> float:
