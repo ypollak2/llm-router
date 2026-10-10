@@ -96,3 +96,15 @@ def test_session_end_hook_predicate_equals_the_shared_one():
         block = "\n".join(text.splitlines()[line:line + 2])
         exec(block, ns)
         assert ns["_REAL_DECISION"] == SQL_REAL_DECISION, rel
+
+
+@pytest.mark.asyncio
+async def test_feedback_without_an_id_lands_on_the_latest_real_decision(cache_env):
+    from llm_router import cost
+
+    await _fill(cache_env)  # real rows 1-6, then 4 error rows and 3 cache rows (newest)
+    c = sqlite3.connect(str(cache_env))
+    c.execute("UPDATE routing_decisions SET was_good = NULL")
+    c.commit()
+    assert await cost.rate_routing_decision(None, False) == 6
+    assert c.execute("SELECT id FROM routing_decisions WHERE was_good IS NOT NULL").fetchall() == [(6,)]

@@ -1932,8 +1932,11 @@ async def rate_routing_decision(decision_id: int | None, good: bool) -> int | No
     db = await _get_db()
     try:
         if decision_id is None:
+            # LEDGER-ERR-1: the latest REAL decision, not a failed or cache-served call's row.
+            from llm_router.provider_classes import real_decision_sql_async
             cursor = await db.execute(
-                "SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1"
+                "SELECT id FROM routing_decisions WHERE "
+                + await real_decision_sql_async(db) + " ORDER BY id DESC LIMIT 1"
             )
             row = await cursor.fetchone()
             if not row:
