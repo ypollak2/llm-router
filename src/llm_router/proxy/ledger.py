@@ -21,7 +21,9 @@ Row fields:
   step_error      true when the step labels could not be computed (fail-open)
   is_main_thread, is_first_call, turn_origin, tier_text_len
                   TURNFIRST-1 (``steps.turn_fields``), text-free: the call
-                  carries the Agent/Task launcher; it is the conversation's
+                  carries the Agent/Task launcher and no sub-agent marker in
+                  its system prompt or tools (TURNFIRST-2; rows written before
+                  it count a general-purpose sub-agent as main thread); it is the conversation's
                   first call; where the newest user turn came from (typed |
                   subagent_brief | task_notification | command | other_tag,
                   null for a continuation or side call); the character length

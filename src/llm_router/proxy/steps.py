@@ -66,9 +66,25 @@ ORIGIN_OTHER_TAG = "other_tag"            # only other harness tags (reminders, 
 TURN_ORIGINS = (ORIGIN_TYPED, ORIGIN_SUBAGENT_BRIEF, ORIGIN_TASK_NOTIFICATION, ORIGIN_COMMAND,
                 ORIGIN_OTHER_TAG)
 
-#: Claude Code gives the main thread a sub-agent launcher and gives sub-agents none
-#: (a sub-agent cannot spawn another). ``Task`` is the older name of ``Agent``.
+#: Claude Code gives the main thread a sub-agent launcher. ``Task`` is the older name of
+#: ``Agent``. A launcher alone does not make a call main-thread: since sub-agents may spawn
+#: sub-agents, a general-purpose sub-agent holds ``Agent`` too (TURNFIRST-2).
 _AGENT_LAUNCHERS = frozenset({"Agent", "Task"})
+
+#: Text Claude Code puts in a sub-agent's system prompt and never in the main thread's.
+#: Read from the shipped Claude Code 2.1.296 binary (2026-10-10): the agent runner appends
+#: the first two lines to EVERY spawned agent's prompt, built-in or custom, after the
+#: agent's own prompt; the third opens the general-purpose agent's prompt. Any one of them
+#: vetoes the launcher, so an unsure call is not counted as a main-thread human turn
+#: (docs/bugs/TURNFIRST-2.md). A fork (``subagent_type: fork``) re-sends the parent's
+#: system prompt and tools and none of these; its first call is a continuation.
+_SUBAGENT_PROMPT_MARKERS = (
+    "Messages from the agent that launched you",
+    "Agent threads always have their cwd reset between bash calls",
+    "You are an agent for Claude Code",
+)
+#: A tool only a sub-agent is given: it hands the final report back to its caller.
+_SUBAGENT_TOOLS = frozenset({"SubagentHandback"})
 
 
 def non_system(messages: list) -> list:
@@ -143,19 +159,43 @@ def step_class(body: dict, enabled: frozenset[str] | set[str]) -> str | None:
     return None
 
 
+def _system_text(system) -> str:
+    if isinstance(system, str):
+        return system
+    if isinstance(system, list):
+        return "\n".join(b.get("text", "") for b in system
+                         if isinstance(b, dict) and isinstance(b.get("text"), str))
+    return ""
+
+
+def is_subagent_request(body: dict) -> bool:
+    """The request carries sub-agent evidence: a sub-agent system-prompt marker
+    (:data:`_SUBAGENT_PROMPT_MARKERS`) or a sub-agent-only tool. Only the ``system``
+    field is read, never a message, so a user who pastes the marker text does not
+    turn the main thread into a sub-agent."""
+    names = {t.get("name") for t in body.get("tools") or [] if isinstance(t, dict)}
+    if names & _SUBAGENT_TOOLS:
+        return True
+    system = _system_text(body.get("system"))
+    return any(marker in system for marker in _SUBAGENT_PROMPT_MARKERS)
+
+
 def is_main_thread(body: dict) -> bool:
     """The call comes from the main thread: its tools hold an ``Agent``/``Task``
-    launcher, which Claude Code sends on every main-thread call and never to a
-    sub-agent. A main session run with that tool disabled reads as a sub-agent."""
+    launcher and it carries no sub-agent evidence (:func:`is_subagent_request`).
+    The launcher alone is not enough: a general-purpose sub-agent holds ``Agent``
+    too (TURNFIRST-2: three of four live turn_first rows on 2026-10-10 were such
+    first calls). A main session run with the launcher disabled reads as a sub-agent."""
     names = {t.get("name") for t in body.get("tools") or [] if isinstance(t, dict)}
-    return bool(names & _AGENT_LAUNCHERS)
+    return bool(names & _AGENT_LAUNCHERS) and not is_subagent_request(body)
 
 
 def step_kind(body: dict) -> str:
     """What kind of call ``body`` is (one of :data:`STEP_KINDS`), for the ledger.
 
-    Sub-agent kinds are inferred from the tool list (:func:`is_main_thread`). A main
-    session started with the launcher disabled is therefore counted as a sub-agent;
+    Sub-agent kinds are inferred from the tool list and the system prompt
+    (:func:`is_main_thread`). A main session started with the launcher disabled is
+    therefore counted as a sub-agent;
     both are actions, so the census's action total does not move. A first call keeps
     its pre-TURNFIRST-1 label (``turn_first`` / ``subagent_first``) whatever its text."""
     if not _has_client_tools(body):

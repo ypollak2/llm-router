@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- proxy main-thread test (TURNFIRST-2, docs/bugs/TURNFIRST-2.md): a general-purpose sub-agent is sent the `Agent`
+  tool, so the launcher-only test labelled its first call a main-thread `turn_first`. In the live ledger after the
+  TURNFIRST-1 deploy (2026-10-10 00:15:07Z to 08:17:31Z, n=100 rows) 3 of the 4 `turn_first` rows were such first
+  calls. `is_main_thread` now also needs no sub-agent marker: one of the lines Claude Code 2.1.296 puts in every
+  sub-agent's system prompt, or the `SubagentHandback` tool. The Haiku arm uses the same rule. P0.9-e and the Haiku
+  arm counts must be recomputed on rows written after the deploy.
 - proxy turn population (TURNFIRST-1, docs/bugs/TURNFIRST-1.md): `step_class == turn_first` labelled every later
   sub-agent call and notification turn as a human turn; in the live ledger (2026-10-08 17:50 to 10-09 21:05) all 113
   classified turn_first rows were Sonnet requests and 108 (95.6%) classed `code`, while the Opus main loop was never
