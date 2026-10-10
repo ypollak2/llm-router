@@ -535,6 +535,17 @@ def _has_haiku55_rejected_params(body: dict) -> bool:
         effort = oc.get("effort") if isinstance(oc, dict) else None
         if ttype != "disabled" or effort in ("xhigh", "max"):
             return True
+        if ttype == "disabled":
+            # "With thinking: disabled, effort can't change mid-conversation: a per-message
+            # output_config.effort that differs from the level in effect returns a 400"
+            # (build-with-claude/effort, Haiku 5.5). In effect: the top-level effort, else
+            # the default `medium`, then each earlier per-message level.
+            level = effort or "medium"
+            for m in body.get("messages") or []:
+                moc = m.get("output_config") if isinstance(m, dict) and m.get("role") == "system" else None
+                if isinstance(moc, dict) and moc.get("effort") is not None:
+                    if moc["effort"] != level:
+                        return True
     if isinstance(body.get("max_tokens"), int) and body["max_tokens"] > HAIKU55_MAX_OUTPUT_TOKENS:
         return True
     if body.get("temperature") not in (None, 1):

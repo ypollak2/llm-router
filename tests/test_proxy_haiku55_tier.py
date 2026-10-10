@@ -215,13 +215,17 @@ async def test_the_45_policy_is_unchanged_by_55_support():
     {"thinking": {"type": "disabled"}, "output_config": {"effort": "max"}},
     {"thinking": {"type": "disabled"}, "output_config": {"effort": "xhigh"}},
     {"max_tokens": 128_001},
+    # per-message effort ("low" in the body) differs from the level in effect, thinking disabled
+    {"thinking": {"type": "disabled"}, "output_config": {"effort": "high"}},
+    {"thinking": {"type": "disabled"}},  # default medium vs the per-message "low"
 ])
 def test_55_more_rejected_shapes_block(extra):
     assert pt.haiku_block_reason(dict(_eligible_body(), **extra), model=H55) == "params"
 
 
 @pytest.mark.parametrize("extra", [
-    {"thinking": {"type": "disabled"}, "output_config": {"effort": "high"}},
+    {"thinking": {"type": "disabled"}, "output_config": {"effort": "low"}},  # matches the body's per-message "low"
+    {"thinking": {"type": "adaptive"}, "output_config": {"effort": "high"}},  # adaptive may vary effort per turn
     {"thinking": {"type": "enabled", "budget_tokens": 2000}},   # rewritten to adaptive, not blocked
     {"max_tokens": 128_000},
 ])

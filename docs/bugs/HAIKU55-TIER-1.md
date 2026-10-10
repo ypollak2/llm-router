@@ -29,7 +29,9 @@ status: fixed in `feat/haiku-tier-5-5` (deploy: set the `haiku` tier in `~/.llm-
   five effort levels". `build-with-claude/mid-conversation-system-messages`: "available on ... Claude
   Sonnet 5.5, and Claude Haiku 5.5. No beta header is required". `models/haiku-4-5/overview`: legacy,
   "Claude Haiku 4.5 uses manual extended thinking", effort "Not supported", "Retirement: Not sooner than
-  October 15, 2026". Not confirmed from docs: whether Claude Code ever sends `thinking: disabled`
+  October 15, 2026". build-with-claude/effort: "With `thinking: {"type": "disabled"}`, effort can't change mid-conversation: a per-message
+  `output_config.effort` that differs from the level in effect returns a 400 error" (so `disabled` plus a differing
+  per-message effort is `params`; the level in effect is the top-level effort, default `medium`). Not confirmed from docs: whether Claude Code ever sends `thinking: disabled`
   (the tier does not list it, so such a request floors to Sonnet).
 - **Fix.** The Haiku rules key off the tier's `model` (`ClaudeTierPolicy.haiku_model`; `translate.haiku_is_legacy`:
   every id but `claude-haiku-5-5` is the 4.5 rule set, unchanged). For 5.5: `for_haiku` keeps thinking
