@@ -68,6 +68,25 @@ def _quality_breaker_block(lever: str, task_type: str) -> str | None:
             f"Do this yourself instead of routing it.")
 
 
+async def _log_breaker_refusal(task: str) -> None:
+    """N21: a refused ``llm()`` call still gets its one session-attributed ledger row in ``usage`` and
+    ``routing_decisions`` (reason ``breaker_open``, $0). Fail-open: a ledger error never changes the reply."""
+    try:
+        import uuid
+
+        from llm_router import cost
+        from llm_router.state import get_active_profile
+        from llm_router.types import TaskType
+
+        try:
+            task_type = TaskType(task if task != "auto" else "query")
+        except ValueError:
+            task_type = None
+        await cost.log_breaker_refusal(task_type, get_active_profile(), correlation_id=uuid.uuid4().hex[:8])
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def door_for_tool(name: str) -> str:
     """Return the consolidated front door for a legacy tool, or the name unchanged
     if it has no door (e.g. it's already a door, or stays as-is toward 1.0).
@@ -119,6 +138,7 @@ async def llm(
     t = (task or "auto").lower()
     _blocked = _quality_breaker_block("mcp_llm", t)
     if _blocked:
+        await _log_breaker_refusal(t)
         return _blocked
     if t == "research":
         return await llm_research(prompt, ctx, system_prompt=system_prompt, context=context)
