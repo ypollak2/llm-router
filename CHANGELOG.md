@@ -66,6 +66,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Existing `~/.llm-router/result_cache.db` files are left on disk, unread and unmigrated.
 
 ### Added
+- one resource map, discovery (PLAN v16 P1.8, branch `feat/map-discovery`, stacked on `feat/map-core`, DRAFT, do not merge
+  before G0): every `Seat` now has `status` (connected / installed_not_connected / absent) and `reason`; Codex's reason
+  is the first line `codex login status` printed (fixture: `Error loading configuration: ...config.toml:443:14: invalid
+  transport`); new Copilot seat (`gh copilot --version`, `hosts.json`, VS Code extension dir, existence checks only);
+  Gemini plan from `~/.gemini/settings.json` (`unknown` + reason when unrecognised). Old `seats.json` loads unchanged.
+  New `discovery/keys.py` `discover()` returns `KeyInfo{var, provider, source env|dotenv:<path>|keychain, usable_by,
+  billing}` without ever holding a value; `secrets_vault` gets a `keychain` backend. New `claude_creds.py` holds the
+  one keychain query (`read_oauth` follows in `feat/map-readers`). Routing is unchanged.
 - one resource map, core (PLAN v16 P1.8, branch `feat/map-core`, DRAFT, do not merge before G0): `llm-router map [--json]`
   and `llm_router_status(view="map")` return the same JSON, built by `resource_map.build()` and written atomically to
   `resource_map.json` (rebuilt when older than 300 s). One row per seat (claude, codex, gemini_cli), local model and API

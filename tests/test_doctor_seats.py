@@ -135,5 +135,5 @@ def test_seats_json_shape_is_stable(tmp_path):
     """The hook, doctor, and install all read this file; pin its keys."""
     S.save_seats(S.Seats(detected_at="2026-09-04T00:00:00+00:00"), tmp_path)
     data = json.loads((tmp_path / ".llm-router" / "seats.json").read_text())
-    assert set(data) == {"claude", "codex", "gemini", "ollama", "api_keys", "detected_at"}
-    assert set(data["claude"]) == {"kind", "plan", "plan_stale", "models"}
+    assert set(data) == {"claude", "codex", "gemini", "ollama", "copilot", "api_keys", "detected_at"}
+    assert set(data["claude"]) == {"kind", "plan", "plan_stale", "models", "status", "reason"}

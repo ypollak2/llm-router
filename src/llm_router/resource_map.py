@@ -30,17 +30,6 @@ REFRESH_TTL_S = 300
 PROVENANCE = ("measured", "estimated", "default")
 TIMESTAMP_KEYS = frozenset({"generated_at", "as_of", "reset_at"})
 
-# api key variable -> (chain provider, display name)
-_KEY_PROVIDERS = {
-    "ANTHROPIC_API_KEY": "anthropic",
-    "OPENAI_API_KEY": "openai",
-    "GEMINI_API_KEY": "gemini",
-    "GOOGLE_API_KEY": "gemini",
-    "PERPLEXITY_API_KEY": "perplexity",
-    "GROQ_API_KEY": "groq",
-    "DEEPSEEK_API_KEY": "deepseek",
-    "MOONSHOT_API_KEY": "moonshot",
-}
 DEFAULT_CODEX_DAILY = 1000
 DEFAULT_GEMINI_DAILY = 1500
 
@@ -173,6 +162,7 @@ class MapInputs:
     competence: dict | None = None          # local_eligibility.json contents
     policy: str | None = None
     codex_daily_limit: int = DEFAULT_CODEX_DAILY
+    keys: Callable[[], list] | None = None   # -> list[discovery.keys.KeyInfo]; None -> discover()
     now: float | None = None
 
 
@@ -183,11 +173,29 @@ def _row(resource: str, kind: str, chain_id: str, **kw) -> dict:
         "resource": resource, "kind": kind, "chain_id": chain_id,
         "plan": None, "status": "absent", "reason": "", "quota": {},
         "reset_at": None, "marginal_cost": {"value": None, "label": ""},
-        "capabilities": [], "limits": {}, "competence": None,
+        "capabilities": [], "limits": {}, "competence": None, "key": None,
         "effective_priority": None,
     }
     row.update(kw)
     return row
+
+
+def _not_connected(row: dict, seat, fallback: str) -> dict:
+    """Status and reason for a seat that is not connected, from the detector."""
+    row["status"] = seat.status if seat.status in ("installed_not_connected", "absent") else "absent"
+    row["reason"] = seat.reason or fallback
+    return row
+
+
+def _copilot_row(seat) -> dict:
+    # No router provider routes through Copilot, so it carries no `generate`
+    # capability and never gets a priority; it is listed so the user can see it.
+    row = _row("copilot", "subscription", "copilot", plan=seat.plan,
+               marginal_cost={"value": 0.0, "label": "included in the Copilot seat"})
+    if seat.present:
+        row["status"], row["reason"] = "connected", seat.reason or "signed in"
+        return row
+    return _not_connected(row, seat, "no GitHub Copilot found")
 
 
 def _claude_row(seat, inp: MapInputs, now: float) -> dict:
@@ -196,9 +204,8 @@ def _claude_row(seat, inp: MapInputs, now: float) -> dict:
                marginal_cost={"value": 0.0, "label": "included in the subscription seat"},
                capabilities=["generate", "tools", "vision", "thinking"])
     if not seat.present:
-        row["reason"] = "no claude.ai login found" if seat.kind != "api-key" else "API-key login, not a subscription seat"
-        return row
-    row["status"], row["reason"] = "connected", f"logged in via {seat.kind}"
+        return _not_connected(row, seat, "no claude.ai login found")
+    row["status"], row["reason"] = "connected", seat.reason or f"logged in via {seat.kind}"
     value, state, as_of = inp.claude_reading()
     if value is None:
         row["quota"]["pressure"] = quota_value(None, "default", None)
@@ -213,8 +220,7 @@ def _codex_row(seat, inp: MapInputs, now: float) -> dict:
                marginal_cost={"value": 0.0, "label": "included in the ChatGPT seat"},
                capabilities=["generate", "tools"])
     if not seat.present:
-        row["reason"] = "no ChatGPT login for codex found" if seat.kind != "api-key" else "API-key login, not a seat"
-        return row
+        return _not_connected(row, seat, "no ChatGPT login for codex found")
     row["status"] = "connected"
     row["reason"] = "logged in" + (" (plan claim expired)" if seat.plan_stale else "")
     rl = codex_rate_limits(inp.codex_sessions) if inp.codex_sessions else None
@@ -248,9 +254,8 @@ def _gemini_row(seat, inp: MapInputs, now: float) -> dict:
                marginal_cost={"value": 0.0, "label": "included in the Google seat"},
                capabilities=["generate", "tools", "vision"])
     if not seat.present:
-        row["reason"] = "no gemini login found" if seat.kind != "api-key" else "API-key only, no CLI login"
-        return row
-    row["status"], row["reason"] = "connected", "gemini CLI logged in"
+        return _not_connected(row, seat, "no gemini login found")
+    row["status"], row["reason"] = "connected", seat.reason or "gemini CLI logged in"
     q = inp.gemini_quota()
     if q:
         row["quota"]["daily_limit"] = quota_value(q.get("daily_limit", DEFAULT_GEMINI_DAILY), "estimated", None)
@@ -276,7 +281,10 @@ def _ollama_rows(inp: MapInputs, now: float) -> list[dict]:
             or "http://localhost:11434").rstrip("/")
     tags = inp.http_get(f"{base}/api/tags")
     if not isinstance(tags, dict) or "models" not in tags:
-        return [_row("ollama", "local", "ollama", reason=f"Ollama not reachable at {base}")]
+        seat = getattr(inp.seats, "ollama", None)
+        status = seat.status if seat is not None and seat.status == "installed_not_connected" else "absent"
+        why = seat.reason if status == "installed_not_connected" else f"Ollama not reachable at {base}"
+        return [_row("ollama", "local", "ollama", status=status, reason=why)]
     rows = []
     for m in tags.get("models") or []:
         name = m.get("name")
@@ -325,22 +333,22 @@ def _ollama_rows(inp: MapInputs, now: float) -> list[dict]:
 
 
 def _key_rows(inp: MapInputs) -> list[dict]:
-    seats = inp.seats
-    keys = dict(getattr(seats, "api_keys", None) or {})
-    for var in _KEY_PROVIDERS:
-        if inp.env.get(var):
-            keys[var] = True
+    if inp.keys is not None:
+        infos = inp.keys()
+    else:
+        from llm_router.discovery.keys import discover
+        infos = discover(env=inp.env)
     rows = []
-    for var, present in sorted(keys.items()):
-        if not present:
-            continue
-        provider = _KEY_PROVIDERS.get(var, var.removesuffix("_API_KEY").lower())
+    for k in infos:
         rows.append(_row(
-            f"api/{var}", "api", f"{provider}/api",
-            status="connected", reason=f"{var} is set (value not read)",
-            marginal_cost={"value": None, "label": "billed per token"},
+            f"api/{k.var}", "api", f"{k.provider}/api",
+            status="connected", reason=f"{k.var} is set (value not read)",
+            marginal_cost={"value": None, "label": "billed per token" if k.billing == "paid"
+                           else f"billing {k.billing}"},
             capabilities=["generate"],
             quota={"rpm_tpm": quota_value(None, "default", None)},
+            key={"provider": k.provider, "source": k.source,
+                 "usable_by": list(k.usable_by), "billing": k.billing},
         ))
     return rows
 
@@ -367,6 +375,7 @@ def build(inputs: MapInputs | None = None) -> dict:
         _claude_row(seats.claude, inp, now),
         _codex_row(seats.codex, inp, now),
         _gemini_row(seats.gemini, inp, now),
+        _copilot_row(seats.copilot),
         *_ollama_rows(inp, now),
         *_key_rows(inp),
     ]
