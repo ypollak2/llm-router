@@ -656,7 +656,7 @@ def test_cmd_proxy_without_a_model_refuses_cleanly_with_the_table_default(monkey
 
 def test_preflight_and_banner_resolve_a_missing_window_from_the_table(tmp_path):
     assert local_mode.resolve_num_ctx(None, None) == 32768
-    assert local_mode.resolve_num_ctx("ollama/qwen3.5:latest", None) == 131072
+    assert local_mode.resolve_num_ctx("ollama/qwen3.5:latest", None) == 32768
     assert local_mode.resolve_num_ctx("ollama/qwen3.5:latest", 40000) == 40000
     pre = _pre(tmp_path, num_ctx=None)
     assert not any("--num-ctx" in p for p in pre)

@@ -32,7 +32,7 @@ p90 3.59 s, 0/24 validation failures; that spike ran a tuned dedicated
     user turn plus the last exchange: about 3k prompt tokens instead of ~21k;
   * ``num_predict`` capped at 200 after Read/Bash/no tool, 700 otherwise; a
     reply that hits the cap is rejected (``translate.from_ollama``);
-  * ``keep_alive: -1`` on every call and one warm-up call at proxy start;
+  * ``keep_alive`` (default 600 s; -1 only when asked) on every call and one warm-up call at proxy start;
   * an 8 s first-token hedge: no first token in time -> fall back to Claude.
     Cold start was still 8-110 s in that spike, which is why both the warm-up
     and the hedge exist.
@@ -167,7 +167,8 @@ class Backend(Protocol):
 NUM_PREDICT_EASY = 200  # after Read / Bash / no tool: pick the obvious next action
 NUM_PREDICT_HARD = 700  # anything else (e.g. after an Edit)
 DEFAULT_HEDGE_S = 8.0
-DEFAULT_KEEP_ALIVE: int | str = -1
+# N20: bounded; an explicit --keep-alive -1 is still honoured (server.parse_keep_alive).
+DEFAULT_KEEP_ALIVE: int | str = 600
 
 
 def num_predict_for(body: dict) -> int:

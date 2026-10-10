@@ -6,8 +6,6 @@ from llm_router import local_models
 TABLE = {
     "qwen3-coder:30b": 32768,
     "qwen3.6:35b-a3b-coding": 32768,
-    "qwen3.5:latest": 131072,
-    "qwen3.8:latest": 131072,
     "llmr-classifier": 4096,
     "llmr-edit": 16384,
 }
@@ -27,14 +25,14 @@ def test_table_is_the_planned_one():
 
 @pytest.mark.parametrize("model,want", list(TABLE.items()) + [
     ("ollama/qwen3-coder:30b", 32768),     # provider prefix is ignored
-    ("QWEN3.5:latest", 131072),
-    ("qwen3.5:9b", 131072),                # another tag of a listed :latest family
+    ("QWEN3.5:latest", 32768),
+    ("qwen3.5:9b", 32768),                # another tag of a listed :latest family
     ("llmr-classifier:latest", 4096),      # Ollama reports aliases with their tag
     ("ollama/llmr-classifier:latest", 4096),
     ("llmr-edit:latest", 16384),
     ("ollama/llmr-edit:latest", 16384),
     ("LLMR-Edit:Latest", 16384),
-    ("qwen3.8:7b", 131072),
+    ("qwen3.8:7b", 32768),
     ("some-new-model:7b", 32768),
     ("qwen3-coder:480b", 32768),
     ("", 32768),
@@ -89,13 +87,13 @@ def test_operator_override_still_beats_the_table(monkeypatch):
 def test_old_family_values_are_unchanged():
     """Zero-Claude edits must not move: the pre-M3.4 family rule gave these."""
     for m in ("qwen3.5:latest", "qwen3.8:latest", "qwen3-coder:30b", "x:1b"):
-        old = 131072 if any(f in m for f in ("qwen3.5", "qwen3.8")) else 32768
+        old = 32768  # N20: server OLLAMA_CONTEXT_LENGTH
         assert local_models.num_ctx(m) == old
 
 
 # --- proxy without --model (docs/proxy.md's default way to run it) -----------
 
-@pytest.mark.parametrize("model,want", [("qwen3.5:latest", 131072), ("qwen3.8:latest", 131072),
+@pytest.mark.parametrize("model,want", [("qwen3.5:latest", 32768), ("qwen3.8:latest", 32768),
                                         ("qwen3-coder:30b", 32768), ("llmr-edit", 16384)])
 def test_make_backend_without_a_pin_uses_each_models_table_value(monkeypatch, tmp_path, model, want):
     """Probe 2026-10-07: cfg.model None gave cfg.num_ctx 32768, make_backend sent

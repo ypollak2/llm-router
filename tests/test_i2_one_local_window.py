@@ -40,7 +40,7 @@ def test_the_draft_call_sends_the_shared_window(monkeypatch):
     except Exception:
         pass
     assert sent, "premise: a request was built"
-    assert sent["options"].get("num_ctx") == 131072, sent["options"]
+    assert sent["options"].get("num_ctx") == 32768, sent["options"]
 
 
 def test_all_three_paths_agree(monkeypatch):

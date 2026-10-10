@@ -34,6 +34,7 @@ from llm_router.types import (
 from llm_router.savings import net_saved
 
 from llm_router import paths
+from llm_router.call_identity import note_ledger_write as _ci_note_write
 
 
 def _detect_synthetic() -> bool:
@@ -1442,6 +1443,7 @@ async def log_usage(
             ),
         )
         await db.commit()
+        _ci_note_write("usage")
     finally:
         await db.close()
 
@@ -1456,6 +1458,7 @@ async def log_route_error(
     attempted_model: str | None = None,
     latency_ms: float = 0.0,
     complexity: str = "moderate",
+    only: tuple[str, ...] | None = None,
 ) -> bool:
     """Write the one ``usage`` row of a call that reached dispatch and failed.
 
@@ -1468,8 +1471,11 @@ async def log_route_error(
     Never a second row: if a row already carries this ``correlation_id`` (an answer was
     written before a late cancel, or this failure was already recorded) nothing is
     written. Returns True when a row was written. The router wraps the call fail-open.
+
+    ``only`` (LEDGER-EVERY-EXIT-1, used by ``tools.consolidated._ledger_guard``): fill just these
+    tables, with no correlation-id dedup, for a call that wrote one table and not the other.
     """
-    if correlation_id:
+    if correlation_id and only is None:
         db = await _get_db()
         try:
             for _t in ("usage", "routing_decisions"):
@@ -1482,22 +1488,25 @@ async def log_route_error(
             await db.close()
     model = (attempted_model or "").strip()
     provider = model.split("/", 1)[0] if "/" in model else (model or "none")
-    await log_usage(
-        LLMResponse(
-            content="",
-            model=model or "none",
-            input_tokens=0,
-            output_tokens=0,
-            cost_usd=0.0,
-            latency_ms=float(latency_ms or 0.0),
-            provider=provider,
-        ),
-        task_type,
-        profile,
-        success=False,
-        correlation_id=correlation_id,
-        reason=reason,
-    )
+    if only is None or "usage" in only:
+        await log_usage(
+            LLMResponse(
+                content="",
+                model=model or "none",
+                input_tokens=0,
+                output_tokens=0,
+                cost_usd=0.0,
+                latency_ms=float(latency_ms or 0.0),
+                provider=provider,
+            ),
+            task_type,
+            profile,
+            success=False,
+            correlation_id=correlation_id,
+            reason=reason,
+        )
+    if only is not None and "routing_decisions" not in only:
+        return True
     # Owner decision 2026-10-10: the M0-3 gate reads routing_decisions, so the failed call
     # leaves its one runtime row there too (same session source as a success row). Its
     # reason_code starts ``error_``, which every routing-metric reader excludes.
@@ -2307,6 +2316,7 @@ async def log_routing_decision(
             ),
         )
         await db.commit()
+        _ci_note_write("routing_decisions")
 
         # CHZ-JUDGE-QUEUE: queue-and-grade-later. This used to call
         # judge.evaluate_response_async directly from the hot path, which (1)
