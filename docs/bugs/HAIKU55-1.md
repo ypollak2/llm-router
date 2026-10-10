@@ -50,7 +50,8 @@ status: fixed in `fix/proxy-unknown-model-haiku55` (deploy: restart the proxy; r
   MTok | $0.25 / MTok<sup>1</sup> | $50 / MTok", footnote 1 "Cache hits and refreshes on Claude Fable 5.1 and Claude
   Mythos 5.1 are priced at 0.025x the base input price". It is in the standard-rate long-context set like Fable 5.1.
   Side effect: `ClaudeTierPolicy.tier_of` uses the same resolver, so a dated id of a configured tier model
-  (`claude-sonnet-5-20260901`) now belongs to that tier, the same way its `[1m]` spelling already did.
+  (`claude-sonnet-5-20260901`) now belongs to that tier and is tier-routed (and matches `pinned_models`), the same
+  way its `[1m]` spelling already did; `test_a_dated_tier_model_id_belongs_to_its_tier_like_its_1m_spelling` pins it.
   Tests: `tests/test_pricing_haiku55.py` (suffixed Haiku 5.5 on both cards, a date on every `_ANTHROPIC` id, exact
   matches win, unknown stays unknown, the pre-4.6 `[1m]` guard after a date, a dated long-prompt ledger row,
   Mythos 5.1) and `tests/test_proxy_tiers.py::test_suffixed_haiku_5_5_rows_are_priced_on_the_tiered_card` (through

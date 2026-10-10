@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `claude-haiku-5-5-20260901` and `claude-haiku-5-5[1m]`, so such a proxy row would be labelled but unpriced and fail
   G3. An Anthropic id with an 8-digit date suffix now resolves to its base entry. Exact matches still win. `[1m]` on
   Haiku 5.5 uses its own tiered card. `claude-mythos-5-1` is priced from the pricing page ($10/$50, $0.25 cache read).
+  Behaviour change: the proxy tier policy resolves ids through the same function, so a dated id of a configured tier
+  model (`claude-opus-5-5-20260901`) now belongs to that tier and is tier-routed, as its `[1m]` spelling already was,
+  instead of being forwarded unchanged as `unknown_model`. `pinned_models` matching widens the same way.
 - emergency-chain local timeouts (LOCAL-TIMEOUT-1 follow-up, docs/bugs/LOCAL-TIMEOUT-1.md): a local timeout in the
   BUDGET emergency chain now starts or refreshes the cooldown, as it already did in the primary chain.
 - local timeout demotion (LOCAL-TIMEOUT-1, docs/bugs/LOCAL-TIMEOUT-1.md): an `ollama/*` model that had just timed out
