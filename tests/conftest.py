@@ -893,6 +893,10 @@ def _codex_home_fingerprint() -> dict[str, tuple[int, str] | None]:
         if not p.is_file():
             out[name] = None
             continue
+        if name == "config.toml":
+            # Live file (FLAKE-LAV-1): compare only llm_router's slice, content only.
+            out[name] = (0, hashlib.sha256(repr(_codex_config_slice(p)).encode()).hexdigest())
+            continue
         st = p.stat()
         digest = hashlib.sha256(p.read_bytes()).hexdigest()
         out[name] = (st.st_mtime_ns, digest)

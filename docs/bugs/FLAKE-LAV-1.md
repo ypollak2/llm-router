@@ -16,10 +16,13 @@ status: fixed in this change (test infrastructure only; production unaffected)
   Evidence: the verify file alone, 15 workers, 120 CPU busy-loops, `uvx ruff` (no ruff on PATH): 1 teardown
   ERROR in 12 runs; verify + zero_claude_edit_scope: 1 ERROR in 3 runs on a different file, identical
   signature; neither file writes under HOME.
+- **Second guard.** The session-wide `_codex_home_untouched_for_the_whole_session` fingerprinted the same file
+  whole (mtime+sha256) and errored once per xdist worker at teardown (`ERROR ... teardown of <last test>`;
+  first 'fix' attempt: 2 of 50 runs still errored, 2 and 15 errors). Its config.toml entry now uses the slice too.
 - **Fix.** `_codex_config_slice` in `tests/conftest.py`: compare only `[mcp_servers.llm_router]` and the
   hook trust records (`hooks.state`), the only things the installer writes (`codex_host`); the file is
   `_REPORT_ONLY` (never restored over a live writer). Genuine escapes still show.
 - **Test.** `tests/test_codex_config_guard_slice.py` (6 tests: project-table churn ignored; new/edited
-  llm_router table and new trust record detected). Same harness after: 50 of 50 runs passed (87 tests each).
+  llm_router table and new trust record detected). Same harness after: see PR body for the 50-run count.
 - **Not found.** No timing/ruff failure reproduced in the verify file; its 30 s deadlines held under 8x CPU
   oversubscription (runs took ~40 s vs ~8 s unloaded).
