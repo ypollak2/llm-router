@@ -181,3 +181,62 @@ def test_an_explicit_pin_keeps_its_place():
 def test_cooldown_setting_is_parsed_safely(monkeypatch, raw, expected):
     monkeypatch.setenv("LLM_ROUTER_LOCAL_TIMEOUT_COOLDOWN_S", raw)
     assert router._local_timeout_cooldown_s() == expected
+
+
+# ── Follow-up (#400 review): the emergency (backup) chain records timeouts too ──
+
+
+async def _route_with_emergency(calls, failing, emergency):
+    with patch("llm_router.router._build_and_filter_chain",
+               new=AsyncMock(side_effect=[["openai/gpt-4o"], list(emergency)])), \
+         patch("llm_router.router._call_text", new=AsyncMock(side_effect=_fake_call(
+             calls, {"openai/gpt-4o": RuntimeError("down"), **failing}))):
+        return await route_and_call(TaskType.CODE, next(_PROMPTS), complexity_hint="simple",
+                                    profile=RoutingProfile.BALANCED)
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_in_the_emergency_chain_starts_the_cooldown(temp_db, mock_env):
+    calls: list[str] = []
+    resp = await _route_with_emergency(calls, {CODER: _timeout(CODER)}, [CODER, GENERAL])
+    assert calls == ["openai/gpt-4o", CODER, GENERAL]
+    assert resp.model == GENERAL
+    # Before the fix the emergency loop's except never noted the timeout.
+    assert set(router._local_timeout_at) == {CODER}
+
+    calls.clear()
+    await _route_with_emergency(calls, {CODER: _timeout(CODER)}, [CODER, GENERAL])
+    assert calls == ["openai/gpt-4o", GENERAL]
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_in_the_emergency_chain_refreshes_the_cooldown(temp_db, mock_env):
+    stale = time.monotonic() - 500
+    router._local_timeout_at[CODER] = stale
+    calls: list[str] = []
+    # CODER is demoted to the back; everything before it fails, so it runs and times out again.
+    with pytest.raises(RuntimeError):
+        await _route_with_emergency(
+            calls, {GENERAL: RuntimeError("down"), REMOTE: RuntimeError("down"), CODER: _timeout(CODER)},
+            [CODER, GENERAL, REMOTE])
+    assert calls == ["openai/gpt-4o", GENERAL, REMOTE, CODER]
+    assert router._local_timeout_at[CODER] > stale
+
+
+@pytest.mark.asyncio
+async def test_emergency_chain_non_timeout_errors_do_not_demote(temp_db, mock_env):
+    calls: list[str] = []
+    bad_request = litellm.BadRequestError(message="bad request", model=CODER, llm_provider="ollama")
+    resp = await _route_with_emergency(calls, {CODER: bad_request}, [CODER, GENERAL])
+    assert resp.model == GENERAL
+    assert router._local_timeout_at == {}
+
+
+@pytest.mark.asyncio
+async def test_emergency_chain_cancellation_does_not_demote(temp_db, mock_env):
+    import asyncio
+
+    calls: list[str] = []
+    with pytest.raises(asyncio.CancelledError):
+        await _route_with_emergency(calls, {CODER: asyncio.CancelledError()}, [CODER, GENERAL])
+    assert router._local_timeout_at == {}

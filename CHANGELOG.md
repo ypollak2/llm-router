@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- suffixed Anthropic model ids (HAIKU55-1 follow-up, docs/bugs/HAIKU55-1.md): `pricing.resolve` returned None for
+  `claude-haiku-5-5-20260901` and `claude-haiku-5-5[1m]`, so such a proxy row would be labelled but unpriced and fail
+  G3. An Anthropic id with an 8-digit date suffix now resolves to its base entry. Exact matches still win. `[1m]` on
+  Haiku 5.5 uses its own tiered card. `claude-mythos-5-1` is priced from the pricing page ($10/$50, $0.25 cache read).
+- emergency-chain local timeouts (LOCAL-TIMEOUT-1 follow-up, docs/bugs/LOCAL-TIMEOUT-1.md): a local timeout in the
+  BUDGET emergency chain now starts or refreshes the cooldown, as it already did in the primary chain.
 - local timeout demotion (LOCAL-TIMEOUT-1, docs/bugs/LOCAL-TIMEOUT-1.md): an `ollama/*` model that had just timed out
   led the next route again. In the live ledger (`routing_quality.jsonl`, 2026-10-10 08:34:22Z to 09:30:14Z),
   `ollama/qwen3-coder:30b` timed out at 120 s on 21 of the 21 code routes that tried it. Ollama's scheduler was stuck

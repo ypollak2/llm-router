@@ -1224,6 +1224,20 @@ async def test_haiku_5_5_is_forwarded_unchanged_with_a_tier_label_and_a_cost(tmp
     assert row["anthropic_cost_usd"] == pytest.approx(usd, abs=1e-6)  # the row rounds to 6 dp
 
 
+@pytest.mark.parametrize("model", ["claude-haiku-5-5-20260901", "claude-haiku-5-5[1m]"])
+async def test_suffixed_haiku_5_5_rows_are_priced_on_the_tiered_card(tmp_path, model):
+    """#396 review: a dated or "[1m]" Haiku 5.5 id got the tier label but a null cost
+    (pricing.resolve returned None), which G3 counts as incomplete. Over 100K here."""
+    up = Upstream(responses=[(200, _sse(model, usage=_haiku55_usage(150_000)))])
+    app = _app(tmp_path, up)
+    assert (await _post(app, _req(model))).status_code == 200
+    assert json.loads(up.requests[0].content)["model"] == model
+    row = _rows(tmp_path)[-1]
+    assert (row["served_model"], row["tier"], row["tier_reason"]) == (model, "haiku", "unknown_model")
+    assert row["anthropic_cost_usd"] == pytest.approx(
+        (5 * 0.50 + 150_000 * 0.05 + 1_000 * 1.00 + 40 * 2.50) / 1e6, abs=1e-6)
+
+
 async def test_unknown_model_label_is_a_word_match_only(policy):
     sticky = Stickiness()
     for model, label in [(HAIKU55, "haiku"), ("claude-sonnet-6", "sonnet"), ("claude-3-opus", "opus"),
