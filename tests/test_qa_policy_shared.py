@@ -39,6 +39,7 @@ def _fake_local(*_args, **_kwargs) -> tuple[list[ModelSpec], list[ModelSpec]]:
 def all_providers(monkeypatch):
     """Every local provider is 'installed' and both external keys are set."""
     monkeypatch.setattr(chain_builder, "_ollama_models", _fake_local)
+    monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "ollama-model,openai_compat-model")   # P0.15: configured
     monkeypatch.setenv("GEMINI_API_KEY", "test-not-a-key")
     monkeypatch.setenv("OPENAI_API_KEY", "test-not-a-key")
 
