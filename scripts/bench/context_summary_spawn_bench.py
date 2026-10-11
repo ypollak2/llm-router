@@ -12,7 +12,9 @@ import sys
 import tempfile
 import time
 
-from llm_router import context_summary as cs
+os.environ.setdefault("LLM_ROUTER_SYNTHETIC", "1")
+
+from llm_router import context_summary as cs  # noqa: E402
 
 
 def main(n: int = 100) -> dict:
