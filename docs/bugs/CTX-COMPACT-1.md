@@ -13,7 +13,8 @@ status: fixed in `fix/ctx-compact-spill`
 - **Fix.** Before the replace, `_spill_to_archive` appends the dropped lines (size/count overflow and
   torn/unparsable lines, raw), in original order, to `archive/session_context_<sid>.jsonl` and fsyncs; if the spill
   fails the live file is left alone. TTL-expired records are NOT spilled: B-02 retention stays a
-  physical delete (`LLM_ROUTER_PERSIST_TTL_DAYS`, default 30 days, so it never touches a live session). A crash between append and replace leaves a duplicate, never a
+  physical delete (`LLM_ROUTER_PERSIST_TTL_DAYS`, default 30 days; it reaches a live session only if set
+  shorter than the session). A crash between append and replace leaves a duplicate, never a
   loss. `archive_session` (SessionEnd) already appended to an existing archive and now guards a
   missing trailing newline (one-byte seek) and fsyncs before unlinking live, so the archive is spilled lines then live lines. `restore_session`
   prepends the archive and drops live lines byte-identical to an archive line (same ts and hash), so
