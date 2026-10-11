@@ -156,3 +156,50 @@ async def test_failure_in_the_reorder_does_not_break_routing(monkeypatch, _no_di
         f"a failing reorder collapsed the chain to {chain!r} — the fail-open "
         f"path must return the chain it was handed"
     )
+
+
+@pytest.mark.asyncio
+async def test_map_priority_replaces_the_subscription_local_reorder(monkeypatch, _no_discovery):
+    """P1.8 (updated on purpose): with a fresh resource map, ``build_chain`` takes its
+    order from the map's ``effective_priority``, not from the subscription-local reorder.
+
+    The reorder spy is not called; the chain is the map-ordered chain; a map that
+    marks a provider absent drops it. Without a map the three tests above hold
+    unchanged (they run with no map file).
+    """
+    import time
+
+    import llm_router.subscription_local_routing as slr
+    from llm_router import resource_map as rm
+
+    monkeypatch.setattr(slr, "is_subscription_local_active", lambda profile: True)
+
+    def _spy(chain, **kwargs):
+        raise AssertionError("the subscription-local reorder ran although a map is present")
+
+    monkeypatch.setattr(slr, "reorder_for_subscription_local", _spy)
+
+    base = await chain_builder.build_chain(TaskType.CODE, "moderate", RoutingProfile.BALANCED)
+    provs = list(dict.fromkeys(m.split("/")[0] for m in base))
+    assert len(provs) >= 3, f"static chain too uniform to show an order: {base}"
+
+    def _write(order, absent=()):
+        rows = [
+            {"resource": p, "kind": "api", "chain_id": f"{p}/api",
+             "status": "absent" if p in absent else "connected",
+             "effective_priority": None if p in absent else i + 1,
+             "capabilities": ["generate"], "quota": {}}
+            for i, p in enumerate(order)
+        ]
+        rm.write_map({"schema": rm.SCHEMA, "policy": "balanced", "resources": rows,
+                      "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())})
+
+    want = list(reversed(provs))
+    _write(want)
+    chain = await chain_builder.build_chain(TaskType.CODE, "moderate", RoutingProfile.BALANCED)
+    got = list(dict.fromkeys(m.split("/")[0] for m in chain))
+    assert got == want, f"chain order {got} is not the map's priority order {want}"
+
+    _write(want, absent=(provs[0],))
+    chain = await chain_builder.build_chain(TaskType.CODE, "moderate", RoutingProfile.BALANCED)
+    assert all(not m.startswith(provs[0] + "/") for m in chain), chain

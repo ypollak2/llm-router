@@ -993,6 +993,16 @@ async def _build_and_filter_chain(
                 sorted(_blocked), getattr(task_type, "value", task_type), profile,
             )
 
+    # P1.8: the resource map, when a fresh one is on disk, drops resources that are
+    # not connected and orders by its effective_priority. No map, no change. An
+    # explicit pin or the headless codex re-assert above keeps its place (filter only).
+    _keep_order = bool(pinned_model) or (
+        "codex" in _broker_provs
+        and profile in (RoutingProfile.PREMIUM, RoutingProfile.REASONING)
+    )
+    from llm_router import map_reader
+    models_to_try = map_reader.apply_to_chain(models_to_try, reorder=not _keep_order)
+
     # M3.0: the Q&A local strip is NOT applied here. This builder is shared with the
     # proxy (proxy/backends.py policy_chain), whose routing must not change. The strip
     # lives in route_and_call (primary chain, after the specialist and bandit steps) and

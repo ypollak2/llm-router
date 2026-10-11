@@ -33,6 +33,7 @@ log = get_logger("llm_router.dynamic_routing")
 # Protected by _routing_lock to prevent race conditions between async event loop and daemon thread
 _dynamic_routing_table: dict[tuple[RoutingProfile, TaskType], list[str]] | None = None
 _discovery_complete = False
+_built_map_token: int | None = None  # resource-map mtime the table was built against
 _routing_lock = threading.Lock()  # Protects _dynamic_routing_table and _discovery_complete
 
 def _profile_path():
@@ -164,7 +165,18 @@ def _detect_available_tiers() -> dict[str, bool]:
         models = tier_info.get("models", [])
         if tier_name and models:
             available[tier_name] = True
-    
+
+    # P1.8: with a fresh resource map, a tier with no connected resource of its
+    # kind is not available. No map: the profile.yaml answer stands.
+    from llm_router import map_reader
+
+    view = map_reader.load_view()
+    if view is not None:
+        for tier_name in list(available):
+            kind = map_reader.TIER_KINDS.get(tier_name)
+            if kind is not None and kind not in view.kinds:
+                available[tier_name] = False
+
     return available
 
 
@@ -301,16 +313,21 @@ def initialize_dynamic_routing(available_providers: set[str] | None = None) -> N
     import time
     import traceback
 
-    global _dynamic_routing_table, _discovery_complete
+    global _dynamic_routing_table, _discovery_complete, _built_map_token
 
     with _routing_lock:
         if _discovery_complete:
             return  # Already initialized
 
         try:
+            from llm_router import map_reader
+
+            _built_map_token = map_reader.token()
             if available_providers is None:
                 # Use fast discovery that doesn't block on Ollama checks
                 available_providers = _get_available_providers_fast()
+            # P1.8: providers the resource map knows and has no connected row for
+            available_providers = map_reader.filter_providers(available_providers)
 
             _dynamic_routing_table = build_dynamic_routing_table(available_providers)
             _discovery_complete = True
@@ -411,6 +428,7 @@ def get_dynamic_model_chain(
     Returns:
         Model chain for this profile/task combo, or None if unavailable.
     """
+    _rebuild_if_map_changed()
     with _routing_lock:
         if _dynamic_routing_table is None:
             return None
@@ -418,12 +436,33 @@ def get_dynamic_model_chain(
         return _dynamic_routing_table.get((profile, task_type))
 
 
+def _rebuild_if_map_changed() -> None:
+    """P1.8: re-read the resource map when its mtime moved since the table was built.
+
+    Replaces build-once: the MCP server's table follows a rewritten map file.
+    A table that was never built, or a map file that is absent, is left alone.
+    """
+    global _discovery_complete
+    try:
+        from llm_router import map_reader
+
+        tok = map_reader.token()
+        with _routing_lock:
+            if _dynamic_routing_table is None or tok is None or tok == _built_map_token:
+                return
+            _discovery_complete = False
+        initialize_dynamic_routing()
+    except Exception as exc:  # fail open: keep the table we have
+        log.debug("dynamic routing map re-read failed: %s", exc)
+
+
 def reset_dynamic_routing() -> None:
     """Reset dynamic routing tables (for testing).
     
     Clears the cached tables so the next initialize call will rediscover.
     """
-    global _dynamic_routing_table, _discovery_complete
+    global _dynamic_routing_table, _discovery_complete, _built_map_token
     with _routing_lock:
         _dynamic_routing_table = None
         _discovery_complete = False
+        _built_map_token = None

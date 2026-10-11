@@ -122,6 +122,15 @@ async def _apply_subscription_local(
     still a working chain.
     """
     try:
+        # P1.8: with a fresh resource map the map's effective_priority is the
+        # order (and non-connected resources are dropped); the subscription-local
+        # reorder below is the fallback for an install with no map.
+        from llm_router import map_reader
+
+        view = map_reader.load_view()
+        if view is not None:
+            return map_reader.apply_to_chain(chain, view=view)
+
         from llm_router.subscription_local_routing import (
             get_subscription_pressure,
             is_subscription_local_active,
