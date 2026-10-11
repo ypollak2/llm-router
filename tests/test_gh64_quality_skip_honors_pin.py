@@ -36,6 +36,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _models_are_user_configured(monkeypatch):
+    """P0.15: the local models these tests name are configured, so the promote gate leaves them in place."""
+    monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "badmodel,llama3.2:3b,terse")
+
 import tests.test_tq007_daily_cap_downgrade as t
 from llm_router import repo_config as repo_config_module
 from llm_router import router as router_module
