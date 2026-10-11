@@ -249,3 +249,73 @@ def test_the_classifier_does_not_mutate_its_body():
     steps.step_fields(body, parent_main=True)
     steps.turn_fields(body, True)
     assert body == before
+
+
+# -- review round 2 ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("tail", [
+    [_user(RESULT)],                                                              # lone tool_result
+    [_user(RESULT, REMINDER)],
+    [{"role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": "Bash", "input": {}}]},
+     _user(RESULT), {"role": "assistant", "content": [_text("a")]}, _user(RESULT)],   # multi-message tail
+])
+def test_a_thread_continue_is_never_servable_even_with_client_tools(tail):
+    body = _continue(tail, tools=CORE + [AGENT])
+    assert steps.step_class(body, {"continuation"}) is None
+    assert steps._is_continuation(body) is False
+    assert steps.step_kind(body) == steps.STEP_CONTINUATION or len(tail) > 1   # the LABEL may still say so
+
+
+@pytest.mark.parametrize("tail", [[_user(RESULT)], [_user(RESULT), _user(RESULT)]])
+async def test_try_serve_is_never_called_for_a_thread_continue(tmp_path, monkeypatch, tail):
+    config = ps.ProxyConfig(upstream="http://127.0.0.1:9", ledger_path=tmp_path / "proxy_calls.jsonl",
+                            steps=frozenset({"continuation"}))
+    app = ps.build_app(config, client=httpx.AsyncClient(transport=httpx.MockTransport(_Upstream())),
+                       backend_factory=lambda model: pytest.fail("a backend was built for a thread continue"))
+    h = {"authorization": f"Bearer {TOKEN}", "anthropic-version": "2023-06-01", "content-type": "application/json"}
+    body = _continue(tail, tools=CORE + [AGENT])
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8787") as c:
+        r = await c.post("/v1/messages", content=json.dumps(dict(body, stream=False)), headers=h)
+    assert r.status_code == 200
+    (row,) = ledger.read_rows(tmp_path / "proxy_calls.jsonl")
+    assert row["decision"] == "forwarded" and row["reason"] == "not_eligible"
+
+
+def test_the_stateless_continuation_is_still_servable():
+    assert steps.step_class(_history(_user(RESULT, REMINDER)), {"continuation"}) == "continuation"
+
+
+async def test_an_unknown_parent_chain_stays_unknown_until_a_continue_shows_its_launcher(tmp_path):
+    rows = await _session(tmp_path, [
+        _continue([_user(_text())], parent="msg_unseen"),                    # msg_1: unknown
+        _continue([_user(_text())], parent="msg_1"),                         # msg_2: still unknown
+        _continue([_user(_text())], parent="msg_2", tools=CORE + [AGENT]),   # msg_3: launcher seen -> main
+        _continue([_user(_text())], parent="msg_3"),                         # msg_4: inherits main
+    ])
+    assert [r["is_main_thread"] for r in rows] == [None, None, True, True]
+    assert [r["step_class"] for r in rows] == ["subagent_turn", "subagent_turn", "turn_first", "turn_first"]
+
+
+@pytest.mark.parametrize("text", [
+    "<cross-session-message from=\"abc\" from-name=\"peer\">\nsynthetic\n</cross-session-message>",
+    "The coordinator sent a message while you were working:\nAddress this before completing your current task.\nsynthetic",
+    "Another Claude session sent a message while you were working: synthetic",
+    "The synthetic plugin sent a message while you were working:\nsynthetic",
+    "Your background observer (x) sent a report while you were working:\nsynthetic",
+    "[SYSTEM NOTIFICATION - NOT USER INPUT]\nsynthetic",
+    "[MESSAGE FROM NON-USER SOURCE - NOT USER INPUT]\nsynthetic",
+    "synthetic-channel while you were working:\nsynthetic",
+    "The user hasn't heard from you in a while. synthetic",
+    "<system-reminder>\nhook additional context: synthetic\n</system-reminder>",
+])
+def test_agent_to_agent_and_harness_text_beside_tool_results_is_not_a_human_prompt(text):
+    last = _user(RESULT, _text(text))
+    assert steps.step_kind(_history(last)) == steps.STEP_CONTINUATION
+    assert steps.turn_origin(_history(last)) is None
+
+
+def test_the_users_own_queued_prompt_wire_form_is_a_human_prompt():
+    text = ("The user sent a new message while you were working:\nsynthetic\n"
+            "This is how Claude Code surfaces messages the user sends mid-turn")
+    assert steps.step_kind(_history(_user(RESULT, _text(text)))) == steps.STEP_TURN_FIRST

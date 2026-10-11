@@ -40,16 +40,38 @@ status: fixed in `fix/step-sidecall` (D-59; deploy: restart the proxy; rows writ
      remembers `msg_id -> is_main_thread` (bounded, 8,192) as rows are written and passes it as
      `parent_main`. Sub-agent evidence in the trimmed `system` still vetoes. An unknown parent (proxy
      restarted, parent bypassed) is not proof of a main-thread human turn, so it is `subagent_turn`
-     and the ledger's `is_main_thread` is null (same rule as TURNFIRST-2).
+     and the ledger's `is_main_thread` is null (same rule as TURNFIRST-2). Null is never stored, so the
+     rest of that thread stays unknown, and its human-text continues `subagent_turn`, until a new
+     `create` or a continue that carries tools (launcher visible) re-establishes it. That is not a
+     one-time miss: it lasts for the remainder of a thread that began before a proxy restart.
   3. A user turn with `tool_result` AND human text (harness blocks and `[Request interrupted` do not
      count) is a human turn, not a continuation: `turn_first` on the main thread, `subagent_turn`
      otherwise.
   4. New text-free ledger column `thread` (`create` | `continue` | null) so the next audit can
      re-label offline; this audit could not, because the ledger did not keep it.
-  Not changed: serving (`step_class`) and `tiers.py` still use `has_client_tools`, so a thread
-  continue is never served, never re-tiered and never given to the Haiku arm (a model switch inside a
-  server-side thread would be refused). `prev_tools` / `prev_tool_class` stay empty for a threaded
-  continuation (the tool_use is in the part of the history the body leaves out).
+  Serving: `steps.step_class` (the only serving gate) and the strict `_is_continuation` return
+  nothing for any thread continue, so a continue is never served, even when it carries a client tool
+  and a one-message tail (the first push relaxed the 3-message rule for the label only by changing
+  `_newest_turn_kinds`, which the serving predicate also read; review round 2 caught it). `tiers.py`
+  and the Haiku arm still use `has_client_tools`, so a tools-less continue is never re-tiered either.
+  `prev_tools` / `prev_tool_class` stay empty for a threaded continuation (the tool_use is in the part
+  of the history the body leaves out).
+  Human text beside tool results is human only if it carries no non-user wire prefix. Read from the
+  Claude Code 2.1.296 binary (2026-10-11): the user's own queued prompt is
+  `The user sent a new message while you were working:\n<text>\nThis is how Claude Code surfaces...`;
+  a coordinator is prefixed `The coordinator sent a message while you were working:`; a peer is
+  `<cross-session-message from=...>` / `Another Claude session sent a message...`; a plugin
+  `The <name> plugin sent a message...`; an observer `Your background observer (...) sent a report...`;
+  a task notification `[SYSTEM NOTIFICATION - NOT USER INPUT]`; other non-user sources
+  `[MESSAGE FROM NON-USER SOURCE - NOT USER INPUT]`, `[SCHEDULED TASK`, `... in the bound thread while
+  you were working`. Hook output (`hook_additional_context`, `hook_success`, `hook_blocking_error`,
+  `hook_stopped_continuation`) is built as `xe({content: UEe(...), isMeta: true})` where `UEe` wraps in
+  `<system-reminder>` (`NO="<system-reminder>"`), so the existing harness-tag strip removes it. The
+  silent-turn reminder's wrapper was not found; its text ("The user hasn't heard from you in a
+  while") is excluded by marker. Known limit: the review's transcript copy (attachment text, before the
+  wire prefix is added) over-counted 19 of 53 such blocks; on the wire these carry the prefixes
+  above, but no raw wire body was captured, so a coordinator or peer message without its prefix would
+  still be counted as human.
 - **Rule.** A missing `tools` field is not evidence that a call is a side call. Read the shape that
   carries the history (`thread`), and take the label of a threaded call from the call it continues.
 - **Test.** `tests/test_proxy_step_sidecall.py` (synthesized bodies, no prompt text): human prompt
@@ -57,5 +79,8 @@ status: fixed in `fix/step-sidecall` (D-59; deploy: restart the proxy; rows writ
   is `turn_first` (main) or `subagent_turn` (sub-agent); unknown parent and sub-agent marker are not
   main thread; title, probe, summary, server-tool-only and `thread: create` bodies stay `side_call`;
   interrupt and reminder text beside tool results stay `continuation`; serving unchanged; end to end
-  through the proxy (create, typed prompt, tool follow-up, mid-run prompt, unseen parent).
+  through the proxy (create, typed prompt, tool follow-up, mid-run prompt, unseen parent, an unknown
+  chain resolved by a continue that carries tools); a continue with client tools and a one- or
+  multi-message tail is never served and `try_serve` is never reached; agent-to-agent and harness
+  prefixes beside tool results stay `continuation`.
   Red on origin/main, green here.

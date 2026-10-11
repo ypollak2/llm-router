@@ -134,6 +134,9 @@ def _newest_turn_kinds(body: dict) -> set | None:
 
 
 def _is_continuation(body: dict) -> bool:
+    """The SERVING predicate: strict, and never true for a thread continue (a one-message tail)."""
+    if is_thread_continue(body):
+        return False
     kinds = _newest_turn_kinds(body)
     return kinds is not None and "tool_result" in kinds and kinds <= {"tool_result", "text"}
 
@@ -174,7 +177,10 @@ def _has_client_tools(body: dict) -> bool:
 
 
 def step_class(body: dict, enabled: frozenset[str] | set[str]) -> str | None:
-    """The first enabled step class this request belongs to, else ``None``."""
+    """The first enabled step class this request belongs to, else ``None``. A Message Threads
+    continue is never served: its body is the tail of a server-side thread (STEP-SIDECALL-1)."""
+    if is_thread_continue(body):
+        return None
     if not _has_client_tools(body):
         return None  # side calls (titles, probes) carry no tools
     tc = body.get("tool_choice")
@@ -225,6 +231,30 @@ def is_main_thread(body: dict, parent_main: bool | None = None) -> bool | None:
     return bool(names & _AGENT_LAUNCHERS) and not is_subagent_request(body)
 
 
+#: Wire text Claude Code 2.1.296 puts in front of a message that is NOT the user's, when it
+#: queues it beside tool results (read from the binary, 2026-10-11). The user's own queued
+#: prompt is prefixed ``The user sent a new message while you were working:``; a peer, a
+#: coordinator, a channel, a plugin, an observer, a scheduler and a task notification each
+#: have their own prefix. ``<cross-session-message`` is the peer envelope. Hook output
+#: (``additionalContext``, ``hook_success``, blocking errors, stop-continuation) is wrapped
+#: in ``<system-reminder>`` and stripped as a harness block; the silent-turn reminder text
+#: is listed because its wrapper was not found.
+_USER_QUEUED = "The user sent a new message while you were working"
+_NON_USER_MARKERS = (
+    "[SYSTEM NOTIFICATION - NOT USER INPUT]", "[MESSAGE FROM NON-USER SOURCE", "[SCHEDULED TASK",
+    "<cross-session-message", "The coordinator sent a message", "Another Claude session sent a message",
+    "Your background observer (", " plugin sent a message", "arrived in the bound thread",
+    "The user hasn't heard from you in a while",
+)
+
+
+def _is_non_user_text(text: str) -> bool:
+    head = text.lstrip()[:400]
+    if _USER_QUEUED in head:
+        return False
+    return any(m in head for m in _NON_USER_MARKERS) or "while you were working" in head
+
+
 def _typed_text_beside_results(body: dict) -> bool:
     """The newest user turn answers tools AND holds human text: a prompt typed while a
     tool ran (Claude Code appends it to the tool results' turn). Harness blocks and a
@@ -233,7 +263,7 @@ def _typed_text_beside_results(body: dict) -> bool:
     if not isinstance(content, list):
         return False
     texts = [b for b in content if isinstance(b, dict) and b.get("type") == "text"
-             and not _INTERRUPT.match(b.get("text") or "")]
+             and not _INTERRUPT.match(b.get("text") or "") and not _is_non_user_text(b.get("text") or "")]
     return bool(texts) and bool(_human_parts(texts)[0])
 
 
