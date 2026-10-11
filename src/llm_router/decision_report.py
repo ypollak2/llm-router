@@ -171,7 +171,7 @@ def classifier_line(decisions: list[dict], labels: list[dict], outcomes: list[di
                     engine_version: str, heldout: dict | None = None) -> str | None:
     """``kpi classifier``: stored GT held-out for ``engine_version`` + live 7-day abstain rate,
     layer mix, shadow agreement, outcome-linked share, with n. None when the ledger is empty."""
-    win = [r for r in decisions if isinstance(r.get("ts"), (int, float)) and now - 7 * 86400 <= r["ts"] <= now]
+    win = [r for r in decisions if isinstance(r.get("ts"), (int, float)) and now - 7 * 86400 <= r["ts"] <= now + 1.0]  # ts is rounded to ms: a row just written may read as 'future'
     if not win:
         return None
     n = len(win)

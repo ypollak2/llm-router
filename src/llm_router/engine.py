@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from llm_router import decision_ledger, ml_lexical, prompt_key
+from llm_router import decision_ledger, failopen, ml_lexical, prompt_key
 from llm_router.classify import GATEWAY_POLICY, _score_categories, classify_signals
 from llm_router.paths import state_path
 
@@ -227,8 +227,8 @@ def clear_cache(*, persistent: bool = True) -> None:
                 try:
                     c.execute("DELETE FROM decisions")
                     c.commit()
-                except sqlite3.Error:
-                    pass
+                except sqlite3.Error as exc:
+                    failopen.record("LR-FO-ENGINE-CACHE-CLEAR", exc)
 
 
 def _cache_key(text: str, policy_version: str, ctx_digest: str) -> str:
@@ -282,8 +282,8 @@ def _cache_put(key: str, d: Decision, mode: str) -> None:
             c.execute("INSERT OR REPLACE INTO decisions VALUES (?,?,?)",
                       (key, json.dumps(dataclasses.asdict(d), sort_keys=True), time.time()))
             c.commit()
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as exc:
+        failopen.record("LR-FO-ENGINE-CACHE-WRITE", exc)
 
 
 # ── decision ─────────────────────────────────────────────────────────────────
