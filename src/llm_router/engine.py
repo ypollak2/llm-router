@@ -244,7 +244,7 @@ def clear_cache(*, persistent: bool = True) -> None:
                     c.execute("DELETE FROM decisions")
                     c.commit()
                 except sqlite3.Error as exc:
-                    failopen.record("P16-DECIDE-CACHE-CLEAR", exc)
+                    failopen.record("LR-FO-ENGINE-CACHE-CLEAR", exc)
 
 
 def _cache_key(text: str, policy_version: str, ctx_digest: str) -> str:
@@ -299,7 +299,7 @@ def _cache_put(key: str, d: Decision, mode: str) -> None:
                       (key, json.dumps(dataclasses.asdict(d), sort_keys=True), time.time()))
             c.commit()
     except sqlite3.Error as exc:
-        failopen.record("P16-DECIDE-CACHE-PUT", exc)
+        failopen.record("LR-FO-ENGINE-CACHE-WRITE", exc)
 
 
 # ── decision ─────────────────────────────────────────────────────────────────
