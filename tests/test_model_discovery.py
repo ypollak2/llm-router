@@ -94,3 +94,76 @@ def test_chain_builder_and_the_hook_agree(home, monkeypatch):
     _cache(home, ["shared:latest"], age_hours=1)
     from llm_router.hooks.chain_builder import _ollama_models
     assert [m.model for m in _ollama_models()] == ["shared:latest"]
+
+
+_MIXED = ["nimble:9b", "llmr-classifier:latest", "llmr-classifier-38:latest",
+          "llamacpp:44a38603922e", "qwen3.5:latest"]
+
+
+@pytest.fixture
+def no_role_env(monkeypatch):
+    for v in ("LLM_ROUTER_LOCAL_ALLOW_MODELS", "LLM_ROUTER_CLASSIFIER_MODEL", "LLM_ROUTER_DECISION_MODEL"):
+        monkeypatch.delenv(v, raising=False)
+
+
+def test_non_generators_never_reach_the_draft_chain(home, no_role_env):
+    """HOOK-DRAFT-1: the hook's list kept nimble:9b (decision-only, HTTP 400 on generate)
+    and the classifier aliases, so a moderate code draft could open on one of them.
+    nimble is listed first, so first_installed() would have returned it as well."""
+    _cache(home, _MIXED, age_hours=1)
+    assert md.available_ollama_models() == ["qwen3.5:latest"]
+    assert md.first_installed() == "qwen3.5:latest"
+    from llm_router.hooks.chain_builder import _ollama_models
+    assert [m.model for m in _ollama_models()] == ["qwen3.5:latest"]
+
+
+def test_a_declared_decision_role_alone_excludes(home, no_role_env):
+    """nimble is excluded by local_models.ROLES, not by a name prefix."""
+    _cache(home, ["nimble:9b", "qwen3.5:latest"], age_hours=1)
+    assert md.available_ollama_models() == ["qwen3.5:latest"]
+
+
+def test_the_classifier_name_rule_alone_excludes(home, no_role_env):
+    """llmr-classifier-38 has the default generate role; only the name rule removes it."""
+    _cache(home, ["llmr-classifier-38:latest", "qwen3.5:latest"], age_hours=1)
+    assert md.available_ollama_models() == ["qwen3.5:latest"]
+
+
+def test_the_live_probe_filters_too(home, no_role_env, monkeypatch):
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"models": [{"name": n} for n in _MIXED]}).encode()
+
+    monkeypatch.setattr(md.urllib.request, "urlopen", lambda *a, **k: _Resp())
+    assert md.probe_ollama() == ["qwen3.5:latest"]
+
+
+def test_the_allow_list_still_admits_a_deliberately_named_import(home, no_role_env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_ALLOW_MODELS", "llamacpp:44a38603922e")
+    _cache(home, ["llamacpp:44a38603922e", "qwen3.5:latest"], age_hours=1)
+    assert md.available_ollama_models() == ["llamacpp:44a38603922e", "qwen3.5:latest"]
+
+
+def test_the_hook_list_does_not_import_discover():
+    """discover costs ~0.56 s to import; the per-prompt hook must not pay it for this rule."""
+    import subprocess
+    import sys
+
+    code = ("import sys; from llm_router.hooks import chain_builder; "
+            "from llm_router import model_discovery; model_discovery._is_completion_model('qwen3.5:latest'); "
+            "print('llm_router.discover' in sys.modules)")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "False", out.stdout + out.stderr
+
+
+def test_a_configured_classifier_model_is_excluded(home, no_role_env, monkeypatch):
+    """The model the classifier path is configured to use is ruled out by role, whatever its name."""
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_MODEL", "my-sorter:latest")
+    _cache(home, ["my-sorter:latest", "qwen3.5:latest"], age_hours=1)
+    assert md.available_ollama_models() == ["qwen3.5:latest"]

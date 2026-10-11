@@ -27,6 +27,8 @@ Design principles mirror :mod:`llm_router.calibration`:
 
 from __future__ import annotations
 
+from llm_router.provider_classes import real_decision_sql_async
+
 import logging
 import os
 from dataclasses import dataclass
@@ -235,6 +237,7 @@ async def aggregate_stats(
          -- calls. Measured delta on that ledger: the top pick was unchanged;
          -- the two models dropped were already ranked last on placeholder data.
          WHERE provenance = 'runtime'
+           AND __REAL__
            AND profile = ?
            AND (subject = ? OR (subject IS NULL AND ? = 'general'))
            AND final_model IN ({placeholders})
@@ -256,6 +259,7 @@ async def aggregate_stats(
         return []
 
     try:
+        sql = sql.replace("__REAL__", await real_decision_sql_async(db))
         async with db.execute(sql, params) as cursor:
             rows = await cursor.fetchall()
     except aiosqlite.OperationalError as err:

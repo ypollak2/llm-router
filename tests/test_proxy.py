@@ -464,7 +464,7 @@ async def test_ollama_backend_streams_merges_tool_calls_and_sends_keep_alive():
     assert m["content"][1]["name"] == "Bash" and usage["prompt_tokens"] == 2900
     assert usage["first_token_s"] is not None
     payload = seen[0]
-    assert payload["stream"] is True and payload["keep_alive"] == -1 and payload["think"] is False
+    assert payload["stream"] is True and payload["keep_alive"] == 600 and payload["think"] is False
     assert payload["model"] == "qwen3-coder:30b" and payload["options"]["num_predict"] == 700
 
 
@@ -494,7 +494,7 @@ async def test_warm_up_pins_the_policy_model_and_never_raises(tmp_path, monkeypa
     app = ps.build_app(cfg, client=client)
     result = await app.state.warm_up()
     assert result["warm_up"] == "ok" and result["model"] == "ollama/qwen3-coder:30b"
-    assert seen[0]["keep_alive"] == -1 and seen[0]["options"]["num_predict"] == 1
+    assert seen[0]["keep_alive"] == 600 and seen[0]["options"]["num_predict"] == 1
 
     async def _boom(text):
         raise RuntimeError("policy down")

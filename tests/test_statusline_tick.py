@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from llm_router import statusline_tick as tick
+from tests.statusline_prime import wait_for_cache
 
 REPO = Path(__file__).resolve().parents[1]
 TICK = REPO / "src" / "llm_router" / "statusline_tick.py"
@@ -208,6 +209,29 @@ def test_tick_is_stdlib_only():
     assert "compute_scorecard" not in TICK.read_text()
 
 
+def test_tick_render_path_does_not_import_datetime(tmp_path):
+    """P0.9-c: ``datetime`` costs ~5-8 ms per tick and only the history row's ISO
+    reset time needs it. Run the real tick as ``python -I -S`` over an empty HOME
+    and assert the module was never loaded (deterministic: no wall clock)."""
+    code = (
+        "import sys, runpy\n"
+        f"sys.argv = [{str(TICK)!r}]\n"
+        "try:\n"
+        f"    runpy.run_path({str(TICK)!r}, run_name='__main__')\n"
+        "except SystemExit:\n"
+        "    pass\n"
+        "print('datetime' in sys.modules)\n"
+    )
+    env = {"HOME": str(tmp_path), "LLM_ROUTER_HOME": str(tmp_path / ".llm-router"), "PATH": os.environ["PATH"]}
+    out = subprocess.run([sys.executable, "-I", "-S", "-c", code], input=b"", capture_output=True, env=env, timeout=30)
+    assert out.stdout.decode().strip().splitlines()[-1] == "False", out.stderr.decode()
+
+
+def test_epoch_still_parses_iso_after_lazy_import():
+    assert tick._epoch("2026-10-11T00:00:00Z") == 1791676800.0
+    assert tick._epoch("nope") is None
+
+
 # ── subprocess: the real command ─────────────────────────────────────────────
 
 def _env(home: Path, refresh_cmd: str, *, fast: bool = True) -> dict:
@@ -384,11 +408,18 @@ def _both(tmp_path, **extra):
 
 
 def test_both_prints_full_line_then_fast_line(tmp_path):
+    # A cold home's first render only starts the detached segment build and prints
+    # "segments pending"; the build lands later, at a time no test controls. Build
+    # the cache first so the `both` render and the full render below read the same
+    # one (docs/bugs/SLT-FLAKE-1.md).
+    _run(_env(tmp_path, "true", fast=False))
+    assert wait_for_cache(tmp_path), "the detached build never wrote the segment cache"
     out, _ = _both(tmp_path)
     lines = out.splitlines()
     assert len(lines) == 2, out
     assert not lines[0].startswith("llm-router · "), lines[0]
     assert lines[1].startswith("llm-router · "), lines[1]
+    assert "segments pending" not in lines[0], lines[0]
     full, _ = _run(_env(tmp_path, "true", fast=False))
     assert lines[0] == full.splitlines()[0]
 

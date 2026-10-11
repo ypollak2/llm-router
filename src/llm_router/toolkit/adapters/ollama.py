@@ -218,7 +218,11 @@ class OllamaAdapter:
         if self.constrained:
             payload["format"] = tool_call_schema(sorted(names))
         try:
-            check_overflow(payload, num_ctx=self.num_ctx, base_url=self.base_url, model=self.model,
+            from llm_router.pack_overflow import PayloadPack
+            pack = PayloadPack(payload, num_ctx=self.num_ctx, base_url=self.base_url,
+                               model=self.model, site="toolkit.adapters.ollama")
+            payload = pack.trim_to()
+            check_overflow(payload, num_ctx=pack.num_ctx, base_url=self.base_url, model=pack.model,
                            site="toolkit.adapters.ollama")
         except ContextOverflow as exc:
             raise AdapterError(f"context_overflow: {exc}") from exc

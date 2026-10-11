@@ -310,6 +310,30 @@ def inject_system_prompt(system_prompt: str | None, objective: str,
         return system_prompt
 
 
+def inject_system_block(objective: str, *, root: str | None = None,
+                        session_id: str | None = None, limit: int = 3,
+                        target_provider: str | None = None,
+                        session_tokens: int = 1200,
+                        session_root: str | None = None) -> str:
+    """P1.4 (R-CTX-8) ``placement="system"``: the knowledge block ALONE.
+
+    Same retrieval as `inject` (it calls it), but the block is returned
+    separately instead of being prepended to the user message, so an Anthropic
+    path can place it in the system prompt after the instructions, inside the
+    cached stable prefix (`cache_layout.build_layout`). Nothing calls this by
+    default. "" when there is nothing to attach or on any failure.
+    """
+    try:
+        enriched = inject(objective, root=root, session_id=session_id, limit=limit,
+                          target_provider=target_provider,
+                          session_tokens=session_tokens, session_root=session_root)
+        if not enriched or enriched == objective or objective not in enriched:
+            return ""
+        return enriched[: enriched.index(objective)].strip()
+    except Exception:                                        # noqa: BLE001
+        return ""
+
+
 def render_block(concepts) -> str:
     """Format already-retrieved concepts as a knowledge block, with no prompt.
 

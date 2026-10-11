@@ -85,6 +85,35 @@ def call_session_id() -> str | None:
     return mcp_session_id() if tool_use_id() is not None else None
 
 
+class LedgerGuard:
+    """LEDGER-EVERY-EXIT-1: which ledger tables one tool call has written to so far."""
+
+    __slots__ = ("tables", "refused")
+
+    def __init__(self) -> None:
+        self.tables: set[str] = set()
+        self.refused = False
+
+
+_LEDGER_GUARD: ContextVar[LedgerGuard | None] = ContextVar("llm_router_ledger_guard", default=None)
+
+
+def open_ledger_guard() -> tuple[LedgerGuard, Token]:
+    guard = LedgerGuard()
+    return guard, _LEDGER_GUARD.set(guard)
+
+
+def close_ledger_guard(token: Token) -> None:
+    _LEDGER_GUARD.reset(token)
+
+
+def note_ledger_write(table: str) -> None:
+    """Called by the two ledger writers after a committed insert. No-op outside a guarded call."""
+    guard = _LEDGER_GUARD.get()
+    if guard is not None:
+        guard.tables.add(table)
+
+
 def tool_use_id() -> str | None:
     """The calling ``tool_use`` id inside an MCP tool call, else None."""
     return _TOOL_USE_ID.get()

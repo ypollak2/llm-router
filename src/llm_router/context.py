@@ -252,9 +252,9 @@ def _resolve_context_identity(
     resolved_sid: str | None = None
     try:
         from llm_router import session_store
-        if not resolved_pid:
-            resolved_pid = session_store._project_id()
         resolved_sid = session_store.resolve_session_id(session_id)
+        if not resolved_pid:
+            resolved_pid = session_store._project_id(session_id=resolved_sid)
     except Exception:
         pass
     return resolved_pid or "_unknown", resolved_sid
