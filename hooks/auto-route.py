@@ -2349,23 +2349,38 @@ def classify_with_gemini(text: str) -> str | None:
 # ── Complexity Classifier ────────────────────────────────────────────────────
 
 
-def classify_complexity(text: str, task_type: str) -> str:
-    """Delegates to the shared engine. Kept as a name, not an implementation.
+def _engine_reuse_fields(text: str, decision) -> dict:
+    from llm_router import engine
 
-    This was an AST-extracted copy of `llm_router.classify`, and the copy is what
-    made the two drift. HOOK_LIVE_POLICY reproduces the old local behaviour
-    EXACTLY — 1000 of 1000 comparisons over 200 real prompts x 5 task types — so
-    this delegation changes no routing.
+    return engine.reuse_fields(text, decision)
 
-    Not HOOK_POLICY, despite the name: that one applies `apply_complexity_floor`,
-    which the hook never did, and would push 26% of prompts to a more expensive
-    tier. `tests/test_hook_classifier_equivalence.py` pins both facts.
-    """
-    from llm_router.classify import HOOK_LIVE_POLICY, complexity_for
 
-    return complexity_for(text, policy=HOOK_LIVE_POLICY, task_type=task_type).value
+def engine_decision(text: str):
+    """The one engine's Decision for this prompt (PLAN v16 P1.6, door ``hook``).
+
+    Sync L1 + L3 + cache only: the hook never waits on an LLM (D-13). Same Decision
+    as every other door for the same text."""
+    from llm_router import engine
+
+    return engine.decide(text, door="hook")
+
+
 def classify_prompt(text: str) -> dict | None:
-    """Classify using heuristic scoring → Ollama → cheap API → weak heuristic → auto."""
+    """Classify with the one engine; deterministic fast paths run first.
+
+    Fast paths (not classification: each carries semantics that downstream hooks read, and
+    the engine's L1 has no such rule yet): too short or a skip pattern -> None (do not
+    route); coordination plans -> ``coordinate`` (advisory only, never direct execution);
+    build tasks -> ``code``; content generation -> ``generate``; local-state questions ->
+    ``introspect`` (enforce-route lets native tools through); benchmark templates; and the
+    hook's executable git/deploy ``coordination`` bucket. Everything else is
+    ``engine.decide``: sync L1 + L3 + cache, no Ollama, no cloud API (D-13). The residual
+    disagreement with the other doors is exactly the prompts these paths take
+    (``scripts/door_agreement.py``); moving build/content/coordination into the engine's L1
+    is an engine-policy change for every door at once, so it is not made here.
+
+    Complexity for every path is the engine's, except the ``coordination`` bucket, which is
+    at least ``moderate``."""
     stripped = text.strip()
 
     if not stripped or len(stripped) < 8:
@@ -2373,113 +2388,64 @@ def classify_prompt(text: str) -> dict | None:
     if SKIP_PATTERNS.search(stripped):
         return None
 
+    d = engine_decision(text)
+
     # Coordination fast-path: multi-agent orchestration prompts are plans,
     # not payloads. Checked BEFORE the build/content fast-paths because
     # "coordinate three agents to build X" contains build vocabulary but
-    # is orchestration, not a direct code task — the two-signal detector
-    # (verb + agent target) is higher precision than the single-signal
-    # build/generate detectors. The classification is ADVISORY-ONLY —
-    # direct execution must never fire for ``task_type == coordinate``
-    # (the direct path has no subagents; a direct answer would fabricate
-    # parallel work). The route indicator still surfaces the bucket and
-    # it is logged for telemetry like every other classification.
+    # is orchestration, not a direct code task. The classification is
+    # ADVISORY-ONLY: direct execution must never fire for ``task_type ==
+    # coordinate`` (the direct path has no subagents; a direct answer would
+    # fabricate parallel work).
     if _is_coordination_task(stripped):
-        return {
-            "task_type": "coordinate",
-            "complexity": classify_complexity(text, "analyze"),
-            "method": "coordination-fast-path",
-        }
+        return {"task_type": "coordinate", "complexity": d.complexity, "method": "coordination-fast-path"}
 
     # Build task fast-path: deterministic llm_code routing for obvious coding work.
     if _is_build_task(stripped):
-        return {
-            "task_type": "code",
-            "complexity": classify_complexity(text, "code"),
-            "method": "build-fast-path",
-        }
+        return {"task_type": "code", "complexity": d.complexity, "method": "build-fast-path"}
 
     # Content generation detection (v7.4.0+): Suggest routing for create/write/add tasks
     if _is_content_generation_task(stripped):
         return {
             "task_type": "generate",
-            "complexity": classify_complexity(text, "generate"),
+            "complexity": d.complexity,
             "method": "content-generation-fast-path",
             "suggestion": "content-generation-decomposition",
         }
 
-    # Introspection fast-path: questions about LOCAL LLM Router / project
-    # state need read-only Bash + SQL — they're impossible to satisfy by
-    # routing to an LLM that has no access to ``~/.llm-router``. We still
-    # emit the classification (visible in the route indicator + logged
-    # for telemetry) but enforce-route.py recognises ``task_type ==
-    # introspect`` and lets native tools through without enforcement.
+    # Introspection fast-path: questions about LOCAL LLM Router / project state need
+    # read-only Bash + SQL; enforce-route recognises ``introspect`` and lets native tools
+    # through without enforcement.
     if _is_introspection_task(stripped):
-        return {
-            "task_type": "introspect",
-            "complexity": "simple",
-            "method": "introspection-fast-path",
-        }
+        return {"task_type": "introspect", "complexity": "simple", "method": "introspection-fast-path"}
 
-    # Benchmark prompt fast-path (Plan 07 Phase 3 C): RouterArena / MMLU /
-    # HELM templates have stable prefixes — match them O(constant) instead
-    # of paying for the heuristic/Ollama/API classifier chain.
+    # Benchmark prompt fast-path (Plan 07 Phase 3 C): RouterArena / MMLU / HELM templates
+    # have stable prefixes.
     bench = benchmark_fast_path(stripped)
     if bench is not None:
         return bench
 
-    # Layer 1: Heuristic scoring (instant, free)
+    # The hook's own ``coordination`` bucket (executable git / deploy / command asks, no
+    # trailing "e"): enforce-route keeps it enforced and names llm_act for it
+    # (test_enf_coordination_bash_names_llm_act). The engine has no such category, so the
+    # hook scorer's winning bucket stays a gate, exactly as before.
     scores = score_categories(text)
     best_category = max(scores, key=scores.get)
-    best_score = scores[best_category]
+    if best_category == "coordination" and scores[best_category] > 0:
+        # At least ``moderate``: enforce-route's llm_act redirect fires only for
+        # moderate/complex, and the old policy gave this bucket ``moderate`` unless the
+        # prompt was long. The engine's length curve says ``simple`` below 400 chars,
+        # which would stop holding Bash for "run git push now".
+        cx = d.complexity if d.complexity != "simple" else "moderate"
+        return {"task_type": "coordination", "complexity": cx,
+                "method": "heuristic" if scores[best_category] >= CONFIDENCE_THRESHOLD else "heuristic-weak",
+                "score": scores[best_category]}
 
-    if best_score >= CONFIDENCE_THRESHOLD:
-        return {
-            "task_type": best_category,
-            "complexity": classify_complexity(text, best_category),
-            "method": "heuristic",
-            "score": best_score,
-        }
-
-    # Layer 2: Ollama local LLM (free, 1-3s)
-    if not DISABLE_LLM_CLASSIFIERS and len(stripped) >= 10:
-        ollama_result = classify_with_ollama(text)
-        if ollama_result:
-            return {
-                "task_type": ollama_result,
-                "complexity": classify_complexity(text, ollama_result),
-                "method": "ollama",
-            }
-
-    # Layer 3: Cheap API model (Gemini Flash first — free tier, then GPT-4o-mini)
-    if not DISABLE_LLM_CLASSIFIERS and _API_CLASSIFIERS_ALLOWED and len(stripped) >= 10:
-        api_result = classify_with_gemini(text) or classify_with_openai(text)
-        if api_result:
-            return {
-                "task_type": api_result,
-                "complexity": classify_complexity(text, api_result),
-                "method": "api",
-            }
-
-    # Layer 4: Weak heuristic match (score > 0 but below threshold)
-    if best_score > 0:
-        return {
-            "task_type": best_category,
-            "complexity": classify_complexity(text, best_category),
-            "method": "heuristic-weak",
-            "score": best_score,
-        }
-
-    # Layer 5: Question / unknown — treat as query so cheap model (Haiku) handles it.
-    # This ensures codebase questions, "why doesn't X work", meta-questions, etc.
-    # are routed instead of silently falling through to the top-tier model.
-    if len(stripped) >= 8:
-        return {
-            "task_type": "query",
-            "complexity": classify_complexity(text, "query"),
-            "method": "fallback",
-        }
-
-    return None
+    # Telemetry labels keep their old vocabulary: an abstain with some signal was
+    # "heuristic-weak", with none "fallback" (the old layer 5, now an abstain).
+    method = "heuristic" if not d.abstain else ("heuristic-weak" if d.confidence else "fallback")
+    return {"task_type": d.task_type, "complexity": d.complexity, "method": method,
+            "abstain": d.abstain}
 
 
 # ── MCP Capability Map ───────────────────────────────────────────────────────
@@ -4520,6 +4486,17 @@ def main() -> None:
 
     session_id = hook_input.get("session_id", "")
 
+    # P1.6-h: this turn's Decision, left for the proxy in the last_classification sidecar
+    # (written below) so it reads it by text_sha instead of classifying the prompt again.
+    # Fail-open: no record costs the proxy one classification, nothing else.
+    _p16_decision = None
+    if session_id:
+        try:
+            _p16_decision = engine_decision(prompt)
+        except Exception as _exc:                                    # noqa: BLE001
+            from llm_router import failopen as _fo
+            _fo.record("P16-HOOK-DECISION", _exc)
+
     # Refresh the session pointer on every prompt. It used to be written once by
     # session-start.py, so it went stale after the 6h TTL and a long session lost
     # its own identity — measured 2026-09-14, all 30 pointers on this machine
@@ -5955,6 +5932,8 @@ def main() -> None:
                     # never look at them, so this is backward compatible.
                     "route_id": _directive_id,
                     "turn_id": int(_directive_now),
+                    # P1.6-h: text_sha / tier_sha / decision / ts, for the proxy's reuse.
+                    **(_engine_reuse_fields(prompt, _p16_decision) if _p16_decision is not None else {}),
                 },
             )
         except OSError:

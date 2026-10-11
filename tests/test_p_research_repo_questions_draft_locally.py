@@ -25,7 +25,10 @@ import pytest
 pytestmark = pytest.mark.usefixtures("qa_routing_on")
 
 HOOK = Path(__file__).resolve().parents[1] / "src" / "llm_router" / "hooks" / "auto-route.py"
-REPO_Q = "Can you take the last 10 days prompts and check if they are being routed?"
+# P1.6: the engine, not the hook's old scorer, decides what is "research". The original example
+# ("Can you take the last 10 days prompts and check if they are being routed?") is `analyze` now,
+# so the prompt names the task; it is still a repo question, not a web one.
+REPO_Q = "Can you research how the last 10 days of prompts are being routed?"
 WEB_Q = "What is the latest price of Claude Opus on OpenRouter today?"
 
 

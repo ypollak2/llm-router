@@ -62,7 +62,7 @@ TRIVIAL = [
 
 @pytest.mark.parametrize("prompt", TRIVIAL)
 def test_a_trivial_prompt_does_not_reach_a_premium_model(hook, prompt):
-    complexity = hook.classify_complexity(prompt, "analyze")
+    complexity = hook.engine_decision(prompt).complexity  # P1.6: the hook decides with the engine
     chain = [m.model for m in build_chain(complexity, "green", "analyze")]
     assert chain, "empty chain"
     assert "claude" not in chain[0].lower(), (
@@ -91,11 +91,14 @@ def test_the_floor_is_what_would_put_it_there(prompt):
 
 
 def test_the_hook_still_declines_the_floor(hook):
-    """The decision itself. Flip this and 34% of prompts change tier."""
+    """The decision itself. Flip this and 34% of prompts change tier. Since P1.6 the hook
+    decides with ``engine.decide``, so the policy to pin is ``ENGINE_POLICY``."""
+    from llm_router import engine
+
+    assert engine.ENGINE_POLICY.apply_floor is False, (
+        "ENGINE_POLICY has started applying the complexity floor. That is a routing "
+        "change, not a refactor: measure it before shipping."
+    )
     for prompt in TRIVIAL:
-        for task in ("query", "code", "analyze"):
-            assert hook.classify_complexity(prompt, task) == complexity_for(
-                prompt, policy=HOOK_LIVE_POLICY, task_type=task).value, (
-                "the hook has started applying the complexity floor. That is a "
-                "routing change, not a refactor: measure it before shipping."
-            )
+        assert hook.engine_decision(prompt).complexity == complexity_for(
+            prompt, policy=engine.ENGINE_POLICY).value

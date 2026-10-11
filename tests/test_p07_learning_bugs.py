@@ -252,11 +252,13 @@ def test_p07c_default_off_without_ollama_and_with_an_api_key(home, monkeypatch):
     assert calls == {"ollama": 0, "api": 0}
 
 
-def test_p07c_flag_on_calls_the_ollama_layer(home, monkeypatch):
+def test_p07c_flag_on_no_longer_calls_the_ollama_layer(home, monkeypatch):
+    """PLAN v16 P1.6: the hook classifies with the engine (sync L1/L3, D-13) and the layer-2/3 LLM
+    path is gone; the flag no longer reaches a model from classify_prompt."""
     monkeypatch.setenv("LLM_ROUTER_HOOK_LLM_LAYER", "on")
     result, calls = _classify_with_spies(monkeypatch, ollama_reachable=True, name="p07c_3")
-    assert calls["ollama"] == 1
-    assert result["method"] == "ollama"
+    assert calls == {"ollama": 0, "api": 0}
+    assert result["method"] != "ollama"
 
 
 def test_p07c_old_variables_no_longer_turn_the_layer_on(home, monkeypatch):
@@ -266,31 +268,20 @@ def test_p07c_old_variables_no_longer_turn_the_layer_on(home, monkeypatch):
     assert calls == {"ollama": 0, "api": 0}
 
 
-def test_p07c_flag_on_keeps_the_cloud_api_layer_opt_in(home, monkeypatch):
-    """With the layer on, a prompt reaches a cloud API only when the user also
-    opted out of local-only classification (privacy-first default)."""
+def test_p07c_flag_on_never_sends_a_prompt_to_a_cloud_api(home, monkeypatch):
+    """PLAN v16 P1.6: even with the layer flag on AND local-only classification opted out, the hook's
+    classify_prompt calls no cloud API (the layer-3 path was removed with the engine wiring)."""
     monkeypatch.setenv("LLM_ROUTER_HOOK_LLM_LAYER", "on")
     monkeypatch.setenv("GEMINI_API_KEY", "test-not-a-key")
-
-    def no_ollama(text):
-        return None
-
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFY_LOCAL_ONLY", "false")
     monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _Reachable())
     auto_route = _load_hook("p07c_5", "auto-route.py")
     api_calls = []
-    monkeypatch.setattr(auto_route, "classify_with_ollama", no_ollama)
+    monkeypatch.setattr(auto_route, "classify_with_ollama", lambda t: api_calls.append(t) or None)
     monkeypatch.setattr(auto_route, "classify_with_gemini", lambda t: api_calls.append(t) or None)
     monkeypatch.setattr(auto_route, "classify_with_openai", lambda t: api_calls.append(t) or None)
-    auto_route.classify_prompt(_AMBIGUOUS)
+    assert auto_route.classify_prompt(_AMBIGUOUS) is not None
     assert api_calls == []
-
-    monkeypatch.setenv("LLM_ROUTER_CLASSIFY_LOCAL_ONLY", "false")
-    auto_route = _load_hook("p07c_6", "auto-route.py")
-    monkeypatch.setattr(auto_route, "classify_with_ollama", no_ollama)
-    monkeypatch.setattr(auto_route, "classify_with_gemini", lambda t: api_calls.append(t) or None)
-    monkeypatch.setattr(auto_route, "classify_with_openai", lambda t: api_calls.append(t) or None)
-    auto_route.classify_prompt(_AMBIGUOUS)
-    assert len(api_calls) == 2  # gemini, then openai
 
 
 def test_p07c_flag_is_registered():

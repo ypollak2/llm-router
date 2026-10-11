@@ -942,8 +942,14 @@ class ClaudeTierPolicy:
         # Only a fresh measurement drives the step; stale/unknown/off fail open.
         pressure = reading.pressure if reading.state == quota_pressure_mod.STATE_OK else None
         block = _HaikuBlock(body, self.haiku_folds_system, phases, self.haiku_model)
-        decision = await self._decide(body, session_id, _TimedSticky(sticky, phases), classify,
-                                      pressure, phases, block)
+        from llm_router import engine
+
+        token = engine.bind_session(session_id)  # P1.6-h: the classifier reuses the hook's Decision
+        try:
+            decision = await self._decide(body, session_id, _TimedSticky(sticky, phases), classify,
+                                          pressure, phases, block)
+        finally:
+            engine.unbind_session(token)
         decision.quota_pressure, decision.quota_state = reading.pressure, reading.state
         decision.phases_ms = phases.ms
         decision.haiku_block = block.reason

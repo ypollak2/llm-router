@@ -60,10 +60,20 @@ _TRUST_PRIMARY_COMPLEXITY = 0.75
 # shared with the sync heuristic path). Imported above as apply_complexity_floor.
 
 
+def _engine_mode() -> str:
+    """``LLM_ROUTER_ENSEMBLE``: unset or ``engine`` -> the one engine (PLAN v16 P1.6);
+    ``legacy`` (or the old ``1``/``true``/``on``/``yes``) -> the LLM-first ensemble below,
+    kept for one release; anything else (``off``) -> the cloud classifier."""
+    v = os.environ.get("LLM_ROUTER_ENSEMBLE", "engine").strip().lower()
+    if v in ("", "engine"):
+        return "engine"
+    return "legacy" if v in ("legacy", "1", "true", "on", "yes") else "off"
+
+
 def _ensemble_enabled() -> bool:
-    """LLM-first ensemble is the default routing classifier (user choice, 2026-07).
-    Disable with LLM_ROUTER_ENSEMBLE=off to fall back to the cloud classifier."""
-    return os.environ.get("LLM_ROUTER_ENSEMBLE", "on").strip().lower() in ("1", "true", "on", "yes")
+    """True only on the legacy LLM-first ensemble path (user choice, 2026-07), which is
+    now opt-in via ``LLM_ROUTER_ENSEMBLE=legacy``. Its warmup follows this switch."""
+    return _engine_mode() == "legacy"
 
 
 # Primary local classifier — one env knob shared by warmup and routing so they
@@ -187,16 +197,36 @@ def warm_primary(model: str | None = None) -> None:
     threading.Thread(target=_run, name="llm_router-ollama-warmup", daemon=True).start()
 
 
+def engine_classification(prompt: str) -> ClassificationResult:
+    """The MCP door's ``ClassificationResult`` from ``engine.decide`` (sync, no LLM, no
+    network). ``subject`` stays ``GENERAL`` and ``capabilities`` empty, as for the legacy
+    ensemble: the engine does not classify a subject, and no caller reads them here."""
+    from llm_router import engine
+
+    d = engine.decide(prompt, door="mcp")
+    return ClassificationResult(
+        complexity=Complexity(d.complexity),
+        confidence=d.confidence or 0.0,
+        reasoning=d.reason,
+        inferred_task_type=TaskType(d.task_type),
+        classifier_model="engine",
+        classifier_cost_usd=0.0,
+        classifier_latency_ms=d.ms,
+    )
+
+
 async def classify_for_routing(prompt: str, **_legacy_kwargs) -> "ClassificationResult":
     """Routing-path classification entry point used by the MCP tools.
 
-    LLM-first: when LLM_ROUTER_ENSEMBLE is on (default), the local ensemble classifies
-    every prompt and — on cold start/model failure — degrades INTERNALLY to the
+    Default: ``engine.decide`` (P1.6). ``LLM_ROUTER_ENSEMBLE=legacy`` restores the
+    LLM-first path for one release: the local ensemble classifies every prompt and — on cold start/model failure — degrades INTERNALLY to the
     floor'd heuristic (never stalls, never bounces). When disabled, defers to the
     cloud ``classify_complexity``. Legacy kwargs (timeout_seconds, quality_mode,
     min_model) are accepted for call-site compatibility; the ensemble uses its own
     timeout because a 10s cap would kill it on a cold local model.
     """
+    if _engine_mode() == "engine":
+        return engine_classification(prompt)
     if _ensemble_enabled():
         timeout = float(os.environ.get("LLM_ROUTER_ENSEMBLE_TIMEOUT", "120"))
         return await classify_ensemble(

@@ -170,12 +170,11 @@ async def _guard_cross_origin(request, call_next):
 os.environ.setdefault("LLM_ROUTER_DISABLE_SUBPROCESS_BACKENDS", "codex,gemini_cli")
 
 def _classify(prompt: str) -> tuple[str, str]:
-    # Unified engine (llm_router.classify), gateway policy — richer task_type than the
-    # old code/analyze regex; same 400/2000 length tiers + analyze low-signal default.
-    from llm_router.classify import GATEWAY_POLICY, classify_signals
+    # The one engine (PLAN v16 P1.6): the same Decision every door gets for this text.
+    from llm_router import engine
 
-    s = classify_signals(prompt, GATEWAY_POLICY)
-    return s.task_type.value, s.complexity.value
+    d = engine.decide(prompt, door="gateway")
+    return d.task_type, d.complexity
 
 
 class _ModelRef:

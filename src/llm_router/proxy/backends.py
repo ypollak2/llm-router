@@ -356,24 +356,25 @@ _chain_cache: dict[tuple[str, str], list[str]] = {}
 
 async def policy_chain(text: str) -> tuple[str, str, list[str]]:
     """``(task_type, complexity, chain)`` from the router's own policy."""
-    from llm_router.classify import GATEWAY_POLICY, classify_signals
+    from llm_router import engine
     from llm_router.config import get_config
     from llm_router.profiles import complexity_to_profile
     from llm_router.router import _build_and_filter_chain
+    from llm_router.types import Complexity, TaskType
 
-    sig = classify_signals(text, GATEWAY_POLICY)
-    key = (sig.task_type.value, sig.complexity.value)
+    d = engine.decide_for_proxy(text)
+    key = (d.task_type, d.complexity)
     if key not in _chain_cache:
-        c = sig.complexity
+        c = Complexity(d.complexity)
         _chain_cache[key] = await _build_and_filter_chain(
-            sig.task_type, complexity_to_profile(c), None, c, c, get_config())
+            TaskType(d.task_type), complexity_to_profile(c), None, c, c, get_config())
     return key[0], key[1], _chain_cache[key]
 
 
 async def tier_classify(text: str, pinned: str | None = None, *, anthropic: bool = True) -> dict:
     """The Claude tier decision's classifier (``proxy.tiers``): the same
     ``(task_type, complexity)`` as ``choose_model`` -- both are
-    ``classify_signals(text, GATEWAY_POLICY)`` -- without building a provider chain.
+    ``engine.decide_for_proxy(text)`` -- without building a provider chain.
 
     PLAN v16 P0.9-e. The tier decision reads only the class; the chain is
     informational there (``chain_head``) and its build (``_build_and_filter_chain``:
@@ -385,10 +386,10 @@ async def tier_classify(text: str, pinned: str | None = None, *, anthropic: bool
     it. Same signature and return shape as ``choose_model`` so it is a drop-in
     seam; ``pinned`` is accepted and ignored (no model is chosen here)."""
     del pinned
-    from llm_router.classify import GATEWAY_POLICY, classify_signals
+    from llm_router import engine
 
-    sig = classify_signals(text, GATEWAY_POLICY, capabilities=False)  # the class only (P0.9-e)
-    task, cx = sig.task_type.value, sig.complexity.value
+    d = engine.decide_for_proxy(text)  # the hook's Decision for this turn, else engine.decide (P1.6)
+    task, cx = d.task_type, d.complexity
     chain = _chain_cache.get((task, cx)) or []
     model = next((m for m in chain if tool_capable(m, anthropic=anthropic)), None)
     return {"task_type": task, "complexity": cx, "chain_head": chain[:4], "model": model}

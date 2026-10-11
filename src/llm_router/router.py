@@ -1057,12 +1057,12 @@ def _resolve_profile(
             # genuine reasoning prompts in a coding session are rarely > 2k
             # chars. Operators who need the legacy behaviour can pass
             # ``complexity_hint`` explicitly.
-            # Unified engine (llm_router.classify), router policy — reproduces the
-            # documented <600 / [600,2000] / >2000 partition exactly, now shared
-            # with the gateway/hook so a fix to the algorithm lands in one place.
-            from llm_router.classify import ROUTER_POLICY, complexity_for
+            # The one engine (PLAN v16 P1.6, door "router"): the same complexity every
+            # other door gets for this text. It replaces ROUTER_POLICY's length-only
+            # <600 / [600,2000] / >2000 partition.
+            from llm_router import engine
 
-            c = complexity_for(prompt, policy=ROUTER_POLICY)
+            c = Complexity(engine.decide(prompt, door="router").complexity)
         if c == Complexity.DEEP_REASONING:
             use_thinking = True
         resolved = _COMPLEXITY_TO_PROFILE.get(c, config.llm_router_profile)

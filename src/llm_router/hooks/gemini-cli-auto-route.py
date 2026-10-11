@@ -76,58 +76,18 @@ def _load_tool_surface_fns():
 route_tool, route_call, route_call_with_complexity = _load_tool_surface_fns()
 
 
-async def classify_complexity(prompt: str) -> tuple[str, float]:
-    """Classify task complexity (simple/moderate/complex).
+async def engine_complexity(prompt: str) -> tuple[str, float]:
+    """Classify task complexity (simple/moderate/complex) with the one engine.
+
+    PLAN v16 P1.6, door ``gemini_cli``: sync L1/L3 only, no Ollama or network call.
 
     Returns:
-        Tuple of (complexity: str, confidence: float where 1.0 = high confidence)
+        Tuple of (complexity: str, confidence: float, 0.0 when the engine has none)
     """
-    # Layer 1: Heuristics (instant, free)
-    prompt_lower = prompt.lower()
+    from llm_router import engine
 
-    # Quick patterns for high-confidence classification
-    simple_patterns = [
-        r"what is",
-        r"explain",
-        r"define",
-        r"summarize",
-        r"list",
-        r"how do i",
-    ]
-    complex_patterns = [
-        r"debug",
-        r"refactor",
-        r"implement",
-        r"design",
-        r"architecture",
-        r"optimize",
-        r"analyze",
-    ]
-
-    import re
-
-    for pattern in simple_patterns:
-        if re.search(pattern, prompt_lower):
-            return "simple", 0.9
-
-    for pattern in complex_patterns:
-        if re.search(pattern, prompt_lower):
-            return "complex", 0.85
-
-    # Layer 2: Try Ollama qwen3.5 (local, cheap)
-    try:
-        from llm_router.classifier import classify_prompt_heuristic
-
-        result = await classify_prompt_heuristic(prompt)
-        if result:
-            complexity = result.get("complexity", "moderate")
-            confidence = result.get("confidence", 0.6)
-            return complexity, confidence
-    except Exception:
-        pass
-
-    # Layer 3: Fallback to default
-    return "moderate", 0.5
+    d = engine.decide(prompt, door="gemini_cli")
+    return ("complex" if d.complexity == "deep_reasoning" else d.complexity), d.confidence or 0.0
 
 
 async def get_routing_hint(prompt: str) -> Optional[str]:
@@ -137,7 +97,7 @@ async def get_routing_hint(prompt: str) -> Optional[str]:
         A formatted hint string, or None if classification fails.
     """
     try:
-        complexity, _confidence = await classify_complexity(prompt)
+        complexity, _confidence = await engine_complexity(prompt)
         prompt_lower = prompt.lower()
 
         # Heuristic for task type

@@ -129,7 +129,10 @@ def test_a_door_pointed_off_the_stub_fails_the_run(tmp_path, monkeypatch):
 
     def env(self, **extra):
         e = real_env(self, **extra)
-        e.update({"OLLAMA_HOST": off, "OLLAMA_BASE_URL": off, "OLLAMA_URL": off, "LLM_ROUTER_OLLAMA_URL": off})
+        e.update({"OLLAMA_HOST": off, "OLLAMA_BASE_URL": off, "OLLAMA_URL": off, "LLM_ROUTER_OLLAMA_URL": off,
+                  # P1.6: the MCP door classifies with the engine (no Ollama call) unless this is set; the
+                  # legacy ensemble is what makes the door reach for Ollama, which is what the guard sees.
+                  "LLM_ROUTER_ENSEMBLE": "legacy"})
         return e
 
     monkeypatch.setattr(sr.Scratch, "env", env)

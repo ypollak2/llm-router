@@ -2,8 +2,9 @@
 
 The seven classifier call sites each decide differently today (door agreement
 on the frozen corpus: hook vs gateway 68.0%). This module is the single
-decision they will all call. It is the CORE only: nothing in ``src/`` calls it
-yet (``feat/engine-wire-<site>`` does that, one PR per site).
+decision they will all call. The gateway, proxy, MCP, hook, agent-route,
+gemini-cli and router doors call it (the wiring PR); the hook also leaves its
+Decision for the proxy to reuse by ``text_sha`` (``reuse_fields``).
 
 Sync authority, per D-19 A: L1 heuristics (``classify.classify_signals`` under
 ``ENGINE_POLICY``) + L3 lexical model (``ml_lexical``) + a cache. No LLM and no
@@ -13,13 +14,15 @@ schema-checked LLM verdict could be merged later; ``decide`` never calls it.
 Not done here, on purpose (needs data or another item):
   * ``ENGINE_POLICY`` is GATEWAY_POLICY unrefitted; the refit on GT-500 tune
     needs that set (GE3).
-  * ``TAU`` and the calibration tables are placeholders until fitted on tune.
+  * ``TAU`` and the calibration tables are placeholders until fitted on tune, so
+    abstain is log-only by default (``LLM_ROUTER_ENGINE_ABSTAIN=enforce`` moves a tier).
   * the ``prefix`` layer is P2.7's; the ``complexity_knn`` vote is left out
     because it needs an embedding call (see ``decide`` docstring).
 """
 
 from __future__ import annotations
 
+import contextvars
 import dataclasses
 import hashlib
 import json
@@ -49,6 +52,16 @@ POLICY_ID = "ep1"
 #: Abstain below this combined confidence. PLACEHOLDER: fitted on tune and
 #: pre-registered before wiring. 0.5 equals L1's own ``_CONFIDENCE_THRESHOLD``.
 TAU = 0.5
+
+
+def abstain_enforced() -> bool:
+    """``LLM_ROUTER_ENGINE_ABSTAIN``: ``log`` (default) or ``enforce``.
+
+    TAU is a placeholder until it is fitted on GT-500 tune, so the wired doors
+    must not move a tier on it: under ``log`` the Decision still carries
+    ``abstain=True`` (and the reason says so) but tier and complexity stay what
+    L1/L3 decided. ``enforce`` is the spec behaviour (one tier safer)."""
+    return os.environ.get("LLM_ROUTER_ENGINE_ABSTAIN", "log").strip().lower() == "enforce"
 
 DOORS = ("proxy", "mcp", "hook", "gateway", "agent_route", "gemini_cli", "router")
 Layer = Literal["prefix", "L1", "cache", "L3", "L2", "fallback"]
@@ -347,7 +360,8 @@ def _lexical() -> ml_lexical.LexicalModel | None:
 
 
 def _policy_version(lex, cal) -> str:
-    sig = json.dumps([dataclasses.asdict(ENGINE_POLICY), TAU, lex.version if lex else None, cal], sort_keys=True)
+    sig = json.dumps([dataclasses.asdict(ENGINE_POLICY), TAU, abstain_enforced(), lex.version if lex else None, cal],
+                     sort_keys=True)
     return "%s-%s" % (POLICY_ID, hashlib.sha256(sig.encode()).hexdigest()[:8])
 
 
@@ -375,10 +389,12 @@ def _compute(text: str, lex, cal, policy_version: str) -> Decision:
                 reason = "L3 lexical tier=%s p=%.2f (L1 low-signal)" % (tier, p)
     conf, calibrated = _apply_calibration(layer, raw, cal)
     abstain = conf < TAU
-    if abstain:
+    if abstain and abstain_enforced():
         tier = _safer(tier)
         cx = _TIER_COMPLEXITY.get(tier, cx) if _COMPLEXITY_TIER.get(cx) != tier else cx
         reason += "; abstain, tier up"
+    elif abstain:
+        reason += "; abstain (log only)"
     secrets = _secret_names(text)
     if secrets:
         reason += "; secret:" + ",".join(secrets)
@@ -432,6 +448,112 @@ def decide(text: str, *, ctx_digest: str = "", door: str, session_id: str | None
     except Exception as exc:  # noqa: BLE001 — a classifier never stalls routing
         log.warning("engine: decide failed, abstaining: %s", exc)
         return dataclasses.replace(_fallback(exc, pv), ms=(time.perf_counter() - t0) * 1000)
+
+
+# ── hook -> proxy reuse (P1.6 task 5, P1.6-h) ────────────────────────────────
+
+#: ``proxy.steps.tier_text`` keeps the last 3,000 chars of the newest human prompt.
+_TIER_TEXT_LIMIT = 3000
+_REUSE_TTL_S = 300.0  # the proxy's turn-first call follows the hook's prompt by seconds
+_session_var: "contextvars.ContextVar[str | None]" = contextvars.ContextVar("engine_session", default=None)
+
+
+def text_sha(text: str) -> str:
+    """The ledger's ``text_sha``: ``prompt_key.key`` (16 hex of sha256 over the normalized text)."""
+    return prompt_key.key(text)
+
+
+def _tier_sha(text: str) -> str:
+    return prompt_key.key(prompt_key.normalize(text)[-_TIER_TEXT_LIMIT:])
+
+
+def _reuse_path(session_id: str) -> Path:
+    return state_path("last_classification_%s.json" % re.sub(r"[^A-Za-z0-9_-]", "_", session_id)[:64])
+
+
+def reuse_fields(text: str, decision: Decision) -> dict:
+    """The keys the hook adds to its ``last_classification_<sid>.json`` sidecar so the
+    proxy can reuse the Decision: ``text_sha``, ``tier_sha`` (sha of the proxy's
+    3,000-char tail), ``decision`` and ``ts``. Additive: the sidecar's older readers
+    (``tools/text.py``, ``doctor``) never look at them. No prompt text."""
+    return {"text_sha": text_sha(text), "tier_sha": _tier_sha(text),
+            "decision": dataclasses.asdict(decision), "ts": time.time()}
+
+
+def write_hook_decision(session_id: str | None, text: str, decision: Decision) -> None:
+    """Merge ``reuse_fields`` into the session's sidecar (0600, atomic). The hook itself
+    writes the sidecar once per turn with the same fields; this is for callers that are
+    not the hook. Never raises: a failed write costs one re-classification, nothing else."""
+    if not session_id:
+        return
+    path = _reuse_path(session_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            cur = json.loads(path.read_text())
+            cur = cur if isinstance(cur, dict) else {}
+        except (OSError, ValueError):
+            cur = {}
+        cur.update(reuse_fields(text, decision))
+        tmp = path.with_name(path.name + ".%d.tmp" % os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump(cur, fh)
+        os.replace(tmp, path)
+    except OSError as exc:
+        log.warning("engine: could not write hook decision: %s", exc)
+
+
+def read_hook_decision(session_id: str | None, text: str) -> tuple[bool, Decision | None]:
+    """``(hook_seen, decision)``. ``hook_seen`` is True when a fresh record exists for
+    the session; ``decision`` is set only when its sha matches ``text`` (the full
+    normalized prompt, or the proxy's 3,000-char tail of it)."""
+    if not session_id:
+        return False, None
+    try:
+        rec = json.loads(_reuse_path(session_id).read_text())
+        if "decision" not in rec:  # a sidecar written before this turn's reuse fields: not seen
+            return False, None
+        if time.time() - float(rec["ts"]) > _REUSE_TTL_S:
+            return False, None
+        if text_sha(text) in (rec.get("text_sha"), rec.get("tier_sha")):
+            return True, Decision(**rec["decision"])
+        return True, None
+    except (OSError, ValueError, KeyError, TypeError):
+        return False, None
+
+
+def bind_session(session_id: str | None):
+    """Name the session for the next ``decide_for_proxy`` in this context; returns a token for ``unbind_session``."""
+    return _session_var.set(session_id)
+
+
+def unbind_session(token) -> None:
+    _session_var.reset(token)
+
+
+def _note_reuse(hook_seen: bool, reused: bool) -> None:
+    """One counts-only line per hook-seen proxy classification: the P1.6-h instrument
+    (``scripts/hook_reuse_rate.py`` reads it). No text, no session id."""
+    if not hook_seen:
+        return
+    try:
+        p = state_path("decision_reuse.jsonl")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "a") as fh:
+            fh.write(json.dumps({"ts": round(time.time(), 3), "reused": bool(reused)}) + "\n")
+    except OSError:
+        pass
+
+
+def decide_for_proxy(text: str, *, session_id: str | None = None) -> Decision:
+    """The proxy's door: the hook's Decision for this turn when its ``text_sha``
+    matches (one classification per turn), else ``decide(door="proxy")``."""
+    sid = session_id if session_id is not None else _session_var.get()
+    seen, d = read_hook_decision(sid, text)
+    _note_reuse(seen, d is not None)
+    return d if d is not None else decide(text, door="proxy", session_id=sid)
 
 
 # ── L2: schema-checked LLM verdicts (not on the sync path) ───────────────────

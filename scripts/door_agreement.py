@@ -55,6 +55,7 @@ from typing import Callable
 
 Z95 = 1.959963984540054
 NONE_LABEL = "<none>"  # the site declined to classify (the hook returns None)
+NA_LABEL = "<n/a>"  # the site emits no task_type (gemini_cli, router): left out of task_type comparisons
 
 Classify = Callable[[str], "tuple[str | None, str | None]"]
 
@@ -148,6 +149,62 @@ def _load_hook_policy() -> Classify:
     return classify
 
 
+def _load_hook_module(name: str, filename: str):
+    import llm_router
+
+    path = Path(llm_router.__file__).resolve().parent / "hooks" / filename
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _load_mcp() -> Classify:
+    from llm_router import ensemble
+
+    def classify(text: str):
+        r = ensemble.engine_classification(text)  # P1.6: the MCP door on the engine
+        return r.inferred_task_type.value, r.complexity.value
+
+    return classify
+
+
+def _load_agent_route() -> Classify:
+    mod = _load_hook_module("_door_agreement_agent_route", "agent-route.py")
+
+    def classify(text: str):
+        return mod._engine_decision(text)
+
+    return classify
+
+
+def _load_gemini_cli() -> Classify:
+    import asyncio
+
+    mod = _load_hook_module("_door_agreement_gemini_cli", "gemini-cli-auto-route.py")
+    loop = asyncio.new_event_loop()
+
+    def classify(text: str):
+        return NA_LABEL, loop.run_until_complete(mod.engine_complexity(text))[0]
+
+    return classify
+
+
+def _load_router() -> Classify:
+    from types import SimpleNamespace
+
+    from llm_router import router
+    from llm_router.types import RoutingProfile
+
+    cfg = SimpleNamespace(llm_router_profile=RoutingProfile.BALANCED)
+
+    def classify(text: str):
+        return NA_LABEL, router._resolve_profile(None, None, None, text, None, cfg)[1].value
+
+    return classify
+
+
 _HOOK_NO_LLM_ENV = {
     # da31df7 and earlier: "true" disables layers 2+3 and skips the 0.5 s Ollama
     # /api/tags probe that otherwise runs at import when the flag is unset.
@@ -195,6 +252,34 @@ SITES: dict[str, Site] = {
             "(usage.db + Ollama model list, used by choose_model on pre-P0.9-e trees) "
             "is replaced by an empty chain because the class is computed before it; "
             "LITELLM_LOCAL_MODEL_COST_MAP=True stops LiteLLM's import-time cost-map download",
+        ),
+        Site(
+            "mcp",
+            "ensemble.engine_classification (MCP tools' classify_for_routing, engine default); "
+            "available from the P1.6 wiring PR on",
+            _load_mcp,
+            no_llm_note="engine.decide: sync L1/L3, no LLM",
+        ),
+        Site(
+            "agent_route",
+            "hooks/agent-route.py _engine_decision (task_type, complexity)",
+            _load_agent_route,
+            no_llm_note="no LLM layer",
+        ),
+        Site(
+            "gemini_cli",
+            "hooks/gemini-cli-auto-route.py engine_complexity; complexity only (task_type is <n/a>); "
+            "available from the P1.6 wiring PR on",
+            _load_gemini_cli,
+            no_llm_note="engine.decide: sync L1/L3, no LLM",
+        ),
+        Site(
+            "router",
+            "router._resolve_profile fallback complexity (no hint, no classification_data); complexity "
+            "only (task_type is <n/a>)",
+            _load_router,
+            no_llm_env={"LITELLM_LOCAL_MODEL_COST_MAP": "True"},
+            no_llm_note="no LLM layer: the prompt-only complexity branch",
         ),
         Site(
             "hook_policy",
@@ -307,7 +392,7 @@ def measure(prompts: list[str], classifiers: dict[str, Classify],
     for a, b in combinations(names, 2):
         ta, tb = [x[0] for x in labels[a]], [x[0] for x in labels[b]]
         ra, rb = [x[1] for x in labels[a]], [x[1] for x in labels[b]]
-        tt = sum(1 for x, y in zip(ta, tb) if x != y)
+        tt = sum(1 for x, y in zip(ta, tb) if x != y and NA_LABEL not in (x, y))
         ti = sum(1 for x, y in zip(ra, rb) if x != y)
         pair = {
             "task_type_disagree": tt,
@@ -327,7 +412,7 @@ def measure(prompts: list[str], classifiers: dict[str, Classify],
             pair["task_type_by_bucket"] = split
         pairs[f"{a}|{b}"] = pair
 
-    all_tt = sum(1 for i in range(n) if len({labels[s][i][0] for s in names}) > 1)
+    all_tt = sum(1 for i in range(n) if len({labels[s][i][0] for s in names} - {NA_LABEL}) > 1)
     all_ti = sum(1 for i in range(n) if len({labels[s][i][1] for s in names}) > 1)
     per_site = {}
     for s in names:
@@ -607,7 +692,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{pair}: task_type {v['task_type_disagree']}/{out['n']} = {100 * v['rate']:.1f}% "
               f"[{100 * lo:.1f}, {100 * hi:.1f}]; shared-labels {sh['disagree']}/{sh['n']}; "
               f"tier {v['tier_disagree']}/{out['n']}")
-    print(f"all sites task_type disagree: {out['all_sites_disagree']}/{out['n']}")
+    print(f"all sites task_type disagree: {out['all_sites_disagree']}/{out['n']}; "
+          f"tier {out['all_sites_tier_disagree']}/{out['n']}")
+    print(f"n={out['n']} corpus_sha256={out['corpus_sha256']} git_sha={out['git_sha']}")
     return 0
 
 

@@ -179,8 +179,8 @@ async def _delegate(
     )
     if bounded is None:
         try:
-            from llm_router.classify import classify_signals
-            _complexity = classify_signals(task).complexity.value
+            from llm_router import engine
+            _complexity = engine.decide(task, door="mcp").complexity
             bounded = should_route_bounded(task, _complexity)
         except Exception:  # noqa: BLE001 — detection failure → full delegate (safe default)
             bounded = False

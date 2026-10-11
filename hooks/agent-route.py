@@ -235,61 +235,6 @@ _REASONING_INTENT = re.compile(
     re.IGNORECASE,
 )
 
-# ── Complexity signals ───────────────────────────────────────────────────────
-
-_COMPLEX_SIGNALS = re.compile(
-    r"\b(?:comprehensive|complete|full|entire|end-to-end|thorough|in-depth|"
-    r"detailed|deep dive|all (?:aspects?|parts?|components?|modules?|files?)|"
-    r"across (?:the )?(?:codebase|repo|project|all)|"
-    r"architecture|system design|multiple|several|various|every|"
-    r"production|scalable|critical|security|performance)\b",
-    re.IGNORECASE,
-)
-
-_SIMPLE_SIGNALS = re.compile(
-    r"\b(?:quick|simple|brief|short|just|only|single|one|"
-    r"small|minor|tiny|trivial|basic|specific|particular)\b",
-    re.IGNORECASE,
-)
-
-# ── Task type → MCP tool mapping ─────────────────────────────────────────────
-
-_TASK_SIGNALS: dict[str, re.Pattern] = {
-    "code": re.compile(
-        r"\b(?:implement|write (?:a |the )?(?:function|class|module|test|script)|"
-        r"build|scaffold|refactor|fix (?:the |a )?(?:bug|error|issue|crash)|"
-        r"add (?:a )?(?:feature|method|test|endpoint)|"
-        r"update (?:the )?(?:code|logic|function)|"
-        r"create (?:a )?(?:function|class|module|component|test))\b",
-        re.IGNORECASE,
-    ),
-    "analyze": re.compile(
-        r"\b(?:analyze|evaluate|assess|review|audit|critique|debug|diagnose|"
-        r"explain|describe|compare|identify (?:issues?|bugs?|problems?|patterns?)|"
-        r"root cause|deep dive|how does|why (?:does|is|did)|"
-        r"what (?:is|are) (?:the )?(?:issue|problem|bug|pattern|bottleneck)|"
-        r"should (?:we|I)|pros? and cons?|trade-?off)\b",
-        re.IGNORECASE,
-    ),
-    "research": re.compile(
-        r"\b(?:research|look up|find out|what(?:'s| is) (?:the )?(?:latest|current)|"
-        r"what happened|market|trend|news|latest|recent|current state)\b",
-        re.IGNORECASE,
-    ),
-    "generate": re.compile(
-        r"\b(?:write (?:a |an |the )?(?:document|readme|changelog|report|email|"
-        r"summary|description|comment|docstring)|"
-        r"draft|compose|create (?:content|documentation|text))\b",
-        re.IGNORECASE,
-    ),
-    "query": re.compile(
-        r"\b(?:what is|what are|how (?:do|does|can|to)|"
-        r"where (?:is|are)|when (?:does|did|is)|which|"
-        r"tell me|can you explain|define|clarify)\b",
-        re.IGNORECASE,
-    ),
-}
-
 # RED8-06: the private _TOOL_MAP is gone. It held 5 of the 8 task types and fell
 # back to llm_analyze — a COMPLETION DOOR that cannot run tools — while
 # auto-route.py fell back to llm_route for the same unrecognised input. The five
@@ -997,25 +942,18 @@ def _is_retrieval_only(prompt: str) -> bool:
     return has_retrieval and not has_reasoning
 
 
-def _classify_complexity(prompt: str) -> str:
-    # Explicit complex signals or very long prompt → complex
-    if _COMPLEX_SIGNALS.search(prompt) or len(prompt) > 500:
-        return "complex"
-    # Only downgrade to simple if there are explicit simple signals
-    # AND the prompt is genuinely short (don't let small prompts sneak by)
-    if _SIMPLE_SIGNALS.search(prompt) and len(prompt) < 80:
-        return "simple"
-    return "moderate"
+def _engine_decision(prompt: str) -> tuple[str, str]:
+    """``(task_type, complexity)`` from the one engine (PLAN v16 P1.6, door ``agent_route``).
 
+    ``deep_reasoning`` maps to ``complex``: this hook's profile table has three rows.
+    Fail-open to the old no-signal default if the engine cannot be imported."""
+    try:
+        from llm_router import engine
 
-def _classify_task_type(prompt: str) -> str:
-    """Return the best-matching task type for the subagent prompt."""
-    scores: dict[str, int] = {}
-    for task, pattern in _TASK_SIGNALS.items():
-        matches = pattern.findall(prompt)
-        scores[task] = len(matches)
-    best = max(scores, key=scores.get)  # type: ignore[arg-type]
-    return best if scores[best] > 0 else "analyze"
+        d = engine.decide(prompt, door="agent_route")
+        return d.task_type, "complex" if d.complexity == "deep_reasoning" else d.complexity
+    except Exception:  # noqa: BLE001 — a classifier error must never stop a spawn
+        return "analyze", "moderate"
 
 
 def _complexity_to_profile(complexity: str, session: float, sonnet: float, weekly: float) -> str:
@@ -2220,8 +2158,7 @@ def main() -> None:
 
     # ── Classify reasoning task ──────────────────────────────────────────────
     with _hl_phase("classify"):
-        task_type = _classify_task_type(prompt)
-        complexity = _classify_complexity(prompt)
+        task_type, complexity = _engine_decision(prompt)
 
     # ── NS3: suitable spawns → Codex CLI FIRST (external, free from Claude quota) ──
     # Must run before _allow_routed_spawn() below: that branch defaults to ON and
