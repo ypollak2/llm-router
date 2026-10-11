@@ -319,8 +319,8 @@ def _gate_configured_names(config, repo_cfg) -> list[str]:
         csv = getattr(config, field, "")
         if isinstance(csv, str):
             names.extend(n.strip() for n in csv.split(",") if n.strip())
-    names.extend(o.model for o in repo_cfg.routing.values() if o.model)
-    for pin in (repo_cfg.agentic_model, getattr(config, "llm_router_agentic_model", "")):
+    names.extend(o.model for o in (getattr(repo_cfg, "routing", None) or {}).values() if o.model)
+    for pin in (getattr(repo_cfg, "agentic_model", None), getattr(config, "llm_router_agentic_model", "")):
         if isinstance(pin, str) and pin:
             names.append(pin)
     return names
