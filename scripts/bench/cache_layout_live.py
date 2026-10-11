@@ -25,6 +25,8 @@ import httpx
 from llm_router import cache_layout
 from llm_router.proxy.cache_cost import context_tokens
 
+os.environ.setdefault("LLM_ROUTER_SYNTHETIC", "1")  # benchmark traffic, not production spend
+
 API = "https://api.anthropic.com/v1/messages"
 FILLER = ("Project rule: keep functions small, test first, name evidence for every rule, "
           "never edit generated files, and state what was verified. ")
