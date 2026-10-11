@@ -71,7 +71,7 @@ from llm_router.config import get_config
 from llm_router.repo_config import effective_config as get_repo_config
 from llm_router.context import _resolve_context_identity, build_context_messages, get_session_buffer
 from llm_router.health import get_tracker
-from llm_router.model_discovery import order_for_chain, sink_unvalidated
+from llm_router.model_discovery import ensure_grandfather, order_for_chain, sink_unvalidated
 from llm_router.profiles import get_model_chain, provider_from_model
 from llm_router.receipt_store import compute_receipt, store_receipt
 from llm_router.tracing import set_span_attributes, traced_span
@@ -596,8 +596,11 @@ async def _build_and_filter_chain(
             profile == RoutingProfile.BUDGET and task_type in _GATE_NON_CRITICAL_TASKS
         )
         _gate_names = _gate_configured_names(config, repo_cfg)
+        _local_all = config.all_ollama_models() if _cheap_tier else []
+        # First run of an upgrade: grandfather Ollama AND auto-detected openai-compat models together.
+        ensure_grandfather(_local_all + config.all_openai_compat_models())
         ollama_models, _ollama_tail = order_for_chain(
-            config.all_ollama_models() if _cheap_tier else [],
+            _local_all,
             task_type.value, critical=_gate_critical,
             configured=_gate_names, read_routing_yaml=False,
         )

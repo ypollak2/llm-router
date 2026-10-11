@@ -357,7 +357,7 @@ def test_the_bandit_cannot_pull_an_unvalidated_model_forward(state):
         _os.environ.pop("LLM_ROUTER_PROMOTE_GATE")
 
 
-@pytest.mark.parametrize("prior", ["discovery.json", "profile.yaml", "usage.db"])
+@pytest.mark.parametrize("prior", ["discovery.json", "profile.yaml"])
 def test_any_one_prior_state_file_makes_it_an_upgrade(state, prior):
     (state / prior).write_text("{}" if prior.endswith(".json") else "x")
     md.ensure_grandfather([A])
@@ -394,6 +394,71 @@ def test_an_unwritable_home_fails_closed_and_does_not_raise(state, monkeypatch):
     assert md.order_for_chain([A], "query", critical=False) == ([], [A])
 
 
+# ═══ D-62 with the real cost code (no mocked usage.db), and the review nits ═══
+
+def test_a_real_fresh_install_is_not_an_upgrade_even_though_the_router_creates_usage_db(state):
+    """Reviewer repro: cost._get_db creates an EMPTY usage.db before the injection door runs."""
+    cfg = world(ollama=[A, B], compat=[X])
+    chain = build("BUDGET", "QUERY", cfg, mock_cost=False)
+    assert (state / "usage.db").exists(), "the real cost code must have created usage.db (else this proves nothing)"
+    assert not (state / "discovery.json").exists()
+    assert json.loads(grandfather_bytes(state))["ids"] == []
+    assert chain[-3:] == [A, B, X]
+
+
+def test_an_empty_usage_db_is_not_history_but_a_routed_call_is(state):
+    import sqlite3
+
+    db = state / "usage.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE routing_decisions (id INTEGER PRIMARY KEY, model TEXT)")
+    con.commit()
+    assert not md._usage_db_has_history(db)
+    con.execute("INSERT INTO routing_decisions (model) VALUES ('openai/gpt-4o-mini')")
+    con.commit()
+    con.close()
+    assert md._usage_db_has_history(db)
+    md.ensure_grandfather([A])
+    assert json.loads(grandfather_bytes(state))["ids"] == [A]
+
+
+def test_an_upgrade_with_routing_history_is_grandfathered_through_the_real_router(state):
+    import sqlite3
+
+    con = sqlite3.connect(state / "usage.db")
+    con.execute("CREATE TABLE routing_decisions (id INTEGER PRIMARY KEY, model TEXT)")
+    con.execute("INSERT INTO routing_decisions (model) VALUES ('ollama/old-a:7b')")
+    con.commit()
+    con.close()
+    build("BUDGET", "QUERY", world(ollama=[A]), mock_cost=False)
+    assert json.loads(grandfather_bytes(state))["ids"] == [A]
+
+
+def test_auto_detected_openai_compat_models_are_grandfathered_with_ollama_on_upgrade(state):
+    homes.write_discovery(state, ["old-a:7b"])
+    build("BUDGET", "QUERY", world(ollama=[A], compat=[X]))
+    assert set(json.loads(grandfather_bytes(state))["ids"]) == {A, X}
+
+
+def test_gate_off_does_not_write_the_grandfather_file(state, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PROMOTE_GATE", "off")
+    homes.write_discovery(state, ["old-a:7b"])
+    md.ensure_grandfather([A])
+    build("BUDGET", "QUERY", world(ollama=[A]))
+    assert not (state / "grandfathered_models.json").exists() and not (state / "grandfathered_models.init").exists()
+    monkeypatch.delenv("LLM_ROUTER_PROMOTE_GATE")
+    md.ensure_grandfather([A])                     # switching the gate on later still gets its first run
+    assert json.loads(grandfather_bytes(state))["ids"] == [A]
+
+
+def test_embedding_models_are_not_grandfathered_by_the_discovery_writer(state):
+    from llm_router import discover
+
+    homes.write_discovery(state, ["old-a:7b"])
+    discover._update_discovery_cache([{"name": "old-a:7b"}, {"name": "nomic-embed-text:latest"}])
+    assert json.loads(grandfather_bytes(state))["ids"] == [A]
+
+
 # ═══ P0.15-f: the caller audit ═════════════════════════════════════════════════
 
 NAMES = ("available_ollama_models", "available_ollama_models_nowait", "all_ollama_models",
@@ -406,7 +471,8 @@ SCAN_ROOTS = (ROOT / "src" / "llm_router", ROOT / "scripts")
 CALLERS: dict[tuple[str, str, str, int], tuple[str, str]] = {
     ("src/llm_router/router.py", "_build_and_filter_chain", "all_ollama_models", 0): ("existence", "provider filter: is any Ollama model there"),
     ("src/llm_router/router.py", "_build_and_filter_chain", "all_ollama_models", 1): ("order", "door D1, Ollama injection"),
-    ("src/llm_router/router.py", "_build_and_filter_chain", "all_openai_compat_models", 0): ("order", "door D1, openai-compat injection"),
+    ("src/llm_router/router.py", "_build_and_filter_chain", "all_openai_compat_models", 0): ("existence", "first-run grandfather input (ensure_grandfather); injects nothing"),
+    ("src/llm_router/router.py", "_build_and_filter_chain", "all_openai_compat_models", 1): ("order", "door D1, openai-compat injection"),
     ("src/llm_router/hooks/chain_builder.py", "_ollama_models", "available_ollama_models", 0): ("order", "door D2, the hook chain builder"),
     ("src/llm_router/hooks/auto-route.py", "_load_discovered_ollama_split", "available_ollama_models", 0): ("order", "door D2b, hook classifier models (older-llm_router import path)"),
     ("src/llm_router/hooks/auto-route.py", "_load_discovered_ollama_split", "available_ollama_models_nowait", 0): ("order", "door D2b, the _nowait variant"),
@@ -424,36 +490,49 @@ CALLERS: dict[tuple[str, str, str, int], tuple[str, str]] = {
 }
 
 
-def _calls() -> list[tuple[str, str, str, int, str]]:
-    """Every use of the five names under src/llm_router and scripts: (file, function, name, ordinal, where)."""
+def _uses_in_source(text: str, rel: str) -> list[tuple[str, str, str, int]]:
+    """(file, function, canonical name, line) for every use of the five names in one source text.
+
+    Import aliases are resolved (`from m import available_ollama_models as _a; _a()` is a use of
+    available_ollama_models), and `getattr(obj, "all_ollama_models")` counts too."""
+    tree = ast.parse(text)
+    alias: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.ImportFrom, ast.Import)):
+            for a in node.names:
+                if a.name.rsplit(".", 1)[-1] in NAMES and a.asname:
+                    alias[a.asname] = a.name.rsplit(".", 1)[-1]
+    parents: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+
+    def enclosing(n: ast.AST) -> str:
+        while n in parents:
+            n = parents[n]
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return n.name
+        return "<module>"
+
     found = []
-    for base in SCAN_ROOTS:
-        for path in sorted(base.rglob("*.py")):
-            tree = ast.parse(path.read_text())
-            rel = str(path.relative_to(ROOT))
-            parents: dict[ast.AST, ast.AST] = {}
-            for node in ast.walk(tree):
-                for child in ast.iter_child_nodes(node):
-                    parents[child] = node
+    for node in ast.walk(tree):
+        # A *use*, not only a call: `asyncio.to_thread(get_cached_ollama_models)` passes the
+        # function without calling it and is exactly as much a door.
+        name = None
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            name = alias.get(node.id, node.id)
+        elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+            name = node.attr
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in NAMES \
+                and isinstance(parents.get(node), ast.Call) \
+                and getattr(parents[node].func, "id", getattr(parents[node].func, "attr", "")) in ("getattr", "hasattr"):
+            name = node.value
+        if name in NAMES:
+            found.append((rel, enclosing(node), name, node.lineno))
+    return found
 
-            def enclosing(n: ast.AST) -> str:
-                while n in parents:
-                    n = parents[n]
-                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        return n.name
-                return "<module>"
 
-            for node in ast.walk(tree):
-                # A *use*, not only a call: `asyncio.to_thread(get_cached_ollama_models)` passes the
-                # function without calling it and is exactly as much a door.
-                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-                    name = node.id
-                elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
-                    name = node.attr
-                else:
-                    continue
-                if name in NAMES:
-                    found.append((rel, enclosing(node), name, node.lineno))
+def _ordinals(found) -> list[tuple[str, str, str, int, str]]:
     # ordinal = position by line number within (file, function, name)
     out, seen = [], {}
     for rel, fn, name, line in sorted(found):
@@ -461,6 +540,41 @@ def _calls() -> list[tuple[str, str, str, int, str]]:
         seen[(rel, fn, name)] = n + 1
         out.append((rel, fn, name, n, f"{rel}:{line}"))
     return out
+
+
+def _calls() -> list[tuple[str, str, str, int, str]]:
+    """Every use of the five names under src/llm_router and scripts: (file, function, name, ordinal, where)."""
+    found = []
+    for base in SCAN_ROOTS:
+        for path in sorted(base.rglob("*.py")):
+            found += _uses_in_source(path.read_text(), str(path.relative_to(ROOT)))
+    return _ordinals(found)
+
+
+def order_result_used(source: str, fn: str) -> bool:
+    """True when function ``fn`` in ``source`` calls order_for_chain AND uses what it returns:
+    every name the result is assigned to (``_`` and ``_x`` aside) is read again in the function."""
+    node = next((n for n in ast.walk(ast.parse(source))
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == fn), None)
+    if node is None:
+        return False
+    calls = [n for n in ast.walk(node) if isinstance(n, ast.Call)
+             and getattr(n.func, "id", getattr(n.func, "attr", "")) == "order_for_chain"]
+    if not calls:
+        return False
+    loads = {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    for call in calls:
+        owner = next((n for n in ast.walk(node)
+                      if isinstance(n, (ast.Assign, ast.Return, ast.Expr)) and getattr(n, "value", None) is call), None)
+        if owner is None or isinstance(owner, ast.Expr):
+            return False                       # bare call: the result is thrown away
+        if isinstance(owner, ast.Return):
+            continue
+        for t in owner.targets:
+            for name in ast.walk(t):
+                if isinstance(name, ast.Name) and name.id not in loads and not name.id.startswith("_tail_unused"):
+                    return False
+    return True
 
 
 def _function_source(rel: str, fn: str) -> str:
@@ -496,6 +610,28 @@ def test_every_order_caller_sits_in_a_function_that_calls_the_gate():
     assert len(orders) == 5
     for rel, fn, name, n in orders:
         assert "order_for_chain(" in _function_source(rel, fn), f"{rel}:{fn} injects without the gate"
+        assert order_result_used((ROOT / rel).read_text(), fn), f"{rel}:{fn} calls the gate but drops its result"
+
+
+def test_the_audit_resolves_import_aliases_and_getattr():
+    src = ("from llm_router.model_discovery import available_ollama_models as _a\n"
+           "def inject():\n    return _a()\n"
+           "def sneaky(cfg):\n    return getattr(cfg, 'all_ollama_models')()\n")
+    found = _ordinals(_uses_in_source(src, "src/llm_router/_canary.py"))
+    assert [(fn, name) for _, fn, name, *_ in found] == [("inject", "available_ollama_models"),
+                                                         ("sneaky", "all_ollama_models")]
+    assert len(find_unmarked(found)) == 2
+
+
+def test_the_audit_notices_a_gate_whose_result_is_dropped():
+    bare = "def f(models):\n    order_for_chain(models, 'q', critical=False)\n    return models\n"
+    unused = "def f(models):\n    front, tail = order_for_chain(models, 'q', critical=False)\n    return models\n"
+    half = "def f(models):\n    front, tail = order_for_chain(models, 'q', critical=False)\n    return front\n"
+    used = "def f(models):\n    front, tail = order_for_chain(models, 'q', critical=False)\n    return front + tail\n"
+    assert not order_result_used(bare, "f")
+    assert not order_result_used(unused, "f")
+    assert not order_result_used(half, "f")
+    assert order_result_used(used, "f")
 
 
 def test_the_audit_finds_at_least_ten_callers_and_both_kinds():

@@ -37,15 +37,12 @@ class FakeConfig:
 
 
 @contextmanager
-def isolated(repo_cfg=None):
+def isolated(repo_cfg=None, *, mock_cost=True):
     from llm_router.repo_config import RepoConfig
 
     with ExitStack() as st:
         for target, value in (
             ("llm_router.dynamic_routing.get_dynamic_model_chain", lambda *a, **k: None),
-            ("llm_router.cost.get_model_failure_rates", AsyncMock(return_value={})),
-            ("llm_router.cost.get_model_latency_stats", AsyncMock(return_value={})),
-            ("llm_router.cost.get_model_acceptance_scores", AsyncMock(return_value={})),
             ("llm_router.claude_usage.get_claude_pressure", lambda: 0.0),
             ("llm_router.policy.load_org_policy", lambda *a, **k: None),
             ("llm_router.router.get_repo_config", lambda *a, **k: repo_cfg or RepoConfig()),
@@ -56,15 +53,18 @@ def isolated(repo_cfg=None):
              AsyncMock(return_value={"claude": 0.5, "gemini_cli": 0.5, "codex": 0.5})),
         ):
             st.enter_context(patch(target, value))
+        if mock_cost:
+            for name in ("get_model_failure_rates", "get_model_latency_stats", "get_model_acceptance_scores"):
+                st.enter_context(patch(f"llm_router.cost.{name}", AsyncMock(return_value={})))
         yield
 
 
-def build(profile: str, task: str, config: FakeConfig, repo_cfg=None) -> list[str]:
+def build(profile: str, task: str, config: FakeConfig, repo_cfg=None, *, mock_cost=True) -> list[str]:
     from llm_router.router import _build_and_filter_chain
     from llm_router.types import Complexity, RoutingProfile, TaskType
 
     c = Complexity[COMPLEXITY[profile]]
-    with isolated(repo_cfg):
+    with isolated(repo_cfg, mock_cost=mock_cost):
         return asyncio.run(_build_and_filter_chain(
             TaskType[task], RoutingProfile[profile], None, c, c, config))
 

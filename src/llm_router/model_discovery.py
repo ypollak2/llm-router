@@ -271,7 +271,10 @@ def available_ollama_models_nowait(*, refresh: bool = True) -> list[str]:
 GATE_ENV = "LLM_ROUTER_PROMOTE_GATE"
 _GATE_OFF_VALUES = frozenset({"off", "0", "false", "no"})
 _LOCAL_ID_PREFIXES = ("ollama/", "openai_compat/")
-_PRIOR_STATE_FILES = ("discovery.json", "profile.yaml", "usage.db")
+_PRIOR_STATE_FILES = ("discovery.json", "profile.yaml")
+#: usage.db counts as prior state only when it holds routed calls. The router and the onboarding
+#: wizard create an EMPTY usage.db before the first chain build, so its existence proves nothing.
+_USAGE_HISTORY_TABLES = ("routing_decisions", "usage")
 _gate_off_logged = False
 
 
@@ -329,6 +332,28 @@ def _grandfather_marker_path() -> Path:
     return _cache_path().with_name("grandfathered_models.init")
 
 
+def _usage_db_has_history(path: Path) -> bool:
+    """True when usage.db has at least one row in a table of routed calls. Unreadable = no."""
+    import sqlite3
+
+    if not path.exists():
+        return False
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.2)
+        try:
+            for table in _USAGE_HISTORY_TABLES:
+                try:
+                    if con.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
+                        return True
+                except sqlite3.Error:
+                    continue                     # table absent
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return False
+    return False
+
+
 def ensure_grandfather(current_ids: "list[str] | tuple[str, ...]" = ()) -> None:
     """Write ``grandfathered_models.json`` once, at the first run of this version (D-62 = A).
 
@@ -342,11 +367,11 @@ def ensure_grandfather(current_ids: "list[str] | tuple[str, ...]" = ()) -> None:
     its own first probe as prior state.
     """
     path, marker = _grandfather_path(), _grandfather_marker_path()
-    if marker.exists() or path.exists():
-        return
+    if marker.exists() or path.exists() or not gate_enabled():
+        return                       # gate off: nothing to protect, and a later switch-on still gets its first run
     home = path.parent
     ids: list[str] = []
-    if any((home / name).exists() for name in _PRIOR_STATE_FILES):
+    if any((home / name).exists() for name in _PRIOR_STATE_FILES) or _usage_db_has_history(home / "usage.db"):
         cached, _age = _read_cache()
         found = {f"ollama/{m}" for m in cached}
         for m in current_ids:

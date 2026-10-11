@@ -21,14 +21,16 @@ status: fixed in `fix/p015-safety-floor` (PLAN v16 P0.15 task 2; owner decisions
   query/generate/analyze chain, after every reorder, and is absent from every other chain (code,
   moderate and harder). Matching is by id only. D-62 = A: `grandfathered_models.json` is written once,
   atomically, at the first run, from the installed list, and only when prior llm-router state exists
-  (`discovery.json`, `profile.yaml` or `usage.db`); a fresh install writes an empty `ids`; a deleted
+  (`discovery.json`, `profile.yaml`, or a `usage.db` with routed calls in it); a fresh install writes an empty `ids`; a deleted
   file is not recreated (a `grandfathered_models.init` marker records the one-time write) and
   `llm-router doctor` reports it. `discover.py` marks the assumed task list `task_types_assumed: true`.
   `LLM_ROUTER_PROMOTE_GATE=off` restores today's chains (logged once per process).
   **Accepted trade-offs.** A model pulled after the upgrade is not preferred until it is configured
   (graded promotion is 16.3). Models already installed at the first run stay where they are but are
-  still unvalidated. A fresh install is told apart from an upgrade only by the three files above;
-  a `usage.db` created before the first probe makes a fresh install look like an upgrade.
+  still unvalidated. A fresh install is told apart from an upgrade by `discovery.json`, `profile.yaml`, or a `usage.db`
+  that holds at least one `routing_decisions` or `usage` row. An empty `usage.db` does not count: the
+  router and the onboarding wizard create one before the first chain build (found in review). Both
+  discovery writers, `save_profile` and the router claim the first run before they write.
 - **Test.** `tests/test_p015_promote_gate.py`: P0.15-b (router: unvalidated model last in 3 of 12
   chains and absent from 9, first in 0; validated models keep their place; non-balanced policies do
   not move it), P0.15-e (hook), P0.15-c (grandfather file), P0.15-f (an AST audit of every use of

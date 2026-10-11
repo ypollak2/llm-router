@@ -216,7 +216,8 @@ def _update_discovery_cache(ollama_models: list[dict]) -> None:
     # P0.15-c: the one-time grandfather write must happen before discovery.json
     # exists on a fresh install, or the first probe would look like prior state.
     from llm_router.model_discovery import ensure_grandfather
-    ensure_grandfather([f"ollama/{m['name']}" for m in ollama_models if m.get("name")])
+    ensure_grandfather([f"ollama/{m['name']}" for m in ollama_models
+                        if m.get("name") and not _is_embedding_model(m["name"], m)])
 
     models = {}
     for m in ollama_models:
