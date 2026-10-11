@@ -89,9 +89,15 @@ def test_door_does_not_change_the_decision_and_unknown_door_raises():
         engine.decide("hi", door="nope")
 
 
-def test_engine_policy_starts_from_gateway_policy():
+def test_engine_policy_is_gateway_policy_plus_keyword_complexity():
+    """D-69: GATEWAY_POLICY with keyword + length complexity; nothing else differs."""
+    import dataclasses
+
     from llm_router.classify import GATEWAY_POLICY
-    assert engine.ENGINE_POLICY == GATEWAY_POLICY
+    diff = {f.name for f in dataclasses.fields(GATEWAY_POLICY)
+            if getattr(engine.ENGINE_POLICY, f.name) != getattr(GATEWAY_POLICY, f.name)}
+    assert diff == {"engine_keywords", "simple_max"}, diff
+    assert engine.ENGINE_POLICY.engine_keywords and engine.ENGINE_POLICY.apply_floor is False
 
 
 def test_tier_map_matches_the_proxy_policy_file():

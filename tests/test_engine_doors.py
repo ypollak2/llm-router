@@ -359,3 +359,64 @@ def test_instrument_reports_pending_below_min_n_and_never_passes_on_small_n(tmp_
     p = tmp_path / "decision_reuse.jsonl"
     p.write_text("\n".join(json.dumps(x) for x in rows) + "\nnot json\n")
     assert len(h.read_rows(p)) == 100 and len(h.read_rows(p, since=50.0)) == 51
+
+
+# ── D-69: keyword + length complexity; the 2026-06-06 wrapped-prompt incident stays fixed ──────────
+
+HARD = [
+    "design a multi-region architecture for a payments platform with strict consistency",
+    "Architect a distributed task queue with retries and dead letter handling",
+]
+
+
+@pytest.mark.parametrize("prompt", HARD)
+def test_hard_prompts_are_complex_at_every_door(prompt):
+    doors = _doors()
+    for name, fn in doors.items():
+        got = fn(prompt)
+        cx = got[1]
+        assert cx in ("complex", "deep_reasoning"), (name, got)
+    assert engine.decide(prompt, door="gateway").tier == "opus"
+
+
+def test_the_keyword_signals_come_from_the_three_old_scorers():
+    from llm_router import classify as C
+
+    # one signal from each source, all >= 40 chars so the keyword rule applies
+    pad = " in the payment service module of the repo"
+    for kw, src in (("build a scalable job runner", "classify._COMPLEXITY_COMPLEX"),
+                    ("review the security of the login flow", "agent-route _COMPLEX_SIGNALS"),
+                    ("optimize the slow query in the report", "gemini-cli complex_patterns")):
+        t = kw + pad
+        assert len(t) >= 40
+        assert C.complexity_for(t, policy=engine.ENGINE_POLICY).value == "complex", src
+    plain = "what time zone is the office in right now, by the way"
+    assert C.complexity_for(plain, policy=engine.ENGINE_POLICY).value == "simple"
+    assert C.complexity_for("optimize it", policy=engine.ENGINE_POLICY).value == "simple"  # < 40 chars
+
+
+@pytest.mark.parametrize("n", [401, 450, 500, 599])
+def test_wrapped_prompts_of_401_to_599_chars_stay_simple_at_the_router(n):
+    """2026-06-06: callers wrap the user's prompt, the wrapped form crosses 300-400 chars, and
+    everything routed to Sonnet. The no-hint fallback keeps `simple` up to 599 chars (the engine's
+    simple band), and no door sends a keyword-free 401-599 char prompt above `simple`."""
+    prompt = ("Please answer the following question for the user. " + "lorem ipsum dolor sit amet " * 40)[:n]
+    assert len(prompt) == n
+    for name, fn in _doors().items():
+        got = fn(prompt)
+        if name == "hook":
+            continue  # the hook's fast paths may take a prompt; the engine path is checked below
+        assert got[1] == "simple", (name, n, got)
+    assert engine.decide(prompt, door="hook").complexity == "simple"
+    assert engine.decide(prompt + " x" * 100, door="hook").complexity == "moderate"  # > 599
+
+
+def test_the_router_fallback_boundary_is_unchanged_at_600():
+    from types import SimpleNamespace
+
+    from llm_router import router
+    from llm_router.types import RoutingProfile
+
+    cfg = SimpleNamespace(llm_router_profile=RoutingProfile.BALANCED)
+    cx = lambda n: router._resolve_profile(None, None, None, "x" * n, None, cfg)[1].value  # noqa: E731
+    assert [cx(599), cx(600), cx(2000), cx(2001)] == ["simple", "moderate", "moderate", "complex"]

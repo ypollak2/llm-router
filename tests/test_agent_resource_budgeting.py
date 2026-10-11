@@ -413,7 +413,7 @@ class TestBudgetStarvation:
             }))
 
             code, out = _run_agent_route(
-                "analyze and implement a validation function with error handling",
+                "write a validation function with error handling",
                 tmp_path=tmp_path,
                 session_id=sid,
                 init_budget=initial_budget,  # Pass initial budget so it uses existing file

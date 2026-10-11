@@ -9,15 +9,9 @@ and wrappers (``llm_query`` callers, Claude Code) almost always cross
 that line. So Haiku/Flash routing never fired and Sonnet/GPT-4o ate
 the spend.
 
-The fix raised the simple boundary to 600 chars and pulled the complex
-boundary down to 2000. This test pins the numbers so a future refactor can't
-silently regress to the old ratio.
-
-PLAN v16 P1.6 (draft): the no-hint fallback now asks the one engine, whose policy
-is GATEWAY_POLICY (simple <= 400, complex > 2000) until the GT-500 refit, so the
-simple boundary is 400 again, not 600. That reopens the incident above for
-401-599 char prompts (98 of 2,658 frozen-corpus prompts); the refit has to settle
-it before the wiring merges. The boundaries below pin what the engine does today.
+The fix raises the simple boundary to 600 chars and pulls the complex
+boundary down to 2000. This test pins those numbers so a future
+refactor can't silently regress to the old ratio.
 """
 
 from __future__ import annotations
@@ -34,10 +28,8 @@ from llm_router.types import Complexity, RoutingProfile
     (1, Complexity.SIMPLE),
     (100, Complexity.SIMPLE),
     (200, Complexity.SIMPLE),
-    (400, Complexity.SIMPLE),
-    (401, Complexity.MODERATE),
-    (500, Complexity.MODERATE),
-    (599, Complexity.MODERATE),
+    (500, Complexity.SIMPLE),
+    (599, Complexity.SIMPLE),
     (600, Complexity.MODERATE),
     (1000, Complexity.MODERATE),
     (1999, Complexity.MODERATE),
@@ -46,7 +38,7 @@ from llm_router.types import Complexity, RoutingProfile
     (5000, Complexity.COMPLEX),
 ])
 def test_no_hint_heuristic_boundaries(length, expected):
-    """Verify the <= 400 / (400,2000] / > 2000 partition of complexity (engine, PLAN v16 P1.6)."""
+    """Verify the < 600 / [600,2000] / > 2000 partition of complexity."""
     prompt = "x" * length
     config = MagicMock(llm_router_profile=RoutingProfile.BALANCED)
     _profile, complexity, _thinking = _resolve_profile(

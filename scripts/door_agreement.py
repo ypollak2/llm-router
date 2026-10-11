@@ -97,10 +97,16 @@ def _load_hook() -> Classify:
 
     def classify(text: str):
         r = mod.classify_prompt(text)
+        # P1.6 (D-69): the hook keeps fast paths the engine does not have. Record which prompts
+        # take the engine path so agreement can be reported on them (``engine_path`` in the output).
+        classify.engine_path.append(
+            r is not None and not str(r.get("method", "")).endswith("fast-path")
+            and r.get("task_type") != "coordination")
         if r is None:
             return None, None
         return r.get("task_type"), r.get("complexity")
 
+    classify.engine_path = []
     return classify
 
 
@@ -370,7 +376,7 @@ def _shared(la: list[str], lb: list[str]) -> dict:
 
 
 def measure(prompts: list[str], classifiers: dict[str, Classify],
-            buckets: list[str] | None = None) -> dict:
+            buckets: list[str] | None = None, engine_path: list[bool] | None = None) -> dict:
     """Counts only. ``classifiers`` maps site name -> classify(text). ``buckets``
     (one label per prompt, e.g. a date window) adds a per-bucket task_type split."""
     n = len(prompts)
@@ -437,6 +443,23 @@ def measure(prompts: list[str], classifiers: dict[str, Classify],
     }
     if buckets is not None:
         result["bucket_counts"] = {b: buckets.count(b) for b in sorted(set(buckets))}
+    if engine_path is not None:
+        # D-69: P1.6-a and P1.6-i are measured on the prompts the hook sends to the engine; its
+        # fast paths (coordinate, build, content, introspect, benchmark, coordination bucket,
+        # declined) are the hook's by owner decision and are reported separately.
+        idx = [i for i in range(n) if engine_path[i]]
+        sub = {}
+        for a, b in combinations(names, 2):
+            tt = sum(1 for i in idx if labels[a][i][0] != labels[b][i][0]
+                     and NA_LABEL not in (labels[a][i][0], labels[b][i][0]))
+            ti = sum(1 for i in idx if labels[a][i][1] != labels[b][i][1])
+            sub[f"{a}|{b}"] = {"task_type_disagree": tt, "tier_disagree": ti}
+        result["engine_path"] = {
+            "n": len(idx), "of": n, "hook_fast_path_or_declined": n - len(idx),
+            "pairs": sub,
+            "all_sites_disagree": sum(1 for i in idx if len({labels[s][i][0] for s in names} - {NA_LABEL}) > 1),
+            "all_sites_tier_disagree": sum(1 for i in idx if len({labels[s][i][1] for s in names}) > 1),
+        }
     return result
 
 
@@ -646,7 +669,7 @@ def main(argv: list[str] | None = None) -> int:
     undo_guard = _install_network_guard()
     try:
         classifiers = {s: SITES[s].load() for s in names}
-        result = measure(prompts, classifiers, buckets)
+        result = measure(prompts, classifiers, buckets, getattr(classifiers.get("hook"), "engine_path", None))
     except NetworkRefused:
         pass  # recorded in REFUSALS; reported below with no output written
     finally:
@@ -694,6 +717,10 @@ def main(argv: list[str] | None = None) -> int:
               f"tier {v['tier_disagree']}/{out['n']}")
     print(f"all sites task_type disagree: {out['all_sites_disagree']}/{out['n']}; "
           f"tier {out['all_sites_tier_disagree']}/{out['n']}")
+    if "engine_path" in out:
+        ep = out["engine_path"]
+        print(f"engine-path scope (D-69): {ep['n']}/{out['n']} prompts take the hook's engine path; "
+              f"all sites task_type disagree {ep['all_sites_disagree']}, tier {ep['all_sites_tier_disagree']}")
     print(f"n={out['n']} corpus_sha256={out['corpus_sha256']} git_sha={out['git_sha']}")
     return 0
 

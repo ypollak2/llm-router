@@ -38,16 +38,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from llm_router import ml_lexical, prompt_key
+from llm_router import failopen, ml_lexical, prompt_key
 from llm_router.classify import GATEWAY_POLICY, _score_categories, classify_signals
 from llm_router.paths import state_path
 
 log = logging.getLogger("llm_router.engine")
 
 ENGINE_VERSION = "engine/1"
-#: One policy for every door. Starts from GATEWAY_POLICY (the live proxy's);
-#: the GT-500 tune refit is pending, so its fields equal the gateway's today.
-ENGINE_POLICY = dataclasses.replace(GATEWAY_POLICY)
+#: One policy for every door. Starts from GATEWAY_POLICY (the live proxy's) and adds keyword
+#: complexity (D-69): the complex-keyword signals of the hook, agent-route and gemini-cli scorers
+#: (classify.py `_engine_keyword_complex`) for prompts of >= 40 chars, and a simple band up to 599
+#: chars (the router's wrapped-prompt fix of 2026-06-06). Chosen on the GT-500 tune split only
+#: (n=108, Opus labels; `scripts/engine_policy_tune.py`); the held-out split is untouched.
+ENGINE_POLICY = dataclasses.replace(GATEWAY_POLICY, engine_keywords=True, simple_max=599, keyword_min_len=40)
 POLICY_ID = "ep1"
 #: Abstain below this combined confidence. PLACEHOLDER: fitted on tune and
 #: pre-registered before wiring. 0.5 equals L1's own ``_CONFIDENCE_THRESHOLD``.
@@ -240,8 +243,8 @@ def clear_cache(*, persistent: bool = True) -> None:
                 try:
                     c.execute("DELETE FROM decisions")
                     c.commit()
-                except sqlite3.Error:
-                    pass
+                except sqlite3.Error as exc:
+                    failopen.record("P16-DECIDE-CACHE-CLEAR", exc)
 
 
 def _cache_key(text: str, policy_version: str, ctx_digest: str) -> str:
@@ -295,8 +298,8 @@ def _cache_put(key: str, d: Decision, mode: str) -> None:
             c.execute("INSERT OR REPLACE INTO decisions VALUES (?,?,?)",
                       (key, json.dumps(dataclasses.asdict(d), sort_keys=True), time.time()))
             c.commit()
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as exc:
+        failopen.record("P16-DECIDE-CACHE-PUT", exc)
 
 
 # ── decision ─────────────────────────────────────────────────────────────────
