@@ -2721,7 +2721,7 @@ _STRICT_ACK_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Short follow-up prompts that the strict single-word CONTINUATION_RE
+# Short follow-up prompts that the strict single-word _STRICT_ACK_RE
 # misses: "ok do it", "yes continue with 3", "now do the next one".
 # These are conversational follow-ups that presume the current session's
 # context — routing them spends quota classifying something Claude
@@ -3000,7 +3000,7 @@ def _load_last_route(session_id: str) -> dict | None:
 
 def _is_short_followup(prompt: str) -> bool:
     """Return True for short conversational follow-ups beyond the existing
-    single-word CONTINUATION_RE.
+    single-word _STRICT_ACK_RE.
 
     Catches the pattern "ok do that" / "yes, continue with 3" / "now do
     the next one" — multi-word but unmistakably a follow-up to the

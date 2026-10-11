@@ -76,6 +76,10 @@ def test_is_continuation_uses_strict_ack_for_directive_prompts(hook):
     # `_is_continuation` documents "short affirmatives ... carry no new task signal".
     assert hook._is_continuation("ok") is True
     assert hook._STRICT_ACK_RE.match("fix it") is None
+    # The one narrowing from strict-only (review of #421): directive-only words no longer count as a
+    # continuation by themselves; _is_short_code_followup still catches them after a code task.
+    assert hook._is_continuation("push it") is False
+    assert hook._is_continuation("retry") is False
 
 
 def test_directive_call_sites_keep_broad_behaviour(hook):
