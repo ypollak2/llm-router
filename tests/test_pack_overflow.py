@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import types
 import urllib.request
 
 import pytest

@@ -64,7 +64,7 @@ def _shrink_summary(text: str) -> str:
 
 def _shrink_instructions(text: str) -> str:
     """Headings only: the digest's rule lines go, its structure stays."""
-    return "\n".join(l for l in text.splitlines() if l.lstrip().startswith("#")).strip()
+    return "\n".join(ln for ln in text.splitlines() if ln.lstrip().startswith("#")).strip()
 
 
 def _shrink(layer: str, text: str) -> str:
