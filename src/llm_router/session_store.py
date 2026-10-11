@@ -712,8 +712,10 @@ def record_event(
                 # CTX-PROJ-2: resolve once more BEFORE taking the lock. If the hook's cwd record
                 # appeared since the first resolve, this call creates the pin and adopts the old
                 # shards; doing that while holding the old shard's lock made adoption time out on
-                # our own lock and strand the early events. Under the lock the pin now exists, so
-                # the re-resolve below is a pure read.
+                # our own lock and strand the early events. Under the lock the pin almost always
+                # exists, so the re-resolve below is a read; if the record lands in the tiny window
+                # before the lock, adoption can still skip this shard (counted by
+                # _note_lock_timeout; `llm-router sessions merge` recovers it).
                 path = _session_path(session_id)
             path.parent.mkdir(parents=True, exist_ok=True)
             with exclusive_lock(_lock_path(path)) as locked:
