@@ -1,6 +1,6 @@
 ---
 id: STEP-SIDECALL-2
-status: fixed in `fix/step-sidecall-2` (stacked on `fix/step-sidecall`, PR #425; deploy: restart the proxy)
+status: fixed in `fix/step-sidecall-2b` (follows PR #425, merged; deploy: restart the proxy)
 ---
 ## STEP-SIDECALL-2. Wire-form gaps in the human-text test beside tool results (follow-up to STEP-SIDECALL-1)
 
@@ -22,8 +22,10 @@ status: fixed in `fix/step-sidecall-2` (stacked on `fix/step-sidecall`, PR #425;
      bound conversation is framed `Activity in the bound conversation ...` / `Activity was observed in
      the bound conversation`; excluded.
   3. "arrived in the bound thread": `rye()` leads a post with `A message arrived in the bound thread
-     while you were working:\n` only when `verifiedSlackHumanTurn` is set and the origin is human-class
-     (`wb(origin)`); a batch uses `Messages arrived in the bound thread while you were working:\n`. The
+     while you were working:\n` (`h3t`, singular) only when `verifiedSlackHumanTurn` is set and the origin
+     is human-class (`wb(origin)`). The plural `Messages arrived in the bound thread while you were
+     working:\n` (`ORn`) comes from the `queued_command` attachment renderer for batched verified-human
+     relays (`wZe` = queued_command && `P4e`), not from `rye()`. The
      harness's own trust text calls a turn that opens with either lead the user speaking. Every
      non-user kind gets a different prefix instead. The marker is removed and a text that OPENS with
      either lead is human. A lead quoted inside another message is not human.
