@@ -161,7 +161,9 @@ async def test_failure_in_the_reorder_does_not_break_routing(monkeypatch, _no_di
 @pytest.mark.asyncio
 async def test_map_priority_replaces_the_subscription_local_reorder(monkeypatch, _no_discovery):
     """P1.8 (updated on purpose): with a fresh resource map, ``build_chain`` takes its
-    order from the map's ``effective_priority``, not from the subscription-local reorder.
+    order from the map's ``effective_priority`` when the map's policy expresses an
+    order (not ``balanced``), not from the subscription-local reorder. Under
+    ``balanced`` it only drops non-connected resources.
 
     The reorder spy is not called; the chain is the map-ordered chain; a map that
     marks a provider absent drops it. Without a map the three tests above hold
@@ -183,7 +185,7 @@ async def test_map_priority_replaces_the_subscription_local_reorder(monkeypatch,
     provs = list(dict.fromkeys(m.split("/")[0] for m in base))
     assert len(provs) >= 3, f"static chain too uniform to show an order: {base}"
 
-    def _write(order, absent=()):
+    def _write(order, absent=(), policy="local-first"):
         rows = [
             {"resource": p, "kind": "api", "chain_id": f"{p}/api",
              "status": "absent" if p in absent else "connected",
@@ -191,7 +193,7 @@ async def test_map_priority_replaces_the_subscription_local_reorder(monkeypatch,
              "capabilities": ["generate"], "quota": {}}
             for i, p in enumerate(order)
         ]
-        rm.write_map({"schema": rm.SCHEMA, "policy": "balanced", "resources": rows,
+        rm.write_map({"schema": rm.SCHEMA, "policy": policy, "resources": rows,
                       "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())})
 
     want = list(reversed(provs))
@@ -200,6 +202,14 @@ async def test_map_priority_replaces_the_subscription_local_reorder(monkeypatch,
     got = list(dict.fromkeys(m.split("/")[0] for m in chain))
     assert got == want, f"chain order {got} is not the map's priority order {want}"
 
+    # Under balanced the map's ranks are row order only: filter, never reorder.
+    _write(want, policy="balanced")
+    chain = await chain_builder.build_chain(TaskType.CODE, "moderate", RoutingProfile.BALANCED)
+    assert chain == base, "a balanced map must not reorder the chain"
+
     _write(want, absent=(provs[0],))
     chain = await chain_builder.build_chain(TaskType.CODE, "moderate", RoutingProfile.BALANCED)
     assert all(not m.startswith(provs[0] + "/") for m in chain), chain
+    _write(want, absent=(provs[0],), policy="balanced")
+    chain = await chain_builder.build_chain(TaskType.CODE, "moderate", RoutingProfile.BALANCED)
+    assert chain == [m for m in base if not m.startswith(provs[0] + "/")], chain

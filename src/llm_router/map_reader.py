@@ -35,6 +35,7 @@ class MapView:
     kinds: frozenset          # kinds with at least one connected row
     rank_by_id: dict          # chain_id -> effective_priority (connected rows)
     rank_by_provider: dict    # provider -> best effective_priority
+    orders: bool = False      # the map's policy expresses an order (not balanced/unknown)
 
     def provider_ok(self, provider: str) -> bool:
         """False only when the map knows the provider and none of its rows is connected."""
@@ -48,6 +49,14 @@ class MapView:
 
 def _provider(model_id: str) -> str:
     return model_id.split("/", 1)[0]
+
+
+def _expresses_order(policy: object) -> bool:
+    """Under ``balanced`` (the identity policy) the map's ranks are only row order,
+    not a preference, so they must not reorder a chain. Any other known policy does."""
+    from llm_router.user_routing_policy import known_policies
+
+    return isinstance(policy, str) and policy != "balanced" and policy in known_policies()
 
 
 def _index(data: dict) -> MapView:
@@ -65,7 +74,8 @@ def _index(data: dict) -> MapView:
         if isinstance(p, int):
             by_id[r["chain_id"]] = p
             by_prov[prov] = min(p, by_prov.get(prov, p))
-    return MapView(frozenset(known), frozenset(connected), frozenset(kinds), by_id, by_prov)
+    return MapView(frozenset(known), frozenset(connected), frozenset(kinds), by_id, by_prov,
+                   _expresses_order(data.get("policy")))
 
 
 _lock = threading.Lock()
@@ -80,9 +90,17 @@ def _path(path: Path | None) -> Path:
 
 
 def token(path: Path | None = None) -> int | None:
-    """The map file's mtime in ns (``None`` when absent): changes when the map is rewritten."""
+    """The usable map's mtime in ns, ``None`` when there is no usable map.
+
+    Changes when the map is rewritten, and flips to ``None`` when the file is
+    deleted, unreadable or older than :data:`MAX_AGE_S`, so a cache keyed on it
+    returns to the no-map result without a restart.
+    """
     try:
-        return _path(path).stat().st_mtime_ns
+        p = _path(path)
+        if load_view(p) is None:
+            return None
+        return p.stat().st_mtime_ns
     except Exception:
         return None
 
@@ -129,8 +147,10 @@ def apply_to_chain(
     """*chain* without entries whose resource is not connected, in map priority order.
 
     ``key`` gives the ``provider/model`` id of an entry. Entries of providers the
-    map has no row for are left alone; ranked entries trade places among the slots
-    ranked entries already hold, so unranked entries stay where they were. With no
+    map has no row for are left alone. The chain is reordered only when the map's
+    policy expresses an order (``MapView.orders``; never under ``balanced``): ranked
+    entries then trade places among the slots ranked entries already hold, so
+    unranked entries stay where they were. With no
     usable map, or if the filter would empty the chain, the chain is returned as is.
     """
     out = list(chain)
@@ -141,7 +161,7 @@ def apply_to_chain(
         kept = [m for m in out if v.provider_ok(_provider(key(m)))]
         if not kept:
             return out
-        if reorder:
+        if reorder and v.orders:
             ranks = [v.rank(key(m)) for m in kept]
             slots = [i for i, r in enumerate(ranks) if r is not None]
             ordered = sorted((kept[i] for i in slots), key=lambda m: v.rank(key(m)))

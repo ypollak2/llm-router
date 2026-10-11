@@ -351,7 +351,8 @@ def tool_capable(model: str, *, anthropic: bool = False) -> bool:
 
 # ── model choice ─────────────────────────────────────────────────────────────
 
-_chain_cache: dict[tuple[str, str], list[str]] = {}
+_chain_cache: dict[tuple, list[str]] = {}
+_chain_cache_token: int | None = None
 
 
 async def policy_chain(text: str) -> tuple[str, str, list[str]]:
@@ -366,7 +367,12 @@ async def policy_chain(text: str) -> tuple[str, str, list[str]]:
     key = (sig.task_type.value, sig.complexity.value)
     # P1.8: the chain is cached with the map file's mtime, so a rewritten map is
     # re-read; None (no map file) is the pre-map behaviour.
-    ckey = (*key, map_reader.token())
+    global _chain_cache_token
+    tok = map_reader.token()
+    if tok != _chain_cache_token:      # map rewritten, aged out or deleted: drop old chains
+        _chain_cache.clear()
+        _chain_cache_token = tok
+    ckey = (*key, tok)
     if ckey not in _chain_cache:
         c = sig.complexity
         _chain_cache[ckey] = await _build_and_filter_chain(

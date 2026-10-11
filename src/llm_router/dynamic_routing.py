@@ -322,7 +322,7 @@ def initialize_dynamic_routing(available_providers: set[str] | None = None) -> N
         try:
             from llm_router import map_reader
 
-            _built_map_token = map_reader.token()
+            tok = map_reader.token()
             if available_providers is None:
                 # Use fast discovery that doesn't block on Ollama checks
                 available_providers = _get_available_providers_fast()
@@ -331,6 +331,7 @@ def initialize_dynamic_routing(available_providers: set[str] | None = None) -> N
 
             _dynamic_routing_table = build_dynamic_routing_table(available_providers)
             _discovery_complete = True
+            _built_map_token = tok  # only after a successful build, so a failure retries
 
             # Log summary
             provider_names = ", ".join(sorted(available_providers))
@@ -440,7 +441,8 @@ def _rebuild_if_map_changed() -> None:
     """P1.8: re-read the resource map when its mtime moved since the table was built.
 
     Replaces build-once: the MCP server's table follows a rewritten map file.
-    A table that was never built, or a map file that is absent, is left alone.
+    A table that was never built is left alone. A map that was deleted or aged
+    out (token back to None) rebuilds the table to its no-map form.
     """
     global _discovery_complete
     try:
@@ -448,7 +450,7 @@ def _rebuild_if_map_changed() -> None:
 
         tok = map_reader.token()
         with _routing_lock:
-            if _dynamic_routing_table is None or tok is None or tok == _built_map_token:
+            if _dynamic_routing_table is None or tok == _built_map_token:
                 return
             _discovery_complete = False
         initialize_dynamic_routing()

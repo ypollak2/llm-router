@@ -18,14 +18,14 @@ GEM, OAI, LOCAL = "gemini/gemini-2.5-flash", "openai/gpt-4o-mini", "ollama/qwen3
 BASE = [LOCAL, GEM, OAI]
 
 
-def make_map(*rows, age_s=0.0):
+def make_map(*rows, age_s=0.0, policy="local-first"):
     resources = [
         {"resource": cid, "kind": kind, "chain_id": cid, "status": status,
          "effective_priority": prio, "capabilities": ["generate"], "quota": {}}
         for cid, kind, status, prio in rows
     ]
     gen = time.time() - age_s
-    return {"schema": rm.SCHEMA, "policy": "balanced", "resources": resources,
+    return {"schema": rm.SCHEMA, "policy": policy, "resources": resources,
             "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(gen))}
 
 
@@ -73,6 +73,17 @@ def test_drops_non_connected_and_orders_by_priority():
                  ("gemini/api", "api", "connected", 1),
                  ("openai/api", "api", "absent", None)))
     assert map_reader.apply_to_chain(BASE) == [GEM, LOCAL]
+
+
+def test_balanced_policy_filters_but_never_reorders():
+    """Under balanced the ranks are row order only; reordering would flip cheap-first
+    to paid-first. Same ranks under local-first do reorder (previous test)."""
+    rows = [(LOCAL, "local", "connected", 3), ("gemini/api", "api", "connected", 1),
+            ("openai/api", "api", "absent", None)]
+    put(make_map(*rows, policy="balanced"))
+    assert map_reader.apply_to_chain(BASE) == [LOCAL, GEM]      # dropped, order kept
+    put(make_map(*rows, policy="no-such-policy"))
+    assert map_reader.apply_to_chain(BASE) == [LOCAL, GEM]
 
 
 def test_unmapped_provider_untouched_and_keeps_its_slot():
@@ -203,3 +214,132 @@ def test_dynamic_table_rebuilds_when_map_mtime_changes(monkeypatch):
         assert built == [{"ollama", "gemini"}, {"gemini"}]   # re-read once on the mtime change
     finally:
         dr.reset_dynamic_routing()
+
+
+# ── the two measured scenarios: cheap-first survives a balanced map ──────────
+
+CLAUDE = "anthropic/claude-sonnet-4-6"
+HAIKU = "anthropic/claude-haiku-4-5-20251001"
+
+
+def seat_rows():
+    # the map's real row order: claude seat first, then local
+    return [("anthropic/claude-subscription", "subscription", "connected", 1),
+            (LOCAL, "local", "connected", 2), ("ollama/qwen3:32b", "local", "connected", 3),
+            ("openai/api", "api", "connected", 4)]
+
+
+@pytest.mark.parametrize("chain", [
+    [LOCAL, "ollama/qwen3:32b", "openai/gpt-4o", CLAUDE, HAIKU],   # code/BALANCED/MODERATE
+    [LOCAL, "ollama/qwen3:32b", HAIKU],                            # code/BUDGET/SIMPLE
+])
+def test_balanced_map_keeps_cheap_first_local_first_reorders(chain):
+    put(make_map(*seat_rows(), policy="balanced"))
+    assert map_reader.apply_to_chain(chain) == chain
+    put(make_map(*seat_rows(), policy="local-first"))
+    out = map_reader.apply_to_chain(chain)
+    assert sorted(out) == sorted(chain)
+    assert out[0].startswith("anthropic/"), "local-first map orders by its ranks (claude seat ranked 1)"
+
+
+# ── stale or deleted map must stop steering a long-lived process ─────────────
+
+@pytest.fixture
+def clock(monkeypatch):
+    offset = {"s": 0.0}
+    real = rm.age_seconds
+    monkeypatch.setattr(rm, "age_seconds", lambda d, now=None: real(d, now) + offset["s"])
+    return offset
+
+
+async def test_proxy_chain_returns_to_no_map_when_map_ages_out_or_is_deleted(three_paths, clock):
+    _, _, proxy_chain = three_paths
+    base = await proxy_chain()
+    put(make_map((LOCAL, "local", "absent", None), ("gemini/api", "api", "connected", 1),
+                 ("openai/api", "api", "connected", 2)))
+    steered = await proxy_chain()
+    assert steered != base and not any(m.startswith("ollama/") for m in steered)
+    clock["s"] = map_reader.MAX_AGE_S + 1                     # (a) ages past MAX_AGE_S
+    assert await proxy_chain() == base
+    clock["s"] = 0
+    assert await proxy_chain() == steered                      # fresh again
+    os.unlink(rm.map_path())                                   # (b) deleted after a build
+    assert await proxy_chain() == base
+
+
+async def test_proxy_chain_cache_is_cleared_on_token_change(three_paths):
+    from llm_router.proxy import backends
+
+    _, _, proxy_chain = three_paths
+    await proxy_chain()
+    for i in range(5):
+        put(make_map((LOCAL, "local", "connected", 1), ("gemini/api", "api", "connected", 2),
+                     ("openai/api", "api", "connected", 3)))
+        os.utime(rm.map_path(), ns=(1, 1_000_000_000 * (i + 10)))   # distinct mtime each time
+        await proxy_chain()
+    assert len(backends._chain_cache) == 1, backends._chain_cache.keys()
+
+
+def test_dynamic_table_returns_to_no_map_when_map_ages_out_or_is_deleted(monkeypatch, clock):
+    import llm_router.dynamic_routing as dr
+
+    built = []
+    monkeypatch.setattr(dr, "_get_available_providers_fast", lambda: {"ollama", "gemini"})
+    monkeypatch.setattr(dr, "build_dynamic_routing_table",
+                        lambda provs: built.append(set(provs)) or {})
+    full = {"ollama", "gemini"}
+    put(make_map((LOCAL, "local", "absent", None), ("gemini/api", "api", "connected", 1)))
+    dr.reset_dynamic_routing()
+    try:
+        dr.initialize_dynamic_routing()
+        assert built == [{"gemini"}]
+        clock["s"] = map_reader.MAX_AGE_S + 1
+        dr.get_dynamic_model_chain(RoutingProfile.BALANCED, TaskType.QUERY)
+        assert built == [{"gemini"}, full]                      # (a) aged out: unfiltered again
+        clock["s"] = 0
+        dr.get_dynamic_model_chain(RoutingProfile.BALANCED, TaskType.QUERY)
+        assert built[-1] == {"gemini"}
+        os.unlink(rm.map_path())
+        dr.get_dynamic_model_chain(RoutingProfile.BALANCED, TaskType.QUERY)
+        assert built[-1] == full                                # (b) deleted
+    finally:
+        dr.reset_dynamic_routing()
+
+
+def test_dynamic_rebuild_failure_is_retried(monkeypatch):
+    import llm_router.dynamic_routing as dr
+
+    monkeypatch.setattr(dr, "_get_available_providers_fast", lambda: {"ollama"})
+    monkeypatch.setattr(dr, "build_dynamic_routing_table", lambda provs: {})
+    dr.reset_dynamic_routing()
+    try:
+        dr.initialize_dynamic_routing()
+        put(all_connected())
+        boom = {"on": True}
+        ok = lambda provs: {}                                   # noqa: E731
+
+        def flaky(provs):
+            if boom["on"]:
+                raise RuntimeError("discovery down")
+            return ok(provs)
+        monkeypatch.setattr(dr, "build_dynamic_routing_table", flaky)
+        dr.get_dynamic_model_chain(RoutingProfile.BALANCED, TaskType.QUERY)   # fails
+        assert dr._built_map_token is None, "token must not advance on a failed build"
+        boom["on"] = False
+        dr.get_dynamic_model_chain(RoutingProfile.BALANCED, TaskType.QUERY)   # retried
+        assert dr._built_map_token == map_reader.token() is not None
+    finally:
+        dr.reset_dynamic_routing()
+
+
+def test_hook_chain_builder_survives_a_missing_map_reader(monkeypatch):
+    import sys
+
+    from llm_router.hooks import chain_builder as hook_cb
+    from llm_router.hooks.direct_executor import ModelSpec
+
+    monkeypatch.setattr(hook_cb, "_ollama_models", lambda: [ModelSpec("ollama", "qwen3:8b")])
+    monkeypatch.setitem(sys.modules, "llm_router.map_reader", None)   # import raises
+    monkeypatch.delattr("llm_router.map_reader", raising=False)
+    chain = hook_cb.build_chain("simple", "green", "code")
+    assert chain and f"{chain[0].provider}/{chain[0].model}" == LOCAL
