@@ -125,6 +125,7 @@ def probe_ollama() -> list[str]:
 
 def _write_cache(models: list[str]) -> None:
     """Refresh the cache, preserving any richer per-model metadata it holds."""
+    ensure_grandfather([f"ollama/{m}" for m in models])   # before discovery.json exists on a fresh install
     try:
         path = _cache_path()
         try:
@@ -245,6 +246,203 @@ def available_ollama_models_nowait(*, refresh: bool = True) -> list[str]:
     if refresh and _claim_probe_attempt():
         _spawn_probe_child()
     return cached
+
+
+# ── Promotion gate (P0.15, DISC-PROMOTE-1) ───────────────────────────────────
+#
+# A model that shows up in the discovery cache or in a live /api/tags answer used
+# to lead every cheap chain the moment it appeared, with nothing having measured
+# it. The gate sorts every injected local model into two groups:
+#
+#   front  the user named it (env, config, routing.yaml pin) or it was already
+#          installed when this version first ran (grandfathered). Placed as today.
+#   tail   everything else. D-60c = A: appended after the LAST entry of a
+#          non-critical chain (simple query/generate/analyze) and absent from
+#          every other chain. Graded models (16.3) will join `front`; until then
+#          "validated" means configured or grandfathered.
+#
+# Matching is by id only. `LLM_ROUTER_PROMOTE_GATE=off` restores the old behaviour.
+
+GATE_ENV = "LLM_ROUTER_PROMOTE_GATE"
+_GATE_OFF_VALUES = frozenset({"off", "0", "false", "no"})
+_LOCAL_ID_PREFIXES = ("ollama/", "openai_compat/")
+_PRIOR_STATE_FILES = ("discovery.json", "profile.yaml", "usage.db")
+_gate_off_logged = False
+
+
+def gate_enabled() -> bool:
+    return os.environ.get("LLM_ROUTER_PROMOTE_GATE", "").strip().lower() not in _GATE_OFF_VALUES
+
+
+def _id_forms(name: str) -> set[str]:
+    """Every full id a configured name can mean. A bare name is ambiguous between
+    the two local providers, so it covers both; a name with no tag also covers
+    ``:latest`` because that is what Ollama lists it as."""
+    name = name.strip()
+    if not name:
+        return set()
+    bases = {name} if name.startswith(_LOCAL_ID_PREFIXES) else {f"ollama/{name}", f"openai_compat/{name}"}
+    out = set(bases)
+    for b in bases:
+        if ":" not in b.rsplit("/", 1)[-1]:
+            out.add(f"{b}:latest")
+    return out
+
+
+def _env_configured_ids() -> set[str]:
+    """Models the operator named in the environment. Literal reads, as in ``_from_env``."""
+    out: set[str] = set()
+    out |= _id_forms(os.environ.get("LLM_ROUTER_OLLAMA_MODEL", ""))
+    for raw in (os.environ.get("OLLAMA_BUDGET_MODELS", ""), os.environ.get("OLLAMA_MODELS", "")):
+        for name in raw.split(","):
+            out |= _id_forms(name)
+    return out
+
+
+def _routing_yaml_pin_ids() -> set[str]:
+    """Models pinned in the user's routing.yaml (per-task ``model`` and ``agentic_model``)."""
+    try:
+        from llm_router.repo_config import load_user_config
+
+        cfg = load_user_config()
+    except Exception as exc:                                 # noqa: BLE001
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-PROMOTE-GATE-ROUTING-YAML", exc)
+        return set()
+    names = [o.model for o in cfg.routing.values() if o.model]
+    if cfg.agentic_model:
+        names.append(cfg.agentic_model)
+    return set().union(*(_id_forms(str(n)) for n in names)) if names else set()
+
+
+def _grandfather_path() -> Path:
+    return _cache_path().with_name("grandfathered_models.json")
+
+
+def _grandfather_marker_path() -> Path:
+    return _cache_path().with_name("grandfathered_models.init")
+
+
+def ensure_grandfather(current_ids: "list[str] | tuple[str, ...]" = ()) -> None:
+    """Write ``grandfathered_models.json`` once, at the first run of this version (D-62 = A).
+
+    Upgrade (prior llm-router state exists: discovery.json, profile.yaml or usage.db):
+    the file lists the models already installed (the old discovery cache plus
+    ``current_ids``). Fresh install: the file is written with an empty ``ids``.
+    The file is never rewritten, and is not recreated if deleted: the
+    ``grandfathered_models.init`` marker records that the one-time write happened.
+
+    Call this BEFORE anything writes discovery.json, or a fresh install would see
+    its own first probe as prior state.
+    """
+    path, marker = _grandfather_path(), _grandfather_marker_path()
+    if marker.exists() or path.exists():
+        return
+    home = path.parent
+    ids: list[str] = []
+    if any((home / name).exists() for name in _PRIOR_STATE_FILES):
+        cached, _age = _read_cache()
+        found = {f"ollama/{m}" for m in cached}
+        for m in current_ids:
+            found |= {m} if m.startswith(_LOCAL_ID_PREFIXES) else {f"ollama/{m}"}
+        ids = sorted(found)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        home.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps({"at": time.time(), "ids": ids}, indent=2))
+        os.link(tmp, path)          # exclusive create: a racing first run loses cleanly
+        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+    except FileExistsError:
+        return
+    except OSError as exc:
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-PROMOTE-GATE-GRANDFATHER-WRITE", exc)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+_grandfather_cache: tuple[str, int, frozenset[str]] | None = None
+
+
+def grandfathered_ids() -> frozenset[str]:
+    """Ids in ``grandfathered_models.json``; empty when the file is absent or unreadable."""
+    global _grandfather_cache
+    path = _grandfather_path()
+    try:
+        mtime = path.stat().st_mtime_ns
+    except OSError:
+        return frozenset()
+    if _grandfather_cache and _grandfather_cache[:2] == (str(path), mtime):
+        return _grandfather_cache[2]
+    try:
+        raw = json.loads(path.read_text()).get("ids", [])
+        ids = frozenset(i for name in raw if isinstance(name, str) for i in _id_forms(name))
+    except (OSError, ValueError, AttributeError):
+        return frozenset()
+    _grandfather_cache = (str(path), mtime, ids)
+    return ids
+
+
+def grandfather_status() -> str:
+    """For `llm-router doctor`: ``ok``, ``missing`` (deleted after the one-time write) or ``unwritten``."""
+    if _grandfather_path().exists():
+        return "ok"
+    return "missing" if _grandfather_marker_path().exists() else "unwritten"
+
+
+def order_for_chain(
+    models: "list[str]",
+    task_class: str,
+    *,
+    critical: bool,
+    configured: "tuple[str, ...] | list[str] | set[str]" = (),
+    read_routing_yaml: bool = True,
+) -> "tuple[list[str], list[str]]":
+    """Split injected local model ids into ``(front, tail)`` (P0.15, D-60c = A).
+
+    ``front``  configured or grandfathered models, in the order given.
+    ``tail``   every other model on a non-critical chain; ``[]`` on a critical one
+               (the models are absent from it). The caller appends ``tail`` after
+               the chain's last entry, after every reorder.
+
+    ``configured`` carries names the caller knows about (``Config`` fields, the
+    pins of an already-loaded ``RepoConfig``); the environment is always read.
+    ``read_routing_yaml`` is False for callers that pass the loaded pins.
+    ``task_class`` is only used for the debug log until 16.3 adds per-class grades.
+
+    With ``LLM_ROUTER_PROMOTE_GATE=off`` this returns ``(models, [])``: today's chain.
+    """
+    global _gate_off_logged
+    models = list(models)
+    if not gate_enabled():
+        if not _gate_off_logged:
+            _gate_off_logged = True
+            import logging
+
+            logging.getLogger("llm_router.model_discovery").warning(
+                "%s=off: unvalidated local models are injected at the front of chains again", GATE_ENV)
+        return models, []
+    if not models:
+        return [], []
+    ensure_grandfather([m for m in models if m.startswith(_LOCAL_ID_PREFIXES)])
+    keep = set(grandfathered_ids()) | _env_configured_ids()
+    for name in configured:
+        keep |= _id_forms(str(name))
+    if read_routing_yaml and any(m not in keep for m in models):
+        keep |= _routing_yaml_pin_ids()
+    front = [m for m in models if m in keep]
+    unvalidated = [m for m in models if m not in keep]
+    if unvalidated:
+        import logging
+
+        logging.getLogger("llm_router.model_discovery").debug(
+            "promote gate (%s, %s chain): %s unvalidated %s",
+            task_class, "critical" if critical else "non-critical",
+            "dropped" if critical else "tail", unvalidated)
+    return front, ([] if critical else unvalidated)
 
 
 def first_installed(prefer: tuple[str, ...] = ()) -> str | None:

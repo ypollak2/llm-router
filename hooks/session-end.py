@@ -2308,6 +2308,13 @@ def _maybe_rescan_profile() -> None:
         updated, changes = rescan_and_update()
         if updated and changes:
             _append_stop_note(f"🔄 Profile updated: {', '.join(changes)}")
+        else:
+            # P0.15-a: an edited profile.yaml is not rewritten; say so once per
+            # change of the regenerated content (None when there is nothing new).
+            from llm_router.auto_profile import last_rescan_note
+            note = last_rescan_note()
+            if note:
+                _append_stop_note(f"⚠ {note}")
 
 
 def _maybe_evaluate_models() -> None:

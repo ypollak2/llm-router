@@ -93,4 +93,6 @@ def test_chain_builder_and_the_hook_agree(home, monkeypatch):
     """The two callers that used to disagree must now give the same answer."""
     _cache(home, ["shared:latest"], age_hours=1)
     from llm_router.hooks.chain_builder import _ollama_models
-    assert [m.model for m in _ollama_models()] == ["shared:latest"]
+    front, tail = _ollama_models()
+    # P0.15: discovery.json predates the first gate run, so the model is grandfathered.
+    assert [m.model for m in front] == ["shared:latest"] and tail == []
