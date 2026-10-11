@@ -72,13 +72,21 @@ status: fixed in `fix/step-sidecall` (D-59; deploy: restart the proxy; rows writ
   wire prefix is added) over-counted 19 of 53 such blocks; on the wire these carry the prefixes
   above, but no raw wire body was captured, so a coordinator or peer message without its prefix would
   still be counted as human.
+  Further known limits (coordinator review of 7192ac31, CC 2.1.296 binary): `async_hook_response`
+  output is rendered with `UT(...)` (escape only, no `<system-reminder>` wrap), so its text beside tool
+  results would count as human (0 occurrences in a 3-day, 556-transcript sample); `observer-activity`
+  and unclassified origin kinds pass through bare (0 seen); the "arrived in the bound thread" marker also
+  drops verified Slack human turns; the opt-in `--serve local-agent` path (`local_mode.is_agent_turn`)
+  does not consult `step_class` (unchanged from main; protected by the conversation pin). Follow-up:
+  STEP-SIDECALL-2.
 - **Rule.** A missing `tools` field is not evidence that a call is a side call. Read the shape that
   carries the history (`thread`), and take the label of a threaded call from the call it continues.
 - **Test.** `tests/test_proxy_step_sidecall.py` (synthesized bodies, no prompt text): human prompt
   on a continue is `turn_first`; tool-result continue is `continuation`; prompt beside tool results
   is `turn_first` (main) or `subagent_turn` (sub-agent); unknown parent and sub-agent marker are not
   main thread; title, probe, summary, server-tool-only and `thread: create` bodies stay `side_call`;
-  interrupt and reminder text beside tool results stay `continuation`; serving unchanged; end to end
+  interrupt and reminder text beside tool results stay `continuation`; stateless (non-thread) serving
+  is byte-identical to origin/main on 12 body shapes (coordinator review); end to end
   through the proxy (create, typed prompt, tool follow-up, mid-run prompt, unseen parent, an unknown
   chain resolved by a continue that carries tools); a continue with client tools and a one- or
   multi-message tail is never served and `try_serve` is never reached; agent-to-agent and harness
