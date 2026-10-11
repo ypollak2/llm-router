@@ -254,12 +254,13 @@ def free_memory_pct() -> float | None:
         if sys.platform == "darwin":
             import subprocess
 
-            out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=3).stdout
+            # fixed argv, explicit minimal env (R4 subprocess env allowlist ratchet)
+            out = subprocess.run(["/usr/bin/vm_stat"], capture_output=True, text=True, timeout=3,
+                                 env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}).stdout
             page = int(re.search(r"page size of (\d+)", out).group(1))  # type: ignore[union-attr]
             pg = {k: int(v) for k, v in re.findall(r"Pages ([a-z ]+):\s+(\d+)\.", out)}
             free = (pg.get("free", 0) + pg.get("inactive", 0) + pg.get("speculative", 0)) * page
-            total = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True,
-                                       text=True, timeout=3).stdout.strip())
+            total = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
             return 100.0 * free / total
         info = {k: int(v) for k, v in re.findall(r"(\w+):\s+(\d+) kB", Path("/proc/meminfo").read_text())}
         return 100.0 * info["MemAvailable"] / info["MemTotal"]
