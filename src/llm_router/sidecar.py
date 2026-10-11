@@ -50,6 +50,8 @@ Claude.
 
 from __future__ import annotations
 
+from llm_router.provider_classes import real_decision_sql
+
 import os
 import re
 import shutil
@@ -134,7 +136,8 @@ def _handle_routing_distribution(_prompt: str) -> str | None:
             "SELECT complexity, final_model, COALESCE(cost_usd,0) "
             "FROM routing_decisions "
             "WHERE date(timestamp,'localtime') = date('now','localtime') "
-            "  AND COALESCE(reason_code,'') != 'sidecar_backfill'"
+            "  AND COALESCE(reason_code,'') != 'sidecar_backfill' "
+            "  AND " + real_decision_sql(conn)
         ).fetchall()
     except sqlite3.Error:
         return None

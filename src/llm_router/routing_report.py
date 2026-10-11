@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from llm_router import paths
+from llm_router.provider_classes import not_error_row_sql, real_decision_sql
 
 def _home():
     return paths.llm_router_home()
@@ -255,20 +256,21 @@ def generate_report() -> str:
 
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
+        not_error = not_error_row_sql(con)
         rows = con.execute(
             """SELECT model, provider, COUNT(*) n,
                       SUM(input_tokens) tin, SUM(output_tokens) tout,
                       ROUND(AVG(latency_ms)) avg_ms, MAX(latency_ms) max_ms,
                       ROUND(SUM(COALESCE(saved_usd,0)), 5) saved
-               FROM usage GROUP BY model, provider ORDER BY n DESC"""
+               FROM usage WHERE """ + not_error + """ GROUP BY model, provider ORDER BY n DESC"""
         ).fetchall()
         lats = [r[0] for r in con.execute(
-            "SELECT latency_ms FROM usage WHERE latency_ms > 0").fetchall()]
+            "SELECT latency_ms FROM usage WHERE latency_ms > 0 AND " + not_error).fetchall()]
         # routing source breakdown (gateway vs hook vs mcp) if reason_code exists
         try:
             srcs = con.execute(
                 "SELECT COALESCE(classifier_type,'?'), COUNT(*) FROM routing_decisions "
-                "GROUP BY 1 ORDER BY 2 DESC").fetchall()
+                "WHERE " + real_decision_sql(con) + " GROUP BY 1 ORDER BY 2 DESC").fetchall()
         except sqlite3.Error:
             srcs = []
     finally:

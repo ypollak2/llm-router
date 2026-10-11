@@ -12,6 +12,8 @@ All analysis data comes from existing usage.db — no new data collection needed
 
 from __future__ import annotations
 
+from llm_router.provider_classes import real_decision_sql
+
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -91,7 +93,7 @@ def fetch_session_decisions(
         rows = conn.execute(
             """
             SELECT * FROM routing_decisions
-            WHERE timestamp >= ? AND timestamp <= ?
+            WHERE timestamp >= ? AND timestamp <= ? AND """ + real_decision_sql(conn) + """
             ORDER BY timestamp ASC
             """,
             (start_iso, end_iso),

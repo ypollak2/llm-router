@@ -37,3 +37,23 @@ status: fixed in `fix/proxy-unknown-model-haiku55` (deploy: restart the proxy; r
   (`decide` and `decide_unclassified`). All eight fail on `origin/main` (cf444090).
 - **Gates to recompute after deploy, on rows written after it:** G3 (proxy writer). Rows already in the
   ledger keep their stored nulls; a G3 window that starts before the restart still counts them.
+- **Follow-up (#396 review, `fix/review-followups-1010`).** The residual is closed, and dated ids too.
+  `pricing.resolve('claude-haiku-5-5-20260901')` and `pricing.resolve('claude-haiku-5-5[1m]')` returned None, so such
+  a row would get the `haiku` label from `family_tier` but a null cost and fail G3. The proxy normalises model ids
+  through `pricing.resolve` (`tiers._canonical`, `ledger._price_tokens`), so the fix is there: after exact and alias
+  lookups miss, an Anthropic id ending in an 8-digit date resolves to its base entry, if that entry exists. Exact
+  matches still win. A date on an unknown id stays None. `[1m]` now also resolves when the base entry carries its own
+  long-prompt card (`long_prompt_over`). The pricing page (checked 2026-10-10) says "Claude 4.6 and later models
+  (except Claude Haiku 5.5) ... include the full 1M token context window at standard pricing". So Haiku 5.5's
+  `[1m]` and dated ids use the same tiered entry, and pre-4.6 `[1m]` ids stay unknown. `claude-mythos-5-1` is now
+  priced from the page's own row: "Claude Mythos 5.1 ([limited availability]) | $10 / MTok | $12.50 / MTok | $20 /
+  MTok | $0.25 / MTok<sup>1</sup> | $50 / MTok", footnote 1 "Cache hits and refreshes on Claude Fable 5.1 and Claude
+  Mythos 5.1 are priced at 0.025x the base input price". It is in the standard-rate long-context set like Fable 5.1.
+  Side effect: `ClaudeTierPolicy.tier_of` uses the same resolver, so a dated id of a configured tier model
+  (`claude-sonnet-5-20260901`) now belongs to that tier and is tier-routed (and matches `pinned_models`), the same
+  way its `[1m]` spelling already did; `test_a_dated_tier_model_id_belongs_to_its_tier_like_its_1m_spelling` pins it.
+  Tests: `tests/test_pricing_haiku55.py` (suffixed Haiku 5.5 on both cards, a date on every `_ANTHROPIC` id, exact
+  matches win, unknown stays unknown, the pre-4.6 `[1m]` guard after a date, a dated long-prompt ledger row,
+  Mythos 5.1) and `tests/test_proxy_tiers.py::test_suffixed_haiku_5_5_rows_are_priced_on_the_tiered_card` (through
+  the proxy: forwarded unchanged, labelled `haiku`, priced). 10 of these 11 fail on `origin/main` (a39731a7);
+  the exact-match / unknown-stays-unknown guard passes on both.

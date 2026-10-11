@@ -105,7 +105,7 @@ def test_ollama_rows_facts_and_n19(tmp_path):
     data = rm.build(make_inputs(tmp_path, models=("qwen3.5:latest", "nimble:9b", "nomic-embed-text:latest")))
     q = row(data, "ollama/qwen3.5:latest")
     assert "generate" in q["capabilities"] and "tools" in q["capabilities"]
-    assert q["limits"]["num_ctx"] == local_models.num_ctx("qwen3.5:latest") == 131072
+    assert q["limits"]["num_ctx"] == local_models.num_ctx("qwen3.5:latest")  # the table is the source (N20 set 32K in #407)
     assert q["limits"]["max_context"] == 262144
     n = row(data, "ollama/nimble:9b")
     assert "generate" not in n["capabilities"] and "decision" in n["capabilities"]
