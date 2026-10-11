@@ -213,3 +213,41 @@ async def test_map_priority_replaces_the_subscription_local_reorder(monkeypatch,
     _write(want, absent=(provs[0],), policy="balanced")
     chain = await chain_builder.build_chain(TaskType.CODE, "moderate", RoutingProfile.BALANCED)
     assert chain == [m for m in base if not m.startswith(provs[0] + "/")], chain
+
+
+@pytest.mark.asyncio
+async def test_balanced_map_filters_then_subscription_local_reorder_still_runs(
+    monkeypatch, _no_discovery
+):
+    """Balanced map + subscription provider set == no-map result minus disconnected providers."""
+    import time
+
+    import llm_router.subscription_local_routing as slr
+    from llm_router import resource_map as rm
+
+    monkeypatch.setattr(slr, "is_subscription_local_active", lambda profile: True)
+
+    async def _pressure():
+        return 0.5
+
+    monkeypatch.setattr(slr, "get_subscription_pressure", _pressure)
+    monkeypatch.setattr(
+        slr, "reorder_for_subscription_local",
+        lambda chain, **kw: list(reversed(chain)),   # visible, deterministic reorder
+    )
+    nomap = await chain_builder.build_chain(TaskType.CODE, "moderate", RoutingProfile.BALANCED)
+    provs = list(dict.fromkeys(m.split("/")[0] for m in nomap))
+    assert len(provs) >= 3
+    gone = provs[0]
+    rows = [{"resource": p, "kind": "api", "chain_id": f"{p}/api",
+             "status": "absent" if p == gone else "connected",
+             "effective_priority": None if p == gone else i + 1,
+             "capabilities": ["generate"], "quota": {}} for i, p in enumerate(provs)]
+    rm.write_map({"schema": rm.SCHEMA, "policy": "balanced", "resources": rows,
+                  "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())})
+    got = await chain_builder.build_chain(TaskType.CODE, "moderate", RoutingProfile.BALANCED)
+    # nomap is already reorder(pre); filter-then-reorder of the same input is the
+    # same list minus the disconnected provider. A skipped reorder would be reversed.
+    want = [m for m in nomap if not m.startswith(gone + "/")]
+    assert got == want, (got, want)
+    assert got != list(reversed(want)), "reorder was skipped"
