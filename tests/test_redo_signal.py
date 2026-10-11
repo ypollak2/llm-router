@@ -29,9 +29,11 @@ def human(text, ts=T0, **extra):
     return rec
 
 
-def assistant(text, ts=T0 + 1):
-    return {"type": "assistant", "timestamp": _iso(ts),
-            "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
+def assistant(text, ts=T0 + 1, msg_id=None):
+    msg = {"role": "assistant", "content": [{"type": "text", "text": text}]}
+    if msg_id:
+        msg["id"] = msg_id    # the proxy row's msg_id: without it the call is in no transcript message (orphan)
+    return {"type": "assistant", "timestamp": _iso(ts), "message": msg}
 
 
 def tool_result(ts=T0 + 2):
@@ -274,12 +276,13 @@ def test_kpi_o3_reports_detector_flags_while_source4_is_disabled(monkeypatch, tm
     session_kind._FOUND.clear()
     session_kind.tag_session("s-org", "/Users/someone/Projects/app", env={})
     t0 = NOW - 5000
-    entries = [human("first ask here", ts=t0 - 3), assistant("a", ts=t0 + 1),
-               human("claude: first ask here", ts=t0 + 100 - 3), assistant("b", ts=t0 + 101)]
+    entries = [human("first ask here", ts=t0 - 3), assistant("a", ts=t0 + 1, msg_id="m-turn-0"),
+               human("claude: first ask here", ts=t0 + 100 - 3), assistant("b", ts=t0 + 101, msg_id="m-turn-1")]
     (proj / "-p" / "s-org.jsonl").write_text("\n".join(json.dumps(e) for e in entries) + "\n")
     rows = []
     for k in range(2):
-        rows.append(proxy_row(2 * k, sid="s-org", tier="haiku", ts=t0 + 100 * k, kind="organic"))
+        rows.append(proxy_row(2 * k, sid="s-org", tier="haiku", ts=t0 + 100 * k, kind="organic",
+                              msg_id=f"m-turn-{k}"))
         rows.append(proxy_row(2 * k + 1, sid="s-org", tier="haiku", step="continuation", ts=t0 + 100 * k + 1,
                               kind="organic"))
     write_jsonl(paths.state_path("proxy_calls.jsonl"), rows)

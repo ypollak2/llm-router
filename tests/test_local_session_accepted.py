@@ -416,7 +416,7 @@ def test_other_kpis_are_byte_identical_with_attributable_accepted_local_answers(
     assert card["o3"]["local_answers"]["breakdown"]["accepted"] == 3  # premise
     assert json.dumps(card["kpis"], indent=1, sort_keys=True, default=str) == \
         (GOLDEN / "kpi_pre_o3_kpis.json").read_text()
-    o3_lines = set(kpi._o3_render_lines(card["o3"]))
+    o3_lines = set(kpi._o3_render_lines(card["o3"])) | set(kpi._offload_render_lines(card["offload"]))
     full = kpi.render_scorecard(card).split("\n")
     # `local (shadow): n=...` is #284's informational count of local units (not this change).
     rest = [ln for ln in full if ln not in o3_lines and not ln.startswith("local (shadow): ")

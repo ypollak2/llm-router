@@ -573,6 +573,32 @@ def is_free(model: str) -> bool:
     return p is not None and p.input == 0.0 and p.output == 0.0
 
 
+#: Name prefixes of models that run on this machine (``cache/ollama/...`` is a semantic-cache hit on one).
+_LOCAL_PREFIXES = ("ollama/", "cache/ollama/", "lmstudio/", "llamacpp/", "local/")
+
+
+def is_local(model: str) -> bool:
+    """True for a model served by a local provider (Ollama and kin). A name only: no price lookup."""
+    m = (model or "").strip().lower()
+    return m.startswith(_LOCAL_PREFIXES) or resolve(m) == "ollama"
+
+
+def haiku_input_rate() -> float:
+    """The input price (USD per million tokens) a model must not exceed to count as "very cheap": the
+    highest base input rate among the Haiku entries of this table, so every Haiku qualifies. Read from the
+    table, never written down (Haiku 4.5 and 5.5 are priced differently)."""
+    return max(p.input for k, p in _PRICES.items() if "haiku" in k)
+
+
+def is_very_cheap(model: str) -> bool:
+    """PLAN v16 S1 ("very cheap"): a local provider, or an input price at or below Haiku's
+    (:func:`haiku_input_rate`). An unknown model is not very cheap: unknown is not free."""
+    if is_local(model):
+        return True
+    p = price_for(model)
+    return p is not None and p.input <= haiku_input_rate()
+
+
 def known_models() -> frozenset[str]:
     return frozenset(_PRICES)
 

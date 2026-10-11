@@ -34,6 +34,7 @@ import time
 from pathlib import Path
 
 from llm_router.lazy_urllib import urllib  # urllib.request on first use, not at import
+from llm_router.local_models import serves_generate
 
 DEFAULT_TTL_HOURS = 12.0
 _PROBE_TIMEOUT_S = 2.0
@@ -49,7 +50,11 @@ _EMBEDDING_MARKERS = ("embed", "bge-", "gte-", "e5-", "all-minilm")
 
 def _is_completion_model(name: str) -> bool:
     low = name.lower()
-    return not any(marker in low for marker in _EMBEDDING_MARKERS)
+    if any(marker in low for marker in _EMBEDDING_MARKERS):
+        return False
+    # HOOK-DRAFT-1: a decision-only model (nimble:9b, HTTP 400 on generate) or a
+    # classifier alias reached the hook draft chain and first_installed() from here.
+    return serves_generate(low)
 
 
 def _cache_path() -> Path:

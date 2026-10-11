@@ -143,43 +143,13 @@ _capability_cache: dict[tuple[str, str], tuple[bool, float]] = {}
 _CAPABILITY_TTL_S = 3600.0
 _CAPABILITY_UNKNOWN_TTL_S = 60.0
 
-#: Name prefixes of models that must never serve generation. ``llmr-classifier`` is a qwen3.5
-#: Modelfile and ``llmr-classifier-38`` a qwen3.8 one: /api/show reports both as normal chat
-#: models (no SYSTEM, template ``{{ .Prompt }}``, caps include ``completion``), so there is no
-#: marker to read; the name is the only signal. An exact-name rule let ``llmr-classifier-38``
-#: through (M0-3 rerun3, a code call burnt a 120 s timeout on it). ``llamacpp:<sha256>`` is
-#: the tag Ollama's llamacpp runner gives an unnamed import of a blob: two exist on the
-#: reference machine, byte-for-byte copies of ``qwen3.5`` and ``llmr-classifier``; an
-#: unnamed import has no declared role, so it never enters a code chain.
-_NON_CODE_NAME_PREFIXES = ("llmr-classifier", "llamacpp:")
-
-
-def _configured_classifier_bases() -> frozenset[str]:
-    """Bare names of the models the classifier path is configured to use (explicit role)."""
-    import os
-
-    out = set()
-    for var in ("LLM_ROUTER_CLASSIFIER_MODEL", "LLM_ROUTER_DECISION_MODEL"):
-        v = os.environ.get(var, "").strip().lower()
-        if v:
-            out.add(v.split(":", 1)[0])
-    return frozenset(out)
-
 
 def _is_non_code_model(bare: str) -> bool:
-    """True for a classifier-only or unnamed-import model, by role then by name prefix.
+    """True for a classifier-only or unnamed-import model; the rule lives in
+    :func:`llm_router.local_models.is_named_non_generator`. A debug line records each exclusion."""
+    from llm_router.local_models import is_named_non_generator
 
-    ``LLM_ROUTER_LOCAL_ALLOW_MODELS`` (comma-separated exact names, tag optional) overrides
-    the name rules for a model the user deliberately named, e.g. a coder pulled as
-    ``llamacpp:...``. A debug line records each exclusion.
-    """
-    import os
-
-    low = bare.lower()
-    allow = {a.strip().lower() for a in os.environ.get("LLM_ROUTER_LOCAL_ALLOW_MODELS", "").split(",") if a.strip()}
-    if low in allow or (":" not in low and f"{low}:latest" in allow) or low.removesuffix(":latest") in allow:
-        return False
-    if low.startswith(_NON_CODE_NAME_PREFIXES) or low.split(":", 1)[0] in _configured_classifier_bases():
+    if is_named_non_generator(bare):
         log.debug("excluded %s from local code chains (classifier/unnamed-import name rule)", bare)
         return True
     return False

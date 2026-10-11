@@ -122,6 +122,18 @@ async def _apply_subscription_local(
     still a working chain.
     """
     try:
+        # P1.8: with a fresh resource map non-connected resources are dropped; a map
+        # whose policy expresses an order also sets the order and replaces the
+        # subscription-local reorder below, which otherwise still runs.
+        from llm_router import map_reader
+
+        view = map_reader.load_view()
+        if view is not None:
+            chain = map_reader.apply_to_chain(chain, view=view)
+            if view.orders or not chain:
+                return chain   # [] = nothing connected: callers' no-route path
+            # a balanced map only filters: the no-map result (incl. the reorder below) stays
+
         from llm_router.subscription_local_routing import (
             get_subscription_pressure,
             is_subscription_local_active,

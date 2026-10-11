@@ -224,8 +224,16 @@ def build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:
     """
     from llm_router.qa_policy import strip_local_for_qa
 
-    return strip_local_for_qa(_build_chain(complexity, zone, task_type), task_type,
-                              keep_if_only_local=False)
+    chain = strip_local_for_qa(_build_chain(complexity, zone, task_type), task_type,
+                               keep_if_only_local=False)
+    # P1.8: read-only use of the resource map; no fresh map file, no change.
+    try:
+        from llm_router import map_reader
+
+        return map_reader.apply_to_chain(
+            chain, key=lambda s: f"{'anthropic' if s.provider == 'claude' else s.provider}/{s.model}")
+    except Exception:
+        return chain
 
 
 def _build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:

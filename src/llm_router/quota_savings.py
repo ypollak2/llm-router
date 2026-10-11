@@ -288,7 +288,7 @@ _API_PROVIDERS = frozenset({"openai", "gemini", "groq", "deepseek"})
 # RED2-3-03: gemini_cli is treated as free-local for cap routing (router.py's
 # _FREE_LOCAL_PROVIDERS), so it must be in this bucket too or its calls silently
 # lose their quota-hint line.
-_FREE_LOCAL_PROVIDERS = frozenset({"ollama", "vllm", "lm_studio", "gemini_cli"})
+_FREE_LOCAL_PROVIDERS = frozenset({"ollama", "vllm", "lm_studio", "gemini_cli", "openai_compat"})
 
 
 def _sum_cost_usd_since_for_provider(

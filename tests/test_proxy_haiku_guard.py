@@ -112,6 +112,21 @@ def test_subagent_first_rows_are_not_turns_for_the_redo_trigger():
     assert _eval(only_sub)["triggers"]["redo"]["n"] == 0
 
 
+def test_harness_turn_and_non_human_turn_origin_rows_are_not_turns_for_the_redo_trigger():
+    """P1.9 task 1 reaches this live guard (``redo_trigger`` -> ``osh.build_units`` with no transcript):
+    a ``harness_turn`` row and a ``turn_origin`` of task_notification / command / other_tag / subagent_brief
+    are not human turns, so the guard's n shrinks and it reaches MIN_N later. Base: n=40 each; head: n=0.
+    ``typed`` and a null origin (rows written before the field) are still turns."""
+    def n_of(**extra):
+        rows = [_turn(f"s{i}", NOW - 3600.0 - i * 60.0, **extra) for i in range(40)]
+        return _eval(rows)["triggers"]["redo"]["n"]
+
+    assert n_of(step_class="harness_turn") == 0
+    for origin in ("task_notification", "command", "other_tag", "subagent_brief"):
+        assert n_of(turn_origin=origin) == 0, origin
+    assert n_of(turn_origin="typed") == 40 and n_of() == 40
+
+
 def test_redo_at_the_bar_does_not_trip_and_below_min_n_is_not_evaluable():
     at_bar = _eval(_redo_ledger(40, 6))["triggers"]["redo"]  # 15.0%, not > 15%
     assert at_bar["evaluable"] and not at_bar["tripped"]

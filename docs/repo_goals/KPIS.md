@@ -93,8 +93,11 @@ it would attribute an answer to the wrong conversation. Ids only, shape-checked
 (`[A-Za-z0-9_.:-]{1,128}`); free text, a non-string or a placeholder (`sdk`, `unknown`) is stored
 as NULL (`src/llm_router/call_identity.py`).
 
-*Which proxy calls are turns* (M0.3b; the owner's definition, PLAN section 1.2 O3). A turn is a proxy
-row that is not a side call and whose `step_class` is `turn_first`, minus sub-agent first calls. A row with
+*Which proxy calls are turns* (M0.3b; repaired by P1.9, PLAN section 1.2 O3). A turn is a proxy
+row that is not a side call, whose `step_class` is `turn_first`, and that is the first answer to something a
+person typed. **P1.9 task 1** takes out the two causes M0.3 measured and kept in (PR #295, session b9f04425, W0:
+548 of 813 "turns" were calls in no transcript message; 113 of 209 "typed prompts" were task notifications):
+the table below lists what is out now. A row with
 no `step_class` (written before GE1) or labelled `subagent_first` is never a turn; they are counted in
 `o3.excluded.no_step_class` and `o3.excluded.step_subagent_first` (`docs/bugs/O3-STEP-1.md`).
 Since TURNFIRST-1 (`docs/bugs/TURNFIRST-1.md`) the proxy splits two kinds out of `turn_first`: a
@@ -110,21 +113,21 @@ join changes exactly one thing; the rest of its roles are only counted:
 | Transcript role of the row | Counted as | Counter |
 |---|---|---|
 | sub-agent call (`isSidechain: true`, or `<session>/subagents/**/agent-*.jsonl`) | not a turn (per-call unit only, does not end a redo window) | `o3.excluded.subagent_first` |
-| first answer to injected input: slash command, sub-agent hand-back, peer message, task notification | **turn** (kept in) | `o3.kept_in.meta_first` |
-| message id in no message of a session that HAS a transcript (permission classifier, prompt suggestion, side query) | **turn** (kept in: "unjoined rows stay in") | `o3.kept_in.unjoined` |
-| session with no transcript at all, or a row with no message id | **turn** (proxy-only rule) | `o3.kept_in.no_transcript` |
+| first answer to injected input: slash command, sub-agent hand-back, peer message, task notification | not a turn (P1.9) | `o3.excluded.meta_first` |
+| message id in no message of a session that HAS a transcript (permission classifier, prompt suggestion, side query) | not a turn (P1.9) | `o3.excluded.unjoined` |
+| session with no transcript at all, or a row with no message id: the ledger decides (`harness_turn`, or a `turn_origin` of `task_notification`, `command`, `other_tag`, `subagent_brief`) | not a turn | `o3.excluded.ledger_not_human` |
+| the same, with `step_class` `turn_first` and `turn_origin` `typed` or null (a row written before the field) | **turn** (proxy-only rule) | `o3.kept_in.no_transcript` |
 | anything else | by `step_class` | |
 
-A row the proxy flags `side_call` is never promoted to a turn, whatever the transcript says. The
-`kept_in` counters are the size of the gap between this definition and "the first answer to a typed
-prompt": they are reported so the owner can see it, and they do not change n.
+A row the proxy flags `side_call` is never promoted to a turn, whatever the transcript says. Only rows with
+no transcript stay in on the proxy-only rule (`o3.kept_in.no_transcript`). A row that is not a turn also does
+not end a unit's redo window: the window is 2 human turns, not 2 notifications.
 
-Typed prompt (used only by `o3_integrity.py`, never by the scorecard) = a `user` entry that is not a
-sidechain, not `isMeta`, has non-blank text and does not start with `<command-`. **Open owner decision:
-background task notifications have that shape too** (`promptSource=system`: 113 of the 209 typed prompts
-of the one qualifying W0 session, 54%), so a "human turn" here includes turns the harness started on a
-sub-agent completion, and the redo window of 2 human turns can span notifications rather than human
-replies. The definition is not changed here; O3 should not feed an M2/M4 bar before the owner decides.
+Typed prompt (`o3_transcripts.is_typed_prompt`; `o3_integrity.py` has its own copy) = a `user` entry that is
+not a sidechain, not `isMeta`, has non-blank text, does not start with `<command-`, and was not injected by
+the harness (`promptSource=system`, or an `origin.kind` other than `human`: a `task-notification`). The frozen
+M0.3 gate script still counts notifications (113 of the 209 typed prompts of b9f04425, 54%); its P1.9 variant
+does not (see "Integrity" below).
 
 Measured on W0 (2026-09-29T09:41:51Z to 2026-10-06T09:41:52Z, `proxy_calls.jsonl` md5 627eef56, 26,096
 rows, one qualifying session b9f04425): the owner's rule counts **813 turns against 209 typed prompts =
@@ -143,12 +146,55 @@ the session's first proxy row are printed apart and still counted). Zero qualify
 checks do not go through `offload_share`: no msg_id is counted as a turn twice, and the O3 turn count must
 equal a recount made from the ledger rows.
 
+*P1.9-a measurement (2026-10-11, `proxy_calls.jsonl` copy of 43,468 rows, window 2026-09-29T00:00:00Z to
+2026-10-11T12:00:00Z).* **Result: no qualifying session, so P1.9-a is not met and cannot be measured yet** (not a
+numeric fail). **Population rule (owner decision D-58):** a session validates the turn count only when it has kind
+`organic`, >= 50 typed prompts under the P1.9 definition, >= 1 proxy turn, and proxy coverage >= 95% (ledger
+`msg_id`s / main-thread transcript assistant message ids). A session under the coverage bar is reported as
+UNMEASURABLE together with its coverage ratio and is never counted as a fail; a live coordinator session never
+counts. The rule is printed in `offload.turn.caveats` beside the O3 warning. With the P1.9 typed-prompt definition (task notifications and other injected input are not
+typed prompts) neither organic session reaches 50 typed prompts: 6cf3b1b8 has 26, 5041bdf8 has 27.
+The frozen M0.3 gate, which still counts notifications, qualifies both and reads 3 / 74 = 0.041 and 2 / 69 =
+0.029 (pooled 5 / 143 = 0.035; before the repair the same two sessions read 3.824 and 0.304). The bar 0.90-1.10 is
+not met on either definition, so `O3_INTEGRITY_GATE` and the warning are unchanged.
+Why the repaired count is low (re-measured by an independent reviewer with the frozen `o3_integrity.py`, same
+window): 6cf3b1b8 is proxy-fronted (920 of its 1,030 assistant messages are in the ledger). Of its 26 genuine
+human turns the repaired O3 counts 3: 17 carry `step_class=side_call` (the proxy labels real human turns as side
+calls, #295 owner question 1), 4 have no ledger row and 2 are `continuation`. 5041bdf8 has 10% ledger coverage
+(69 of 667 messages), so it cannot be measured. Zero or one valid organic session is the P1.9-a kill condition
+of PLAN v16 (6 weeks to reach n). Sources: `~/.rsi/research/primary-plan/scripts/o3_integrity.py` (frozen gate)
+and a P1.9 variant kept with the PR evidence.
+
 *Owner-accepted warning (M0-2, 2026-10-07).* On W0 the integrity ratio is 813 / 209 = 3.89 on the only
 measurable session (b9f04425, research), outside the bar, so M0-2 FAILED. The owner accepted O3 as is,
 with a warning: `kpi`, `kpi --health`, `kpi --json` (`o3.caveat`, `o3.integrity`) and the weekly markdown
 all print "O3 turn count unvalidated: may overcount turns (integrity 3.89x ...)". The figures live in
 one place, `commands/kpi.py` `O3_INTEGRITY_GATE`. Do not read O3 as a bar for M2 or M4 until the turn
 count is validated; remove the warning only after `o3_integrity.py` passes.
+
+*Offload per action, call, turn and spread* (PLAN v16 section 1.1 S1, P1.9; `llm-router kpi --json` key
+`offload`, three lines under O3 in the text card). Code: `offload_share.action_units` and `summarize_actions`,
+`lane_quality`, `pricing.is_very_cheap`, `commands/kpi.py` `_offload_prd`. Every line is `{k, n, value,
+wilson95, n_sessions, largest_session_share, window}`.
+
+| Line | k / n | Source |
+|---|---|---|
+| `offload.action` | actions served by a local, Haiku or other very-cheap model, not redone, not escalated, not re-read, in a quality-sampled lane / every organic action | `proxy_calls.jsonl`, `usage.db` `routing_decisions` (MCP and DIRECT rows, any provider), `edit_outcomes.jsonl`, `technical_ops.jsonl` (P2.1) |
+| `offload.call` | the same, proxy-ledger rows only (doors `proxy`, `subagent`) | `proxy_calls.jsonl` |
+| `offload.turn` | O3 (this section): same k and n as `o3.breakdown`; carries `caveats` = the O3 integrity warning until P1.9-a passes | as O3 |
+| `offload.spread` | k = actions another Frontier subscription served (Codex gpt-5.5, gpt-6, Gemini Pro); n = all actions; never in a numerator (D-24) | as `action` |
+
+`by_lane` splits `action` by `(door, served_class, task_group)`; `by_task_type` by task group (`qa`, `code`,
+`tech_op`); `quality_sampled_lanes` lists the lanes that passed. "Very cheap" = a local provider, or an input
+price at or below the highest Haiku entry of `pricing.py` (`pricing.haiku_input_rate()`; unknown models are not
+cheap). Not actions: side calls, deterministic filtering (`served_by=local_filter`), raw passthrough, technical
+ops under 4 KB, semantic-cache hits, rows of non-organic sessions. A lane is quality-sampled when its latest
+audit or shadow-pair batch in `lane_quality.jsonl` inside the trailing 28 days passed (audit n >= 30 and
+>= 26/30; or n >= 60 pairs, gap <= 3 pts, Newcombe LB >= -10); the file is written by the audit tooling and
+read here. Until a batch passes, `offload.action.k` is 0 by rule and `caveats` says so. **Known limits:** a
+sub-agent spawned through the MCP path counts under door `mcp`; `technical_ops.jsonl` does not exist before P2.1
+(the technical-op door is empty and the caveat says so); the DIRECT row's "used" is "not redone" through
+`usage_outcome`. Fixture: `tests/test_offload_prd.py` (the 15 cases of the plan).
 
 *Redone.* A unit is redone when any of:
 
@@ -268,7 +314,7 @@ Most are computed by research scripts outside this repository, not by `llm-route
 
 | ID | Definition | Today (n, source) | Computed by |
 |---|---|---|---|
-| O3-int | GUARD. O3 proxy turns / typed transcript human prompts, per session and pooled, over the pinned window W0. Bar 0.90-1.10. | 424/370 = 1.146 in b9f04425 (research findings, 2026-10-06) | plan task M0.3: `o3_integrity.py --since --until` (not in this repo) |
+| O3-int | GUARD. O3 proxy turns / typed transcript human prompts, per session and pooled, over the pinned window W0. Bar 0.90-1.10. | 424/370 = 1.146 in b9f04425 (research findings, 2026-10-06); P1.9 repaired O3: 5/143 = 0.035 on 2 organic sessions (2026-09-29..2026-10-11, see O3 above), bar not met | plan task M0.3: `o3_integrity.py --since --until` (not in this repo) |
 | CU | GUARD. Under-route on real prompts: #{rank(pred) < rank(truth)} / n, tiers ordered local < haiku < sonnet < opus. | rules_eff 39/89 = 43.8% (E2 held-out, `~/.rsi/research/complexity-v2/p_eval/REPORT.txt`) | `eval_router.py` results |
 | Cλ2 | LEAD. Quality-weighted cost: per item c(pred) if pred >= truth, else c(pred) + 2·c(truth); c = haiku 1, sonnet 2.7, opus 6.15 (the p_eval table; D4 above uses its own weights, 3.66 for Sonnet, and the two are never mixed). | rules_eff 8.24, always-Opus 6.15, qwen rule 6.05 (n=89, p_eval) | `eval_router.py` results |
 | CRAW | GUARD. Raw cost mean c(pred); stops a disguised always-Opus. | rules_eff 2.86, qwen rule 3.91, always-Opus 6.15 (n=89, p_eval) | `eval_router.py` results |
