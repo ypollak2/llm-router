@@ -9,7 +9,7 @@ call 2 can only come from call 1 of the same pair (isolated, no cross-pair
 reuse). Needs ANTHROPIC_API_KEY. SPENDS REAL MONEY (~20 calls; call 1 writes the
 prefix). `--dry-run` prints the request shapes and spends nothing.
 
-    uv run python scripts/bench/cache_layout_live.py --pairs 10 --model claude-sonnet-4-5
+    uv run python scripts/bench/cache_layout_live.py --pairs 10 --model claude-sonnet-5-5
 """
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def call(client: httpx.Client, key: str, model: str, lay: cache_layout.CacheLayo
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--pairs", type=int, default=10)
-    ap.add_argument("--model", default="claude-sonnet-4-5")
+    ap.add_argument("--model", default="claude-sonnet-5-5")
     ap.add_argument("--filler-repeats", type=int, default=250,
                     help="~5k+ tokens of stable prefix, above every model's cache minimum")
     ap.add_argument("--gap-s", type=float, default=1.0, help="pause between call 1 and 2")
