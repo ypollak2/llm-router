@@ -273,6 +273,10 @@ async def call_llm(
         # wrong thing. Raising here is caught by router.py's existing
         # chain-failover `except Exception` with no further wiring.
         from llm_router.local_context_guard import check_overflow
+        from llm_router.pack_overflow import PayloadPack
+        pack = PayloadPack({"messages": cached_messages}, num_ctx=kwargs.get("num_ctx"),
+                           model=kwargs["model"], site="providers.call_llm", allow_model_swap=False)
+        cached_messages = kwargs["messages"] = pack.trim_to()["messages"]
         check_overflow({"messages": cached_messages}, num_ctx=kwargs.get("num_ctx"),
                        model=kwargs["model"], site="providers.call_llm")
 
@@ -474,6 +478,10 @@ async def call_llm_stream_events(
     if model.startswith("ollama/"):
         # Same preflight as call_llm() — see local_context_guard module docstring.
         from llm_router.local_context_guard import check_overflow
+        from llm_router.pack_overflow import PayloadPack
+        pack = PayloadPack({"messages": cached_messages}, num_ctx=kwargs.get("num_ctx"),
+                           model=kwargs["model"], site="providers.call_llm_stream_events", allow_model_swap=False)
+        cached_messages = kwargs["messages"] = pack.trim_to()["messages"]
         check_overflow({"messages": cached_messages}, num_ctx=kwargs.get("num_ctx"),
                        model=kwargs["model"], site="providers.call_llm_stream_events")
 

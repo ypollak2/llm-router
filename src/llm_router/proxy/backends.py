@@ -211,7 +211,11 @@ class OllamaBackend:
             # Refuse to send what Ollama would silently truncate from the front
             # (system prompt + tool definitions first) rather than find out from a
             # reply about the wrong thing. See local_context_guard module docstring.
-            check_overflow(payload, num_ctx=self.num_ctx, base_url=self.base_url, model=self.model,
+            from llm_router.pack_overflow import PayloadPack
+            pack = PayloadPack(payload, num_ctx=self.num_ctx, base_url=self.base_url,
+                               model=self.model, site="proxy.OllamaBackend")
+            payload = pack.trim_to()
+            check_overflow(payload, num_ctx=pack.num_ctx, base_url=self.base_url, model=pack.model,
                            site="proxy.OllamaBackend")
             return payload
 

@@ -123,6 +123,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # descriptions, long-output summaries on a local model with a checked
     # fallback). Off by default — see tools/text.py's _local_text_jobs_enabled.
     "LLM_ROUTER_LOCAL_TEXT_JOBS": ("llm_router", "tools/text.py", 1),
+    # PLAN v16 P1.3: opt-in trim / bigger-window before ContextOverflow. Off by default (D-47).
+    "LLM_ROUTER_PACK_OVERFLOW": ("llm_router", "pack_overflow.py", 1),
     "LLM_ROUTER_CONFIDENCE_THRESHOLD": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_CONTEXT_OPTIMIZER": ("llm_router", "context.py", 1),
     "LLM_ROUTER_COST_PROFILE": ("llm_router", "repo_config.py", 1),
