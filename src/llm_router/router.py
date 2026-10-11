@@ -71,7 +71,7 @@ from llm_router.config import get_config
 from llm_router.repo_config import effective_config as get_repo_config
 from llm_router.context import _resolve_context_identity, build_context_messages, get_session_buffer
 from llm_router.health import get_tracker
-from llm_router.model_discovery import order_for_chain
+from llm_router.model_discovery import order_for_chain, sink_unvalidated
 from llm_router.profiles import get_model_chain, provider_from_model
 from llm_router.receipt_store import compute_receipt, store_receipt
 from llm_router.tracing import set_span_attributes, traced_span
@@ -4668,6 +4668,13 @@ async def route_and_call(
                 log.debug("Bandit reorder skipped (continuing): %s", _bandit_err)
                 from llm_router import failopen
                 failopen.record("CHZ-FO-ROUTER-BANDIT-REORDER", _bandit_err)
+
+        # P0.15 (DISC-PROMOTE-1): the specialist and the bandit's explore step can move any
+        # entry to the front, an unvalidated local model included. Sink it again.
+        if models_to_try and not model_override:
+            models_to_try = sink_unvalidated(
+                models_to_try, task_type.value,
+                _gate_configured_names(get_config(), get_repo_config()))
 
         # M3.0 (D-14 = A): Q&A never goes to a local provider. Applied here, after the
         # chain build, the subject specialist and the bandit reorder (either can add a
