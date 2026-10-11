@@ -242,8 +242,30 @@ def build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:
     """
     from llm_router.qa_policy import strip_local_for_qa
 
-    return strip_local_for_qa(_build_chain(complexity, zone, task_type), task_type,
-                              keep_if_only_local=False)
+    chain = strip_local_for_qa(_build_chain(complexity, zone, task_type), task_type,
+                               keep_if_only_local=False)
+    # P1.8: read-only use of the resource map; no fresh map file, no change.
+    try:
+        from llm_router import map_reader
+
+        mapped = map_reader.apply_to_chain(
+            chain, key=lambda s: f"{'anthropic' if s.provider == 'claude' else s.provider}/{s.model}")
+    except Exception:
+        return chain
+    return _sink_unvalidated_specs(mapped, task_type)
+
+
+def _sink_unvalidated_specs(chain: list[ModelSpec], task_type: str) -> list[ModelSpec]:
+    """The map ranks ``ollama/*`` by provider, so it can swap an unvalidated tail model
+    into a front slot (P0.15, D-60c = A). Put every unvalidated local model back last."""
+    from llm_router.model_discovery import sink_unvalidated
+
+    ids = [f"{s.provider}/{s.model}" for s in chain]
+    sunk = sink_unvalidated(ids, task_type)
+    if sunk == ids:
+        return chain
+    pos = {i: n for n, i in enumerate(ids)}
+    return [chain[pos[i]] for i in sunk]
 
 
 def _build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:

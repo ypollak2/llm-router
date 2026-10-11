@@ -72,13 +72,14 @@ status: fixed in `fix/step-sidecall` (D-59; deploy: restart the proxy; rows writ
   wire prefix is added) over-counted 19 of 53 such blocks; on the wire these carry the prefixes
   above, but no raw wire body was captured, so a coordinator or peer message without its prefix would
   still be counted as human.
-  Further known limits (coordinator review of 7192ac31, CC 2.1.296 binary): `async_hook_response`
-  output is rendered with `UT(...)` (escape only, no `<system-reminder>` wrap), so its text beside tool
-  results would count as human (0 occurrences in a 3-day, 556-transcript sample); `observer-activity`
-  and unclassified origin kinds pass through bare (0 seen); the "arrived in the bound thread" marker also
-  drops verified Slack human turns; the opt-in `--serve local-agent` path (`local_mode.is_agent_turn`)
-  does not consult `step_class` (unchanged from main; protected by the conversation pin). Follow-up:
-  STEP-SIDECALL-2.
+  Further known limits (coordinator review of 7192ac31, CC 2.1.296 binary; corrected by the binary
+  in STEP-SIDECALL-2): `async_hook_response` IS wrapped in `<system-reminder>` (`yl` -> `Xl`), so the
+  harness-tag strip removes it; `unclassified` origin gets the `[MESSAGE FROM NON-USER SOURCE` prefix
+  (`QM`), already excluded; `observer-activity` is the bare passthrough, now excluded by its digest
+  framing in STEP-SIDECALL-2; verified Slack human turns (bound-thread lead) were dropped by the
+  "arrived in the bound thread" marker and are now kept as human; the opt-in `--serve local-agent` path
+  (`local_mode.is_agent_turn`) does not consult `step_class` (unchanged from main; protected by the
+  conversation pin). Corrected in STEP-SIDECALL-2.
 - **Rule.** A missing `tools` field is not evidence that a call is a side call. Read the shape that
   carries the history (`thread`), and take the label of a threaded call from the call it continues.
 - **Test.** `tests/test_proxy_step_sidecall.py` (synthesized bodies, no prompt text): human prompt

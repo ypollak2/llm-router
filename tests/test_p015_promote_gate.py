@@ -539,6 +539,57 @@ def test_the_tail_is_appended_after_every_reorder_in_the_router():
                 pytest.fail("models_to_try is reassigned after the unvalidated tail was appended")
 
 
+# ═══ with a fresh resource map (#423 readers) the tail still does not move ═══
+
+def _ollama_first_map(monkeypatch):
+    from llm_router import map_reader
+
+    view = map_reader.MapView(
+        known=frozenset({"ollama", "openai_compat", "openai", "anthropic", "deepseek", "gemini"}),
+        connected=frozenset({"ollama", "openai_compat", "openai", "anthropic", "deepseek", "gemini"}),
+        kinds=frozenset({"local", "api"}),
+        rank_by_id={}, rank_by_provider={"ollama": 0, "openai_compat": 1, "deepseek": 2, "anthropic": 3, "openai": 9},
+        orders=True)
+    monkeypatch.setattr(map_reader, "load_view", lambda *a, **k: view)
+
+
+@pytest.mark.parametrize("policy", ["balanced", "local-first"])
+def test_router_tail_survives_a_fresh_map(state, monkeypatch, policy):
+    first_run_with(state, [A])
+    _ollama_first_map(monkeypatch)
+    chains = all_chains(world(**{**FULL, "routing_policy": policy}))
+    new = {B, C, X}
+    for key, chain in chains.items():
+        assert chain[0] not in new, (key, chain)
+        if key in NON_CRITICAL:
+            assert chain[-3:] == [B, C, X], (key, chain)
+        else:
+            assert not new & set(chain), (key, chain)
+
+
+def test_hook_tail_survives_a_fresh_map(state, monkeypatch):
+    """The hook applies the map AFTER the chain is built; `ollama/*` is ranked by provider.
+
+    Today D-14 strips every local model from a Q&A chain, which is the only kind that can carry a
+    tail, so the strip is switched off here to exercise the map step on its own."""
+    from llm_router.hooks import chain_builder as cb
+
+    monkeypatch.setattr("llm_router.qa_policy.strip_local_for_qa", lambda models, *a, **k: models)
+
+    first_run_with(state, [A])
+    _ollama_first_map(monkeypatch)
+    monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "cfg-d:8b")
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setattr(md, "available_ollama_models", lambda *a, **k: ["old-a:7b", "new-b:7b", "cfg-d:8b"])
+    for task in ("generate", "analyze"):
+        ids = [f"{s.provider}/{s.model}" for s in cb.build_chain("simple", "green", task)]
+        assert B in ids and ids[-1] == B and ids[0] in (A, D), ids
+    for task in ("code",):
+        ids = [f"{s.provider}/{s.model}" for s in cb.build_chain("simple", "green", task)]
+        assert B not in ids and ids[0] in (A, D), ids
+
+
 # ═══ mutants: each check above turns red when its door is broken (P1.12-a, lite) ═══
 
 def test_mutant_gate_dead_turns_the_router_check_red(state, monkeypatch):
