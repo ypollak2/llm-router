@@ -25,6 +25,7 @@ storage problem here can never block routing, hooks, or Claude Code itself.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -277,10 +278,8 @@ def _session_project_root(session_id: str) -> str | None:
             except FileExistsError:
                 created = False
             finally:
-                try:
+                with contextlib.suppress(OSError):  # our own temp file; the link (if any) is the pin
                     os.unlink(tmp)
-                except OSError:
-                    pass
             if not created:
                 # Lost a race: the winner's pin is the truth (one retry covers a slow filesystem).
                 for _ in range(2):
@@ -1031,8 +1030,8 @@ def _sweep_orphan_pins(state_dir: Path, cutoff: float) -> None:
             try:
                 if p.name[len(prefix):-len(".json")] not in have and p.stat().st_mtime < cutoff:
                     p.unlink()
-            except OSError:
-                pass
+            except OSError as exc:
+                logging.getLogger(__name__).debug("pin sweep skipped %s: %s", p, exc)
 
 
 # ---------------------------------------------------------------------------
