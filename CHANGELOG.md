@@ -95,18 +95,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Existing `~/.llm-router/result_cache.db` files are left on disk, unread and unmigrated.
 
 ### Added
-- door-agreement tool (PLAN v16 P1.6 task 0, P1.6-i): `scripts/door_agreement.py --corpus <jsonl> --sites hook,gateway[,...] --out <json>`
-  reports, per pair of classifier call sites, how many prompts get a different task_type and a different tier, with Wilson 95% CIs,
-  plus the count where any listed site differs. Sites now: `hook` (auto-route.py `classify_prompt`), `gateway` (`gateway._classify`),
-  `proxy` (`proxy/tiers._default_classify` on `steps.tier_text` of the prompt) and the reference `hook_policy` (`classify_signals(HOOK_POLICY)`, what `measure_low_signal_rate.py` called "hook"); the other P1.6
-  sites are added one per wiring PR. `--freeze-corpus <path>` writes `measure_low_signal_rate.collect()`'s prompts once (mode 0600,
-  never overwritten, temp file hard-linked into place). Each pair also reports a shared-labels rate (only prompts where both
-  sites' labels are in the vocabulary both emitted), and `--freeze-dates` / `--dates` / `--date-cutoff` add a reproducible
-  split by prompt date from a counts-only per-line date sidecar. Output is counts and hashes only. No model calls: the hook's LLM layers are forced off by the env switches its
-  code reads (`LLM_ROUTER_CLASSIFY_LOCAL_ONLY`, `LLM_ROUTER_DISABLE_LLM_CLASSIFIERS`, `LLM_ROUTER_HOOK_LLM_LAYER=off`), the proxy's pre-P0.9-e chain build is replaced by an empty chain,
-  `LITELLM_LOCAL_MODEL_COST_MAP=True` stops LiteLLM's import-time download, `LLM_ROUTER_OLLAMA_MODEL` stops older hooks'
-  import-time Ollama probe, and DNS plus every outbound socket connect is refused during the run (a `BaseException`, and any
-  refusal fails the run). Measure an older commit by putting its tree's `src` first on PYTHONPATH.
+- one resource map, discovery (PLAN v16 P1.8, branch `feat/map-discovery`, stacked on `feat/map-core`, DRAFT, do not merge
+  before G0): every `Seat` now has `status` (connected / installed_not_connected / absent) and `reason`; Codex's reason
+  is the first line `codex login status` printed (fixture: `Error loading configuration: ...config.toml:443:14: invalid
+  transport`); new Copilot seat (`gh copilot --version`, `hosts.json`, VS Code extension dir, existence checks only);
+  Gemini plan from `~/.gemini/settings.json` (`unknown` + reason when unrecognised). Old `seats.json` loads unchanged.
+  New `discovery/keys.py` `discover()` returns `KeyInfo{var, provider, source env|dotenv:<path>|keychain, usable_by,
+  billing}` without ever holding a value; `secrets_vault` gets a `keychain` backend. New `claude_creds.py` holds the
+  one keychain query (`read_oauth` follows in `feat/map-readers`). Routing is unchanged.
+- one resource map, core (PLAN v16 P1.8, branch `feat/map-core`, DRAFT, do not merge before G0): `llm-router map [--json]`
+  and `llm_router_status(view="map")` return the same JSON, built by `resource_map.build()` and written atomically to
+  `resource_map.json` (rebuilt when older than 300 s). One row per seat (claude, codex, gemini_cli), local model and API
+  key, with status and reason, quota values as `{value, provenance, as_of}` (measured / estimated / default),
+  marginal cost, capabilities, per-model limits (`num_ctx`, max context) and `effective_priority` from the routing policy.
+  Key values are never read. Not yet read by any chain builder (that is `feat/map-readers`), so routing is unchanged.
+  `local_models.ROLES` declares that `nimble:9b` serves `decision` only, so the map does not list it as a generate model (N19).
 - synthetic replay harness (owner decision D-42; test tooling, no product change): `scripts/synthetic_replay.py --corpus <jsonl>
   --out <dir> [--doors hook,proxy,gateway,mcp,sdk,agent-route] [--sessions N]` drives synthetic sessions through every
   classification door (auto-route and agent-route hooks as subprocesses, an `llm-router proxy` on an ephemeral port, the
