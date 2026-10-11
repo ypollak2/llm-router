@@ -10,21 +10,19 @@ counts turns: a turn is offloaded when its FIRST call is served by Haiku or loca
 is not redone (the redo test below is applied to that first call, and covers its own turn and
 the next 2). Per-call figures are kept as a secondary line.
 
-A TURN is the first proxy call of a human turn (PLAN section 1.2 O3, M0.3b): a proxy row that is not a
-side call and whose ``step_class`` is ``turn_first`` (a null label is not a kind: pre-GE1 rows and any unlabelled row are never
-a turn; ``subagent_first`` is not one either), minus sub-agent first calls. Since TURNFIRST-1 a
-``harness_turn`` row (a main-thread notification / command echo, labelled ``turn_first`` before) is a turn
-too and a ``subagent_turn`` row (a later sub-agent call, also ``turn_first`` before) follows the
-``subagent_first`` rule. The transcript
-join (M0.3b, ``o3_transcripts``: the proxy ``msg_id`` joined to the transcript assistant ``message.id``)
-decides ONE thing: a row whose message is a sub-agent call (``sidechain``) is not a turn. Unjoined rows
-stay in: a session with no transcript, and a row whose id is in no message of a session that has one
-(``orphan``), are turns on the proxy-only rule. The join also COUNTS, without changing the headline, the
-turn rows the transcript says were not the first answer to a typed prompt, so the size of the gap to the
-owner's definition stays visible: ``meta_first`` (first answer to injected input: a slash command, a
-sub-agent hand-back, a peer message) and ``unjoined`` (``orphan``: a permission classifier, a prompt
-suggestion, a side query). Both stay IN n. A transcript-decided turn definition (the first answer to a
-typed prompt) is a different definition from the owner's: it needs a PLAN edit, not a code default.
+A TURN is the first proxy call of a human turn (PLAN section 1.2 O3; P1.9 repaired M0.3b): a proxy row that is
+not a side call, whose ``step_class`` is ``turn_first`` (a null label is not a kind: pre-GE1 rows and any
+unlabelled row are never a turn; ``subagent_first`` / ``subagent_turn`` are not turns unless the transcript puts
+them on the main thread as a typed prompt's answer) and that is the first answer to something a person typed.
+M0.3 kept two kinds of row IN, and measured the cost (PR #295, session b9f04425, W0): 548 of 813 "turns" were
+calls in no message of the session's transcript (permission classifier, prompt suggestion, side query) and the
+typed-prompt side counted task notifications (113 of 209). P1.9 takes them out. The transcript join
+(``o3_transcripts``: the proxy ``msg_id`` joined to the transcript assistant ``message.id``) decides: a row whose
+message is a sub-agent call (``sidechain``), is in no message of its session's transcript (``orphan``) or answers
+injected input (``meta``: task notification, peer message, slash command) is not a turn. They are counted
+(``subagent_first``, ``unjoined``, ``meta_first``). A session with no transcript is decided by the ledger: a
+``harness_turn`` row, or a ``turn_origin`` that is not human text, is not a turn (``ledger_not_human``); the rest
+are turns on the proxy-only rule (``no_transcript``).
 
 Two more rules (M0.3):
 
@@ -130,8 +128,11 @@ STEP_TURN_FIRST = "turn_first"   # proxy.steps.STEP_TURN_FIRST, duplicated to ke
 # turn unless the transcript puts it on the main thread, the same rule as ``subagent_first``).
 STEP_HARNESS_TURN = "harness_turn"
 STEP_SUBAGENT_TURN = "subagent_turn"
+_SUBAGENT_STEPS = frozenset({"subagent_first", STEP_SUBAGENT_TURN})
 STEP_UNKNOWN = "unknown"  # labelling raised (proxy.steps.STEP_UNKNOWN, step_error): not a kind, never a turn
 _BEGINS_TURN_KINDS = frozenset({STEP_TURN_FIRST, STEP_HARNESS_TURN})
+#: ``turn_origin`` (proxy.steps.TURN_ORIGINS, duplicated) values that are not a person's typed prompt.
+NOT_HUMAN_ORIGINS = frozenset({"task_notification", "command", "other_tag", "subagent_brief"})
 ESCALATION_REASONS = frozenset({"escalation", "escalation_under_pressure"})
 NOT_APPLIED_YET = frozenset({"not_applied_seen", "partly_applied"})  # usage_outcome so_far
 REDO_TURNS = 2          # the unit's own turn + the next 2 human turns
@@ -146,6 +147,11 @@ def _num(x: Any) -> float | None:
     if isinstance(x, (int, float)) and not isinstance(x, bool) and x == x and abs(x) < 1e11:
         return float(x)
     return None
+
+
+def _ledger_not_human(row: dict) -> bool:
+    """The proxy's own reading of a turn-first row: its newest user message is not human text."""
+    return row.get("step_class") == STEP_HARNESS_TURN or row.get("turn_origin") in NOT_HUMAN_ORIGINS
 
 
 def _is_side_call(row: dict) -> bool:
@@ -252,8 +258,11 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
     ``no_step_class``), ``subagent_first`` or ``subagent_turn``. ``units`` holds
     turns and the other calls (``first`` False); ``local_assist`` holds the local MCP units (never
     turns). ``subagent_first``, ``meta_first`` and ``unjoined`` count the turn-first rows
-    by what the transcript says: ``subagent_first`` are taken out of the turns, ``meta_first`` and
-    ``unjoined`` are KEPT IN and only counted; ``no_transcript`` counts the turn rows kept on the
+    by what the transcript says, and ALL THREE are taken out of the turns (P1.9): ``subagent_first``,
+    ``meta_first`` (first answer to injected input: task notification, peer message, slash command) and
+    ``unjoined`` (no message of the session's transcript holds the call). ``ledger_not_human`` counts the
+    turn-first rows of a session with no transcript that the ledger itself says were not typed
+    (``harness_turn`` / ``turn_origin``), also taken out. ``no_transcript`` counts the turn rows kept on the
     proxy-only rule because their session has no transcript (or the row has no message id).
     ``local_untagged`` / ``local_other_kind`` are the local answers among the ``untagged`` /
     ``other_kind`` exclusions (the local answers line states them). A local answer is a local MCP
@@ -287,15 +296,24 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
         return role_cache[k]
 
     def begins_turn(r: dict) -> bool:
-        # The owner's definition (not a side call, step_class turn_first) minus sub-agent first calls.
+        # A human turn (P1.9): not a side call, step_class turn_first, and the first answer to something a
+        # person typed. Taken out: sub-agent calls, calls the session's transcript does not hold (orphan:
+        # permission classifier, prompt suggestion, side query) and first answers to injected input
+        # (meta: task notification, peer message, slash command). With no transcript the ledger's own
+        # reading of the newest user message decides (``harness_turn`` / ``turn_origin``).
         # A null step_class is not a kind: only rows written before GE1 (#313) carry one.
         step = r.get("step_class")
+        role = role_of(r)
         if step in ("subagent_first", STEP_SUBAGENT_TURN):
             # The proxy infers this label from a missing Agent/Task launcher in the tool list, so a main
             # session run with that tool disabled gets it too. Only a transcript join that places the
-            # message on the main thread (turn / meta) keeps the row a turn; no join, orphan or sidechain: not.
-            return role_of(r) in (ROLE_TURN, ROLE_META)
-        return step in _BEGINS_TURN_KINDS and role_of(r) != ROLE_SIDECHAIN
+            # message on the main thread as a typed prompt's answer keeps the row a turn.
+            return role == ROLE_TURN
+        if step not in _BEGINS_TURN_KINDS:
+            return False
+        if role in (ROLE_SIDECHAIN, ROLE_ORPHAN, ROLE_META):
+            return False
+        return role is not None or not _ledger_not_human(r)
 
     convs: dict[str, "_Conversation"] = {}
 
@@ -333,6 +351,7 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
     side = untagged = other = local_no_session = local_failed = n_escalations = 0
     local_untagged = local_other = 0
     subagent_first = meta_first = unjoined = no_transcript = edit_no_session = edit_no_turn_id = 0
+    ledger_not_human = 0
     no_step_class = step_subagent_first = step_subagent_turn = step_side_call = 0
 
     det_turns: dict[str, list[int]] = {}
@@ -412,22 +431,28 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
             step_subagent_turn += 1     # a later sub-agent call (TURNFIRST-1): not a turn
         elif step == "side_call":
             step_side_call += 1         # labelled side call whose tier_reason is not side_call
-        if thread_of is not None and step in _BEGINS_TURN_KINDS:
-            # a turn-first row on the proxy-only rule: say what the transcript makes of it
+        if step in _BEGINS_TURN_KINDS and (thread_of is not None or not first):
+            # a turn-first row: say what the transcript (or, with none, the ledger) makes of it
             role = role_of(r)
             if role == ROLE_SIDECHAIN:
                 subagent_first += 1     # taken out of the turns (first is False)
             elif role == ROLE_META:
-                meta_first += 1         # kept in, counted
+                meta_first += 1         # taken out (P1.9), counted
             elif role == ROLE_ORPHAN:
-                unjoined += 1           # kept in, counted
+                unjoined += 1           # taken out (P1.9), counted
             elif role is None:
-                no_transcript += 1      # kept in on the proxy-only rule: counted, and said so
+                if first:
+                    no_transcript += 1  # kept in on the proxy-only rule: counted, and said so
+                else:
+                    ledger_not_human += 1   # taken out on the ledger's own reading, counted
         if why is None and detector_redone(sid, ts):
             why = "detector"
         units.append({"class": cls, "ts": ts, "session_id": sid, "redone": why is not None,
                       "why": why, "window_open": open_ and why is None, "first": first,
-                      "msg_id": r.get("msg_id"),
+                      "msg_id": r.get("msg_id"), "step": step, "decision": r.get("decision"),
+                      "role": role_of(r) if step in _BEGINS_TURN_KINDS or step in _SUBAGENT_STEPS else None,
+                      "model": r.get("served_model") or r.get("requested_model"),
+                      "task_type": r.get("tier_task_type"), "prev_tool_class": r.get("prev_tool_class"),
                       "kept": isinstance(r.get("msg_id"), str) and r["msg_id"] in band_kept})
         if r.get("tier_reason") in ESCALATION_REASONS:
             n_escalations += 1
@@ -474,7 +499,9 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
             why = "detector"
         assist.append({"class": CLASS_LOCAL, "ts": ts, "session_id": sid, "redone": why is not None,
                        "why": why, "window_open": open_ and why is None, "first": True,
-                       "kept": False, "joined": ev is not None, "unjudged": unjudged and why is None})
+                       "kept": False, "joined": ev is not None, "unjudged": unjudged and why is None,
+                       "model": rows[0].get("model"), "provider": rows[0].get("provider"),
+                       "task_type": rows[0].get("task_type"), "reason_code": rows[0].get("reason_code")})
 
     # Zero-Claude edits: one local TURN per (session_id, turn_id). The hook served the whole turn,
     # so there is no proxy row for it; a `claude:` re-ask in the next turns marks it redone.
@@ -510,7 +537,7 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
             "local_untagged": local_untagged, "local_other_kind": local_other,
             "n_escalations": n_escalations,
             "subagent_first": subagent_first, "meta_first": meta_first, "unjoined": unjoined,
-            "no_transcript": no_transcript, "edit_no_session": edit_no_session,
+            "no_transcript": no_transcript, "ledger_not_human": ledger_not_human, "edit_no_session": edit_no_session,
             "edit_no_turn_id": edit_no_turn_id, "zero_claude_turns": len(seen_turns),
             "n_detector_flags": n_det, "n_detector_unmapped": n_det_unmapped,
             "no_step_class": no_step_class, "step_subagent_first": step_subagent_first,
@@ -597,3 +624,226 @@ def local_answers(units: list[dict]) -> dict:
         else:
             out["pending"] += 1
     return out
+
+
+# ── S1 offload per ACTION (PLAN v16 section 1.1, P1.9) ────────────────────────────────────────────────
+#
+# An ACTION is any non-side-call model call of an organic session: a proxy turn-first, continuation or
+# sub-agent call, an MCP ``llm()`` call, a DIRECT hook draft, a zero-Claude edit turn, and a technical op a
+# local model condensed. Deterministic filtering (``served_by=local_filter``), raw passthrough and ops under
+# 4 KB are not model actions and are in neither side. Each action gets a LANE (``lane_quality``) and a served
+# class; it is in the NUMERATOR when it was served by a local / Haiku / other very-cheap model, was not redone,
+# not escalated, not re-read (technical ops), and its lane is quality-sampled. Work served by another Frontier
+# subscription (Codex gpt-5.5, Gemini Pro) is ``spread``: denominator only, reported on its own line (D-24).
+
+DOOR_PROXY, DOOR_SUBAGENT, DOOR_MCP, DOOR_DIRECT, DOOR_TECHOP, DOOR_HOOK = (
+    "proxy", "subagent", "mcp", "direct", "techop", "hook")
+SC_LOCAL, SC_HAIKU, SC_CHEAP, SC_SPREAD, SC_PAID = "local", "haiku", "very_cheap", "spread", "paid"
+OFFLOADED_CLASSES = frozenset({SC_LOCAL, SC_HAIKU, SC_CHEAP})
+TG_QA, TG_CODE, TG_TECH = "qa", "code", "tech_op"
+TECHOP_MIN_BYTES = 4096     # PLAN P2.1 task 3: smaller outputs are passed through, never condensed
+TECHOP_FILE = "technical_ops.jsonl"
+_SPREAD_RE = None
+
+
+def _is_spread(model: Any, provider: Any = None) -> bool:
+    """Another Frontier subscription: Codex (gpt-5.5, gpt-6) or Gemini Pro."""
+    global _SPREAD_RE
+    import re
+    if _SPREAD_RE is None:
+        _SPREAD_RE = re.compile(r"codex|gpt-5\.|gpt-6|gemini[\w.\-/]*pro")
+    m = model.lower() if isinstance(model, str) else ""
+    return (isinstance(provider, str) and provider.lower() == "codex") or bool(_SPREAD_RE.search(m))
+
+
+def served_class(model: Any, *, local: bool = False, provider: Any = None) -> str:
+    """``local`` | ``haiku`` | ``very_cheap`` | ``spread`` | ``paid`` for the model that served an action."""
+    from llm_router import pricing
+    m = model if isinstance(model, str) else ""
+    if local or pricing.is_local(m) or (isinstance(provider, str) and provider.lower() == "ollama"):
+        return SC_LOCAL
+    if "haiku" in m.lower():
+        return SC_HAIKU
+    if _is_spread(m, provider):
+        return SC_SPREAD
+    return SC_CHEAP if pricing.is_very_cheap(m) else SC_PAID
+
+
+def _task_group(task_type: Any, prev_tool_class: Any = None) -> str:
+    if prev_tool_class == "technical_op":
+        return TG_TECH
+    return TG_CODE if task_type == "code" else TG_QA
+
+
+def _techop_actions(techops: Iterable[dict], *, since: float, now: float, admit) -> tuple[list[dict], dict]:
+    """Model-served technical ops as actions. ``techops``: ``technical_ops.jsonl`` rows (PLAN P2.1)."""
+    out: list[dict] = []
+    ex = {"techop_deterministic": 0, "techop_passthrough": 0, "techop_below_4kb": 0,
+          "techop_no_bytes": 0, "techop_no_session": 0}
+    for t in techops:
+        ts = _num(_iso_ts(t.get("ts")))
+        if ts is None or ts < since or ts > now:
+            continue
+        by = t.get("served_by")
+        if by == "local_filter":
+            ex["techop_deterministic"] += 1      # not a model action
+            continue
+        if by != "local_model":
+            ex["techop_passthrough"] += 1        # raw output: no model served it
+            continue
+        size = t.get("bytes_in")
+        if not (isinstance(size, int) and not isinstance(size, bool)):
+            ex["techop_no_bytes"] += 1           # the 4 KB rule cannot be applied: never guessed
+            continue
+        if size < TECHOP_MIN_BYTES:
+            ex["techop_below_4kb"] += 1
+            continue
+        sid = t.get("session_id")
+        if not (isinstance(sid, str) and sid):
+            ex["techop_no_session"] += 1
+            continue
+        if not admit(sid, t.get("session_kind")):
+            continue
+        out.append({"ts": ts, "session_id": sid, "door": DOOR_TECHOP, "task_group": TG_TECH,
+                    "served_class": SC_LOCAL, "model": t.get("served_model") or t.get("model"),
+                    "first": False, "redone": False, "reread": bool(t.get("re_read")), "window_open": False})
+    return out, ex
+
+
+def action_units(since: float, until: float, *, proxy_rows: list[dict] | None = None,
+                 mcp_rows: Iterable[dict] | None = None, techops: Iterable[dict] | None = None,
+                 edit_rows: Iterable[dict] | None = None, kind_of=None,
+                 allowed: frozenset = frozenset({"organic"}), thread_of=None,
+                 band_redone: set[str] | frozenset = frozenset(), outcome_redos: Iterable[dict] | None = None,
+                 quality_rows: Iterable[dict] | None = None) -> dict:
+    """Every organic ACTION in ``[since, until]`` with its lane and verdict (module section above).
+
+    Inputs default to the live files; pass them to measure something else (the fixture does):
+    ``proxy_rows`` (``proxy_calls.jsonl``), ``mcp_rows`` (``northstar.local_shadow_units(all_providers=True)``:
+    MCP ``llm()``/``llm_edit`` and DIRECT rows of ``usage.db``, any provider), ``techops``
+    (``technical_ops.jsonl``), ``edit_rows`` (``edit_outcomes.jsonl``), ``kind_of(session_id, stamp)`` (session
+    kind, default ``session_kind.KindIndex``), ``outcome_redos`` (``usage_outcome`` rows), ``quality_rows``
+    (``lane_quality.jsonl``).
+
+    Returns ``{"actions": [...], "excluded": {...}, "sampled": {lane: batch}, "built": build_units result}``.
+    Each action: ``ts, session_id, door, task_group, served_class, model, first, redone, reread, window_open,
+    lane, sampled, numerator, spread``. ``excluded`` counts what is NOT an action and why."""
+    from llm_router import lane_quality, paths
+    from llm_router.proxy import ledger as pl
+
+    now, days = until, (until - since) / 86400.0
+    if proxy_rows is None:
+        proxy_rows = pl.read_rows()
+    if kind_of is None:
+        from llm_router import session_kind
+        index = session_kind.KindIndex(proxy_rows)
+        kind_of = lambda sid, stamp: index.resolve(sid, stamp=stamp).kind  # noqa: E731
+    if mcp_rows is None:
+        from llm_router import northstar
+        mcp_rows = northstar.local_shadow_units(days=max(1, int(days) + 2), all_providers=True)
+    mcp_rows = [u for u in mcp_rows if u.get("reason_code") != "cache_hit"
+                and not str(u.get("model") or "").startswith("cache/")]
+    if techops is None:
+        techops = _read_jsonl(paths.state_path(TECHOP_FILE))
+    if edit_rows is None:
+        from llm_router import northstar
+        edit_rows = northstar._load_edit_outcomes()
+    if quality_rows is None:
+        quality_rows = lane_quality.read_rows()
+    built = build_units(proxy_rows, mcp_rows, now=now, days=days, kind_of=kind_of, allowed=allowed,
+                        band_redone=band_redone, outcome_redos=list(outcome_redos or ()),
+                        edit_rows=edit_rows or (), thread_of=thread_of)
+    sampled = lane_quality.sampled_lanes(quality_rows, now)
+
+    actions: list[dict] = []
+    for u in built["units"]:
+        if u.get("zero_claude"):
+            door, group, cls, model = DOOR_HOOK, TG_CODE, SC_LOCAL, None
+        else:
+            sub = u.get("step") in _SUBAGENT_STEPS or u.get("role") == ROLE_SIDECHAIN
+            door = DOOR_SUBAGENT if sub else DOOR_PROXY
+            group = _task_group(u.get("task_type"), u.get("prev_tool_class"))
+            model = u.get("model")
+            cls = served_class(model, local=u.get("decision") == "served")
+        actions.append({**_action_base(u), "door": door, "task_group": group, "served_class": cls,
+                        "model": model, "reread": False})
+    for u in built["local_assist"]:
+        direct = u.get("reason_code") == "direct"
+        cls = served_class(u.get("model"), provider=u.get("provider"))
+        actions.append({**_action_base(u), "door": DOOR_DIRECT if direct else DOOR_MCP,
+                        "task_group": _task_group(u.get("task_type")), "served_class": cls,
+                        "model": u.get("model"), "reread": False})
+    admitted = lambda sid, stamp: kind_of(sid, stamp) in allowed  # noqa: E731
+    tech, tech_ex = _techop_actions(techops, since=since, now=now, admit=admitted)
+    actions += tech
+    for a in actions:
+        lane = (a["door"], a["served_class"], a["task_group"])
+        a["lane"] = lane
+        a["spread"] = a["served_class"] == SC_SPREAD
+        a["sampled"] = lane in sampled
+        a["numerator"] = (a["served_class"] in OFFLOADED_CLASSES and not a["redone"] and not a["reread"]
+                          and a["sampled"])
+    excluded = {"side_call": built["side_call_excluded"], "untagged": built["untagged"],
+                "other_kind": built["other_kind"], "local_no_session": built["local_no_session"],
+                "local_failed": built["local_failed"], **tech_ex}
+    return {"actions": actions, "excluded": excluded, "sampled": sampled, "built": built}
+
+
+def _action_base(u: dict) -> dict:
+    return {"ts": u["ts"], "session_id": u.get("session_id"), "first": bool(u.get("first")),
+            "redone": bool(u.get("redone")), "window_open": bool(u.get("window_open"))}
+
+
+def _read_jsonl(path) -> list[dict]:
+    import json
+    from pathlib import Path
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out = []
+    for line in text.splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(d, dict):
+            out.append(d)
+    return out
+
+
+def rate_line(k: int, n: int, sessions: Iterable[Any], window: dict | None = None) -> dict:
+    """``{k, n, value, wilson95, n_sessions, largest_session_share, window}`` (PLAN v16 section 1.1).
+    ``largest_session_share`` is the biggest session's share of ``n``; ``value`` and the share are None at n=0."""
+    from collections import Counter
+    from llm_router.shadow_eval import wilson
+    per = Counter(sessions)
+    return {"k": k, "n": n, "value": round(k / n, 4) if n else None, "wilson95": wilson(k, n),
+            "n_sessions": len(per),
+            "largest_session_share": round(max(per.values()) / n, 4) if n and per else None,
+            "window": window}
+
+
+def summarize_actions(actions: list[dict], window: dict | None = None) -> dict:
+    """``{action, call, spread, by_lane, by_task_type}`` over :func:`action_units` actions.
+
+    ``action`` every action (k = numerator); ``call`` the proxy-ledger subset (doors ``proxy`` and ``subagent``:
+    what O3 called "per call"); ``spread`` the actions another Frontier subscription served (k) among all (n);
+    ``by_lane`` / ``by_task_type`` the same split by lane / task group, each lane with its ``sampled`` flag."""
+    def line(rows: list[dict], key: str = "numerator") -> dict:
+        return rate_line(sum(1 for a in rows if a[key]), len(rows), (a["session_id"] for a in rows), window)
+
+    by_lane: dict[tuple, list[dict]] = {}
+    by_group: dict[str, list[dict]] = {}
+    for a in actions:
+        by_lane.setdefault(a["lane"], []).append(a)
+        by_group.setdefault(a["task_group"], []).append(a)
+    return {
+        "action": line(actions),
+        "call": line([a for a in actions if a["door"] in (DOOR_PROXY, DOOR_SUBAGENT)]),
+        "spread": line(actions, "spread"),
+        "by_lane": [{"door": d, "served_class": c, "task_group": g, "quality_sampled": rows[0]["sampled"],
+                     **line(rows)} for (d, c, g), rows in sorted(by_lane.items())],
+        "by_task_type": {g: line(rows) for g, rows in sorted(by_group.items())},
+        "window_open": sum(1 for a in actions if a["window_open"]),
+    }

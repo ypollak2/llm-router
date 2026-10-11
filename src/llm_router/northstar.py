@@ -1474,7 +1474,8 @@ def units(days: int | None = 30, session_id: str | None = None,
             yield d
 
 
-def local_shadow_units(days: int | None = 30, db_path: Path | None = None) -> Iterator[dict]:
+def local_shadow_units(days: int | None = 30, db_path: Path | None = None, *,
+                       all_providers: bool = False) -> Iterator[dict]:
     """Local work as ``local_shadow`` rows, derived from ``usage.db``.
 
     Source: ``routing_decisions`` rows with ``provenance='runtime'`` (the MCP
@@ -1488,14 +1489,18 @@ def local_shadow_units(days: int | None = 30, db_path: Path | None = None) -> It
     latency_ms, outcome (always ``unknown`` here; ``offload_share`` judges it),
     provenance ("runtime"), shadow_tier, tool_use_id (the MCP call's ``tool_use`` id,
     None on rows written before ``call_identity`` or with no MCP call), success (the
-    router's own 0/1 verdict on the answer, None when the column is absent).
+    router's own 0/1 verdict on the answer, None when the column is absent), provider
+    (``final_provider``), reason_code (``direct`` marks the hook's DIRECT rows).
+
+    ``all_providers`` (P1.9 offload per action) drops the ``final_provider = 'ollama'`` filter: the same
+    runtime rows served by any provider (Gemini, Codex, ...). Default False: every existing caller is unchanged.
     """
     import sqlite3
 
     path = db_path or paths.state_path("usage.db")
     if not Path(path).is_file():
         return
-    where = "provenance = 'runtime' AND final_provider = 'ollama'"
+    where = "provenance = 'runtime'" + ("" if all_providers else " AND final_provider = 'ollama'")
     args: tuple = ()
     if days:
         where += " AND timestamp >= datetime('now', ?)"
@@ -1511,15 +1516,18 @@ def local_shadow_units(days: int | None = 30, db_path: Path | None = None) -> It
         tier = "shadow_tier" if "shadow_tier" in cols else "NULL"
         tool = "tool_use_id" if "tool_use_id" in cols else "NULL"
         ok = "success" if "success" in cols else "NULL"
+        prov = "final_provider" if "final_provider" in cols else "NULL"
+        reason = "reason_code" if "reason_code" in cols else "NULL"
         rows = conn.execute(
-            f"SELECT {sid}, timestamp, task_type, complexity, final_model, latency_ms, {tier}, {tool}, {ok} "
+            f"SELECT {sid}, timestamp, task_type, complexity, final_model, latency_ms, {tier}, {tool}, {ok}, "
+            f"{prov}, {reason} "
             f"FROM routing_decisions WHERE {where} ORDER BY timestamp, id", args,
         ).fetchall()
     except sqlite3.Error:
         return
     finally:
         conn.close()
-    for session, ts, task_type, complexity, model, latency, shadow, tool_use, success in rows:
+    for session, ts, task_type, complexity, model, latency, shadow, tool_use, success, provider, reason_code in rows:
         try:
             iso = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).isoformat()
         except (TypeError, ValueError):
@@ -1529,7 +1537,7 @@ def local_shadow_units(days: int | None = 30, db_path: Path | None = None) -> It
             "lever": _LEVER_OF_KIND[UNIT_LOCAL_SHADOW], "task_type": task_type,
             "complexity": complexity, "model": model, "latency_ms": latency,
             "outcome": OUTCOME_UNKNOWN, "provenance": "runtime", "shadow_tier": shadow,
-            "tool_use_id": tool_use, "success": success,
+            "tool_use_id": tool_use, "success": success, "provider": provider, "reason_code": reason_code,
         }
 
 
