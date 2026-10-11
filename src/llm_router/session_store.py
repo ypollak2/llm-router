@@ -708,11 +708,20 @@ def record_event(
         # comment above describes, so an unlocked run does not silently do the
         # dangerous thing: it declines, counts, and says so.
         for attempt in (0, 1):
+            if attempt == 0:
+                # CTX-PROJ-2: resolve once more BEFORE taking the lock. If the hook's cwd record
+                # appeared since the first resolve, this call creates the pin and adopts the old
+                # shards; doing that while holding the old shard's lock made adoption time out on
+                # our own lock and strand the early events. Under the lock the pin now exists, so
+                # the re-resolve below is a pure read.
+                path = _session_path(session_id)
             path.parent.mkdir(parents=True, exist_ok=True)
             with exclusive_lock(_lock_path(path)) as locked:
                 if not locked:
                     _note_lock_timeout("session append")
                     return
+                # NEVER create a pin / adopt from inside this lock: adoption locks the source shards
+                # (0.5 s) and this lock file may be one of them, so it would time out on ourselves.
                 # A pin created/merge applied while we waited can move the session's path: a stale
                 # `open("a")` would recreate the OLD shard. Re-resolve under the lock, retry once.
                 if attempt == 0 and _session_path(session_id) != path:
@@ -1199,6 +1208,13 @@ def merge_session_shards(
     try:
         import contextlib as _cl
         with _cl.ExitStack() as stack:
+            if not adopt:
+                # CTX-PROJ-2: the CLI path replaces the target file, so a concurrent writer's
+                # append (made under the target's lock) must not land between our read and the
+                # replace. Adoption (target= given) is called with the target lock already held.
+                if not stack.enter_context(exclusive_lock(_lock_path(target), timeout=5.0)):
+                    _note_lock_timeout("session merge target")
+                    return report
             # Writers append under the SOURCE's own lock. Hold it across read+rename, or an append
             # landing in between is never merged. Sorted order; a source we cannot lock quickly is
             # skipped (left in place) so adoption never blocks a hook.
