@@ -2712,7 +2712,7 @@ def _block_zero_claude(reason: str, task_type: str = "unknown", complexity: str 
 # full Ollama/API classifier chain isn't re-invoked for "ok do it" / "yes" etc.
 _LAST_ROUTE_TTL = 1800  # 30 minutes — reuse context within same working session
 
-_CONTINUATION_RE = re.compile(
+_STRICT_ACK_RE = re.compile(
     r"^(?:yes|no|ok|okay|sure|yep|nope|y|n|"
     r"continue|proceed|go ahead|do it|do that|"
     r"sounds good|great|perfect|agreed|correct|right|"
@@ -2721,7 +2721,7 @@ _CONTINUATION_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Short follow-up prompts that the strict single-word CONTINUATION_RE
+# Short follow-up prompts that the strict single-word _STRICT_ACK_RE
 # misses: "ok do it", "yes continue with 3", "now do the next one".
 # These are conversational follow-ups that presume the current session's
 # context — routing them spends quota classifying something Claude
@@ -3000,7 +3000,7 @@ def _load_last_route(session_id: str) -> dict | None:
 
 def _is_short_followup(prompt: str) -> bool:
     """Return True for short conversational follow-ups beyond the existing
-    single-word CONTINUATION_RE.
+    single-word _STRICT_ACK_RE.
 
     Catches the pattern "ok do that" / "yes, continue with 3" / "now do
     the next one" — multi-word but unmistakably a follow-up to the
@@ -3021,7 +3021,7 @@ def _is_continuation(prompt: str) -> bool:
     than re-triggering the full classifier chain.
     """
     stripped = prompt.strip()
-    if _CONTINUATION_RE.match(stripped):
+    if _STRICT_ACK_RE.match(stripped):
         return True
     if _is_short_followup(stripped):
         return True
@@ -3714,7 +3714,7 @@ def _resolve_auto_render_mode(render_mode: str, zero_claude: bool) -> str:
 # Anchored at the start on purpose. "continue" mid-sentence ("the script should
 # continue on error") is ordinary English; opening with it is a reply to
 # something. The length gate is applied by the caller, as for the deictic test.
-_CONTINUATION_RE = re.compile(
+_CONTINUATION_DIRECTIVE_RE = re.compile(
     r"^\s*(?:and\s+)?(?:"
     r"continue|carry on|go on|go ahead|keep going|proceed|resume|"
     r"do (?:it|that|them|both|this|those)|"
@@ -3797,7 +3797,7 @@ def _is_context_dependent(prompt: str) -> bool:
         return True
     # D-1: a short prompt that OPENS as a continuation. Same length gate, same
     # reasoning, different surface — this class carries no pronoun to catch.
-    if len(words) <= 12 and _CONTINUATION_RE.match(p):
+    if len(words) <= 12 and _CONTINUATION_DIRECTIVE_RE.match(p):
         return True
     return False
 
@@ -3831,7 +3831,7 @@ def _is_short_code_followup(prompt: str, last_route: dict | None) -> bool:
     return bool(
         _CODE_FOLLOWUP_SIGNAL_RE.search(stripped)
         or _SHORT_FOLLOWUP_PREFIX.match(stripped)
-        or _CONTINUATION_RE.match(stripped)
+        or _CONTINUATION_DIRECTIVE_RE.match(stripped)
     )
 
 
@@ -4668,13 +4668,13 @@ def main() -> None:
     # Kill-switch: LLM_ROUTER_DISABLE_CONTINUATION_BYPASS=1 forces every turn
     # through the classifier (useful when the heuristic regresses).
     #
-    # v6.13: Bypass ONLY on strict-ack continuations (_CONTINUATION_RE), NOT
+    # v6.13: Bypass ONLY on strict-ack continuations (_STRICT_ACK_RE), NOT
     # on the broader _is_short_followup union. "please go ahead and do the
     # change" after a code task is a directive that should reach the
     # code-context-inherit branch — not silently bypass to the host agent.
     # Prior behaviour swallowed such prompts (test_short_followup_after_code_inherits_code).
     if (not zero_claude and session_id
-            and _CONTINUATION_RE.match(prompt.strip())):
+            and _STRICT_ACK_RE.match(prompt.strip())):
         if os.environ.get("LLM_ROUTER_DISABLE_CONTINUATION_BYPASS", "").lower() in ("1", "true", "yes", "on"):
             _debug_log(f"[INVOCATION {invocation_id:.3f}] CONTINUATION: bypass disabled via env, routing instead")
         else:
