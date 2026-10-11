@@ -32,6 +32,8 @@ analytics but not strictly necessary for spend rollups.
 
 from __future__ import annotations
 
+from llm_router.provider_classes import real_decision_sql
+
 import json
 import sqlite3
 from dataclasses import dataclass
@@ -115,14 +117,16 @@ def export_rows(
         suffix = ""
 
     column_list = ", ".join(EXPORT_SCHEMA)
-    query = (
-        f"SELECT {column_list} FROM routing_decisions "
-        f"WHERE {' AND '.join(where)} "
-        f"ORDER BY timestamp{suffix}"
-    )
 
     conn = sqlite3.connect(str(source_db))
     try:
+        # LEDGER-ERR-1: a failed or cache-served call is not a routing decision to export.
+        where.append(real_decision_sql(conn))
+        query = (
+            f"SELECT {column_list} FROM routing_decisions "
+            f"WHERE {' AND '.join(where)} "
+            f"ORDER BY timestamp{suffix}"
+        )
         cursor = conn.execute(query, params)
         cols = [c[0] for c in cursor.description]
         for row in cursor:

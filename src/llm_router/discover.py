@@ -129,6 +129,112 @@ def _is_embedding_model(name: str, meta: dict | None = None) -> bool:
     return False
 
 
+# N19: /api/show reports what a model can do (``capabilities``: ["completion",
+# "tools", "thinking"] for a chat model, ["embedding"] for an embedder). A model
+# without "completion" answers /api/generate with 400 "does not support generate",
+# so it must not enter a routing chain (nimble:9b, a decision-only classifier,
+# failed in ~30 ms on every llm(task=code) call). The classifier path names its
+# model explicitly (decision_classifier.DEFAULT_MODEL) and never reads this list.
+#: (base_url, model) -> (verdict, expires_at). A definite answer lives 1 h (a re-pulled or
+#: replaced model gets a fresh verdict); an unknown one (Ollama down, /api/show erroring or
+#: 404, no ``capabilities``) is remembered as fail-open for 60 s so a route does not pay the
+#: 2 s timeout per model, since all_ollama_models() runs on every route.
+_capability_cache: dict[tuple[str, str], tuple[bool, float]] = {}
+_CAPABILITY_TTL_S = 3600.0
+_CAPABILITY_UNKNOWN_TTL_S = 60.0
+
+#: Name prefixes of models that must never serve generation. ``llmr-classifier`` is a qwen3.5
+#: Modelfile and ``llmr-classifier-38`` a qwen3.8 one: /api/show reports both as normal chat
+#: models (no SYSTEM, template ``{{ .Prompt }}``, caps include ``completion``), so there is no
+#: marker to read; the name is the only signal. An exact-name rule let ``llmr-classifier-38``
+#: through (M0-3 rerun3, a code call burnt a 120 s timeout on it). ``llamacpp:<sha256>`` is
+#: the tag Ollama's llamacpp runner gives an unnamed import of a blob: two exist on the
+#: reference machine, byte-for-byte copies of ``qwen3.5`` and ``llmr-classifier``; an
+#: unnamed import has no declared role, so it never enters a code chain.
+_NON_CODE_NAME_PREFIXES = ("llmr-classifier", "llamacpp:")
+
+
+def _configured_classifier_bases() -> frozenset[str]:
+    """Bare names of the models the classifier path is configured to use (explicit role)."""
+    import os
+
+    out = set()
+    for var in ("LLM_ROUTER_CLASSIFIER_MODEL", "LLM_ROUTER_DECISION_MODEL"):
+        v = os.environ.get(var, "").strip().lower()
+        if v:
+            out.add(v.split(":", 1)[0])
+    return frozenset(out)
+
+
+def _is_non_code_model(bare: str) -> bool:
+    """True for a classifier-only or unnamed-import model, by role then by name prefix.
+
+    ``LLM_ROUTER_LOCAL_ALLOW_MODELS`` (comma-separated exact names, tag optional) overrides
+    the name rules for a model the user deliberately named, e.g. a coder pulled as
+    ``llamacpp:...``. A debug line records each exclusion.
+    """
+    import os
+
+    low = bare.lower()
+    allow = {a.strip().lower() for a in os.environ.get("LLM_ROUTER_LOCAL_ALLOW_MODELS", "").split(",") if a.strip()}
+    if low in allow or (":" not in low and f"{low}:latest" in allow) or low.removesuffix(":latest") in allow:
+        return False
+    if low.startswith(_NON_CODE_NAME_PREFIXES) or low.split(":", 1)[0] in _configured_classifier_bases():
+        log.debug("excluded %s from local code chains (classifier/unnamed-import name rule)", bare)
+        return True
+    return False
+
+
+def _ollama_show_capabilities(base_url: str, name: str) -> list[str] | None:
+    """POST /api/show for ``name``; its ``capabilities`` list, or None when unknown."""
+    import json
+    import urllib.request
+
+    req = urllib.request.Request(
+        f"{base_url.rstrip('/')}/api/show",
+        data=json.dumps({"model": name}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=2) as resp:  # noqa: S310 - validated Ollama URL
+        caps = json.loads(resp.read()).get("capabilities")
+    return [str(c) for c in caps] if isinstance(caps, list) else None
+
+
+def ollama_can_generate(name: str) -> bool:
+    """False only when Ollama says the model lacks the ``completion`` capability.
+
+    Fails open: no base URL, /api/show unreachable, an older Ollama without
+    ``capabilities``, or any error all keep the model. Answers are cached per process
+    (see ``_capability_cache``): 1 h when definite, 60 s when unknown.
+    """
+    bare = name.split("/", 1)[1] if name.startswith("ollama/") else name
+    if _is_non_code_model(bare):
+        return False
+    try:
+        base = get_config().effective_ollama_base_url
+    except Exception:
+        return True
+    if not base:
+        return True
+    key = (base, bare)
+    import time
+    now = time.monotonic()
+    hit = _capability_cache.get(key)
+    if hit and hit[1] > now:
+        return hit[0]
+    try:
+        caps = _ollama_show_capabilities(base, bare)
+    except Exception as e:
+        log.debug("Ollama /api/show failed for %s: %s", bare, e)
+        caps = None
+    if caps is None:
+        _capability_cache[key] = (True, now + _CAPABILITY_UNKNOWN_TTL_S)
+        return True
+    ok = "completion" in caps
+    _capability_cache[key] = (ok, now + _CAPABILITY_TTL_S)
+    return ok
+
+
 def _update_discovery_cache(ollama_models: list[dict]) -> None:
     """Write discovered Ollama models to ~/.llm-router/discovery.json.
 
@@ -456,6 +562,7 @@ def _probe_ollama_direct(base_url: str = "http://localhost:11434") -> list[str]:
         return [
             f"ollama/{m['name']}" for m in models
             if m.get("name") and not _is_embedding_model(m["name"], m)
+            and ollama_can_generate(m["name"])
         ]
     except Exception:
         return []
@@ -481,6 +588,7 @@ def get_cached_ollama_models() -> list[str]:
             # written before this filter existed (24h TTL) — they can never
             # generate, so they must never reach a routing chain.
             and not _is_embedding_model(m_id.split("/", 1)[-1], m_data)
+            and ollama_can_generate(m_id)
         ]
 
     # Cache empty or stale — try a live probe to refresh it.
@@ -491,6 +599,8 @@ def get_cached_ollama_models() -> list[str]:
             return [
                 m_id for m_id, m_data in cached.items()
                 if m_data.get("provider") == "ollama"
+                and not _is_embedding_model(m_id.split("/", 1)[-1], m_data)
+                and ollama_can_generate(m_id)
             ]
 
     # Fallback: probe localhost:11434 even if OLLAMA_BASE_URL is not configured.
