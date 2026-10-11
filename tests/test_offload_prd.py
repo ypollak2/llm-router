@@ -348,7 +348,7 @@ def test_scorecard_emits_offload_with_k_n_wilson_sessions_and_the_o3_warning(_sc
     # turn reuses O3: same numerator, same denominator, and its integrity warning
     o3 = data["o3"]["breakdown"]
     assert (off["turn"]["k"], off["turn"]["n"]) == (o3["offload_kept"], o3["n"])
-    assert off["turn"]["caveats"] == [data["o3"]["caveat"]] and "unvalidated" in off["turn"]["caveats"][0]
+    assert off["turn"]["caveats"] == [data["o3"]["caveat"], kpi.P19A_POPULATION_NOTE] and "D-58" in off["turn"]["caveats"][1] and "unvalidated" in off["turn"]["caveats"][0]
     assert {r["task_group"] for r in off["by_lane"]} == {"qa", "code", "tech_op"}
     assert set(off["by_task_type"]) == {"qa", "code", "tech_op"}
     assert not any("no quality-sampled lane" in c for c in off["caveats"])

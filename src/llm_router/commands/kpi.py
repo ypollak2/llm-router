@@ -1968,6 +1968,14 @@ def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[
     return res
 
 
+#: Owner decision D-58: who may validate the O3 turn count (P1.9-a). Printed with the O3 warning.
+P19A_POPULATION_NOTE = (
+    "O3 validation population (D-58): kind organic, >= 50 typed prompts (P1.9 definition) and >= 1 proxy turn, "
+    "proxy coverage >= 95% (ledger msg_ids / main-thread transcript assistant message ids); a session below the "
+    "coverage bar is UNMEASURABLE (reported with its coverage ratio), never a fail; a live coordinator session "
+    "never counts")
+
+
 def _offload_prd(days: float, allowed: frozenset[str], index, all_rows: list[dict], now: float,
                  win: "_Window | None", o3: dict, inputs: tuple, thread_of) -> dict:
     """``data["offload"]`` (PLAN v16 P1.9, section 1.1): the S1 offload share per ``action``, per proxy
@@ -1995,7 +2003,7 @@ def _offload_prd(days: float, allowed: frozenset[str], index, all_rows: list[dic
     turns = osh.turn_units(res["built"]["units"])       # the same units O3 counts
     s = osh.summarize(turns)
     out["turn"] = {**osh.rate_line(s["offload_kept"], s["n"], (u["session_id"] for u in turns), window),
-                   "caveats": [o3["caveat"]] if o3.get("caveat") else []}
+                   "caveats": [o3["caveat"], P19A_POPULATION_NOTE] if o3.get("caveat") else []}
     caveats = []
     if not res["sampled"]:
         caveats.append("no quality-sampled lane: lane_quality.jsonl holds no passing audit or shadow-pair batch "

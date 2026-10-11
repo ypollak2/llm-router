@@ -148,7 +148,11 @@ equal a recount made from the ledger rows.
 
 *P1.9-a measurement (2026-10-11, `proxy_calls.jsonl` copy of 43,468 rows, window 2026-09-29T00:00:00Z to
 2026-10-11T12:00:00Z).* **Result: no qualifying session, so P1.9-a is not met and cannot be measured yet** (not a
-numeric fail). With the P1.9 typed-prompt definition (task notifications and other injected input are not
+numeric fail). **Population rule (owner decision D-58):** a session validates the turn count only when it has kind
+`organic`, >= 50 typed prompts under the P1.9 definition, >= 1 proxy turn, and proxy coverage >= 95% (ledger
+`msg_id`s / main-thread transcript assistant message ids). A session under the coverage bar is reported as
+UNMEASURABLE together with its coverage ratio and is never counted as a fail; a live coordinator session never
+counts. The rule is printed in `offload.turn.caveats` beside the O3 warning. With the P1.9 typed-prompt definition (task notifications and other injected input are not
 typed prompts) neither organic session reaches 50 typed prompts: 6cf3b1b8 has 26, 5041bdf8 has 27.
 The frozen M0.3 gate, which still counts notifications, qualifies both and reads 3 / 74 = 0.041 and 2 / 69 =
 0.029 (pooled 5 / 143 = 0.035; before the repair the same two sessions read 3.824 and 0.304). The bar 0.90-1.10 is
