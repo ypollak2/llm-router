@@ -24,7 +24,20 @@ History fixtures (no real prompt text; synthetic strings only):
 * ``one_prompt``: the worst case for a backward scan: one human prompt at message 0, then
   only tool_use / tool_result pairs whose results carry reminder text blocks.
 
-Run: ``uv run python scripts/bench_shadow_continuation.py --n 100 --out result.json``.
+Decision-ledger arm (P1.7 task 3): in both arms the harness also runs ``engine.decide`` (which
+appends a ledger row) in a worker thread, started just before the continuation, so the
+continuation shares the GIL and the disk with the ledger write. In the ``shadow`` arm
+``LLM_ROUTER_DECISION_SHADOW=measure`` with the rate at the 10% top of the 5-10% band makes
+:mod:`llm_router.decision_ledger` mark sampled rows, so the arm difference is the whole shadow.
+The run writes its ledger under a temp ``LLM_ROUTER_HOME``, never the real state dir.
+
+Verdict (P1.7-c): shadow-on minus shadow-off continuation p95 <= 5 ms on every fixture at
+>= 1,800 messages, n >= 100 per arm, free memory >= 20% before and after
+(``decision_ledger.gate_verdict``). ``--gate`` writes ``p17c_gate.json`` into the REAL state dir
+only when that verdict passes; ``LLM_ROUTER_DECISION_SHADOW=on`` stays inert without it. A
+harness run is never proof that the live proxy is fast: it is synthetic, single-process.
+
+Run: ``uv run python scripts/bench_shadow_continuation.py --n 100 --out result.json [--gate]``.
 """
 
 from __future__ import annotations
@@ -44,6 +57,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
+from llm_router import decision_ledger as DL  # noqa: E402
+from llm_router import engine  # noqa: E402
 from llm_router import local_classifier as lc  # noqa: E402
 from llm_router.proxy import backends as pb  # noqa: E402
 from llm_router.proxy.cls_input import assemble  # noqa: E402
@@ -161,13 +176,18 @@ async def run(kinds: list[str], sizes: list[int], n: int, warmup: int) -> dict:
                 for i in range(n + warmup):
                     for arm in (("off", "shadow") if i % 2 == 0 else ("shadow", "off")):
                         os.environ["LLM_ROUTER_LOCAL_CLASSIFIER"] = arm
+                        os.environ["LLM_ROUTER_DECISION_SHADOW"] = "measure" if arm == "shadow" else "off"
                         lc._reset_state()
                         app = apps[arm]
                         body = turn_first(kind, h, i)
                         assert (await _post(app, body)).status_code == 200
+                        decide_task = asyncio.create_task(asyncio.to_thread(
+                            engine.decide, f"final prompt number {i}: change file{i}.py",
+                            door="proxy", session_id=SID))
                         t0 = time.perf_counter()
                         r = await _post(app, _req())
                         dt = (time.perf_counter() - t0) * 1000
+                        await decide_task
                         assert r.status_code == 200
                         sched = app.state.cls_shadow
                         if arm == "shadow":
@@ -187,6 +207,9 @@ async def run(kinds: list[str], sizes: list[int], n: int, warmup: int) -> dict:
             results["rows"].append(row)
             print(json.dumps(row), flush=True)
     results["meta"]["machine_after"] = machine()
+    results["verdict"] = DL.gate_verdict(results)
+    results["meta"]["decision_rows"] = len(DL.read_jsonl(DL.ledger_path()))
+    results["meta"]["decision_rows_shadow"] = sum(1 for r in DL.read_jsonl(DL.ledger_path()) if r.get("shadow"))
     return results
 
 
@@ -197,10 +220,25 @@ def main() -> None:
     ap.add_argument("--fixtures", default="agentic,dense,one_prompt")
     ap.add_argument("--sizes", default="0,600,1800")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--gate", action="store_true",
+                    help="write p17c_gate.json into the real state dir if the P1.7-c verdict passes")
     a = ap.parse_args()
-    res = asyncio.run(run(a.fixtures.split(","), [int(x) for x in a.sizes.split(",")], a.n, a.warmup))
+    real_gate = DL.gate_path()  # resolved BEFORE the run redirects the state dir
+    with tempfile.TemporaryDirectory() as home:
+        os.environ["LLM_ROUTER_HOME"] = home
+        os.environ["LLM_ROUTER_DECISION_SHADOW_RATE"] = str(DL.RATE_MAX)
+        engine.clear_cache(persistent=False)
+        res = asyncio.run(run(a.fixtures.split(","), [int(x) for x in a.sizes.split(",")], a.n, a.warmup))
+    print(json.dumps({"verdict": res["verdict"]}))
     if a.out:
         Path(a.out).write_text(json.dumps(res, indent=1))
+    if a.gate and res["verdict"]["passed"]:
+        real_gate.parent.mkdir(parents=True, exist_ok=True)
+        real_gate.write_text(json.dumps({"passed": True, **res}, indent=1))
+        print("gate written:", real_gate)
+    elif a.gate:
+        print("gate NOT written: P1.7-c did not pass")
+    sys.exit(0 if res["verdict"]["passed"] else 1)
 
 
 if __name__ == "__main__":

@@ -2236,7 +2236,8 @@ def _condense(summary: str) -> str:
 #: Steps the child runs, in order; each is fail-open on its own.
 _STOP_BACKGROUND_STEPS = ("_refresh_northstar_line", "_fetch_live_usage",
                           "_build_and_save_learned_profile",
-                          "_maybe_rescan_profile", "_maybe_evaluate_models")
+                          "_maybe_rescan_profile", "_maybe_evaluate_models",
+                          "_link_decision_outcomes")
 _STOP_NOTES_FILENAME = "stop_notes.json"
 #: A note older than this is dropped rather than shown.
 _STOP_NOTES_MAX_AGE_S = 24 * 3600
@@ -2404,6 +2405,17 @@ def _cached_northstar_line(session_id: str, now: float | None = None) -> str | N
         return d["line"]
     except Exception:  # noqa: BLE001
         return None
+
+
+def _link_decision_outcomes() -> None:
+    """P1.7: link engine decisions to outcomes (24 h window) and write yesterday's daily
+    accuracy/drift record. Both are idempotent; a missing ledger makes them no-ops."""
+    from datetime import datetime, timedelta, timezone
+
+    from llm_router import decision_report, outcome_link
+
+    outcome_link.link()
+    decision_report.write_daily((datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d"))
 
 
 def _run_background_stop_work() -> None:
