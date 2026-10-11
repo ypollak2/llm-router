@@ -34,7 +34,7 @@ CLOUD = "openai/gpt-4o"
 EMERGENCY = ["openai/gpt-4o-mini", "gemini/gemini-2.5-flash"]
 
 
-async def _run_failing_override(model_override, profile=RoutingProfile.BALANCED):
+async def _run_failing_override(model_override, profile=RoutingProfile.BALANCED, task_type=TaskType.CODE):
     """route_and_call with ``model_override`` failing and a cloud-only BUDGET chain.
 
     Same stubs as ``tests/test_mcp_qa_no_local._run``, which cannot be reused here:
@@ -48,6 +48,10 @@ async def _run_failing_override(model_override, profile=RoutingProfile.BALANCED)
         if model == model_override:
             raise RuntimeError(f"stub failure for {model}")
         return _response(model)
+
+    async def fake_call_media(task_type, provider, model_name, *a, **k):
+        # Media task types are dispatched through _call_media, not call_llm.
+        return await fake_call_llm(f"{provider}/{model_name}")
 
     async def fake_build(task_type, profile, override, *a, **k):
         # Like the real builder: an override is the whole chain, whatever the profile;
@@ -81,9 +85,10 @@ async def _run_failing_override(model_override, profile=RoutingProfile.BALANCED)
         p(patch("llm_router.semantic_cache.store", new_callable=AsyncMock))
         p(patch("llm_router.router._build_and_filter_chain", side_effect=fake_build))
         p(patch("llm_router.router.providers.call_llm", side_effect=fake_call_llm))
+        p(patch("llm_router.router._call_media", side_effect=fake_call_media))
         try:
             await router_module.route_and_call(
-                TaskType.CODE, "hello", profile=profile,
+                task_type, "hello", profile=profile,
                 complexity_hint="moderate", model_override=model_override,
             )
         except Exception as exc:  # the outcome under test, inspected by the caller
@@ -133,6 +138,16 @@ async def test_a_bare_local_provider_override_is_guarded_too():
 async def test_no_skip_is_logged_where_no_fallback_would_run():
     """A BUDGET call never had an emergency fallback, so it must not log a skip."""
     called, raised, _, route_log = await _run_failing_override(LOCAL, profile=RoutingProfile.BUDGET)
+    assert called == [LOCAL], called
+    assert raised is not None
+    assert _skip_events(route_log) == []
+
+
+@pytest.mark.asyncio
+async def test_no_skip_is_logged_for_a_media_task():
+    """Media task types never had an emergency fallback either (mutation M7 of the
+    independent red-check left the media half of the condition unpinned)."""
+    called, raised, _, route_log = await _run_failing_override(LOCAL, task_type=TaskType.IMAGE)
     assert called == [LOCAL], called
     assert raised is not None
     assert _skip_events(route_log) == []

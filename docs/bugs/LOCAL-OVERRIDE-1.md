@@ -26,6 +26,7 @@ status: fixed in `fix/openai-compat-local-override`
   `openai_compat` can point at a remote server), `types.LOCAL_PROVIDERS` (it feeds budget and chain_builder), and about
   10 duplicated free-provider literals elsewhere (needs a separate consolidation PR).
 - **Test.** `tests/test_openai_compat_local_override.py`: a failed local override calls only the local model and logs
-  the skip reason; a failed cloud override still reaches the emergency chain (scope control); tier, quota bucket and
-  $0 usage row. `tests/test_gf_validate_routing_insert.py` adds `openai_compat` to the accepted providers. Each was
-  red-checked by deleting only its one token or condition.
+  the skip reason; a bare `ollama` override is guarded too; no skip is logged for BUDGET or media calls, which never had
+  a fallback; a failed cloud override still reaches the emergency chain (scope control); tier, quota bucket and $0 usage row. `tests/test_gf_validate_routing_insert.py` adds `openai_compat` to the accepted providers. Each was
+  red-checked by deleting only its one token or condition; an independent run of 17 narrow mutations found one unpinned
+  condition (media task types), now covered.
