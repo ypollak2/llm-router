@@ -28,6 +28,8 @@ _PROMPTS = iter(f"Write a Python function named add_n18_{i} that returns a + b" 
 @pytest.fixture(autouse=True)
 def _fresh_cooldowns(monkeypatch):
     monkeypatch.delenv("LLM_ROUTER_LOCAL_TIMEOUT_COOLDOWN_S", raising=False)
+    # P0.15: these pinned-chain models are user-configured, so the promote gate leaves them in place.
+    monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "qwen3-coder:30b,qwen3.8:latest")
     router._local_timeout_at.clear()
     yield
     router._local_timeout_at.clear()
