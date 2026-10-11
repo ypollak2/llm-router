@@ -411,10 +411,10 @@ def test_an_empty_usage_db_is_not_history_but_a_routed_call_is(state):
 
     db = state / "usage.db"
     con = sqlite3.connect(db)
-    con.execute("CREATE TABLE routing_decisions (id INTEGER PRIMARY KEY, model TEXT)")
+    con.execute("CREATE TABLE usage (id INTEGER PRIMARY KEY, model TEXT, provider TEXT)")
     con.commit()
     assert not md._usage_db_has_history(db)
-    con.execute("INSERT INTO routing_decisions (model) VALUES ('openai/gpt-4o-mini')")
+    con.execute("INSERT INTO usage (model, provider) VALUES ('openai/gpt-4o-mini', 'openai')")
     con.commit()
     con.close()
     assert md._usage_db_has_history(db)
@@ -426,8 +426,8 @@ def test_an_upgrade_with_routing_history_is_grandfathered_through_the_real_route
     import sqlite3
 
     con = sqlite3.connect(state / "usage.db")
-    con.execute("CREATE TABLE routing_decisions (id INTEGER PRIMARY KEY, model TEXT)")
-    con.execute("INSERT INTO routing_decisions (model) VALUES ('ollama/old-a:7b')")
+    con.execute("CREATE TABLE usage (id INTEGER PRIMARY KEY, model TEXT, provider TEXT)")
+    con.execute("INSERT INTO usage (model, provider) VALUES ('ollama/old-a:7b', 'ollama')")
     con.commit()
     con.close()
     build("BUDGET", "QUERY", world(ollama=[A]), mock_cost=False)
@@ -485,6 +485,7 @@ CALLERS: dict[tuple[str, str, str, int], tuple[str, str]] = {
     ("src/llm_router/judge.py", "_select_judge_model", "get_cached_ollama_models", 0): ("existence", "picks a grader for a stored row, not a routed answer"),
     ("src/llm_router/hooks/direct_executor.py", "execute_chain", "available_ollama_models", 0): ("existence", "is each chain entry pulled; adds none"),
     ("src/llm_router/model_discovery.py", "first_installed", "available_ollama_models", 0): ("existence", "auxiliary pick (warm-up, compressor), not a routing chain"),
+    ("src/llm_router/model_discovery.py", "ensure_grandfather", "all_openai_compat_models", 0): ("existence", "first-run grandfather input (P0.15-2); records ids, injects nothing"),
     ("src/llm_router/model_discovery.py", "<module>", "available_ollama_models", 0): ("existence", "the detached cache refresher"),
     ("scripts/bench_draft_acceptance.py", "preflight", "available_ollama_models", 0): ("existence", "benchmark script: is the model installed"),
 }
@@ -553,7 +554,7 @@ def _calls() -> list[tuple[str, str, str, int, str]]:
 
 def order_result_used(source: str, fn: str) -> bool:
     """True when function ``fn`` in ``source`` calls order_for_chain AND uses what it returns:
-    every name the result is assigned to (``_`` and ``_x`` aside) is read again in the function."""
+    every assigned name except ``_tail_unused*`` is read again in the function."""
     node = next((n for n in ast.walk(ast.parse(source))
                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == fn), None)
     if node is None:
