@@ -27,14 +27,18 @@ History fixtures (no real prompt text; synthetic strings only):
 Decision-ledger arm (P1.7 task 3): in both arms the harness also runs ``engine.decide`` (which
 appends a ledger row) in a worker thread, started just before the continuation, so the
 continuation shares the GIL and the disk with the ledger write. In the ``shadow`` arm
-``LLM_ROUTER_DECISION_SHADOW=measure`` with the rate at the 10% top of the 5-10% band makes
-:mod:`llm_router.decision_ledger` mark sampled rows, so the arm difference is the whole shadow.
+``decision_ledger._force_shadow`` (a private module attribute; no environment value can set it)
+with the rate at the 10% top of the 5-10% band makes :mod:`llm_router.decision_ledger` mark sampled
+rows, so the arm difference is the whole shadow.
 The run writes its ledger under a temp ``LLM_ROUTER_HOME``, never the real state dir.
 
 Verdict (P1.7-c): shadow-on minus shadow-off continuation p95 <= 5 ms on every fixture at
->= 1,800 messages, n >= 100 per arm, free memory >= 20% before and after
+>= 1,800 messages, n >= 100 per arm, free memory >= 20% and load1 <= 4.0 before and after
 (``decision_ledger.gate_verdict``). ``--gate`` writes ``p17c_gate.json`` into the REAL state dir
-only when that verdict passes; ``LLM_ROUTER_DECISION_SHADOW=on`` stays inert without it. A
+only when that verdict passes; ``LLM_ROUTER_DECISION_SHADOW=on`` stays inert without it. That gate
+governs the decision-ledger ``shadow`` flag only. The same run also measures the pre-existing
+classifier shadow (``LLM_ROUTER_LOCAL_CLASSIFIER=shadow``, on since 2026-10-08): its added p95 is
+reported as evidence and gates nothing. A
 harness run is never proof that the live proxy is fast: it is synthetic, single-process.
 
 Run: ``uv run python scripts/bench_shadow_continuation.py --n 100 --out result.json [--gate]``.
@@ -176,7 +180,7 @@ async def run(kinds: list[str], sizes: list[int], n: int, warmup: int) -> dict:
                 for i in range(n + warmup):
                     for arm in (("off", "shadow") if i % 2 == 0 else ("shadow", "off")):
                         os.environ["LLM_ROUTER_LOCAL_CLASSIFIER"] = arm
-                        os.environ["LLM_ROUTER_DECISION_SHADOW"] = "measure" if arm == "shadow" else "off"
+                        DL._force_shadow = arm == "shadow"  # private harness switch, not an env value
                         lc._reset_state()
                         app = apps[arm]
                         body = turn_first(kind, h, i)
@@ -208,8 +212,10 @@ async def run(kinds: list[str], sizes: list[int], n: int, warmup: int) -> dict:
             print(json.dumps(row), flush=True)
     results["meta"]["machine_after"] = machine()
     results["verdict"] = DL.gate_verdict(results)
-    results["meta"]["decision_rows"] = len(DL.read_jsonl(DL.ledger_path()))
-    results["meta"]["decision_rows_shadow"] = sum(1 for r in DL.read_jsonl(DL.ledger_path()) if r.get("shadow"))
+    DL._force_shadow = False
+    rows = DL.read_ledger()
+    results["meta"]["decision_rows"] = len(rows)
+    results["meta"]["decision_rows_shadow"] = sum(1 for r in rows if r.get("shadow"))
     return results
 
 

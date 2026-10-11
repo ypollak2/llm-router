@@ -147,13 +147,28 @@ def write_daily(day: str, *, state: Path | None = None, now: float | None = None
     path = base / DAILY_FILENAME
     if any(r.get("day") == day for r in DL.read_jsonl(path)):
         return None
-    dec = DL.read_jsonl(base / DL.LEDGER_FILENAME)
+    dec = DL.read_ledger(base)
     rec = {"day": day, "written_at": round(time.time() if now is None else now, 3),
            "accuracy": daily_accuracy(dec, DL.read_jsonl(base / DL.LABELS_FILENAME), day),
            "drift": drift(dec, day)}
     rec["line"] = accuracy_text(rec["accuracy"])
     DL._append(path, rec)
     return rec
+
+
+def backfill_daily(days: int = 7, *, state: Path | None = None, now: float | None = None) -> list[str]:
+    """Write every missing record for the last ``days`` completed UTC days (yesterday back). A day
+    with no data gets an n = 0 record (an honest "not informative" line, not an omitted day), so
+    ``days_covered`` can reach 7/7 only through days that are also informative. Returns the days
+    written."""
+    t = time.time() if now is None else now
+    today = datetime.fromtimestamp(t, timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    written = []
+    for k in range(1, days + 1):
+        day = (today - timedelta(days=k)).strftime("%Y-%m-%d")
+        if write_daily(day, state=state, now=t) is not None:
+            written.append(day)
+    return written
 
 
 def days_covered(daily: list[dict], days: list[str]) -> dict:
@@ -171,7 +186,7 @@ def classifier_line(decisions: list[dict], labels: list[dict], outcomes: list[di
                     engine_version: str, heldout: dict | None = None) -> str | None:
     """``kpi classifier``: stored GT held-out for ``engine_version`` + live 7-day abstain rate,
     layer mix, shadow agreement, outcome-linked share, with n. None when the ledger is empty."""
-    win = [r for r in decisions if isinstance(r.get("ts"), (int, float)) and now - 7 * 86400 <= r["ts"] <= now + 1.0]  # ts is rounded to ms: a row just written may read as 'future'
+    win = [r for r in decisions if isinstance(r.get("ts"), (int, float)) and now - 7 * 86400 <= r["ts"] <= now + 1.0]  # ts is ms-rounded: a fresh row can read as future
     if not win:
         return None
     n = len(win)
@@ -188,18 +203,20 @@ def classifier_line(decisions: list[dict], labels: list[dict], outcomes: list[di
         held = "GT held-out: none stored for %s" % engine_version
     share = "n/a (0 due)" if ol["share"] is None else "%.0f%% of %d due" % (100 * ol["share"], ol["n_due"])
     return ("classifier [%s]: %s; live 7d n=%d: abstain %.1f%%, layers %s, shadow agree %s, "
-            "outcome-linked %s (all sessions, not organic-only; informational)"
+            "outcome-linked %s [%s] (all sessions, not organic-only; informational)"
             % (engine_version, held, n, 100 * ab / n, mix_s,
-               "%d/%d" % (agree, len(lab)) if lab else "n/a (0 labelled)", share))
+               "%d/%d" % (agree, len(lab)) if lab else "n/a (0 labelled)", share, outcome_link.LINK_KIND))
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m llm_router.decision_report")
-    ap.add_argument("--day", help="UTC day YYYY-MM-DD (default: yesterday)")
+    ap.add_argument("--day", help="UTC day YYYY-MM-DD (default: backfill the last 7 completed days)")
     a = ap.parse_args(argv)
-    day = a.day or (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
-    rec = write_daily(day)
-    print(json.dumps(rec if rec else {"day": day, "status": "already written"}))
+    if a.day:
+        rec = write_daily(a.day)
+        print(json.dumps(rec if rec else {"day": a.day, "status": "already written"}))
+    else:
+        print(json.dumps({"written": backfill_daily()}))
     return 0
 
 

@@ -43,7 +43,7 @@ def _prompts(n: int) -> list[str]:
 
 
 def _rows() -> list[dict]:
-    return DL.read_jsonl(DL.ledger_path())
+    return DL.read_ledger()
 
 
 # ── P1.7-a / P1.7-e: the row ─────────────────────────────────────────────────
@@ -116,10 +116,11 @@ def test_the_ledger_kill_switch_and_a_failed_write_never_stall_decide(monkeypatc
 
 # ── shadow: off by default, gated, 5-10%, tier-stratified ────────────────────
 
-def _gate(passed=True, n=100, added=1.0, free=80, msgs=1800) -> dict:
-    row = {"fixture": "agentic", "messages": msgs, "off": {"n": n}, "shadow": {"n": n}, "added_p95_ms": added}
-    return {"passed": passed, "rows": [row],
-            "meta": {"machine_before": {"free_pct": free}, "machine_after": {"free_pct": free}}}
+def _gate(passed=True, n=100, added=1.0, free=80, msgs=1800, load=1.0, extra_rows=()) -> dict:
+    row = {"fixture": "agentic", "messages": msgs, "off": {"n": n, "p95": 1.0}, "shadow": {"n": n, "p95": 1.0},
+           "added_p95_ms": added}
+    m = {"free_pct": free, "loadavg": [load, load, load]}
+    return {"passed": passed, "rows": [row, *extra_rows], "meta": {"machine_before": dict(m), "machine_after": dict(m)}}
 
 
 def test_shadow_is_off_by_default_and_every_sampled_flag_is_false():
@@ -140,7 +141,9 @@ def test_shadow_on_needs_the_p17c_gate(monkeypatch, tmp_path):
     g.write_text(json.dumps(_gate(passed=True, msgs=600)))
     assert DL.shadow_enabled() is False                    # history < 1,800
     g.write_text(json.dumps(_gate(passed=True, free=10)))
-    assert DL.shadow_enabled() is False                    # contended
+    assert DL.shadow_enabled() is False                    # contended (memory)
+    g.write_text(json.dumps(_gate(passed=True, load=9.0)))
+    assert DL.shadow_enabled() is False                    # contended (CPU)
     g.write_text(json.dumps(_gate(passed=False)))
     assert DL.shadow_enabled() is False
     g.write_text(json.dumps(_gate(passed=True)))
@@ -183,14 +186,86 @@ def test_rate_env_is_clamped(monkeypatch):
         assert DL.shadow_rate() == want
 
 
-def test_measure_mode_marks_sampled_rows_at_the_configured_rate(monkeypatch):
-    monkeypatch.setenv("LLM_ROUTER_DECISION_SHADOW", "measure")
+def test_the_private_switch_marks_sampled_rows_at_the_configured_rate(monkeypatch):
+    monkeypatch.setattr(DL, "_force_shadow", True)
     monkeypatch.setenv("LLM_ROUTER_DECISION_SHADOW_RATE", "0.10")
     for t in _prompts(3000):
         engine.decide(t, door="hook")
     rows = _rows()
     share = sum(r["shadow"] for r in rows) / len(rows)
     assert len(rows) == 3000 and 0.07 < share < 0.13, share
+
+
+@pytest.mark.parametrize("value", ["measure", "force", "1.0", "MEASURE", "all"])
+def test_no_environment_value_bypasses_the_gate(monkeypatch, value):
+    """The old ``measure`` value turned the shadow on with no gate file. No env value may do that."""
+    monkeypatch.setenv("LLM_ROUTER_DECISION_SHADOW", value)
+    assert not DL.gate_path().exists() and DL.shadow_enabled() is False
+    for t in _prompts(300):
+        engine.decide(t, door="hook")
+    assert not any(r["shadow"] for r in _rows())
+    assert DL._force_shadow is False
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), None, "1.0", True])
+def test_gate_verdict_rejects_non_finite_and_non_numbers(bad):
+    for field in ("added", "n", "free", "load", "p95"):
+        g = _gate()
+        if field == "added":
+            g["rows"][0]["added_p95_ms"] = bad
+        elif field == "n":
+            g["rows"][0]["off"]["n"] = bad
+        elif field == "p95":
+            g["rows"][0]["shadow"]["p95"] = bad
+        elif field == "free":
+            g["meta"]["machine_after"]["free_pct"] = bad
+        else:
+            g["meta"]["machine_before"]["loadavg"] = [bad, 1, 1]
+        v = DL.gate_verdict(g)
+        assert v["passed"] is False, (field, bad)
+        assert v["rows_checked"] == 1                       # it looked, and said no
+    assert DL.gate_verdict(_gate())["passed"] is True       # the clean control passes
+
+
+def test_nan_in_a_gate_file_does_not_open_the_shadow(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_DECISION_SHADOW", "on")
+    g = _gate(passed=True)
+    g["rows"][0]["added_p95_ms"] = float("nan")
+    DL.gate_path().write_text(json.dumps(g))     # json.dumps writes NaN, json.loads reads it back
+    assert DL.shadow_enabled() is False
+
+
+def test_every_row_at_1800_messages_must_pass_not_just_one():
+    bad = {"fixture": "dense", "messages": 1800, "off": {"n": 100, "p95": 1.0},
+           "shadow": {"n": 100, "p95": 9.0}, "added_p95_ms": 8.0}
+    v = DL.gate_verdict(_gate(extra_rows=[bad]))
+    assert v["passed"] is False and v["rows_checked"] == 2 and any("dense@1800" in w for w in v["why"])
+    thin = {**bad, "added_p95_ms": 0.1, "off": {"n": 99, "p95": 1.0}}
+    assert DL.gate_verdict(_gate(extra_rows=[thin]))["passed"] is False
+
+
+def test_contention_is_checked_at_the_start_and_at_the_end():
+    g = _gate()
+    g["meta"]["machine_after"]["loadavg"] = [4.01, 1, 1]
+    assert DL.gate_verdict(g)["passed"] is False
+    g["meta"]["machine_after"]["loadavg"] = [4.0, 1, 1]
+    assert DL.gate_verdict(g)["passed"] is True
+    g = _gate()
+    g["meta"]["machine_before"].pop("loadavg")
+    assert DL.gate_verdict(g)["passed"] is False            # unknown load is not "uncontended"
+
+
+def test_decisions_jsonl_is_size_capped_with_two_generations(monkeypatch):
+    monkeypatch.setattr(DL, "MAX_BYTES", 20_000)
+    for t in _prompts(400):
+        engine.decide(t, door="hook")
+    p = DL.ledger_path()
+    assert p.with_name(p.name + ".1").exists()
+    assert p.stat().st_size <= 20_000 + 1_000
+    rows = DL.read_ledger()
+    assert 0 < len(rows) < 400                              # oldest generations dropped: that is the cap
+    assert all(DL.row_complete(r) for r in rows)
+    assert (os.stat(p).st_mode & 0o777) == 0o600
 
 
 def test_labels_need_a_known_tier_and_a_source():
@@ -227,6 +302,7 @@ def test_outcome_precedence_window_and_pending():
     # inside the window: only linked ones are written, the rest stay pending
     rows = {r["decision_id"]: r for r in outcome_link.link_decisions(ds, sigs, now=T0 + 3600)}
     assert rows["d1"]["outcome"] == "redone" and rows["d1"]["source"] == "usage_outcomes"  # redone beats used
+    assert all(r["link"] == "session" for r in rows.values())
     assert rows["d2"]["outcome"] == "escalated" and rows["d2"]["source"] == "proxy_calls"
     assert rows["d3"]["outcome"] == "success" and rows["d3"]["source"] == "verify"
     assert rows["d4"]["outcome"] == "redone" and rows["d4"]["source"] == "verify"
@@ -262,6 +338,7 @@ def test_linked_share_counts_unknown_as_not_linked_and_empty_as_not_informative(
     s = outcome_link.linked_share(ds, outs, now=T0 + 24 * 3600 + 1)
     assert (s["n_due"], s["n_linked"], s["n_unknown"]) == (10, 9, 1)
     assert s["share"] == 0.9 and s["share_any_row"] == 1.0
+    assert s["link_kind"] == "session-level link (upper bound)"
 
 
 # ── drift ────────────────────────────────────────────────────────────────────
@@ -350,12 +427,38 @@ def test_write_daily_is_once_per_day_and_days_covered_needs_informative_days(tmp
     assert DR.days_covered(daily, days) == {"window_days": 3, "with_record": 2, "informative": 1}
 
 
+def test_one_escalation_marks_every_decision_of_the_session():
+    """Documents the session-level join: it is an upper bound, and says so."""
+    sigs = [{"session_id": "s", "ts": T0 + 100, "outcome": "escalated", "source": "proxy_calls"}]
+    ds = [_dec(i, "s", ts=T0 + i) for i in range(5)]
+    rows = outcome_link.link_decisions(ds, sigs, now=T0 + 3600)
+    assert [r["outcome"] for r in rows] == ["escalated"] * 5
+
+
+def test_backfill_writes_seven_days_once_and_empty_days_as_n0(tmp_path):
+    from datetime import datetime, timezone
+
+    now = T0 + 86400 * 3
+    written = DR.backfill_daily(7, now=now)
+    assert len(written) == 7
+    daily = DL.read_jsonl(DR.daily_path())
+    assert len(daily) == 7 and all(r["accuracy"]["n_labelled"] == 0 for r in daily)
+    assert all("not informative" in r["line"] for r in daily)
+    assert DR.backfill_daily(7, now=now) == []               # idempotent
+    assert len(DR.backfill_daily(7, now=now + 86400)) == 1   # next day adds just the new day
+    days = [r["day"] for r in DL.read_jsonl(DR.daily_path())][:7]
+    assert DR.days_covered(DL.read_jsonl(DR.daily_path()), days) == {
+        "window_days": 7, "with_record": 7, "informative": 0}  # records exist, none informative
+    assert datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%d") not in days  # today is not complete
+
+
 def test_classifier_line_reports_n_and_none_when_empty():
     assert DR.classifier_line([], [], [], now=T0, engine_version="engine/1") is None
     decs, labs = _shadow_day(10, 8, 1)
     line = DR.classifier_line(decs, labs, [], now=T0 + 3600, engine_version="engine/1")
     assert "n=10" in line and "abstain 0.0%" in line and "shadow agree 8/10" in line
     assert "GT held-out: none stored for engine/1" in line and "0 due" in line
+    assert "session-level link (upper bound)" in line
     line = DR.classifier_line(decs, [], [], now=T0 + 3600, engine_version="engine/1")
     assert "n/a (0 labelled)" in line
     line = DR.classifier_line(decs, [], [], now=T0 + 3600, engine_version="engine/1",

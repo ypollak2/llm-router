@@ -2408,14 +2408,12 @@ def _cached_northstar_line(session_id: str, now: float | None = None) -> str | N
 
 
 def _link_decision_outcomes() -> None:
-    """P1.7: link engine decisions to outcomes (24 h window) and write yesterday's daily
-    accuracy/drift record. Both are idempotent; a missing ledger makes them no-ops."""
-    from datetime import datetime, timedelta, timezone
-
+    """P1.7: link engine decisions to outcomes (24 h window) and backfill the last 7 days of daily
+    accuracy/drift records. Both are idempotent; a missing ledger makes them no-ops."""
     from llm_router import decision_report, outcome_link
 
     outcome_link.link()
-    decision_report.write_daily((datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d"))
+    decision_report.backfill_daily(7)
 
 
 def _run_background_stop_work() -> None:

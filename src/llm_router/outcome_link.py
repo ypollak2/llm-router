@@ -15,6 +15,13 @@ appends ``{decision_id, outcome, source, ts, linked_at}`` to ``decision_outcomes
 When several signals match, the strongest evidence that the decision was too low wins:
 escalated > redone > success. ``source`` names the file the winning signal came from.
 
+**Session-level link (upper bound).** The join key is ``session_id`` plus time: one escalation or
+redo in a session marks EVERY decision of that session made in the 24 h before it, not just the
+turn it belongs to. Linked shares and the escalated/redone counts are therefore upper bounds on
+turn-level truth; ``linked_share`` says so (``link_kind``) and every outcome row carries
+``"link": "session"``. A nearest-following-turn join would need a turn id on the decision, which
+no door passes yet.
+
 Join key: ``session_id`` plus time. A decision with no ``session_id`` cannot be joined and is
 ``unknown`` after the window; it is never guessed. Rows hold ids, enums and times only.
 A decision is linked once; the file is append-only and a re-run adds nothing for a linked id.
@@ -34,6 +41,7 @@ from llm_router import paths
 
 OUTCOMES_FILENAME = "decision_outcomes.jsonl"
 WINDOW_S = 24 * 3600
+LINK_KIND = "session-level link (upper bound)"
 OUTCOMES = ("success", "redone", "escalated", "unknown")
 _PRECEDENCE = {"escalated": 3, "redone": 2, "success": 1}
 
@@ -118,7 +126,7 @@ def link_decisions(decisions: list[dict], sigs: list[dict], *, now: float,
         else:
             continue  # window still open: a later signal could arrive
         rows.append({"decision_id": did, "outcome": outcome, "source": source, "ts": dts,
-                     "linked_at": round(now, 3)})
+                     "linked_at": round(now, 3), "link": "session"})
     return rows
 
 
@@ -127,7 +135,7 @@ def link(*, now: float | None = None, dry_run: bool = False, state: Path | None 
     Returns ``{n_decisions, n_linked_before, n_new, by_outcome}``. Never raises on bad input."""
     now = time.time() if now is None else now
     base = state or paths.llm_router_home()
-    decisions = DL.read_jsonl(base / DL.LEDGER_FILENAME)
+    decisions = DL.read_ledger(base)
     done = {r.get("decision_id") for r in DL.read_jsonl(base / OUTCOMES_FILENAME)}
     sigs = signals(usage_rows=DL.read_jsonl(base / "usage_outcomes.jsonl"),
                    proxy_rows=DL.read_jsonl(base / "proxy_calls.jsonl"),
@@ -156,7 +164,7 @@ def linked_share(decisions: list[dict], outcomes: list[dict], *, now: float) -> 
     due = [d for d in decisions if (_epoch(d.get("ts")) or now) + WINDOW_S <= now]
     real = sum(1 for d in due if out_by.get(d.get("decision_id")) in ("success", "redone", "escalated"))
     anyrow = sum(1 for d in due if d.get("decision_id") in out_by)
-    return {"n_due": len(due), "n_linked": real, "n_unknown": anyrow - real,
+    return {"link_kind": LINK_KIND, "n_due": len(due), "n_linked": real, "n_unknown": anyrow - real,
             "share": (real / len(due)) if due else None,
             "share_any_row": (anyrow / len(due)) if due else None}
 

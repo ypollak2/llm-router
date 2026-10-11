@@ -2238,7 +2238,7 @@ def _decision_ledger_line() -> str | None:
         except (OSError, ValueError):
             pass
         return decision_report.classifier_line(
-            DL.read_jsonl(home / DL.LEDGER_FILENAME), DL.read_jsonl(home / DL.LABELS_FILENAME),
+            DL.read_ledger(home), DL.read_jsonl(home / DL.LABELS_FILENAME),
             DL.read_jsonl(home / "decision_outcomes.jsonl"), now=time.time(),
             engine_version=engine.ENGINE_VERSION, heldout=heldout if isinstance(heldout, dict) else None)
     except Exception:  # noqa: BLE001 - informational line
