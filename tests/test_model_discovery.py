@@ -155,8 +155,15 @@ def test_the_hook_list_does_not_import_discover():
     import subprocess
     import sys
 
-    code = ("import sys; from llm_router.hooks import chain_builder; chain_builder._ollama_models; "
+    code = ("import sys; from llm_router.hooks import chain_builder; "
             "from llm_router import model_discovery; model_discovery._is_completion_model('qwen3.5:latest'); "
             "print('llm_router.discover' in sys.modules)")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "False", out.stdout + out.stderr
+
+
+def test_a_configured_classifier_model_is_excluded(home, no_role_env, monkeypatch):
+    """The model the classifier path is configured to use is ruled out by role, whatever its name."""
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_MODEL", "my-sorter:latest")
+    _cache(home, ["my-sorter:latest", "qwen3.5:latest"], age_hours=1)
+    assert md.available_ollama_models() == ["qwen3.5:latest"]

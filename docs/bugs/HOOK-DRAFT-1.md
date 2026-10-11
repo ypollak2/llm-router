@@ -20,9 +20,11 @@ status: fixed in `fix/hook-draft-list-non-generators`
   delegates to it and keeps its debug line. Add `local_models.serves_generate` = declared `generate` role and not
   name-ruled. `model_discovery._is_completion_model` now requires it, for both the live probe and the cache.
   The explicit env overrides (`LLM_ROUTER_OLLAMA_MODEL`, `OLLAMA_BUDGET_MODELS`, `OLLAMA_MODELS`) stay unfiltered, as operator intent.
+  Side effect: `resolver/inventory.py` uses the same filter, so `llm-router inventory` and `resolve` no longer list
+  these non-generators as Ollama inventory.
 - **Test.** `tests/test_model_discovery.py`:
   - On a mixed list, the cache, `first_installed()` and `chain_builder._ollama_models()` all return only the generator.
-  - The role and the name rule each exclude a model by itself.
+  - The role, the name rule and a configured `LLM_ROUTER_CLASSIFIER_MODEL` each exclude a model by itself.
   - The live probe filters too.
   - The allow-list still admits a named `llamacpp:` import.
   - Importing the hook list does not load `discover`.
