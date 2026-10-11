@@ -276,8 +276,10 @@ async def call_llm(
         from llm_router.pack_overflow import PayloadPack
         # allow_model_swap=False (documented exception to PLAN v16 P1.3 task 1 "next eligible
         # model with a larger window"): here the model is chosen by router.py's chain, and
-        # swapping inside call_llm would bill and ledger the wrong model. The chain's next
-        # model, reached when ContextOverflow is raised, is this site's bigger-window step.
+        # swapping inside call_llm would bill and ledger the wrong model. ContextOverflow is
+        # caught by router.py's generic chain failover, which moves to the chain's next model;
+        # it does NOT pick a bigger-window model (router.py has no window-aware step), so the
+        # bigger-window part of P1.3 is not met at this site.
         pack = PayloadPack({"messages": cached_messages}, num_ctx=kwargs.get("num_ctx"),
                            model=kwargs["model"], site="providers.call_llm", allow_model_swap=False)
         cached_messages = kwargs["messages"] = pack.trim_to()["messages"]
@@ -485,8 +487,10 @@ async def call_llm_stream_events(
         from llm_router.pack_overflow import PayloadPack
         # allow_model_swap=False (documented exception to PLAN v16 P1.3 task 1 "next eligible
         # model with a larger window"): here the model is chosen by router.py's chain, and
-        # swapping inside call_llm would bill and ledger the wrong model. The chain's next
-        # model, reached when ContextOverflow is raised, is this site's bigger-window step.
+        # swapping inside call_llm would bill and ledger the wrong model. ContextOverflow is
+        # caught by router.py's generic chain failover, which moves to the chain's next model;
+        # it does NOT pick a bigger-window model (router.py has no window-aware step), so the
+        # bigger-window part of P1.3 is not met at this site.
         pack = PayloadPack({"messages": cached_messages}, num_ctx=kwargs.get("num_ctx"),
                            model=kwargs["model"], site="providers.call_llm_stream_events", allow_model_swap=False)
         cached_messages = kwargs["messages"] = pack.trim_to()["messages"]
