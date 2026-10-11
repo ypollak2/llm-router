@@ -17,8 +17,8 @@ very payload object it was given and changes no field, so every call site
 behaves exactly as before.
 
 Layers are recognised by tag in the text of a system-role message (or of the
-first message): ``<project-knowledge>``, ``<conversation-summary>`` and
-``<project-instructions>``. Untagged text is never touched. The pure
+first message). The tags are owned by `context_tags`; a renderer must emit them
+with `context_tags.render_layers(pack)`. Untagged text is never touched. The pure
 `trim_pack` does the same ordering on a `ContextPack`-shaped dataclass (fields
 ``project``, ``summary``, ``instructions``) without importing `context_pack`.
 """
@@ -30,13 +30,8 @@ import os
 import re
 from typing import Any
 
-#: Trim order. Index 0 goes first.
-LAYERS = ("project", "summary", "instructions")
-TAGS = {
-    "project": "project-knowledge",
-    "summary": "conversation-summary",
-    "instructions": "project-instructions",
-}
+from llm_router.context_tags import LAYERS, TAGS  # noqa: E402  (one owner for the tag names)
+
 #: Summary sections that survive summary trimming.
 KEEP_SUMMARY_SECTIONS = ("goal", "current state")
 

@@ -274,6 +274,10 @@ async def call_llm(
         # chain-failover `except Exception` with no further wiring.
         from llm_router.local_context_guard import check_overflow
         from llm_router.pack_overflow import PayloadPack
+        # allow_model_swap=False (documented exception to PLAN v16 P1.3 task 1 "next eligible
+        # model with a larger window"): here the model is chosen by router.py's chain, and
+        # swapping inside call_llm would bill and ledger the wrong model. The chain's next
+        # model, reached when ContextOverflow is raised, is this site's bigger-window step.
         pack = PayloadPack({"messages": cached_messages}, num_ctx=kwargs.get("num_ctx"),
                            model=kwargs["model"], site="providers.call_llm", allow_model_swap=False)
         cached_messages = kwargs["messages"] = pack.trim_to()["messages"]
@@ -479,6 +483,10 @@ async def call_llm_stream_events(
         # Same preflight as call_llm() — see local_context_guard module docstring.
         from llm_router.local_context_guard import check_overflow
         from llm_router.pack_overflow import PayloadPack
+        # allow_model_swap=False (documented exception to PLAN v16 P1.3 task 1 "next eligible
+        # model with a larger window"): here the model is chosen by router.py's chain, and
+        # swapping inside call_llm would bill and ledger the wrong model. The chain's next
+        # model, reached when ContextOverflow is raised, is this site's bigger-window step.
         pack = PayloadPack({"messages": cached_messages}, num_ctx=kwargs.get("num_ctx"),
                            model=kwargs["model"], site="providers.call_llm_stream_events", allow_model_swap=False)
         cached_messages = kwargs["messages"] = pack.trim_to()["messages"]

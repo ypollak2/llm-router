@@ -15,7 +15,7 @@ import pytest
 
 from llm_router import failopen
 from llm_router import local_context_guard as lcg
-from llm_router import local_models, pack_overflow
+from llm_router import context_tags, local_models, pack_overflow
 from llm_router.paths import is_isolated
 
 MODEL = "qwen3-coder:30b"
@@ -35,9 +35,7 @@ def _iso(tmp_path, monkeypatch):
     lcg.reset_cache()
 
 
-def _wrap(layer: str, body: str) -> str:
-    tag = pack_overflow.TAGS[layer]
-    return f"<{tag}>{body}</{tag}>"
+_wrap = context_tags.wrap
 
 
 SUMMARY = "## Goal\nship P1.3\n## Decisions\n" + "decided a thing\n" * 200 + "## Current state\nwriting tests\n"
@@ -266,3 +264,58 @@ async def test_synthetic_overflow_is_trimmed_to_fit_at_every_site(site, monkeypa
     assert _fits(sent[0]), f"{site}: sent payload still over window"
     assert "do the thing" in json.dumps(sent[0])
     assert "knowledge knowledge" not in json.dumps(sent[0])
+
+
+# ── the render/trim contract (context_tags is the single owner) ──────────────
+
+def test_render_layers_output_is_trimmed_in_order_by_trim_to(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PACK_OVERFLOW", "1")
+    pk = _Pack("do the thing", [], PROJECT, SUMMARY, INSTR)
+    rendered = context_tags.render_layers(pk)
+    for tag in ("project-knowledge", "conversation-summary", "project-instructions"):
+        assert f"<{tag}>" in rendered  # literal names: fails if the tag constants drift
+    p = _payload("BASE\n" + rendered)
+    t = lcg.estimate_payload_tokens
+    no_project = _payload("BASE\n" + context_tags.render_layers(_Pack("r", [], "", SUMMARY, INSTR)))
+    out = pack_overflow.PayloadPack(p, num_ctx=t(no_project) + 300, model=MODEL, allow_model_swap=False).trim_to()
+    text = out["messages"][0]["content"]
+    assert "knowledge" not in text and "decided a thing" in text and "a rule line" in text
+    out = pack_overflow.PayloadPack(p, num_ctx=700, model=MODEL, allow_model_swap=False).trim_to()
+    text = out["messages"][0]["content"]
+    assert "decided a thing" not in text and "ship P1.3" in text and "a rule line" not in text and "# Rules" in text
+
+
+def test_render_layers_omits_empty_layers():
+    assert context_tags.render_layers(_Pack("r", [])) == ""
+    assert context_tags.render_layers(_Pack("r", [], summary="## Goal\nx")) == "<conversation-summary>## Goal\nx</conversation-summary>"
+
+
+def test_pack_overflow_reads_layers_through_context_tags(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PACK_OVERFLOW", "1")
+    monkeypatch.setitem(context_tags.TAGS, "project", "renamed-knowledge")
+    p = _payload("BASE\n" + "<renamed-knowledge>" + PROJECT + "</renamed-knowledge>")
+    out = pack_overflow.PayloadPack(p, num_ctx=700, model=MODEL, allow_model_swap=False).trim_to()
+    assert "knowledge knowledge" not in out["messages"][0]["content"]
+
+
+# ── a swapped model/window reaches the caller ────────────────────────────────
+
+def test_agent_loop_and_direct_executor_use_the_swapped_model(monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_ROUTER_PACK_OVERFLOW", "1")
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_NUM_CTX", str(WINDOW))
+    monkeypatch.setitem(local_models.NUM_CTX, "big-a", 65536)
+    monkeypatch.setattr(pack_overflow, "pick_larger_model", lambda *a, **k: "big-a")
+    sent: list[dict] = []
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_spy(sent))
+    from llm_router.hooks import agent_loop, direct_executor
+
+    monkeypatch.setattr("llm_router.context_injection.inject_system_prompt", lambda sp, *a, **k: sp)
+    huge = "q" * 60_000
+    for run in (lambda: direct_executor.call_ollama(huge, MODEL), lambda: agent_loop.run_agent_loop(huge, MODEL, tmp_path)):
+        sent.clear()
+        try:
+            run()
+        except _Stop:
+            pass
+        assert len(sent) == 1
+        assert sent[0]["model"] == "big-a" and sent[0]["options"]["num_ctx"] == 65536

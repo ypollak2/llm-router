@@ -321,8 +321,11 @@ def call_ollama(
         pack = PayloadPack(payload, num_ctx=_local_num_ctx(model), base_url=ollama_url,
                            model=model, site="hooks.direct_executor.call_ollama")
         payload = pack.trim_to()
-        check_overflow(payload, num_ctx=pack.num_ctx, base_url=ollama_url,
-                       model=pack.model, site="hooks.direct_executor.call_ollama")
+        # A bigger-window swap changes the model; later code (truncation check) must see it.
+        model = pack.model
+        _swapped_ctx = pack.num_ctx
+        check_overflow(payload, num_ctx=_swapped_ctx, base_url=ollama_url,
+                       model=model, site="hooks.direct_executor.call_ollama")
     except ContextOverflow:
         _call_failure("ollama", model, "local_context_overflow")
         return None, {}
@@ -382,7 +385,7 @@ def call_ollama(
                         effective_window,
                         estimate_payload_tokens,
                     )
-                    _window, _ = effective_window(num_ctx=_local_num_ctx(model), base_url=ollama_url, model=model)
+                    _window, _ = effective_window(num_ctx=_swapped_ctx, base_url=ollama_url, model=model)
                     _pec = chunk.get("prompt_eval_count")
                     if check_truncated(_pec, estimate_payload_tokens(payload),
                                        _window, site="hooks.direct_executor.call_ollama", model=model) \

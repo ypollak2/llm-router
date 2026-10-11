@@ -575,7 +575,9 @@ def run_agent_loop(
             pack = PayloadPack(payload, num_ctx=_ctx, base_url=ollama_url, model=model,
                                site="hooks.agent_loop")
             payload = pack.trim_to()
-            check_overflow(payload, num_ctx=pack.num_ctx, base_url=ollama_url, model=pack.model,
+            # A bigger-window swap changes the model and window for this and later calls.
+            model, _ctx = pack.model, pack.num_ctx
+            check_overflow(payload, num_ctx=_ctx, base_url=ollama_url, model=model,
                            site="hooks.agent_loop")
         except ContextOverflow as _exc:
             _trace.emit("llm.error", iteration=iteration, error=str(_exc))
