@@ -236,23 +236,37 @@ def is_main_thread(body: dict, parent_main: bool | None = None) -> bool | None:
 #: prompt is prefixed ``The user sent a new message while you were working:``; a peer, a
 #: coordinator, a channel, a plugin, an observer, a scheduler and a task notification each
 #: have their own prefix. ``<cross-session-message`` is the peer envelope. Hook output
-#: (``additionalContext``, ``hook_success``, blocking errors, stop-continuation) is wrapped
-#: in ``<system-reminder>`` and stripped as a harness block; the silent-turn reminder text
-#: is listed because its wrapper was not found.
-_USER_QUEUED = "The user sent a new message while you were working"
+#: (``additionalContext``, ``hook_success``, ``async_hook_response``) is wrapped in
+#: ``<system-reminder>`` by the attachment normaliser and stripped as a harness block; the
+#: silent-turn reminder text is listed because its wrapper was not found. An ``unclassified``
+#: or ``slack-ping`` origin gets ``[MESSAGE FROM NON-USER SOURCE`` (listed). Activity seen in a
+#: bound conversation is framed ``Activity in the bound conversation ...``.
+_USER_QUEUED = "The user sent a new message while you were working:"
+#: A verified Slack human turn (``verifiedSlackHumanTurn``) is led by one of these; the
+#: harness places the lead only on such posts, and every non-user kind gets its own prefix
+#: instead, so a text that OPENS with the lead is the user's.
+_HUMAN_BOUND_THREAD = ("A message arrived in the bound thread while you were working:",
+                       "Messages arrived in the bound thread while you were working:")
 _NON_USER_MARKERS = (
     "[SYSTEM NOTIFICATION - NOT USER INPUT]", "[MESSAGE FROM NON-USER SOURCE", "[SCHEDULED TASK",
     "<cross-session-message", "The coordinator sent a message", "Another Claude session sent a message",
-    "Your background observer (", " plugin sent a message", "arrived in the bound thread",
+    "Your background observer (", " plugin sent a message",
+    "Activity in the bound conversation", "Activity was observed in the bound conversation",
     "The user hasn't heard from you in a while",
 )
+#: An ``observer-activity`` origin is delivered bare (the harness returns the text as is), but
+#: the digest frames itself: ``<NAME-activity ...>`` tags and a fixed postamble.
+_OBSERVER_DIGEST_TAG = re.compile(r"<[A-Za-z0-9_-]+-activity[\s>]")
+_OBSERVER_DIGEST_POSTAMBLE = "The activity above is a read-only digest of the agent you are observing"
 
 
 def _is_non_user_text(text: str) -> bool:
-    head = text.lstrip()[:400]
-    if _USER_QUEUED in head:
+    lead = text.lstrip()
+    if lead.startswith(_USER_QUEUED) or lead.startswith(_HUMAN_BOUND_THREAD):
         return False
-    return any(m in head for m in _NON_USER_MARKERS) or "while you were working" in head
+    head = lead[:400]
+    return (any(m in head for m in _NON_USER_MARKERS) or "while you were working" in head
+            or bool(_OBSERVER_DIGEST_TAG.search(head)) or _OBSERVER_DIGEST_POSTAMBLE in lead[-800:])
 
 
 def _typed_text_beside_results(body: dict) -> bool:
