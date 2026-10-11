@@ -702,6 +702,22 @@ def record_event(
         pass
 
 
+def _spill_to_archive(path: Path, lines: list[str]) -> None:
+    """Append *lines* (original order) to the archive file of the session log at *path*, fsynced."""
+    dest = path.parent / "archive" / path.name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    from llm_router.paths import private_opener
+    with open(dest, "ab", opener=private_opener) as out:
+        if out.tell() > 0:
+            with open(dest, "rb") as rf:
+                rf.seek(-1, os.SEEK_END)
+                if rf.read(1) != b"\n":
+                    out.write(b"\n")
+        out.write(("\n".join(lines) + "\n").encode("utf-8"))
+        out.flush()
+        os.fsync(out.fileno())
+
+
 def _maybe_compact(path: Path) -> None:
     """Rewrite *path* to keep only its newest ``_COMPACT_TO`` records once it
     exceeds ``_MAX_FILE_BYTES`` or ``_MAX_RECORDS`` lines, or once its oldest
@@ -737,7 +753,9 @@ def _maybe_compact(path: Path) -> None:
         if not need_compact:
             return
 
-        records: list[str] = []
+        # (line, parsed_ok) in file order. TTL-expired records are left out on purpose: B-02
+        # retention is a physical delete, so they are NOT spilled to the archive.
+        entries: list[tuple[str, bool]] = []
         with path.open("r", encoding="utf-8", errors="ignore") as fh:
             for line in fh:
                 line = line.strip()
@@ -746,16 +764,29 @@ def _maybe_compact(path: Path) -> None:
                 try:
                     parsed = json.loads(line)  # validate; keep raw line to avoid re-encoding cost
                 except Exception:
+                    entries.append((line, False))  # torn/corrupt: leaves live, spilled raw
                     continue
                 if ttl_cutoff is not None:
                     try:
                         if float(parsed.get("ts", 0)) < ttl_cutoff:
-                            continue  # B-02: physically drop expired record
+                            continue  # B-02: physically deleted
                     except Exception:
                         pass
-                records.append(line)
+                entries.append((line, True))
 
-        newest = records[-_COMPACT_TO:]
+        parsed_idx = [i for i, (_, ok) in enumerate(entries) if ok]
+        cut = parsed_idx[-_COMPACT_TO] if len(parsed_idx) > _COMPACT_TO else 0
+        newest = [ln for i, (ln, ok) in enumerate(entries) if ok and i >= cut]
+        # CTX-COMPACT-1: everything else that leaves the live file goes to the archive, in order.
+        dropped = [ln for i, (ln, ok) in enumerate(entries) if not (ok and i >= cut)]
+        # CTX-COMPACT-1 (R-CTX-4): append the dropped lines to the archive and fsync BEFORE the live
+        # file is replaced. A crash in between leaves them in both places (a duplicate that restore
+        # removes); it can never leave them in neither. If the spill fails, do not compact at all.
+        if dropped:
+            try:
+                _spill_to_archive(path, dropped)
+            except Exception:
+                return
         fd, tmp_path = tempfile.mkstemp(
             dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp",
         )
@@ -1109,7 +1140,14 @@ def archive_session(session_id: str | None) -> None:
             dest.parent.mkdir(parents=True, exist_ok=True)
             if dest.exists():
                 with open(dest, "ab") as out, open(path, "rb") as src:
+                    if out.tell() > 0:
+                        with open(dest, "rb") as rf:
+                            rf.seek(-1, os.SEEK_END)
+                            if rf.read(1) != b"\n":
+                                out.write(b"\n")
                     out.write(src.read())
+                    out.flush()
+                    os.fsync(out.fileno())  # CTX-COMPACT-1: durable before the live copy goes
                 path.unlink()
             else:
                 os.replace(path, dest)
@@ -1142,7 +1180,15 @@ def restore_session(session_id: str | None) -> bool:
             if data and not data.endswith(b"\n"):
                 data += b"\n"
             if path.exists():
-                data += path.read_bytes()
+                # CTX-COMPACT-1: a crash mid-spill / mid-restore can leave an event in both files;
+                # drop live lines that are byte-identical to an archive line (same ts + hash).
+                seen = set(data.split(b"\n"))
+                live = path.read_bytes()
+                if live and not live.endswith(b"\n"):
+                    live += b"\n"
+                data += b"".join(
+                    ln + b"\n" for ln in live.split(b"\n") if ln and ln not in seen
+                )
             fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".restore_", suffix=".tmp")
             try:
                 with os.fdopen(fd, "wb") as f:
