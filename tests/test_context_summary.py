@@ -5,7 +5,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -77,16 +76,19 @@ def test_low_free_memory_never_calls_model(tmp_path, db):
     assert src == "extractive" and not called
 
 
-def test_survives_restart(tmp_path, db):
+def test_survives_process_restart(tmp_path, db):
+    """Process A summarises and exits; process B (fresh interpreter) reads it back."""
     t = _write(tmp_path / "t.jsonl", convo(8))
-    cs.maybe_update("s1", t, model=None, db=db)
-    # a fresh process reads the same file-backed db
-    code = ("import sys; from llm_router import context_summary as c; "
-            "r=c.load_summary('s1'); print(r['upto_msg_idx'], r['source'])")
-    env = dict(os.environ, HOME=str(tmp_path), LLM_ROUTER_SESSIONS_PATH=str(db))
-    out = subprocess.run([sys.executable, "-I", "-c", code], env=env, capture_output=True, text=True,
-                         cwd=str(tmp_path))
-    assert out.stdout.split() == ["16", "extractive"], out.stderr
+    env = dict(os.environ, HOME=str(tmp_path), LLM_ROUTER_SESSIONS_PATH=str(db),
+               LLM_ROUTER_HOME=str(tmp_path / "home"))
+    w = ("from llm_router import context_summary as c; "
+         f"print(c.maybe_update('s1', {str(t)!r}, model=None))")
+    r = ("from llm_router import context_summary as c; "
+         "r=c.load_summary('s1'); print(r['upto_msg_idx'], r['source'], c.has_all_sections(r['text']))")
+    outs = [subprocess.run([sys.executable, "-I", "-c", code], env=env, capture_output=True, text=True,
+                           cwd=str(tmp_path)) for code in (w, r)]
+    assert outs[0].stdout.split() == ["extractive"], outs[0].stderr
+    assert outs[1].stdout.split() == ["16", "extractive", "True"], outs[1].stderr
 
 
 def test_compaction_stores_host_summary_and_continues(tmp_path, db):
@@ -150,6 +152,17 @@ def test_torn_trailing_line_ignored(tmp_path, db):
     assert cs.maybe_update("s1", t, model=None, db=db) == "extractive"
 
 
+def test_pick_model_uses_resource_map(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_SUMMARY_MODEL", raising=False)
+    row = lambda n, caps, st="connected": {"kind": "local", "status": st, "resource": f"ollama/{n}",  # noqa: E731
+                                           "capabilities": caps}
+    m = {"resources": [row("llama3:8b", ["generate"]), row("qwen3.5:9b", ["generate"], "absent"),
+                       row("qwen3.6:x", ["embedding"]), {"kind": "claude", "status": "connected", "resource": "claude"}]}
+    assert cs.pick_model(["qwen3.5:9b"], m) == "llama3:8b"   # map wins over /api/tags
+    assert cs.pick_model(["qwen3.5:9b"], {"resources": []}) is None
+    assert cs.pick_model(["qwen3.5:9b"], None) == "qwen3.5:9b"  # no map: tags
+
+
 def test_pick_model(monkeypatch):
     monkeypatch.delenv("LLM_ROUTER_SUMMARY_MODEL", raising=False)
     assert cs.pick_model(["llmr-edit:latest", "nomic-embed-text", "qwen3-coder:30b"]) is None
@@ -158,26 +171,36 @@ def test_pick_model(monkeypatch):
     assert cs.pick_model([]) == "x:1"
 
 
-def test_spawn_cooldown_and_p95_over_100_spawns(tmp_path, monkeypatch):
+def test_spawn_is_detached_nonblocking_and_cooled_down(tmp_path, monkeypatch):
+    """Deterministic: spawn hands argv to the fork+execv helper once per session
+    per cooldown and never waits on the child. No wall clock."""
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "home"))
-    argv = [sys.executable, "-I", "-c", "pass"]
-    times = []
+    calls = []
+    import llm_router.statusline_tick as st
+    monkeypatch.setattr(st, "_spawn_detached", lambda argv: calls.append(argv))
+    argv = ["worker", "--x"]
     for i in range(100):
-        t0 = time.perf_counter()
         assert cs.spawn(f"sess-{i}", "/x/t.jsonl", argv=argv) is True
-        times.append((time.perf_counter() - t0) * 1000)
-    time.sleep(0.5)
-    try:
-        while os.waitpid(-1, os.WNOHANG)[0]:
-            pass
-    except ChildProcessError:
-        pass
-    times.sort()
-    p95 = times[94]
-    print(f"spawn p95={p95:.2f} ms over n=100")
-    assert p95 <= 50.0
+    assert len(calls) == 100 and all(c == argv for c in calls)
     assert cs.spawn("sess-0", "/x/t.jsonl", argv=argv) is False  # cooldown
     assert cs.spawn("", "/x/t.jsonl", argv=argv) is False
+    assert len(calls) == 100
+    default = []
+    monkeypatch.setattr(st, "_spawn_detached", lambda a: default.append(a))
+    assert cs.spawn("fresh", "/t/x.jsonl") is True
+    assert default[0][1:3] == ["-m", "llm_router.context_summary"]
+
+
+@pytest.mark.timing
+def test_spawn_p95_harness_under_50ms():
+    """P1.2-a wall clock, in the serial timing lane, measured in a small separate process."""
+    root = Path(cs.__file__).resolve().parents[2]
+    out = subprocess.run([sys.executable, "-I", str(root / "scripts/bench/context_summary_spawn_bench.py"), "100"],
+                         capture_output=True, text=True, env={**os.environ, "PYTHONPATH": str(root / "src")},
+                         cwd=str(root), timeout=120)
+    r = json.loads(out.stdout.strip().splitlines()[-1])
+    print(r)
+    assert r["n"] == 100 and r["p95_ms"] <= 50.0, r
 
 
 def test_coverage_reports_n_and_informative(tmp_path, db):
