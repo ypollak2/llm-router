@@ -1,0 +1,3 @@
+CTX-COMPACT-1: session-context compaction no longer deletes events. Lines dropped when the live `session_context_<sid>.jsonl` is trimmed to its newest 150 (over 300 lines or 256KB) or aged out by the persist TTL are now appended (fsynced, original order) to `archive/session_context_<sid>.jsonl` before the live file is replaced, so a crash can duplicate a line but never lose one. SessionEnd appends the live file to that archive; resume drops live lines already present in the archive. The live file stays bounded, so hook read cost is unchanged.
+
+Evidence: `tests/test_session_store_spill.py` (8 tests; 180 writes of 1.3KB each with lowered thresholds, live + archive count equals writes after every call, union equals the written sequence). Owner decision D-57.
