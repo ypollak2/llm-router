@@ -84,14 +84,28 @@ def test_size_trigger(monkeypatch):
     assert _contents(_lines(arch) + _lines(live)) == _expected(30)
 
 
-def test_ttl_expired_lines_are_spilled(monkeypatch):
+def test_ttl_expired_lines_are_deleted_not_spilled(monkeypatch):
+    # B-02 retention is a physical delete; CTX-COMPACT-1 must not resurrect it in the archive.
     live, arch = _paths()
     live.parent.mkdir(parents=True, exist_ok=True)
     old = {"ts": time.time() - 90 * 86400, "kind": "k", "role": "user", "content": "old", "h": "a"}
     live.write_text(json.dumps(old) + "\n")
     ss.record_event(SID, "user_prompt", "new")
     assert _contents(_lines(live)) == ["new"]
-    assert _contents(_lines(arch)) == ["old"]
+    assert _lines(arch) == []
+
+
+def test_torn_line_is_spilled_not_dropped(monkeypatch):
+    monkeypatch.setattr(ss, "_MAX_RECORDS", 4)
+    monkeypatch.setattr(ss, "_COMPACT_TO", 2)
+    live, arch = _paths()
+    live.parent.mkdir(parents=True, exist_ok=True)
+    good = [json.dumps({"ts": time.time(), "kind": "k", "role": "user", "content": f"c{i}", "h": str(i)})
+            for i in range(3)]
+    live.write_text(good[0] + "\n" + '{"torn": \n' + good[1] + "\n" + good[2] + "\n")
+    ss.record_event(SID, "user_prompt", "c3")
+    assert _contents(_lines(live)) == ["c2", "c3"]
+    assert _lines(arch) == [good[0], '{"torn":', good[1]]
 
 
 def test_session_end_archive_is_spilled_then_live(monkeypatch):

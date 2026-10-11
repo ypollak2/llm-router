@@ -701,8 +701,9 @@ def _maybe_compact(path: Path) -> None:
         if not need_compact:
             return
 
-        records: list[str] = []
-        dropped: list[str] = []  # CTX-COMPACT-1: spilled to the archive, never deleted
+        # (line, parsed_ok) in file order. TTL-expired records are left out on purpose: B-02
+        # retention is a physical delete, so they are NOT spilled to the archive.
+        entries: list[tuple[str, bool]] = []
         with path.open("r", encoding="utf-8", errors="ignore") as fh:
             for line in fh:
                 line = line.strip()
@@ -711,18 +712,21 @@ def _maybe_compact(path: Path) -> None:
                 try:
                     parsed = json.loads(line)  # validate; keep raw line to avoid re-encoding cost
                 except Exception:
+                    entries.append((line, False))  # torn/corrupt: leaves live, spilled raw
                     continue
                 if ttl_cutoff is not None:
                     try:
                         if float(parsed.get("ts", 0)) < ttl_cutoff:
-                            dropped.append(line)  # B-02: leaves the live file (spilled below)
-                            continue
+                            continue  # B-02: physically deleted
                     except Exception:
                         pass
-                records.append(line)
+                entries.append((line, True))
 
-        newest = records[-_COMPACT_TO:]
-        dropped.extend(records[:-_COMPACT_TO] if len(records) > _COMPACT_TO else [])
+        parsed_idx = [i for i, (_, ok) in enumerate(entries) if ok]
+        cut = parsed_idx[-_COMPACT_TO] if len(parsed_idx) > _COMPACT_TO else 0
+        newest = [ln for i, (ln, ok) in enumerate(entries) if ok and i >= cut]
+        # CTX-COMPACT-1: everything else that leaves the live file goes to the archive, in order.
+        dropped = [ln for i, (ln, ok) in enumerate(entries) if not (ok and i >= cut)]
         # CTX-COMPACT-1 (R-CTX-4): append the dropped lines to the archive and fsync BEFORE the live
         # file is replaced. A crash in between leaves them in both places (a duplicate that restore
         # removes); it can never leave them in neither. If the spill fails, do not compact at all.
@@ -1084,9 +1088,14 @@ def archive_session(session_id: str | None) -> None:
             dest.parent.mkdir(parents=True, exist_ok=True)
             if dest.exists():
                 with open(dest, "ab") as out, open(path, "rb") as src:
-                    if out.tell() > 0 and dest.read_bytes()[-1:] != b"\n":
-                        out.write(b"\n")
+                    if out.tell() > 0:
+                        with open(dest, "rb") as rf:
+                            rf.seek(-1, os.SEEK_END)
+                            if rf.read(1) != b"\n":
+                                out.write(b"\n")
                     out.write(src.read())
+                    out.flush()
+                    os.fsync(out.fileno())  # CTX-COMPACT-1: durable before the live copy goes
                 path.unlink()
             else:
                 os.replace(path, dest)
