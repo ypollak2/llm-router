@@ -30,7 +30,7 @@ def _ok(provider: str = "openai", model: str = "openai/gpt-4o", cost: float = 0.
 
 
 class TestEveryAllowlistedProviderIsAccepted:
-    """Twelve mutants live in this frozenset. Each entry needs its own assertion.
+    """Thirteen mutants live in this frozenset. Each entry needs its own assertion.
 
     A single "openai is accepted" test kills none of the others: dropping 'groq' from
     the set is invisible unless something passes 'groq'.
@@ -40,6 +40,7 @@ class TestEveryAllowlistedProviderIsAccepted:
         "ollama", "openai", "gemini", "codex",
         "claude_subscription", "subscription", "anthropic",
         "perplexity", "groq", "deepseek", "cc", "claude",
+        "openai_compat",  # LOCAL-OVERRIDE-1: self-hosted server, explicit calls were unlogged
     ])
     def test_a_real_provider_is_accepted(self, provider):
         _ok(provider=provider)

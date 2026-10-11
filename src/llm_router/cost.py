@@ -1384,8 +1384,8 @@ async def log_usage(
                   else _call_identity.ledger_session_id(session_id))
     db = await _get_db()
     try:
-        # Local providers (ollama, codex) are free — override any calculated cost
-        cost_usd = 0.0 if response.provider in {"ollama", "codex", "gemini_cli"} else response.cost_usd
+        # Local providers (ollama, codex, openai_compat) are free — override any calculated cost
+        cost_usd = 0.0 if response.provider in {"ollama", "codex", "gemini_cli", "openai_compat"} else response.cost_usd
 
         # v9.4.0: compute counterfactual baseline so the dashboard's
         # realized-savings metric has data. Previously baseline_model was
@@ -2098,7 +2098,7 @@ def _validate_routing_insert(
     from llm_router.model_registry import GOOGLE_PROVIDERS, OPENAI_PROVIDERS
 
     VALID_PROVIDERS = frozenset({
-        'ollama', 'codex',
+        'ollama', 'codex', 'openai_compat',
         'claude_subscription', 'subscription', 'anthropic',
         'perplexity', 'groq', 'deepseek', 'cc',
         'claude',  # variations

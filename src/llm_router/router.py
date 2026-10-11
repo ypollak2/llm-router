@@ -3598,8 +3598,31 @@ async def _dispatch_model_loop(
             # and any unexpected exit, so the pressure oracle never leaks.
             release_tokens(provider, _res_tokens)
 
+    # LOCAL-OVERRIDE-1: an explicit override of a model on the user's own machine
+    # fails instead of walking the BUDGET chain, which can hold paid cloud models.
+    # A prompt sent to a local server must not leave the machine because that
+    # server is down. A cloud override keeps the fallback (owner decision).
+    # The provider is the part before the first "/": a bare "ollama" is a valid
+    # override (see the format check in _build_and_filter_chain).
+    _local_override = (
+        bool(model_override)
+        and model_override.split("/", 1)[0] in _QA_STRIP_PROVIDERS
+    )
+    _would_fall_back = profile != RoutingProfile.BUDGET and task_type not in MEDIA_TASK_TYPES
+    if _local_override and _would_fall_back:
+        log.warning(
+            "Explicit local override %s exhausted; BUDGET emergency fallback skipped",
+            model_override,
+        )
+        route_log.info(
+            "emergency_fallback_skipped",
+            correlation_id=correlation_id,
+            reason="local_model_override",
+            model=model_override,
+        )
+
     # ── Emergency fallback: try BUDGET chain when primary chain exhausts ────
-    if profile != RoutingProfile.BUDGET and task_type not in MEDIA_TASK_TYPES:
+    if _would_fall_back and not _local_override:
         await _notify(
             ctx, "warning",
             f"⚠️  {profile.value} chain exhausted — trying budget models as fallback"
