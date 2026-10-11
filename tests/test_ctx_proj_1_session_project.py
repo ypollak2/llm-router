@@ -82,11 +82,29 @@ def test_env_override_wins(tmp_path, monkeypatch):
     assert [f.parent.name for f in _shards("sid4")] == ["forced"]
 
 
-def test_explicit_project_root_wins(tmp_path):
-    a = _repo(tmp_path / "A")
+def test_explicit_project_root_wins_when_nothing_pinned(tmp_path):
     b = _repo(tmp_path / "B")
-    ss.write_pointer("sid5", cwd=str(a))
-    assert ss._session_path("sid5", str(b)).parent.name == _hash(b)
+    assert ss._session_path("sid5", str(b)).parent.name == _hash(b)  # no cwd record, no pin
+
+
+def test_pin_outranks_caller_project_root(tmp_path):
+    """MCP/gateway callers pass the session's LATEST cwd (worktree W): readers must still hit A."""
+    a = _repo(tmp_path / "A")
+    w = _repo(tmp_path / "W")
+    ss.write_pointer("sid5b", cwd=str(a))
+    ss.record_event("sid5b", "user_prompt", "written under A")
+    assert ss._session_path("sid5b", str(w)).parent.name == _hash(a)
+    assert [e["content"] for e in ss.load_events("sid5b", project_root=str(w))] == ["written under A"]
+    assert "written under A" in ss.build_session_context("sid5b", project_root=str(w))
+
+
+def test_env_override_beats_pin_and_caller_root(tmp_path, monkeypatch):
+    a = _repo(tmp_path / "A")
+    w = _repo(tmp_path / "W")
+    ss.write_pointer("sid5c", cwd=str(a))
+    ss._session_path("sid5c")  # pin
+    monkeypatch.setenv("LLM_ROUTER_PROJECT_ID", "forced")
+    assert ss._session_path("sid5c", str(w)).parent.name == "forced"
 
 
 def test_no_session_cwd_record_is_old_behaviour(tmp_path, monkeypatch):
@@ -107,7 +125,9 @@ def test_first_write_race_is_deterministic(tmp_path, monkeypatch):
     ss.record_event("sid7", "user_prompt", "early")
     ss.write_pointer("sid7", cwd=str(a))
     ss.record_event("sid7", "user_prompt", "late")
-    assert sorted(f.parent.name for f in _shards("sid7")) == sorted([_hash(a), _hash(b)])
+    # The pin's creation adopts the early shard (item 3), so only A's file remains live.
+    assert [f.parent.name for f in _shards("sid7")] == [_hash(a)]
+    assert [e["content"] for e in ss.load_events("sid7")] == ["early", "late"]
     assert ss._session_path("sid7").parent.name == _hash(a)
 
 
@@ -123,3 +143,94 @@ def test_archive_and_restore_use_same_project(tmp_path, monkeypatch):
     assert ss.restore_session("sid8")
     assert [f.parent.name for f in _shards("sid8")] == [_hash(a)]
     assert ss.load_events("sid8")[0]["content"] == "keep me"
+
+
+def _put(sid, root, text, ts, archive=False):
+    d = ss._state_dir() / "projects" / _hash(root)
+    if archive:
+        d = d / "archive"
+    d.mkdir(parents=True, exist_ok=True)
+    with (d / f"session_context_{sid}.jsonl").open("a") as fh:
+        fh.write(json.dumps({"ts": time.time() - 100 + ts, "role": "user", "content": text, "kind": "user_prompt"}) + "\n")
+
+
+def test_pin_creation_adopts_predeploy_shards_live_and_archive(tmp_path):
+    a = _repo(tmp_path / "A")
+    b = _repo(tmp_path / "B")
+    c = _repo(tmp_path / "C")
+    _put("sid9", b, "b1", 1.0)
+    _put("sid9", c, "c1", 3.0)
+    _put("sid9", b, "b-arch", 0.5, archive=True)
+    _put("sid9", c, "c-arch", 0.7, archive=True)
+    ss.write_pointer("sid9", cwd=str(a))
+    ss.record_event("sid9", "user_prompt", "a-new")  # first resolution creates the pin
+    live = _shards("sid9")
+    assert [f.parent.name for f in live] == [_hash(a)]
+    contents = [e["content"] for e in ss.load_events("sid9")]
+    assert contents[:2] == ["b1", "c1"] and "a-new" in contents and len(contents) == 3
+    arch = ss._archive_path("sid9")
+    assert arch.parent.parent.name == _hash(a)
+    assert [json.loads(x)["content"] for x in arch.read_text().splitlines()] == ["b-arch", "c-arch"]
+    # sources kept on disk as .premerge: nothing lost
+    assert list((ss._state_dir() / "projects").glob("*/session_context_sid9.jsonl.premerge"))
+    # second resolution does not re-merge or duplicate
+    ss.record_event("sid9", "user_prompt", "a-newer")
+    assert len(ss.load_events("sid9")) == 4
+
+
+def test_pin_adoption_single_foreign_shard_no_dupes(tmp_path):
+    a = _repo(tmp_path / "A")
+    b = _repo(tmp_path / "B")
+    _put("sid10", b, "only", 1.0)
+    ss.write_pointer("sid10", cwd=str(a))
+    assert [e["content"] for e in ss.load_events("sid10")] == ["only"]
+    assert [f.parent.name for f in _shards("sid10")] == [_hash(a)]
+
+
+def test_pin_write_is_atomic_and_complete(tmp_path):
+    a = _repo(tmp_path / "A")
+    ss.write_pointer("sid11", cwd=str(a))
+    ss._session_path("sid11")
+    pin = ss._state_dir() / "session_project_sid11.json"
+    assert json.loads(pin.read_text())["project_root"] == str(a.resolve())
+    assert not list(ss._state_dir().glob(".pin_*"))  # temp file removed
+
+
+def test_pin_race_loser_reads_winner(tmp_path, monkeypatch):
+    a = _repo(tmp_path / "A")
+    b = _repo(tmp_path / "B")
+    ss.write_pointer("sid12", cwd=str(a))
+    pin = ss._state_dir() / "session_project_sid12.json"
+    real_link = ss.os.link
+
+    def racing_link(src, dst):
+        pin.write_text(json.dumps({"project_root": str(b.resolve()), "ts": 1}))  # winner sneaks in
+        return real_link(src, dst)  # raises FileExistsError
+
+    monkeypatch.setattr(ss.os, "link", racing_link)
+    assert ss._session_path("sid12").parent.name == _hash(b)
+
+
+def _age(path, days):
+    t = time.time() - days * 86400
+    ss.os.utime(path, (t, t))
+
+
+def test_cleanup_sweeps_orphan_pin_and_cwd_record(tmp_path):
+    a = _repo(tmp_path / "A")
+    sd = ss._state_dir()
+    for sid in ("dead", "alive", "arch", "young"):
+        ss.write_pointer(sid, cwd=str(a))
+        ss._session_path(sid)  # pin
+    ss.record_event("alive", "user_prompt", "x")
+    ss.record_event("arch", "user_prompt", "x")
+    ss.archive_session("arch")
+    for sid in ("dead", "alive", "arch"):
+        for f in (sd / f"session_project_{sid}.json", sd / f"session_cwd_{sid}.json"):
+            _age(f, ss._TTL_DAYS + 1)
+    ss.cleanup_old_sessions()
+    assert not (sd / "session_project_dead.json").exists()
+    assert not (sd / "session_cwd_dead.json").exists()
+    for sid in ("alive", "arch", "young"):  # has a log / archive, or younger than the TTL
+        assert (sd / f"session_project_{sid}.json").exists()
+        assert (sd / f"session_cwd_{sid}.json").exists()

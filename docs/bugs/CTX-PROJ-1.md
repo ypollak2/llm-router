@@ -11,15 +11,32 @@ status: fixed in `fix/ctx-project-per-session` (owner decision D-57; sessions al
   process. Bash-spawned test/E2E processes inherit the session id and call `router.route_and_call`
   (finalizer records events), and a `cd` into a git worktree changes the root, so each wrote under
   its own hash.
-- **Fix.** `_project_id(project_root, session_id)`: for a known session id (and no
-  `LLM_ROUTER_PROJECT_ID` / explicit root) the project is the repo root of the session's cwd from
-  `~/.llm-router/session_cwd_<sid>.json` (written by the prompt hook), pinned on first use in
-  `session_project_<sid>.json` (O_EXCL, first wins, not age-limited) so later `cd`s cannot move it.
-  `_session_path` and `_archive_path` pass the session id, so record, load, purge, merge, archive
-  and restore resolve identically; `context._resolve_context_identity` passes it too. First-write
-  race: before the hook has written a record nothing is pinned and the writer's cwd is used (old
-  behaviour); those early events stay in that shard.
-- **Test.** `tests/test_ctx_proj_1_session_project.py` (8 tests): events from repo B, a worktree of A
-  and a subdir land in one file under A's hash; pin survives the cwd record moving or ageing; env
-  override and explicit root win; no record / no session id is the old behaviour; race behaviour;
-  archive and restore use A's hash. On main, the tests that exercise the fix fail.
+- **Fix.** `_project_id(project_root, session_id)`: for a known session id the project is the
+  repo root of the session's cwd from `~/.llm-router/session_cwd_<sid>.json` (written by the prompt
+  hook), pinned on first use in `session_project_<sid>.json` so later `cd`s cannot move it.
+  Final semantics, in precedence order:
+  1. `LLM_ROUTER_PROJECT_ID` wins over everything.
+  2. A session's **pin outranks a caller-derived `project_root`**. MCP/gateway callers pass the
+     session's LATEST cwd (`mcp_roots._root_from_session_pointer`); honouring it would read
+     hash(worktree) while writers write hash(repo). An explicit `project_root` is used only when the
+     session has no pin and no cwd record, or when no session id is given.
+  3. No session id / no cwd record: the old behaviour (writer's cwd), nothing pinned.
+  The pin is created atomically (temp file + `os.link`; the loser of a race re-reads the winner's
+  pin, one retry), is not age-limited, and `_session_path`/`_archive_path` pass the session id so
+  record, load, purge, merge, archive and restore resolve identically.
+  **Deploy-time adoption.** When a pin is first CREATED for a sid, its existing shards in other
+  project dirs (live and `archive/`) are folded into the pinned project via `merge_session_shards`
+  (ts-ordered, de-duplicated, under the target's lock; sources kept as `*.premerge`). So a session
+  running at deploy does not orphan its pre-deploy events. If the lock times out the merge is
+  skipped and the shards stay put: run `llm-router sessions merge`. Events written before the first
+  hook record exists (the first-write race) are adopted the same way once the pin appears.
+  **Cleanup.** `cleanup_old_sessions` deletes `session_project_<sid>.json` and
+  `session_cwd_<sid>.json` older than `_TTL_DAYS` when no `session_context_<sid>.jsonl` exists
+  (live or archive, any project dir).
+- **Test.** `tests/test_ctx_proj_1_session_project.py` (15 tests): events from repo B, a worktree
+  of A and a subdir land in one file under A's hash; pin survives the cwd record moving or ageing;
+  pin beats a caller `project_root` (load_events and build_session_context); env override beats pin
+  and root; no record / no session id is the old behaviour; first-write race is adopted; archive and
+  restore use A's hash; pre-deploy live + archive shards from two other dirs are merged in order
+  without loss or duplicates; pin write is atomic; race loser reads the winner; cleanup sweeps only
+  orphaned, aged pins and cwd records.

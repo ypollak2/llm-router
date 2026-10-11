@@ -203,8 +203,13 @@ def _project_id(project_root: str | None = None, session_id: str | None = None) 
             return re.sub(r"[^A-Za-z0-9._-]", "_", explicit)[:64] or "default"
     except Exception:
         pass
-    if not project_root and session_id:
-        project_root = _session_project_root(session_id)
+    if session_id:
+        # CTX-PROJ-1: the session's pin outranks a caller-derived root. MCP/gateway callers pass the
+        # session's LATEST cwd (mcp_roots._root_from_session_pointer); honouring it would put readers
+        # at hash(worktree) while the writers stay at the pinned hash(repo).
+        pinned = _session_project_root(session_id)
+        if pinned:
+            project_root = pinned
     if project_root:
         # An explicit root from the CALLER. The MCP server's cwd is $HOME, a
         # directory no session ever writes to, so deriving the bucket from the
@@ -260,22 +265,70 @@ def _session_project_root(session_id: str) -> str | None:
         root = _repo_root_of(cwd)
         try:
             pin.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(str(pin), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump({"project_root": root, "ts": time.time()}, fh)
-        except FileExistsError:
-            # Lost a race: the winner's pin is the truth.
+            # Atomic publish: write a private temp file, then os.link it to the pin path. link()
+            # fails with FileExistsError if a winner exists, and a reader never sees a partial file.
+            fd, tmp = tempfile.mkstemp(dir=str(pin.parent), prefix=".pin_", suffix=".tmp")
             try:
-                won = json.loads(pin.read_text(encoding="utf-8")).get("project_root")
-                if isinstance(won, str) and won:
-                    return won
-            except Exception:  # noqa: BLE001
-                pass
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump({"project_root": root, "ts": time.time()}, fh)
+                os.chmod(tmp, 0o600)
+                os.link(tmp, pin)
+                created = True
+            except FileExistsError:
+                created = False
+            finally:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+            if not created:
+                # Lost a race: the winner's pin is the truth (one retry covers a slow filesystem).
+                for _ in range(2):
+                    try:
+                        won = json.loads(pin.read_text(encoding="utf-8")).get("project_root")
+                        if isinstance(won, str) and won:
+                            return won
+                    except Exception:  # noqa: BLE001
+                        time.sleep(0.02)
+            else:
+                _adopt_foreign_shards(session_id, root)
         except OSError:
             pass
         return root
     except Exception:  # noqa: BLE001 — absent/unreadable record: old behaviour
         return None
+
+
+def _adopt_foreign_shards(session_id: str, root: str) -> None:
+    """Pin just created for *session_id*: fold its pre-pin shards into the pinned project.
+
+    A session already running at deploy wrote under hash(cwd-at-the-time); without this its older
+    events (live and archived) would sit in other project dirs and never be archived or restored
+    with the session. Reuses ``merge_session_shards`` (order by ts, de-duplicated, sources kept as
+    ``*.premerge``) under the target's lock. Best-effort: a failure leaves the shards in place for
+    ``llm-router sessions merge``.
+    """
+    try:
+        pdir = _state_dir() / "projects" / hashlib.sha1(
+            root.encode("utf-8", errors="ignore"), usedforsecurity=False
+        ).hexdigest()[:16]
+        name = f"session_context_{_sanitize(session_id)}.jsonl"
+        projects = _state_dir() / "projects"
+        live = sorted(p for p in projects.glob(f"*/{name}") if p.is_file())
+        arch = sorted(p for p in projects.glob(f"*/archive/{name}") if p.is_file())
+        target, atarget = pdir / name, pdir / "archive" / name
+        if not any(p != target for p in live) and not any(p != atarget for p in arch):
+            return
+        with exclusive_lock(_lock_path(target)) as locked:
+            if not locked:
+                _note_lock_timeout("session adopt")
+                return
+            if any(p != target for p in live):
+                merge_session_shards(session_id, apply=True, paths=live, target=target)
+            if any(p != atarget for p in arch):
+                merge_session_shards(session_id, apply=True, paths=arch, target=atarget)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _repo_root_of(start: str) -> str:
@@ -960,8 +1013,26 @@ def cleanup_old_sessions(max_age_days: int = _TTL_DAYS) -> None:
                     p.unlink()
             except OSError:
                 pass
+        _sweep_orphan_pins(state_dir, cutoff)
     except Exception:
         pass
+
+
+def _sweep_orphan_pins(state_dir: Path, cutoff: float) -> None:
+    """Delete ``session_project_<sid>.json`` and ``session_cwd_<sid>.json`` older than *cutoff*
+    whose session has no ``session_context_<sid>.jsonl`` anywhere (live or archive, any project)."""
+    have: set[str] = set()
+    for pat in ("session_context_*.jsonl", "projects/*/session_context_*.jsonl",
+                "projects/*/archive/session_context_*.jsonl"):
+        for p in state_dir.glob(pat):
+            have.add(p.name[len("session_context_"):-len(".jsonl")])
+    for prefix in ("session_project_", "session_cwd_"):
+        for p in state_dir.glob(f"{prefix}*.json"):
+            try:
+                if p.name[len(prefix):-len(".json")] not in have and p.stat().st_mtime < cutoff:
+                    p.unlink()
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -1035,7 +1106,13 @@ def fragmented_sessions() -> dict[str, dict[str, Any]]:
     return found
 
 
-def merge_session_shards(session_id: str, apply: bool = False) -> dict[str, Any]:
+def merge_session_shards(
+    session_id: str,
+    apply: bool = False,
+    *,
+    paths: list[Path] | None = None,
+    target: Path | None = None,
+) -> dict[str, Any]:
     """Consolidate every shard of *session_id* into the current project's log.
 
     Ordering is by recorded timestamp where events carry one, because a merged
@@ -1045,7 +1122,9 @@ def merge_session_shards(session_id: str, apply: bool = False) -> dict[str, Any]
     Returns a report dict. With ``apply=False`` (the default) nothing is written —
     a merge that turns out to be wrong should be discovered before it is applied.
     """
-    paths = _shard_paths(session_id)
+    adopt = target is not None  # internal: fold foreign shards into an explicit target
+    if paths is None:
+        paths = _shard_paths(session_id)
     report: dict[str, Any] = {
         "session_id": session_id,
         "shards": len(paths),
@@ -1077,12 +1156,13 @@ def merge_session_shards(session_id: str, apply: bool = False) -> dict[str, Any]
             return 0.0
 
     merged.sort(key=_ts)
-    target = _session_path(session_id)
+    if target is None:
+        target = _session_path(session_id)
     report["target"] = str(target)
     report["merged"] = max(0, len(merged) - max(
         (len(_read_shard(p)) for p in paths), default=0
     ))
-    if len(paths) < 2 or not apply:
+    if (len(paths) < 2 and not (adopt and paths and paths[0] != target)) or not apply:
         return report
 
     try:
