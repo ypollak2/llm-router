@@ -20,7 +20,6 @@ import ast
 import asyncio
 import json
 import os
-import time
 from pathlib import Path
 
 import pytest
@@ -30,7 +29,7 @@ from tests.fixtures.dyn import homes
 from tests.fixtures.dyn.fake_ollama import FakeLocalServer
 from tests.fixtures.dyn.net_guard import ForeignHostConnection, net_guard
 from tests.fixtures.dyn.router_chain import (
-    FIXTURES, INJECTED, PROFILES, TASKS, FakeConfig, all_chains, build, isolated, pattern,
+    FIXTURES, INJECTED, FakeConfig, all_chains, build, isolated, pattern,
 )
 
 A, B, C, D, X, Y = INJECTED
