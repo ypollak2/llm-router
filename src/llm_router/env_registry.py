@@ -402,6 +402,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # The classifier's own Ollama alias (M1.4): other callers load qwen3.5 at a different
     # num_ctx, and a shared name would reload the runner back and forth.
     "LLM_ROUTER_CLASSIFIER_MODEL": ("llm_router", "local_classifier.py", 1),
+    # N19b: exact local model names exempt from the classifier / llamacpp: exclusion in code chains.
+    "LLM_ROUTER_LOCAL_ALLOW_MODELS": ("llm_router", "discover.py", 1),
     "LLM_ROUTER_CLASSIFIER_KEEP_ALIVE": ("llm_router", "local_classifier.py", 1),
     # M1.8 round 3: decision-model backend (Ollama /v1/systemone, nimble). Default OFF
     # (backend "chat" = the v6 /api/chat classifier); see decision_classifier.py.

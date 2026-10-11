@@ -861,7 +861,11 @@ class RouterConfig(BaseSettings):
             return []
 
         os.environ.setdefault("OLLAMA_API_BASE", effective_url)
-        return [f"ollama/{m.strip()}" for m in self.ollama_budget_models.split(",") if m.strip()]
+        from llm_router.discover import ollama_can_generate
+        return [
+            f"ollama/{m.strip()}" for m in self.ollama_budget_models.split(",")
+            if m.strip() and ollama_can_generate(m.strip())
+        ]
 
     def all_openai_compat_models(self) -> list[str]:
         """Return model IDs for the configured OpenAI-compatible local server.
