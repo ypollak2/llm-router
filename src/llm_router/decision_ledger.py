@@ -28,7 +28,7 @@ import time
 import uuid
 from pathlib import Path
 
-from llm_router import paths, prompt_key
+from llm_router import failopen, paths, prompt_key
 
 LEDGER_FILENAME = "decisions.jsonl"
 LABELS_FILENAME = "decision_labels.jsonl"
@@ -199,7 +199,8 @@ def record(d, **kw) -> dict | None:
         row = build_row(d, **kw)
         _append(ledger_path(), row)
         return row
-    except Exception:  # noqa: BLE001 - a ledger never stalls routing
+    except Exception as exc:  # noqa: BLE001 - a ledger never stalls routing
+        failopen.record("LR-FO-DECISION-LEDGER-WRITE", exc)
         return None
 
 
@@ -212,7 +213,8 @@ def record_label(decision_id: str, ref_tier: str, source: str, *, now: float | N
         _append(labels_path(), {"decision_id": decision_id, "ref_tier": ref_tier, "source": source,
                                 "ts": round(time.time() if now is None else now, 3)})
         return True
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        failopen.record("LR-FO-DECISION-LABEL-WRITE", exc)
         return False
 
 
