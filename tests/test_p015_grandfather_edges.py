@@ -113,3 +113,26 @@ def test_compat_lookup_failure_records_and_preserves_ollama_claim(state, monkeyp
     md.ensure_grandfather(["ollama/a:7b"])
     assert claimed_ids(state) == ["ollama/a:7b"]
     assert records[0][0] == "CHZ-FO-PROMOTE-GATE-GRANDFATHER-COMPAT"
+
+
+def test_real_direct_route_rows_are_not_history(state):
+    """#434 review: a DIRECT hook route writes a routing_decisions row AND a usage twin
+    (reason='direct', routed provider). Neither may turn a fresh install into an upgrade."""
+    from llm_router.hooks import savings_logger
+
+    result = SimpleNamespace(
+        model=SimpleNamespace(provider="ollama", model="qwen3:8b"),
+        input_tokens=12, output_tokens=7, latency_ms=150.0,
+        text="ok", content="ok", cost_usd=0.0, success=True,
+    )
+    savings_logger.log_direct_to_db(result, prompt="hi", task_type="query",
+                                    complexity="simple", session_id="s-direct")
+    db = state / "usage.db"
+    with sqlite3.connect(db) as con:
+        assert con.execute("SELECT COUNT(*) FROM usage WHERE reason='direct'").fetchone()[0] >= 1
+        assert con.execute(
+            "SELECT COUNT(*) FROM routing_decisions WHERE reason_code='direct'").fetchone()[0] >= 1
+    assert not md._usage_db_has_history(db)
+    md.order_for_chain([], "query", critical=False)
+    md.ensure_grandfather(["ollama/justpulled:7b"])
+    assert claimed_ids(state) == []

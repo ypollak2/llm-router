@@ -593,6 +593,7 @@ def find_unmarked(calls) -> list[str]:
             if (rel, fn, name, n) not in CALLERS]
 
 
+@pytest.mark.timeout(120)  # AST walk of all of src; 30 s default starved under -n auto (#434 CI)
 def test_every_caller_of_the_five_list_functions_is_marked_order_or_existence():
     calls = _calls()
     assert len(calls) >= 10, f"the audit saw only {len(calls)} callers; it is not looking at the code"
@@ -641,6 +642,7 @@ def test_the_audit_finds_at_least_ten_callers_and_both_kinds():
     assert len(calls) >= 10 and kinds == {"order", "existence"}
 
 
+@pytest.mark.timeout(120)  # AST walk of all of src; 30 s default starved under -n auto (#434 CI)
 def test_the_audit_notices_a_new_ungated_caller():
     """Negative control: a fresh injection site (not in the table) is reported."""
     canary = ("src/llm_router/_canary.py", "inject", "all_ollama_models", 0, "src/llm_router/_canary.py:2")

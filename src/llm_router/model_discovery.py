@@ -346,8 +346,19 @@ def _usage_db_has_history(path: Path) -> bool:
     try:
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.2)
         try:
+            # DIRECT hook routes (savings_logger.log_direct_to_db) write a usage twin with
+            # reason='direct' and the routed provider, so the usage filter must drop it too.
+            # Older schemas lack the reason column; the second usage query is the fallback.
+            usage_queries = (
+                "SELECT 1 FROM usage WHERE provider != 'cc' "
+                "AND (reason IS NULL OR reason != 'direct') LIMIT 1",
+            )
+            try:
+                con.execute("SELECT reason FROM usage LIMIT 0")
+            except sqlite3.Error:
+                usage_queries = ("SELECT 1 FROM usage WHERE provider != 'cc' LIMIT 1",)
             for query in (
-                "SELECT 1 FROM usage WHERE provider != 'cc' LIMIT 1",
+                *usage_queries,
                 "SELECT 1 FROM routing_decisions "
                 "WHERE reason_code IS NULL OR reason_code != 'direct' LIMIT 1",
             ):
