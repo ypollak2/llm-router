@@ -350,6 +350,10 @@ def save_profile(yaml_content: str) -> Path:
         Path to saved profile file
     """
     data = yaml_content.encode("utf-8")
+    # P0.15-c: profile.yaml counts as prior state for the grandfather file, so the one-time
+    # write must happen before this file exists on a fresh install.
+    from llm_router.model_discovery import ensure_grandfather
+    ensure_grandfather()
     _atomic_write_bytes(_profile_path(), data)
     _atomic_write_bytes(
         _profile_hash_path(),

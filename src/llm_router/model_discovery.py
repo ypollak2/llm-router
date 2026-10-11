@@ -450,6 +450,23 @@ def order_for_chain(
     return front, ([] if critical else unvalidated)
 
 
+def sink_unvalidated(models: "list[str]", task_class: str,
+                     configured: "tuple[str, ...] | list[str]" = ()) -> "list[str]":
+    """Stable-move every unvalidated local id in ``models`` to the end (P0.15, D-60c = A).
+
+    For reorders that run after the chain is built (the bandit's explore step can pick
+    any entry). Chain order is otherwise unchanged. Gate off: ``models`` as given.
+    """
+    local = [m for m in models if m.startswith(_LOCAL_ID_PREFIXES)]
+    if not local or not gate_enabled():
+        return list(models)
+    front, tail = order_for_chain(local, task_class, critical=False, configured=configured)
+    if not tail:
+        return list(models)
+    sunk = set(tail)
+    return [m for m in models if m not in sunk] + [m for m in models if m in sunk]
+
+
 def first_installed(prefer: tuple[str, ...] = ()) -> str | None:
     """The best local model that is ACTUALLY installed, or None.
 

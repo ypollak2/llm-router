@@ -338,6 +338,26 @@ def test_a_fresh_install_grandfathers_nothing(state):
     assert (front, tail) == ([], ["ollama/first-model:7b"])
 
 
+def test_profile_yaml_written_first_on_a_fresh_install_is_not_prior_state(state):
+    from llm_router import auto_profile
+
+    auto_profile.save_profile("routing: {}\n")
+    assert json.loads(grandfather_bytes(state))["ids"] == []
+    assert md.order_for_chain([A], "query", critical=False) == ([], [A])
+
+
+def test_the_bandit_cannot_pull_an_unvalidated_model_forward(state):
+    first_run_with(state, [A])
+    chain = ["openai/gpt-4o-mini", B, A, "deepseek/deepseek-chat"]
+    assert md.sink_unvalidated(chain, "query") == ["openai/gpt-4o-mini", A, "deepseek/deepseek-chat", B]
+    import os as _os
+    _os.environ["LLM_ROUTER_PROMOTE_GATE"] = "off"
+    try:
+        assert md.sink_unvalidated(chain, "query") == chain
+    finally:
+        _os.environ.pop("LLM_ROUTER_PROMOTE_GATE")
+
+
 @pytest.mark.parametrize("prior", ["discovery.json", "profile.yaml", "usage.db"])
 def test_any_one_prior_state_file_makes_it_an_upgrade(state, prior):
     (state / prior).write_text("{}" if prior.endswith(".json") else "x")
