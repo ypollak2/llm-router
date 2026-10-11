@@ -185,8 +185,11 @@ def _state_dir() -> Path:
     return llm_router_home()
 
 
-def _project_id(project_root: str | None = None) -> str:
+def _project_id(project_root: str | None = None, session_id: str | None = None) -> str:
     """Stable identifier for the current project scope.
+
+    CTX-PROJ-1: with a *session_id* (and no explicit root/override) the project is
+    the session's, not the writing process's: see ``_session_project_root``.
 
     Precedence: ``$LLM_ROUTER_PROJECT_ID`` (explicit override) → a short hash of
     the current working directory. Cross-project isolation depends on this:
@@ -200,6 +203,8 @@ def _project_id(project_root: str | None = None) -> str:
             return re.sub(r"[^A-Za-z0-9._-]", "_", explicit)[:64] or "default"
     except Exception:
         pass
+    if not project_root and session_id:
+        project_root = _session_project_root(session_id)
     if project_root:
         # An explicit root from the CALLER. The MCP server's cwd is $HOME, a
         # directory no session ever writes to, so deriving the bucket from the
@@ -226,6 +231,53 @@ def _project_id(project_root: str | None = None) -> str:
     ).hexdigest()[:16]
 
 
+def _session_project_root(session_id: str) -> str | None:
+    """The repo root this session is pinned to, or None (caller falls back to its cwd).
+
+    CTX-PROJ-1 (D-57): hashing the writing process's cwd scattered one session id
+    across several ``projects/<hash>/`` shards (Bash-spawned test processes that
+    inherit the session id, a ``cd`` into a worktree). The hooks record the
+    session's cwd in ``session_cwd_<sid>.json``; the first time that record exists
+    its repo root is pinned in ``session_project_<sid>.json`` (O_EXCL, first wins),
+    so later ``cd``s and the record's rewrites cannot move the session. The pin is
+    deliberately not age-limited (``read_session_cwd`` is, by 12 h): a session
+    resumed a day later must find its own file. First-write race: before the hook
+    has written a record nothing is pinned and the writer's cwd is used (the old
+    behaviour); events written in that window stay in that shard.
+    """
+    try:
+        pin = _state_dir() / f"session_project_{_sanitize(session_id)}.json"
+        try:
+            root = json.loads(pin.read_text(encoding="utf-8")).get("project_root")
+            if isinstance(root, str) and root:
+                return root
+        except Exception:  # noqa: BLE001 — no usable pin yet
+            pass
+        rec = json.loads(_session_cwd_path(session_id).read_text(encoding="utf-8"))
+        cwd = str(rec.get("cwd") or "")
+        if not cwd:
+            return None
+        root = _repo_root_of(cwd)
+        try:
+            pin.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(pin), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({"project_root": root, "ts": time.time()}, fh)
+        except FileExistsError:
+            # Lost a race: the winner's pin is the truth.
+            try:
+                won = json.loads(pin.read_text(encoding="utf-8")).get("project_root")
+                if isinstance(won, str) and won:
+                    return won
+            except Exception:  # noqa: BLE001
+                pass
+        except OSError:
+            pass
+        return root
+    except Exception:  # noqa: BLE001 — absent/unreadable record: old behaviour
+        return None
+
+
 def _repo_root_of(start: str) -> str:
     """Nearest ancestor of *start* containing ``.git``, else *start* unchanged.
 
@@ -246,9 +298,9 @@ def _repo_root_of(start: str) -> str:
     return str(here)
 
 
-def _project_dir(project_root: str | None = None) -> Path:
+def _project_dir(project_root: str | None = None, session_id: str | None = None) -> Path:
     """Project-scoped state dir: ``~/.llm-router/projects/<project_id>``."""
-    return _state_dir() / "projects" / _project_id(project_root)
+    return _state_dir() / "projects" / _project_id(project_root, session_id)
 
 
 def _sanitize(session_id: str) -> str:
@@ -269,7 +321,7 @@ def _session_path(session_id: str, project_root: str | None = None) -> Path:
     genuinely different project stay with that project. See ``_repo_root_of`` for
     the part that IS fixed — subdirectories of one repo no longer split.
     """
-    return _project_dir(project_root) / f"session_context_{_sanitize(session_id)}.jsonl"
+    return _project_dir(project_root, session_id) / f"session_context_{_sanitize(session_id)}.jsonl"
 
 
 def _lock_path(path: Path) -> Path:
@@ -1025,7 +1077,7 @@ def merge_session_shards(session_id: str, apply: bool = False) -> dict[str, Any]
 
 def _archive_path(session_id: str, project_root: str | None = None) -> Path:
     """Where SessionEnd parks *session_id*'s log until the session resumes or ages out."""
-    return _project_dir(project_root) / "archive" / f"session_context_{_sanitize(session_id)}.jsonl"
+    return _project_dir(project_root, session_id) / "archive" / f"session_context_{_sanitize(session_id)}.jsonl"
 
 
 def archive_session(session_id: str | None) -> None:
