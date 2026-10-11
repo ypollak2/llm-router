@@ -33,7 +33,7 @@ log = get_logger("llm_router.dynamic_routing")
 # Protected by _routing_lock to prevent race conditions between async event loop and daemon thread
 _dynamic_routing_table: dict[tuple[RoutingProfile, TaskType], list[str]] | None = None
 _discovery_complete = False
-_built_map_token: int | None = None  # resource-map mtime the table was built against
+_built_map_token: tuple | None = None  # resource-map mtime the table was built against
 _routing_lock = threading.Lock()  # Protects _dynamic_routing_table and _discovery_complete
 
 def _profile_path():
@@ -259,7 +259,11 @@ def build_dynamic_routing_table(
         available_providers = get_available_providers()
 
     # Always allow codex and ollama (they're local/special and handled separately)
-    available_providers = available_providers | {"codex", "ollama", "gemini_cli"}
+    # (P1.8: minus any the resource map says are not connected)
+    from llm_router import map_reader
+
+    available_providers = available_providers | map_reader.filter_providers(
+        {"codex", "ollama", "gemini_cli"})
 
     # Get quota pressure information
     quota_pressure = _get_quota_pressure()

@@ -4,10 +4,12 @@ The router, the hooks, the proxy and the dynamic table only ever READ
 ``resource_map.json``; the map is built by ``llm-router map`` or the MCP
 ``llm_router_status(view="map")`` door (:mod:`llm_router.resource_map`).
 
-Every function here is fail-open. A missing, unreadable, other-schema or stale
-(older than :data:`MAX_AGE_S`) file gives ``None`` and the caller keeps today's
-chain unchanged, so an install that has never written a map routes exactly as
-before. A filter that would empty a non-empty chain is not applied.
+Every function here is fail-open on the MAP: a missing, unreadable, other-schema
+or stale (older than :data:`MAX_AGE_S`) file gives ``None`` and the caller keeps
+today's chain unchanged, so an install that has never written a map routes
+exactly as before. With a fresh map the rule is "never route to a resource the
+map says is not connected": a filter that empties the chain returns ``[]``, and
+each door's existing nothing-routable path takes over (the host model answers).
 """
 from __future__ import annotations
 
@@ -89,18 +91,23 @@ def _path(path: Path | None) -> Path:
     return resource_map.map_path()
 
 
-def token(path: Path | None = None) -> int | None:
+def token(path: Path | None = None) -> tuple[int, ...] | None:
     """The usable map's mtime in ns, ``None`` when there is no usable map.
 
     Changes when the map is rewritten, and flips to ``None`` when the file is
     deleted, unreadable or older than :data:`MAX_AGE_S`, so a cache keyed on it
     returns to the no-map result without a restart.
+
+    Extension point: this is the map component of the cache key. It is a tuple so
+    another state file (e.g. a future ``policy_state.json`` mtime) can be appended
+    as one more element without changing any caller: callers only compare tokens
+    for equality and put them in cache keys.
     """
     try:
         p = _path(path)
         if load_view(p) is None:
             return None
-        return p.stat().st_mtime_ns
+        return (p.stat().st_mtime_ns,)
     except Exception:
         return None
 
@@ -151,7 +158,7 @@ def apply_to_chain(
     policy expresses an order (``MapView.orders``; never under ``balanced``): ranked
     entries then trade places among the slots ranked entries already hold, so
     unranked entries stay where they were. With no
-    usable map, or if the filter would empty the chain, the chain is returned as is.
+    usable map the chain is returned as is; if the filter empties it, ``[]`` is returned.
     """
     out = list(chain)
     try:
@@ -160,7 +167,7 @@ def apply_to_chain(
             return out
         kept = [m for m in out if v.provider_ok(_provider(key(m)))]
         if not kept:
-            return out
+            return []   # every entry is map-known and disconnected: no external route
         if reorder and v.orders:
             ranks = [v.rank(key(m)) for m in kept]
             slots = [i for i, r in enumerate(ranks) if r is not None]
@@ -173,9 +180,8 @@ def apply_to_chain(
 
 
 def filter_providers(providers: set[str]) -> set[str]:
-    """*providers* minus those the map knows and has no connected row for."""
+    """*providers* minus those the map knows and has no connected row for (may be empty)."""
     v = load_view()
     if v is None:
         return providers
-    kept = {p for p in providers if v.provider_ok(p)}
-    return kept or providers
+    return {p for p in providers if v.provider_ok(p)}

@@ -352,7 +352,7 @@ def tool_capable(model: str, *, anthropic: bool = False) -> bool:
 # ── model choice ─────────────────────────────────────────────────────────────
 
 _chain_cache: dict[tuple, list[str]] = {}
-_chain_cache_token: int | None = None
+_chain_cache_token: tuple | None = None
 
 
 async def policy_chain(text: str) -> tuple[str, str, list[str]]:

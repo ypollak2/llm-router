@@ -130,8 +130,8 @@ async def _apply_subscription_local(
         view = map_reader.load_view()
         if view is not None:
             chain = map_reader.apply_to_chain(chain, view=view)
-            if view.orders:
-                return chain
+            if view.orders or not chain:
+                return chain   # [] = nothing connected: callers' no-route path
             # a balanced map only filters: the no-map result (incl. the reorder below) stays
 
         from llm_router.subscription_local_routing import (

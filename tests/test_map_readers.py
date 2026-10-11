@@ -92,10 +92,12 @@ def test_unmapped_provider_untouched_and_keeps_its_slot():
     assert map_reader.apply_to_chain(chain) == [GEM, "mistral/m", LOCAL]
 
 
-def test_never_empties_a_chain():
+def test_all_disconnected_gives_empty_chain_but_unmapped_keep_their_slots():
     put(make_map((LOCAL, "local", "absent", None), ("gemini/api", "api", "absent", None),
                  ("openai/api", "api", "absent", None)))
-    assert map_reader.apply_to_chain(BASE) == BASE
+    assert map_reader.apply_to_chain(BASE) == []
+    assert map_reader.apply_to_chain(BASE + ["mistral/m"]) == ["mistral/m"]
+    assert map_reader.filter_providers({"ollama", "gemini", "openai"}) == set()
 
 
 def test_rereads_on_mtime_change_only(monkeypatch):
@@ -343,3 +345,94 @@ def test_hook_chain_builder_survives_a_missing_map_reader(monkeypatch):
     monkeypatch.delattr("llm_router.map_reader", raising=False)
     chain = hook_cb.build_chain("simple", "green", "code")
     assert chain and f"{chain[0].provider}/{chain[0].model}" == LOCAL
+
+
+# ── every map-known provider disconnected: no external route, host answers ───
+
+def all_gone():
+    return make_map((LOCAL, "local", "absent", None), ("ollama", "local", "absent", None),
+                    ("gemini/api", "api", "absent", None), ("openai/api", "api", "absent", None))
+
+
+async def test_all_disconnected_every_door_has_no_route_and_nothing_is_called(three_paths, monkeypatch):
+    from llm_router import providers
+    from llm_router.hooks import direct_executor
+    from llm_router.proxy import backends
+    from llm_router.router import route_and_call
+
+    router_chain, hook_chain, proxy_chain = three_paths
+    called = []
+
+    async def spy(*a, **k):
+        called.append(a)
+        raise AssertionError("a disconnected provider was tried")
+    monkeypatch.setattr(providers, "call_llm", spy)
+
+    put(all_gone())
+    assert await router_chain() == []                 # MCP: route_and_call raises "No providers"
+    with pytest.raises(ValueError, match="No providers available"):
+        await route_and_call(TaskType.CODE, "write a python function that reverses a list")
+    assert hook_chain() == []                         # hook: execute_chain([]) -> None -> host answers
+    from llm_router.hooks.chain_builder import build_chain
+    assert direct_executor.execute_chain("hi", build_chain("simple", "green", "code"), "code") is None
+    assert await proxy_chain() == []                  # proxy: model None -> forwarded upstream
+    choice = await backends.choose_model("write a python function that reverses a list", None)
+    assert choice["model"] is None and choice["chain_head"] == []
+    assert not called
+
+
+async def test_all_disconnected_stale_or_missing_map_keeps_todays_chains(three_paths):
+    router_chain, hook_chain, proxy_chain = three_paths
+    base = (await router_chain(), hook_chain(), await proxy_chain())
+    assert all(base)
+    data = all_gone()
+    data["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
+                                         time.gmtime(time.time() - map_reader.MAX_AGE_S * 2))
+    put(data)
+    assert (await router_chain(), hook_chain(), await proxy_chain()) == base
+
+
+def test_all_disconnected_dynamic_table_has_no_disconnected_provider(monkeypatch):
+    import llm_router.dynamic_routing as dr
+
+    monkeypatch.setattr(dr, "_get_quota_pressure", lambda: {})
+    put(all_gone())
+    provs = map_reader.filter_providers({"ollama", "gemini", "openai"})
+    table = dr.build_dynamic_routing_table(provs)
+    seen = {m.split("/")[0] for chain in table.values() for m in chain}
+    assert not seen & {"ollama", "gemini", "openai"}, seen
+    assert table, "empty table would pass trivially"
+    # with no map the always-allowed local tiers are present again
+    os.unlink(rm.map_path())
+    seen = {m.split("/")[0] for chain in dr.build_dynamic_routing_table(set()).values() for m in chain}
+    assert "ollama" in seen
+
+
+def test_available_tiers_all_disconnected(monkeypatch):
+    import llm_router.dynamic_routing as dr
+
+    prof = {"routing": {"model_priority": [{"tier": "free_local", "models": ["a"]},
+                                           {"tier": "cheap_apis", "models": ["b"]}]}}
+    monkeypatch.setattr(dr, "_load_user_profile", lambda: prof)
+    put(all_gone())
+    assert dr._detect_available_tiers() == {"free_local": False, "cheap_apis": False}
+
+
+@pytest.mark.parametrize("policy", ["balanced", "local-first"])
+async def test_subscription_local_with_nothing_connected_returns_empty(policy, monkeypatch):
+    import llm_router.subscription_local_routing as slr
+    from llm_router import chain_builder
+
+    monkeypatch.setattr(slr, "is_subscription_local_active", lambda profile: True)
+    put(make_map((LOCAL, "local", "absent", None), ("gemini/api", "api", "absent", None),
+                 ("openai/api", "api", "absent", None), policy=policy))
+    assert await chain_builder._apply_subscription_local(BASE, "moderate", RoutingProfile.BALANCED) == []
+    os.unlink(rm.map_path())
+    assert await chain_builder._apply_subscription_local([], "moderate", RoutingProfile.BALANCED) == []
+
+
+def test_token_is_a_tuple_so_other_state_can_join_the_cache_key():
+    assert map_reader.token() is None
+    put(all_connected())
+    tok = map_reader.token()
+    assert isinstance(tok, tuple) and len(tok) == 1
