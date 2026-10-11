@@ -209,6 +209,29 @@ def test_tick_is_stdlib_only():
     assert "compute_scorecard" not in TICK.read_text()
 
 
+def test_tick_render_path_does_not_import_datetime(tmp_path):
+    """P0.9-c: ``datetime`` costs ~5-8 ms per tick and only the history row's ISO
+    reset time needs it. Run the real tick as ``python -I -S`` over an empty HOME
+    and assert the module was never loaded (deterministic: no wall clock)."""
+    code = (
+        "import sys, runpy\n"
+        f"sys.argv = [{str(TICK)!r}]\n"
+        "try:\n"
+        f"    runpy.run_path({str(TICK)!r}, run_name='__main__')\n"
+        "except SystemExit:\n"
+        "    pass\n"
+        "print('datetime' in sys.modules)\n"
+    )
+    env = {"HOME": str(tmp_path), "LLM_ROUTER_HOME": str(tmp_path / ".llm-router"), "PATH": os.environ["PATH"]}
+    out = subprocess.run([sys.executable, "-I", "-S", "-c", code], input=b"", capture_output=True, env=env, timeout=30)
+    assert out.stdout.decode().strip().splitlines()[-1] == "False", out.stderr.decode()
+
+
+def test_epoch_still_parses_iso_after_lazy_import():
+    assert tick._epoch("2026-10-11T00:00:00Z") == 1791676800.0
+    assert tick._epoch("nope") is None
+
+
 # ── subprocess: the real command ─────────────────────────────────────────────
 
 def _env(home: Path, refresh_cmd: str, *, fast: bool = True) -> dict:
