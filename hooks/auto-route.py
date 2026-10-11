@@ -286,13 +286,18 @@ _load_dotenv()
 OLLAMA_URL = os.environ.get("LLM_ROUTER_OLLAMA_URL", "http://localhost:11434")
 
 
-def _load_discovered_ollama_models() -> list[str]:
-    """Ollama models available right now — delegated to the shared resolver.
+def _load_discovered_ollama_split() -> tuple[list[str], list[str]]:
+    """Ollama models available right now, as ``(validated, unvalidated)``.
 
-    This function used to own the logic and was evaluated once at import, while
-    chain_builder had a second, worse copy that the draft path actually used.
-    Two answers to one question, and the hot path used the hardcoded one. Both
-    now call `llm_router.model_discovery`.
+    Delegated to the shared resolver; this function used to own the logic and was
+    evaluated once at import, while chain_builder had a second, worse copy that
+    the draft path actually used. Two answers to one question, and the hot path
+    used the hardcoded one. Both now call `llm_router.model_discovery`.
+
+    P0.15 (DISC-PROMOTE-1): the list is then split by the promote gate. A model
+    the user configured or that was installed when this version first ran is
+    validated; any other is placed after them and kept out of code work (see
+    OLLAMA_CODE_MODELS). `LLM_ROUTER_PROMOTE_GATE=off` makes every model validated.
     """
     try:
         # No synchronous probe: this runs at import, on the host's critical path. A
@@ -303,17 +308,26 @@ def _load_discovered_ollama_models() -> list[str]:
             from llm_router.model_discovery import available_ollama_models_nowait
         except ImportError:
             from llm_router.model_discovery import available_ollama_models
-            return available_ollama_models()
+            return available_ollama_models(), []
         # Only the real hook process starts the refresh child; a test that imports
         # this file as a module must not.
-        return available_ollama_models_nowait(refresh=__name__ == "__main__")
+        discovered = available_ollama_models_nowait(refresh=__name__ == "__main__")
     except Exception:                                        # noqa: BLE001
-        return []
+        return [], []
+    try:
+        from llm_router.model_discovery import order_for_chain
+        front, tail = order_for_chain([f"ollama/{m}" for m in discovered], "query", critical=False)
+    except ImportError:                                      # older llm_router without the gate
+        return discovered, []
+    except Exception:                                        # noqa: BLE001
+        return [], []                                        # gate failed: fail closed, name nothing
+    return [m.removeprefix("ollama/") for m in front], [m.removeprefix("ollama/") for m in tail]
 
 
-_DISCOVERED_OLLAMA = _load_discovered_ollama_models()
-# First discovered model used as the single-model fallback (e.g. for tracking)
-OLLAMA_MODEL = _DISCOVERED_OLLAMA[0] if _DISCOVERED_OLLAMA else "qwen3.5:latest"
+_DISCOVERED_OLLAMA_VALIDATED, _DISCOVERED_OLLAMA_UNVALIDATED = _load_discovered_ollama_split()
+_DISCOVERED_OLLAMA = _DISCOVERED_OLLAMA_VALIDATED + _DISCOVERED_OLLAMA_UNVALIDATED
+# First validated model used as the single-model fallback (e.g. for tracking)
+OLLAMA_MODEL = _DISCOVERED_OLLAMA_VALIDATED[0] if _DISCOVERED_OLLAMA_VALIDATED else "qwen3.5:latest"
 # 4s was the old default and no local model could ever meet it: measured p50s on
 # this machine are 11.4s (lfm2.5:8b), 15.8s (qwen3-coder:30b) and 28.5s (qwen3.8),
 # and even "Say OK." took 6.6s warm. Every DIRECT attempt therefore aborted at
@@ -2235,7 +2249,8 @@ def _extract_category(raw: str) -> str | None:
 # longer a separate hard-coded "code specialization" list because we cannot know which
 # local models are code-focused without discovery metadata.
 OLLAMA_MODELS = _DISCOVERED_OLLAMA or ["qwen3.5:latest"]
-OLLAMA_CODE_MODELS = _DISCOVERED_OLLAMA or ["qwen3.5:latest"]
+# Code work is a critical chain (D-60c): only validated models, never an unvalidated one.
+OLLAMA_CODE_MODELS = _DISCOVERED_OLLAMA_VALIDATED or ["qwen3.5:latest"]
 
 
 def classify_with_ollama(text: str) -> str | None:

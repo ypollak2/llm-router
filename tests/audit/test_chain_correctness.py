@@ -62,6 +62,11 @@ class _FakeConfig:
         self.llm_router_claw_code = claw_code
         self.llm_router_routing_policy = routing_policy
         self.llm_router_agentic_model = agentic_model
+        # P0.15: models the test names are USER-CONFIGURED, so the promote gate
+        # (DISC-PROMOTE-1) keeps them at their place; these tests are about pins and
+        # reorders, not about unvalidated models (tests/test_p015_promote_gate.py).
+        self.ollama_budget_models = ",".join(self._ollama_models)
+        self.openai_compat_models = ",".join(self._openai_compat_models)
 
     def all_ollama_models(self) -> list[str]:
         return list(self._ollama_models)
