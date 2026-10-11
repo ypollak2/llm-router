@@ -571,6 +571,12 @@ def run_agent_loop(
             # just `messages`): `_budget.prune` above only trims old tool
             # results and never accounts for tool-definition JSON size. See
             # local_context_guard module docstring.
+            from llm_router.pack_overflow import PayloadPack
+            pack = PayloadPack(payload, num_ctx=_ctx, base_url=ollama_url, model=model,
+                               site="hooks.agent_loop")
+            payload = pack.trim_to()
+            # A bigger-window swap changes the model and window for this and later calls.
+            model, _ctx = pack.model, pack.num_ctx
             check_overflow(payload, num_ctx=_ctx, base_url=ollama_url, model=model,
                            site="hooks.agent_loop")
         except ContextOverflow as _exc:

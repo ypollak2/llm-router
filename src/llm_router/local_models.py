@@ -6,7 +6,10 @@ each time) and, for the 30B coder, cost another ~31 GB. Every caller that sizes
 a local request reads the window here, through :func:`num_ctx`.
 
 Measured basis (resident size, 52 GB Mac):
-* qwen3.5 / qwen3.8 hold 131072 on the GPU (I2b, 2026-09-24).
+* qwen3.5 / qwen3.8 hold 131072 on the GPU (I2b, 2026-09-24) but the owner runs the
+  server at OLLAMA_CONTEXT_LENGTH=32768 (2026-10-10); an explicit 131072 here overrode
+  it and cost memory (N20). They now take the default; raise one with
+  ``LLM_ROUTER_LOCAL_NUM_CTX`` / ``LLM_ROUTER_PROXY_NUM_CTX`` or a table entry.
 * qwen3-coder:30b at 32768 already uses 31.4-31.7 GB; 64K spilled 11% and
   128K 45% of it to CPU.
 * The two ``llmr-*`` aliases are qwen3.5 Modelfiles with their window fixed.
@@ -22,8 +25,6 @@ DEFAULT_NUM_CTX = 32768
 NUM_CTX: dict[str, int] = {
     "qwen3-coder:30b": 32768,
     "qwen3.6:35b-a3b-coding": 32768,
-    "qwen3.5:latest": 131072,
-    "qwen3.8:latest": 131072,
     "llmr-classifier": 4096,
     "llmr-edit": 16384,
 }
@@ -50,3 +51,22 @@ def num_ctx(model: str | None = None) -> int:
     if base:
         return NUM_CTX.get(base, NUM_CTX.get(f"{base}:latest", DEFAULT_NUM_CTX))
     return DEFAULT_NUM_CTX
+
+
+# What a local model may be asked to do. Ollama's ``/api/show`` capabilities
+# list says "completion" for a model that still 400s on a generate call when it
+# was built for one narrow job, so the roles are declared here, next to the
+# window. A model not listed here serves ``generate``. ``resource_map`` reads
+# this table; nothing else should guess a model's role from its name.
+# nimble:9b is the typed decision model (``decision_classifier.DEFAULT_MODEL``):
+# a generate call to it returns HTTP 400 (bug N19).
+ROLES: dict[str, frozenset[str]] = {
+    "nimble:9b": frozenset({"decision"}),
+}
+DEFAULT_ROLES: frozenset[str] = frozenset({"generate"})
+
+
+def roles(model: str | None = None) -> frozenset[str]:
+    """The roles *model* serves (``ollama/`` prefix optional); see :data:`ROLES`."""
+    name = _name(model)
+    return ROLES.get(name, DEFAULT_ROLES)

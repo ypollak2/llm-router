@@ -11,6 +11,7 @@ Missing coverage preserves the configured model or asks the user.**
 | Command | Does | Spends |
 |---|---|---|
 | `llm-router inventory [--json] [--save] [--verify]` | detect models, route, path, quota, privacy, capabilities | nothing; read-only. `--verify` makes one zero-cost list-models call per API-key provider (no tokens) |
+| `llm-router map [--json]` | the one resource map (P1.8): seats, local models, API keys with status, labelled quota, cost, capabilities, priority; same JSON as `llm_router_status(view="map")` | nothing; read-only, writes `resource_map.json`, never reads a key value |
 | `llm-router calibrate [--models ..] [--budget-s N] [--tokens N] [--allow-paid] [--yes] [--max-usd N] [--dry-run]` | short capability probes per model | nothing for local models; cloud only with `--allow-paid`, estimate and total printed first; more than 3 paid models without `--models` needs `--yes`; refuses above `--max-usd` (default 1.00) |
 
 ## Inventory

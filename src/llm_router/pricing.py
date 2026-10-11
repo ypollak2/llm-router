@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+import re
 from dataclasses import dataclass
 
 __all__ = [
@@ -229,6 +230,12 @@ _ANTHROPIC: dict[str, Price] = {
     # page footnote 1, re-checked 2026-09-28): $0.25, not the derived $1.00.
     "claude-fable-5-1": Price("claude-fable-5-1", 10.00, 50.00, cache_read=0.25),
     "claude-fable-5": Price("claude-fable-5", 10.00, 50.00),
+    # Mythos 5.1 (limited availability): the pricing page lists it on the same row
+    # values as Fable 5.1 — "$10 / MTok | $12.50 / MTok | $20 / MTok | $0.25 / MTok |
+    # $50 / MTok", and footnote 1 covers both: "Cache hits and refreshes on Claude
+    # Fable 5.1 and Claude Mythos 5.1 are priced at 0.025x the base input price"
+    # (checked 2026-10-10). So the $0.25 read is explicit; writes derive.
+    "claude-mythos-5-1": Price("claude-mythos-5-1", 10.00, 50.00, cache_read=0.25),
     # Fast mode (research preview, Claude API first-party only). Pricing page
     # "Fast mode pricing", re-checked 2026-09-29 against the raw .md: Opus 5.5
     # $8/$40; Opus 5 / Opus 4.8 $10/$50 — "Prompt caching multipliers apply on
@@ -353,10 +360,12 @@ _ALIASES: dict[str, str] = {
 # context pricing"). So "[1m]" maps to the base model's rates with NO surcharge
 # — but only for 4.6+. Earlier models billed long context at a premium this
 # table does not carry, so a pre-4.6 "[1m]" id stays unknown rather than being
-# silently under-priced at base rates.
+# silently under-priced at base rates. The page excepts Claude Haiku 5.5 (re-checked
+# 2026-10-10); its long-prompt card is part of its own entry (``long_prompt_over``),
+# so a "[1m]" Haiku 5.5 id resolves to that tiered entry instead.
 _LONG_CONTEXT_SUFFIX = "[1m]"
 _LONG_CONTEXT_AT_STANDARD_RATES: frozenset[str] = frozenset({
-    "claude-fable-5-1", "claude-fable-5",
+    "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1",
     "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
     "claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6",
 })
@@ -379,6 +388,24 @@ def _normalize(model: str) -> str:
     return m
 
 
+# Anthropic model ids can carry a release date ("claude-haiku-4-5-20251001"). The
+# date names a snapshot of the same model at the same price, so a dated id resolves
+# to its base entry. Anthropic ids only, and only an exact 8-digit date: a date on an
+# id this table does not know stays unknown. Exact matches (and aliases) are tried
+# first, so an explicit entry for a dated spelling always wins.
+_DATE_SUFFIX = re.compile(r"-\d{8}$")
+
+
+def _undated_anthropic(m: str) -> str | None:
+    base = _DATE_SUFFIX.sub("", m)
+    return base if base != m and base in _ANTHROPIC else None
+
+
+def _long_context_ok(base: str | None) -> bool:
+    return base is not None and (base in _LONG_CONTEXT_AT_STANDARD_RATES
+                                 or _PRICES[base].long_prompt_over is not None)
+
+
 def resolve(model: str) -> str | None:
     """Canonical model ID for ``model``, or ``None`` if unknown.
 
@@ -389,7 +416,7 @@ def resolve(model: str) -> str | None:
     raw = (model or "").strip().lower()
     if raw.endswith(_LONG_CONTEXT_SUFFIX):
         base = resolve(raw[: -len(_LONG_CONTEXT_SUFFIX)])
-        return base if base in _LONG_CONTEXT_AT_STANDARD_RATES else None
+        return base if _long_context_ok(base) else None
     # Captured before _normalize() strips the "ollama/" prefix. A tag-less
     # Ollama name ("ollama/llama3.2") has neither a surviving "ollama" prefix
     # nor a ":tag" once normalized, so the fallback below has nothing left to
@@ -400,6 +427,8 @@ def resolve(model: str) -> str | None:
         return m
     if m in _ALIASES:
         return _ALIASES[m]
+    if undated := _undated_anthropic(m):
+        return undated
     # Any remaining "vendor/model" spelling: callers write the same model as
     # "o3", "openai/o3" and "deepseek/deepseek-chat" depending on which registry
     # they came from. Strip one leading segment rather than enumerate vendors —
@@ -411,6 +440,8 @@ def resolve(model: str) -> str | None:
             return tail
         if tail in _ALIASES:
             return _ALIASES[tail]
+        if undated := _undated_anthropic(tail):
+            return undated
     if had_ollama_prefix or m.startswith("ollama") or ":" in m:
         # Ollama tags look like "qwen2.5-coder:7b" — local, and free. A
         # tag-less name is just as local; the prefix alone (caught above) is

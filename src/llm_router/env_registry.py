@@ -123,6 +123,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # descriptions, long-output summaries on a local model with a checked
     # fallback). Off by default — see tools/text.py's _local_text_jobs_enabled.
     "LLM_ROUTER_LOCAL_TEXT_JOBS": ("llm_router", "tools/text.py", 1),
+    # PLAN v16 P1.3: opt-in trim / bigger-window before ContextOverflow. Off by default (D-47).
+    "LLM_ROUTER_PACK_OVERFLOW": ("llm_router", "pack_overflow.py", 1),
     "LLM_ROUTER_CONFIDENCE_THRESHOLD": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_CONTEXT_OPTIMIZER": ("llm_router", "context.py", 1),
     "LLM_ROUTER_COST_PROFILE": ("llm_router", "repo_config.py", 1),
@@ -178,6 +180,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_TRACE": ("llm_router", "trace.py", 1),
     "LLM_ROUTER_DISCOVERY_TTL_HOURS": ("llm_router", "model_discovery.py", 1),
     "LLM_ROUTER_CONTEXT_INJECTION": ("llm_router", "context_injection.py", 1),
+    "LLM_ROUTER_CACHE_LAYOUT": ("llm_router", "cache_layout.py", 1),
     "LLM_ROUTER_TRACE_FILE": ("llm_router", "trace.py", 1),
     "LLM_ROUTER_BASH_INTERCEPT": ("llm_router", "hooks/tool_intercept.py", 1),
     "LLM_ROUTER_SYNTHETIC": ("llm_router", "routing_quality.py", 2),
@@ -271,6 +274,9 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_OIDC_ISSUER": ("llm_router", "enterprise/oidc.py", 1),
     "LLM_ROUTER_OIDC_JWKS_URI": ("llm_router", "enterprise/oidc.py", 1),
     "LLM_ROUTER_OIDC_ROLE_MAP": ("llm_router", "enterprise/oidc.py", 1),
+    "LLM_ROUTER_ROLLING_SUMMARY": ("llm_router", "hooks/session-end.py", 1),
+    "LLM_ROUTER_SUMMARY_EVERY": ("llm_router", "context_summary.py", 1),
+    "LLM_ROUTER_SUMMARY_MODEL": ("llm_router", "context_summary.py", 1),
     "LLM_ROUTER_OKF": ("llm_router", "okf.py", 1),
     "LLM_ROUTER_OKF_MIN_SCORE": ("llm_router", "okf.py", 1),
     "LLM_ROUTER_OLLAMA_MODEL": ("llm_router", "model_discovery.py", 1),
@@ -407,6 +413,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # The classifier's own Ollama alias (M1.4): other callers load qwen3.5 at a different
     # num_ctx, and a shared name would reload the runner back and forth.
     "LLM_ROUTER_CLASSIFIER_MODEL": ("llm_router", "local_classifier.py", 1),
+    # N19b: exact local model names exempt from the classifier / llamacpp: exclusion in code chains.
+    "LLM_ROUTER_LOCAL_ALLOW_MODELS": ("llm_router", "discover.py", 1),
     "LLM_ROUTER_CLASSIFIER_KEEP_ALIVE": ("llm_router", "local_classifier.py", 1),
     # M1.8 round 3: decision-model backend (Ollama /v1/systemone, nimble). Default OFF
     # (backend "chat" = the v6 /api/chat classifier); see decision_classifier.py.
