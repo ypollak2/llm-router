@@ -18,30 +18,80 @@ them faithfully, and a pass-through costs nothing.
 Step KINDS (GE1 action census). The ledger's ``step_class`` field records what
 kind of call every request was, whether or not it may be served
 (:func:`step_kind`): ``continuation`` (the shape above), ``turn_first`` (the
-first call of a human turn: the newest user turn has text), ``subagent_first``
-(a sub-agent's first call) and ``side_call`` (no client tools: titles, probes,
-summaries). Only ``STEP_CLASSES`` may be served; the other kinds are labels.
-A continuation that cannot be served faithfully says why in
+first call of a MAIN-THREAD human turn: the newest user turn holds human text
+once harness tags are stripped), ``subagent_first`` (a sub-agent's first call),
+``subagent_turn`` (any later sub-agent call that is not a continuation: a
+SendMessage resume or a task notification mid-run), ``harness_turn`` (a
+main-thread call whose newest user turn is only harness messages: a
+``<task-notification>``, a command echo) and ``side_call`` (no client tools:
+titles, probes, summaries). Only ``STEP_CLASSES`` may be served; the other kinds
+are labels. A continuation that cannot be served faithfully says why in
 :func:`step_ineligible`.
+
+Two request shapes hid human turns before STEP-SIDECALL-1 (docs/bugs/STEP-SIDECALL-1.md). A
+Message Threads continue (``thread.type == "continue"``) sends only the messages after the
+anchor reply and omits ``tools`` when the thread already holds them, so it has no client
+tools and no history: it read as ``side_call``, and a tool-result follow-up as a
+one-message request. And a human prompt typed while a tool runs is appended to the tool
+results' turn as a text block, so it read as ``continuation``.
+
+Before TURNFIRST-1 (docs/bugs/TURNFIRST-1.md) every non-first, non-continuation
+call was ``turn_first``, sub-agent calls and notifications included: 113 of 113
+classified turn_first rows in the live ledger (2026-10-08 17:50 to 10-09 21:05)
+were Sonnet sub-agent calls, 108 of them classed ``code``. :func:`turn_fields`
+adds the text-free columns that tell the populations apart on every row.
 """
 
 from __future__ import annotations
 
+import bisect
 import json
 import re
 from typing import Callable
 
+from llm_router.groundtruth_sources import _CAVEAT, _INTERRUPT, HARNESS_TAGS
 from llm_router.proxy import tool_classes
 
 STEP_CONTINUATION = "continuation"
 STEP_TURN_FIRST = "turn_first"
 STEP_SIDE_CALL = "side_call"
 STEP_SUBAGENT_FIRST = "subagent_first"
-STEP_KINDS = (STEP_CONTINUATION, STEP_TURN_FIRST, STEP_SIDE_CALL, STEP_SUBAGENT_FIRST)
+STEP_SUBAGENT_TURN = "subagent_turn"
+STEP_HARNESS_TURN = "harness_turn"
+STEP_KINDS = (STEP_CONTINUATION, STEP_TURN_FIRST, STEP_SIDE_CALL, STEP_SUBAGENT_FIRST,
+              STEP_SUBAGENT_TURN, STEP_HARNESS_TURN)
+#: Not a kind: the ledger's ``step_class`` when labelling the call raised (``step_error``
+#: is then true). The proxy forwards it without classifying it (``server.step_fields``).
+STEP_UNKNOWN = "unknown"
 
-#: Claude Code gives the main thread a sub-agent launcher and gives sub-agents none
-#: (a sub-agent cannot spawn another). ``Task`` is the older name of ``Agent``.
+#: Where the newest user turn of a non-continuation call came from (:func:`turn_origin`).
+ORIGIN_TYPED = "typed"                    # main thread, human text
+ORIGIN_SUBAGENT_BRIEF = "subagent_brief"  # sub-agent, text from the parent (brief / SendMessage)
+ORIGIN_TASK_NOTIFICATION = "task_notification"
+ORIGIN_COMMAND = "command"                # <command-*> / <local-command-*> / "Caveat:" echo
+ORIGIN_OTHER_TAG = "other_tag"            # only other harness tags (reminders, agent-message, ...)
+TURN_ORIGINS = (ORIGIN_TYPED, ORIGIN_SUBAGENT_BRIEF, ORIGIN_TASK_NOTIFICATION, ORIGIN_COMMAND,
+                ORIGIN_OTHER_TAG)
+
+#: Claude Code gives the main thread a sub-agent launcher. ``Task`` is the older name of
+#: ``Agent``. A launcher alone does not make a call main-thread: since sub-agents may spawn
+#: sub-agents, a general-purpose sub-agent holds ``Agent`` too (TURNFIRST-2).
 _AGENT_LAUNCHERS = frozenset({"Agent", "Task"})
+
+#: Text Claude Code puts in a sub-agent's system prompt and never in the main thread's.
+#: Read from the shipped Claude Code 2.1.296 binary (2026-10-10): the agent runner appends
+#: the first two lines to EVERY spawned agent's prompt, built-in or custom, after the
+#: agent's own prompt; the third opens the general-purpose agent's prompt. Any one of them
+#: vetoes the launcher, so an unsure call is not counted as a main-thread human turn
+#: (docs/bugs/TURNFIRST-2.md). A fork (``subagent_type: fork``) re-sends the parent's
+#: system prompt and tools and none of these; its first call is a continuation.
+_SUBAGENT_PROMPT_MARKERS = (
+    "Messages from the agent that launched you",
+    "Agent threads always have their cwd reset between bash calls",
+    "You are an agent for Claude Code",
+)
+#: A tool only a sub-agent is given: it hands the final report back to its caller.
+_SUBAGENT_TOOLS = frozenset({"SubagentHandback"})
 
 
 def non_system(messages: list) -> list:
@@ -50,10 +100,32 @@ def non_system(messages: list) -> list:
     return [m for m in messages if isinstance(m, dict) and m.get("role") != "system"]
 
 
+def thread_type(body: dict) -> str | None:
+    """``create`` or ``continue`` when the request carries Message Threads, else ``None``."""
+    thread = body.get("thread")
+    kind = thread.get("type") if isinstance(thread, dict) else None
+    return kind if kind in ("create", "continue") else None
+
+
+def is_thread_continue(body: dict) -> bool:
+    """A Message Threads continue: ``messages`` is only the tail after the anchor reply
+    (``thread.previous_message_id``) and ``tools`` is left out when the thread holds them."""
+    return thread_type(body) == "continue"
+
+
+def thread_parent(body: dict) -> str | None:
+    """The reply a continue builds on (``thread.previous_message_id``), else ``None``."""
+    thread = body.get("thread")
+    parent = thread.get("previous_message_id") if isinstance(thread, dict) else None
+    return parent if isinstance(parent, str) and parent else None
+
+
 def _newest_turn_kinds(body: dict) -> set | None:
-    """Block types of the newest user turn, or ``None`` when it cannot answer tools."""
+    """Block types of the newest user turn, or ``None`` when it cannot answer tools.
+    A thread continue holds only the tail after its anchor, so its newest turn may be
+    the only message."""
     msgs = non_system(body.get("messages") or [])
-    if len(msgs) < 3 or msgs[-1].get("role") != "user":
+    if len(msgs) < (1 if is_thread_continue(body) else 3) or msgs[-1].get("role") != "user":
         return None
     content = msgs[-1].get("content")
     if not isinstance(content, list) or not content:
@@ -62,6 +134,9 @@ def _newest_turn_kinds(body: dict) -> set | None:
 
 
 def _is_continuation(body: dict) -> bool:
+    """The SERVING predicate: strict, and never true for a thread continue (a one-message tail)."""
+    if is_thread_continue(body):
+        return False
     kinds = _newest_turn_kinds(body)
     return kinds is not None and "tool_result" in kinds and kinds <= {"tool_result", "text"}
 
@@ -102,7 +177,10 @@ def _has_client_tools(body: dict) -> bool:
 
 
 def step_class(body: dict, enabled: frozenset[str] | set[str]) -> str | None:
-    """The first enabled step class this request belongs to, else ``None``."""
+    """The first enabled step class this request belongs to, else ``None``. A Message Threads
+    continue is never served: its body is the tail of a server-side thread (STEP-SIDECALL-1)."""
+    if is_thread_continue(body):
+        return None
     if not _has_client_tools(body):
         return None  # side calls (titles, probes) carry no tools
     tc = body.get("tool_choice")
@@ -116,21 +194,142 @@ def step_class(body: dict, enabled: frozenset[str] | set[str]) -> str | None:
     return None
 
 
-def step_kind(body: dict) -> str:
+def _system_text(system) -> str:
+    if isinstance(system, str):
+        return system
+    if isinstance(system, list):
+        return "\n".join(b.get("text", "") for b in system
+                         if isinstance(b, dict) and isinstance(b.get("text"), str))
+    return ""
+
+
+def is_subagent_request(body: dict) -> bool:
+    """The request carries sub-agent evidence: a sub-agent system-prompt marker
+    (:data:`_SUBAGENT_PROMPT_MARKERS`) or a sub-agent-only tool. Only the ``system``
+    field is read, never a message, so a user who pastes the marker text does not
+    turn the main thread into a sub-agent."""
+    names = {t.get("name") for t in body.get("tools") or [] if isinstance(t, dict)}
+    if names & _SUBAGENT_TOOLS:
+        return True
+    system = _system_text(body.get("system"))
+    return any(marker in system for marker in _SUBAGENT_PROMPT_MARKERS)
+
+
+def is_main_thread(body: dict, parent_main: bool | None = None) -> bool | None:
+    """The call comes from the main thread: its tools hold an ``Agent``/``Task``
+    launcher and it carries no sub-agent evidence (:func:`is_subagent_request`).
+    The launcher alone is not enough: a general-purpose sub-agent holds ``Agent``
+    too (TURNFIRST-2: three of four live turn_first rows on 2026-10-10 were such
+    first calls). A main session run with the launcher disabled reads as a sub-agent.
+
+    A thread continue that leaves ``tools`` out has no launcher to read: it is the
+    thread's own, so it answers as ``parent_main`` (the reply it builds on), ``False``
+    on sub-agent evidence, and ``None`` when the parent is unknown."""
+    names = {t.get("name") for t in body.get("tools") or [] if isinstance(t, dict)}
+    if not names and is_thread_continue(body):
+        return False if is_subagent_request(body) else parent_main
+    return bool(names & _AGENT_LAUNCHERS) and not is_subagent_request(body)
+
+
+#: Wire text Claude Code 2.1.296 puts in front of a message that is NOT the user's, when it
+#: queues it beside tool results (read from the binary, 2026-10-11). The user's own queued
+#: prompt is prefixed ``The user sent a new message while you were working:``; a peer, a
+#: coordinator, a channel, a plugin, an observer, a scheduler and a task notification each
+#: have their own prefix. ``<cross-session-message`` is the peer envelope. Hook output
+#: (``additionalContext``, ``hook_success``, ``async_hook_response``) is wrapped in
+#: ``<system-reminder>`` by the attachment normaliser and stripped as a harness block; the
+#: silent-turn reminder text is listed because its wrapper was not found. An ``unclassified``
+#: or ``slack-ping`` origin gets ``[MESSAGE FROM NON-USER SOURCE`` (listed). Activity seen in a
+#: bound conversation is framed ``Activity in the bound conversation ...``.
+_USER_QUEUED = "The user sent a new message while you were working:"
+#: A verified Slack human turn (``verifiedSlackHumanTurn``) is led by one of these; the
+#: harness places the lead only on such posts, and every non-user kind gets its own prefix
+#: instead, so a text that OPENS with the lead is the user's.
+_HUMAN_BOUND_THREAD = ("A message arrived in the bound thread while you were working:",
+                       "Messages arrived in the bound thread while you were working:")
+_NON_USER_MARKERS = (
+    "[SYSTEM NOTIFICATION - NOT USER INPUT]", "[MESSAGE FROM NON-USER SOURCE", "[SCHEDULED TASK",
+    "<cross-session-message", "The coordinator sent a message", "Another Claude session sent a message",
+    "Your background observer (", " plugin sent a message",
+    "Activity in the bound conversation", "Activity was observed in the bound conversation",
+    "The user hasn't heard from you in a while",
+)
+#: An ``observer-activity`` origin is delivered bare (the harness returns the text as is), but
+#: the digest frames itself: ``<NAME-activity ...>`` tags and a fixed postamble.
+_OBSERVER_DIGEST_TAG = re.compile(r"<[A-Za-z0-9_-]+-activity[\s>]")
+_OBSERVER_DIGEST_POSTAMBLE = "The activity above is a read-only digest of the agent you are observing"
+
+
+def _is_non_user_text(text: str) -> bool:
+    lead = text.lstrip()
+    if lead.startswith(_USER_QUEUED) or lead.startswith(_HUMAN_BOUND_THREAD):
+        return False
+    head = lead[:400]
+    return (any(m in head for m in _NON_USER_MARKERS) or "while you were working" in head
+            or bool(_OBSERVER_DIGEST_TAG.search(head)) or _OBSERVER_DIGEST_POSTAMBLE in lead[-800:])
+
+
+def _typed_text_beside_results(body: dict) -> bool:
+    """The newest user turn answers tools AND holds human text: a prompt typed while a
+    tool ran (Claude Code appends it to the tool results' turn). Harness blocks and a
+    ``[Request interrupted`` marker are not human text."""
+    content = _newest_user_content(body)
+    if not isinstance(content, list):
+        return False
+    texts = [b for b in content if isinstance(b, dict) and b.get("type") == "text"
+             and not _INTERRUPT.match(b.get("text") or "") and not _is_non_user_text(b.get("text") or "")]
+    return bool(texts) and bool(_human_parts(texts)[0])
+
+
+def _is_pure_continuation(body: dict) -> bool:
+    """:func:`_is_continuation_kind` and no human prompt riding on the tool results."""
+    return _is_continuation_kind(body) and not _typed_text_beside_results(body)
+
+
+def step_kind(body: dict, parent_main: bool | None = None) -> str:
     """What kind of call ``body`` is (one of :data:`STEP_KINDS`), for the ledger.
 
-    ``subagent_first`` is inferred from the tool list: a first call whose tools hold
-    no ``Agent``/``Task`` launcher. A main session started with that tool disabled is
-    therefore counted as a sub-agent; both are actions, so the census's action total
-    does not move."""
-    if not _has_client_tools(body):
+    Sub-agent kinds are inferred from the tool list and the system prompt
+    (:func:`is_main_thread`). A main session started with the launcher disabled is
+    therefore counted as a sub-agent;
+    both are actions, so the census's action total does not move. A first call keeps
+    its pre-TURNFIRST-1 label (``turn_first`` / ``subagent_first``) whatever its text.
+
+    A thread continue has no tools to read (they stay on the thread), so it is not a
+    ``side_call``; ``parent_main`` is whether the reply it builds on came from the main
+    thread (the proxy remembers it per reply). Unknown is not proof: a human-text
+    continue with no known parent is ``subagent_turn``. A tool-result turn carrying a
+    typed prompt is that prompt's first call, not a continuation."""
+    thread = is_thread_continue(body)
+    if not _has_client_tools(body) and not thread:
         return STEP_SIDE_CALL
-    if _is_continuation_kind(body):
+    if _is_pure_continuation(body):
         return STEP_CONTINUATION
+    main = is_main_thread(body, parent_main)
     if is_first_call(body):
-        names = {t.get("name") for t in body.get("tools") or [] if isinstance(t, dict)}
-        return STEP_TURN_FIRST if names & _AGENT_LAUNCHERS else STEP_SUBAGENT_FIRST
-    return STEP_TURN_FIRST
+        return STEP_TURN_FIRST if main else STEP_SUBAGENT_FIRST
+    if not main:
+        return STEP_SUBAGENT_TURN
+    return STEP_TURN_FIRST if _newest_turn_is_human(body) else STEP_HARNESS_TURN
+
+
+def step_fields(body: dict, on_error: Callable[[Exception], None] | None = None,
+                parent_main: bool | None = None) -> dict:
+    """The GE1 ledger labels (``step_class``, ``prev_tools``, ``prev_tool_class``,
+    ``step_ineligible``) plus ``step_error``. Fail-open for these labels only: if
+    labelling raises, the row says ``step_class == unknown`` with ``step_error`` true
+    and empty labels, the exception goes to ``on_error``, and the caller must not
+    classify the call (NFR-FAIL). Other body-shape reads on the request path (for
+    example ``has_served_turn``, ``session_id_of``) are not guarded here."""
+    try:
+        return {"step_class": step_kind(body, parent_main), "prev_tools": prev_tools(body),
+                "prev_tool_class": prev_tool_class(body), "step_ineligible": step_ineligible(body),
+                "step_error": False}
+    except Exception as exc:  # noqa: BLE001 - a labelling error must not fail the call
+        if on_error is not None:
+            on_error(exc)
+        return {"step_class": STEP_UNKNOWN, "prev_tools": [], "prev_tool_class": None,
+                "step_ineligible": None, "step_error": True}
 
 
 def step_ineligible(body: dict) -> str | None:
@@ -198,21 +397,195 @@ def classify_text(body: dict, limit: int = 1500) -> str:
     return (first[-limit:] + "\n" + "\n".join(outputs)[:limit]).strip()
 
 
-_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
 _MODEL_COMMAND = "<command-name>/model</command-name>"
+
+#: Harness tags. The tag list is shared with the prompt-corpus filter
+#: (``groundtruth_sources.HARNESS_TAGS``); each entry is a name prefix, so
+#: ``local-command`` also opens ``local-command-stdout``. An open tag counts at the start
+#: of a line (leading blanks allowed); ``<system-reminder>`` also counts mid-line, as it
+#: did before TURNFIRST-1. Attributes are bounded and single-line: an unbounded ``\s[^>]*``
+#: crossed newlines and made a body of line-start ``<command-name foo`` lines with no
+#: ``>`` quadratic (100 lines on 3 MB took 1.9 s, 1,000 took 19 s).
+_TAG_NAME = r"(?:" + "|".join(re.escape(t) for t in HARNESS_TAGS) + r")[\w-]*"
+_ATTRS = r"(?:[ \t][^>\n]{0,200})?"
+#: The pattern starts with a literal ``<`` so the scan skips ahead to each one (a
+#: ``^``-anchored alternation was ~20x slower on tag-free text); the line-start rule is
+#: checked per match (:func:`_line_start`).
+_HARNESS_OPEN_RE = re.compile(r"<(?P<name>" + _TAG_NAME + r")" + _ATTRS + r">", re.I)
+_MID_LINE_OK = "system-reminder"
+_HARNESS_CLOSE_RE = re.compile(r"</(?P<name>" + _TAG_NAME + r")>", re.I)
+_REST_OF_LINE_BLANK = re.compile(r"[ \t]*(?:\n|\Z)")
+_TASK_NOTIFICATION = "task-notification"
+_CAVEAT_TAG = "local-command-caveat"  # the old plain-text "Caveat: ..." line is filed under this tag
+
+
+def _is_command_tag(name: str) -> bool:
+    return name.startswith("command-") or name.startswith("local-command")
+
+
+def _line_start(text: str, start: int) -> int | None:
+    """The line's start when only blanks precede ``start`` on its line, else None."""
+    i = start
+    while i > 0 and text[i - 1] in " \t":
+        i -= 1
+    return i if i == 0 or text[i - 1] == "\n" else None
+
+
+def _alone_on_line(text: str, start: int, end: int) -> bool:
+    """Only blanks between the line start and ``start`` and between ``end`` and the line end."""
+    return _line_start(text, start) is not None and _REST_OF_LINE_BLANK.match(text, end) is not None
+
+
+def _first_in(starts: list[int], ends: list[int], lo: int, hi: int) -> int | None:
+    """End of the first span whose start is in ``[lo, hi)``, else None."""
+    i = bisect.bisect_left(starts, lo)
+    return ends[i] if i < len(starts) and starts[i] < hi else None
+
+
+def _strip_block(text: str) -> tuple[str, set[str]]:
+    """``text`` with every harness block removed, and the tag names removed.
+
+    A block ends at the first close tag of its name that stands alone on its own
+    line, before the next line-start open of the same tag; only when there is none
+    does the first close tag anywhere end it (a one-line block). An unclosed block
+    that opened at a line start runs to that next open or the end; an unclosed
+    ``<system-reminder>`` that opened mid-line is left as text (a tag named inside a
+    sentence). So a literal ``</system-reminder>`` quoted inside a reminder (a
+    CLAUDE.md that mentions it) cannot end the block early and leak the rest of the
+    reminder. Tags and closes are found in one pass each and looked up by bisection,
+    so the cost is linear in ``text`` whatever its shape."""
+    opens = []
+    for m in _HARNESS_OPEN_RE.finditer(text):
+        name = m.group("name").lower()
+        ls = _line_start(text, m.start())
+        if ls is not None:
+            opens.append((ls, m.end(), name, True))
+        elif name == _MID_LINE_OK:
+            opens.append((m.start(), m.end(), name, False))
+    if not opens:
+        return text, set()
+    line_opens: dict[str, list[int]] = {}
+    for s, _e, name, at_line_start in opens:
+        if at_line_start:
+            line_opens.setdefault(name, []).append(s)
+    closes: dict[str, tuple[list[int], list[int]]] = {}
+    strict: dict[str, tuple[list[int], list[int]]] = {}
+    for c in _HARNESS_CLOSE_RE.finditer(text):
+        name = c.group("name").lower()
+        for table in ((closes, strict) if _alone_on_line(text, c.start(), c.end()) else (closes,)):
+            starts, ends = table.setdefault(name, ([], []))
+            starts.append(c.start())
+            ends.append(c.end())
+    seen: set[str] = set()
+    out: list[str] = []
+    pos = 0
+    for s, e, name, at_line_start in opens:
+        if s < pos:
+            continue  # inside a block already removed
+        nl = line_opens.get(name, [])
+        i = bisect.bisect_left(nl, e)
+        limit = nl[i] if i < len(nl) else len(text)
+        end = _first_in(*strict.get(name, ([], [])), e, limit)
+        if end is None:
+            end = _first_in(*closes.get(name, ([], [])), e, limit)
+        if end is None and not at_line_start:
+            continue  # an unclosed tag inside a sentence is text
+        out.append(text[pos:s])
+        seen.add(name)
+        pos = end if end is not None else limit
+    out.append(text[pos:])
+    return "".join(out), seen
+
+
+def _human_parts(content) -> tuple[str, frozenset[str]]:
+    """(the turn's human text, the harness tags it held). Tool results, harness
+    blocks and the old plain-text ``Caveat:`` line are removed per text block;
+    the blocks that keep text are joined with one space."""
+    if isinstance(content, str):
+        texts = [content]
+    elif isinstance(content, list):
+        texts = [b.get("text", "") for b in content
+                 if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)]
+    else:
+        texts = []
+    kept: list[str] = []
+    seen: set[str] = set()
+    for text in texts:
+        rest, tags = _strip_block(text)
+        seen |= tags
+        rest = rest.strip()
+        if _CAVEAT.match(rest):
+            seen.add(_CAVEAT_TAG)
+            rest = rest.split("\n", 1)[1].strip() if "\n" in rest else ""
+        if rest:
+            kept.append(rest)
+    return " ".join(kept), frozenset(seen)
 
 
 def _human_text(content) -> str:
-    """A user turn's own text: tool results and Claude Code's
-    ``<system-reminder>`` blocks removed."""
-    return _REMINDER_RE.sub("", _text_of(content)).strip()
+    """A user turn's own text: tool results, Claude Code's harness blocks
+    (``<system-reminder>``, ``<task-notification>``, ``<command-*>``,
+    ``<local-command-*>``, ``<agent-message>``, ...) and ``Caveat:`` lines removed."""
+    return _human_parts(content)[0]
+
+
+def _newest_user_content(body: dict):
+    msgs = non_system(body.get("messages") or [])
+    if not msgs or msgs[-1].get("role") != "user":
+        return None
+    return msgs[-1].get("content")
+
+
+def _newest_turn_is_human(body: dict) -> bool:
+    """The newest user turn is something a person (or, in a sub-agent, its parent)
+    wrote: human text is left once harness blocks are stripped, or it held no
+    harness block at all (an image-only turn)."""
+    text, tags = _human_parts(_newest_user_content(body))
+    return bool(text) or not tags
+
+
+def turn_origin(body: dict, parent_main: bool | None = None) -> str | None:
+    """Where the newest user turn of a non-continuation call came from (one of
+    :data:`TURN_ORIGINS`); ``None`` for a continuation, a side call, or a request
+    whose newest message is not a user turn. A turn with human text is ``command``
+    when it also carries a command echo (a slash command and its expanded prompt),
+    else ``typed`` on the main thread and ``subagent_brief`` in a sub-agent. A turn
+    with no human text is named by its harness tags."""
+    if (not _has_client_tools(body) and not is_thread_continue(body)) or _is_pure_continuation(body):
+        return None
+    msgs = non_system(body.get("messages") or [])
+    if not msgs or msgs[-1].get("role") != "user":
+        return None
+    text, tags = _human_parts(msgs[-1].get("content"))
+    command = any(_is_command_tag(t) for t in tags)
+    if text or not tags:
+        if command:
+            return ORIGIN_COMMAND
+        return ORIGIN_TYPED if is_main_thread(body, parent_main) else ORIGIN_SUBAGENT_BRIEF
+    if _TASK_NOTIFICATION in tags:
+        return ORIGIN_TASK_NOTIFICATION
+    return ORIGIN_COMMAND if command else ORIGIN_OTHER_TAG
+
+
+def turn_fields(body: dict, parent_main: bool | None = None) -> dict:
+    """The TURNFIRST-1 ledger columns, text-free: ``is_main_thread``
+    (``None`` for a thread continue whose parent is unknown),
+    ``is_first_call``, ``turn_origin`` and ``tier_text_len`` (the length in
+    characters of what the tier classifier reads, :func:`tier_text`; 0 when there
+    is no human text), plus ``thread`` (``create`` | ``continue`` | ``None``:
+    STEP-SIDECALL-1, so a later audit can tell the shapes apart)."""
+    return {"is_main_thread": is_main_thread(body, parent_main), "is_first_call": is_first_call(body),
+            "turn_origin": turn_origin(body, parent_main), "tier_text_len": len(tier_text(body)),
+            "thread": thread_type(body)}
 
 
 def newest_human_text(body: dict) -> str:
     """The conversation's newest human prompt, untruncated: the newest user
-    message that has text once tool results and ``<system-reminder>`` blocks are
-    removed. ``tier_text`` classifies the tail of this; ``prompt_key.key`` hashes
-    all of it, so the ledger's ``text_sha`` matches a hash of the typed prompt."""
+    message that has text once tool results and harness blocks are removed. A
+    turn that is only a notification or a command echo is skipped, so the tier
+    keeps classifying the prompt before it (the sticky tier holds). ``tier_text``
+    classifies the tail of this; ``prompt_key.key`` hashes all of it, so the
+    ledger's ``text_sha`` matches a hash of the typed prompt."""
     for m in reversed(non_system(body.get("messages") or [])):
         if m.get("role") != "user":
             continue
@@ -241,8 +614,9 @@ def user_pinned_model(body: dict) -> bool:
 
 
 def is_first_call(body: dict) -> bool:
-    """The conversation's first model call: one user turn, no reply yet."""
-    return len(non_system(body.get("messages") or [])) == 1
+    """The conversation's first model call: one user turn, no reply yet. A thread
+    continue also holds one message, but it answers a reply the thread already has."""
+    return len(non_system(body.get("messages") or [])) == 1 and not is_thread_continue(body)
 
 
 def has_client_tools(body: dict) -> bool:

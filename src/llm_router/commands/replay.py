@@ -33,6 +33,7 @@ Example output:
   ───────────────────────────────────────────────────────────
 """
 
+from llm_router.provider_classes import real_decision_sql
 import argparse
 import sqlite3
 from datetime import datetime
@@ -76,7 +77,7 @@ def fetch_routing_decisions(
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        query = "SELECT * FROM routing_decisions WHERE success = 1"
+        query = "SELECT * FROM routing_decisions WHERE success = 1 AND " + real_decision_sql(conn)
         params: list = []
 
         query += " ORDER BY timestamp DESC LIMIT ?"

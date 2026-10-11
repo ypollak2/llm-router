@@ -66,6 +66,7 @@ def inject_cache_control(
     messages: list[dict],
     model: str,
     min_tokens: int = 1024,
+    recent_end: int | None = None,
 ) -> list[dict]:
     """Inject Anthropic cache_control breakpoints into the messages list.
 
@@ -82,6 +83,11 @@ def inject_cache_control(
         min_tokens: Minimum token estimate to apply caching. Anthropic requires
             at least 1024 tokens for Sonnet/Opus and 2048 for Haiku. Default 1024
             covers all modern Claude models.
+        recent_end: P1.4 (R-CTX-8). Index one past the last message of the
+            ``recent`` block; breakpoint 2 goes on ``messages[recent_end - 1]``
+            instead of "the message before the last user turn". Clamped so it
+            can never land on the final user message (the request). ``None``
+            (default) keeps the historical behaviour byte-for-byte.
 
     Returns:
         New list with cache_control injected at effective breakpoints.
@@ -121,6 +127,10 @@ def inject_cache_control(
         if total_context_chars >= min_chars:
             # Mark the message just before the current user turn.
             target_idx = last_user_idx - 1
+            if recent_end is not None:
+                target_idx = min(recent_end, last_user_idx) - 1
+                if target_idx < start:
+                    target_idx = last_user_idx - 1
             text = _content_text(result[target_idx])
             result[target_idx] = {**result[target_idx], "content": _to_cached_block(text)}
             injected += 1

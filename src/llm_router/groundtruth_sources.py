@@ -114,13 +114,15 @@ _PASTED_TOOL_OUTPUT = re.compile(
 # when someone adds a fixture.
 _SANDBOX_PROJECT = re.compile(r"^-(private-)?(tmp|var-folders)-", re.I)
 
-# Harness-injected blocks. These are not things a human typed.
-_NOISE_PREFIX = re.compile(
-    r"^\s*<(task-notification|system-reminder|local-command|command-name"
-    r"|command-message|command-args|local-command-stdout|agent-message"
-    r"|function_results|user-prompt-submit-hook)",
-    re.I,
+# Harness-injected blocks. These are not things a human typed. Tag-name
+# prefixes (``local-command`` covers ``local-command-stdout`` / ``-caveat``);
+# ``proxy.steps`` strips the same tags from a request's newest user turn.
+HARNESS_TAGS = (
+    "task-notification", "system-reminder", "local-command", "command-name",
+    "command-message", "command-args", "local-command-stdout", "agent-message",
+    "function_results", "user-prompt-submit-hook",
 )
+_NOISE_PREFIX = re.compile(r"^\s*<(" + "|".join(HARNESS_TAGS) + ")", re.I)
 _CAVEAT = re.compile(r"^\s*Caveat: The messages below were generated", re.I)
 _INTERRUPT = re.compile(r"^\s*\[Request interrupted", re.I)
 

@@ -4,6 +4,7 @@ Comprehensive diagnostic tool to check hooks, MCP registration, API keys,
 Ollama availability, and host-specific configurations.
 """
 
+from llm_router.provider_classes import real_decision_sql
 import json
 import os
 import re
@@ -513,7 +514,7 @@ def _routing_decision_state(db_path: Path) -> _RoutingDecisionState:
             rows = conn.execute(
                 "SELECT COUNT(*) FROM routing_decisions "
                 "WHERE date(timestamp,'localtime')=date('now','localtime') "
-                "  AND COALESCE(reason_code,'') != 'sidecar_backfill'"
+                "  AND COALESCE(reason_code,'') != 'sidecar_backfill' AND " + real_decision_sql(conn)
             ).fetchone()[0]
         except sqlite3.Error as e:
             # NOT 0 rows. An unreadable table is a different fact from an empty
@@ -786,7 +787,7 @@ def _check_savings_posture() -> list[str]:
                 "  COUNT(*) "
                 "FROM routing_decisions "
                 "WHERE date(timestamp,'localtime')=date('now','localtime') "
-                "  AND COALESCE(reason_code,'') != 'sidecar_backfill'"
+                "  AND COALESCE(reason_code,'') != 'sidecar_backfill' AND " + real_decision_sql(conn)
             ).fetchone()
             conn.close()
             simple_n, total_n = (row[0] or 0), (row[1] or 0)

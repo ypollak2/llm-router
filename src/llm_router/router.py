@@ -29,6 +29,12 @@ from uuid import uuid4
 
 from llm_router import cost, media, provider_reset, providers
 from llm_router.cost import (  # constants, so a test that patches ``cost`` keeps the codes
+    REASON_ERROR_ALL_FAILED,
+    REASON_ERROR_BUDGET,
+    REASON_ERROR_CANCELLED,
+    REASON_ERROR_DENIED,
+    REASON_ERROR_OTHER,
+    REASON_ERROR_TIMEOUT,
     REASON_ROUTER_BUDGET_FALLBACK,
     REASON_CACHE_HIT,
     REASON_ROUTER_CHAIN,
@@ -1413,6 +1419,64 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     )
 
 
+# LOCAL-TIMEOUT-1: when Ollama's scheduler is stuck on a model it cannot load, every
+# request for a NOT-yet-loaded model waits in its queue while loaded models keep
+# answering. Live 2026-10-10 (routing_quality.jsonl, 08:34:22Z-09:30:14Z):
+# ollama/qwen3-coder:30b led the code chain and timed out at 120 s on 21 of the 21
+# routes that tried it; the loaded qwen3.8 answered right after it. Every route paid
+# the full timeout because nothing remembered the one before. A local model that just
+# timed out now goes to the back of the chain for a cooldown. It is moved, not dropped,
+# and it leads again when the cooldown ends. The state is per process (the MCP server
+# lives as long as the session).
+_LOCAL_TIMEOUT_COOLDOWN_DEFAULT_S = 600.0
+_local_timeout_at: dict[str, float] = {}  # model -> time.monotonic() of its last timeout
+
+
+def _local_timeout_cooldown_s() -> float:
+    """``LLM_ROUTER_LOCAL_TIMEOUT_COOLDOWN_S`` (default 600). 0 turns demotion off."""
+    raw = os.environ.get("LLM_ROUTER_LOCAL_TIMEOUT_COOLDOWN_S", "").strip()
+    try:
+        value = float(raw) if raw else _LOCAL_TIMEOUT_COOLDOWN_DEFAULT_S
+    except ValueError:
+        value = _LOCAL_TIMEOUT_COOLDOWN_DEFAULT_S
+    return max(0.0, value)
+
+
+def _is_timeout_error(exc: BaseException) -> bool:
+    # litellm.Timeout (what the Ollama path raises) is not a TimeoutError subclass.
+    return isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower()
+
+
+def _note_local_timeout(model: str, exc: BaseException) -> None:
+    if model.startswith("ollama/") and _is_timeout_error(exc):
+        _local_timeout_at[model] = time.monotonic()
+
+
+def _local_in_timeout_cooldown(model: str) -> bool:
+    """True when local *model* timed out within the cooldown (LOCAL-TIMEOUT-1 state)."""
+    t = _local_timeout_at.get(model)
+    cooldown = _local_timeout_cooldown_s()
+    return t is not None and cooldown > 0 and time.monotonic() - t < cooldown
+
+
+def _demote_timed_out_local(models: list[str], exempt: str | None = None) -> list[str]:
+    """Move local models still inside their timeout cooldown to the end of *models*.
+
+    *exempt* is an explicit routing.yaml pin, which keeps its place (GH#64 exempts it
+    from the quality breaker for the same reason).
+    """
+    cooldown = _local_timeout_cooldown_s()
+    if cooldown <= 0 or not _local_timeout_at:
+        return models
+    now = time.monotonic()
+    cooling = {m for m, t in _local_timeout_at.items() if now - t < cooldown and m != exempt}
+    demoted = [m for m in models if m in cooling]
+    if not demoted or len(demoted) == len(models):
+        return models
+    log.info("Demoting %s for this route: timed out within the last %.0fs", demoted, cooldown)
+    return [m for m in models if m not in cooling] + demoted
+
+
 def _response_headers(exc: BaseException) -> dict[str, str]:
     """HTTP response headers carried by a provider exception, or ``{}``."""
     for attr in ("http_response", "_response"):
@@ -2432,7 +2496,8 @@ async def _finalize_successful_route(
             # put every local model at a permanent disadvantage on no evidence
             # — the mirror image of the bug being fixed.
             success=(
-                False if getattr(response, "quality_degraded", False)
+                False if ledger_outcome == "degraded"  # N22: gate-rejected floor answer, not a win
+                else False if getattr(response, "quality_degraded", False)
                 else False if _finish_reason_is_failure(response)
                 else _response_is_usable(getattr(response, "content", "") or "")
             ),
@@ -2441,7 +2506,8 @@ async def _finalize_successful_route(
             cost_usd=response.cost_usd,
             latency_ms=response.latency_ms,
             reason_code=_cd.get("reason_code") or (
-                REASON_ROUTER_UNHINTED if _unhinted else REASON_ROUTER_CHAIN
+                REASON_CACHE_HIT if ledger_outcome == "cache_hit"
+                else REASON_ROUTER_UNHINTED if _unhinted else REASON_ROUTER_CHAIN
             ),
             correlation_id=correlation_id,
             response=response.content,
@@ -2585,6 +2651,10 @@ async def _dispatch_model_loop(
     scope_root: str | None = None,
     # P0.5: the semantic-cache key route_and_call checked under; stored under it.
     semantic_key=None,
+    # LEDGER-ERR-1: the caller's own list, used AS the attempt list, so a failure that
+    # escapes this function (timeout, cancel, exhaustion) still tells the caller which
+    # model was being attempted. None keeps the old private list.
+    chain_attempts_out: list[str] | None = None,
 ) -> LLMResponse:
     """Execute the main model dispatch loop with primary + emergency fallback chains.
 
@@ -2628,7 +2698,8 @@ async def _dispatch_model_loop(
 
     last_error: Exception | None = None
     chain_errors: list[tuple[str, str]] = []  # (model, error_summary) for diagnostics
-    chain_attempts: list[str] = []  # models tried, for explainability
+    # models tried, for explainability
+    chain_attempts: list[str] = chain_attempts_out if chain_attempts_out is not None else []
     # CF-1 G2: real failed-attempt cost. Accumulates the billable cost of any attempt
     # that produced a response but was then REJECTED (gate/quality) before the chain
     # advanced. Pre-dispatch skips (health/budget/cost cap/policy) never bill, so they
@@ -2719,9 +2790,29 @@ async def _dispatch_model_loop(
     policy_skipped: list[tuple[str, str]] = []  # (model, why)
     _policy_active_mode = _policy_mode() if routing_policy is not None else "off"
 
+    # N22: set when a local model times out in THIS call (see the skip at the top of the loop).
+    _local_timed_out_in_call = False
+    _chain_as_built = list(models_to_try)  # LOCAL-TIMEOUT-1: the emergency check compares against this
+    models_to_try = _demote_timed_out_local(models_to_try, exempt=pinned_model)
     for attempt, model in enumerate(models_to_try, start=1):
         provider = provider_from_model(model)
         model_name = model.split("/", 1)[1] if "/" in model else model
+
+        # N22: a rejected answer is already in hand, so the floor is what this call returns if the
+        # rest of the chain fails. A local model that timed out in this call, or is still inside its
+        # timeout cooldown, would only add its full timeout (120 s each) before that same floor is
+        # served: M0-3 rerun3 spent 268 s on two llamacpp/classifier models after the coder answer
+        # failed the syntax gate. Skip it; a remote model still runs. The in-call flag deliberately skips
+        # EVERY later ollama model, not just the one that timed out: one local timeout means the local
+        # scheduler is stuck, and the next local model most likely hangs the same way.
+        if (
+            _best_rejected is not None
+            and model.startswith("ollama/")
+            and model != pinned_model
+            and (_local_timed_out_in_call or _local_in_timeout_cooldown(model))
+        ):
+            chain_errors.append((model, "skipped:local_timeout_with_answer_in_hand"))
+            continue
 
         if not tracker.is_healthy(provider):
             await _notify(ctx, "warning", f"⚠️  {provider} unhealthy — trying next")
@@ -3421,6 +3512,9 @@ async def _dispatch_model_loop(
             )
 
         except Exception as e:
+            _note_local_timeout(model, e)  # LOCAL-TIMEOUT-1
+            if model.startswith("ollama/") and _is_timeout_error(e):
+                _local_timed_out_in_call = True  # N22
             # A reported reset time ("try again at 06:39", Retry-After: 7200,
             # anthropic-ratelimit-*-reset) benches the provider until then,
             # across processes. Independent of the classification below: the
@@ -3519,7 +3613,8 @@ async def _dispatch_model_loop(
         )
         # M3.0 (D-14 = A): the shared builder no longer strips local, so strip here.
         emergency_chain = _strip_local_for_qa(emergency_chain, task_type)
-        if emergency_chain and emergency_chain != models_to_try:
+        if emergency_chain and emergency_chain != _chain_as_built:
+            emergency_chain = _demote_timed_out_local(emergency_chain)  # LOCAL-TIMEOUT-1
             for attempt, model in enumerate(emergency_chain, start=len(models_to_try) + 1):
                 provider = provider_from_model(model)
                 model_name = model.split("/", 1)[1] if "/" in model else model
@@ -3658,6 +3753,7 @@ async def _dispatch_model_loop(
                     )
 
                 except Exception as e:
+                    _note_local_timeout(model, e)  # LOCAL-TIMEOUT-1: same as the primary loop
                     chain_attempts.append(model)
                     log.warning(
                         "Emergency fallback model %s failed: %s", model, e
@@ -3780,6 +3876,17 @@ async def _dispatch_model_loop(
         # rejected); accepting it here does not re-bill. Terminal state is 'accepted'
         # — an answer WAS returned — with the degradation captured in the logs above.
         _emit_ledger_terminal(correlation_id, "accepted", route_succeeded=True)
+        # N22: the floor answer was served, so its real usage row (tokens, cost, provider, the caller's
+        # session) must exist. Only the accepted-attempt path wrote one, so a floor-served call left
+        # just the LEDGER-EVERY-EXIT-1 safety-net row (provider=none, error_unledgered_exit, success=0).
+        # Rejected attempts never wrote usage, so this does not double count. Fail-open.
+        try:
+            await cost.log_usage(
+                _best_rejected, task_type, profile, correlation_id=correlation_id,
+                success=False, reason=cost.REASON_DEGRADED_FLOOR,
+            )
+        except Exception as _fu_err:  # noqa: BLE001 -- telemetry never fails the turn
+            log.warning("exhaustion-floor usage row failed (non-fatal): %s", _fu_err)
         # RED1-8-01: the floor answer's own cost is ALREADY inside
         # _failed_attempt_cost (billed when it was rejected), so subtract it to
         # avoid double-counting — settlement adds response.cost_usd back.
@@ -3887,6 +3994,65 @@ def _response_is_usable(text: str) -> bool:
         from llm_router import failopen
         failopen.record("CHZ-FO-ROUTER-SUCCESS-SIGNAL", exc)
         return bool((text or "").strip())
+
+
+def _route_error_reason(exc: BaseException) -> str:
+    """The ``usage.reason`` code for a call that reached dispatch and failed (LEDGER-ERR-1)."""
+    if isinstance(exc, asyncio.CancelledError):
+        return REASON_ERROR_CANCELLED
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):  # incl. WallClockExceeded, DeadlineExceeded
+        return REASON_ERROR_TIMEOUT
+    if isinstance(exc, BudgetExceededError):
+        return REASON_ERROR_BUDGET
+    if isinstance(exc, RoutingDenied):
+        return REASON_ERROR_DENIED
+    if type(exc) is RuntimeError and str(exc).startswith("All models failed"):
+        return REASON_ERROR_ALL_FAILED
+    return REASON_ERROR_OTHER
+
+
+async def _record_route_error(
+    exc: BaseException,
+    task_type: TaskType,
+    profile: RoutingProfile,
+    correlation_id: str,
+    attempts: list[str],
+    models_to_try: list[str],
+    started_monotonic: float,
+    complexity: str = "moderate",
+) -> None:
+    """LEDGER-ERR-1: leave the failed call's one per-session ledger row. FAIL-OPEN.
+
+    M0-3 rerun 2026-10-10: calls that ended in an MCP tool error (all providers timed out,
+    every candidate skipped as unhealthy) wrote no ``usage`` / ``routing_decisions`` row,
+    so per-session accounting could not see them. Every writer ran only on success.
+
+    Runs from the three terminal handlers around dispatch. Shielded so a cancel that is
+    already unwinding cannot abort the insert half way; ``cost.log_route_error`` skips the
+    write when a row with this correlation id exists, so a late cancel after an answer was
+    recorded does not add a second row.
+    """
+    try:
+        import time as _time
+
+        from llm_router.quality_feedback import is_skip_marker
+
+        real = [a for a in attempts if not is_skip_marker(a)]
+        attempted = real[-1] if real else (models_to_try[0] if models_to_try else None)
+        await asyncio.shield(
+            cost.log_route_error(
+                task_type, profile,
+                reason=_route_error_reason(exc),
+                correlation_id=correlation_id,
+                attempted_model=attempted,
+                latency_ms=(_time.monotonic() - started_monotonic) * 1000.0,
+                complexity=complexity,
+            )
+        )
+    except BaseException as _err:  # noqa: BLE001 — telemetry never changes the failure
+        # A second cancel during the shielded write lands here too: the insert task keeps
+        # running; the original exception is what the caller must see.
+        log.debug("route-error usage row failed (non-fatal): %r", _err)
 
 
 async def route_and_call(
@@ -4863,6 +5029,7 @@ async def route_and_call(
         # ``asyncio.timeout``) for Python 3.10 compatibility — the project
         # supports 3.10+. On timeout, release the budget reservation, write
         # a timeout audit row, and raise WallClockExceeded.
+        _attempt_trace: list[str] = []
         _dispatch_coro = _dispatch_model_loop(
             models_to_try=models_to_try,
             task_type=task_type,
@@ -4894,6 +5061,7 @@ async def route_and_call(
             ledger_route_id=_ledger_route_id,
             scope_root=_scope_root,
             semantic_key=_semantic_key,
+            chain_attempts_out=_attempt_trace,
         )
         # T3-S2 + T3-M1: combined timeout + cancel handling. Both failure
         # modes share the same cleanup contract — release the budget
@@ -4957,6 +5125,9 @@ async def route_and_call(
             else:
                 response = await _dispatch_coro
         except asyncio.CancelledError as _cancel_err:
+            await _record_route_error(_cancel_err, task_type, profile, correlation_id,
+                                      _attempt_trace, models_to_try, _dispatch_started,
+                                      effective_complexity)
             # T3-M1: external cancellation (parent agent killed, host
             # client disconnected, supervisor pulled the plug). The
             # routing path must release its budget reservation before
@@ -4970,6 +5141,9 @@ async def route_and_call(
             raise
         except asyncio.TimeoutError as _to_err:
             elapsed = _t.monotonic() - _dispatch_started
+            await _record_route_error(_to_err, task_type, profile, correlation_id,
+                                      _attempt_trace, models_to_try, _dispatch_started,
+                                      effective_complexity)
             async with _budget_lock():
                 _pending_spend = max(0.0, _pending_spend - _reservation)
             await release_envelope(_env_key, _reservation)
@@ -4993,7 +5167,10 @@ async def route_and_call(
                 cap_seconds=max_wall_clock_seconds,
                 elapsed_seconds=elapsed,
             ) from _to_err
-        except Exception:
+        except Exception as _disp_err:
+            await _record_route_error(_disp_err, task_type, profile, correlation_id,
+                                      _attempt_trace, models_to_try, _dispatch_started,
+                                      effective_complexity)
             # RED1-4-02: _dispatch_model_loop releases _pending_spend on its
             # all-models-failed tail (RuntimeError) but never the distributed
             # budget envelope, and route_and_call only caught Cancelled/Timeout —

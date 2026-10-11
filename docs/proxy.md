@@ -131,7 +131,7 @@ client tools are never routed.
 | `--hedge-s` | `LLM_ROUTER_PROXY_HEDGE_S` | `8` (first-token deadline; `off` disables) |
 | `--model` | `LLM_ROUTER_PROXY_MODEL` | from policy. A pin changes *which* tool-capable model serves, never *whether* a step is routed. |
 | `--trim` | `LLM_ROUTER_PROXY_TRIM` | `fast`. Comma list of named trims or `module:function`. |
-| `--num-ctx` | `LLM_ROUTER_PROXY_NUM_CTX` | per model, from `llm_router.local_models.NUM_CTX` (`qwen3.5:latest` and `qwen3.8:latest` 131072, `llmr-edit` 16384, `llmr-classifier` 4096; 32768 for `qwen3-coder:30b`, `qwen3.6:35b-a3b-coding` and any unlisted model). Applies to the pinned `--model`, or to each model the policy picks when none is pinned. A value you set applies to every model. |
+| `--num-ctx` | `LLM_ROUTER_PROXY_NUM_CTX` | per model, from `llm_router.local_models.NUM_CTX` (`llmr-edit` 16384, `llmr-classifier` 4096; 32768 for every other model, including qwen3.5/3.8, so the server OLLAMA_CONTEXT_LENGTH is not overridden). Applies to the pinned `--model`, or to each model the policy picks when none is pinned. A value you set applies to every model. |
 | `--keep-alive` | (none) | `-1`: the model stays loaded until Ollama restarts |
 | `--no-warm-up` | (none) | a warm-up call runs in the background at start |
 | `--ollama-url` | (none) | the router's configured Ollama (e.g. a dedicated server, below) |
@@ -159,7 +159,7 @@ That run used a dedicated tuned server. The proxy's defaults follow it:
   That is about 3-5k prompt tokens instead of about 21k.
 - **Output cap.** `num_predict` is 200 after `Read`/`Bash`/no tool, and 700
   otherwise.
-- **Warm.** `keep_alive: -1` is sent on every call, plus one warm-up call at
+- **Warm.** `keep_alive: 600` (seconds; `--keep-alive -1` pins forever) is sent on every call, plus one warm-up call at
   start. A cold load took 8-110 s in that spike.
 - **Hedge.** 8 s to the first token.
 
@@ -480,8 +480,9 @@ narrow, logged exception, off unless `haiku_arm_share` is set (a fraction 0-1; a
 
 - **Which turns:** the hash `sha256(session_id|turn|salt)` must fall under the share (turn = number of non-system
   messages, so a retried request lands in the same place), and then the existing rules must call it simple Q&A: a
-  main-thread human turn (`step_kind == turn_first`; side calls, tool-result continuations and sub-agent first
-  calls stay pinned), past the first call, no `opus:` / `/model` pin, no correction signal, a body Haiku accepts
+  main-thread human turn (`step_kind == turn_first`; side calls, tool-result continuations, sub-agent calls
+  (`subagent_first` / `subagent_turn`) and notification-only turns (`harness_turn`, arm reason `harness_turn`)
+  stay pinned), past the first call, no `opus:` / `/model` pin, no correction signal, a body Haiku accepts
   (no media, no mid-conversation system message, under the context limit), and the classifier says `query` /
   `simple`. No session id = never armed. Sub-agent calls (no `Agent`/`Task` launcher in `tools`, on any call, not only the first) and sessions tagged headless / harness / research are never armed. `haiku_arm_eligible` (default `[query/simple]`) lists the `task/complexity` patterns that qualify (complexity may be `*`); the matched pattern is logged as `tier_arm_reason: matched:<pattern>`. To run the widened arm: `haiku_arm_share: 0.25` + `haiku_arm_eligible: [query/*]` (with `haiku_rewrite: true`).
 - **Ledger:** only in-share turns get `tier_arm`, `tier_arm_assignment` (`treatment` / `ineligible`),

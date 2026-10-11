@@ -11,6 +11,8 @@ All data from existing SQLite `usage` table — no new collection needed.
 
 from __future__ import annotations
 
+from llm_router.provider_classes import SQL_REAL_DECISION
+
 import os
 
 from mcp.server.mcpserver import Context
@@ -234,6 +236,7 @@ async def _query_classifier_overhead(since_sql: str) -> float:
             FROM routing_decisions
             WHERE timestamp >= {since_sql}
               AND is_real = 1
+              AND {SQL_REAL_DECISION}
             """,
         )
         row = await cursor.fetchone()
