@@ -28,6 +28,13 @@ titles, probes, summaries). Only ``STEP_CLASSES`` may be served; the other kinds
 are labels. A continuation that cannot be served faithfully says why in
 :func:`step_ineligible`.
 
+Two request shapes hid human turns before STEP-SIDECALL-1 (docs/bugs/STEP-SIDECALL-1.md). A
+Message Threads continue (``thread.type == "continue"``) sends only the messages after the
+anchor reply and omits ``tools`` when the thread already holds them, so it has no client
+tools and no history: it read as ``side_call``, and a tool-result follow-up as a
+one-message request. And a human prompt typed while a tool runs is appended to the tool
+results' turn as a text block, so it read as ``continuation``.
+
 Before TURNFIRST-1 (docs/bugs/TURNFIRST-1.md) every non-first, non-continuation
 call was ``turn_first``, sub-agent calls and notifications included: 113 of 113
 classified turn_first rows in the live ledger (2026-10-08 17:50 to 10-09 21:05)
@@ -42,7 +49,7 @@ import json
 import re
 from typing import Callable
 
-from llm_router.groundtruth_sources import _CAVEAT, HARNESS_TAGS
+from llm_router.groundtruth_sources import _CAVEAT, _INTERRUPT, HARNESS_TAGS
 from llm_router.proxy import tool_classes
 
 STEP_CONTINUATION = "continuation"
@@ -93,10 +100,32 @@ def non_system(messages: list) -> list:
     return [m for m in messages if isinstance(m, dict) and m.get("role") != "system"]
 
 
+def thread_type(body: dict) -> str | None:
+    """``create`` or ``continue`` when the request carries Message Threads, else ``None``."""
+    thread = body.get("thread")
+    kind = thread.get("type") if isinstance(thread, dict) else None
+    return kind if kind in ("create", "continue") else None
+
+
+def is_thread_continue(body: dict) -> bool:
+    """A Message Threads continue: ``messages`` is only the tail after the anchor reply
+    (``thread.previous_message_id``) and ``tools`` is left out when the thread holds them."""
+    return thread_type(body) == "continue"
+
+
+def thread_parent(body: dict) -> str | None:
+    """The reply a continue builds on (``thread.previous_message_id``), else ``None``."""
+    thread = body.get("thread")
+    parent = thread.get("previous_message_id") if isinstance(thread, dict) else None
+    return parent if isinstance(parent, str) and parent else None
+
+
 def _newest_turn_kinds(body: dict) -> set | None:
-    """Block types of the newest user turn, or ``None`` when it cannot answer tools."""
+    """Block types of the newest user turn, or ``None`` when it cannot answer tools.
+    A thread continue holds only the tail after its anchor, so its newest turn may be
+    the only message."""
     msgs = non_system(body.get("messages") or [])
-    if len(msgs) < 3 or msgs[-1].get("role") != "user":
+    if len(msgs) < (1 if is_thread_continue(body) else 3) or msgs[-1].get("role") != "user":
         return None
     content = msgs[-1].get("content")
     if not isinstance(content, list) or not content:
@@ -180,29 +209,59 @@ def is_subagent_request(body: dict) -> bool:
     return any(marker in system for marker in _SUBAGENT_PROMPT_MARKERS)
 
 
-def is_main_thread(body: dict) -> bool:
+def is_main_thread(body: dict, parent_main: bool | None = None) -> bool | None:
     """The call comes from the main thread: its tools hold an ``Agent``/``Task``
     launcher and it carries no sub-agent evidence (:func:`is_subagent_request`).
     The launcher alone is not enough: a general-purpose sub-agent holds ``Agent``
     too (TURNFIRST-2: three of four live turn_first rows on 2026-10-10 were such
-    first calls). A main session run with the launcher disabled reads as a sub-agent."""
+    first calls). A main session run with the launcher disabled reads as a sub-agent.
+
+    A thread continue that leaves ``tools`` out has no launcher to read: it is the
+    thread's own, so it answers as ``parent_main`` (the reply it builds on), ``False``
+    on sub-agent evidence, and ``None`` when the parent is unknown."""
     names = {t.get("name") for t in body.get("tools") or [] if isinstance(t, dict)}
+    if not names and is_thread_continue(body):
+        return False if is_subagent_request(body) else parent_main
     return bool(names & _AGENT_LAUNCHERS) and not is_subagent_request(body)
 
 
-def step_kind(body: dict) -> str:
+def _typed_text_beside_results(body: dict) -> bool:
+    """The newest user turn answers tools AND holds human text: a prompt typed while a
+    tool ran (Claude Code appends it to the tool results' turn). Harness blocks and a
+    ``[Request interrupted`` marker are not human text."""
+    content = _newest_user_content(body)
+    if not isinstance(content, list):
+        return False
+    texts = [b for b in content if isinstance(b, dict) and b.get("type") == "text"
+             and not _INTERRUPT.match(b.get("text") or "")]
+    return bool(texts) and bool(_human_parts(texts)[0])
+
+
+def _is_pure_continuation(body: dict) -> bool:
+    """:func:`_is_continuation_kind` and no human prompt riding on the tool results."""
+    return _is_continuation_kind(body) and not _typed_text_beside_results(body)
+
+
+def step_kind(body: dict, parent_main: bool | None = None) -> str:
     """What kind of call ``body`` is (one of :data:`STEP_KINDS`), for the ledger.
 
     Sub-agent kinds are inferred from the tool list and the system prompt
     (:func:`is_main_thread`). A main session started with the launcher disabled is
     therefore counted as a sub-agent;
     both are actions, so the census's action total does not move. A first call keeps
-    its pre-TURNFIRST-1 label (``turn_first`` / ``subagent_first``) whatever its text."""
-    if not _has_client_tools(body):
+    its pre-TURNFIRST-1 label (``turn_first`` / ``subagent_first``) whatever its text.
+
+    A thread continue has no tools to read (they stay on the thread), so it is not a
+    ``side_call``; ``parent_main`` is whether the reply it builds on came from the main
+    thread (the proxy remembers it per reply). Unknown is not proof: a human-text
+    continue with no known parent is ``subagent_turn``. A tool-result turn carrying a
+    typed prompt is that prompt's first call, not a continuation."""
+    thread = is_thread_continue(body)
+    if not _has_client_tools(body) and not thread:
         return STEP_SIDE_CALL
-    if _is_continuation_kind(body):
+    if _is_pure_continuation(body):
         return STEP_CONTINUATION
-    main = is_main_thread(body)
+    main = is_main_thread(body, parent_main)
     if is_first_call(body):
         return STEP_TURN_FIRST if main else STEP_SUBAGENT_FIRST
     if not main:
@@ -210,7 +269,8 @@ def step_kind(body: dict) -> str:
     return STEP_TURN_FIRST if _newest_turn_is_human(body) else STEP_HARNESS_TURN
 
 
-def step_fields(body: dict, on_error: Callable[[Exception], None] | None = None) -> dict:
+def step_fields(body: dict, on_error: Callable[[Exception], None] | None = None,
+                parent_main: bool | None = None) -> dict:
     """The GE1 ledger labels (``step_class``, ``prev_tools``, ``prev_tool_class``,
     ``step_ineligible``) plus ``step_error``. Fail-open for these labels only: if
     labelling raises, the row says ``step_class == unknown`` with ``step_error`` true
@@ -218,7 +278,7 @@ def step_fields(body: dict, on_error: Callable[[Exception], None] | None = None)
     classify the call (NFR-FAIL). Other body-shape reads on the request path (for
     example ``has_served_turn``, ``session_id_of``) are not guarded here."""
     try:
-        return {"step_class": step_kind(body), "prev_tools": prev_tools(body),
+        return {"step_class": step_kind(body, parent_main), "prev_tools": prev_tools(body),
                 "prev_tool_class": prev_tool_class(body), "step_ineligible": step_ineligible(body),
                 "step_error": False}
     except Exception as exc:  # noqa: BLE001 - a labelling error must not fail the call
@@ -440,14 +500,14 @@ def _newest_turn_is_human(body: dict) -> bool:
     return bool(text) or not tags
 
 
-def turn_origin(body: dict) -> str | None:
+def turn_origin(body: dict, parent_main: bool | None = None) -> str | None:
     """Where the newest user turn of a non-continuation call came from (one of
     :data:`TURN_ORIGINS`); ``None`` for a continuation, a side call, or a request
     whose newest message is not a user turn. A turn with human text is ``command``
     when it also carries a command echo (a slash command and its expanded prompt),
     else ``typed`` on the main thread and ``subagent_brief`` in a sub-agent. A turn
     with no human text is named by its harness tags."""
-    if not _has_client_tools(body) or _is_continuation_kind(body):
+    if (not _has_client_tools(body) and not is_thread_continue(body)) or _is_pure_continuation(body):
         return None
     msgs = non_system(body.get("messages") or [])
     if not msgs or msgs[-1].get("role") != "user":
@@ -457,19 +517,22 @@ def turn_origin(body: dict) -> str | None:
     if text or not tags:
         if command:
             return ORIGIN_COMMAND
-        return ORIGIN_TYPED if is_main_thread(body) else ORIGIN_SUBAGENT_BRIEF
+        return ORIGIN_TYPED if is_main_thread(body, parent_main) else ORIGIN_SUBAGENT_BRIEF
     if _TASK_NOTIFICATION in tags:
         return ORIGIN_TASK_NOTIFICATION
     return ORIGIN_COMMAND if command else ORIGIN_OTHER_TAG
 
 
-def turn_fields(body: dict) -> dict:
-    """The TURNFIRST-1 ledger columns, text-free: ``is_main_thread``,
+def turn_fields(body: dict, parent_main: bool | None = None) -> dict:
+    """The TURNFIRST-1 ledger columns, text-free: ``is_main_thread``
+    (``None`` for a thread continue whose parent is unknown),
     ``is_first_call``, ``turn_origin`` and ``tier_text_len`` (the length in
     characters of what the tier classifier reads, :func:`tier_text`; 0 when there
-    is no human text)."""
-    return {"is_main_thread": is_main_thread(body), "is_first_call": is_first_call(body),
-            "turn_origin": turn_origin(body), "tier_text_len": len(tier_text(body))}
+    is no human text), plus ``thread`` (``create`` | ``continue`` | ``None``:
+    STEP-SIDECALL-1, so a later audit can tell the shapes apart)."""
+    return {"is_main_thread": is_main_thread(body, parent_main), "is_first_call": is_first_call(body),
+            "turn_origin": turn_origin(body, parent_main), "tier_text_len": len(tier_text(body)),
+            "thread": thread_type(body)}
 
 
 def newest_human_text(body: dict) -> str:
@@ -507,8 +570,9 @@ def user_pinned_model(body: dict) -> bool:
 
 
 def is_first_call(body: dict) -> bool:
-    """The conversation's first model call: one user turn, no reply yet."""
-    return len(non_system(body.get("messages") or [])) == 1
+    """The conversation's first model call: one user turn, no reply yet. A thread
+    continue also holds one message, but it answers a reply the thread already has."""
+    return len(non_system(body.get("messages") or [])) == 1 and not is_thread_continue(body)
 
 
 def has_client_tools(body: dict) -> bool:
