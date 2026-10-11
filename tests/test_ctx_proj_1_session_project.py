@@ -234,3 +234,84 @@ def test_cleanup_sweeps_orphan_pin_and_cwd_record(tmp_path):
     for sid in ("alive", "arch", "young"):  # has a log / archive, or younger than the TTL
         assert (sd / f"session_project_{sid}.json").exists()
         assert (sd / f"session_cwd_{sid}.json").exists()
+
+
+def test_cleanup_ages_out_premerge_and_merging_leftovers(tmp_path):
+    a = _repo(tmp_path / "A")
+    b = _repo(tmp_path / "B")
+    _put("sid13", b, "b1", 1.0)
+    _put("sid13", b, "b-arch", 0.5, archive=True)
+    ss.write_pointer("sid13", cwd=str(a))
+    ss.record_event("sid13", "user_prompt", "a")  # adoption leaves *.premerge in B
+    projects = ss._state_dir() / "projects"
+    left = list(projects.glob("*/session_context_sid13.jsonl.premerge")) \
+        + list(projects.glob("*/archive/session_context_sid13.jsonl.premerge"))
+    stray = projects / _hash(a) / "session_context_sid13.jsonl.merging"
+    stray.write_text("{}\n")
+    left.append(stray)
+    assert len(left) == 3
+    ss.cleanup_old_sessions()
+    assert all(p.exists() for p in left)  # young: kept
+    for p in left:
+        _age(p, ss._TTL_DAYS + 1)
+    ss.cleanup_old_sessions()
+    assert not any(p.exists() for p in left)
+
+
+def test_merge_skips_a_source_whose_lock_is_held(tmp_path):
+    a = _repo(tmp_path / "A")
+    b = _repo(tmp_path / "B")
+    c = _repo(tmp_path / "C")
+    _put("sid14", b, "b1", 1.0)
+    _put("sid14", c, "c1", 2.0)
+    src_b = ss._state_dir() / "projects" / _hash(b) / "session_context_sid14.jsonl"
+    src_c = ss._state_dir() / "projects" / _hash(c) / "session_context_sid14.jsonl"
+    target = ss._state_dir() / "projects" / _hash(a) / "session_context_sid14.jsonl"
+    from llm_router.file_lock import exclusive_lock
+    with exclusive_lock(ss._lock_path(src_b)) as got:  # a writer is mid-append on B
+        assert got
+        rep = ss.merge_session_shards("sid14", apply=True, paths=[src_b, src_c], target=target)
+    assert rep["applied"]
+    assert src_b.exists() and not src_b.with_suffix(".jsonl.premerge").exists()  # skipped, in place
+    assert not src_c.exists() and src_c.with_suffix(".jsonl.premerge").exists()
+    assert [json.loads(x)["content"] for x in target.read_text().splitlines()] == ["c1"]
+    # B's data is not lost: the next merge picks it up
+    ss.merge_session_shards("sid14", apply=True, paths=[src_b, target], target=target)
+    assert [json.loads(x)["content"] for x in target.read_text().splitlines()] == ["b1", "c1"]
+
+
+def test_stale_path_writer_retries_on_the_new_path(tmp_path, monkeypatch):
+    a = _repo(tmp_path / "A")
+    b = _repo(tmp_path / "B")
+    ss.write_pointer("sid15", cwd=str(a))
+    ss._session_path("sid15")  # pin to A
+    stale = ss._state_dir() / "projects" / _hash(b) / "session_context_sid15.jsonl"
+    real = ss._session_path
+    calls = {"n": 0}
+
+    def fake(sid, root=None):
+        calls["n"] += 1
+        return stale if calls["n"] == 1 else real(sid, root)  # writer resolved before the pin moved it
+
+    monkeypatch.setattr(ss, "_session_path", fake)
+    ss.record_event("sid15", "user_prompt", "late writer")
+    monkeypatch.setattr(ss, "_session_path", real)
+    assert not stale.exists()
+    assert [f.parent.name for f in _shards("sid15")] == [_hash(a)]
+    assert [e["content"] for e in ss.load_events("sid15")] == ["late writer"]
+
+
+def test_merge_keeps_raw_bytes_non_ascii_and_unparseable_lines(tmp_path):
+    a = _repo(tmp_path / "A")
+    b = _repo(tmp_path / "B")
+    now = time.time()
+    ev = json.dumps({"ts": now - 10, "role": "user", "content": "שלום café", "kind": "user_prompt"})
+    d = ss._state_dir() / "projects" / _hash(b)
+    d.mkdir(parents=True)
+    (d / "session_context_sid16.jsonl").write_text(ev + "\n{torn line\n")
+    ss.write_pointer("sid16", cwd=str(a))
+    ss.record_event("sid16", "user_prompt", "after")
+    lines = ss._session_path("sid16").read_text().splitlines()
+    assert lines[0] == ev            # byte-identical: ensure_ascii escapes preserved
+    assert lines[1] == "{torn line"  # kept raw, in place
+    assert json.loads(lines[2])["content"] == "after"

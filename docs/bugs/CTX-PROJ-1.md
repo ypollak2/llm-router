@@ -30,13 +30,20 @@ status: fixed in `fix/ctx-project-per-session` (owner decision D-57; sessions al
   running at deploy does not orphan its pre-deploy events. If the lock times out the merge is
   skipped and the shards stay put: run `llm-router sessions merge`. Events written before the first
   hook record exists (the first-write race) are adopted the same way once the pin appears.
+  The merge holds each source's lock (sorted order, 0.5 s; a source it cannot lock is skipped and
+  left in place) across read+rename, writes the target first and renames sources second (a crash
+  leaves duplicates, which dedupe, never data only in `*.premerge`), keeps lines byte-for-byte
+  (non-ASCII escapes intact, so restore's byte-identical dedupe still matches) and keeps
+  unparseable lines raw. `record_event` re-resolves its path under the lock and retries once, so a
+  writer that resolved the pre-pin path cannot recreate the old shard.
   **Cleanup.** `cleanup_old_sessions` deletes `session_project_<sid>.json` and
   `session_cwd_<sid>.json` older than `_TTL_DAYS` when no `session_context_<sid>.jsonl` exists
-  (live or archive, any project dir).
-- **Test.** `tests/test_ctx_proj_1_session_project.py` (15 tests): events from repo B, a worktree
+  (live or archive, any project dir). `*.premerge` / `*.merging` leftovers age out on the same
+  TTL (B-02: no plaintext copy outlives retention).
+- **Test.** `tests/test_ctx_proj_1_session_project.py` (19 tests): events from repo B, a worktree
   of A and a subdir land in one file under A's hash; pin survives the cwd record moving or ageing;
   pin beats a caller `project_root` (load_events and build_session_context); env override beats pin
   and root; no record / no session id is the old behaviour; first-write race is adopted; archive and
   restore use A's hash; pre-deploy live + archive shards from two other dirs are merged in order
   without loss or duplicates; pin write is atomic; race loser reads the winner; cleanup sweeps only
-  orphaned, aged pins and cwd records.
+  orphaned, aged pins and cwd records. Also: premerge/merging retention sweep, held-source-lock skip, stale-path writer retry, raw-line preservation.
