@@ -44,7 +44,8 @@ def _audit(door, cls, group, *, n=30, ok=28, ts=NOW - 86400.0):
 #: lane -> sampled. Case 15 sits in (proxy, local, code), which has no passing batch.
 QUALITY = [_audit("proxy", "haiku", "qa"), _audit("mcp", "local", "code"), _audit("proxy", "local", "qa"),
            _audit("mcp", "very_cheap", "qa"), _audit("techop", "local", "tech_op"),
-           _audit("direct", "local", "code"), _audit("subagent", "haiku", "qa")]
+           _audit("direct", "local", "code"), _audit("subagent", "haiku", "qa"),
+           _audit("proxy", "very_cheap", "qa")]       # so case 7 (Sonnet) is decided by model class alone
 
 
 def _case_sid(n: int) -> str:
@@ -154,6 +155,17 @@ def test_fixture_is_15_cases_and_the_totals_follow(res):
     assert ex["techop_deterministic"] == 1 and ex["techop_below_4kb"] == 1 and ex["other_kind"] >= 1
 
 
+def test_orphan_proxy_rows_are_flagged_and_counted_in_a_caveat(_scorecard_env, monkeypatch):
+    from llm_router import o3_transcripts
+
+    proxy, mcp, _ = _fixture()
+    fx.write_jsonl(paths.state_path("proxy_calls.jsonl"), proxy)
+    monkeypatch.setattr(ns, "local_shadow_units", lambda days=30, db_path=None, **kw: iter(()))
+    monkeypatch.setattr(o3_transcripts, "thread_lookup", lambda **kw: (lambda sid, mid: "orphan"))
+    off = kpi.compute_scorecard(since=SINCE, until=UNTIL)["offload"]
+    assert any("in no message of their session's transcript" in c for c in off["caveats"])
+
+
 def test_case_2_haiku_row_is_redone_by_escalation(res):
     haiku = [a for a in _of(res, 2) if a["served_class"] == "haiku"][0]
     assert haiku["redone"] is True and haiku["numerator"] is False
@@ -251,7 +263,8 @@ def test_very_cheap_reference_is_read_from_the_table_not_written_down():
     ("ollama/x:7b", "ollama", False, "local"), ("claude-sonnet-5-5", None, True, "local"),
     ("claude-haiku-5-5", None, False, "haiku"), ("gemini/gemini-2.5-flash", "gemini", False, "very_cheap"),
     ("gpt-5.5", "codex", False, "spread"), ("codex/gpt-5.5", None, False, "spread"),
-    ("gpt-6-astra", "codex", False, "spread"), ("gemini-2.5-pro", "gemini", False, "spread"),
+    ("gpt-6-astra", "codex", False, "spread"), ("gpt-5.1-codex-mini", None, False, "spread"),
+    ("gpt-5-mini", None, False, "very_cheap"), ("gpt-5.4-mini", None, False, "paid"), ("gemini-2.5-pro", "gemini", False, "spread"),
     ("claude-sonnet-5-5", None, False, "paid"), ("claude-opus-5-5", None, False, "paid"),
 ])
 def test_served_class(model, provider, local, want):

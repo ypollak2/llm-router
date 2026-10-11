@@ -647,11 +647,13 @@ _SPREAD_RE = None
 
 
 def _is_spread(model: Any, provider: Any = None) -> bool:
-    """Another Frontier subscription: Codex (gpt-5.5, gpt-6) or Gemini Pro."""
+    """Another Frontier subscription: anything Codex-named or served by the Codex provider, gpt-5.5, gpt-6, or
+    Gemini Pro. Other gpt-5.x models fall through to the price rule (priced at or below Haiku's input rate:
+    very cheap; unpriced or dearer: paid), so ``gpt-5-mini`` and ``gpt-5.4-mini`` are judged by price alike."""
     global _SPREAD_RE
     import re
     if _SPREAD_RE is None:
-        _SPREAD_RE = re.compile(r"codex|gpt-5\.|gpt-6|gemini[\w.\-/]*pro")
+        _SPREAD_RE = re.compile(r"codex|gpt-5\.5|gpt-6|gemini[\w.\-/]*pro")
     m = model.lower() if isinstance(model, str) else ""
     return (isinstance(provider, str) and provider.lower() == "codex") or bool(_SPREAD_RE.search(m))
 
@@ -791,6 +793,7 @@ def action_units(since: float, until: float, *, proxy_rows: list[dict] | None = 
 
 def _action_base(u: dict) -> dict:
     return {"ts": u["ts"], "session_id": u.get("session_id"), "first": bool(u.get("first")),
+            "orphan": u.get("role") == ROLE_ORPHAN,
             "redone": bool(u.get("redone")), "window_open": bool(u.get("window_open"))}
 
 

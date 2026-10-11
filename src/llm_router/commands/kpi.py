@@ -2010,6 +2010,11 @@ def _offload_prd(days: float, allowed: frozenset[str], index, all_rows: list[dic
         "under door mcp",
     ]
     ex = res["excluded"]
+    orphans = sum(1 for a in res["actions"] if a.get("orphan"))
+    if orphans:
+        caveats.append(f"{orphans:,} of {len(res['actions']):,} actions are proxy rows in no message of their "
+                       "session's transcript (permission classifier, suggestion, side query): not turns, but "
+                       "still in the action and call denominators")
     if ex["local_no_session"]:
         caveats.append(f"{ex['local_no_session']:,} MCP call(s) with no session id are not counted (lower bound)")
     if out["window_open"]:

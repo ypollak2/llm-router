@@ -147,15 +147,19 @@ checks do not go through `offload_share`: no msg_id is counted as a turn twice, 
 equal a recount made from the ledger rows.
 
 *P1.9-a measurement (2026-10-11, `proxy_calls.jsonl` copy of 43,468 rows, window 2026-09-29T00:00:00Z to
-2026-10-11T12:00:00Z).* The frozen gate on the repaired O3, qualifying = kind `organic`, >= 50 typed prompts and >= 1
-proxy turn: two sessions, 6cf3b1b8 (3 turns / 74 prompts = 0.041) and 5041bdf8 (2 / 69 = 0.029), pooled 5 / 143 =
-0.035; before the repair the same two sessions read 3.824 and 0.304. With notifications removed from the prompt
-side, **no organic session has 50 typed prompts** (26 and 27). The bar 0.90-1.10 is NOT met on either
-definition, so `O3_INTEGRITY_GATE` and the warning are unchanged. Why the ratio is low: most prompts of those
-sessions were not served through the proxy (Remote Control sessions bypass it), so the proxy has no turn to
-count. Zero or one valid organic session is the P1.9-a kill condition of PLAN v16 (6 weeks to reach n).
-Sources: `~/.rsi/research/primary-plan/scripts/o3_integrity.py` (frozen gate) and a P1.9 variant kept with the
-PR evidence; both exit 1.
+2026-10-11T12:00:00Z).* **Result: no qualifying session, so P1.9-a is not met and cannot be measured yet** (not a
+numeric fail). With the P1.9 typed-prompt definition (task notifications and other injected input are not
+typed prompts) neither organic session reaches 50 typed prompts: 6cf3b1b8 has 26, 5041bdf8 has 27.
+The frozen M0.3 gate, which still counts notifications, qualifies both and reads 3 / 74 = 0.041 and 2 / 69 =
+0.029 (pooled 5 / 143 = 0.035; before the repair the same two sessions read 3.824 and 0.304). The bar 0.90-1.10 is
+not met on either definition, so `O3_INTEGRITY_GATE` and the warning are unchanged.
+Why the repaired count is low (re-measured by an independent reviewer with the frozen `o3_integrity.py`, same
+window): 6cf3b1b8 is proxy-fronted (920 of its 1,030 assistant messages are in the ledger). Of its 26 genuine
+human turns the repaired O3 counts 3: 17 carry `step_class=side_call` (the proxy labels real human turns as side
+calls, #295 owner question 1), 4 have no ledger row and 2 are `continuation`. 5041bdf8 has 10% ledger coverage
+(69 of 667 messages), so it cannot be measured. Zero or one valid organic session is the P1.9-a kill condition
+of PLAN v16 (6 weeks to reach n). Sources: `~/.rsi/research/primary-plan/scripts/o3_integrity.py` (frozen gate)
+and a P1.9 variant kept with the PR evidence.
 
 *Owner-accepted warning (M0-2, 2026-10-07).* On W0 the integrity ratio is 813 / 209 = 3.89 on the only
 measurable session (b9f04425, research), outside the bar, so M0-2 FAILED. The owner accepted O3 as is,
