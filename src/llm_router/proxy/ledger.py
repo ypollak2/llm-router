@@ -23,6 +23,11 @@ Row fields:
                   prev_tool_class and step_ineligible are then empty); such a
                   call is forwarded without classification.
   step_error      true when the step labels could not be computed (fail-open)
+  thread          STEP-SIDECALL-1: the Message Threads type the request carried
+                  (create | continue), else null. A continue holds only the
+                  messages after its anchor reply and no tools, so its labels
+                  come from the parent reply (``is_main_thread`` is null when
+                  the proxy never saw the parent). Absent on older rows.
   is_main_thread, is_first_call, turn_origin, tier_text_len
                   TURNFIRST-1 (``steps.turn_fields``), text-free: the call
                   carries the Agent/Task launcher and no sub-agent marker in

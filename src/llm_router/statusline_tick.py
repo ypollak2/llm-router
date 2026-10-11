@@ -41,7 +41,6 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
 
 # subprocess / shlex are imported only on the rare path that needs them: on this
 # machine's python3 they add ~15 ms to a tick, and the bar is 100 ms.
@@ -314,6 +313,9 @@ def maybe_refresh(home: str, cache: dict | None, now: float) -> bool:
 def _epoch(value) -> float | None:
     """Copy of ``quota_samples._epoch``: ``session_resets_at`` as epoch seconds."""
     if isinstance(value, str) and value:
+        # Imported here, not at the top: ``datetime`` costs ~5-8 ms of start-up and
+        # only the once-per-5-min history row reads an ISO reset time (P0.9-c).
+        from datetime import datetime, timezone
         try:
             dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:

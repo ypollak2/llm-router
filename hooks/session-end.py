@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 29
+# llm_router-hook-version: 30
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -339,7 +339,7 @@ _CACHE_PROVIDER = "cache"  # semantic-cache-served call: not paid/free/subscript
 # routing_decisions rows of a failed or cache-served call (LEDGER-ERR-1): not routing decisions.
 # Copy of provider_classes.SQL_REAL_DECISION (hooks cannot import the package); a test pins equality.
 _REAL_DECISION = ("COALESCE(reason_code, '') NOT LIKE 'error\\_%' ESCAPE '\\' "
-                  "AND COALESCE(reason_code, '') != 'cache_hit' AND COALESCE(final_provider, '') != 'cache'")
+                  "AND COALESCE(reason_code, '') != 'cache_hit' AND COALESCE(reason_code, '') != 'breaker_open' AND COALESCE(final_provider, '') != 'cache'")
 
 
 def _real_decision(conn) -> str:
@@ -2580,6 +2580,16 @@ def main() -> None:
     # run in one detached child; this Stop reads the usage.json it last wrote.
     with _hl_phase("bg_spawn"):
         _spawn_background_stop_work()
+    # P1.2 rolling summary: OPT-IN (default off). Only the env read happens when off;
+    # the module is imported, and a detached worker started, only when set to 1.
+    if os.environ.get("LLM_ROUTER_ROLLING_SUMMARY", "").strip().lower() in ("1", "true", "on", "yes"):
+        try:
+            from llm_router import context_summary as _ctx_summary
+            if isinstance(_hook_input, dict):
+                _ctx_summary.spawn(str(_hook_input.get("session_id") or ""),
+                                   str(_hook_input.get("transcript_path") or ""))
+        except Exception:  # noqa: BLE001 -- fail open: a summary is never worth a Stop
+            pass
     with _hl_phase("session_data"):
         session_start               = _read_session_start()
         paid_rows, cc_rows, free_rows = _query_session_data(session_start)

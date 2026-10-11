@@ -280,7 +280,7 @@ def mix_segment(state: str) -> dict[str, str]:
         try:
             # = provider_classes.not_error_row_sql (stdlib-only hot path; test pins equality)
             has_reason = any(r[1] == "reason" for r in con.execute("PRAGMA table_info(usage)"))
-            not_error = ("COALESCE(reason, '') NOT LIKE 'error\\_%' ESCAPE '\\'" if has_reason else "1")
+            not_error = ("COALESCE(reason, '') NOT LIKE 'error\\_%' ESCAPE '\\' AND COALESCE(reason, '') != 'breaker_open'" if has_reason else "1")
             row = con.execute(
                 "SELECT SUM(CASE WHEN model LIKE 'ollama/%' THEN 1 ELSE 0 END),"
                 " SUM(CASE WHEN model NOT LIKE 'ollama/%' THEN 1 ELSE 0 END)"
