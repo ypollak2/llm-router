@@ -4,7 +4,7 @@
 Runs in a scratch LLM_ROUTER_HOME (it makes one if none is set) and never touches the real one.
 Prints N, window and the numbers; nothing is written to the repo.
 
-    LLM_ROUTER_HOME=/tmp/scratch python scripts/bench_promote_gate.py [--n 20000] [--cold 15]
+    LLM_ROUTER_HOME=/tmp/scratch python scripts/promote_gate_microbench.py [--n 20000] [--cold 15]
 
 Measured: (1) `order_for_chain` warm, per call; (2) the hook `_build_chain` with the gate on and
 off; (3) a cold hook process (interpreter + imports + one chain), gate on vs off.
