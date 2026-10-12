@@ -213,6 +213,12 @@ def _update_discovery_cache(ollama_models: list[dict]) -> None:
     import json
     import time
 
+    # P0.15-c: the one-time grandfather write must happen before discovery.json
+    # exists on a fresh install, or the first probe would look like prior state.
+    from llm_router.model_discovery import ensure_grandfather
+    ensure_grandfather([f"ollama/{m['name']}" for m in ollama_models
+                        if m.get("name") and not _is_embedding_model(m["name"], m)])
+
     models = {}
     for m in ollama_models:
         name = m.get("name", "")
@@ -231,7 +237,12 @@ def _update_discovery_cache(ollama_models: list[dict]) -> None:
             "model_id": model_id,
             "provider": "ollama",
             "provider_tier": "local",
+            # DISC-PROMOTE-1: this list is an assumption, not an observation (nothing
+            # measured what the model can do). The marker lets a reader tell.
+            # Promotion is decided at the injection doors (model_discovery.order_for_chain),
+            # not here.
             "task_types": ["query", "generate", "analyze", "code"],
+            "task_types_assumed": True,
         }
 
     cache_data = {

@@ -252,6 +252,10 @@ def test_other_kpis_are_byte_identical_to_the_pre_o3_golden():
     # P0.14-a: the proxy ledger liveness line is new and time-dependent, so it is not in the golden.
     # P0.5-b: so is the per-project semantic-cache block (it reads usage.db, not the proxy ledger);
     # its own tests are tests/test_p05b_cache_hit_per_project.py.
+    # P1.9: so are the `offload` lines (tests/test_offload_prd.py).
+    off_lines = set(kpi._offload_render_lines(card["offload"]))
+    assert off_lines <= set(full)
+    full = [ln for ln in full if ln not in off_lines]
     full = [ln for ln in full if not ln.startswith(("proxy_rows_24h:", "WARN proxy ledger",
                                                     "semantic cache (= result cache)"))]
     # P0.9-g: the sync-hook wall/live gate lines are new and outside "kpis"; not in the golden.
