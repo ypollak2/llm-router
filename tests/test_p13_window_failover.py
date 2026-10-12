@@ -26,9 +26,12 @@ def _iso(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_OLLAMA_NUM_CTX", "512")
     monkeypatch.delenv("LLM_ROUTER_PACK_OVERFLOW", raising=False)
     monkeypatch.delenv("LLM_ROUTER_PROMOTE_GATE", raising=False)
-    failopen.reset_cache(); failopen.clear(); lcg.reset_cache()  # noqa: E702
+    failopen.reset_cache()
+    failopen.clear()
+    lcg.reset_cache()
     yield
-    failopen.reset_cache(); lcg.reset_cache()
+    failopen.reset_cache()
+    lcg.reset_cache()
 
 
 def _messages(big: bool = True) -> list[dict[str, str]]:
@@ -123,7 +126,7 @@ async def test_window_failover_uses_validated_bigger_window(site, monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("site", ["call_llm", "stream"])
 async def test_pack_overflow_off_tiny_request_never_discovers(site, monkeypatch):
-    providers = _patch_provider(monkeypatch)
+    _patch_provider(monkeypatch)
     monkeypatch.setattr(model_discovery, "available_ollama_models", lambda: (_ for _ in ()).throw(AssertionError("discovered")))
     messages = [{"role": "user", "content": "hi"}]
     with pytest.raises(Sent) as sent:
