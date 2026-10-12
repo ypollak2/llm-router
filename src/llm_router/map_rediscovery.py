@@ -37,6 +37,8 @@ from typing import Any, Callable
 log = logging.getLogger(__name__)
 
 CHANGES_FILE = "map_changes.jsonl"
+CHANGES_MAX_BYTES = 256 * 1024
+CHANGES_KEEP_LINES = 1000
 WATCH_FILE = "map_watch.json"
 CURSOR_FILE = "map_notice_cursor.json"
 LOCK_FILE = "map_refresh.lock"
@@ -105,8 +107,11 @@ def tags_signature(tags: Any) -> str:
 def watched_paths(env: dict | None = None, home: Path | str | None = None) -> list[Path]:
     """Files whose mtime change means the map may differ. Stat only, never read."""
     from llm_router import env_loader, paths
+    # [0] is Path.cwd()/.env. The watch state (map_watch.json) is global, so a
+    # cwd-relative key would flip between projects and force a rebuild on every
+    # poll that alternates cwds. Only the user-level env files are watched.
     return [
-        *env_loader.candidate_env_paths(),
+        *env_loader.candidate_env_paths()[1:],
         Path(home) / ".codex" / "auth.json" if home else Path.home() / ".codex" / "auth.json",
         paths.state_path("usage.json"),
         paths.state_path("codex_quota.json"),
@@ -210,12 +215,31 @@ def record_changes(old: dict | None, new: dict, *, source: str, now: float,
     path = path or _home() / CHANGES_FILE
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        block = "".join(json.dumps({"ts": _iso(now), "source": source, **e}, sort_keys=True) + "\n"
+                        for e in events)
         with open(path, "a") as f:
-            for e in events:
-                f.write(json.dumps({"ts": _iso(now), "source": source, **e}, sort_keys=True) + "\n")
+            f.write(block)           # one write: a poll's events are never split
+        _cap_changes(path)
     except OSError as exc:
         _lost("CHZ-FO-MAP-CHANGES-WRITE", exc)
     return events
+
+
+def _cap_changes(path: Path) -> None:
+    """Keep the last CHANGES_KEEP_LINES lines once the file passes CHANGES_MAX_BYTES.
+    Callers hold the refresh lock. The notice cursor is a timestamp, so a trim is safe."""
+    if path.stat().st_size <= CHANGES_MAX_BYTES:
+        return
+    lines = path.read_text(errors="replace").splitlines(keepends=True)[-CHANGES_KEEP_LINES:]
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.writelines(lines)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):   # temp-file cleanup; the write error is re-raised
+            os.unlink(tmp)
+        raise
 
 
 # ── the single writer ───────────────────────────────────────────────────────
@@ -275,34 +299,28 @@ def pending_notice(*, now: float | None = None, consume: bool = True,
     d = path_dir or _home()
     now = time.time() if now is None else now
     try:
-        size = (d / CHANGES_FILE).stat().st_size
+        raw = (d / CHANGES_FILE).read_bytes()
     except OSError:
         return ""
     cur = _read_json(d / CURSOR_FILE)
-    offset = cur.get("offset") if isinstance(cur, dict) else 0
-    if not isinstance(offset, int) or offset < 0 or offset > size:
-        offset = 0
-    if offset == size:
-        return ""
-    try:
-        with open(d / CHANGES_FILE, "rb") as f:
-            f.seek(offset)
-            raw = f.read(size - offset)
-    except OSError:
-        return ""
+    last = cur.get("ts") if isinstance(cur, dict) else None
+    last = float(last) if isinstance(last, (int, float)) and not isinstance(last, bool) else 0.0
     kept = []
+    newest = last
     for line in raw.decode("utf-8", "replace").splitlines():
         try:
             e = json.loads(line)
             ts = datetime.fromisoformat(e["ts"]).timestamp()
         except (ValueError, KeyError, TypeError):
+            continue          # includes a half-written tail: read again next time
+        if not isinstance(e, dict) or ts <= last:
             continue
-        if isinstance(e, dict) and 0 <= now - ts <= NOTICE_MAX_AGE_S:
+        newest = max(newest, ts)
+        if 0 <= now - ts <= NOTICE_MAX_AGE_S:
             kept.append(e)
-    if consume:
+    if consume and newest > last:
         try:
-            # advance only past complete lines; a half-written tail is read next time
-            _atomic_write_json(d / CURSOR_FILE, {"offset": offset + raw.rfind(b"\n") + 1})
+            _atomic_write_json(d / CURSOR_FILE, {"ts": newest})
         except OSError as exc:
             _lost("CHZ-FO-MAP-NOTICE-CURSOR", exc)
     return notice_text(kept)
@@ -372,6 +390,7 @@ class Poller:
             try:
                 poll_fn(**kwargs)
             except Exception as exc:  # noqa: BLE001
+                _lost("CHZ-FO-MAP-POLL", exc)
                 log.debug("map re-discovery poll failed: %s", exc)
             self._wait(interval_s)
 
@@ -412,8 +431,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if "--once" in (sys.argv[1:] if argv is None else argv):
             poll()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        _lost("CHZ-FO-MAP-REFRESH-CHILD", exc)
     return 0
 
 

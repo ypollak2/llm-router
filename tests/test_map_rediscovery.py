@@ -373,3 +373,126 @@ def test_partial_trailing_line_is_not_skipped(world):
     assert world.notice() == ""
     p.write_text(line + "\n")
     assert world.notice() == "map: + x local"
+
+
+# ── review fixes (PR #463 S1, S2, nits) ─────────────────────────────────────
+
+def test_alternating_cwds_do_not_rebuild(world, monkeypatch, tmp_path):
+    """S1: cwd/.env must not be a key of the global watch state."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    dirs = []
+    for n in ("a", "b"):
+        d = tmp_path / f"proj-{n}"
+        d.mkdir()
+        (d / ".env").write_text(n)
+        dirs.append(d)
+
+    def poll_in(d):
+        monkeypatch.chdir(d)
+        world.clock += POLL
+        return mr.poll(inputs=world.inputs(), now=world.clock, map_path=world.map_path,
+                       state_dir=world.state)
+
+    poll_in(dirs[0])                       # settle the watch state
+    before = world.map_path.stat().st_mtime_ns
+    for i in range(8):
+        poll_in(dirs[i % 2])
+    assert world.map_path.stat().st_mtime_ns == before      # 0 rebuilds in 8 polls
+    assert not any(str(d) in k for d in dirs
+                   for k in (json.loads((world.state / mr.WATCH_FILE).read_text())["mtimes"]))
+
+
+def test_refresh_if_stale_concurrent_with_poll_logs_once(world):
+    """A poll landing while refresh_if_stale builds must not duplicate the diff."""
+    world.models["qwen3.6:latest"] = ("sha-n", "m")
+    stale = rm.load_map(world.map_path)
+    stale["generated_at"] = datetime.fromtimestamp(world.clock - 10 * rm.REFRESH_TTL_S,
+                                                   tz=timezone.utc).isoformat()
+    world.map_path.write_text(json.dumps(stale))
+    world.clock += POLL
+    fired = []
+    inner = world.tags
+
+    def tags_then_poll(url):
+        if not fired:
+            fired.append(1)
+            world.poll()              # the poller wakes up mid-refresh
+        return inner(url)
+
+    inputs = dataclasses.replace(world.inputs(), http_get=tags_then_poll)
+    rm.refresh_if_stale(inputs, path=world.map_path, now=world.clock)
+    adds = [c for c in world.changes() if c["event"] == "added" and c["resource"].endswith("qwen3.6:latest")]
+    assert len(adds) == 1
+
+
+def test_refresh_if_stale_skips_while_lock_held(world):
+    from llm_router.file_lock import exclusive_lock
+    world.models["qwen3.6:latest"] = ("sha-n", "m")
+    stale = rm.load_map(world.map_path)
+    stale["generated_at"] = datetime.fromtimestamp(world.clock - 10 * rm.REFRESH_TTL_S,
+                                                   tz=timezone.utc).isoformat()
+    world.map_path.write_text(json.dumps(stale))
+    with exclusive_lock(world.state / mr.LOCK_FILE, timeout=0) as got:
+        assert got
+        out = rm.refresh_if_stale(world.inputs(), path=world.map_path, now=world.clock)
+    assert out == stale and world.changes() == []
+
+
+def test_refresh_if_stale_custom_path_logs_beside_it(world, tmp_path):
+    custom = tmp_path / "custom" / "map.json"
+    custom.parent.mkdir()
+    rm.write_map(rm.build(world.inputs()), custom)
+    world.models["qwen3.6:latest"] = ("sha-n", "m")
+    rm.refresh_if_stale(world.inputs(), path=custom, max_age_s=-1, now=world.clock)
+    assert (custom.parent / mr.CHANGES_FILE).exists()
+    assert world.changes() == []           # $LLM_ROUTER_HOME log untouched
+
+
+def test_changes_file_capped_and_cursor_survives(world, monkeypatch):
+    monkeypatch.setattr(mr, "CHANGES_MAX_BYTES", 2000)
+    monkeypatch.setattr(mr, "CHANGES_KEEP_LINES", 5)
+    for i in range(20):
+        world.clock += POLL
+        world.models = {f"m{i}:latest": (f"sha-{i}", "m")}
+        world.poll()
+        world.notice()
+    lines = (world.state / mr.CHANGES_FILE).read_text().splitlines()
+    assert 0 < len(lines) < 20 * 2
+    world.clock += POLL
+    world.models = {"final:latest": ("sha-f", "m")}
+    world.poll()
+    assert "final:latest" in world.notice()      # cursor is a ts, trim did not hide it
+    assert world.notice() == ""
+
+
+def test_child_main_failure_leaves_evidence(monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "state"))
+    seen = []
+    from llm_router import failopen
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, **k: seen.append(code))
+    monkeypatch.setattr(mr, "poll", lambda **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert mr.main(["--once"]) == 0
+    assert seen == ["CHZ-FO-MAP-REFRESH-CHILD"]
+
+
+def test_poller_failure_leaves_evidence(monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "state"))
+    seen = []
+    from llm_router import failopen
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, **k: seen.append(code))
+    release = threading.Event()
+
+    def bad(**k):
+        raise RuntimeError("boom")
+
+    p = mr.start_poller(poll_fn=bad, wait=lambda _: release.wait(5))
+    for _ in range(100):
+        if seen:
+            break
+        release.wait(0.05)
+    p.stop()
+    release.set()
+    p.join(5)
+    assert seen == ["CHZ-FO-MAP-POLL"]

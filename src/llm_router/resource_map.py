@@ -489,15 +489,28 @@ def refresh_if_stale(inputs: MapInputs | None = None, *, path: Path | None = Non
         age = age_seconds(cur, now)
         if age is not None and 0 <= age <= max_age_s:
             return cur
-    data = build(inputs)
-    try:
-        from llm_router import map_rediscovery as _mr
-        _mr.record_changes(cur, data, source="refresh_if_stale",
-                           now=time.time() if now is None else now)
-    except Exception:  # noqa: BLE001 - the change log never blocks a refresh
-        pass
-    write_map(data, path)
-    return data
+    from llm_router import map_rediscovery as _mr
+    from llm_router.file_lock import exclusive_lock
+    sdir = _mr._home()
+    # Same non-blocking lock as map_rediscovery.poll: the holder is already
+    # rebuilding and logging this diff, so we neither rebuild nor log it again.
+    with exclusive_lock(sdir / _mr.LOCK_FILE, timeout=0) as got:
+        if not got:
+            return cur if cur is not None else build(inputs)
+        cur = load_map(path)          # the previous holder may have just refreshed
+        if cur is not None:
+            age = age_seconds(cur, now)
+            if age is not None and 0 <= age <= max_age_s:
+                return cur
+        data = build(inputs)
+        try:
+            _mr.record_changes(cur, data, source="refresh_if_stale",
+                               now=time.time() if now is None else now,
+                               path=(path.parent if path is not None else sdir) / _mr.CHANGES_FILE)
+        except Exception as exc:  # noqa: BLE001 - the change log never blocks a refresh
+            _mr._lost("CHZ-FO-MAP-CHANGES-WRITE", exc)
+        write_map(data, path)
+        return data
 
 
 def strip_timestamps(obj: Any) -> Any:
