@@ -1,0 +1,370 @@
+{
+ "compat_X_only": {
+  "BALANCED/ANALYZE": [
+   "openai_compat/new-x",
+   "."
+  ],
+  "BALANCED/CODE": [
+   "openai_compat/new-x",
+   "."
+  ],
+  "BALANCED/GENERATE": [
+   "openai_compat/new-x",
+   "."
+  ],
+  "BALANCED/QUERY": [
+   "openai_compat/new-x",
+   "."
+  ],
+  "BUDGET/ANALYZE": [
+   "openai_compat/new-x",
+   "."
+  ],
+  "BUDGET/CODE": [
+   "openai_compat/new-x",
+   "."
+  ],
+  "BUDGET/GENERATE": [
+   "openai_compat/new-x",
+   "."
+  ],
+  "BUDGET/QUERY": [
+   "openai_compat/new-x",
+   "."
+  ],
+  "PREMIUM/ANALYZE": [
+   "openai_compat/new-x",
+   "."
+  ],
+  "PREMIUM/CODE": [
+   "openai_compat/new-x",
+   "."
+  ],
+  "PREMIUM/GENERATE": [
+   "openai_compat/new-x",
+   "."
+  ],
+  "PREMIUM/QUERY": [
+   "openai_compat/new-x",
+   "."
+  ]
+ },
+ "mixed_all": {
+  "BALANCED/ANALYZE": [
+   "ollama/new-c:70b",
+   "ollama/cfg-d:8b",
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "openai_compat/new-x",
+   "openai_compat/cfg-y",
+   "."
+  ],
+  "BALANCED/CODE": [
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "ollama/new-c:70b",
+   "ollama/cfg-d:8b",
+   "openai_compat/new-x",
+   "openai_compat/cfg-y",
+   "."
+  ],
+  "BALANCED/GENERATE": [
+   "ollama/cfg-d:8b",
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "ollama/new-c:70b",
+   "openai_compat/new-x",
+   "openai_compat/cfg-y",
+   "."
+  ],
+  "BALANCED/QUERY": [
+   "ollama/cfg-d:8b",
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "ollama/new-c:70b",
+   "openai_compat/new-x",
+   "openai_compat/cfg-y",
+   "."
+  ],
+  "BUDGET/ANALYZE": [
+   "ollama/new-c:70b",
+   "ollama/cfg-d:8b",
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "openai_compat/new-x",
+   "openai_compat/cfg-y",
+   "."
+  ],
+  "BUDGET/CODE": [
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "ollama/new-c:70b",
+   "ollama/cfg-d:8b",
+   "openai_compat/new-x",
+   "openai_compat/cfg-y",
+   "."
+  ],
+  "BUDGET/GENERATE": [
+   "ollama/cfg-d:8b",
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "ollama/new-c:70b",
+   "openai_compat/new-x",
+   "openai_compat/cfg-y",
+   "."
+  ],
+  "BUDGET/QUERY": [
+   "ollama/cfg-d:8b",
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "ollama/new-c:70b",
+   "openai_compat/new-x",
+   "openai_compat/cfg-y",
+   "."
+  ],
+  "PREMIUM/ANALYZE": [
+   "openai_compat/new-x",
+   "openai_compat/cfg-y",
+   "."
+  ],
+  "PREMIUM/CODE": [
+   "openai_compat/new-x",
+   "openai_compat/cfg-y",
+   "."
+  ],
+  "PREMIUM/GENERATE": [
+   "openai_compat/new-x",
+   "openai_compat/cfg-y",
+   "."
+  ],
+  "PREMIUM/QUERY": [
+   "openai_compat/new-x",
+   "openai_compat/cfg-y",
+   "."
+  ]
+ },
+ "none": {
+  "BALANCED/ANALYZE": [
+   "."
+  ],
+  "BALANCED/CODE": [
+   "."
+  ],
+  "BALANCED/GENERATE": [
+   "."
+  ],
+  "BALANCED/QUERY": [
+   "."
+  ],
+  "BUDGET/ANALYZE": [
+   "."
+  ],
+  "BUDGET/CODE": [
+   "."
+  ],
+  "BUDGET/GENERATE": [
+   "."
+  ],
+  "BUDGET/QUERY": [
+   "."
+  ],
+  "PREMIUM/ANALYZE": [
+   "."
+  ],
+  "PREMIUM/CODE": [
+   "."
+  ],
+  "PREMIUM/GENERATE": [
+   "."
+  ],
+  "PREMIUM/QUERY": [
+   "."
+  ]
+ },
+ "ollama_ABCD": {
+  "BALANCED/ANALYZE": [
+   "ollama/new-c:70b",
+   "ollama/cfg-d:8b",
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "."
+  ],
+  "BALANCED/CODE": [
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "ollama/new-c:70b",
+   "ollama/cfg-d:8b",
+   "."
+  ],
+  "BALANCED/GENERATE": [
+   "ollama/cfg-d:8b",
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "ollama/new-c:70b",
+   "."
+  ],
+  "BALANCED/QUERY": [
+   "ollama/cfg-d:8b",
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "ollama/new-c:70b",
+   "."
+  ],
+  "BUDGET/ANALYZE": [
+   "ollama/new-c:70b",
+   "ollama/cfg-d:8b",
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "."
+  ],
+  "BUDGET/CODE": [
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "ollama/new-c:70b",
+   "ollama/cfg-d:8b",
+   "."
+  ],
+  "BUDGET/GENERATE": [
+   "ollama/cfg-d:8b",
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "ollama/new-c:70b",
+   "."
+  ],
+  "BUDGET/QUERY": [
+   "ollama/cfg-d:8b",
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "ollama/new-c:70b",
+   "."
+  ],
+  "PREMIUM/ANALYZE": [
+   "."
+  ],
+  "PREMIUM/CODE": [
+   "."
+  ],
+  "PREMIUM/GENERATE": [
+   "."
+  ],
+  "PREMIUM/QUERY": [
+   "."
+  ]
+ },
+ "ollama_ABCD_cost_policy": {
+  "BALANCED/ANALYZE": [
+   "ollama/new-c:70b",
+   "ollama/cfg-d:8b",
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "."
+  ],
+  "BALANCED/CODE": [
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "ollama/new-c:70b",
+   "ollama/cfg-d:8b",
+   "."
+  ],
+  "BALANCED/GENERATE": [
+   "ollama/cfg-d:8b",
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "ollama/new-c:70b",
+   "."
+  ],
+  "BALANCED/QUERY": [
+   "ollama/cfg-d:8b",
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "ollama/new-c:70b",
+   "."
+  ],
+  "BUDGET/ANALYZE": [
+   "ollama/new-c:70b",
+   "ollama/cfg-d:8b",
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "."
+  ],
+  "BUDGET/CODE": [
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "ollama/new-c:70b",
+   "ollama/cfg-d:8b",
+   "."
+  ],
+  "BUDGET/GENERATE": [
+   "ollama/cfg-d:8b",
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "ollama/new-c:70b",
+   "."
+  ],
+  "BUDGET/QUERY": [
+   "ollama/cfg-d:8b",
+   "ollama/old-a:7b",
+   "ollama/new-b:7b",
+   "ollama/new-c:70b",
+   "."
+  ],
+  "PREMIUM/ANALYZE": [
+   "."
+  ],
+  "PREMIUM/CODE": [
+   "."
+  ],
+  "PREMIUM/GENERATE": [
+   "."
+  ],
+  "PREMIUM/QUERY": [
+   "."
+  ]
+ },
+ "ollama_B_only": {
+  "BALANCED/ANALYZE": [
+   "ollama/new-b:7b",
+   "."
+  ],
+  "BALANCED/CODE": [
+   "ollama/new-b:7b",
+   "."
+  ],
+  "BALANCED/GENERATE": [
+   "ollama/new-b:7b",
+   "."
+  ],
+  "BALANCED/QUERY": [
+   "ollama/new-b:7b",
+   "."
+  ],
+  "BUDGET/ANALYZE": [
+   "ollama/new-b:7b",
+   "."
+  ],
+  "BUDGET/CODE": [
+   "ollama/new-b:7b",
+   "."
+  ],
+  "BUDGET/GENERATE": [
+   "ollama/new-b:7b",
+   "."
+  ],
+  "BUDGET/QUERY": [
+   "ollama/new-b:7b",
+   "."
+  ],
+  "PREMIUM/ANALYZE": [
+   "."
+  ],
+  "PREMIUM/CODE": [
+   "."
+  ],
+  "PREMIUM/GENERATE": [
+   "."
+  ],
+  "PREMIUM/QUERY": [
+   "."
+  ]
+ }
+}

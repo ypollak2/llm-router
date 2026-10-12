@@ -52,6 +52,7 @@ def fake_local(mock_env, monkeypatch):
     from llm_router import config as config_module
     from llm_router import router as router_module
 
+    monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "qwen3-coder:30b,qwen3.8,nimble:9b")   # P0.15: configured
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     config_module._config = None

@@ -211,7 +211,11 @@ class OllamaBackend:
             # Refuse to send what Ollama would silently truncate from the front
             # (system prompt + tool definitions first) rather than find out from a
             # reply about the wrong thing. See local_context_guard module docstring.
-            check_overflow(payload, num_ctx=self.num_ctx, base_url=self.base_url, model=self.model,
+            from llm_router.pack_overflow import PayloadPack
+            pack = PayloadPack(payload, num_ctx=self.num_ctx, base_url=self.base_url,
+                               model=self.model, site="proxy.OllamaBackend")
+            payload = pack.trim_to()
+            check_overflow(payload, num_ctx=pack.num_ctx, base_url=self.base_url, model=pack.model,
                            site="proxy.OllamaBackend")
             return payload
 
@@ -347,7 +351,8 @@ def tool_capable(model: str, *, anthropic: bool = False) -> bool:
 
 # ── model choice ─────────────────────────────────────────────────────────────
 
-_chain_cache: dict[tuple[str, str], list[str]] = {}
+_chain_cache: dict[tuple, list[str]] = {}
+_chain_cache_token: tuple | None = None
 
 
 async def policy_chain(text: str) -> tuple[str, str, list[str]]:
@@ -355,15 +360,24 @@ async def policy_chain(text: str) -> tuple[str, str, list[str]]:
     from llm_router.classify import GATEWAY_POLICY, classify_signals
     from llm_router.config import get_config
     from llm_router.profiles import complexity_to_profile
+    from llm_router import map_reader
     from llm_router.router import _build_and_filter_chain
 
     sig = classify_signals(text, GATEWAY_POLICY)
     key = (sig.task_type.value, sig.complexity.value)
-    if key not in _chain_cache:
+    # P1.8: the chain is cached with the map file's mtime, so a rewritten map is
+    # re-read; None (no map file) is the pre-map behaviour.
+    global _chain_cache_token
+    tok = map_reader.token()
+    if tok != _chain_cache_token:      # map rewritten, aged out or deleted: drop old chains
+        _chain_cache.clear()
+        _chain_cache_token = tok
+    ckey = (*key, tok)
+    if ckey not in _chain_cache:
         c = sig.complexity
-        _chain_cache[key] = await _build_and_filter_chain(
+        _chain_cache[ckey] = await _build_and_filter_chain(
             sig.task_type, complexity_to_profile(c), None, c, c, get_config())
-    return key[0], key[1], _chain_cache[key]
+    return key[0], key[1], _chain_cache[ckey]
 
 
 async def tier_classify(text: str, pinned: str | None = None, *, anthropic: bool = True) -> dict:
@@ -381,11 +395,12 @@ async def tier_classify(text: str, pinned: str | None = None, *, anthropic: bool
     it. Same signature and return shape as ``choose_model`` so it is a drop-in
     seam; ``pinned`` is accepted and ignored (no model is chosen here)."""
     del pinned
+    from llm_router import map_reader
     from llm_router.classify import GATEWAY_POLICY, classify_signals
 
     sig = classify_signals(text, GATEWAY_POLICY, capabilities=False)  # the class only (P0.9-e)
     task, cx = sig.task_type.value, sig.complexity.value
-    chain = _chain_cache.get((task, cx)) or []
+    chain = _chain_cache.get((task, cx, map_reader.token())) or []
     model = next((m for m in chain if tool_capable(m, anthropic=anthropic)), None)
     return {"task_type": task, "complexity": cx, "chain_head": chain[:4], "model": model}
 

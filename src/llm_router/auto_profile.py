@@ -9,8 +9,12 @@ This module:
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import shutil
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
 
@@ -28,6 +32,13 @@ def _profile_path():
     return paths.state_path("profile.yaml")
 def _profile_cache_path():
     return paths.state_path("profile_cache.json")
+def _profile_hash_path():
+    # Own file, written only by save_profile (P0.15-a). NOT profile_cache.json:
+    # save_detection_cache rewrites that whole file on every rescan, so a hash
+    # stored there would be erased at once and every file would look edited.
+    return paths.state_path("profile_hash.json")
+def _profile_generated_path():
+    return paths.state_path("profile.generated.yaml")
 SCAN_INTERVAL_SECONDS = 3600  # Rescan every hour
 
 
@@ -141,10 +152,8 @@ def generate_profile_yaml(detected: ServiceDetection) -> str:
 
     # Tier 1: Free local (prioritized by task type + speed)
     if detected.get("ollama_available"):
-        # Prefer the models actually installed (from discovery cache) so the
-        # profile never routes to a model the user doesn't have. The hardcoded
-        # list below is only a pre-discovery fallback (example names that may
-        # not be installed) — see LLM Router #ghost-model fix (v0.5.5).
+        # Only models actually observed (discovery cache) are written, so the
+        # profile never names a model the user doesn't have.
         _discovered: list[str] = []
         try:
             from llm_router.discover import get_cached_ollama_models
@@ -153,12 +162,8 @@ def generate_profile_yaml(detected: ServiceDetection) -> str:
             _discovered = []
         if _discovered:
             free_local.extend(_discovered)
-        else:
-            free_local.append("ollama/qwen3.5:latest")      # Primary: best reasoning (Feb 2025)
-            free_local.append("ollama/kimi-k2.6:cloud")     # Code expert: 256K context, autonomous
-            free_local.append("ollama/qwen3-coder-next")    # Code-specialized fallback
-            free_local.append("ollama/qwen2.5:latest")      # Secondary fallback
-            free_local.append("ollama/gemma4:latest")       # Lightweight pre-check
+        # EMPTY-ENVIRONMENT-1 (P0.15-d): with an empty discovery cache no local
+        # model name is written. A name no adapter observed is a ghost model.
 
     # Tier 2: Free subscriptions
     if detected.get("claude_subscription"):
@@ -221,6 +226,9 @@ def generate_profile_yaml(detected: ServiceDetection) -> str:
         yaml += "    - tier: free_local\n"
         yaml += "      description: Local + unlimited\n"
         yaml += f"      models: {free_local}\n\n"
+    elif detected.get("ollama_available"):
+        yaml += "    # free_local: Ollama is up but no installed model has been observed yet.\n"
+        yaml += "    # Run `llm-router discover`; no model name is written until one is seen.\n\n"
 
     if free_subscriptions:
         yaml += "    - tier: free_subscriptions\n"
@@ -271,8 +279,69 @@ def generate_profile_yaml(detected: ServiceDetection) -> str:
     return yaml
 
 
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Write ``data`` to ``path`` through a same-directory temp file and ``os.replace``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _recorded_profile_hash() -> str | None:
+    """sha256 of the bytes ``save_profile`` last wrote, or None (legacy / unreadable)."""
+    try:
+        value = json.loads(_profile_hash_path().read_text()).get("sha256")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def profile_state() -> str:
+    """Who owns profile.yaml right now (P0.15-a, AUTO-PROFILE-OVERWRITE-1).
+
+    ``absent``  no file: the router may create it.
+    ``owned``   the file's whole-file sha256 equals the one ``save_profile`` recorded.
+    ``edited``  anything else: a user edit, a legacy file with no recorded hash,
+                CRLF re-saves, an empty or non-YAML file. The router never
+                overwrites these; it cannot tell an edit from a legacy file.
+    """
+    path = _profile_path()
+    try:
+        current = path.read_bytes()
+    except FileNotFoundError:
+        return "absent"
+    return "owned" if _recorded_profile_hash() == _sha256(current) else "edited"
+
+
+PROFILE_EDITED_NOTE = (
+    "profile.yaml has local changes and is no longer auto-updated; "
+    "run `llm-router profile auto` to regenerate, a backup is kept"
+)
+
+
+def profile_status_lines() -> list[str]:
+    """Lines for `llm-router doctor` / `llm-router map`; empty when nothing to say."""
+    if profile_state() != "edited":
+        return []
+    lines = [PROFILE_EDITED_NOTE]
+    if _profile_generated_path().exists():
+        lines.append(f"latest regeneration (informational): {_profile_generated_path()}")
+    return lines
+
+
 def save_profile(yaml_content: str) -> Path:
-    """Save profile YAML to ~/.llm-router/profile.yaml.
+    """Save profile YAML to ~/.llm-router/profile.yaml and record its sha256.
+
+    The only writer of ``profile_hash.json``: the router later overwrites
+    profile.yaml only while the file still hashes to what is recorded here.
 
     Args:
         yaml_content: Generated YAML string
@@ -280,20 +349,51 @@ def save_profile(yaml_content: str) -> Path:
     Returns:
         Path to saved profile file
     """
-    _profile_path().parent.mkdir(parents=True, exist_ok=True)
-    _profile_path().write_text(yaml_content)
+    data = yaml_content.encode("utf-8")
+    # P0.15-c: profile.yaml counts as prior state for the grandfather file, so the one-time
+    # write must happen before this file exists on a fresh install.
+    from llm_router.model_discovery import ensure_grandfather
+    ensure_grandfather()
+    _atomic_write_bytes(_profile_path(), data)
+    _atomic_write_bytes(
+        _profile_hash_path(),
+        json.dumps({"sha256": _sha256(data), "written_at": time.time()}).encode("utf-8"),
+    )
     log.info(f"Profile saved to {_profile_path()}")
     return _profile_path()
 
 
+def _backup_profile() -> Path | None:
+    """Copy the current profile.yaml to ``profile.yaml.<UTC timestamp>.bak``; never overwrite a .bak."""
+    src = _profile_path()
+    if not src.exists():
+        return None
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    for n in range(1000):
+        dest = src.with_name(f"{src.name}.{stamp}{'' if n == 0 else f'.{n}'}.bak")
+        try:
+            with open(src, "rb") as fin, open(dest, "xb") as fout:
+                shutil.copyfileobj(fin, fout)
+            return dest
+        except FileExistsError:
+            continue
+    raise OSError(f"could not find a free backup name next to {src}")
+
+
 def auto_generate_profile() -> Path:
-    """Auto-detect services and generate profile in one call.
+    """Auto-detect services and generate profile in one call (explicit command).
+
+    An existing profile.yaml is backed up first, so the explicit command can
+    never lose a user's edits.
 
     Returns:
         Path to generated profile
     """
     detected = detect_services()
     yaml = generate_profile_yaml(detected)
+    backup = _backup_profile()
+    if backup is not None:
+        log.info(f"Previous profile kept at {backup}")
     return save_profile(yaml)
 
 
@@ -385,18 +485,45 @@ def detect_changes() -> tuple[bool, list[str]]:
     return len(changes) > 0, changes
 
 
+_last_rescan_note: str | None = None
+
+
+def last_rescan_note() -> str | None:
+    """The note the most recent ``rescan_and_update`` in this process wants shown, or None."""
+    return _last_rescan_note
+
+
 def rescan_and_update() -> tuple[bool, list[str]]:
     """Rescan services and update profile if changes detected.
+
+    profile.yaml is rewritten only when the router owns it (absent, or hashing to
+    what ``save_profile`` recorded). Otherwise the regeneration goes to
+    ``profile.generated.yaml`` and a note is produced once per change of that
+    content (AUTO-PROFILE-OVERWRITE-1).
 
     Returns:
         (profile_updated, list of changes)
     """
+    global _last_rescan_note
+    _last_rescan_note = None
     has_changes, changes = detect_changes()
 
     if has_changes:
         log.info(f"Service configuration changed: {', '.join(changes)}")
         detected = detect_services()
         yaml = generate_profile_yaml(detected)
+        if profile_state() == "edited":
+            data = yaml.encode("utf-8")
+            try:
+                previous = _profile_generated_path().read_bytes()
+            except FileNotFoundError:
+                previous = None
+            if previous != data:
+                _atomic_write_bytes(_profile_generated_path(), data)
+                _last_rescan_note = PROFILE_EDITED_NOTE
+                log.warning(PROFILE_EDITED_NOTE)
+            save_detection_cache(detected)
+            return False, changes
         save_profile(yaml)
         save_detection_cache(detected)
         return True, changes

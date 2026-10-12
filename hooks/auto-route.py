@@ -286,13 +286,18 @@ _load_dotenv()
 OLLAMA_URL = os.environ.get("LLM_ROUTER_OLLAMA_URL", "http://localhost:11434")
 
 
-def _load_discovered_ollama_models() -> list[str]:
-    """Ollama models available right now — delegated to the shared resolver.
+def _load_discovered_ollama_split() -> tuple[list[str], list[str]]:
+    """Ollama models available right now, as ``(validated, unvalidated)``.
 
-    This function used to own the logic and was evaluated once at import, while
-    chain_builder had a second, worse copy that the draft path actually used.
-    Two answers to one question, and the hot path used the hardcoded one. Both
-    now call `llm_router.model_discovery`.
+    Delegated to the shared resolver; this function used to own the logic and was
+    evaluated once at import, while chain_builder had a second, worse copy that
+    the draft path actually used. Two answers to one question, and the hot path
+    used the hardcoded one. Both now call `llm_router.model_discovery`.
+
+    P0.15 (DISC-PROMOTE-1): the list is then split by the promote gate. A model
+    the user configured or that was installed when this version first ran is
+    validated; any other is placed after them and kept out of code work (see
+    OLLAMA_CODE_MODELS). `LLM_ROUTER_PROMOTE_GATE=off` makes every model validated.
     """
     try:
         # No synchronous probe: this runs at import, on the host's critical path. A
@@ -303,17 +308,26 @@ def _load_discovered_ollama_models() -> list[str]:
             from llm_router.model_discovery import available_ollama_models_nowait
         except ImportError:
             from llm_router.model_discovery import available_ollama_models
-            return available_ollama_models()
+            return available_ollama_models(), []
         # Only the real hook process starts the refresh child; a test that imports
         # this file as a module must not.
-        return available_ollama_models_nowait(refresh=__name__ == "__main__")
+        discovered = available_ollama_models_nowait(refresh=__name__ == "__main__")
     except Exception:                                        # noqa: BLE001
-        return []
+        return [], []
+    try:
+        from llm_router.model_discovery import order_for_chain
+        front, tail = order_for_chain([f"ollama/{m}" for m in discovered], "query", critical=False)
+    except ImportError:                                      # older llm_router without the gate
+        return discovered, []
+    except Exception:                                        # noqa: BLE001
+        return [], []                                        # gate failed: fail closed, name nothing
+    return [m.removeprefix("ollama/") for m in front], [m.removeprefix("ollama/") for m in tail]
 
 
-_DISCOVERED_OLLAMA = _load_discovered_ollama_models()
-# First discovered model used as the single-model fallback (e.g. for tracking)
-OLLAMA_MODEL = _DISCOVERED_OLLAMA[0] if _DISCOVERED_OLLAMA else "qwen3.5:latest"
+_DISCOVERED_OLLAMA_VALIDATED, _DISCOVERED_OLLAMA_UNVALIDATED = _load_discovered_ollama_split()
+_DISCOVERED_OLLAMA = _DISCOVERED_OLLAMA_VALIDATED + _DISCOVERED_OLLAMA_UNVALIDATED
+# First validated model used as the single-model fallback (e.g. for tracking)
+OLLAMA_MODEL = _DISCOVERED_OLLAMA_VALIDATED[0] if _DISCOVERED_OLLAMA_VALIDATED else "qwen3.5:latest"
 # 4s was the old default and no local model could ever meet it: measured p50s on
 # this machine are 11.4s (lfm2.5:8b), 15.8s (qwen3-coder:30b) and 28.5s (qwen3.8),
 # and even "Say OK." took 6.6s warm. Every DIRECT attempt therefore aborted at
@@ -2235,7 +2249,8 @@ def _extract_category(raw: str) -> str | None:
 # longer a separate hard-coded "code specialization" list because we cannot know which
 # local models are code-focused without discovery metadata.
 OLLAMA_MODELS = _DISCOVERED_OLLAMA or ["qwen3.5:latest"]
-OLLAMA_CODE_MODELS = _DISCOVERED_OLLAMA or ["qwen3.5:latest"]
+# Code work is a critical chain (D-60c): only validated models, never an unvalidated one.
+OLLAMA_CODE_MODELS = _DISCOVERED_OLLAMA_VALIDATED or ["qwen3.5:latest"]
 
 
 def classify_with_ollama(text: str) -> str | None:
@@ -2712,7 +2727,7 @@ def _block_zero_claude(reason: str, task_type: str = "unknown", complexity: str 
 # full Ollama/API classifier chain isn't re-invoked for "ok do it" / "yes" etc.
 _LAST_ROUTE_TTL = 1800  # 30 minutes — reuse context within same working session
 
-_CONTINUATION_RE = re.compile(
+_STRICT_ACK_RE = re.compile(
     r"^(?:yes|no|ok|okay|sure|yep|nope|y|n|"
     r"continue|proceed|go ahead|do it|do that|"
     r"sounds good|great|perfect|agreed|correct|right|"
@@ -2721,7 +2736,7 @@ _CONTINUATION_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Short follow-up prompts that the strict single-word CONTINUATION_RE
+# Short follow-up prompts that the strict single-word _STRICT_ACK_RE
 # misses: "ok do it", "yes continue with 3", "now do the next one".
 # These are conversational follow-ups that presume the current session's
 # context — routing them spends quota classifying something Claude
@@ -3000,7 +3015,7 @@ def _load_last_route(session_id: str) -> dict | None:
 
 def _is_short_followup(prompt: str) -> bool:
     """Return True for short conversational follow-ups beyond the existing
-    single-word CONTINUATION_RE.
+    single-word _STRICT_ACK_RE.
 
     Catches the pattern "ok do that" / "yes, continue with 3" / "now do
     the next one" — multi-word but unmistakably a follow-up to the
@@ -3021,7 +3036,7 @@ def _is_continuation(prompt: str) -> bool:
     than re-triggering the full classifier chain.
     """
     stripped = prompt.strip()
-    if _CONTINUATION_RE.match(stripped):
+    if _STRICT_ACK_RE.match(stripped):
         return True
     if _is_short_followup(stripped):
         return True
@@ -3714,7 +3729,7 @@ def _resolve_auto_render_mode(render_mode: str, zero_claude: bool) -> str:
 # Anchored at the start on purpose. "continue" mid-sentence ("the script should
 # continue on error") is ordinary English; opening with it is a reply to
 # something. The length gate is applied by the caller, as for the deictic test.
-_CONTINUATION_RE = re.compile(
+_CONTINUATION_DIRECTIVE_RE = re.compile(
     r"^\s*(?:and\s+)?(?:"
     r"continue|carry on|go on|go ahead|keep going|proceed|resume|"
     r"do (?:it|that|them|both|this|those)|"
@@ -3797,7 +3812,7 @@ def _is_context_dependent(prompt: str) -> bool:
         return True
     # D-1: a short prompt that OPENS as a continuation. Same length gate, same
     # reasoning, different surface — this class carries no pronoun to catch.
-    if len(words) <= 12 and _CONTINUATION_RE.match(p):
+    if len(words) <= 12 and _CONTINUATION_DIRECTIVE_RE.match(p):
         return True
     return False
 
@@ -3831,7 +3846,7 @@ def _is_short_code_followup(prompt: str, last_route: dict | None) -> bool:
     return bool(
         _CODE_FOLLOWUP_SIGNAL_RE.search(stripped)
         or _SHORT_FOLLOWUP_PREFIX.match(stripped)
-        or _CONTINUATION_RE.match(stripped)
+        or _CONTINUATION_DIRECTIVE_RE.match(stripped)
     )
 
 
@@ -4668,13 +4683,13 @@ def main() -> None:
     # Kill-switch: LLM_ROUTER_DISABLE_CONTINUATION_BYPASS=1 forces every turn
     # through the classifier (useful when the heuristic regresses).
     #
-    # v6.13: Bypass ONLY on strict-ack continuations (_CONTINUATION_RE), NOT
+    # v6.13: Bypass ONLY on strict-ack continuations (_STRICT_ACK_RE), NOT
     # on the broader _is_short_followup union. "please go ahead and do the
     # change" after a code task is a directive that should reach the
     # code-context-inherit branch — not silently bypass to the host agent.
     # Prior behaviour swallowed such prompts (test_short_followup_after_code_inherits_code).
     if (not zero_claude and session_id
-            and _CONTINUATION_RE.match(prompt.strip())):
+            and _STRICT_ACK_RE.match(prompt.strip())):
         if os.environ.get("LLM_ROUTER_DISABLE_CONTINUATION_BYPASS", "").lower() in ("1", "true", "yes", "on"):
             _debug_log(f"[INVOCATION {invocation_id:.3f}] CONTINUATION: bypass disabled via env, routing instead")
         else:

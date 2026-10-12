@@ -36,6 +36,7 @@ Tier = Literal["free_local", "free_subscription", "paid_api"]
 _TIER_PREFIXES: dict[str, Tier] = {
     "ollama/": "free_local",
     "ollama:": "free_local",
+    "openai_compat/": "free_local",  # self-hosted OpenAI-compatible server
     "codex/": "free_subscription",
     "codex:": "free_subscription",
     "gemini_cli/": "free_subscription",

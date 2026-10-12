@@ -46,6 +46,7 @@ import json
 import os
 import sys
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -82,8 +83,8 @@ from llm_router.proxy.loop_guard import (
 )
 from llm_router.proxy.cache_cost import Stickiness, conversation_key
 from llm_router.proxy.steps import (
-    STEP_CLASSES, classify_text, is_first_call, newest_human_text, session_id_of,
-    step_class, step_fields, turn_fields,
+    STEP_CLASSES, classify_text, is_first_call, is_thread_continue, newest_human_text, session_id_of,
+    step_class, step_fields, thread_parent, turn_fields,
 )
 from llm_router import session_kind
 from llm_router.proxy import cost_accounting
@@ -109,6 +110,8 @@ ANTHROPIC_UPSTREAM = "https://api.anthropic.com"
 DEFAULT_PORT = 8787
 DEFAULT_STEP_BUDGET_S = 30.0
 DEFAULT_NUM_CTX = local_models.DEFAULT_NUM_CTX
+#: Replies remembered for Message Threads continues (STEP-SIDECALL-1). Two ids per human turn at most.
+_THREAD_MAIN_MAX = 8192
 _HOP = {"host", "content-length", "connection", "accept-encoding", "transfer-encoding",
         "keep-alive", "proxy-authorization", "te", "trailer", "upgrade"}
 
@@ -355,8 +358,24 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         local_agent = LocalAgent(cfg.local_agent, http=http, ollama_url=_ollama_url)
 
     prefixes = cost_accounting.PrefixTracker()
+    # STEP-SIDECALL-1: reply id -> whether the call that got it was the main thread's. A Message
+    # Threads continue names its parent reply and carries no tools to tell main from sub-agent.
+    # Bounded; a miss (restart, bypassed parent) leaves the call unproven, never main.
+    thread_main: OrderedDict[str, bool] = OrderedDict()
+
+    def remember_thread(row: dict) -> None:
+        msg_id, main = row.get("msg_id"), row.get("is_main_thread")
+        if isinstance(msg_id, str) and isinstance(main, bool):
+            thread_main[msg_id] = main
+            thread_main.move_to_end(msg_id)
+            while len(thread_main) > _THREAD_MAIN_MAX:
+                thread_main.popitem(last=False)
+
+    def parent_main_of(body: dict) -> bool | None:
+        return thread_main.get(thread_parent(body)) if is_thread_continue(body) else None
 
     def write(row: dict) -> None:
+        remember_thread(row)
         # Real Anthropic spend per call (PR 8). Never lets accounting cost a row.
         try:
             cost_accounting.annotate(row, prefixes.get(row.get("session_id")))
@@ -663,18 +682,18 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                                   cheap_usage=row.get("usage"))
         return _on_reply
 
-    def request_fields(body: dict, raw: bytes) -> dict:
+    def request_fields(body: dict, raw: bytes, parent_main: bool | None = None) -> dict:
         """The M0.5 ledger fields, derived from the request's shape and a hash of
         its newest human text. Never the text itself. A failure leaves honest
         nulls (and a fail-open record): this path must never cost a call."""
         fields: dict = {"text_sha": None, "has_mid_system": None, "req_bytes": len(raw),
                         # TURNFIRST-1: which population a turn row belongs to (text-free).
                         "is_main_thread": None, "is_first_call": None, "turn_origin": None,
-                        "tier_text_len": None}
+                        "tier_text_len": None, "thread": None}
         try:
             fields["text_sha"] = prompt_key.key(newest_human_text(body))
             fields["has_mid_system"] = has_mid_conversation_system_message(body)
-            fields.update(turn_fields(body))
+            fields.update(turn_fields(body, parent_main))
         except Exception as exc:  # noqa: BLE001 - fail-safe: the ledger gets nulls, the call goes on
             failopen.record("LR-FO-PROXY-LEDGER-FIELDS", exc)
         return fields
@@ -903,7 +922,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # step_class(body, cfg.steps) below, not this label.
             # Fail-open (NFR-FAIL): a labelling error gives step_class "unknown" and
             # step_error true; decide_tier then does not classify the call.
-            **step_fields(body, on_error=lambda exc: failopen.record("LR-FO-PROXY-STEP-KIND", exc)),
+            **step_fields(body, on_error=lambda exc: failopen.record("LR-FO-PROXY-STEP-KIND", exc),
+                          parent_main=(parent_main := parent_main_of(body))),
             "decision": ledger.DECISION_FORWARDED, "added_latency_s": 0.0,
             "tier_mode": cfg.tiers,
             # KPI instrumentation (G3): these keys exist on EVERY forwarded/served
@@ -915,7 +935,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # M0.5: request-shape and prompt-hash fields, never prompt text. The
             # classifier columns say the verdict still comes from the rules and
             # nothing is applied; M1 shadow and M2 canary fill them in.
-            **request_fields(body, raw),
+            **request_fields(body, raw, parent_main),
             "cls_source": "rules", "cls_ms": None, "cls_arm": None, "cls_applied": False,
         }
         if lm is not None:

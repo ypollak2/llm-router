@@ -2308,6 +2308,13 @@ def _maybe_rescan_profile() -> None:
         updated, changes = rescan_and_update()
         if updated and changes:
             _append_stop_note(f"🔄 Profile updated: {', '.join(changes)}")
+        else:
+            # P0.15-a: an edited profile.yaml is not rewritten; say so once per
+            # change of the regenerated content (None when there is nothing new).
+            from llm_router.auto_profile import last_rescan_note
+            note = last_rescan_note()
+            if note:
+                _append_stop_note(f"⚠ {note}")
 
 
 def _maybe_evaluate_models() -> None:
@@ -2580,6 +2587,16 @@ def main() -> None:
     # run in one detached child; this Stop reads the usage.json it last wrote.
     with _hl_phase("bg_spawn"):
         _spawn_background_stop_work()
+    # P1.2 rolling summary: OPT-IN (default off). Only the env read happens when off;
+    # the module is imported, and a detached worker started, only when set to 1.
+    if os.environ.get("LLM_ROUTER_ROLLING_SUMMARY", "").strip().lower() in ("1", "true", "on", "yes"):
+        try:
+            from llm_router import context_summary as _ctx_summary
+            if isinstance(_hook_input, dict):
+                _ctx_summary.spawn(str(_hook_input.get("session_id") or ""),
+                                   str(_hook_input.get("transcript_path") or ""))
+        except Exception:  # noqa: BLE001 -- fail open: a summary is never worth a Stop
+            pass
     with _hl_phase("session_data"):
         session_start               = _read_session_start()
         paid_rows, cc_rows, free_rows = _query_session_data(session_start)
