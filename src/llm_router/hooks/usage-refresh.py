@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 5
+# llm_router-hook-version: 6
 """PostToolUse hook — usage refresh + periodic savings awareness.
 
 After any llm_* MCP tool call:
@@ -318,6 +318,38 @@ def _rate_limited() -> bool:
         return False
 
 
+def _read_claude_oauth(timeout, env=None):
+    """Claude OAuth info via claude_creds (the one keychain/credentials reader), or None.
+
+    Prefers the importable package; else the stdlib-only copy the installer drops
+    next to the hooks, else the in-repo source. Never raises.
+    """
+    try:
+        from llm_router import claude_creds as _cc
+    except ImportError:
+        _cc = None
+        try:
+            import importlib.util as _ilu
+            from pathlib import Path as _P
+            _here = _P(__file__).resolve().parent
+            for _cand in (_here / "llm_router_claude_creds.py", _here.parent / "claude_creds.py",
+                          _here.parents[1] / "src" / "llm_router" / "claude_creds.py"):
+                if _cand.exists():
+                    _spec = _ilu.spec_from_file_location("llm_router_claude_creds", _cand)
+                    _cc = _ilu.module_from_spec(_spec)
+                    _spec.loader.exec_module(_cc)
+                    break
+        except Exception:  # noqa: BLE001 -- a broken support module must not kill the hook
+            _cc = None
+    if _cc is None:
+        return None
+    try:
+        return _cc.read_oauth(timeout=timeout, env=env)
+    except Exception:  # noqa: BLE001 -- read_oauth does not raise; belt and braces
+        _cc = None
+    return None
+
+
 def _oauth_refresh_and_write() -> None:
     """Fetch live Claude subscription usage via OAuth and write usage.json.
 
@@ -326,7 +358,6 @@ def _oauth_refresh_and_write() -> None:
     but is null-safe: the OAuth endpoint returns ``null`` (not a missing key) for
     inactive windows like ``seven_day_sonnet``, so we coerce ``None`` to ``{}``.
     """
-    import subprocess
     import urllib.error
     import urllib.request
 
@@ -340,14 +371,11 @@ def _oauth_refresh_and_write() -> None:
         return  # inside a server-instructed backoff; retrying is guaranteed noise
 
     try:
-        r = subprocess.run(
-            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if r.returncode != 0 or not r.stdout.strip():
+        creds = _read_claude_oauth(10)
+        if creds is None:
             _record_refresh_error("no-credentials", "keychain lookup returned nothing")
             return
-        token = json.loads(r.stdout.strip()).get("claudeAiOauth", {}).get("accessToken", "")
+        token = creds.get("accessToken", "")
         if not token:
             _record_refresh_error("no-token", "credentials contain no accessToken")
             return

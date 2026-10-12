@@ -8,6 +8,10 @@ optional ``detail`` string (a fallback reason) is passed through
 
 Row fields:
   ts, session_id, msg_id, stream, requested_model
+  task_id, trace_id
+                  P1.10 (``call_identity``): the human request (the session's current
+                  turn, the same id the hooks and MCP calls of that turn carry) and this
+                  call's own uuid4 hex. Absent on rows written before P1.10.
   step_class      the kind of call (``proxy.steps.step_kind``): continuation |
                   turn_first | subagent_first | subagent_turn | harness_turn |
                   side_call. Rows written before GE1 hold continuation or null

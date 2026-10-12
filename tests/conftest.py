@@ -1,5 +1,6 @@
 """Shared pytest fixtures for all llm_router tests."""
 
+import sys
 import json
 import os
 import re
@@ -142,6 +143,24 @@ def _real_home_untouched():
     yield
     new = _real_home_guard.VIOLATIONS[before:]
     assert not new, f"test touched the operator's real state: {new}"
+
+
+@pytest.fixture(autouse=True)
+def _drain_engine_shadow():
+    """Let queued engine-shadow work finish while this test's HOME is still in place.
+
+    The shadow worker (engine.shadow(background=True)) runs on a thread; work it left queued
+    used to run after HOME was restored and write the real ~/.llm-router (main CI 70847288).
+    Defined after _isolate_user_home and _real_home_untouched, so it tears down before both:
+    the drain happens before HOME unwinds and before the real-state check. Only drains when
+    the engine module was imported by this test run (no import cost elsewhere)."""
+    yield
+    eng = sys.modules.get("llm_router.engine")
+    if eng is not None and getattr(eng, "_pending", 0):
+        try:
+            eng.shadow_drain(timeout=10)
+        except Exception:  # noqa: BLE001 — a test that patched the clock; the real-state guard still runs
+            pass
 
 
 # ── Config-singleton isolation (CHZ-AUD-001) ────────────────────────────────

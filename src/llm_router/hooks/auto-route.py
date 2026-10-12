@@ -822,6 +822,38 @@ def _spawn_background_usage_refresh() -> None:
             _debug_log("usage refresh spawn failed")
 
 
+def _read_claude_oauth(timeout, env=None):
+    """Claude OAuth info via claude_creds (the one keychain/credentials reader), or None.
+
+    Prefers the importable package; else the stdlib-only copy the installer drops
+    next to the hooks, else the in-repo source. Never raises.
+    """
+    try:
+        from llm_router import claude_creds as _cc
+    except ImportError:
+        _cc = None
+        try:
+            import importlib.util as _ilu
+            from pathlib import Path as _P
+            _here = _P(__file__).resolve().parent
+            for _cand in (_here / "llm_router_claude_creds.py", _here.parent / "claude_creds.py",
+                          _here.parents[1] / "src" / "llm_router" / "claude_creds.py"):
+                if _cand.exists():
+                    _spec = _ilu.spec_from_file_location("llm_router_claude_creds", _cand)
+                    _cc = _ilu.module_from_spec(_spec)
+                    _spec.loader.exec_module(_cc)
+                    break
+        except Exception:  # noqa: BLE001 -- a broken support module must not kill the hook
+            _cc = None
+    if _cc is None:
+        return None
+    try:
+        return _cc.read_oauth(timeout=timeout, env=env)
+    except Exception:  # noqa: BLE001 -- read_oauth does not raise; belt and braces
+        _cc = None
+    return None
+
+
 def _fetch_usage_inline() -> dict | None:
     """Live OAuth refresh of Claude subscription data — called when usage.json is stale.
 
@@ -829,21 +861,13 @@ def _fetch_usage_inline() -> dict | None:
     then calls the Anthropic usage API. Writes fresh data to usage.json atomically.
     Returns the parsed data dict, or None on any failure (network, no token, etc.).
     """
-    if sys.platform != "darwin":
-        return None  # Keychain only available on macOS
     try:
         # Filter environment to exclude API keys and sensitive tokens
         safe_env = {k: v for k, v in os.environ.items() 
                    if not any(x in k.upper() for x in ("KEY", "TOKEN", "SECRET", "PASS", "AUTH"))}
-        
-        r = subprocess.run(
-            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-            capture_output=True, text=True, timeout=4,
-            env=safe_env,
-        )
-        if r.returncode != 0 or not r.stdout.strip():
-            return None
-        token = json.loads(r.stdout.strip()).get("claudeAiOauth", {}).get("accessToken", "")
+
+        creds = _read_claude_oauth(4, safe_env)
+        token = (creds or {}).get("accessToken", "")
         if not token:
             return None
     except Exception:
@@ -4656,6 +4680,15 @@ def main() -> None:
             sys.exit(0)
 
     session_id = hook_input.get("session_id", "")
+
+    # P1.10: a human prompt is a new task. Advance the session's turn counter before any
+    # writer runs, so every row of this turn (hook, MCP, proxy, sub-agents) shares one task_id.
+    try:
+        from llm_router import call_identity as _ci_turn
+        _ci_turn.begin_turn(session_id)
+    except Exception as _exc:  # identity never blocks a prompt
+        from llm_router import failopen as _fo
+        _fo.record("CHZ-FO-HOOK-TURN-ID", _exc)
 
     # P1.6-h (decide mode only, D-72): this turn's Decision, left for the proxy in the
     # last_classification sidecar (written below) so it reads it by text_sha instead of
