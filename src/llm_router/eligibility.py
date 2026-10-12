@@ -18,7 +18,9 @@ States:
   probe     some evidence but not enough to decide: 0 < n < 60, or n >= 60 with
             gap_pts or lb_pts missing.
   eligible  n >= 60 and gap_pts <= 3.0 and lb_pts >= -10.0 (both inclusive,
-            compared unrounded).
+            unrounded). From counts the gap is computed exactly (Fraction), so
+            an exact 3-point gap is eligible; the sqrt-based LB is compared
+            with a 1e-9 pt tolerance.
   failed    n >= 60 and the rule does not hold.
 
 Not wired into routing; nothing here reads or writes ``local_eligibility.json``.
@@ -27,12 +29,17 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import Any, Literal, Mapping
 
 from llm_router.lane_quality import PAIRS_MAX_GAP_PTS, PAIRS_MIN_LB, PAIRS_MIN_N
 
 Grade = Literal["unknown", "probe", "eligible", "failed"]
 _Z95 = 1.959964
+# The LB comes from sqrt, so it cannot be exact. sqrt rounding error is ~1e-14
+# pts; 1e-9 is far above float noise and far below any difference two count
+# pairs with n <= 1e6 can produce, so it only absorbs noise at the -10.0 edge.
+_LB_EPS_PTS = 1e-9
 
 
 @dataclass(frozen=True)
@@ -67,7 +74,9 @@ def evidence_from_counts(k_cand: int, n_cand: int, k_ref: int, n_ref: int) -> Ev
         return Evidence()
     lo, _ = newcombe_diff_ci(k_cand, n_cand, k_ref, n_ref)
     return Evidence(n=min(n_cand, n_ref),
-                    gap_pts=(k_ref / n_ref - k_cand / n_cand) * 100,
+                    # Exact rational gap; float() of it is correctly rounded and
+                    # monotone, so an exact gap <= 3 stays <= 3.0 (floats gave 3.0000000000000004).
+                    gap_pts=float((Fraction(k_ref, n_ref) - Fraction(k_cand, n_cand)) * 100),
                     lb_pts=lo * 100)
 
 
@@ -87,4 +96,4 @@ def grade(evidence: Evidence | Mapping[str, Any] | None) -> Grade:
     gap, lb = get("gap_pts"), get("lb_pts")
     if n < PAIRS_MIN_N or gap is None or lb is None:
         return "probe"
-    return "eligible" if gap <= PAIRS_MAX_GAP_PTS and lb >= PAIRS_MIN_LB else "failed"
+    return "eligible" if gap <= PAIRS_MAX_GAP_PTS and lb >= PAIRS_MIN_LB - _LB_EPS_PTS else "failed"

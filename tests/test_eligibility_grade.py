@@ -66,3 +66,27 @@ def test_grade_accepts_raw_counts():
     assert grade({"k_cand": 10, "n_cand": 20, "k_ref": 20, "n_ref": 20}) == "probe"
     assert grade({"k_cand": 0, "n_cand": 0, "k_ref": 5, "n_ref": 10}) == "unknown"
     assert grade({"k_cand": 30, "n_cand": 64, "k_ref": 60, "n_ref": 64}) == "failed"
+
+
+def test_exact_three_point_gap_from_counts():
+    ev = evidence_from_counts(97, 100, 100, 100)
+    assert ev.gap_pts == 3.0 and grade(ev) == "eligible"
+    ev = evidence_from_counts(2, 100, 5, 100)
+    assert ev.gap_pts == 3.0
+    assert grade(ev) == ("eligible" if ev.lb_pts >= -10.0 else "failed")
+    assert grade(evidence_from_counts(96, 100, 100, 100)) == "failed"  # 4.0 pts
+
+
+def test_exact_three_point_gap_sweep():
+    found = 0
+    for n in range(60, 121):
+        for k_ref in range(n + 1):
+            for k_cand in range(n + 1):
+                if 100 * (k_ref - k_cand) != 3 * n:
+                    continue
+                found += 1
+                ev = evidence_from_counts(k_cand, n, k_ref, n)
+                assert ev.gap_pts == 3.0, (k_cand, k_ref, n)
+                want = "eligible" if ev.lb_pts >= -10.0 else "failed"
+                assert grade(ev) == want, (k_cand, k_ref, n)
+    assert found >= 20  # the sweep must find something to check
