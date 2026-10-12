@@ -95,36 +95,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Existing `~/.llm-router/result_cache.db` files are left on disk, unread and unmigrated.
 
 ### Added
-- context-pack builder core (PLAN v16 P1.1 tasks 1, 2, 4-core; R-CTX-1/2/4): new library module
-  `llm_router/context_pack.py` with `build_pack(request, messages=None, *, session_id, transcript_path,
-  project_root, target_window, door) -> ContextPack` and `messages_for(door, ...)`. The request is kept
-  verbatim; `recent` is the last 7 messages with tool_use/tool_result rendered as text (a tool block over
-  4,000 chars keeps head 1,500 + `[…truncated N chars…]` + tail 1,500); `mode="full"` carries the whole
-  conversation when it, the request and the instructions fit 0.8 x `target_window` and the whole
-  conversation was read; only the last 2 MB of a transcript is read. `project` comes from
-  `context_injection.inject` (OKF, semantic pack, repo state), `instructions` is a CLAUDE.md/AGENTS.md
-  digest (headings and rule lines, <= 1,500 tokens, cached by content hash), `summary` stays `None` until
-  P1.2. Errors in any section yield an empty section. Formats: Claude Code transcript JSONL, Codex rollout
-  JSONL, Anthropic Messages, OpenAI chat, Responses-API items. Instructions come from the project's
-  CLAUDE.md, .claude/CLAUDE.md and AGENTS.md only; nothing under `~/.claude` is ever read, including via
-  `project_root == $HOME` or a symlink (owner decision D-43), and a `project_root` that resolves to
-  `$HOME` is no project at all: no instruction files and no project section are read from the home root. `target_provider=` applies the session
-  privacy rule to `recent` (new `session_store.allows_session_content`, now shared with
-  `build_session_context`; behaviour unchanged there); `context=` carries an MCP caller-context string
-  that never qualifies for `mode="full"`; an unknown `door` raises `ValueError`. No door calls it yet
-  (the 7 door PRs follow); no hook changed.
-- repo state reads are cheaper (PLAN v16 P1.1, context-pack 50 ms budget): `repo_facts.collect` runs two
-  git calls instead of five (`status --porcelain --branch --no-ahead-behind` and one `log` line); it needs
-  git >= 2.17, and on an older git it now returns no repo state instead of answering. New opt-in
-  `repo_facts.render(root, reuse=True)` (via `context_injection.inject(..., reuse_repo_state=True)`) reuses
-  the block for the same root while `.git/HEAD`, `.git/index` and `.git/logs/HEAD` are unchanged, for at
-  most 10 s; only the context pack opts in, so every existing caller still reads git on each call. Under
-  reuse an untracked file or unstaged edit can lag by up to 10 s. Benchmark
-  `scripts/bench/context_pack_bench.py` (synthetic, Apple M5 Pro, 2026-10-09, one run, n=100 each), door
-  shape = 10 MB transcript + temp git repo + CLAUDE.md + semantic default: before (5 git calls, no reuse)
-  p50 45.78 / p95 51.66 ms; after, every call reading git p50 32.05 / p95 34.84 ms; after, reuse hit p50
-  17.23 / p95 19.62 ms. Transcript only: 10 MB p50 0.71 / p95 0.78 ms; 1.99 MB parsed whole p50 5.61 /
-  p95 6.66 ms.
+- door-agreement tool (PLAN v16 P1.6 task 0, P1.6-i): `scripts/door_agreement.py --corpus <jsonl> --sites hook,gateway[,...] --out <json>`
+  reports, per pair of classifier call sites, how many prompts get a different task_type and a different tier, with Wilson 95% CIs,
+  plus the count where any listed site differs. Sites now: `hook` (auto-route.py `classify_prompt`), `gateway` (`gateway._classify`),
+  `proxy` (`proxy/tiers._default_classify` on `steps.tier_text` of the prompt) and the reference `hook_policy` (`classify_signals(HOOK_POLICY)`, what `measure_low_signal_rate.py` called "hook"); the other P1.6
+  sites are added one per wiring PR. `--freeze-corpus <path>` writes `measure_low_signal_rate.collect()`'s prompts once (mode 0600,
+  never overwritten, temp file hard-linked into place). Each pair also reports a shared-labels rate (only prompts where both
+  sites' labels are in the vocabulary both emitted), and `--freeze-dates` / `--dates` / `--date-cutoff` add a reproducible
+  split by prompt date from a counts-only per-line date sidecar. Output is counts and hashes only. No model calls: the hook's LLM layers are forced off by the env switches its
+  code reads (`LLM_ROUTER_CLASSIFY_LOCAL_ONLY`, `LLM_ROUTER_DISABLE_LLM_CLASSIFIERS`, `LLM_ROUTER_HOOK_LLM_LAYER=off`), the proxy's pre-P0.9-e chain build is replaced by an empty chain,
+  `LITELLM_LOCAL_MODEL_COST_MAP=True` stops LiteLLM's import-time download, `LLM_ROUTER_OLLAMA_MODEL` stops older hooks'
+  import-time Ollama probe, and DNS plus every outbound socket connect is refused during the run (a `BaseException`, and any
+  refusal fails the run). Measure an older commit by putting its tree's `src` first on PYTHONPATH.
+- synthetic replay harness (owner decision D-42; test tooling, no product change): `scripts/synthetic_replay.py --corpus <jsonl>
+  --out <dir> [--doors hook,proxy,gateway,mcp,sdk,agent-route] [--sessions N]` drives synthetic sessions through every
+  classification door (auto-route and agent-route hooks as subprocesses, an `llm-router proxy` on an ephemeral port, the
+  gateway/SDK classify path, the MCP `classify_for_routing` path) and fires every hook `hooks/hooks.json` registers for the
+  events it emits (SessionStart, UserPromptSubmit, PreToolUse/PostToolUse per tool call, SubagentStart, Stop, SessionEnd) in
+  host order, under a scratch HOME and `LLM_ROUTER_HOME`; a registered hook that never ran is listed with the reason.
+  Upstream is a local stub. Children run a scratch venv interpreter whose `sitecustomize` is `scripts/_replay_netguard.py`
+  with the run's allowlist baked in, so any Python child, even one with an emptied environment, refuses every other
+  connection and the run exits 1; non-Python network clients are shadowed on PATH (absolute paths are not covered).
+  Leftover and detached processes are counted with a positive-control canary; "cannot tell" fails the run. Rows are
+  tagged with the existing mechanisms (`LLM_ROUTER_SYNTHETIC=1`, `LLM_ROUTER_ALLOW_STUBS=1` -> `provenance=test`,
+  `LLM_ROUTER_SESSION_KIND=harness`, `synth-replay-<hash>` session ids); no field was added. Writes `summary.json` /
+  `summary.md` (counts and hashes only): per-door decisions and field presence, latency p50/p95 with n, ledger completeness
+  per writer, P0.1-a archive checks and a pairwise door-agreement matrix with Wilson intervals. Synthetic results are
+  mechanics evidence only and never organic. Fixture: `tests/fixtures/synthetic_sessions/`; tests: `tests/test_synthetic_replay.py`.
 - ledger completeness (PLAN v16 P0.8-e): a call the semantic cache answers now writes a `usage` row
   (`reason = "cache_hit"`, provider `cache`, model `cache/<cached model>`, 0 tokens, $0) carrying the
   caller's session id, and `semantic_cache_lookups` gains a nullable `session_id` (additive migration;

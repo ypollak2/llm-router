@@ -635,3 +635,52 @@ def test_build_p95_under_50ms_in_the_shape_doors_use(big_transcript, tmp_path):
     samples = sorted(once()[0] for _ in range(30))
     p95 = samples[math.ceil(0.95 * len(samples)) - 1]
     assert p95 <= 50, f"p95={p95:.1f} ms over n={len(samples)}: {[round(x,1) for x in samples]}"
+
+
+# --------------------------------------------------------------------------- render_layers (P1.3 contract)
+
+
+def test_pack_layers_come_from_render_layers_once_and_in_trim_order(monkeypatch):
+    """build_pack renders project/summary/instructions through
+    context_tags.render_layers (the writer P1.3's trimmer reads), once, in
+    LAYERS order; to_messages puts that text in one system message."""
+    import dataclasses
+
+    from llm_router import context_tags
+
+    monkeypatch.setattr(cp, "_project", lambda *a, **k: "PROJECT-BODY")
+    monkeypatch.setattr(cp, "_instructions", lambda *a, **k: "INSTR-BODY")
+    calls = []
+    real = context_tags.render_layers
+    monkeypatch.setattr(context_tags, "render_layers",
+                        lambda pack: calls.append(pack) or real(pack))
+
+    pack = _build(project_root="/synthetic/root")
+    assert len(calls) == 1 and calls[0].project == "PROJECT-BODY"
+    assert pack.system == real(pack)
+    assert pack.system == (
+        "<project-knowledge>PROJECT-BODY</project-knowledge>\n"
+        "<project-instructions>INSTR-BODY</project-instructions>")
+    assert pack.tokens >= estimate_tokens(pack.system) + estimate_tokens(REQUEST)
+
+    msgs = cp.to_messages(pack)
+    assert msgs[0] == {"role": "system", "content": pack.system}
+    assert msgs[1:-1] == pack.recent
+    assert msgs[-1] == {"role": "user", "content": REQUEST}
+    joined = "\n".join(m["content"] for m in msgs)
+    for tag in ("project-knowledge", "project-instructions"):
+        assert joined.count(f"<{tag}>") == 1
+
+    # all three layers, in the specified trim order project -> summary -> instructions
+    full = real(dataclasses.replace(pack, summary="SUMMARY-BODY"))
+    order = [full.index(f"<{t}>") for t in
+             ("project-knowledge", "conversation-summary", "project-instructions")]
+    assert order == sorted(order) and full.count("<conversation-summary>") == 1
+
+
+def test_pack_without_layers_has_no_system_message(monkeypatch):
+    monkeypatch.setattr(cp, "_project", lambda *a, **k: "")
+    monkeypatch.setattr(cp, "_instructions", lambda *a, **k: "")
+    pack = _build()
+    assert pack.system == ""
+    assert cp.to_messages(pack)[0]["role"] != "system"

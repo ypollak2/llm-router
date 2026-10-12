@@ -43,10 +43,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable
 
+from llm_router import context_tags
 from llm_router.token_budget import estimate_tokens
 
 #: The seven context doors of PLAN v16 P1.1 task 3. The door PRs wire each one;
@@ -79,6 +80,10 @@ class ContextPack:
     mode: str = "pack"
     tokens: int = 0
     stable_hash: str = ""
+    #: ``context_tags.render_layers(pack)``: the project, summary and instructions
+    #: layers as tagged text, in trim order. This is the ONLY rendering of those
+    #: layers; put it in the system message as is (P1.3 trims by these tags).
+    system: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -652,10 +657,27 @@ def build_pack(request: str, messages: list | None = None, *,
         recent = [{"role": m.role, "content": m.render(cap=True)} for m in msgs[-RECENT_N:]]
 
     summary: str | None = None  # P1.2 (rolling summary) is not built yet
-    tokens = estimate_tokens(request) + sum(estimate_tokens(m["content"]) for m in recent)
-    tokens += sum(estimate_tokens(s) for s in (project, instructions) if s)
-    return ContextPack(
+    pack = ContextPack(
         request=request, recent=recent, summary=summary, project=project,
-        instructions=instructions, mode=mode, tokens=tokens,
+        instructions=instructions, mode=mode,
         stable_hash=_hash(request, recent, summary, project, instructions, mode),
     )
+    # render_layers first: it is the single writer of the layer tags, so the
+    # tokens counted below are the tokens a renderer will actually send.
+    system = context_tags.render_layers(pack)
+    tokens = estimate_tokens(request) + sum(estimate_tokens(m["content"]) for m in recent)
+    tokens += estimate_tokens(system) if system else 0
+    return replace(pack, system=system, tokens=tokens)
+
+
+def to_messages(pack: ContextPack) -> list[dict[str, str]]:
+    """The pack as chat messages: the tagged layers as one system message (when
+    any layer is non-empty), then ``recent``, then the request as the last user
+    message. The layers come from ``pack.system`` (``render_layers``) and appear
+    exactly once."""
+    out: list[dict[str, str]] = []
+    if pack.system:
+        out.append({"role": "system", "content": pack.system})
+    out.extend(pack.recent)
+    out.append({"role": "user", "content": pack.request})
+    return out
