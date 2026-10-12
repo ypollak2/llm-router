@@ -64,6 +64,7 @@ from judge_eval_set import ITEMS  # noqa: E402
 
 from llm_router import cost  # noqa: E402
 from llm_router.call_identity import ledger_session_id as _ledger_session_id  # noqa: E402
+from llm_router.call_identity import unknown_session as _unknown_session  # noqa: E402
 from llm_router import judge as judge_module  # noqa: E402
 from llm_router.judge import _evaluate_background  # noqa: E402
 
@@ -126,7 +127,7 @@ async def _insert_decision(task_type: str, answering_model: str) -> int:
                VALUES (datetime('now'), ?, 'balanced', 'simple', ?, 'ollama', 1, 10, 10, 0.0, 100.0, NULL,
                        'judge_eval', ?)""",
             (task_type, answering_model,
-             _ledger_session_id(os.environ.get("CLAUDE_CODE_SESSION_ID"))),
+             _ledger_session_id(os.environ.get("CLAUDE_CODE_SESSION_ID")) or _unknown_session("script")),
         )
         await db.commit()
         cursor = await db.execute("SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1")

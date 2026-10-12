@@ -2277,6 +2277,12 @@ async def log_routing_decision(
                 "capability_shadow_detection_failed: %s", _cap_err
             )
 
+        # P0.8-d: never NULL. Same resolution as ``log_usage``: the caller's id, else the
+        # MCP call's own session, else the explicit ``unknown:<door>`` (G3: missing).
+        from llm_router import call_identity as _ci_rd
+
+        _rd_session_id = (_ci_rd.ledger_session_id(session_id) or _ci_rd.call_session_id()
+                          or _ci_rd.unknown_session())
         await db.execute(
             """INSERT INTO routing_decisions
                (prompt_hash, task_type, profile, classifier_type, classifier_model,
@@ -2317,7 +2323,7 @@ async def log_routing_decision(
                 _write_provenance(),
                 capabilities_json,
                 shadow_tier,
-                session_id or None,
+                _rd_session_id,
                 tool_use_id or None,
                 task_type_raw,
             ),

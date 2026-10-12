@@ -278,7 +278,7 @@ def _log_to_db(
                     potential,
                     saved,
                     1 if _is_synthetic_run() else 0,
-                    session_id,
+                    session_id or "unknown:hook",  # P0.8: never NULL; G3 counts unknown:* as missing
                 ),
             )
             db.commit()
