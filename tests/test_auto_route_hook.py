@@ -42,7 +42,7 @@ def _hook_env(home_dir: Path, extra_env: dict[str, str] | None = None) -> dict[s
     # or the subprocess writes to the fixture's dir, not this one.
     env["LLM_ROUTER_HOME"] = str(home_dir) + "/.llm-router"
     # Prevent detached refresh writes after temporary HOME cleanup.
-    env["LLM_ROUTER_NO_BG_USAGE_REFRESH"] = "1"
+    env["LLM_ROUTER_NO_DETACHED_SPAWN"] = "1"
     env["LLM_ROUTER_DISABLE_LLM_CLASSIFIERS"] = "1"
     env["LLM_ROUTER_DIRECT_EXECUTION"] = "0"  # Disable direct execution — test classification only
     env["OPENAI_API_KEY"] = ""
@@ -64,11 +64,11 @@ def test_background_usage_refresh_opt_out(monkeypatch):
     monkeypatch.setattr(hook, "_usage_refresh_script_path", lambda: Path("usage-refresh.py"))
     monkeypatch.setattr(hook, "_refresh_child_env", lambda: {})
 
-    monkeypatch.setenv("LLM_ROUTER_NO_BG_USAGE_REFRESH", "1")
+    monkeypatch.setenv("LLM_ROUTER_NO_DETACHED_SPAWN", "1")
     hook._spawn_background_usage_refresh()
     assert calls == []
 
-    monkeypatch.delenv("LLM_ROUTER_NO_BG_USAGE_REFRESH")
+    monkeypatch.delenv("LLM_ROUTER_NO_DETACHED_SPAWN")
     hook._spawn_background_usage_refresh()
     assert len(calls) == 1
 
@@ -490,3 +490,15 @@ class TestShortCodeFollowup:
                     assert "code-context-inherit" not in hint
             finally:
                 last_route_path.unlink(missing_ok=True)
+
+
+def test_no_detached_spawn_also_stops_the_model_discovery_probe(monkeypatch):
+    # Review of #482: the discovery probe child wrote discovery.json late in 25 of 100 runs.
+    from llm_router import model_discovery
+    import subprocess as _sp
+    calls = []
+    monkeypatch.setattr(_sp, "Popen", lambda *a, **k: calls.append(a))
+    monkeypatch.setenv("LLM_ROUTER_NO_DETACHED_SPAWN", "1")
+    assert model_discovery._spawn_probe_child() is False and calls == []
+    monkeypatch.setenv("LLM_ROUTER_NO_DETACHED_SPAWN", "0")
+    assert model_discovery._spawn_probe_child() is True and len(calls) == 1
