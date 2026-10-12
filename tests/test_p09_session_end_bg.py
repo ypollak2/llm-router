@@ -353,12 +353,12 @@ def test_an_unwritable_claim_starts_no_child(hook, state, monkeypatch):
 
 # ── #325 review gaps (mutation survivors) ────────────────────────────────────
 
-def test_the_background_steps_are_exactly_these_five_in_order(hook):
+def test_the_background_steps_are_exactly_these_six_in_order(hook):
     """The two tests above iterate ``_STOP_BACKGROUND_STEPS`` itself, so dropping a
     step from it (the profile rescan) left them green."""
     assert hook._STOP_BACKGROUND_STEPS == (
         "_refresh_northstar_line", "_fetch_live_usage", "_build_and_save_learned_profile",
-        "_maybe_rescan_profile", "_maybe_evaluate_models")
+        "_maybe_rescan_profile", "_maybe_evaluate_models", "_link_decision_outcomes")
     for name in hook._STOP_BACKGROUND_STEPS:
         assert callable(getattr(hook, name)), name
 

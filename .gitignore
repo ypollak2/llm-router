@@ -131,6 +131,9 @@ tests/hook_rendering/
 !/docs/BUGS.md
 !/docs/decisions/
 !/docs/decisions/**
+# Preregistrations (hash recorded before the first scored row): permanent records.
+!/docs/prereg/
+!/docs/prereg/**
 # The opt-in per-call proxy: user-facing enablement page, and the spike that
 # is its design record (the numbers docs/proxy.md relies on).
 !/docs/proxy.md
