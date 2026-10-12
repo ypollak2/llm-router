@@ -239,7 +239,7 @@ class HealthTracker:
             return False
         return self._get(provider).is_healthy()
 
-    def record_success(self, provider: str) -> None:
+    def record_success(self, provider: str, model: str | None = None) -> None:
         """Record a successful call to the given provider.
 
         Args:
@@ -254,8 +254,18 @@ class HealthTracker:
         self._get(provider).record_success()
         if had_failures:  # a breaker just cleared — refresh the shared snapshot
             self.write_snapshot()
+        if model:
+            try:
+                from llm_router import map_health
+                map_health.record_outcome(model, True)
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    from llm_router import failopen
+                    failopen.record("CHZ-FO-MAPHEALTH-HOOK", exc)
+                except Exception:  # noqa: BLE001
+                    pass
 
-    def record_failure(self, provider: str) -> None:
+    def record_failure(self, provider: str, model: str | None = None) -> None:
         """Record a hard failure for the given provider.
 
         Args:
@@ -263,6 +273,16 @@ class HealthTracker:
         """
         self._get(provider).record_failure()
         self.write_snapshot()  # state changed → refresh shared snapshot
+        if model:
+            try:
+                from llm_router import map_health
+                map_health.record_outcome(model, False)
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    from llm_router import failopen
+                    failopen.record("CHZ-FO-MAPHEALTH-HOOK", exc)
+                except Exception:  # noqa: BLE001
+                    pass
 
     def record_rate_limit(self, provider: str, cooldown_seconds: int | None = None) -> None:
         """Record a rate-limit (429) error for the given provider.

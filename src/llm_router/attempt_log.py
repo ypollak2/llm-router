@@ -129,6 +129,19 @@ def record(model: str, outcome: str, latency_ms: int, *, reason: str = "") -> No
                     )
                 except Exception:  # noqa: BLE001
                     pass
+        try:
+            if outcome == OK:
+                from llm_router import map_health
+                map_health.record_outcome(model, True)
+            elif outcome == TIMEOUT:
+                from llm_router import map_health
+                map_health.record_outcome(model, False)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                from llm_router import failopen
+                failopen.record("CHZ-FO-MAPHEALTH-HOOK", exc)
+            except Exception:  # noqa: BLE001
+                pass
     except Exception:                                        # noqa: BLE001
         pass
 
