@@ -3,8 +3,11 @@
 The seven classifier call sites each decide differently today (door agreement
 on the frozen corpus: hook vs gateway 68.0%). This module is the single
 decision they will all call. The gateway, proxy, MCP, hook, agent-route,
-gemini-cli and router doors call it (the wiring PR); the hook also leaves its
-Decision for the proxy to reuse by ``text_sha`` (``reuse_fields``).
+gemini-cli and router doors call it (the wiring PR) in SHADOW by default (D-72,
+``LLM_ROUTER_ENGINE_MODE``): their rules route and ``shadow`` logs this engine's
+Decision beside the rules class. ``decide`` mode, where the engine decides (the
+hook then also leaves its Decision for the proxy by ``text_sha``,
+``reuse_fields``), is opt-in and not the v16.0 default: P1.6-g FAILed.
 
 Sync authority, per D-19 A: L1 heuristics (``classify.classify_signals`` under
 ``ENGINE_POLICY``) + L3 lexical model (``ml_lexical``) + a cache. No LLM and no
@@ -38,7 +41,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from llm_router import failopen, ml_lexical, prompt_key
+from llm_router import capped_log, failopen, ml_lexical, prompt_key
 from llm_router.classify import GATEWAY_POLICY, _score_categories, classify_signals
 from llm_router.paths import state_path
 
@@ -371,8 +374,8 @@ def _policy_version(lex, cal) -> str:
     return "%s-%s" % (POLICY_ID, hashlib.sha256(sig.encode()).hexdigest()[:8])
 
 
-def _compute(text: str, lex, cal, policy_version: str) -> Decision:
-    sig = classify_signals(text, ENGINE_POLICY)
+def _compute(text: str, lex, cal, policy_version: str, *, capabilities: bool = True) -> Decision:
+    sig = classify_signals(text, ENGINE_POLICY, capabilities=capabilities)
     cx = sig.complexity.value
     tier = _COMPLEXITY_TIER.get(cx, "sonnet")
     dims = {k: int(v) for k, v in _score_categories(text).items()}
@@ -454,6 +457,121 @@ def decide(text: str, *, ctx_digest: str = "", door: str, session_id: str | None
     except Exception as exc:  # noqa: BLE001 — a classifier never stalls routing
         log.warning("engine: decide failed, abstaining: %s", exc)
         return dataclasses.replace(_fallback(exc, pv), ms=(time.perf_counter() - t0) * 1000)
+
+
+# ── wiring mode: shadow by default (PLAN v16 D-72) ───────────────────────────
+
+#: ``LLM_ROUTER_ENGINE_MODE``: ``shadow`` (default), ``decide`` or ``off``.
+#: ``shadow``: every wired door routes with its own rules, exactly as before this wiring, and the
+#: engine computes a Decision AFTER that, logged to ``engine_shadow.jsonl`` next to the rules class.
+#: ``decide``: the engine decides at the doors (the #433 behaviour). NOT the v16.0 default:
+#: P1.6-g FAILed on the outcome basis (D-71/D-72), so the decider role moves to 16.1.
+#: ``off``: rules only, no engine call at all. An unknown value reads as ``shadow``.
+MODE_ENV = "LLM_ROUTER_ENGINE_MODE"
+SHADOW_LOG = "engine_shadow.jsonl"
+_SHADOW_MAX_BYTES = 2_000_000  # capped_log keeps this + one rotated generation
+
+
+def wire_mode() -> str:
+    v = os.environ.get(MODE_ENV, "shadow").strip().lower()
+    return v if v in ("shadow", "decide", "off") else "shadow"
+
+
+def decides() -> bool:
+    """True when the engine, not the door's rules, decides the route."""
+    return wire_mode() == "decide"
+
+
+def _decide_light(text: str, *, door: str, lexical: bool) -> Decision:
+    """The shadow call's Decision: no capability detector (``needs_tools`` / ``needs_repo_context`` /
+    ``local_eligible`` are not computed), no cache read or write, no sqlite. ``lexical`` adds L3 when
+    the model is already loadable (server doors); the hooks pass False (L1 only: a short-lived
+    process must not load an artifact for a log row). task_type, tier and complexity are what
+    ``decide`` returns for the same text without the cache."""
+    if door not in DOORS:
+        raise ValueError("unknown door %r; expected one of %s" % (door, ", ".join(DOORS)))
+    t0 = time.perf_counter()
+    lex, cal = (_lexical() if lexical else None), _calibration()
+    d = _compute(text or "", lex, cal, _policy_version(lex, cal), capabilities=False)
+    return dataclasses.replace(d, ms=(time.perf_counter() - t0) * 1000)
+
+
+def _shadow_run(text: str, door: str, rules_task: str | None, rules_complexity: str | None,
+                l1_only: bool) -> Decision | None:
+    try:
+        d = _decide_light(text, door=door, lexical=not l1_only)
+        row = dataclasses.asdict(d)
+        row.update(needs_tools=None, needs_repo_context=None, local_eligible=None, light=True)  # not computed
+        rtier = _COMPLEXITY_TIER.get(rules_complexity or "")
+        row.update(ts=round(time.time(), 3), door=door, l1_only=bool(l1_only), rules_task_type=rules_task,
+                   rules_complexity=rules_complexity, rules_tier=rtier,
+                   agree=bool(rtier == d.tier and rules_task == d.task_type))
+        capped_log.append(state_path(SHADOW_LOG), (json.dumps(row, separators=(",", ":")) + "\n").encode(),
+                          _SHADOW_MAX_BYTES)
+        return d
+    except Exception as exc:  # noqa: BLE001 — a shadow classifier must never touch routing
+        failopen.record("LR-FO-ENGINE-SHADOW", exc)
+        return None
+
+
+_SHADOW_QUEUE_MAX = 256
+_pool_lock = threading.Lock()
+_pool = None
+_pending = 0
+
+
+def _submit(args: tuple) -> None:
+    global _pool, _pending
+    from concurrent.futures import ThreadPoolExecutor
+
+    with _pool_lock:
+        if _pending >= _SHADOW_QUEUE_MAX:
+            failopen.record("LR-FO-ENGINE-SHADOW-DROP", RuntimeError("shadow queue full"))
+            return
+        if _pool is None:
+            _pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="llm_router-engine-shadow")
+        _pending += 1
+        fut = _pool.submit(_shadow_run, *args)
+
+    def _done(_f) -> None:
+        global _pending
+        with _pool_lock:
+            _pending -= 1
+
+    fut.add_done_callback(_done)
+
+
+def shadow_drain(timeout: float = 10.0) -> bool:
+    """Wait for queued background shadow rows (tests, shutdown). True when the queue is empty."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        with _pool_lock:
+            if _pending == 0:
+                return True
+        time.sleep(0.005)
+    return False
+
+
+def shadow(text: str, *, door: str, rules_task: str | None, rules_complexity: str | None,
+           l1_only: bool = False, background: bool = False) -> Decision | None:
+    """Shadow mode: compute the engine's Decision and log it beside the rules class.
+
+    Call it AFTER the rules decision, and never use the result to route. ``background=True`` (the
+    long-lived server doors: proxy, gateway, MCP, router) queues the work to one daemon thread, so
+    the request path pays only the queue put and the result is None; the hooks are short-lived
+    processes and run it inline with ``l1_only=True``. Returns the Decision when run inline (None
+    when the mode is not ``shadow`` or the engine failed). Never raises into the request path: any
+    error is recorded through ``failopen`` (``LR-FO-ENGINE-SHADOW``). The row holds the Decision's
+    fields and the rules tier, no prompt text."""
+    if wire_mode() != "shadow":
+        return None
+    if background:
+        try:
+            _submit((text, door, rules_task, rules_complexity, l1_only))
+        except Exception as exc:  # noqa: BLE001
+            failopen.record("LR-FO-ENGINE-SHADOW", exc)
+        return None
+    return _shadow_run(text, door, rules_task, rules_complexity, l1_only)
 
 
 # ── hook -> proxy reuse (P1.6 task 5, P1.6-h) ────────────────────────────────

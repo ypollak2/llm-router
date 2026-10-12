@@ -1229,7 +1229,7 @@ class TestDefaultAgentCallPassesThroughCleanly:
         carve-out, measured separately. No local-model direct path is taken."""
         mod = _load_hook_module()
         prompt = "implement a fix for the off-by-one bug"
-        assert mod._engine_decision(prompt)[0] == "code"
+        assert mod._classify_task_type(prompt) == "code"
         # Savings DB logging is not under test (and writes to stdout via structlog).
         monkeypatch.setattr(mod, "_log_cli_savings", lambda *a, **k: None)
         seen = self._run_main_in_process(mod, monkeypatch, tmp_path, prompt)
@@ -1247,7 +1247,7 @@ class TestDefaultAgentCallPassesThroughCleanly:
         mod = _load_hook_module()
         prompt = "refactor the entire codebase across multiple files to rename Foo to Bar"
         assert not mod._is_codex_suitable(
-            "general-purpose", mod._engine_decision(prompt)[0], prompt)
+            "general-purpose", mod._classify_task_type(prompt), prompt)
         seen = self._run_main_in_process(mod, monkeypatch, tmp_path, prompt)
         out = json.loads(capsys.readouterr().out)
         assert seen == []  # Codex never called

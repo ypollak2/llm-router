@@ -150,11 +150,8 @@ def test_context_dependent_prompt_gets_no_draft_and_a_context_directive(tmp_path
     # CHZ-SURF-01: the directive must name a tool that is registered under the
     # ACTIVE tier — llm_query(context=…) on a legacy tier, and
     # llm(task="query", context=…) under the consolidated default.
-    # P1.6: the low-signal fallback is the engine's (gateway `analyze` default), not the hook's old `query`.
-    from llm_router import engine
     from llm_router.tool_surface import route_call
-    task = engine.decide("how do I run this app", door="hook").task_type
-    assert route_call("llm_" + task, "context=…") in ctx
+    assert route_call("llm_query", "context=…") in ctx
     # ...and no blind draft was relayed.
     assert "UNVERIFIED DRAFT" not in ctx
     assert "ROUTING NOTICE" not in ctx

@@ -35,6 +35,9 @@ def _isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_DECIDE_CACHE", "memory")
     monkeypatch.delenv("LLM_ROUTER_ENGINE_ABSTAIN", raising=False)
     monkeypatch.delenv("LLM_ROUTER_ENSEMBLE", raising=False)
+    # These tests cover the engine-decides wiring (the #433 behaviour). The default is shadow (D-72),
+    # covered by tests/test_engine_shadow.py.
+    monkeypatch.setenv("LLM_ROUTER_ENGINE_MODE", "decide")
     engine.clear_cache(persistent=False)
     engine._db.clear()
     yield
@@ -88,12 +91,20 @@ def scan_tree(root: Path) -> dict[str, list[tuple[str, int]]]:
     return found
 
 
-def test_head_has_zero_classifier_calls_outside_the_engine():
+def test_every_remaining_rules_classifier_is_paired_with_the_engine():
+    """D-72: the rules still route at the 7 doors, so the old classifier calls stay. Each module that
+    keeps one must also reach for the engine (shadow call and the ``decide`` opt-in); a rules site with
+    no engine pairing is the second classifier P1.6-a forbids. (P1.6-a proper, 0 calls outside the
+    engine, returns when the engine decides, 16.1.)"""
     found = scan_tree(SRC)
     # An empty scan passes everything: the scanner must see the allowed callers it is told to skip.
     assert {"classify.py", "engine.py", "ensemble.py"} <= set(found), sorted(found)
     others = {m: c for m, c in found.items() if m not in ALLOWED}
-    assert others == {}, "a second classifier: %s" % others
+    assert len(others) >= 7, sorted(others)  # the doors: gateway, proxy, 3 hooks, router, agentic
+    unpaired = [m for m in others
+                if "engine.shadow(" not in (SRC / m).read_text(encoding="utf-8")
+                or "decides()" not in (SRC / m).read_text(encoding="utf-8")]
+    assert unpaired == [], "a rules classifier with no engine shadow/decide pairing: %s" % unpaired
 
 
 def test_scanner_finds_at_least_7_sites_on_da31df7():

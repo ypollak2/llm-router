@@ -355,17 +355,35 @@ _chain_cache: dict[tuple, list[str]] = {}
 _chain_cache_token: tuple | None = None
 
 
+def _classify_class(text: str, *, capabilities: bool = True) -> tuple[str, str]:
+    """``(task_type, complexity)`` the proxy routes on.
+
+    PLAN v16 P1.6 / D-72: ``classify_signals(GATEWAY_POLICY)`` decides, exactly as before the
+    wiring; the one engine only runs after it, in shadow. ``LLM_ROUTER_ENGINE_MODE=decide`` makes
+    the engine decide, reusing the hook's Decision for this turn by ``text_sha`` (P1.6-h)."""
+    from llm_router import engine
+
+    if engine.decides():
+        d = engine.decide_for_proxy(text)
+        return d.task_type, d.complexity
+    from llm_router.classify import GATEWAY_POLICY, classify_signals
+
+    sig = classify_signals(text, GATEWAY_POLICY, capabilities=capabilities)
+    out = sig.task_type.value, sig.complexity.value
+    engine.shadow(text, door="proxy", rules_task=out[0], rules_complexity=out[1],
+                  background=True)
+    return out
+
+
 async def policy_chain(text: str) -> tuple[str, str, list[str]]:
     """``(task_type, complexity, chain)`` from the router's own policy."""
-    from llm_router import engine
     from llm_router.config import get_config
     from llm_router.profiles import complexity_to_profile
     from llm_router import map_reader
     from llm_router.router import _build_and_filter_chain
     from llm_router.types import Complexity, TaskType
 
-    d = engine.decide_for_proxy(text)
-    key = (d.task_type, d.complexity)
+    key = _classify_class(text)
     # P1.8: the chain is cached with the map file's mtime, so a rewritten map is
     # re-read; None (no map file) is the pre-map behaviour.
     global _chain_cache_token
@@ -375,16 +393,16 @@ async def policy_chain(text: str) -> tuple[str, str, list[str]]:
         _chain_cache_token = tok
     ckey = (*key, tok)
     if ckey not in _chain_cache:
-        c = Complexity(d.complexity)
+        c = Complexity(key[1])
         _chain_cache[ckey] = await _build_and_filter_chain(
-            TaskType(d.task_type), complexity_to_profile(c), None, c, c, get_config())
+            TaskType(key[0]), complexity_to_profile(c), None, c, c, get_config())
     return key[0], key[1], _chain_cache[ckey]
 
 
 async def tier_classify(text: str, pinned: str | None = None, *, anthropic: bool = True) -> dict:
     """The Claude tier decision's classifier (``proxy.tiers``): the same
     ``(task_type, complexity)`` as ``choose_model`` -- both are
-    ``engine.decide_for_proxy(text)`` -- without building a provider chain.
+    ``classify_signals(text, GATEWAY_POLICY)`` -- without building a provider chain.
 
     PLAN v16 P0.9-e. The tier decision reads only the class; the chain is
     informational there (``chain_head``) and its build (``_build_and_filter_chain``:
@@ -396,10 +414,9 @@ async def tier_classify(text: str, pinned: str | None = None, *, anthropic: bool
     it. Same signature and return shape as ``choose_model`` so it is a drop-in
     seam; ``pinned`` is accepted and ignored (no model is chosen here)."""
     del pinned
-    from llm_router import engine, map_reader
+    from llm_router import map_reader
 
-    d = engine.decide_for_proxy(text)  # the hook's Decision for this turn, else engine.decide (P1.6)
-    task, cx = d.task_type, d.complexity
+    task, cx = _classify_class(text, capabilities=False)  # the class only (P0.9-e)
     chain = _chain_cache.get((task, cx, map_reader.token())) or []
     model = next((m for m in chain if tool_capable(m, anthropic=anthropic)), None)
     return {"task_type": task, "complexity": cx, "chain_head": chain[:4], "model": model}

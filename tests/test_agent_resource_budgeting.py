@@ -31,13 +31,6 @@ def _depth_path_for(tmp_path: Path, session_id: str) -> Path:
     return tmp_path / ".llm-router" / f"agent_depth_{safe}.json"
 
 
-# PLAN v16 P1.6: agent-route decides complexity with the engine (a length curve: <= 400 chars is
-# `simple`, 401-2000 `moderate`), where the old keyword table said `moderate` for a short build
-# prompt. These tests price a `moderate` agent ($1.00), so the prompt carries neutral filler that
-# puts it in the engine's moderate band without adding a classification signal.
-_MODERATE_PAD = " Background notes follow." + " lorem ipsum dolor sit amet." * 20
-
-
 def _run_agent_route(
     prompt: str,
     subagent_type: str = "general-purpose",
@@ -52,7 +45,7 @@ def _run_agent_route(
         "hook_event_name": "PreToolUse",
         "tool_name": "Agent",
         "tool_input": {
-            "prompt": prompt + _MODERATE_PAD,
+            "prompt": prompt,
             "subagent_type": subagent_type,
         },
     })
@@ -413,7 +406,7 @@ class TestBudgetStarvation:
             }))
 
             code, out = _run_agent_route(
-                "write a validation function with error handling",
+                "analyze and implement a validation function with error handling",
                 tmp_path=tmp_path,
                 session_id=sid,
                 init_budget=initial_budget,  # Pass initial budget so it uses existing file

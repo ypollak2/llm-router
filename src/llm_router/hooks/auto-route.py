@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 50
+# llm_router-hook-version: 51
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 50"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 51"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -2364,6 +2364,139 @@ def classify_with_gemini(text: str) -> str | None:
 # ── Complexity Classifier ────────────────────────────────────────────────────
 
 
+def classify_complexity(text: str, task_type: str) -> str:
+    """Delegates to the shared engine. Kept as a name, not an implementation.
+
+    This was an AST-extracted copy of `llm_router.classify`, and the copy is what
+    made the two drift. HOOK_LIVE_POLICY reproduces the old local behaviour
+    EXACTLY — 1000 of 1000 comparisons over 200 real prompts x 5 task types — so
+    this delegation changes no routing.
+
+    Not HOOK_POLICY, despite the name: that one applies `apply_complexity_floor`,
+    which the hook never did, and would push 26% of prompts to a more expensive
+    tier. `tests/test_hook_classifier_equivalence.py` pins both facts.
+    """
+    from llm_router.classify import HOOK_LIVE_POLICY, complexity_for
+
+    return complexity_for(text, policy=HOOK_LIVE_POLICY, task_type=task_type).value
+def _classify_prompt_rules(text: str) -> dict | None:
+    """Classify using heuristic scoring → Ollama → cheap API → weak heuristic → auto."""
+    stripped = text.strip()
+
+    if not stripped or len(stripped) < 8:
+        return None
+    if SKIP_PATTERNS.search(stripped):
+        return None
+
+    # Coordination fast-path: multi-agent orchestration prompts are plans,
+    # not payloads. Checked BEFORE the build/content fast-paths because
+    # "coordinate three agents to build X" contains build vocabulary but
+    # is orchestration, not a direct code task — the two-signal detector
+    # (verb + agent target) is higher precision than the single-signal
+    # build/generate detectors. The classification is ADVISORY-ONLY —
+    # direct execution must never fire for ``task_type == coordinate``
+    # (the direct path has no subagents; a direct answer would fabricate
+    # parallel work). The route indicator still surfaces the bucket and
+    # it is logged for telemetry like every other classification.
+    if _is_coordination_task(stripped):
+        return {
+            "task_type": "coordinate",
+            "complexity": classify_complexity(text, "analyze"),
+            "method": "coordination-fast-path",
+        }
+
+    # Build task fast-path: deterministic llm_code routing for obvious coding work.
+    if _is_build_task(stripped):
+        return {
+            "task_type": "code",
+            "complexity": classify_complexity(text, "code"),
+            "method": "build-fast-path",
+        }
+
+    # Content generation detection (v7.4.0+): Suggest routing for create/write/add tasks
+    if _is_content_generation_task(stripped):
+        return {
+            "task_type": "generate",
+            "complexity": classify_complexity(text, "generate"),
+            "method": "content-generation-fast-path",
+            "suggestion": "content-generation-decomposition",
+        }
+
+    # Introspection fast-path: questions about LOCAL LLM Router / project
+    # state need read-only Bash + SQL — they're impossible to satisfy by
+    # routing to an LLM that has no access to ``~/.llm-router``. We still
+    # emit the classification (visible in the route indicator + logged
+    # for telemetry) but enforce-route.py recognises ``task_type ==
+    # introspect`` and lets native tools through without enforcement.
+    if _is_introspection_task(stripped):
+        return {
+            "task_type": "introspect",
+            "complexity": "simple",
+            "method": "introspection-fast-path",
+        }
+
+    # Benchmark prompt fast-path (Plan 07 Phase 3 C): RouterArena / MMLU /
+    # HELM templates have stable prefixes — match them O(constant) instead
+    # of paying for the heuristic/Ollama/API classifier chain.
+    bench = benchmark_fast_path(stripped)
+    if bench is not None:
+        return bench
+
+    # Layer 1: Heuristic scoring (instant, free)
+    scores = score_categories(text)
+    best_category = max(scores, key=scores.get)
+    best_score = scores[best_category]
+
+    if best_score >= CONFIDENCE_THRESHOLD:
+        return {
+            "task_type": best_category,
+            "complexity": classify_complexity(text, best_category),
+            "method": "heuristic",
+            "score": best_score,
+        }
+
+    # Layer 2: Ollama local LLM (free, 1-3s)
+    if not DISABLE_LLM_CLASSIFIERS and len(stripped) >= 10:
+        ollama_result = classify_with_ollama(text)
+        if ollama_result:
+            return {
+                "task_type": ollama_result,
+                "complexity": classify_complexity(text, ollama_result),
+                "method": "ollama",
+            }
+
+    # Layer 3: Cheap API model (Gemini Flash first — free tier, then GPT-4o-mini)
+    if not DISABLE_LLM_CLASSIFIERS and _API_CLASSIFIERS_ALLOWED and len(stripped) >= 10:
+        api_result = classify_with_gemini(text) or classify_with_openai(text)
+        if api_result:
+            return {
+                "task_type": api_result,
+                "complexity": classify_complexity(text, api_result),
+                "method": "api",
+            }
+
+    # Layer 4: Weak heuristic match (score > 0 but below threshold)
+    if best_score > 0:
+        return {
+            "task_type": best_category,
+            "complexity": classify_complexity(text, best_category),
+            "method": "heuristic-weak",
+            "score": best_score,
+        }
+
+    # Layer 5: Question / unknown — treat as query so cheap model (Haiku) handles it.
+    # This ensures codebase questions, "why doesn't X work", meta-questions, etc.
+    # are routed instead of silently falling through to the top-tier model.
+    if len(stripped) >= 8:
+        return {
+            "task_type": "query",
+            "complexity": classify_complexity(text, "query"),
+            "method": "fallback",
+        }
+
+    return None
+
+
 def _engine_reuse_fields(text: str, decision) -> dict:
     from llm_router import engine
 
@@ -2380,8 +2513,8 @@ def engine_decision(text: str):
     return engine.decide(text, door="hook")
 
 
-def classify_prompt(text: str) -> dict | None:
-    """Classify with the one engine; deterministic fast paths run first.
+def _classify_prompt_engine(text: str) -> dict | None:
+    """LLM_ROUTER_ENGINE_MODE=decide: classify with the one engine; deterministic fast paths run first.
 
     Fast paths (not classification: each carries semantics that downstream hooks read, and
     the engine's L1 has no such rule yet): too short or a skip pattern -> None (do not
@@ -2461,6 +2594,29 @@ def classify_prompt(text: str) -> dict | None:
     method = "heuristic" if not d.abstain else ("heuristic-weak" if d.confidence else "fallback")
     return {"task_type": d.task_type, "complexity": d.complexity, "method": method,
             "abstain": d.abstain}
+
+
+def classify_prompt(text: str) -> dict | None:
+    """The hook's classification. PLAN v16 P1.6 / D-72: the rules above route (unchanged); the one
+    engine runs AFTER them, L1 only, in shadow (``engine.shadow``: logged beside the rules class,
+    never raises, no cache or model load). ``LLM_ROUTER_ENGINE_MODE=decide`` makes the engine
+    decide (``_classify_prompt_engine``), ``off`` skips the engine call."""
+    try:
+        from llm_router import engine
+
+        decides = engine.decides()
+    except Exception as exc:  # noqa: BLE001 — an engine import error must never stop the rules
+        from llm_router import failopen as _fo
+
+        _fo.record("LR-FO-ENGINE-SHADOW", exc)
+        return _classify_prompt_rules(text)
+    if decides:
+        return _classify_prompt_engine(text)
+    result = _classify_prompt_rules(text)
+    if result is not None:
+        engine.shadow(text, door="hook", rules_task=result.get("task_type"),
+                      rules_complexity=result.get("complexity"), l1_only=True)
+    return result
 
 
 # ── MCP Capability Map ───────────────────────────────────────────────────────
@@ -4501,13 +4657,17 @@ def main() -> None:
 
     session_id = hook_input.get("session_id", "")
 
-    # P1.6-h: this turn's Decision, left for the proxy in the last_classification sidecar
-    # (written below) so it reads it by text_sha instead of classifying the prompt again.
-    # Fail-open: no record costs the proxy one classification, nothing else.
+    # P1.6-h (decide mode only, D-72): this turn's Decision, left for the proxy in the
+    # last_classification sidecar (written below) so it reads it by text_sha instead of
+    # classifying the prompt again. In shadow mode the rules route and nothing is left for the
+    # proxy. Fail-open: no record costs the proxy one classification, nothing else.
     _p16_decision = None
     if session_id:
         try:
-            _p16_decision = engine_decision(prompt)
+            from llm_router import engine as _engine
+
+            if _engine.decides():
+                _p16_decision = engine_decision(prompt)
         except Exception as _exc:                                    # noqa: BLE001
             from llm_router import failopen as _fo
             _fo.record("P16-HOOK-DECISION", _exc)
@@ -5947,7 +6107,7 @@ def main() -> None:
                     # never look at them, so this is backward compatible.
                     "route_id": _directive_id,
                     "turn_id": int(_directive_now),
-                    # P1.6-h: text_sha / tier_sha / decision / ts, for the proxy's reuse.
+                    # P1.6-h (decide mode): text_sha / tier_sha / decision / ts, for the proxy's reuse.
                     **(_engine_reuse_fields(prompt, _p16_decision) if _p16_decision is not None else {}),
                 },
             )

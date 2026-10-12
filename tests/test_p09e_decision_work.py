@@ -109,20 +109,11 @@ def test_twin_scores_equal_the_ignorecase_scores(seed):
         assert C._score_categories(text) == _reference_scores(text), text[:200]
 
 
-def test_the_tier_classify_keeps_the_class_and_runs_the_capability_detector_once_per_text(monkeypatch, tmp_path):
-    """PLAN v16 P1.6 supersedes the P0.9-e "skip the detector" shortcut: the proxy asks the one
-    engine, whose Decision carries needs_tools / needs_repo_context, so the detector runs on a
-    cache MISS (measured on 1,000 frozen-corpus prompts, 3,000-char tails: engine.decide uncached
-    p50 1.2 ms / p95 11.2 ms, against 0.3 / 2.8 ms for the old class-only call). It must not run
-    again for a text the engine has already decided (the hook decides first, and shares the cache),
-    and the class must be exactly what it was."""
+def test_the_tier_classify_skips_the_capability_detector_and_keeps_the_class(monkeypatch):
     import asyncio
 
-    from llm_router import capabilities, engine
+    from llm_router import capabilities
 
-    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
-    monkeypatch.setenv("LLM_ROUTER_DECIDE_CACHE", "memory")
-    engine.clear_cache(persistent=False)
     texts = ["fix the typo in the README", "write a function that parses ISO dates and add tests",
              "explain how the cache works " * 30, "design a migration plan for the billing database " * 60]
     want = [(C.classify_signals(t, C.GATEWAY_POLICY).task_type.value,
@@ -138,11 +129,10 @@ def test_the_tier_classify_keeps_the_class_and_runs_the_capability_detector_once
     monkeypatch.setattr(capabilities, "detect_capabilities", counting)
     got = [asyncio.run(pb.tier_classify(t, None, anthropic=True)) for t in texts]
     assert [(g["task_type"], g["complexity"]) for g in got] == want
-    assert len(calls) == len(texts), "one detector run per distinct text"
-    again = [asyncio.run(pb.tier_classify(t, None, anthropic=True)) for t in texts]
-    assert [(g["task_type"], g["complexity"]) for g in again] == want
-    assert len(calls) == len(texts), "a text the engine already decided must not run the detector again"
-    engine.clear_cache(persistent=False)
+    assert calls == [], "the tier decision ran the capability detector"
+    C.classify_signals(texts[0], C.GATEWAY_POLICY)  # every other caller still gets the vector
+    assert len(calls) == 1
+
 
 def test_the_proxy_imports_the_classifier_at_start_not_in_the_first_decision(tmp_path):
     """Cold, the import cost the first classified call ~8 ms of its classify phase."""

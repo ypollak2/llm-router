@@ -660,6 +660,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.dates:
         buckets = date_buckets(read_dates(args.dates, corpus_sha, len(prompts)), args.date_cutoff)
 
+    # This tool measures whether the doors AGREE when the engine decides (P1.6-a/-i); the default
+    # mode is shadow (D-72), where the doors route with their own rules. An explicit value wins.
+    os.environ.setdefault("LLM_ROUTER_ENGINE_MODE", "decide")
     switches: dict[str, dict] = {}
     for s in names:
         for var, val in SITES[s].no_llm_env.items():

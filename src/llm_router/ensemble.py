@@ -61,18 +61,25 @@ _TRUST_PRIMARY_COMPLEXITY = 0.75
 
 
 def _engine_mode() -> str:
-    """``LLM_ROUTER_ENSEMBLE``: unset or ``engine`` -> the one engine (PLAN v16 P1.6);
-    ``legacy`` (or the old ``1``/``true``/``on``/``yes``) -> the LLM-first ensemble below,
-    kept for one release; anything else (``off``) -> the cloud classifier."""
-    v = os.environ.get("LLM_ROUTER_ENSEMBLE", "engine").strip().lower()
-    if v in ("", "engine"):
+    """Which classifier the MCP door routes with: ``engine`` | ``legacy`` | ``off``.
+
+    PLAN v16 P1.6 / D-72: the rules route by default, so with ``LLM_ROUTER_ENGINE_MODE`` unset
+    (``shadow``) this is main's ``LLM_ROUTER_ENSEMBLE`` switch unchanged: the LLM-first ensemble
+    unless ``off`` (cloud classifier). ``engine`` only when ``LLM_ROUTER_ENGINE_MODE=decide`` and
+    ``LLM_ROUTER_ENSEMBLE`` is unset or ``engine``; ``legacy`` then keeps the old path."""
+    from llm_router import engine
+
+    raw = os.environ.get("LLM_ROUTER_ENSEMBLE")
+    v = (raw if raw is not None else "on").strip().lower()
+    if engine.decides() and (raw is None or v in ("", "engine")):
         return "engine"
     return "legacy" if v in ("legacy", "1", "true", "on", "yes") else "off"
 
 
 def _ensemble_enabled() -> bool:
-    """True only on the legacy LLM-first ensemble path (user choice, 2026-07), which is
-    now opt-in via ``LLM_ROUTER_ENSEMBLE=legacy``. Its warmup follows this switch."""
+    """LLM-first ensemble is the default routing classifier (user choice, 2026-07).
+    Disable with LLM_ROUTER_ENSEMBLE=off to fall back to the cloud classifier. Its warmup
+    follows this switch."""
     return _engine_mode() == "legacy"
 
 
@@ -218,10 +225,11 @@ def engine_classification(prompt: str) -> ClassificationResult:
 async def classify_for_routing(prompt: str, **_legacy_kwargs) -> "ClassificationResult":
     """Routing-path classification entry point used by the MCP tools.
 
-    Default: ``engine.decide`` (P1.6). ``LLM_ROUTER_ENSEMBLE=legacy`` restores the
-    LLM-first path for one release: the local ensemble classifies every prompt and — on cold start/model failure — degrades INTERNALLY to the
+    LLM-first: when LLM_ROUTER_ENSEMBLE is on (default), the local ensemble classifies
+    every prompt and — on cold start/model failure — degrades INTERNALLY to the
     floor'd heuristic (never stalls, never bounces). When disabled, defers to the
-    cloud ``classify_complexity``. Legacy kwargs (timeout_seconds, quality_mode,
+    cloud ``classify_complexity``. PLAN v16 P1.6 / D-72: that is the rules decision; the one
+    engine runs after it in shadow, and decides only under ``LLM_ROUTER_ENGINE_MODE=decide``. Legacy kwargs (timeout_seconds, quality_mode,
     min_model) are accepted for call-site compatibility; the ensemble uses its own
     timeout because a 10s cap would kill it on a cold local model.
     """
@@ -229,12 +237,28 @@ async def classify_for_routing(prompt: str, **_legacy_kwargs) -> "Classification
         return engine_classification(prompt)
     if _ensemble_enabled():
         timeout = float(os.environ.get("LLM_ROUTER_ENSEMBLE_TIMEOUT", "120"))
-        return await classify_ensemble(
+        result = await classify_ensemble(
             prompt, primary=_primary_model(), secondary=_secondary_model(), timeout_seconds=timeout
         )
-    from llm_router.classifier import classify_complexity
+    else:
+        from llm_router.classifier import classify_complexity
 
-    return await classify_complexity(prompt, **_legacy_kwargs)
+        result = await classify_complexity(prompt, **_legacy_kwargs)
+    _engine_shadow(prompt, result)
+    return result
+
+
+def _engine_shadow(prompt: str, result) -> None:
+    """Log the engine's Decision beside the rules result (D-72). Never raises."""
+    try:
+        from llm_router import engine
+
+        engine.shadow(prompt, door="mcp", rules_task=getattr(result.inferred_task_type, "value", None),
+                      rules_complexity=getattr(result.complexity, "value", None), background=True)
+    except Exception as exc:  # noqa: BLE001 — shadow must not touch routing
+        from llm_router import failopen
+
+        failopen.record("LR-FO-ENGINE-SHADOW", exc)
 
 
 async def local_llm_classify(
