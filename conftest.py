@@ -39,11 +39,15 @@ and "the module is broken" must never look the same.
 
 from __future__ import annotations
 
+import os
 import re
 
 import pathlib
 
 import pytest
+
+# Never start a real map poller or spawn a real map refresh from the test suite.
+os.environ.setdefault("LLM_ROUTER_MAP_REDISCOVERY", "0")
 
 _EXCLUDED_MODULE_ROOTS = (
     "llm_router.enterprise",

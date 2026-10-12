@@ -357,6 +357,7 @@ def _ollama_rows(inp: MapInputs, now: float) -> list[dict]:
             status="connected", reason=reason,
             marginal_cost={"value": 0.0, "label": "local; electricity not counted"},
             capabilities=caps,
+            digest=m.get("digest"),
             limits={
                 "num_ctx": local_models.num_ctx(name),
                 "max_context": _ctx_from_info(show.get("model_info")),
@@ -489,6 +490,12 @@ def refresh_if_stale(inputs: MapInputs | None = None, *, path: Path | None = Non
         if age is not None and 0 <= age <= max_age_s:
             return cur
     data = build(inputs)
+    try:
+        from llm_router import map_rediscovery as _mr
+        _mr.record_changes(cur, data, source="refresh_if_stale",
+                           now=time.time() if now is None else now)
+    except Exception:  # noqa: BLE001 - the change log never blocks a refresh
+        pass
     write_map(data, path)
     return data
 

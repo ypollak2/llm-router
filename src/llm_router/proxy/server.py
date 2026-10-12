@@ -1226,5 +1226,10 @@ def cmd_proxy(argv: list[str]) -> int:
         for line in local_mode.banner_lines(model=cfg.model, num_ctx=cfg.num_ctx, kill_path=kill,
                                             killed=kill.exists()):
             print(line, flush=True)
+    try:
+        from llm_router.map_rediscovery import maybe_start_poller
+        maybe_start_poller()
+    except Exception:
+        pass
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning", access_log=False)
     return 0

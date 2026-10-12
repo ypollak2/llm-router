@@ -140,6 +140,14 @@ try:
 except Exception as _dynroute_err:
     log.warning("Failed to initialize dynamic routing, will fall back to static tables: %s", _dynroute_err)
 
+# Map re-discovery (P1.8 tasks 8, 10): poll the map's inputs every 30 s in this
+# long-running process. Hooks only read the diff file. Off: LLM_ROUTER_MAP_REDISCOVERY=0.
+try:
+    from llm_router.map_rediscovery import maybe_start_poller
+    maybe_start_poller()
+except Exception:
+    pass
+
 # ── Tool slim mode (v4.0) ─────────────────────────────────────────────────────
 # Gating happens at registration time so unused tools never appear in Claude's
 # tool list at all — saving tokens before any request is made.

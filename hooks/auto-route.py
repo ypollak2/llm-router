@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 50
+# llm_router-hook-version: 52
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 50"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 52"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -6008,6 +6008,16 @@ def main() -> None:
         _final_context = _final_context + "\n\n" + _grounding_notice
     if _mini_summary_block:
         _final_context = _final_context + "\n\n" + _mini_summary_block
+    # P1.8 tasks 8/10: one line when the resource map changed since the last prompt.
+    # Reads two small files; the refresh itself is a detached child, never awaited.
+    try:
+        from llm_router import map_rediscovery as _map_rd
+        _map_line = _map_rd.pending_notice()
+        _map_rd.spawn_refresh_if_needed()
+    except Exception:
+        _map_line = ""
+    if _map_line:
+        _final_context = _final_context + "\n\n" + _map_line
 
     output = {
         "hookSpecificOutput": {
