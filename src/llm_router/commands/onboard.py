@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess as sp
 import sys
+from typing import Callable
 
 from llm_router import paths
 
@@ -61,8 +62,18 @@ def cmd_onboard(args: list[str]) -> int:
 
 # ── Implementation ─────────────────────────────────────────────────────────────
 
-def _run_onboard() -> None:
-    """Zero-friction onboarding: detect capabilities, pick enforcement mode, write config, install."""
+def _run_onboard(
+    input_fn: Callable[[str], str] = input,
+    runner: Callable[[str], int] | None = None,
+    detect: Callable[[], list[str]] | None = None,
+) -> None:
+    """Zero-friction onboarding: detect capabilities, pick enforcement mode, write config, install.
+
+    ``input_fn``, ``runner`` and ``detect`` are injectable so tests never touch the host.
+    """
+    from llm_router import runtime_offer as _ro
+    from llm_router.onboard_needs import ask_needs
+
     STATE_DIR = str(paths.llm_router_home())
 
     print(f"\n{_bold('╔══════════════════════════════════════════╗')}")
@@ -72,16 +83,28 @@ def _run_onboard() -> None:
 
     # ── 1. Detect Ollama ──────────────────────────────────────────────────────
     ollama_ok = False
-    try:
-        r = sp.run(["curl", "-sf", "http://localhost:11434/api/tags"],
-                   capture_output=True, timeout=3)
-        ollama_ok = r.returncode == 0
-    except Exception:
-        pass
+    if detect is None:
+        try:
+            r = sp.run(["curl", "-sf", "http://localhost:11434/api/tags"],
+                       capture_output=True, timeout=3)
+            ollama_ok = r.returncode == 0
+        except Exception:
+            pass
+        runtimes = _ro.detect_runtimes()
+        if ollama_ok and "ollama" not in runtimes:
+            runtimes.append("ollama")
+    else:
+        runtimes = list(detect())
+        ollama_ok = "ollama" in runtimes
+    other_runtimes = [r for r in runtimes if r != "ollama"]
     if ollama_ok:
         print(_ok("Ollama running  (free local tier, ~1–3s)"))
     else:
-        print(_warn("Ollama not detected  — install from ollama.ai for free routing"))
+        print(_warn("Ollama not detected"))
+        print(_ro.runtime_offer())
+    for name in other_runtimes:
+        print(_ok(f"Local runtime detected: {name}  (via openai_compat)"))
+    local_ok = bool(runtimes)
 
     # ── 2. Detect Codex ───────────────────────────────────────────────────────
     codex_ok = shutil.which("codex") is not None
@@ -101,7 +124,7 @@ def _run_onboard() -> None:
 
     # ── 4. Recommend profile ──────────────────────────────────────────────────
     print()
-    if ollama_ok or codex_ok:
+    if local_ok or codex_ok:
         profile = "budget"
         print(f"  {_bold('Recommended profile:')} {_green('budget')}  (free-first via Ollama/Codex)")
     elif found_keys:
@@ -109,8 +132,19 @@ def _run_onboard() -> None:
         print(f"  {_bold('Recommended profile:')} {_yellow('balanced')}  (paid API routing)")
     else:
         print(f"\n  {_red('✗  No routing backends found!')}")
-        print("     Install Ollama (ollama.ai) or set an API key to enable routing.\n")
+        print(_ro.runtime_offer() + "\n")
+        try:
+            answer = input_fn("  Run it now? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = "n"
+        if answer in ("y", "yes"):
+            print("  " + _ro.install_runtime(confirm=True, runner=runner))
         return
+
+    # ── 4b. Needs questions (feed the task-4 recommender; not wired yet) ──────
+    print(f"\n  {_bold('A few questions (Enter keeps the default, s skips):')}")
+    needs = ask_needs(input_fn, print)
+    print(f"  Needs: {needs.main_use}, languages={','.join(needs.languages)}, priority={needs.priority}")
 
     # ── 5. Choose enforcement mode ────────────────────────────────────────────
     print(f"\n  {_bold('Enforcement mode:')}")
@@ -119,7 +153,7 @@ def _run_onboard() -> None:
     print(f"    {_dim('[3] enforce')}  — block Claude when routing is violated  {_dim('(maximum savings)')}")
     print()
     try:
-        choice = input("  Choose [1/2/3, default=1]: ").strip() or "1"
+        choice = input_fn("  Choose [1/2/3, default=1]: ").strip() or "1"
     except (EOFError, KeyboardInterrupt):
         choice = "1"
 

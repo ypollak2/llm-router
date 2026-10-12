@@ -172,10 +172,14 @@ _TEST_MODELS: dict[str, str] = {
 
 # ── Tool functions ─────────────────────────────────────────────────────────────
 
+# Test seam: None means the real runner in runtime_offer.
+_RUNTIME_RUNNER = None
+
 async def llm_setup(
     action: str = "status",
     provider: str | None = None,
     api_key: str | None = None,
+    confirm: bool = False,
 ) -> str:
     """Set up and manage API providers, hooks, and routing enforcement.
 
@@ -188,11 +192,13 @@ async def llm_setup(
     - "provider": Show details about a specific provider
     - "install_hooks": Install auto-routing hooks globally (every Claude Code session)
     - "uninstall_hooks": Remove auto-routing hooks
+    - "install_runtime": Offer a local model runtime install; runs only with confirm=True
 
     Args:
-        action: What to do — "status", "guide", "discover", "add", "test", "provider", "install_hooks", or "uninstall_hooks".
+        action: What to do — "status", "guide", "discover", "add", "test", "provider", "install_hooks", "uninstall_hooks", or "install_runtime".
         provider: Provider name (for "add", "test", and "provider" actions).
         api_key: API key value (for "add" action only). Key is validated before saving.
+        confirm: Must be True for "install_runtime" to run the install command.
     """
     if action == "status":
         return _setup_status()
@@ -223,8 +229,15 @@ async def llm_setup(
         return _setup_install_hooks()
     elif action == "uninstall_hooks":
         return _setup_uninstall_hooks()
+    elif action == "install_runtime":
+        from llm_router.runtime_offer import install_runtime
+
+        return install_runtime(confirm=confirm, runner=_RUNTIME_RUNNER)
     else:
-        return f"Unknown action: {action}. Use: status, guide, discover, add, test, provider, install_hooks, or uninstall_hooks."
+        return (
+            f"Unknown action: {action}. Use: status, guide, discover, add, test, provider, "
+            "install_hooks, uninstall_hooks, or install_runtime."
+        )
 
 
 async def llm_rate(good: bool, decision_id: int | None = None) -> str:
