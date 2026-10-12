@@ -2403,7 +2403,7 @@ def classify_complexity(text: str, task_type: str) -> str:
     from llm_router.classify import HOOK_LIVE_POLICY, complexity_for
 
     return complexity_for(text, policy=HOOK_LIVE_POLICY, task_type=task_type).value
-def classify_prompt(text: str) -> dict | None:
+def _classify_prompt_rules(text: str) -> dict | None:
     """Classify using heuristic scoring → Ollama → cheap API → weak heuristic → auto."""
     stripped = text.strip()
 
@@ -2519,6 +2519,128 @@ def classify_prompt(text: str) -> dict | None:
         }
 
     return None
+
+
+def _engine_reuse_fields(text: str, decision) -> dict:
+    from llm_router import engine
+
+    return engine.reuse_fields(text, decision)
+
+
+def engine_decision(text: str):
+    """The one engine's Decision for this prompt (PLAN v16 P1.6, door ``hook``).
+
+    Sync L1 + L3 + cache only: the hook never waits on an LLM (D-13). Same Decision
+    as every other door for the same text."""
+    from llm_router import engine
+
+    return engine.decide(text, door="hook")
+
+
+def _classify_prompt_engine(text: str) -> dict | None:
+    """LLM_ROUTER_ENGINE_MODE=decide: classify with the one engine; deterministic fast paths run first.
+
+    Fast paths (not classification: each carries semantics that downstream hooks read, and
+    the engine's L1 has no such rule yet): too short or a skip pattern -> None (do not
+    route); coordination plans -> ``coordinate`` (advisory only, never direct execution);
+    build tasks -> ``code``; content generation -> ``generate``; local-state questions ->
+    ``introspect`` (enforce-route lets native tools through); benchmark templates; and the
+    hook's executable git/deploy ``coordination`` bucket. Everything else is
+    ``engine.decide``: sync L1 + L3 + cache, no Ollama, no cloud API (D-13). The residual
+    disagreement with the other doors is exactly the prompts these paths take
+    (``scripts/door_agreement.py``); moving build/content/coordination into the engine's L1
+    is an engine-policy change for every door at once, so it is not made here.
+
+    Complexity for every path is the engine's, except the ``coordination`` bucket, which is
+    at least ``moderate``."""
+    stripped = text.strip()
+
+    if not stripped or len(stripped) < 8:
+        return None
+    if SKIP_PATTERNS.search(stripped):
+        return None
+
+    d = engine_decision(text)
+
+    # Coordination fast-path: multi-agent orchestration prompts are plans,
+    # not payloads. Checked BEFORE the build/content fast-paths because
+    # "coordinate three agents to build X" contains build vocabulary but
+    # is orchestration, not a direct code task. The classification is
+    # ADVISORY-ONLY: direct execution must never fire for ``task_type ==
+    # coordinate`` (the direct path has no subagents; a direct answer would
+    # fabricate parallel work).
+    if _is_coordination_task(stripped):
+        return {"task_type": "coordinate", "complexity": d.complexity, "method": "coordination-fast-path"}
+
+    # Build task fast-path: deterministic llm_code routing for obvious coding work.
+    if _is_build_task(stripped):
+        return {"task_type": "code", "complexity": d.complexity, "method": "build-fast-path"}
+
+    # Content generation detection (v7.4.0+): Suggest routing for create/write/add tasks
+    if _is_content_generation_task(stripped):
+        return {
+            "task_type": "generate",
+            "complexity": d.complexity,
+            "method": "content-generation-fast-path",
+            "suggestion": "content-generation-decomposition",
+        }
+
+    # Introspection fast-path: questions about LOCAL LLM Router / project state need
+    # read-only Bash + SQL; enforce-route recognises ``introspect`` and lets native tools
+    # through without enforcement.
+    if _is_introspection_task(stripped):
+        return {"task_type": "introspect", "complexity": "simple", "method": "introspection-fast-path"}
+
+    # Benchmark prompt fast-path (Plan 07 Phase 3 C): RouterArena / MMLU / HELM templates
+    # have stable prefixes.
+    bench = benchmark_fast_path(stripped)
+    if bench is not None:
+        return bench
+
+    # The hook's own ``coordination`` bucket (executable git / deploy / command asks, no
+    # trailing "e"): enforce-route keeps it enforced and names llm_act for it
+    # (test_enf_coordination_bash_names_llm_act). The engine has no such category, so the
+    # hook scorer's winning bucket stays a gate, exactly as before.
+    scores = score_categories(text)
+    best_category = max(scores, key=scores.get)
+    if best_category == "coordination" and scores[best_category] > 0:
+        # At least ``moderate``: enforce-route's llm_act redirect fires only for
+        # moderate/complex, and the old policy gave this bucket ``moderate`` unless the
+        # prompt was long. The engine's length curve says ``simple`` below 400 chars,
+        # which would stop holding Bash for "run git push now".
+        cx = d.complexity if d.complexity != "simple" else "moderate"
+        return {"task_type": "coordination", "complexity": cx,
+                "method": "heuristic" if scores[best_category] >= CONFIDENCE_THRESHOLD else "heuristic-weak",
+                "score": scores[best_category]}
+
+    # Telemetry labels keep their old vocabulary: an abstain with some signal was
+    # "heuristic-weak", with none "fallback" (the old layer 5, now an abstain).
+    method = "heuristic" if not d.abstain else ("heuristic-weak" if d.confidence else "fallback")
+    return {"task_type": d.task_type, "complexity": d.complexity, "method": method,
+            "abstain": d.abstain}
+
+
+def classify_prompt(text: str) -> dict | None:
+    """The hook's classification. PLAN v16 P1.6 / D-72: the rules above route (unchanged); the one
+    engine runs AFTER them, L1 only, in shadow (``engine.shadow``: logged beside the rules class,
+    never raises, no cache or model load). ``LLM_ROUTER_ENGINE_MODE=decide`` makes the engine
+    decide (``_classify_prompt_engine``), ``off`` skips the engine call."""
+    try:
+        from llm_router import engine
+
+        decides = engine.decides()
+    except Exception as exc:  # noqa: BLE001 — an engine import error must never stop the rules
+        from llm_router import failopen as _fo
+
+        _fo.record("LR-FO-ENGINE-SHADOW", exc)
+        return _classify_prompt_rules(text)
+    if decides:
+        return _classify_prompt_engine(text)
+    result = _classify_prompt_rules(text)
+    if result is not None:
+        engine.shadow(text, door="hook", rules_task=result.get("task_type"),
+                      rules_complexity=result.get("complexity"), l1_only=True)
+    return result
 
 
 # ── MCP Capability Map ───────────────────────────────────────────────────────
@@ -4559,6 +4681,21 @@ def main() -> None:
 
     session_id = hook_input.get("session_id", "")
 
+    # P1.6-h (decide mode only, D-72): this turn's Decision, left for the proxy in the
+    # last_classification sidecar (written below) so it reads it by text_sha instead of
+    # classifying the prompt again. In shadow mode the rules route and nothing is left for the
+    # proxy. Fail-open: no record costs the proxy one classification, nothing else.
+    _p16_decision = None
+    if session_id:
+        try:
+            from llm_router import engine as _engine
+
+            if _engine.decides():
+                _p16_decision = engine_decision(prompt)
+        except Exception as _exc:                                    # noqa: BLE001
+            from llm_router import failopen as _fo
+            _fo.record("P16-HOOK-DECISION", _exc)
+
     # Refresh the session pointer on every prompt. It used to be written once by
     # session-start.py, so it went stale after the 6h TTL and a long session lost
     # its own identity — measured 2026-09-14, all 30 pointers on this machine
@@ -5994,6 +6131,8 @@ def main() -> None:
                     # never look at them, so this is backward compatible.
                     "route_id": _directive_id,
                     "turn_id": int(_directive_now),
+                    # P1.6-h (decide mode): text_sha / tier_sha / decision / ts, for the proxy's reuse.
+                    **(_engine_reuse_fields(prompt, _p16_decision) if _p16_decision is not None else {}),
                 },
             )
         except OSError:

@@ -413,6 +413,9 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # P1.6 engine core: decide() cache mode sqlite|memory|off (default sqlite), and the L3 / calibration
     # artifact path overrides (default $LLM_ROUTER_HOME/engine_lexical.json, engine_calibration.json).
     "LLM_ROUTER_DECIDE_CACHE": ("llm_router", "engine.py", 1),
+    "LLM_ROUTER_ENGINE_ABSTAIN": ("llm_router", "engine.py", 1),
+    # P1.6 wiring mode (D-72): shadow (default) | decide | off. decide is opt-in; P1.6-g FAILed.
+    "LLM_ROUTER_ENGINE_MODE": ("llm_router", "engine.py", 1),
     "LLM_ROUTER_ENGINE_LEXICAL": ("llm_router", "engine.py", 1),
     "LLM_ROUTER_ENGINE_CALIBRATION": ("llm_router", "engine.py", 1),
     # LOCAL-TIMEOUT-1: seconds a local model that just timed out stays at the back of the chain (0 = off).

@@ -172,10 +172,18 @@ os.environ.setdefault("LLM_ROUTER_DISABLE_SUBPROCESS_BACKENDS", "codex,gemini_cl
 def _classify(prompt: str) -> tuple[str, str]:
     # Unified engine (llm_router.classify), gateway policy — richer task_type than the
     # old code/analyze regex; same 400/2000 length tiers + analyze low-signal default.
+    # PLAN v16 P1.6 / D-72: these rules route. The one engine only runs AFTER them, in shadow
+    # (logged beside the rules class); LLM_ROUTER_ENGINE_MODE=decide lets it decide instead.
+    from llm_router import engine_door
     from llm_router.classify import GATEWAY_POLICY, classify_signals
 
+    d = engine_door.decision(prompt, door="gateway")
+    if d is not None:
+        return d.task_type, d.complexity
     s = classify_signals(prompt, GATEWAY_POLICY)
-    return s.task_type.value, s.complexity.value
+    out = s.task_type.value, s.complexity.value
+    engine_door.shadow(prompt, door="gateway", rules_task=out[0], rules_complexity=out[1])
+    return out
 
 
 class _ModelRef:

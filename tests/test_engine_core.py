@@ -89,9 +89,15 @@ def test_door_does_not_change_the_decision_and_unknown_door_raises():
         engine.decide("hi", door="nope")
 
 
-def test_engine_policy_starts_from_gateway_policy():
+def test_engine_policy_is_gateway_policy_plus_keyword_complexity():
+    """D-69: GATEWAY_POLICY with keyword + length complexity; nothing else differs."""
+    import dataclasses
+
     from llm_router.classify import GATEWAY_POLICY
-    assert engine.ENGINE_POLICY == GATEWAY_POLICY
+    diff = {f.name for f in dataclasses.fields(GATEWAY_POLICY)
+            if getattr(engine.ENGINE_POLICY, f.name) != getattr(GATEWAY_POLICY, f.name)}
+    assert diff == {"engine_keywords", "simple_max"}, diff
+    assert engine.ENGINE_POLICY.engine_keywords and engine.ENGINE_POLICY.apply_floor is False
 
 
 def test_tier_map_matches_the_proxy_policy_file():
@@ -328,7 +334,18 @@ def test_decision_equality_ignores_layer_and_ms():
 # ── abstain / L2 schema ──────────────────────────────────────────────────────
 
 
-def test_low_signal_abstains_one_tier_safer_and_confident_does_not():
+def test_low_signal_abstains_log_only_by_default_and_never_moves_the_tier():
+    """Wired doors must not move a tier on a placeholder TAU (P1.6 wiring)."""
+    from llm_router.classify import classify_signals
+
+    d = engine.decide("hmm ok then", door="hook")
+    sig = classify_signals("hmm ok then", engine.ENGINE_POLICY)
+    assert d.abstain and "abstain (log only)" in d.reason
+    assert (d.tier, d.complexity) == (engine._COMPLEXITY_TIER[sig.complexity.value], sig.complexity.value)
+
+
+def test_low_signal_abstains_one_tier_safer_and_confident_does_not(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_ENGINE_ABSTAIN", "enforce")
     d = engine.decide("hmm ok then", door="hook")
     assert d.abstain and d.layer == "L1" and d.confidence < engine.TAU and "abstain" in d.reason
     base_tier = engine._COMPLEXITY_TIER[
@@ -399,7 +416,8 @@ def test_l3_decides_tier_where_l1_is_low_signal(tmp_path):
     assert d.layer == "L3" and d.tier == "opus" and d.complexity == "complex" and "L3" in d.reason
 
 
-def test_calibration_applies_and_marks_calibrated(tmp_path):
+def test_calibration_applies_and_marks_calibrated(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_ENGINE_ABSTAIN", "enforce")
     p = "write a python function that parses json and add unit tests; refactor the class"
     raw = engine.decide(p, door="hook")
     assert raw.calibrated is False
