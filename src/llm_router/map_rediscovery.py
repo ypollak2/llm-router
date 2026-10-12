@@ -435,6 +435,11 @@ def start_poller(interval_s: float = POLL_INTERVAL_S, *, poll_fn: Callable = pol
     if poll_fn is poll:
         if _default_poller is not None:
             return _default_poller
+        # Bind the state locations now: a process that later changes
+        # LLM_ROUTER_HOME (a test worker) must not have this thread write into it.
+        from llm_router import resource_map as rm
+        poll_kwargs.setdefault("state_dir", _home())
+        poll_kwargs.setdefault("map_path", rm.map_path())
         _default_poller = Poller(interval_s, poll_fn, wait, poll_kwargs).start()
         return _default_poller
     return Poller(interval_s, poll_fn, wait, poll_kwargs).start()

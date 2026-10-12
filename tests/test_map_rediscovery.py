@@ -551,3 +551,22 @@ def test_exclusive_lock_status_tells_held_from_unavailable(tmp_path):
     st = {}
     with exclusive_lock(tmp_path / "f" / "x.lock", timeout=0, status=st) as got4:
         assert not got4 and st["state"] == "unavailable"
+
+
+def test_default_poller_binds_its_state_dir_at_start(tmp_path, monkeypatch):
+    """A long-lived process that later changes LLM_ROUTER_HOME (a test worker) must not
+    have the poller thread write into the new home (CI: test_cli_help_is_inert)."""
+    home_a, home_b = tmp_path / "a", tmp_path / "b"
+    home_a.mkdir()
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(home_a))
+    monkeypatch.setattr(mr, "_default_poller", None)
+    seen = {}
+    monkeypatch.setattr(mr, "poll", lambda **kw: seen.update(kw))
+    release = threading.Event()
+    p = mr.start_poller(poll_fn=mr.poll, wait=lambda _: release.wait(5))
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(home_b))
+    release.set()
+    p.stop()
+    p.join(2)
+    assert seen["state_dir"] == home_a
+    assert seen["map_path"].parent == home_a
