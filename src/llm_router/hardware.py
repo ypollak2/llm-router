@@ -30,6 +30,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from llm_router.safe_subprocess import get_safe_env
+
 _GIB = 1024**3
 _TIMEOUT_S = 2.0
 _NVIDIA_CMD = [
@@ -69,6 +71,7 @@ def _default_runner(argv: list, timeout: float) -> str:
         timeout=min(timeout, _TIMEOUT_S),
         shell=False,
         check=True,
+        env=get_safe_env(),
     )
     return proc.stdout
 
