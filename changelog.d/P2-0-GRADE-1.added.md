@@ -1,0 +1,1 @@
+Add `llm_router.eligibility.grade` (P2.0 task 6): one pure eligibility rule (n >= 60, gap <= 3 pts, Newcombe LB >= -10) returning unknown/probe/eligible/failed, plus a Newcombe method-10 CI helper. Not wired into routing.
