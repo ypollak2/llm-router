@@ -496,3 +496,58 @@ def test_poller_failure_leaves_evidence(monkeypatch, tmp_path):
     release.set()
     p.join(5)
     assert seen == ["CHZ-FO-MAP-POLL"]
+
+
+def _event_line(ts, text):
+    return json.dumps({"ts": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(),
+                       "event": "added", "notice": "+ " + text, "source": "t"})
+
+
+def test_half_written_batch_tail_is_not_skipped(world):
+    """Events of a batch share a timestamp; a half-written tail must not advance the cursor past it."""
+    ts = world.clock - 5
+    path = world.state / mr.CHANGES_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    full_two = _event_line(ts, "two")
+    path.write_text(_event_line(ts, "one") + "\n" + full_two[:20])      # reader lands mid-write
+    first = world.notice()
+    assert "two" not in first
+    path.write_text(_event_line(ts, "one") + "\n" + full_two + "\n")    # writer finishes
+    texts = first + world.notice()
+    assert "one" in texts and "two" in texts
+
+
+def test_refresh_if_stale_lock_unavailable_rebuilds_and_records(world, monkeypatch):
+    from llm_router import failopen
+    seen = []
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, **kw: seen.append(code))
+    monkeypatch.setattr(mr, "_lost", lambda code, exc: seen.append(code))
+    world.models["qwen3.6:latest"] = ("sha-n", "m")
+    stale = rm.load_map(world.map_path)
+    stale["generated_at"] = datetime.fromtimestamp(world.clock - 10 * rm.REFRESH_TTL_S,
+                                                   tz=timezone.utc).isoformat()
+    world.map_path.write_text(json.dumps(stale))
+    # An unwritable home: the lock file's parent is a regular file, so open() fails.
+    blocker = world.tmp / "blocker"
+    blocker.write_text("x")
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(blocker))
+    out = rm.refresh_if_stale(world.inputs(), path=world.map_path, now=world.clock)
+    assert any(r["resource"].endswith("qwen3.6:latest") for r in out["resources"])
+    assert "CHZ-FO-MAP-LOCK-UNAVAILABLE" in seen
+
+
+def test_exclusive_lock_status_tells_held_from_unavailable(tmp_path):
+    from llm_router.file_lock import exclusive_lock
+    lock = tmp_path / "x.lock"
+    with exclusive_lock(lock, timeout=0) as got:
+        assert got
+        st = {}
+        with exclusive_lock(lock, timeout=0, status=st) as got2:
+            assert not got2 and st["state"] == "held"
+    st = {}
+    with exclusive_lock(lock, timeout=0, status=st) as got3:
+        assert got3 and st["state"] == "acquired"
+    (tmp_path / "f").write_text("x")
+    st = {}
+    with exclusive_lock(tmp_path / "f" / "x.lock", timeout=0, status=st) as got4:
+        assert not got4 and st["state"] == "unavailable"

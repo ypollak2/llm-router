@@ -494,9 +494,14 @@ def refresh_if_stale(inputs: MapInputs | None = None, *, path: Path | None = Non
     sdir = _mr._home()
     # Same non-blocking lock as map_rediscovery.poll: the holder is already
     # rebuilding and logging this diff, so we neither rebuild nor log it again.
-    with exclusive_lock(sdir / _mr.LOCK_FILE, timeout=0) as got:
-        if not got:
+    st: dict = {}
+    with exclusive_lock(sdir / _mr.LOCK_FILE, timeout=0, status=st) as got:
+        if not got and st.get("state") == "held":
             return cur if cur is not None else build(inputs)
+        if not got:
+            # Locking unavailable (e.g. unwritable LLM_ROUTER_HOME): rebuild
+            # unlocked, as before the lock existed, and record why.
+            _mr._lost("CHZ-FO-MAP-LOCK-UNAVAILABLE", OSError("map refresh lock unavailable"))
         cur = load_map(path)          # the previous holder may have just refreshed
         if cur is not None:
             age = age_seconds(cur, now)

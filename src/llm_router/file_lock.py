@@ -17,6 +17,7 @@ stays stable for the duration of the critical section.
 from __future__ import annotations
 
 import contextlib
+import errno
 import sys
 import time
 from pathlib import Path
@@ -31,11 +32,13 @@ else:  # pragma: no cover - platform-specific import
 
 _DEFAULT_TIMEOUT_SECONDS = 30.0
 _POLL_INTERVAL_SECONDS = 0.02
+_CONTENDED = (errno.EAGAIN, errno.EACCES, errno.EDEADLK)
 
 
 @contextlib.contextmanager
 def exclusive_lock(
-    lock_path: Path, timeout: float = _DEFAULT_TIMEOUT_SECONDS
+    lock_path: Path, timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    status: dict | None = None,
 ) -> Iterator[bool]:
     """Hold an exclusive advisory lock on *lock_path* for the block body.
 
@@ -51,8 +54,13 @@ def exclusive_lock(
     platform module, etc.) — degrades to "unlocked" so a locking problem can
     never turn into a hard outage for a caller that was previously unlocked
     entirely.
+
+    A ``False`` yield is ambiguous (held by another process, or locking
+    unavailable). Pass a dict as *status* to tell them apart: it gets
+    ``status["state"]`` = ``"acquired"``, ``"held"`` or ``"unavailable"``.
     """
     locked = False
+    state = "unavailable"
     fh = None
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -65,8 +73,13 @@ def exclusive_lock(
                 else:
                     fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 locked = True
+                state = "acquired"
                 break
-            except OSError:
+            except OSError as exc:
+                if exc.errno in _CONTENDED:
+                    state = "held"
+                else:
+                    break
                 if time.monotonic() >= deadline:
                     break
                 time.sleep(_POLL_INTERVAL_SECONDS)
@@ -76,6 +89,8 @@ def exclusive_lock(
                 break
     except Exception:
         locked = False
+    if status is not None:
+        status["state"] = state
     try:
         yield locked
     finally:

@@ -17,6 +17,10 @@ lock so only one process refreshes at a time.
 
 Diffs go to ``map_changes.jsonl`` (append only). The next hook prints one line
 such as ``map: + qwen3.6 local``; a cursor file records what was announced.
+
+Known limits: the cwd ``.env`` is not a watch key, so a change to a project's
+``.env`` is seen only by the 300 s TTL, and rebuilds from different cwds can
+show key add/remove diffs because ``build()`` reads the cwd ``.env``.
 """
 from __future__ import annotations
 
@@ -286,7 +290,8 @@ def poll(*, inputs: Any = None, now: float | None = None, http_get: Callable | N
             inputs.now = now
         data = rm.build(inputs)
         rm.write_map(data, map_path)
-        events = record_changes(cur, data, source=",".join(reasons), now=now, path=sdir / CHANGES_FILE)
+        events = record_changes(cur, data, source=",".join(reasons), now=now,
+                                path=(map_path.parent if map_path is not None else sdir) / CHANGES_FILE)
         _atomic_write_json(sdir / WATCH_FILE, state)
         return events
 
@@ -305,15 +310,30 @@ def pending_notice(*, now: float | None = None, consume: bool = True,
     cur = _read_json(d / CURSOR_FILE)
     last = cur.get("ts") if isinstance(cur, dict) else None
     last = float(last) if isinstance(last, (int, float)) and not isinstance(last, bool) else 0.0
-    kept = []
-    newest = last
+    parsed: list[tuple[float, dict]] = []
+    tail_bad = False
     for line in raw.decode("utf-8", "replace").splitlines():
+        if not line.strip():
+            continue
         try:
             e = json.loads(line)
             ts = datetime.fromisoformat(e["ts"]).timestamp()
         except (ValueError, KeyError, TypeError):
-            continue          # includes a half-written tail: read again next time
-        if not isinstance(e, dict) or ts <= last:
+            tail_bad = True       # only the LAST line matters: a half-written tail
+            continue
+        tail_bad = False
+        if isinstance(e, dict):
+            parsed.append((ts, e))
+    if tail_bad and parsed:
+        # Events of one batch share a timestamp. The batch is still being written,
+        # so hold it back whole and read it again next time; advancing the cursor
+        # to its timestamp would skip the unwritten rest of it for good.
+        open_ts = parsed[-1][0]
+        parsed = [(t, e) for t, e in parsed if t < open_ts]
+    kept = []
+    newest = last
+    for ts, e in parsed:
+        if ts <= last:
             continue
         newest = max(newest, ts)
         if 0 <= now - ts <= NOTICE_MAX_AGE_S:
