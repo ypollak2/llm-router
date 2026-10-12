@@ -26,6 +26,11 @@ _RUN_PERF = os.environ.get("LLM_ROUTER_RUN_PERF") == "1"
 for _k in [k for k in os.environ if k.startswith("LLM_ROUTER_")]:
     del os.environ[_k]
 os.environ["LLM_ROUTER_HOME"] = _tempfile.mkdtemp(prefix="llm_router-suite-home-")
+# Importing llm_router.server starts the map re-discovery poller thread (30 s tick, probes
+# Ollama on 127.0.0.1:11434). Left on, it outlives its test and fires inside whichever test
+# runs next in the worker: it made test_synthetic_replay fail on CI only (violations
+# 127.0.0.1:11434 and ::1:11434). Tests of the poller start their own and need no switch.
+os.environ["LLM_ROUTER_MAP_REDISCOVERY"] = "off"
 
 # 2026-10-06: the operator's live usage.db held 294 fixture rows written that day
 # (see tests/_real_home_guard.py). LLM_ROUTER_HOME alone is advisory: code that

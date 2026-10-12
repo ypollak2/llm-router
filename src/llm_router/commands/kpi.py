@@ -2321,6 +2321,27 @@ def _classifier_shadow_line(s: dict | None) -> str | None:
             "(hashes and tiers only; informational, never in NS, D1 or D2)")
 
 
+def _decision_ledger_line() -> str | None:
+    """The engine decision ledger's ``classifier`` line (P1.7 task 5): None when the ledger is
+    empty or unreadable. Read-only; never raises into the scorecard."""
+    try:
+        from llm_router import decision_ledger as DL
+        from llm_router import decision_report, engine, paths
+
+        home = paths.llm_router_home()
+        heldout = None
+        try:
+            heldout = json.loads((home / "engine_heldout.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+        return decision_report.classifier_line(
+            DL.read_ledger(home), DL.read_jsonl(home / DL.LABELS_FILENAME),
+            DL.read_jsonl(home / "decision_outcomes.jsonl"), now=time.time(),
+            engine_version=engine.ENGINE_VERSION, heldout=heldout if isinstance(heldout, dict) else None)
+    except Exception:  # noqa: BLE001 - informational line
+        return None
+
+
 def _classifier_vs_rules_lines(s: dict | None) -> list[str]:
     """One line per classifier model: the live-shadow score against rules_eff (P1.7)."""
     out = []
@@ -2653,6 +2674,9 @@ def render_scorecard(data: dict) -> str:
     if classifier_line:
         lines.append(classifier_line)
         lines += _classifier_vs_rules_lines(data.get("classifier_shadow"))
+    ledger_line = _decision_ledger_line()
+    if ledger_line:
+        lines.append(ledger_line)
     lines += _proxy_liveness_lines(data.get("proxy_liveness"))
     lines += _semantic_cache_lines(data.get("semantic_cache"))
     if data.get("p09g"):

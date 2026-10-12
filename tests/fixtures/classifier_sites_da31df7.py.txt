@@ -1,0 +1,879 @@
+# Verbatim excerpts of the functions that hold a classifier call on da31df7e (the commit PLAN v16 P1.6-a names),
+# one '# FILE:' chunk per module. tests/test_engine_doors.py scans them with the same AST scanner it runs on head,
+# to prove the scanner can see the call sites. Regenerate only from that commit; never edit by hand.
+
+# FILE: gateway.py
+def _classify(prompt: str) -> tuple[str, str]:
+    # Unified engine (llm_router.classify), gateway policy — richer task_type than the
+    # old code/analyze regex; same 400/2000 length tiers + analyze low-signal default.
+    from llm_router.classify import GATEWAY_POLICY, classify_signals
+
+    s = classify_signals(prompt, GATEWAY_POLICY)
+    return s.task_type.value, s.complexity.value
+
+# FILE: proxy/backends.py
+async def policy_chain(text: str) -> tuple[str, str, list[str]]:
+    """``(task_type, complexity, chain)`` from the router's own policy."""
+    from llm_router.classify import GATEWAY_POLICY, classify_signals
+    from llm_router.config import get_config
+    from llm_router.profiles import complexity_to_profile
+    from llm_router.router import _build_and_filter_chain
+
+    sig = classify_signals(text, GATEWAY_POLICY)
+    key = (sig.task_type.value, sig.complexity.value)
+    if key not in _chain_cache:
+        c = sig.complexity
+        _chain_cache[key] = await _build_and_filter_chain(
+            sig.task_type, complexity_to_profile(c), None, c, c, get_config())
+    return key[0], key[1], _chain_cache[key]
+
+# FILE: ensemble.py
+async def classify_for_routing(prompt: str, **_legacy_kwargs) -> "ClassificationResult":
+    """Routing-path classification entry point used by the MCP tools.
+
+    LLM-first: when LLM_ROUTER_ENSEMBLE is on (default), the local ensemble classifies
+    every prompt and — on cold start/model failure — degrades INTERNALLY to the
+    floor'd heuristic (never stalls, never bounces). When disabled, defers to the
+    cloud ``classify_complexity``. Legacy kwargs (timeout_seconds, quality_mode,
+    min_model) are accepted for call-site compatibility; the ensemble uses its own
+    timeout because a 10s cap would kill it on a cold local model.
+    """
+    if _ensemble_enabled():
+        timeout = float(os.environ.get("LLM_ROUTER_ENSEMBLE_TIMEOUT", "120"))
+        return await classify_ensemble(
+            prompt, primary=_primary_model(), secondary=_secondary_model(), timeout_seconds=timeout
+        )
+    from llm_router.classifier import classify_complexity
+
+    return await classify_complexity(prompt, **_legacy_kwargs)
+
+async def classify_ensemble(
+    prompt: str,
+    *,
+    primary: str = DEFAULT_PRIMARY,
+    secondary: str | None = DEFAULT_SECONDARY,
+    allow_secondary: bool = True,
+    timeout_seconds: float = 120.0,
+) -> ClassificationResult:
+    """LLM-first ensemble: local primary + weighted heuristic, second-model
+    tiebreak on the low-margin tail. Returns a ``ClassificationResult``."""
+    heur = classify_signals(prompt)
+    primary_res = await local_llm_classify(prompt, primary, timeout_seconds=timeout_seconds)
+
+    votes: dict[TaskType, float] = {}
+    # LLM ballot: weight = self-reported confidence (floor 0.1 so a 0-confidence
+    # but non-null label still counts a little).
+    _add_vote(votes, primary_res.inferred_task_type, max(primary_res.confidence, 0.1))
+    # Heuristic ballot: weight = normalized signal score (0 when it found nothing).
+    _add_vote(votes, heur.task_type, min(1.0, heur.score / _SCORE_NORM))
+
+    winner, margin = _winner(votes)
+    models_used = [primary_res.classifier_model]
+    latency = primary_res.classifier_latency_ms
+    cost = primary_res.classifier_cost_usd
+
+    if allow_secondary and secondary and margin < _MARGIN_TIEBREAK:
+        sec = await local_llm_classify(prompt, secondary, timeout_seconds=timeout_seconds)
+        _add_vote(votes, sec.inferred_task_type, max(sec.confidence, 0.1))
+        winner, margin = _winner(votes)
+        models_used.append(sec.classifier_model)
+        latency += sec.classifier_latency_ms
+        cost += sec.classifier_cost_usd
+
+    task_type = winner if winner is not None else (heur.task_type or TaskType.QUERY)
+    complexity = _blend_complexity(primary_res, heur.complexity, task_type)
+    knn_note = ""
+    if complexity_knn.enabled():
+        knn = await complexity_knn.complexity_score(prompt)
+        if knn is not None:
+            complexity = _knn_vote(complexity, primary_res, heur.complexity,
+                                   min(1.0, heur.score / _SCORE_NORM), knn, task_type)
+            knn_note = f"; knn={knn.score:.2f}"
+    total = sum(votes.values())
+    confidence = (votes.get(task_type, 0.0) / total) if total else primary_res.confidence
+
+    return ClassificationResult(
+        complexity=complexity,
+        confidence=confidence,
+        reasoning=f"ensemble({'+'.join(models_used)}); margin={margin:.2f}{knn_note}",
+        inferred_task_type=task_type,
+        classifier_model="ensemble:" + "+".join(models_used),
+        classifier_cost_usd=cost,
+        classifier_latency_ms=latency,
+        subject=primary_res.subject,
+    )
+
+# FILE: hooks/auto-route.py
+def classify_complexity(text: str, task_type: str) -> str:
+    """Delegates to the shared engine. Kept as a name, not an implementation.
+
+    This was an AST-extracted copy of `llm_router.classify`, and the copy is what
+    made the two drift. HOOK_LIVE_POLICY reproduces the old local behaviour
+    EXACTLY — 1000 of 1000 comparisons over 200 real prompts x 5 task types — so
+    this delegation changes no routing.
+
+    Not HOOK_POLICY, despite the name: that one applies `apply_complexity_floor`,
+    which the hook never did, and would push 26% of prompts to a more expensive
+    tier. `tests/test_hook_classifier_equivalence.py` pins both facts.
+    """
+    from llm_router.classify import HOOK_LIVE_POLICY, complexity_for
+
+    return complexity_for(text, policy=HOOK_LIVE_POLICY, task_type=task_type).value
+
+def classify_prompt(text: str) -> dict | None:
+    """Classify using heuristic scoring → Ollama → cheap API → weak heuristic → auto."""
+    stripped = text.strip()
+
+    if not stripped or len(stripped) < 8:
+        return None
+    if SKIP_PATTERNS.search(stripped):
+        return None
+
+    # Coordination fast-path: multi-agent orchestration prompts are plans,
+    # not payloads. Checked BEFORE the build/content fast-paths because
+    # "coordinate three agents to build X" contains build vocabulary but
+    # is orchestration, not a direct code task — the two-signal detector
+    # (verb + agent target) is higher precision than the single-signal
+    # build/generate detectors. The classification is ADVISORY-ONLY —
+    # direct execution must never fire for ``task_type == coordinate``
+    # (the direct path has no subagents; a direct answer would fabricate
+    # parallel work). The route indicator still surfaces the bucket and
+    # it is logged for telemetry like every other classification.
+    if _is_coordination_task(stripped):
+        return {
+            "task_type": "coordinate",
+            "complexity": classify_complexity(text, "analyze"),
+            "method": "coordination-fast-path",
+        }
+
+    # Build task fast-path: deterministic llm_code routing for obvious coding work.
+    if _is_build_task(stripped):
+        return {
+            "task_type": "code",
+            "complexity": classify_complexity(text, "code"),
+            "method": "build-fast-path",
+        }
+
+    # Content generation detection (v7.4.0+): Suggest routing for create/write/add tasks
+    if _is_content_generation_task(stripped):
+        return {
+            "task_type": "generate",
+            "complexity": classify_complexity(text, "generate"),
+            "method": "content-generation-fast-path",
+            "suggestion": "content-generation-decomposition",
+        }
+
+    # Introspection fast-path: questions about LOCAL LLM Router / project
+    # state need read-only Bash + SQL — they're impossible to satisfy by
+    # routing to an LLM that has no access to ``~/.llm-router``. We still
+    # emit the classification (visible in the route indicator + logged
+    # for telemetry) but enforce-route.py recognises ``task_type ==
+    # introspect`` and lets native tools through without enforcement.
+    if _is_introspection_task(stripped):
+        return {
+            "task_type": "introspect",
+            "complexity": "simple",
+            "method": "introspection-fast-path",
+        }
+
+    # Benchmark prompt fast-path (Plan 07 Phase 3 C): RouterArena / MMLU /
+    # HELM templates have stable prefixes — match them O(constant) instead
+    # of paying for the heuristic/Ollama/API classifier chain.
+    bench = benchmark_fast_path(stripped)
+    if bench is not None:
+        return bench
+
+    # Layer 1: Heuristic scoring (instant, free)
+    scores = score_categories(text)
+    best_category = max(scores, key=scores.get)
+    best_score = scores[best_category]
+
+    if best_score >= CONFIDENCE_THRESHOLD:
+        return {
+            "task_type": best_category,
+            "complexity": classify_complexity(text, best_category),
+            "method": "heuristic",
+            "score": best_score,
+        }
+
+    # Layer 2: Ollama local LLM (free, 1-3s)
+    if not DISABLE_LLM_CLASSIFIERS and len(stripped) >= 10:
+        ollama_result = classify_with_ollama(text)
+        if ollama_result:
+            return {
+                "task_type": ollama_result,
+                "complexity": classify_complexity(text, ollama_result),
+                "method": "ollama",
+            }
+
+    # Layer 3: Cheap API model (Gemini Flash first — free tier, then GPT-4o-mini)
+    if not DISABLE_LLM_CLASSIFIERS and len(stripped) >= 10:
+        api_result = classify_with_gemini(text) or classify_with_openai(text)
+        if api_result:
+            return {
+                "task_type": api_result,
+                "complexity": classify_complexity(text, api_result),
+                "method": "api",
+            }
+
+    # Layer 4: Weak heuristic match (score > 0 but below threshold)
+    if best_score > 0:
+        return {
+            "task_type": best_category,
+            "complexity": classify_complexity(text, best_category),
+            "method": "heuristic-weak",
+            "score": best_score,
+        }
+
+    # Layer 5: Question / unknown — treat as query so cheap model (Haiku) handles it.
+    # This ensures codebase questions, "why doesn't X work", meta-questions, etc.
+    # are routed instead of silently falling through to the top-tier model.
+    if len(stripped) >= 8:
+        return {
+            "task_type": "query",
+            "complexity": classify_complexity(text, "query"),
+            "method": "fallback",
+        }
+
+    return None
+
+# FILE: hooks/agent-route.py
+def main() -> None:
+    try:
+        hook_input = json.load(sys.stdin)
+    except (json.JSONDecodeError, EOFError):
+        sys.exit(0)  # approve: can't parse input
+
+    tool_name = hook_input.get("tool_name", "")
+    if tool_name != "Agent":
+        sys.exit(0)  # approve: not an Agent call
+
+    tool_input = hook_input.get("tool_input", {})
+    prompt = tool_input.get("prompt", "").strip()
+    subagent_type = tool_input.get("subagent_type", "general-purpose")
+
+    # ── Headless session guard — checked before anything else, including the
+    # empty-prompt short-circuit, so a headless run never takes a routing
+    # decision or writes session state (budget/depth files). See the guard
+    # note above _headless_entrypoint().
+    _entrypoint = _headless_entrypoint()
+    if _is_headless_entrypoint(_entrypoint) and not _headless_route_override_enabled():
+        _log_agent_call(
+            subagent_type, prompt,
+            f"skipped_headless:entrypoint={_entrypoint or 'unknown'}",
+        )
+        sys.exit(0)  # approve, no decision — headless session, routing skipped
+
+    if not prompt:
+        sys.exit(0)  # approve: nothing to classify
+
+    # ── Initialize session budget if not already done ──────────────────────────
+    _initialize_session_budget()
+
+    # ── Always approve Explore subagents — they're pure retrieval ────────────
+    if subagent_type == "Explore":
+        _log_agent_call(subagent_type, prompt, "approved_explore")
+        if _model_pin_enabled():  # Phase 4: lightweight read/search → Haiku, not Opus
+            _emit_model_pin(tool_input, "haiku")
+            return
+        sys.exit(0)
+
+    # ── Special rule: allowlisted subagent types bypass routing ──────────────
+    # Agents that must do real tool-work (run tests, QA, edit files) where an
+    # llm_* call is not a substitute. See LLM_ROUTER_AGENT_ROUTE_ALLOW.
+    if subagent_type in _route_allowlist():
+        _log_agent_call(subagent_type, prompt, "approved_allowlist")
+        sys.exit(0)
+
+    # ── Circuit breaker: block if nesting too deep ──────────────────────────
+    session_id = _get_session_id()
+    current_depth = _read_agent_depth(session_id)
+    max_depth = _get_max_depth()
+
+    if current_depth >= max_depth:
+        # Active alert: a runaway-nesting breaker trip should page ops,
+        # not just silently block. Guarded so the hook never breaks.
+        # stdout is the hook's JSON decision channel — structlog's default
+        # sink is stdout, so redirect any alert logging to stderr to keep
+        # the decision payload parseable.
+        try:
+            import contextlib
+
+            from llm_router.alerts import RUNAWAY_BREAKER_TRIP, emit_alert
+            with contextlib.redirect_stdout(sys.stderr):
+                emit_alert(
+                    RUNAWAY_BREAKER_TRIP,
+                    detail={"session_id": session_id, "depth": current_depth, "max_depth": max_depth},
+                )
+        except Exception:
+            pass
+        result = {
+            "decision": "block",
+            "reason": (
+                f"[llm_router] Agent loop circuit breaker: depth {current_depth}/{max_depth}. "
+                f"Too many nested agents. Use llm_* MCP tools directly instead."
+            ),
+        }
+        json.dump(result, sys.stdout)
+        return
+
+    # Increment depth before approving any non-Explore agent
+    _write_agent_depth(session_id, current_depth + 1)
+
+    # ── Detect retrieval-only tasks ──────────────────────────────────────────
+    if _is_retrieval_only(prompt):
+        _log_agent_call(subagent_type, prompt, "approved_retrieval")
+        if _model_pin_enabled():  # Phase 4: pure retrieval → Haiku, not Opus
+            _emit_model_pin(tool_input, "haiku")
+            return
+        sys.exit(0)
+
+    # ── Classify reasoning task ──────────────────────────────────────────────
+    task_type = _classify_task_type(prompt)
+    complexity = _classify_complexity(prompt)
+
+    # ── NS3: suitable spawns → Codex CLI FIRST (external, free from Claude quota) ──
+    # Must run before _allow_routed_spawn() below: that branch defaults to ON and
+    # returns unconditionally, which is why Codex delegation was unreachable before
+    # this change. See the NS3 docstring above _try_codex_subagent_delegation.
+    _codex_delegated = _try_codex_subagent_delegation(
+        prompt, task_type, complexity, subagent_type, session_id,
+        cwd=hook_input.get("cwd"), ledger_session_id=hook_input.get("session_id"))
+    if _codex_delegated is not None:
+        _write_agent_depth(session_id, current_depth)  # roll back: no real spawn happened
+        _log_agent_call(subagent_type, prompt, "routed_codex_subagent")
+        json.dump({
+            "decision": "block",
+            "reason": (
+                "[llm_router] Subagent task was delegated to Codex CLI (external, "
+                "ChatGPT subscription — free from Claude quota); budget and outcome "
+                "logged (lever=agent_route_codex). Use this result directly as the "
+                "subagent's output — do not re-do the work:\n\n" + _codex_delegated +
+                "\n\n[NS1] agent_route_codex: result used verbatim as subagent output."
+            ),
+        }, sys.stdout)
+        return
+
+    # ── llm_router multi-agent: ALLOW a real spawn on a cheap tier + inherit routing ─
+    # (depth breaker above already bounds nesting; cheap model bounds cost). This
+    # is what makes councils / parallel reviews possible instead of collapsing
+    # every subagent into a single cheap call.
+    if _allow_routed_spawn():
+        model = _spawn_model(complexity, tool_input.get("model"))
+        _log_agent_call(subagent_type, prompt, "allowed_routed_spawn")
+        _emit_model_pin(_with_routing_note(tool_input), model)
+        return
+
+    # ── NS4: don't route a class whose routed answers keep failing ───────────
+    # Checked before attempting the routed chain at all, so a class the
+    # breaker has opened never spends the latency on a doomed attempt.
+    _qb_allowed = True
+    _qb_decision = None
+    try:
+        from llm_router import quality_breaker as _quality_breaker
+        _qb_decision = _quality_breaker.should_route("agent_route", task_type)
+        _qb_allowed = _qb_decision.allowed
+    except Exception:
+        _qb_allowed, _qb_decision = True, None  # fail open — never block on a bug here
+
+    # ── DIRECT subagent execution: route the work onto a cheap model ─────────
+    # Instead of merely blocking with advice, actually run the task on the
+    # routed chain and hand the result back as the subagent's output. Savings
+    # are logged (host=claude_code_subagent). Falls through on any failure.
+    _routed = (_try_direct_subagent(prompt, task_type, complexity, session_id, subagent_type,
+                                    ledger_session_id=hook_input.get("session_id"))
+               if _qb_allowed else None)
+    if not _qb_allowed:
+        _log_agent_call(subagent_type, prompt,
+                         f"breaker_open:{_qb_decision.reason if _qb_decision else 'agent_route'}")
+    if _routed is not None:
+        _write_agent_depth(session_id, current_depth)  # roll back: no real spawn happened
+        _log_agent_call(subagent_type, prompt, "routed_direct")
+        json.dump({
+            "decision": "block",
+            "reason": (
+                "[llm_router] Subagent task was executed by a routed model (not spawned); "
+                "savings logged. Use this result directly as the subagent's output — "
+                "do not re-do the work:\n\n" + _routed
+            ),
+        }, sys.stdout)
+        return
+
+    # ── Phase 2: CLI delegation for bigger/tool-heavy work ───────────────────
+    # What DIRECT didn't take (tool tasks, complex work) goes to a real external
+    # agent CLI (Codex / Gemini) running on an external subscription. Savings
+    # logged (host=claude_code_subagent_cli). Falls through on any failure.
+    _delegated = _try_cli_delegation(
+        prompt, task_type, complexity, session_id, subagent_type, cwd=hook_input.get("cwd"),
+        ledger_session_id=hook_input.get("session_id"))
+    if _delegated is not None:
+        _write_agent_depth(session_id, current_depth)  # roll back: no real spawn happened
+        _log_agent_call(subagent_type, prompt, "routed_cli_delegation")
+        json.dump({
+            "decision": "block",
+            "reason": (
+                "[llm_router] Subagent task was delegated to an external agent CLI "
+                "(Codex/Gemini); savings logged. Use this result directly as the "
+                "subagent's output — do not re-do the work:\n\n" + _delegated
+            ),
+        }, sys.stdout)
+        return
+
+    # ── Estimate cost for this agent call ───────────────────────────────────
+    estimated_cost = _estimate_agent_cost(complexity, task_type)
+    remaining_budget = _get_remaining_budget()
+    
+    # ── Check resource limits ───────────────────────────────────────────────
+    # Soft limit: warn if cost > 80% of remaining budget (informational only)
+    soft_limit = remaining_budget * SOFT_BUDGET_FACTOR
+    if estimated_cost > soft_limit and remaining_budget > 0:
+        # Could log warning here if we had stderr access
+        # sys.stderr.write(f"[warning] Agent cost ${estimated_cost:.2f} exceeds soft limit (80% of remaining ${remaining_budget:.2f})\n")
+        pass
+    
+    # Hard limit: block if cost exceeds remaining budget
+    if estimated_cost > remaining_budget:
+        result = {
+            "decision": "block",
+            "reason": (
+                f"[llm_router] Agent would exceed session budget.\n\n"
+                f"  Estimated cost: ${estimated_cost:.2f}\n"
+                f"  Remaining budget: ${remaining_budget:.2f}\n\n"
+                f"Use llm_* MCP tools instead (typically cheaper and more efficient)."
+            ),
+        }
+        json.dump(result, sys.stdout)
+        return
+    
+    # Hard limit: block if cost exceeds per-agent maximum
+    if estimated_cost > AGENT_MAX_COST_USD:
+        result = {
+            "decision": "block",
+            "reason": (
+                f"[llm_router] Agent estimated cost exceeds per-agent limit.\n\n"
+                f"  Estimated: ${estimated_cost:.2f}\n"
+                f"  Per-agent limit: ${AGENT_MAX_COST_USD:.2f}\n\n"
+                f"Task is too complex for a single agent. Break it into smaller steps\n"
+                f"or use a series of llm_* MCP tool calls."
+            ),
+        }
+        json.dump(result, sys.stdout)
+        return
+
+    # ── All limit checks passed: decrement budget provisionally ──────────────────
+    # This tracks the estimated cost as "provisional spend" so multiple agents
+    # don't all think they have budget available. Will be reconciled on completion.
+    _decrement_budget_provisional(estimated_cost)
+
+    # Log the blocked reasoning task call for error recovery tracking
+    _log_agent_call(subagent_type, prompt, "blocked_reasoning")
+    
+    raw_pressure = _get_claude_pressure()  # legacy single value for display
+
+    # Read per-bucket pressure from usage.json for accurate threshold decisions
+    _p = {"session": raw_pressure, "sonnet": raw_pressure, "weekly": raw_pressure}
+    _usage_path = _router_home() / "usage.json"
+    try:
+        _data = json.loads(_usage_path.read_text())
+        def _f(k: str) -> float:
+            v = float(_data.get(k, 0.0))
+            return v / 100.0 if v > 1.0 else v
+        _p = {"session": _f("session_pct"), "sonnet": _f("sonnet_pct"), "weekly": _f("weekly_pct")}
+    except Exception:
+        pass
+
+    profile = _complexity_to_profile(complexity, _p["session"], _p["sonnet"], _p["weekly"])
+    tool = tool_for_task(task_type)
+
+    _model_hint = {
+        "budget": "Gemini Flash / Groq (session pressure — cheap external)",
+        "balanced": "GPT-4o / Gemini Pro (quota pressure — external)",
+        "premium": "Opus via subscription (no API cost — quota available)",
+    }
+    model_hint = _model_hint.get(profile, profile)
+
+    # Agentic model pin (v0.5.5): when LLM_ROUTER_AGENTIC_MODEL is set, the router
+    # leads agentic/reasoning tasks with it — surface that in the hint so the
+    # route indicator reflects the real preferred model.
+    _agentic = os.environ.get("LLM_ROUTER_AGENTIC_MODEL", "").strip()
+    if _agentic:
+        model_hint = f"{_agentic} (agentic pin) → {model_hint}"
+
+    pressure_note = ""
+    if _p["weekly"] >= 0.95:
+        pressure_note = f"  ⚠️  Weekly={_p['weekly']:.0%} — all tiers on external models.\n"
+    elif _p["sonnet"] >= 0.95:
+        pressure_note = f"  ⚠️  Sonnet={_p['sonnet']:.0%} — moderate/complex on external models.\n"
+    elif _p["session"] >= 0.85:
+        pressure_note = f"  ⚠️  Session={_p['session']:.0%} — simple tasks on external models.\n"
+
+    # Build the block instruction
+    # Use repr() for the prompt so newlines are visible and the instruction is copy-safe
+    prompt_repr = prompt[:800] + ("..." if len(prompt) > 800 else "")
+
+    stale_note = (
+        f"\n  ⚠️  Usage data >30min old — quota thresholds may be inaccurate. "
+        f"Run {route_tool('llm_check_usage')}.\n"
+    ) if _is_pressure_stale() else ""
+    # CHZ-SURF-01: head + pinned args, kept separate so the multi-line call below
+    # renders as `llm(\n  task="analyze",\n  prompt=…\n)` and not `llm(task=…)(…)`.
+    _call_head, _call_pinned = call_parts(tool)
+    block_reason = (
+        f"[AGENT-ROUTE] Subagent blocked — routing reasoning to cheap model.\n\n"
+        f"  Task:       {task_type}/{complexity}\n"
+        f"  Est. Cost:  ${estimated_cost:.2f} (remaining: ${remaining_budget:.2f})\n"
+        f"  Profile:    {profile} → {model_hint}\n"
+        f"  Quota:      session={_p['session']:.0%} sonnet={_p['sonnet']:.0%} weekly={_p['weekly']:.0%}\n"
+        f"{pressure_note}"
+        f"{stale_note}\n"
+        f"ACTION REQUIRED — do this instead of spawning the subagent:\n\n"
+        f"  1. If the task needs LOCAL FILE CONTENT:\n"
+        f"     Use Read / Grep / Glob tools to extract the text.\n"
+        f"     Embed the content directly in the prompt below.\n\n"
+        f"  2. Call this MCP tool:\n\n"
+        # CHZ-SURF-01: head and pinned args come from call_parts, NOT route_tool —
+        # route_tool already embeds the args (llm(task="analyze")), so using it as
+        # the head here would emit the uncallable `llm(task="analyze")(prompt=…)`.
+        # `profile=` was ALSO dropped: it is not a parameter of llm_query/analyze/
+        # code/research/generate OR of the `llm` door, so every call this block
+        # printed was rejected for an unexpected keyword argument on every tier.
+        # The profile is already reported above in the "Profile:" line.
+        f"     {_call_head}(\n"
+        + "".join(f"       {_a},\n" for _a in _call_pinned) +
+        f'       prompt="""{prompt_repr}""",\n'
+        f"     )\n\n"
+        f"  3. Return the tool output as your response — no further work needed.\n\n"
+        f"Cost saved: subagent would use Opus for reasoning; {route_tool(tool)} uses {model_hint}."
+    )
+
+    result = {
+        "decision": "block",
+        "reason": block_reason,
+    }
+    json.dump(result, sys.stdout)
+
+# FILE: hooks/gemini-cli-auto-route.py
+async def classify_complexity(prompt: str) -> tuple[str, float]:
+    """Classify task complexity (simple/moderate/complex).
+
+    Returns:
+        Tuple of (complexity: str, confidence: float where 1.0 = high confidence)
+    """
+    # Layer 1: Heuristics (instant, free)
+    prompt_lower = prompt.lower()
+
+    # Quick patterns for high-confidence classification
+    simple_patterns = [
+        r"what is",
+        r"explain",
+        r"define",
+        r"summarize",
+        r"list",
+        r"how do i",
+    ]
+    complex_patterns = [
+        r"debug",
+        r"refactor",
+        r"implement",
+        r"design",
+        r"architecture",
+        r"optimize",
+        r"analyze",
+    ]
+
+    import re
+
+    for pattern in simple_patterns:
+        if re.search(pattern, prompt_lower):
+            return "simple", 0.9
+
+    for pattern in complex_patterns:
+        if re.search(pattern, prompt_lower):
+            return "complex", 0.85
+
+    # Layer 2: Try Ollama qwen3.5 (local, cheap)
+    try:
+        from llm_router.classifier import classify_prompt_heuristic
+
+        result = await classify_prompt_heuristic(prompt)
+        if result:
+            complexity = result.get("complexity", "moderate")
+            confidence = result.get("confidence", 0.6)
+            return complexity, confidence
+    except Exception:
+        pass
+
+    # Layer 3: Fallback to default
+    return "moderate", 0.5
+
+async def get_routing_hint(prompt: str) -> Optional[str]:
+    """Generate MANDATORY ROUTE hint based on classified complexity.
+
+    Returns:
+        A formatted hint string, or None if classification fails.
+    """
+    try:
+        complexity, _confidence = await classify_complexity(prompt)
+        prompt_lower = prompt.lower()
+
+        # Heuristic for task type
+        is_code = any(kw in prompt_lower for kw in ["code", "script", "function", "refactor", "bug", "implement"])
+        is_generate = any(kw in prompt_lower for kw in ["write", "draft", "compose", "blog", "article"])
+        is_research = any(kw in prompt_lower for kw in ["latest", "recent", "news", "current events", "research"])
+
+        # Map complexity + task type to recommended tool
+        if is_research:
+            return f"⚡ MANDATORY ROUTE: research/{complexity} → call {route_call_with_complexity('llm_research', complexity)}"
+        
+        if is_code:
+            return f"⚡ MANDATORY ROUTE: code/{complexity} → call {route_call_with_complexity('llm_code', complexity)}"
+            
+        if is_generate:
+            return f"⚡ MANDATORY ROUTE: generate/{complexity} → call {route_call_with_complexity('llm_generate', complexity)}"
+
+        if complexity == "simple":
+            return f"⚡ MANDATORY ROUTE: query/simple → call {route_call_with_complexity('llm_query', 'simple')}"
+        elif complexity == "complex":
+            return f"⚡ MANDATORY ROUTE: analyze/complex → call {route_call_with_complexity('llm_analyze', 'complex')}"
+        else:
+            return f"⚡ MANDATORY ROUTE: analyze/moderate → call {route_call_with_complexity('llm_analyze', 'moderate')}"
+    except Exception:
+        return None
+
+# FILE: router.py
+def _resolve_profile(
+    profile: RoutingProfile | None,
+    complexity_hint: Complexity | str | None,
+    classification_data: dict | None,
+    prompt: str,
+    model_override: str | None,
+    config,
+) -> tuple[RoutingProfile, Complexity, bool]:
+    """Resolve the effective routing profile, complexity, and thinking flag.
+
+    Priority: explicit profile > complexity_hint > classification_data >
+              prompt-length heuristic > config default.
+
+    Args:
+        profile: Explicit profile override from the caller, or None.
+        complexity_hint: Caller-supplied complexity string or enum, or None.
+        classification_data: Optional dict containing a "complexity" key.
+        prompt: Raw prompt text (used only for the length heuristic fallback).
+        model_override: When set, skips profile resolution entirely.
+        config: Application config (provides llm_router_profile default).
+
+    Returns:
+        Tuple of (resolved_profile, effective_complexity, use_thinking).
+        use_thinking is True only for DEEP_REASONING complexity.
+    """
+    c: Complexity = Complexity.MODERATE
+    use_thinking = False
+
+    if profile is None and not model_override:
+        if complexity_hint is not None:
+            if isinstance(complexity_hint, str):
+                try:
+                    c = Complexity(complexity_hint)
+                except ValueError:
+                    c = Complexity.MODERATE
+            else:
+                c = complexity_hint
+        elif classification_data and "complexity" in classification_data:
+            try:
+                c = Complexity(classification_data["complexity"])
+            except ValueError:
+                c = Complexity.MODERATE
+        else:
+            # Fast heuristic — no API call, no latency.
+            #
+            # The thresholds were tightened after a session showed 0/31 prompts
+            # classifying as simple even though 80% of user prompts that day
+            # were under 150 chars: callers (including Claude Code) wrap the
+            # user's prompt for ``llm_query`` and the wrapped form crosses the
+            # 300-char line, dragging "simple" into "moderate" and routing
+            # everything to Sonnet/GPT-4o instead of Haiku/Flash.
+            #
+            # Simple/moderate boundary raised to 600 — covers the wrapped
+            # short prompts. Complex boundary lowered from 3000 to 2000 since
+            # genuine reasoning prompts in a coding session are rarely > 2k
+            # chars. Operators who need the legacy behaviour can pass
+            # ``complexity_hint`` explicitly.
+            # Unified engine (llm_router.classify), router policy — reproduces the
+            # documented <600 / [600,2000] / >2000 partition exactly, now shared
+            # with the gateway/hook so a fix to the algorithm lands in one place.
+            from llm_router.classify import ROUTER_POLICY, complexity_for
+
+            c = complexity_for(prompt, policy=ROUTER_POLICY)
+        if c == Complexity.DEEP_REASONING:
+            use_thinking = True
+        resolved = _COMPLEXITY_TO_PROFILE.get(c, config.llm_router_profile)
+    else:
+        resolved = profile or config.llm_router_profile
+
+    return resolved, c, use_thinking
+
+# FILE: tools/agentic.py
+async def llm_delegate(
+    task: str, budget_usd: float = 1.0, baseline_cost_per_milestone: float = 0.20,
+    context: str = "", bounded: bool | None = None, workdir: str | None = None,
+) -> str:
+    """Agentic delegation: decompose *task* into milestones, run them on the
+    cheapest capable tier with objective acceptance checks, escalate on failure
+    without redoing achieved milestones, and return a JSON result with the
+    outcome, transparency events, and honest savings. Never gets stuck — an
+    unmeetable milestone is surfaced, not looped.
+
+    *context* is optional conversation context from the calling session; it's
+    handed to every delegated agent (bounded) so a routed model isn't blind to
+    what was discussed — not just its own milestones (North Star P1-S2).
+
+    *bounded* selects the CF-4 bounded-operational mode: a SIMPLE task that needs
+    tools (write/command/verify) runs as a single-milestone, tightly-budgeted,
+    mandatorily-verified route rather than a full plan+run+verify loop or an
+    untoolable completion. ``None`` (default) auto-detects via
+    :func:`should_route_bounded`; ``True``/``False`` force it. Bounded runs cap the
+    plan to one milestone, derive the budget from model pricing, and record the
+    parent ledger row as ``route_kind="bounded_operational"``."""
+    from llm_router.bounded_operational import (
+        MAX_BOUNDED_ATTEMPTS, MAX_BOUNDED_MILESTONES, bounded_op_budget_usd,
+        should_route_bounded,
+    )
+    if bounded is None:
+        try:
+            from llm_router.classify import classify_signals
+            _complexity = classify_signals(task).complexity.value
+            bounded = should_route_bounded(task, _complexity)
+        except Exception:  # noqa: BLE001 — detection failure → full delegate (safe default)
+            bounded = False
+
+    planner = (planner_factory or _default_planner)()
+    adapters = (adapters_factory or _default_adapters)()
+    try:
+        milestones = await hybrid_plan(task, planner)
+    except PlanRejected as exc:
+        return json.dumps({"outcome": "surfaced", "ok": False, "reason": f"planning failed: {exc}"})
+
+    route_kind = "delegate"
+    max_attempts = 2
+    if bounded:
+        # CF-4: cap to a single milestone, derive the budget from pricing, and cap
+        # escalation to one tier. Mandatory objective verification is enforced by the
+        # planner's acceptance check on the (single) milestone — an unverifiable plan
+        # is rejected by hybrid_plan, so a bounded run never records verify=False.
+        route_kind = "bounded_operational"
+        milestones = milestones[:MAX_BOUNDED_MILESTONES]
+        budget_usd = bounded_op_budget_usd(task_type="delegate", model_tier=1)
+        max_attempts = MAX_BOUNDED_ATTEMPTS
+
+    # RED3-08: the acceptance check has to know WHERE the work happened.
+    # Defaulting to the process cwd is right for the MCP server (it runs in the
+    # user's project) but must stay overridable — an explicit value is the only
+    # way a caller working in a scratch directory can be verified against the
+    # right tree. Left unresolved, a repo-reading check silently inspects
+    # whatever directory the server happens to be in.
+    import os as _os
+
+    effective_workdir = workdir or _os.getcwd()
+
+    result = run_delegation(
+        task, milestones, adapters,
+        baseline_cost_per_milestone=baseline_cost_per_milestone,
+        budget_cap_usd=budget_usd,
+        max_attempts_per_tier=max_attempts,
+        session_context=(context or "")[:2000],  # bound: don't blow the agent's prompt
+        workdir=effective_workdir,
+    )
+    result["route_kind"] = route_kind
+    # Record the honest saving into llm_router's ledger (fail-open — never breaks the call).
+    from llm_router.agentic.telemetry import record_delegation_savings
+    await record_delegation_savings(result)
+    # North Star measurement: record routing quality — escalation/mis-route/completion/
+    # savings — so "route cheap, escalate on failure" is measured, not assumed. Fail-open.
+    from llm_router.routing_quality import record_delegation
+    record_delegation(result, route_kind=route_kind)
+    return json.dumps(result)
+
+# FILE: commands/test.py
+def _run_test(prompt: str) -> None:
+    """Dry-run route simulation: classify prompt + show model choice + cost estimate."""
+    if not prompt:
+        print(_red("Usage: llm-router test \"<your prompt>\""))
+        sys.exit(1)
+
+    async def _simulate() -> None:
+        from llm_router.classifier import classify_complexity
+        from llm_router.types import MODEL_COST_PER_1K
+
+        # Baseline: claude-sonnet-4-5 (what a non-routing user would pay).
+        # WP-03: rates come from llm_router.pricing; they used to be restated here
+        # as 3.0/15.0, which happened to match sonnet-4-5 but would not have
+        # followed the model if the baseline constant were ever repointed.
+        from llm_router import pricing as _pricing
+
+        BASELINE = "claude-sonnet-4-5"
+        _baseline_price = _pricing.price_for(BASELINE)
+        BASELINE_IN = _baseline_price.input if _baseline_price else 0.0
+        BASELINE_OUT = _baseline_price.output if _baseline_price else 0.0
+
+        # Estimate token counts from prompt length (rough: 1 token ≈ 4 chars)
+        est_in = max(50, len(prompt) // 4)
+        est_out = 300  # typical completion
+
+        result = await classify_complexity(prompt)
+        complexity = result.complexity.value
+        confidence = result.confidence
+        task = result.inferred_task_type.value if result.inferred_task_type else "unknown"
+        method = result.classifier_model or "heuristic"
+
+        # Map complexity → cheapest appropriate model (mirrors router.py logic)
+        complexity_model_map = {
+            "simple": "claude-haiku-4-5-20251001",
+            "moderate": "claude-sonnet-4-6",
+            "complex": "claude-opus-4-6",
+            "deep_reasoning": "claude-opus-4-6",
+        }
+        chosen = complexity_model_map.get(complexity, BASELINE)
+
+        # Cost estimate for chosen model
+        costs = MODEL_COST_PER_1K.get(chosen, {})
+        in_rate = costs.get("input", 0.0) * 1000   # convert /1k to /M
+        out_rate = costs.get("output", 0.0) * 1000
+        chosen_cost = (est_in * in_rate + est_out * out_rate) / 1_000_000
+        baseline_cost = (est_in * BASELINE_IN + est_out * BASELINE_OUT) / 1_000_000
+        saved = max(0.0, baseline_cost - chosen_cost)
+        savings_pct = round(saved / baseline_cost * 100) if baseline_cost > 0 else 0
+
+        W = 56
+        HR = "+" + "-" * W + "+"
+        def row(text: str) -> str:
+            return f"| {text:<{W - 1}}|"
+        def section(title: str) -> str:
+            return "|" + f" {title} ".center(W, "-") + "|"
+
+        print()
+        print(HR)
+        print("|" + " Route Simulation (dry run) ".center(W) + "|")
+        print(HR)
+        print(row(f"  Prompt:      {prompt[:42]}{'…' if len(prompt) > 42 else ''}"))
+        print(row(""))
+        print(section("CLASSIFICATION"))
+        print(row(f"  Task type:   {task}"))
+        print(row(f"  Complexity:  {complexity}"))
+        print(row(f"  Confidence:  {confidence:.0%}  (via {method})"))
+        print(HR)
+        print(section("ROUTING DECISION"))
+        print(row(f"  Chosen:      {_green(chosen)}"))
+        print(row(f"  Baseline:    {BASELINE}"))
+        print(HR)
+        print(section("COST ESTIMATE  (~{est_in}t in / {est_out}t out)".format(
+            est_in=est_in, est_out=est_out)))
+        print(row(f"  Chosen cost: ${chosen_cost:.5f}"))
+        print(row(f"  Baseline:    ${baseline_cost:.5f}"))
+        if saved > 0:
+            print(row(f"  Saved:       {_green(f'${saved:.5f}  ({savings_pct}% cheaper)')}"))
+        else:
+            print(row("  Saved:       —"))
+        print(HR)
+        print()
+
+    asyncio.run(_simulate())

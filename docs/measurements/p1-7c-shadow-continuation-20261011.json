@@ -1,0 +1,215 @@
+{
+ "meta": {
+  "n": 100,
+  "warmup": 5,
+  "python": "3.13.14",
+  "machine_before": {
+   "loadavg": [
+    2.84228515625,
+    3.1796875,
+    3.41064453125
+   ],
+   "ncpu": 15,
+   "free_pct": 38
+  },
+  "started": "2026-10-11T20:30:52Z",
+  "machine_after": {
+   "loadavg": [
+    2.26953125,
+    3.01904296875,
+    3.345703125
+   ],
+   "ncpu": 15,
+   "free_pct": 38
+  },
+  "decision_rows": 1890,
+  "decision_rows_shadow": 85
+ },
+ "rows": [
+  {
+   "fixture": "agentic",
+   "messages": 0,
+   "assemble_ms": 0.01,
+   "shadow_records": 105,
+   "pending_at_continuation": 0,
+   "off": {
+    "n": 100,
+    "p50": 0.74,
+    "p95": 0.84,
+    "max": 1.81
+   },
+   "shadow": {
+    "n": 100,
+    "p50": 0.75,
+    "p95": 0.9,
+    "max": 0.97
+   },
+   "added_p95_ms": 0.06
+  },
+  {
+   "fixture": "agentic",
+   "messages": 600,
+   "assemble_ms": 0.11,
+   "shadow_records": 105,
+   "pending_at_continuation": 0,
+   "off": {
+    "n": 100,
+    "p50": 0.76,
+    "p95": 0.91,
+    "max": 1.32
+   },
+   "shadow": {
+    "n": 100,
+    "p50": 0.77,
+    "p95": 0.95,
+    "max": 1.36
+   },
+   "added_p95_ms": 0.04
+  },
+  {
+   "fixture": "agentic",
+   "messages": 1800,
+   "assemble_ms": 0.13,
+   "shadow_records": 105,
+   "pending_at_continuation": 0,
+   "off": {
+    "n": 100,
+    "p50": 0.83,
+    "p95": 0.93,
+    "max": 1.08
+   },
+   "shadow": {
+    "n": 100,
+    "p50": 0.83,
+    "p95": 0.92,
+    "max": 1.0
+   },
+   "added_p95_ms": -0.01
+  },
+  {
+   "fixture": "dense",
+   "messages": 0,
+   "assemble_ms": 0.0,
+   "shadow_records": 105,
+   "pending_at_continuation": 0,
+   "off": {
+    "n": 100,
+    "p50": 0.71,
+    "p95": 1.01,
+    "max": 1.15
+   },
+   "shadow": {
+    "n": 100,
+    "p50": 0.72,
+    "p95": 0.92,
+    "max": 1.1
+   },
+   "added_p95_ms": -0.09
+  },
+  {
+   "fixture": "dense",
+   "messages": 600,
+   "assemble_ms": 0.22,
+   "shadow_records": 105,
+   "pending_at_continuation": 0,
+   "off": {
+    "n": 100,
+    "p50": 0.77,
+    "p95": 0.88,
+    "max": 1.09
+   },
+   "shadow": {
+    "n": 100,
+    "p50": 0.77,
+    "p95": 0.88,
+    "max": 1.06
+   },
+   "added_p95_ms": 0.0
+  },
+  {
+   "fixture": "dense",
+   "messages": 1800,
+   "assemble_ms": 0.25,
+   "shadow_records": 105,
+   "pending_at_continuation": 0,
+   "off": {
+    "n": 100,
+    "p50": 0.93,
+    "p95": 1.08,
+    "max": 1.19
+   },
+   "shadow": {
+    "n": 100,
+    "p50": 0.95,
+    "p95": 1.1,
+    "max": 1.23
+   },
+   "added_p95_ms": 0.02
+  },
+  {
+   "fixture": "one_prompt",
+   "messages": 0,
+   "assemble_ms": 0.0,
+   "shadow_records": 105,
+   "pending_at_continuation": 0,
+   "off": {
+    "n": 100,
+    "p50": 0.7,
+    "p95": 0.85,
+    "max": 0.9
+   },
+   "shadow": {
+    "n": 100,
+    "p50": 0.7,
+    "p95": 0.75,
+    "max": 0.86
+   },
+   "added_p95_ms": -0.1
+  },
+  {
+   "fixture": "one_prompt",
+   "messages": 600,
+   "assemble_ms": 0.48,
+   "shadow_records": 105,
+   "pending_at_continuation": 0,
+   "off": {
+    "n": 100,
+    "p50": 0.75,
+    "p95": 0.81,
+    "max": 0.85
+   },
+   "shadow": {
+    "n": 100,
+    "p50": 0.75,
+    "p95": 0.86,
+    "max": 0.97
+   },
+   "added_p95_ms": 0.05
+  },
+  {
+   "fixture": "one_prompt",
+   "messages": 1800,
+   "assemble_ms": 0.54,
+   "shadow_records": 105,
+   "pending_at_continuation": 0,
+   "off": {
+    "n": 100,
+    "p50": 0.85,
+    "p95": 1.02,
+    "max": 1.42
+   },
+   "shadow": {
+    "n": 100,
+    "p50": 0.86,
+    "p95": 1.06,
+    "max": 1.28
+   },
+   "added_p95_ms": 0.04
+  }
+ ],
+ "verdict": {
+  "passed": true,
+  "why": [],
+  "rows_checked": 3
+ }
+}

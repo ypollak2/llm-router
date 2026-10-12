@@ -445,6 +445,21 @@ def start_poller(interval_s: float = POLL_INTERVAL_S, *, poll_fn: Callable = pol
     return Poller(interval_s, poll_fn, wait, poll_kwargs).start()
 
 
+def stop_default_poller(timeout: float = 10.0) -> bool:
+    """Stop and join this process's default poller (if any); True when none is left running.
+
+    A process that must make no outbound connection (the synthetic-replay harness
+    run in-process) calls this: ``import llm_router.server`` starts the poller, and
+    its next tick would probe Ollama through the harness' network guard."""
+    global _default_poller
+    p, _default_poller = _default_poller, None
+    if p is None:
+        return True
+    p.stop()
+    p.join(timeout)
+    return not p._thread.is_alive()
+
+
 def maybe_start_poller() -> Poller | None:
     try:
         return start_poller() if _enabled() else None
@@ -454,7 +469,7 @@ def maybe_start_poller() -> Poller | None:
 
 def main(argv: list[str] | None = None) -> int:
     try:
-        if "--once" in (sys.argv[1:] if argv is None else argv):
+        if "--once" in (sys.argv[1:] if argv is None else argv) and _enabled():
             poll()
     except Exception as exc:  # noqa: BLE001
         _lost("CHZ-FO-MAP-REFRESH-CHILD", exc)

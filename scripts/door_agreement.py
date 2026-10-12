@@ -55,6 +55,7 @@ from typing import Callable
 
 Z95 = 1.959963984540054
 NONE_LABEL = "<none>"  # the site declined to classify (the hook returns None)
+NA_LABEL = "<n/a>"  # the site emits no task_type (gemini_cli, router): left out of task_type comparisons
 
 Classify = Callable[[str], "tuple[str | None, str | None]"]
 
@@ -96,10 +97,16 @@ def _load_hook() -> Classify:
 
     def classify(text: str):
         r = mod.classify_prompt(text)
+        # P1.6 (D-69): the hook keeps fast paths the engine does not have. Record which prompts
+        # take the engine path so agreement can be reported on them (``engine_path`` in the output).
+        classify.engine_path.append(
+            r is not None and not str(r.get("method", "")).endswith("fast-path")
+            and r.get("task_type") != "coordination")
         if r is None:
             return None, None
         return r.get("task_type"), r.get("complexity")
 
+    classify.engine_path = []
     return classify
 
 
@@ -144,6 +151,62 @@ def _load_hook_policy() -> Classify:
     def classify(text: str):
         s = c.classify_signals(text, c.HOOK_POLICY)
         return s.task_type.value, s.complexity.value
+
+    return classify
+
+
+def _load_hook_module(name: str, filename: str):
+    import llm_router
+
+    path = Path(llm_router.__file__).resolve().parent / "hooks" / filename
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _load_mcp() -> Classify:
+    from llm_router import ensemble
+
+    def classify(text: str):
+        r = ensemble.engine_classification(text)  # P1.6: the MCP door on the engine
+        return r.inferred_task_type.value, r.complexity.value
+
+    return classify
+
+
+def _load_agent_route() -> Classify:
+    mod = _load_hook_module("_door_agreement_agent_route", "agent-route.py")
+
+    def classify(text: str):
+        return mod._engine_decision(text)
+
+    return classify
+
+
+def _load_gemini_cli() -> Classify:
+    import asyncio
+
+    mod = _load_hook_module("_door_agreement_gemini_cli", "gemini-cli-auto-route.py")
+    loop = asyncio.new_event_loop()
+
+    def classify(text: str):
+        return NA_LABEL, loop.run_until_complete(mod.engine_complexity(text))[0]
+
+    return classify
+
+
+def _load_router() -> Classify:
+    from types import SimpleNamespace
+
+    from llm_router import router
+    from llm_router.types import RoutingProfile
+
+    cfg = SimpleNamespace(llm_router_profile=RoutingProfile.BALANCED)
+
+    def classify(text: str):
+        return NA_LABEL, router._resolve_profile(None, None, None, text, None, cfg)[1].value
 
     return classify
 
@@ -195,6 +258,34 @@ SITES: dict[str, Site] = {
             "(usage.db + Ollama model list, used by choose_model on pre-P0.9-e trees) "
             "is replaced by an empty chain because the class is computed before it; "
             "LITELLM_LOCAL_MODEL_COST_MAP=True stops LiteLLM's import-time cost-map download",
+        ),
+        Site(
+            "mcp",
+            "ensemble.engine_classification (MCP tools' classify_for_routing, engine default); "
+            "available from the P1.6 wiring PR on",
+            _load_mcp,
+            no_llm_note="engine.decide: sync L1/L3, no LLM",
+        ),
+        Site(
+            "agent_route",
+            "hooks/agent-route.py _engine_decision (task_type, complexity)",
+            _load_agent_route,
+            no_llm_note="no LLM layer",
+        ),
+        Site(
+            "gemini_cli",
+            "hooks/gemini-cli-auto-route.py engine_complexity; complexity only (task_type is <n/a>); "
+            "available from the P1.6 wiring PR on",
+            _load_gemini_cli,
+            no_llm_note="engine.decide: sync L1/L3, no LLM",
+        ),
+        Site(
+            "router",
+            "router._resolve_profile fallback complexity (no hint, no classification_data); complexity "
+            "only (task_type is <n/a>)",
+            _load_router,
+            no_llm_env={"LITELLM_LOCAL_MODEL_COST_MAP": "True"},
+            no_llm_note="no LLM layer: the prompt-only complexity branch",
         ),
         Site(
             "hook_policy",
@@ -285,7 +376,7 @@ def _shared(la: list[str], lb: list[str]) -> dict:
 
 
 def measure(prompts: list[str], classifiers: dict[str, Classify],
-            buckets: list[str] | None = None) -> dict:
+            buckets: list[str] | None = None, engine_path: list[bool] | None = None) -> dict:
     """Counts only. ``classifiers`` maps site name -> classify(text). ``buckets``
     (one label per prompt, e.g. a date window) adds a per-bucket task_type split."""
     n = len(prompts)
@@ -307,7 +398,7 @@ def measure(prompts: list[str], classifiers: dict[str, Classify],
     for a, b in combinations(names, 2):
         ta, tb = [x[0] for x in labels[a]], [x[0] for x in labels[b]]
         ra, rb = [x[1] for x in labels[a]], [x[1] for x in labels[b]]
-        tt = sum(1 for x, y in zip(ta, tb) if x != y)
+        tt = sum(1 for x, y in zip(ta, tb) if x != y and NA_LABEL not in (x, y))
         ti = sum(1 for x, y in zip(ra, rb) if x != y)
         pair = {
             "task_type_disagree": tt,
@@ -327,7 +418,7 @@ def measure(prompts: list[str], classifiers: dict[str, Classify],
             pair["task_type_by_bucket"] = split
         pairs[f"{a}|{b}"] = pair
 
-    all_tt = sum(1 for i in range(n) if len({labels[s][i][0] for s in names}) > 1)
+    all_tt = sum(1 for i in range(n) if len({labels[s][i][0] for s in names} - {NA_LABEL}) > 1)
     all_ti = sum(1 for i in range(n) if len({labels[s][i][1] for s in names}) > 1)
     per_site = {}
     for s in names:
@@ -352,6 +443,23 @@ def measure(prompts: list[str], classifiers: dict[str, Classify],
     }
     if buckets is not None:
         result["bucket_counts"] = {b: buckets.count(b) for b in sorted(set(buckets))}
+    if engine_path is not None:
+        # D-69: P1.6-a and P1.6-i are measured on the prompts the hook sends to the engine; its
+        # fast paths (coordinate, build, content, introspect, benchmark, coordination bucket,
+        # declined) are the hook's by owner decision and are reported separately.
+        idx = [i for i in range(n) if engine_path[i]]
+        sub = {}
+        for a, b in combinations(names, 2):
+            tt = sum(1 for i in idx if labels[a][i][0] != labels[b][i][0]
+                     and NA_LABEL not in (labels[a][i][0], labels[b][i][0]))
+            ti = sum(1 for i in idx if labels[a][i][1] != labels[b][i][1])
+            sub[f"{a}|{b}"] = {"task_type_disagree": tt, "tier_disagree": ti}
+        result["engine_path"] = {
+            "n": len(idx), "of": n, "hook_fast_path_or_declined": n - len(idx),
+            "pairs": sub,
+            "all_sites_disagree": sum(1 for i in idx if len({labels[s][i][0] for s in names} - {NA_LABEL}) > 1),
+            "all_sites_tier_disagree": sum(1 for i in idx if len({labels[s][i][1] for s in names}) > 1),
+        }
     return result
 
 
@@ -552,6 +660,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.dates:
         buckets = date_buckets(read_dates(args.dates, corpus_sha, len(prompts)), args.date_cutoff)
 
+    # This tool measures whether the doors AGREE when the engine decides (P1.6-a/-i); the default
+    # mode is shadow (D-72), where the doors route with their own rules. An explicit value wins.
+    os.environ.setdefault("LLM_ROUTER_ENGINE_MODE", "decide")
     switches: dict[str, dict] = {}
     for s in names:
         for var, val in SITES[s].no_llm_env.items():
@@ -561,7 +672,7 @@ def main(argv: list[str] | None = None) -> int:
     undo_guard = _install_network_guard()
     try:
         classifiers = {s: SITES[s].load() for s in names}
-        result = measure(prompts, classifiers, buckets)
+        result = measure(prompts, classifiers, buckets, getattr(classifiers.get("hook"), "engine_path", None))
     except NetworkRefused:
         pass  # recorded in REFUSALS; reported below with no output written
     finally:
@@ -607,7 +718,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{pair}: task_type {v['task_type_disagree']}/{out['n']} = {100 * v['rate']:.1f}% "
               f"[{100 * lo:.1f}, {100 * hi:.1f}]; shared-labels {sh['disagree']}/{sh['n']}; "
               f"tier {v['tier_disagree']}/{out['n']}")
-    print(f"all sites task_type disagree: {out['all_sites_disagree']}/{out['n']}")
+    print(f"all sites task_type disagree: {out['all_sites_disagree']}/{out['n']}; "
+          f"tier {out['all_sites_tier_disagree']}/{out['n']}")
+    if "engine_path" in out:
+        ep = out["engine_path"]
+        print(f"engine-path scope (D-69): {ep['n']}/{out['n']} prompts take the hook's engine path; "
+              f"all sites task_type disagree {ep['all_sites_disagree']}, tier {ep['all_sites_tier_disagree']}")
+    print(f"n={out['n']} corpus_sha256={out['corpus_sha256']} git_sha={out['git_sha']}")
     return 0
 
 

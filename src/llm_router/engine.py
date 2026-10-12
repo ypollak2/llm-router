@@ -2,8 +2,12 @@
 
 The seven classifier call sites each decide differently today (door agreement
 on the frozen corpus: hook vs gateway 68.0%). This module is the single
-decision they will all call. It is the CORE only: nothing in ``src/`` calls it
-yet (``feat/engine-wire-<site>`` does that, one PR per site).
+decision they will all call. The gateway, proxy, MCP, hook, agent-route,
+gemini-cli and router doors call it (the wiring PR) in SHADOW by default (D-72,
+``LLM_ROUTER_ENGINE_MODE``): their rules route and ``shadow`` logs this engine's
+Decision beside the rules class. ``decide`` mode, where the engine decides (the
+hook then also leaves its Decision for the proxy by ``text_sha``,
+``reuse_fields``), is opt-in and not the v16.0 default: P1.6-g FAILed.
 
 Sync authority, per D-19 A: L1 heuristics (``classify.classify_signals`` under
 ``ENGINE_POLICY``) + L3 lexical model (``ml_lexical``) + a cache. No LLM and no
@@ -13,13 +17,15 @@ schema-checked LLM verdict could be merged later; ``decide`` never calls it.
 Not done here, on purpose (needs data or another item):
   * ``ENGINE_POLICY`` is GATEWAY_POLICY unrefitted; the refit on GT-500 tune
     needs that set (GE3).
-  * ``TAU`` and the calibration tables are placeholders until fitted on tune.
+  * ``TAU`` and the calibration tables are placeholders until fitted on tune, so
+    abstain is log-only by default (``LLM_ROUTER_ENGINE_ABSTAIN=enforce`` moves a tier).
   * the ``prefix`` layer is P2.7's; the ``complexity_knn`` vote is left out
     because it needs an embedding call (see ``decide`` docstring).
 """
 
 from __future__ import annotations
 
+import contextvars
 import dataclasses
 import hashlib
 import json
@@ -35,20 +41,33 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from llm_router import failopen, ml_lexical, prompt_key
+from llm_router import capped_log, decision_ledger, failopen, ml_lexical, prompt_key
 from llm_router.classify import GATEWAY_POLICY, _score_categories, classify_signals
 from llm_router.paths import state_path
 
 log = logging.getLogger("llm_router.engine")
 
 ENGINE_VERSION = "engine/1"
-#: One policy for every door. Starts from GATEWAY_POLICY (the live proxy's);
-#: the GT-500 tune refit is pending, so its fields equal the gateway's today.
-ENGINE_POLICY = dataclasses.replace(GATEWAY_POLICY)
+#: One policy for every door. Starts from GATEWAY_POLICY (the live proxy's) and adds keyword
+#: complexity (D-69): the complex-keyword signals of the hook, agent-route and gemini-cli scorers
+#: (classify.py `_engine_keyword_complex`) for prompts of >= 40 chars, and a simple band up to 599
+#: chars (the router's wrapped-prompt fix of 2026-06-06). Chosen on the GT-500 tune split only
+#: (n=108, Opus labels; `scripts/engine_policy_tune.py`); the held-out split is untouched.
+ENGINE_POLICY = dataclasses.replace(GATEWAY_POLICY, engine_keywords=True, simple_max=599, keyword_min_len=40)
 POLICY_ID = "ep1"
 #: Abstain below this combined confidence. PLACEHOLDER: fitted on tune and
 #: pre-registered before wiring. 0.5 equals L1's own ``_CONFIDENCE_THRESHOLD``.
 TAU = 0.5
+
+
+def abstain_enforced() -> bool:
+    """``LLM_ROUTER_ENGINE_ABSTAIN``: ``log`` (default) or ``enforce``.
+
+    TAU is a placeholder until it is fitted on GT-500 tune, so the wired doors
+    must not move a tier on it: under ``log`` the Decision still carries
+    ``abstain=True`` (and the reason says so) but tier and complexity stay what
+    L1/L3 decided. ``enforce`` is the spec behaviour (one tier safer)."""
+    return os.environ.get("LLM_ROUTER_ENGINE_ABSTAIN", "log").strip().lower() == "enforce"
 
 DOORS = ("proxy", "mcp", "hook", "gateway", "agent_route", "gemini_cli", "router")
 Layer = Literal["prefix", "L1", "cache", "L3", "L2", "fallback"]
@@ -232,7 +251,10 @@ def clear_cache(*, persistent: bool = True) -> None:
 
 
 def _cache_key(text: str, policy_version: str, ctx_digest: str) -> str:
-    h = hashlib.sha256(prompt_key.normalize(text).encode()).hexdigest()
+    # Key on the exact text decide computes on. A normalised key let a variant with a
+    # stripped block (a secret, or enough length to change complexity) hit another
+    # variant's cached Decision, so the result depended on call order.
+    h = hashlib.sha256(text.encode()).hexdigest()
     return "%s|%s|%s" % (h, policy_version, (ctx_digest or "")[:8])
 
 
@@ -347,12 +369,13 @@ def _lexical() -> ml_lexical.LexicalModel | None:
 
 
 def _policy_version(lex, cal) -> str:
-    sig = json.dumps([dataclasses.asdict(ENGINE_POLICY), TAU, lex.version if lex else None, cal], sort_keys=True)
+    sig = json.dumps([dataclasses.asdict(ENGINE_POLICY), TAU, abstain_enforced(), lex.version if lex else None, cal],
+                     sort_keys=True)
     return "%s-%s" % (POLICY_ID, hashlib.sha256(sig.encode()).hexdigest()[:8])
 
 
-def _compute(text: str, lex, cal, policy_version: str) -> Decision:
-    sig = classify_signals(text, ENGINE_POLICY)
+def _compute(text: str, lex, cal, policy_version: str, *, capabilities: bool = True) -> Decision:
+    sig = classify_signals(text, ENGINE_POLICY, capabilities=capabilities)
     cx = sig.complexity.value
     tier = _COMPLEXITY_TIER.get(cx, "sonnet")
     dims = {k: int(v) for k, v in _score_categories(text).items()}
@@ -375,10 +398,12 @@ def _compute(text: str, lex, cal, policy_version: str) -> Decision:
                 reason = "L3 lexical tier=%s p=%.2f (L1 low-signal)" % (tier, p)
     conf, calibrated = _apply_calibration(layer, raw, cal)
     abstain = conf < TAU
-    if abstain:
+    if abstain and abstain_enforced():
         tier = _safer(tier)
         cx = _TIER_COMPLEXITY.get(tier, cx) if _COMPLEXITY_TIER.get(cx) != tier else cx
         reason += "; abstain, tier up"
+    elif abstain:
+        reason += "; abstain (log only)"
     secrets = _secret_names(text)
     if secrets:
         reason += "; secret:" + ",".join(secrets)
@@ -424,14 +449,241 @@ def decide(text: str, *, ctx_digest: str = "", door: str, session_id: str | None
         key = _cache_key(text or "", pv, ctx_digest)
         hit = _cache_get(key, mode)
         if hit is not None:
-            return dataclasses.replace(hit, layer="cache", dims=dict(hit.dims) if hit.dims else hit.dims,
-                                       ms=(time.perf_counter() - t0) * 1000)
-        d = _compute(text or "", lex, cal, pv)
-        _cache_put(key, d, mode)
-        return dataclasses.replace(d, ms=(time.perf_counter() - t0) * 1000)
+            out = dataclasses.replace(hit, layer="cache", dims=dict(hit.dims) if hit.dims else hit.dims,
+                                      ms=(time.perf_counter() - t0) * 1000)
+        else:
+            d = _compute(text or "", lex, cal, pv)
+            _cache_put(key, d, mode)
+            out = dataclasses.replace(d, ms=(time.perf_counter() - t0) * 1000)
     except Exception as exc:  # noqa: BLE001 — a classifier never stalls routing
         log.warning("engine: decide failed, abstaining: %s", exc)
-        return dataclasses.replace(_fallback(exc, pv), ms=(time.perf_counter() - t0) * 1000)
+        out = dataclasses.replace(_fallback(exc, pv), ms=(time.perf_counter() - t0) * 1000)
+    decision_ledger.record(out, door=door, text=text or "", session_id=session_id, task_id=task_id)  # P1.7; never raises
+    return out
+
+
+# ── wiring mode: shadow by default (PLAN v16 D-72) ───────────────────────────
+
+#: ``LLM_ROUTER_ENGINE_MODE``: ``shadow`` (default), ``decide`` or ``off``.
+#: ``shadow``: every wired door routes with its own rules, exactly as before this wiring, and the
+#: engine computes a Decision AFTER that, logged to ``engine_shadow.jsonl`` next to the rules class.
+#: ``decide``: the engine decides at the doors (the #433 behaviour). NOT the v16.0 default:
+#: P1.6-g FAILed on the outcome basis (D-71/D-72), so the decider role moves to 16.1.
+#: ``off``: rules only, no engine call at all. An unknown value reads as ``shadow``.
+MODE_ENV = "LLM_ROUTER_ENGINE_MODE"
+SHADOW_LOG = "engine_shadow.jsonl"
+_SHADOW_MAX_BYTES = 2_000_000  # capped_log keeps this + one rotated generation
+
+
+def wire_mode() -> str:
+    v = os.environ.get("LLM_ROUTER_ENGINE_MODE", "shadow").strip().lower()  # literal: test_env_registry scans for it
+    return v if v in ("shadow", "decide", "off") else "shadow"
+
+
+def decides() -> bool:
+    """True when the engine, not the door's rules, decides the route."""
+    return wire_mode() == "decide"
+
+
+def _decide_light(text: str, *, door: str, lexical: bool) -> Decision:
+    """The shadow call's Decision: no capability detector (``needs_tools`` / ``needs_repo_context`` /
+    ``local_eligible`` are not computed), no cache read or write, no sqlite. ``lexical`` adds L3 when
+    the model is already loadable (server doors); the hooks pass False (L1 only: a short-lived
+    process must not load an artifact for a log row). task_type, tier and complexity are what
+    ``decide`` returns for the same text without the cache."""
+    if door not in DOORS:
+        raise ValueError("unknown door %r; expected one of %s" % (door, ", ".join(DOORS)))
+    t0 = time.perf_counter()
+    lex, cal = (_lexical() if lexical else None), _calibration()
+    d = _compute(text or "", lex, cal, _policy_version(lex, cal), capabilities=False)
+    return dataclasses.replace(d, ms=(time.perf_counter() - t0) * 1000)
+
+
+def _shadow_run(text: str, door: str, rules_task: str | None, rules_complexity: str | None,
+                l1_only: bool) -> Decision | None:
+    try:
+        d = _decide_light(text, door=door, lexical=not l1_only)
+        row = dataclasses.asdict(d)
+        row.update(needs_tools=None, needs_repo_context=None, local_eligible=None, light=True)  # not computed
+        rtier = _COMPLEXITY_TIER.get(rules_complexity or "")
+        row.update(ts=round(time.time(), 3), door=door, l1_only=bool(l1_only), rules_task_type=rules_task,
+                   rules_complexity=rules_complexity, rules_tier=rtier,
+                   agree=bool(rtier == d.tier and rules_task == d.task_type))
+        capped_log.append(state_path(SHADOW_LOG), (json.dumps(row, separators=(",", ":")) + "\n").encode(),
+                          _SHADOW_MAX_BYTES)
+        return d
+    except Exception as exc:  # noqa: BLE001 — a shadow classifier must never touch routing
+        failopen.record("LR-FO-ENGINE-SHADOW", exc)
+        return None
+
+
+_SHADOW_QUEUE_MAX = 256
+_pool_lock = threading.Lock()
+# One ThreadPoolExecutor worker, not a daemon thread: it is joined at interpreter exit, so queued
+# rows finish (or the exit waits for at most the 256 queued items) before the process ends.
+_pool = None
+_pending = 0
+
+
+def _submit(args: tuple) -> None:
+    global _pool, _pending
+    from concurrent.futures import ThreadPoolExecutor
+
+    with _pool_lock:
+        if _pending >= _SHADOW_QUEUE_MAX:
+            failopen.record("LR-FO-ENGINE-SHADOW-DROP", RuntimeError("shadow queue full"))
+            return
+        if _pool is None:
+            _pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="llm_router-engine-shadow")
+        _pending += 1
+        fut = _pool.submit(_shadow_run, *args)
+
+    def _done(_f) -> None:
+        global _pending
+        with _pool_lock:
+            _pending -= 1
+
+    fut.add_done_callback(_done)
+
+
+def shadow_drain(timeout: float = 10.0) -> bool:
+    """Wait for queued background shadow rows (tests, shutdown). True when the queue is empty."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        with _pool_lock:
+            if _pending == 0:
+                return True
+        time.sleep(0.005)
+    return False
+
+
+def shadow(text: str, *, door: str, rules_task: str | None, rules_complexity: str | None,
+           l1_only: bool = False, background: bool = False) -> Decision | None:
+    """Shadow mode: compute the engine's Decision and log it beside the rules class.
+
+    Call it AFTER the rules decision, and never use the result to route. ``background=True`` (the
+    long-lived server doors: proxy, gateway, MCP, router) queues the work to one
+    ThreadPoolExecutor worker (NOT a daemon thread: the worker is joined at interpreter exit, and the queue is bounded at 256 items), so
+    the request path pays only the queue put and the result is None; the hooks are short-lived
+    processes and run it inline with ``l1_only=True``. Returns the Decision when run inline (None
+    when the mode is not ``shadow`` or the engine failed). Never raises into the request path: any
+    error is recorded through ``failopen`` (``LR-FO-ENGINE-SHADOW``). The row holds the Decision's
+    fields and the rules tier, no prompt text."""
+    if wire_mode() != "shadow":
+        return None
+    if background:
+        try:
+            _submit((text, door, rules_task, rules_complexity, l1_only))
+        except Exception as exc:  # noqa: BLE001
+            failopen.record("LR-FO-ENGINE-SHADOW", exc)
+        return None
+    return _shadow_run(text, door, rules_task, rules_complexity, l1_only)
+
+
+# ── hook -> proxy reuse (P1.6 task 5, P1.6-h) ────────────────────────────────
+
+#: ``proxy.steps.tier_text`` keeps the last 3,000 chars of the newest human prompt.
+_TIER_TEXT_LIMIT = 3000
+_REUSE_TTL_S = 300.0  # the proxy's turn-first call follows the hook's prompt by seconds
+_session_var: "contextvars.ContextVar[str | None]" = contextvars.ContextVar("engine_session", default=None)
+
+
+def text_sha(text: str) -> str:
+    """The ledger's ``text_sha``: ``prompt_key.key`` (16 hex of sha256 over the normalized text)."""
+    return prompt_key.key(text)
+
+
+def _tier_sha(text: str) -> str:
+    return prompt_key.key(prompt_key.normalize(text)[-_TIER_TEXT_LIMIT:])
+
+
+def _reuse_path(session_id: str) -> Path:
+    return state_path("last_classification_%s.json" % re.sub(r"[^A-Za-z0-9_-]", "_", session_id)[:64])
+
+
+def reuse_fields(text: str, decision: Decision) -> dict:
+    """The keys the hook adds to its ``last_classification_<sid>.json`` sidecar so the
+    proxy can reuse the Decision: ``text_sha``, ``tier_sha`` (sha of the proxy's
+    3,000-char tail), ``decision`` and ``ts``. Additive: the sidecar's older readers
+    (``tools/text.py``, ``doctor``) never look at them. No prompt text."""
+    return {"text_sha": text_sha(text), "tier_sha": _tier_sha(text),
+            "decision": dataclasses.asdict(decision), "ts": time.time()}
+
+
+def write_hook_decision(session_id: str | None, text: str, decision: Decision) -> None:
+    """Merge ``reuse_fields`` into the session's sidecar (0600, atomic). The hook itself
+    writes the sidecar once per turn with the same fields; this is for callers that are
+    not the hook. Never raises: a failed write costs one re-classification, nothing else."""
+    if not session_id:
+        return
+    path = _reuse_path(session_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            cur = json.loads(path.read_text())
+            cur = cur if isinstance(cur, dict) else {}
+        except (OSError, ValueError):
+            cur = {}
+        cur.update(reuse_fields(text, decision))
+        tmp = path.with_name(path.name + ".%d.tmp" % os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump(cur, fh)
+        os.replace(tmp, path)
+    except OSError as exc:
+        log.warning("engine: could not write hook decision: %s", exc)
+
+
+def read_hook_decision(session_id: str | None, text: str) -> tuple[bool, Decision | None]:
+    """``(hook_seen, decision)``. ``hook_seen`` is True when a fresh record exists for
+    the session; ``decision`` is set only when its sha matches ``text`` (the full
+    normalized prompt, or the proxy's 3,000-char tail of it)."""
+    if not session_id:
+        return False, None
+    try:
+        rec = json.loads(_reuse_path(session_id).read_text())
+        if "decision" not in rec:  # a sidecar written before this turn's reuse fields: not seen
+            return False, None
+        if time.time() - float(rec["ts"]) > _REUSE_TTL_S:
+            return False, None
+        if text_sha(text) in (rec.get("text_sha"), rec.get("tier_sha")):
+            return True, Decision(**rec["decision"])
+        return True, None
+    except (OSError, ValueError, KeyError, TypeError):
+        return False, None
+
+
+def bind_session(session_id: str | None):
+    """Name the session for the next ``decide_for_proxy`` in this context; returns a token for ``unbind_session``."""
+    return _session_var.set(session_id)
+
+
+def unbind_session(token) -> None:
+    _session_var.reset(token)
+
+
+def _note_reuse(hook_seen: bool, reused: bool) -> None:
+    """One counts-only line per hook-seen proxy classification: the P1.6-h instrument
+    (``scripts/hook_reuse_rate.py`` reads it). No text, no session id."""
+    if not hook_seen:
+        return
+    try:
+        p = state_path("decision_reuse.jsonl")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "a") as fh:
+            fh.write(json.dumps({"ts": round(time.time(), 3), "reused": bool(reused)}) + "\n")
+    except OSError:
+        pass
+
+
+def decide_for_proxy(text: str, *, session_id: str | None = None) -> Decision:
+    """The proxy's door: the hook's Decision for this turn when its ``text_sha``
+    matches (one classification per turn), else ``decide(door="proxy")``."""
+    sid = session_id if session_id is not None else _session_var.get()
+    seen, d = read_hook_decision(sid, text)
+    _note_reuse(seen, d is not None)
+    return d if d is not None else decide(text, door="proxy", session_id=sid)
 
 
 # ── L2: schema-checked LLM verdicts (not on the sync path) ───────────────────

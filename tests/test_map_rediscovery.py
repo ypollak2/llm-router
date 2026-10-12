@@ -469,6 +469,7 @@ def test_changes_file_capped_and_cursor_survives(world, monkeypatch):
 
 def test_child_main_failure_leaves_evidence(monkeypatch, tmp_path):
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv(mr.ENV_SWITCH, "on")     # the suite default is off (conftest)
     seen = []
     from llm_router import failopen
     monkeypatch.setattr(failopen, "record", lambda code, exc=None, **k: seen.append(code))
@@ -570,3 +571,23 @@ def test_default_poller_binds_its_state_dir_at_start(tmp_path, monkeypatch):
     p.join(2)
     assert seen["state_dir"] == home_a
     assert seen["map_path"].parent == home_a
+
+
+def test_once_child_honours_the_off_switch(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(mr, "poll", lambda **kw: calls.append(kw))
+    monkeypatch.setenv(mr.ENV_SWITCH, "off")
+    assert mr.main(["--once"]) == 0 and calls == []
+    monkeypatch.setenv(mr.ENV_SWITCH, "on")
+    assert mr.main(["--once"]) == 0 and len(calls) == 1
+
+
+def test_stop_default_poller_stops_and_forgets_the_thread(monkeypatch):
+    monkeypatch.setattr(mr, "_default_poller", None)
+    assert mr.stop_default_poller() is True            # none running
+    ticks = threading.Event()
+    p = mr.Poller(0.01, lambda **kw: ticks.set(), None, {}).start()
+    monkeypatch.setattr(mr, "_default_poller", p)
+    assert ticks.wait(5)
+    assert mr.stop_default_poller() is True
+    assert mr._default_poller is None and not p._thread.is_alive()

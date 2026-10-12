@@ -726,6 +726,23 @@ MIGRATE_ROUTING_DECISIONS_ADD_TOOL_USE_ID = [
 (``call_identity.tool_use_id``), NULL when there was none. An id only: it joins a row to
 its ``usage_outcome`` verdict (whose ``event_id`` is the same id)."""
 
+MIGRATE_ROUTING_DECISIONS_ADD_ENGINE_LEDGER = [
+    "ALTER TABLE routing_decisions ADD COLUMN layer TEXT",
+    "ALTER TABLE routing_decisions ADD COLUMN confidence REAL",
+    "ALTER TABLE routing_decisions ADD COLUMN reason TEXT",
+    "ALTER TABLE routing_decisions ADD COLUMN abstain INTEGER",
+    "ALTER TABLE routing_decisions ADD COLUMN engine_version TEXT",
+    "ALTER TABLE routing_decisions ADD COLUMN policy_id TEXT DEFAULT 'none'",
+    "ALTER TABLE routing_decisions ADD COLUMN policy_stage TEXT DEFAULT 'none'",
+    "ALTER TABLE routing_decisions ADD COLUMN grade_basis TEXT DEFAULT 'none'",
+    "ALTER TABLE routing_decisions ADD COLUMN inventory_sig TEXT",
+]
+"""PLAN v16 P1.7 tasks 1 and 7: the engine's decision (``layer``, ``confidence``, ``reason``,
+``abstain``, ``engine_version``; NULL = the row predates the engine or the call site is not
+wired yet, never a made-up value) and the dynamic-policy fields (``policy_id``,
+``policy_stage``, ``grade_basis``; the string ``'none'``, never NULL, MUST P1.7-e).
+Ids, enums and hashes only: no text."""
+
 MIGRATE_USAGE_ADD_SESSION_ID = [
     "ALTER TABLE usage ADD COLUMN session_id TEXT",
 ]
@@ -1229,6 +1246,7 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_ROUTING_DECISIONS_ADD_PROVENANCE
         + MIGRATE_ROUTING_DECISIONS_ADD_SHADOW_TIER
         + MIGRATE_ROUTING_DECISIONS_ADD_TOOL_USE_ID
+        + MIGRATE_ROUTING_DECISIONS_ADD_ENGINE_LEDGER
         + MIGRATE_USAGE_ADD_SESSION_ID
         + MIGRATE_USAGE_ADD_REASON
         + MIGRATE_ADD_TASK_TYPE_RAW
@@ -2191,6 +2209,15 @@ async def log_routing_decision(
     session_id: str | None = None,
     tool_use_id: str | None = None,
     task_type_raw: str | None = None,
+    layer: str | None = None,
+    confidence: float | None = None,
+    reason: str | None = None,
+    abstain: bool | None = None,
+    engine_version: str | None = None,
+    policy_id: str | None = None,
+    policy_stage: str | None = None,
+    grade_basis: str | None = None,
+    inventory_sig: str | None = None,
 ) -> None:
     """Persist a complete routing decision to the routing_decisions table.
 
@@ -2227,6 +2254,10 @@ async def log_routing_decision(
             no prompt or answer text is stored by either.
         task_type_raw: The label behind a NULL ``task_type`` (P0.8). A caller that
             did not measure a classifier field passes None for it: NULL, never 0.0.
+        layer, confidence, reason, abstain, engine_version: the engine ``Decision`` fields
+            (P1.7); None = not decided by the engine (NULL).
+        policy_id, policy_stage, grade_basis, inventory_sig: the dynamic-policy fields
+            (P1.7-e). The first three are stored as ``'none'`` when absent, never NULL.
     """
     # Validate inputs before database insert. A cache-served or failed call (LEDGER-ERR-1)
     # names no real provider ("cache", or "none" when nothing was attempted); its reason_code
@@ -2292,8 +2323,10 @@ async def log_routing_decision(
                 input_tokens, output_tokens, cost_usd, latency_ms, reason_code,
                 correlation_id, requested_complexity, complexity_downgraded, subject,
                 provenance, capabilities_json, shadow_tier, session_id, tool_use_id,
-                task_type_raw)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                task_type_raw, layer, confidence, reason, abstain, engine_version,
+                policy_id, policy_stage, grade_basis, inventory_sig)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 _prompt_hash(prompt),
                 task_type,
@@ -2326,6 +2359,9 @@ async def log_routing_decision(
                 _rd_session_id,
                 tool_use_id or None,
                 task_type_raw,
+                layer, confidence, reason, None if abstain is None else (1 if abstain else 0),
+                engine_version, policy_id or "none", policy_stage or "none", grade_basis or "none",
+                inventory_sig,
             ),
         )
         await db.commit()
