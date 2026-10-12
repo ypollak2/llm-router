@@ -1,0 +1,1 @@
+P1.8 task 12: model artifacts on disk (HF cache, LM Studio, user directories) appear in the resource map as `discovered` rows (reason `no_executable_runtime`); a runtime that reports the same path or blob hash makes the row `accessible` in the same refresh. No fuzzy join. Nothing routes to a discovered artifact.

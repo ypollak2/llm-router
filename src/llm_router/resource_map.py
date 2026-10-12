@@ -181,6 +181,7 @@ class MapInputs:
     policy: str | None = None
     codex_daily_limit: int = DEFAULT_CODEX_DAILY
     keys: Callable[[], list] | None = None   # -> list[discovery.keys.KeyInfo]; None -> discover()
+    artifacts: Callable[[], list[dict]] | None = None   # -> discovered artifact rows; None -> scan this machine
     now: float | None = None
 
 
@@ -352,6 +353,8 @@ def _ollama_rows(inp: MapInputs, now: float) -> list[dict]:
             reason = "/api/show lists no completion capability"
         details = m.get("details") or {}
         comp = (inp.competence or {}).get(name)
+        from llm_router.resolver import inventory as _inv
+        ident = _inv.runtime_identity(show.get("modelfile"))
         rows.append(_row(
             f"ollama/{name}", "local", f"ollama/{name}",
             status="connected", reason=reason,
@@ -362,6 +365,7 @@ def _ollama_rows(inp: MapInputs, now: float) -> list[dict]:
                 "max_context": _ctx_from_info(show.get("model_info")),
                 "parameter_size": details.get("parameter_size"),
                 "size_bytes": m.get("size"),
+                **ident,
             },
             competence=comp,
         ))
@@ -428,6 +432,12 @@ def build(inputs: MapInputs | None = None) -> dict:
         *_ollama_rows(inp, now),
         *_key_rows(inp),
     ]
+    try:
+        from llm_router.resolver import inventory as _inv
+        artifact_rows = inp.artifacts() if inp.artifacts is not None else _inv._inventory_artifacts(inp.env)[0]
+        rows = _inv.merge_artifacts(rows, artifact_rows)
+    except Exception:
+        pass   # an artifact scan must never break the map
     policy = inp.policy
     if policy is None:
         try:
