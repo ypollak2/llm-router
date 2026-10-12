@@ -18,7 +18,6 @@ import json
 import os
 import tempfile
 import time
-import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +54,7 @@ HttpPost = Callable[[str, dict], Any]
 
 def _http_get(url: str) -> Any:
     try:
+        import urllib.request   # lazy: the hook imports this module and must not load http.client
         with urllib.request.urlopen(url, timeout=2.0) as r:
             return json.loads(r.read())
     except Exception:
@@ -63,6 +63,7 @@ def _http_get(url: str) -> Any:
 
 def _http_post(url: str, body: dict) -> Any:
     try:
+        import urllib.request
         req = urllib.request.Request(
             url, data=json.dumps(body).encode(), method="POST",
             headers={"Content-Type": "application/json"},
