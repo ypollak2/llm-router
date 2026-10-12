@@ -272,9 +272,10 @@ GATE_ENV = "LLM_ROUTER_PROMOTE_GATE"
 _GATE_OFF_VALUES = frozenset({"off", "0", "false", "no"})
 _LOCAL_ID_PREFIXES = ("ollama/", "openai_compat/")
 _PRIOR_STATE_FILES = ("discovery.json", "profile.yaml")
-#: usage.db counts as prior state only when it holds routed calls. The router and the onboarding
-#: wizard create an EMPTY usage.db before the first chain build, so its existence proves nothing.
-_USAGE_HISTORY_TABLES = ("routing_decisions", "usage")
+#: usage.db requires non-cc usage or a non-hook routing decision. Empty databases
+#: and Claude Code hook bookkeeping can precede the first chain build.
+#: Older decision schemas without reason_code cannot distinguish hook rows;
+#: only their usage rows establish history.
 _gate_off_logged = False
 
 
@@ -333,7 +334,11 @@ def _grandfather_marker_path() -> Path:
 
 
 def _usage_db_has_history(path: Path) -> bool:
-    """True when usage.db has at least one row in a table of routed calls. Unreadable = no."""
+    """True for non-cc usage or routing decisions outside the DIRECT hook path.
+
+    Decision schemas without reason_code cannot distinguish hook rows, so only
+    usage establishes history there. Unreadable or absent tables count as no.
+    """
     import sqlite3
 
     if not path.exists():
@@ -341,12 +346,27 @@ def _usage_db_has_history(path: Path) -> bool:
     try:
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.2)
         try:
-            for table in _USAGE_HISTORY_TABLES:
+            # DIRECT hook routes (savings_logger.log_direct_to_db) write a usage twin with
+            # reason='direct' and the routed provider, so the usage filter must drop it too.
+            # Older schemas lack the reason column; the second usage query is the fallback.
+            usage_queries = (
+                "SELECT 1 FROM usage WHERE provider != 'cc' "
+                "AND (reason IS NULL OR reason != 'direct') LIMIT 1",
+            )
+            try:
+                con.execute("SELECT reason FROM usage LIMIT 0")
+            except sqlite3.Error:
+                usage_queries = ("SELECT 1 FROM usage WHERE provider != 'cc' LIMIT 1",)
+            for query in (
+                *usage_queries,
+                "SELECT 1 FROM routing_decisions "
+                "WHERE reason_code IS NULL OR reason_code != 'direct' LIMIT 1",
+            ):
                 try:
-                    if con.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
+                    if con.execute(query).fetchone():
                         return True
                 except sqlite3.Error:
-                    continue                     # table absent
+                    continue                     # table or distinguishing column absent
         finally:
             con.close()
     except sqlite3.Error:
@@ -357,9 +377,11 @@ def _usage_db_has_history(path: Path) -> bool:
 def ensure_grandfather(current_ids: "list[str] | tuple[str, ...]" = ()) -> None:
     """Write ``grandfathered_models.json`` once, at the first run of this version (D-62 = A).
 
-    Upgrade (prior llm-router state exists: discovery.json, profile.yaml or usage.db):
-    the file lists the models already installed (the old discovery cache plus
-    ``current_ids``). Fresh install: the file is written with an empty ``ids``.
+    Upgrade: discovery.json or profile.yaml exists, or usage.db holds non-cc
+    usage or a routing decision outside the DIRECT hook path. Empty databases
+    and hook-only rows do not establish an upgrade. The file lists the old
+    discovery cache, ``current_ids`` and detected OpenAI-compatible models.
+    Fresh install: the file is written with an empty ``ids``.
     The file is never rewritten, and is not recreated if deleted: the
     ``grandfathered_models.init`` marker records that the one-time write happened.
 
@@ -376,6 +398,18 @@ def ensure_grandfather(current_ids: "list[str] | tuple[str, ...]" = ()) -> None:
         found = {f"ollama/{m}" for m in cached}
         for m in current_ids:
             found |= {m} if m.startswith(_LOCAL_ID_PREFIXES) else {f"ollama/{m}"}
+        try:
+            from llm_router.config import get_config
+
+            compat_ids = {
+                m if m.startswith("openai_compat/") else f"openai_compat/{m}"
+                for m in get_config().all_openai_compat_models()
+            }
+            found.update(compat_ids)
+        except Exception as exc:                             # noqa: BLE001
+            from llm_router import failopen
+
+            failopen.record("CHZ-FO-PROMOTE-GATE-GRANDFATHER-COMPAT", exc)
         ids = sorted(found)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
@@ -455,9 +489,9 @@ def order_for_chain(
             logging.getLogger("llm_router.model_discovery").warning(
                 "%s=off: unvalidated local models are injected at the front of chains again", GATE_ENV)
         return models, []
+    ensure_grandfather([m for m in models if m.startswith(_LOCAL_ID_PREFIXES)])
     if not models:
         return [], []
-    ensure_grandfather([m for m in models if m.startswith(_LOCAL_ID_PREFIXES)])
     keep = set(grandfathered_ids()) | _env_configured_ids()
     for name in configured:
         keep |= _id_forms(str(name))

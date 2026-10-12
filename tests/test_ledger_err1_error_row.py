@@ -208,7 +208,7 @@ async def test_error_row_has_no_prompt_or_exception_text(cache_env, caller):
 
 
 @pytest.mark.asyncio
-async def test_outside_an_mcp_call_the_error_row_session_is_null(cache_env, monkeypatch):
+async def test_outside_an_mcp_call_the_error_row_session_is_unknown(cache_env, monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID)  # in env, but no tool_use bound
 
     def boom(model, messages, **kw):
@@ -216,7 +216,7 @@ async def test_outside_an_mcp_call_the_error_row_session_is_null(cache_env, monk
 
     with pytest.raises(RuntimeError):
         await _call(boom)
-    assert _q(cache_env, "SELECT session_id, reason FROM usage") == [(None, "error_all_models_failed")]
+    assert _q(cache_env, "SELECT session_id, reason FROM usage") == [("unknown:non_mcp", "error_all_models_failed")]
 
 
 # ── owner decision 2026-10-10: the same calls also leave one routing_decisions row ──────────

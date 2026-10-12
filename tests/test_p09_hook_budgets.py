@@ -279,6 +279,19 @@ def test_record_raw_writes_one_row(tmp_path):
         "statusline", "Statusline", 87.0, False)
 
 
+@pytest.mark.skipif(not hasattr(os, "getloadavg"), reason="needs os.getloadavg")
+def test_record_raw_row_carries_numeric_load1(tmp_path):
+    home = tmp_path / "h"
+    (home / ".llm-router").mkdir(parents=True)
+    r = subprocess.run([sys.executable, "-m", "llm_router.hook_latency", "record-raw",
+                        "statusline", "Statusline", "87"], env=_env(home),
+                       capture_output=True, text=True, timeout=20)
+    assert r.returncode == 0 and r.stdout == ""
+    (row,) = [json.loads(x) for x in (home / ".llm-router" / "hook_latency.jsonl").read_text().splitlines()]
+    assert isinstance(row["load1"], (int, float)) and not isinstance(row["load1"], bool)
+    assert row["load1"] >= 0
+
+
 @pytest.mark.parametrize("args", [[], ["record-raw", "x", "E"], ["record-raw", "x", "E", "abc"],
                                   ["record-raw", "x", "E", "-4"], ["nope", "x", "E", "1"]])
 def test_record_raw_rejects_bad_usage_without_writing(args):
@@ -312,6 +325,7 @@ def test_statusline_timing_all_writes_a_statusline_row(tmp_path):
     _run_statusline(home, _shim_python(tmp_path), LLM_ROUTER_STATUSLINE_TIMING="all")
     row = _wait_row(home / ".llm-router" / "hook_latency.jsonl")
     assert row["hook"] == "statusline" and row["elapsed_ms"] > 0
+    assert isinstance(row["load1"], (int, float)) and not isinstance(row["load1"], bool)
 
 
 def test_statusline_writes_nothing_when_timing_is_off(tmp_path):
