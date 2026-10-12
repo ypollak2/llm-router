@@ -499,6 +499,8 @@ def main():
         print_startup_summary()
     except Exception:
         pass
+    from llm_router.call_identity import mark_stdio_transport
+    mark_stdio_transport()  # stdio = one client per process: call_identity may stamp the env session
     mcp.run()
 
 

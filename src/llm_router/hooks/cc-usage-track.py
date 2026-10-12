@@ -1,4 +1,4 @@
-# llm_router-hook-version: 5
+# llm_router-hook-version: 6
 """PostToolUse[Agent] hook — track Claude Code subscription model calls.
 
 Fires after every Agent subagent completes. Writes an estimated usage record

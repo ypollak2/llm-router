@@ -1,0 +1,1 @@
+ledger session ids (PLAN v16 P0.8 hardening): the MCP server's env session is stamped only on the stdio transport or when a tool_use id is bound; SSE and shell-inherited hosts record `unknown:mcp`. `call_identity.is_unknown_session` is the one predicate for `unknown:*`; offload_share, kpi and northstar treat the sentinel as no session.

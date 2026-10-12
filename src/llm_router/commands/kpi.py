@@ -913,8 +913,9 @@ def _g1_hook(days: int, now: float, killed: int | None) -> dict:
 # CAN apply to its type is recorded.
 
 def _usable_session(row: dict) -> bool:
-    sid = row.get("session_id")
-    return isinstance(sid, str) and sid not in ("", "unknown")
+    from llm_router.call_identity import is_unknown_session
+
+    return not is_unknown_session(row.get("session_id"))
 
 
 def g3_row_type(row: dict) -> str:
@@ -1148,8 +1149,9 @@ _PRD_SQL_TABLE = {"usage": "usage", "routing_decisions": "routing_decisions",
 
 
 def _prd_session(sid: Any) -> str | None:
-    return (sid if isinstance(sid, str) and sid not in ("", "unknown")
-            and not sid.startswith("unknown:") else None)
+    from llm_router.call_identity import is_unknown_session
+
+    return None if is_unknown_session(sid) else sid
 
 
 def _prd_proxy_values(row: dict) -> dict[str, Any]:

@@ -60,8 +60,9 @@ def test_env_session_outside_an_mcp_call_is_still_not_stamped(temp_db, monkeypat
 
 
 def test_mcp_call_without_a_tool_use_id_gets_the_env_session(temp_db, monkeypatch):
-    """The reproduced trigger: inside call_tool, client sent no _meta toolUseId."""
+    """The reproduced trigger: inside call_tool on stdio, client sent no _meta toolUseId."""
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-mcp-1")
+    monkeypatch.setattr(call_identity, "_STDIO_TRANSPORT", True)  # server.main() sets this
 
     async def tool() -> str:
         assert call_identity.tool_use_id() is None  # the client sent none

@@ -37,10 +37,17 @@ ride into a ledger column through them. ``ledger_session_id`` is the same check 
 other writers (the hook DIRECT path, agent-route, the SDK), and also refuses the
 placeholders some of them pass (``sdk``, ``unknown``): those are not sessions.
 
-``call_session_id()`` is what the router stamps: the environment id only inside an MCP
-tool call (a ``tool_use`` id is bound). ``CLAUDE_CODE_SESSION_ID`` is also in every Bash
-tool shell, so a gateway or ``route_server`` started from one would otherwise stamp that
-one session on every call it later serves, for any host.
+``call_session_id()`` is what the router stamps. The environment id is the server
+process's, fixed at start, so it is stamped only where that process serves one
+Claude Code session: (a) when a ``tool_use`` id is bound (the client is Claude Code), or
+(b) inside a ``call_tool`` on the stdio transport (``server.main`` calls
+``mark_stdio_transport()``; Claude Code spawns one stdio server per session). On SSE
+(many clients, one process), or on a host that inherited the variable from a shell
+(Desktop, Cursor, Codex), a call with no ``tool_use`` id gets None, which the writers
+record as ``unknown:mcp``: a wrong real-looking id is worse than that. Outside any MCP
+call it is None as well: ``CLAUDE_CODE_SESSION_ID`` is also in every Bash tool shell,
+so a gateway or ``route_server`` started from one would otherwise stamp that one
+session on every call it later serves.
 
 Light on purpose: ``savings_logger`` imports this inside the UserPromptSubmit hook, so
 the MCP server stack (+234 ms measured) loads only when ``IdentityMCPServer`` is used.
@@ -83,19 +90,30 @@ def mcp_session_id() -> str | None:
             or ledger_session_id(os.environ.get("CLAUDE_SESSION_ID")))
 
 
+_STDIO_TRANSPORT = False
+
+
+def mark_stdio_transport() -> None:
+    """Called by ``server.main`` before ``mcp.run()`` (stdio): this process serves one client."""
+    global _STDIO_TRANSPORT
+    _STDIO_TRANSPORT = True
+
+
+def is_unknown_session(sid: Any) -> bool:
+    """True for a session value that names no session: None, "", "unknown", ``unknown:*``."""
+    return not isinstance(sid, str) or sid in ("", "unknown") or sid.startswith(UNKNOWN_PREFIX)
+
+
 def in_mcp_call() -> bool:
     """True inside an MCP tool call: ``IdentityMCPServer.call_tool`` is on the stack."""
     return _IN_MCP_CALL.get() or tool_use_id() is not None
 
 
 def call_session_id() -> str | None:
-    """``mcp_session_id()`` inside an MCP tool call, else None.
-
-    "Inside" means ``call_tool`` is running, whether or not the client sent a
-    ``tool_use`` id. Keying on the id alone left a NULL ``usage.session_id`` for every
-    call from a client that sends no ``_meta`` (live 2026-10-11: ids 1885-1887).
-    """
-    return mcp_session_id() if in_mcp_call() else None
+    """``mcp_session_id()`` when it provably belongs to this call, else None (see module doc)."""
+    if tool_use_id() is not None or (_IN_MCP_CALL.get() and _STDIO_TRANSPORT):
+        return mcp_session_id()
+    return None
 
 
 #: Door names for ``unknown_session``: where a row was written when no session resolved.
