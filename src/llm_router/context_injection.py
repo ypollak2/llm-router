@@ -159,12 +159,13 @@ def _retrieval_query(prompt: str, session_id: str | None,
     return query
 
 
-def inject(prompt: str, *, root: str | None = None, limit: int = 3,
+def inject(prompt: str, *, root: str | None = None, limit: int | None = None,
            session_id: str | None = None, task_type: str | None = None,
            target_provider: str | None = None,
            session_tokens: int = 1200,
            retrieval_sid: str | None = None,
-           session_root: str | None = None) -> str:
+           session_root: str | None = None,
+           reuse_repo_state: bool = False) -> str:
     """Return *prompt* with relevant repo knowledge prepended, or unchanged.
 
     Fail-open in every direction: no knowledge, no match, a broken store or an
@@ -185,6 +186,9 @@ def inject(prompt: str, *, root: str | None = None, limit: int = 3,
     yet (the MCP `llm()` door chooses the model after this runs) use the session
     for the RETRIEVAL QUERY only. No session text is added to the prompt, so
     nothing session-derived can reach an external API through it.
+
+    `reuse_repo_state` lets `repo_facts.render` reuse a recent read (see that
+    module); only the context pack sets it, every other caller reads git fresh.
 
     `session_root` names the project whose session log to read. Left unset the
     log is looked up under this process's cwd, which is right for a hook running
@@ -238,7 +242,7 @@ def inject(prompt: str, *, root: str | None = None, limit: int = 3,
     # cannot compound the way a remembered fabrication does.
     try:
         from llm_router.repo_facts import render as _repo_render
-        state = _repo_render(root)
+        state = _repo_render(root, reuse=reuse_repo_state)
     except Exception:                                        # noqa: BLE001
         state = ""
     if state:
@@ -281,7 +285,7 @@ def inject(prompt: str, *, root: str | None = None, limit: int = 3,
 def inject_system_prompt(system_prompt: str | None, objective: str,
                          *, root: str | None = None,
                          session_id: str | None = None,
-                         limit: int = 3,
+                         limit: int | None = None,
                          target_provider: str | None = None,
                          session_tokens: int = 1200,
                          session_root: str | None = None) -> str | None:

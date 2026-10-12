@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from llm_router import failopen, ml_lexical
+from llm_router import decision_ledger, failopen, ml_lexical
 from llm_router.classify import GATEWAY_POLICY, _score_categories, classify_signals
 from llm_router.paths import state_path
 
@@ -427,14 +427,17 @@ def decide(text: str, *, ctx_digest: str = "", door: str, session_id: str | None
         key = _cache_key(text or "", pv, ctx_digest)
         hit = _cache_get(key, mode)
         if hit is not None:
-            return dataclasses.replace(hit, layer="cache", dims=dict(hit.dims) if hit.dims else hit.dims,
-                                       ms=(time.perf_counter() - t0) * 1000)
-        d = _compute(text or "", lex, cal, pv)
-        _cache_put(key, d, mode)
-        return dataclasses.replace(d, ms=(time.perf_counter() - t0) * 1000)
+            out = dataclasses.replace(hit, layer="cache", dims=dict(hit.dims) if hit.dims else hit.dims,
+                                      ms=(time.perf_counter() - t0) * 1000)
+        else:
+            d = _compute(text or "", lex, cal, pv)
+            _cache_put(key, d, mode)
+            out = dataclasses.replace(d, ms=(time.perf_counter() - t0) * 1000)
     except Exception as exc:  # noqa: BLE001 — a classifier never stalls routing
         log.warning("engine: decide failed, abstaining: %s", exc)
-        return dataclasses.replace(_fallback(exc, pv), ms=(time.perf_counter() - t0) * 1000)
+        out = dataclasses.replace(_fallback(exc, pv), ms=(time.perf_counter() - t0) * 1000)
+    decision_ledger.record(out, door=door, text=text or "", session_id=session_id, task_id=task_id)  # P1.7; never raises
+    return out
 
 
 # ── L2: schema-checked LLM verdicts (not on the sync path) ───────────────────

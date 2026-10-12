@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 1
+# llm_router-hook-version: 2
 """PostToolUse hook — capture tool activity into the Session Context
 Accumulator's durable per-session store.
 
@@ -100,6 +100,20 @@ def main() -> None:
 
     tool_input = hook_input.get("tool_input", {}) or {}
     tool_result = hook_input.get("tool_response", hook_input.get("tool_result", ""))
+
+    # PLAN v16 P1.5 task 2: an edited source file goes on the semantic index's
+    # dirty queue (one appended line; the re-index runs in a detached child every
+    # 10 files). Before the session-id and content checks below, because whether
+    # to re-index has nothing to do with whether the event is worth recording.
+    if tool_name in ("Edit", "Write", "MultiEdit") and isinstance(tool_input, dict):
+        try:
+            from llm_router.semantic import refresh
+
+            _edited = tool_input.get("file_path")
+            if isinstance(_edited, str) and _edited:
+                refresh.note_edit(_edited, hook_input.get("cwd") or os.getcwd())
+        except Exception:
+            pass  # fail-open — a missed re-index is picked up by the next full index
 
     # 200/500 was uniform across every tool, and it bit: measured 2026-09-15 on
     # 371 stored events, 29% sat at the 700-char ceiling, p90 710, max 782. The

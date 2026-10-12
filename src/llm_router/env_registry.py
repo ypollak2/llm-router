@@ -226,6 +226,12 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_HAIKU_GUARD_SHADOW_VERDICTS": ("llm_router", "proxy/haiku_guard.py", 1),
     # GE4 (PLAN v16, OD-4): the Frontier shadow switch, off unless on/1/true/yes (shadow_frontier.py).
     "LLM_ROUTER_SHADOW_FRONTIER": ("llm_router", "shadow_frontier.py", 1),
+    # P1.7 decision ledger: kill switch (default on); shadow FLAG on ledger rows (off | on; on also
+    # needs a passing P1.7-c gate file; it does NOT govern LLM_ROUTER_LOCAL_CLASSIFIER, the older
+    # classifier shadow); and the flag's sampling rate (clamped to 5-10%).
+    "LLM_ROUTER_DECISION_LEDGER": ("llm_router", "decision_ledger.py", 1),
+    "LLM_ROUTER_DECISION_SHADOW": ("llm_router", "decision_ledger.py", 1),
+    "LLM_ROUTER_DECISION_SHADOW_RATE": ("llm_router", "decision_ledger.py", 1),
     # Kill switch for the tier decision's quota-pressure step (off/0/false/no).
     "LLM_ROUTER_PROXY_QUOTA_PRESSURE": ("llm_router", "proxy/quota_pressure.py", 1),
     # Escalation signals (proxy/escalation.py): the correction-signal
@@ -278,6 +284,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_SUMMARY_EVERY": ("llm_router", "context_summary.py", 1),
     "LLM_ROUTER_SUMMARY_MODEL": ("llm_router", "context_summary.py", 1),
     "LLM_ROUTER_OKF": ("llm_router", "okf.py", 1),
+    "LLM_ROUTER_OKF_BUDGET": ("llm_router", "okf.py", 1),
     "LLM_ROUTER_OKF_MIN_SCORE": ("llm_router", "okf.py", 1),
     "LLM_ROUTER_OLLAMA_MODEL": ("llm_router", "model_discovery.py", 1),
     "LLM_ROUTER_PROMOTE_GATE": ("llm_router", "model_discovery.py", 1),
@@ -341,6 +348,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_SEMANTIC_CLASSIFIER_BACKEND": ("llm_router", "semantic_classify.py", 1),
     "LLM_ROUTER_SEMANTIC_HISTORY": ("llm_router", "semantic/modes.py", 1),
     "LLM_ROUTER_SEMANTIC_INTERVENTION": ("llm_router", "semantic/modes.py", 1),
+    "LLM_ROUTER_SEMANTIC_REFRESH": ("llm_router", "semantic/refresh.py", 1),
+    "LLM_ROUTER_SEMANTIC_REFRESH_EVERY": ("llm_router", "semantic/refresh.py", 1),
     "LLM_ROUTER_SEMANTIC_SOURCE": ("llm_router", "semantic/modes.py", 1),
     "LLM_ROUTER_SEMANTIC_ST_MODEL": ("llm_router", "semantic_classify.py", 1),
     "LLM_ROUTER_SERVICE_PORT": ("llm_router", "hook_client.py", 3),
