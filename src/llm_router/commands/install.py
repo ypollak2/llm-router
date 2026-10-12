@@ -214,12 +214,10 @@ def _run_install(flags: list[str]) -> None:
         return
 
     check_only = "--check" in flags
-    force = "--force" in flags
 
     from llm_router.install_hooks import (
         _HOOKS_DST, _HOOKS_SRC, _HOOK_DEFS,
         _RULES_DST, check_api_keys, claude_desktop_config_path,
-        install,
     )
 
     if check_only:
@@ -286,14 +284,23 @@ def _run_install(flags: list[str]) -> None:
         print()
         return
 
-    claw_code = "--claw-code" in flags
     headless  = "--headless"  in flags
 
     if headless:
         _run_install_headless()
         return
 
-    if force:
+    run_full(interactive=True, flags=flags)
+
+
+def run_full(interactive: bool = True, flags: list[str] | None = None) -> list[str]:
+    """Install globally and return the labels of hosts wired by this run."""
+    from llm_router.install_hooks import check_api_keys, install
+
+    flags = flags if flags is not None else []
+    claw_code = "--claw-code" in flags
+
+    if "--force" in flags:
         from llm_router.install_hooks import _load_settings, _save_settings
         settings = _load_settings()
         settings.get("mcpServers", {}).pop("llm_router", None)
@@ -341,6 +348,11 @@ def _run_install(flags: list[str]) -> None:
                     ok = a.lstrip().startswith("✓")
                     print(f"  {_green('✓') if ok else _dim('·')}  {a.lstrip('✓ ').strip()}")
                 installed_hosts.append(label)
+            elif host_id in _HOST_SNIPPETS and host_id not in _UNSUPPORTED_HOSTS:
+                print(
+                    f"  {host_id}: detected, not auto-wired: "
+                    f"run `llm-router install --host {host_id}`"
+                )
             else:
                 reason = _UNSUPPORTED_HOSTS.get(host_id, "no installer for this host")
                 print(f"  {host_id}: detected, not wired: {reason}")
@@ -370,6 +382,9 @@ def _run_install(flags: list[str]) -> None:
     for line in check_api_keys():
         print(f"  {line}")
 
+    if not interactive:
+        return installed_hosts
+
     print(f"\n{_bold('  Try it:')}")
     print('    In Claude Code, ask: "What does os.path.join do?"')
     print("    You'll see: ⚡ ROUTE → Haiku (simple query)\n")
@@ -382,6 +397,7 @@ def _run_install(flags: list[str]) -> None:
     print("    llm-router install --force      — reinstall / update paths")
     print("    llm-router install --claw-code  — also install into claw-code")
     print("    llm-router uninstall            — remove\n")
+    return installed_hosts
 
 
 # ── install --headless ─────────────────────────────────────────────────────────

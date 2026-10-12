@@ -5,8 +5,28 @@ import json
 import time
 from pathlib import Path
 
-#: Files the user owns. The router must never change a byte of these (T9f).
+#: User-owned vs generated (P2.12-c), derived from the writers in the code:
+#:   user-owned: the user edits it and the router only reads it. ``profile.yaml``
+#:   (auto_profile._profile_path: the router writes it only while it is still
+#:   router-written, P0.15), ``routing.yaml`` (pins), ``.env`` (keys; install only
+#:   appends the subscription flag when a Claude seat is found), ``notes.txt``
+#:   (arbitrary user file in the state dir).
+#:   generated: the router rewrites it at will (``GENERATED``); a user never edits it.
+#: ``usage.db`` is history: the router appends rows, the upgrade must keep them
+#: (row count checked in test_p212_upgrade_from_15_4_0), so it is in neither list.
 USER_OWNED = ("profile.yaml", "routing.yaml", ".env", "notes.txt")
+GENERATED = (
+    "profile.generated.yaml", "profile_cache.json", "profile_hash.json",
+    "discovery.json", "ollama_last_ok.txt",
+    "grandfathered_models.json", "grandfathered_models.init",
+    "seats.json", "usage.json", "install-manifest.json", ".claude.json",
+)
+#: directories the installer owns inside the state dir
+GENERATED_DIRS = ("hooks", "claude-home", "claude-desktop")
+
+
+def user_owned_files(home: Path) -> list[Path]:
+    return [home / n for n in USER_OWNED if (home / n).exists()]
 
 _PROFILE_BODY = (
     "routing:\n  model_priority:\n    - tier: free_local\n      models: ['ollama/mine:latest']\n"

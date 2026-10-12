@@ -11,6 +11,7 @@ parameters so tests never touch the real machine.
 from __future__ import annotations
 
 import shutil
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
@@ -20,10 +21,38 @@ _HOSTS: dict[str, tuple[str, str]] = {
     "claude-code": ("claude", ".claude"),
     "codex": ("codex", ".codex"),
     "gemini-cli": ("gemini", ".gemini"),
+    "opencode": ("opencode", ".config/opencode"),
+    "copilot-cli": ("copilot", ".config/gh/copilot"),
+    "openclaw": ("openclaw", ".openclaw"),
+    "trae": (
+        "trae",
+        "Library/Application Support/Trae" if sys.platform == "darwin"
+        else "AppData/Roaming/Trae" if sys.platform == "win32"
+        else ".config/Trae",
+    ),
+    # Factory's installer reports the repo plugin; the CLI owns ~/.factory.
+    "factory": ("factory", ".factory"),
+    "vscode": (
+        "code",
+        "Library/Application Support/Code/User" if sys.platform == "darwin"
+        else "AppData/Roaming/Code/User" if sys.platform == "win32"
+        else ".config/Code/User",
+    ),
+    "cursor": ("cursor", ".cursor"),
+    # The installer writes project-scoped .windsurf/mcp.json.
+    "windsurf": ("windsurf", ".windsurf"),
     # Detected so `llm-router install` can report them with a reason; no
     # installer wires them yet (v16 P0.4; wiring is P2.12).
     "pi": ("pi", ".pi"),
     "kimi": ("kimi", ".kimi"),
+}
+
+
+UNDETECTABLE: dict[str, str] = {
+    "desktop": (
+        "GUI app config path is platform specific; handled by claude_desktop_config_path"
+    ),
+    "copilot": "VS Code extension, no binary or dir of its own",
 }
 
 

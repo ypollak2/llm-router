@@ -1,0 +1,1 @@
+`install.run_full(interactive)` factored out of the CLI install; `host_detect` now detects every snippet host (opencode, copilot-cli, openclaw, trae, factory, vscode, cursor, windsurf); detected hosts without an auto-installer print the `--host` command. Adds the 15.4.0 upgrade test and the P2.12-c preservation floor test.
