@@ -38,6 +38,7 @@ class MapView:
     rank_by_id: dict          # chain_id -> effective_priority (connected rows)
     rank_by_provider: dict    # provider -> best effective_priority
     orders: bool = False      # the map's policy expresses an order (not balanced/unknown)
+    unavailable: frozenset = frozenset()
 
     def provider_ok(self, provider: str) -> bool:
         """False only when the map knows the provider and none of its rows is connected."""
@@ -62,12 +63,15 @@ def _expresses_order(policy: object) -> bool:
 
 
 def _index(data: dict) -> MapView:
-    known, connected, kinds = set(), set(), set()
+    known, connected, kinds, unavailable = set(), set(), set(), set()
     by_id: dict[str, int] = {}
     by_prov: dict[str, int] = {}
     for r in data["resources"]:
         prov = _provider(r["chain_id"])
         known.add(prov)
+        if r.get("status") == "temporarily_unavailable":
+            unavailable.add(r["chain_id"])
+            continue
         if r["status"] != "connected":
             continue
         connected.add(prov)
@@ -77,7 +81,7 @@ def _index(data: dict) -> MapView:
             by_id[r["chain_id"]] = p
             by_prov[prov] = min(p, by_prov.get(prov, p))
     return MapView(frozenset(known), frozenset(connected), frozenset(kinds), by_id, by_prov,
-                   _expresses_order(data.get("policy")))
+                   _expresses_order(data.get("policy")), frozenset(unavailable))
 
 
 _lock = threading.Lock()
@@ -165,7 +169,7 @@ def apply_to_chain(
         v = view or load_view()
         if v is None or not out:
             return out
-        kept = [m for m in out if v.provider_ok(_provider(key(m)))]
+        kept = [m for m in out if key(m) not in v.unavailable and v.provider_ok(_provider(key(m)))]
         if not kept:
             return []   # every entry is map-known and disconnected: no external route
         if reorder and v.orders:

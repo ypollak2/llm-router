@@ -19,6 +19,7 @@ import os
 import tempfile
 import time
 import urllib.request
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -181,6 +182,9 @@ class MapInputs:
     policy: str | None = None
     codex_daily_limit: int = DEFAULT_CODEX_DAILY
     keys: Callable[[], list] | None = None   # -> list[discovery.keys.KeyInfo]; None -> discover()
+    previous: dict | None = None
+    probe_local: Callable[[str, str], bool] | None = None
+    list_ok: Callable[[dict], bool] | None = None
     now: float | None = None
 
 
@@ -405,9 +409,98 @@ def _competence_default_path() -> Path:
     return paths.state_path("local_eligibility.json")
 
 
+def _ollama_base(inp: MapInputs) -> str:
+    return (inp.ollama_url or inp.env.get("OLLAMA_URL") or inp.env.get("OLLAMA_API_BASE")
+            or "http://localhost:11434").rstrip("/")
+
+
+def _default_probe_local(inp: MapInputs, base: str, model: str) -> bool:
+    body = {"model": model, "prompt": "hi", "stream": False, "options": {"num_predict": 1}}
+    got = inp.http_post(f"{base}/api/generate", body)
+    return isinstance(got, dict) and "response" in got
+
+
+def _default_list_ok(inp: MapInputs, row: dict) -> bool:
+    key = row.get("key")
+    if not isinstance(key, dict):
+        return False
+    var = str(row.get("resource", "")).split("/", 1)[-1]
+    value = inp.env.get(var)
+    if not value:
+        return False
+    from llm_router.resolver import auth_ping
+    return auth_ping.http_ping(key.get("provider", ""), value) == 200
+
+
+def _row_check(inp: MapInputs, row: dict) -> Callable[[], bool]:
+    if row.get("kind") == "local" and str(row.get("resource", "")).startswith("ollama/"):
+        name = str(row["resource"]).split("/", 1)[1]
+        base = _ollama_base(inp)
+        if inp.probe_local is not None:
+            return lambda: bool(inp.probe_local(base, name))
+        return lambda: _default_probe_local(inp, base, name)
+    if row.get("kind") == "api":
+        if inp.list_ok is not None:
+            return lambda: bool(inp.list_ok(row))
+        return lambda: _default_list_ok(inp, row)
+    return lambda: False
+
+
+def carry_forward_health(rows: list[dict], previous: dict | None, inp: MapInputs, now: float) -> None:
+    """Carry local/API health forward across fresh inventory rows."""
+    if not isinstance(previous, dict):
+        return
+    from llm_router import map_health
+
+    prev = {
+        r.get("resource"): r for r in previous.get("resources", [])
+        if isinstance(r, dict) and r.get("kind") in ("local", "api")
+    }
+    for row in rows:
+        if row.get("kind") not in ("local", "api"):
+            continue
+        old = prev.get(row.get("resource"))
+        if not old:
+            continue
+        h = old.get("health")
+        if not isinstance(h, dict) and "unavailable_until" not in old:
+            continue
+        if isinstance(h, dict):
+            row["health"] = deepcopy(h)
+        if "unavailable_until" in old:
+            row["unavailable_until"] = old.get("unavailable_until")
+        if row.get("status") != "connected":
+            map_health.mark_absent_for_compile(row, now)
+            continue
+        if old.get("status") == map_health.STATE:
+            original_reason = row.get("reason", "")
+            row["status"] = map_health.STATE
+            until = row.get("unavailable_until")
+            left = (until is not None and until <= now
+                    and map_health.try_leave(row, now, _row_check(inp, row)()))
+            if left:
+                row["reason"] = original_reason
+            else:
+                until = row.get("unavailable_until")
+                row["status"] = map_health.STATE
+                row["reason"] = (
+                    f"temporarily unavailable until {_iso(until)}; "
+                    f"previous status {(h or {}).get('previous_status') or 'connected'}"
+                )
+            map_health.mark_absent_for_compile(row, now)
+            continue
+        failures = [
+            float(t) for t in row.get("health", {}).get("failures", [])
+            if isinstance(t, (int, float)) and now - float(t) <= map_health.WINDOW_S
+        ]
+        if row.get("kind") == "local" and failures:
+            map_health.record(row, _row_check(inp, row)(), now)
+        map_health.mark_absent_for_compile(row, now)
+
+
 def build(inputs: MapInputs | None = None) -> dict:
     """The map, built from *inputs* (default: this machine)."""
-    inp = inputs or MapInputs(competence_path=_competence_default_path())
+    inp = inputs or MapInputs(competence_path=_competence_default_path(), previous=load_map())
     now = time.time() if inp.now is None else inp.now
     if inp.seats is None:
         inp.seats = _default_seats()
@@ -435,6 +528,7 @@ def build(inputs: MapInputs | None = None) -> dict:
             policy = get_config().llm_router_routing_policy
         except Exception:
             policy = "balanced"
+    carry_forward_health(rows, inp.previous, inp, now)
     _prioritise(rows, policy, now)
     return {"schema": SCHEMA, "generated_at": _iso(now), "policy": policy, "resources": rows}
 
@@ -488,6 +582,8 @@ def refresh_if_stale(inputs: MapInputs | None = None, *, path: Path | None = Non
         age = age_seconds(cur, now)
         if age is not None and 0 <= age <= max_age_s:
             return cur
+    if inputs is not None and inputs.previous is None:
+        inputs.previous = cur
     data = build(inputs)
     write_map(data, path)
     return data

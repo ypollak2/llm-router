@@ -3425,7 +3425,7 @@ async def _dispatch_model_loop(
                 except Exception as _esc_err:  # never let scoring break routing
                     log.debug("quality escalation check skipped: %s", _esc_err)
 
-            tracker.record_success(provider)
+            tracker.record_success(provider, model=model)
             await cost.log_usage(
                 response, task_type, profile, correlation_id=correlation_id,
                 reason=REASON_ROUTER_CHAIN,
@@ -3628,7 +3628,7 @@ async def _dispatch_model_loop(
                     error_type=type(e).__name__,
                     fallback_reason="auth_error",
                 )
-                tracker.record_failure(provider)
+                tracker.record_failure(provider, model=model)
             else:
                 await _notify(ctx, "warning", f"{model} failed: {e} — trying next...")
                 log.warning("Model %s failed: %s", model, e)
@@ -3640,7 +3640,7 @@ async def _dispatch_model_loop(
                     error_type=type(e).__name__,
                     fallback_reason="provider_error",
                 )
-                tracker.record_failure(provider)
+                tracker.record_failure(provider, model=model)
             # CHZ-AUD-A-01: record the FAILED provider attempt in the execution
             # ledger. Provider errors (rate-limit/auth/outage/generic) were
             # invisible to the ledger — only accepted/rejected attempts emitted —
@@ -3760,7 +3760,7 @@ async def _dispatch_model_loop(
                             correlation_id=correlation_id,
                         )
 
-                    tracker.record_success(provider)
+                    tracker.record_success(provider, model=model)
                     await cost.log_usage(
                         response, task_type, RoutingProfile.BUDGET,
                         correlation_id=correlation_id,
