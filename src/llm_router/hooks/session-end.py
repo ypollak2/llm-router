@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 30
+# llm_router-hook-version: 31
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -2236,7 +2236,8 @@ def _condense(summary: str) -> str:
 #: Steps the child runs, in order; each is fail-open on its own.
 _STOP_BACKGROUND_STEPS = ("_refresh_northstar_line", "_fetch_live_usage",
                           "_build_and_save_learned_profile",
-                          "_maybe_rescan_profile", "_maybe_evaluate_models")
+                          "_maybe_rescan_profile", "_maybe_evaluate_models",
+                          "_link_decision_outcomes")
 _STOP_NOTES_FILENAME = "stop_notes.json"
 #: A note older than this is dropped rather than shown.
 _STOP_NOTES_MAX_AGE_S = 24 * 3600
@@ -2411,6 +2412,15 @@ def _cached_northstar_line(session_id: str, now: float | None = None) -> str | N
         return d["line"]
     except Exception:  # noqa: BLE001
         return None
+
+
+def _link_decision_outcomes() -> None:
+    """P1.7: link engine decisions to outcomes (24 h window) and backfill the last 7 days of daily
+    accuracy/drift records. Both are idempotent; a missing ledger makes them no-ops."""
+    from llm_router import decision_report, outcome_link
+
+    outcome_link.link()
+    decision_report.backfill_daily(7)
 
 
 def _run_background_stop_work() -> None:
