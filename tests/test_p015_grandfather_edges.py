@@ -24,7 +24,7 @@ def state(tmp_path, monkeypatch):
     monkeypatch.setattr(md, "_grandfather_cache", None)
     monkeypatch.setattr(
         config, "get_config",
-        lambda: SimpleNamespace(all_openai_compat_models=lambda: []),
+        lambda: SimpleNamespace(legacy_compat_history_ids=lambda: []),
     )
     return home
 
@@ -61,7 +61,7 @@ def test_discover_first_claim_includes_compat(state, monkeypatch, compat_id):
     write_upgrade_cache(state)
     monkeypatch.setattr(
         config, "get_config",
-        lambda: SimpleNamespace(all_openai_compat_models=lambda: [compat_id]),
+        lambda: SimpleNamespace(legacy_compat_history_ids=lambda: [compat_id]),
     )
     discover._update_discovery_cache([{"name": "a:7b"}])
     assert claimed_ids(state) == ["ollama/a:7b", "openai_compat/lmstudio-x"]

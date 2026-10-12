@@ -884,20 +884,44 @@ class RouterConfig(BaseSettings):
                 for m in self.openai_compat_models.split(",")
                 if m.strip()
             ]
-        # Auto-detect: find first running non-Ollama OpenAI-compat platform
+        # Auto-detect: read the resource map first (no rebuild, no network); the router
+        # can reach one base URL, so only the first runtime's models are returned.
         try:
             import os
             if not os.getenv("PYTEST_CURRENT_TEST"):
+                from llm_router.resource_map import load_map
+
+                rows = [
+                    r for r in (load_map() or {}).get("resources", [])
+                    if str(r.get("chain_id", "")).startswith("openai_compat/")
+                    and r.get("status") == "connected" and r.get("privacy") == "local"
+                    and str(r.get("endpoint", "")).startswith("http://localhost:")
+                ]
+                if rows:
+                    first = rows[0]["endpoint"]
+                    object.__setattr__(self, "openai_compat_base_url", f"{first}/v1")
+                    return [r["chain_id"] for r in rows if r["endpoint"] == first]
                 from llm_router.local_platforms import get_first_openai_compat
                 result = get_first_openai_compat()
                 if result:
                     _url, models = result
                     # Temporarily set so OpenAICompatQuirks can read the base_url
                     object.__setattr__(self, "openai_compat_base_url", _url)
-                    return [f"openai_compat/{m}" for m in models[:5] if m]
+                    return [f"openai_compat/{m}" for m in models if m]
         except Exception:
             pass
         return []
+
+    def legacy_compat_history_ids(self) -> list[str]:
+        """The ids the router could have injected before the 5-model cap was removed.
+
+        Feeds the one-time grandfather file, so removing the cap does not widen
+        first-run grandfathering (P0.15); models beyond these stay behind the gate.
+        """
+        ids = self.all_openai_compat_models()
+        if self.openai_compat_base_url and self.openai_compat_models:
+            return ids          # explicit config was never capped
+        return ids[:5]
 
     def model_post_init(self, __context: dict) -> None:
         # Skip in test mode (pytest sets this env var)

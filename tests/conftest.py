@@ -511,6 +511,9 @@ def no_providers_env(monkeypatch):
         def all_openai_compat_models(self):
             return []
 
+        def legacy_compat_history_ids(self):
+            return self.all_openai_compat_models()[:5]
+
         def apply_keys_to_env(self):
             pass  # No-op
 

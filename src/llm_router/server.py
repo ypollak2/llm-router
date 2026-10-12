@@ -495,8 +495,8 @@ def main():
     # Auto-detect local LLM platforms and print a summary on first run.
     # Best-effort — never blocks or crashes startup on failure.
     try:
-        from llm_router.local_platforms import print_startup_summary
-        print_startup_summary()
+        from llm_router.local_platforms import print_startup_summary_from_map
+        print_startup_summary_from_map()
     except Exception:
         pass
     mcp.run()

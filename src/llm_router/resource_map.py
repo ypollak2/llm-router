@@ -370,6 +370,24 @@ def _ollama_rows(inp: MapInputs, now: float) -> list[dict]:
     return rows
 
 
+def _compat_rows(inp: MapInputs) -> list[dict]:
+    """Local OpenAI-compatible runtimes (LM Studio, Jan, vLLM, ...), one row per model. Fails open."""
+    try:
+        from llm_router.resolver import inventory
+
+        probes = inventory.Probes(environ=inp.env, http_get=lambda u, t: inp.http_get(u))
+        rows = []
+        for key, entry in inventory._compat_entries(inventory._openai_compat_runtimes(probes)):
+            rows.append(_row(
+                entry.id, "local", entry.id, status="connected", reason=entry.path_detail,
+                marginal_cost={"value": 0.0, "label": "local; electricity not counted"},
+                capabilities=["generate"], limits={}, privacy=entry.privacy,
+                runtime=key, endpoint=entry.exec_path))
+        return rows
+    except Exception:  # noqa: BLE001 - the map must still build
+        return []
+
+
 def _key_rows(inp: MapInputs) -> list[dict]:
     if inp.keys is not None:
         infos = inp.keys()
@@ -426,6 +444,7 @@ def build(inputs: MapInputs | None = None) -> dict:
         _gemini_row(seats.gemini, inp, now),
         _copilot_row(seats.copilot),
         *_ollama_rows(inp, now),
+        *_compat_rows(inp),
         *_key_rows(inp),
     ]
     policy = inp.policy

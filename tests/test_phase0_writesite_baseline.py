@@ -45,6 +45,9 @@ class _Cfg:
     def all_openai_compat_models(self):
         return []
 
+    def legacy_compat_history_ids(self):
+        return self.all_openai_compat_models()[:5]
+
 
 @pytest.mark.asyncio
 async def test_accepted_attempt_carries_nonzero_baseline_and_classifier_cost(
