@@ -110,7 +110,7 @@ def test_direct_row_carries_the_payload_session_on_usage(temp_db):
                      session_id="sdk")  # a placeholder, not a session
 
     assert _rows(temp_db, "SELECT session_id FROM usage ORDER BY id") == [
-        ("3f2a9c1e-0000-4000-8000-000000000001",), (None,)]
+        ("3f2a9c1e-0000-4000-8000-000000000001",), ("unknown:non_mcp",)]
 
 
 def test_log_usage_stamps_the_mcp_call_session(temp_db, monkeypatch):
@@ -130,7 +130,8 @@ def test_log_usage_stamps_the_mcp_call_session(temp_db, monkeypatch):
             call_identity.reset(token)
 
     asyncio.run(_write())
-    assert _rows(temp_db, "SELECT session_id FROM usage ORDER BY id") == [(None,), ("sess-mcp-42",)]
+    assert _rows(temp_db, "SELECT session_id FROM usage ORDER BY id") == [
+        ("unknown:non_mcp",), ("sess-mcp-42",)]
 
 
 def test_legacy_usage_table_accepts_null_task_type_after_migration(tmp_path, monkeypatch):

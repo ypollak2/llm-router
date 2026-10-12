@@ -1346,9 +1346,10 @@ async def log_usage(
             trace for the same routing call (first 8 chars of UUID4).
         complexity: Task complexity level (simple, moderate, complex).
         session_id: The caller's Claude Code session id (P0.8). Stored only if it is
-            an id (``call_identity.ledger_session_id``); placeholders become NULL.
-            Omitted, the MCP call's own session (``call_identity.call_session_id``)
-            is used, which is None outside an MCP tool call. Never guessed.
+            an id (``call_identity.ledger_session_id``). Omitted, the MCP call's own
+            session (``call_identity.call_session_id``) is used. If none resolves
+            (placeholder, or outside an MCP call) the row gets ``unknown:<door>``, never
+            NULL and never a guessed session.
         task_type_raw: The label a writer could not map onto ``TaskType``; pass it
             with ``task_type=None`` so the row says "unknown" instead of a default.
         reason: Short code for the route that made this row (the ``REASON_*``
@@ -1380,8 +1381,11 @@ async def log_usage(
     user_id, project_id = _get_team_identity()
     from llm_router import call_identity as _call_identity
 
-    ledger_sid = (_call_identity.call_session_id() if session_id is None
-                  else _call_identity.ledger_session_id(session_id))
+    # P0.8: never NULL. A row whose session cannot be resolved says so (``unknown:<door>``),
+    # which G3 counts as missing; it is not a guessed session.
+    ledger_sid = ((_call_identity.call_session_id() if session_id is None
+                   else _call_identity.ledger_session_id(session_id))
+                  or _call_identity.unknown_session())
     db = await _get_db()
     try:
         # Local providers (ollama, codex, openai_compat) are free — override any calculated cost

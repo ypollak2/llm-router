@@ -1148,7 +1148,8 @@ _PRD_SQL_TABLE = {"usage": "usage", "routing_decisions": "routing_decisions",
 
 
 def _prd_session(sid: Any) -> str | None:
-    return sid if isinstance(sid, str) and sid not in ("", "unknown") else None
+    return (sid if isinstance(sid, str) and sid not in ("", "unknown")
+            and not sid.startswith("unknown:") else None)
 
 
 def _prd_proxy_values(row: dict) -> dict[str, Any]:

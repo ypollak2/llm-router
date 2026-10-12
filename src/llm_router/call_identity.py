@@ -56,7 +56,10 @@ TOOL_USE_META_KEY = "claudecode/toolUseId"
 _ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 _PLACEHOLDERS = frozenset({"sdk", "unknown", "none", "null", "default"})
 
+UNKNOWN_PREFIX = "unknown:"
+
 _TOOL_USE_ID: ContextVar[str | None] = ContextVar("llm_router_tool_use_id", default=None)
+_IN_MCP_CALL: ContextVar[bool] = ContextVar("llm_router_in_mcp_call", default=False)
 
 
 def clean_id(value: Any) -> str | None:
@@ -80,9 +83,33 @@ def mcp_session_id() -> str | None:
             or ledger_session_id(os.environ.get("CLAUDE_SESSION_ID")))
 
 
+def in_mcp_call() -> bool:
+    """True inside an MCP tool call: ``IdentityMCPServer.call_tool`` is on the stack."""
+    return _IN_MCP_CALL.get() or tool_use_id() is not None
+
+
 def call_session_id() -> str | None:
-    """``mcp_session_id()`` inside an MCP tool call (a ``tool_use`` id is bound), else None."""
-    return mcp_session_id() if tool_use_id() is not None else None
+    """``mcp_session_id()`` inside an MCP tool call, else None.
+
+    "Inside" means ``call_tool`` is running, whether or not the client sent a
+    ``tool_use`` id. Keying on the id alone left a NULL ``usage.session_id`` for every
+    call from a client that sends no ``_meta`` (live 2026-10-11: ids 1885-1887).
+    """
+    return mcp_session_id() if in_mcp_call() else None
+
+
+#: Door names for ``unknown_session``: where a row was written when no session resolved.
+DOOR_MCP, DOOR_NON_MCP = "mcp", "non_mcp"
+
+
+def unknown_session(door: str | None = None) -> str:
+    """The explicit value for a row whose session could not be resolved: ``unknown:<door>``.
+
+    Never NULL (P0.8) and never a real-looking session. ``door`` defaults to where the
+    call came from. G3 counts this value as missing (``kpi._prd_session``), so it
+    cannot lift the completeness figure.
+    """
+    return f"{UNKNOWN_PREFIX}{door or (DOOR_MCP if in_mcp_call() else DOOR_NON_MCP)}"
 
 
 class LedgerGuard:
@@ -149,9 +176,11 @@ def __getattr__(name: str):
 
         async def call_tool(self, name, arguments, context=None):  # type: ignore[override]
             token = bind(tool_use_id_from_context(context))
+            flag = _IN_MCP_CALL.set(True)
             try:
                 return await super().call_tool(name, arguments, context)
             finally:
+                _IN_MCP_CALL.reset(flag)
                 reset(token)
 
     globals()["IdentityMCPServer"] = IdentityMCPServer
