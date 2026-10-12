@@ -516,6 +516,8 @@ def _shadow_run(text: str, door: str, rules_task: str | None, rules_complexity: 
 
 _SHADOW_QUEUE_MAX = 256
 _pool_lock = threading.Lock()
+# One ThreadPoolExecutor worker, not a daemon thread: it is joined at interpreter exit, so queued
+# rows finish (or the exit waits for at most the 256 queued items) before the process ends.
 _pool = None
 _pending = 0
 
@@ -557,7 +559,8 @@ def shadow(text: str, *, door: str, rules_task: str | None, rules_complexity: st
     """Shadow mode: compute the engine's Decision and log it beside the rules class.
 
     Call it AFTER the rules decision, and never use the result to route. ``background=True`` (the
-    long-lived server doors: proxy, gateway, MCP, router) queues the work to one daemon thread, so
+    long-lived server doors: proxy, gateway, MCP, router) queues the work to one
+    ThreadPoolExecutor worker (NOT a daemon thread: the worker is joined at interpreter exit, and the queue is bounded at 256 items), so
     the request path pays only the queue put and the result is None; the hooks are short-lived
     processes and run it inline with ``l1_only=True``. Returns the Decision when run inline (None
     when the mode is not ``shadow`` or the engine failed). Never raises into the request path: any

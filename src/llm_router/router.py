@@ -1136,14 +1136,15 @@ def _resolve_profile(
             # with the gateway/hook so a fix to the algorithm lands in one place.
             # PLAN v16 P1.6 / D-72: this partition routes; the one engine (door "router")
             # runs after it in shadow, or decides under LLM_ROUTER_ENGINE_MODE=decide.
-            from llm_router import engine
+            from llm_router import engine_door
             from llm_router.classify import ROUTER_POLICY, complexity_for
 
-            if engine.decides():
-                c = Complexity(engine.decide(prompt, door="router").complexity)
+            _d = engine_door.decision(prompt, door="router")
+            if _d is not None:
+                c = Complexity(_d.complexity)
             else:
                 c = complexity_for(prompt, policy=ROUTER_POLICY)
-                engine.shadow(prompt, door="router", rules_task=None, rules_complexity=c.value, background=True)
+                engine_door.shadow(prompt, door="router", rules_task=None, rules_complexity=c.value)
         if c == Complexity.DEEP_REASONING:
             use_thinking = True
         resolved = _COMPLEXITY_TO_PROFILE.get(c, config.llm_router_profile)

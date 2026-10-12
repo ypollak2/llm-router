@@ -361,17 +361,16 @@ def _classify_class(text: str, *, capabilities: bool = True) -> tuple[str, str]:
     PLAN v16 P1.6 / D-72: ``classify_signals(GATEWAY_POLICY)`` decides, exactly as before the
     wiring; the one engine only runs after it, in shadow. ``LLM_ROUTER_ENGINE_MODE=decide`` makes
     the engine decide, reusing the hook's Decision for this turn by ``text_sha`` (P1.6-h)."""
-    from llm_router import engine
+    from llm_router import engine_door
 
-    if engine.decides():
-        d = engine.decide_for_proxy(text)
+    d = engine_door.decision(text, door="proxy", proxy=True)
+    if d is not None:
         return d.task_type, d.complexity
     from llm_router.classify import GATEWAY_POLICY, classify_signals
 
     sig = classify_signals(text, GATEWAY_POLICY, capabilities=capabilities)
     out = sig.task_type.value, sig.complexity.value
-    engine.shadow(text, door="proxy", rules_task=out[0], rules_complexity=out[1],
-                  background=True)
+    engine_door.shadow(text, door="proxy", rules_task=out[0], rules_complexity=out[1])
     return out
 
 

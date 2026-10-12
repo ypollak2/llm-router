@@ -101,9 +101,13 @@ def test_every_remaining_rules_classifier_is_paired_with_the_engine():
     assert {"classify.py", "engine.py", "ensemble.py"} <= set(found), sorted(found)
     others = {m: c for m, c in found.items() if m not in ALLOWED}
     assert len(others) >= 7, sorted(others)  # the doors: gateway, proxy, 3 hooks, router, agentic
-    unpaired = [m for m in others
-                if "engine.shadow(" not in (SRC / m).read_text(encoding="utf-8")
-                or "decides()" not in (SRC / m).read_text(encoding="utf-8")]
+    # The server doors pair through llm_router.engine_door (fail-open seam); the hooks call engine directly.
+    def paired(m: str) -> bool:
+        t = (SRC / m).read_text(encoding="utf-8")
+        return (("engine.shadow(" in t and "decides()" in t)
+                or ("engine_door.shadow(" in t and "engine_door.decision(" in t))
+
+    unpaired = [m for m in others if not paired(m)]
     assert unpaired == [], "a rules classifier with no engine shadow/decide pairing: %s" % unpaired
 
 

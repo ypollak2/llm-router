@@ -67,12 +67,18 @@ def _engine_mode() -> str:
     (``shadow``) this is main's ``LLM_ROUTER_ENSEMBLE`` switch unchanged: the LLM-first ensemble
     unless ``off`` (cloud classifier). ``engine`` only when ``LLM_ROUTER_ENGINE_MODE=decide`` and
     ``LLM_ROUTER_ENSEMBLE`` is unset or ``engine``; ``legacy`` then keeps the old path."""
-    from llm_router import engine
+    from llm_router import engine_door
 
     raw = os.environ.get("LLM_ROUTER_ENSEMBLE")
     v = (raw if raw is not None else "on").strip().lower()
-    if engine.decides() and (raw is None or v in ("", "engine")):
+    if (raw is None or v in ("", "engine")) and engine_door.decides():
         return "engine"
+    return _rules_mode()
+
+
+def _rules_mode() -> str:
+    """``legacy`` (ensemble) or ``off`` (cloud classifier) from ``LLM_ROUTER_ENSEMBLE``; no engine."""
+    v = os.environ.get("LLM_ROUTER_ENSEMBLE", "on").strip().lower()
     return "legacy" if v in ("legacy", "1", "true", "on", "yes") else "off"
 
 
@@ -234,8 +240,13 @@ async def classify_for_routing(prompt: str, **_legacy_kwargs) -> "Classification
     timeout because a 10s cap would kill it on a cold local model.
     """
     if _engine_mode() == "engine":
-        return engine_classification(prompt)
-    if _ensemble_enabled():
+        try:
+            return engine_classification(prompt)
+        except Exception as exc:  # noqa: BLE001 — an engine failure routes with the rules
+            from llm_router import failopen
+
+            failopen.record("LR-FO-ENGINE-DOOR", exc)
+    if _rules_mode() == "legacy":
         timeout = float(os.environ.get("LLM_ROUTER_ENSEMBLE_TIMEOUT", "120"))
         result = await classify_ensemble(
             prompt, primary=_primary_model(), secondary=_secondary_model(), timeout_seconds=timeout
@@ -251,10 +262,10 @@ async def classify_for_routing(prompt: str, **_legacy_kwargs) -> "Classification
 def _engine_shadow(prompt: str, result) -> None:
     """Log the engine's Decision beside the rules result (D-72). Never raises."""
     try:
-        from llm_router import engine
+        from llm_router import engine_door
 
-        engine.shadow(prompt, door="mcp", rules_task=getattr(result.inferred_task_type, "value", None),
-                      rules_complexity=getattr(result.complexity, "value", None), background=True)
+        engine_door.shadow(prompt, door="mcp", rules_task=getattr(result.inferred_task_type, "value", None),
+                           rules_complexity=getattr(result.complexity, "value", None))
     except Exception as exc:  # noqa: BLE001 — shadow must not touch routing
         from llm_router import failopen
 
