@@ -9,7 +9,8 @@ the transcript's assistant entry. The transcript says what the call was:
 ``turn``          the FIRST assistant message of a main-thread turn that a typed prompt started;
 ``continuation``  a later assistant message of a main-thread turn (after a tool result);
 ``meta``          the first assistant message of a turn that no typed prompt started: a slash
-                  command, a sub-agent hand-back or peer message, other ``isMeta`` input;
+                  command, a task notification, a sub-agent hand-back or peer message, other
+                  ``isMeta`` input (P1.9: not a human turn);
 ``sidechain``     a sub-agent call (the one role that takes a call out of O3's turns). Claude Code writes a sub-agent's work in
                   ``<projects>/<project>/<session>/subagents/**/agent-*.jsonl`` (every entry
                   ``isSidechain: true``; workflow agents sit one level deeper, under
@@ -17,15 +18,18 @@ the transcript's assistant entry. The transcript says what the call was:
                   file;
 ``orphan``        the session HAS a transcript and no assistant message in it has this id: the call
                   was never part of the conversation (a permission classifier, a prompt suggestion,
-                  a title or summary side query). On the one measured session, 548 of 813 "turns"
-                  were such calls.
+                  a title or summary side query). On the one session measured at M0.3 (b9f04425,
+                  W0), 548 of 813 "turns" were such calls (PR #295). P1.9: not a human turn.
 
 ``None`` (from :func:`thread_lookup`) means the session has no transcript at all, so nothing can
 be said about the call.
 
-"Typed prompt" has one definition, shared with ``o3_integrity.py``: a ``user`` entry that is not a
-sidechain, not ``isMeta``, has non-blank text (a tool result has none) and does not start with
-``<command-``. Reads message ids and entry kinds only: no prompt text leaves a transcript.
+"Typed prompt": a ``user`` entry that is not a sidechain, not ``isMeta``, has non-blank text (a tool
+result has none), does not start with ``<command-`` and was not injected by the harness. Injected =
+``promptSource == "system"`` or an ``origin.kind`` other than ``human`` (a ``task-notification`` is
+``promptSource=system`` with ``isMeta`` false: on the M0.3 session 113 of 209 "typed prompts" were such
+notifications, PR #295). ``$PP/scripts/o3_integrity.py`` still counts them (it is the frozen M0.3 gate); its
+P1.9 variant does not. Reads message ids and entry kinds only: no prompt text leaves a transcript.
 """
 from __future__ import annotations
 
@@ -52,9 +56,18 @@ def typed_text(content: Any) -> str | None:
     return None
 
 
+def is_injected(entry: dict) -> bool:
+    """The harness wrote this user entry (task notification, peer message), not a person."""
+    if entry.get("promptSource") == "system":
+        return True
+    origin = entry.get("origin")
+    kind = origin.get("kind") if isinstance(origin, dict) else None
+    return isinstance(kind, str) and kind != "human"
+
+
 def is_typed_prompt(entry: dict) -> bool:
-    """A ``user`` transcript entry the owner's definition counts as a typed human prompt."""
-    if entry.get("type") != "user" or entry.get("isSidechain") or entry.get("isMeta"):
+    """A ``user`` transcript entry counted as a typed human prompt (see the module docstring)."""
+    if entry.get("type") != "user" or entry.get("isSidechain") or entry.get("isMeta") or is_injected(entry):
         return False
     msg = entry.get("message")
     text = typed_text(msg.get("content") if isinstance(msg, dict) else None)
@@ -96,7 +109,7 @@ def _scan_main(path: Path, out: dict[str, str]) -> None:
                 text = typed_text(msg.get("content") if isinstance(msg, dict) else None)
                 if text is None or not text.strip():
                     state = "tool"
-                elif d.get("isMeta") or text.lstrip().startswith("<command-"):
+                elif d.get("isMeta") or is_injected(d) or text.lstrip().startswith("<command-"):
                     # injected input never demotes a typed prompt or a tool result it follows
                     if state not in ("human", "tool"):
                         state = "meta"

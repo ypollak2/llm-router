@@ -49,6 +49,9 @@ class _AuditConfig:
     ) -> None:
         self.available_providers = available_providers
         self._ollama_models = ollama_models or []
+        # P0.15: the models a test names are USER-CONFIGURED, so the promote gate keeps them
+        # where they were; these tests are about provider availability and ordering.
+        self.ollama_budget_models = ",".join(self._ollama_models)
 
     def all_ollama_models(self) -> list[str]:
         return list(self._ollama_models)

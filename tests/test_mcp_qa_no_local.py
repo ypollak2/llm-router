@@ -21,12 +21,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+
 import tests.test_tq007_daily_cap_downgrade as t
 from llm_router import router as router_module
 from llm_router.config import RouterConfig, get_config
 from llm_router.northstar import QA_TASK_TYPES
 from llm_router.router import _QA_STRIP_PROVIDERS, _build_and_filter_chain, _strip_local_for_qa
 from llm_router.types import LOCAL_PROVIDERS, Complexity, LLMResponse, RoutingProfile, TaskType
+
+
+@pytest.fixture(autouse=True)
+def _models_are_user_configured(monkeypatch):
+    """P0.15: the local models these tests name are configured, so the promote gate leaves them in place."""
+    monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "qwen3.5:latest,hermes3:8b,qwen3-coder:30b,qwen2.5:7b")
+
 
 OLLAMA = "ollama/qwen3.5:latest"
 # The five task types MCP llm() / llm_* tools can route. Each is Q&A except code.

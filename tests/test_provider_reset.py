@@ -15,6 +15,7 @@ captured 2026-10-03.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -184,6 +185,9 @@ class TestPersistence:
         """A hook process records the reset; this process (the MCP server) sees it."""
         env = {
             "PATH": "/usr/bin:/bin",
+            "HOME": os.environ["HOME"],
+            "USERPROFILE": os.environ["HOME"],
+            "LLM_ROUTER_HOME": os.environ["LLM_ROUTER_HOME"],
             "LLM_ROUTER_PROVIDER_RESET_PATH": str(provider_reset._state_file()),
         }
         script = (
@@ -208,6 +212,9 @@ class TestPersistence:
         n = 10
         env = {
             "PATH": "/usr/bin:/bin",
+            "HOME": os.environ["HOME"],
+            "USERPROFILE": os.environ["HOME"],
+            "LLM_ROUTER_HOME": os.environ["LLM_ROUTER_HOME"],
             "LLM_ROUTER_PROVIDER_RESET_PATH": str(provider_reset._state_file()),
         }
         script = (

@@ -30,14 +30,16 @@ LOCAL_FIVE = ("ollama", "lm_studio", "vllm", "llamacpp", "openai_compat")
 ZONES = ("green", "yellow", "orange", "red", "critical")
 
 
-def _fake_local() -> list[ModelSpec]:
-    return [ModelSpec(p, f"{p}-model") for p in LOCAL_FIVE]
+def _fake_local(*_args, **_kwargs) -> tuple[list[ModelSpec], list[ModelSpec]]:
+    # P0.15: `_ollama_models` returns (validated, unvalidated); all of these are validated.
+    return [ModelSpec(p, f"{p}-model") for p in LOCAL_FIVE], []
 
 
 @pytest.fixture
 def all_providers(monkeypatch):
     """Every local provider is 'installed' and both external keys are set."""
     monkeypatch.setattr(chain_builder, "_ollama_models", _fake_local)
+    monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "ollama-model,openai_compat-model")   # P0.15: configured
     monkeypatch.setenv("GEMINI_API_KEY", "test-not-a-key")
     monkeypatch.setenv("OPENAI_API_KEY", "test-not-a-key")
 
@@ -73,7 +75,7 @@ def test_qa_chain_with_only_local_installed_is_empty_so_the_hook_falls_through(m
 def test_code_keeps_local_first_and_unchanged(all_providers, complexity):
     chain = chain_builder.build_chain(complexity, "green", "code")
     assert chain[0].provider == "ollama"
-    assert chain[: len(LOCAL_FIVE)] == _fake_local()
+    assert chain[: len(LOCAL_FIVE)] == _fake_local()[0]
 
 
 def test_sdk_query_never_calls_ollama(monkeypatch, all_providers):

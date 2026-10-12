@@ -118,15 +118,16 @@ def test_plan_fixture_n4_numerator1(_isolated, monkeypatch):
     assert (b["n"], b["offload_kept"], b["local_n"]) == (4, 1, 1)
     assert (b["local_assist_n"], b["local_assist_redone"]) == (1, 0)
     assert o3["excluded"]["subagent_first"] == 2
-    assert o3["kept_in"] == {"meta_first": 0, "unjoined": 0, "no_transcript": 0}
+    assert o3["kept_in"] == {"no_transcript": 0} and o3["excluded"]["unjoined"] == 0
     assert b["claude_n"] == 3
 
 
-def test_scorecard_turns_follow_the_owner_definition_the_transcript_only_removes_subagents(_isolated):
-    """M0.3 review fix, end to end through the scorecard. Owner's rule: a turn is a proxy row that is
-    not a side call and not a continuation. The transcript takes out the sub-agent first call and
-    nothing else: the classifier calls it never saw and the answer to a hand-back STAY IN (counted
-    in ``kept_in``), and a row the proxy flagged side_call is NOT promoted to a turn."""
+def test_scorecard_turns_are_typed_prompt_answers_the_transcript_takes_out_the_rest(_isolated):
+    """P1.9 (was M0.3's "unjoined rows stay in"), end to end through the scorecard. A turn is a proxy
+    row that is not a side call and not a continuation AND the first answer to a typed prompt. The
+    transcript takes out the sub-agent first call, the classifier calls it never saw (548 of 813 "turns"
+    at M0.3) and the answer to a hand-back (counted in ``excluded``); a row the proxy flagged side_call
+    is NOT promoted to a turn."""
     _write_transcripts(_isolated,
                        ["u:typed", "a:m1", "u:tool", "a:m1c",       # typed turn + continuation
                         "u:typed", "a:m2",                           # typed turn, proxy flagged it side_call
@@ -141,10 +142,10 @@ def test_scorecard_turns_follow_the_owner_definition_the_transcript_only_removes
              proxy_row(6, sid=SID, ts=t + 170, kind="organic", msg_id="classifier-2"),
              proxy_row(7, sid=SID, ts=t + 200, kind="organic", msg_id="peer")])
     o3 = kpi.compute_scorecard(days=7, now=NOW)["o3"]
-    assert o3["breakdown"]["n"] == 4                      # m1, classifier-1, classifier-2, peer
+    assert o3["breakdown"]["n"] == 1                      # m1 only
     assert o3["excluded"]["subagent_first"] == 1 and o3["excluded"]["side_call"] == 1
-    assert o3["kept_in"] == {"meta_first": 1, "unjoined": 2, "no_transcript": 0}
-    assert "unjoined" not in o3["excluded"] and "meta_first" not in o3["excluded"]
+    assert o3["excluded"]["unjoined"] == 2 and o3["excluded"]["meta_first"] == 1
+    assert o3["kept_in"] == {"no_transcript": 0}
 
 
 def test_llm_edit_routed_mcp_unit_is_still_joined_next_to_a_zero_claude_row(tmp_path, monkeypatch):
@@ -236,12 +237,12 @@ def _kw():
     return dict(now=NOW, days=7, allowed=frozenset({"organic"}), kind_of=lambda s, st: st)
 
 
-def test_calls_the_transcript_never_saw_stay_in_as_turns_and_are_counted():
-    """PLAN M0.3(b): "Unjoined rows stay in". (They were taken out by the first repair, which
-    swapped in a different turn definition; the owner's is restored.)"""
+def test_calls_the_transcript_never_saw_are_not_turns_and_are_counted():
+    """P1.9 task 1, cause 1 (PR #295: 548 of 813 "turns" were calls in no message of the session's
+    transcript: permission classifier, suggestions, side queries). They are not human turns."""
     rows = [proxy_row(1, sid=SID, kind="organic", msg_id="x"), proxy_row(2, sid=SID, kind="organic", msg_id="y")]
     built = osh.build_units(rows, [], thread_of=lambda sid, m: "orphan", **_kw())
-    assert len(osh.turn_units(built["units"])) == 2 and built["unjoined"] == 2
+    assert osh.turn_units(built["units"]) == [] and built["unjoined"] == 2
     assert built["subagent_first"] == 0 and built["no_transcript"] == 0
 
 
@@ -252,15 +253,28 @@ def test_session_without_a_transcript_keeps_the_proxy_only_rule_and_says_so():
     assert built["unjoined"] == 0 and built["subagent_first"] == 0
 
 
-def test_first_call_of_injected_input_stays_a_turn_and_is_counted():
+def test_first_call_of_injected_input_is_not_a_turn_and_is_counted():
+    """P1.9 task 1, cause 2: a task notification / peer message / slash command is not a human turn."""
     rows = [proxy_row(1, sid=SID, kind="organic", msg_id="t"), proxy_row(2, sid=SID, kind="organic", msg_id="p")]
     built = osh.build_units(rows, [], thread_of=lambda sid, m: {"t": "turn", "p": "meta"}[m], **_kw())
-    assert len(osh.turn_units(built["units"])) == 2 and built["meta_first"] == 1
+    assert [u["msg_id"] for u in osh.turn_units(built["units"])] == ["t"] and built["meta_first"] == 1
+
+
+def test_session_without_a_transcript_uses_the_ledgers_own_reading_of_the_turn():
+    """No transcript: ``harness_turn`` and a ``turn_origin`` that is not human text are not turns
+    (task notification); ``typed`` and a pre-field null origin are."""
+    rows = [proxy_row(1, sid=SID, kind="organic", msg_id="a", **{"turn_origin": "typed"}),
+            proxy_row(2, sid=SID, kind="organic", msg_id="b", **{"turn_origin": "task_notification"}),
+            proxy_row(3, sid=SID, kind="organic", msg_id="c"),
+            proxy_row(4, sid=SID, kind="organic", msg_id="d", step="harness_turn", **{"turn_origin": "other_tag"})]
+    built = osh.build_units(rows, [], thread_of=lambda sid, m: None, **_kw())
+    assert [u["msg_id"] for u in osh.turn_units(built["units"])] == ["a", "c"]
+    assert built["ledger_not_human"] == 2 and built["no_transcript"] == 2
 
 
 def test_transcript_does_not_override_step_class_or_the_side_call_flag():
-    """The owner's rule is on the proxy row. Whatever role the transcript gives a row, only
-    ``sidechain`` changes the turn count."""
+    """The proxy row's step and side-call flag come first. Whatever role the transcript gives a row,
+    only ``sidechain``, ``orphan`` and ``meta`` take a turn-first row out; ``continuation`` does not."""
     rows = [proxy_row(1, sid=SID, kind="organic", msg_id="a", reason="side_call"),       # flagged: not a turn
             proxy_row(2, sid=SID, kind="organic", msg_id="b", step="continuation"),      # continuation: not a turn
             proxy_row(3, sid=SID, kind="organic", msg_id="c"),                           # turn
@@ -565,8 +579,8 @@ def test_subagent_first_label_is_a_turn_only_with_a_main_thread_join():
             for i, m in enumerate(["main", "meta", "side", "orphan", "cont"], start=1)]
     roles = {"main": "turn", "meta": "meta", "side": "sidechain", "orphan": "orphan", "cont": "continuation"}
     joined = osh.build_units(rows, [], thread_of=lambda sid, m: roles[m], **_kw())
-    assert [u["msg_id"] for u in osh.turn_units(joined["units"])] == ["main", "meta"]
-    assert joined["step_subagent_first"] == 3
+    assert [u["msg_id"] for u in osh.turn_units(joined["units"])] == ["main"]
+    assert joined["step_subagent_first"] == 4
     plain = osh.build_units(rows, [], **_kw())
     assert osh.turn_units(plain["units"]) == [] and plain["step_subagent_first"] == 5
     nojoin = osh.build_units(rows, [], thread_of=lambda sid, m: None, **_kw())
@@ -587,8 +601,8 @@ def test_step_class_side_call_without_the_side_call_reason_is_counted():
 
 def test_turnfirst1_kinds_harness_turn_is_a_turn_and_subagent_turn_needs_a_main_thread_join():
     """TURNFIRST-1 split two kinds out of ``turn_first``. A ``harness_turn`` (main-thread notification /
-    command echo) begins a turn as it did when it was labelled ``turn_first`` (the owner's definition keeps
-    injected input in n). A ``subagent_turn`` (a later sub-agent call) follows the ``subagent_first`` rule:
+    command echo) is not a human turn (P1.9; M0.3 kept it in n) unless a transcript says a person typed it.
+    A ``subagent_turn`` (a later sub-agent call) follows the ``subagent_first`` rule:
     not a turn, and not a redo-window boundary, unless the transcript puts it on the main thread."""
     t = NOW - 3000
     rows = [proxy_row(1, sid=SID, kind="organic", ts=t, msg_id="a", tier="haiku"),
@@ -598,12 +612,12 @@ def test_turnfirst1_kinds_harness_turn_is_a_turn_and_subagent_turn_needs_a_main_
             proxy_row(5, sid=SID, kind="organic", ts=t + 4, msg_id="x", tier="opus", reason="escalation")]
     plain = osh.build_units(rows, [], **_kw())
     turns = osh.turn_units(plain["units"])
-    assert [u["msg_id"] for u in turns] == ["a", "h", "x"]
-    assert plain["step_subagent_turn"] == 2
+    assert [u["msg_id"] for u in turns] == ["a", "x"]
+    assert plain["step_subagent_turn"] == 2 and plain["ledger_not_human"] == 1
     assert turns[0]["redone"] is True     # the two sub-agent calls did not push the escalation out of the window
     roles = {"a": "turn", "s1": "turn", "s2": "sidechain", "h": "meta", "x": "turn"}
     joined = osh.build_units(rows, [], thread_of=lambda sid, m: roles[m], **_kw())
-    assert [u["msg_id"] for u in osh.turn_units(joined["units"])] == ["a", "s1", "h", "x"]
+    assert [u["msg_id"] for u in osh.turn_units(joined["units"])] == ["a", "s1", "x"]
     assert joined["step_subagent_turn"] == 1 and joined["meta_first"] == 1
 
 
