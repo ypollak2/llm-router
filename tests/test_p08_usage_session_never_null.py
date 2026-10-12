@@ -59,10 +59,15 @@ def test_env_session_outside_an_mcp_call_is_still_not_stamped(temp_db, monkeypat
     assert _sessions(temp_db) == ["unknown:non_mcp"]
 
 
+def _cc_ctx():
+    from types import SimpleNamespace as NS
+    params = NS(client_info=NS(name="claude-code"))
+    return NS(request_context=NS(meta={}, session=NS(client_params=params)))
+
+
 def test_mcp_call_without_a_tool_use_id_gets_the_env_session(temp_db, monkeypatch):
-    """The reproduced trigger: inside call_tool on stdio, client sent no _meta toolUseId."""
+    """The reproduced trigger: client is Claude Code (clientInfo) but sent no _meta toolUseId."""
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-mcp-1")
-    monkeypatch.setattr(call_identity, "_STDIO_TRANSPORT", True)  # server.main() sets this
 
     async def tool() -> str:
         assert call_identity.tool_use_id() is None  # the client sent none
@@ -72,7 +77,7 @@ def test_mcp_call_without_a_tool_use_id_gets_the_env_session(temp_db, monkeypatc
 
     server = call_identity.IdentityMCPServer("probe")
     server.tool()(tool)
-    asyncio.run(server.call_tool("tool", {}, None))
+    asyncio.run(server.call_tool("tool", {}, _cc_ctx()))
     assert _sessions(temp_db) == ["sess-mcp-1"]
     assert not call_identity.in_mcp_call()  # flag does not leak out of the call
 

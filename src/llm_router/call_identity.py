@@ -38,16 +38,20 @@ other writers (the hook DIRECT path, agent-route, the SDK), and also refuses the
 placeholders some of them pass (``sdk``, ``unknown``): those are not sessions.
 
 ``call_session_id()`` is what the router stamps. The environment id is the server
-process's, fixed at start, so it is stamped only where that process serves one
-Claude Code session: (a) when a ``tool_use`` id is bound (the client is Claude Code), or
-(b) inside a ``call_tool`` on the stdio transport (``server.main`` calls
-``mark_stdio_transport()``; Claude Code spawns one stdio server per session). On SSE
-(many clients, one process), or on a host that inherited the variable from a shell
-(Desktop, Cursor, Codex), a call with no ``tool_use`` id gets None, which the writers
-record as ``unknown:mcp``: a wrong real-looking id is worse than that. Outside any MCP
-call it is None as well: ``CLAUDE_CODE_SESSION_ID`` is also in every Bash tool shell,
-so a gateway or ``route_server`` started from one would otherwise stamp that one
-session on every call it later serves.
+process's, fixed at start, and also inherited by every child of a Claude Code shell
+(Codex, Cursor, Desktop spawning the same stdio server), so it is stamped only when
+the call itself shows it came from Claude Code: (a) a ``tool_use`` id is bound, or
+(b) the MCP client named itself ``claude-code`` in the ``initialize`` handshake
+(``clientInfo.name``, read per server session from the request, never per process;
+the exact name was captured from a real handshake, see ``mcp_roots.py``). Any other
+call (Codex, Cursor, Desktop, unknown client, no ``clientInfo``) gets None, which the
+writers record as ``unknown:mcp``: a wrong real-looking id is worse than that. Outside
+any MCP call it is None as well: ``CLAUDE_CODE_SESSION_ID`` is also in every Bash tool
+shell, so a gateway or ``route_server`` started from one would otherwise stamp that
+one session on every call it later serves. Remaining limits: several Claude Code
+sessions sharing one SSE process, with a bound ``tool_use`` id, still read that
+process's one env id; and a stale id after ``/clear`` on a long-lived server, which
+``offload_share`` corrects at read time.
 
 Light on purpose: ``savings_logger`` imports this inside the UserPromptSubmit hook, so
 the MCP server stack (+234 ms measured) loads only when ``IdentityMCPServer`` is used.
@@ -67,6 +71,10 @@ UNKNOWN_PREFIX = "unknown:"
 
 _TOOL_USE_ID: ContextVar[str | None] = ContextVar("llm_router_tool_use_id", default=None)
 _IN_MCP_CALL: ContextVar[bool] = ContextVar("llm_router_in_mcp_call", default=False)
+_CLIENT_IS_CLAUDE_CODE: ContextVar[bool] = ContextVar("llm_router_client_is_cc", default=False)
+
+#: ``clientInfo.name`` Claude Code sends in ``initialize`` (real handshake, 2.1.267).
+CLAUDE_CODE_CLIENT_NAME = "claude-code"
 
 
 def clean_id(value: Any) -> str | None:
@@ -90,13 +98,13 @@ def mcp_session_id() -> str | None:
             or ledger_session_id(os.environ.get("CLAUDE_SESSION_ID")))
 
 
-_STDIO_TRANSPORT = False
-
-
-def mark_stdio_transport() -> None:
-    """Called by ``server.main`` before ``mcp.run()`` (stdio): this process serves one client."""
-    global _STDIO_TRANSPORT
-    _STDIO_TRANSPORT = True
+def client_is_claude_code(context: Any) -> bool:
+    """True when this request's MCP session identified itself as Claude Code (``clientInfo.name``)."""
+    try:
+        name = context.request_context.session.client_params.client_info.name
+    except Exception:  # noqa: BLE001 -- no session / no clientInfo / another mcp shape
+        return False
+    return isinstance(name, str) and name.strip().lower() == CLAUDE_CODE_CLIENT_NAME
 
 
 def is_unknown_session(sid: Any) -> bool:
@@ -111,7 +119,7 @@ def in_mcp_call() -> bool:
 
 def call_session_id() -> str | None:
     """``mcp_session_id()`` when it provably belongs to this call, else None (see module doc)."""
-    if tool_use_id() is not None or (_IN_MCP_CALL.get() and _STDIO_TRANSPORT):
+    if tool_use_id() is not None or (_IN_MCP_CALL.get() and _CLIENT_IS_CLAUDE_CODE.get()):
         return mcp_session_id()
     return None
 
@@ -195,9 +203,11 @@ def __getattr__(name: str):
         async def call_tool(self, name, arguments, context=None):  # type: ignore[override]
             token = bind(tool_use_id_from_context(context))
             flag = _IN_MCP_CALL.set(True)
+            cc = _CLIENT_IS_CLAUDE_CODE.set(client_is_claude_code(context))
             try:
                 return await super().call_tool(name, arguments, context)
             finally:
+                _CLIENT_IS_CLAUDE_CODE.reset(cc)
                 _IN_MCP_CALL.reset(flag)
                 reset(token)
 

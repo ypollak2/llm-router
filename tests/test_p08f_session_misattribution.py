@@ -1,9 +1,10 @@
 """P0.8 hardening: the env session is stamped only where it provably belongs to the call.
 
-``CLAUDE_CODE_SESSION_ID`` is the MCP server process's, fixed at start. It is right for a
-Claude Code stdio server (one per session); wrong for SSE (many clients, one process) and
-for hosts that inherited it from a shell. A wrong real-looking id is worse than
-``unknown:mcp``. Also pins the shared ``is_unknown_session`` predicate in each reader.
+``CLAUDE_CODE_SESSION_ID`` is the MCP server process's, and every child of a Claude Code
+shell inherits it (Codex, Cursor, Desktop). It is stamped only when the call shows it came
+from Claude Code: a bound ``tool_use`` id, or ``clientInfo.name == "claude-code"`` in the
+initialize handshake of the request's own MCP session. Anything else is ``unknown:mcp``.
+Also pins the shared ``is_unknown_session`` predicate in each reader.
 """
 from __future__ import annotations
 
@@ -23,7 +24,6 @@ SID = "11111111-aaaa-bbbb-cccc-222222222222"
 def _env(monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID)
     monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
-    monkeypatch.setattr(ci, "_STDIO_TRANSPORT", False)
 
 
 def _probe(seen: list):
@@ -36,96 +36,81 @@ def _probe(seen: list):
     return server
 
 
-def _ctx(tool_use: str | None):
+def _ctx(tool_use: str | None = None, client: str | None = None):
+    """A request context shaped like the MCP SDK's: meta + session.client_params.client_info."""
     meta = {ci.TOOL_USE_META_KEY: tool_use} if tool_use else {}
-    return SimpleNamespace(request_context=SimpleNamespace(meta=meta))
+    params = SimpleNamespace(client_info=SimpleNamespace(name=client)) if client else None
+    session = SimpleNamespace(client_params=params)
+    return SimpleNamespace(request_context=SimpleNamespace(meta=meta, session=session))
 
 
-def _call(stdio: bool, tool_use: str | None):
-    ci._STDIO_TRANSPORT = stdio
+def _call(tool_use: str | None = None, client: str | None = None):
     seen: list = []
-    asyncio.run(_probe(seen).call_tool("tool", {}, _ctx(tool_use)))
+    asyncio.run(_probe(seen).call_tool("tool", {}, _ctx(tool_use, client)))
     return seen[0]
 
 
-def test_stdio_without_meta_stamps_the_env_session():
-    assert _call(True, None) == SID
+@pytest.mark.parametrize("client", ["claude-code", "Claude-Code"])
+def test_claude_code_client_without_meta_stamps_the_env_session(client):
+    assert _call(client=client) == SID
 
 
-def test_sse_without_meta_is_not_stamped():
-    assert _call(False, None) is None
+@pytest.mark.parametrize("client", ["codex", "cursor", "claude-ai", "", None])
+def test_other_or_missing_client_without_meta_is_unknown_even_with_env_set(client):
+    assert _call(client=client) is None
     assert ci.unknown_session(ci.DOOR_MCP) == "unknown:mcp"
 
 
-@pytest.mark.parametrize("stdio", [True, False])
-def test_with_a_tool_use_id_the_env_session_is_stamped_on_both_transports(stdio):
-    assert _call(stdio, "toolu_01ABC") == SID
+def test_missing_context_is_unknown():
+    seen: list = []
+    asyncio.run(_probe(seen).call_tool("tool", {}, None))
+    assert seen == [None]
 
 
-def test_outside_a_call_nothing_is_stamped_even_on_stdio():
-    ci._STDIO_TRANSPORT = True
+@pytest.mark.parametrize("client", ["codex", None, "claude-code"])
+def test_a_bound_tool_use_id_stamps_the_env_session(client):
+    assert _call(tool_use="toolu_01ABC", client=client) == SID
+
+
+def test_outside_a_call_nothing_is_stamped():
     assert ci.call_session_id() is None
 
 
-def test_server_main_marks_stdio_and_sse_entry_points_do_not():
-    import inspect
-
+def test_server_main_leaves_no_global_state(monkeypatch):
+    """server.main() once set a module flag that outlived the run and changed later tests."""
     from llm_router import server
 
-    assert "mark_stdio_transport()" in inspect.getsource(server.main)
-    assert "mark_stdio_transport" not in inspect.getsource(server.main_sse)
-    assert "mark_stdio_transport" not in inspect.getsource(server.main_sse_secured)
+    before = {k: v for k, v in vars(ci).items() if isinstance(v, (bool, int, str, type(None)))}
+    monkeypatch.setattr(server, "_critical_modules_or_die", lambda: None)
+    monkeypatch.setattr(server, "_startup_verify_or_die", lambda: None)
+    monkeypatch.setattr(server, "mcp", type("M", (), {"run": lambda self: None})())
+    server.main()
+    after = {k: v for k, v in vars(ci).items() if isinstance(v, (bool, int, str, type(None)))}
+    assert after == before
+    assert _call(client="codex") is None  # a later non-Claude-Code call is still unknown
 
 
-def test_interleaved_calls_with_different_ids_do_not_leak():
-    ci._STDIO_TRANSPORT = False
-    seen: dict[str, list] = {"a": [], "b": []}
+def test_interleaved_calls_from_different_sessions_do_not_leak():
+    seen: dict[str, list] = {"cc": [], "codex": []}
     gate_a, gate_b = asyncio.Event(), asyncio.Event()
 
     async def run():
         async def tool(who: str) -> str:
-            seen[who].append((ci.tool_use_id(), ci.call_session_id()))
-            (gate_b if who == "a" else gate_a).set()
-            await (gate_a if who == "a" else gate_b).wait()  # interleave: each waits for the other
-            seen[who].append((ci.tool_use_id(), ci.call_session_id()))
+            seen[who].append(ci.call_session_id())
+            (gate_b if who == "cc" else gate_a).set()
+            await (gate_a if who == "cc" else gate_b).wait()  # each waits for the other
+            seen[who].append(ci.call_session_id())
             return who
 
         server = ci.IdentityMCPServer("probe")
         server.tool()(tool)
-        await asyncio.gather(server.call_tool("tool", {"who": "a"}, _ctx("toolu_A")),
-                             server.call_tool("tool", {"who": "b"}, _ctx("toolu_B")))
-        assert not ci.in_mcp_call() and ci.tool_use_id() is None and ci.call_session_id() is None
+        await asyncio.gather(server.call_tool("tool", {"who": "cc"}, _ctx(client="claude-code")),
+                             server.call_tool("tool", {"who": "codex"}, _ctx(client="codex")))
+        assert not ci.in_mcp_call() and ci.call_session_id() is None
 
     asyncio.run(run())
-    assert seen["a"] == [("toolu_A", SID)] * 2
-    assert seen["b"] == [("toolu_B", SID)] * 2
-
-
-def test_interleaved_bare_and_bound_calls_do_not_share_the_flag():
-    """A bare call on SSE running beside a bound one must stay unknown."""
-    ci._STDIO_TRANSPORT = False
-    got: dict[str, str | None] = {}
-    bound_in, bare_done = asyncio.Event(), asyncio.Event()
-
-    async def run():
-        async def tool(who: str) -> str:
-            if who == "bound":
-                bound_in.set()
-                await bare_done.wait()
-            else:
-                await bound_in.wait()
-            got[who] = ci.call_session_id()
-            if who == "bare":
-                bare_done.set()
-            return who
-
-        server = ci.IdentityMCPServer("probe")
-        server.tool()(tool)
-        await asyncio.gather(server.call_tool("tool", {"who": "bound"}, _ctx("toolu_A")),
-                             server.call_tool("tool", {"who": "bare"}, _ctx(None)))
-
-    asyncio.run(run())
-    assert got == {"bound": SID, "bare": None}
+    assert seen["cc"] == [SID, SID]
+    assert seen["codex"] == [None, None]
 
 
 # ── the shared predicate and its readers ─────────────────────────────────────
