@@ -449,8 +449,9 @@ def stop_default_poller(timeout: float = 10.0) -> bool:
     """Stop and join this process's default poller (if any); True when none is left running.
 
     A process that must make no outbound connection (the synthetic-replay harness
-    run in-process) calls this: ``import llm_router.server`` starts the poller, and
-    its next tick would probe Ollama through the harness' network guard."""
+    run in-process) calls this before installing its guard: a poller started by an
+    entry point (``server.main``, ``main_sse*``, ``cmd_proxy``) would otherwise probe
+    Ollama through the harness' network guard on its next tick."""
     global _default_poller
     p, _default_poller = _default_poller, None
     if p is None:
