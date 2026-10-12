@@ -39,6 +39,7 @@ from llm_router.local_context_guard import (
 # wrappers/aliases because hooks, registries and tests import them from here.
 from llm_router.toolkit import tools as _kit
 from llm_router.toolkit.adapters import ollama as _ollama
+from llm_router.write_policy import check_command
 
 
 # ── Tool Definitions (sent to the LLM) ───────────────────────────────────────
@@ -335,6 +336,11 @@ def _run_command_line(cmd: str, project_root: Path) -> str:
             allowed, refusal = _writes.guard_command(seg["argv"])
             if not allowed:
                 return refusal
+    # P2.9-b: static tripwire (not a sandbox) — a non-allow verdict never runs.
+    verdict = check_command(cmd, project_root)
+    if verdict.decision != "allow":
+        return (f"Error: write policy {verdict.decision} ({verdict.reason}) "
+                f"— not run: {cmd[:120]}")
     # R4: the child gets an ALLOWLISTED environment, never the parent's — the
     # allowlist above permits programs that can read os.environ. Fail-closed.
     try:
