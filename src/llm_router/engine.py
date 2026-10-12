@@ -500,7 +500,7 @@ def _decide_light(text: str, *, door: str, lexical: bool) -> Decision:
 
 
 def _shadow_run(text: str, door: str, rules_task: str | None, rules_complexity: str | None,
-                l1_only: bool) -> Decision | None:
+                l1_only: bool, log_path: str | None = None) -> Decision | None:
     try:
         d = _decide_light(text, door=door, lexical=not l1_only)
         row = dataclasses.asdict(d)
@@ -509,7 +509,10 @@ def _shadow_run(text: str, door: str, rules_task: str | None, rules_complexity: 
         row.update(ts=round(time.time(), 3), door=door, l1_only=bool(l1_only), rules_task_type=rules_task,
                    rules_complexity=rules_complexity, rules_tier=rtier,
                    agree=bool(rtier == d.tier and rules_task == d.task_type))
-        capped_log.append(state_path(SHADOW_LOG), (json.dumps(row, separators=(",", ":")) + "\n").encode(),
+        # The background worker may run after the caller's environment changed (a test restoring
+        # HOME, a reloaded config), so the queued path is the one resolved at enqueue time.
+        target = Path(log_path) if log_path else state_path(SHADOW_LOG)
+        capped_log.append(target, (json.dumps(row, separators=(",", ":")) + "\n").encode(),
                           _SHADOW_MAX_BYTES)
         return d
     except Exception as exc:  # noqa: BLE001 — a shadow classifier must never touch routing
@@ -573,7 +576,7 @@ def shadow(text: str, *, door: str, rules_task: str | None, rules_complexity: st
         return None
     if background:
         try:
-            _submit((text, door, rules_task, rules_complexity, l1_only))
+            _submit((text, door, rules_task, rules_complexity, l1_only, str(state_path(SHADOW_LOG))))
         except Exception as exc:  # noqa: BLE001
             failopen.record("LR-FO-ENGINE-SHADOW", exc)
         return None
