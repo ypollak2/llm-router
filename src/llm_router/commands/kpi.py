@@ -1943,16 +1943,19 @@ def _o3_with_caveat(o3: dict) -> dict:
 
 def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[dict],
                       now: float, since_policy: str | None = None,
-                      win: "_Window | None" = None, g3: dict | None = None) -> dict:
+                      win: "_Window | None" = None, g3: dict | None = None,
+                      inputs: tuple | None = None, thread_of=None) -> dict:
+    """``inputs`` (:func:`_o3_unit_inputs`) and ``thread_of`` may be passed in so ``_offload_prd`` shares
+    their (expensive) reads with this function; omitted, they are read here."""
     from llm_router import northstar as ns
     from llm_router import offload_share as osh
     from llm_router import redo_signal
 
     try:
-        local, band, outcomes, edits, kept = _o3_unit_inputs(days, index, now, win)
+        local, band, outcomes, edits, kept = inputs or _o3_unit_inputs(days, index, now, win)
         from llm_router import o3_transcripts
 
-        thread_of = o3_transcripts.thread_lookup()
+        thread_of = thread_of or o3_transcripts.thread_lookup()
         detector_flags = redo_signal.session_flags_loader(ns.claude_projects_dir())
 
         def build(untagged_organic: bool = False) -> dict:
@@ -1974,6 +1977,8 @@ def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[
         res["excluded"] = {"side_call": built["side_call_excluded"], "untagged": built["untagged"],
                            "other_kind": built["other_kind"], "local_no_session": built["local_no_session"],
                            "subagent_first": built["subagent_first"],
+                           "meta_first": built["meta_first"], "unjoined": built["unjoined"],
+                           "ledger_not_human": built["ledger_not_human"],
                            "no_step_class": built["no_step_class"],
                            "step_subagent_first": built["step_subagent_first"],
                            "step_subagent_turn": built["step_subagent_turn"],
@@ -1983,23 +1988,23 @@ def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[
                            "local_failed": built["local_failed"],
                            "local_untagged": built["local_untagged"],
                            "local_other_kind": built["local_other_kind"]}
-        # NOT excluded: turn rows the transcript says were not a typed prompt's first answer. They
-        # stay in n (PLAN M0.3b, "unjoined rows stay in"); the counts say how big that gap is.
-        res["kept_in"] = {"meta_first": built["meta_first"], "unjoined": built["unjoined"],
-                          "no_transcript": built["no_transcript"]}
+        # Kept in n on the proxy-only rule: turn rows of a session with no transcript (P1.9 moved the
+        # transcript-decided kinds, injected-input first calls and calls in no transcript message, to
+        # ``excluded``: they were 548 + 162 of the 813 "turns" at M0.3).
+        res["kept_in"] = {"no_transcript": built["no_transcript"]}
         note = (f"{res['breakdown']['window_open']} turn(s) have fewer than {osh.REDO_TURNS} human turns "
                 f"after them (counted as not redone, may still change); excluded: "
                 f"{built['side_call_excluded']:,} Claude Code side call(s), "
                 f"{built['subagent_first']:,} sub-agent first call(s), "
+                f"{built['meta_first']:,} first call(s) of injected input (task notification, slash command, "
+                f"peer message), {built['unjoined']:,} call(s) in no message of their session's transcript, "
+                f"{built['ledger_not_human']:,} turn row(s) the ledger says were not typed (no transcript), "
                 f"{built['no_step_class']:,} with no step_class (not a turn), "
                 f"{built['step_subagent_first']:,} labelled subagent_first, "
                 f"{built['step_subagent_turn']:,} labelled subagent_turn, "
                 f"{built['step_side_call']:,} labelled side_call, "
                 f"{built['untagged']:,} untagged, {built['other_kind']:,} other-kind; "
-                f"kept in n although the transcript says they were not a typed prompt's first answer: "
-                f"{built['meta_first']:,} injected-input first call(s) (slash command, sub-agent "
-                f"hand-back, task notification), {built['unjoined']:,} call(s) in no message of their "
-                f"session's transcript; {built['no_transcript']:,} turn row(s) with no transcript "
+                f"{built['no_transcript']:,} turn row(s) kept in with no transcript "
                 f"(may include sub-agent first calls)")
         if built["local_failed"]:
             note += f", {built['local_failed']:,} local call(s) the router flagged failed (success=0)"
@@ -2014,6 +2019,74 @@ def _o3_offload_share(days: int, allowed: frozenset[str], index, all_rows: list[
     except Exception as exc:  # noqa: BLE001 -- an O3 failure must not take the scorecard down
         res = _not_measurable(f"O3 computation failed ({type(exc).__name__})")
     return res
+
+
+#: Owner decision D-58: who may validate the O3 turn count (P1.9-a). Printed with the O3 warning.
+P19A_POPULATION_NOTE = (
+    "O3 validation population (D-58): kind organic, >= 50 typed prompts (P1.9 definition) and >= 1 proxy turn, "
+    "proxy coverage >= 95% (ledger msg_ids / main-thread transcript assistant message ids); a session below the "
+    "coverage bar is UNMEASURABLE (reported with its coverage ratio), never a fail; a live coordinator session "
+    "never counts")
+
+
+def _offload_prd(days: float, allowed: frozenset[str], index, all_rows: list[dict], now: float,
+                 win: "_Window | None", o3: dict, inputs: tuple, thread_of) -> dict:
+    """``data["offload"]`` (PLAN v16 P1.9, section 1.1): the S1 offload share per ``action``, per proxy
+    ``call``, per human ``turn`` (O3), the ``spread`` line (work another Frontier subscription served; never
+    in a numerator, D-24), and the split ``by_lane`` / ``by_task_type``. Every line is ``{k, n, value,
+    wilson95, n_sessions, largest_session_share, window}``. The definitions live in ``offload_share`` and
+    ``lane_quality``; this function only feeds them and attaches the caveats."""
+    from llm_router import lane_quality
+    from llm_router import northstar as ns
+    from llm_router import offload_share as osh
+
+    since = now - days * 86400.0
+    window = {"since": _iso(since), "until": _iso(now)}
+    try:
+        _, band, outcomes, edits, _ = inputs
+        mcp = list(ns.local_shadow_units(days=_wall_days(days, win), all_providers=True))
+        res = osh.action_units(
+            since, now, proxy_rows=all_rows, mcp_rows=mcp, edit_rows=edits, allowed=allowed,
+            kind_of=lambda sid, stamp: index.resolve(sid, stamp=stamp).kind, thread_of=thread_of,
+            band_redone=band, outcome_redos=outcomes)
+    except Exception as exc:  # noqa: BLE001 -- must not take the scorecard down
+        return {"measurable": False, "reason": f"offload computation failed ({type(exc).__name__})",
+                "window": window}
+    out = osh.summarize_actions(res["actions"], window)
+    turns = osh.turn_units(res["built"]["units"])       # the same units O3 counts
+    s = osh.summarize(turns)
+    out["turn"] = {**osh.rate_line(s["offload_kept"], s["n"], (u["session_id"] for u in turns), window),
+                   "caveats": [o3["caveat"], P19A_POPULATION_NOTE] if o3.get("caveat") else []}
+    caveats = []
+    if not res["sampled"]:
+        caveats.append("no quality-sampled lane: lane_quality.jsonl holds no passing audit or shadow-pair batch "
+                       f"in the {lane_quality.WINDOW_DAYS} days before the window end, so the action numerator is 0 by "
+                       "rule and every row counts in the denominator only (PLAN v16 section 1.1)")
+    if "tech_op" not in out["by_task_type"]:
+        caveats.append("no model-served technical op in window (technical_ops.jsonl is written from P2.1)")
+    caveats += [
+        "the redo detector is not informative (precision 2/5, recall 2/12, PLAN section 1.1): 'not redone' is "
+        "true almost always, which is why the lane rule applies to every lane",
+        "sub-agent spawns routed through the MCP path cannot be told from MCP calls in usage.db: they count "
+        "under door mcp",
+    ]
+    ex = res["excluded"]
+    orphans = sum(1 for a in res["actions"] if a.get("orphan"))
+    if orphans:
+        caveats.append(f"{orphans:,} of {len(res['actions']):,} actions are proxy rows in no message of their "
+                       "session's transcript (permission classifier, suggestion, side query): not turns, but "
+                       "still in the action and call denominators")
+    if ex["local_no_session"]:
+        caveats.append(f"{ex['local_no_session']:,} MCP call(s) with no session id are not counted (lower bound)")
+    if out["window_open"]:
+        caveats.append(f"{out['window_open']:,} action(s) have fewer than {osh.REDO_TURNS} human turns after them "
+                       "(counted as not redone, may still change)")
+    out["caveats"] = caveats
+    out["excluded"] = ex
+    out["quality_sampled_lanes"] = [
+        {"door": d, "served_class": c, "task_group": g, **info} for (d, c, g), info in sorted(res["sampled"].items())]
+    out["window"] = window
+    return out
 
 
 def _o3_bound(headline: dict, alt_built: dict, coverage: float) -> dict:
@@ -2088,6 +2161,27 @@ def _local_answers_result(la: dict, local_no_session: int, *, local_failed: int 
                    "not organic, not in any count")
     out["lines"] = [detail]
     return out
+
+
+def _offload_render_lines(off: dict) -> list[str]:
+    """The `offload` block (P1.9) as printed by `kpi`: one line per measure, then the caveats."""
+    if "action" not in off:
+        return [f"  {'Offload share (S1)':<42s} not measurable: {off.get('reason', 'unknown')}"]
+
+    def one(name: str, r: dict) -> str:
+        if not r["n"]:
+            return f"  {name:<42s} not measurable: n=0"
+        lo, hi = r["wilson95"]
+        return (f"  {name:<42s} {_pct(r['value'])} ({r['k']}/{r['n']}, Wilson95 {_pct(lo)}-{_pct(hi)}, "
+                f"{r['n_sessions']} sessions, largest {_pct(r['largest_session_share'])})")
+
+    lines = [one("Offload share, per action (S1)", off["action"]),
+             one("Offload share, per proxy call", off["call"]),
+             one("Offload share, per human turn", off["turn"]),
+             one("Spread (other Frontier subscription)", off["spread"])]
+    lines += [f"      WARNING: {c}" for c in off["turn"].get("caveats", ())]
+    lines += [f"      {c}" for c in off.get("caveats", ())]
+    return lines
 
 
 def _o3_render_lines(o3: dict) -> list[str]:
@@ -2428,6 +2522,11 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
     d5_r = _d5_classifier_accuracy(bench)
     g2_r = _g2_silent_failures(days, now_ts, all_rows)
     g4_r = _g4_wrongly_benched(days, now_ts)
+    from llm_router import o3_transcripts
+    o3_thread_of = o3_transcripts.thread_lookup()      # one transcript read shared by O3 and `offload`
+    o3_inputs = _o3_unit_inputs(days, index, now_ts, win)
+    o3_r = _o3_with_caveat(_o3_offload_share(days, allowed, index, all_rows, now_ts, since_policy, win, g3_r,
+                                             inputs=o3_inputs, thread_of=o3_thread_of))
     card = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ts)),
         "generated_ts": now_ts,
@@ -2439,8 +2538,9 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         "local_shadow": _local_shadow_summary(days, win),
         # O3 is likewise outside "kpis": adding it there would change the key set, _ORDER and
         # the --health counts that NS..G4 consumers read. Rendered as its own line.
-        "o3": _o3_with_caveat(
-            _o3_offload_share(days, allowed, index, all_rows, now_ts, since_policy, win, g3_r)),
+        "o3": o3_r,
+        # PLAN v16 P1.9: the S1 offload share per action / call / turn, spread, lanes. Outside "kpis" too.
+        "offload": _offload_prd(days, allowed, index, all_rows, now_ts, win, o3_r, o3_inputs, o3_thread_of),
         "proxy_local_shadow": _proxy_shadow_summary(days, win),
         # P0.14-a: is the proxy ledger alive? Outside "kpis" (a liveness check, not a KPI).
         "proxy_liveness": _proxy_liveness(now_ts, all_rows,
@@ -2590,6 +2690,8 @@ def render_scorecard(data: dict) -> str:
         lines.append(f"  {key:<42s} {r['value']}   [diagnostic, not a target]")
     if data.get("o3") is not None:
         lines += _o3_render_lines(data["o3"])
+    if data.get("offload") is not None:
+        lines += _offload_render_lines(data["offload"])
     lines.append("")
     local_line = _local_shadow_line(data.get("local_shadow"))
     if local_line:

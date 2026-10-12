@@ -886,6 +886,28 @@ def _seats_report() -> list[str]:
     return lines
 
 
+def _floor_report() -> list[str]:
+    """P0.15 lines: profile.yaml ownership, the promote gate, the grandfather file."""
+    from llm_router import model_discovery as md
+    from llm_router.auto_profile import profile_status_lines
+
+    lines = [_warn(t) for t in profile_status_lines()]
+    if not lines:
+        lines.append(_ok("profile.yaml: absent or still router-written (auto-updates)"))
+    if not md.gate_enabled():
+        lines.append(_warn(f"{md.GATE_ENV}=off: unvalidated local models lead chains again"))
+    status = md.grandfather_status()
+    if status == "missing":
+        lines.append(_warn(
+            "grandfathered_models.json was deleted and is not recreated: no installed "
+            "model is grandfathered, so only configured models keep their place"))
+    elif status == "ok":
+        lines.append(_ok(f"grandfathered_models.json: {len(md.grandfathered_ids())} id form(s)"))
+    else:
+        lines.append(_dim("    grandfathered_models.json: not written yet (first routed prompt writes it)"))
+    return lines
+
+
 def _proxy_default_section(issues: list[str]) -> None:
     """Proxy-default health lines for `llm-router doctor`; appends to ``issues``."""
     try:
@@ -1379,6 +1401,11 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     # the fact), so it warns and never fails.
     print(f"\n{_bold('  Seats (subscriptions this machine is logged in to)')}")
     for line in _seats_report():
+        print(f"  {line}")
+
+    # ── 6c. P0.15 floor: user-owned profile.yaml, unvalidated local models ──
+    print(f"\n{_bold('  Profile and local-model gate')}")
+    for line in _floor_report():
         print(f"  {line}")
 
     print(f"\n{_bold('  Provider API keys')}")

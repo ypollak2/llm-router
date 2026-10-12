@@ -93,7 +93,9 @@ def test_chain_builder_and_the_hook_agree(home, monkeypatch):
     """The two callers that used to disagree must now give the same answer."""
     _cache(home, ["shared:latest"], age_hours=1)
     from llm_router.hooks.chain_builder import _ollama_models
-    assert [m.model for m in _ollama_models()] == ["shared:latest"]
+    front, tail = _ollama_models()
+    # P0.15: discovery.json predates the first gate run, so the model is grandfathered.
+    assert [m.model for m in front] == ["shared:latest"] and tail == []
 
 
 _MIXED = ["nimble:9b", "llmr-classifier:latest", "llmr-classifier-38:latest",
@@ -114,7 +116,7 @@ def test_non_generators_never_reach_the_draft_chain(home, no_role_env):
     assert md.available_ollama_models() == ["qwen3.5:latest"]
     assert md.first_installed() == "qwen3.5:latest"
     from llm_router.hooks.chain_builder import _ollama_models
-    assert [m.model for m in _ollama_models()] == ["qwen3.5:latest"]
+    assert [m.model for m in _ollama_models()[0]] == ["qwen3.5:latest"]
 
 
 def test_a_declared_decision_role_alone_excludes(home, no_role_env):
