@@ -219,7 +219,7 @@ def default_tool_executor(cwd: str | None = None, timeout: float = 30.0) -> Tool
                 verdict = check_command(command, base)
                 if verdict.decision != "allow":
                     return (f"tool error: write policy {verdict.decision} "
-                            f"({verdict.reason}) — not run: {command[:120]}")
+                            f"({verdict.reason}): {command[:120]}")
                 # RED6-01 (P0): an explicit allowlisted env. Without `env=` the
                 # child inherited every provider key in the parent process, so a
                 # single injected `env` / `printenv` in a model-authored command

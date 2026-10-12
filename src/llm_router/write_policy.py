@@ -59,7 +59,31 @@ _WRITE_REDIRECTS = {">", ">>", ">|", "&>", "&>>", "<>", ">&"}
 _READ_REDIRECTS = {"<", "<<", "<<-", "<<<", "<&"}
 _NULL_DEVICES = {"/dev/null", "/dev/stdout", "/dev/stderr"}
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-_WRAPPERS = {"command", "exec", "time", "nohup", "nice", "builtin", "env"}
+_WRAPPERS = {"command", "exec", "time", "nohup", "nice", "builtin", "env", "timeout", "stdbuf"}
+
+_NOT_WIRED = " — not run (needs approval; approval is not wired, so treated as refused)"
+_CAT_HEREDOC = re.compile(
+    r"\$\(\s*cat\s+<<-?\s*(['\"]?)(\w+)\1[ \t]*\n.*?\n[ \t]*\2[ \t]*\n?\s*\)", re.S)
+
+
+def _dollar_paren(cmd: str, i: int) -> tuple[int, bool]:
+    """cmd[i:] starts with ``$(``. Returns (index after the construct, is_substitution).
+    ``$((...))`` is arithmetic; ``$(cat <<E ... E)`` is data (git commit -m "$(cat <<'E'
+    ...)"); anything else is a command substitution the tripwire cannot judge."""
+    if cmd.startswith("$((", i):
+        depth, j = 0, i + 1
+        while j < len(cmd):
+            depth += (cmd[j] == "(") - (cmd[j] == ")")
+            j += 1
+            if depth == 0:
+                inner = cmd[i:j]
+                return j, "$(" in inner[3:] or "`" in inner
+        return len(cmd), True
+    m = _CAT_HEREDOC.match(cmd, i)
+    if m:
+        return m.end(), False
+    return i + 2, True
+
 
 Token = tuple[str, str, bool]          # (kind 'op'|'word', text, has_expansion)
 
@@ -131,7 +155,12 @@ def _tokenize(cmd: str) -> tuple[list[Token], bool]:
                         word.append(cmd[i + 1] if cmd[i + 1] in '"\\$`' else d + cmd[i + 1])
                         i += 2
                         continue
-                    if d == "`" or (d == "$" and cmd[i + 1:i + 2] == "("):
+                    if d == "$" and cmd[i + 1:i + 2] == "(":
+                        i, sub = _dollar_paren(cmd, i)
+                        subst = subst or sub
+                        expands = True
+                        continue
+                    if d == "`":
                         subst = True
                     if d == "$":
                         expands = True
@@ -141,7 +170,12 @@ def _tokenize(cmd: str) -> tuple[list[Token], bool]:
                 word.append(cmd[i + 1] if i + 1 < n else "")
                 i += 2
             else:
-                if c == "`" or (c == "$" and cmd[i + 1:i + 2] == "("):
+                if c == "$" and cmd[i + 1:i + 2] == "(":
+                    i, sub = _dollar_paren(cmd, i)
+                    subst = subst or sub
+                    expands = True
+                    continue
+                if c == "`":
                     subst = True
                 if c == "$":
                     expands = True
@@ -174,6 +208,14 @@ class _Scan:
         if expands:
             self.need(f"write target built from an expansion: {text}")
             return
+        if text == "~-" or text.startswith("~-/"):
+            self.need(f"write target uses ~- (previous directory): {text}")
+            return
+        if text == "~+" or text.startswith("~+/"):
+            if self.cwd is None:
+                self.need(f"write target uses ~+ after an unresolvable cd: {text}")
+                return
+            text = str(self.cwd) + text[2:]
         p = Path(os.path.expanduser(text))
         if not p.is_absolute():
             anchor = base if base is not None else self.cwd
@@ -185,6 +227,14 @@ class _Scan:
         self.targets.append(str(resolved))
         if not resolved.is_relative_to(self.root):
             self.outside.append(str(resolved))
+
+
+_PATH_WRITERS: dict[str, set[str]] = {
+    "touch": {"-d", "-t", "-r", "--date", "--reference"},
+    "mkdir": {"-m", "--mode"},
+    "truncate": {"-s", "-r", "--size", "--reference"},
+    "rm": set(), "chmod": set(), "chown": set(), "chgrp": set(), "rename": set(),
+}
 
 
 def _split_opts(args: list[str]) -> tuple[list[str], list[str]]:
@@ -240,13 +290,20 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
     while i < len(words):                              # strip wrappers
         w = words[i][1]
         base = os.path.basename(w)
-        if _ASSIGN.match(w) or base in _WRAPPERS or (w.startswith("-") and i > 0):
+        if _ASSIGN.match(w) or w in ("{", "!"):
             i += 1
-        elif base in ("sudo", "doas"):
-            scan.need("privilege escalation (sudo)")
+        elif base in _WRAPPERS or base in ("sudo", "doas"):
+            if base in ("sudo", "doas"):
+                scan.need("privilege escalation (sudo)")
             i += 1
-        elif w in ("{", "!"):
-            i += 1
+            # the wrapper's own options (and their values)
+            valued = {"timeout": {"-s", "-k", "--signal", "--kill-after"},
+                      "stdbuf": {"-i", "-o", "-e", "--input", "--output", "--error"},
+                      "nice": {"-n", "--adjustment"}}.get(base, set())
+            while i < len(words) and words[i][1].startswith("-") and words[i][1] != "-":
+                i += 2 if words[i][1] in valued else 1
+            if base == "timeout":
+                i += 1                                 # the DURATION operand
         else:
             break
     if i >= len(words):
@@ -261,15 +318,21 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
 
     if prog in ("cd", "pushd"):
         pos = [a for a in args if not a.startswith("-") or a == "-"]
-        if not pos or pos[0] == "-" or expands.get(pos[0], False) or scan.cwd is None:
+        if not pos or pos[0] == "-" or pos[0].startswith("~-") or expands.get(pos[0], False) or scan.cwd is None:
             scan.cwd = None
         else:
-            p = Path(os.path.expanduser(pos[0]))
+            d0 = pos[0]
+            if d0 == "~+" or d0.startswith("~+/"):
+                d0 = str(scan.cwd) + d0[2:]
+            p = Path(os.path.expanduser(d0))
             scan.cwd = (p if p.is_absolute() else scan.cwd / p).resolve()
         return
     if prog == "popd":
         scan.cwd = None
         return
+    if rest[:1] == ["-"] and (re.fullmatch(r"python[\d.]*", prog) or prog in (
+            "node", "nodejs", "sh", "bash", "zsh", "dash", "ksh", "fish", "perl", "ruby")):
+        scan.need(f"{prog} - (code from stdin)")
     if prog == "eval":
         scan.need("eval")
     elif re.fullmatch(r"python[\d.]*", prog):
@@ -339,6 +402,14 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
             # later `> link/x` in the same command line would not be seen.
             for s in srcs:
                 scan.target(s, expands.get(s, False), base=dest_dir)
+    elif prog in _PATH_WRITERS:
+        takes = _PATH_WRITERS[prog]
+        pos, _ = _positionals(args, takes)
+        if prog in ("chmod", "chown", "chgrp", "rename") and not any(
+                a.startswith("--reference") for a in args):
+            pos = pos[1:]                              # mode / owner / s-expression
+        for a in pos:
+            tgt(a)
     elif prog == "sed":
         if any(re.fullmatch(r"-[nEsurz]*i.*|--in-place(=.*)?", o) for o in args
                if o.startswith("-")):
@@ -377,7 +448,7 @@ def check_command(cmd: str, root: Path) -> Verdict:
     try:
         toks, subst = _tokenize(cmd)
     except ValueError as exc:
-        return Verdict(NEEDS_APPROVAL, f"cannot parse command ({exc})")
+        return Verdict(NEEDS_APPROVAL, f"cannot parse command ({exc})" + _NOT_WIRED)
     scan = _Scan(root)
     if subst:
         scan.need("command substitution can run unseen commands")
@@ -387,6 +458,7 @@ def check_command(cmd: str, root: Path) -> Verdict:
     prev_sep = ""
     stdin_code = False
     k = 0
+    cwd_stack: list[Path | None] = []
 
     def flush(sep: str) -> None:
         nonlocal words, redirs, prev_sep, stdin_code
@@ -398,6 +470,10 @@ def check_command(cmd: str, root: Path) -> Verdict:
         kind, text, exp = toks[k]
         if kind == "op" and text in _SEPARATORS:
             flush(text)
+            if text == "(":
+                cwd_stack.append(scan.cwd)             # a subshell's cd stays inside it
+            elif text == ")" and cwd_stack:
+                scan.cwd = cwd_stack.pop()
         elif kind == "op" and (text in _WRITE_REDIRECTS or text in _READ_REDIRECTS):
             nxt = toks[k + 1] if k + 1 < len(toks) else None
             if nxt is not None and nxt[0] == "op" and nxt[1] == "(" and text in (">", "<"):
@@ -419,7 +495,7 @@ def check_command(cmd: str, root: Path) -> Verdict:
     targets = tuple(scan.targets)
     if scan.outside:
         return Verdict(REFUSE, "write target outside project root: "
-                       + ", ".join(scan.outside), targets)
+                       + ", ".join(scan.outside) + " — not run", targets)
     if scan.approvals:
-        return Verdict(NEEDS_APPROVAL, "; ".join(scan.approvals), targets)
+        return Verdict(NEEDS_APPROVAL, "; ".join(scan.approvals) + _NOT_WIRED, targets)
     return Verdict(ALLOW, "", targets)

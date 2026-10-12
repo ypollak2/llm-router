@@ -339,8 +339,7 @@ def _run_command_line(cmd: str, project_root: Path) -> str:
     # P2.9-b: static tripwire (not a sandbox) — a non-allow verdict never runs.
     verdict = check_command(cmd, project_root)
     if verdict.decision != "allow":
-        return (f"Error: write policy {verdict.decision} ({verdict.reason}) "
-                f"— not run: {cmd[:120]}")
+        return (f"Error: write policy {verdict.decision} ({verdict.reason}): {cmd[:120]}")
     # R4: the child gets an ALLOWLISTED environment, never the parent's — the
     # allowlist above permits programs that can read os.environ. Fail-closed.
     try:

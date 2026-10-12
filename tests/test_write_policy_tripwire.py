@@ -142,3 +142,86 @@ def test_executor_does_not_run_a_refused_command(tree):
     assert "write policy refuse" in res and not (out / "y.txt").exists()
     res = ex("bash", {"command": "echo x > ok.txt"})
     assert "[exit 0]" in res and (root / "ok.txt").read_text() == "x\n"
+
+
+# ---- review round 2 (#442 follow-up): bypasses and false positives ------------
+
+GATED_R2 = [
+    # 1. bare `-` = code from stdin
+    "python3 - <<'E'\nopen('/tmp/q','w').write('x')\nE",
+    "node - <<'E'\nx\nE",
+    "bash - <<'E'\necho x\nE",
+    "perl - <<'E'\nprint 1\nE",
+    "ruby - <<'E'\nputs 1\nE",
+    # 2. timeout / stdbuf wrappers
+    "timeout 5 python -c 'print(1)'",
+    "timeout -s KILL 5 python3 -c 'print(1)'",
+    "stdbuf -o0 python -c 'print(1)'",
+    "timeout 5 tee {out}/x",
+    "timeout -k 2 5 tee {out}/x",
+    "stdbuf -o0 tee {out}/x",
+    # 3. cd chains and path-writing commands
+    "cd .. && touch a",
+    "cd {out} && touch a",
+    "pushd {out} && touch a",
+    "(cd {out}; touch a)",
+    "mkdir {out}/d",
+    "truncate -s 0 {out}/f",
+    "rm {out}/f",
+    "chmod 600 {out}/f",
+    "chown me {out}/f",
+    "rename s/a/b/ {out}/f",
+    "touch -d yesterday {out}/f",
+    # 6. ~+ / ~-
+    "cd {out} && echo x > ~+/f",
+    "echo x > ~-/f",
+]
+ALLOWED_R2 = [
+    "echo $((1+2)) > n",
+    "echo $(( 2 * (3 + 4) )) > n.txt",
+    "git commit -m \"$(cat <<'E'\nfix: thing (with parens)\n\nbody\nE\n)\"",
+    "timeout 5 pytest -q 2>&1 | tee t.log",
+    "stdbuf -o0 make > build.log 2>&1",
+    "timeout -s KILL 5 python script.py",
+    "cd sub && touch a && mkdir -p d",
+    "(cd sub; touch a); touch b",
+    "echo x > ~+/f",
+    "rm tmp.txt",
+    "touch a b c",
+    "chmod 644 f.txt",
+    "python3 script.py -",
+]
+STILL_GATED_SUBST = [
+    "echo $(id) > f",
+    "echo \"$(cat <<'E'\nx\nE\n; id)\"",
+    "echo $(cat f)",
+    "echo $((1+$(id)))",
+    "echo `id`",
+]
+
+
+@pytest.mark.parametrize("tpl", GATED_R2)
+def test_r2_bypasses_are_gated(tree, tpl):
+    root, out = tree
+    v = check_command(tpl.format(out=out), root)
+    assert v.decision in ("refuse", "needs_approval"), (tpl, v)
+
+
+@pytest.mark.parametrize("cmd", ALLOWED_R2)
+def test_r2_false_positives_are_allowed(tree, cmd):
+    root, _ = tree
+    (root / "sub").mkdir(exist_ok=True)
+    v = check_command(cmd, root)
+    assert v.decision == "allow", (cmd, v)
+
+
+@pytest.mark.parametrize("cmd", STILL_GATED_SUBST)
+def test_other_substitution_still_needs_approval(tree, cmd):
+    root, _ = tree
+    assert check_command(cmd, root).decision == "needs_approval"
+
+
+def test_needs_approval_reason_says_approval_is_not_wired(tree):
+    root, _ = tree
+    v = check_command("bash -c 'x'", root)
+    assert "not run (needs approval; approval is not wired, so treated as refused)" in v.reason
