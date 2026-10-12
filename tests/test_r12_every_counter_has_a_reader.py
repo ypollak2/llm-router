@@ -59,6 +59,11 @@ _EXACT = {"counters", "snapshot", "count"}
 #: allowlisted wholesale and the allowlist would become the defect.
 NOT_INSTRUMENTATION: dict[str, tuple[str, str]] = {
     # name → (reason, a module that must still reference it — "" to skip)
+    "llm_router.eligibility:evidence_from_counts": (
+        "a pure function of its arguments — it turns k/n success counts into "
+        "Evidence and retains nothing, so there is no tally for anyone to read",
+        "",
+    ),
     "llm_router.token_budget:count_tokens": (
         "a pure function of its argument — it measures the text handed to it "
         "and retains nothing, so there is no tally for anyone to read",

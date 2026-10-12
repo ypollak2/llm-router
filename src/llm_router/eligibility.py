@@ -76,13 +76,13 @@ def grade(evidence: Evidence | Mapping[str, Any] | None) -> Grade:
     if not evidence:
         return "unknown"
     if isinstance(evidence, Mapping) and "n_cand" in evidence:
-        evidence = evidence_from_counts(int(evidence.get("k_cand") or 0), int(evidence.get("n_cand") or 0),
-                                        int(evidence.get("k_ref") or 0), int(evidence.get("n_ref") or 0))
-        if not evidence.n:
-            return "unknown"
+        counts = [evidence.get(k) for k in ("k_cand", "n_cand", "k_ref", "n_ref")]
+        if any(c is None for c in counts):
+            return "unknown"  # an absent count is unmeasured, not zero
+        evidence = evidence_from_counts(*(int(c) for c in counts))
     get = evidence.get if isinstance(evidence, Mapping) else lambda k: getattr(evidence, k, None)
-    n = get("n") or 0
-    if n <= 0:
+    n = get("n")
+    if n is None or n <= 0:
         return "unknown"
     gap, lb = get("gap_pts"), get("lb_pts")
     if n < PAIRS_MIN_N or gap is None or lb is None:
