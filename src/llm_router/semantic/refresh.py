@@ -127,8 +127,9 @@ def drain(root: Path | str | None = None, base: Path | None = None) -> list[str]
     finally:
         try:
             taken.unlink()
-        except OSError:
-            pass
+        except OSError as exc:
+            from llm_router import failopen
+            failopen.record("CHZ-FO-SEMANTIC-REFRESH-DRAIN-CLEANUP", exc)
     return list(dict.fromkeys(line.strip() for line in lines if line.strip()))
 
 

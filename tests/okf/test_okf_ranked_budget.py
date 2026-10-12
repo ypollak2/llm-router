@@ -142,14 +142,41 @@ _PROMPTS_244 = [
 ]
 
 
-def _stems_store(tmp_path: Path) -> Path:
-    proj = tmp_path / "projects" / okf.project_slug(tmp_path / "repo-stems")
+# Curated (non-SourceFile) docs need no identifier anchor, so they are what can leak
+# into a generic prompt. They are the bait: on these prompts the legacy top-3 returns
+# some of them, and every one returned is a false positive (the prompts are not about
+# this repo). Three docs carry "docker" in title or tags, so top-3 is full; two more match the
+# DATABASE_URL prompt only in prose (weaker), so ranked stops before them.
+_BAIT = {
+    "docker-a": ("Docker image decision", "docker, image", "Base image for docker builds"),
+    "docker-b": ("Docker compose notes", "docker, compose", "docker compose database_url"),
+    "docker-c": ("Docker cache", "docker", "docker layer cache"),
+    "docker-d": ("Registry notes", "registry", "database_url compose registry"),
+    "docker-e": ("Volume notes", "volumes", "database_url compose volumes"),
+    "react-a": ("React state management", "react, state", "manage state in a react app"),
+    "react-b": ("React hooks", "react", "react hooks state"),
+    "flask": ("Flask endpoint testing", "flask, endpoint, test", "how to test a flask endpoint"),
+}
+_STEM_FILES = {"api": "src/llm_router/api.py", "cli": "src/llm_router/cli.py",
+               "base": "src/llm_router/base.py", "gc": "src/llm_router/commands/gc.py",
+               "test": "src/llm_router/commands/test.py", "core": "src/llm_router/observability/core.py",
+               "state": "src/llm_router/state.py", "okf": "src/llm_router/okf.py"}
+
+#: Recorded output of `scripts/okf_fp_baseline.py` (the da31df7 `find_relevant(limit=3)`
+#: run on THIS store and THESE prompts): total docs returned over the 11 prompts.
+#: Regenerate with that script; `test_baseline_constant_matches_da31df7_source` re-derives
+#: it from `git show da31df7:src/llm_router/okf.py` whenever that commit is reachable.
+DA31DF7_BASELINE_FP = 9
+
+
+def _fp_store(tmp_path: Path) -> Path:
+    proj = tmp_path / "projects" / okf.project_slug(tmp_path / "repo-fp")
     proj.mkdir(parents=True)
-    files = {"api": "src/llm_router/api.py", "cli": "src/llm_router/cli.py",
-             "base": "src/llm_router/base.py", "gc": "src/llm_router/commands/gc.py",
-             "test": "src/llm_router/commands/test.py", "core": "src/llm_router/observability/core.py",
-             "state": "src/llm_router/state.py", "okf": "src/llm_router/okf.py"}
-    for stem, title in files.items():
+    for stem, (title, tags, body) in _BAIT.items():
+        (proj / f"{stem}.md").write_text(
+            f"---\ntype: Decision\ntitle: {title}\ndescription: {title}\ntags: [{tags}]\n---\n\n{body}\n",
+            encoding="utf-8")
+    for stem, title in _STEM_FILES.items():   # #233: bare-stem prompts must never reach these
         (proj / f"{stem}.md").write_text(textwrap.dedent(f"""\
             ---
             type: SourceFile
@@ -164,26 +191,78 @@ def _stems_store(tmp_path: Path) -> Path:
     return tmp_path
 
 
+def _fp_counts(base: Path, prompts, find):
+    legacy = ranked = 0
+    for p in prompts:
+        okf.invalidate_cache()
+        legacy += len(find(p, limit=3, base=base))
+        okf.invalidate_cache()
+        ranked += len(find(p, base=base))
+    return legacy, ranked
+
+
 def test_retrieval_false_positives_not_above_the_fixed_top3_baseline(tmp_path, monkeypatch, capsys):
     """FP = a doc returned for a prompt that is not about this repo.
 
-    Measured on the same store and prompts with the legacy path (`limit=3`, the
-    behaviour at da31df7) and the new ranked path; n is printed. The ranked path
-    applies the same precision gate first and only changes how many survivors are
-    kept, so it can return fewer docs than top-3 and (with a big budget) more, but
-    it can never return a doc the gate dropped.
+    SCOPE, stated plainly: the #233 and #244 prompt sets run through `okf.find_relevant`
+    here. They do NOT run through the #244 semantic retriever (`semantic/retrieve.py`),
+    which this PR does not change. The sets are the prompts of #233/#244's own tests,
+    over a synthetic store (bait docs + the #233 stem files), not the real index.
+
+    The legacy figure is `find_relevant(limit=3)`, the same code path as da31df7: that
+    module differs from this PR's base by one comment line, and the limit=3 branch is
+    unchanged (see DA31DF7_BASELINE_FP and the git-derived test below). n and both
+    counts are printed. Non-vacuous: the legacy count must be >= 1, ranked must be
+    strictly lower here, and the control test shows an everything-returning ranker fails.
     """
-    base = _stems_store(tmp_path)
-    monkeypatch.setenv("LLM_ROUTER_PROJECT_ROOT", str(tmp_path / "repo-stems"))
+    base = _fp_store(tmp_path)
+    monkeypatch.setenv("LLM_ROUTER_PROJECT_ROOT", str(tmp_path / "repo-fp"))
     prompts = _PROMPTS_233 + _PROMPTS_244
-    legacy = sum(len(okf.find_relevant(p, limit=3, base=base)) for p in prompts)
-    okf.invalidate_cache()
-    ranked = sum(len(okf.find_relevant(p, base=base)) for p in prompts)
+    legacy, ranked = _fp_counts(base, prompts, okf.find_relevant)
     with capsys.disabled():
         print(f"\nOKF FP docs over n={len(prompts)} prompts "
-              f"(#233={len(_PROMPTS_233)}, #244={len(_PROMPTS_244)}): "
-              f"legacy limit=3 -> {legacy}, ranked -> {ranked}")
+              f"(#233={len(_PROMPTS_233)}, #244={len(_PROMPTS_244)}), store={len(_BAIT) + len(_STEM_FILES)} docs: "
+              f"da31df7-baseline={DA31DF7_BASELINE_FP}, legacy limit=3={legacy}, ranked={ranked}")
     assert len(prompts) == 11
-    assert ranked <= legacy
-    # and the positive control: the set is not vacuous (an explicit filename still hits)
+    assert legacy == DA31DF7_BASELINE_FP, "legacy path drifted from the recorded da31df7 count"
+    assert legacy >= 1, "vacuous: the baseline has no false positive, so the check cannot fail"
+    assert ranked <= DA31DF7_BASELINE_FP
+    assert ranked < legacy, "ranked should drop the tail the top-3 kept on this store"
+    # an explicit filename still hits (precision gate intact)
     assert _titles(okf.find_relevant("explain okf.py", base=base)) == ["src/llm_router/okf.py"]
+
+
+def test_fp_check_fails_if_ranked_returns_everything(tmp_path, monkeypatch):
+    """Positive control: swap in a ranker that returns every gated doc; the same
+    comparison must then break, otherwise `ranked <= legacy` proves nothing."""
+    base = _fp_store(tmp_path)
+    monkeypatch.setenv("LLM_ROUTER_PROJECT_ROOT", str(tmp_path / "repo-fp"))
+    prompts = _PROMPTS_233 + _PROMPTS_244
+    monkeypatch.setattr(okf, "rank_within_budget", lambda scored, floor, budget, **kw: [c for c, _ in scored])
+    legacy, everything = _fp_counts(base, prompts, okf.find_relevant)
+    assert everything > legacy, (legacy, everything)
+
+
+def test_baseline_constant_matches_da31df7_source(tmp_path, monkeypatch):
+    """Re-derive the baseline from da31df7's own `find_relevant` (git show -> temp module)."""
+    import importlib.util
+    import subprocess
+    import sys
+    repo = Path(__file__).resolve().parents[2]
+    proc = subprocess.run(["git", "show", "da31df7:src/llm_router/okf.py"], cwd=repo,
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        pytest.skip("da31df7 not reachable in this checkout (shallow clone)")
+    src_file = tmp_path / "okf_da31df7.py"
+    src_file.write_text(proc.stdout, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("llm_router._okf_da31df7", src_file)
+    old = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "llm_router._okf_da31df7", old)
+    spec.loader.exec_module(old)
+    base = _fp_store(tmp_path / "s")
+    monkeypatch.setenv("LLM_ROUTER_PROJECT_ROOT", str(tmp_path / "s" / "repo-fp"))
+    total = 0
+    for p in _PROMPTS_233 + _PROMPTS_244:
+        old.invalidate_cache()
+        total += len(old.find_relevant(p, limit=3, base=base))
+    assert total == DA31DF7_BASELINE_FP
