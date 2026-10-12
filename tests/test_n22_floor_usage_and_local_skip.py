@@ -30,6 +30,7 @@ BAD = "```python\ndef broken(:\n    pass\n```"  # fails the code syntax gate
 @pytest.fixture(autouse=True)
 def _gates(monkeypatch):
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "qwen3-coder:30b,llamacpp:aaaa,llamacpp:bbbb")   # P0.15: configured
     monkeypatch.setenv("LLM_ROUTER_GATES", "on")
     monkeypatch.setenv("LLM_ROUTER_ESCALATE_ON_QUALITY", "0")
     monkeypatch.delenv("LLM_ROUTER_LOCAL_TIMEOUT_COOLDOWN_S", raising=False)

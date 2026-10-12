@@ -27,4 +27,9 @@ def cmd_map(args: list[str]) -> int:
 
     data = rm.refresh_if_stale()
     print(rm.view_json(data) if "--json" in args else rm.render_table(data))
+    if "--json" not in args:
+        from llm_router.auto_profile import profile_status_lines
+
+        for line in profile_status_lines():
+            print(line)
     return 0

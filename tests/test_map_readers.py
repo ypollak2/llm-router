@@ -124,12 +124,13 @@ def three_paths(monkeypatch):
     from llm_router.proxy import backends
 
     monkeypatch.setattr(dr, "get_dynamic_model_chain", lambda profile, task: list(BASE))
-    monkeypatch.setattr(hook_cb, "_ollama_models", lambda: [ModelSpec("ollama", "qwen3:8b")])
+    monkeypatch.setattr(hook_cb, "_ollama_models", lambda *a, **k: ([ModelSpec("ollama", "qwen3:8b")], []))
     monkeypatch.setenv("GEMINI_API_KEY", "x")
     monkeypatch.setenv("OPENAI_API_KEY", "x")
     monkeypatch.setattr(backends, "_chain_cache", {})
     from llm_router.config import RouterConfig
     monkeypatch.setattr(RouterConfig, "all_ollama_models", lambda self: [LOCAL])
+    monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "qwen3:8b")   # P0.15: configured, so the promote gate keeps it in place
 
     async def router_chain():
         from llm_router.config import get_config
@@ -340,7 +341,7 @@ def test_hook_chain_builder_survives_a_missing_map_reader(monkeypatch):
     from llm_router.hooks import chain_builder as hook_cb
     from llm_router.hooks.direct_executor import ModelSpec
 
-    monkeypatch.setattr(hook_cb, "_ollama_models", lambda: [ModelSpec("ollama", "qwen3:8b")])
+    monkeypatch.setattr(hook_cb, "_ollama_models", lambda *a, **k: ([ModelSpec("ollama", "qwen3:8b")], []))
     monkeypatch.setitem(sys.modules, "llm_router.map_reader", None)   # import raises
     monkeypatch.delattr("llm_router.map_reader", raising=False)
     chain = hook_cb.build_chain("simple", "green", "code")

@@ -88,6 +88,8 @@ def test_build_chain_applies_it(monkeypatch):
     _record("fast:latest", timeouts=0, oks=6)
     monkeypatch.setattr("llm_router.model_discovery.available_ollama_models",
                         lambda: ["slow:latest", "fast:latest"])
+    # P0.15: configured models are validated; the gate is not what this test is about.
+    monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "slow:latest,fast:latest")
     # "code", not "query": P0.3 (D-14 = A) keeps local out of every Q&A chain.
     got = [m.model for m in cb.build_chain("simple", "green", "code")]
     assert got[0] == "fast:latest", f"build_chain ignored the measured order: {got}"

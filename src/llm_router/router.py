@@ -71,6 +71,7 @@ from llm_router.config import get_config
 from llm_router.repo_config import effective_config as get_repo_config
 from llm_router.context import _resolve_context_identity, build_context_messages, get_session_buffer
 from llm_router.health import get_tracker
+from llm_router.model_discovery import ensure_grandfather, order_for_chain, sink_unvalidated
 from llm_router.profiles import get_model_chain, provider_from_model
 from llm_router.receipt_store import compute_receipt, store_receipt
 from llm_router.tracing import set_span_attributes, traced_span
@@ -301,6 +302,30 @@ def _stable_task_offset(task_type_value: str, modulus: int) -> int:
     return zlib.crc32(task_type_value.encode()) % modulus
 
 
+#: D-60c = A: an unvalidated local model may appear only on simple (BUDGET)
+#: query/generate/analyze chains, and only after the chain's last entry.
+_GATE_NON_CRITICAL_TASKS = frozenset({TaskType.QUERY, TaskType.GENERATE, TaskType.ANALYZE})
+
+
+def _gate_configured_names(config, repo_cfg) -> list[str]:
+    """Local model names the user wrote down, for the promote gate (P0.15).
+
+    Config fields (which also carry ``.env`` values the process environment does
+    not), the loaded routing pins, and the agentic pin. The environment variables
+    themselves are read by ``model_discovery``.
+    """
+    names: list[str] = []
+    for field in ("ollama_budget_models", "openai_compat_models"):
+        csv = getattr(config, field, "")
+        if isinstance(csv, str):
+            names.extend(n.strip() for n in csv.split(",") if n.strip())
+    names.extend(o.model for o in (getattr(repo_cfg, "routing", None) or {}).values() if o.model)
+    for pin in (getattr(repo_cfg, "agentic_model", None), getattr(config, "llm_router_agentic_model", "")):
+        if isinstance(pin, str) and pin:
+            names.append(pin)
+    return names
+
+
 def _task_aware_default_order(models: list[str], task_type: "TaskType") -> list[str]:
     """Reorder a provider's candidate models for a task type when there is NO
     explicit per-task pin, so QUERY/CODE/ANALYZE/... don't all collapse onto
@@ -480,6 +505,7 @@ async def _build_and_filter_chain(
             is_subscription_mode=config.llm_router_claude_subscription or config.llm_router_gemini_subscription,
         )
 
+    _unvalidated_tail: list[str] = []
     if task_type not in MEDIA_TASK_TYPES:
         from llm_router.claude_usage import get_claude_pressure
         pressure = get_claude_pressure()
@@ -563,7 +589,22 @@ async def _build_and_filter_chain(
             models_to_try = pinned + rest
 
         # ── Ollama injection (cheap tiers only) ───────────────────────────────
-        ollama_models = config.all_ollama_models() if _cheap_tier else []
+        # DISC-PROMOTE-1 (P0.15, door D1): only configured or grandfathered models
+        # are injected here. The rest wait in `_unvalidated_tail` and are appended
+        # after every reorder (non-critical chains) or dropped (critical chains).
+        _gate_critical = not (
+            profile == RoutingProfile.BUDGET and task_type in _GATE_NON_CRITICAL_TASKS
+        )
+        _gate_names = _gate_configured_names(config, repo_cfg)
+        _local_all = config.all_ollama_models() if _cheap_tier else []
+        # First run of an upgrade: grandfather Ollama AND auto-detected openai-compat models together.
+        ensure_grandfather(_local_all + config.all_openai_compat_models())
+        ollama_models, _ollama_tail = order_for_chain(
+            _local_all,
+            task_type.value, critical=_gate_critical,
+            configured=_gate_names, read_routing_yaml=False,
+        )
+        _unvalidated_tail.extend(_ollama_tail)
         if ollama_models:
             # Without an explicit pin, every task type used to see this SAME
             # list prepended in the SAME order — so whichever model happened to
@@ -594,7 +635,12 @@ async def _build_and_filter_chain(
         # wire format. Treated as free/local — injected after Ollama, before
         # paid externals. Uses openai_compat/ prefix; quirk rewrites to openai/
         # + injects api_base before the LiteLLM call.
-        compat_models = config.all_openai_compat_models()
+        compat_models, _compat_tail = order_for_chain(
+            config.all_openai_compat_models(),
+            task_type.value, critical=_gate_critical,
+            configured=_gate_names, read_routing_yaml=False,
+        )
+        _unvalidated_tail.extend(_compat_tail)
         if compat_models:
             # Insert after any Ollama models but before paid providers.
             first_paid = next(
@@ -1002,6 +1048,24 @@ async def _build_and_filter_chain(
     )
     from llm_router import map_reader
     models_to_try = map_reader.apply_to_chain(models_to_try, reorder=not _keep_order)
+
+    # ── Unvalidated local models: last, after every reorder (P0.15, D-60c = A) ──
+    # Appended here, not at the injection point: the agent-context reorder, the
+    # routing policy and the QUOTA_BALANCED pass all group by provider and would
+    # pull an `ollama/*` entry forward. They get the same block/allow rules as
+    # every other candidate.
+    if _unvalidated_tail:
+        _tail = [m for m in _unvalidated_tail if m not in models_to_try]
+        if repo_cfg.block_providers:
+            _tail = [m for m in _tail if provider_from_model(m) not in set(repo_cfg.block_providers)]
+        if _tail and (_merged_block or _merged_allow):
+            _tail, _ = apply_policy(_tail, task_type.value, _policy)
+        _blocked_tail = _blocked_providers()
+        if _blocked_tail:
+            _tail = [m for m in _tail if provider_from_model(m) not in _blocked_tail]
+        # The map may drop a disconnected resource but must not reorder the tail (filter only).
+        _tail = map_reader.apply_to_chain(_tail, reorder=False)
+        models_to_try = models_to_try + _tail
 
     # M3.0: the Q&A local strip is NOT applied here. This builder is shared with the
     # proxy (proxy/backends.py policy_chain), whose routing must not change. The strip
@@ -4642,6 +4706,13 @@ async def route_and_call(
                 log.debug("Bandit reorder skipped (continuing): %s", _bandit_err)
                 from llm_router import failopen
                 failopen.record("CHZ-FO-ROUTER-BANDIT-REORDER", _bandit_err)
+
+        # P0.15 (DISC-PROMOTE-1): the specialist and the bandit's explore step can move any
+        # entry to the front, an unvalidated local model included. Sink it again.
+        if models_to_try and not model_override:
+            models_to_try = sink_unvalidated(
+                models_to_try, task_type.value,
+                _gate_configured_names(get_config(), get_repo_config()))
 
         # M3.0 (D-14 = A): Q&A never goes to a local provider. Applied here, after the
         # chain build, the subject specialist and the bandit reorder (either can add a

@@ -39,8 +39,14 @@ def _router_home():
     return _P(base).expanduser() if base else _P.home() / ".llm-router"
 
 
-def _ollama_models() -> list[ModelSpec]:
-    """Ollama models actually available right now.
+#: D-60c = A: an unvalidated local model may appear only on simple
+#: query/generate/analyze chains, and only after the chain's last entry.
+_GATE_NON_CRITICAL_TASKS = frozenset({"query", "generate", "analyze"})
+
+
+def _ollama_models(task_type: str = "code", *, critical: bool = True
+                   ) -> tuple[list[ModelSpec], list[ModelSpec]]:
+    """Ollama models available right now, as ``(front, tail)`` (P0.15, DISC-PROMOTE-1).
 
     This used to read two env vars and fall back to a hardcoded
     "qwen3.5:latest". It was the hot path — every draft chain came through here
@@ -52,9 +58,21 @@ def _ollama_models() -> list[ModelSpec]:
     hook. It returns [] rather than a guess when Ollama is unreachable, which
     surfaces as "no free-tier model available" instead of a chain built on a
     model that may not be installed.
+
+    ``front`` is what the user configured or what was installed when this version
+    first ran; the caller places it as before. ``tail`` is every other model, and
+    only on a non-critical chain (else it is empty: the model is absent). The
+    caller appends ``tail`` after the chain's last entry. The gate is
+    ``model_discovery.order_for_chain``; ``LLM_ROUTER_PROMOTE_GATE=off`` puts
+    every model in ``front``.
     """
-    from llm_router.model_discovery import available_ollama_models
-    return _demote_unreliable([ModelSpec("ollama", m) for m in available_ollama_models()])
+    from llm_router.model_discovery import available_ollama_models, order_for_chain
+    front, tail = order_for_chain(
+        [f"ollama/{m}" for m in available_ollama_models()], task_type, critical=critical)
+    return (
+        _demote_unreliable([ModelSpec("ollama", m.removeprefix("ollama/")) for m in front]),
+        [ModelSpec("ollama", m.removeprefix("ollama/")) for m in tail],
+    )
 
 
 # A model is demoted, never dropped: a slow model that sometimes answers still
@@ -230,15 +248,32 @@ def build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:
     try:
         from llm_router import map_reader
 
-        return map_reader.apply_to_chain(
+        mapped = map_reader.apply_to_chain(
             chain, key=lambda s: f"{'anthropic' if s.provider == 'claude' else s.provider}/{s.model}")
     except Exception:
         return chain
+    return _sink_unvalidated_specs(mapped, task_type)
+
+
+def _sink_unvalidated_specs(chain: list[ModelSpec], task_type: str) -> list[ModelSpec]:
+    """The map ranks ``ollama/*`` by provider, so it can swap an unvalidated tail model
+    into a front slot (P0.15, D-60c = A). Put every unvalidated local model back last."""
+    from llm_router.model_discovery import sink_unvalidated
+
+    ids = [f"{s.provider}/{s.model}" for s in chain]
+    sunk = sink_unvalidated(ids, task_type)
+    if sunk == ids:
+        return chain
+    pos = {i: n for n, i in enumerate(ids)}
+    return [chain[pos[i]] for i in sunk]
 
 
 def _build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:
     """``build_chain`` before the D-14 Q&A filter (the unchanged pre-P0.3 logic)."""
-    ollama = _ollama_models()
+    # DISC-PROMOTE-1 (P0.15, door D2): only a simple query/generate/analyze chain
+    # may carry an unvalidated local model, and then only after its last entry.
+    ollama, unvalidated = _ollama_models(
+        task_type, critical=not (complexity == "simple" and task_type in _GATE_NON_CRITICAL_TASKS))
     has_gemini = _has_gemini()
     has_openai = _has_openai()
 
@@ -264,7 +299,7 @@ def _build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:
 
     # ── Simple: NEVER uses Claude — always direct ────────────────────────────
     if complexity == "simple":
-        return ollama + cheap_externals
+        return ollama + cheap_externals + unvalidated
 
     # ── Moderate: Claude included only at low pressure ───────────────────────
     if complexity == "moderate":

@@ -121,8 +121,8 @@ def test_cache_hit_equals_miss_and_reports_cache_layer():
     miss = engine.decide(p, door="mcp")
     hit = engine.decide(p, door="hook")
     assert miss.layer in ("L1", "L3") and hit.layer == "cache" and hit == dataclasses.replace(miss, layer="cache")
-    # normalisation: system-reminder blocks and whitespace do not change the key
-    assert engine.decide("<system-reminder>x</system-reminder>  " + p, door="hook").layer == "cache"
+    # the key is the exact text: a variant with an extra block is computed, not served from cache
+    assert engine.decide("<system-reminder>x</system-reminder>  " + p, door="hook").layer != "cache"
     # ctx digest bucket changes the key
     assert engine.decide(p, door="hook", ctx_digest="abcd1234").layer != "cache"
 
@@ -444,3 +444,18 @@ def test_decision_reason_never_over_120_chars():
     long = "x" * 5000
     assert len(engine.decide(long, door="hook").reason) <= 120
     assert len(engine._reason("y" * 500)) == 120
+
+
+def test_cache_result_does_not_depend_on_call_order():
+    # Review of #436: a normalised key served a cached Decision to a variant whose stripped
+    # block held a secret (missed) or enough text to change complexity.
+    x = "hello there, explain this"
+    y = x + "<system-reminder>" + SECRETS[0] + "</system-reminder>"
+    alone = {t: engine.decide(t, door="hook") for t in (x, y)}
+    for order in ((x, y), (y, x)):
+        engine.clear_cache(persistent=False)
+        engine._db.clear()
+        got = {t: engine.decide(t, door="hook") for t in order}
+        for t in order:
+            assert dataclasses.replace(got[t], layer="", ms=0) == dataclasses.replace(alone[t], layer="", ms=0)
+    assert alone[y].local_only and not alone[x].local_only
