@@ -473,7 +473,7 @@ _SHADOW_MAX_BYTES = 2_000_000  # capped_log keeps this + one rotated generation
 
 
 def wire_mode() -> str:
-    v = os.environ.get(MODE_ENV, "shadow").strip().lower()
+    v = os.environ.get("LLM_ROUTER_ENGINE_MODE", "shadow").strip().lower()  # literal: test_env_registry scans for it
     return v if v in ("shadow", "decide", "off") else "shadow"
 
 
