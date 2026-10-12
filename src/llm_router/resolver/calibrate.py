@@ -346,6 +346,7 @@ class CalibrationReport:
     estimates: list[Estimate] = field(default_factory=list)
     out_of_budget: list[str] = field(default_factory=list)
     unreachable: list[str] = field(default_factory=list)   # inconclusive: not recorded
+    fitness: dict[str, dict[str, Any]] = field(default_factory=dict)   # model -> task_type -> result
 
 
 def select_models(inv: Inventory, patterns: list[str] | None, *, allow_paid: bool
@@ -421,6 +422,9 @@ def run_calibration(
     completer_for: Callable[[ModelEntry], Completer],
     clock: Callable[[], float] = time.monotonic,
     on_start: Callable[[ModelEntry], None] | None = None,
+    fitness: bool = False,
+    pass_marks: Any = None,
+    eligibility_path: Any = None,
 ) -> CalibrationReport:
     chosen, skipped = select_models(inv, patterns, allow_paid=allow_paid)
     report = CalibrationReport(skipped=skipped,
@@ -437,4 +441,10 @@ def run_calibration(
             report.unreachable.append(m.id)
         else:
             report.profiles[m.id] = prof
+            if fitness and deadline - clock() > 1.0:
+                from llm_router.resolver import eligibility_store, fitness as fit
+                res = fit.run_fitness(completer_for(m), m.id, pass_marks=pass_marks,
+                                      timeout=probe_timeout)
+                report.fitness[m.id] = res
+                eligibility_store.record_fitness(m.id, res, path=eligibility_path)
     return report
