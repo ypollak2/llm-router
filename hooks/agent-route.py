@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 19
+# llm_router-hook-version: 20
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -1016,6 +1016,37 @@ def _classify_task_type(prompt: str) -> str:
         scores[task] = len(matches)
     best = max(scores, key=scores.get)  # type: ignore[arg-type]
     return best if scores[best] > 0 else "analyze"
+
+
+def _engine_decision(prompt: str) -> tuple[str, str]:
+    """``(task_type, complexity)`` from the one engine (PLAN v16 P1.6, door ``agent_route``).
+
+    ``deep_reasoning`` maps to ``complex``: this hook's profile table has three rows.
+    Fail-open to the old no-signal default if the engine cannot be imported."""
+    try:
+        from llm_router import engine
+
+        d = engine.decide(prompt, door="agent_route")
+        return d.task_type, "complex" if d.complexity == "deep_reasoning" else d.complexity
+    except Exception:  # noqa: BLE001 — a classifier error must never stop a spawn
+        return "analyze", "moderate"
+
+
+def _classify(prompt: str) -> tuple[str, str]:
+    """``(task_type, complexity)`` the spawn is routed on. PLAN v16 P1.6 / D-72: the two regex
+    tables above decide; the one engine runs after them, L1 only, in shadow (never raises).
+    ``LLM_ROUTER_ENGINE_MODE=decide`` makes the engine decide (``_engine_decision``)."""
+    try:
+        from llm_router import engine
+
+        decides = engine.decides()
+    except Exception:  # noqa: BLE001 — no engine, rules as before
+        return _classify_task_type(prompt), _classify_complexity(prompt)
+    if decides:
+        return _engine_decision(prompt)
+    out = _classify_task_type(prompt), _classify_complexity(prompt)
+    engine.shadow(prompt, door="agent_route", rules_task=out[0], rules_complexity=out[1], l1_only=True)
+    return out
 
 
 def _complexity_to_profile(complexity: str, session: float, sonnet: float, weekly: float) -> str:
@@ -2220,8 +2251,7 @@ def main() -> None:
 
     # ── Classify reasoning task ──────────────────────────────────────────────
     with _hl_phase("classify"):
-        task_type = _classify_task_type(prompt)
-        complexity = _classify_complexity(prompt)
+        task_type, complexity = _classify(prompt)
 
     # ── NS3: suitable spawns → Codex CLI FIRST (external, free from Claude quota) ──
     # Must run before _allow_routed_spawn() below: that branch defaults to ON and
