@@ -72,10 +72,12 @@ def test_task_id_is_sha256_of_session_and_turn_16_hex():
 
 def test_begin_turn_advances_per_session_and_other_readers_see_it(temp_db):
     first = ci.begin_turn(SID)
-    assert first == ci.derive_task_id(SID, 1) == ci.turn_task_id(SID)
+    nonce = ci._read_turn_state(SID)["nonce"]
+    assert first == ci.derive_task_id(SID, 1, nonce) == ci.turn_task_id(SID)
     second = ci.begin_turn(SID)
-    assert second == ci.derive_task_id(SID, 2) == ci.turn_task_id(SID)
-    assert ci.begin_turn("another-session") == ci.derive_task_id("another-session", 1)
+    assert second == ci.derive_task_id(SID, 2, nonce) == ci.turn_task_id(SID)
+    other = ci.begin_turn("another-session")
+    assert other == ci.derive_task_id("another-session", 1, ci._read_turn_state("another-session")["nonce"])
     assert ci.turn_task_id(SID) == second            # the other session did not move this one
 
 
@@ -505,3 +507,97 @@ def test_g3_auto_start_per_writer_in_the_reader(temp_db, monkeypatch):
     none = kpi._prd_writer_result([_row(i, None) for i in range(100)], [None] * 100, _Idx(),
                                   frozenset(), set())
     assert none.get("task_id_from") is None and none["fields"]["task_id"]["scored"] is False
+
+
+# ── refresh fixes: no id reuse after prune, bounded lock wait ────────────────
+
+def test_resumed_session_after_prune_does_not_reuse_the_old_turn_1_id(temp_db):
+    import os
+    import time
+
+    old_turn_1 = ci.begin_turn(SID)
+    path = ci._turn_state_path(SID)
+    aged = time.time() - ci.TURN_STATE_TTL_S - 60
+    os.utime(path, (aged, aged))
+    ci.begin_turn("some-new-session")                # a first turn: housekeeping prunes SID's state
+    assert not path.exists()
+    resumed_turn_1 = ci.begin_turn(SID)              # the counter restarts at 1
+    assert ci._read_turn_state(SID)["turn_index"] == 1
+    assert HEX16.fullmatch(resumed_turn_1) and resumed_turn_1 != old_turn_1
+    assert ci.begin_turn(SID) != resumed_turn_1      # and the turn after that moves on
+
+
+def test_task_id_is_stable_within_a_turn_for_every_reader(temp_db):
+    turn = ci.begin_turn(SID)
+    assert ci.turn_task_id(SID) == turn
+    with ci.scope(SID) as (a, _), ci.scope(SID) as (b, _):
+        assert a == b == turn
+
+
+def test_begin_turn_returns_fast_and_unique_while_the_lock_is_held(temp_db):
+    import time
+
+    from llm_router.file_lock import exclusive_lock
+
+    first = ci.begin_turn(SID)
+    lock_path = ci._turn_state_path(SID).with_suffix(".lock")
+    with exclusive_lock(lock_path, timeout=1.0) as held:
+        assert held
+        # the holder is this process, but flock on a second open file description conflicts
+        t0 = time.monotonic()
+        got = ci.begin_turn(SID)
+        elapsed = time.monotonic() - t0
+        got_again = ci.begin_turn(SID)
+    assert elapsed < 0.1, f"begin_turn blocked for {elapsed:.3f}s on a held lock"
+    assert HEX16.fullmatch(got) and len({first, got, got_again}) == 3
+    assert ci.TURN_LOCK_TIMEOUT_S <= 0.05
+
+
+# ── P1.10-a evaluator: `llm-router kpi --identity` ───────────────────────────
+
+def _id_row(i, sid="s", task="t"):
+    return (sid, {"session_id": sid, "task_id": task, "model": "m", "tier": "t", "reason": "r",
+                  "tokens": (1, 1), "cost": 0.0, "latency": 1.0, "outcome": 1, "_ts": 1000.0 + i})
+
+
+class _OrganicIdx:
+    def resolve(self, sid, stamp):
+        class _K:
+            kind = "organic"
+        return _K()
+
+
+def test_identity_share_counts_null_and_generated_as_missing_with_a_wilson_ci():
+    from llm_router.commands import kpi
+
+    recs = ([_id_row(i) for i in range(190)]
+            + [_id_row(i, task=None) for i in range(5)]                  # NULL task_id
+            + [_id_row(i, sid=None) for i in range(5)])                  # NULL session_id
+    out = {}
+    kpi._prd_writer_result(recs, [None] * 200, _OrganicIdx(), frozenset(), set(), out, "usage")
+    ident = out["usage"]
+    assert ident["n"] == 200 and ident["with_ids"] == 190 and ident["share"] == 0.95
+    lo, hi = ident["wilson95"]
+    assert 0.91 < lo < 0.95 < hi < 0.98
+    # a gen- stand-in is mapped to None by _prd_task, so it is missing too
+    assert kpi._prd_task("gen-0123456789ab") is None and kpi._prd_task("0123456789abcdef")
+
+
+def test_kpi_identity_flag_prints_per_writer_n_share_and_ci(capsys):
+    from llm_router.commands import kpi
+
+    ident = kpi._identity_share([_id_row(i)[1] for i in range(200)])
+    data = {"identity": {"usage": ident, "proxy": kpi._identity_share([])}}
+    out = kpi.render_identity(data)
+    assert "usage: n=200" in out and "share=100.0%" in out and "wilson95=[98.1%" in out and "PASS" in out
+    assert "proxy: no organic rows" in out
+
+
+def test_kpi_identity_cli_runs_end_to_end_on_an_empty_home(temp_db, capsys):
+    from llm_router.commands import kpi
+
+    assert kpi.cmd_kpi(["--identity"]) == 0
+    out = capsys.readouterr().out
+    assert "P1.10-a identity share" in out
+    for w in kpi.G3_PRD_WRITERS:                      # every writer is listed, none silently dropped
+        assert f"  {w}: no organic rows" in out

@@ -1291,8 +1291,42 @@ def _prd_sql_records(cutoff: float | None, until: float | None
     return records, no_column, unreadable
 
 
+def _identity_share(organic: list[dict]) -> dict:
+    """P1.10-a, per writer: organic rows carrying a session_id AND a REAL task_id (NULL and
+    ``gen-`` stand-ins count as missing), over ALL organic rows of the window (no merge-date
+    cutoff, unlike ``complete``), with the Wilson 95% interval. n = organic rows only."""
+    from llm_router.shadow_eval import wilson
+
+    n = len(organic)
+    k = sum(1 for v in organic if v.get("session_id") is not None and v.get("task_id") is not None)
+    return {"n": n, "with_ids": k, "share": round(k / n, 4) if n else None, "wilson95": wilson(k, n)}
+
+
+def render_identity(data: dict) -> str:
+    """``llm-router kpi --identity``: the P1.10-a table (see ``_identity_share``)."""
+    writers = data.get("identity") or {}
+    lines = [f"P1.10-a identity share (bar {_pct(G3_PRD_BAR, 0)}, min n {G3_PRD_MIN_N} per path); "
+             "real task_id = not NULL and not gen-; unscored: writers with no task_id path "
+             "(model_tracking, coverage, intercepts, sub-agent rows have no own path here)"]
+    for w in G3_PRD_WRITERS:
+        ident = writers.get(w)
+        if ident is None:
+            lines.append(f"  {w}: unreadable (not scored)")
+            continue
+        if not ident["n"]:
+            lines.append(f"  {w}: no organic rows")
+            continue
+        lo, hi = ident["wilson95"]
+        verdict = ("n<min" if ident["n"] < G3_PRD_MIN_N
+                   else "PASS" if ident["share"] >= G3_PRD_BAR else "FAIL")
+        lines.append(f"  {w}: n={ident['n']} with session_id+task_id={ident['with_ids']} "
+                     f"share={_pct(ident['share'])} wilson95=[{_pct(lo)}, {_pct(hi)}] {verdict}")
+    return "\n".join(lines)
+
+
 def _prd_writer_result(records: list[tuple[str | None, dict]], stamps: list[str | None],
-                       index, excluded_kinds: frozenset[str], no_column: set[str]) -> dict:
+                       index, excluded_kinds: frozenset[str], no_column: set[str],
+                       identity_out: dict | None = None, writer: str = "") -> dict:
     excluded: dict[str, int] = {}
     organic: list[dict] = []
     kinds: dict[tuple[str | None, str | None], str | None] = {}  # one resolve per session/stamp
@@ -1305,6 +1339,8 @@ def _prd_writer_result(records: list[tuple[str | None, dict]], stamps: list[str 
         else:
             organic.append(vals)
     n = len(organic)
+    if identity_out is not None:  # outside the G3 dict: its shape is pinned by goldens
+        identity_out[writer] = _identity_share(organic)
     always = tuple(f for f in G3_PRD_FIELDS if f != "task_id")
     task_from = _task_id_override()
     if task_from is None:  # automatic start: this writer's first row with a real task_id
@@ -1342,7 +1378,8 @@ def _prd_writer_result(records: list[tuple[str | None, dict]], stamps: list[str 
 
 
 def _g3_prd_writers(all_rows: list[dict], days: float, now: float, index,
-                    include_research: bool, until: float | None = None) -> dict:
+                    include_research: bool, until: float | None = None,
+                    identity_out: dict | None = None) -> dict:
     """The G3 verdict over the PRD field list, one result per writer (see the comment above)."""
     from llm_router import session_kind as sk
 
@@ -1360,10 +1397,10 @@ def _g3_prd_writers(all_rows: list[dict], days: float, now: float, index,
         elif w == "proxy":
             recs = [(_prd_session(r.get("session_id")), _prd_proxy_values(r)) for r in proxy_rows]
             writers[w] = _prd_writer_result(recs, [r.get("session_kind") for r in proxy_rows],
-                                            index, excluded_kinds, set())
+                                            index, excluded_kinds, set(), identity_out, w)
         else:
             writers[w] = _prd_writer_result(sql[w], [None] * len(sql[w]), index, excluded_kinds,
-                                            no_column[w])
+                                            no_column[w], identity_out, w)
     failing = [w for w, r in writers.items() if r["state"] == "fail"]
     traffic = [w for w, r in writers.items() if r["state"] != _PRD_NO_TRAFFIC]
     short = [w for w in traffic if writers[w]["state"] in ("not informative", "unreadable")]
@@ -2514,7 +2551,9 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
     g1_hook_r = _g1_hook(days, now_ts, _killed_hooks(days, now_ts))
     g1_proxy_r = _g1_proxy(pop)
     g3_r = _g3_completeness(all_rows, days, now_ts, schema_since, until=until_ts)
-    g3_r["prd"] = _g3_prd_writers(all_rows, days, now_ts, index, include_research, until=until_ts)
+    identity_r: dict = {}
+    g3_r["prd"] = _g3_prd_writers(all_rows, days, now_ts, index, include_research, until=until_ts,
+                                  identity_out=identity_r)
     g3_r["lines"] = _g3_prd_lines(g3_r["prd"])
     o1_r = _o1_quota_avoided(days, win)
     bench = _load_benchmark()
@@ -2533,6 +2572,8 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         "window_days": days,
         "include_research": include_research,
         "joins": joins,
+        # PLAN v16 P1.10-a: per-writer share of rows with session_id and a real task_id. Outside "kpis".
+        "identity": identity_r,
         "verify_shadow": _verify_shadow(unit_list, win),
         # Informational only: not in "kpis", so not in _ORDER, --health or NS/D1/D2.
         "local_shadow": _local_shadow_summary(days, win),
@@ -2789,6 +2830,9 @@ def cmd_kpi(args: list[str]) -> int:
     ap.add_argument("--write-weekly", metavar="DIR", default=None,
                      help="write a dated markdown scorecard into DIR")
     ap.add_argument("--json", action="store_true", help="print the raw scorecard dict as JSON")
+    ap.add_argument("--identity", action="store_true",
+                     help="P1.10-a: per writer, n, share of rows with session_id and a real task_id, "
+                          "and the Wilson 95%% interval")
     ap.add_argument("--schema-since", metavar="WHEN", default=None,
                      help="G3: count proxy rows from WHEN (YYYY-MM-DD, an ISO time, or epoch "
                           "seconds) instead of from the first row that carries the fields")
@@ -2890,6 +2934,9 @@ def cmd_kpi(args: list[str]) -> int:
               else render_health(health, strict=parsed.strict))
         if parsed.strict and health["counts"][STATE_BLIND]:
             exit_code = 1
+    elif parsed.identity:
+        print(json.dumps(data["identity"],
+                         indent=2, default=str) if parsed.json else render_identity(data))
     elif parsed.json:
         print(json.dumps(data, indent=2, sort_keys=False, default=str))
     else:

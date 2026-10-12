@@ -978,9 +978,10 @@ def _clean_verify(raw) -> dict | None:
     }
 
 
-def verify_row(uid: str, result) -> dict:
+def verify_row(uid: str, result, *, task_id: str | None = None, trace_id: str | None = None) -> dict:
     """The ledger row for one ``toolkit.verify_unit.UnitResult`` (duck-typed: verify_status,
-    reason, n_candidates, n_f2p, ms, sandboxed, flags). Pure; PR C decides who appends it."""
+    reason, n_candidates, n_f2p, ms, sandboxed, flags). Pure; PR C decides who appends it.
+    ``task_id`` / ``trace_id`` (P1.10, ids only) are added as extra keys when given."""
     verify = _clean_verify({
         "verify_status": result.verify_status, "verify_reason": result.reason,
         "verify_n_candidates": result.n_candidates, "verify_n_f2p": result.n_f2p,
@@ -988,12 +989,27 @@ def verify_row(uid: str, result) -> dict:
     })
     if verify is None:
         raise ValueError(f"unknown verify_status {result.verify_status!r}")
-    return {"unit_id": uid, "verify": verify}
+    row = {"unit_id": uid, "verify": verify}
+    from llm_router import call_identity as _ci
+
+    for key, value in (("task_id", task_id), ("trace_id", trace_id)):
+        clean = _ci.clean_id(value)
+        if clean is not None:
+            row[key] = clean
+    return row
 
 
-def record_verify(uid: str, result) -> None:
-    """Append one verify row (O_APPEND, 0600). Not called by any hook yet (PR C)."""
-    row = verify_row(uid, result)
+def record_verify(uid: str, result, *, task_id: str | None = None, trace_id: str | None = None) -> None:
+    """Append one verify row (O_APPEND, 0600). The ids are the dispatching call's (the verify
+    worker is another process, so ``verify_queue`` carries them in the marker); when none is
+    given they come from the current scope, as for every other ledger writer (a ``gen-``
+    stand-in when nothing names the task, which G3 counts as missing)."""
+    if task_id is None or trace_id is None:
+        from llm_router import call_identity as _ci
+
+        _task, _trace = _ci.row_ids(None)
+        task_id, trace_id = task_id or _task, trace_id or _trace
+    row = verify_row(uid, result, task_id=task_id, trace_id=trace_id)
     path = _north_star_units_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as fh:

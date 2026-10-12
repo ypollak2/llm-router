@@ -45,8 +45,10 @@ one session on every call it later serves, for any host.
 Task identity (PLAN v16 P1.10, R-EVL-2). Three ids ride every ledger row:
 
 * ``session_id``: the Claude Code session (above), or the SDK caller's / a generated one.
-* ``task_id``: one human request. Host turns: ``sha256(session_id + human_turn_index)[:16]``
-  (plain concatenation, as in the PLAN; session ids are fixed-length UUIDs), where the index is a per-session counter the UserPromptSubmit hook advances
+* ``task_id``: one human request. Host turns: ``sha256(session_id + human_turn_index + nonce)[:16]``
+  (plain concatenation; session ids are fixed-length UUIDs; the PLAN formula plus a random
+  per-state nonce so a session resumed after its turn state was pruned never reuses an id),
+  where the index is a per-session counter the UserPromptSubmit hook advances
   (``begin_turn``) and every other process reads (``turn_task_id``): the MCP server, the
   proxy and the sub-agent hooks all see the same id for the same turn. SDK / gateway / MCP
   callers may pass their own (``scope(task_id=...)``). When nothing names a task a row gets
@@ -90,6 +92,9 @@ TURN_STATE_DIR = "turn_state"
 GENERATED_PREFIX = "gen-"
 #: ``begin_turn`` deletes turn-state files untouched for this long (see ``_prune_turn_state``).
 TURN_STATE_TTL_S = 7 * 86400
+#: ``begin_turn`` waits at most this long for the turn-state lock. It runs inside the
+#: UserPromptSubmit hook (P0.9 latency bars are tens of ms), so a held lock must not stall it.
+TURN_LOCK_TIMEOUT_S = 0.05
 
 
 def clean_id(value: Any) -> str | None:
@@ -163,9 +168,16 @@ def tool_use_id_from_context(context: Any) -> str | None:
     return clean_id(meta.get(TOOL_USE_META_KEY))
 
 
-def derive_task_id(session_id: str, turn_index: int) -> str:
-    """The host task id of human turn ``turn_index`` of ``session_id`` (16 hex chars)."""
-    return hashlib.sha256(f"{session_id}{int(turn_index)}".encode("utf-8")).hexdigest()[:TASK_ID_LEN]
+def derive_task_id(session_id: str, turn_index: int, nonce: str = "") -> str:
+    """The host task id of human turn ``turn_index`` of ``session_id`` (16 hex chars).
+
+    ``nonce`` is the random value ``begin_turn`` stores with the session's turn state when
+    that state is created. It makes the id independent of the counter alone: a session
+    resumed after ``_prune_turn_state`` deleted its state restarts at turn 1 with a NEW
+    nonce, so it cannot reuse the old turn-1 id. Deviation from the PLAN formula
+    ``sha256(session_id + index)``; with no nonce the formula is exactly the PLAN's.
+    """
+    return hashlib.sha256(f"{session_id}{int(turn_index)}{nonce}".encode("utf-8")).hexdigest()[:TASK_ID_LEN]
 
 
 def is_generated_task_id(value: Any) -> bool:
@@ -205,7 +217,9 @@ def begin_turn(session_id: Any) -> str | None:
     (``<state>/turn_state/<session>.json``: counter + current task id, no text) so the
     MCP server, the proxy and the sub-agent hooks, which are other processes, read the
     same id with ``turn_task_id``. Fail-open: returns None, never raises, when the
-    session id is not an id or the state cannot be written.
+    session id is not an id or the state cannot be written. The lock wait is capped at
+    ``TURN_LOCK_TIMEOUT_S`` (50 ms): on a timeout the turn still gets an id at once, made
+    unique by a one-off nonce (documented fallback, see the body), never a blocked hook.
     """
     sid = ledger_session_id(session_id)
     if sid is None:
@@ -216,19 +230,37 @@ def begin_turn(session_id: Any) -> str | None:
         path = _turn_state_path(sid)
         path.parent.mkdir(parents=True, exist_ok=True)
         # Read-modify-write under an advisory lock: two hooks of one session (a resumed
-        # process, a sub-agent's prompt) must not both read N and write N+1.
-        with exclusive_lock(path.with_suffix(".lock"), timeout=2.0):
+        # process, a sub-agent's prompt) must not both read N and write N+1. Best-effort:
+        # the wait is capped at TURN_LOCK_TIMEOUT_S (the prompt hook is latency-bound).
+        with exclusive_lock(path.with_suffix(".lock"), timeout=TURN_LOCK_TIMEOUT_S) as locked:
             prev = _read_turn_state(sid) or {}
             last = prev.get("turn_index")
             idx = 1 if not isinstance(last, int) else last + 1  # no state: the first turn
-            task = derive_task_id(sid, idx)
-            tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
-            tmp.write_text(json.dumps({"turn_index": idx, "task_id": task}), encoding="utf-8")
+            nonce = prev.get("nonce")
+            if not isinstance(nonce, str) or not nonce:  # new state (or pruned): a fresh nonce
+                nonce = uuid.uuid4().hex[:12]
+            if not locked:
+                # Lock timeout, FAIL OPEN: do not block, and do not trust the counter (a
+                # concurrent hook may hold the same N). A one-off nonce keeps this turn's id
+                # unique; the counter is still advanced and written, so later turns go on.
+                turn_nonce = uuid.uuid4().hex[:12]
+            else:
+                turn_nonce = nonce
+            task = derive_task_id(sid, idx, turn_nonce)
+            tmp = path.with_name(path.name + f".{os.getpid()}.{uuid.uuid4().hex[:6]}.tmp")
+            tmp.write_text(json.dumps({"turn_index": idx, "task_id": task, "nonce": nonce}),
+                           encoding="utf-8")
             os.replace(tmp, path)
         if idx == 1:  # a new session: the one moment housekeeping is cheap and bounded
             _prune_turn_state(path.parent)
         return task
-    except Exception:  # noqa: BLE001 -- identity must never break the hook
+    except Exception as exc:  # noqa: BLE001 -- identity must never break the hook
+        try:
+            from llm_router import failopen
+
+            failopen.record("CHZ-FO-BEGIN-TURN", exc)
+        except Exception:  # noqa: BLE001
+            pass
         return None
 
 
