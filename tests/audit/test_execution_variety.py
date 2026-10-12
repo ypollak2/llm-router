@@ -59,6 +59,9 @@ class _AuditConfig:
     def all_openai_compat_models(self) -> list[str]:
         return []
 
+    def legacy_compat_history_ids(self):
+        return self.all_openai_compat_models()[:5]
+
 
 @pytest.fixture
 def chain_building_isolated(monkeypatch):

@@ -49,6 +49,9 @@ class _MatrixConfig:
     def all_openai_compat_models(self) -> list[str]:
         return []
 
+    def legacy_compat_history_ids(self):
+        return self.all_openai_compat_models()[:5]
+
 
 @dataclass(frozen=True)
 class _EnvCase:

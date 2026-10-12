@@ -270,6 +270,16 @@ def _ollama_base() -> str:
     return url if "://" in url else f"http://{url}"
 
 
+def _user_runtimes() -> list[dict]:
+    """Extra OpenAI-compatible endpoints the user listed under ``runtimes:`` in routing.yaml."""
+    try:
+        from llm_router.repo_config import load_user_config
+
+        return list(load_user_config().runtimes)
+    except Exception:  # noqa: BLE001 - no config means no extra endpoints
+        return []
+
+
 @dataclass
 class Probes:
     """Everything the inventory reads. Tests replace fields with fakes."""
@@ -295,6 +305,7 @@ class Probes:
     ping_cache: Callable[[], Path] = auth_ping.cache_path
     ping: Callable[[str, str], int | None] = auth_ping.http_ping
     now: Callable[[], float] = time.time
+    user_runtimes: Callable[[], list[dict]] = _user_runtimes
 
 
 # ------------------------------------------------------------------- registry
@@ -442,6 +453,134 @@ def _inventory_ollama(p: Probes) -> tuple[list[ModelEntry], SourceStatus]:
             authorized=True, auth_detail="local server, no credential",
             quota=Quota("n/a", None, None, "local"), notes=tuple(notes), **common))
     return entries, SourceStatus(True, f"{len(entries)} model(s) at {host}")
+
+_GENERIC_COMPAT_KEY = "openai_compat"
+_GENERIC_COMPAT_NAME = "OpenAI-compatible server"
+
+
+def _classify_openai_shape(body: dict, candidates: list) -> Any:
+    """Which runtime on a shared port answered, decided by the SHAPE of /v1/models.
+
+    Never by port or by list order: llama.cpp, llamafile, LocalAI and MLX all
+    default to 8080. Returns one of ``candidates`` or None (generic runtime).
+    NOTE: these heuristics are written from the servers' documented output and
+    have no real-server fixtures yet; they are unverified.
+    """
+    data = [d for d in (body.get("data") or []) if isinstance(d, dict)]
+    owners = [str(d.get("owned_by") or "").lower() for d in data]
+    by_key = {c.provider_key: c for c in candidates}
+    verdict: str | None = None
+    if any("llamafile" in o for o in owners):
+        verdict = "llamafile"
+    elif (isinstance(body.get("models"), list)
+          or any(isinstance(d.get("meta"), dict)
+                 and ("n_ctx_train" in d["meta"] or "vocab_type" in d["meta"]) for d in data)
+          or any("llamacpp" in o or "llama.cpp" in o for o in owners)):
+        verdict = "llamacpp"
+    elif any("localai" in o or "local-ai" in o for o in owners):
+        verdict = "localai"
+    elif data and all("/" in str(d.get("id") or "") for d in data) and not any(owners):
+        verdict = "mlx"
+    return by_key.get(verdict) if verdict else None
+
+
+@dataclass
+class _UserRuntime:
+    name: str
+    provider_key: str
+
+
+def _compat_endpoints(p: Probes) -> list[tuple[str, list]]:
+    """[(base, candidate platforms)] for each distinct endpoint to probe, in order."""
+    from llm_router import local_platforms
+
+    by_port: dict[int, list] = {}
+    for plat in local_platforms.PLATFORMS:
+        if plat.api_type != "openai":
+            continue
+        val = str(p.environ.get(plat.port_env, ""))
+        port = int(val) if val.isdigit() else plat.default_port
+        by_port.setdefault(port, []).append(plat)
+    out: list[tuple[str, list]] = [(f"http://localhost:{port}", plats) for port, plats in by_port.items()]
+    seen = {base for base, _ in out}
+    try:
+        extra = p.user_runtimes()
+    except Exception:  # noqa: BLE001
+        extra = []
+    for item in extra if isinstance(extra, list) else []:
+        url = item.get("url") if isinstance(item, dict) else None
+        if not isinstance(url, str) or urlsplit(url.strip()).scheme not in ("http", "https"):
+            continue
+        base = url.strip().rstrip("/")
+        if base.endswith("/v1"):
+            base = base[:-3].rstrip("/")
+        if base in seen:
+            continue
+        seen.add(base)
+        name = item.get("name") if isinstance(item.get("name"), str) and item.get("name") else _safe_host(base)
+        key = str(item.get("key") or "").strip() if isinstance(item.get("key"), str) else ""
+        out.append((base, [_UserRuntime(name, key or _GENERIC_COMPAT_KEY)]))
+    return out
+
+
+def _openai_compat_runtimes(p: Probes) -> list[tuple[str, str, str, list[str]]]:
+    """Probe every endpoint once. Returns [(runtime_key, runtime_name, base, models)]."""
+    found: list[tuple[str, str, str, list[str]]] = []
+    for base, cands in _compat_endpoints(p):
+        body = p.http_get(f"{base}/v1/models", HTTP_TIMEOUT_S)
+        if not isinstance(body, dict) or not isinstance(body.get("data"), list):
+            continue
+        models: list[str] = []
+        for item in body["data"]:
+            mid = item.get("id") if isinstance(item, dict) else None
+            if isinstance(mid, str) and mid and mid not in models:
+                models.append(mid)
+        if len(cands) == 1:
+            chosen = cands[0]
+        else:
+            chosen = _classify_openai_shape(body, cands)
+        if chosen is None:
+            found.append((_GENERIC_COMPAT_KEY, _GENERIC_COMPAT_NAME, base, models))
+        else:
+            found.append((chosen.provider_key, chosen.name, base, models))
+    return found
+
+
+def _compat_entry(model: str, key: str, name: str, base: str, taken: set[str]) -> ModelEntry:
+    """One ModelEntry; shared by the inventory and the map so both agree on ids."""
+    mid = f"openai_compat/{model}"
+    if mid in taken:
+        mid = f"openai_compat/{model}@{key}"
+    taken.add(mid)
+    local = _is_loopback(base)
+    notes = [f"runtime: {name} ({key})"]
+    if not local:
+        notes.append(f"remote runtime host {_safe_host(base)}: treated as non-local for privacy")
+    return ModelEntry(
+        id=mid, provider="openai_compat", route_kind=ROUTE_LOCAL,
+        privacy=PRIVACY_LOCAL if local else PRIVACY_CLOUD, exec_path=_safe_base(base),
+        path_verified=True, path_detail=f"listed by {name} /v1/models", authorized=True,
+        auth_detail="local server, no credential" if local
+        else "user-listed remote runtime; no credential sent",
+        quota=Quota("n/a", None, None, "local"), notes=tuple(notes))
+
+
+def _compat_entries(runtimes: list[tuple[str, str, str, list[str]]]) -> list[tuple[str, ModelEntry]]:
+    taken: set[str] = set()
+    return [(key, _compat_entry(m, key, name, base, taken))
+            for key, name, base, models in runtimes for m in models]
+
+
+def _inventory_openai_compat(p: Probes) -> tuple[list[ModelEntry], SourceStatus]:
+    runtimes = _openai_compat_runtimes(p)
+    entries = [e for _, e in _compat_entries(runtimes)]
+    if not runtimes:
+        return [], SourceStatus(False, "no OpenAI-compatible runtime reachable")
+    detail = f"{len(entries)} model(s) across {len(runtimes)} runtime(s)"
+    empty = [name for _, name, _, models in runtimes if not models]
+    if empty:
+        detail += "; " + ", ".join(f"{n}: 0 models" for n in empty)
+    return entries, SourceStatus(True, detail)
 
 
 def _ollama_cloud_authorization(signin: str) -> tuple[bool, str]:
@@ -761,6 +900,7 @@ def collect_inventory(
     models: list[ModelEntry] = []
     sources: dict[str, SourceStatus] = {}
     for name, fn in (("ollama", lambda: _inventory_ollama(p)),
+                     ("openai_compat", lambda: _inventory_openai_compat(p)),
                      ("claude", lambda: _inventory_claude(p, reg, resets)),
                      ("codex", lambda: _inventory_codex(p, reg, resets)),
                      ("gemini_cli", lambda: _inventory_gemini(p, reg, resets, verify=verify))):

@@ -1,0 +1,1 @@
+P1.8-compat-runtimes: local OpenAI-compatible runtimes (LM Studio, Jan, vLLM, llama.cpp, llamafile, LocalAI, MLX and any `runtimes:` entry in routing.yaml) now appear in the inventory and the resource map, one row per model with no cap, and every model beyond the first-run grandfathered five stays behind the P0.15 gate. Evidence: `tests/test_p18_compat_runtimes.py`.

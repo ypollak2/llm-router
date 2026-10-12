@@ -598,7 +598,7 @@ async def _build_and_filter_chain(
         _gate_names = _gate_configured_names(config, repo_cfg)
         _local_all = config.all_ollama_models() if _cheap_tier else []
         # First run of an upgrade: grandfather Ollama AND auto-detected openai-compat models together.
-        ensure_grandfather(_local_all + config.all_openai_compat_models())
+        ensure_grandfather(_local_all + config.legacy_compat_history_ids())
         ollama_models, _ollama_tail = order_for_chain(
             _local_all,
             task_type.value, critical=_gate_critical,

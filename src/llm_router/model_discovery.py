@@ -403,7 +403,7 @@ def ensure_grandfather(current_ids: "list[str] | tuple[str, ...]" = ()) -> None:
 
             compat_ids = {
                 m if m.startswith("openai_compat/") else f"openai_compat/{m}"
-                for m in get_config().all_openai_compat_models()
+                for m in get_config().legacy_compat_history_ids()
             }
             found.update(compat_ids)
         except Exception as exc:                             # noqa: BLE001

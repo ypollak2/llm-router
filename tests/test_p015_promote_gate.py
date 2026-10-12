@@ -462,7 +462,7 @@ def test_embedding_models_are_not_grandfathered_by_the_discovery_writer(state):
 # ═══ P0.15-f: the caller audit ═════════════════════════════════════════════════
 
 NAMES = ("available_ollama_models", "available_ollama_models_nowait", "all_ollama_models",
-         "get_cached_ollama_models", "all_openai_compat_models")
+         "get_cached_ollama_models", "all_openai_compat_models", "legacy_compat_history_ids")
 SCAN_ROOTS = (ROOT / "src" / "llm_router", ROOT / "scripts")
 
 #: (path relative to the repo, enclosing function, called name, ordinal of that call in the function)
@@ -471,12 +471,13 @@ SCAN_ROOTS = (ROOT / "src" / "llm_router", ROOT / "scripts")
 CALLERS: dict[tuple[str, str, str, int], tuple[str, str]] = {
     ("src/llm_router/router.py", "_build_and_filter_chain", "all_ollama_models", 0): ("existence", "provider filter: is any Ollama model there"),
     ("src/llm_router/router.py", "_build_and_filter_chain", "all_ollama_models", 1): ("order", "door D1, Ollama injection"),
-    ("src/llm_router/router.py", "_build_and_filter_chain", "all_openai_compat_models", 0): ("existence", "first-run grandfather input (ensure_grandfather); injects nothing"),
-    ("src/llm_router/router.py", "_build_and_filter_chain", "all_openai_compat_models", 1): ("order", "door D1, openai-compat injection"),
+    ("src/llm_router/router.py", "_build_and_filter_chain", "legacy_compat_history_ids", 0): ("existence", "first-run grandfather input (ensure_grandfather); injects nothing"),
+    ("src/llm_router/router.py", "_build_and_filter_chain", "all_openai_compat_models", 0): ("order", "door D1, openai-compat injection"),
     ("src/llm_router/hooks/chain_builder.py", "_ollama_models", "available_ollama_models", 0): ("order", "door D2, the hook chain builder"),
     ("src/llm_router/hooks/auto-route.py", "_load_discovered_ollama_split", "available_ollama_models", 0): ("order", "door D2b, hook classifier models (older-llm_router import path)"),
     ("src/llm_router/hooks/auto-route.py", "_load_discovered_ollama_split", "available_ollama_models_nowait", 0): ("order", "door D2b, the _nowait variant"),
     ("src/llm_router/config.py", "ollama_models_for_profile", "all_ollama_models", 0): ("existence", "legacy wrapper; no caller (asserted below)"),
+    ("src/llm_router/config.py", "legacy_compat_history_ids", "all_openai_compat_models", 0): ("existence", "grandfather input; the first five ids of the injection list"),
     ("src/llm_router/config.py", "all_ollama_models", "get_cached_ollama_models", 0): ("existence", "the lister; the router gates its result at D1"),
     ("src/llm_router/auto_profile.py", "generate_profile_yaml", "get_cached_ollama_models", 0): ("existence", "profile.yaml tier listing; read only as 'tier present' by dynamic_routing"),
     ("src/llm_router/discover.py", "_scan_ollama", "get_cached_ollama_models", 0): ("existence", "capability scan feeding the dead top-level chain_builder (no src caller)"),
@@ -485,7 +486,7 @@ CALLERS: dict[tuple[str, str, str, int], tuple[str, str]] = {
     ("src/llm_router/judge.py", "_select_judge_model", "get_cached_ollama_models", 0): ("existence", "picks a grader for a stored row, not a routed answer"),
     ("src/llm_router/hooks/direct_executor.py", "execute_chain", "available_ollama_models", 0): ("existence", "is each chain entry pulled; adds none"),
     ("src/llm_router/model_discovery.py", "first_installed", "available_ollama_models", 0): ("existence", "auxiliary pick (warm-up, compressor), not a routing chain"),
-    ("src/llm_router/model_discovery.py", "ensure_grandfather", "all_openai_compat_models", 0): ("existence", "first-run grandfather input (P0.15-2); records ids, injects nothing"),
+    ("src/llm_router/model_discovery.py", "ensure_grandfather", "legacy_compat_history_ids", 0): ("existence", "first-run grandfather input (P0.15-2); records ids, injects nothing"),
     ("src/llm_router/model_discovery.py", "<module>", "available_ollama_models", 0): ("existence", "the detached cache refresher"),
     ("scripts/bench_draft_acceptance.py", "preflight", "available_ollama_models", 0): ("existence", "benchmark script: is the model installed"),
 }

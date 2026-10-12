@@ -41,6 +41,9 @@ class _Cfg:
     def all_openai_compat_models(self):
         return []
 
+    def legacy_compat_history_ids(self):
+        return self.all_openai_compat_models()[:5]
+
 
 async def _run(prompt: str, ledger, monkeypatch, *, suppress: bool):
     monkeypatch.setenv("LLM_ROUTER_ROUTING_LEDGER", str(ledger))

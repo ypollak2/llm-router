@@ -109,6 +109,7 @@ class RepoConfig:
     routing: dict[str, TaskRouteOverride] = field(default_factory=dict)
     agentic_model: str | None = None  # preferred model for agentic/reasoning tasks (v0.5.5)
     daily_caps: dict[str, float] = field(default_factory=dict)  # task_type → USD; "_total" key for global
+    runtimes: list[dict] = field(default_factory=list)  # extra OpenAI-compatible endpoints: {name, url[, key]}
     # Source info (not a user field — set by loader)
     _sources: list[str] = field(default_factory=list)
 
@@ -218,6 +219,15 @@ def _dict_to_config(data: dict[str, Any], source: str) -> RepoConfig:
             except (TypeError, ValueError):
                 pass
 
+    if isinstance(data.get("runtimes"), list):
+        for item in data["runtimes"]:
+            if (isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"]
+                    and isinstance(item.get("url"), str) and item["url"]):
+                entry = {"name": item["name"], "url": item["url"]}
+                if isinstance(item.get("key"), str) and item["key"]:
+                    entry["key"] = item["key"]
+                cfg.runtimes.append(entry)
+
     return cfg
 
 
@@ -232,6 +242,7 @@ def _merge(base: RepoConfig, override: RepoConfig) -> RepoConfig:
         routing        = {**base.routing, **override.routing},
         agentic_model  = override.agentic_model or base.agentic_model,
         daily_caps     = {**base.daily_caps, **override.daily_caps},
+        runtimes       = list({r["url"]: r for r in [*base.runtimes, *override.runtimes]}.values()),
         _sources       = base._sources + override._sources,
     )
     return merged

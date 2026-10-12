@@ -74,6 +74,9 @@ class _FakeConfig:
     def all_openai_compat_models(self) -> list[str]:
         return list(self._openai_compat_models)
 
+    def legacy_compat_history_ids(self):
+        return self.all_openai_compat_models()[:5]
+
 
 @pytest.fixture(autouse=True)
 def isolate_chain_build(monkeypatch):

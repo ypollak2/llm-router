@@ -67,6 +67,9 @@ class _Cfg:
     def all_openai_compat_models(self):
         return []
 
+    def legacy_compat_history_ids(self):
+        return self.all_openai_compat_models()[:5]
+
 
 def _accepted_row(db: Path, session_id: str) -> sqlite3.Row:
     conn = sqlite3.connect(str(db))

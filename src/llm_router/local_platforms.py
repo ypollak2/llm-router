@@ -321,3 +321,30 @@ def print_startup_summary(detected: list[DetectedPlatform] | None = None) -> Non
         else:
             print(f"   ✓ {d.platform.name}{tier_tag}  →  {d.platform.base_url}  (no models listed)")
     print()
+
+
+def print_startup_summary_from_map() -> None:
+    """Start-up summary read from the resource map; probes live when no map exists."""
+    try:
+        from llm_router.resource_map import load_map
+
+        data = load_map()
+    except Exception:
+        data = None
+    if data is None:
+        print_startup_summary()
+        return
+    groups: dict[tuple[str, str], list[str]] = {}
+    for r in data.get("resources", []):
+        if r.get("status") == "connected" and r.get("endpoint") and r.get("runtime"):
+            name = str(r.get("chain_id", "")).removeprefix("openai_compat/")
+            groups.setdefault((r["runtime"], r["endpoint"]), []).append(name)
+    if not groups:
+        return
+    print("\n🖥️  Local LLM platforms detected:")
+    for (runtime, endpoint), models in groups.items():
+        label = PLATFORM_MAP[runtime].name if runtime in PLATFORM_MAP else runtime
+        print(f"   ✓ {label}  →  {endpoint}  ({len(models)} model(s))")
+        suffix = f" (+{len(models) - 3} more)" if len(models) > 3 else ""
+        print(f"     models: {', '.join(models[:3])}{suffix}")
+    print()
