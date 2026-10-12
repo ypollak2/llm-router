@@ -485,6 +485,7 @@ CALLERS: dict[tuple[str, str, str, int], tuple[str, str]] = {
     ("src/llm_router/judge.py", "_select_judge_model", "get_cached_ollama_models", 0): ("existence", "picks a grader for a stored row, not a routed answer"),
     ("src/llm_router/hooks/direct_executor.py", "execute_chain", "available_ollama_models", 0): ("existence", "is each chain entry pulled; adds none"),
     ("src/llm_router/model_discovery.py", "first_installed", "available_ollama_models", 0): ("existence", "auxiliary pick (warm-up, compressor), not a routing chain"),
+    ("src/llm_router/providers.py", "_ollama_window_candidates", "available_ollama_models", 0): ("order", "P1.3 bigger-window pick: order_for_chain(critical=True), validated ids only"),
     ("src/llm_router/model_discovery.py", "ensure_grandfather", "all_openai_compat_models", 0): ("existence", "first-run grandfather input (P0.15-2); records ids, injects nothing"),
     ("src/llm_router/model_discovery.py", "<module>", "available_ollama_models", 0): ("existence", "the detached cache refresher"),
     ("scripts/bench_draft_acceptance.py", "preflight", "available_ollama_models", 0): ("existence", "benchmark script: is the model installed"),
@@ -609,7 +610,7 @@ def test_every_caller_of_the_five_list_functions_is_marked_order_or_existence():
 
 def test_every_order_caller_sits_in_a_function_that_calls_the_gate():
     orders = [k for k, (kind, _) in CALLERS.items() if kind == "order"]
-    assert len(orders) == 5
+    assert len(orders) == 6  # +1: providers._ollama_window_candidates (P1.3 bigger-window pick)
     for rel, fn, name, n in orders:
         assert "order_for_chain(" in _function_source(rel, fn), f"{rel}:{fn} injects without the gate"
         assert order_result_used((ROOT / rel).read_text(), fn), f"{rel}:{fn} calls the gate but drops its result"

@@ -64,6 +64,7 @@ from llm_router.gates import run_gates
 from llm_router.gemini_cli_agent import GEMINI_MODELS, is_gemini_cli_available, run_gemini_cli
 from llm_router import okf as _okf
 from llm_router import pricing as _pricing
+from llm_router import call_identity as _ci_scope  # P1.10: one trace per routed call
 from llm_router.logging import get_logger
 from llm_router.streaming_types import RouterStreamEvent
 from llm_router.compaction import compact_structural
@@ -1134,9 +1135,17 @@ def _resolve_profile(
             # Unified engine (llm_router.classify), router policy — reproduces the
             # documented <600 / [600,2000] / >2000 partition exactly, now shared
             # with the gateway/hook so a fix to the algorithm lands in one place.
+            # PLAN v16 P1.6 / D-72: this partition routes; the one engine (door "router")
+            # runs after it in shadow, or decides under LLM_ROUTER_ENGINE_MODE=decide.
+            from llm_router import engine_door
             from llm_router.classify import ROUTER_POLICY, complexity_for
 
-            c = complexity_for(prompt, policy=ROUTER_POLICY)
+            _d = engine_door.decision(prompt, door="router")
+            if _d is not None:
+                c = Complexity(_d.complexity)
+            else:
+                c = complexity_for(prompt, policy=ROUTER_POLICY)
+                engine_door.shadow(prompt, door="router", rules_task=None, rules_complexity=c.value)
         if c == Complexity.DEEP_REASONING:
             use_thinking = True
         resolved = _COMPLEXITY_TO_PROFILE.get(c, config.llm_router_profile)
@@ -4152,6 +4161,7 @@ async def _record_route_error(
         log.debug("route-error usage row failed (non-fatal): %r", _err)
 
 
+@_ci_scope.traced
 async def route_and_call(
     task_type: TaskType,
     prompt: str,

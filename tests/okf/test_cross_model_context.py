@@ -254,5 +254,9 @@ def test_injected_context_is_bounded(store):
     hits = okf.find_relevant("widget subsystem module", base=store)
     injected = okf.inject_context("widget subsystem", hits)
 
-    assert len(hits) <= 10, f"{len(hits)} docs selected for injection"
+    # PLAN v16 P1.5: the bound is a token budget (default 1,500), not a doc count --
+    # 40 equally relevant tiny docs are all kept while they fit.
+    from llm_router.token_budget import estimate_tokens
+    spent = sum(estimate_tokens(c.as_context_block()) for c in hits)
+    assert spent <= 1500, f"{len(hits)} docs, {spent} tokens selected for injection"
     assert len(injected) < 20_000, f"injected {len(injected)} chars into a prompt"

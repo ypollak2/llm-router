@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 1
+# llm_router-hook-version: 2
 """Gemini CLI auto-route hook — injects MANDATORY ROUTE hint before model answers.
 
 This hook fires on UserPromptSubmit (after the user types a prompt, before Gemini
@@ -130,6 +130,37 @@ async def classify_complexity(prompt: str) -> tuple[str, float]:
     return "moderate", 0.5
 
 
+async def engine_complexity(prompt: str) -> tuple[str, float]:
+    """Classify task complexity (simple/moderate/complex) with the one engine.
+
+    LLM_ROUTER_ENGINE_MODE=decide only (PLAN v16 P1.6 / D-72), door ``gemini_cli``: sync L1/L3 only, no Ollama or network call.
+
+    Returns:
+        Tuple of (complexity: str, confidence: float, 0.0 when the engine has none)
+    """
+    from llm_router import engine
+
+    d = engine.decide(prompt, door="gemini_cli")
+    return ("complex" if d.complexity == "deep_reasoning" else d.complexity), d.confidence or 0.0
+
+
+async def _complexity(prompt: str) -> tuple[str, float]:
+    """The complexity the hint is built from. PLAN v16 P1.6 / D-72: the rules above decide; the
+    one engine runs after them, L1 only, in shadow (never raises). ``LLM_ROUTER_ENGINE_MODE=decide``
+    makes the engine decide."""
+    try:
+        from llm_router import engine
+
+        decides = engine.decides()
+    except Exception:  # noqa: BLE001 — no engine, rules as before
+        return await classify_complexity(prompt)
+    if decides:
+        return await engine_complexity(prompt)
+    out = await classify_complexity(prompt)
+    engine.shadow(prompt, door="gemini_cli", rules_task=None, rules_complexity=out[0], l1_only=True)
+    return out
+
+
 async def get_routing_hint(prompt: str) -> Optional[str]:
     """Generate MANDATORY ROUTE hint based on classified complexity.
 
@@ -137,7 +168,7 @@ async def get_routing_hint(prompt: str) -> Optional[str]:
         A formatted hint string, or None if classification fails.
     """
     try:
-        complexity, _confidence = await classify_complexity(prompt)
+        complexity, _confidence = await _complexity(prompt)
         prompt_lower = prompt.lower()
 
         # Heuristic for task type

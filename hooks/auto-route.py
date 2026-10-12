@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 50
+# llm_router-hook-version: 54
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 50"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 54"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -822,6 +822,38 @@ def _spawn_background_usage_refresh() -> None:
             _debug_log("usage refresh spawn failed")
 
 
+def _read_claude_oauth(timeout, env=None):
+    """Claude OAuth info via claude_creds (the one keychain/credentials reader), or None.
+
+    Prefers the importable package; else the stdlib-only copy the installer drops
+    next to the hooks, else the in-repo source. Never raises.
+    """
+    try:
+        from llm_router import claude_creds as _cc
+    except ImportError:
+        _cc = None
+        try:
+            import importlib.util as _ilu
+            from pathlib import Path as _P
+            _here = _P(__file__).resolve().parent
+            for _cand in (_here / "llm_router_claude_creds.py", _here.parent / "claude_creds.py",
+                          _here.parents[1] / "src" / "llm_router" / "claude_creds.py"):
+                if _cand.exists():
+                    _spec = _ilu.spec_from_file_location("llm_router_claude_creds", _cand)
+                    _cc = _ilu.module_from_spec(_spec)
+                    _spec.loader.exec_module(_cc)
+                    break
+        except Exception:  # noqa: BLE001 -- a broken support module must not kill the hook
+            _cc = None
+    if _cc is None:
+        return None
+    try:
+        return _cc.read_oauth(timeout=timeout, env=env)
+    except Exception:  # noqa: BLE001 -- read_oauth does not raise; belt and braces
+        _cc = None
+    return None
+
+
 def _fetch_usage_inline() -> dict | None:
     """Live OAuth refresh of Claude subscription data — called when usage.json is stale.
 
@@ -829,21 +861,13 @@ def _fetch_usage_inline() -> dict | None:
     then calls the Anthropic usage API. Writes fresh data to usage.json atomically.
     Returns the parsed data dict, or None on any failure (network, no token, etc.).
     """
-    if sys.platform != "darwin":
-        return None  # Keychain only available on macOS
     try:
         # Filter environment to exclude API keys and sensitive tokens
         safe_env = {k: v for k, v in os.environ.items() 
                    if not any(x in k.upper() for x in ("KEY", "TOKEN", "SECRET", "PASS", "AUTH"))}
-        
-        r = subprocess.run(
-            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-            capture_output=True, text=True, timeout=4,
-            env=safe_env,
-        )
-        if r.returncode != 0 or not r.stdout.strip():
-            return None
-        token = json.loads(r.stdout.strip()).get("claudeAiOauth", {}).get("accessToken", "")
+
+        creds = _read_claude_oauth(4, safe_env)
+        token = (creds or {}).get("accessToken", "")
         if not token:
             return None
     except Exception:
@@ -2379,7 +2403,7 @@ def classify_complexity(text: str, task_type: str) -> str:
     from llm_router.classify import HOOK_LIVE_POLICY, complexity_for
 
     return complexity_for(text, policy=HOOK_LIVE_POLICY, task_type=task_type).value
-def classify_prompt(text: str) -> dict | None:
+def _classify_prompt_rules(text: str) -> dict | None:
     """Classify using heuristic scoring → Ollama → cheap API → weak heuristic → auto."""
     stripped = text.strip()
 
@@ -2495,6 +2519,128 @@ def classify_prompt(text: str) -> dict | None:
         }
 
     return None
+
+
+def _engine_reuse_fields(text: str, decision) -> dict:
+    from llm_router import engine
+
+    return engine.reuse_fields(text, decision)
+
+
+def engine_decision(text: str):
+    """The one engine's Decision for this prompt (PLAN v16 P1.6, door ``hook``).
+
+    Sync L1 + L3 + cache only: the hook never waits on an LLM (D-13). Same Decision
+    as every other door for the same text."""
+    from llm_router import engine
+
+    return engine.decide(text, door="hook")
+
+
+def _classify_prompt_engine(text: str) -> dict | None:
+    """LLM_ROUTER_ENGINE_MODE=decide: classify with the one engine; deterministic fast paths run first.
+
+    Fast paths (not classification: each carries semantics that downstream hooks read, and
+    the engine's L1 has no such rule yet): too short or a skip pattern -> None (do not
+    route); coordination plans -> ``coordinate`` (advisory only, never direct execution);
+    build tasks -> ``code``; content generation -> ``generate``; local-state questions ->
+    ``introspect`` (enforce-route lets native tools through); benchmark templates; and the
+    hook's executable git/deploy ``coordination`` bucket. Everything else is
+    ``engine.decide``: sync L1 + L3 + cache, no Ollama, no cloud API (D-13). The residual
+    disagreement with the other doors is exactly the prompts these paths take
+    (``scripts/door_agreement.py``); moving build/content/coordination into the engine's L1
+    is an engine-policy change for every door at once, so it is not made here.
+
+    Complexity for every path is the engine's, except the ``coordination`` bucket, which is
+    at least ``moderate``."""
+    stripped = text.strip()
+
+    if not stripped or len(stripped) < 8:
+        return None
+    if SKIP_PATTERNS.search(stripped):
+        return None
+
+    d = engine_decision(text)
+
+    # Coordination fast-path: multi-agent orchestration prompts are plans,
+    # not payloads. Checked BEFORE the build/content fast-paths because
+    # "coordinate three agents to build X" contains build vocabulary but
+    # is orchestration, not a direct code task. The classification is
+    # ADVISORY-ONLY: direct execution must never fire for ``task_type ==
+    # coordinate`` (the direct path has no subagents; a direct answer would
+    # fabricate parallel work).
+    if _is_coordination_task(stripped):
+        return {"task_type": "coordinate", "complexity": d.complexity, "method": "coordination-fast-path"}
+
+    # Build task fast-path: deterministic llm_code routing for obvious coding work.
+    if _is_build_task(stripped):
+        return {"task_type": "code", "complexity": d.complexity, "method": "build-fast-path"}
+
+    # Content generation detection (v7.4.0+): Suggest routing for create/write/add tasks
+    if _is_content_generation_task(stripped):
+        return {
+            "task_type": "generate",
+            "complexity": d.complexity,
+            "method": "content-generation-fast-path",
+            "suggestion": "content-generation-decomposition",
+        }
+
+    # Introspection fast-path: questions about LOCAL LLM Router / project state need
+    # read-only Bash + SQL; enforce-route recognises ``introspect`` and lets native tools
+    # through without enforcement.
+    if _is_introspection_task(stripped):
+        return {"task_type": "introspect", "complexity": "simple", "method": "introspection-fast-path"}
+
+    # Benchmark prompt fast-path (Plan 07 Phase 3 C): RouterArena / MMLU / HELM templates
+    # have stable prefixes.
+    bench = benchmark_fast_path(stripped)
+    if bench is not None:
+        return bench
+
+    # The hook's own ``coordination`` bucket (executable git / deploy / command asks, no
+    # trailing "e"): enforce-route keeps it enforced and names llm_act for it
+    # (test_enf_coordination_bash_names_llm_act). The engine has no such category, so the
+    # hook scorer's winning bucket stays a gate, exactly as before.
+    scores = score_categories(text)
+    best_category = max(scores, key=scores.get)
+    if best_category == "coordination" and scores[best_category] > 0:
+        # At least ``moderate``: enforce-route's llm_act redirect fires only for
+        # moderate/complex, and the old policy gave this bucket ``moderate`` unless the
+        # prompt was long. The engine's length curve says ``simple`` below 400 chars,
+        # which would stop holding Bash for "run git push now".
+        cx = d.complexity if d.complexity != "simple" else "moderate"
+        return {"task_type": "coordination", "complexity": cx,
+                "method": "heuristic" if scores[best_category] >= CONFIDENCE_THRESHOLD else "heuristic-weak",
+                "score": scores[best_category]}
+
+    # Telemetry labels keep their old vocabulary: an abstain with some signal was
+    # "heuristic-weak", with none "fallback" (the old layer 5, now an abstain).
+    method = "heuristic" if not d.abstain else ("heuristic-weak" if d.confidence else "fallback")
+    return {"task_type": d.task_type, "complexity": d.complexity, "method": method,
+            "abstain": d.abstain}
+
+
+def classify_prompt(text: str) -> dict | None:
+    """The hook's classification. PLAN v16 P1.6 / D-72: the rules above route (unchanged); the one
+    engine runs AFTER them, L1 only, in shadow (``engine.shadow``: logged beside the rules class,
+    never raises, no cache or model load). ``LLM_ROUTER_ENGINE_MODE=decide`` makes the engine
+    decide (``_classify_prompt_engine``), ``off`` skips the engine call."""
+    try:
+        from llm_router import engine
+
+        decides = engine.decides()
+    except Exception as exc:  # noqa: BLE001 — an engine import error must never stop the rules
+        from llm_router import failopen as _fo
+
+        _fo.record("LR-FO-ENGINE-SHADOW", exc)
+        return _classify_prompt_rules(text)
+    if decides:
+        return _classify_prompt_engine(text)
+    result = _classify_prompt_rules(text)
+    if result is not None:
+        engine.shadow(text, door="hook", rules_task=result.get("task_type"),
+                      rules_complexity=result.get("complexity"), l1_only=True)
+    return result
 
 
 # ── MCP Capability Map ───────────────────────────────────────────────────────
@@ -4535,6 +4681,30 @@ def main() -> None:
 
     session_id = hook_input.get("session_id", "")
 
+    # P1.10: a human prompt is a new task. Advance the session's turn counter before any
+    # writer runs, so every row of this turn (hook, MCP, proxy, sub-agents) shares one task_id.
+    try:
+        from llm_router import call_identity as _ci_turn
+        _ci_turn.begin_turn(session_id)
+    except Exception as _exc:  # identity never blocks a prompt
+        from llm_router import failopen as _fo
+        _fo.record("CHZ-FO-HOOK-TURN-ID", _exc)
+
+    # P1.6-h (decide mode only, D-72): this turn's Decision, left for the proxy in the
+    # last_classification sidecar (written below) so it reads it by text_sha instead of
+    # classifying the prompt again. In shadow mode the rules route and nothing is left for the
+    # proxy. Fail-open: no record costs the proxy one classification, nothing else.
+    _p16_decision = None
+    if session_id:
+        try:
+            from llm_router import engine as _engine
+
+            if _engine.decides():
+                _p16_decision = engine_decision(prompt)
+        except Exception as _exc:                                    # noqa: BLE001
+            from llm_router import failopen as _fo
+            _fo.record("P16-HOOK-DECISION", _exc)
+
     # Refresh the session pointer on every prompt. It used to be written once by
     # session-start.py, so it went stale after the 6h TTL and a long session lost
     # its own identity — measured 2026-09-14, all 30 pointers on this machine
@@ -5970,6 +6140,8 @@ def main() -> None:
                     # never look at them, so this is backward compatible.
                     "route_id": _directive_id,
                     "turn_id": int(_directive_now),
+                    # P1.6-h (decide mode): text_sha / tier_sha / decision / ts, for the proxy's reuse.
+                    **(_engine_reuse_fields(prompt, _p16_decision) if _p16_decision is not None else {}),
                 },
             )
         except OSError:
@@ -6008,6 +6180,16 @@ def main() -> None:
         _final_context = _final_context + "\n\n" + _grounding_notice
     if _mini_summary_block:
         _final_context = _final_context + "\n\n" + _mini_summary_block
+    # P1.8 tasks 8/10: one line when the resource map changed since the last prompt.
+    # Reads two small files; the refresh itself is a detached child, never awaited.
+    try:
+        from llm_router import map_rediscovery as _map_rd
+        _map_line = _map_rd.pending_notice()
+        _map_rd.spawn_refresh_if_needed()
+    except Exception:
+        _map_line = ""
+    if _map_line:
+        _final_context = _final_context + "\n\n" + _map_line
 
     output = {
         "hookSpecificOutput": {

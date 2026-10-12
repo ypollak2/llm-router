@@ -107,6 +107,8 @@ class ModelEntry:
     measured_recall_tokens: int | None = None
     present: bool = True                 # False: in the last snapshot, gone now
     notes: tuple[str, ...] = ()
+    digest: str = ""                     # ollama /api/tags digest (P1.8 task 10); "" if unknown
+    modified_at: str = ""                # ollama /api/tags modified_at
 
     def cap(self, name: str) -> Cap:
         return self.capabilities.get(name, Cap(CAP_UNKNOWN, SRC_DECLARED, "not reported"))

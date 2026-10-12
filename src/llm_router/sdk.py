@@ -33,12 +33,47 @@ class RouteResult:
         return self.input_tokens + self.output_tokens
 
 
+_PROCESS_SESSION: str | None = None
+
+
+def _sdk_session_id(session_id: str | None) -> str:
+    """The caller's session id when it is an id, else one generated once per process.
+
+    P1.10: the SDK used to stamp the literal ``"sdk"`` on every row, which the ledger
+    refuses as a placeholder (NULL session). A generated id keeps one process's calls
+    together and is never mistaken for a Claude Code session (``sdk-`` prefix)."""
+    global _PROCESS_SESSION
+    from llm_router.call_identity import ledger_session_id
+
+    sid = ledger_session_id(session_id)
+    if sid:
+        return sid
+    if _PROCESS_SESSION is None:
+        import uuid
+
+        _PROCESS_SESSION = f"sdk-{uuid.uuid4().hex[:12]}"
+    return _PROCESS_SESSION
+
+
 def route(prompt: str, *, task_type: str | None = None,
-          complexity: str | None = None, timeout: int = 150) -> RouteResult:
+          complexity: str | None = None, timeout: int = 150,
+          session_id: str | None = None, task_id: str | None = None) -> RouteResult:
     """Route one prompt through LLM Router and return the answer + routing metadata.
 
-    task_type / complexity are inferred from the prompt when omitted.
+    task_type / complexity are inferred from the prompt when omitted. ``session_id`` and
+    ``task_id`` (ids, ``[A-Za-z0-9_.:-]{1,128}``) name the caller's session and request on
+    the ledger rows; omitted, the session is generated once per process and the task per call.
     """
+    from llm_router import call_identity
+
+    sid = _sdk_session_id(session_id)
+    with call_identity.scope(sid, task_id=task_id):
+        return _route(prompt, task_type=task_type, complexity=complexity,
+                      timeout=timeout, session_id=sid)
+
+
+def _route(prompt: str, *, task_type: str | None, complexity: str | None,
+           timeout: int, session_id: str) -> RouteResult:
     # Lazy imports keep ``import llm_router`` cheap.
     from llm_router.gateway import _classify
     from llm_router.hooks.chain_builder import build_chain, get_current_pressure, needs_claude_tools
@@ -65,9 +100,9 @@ def route(prompt: str, *, task_type: str | None = None,
     try:  # meter, like the gateway/hook paths
         from llm_router.hooks.savings_logger import log_direct_savings, log_direct_to_db
         log_direct_to_db(result=result, prompt=prompt, task_type=task_type,
-                         complexity=complexity, classifier_type="sdk", session_id="sdk")
+                         complexity=complexity, classifier_type="sdk", session_id=session_id)
         log_direct_savings(result=result, task_type=task_type, complexity=complexity,
-                           session_id="sdk", host="sdk")
+                           session_id=session_id, host="sdk")
     except Exception:
         pass
 
