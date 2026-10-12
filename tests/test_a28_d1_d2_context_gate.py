@@ -102,13 +102,13 @@ def test_the_word_mid_sentence_does_not_trigger_it(hook) -> None:
     reply to something. Without the anchor this class would swallow ordinary
     instructions.
     """
-    assert hook._CONTINUATION_RE.match("the script should continue on error") is None
+    assert hook._CONTINUATION_DIRECTIVE_RE.match("the script should continue on error") is None
     # Asserted on the REGEX, not on `_is_context_dependent`. The full predicate
     # flags "the loop should continue until the tests pass" anyway — verified
     # pre-existing (True before this change and after), via the anaphora branch
     # on "the tests". Asserting False there would have failed for a reason
     # unrelated to what this test is about.
-    assert hook._CONTINUATION_RE.match(
+    assert hook._CONTINUATION_DIRECTIVE_RE.match(
         "the loop should continue until the tests pass"
     ) is None
 
@@ -125,7 +125,7 @@ def test_the_length_gate_still_applies(hook) -> None:
     # via `_CONTEXT_DEP_RE` ("migration"/"queue"/"replica"), pre-existing and
     # unrelated — but the D-1 branch must not be what fires.
     assert not (len(long_prompt.split()) <= 12
-                and hook._CONTINUATION_RE.match(long_prompt))
+                and hook._CONTINUATION_DIRECTIVE_RE.match(long_prompt))
 
 
 # ── D-2 ───────────────────────────────────────────────────────────────────

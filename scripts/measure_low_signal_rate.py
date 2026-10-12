@@ -43,8 +43,9 @@ from llm_router import classify  # noqa: E402
 MIN_N = 50  # CLAUDE.md: below ~50 real prompts, say "too few to tell".
 
 
-def collect() -> tuple[list[str], collections.Counter]:
-    kept: list[str] = []
+def collect_records() -> tuple[list, collections.Counter]:
+    """The kept PromptRecords (text, ts, source, ...), in collection order."""
+    kept: list = []
     drops: collections.Counter = collections.Counter()
     for name, reader in sources.READERS.items():
         try:
@@ -55,10 +56,15 @@ def collect() -> tuple[list[str], collections.Counter]:
                 if reason:
                     drops[reason] += 1
                     continue
-                kept.append(rec.text)
+                kept.append(rec)
         except Exception as exc:  # noqa: BLE001 — one dead source must not hide the rest
             print(f"  reader {name}: {type(exc).__name__}: {exc}", file=sys.stderr)
     return kept, drops
+
+
+def collect() -> tuple[list[str], collections.Counter]:
+    records, drops = collect_records()
+    return [rec.text for rec in records], drops
 
 
 def main() -> int:

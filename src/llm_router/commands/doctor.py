@@ -4,6 +4,7 @@ Comprehensive diagnostic tool to check hooks, MCP registration, API keys,
 Ollama availability, and host-specific configurations.
 """
 
+from llm_router.provider_classes import real_decision_sql
 import json
 import os
 import re
@@ -513,7 +514,7 @@ def _routing_decision_state(db_path: Path) -> _RoutingDecisionState:
             rows = conn.execute(
                 "SELECT COUNT(*) FROM routing_decisions "
                 "WHERE date(timestamp,'localtime')=date('now','localtime') "
-                "  AND COALESCE(reason_code,'') != 'sidecar_backfill'"
+                "  AND COALESCE(reason_code,'') != 'sidecar_backfill' AND " + real_decision_sql(conn)
             ).fetchone()[0]
         except sqlite3.Error as e:
             # NOT 0 rows. An unreadable table is a different fact from an empty
@@ -786,7 +787,7 @@ def _check_savings_posture() -> list[str]:
                 "  COUNT(*) "
                 "FROM routing_decisions "
                 "WHERE date(timestamp,'localtime')=date('now','localtime') "
-                "  AND COALESCE(reason_code,'') != 'sidecar_backfill'"
+                "  AND COALESCE(reason_code,'') != 'sidecar_backfill' AND " + real_decision_sql(conn)
             ).fetchone()
             conn.close()
             simple_n, total_n = (row[0] or 0), (row[1] or 0)
@@ -882,6 +883,28 @@ def _seats_report() -> list[str]:
             f"LLM_ROUTER_SUBSCRIPTION_PROVIDER={env_sub} but the detected seat is '{sub}'"
         ))
     lines.append(_dim(f"    cached in ~/.llm-router/{_seats.SEATS_FILE_NAME}"))
+    return lines
+
+
+def _floor_report() -> list[str]:
+    """P0.15 lines: profile.yaml ownership, the promote gate, the grandfather file."""
+    from llm_router import model_discovery as md
+    from llm_router.auto_profile import profile_status_lines
+
+    lines = [_warn(t) for t in profile_status_lines()]
+    if not lines:
+        lines.append(_ok("profile.yaml: absent or still router-written (auto-updates)"))
+    if not md.gate_enabled():
+        lines.append(_warn(f"{md.GATE_ENV}=off: unvalidated local models lead chains again"))
+    status = md.grandfather_status()
+    if status == "missing":
+        lines.append(_warn(
+            "grandfathered_models.json was deleted and is not recreated: no installed "
+            "model is grandfathered, so only configured models keep their place"))
+    elif status == "ok":
+        lines.append(_ok(f"grandfathered_models.json: {len(md.grandfathered_ids())} id form(s)"))
+    else:
+        lines.append(_dim("    grandfathered_models.json: not written yet (first routed prompt writes it)"))
     return lines
 
 
@@ -1378,6 +1401,11 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     # the fact), so it warns and never fails.
     print(f"\n{_bold('  Seats (subscriptions this machine is logged in to)')}")
     for line in _seats_report():
+        print(f"  {line}")
+
+    # ── 6c. P0.15 floor: user-owned profile.yaml, unvalidated local models ──
+    print(f"\n{_bold('  Profile and local-model gate')}")
+    for line in _floor_report():
         print(f"  {line}")
 
     print(f"\n{_bold('  Provider API keys')}")

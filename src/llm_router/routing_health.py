@@ -24,6 +24,7 @@ import statistics
 import sys
 from pathlib import Path
 
+from llm_router.provider_classes import not_error_row_sql
 from llm_router.routing_log import MIN_SAMPLE, default_log, is_human, is_real, load
 
 _LATENCY = re.compile(r"latency=(\d+)ms")
@@ -102,6 +103,7 @@ def routed_calls(days: int = 7, db: Path | None = None,
             "SELECT date(timestamp), provider, COUNT(*) FROM usage "
             "WHERE date(timestamp) >= ? AND COALESCE(is_simulated, 0) = 0 "
             "AND COALESCE(provider, '') != 'cache' "  # excluded from every rate (own bucket: none)
+            f"AND {not_error_row_sql(con)} "  # LEDGER-ERR-1: a failed call is not a served call
             "GROUP BY 1, 2", (since,)).fetchall()
     finally:
         con.close()

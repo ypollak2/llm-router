@@ -125,13 +125,15 @@ def _generate_posts():
 
 def test_edit_keep_alive_default_env_and_duration_string(monkeypatch):
     monkeypatch.delenv("LLM_ROUTER_LOCAL_KEEP_ALIVE", raising=False)
+    assert warm.edit_keep_alive() == 600
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_KEEP_ALIVE", "-1")
     assert warm.edit_keep_alive() == -1
     monkeypatch.setenv("LLM_ROUTER_LOCAL_KEEP_ALIVE", "600")
     assert warm.edit_keep_alive() == 600
     monkeypatch.setenv("LLM_ROUTER_LOCAL_KEEP_ALIVE", "30m")
     assert warm.edit_keep_alive() == "30m"
     monkeypatch.setenv("LLM_ROUTER_LOCAL_KEEP_ALIVE", "  ")
-    assert warm.edit_keep_alive() == -1
+    assert warm.edit_keep_alive() == 600
 
 
 def test_call_ollama_sends_keep_alive_only_when_asked(stub):
@@ -163,7 +165,7 @@ def test_warmup_and_edit_call_agree_on_num_ctx_and_keep_alive(stub, monkeypatch)
                            MODEL, time.monotonic() + 30)
         chat = _chat_posts()[0]
         wp = warm.warmup_payload(MODEL)
-        assert chat["keep_alive"] == wp["keep_alive"] == -1
+        assert chat["keep_alive"] == wp["keep_alive"] == 600
         assert chat["options"].get("num_ctx") == wp["options"].get("num_ctx")
         if ctx:
             assert wp["options"]["num_ctx"] == int(ctx)
@@ -271,7 +273,7 @@ def test_warm_edit_model_bg_loads_with_the_edit_calls_options(stub, monkeypatch)
     assert _wait_for(lambda: _generate_posts()), "warm-up never reached the server"
     got = _generate_posts()[0]
     assert got == warm.warmup_payload(MODEL)
-    assert got["keep_alive"] == -1
+    assert got["keep_alive"] == 600
 
 
 def test_warm_edit_model_bg_is_gated(stub, monkeypatch):
@@ -333,7 +335,7 @@ def test_cold_model_falls_through_fast_without_calling_the_model(stub, repo, mon
     assert (repo / "foo.py").read_text() == "def old_name():\n    pass\n"
     # ...and the next edit is made warm: a detached warm-up was started.
     assert len(spawned) == 1 and spawned[0][0] == "curl"
-    assert json.loads(spawned[0][spawned[0].index("-d") + 1])["keep_alive"] == -1
+    assert json.loads(spawned[0][spawned[0].index("-d") + 1])["keep_alive"] == 600
 
 
 def test_resident_model_is_served_with_keep_alive(stub, repo, monkeypatch):
@@ -343,7 +345,7 @@ def test_resident_model_is_served_with_keep_alive(stub, repo, monkeypatch):
                             deadline_s=time.monotonic() + 36)
     assert out is not None and out.applied, out
     assert "new_name" in (repo / "foo.py").read_text()
-    assert _chat_posts() and all(p["keep_alive"] == -1 for p in _chat_posts())
+    assert _chat_posts() and all(p["keep_alive"] == 600 for p in _chat_posts())
 
 
 def test_applied_edit_row_carries_the_payload_session_id_not_the_pointer_files(stub, repo, monkeypatch):
@@ -409,7 +411,7 @@ def test_session_start_warms_edit_model_and_skips_the_generic_double_warm(stub, 
     mod._warm_ollama_bg()                      # same model: must NOT reload it at server defaults
     assert len(spawned) == 1
     body = json.loads(spawned[0][spawned[0].index("-d") + 1])
-    assert body["model"] == MODEL and body["keep_alive"] == -1 and "num_ctx" in body["options"]
+    assert body["model"] == MODEL and body["keep_alive"] == 600 and "num_ctx" in body["options"]
 
 
 def test_session_start_generic_warmup_yields_to_the_edit_warmup(stub, monkeypatch):

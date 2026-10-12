@@ -94,6 +94,18 @@ jobs:
           python3 scripts/bugs_index.py --write "$RUNNER_TEMP/bugs-index.md"
           python3 scripts/bugs_index.py --check --index "$RUNNER_TEMP/bugs-index.md"
 
+  changelog-check:
+    # D-49: a PR adds changelog.d/<id>.<type>.md instead of editing CHANGELOG.md.
+    # Malformed/empty fragment: fail. Direct edit of [Unreleased]: WARN only until the
+    # next release is cut, then add --strict here.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - run: python3 scripts/changelog_fragments.py check --base "origin/${{ github.base_ref }}"
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 30

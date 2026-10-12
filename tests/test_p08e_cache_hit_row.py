@@ -100,15 +100,19 @@ async def test_a_miss_writes_no_cache_hit_row(cache_env, caller, real_usage_writ
 
 
 @pytest.mark.asyncio
-async def test_cache_hit_adds_no_routing_decision_row(cache_env, caller, real_usage_writer):
-    """Deliberate: a replay is not a routing decision (see the PR body); the judge queue, the
-    bandit and the offload shares read ``routing_decisions`` and would count it twice."""
+async def test_cache_hit_adds_one_runtime_routing_decision_row(cache_env, caller, real_usage_writer):
+    """Owner decision 2026-10-10 (supersedes the earlier "no routing row" choice): the M0-3 gate reads
+    routing_decisions, so a cache-served call leaves one runtime row (provider cache, reason_code
+    cache_hit, caller's session). Routing-metric readers exclude it (SQL_REAL_DECISION)."""
     calls: list = []
     await _route("explain the retry policy", caller_context="c", calls=calls)
-    before = _q(cache_env, "SELECT COUNT(*) FROM routing_decisions")
     await _route("explain the retry policy", caller_context="c", calls=calls)
-    assert _q(cache_env, "SELECT COUNT(*) FROM routing_decisions") == before
-    assert _q(cache_env, "SELECT COUNT(*) FROM routing_decisions WHERE final_provider = 'cache'") == [(0,)]
+    from llm_router import cost
+
+    rows = _q(cache_env, "SELECT session_id, final_provider, reason_code, provenance "
+                         "FROM routing_decisions ORDER BY id")
+    prov = cost._write_provenance()  # 'runtime' in production; 'test' under pytest
+    assert rows == [(SID, "openai", "router_unhinted", prov), (SID, "cache", "cache_hit", prov)]
 
 
 @pytest.mark.asyncio

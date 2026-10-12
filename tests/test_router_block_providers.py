@@ -36,6 +36,7 @@ def _isolate_dynamic(monkeypatch, *, block: list[str]) -> None:
     - repo_cfg carries the block list under test
     """
     monkeypatch.setattr("llm_router.claude_usage.get_claude_pressure", lambda: 0.0)
+    monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "qwen3.5:latest")   # P0.15: configured, so the promote gate keeps it
     monkeypatch.setattr(
         "llm_router.router.get_repo_config",
         lambda *a, **k: RepoConfig(block_providers=list(block)),
