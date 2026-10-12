@@ -10,6 +10,7 @@ import asyncio
 import importlib.util
 import json
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -302,3 +303,27 @@ def test_shadow_never_records_to_the_decision_ledger_but_decide_does():
     assert len(rows()) == 2 and decision_ledger.read_ledger() == []
     engine.decide("refactor the auth module across the codebase", door="hook")
     assert len(decision_ledger.read_ledger()) == 1
+
+
+def test_background_shadow_row_lands_in_the_home_current_at_enqueue(tmp_path, monkeypatch):
+    # main CI 70847288: the worker ran after a test restored HOME and wrote the operator's real
+    # ~/.llm-router/engine_shadow.jsonl. The path is now resolved when the work is queued.
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    assert engine.shadow_drain()
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(a))
+    gate = threading.Event()
+    real = engine._decide_light
+
+    def slow(*args, **kwargs):
+        gate.wait(5)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "_decide_light", slow)
+    engine.shadow(PROMPT, door="gateway", rules_task="query", rules_complexity="simple", background=True)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(b))  # the caller's environment changes before the worker runs
+    gate.set()
+    assert engine.shadow_drain()
+    assert (a / engine.SHADOW_LOG).exists()
+    assert not (b / engine.SHADOW_LOG).exists()
