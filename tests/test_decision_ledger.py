@@ -555,22 +555,62 @@ def test_prereg_check_counts_rows_before_and_after_the_freeze(tmp_path):
     assert check_prereg.check(md)["match"] is False
 
 
-def test_harness_runs_and_refuses_to_pass_a_tiny_run(tmp_path):
-    """Smoke only: n = 3 per arm at 0 messages. It must produce rows and a FAILING verdict
-    (nothing at >= 1,800 messages was checked), and must not write a gate file."""
+def _run_harness(tmp_path, extra, *, loadavg=None):
+    """Run the P1.7-c harness in a subprocess. Returns (proc, out_path, gate_home)."""
     home = tmp_path / "gatehome"
     home.mkdir()
     env = {**os.environ, "HOME": str(tmp_path), "LLM_ROUTER_HOME": str(home),
            "PYTHONPATH": os.pathsep.join([str(ROOT / "src"), str(ROOT)])}
     out = tmp_path / "res.json"
-    p = subprocess.run([sys.executable, str(ROOT / "scripts" / "bench_shadow_continuation.py"),
-                        "--n", "3", "--warmup", "1", "--sizes", "0", "--fixtures", "one_prompt",
-                        "--out", str(out), "--gate"], env=env, capture_output=True, text=True, timeout=300,
-                       cwd=str(ROOT))
-    assert p.returncode == 1, p.stderr[-600:]
+    script = str(ROOT / "scripts" / "bench_shadow_continuation.py")
+    args = ["--n", "3", "--warmup", "1", "--sizes", "0", "--fixtures", "one_prompt",
+            "--out", str(out), "--gate", *extra]
+    if loadavg is None:
+        cmd = [sys.executable, script, *args]
+    else:  # fake a loaded machine: patch getloadavg, then run the script as __main__
+        cmd = [sys.executable, "-c",
+               "import os,runpy,sys;os.getloadavg=lambda:(%r,%r,%r);sys.argv=[%r]+sys.argv[1:];"
+               "runpy.run_path(%r,run_name='__main__')" % (loadavg, loadavg, loadavg, script, script),
+               *args]
+    p = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=300, cwd=str(ROOT))
+    return p, out, home
+
+
+def _diag(p):
+    return "rc=%s\nSTDOUT:\n%s\nSTDERR:\n%s" % (p.returncode, p.stdout[-1500:], p.stderr[-1500:])
+
+
+def test_harness_runs_and_refuses_to_pass_a_tiny_run(tmp_path):
+    """Smoke only: n = 3 per arm at 0 messages. It must produce rows and a FAILING verdict
+    (nothing at >= 1,800 messages was checked), and must not write a gate file. Exit 1 means
+    "verdict failed" ONLY: a harness error exits 2 (an uncaught exception used to exit 1 too and
+    leave no out-file, which made a CI flake look like a verdict failure)."""
+    p, out, home = _run_harness(tmp_path, [])
+    assert p.returncode == 1, _diag(p)
+    assert out.exists(), "exit 1 but no out-file written\n" + _diag(p)
     res = json.loads(out.read_text())
     assert res["rows"] and res["rows"][0]["off"]["n"] == 3 and res["rows"][0]["shadow"]["n"] == 3
     assert res["verdict"]["passed"] is False and res["verdict"]["rows_checked"] == 0
     assert res["meta"]["decision_rows"] == 8 and res["meta"]["decision_rows_shadow"] >= 0
     assert not (home / DL.GATE_FILENAME).exists()
     assert "gate NOT written" in p.stdout
+
+
+def test_harness_on_a_loaded_machine_fails_the_verdict_and_writes_out(tmp_path):
+    """Contention is a failing verdict (exit 1, out written, reason names the load), not a crash."""
+    p, out, home = _run_harness(tmp_path, [], loadavg=99.0)
+    assert p.returncode == 1, _diag(p)
+    res = json.loads(out.read_text())
+    assert res["rows"] and res["verdict"]["passed"] is False
+    assert any("load1" in w for w in res["verdict"]["why"]), res["verdict"]
+    assert not (home / DL.GATE_FILENAME).exists()
+
+
+def test_harness_error_exits_2_writes_out_and_no_gate(tmp_path):
+    """A harness exception (here an unknown fixture) is exit 2 with a reason, never exit 1."""
+    p, out, home = _run_harness(tmp_path, ["--fixtures", "no_such_fixture"])
+    assert p.returncode == 2, _diag(p)
+    res = json.loads(out.read_text())
+    assert res["verdict"]["passed"] is False and "harness error" in res["verdict"]["reason"]
+    assert "no_such_fixture" in res["verdict"]["reason"]
+    assert not (home / DL.GATE_FILENAME).exists()

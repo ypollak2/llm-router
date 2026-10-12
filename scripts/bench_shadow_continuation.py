@@ -54,6 +54,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from pathlib import Path
 
 os.environ.setdefault("LLM_ROUTER_SYNTHETIC", "1")  # benchmark traffic, never production spend
@@ -61,12 +62,21 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
-from llm_router import decision_ledger as DL  # noqa: E402
-from llm_router import engine  # noqa: E402
-from llm_router import local_classifier as lc  # noqa: E402
-from llm_router.proxy import backends as pb  # noqa: E402
-from llm_router.proxy.cls_input import assemble  # noqa: E402
-from tests.test_proxy_tiers import Upstream, _app, _first, _post, _req  # noqa: E402
+try:
+    from llm_router import decision_ledger as DL  # noqa: E402
+    from llm_router import engine  # noqa: E402
+    from llm_router import local_classifier as lc  # noqa: E402
+    from llm_router.proxy import backends as pb  # noqa: E402
+    from llm_router.proxy.cls_input import assemble  # noqa: E402
+    from tests.test_proxy_tiers import Upstream, _app, _first, _post, _req  # noqa: E402
+except Exception as _e:  # an uncaught ImportError would exit 1 == "verdict failed"
+    _msg = "harness error (import): %s: %s" % (type(_e).__name__, _e)
+    print(_msg, file=sys.stderr)
+    if "--out" in sys.argv[:-1]:
+        Path(sys.argv[sys.argv.index("--out") + 1]).write_text(json.dumps(
+            {"rows": [], "meta": {"error": traceback.format_exc()},
+             "verdict": {"passed": False, "reason": _msg}}, indent=1))
+    sys.exit(2)
 
 SID = "11111111-2222-3333-4444-555555555555"
 REMINDER = "<system-reminder>" + "r" * 2000 + "</system-reminder>"
@@ -219,6 +229,11 @@ async def run(kinds: list[str], sizes: list[int], n: int, warmup: int) -> dict:
     return results
 
 
+# Exit codes: 0 verdict passed, 1 verdict FAILED (out written), 2 harness error (out written, passed=false).
+EXIT_VERDICT_FAILED = 1
+EXIT_ERROR = 2
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=100)
@@ -230,11 +245,22 @@ def main() -> None:
                     help="write p17c_gate.json into the real state dir if the P1.7-c verdict passes")
     a = ap.parse_args()
     real_gate = DL.gate_path()  # resolved BEFORE the run redirects the state dir
-    with tempfile.TemporaryDirectory() as home:
-        os.environ["LLM_ROUTER_HOME"] = home
-        os.environ["LLM_ROUTER_DECISION_SHADOW_RATE"] = str(DL.RATE_MAX)
-        engine.clear_cache(persistent=False)
-        res = asyncio.run(run(a.fixtures.split(","), [int(x) for x in a.sizes.split(",")], a.n, a.warmup))
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            os.environ["LLM_ROUTER_HOME"] = home
+            os.environ["LLM_ROUTER_DECISION_SHADOW_RATE"] = str(DL.RATE_MAX)
+            engine.clear_cache(persistent=False)
+            res = asyncio.run(run(a.fixtures.split(","), [int(x) for x in a.sizes.split(",")], a.n, a.warmup))
+    except Exception as e:  # harness error: an uncaught one would exit 1 == "verdict failed"
+        err = "harness error: %s: %s" % (type(e).__name__, e)
+        res = {"rows": [], "meta": {"error": traceback.format_exc()},
+               "verdict": {"passed": False, "reason": err}}
+        print(err, file=sys.stderr)
+        if a.out:
+            Path(a.out).write_text(json.dumps(res, indent=1))
+        if a.gate:
+            print("gate NOT written: harness error")
+        sys.exit(EXIT_ERROR)
     print(json.dumps({"verdict": res["verdict"]}))
     if a.out:
         Path(a.out).write_text(json.dumps(res, indent=1))
@@ -244,7 +270,7 @@ def main() -> None:
         print("gate written:", real_gate)
     elif a.gate:
         print("gate NOT written: P1.7-c did not pass")
-    sys.exit(0 if res["verdict"]["passed"] else 1)
+    sys.exit(0 if res["verdict"]["passed"] else EXIT_VERDICT_FAILED)
 
 
 if __name__ == "__main__":
