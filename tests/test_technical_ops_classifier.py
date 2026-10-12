@@ -8,12 +8,13 @@ from llm_router.technical_ops import classify_tool_call
 
 BASH_CASES = [
     # listed, read-only
-    ("ls", C.LIST), ("ls -la src", C.LIST), ("tree -L 2", C.LIST),
+    ("ls", C.LIST), ("ls -la src", C.LIST), ("tree -L 2", C.LIST), ("tree -L 2 -a", C.LIST),
     ("cat README.md", C.READ), ("head -n 20 a.py", C.READ), ("tail -f x.log", C.READ),
     ("wc -l a.py b.py", C.READ),
     ("grep -rn foo src", C.SEARCH), ("rg 'foo bar' src", C.SEARCH),
     ("rg -n 'a > b' src", C.SEARCH), ("find . -name '*.py'", C.SEARCH),
     ("git status", C.GIT_READ), ("git log --oneline -5", C.GIT_READ),
+    ("git diff --stat", C.GIT_READ), ("git log --oneline", C.GIT_READ),
     ("git diff HEAD~1", C.GIT_READ), ("git show abc123", C.GIT_READ),
     ("git blame a.py", C.GIT_READ), ("git branch", C.GIT_READ),
     ("git branch -a", C.GIT_READ), ("git branch --list 'feat/*'", C.GIT_READ),
@@ -38,10 +39,17 @@ BASH_CASES = [
     ("echo $(ls)", None), ("cat `ls`", None), ("ls\nrm x", None),
     # writes
     ("find . -delete", None), ("find . -name x -exec rm {} ;", None),
-    ("find . -fprint o", None), ("rg --pre ./x foo", None),
+    ("find . -fprintf out.txt '%p\\n'", None), ("find . -fprintf=o x", None),
+    ("find . -fprint o", None), ("find . -fprint0 o", None), ("find . -fls o", None),
+    ("find . -ok rm {} ;", None), ("find . -okdir rm {} ;", None),
+    ("find . -execdir ls {} ;", None), ("rg --pre ./x foo", None),
+    ("tree -o out.txt", None), ("tree -L 2 -o f", None), ("tree --output=o", None),
+    ("tree --output o", None), ("tree -ao f", None), ("tree -ofile", None), ("tree --out=o", None),
     ("git branch -D x", None), ("git branch newname", None), ("git branch -m a b", None),
     ("git commit -m x", None), ("git push", None), ("git checkout main", None),
     ("git diff --output=o.txt", None), ("git -c core.pager=x status", None),
+    ("git diff --ext-diff", None), ("git log --ext-diff --textconv", None),
+    ("git show --textconv HEAD", None), ("git diff --ext HEAD", None), ("git diff --text x", None),
     ("black src", None), ("black --check --fix src", None),
     ("prettier --check --write .", None), ("ruff format .", None), ("cargo fmt", None),
     # not listed / malformed

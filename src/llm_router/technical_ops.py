@@ -47,7 +47,7 @@ _CMD_CLASS = {
     "git": OpClass.GIT_READ,
 }
 _GIT_SUBS = {"status", "log", "diff", "show", "branch", "blame"}
-_FIND_WRITE = {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fls"}
+_FIND_WRITE = {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"}
 _RG_EXEC = {"--pre", "--hostname-bin"}
 _BRANCH_OK = {"-a", "-r", "-v", "-vv", "--list", "-l", "--all", "--remotes", "--verbose",
               "--show-current", "--merged", "--no-merged", "--contains", "--no-color", "--color"}
@@ -79,6 +79,9 @@ def _git_ok(argv: list[str]) -> bool:
         return False
     sub, args = rest[0], rest[1:]
     for a in args:
+        option = a.split("=", 1)[0]
+        if option.startswith("--") and len(option) >= 5 and any(flag.startswith(option) for flag in ("--ext-diff", "--textconv")):
+            return False
         if a == "--output" or a.startswith("--output=") or a == "-o" or a.startswith("-o="):
             return False
     if sub == "branch":
@@ -104,8 +107,15 @@ def _segment_class(argv: list[str]) -> OpClass | None:
     if cls is None:
         return None
     args = argv[1:]
-    if name == "find" and _FIND_WRITE.intersection(args):
+    if name == "find" and any(a.split("=", 1)[0] in _FIND_WRITE for a in args):
         return None
+    if name == "tree":
+        for a in args:
+            option = a.split("=", 1)[0]
+            if option.startswith("--") and len(option) >= 3 and "--output".startswith(option):
+                return None
+            if a.startswith("-") and not a.startswith("--") and "o" in a:
+                return None
     if name == "rg" and any(a.split("=", 1)[0] in _RG_EXEC for a in args):
         return None
     if name == "git" and not _git_ok(argv):
