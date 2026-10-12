@@ -17,6 +17,7 @@ from urllib.request import urlopen
 from llm_router import paths
 
 CATALOG_TTL_S = 7 * 86400
+CODE_TASKS = ("edit_with_test", "code_explanation")
 RAW_URL_TEMPLATE = (
     "https://raw.githubusercontent.com/ypollak2/llm-router/"
     "v{version}/src/llm_router/catalog/models.json"
@@ -161,6 +162,13 @@ def _measured_score(quality: dict, task: str) -> float | None:
     return score if count is not None and count > 0 else None
 
 
+def _code_score(quality: dict) -> float | None:
+    scores = [_measured_score(quality, task) for task in CODE_TASKS]
+    if any(score is None for score in scores):
+        return None
+    return min(scores)
+
+
 def recommend(
     hardware: dict,
     answers: dict | None = None,
@@ -170,7 +178,11 @@ def recommend(
     eligibility: dict | None = None,
     limit: int = 3,
 ) -> list[Recommendation]:
-    """Rank fitting models using measurements, then size.
+    """Rank fitting models using measured code score, priority and memory fit only.
+
+    Measured code score affects ranking only when main_use=code and a mark exists.
+    main_use otherwise and languages do not affect ranking; languages add reason text.
+    The code gate binds only once P2.0 sets marks.
 
     eligibility is reserved for onboarding integration; no policy is inferred from it.
     """
@@ -214,7 +226,7 @@ def recommend(
             continue
         quality = model.get("quality", {})
         quality = quality if isinstance(quality, dict) else {}
-        score = _measured_score(quality, "code") if main_use == "code" else None
+        score = _code_score(quality) if has_mark else None
         if has_mark and (score is None or score < mark):
             continue
         facts = [
@@ -223,7 +235,7 @@ def recommend(
             f"measured code score {score:g}" if score is not None else "no measured quality yet",
         ]
         if main_use == "code" and not has_mark:
-            facts.append("unproven for code (no pass mark yet)")
+            facts.append("unknown for code (no pass mark yet)")
         if "he" in languages and "hebrew_qa" not in quality:
             facts.append("Hebrew is unmeasured")
         size_order = size if priority == "speed" else -size

@@ -1,0 +1,1 @@
+Model catalog `recommend()` now derives the code score as the minimum of the `edit_with_test` and `code_explanation` fitness scores (the pass mark key stays `code`); with no pass mark, code recommendations are labelled "unknown for code (no pass mark yet)".

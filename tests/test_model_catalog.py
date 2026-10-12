@@ -167,21 +167,29 @@ def test_code_without_measurements_fails_mark() -> None:
     ) == []
 
 
-def test_unproven_code_and_hebrew() -> None:
+def test_unknown_code_and_hebrew() -> None:
     results = mc.recommend({"usable_gb": 8}, {"main_use": "code", "languages": ["en", "he"]})
     assert results
     for result in results:
-        assert "unproven for code (no pass mark yet)" in result.reason
+        assert "unknown for code (no pass mark yet)" in result.reason.split("; ")
+        assert "qualified" not in result.reason
+        assert "unproven" not in result.reason
         assert "no measured quality yet" in result.reason
         assert "Hebrew is unmeasured" in result.reason
 
 
 def test_measured_code_ranking_and_mark() -> None:
     catalog = deepcopy(mc.load_bundled())
-    for model, score in zip(catalog["models"], [0.8, 0.99, 0.9, 0.6, 0.7]):
-        model["quality"]["code"] = {"score": score, "n": 10, "source": "fitness"}
+    scores = [(0.8, 0.95), (0.99, 0.6), (0.95, 0.9), (0.65, 0.99), (0.7, 0.85)]
+    for model, (edit_score, explanation_score) in zip(catalog["models"], scores):
+        model["quality"]["edit_with_test"] = {
+            "score": edit_score, "n": 10, "source": "fitness"
+        }
+        model["quality"]["code_explanation"] = {
+            "score": explanation_score, "n": 10, "source": "fitness"
+        }
     results = mc.recommend(
-        {"usable_gb": 8},
+        {"usable_gb": 16},
         {"main_use": "code", "priority": "speed"},
         catalog=catalog,
         pass_marks={"code": 0.7},
@@ -189,13 +197,73 @@ def test_measured_code_ranking_and_mark() -> None:
     assert [result.name for result in results] == [
         "llama3.1:8b", "qwen2.5-coder:7b", "gemma3:4b"
     ]
-    assert all("measured code score" in result.reason for result in results)
+    names = {result.name for result in results}
+    assert "qwen2.5-coder:14b" not in names
+    assert "qwen3:8b" not in names
+    for result, score in zip(results, [0.9, 0.8, 0.7]):
+        assert f"measured code score {score:g}" in result.reason.split("; ")
     assert all("unproven" not in result.reason for result in results)
-    catalog["models"][0]["quality"]["code"]["n"] = 0
+    catalog["models"][0]["quality"]["edit_with_test"]["n"] = 0
     results = mc.recommend(
-        {"usable_gb": 8}, {"main_use": "code"}, catalog=catalog, pass_marks={"code": 0.7}
+        {"usable_gb": 16}, {"main_use": "code"}, catalog=catalog, pass_marks={"code": 0.7}
     )
     assert "qwen2.5-coder:7b" not in {result.name for result in results}
+
+
+@pytest.mark.parametrize("priority", ["speed", "quality", "balanced"])
+def test_main_use_without_code_mark_does_not_change_ranking(priority: str) -> None:
+    catalog = deepcopy(mc.load_bundled())
+    for model, score in zip(catalog["models"], [0.99, 0.8, 0.7, 0.6, 0.95]):
+        for task in mc.CODE_TASKS:
+            model["quality"][task] = {"score": score, "n": 10, "source": "fitness"}
+    mixed = mc.recommend(
+        {"usable_gb": 16},
+        {"main_use": "mixed", "priority": priority},
+        catalog=catalog,
+    )
+    for main_use in ("chat", "writing", "mixed"):
+        assert mc.recommend(
+            {"usable_gb": 16},
+            {"main_use": main_use, "priority": priority},
+            catalog=catalog,
+        ) == mixed
+    code = mc.recommend(
+        {"usable_gb": 16},
+        {"main_use": "code", "priority": priority},
+        catalog=catalog,
+    )
+    assert [result.name for result in code] == [result.name for result in mixed]
+    for result in code:
+        assert "unknown for code (no pass mark yet)" in result.reason.split("; ")
+        assert "measured code score" not in result.reason
+        assert "qualified" not in result.reason
+
+
+@pytest.mark.parametrize("missing_task", mc.CODE_TASKS)
+def test_code_mark_excludes_model_missing_task(missing_task: str) -> None:
+    catalog = deepcopy(mc.load_bundled())
+    for model in catalog["models"]:
+        for task in mc.CODE_TASKS:
+            model["quality"][task] = {"score": 0.9, "n": 10, "source": "fitness"}
+    del catalog["models"][0]["quality"][missing_task]
+    results = mc.recommend(
+        {"usable_gb": 8},
+        {"main_use": "code"},
+        catalog=catalog,
+        pass_marks={"code": 0.7},
+    )
+    assert results
+    assert "qwen2.5-coder:7b" not in {result.name for result in results}
+
+
+def test_languages_only_change_reason_text() -> None:
+    english = mc.recommend({"usable_gb": 8}, {"languages": ["en"]})
+    hebrew = mc.recommend({"usable_gb": 8}, {"languages": ["en", "he"]})
+    assert [(r.name, r.runtime, r.size_gb) for r in hebrew] == [
+        (r.name, r.runtime, r.size_gb) for r in english
+    ]
+    for en_result, he_result in zip(english, hebrew):
+        assert he_result.reason == en_result.reason + "; Hebrew is unmeasured"
 
 
 def test_memory_minimum_and_size_fallback() -> None:
