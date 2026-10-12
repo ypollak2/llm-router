@@ -737,6 +737,223 @@ def _inventory_api(p: Probes, reg: Any, resets: dict[str, float], *, verify: boo
 
 # ------------------------------------------------------------------ assemble
 
+# ------------------------------------------------------------------ artifacts
+ARTIFACT_MAX_FILES = 20000
+ARTIFACT_MAX_SECONDS = 3.0
+STATE_DISCOVERED = "discovered"
+STATE_ACCESSIBLE = "accessible"
+REASON_NO_RUNTIME = "no_executable_runtime"
+_ARTIFACT_SKIP_DIRS = frozenset({".locks", "blobs", "refs", ".no_exist"})
+_CONFIG_MAX_BYTES = 1 << 20
+_SAFETENSORS_MAX_HEADER = 100_000_000
+_HEX = frozenset("0123456789abcdef")
+
+
+def _artifact_roots(environ: Mapping[str, str], extra_dirs=()) -> list[tuple[str, Path]]:
+    """(origin, dir) pairs to scan. ``~/.ollama`` is never one: Ollama owns it."""
+    home = Path(environ["HOME"]) if environ.get("HOME") else Path.home()
+    cands: list[tuple[str, Path]] = []
+    if environ.get("HF_HOME"):
+        hf = Path(environ["HF_HOME"]).expanduser()
+        cands.append(("hf_cache", hf / "hub" if (hf / "hub").is_dir() else hf))
+    else:
+        cands.append(("hf_cache", home / ".cache" / "huggingface" / "hub"))
+    cands.append(("lmstudio", home / ".lmstudio" / "models"))
+    cands.append(("lmstudio", home / ".cache" / "lm-studio" / "models"))
+    listed = [str(d) for d in extra_dirs]
+    listed += [d for d in (environ.get("LLM_ROUTER_ARTIFACT_DIRS") or "").split(os.pathsep) if d]
+    cands += [("user_dir", Path(d).expanduser()) for d in listed]
+    seen: set[str] = set()
+    out: list[tuple[str, Path]] = []
+    for origin, d in cands:
+        try:
+            ok = d.is_dir()
+        except OSError:
+            ok = False
+        if ok and str(d) not in seen:
+            seen.add(str(d))
+            out.append((origin, d))
+    return out
+
+
+def _read_head(path: str, n: int) -> bytes:
+    try:
+        with open(path, "rb") as f:
+            return f.read(n)
+    except OSError:
+        return b""
+
+
+def _is_gguf(path: str) -> bool:
+    return _read_head(path, 4) == b"GGUF"
+
+
+def _is_safetensors(path: str) -> bool:
+    head = _read_head(path, 9)
+    if len(head) < 9:
+        return False
+    n = int.from_bytes(head[:8], "little")
+    return 0 < n <= _SAFETENSORS_MAX_HEADER and head[8:9] == b"{"
+
+
+def _config_says_mlx(path: str) -> bool:
+    try:
+        with open(path, "rb") as f:
+            cfg = json.loads(f.read(_CONFIG_MAX_BYTES))
+    except (OSError, ValueError):
+        return False
+    return isinstance(cfg, dict) and (cfg.get("library_name") == "mlx" or "mlx" in cfg)
+
+
+def _blob_hash(real: str) -> str | None:
+    base = os.path.basename(real)
+    if base.startswith("sha256-"):
+        base = base[7:]
+    return base if len(base) == 64 and set(base) <= _HEX else None
+
+
+def _repo_of(path: Path, root: Path) -> str:
+    """``ns/name`` for an HF cache dir (``models--ns--name``), ``publisher/repo``
+    for an LM Studio style layout, else the entry's own name."""
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        return path.name
+    if parts and parts[0].startswith("models--"):
+        ns, _, name = parts[0][len("models--"):].partition("--")
+        return f"{ns}/{name}" if name else ns
+    return "/".join(parts[:2]) if len(parts) >= 3 else path.name
+
+
+def _inventory_artifacts(environ: Mapping[str, str] | None = None, extra_dirs=(), *,
+                         monotonic: Callable[[], float] = time.monotonic,
+                         max_files: int = ARTIFACT_MAX_FILES,
+                         max_seconds: float = ARTIFACT_MAX_SECONDS,
+                         ) -> tuple[list[dict], SourceStatus]:
+    """Model weights on disk, as ``discovered`` map rows (reason ``no_executable_runtime``).
+
+    Reads names, sizes and header bytes only; never loads or executes a weight.
+    Directory symlinks are not followed (no loops); the scan stops at
+    ``max_files`` entries or ``max_seconds`` and says so in the status."""
+    from llm_router.resource_map import _row
+
+    env = os.environ if environ is None else environ
+    roots = _artifact_roots(env, extra_dirs)
+    deadline = monotonic() + max_seconds
+    visited = 0
+    truncated = ""
+    rows: list[dict] = []
+    seen_hash: set[str] = set()
+    seen_dir: set[str] = set()
+
+    def emit(origin: str, repo: str, name: str, fmt: str, path: Path, real: str,
+             blob: str | None, size: int) -> None:
+        rid = f"artifact/{origin}/{repo}" + (f"/{name}" if name else "")
+        row = _row(rid, "local", rid, status=STATE_DISCOVERED, reason=REASON_NO_RUNTIME,
+                   capabilities=[], limits={"size_bytes": size})
+        row["state"] = STATE_DISCOVERED
+        row["artifact"] = {"format": fmt, "origin": origin, "repo": repo, "path": str(path),
+                           "real_path": real, "blob_sha256": blob, "size_bytes": size}
+        rows.append(row)
+
+    for origin, root in roots:
+        stack = [root]
+        while stack and not truncated:
+            d = stack.pop()
+            if monotonic() > deadline:
+                truncated = "truncated: time limit"
+                break
+            files: dict[str, os.DirEntry] = {}
+            try:
+                with os.scandir(d) as it:
+                    entries = list(it)
+            except OSError:
+                continue
+            for e in entries:
+                visited += 1
+                if visited > max_files:
+                    truncated = "truncated: file limit"
+                    break
+                try:
+                    if e.is_dir(follow_symlinks=False):
+                        if e.name not in _ARTIFACT_SKIP_DIRS and not e.name.startswith("."):
+                            stack.append(Path(e.path))
+                    elif e.is_file():          # follows file symlinks (HF blobs)
+                        files[e.name] = e
+                except OSError:
+                    continue
+            if truncated:
+                break
+            repo = _repo_of(d, root)
+            for name, e in sorted(files.items()):
+                if not name.endswith(".gguf") or not _is_gguf(e.path):
+                    continue
+                real = os.path.realpath(e.path)
+                blob = _blob_hash(real) if e.is_symlink() else None
+                if blob and blob in seen_hash:
+                    continue
+                if blob:
+                    seen_hash.add(blob)
+                emit(origin, repo, name, "gguf", Path(e.path), real, blob, e.stat().st_size)
+            st = [n for n in files if n.endswith(".safetensors") and _is_safetensors(files[n].path)]
+            real_dir = os.path.realpath(d)
+            if "config.json" in files and st and real_dir not in seen_dir:
+                seen_dir.add(real_dir)
+                mlx = repo.split("/", 1)[0] == "mlx-community" or _config_says_mlx(files["config.json"].path)
+                size = sum(files[n].stat().st_size for n in st)
+                emit(origin, repo, "", "mlx" if mlx else "safetensors", d, real_dir, None, size)
+    rows.sort(key=lambda r: r["resource"])
+    detail = f"{len(rows)} artifact(s) in {len(roots)} root(s)" + (f"; {truncated}" if truncated else "")
+    return rows, SourceStatus(True, detail)
+
+
+def runtime_identity(modelfile: str | None) -> dict:
+    """Path and blob hash an Ollama ``/api/show`` modelfile reports, or ``{}``."""
+    try:
+        for line in (modelfile or "").splitlines():
+            if line.startswith("FROM "):
+                val = line[5:].strip()
+                if os.path.isabs(val):
+                    out = {"path": val}
+                    blob = _blob_hash(val)
+                    if blob:
+                        out["blob_sha256"] = blob
+                    return out
+                return {}
+    except Exception:  # noqa: BLE001 - identity is optional
+        pass
+    return {}
+
+
+def merge_artifacts(runtime_rows: list[dict], artifact_rows: list[dict]) -> list[dict]:
+    """*runtime_rows* plus the artifact rows that did not merge.
+
+    No fuzzy join: an artifact merges into a runtime row only when the runtime
+    reports the same blob hash or the same path. The merged row is the runtime
+    row (status unchanged) with ``state="accessible"`` and the artifact attached."""
+    out = list(runtime_rows)
+    taken: set[int] = set()
+    left: list[dict] = []
+    norm = lambda s: os.path.normpath(s) if s else ""  # noqa: E731
+    for a in artifact_rows:
+        art = a.get("artifact") or {}
+        hit = None
+        for i, r in enumerate(out):
+            if i in taken:
+                continue
+            lim = r.get("limits") or {}
+            h, p = lim.get("blob_sha256"), norm(lim.get("path"))
+            if (h and h == art.get("blob_sha256")) or (p and p in (norm(art.get("path")), norm(art.get("real_path")))):
+                hit = i
+                break
+        if hit is None:
+            left.append(a)
+        else:
+            taken.add(hit)
+            out[hit] = {**out[hit], "state": STATE_ACCESSIBLE, "artifact": art}
+    return out + left
+
+
 def collect_inventory(
     probes: Probes | None = None,
     *,
