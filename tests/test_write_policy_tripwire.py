@@ -263,3 +263,69 @@ def test_r3_nested_execution_is_gated(tree, tpl):
 def test_r3_arithmetic_still_allowed_with_redirect(tree):
     root, _ = tree
     assert check_command("echo $((1+2)) > n", root).decision == "allow"
+
+
+# ---- review round 4 (#448 follow-up): compound-command keywords, arithmetic re-evaluation ----
+
+GATED_R4 = [
+    "for i in 1; do tee {out}/x; done",
+    "for i in 1; do touch {out}/q; done",
+    "for i in 1; do echo x > {out}/q; done",
+    "for ((i=0;i<1;i++)); do touch {out}/q; done",
+    "for ((i=0;i<1;i++)); do tee {out}/q; done",
+    "for i in 1; do\n  touch {out}/q\ndone",
+    "while true; do rm -rf {out}; done",
+    "until false; do touch {out}/q; done",
+    "while touch {out}/q; do :; done",
+    "until tee {out}/q; do :; done",
+    "if tee {out}/x; then :; fi",
+    "if true; then touch {out}/q; fi",
+    "if false; then :; else tee {out}/q; fi",
+    "if false; then :; elif touch {out}/q; then :; fi",
+    "if ((1)); then touch {out}/q; fi",
+    "! touch {out}/q",
+    "case x in x) touch {out}/a;; esac",
+    "case x in y) :;; *) echo x > {out}/a;; esac",
+    "case x in x) tee {out}/a;; esac",
+    "f(){ touch {out}/a; }; f",
+    "f() { echo x > {out}/a; }; f",
+    "function f { touch {out}/a; }; f",
+    "function f() { tee {out}/a; }",
+    "{ touch {out}/a; }",
+    "select s in a; do touch {out}/q; done",
+    # arithmetic that bash re-evaluates, the `$(` is single-quoted
+    "let 'a[$(touch {out}/q)]=1'",
+    "declare -i a; a='b[$(touch {out}/q)]'",
+    "x='a[$(touch {out}/q)]'; echo $((x))",
+    "typeset -i a; a='b[`touch {out}/q`]'",
+    "local -i a; a='b[$(touch {out}/q)]'",
+    "((a='b[$(touch {out}/q)]'))",
+    # a `((` that is a command, not arithmetic, cannot be parsed confidently
+    "((touch {out}/q))",
+    "for ((touch {out}/q; i<1; i++)); do :; done",
+]
+
+ALLOWED_R4 = [
+    "for f in *.py; do echo $f; done",
+    "for f in a b; do cp $f build/; done",
+    "if [ -f x ]; then echo ok > out.txt; fi",
+    "while read l; do echo \"$l\"; done < in.txt",
+    "for ((i=0;i<3;i++)); do echo $i > n.txt; done",
+    "case x in x) echo hi > o.txt;; *) :;; esac",
+    "f(){ echo x > o.txt; }; f",
+]
+
+
+@pytest.mark.parametrize("tpl", GATED_R4)
+def test_r4_compound_commands_and_arithmetic_are_gated(tree, tpl):
+    root, out = tree
+    v = check_command(tpl.replace("{out}", str(out)), root)
+    assert v.decision in ("refuse", "needs_approval"), (tpl, v)
+
+
+@pytest.mark.parametrize("cmd", ALLOWED_R4)
+def test_r4_benign_compound_commands_are_allowed(tree, cmd):
+    root, _ = tree
+    (root / "build").mkdir(exist_ok=True)
+    v = check_command(cmd, root)
+    assert v.decision == "allow", (cmd, v)

@@ -61,6 +61,14 @@ _NULL_DEVICES = {"/dev/null", "/dev/stdout", "/dev/stderr"}
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _WRAPPERS = {"command", "exec", "time", "nohup", "nice", "builtin", "env", "timeout", "stdbuf"}
 
+_KEYWORDS = {"{", "}", "!", "do", "then", "else", "elif", "if", "while", "until",
+             "done", "fi", "esac"}          # grammar words: the command follows them
+_HEADS = {"for", "select", "case"}           # whole segment is a loop/case head (data only)
+_ARITH_CMD = re.compile(r"(?<![\w$-])(?:let|declare|typeset)\b|\blocal\s+-\w*i|\(\(")
+_NESTED_EXEC = re.compile(r"\$\((?!\()|`")
+_ARITH_WHY = ("`$(`/backtick on a line that also evaluates arithmetic "
+              "(let/declare/typeset/local -i/((/$((): bash re-evaluates it even inside quotes)")
+
 _NOT_WIRED = " — not run (needs approval; approval is not wired, so treated as refused)"
 _ARITH = re.compile(r"[A-Za-z0-9_ \t+\-*/%()!~^=,?:$]*")
 _SUBST_WHY = ("command substitution can run unseen commands "
@@ -293,8 +301,12 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
     while i < len(words):                              # strip wrappers
         w = words[i][1]
         base = os.path.basename(w)
-        if _ASSIGN.match(w) or w in ("{", "!"):
+        if _ASSIGN.match(w) or w in _KEYWORDS:
             i += 1
+        elif w == "function":
+            i += 2                                     # `function NAME`; the body follows
+        elif w in _HEADS and i == 0:
+            return                                     # `for N in W`, `case W in`: data only
         elif base in _WRAPPERS or base in ("sudo", "doas"):
             if base in ("sudo", "doas"):
                 scan.need("privilege escalation (sudo)")
@@ -444,6 +456,28 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
                 tgt(f)
 
 
+def _arith_end(toks: list[Token], k: int) -> int | None:
+    """toks[k:k+2] is ``((``. Index after the matching adjacent ``))`` if the content is
+    plain arithmetic (no expansion, no ``/``, no two words in a row, i.e. not a command),
+    else None."""
+    depth, j, prev_word = 0, k, False
+    while j < len(toks):
+        kind, text, exp = toks[j]
+        if kind == "op" and text in ("(", ")"):
+            depth += 1 if text == "(" else -1
+            prev_word = False
+            if depth == 0:
+                return j + 1 if toks[j - 1][1:] == (")", False) and j - 1 > k + 1 else None
+        elif kind == "word":
+            if exp or "/" in text or prev_word:
+                return None
+            prev_word = True
+        else:
+            prev_word = False
+        j += 1
+    return None
+
+
 def check_command(cmd: str, root: Path) -> Verdict:
     """Judge a shell command line against the project *root* before it runs."""
     if not cmd.strip():
@@ -455,6 +489,8 @@ def check_command(cmd: str, root: Path) -> Verdict:
     scan = _Scan(root)
     if subst:
         scan.need(_SUBST_WHY)
+    if _ARITH_CMD.search(cmd) and _NESTED_EXEC.search(cmd):
+        scan.need(_ARITH_WHY)
 
     words: list[Token] = []
     redirs: list[tuple[str, Token | None]] = []
@@ -471,6 +507,17 @@ def check_command(cmd: str, root: Path) -> Verdict:
 
     while k < len(toks):
         kind, text, exp = toks[k]
+        if (kind == "op" and text == "(" and toks[k + 1:k + 2] == [("op", "(", False)]
+                and all(w[1] in ("for", "if", "while", "until", "elif", "then", "do", "else", "!")
+                        for w in words) and not redirs):
+            end = _arith_end(toks, k)                  # `((expr))` / `for ((a;b;c))`
+            if end is None or (not words or words[0][1] != "for") and any(
+                    t[1] == ";" for t in toks[k:end]):
+                scan.need("arithmetic command that cannot be parsed confidently")
+                break
+            words = []
+            k = end
+            continue
         if kind == "op" and text in _SEPARATORS:
             flush(text)
             if text == "(":
