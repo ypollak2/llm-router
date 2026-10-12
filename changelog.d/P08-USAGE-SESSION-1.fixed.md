@@ -1,0 +1,1 @@
+`usage.session_id` is never NULL (P0.8). An MCP tool call whose client sent no `tool_use` id (and any call outside MCP) wrote NULL; now a call inside `IdentityMCPServer.call_tool` takes the server's session, and an unresolved row gets `unknown:mcp` / `unknown:non_mcp`, which the G3 completeness check counts as missing.

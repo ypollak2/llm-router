@@ -586,6 +586,16 @@ def test_identity_share_counts_null_and_generated_as_missing_with_a_wilson_ci():
     assert kpi._prd_task("gen-0123456789ab") is None and kpi._prd_task("0123456789abcdef")
 
 
+def test_identity_share_counts_unknown_session_sentinels_as_missing():
+    from llm_router.commands import kpi
+
+    rows = ([_id_row(i)[1] for i in range(6)]
+            + [_id_row(i, sid=s)[1] for i, s in enumerate(
+                ["unknown:mcp", "unknown:non_mcp", "unknown:script", "unknown:hook"])])
+    ident = kpi._identity_share(rows)           # direct call: the rule must not rely on _prd_session
+    assert ident["n"] == 10 and ident["with_ids"] == 6 and ident["share"] == 0.6
+
+
 def test_kpi_identity_flag_prints_per_writer_n_share_and_ci(capsys):
     from llm_router.commands import kpi
 

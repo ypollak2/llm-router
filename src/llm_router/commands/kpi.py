@@ -913,8 +913,9 @@ def _g1_hook(days: int, now: float, killed: int | None) -> dict:
 # CAN apply to its type is recorded.
 
 def _usable_session(row: dict) -> bool:
-    sid = row.get("session_id")
-    return isinstance(sid, str) and sid not in ("", "unknown")
+    from llm_router.call_identity import is_unknown_session
+
+    return not is_unknown_session(row.get("session_id"))
 
 
 def g3_row_type(row: dict) -> str:
@@ -1182,7 +1183,9 @@ _PRD_SQL_TABLE = {"usage": "usage", "routing_decisions": "routing_decisions",
 
 
 def _prd_session(sid: Any) -> str | None:
-    return sid if isinstance(sid, str) and sid not in ("", "unknown") else None
+    from llm_router.call_identity import is_unknown_session
+
+    return None if is_unknown_session(sid) else sid
 
 
 def _prd_proxy_values(row: dict) -> dict[str, Any]:
@@ -1294,11 +1297,14 @@ def _prd_sql_records(cutoff: float | None, until: float | None
 def _identity_share(organic: list[dict]) -> dict:
     """P1.10-a, per writer: organic rows carrying a session_id AND a REAL task_id (NULL and
     ``gen-`` stand-ins count as missing), over ALL organic rows of the window (no merge-date
-    cutoff, unlike ``complete``), with the Wilson 95% interval. n = organic rows only."""
+    cutoff, unlike ``complete``), with the Wilson 95% interval. n = organic rows only.
+    P0.8: a session_id of ``unknown:*`` (``call_identity.is_unknown_session``) is missing."""
+    from llm_router.call_identity import is_unknown_session
     from llm_router.shadow_eval import wilson
 
     n = len(organic)
-    k = sum(1 for v in organic if v.get("session_id") is not None and v.get("task_id") is not None)
+    k = sum(1 for v in organic
+            if not is_unknown_session(v.get("session_id")) and v.get("task_id") is not None)
     return {"n": n, "with_ids": k, "share": round(k / n, 4) if n else None, "wilson95": wilson(k, n)}
 
 

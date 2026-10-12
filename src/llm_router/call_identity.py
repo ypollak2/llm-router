@@ -37,10 +37,21 @@ ride into a ledger column through them. ``ledger_session_id`` is the same check 
 other writers (the hook DIRECT path, agent-route, the SDK), and also refuses the
 placeholders some of them pass (``sdk``, ``unknown``): those are not sessions.
 
-``call_session_id()`` is what the router stamps: the environment id only inside an MCP
-tool call (a ``tool_use`` id is bound). ``CLAUDE_CODE_SESSION_ID`` is also in every Bash
-tool shell, so a gateway or ``route_server`` started from one would otherwise stamp that
-one session on every call it later serves, for any host.
+``call_session_id()`` is what the router stamps. The environment id is the server
+process's, fixed at start, and also inherited by every child of a Claude Code shell
+(Codex, Cursor, Desktop spawning the same stdio server), so it is stamped only when
+the call itself shows it came from Claude Code: (a) a ``tool_use`` id is bound, or
+(b) the MCP client named itself ``claude-code`` in the ``initialize`` handshake
+(``clientInfo.name``, read per server session from the request, never per process;
+the exact name was captured from a real handshake, see ``mcp_roots.py``). Any other
+call (Codex, Cursor, Desktop, unknown client, no ``clientInfo``) gets None, which the
+writers record as ``unknown:mcp``: a wrong real-looking id is worse than that. Outside
+any MCP call it is None as well: ``CLAUDE_CODE_SESSION_ID`` is also in every Bash tool
+shell, so a gateway or ``route_server`` started from one would otherwise stamp that
+one session on every call it later serves. Remaining limits: several Claude Code
+sessions sharing one SSE process, with a bound ``tool_use`` id, still read that
+process's one env id; and a stale id after ``/clear`` on a long-lived server, which
+``offload_share`` corrects at read time.
 
 Task identity (PLAN v16 P1.10, R-EVL-2). Three ids ride every ledger row:
 
@@ -83,7 +94,15 @@ TOOL_USE_META_KEY = "claudecode/toolUseId"
 _ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 _PLACEHOLDERS = frozenset({"sdk", "unknown", "none", "null", "default"})
 
+UNKNOWN_PREFIX = "unknown:"
+
 _TOOL_USE_ID: ContextVar[str | None] = ContextVar("llm_router_tool_use_id", default=None)
+_IN_MCP_CALL: ContextVar[bool] = ContextVar("llm_router_in_mcp_call", default=False)
+_CLIENT_IS_CLAUDE_CODE: ContextVar[bool] = ContextVar("llm_router_client_is_cc", default=False)
+
+#: ``clientInfo.name`` Claude Code sends in ``initialize`` (real handshake, 2.1.267).
+CLAUDE_CODE_CLIENT_NAME = "claude-code"
+
 _TASK_ID: ContextVar[str | None] = ContextVar("llm_router_task_id", default=None)
 _TRACE_ID: ContextVar[str | None] = ContextVar("llm_router_trace_id", default=None)
 
@@ -118,9 +137,44 @@ def mcp_session_id() -> str | None:
             or ledger_session_id(os.environ.get("CLAUDE_SESSION_ID")))
 
 
+def client_is_claude_code(context: Any) -> bool:
+    """True when this request's MCP session identified itself as Claude Code (``clientInfo.name``)."""
+    try:
+        name = context.request_context.session.client_params.client_info.name
+    except Exception:  # noqa: BLE001 -- no session / no clientInfo / another mcp shape
+        return False
+    return isinstance(name, str) and name.strip().lower() == CLAUDE_CODE_CLIENT_NAME
+
+
+def is_unknown_session(sid: Any) -> bool:
+    """True for a session value that names no session: None, "", "unknown", ``unknown:*``."""
+    return not isinstance(sid, str) or sid in ("", "unknown") or sid.startswith(UNKNOWN_PREFIX)
+
+
+def in_mcp_call() -> bool:
+    """True inside an MCP tool call: ``IdentityMCPServer.call_tool`` is on the stack."""
+    return _IN_MCP_CALL.get() or tool_use_id() is not None
+
+
 def call_session_id() -> str | None:
-    """``mcp_session_id()`` inside an MCP tool call (a ``tool_use`` id is bound), else None."""
-    return mcp_session_id() if tool_use_id() is not None else None
+    """``mcp_session_id()`` when it provably belongs to this call, else None (see module doc)."""
+    if tool_use_id() is not None or (_IN_MCP_CALL.get() and _CLIENT_IS_CLAUDE_CODE.get()):
+        return mcp_session_id()
+    return None
+
+
+#: Door names for ``unknown_session``: where a row was written when no session resolved.
+DOOR_MCP, DOOR_NON_MCP = "mcp", "non_mcp"
+
+
+def unknown_session(door: str | None = None) -> str:
+    """The explicit value for a row whose session could not be resolved: ``unknown:<door>``.
+
+    Never NULL (P0.8) and never a real-looking session. ``door`` defaults to where the
+    call came from. G3 counts this value as missing (``kpi._prd_session``), so it
+    cannot lift the completeness figure.
+    """
+    return f"{UNKNOWN_PREFIX}{door or (DOOR_MCP if in_mcp_call() else DOOR_NON_MCP)}"
 
 
 class LedgerGuard:
@@ -361,11 +415,15 @@ def __getattr__(name: str):
 
         async def call_tool(self, name, arguments, context=None):  # type: ignore[override]
             token = bind(tool_use_id_from_context(context))
+            flag = _IN_MCP_CALL.set(True)
+            cc = _CLIENT_IS_CLAUDE_CODE.set(client_is_claude_code(context))
             try:
                 # P1.10: every routed call of this tool call shares one task id.
                 with scope(call_session_id()):
                     return await super().call_tool(name, arguments, context)
             finally:
+                _CLIENT_IS_CLAUDE_CODE.reset(cc)
+                _IN_MCP_CALL.reset(flag)
                 reset(token)
 
     globals()["IdentityMCPServer"] = IdentityMCPServer

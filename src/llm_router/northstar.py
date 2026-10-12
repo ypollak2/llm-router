@@ -328,6 +328,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from llm_router import paths, session_kind
+from llm_router.call_identity import is_unknown_session
 
 # Ground-truth exclusion rules, reused rather than re-implemented.
 # ``groundtruth_sources`` owns what counts as a human prompt and which sessions
@@ -1549,7 +1550,8 @@ def local_shadow_units(days: int | None = 30, db_path: Path | None = None, *,
         except (TypeError, ValueError):
             iso = None
         yield {
-            "session_id": session, "ts": iso, "kind": UNIT_LOCAL_SHADOW,
+            "session_id": None if is_unknown_session(session) else session,  # sentinel = no session (P0.8)
+            "ts": iso, "kind": UNIT_LOCAL_SHADOW,
             "lever": _LEVER_OF_KIND[UNIT_LOCAL_SHADOW], "task_type": task_type,
             "complexity": complexity, "model": model, "latency_ms": latency,
             "outcome": OUTCOME_UNKNOWN, "provenance": "runtime", "shadow_tier": shadow,
