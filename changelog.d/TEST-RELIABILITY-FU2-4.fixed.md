@@ -1,0 +1,1 @@
+Prevent detached usage-refresh writes after temporary HOME cleanup with a registered opt-out and a behavioral test; tolerate transient timing contention with five p95 rounds while retaining the 50 ms limit, and require the OKF baseline commit in CI, fetching it in the test job while preserving local shallow-checkout skips.

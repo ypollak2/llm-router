@@ -41,6 +41,8 @@ def _hook_env(home_dir: Path, extra_env: dict[str, str] | None = None) -> dict[s
     # autouse isolation fixture exports it. Pin it to the same sandbox
     # or the subprocess writes to the fixture's dir, not this one.
     env["LLM_ROUTER_HOME"] = str(home_dir) + "/.llm-router"
+    # Prevent detached refresh writes after temporary HOME cleanup.
+    env["LLM_ROUTER_NO_BG_USAGE_REFRESH"] = "1"
     env["LLM_ROUTER_DISABLE_LLM_CLASSIFIERS"] = "1"
     env["LLM_ROUTER_DIRECT_EXECUTION"] = "0"  # Disable direct execution — test classification only
     env["OPENAI_API_KEY"] = ""
@@ -49,6 +51,26 @@ def _hook_env(home_dir: Path, extra_env: dict[str, str] | None = None) -> dict[s
     if extra_env:
         env.update(extra_env)
     return env
+
+
+def test_background_usage_refresh_opt_out(monkeypatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("auto_route_usage_refresh", HOOK_PATH)
+    hook = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hook)
+    calls = []
+    monkeypatch.setattr(hook.subprocess, "Popen", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(hook, "_usage_refresh_script_path", lambda: Path("usage-refresh.py"))
+    monkeypatch.setattr(hook, "_refresh_child_env", lambda: {})
+
+    monkeypatch.setenv("LLM_ROUTER_NO_BG_USAGE_REFRESH", "1")
+    hook._spawn_background_usage_refresh()
+    assert calls == []
+
+    monkeypatch.delenv("LLM_ROUTER_NO_BG_USAGE_REFRESH")
+    hook._spawn_background_usage_refresh()
+    assert len(calls) == 1
 
 
 def run_hook(
