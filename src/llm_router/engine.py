@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from llm_router import failopen, ml_lexical, prompt_key
+from llm_router import failopen, ml_lexical
 from llm_router.classify import GATEWAY_POLICY, _score_categories, classify_signals
 from llm_router.paths import state_path
 
@@ -232,7 +232,10 @@ def clear_cache(*, persistent: bool = True) -> None:
 
 
 def _cache_key(text: str, policy_version: str, ctx_digest: str) -> str:
-    h = hashlib.sha256(prompt_key.normalize(text).encode()).hexdigest()
+    # Key on the exact text decide computes on. A normalised key let a variant with a
+    # stripped block (a secret, or enough length to change complexity) hit another
+    # variant's cached Decision, so the result depended on call order.
+    h = hashlib.sha256(text.encode()).hexdigest()
     return "%s|%s|%s" % (h, policy_version, (ctx_digest or "")[:8])
 
 
