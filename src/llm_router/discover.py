@@ -353,44 +353,6 @@ async def _scan_ollama() -> dict:
     return {}
 
 
-async def _scan_openai() -> dict:
-    """Scan OpenAI for available models via /v1/models.
-    
-    Returns:
-        Dict of model capabilities from OpenAI, or empty if unavailable.
-    """
-    # Stub for testing - will be mocked by tests
-    config = get_config()
-    if not config.openai_api_key:
-        return {}
-    # Actual implementation would call OpenAI API
-    return {}
-
-
-async def _scan_gemini() -> dict:
-    """Scan Gemini for available models via /v1beta/models.
-    
-    Returns:
-        Dict of model capabilities from Gemini, or empty if unavailable.
-    """
-    # Stub for testing - will be mocked by tests
-    config = get_config()
-    if not config.gemini_api_key:
-        return {}
-    # Actual implementation would call Gemini API
-    return {}
-
-
-async def _scan_api_key_providers() -> dict:
-    """Scan for other API providers based on configured keys.
-    
-    Returns:
-        Dict of model capabilities from configured providers.
-    """
-    # Stub for testing - will be mocked by tests
-    return {}
-
-
 async def discover_available_models() -> dict:
     """Discover all available models across all configured providers.
     
@@ -401,9 +363,6 @@ async def discover_available_models() -> dict:
     """
     results = await asyncio.gather(
         _scan_ollama(),
-        _scan_openai(),
-        _scan_gemini(),
-        _scan_api_key_providers(),
         return_exceptions=True,
     )
     

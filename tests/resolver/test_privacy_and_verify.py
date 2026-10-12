@@ -356,8 +356,9 @@ def test_no_key_shaped_string_appears_in_any_output_or_cache(tmp_path):
     blob = json.dumps(inventory_to_dict(inv)) + inv_mod.render_table(inv) + (tmp_path / "c.json").read_text()
     assert KEY not in blob and OTHER_KEY not in blob and "sk-" not in blob
     cache = json.loads((tmp_path / "c.json").read_text())
-    assert set(cache) == {"openai", "anthropic"} and all(set(v) == {"fp", "ts", "verdict", "status"}
-                                                         for v in cache.values())
+    # P1.8 task 13: the inventory caches the account's model ids beside the verdict.
+    assert set(cache) == {"openai:list", "anthropic:list"} and all(
+        set(v) == {"fp", "ts", "verdict", "status", "ids", "complete"} for v in cache.values())
 
 
 def test_cache_hits_within_the_ttl_and_expires_after_it_and_notices_a_new_key(tmp_path):
