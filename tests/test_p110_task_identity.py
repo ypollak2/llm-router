@@ -72,10 +72,12 @@ def test_task_id_is_sha256_of_session_and_turn_16_hex():
 
 def test_begin_turn_advances_per_session_and_other_readers_see_it(temp_db):
     first = ci.begin_turn(SID)
-    nonce = ci._read_turn_state(SID)["nonce"]
-    assert first == ci.derive_task_id(SID, 1, nonce) == ci.turn_task_id(SID)
+    st = ci._read_turn_state(SID)
+    assert first == ci.derive_task_id(SID, 1, st["nonce"]) == ci.turn_task_id(SID) and st["turn_index"] == 1
     second = ci.begin_turn(SID)
-    assert second == ci.derive_task_id(SID, 2, nonce) == ci.turn_task_id(SID)
+    st = ci._read_turn_state(SID)
+    assert second == ci.derive_task_id(SID, 2, st["nonce"]) == ci.turn_task_id(SID) and st["turn_index"] == 2
+    assert second != first
     other = ci.begin_turn("another-session")
     assert other == ci.derive_task_id("another-session", 1, ci._read_turn_state("another-session")["nonce"])
     assert ci.turn_task_id(SID) == second            # the other session did not move this one
@@ -534,6 +536,7 @@ def test_task_id_is_stable_within_a_turn_for_every_reader(temp_db):
         assert a == b == turn
 
 
+@pytest.mark.timing
 def test_begin_turn_returns_fast_and_unique_while_the_lock_is_held(temp_db):
     import time
 
