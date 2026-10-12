@@ -59,3 +59,10 @@ def test_evidence_from_counts():
     ev = evidence_from_counts(58, 64, 60, 64)
     assert ev.n == 64 and ev.gap_pts == pytest.approx(3.125) and grade(ev) == "failed"
     assert grade(evidence_from_counts(60, 60, 60, 60)) == "eligible"
+
+
+def test_grade_accepts_raw_counts():
+    assert grade({"k_cand": 60, "n_cand": 60, "k_ref": 60, "n_ref": 60}) == "eligible"
+    assert grade({"k_cand": 10, "n_cand": 20, "k_ref": 20, "n_ref": 20}) == "probe"
+    assert grade({"k_cand": 0, "n_cand": 0, "k_ref": 5, "n_ref": 10}) == "unknown"
+    assert grade({"k_cand": 30, "n_cand": 64, "k_ref": 60, "n_ref": 64}) == "failed"

@@ -9,7 +9,9 @@ Evidence shape (``Evidence``, frozen): ``n`` paired items, ``gap_pts`` =
 (reference rate - candidate rate) * 100 (positive = candidate is worse), and
 ``lb_pts`` = Newcombe (method 10, Wilson-based) 95% lower bound of
 (candidate - reference), in points. ``evidence_from_counts`` builds it from
-k/n counts. A dict with the same keys is accepted too.
+k/n counts. A dict with the same keys is accepted too, and so is a dict of raw
+counts ``{k_cand, n_cand, k_ref, n_ref}``, which ``grade`` converts with
+``evidence_from_counts``.
 
 States:
   unknown   no evidence: None, empty mapping, or n <= 0.
@@ -73,6 +75,11 @@ def grade(evidence: Evidence | Mapping[str, Any] | None) -> Grade:
     """Grade evidence as unknown, probe, eligible or failed (see module docstring)."""
     if not evidence:
         return "unknown"
+    if isinstance(evidence, Mapping) and "n_cand" in evidence:
+        evidence = evidence_from_counts(int(evidence.get("k_cand") or 0), int(evidence.get("n_cand") or 0),
+                                        int(evidence.get("k_ref") or 0), int(evidence.get("n_ref") or 0))
+        if not evidence.n:
+            return "unknown"
     get = evidence.get if isinstance(evidence, Mapping) else lambda k: getattr(evidence, k, None)
     n = get("n") or 0
     if n <= 0:
