@@ -24,9 +24,11 @@ from __future__ import annotations
 import hashlib
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from llm_router import failopen, paths
 
@@ -48,7 +50,7 @@ DEFAULT_TTL_S = 600.0
 ENDPOINTS: dict[str, tuple[str, str]] = {
     "openai": ("https://api.openai.com/v1/models", "bearer"),
     "anthropic": ("https://api.anthropic.com/v1/models", "anthropic"),
-    "gemini": ("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", "google"),
+    "gemini": ("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000", "google"),
     "openrouter": ("https://openrouter.ai/api/v1/key", "bearer"),
     "deepseek": ("https://api.deepseek.com/models", "bearer"),
     "groq": ("https://api.groq.com/openai/v1/models", "bearer"),
@@ -172,3 +174,172 @@ def verify_provider(
     data[provider] = {"fp": fp, "ts": now, "verdict": verdict, "status": status}
     _store(path, data)
     return verdict, status
+
+
+# ------------------------------------------------------------ per-account lists
+# P1.8 task 13. The same authenticated GET also carries the account's model ids; the
+# ids are model names (not secrets) and are cached beside the verdict.
+
+LIST_TTL_S = 6 * 3600.0          # at most one list refresh per provider per 6 h
+MAX_IDS = 2000                   # ids kept per provider
+MAX_BODY_BYTES = 1_000_000       # bytes read per response
+MAX_PAGES = 20
+MAX_ID_LEN = 200
+_OPENAI_STYLE = ("openai", "deepseek", "groq", "xai", "mistral", "together", "moonshot")
+
+
+@dataclass(frozen=True)
+class ListResult:
+    """What one provider list call returned. ``ids`` is None when the provider has
+    no list in this call (or the body could not be read); ``complete`` is False when
+    a cap or a failed later page cut the list short, in which case an id that is
+    absent proves nothing."""
+
+    status: int | None
+    ids: tuple[str, ...] | None = None
+    complete: bool = False
+
+
+@dataclass(frozen=True)
+class ListOutcome:
+    verdict: str
+    status: int | None
+    ids: tuple[str, ...] | None = None
+    complete: bool = False
+    from_cache: bool = False
+
+
+def parse_page(provider: str, body: Any) -> tuple[list[str], dict[str, str]] | None:
+    """(ids, query params for the next page) from one decoded page, or None when the
+    provider has no list or the shape is unknown. Ids are bare (no ``models/``)."""
+    raw: list[Any]
+    nxt: dict[str, str] = {}
+    if provider in _OPENAI_STYLE:
+        raw = body if isinstance(body, list) else (body.get("data") if isinstance(body, dict) else None)
+        key = "id"
+    elif provider == "anthropic" and isinstance(body, dict):
+        raw, key = body.get("data"), "id"
+        if body.get("has_more") is True and isinstance(body.get("last_id"), str):
+            nxt = {"after_id": body["last_id"]}
+    elif provider == "gemini" and isinstance(body, dict):
+        raw, key = body.get("models"), "name"
+        if isinstance(body.get("nextPageToken"), str) and body["nextPageToken"]:
+            nxt = {"pageToken": body["nextPageToken"]}
+    elif provider == "cohere" and isinstance(body, dict):
+        raw, key = body.get("models"), "name"
+        if isinstance(body.get("next_page_token"), str) and body["next_page_token"]:
+            nxt = {"page_token": body["next_page_token"]}
+    else:
+        return None
+    if not isinstance(raw, list):
+        return None
+    ids = []
+    for item in raw:
+        v = item.get(key) if isinstance(item, dict) else None
+        if isinstance(v, str) and v.strip():
+            ids.append(v.strip().removeprefix("models/")[:MAX_ID_LEN])
+    return ids, nxt
+
+
+def _get_json(url: str, style: str, key: str) -> tuple[int | None, Any, bool]:
+    """(status, decoded body or None, body_ok). Reads at most MAX_BODY_BYTES + 1."""
+    req = urllib.request.Request(url, headers=_headers(style, key), method="GET")
+    try:
+        with _opener().open(req, timeout=PING_TIMEOUT_S) as resp:  # noqa: S310 - fixed https URL
+            status = int(resp.status)
+            data = resp.read(MAX_BODY_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        return int(exc.code), None, False
+    except Exception:  # noqa: BLE001 - never echo the exception
+        return None, None, False
+    if len(data) > MAX_BODY_BYTES:
+        return status, None, False
+    try:
+        return status, json.loads(data.decode("utf-8")), True
+    except ValueError:
+        return status, None, False
+
+
+def http_list(provider: str, key: str) -> ListResult:
+    """GET the provider's list-models endpoint, following its pagination, within
+    the caps. The key goes only in a header to the host in :data:`ENDPOINTS`."""
+    entry = ENDPOINTS.get(provider)
+    if entry is None or not entry[0].startswith("https://"):
+        return ListResult(None)
+    base, style = entry
+    ids: list[str] = []
+    params: dict[str, str] = {}
+    first_status: int | None = None
+    complete = False
+    for page in range(MAX_PAGES):
+        url = base
+        if params:
+            sep = "&" if "?" in base else "?"
+            url = base + sep + urllib.parse.urlencode(params)
+        status, body, ok = _get_json(url, style, key)
+        if page == 0:
+            first_status = status
+            if status != 200:
+                return ListResult(status)
+        if not ok:
+            break
+        parsed = parse_page(provider, body)
+        if parsed is None:
+            return ListResult(first_status) if page == 0 else ListResult(first_status, tuple(ids), False)
+        got, params = parsed
+        for i in got:
+            if len(ids) >= MAX_IDS:
+                return ListResult(first_status, tuple(ids), False)
+            ids.append(i)
+        if not params:
+            complete = True
+            break
+    if page == 0 and not ids and not complete:
+        return ListResult(first_status)
+    return ListResult(first_status, tuple(dict.fromkeys(ids)), complete)
+
+
+def list_provider(
+    provider: str,
+    key: str,
+    *,
+    fetch: Callable[[str, str], ListResult] | None,
+    now: float,
+    cache: Path | None = None,
+    ttl_s: float = LIST_TTL_S,
+) -> ListOutcome:
+    """Verdict plus the account's model ids, at most one ``fetch`` per provider per
+    ``ttl_s`` unless the key changed (fingerprint). ``fetch=None`` reads the cache only
+    (no network). Only verified/rejected outcomes are cached; a transport error or an
+    unexpected status returns no ids, so it can never read as "not listed"."""
+    if provider not in ENDPOINTS:
+        return ListOutcome(NO_CHECK, None)
+    path = cache or cache_path()
+    fp = _fingerprint(provider, key)
+    data = _load(path)
+    hit = data.get(provider + ":list")
+    if (isinstance(hit, dict) and hit.get("fp") == fp and isinstance(hit.get("ts"), (int, float))
+            and hit.get("verdict") in (VERIFIED, REJECTED)):
+        fresh = 0 <= now - hit["ts"] < ttl_s
+        if fresh or fetch is None:
+            ids = hit.get("ids")
+            ids = tuple(i for i in ids if isinstance(i, str)) if isinstance(ids, list) else None
+            return ListOutcome(hit["verdict"], hit.get("status"), ids,
+                               bool(hit.get("complete")), True)
+    if fetch is None:
+        return ListOutcome(UNREACHABLE, None)
+    res = fetch(provider, key)
+    if res.status is None:
+        return ListOutcome(UNREACHABLE, None)
+    if res.status == 200:
+        verdict = VERIFIED
+    elif res.status in (401, 403):
+        verdict = REJECTED
+    else:
+        return ListOutcome(UNEXPECTED, res.status)
+    ids = res.ids if verdict == VERIFIED else None
+    complete = bool(res.complete) if ids is not None else False
+    data[provider + ":list"] = {"fp": fp, "ts": now, "verdict": verdict, "status": res.status,
+                                "ids": list(ids) if ids is not None else None, "complete": complete}
+    _store(path, data)
+    return ListOutcome(verdict, res.status, ids, complete)

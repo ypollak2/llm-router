@@ -107,6 +107,7 @@ class ModelEntry:
     measured_recall_tokens: int | None = None
     present: bool = True                 # False: in the last snapshot, gone now
     notes: tuple[str, ...] = ()
+    listing: str = ""                    # API rows: accessible | not_listed | discovered | key_rejected | ""
 
     def cap(self, name: str) -> Cap:
         return self.capabilities.get(name, Cap(CAP_UNKNOWN, SRC_DECLARED, "not reported"))

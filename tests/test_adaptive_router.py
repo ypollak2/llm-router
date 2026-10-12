@@ -184,13 +184,9 @@ class TestOpenAIScanner:
         from llm_router.discover import discover_available_models
 
         mock_ollama = AsyncMock(return_value=[])
-        mock_openai = AsyncMock(return_value=[])
-        mock_gemini = AsyncMock(return_value=[])
 
         with patch("llm_router.discover._scan_ollama", mock_ollama):
-            with patch("llm_router.discover._scan_openai", mock_openai):
-                with patch("llm_router.discover._scan_gemini", mock_gemini):
-                    result = await discover_available_models()
+            result = await discover_available_models()
 
         # Should return dict of capabilities
         assert isinstance(result, dict)
@@ -200,14 +196,10 @@ class TestOpenAIScanner:
         """Discovery should handle scanner exceptions gracefully."""
         from llm_router.discover import discover_available_models
 
-        mock_ollama = AsyncMock(return_value=[])
-        mock_openai = AsyncMock(side_effect=Exception("API error"))
-        mock_gemini = AsyncMock(return_value=[])
+        mock_ollama = AsyncMock(side_effect=Exception("API error"))
 
         with patch("llm_router.discover._scan_ollama", mock_ollama):
-            with patch("llm_router.discover._scan_openai", mock_openai):
-                with patch("llm_router.discover._scan_gemini", mock_gemini):
-                    result = await discover_available_models()
+            result = await discover_available_models()
 
         # Should still return a dict (other scanners' results)
         assert isinstance(result, dict)
@@ -260,13 +252,9 @@ class TestGeminiScanner:
         from llm_router.discover import discover_available_models
 
         mock_ollama = AsyncMock(return_value=[])
-        mock_openai = AsyncMock(return_value=[])
-        mock_gemini = AsyncMock(return_value=[])
 
         with patch("llm_router.discover._scan_ollama", mock_ollama):
-            with patch("llm_router.discover._scan_openai", mock_openai):
-                with patch("llm_router.discover._scan_gemini", mock_gemini):
-                    result = await discover_available_models()
+            result = await discover_available_models()
 
         assert isinstance(result, dict)
 
@@ -573,12 +561,6 @@ class TestAdaptiveUniversalRouterIntegration:
 
         with (
             patch("llm_router.discover._scan_ollama",
-                  new_callable=AsyncMock, return_value=[]),
-            patch("llm_router.discover._scan_openai",
-                  new_callable=AsyncMock, return_value=[]),
-            patch("llm_router.discover._scan_gemini",
-                  new_callable=AsyncMock, return_value=[]),
-            patch("llm_router.discover._scan_api_key_providers",
                   new_callable=AsyncMock, return_value=[]),
         ):
             result = await discover_available_models()

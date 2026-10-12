@@ -294,6 +294,9 @@ class Probes:
     registry: Callable[[], Any] = _registry
     ping_cache: Callable[[], Path] = auth_ping.cache_path
     ping: Callable[[str, str], int | None] = auth_ping.http_ping
+    #: None: use ``http_list`` when ``ping`` is the real one, else a status-only adapter
+    #: over ``ping`` (so a fake ping never reaches the network).
+    ping_list: Callable[[str, str], auth_ping.ListResult] | None = None
     now: Callable[[], float] = time.time
 
 
@@ -677,12 +680,8 @@ def _inventory_gemini(p: Probes, reg: Any, resets: dict[str, float], *, verify: 
 
 # ------------------------------------------------------------------ API keys
 
-def _verify_key(p: Probes, provider: str, env_name: str) -> tuple[bool | None, bool, str, str]:
-    """(path_verified, authorized, path_detail, auth_detail) from a zero-cost list-models call.
-
-    ``None`` for path_verified means "unchanged" (could not verify)."""
-    verdict, status = auth_ping.verify_provider(
-        provider, p.environ.get(env_name, ""), ping=p.ping, now=p.now(), cache=p.ping_cache())
+def _verdict_texts(verdict: str, status: int | None, provider: str, env_name: str
+                   ) -> tuple[bool | None, bool, str, str]:
     if verdict == auth_ping.VERIFIED:
         return (True, True, f"key accepted by {provider} (HTTP {status} on a list-models call; no tokens used)",
                 f"{env_name} is set and accepted")
@@ -695,6 +694,35 @@ def _verify_key(p: Probes, provider: str, env_name: str) -> tuple[bool | None, b
         return None, True, f"unexpected HTTP {status} from the list-models call; not verified", f"{env_name} is set"
     return None, True, ("key present; no zero-cost check exists for this provider "
                         "(`llm-router calibrate --allow-paid --models <one>`)"), f"{env_name} is set"
+
+
+def _verify_key(p: Probes, provider: str, env_name: str) -> tuple[bool | None, bool, str, str]:
+    """(path_verified, authorized, path_detail, auth_detail) from a zero-cost list-models call.
+
+    ``None`` for path_verified means "unchanged" (could not verify)."""
+    verdict, status = auth_ping.verify_provider(
+        provider, p.environ.get(env_name, ""), ping=p.ping, now=p.now(), cache=p.ping_cache())
+    return _verdict_texts(verdict, status, provider, env_name)
+
+
+def _list_fetch(p: Probes) -> Callable[[str, str], auth_ping.ListResult]:
+    if p.ping_list is not None:
+        return p.ping_list
+    if p.ping is auth_ping.http_ping:
+        return auth_ping.http_list
+    return lambda prov, key: auth_ping.ListResult(p.ping(prov, key))
+
+
+def _listed_match(registry_id: str, listed: set[str]) -> str | None:
+    """The listed id that is this registry id (bare name, or the name plus a dated
+    suffix such as ``-20251001``), else None."""
+    name = registry_id.split("/", 1)[-1]
+    if name in listed:
+        return name
+    for lid in listed:
+        if lid.startswith(name + "-") and lid[len(name) + 1:].isdigit() and len(lid) - len(name) - 1 == 8:
+            return lid
+    return None
 
 
 def _inventory_api(p: Probes, reg: Any, resets: dict[str, float], *, verify: bool = False
@@ -713,17 +741,35 @@ def _inventory_api(p: Probes, reg: Any, resets: dict[str, float], *, verify: boo
         authorized, path_detail = True, ("key present; not verified yet "
                                          "(`llm-router inventory --verify`, or `calibrate --allow-paid`)")
         auth_detail = f"{env_name} is set"
-        if verify:
-            verified, authorized, path_detail, auth_detail = _verify_key(p, provider, env_name)
+        outcome = auth_ping.list_provider(
+            provider, p.environ.get(env_name, ""), fetch=_list_fetch(p) if verify else None,
+            now=p.now(), cache=p.ping_cache())
+        if verify or outcome.from_cache:
+            verified, authorized, path_detail, auth_detail = _verdict_texts(
+                outcome.verdict, outcome.status, provider, env_name)
+        listed = set(outcome.ids) if (outcome.verdict == auth_ping.VERIFIED and outcome.ids is not None) else None
+        rejected = outcome.verdict == auth_ping.REJECTED
+        used: set[str] = set()
         for meta in rows:
             if meta.provider != provider and not (
                     provider == "gemini" and meta.provider == "google"):
                 continue
             facts = _from_registry(meta)
+            row_verified, row_auth, row_detail, listing = verified, authorized, path_detail, ""
+            if rejected:
+                listing = "key_rejected"
+            elif listed is not None:
+                hit = _listed_match(meta.id, listed)
+                if hit is not None:
+                    used.add(hit)
+                    listing, row_verified, row_auth = "accessible", True, True
+                elif outcome.complete:
+                    listing, row_verified, row_auth = "not_listed", False, False
+                    row_detail = f"not in the {provider} account's model list"
             entries.append(ModelEntry(
                 id=meta.id, provider=provider, route_kind=ROUTE_API, privacy=PRIVACY_CLOUD,
-                exec_path=f"api:{provider}", path_verified=bool(verified),
-                path_detail=path_detail, authorized=authorized, auth_detail=auth_detail,
+                exec_path=f"api:{provider}", path_verified=bool(row_verified),
+                path_detail=row_detail, authorized=row_auth, auth_detail=auth_detail,
                 quota=_quota_for(provider, resets, pressure=None,
                                  pressure_detail="pay-per-use; no quota window",
                                  state_if_ok="metered", unknown_state="metered"),
@@ -731,6 +777,20 @@ def _inventory_api(p: Probes, reg: Any, resets: dict[str, float], *, verify: boo
                 context_source="curated registry" if facts["context"] else "",
                 price_in_per_mtok=facts["pin"], price_out_per_mtok=facts["pout"],
                 tier_ceiling=facts["prior"], tier_basis="prior" if facts["prior"] else "unmeasured",
+                listing=listing,
+            ))
+        for lid in sorted((listed or set()) - used):
+            # Listed by the account, absent from the registry: metadata is unknown.
+            entries.append(ModelEntry(
+                id=f"{provider}/{lid}", provider=provider, route_kind=ROUTE_API, privacy=PRIVACY_CLOUD,
+                exec_path=f"api:{provider}", path_verified=True,
+                path_detail=f"listed by the {provider} account; not in the curated registry",
+                authorized=True, auth_detail=auth_detail,
+                quota=_quota_for(provider, resets, pressure=None,
+                                 pressure_detail="pay-per-use; no quota window",
+                                 state_if_ok="metered", unknown_state="metered"),
+                tier_basis="unmeasured", tier_detail="metadata unknown", listing="discovered",
+                notes=("metadata unknown",),
             ))
     return entries, names
 
