@@ -1,1 +1,1 @@
-- Fix: the background shadow worker resolves its log path at enqueue time, so a row never lands in a HOME the caller has since left (main CI 70847288 failed: a test's queued shadow row wrote the real ~/.llm-router/engine_shadow.jsonl).
+- Fix: the background shadow worker writes its row to the log path resolved at enqueue time, and the test suite drains queued shadow work before each test's HOME is restored (main CI 70847288 failed: a queued shadow row wrote the real ~/.llm-router/engine_shadow.jsonl).
