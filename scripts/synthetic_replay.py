@@ -480,6 +480,7 @@ DISABLE_ENV = {
     "LLM_ROUTER_OLLAMA_WATCHDOG": "off",
     "LLM_ROUTER_JUDGE_AUTODRAIN": "off",
     "LLM_ROUTER_OKF_AUTOINDEX": "off",
+    "LLM_ROUTER_MAP_REDISCOVERY": "off",   # the hook's detached refresh child would linger and probe Ollama
     "LLM_ROUTER_VERIFY": "off",
     "LLM_ROUTER_PXPIPE_ENABLED": "off",
     "LLM_ROUTER_AUTO_BENCHMARK_FETCH": "off",
