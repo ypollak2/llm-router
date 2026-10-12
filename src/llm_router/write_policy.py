@@ -62,26 +62,29 @@ _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _WRAPPERS = {"command", "exec", "time", "nohup", "nice", "builtin", "env", "timeout", "stdbuf"}
 
 _NOT_WIRED = " — not run (needs approval; approval is not wired, so treated as refused)"
-_CAT_HEREDOC = re.compile(
-    r"\$\(\s*cat\s+<<-?\s*(['\"]?)(\w+)\1[ \t]*\n.*?\n[ \t]*\2[ \t]*\n?\s*\)", re.S)
+_ARITH = re.compile(r"[A-Za-z0-9_ \t+\-*/%()!~^=,?:$]*")
+_SUBST_WHY = ("command substitution can run unseen commands "
+              "(write the text to a file instead, e.g. `git commit -F file`)")
 
 
 def _dollar_paren(cmd: str, i: int) -> tuple[int, bool]:
     """cmd[i:] starts with ``$(``. Returns (index after the construct, is_substitution).
-    ``$((...))`` is arithmetic; ``$(cat <<E ... E)`` is data (git commit -m "$(cat <<'E'
-    ...)"); anything else is a command substitution the tripwire cannot judge."""
+    Only a strict ``$((arithmetic))`` is not a substitution: the matching close is an
+    adjacent ``))`` and the content is nothing but identifiers, digits, spaces and
+    ``+ - * / % ( ) ! ~ ^ = , ? : $``. In doubt it is a substitution (needs approval).
+    ``$(cat <<E ... E)`` is NOT exempt: a heredoc body can nest ``$()`` and its end
+    cannot be found reliably."""
     if cmd.startswith("$((", i):
         depth, j = 0, i + 1
         while j < len(cmd):
             depth += (cmd[j] == "(") - (cmd[j] == ")")
             j += 1
             if depth == 0:
-                inner = cmd[i:j]
-                return j, "$(" in inner[3:] or "`" in inner
+                inner = cmd[i + 3:j - 2]
+                ok = (cmd[j - 2:j] == "))" and "$(" not in inner
+                        and _ARITH.fullmatch(inner) is not None)
+                return j, not ok
         return len(cmd), True
-    m = _CAT_HEREDOC.match(cmd, i)
-    if m:
-        return m.end(), False
     return i + 2, True
 
 
@@ -451,7 +454,7 @@ def check_command(cmd: str, root: Path) -> Verdict:
         return Verdict(NEEDS_APPROVAL, f"cannot parse command ({exc})" + _NOT_WIRED)
     scan = _Scan(root)
     if subst:
-        scan.need("command substitution can run unseen commands")
+        scan.need(_SUBST_WHY)
 
     words: list[Token] = []
     redirs: list[tuple[str, Token | None]] = []

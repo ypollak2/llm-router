@@ -179,7 +179,9 @@ GATED_R2 = [
 ALLOWED_R2 = [
     "echo $((1+2)) > n",
     "echo $(( 2 * (3 + 4) )) > n.txt",
-    "git commit -m \"$(cat <<'E'\nfix: thing (with parens)\n\nbody\nE\n)\"",
+    "echo $((a+b*2)) > n.txt",
+    "echo $(( (1+2) * 3 )) $((x%2))",
+    "git commit -F msg.txt",
     "timeout 5 pytest -q 2>&1 | tee t.log",
     "stdbuf -o0 make > build.log 2>&1",
     "timeout -s KILL 5 python script.py",
@@ -225,3 +227,39 @@ def test_needs_approval_reason_says_approval_is_not_wired(tree):
     root, _ = tree
     v = check_command("bash -c 'x'", root)
     assert "not run (needs approval; approval is not wired, so treated as refused)" in v.reason
+
+
+# ---- review round 3 (#446 follow-up): M1-M3 and the removed cat-heredoc exemption ----
+
+GATED_R3 = [
+    # M1: unquoted delimiter expands the body, nested $() / backtick runs
+    "echo \"$(cat <<E\n$(touch {out}/q2)\nE\n)\"",
+    "echo \"$(cat <<E\n`touch {out}/q2`\nE\n)\"",
+    # M2: the heredoc ends at the first E; what follows runs
+    "echo \"$(cat <<E\nx\nE\ntouch {out}/q3\nE\n)\"",
+    "echo \"$(cat <<'E'\nx\nE\ntouch {out}/q3\nE\n)\"",
+    "echo \"$(cat <<E\nx\nE\ncat <<E\ny\nE\n)\"",
+    "echo \"$(cat <<-E\n\tx\n\tE\ntouch {out}/q3\n\tE\n)\"",
+    # M3: not an adjacent )) -> command substitution
+    "echo $((touch {out}/q1) )",
+    "echo $((1+2; touch {out}/q1))",
+    "echo $((1 | 2))",
+    "echo $((a > b))",
+    "echo $(( 1 + `id` ))",
+    "echo $((1+$(id)))",
+    # the exempted idiom is gated again
+    "git commit -m \"$(cat <<'E'\nfix: thing\nE\n)\"",
+]
+
+
+@pytest.mark.parametrize("tpl", GATED_R3)
+def test_r3_nested_execution_is_gated(tree, tpl):
+    root, out = tree
+    v = check_command(tpl.format(out=out), root)
+    assert v.decision == "needs_approval", (tpl, v)
+    assert "git commit -F" in v.reason
+
+
+def test_r3_arithmetic_still_allowed_with_redirect(tree):
+    root, _ = tree
+    assert check_command("echo $((1+2)) > n", root).decision == "allow"
