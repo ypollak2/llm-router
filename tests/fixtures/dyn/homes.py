@@ -10,19 +10,23 @@ from pathlib import Path
 #:   (auto_profile._profile_path: the router writes it only while it is still
 #:   router-written, P0.15), ``routing.yaml`` (pins), ``.env`` (keys; install only
 #:   appends the subscription flag when a Claude seat is found), ``notes.txt``
-#:   (arbitrary user file in the state dir).
+#:   (arbitrary user file in the state dir), ``config.yaml`` (safe_config.load_safe_config:
+#:   read only), ``session_kind_overrides.json`` (session_kind: read only).
 #:   generated: the router rewrites it at will (``GENERATED``); a user never edits it.
 #: ``usage.db`` is history: the router appends rows, the upgrade must keep them
 #: (row count checked in test_p212_upgrade_from_15_4_0), so it is in neither list.
-USER_OWNED = ("profile.yaml", "routing.yaml", ".env", "notes.txt")
+USER_OWNED = ("profile.yaml", "routing.yaml", ".env", "notes.txt", "config.yaml", "session_kind_overrides.json")
 GENERATED = (
     "profile.generated.yaml", "profile_cache.json", "profile_hash.json",
     "discovery.json", "ollama_last_ok.txt",
     "grandfathered_models.json", "grandfathered_models.init",
     "seats.json", "usage.json", "install-manifest.json", ".claude.json",
 )
-#: directories the installer owns inside the state dir
-GENERATED_DIRS = ("hooks", "claude-home", "claude-desktop")
+#: directories the installer owns wholesale inside the state dir
+GENERATED_DIRS = ("hooks",)
+#: directories the installer may CREATE files in; a file already there (the user's
+#: ``claude-home/settings.json``) is user-edited and protected by sha
+GENERATED_NEW_ONLY_DIRS = ("claude-home", "claude-desktop")
 
 
 def user_owned_files(home: Path) -> list[Path]:
@@ -57,6 +61,8 @@ def make_home(root: Path, shape: str, *, models: tuple[str, ...] = ("old-a:lates
     (home / "routing.yaml").write_text("routing:\n  code:\n    model: ollama/pinned:latest\n")
     (home / ".env").write_text("# my keys\nOLLAMA_BUDGET_MODELS=\"\"\n")
     (home / "notes.txt").write_bytes(b"mine\r\n")
+    (home / "config.yaml").write_text("log_level: info\n")
+    (home / "session_kind_overrides.json").write_text("{}\n")
     body = {
         "upgrade": _PROFILE_BODY,
         "edited": _PROFILE_BODY + "# my own comment\n",

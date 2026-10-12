@@ -28,12 +28,29 @@ def _tree(home: Path) -> dict[str, str]:
     return {str(p.relative_to(home)): _sha(p) for p in home.rglob("*") if p.is_file() and p.name != "usage.db"}
 
 
-def _declared(rel: str) -> bool:
-    return rel in homes.GENERATED or rel.split("/")[0] in homes.GENERATED_DIRS
+def undeclared_changes(tree_before: dict[str, str], tree_after: dict[str, str], shape: str) -> list[str]:
+    """Changed or created files that no rule declares generated.
+
+    A file under a ``GENERATED_NEW_ONLY_DIRS`` dir (claude-home, claude-desktop) may be
+    created by the router, but one that already existed is user-edited and is protected by sha.
+    """
+    def declared(rel: str) -> bool:
+        top = rel.split("/")[0]
+        return (rel in homes.GENERATED or top in homes.GENERATED_DIRS
+                or (top in homes.GENERATED_NEW_ONLY_DIRS and rel not in tree_before))
+    return [n for n, d in tree_after.items() if tree_before.get(n) != d and not declared(n)
+            and not (shape == "owned" and n == "profile.yaml")]  # router-written there (P0.15)
 
 
-def run_upgrade(root: Path, monkeypatch, shape: str, *, tamper: bool = False) -> tuple[int, list[str]]:
+def run_upgrade(root: Path, monkeypatch, shape: str, *, inject: str | None = None,
+                seed: str | None = None, fail_undeclared: bool = False) -> tuple[int, list[str]]:
+    """``inject``: ``rewrite`` (same bytes, in the recorder window), ``append-window`` (in the
+    window, after the rescans) or ``append-after`` (after the recorder window closed).
+    ``seed``: a user file written under the home before the run (path relative to the home)."""
     home, owned = rec.build(root, shape, monkeypatch)
+    if seed:
+        (home / seed).parent.mkdir(parents=True, exist_ok=True)
+        (home / seed).write_bytes(b'{"user": true}\n')
     monkeypatch.setenv("HOME", str(root))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: root))
     monkeypatch.chdir(root)
@@ -59,17 +76,22 @@ def run_upgrade(root: Path, monkeypatch, shape: str, *, tamper: bool = False) ->
         for _ in range(3):                                                  # 3 forced rescans
             world["n"] += 1
             ap.rescan_and_update()
-        if tamper and owned:
-            with open(owned[0], "ab") as f:                                 # negative control
+        if inject == "rewrite":
+            owned[0].write_bytes(owned[0].read_bytes())                     # negative control: sha same, write seen
+        elif inject == "append-window":
+            with open(owned[0], "ab") as f:                                 # negative control: sha changes in the window
                 f.write(b"x")
         writes = list(rec._WRITES)
     finally:
         rec._WRITES = None
+    if inject == "append-after":
+        with open(owned[0], "ab") as f:                                     # negative control: after the window
+            f.write(b"x")
     assert after_upgrade == before, f"{shape}: user-owned file changed by the upgrade"
     assert {p: _sha(p) for p in owned} == before, f"{shape}: changed after rescans"
     assert writes == [], f"{shape}: writes to user-owned paths: {writes}"
-    undeclared = [n for n, d in _tree(home).items() if tree_before.get(n) != d and not _declared(n)
-                  and not (shape == "owned" and n == "profile.yaml")]  # router-written there (P0.15)
+    undeclared = undeclared_changes(tree_before, _tree(home), shape)
+    assert not (fail_undeclared and undeclared), f"undeclared change: {undeclared}"
     print(f"P2.12-c {shape}: compared {len(owned)} file(s): {[p.name for p in owned]}")
     return len(owned), undeclared
 
@@ -83,9 +105,27 @@ def test_six_homes_upgrade_preserves_user_owned_files(tmp_path, monkeypatch):
     assert {s: u for s, (_, u) in results.items() if u} == {}
 
 
-def test_negative_control_a_changed_user_file_is_caught(tmp_path, monkeypatch):
-    with pytest.raises(AssertionError):
-        run_upgrade(tmp_path / "edited", monkeypatch, "edited", tamper=True)
+@pytest.mark.parametrize("inject,message", [
+    ("append-window", "changed after rescans"),
+    ("append-after", "changed after rescans"),
+    ("rewrite", "writes to user-owned paths"),
+])
+def test_negative_control_each_injection_fails_with_its_own_message(tmp_path, monkeypatch, inject, message):
+    with pytest.raises(AssertionError, match=message):
+        run_upgrade(tmp_path / "edited", monkeypatch, "edited", inject=inject)
+
+
+def test_negative_control_write_to_user_edited_settings_json_is_undeclared(tmp_path, monkeypatch):
+    with pytest.raises(AssertionError, match=r"undeclared change:.*claude-home/settings\.json"):
+        run_upgrade(tmp_path / "edited", monkeypatch, "edited",
+                    seed="claude-home/settings.json", fail_undeclared=True)
+
+
+def test_undeclared_changes_protects_preexisting_files_in_new_only_dirs():
+    before = {"claude-home/settings.json": "a", "hooks/x": "a"}
+    after = {"claude-home/settings.json": "b", "hooks/x": "b", "claude-home/rules/r.md": "c",
+             "claude-desktop/c.json": "c", "notes.txt": "n"}
+    assert undeclared_changes(before, after, "edited") == ["claude-home/settings.json", "notes.txt"]
 
 
 def test_user_owned_and_generated_are_disjoint():

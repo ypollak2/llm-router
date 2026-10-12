@@ -1,5 +1,6 @@
 """Full installation preserves writes while optionally omitting guidance."""
 
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,6 +8,30 @@ import pytest
 
 from llm_router import host_detect, install_hooks, seats
 from llm_router.commands import install
+
+# exact CLI output (ANSI stripped) with .codex, .cursor and .windsurf present; the one
+# "also detected" line is the only host-detection line.
+GOLDEN = """
+╔══════════════════════════════════════════╗
+║   LLM Router — One-Command Install        ║
+╚══════════════════════════════════════════╝
+
+  ✓  Claude hooks installed
+
+  Codex CLI detected — installing...
+  ✓  Codex hooks installed
+  also detected, not auto-wired: cursor, windsurf (wire one with `llm-router install --host <name>`)
+
+  Seats  test seats
+  no seat found — routed calls will bill an API key; log in to Claude Code, Codex, or start Ollama
+
+✓ LLM Router installed globally.
+  Every Claude Code and Codex CLI session will now auto-route tasks.
+  Restart Claude Code (and Claude Desktop if installed) to activate.
+
+  Provider keys (optional — router works without any):
+  test provider keys
+"""
 
 
 @pytest.fixture
@@ -70,11 +95,33 @@ def test_detected_cursor_reports_explicit_install_command(sandbox, capsys):
     assert install.run_full(interactive=False) == ["Claude Code"]
 
     assert (
-        "cursor: detected, not auto-wired: run `llm-router install --host cursor`"
+        "also detected, not auto-wired: cursor (wire one with `llm-router install --host <name>`)"
         in capsys.readouterr().out
     )
 
 
+def test_many_detected_hosts_print_one_summary_line(sandbox, capsys):
+    home, _ = sandbox
+    (home / ".cursor").mkdir()
+    (home / ".windsurf").mkdir()
+
+    install.run_full(interactive=False)
+
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if "not auto-wired" in ln]
+    assert lines == [
+        "  also detected, not auto-wired: cursor, windsurf (wire one with `llm-router install --host <name>`)"
+    ]
+
+
+def test_golden_output_on_a_fixture_home(sandbox, capsys):
+    home, _ = sandbox
+    for d in (".codex", ".cursor", ".windsurf"):
+        (home / d).mkdir()
+
+    install.run_full(interactive=False)
+
+    out = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
+    assert out == GOLDEN
 def test_no_hosts_still_installs_claude(sandbox):
     home, calls = sandbox
     (home / ".codex").mkdir()

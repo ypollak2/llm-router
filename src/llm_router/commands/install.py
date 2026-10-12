@@ -338,6 +338,7 @@ def run_full(interactive: bool = True, flags: list[str] | None = None) -> list[s
             "codex": ("Codex CLI", _install_codex_files),
             "gemini-cli": ("Gemini CLI", _install_gemini_cli_files),
         }
+        _unwired: list[str] = []
         for host_id, info in host_detect.detect_hosts().items():
             if not info.present or host_id == "claude-code":
                 continue  # absent, or already wired by install() above
@@ -349,13 +350,16 @@ def run_full(interactive: bool = True, flags: list[str] | None = None) -> list[s
                     print(f"  {_green('✓') if ok else _dim('·')}  {a.lstrip('✓ ').strip()}")
                 installed_hosts.append(label)
             elif host_id in _HOST_SNIPPETS and host_id not in _UNSUPPORTED_HOSTS:
-                print(
-                    f"  {host_id}: detected, not auto-wired: "
-                    f"run `llm-router install --host {host_id}`"
-                )
+                _unwired.append(host_id)
             else:
                 reason = _UNSUPPORTED_HOSTS.get(host_id, "no installer for this host")
                 print(f"  {host_id}: detected, not wired: {reason}")
+        if _unwired:
+            # One line, not one per host: vscode and cursor are on most dev machines.
+            print(
+                f"  also detected, not auto-wired: {', '.join(sorted(_unwired))} "
+                "(wire one with `llm-router install --host <name>`)"
+            )
 
     # ── Seats: which subscriptions are logged in (drives the free bucket) ──
     try:
