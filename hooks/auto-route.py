@@ -794,6 +794,12 @@ def _spawn_background_usage_refresh() -> None:
     stdout/stderr so a slow or failing child can never bleed into THIS
     hook's own stdout, which the host parses as the routing decision.
     """
+    # The detached child writes usage.json/errors into LLM_ROUTER_HOME after
+    # the caller exits. Tests disable it so a TemporaryDirectory HOME is not
+    # written after cleanup (OSError 66 flake).
+    no_bg_refresh = os.environ.get("LLM_ROUTER_NO_BG_USAGE_REFRESH", "")
+    if no_bg_refresh and no_bg_refresh.lower() not in ("0", "off", "false", "no"):
+        return
     script = _usage_refresh_script_path()
     if script is None:
         return
