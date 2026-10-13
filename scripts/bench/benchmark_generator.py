@@ -18,14 +18,19 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-log = logging.getLogger("llm_router.benchmark_fetcher")
+# M-02: every row this generator causes is benchmark traffic, not usage.
+os.environ.setdefault("LLM_ROUTER_SYNTHETIC", "1")
+
+log = logging.getLogger("llm_router.benchmark_generator")
 
 # Path to the bundled benchmarks file (relative to this module).
-_OUTPUT_PATH = Path(__file__).parent / "data" / "benchmarks.json"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_OUTPUT_PATH = _REPO_ROOT / "src" / "llm_router" / "data" / "benchmarks.json"
 
 # Task-type scoring weights: (lmsys, aider, hf, cost_inv).
 # cost_inv = 1 - normalized_cost (cheaper → higher score).
@@ -420,7 +425,7 @@ def generate_benchmarks_json(output_path: Path = _OUTPUT_PATH) -> None:
     )
 
     # Also regenerate the human-readable benchmarks doc.
-    md_path = Path(__file__).parent.parent.parent.parent / "docs" / "BENCHMARKS.md"
+    md_path = _REPO_ROOT / "docs" / "BENCHMARKS.md"
     try:
         generate_benchmarks_md(output, md_path)
         log.info("BENCHMARKS.md regenerated")

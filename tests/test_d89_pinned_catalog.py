@@ -38,13 +38,49 @@ def test_fetch_pinned_mismatch(
     data = b'{"version": 1}'
     monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: FakeResponse(data))
     with caplog.at_level(logging.WARNING, logger="llm_router.benchmark_fetcher"):
-        assert bf.fetch_pinned("https://example.test/catalog", "0" * 64) is None
+        with pytest.raises(bf.PinnedFetchError, match="sha256 mismatch"):
+            bf.fetch_pinned("https://example.test/catalog", "0" * 64)
     records = [r for r in caplog.records if r.name == "llm_router.benchmark_fetcher"]
     assert len(records) == 1
     assert records[0].getMessage() == (
         "catalog rejected: sha256 mismatch for https://example.test/catalog "
         f"(expected {'0' * 12}..., got {bf.sha256_hex(data)[:12]}...)"
     )
+
+
+def test_fetch_pinned_download_failure_is_not_a_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*a: object, **k: object) -> None:
+        raise OSError("offline")
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    with pytest.raises(bf.PinnedFetchError, match="download failed"):
+        bf.fetch_pinned("https://example.test/catalog", "0" * 64)
+
+
+def test_catalog_already_pinned_skips_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    data = b'{"version": 1}'
+    monkeypatch.setattr(bf, "load_pins", lambda: {"benchmarks": {"tag": "vtest", "sha256": bf.sha256_hex(data)}})
+
+    def forbidden(*a: object, **k: object) -> None:
+        raise AssertionError("downloaded although the installed copy matches the pin")
+
+    monkeypatch.setattr(urllib.request, "urlopen", forbidden)
+    output = tmp_path / "benchmarks.json"
+    output.write_bytes(data)
+    assert bf.fetch_pinned_catalog(output) is True
+
+
+def test_generator_defaults_to_the_bundled_data_file() -> None:
+    import sys
+
+    root = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(root / "scripts/bench"))
+    try:
+        import benchmark_generator as gen
+    finally:
+        sys.path.remove(str(root / "scripts/bench"))
+    assert gen._OUTPUT_PATH == root / "src/llm_router/data/benchmarks.json"
+    assert (gen._REPO_ROOT / "docs").is_dir()
 
 
 @pytest.mark.parametrize("matches", [True, False])
@@ -66,12 +102,15 @@ def test_catalog_write(
         assert list(tmp_path.iterdir()) == []
 
 
-def test_session_start_unset_makes_zero_outbound_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_session_start_unset_makes_zero_outbound_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     hook = Path(__file__).resolve().parent.parent / "src/llm_router/hooks/session-start.py"
     spec = importlib.util.spec_from_file_location("_d89_session_start", hook)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "_state_dir", lambda: str(tmp_path))
     calls: list[str] = []
 
     def forbidden(*args: object, **kwargs: object) -> None:

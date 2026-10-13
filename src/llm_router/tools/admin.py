@@ -1339,15 +1339,16 @@ async def llm_import_profile(url: str = "") -> str:
 
         # Fetch and parse remote profile.
         if not url:
-            from llm_router.benchmark_fetcher import fetch_pinned, load_pins
+            from llm_router.benchmark_fetcher import PinnedFetchError, fetch_pinned, load_pins
 
             pin = load_pins().get("community_profile", {})
             if not pin.get("sha256"):
                 return "No pinned community profile; pass an explicit url to import one you chose"
             url = pin["url"]
-            payload = fetch_pinned(url, pin["sha256"])
-            if payload is None:
-                return "Community profile rejected: sha256 does not match the pin"
+            try:
+                payload = fetch_pinned(url, pin["sha256"])
+            except PinnedFetchError as e:
+                return f"Community profile not imported: {e}"
             try:
                 remote_data = json.loads(payload.decode())
             except Exception as e:

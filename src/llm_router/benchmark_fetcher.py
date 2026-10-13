@@ -26,21 +26,26 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def fetch_pinned(url: str, expected_sha256: str | None, timeout: int = 10) -> bytes | None:
+class PinnedFetchError(Exception):
+    """The pinned download failed ("download failed") or was rejected ("sha256 mismatch")."""
+
+
+def fetch_pinned(url: str, expected_sha256: str | None, timeout: int = 10) -> bytes:
+    """Return the bytes at url iff their sha256 equals the pin; else raise PinnedFetchError."""
     if not expected_sha256:
-        return None
+        raise PinnedFetchError("no pin")
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
             data = response.read()
-    except Exception:
-        return None
+    except Exception as exc:
+        raise PinnedFetchError(f"download failed: {exc}") from exc
     actual = sha256_hex(data)
     if actual != expected_sha256:
         log.warning(
             "catalog rejected: sha256 mismatch for %s (expected %s..., got %s...)",
             url, expected_sha256[:12], actual[:12],
         )
-        return None
+        raise PinnedFetchError("sha256 mismatch")
     return data
 
 
@@ -50,9 +55,9 @@ def fetch_pinned_catalog(output_path: Path) -> bool:
         pin = load_pins().get("benchmarks", {})
         if not pin.get("sha256"):
             return False
+        if output_path.exists() and sha256_hex(output_path.read_bytes()) == pin["sha256"]:
+            return True  # installed copy is already the pinned catalog; no download
         data = fetch_pinned(CATALOG_URL.format(tag=pin["tag"]), pin["sha256"])
-        if data is None:
-            return False
         catalog = json.loads(data)
         if not isinstance(catalog, dict) or "version" not in catalog:
             return False
@@ -63,6 +68,10 @@ def fetch_pinned_catalog(output_path: Path) -> bool:
         os.replace(temporary, output_path)
         temporary = None
         return True
+    except PinnedFetchError as exc:
+        if "mismatch" not in str(exc):  # a mismatch was already logged by fetch_pinned
+            log.warning("catalog not installed: %s", exc)
+        return False
     except Exception as exc:
         log.warning("catalog not installed: %s", exc)
         return False

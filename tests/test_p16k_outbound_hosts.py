@@ -46,6 +46,12 @@ PROVIDER_API = {
 CATALOG_PINNED: dict[str, str] = {
     "raw.githubusercontent.com": "benchmark catalog and default community profile, sha256-pinned in catalog_pins.json (benchmark_fetcher.py); the unpinned scraper moved to scripts/bench",
 }
+# The only raw.githubusercontent.com URLs allowed: the release-tag catalog template
+# (sha256 in catalog_pins.json) and the community profile URL (also pin-checked).
+CATALOG_URL_PREFIXES = (
+    "https://raw.githubusercontent.com/ypollak2/llm-router/",
+    "https://raw.githubusercontent.com/ypollak2/llm_router-profiles/main/community.json",
+)
 # D-89: called, but only when the user types the command.
 USER_COMMAND = {
     "pypi.org": "only on the user's explicit update command",
@@ -122,8 +128,8 @@ def hosts_of(text: str) -> set[str]:
     return {match.group(1).lower().strip("[]").rstrip(".") for match in URL_RE.finditer(text)}
 
 
-def sweep_hosts(root: Path) -> dict[str, list[str]]:
-    found: dict[str, list[str]] = {}
+def literal_urls(root: Path):
+    """Yield (where, host, url-text) for every URL-bearing literal in src/ and hooks/."""
     for path in iter_files(root):
         rel = path.relative_to(root).as_posix()
         if path.suffix == ".py":
@@ -139,8 +145,23 @@ def sweep_hosts(root: Path) -> dict[str, list[str]]:
             for match in URL_RE.finditer(text):
                 host = match.group(1).lower().strip("[]").rstrip(".")
                 where = f"{rel}:{line + text[:match.start()].count(chr(10))}"
-                found.setdefault(host, []).append(where)
+                yield where, host, re.split(r"[\s\"'<>)]", text[match.start():], maxsplit=1)[0]
+
+
+def sweep_hosts(root: Path) -> dict[str, list[str]]:
+    found: dict[str, list[str]] = {}
+    for where, host, _ in literal_urls(root):
+        found.setdefault(host, []).append(where)
     return {host: sorted(where) for host, where in sorted(found.items())}
+
+
+def unpinned_urls(root: Path) -> list[str]:
+    """A pinned-catalog host is allowed only at the URL patterns in CATALOG_URL_PREFIXES."""
+    return [
+        f"{where}: {url} is on a pinned-catalog host but not at a pinned URL pattern"
+        for where, host, url in literal_urls(root)
+        if host in CATALOG_PINNED and not url.startswith(CATALOG_URL_PREFIXES)
+    ]
 
 
 def is_loopback(host: str) -> bool:
@@ -333,6 +354,19 @@ def test_every_outbound_host_is_on_the_allow_list():
 def test_every_network_call_site_reaches_only_an_allowed_host():
     violations = unallowed_calls(REPO)
     assert not violations, "\n".join(violations)
+
+
+def test_pinned_catalog_host_only_at_pinned_url_patterns(tmp_path):
+    assert unpinned_urls(REPO) == []
+    path = tmp_path / "src/pkg/raw.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        'OK = "https://raw.githubusercontent.com/ypollak2/llm-router/{tag}/x.json"\n'
+        'BAD = "https://raw.githubusercontent.com/someone/else/main/unpinned.json"\n',
+        encoding="utf-8",
+    )
+    found = unpinned_urls(tmp_path)
+    assert len(found) == 1 and "src/pkg/raw.py:2" in found[0]
 
 
 def test_zero_telemetry_endpoints():
