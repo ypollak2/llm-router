@@ -459,3 +459,23 @@ def test_cache_result_does_not_depend_on_call_order():
         for t in order:
             assert dataclasses.replace(got[t], layer="", ms=0) == dataclasses.replace(alone[t], layer="", ms=0)
     assert alone[y].local_only and not alone[x].local_only
+
+
+def test_d85_openrouter_key_has_its_own_name_and_is_local_only():
+    import secrets
+    key = "sk-or-v1-" + secrets.token_hex(32)
+    text = "please debug this call, my key is %s thanks" % key
+    assert engine._secret_names(text) == ["openrouter_key"]
+    assert engine.decide(text, door="hook").local_only
+
+
+def test_d85_openrouter_near_misses_keep_their_old_names():
+    h = "a1" * 32  # 64 lowercase hex, has a digit and a letter
+    cases = {
+        "sk-xx-v1-" + h: ["openai_key"],
+        "sk-or-v1-" + h[:63]: ["openai_key"],
+        "sk-or-v1-" + h + "a": ["openai_key"],
+        "sk-or-v1-" + h.upper(): ["openai_key"],
+    }
+    for key, expected in cases.items():
+        assert engine._secret_names("my key is %s thanks" % key) == expected, key[:12]

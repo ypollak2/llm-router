@@ -324,7 +324,9 @@ def _reason(s: str) -> str:
 #: on coding prompts; blocking or localising a turn needs a stricter test.
 _SECRET_SHAPES = {
     "anthropic_key": re.compile(r"\bsk-ant-[A-Za-z0-9_-]{32,}"),
-    "openai_key": re.compile(r"\bsk-(?:proj-|svcacct-)?(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}"),
+    # Listed before openai_key; openai_key excludes this exact shape so one key yields one name.
+    "openrouter_key": re.compile(r"\bsk-or-v1-[0-9a-f]{64}(?![A-Za-z0-9_-])"),
+    "openai_key": re.compile(r"\bsk-(?!or-v1-[0-9a-f]{64}(?![A-Za-z0-9_-]))(?:proj-|svcacct-)?(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}"),
     "google_key": re.compile(r"\bAIza[0-9A-Za-z_-]{35,}"),
     "aws_key_id": re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
     "github_token": re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,})"),
