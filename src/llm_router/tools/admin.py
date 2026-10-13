@@ -1337,17 +1337,28 @@ async def llm_import_profile(url: str = "") -> str:
         # Load existing profile
         existing = load_learned_profile()
 
-        # Default to latest community profile if no URL provided
-        DEFAULT_COMMUNITY_URL = "https://raw.githubusercontent.com/ypollak2/llm_router-profiles/main/community.json"
+        # Fetch and parse remote profile.
         if not url:
-            url = DEFAULT_COMMUNITY_URL
+            from llm_router.benchmark_fetcher import PinnedFetchError, fetch_pinned, load_pins
 
-        # Fetch and parse remote profile
-        try:
-            with urllib.request.urlopen(url, timeout=10) as resp:
-                remote_data = json.loads(resp.read().decode())
-        except Exception as e:
-            return f"Failed to fetch profile from {url}: {e}"
+            pin = load_pins().get("community_profile", {})
+            if not pin.get("sha256"):
+                return "No pinned community profile; pass an explicit url to import one you chose"
+            url = pin["url"]
+            try:
+                payload = fetch_pinned(url, pin["sha256"])
+            except PinnedFetchError as e:
+                return f"Community profile not imported: {e}"
+            try:
+                remote_data = json.loads(payload.decode())
+            except Exception as e:
+                return f"Failed to fetch profile from {url}: {e}"
+        else:
+            try:
+                with urllib.request.urlopen(url, timeout=10) as resp:
+                    remote_data = json.loads(resp.read().decode())
+            except Exception as e:
+                return f"Failed to fetch profile from {url}: {e}"
 
         # Validate and merge
         routes = remote_data.get("routes", {})

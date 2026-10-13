@@ -33,15 +33,32 @@ EXECUTION_PATHS = [
 ]
 
 
+def _crosses_choke_point(src: str, pack_src: str) -> bool:
+    """Directly, or through `context_pack`, whose project layer calls
+    `context_injection.inject` (P1.1 doors)."""
+    if "context_injection" in src:
+        return True
+    return "context_pack" in src and "context_injection" in pack_src
+
+
 @pytest.mark.parametrize("rel", EXECUTION_PATHS)
 def test_execution_path_crosses_the_choke_point(rel):
     src = (SRC / rel).read_text()
-    assert "context_injection" in src, (
+    assert _crosses_choke_point(src, (SRC / "context_pack.py").read_text()), (
         f"{rel} sends prompts to a model but never imports "
-        f"llm_router.context_injection, so it runs with no repo knowledge. "
+        f"llm_router.context_injection (or llm_router.context_pack, which "
+        f"calls it), so it runs with no repo knowledge. "
         f"Call inject() or inject_system_prompt() — do not add a third private "
         f"copy of the retrieval logic."
     )
+
+
+def test_a_module_bypassing_both_fails_the_choke_point_check():
+    pack_src = (SRC / "context_pack.py").read_text()
+    assert "context_injection" in pack_src  # the premise of the indirect route
+    assert not _crosses_choke_point("import subprocess\nrun(prompt)\n", pack_src)
+    assert _crosses_choke_point("from llm_router.context_pack import build_pack", pack_src)
+    assert not _crosses_choke_point("from llm_router.context_pack import build_pack", "no seam")
 
 
 def test_only_the_choke_point_implements_injection():

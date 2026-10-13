@@ -608,8 +608,9 @@ def maybe_refresh_benchmarks_background(ttl_days: int = 7) -> bool:
     def _refresh_worker() -> None:
         global _refresh_in_progress, _cache, _cache_loaded
         try:
-            from llm_router.benchmark_fetcher import generate_benchmarks_json
-            generate_benchmarks_json(output_path=_installed())
+            from llm_router.benchmark_fetcher import fetch_pinned_catalog
+            if not fetch_pinned_catalog(_installed()):
+                return
             # Invalidate cache so next get_benchmark_data() picks up the new file.
             _cache = None
             _cache_loaded = False
