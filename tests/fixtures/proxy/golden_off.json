@@ -27,7 +27,7 @@
     "complexity": "moderate",
     "counterfactual_cost_usd": 0.012326,
     "decision": "fallback",
-    "detail": "estimated 2092 prompt tokens (+256 reserved for the reply) exceeds the 1024-token window (source=num_ctx); escalating instead of letting Ollama silently drop the front of the prompt",
+    "detail": "estimated 2075 prompt tokens (+256 reserved for the reply) exceeds the 1024-token window (source=num_ctx); escalating instead of letting Ollama silently drop the front of the prompt",
     "grade_basis": "none",
     "has_mid_system": true,
     "inventory_sig": null,

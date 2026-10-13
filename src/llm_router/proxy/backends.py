@@ -33,7 +33,9 @@ p90 3.59 s, 0/24 validation failures; that spike ran a tuned dedicated
     ~21k). Since PLAN v16 P1.1, history comes from the context pack
     (``context_pack.build_pack(door="proxy")``): the whole conversation when it
     fits 0.8 x the local window, else the last 7 messages with tool output
-    capped, plus the request verbatim. Prompts are larger than the spike's;
+    capped, plus the request verbatim. Full mode is also capped at
+    ``LLM_ROUTER_PROXY_FULL_CAP`` (default 6000 estimated payload
+    tokens). Prompts are larger than the spike's;
   * ``num_predict`` capped at 200 after Read/Bash/no tool, 700 otherwise; a
     reply that hits the cap is rejected (``translate.from_ollama``);
   * ``keep_alive`` (default 600 s; -1 only when asked) on every call and one warm-up call at proxy start;
@@ -48,10 +50,11 @@ import asyncio
 import copy
 import importlib
 import json
+import os
 from typing import Callable, Protocol
 
 from llm_router import local_models
-from llm_router.local_context_guard import check_overflow, check_truncated, effective_window, estimate_payload_tokens
+from llm_router.local_context_guard import DEFAULT_RESERVED_OUTPUT_TOKENS, check_overflow, check_truncated, effective_window, estimate_payload_tokens
 from llm_router.proxy.steps import STEP_CONTINUATION, non_system, prev_tools
 from llm_router.proxy.translate import from_ollama, to_ollama
 
@@ -110,13 +113,38 @@ STEP_TOOLS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _pack_messages(turns: list, target_window: int | None) -> tuple[str, list]:
+# Full mode (whole conversation, native) is used only when estimate_payload_tokens
+# of the to_ollama payload (the guard's estimator) is at most this many tokens
+# and fits window - DEFAULT_RESERVED_OUTPUT_TOKENS; above it, send the pack's
+# last-7 history. Cold-cache first-token time on qwen3-coder:30b (num_ctx
+# 32768) grows superlinearly with prompt size: ~4.0k real tokens 2.9 s, ~8.1k
+# 9.4 s, ~15.7k 31 s, ~22.9k 64 s against the 8 s first-token hedge (P1.1 door
+# 3 measurement, 2026-10-13, N=1-3 per size, Read-like code output, where this
+# estimate runs ~1.36x Ollama's count). 6000 keeps such content near 4.4k real
+# tokens. LLM_ROUTER_PROXY_FULL_CAP overrides this default.
+DEFAULT_FULL_MAX_TOKENS = 6000
+
+
+def full_max_tokens() -> int:
+    """Positive full-mode payload cap, or the default for an invalid setting."""
+    raw = os.environ.get("LLM_ROUTER_PROXY_FULL_CAP")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_FULL_MAX_TOKENS
+    return value if value > 0 else DEFAULT_FULL_MAX_TOKENS
+
+
+def _pack_messages(turns: list, window: int, shell: dict) -> tuple[str, list]:
     """Keep the request verbatim and untruncated, sent natively.
 
-    Full mode sends the whole conversation natively (the non-system turns, as
-    the pack counts them; Claude Code's ``role: system`` reminders are not
-    conversation); pack mode sends pack.recent as text plus the newest
-    exchange natively.
+    Full mode sends the whole conversation natively only when the native
+    payload estimate fits both the window budget and full_max_tokens(). The
+    non-system turns are conversation; Claude Code's ``role: system`` reminders
+    are not. Pack mode sends capped recent history as text plus the newest
+    exchange natively. It can still exceed the window and is left to the
+    existing guard (PayloadPack.trim_to / check_overflow in
+    OllamaBackend.complete).
     target_provider="ollama" applies the session-context privacy rule:
     LLM_ROUTER_SESSION_CONTEXT=off empties history. Project/instructions
     layers are not built here (no project_root): proxy.okf_context.attach
@@ -126,12 +154,19 @@ def _pack_messages(turns: list, target_window: int | None) -> tuple[str, list]:
 
     request = context_pack.extract_turn_text(
         turns[-1].get("content"), keep_tools=True, cap=False).strip()
-    window = target_window if isinstance(target_window, int) and target_window > 0 else local_models.num_ctx(None)
     pack = context_pack.build_pack(
         request, turns[:-1], door="proxy", target_window=window, target_provider="ollama")
     if pack.mode == "full":
-        return pack.system, list(turns)
-    recent = list(pack.recent)
+        candidate = dict(shell, messages=list(turns))
+        if pack.system:
+            candidate["system"] = pack.system + "\n\n" + shell["system"]
+        est = estimate_payload_tokens(to_ollama(candidate, "", num_ctx=window))
+        if est <= min(window - DEFAULT_RESERVED_OUTPUT_TOKENS, full_max_tokens()):
+            return pack.system, list(turns)
+        recent = context_pack.messages_for(
+            "proxy", messages=turns[:-1], cap=True)[-context_pack.RECENT_N:]
+    else:
+        recent = list(pack.recent)
     tail = turns[-2:] if len(turns) >= 2 and turns[-2].get("role") == "assistant" else turns[-1:]
     if len(tail) == 2 and recent and recent[-1] == {
         "role": "assistant",
@@ -152,7 +187,8 @@ def _trim_fast(body: dict, target_window: int | None = None) -> dict:
     out["tools"] = [by_name[n] for n in wanted if n in by_name]
     turns = non_system(body.get("messages") or [])
     if turns:
-        system_layers, messages = _pack_messages(turns, target_window)
+        window = target_window if isinstance(target_window, int) and target_window > 0 else local_models.num_ctx(None)
+        system_layers, messages = _pack_messages(turns, window, out)
         out["messages"] = messages
         if system_layers:
             out["system"] = system_layers + "\n\n" + CONDENSED_SYSTEM

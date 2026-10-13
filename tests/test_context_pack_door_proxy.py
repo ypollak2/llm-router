@@ -5,8 +5,10 @@ import json
 import pytest
 
 from llm_router import context_pack
+from llm_router.local_context_guard import check_overflow
 from llm_router.proxy import backends, server
 from llm_router.proxy.steps import non_system, prev_tools
+from llm_router.proxy.translate import to_ollama
 from tests.test_proxy import FakeBackend, Upstream, _app, _call, _ollama, _post, _req, policy  # noqa: F401
 
 
@@ -15,13 +17,16 @@ def session_context_all(monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "all")
 
 
-def _spy_pack(monkeypatch):
+def _spy_pack(monkeypatch, modes=None):
     calls = []
     real = context_pack.build_pack
 
     def spy(*args, **kwargs):
         calls.append((args, kwargs))
-        return real(*args, **kwargs)
+        pack = real(*args, **kwargs)
+        if modes is not None:
+            modes.append(pack.mode)
+        return pack
 
     monkeypatch.setattr(context_pack, "build_pack", spy)
     return calls
@@ -122,3 +127,58 @@ def test_session_context_off_withholds_history_but_keeps_request(monkeypatch):
     body = _tool_heavy_body()
     out = backends.apply_trims(body, backends.resolve_trims("fast"), target_window=32768)
     assert non_system(out["messages"]) == non_system(body["messages"])[-2:]
+
+
+def _pairs_body(rc, n=30):
+    messages = [{"role": "user", "content": [{"type": "text", "text": "fix it"}]}]
+    for i in range(n):
+        messages.extend([
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": f"t{i}", "name": "Read",
+                 "input": {"file_path": f"/w/{i}.py"}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": f"t{i}",
+                 "content": "z" * rc}]},
+        ])
+    return dict(_req(), messages=messages)
+
+
+def test_full_mode_never_overflows_the_native_payload(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PROXY_FULL_CAP", str(10**9))
+    modes = []
+    calls = _spy_pack(monkeypatch, modes)
+    sent_full = False
+    rejected_full = False
+    for rc in range(2600, 3600, 100):
+        body = _pairs_body(rc)
+        before = len(calls)
+        send = backends.apply_trims(
+            body, backends.resolve_trims("fast"), target_window=32768)
+        assert len(calls) == before + 1
+        payload = to_ollama(send, "m", num_ctx=32768)
+        check_overflow(payload, num_ctx=32768)
+        native = send["messages"] == non_system(body["messages"])
+        sent_full |= modes[-1] == "full" and native
+        rejected_full |= modes[-1] == "full" and not native
+    assert sent_full
+    assert rejected_full
+    assert len(calls) == len(range(2600, 3600, 100))
+
+
+def test_full_mode_cap_env(monkeypatch):
+    body = _req()
+    turns = non_system(body["messages"])
+    monkeypatch.setenv("LLM_ROUTER_PROXY_FULL_CAP", "1000")
+    assert backends.full_max_tokens() == 1000
+    out = backends.apply_trims(body, backends.resolve_trims("fast"), target_window=32768)
+    assert out["messages"] != turns
+    assert out["messages"][-2:] == turns[-2:]
+
+    monkeypatch.delenv("LLM_ROUTER_PROXY_FULL_CAP")
+    assert backends.full_max_tokens() == backends.DEFAULT_FULL_MAX_TOKENS
+    out = backends.apply_trims(body, backends.resolve_trims("fast"), target_window=32768)
+    assert out["messages"] == turns
+
+    for raw in ("", "abc", "0", "-5"):
+        monkeypatch.setenv("LLM_ROUTER_PROXY_FULL_CAP", raw)
+        assert backends.full_max_tokens() == backends.DEFAULT_FULL_MAX_TOKENS
