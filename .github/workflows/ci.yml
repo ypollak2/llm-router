@@ -239,6 +239,28 @@ jobs:
           kill $PYTEST_PID 2>/dev/null || true
           exit $result
 
+  test-windows-claude-creds:
+    # P1.8-c / D-90: only this module to keep cost low; not a required check.
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+        continue-on-error: true
+        id: uv-setup
+      - name: Retry uv setup
+        if: steps.uv-setup.outcome == 'failure'
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: false
+      - run: uv python install 3.11
+      - run: uv sync --extra dev
+      - run: uv run pytest tests/test_claude_creds.py -q -p no:xdist
+        shell: bash
+
   timing:
     # TIMING-1: the tests tagged `timing` assert on wall-clock speed (elapsed,
     # p95, event-loop lag, short real timeouts, sleep ordering). Under
