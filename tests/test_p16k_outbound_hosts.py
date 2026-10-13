@@ -4,8 +4,7 @@ Frontier shadow and judge calls only behind OD-4 consent.
 
 Check URL-bearing literals and assets across src/ and hooks/, resolve Python
 network call targets, and exercise the scanner with mutants and the OD-4 gate.
-CATALOG_PINNED is empty because the sha256-pinned catalog (PLAN P2, D-22)
-does not exist yet.
+CATALOG_PINNED holds the D-22 sha256-pinned catalog host (D-89).
 """
 
 from __future__ import annotations
@@ -42,9 +41,20 @@ PROVIDER_API = {
     "api.helicone.ai": "Helicone spend pull, only with HELICONE_API_KEY and LLM_ROUTER_HELICONE_PULL (user opt-in)",
     "agoragentic.com": "Agoragentic tools, registered only with LLM_ROUTER_AGORAGENTIC=on (SEC-003, user opt-in)",
 }
-# PLAN P2, D-22 has not introduced a sha256-pinned catalog yet.
-CATALOG_PINNED: dict[str, str] = {}
+# D-22 / D-89: fetched only after opt-in (LLM_ROUTER_AUTO_BENCHMARK_FETCH, default off),
+# and rejected unless the bytes match the sha256 in src/llm_router/data/catalog_pins.json.
+CATALOG_PINNED: dict[str, str] = {
+    "raw.githubusercontent.com": "benchmark catalog and default community profile, sha256-pinned in catalog_pins.json (benchmark_fetcher.py); the unpinned scraper moved to scripts/bench",
+}
+# D-89: called, but only when the user types the command.
+USER_COMMAND = {
+    "pypi.org": "only on the user's explicit update command",
+    "pypistats.org": "only on the user's explicit stats command",
+}
 NON_NETWORK = {
+    "cdn.jsdelivr.net": "display assets loaded by the user's browser from dashboard HTML, never fetched by the router",
+    "cdn.tailwindcss.com": "display assets loaded by the user's browser from dashboard HTML, never fetched by the router",
+    "fonts.googleapis.com": "display assets loaded by the user's browser from dashboard HTML, never fetched by the router",
     "ai.google.dev": "Gemini documentation resource in generated capability notes",
     "aistudio.google.com": "Gemini key signup link printed by setup",
     "api.telegram.org": "Telegram endpoint example shown in team setup hints",
@@ -64,7 +74,6 @@ NON_NETWORK = {
     "github": "Escaped Markdown link fragment in team.py",
     "google.com": "Gemini CLI install hint",
     "hooks.slack.com": "Slack webhook example or recognition of a user-configured webhook",
-    "huggingface.co": "Benchmark dataset link shown to the user",
     "llm_router.dev": "Pro upgrade link shown to the user",
     "nodejs.org": "Node.js install hint printed by the hook",
     "ollama.com": "Ollama install hint",
@@ -276,7 +285,7 @@ def call_sites(root: Path) -> list[Site]:
 
 
 def unclassified(root: Path) -> list[str]:
-    allowed = PROVIDER_API.keys() | CATALOG_PINNED.keys() | NON_NETWORK.keys()
+    allowed = PROVIDER_API.keys() | CATALOG_PINNED.keys() | USER_COMMAND.keys() | NON_NETWORK.keys()
     return [
         f"{host}: not on the P1.6-k allow-list (provider API the user chose / sha256-pinned catalog / display-only) at {', '.join(where[:5])}"
         for host, where in sweep_hosts(root).items() if not is_loopback(host) and host not in allowed
@@ -287,7 +296,7 @@ def unallowed_calls(root: Path) -> list[str]:
     found = []
     for site in call_sites(root):
         for host in sorted(site.hosts):
-            if is_loopback(host) or host in PROVIDER_API or host in CATALOG_PINNED:
+            if is_loopback(host) or host in PROVIDER_API or host in CATALOG_PINNED or host in USER_COMMAND:
                 continue
             reason = "listed as display-only but called" if host in NON_NETWORK else "not a provider API the user chose or a sha256-pinned catalog"
             found.append(f"{site.where}: {site.func}() reaches {host}, which is {reason}")
@@ -298,7 +307,7 @@ def telemetry(root: Path) -> list[str]:
     found = [f"{host}: telemetry endpoint at {', '.join(where)}"
              for host, where in sweep_hosts(root).items()
              if any(marker in host for marker in TELEMETRY_MARKERS)]
-    for mapping in (PROVIDER_API, CATALOG_PINNED, NON_NETWORK):
+    for mapping in (PROVIDER_API, CATALOG_PINNED, USER_COMMAND, NON_NETWORK):
         found.extend(f"{host}: telemetry endpoint in allow-list"
                      for host in mapping if any(marker in host for marker in TELEMETRY_MARKERS))
     return found
@@ -333,10 +342,11 @@ def test_zero_telemetry_endpoints():
 
 def test_allow_list_has_no_stale_entries():
     found = sweep_hosts(REPO)
-    assert not (PROVIDER_API.keys() | NON_NETWORK.keys()) - found.keys()
+    assert not (PROVIDER_API.keys() | CATALOG_PINNED.keys() | USER_COMMAND.keys() | NON_NETWORK.keys()) - found.keys()
     assert not PROVIDER_API.keys() & NON_NETWORK.keys()
     assert not PROVIDER_API.keys() & CATALOG_PINNED.keys()
     assert not NON_NETWORK.keys() & CATALOG_PINNED.keys()
+    assert not USER_COMMAND.keys() & (PROVIDER_API.keys() | CATALOG_PINNED.keys() | NON_NETWORK.keys())
 
 
 def copy_auth_ping(root: Path) -> Path:

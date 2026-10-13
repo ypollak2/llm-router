@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 35
+# llm_router-hook-version: 36
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -1874,9 +1874,9 @@ def _maybe_refresh_benchmarks_bg() -> None:
         return
 
     script = (
-        "from llm_router.benchmark_fetcher import generate_benchmarks_json; "
+        "from llm_router.benchmark_fetcher import fetch_pinned_catalog; "
         f"from pathlib import Path; "
-        f"generate_benchmarks_json(output_path=Path('{benchmarks_path}'))"
+        f"fetch_pinned_catalog(Path('{benchmarks_path}'))"
     )
     try:
         subprocess.Popen(
