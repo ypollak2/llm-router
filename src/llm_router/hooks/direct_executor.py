@@ -772,7 +772,10 @@ def execute_chain(
     # majority of routed traffic neither received stored context nor contributed
     # to the store, and OKF looked enabled while doing nothing for most calls.
     # The privacy gate needs the MOST external provider this prompt may reach.
-    _target = next((m.provider for m in chain if m.provider not in _FREE_PROVIDERS),
+    # D-91: privacy-local (session_store.LOCAL_PROVIDERS) is narrower than the
+    # cost-free set above -- codex is free but not on-device.
+    from llm_router.session_store import LOCAL_PROVIDERS as _PRIV_LOCAL
+    _target = next((m.provider for m in chain if m.provider not in _PRIV_LOCAL),
                    "ollama")
     if okf_inject:  # False when the caller's context pack already injected
         prompt = _okf_inject(prompt, root=root, session_id=session_id,

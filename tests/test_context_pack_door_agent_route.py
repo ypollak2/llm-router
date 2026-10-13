@@ -153,6 +153,27 @@ def test_local_mode_all_local_chain_keeps_session_content(monkeypatch, rig, tmp_
     assert _leaked(rig)
 
 
+def test_local_mode_ollama_codex_chain_withholds_session_content(monkeypatch, rig, tmp_path):
+    # D-91: codex is cloud; an ollama+codex chain must not get content in "local".
+    monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "local")
+    monkeypatch.setattr(cb, "build_chain", lambda *a, **k: [
+        de.ModelSpec("ollama", "fake"), de.ModelSpec("codex", "fake")])
+    _hook()._try_direct_subagent("implement foo", "code", "simple", "s1",
+                                 transcript_path=_transcript(tmp_path))
+    assert len(rig["exec"]) == 1 and not _leaked(rig)
+
+
+def test_all_mode_ollama_codex_chain_sends_session_content(monkeypatch, rig, tmp_path):
+    monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "all")
+    monkeypatch.setattr(cb, "build_chain", lambda *a, **k: [
+        de.ModelSpec("ollama", "fake"), de.ModelSpec("codex", "fake")])
+    _hook()._try_direct_subagent("implement foo", "code", "simple", "s1",
+                                 transcript_path=_transcript(tmp_path))
+    assert _leaked(rig)
+
+
 def test_inject_once_per_direct_run(monkeypatch, tmp_path):
     import llm_router.context_injection as ci
     calls = []

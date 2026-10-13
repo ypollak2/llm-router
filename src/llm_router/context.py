@@ -682,12 +682,13 @@ async def build_context_messages(
     # added to a second allowlist. NOTE: `local` mode governs history/context
     # attachment only — it does not change routing destination (whether the
     # current prompt goes external is decided by the routing chain).
-    _FREE_LOCAL_PROVIDERS = ("ollama", "codex", "gemini_cli")
     try:
         from llm_router import session_store
+        _FREE_LOCAL_PROVIDERS = session_store.LOCAL_PROVIDERS  # D-91: one privacy list
         privacy_mode = session_store.get_mode()
     except Exception:
         privacy_mode = "all"
+        _FREE_LOCAL_PROVIDERS = ()
     _blocks_external = (
         privacy_mode == "local" and target_provider not in _FREE_LOCAL_PROVIDERS
     )

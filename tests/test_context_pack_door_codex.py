@@ -138,12 +138,30 @@ def test_privacy_off_withholds_rollout_and_caller_messages(monkeypatch, tmp_path
     assert sent.endswith("req")
 
 
-@pytest.mark.parametrize("mode", ["all", "local"])
-def test_privacy_permissive_modes_let_session_content_through(monkeypatch, tmp_path, mode):
-    # "local" permits Codex because session_store.LOCAL_PROVIDERS lists "codex".
-    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", mode)
+def test_privacy_all_mode_lets_session_content_through(monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "all")
     rollout, msgs = _convo(tmp_path)
     _, sent = _run(monkeypatch, tmp_path, "req", transcript_path=str(rollout))
     assert "PRV1" in sent
     _, sent = _run(monkeypatch, tmp_path, "req", messages=msgs)
     assert "PRV2" in sent
+
+
+def test_privacy_local_mode_withholds_from_codex(monkeypatch, tmp_path):
+    # D-91: codex is cloud, so "local" keeps session content on this machine.
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "local")
+    rollout, msgs = _convo(tmp_path)
+    _, sent = _run(monkeypatch, tmp_path, "req", transcript_path=str(rollout))
+    assert "PRV1" not in sent
+    _, sent = _run(monkeypatch, tmp_path, "req", messages=msgs)
+    assert "PRV2" not in sent
+    assert sent.endswith("req")
+
+
+def test_codex_is_not_a_privacy_local_provider(monkeypatch):
+    from llm_router import session_store
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "local")
+    assert not session_store.allows_session_content("codex")
+    assert session_store.allows_session_content("ollama")
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "all")
+    assert session_store.allows_session_content("codex")
