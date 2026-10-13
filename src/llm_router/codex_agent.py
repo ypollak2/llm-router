@@ -356,12 +356,18 @@ async def run_codex(
             use ``context_root`` instead.
         timeout: Maximum seconds to wait before killing the process.
             Defaults to ``LLM_ROUTER_CODEX_TIMEOUT`` env var (300s).
-        context_root: Project root to scope OKF context injection to,
-            independent of ``working_dir``/subprocess cwd. Defaults to
-            ``working_dir`` when not given, which is the pre-existing
-            behaviour. A router dispatch that knows the caller's session
-            scope but must not change where the Codex subprocess runs
-            passes this instead of ``working_dir``.
+        context_root: Project root for the context pack's project layer
+            (OKF, repo state, instructions digest), independent of
+            ``working_dir``/subprocess cwd. Defaults to ``working_dir``. With
+            neither, no project layer is added (the old ``inject`` path used
+            the current repo). A router dispatch that knows the caller's
+            session scope but must not change where Codex runs passes this.
+        messages: The caller's conversation (chat or Responses items), used as
+            pack ``recent`` when no rollout file is readable.
+        transcript_path: A Codex rollout JSONL file to read the conversation
+            from. A missing or unreadable file falls back to ``messages``.
+        target_window: Token window the pack is sized against (default
+            ``CODEX_TARGET_WINDOW``, an unsourced assumption).
 
     Returns:
         A ``CodexResult`` with the process output, model name, exit code,

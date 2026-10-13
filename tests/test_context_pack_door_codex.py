@@ -118,3 +118,32 @@ def test_missing_rollout_and_no_messages_sends_request_only(monkeypatch, tmp_pat
                      transcript_path=str(tmp_path / "nope.jsonl"))
     assert res.success
     assert sent == "only the request"
+
+
+# -- D-43(b): the privacy gate (target_provider="codex") ----------------------
+
+def _convo(tmp_path):
+    rollout = _rollout(tmp_path / "rollout-priv.jsonl", [("user", "secret turn PRV1")])
+    return rollout, [{"role": "user", "content": "caller turn PRV2"}]
+
+
+@pytest.mark.parametrize("mode", ["off"])
+def test_privacy_off_withholds_rollout_and_caller_messages(monkeypatch, tmp_path, mode):
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", mode)
+    rollout, msgs = _convo(tmp_path)
+    _, sent = _run(monkeypatch, tmp_path, "req", transcript_path=str(rollout))
+    assert "PRV1" not in sent
+    _, sent = _run(monkeypatch, tmp_path, "req", messages=msgs)
+    assert "PRV2" not in sent
+    assert sent.endswith("req")
+
+
+@pytest.mark.parametrize("mode", ["all", "local"])
+def test_privacy_permissive_modes_let_session_content_through(monkeypatch, tmp_path, mode):
+    # "local" permits Codex because session_store.LOCAL_PROVIDERS lists "codex".
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", mode)
+    rollout, msgs = _convo(tmp_path)
+    _, sent = _run(monkeypatch, tmp_path, "req", transcript_path=str(rollout))
+    assert "PRV1" in sent
+    _, sent = _run(monkeypatch, tmp_path, "req", messages=msgs)
+    assert "PRV2" in sent
