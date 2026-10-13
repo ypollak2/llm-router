@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 22
+# llm_router-hook-version: 23
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -1310,11 +1310,13 @@ def _try_direct_subagent(
         request, context, history, agent_context, okf = prompt, None, None, None, True
         try:
             from llm_router.context_pack import build_pack
-            from llm_router.hooks.direct_executor import _FREE_PROVIDERS, _local_num_ctx
+            from llm_router.hooks.direct_executor import _local_num_ctx
 
             # Privacy: the most external provider the chain may reach, because
             # execute_chain hands the same history to every later model.
-            _target = next((m.provider for m in chain if m.provider not in _FREE_PROVIDERS),
+            # D-91: privacy-local is narrower than cost-free (codex is cloud).
+            from llm_router.session_store import LOCAL_PROVIDERS as _PRIV_LOCAL
+            _target = next((m.provider for m in chain if m.provider not in _PRIV_LOCAL),
                            chain[0].provider)
             pack = build_pack(
                 prompt, session_id=ledger_session_id,

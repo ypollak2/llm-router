@@ -166,7 +166,7 @@ def test_draft_builds_one_hook_pack_and_relays_tool_blocks(run_hook, monkeypatch
     assert args == (PROMPT,)
     assert kwargs["door"] == "hook"
     assert kwargs["session_id"] == "sess-p11hook"
-    assert kwargs["target_provider"] == "ollama"
+    assert kwargs["target_provider"] == "local"
     assert kwargs["project_root"] == str(result.project)
     assert kwargs["transcript_path"].endswith("transcript.jsonl")
     assert kwargs["target_window"] == 8192
@@ -204,7 +204,7 @@ def test_request_is_verbatim_at_two_hundred_thousand_characters(run_hook):
 @pytest.mark.parametrize("providers,mode,allowed,target", [
     (("ollama", "gemini"), "local", False, "gemini"),
     (("ollama", "gemini"), "all", True, "gemini"),
-    (("ollama",), "local", True, "ollama"),
+    (("ollama",), "local", True, "local"),
 ])
 def test_privacy_uses_external_fallback_provider(run_hook, providers, mode, allowed, target):
     result = run_hook(providers=providers, mode=mode)
@@ -236,6 +236,23 @@ def test_codex_in_chain_is_not_privacy_local_withholds_session_content(run_hook,
     assert result.pack_calls[0][1]["target_provider"] == "codex"
     assert MARKER not in _material(result.chain_calls[0])
     assert TOOL_RESULT not in _material(result.chain_calls[0])
+
+
+@pytest.mark.parametrize("providers,target,allowed", [
+    (("ollama", "codex"), "codex", False),
+    (("ollama", "gemini_cli"), "gemini_cli", False),
+    (("ollama",), "local", True),
+])
+def test_privacy_target_helper_in_local_mode(monkeypatch, providers, target, allowed):
+    import llm_router.hooks.direct_executor as de
+    import llm_router.session_store as ss
+
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "local")
+    ar = _load(monkeypatch)
+    chain = [de.ModelSpec(provider=p, model="m") for p in providers]
+    got = ar._privacy_target(chain)
+    assert got == target
+    assert ss.allows_session_content(got) is allowed
 
 
 def test_pack_failure_runs_legacy_draft_without_error(run_hook, monkeypatch):

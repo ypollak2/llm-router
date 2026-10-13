@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 56
+# llm_router-hook-version: 57
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 56"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 57"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -3313,6 +3313,17 @@ _ANAPHORA_RE = re.compile(r"\bthe\s+(rest|remaining|others?|ones?)\b", re.I)
 _FREE_DRAFT_PROVIDERS = frozenset({"ollama", "codex", "gemini_cli"})
 
 
+def _privacy_target(chain) -> str:
+    """Provider that decides whether session content may reach a draft chain.
+
+    Every fallback model in the chain receives the same context, so the target is
+    the first provider outside ``session_store.LOCAL_PROVIDERS`` (read at call
+    time; D-91, D-95: codex and gemini_cli are not on-device), else "local".
+    """
+    from llm_router import session_store as _ss
+    return next((m.provider for m in chain if m.provider not in _ss.LOCAL_PROVIDERS), "local")
+
+
 def _free_tier_draft_chain(chain: list) -> list:
     """Keep only free/local-provider models so a draft never hits a paid API."""
     return [m for m in chain if getattr(m, "provider", None) in _FREE_DRAFT_PROVIDERS]
@@ -5452,17 +5463,9 @@ def main() -> None:
             if _direct_chain:
                 try:
                     from llm_router.context_pack import build_pack
-                    from llm_router import session_store as _ss_priv
                     from llm_router.hooks.direct_executor import _local_num_ctx
 
-                    # Privacy: the first provider the chain may reach that is not
-                    # privacy-local (read at call time), because every fallback
-                    # model receives the same history.
-                    _pack_target = next(
-                        (m.provider for m in _direct_chain
-                         if m.provider not in _ss_priv.LOCAL_PROVIDERS),
-                        _direct_chain[0].provider,
-                    )
+                    _pack_target = _privacy_target(_direct_chain)
                     _pack = build_pack(
                         prompt, session_id=session_id or None,
                         transcript_path=hook_input.get("transcript_path") or None,
@@ -5484,7 +5487,7 @@ def main() -> None:
                         max_tokens=_draft_context_budget(),
                         task_type=task_type,
                         query=prompt,
-                        target_provider="local",
+                        target_provider=_privacy_target(_direct_chain),
                     )
                 except Exception:
                     _session_ctx = None
