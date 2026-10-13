@@ -947,6 +947,7 @@ def execute_agent(
     deadline_s: float | None = None,
     read_only: bool = False,
     session_id: str | None = None,
+    okf_inject: bool = True,
 ) -> DirectResult | None:
     """Run a tool-calling agent loop for tasks that need file operations.
 
@@ -1067,6 +1068,8 @@ def execute_agent(
             read_only=read_only,
             session_id=session_id,
             read_log=_reads,
+            # Only passed when False so callers/fakes of run_agent_loop are unchanged.
+            **({} if okf_inject else {"okf_inject": False}),
         )
 
         if response and quality_ok(response, "code"):

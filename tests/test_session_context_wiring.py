@@ -128,8 +128,8 @@ def _patch_direct_execution(ar, monkeypatch, *, execute_chain_fn, needs_tools=Fa
     return fake_model
 
 
-def _run(ar, monkeypatch, prompt: str, session_id: str = "sess-abc123"):
-    payload = json.dumps({"prompt": prompt, "session_id": session_id})
+def _run(ar, monkeypatch, prompt: str, session_id: str = "sess-abc123", **extra):
+    payload = json.dumps({"prompt": prompt, "session_id": session_id, **extra})
     monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
     out = io.StringIO()
     monkeypatch.setattr(sys, "stdout", out)
@@ -317,7 +317,7 @@ def test_empty_context_is_passed_through_not_fabricated(ar, monkeypatch, pack_un
     assert captured["context"] == ""
 
 
-def test_no_session_id_skips_all_session_store_calls(ar, monkeypatch):
+def test_no_session_id_skips_all_session_store_calls(ar, monkeypatch, tmp_path):
     rec = _Recorder()
     import llm_router.session_store as real_session_store
     monkeypatch.setattr(real_session_store, "record_event", rec.record_event)
@@ -334,9 +334,40 @@ def test_no_session_id_skips_all_session_store_calls(ar, monkeypatch):
 
     _patch_direct_execution(ar, monkeypatch, execute_chain_fn=fake_execute_chain)
 
-    _run(ar, monkeypatch, SAFE_PROMPT, session_id="")
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({"type": "user", "message": {
+        "role": "user", "content": "SEEDED-TRANSCRIPT-MARKER earlier turn"}}) + "\n")
+    _run(ar, monkeypatch, SAFE_PROMPT, session_id="", transcript_path=str(transcript))
 
     assert rec.record_event_calls == []
     assert rec.build_session_context_calls == []
-    # The pack path may still supply project knowledge; it must carry no session content.
-    assert "PRIOR SESSION CONTEXT" not in (captured["context"] or "")
+    # Context is absent or project-only: no session or transcript content.
+    ctx = captured["context"]
+    assert ctx is None or ctx.startswith("<project-knowledge>")
+    assert "SEEDED-TRANSCRIPT-MARKER" not in (ctx or "")
+
+
+def test_pack_path_passes_none_when_no_context_exists(ar, monkeypatch, tmp_path):
+    """No transcript and an empty non-git project: the draft gets context=None, nothing fabricated."""
+    rec = _Recorder()
+    import llm_router.session_store as real_session_store
+    monkeypatch.setattr(real_session_store, "record_event", rec.record_event)
+    monkeypatch.setattr(real_session_store, "build_session_context", rec.build_session_context)
+
+    import llm_router.hooks.direct_executor as direct_executor
+    captured = {}
+
+    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None, okf_inject=True):
+        captured["context"] = context
+        captured["history"] = history
+        return direct_executor.DirectResult(
+            text="answer", model=chain[0], latency_ms=1, input_tokens=1, output_tokens=1,
+        )
+
+    _patch_direct_execution(ar, monkeypatch, execute_chain_fn=fake_execute_chain)
+    empty = tmp_path / "emptyproj"
+    empty.mkdir()
+    _run(ar, monkeypatch, SAFE_PROMPT, session_id="sess-none", cwd=str(empty))
+
+    assert captured["context"] is None
+    assert not captured["history"]

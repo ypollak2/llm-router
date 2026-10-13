@@ -5519,6 +5519,8 @@ def main() -> None:
                     part for part in (_session_ctx, _recent_ctx) if part
                 ) or None
             _ground_ctx = (_agent_ctx or "") if _pack else (_session_ctx or "")
+            # The pack already carried the project layer: executors must not inject it again.
+            _okf_kw = {"okf_inject": False} if _pack and _pack.project else {}
 
             _direct_result = None
             # GH#57: wall-clock for the DIRECT attempt, so a timeout can be
@@ -5548,6 +5550,7 @@ def main() -> None:
                         project_root=hook_input.get("cwd") or os.getcwd(),
                         session_id=session_id,
                         read_only=task_type in ("query", "research", "analyze"),
+                        **_okf_kw,
                     )
                 if _direct_result:
                     _debug_log(f"[INVOCATION {invocation_id:.3f}] AGENT LOOP SUCCESS")
@@ -5583,7 +5586,7 @@ def main() -> None:
                             prompt, _direct_chain, project_root=_draft_root,
                             timeout=OLLAMA_TIMEOUT, context=_agent_ctx,
                             deadline_s=_readonly_draft_deadline(), read_only=True,
-                            session_id=session_id,
+                            session_id=session_id, **_okf_kw,
                         )
                     _debug_log(
                         f"[INVOCATION {invocation_id:.3f}] READ-ONLY DRAFT LOOP: "
@@ -5598,9 +5601,7 @@ def main() -> None:
                             # I1: the session store and a scoped semantic index.
                             session_id=session_id,
                             root=_draft_root,
-                            # Only pass the flag when the pack already injected the
-                            # project block; keeps the legacy call shape otherwise.
-                            **({"okf_inject": False} if _pack and _pack.project else {}),
+                            **_okf_kw,
                         )
 
             # S2-6: a draft that cites a file nobody mentioned and that does not

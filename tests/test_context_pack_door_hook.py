@@ -76,7 +76,8 @@ def run_hook(monkeypatch, tmp_path):
     monkeypatch.setattr(de, "_local_num_ctx", lambda model: 8192)
 
     def _run(prompt=PROMPT, *, providers=("ollama",), direct="1",
-             mode="all", relay="on", needs_tools=False, readonly_loop=False):
+             mode="all", relay="on", needs_tools=False, readonly_loop=False,
+             real_agent=False):
         pack_calls.clear()
         packs.clear()
         for key, value in {
@@ -121,7 +122,8 @@ def run_hook(monkeypatch, tmp_path):
         monkeypatch.setattr(cb, "build_chain", build_chain)
         monkeypatch.setattr(cb, "needs_claude_tools", lambda prompt, task: needs_tools)
         monkeypatch.setattr(de, "execute_chain", execute_chain)
-        monkeypatch.setattr(de, "execute_agent", execute_agent)
+        if not real_agent:
+            monkeypatch.setattr(de, "execute_agent", execute_agent)
         monkeypatch.setattr(ar, "_debug_log", log.append)
         monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({
             "prompt": prompt,
@@ -135,7 +137,7 @@ def run_hook(monkeypatch, tmp_path):
         except SystemExit as exc:
             assert exc.code in (None, 0)
         assert not any("DIRECT ERROR:" in line for line in log), log
-        assert any("task=query" in line for line in log), log
+        assert real_agent or any("task=query" in line for line in log), log
         return SimpleNamespace(
             pack_calls=list(pack_calls), packs=list(packs), built=built,
             chain_calls=chain_calls, agent_calls=agent_calls, log=log,
@@ -320,3 +322,46 @@ def test_pack_project_injects_once_and_disables_executor_injection(run_hook, mon
     assert result.packs[0].project == "KNOWLEDGE"
     assert "KNOWLEDGE" in result.chain_calls[0][1]["context"]
     assert result.chain_calls[0][1]["okf_inject"] is False
+
+
+def test_agent_path_injects_project_knowledge_exactly_once(run_hook, monkeypatch):
+    """Real execute_agent and run_agent_loop; only the HTTP call and retrieval are faked."""
+    import llm_router.context_injection as ci
+    from llm_router.hooks import agent_loop
+
+    injected = []
+
+    def inject(request, **kwargs):
+        injected.append(request)
+        return "KNOWLEDGE-BLOCK\n\n" + request
+
+    monkeypatch.setattr(ci, "inject", inject)
+    replies = [
+        {"tool": "read_file", "arguments": {"path": "retry.py"}},
+        {"tool": agent_loop.FINISH_TOOL,
+         "arguments": {"answer": "The retry logic makes three attempts with exponential backoff."}},
+    ]
+    systems = []
+
+    class _R:
+        def __init__(self, reply):
+            self._reply = reply
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def read(self):
+            return json.dumps({"message": {"content": json.dumps(self._reply),
+                                           "tool_calls": []}}).encode()
+
+    def urlopen(req, timeout=None):
+        systems.append(json.loads(req.data)["messages"][0]["content"])
+        return _R(replies.pop(0))
+
+    monkeypatch.setattr(agent_loop.urllib.request, "urlopen", urlopen)
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_AGENT_LOOP", "on")
+    result = run_hook(needs_tools=True, real_agent=True, readonly_loop=True)
+    assert "KNOWLEDGE" in result.packs[0].project
+    assert systems, "agent loop never reached the model"
+    assert all(sys_prompt.count("KNOWLEDGE") == 1 for sys_prompt in systems), systems
+    assert len(injected) == 1, injected
