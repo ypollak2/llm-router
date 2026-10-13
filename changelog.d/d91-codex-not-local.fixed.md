@@ -1,1 +1,1 @@
-Privacy mode `local` no longer treats Codex as on-device: session content is withheld from Codex (it still receives the request). Ollama and gemini_cli remain on the local list (D-91).
+Privacy mode `local` no longer treats Codex or Gemini CLI as on-device: session content is withheld from both (they still receive the request). Only `local` and `ollama` keep session content (D-91, D-95).

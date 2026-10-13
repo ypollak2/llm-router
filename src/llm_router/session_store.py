@@ -555,10 +555,10 @@ def get_mode() -> str:
 
 
 #: Providers that keep session content on this machine (privacy mode `local`).
-#: D-91: "codex" is NOT here -- Codex is a cloud service; it still receives the
+#: D-91/D-95: "codex" and "gemini_cli" are NOT here -- both are cloud services; it still receives the
 #: request, but not session content under `local`. This is a privacy list only;
 #: cost classes (_FREE_PROVIDERS etc.) are separate and still count codex as free.
-LOCAL_PROVIDERS = ("local", "ollama", "gemini_cli")
+LOCAL_PROVIDERS = ("local", "ollama")
 
 
 def allows_session_content(target_provider: str | None) -> bool:

@@ -1310,7 +1310,7 @@ def _try_direct_subagent(
         request, context, history, agent_context, okf = prompt, None, None, None, True
         try:
             from llm_router.context_pack import build_pack
-            from llm_router.hooks.direct_executor import _FREE_PROVIDERS, _local_num_ctx
+            from llm_router.hooks.direct_executor import _local_num_ctx
 
             # Privacy: the most external provider the chain may reach, because
             # execute_chain hands the same history to every later model.

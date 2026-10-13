@@ -165,3 +165,14 @@ def test_codex_is_not_a_privacy_local_provider(monkeypatch):
     assert session_store.allows_session_content("ollama")
     monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "all")
     assert session_store.allows_session_content("codex")
+
+
+def test_gemini_cli_is_not_a_privacy_local_provider(monkeypatch):
+    # D-95: Gemini CLI is Google's cloud CLI.
+    from llm_router import session_store
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "local")
+    assert not session_store.allows_session_content("gemini_cli")
+    assert session_store.allows_session_content("ollama")
+    assert session_store.allows_session_content("local")
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "all")
+    assert session_store.allows_session_content("gemini_cli")
