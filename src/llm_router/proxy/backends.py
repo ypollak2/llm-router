@@ -28,8 +28,12 @@ DEFAULTS come from the local-speed spike (``docs/spikes/local-speed-2026-09-28.m
 p90 3.59 s, 0/24 validation failures; that spike ran a tuned dedicated
 ``ollama serve`` and its absolute numbers depend on it):
   * trim ``fast``: a 366-char condensed system prompt, only the tools the step
-    class needs (names and schemas byte-identical), history capped to the first
-    user turn plus the last exchange: about 3k prompt tokens instead of ~21k;
+    class needs (names and schemas byte-identical). The spike capped history to
+    the first user turn plus the last exchange (~3k prompt tokens instead of
+    ~21k). Since PLAN v16 P1.1, history comes from the context pack
+    (``context_pack.build_pack(door="proxy")``): the whole conversation when it
+    fits 0.8 x the local window, else the last 7 messages with tool output
+    capped, plus the request verbatim. Prompts are larger than the spike's;
   * ``num_predict`` capped at 200 after Read/Bash/no tool, 700 otherwise; a
     reply that hits the cap is rejected (``translate.from_ollama``);
   * ``keep_alive`` (default 600 s; -1 only when asked) on every call and one warm-up call at proxy start;
@@ -106,17 +110,52 @@ STEP_TOOLS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _trim_fast(body: dict) -> dict:
-    """The local-speed spike's trimmed request: condensed system prompt, the
-    step class's tool subset, history capped to first user turn + last exchange."""
+def _pack_messages(turns: list, target_window: int | None) -> tuple[str, list]:
+    """Keep the request verbatim and untruncated, sent natively.
+
+    Full mode sends the whole conversation natively (the non-system turns, as
+    the pack counts them; Claude Code's ``role: system`` reminders are not
+    conversation); pack mode sends pack.recent as text plus the newest
+    exchange natively.
+    target_provider="ollama" applies the session-context privacy rule:
+    LLM_ROUTER_SESSION_CONTEXT=off empties history. Project/instructions
+    layers are not built here (no project_root): proxy.okf_context.attach
+    already attaches repository context after the trim.
+    """
+    from llm_router import context_pack
+
+    request = context_pack.extract_turn_text(
+        turns[-1].get("content"), keep_tools=True, cap=False).strip()
+    window = target_window if isinstance(target_window, int) and target_window > 0 else local_models.num_ctx(None)
+    pack = context_pack.build_pack(
+        request, turns[:-1], door="proxy", target_window=window, target_provider="ollama")
+    if pack.mode == "full":
+        return pack.system, list(turns)
+    recent = list(pack.recent)
+    tail = turns[-2:] if len(turns) >= 2 and turns[-2].get("role") == "assistant" else turns[-1:]
+    if len(tail) == 2 and recent and recent[-1] == {
+        "role": "assistant",
+        "content": context_pack.extract_turn_text(
+            turns[-2].get("content"), keep_tools=True, cap=True).strip(),
+    }:
+        recent.pop()
+    return pack.system, recent + tail
+
+
+def _trim_fast(body: dict, target_window: int | None = None) -> dict:
+    """Condensed system prompt and the step class's tool subset; history now
+    comes from the one context pack (PLAN v16 P1.1 door 3)."""
     out = dict(body)
     out["system"] = CONDENSED_SYSTEM
     wanted = STEP_TOOLS[STEP_CONTINUATION]
     by_name = {t.get("name"): t for t in body.get("tools") or [] if isinstance(t, dict)}
     out["tools"] = [by_name[n] for n in wanted if n in by_name]
     turns = non_system(body.get("messages") or [])
-    if len(turns) > 3:
-        out["messages"] = [turns[0]] + turns[-2:]
+    if turns:
+        system_layers, messages = _pack_messages(turns, target_window)
+        out["messages"] = messages
+        if system_layers:
+            out["system"] = system_layers + "\n\n" + CONDENSED_SYSTEM
     return out
 
 
@@ -149,10 +188,10 @@ def resolve_trims(spec: str | None) -> list[Trim]:
     return out
 
 
-def apply_trims(body: dict, trims: list[Trim]) -> dict:
+def apply_trims(body: dict, trims: list[Trim], *, target_window: int | None = None) -> dict:
     out = copy.deepcopy(body)
     for trim in trims:
-        out = trim(out)
+        out = trim(out, target_window=target_window) if trim is _trim_fast else trim(out)
     return out
 
 
