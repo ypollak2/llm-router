@@ -3316,6 +3316,9 @@ async def _dispatch_model_loop(
                     response = await _call_text(
                         model, prompt, system_prompt, temperature, max_tokens, task_type,
                         caller_context=caller_context,
+                        user_prompt=user_prompt,
+                        scope_root=scope_root,
+                        chain=models_to_try,
                         use_thinking=use_thinking,
                         correlation_id=correlation_id,
                     )
@@ -3765,6 +3768,9 @@ async def _dispatch_model_loop(
                         response = await _call_text(
                             model, prompt, system_prompt, temperature, max_tokens, task_type,
                             caller_context=caller_context,
+                            user_prompt=user_prompt,
+                            scope_root=scope_root,
+                            chain=emergency_chain,
                             use_thinking=use_thinking,
                             correlation_id=correlation_id,
                         )
@@ -5390,6 +5396,21 @@ async def route_and_call(
         return response
 
 
+def _pack_target_provider(model: str, chain: list[str] | None) -> str:
+    """Gate session content for every provider the fallback chain can reach."""
+    from llm_router import session_store
+
+    candidates = list(chain or [model])
+    if model not in candidates:
+        candidates.append(model)
+    providers_in_chain = [provider_from_model(m) for m in candidates]
+    return next(
+        (provider for provider in providers_in_chain
+         if provider not in session_store.LOCAL_PROVIDERS),
+        providers_in_chain[0],
+    )
+
+
 async def _call_text(
     model: str,
     prompt: str,
@@ -5399,16 +5420,20 @@ async def _call_text(
     task_type: TaskType,
     *,
     caller_context: str | None = None,
+    user_prompt: str | None = None,
+    scope_root: str | None = None,
+    chain: list[str] | None = None,
     use_thinking: bool = False,
     correlation_id: str | None = None,
 ) -> LLMResponse:
     """Dispatch a text completion call through LiteLLM's unified API.
 
-    Builds the messages list with optional context injection:
-      [system_prompt?] → [context_messages...] → [user_prompt]
+    Builds the messages list with the shared MCP context pack:
+      [system_prompt?] → [pack.system?] → [pack.recent...] → [request]
 
-    Context messages include previous session summaries and recent
-    conversation history, assembled by ``build_context_messages()``.
+    Session content is gated across the fallback chain. When the pack supplies
+    project context, its raw request avoids duplicating injected context.
+    Pack failures fall back to the original prompt without context.
 
     Args:
         model: LiteLLM model identifier (e.g. ``"openai/gpt-4o"``).
@@ -5418,7 +5443,10 @@ async def _call_text(
         max_tokens: Maximum output tokens (None = provider default).
         task_type: Used to inject task-specific parameters (e.g. research
             tasks add a recency filter for Perplexity).
-        caller_context: Optional caller-supplied context string.
+        caller_context: Context fallback when no session transcript is found.
+        user_prompt: Raw request before project context injection.
+        scope_root: Explicit project root for the pack's project layer.
+        chain: Fallback models used to gate session-content privacy.
 
     Returns:
         An ``LLMResponse`` with the generated text, cost, and latency.
@@ -5442,25 +5470,36 @@ async def _call_text(
                     # Invalid caveman mode — skip
                     pass
 
-    # Inject session + persistent context between system prompt and user prompt
-    # Guard: context_enabled may be MagicMock in test mocks
+    # Guard: context_enabled may be MagicMock in test mocks.
+    user_content = prompt
     context_enabled = getattr(config, "context_enabled", True)
     if isinstance(context_enabled, bool) and context_enabled:
-        _is_free = model.startswith("ollama/") or model.startswith("codex/") or model.startswith("gemini_cli/")
-        _target_provider = model.split("/", 1)[0] if "/" in model else None
-        context_msgs = await build_context_messages(
-            # CHZ-AUD-B-01: fall back to the LIVE prompt so keyword-relevance
-            # retrieval fires even when the caller passes no explicit context.
-            caller_context=caller_context or prompt,
-            max_session_messages=getattr(config, "context_max_messages", 5),
-            max_previous_sessions=getattr(config, "context_max_previous_sessions", 3),
-            max_context_tokens=getattr(config, "context_max_tokens", 1500),
-            is_free_model=_is_free,
-            target_provider=_target_provider,
-        )
-        messages.extend(context_msgs)
+        try:
+            from llm_router import call_identity, context_pack, local_models
 
-    messages.append({"role": "user", "content": prompt})
+            request = user_prompt if user_prompt is not None else prompt
+            pack = context_pack.build_pack(
+                request,
+                session_id=call_identity.call_session_id(),
+                project_root=scope_root,
+                target_window=(local_models.num_ctx(model.split("/", 1)[1])
+                               if model.startswith("ollama/") else 8192),
+                door="mcp",
+                context=caller_context,
+                target_provider=_pack_target_provider(model, chain),
+            )
+            pack_messages = []
+            if pack.system:
+                pack_messages.append({"role": "system", "content": pack.system})
+            pack_messages.extend(pack.recent)
+            final_content = pack.request if pack.project else prompt
+            messages.extend(pack_messages)
+            user_content = final_content
+        except Exception as exc:
+            from llm_router import failopen
+            failopen.record("CHZ-FO-ROUTER-MCP-PACK", exc)
+
+    messages.append({"role": "user", "content": user_content})
 
     extra = {}
     # Perplexity's sonar models support a recency filter that limits
