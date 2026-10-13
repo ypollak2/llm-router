@@ -6,6 +6,7 @@ For Python agents that prefer a direct call over the HTTP gateway. Same router
     from llm_router import route
     r = route("Summarize this 10-K risk section ...")
     print(r.text, "via", r.model)
+    r = route("Explain further", messages=[{"role": "user", "content": "What is routing?"}])
 
 Returns a :class:`RouteResult`. Raises :class:`RoutingError` if the model chain
 is exhausted (so callers can fall back to a direct provider if they wish).
@@ -57,17 +58,37 @@ def _sdk_session_id(session_id: str | None) -> str:
 
 def route(prompt: str, *, task_type: str | None = None,
           complexity: str | None = None, timeout: int = 150,
-          session_id: str | None = None, task_id: str | None = None) -> RouteResult:
+          session_id: str | None = None, task_id: str | None = None,
+          messages: list[dict] | None = None) -> RouteResult:
     """Route one prompt through LLM Router and return the answer + routing metadata.
 
     task_type / complexity are inferred from the prompt when omitted. ``session_id`` and
     ``task_id`` (ids, ``[A-Za-z0-9_.:-]{1,128}``) name the caller's session and request on
     the ledger rows; omitted, the session is generated once per process and the task per call.
+
+    messages is the conversation so far as {"role", "content"} chat dicts,
+    excluding prompt, the current request, which is sent verbatim and never
+    trimmed. build_pack drops a trailing user message equal to prompt. None keeps
+    existing behavior. Supplied history is packed via door="sdk" per provider
+    attempt and sent only when session_store.allows_session_content allows it at
+    call time (only local/ollama are privacy-local). Disallowed attempts get just
+    the request; leading assistant turns are dropped for API providers. Pack
+    failures record CHZ-FO-ROUTER-SDK-PACK and send the plain prompt. A hash of
+    messages isolates semantic cache entries by conversation.
     """
     from llm_router import call_identity
 
     sid = _sdk_session_id(session_id)
     with call_identity.scope(sid, task_id=task_id):
+        if messages is not None:
+            if not isinstance(messages, list) or any(
+                not isinstance(message, dict)
+                or not isinstance(message.get("role"), str)
+                or not isinstance(message.get("content"), str)
+                for message in messages
+            ):
+                raise ValueError("messages must be a list of dicts with string role/content")
+            return _route_messages(prompt, messages, task_type, complexity, sid)
         return _route(prompt, task_type=task_type, complexity=complexity,
                       timeout=timeout, session_id=sid)
 
@@ -113,4 +134,55 @@ def _route(prompt: str, *, task_type: str | None, complexity: str | None,
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,
         latency_ms=int(result.latency_ms or 0),
+    )
+
+
+def _run_coro(coro):
+    """Run a coroutine synchronously, preserving caller identity in a worker."""
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    from concurrent.futures import ThreadPoolExecutor
+    from contextvars import copy_context
+
+    context = copy_context()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(context.run, asyncio.run, coro).result()
+
+
+def _route_messages(prompt: str, messages: list[dict], task_type: str | None,
+                    complexity: str | None, session_id: str) -> RouteResult:
+    """Route caller history within the SDK's existing identity scope."""
+    from llm_router.gateway import _classify
+    from llm_router.router import route_and_call
+    from llm_router.types import TaskType
+
+    if not prompt or not prompt.strip():
+        raise ValueError("prompt is empty")
+    if not task_type or not complexity:
+        _t, _c = _classify(prompt)
+        task_type, complexity = task_type or _t, complexity or _c
+    try:
+        tt = TaskType(task_type)
+    except ValueError:
+        tt = TaskType.QUERY
+    try:
+        resp = _run_coro(route_and_call(
+            tt, prompt, complexity_hint=complexity, messages=messages,
+        ))
+    except RuntimeError as exc:
+        raise RoutingError(
+            f"LLM Router routing failed — model chain exhausted: {exc}"
+        ) from exc
+    return RouteResult(
+        text=resp.content,
+        model=resp.model if "/" in resp.model else f"{resp.provider}/{resp.model}",
+        provider=resp.provider,
+        input_tokens=resp.input_tokens,
+        output_tokens=resp.output_tokens,
+        latency_ms=int(resp.latency_ms or 0),
     )

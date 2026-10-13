@@ -2193,6 +2193,8 @@ def _semantic_cache_key(
     caller_context: str | None,
     scope_root: str | None,
     system_prompt: str | None = None,
+    *,
+    messages: list | None = None,
 ):
     """P0.5 (R-CTX-7): the ONE semantic-cache key for this request.
 
@@ -2219,6 +2221,13 @@ def _semantic_cache_key(
             log.debug("semantic cache context read failed: %s", exc)
     if system_prompt:
         context_text += "\x1fsystem:" + system_prompt
+    if messages is not None:
+        import hashlib
+        import json
+
+        context_text += "\x1fmessages:" + hashlib.sha256(
+            json.dumps(messages, sort_keys=True, default=str).encode()
+        ).hexdigest()
     scope = ""
     if scope_root:
         try:
@@ -2738,6 +2747,8 @@ async def _dispatch_model_loop(
     # escapes this function (timeout, cancel, exhaustion) still tells the caller which
     # model was being attempted. None keeps the old private list.
     chain_attempts_out: list[str] | None = None,
+    # Caller history is packed separately for each provider attempt.
+    conversation: list | None = None,
 ) -> LLMResponse:
     """Execute the main model dispatch loop with primary + emergency fallback chains.
 
@@ -3316,6 +3327,7 @@ async def _dispatch_model_loop(
                     response = await _call_text(
                         model, prompt, system_prompt, temperature, max_tokens, task_type,
                         caller_context=caller_context,
+                        conversation=conversation,
                         user_prompt=user_prompt,
                         scope_root=scope_root,
                         use_thinking=use_thinking,
@@ -3767,6 +3779,7 @@ async def _dispatch_model_loop(
                         response = await _call_text(
                             model, prompt, system_prompt, temperature, max_tokens, task_type,
                             caller_context=caller_context,
+                            conversation=conversation,
                             user_prompt=user_prompt,
                             scope_root=scope_root,
                             use_thinking=use_thinking,
@@ -4195,6 +4208,7 @@ async def route_and_call(
     agent_session_id: str | None = None,
     suppress_ledger: bool = False,
     route_directive_id: str | None = None,
+    messages: list[dict] | None = None,
 ) -> LLMResponse:
     """Route a request to the best available model and return the response.
 
@@ -4235,6 +4249,16 @@ async def route_and_call(
         caller_context: Optional context string from the MCP tool caller
             (e.g. recent conversation summary). Injected alongside session
             buffer and persistent history into the LLM messages.
+        messages: Caller conversation so far as {"role", "content"} chat dicts,
+            excluding the current request. prompt is sent verbatim and never
+            trimmed; build_pack drops a trailing user message equal to it.
+            None preserves existing behavior. Each attempt builds an SDK pack
+            with its target provider, gating conversation at call time through
+            session_store.allows_session_content (only local/ollama are privacy-local).
+            Disallowed attempts receive just the request, plus explicit context.
+            Leading assistant turns are dropped for API providers. Pack failures
+            record CHZ-FO-ROUTER-SDK-PACK and send the plain prompt. The semantic
+            cache key includes a hash of messages to isolate conversations.
         deadline_monotonic: Track-3 agent-safety absolute deadline.
             When set, the routed turn refuses to start if
             ``time.monotonic()`` is already past this value (raises
@@ -4847,7 +4871,9 @@ async def route_and_call(
         # model_override turn still stores under the same key.
         _semantic_key = None
         try:
-            _semantic_key = _semantic_cache_key(prompt, caller_context, _scope_root, system_prompt)
+            _semantic_key = _semantic_cache_key(
+                prompt, caller_context, _scope_root, system_prompt, messages=messages,
+            )
         except Exception as _key_err:  # noqa: BLE001 — the cache is an optimisation
             log.debug("Semantic cache key failed: %s", _key_err)
 
@@ -5180,6 +5206,7 @@ async def route_and_call(
             scope_root=_scope_root,
             semantic_key=_semantic_key,
             chain_attempts_out=_attempt_trace,
+            conversation=messages,
         )
         # T3-S2 + T3-M1: combined timeout + cancel handling. Both failure
         # modes share the same cleanup contract — release the budget
@@ -5413,6 +5440,7 @@ async def _call_text(
     task_type: TaskType,
     *,
     caller_context: str | None = None,
+    conversation: list | None = None,
     user_prompt: str | None = None,
     scope_root: str | None = None,
     use_thinking: bool = False,
@@ -5436,6 +5464,8 @@ async def _call_text(
         task_type: Used to inject task-specific parameters (e.g. research
             tasks add a recency filter for Perplexity).
         caller_context: Explicit context, deduplicated against transcript turns.
+        conversation: Caller history excluding the current request. None keeps
+            MCP context handling; SDK packs gate history per provider attempt.
         user_prompt: Raw request before project context injection.
         scope_root: Explicit project root for the pack's project layer.
 
@@ -5474,42 +5504,61 @@ async def _call_text(
                 project = prompt[:-len(user_prompt)].strip()
             provider = _pack_target_provider(model)
             allowed = session_store.allows_session_content(provider)
-            pack = context_pack.build_pack(
-                request,
-                session_id=call_identity.call_session_id(),
-                project_root=scope_root,
-                target_window=(local_models.num_ctx(model.split("/", 1)[1])
-                               if model.startswith("ollama/") else _MCP_NON_LOCAL_WINDOW),
-                door="mcp",
-                project=project,
-                target_provider=provider,
-            )
-            pack_messages = []
-            if pack.system:
-                pack_messages.append({"role": "system", "content": pack.system})
-            additional = caller_context
-            if additional and any(additional.strip() in m["content"] for m in pack.recent):
-                additional = None
-            if allowed:
-                context_tokens = getattr(config, "context_max_tokens", 1500)
-                if pack.recent:
-                    context_tokens = min(context_tokens, _MCP_SUMMARY_ONLY_MAX_TOKENS)
-                pack_messages.extend(await build_context_messages(
-                    caller_context=additional,
-                    query=request,
-                    include_current_session=not bool(pack.recent),
-                    max_session_messages=getattr(config, "context_max_messages", 5),
-                    max_previous_sessions=getattr(config, "context_max_previous_sessions", 3),
-                    max_context_tokens=context_tokens,
-                    is_free_model=provider in ("ollama", "gemini_cli"),
-                    target_provider=provider,
+            if conversation is not None:
+                pack = context_pack.build_pack(
+                    request,
+                    messages=conversation,
                     project_root=scope_root,
-                ))
-            elif additional:
-                pack_messages.append({
-                    "role": "system", "content": "[Additional context]\n" + additional,
-                })
-            recent = list(pack.recent)
+                    target_window=(local_models.num_ctx(model.split("/", 1)[1])
+                                   if model.startswith("ollama/") else _MCP_NON_LOCAL_WINDOW),
+                    door="sdk",
+                    project=project,
+                    target_provider=provider,
+                )
+                pack_messages = []
+                if pack.system:
+                    pack_messages.append({"role": "system", "content": pack.system})
+                if caller_context:
+                    pack_messages.append({
+                        "role": "system", "content": "[Additional context]\n" + caller_context,
+                    })
+            else:
+                pack = context_pack.build_pack(
+                    request,
+                    session_id=call_identity.call_session_id(),
+                    project_root=scope_root,
+                    target_window=(local_models.num_ctx(model.split("/", 1)[1])
+                                   if model.startswith("ollama/") else _MCP_NON_LOCAL_WINDOW),
+                    door="mcp",
+                    project=project,
+                    target_provider=provider,
+                )
+                pack_messages = []
+                if pack.system:
+                    pack_messages.append({"role": "system", "content": pack.system})
+                additional = caller_context
+                if additional and any(additional.strip() in m["content"] for m in pack.recent):
+                    additional = None
+                if allowed:
+                    context_tokens = getattr(config, "context_max_tokens", 1500)
+                    if pack.recent:
+                        context_tokens = min(context_tokens, _MCP_SUMMARY_ONLY_MAX_TOKENS)
+                    pack_messages.extend(await build_context_messages(
+                        caller_context=additional,
+                        query=request,
+                        include_current_session=not bool(pack.recent),
+                        max_session_messages=getattr(config, "context_max_messages", 5),
+                        max_previous_sessions=getattr(config, "context_max_previous_sessions", 3),
+                        max_context_tokens=context_tokens,
+                        is_free_model=provider in ("ollama", "gemini_cli"),
+                        target_provider=provider,
+                        project_root=scope_root,
+                    ))
+                elif additional:
+                    pack_messages.append({
+                        "role": "system", "content": "[Additional context]\n" + additional,
+                    })
+            recent = list(pack.recent) if conversation is None or allowed else []
             while recent and recent[0]["role"] == "assistant":
                 recent.pop(0)
             pack_messages.extend(recent)
@@ -5517,7 +5566,10 @@ async def _call_text(
             user_content = pack.request
         except Exception as exc:
             from llm_router import failopen
-            failopen.record("CHZ-FO-ROUTER-MCP-PACK", exc)
+            failopen.record(
+                "CHZ-FO-ROUTER-SDK-PACK" if conversation is not None
+                else "CHZ-FO-ROUTER-MCP-PACK", exc,
+            )
 
     messages.append({"role": "user", "content": user_content})
 
