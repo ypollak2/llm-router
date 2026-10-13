@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 2
+# llm_router-hook-version: 3
 """Gemini CLI auto-route hook — injects MANDATORY ROUTE hint before model answers.
 
 This hook fires on UserPromptSubmit (after the user types a prompt, before Gemini
@@ -136,12 +136,14 @@ async def engine_complexity(prompt: str) -> tuple[str, float]:
     LLM_ROUTER_ENGINE_MODE=decide only (PLAN v16 P1.6 / D-72), door ``gemini_cli``: sync L1/L3 only, no Ollama or network call.
 
     Returns:
-        Tuple of (complexity: str, confidence: float, 0.0 when the engine has none)
+        Tuple of (complexity: str in the engine's vocabulary, ``deep_reasoning`` included, D-83;
+        confidence: float, 0.0 when the engine has none). ``_complexity`` folds ``deep_reasoning``
+        into ``complex`` for the hint, whose table has three rows.
     """
     from llm_router import engine
 
     d = engine.decide(prompt, door="gemini_cli")
-    return ("complex" if d.complexity == "deep_reasoning" else d.complexity), d.confidence or 0.0
+    return d.complexity, d.confidence or 0.0
 
 
 async def _complexity(prompt: str) -> tuple[str, float]:
@@ -155,7 +157,8 @@ async def _complexity(prompt: str) -> tuple[str, float]:
     except Exception:  # noqa: BLE001 — no engine, rules as before
         return await classify_complexity(prompt)
     if decides:
-        return await engine_complexity(prompt)
+        cx, conf = await engine_complexity(prompt)
+        return ("complex" if cx == "deep_reasoning" else cx), conf  # the hint table has three rows
     out = await classify_complexity(prompt)
     engine.shadow(prompt, door="gemini_cli", rules_task=None, rules_complexity=out[0], l1_only=True)
     return out

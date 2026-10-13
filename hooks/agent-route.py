@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 20
+# llm_router-hook-version: 21
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -1019,15 +1019,15 @@ def _classify_task_type(prompt: str) -> str:
 
 
 def _engine_decision(prompt: str) -> tuple[str, str]:
-    """``(task_type, complexity)`` from the one engine (PLAN v16 P1.6, door ``agent_route``).
-
-    ``deep_reasoning`` maps to ``complex``: this hook's profile table has three rows.
+    """``(task_type, complexity)`` from the one engine (PLAN v16 P1.6, door ``agent_route``), verbatim:
+    the same vocabulary as every other door, ``deep_reasoning`` included (D-83). ``_classify`` folds
+    ``deep_reasoning`` into ``complex`` because this hook's profile table has three rows.
     Fail-open to the old no-signal default if the engine cannot be imported."""
     try:
         from llm_router import engine
 
         d = engine.decide(prompt, door="agent_route")
-        return d.task_type, "complex" if d.complexity == "deep_reasoning" else d.complexity
+        return d.task_type, d.complexity
     except Exception:  # noqa: BLE001 — a classifier error must never stop a spawn
         return "analyze", "moderate"
 
@@ -1043,7 +1043,8 @@ def _classify(prompt: str) -> tuple[str, str]:
     except Exception:  # noqa: BLE001 — no engine, rules as before
         return _classify_task_type(prompt), _classify_complexity(prompt)
     if decides:
-        return _engine_decision(prompt)
+        task, cx = _engine_decision(prompt)
+        return task, "complex" if cx == "deep_reasoning" else cx  # three-row profile table
     out = _classify_task_type(prompt), _classify_complexity(prompt)
     engine.shadow(prompt, door="agent_route", rules_task=out[0], rules_complexity=out[1], l1_only=True)
     return out

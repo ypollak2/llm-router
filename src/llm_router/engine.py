@@ -374,11 +374,24 @@ def _policy_version(lex, cal) -> str:
     return "%s-%s" % (POLICY_ID, hashlib.sha256(sig.encode()).hexdigest()[:8])
 
 
+def canonical_text(text: str) -> str:
+    """What every door's class is computed on: the human prompt with Claude Code's harness blocks
+    (``<system-reminder>``, ``<command-*>``, ``<agent-message>``, ...) and a leading ``Caveat:`` line
+    removed, its last 3,000 chars. That is the proxy's ``steps.tier_text`` of a one-user-message
+    body, so a door that stripped and truncated first (the proxy) and a door that passed the raw
+    prompt get the same Decision (D-83: a 2,088-char prompt was complex at six doors and moderate at
+    the proxy, which classified its 1,995 stripped chars)."""
+    from llm_router.proxy.steps import _human_text
+
+    return _human_text(text or "")[-_TIER_TEXT_LIMIT:]
+
+
 def _compute(text: str, lex, cal, policy_version: str, *, capabilities: bool = True) -> Decision:
-    sig = classify_signals(text, ENGINE_POLICY, capabilities=capabilities)
+    ctext = canonical_text(text)
+    sig = classify_signals(ctext, ENGINE_POLICY, capabilities=capabilities)
     cx = sig.complexity.value
     tier = _COMPLEXITY_TIER.get(cx, "sonnet")
-    dims = {k: int(v) for k, v in _score_categories(text).items()}
+    dims = {k: int(v) for k, v in _score_categories(ctext).items()}
     req = sig.capabilities
     needs_tools = bool(req.needs_tools)
     needs_repo = bool(req.repo_search or req.read_files or req.git_operations)
@@ -391,7 +404,7 @@ def _compute(text: str, lex, cal, policy_version: str, *, capabilities: bool = T
         raw = sig.score / (sig.score + 2.0)  # 0 for no signal, 1/3 for weak
         reason = "L1 low-signal score=%d default=%s" % (sig.score, ENGINE_POLICY.low_signal_default)
         if lex is not None:
-            ltier, p = lex.predict(text)
+            ltier, p = lex.predict(ctext)
             if ltier in TIERS:
                 layer, tier, raw = "L3", ltier, p
                 cx = _TIER_COMPLEXITY[tier] if _COMPLEXITY_TIER.get(cx) != tier else cx
@@ -404,6 +417,8 @@ def _compute(text: str, lex, cal, policy_version: str, *, capabilities: bool = T
         reason += "; abstain, tier up"
     elif abstain:
         reason += "; abstain (log only)"
+    # Raw text, not ctext: a secret inside a stripped harness block or before the tail must still
+    # set local_only (NFR-PRIV).
     secrets = _secret_names(text)
     if secrets:
         reason += "; secret:" + ",".join(secrets)
@@ -432,7 +447,9 @@ def decide(text: str, *, ctx_digest: str = "", door: str, session_id: str | None
     ``door`` names the call site and must be one of ``DOORS``; it is NOT part
     of the cache key or the result: every door gets the same Decision for the
     same text (P1.6-a). ``session_id`` / ``task_id`` are accepted for the
-    decision ledger (P1.7) and do not affect the decision.
+    decision ledger (P1.7) and do not affect the decision. The class (task_type, complexity,
+    tier, dims, capabilities) is computed on ``canonical_text(text)``; secrets and the cache key
+    use the raw text.
 
     L3 here is the lexical model only. The ``complexity_knn`` vote the plan
     also names embeds the prompt through Ollama, which is a model call on the
