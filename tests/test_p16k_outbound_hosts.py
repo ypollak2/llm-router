@@ -46,11 +46,14 @@ PROVIDER_API = {
 CATALOG_PINNED: dict[str, str] = {
     "raw.githubusercontent.com": "benchmark catalog and default community profile, sha256-pinned in catalog_pins.json (benchmark_fetcher.py); the unpinned scraper moved to scripts/bench",
 }
-# The only raw.githubusercontent.com URLs allowed: the release-tag catalog template
-# (sha256 in catalog_pins.json) and the community profile URL (also pin-checked).
-CATALOG_URL_PREFIXES = (
-    "https://raw.githubusercontent.com/ypollak2/llm-router/",
-    "https://raw.githubusercontent.com/ypollak2/llm_router-profiles/main/community.json",
+# The only raw.githubusercontent.com URLs allowed, matched in full (^...$): the
+# release-tag catalog template (sha256 in catalog_pins.json) and the community
+# profile URL (also pin-checked). No prefix match: `.../community.json.evil` or
+# `ypollak2/llm-router/main/anything.json` must not pass.
+CATALOG_URL_PATTERNS = (
+    re.compile(r"^https://raw\.githubusercontent\.com/ypollak2/llm-router/"
+               r"(?:\{tag\}|[A-Za-z0-9._\-]+)/src/llm_router/data/benchmarks\.json$"),
+    re.compile(r"^https://raw\.githubusercontent\.com/ypollak2/llm_router-profiles/main/community\.json$"),
 )
 # D-89: called, but only when the user types the command.
 USER_COMMAND = {
@@ -156,11 +159,11 @@ def sweep_hosts(root: Path) -> dict[str, list[str]]:
 
 
 def unpinned_urls(root: Path) -> list[str]:
-    """A pinned-catalog host is allowed only at the URL patterns in CATALOG_URL_PREFIXES."""
+    """A pinned-catalog host is allowed only at the URL patterns in CATALOG_URL_PATTERNS."""
     return [
         f"{where}: {url} is on a pinned-catalog host but not at a pinned URL pattern"
         for where, host, url in literal_urls(root)
-        if host in CATALOG_PINNED and not url.startswith(CATALOG_URL_PREFIXES)
+        if host in CATALOG_PINNED and not any(p.match(url) for p in CATALOG_URL_PATTERNS)
     ]
 
 
@@ -361,12 +364,34 @@ def test_pinned_catalog_host_only_at_pinned_url_patterns(tmp_path):
     path = tmp_path / "src/pkg/raw.py"
     path.parent.mkdir(parents=True)
     path.write_text(
-        'OK = "https://raw.githubusercontent.com/ypollak2/llm-router/{tag}/x.json"\n'
+        'OK = "https://raw.githubusercontent.com/ypollak2/llm-router/{tag}/src/llm_router/data/benchmarks.json"\n'
         'BAD = "https://raw.githubusercontent.com/someone/else/main/unpinned.json"\n',
         encoding="utf-8",
     )
     found = unpinned_urls(tmp_path)
     assert len(found) == 1 and "src/pkg/raw.py:2" in found[0]
+
+
+def test_pinned_url_patterns_are_end_anchored_and_exact(tmp_path):
+    base = "https://raw.githubusercontent.com/"
+    good = [
+        base + "ypollak2/llm-router/{tag}/src/llm_router/data/benchmarks.json",
+        base + "ypollak2/llm-router/v1.2.3/src/llm_router/data/benchmarks.json",
+        base + "ypollak2/llm_router-profiles/main/community.json",
+    ]
+    bad = [
+        base + "ypollak2/llm_router-profiles/main/community.json.evil",
+        base + "ypollak2/llm_router-profiles/main/community.jsonx",
+        base + "ypollak2/llm-router/main/anything.json",
+        base + "ypollak2/llm-router/main/src/llm_router/data/benchmarks.json.evil",
+        base + "ypollak2/llm-router/a/b/src/llm_router/data/benchmarks.json",
+    ]
+    path = tmp_path / "src/pkg/raw.py"
+    path.parent.mkdir(parents=True)
+    path.write_text("".join(f"U{i} = {u!r}\n" for i, u in enumerate(good + bad)), encoding="utf-8")
+    flagged = {int(m.group(1)) for item in unpinned_urls(tmp_path)
+               if (m := re.search(r"raw\.py:(\d+)", item))}
+    assert flagged == set(range(len(good) + 1, len(good) + len(bad) + 1))
 
 
 def test_zero_telemetry_endpoints():

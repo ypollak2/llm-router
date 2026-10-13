@@ -1,0 +1,1 @@
+Tests: OKF choke-point check now requires a real `build_pack(` call and a behavioural spy that `build_pack` reaches `context_injection.inject`; P1.6-k raw.githubusercontent.com pins are full-string anchored (release-tag benchmarks template and community.json only).
