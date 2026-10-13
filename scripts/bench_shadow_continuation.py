@@ -223,6 +223,9 @@ async def run(kinds: list[str], sizes: list[int], n: int, warmup: int) -> dict:
     results["meta"]["machine_after"] = machine()
     results["verdict"] = DL.gate_verdict(results)
     DL._force_shadow = False
+    results["meta"]["shadow_drain_ok"] = engine.shadow_drain()
+    if not results["meta"]["shadow_drain_ok"]:
+        results["meta"]["shadow_drain_error"] = "engine shadow queue not drained within timeout"
     rows = DL.read_ledger()
     results["meta"]["decision_rows"] = len(rows)
     results["meta"]["decision_rows_shadow"] = sum(1 for r in rows if r.get("shadow"))
@@ -251,7 +254,9 @@ def main() -> None:
             os.environ["LLM_ROUTER_DECISION_SHADOW_RATE"] = str(DL.RATE_MAX)
             engine.clear_cache(persistent=False)
             res = asyncio.run(run(a.fixtures.split(","), [int(x) for x in a.sizes.split(",")], a.n, a.warmup))
-    except Exception as e:  # harness error: an uncaught one would exit 1 == "verdict failed"
+    except BaseException as e:  # harness error: an uncaught one would exit 1 == "verdict failed"
+        if isinstance(e, (KeyboardInterrupt, SystemExit)):
+            raise
         err = "harness error: %s: %s" % (type(e).__name__, e)
         res = {"rows": [], "meta": {"error": traceback.format_exc()},
                "verdict": {"passed": False, "reason": err}}

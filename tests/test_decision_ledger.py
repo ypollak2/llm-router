@@ -555,7 +555,7 @@ def test_prereg_check_counts_rows_before_and_after_the_freeze(tmp_path):
     assert check_prereg.check(md)["match"] is False
 
 
-def _run_harness(tmp_path, extra, *, loadavg=None):
+def _run_harness(tmp_path, extra, *, loadavg=None, prelude: str | None = None):
     """Run the P1.7-c harness in a subprocess. Returns (proc, out_path, gate_home)."""
     home = tmp_path / "gatehome"
     home.mkdir()
@@ -565,13 +565,16 @@ def _run_harness(tmp_path, extra, *, loadavg=None):
     script = str(ROOT / "scripts" / "bench_shadow_continuation.py")
     args = ["--n", "3", "--warmup", "1", "--sizes", "0", "--fixtures", "one_prompt",
             "--out", str(out), "--gate", *extra]
-    if loadavg is None:
+    if loadavg is None and prelude is None:
         cmd = [sys.executable, script, *args]
-    else:  # fake a loaded machine: patch getloadavg, then run the script as __main__
-        cmd = [sys.executable, "-c",
-               "import os,runpy,sys;os.getloadavg=lambda:(%r,%r,%r);sys.argv=[%r]+sys.argv[1:];"
-               "runpy.run_path(%r,run_name='__main__')" % (loadavg, loadavg, loadavg, script, script),
-               *args]
+    else:  # patch the subprocess, then run the script as __main__
+        wrapper = "import os,runpy,sys\n"
+        if loadavg is not None:
+            wrapper += "os.getloadavg=lambda:(%r,%r,%r)\n" % (loadavg, loadavg, loadavg)
+        if prelude is not None:
+            wrapper += prelude + "\n"
+        wrapper += "sys.argv=[%r]+sys.argv[1:]\nrunpy.run_path(%r,run_name='__main__')" % (script, script)
+        cmd = [sys.executable, "-c", wrapper, *args]
     p = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=300, cwd=str(ROOT))
     return p, out, home
 
@@ -594,6 +597,68 @@ def test_harness_runs_and_refuses_to_pass_a_tiny_run(tmp_path):
     assert res["meta"]["decision_rows"] == 8 and res["meta"]["decision_rows_shadow"] >= 0
     assert not (home / DL.GATE_FILENAME).exists()
     assert "gate NOT written" in p.stdout
+
+
+def test_harness_drains_shadow_queue_before_cleanup(tmp_path, monkeypatch):
+    marker = tmp_path / "shadow-marker"
+    monkeypatch.setenv("MARKER_PATH", str(marker))
+    prelude = """
+import llm_router.engine as E
+import tempfile, os, threading
+release = threading.Event()
+real_shadow_run = E._shadow_run
+real_shadow_drain = E.shadow_drain
+real_exit = tempfile.TemporaryDirectory.__exit__
+
+def shadow_run(*args, **kwargs):
+    release.wait(30)
+    with open(os.environ["MARKER_PATH"], "a") as marker:
+        marker.write("1" if os.path.isdir(os.environ["LLM_ROUTER_HOME"]) else "0")
+    return real_shadow_run(*args, **kwargs)
+
+def shadow_drain(*args, **kwargs):
+    release.set()
+    return real_shadow_drain(*args, **kwargs)
+
+def temp_exit(self, *args, **kwargs):
+    result = real_exit(self, *args, **kwargs)
+    if self.name == os.environ["LLM_ROUTER_HOME"]:  # the harness's home, not the per-fixture dirs
+        release.set()
+    return result
+
+E._shadow_run = shadow_run
+E.shadow_drain = shadow_drain
+tempfile.TemporaryDirectory.__exit__ = temp_exit
+"""
+    p, out, _ = _run_harness(tmp_path, [], prelude=prelude)
+    assert p.returncode == 1, _diag(p)
+    assert out.exists(), _diag(p)
+    assert marker.exists(), _diag(p)
+    marks = marker.read_text()
+    assert "0" not in marks and "1" in marks, marks
+    res = json.loads(out.read_text())
+    assert res["meta"]["shadow_drain_ok"] is True
+
+
+def test_harness_baseexception_exits_2(tmp_path):
+    prelude = """
+import asyncio
+
+class Boom(BaseException):
+    pass
+
+def boom(coro, *args, **kwargs):
+    coro.close()
+    raise Boom("x")
+
+asyncio.run = boom
+"""
+    p, out, _ = _run_harness(tmp_path, [], prelude=prelude)
+    assert p.returncode == 2, _diag(p)
+    assert out.exists(), _diag(p)
+    res = json.loads(out.read_text())
+    assert "Boom" in res["meta"]["error"]
+    assert res["verdict"]["passed"] is False
 
 
 def test_harness_on_a_loaded_machine_fails_the_verdict_and_writes_out(tmp_path):
