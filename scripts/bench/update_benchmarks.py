@@ -21,7 +21,8 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-from llm_router.benchmark_fetcher import generate_benchmarks_json  # noqa: E402
+sys.path.insert(0, str(Path(__file__).parent))
+from benchmark_generator import generate_benchmarks_json  # noqa: E402
 
 # M-02: every row this script causes is benchmark traffic, not usage. Declared
 # here rather than inferred later -- `routing_quality.detect_synthetic` prefers

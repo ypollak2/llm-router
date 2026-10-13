@@ -100,7 +100,7 @@ def test_env_on_spawns_a_fetch_when_stale(state_dir, monkeypatch):
     sshook._maybe_refresh_benchmarks_bg()
     assert calls, "opted in, and no local file exists (stale) — a fetch must start"
     argv = calls[0][0][0]
-    assert "generate_benchmarks_json" in argv[-1]
+    assert "fetch_pinned_catalog" in argv[-1]
 
 
 def test_env_on_but_fresh_file_does_not_spawn_a_fetch(state_dir, monkeypatch):
