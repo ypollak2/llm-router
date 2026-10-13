@@ -104,3 +104,79 @@ def test_pack_error_fails_open(monkeypatch, rig):
     prompt, kw = rig["exec"][0]
     assert prompt == "implement foo"
     assert not kw.get("history") and not kw.get("context")
+
+
+# ── privacy gate (D-43) and single injection ────────────────────────────────
+
+MARK = "PRIVATE-TRANSCRIPT-MARKER"
+
+
+def _transcript(tmp_path):
+    t = tmp_path / "t.jsonl"
+    t.write_text(
+        f'{{"type":"user","message":{{"role":"user","content":"{MARK} q"}}}}\n'
+        f'{{"type":"assistant","message":{{"role":"assistant","content":"{MARK} a"}}}}\n')
+    return str(t)
+
+
+def _mixed(monkeypatch, mode):
+    monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", mode)
+    monkeypatch.setattr(cb, "build_chain", lambda *a, **k: [
+        de.ModelSpec("ollama", "fake"), de.ModelSpec("gemini", "fake")])
+
+
+def _leaked(rig):
+    _, kw = rig["exec"][0]
+    return MARK in repr(kw.get("history")) + repr(kw.get("context"))
+
+
+def test_local_mode_mixed_chain_withholds_session_content(monkeypatch, rig, tmp_path):
+    _mixed(monkeypatch, "local")
+    _hook()._try_direct_subagent("implement foo", "code", "simple", "s1",
+                                 transcript_path=_transcript(tmp_path))
+    assert len(rig["exec"]) == 1 and not _leaked(rig)
+
+
+def test_all_mode_mixed_chain_sends_session_content(monkeypatch, rig, tmp_path):
+    _mixed(monkeypatch, "all")
+    _hook()._try_direct_subagent("implement foo", "code", "simple", "s1",
+                                 transcript_path=_transcript(tmp_path))
+    assert _leaked(rig)
+
+
+def test_local_mode_all_local_chain_keeps_session_content(monkeypatch, rig, tmp_path):
+    monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "local")
+    _hook()._try_direct_subagent("implement foo", "code", "simple", "s1",
+                                 transcript_path=_transcript(tmp_path))
+    assert _leaked(rig)
+
+
+def test_inject_once_per_direct_run(monkeypatch, tmp_path):
+    import llm_router.context_injection as ci
+    calls = []
+
+    def _inject(request, **k):
+        calls.append(k.get("root"))
+        return "KNOWLEDGE\n\n" + request
+
+    spec = de.ModelSpec("gemini", "fake")
+    seen = []
+    monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")
+    monkeypatch.setattr(ci, "inject", _inject)
+    monkeypatch.setattr(cb, "build_chain", lambda *a, **k: [spec])
+    monkeypatch.setattr(cb, "get_current_pressure", lambda: ("green", 0.0))
+    monkeypatch.setattr(cb, "needs_claude_tools", lambda *a, **k: False)
+    monkeypatch.setattr(de, "_paid_budget_exhausted", lambda p: False)
+    monkeypatch.setattr(de, "_provider_reset_blocked", lambda p: False)
+    monkeypatch.setattr(de, "_okf_enrich", lambda *a, **k: None)
+    monkeypatch.setitem(de._PROVIDER_CALLS, "gemini",
+                        lambda prompt, m, t, h, s: (seen.append((prompt, s)) or "ok " * 30,
+                                                    {"input_tokens": 1, "output_tokens": 1}))
+    root = tmp_path / "proj"
+    root.mkdir()
+    out = _hook()._try_direct_subagent("implement foo", "code", "simple", "s1",
+                                       project_root=str(root))
+    assert out and len(calls) == 1
+    assert "KNOWLEDGE" in seen[0][1] and "KNOWLEDGE" not in seen[0][0]

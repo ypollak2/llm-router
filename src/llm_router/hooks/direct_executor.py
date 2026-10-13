@@ -743,6 +743,7 @@ def execute_chain(
     deadline_s: float | None = None,
     session_id: str | None = None,
     root: str | None = None,
+    okf_inject: bool = True,
 ) -> DirectResult | None:
     """Try each model in the chain until one returns a quality response.
 
@@ -773,8 +774,9 @@ def execute_chain(
     # The privacy gate needs the MOST external provider this prompt may reach.
     _target = next((m.provider for m in chain if m.provider not in _FREE_PROVIDERS),
                    "ollama")
-    prompt = _okf_inject(prompt, root=root, session_id=session_id,
-                         target_provider=_target)
+    if okf_inject:  # False when the caller's context pack already injected
+        prompt = _okf_inject(prompt, root=root, session_id=session_id,
+                             target_provider=_target)
 
     # Every abandonment below says WHY. It used to say nothing: six `continue`
     # paths all surfaced as one line, "DIRECT FAILED: falling through to

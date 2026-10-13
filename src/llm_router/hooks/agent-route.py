@@ -1307,16 +1307,20 @@ def _try_direct_subagent(
         chain = build_chain(complexity, zone, task_type)
         if not chain:
             return None
-        request, context, history, agent_context = prompt, None, None, None
+        request, context, history, agent_context, okf = prompt, None, None, None, True
         try:
             from llm_router.context_pack import build_pack
-            from llm_router.hooks.direct_executor import _local_num_ctx
+            from llm_router.hooks.direct_executor import _FREE_PROVIDERS, _local_num_ctx
 
+            # Privacy: the most external provider the chain may reach, because
+            # execute_chain hands the same history to every later model.
+            _target = next((m.provider for m in chain if m.provider not in _FREE_PROVIDERS),
+                           chain[0].provider)
             pack = build_pack(
                 prompt, session_id=ledger_session_id,
                 transcript_path=transcript_path, project_root=project_root,
                 target_window=(_local_num_ctx(chain[0].model) or 8192),
-                door="agent", target_provider=chain[0].provider,
+                door="agent", target_provider=_target,
             )
             context = pack.system or None
             history = pack.recent or None
@@ -1327,12 +1331,14 @@ def _try_direct_subagent(
                 part for part in (context, recent_context) if part
             ) or None
             request = pack.request
+            okf = not pack.project  # the pack's project layer already ran inject()
         except Exception:
-            request, context, history, agent_context = prompt, None, None, None
+            request, context, history, agent_context, okf = prompt, None, None, None, True
         if needs_claude_tools(prompt, task_type):
             result = execute_agent(request, chain, timeout=60, context=agent_context)  # Ollama tool-loop
         else:
-            result = execute_chain(request, chain, task_type, timeout=15, context=context, history=history)
+            result = execute_chain(request, chain, task_type, timeout=15, context=context, history=history,
+                                  okf_inject=okf)
     except Exception:
         return None
 
