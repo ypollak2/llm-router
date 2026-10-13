@@ -135,6 +135,22 @@ def full_max_tokens() -> int:
     return value if value > 0 else DEFAULT_FULL_MAX_TOKENS
 
 
+def _first_request_index(turns: list) -> int | None:
+    """Find the first human request, skipping users with only tool results."""
+    for i, turn in enumerate(turns):
+        if not isinstance(turn, dict) or turn.get("role") != "user":
+            continue
+        content = turn.get("content")
+        if isinstance(content, str) and content:
+            return i
+        if isinstance(content, list) and any(
+            not isinstance(block, dict) or block.get("type") != "tool_result"
+            for block in content
+        ):
+            return i
+    return None
+
+
 def _pack_messages(turns: list, window: int, shell: dict) -> tuple[str, list]:
     """Keep the request verbatim and untruncated, sent natively.
 
@@ -145,12 +161,15 @@ def _pack_messages(turns: list, window: int, shell: dict) -> tuple[str, list]:
     exchange natively. It can still exceed the window and is left to the
     existing guard (PayloadPack.trim_to / check_overflow in
     OllamaBackend.complete).
+    D-92 interim (remove when the P1.2 rolling summary exists): pack mode pins
+    the first user request verbatim when it is older than the recent window and
+    the native payload with it fits the window budget.
     target_provider="ollama" applies the session-context privacy rule:
     LLM_ROUTER_SESSION_CONTEXT=off empties history. Project/instructions
     layers are not built here (no project_root): proxy.okf_context.attach
     already attaches repository context after the trim.
     """
-    from llm_router import context_pack
+    from llm_router import context_pack, session_store
 
     request = context_pack.extract_turn_text(
         turns[-1].get("content"), keep_tools=True, cap=False).strip()
@@ -174,6 +193,17 @@ def _pack_messages(turns: list, window: int, shell: dict) -> tuple[str, list]:
             turns[-2].get("content"), keep_tools=True, cap=True).strip(),
     }:
         recent.pop()
+    # D-92 interim: remove when P1.2 summary exists.
+    i = _first_request_index(turns)
+    if (i is not None and i < len(turns) - 1 - context_pack.RECENT_N
+            and all(turns[i] is not message for message in tail)
+            and session_store.allows_session_content("ollama")):
+        messages = [turns[i]] + recent + tail
+        system = pack.system + "\n\n" + shell["system"] if pack.system else shell["system"]
+        candidate = dict(shell, messages=messages, system=system)
+        est = estimate_payload_tokens(to_ollama(candidate, "", num_ctx=window))
+        if est <= window - DEFAULT_RESERVED_OUTPUT_TOKENS:
+            return pack.system, messages
     return pack.system, recent + tail
 
 

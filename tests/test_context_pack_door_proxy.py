@@ -97,11 +97,12 @@ def test_tool_heavy_conversation_pack_mode(monkeypatch):
     body = _tool_heavy_body()
     before = json.dumps(body)
     turns = non_system(body["messages"])
-    out = backends.apply_trims(body, backends.resolve_trims("fast"), target_window=2048)
+    out = backends.apply_trims(body, backends.resolve_trims("fast"), target_window=32768)
     assert out["system"] == backends.CONDENSED_SYSTEM
     assert non_system(out["messages"])[-2:] == turns[-2:]
     assert out["messages"][-1]["content"][0]["content"] == "RESULT-9 " + "y" * 6000
-    recent = out["messages"][:-2]
+    assert out["messages"][0] == body["messages"][0]
+    recent = out["messages"][1:-2]
     assert len(recent) == 6
     assert all(isinstance(m["content"], str) for m in recent)
     assert [m["role"] for m in recent] == ["assistant", "user"] * 3  # a6 u6 a7 u7 a8 u8
@@ -141,6 +142,36 @@ def _pairs_body(rc, n=30):
                  "content": "z" * rc}]},
         ])
     return dict(_req(), messages=messages)
+
+
+def test_pack_mode_pins_the_first_user_request_verbatim():
+    body = _pairs_body(3000, n=30)
+    body["messages"][0]["content"] = [
+        {"type": "text", "text": "FIRST-ASK " + "q" * 500}]
+    out = backends.apply_trims(body, backends.resolve_trims("fast"), target_window=32768)
+    assert out["messages"] != non_system(body["messages"])
+    assert out["messages"][0] == body["messages"][0]
+    assert out["messages"].count(body["messages"][0]) == 1
+    check_overflow(to_ollama(out, "m", num_ctx=32768), num_ctx=32768)
+
+
+def test_pin_is_dropped_when_it_would_overflow():
+    body = _pairs_body(3000, n=30)
+    body["messages"][0]["content"] = [
+        {"type": "text", "text": "FIRST-ASK " + "q" * 120_000}]
+    out = backends.apply_trims(body, backends.resolve_trims("fast"), target_window=32768)
+    assert "FIRST-ASK" not in json.dumps(out["messages"])
+    assert out["messages"][-2:] == non_system(body["messages"])[-2:]
+
+
+def test_short_conversation_is_never_pinned_twice(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PROXY_FULL_CAP", "1000")
+    body = _req()
+    turns = non_system(body["messages"])
+    text = context_pack.extract_turn_text(turns[0]["content"], keep_tools=True, cap=False)
+    out = backends.apply_trims(body, backends.resolve_trims("fast"), target_window=32768)
+    assert out["messages"] != turns
+    assert sum(json.dumps(message).count(text) for message in out["messages"]) == 1
 
 
 def test_full_mode_never_overflows_the_native_payload(monkeypatch):
