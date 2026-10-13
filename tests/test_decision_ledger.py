@@ -640,6 +640,58 @@ tempfile.TemporaryDirectory.__exit__ = temp_exit
     assert res["meta"]["shadow_drain_ok"] is True
 
 
+def test_harness_error_path_drains_and_does_not_recreate_home(tmp_path, monkeypatch):
+    marker = tmp_path / "shadow-marker"
+    homefile = tmp_path / "home-path"
+    monkeypatch.setenv("MARKER_PATH", str(marker))
+    monkeypatch.setenv("HOMEFILE_PATH", str(homefile))
+    prelude = """
+import llm_router.engine as E
+import llm_router.decision_ledger as D
+import tempfile, os, threading
+release = threading.Event()
+real_shadow_run = E._shadow_run
+real_shadow_drain = E.shadow_drain
+real_exit = tempfile.TemporaryDirectory.__exit__
+
+class Boom(BaseException):
+    pass
+
+def gate_verdict(*a, **k):
+    raise Boom("gate")
+
+def shadow_run(*args, **kwargs):
+    release.wait(30)
+    home = os.environ["LLM_ROUTER_HOME"]
+    with open(os.environ["MARKER_PATH"], "a") as m:
+        m.write("1" if os.path.isdir(home) else "0")
+    open(os.environ["HOMEFILE_PATH"], "w").write(home)
+    return real_shadow_run(*args, **kwargs)
+
+def shadow_drain(*args, **kwargs):
+    release.set()
+    return real_shadow_drain(*args, **kwargs)
+
+def temp_exit(self, *args, **kwargs):
+    result = real_exit(self, *args, **kwargs)
+    if self.name == os.environ["LLM_ROUTER_HOME"]:
+        release.set()
+    return result
+
+D.gate_verdict = gate_verdict
+E._shadow_run = shadow_run
+E.shadow_drain = shadow_drain
+tempfile.TemporaryDirectory.__exit__ = temp_exit
+"""
+    p, out, _ = _run_harness(tmp_path, [], prelude=prelude)
+    assert p.returncode == 2, _diag(p)
+    res = json.loads(out.read_text())
+    assert "Boom" in res["meta"]["error"]
+    marks = marker.read_text() if marker.exists() else ""
+    assert "1" in marks and "0" not in marks, marks  # non-vacuous: writes happened, all before cleanup
+    assert not Path(homefile.read_text()).exists(), "harness home was re-created after cleanup"
+
+
 def test_harness_baseexception_exits_2(tmp_path):
     prelude = """
 import asyncio

@@ -226,6 +226,8 @@ async def run(kinds: list[str], sizes: list[int], n: int, warmup: int) -> dict:
     results["meta"]["shadow_drain_ok"] = engine.shadow_drain()
     if not results["meta"]["shadow_drain_ok"]:
         results["meta"]["shadow_drain_error"] = "engine shadow queue not drained within timeout"
+        results["verdict"]["passed"] = False  # never write a gate on a run whose shadow writes were still pending
+        results["verdict"]["reason"] = results["meta"]["shadow_drain_error"]
     rows = DL.read_ledger()
     results["meta"]["decision_rows"] = len(rows)
     results["meta"]["decision_rows_shadow"] = sum(1 for r in rows if r.get("shadow"))
@@ -247,19 +249,25 @@ def main() -> None:
     ap.add_argument("--gate", action="store_true",
                     help="write p17c_gate.json into the real state dir if the P1.7-c verdict passes")
     a = ap.parse_args()
+    final_drain_ok = True
     real_gate = DL.gate_path()  # resolved BEFORE the run redirects the state dir
     try:
         with tempfile.TemporaryDirectory() as home:
             os.environ["LLM_ROUTER_HOME"] = home
             os.environ["LLM_ROUTER_DECISION_SHADOW_RATE"] = str(DL.RATE_MAX)
             engine.clear_cache(persistent=False)
-            res = asyncio.run(run(a.fixtures.split(","), [int(x) for x in a.sizes.split(",")], a.n, a.warmup))
+            try:
+                res = asyncio.run(run(a.fixtures.split(","), [int(x) for x in a.sizes.split(",")], a.n,
+                                      a.warmup))
+            finally:  # also on error: a late shadow write must not re-create the removed home
+                final_drain_ok = engine.shadow_drain()
     except BaseException as e:  # harness error: an uncaught one would exit 1 == "verdict failed"
         if isinstance(e, (KeyboardInterrupt, SystemExit)):
             raise
         err = "harness error: %s: %s" % (type(e).__name__, e)
         res = {"rows": [], "meta": {"error": traceback.format_exc()},
                "verdict": {"passed": False, "reason": err}}
+        res["meta"]["shadow_drain_ok"] = final_drain_ok
         print(err, file=sys.stderr)
         if a.out:
             Path(a.out).write_text(json.dumps(res, indent=1))
