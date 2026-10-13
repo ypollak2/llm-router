@@ -3318,7 +3318,6 @@ async def _dispatch_model_loop(
                         caller_context=caller_context,
                         user_prompt=user_prompt,
                         scope_root=scope_root,
-                        chain=models_to_try,
                         use_thinking=use_thinking,
                         correlation_id=correlation_id,
                     )
@@ -3770,7 +3769,6 @@ async def _dispatch_model_loop(
                             caller_context=caller_context,
                             user_prompt=user_prompt,
                             scope_root=scope_root,
-                            chain=emergency_chain,
                             use_thinking=use_thinking,
                             correlation_id=correlation_id,
                         )
@@ -5396,19 +5394,14 @@ async def route_and_call(
         return response
 
 
-def _pack_target_provider(model: str, chain: list[str] | None) -> str:
-    """Gate session content for every provider the fallback chain can reach."""
-    from llm_router import session_store
+# Non-ollama target window for the pack; real per-model windows arrive with the registry.
+_MCP_NON_LOCAL_WINDOW = 8192
+_MCP_SUMMARY_ONLY_MAX_TOKENS = 500
 
-    candidates = list(chain or [model])
-    if model not in candidates:
-        candidates.append(model)
-    providers_in_chain = [provider_from_model(m) for m in candidates]
-    return next(
-        (provider for provider in providers_in_chain
-         if provider not in session_store.LOCAL_PROVIDERS),
-        providers_in_chain[0],
-    )
+
+def _pack_target_provider(model: str) -> str:
+    """Return the provider receiving this attempt's session content."""
+    return provider_from_model(model)
 
 
 async def _call_text(
@@ -5422,17 +5415,16 @@ async def _call_text(
     caller_context: str | None = None,
     user_prompt: str | None = None,
     scope_root: str | None = None,
-    chain: list[str] | None = None,
     use_thinking: bool = False,
     correlation_id: str | None = None,
 ) -> LLMResponse:
     """Dispatch a text completion call through LiteLLM's unified API.
 
     Builds the messages list with the shared MCP context pack:
-      [system_prompt?] → [pack.system?] → [pack.recent...] → [request]
+      [system_prompt?] → [pack.system?] → [context...] → [recent...] → [request]
 
-    Session content is gated across the fallback chain. When the pack supplies
-    project context, its raw request avoids duplicating injected context.
+    Session content is built and gated per attempt. Reuse the project block
+    already injected for this turn; explicit caller context supplements history.
     Pack failures fall back to the original prompt without context.
 
     Args:
@@ -5443,10 +5435,9 @@ async def _call_text(
         max_tokens: Maximum output tokens (None = provider default).
         task_type: Used to inject task-specific parameters (e.g. research
             tasks add a recency filter for Perplexity).
-        caller_context: Context fallback when no session transcript is found.
+        caller_context: Explicit context, deduplicated against transcript turns.
         user_prompt: Raw request before project context injection.
         scope_root: Explicit project root for the pack's project layer.
-        chain: Fallback models used to gate session-content privacy.
 
     Returns:
         An ``LLMResponse`` with the generated text, cost, and latency.
@@ -5475,26 +5466,55 @@ async def _call_text(
     context_enabled = getattr(config, "context_enabled", True)
     if isinstance(context_enabled, bool) and context_enabled:
         try:
-            from llm_router import call_identity, context_pack, local_models
+            from llm_router import call_identity, context_pack, local_models, session_store
 
             request = user_prompt if user_prompt is not None else prompt
+            project = ""
+            if user_prompt is not None and prompt != user_prompt and prompt.endswith(user_prompt):
+                project = prompt[:-len(user_prompt)].strip()
+            provider = _pack_target_provider(model)
+            allowed = session_store.allows_session_content(provider)
             pack = context_pack.build_pack(
                 request,
                 session_id=call_identity.call_session_id(),
                 project_root=scope_root,
                 target_window=(local_models.num_ctx(model.split("/", 1)[1])
-                               if model.startswith("ollama/") else 8192),
+                               if model.startswith("ollama/") else _MCP_NON_LOCAL_WINDOW),
                 door="mcp",
-                context=caller_context,
-                target_provider=_pack_target_provider(model, chain),
+                project=project,
+                target_provider=provider,
             )
             pack_messages = []
             if pack.system:
                 pack_messages.append({"role": "system", "content": pack.system})
-            pack_messages.extend(pack.recent)
-            final_content = pack.request if pack.project else prompt
+            additional = caller_context
+            if additional and any(additional.strip() in m["content"] for m in pack.recent):
+                additional = None
+            if allowed:
+                context_tokens = getattr(config, "context_max_tokens", 1500)
+                if pack.recent:
+                    context_tokens = min(context_tokens, _MCP_SUMMARY_ONLY_MAX_TOKENS)
+                pack_messages.extend(await build_context_messages(
+                    caller_context=additional,
+                    query=request,
+                    include_current_session=not bool(pack.recent),
+                    max_session_messages=getattr(config, "context_max_messages", 5),
+                    max_previous_sessions=getattr(config, "context_max_previous_sessions", 3),
+                    max_context_tokens=context_tokens,
+                    is_free_model=provider in ("ollama", "gemini_cli"),
+                    target_provider=provider,
+                    project_root=scope_root,
+                ))
+            elif additional:
+                pack_messages.append({
+                    "role": "system", "content": "[Additional context]\n" + additional,
+                })
+            recent = list(pack.recent)
+            while recent and recent[0]["role"] == "assistant":
+                recent.pop(0)
+            pack_messages.extend(recent)
             messages.extend(pack_messages)
-            user_content = final_content
+            user_content = pack.request
         except Exception as exc:
             from llm_router import failopen
             failopen.record("CHZ-FO-ROUTER-MCP-PACK", exc)
