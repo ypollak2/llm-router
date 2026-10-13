@@ -402,7 +402,14 @@ def _gather(door: str, *, messages: list | None = None, transcript_path: str | N
             return _from_list(messages)
         if door == "codex":
             if transcript_path:
-                return _transcript(transcript_path, codex=True)
+                # A missing or unreadable rollout file falls back to the
+                # caller's messages; it never raises (P1.1 door 4).
+                try:
+                    got, complete = _transcript(transcript_path, codex=True)
+                except OSError:
+                    got, complete = [], False
+                if got or messages is None:
+                    return got, complete
             return _from_list(messages)
         if door == "mcp":
             if not transcript_path:

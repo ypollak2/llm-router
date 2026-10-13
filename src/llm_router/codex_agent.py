@@ -18,6 +18,9 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+# Default context window budget for Codex packs.
+CODEX_TARGET_WINDOW = 200_000
+
 CODEX_PATHS = [
     "/Applications/Codex.app/Contents/Resources/codex",
     os.path.expanduser("~/.local/bin/codex"),
@@ -297,6 +300,21 @@ class CodexResult:
         return self.exit_code == 0
 
 
+def _render_pack_prompt(pack) -> str:
+    """Flatten pack messages while preserving the final request verbatim."""
+    from llm_router.context_pack import to_messages
+
+    messages = to_messages(pack)
+    parts = []
+    for index, message in enumerate(messages[:-1]):
+        if index == 0 and pack.system:
+            parts.append(message["content"])
+        else:
+            parts.append(f'[{message["role"]}]\n{message["content"]}')
+    parts.append(messages[-1]["content"])
+    return "\n\n".join(parts)
+
+
 async def run_codex(
     prompt: str,
     model: str = "gpt-5.5",
@@ -304,6 +322,9 @@ async def run_codex(
     timeout: int | None = None,
     on_event: "Callable[[str, str], Awaitable[None]] | None" = None,
     context_root: str | None = None,
+    messages: list | None = None,
+    transcript_path: str | None = None,
+    target_window: int = CODEX_TARGET_WINDOW,
 ) -> CodexResult:
     """Run a task through the Codex CLI agent as a subprocess.
 
@@ -350,8 +371,18 @@ async def run_codex(
     from llm_router.safe_subprocess import get_safe_env
 
     try:
-        from llm_router.context_injection import inject
-        prompt = inject(prompt, root=context_root if context_root is not None else working_dir)
+        from llm_router.context_pack import build_pack
+
+        pack = build_pack(
+            prompt,
+            messages,
+            transcript_path=transcript_path,
+            project_root=(context_root if context_root is not None else working_dir),
+            target_window=target_window,
+            door="codex",
+            target_provider="codex",
+        )
+        prompt = _render_pack_prompt(pack)
     except Exception:                                        # noqa: BLE001
         pass
 
