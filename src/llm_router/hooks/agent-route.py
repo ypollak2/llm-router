@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 21
+# llm_router-hook-version: 22
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -1268,6 +1268,7 @@ def _with_routing_note(tool_input: dict) -> dict:
 def _try_direct_subagent(
     prompt: str, task_type: str, complexity: str, session_id: str,
     subagent_type: str = "general-purpose", ledger_session_id: str | None = None,
+    transcript_path: str | None = None, project_root: str | None = None,
 ) -> str | None:
     """Run the subagent's task on a routed cheap model instead of spawning Opus.
 
@@ -1306,10 +1307,32 @@ def _try_direct_subagent(
         chain = build_chain(complexity, zone, task_type)
         if not chain:
             return None
+        request, context, history, agent_context = prompt, None, None, None
+        try:
+            from llm_router.context_pack import build_pack
+            from llm_router.hooks.direct_executor import _local_num_ctx
+
+            pack = build_pack(
+                prompt, session_id=ledger_session_id,
+                transcript_path=transcript_path, project_root=project_root,
+                target_window=(_local_num_ctx(chain[0].model) or 8192),
+                door="agent", target_provider=chain[0].provider,
+            )
+            context = pack.system or None
+            history = pack.recent or None
+            recent_context = "\n\n".join(
+                f"[{turn['role']}]\n{turn['content']}" for turn in pack.recent
+            )
+            agent_context = "\n\n".join(
+                part for part in (context, recent_context) if part
+            ) or None
+            request = pack.request
+        except Exception:
+            request, context, history, agent_context = prompt, None, None, None
         if needs_claude_tools(prompt, task_type):
-            result = execute_agent(prompt, chain, timeout=60)  # Ollama tool-loop
+            result = execute_agent(request, chain, timeout=60, context=agent_context)  # Ollama tool-loop
         else:
-            result = execute_chain(prompt, chain, task_type, timeout=15)
+            result = execute_chain(request, chain, task_type, timeout=15, context=context, history=history)
     except Exception:
         return None
 
@@ -2305,7 +2328,9 @@ def main() -> None:
     # are logged (host=claude_code_subagent). Falls through on any failure.
     with _hl_phase("direct_subagent"):  # routed model time when it runs
         _routed = (_try_direct_subagent(prompt, task_type, complexity, session_id, subagent_type,
-                                        ledger_session_id=hook_input.get("session_id"))
+                                        ledger_session_id=hook_input.get("session_id"),
+                                        transcript_path=hook_input.get("transcript_path"),
+                                        project_root=hook_input.get("cwd"))
                    if _qb_allowed else None)
     if not _qb_allowed:
         _log_agent_call(subagent_type, prompt,
