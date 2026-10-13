@@ -3316,6 +3316,8 @@ async def _dispatch_model_loop(
                     response = await _call_text(
                         model, prompt, system_prompt, temperature, max_tokens, task_type,
                         caller_context=caller_context,
+                        user_prompt=user_prompt,
+                        scope_root=scope_root,
                         use_thinking=use_thinking,
                         correlation_id=correlation_id,
                     )
@@ -3765,6 +3767,8 @@ async def _dispatch_model_loop(
                         response = await _call_text(
                             model, prompt, system_prompt, temperature, max_tokens, task_type,
                             caller_context=caller_context,
+                            user_prompt=user_prompt,
+                            scope_root=scope_root,
                             use_thinking=use_thinking,
                             correlation_id=correlation_id,
                         )
@@ -5390,6 +5394,16 @@ async def route_and_call(
         return response
 
 
+# Non-ollama target window for the pack; real per-model windows arrive with the registry.
+_MCP_NON_LOCAL_WINDOW = 8192
+_MCP_SUMMARY_ONLY_MAX_TOKENS = 500
+
+
+def _pack_target_provider(model: str) -> str:
+    """Return the provider receiving this attempt's session content."""
+    return provider_from_model(model)
+
+
 async def _call_text(
     model: str,
     prompt: str,
@@ -5399,16 +5413,19 @@ async def _call_text(
     task_type: TaskType,
     *,
     caller_context: str | None = None,
+    user_prompt: str | None = None,
+    scope_root: str | None = None,
     use_thinking: bool = False,
     correlation_id: str | None = None,
 ) -> LLMResponse:
     """Dispatch a text completion call through LiteLLM's unified API.
 
-    Builds the messages list with optional context injection:
-      [system_prompt?] → [context_messages...] → [user_prompt]
+    Builds the messages list with the shared MCP context pack:
+      [system_prompt?] → [pack.system?] → [context...] → [recent...] → [request]
 
-    Context messages include previous session summaries and recent
-    conversation history, assembled by ``build_context_messages()``.
+    Session content is built and gated per attempt. Reuse the project block
+    already injected for this turn; explicit caller context supplements history.
+    Pack failures fall back to the original prompt without context.
 
     Args:
         model: LiteLLM model identifier (e.g. ``"openai/gpt-4o"``).
@@ -5418,7 +5435,9 @@ async def _call_text(
         max_tokens: Maximum output tokens (None = provider default).
         task_type: Used to inject task-specific parameters (e.g. research
             tasks add a recency filter for Perplexity).
-        caller_context: Optional caller-supplied context string.
+        caller_context: Explicit context, deduplicated against transcript turns.
+        user_prompt: Raw request before project context injection.
+        scope_root: Explicit project root for the pack's project layer.
 
     Returns:
         An ``LLMResponse`` with the generated text, cost, and latency.
@@ -5442,25 +5461,65 @@ async def _call_text(
                     # Invalid caveman mode — skip
                     pass
 
-    # Inject session + persistent context between system prompt and user prompt
-    # Guard: context_enabled may be MagicMock in test mocks
+    # Guard: context_enabled may be MagicMock in test mocks.
+    user_content = prompt
     context_enabled = getattr(config, "context_enabled", True)
     if isinstance(context_enabled, bool) and context_enabled:
-        _is_free = model.startswith("ollama/") or model.startswith("codex/") or model.startswith("gemini_cli/")
-        _target_provider = model.split("/", 1)[0] if "/" in model else None
-        context_msgs = await build_context_messages(
-            # CHZ-AUD-B-01: fall back to the LIVE prompt so keyword-relevance
-            # retrieval fires even when the caller passes no explicit context.
-            caller_context=caller_context or prompt,
-            max_session_messages=getattr(config, "context_max_messages", 5),
-            max_previous_sessions=getattr(config, "context_max_previous_sessions", 3),
-            max_context_tokens=getattr(config, "context_max_tokens", 1500),
-            is_free_model=_is_free,
-            target_provider=_target_provider,
-        )
-        messages.extend(context_msgs)
+        try:
+            from llm_router import call_identity, context_pack, local_models, session_store
 
-    messages.append({"role": "user", "content": prompt})
+            request = user_prompt if user_prompt is not None else prompt
+            project = ""
+            if user_prompt is not None and prompt != user_prompt and prompt.endswith(user_prompt):
+                project = prompt[:-len(user_prompt)].strip()
+            provider = _pack_target_provider(model)
+            allowed = session_store.allows_session_content(provider)
+            pack = context_pack.build_pack(
+                request,
+                session_id=call_identity.call_session_id(),
+                project_root=scope_root,
+                target_window=(local_models.num_ctx(model.split("/", 1)[1])
+                               if model.startswith("ollama/") else _MCP_NON_LOCAL_WINDOW),
+                door="mcp",
+                project=project,
+                target_provider=provider,
+            )
+            pack_messages = []
+            if pack.system:
+                pack_messages.append({"role": "system", "content": pack.system})
+            additional = caller_context
+            if additional and any(additional.strip() in m["content"] for m in pack.recent):
+                additional = None
+            if allowed:
+                context_tokens = getattr(config, "context_max_tokens", 1500)
+                if pack.recent:
+                    context_tokens = min(context_tokens, _MCP_SUMMARY_ONLY_MAX_TOKENS)
+                pack_messages.extend(await build_context_messages(
+                    caller_context=additional,
+                    query=request,
+                    include_current_session=not bool(pack.recent),
+                    max_session_messages=getattr(config, "context_max_messages", 5),
+                    max_previous_sessions=getattr(config, "context_max_previous_sessions", 3),
+                    max_context_tokens=context_tokens,
+                    is_free_model=provider in ("ollama", "gemini_cli"),
+                    target_provider=provider,
+                    project_root=scope_root,
+                ))
+            elif additional:
+                pack_messages.append({
+                    "role": "system", "content": "[Additional context]\n" + additional,
+                })
+            recent = list(pack.recent)
+            while recent and recent[0]["role"] == "assistant":
+                recent.pop(0)
+            pack_messages.extend(recent)
+            messages.extend(pack_messages)
+            user_content = pack.request
+        except Exception as exc:
+            from llm_router import failopen
+            failopen.record("CHZ-FO-ROUTER-MCP-PACK", exc)
+
+    messages.append({"role": "user", "content": user_content})
 
     extra = {}
     # Perplexity's sonar models support a recency filter that limits

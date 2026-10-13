@@ -611,14 +611,18 @@ def build_pack(request: str, messages: list | None = None, *,
                session_id: str | None = None, transcript_path: str | None = None,
                project_root: str | None = None, target_window: int,
                door: str, context: str | None = None,
-               target_provider: str | None = None) -> ContextPack:
+               target_provider: str | None = None,
+               project: str | None = None) -> ContextPack:
     """Build the context pack for one request at one door.
 
     ``context`` is a caller-supplied context string (the MCP ``llm(context=)``
     argument). It is used only when no transcript is found and is never the
     whole conversation, so it never qualifies the pack for ``mode="full"``.
-    The MCP recipe is ``build_pack(prompt, session_id=sid, context=ctx,
-    door="mcp", ...)``. ``messages`` means "this list IS the conversation".
+    ``messages`` means "this list IS the conversation". The MCP door adds
+    caller context separately and passes its already-injected project layer.
+
+    ``project`` overrides the project layer verbatim when supplied, including
+    an empty string; only ``None`` invokes ``_project`` and context injection.
 
     ``target_provider`` is the privacy hook for doors: when given, ``recent``
     (session content) is emptied unless ``session_store.allows_session_content``
@@ -646,7 +650,8 @@ def build_pack(request: str, messages: list | None = None, *,
         msgs = msgs[:-1]
 
     instructions = _instructions(project_root)
-    project = _project(request, project_root, session_id)
+    if project is None:
+        project = _project(request, project_root, session_id)
 
     try:
         window = int(target_window)
