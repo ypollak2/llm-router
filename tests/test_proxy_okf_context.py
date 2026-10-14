@@ -455,4 +455,25 @@ async def test_a_failing_trim_is_still_a_counted_fallback(home, tmp_path, policy
     r = await _post(_app(tmp_path, up, backend), _request(repo))
     assert r.status_code == 200 and backend.calls == [] and len(up.requests) == 1
     row = json.loads((tmp_path / "proxy_calls.jsonl").read_text().splitlines()[-1])
-    assert row["decision"] == "fallback"
+    assert (row["decision"], row["reason"], row["detail"]) == (
+        "fallback", "backend_error", "RuntimeError: trim exploded")
+    assert "trim" not in (row.get("tier_phases_ms") or {})
+
+
+@pytest.mark.timing
+async def test_a_trim_that_cannot_get_a_thread_is_bounded_by_the_step_budget(home, tmp_path, policy,
+                                                                             monkeypatch):
+    """A stuck default thread pool (okf attaches outliving their timeout) must not hang the step."""
+    import time as _time
+
+    from llm_router.proxy import server as proxy_server
+
+    monkeypatch.setattr(proxy_server, "apply_trims", lambda *a, **k: (_time.sleep(1.0), a[0])[1])
+    repo = _repo(tmp_path, "repo-a")
+    backend, up = _Backend(), _Upstream()
+    t0 = _time.monotonic()
+    r = await _post(_app(tmp_path, up, backend, step_budget_s=0.2), _request(repo))
+    assert r.status_code == 200 and backend.calls == [] and len(up.requests) == 1
+    assert _time.monotonic() - t0 < 0.9
+    row = json.loads((tmp_path / "proxy_calls.jsonl").read_text().splitlines()[-1])
+    assert (row["decision"], row["reason"]) == ("fallback", "budget_exceeded")

@@ -456,12 +456,15 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                     src, checks = local_mode.annotate_failed_checks(body, lm, la_session_cwd(body))
                     if checks:
                         row["post_apply_checks"] = checks
-                # Off the event loop (D-94(a)): the ``fast`` trim builds the context pack,
-                # which reads the session and estimates tokens over the whole prompt. An
-                # error still reaches the counted-fallback handler below.
+                # Off the event loop (D-94(a)): the ``fast`` trim builds the context pack
+                # and estimates tokens over the whole prompt. Bounded by the step budget,
+                # since it shares the default thread pool with okf attaches that may outlive
+                # their own timeout: a stuck pool is a budget_exceeded fallback, never a hang.
+                # An error still reaches the counted-fallback handler below.
                 trim_t0 = time.perf_counter()
-                send = await asyncio.to_thread(
-                    apply_trims, src, trims, target_window=getattr(backend, "num_ctx", None))
+                send = await asyncio.wait_for(asyncio.to_thread(
+                    apply_trims, src, trims, target_window=getattr(backend, "num_ctx", None)),
+                    timeout=cfg.step_budget_s)
                 _add_phase(row, "trim", (time.perf_counter() - trim_t0) * 1000.0)
             # Repo knowledge for the local model (proxy.okf_context): the trimmed
             # request is all it sees. Local path only, never the pass-through;
