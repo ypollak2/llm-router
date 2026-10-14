@@ -141,16 +141,16 @@ def test_gateway_writer_literal_is_still_exempted() -> None:
 
 
 def test_sdk_writer_literal_is_still_exempted() -> None:
-    path = _REPO_ROOT / "src" / "llm_router" / "sdk.py"
-    src = path.read_text()
-    m = _SDK_WRITER_RE.search(src)
-    assert m, (
-        "sdk.py's log_direct_savings call changed shape — update _SDK_WRITER_RE "
-        "in this test, then re-check the literal it emits"
+    """P1.10: sdk.py generates ``sdk-<12 hex>`` instead of stamping the literal ``sdk``;
+    that generated id must stay a production id, not a fixture."""
+    from llm_router import sdk
+
+    src = (_REPO_ROOT / "src" / "llm_router" / "sdk.py").read_text()
+    assert 'session_id="sdk"' not in src, "sdk.py stamps the placeholder again"
+    sdk._PROCESS_SESSION = None
+    sid = sdk._sdk_session_id(None)
+    assert is_synthetic_session(sid) is False, (
+        f"sdk.py now generates session ids like {sid!r}, which the fixture rules flag — "
+        f"update _PRODUCTION_WRITER_SESSION_RE in llm_router/groundtruth_sources.py"
     )
-    literal = m.group(1)
-    assert is_synthetic_session(literal) is False, (
-        f"sdk.py now stamps SDK traffic with session_id={literal!r}, a NEW "
-        f"non-hex id not in _PRODUCTION_WRITER_SESSION_IDS — add it to the "
-        f"allowlist in scripts/groundtruth/sources.py with its row count"
-    )
+    assert is_synthetic_session("sdk-feedface-typed") is True   # a hand-typed one still is

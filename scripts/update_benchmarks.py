@@ -21,7 +21,8 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-from llm_router.benchmark_fetcher import generate_benchmarks_json  # noqa: E402
+sys.path.insert(0, str(Path(__file__).parent / "bench"))
+from benchmark_generator import generate_benchmarks_json  # noqa: E402
 
 if __name__ == "__main__":
     try:

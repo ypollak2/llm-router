@@ -116,6 +116,8 @@ from __future__ import annotations
 import bisect
 from typing import Any, Iterable
 
+from llm_router.call_identity import is_unknown_session
+
 CLASS_HAIKU = "haiku"
 CLASS_LOCAL = "local"
 CLASS_CLAUDE = "claude"
@@ -466,7 +468,7 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
         sid = stamp
         if ev is not None and isinstance(ev.get("session_id"), str) and ev["session_id"]:
             sid = ev["session_id"]  # the transcript's own session id wins over the stamp
-        if not (isinstance(sid, str) and sid):
+        if is_unknown_session(sid):
             local_no_session += 1  # cannot be scoped to organic: counted, never guessed
             continue
         if not admit(sid, None, local=True):

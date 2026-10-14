@@ -342,3 +342,25 @@ def test_outputs_carry_no_message_text(replay):
     for _, md, raw in replay[1]:
         for t in texts:
             assert t not in md and t not in raw
+
+
+def test_a_poller_started_before_the_run_cannot_probe_ollama_through_the_guard(tmp_path, monkeypatch):
+    """CI-only failure, 2026-10-12: any test that imports llm_router.server leaves the map
+    re-discovery poller ticking in the pytest worker; its probe of 127.0.0.1:11434 landed
+    inside a later replay and counted as a network violation (rc 1)."""
+    from llm_router import map_rediscovery as mr
+    monkeypatch.setattr(mr, "_default_poller", None)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "home"))
+    probes = []
+
+    def probe(**kw):
+        probes.append(1)
+        with pytest.raises(OSError):                   # refused by the guard or nothing listening
+            socket.create_connection(("127.0.0.1", 11434), 0.2)
+
+    monkeypatch.setattr(mr, "_default_poller", mr.Poller(0.05, probe, None, {}).start())
+    time.sleep(0.3)
+    assert sr.run(FIXTURE, tmp_path / "out", {"gateway"}, sessions=1, work=tmp_path) == 0
+    n = len(probes)
+    time.sleep(0.3)
+    assert len(probes) == n                            # no tick after the run began

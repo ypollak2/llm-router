@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 33
+# llm_router-hook-version: 36
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -1312,6 +1312,38 @@ def _run_background_usage_refresh_entrypoint() -> None:
     _refresh_claude_usage()
 
 
+def _read_claude_oauth(timeout, env=None):
+    """Claude OAuth info via claude_creds (the one keychain/credentials reader), or None.
+
+    Prefers the importable package; else the stdlib-only copy the installer drops
+    next to the hooks, else the in-repo source. Never raises.
+    """
+    try:
+        from llm_router import claude_creds as _cc
+    except ImportError:
+        _cc = None
+        try:
+            import importlib.util as _ilu
+            from pathlib import Path as _P
+            _here = _P(__file__).resolve().parent
+            for _cand in (_here / "llm_router_claude_creds.py", _here.parent / "claude_creds.py",
+                          _here.parents[1] / "src" / "llm_router" / "claude_creds.py"):
+                if _cand.exists():
+                    _spec = _ilu.spec_from_file_location("llm_router_claude_creds", _cand)
+                    _cc = _ilu.module_from_spec(_spec)
+                    _spec.loader.exec_module(_cc)
+                    break
+        except Exception:  # noqa: BLE001 -- a broken support module must not kill the hook
+            _cc = None
+    if _cc is None:
+        return None
+    try:
+        return _cc.read_oauth(timeout=timeout, env=env)
+    except Exception:  # noqa: BLE001 -- read_oauth does not raise; belt and braces
+        _cc = None
+    return None
+
+
 def _refresh_claude_usage_attempt() -> dict:
     """Single attempt to fetch Claude subscription usage via OAuth.
     
@@ -1319,16 +1351,9 @@ def _refresh_claude_usage_attempt() -> dict:
         {"success": True, "session_pct": X, "weekly_pct": Y, "sonnet_pct": Z, "highest_pressure": P}
         or {"success": False} on any error
     """
-    # Read OAuth token from macOS Keychain
+    # Read OAuth token (macOS keychain, else ~/.claude/.credentials.json)
     try:
-        r = subprocess.run(
-            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-            capture_output=True, text=True, timeout=subprocess_timeout(),
-        )
-        if r.returncode != 0 or not r.stdout.strip():
-            return {"success": False}
-        creds = json.loads(r.stdout.strip())
-        token = creds.get("claudeAiOauth", {}).get("accessToken", "")
+        token = (_read_claude_oauth(subprocess_timeout()) or {}).get("accessToken", "")
         if not token:
             return {"success": False}
     except Exception:
@@ -1849,9 +1874,9 @@ def _maybe_refresh_benchmarks_bg() -> None:
         return
 
     script = (
-        "from llm_router.benchmark_fetcher import generate_benchmarks_json; "
+        "from llm_router.benchmark_fetcher import fetch_pinned_catalog; "
         f"from pathlib import Path; "
-        f"generate_benchmarks_json(output_path=Path('{benchmarks_path}'))"
+        f"fetch_pinned_catalog(Path('{benchmarks_path}'))"
     )
     try:
         subprocess.Popen(
@@ -1942,6 +1967,22 @@ def _maybe_reindex_okf_bg(cwd: str | None = None) -> None:
                 stderr=errfh,
                 start_new_session=True,
             )
+    except Exception:
+        pass                # never block session start
+
+
+def _maybe_refresh_semantic_bg(cwd: str | None = None) -> None:
+    """Index files a previous session edited but never reached the 10-file threshold for.
+
+    PLAN v16 P1.5 task 2. The PostToolUse hook queues edited paths and re-indexes
+    every 10; whatever is left in the queue when a session ends is picked up here,
+    in a detached child, so the first prompt is never delayed. A no-op when nothing
+    is queued.
+    """
+    try:
+        from llm_router.semantic import refresh
+
+        refresh.maybe_spawn(cwd or os.getcwd(), minimum=1)
     except Exception:
         pass                # never block session start
 
@@ -2143,6 +2184,7 @@ def _run_background_session_work(cwd: str, session_id: str = "") -> None:
 
     _step(_maybe_refresh_benchmarks_bg)
     _step(_maybe_reindex_okf_bg, cwd)
+    _step(_maybe_refresh_semantic_bg, cwd)
     _step(_warm_edit_model_bg)
     _step(_warm_ollama_bg)
     _step(_drain_judge_queue_bg)

@@ -100,32 +100,23 @@ async def llm_refresh_claude_usage() -> str:
     import json as _json
     import urllib.request
 
+    from llm_router.claude_creds import read_oauth
     from llm_router.claude_usage import parse_oauth_response, set_claude_pressure
-    from llm_router.safe_subprocess import safe_subprocess_run
+    from llm_router.safe_subprocess import get_safe_env
 
-    # ── Step 1: read OAuth token from macOS Keychain (using safe subprocess) ──
+    # ── Step 1: read OAuth token (macOS Keychain, else ~/.claude/.credentials.json) ──
     try:
-        r = safe_subprocess_run(
-            "security", "find-generic-password", "-s", "Claude Code-credentials", "-w",
-            capture_output=True, text=True, timeout=8,
-        )
-        if r.returncode != 0 or not r.stdout.strip():
-            return (
-                "Could not read Claude Code credentials from Keychain.\n"
-                "Make sure Claude Code is installed and you are signed in."
-            )
-        creds = _json.loads(r.stdout.strip())
-        token = creds.get("claudeAiOauth", {}).get("accessToken", "")
-        if not token:
-            return "OAuth token not found in Keychain credentials. Try signing out and back into Claude Code."
+        creds = read_oauth(timeout=8, env=get_safe_env())
     except Exception as e:
-        if "TimeoutExpired" in str(type(e)):
-            return "Keychain read timed out."
-        elif "JSONDecodeError" in str(type(e)):
-            return f"Could not parse Keychain credentials: {e}"
-        elif "FileNotFoundError" in str(type(e)):
-            return "`security` command not available — macOS only."
         return f"Keychain error: {e}"
+    if creds is None:
+        return (
+            "Could not read Claude Code credentials (macOS Keychain or ~/.claude/.credentials.json).\n"
+            "Make sure Claude Code is installed and you are signed in."
+        )
+    token = creds.get("accessToken", "")
+    if not token:
+        return "OAuth token not found in Claude Code credentials. Try signing out and back into Claude Code."
 
     # ── Step 2: call the OAuth usage API ─────────────────────────────────────
     url = "https://api.anthropic.com/api/oauth/usage"

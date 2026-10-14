@@ -35,7 +35,9 @@ LOAD (PLAN v16 P0.9-g). A hook row also carries ``load1``, the 1-minute load
 average (``os.getloadavg()[0]``) read in the exit handler after the clock has
 stopped, so it is not inside ``elapsed_ms``. A reader excludes and counts rows
 above the contention bar (``hook_wall.MAX_LOAD``) instead of averaging over a
-burst (AMEND R8 A.3). ``record-raw`` rows (the statusline) do not carry it.
+burst (AMEND R8 A.3). ``record-raw`` rows (the statusline) also carry it, read
+in the backgrounded record-raw process after the statusline clock stopped:
+no extra spawn, and not inside ``elapsed_ms``.
 
 ``timed_out`` means ``elapsed_ms >= HOOK_TIMEOUTS_MS[hook]`` (the host's
 timeout, 60 s by default): the invocation used all the time the host gives it.
@@ -561,7 +563,7 @@ def _main(argv: list[str] | None = None) -> int:
         return 2
     if not hook or elapsed != elapsed or elapsed < 0:  # NaN or negative
         return 2
-    return 0 if record(hook, event, elapsed, session_id=sid or None) else 1
+    return 0 if record(hook, event, elapsed, session_id=sid or None, load1=_load1()) else 1
 
 
 if __name__ == "__main__":

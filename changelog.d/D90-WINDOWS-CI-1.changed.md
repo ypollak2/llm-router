@@ -1,0 +1,1 @@
+Add the P1.8-c / D-90 `test-windows-claude-creds` CI job on `windows-latest` with a 10-minute timeout, pinned checkout and uv setup actions, uv setup retry, Python 3.11, and development dependencies. It runs only `tests/test_claude_creds.py` with Bash and xdist disabled to keep cost low, and is not a required check.

@@ -726,6 +726,23 @@ MIGRATE_ROUTING_DECISIONS_ADD_TOOL_USE_ID = [
 (``call_identity.tool_use_id``), NULL when there was none. An id only: it joins a row to
 its ``usage_outcome`` verdict (whose ``event_id`` is the same id)."""
 
+MIGRATE_ROUTING_DECISIONS_ADD_ENGINE_LEDGER = [
+    "ALTER TABLE routing_decisions ADD COLUMN layer TEXT",
+    "ALTER TABLE routing_decisions ADD COLUMN confidence REAL",
+    "ALTER TABLE routing_decisions ADD COLUMN reason TEXT",
+    "ALTER TABLE routing_decisions ADD COLUMN abstain INTEGER",
+    "ALTER TABLE routing_decisions ADD COLUMN engine_version TEXT",
+    "ALTER TABLE routing_decisions ADD COLUMN policy_id TEXT DEFAULT 'none'",
+    "ALTER TABLE routing_decisions ADD COLUMN policy_stage TEXT DEFAULT 'none'",
+    "ALTER TABLE routing_decisions ADD COLUMN grade_basis TEXT DEFAULT 'none'",
+    "ALTER TABLE routing_decisions ADD COLUMN inventory_sig TEXT",
+]
+"""PLAN v16 P1.7 tasks 1 and 7: the engine's decision (``layer``, ``confidence``, ``reason``,
+``abstain``, ``engine_version``; NULL = the row predates the engine or the call site is not
+wired yet, never a made-up value) and the dynamic-policy fields (``policy_id``,
+``policy_stage``, ``grade_basis``; the string ``'none'``, never NULL, MUST P1.7-e).
+Ids, enums and hashes only: no text."""
+
 MIGRATE_USAGE_ADD_SESSION_ID = [
     "ALTER TABLE usage ADD COLUMN session_id TEXT",
 ]
@@ -773,6 +790,30 @@ REASON_BREAKER_OPEN = "breaker_open"
 # N22: the exhaustion floor served a gate-rejected answer. A real served call (attribution, mix, latency, M0-3
 # include it) that is NOT a success: its usage row has success=0, so success-filtered quality/cost/bandit readers skip it.
 REASON_DEGRADED_FLOOR = "degraded_floor"
+
+MIGRATE_ADD_TASK_IDENTITY = [
+    "ALTER TABLE usage ADD COLUMN task_id TEXT",
+    "ALTER TABLE usage ADD COLUMN trace_id TEXT",
+    "ALTER TABLE routing_decisions ADD COLUMN task_id TEXT",
+    "ALTER TABLE routing_decisions ADD COLUMN trace_id TEXT",
+]
+"""P1.10 (R-EVL-2): the human request (``task_id``) and the single routed call
+(``trace_id``) behind a ``usage`` / ``routing_decisions`` row (``call_identity``).
+Additive and nullable, no default: every row written before this carries NULL, which the
+G3 completeness check counts as missing rather than a guessed id. ``session_id`` already
+exists on both tables. Escalations and retries share a task_id and differ in trace_id."""
+
+
+def _row_identity(session_id: str | None, task_id: str | None,
+                  trace_id: str | None) -> tuple[str, str]:
+    """``(task_id, trace_id)`` for a row written now: the caller's value when it is an id,
+    else the bound ``call_identity.scope``, else the session's current turn, else generated."""
+    from llm_router import call_identity as _ci
+
+    bound_task, bound_trace = _ci.row_ids(session_id)
+    return (_ci.ledger_task_id(task_id) or bound_task,
+            _ci.clean_id(trace_id) or bound_trace)
+
 
 MIGRATE_ADD_TASK_TYPE_RAW = [
     "ALTER TABLE usage ADD COLUMN task_type_raw TEXT",
@@ -1229,8 +1270,10 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_ROUTING_DECISIONS_ADD_PROVENANCE
         + MIGRATE_ROUTING_DECISIONS_ADD_SHADOW_TIER
         + MIGRATE_ROUTING_DECISIONS_ADD_TOOL_USE_ID
+        + MIGRATE_ROUTING_DECISIONS_ADD_ENGINE_LEDGER
         + MIGRATE_USAGE_ADD_SESSION_ID
         + MIGRATE_USAGE_ADD_REASON
+        + MIGRATE_ADD_TASK_IDENTITY
         + MIGRATE_ADD_TASK_TYPE_RAW
         # Defined in v6.2 and never applied: compression_stats was declared,
         # log_compression_stat wrote to it, and the table did not exist. The
@@ -1329,6 +1372,8 @@ async def log_usage(
     session_id: str | None = None,
     task_type_raw: str | None = None,
     reason: str | None = None,
+    task_id: str | None = None,
+    trace_id: str | None = None,
 ) -> None:
     """Persist a completed external LLM call to the usage database.
 
@@ -1346,14 +1391,18 @@ async def log_usage(
             trace for the same routing call (first 8 chars of UUID4).
         complexity: Task complexity level (simple, moderate, complex).
         session_id: The caller's Claude Code session id (P0.8). Stored only if it is
-            an id (``call_identity.ledger_session_id``); placeholders become NULL.
-            Omitted, the MCP call's own session (``call_identity.call_session_id``)
-            is used, which is None outside an MCP tool call. Never guessed.
+            an id (``call_identity.ledger_session_id``). Omitted, the MCP call's own
+            session (``call_identity.call_session_id``) is used. If none resolves
+            (placeholder, or outside an MCP call) the row gets ``unknown:<door>``, never
+            NULL and never a guessed session.
         task_type_raw: The label a writer could not map onto ``TaskType``; pass it
             with ``task_type=None`` so the row says "unknown" instead of a default.
         reason: Short code for the route that made this row (the ``REASON_*``
             constants), stored in ``usage.reason`` (P0.8-d). None is stored as NULL,
             which the G3 completeness check counts as missing. Never prompt text.
+        task_id: The human request behind the call (P1.10). Omitted, it is the bound
+            ``call_identity.scope``'s, else the session's current turn, else generated.
+        trace_id: This call's trace id; omitted, the bound scope's or a fresh one.
     """
     # PRIMARY GUARD: a test must not write to the production database. See
     # `_refuse_unisolated_test_write` for why the fingerprint below was not enough.
@@ -1380,8 +1429,12 @@ async def log_usage(
     user_id, project_id = _get_team_identity()
     from llm_router import call_identity as _call_identity
 
-    ledger_sid = (_call_identity.call_session_id() if session_id is None
-                  else _call_identity.ledger_session_id(session_id))
+    # P0.8: never NULL. A row whose session cannot be resolved says so (``unknown:<door>``),
+    # which G3 counts as missing; it is not a guessed session.
+    ledger_sid = ((_call_identity.call_session_id() if session_id is None
+                   else _call_identity.ledger_session_id(session_id))
+                  or _call_identity.unknown_session())
+    row_task_id, row_trace_id = _row_identity(ledger_sid, task_id, trace_id)
     db = await _get_db()
     try:
         # Local providers (ollama, codex, openai_compat) are free — override any calculated cost
@@ -1420,8 +1473,8 @@ async def log_usage(
                input_tokens, output_tokens, cost_usd, latency_ms, success,
                user_id, project_id, correlation_id, complexity,
                baseline_model, potential_cost_usd, saved_usd, is_simulated,
-               session_id, task_type_raw, reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               session_id, task_type_raw, reason, task_id, trace_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 response.model,
                 response.provider,
@@ -1443,6 +1496,8 @@ async def log_usage(
                 ledger_sid,
                 task_type_raw if task_type is None else None,
                 (reason or None),
+                row_task_id,
+                row_trace_id,
             ),
         )
         await db.commit()
@@ -2187,6 +2242,17 @@ async def log_routing_decision(
     session_id: str | None = None,
     tool_use_id: str | None = None,
     task_type_raw: str | None = None,
+    task_id: str | None = None,
+    trace_id: str | None = None,
+    layer: str | None = None,
+    confidence: float | None = None,
+    reason: str | None = None,
+    abstain: bool | None = None,
+    engine_version: str | None = None,
+    policy_id: str | None = None,
+    policy_stage: str | None = None,
+    grade_basis: str | None = None,
+    inventory_sig: str | None = None,
 ) -> None:
     """Persist a complete routing decision to the routing_decisions table.
 
@@ -2223,6 +2289,11 @@ async def log_routing_decision(
             no prompt or answer text is stored by either.
         task_type_raw: The label behind a NULL ``task_type`` (P0.8). A caller that
             did not measure a classifier field passes None for it: NULL, never 0.0.
+        task_id, trace_id: P1.10 ids (see ``log_usage``); omitted, resolved the same way.
+        layer, confidence, reason, abstain, engine_version: the engine ``Decision`` fields
+            (P1.7); None = not decided by the engine (NULL).
+        policy_id, policy_stage, grade_basis, inventory_sig: the dynamic-policy fields
+            (P1.7-e). The first three are stored as ``'none'`` when absent, never NULL.
     """
     # Validate inputs before database insert. A cache-served or failed call (LEDGER-ERR-1)
     # names no real provider ("cache", or "none" when nothing was attempted); its reason_code
@@ -2241,6 +2312,9 @@ async def log_routing_decision(
     if _refuse_unisolated_test_write(get_config().llm_router_db_path):
         return
 
+    from llm_router import call_identity as _ci_rd
+
+    row_task_id, row_trace_id = _row_identity(_ci_rd.ledger_session_id(session_id), task_id, trace_id)
     db = await _get_db()
     try:
         # Track complexity mismatch: if requested_complexity differs from final complexity,
@@ -2273,6 +2347,12 @@ async def log_routing_decision(
                 "capability_shadow_detection_failed: %s", _cap_err
             )
 
+        # P0.8-d: never NULL. Same resolution as ``log_usage``: the caller's id, else the
+        # MCP call's own session, else the explicit ``unknown:<door>`` (G3: missing).
+        from llm_router import call_identity as _ci_rd
+
+        _rd_session_id = (_ci_rd.ledger_session_id(session_id) or _ci_rd.call_session_id()
+                          or _ci_rd.unknown_session())
         await db.execute(
             """INSERT INTO routing_decisions
                (prompt_hash, task_type, profile, classifier_type, classifier_model,
@@ -2282,8 +2362,9 @@ async def log_routing_decision(
                 input_tokens, output_tokens, cost_usd, latency_ms, reason_code,
                 correlation_id, requested_complexity, complexity_downgraded, subject,
                 provenance, capabilities_json, shadow_tier, session_id, tool_use_id,
-                task_type_raw)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                task_type_raw, layer, confidence, reason, abstain, engine_version,
+                policy_id, policy_stage, grade_basis, inventory_sig, task_id, trace_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 _prompt_hash(prompt),
                 task_type,
@@ -2313,9 +2394,14 @@ async def log_routing_decision(
                 _write_provenance(),
                 capabilities_json,
                 shadow_tier,
-                session_id or None,
+                _rd_session_id,
                 tool_use_id or None,
                 task_type_raw,
+                layer, confidence, reason, None if abstain is None else (1 if abstain else 0),
+                engine_version, policy_id or "none", policy_stage or "none", grade_basis or "none",
+                inventory_sig,
+                row_task_id,
+                row_trace_id,
             ),
         )
         await db.commit()

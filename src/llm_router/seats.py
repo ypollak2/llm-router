@@ -58,6 +58,17 @@ class Seat:
     plan: str | None = None      # "max" | "pro" | "plus" | "team" | ... | None
     plan_stale: bool = False     # the plan claim's own window has passed
     models: tuple[str, ...] = ()  # ollama only
+    # P1.8: "connected" | "installed_not_connected" | "absent", with the reason.
+    # compare=False: two detections of the same login are the same seat whatever
+    # the reason text says. Left unset, status is derived from kind.
+    status: str | None = field(default=None, compare=False)
+    reason: str = field(default="", compare=False)
+
+    def __post_init__(self) -> None:
+        if self.status is None:
+            object.__setattr__(
+                self, "status", "connected" if self.present else "absent"
+            )
 
     @property
     def present(self) -> bool:
@@ -82,6 +93,7 @@ class Seats:
     codex: Seat = field(default_factory=Seat)
     gemini: Seat = field(default_factory=Seat)
     ollama: Seat = field(default_factory=Seat)
+    copilot: Seat = field(default_factory=Seat)
     api_keys: dict[str, bool] = field(default_factory=dict)
     detected_at: str = ""
 
@@ -144,17 +156,22 @@ class Seats:
     def from_dict(cls, d: dict) -> "Seats":
         def seat(x: dict | None) -> Seat:
             x = x or {}
+            # seats.json from before P1.8 has no status/reason/copilot: they
+            # are derived from kind, so an old file loads without a rewrite.
             return Seat(
                 kind=x.get("kind"),
                 plan=x.get("plan"),
                 plan_stale=bool(x.get("plan_stale", False)),
                 models=tuple(x.get("models") or ()),
+                status=x.get("status"),
+                reason=str(x.get("reason") or ""),
             )
         return cls(
             claude=seat(d.get("claude")),
             codex=seat(d.get("codex")),
             gemini=seat(d.get("gemini")),
             ollama=seat(d.get("ollama")),
+            copilot=seat(d.get("copilot")),
             api_keys=dict(d.get("api_keys") or {}),
             detected_at=str(d.get("detected_at") or ""),
         )
@@ -189,9 +206,29 @@ def _default_runner(argv: list[str], timeout: float) -> tuple[int, str] | None:
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 
 
+def _first_line(text: str) -> str:
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line:
+            return line[:300]
+    return ""
+
+
+def _key_only_seat(why: str, not_logged: "Seat | None") -> Seat:
+    """An API-key fallback. When the CLI is installed but failing, the status says
+    so and the reason is the CLI's own first line; ``kind`` (so routing) is unchanged."""
+    if not_logged is not None:
+        return Seat(kind="api-key", status="installed_not_connected",
+                    reason=not_logged.reason)
+    return Seat(kind="api-key", reason=why)
+
+
 def _detect_claude(runner: Runner, env: dict, timeout: float) -> Seat:
     res = runner(["claude", "auth", "status"], timeout)
+    not_logged = None
     if res is not None:
+        not_logged = Seat(status="installed_not_connected",
+                          reason=_first_line(res[1]) or "claude auth status reports no login")
         code, out = res
         try:
             data = json.loads(out[out.index("{"):])
@@ -203,10 +240,10 @@ def _detect_claude(runner: Runner, env: dict, timeout: float) -> Seat:
             if method == "claude.ai":
                 return Seat(kind="claude.ai", plan=str(plan).lower() if plan else None)
             # console / API-key login through the CLI: not a subscription seat
-            return Seat(kind="api-key")
+            return Seat(kind="api-key", reason="API-key login, not a subscription seat")
     if env.get("ANTHROPIC_API_KEY"):
-        return Seat(kind="api-key")
-    return Seat()
+        return _key_only_seat("ANTHROPIC_API_KEY only, no subscription seat", not_logged)
+    return not_logged or Seat(reason="claude CLI not found")
 
 
 def _jwt_payload(token: str) -> dict:
@@ -241,37 +278,97 @@ def _codex_plan_from_auth(home: Path, now: float) -> tuple[str | None, bool]:
 
 def _detect_codex(runner: Runner, env: dict, home: Path, timeout: float, now: float) -> Seat:
     res = runner(["codex", "login", "status"], timeout)
+    not_logged = None
     if res is not None:
         _, out = res
         low = out.lower()
+        # The reason is the first line codex itself printed (for a broken
+        # config.toml that is the "Error loading configuration: ..." line).
+        not_logged = Seat(status="installed_not_connected",
+                          reason=_first_line(out) or "codex login status printed nothing")
         if "logged in using chatgpt" in low:
             plan, stale = _codex_plan_from_auth(home, now)
             return Seat(kind="chatgpt", plan=plan, plan_stale=stale)
         if "logged in" in low and "not logged in" not in low:
-            return Seat(kind="api-key")
+            return Seat(kind="api-key", reason="codex logged in with an API key, not a seat")
     if env.get("OPENAI_API_KEY"):
-        return Seat(kind="api-key")
-    return Seat()
+        return _key_only_seat("OPENAI_API_KEY only, no ChatGPT seat", not_logged)
+    return not_logged or Seat(reason="codex CLI not found")
+
+
+# ~/.gemini/settings.json auth-type value -> plan label. The two key paths are
+# the ones Gemini CLI has used (flat `selectedAuthType`, later
+# `security.auth.selectedType`); neither is verified against a live file on
+# this machine, so an unrecognised value stays "unknown" with its reason.
+_GEMINI_AUTH_PLAN = {"oauth-personal": "google-account", "login-with-google": "google-account"}
+
+
+def _gemini_plan(home: Path) -> tuple[str, str]:
+    try:
+        data = json.loads((home / ".gemini" / "settings.json").read_text())
+    except (OSError, ValueError, json.JSONDecodeError):
+        return "unknown", "no readable ~/.gemini/settings.json"
+    sec = ((data.get("security") or {}).get("auth") or {}) if isinstance(data, dict) else {}
+    auth = sec.get("selectedType") or (data.get("selectedAuthType") if isinstance(data, dict) else None)
+    if not auth:
+        return "unknown", "settings.json names no auth type"
+    plan = _GEMINI_AUTH_PLAN.get(str(auth))
+    if plan:
+        return plan, f"auth type {auth}"
+    return "unknown", f"unrecognised auth type {auth}"
 
 
 def _detect_gemini(env: dict, home: Path, which: Callable[[str], str | None]) -> Seat:
-    if which("gemini") and (home / ".gemini" / "oauth_creds.json").exists():
-        return Seat(kind="google")
+    has_bin = bool(which("gemini"))
+    if has_bin and (home / ".gemini" / "oauth_creds.json").exists():
+        plan, why = _gemini_plan(home)
+        return Seat(kind="google", plan=plan, reason=f"logged in; plan {plan}: {why}")
     if env.get("GEMINI_API_KEY") or env.get("GOOGLE_API_KEY"):
-        return Seat(kind="api-key")
-    return Seat()
+        return Seat(kind="api-key", reason="API key only, no gemini CLI login")
+    if has_bin:
+        return Seat(status="installed_not_connected",
+                    reason="gemini binary found, no ~/.gemini/oauth_creds.json")
+    return Seat(reason="gemini CLI not found")
 
 
-def _detect_ollama(env: dict, timeout: float, opener=urllib.request.urlopen) -> Seat:
+def _detect_copilot(runner: Runner, home: Path, which: Callable[[str], str | None],
+                    timeout: float) -> Seat:
+    """GitHub Copilot: `gh copilot --version`, hosts.json, VS Code extension dir.
+    Existence checks only; the files' contents (tokens) are never read."""
+    res = runner(["gh", "copilot", "--version"], timeout) if which("gh") else None
+    cli_ok = res is not None and res[0] == 0
+    hosts = (home / ".config" / "github-copilot" / "hosts.json").exists()
+    try:
+        ext = any((home / ".vscode" / "extensions").glob("github.copilot-*"))
+    except OSError:
+        ext = False
+    if hosts and (cli_ok or ext):
+        via = "gh copilot" if cli_ok else "VS Code extension"
+        return Seat(kind="github-copilot", reason=f"hosts.json present; {via} installed")
+    if cli_ok or ext or hosts:
+        found = [n for n, ok in (("gh copilot", cli_ok), ("VS Code extension", ext),
+                                 ("hosts.json", hosts)) if ok]
+        why = "no signed-in host in ~/.config/github-copilot/hosts.json" if not hosts \
+            else "hosts.json present but no gh copilot or VS Code extension"
+        return Seat(status="installed_not_connected", reason=f"found {', '.join(found)}; {why}")
+    return Seat(reason="no gh copilot, hosts.json or VS Code extension")
+
+
+def _detect_ollama(env: dict, timeout: float, opener=urllib.request.urlopen,
+                   which: Callable[[str], str | None] = shutil.which) -> Seat:
     url = env.get("OLLAMA_URL") or "http://localhost:11434"
     try:
         req = urllib.request.Request(f"{url}/api/tags", method="GET")
         with opener(req, timeout=timeout) as resp:
             data = json.loads(resp.read())
     except Exception:
-        return Seat()
+        if which("ollama"):
+            return Seat(status="installed_not_connected",
+                        reason=f"ollama binary found, server not reachable at {url}")
+        return Seat(reason="ollama not installed")
     names = tuple(m.get("name", "") for m in data.get("models", []) if m.get("name"))
-    return Seat(kind="local", models=names)
+    return Seat(kind="local", models=names,
+                reason=f"{len(names)} model(s) listed" if names else "server up, no models installed")
 
 
 def detect_seats(
@@ -291,7 +388,8 @@ def detect_seats(
         claude=_detect_claude(runner, env, timeout),
         codex=_detect_codex(runner, env, home, timeout, now),
         gemini=_detect_gemini(env, home, which),
-        ollama=_detect_ollama(env, min(timeout, 2.0), opener),
+        ollama=_detect_ollama(env, min(timeout, 2.0), opener, which),
+        copilot=_detect_copilot(runner, home, which, timeout),
         api_keys={k: bool(env.get(k)) for k in _API_KEY_VARS},
         detected_at=datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
     )
