@@ -145,6 +145,7 @@ def test_transcript_stem_names_the_session(db, tmp_path):
         assert _build(door=door, session_id=None, transcript_path=str(other)).summary == TEXT
 
 
+@pytest.mark.timing
 def test_read_is_read_only_and_bounded(db):
     import sqlite3
     import time
