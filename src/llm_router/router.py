@@ -5433,6 +5433,10 @@ async def route_and_call(
 
 # Non-ollama target window for the pack; real per-model windows arrive with the registry.
 _MCP_NON_LOCAL_WINDOW = 8192
+# Owner decision (P1.1 door 7): gateway clients (Cursor, Codex, any OpenAI/Anthropic
+# SDK) send their own whole conversation, so a cloud attempt keeps up to this much
+# of it before the pack falls back to the last 7 messages.
+_GATEWAY_NON_LOCAL_WINDOW = 32_768
 _MCP_SUMMARY_ONLY_MAX_TOKENS = 500
 
 
@@ -5523,7 +5527,9 @@ async def _call_text(
                     messages=conversation,
                     project_root=scope_root,
                     target_window=(local_models.num_ctx(model.split("/", 1)[1])
-                                   if model.startswith("ollama/") else _MCP_NON_LOCAL_WINDOW),
+                                   if model.startswith("ollama/")
+                                   else _GATEWAY_NON_LOCAL_WINDOW if context_door == "gateway"
+                                   else _MCP_NON_LOCAL_WINDOW),
                     door=context_door,
                     project=project,
                     target_provider=provider,

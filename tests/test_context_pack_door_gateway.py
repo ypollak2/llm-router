@@ -285,3 +285,19 @@ def test_chat_completion_reaches_the_provider_as_packed_turns(monkeypatch, clien
     assert sent[-1]["role"] == "user" and sent[-1]["content"].endswith("REQ-TEXT")
     assert HISTORY[0] in sent and HISTORY[1] in sent
     assert all("user: " not in m["content"] for m in sent)
+
+
+@pytest.mark.asyncio
+async def test_gateway_cloud_window_keeps_a_mid_size_conversation_whole(rig):
+    """Owner decision: the gateway's cloud window is 32k, so a ~12k-token
+    conversation is sent whole; the SDK door (8k) keeps only the last 7."""
+    convo = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"T{i} " + "w" * 2400}
+             for i in range(20)]
+    await _call(model="openai/gpt-4o", conversation=convo)
+    await router._call_text("openai/gpt-4o", "REQ-TEXT", None, None, None, TaskType.QUERY,
+                            conversation=convo, context_door="sdk")
+    gateway, sdk_door = rig
+    assert [m["content"][:4] for m in gateway[:-1]] == [m["content"][:4] for m in convo]
+    # Last 7 are T13..T19; T13 is an assistant turn, dropped as a leading one.
+    assert len(sdk_door) == 7 and sdk_door[0]["content"].startswith("T14 ")
+    assert router._GATEWAY_NON_LOCAL_WINDOW == 32_768
