@@ -484,3 +484,63 @@ def test_budget_counts_tool_text_but_not_ids_or_images():
         {"type": "function_call_output", "call_id": "r1", "output": "ef"},
         {"role": "user", "content": [{"type": "image", "source": {"data": "A" * 1000}}]},
     ]) == 6
+
+
+# ── review fixes: error results, parallel results, opaque payloads ───────────
+
+
+def test_a_trailing_error_tool_result_is_the_request(client, payloads):
+    """A failed tool call is the usual next step too; it used to flatten away."""
+    last = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1",
+                                         "is_error": True, "content": "BOOM-ERR"}]}
+    r = client.post("/v1/messages", json={"messages": [*ANT_TOOL_HISTORY[:2], last],
+                                          "max_tokens": 64})
+    assert r.status_code == 200, r.text
+    assert payloads[0]["prompt"] == "[tool_result (error)] BOOM-ERR"
+    assert payloads[0]["messages"] == ANT_TOOL_HISTORY[:2]
+
+
+@pytest.mark.parametrize("path,key,calls,outputs", [
+    ("/v1/chat/completions", "messages",
+     [{"role": "assistant", "content": None, "tool_calls": [
+         {"id": "a", "type": "function", "function": {"name": "f", "arguments": "{}"}},
+         {"id": "b", "type": "function", "function": {"name": "g", "arguments": "{}"}}]}],
+     [{"role": "tool", "tool_call_id": "a", "content": "RA"},
+      {"role": "tool", "tool_call_id": "b", "content": "RB"}]),
+    ("/v1/responses", "input",
+     [{"type": "function_call", "name": "f", "arguments": "{}", "call_id": "a"},
+      {"type": "function_call", "name": "g", "arguments": "{}", "call_id": "b"}],
+     [{"type": "function_call_output", "call_id": "a", "output": "RA"},
+      {"type": "function_call_output", "call_id": "b", "output": "RB"}]),
+])
+def test_parallel_tool_results_are_all_in_the_request(client, payloads, path, key, calls, outputs):
+    head = [{"role": "user", "content": "go"}, *calls]
+    r = client.post(path, json={key: [*head, *outputs]})
+    assert r.status_code == 200, r.text
+    assert payloads[0]["prompt"] == "[tool_result] RA\n\n[tool_result] RB"
+    assert payloads[0]["messages"] == head
+
+
+def test_budget_skips_payloads_the_pack_never_sends():
+    assert router._messages_chars([
+        {"role": "user", "content": "ab", "images": ["A" * 100_000]},
+        {"role": "user", "content": [{"type": "input_file", "file_data": "F" * 50_000},
+                                     {"type": "input_text", "text": "cd"}]},
+        {"role": "assistant", "content": [{"type": "thinking", "thinking": "t",
+                                           "signature": "S" * 30_000}]},
+    ]) == 4
+
+
+def test_every_string_inside_a_tool_input_is_redacted(monkeypatch):
+    monkeypatch.setattr(router, "_maybe_redact",
+                        lambda t: (t.replace("SECRET", "[R]"), {"k": 1} if "SECRET" in t else {}))
+    history = [
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": "set",
+                                           "input": {"id": "SECRET", "name": "SECRET",
+                                                     "nested": [{"status": "SECRET"}]}}]},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c", "function": {"name": "f", "arguments": {"name": "SECRET"}}}]},
+    ]
+    redacted, counts = router._redact_messages(history)
+    assert "SECRET" not in repr(redacted) and counts == {"k": 4}
+    assert redacted[0]["content"][0]["name"] == "set" and redacted[1]["tool_calls"][0]["id"] == "c"

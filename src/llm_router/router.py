@@ -5492,32 +5492,40 @@ def _pack_window(model: str, door: str) -> int:
     return _GATEWAY_NON_LOCAL_WINDOW if door == "gateway" else _MCP_NON_LOCAL_WINDOW
 
 
-# Keys that name or link parts of a message, or hold non-text payloads, rather
-# than carry its text: never redacted (an id rewrite would break tool-call
-# pairing; base64 image data is not text) and not counted.
-_STRUCTURAL_KEYS = frozenset({
-    "role", "type", "id", "call_id", "tool_call_id", "tool_use_id", "name", "status",
-    "source", "image_url", "cache_control",
-})
+# Keys under which a message carries text the context pack sends
+# (``context_pack._render_block`` / ``_from_chat`` / ``_from_item``): message and
+# block ``content``/``text``, OpenAI ``tool_calls[].function``, tool ``output``.
+# Everything else (ids, images, files, thinking signatures) is never sent as text,
+# so it is neither redacted nor counted.
+_TEXT_KEYS = frozenset({"content", "text", "tool_calls", "function", "output"})
+# Tool payloads the pack sends whole (``json.dumps`` of a dict input): every string
+# inside them is text, whatever its key.
+_PAYLOAD_KEYS = frozenset({"input", "arguments", "action"})
 
 
-def _walk_text(value, fn):
-    """``value`` with ``fn`` applied to every string in it except under
-    ``_STRUCTURAL_KEYS``: message content, content blocks, OpenAI ``tool_calls``
-    arguments, Anthropic ``tool_use`` inputs, Responses tool items' output."""
+def _walk_text(value, fn, *, payload: bool = False):
+    """``value`` with ``fn`` applied to every string the pack would send: under
+    ``_TEXT_KEYS`` at message/block level, and anywhere inside ``_PAYLOAD_KEYS``."""
     if isinstance(value, str):
         return fn(value)
     if isinstance(value, list):
-        return [_walk_text(v, fn) for v in value]
+        return [_walk_text(v, fn, payload=payload) for v in value]
     if isinstance(value, dict):
-        return {k: (v if k in _STRUCTURAL_KEYS else _walk_text(v, fn))
-                for k, v in value.items()}
+        out = {}
+        for k, v in value.items():
+            if payload or k in _PAYLOAD_KEYS:
+                out[k] = _walk_text(v, fn, payload=True)
+            elif k in _TEXT_KEYS:
+                out[k] = _walk_text(v, fn)
+            else:
+                out[k] = v
+        return out
     return value
 
 
 def _messages_chars(messages: list | None) -> int:
-    """Characters of text in a caller's message list (content, content blocks and
-    tool-call arguments/inputs/outputs), for the budget estimates that used to see
+    """Characters of text in a caller's message list that the pack would send
+    (content, content blocks, tool-call arguments/inputs/outputs), for the budget estimates that used to see
     only ``prompt`` (the gateway door carries the history outside it)."""
     n = 0
 
@@ -5533,9 +5541,9 @@ def _messages_chars(messages: list | None) -> int:
 
 
 def _redact_messages(messages: list) -> tuple[list, dict[str, int]]:
-    """T4-M1 redaction over a caller's message list: every string in each message
-    (content, content blocks, tool-call arguments and inputs, tool outputs) except
-    structural keys. Fail-closed like the prompt (``maybe_redact`` raises when
+    """T4-M1 redaction over a caller's message list: every string the pack would
+    send (content, content blocks, tool-call arguments and inputs, tool outputs;
+    ``_walk_text``). Fail-closed like the prompt (``maybe_redact`` raises when
     redaction is on but unavailable)."""
     counts: dict[str, int] = {}
 
