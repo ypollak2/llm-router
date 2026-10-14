@@ -519,6 +519,8 @@ def _backup_before_overwrite(dst: Path) -> Path | None:
 # the consolidated default. (src relative to the package dir, dst under ~/.claude/hooks/)
 _HOOK_SUPPORT_FILES: tuple[tuple[str, str], ...] = (
     ("tool_surface.py", "llm_router_tool_surface.py"),
+    # The one reader of Claude's OAuth credentials (P1.8-c); the usage hooks load it by path.
+    ("claude_creds.py", "llm_router_claude_creds.py"),
     # The status line's per-tick renderer (statusline-command.sh execs it).
     ("statusline_tick.py", "llm_router_statusline_tick.py"),
     # The full status line's segments (quota, context, money, health, last route),

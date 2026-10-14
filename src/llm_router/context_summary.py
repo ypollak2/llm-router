@@ -13,8 +13,9 @@ Shape:
   (``statusline_tick._spawn_detached``: fork + execv, nothing waits on it).
 * :func:`maybe_update` (worker side) parses the transcript, decides whether a summary
   is due, and writes a row to ``rolling_summaries``.
-* :func:`load_summary` is what ``context_pack.build_pack`` will call. This module
-  does not import ``context_pack``; there is no dependency on PR #392.
+* :func:`read_summary_text` is what ``context_pack.build_pack`` calls (pack mode, the
+  hook / agent / mcp doors, only while this feature is on): read-only, short busy
+  timeout. This module does not import ``context_pack``.
 
 Cadence: due when more than ``RECENT_WINDOW`` (7) messages are unsummarised, or
 ``LLM_ROUTER_SUMMARY_EVERY`` (default 4) human turns have passed. The summary covers
@@ -108,6 +109,29 @@ def load_summary(session_id: str, path: Path | None = None) -> dict[str, Any] | 
         return None
     keys = ("session_id", "upto_msg_idx", "text", "model", "source", "updated_at")
     return dict(zip(keys, row))
+
+
+def read_summary_text(session_id: str, path: Path | None = None,
+                      timeout_s: float = 0.25) -> str | None:
+    """The stored summary text, read-only, or None. Never raises, never writes.
+
+    For the context pack's hot path: a ``mode=ro`` connection with a short busy
+    timeout, so a locked database or a missing table costs at most
+    ``timeout_s`` and never creates the file, the table or a WAL.
+    """
+    try:
+        p = path or db_path()
+        if not p.is_file():
+            return None
+        conn = sqlite3.connect(f"{p.resolve().as_uri()}?mode=ro", uri=True, timeout=timeout_s)
+        try:
+            row = conn.execute(
+                "SELECT text FROM rolling_summaries WHERE session_id=?", (session_id,)).fetchone()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        return None
+    return str(row[0]) if row and row[0] else None
 
 
 def _store(session_id: str, upto: int, text: str, model: str, source: str,

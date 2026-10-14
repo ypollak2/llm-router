@@ -480,6 +480,7 @@ DISABLE_ENV = {
     "LLM_ROUTER_OLLAMA_WATCHDOG": "off",
     "LLM_ROUTER_JUDGE_AUTODRAIN": "off",
     "LLM_ROUTER_OKF_AUTOINDEX": "off",
+    "LLM_ROUTER_MAP_REDISCOVERY": "off",   # the hook's detached refresh child would linger and probe Ollama
     "LLM_ROUTER_VERIFY": "off",
     "LLM_ROUTER_PXPIPE_ENABLED": "off",
     "LLM_ROUTER_AUTO_BENCHMARK_FETCH": "off",
@@ -1741,6 +1742,15 @@ def run(corpus: Path, out: Path, doors: set[str], *, sessions: int | None = None
             spec = importlib.util.spec_from_file_location("_replay_netguard_self", GUARD_SRC)
             guard = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
             spec.loader.exec_module(guard)  # type: ignore[union-attr]
+            # An importer of llm_router.server (pytest, any embedder) already started the
+            # map re-discovery poller in THIS process; its next tick probes Ollama and the
+            # guard counts that as a violation (CI-only: the replay outlasts the 30 s tick).
+            try:
+                from llm_router import map_rediscovery
+            except ImportError:      # standalone run, package not importable: no poller here
+                map_rediscovery = None
+            if map_rediscovery is not None and not map_rediscovery.stop_default_poller():
+                sys.stderr.write("synthetic_replay: map re-discovery poller did not stop\n")
             guard.install(allow=scratch.allow(), violations=str(scratch.violations))
             try:
                 rc = _run_in(scratch, stub, recs, corpus, out, doors, root, keep_work, t_start)
@@ -1832,6 +1842,10 @@ def _run_in(scratch: Scratch, stub: StubServer, recs: list[dict], corpus: Path, 
     }
     if violations or errors:
         rc = 1
+        # CI shows only the exit code otherwise; name the cause (hosts, kinds and error text, never payloads)
+        sys.stderr.write(f"synthetic_replay: FAILED violations={len(violations)} "
+                         f"targets={det['network']['violation_targets']} "
+                         f"kinds={det['network']['violation_kinds']} errors={errors}\n")
     out.mkdir(parents=True, exist_ok=True)
     (out / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     (out / "summary.md").write_text(render_md(summary), encoding="utf-8")

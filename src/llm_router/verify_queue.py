@@ -247,7 +247,8 @@ def capture(cwd: str, budget_s: float | None = None) -> tuple[tuple[str, str, by
     return box["ok"]
 
 
-def enqueue(uid: str, repo: str, head: str, patch: bytes, *, now: float | None = None) -> Path:
+def enqueue(uid: str, repo: str, head: str, patch: bytes, *, now: float | None = None,
+            task_id: str | None = None, trace_id: str | None = None) -> Path:
     """Write the patch (0600) then the marker (atomic). No marker without its patch; a failed
     marker write removes the patch again."""
     if not _UID_RX.match(uid):
@@ -265,6 +266,8 @@ def enqueue(uid: str, repo: str, head: str, patch: bytes, *, now: float | None =
     created = time.time() if now is None else now
     marker = {"v": 1, "unit_id": uid, "cwd": repo, "head": head, "patch": pp.name,
               "created_at": created, "ttl_s": TTL_S, "attempts": 0}
+    if task_id and trace_id:  # P1.10: the dispatching call's ids; the worker is another process
+        marker["task_id"], marker["trace_id"] = task_id, trace_id
     dest = _sub("pending") / f"{uid}.json"
     tmp = _sub("pending") / f".{uid}.tmp"
     try:
@@ -302,7 +305,14 @@ def enqueue_from_run(cwd: str, *, session_id: str | None, ts: float | None,
     if got is None:
         return why
     top, head, patch = got
-    enqueue(uid, top, head, patch)
+    task_id = trace_id = None
+    try:
+        from llm_router import call_identity
+
+        task_id, trace_id = call_identity.row_ids(session_id)
+    except Exception as exc:  # noqa: BLE001 -- identity must never stop a verify unit
+        _failopen("CHZ-FO-VERIFY-IDS", exc)
+    enqueue(uid, top, head, patch, task_id=task_id, trace_id=trace_id)
     return "queued"
 
 

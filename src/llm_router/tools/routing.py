@@ -378,6 +378,8 @@ async def llm_route(
         _clf_type = "override"
     elif classification.classifier_model == "none":
         _clf_type = "fallback"
+    elif classification.classifier_model == "engine":
+        _clf_type = "heuristic"  # engine.decide (P1.6): sync L1/L3, no LLM call
     elif classification.classifier_latency_ms == 0.0 and classification.confidence > 0:
         _clf_type = "cached"
     else:
@@ -570,6 +572,7 @@ async def llm_auto(
     _clf_type = (
         "cached" if classification.classifier_latency_ms == 0.0 and classification.confidence > 0
         else "fallback" if classification.classifier_model == "none"
+        else "heuristic" if classification.classifier_model == "engine"
         else "llm"
     )
     _classification_data = {

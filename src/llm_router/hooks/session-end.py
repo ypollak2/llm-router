@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 30
+# llm_router-hook-version: 32
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -11,7 +11,6 @@ import json
 import os
 import re
 import sqlite3
-import subprocess
 import sys
 import time
 import urllib.request
@@ -173,15 +172,41 @@ def _is_known_model(model: str) -> bool:
 
 # ── Claude subscription ────────────────────────────────────────────────────────
 
+def _read_claude_oauth(timeout, env=None):
+    """Claude OAuth info via claude_creds (the one keychain/credentials reader), or None.
+
+    Prefers the importable package; else the stdlib-only copy the installer drops
+    next to the hooks, else the in-repo source. Never raises.
+    """
+    try:
+        from llm_router import claude_creds as _cc
+    except ImportError:
+        _cc = None
+        try:
+            import importlib.util as _ilu
+            from pathlib import Path as _P
+            _here = _P(__file__).resolve().parent
+            for _cand in (_here / "llm_router_claude_creds.py", _here.parent / "claude_creds.py",
+                          _here.parents[1] / "src" / "llm_router" / "claude_creds.py"):
+                if _cand.exists():
+                    _spec = _ilu.spec_from_file_location("llm_router_claude_creds", _cand)
+                    _cc = _ilu.module_from_spec(_spec)
+                    _spec.loader.exec_module(_cc)
+                    break
+        except Exception:  # noqa: BLE001 -- a broken support module must not kill the hook
+            _cc = None
+    if _cc is None:
+        return None
+    try:
+        return _cc.read_oauth(timeout=timeout, env=env)
+    except Exception:  # noqa: BLE001 -- read_oauth does not raise; belt and braces
+        _cc = None
+    return None
+
+
 def _fetch_live_usage() -> dict | None:
     try:
-        r = subprocess.run(
-            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-            capture_output=True, text=True, timeout=subprocess_timeout(),
-        )
-        if r.returncode != 0 or not r.stdout.strip():
-            return None
-        token = json.loads(r.stdout.strip()).get("claudeAiOauth", {}).get("accessToken", "")
+        token = (_read_claude_oauth(subprocess_timeout()) or {}).get("accessToken", "")
         if not token:
             return None
     except Exception:
@@ -2236,7 +2261,8 @@ def _condense(summary: str) -> str:
 #: Steps the child runs, in order; each is fail-open on its own.
 _STOP_BACKGROUND_STEPS = ("_refresh_northstar_line", "_fetch_live_usage",
                           "_build_and_save_learned_profile",
-                          "_maybe_rescan_profile", "_maybe_evaluate_models")
+                          "_maybe_rescan_profile", "_maybe_evaluate_models",
+                          "_link_decision_outcomes")
 _STOP_NOTES_FILENAME = "stop_notes.json"
 #: A note older than this is dropped rather than shown.
 _STOP_NOTES_MAX_AGE_S = 24 * 3600
@@ -2411,6 +2437,15 @@ def _cached_northstar_line(session_id: str, now: float | None = None) -> str | N
         return d["line"]
     except Exception:  # noqa: BLE001
         return None
+
+
+def _link_decision_outcomes() -> None:
+    """P1.7: link engine decisions to outcomes (24 h window) and backfill the last 7 days of daily
+    accuracy/drift records. Both are idempotent; a missing ledger makes them no-ops."""
+    from llm_router import decision_report, outcome_link
+
+    outcome_link.link()
+    decision_report.backfill_daily(7)
 
 
 def _run_background_stop_work() -> None:

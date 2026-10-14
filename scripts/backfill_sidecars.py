@@ -53,6 +53,7 @@ if str(Path(__file__).resolve().parent.parent / "src") not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from llm_router.call_identity import ledger_session_id as _ledger_session_id
+from llm_router.call_identity import unknown_session as _unknown_session
 from llm_router.cost import _get_db
 
 
@@ -158,7 +159,7 @@ async def backfill(
                     record.task_type,
                     record.complexity,
                     record.correlation_id,
-                    _ledger_session_id(record.session_id),
+                    _ledger_session_id(record.session_id) or _unknown_session("script"),
                 ),
             )
             inserted += 1

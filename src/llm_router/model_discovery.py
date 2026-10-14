@@ -221,6 +221,9 @@ def _spawn_probe_child() -> bool:
     import subprocess
     import sys
 
+    flag = os.environ.get("LLM_ROUTER_NO_DETACHED_SPAWN", "")
+    if flag and flag.lower() not in ("0", "off", "false", "no"):
+        return False  # tests: no child may write the state dir after the caller exits
     try:
         # Pin the child to the state directory the parent resolved, so a parent running
         # under an overridden home refreshes that cache and never another one.

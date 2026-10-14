@@ -18,6 +18,9 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+# Default context window budget for Codex packs.
+CODEX_TARGET_WINDOW = 200_000
+
 CODEX_PATHS = [
     "/Applications/Codex.app/Contents/Resources/codex",
     os.path.expanduser("~/.local/bin/codex"),
@@ -297,6 +300,21 @@ class CodexResult:
         return self.exit_code == 0
 
 
+def _render_pack_prompt(pack) -> str:
+    """Flatten pack messages while preserving the final request verbatim."""
+    from llm_router.context_pack import to_messages
+
+    messages = to_messages(pack)
+    parts = []
+    for index, message in enumerate(messages[:-1]):
+        if index == 0 and pack.system:
+            parts.append(message["content"])
+        else:
+            parts.append(f'[{message["role"]}]\n{message["content"]}')
+    parts.append(messages[-1]["content"])
+    return "\n\n".join(parts)
+
+
 async def run_codex(
     prompt: str,
     model: str = "gpt-5.5",
@@ -304,6 +322,9 @@ async def run_codex(
     timeout: int | None = None,
     on_event: "Callable[[str, str], Awaitable[None]] | None" = None,
     context_root: str | None = None,
+    messages: list | None = None,
+    transcript_path: str | None = None,
+    target_window: int = CODEX_TARGET_WINDOW,
 ) -> CodexResult:
     """Run a task through the Codex CLI agent as a subprocess.
 
@@ -335,12 +356,18 @@ async def run_codex(
             use ``context_root`` instead.
         timeout: Maximum seconds to wait before killing the process.
             Defaults to ``LLM_ROUTER_CODEX_TIMEOUT`` env var (300s).
-        context_root: Project root to scope OKF context injection to,
-            independent of ``working_dir``/subprocess cwd. Defaults to
-            ``working_dir`` when not given, which is the pre-existing
-            behaviour. A router dispatch that knows the caller's session
-            scope but must not change where the Codex subprocess runs
-            passes this instead of ``working_dir``.
+        context_root: Project root for the context pack's project layer
+            (OKF, repo state, instructions digest), independent of
+            ``working_dir``/subprocess cwd. Defaults to ``working_dir``. With
+            neither, no project layer is added (the old ``inject`` path used
+            the current repo). A router dispatch that knows the caller's
+            session scope but must not change where Codex runs passes this.
+        messages: The caller's conversation (chat or Responses items), used as
+            pack ``recent`` when no rollout file is readable.
+        transcript_path: A Codex rollout JSONL file to read the conversation
+            from. A missing or unreadable file falls back to ``messages``.
+        target_window: Token window the pack is sized against (default
+            ``CODEX_TARGET_WINDOW``, an unsourced assumption).
 
     Returns:
         A ``CodexResult`` with the process output, model name, exit code,
@@ -350,8 +377,18 @@ async def run_codex(
     from llm_router.safe_subprocess import get_safe_env
 
     try:
-        from llm_router.context_injection import inject
-        prompt = inject(prompt, root=context_root if context_root is not None else working_dir)
+        from llm_router.context_pack import build_pack
+
+        pack = build_pack(
+            prompt,
+            messages,
+            transcript_path=transcript_path,
+            project_root=(context_root if context_root is not None else working_dir),
+            target_window=target_window,
+            door="codex",
+            target_provider="codex",
+        )
+        prompt = _render_pack_prompt(pack)
     except Exception:                                        # noqa: BLE001
         pass
 
