@@ -83,7 +83,9 @@ def batch_passed(row: dict) -> bool | None:
         gap, lb = _real(row.get("gap_pts")), _real(row.get("newcombe_lb"))
         if gap is None or lb is None:
             return None
-        return n >= PAIRS_MIN_N and gap <= PAIRS_MAX_GAP_PTS and lb >= PAIRS_MIN_LB
+        # P2.0-b: one eligibility rule. Lazy import: eligibility imports this module.
+        from llm_router.eligibility import grade
+        return grade({"n": n, "gap_pts": gap, "lb_pts": lb}) == "eligible"
     return None
 
 

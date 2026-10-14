@@ -73,7 +73,7 @@ def test_exact_three_point_gap_from_counts():
     assert ev.gap_pts == 3.0 and grade(ev) == "eligible"
     ev = evidence_from_counts(2, 100, 5, 100)
     assert ev.gap_pts == 3.0
-    assert grade(ev) == ("eligible" if ev.lb_pts >= -10.0 else "failed")
+    assert grade(ev) == ("eligible" if ev.lb_pts >= -10.0 - 1e-9 else "failed")
     assert grade(evidence_from_counts(96, 100, 100, 100)) == "failed"  # 4.0 pts
 
 
@@ -87,6 +87,43 @@ def test_exact_three_point_gap_sweep():
                 found += 1
                 ev = evidence_from_counts(k_cand, n, k_ref, n)
                 assert ev.gap_pts == 3.0, (k_cand, k_ref, n)
-                want = "eligible" if ev.lb_pts >= -10.0 else "failed"
+                want = "eligible" if ev.lb_pts >= -10.0 - 1e-9 else "failed"
                 assert grade(ev) == want, (k_cand, k_ref, n)
     assert found >= 20  # the sweep must find something to check
+
+
+# ── review fixes ────────────────────────────────────────────────────────────
+
+def test_lane_quality_row_key_newcombe_lb_is_read():
+    assert grade({"n": 64, "gap_pts": 2.1, "newcombe_lb": -6.4}) == "eligible"
+    assert grade({"n": 64, "gap_pts": 2.1, "newcombe_lb": -12.0}) == "failed"
+
+
+@pytest.mark.parametrize("counts", [
+    {"k_cand": 70, "n_cand": 60, "k_ref": 5, "n_ref": 60},     # k > n
+    {"k_cand": -1, "n_cand": 60, "k_ref": 5, "n_ref": 60},     # negative
+    {"k_cand": 59.9, "n_cand": 60.9, "k_ref": 60, "n_ref": 60},  # fractional
+    {"k_cand": True, "n_cand": 60, "k_ref": 60, "n_ref": 60},  # bool
+    {"k_cand": "59", "n_cand": 60, "k_ref": 60, "n_ref": 60},  # string
+])
+def test_malformed_counts_grade_unknown_never_raise(counts):
+    assert grade(counts) == "unknown"
+
+
+def test_malformed_mapping_values():
+    assert grade({"n": "60", "gap_pts": 1, "lb_pts": 0}) == "unknown"
+    assert grade({"n": 60, "gap_pts": float("nan"), "lb_pts": 0}) == "probe"
+    assert grade({"n": 60, "gap_pts": 1, "lb_pts": float("inf")}) == "probe"
+
+
+def test_supplied_gap_float_noise_is_tolerated():
+    assert grade(Evidence(60, (0.05 - 0.02) * 100, -5.0)) == "eligible"
+    assert grade(Evidence(60, 3.0001, -5.0)) == "failed"
+
+
+def test_lane_quality_uses_the_one_rule():
+    from llm_router import lane_quality
+    row = {"kind": "shadow_pairs", "n": 64, "gap_pts": (0.05 - 0.02) * 100, "newcombe_lb": -5.0}
+    assert lane_quality.batch_passed(row) is True
+    assert lane_quality.batch_passed({**row, "n": 59}) is False
+    assert lane_quality.batch_passed({**row, "newcombe_lb": None}) is None
