@@ -517,8 +517,9 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "VAULT_ADDR": ("external_tool", "org_policy.py", 1),
     "ANTHROPIC_BASE_URL": ("external_tool", "hooks/session-start.py", 1),
     "_SESSION_BUDGET_WARNING": ("external_tool", "hooks/enforce-route.py", 1),
-    # ── platform  (4) ──
+    # ── platform  (5) ──
     "APPDATA": ("platform", "commands/doctor.py", 4),
+    "CDPATH": ("platform", "write_policy.py", 1),
     "NO_COLOR": ("platform", "commands/budget.py", 16),
     "PATH": ("platform", "statusline_tick.py", 1),
     "XDG_CONFIG_HOME": ("platform", "install_hooks.py", 1),
