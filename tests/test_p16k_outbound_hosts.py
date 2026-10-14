@@ -17,6 +17,12 @@ from itertools import islice, product
 from pathlib import Path
 from typing import NamedTuple
 
+import pytest
+
+# 2026-10-13: the whole-tree scans take ~3.4 s locally but hit the global 30 s
+# timeout on busy CI runners (29.91 s once, twice in a day). Explicit 120 s.
+pytestmark = pytest.mark.timeout(120)
+
 REPO = Path(__file__).resolve().parents[1]
 SCAN_DIRS = ("src", "hooks")
 URL_RE = re.compile(r"\b(?:https?|wss?)://(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9][A-Za-z0-9.\-_]*)")

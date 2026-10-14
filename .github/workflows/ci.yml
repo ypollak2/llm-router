@@ -108,7 +108,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -188,7 +188,7 @@ jobs:
             --junit-xml=/tmp/pytest-results.xml &
           PYTEST_PID=$!
 
-          # Wait up to 1500s for pytest to exit normally.
+          # Wait up to 2100s for pytest to exit normally.
           #
           # History: 150s (sized for ~2,700 tests) -> 900s (~6,900 tests) -> here.
           # Each time the suite outgrew the wait, the hang-handler fired on a
@@ -196,10 +196,16 @@ jobs:
           # written when the run finishes) and reported failure. Nothing was
           # broken; the watchdog was simply shorter than the work.
           #
-          # 1500s is the ceiling, not the expectation: with -n auto a healthy
+          # 2026-10-13: 1500s -> 2100s. test (3.11) hit "suite exceeded the 1500s
+          # budget" at least 3 times that day on main/PRs (run 38397099001 only
+          # passed on rerun, at 1426s; #499 run 38475482200) while test jobs
+          # normally take 16-25 min, so headroom was ~5%. Raised to ~40% over
+          # the 25 min upper range.
+          #
+          # 2100s is the ceiling, not the expectation: with -n auto a healthy
           # run is a few minutes and exits the loop immediately. timeout-minutes
           # on the job is raised to match, or the job dies before the loop can.
-          for i in $(seq 1 1500); do
+          for i in $(seq 1 2100); do
             if ! kill -0 $PYTEST_PID 2>/dev/null; then
               wait $PYTEST_PID
               exit $?
@@ -207,7 +213,7 @@ jobs:
             sleep 1
           done
 
-          # Still running after 1500s. Two different situations look the same
+          # Still running after 2100s. Two different situations look the same
           # from here, and only the junit xml tells them apart: pytest writes it
           # when the run FINISHES, so
           #   xml present -> tests are done, the process hangs on exit (aiosqlite
@@ -216,7 +222,7 @@ jobs:
           #                  budget. That is a failure of the budget, not a pass
           #                  and not an exit hang, and it says so.
           if [ ! -s /tmp/pytest-results.xml ]; then
-            echo "::error::suite exceeded the 1500s budget: pytest is still running tests (no junit xml written yet), so this is NOT the aiosqlite exit hang. Raise the budget or speed the suite up."
+            echo "::error::suite exceeded the 2100s budget: pytest is still running tests (no junit xml written yet), so this is NOT the aiosqlite exit hang. Raise the budget or speed the suite up."
             kill $PYTEST_PID 2>/dev/null || true
             exit 1
           fi
