@@ -411,8 +411,8 @@ async def test_default_fast_trim_reaches_the_backend_only(tmp_path, policy):
     assert [t["name"] for t in sent["tools"]] == ["Read", "Edit", "Write", "Bash"]
     by_name = {t["name"]: t for t in body["tools"]}
     assert all(t == by_name[t["name"]] for t in sent["tools"])
-    turns = [m for m in sent["messages"] if m["role"] != "system"]
-    assert len(turns) == 3 and turns[0] == body["messages"][0]  # first ask + last exchange
+    # fits the window: the whole conversation (non-system turns), native
+    assert sent["messages"] == [m for m in body["messages"] if m["role"] != "system"]
 
 
 def test_fast_trim_keeps_short_histories_and_does_not_mutate():
@@ -420,7 +420,8 @@ def test_fast_trim_keeps_short_histories_and_does_not_mutate():
     body["messages"] = body["messages"][:4]
     before = json.dumps(body)
     out = pb.apply_trims(body, pb.resolve_trims(None))
-    assert out["messages"] == body["messages"] and json.dumps(body) == before
+    assert out["messages"] == [m for m in body["messages"] if m["role"] != "system"]
+    assert json.dumps(body) == before
 
 
 def test_num_predict_caps_by_previous_tool():

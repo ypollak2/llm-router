@@ -337,16 +337,26 @@ def test_run_codex_context_root_defaults_to_working_dir(_mock_codex, tmp_path):
     assert _mock_codex["cwd"] == wd
 
 
-def test_run_codex_no_scope_at_all_injects_nothing(_mock_codex):
+def test_run_codex_no_scope_at_all_injects_nothing(_mock_codex, monkeypatch):
     """Behavioural half of the "no scope means nothing is injected" pair:
-    with neither working_dir nor context_root, inject() is asked for root=None
-    — the same "no known project" signal OKF-SCOPE-05 made safe (None, not a
-    wrong bucket), not a silently-wrong default."""
+    with neither working_dir nor context_root, build_pack receives
+    project_root=None (the OKF-SCOPE-05 "no known project" signal) and its
+    project layer never reaches inject()."""
+    from llm_router import context_pack
     from llm_router.codex_agent import run_codex
 
+    seen: dict = {}
+    real = context_pack.build_pack
+
+    def _spy(*a, **kw):
+        seen["project_root"] = kw.get("project_root", "missing")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(context_pack, "build_pack", _spy)
     asyncio.run(run_codex("hi"))
 
-    assert _mock_codex["inject_root"] is None
+    assert seen["project_root"] is None
+    assert "inject_root" not in _mock_codex
 
 
 @pytest.fixture

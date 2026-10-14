@@ -141,6 +141,45 @@ def _ollama_num_ctx(model: str | None = None) -> int | None:
     return val if val > 0 else None
 
 
+def _ollama_window_candidates(model: str, current_window: int | None) -> list[str]:
+    """Validated installed Ollama models with a larger known local window."""
+    from llm_router import pack_overflow
+
+    if not pack_overflow.enabled():
+        return []
+    try:
+        from llm_router import local_models, model_discovery
+
+        current = int(current_window or local_models.num_ctx(model))
+        pool: list[str] = []
+        for raw in model_discovery.available_ollama_models():
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            name = raw.strip()
+            if "/" in name:
+                if not name.startswith("ollama/"):
+                    continue
+                name = name.split("/", 1)[1]
+            table = local_models.NUM_CTX
+            base = name.split(":", 1)[0]
+            window = table.get(name, table.get(base, table.get(f"{base}:latest")))
+            if window is None or window <= current or not local_models.serves_generate(name):
+                continue
+            pool.append(f"ollama/{name}")
+        if not pool:
+            return []
+        front, _tail_unused = model_discovery.order_for_chain(pool, "generate", critical=True)
+        validated = (set(model_discovery.grandfathered_ids())
+                     | model_discovery._env_configured_ids()
+                     | model_discovery._routing_yaml_pin_ids())
+        return [m for m in front if m in validated]
+    except Exception as exc:  # noqa: BLE001 - discovery failure must preserve escalation
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-PACK-OVERFLOW-DISCOVERY", exc, detail=f"model={model}")
+        return []
+
+
 def _ollama_think_enabled() -> bool:
     """Whether Ollama's native <think> reasoning mode should stay ON.
 
@@ -268,21 +307,23 @@ async def call_llm(
     kwargs = _quirk.transform_request(kwargs)
 
     if model.startswith("ollama/"):
-        # Refuse to send what Ollama would silently truncate from the front
-        # (system prompt first) instead of finding out from a reply about the
-        # wrong thing. Raising here is caught by router.py's existing
-        # chain-failover `except Exception` with no further wiring.
+        # Refuse to send what Ollama would silently truncate from the front. If
+        # trimming leaves an untrimmable request, try a validated installed local
+        # model with a larger known window before escalating.
         from llm_router.local_context_guard import check_overflow
         from llm_router.pack_overflow import PayloadPack
-        # allow_model_swap=False (documented exception to PLAN v16 P1.3 task 1 "next eligible
-        # model with a larger window"): here the model is chosen by router.py's chain, and
-        # swapping inside call_llm would bill and ledger the wrong model. ContextOverflow is
-        # caught by router.py's generic chain failover, which moves to the chain's next model;
-        # it does NOT pick a bigger-window model (router.py has no window-aware step), so the
-        # bigger-window part of P1.3 is not met at this site.
+        old_model = kwargs["model"]
         pack = PayloadPack({"messages": cached_messages}, num_ctx=kwargs.get("num_ctx"),
-                           model=kwargs["model"], site="providers.call_llm", allow_model_swap=False)
+                           model=kwargs["model"], site="providers.call_llm",
+                           candidates=_ollama_window_candidates(kwargs["model"], kwargs.get("num_ctx")))
         cached_messages = kwargs["messages"] = pack.trim_to()["messages"]
+        if pack.action == "bigger_window":
+            from llm_router import failopen
+            model = kwargs["model"] = pack.model
+            kwargs["num_ctx"] = pack.num_ctx
+            failopen.record("CHZ-FO-PACK-OVERFLOW-BIGGER-WINDOW",
+                            detail=(f"site=providers.call_llm old_model={old_model} "
+                                    f"new_model={pack.model} num_ctx={pack.num_ctx} action=bigger_window"))
         check_overflow({"messages": cached_messages}, num_ctx=kwargs.get("num_ctx"),
                        model=kwargs["model"], site="providers.call_llm")
 
@@ -482,18 +523,22 @@ async def call_llm_stream_events(
     kwargs = _quirk.transform_request(kwargs)
 
     if model.startswith("ollama/"):
-        # Same preflight as call_llm() — see local_context_guard module docstring.
+        # Same preflight as call_llm(): trim first, then try a validated larger
+        # installed local window, then let check_overflow escalate.
         from llm_router.local_context_guard import check_overflow
         from llm_router.pack_overflow import PayloadPack
-        # allow_model_swap=False (documented exception to PLAN v16 P1.3 task 1 "next eligible
-        # model with a larger window"): here the model is chosen by router.py's chain, and
-        # swapping inside call_llm would bill and ledger the wrong model. ContextOverflow is
-        # caught by router.py's generic chain failover, which moves to the chain's next model;
-        # it does NOT pick a bigger-window model (router.py has no window-aware step), so the
-        # bigger-window part of P1.3 is not met at this site.
+        old_model = kwargs["model"]
         pack = PayloadPack({"messages": cached_messages}, num_ctx=kwargs.get("num_ctx"),
-                           model=kwargs["model"], site="providers.call_llm_stream_events", allow_model_swap=False)
+                           model=kwargs["model"], site="providers.call_llm_stream_events",
+                           candidates=_ollama_window_candidates(kwargs["model"], kwargs.get("num_ctx")))
         cached_messages = kwargs["messages"] = pack.trim_to()["messages"]
+        if pack.action == "bigger_window":
+            from llm_router import failopen
+            model = kwargs["model"] = pack.model
+            kwargs["num_ctx"] = pack.num_ctx
+            failopen.record("CHZ-FO-PACK-OVERFLOW-BIGGER-WINDOW",
+                            detail=(f"site=providers.call_llm_stream_events old_model={old_model} "
+                                    f"new_model={pack.model} num_ctx={pack.num_ctx} action=bigger_window"))
         check_overflow({"messages": cached_messages}, num_ctx=kwargs.get("num_ctx"),
                        model=kwargs["model"], site="providers.call_llm_stream_events")
 
