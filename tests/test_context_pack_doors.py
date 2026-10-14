@@ -59,13 +59,22 @@ SPY_TESTS = {
 #: Installed in the child pytest before collection, so every door test's own
 #: spy (``real = context_pack.build_pack``) wraps this recorder.
 _RECORDER = """
-    import json, os
+    import json, os, sys
     from llm_router import context_pack
 
     _real, _seen, _cur = context_pack.build_pack, {}, [None]
 
+    def _caller():
+        # The first frame outside the tests (their spies wrap this recorder) and
+        # outside this plugin: the production code that called build_pack.
+        f = sys._getframe(2)
+        while f is not None and ("/tests/" in f.f_code.co_filename
+                                 or f.f_code.co_filename == __file__):
+            f = f.f_back
+        return f.f_code.co_filename if f is not None else ""
+
     def _recording(*args, **kwargs):
-        _seen.setdefault(_cur[0], []).append(kwargs.get("door"))
+        _seen.setdefault(_cur[0], []).append([kwargs.get("door"), _caller()])
         return _real(*args, **kwargs)
 
     context_pack.build_pack = _recording
@@ -125,6 +134,12 @@ def test_spy_tests_cover_every_door():
         assert node.startswith(TEST_FILES[door] + "::"), door
 
 
+# A nested pytest (interpreter start, conftest, seven door tests): ~6-8 s alone, so
+# the suite-wide 30 s timeout is too tight under `-n auto` load (P12-FLAKE-1, see
+# test_n_suite_ignores_the_operators_settings.py). The subprocess budget sits just
+# inside the mark so a hang reports the child's output.
+@pytest.mark.timeout(180)
+@pytest.mark.xdist_group("nested_pytest")
 def test_a_spy_sees_each_door_call_build_pack(tmp_path):
     (tmp_path / "door_spy_recorder.py").write_text(textwrap.dedent(_RECORDER), encoding="utf-8")
     out = tmp_path / "seen.json"
@@ -139,12 +154,16 @@ def test_a_spy_sees_each_door_call_build_pack(tmp_path):
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "door_spy_recorder", "-p", "no:cacheprovider",
          "-p", "no:xdist", "-o", "addopts=", *nodes],
-        cwd=TESTS.parent, env=env, capture_output=True, text=True, timeout=300,
+        cwd=TESTS.parent, env=env, capture_output=True, text=True, timeout=170,
     )
     assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-2000:]
     seen = json.loads(out.read_text(encoding="utf-8"))["seen"]
-    by_test = {node.rsplit("tests/", 1)[-1]: set(doors) for node, doors in seen.items() if node}
-    assert {node: by_test.get(node) for node in SPY_TESTS.values()} == {
+    by_test = {node.rsplit("tests/", 1)[-1]: calls for node, calls in seen.items() if node}
+    assert {node: {d for d, _ in by_test.get(node, [])} for node in SPY_TESTS.values()} == {
         node: {door} for door, node in SPY_TESTS.items()}
-    called = set().union(*by_test.values())
+    # Each call came from production code (the llm_router package, source tree or
+    # installed, or the hooks/ mirror), never from a test calling build_pack itself.
+    callers = {Path(f).as_posix() for calls in by_test.values() for _d, f in calls}
+    assert callers and all("/llm_router/" in f or "/hooks/" in f for f in callers), callers
+    called = {d for calls in by_test.values() for d, _ in calls}
     assert called == set(context_pack.DOORS) and len(called) == 7
