@@ -245,6 +245,13 @@ def _from_message(m: Any) -> _Msg | None:
     return _from_item(m)
 
 
+def render_message(m: Any) -> str:
+    """One chat message or Responses item as the text a pack sends (tool blocks
+    included, uncapped), or ``""`` for anything the pack would skip."""
+    msg = _from_message(m)
+    return msg.render(cap=False) if msg else ""
+
+
 def _from_cc_line(entry: Any) -> _Msg | None:
     """One Claude Code transcript JSONL entry."""
     if not isinstance(entry, dict) or entry.get("isMeta"):
