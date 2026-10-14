@@ -15,8 +15,11 @@ a transcript path, a session id) and gets back a frozen `ContextPack`:
                    its first and last 1,500 chars around a ``[…truncated N
                    chars…]`` marker. In ``mode="full"`` this is the whole
                    conversation, unelided.
-* ``summary``      the rolling summary from P1.2. P1.2 is not built yet, so this
-                   is always ``None`` today.
+* ``summary``      the P1.2 rolling summary of the session (``context_summary``),
+                   only in ``mode="pack"``, only at the doors that know the
+                   Claude Code session (``SUMMARY_DOORS``) and only when
+                   ``LLM_ROUTER_ROLLING_SUMMARY`` is on; otherwise ``None``. At
+                   most ``SUMMARY_MAX_TOKENS``; gated like ``recent``.
 * ``project``      repository knowledge and state: OKF, the semantic pack and
                    ``repo_facts`` (branch, ``git status --porcelain`` count),
                    produced by ``context_injection.inject`` — the one choke point
@@ -50,8 +53,8 @@ from typing import Any, Iterable
 from llm_router import context_tags
 from llm_router.token_budget import estimate_tokens
 
-#: The seven context doors of PLAN v16 P1.1 task 3. The door PRs wire each one;
-#: `tests/test_context_pack_doors.py` (door PRs) enumerates exactly these.
+#: The seven context doors of PLAN v16 P1.1 task 3. `tests/test_context_pack_doors.py`
+#: enumerates exactly these and checks each one is wired and tested.
 DOORS = ("hook", "mcp", "proxy", "codex", "agent", "sdk", "gateway")
 
 RECENT_N = 7
@@ -60,6 +63,11 @@ TOOL_KEEP_CHARS = 1_500
 TAIL_BYTES = 2 * 1024 * 1024
 FULL_FRACTION = 0.8  # applied as whole * 5 <= window * 4 in build_pack
 INSTRUCTIONS_MAX_TOKENS = 1_500
+#: Doors whose session id keys a P1.2 rolling summary: the Stop hook writes one
+#: row per Claude Code session. The other doors see a caller's message list or a
+#: Codex rollout, for which no summary is ever stored.
+SUMMARY_DOORS = ("hook", "agent", "mcp")
+SUMMARY_MAX_TOKENS = 2_000
 
 _INSTRUCTION_FILES = ("CLAUDE.md", ".claude/CLAUDE.md", "AGENTS.md")
 _SKIP_ROLES = frozenset({"system", "developer"})
@@ -402,7 +410,14 @@ def _gather(door: str, *, messages: list | None = None, transcript_path: str | N
             return _from_list(messages)
         if door == "codex":
             if transcript_path:
-                return _transcript(transcript_path, codex=True)
+                # A missing or unreadable rollout file falls back to the
+                # caller's messages; it never raises (P1.1 door 4).
+                try:
+                    got, complete = _transcript(transcript_path, codex=True)
+                except OSError:
+                    got, complete = [], False
+                if got or messages is None:
+                    return got, complete
             return _from_list(messages)
         if door == "mcp":
             if not transcript_path:
@@ -595,6 +610,71 @@ def _session_content_allowed(target_provider: str) -> bool:
         return False  # privacy gate: an unreadable rule withholds, never leaks
 
 
+def _summary(door: str, session_id: str | None,
+             transcript_path: str | None = None) -> str | None:
+    """The stored P1.2 rolling summary for this session, or None.
+
+    Opt-in: with ``LLM_ROUTER_ROLLING_SUMMARY`` off this reads one environment
+    variable and imports nothing. The session is the explicit ``session_id``,
+    else the transcript's file stem (the id the Stop hook stores it under), else,
+    at the mcp door only, the calling session. Read-only
+    (``context_summary.read_summary_text``): it never creates ``sessions.db``.
+    Layer tags inside the text are neutralised so they cannot close the
+    summary's own layer. Fail-open: any error is no summary.
+    """
+    if door not in SUMMARY_DOORS:
+        return None
+    if os.environ.get("LLM_ROUTER_ROLLING_SUMMARY", "").strip().lower() not in (
+            "1", "true", "on", "yes"):
+        return None
+    try:
+        from llm_router import context_summary
+        from llm_router.call_identity import clean_id
+
+        if session_id is None and transcript_path:
+            session_id = Path(transcript_path).stem
+        if session_id is None and door == "mcp":
+            from llm_router.call_identity import call_session_id
+            session_id = call_session_id()
+        sid = clean_id(session_id)
+        if not sid:
+            return None
+        text = (context_summary.read_summary_text(sid) or "").strip()
+        for tag in context_tags.TAGS.values():
+            text = text.replace(f"</{tag}", f"‹/{tag}").replace(f"<{tag}", f"‹{tag}")
+        return _fit_summary(text, SUMMARY_MAX_TOKENS)
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
+def _fit_summary(text: str, max_tokens: int) -> str | None:
+    """``text`` within ``max_tokens``, or None when nothing fits.
+
+    Over the budget it first keeps only the sections ``pack_overflow`` never
+    trims (Goal, Current state), so the newest state survives; then whole lines
+    from the head, the first line that does not fit cut to the remaining room.
+    """
+    if not text or max_tokens <= 0:
+        return None
+    if estimate_tokens(text) <= max_tokens:
+        return text
+    from llm_router.pack_overflow import _shrink_summary
+
+    text = _shrink_summary(text) or text
+    kept: list[str] = []
+    used = 0
+    for line in text.splitlines():
+        cost = len(line) + 1
+        if (used + cost) // 4 > max_tokens:
+            room = max_tokens * 4 - used - 1
+            if room > 0:
+                kept.append(line[:room])
+            break
+        kept.append(line)
+        used += cost
+    return "\n".join(kept).strip() or None
+
+
 def _check_door(door: str) -> None:
     if door not in DOORS:
         raise ValueError(f"unknown context door {door!r}; expected one of {DOORS}")
@@ -604,14 +684,18 @@ def build_pack(request: str, messages: list | None = None, *,
                session_id: str | None = None, transcript_path: str | None = None,
                project_root: str | None = None, target_window: int,
                door: str, context: str | None = None,
-               target_provider: str | None = None) -> ContextPack:
+               target_provider: str | None = None,
+               project: str | None = None) -> ContextPack:
     """Build the context pack for one request at one door.
 
     ``context`` is a caller-supplied context string (the MCP ``llm(context=)``
     argument). It is used only when no transcript is found and is never the
     whole conversation, so it never qualifies the pack for ``mode="full"``.
-    The MCP recipe is ``build_pack(prompt, session_id=sid, context=ctx,
-    door="mcp", ...)``. ``messages`` means "this list IS the conversation".
+    ``messages`` means "this list IS the conversation". The MCP door adds
+    caller context separately and passes its already-injected project layer.
+
+    ``project`` overrides the project layer verbatim when supplied, including
+    an empty string; only ``None`` invokes ``_project`` and context injection.
 
     ``target_provider`` is the privacy hook for doors: when given, ``recent``
     (session content) is emptied unless ``session_store.allows_session_content``
@@ -631,7 +715,8 @@ def build_pack(request: str, messages: list | None = None, *,
         request = "" if request is None else str(request)
     msgs, complete = _gather(door, messages=messages, transcript_path=transcript_path,
                              session_id=session_id, context=context)
-    if target_provider is not None and not _session_content_allowed(target_provider):
+    content_allowed = target_provider is None or _session_content_allowed(target_provider)
+    if not content_allowed:
         msgs, complete = [], False
     # The current request is passed separately; a trailing copy of it in the
     # conversation would send it twice.
@@ -639,7 +724,8 @@ def build_pack(request: str, messages: list | None = None, *,
         msgs = msgs[:-1]
 
     instructions = _instructions(project_root)
-    project = _project(request, project_root, session_id)
+    if project is None:
+        project = _project(request, project_root, session_id)
 
     try:
         window = int(target_window)
@@ -656,7 +742,16 @@ def build_pack(request: str, messages: list | None = None, *,
         mode = "pack"
         recent = [{"role": m.role, "content": m.render(cap=True)} for m in msgs[-RECENT_N:]]
 
-    summary: str | None = None  # P1.2 (rolling summary) is not built yet
+    # The summary stands in for the turns before ``recent``; a full pack already
+    # carries them all. It is session content, so the privacy gate applies.
+    summary = (_summary(door, session_id, transcript_path)
+               if mode == "pack" and content_allowed else None)
+    if summary and window > 0:
+        # The summary gets only what the window has left after everything else,
+        # on the same 0.8 x window budget as full mode.
+        used = estimate_tokens(request) + sum(estimate_tokens(m["content"]) for m in recent)
+        used += sum(estimate_tokens(x) for x in (instructions, project) if x)
+        summary = _fit_summary(summary, window * 4 // 5 - used)
     pack = ContextPack(
         request=request, recent=recent, summary=summary, project=project,
         instructions=instructions, mode=mode,

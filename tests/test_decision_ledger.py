@@ -555,22 +555,179 @@ def test_prereg_check_counts_rows_before_and_after_the_freeze(tmp_path):
     assert check_prereg.check(md)["match"] is False
 
 
-def test_harness_runs_and_refuses_to_pass_a_tiny_run(tmp_path):
-    """Smoke only: n = 3 per arm at 0 messages. It must produce rows and a FAILING verdict
-    (nothing at >= 1,800 messages was checked), and must not write a gate file."""
+def _run_harness(tmp_path, extra, *, loadavg=None, prelude: str | None = None):
+    """Run the P1.7-c harness in a subprocess. Returns (proc, out_path, gate_home)."""
     home = tmp_path / "gatehome"
     home.mkdir()
     env = {**os.environ, "HOME": str(tmp_path), "LLM_ROUTER_HOME": str(home),
            "PYTHONPATH": os.pathsep.join([str(ROOT / "src"), str(ROOT)])}
     out = tmp_path / "res.json"
-    p = subprocess.run([sys.executable, str(ROOT / "scripts" / "bench_shadow_continuation.py"),
-                        "--n", "3", "--warmup", "1", "--sizes", "0", "--fixtures", "one_prompt",
-                        "--out", str(out), "--gate"], env=env, capture_output=True, text=True, timeout=300,
-                       cwd=str(ROOT))
-    assert p.returncode == 1, p.stderr[-600:]
+    script = str(ROOT / "scripts" / "bench_shadow_continuation.py")
+    args = ["--n", "3", "--warmup", "1", "--sizes", "0", "--fixtures", "one_prompt",
+            "--out", str(out), "--gate", *extra]
+    if loadavg is None and prelude is None:
+        cmd = [sys.executable, script, *args]
+    else:  # patch the subprocess, then run the script as __main__
+        wrapper = "import os,runpy,sys\n"
+        if loadavg is not None:
+            wrapper += "os.getloadavg=lambda:(%r,%r,%r)\n" % (loadavg, loadavg, loadavg)
+        if prelude is not None:
+            wrapper += prelude + "\n"
+        wrapper += "sys.argv=[%r]+sys.argv[1:]\nrunpy.run_path(%r,run_name='__main__')" % (script, script)
+        cmd = [sys.executable, "-c", wrapper, *args]
+    p = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=300, cwd=str(ROOT))
+    return p, out, home
+
+
+def _diag(p):
+    return "rc=%s\nSTDOUT:\n%s\nSTDERR:\n%s" % (p.returncode, p.stdout[-1500:], p.stderr[-1500:])
+
+
+def test_harness_runs_and_refuses_to_pass_a_tiny_run(tmp_path):
+    """Smoke only: n = 3 per arm at 0 messages. It must produce rows and a FAILING verdict
+    (nothing at >= 1,800 messages was checked), and must not write a gate file. Exit 1 means
+    "verdict failed" ONLY: a harness error exits 2 (an uncaught exception used to exit 1 too and
+    leave no out-file, which made a CI flake look like a verdict failure)."""
+    p, out, home = _run_harness(tmp_path, [])
+    assert p.returncode == 1, _diag(p)
+    assert out.exists(), "exit 1 but no out-file written\n" + _diag(p)
     res = json.loads(out.read_text())
     assert res["rows"] and res["rows"][0]["off"]["n"] == 3 and res["rows"][0]["shadow"]["n"] == 3
     assert res["verdict"]["passed"] is False and res["verdict"]["rows_checked"] == 0
     assert res["meta"]["decision_rows"] == 8 and res["meta"]["decision_rows_shadow"] >= 0
     assert not (home / DL.GATE_FILENAME).exists()
     assert "gate NOT written" in p.stdout
+
+
+def test_harness_drains_shadow_queue_before_cleanup(tmp_path, monkeypatch):
+    marker = tmp_path / "shadow-marker"
+    monkeypatch.setenv("MARKER_PATH", str(marker))
+    prelude = """
+import llm_router.engine as E
+import tempfile, os, threading
+release = threading.Event()
+real_shadow_run = E._shadow_run
+real_shadow_drain = E.shadow_drain
+real_exit = tempfile.TemporaryDirectory.__exit__
+
+def shadow_run(*args, **kwargs):
+    release.wait(30)
+    with open(os.environ["MARKER_PATH"], "a") as marker:
+        marker.write("1" if os.path.isdir(os.environ["LLM_ROUTER_HOME"]) else "0")
+    return real_shadow_run(*args, **kwargs)
+
+def shadow_drain(*args, **kwargs):
+    release.set()
+    return real_shadow_drain(*args, **kwargs)
+
+def temp_exit(self, *args, **kwargs):
+    result = real_exit(self, *args, **kwargs)
+    if self.name == os.environ["LLM_ROUTER_HOME"]:  # the harness's home, not the per-fixture dirs
+        release.set()
+    return result
+
+E._shadow_run = shadow_run
+E.shadow_drain = shadow_drain
+tempfile.TemporaryDirectory.__exit__ = temp_exit
+"""
+    p, out, _ = _run_harness(tmp_path, [], prelude=prelude)
+    assert p.returncode == 1, _diag(p)
+    assert out.exists(), _diag(p)
+    assert marker.exists(), _diag(p)
+    marks = marker.read_text()
+    assert "0" not in marks and "1" in marks, marks
+    res = json.loads(out.read_text())
+    assert res["meta"]["shadow_drain_ok"] is True
+
+
+def test_harness_error_path_drains_and_does_not_recreate_home(tmp_path, monkeypatch):
+    marker = tmp_path / "shadow-marker"
+    homefile = tmp_path / "home-path"
+    monkeypatch.setenv("MARKER_PATH", str(marker))
+    monkeypatch.setenv("HOMEFILE_PATH", str(homefile))
+    prelude = """
+import llm_router.engine as E
+import llm_router.decision_ledger as D
+import tempfile, os, threading
+release = threading.Event()
+real_shadow_run = E._shadow_run
+real_shadow_drain = E.shadow_drain
+real_exit = tempfile.TemporaryDirectory.__exit__
+
+class Boom(BaseException):
+    pass
+
+def gate_verdict(*a, **k):
+    raise Boom("gate")
+
+def shadow_run(*args, **kwargs):
+    release.wait(30)
+    home = os.environ["LLM_ROUTER_HOME"]
+    with open(os.environ["MARKER_PATH"], "a") as m:
+        m.write("1" if os.path.isdir(home) else "0")
+    open(os.environ["HOMEFILE_PATH"], "w").write(home)
+    return real_shadow_run(*args, **kwargs)
+
+def shadow_drain(*args, **kwargs):
+    release.set()
+    return real_shadow_drain(*args, **kwargs)
+
+def temp_exit(self, *args, **kwargs):
+    result = real_exit(self, *args, **kwargs)
+    if self.name == os.environ["LLM_ROUTER_HOME"]:
+        release.set()
+    return result
+
+D.gate_verdict = gate_verdict
+E._shadow_run = shadow_run
+E.shadow_drain = shadow_drain
+tempfile.TemporaryDirectory.__exit__ = temp_exit
+"""
+    p, out, _ = _run_harness(tmp_path, [], prelude=prelude)
+    assert p.returncode == 2, _diag(p)
+    res = json.loads(out.read_text())
+    assert "Boom" in res["meta"]["error"]
+    marks = marker.read_text() if marker.exists() else ""
+    assert "1" in marks and "0" not in marks, marks  # non-vacuous: writes happened, all before cleanup
+    assert not Path(homefile.read_text()).exists(), "harness home was re-created after cleanup"
+
+
+def test_harness_baseexception_exits_2(tmp_path):
+    prelude = """
+import asyncio
+
+class Boom(BaseException):
+    pass
+
+def boom(coro, *args, **kwargs):
+    coro.close()
+    raise Boom("x")
+
+asyncio.run = boom
+"""
+    p, out, _ = _run_harness(tmp_path, [], prelude=prelude)
+    assert p.returncode == 2, _diag(p)
+    assert out.exists(), _diag(p)
+    res = json.loads(out.read_text())
+    assert "Boom" in res["meta"]["error"]
+    assert res["verdict"]["passed"] is False
+
+
+def test_harness_on_a_loaded_machine_fails_the_verdict_and_writes_out(tmp_path):
+    """Contention is a failing verdict (exit 1, out written, reason names the load), not a crash."""
+    p, out, home = _run_harness(tmp_path, [], loadavg=99.0)
+    assert p.returncode == 1, _diag(p)
+    res = json.loads(out.read_text())
+    assert res["rows"] and res["verdict"]["passed"] is False
+    assert any("load1" in w for w in res["verdict"]["why"]), res["verdict"]
+    assert not (home / DL.GATE_FILENAME).exists()
+
+
+def test_harness_error_exits_2_writes_out_and_no_gate(tmp_path):
+    """A harness exception (here an unknown fixture) is exit 2 with a reason, never exit 1."""
+    p, out, home = _run_harness(tmp_path, ["--fixtures", "no_such_fixture"])
+    assert p.returncode == 2, _diag(p)
+    res = json.loads(out.read_text())
+    assert res["verdict"]["passed"] is False and "harness error" in res["verdict"]["reason"]
+    assert "no_such_fixture" in res["verdict"]["reason"]
+    assert not (home / DL.GATE_FILENAME).exists()

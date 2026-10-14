@@ -28,8 +28,14 @@ DEFAULTS come from the local-speed spike (``docs/spikes/local-speed-2026-09-28.m
 p90 3.59 s, 0/24 validation failures; that spike ran a tuned dedicated
 ``ollama serve`` and its absolute numbers depend on it):
   * trim ``fast``: a 366-char condensed system prompt, only the tools the step
-    class needs (names and schemas byte-identical), history capped to the first
-    user turn plus the last exchange: about 3k prompt tokens instead of ~21k;
+    class needs (names and schemas byte-identical). The spike capped history to
+    the first user turn plus the last exchange (~3k prompt tokens instead of
+    ~21k). Since PLAN v16 P1.1, history comes from the context pack
+    (``context_pack.build_pack(door="proxy")``): the whole conversation when it
+    fits 0.8 x the local window, else the last 7 messages with tool output
+    capped, plus the request verbatim. Full mode is also capped at
+    ``LLM_ROUTER_PROXY_FULL_CAP`` (default 6000 estimated payload
+    tokens). Prompts are larger than the spike's;
   * ``num_predict`` capped at 200 after Read/Bash/no tool, 700 otherwise; a
     reply that hits the cap is rejected (``translate.from_ollama``);
   * ``keep_alive`` (default 600 s; -1 only when asked) on every call and one warm-up call at proxy start;
@@ -44,10 +50,11 @@ import asyncio
 import copy
 import importlib
 import json
+import os
 from typing import Callable, Protocol
 
 from llm_router import local_models
-from llm_router.local_context_guard import check_overflow, check_truncated, effective_window, estimate_payload_tokens
+from llm_router.local_context_guard import DEFAULT_RESERVED_OUTPUT_TOKENS, check_overflow, check_truncated, effective_window, estimate_payload_tokens
 from llm_router.proxy.steps import STEP_CONTINUATION, non_system, prev_tools
 from llm_router.proxy.translate import from_ollama, to_ollama
 
@@ -106,17 +113,115 @@ STEP_TOOLS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _trim_fast(body: dict) -> dict:
-    """The local-speed spike's trimmed request: condensed system prompt, the
-    step class's tool subset, history capped to first user turn + last exchange."""
+# Full mode (whole conversation, native) is used only when estimate_payload_tokens
+# of the to_ollama payload (the guard's estimator) is at most this many tokens
+# and fits window - DEFAULT_RESERVED_OUTPUT_TOKENS; above it, send the pack's
+# last-7 history. Cold-cache first-token time on qwen3-coder:30b (num_ctx
+# 32768) grows superlinearly with prompt size: ~4.0k real tokens 2.9 s, ~8.1k
+# 9.4 s, ~15.7k 31 s, ~22.9k 64 s against the 8 s first-token hedge (P1.1 door
+# 3 measurement, 2026-10-13, N=1-3 per size, Read-like code output, where this
+# estimate runs ~1.36x Ollama's count). 6000 keeps such content near 4.4k real
+# tokens. LLM_ROUTER_PROXY_FULL_CAP overrides this default.
+DEFAULT_FULL_MAX_TOKENS = 6000
+
+
+def full_max_tokens() -> int:
+    """Positive full-mode payload cap, or the default for an invalid setting."""
+    raw = os.environ.get("LLM_ROUTER_PROXY_FULL_CAP")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_FULL_MAX_TOKENS
+    return value if value > 0 else DEFAULT_FULL_MAX_TOKENS
+
+
+def _first_request_index(turns: list) -> int | None:
+    """Find the first human request, skipping users with only tool results."""
+    for i, turn in enumerate(turns):
+        if not isinstance(turn, dict) or turn.get("role") != "user":
+            continue
+        content = turn.get("content")
+        if isinstance(content, str) and content:
+            return i
+        if isinstance(content, list) and any(
+            not isinstance(block, dict) or block.get("type") != "tool_result"
+            for block in content
+        ):
+            return i
+    return None
+
+
+def _pack_messages(turns: list, window: int, shell: dict) -> tuple[str, list]:
+    """Keep the request verbatim and untruncated, sent natively.
+
+    Full mode sends the whole conversation natively only when the native
+    payload estimate fits both the window budget and full_max_tokens(). The
+    non-system turns are conversation; Claude Code's ``role: system`` reminders
+    are not. Pack mode sends capped recent history as text plus the newest
+    exchange natively. It can still exceed the window and is left to the
+    existing guard (PayloadPack.trim_to / check_overflow in
+    OllamaBackend.complete).
+    D-92 interim (remove when the P1.2 rolling summary exists): pack mode pins
+    the first user request verbatim when it is older than the recent window and
+    the native payload with it fits the window budget.
+    target_provider="ollama" applies the session-context privacy rule:
+    LLM_ROUTER_SESSION_CONTEXT=off empties history. Project/instructions
+    layers are not built here (no project_root): proxy.okf_context.attach
+    already attaches repository context after the trim.
+    """
+    from llm_router import context_pack, session_store
+
+    request = context_pack.extract_turn_text(
+        turns[-1].get("content"), keep_tools=True, cap=False).strip()
+    pack = context_pack.build_pack(
+        request, turns[:-1], door="proxy", target_window=window, target_provider="ollama")
+    if pack.mode == "full":
+        candidate = dict(shell, messages=list(turns))
+        if pack.system:
+            candidate["system"] = pack.system + "\n\n" + shell["system"]
+        est = estimate_payload_tokens(to_ollama(candidate, "", num_ctx=window))
+        if est <= min(window - DEFAULT_RESERVED_OUTPUT_TOKENS, full_max_tokens()):
+            return pack.system, list(turns)
+        recent = context_pack.messages_for(
+            "proxy", messages=turns[:-1], cap=True)[-context_pack.RECENT_N:]
+    else:
+        recent = list(pack.recent)
+    tail = turns[-2:] if len(turns) >= 2 and turns[-2].get("role") == "assistant" else turns[-1:]
+    if len(tail) == 2 and recent and recent[-1] == {
+        "role": "assistant",
+        "content": context_pack.extract_turn_text(
+            turns[-2].get("content"), keep_tools=True, cap=True).strip(),
+    }:
+        recent.pop()
+    # D-92 interim: remove when P1.2 summary exists.
+    i = _first_request_index(turns)
+    if (i is not None and i < len(turns) - 1 - context_pack.RECENT_N
+            and all(turns[i] is not message for message in tail)
+            and session_store.allows_session_content("ollama")):
+        messages = [turns[i]] + recent + tail
+        system = pack.system + "\n\n" + shell["system"] if pack.system else shell["system"]
+        candidate = dict(shell, messages=messages, system=system)
+        est = estimate_payload_tokens(to_ollama(candidate, "", num_ctx=window))
+        if est <= window - DEFAULT_RESERVED_OUTPUT_TOKENS:
+            return pack.system, messages
+    return pack.system, recent + tail
+
+
+def _trim_fast(body: dict, target_window: int | None = None) -> dict:
+    """Condensed system prompt and the step class's tool subset; history now
+    comes from the one context pack (PLAN v16 P1.1 door 3)."""
     out = dict(body)
     out["system"] = CONDENSED_SYSTEM
     wanted = STEP_TOOLS[STEP_CONTINUATION]
     by_name = {t.get("name"): t for t in body.get("tools") or [] if isinstance(t, dict)}
     out["tools"] = [by_name[n] for n in wanted if n in by_name]
     turns = non_system(body.get("messages") or [])
-    if len(turns) > 3:
-        out["messages"] = [turns[0]] + turns[-2:]
+    if turns:
+        window = target_window if isinstance(target_window, int) and target_window > 0 else local_models.num_ctx(None)
+        system_layers, messages = _pack_messages(turns, window, out)
+        out["messages"] = messages
+        if system_layers:
+            out["system"] = system_layers + "\n\n" + CONDENSED_SYSTEM
     return out
 
 
@@ -149,10 +254,10 @@ def resolve_trims(spec: str | None) -> list[Trim]:
     return out
 
 
-def apply_trims(body: dict, trims: list[Trim]) -> dict:
+def apply_trims(body: dict, trims: list[Trim], *, target_window: int | None = None) -> dict:
     out = copy.deepcopy(body)
     for trim in trims:
-        out = trim(out)
+        out = trim(out, target_window=target_window) if trim is _trim_fast else trim(out)
     return out
 
 

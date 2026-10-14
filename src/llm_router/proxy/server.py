@@ -456,7 +456,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                     src, checks = local_mode.annotate_failed_checks(body, lm, la_session_cwd(body))
                     if checks:
                         row["post_apply_checks"] = checks
-                send = apply_trims(src, trims)
+                send = apply_trims(src, trims, target_window=getattr(backend, "num_ctx", None))
             # Repo knowledge for the local model (proxy.okf_context): the trimmed
             # request is all it sees. Local path only, never the pass-through;
             # fail-open; in a thread because retrieval and the repo-state line

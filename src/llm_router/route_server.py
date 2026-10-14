@@ -15,7 +15,8 @@ available. Launch it with the ``llm_router-route`` console script, or
        "complexity": "simple|moderate|complex", # optional -> routing profile
        "system": "...",                         # optional system prompt
        "task_type": "code|query|...",           # optional (default: code)
-       "max_tokens": 4096, "temperature": 0.2}  # optional
+       "max_tokens": 4096, "temperature": 0.2,  # optional
+       "messages": [{"role", "content"}, ...]}  # optional: turns before prompt
       -> 200 {"text","model","provider","cost_usd",
               "input_tokens","output_tokens","complexity"}
       -> 400 on bad input · 502 if routing/provider fails
@@ -75,6 +76,13 @@ async def route_payload_async(payload: dict) -> dict:
         _override = None
 
     system = payload.get("system") or None
+    # PLAN v16 P1.1 door 7: the caller's conversation before ``prompt``, as
+    # chat message dicts. Absent keeps the old path (no caller history).
+    messages = payload.get("messages")
+    if messages is not None and (
+        not isinstance(messages, list) or not all(isinstance(m, dict) for m in messages)
+    ):
+        raise ValueError("'messages' must be a list of message objects")
     # P0.6: the semantic cache keys on ``prompt`` and task type only. Once the
     # gateway forwards a caller's system prompt separately (instead of folding it
     # into ``prompt``), two callers with different system prompts and the same
@@ -95,6 +103,8 @@ async def route_payload_async(payload: dict) -> dict:
             # key can survive the trip. Absent → scope falls back to env, then cwd,
             # which is this process's launch directory and not the asker's.
             project_root=payload.get("project_root") or None,
+            messages=messages,
+            context_door="gateway",
         )
     finally:
         if _sc_token is not None:

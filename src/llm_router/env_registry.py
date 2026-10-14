@@ -52,7 +52,7 @@ CATEGORIES = frozenset(
 
 #: name -> (category, first_module_that_reads_it, module_count_at_registration)
 ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
-    # ── llm_router  (153) ──
+    # ── llm_router  (154) ──
     "LLM_ROUTER_ADMIN_ACTIONS_PATH": ("llm_router", "admin_actions.py", 1),
     "LLM_ROUTER_AGENTIC_MODEL": ("llm_router", "hooks/agent-route.py", 1),
     "LLM_ROUTER_AGENTS_CONFIG": ("llm_router", "tools/agents.py", 1),
@@ -204,6 +204,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PROXY_STEP_BUDGET_S": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_MODEL": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_TRIM": ("llm_router", "proxy/server.py", 1),
+    "LLM_ROUTER_PROXY_FULL_CAP": ("llm_router", "proxy/backends.py", 1),
     "LLM_ROUTER_PROXY_NUM_CTX": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_UPSTREAM": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_PORT": ("llm_router", "proxy/server.py", 1),
@@ -328,6 +329,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_QUOTA_RETRY": ("llm_router", "quota_tracker.py", 1),
     "LLM_ROUTER_QUOTA_MAX_AGE": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_QUOTA_TTL": ("llm_router", "hooks/auto-route.py", 2),
+    "LLM_ROUTER_NO_DETACHED_SPAWN": ("llm_router", "hooks/auto-route.py", 1),
     # Verifier PR C (SHADOW): kill switch for patch capture + worker spawn, and the per-unit
     # verify budget (default 120 s, capped at 300 s).
     "LLM_ROUTER_VERIFY": ("llm_router", "verify_queue.py", 1),

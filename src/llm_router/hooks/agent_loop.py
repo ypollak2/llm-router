@@ -460,8 +460,12 @@ def run_agent_loop(
     read_only: bool = False,
     session_id: str | None = None,
     read_log: list[str] | None = None,
+    okf_inject: bool = True,
 ) -> str | None:
     """Run a tool-calling agent loop with an Ollama model.
+
+    ``okf_inject=False`` skips the repo-knowledge injection because the caller's
+    ``system_prompt`` already carries it (context pack project layer).
 
     ``read_only`` (I4) is the draft mode: only READ_ONLY_TOOLS are offered, any
     other call is refused, and a direct answer without opening a file is a valid
@@ -481,9 +485,10 @@ def run_agent_loop(
     # quietly skip it — tests/test_okf_choke_point.py enforces that.
     try:
         from llm_router.context_injection import inject_system_prompt
-        system_prompt = inject_system_prompt(system_prompt, prompt,
-                                             root=str(project_root),
-                                             session_id=session_id)
+        if okf_inject:
+            system_prompt = inject_system_prompt(system_prompt, prompt,
+                                                 root=str(project_root),
+                                                 session_id=session_id)
     except Exception:                                        # noqa: BLE001
         pass
 

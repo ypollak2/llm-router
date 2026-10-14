@@ -328,7 +328,7 @@ async def _route(prompt: str, task_type: str | None, complexity: str | None,
                  prefer_model: str | None = None, project_root: str | None = None,
                  classify_text: str | None = None, *,
                  system: str | None = None, max_tokens: int | None = None,
-                 temperature: float | None = None):
+                 temperature: float | None = None, messages: list | None = None):
     """Shared core for every wire-format endpoint: classify (if needed) → route
     through LLM Router's FULL router and adapt the result.
 
@@ -361,6 +361,12 @@ async def _route(prompt: str, task_type: str | None, complexity: str | None,
     values, forwarded to ``route_and_call``. They used to be dropped here, so a
     client's ``max_tokens`` cap and ``temperature`` never reached the model, and
     its system prompt arrived as a ``system:`` line inside the user text.
+
+    ``messages`` (PLAN v16 P1.1 door 7): the caller's conversation before
+    ``prompt``. Every completion endpoint passes a list (empty when there is no
+    history), so ``route_and_call`` builds the pack with ``door="gateway"`` from
+    the caller's own turns and never from this process's session. ``None`` (the
+    native ``/route``) keeps the old path.
     """
     if not prompt.strip():
         raise HTTPException(status_code=400, detail="no prompt content")
@@ -379,6 +385,7 @@ async def _route(prompt: str, task_type: str | None, complexity: str | None,
             "system": system,
             "max_tokens": max_tokens,
             "temperature": temperature,
+            "messages": messages,
         })
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -482,6 +489,46 @@ def _join_system(*parts: str | None) -> str | None:
     return joined or None
 
 
+def _history_turn(item) -> dict | None:
+    """One history item as a chat turn a provider accepts, or None.
+
+    ``user`` / ``assistant`` messages pass unchanged. A bare string (the
+    Responses API allows them in ``input``) becomes a user turn; any other
+    role (legacy ``function``, ``tool``) or a role-less content part becomes a
+    user turn labelled with that role, since providers reject unknown roles.
+    """
+    if isinstance(item, str):
+        return {"role": "user", "content": item} if item.strip() else None
+    if not isinstance(item, dict):
+        return None
+    role = item.get("role")
+    if role in ("user", "assistant") and "content" in item:
+        return item
+    text = _content_text(item.get("content", item.get("text")))
+    if not text.strip():
+        return None
+    return {"role": "user", "content": f"[{role}] {text}" if role else text}
+
+
+def _request_and_history(messages, flatten=None) -> tuple[str, list]:
+    """``(request, history)`` for one completion request (P1.1 door 7).
+
+    The request is the trailing ``user`` turn's text, sent verbatim; the
+    turns before it are the history ``build_pack(door="gateway")`` packs.
+    Without a trailing user turn with text (an assistant prefill, a
+    system-only request, raw content-parts) there is no request to separate:
+    the old flattened prompt is sent with no history, so nothing the caller
+    sent is lost.
+    """
+    if isinstance(messages, list) and messages and isinstance(messages[-1], dict):
+        last = messages[-1]
+        if last.get("role", "user") == "user":
+            text = _content_text(last.get("content"))
+            if text.strip():
+                return text, [t for t in map(_history_turn, messages[:-1]) if t]
+    return (flatten or _flatten)(messages), []
+
+
 def _flatten(messages: list) -> str:
     parts = []
     for m in messages or []:
@@ -561,7 +608,7 @@ async def route(payload: dict, request: Request) -> dict:
     """Minimal native routing endpoint — same contract as ``llm_router.route_server``.
 
     Body: ``{"prompt", "complexity"?, "system"?, "task_type"?, "max_tokens"?,
-    "temperature"?, "model"?}`` → ``{"text","model","provider","cost_usd",
+    "temperature"?, "model"?, "messages"?}`` → ``{"text","model","provider","cost_usd",
     "input_tokens","output_tokens","complexity"}``. Goes through the same
     ``route_payload`` core as every other endpoint.
     """
@@ -778,13 +825,14 @@ async def openai_chat(req: _OAIRequest, request: Request) -> dict:
     _refuse_stream(req.stream)
     _refuse_tools_if_present(req.tools, req.tool_choice)
     system, messages = _split_system(req.messages)
-    r = await _route(_flatten(messages), req.task_type, req.complexity,
+    prompt, history = _request_and_history(messages)
+    r = await _route(prompt, req.task_type, req.complexity,
                      prefer_model=_qualify_model(req.model, "openai"),
                      project_root=_resolve_project_scope(request),
                      classify_text=_latest_user_turn(req.messages),
                      system=system,
                      max_tokens=req.max_completion_tokens or req.max_tokens,
-                     temperature=req.temperature)
+                     temperature=req.temperature, messages=history)
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
         "object": "chat.completion",
@@ -823,7 +871,10 @@ async def openai_responses(req: _ResponsesRequest, request: Request) -> dict:
     # items in `input` are too. Both go to the model as its system prompt
     # (P0.6), and neither is classified (T-03, see _route).
     input_system, input_rest = _split_system(req.input)
-    prompt = _flatten_responses_input(input_rest)
+    if isinstance(input_rest, str):
+        prompt, history = input_rest, []
+    else:
+        prompt, history = _request_and_history(input_rest, _flatten_responses_input)
     classify_text = _latest_user_turn_from_responses_input(req.input)
     r = await _route(prompt, req.task_type, req.complexity,
                      prefer_model=_qualify_model(req.model, "openai"),
@@ -831,7 +882,7 @@ async def openai_responses(req: _ResponsesRequest, request: Request) -> dict:
                      classify_text=classify_text,
                      system=_join_system(req.instructions, input_system),
                      max_tokens=req.max_output_tokens,
-                     temperature=req.temperature)
+                     temperature=req.temperature, messages=history)
     output_id = f"msg_{uuid.uuid4().hex[:24]}"
     return {
         "id": f"resp_{uuid.uuid4().hex[:24]}",
@@ -881,13 +932,14 @@ async def anthropic_messages(req: _AnthropicRequest, request: Request) -> dict:
     _refuse_stream(req.stream)
     _refuse_tools_if_present(req.tools, req.tool_choice)
     # `req.system` is the model's system prompt and is never classified (T-03).
-    r = await _route(_flatten(req.messages), None, None,
+    prompt, history = _request_and_history(req.messages)
+    r = await _route(prompt, None, None,
                      prefer_model=_qualify_model(req.model, "anthropic"),
                      project_root=_resolve_project_scope(request),
                      classify_text=_latest_user_turn(req.messages),
                      system=req.system or None,
                      max_tokens=req.max_tokens,
-                     temperature=req.temperature)
+                     temperature=req.temperature, messages=history)
     return {
         "id": f"msg_{uuid.uuid4().hex[:24]}",
         "type": "message",
@@ -931,11 +983,13 @@ async def ollama_chat(req: _OllamaChat, request: Request) -> dict:
     _refuse_tools_if_present(req.tools, req.tool_choice)
     system, messages = _split_system(req.messages)
     max_tokens, temperature = _ollama_options(req.options)
-    r = await _route(_flatten(messages), None, None,
+    prompt, history = _request_and_history(messages)
+    r = await _route(prompt, None, None,
                      prefer_model=_qualify_model(req.model, "ollama"),
                      project_root=_resolve_project_scope(request),
                      classify_text=_latest_user_turn(req.messages),
-                     system=system, max_tokens=max_tokens, temperature=temperature)
+                     system=system, max_tokens=max_tokens, temperature=temperature,
+                     messages=history)
     return {
         "model": f"{r.model.provider}/{r.model.model}",
         "message": {"role": "assistant", "content": r.text},
@@ -952,7 +1006,7 @@ async def ollama_generate(req: _OllamaGenerate, request: Request) -> dict:
                      prefer_model=_qualify_model(req.model, "ollama"),
                      project_root=_resolve_project_scope(request),
                      system=req.system or None,
-                     max_tokens=max_tokens, temperature=temperature)
+                     max_tokens=max_tokens, temperature=temperature, messages=[])
     return {
         "model": f"{r.model.provider}/{r.model.model}",
         "response": r.text,

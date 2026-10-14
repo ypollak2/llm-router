@@ -5,6 +5,7 @@ first, until a token budget (default 1,500). Offline: markdown fixtures, no mode
 """
 from __future__ import annotations
 
+import os
 import textwrap
 from pathlib import Path
 
@@ -252,6 +253,9 @@ def test_baseline_constant_matches_da31df7_source(tmp_path, monkeypatch):
     proc = subprocess.run(["git", "show", "da31df7:src/llm_router/okf.py"], cwd=repo,
                           capture_output=True, text=True)
     if proc.returncode != 0:
+        ci = os.environ.get("CI", "")
+        if ci and ci.lower() not in ("false", "0"):
+            pytest.fail("da31df7 must be fetched for the OKF baseline test (ci.yml fetches it)")
         pytest.skip("da31df7 not reachable in this checkout (shallow clone)")
     src_file = tmp_path / "okf_da31df7.py"
     src_file.write_text(proc.stdout, encoding="utf-8")
