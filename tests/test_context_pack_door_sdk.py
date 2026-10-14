@@ -209,13 +209,29 @@ def test_the_sdk_module_never_calls_route_and_call():
 # ── privacy gate A: the target is the most external provider in the chain ─────
 
 
+@pytest.mark.parametrize("order", ["local_first", "cloud_first", "cloud_between"])
 @pytest.mark.parametrize("cloud", ["openai", "gemini", "codex", "gemini_cli"])
-def test_gate_a_local_mode_withholds_history_when_any_fallback_is_cloud(monkeypatch, cloud):
+def test_gate_a_local_mode_withholds_history_when_any_fallback_is_cloud(monkeypatch, cloud,
+                                                                         order):
     monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "local")
-    rig = Rig(monkeypatch, chain=(OLLAMA, ModelSpec(cloud, "m")))
+    c = ModelSpec(cloud, "m")
+    chain = {"local_first": (OLLAMA, c), "cloud_first": (c, OLLAMA),
+             "cloud_between": (OLLAMA, c, ModelSpec("ollama", "other"))}[order]
+    rig = Rig(monkeypatch, chain=chain)
     _route(messages=HISTORY)
     assert rig.history() is None
     assert rig.packs[0][1]["target_provider"] == cloud
+
+
+def test_gate_a_claude_entries_are_never_called_so_they_do_not_withhold(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "local")
+    claude = ModelSpec("claude", "sonnet")
+    rig = Rig(monkeypatch, chain=(OLLAMA, claude))
+    _route(messages=HISTORY)
+    assert rig.history() == HISTORY
+    rig = Rig(monkeypatch, chain=(OLLAMA, claude, OPENAI))
+    _route(messages=HISTORY)
+    assert rig.history() is None
 
 
 def test_gate_a_local_mode_sends_history_to_an_all_local_chain(monkeypatch):
@@ -265,11 +281,40 @@ def test_gate_b_mutation_permissive_rule_would_leak(monkeypatch):
     assert rig.history() == HISTORY
 
 
-def test_gate_applies_to_the_agent_loop_context(monkeypatch):
+def test_agent_loop_target_is_its_ollama_models_only(monkeypatch):
+    """The agent loop calls ollama models only, so a cloud entry it skips does not
+    withhold the history; the gate itself still applies (mode off)."""
     monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "local")
-    rig = Rig(monkeypatch, chain=(OLLAMA, OPENAI), tools=True)
+    rig = Rig(monkeypatch, chain=(OPENAI, OLLAMA), tools=True)
+    _route(messages=HISTORY)
+    assert "U1" in rig.agent[-1]["context"]
+    assert rig.packs[-1][1]["target_provider"] == "ollama"
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "off")
     _route(messages=HISTORY)
     assert "U1" not in (rig.agent[-1].get("context") or "")
+
+
+def test_agent_loop_without_an_ollama_model_is_the_plain_call(monkeypatch):
+    rig = Rig(monkeypatch, chain=(OPENAI,), tools=True)
+    _route(timeout=30, messages=HISTORY)
+    assert rig.packs == [] and "context" not in rig.agent[-1]
+
+
+def test_history_shape_fits_chat_apis(monkeypatch):
+    rig = Rig(monkeypatch)
+    _route(messages=[
+        {"role": "user", "content": "U1"},
+        {"role": "user", "content": "U2"},
+        {"role": "function", "content": "F"},
+        {"role": "assistant", "content": "A1"},
+        {"role": "assistant", "content": "A2"},
+        {"role": "user", "content": "U3"},
+    ])
+    assert rig.history() == [
+        {"role": "user", "content": "U1\n\nU2\n\n[function] F"},
+        {"role": "assistant", "content": "A1\n\nA2"},
+        {"role": "user", "content": "U3"},
+    ]
 
 
 # ── end to end through the real execute_chain ─────────────────────────────────
