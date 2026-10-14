@@ -53,8 +53,8 @@ from typing import Any, Iterable
 from llm_router import context_tags
 from llm_router.token_budget import estimate_tokens
 
-#: The seven context doors of PLAN v16 P1.1 task 3. The door PRs wire each one;
-#: `tests/test_context_pack_doors.py` (door PRs) enumerates exactly these.
+#: The seven context doors of PLAN v16 P1.1 task 3. `tests/test_context_pack_doors.py`
+#: enumerates exactly these and checks each one is wired and tested.
 DOORS = ("hook", "mcp", "proxy", "codex", "agent", "sdk", "gateway")
 
 RECENT_N = 7
