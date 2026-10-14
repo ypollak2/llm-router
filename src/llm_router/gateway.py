@@ -489,6 +489,27 @@ def _join_system(*parts: str | None) -> str | None:
     return joined or None
 
 
+def _history_turn(item) -> dict | None:
+    """One history item as a chat turn a provider accepts, or None.
+
+    ``user`` / ``assistant`` messages pass unchanged. A bare string (the
+    Responses API allows them in ``input``) becomes a user turn; any other
+    role (legacy ``function``, ``tool``) or a role-less content part becomes a
+    user turn labelled with that role, since providers reject unknown roles.
+    """
+    if isinstance(item, str):
+        return {"role": "user", "content": item} if item.strip() else None
+    if not isinstance(item, dict):
+        return None
+    role = item.get("role")
+    if role in ("user", "assistant") and "content" in item:
+        return item
+    text = _content_text(item.get("content", item.get("text")))
+    if not text.strip():
+        return None
+    return {"role": "user", "content": f"[{role}] {text}" if role else text}
+
+
 def _request_and_history(messages, flatten=None) -> tuple[str, list]:
     """``(request, history)`` for one completion request (P1.1 door 7).
 
@@ -504,7 +525,7 @@ def _request_and_history(messages, flatten=None) -> tuple[str, list]:
         if last.get("role", "user") == "user":
             text = _content_text(last.get("content"))
             if text.strip():
-                return text, [m for m in messages[:-1] if isinstance(m, dict)]
+                return text, [t for t in map(_history_turn, messages[:-1]) if t]
     return (flatten or _flatten)(messages), []
 
 

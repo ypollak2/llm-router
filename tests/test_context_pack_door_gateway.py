@@ -301,3 +301,68 @@ async def test_gateway_cloud_window_keeps_a_mid_size_conversation_whole(rig):
     # Last 7 are T13..T19; T13 is an assistant turn, dropped as a leading one.
     assert len(sdk_door) == 7 and sdk_door[0]["content"].startswith("T14 ")
     assert router._GATEWAY_NON_LOCAL_WINDOW == 32_768
+
+
+# ── review fixes (CLI providers, redaction, budgets, context off, roles, cache key) ──
+
+@pytest.mark.asyncio
+async def test_cli_providers_get_the_callers_history(monkeypatch):
+    config = SimpleNamespace(context_enabled=False)
+    out = await router._cli_prompt_with_context(
+        "REQ-TEXT", "codex", None, config, None, conversation=HISTORY, context_door="gateway")
+    assert MARK + " q" in out and MARK + " a" in out and out.endswith("REQ-TEXT")
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "local")  # codex is not privacy-local
+    assert await router._cli_prompt_with_context(
+        "REQ-TEXT", "codex", None, config, None, conversation=HISTORY,
+        context_door="gateway") == "REQ-TEXT"
+
+
+@pytest.mark.asyncio
+async def test_history_is_redacted_like_the_prompt(monkeypatch, rig_real):
+    monkeypatch.setenv("LLM_ROUTER_SEMANTIC_CACHE", "off")
+
+    def fake_redact(text):
+        return text.replace("SECRET-1", "[REDACTED]"), ({"key": 1} if "SECRET-1" in text else {})
+
+    monkeypatch.setattr(router, "_maybe_redact", fake_redact)
+    history = [{"role": "user", "content": "my key is SECRET-1"},
+               {"role": "assistant", "content": [{"type": "text", "text": "noted SECRET-1"}]}]
+    await router.route_and_call(TaskType.QUERY, "REQ-TEXT", model_override="ollama/x",
+                                messages=history, context_door="gateway")
+    sent = " ".join(m["content"] for m in rig_real[-1])
+    assert "SECRET-1" not in sent and sent.count("[REDACTED]") == 2
+
+
+def test_budget_estimates_count_the_history():
+    assert router._messages_chars(None) == 0
+    assert router._messages_chars([
+        {"role": "user", "content": "abcd"},
+        {"role": "assistant", "content": [{"type": "text", "text": "ef"},
+                                          {"type": "tool_result", "content": "ghi"}]},
+    ]) == 9
+
+
+@pytest.mark.asyncio
+async def test_history_is_sent_with_context_injection_off(monkeypatch, rig):
+    monkeypatch.setattr(router, "get_config", lambda: SimpleNamespace(
+        context_enabled=False, caveman_mode="off", prompt_cache_enabled=False))
+    await _call(conversation=HISTORY)
+    assert rig == [[*HISTORY, REQUEST]]
+
+
+def test_unknown_roles_and_bare_strings_become_user_turns(client, payloads):
+    r = client.post("/v1/chat/completions", json={"messages": [
+        {"role": "function", "name": "f", "content": "FN-OUT"}, REQUEST]})
+    assert r.status_code == 200, r.text
+    assert payloads[0]["messages"] == [{"role": "user", "content": "[function] FN-OUT"}]
+    r = client.post("/v1/responses", json={"input": ["Background: py3.8", REQUEST]})
+    assert r.status_code == 200, r.text
+    assert payloads[1]["messages"] == [{"role": "user", "content": "Background: py3.8"}]
+
+
+def test_cache_key_ignores_the_session_buffer_when_history_is_given(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("the process buffer must not be read for a caller history")
+
+    monkeypatch.setattr(router, "get_session_buffer", boom)
+    router._semantic_cache_key("p", None, None, None, messages=HISTORY)

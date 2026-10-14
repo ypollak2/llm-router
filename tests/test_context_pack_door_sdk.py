@@ -264,3 +264,49 @@ def test_sdk_route_without_messages_does_not_use_route_and_call(monkeypatch):
     monkeypatch.setattr(router, "route_and_call", boom)
     monkeypatch.setattr(sdk, "_route", lambda prompt, **kw: "legacy")
     assert sdk.route("REQ") == "legacy"
+
+
+# ── review fixes: timeout, error mapping, background-task drain ──
+
+def _fake_rac(monkeypatch, exc=None):
+    got = {}
+
+    async def fake(task_type, prompt, **kwargs):
+        got.update(kwargs)
+        if exc is not None:
+            raise exc
+        return LLMResponse(content="hi", model="m", input_tokens=1, output_tokens=1,
+                           cost_usd=0.0, latency_ms=1.0, provider="p")
+
+    monkeypatch.setattr(router, "route_and_call", fake)
+    return got
+
+
+def test_sdk_messages_path_honours_timeout(monkeypatch):
+    got = _fake_rac(monkeypatch)
+    sdk.route("REQ", task_type="query", complexity="simple", messages=[], timeout=7)
+    assert got["max_wall_clock_seconds"] == 7
+
+
+def test_sdk_messages_path_error_mapping(monkeypatch):
+    from llm_router.types import BudgetExceededError
+
+    _fake_rac(monkeypatch, BudgetExceededError("cap"))
+    with pytest.raises(BudgetExceededError):
+        sdk.route("REQ", task_type="query", complexity="simple", messages=[])
+    for exc in (ValueError("No models available"), TimeoutError("slow"), RuntimeError("x")):
+        _fake_rac(monkeypatch, exc)
+        with pytest.raises(sdk.RoutingError):
+            sdk.route("REQ", task_type="query", complexity="simple", messages=[])
+
+
+def test_sdk_messages_path_drains_background_tasks(monkeypatch):
+    _fake_rac(monkeypatch)
+    drained = []
+
+    async def drain(timeout_s=5.0):
+        drained.append(True)
+
+    monkeypatch.setattr(router, "drain_bg_tasks", drain)
+    sdk.route("REQ", task_type="query", complexity="simple", messages=[])
+    assert drained == [True]

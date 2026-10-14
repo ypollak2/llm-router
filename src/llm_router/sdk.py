@@ -75,6 +75,12 @@ def route(prompt: str, *, task_type: str | None = None,
     the request; leading assistant turns are dropped for API providers. Pack
     failures record CHZ-FO-ROUTER-SDK-PACK and send the plain prompt. A hash of
     messages isolates semantic cache entries by conversation.
+
+    With ``messages`` the call goes through ``route_and_call`` as a text
+    completion, bounded by ``timeout`` (its wall-clock cap); file and tool tasks
+    do not get the local agent loop that the no-``messages`` path uses. A budget
+    refusal raises ``BudgetExceededError`` (never ``RoutingError``), so a caller
+    cannot fall back around a spend cap.
     """
     from llm_router import call_identity
 
@@ -88,7 +94,7 @@ def route(prompt: str, *, task_type: str | None = None,
                 for message in messages
             ):
                 raise ValueError("messages must be a list of dicts with string role/content")
-            return _route_messages(prompt, messages, task_type, complexity, sid)
+            return _route_messages(prompt, messages, task_type, complexity, sid, timeout)
         return _route(prompt, task_type=task_type, complexity=complexity,
                       timeout=timeout, session_id=sid)
 
@@ -154,12 +160,23 @@ def _run_coro(coro):
         return executor.submit(context.run, asyncio.run, coro).result()
 
 
+async def _drained(coro):
+    """Await ``coro``, then the turn's fire-and-forget tasks (receipts, savings
+    rows) before ``asyncio.run`` closes the loop and would cancel them."""
+    from llm_router.router import drain_bg_tasks
+
+    try:
+        return await coro
+    finally:
+        await drain_bg_tasks()
+
+
 def _route_messages(prompt: str, messages: list[dict], task_type: str | None,
-                    complexity: str | None, session_id: str) -> RouteResult:
+                    complexity: str | None, session_id: str, timeout: int) -> RouteResult:
     """Route caller history within the SDK's existing identity scope."""
     from llm_router.gateway import _classify
     from llm_router.router import route_and_call
-    from llm_router.types import TaskType
+    from llm_router.types import BudgetExceededError, TaskType
 
     if not prompt or not prompt.strip():
         raise ValueError("prompt is empty")
@@ -171,13 +188,19 @@ def _route_messages(prompt: str, messages: list[dict], task_type: str | None,
     except ValueError:
         tt = TaskType.QUERY
     try:
-        resp = _run_coro(route_and_call(
+        resp = _run_coro(_drained(route_and_call(
             tt, prompt, complexity_hint=complexity, messages=messages,
-        ))
-    except RuntimeError as exc:
-        raise RoutingError(
-            f"LLM Router routing failed — model chain exhausted: {exc}"
-        ) from exc
+            max_wall_clock_seconds=timeout,
+        )))
+    except BudgetExceededError:
+        raise  # a refusal, not an exhausted chain
+    except (RuntimeError, ValueError, TimeoutError) as exc:
+        raise RoutingError(f"LLM Router routing failed: {exc}") from exc
+    try:  # meter, like the no-messages path and the gateway
+        from llm_router.route_server import _log_route_savings
+        _log_route_savings(resp, tt.value, complexity or resp.complexity or "moderate", "sdk")
+    except Exception:
+        pass
     return RouteResult(
         text=resp.content,
         model=resp.model if "/" in resp.model else f"{resp.provider}/{resp.model}",
