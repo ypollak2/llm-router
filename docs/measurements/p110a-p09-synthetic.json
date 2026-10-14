@@ -1,0 +1,83 @@
+{
+  "label": "synthetic (D-99)",
+  "latency": {
+    "P0.9-a session-start": {
+      "bar_ms": 2000,
+      "n": 60,
+      "p50_ms": 187.88,
+      "p95_ms": 239.93,
+      "verdict": "PASS"
+    },
+    "P0.9-b status-bar": {
+      "bar_ms": 300,
+      "n": 300,
+      "p50_ms": 69.75,
+      "p95_ms": 93.65,
+      "verdict": "PASS"
+    }
+  },
+  "must": [
+    "P1.10-a",
+    "P0.9-a",
+    "P0.9-b"
+  ],
+  "paths": {
+    "execution_events": {
+      "n": 314,
+      "share": 1.0,
+      "verdict": "PASS",
+      "wilson95": [
+        0.9879,
+        1.0
+      ],
+      "with_ids": 314
+    },
+    "proxy": {
+      "n": 1320,
+      "share": 1.0,
+      "verdict": "PASS",
+      "wilson95": [
+        0.9971,
+        1.0
+      ],
+      "with_ids": 1320
+    },
+    "proxy_probe_envelopes": {
+      "n": 900,
+      "share": 0.0,
+      "verdict": "not scored (replay probe)",
+      "wilson95": [
+        0.0,
+        0.0043
+      ],
+      "with_ids": 0
+    },
+    "usage": {
+      "n": 240,
+      "share": 1.0,
+      "verdict": "PASS",
+      "wilson95": [
+        0.9842,
+        1.0
+      ],
+      "with_ids": 240
+    }
+  },
+  "replay": {
+    "errors": [],
+    "git_sha": "0f02ce483a56bcceb1627c970dbe29de3f6ae8b4",
+    "network_violations": 0,
+    "records": {
+      "by_step": {
+        "continuation": 780,
+        "subagent": 240,
+        "turn_first": 300
+      },
+      "records": 1320,
+      "sessions": 60,
+      "sha256": "224c650fb12f0ed343db3ec3c605ae966071c2381061f79c70071a6b7b5810b4"
+    },
+    "wall_s": 1020.1
+  },
+  "verdict_p110a": "PASS"
+}

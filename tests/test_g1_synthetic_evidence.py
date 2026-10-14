@@ -228,3 +228,20 @@ def test_identity_readout_uses_the_kpi_rule(g1, tmp_path):
     assert res["paths"]["proxy"]["verdict"] == "PASS" and res["paths"]["usage"]["verdict"] == "n<200"
     assert res["verdict_p110a"] == "NOT INFORMATIVE"
     assert res["latency"]["P0.9-a session-start"]["verdict"] == "PASS"
+
+
+def test_identity_readout_reports_replay_probe_envelopes_apart(g1, tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    host = [{"session_id": "synth-replay-1", "task_id": "0123456789abcdef"}] * 200
+    probes = [{"session_id": f"synth-replay-1-{v}", "task_id": "gen-0123456789ab"}
+              for v in ("nosys", "bare", "reminder")] * 50
+    (state / "proxy_calls.jsonl").write_text("".join(json.dumps(r) + "\n" for r in host + probes))
+    summary = {"timing": {"lifecycle": {}, "wall_s": 1.0},
+               "deterministic": {"errors": [], "network": {"violations": 0}, "corpus": {}},
+               "run": {"git_sha": "x"}}
+    res = g1.identity_from_replay(state, summary)
+    assert res["paths"]["proxy"]["n"] == 200 and res["paths"]["proxy"]["verdict"] == "PASS"
+    assert res["paths"]["proxy_probe_envelopes"]["n"] == 150
+    assert res["paths"]["proxy_probe_envelopes"]["share"] == 0.0
+    assert res["verdict_p110a"] == "PASS"

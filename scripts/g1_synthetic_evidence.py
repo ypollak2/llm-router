@@ -682,6 +682,10 @@ def replay_corpus(n_sessions: int = 60, turns: int = 5) -> list[dict]:
     return out
 
 
+#: ``scripts/synthetic_replay.PROXY_VARIANTS`` as session-id suffixes.
+_PROBE_SUFFIXES = ("-nosys", "-bare", "-reminder")
+
+
 def _identity_rows(state: Path) -> dict[str, list[dict]]:
     """``{path: [{session_id, task_id}]}`` from a replay's scratch state (the kpi P1.10-a paths,
     plus execution events and edit outcomes when they have rows)."""
@@ -720,11 +724,21 @@ def identity_from_replay(state: Path, summary: dict) -> dict:
     missing; bar 99%, 200 rows per path) and the P0.9-a/b hook latencies, from one replay run."""
     from llm_router.commands import kpi
 
+    rows_by_path = _identity_rows(state)
+    if "proxy" in rows_by_path:
+        # synthetic_replay.proxy_body also sends every turn-first record as three probe envelopes
+        # (PROXY_VARIANTS) under the session id ``<sid>-<variant>``: a session no host prompt ever
+        # started, so no hook began its turn. They are reported apart, never counted as host traffic.
+        probe = [r for r in rows_by_path["proxy"] if str(r.get("session_id") or "").endswith(_PROBE_SUFFIXES)]
+        rows_by_path["proxy"] = [r for r in rows_by_path["proxy"] if r not in probe]
+        if probe:
+            rows_by_path["proxy_probe_envelopes"] = probe
     paths = {}
-    for path, rows in sorted(_identity_rows(state).items()):
+    for path, rows in sorted(rows_by_path.items()):
         share = kpi._identity_share([{"session_id": r.get("session_id"),
                                       "task_id": kpi._prd_task(r.get("task_id"))} for r in rows])
-        share["verdict"] = ("n<200" if share["n"] < 200 else
+        share["verdict"] = ("not scored (replay probe)" if path == "proxy_probe_envelopes" else
+                            "n<200" if share["n"] < 200 else
                             "PASS" if share["share"] >= kpi.G3_PRD_BAR else "FAIL")
         paths[path] = share
     life = summary["timing"]["lifecycle"]
@@ -735,7 +749,7 @@ def identity_from_replay(state: Path, summary: dict) -> dict:
         if row:
             latency[name] = {"n": row["n"], "p50_ms": row["p50_ms"], "p95_ms": row["p95_ms"], "bar_ms": bar,
                              "verdict": "n<min" if row["n"] < n_min else "PASS" if row["p95_ms"] <= bar else "FAIL"}
-    scored = [p for p in paths.values()]
+    scored = [p for name, p in paths.items() if name != "proxy_probe_envelopes"]
     return {"label": LABEL, "must": ["P1.10-a", "P0.9-a", "P0.9-b"], "paths": paths, "latency": latency,
             "verdict_p110a": ("PASS" if scored and all(p["verdict"] == "PASS" for p in scored) else
                               "FAIL" if any(p["verdict"] == "FAIL" for p in scored) else "NOT INFORMATIVE"),
