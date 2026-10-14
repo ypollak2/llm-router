@@ -366,3 +366,197 @@ def test_cache_key_ignores_the_session_buffer_when_history_is_given(monkeypatch)
 
     monkeypatch.setattr(router, "get_session_buffer", boom)
     router._semantic_cache_key("p", None, None, None, messages=HISTORY)
+
+
+# ── tool blocks: kept in the history, and a tool-result turn is the request ──
+
+OAI_TOOL_HISTORY = [
+    {"role": "user", "content": "find it"},
+    {"role": "assistant", "content": None, "tool_calls": [
+        {"id": "c1", "type": "function", "function": {"name": "grep", "arguments": '{"q": "x"}'}}]},
+    {"role": "tool", "tool_call_id": "c1", "content": "OUT-OAI"},
+]
+RESP_TOOL_HISTORY = [
+    {"role": "user", "content": "find it"},
+    {"type": "function_call", "name": "grep", "arguments": '{"q": "y"}', "call_id": "r1"},
+    {"type": "function_call_output", "call_id": "r1", "output": "OUT-RESP"},
+]
+ANT_TOOL_HISTORY = [
+    {"role": "user", "content": "find it"},
+    {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "grep",
+                                       "input": {"q": "z"}}]},
+    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1",
+                                  "content": [{"type": "text", "text": "OUT-ANT"}]}]},
+]
+
+
+@pytest.mark.parametrize("path,key,history", [
+    ("/v1/chat/completions", "messages", OAI_TOOL_HISTORY),
+    ("/v1/responses", "input", RESP_TOOL_HISTORY),
+    ("/v1/messages", "messages", ANT_TOOL_HISTORY),
+])
+def test_tool_calls_and_results_in_history_pass_through(client, payloads, path, key, history):
+    r = client.post(path, json={key: [*history, REQUEST], "max_tokens": 64})
+    assert r.status_code == 200, r.text
+    assert payloads[0]["prompt"] == "REQ-TEXT"
+    assert payloads[0]["messages"] == history
+
+
+@pytest.mark.parametrize("history,call,out", [
+    (OAI_TOOL_HISTORY, '[tool_use: grep] {"q": "x"}', "[tool_result] OUT-OAI"),
+    (RESP_TOOL_HISTORY, '[tool_use: grep] {"q": "y"}', "[tool_result] OUT-RESP"),
+    (ANT_TOOL_HISTORY, '[tool_use: grep] {"q": "z"}', "[tool_result] OUT-ANT"),
+])
+@pytest.mark.asyncio
+async def test_the_provider_sees_the_tool_blocks_as_text(rig, history, call, out):
+    await _call(conversation=history)
+    sent = [m["content"] for m in rig[-1]]
+    assert sent == ["find it", call, out, "REQ-TEXT"]
+
+
+@pytest.mark.parametrize("path,key,body", [
+    ("/v1/chat/completions", "messages", OAI_TOOL_HISTORY),
+    ("/v1/responses", "input", RESP_TOOL_HISTORY),
+    ("/v1/messages", "messages", ANT_TOOL_HISTORY),
+])
+def test_a_trailing_tool_result_is_the_request(client, payloads, path, key, body):
+    """An agent client's next step is a tool result with no text: it used to be
+    flattened away with the history (``user: find it`` and no tool output)."""
+    r = client.post(path, json={key: body, "max_tokens": 64})
+    assert r.status_code == 200, r.text
+    assert payloads[0]["prompt"].startswith("[tool_result] OUT-")
+    assert payloads[0]["messages"] == body[:-1]
+
+
+def test_text_beside_a_tool_result_keeps_both_in_the_request(client, payloads):
+    last = {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": "OUT-ANT"},
+        {"type": "text", "text": "now fix it"}]}
+    r = client.post("/v1/messages", json={"messages": [*ANT_TOOL_HISTORY[:2], last],
+                                          "max_tokens": 64})
+    assert r.status_code == 200, r.text
+    assert "OUT-ANT" in payloads[0]["prompt"] and "now fix it" in payloads[0]["prompt"]
+
+
+def test_an_image_only_trailing_turn_still_flattens(client, payloads):
+    r = client.post("/v1/messages", json={"messages": [
+        REQUEST, {"role": "user", "content": [{"type": "image", "source": {
+            "type": "base64", "media_type": "image/png", "data": "AAAA"}}]}],
+        "max_tokens": 64})
+    assert r.status_code == 200, r.text
+    assert payloads[0]["prompt"] == "user: REQ-TEXT" and payloads[0]["messages"] == []
+
+
+@pytest.mark.asyncio
+async def test_tool_arguments_inputs_and_outputs_are_redacted(monkeypatch, rig_real):
+    monkeypatch.setenv("LLM_ROUTER_SEMANTIC_CACHE", "off")
+
+    def fake_redact(text):
+        return text.replace("SECRET-2", "[REDACTED]"), ({"key": 1} if "SECRET-2" in text else {})
+
+    monkeypatch.setattr(router, "_maybe_redact", fake_redact)
+    history = [
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "SECRET-2-id", "type": "function",
+             "function": {"name": "f", "arguments": '{"token": "SECRET-2"}'}}]},
+        {"role": "tool", "tool_call_id": "SECRET-2-id", "content": "got SECRET-2"},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": "g",
+                                           "input": {"k": "SECRET-2"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t",
+                                      "content": [{"type": "text", "text": "SECRET-2"}]}]},
+        {"type": "function_call_output", "call_id": "r", "output": "SECRET-2"},
+    ]
+    redacted, counts = router._redact_messages(history)
+    assert "SECRET-2\"" not in repr(redacted).replace("SECRET-2-id", "")
+    assert redacted[1]["tool_calls"][0]["id"] == "SECRET-2-id"  # ids are not text
+    assert counts == {"key": 5}
+    await router.route_and_call(TaskType.QUERY, "REQ-TEXT", model_override="ollama/x",
+                                messages=history, context_door="gateway")
+    sent = " ".join(m["content"] for m in rig_real[-1])
+    assert "SECRET-2" not in sent
+
+
+def test_budget_counts_tool_text_but_not_ids_or_images():
+    assert router._messages_chars([
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "f", "arguments": "abcd"}}]},
+        {"type": "function_call_output", "call_id": "r1", "output": "ef"},
+        {"role": "user", "content": [{"type": "image", "source": {"data": "A" * 1000}}]},
+    ]) == 6
+
+
+# ── review fixes: error results, parallel results, opaque payloads ───────────
+
+
+def test_a_trailing_error_tool_result_is_the_request(client, payloads):
+    """A failed tool call is the usual next step too; it used to flatten away."""
+    last = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1",
+                                         "is_error": True, "content": "BOOM-ERR"}]}
+    r = client.post("/v1/messages", json={"messages": [*ANT_TOOL_HISTORY[:2], last],
+                                          "max_tokens": 64})
+    assert r.status_code == 200, r.text
+    assert payloads[0]["prompt"] == "[tool_result (error)] BOOM-ERR"
+    assert payloads[0]["messages"] == ANT_TOOL_HISTORY[:2]
+
+
+@pytest.mark.parametrize("path,key,calls,outputs", [
+    ("/v1/chat/completions", "messages",
+     [{"role": "assistant", "content": None, "tool_calls": [
+         {"id": "a", "type": "function", "function": {"name": "f", "arguments": "{}"}},
+         {"id": "b", "type": "function", "function": {"name": "g", "arguments": "{}"}}]}],
+     [{"role": "tool", "tool_call_id": "a", "content": "RA"},
+      {"role": "tool", "tool_call_id": "b", "content": "RB"}]),
+    ("/v1/responses", "input",
+     [{"type": "function_call", "name": "f", "arguments": "{}", "call_id": "a"},
+      {"type": "function_call", "name": "g", "arguments": "{}", "call_id": "b"}],
+     [{"type": "function_call_output", "call_id": "a", "output": "RA"},
+      {"type": "function_call_output", "call_id": "b", "output": "RB"}]),
+])
+def test_parallel_tool_results_are_all_in_the_request(client, payloads, path, key, calls, outputs):
+    head = [{"role": "user", "content": "go"}, *calls]
+    r = client.post(path, json={key: [*head, *outputs]})
+    assert r.status_code == 200, r.text
+    assert payloads[0]["prompt"] == "[tool_result] RA\n\n[tool_result] RB"
+    assert payloads[0]["messages"] == head
+
+
+def test_budget_skips_payloads_the_pack_never_sends():
+    assert router._messages_chars([
+        {"role": "user", "content": "ab", "images": ["A" * 100_000]},
+        {"role": "user", "content": [{"type": "input_file", "file_data": "F" * 50_000},
+                                     {"type": "input_text", "text": "cd"}]},
+        {"role": "assistant", "content": [{"type": "thinking", "thinking": "t",
+                                           "signature": "S" * 30_000}]},
+    ]) == 4
+
+
+def test_every_string_inside_a_tool_input_is_redacted(monkeypatch):
+    monkeypatch.setattr(router, "_maybe_redact",
+                        lambda t: (t.replace("SECRET", "[R]"), {"k": 1} if "SECRET" in t else {}))
+    history = [
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": "set",
+                                           "input": {"id": "SECRET", "name": "SECRET",
+                                                     "nested": [{"status": "SECRET"}]}}]},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c", "function": {"name": "f", "arguments": {"name": "SECRET"}}}]},
+    ]
+    redacted, counts = router._redact_messages(history)
+    assert "SECRET" not in repr(redacted) and counts == {"k": 4}
+    assert redacted[0]["content"][0]["name"] == "set" and redacted[1]["tool_calls"][0]["id"] == "c"
+
+
+def test_a_dict_tool_result_is_redacted_and_counted(monkeypatch):
+    monkeypatch.setattr(router, "_maybe_redact",
+                        lambda t: (t.replace("SECRET", "[R]"), {"k": 1} if "SECRET" in t else {}))
+    history = [
+        {"role": "tool", "tool_call_id": "c", "content": {"result": "SECRET"}},
+        {"type": "function_call_output", "call_id": "r", "output": {"id": "SECRET"}},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t",
+                                      "content": {"rows": ["SECRET"]}}]},
+    ]
+    redacted, counts = router._redact_messages(history)
+    assert "SECRET" not in repr(redacted) and counts == {"k": 3}
+    assert router._messages_chars(history) == 18
+    rendered = [context_pack.render_message(m) for m in redacted]
+    assert all("SECRET" not in r for r in rendered) and "[R]" in rendered[0]

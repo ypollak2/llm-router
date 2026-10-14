@@ -489,20 +489,33 @@ def _join_system(*parts: str | None) -> str | None:
     return joined or None
 
 
-def _history_turn(item) -> dict | None:
-    """One history item as a chat turn a provider accepts, or None.
+# Tool-call history the context pack renders itself (``context_pack._from_message``):
+# Responses API typed items and OpenAI ``tool`` results. They pass through unchanged;
+# rewriting them here used to drop the function calls and their outputs.
+_TOOL_ITEM_TYPES = frozenset({
+    "function_call", "function_call_output", "custom_tool_call",
+    "custom_tool_call_output", "local_shell_call", "local_shell_call_output",
+})
 
-    ``user`` / ``assistant`` messages pass unchanged. A bare string (the
-    Responses API allows them in ``input``) becomes a user turn; any other
-    role (legacy ``function``, ``tool``) or a role-less content part becomes a
-    user turn labelled with that role, since providers reject unknown roles.
+
+def _history_turn(item) -> dict | None:
+    """One history item as a turn ``build_pack`` accepts, or None.
+
+    ``user`` / ``assistant`` messages (including OpenAI ``tool_calls`` and
+    Anthropic ``tool_use`` / ``tool_result`` blocks), OpenAI ``tool`` results and
+    Responses API tool items pass unchanged: the pack renders their tool blocks as
+    text. A bare string (the Responses API allows them in ``input``) becomes a user
+    turn; any other role (legacy ``function``) or a role-less content part becomes
+    a user turn labelled with that role, since providers reject unknown roles.
     """
     if isinstance(item, str):
         return {"role": "user", "content": item} if item.strip() else None
     if not isinstance(item, dict):
         return None
     role = item.get("role")
-    if role in ("user", "assistant") and "content" in item:
+    if role in ("user", "assistant") and ("content" in item or item.get("tool_calls")):
+        return item
+    if role == "tool" or item.get("type") in _TOOL_ITEM_TYPES:
         return item
     text = _content_text(item.get("content", item.get("text")))
     if not text.strip():
@@ -510,22 +523,61 @@ def _history_turn(item) -> dict | None:
     return {"role": "user", "content": f"[{role}] {text}" if role else text}
 
 
+_TOOL_OUTPUT_TYPES = frozenset({
+    "function_call_output", "custom_tool_call_output", "local_shell_call_output",
+})
+
+
+def _is_tool_output(item) -> bool:
+    """An OpenAI ``tool`` message or a Responses tool-output item."""
+    return isinstance(item, dict) and (
+        item.get("role") == "tool" or item.get("type") in _TOOL_OUTPUT_TYPES)
+
+
+def _trailing_request(last) -> str:
+    """The request text of a trailing ``user`` turn, or ``""`` if it is not one.
+
+    A user turn with text is that text, verbatim. A user turn that carries tool
+    results (Anthropic ``tool_result`` blocks, errors included, with or without
+    text beside them) is the turn as the context pack renders it, so the tool
+    output is the request instead of being flattened away with the history."""
+    if not isinstance(last, dict) or last.get("role", "user") != "user" or \
+            last.get("type") not in (None, "message"):
+        return ""
+    content = last.get("content")
+    if isinstance(content, list) and any(
+            isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+        from llm_router.context_pack import render_message
+
+        return render_message(last)
+    text = _content_text(content)
+    return text if text.strip() else ""
+
+
 def _request_and_history(messages, flatten=None) -> tuple[str, list]:
     """``(request, history)`` for one completion request (P1.1 door 7).
 
-    The request is the trailing ``user`` turn's text, sent verbatim; the
-    turns before it are the history ``build_pack(door="gateway")`` packs.
-    Without a trailing user turn with text (an assistant prefill, a
-    system-only request, raw content-parts) there is no request to separate:
-    the old flattened prompt is sent with no history, so nothing the caller
-    sent is lost.
+    The request is the trailing turn (``_trailing_request``), sent verbatim, or the
+    trailing run of tool outputs (OpenAI ``tool`` messages / Responses ``*_output``
+    items, one per parallel call) rendered as the context pack renders them. The
+    turns before it are the history ``build_pack(door="gateway")`` packs, tool
+    blocks included. Without a trailing request (an assistant prefill, a
+    system-only request, raw content-parts) there is nothing to separate: the old
+    flattened prompt is sent with no history, so nothing the caller sent is lost.
     """
-    if isinstance(messages, list) and messages and isinstance(messages[-1], dict):
-        last = messages[-1]
-        if last.get("role", "user") == "user":
-            text = _content_text(last.get("content"))
-            if text.strip():
-                return text, [t for t in map(_history_turn, messages[:-1]) if t]
+    if isinstance(messages, list) and messages:
+        start = len(messages)
+        while start > 0 and _is_tool_output(messages[start - 1]):
+            start -= 1
+        if start < len(messages):
+            from llm_router.context_pack import render_message
+
+            request = "\n\n".join(r for r in map(render_message, messages[start:]) if r.strip())
+        else:
+            request = _trailing_request(messages[-1])
+            start = len(messages) - 1
+        if request:
+            return request, [t for t in map(_history_turn, messages[:start]) if t]
     return (flatten or _flatten)(messages), []
 
 

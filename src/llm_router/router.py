@@ -5493,27 +5493,62 @@ def _pack_window(model: str, door: str) -> int:
     return _GATEWAY_NON_LOCAL_WINDOW if door == "gateway" else _MCP_NON_LOCAL_WINDOW
 
 
+# Keys under which a message carries text the context pack sends
+# (``context_pack._render_block`` / ``_from_chat`` / ``_from_item``): message and
+# block ``content``/``text``, OpenAI ``tool_calls[].function``, tool ``output``.
+# Everything else (ids, images, files, thinking signatures) is never sent as text,
+# so it is neither redacted nor counted.
+_TEXT_KEYS = frozenset({"content", "text", "tool_calls", "function", "output"})
+# Tool payloads the pack sends whole (``json.dumps`` of a dict input): every string
+# inside them is text, whatever its key.
+_PAYLOAD_KEYS = frozenset({"input", "arguments", "action"})
+
+
+def _walk_text(value, fn, *, payload: bool = False):
+    """``value`` with ``fn`` applied to every string the pack would send: under
+    ``_TEXT_KEYS`` at message/block level, and anywhere inside ``_PAYLOAD_KEYS``."""
+    if isinstance(value, str):
+        return fn(value)
+    if isinstance(value, list):
+        return [_walk_text(v, fn, payload=payload) for v in value]
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            if payload or k in _PAYLOAD_KEYS:
+                out[k] = _walk_text(v, fn, payload=True)
+            elif k in ("content", "output") and isinstance(v, dict):
+                # A dict tool result is sent json-dumped (context_pack._as_text).
+                out[k] = _walk_text(v, fn, payload=True)
+            elif k in _TEXT_KEYS:
+                out[k] = _walk_text(v, fn)
+            else:
+                out[k] = v
+        return out
+    return value
+
+
 def _messages_chars(messages: list | None) -> int:
-    """Characters of text in a caller's message list (string content and the
-    text of content blocks), for the budget estimates that used to see only
-    ``prompt`` (P1.1 doors 6-7 carry the history outside it)."""
+    """Characters of text in a caller's message list that the pack would send
+    (content, content blocks, tool-call arguments/inputs/outputs), for the budget estimates that used to see
+    only ``prompt`` (the gateway door carries the history outside it)."""
     n = 0
+
+    def count(text: str) -> str:
+        nonlocal n
+        n += len(text)
+        return text
+
     for m in messages or []:
-        c = m.get("content") if isinstance(m, dict) else None
-        if isinstance(c, str):
-            n += len(c)
-        elif isinstance(c, list):
-            for b in c:
-                if isinstance(b, dict):
-                    t = b.get("text") if isinstance(b.get("text"), str) else b.get("content")
-                    n += len(t) if isinstance(t, str) else 0
+        if isinstance(m, dict):
+            _walk_text(m, count)
     return n
 
 
 def _redact_messages(messages: list) -> tuple[list, dict[str, int]]:
-    """T4-M1 redaction over a caller's message list: string content and the
-    string ``text`` / ``content`` of each block. Fail-closed like the prompt
-    (``maybe_redact`` raises when redaction is on but unavailable)."""
+    """T4-M1 redaction over a caller's message list: every string the pack would
+    send (content, content blocks, tool-call arguments and inputs, tool outputs;
+    ``_walk_text``). Fail-closed like the prompt (``maybe_redact`` raises when
+    redaction is on but unavailable)."""
     counts: dict[str, int] = {}
 
     def scrub(text: str) -> str:
@@ -5522,24 +5557,7 @@ def _redact_messages(messages: list) -> tuple[list, dict[str, int]]:
             counts[k] = counts.get(k, 0) + v
         return out
 
-    out = []
-    for m in messages:
-        if not isinstance(m, dict):
-            out.append(m)
-            continue
-        c = m.get("content")
-        if isinstance(c, str):
-            c = scrub(c)
-        elif isinstance(c, list):
-            blocks = []
-            for b in c:
-                if isinstance(b, dict):
-                    for key in ("text", "content"):
-                        if isinstance(b.get(key), str):
-                            b = {**b, key: scrub(b[key])}
-                blocks.append(b)
-            c = blocks
-        out.append({**m, "content": c})
+    out = [_walk_text(m, scrub) if isinstance(m, dict) else m for m in messages]
     return out, counts
 _MCP_SUMMARY_ONLY_MAX_TOKENS = 500
 
