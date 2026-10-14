@@ -1,4 +1,4 @@
-<!-- llm_router-rules-version: 10 -->
+<!-- llm_router-rules-version: 11 -->
 # LLM Router — Global Routing Rules
 
 > Installed by llm_router. These rules help you route each task to the cheapest capable
@@ -124,9 +124,13 @@ Prefer the cheap tools for offloadable work, but never force it:
 - Simple questions → `llm_query`
 
 Reading files, running commands, and one-off edits you already know the exact change for
-are normal agent work — just do it. LLM Router routes the *thinking*, not your file tools.
-The exception is edit-shaped work on a small known file set — see `llm_edit` above: there
-the "thinking" being routed is figuring out the diff itself.
+are normal agent work — just do it. When technical-op condensing is enabled
+(not shipped yet), results of read-only technical operations (Grep, Glob, LS, Read, and
+read-only `git`/`ls`/`cat`/`find`/`rg` commands) may arrive pre-summarised by a local model;
+re-run the operation only if the summary is insufficient, and say so. With it off, results
+arrive raw.
+Edit-shaped work on a small known file set is different — see `llm_edit` above: working
+out the diff itself is reasoning worth routing.
 
 ---
 
