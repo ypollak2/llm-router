@@ -35,6 +35,10 @@ def upgraded(tmp_path, monkeypatch):
     before = {n: _sha(state / n) for n in fx.PRESERVED}
     stale = {n: (state / "claude-home" / "hooks" / n).read_text() for _s, n, _e, _t in ih._HOOK_DEFS}
     monkeypatch.setattr(seats, "refresh_seats", lambda *a, **k: (_ for _ in ()).throw(OSError("no probe")))
+    from llm_router import host_detect
+    detect = host_detect.detect_hosts  # wired hosts must not depend on the developer's PATH
+    monkeypatch.setattr(host_detect, "detect_hosts",
+                        lambda **k: detect(**{"home": home, "which": lambda b: None, **k}))
     wired = install.run_full(interactive=False)
     return home, state, before, stale, wired
 

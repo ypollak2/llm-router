@@ -11,8 +11,10 @@ from pathlib import Path
 
 import pytest
 
+from types import SimpleNamespace
+
 from llm_router import auto_profile as ap
-from llm_router import discover, seats
+from llm_router import discover, host_detect, seats
 from llm_router import model_discovery as md
 from llm_router.commands import install
 from tests import test_p015_user_files_untouched as rec
@@ -42,6 +44,13 @@ def undeclared_changes(tree_before: dict[str, str], tree_after: dict[str, str], 
             and not (shape == "owned" and n == "profile.yaml")]  # router-written there (P0.15)
 
 
+def _pin_host_detection(monkeypatch, root: Path) -> None:
+    """Which hosts are wired must not depend on the developer's PATH."""
+    detect = host_detect.detect_hosts
+    monkeypatch.setattr(host_detect, "detect_hosts",
+                        lambda **k: detect(**{"home": root, "which": lambda b: None, **k}))
+
+
 def run_upgrade(root: Path, monkeypatch, shape: str, *, inject: str | None = None,
                 seed: str | None = None, fail_undeclared: bool = False) -> tuple[int, list[str]]:
     """``inject``: ``rewrite`` (same bytes, in the recorder window), ``append-window`` (in the
@@ -60,6 +69,7 @@ def run_upgrade(root: Path, monkeypatch, shape: str, *, inject: str | None = Non
         "claude_subscription": True, "claude_quota_remaining": 10.0 * world["n"], "ollama_available": world["n"] % 2 == 0})
     ap.save_detection_cache(ap.detect_services())
     monkeypatch.setattr(seats, "refresh_seats", lambda *a, **k: (_ for _ in ()).throw(OSError("no probe")))
+    _pin_host_detection(monkeypatch, root)
     before = {p: _sha(p) for p in owned}
     tree_before = _tree(home)
     rec._WATCH.clear()
@@ -130,3 +140,34 @@ def test_undeclared_changes_protects_preexisting_files_in_new_only_dirs():
 
 def test_user_owned_and_generated_are_disjoint():
     assert not set(homes.USER_OWNED) & set(homes.GENERATED)
+
+
+def test_seat_present_upgrade_only_appends_the_subscription_flag(tmp_path, monkeypatch):
+    """The common upgrade: a Claude seat is logged in. ``.env`` is user-owned with one
+    declared exception (homes.py): the flag is appended once when it was never set.
+    Every other user-owned file is untouched, and a second run changes nothing."""
+    root = tmp_path / "seat"
+    home, owned = rec.build(root, "upgrade", monkeypatch)
+    monkeypatch.setenv("HOME", str(root))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: root))
+    monkeypatch.chdir(root)
+    monkeypatch.delenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", raising=False)
+    monkeypatch.setattr("llm_router.discover.get_cached_ollama_models", lambda: [])
+    monkeypatch.setattr(ap, "detect_services", lambda: {
+        "claude_subscription": True, "claude_quota_remaining": 10.0, "ollama_available": False})
+    found = SimpleNamespace(claude=SimpleNamespace(present=True), summary_line=lambda: "claude",
+                            free_bucket=lambda: ["claude"])
+    monkeypatch.setattr(seats, "refresh_seats", lambda *a, **k: found)
+    _pin_host_detection(monkeypatch, root)
+    env = home / ".env"
+    env_before = env.read_bytes() if env.exists() else b""
+    before = {p: _sha(p) for p in owned if p != env}
+
+    install.run_full(interactive=False)
+
+    assert {p: _sha(p) for p in owned if p != env} == before
+    assert env.read_bytes().startswith(env_before)
+    assert env.read_bytes()[len(env_before):].strip() == b"LLM_ROUTER_CLAUDE_SUBSCRIPTION=true"
+    snapshot = {p: _sha(p) for p in [*owned, env] if p.exists()}
+    install.run_full(interactive=False)                                      # idempotent
+    assert {p: _sha(p) for p in [*owned, env] if p.exists()} == snapshot

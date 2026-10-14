@@ -293,6 +293,14 @@ def _run_install(flags: list[str]) -> None:
     run_full(interactive=True, flags=flags)
 
 
+#: Detected hosts whose `--host` installer cannot wire them from a global
+#: install, so the "wire one with --host" hint would be wrong for them.
+_NOT_GLOBALLY_WIRABLE = {
+    "windsurf": "its config is per project; run `llm-router install --host windsurf` inside each project",
+    "factory": "install the plugin with `factory plugin install ypollak2/llm_router`",
+}
+
+
 def run_full(interactive: bool = True, flags: list[str] | None = None) -> list[str]:
     """Install globally and return the labels of hosts wired by this run."""
     from llm_router.install_hooks import check_api_keys, install
@@ -349,7 +357,9 @@ def run_full(interactive: bool = True, flags: list[str] | None = None) -> list[s
                     ok = a.lstrip().startswith("✓")
                     print(f"  {_green('✓') if ok else _dim('·')}  {a.lstrip('✓ ').strip()}")
                 installed_hosts.append(label)
-            elif host_id in _HOST_SNIPPETS and host_id not in _UNSUPPORTED_HOSTS:
+            elif host_id in _NOT_GLOBALLY_WIRABLE:
+                print(f"  {host_id}: detected, not wired: {_NOT_GLOBALLY_WIRABLE[host_id]}")
+            elif host_id in _HOST_SNIPPETS:
                 _unwired.append(host_id)
             else:
                 reason = _UNSUPPORTED_HOSTS.get(host_id, "no installer for this host")

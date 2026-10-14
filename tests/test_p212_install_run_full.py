@@ -20,7 +20,8 @@ GOLDEN = """
 
   Codex CLI detected — installing...
   ✓  Codex hooks installed
-  also detected, not auto-wired: cursor, windsurf (wire one with `llm-router install --host <name>`)
+  windsurf: detected, not wired: its config is per project; run `llm-router install --host windsurf` inside each project
+  also detected, not auto-wired: cursor (wire one with `llm-router install --host <name>`)
 
   Seats  test seats
   no seat found — routed calls will bill an API key; log in to Claude Code, Codex, or start Ollama
@@ -91,6 +92,7 @@ def test_full_install_returns_hosts_and_preserves_writes(sandbox, interactive, c
 def test_detected_cursor_reports_explicit_install_command(sandbox, capsys):
     home, _ = sandbox
     (home / ".cursor").mkdir()
+    (home / ".cursor" / "host-own-state.json").write_text("{}")
 
     assert install.run_full(interactive=False) == ["Claude Code"]
 
@@ -102,21 +104,26 @@ def test_detected_cursor_reports_explicit_install_command(sandbox, capsys):
 
 def test_many_detected_hosts_print_one_summary_line(sandbox, capsys):
     home, _ = sandbox
-    (home / ".cursor").mkdir()
-    (home / ".windsurf").mkdir()
+    for d in (".cursor", ".openclaw", ".windsurf"):
+        (home / d).mkdir()
+        (home / d / "host-own-state.json").write_text("{}")
 
     install.run_full(interactive=False)
 
-    lines = [ln for ln in capsys.readouterr().out.splitlines() if "not auto-wired" in ln]
+    out = capsys.readouterr().out.splitlines()
+    lines = [ln for ln in out if "not auto-wired" in ln]
     assert lines == [
-        "  also detected, not auto-wired: cursor, windsurf (wire one with `llm-router install --host <name>`)"
+        "  also detected, not auto-wired: cursor, openclaw (wire one with `llm-router install --host <name>`)"
     ]
+    # windsurf's installer is per project: it gets a reason, not the --host hint
+    assert any(ln.startswith("  windsurf: detected, not wired: its config is per project") for ln in out)
 
 
 def test_golden_output_on_a_fixture_home(sandbox, capsys):
     home, _ = sandbox
     for d in (".codex", ".cursor", ".windsurf"):
         (home / d).mkdir()
+        (home / d / "host-own-state.json").write_text("{}")
 
     install.run_full(interactive=False)
 
