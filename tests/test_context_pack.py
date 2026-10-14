@@ -407,6 +407,29 @@ def test_stable_hash_covers_project_and_instructions(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- fail open
 
 
+def test_query_is_the_project_retrieval_text_and_the_request_stays_verbatim(tmp_path, monkeypatch):
+    """D-94(a): a door whose request is a tool result retrieves with the person's ask."""
+    import llm_router.context_injection as ci
+
+    asked = []
+
+    def inject(text, **k):
+        asked.append(text)
+        return f"synthetic block for [{text}]\n\n{text}"
+
+    monkeypatch.setattr(ci, "inject", inject)
+    tool_result = "[tool_result] 3 passed"
+    pack = cp.build_pack(tool_result, [], project_root=str(tmp_path), target_window=10**4,
+                         door="proxy", query="synthetic human ask")
+    assert asked == ["synthetic human ask"]
+    assert pack.project == "synthetic block for [synthetic human ask]" and pack.request == tool_result
+    for blank in (None, "", "   "):          # no query: the request is the retrieval text
+        asked.clear()
+        cp.build_pack("synthetic request", [], project_root=str(tmp_path), target_window=10**4,
+                      door="proxy", query=blank)
+        assert asked == ["synthetic request"]
+
+
 def test_project_and_instruction_errors_yield_empty_sections(tmp_path, monkeypatch):
     import llm_router.context_injection as ci
 

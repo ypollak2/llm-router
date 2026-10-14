@@ -415,3 +415,44 @@ async def test_pass_through_to_claude_is_never_touched(home, tmp_path, monkeypat
     assert seen == [] and backend.calls == []
     assert json.loads(up.requests[0].content) == body
     assert b"knowledge_context" not in up.requests[0].content
+
+
+async def test_the_trim_runs_off_the_event_loop_and_is_timed(home, tmp_path, policy, monkeypatch):
+    """D-94(a): the ``fast`` trim builds the context pack (session reads, token estimates over the
+    whole prompt), so it runs in a worker thread; its time is the ``trim`` phase, outside the
+    P0.9-e decision sum."""
+    import threading
+
+    from llm_router.proxy import server as proxy_server
+    from llm_router.proxy.tiers import DECISION_PHASES
+
+    seen = []
+    real = proxy_server.apply_trims
+
+    def spy(*a, **k):
+        seen.append(threading.current_thread() is threading.main_thread())
+        return real(*a, **k)
+
+    monkeypatch.setattr(proxy_server, "apply_trims", spy)
+    repo = _repo(tmp_path, "repo-a")
+    backend, up = _Backend(), _Upstream()
+    r = await _post(_app(tmp_path, up, backend), _request(repo))
+    assert r.status_code == 200 and up.requests == []
+    assert seen == [False]
+    row = json.loads((tmp_path / "proxy_calls.jsonl").read_text().splitlines()[-1])
+    assert row["tier_phases_ms"]["trim"] >= 0 and "trim" not in DECISION_PHASES
+
+
+async def test_a_failing_trim_is_still_a_counted_fallback(home, tmp_path, policy, monkeypatch):
+    from llm_router.proxy import server as proxy_server
+
+    def boom(*a, **k):
+        raise RuntimeError("trim exploded")
+
+    monkeypatch.setattr(proxy_server, "apply_trims", boom)
+    repo = _repo(tmp_path, "repo-a")
+    backend, up = _Backend(), _Upstream()
+    r = await _post(_app(tmp_path, up, backend), _request(repo))
+    assert r.status_code == 200 and backend.calls == [] and len(up.requests) == 1
+    row = json.loads((tmp_path / "proxy_calls.jsonl").read_text().splitlines()[-1])
+    assert row["decision"] == "fallback"
