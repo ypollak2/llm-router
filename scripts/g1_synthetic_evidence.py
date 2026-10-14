@@ -27,7 +27,7 @@ import sys
 import tempfile
 import time
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator
 
@@ -374,15 +374,15 @@ def run_summary(n_sessions: int = 24, spawns: int = 100) -> dict:
         tdir = root / "transcripts"
         tdir.mkdir()
         counts: dict[str, int] = {}
+        worker_failures = 0
         for i in range(n_sessions):
             it = build_item(10_000 + i, MIX[i % len(MIX)][0])
             path = write_transcript(it, tdir)
             sid = f"synth-p12a-{i:03d}"
             counts[sid] = len(context_summary.read_messages(path))
             # The Stop hook's worker, run in-process (spawn() only starts it detached).
-            rc = context_summary._worker(["--session", sid, "--transcript", str(path)])
-            if rc != 0:
-                counts[sid] = counts[sid]  # recorded as uncovered by coverage()
+            # coverage() counts a session only if a summary was actually stored.
+            worker_failures += context_summary._worker(["--session", sid, "--transcript", str(path)]) != 0
         cov = context_summary.coverage(counts, min_messages=12)
         times = []
         noop = [sys.executable, "-c", "pass"]
@@ -393,7 +393,7 @@ def run_summary(n_sessions: int = 24, spawns: int = 100) -> dict:
         times.sort()
         p95 = times[min(len(times) - 1, math.ceil(0.95 * len(times)) - 1)]
     return {"label": LABEL, "must": "P1.2-a", "coverage": cov, "spawn_ms_p95": round(p95, 2),
-            "spawns": spawns, "bars": {"coverage_pct": 95, "spawn_ms_p95": 50, "n_sessions": 20},
+            "spawns": spawns, "worker_failures": worker_failures, "bars": {"coverage_pct": 95, "spawn_ms_p95": 50, "n_sessions": 20},
             "verdict": ("PASS" if cov["informative"] and (cov["pct"] or 0) >= 95 and p95 <= 50
                         else "FAIL")}
 
