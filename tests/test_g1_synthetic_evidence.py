@@ -123,6 +123,14 @@ def test_verdict_bar_and_error_rule(g1):
     assert (v["n"], v["errors"], v["verdict"]) == (53, 7, "NOT INFORMATIVE")
 
 
+def test_fewer_than_60_paired_items_is_never_a_verdict(g1):
+    """PLAN P1.1-b: 'Until n >= 60 paired the result is not informative' (review 509, finding 1)."""
+    six_errors = _rows([("recent", True, True, None)] * 54 + [("recent", False, False, "cli_error")] * 6)
+    assert g1.verdict(six_errors, total=60)["verdict"] == "NOT INFORMATIVE"   # 10% errors, n=54
+    assert g1.verdict(_rows([("recent", True, True, None)] * 5), total=5)["verdict"] == "NOT INFORMATIVE"
+    assert g1.verdict(_rows([("recent", True, True, None)] * 60), total=60)["verdict"] == "PASS"
+
+
 def test_run_fidelity_with_fake_responders(g1):
     """End to end on 8 items: a responder that answers from whatever context it gets."""
     def echo(context: str):
@@ -130,6 +138,7 @@ def test_run_fidelity_with_fake_responders(g1):
 
     res = g1.run_fidelity("sonnet", echo, provider="anthropic", limit=8)
     assert res["label"] == g1.LABEL and res["n"] == 8 and res["errors"] == 0
+    assert res["verdict"] == "SMOKE (not scored)"                 # a --limit run is never a result
     assert res["prereg_sha256"] == g1.prereg_sha256()
     assert set(res["pack_modes"]) == {"pack"}
 
@@ -142,14 +151,37 @@ def test_errors_are_retried_once_then_counted(g1):
         return g1.Answer(error="cli_error")
 
     res = g1.run_fidelity("sonnet", flaky, provider="anthropic", limit=2)
-    assert res["errors"] == 2 and res["n"] == 0 and res["verdict"] == "NOT INFORMATIVE"
+    assert res["errors"] == 2 and res["n"] == 0 and res["verdict"] == "SMOKE (not scored)"
     assert len(calls) == 2 * 2 * 2  # 2 items x 2 arms x (call + one retry)
 
 
-def test_summary_coverage_on_synthetic_sessions(g1):
-    res = g1.run_summary(n_sessions=20, spawns=20)
-    assert res["label"] == g1.LABEL
+def test_summary_coverage_comes_from_the_real_detached_workers(g1, monkeypatch):
+    res = g1.run_summary(n_sessions=20, wait_s=120)
+    assert res["label"] == g1.LABEL and res["workers_started"] == 20
     assert res["coverage"]["n_sessions"] == 20 and res["coverage"]["covered"] == 20
+    assert res["verdict"] == "NOT INFORMATIVE"                    # 20 spawns < the 100 the bar needs
+    from llm_router import context_summary as cs
+
+    real = cs.spawn
+    monkeypatch.setattr(cs, "spawn", lambda sid, p, argv=None: real(sid, p, argv=[sys.executable, "-c", "pass"]))
+    res = g1.run_summary(n_sessions=20, wait_s=2)
+    assert res["coverage"]["covered"] == 0                        # no worker, no summary
+
+
+def test_summary_verdict_bars(g1):
+    cov = {"n_sessions": 20, "covered": 20, "pct": 100.0, "informative": True}
+    assert g1.summary_verdict(cov, [10.0] * 100)["verdict"] == "PASS"
+    assert g1.summary_verdict(cov, [10.0] * 94 + [60.0] * 6)["verdict"] == "FAIL"   # p95 > 50 ms
+    assert g1.summary_verdict(dict(cov, covered=18, pct=90.0), [10.0] * 100)["verdict"] == "FAIL"
+    assert g1.summary_verdict(dict(cov, informative=False), [10.0] * 100)["verdict"] == "NOT INFORMATIVE"
+    assert g1.summary_verdict(cov, [10.0] * 99)["verdict"] == "NOT INFORMATIVE"
+
+
+def test_a_loopback_base_url_is_refused(g1):
+    assert g1.loopback_base_url({"ANTHROPIC_BASE_URL": "http://127.0.0.1:8787"})
+    assert g1.loopback_base_url({"ANTHROPIC_BASE_URL": "http://localhost:8787/v1"})
+    assert g1.loopback_base_url({"ANTHROPIC_BASE_URL": "https://api.anthropic.com"}) is None
+    assert g1.loopback_base_url({}) is None
 
 
 # ── P1.9-a: O3 integrity on synthetic transcripts ─────────────────────────────

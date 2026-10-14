@@ -2,18 +2,20 @@
   "bars": {
     "coverage_pct": 95,
     "n_sessions": 20,
+    "n_spawns": 100,
     "spawn_ms_p95": 50
   },
   "coverage": {
-    "covered": 24,
+    "covered": 100,
     "informative": true,
-    "n_sessions": 24,
+    "n_sessions": 100,
     "pct": 100.0
   },
   "label": "synthetic (D-99)",
+  "method": "spawn() with the real detached worker per session; Stop hook process not run",
   "must": "P1.2-a",
-  "spawn_ms_p95": 22.09,
+  "spawn_ms_p95": 33.9,
   "spawns": 100,
   "verdict": "PASS",
-  "worker_failures": 0
+  "workers_started": 100
 }

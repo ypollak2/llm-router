@@ -21,7 +21,7 @@ local stratum and P1.7-d cannot run in this container. P2 merges stay blocked (D
 |---|---|---|---|
 | (1) every P1 MUST | mechanical MUST tests on main 9c244981 (16 sets) | all 0 fail (PROGRESS 2026-10-14) | — |
 | (1) | P1.1-a seven doors | PASS: spy test merged in #507 | — |
-| (1) | P1.2-a summary coverage and spawn p95 | **PASS**: 24/24 sessions with ≥ 12 messages covered; spawn p95 22.1 ms (bar 50); 0 worker failures | `p12a-synthetic.json` |
+| (1) | P1.2-a summary coverage and spawn p95 | **PASS**: 100/100 sessions with ≥ 12 messages covered by the real detached workers; spawn p95 33.9 ms over 100 spawns (bar 50). The Stop hook process itself was not run (see below) | `p12a-synthetic.json` |
 | (1) | P1.7-d nimble shadow adoption | **NOT RUN**: needs nimble:9b in Ollama; ollama.com and huggingface.co are blocked by this container's network policy | — |
 | (1) | P1.9-a O3 integrity | **PASS**: 3 measurable sessions at ratio 1.000 (bar 0.90-1.10); the coverage-50% session is UNMEASURABLE and the 30-prompt session is not a gate unit, both as designed | `p19a-synthetic.json` |
 | (1) | P1.10-a identity per path | **PASS**: proxy 1,320/1,320, usage 240/240, execution_events 314/314 (each ≥ 200, 100%); replay probe envelopes reported apart | `p110a-p09-synthetic.json` |
@@ -29,7 +29,7 @@ local stratum and P1.7-d cannot run in this container. P2 merges stay blocked (D
 | (2) | P1.7-a | N/A (D-82) | — |
 | (3) | P1.1-b Sonnet stratum, PACK vs FULL | **FAIL**: n=60, worse 20, better 0, (w-b)/n = 0.333 > 0.02, exact McNemar p = 1.9e-6 | `p11b-synthetic-sonnet.json` |
 | (3) | P1.1-b local stratum, PACK vs HOOK6 | **NOT RUN**: needs a local model (blocked as above) | — |
-| (4) | G0 guards P0.9-a..c | **PASS (synthetic)**: session-start p95 240 ms (n=60, bar 2,000); status-bar p95 94 ms (n=300, bar 300); statusline p95 44-47 ms (n=200 x 3 conditions, bar 100). The "last 7 days live" reading needs the live install | `p110a-p09-synthetic.json`, `p09c-statusline-synthetic.txt` |
+| (4) | G0 guards P0.9-a..c | **PASS (synthetic replay and bench mechanics only)**: session-start p95 240 ms (n=60, bar 2,000); status-bar p95 94 ms (n=300, bar 300); statusline p95 44-47 ms (n=200 x 3 conditions, bar 100). The "last 7 days live" reading needs the live install | `p110a-p09-synthetic.json`, `p09c-statusline-synthetic.txt` |
 
 ## P1.1-b: what failed and why
 
@@ -60,6 +60,14 @@ Two readings matter for the owner:
    could carry early decisions and key tool facts. Tuning the extractive heuristics to this
    generator would overfit it, so no such repair was tried.
 
+**Rule amendment (AMEND1).** The independent review found that the frozen run rule allowed a
+verdict on fewer than 60 paired items: with 1-6 errors, or with a `--limit` run. That contradicts
+PLAN P1.1-b ("until n >= 60 paired the result is 'not informative'").
+`docs/prereg/PREREG-P11B-synthetic-AMEND1.md` was frozen at 2026-10-14T20:06:02Z, after this
+stratum ran. For every later run it requires n >= 60 paired items and labels `--limit` runs
+`SMOKE (not scored)`. This Sonnet stratum had n = 60 and 0 errors, so the stricter rule gives the
+same FAIL.
+
 The kill rule (park after 2 failed repairs) is not reached: 0 repairs were run. P1.1-b is parked
 here pending an owner call (see "Owner decisions needed").
 
@@ -69,7 +77,9 @@ estimate and under the plan's ~$18 P1.1-b cap.
 
 ## P1.9-a: O3 integrity (P1.9 variant of the M0.3 check, D-58 population rules)
 
-`o3_integrity()` in the harness counts, per session:
+`o3_integrity()` in the harness is a new implementation of the P1.9 variant D-58 asks for. It is
+not a patch of the frozen `$PP/scripts/o3_integrity.py`, which this container cannot reach. It
+counts, per session:
 
 - O3 human turns: `offload_share.build_units` + `turn_units`, with the transcript join, the same units
   `kpi` counts;
@@ -98,8 +108,10 @@ Ledger shapes:
 
 **Bug found and fixed in this PR:** `is_typed_prompt` counted the host's `[Request interrupted …]`
 marker and its compaction summary (`isCompactSummary`) as typed prompts. Before the fix the ratios
-were 0.965 / 0.976 / 0.965. After it they are 1.000 / 1.000 / 1.000. The proxy's step labeller
-already read the interrupt marker as not human text.
+were 0.970 / 0.976 / 0.965 (rerun of `o3` with main's `o3_transcripts.py`). After it they are
+1.000 / 1.000 / 1.000. All three pre-fix ratios were already inside the 0.90-1.10 bar, so the fix
+was not needed to pass. The proxy's step labeller already read the interrupt marker as not human
+text.
 
 The check can fail: without the transcript join, the proxy-only rule keeps the orphan calls and
 the ratio rises above 1.10. `tests/test_g1_synthetic_evidence.py` checks this.
@@ -121,7 +133,11 @@ turns 2-5 (1,320 records). Identity uses kpi's P1.10-a rule (`_identity_share`):
 replay's per-hook wall times. The replay rows are tagged `harness`, so `llm-router kpi --identity`
 itself excludes them, and the readout applies the same rule directly.
 
-The replay (1,020 s wall, 0 errors, 0 network violations) gave:
+The replay ran for 1,020 s wall time with 0 errors. It also reported 0 network violations, but
+that figure **means nothing in this container**. The replay's network guard loads as
+`sitecustomize`, and Debian's `/usr/lib/python3.13/sitecustomize.py` shadows it. Two guard tests
+in `tests/test_synthetic_replay.py` fail the same way on main. The identity and latency figures do
+not depend on the guard: the doors point at the stub upstream. The replay gave:
 
 | Path | n | with session_id + real task_id | Verdict |
 |---|---|---|---|
@@ -137,7 +153,9 @@ answers. Sub-agent proxy calls (`subagent_first`) carry their parent turn's task
 envelopes (`nosys`, `bare`, `reminder`). Each is sent under its own session id `<sid>-<variant>`,
 which no host prompt ever started, so no hook began a turn and the proxy stamps a `gen-` task id.
 The first readout counted them and gave proxy 59.5%. They are not host traffic, so they are
-reported apart. The same thing happens live when a session's UserPromptSubmit hook never runs
+reported apart. This is a **post-hoc** rule, added after that first readout. It is stated here so the
+owner can judge it: all 900 probe rows carry `gen-` ids, all 1,320 host rows carry real ones, and
+host session ids (`synth-replay-<hex>`) cannot match the suffix filter. The same thing happens live when a session's UserPromptSubmit hook never runs
 (hooks disabled), and kpi then correctly counts those rows as missing.
 
 | Hook (G0 guard) | n | p50 | p95 | Bar | Verdict |
@@ -148,8 +166,21 @@ reported apart. The same thing happens live when a session's UserPromptSubmit ho
 | P0.9-c statusline, warm | 200 | 33 ms | 44 ms | 100 ms | PASS |
 | P0.9-c statusline, refresher hangs | 200 | 36 ms | 47 ms | 100 ms | PASS |
 
-These are wall times in a quiet container (load1 0.8 at the bench start). The live clauses gate on
-all organic rows, contention included (§1.4), so they measure something different.
+These are wall times in a quiet container (load1 0.8 at the bench start). G1 clause (4) reads
+"still hold over the last 7 days", which is a property of the live install. These figures show
+the mechanics only: the hooks and the statusline meet their bars when nothing contends. The live
+clauses gate on all organic rows, contention included (§1.4).
+
+## P1.2-a: method
+
+For each of 100 synthetic sessions (≥ 12 messages), `context_summary.spawn()` starts the real
+detached worker with its default argv. `spawn()` is what the Stop hook calls. Coverage counts the
+sessions with a stored summary once the workers finish; all 100 finished within seconds, and the
+summary is extractive because there is no local model. Spawn p95 is the wall time of those same
+100 `spawn()` calls. The Stop hook process itself was not run: its wall time is P0.9's. A test
+shows that coverage drops to 0 when the workers are replaced by a no-op. The first version of this
+check called the worker in-process and timed no-op spawns. The PR review flagged it as weaker than
+the clause, and it was replaced.
 
 ## Owner decisions needed
 

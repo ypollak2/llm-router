@@ -298,7 +298,29 @@ def test_interrupt_marker_and_compaction_summary_are_not_typed_prompts():
     assert not t.is_typed_prompt(entry("[Request interrupted by user for tool use]"))
     assert not t.is_typed_prompt(entry("This session is being continued from a previous conversation.",
                                        isCompactSummary=True, isVisibleInTranscriptOnly=True))
-    assert t.is_typed_prompt(entry("why was the request interrupted?"))  # only the leading marker
+    assert t.is_typed_prompt(entry("why was the request interrupted?"))
+    assert t.is_typed_prompt(entry("see the [Request interrupted by user] line above"))  # anchored
+
+
+def test_an_answer_after_a_compaction_summary_or_interrupt_with_no_prompt_is_not_a_turn(tmp_path):
+    from llm_router import o3_transcripts as t
+
+    def line(d):
+        return json.dumps(d) + "\n"
+
+    user = lambda content, **kw: line({"type": "user", "message": {"role": "user", "content": content}, **kw})  # noqa: E731
+    asst = lambda mid: line({"type": "assistant", "message": {"id": mid, "role": "assistant", "content": []}})  # noqa: E731
+    proj = tmp_path / "-p"
+    proj.mkdir()
+    (proj / "sess.jsonl").write_text(
+        user("first real prompt") + asst("m1")
+        + user("This session is being continued.", isCompactSummary=True) + asst("m2")
+        + user([{"type": "text", "text": "[Request interrupted by user]"}]) + asst("m3")
+        + user("second real prompt") + user("This session is being continued.", isCompactSummary=True)
+        + asst("m4"))
+    roles = t.thread_index("sess", projects_dir=tmp_path)
+    assert roles == {"m1": t.ROLE_TURN, "m2": t.ROLE_META, "m3": t.ROLE_META,
+                     "m4": t.ROLE_TURN}  # a summary never demotes the prompt it follows
 
 
 def test_transcript_role_of_a_task_notification_answer_is_meta(tmp_path):

@@ -49,6 +49,11 @@ MIX = (("recent", 30), ("early_user", 10), ("early_tool", 10), ("early_assistant
 CYCLES = 9
 MAX_ERROR_SHARE = 0.10
 BAR = 0.02
+#: PLAN v16 P1.1-b: "Until n >= 60 paired the result is 'not informative'" (60 paired per stratum).
+MIN_PAIRED = 60
+#: Superseding rule file (stricter run rule: n >= 60 paired, smoke runs never scored), frozen after
+#: the Sonnet stratum ran; it governs every later fidelity run.
+AMEND = ROOT / "docs" / "prereg" / "PREREG-P11B-synthetic-AMEND1.md"
 
 SYSTEM_PROMPT = ("You are a coding assistant continuing the session below. Answer the final user "
                  "request using only the session. Be brief.")
@@ -218,7 +223,7 @@ def verdict(rows: list[dict], *, total: int) -> dict:
     worse = sum(1 for r in ok if r["ref"] and not r["pack"])
     better = sum(1 for r in ok if r["pack"] and not r["ref"])
     share = (worse - better) / n if n else None
-    informative = n > 0 and errors <= MAX_ERROR_SHARE * total
+    informative = n >= MIN_PAIRED and errors <= MAX_ERROR_SHARE * total
     by_cat: dict[str, dict] = {}
     for r in ok:
         c = by_cat.setdefault(r["category"], {"n": 0, "pack_pass": 0, "ref_pass": 0, "worse": 0, "better": 0})
@@ -233,7 +238,7 @@ def verdict(rows: list[dict], *, total: int) -> dict:
         "worse": worse, "better": better,
         "worse_minus_better_over_n": None if share is None else round(share, 4),
         "mcnemar_exact_p": mcnemar_exact(worse, better),
-        "bar": BAR,
+        "bar": BAR, "min_paired": MIN_PAIRED,
         "verdict": ("NOT INFORMATIVE" if not informative else
                     "PASS" if share is not None and share <= BAR else "FAIL"),
         "by_category": by_cat,
@@ -249,6 +254,16 @@ class Answer:
     error: str | None = None
     model: str | None = None
     cost_usd: float = 0.0
+
+
+def loopback_base_url(env: dict | None = None) -> str | None:
+    """``ANTHROPIC_BASE_URL`` when it points at this machine (e.g. the live router proxy on :8787),
+    else None. A synthetic run through it would land unlabelled in the live ledger."""
+    import urllib.parse
+
+    raw = (env if env is not None else os.environ).get("ANTHROPIC_BASE_URL") or ""
+    host = (urllib.parse.urlparse(raw).hostname or "").lower()
+    return raw if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0") or host.startswith("127.") else None
 
 
 def claude_responder(model: str = "sonnet", timeout: float = 180.0) -> Callable[[str], Answer]:
@@ -303,16 +318,16 @@ def scratch_env(extra: dict[str, str] | None = None) -> Iterator[Path]:
     keep.update({k: os.environ.get(k) for k in ("HOME",)})
     with tempfile.TemporaryDirectory(prefix="g1-synth-") as tmp:
         root = Path(tmp)
-        for k in list(os.environ):
-            if k.startswith("LLM_ROUTER_"):
-                del os.environ[k]
-        os.environ.update({"HOME": str(root / "home"), "LLM_ROUTER_HOME": str(root / "lr"),
-                           "LLM_ROUTER_SESSIONS_PATH": str(root / "lr" / "sessions.db"),
-                           "LLM_ROUTER_SESSION_CONTEXT": "all", "LLM_ROUTER_ROLLING_SUMMARY": "1",
-                           "LLM_ROUTER_SYNTHETIC": "1", **(extra or {})})
-        (root / "home").mkdir()
-        (root / "lr").mkdir()
         try:
+            (root / "home").mkdir()
+            (root / "lr").mkdir()
+            for k in list(os.environ):
+                if k.startswith("LLM_ROUTER_"):
+                    del os.environ[k]
+            os.environ.update({"HOME": str(root / "home"), "LLM_ROUTER_HOME": str(root / "lr"),
+                               "LLM_ROUTER_SESSIONS_PATH": str(root / "lr" / "sessions.db"),
+                               "LLM_ROUTER_SESSION_CONTEXT": "all", "LLM_ROUTER_ROLLING_SUMMARY": "1",
+                               "LLM_ROUTER_SYNTHETIC": "1", **(extra or {})})
             yield root
         finally:
             for k in list(os.environ):
@@ -360,49 +375,67 @@ def run_fidelity(stratum: str, responder: Callable[[str], Answer], *, provider: 
             rows.append(row)
             progress(json.dumps(row))
     reference = "FULL" if stratum == "sonnet" else "HOOK6"
+    scored = verdict(rows, total=len(chosen))
+    if limit:  # a --limit run checks the harness; it is never a result (AMEND1)
+        scored["verdict"] = "SMOKE (not scored)"
     return {
         "label": LABEL, "must": "P1.1-b", "stratum": stratum, "arms": f"PACK vs {reference}",
         "prereg": PREREG.name, "prereg_sha256": prereg_sha256(), "seed": SEED, "window": WINDOW,
         "models": sorted(models), "summary_model": summary_model or "extractive",
         "pack_modes": modes, "cost_usd": round(cost, 4),
-        **verdict(rows, total=len(chosen)), "rows": rows,
+        "amend_sha256": hashlib.sha256(AMEND.read_bytes()).hexdigest() if AMEND.exists() else None,
+        **scored, "rows": rows,
     }
 
 
 # ── summary coverage (P1.2-a) ─────────────────────────────────────────────────
 
 
-def run_summary(n_sessions: int = 24, spawns: int = 100) -> dict:
-    """P1.2-a on synthetic sessions: every session with >= 12 messages gets a stored summary
-    when its Stop hook runs the worker; spawn() p95 over ``spawns`` calls."""
+def run_summary(n_sessions: int = 100, wait_s: float = 300.0) -> dict:
+    """P1.2-a on synthetic sessions. For each session, ``context_summary.spawn()`` (what the Stop
+    hook calls) starts the real detached worker with its default argv. Coverage counts sessions
+    with a stored summary once the workers are done (or ``wait_s`` passed). Spawn p95 is the wall
+    time of those same ``spawn()`` calls. The Stop hook process itself is not run here: its wall
+    time is P0.9's."""
     from llm_router import context_summary
 
-    with scratch_env() as root:
+    src = str(ROOT / "src")
+    pythonpath = os.pathsep.join([src] + [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p])
+    with scratch_env({"PYTHONPATH": pythonpath}) as root:
         tdir = root / "transcripts"
         tdir.mkdir()
         counts: dict[str, int] = {}
-        worker_failures = 0
+        times: list[float] = []
+        started = 0
         for i in range(n_sessions):
             it = build_item(10_000 + i, MIX[i % len(MIX)][0])
             path = write_transcript(it, tdir)
             sid = f"synth-p12a-{i:03d}"
             counts[sid] = len(context_summary.read_messages(path))
-            # The Stop hook's worker, run in-process (spawn() only starts it detached).
-            # coverage() counts a session only if a summary was actually stored.
-            worker_failures += context_summary._worker(["--session", sid, "--transcript", str(path)]) != 0
-        cov = context_summary.coverage(counts, min_messages=12)
-        times = []
-        noop = [sys.executable, "-c", "pass"]
-        for i in range(spawns):
             t0 = time.perf_counter()
-            context_summary.spawn(f"synth-spawn-{i:03d}", str(tdir / "x.jsonl"), argv=noop)
+            started += bool(context_summary.spawn(sid, str(path)))
             times.append((time.perf_counter() - t0) * 1000)
-        times.sort()
-        p95 = times[min(len(times) - 1, math.ceil(0.95 * len(times)) - 1)]
-    return {"label": LABEL, "must": "P1.2-a", "coverage": cov, "spawn_ms_p95": round(p95, 2),
-            "spawns": spawns, "worker_failures": worker_failures, "bars": {"coverage_pct": 95, "spawn_ms_p95": 50, "n_sessions": 20},
-            "verdict": ("PASS" if cov["informative"] and (cov["pct"] or 0) >= 95 and p95 <= 50
-                        else "FAIL")}
+        deadline = time.monotonic() + wait_s
+        while time.monotonic() < deadline:
+            cov = context_summary.coverage(counts, min_messages=12)
+            if cov["covered"] == cov["n_sessions"]:
+                break
+            time.sleep(0.5)
+        cov = context_summary.coverage(counts, min_messages=12)
+    return {"label": LABEL, "must": "P1.2-a", "workers_started": started,
+            "method": "spawn() with the real detached worker per session; Stop hook process not run",
+            **summary_verdict(cov, times)}
+
+
+def summary_verdict(cov: dict, spawn_ms: list[float]) -> dict:
+    """P1.2-a bars: coverage >= 95% of >= 20 sessions, spawn p95 <= 50 ms over >= 100 spawns."""
+    times = sorted(spawn_ms)
+    p95 = times[min(len(times) - 1, math.ceil(0.95 * len(times)) - 1)] if times else None
+    verdict = ("NOT INFORMATIVE" if not cov.get("informative") or len(times) < 100 else
+               "PASS" if (cov.get("pct") or 0) >= 95 and p95 <= 50 else "FAIL")
+    return {"coverage": cov, "spawn_ms_p95": None if p95 is None else round(p95, 2), "spawns": len(times),
+            "bars": {"coverage_pct": 95, "spawn_ms_p95": 50, "n_sessions": 20, "n_spawns": 100},
+            "verdict": verdict}
 
 
 # ── O3 integrity (P1.9-a) ─────────────────────────────────────────────────────
@@ -801,6 +834,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "fidelity":
         if args.stratum == "sonnet":
+            if loopback_base_url():
+                ap.error("ANTHROPIC_BASE_URL points at this machine (the live router?): the synthetic "
+                         "calls would land in the live ledger. Unset it for this run.")
             responder, provider = claude_responder("sonnet"), "anthropic"
         else:
             if not args.local_model:
