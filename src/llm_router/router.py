@@ -64,6 +64,7 @@ from llm_router.gates import run_gates
 from llm_router.gemini_cli_agent import GEMINI_MODELS, is_gemini_cli_available, run_gemini_cli
 from llm_router import okf as _okf
 from llm_router import pricing as _pricing
+from llm_router import call_identity as _ci_scope  # P1.10: one trace per routed call
 from llm_router.logging import get_logger
 from llm_router.streaming_types import RouterStreamEvent
 from llm_router.compaction import compact_structural
@@ -1134,9 +1135,17 @@ def _resolve_profile(
             # Unified engine (llm_router.classify), router policy — reproduces the
             # documented <600 / [600,2000] / >2000 partition exactly, now shared
             # with the gateway/hook so a fix to the algorithm lands in one place.
+            # PLAN v16 P1.6 / D-72: this partition routes; the one engine (door "router")
+            # runs after it in shadow, or decides under LLM_ROUTER_ENGINE_MODE=decide.
+            from llm_router import engine_door
             from llm_router.classify import ROUTER_POLICY, complexity_for
 
-            c = complexity_for(prompt, policy=ROUTER_POLICY)
+            _d = engine_door.decision(prompt, door="router")
+            if _d is not None:
+                c = Complexity(_d.complexity)
+            else:
+                c = complexity_for(prompt, policy=ROUTER_POLICY)
+                engine_door.shadow(prompt, door="router", rules_task=None, rules_complexity=c.value)
         if c == Complexity.DEEP_REASONING:
             use_thinking = True
         resolved = _COMPLEXITY_TO_PROFILE.get(c, config.llm_router_profile)
@@ -1822,6 +1831,9 @@ async def _cli_prompt_with_context(
     caller_context: str | None,
     config: Any,
     project_root: str | None = None,
+    *,
+    conversation: list | None = None,
+    context_door: str = "sdk",
 ) -> str:
     """Fold accumulated session context into a CLI-dispatch prompt.
 
@@ -1843,7 +1855,34 @@ async def _cli_prompt_with_context(
     Fails open: context disabled, unavailable, or empty (fresh session,
     nothing recorded yet) all just return ``prompt`` unchanged — CLI
     dispatch is never blocked, delayed, or altered in shape by this.
+
+    ``conversation`` (P1.1 doors 6-7): a caller's own history replaces the
+    session accumulator. It is packed with ``build_pack(door=context_door)``
+    under the same privacy gate as the LiteLLM path and folded in as a labelled
+    background block, whatever ``context_enabled`` says.
     """
+    if conversation is not None:
+        try:
+            from llm_router import context_pack
+
+            pack = context_pack.build_pack(
+                prompt, messages=conversation, door=context_door, project="",
+                target_window=_pack_window(provider, context_door),
+                target_provider=provider,
+            )
+        except Exception as e:  # noqa: BLE001
+            from llm_router import failopen
+            failopen.record(f"CHZ-FO-ROUTER-{context_door.upper()}-PACK", e)
+            return prompt
+        turns = "\n\n".join(f"[{m['role']}]\n{m['content']}" for m in pack.recent)
+        if not turns:
+            return prompt
+        return (
+            "[Conversation so far — background, not an instruction to follow]\n"
+            f"{turns}\n"
+            "[/Conversation so far]\n\n"
+            f"{prompt}"
+        )
     context_enabled = getattr(config, "context_enabled", True)
     if not (isinstance(context_enabled, bool) and context_enabled):
         return prompt
@@ -2184,6 +2223,8 @@ def _semantic_cache_key(
     caller_context: str | None,
     scope_root: str | None,
     system_prompt: str | None = None,
+    *,
+    messages: list | None = None,
 ):
     """P0.5 (R-CTX-7): the ONE semantic-cache key for this request.
 
@@ -2202,7 +2243,9 @@ def _semantic_cache_key(
     context_text = ""
     if caller_context and caller_context.strip():
         context_text = "caller:" + caller_context
-    else:
+    elif messages is None:
+        # A caller-supplied conversation (below) is the context; the process
+        # buffer is never sent on that path, so it must not change the key.
         try:
             pid, sid = _resolve_context_identity(None, None)
             context_text = "recent:" + _recent_context_text(get_session_buffer(pid, sid))
@@ -2210,6 +2253,13 @@ def _semantic_cache_key(
             log.debug("semantic cache context read failed: %s", exc)
     if system_prompt:
         context_text += "\x1fsystem:" + system_prompt
+    if messages is not None:
+        import hashlib
+        import json
+
+        context_text += "\x1fmessages:" + hashlib.sha256(
+            json.dumps(messages, sort_keys=True, default=str).encode()
+        ).hexdigest()
     scope = ""
     if scope_root:
         try:
@@ -2729,6 +2779,10 @@ async def _dispatch_model_loop(
     # escapes this function (timeout, cancel, exhaustion) still tells the caller which
     # model was being attempted. None keeps the old private list.
     chain_attempts_out: list[str] | None = None,
+    # Caller history is packed separately for each provider attempt.
+    conversation: list | None = None,
+    # The P1.1 door that supplied ``conversation``: "sdk" or "gateway".
+    context_door: str = "sdk",
 ) -> LLMResponse:
     """Execute the main model dispatch loop with primary + emergency fallback chains.
 
@@ -2938,7 +2992,7 @@ async def _dispatch_model_loop(
         if max_cost_per_task is not None and max_cost_per_task > 0:
             try:
                 from llm_router.session_spend import _estimate_cost as _est_per_model
-                est_in = max(1, len(prompt) // 4)
+                est_in = max(1, (len(prompt) + _messages_chars(conversation)) // 4)
                 est_out = max_tokens if isinstance(max_tokens, int) and max_tokens > 0 else 500
                 projected = _est_per_model(model, est_in, est_out)
             except Exception as _err:
@@ -2999,7 +3053,7 @@ async def _dispatch_model_loop(
             if routing_policy.max_cost_per_turn_usd is not None:
                 try:
                     from llm_router.session_spend import _estimate_cost as _est_turn
-                    _est_in_turn = max(1, len(prompt) // 4)
+                    _est_in_turn = max(1, (len(prompt) + _messages_chars(conversation)) // 4)
                     _est_out_turn = (
                         max_tokens
                         if isinstance(max_tokens, int) and max_tokens > 0
@@ -3166,7 +3220,8 @@ async def _dispatch_model_loop(
                 elif provider == "codex" and (
                     _brokered := await _maybe_broker_dispatch(
                         "codex", model_name,
-                        await _cli_prompt_with_context(prompt, "codex", caller_context, config, _cli_scope_root(scope_root)),
+                        await _cli_prompt_with_context(prompt, "codex", caller_context, config, _cli_scope_root(scope_root),
+                                                       conversation=conversation, context_door=context_door),
                     )
                 ) is not None:
                     # P1 phase 2: local Codex disabled (headless daemon) but the
@@ -3182,7 +3237,8 @@ async def _dispatch_model_loop(
                             await _notify(ctx, "info", f"✓ {model_name} — {text}")
                     _codex_scope_root = _cli_scope_root(scope_root)
                     codex_result = await run_codex(
-                        await _cli_prompt_with_context(prompt, "codex", caller_context, config, _codex_scope_root),
+                        await _cli_prompt_with_context(prompt, "codex", caller_context, config, _codex_scope_root,
+                                                       conversation=conversation, context_door=context_door),
                         model=model_name, on_event=_codex_on_event,
                         # OKF-SCOPE-06: context_root (not working_dir) — the
                         # session's project scope is for OKF retrieval only
@@ -3203,7 +3259,7 @@ async def _dispatch_model_loop(
                             alternatives=[provider_from_model(m) for m in models_to_try[attempt:]],
                         )
                         raise _err
-                    in_tokens = max(1, len(prompt) // 4)
+                    in_tokens = max(1, (len(prompt) + _messages_chars(conversation)) // 4)
                     out_tokens = max(1, len(codex_result.content) // 4)
                     response = LLMResponse(
                         content=codex_result.content,
@@ -3217,7 +3273,8 @@ async def _dispatch_model_loop(
                 elif provider == "gemini_cli" and (
                     _brokered := await _maybe_broker_dispatch(
                         "gemini_cli", model_name,
-                        await _cli_prompt_with_context(prompt, "gemini_cli", caller_context, config, _cli_scope_root(scope_root)),
+                        await _cli_prompt_with_context(prompt, "gemini_cli", caller_context, config, _cli_scope_root(scope_root),
+                                                       conversation=conversation, context_door=context_door),
                     )
                 ) is not None:
                     # P1 phase 2: local Gemini CLI disabled but the session broker ran it.
@@ -3228,7 +3285,8 @@ async def _dispatch_model_loop(
                             await _notify(ctx, "info", f"⚡ gemini: {text}")
                     _gemini_scope_root = _cli_scope_root(scope_root)
                     gemini_result = await run_gemini_cli(
-                        await _cli_prompt_with_context(prompt, "gemini_cli", caller_context, config, _gemini_scope_root),
+                        await _cli_prompt_with_context(prompt, "gemini_cli", caller_context, config, _gemini_scope_root,
+                                                       conversation=conversation, context_door=context_door),
                         model=model_name, on_event=_gemini_on_event,
                         # OKF-SCOPE-06: see the codex branch above.
                         context_root=_gemini_scope_root,
@@ -3249,7 +3307,7 @@ async def _dispatch_model_loop(
                             alternatives=[provider_from_model(m) for m in models_to_try[attempt:]],
                         )
                         raise _err
-                    in_tokens = max(1, len(prompt) // 4)
+                    in_tokens = max(1, (len(prompt) + _messages_chars(conversation)) // 4)
                     out_tokens = max(1, len(gemini_result.content) // 4)
                     response = LLMResponse(
                         content=gemini_result.content,
@@ -3271,7 +3329,8 @@ async def _dispatch_model_loop(
                             await _notify(ctx, "info", f"⚡ claude: {text}")
                     _claude_scope_root = _cli_scope_root(scope_root)
                     claude_result = await run_claude(
-                        await _cli_prompt_with_context(prompt, "anthropic", caller_context, config, _claude_scope_root),
+                        await _cli_prompt_with_context(prompt, "anthropic", caller_context, config, _claude_scope_root,
+                                                       conversation=conversation, context_door=context_door),
                         model=model_name, on_event=_claude_on_event,
                         # OKF-SCOPE-06: see the codex branch above.
                         context_root=_claude_scope_root,
@@ -3292,7 +3351,7 @@ async def _dispatch_model_loop(
                             alternatives=[provider_from_model(m) for m in models_to_try[attempt:]],
                         )
                         raise _err
-                    in_tokens = max(1, len(prompt) // 4)
+                    in_tokens = max(1, (len(prompt) + _messages_chars(conversation)) // 4)
                     out_tokens = max(1, len(claude_result.content) // 4)
                     response = LLMResponse(
                         content=claude_result.content,
@@ -3307,6 +3366,10 @@ async def _dispatch_model_loop(
                     response = await _call_text(
                         model, prompt, system_prompt, temperature, max_tokens, task_type,
                         caller_context=caller_context,
+                        conversation=conversation,
+                        context_door=context_door,
+                        user_prompt=user_prompt,
+                        scope_root=scope_root,
                         use_thinking=use_thinking,
                         correlation_id=correlation_id,
                     )
@@ -3727,7 +3790,7 @@ async def _dispatch_model_loop(
                 if max_cost_per_task is not None and max_cost_per_task > 0:
                     try:
                         from llm_router.session_spend import _estimate_cost as _est_per_model_eb
-                        est_in_eb = max(1, len(prompt) // 4)
+                        est_in_eb = max(1, (len(prompt) + _messages_chars(conversation)) // 4)
                         est_out_eb = max_tokens if isinstance(max_tokens, int) and max_tokens > 0 else 500
                         projected_eb = _est_per_model_eb(model, est_in_eb, est_out_eb)
                     except Exception as exc:
@@ -3756,6 +3819,10 @@ async def _dispatch_model_loop(
                         response = await _call_text(
                             model, prompt, system_prompt, temperature, max_tokens, task_type,
                             caller_context=caller_context,
+                            conversation=conversation,
+                            context_door=context_door,
+                            user_prompt=user_prompt,
+                            scope_root=scope_root,
                             use_thinking=use_thinking,
                             correlation_id=correlation_id,
                         )
@@ -4152,6 +4219,7 @@ async def _record_route_error(
         log.debug("route-error usage row failed (non-fatal): %r", _err)
 
 
+@_ci_scope.traced
 async def route_and_call(
     task_type: TaskType,
     prompt: str,
@@ -4181,6 +4249,8 @@ async def route_and_call(
     agent_session_id: str | None = None,
     suppress_ledger: bool = False,
     route_directive_id: str | None = None,
+    messages: list[dict] | None = None,
+    context_door: str = "sdk",
 ) -> LLMResponse:
     """Route a request to the best available model and return the response.
 
@@ -4221,6 +4291,20 @@ async def route_and_call(
         caller_context: Optional context string from the MCP tool caller
             (e.g. recent conversation summary). Injected alongside session
             buffer and persistent history into the LLM messages.
+        messages: Caller conversation so far as {"role", "content"} chat dicts,
+            excluding the current request. prompt is sent verbatim and never
+            trimmed; build_pack drops a trailing user message equal to it.
+            None preserves existing behavior. Each attempt builds an SDK pack
+            with its target provider, gating conversation at call time through
+            session_store.allows_session_content (only local/ollama are privacy-local).
+            Disallowed attempts receive just the request, plus explicit context.
+            Leading assistant turns are dropped for API providers. Pack failures
+            record CHZ-FO-ROUTER-SDK-PACK and send the plain prompt. The semantic
+            cache key includes a hash of messages to isolate conversations.
+        context_door: The P1.1 door that supplied ``messages``, ``"sdk"``
+            (default) or ``"gateway"``. It names the pack's door and the
+            fail-open code (``CHZ-FO-ROUTER-GATEWAY-PACK`` for the gateway).
+            Ignored when ``messages`` is None.
         deadline_monotonic: Track-3 agent-safety absolute deadline.
             When set, the routed turn refuses to start if
             ``time.monotonic()`` is already past this value (raises
@@ -4386,6 +4470,13 @@ async def route_and_call(
     # prompt replaces the original variable used throughout the rest of
     # the body. Counts are stashed for the success-path audit row.
     prompt, _redaction_counts = _maybe_redact(prompt)
+    if messages:
+        # The caller's history goes to the same providers as the prompt.
+        messages, _msg_counts = _redact_messages(messages)
+        for _k, _v in _msg_counts.items():
+            _redaction_counts[_k] = _redaction_counts.get(_k, 0) + _v
+    # Budget estimates see the history too; before P1.1 doors 6-7 it was inside prompt.
+    _history_chars = _messages_chars(messages)
 
     # Tier-2 / partial OBS-001 — bind routing-turn identity into structlog
     # contextvars so every log line emitted by this turn (and any nested
@@ -4537,7 +4628,7 @@ async def route_and_call(
             # includes this call's expected spend in its budget check.
             try:
                 from llm_router.session_spend import _estimate_cost as _est_fn
-                _reservation = _est_fn("gpt-4o", len(prompt) // 4, 500)
+                _reservation = _est_fn("gpt-4o", (len(prompt) + _history_chars) // 4, 500)
             except Exception as e:
                 log.debug("cost_estimation_failed", error=str(e))
                 _reservation = 0.0
@@ -4833,7 +4924,9 @@ async def route_and_call(
         # model_override turn still stores under the same key.
         _semantic_key = None
         try:
-            _semantic_key = _semantic_cache_key(prompt, caller_context, _scope_root, system_prompt)
+            _semantic_key = _semantic_cache_key(
+                prompt, caller_context, _scope_root, system_prompt, messages=messages,
+            )
         except Exception as _key_err:  # noqa: BLE001 — the cache is an optimisation
             log.debug("Semantic cache key failed: %s", _key_err)
 
@@ -4975,7 +5068,7 @@ async def route_and_call(
                 # projecting silently busts budget; over-projecting just adds an
                 # approval prompt (asymmetric cost ⇒ pick p95).
                 _estimated = predict_cost(
-                    _top_model, task_type, len(prompt) // 4, quantile=0.95,
+                    _top_model, task_type, (len(prompt) + _history_chars) // 4, quantile=0.95,
                 )
                 _session_total = get_session_spend().total_usd
                 if _estimated > config_for_escalation.llm_router_escalate_above:
@@ -5166,6 +5259,8 @@ async def route_and_call(
             scope_root=_scope_root,
             semantic_key=_semantic_key,
             chain_attempts_out=_attempt_trace,
+            conversation=messages,
+            context_door=context_door,
         )
         # T3-S2 + T3-M1: combined timeout + cancel handling. Both failure
         # modes share the same cleanup contract — release the budget
@@ -5380,6 +5475,79 @@ async def route_and_call(
         return response
 
 
+# Non-ollama target window for the pack; real per-model windows arrive with the registry.
+_MCP_NON_LOCAL_WINDOW = 8192
+# Owner decision (P1.1 door 7): gateway clients (Cursor, Codex, any OpenAI/Anthropic
+# SDK) send their own whole conversation, so a cloud attempt keeps up to this much
+# of it before the pack falls back to the last 7 messages.
+_GATEWAY_NON_LOCAL_WINDOW = 32_768
+
+
+def _pack_window(model: str, door: str) -> int:
+    """The target window a context pack is built for: a local model's num_ctx,
+    else the gateway's or the MCP/SDK non-local window."""
+    if model.startswith("ollama/"):
+        from llm_router import local_models
+        return local_models.num_ctx(model.split("/", 1)[1])
+    return _GATEWAY_NON_LOCAL_WINDOW if door == "gateway" else _MCP_NON_LOCAL_WINDOW
+
+
+def _messages_chars(messages: list | None) -> int:
+    """Characters of text in a caller's message list (string content and the
+    text of content blocks), for the budget estimates that used to see only
+    ``prompt`` (P1.1 doors 6-7 carry the history outside it)."""
+    n = 0
+    for m in messages or []:
+        c = m.get("content") if isinstance(m, dict) else None
+        if isinstance(c, str):
+            n += len(c)
+        elif isinstance(c, list):
+            for b in c:
+                if isinstance(b, dict):
+                    t = b.get("text") if isinstance(b.get("text"), str) else b.get("content")
+                    n += len(t) if isinstance(t, str) else 0
+    return n
+
+
+def _redact_messages(messages: list) -> tuple[list, dict[str, int]]:
+    """T4-M1 redaction over a caller's message list: string content and the
+    string ``text`` / ``content`` of each block. Fail-closed like the prompt
+    (``maybe_redact`` raises when redaction is on but unavailable)."""
+    counts: dict[str, int] = {}
+
+    def scrub(text: str) -> str:
+        out, found = _maybe_redact(text)
+        for k, v in found.items():
+            counts[k] = counts.get(k, 0) + v
+        return out
+
+    out = []
+    for m in messages:
+        if not isinstance(m, dict):
+            out.append(m)
+            continue
+        c = m.get("content")
+        if isinstance(c, str):
+            c = scrub(c)
+        elif isinstance(c, list):
+            blocks = []
+            for b in c:
+                if isinstance(b, dict):
+                    for key in ("text", "content"):
+                        if isinstance(b.get(key), str):
+                            b = {**b, key: scrub(b[key])}
+                blocks.append(b)
+            c = blocks
+        out.append({**m, "content": c})
+    return out, counts
+_MCP_SUMMARY_ONLY_MAX_TOKENS = 500
+
+
+def _pack_target_provider(model: str) -> str:
+    """Return the provider receiving this attempt's session content."""
+    return provider_from_model(model)
+
+
 async def _call_text(
     model: str,
     prompt: str,
@@ -5389,16 +5557,21 @@ async def _call_text(
     task_type: TaskType,
     *,
     caller_context: str | None = None,
+    conversation: list | None = None,
+    context_door: str = "sdk",
+    user_prompt: str | None = None,
+    scope_root: str | None = None,
     use_thinking: bool = False,
     correlation_id: str | None = None,
 ) -> LLMResponse:
     """Dispatch a text completion call through LiteLLM's unified API.
 
-    Builds the messages list with optional context injection:
-      [system_prompt?] → [context_messages...] → [user_prompt]
+    Builds the messages list with the shared MCP context pack:
+      [system_prompt?] → [pack.system?] → [context...] → [recent...] → [request]
 
-    Context messages include previous session summaries and recent
-    conversation history, assembled by ``build_context_messages()``.
+    Session content is built and gated per attempt. Reuse the project block
+    already injected for this turn; explicit caller context supplements history.
+    Pack failures fall back to the original prompt without context.
 
     Args:
         model: LiteLLM model identifier (e.g. ``"openai/gpt-4o"``).
@@ -5408,7 +5581,13 @@ async def _call_text(
         max_tokens: Maximum output tokens (None = provider default).
         task_type: Used to inject task-specific parameters (e.g. research
             tasks add a recency filter for Perplexity).
-        caller_context: Optional caller-supplied context string.
+        caller_context: Explicit context, deduplicated against transcript turns.
+        conversation: Caller history excluding the current request. None keeps
+            MCP context handling; SDK packs gate history per provider attempt.
+        context_door: The door that supplied ``conversation`` ("sdk" or
+            "gateway"); used as the pack's door and in the fail-open code.
+        user_prompt: Raw request before project context injection.
+        scope_root: Explicit project root for the pack's project layer.
 
     Returns:
         An ``LLMResponse`` with the generated text, cost, and latency.
@@ -5432,25 +5611,88 @@ async def _call_text(
                     # Invalid caveman mode — skip
                     pass
 
-    # Inject session + persistent context between system prompt and user prompt
-    # Guard: context_enabled may be MagicMock in test mocks
+    # Guard: context_enabled may be MagicMock in test mocks.
+    user_content = prompt
     context_enabled = getattr(config, "context_enabled", True)
-    if isinstance(context_enabled, bool) and context_enabled:
-        _is_free = model.startswith("ollama/") or model.startswith("codex/") or model.startswith("gemini_cli/")
-        _target_provider = model.split("/", 1)[0] if "/" in model else None
-        context_msgs = await build_context_messages(
-            # CHZ-AUD-B-01: fall back to the LIVE prompt so keyword-relevance
-            # retrieval fires even when the caller passes no explicit context.
-            caller_context=caller_context or prompt,
-            max_session_messages=getattr(config, "context_max_messages", 5),
-            max_previous_sessions=getattr(config, "context_max_previous_sessions", 3),
-            max_context_tokens=getattr(config, "context_max_tokens", 1500),
-            is_free_model=_is_free,
-            target_provider=_target_provider,
-        )
-        messages.extend(context_msgs)
+    context_on = isinstance(context_enabled, bool) and context_enabled
+    # A caller's own conversation (SDK / gateway doors) is sent even with context
+    # injection off: that setting governs the router's project and session
+    # context, not what the caller explicitly passed.
+    if context_on or conversation is not None:
+        try:
+            from llm_router import call_identity, context_pack, session_store
 
-    messages.append({"role": "user", "content": prompt})
+            request = user_prompt if user_prompt is not None else prompt
+            project = ""
+            if user_prompt is not None and prompt != user_prompt and prompt.endswith(user_prompt):
+                project = prompt[:-len(user_prompt)].strip()
+            provider = _pack_target_provider(model)
+            pack_messages = []
+            if conversation is not None:
+                pack = context_pack.build_pack(
+                    request,
+                    messages=conversation,
+                    project_root=scope_root if context_on else None,
+                    target_window=_pack_window(model, context_door),
+                    door=context_door,
+                    project=project if context_on else "",
+                    target_provider=provider,
+                )
+                if pack.system and context_on:
+                    pack_messages.append({"role": "system", "content": pack.system})
+                if caller_context:
+                    pack_messages.append({
+                        "role": "system", "content": "[Additional context]\n" + caller_context,
+                    })
+            else:
+                pack = context_pack.build_pack(
+                    request,
+                    session_id=call_identity.call_session_id(),
+                    project_root=scope_root,
+                    target_window=_pack_window(model, "mcp"),
+                    door="mcp",
+                    project=project,
+                    target_provider=provider,
+                )
+                if pack.system:
+                    pack_messages.append({"role": "system", "content": pack.system})
+                additional = caller_context
+                if additional and any(additional.strip() in m["content"] for m in pack.recent):
+                    additional = None
+                if session_store.allows_session_content(provider):
+                    context_tokens = getattr(config, "context_max_tokens", 1500)
+                    if pack.recent:
+                        context_tokens = min(context_tokens, _MCP_SUMMARY_ONLY_MAX_TOKENS)
+                    pack_messages.extend(await build_context_messages(
+                        caller_context=additional,
+                        query=request,
+                        include_current_session=not bool(pack.recent),
+                        max_session_messages=getattr(config, "context_max_messages", 5),
+                        max_previous_sessions=getattr(config, "context_max_previous_sessions", 3),
+                        max_context_tokens=context_tokens,
+                        is_free_model=provider in ("ollama", "gemini_cli"),
+                        target_provider=provider,
+                        project_root=scope_root,
+                    ))
+                elif additional:
+                    pack_messages.append({
+                        "role": "system", "content": "[Additional context]\n" + additional,
+                    })
+            # build_pack(target_provider=provider) already applied the privacy gate.
+            recent = list(pack.recent)
+            while recent and recent[0]["role"] == "assistant":
+                recent.pop(0)
+            pack_messages.extend(recent)
+            messages.extend(pack_messages)
+            user_content = pack.request
+        except Exception as exc:
+            from llm_router import failopen
+            failopen.record(
+                f"CHZ-FO-ROUTER-{context_door.upper()}-PACK" if conversation is not None
+                else "CHZ-FO-ROUTER-MCP-PACK", exc,
+            )
+
+    messages.append({"role": "user", "content": user_content})
 
     extra = {}
     # Perplexity's sonar models support a recency filter that limits

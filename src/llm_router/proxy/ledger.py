@@ -8,6 +8,10 @@ optional ``detail`` string (a fallback reason) is passed through
 
 Row fields:
   ts, session_id, msg_id, stream, requested_model
+  task_id, trace_id
+                  P1.10 (``call_identity``): the human request (the session's current
+                  turn, the same id the hooks and MCP calls of that turn carry) and this
+                  call's own uuid4 hex. Absent on rows written before P1.10.
   step_class      the kind of call (``proxy.steps.step_kind``): continuation |
                   turn_first | subagent_first | subagent_turn | harness_turn |
                   side_call. Rows written before GE1 hold continuation or null
@@ -280,8 +284,19 @@ def scrub_detail(text: str | None) -> str | None:
     return scrub_text(str(text))[:200]
 
 
+#: PLAN v16 P1.7 tasks 1 and 7: present on EVERY row. ``cls_*`` are the engine Decision's
+#: layer, confidence and reason (null = the engine did not decide this call); the policy
+#: fields are the string "none" when no dynamic policy applied, never null (MUST P1.7-e).
+ENGINE_FIELD_DEFAULTS = {"cls_layer": None, "cls_confidence": None, "cls_reason": None,
+                         "policy_id": "none", "policy_stage": "none", "grade_basis": "none",
+                         "inventory_sig": None}
+
+
 def write_row(row: dict, path: Path | None = None) -> None:
     target = path or ledger_path()
+    for k, v in ENGINE_FIELD_DEFAULTS.items():
+        if row.get(k) is None:
+            row[k] = v
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("a", encoding="utf-8") as fh:

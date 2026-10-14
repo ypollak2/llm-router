@@ -60,10 +60,33 @@ _TRUST_PRIMARY_COMPLEXITY = 0.75
 # shared with the sync heuristic path). Imported above as apply_complexity_floor.
 
 
+def _engine_mode() -> str:
+    """Which classifier the MCP door routes with: ``engine`` | ``legacy`` | ``off``.
+
+    PLAN v16 P1.6 / D-72: the rules route by default, so with ``LLM_ROUTER_ENGINE_MODE`` unset
+    (``shadow``) this is main's ``LLM_ROUTER_ENSEMBLE`` switch unchanged: the LLM-first ensemble
+    unless ``off`` (cloud classifier). ``engine`` only when ``LLM_ROUTER_ENGINE_MODE=decide`` and
+    ``LLM_ROUTER_ENSEMBLE`` is unset or ``engine``; ``legacy`` then keeps the old path."""
+    from llm_router import engine_door
+
+    raw = os.environ.get("LLM_ROUTER_ENSEMBLE")
+    v = (raw if raw is not None else "on").strip().lower()
+    if (raw is None or v in ("", "engine")) and engine_door.decides():
+        return "engine"
+    return _rules_mode()
+
+
+def _rules_mode() -> str:
+    """``legacy`` (ensemble) or ``off`` (cloud classifier) from ``LLM_ROUTER_ENSEMBLE``; no engine."""
+    v = os.environ.get("LLM_ROUTER_ENSEMBLE", "on").strip().lower()
+    return "legacy" if v in ("legacy", "1", "true", "on", "yes") else "off"
+
+
 def _ensemble_enabled() -> bool:
     """LLM-first ensemble is the default routing classifier (user choice, 2026-07).
-    Disable with LLM_ROUTER_ENSEMBLE=off to fall back to the cloud classifier."""
-    return os.environ.get("LLM_ROUTER_ENSEMBLE", "on").strip().lower() in ("1", "true", "on", "yes")
+    Disable with LLM_ROUTER_ENSEMBLE=off to fall back to the cloud classifier. Its warmup
+    follows this switch."""
+    return _engine_mode() == "legacy"
 
 
 # Primary local classifier — one env knob shared by warmup and routing so they
@@ -187,24 +210,66 @@ def warm_primary(model: str | None = None) -> None:
     threading.Thread(target=_run, name="llm_router-ollama-warmup", daemon=True).start()
 
 
+def engine_classification(prompt: str) -> ClassificationResult:
+    """The MCP door's ``ClassificationResult`` from ``engine.decide`` (sync, no LLM, no
+    network). ``subject`` stays ``GENERAL`` and ``capabilities`` empty, as for the legacy
+    ensemble: the engine does not classify a subject, and no caller reads them here."""
+    from llm_router import engine
+
+    d = engine.decide(prompt, door="mcp")
+    return ClassificationResult(
+        complexity=Complexity(d.complexity),
+        confidence=d.confidence or 0.0,
+        reasoning=d.reason,
+        inferred_task_type=TaskType(d.task_type),
+        classifier_model="engine",
+        classifier_cost_usd=0.0,
+        classifier_latency_ms=d.ms,
+    )
+
+
 async def classify_for_routing(prompt: str, **_legacy_kwargs) -> "ClassificationResult":
     """Routing-path classification entry point used by the MCP tools.
 
     LLM-first: when LLM_ROUTER_ENSEMBLE is on (default), the local ensemble classifies
     every prompt and — on cold start/model failure — degrades INTERNALLY to the
     floor'd heuristic (never stalls, never bounces). When disabled, defers to the
-    cloud ``classify_complexity``. Legacy kwargs (timeout_seconds, quality_mode,
+    cloud ``classify_complexity``. PLAN v16 P1.6 / D-72: that is the rules decision; the one
+    engine runs after it in shadow, and decides only under ``LLM_ROUTER_ENGINE_MODE=decide``. Legacy kwargs (timeout_seconds, quality_mode,
     min_model) are accepted for call-site compatibility; the ensemble uses its own
     timeout because a 10s cap would kill it on a cold local model.
     """
-    if _ensemble_enabled():
+    if _engine_mode() == "engine":
+        try:
+            return engine_classification(prompt)
+        except Exception as exc:  # noqa: BLE001 — an engine failure routes with the rules
+            from llm_router import failopen
+
+            failopen.record("LR-FO-ENGINE-DOOR", exc)
+    if _rules_mode() == "legacy":
         timeout = float(os.environ.get("LLM_ROUTER_ENSEMBLE_TIMEOUT", "120"))
-        return await classify_ensemble(
+        result = await classify_ensemble(
             prompt, primary=_primary_model(), secondary=_secondary_model(), timeout_seconds=timeout
         )
-    from llm_router.classifier import classify_complexity
+    else:
+        from llm_router.classifier import classify_complexity
 
-    return await classify_complexity(prompt, **_legacy_kwargs)
+        result = await classify_complexity(prompt, **_legacy_kwargs)
+    _engine_shadow(prompt, result)
+    return result
+
+
+def _engine_shadow(prompt: str, result) -> None:
+    """Log the engine's Decision beside the rules result (D-72). Never raises."""
+    try:
+        from llm_router import engine_door
+
+        engine_door.shadow(prompt, door="mcp", rules_task=getattr(result.inferred_task_type, "value", None),
+                           rules_complexity=getattr(result.complexity, "value", None))
+    except Exception as exc:  # noqa: BLE001 — shadow must not touch routing
+        from llm_router import failopen
+
+        failopen.record("LR-FO-ENGINE-SHADOW", exc)
 
 
 async def local_llm_classify(

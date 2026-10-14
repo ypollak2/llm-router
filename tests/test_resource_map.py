@@ -6,6 +6,7 @@ import json
 import pytest
 
 from llm_router import local_models, resource_map as rm
+from llm_router.discovery.keys import discover
 from llm_router.seats import Seat, Seats
 
 NOW = 1_790_000_000.0  # fixed clock
@@ -36,6 +37,7 @@ def make_inputs(tmp_path, *, seats=None, models=("qwen3.5:latest", "nimble:9b"),
         claude_reading=lambda: claude,
         codex_counter=lambda: counter, codex_sessions=tmp_path / "no-codex",
         gemini_quota=lambda: gemini, policy=policy, now=NOW,
+        keys=lambda: discover(env=env or {}, dotenv_paths=[], keychain=lambda v: False),
     )
 
 

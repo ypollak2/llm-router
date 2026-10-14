@@ -163,6 +163,11 @@ class LedgerEvent:
     verify: str | None = None
     used: bool | None = None
 
+    # P1.10 (R-EVL-2): the human request and the routed call behind the event
+    # (``call_identity``). Stamped on write when None; NULL on rows written before.
+    task_id: str | None = None
+    trace_id: str | None = None
+
     # Orchestration overhead (INV-COST-005)
     hook_input_tokens: int | None = None
     hook_output_tokens: int | None = None
@@ -207,7 +212,7 @@ _COLUMNS: tuple[str, ...] = (
     # ALTER-migrated old DB end up with the same column SET (order doesn't need
     # to match _DDL's declared order; INSERT/SELECT are always by explicit name).
     "classifier_cost_usd", "failed_attempt_cost_usd", "baseline_tokens",
-    "adoption_method", "verify", "used",
+    "adoption_method", "verify", "used", "task_id", "trace_id",
 )
 
 _DDL = """
@@ -249,7 +254,9 @@ CREATE TABLE IF NOT EXISTS execution_events (
     baseline_tokens INTEGER,
     adoption_method TEXT,
     verify TEXT,
-    used INTEGER
+    used INTEGER,
+    task_id TEXT,
+    trace_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_exec_route ON execution_events(route_id);
 CREATE INDEX IF NOT EXISTS idx_exec_session ON execution_events(session_id);
@@ -270,6 +277,8 @@ _MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE execution_events ADD COLUMN adoption_method TEXT",
     "ALTER TABLE execution_events ADD COLUMN verify TEXT",
     "ALTER TABLE execution_events ADD COLUMN used INTEGER",
+    "ALTER TABLE execution_events ADD COLUMN task_id TEXT",
+    "ALTER TABLE execution_events ADD COLUMN trace_id TEXT",
 )
 
 
@@ -398,6 +407,12 @@ def record_event(ev: LedgerEvent, *, path: Path | None = None) -> bool:
     try:
         if not ev.ts:
             ev.ts = time.time()
+        if ev.task_id is None or ev.trace_id is None:  # P1.10: stamp the call's identity
+            from llm_router import call_identity
+
+            _task, _trace = call_identity.row_ids(ev.session_id)
+            ev.task_id = ev.task_id or _task
+            ev.trace_id = ev.trace_id or _trace
         conn = _connect(path)
         try:
             placeholders = ",".join("?" for _ in _COLUMNS)
