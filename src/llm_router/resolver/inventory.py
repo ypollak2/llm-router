@@ -417,6 +417,7 @@ def _inventory_ollama(p: Probes) -> tuple[list[ModelEntry], SourceStatus]:
             capabilities=caps, context_window=ctx,
             context_source="ollama /api/show model_info" if ctx else "",
             loaded=name in loaded, size_bytes=m.get("size"),
+            digest=str(m.get("digest") or ""), modified_at=str(m.get("modified_at") or ""),
         )
         if cloud_why:
             # Served by Ollama's cloud through the local daemon: off-machine, spends the

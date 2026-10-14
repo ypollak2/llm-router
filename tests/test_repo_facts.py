@@ -117,3 +117,97 @@ def test_nothing_here_can_be_written_by_a_model():
         "repo_facts gained a writer. Only git may author these fields; a model-"
         "written value here is the fabrication loop with extra steps."
     )
+
+
+# --------------------------------------------------------------------------- P1.1
+# Two git calls per read, and a bounded reuse of the rendered block
+# (PLAN v16 P1.1: the context pack's 50 ms budget, judged in the door shape).
+
+
+def _count_git(monkeypatch):
+    calls: list[list[str]] = []
+    real = repo_facts.subprocess.run
+
+    def spy(args, *a, **k):
+        calls.append(list(args))
+        return real(args, *a, **k)
+
+    monkeypatch.setattr(repo_facts.subprocess, "run", spy)
+    return calls
+
+
+def test_a_read_costs_two_git_calls(repo, monkeypatch):
+    calls = _count_git(monkeypatch)
+    f = repo_facts.collect(str(repo))
+    assert len(calls) == 2, calls
+    assert f["last_commit"] == "first commit" and f["uncommitted"] == "0"
+
+
+@pytest.mark.parametrize("header,branch", [
+    ("## main", "main"),
+    ("## feat/x...origin/feat/x", "feat/x"),
+    ("## main...origin/main [different]", "main"),
+    ("## No commits yet on fresh", "fresh"),
+    ("## Initial commit on fresh", "fresh"),
+    ("## HEAD (no branch)", ""),
+])
+def test_branch_header_parsing(header, branch):
+    assert repo_facts._branch(header) == branch
+
+
+def test_detached_head_has_no_branch_but_still_reports(repo):
+    subprocess.run(["git", "checkout", "-q", "--detach"], cwd=repo, check=False)
+    f = repo_facts.collect(str(repo))
+    assert "branch" not in f and f.get("head") and f["uncommitted"] == "0"
+
+
+def test_an_unborn_branch_reports_its_name(tmp_path):
+    subprocess.run(["git", "init", "-q", "-b", "unborn"], cwd=tmp_path, check=False)
+    f = repo_facts.collect(str(tmp_path))
+    assert f.get("branch") == "unborn" and "head" not in f
+
+
+def test_render_reuses_its_read_only_when_opted_in(repo, monkeypatch):
+    repo_facts._reuse.clear()
+    first = repo_facts.render(str(repo), reuse=True)
+    calls = _count_git(monkeypatch)
+    assert repo_facts.render(str(repo), reuse=True) == first
+    assert calls == []
+    repo_facts.render(str(repo))          # default: always reads git
+    assert len(calls) == 2
+
+
+def test_default_callers_see_an_edit_at_once(repo):
+    repo_facts._reuse.clear()
+    assert "uncommitted: 0" in repo_facts.render(str(repo), reuse=True)
+    (repo / "new.txt").write_text("n\n")       # touches no git file
+    assert "uncommitted: 1" in repo_facts.render(str(repo))
+    assert "uncommitted: 1" in repo_facts.render(str(repo))
+
+
+def test_a_commit_or_branch_switch_is_seen_on_the_next_render(repo):
+    repo_facts._reuse.clear()
+    assert "first commit" in repo_facts.render(str(repo), reuse=True)
+    (repo / "c.py").write_text("c = 1\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=False)
+    subprocess.run(["git", "commit", "-qm", "second commit"], cwd=repo, check=False)
+    assert "second commit" in repo_facts.render(str(repo), reuse=True)
+    subprocess.run(["git", "checkout", "-q", "-b", "other-branch"], cwd=repo, check=False)
+    assert "branch: other-branch" in repo_facts.render(str(repo), reuse=True)
+
+
+def test_reuse_expires_after_the_ttl(repo, monkeypatch):
+    repo_facts._reuse.clear()
+    repo_facts.render(str(repo), reuse=True)
+    (repo / "untracked.py").write_text("u = 1\n")   # touches no git file
+    assert "uncommitted: 0" in repo_facts.render(str(repo), reuse=True)  # inside the TTL
+    now = time.monotonic()
+    monkeypatch.setattr(repo_facts.time, "monotonic", lambda: now + repo_facts._REUSE_TTL_S + 1)
+    assert "uncommitted: 1" in repo_facts.render(str(repo), reuse=True)
+
+
+def test_render_without_a_root_is_never_reused(repo, monkeypatch):
+    monkeypatch.chdir(repo)
+    repo_facts._reuse.clear()
+    repo_facts.render(None, reuse=True)
+    assert repo_facts._reuse == {}

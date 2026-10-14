@@ -153,7 +153,7 @@ async def test_no_session_env_is_null_never_the_machine_wide_pointer(_router_db,
     assert session_store.resolve_session_id() == "sess-someone-else"  # premise: a fresh pointer
     await _route_through_mcp(None)
     rows = _rows(_router_db)
-    assert len(rows) == 1 and rows[0]["session_id"] is None and rows[0]["tool_use_id"] is None
+    assert len(rows) == 1 and rows[0]["session_id"] == "unknown:mcp" and rows[0]["tool_use_id"] is None
 
 
 def test_direct_path_stamps_the_hooks_session_id(temp_db):
@@ -166,7 +166,7 @@ def test_direct_path_stamps_the_hooks_session_id(temp_db):
                      classifier_type="heuristic", session_id="sess-hook")
     log_direct_to_db(result, prompt=PROMPT, task_type="query", complexity="simple",
                      classifier_type="heuristic")
-    assert [r["session_id"] for r in _rows(temp_db)] == ["sess-hook", None]
+    assert [r["session_id"] for r in _rows(temp_db)] == ["sess-hook", "unknown:non_mcp"]
 
 
 def test_ids_that_are_not_ids_are_refused(monkeypatch):
@@ -696,7 +696,7 @@ def test_direct_path_stores_only_an_id_never_text_or_a_placeholder(temp_db):
     for sid in sent:
         log_direct_to_db(result, prompt=PROMPT, task_type="query", complexity="simple",
                          classifier_type="heuristic", session_id=sid)
-    assert [r["session_id"] for r in _rows(temp_db)] == [None, None, None, None, real]
+    assert [r["session_id"] for r in _rows(temp_db)] == ["unknown:non_mcp"] * 4 + [real]
 
 
 def test_agent_route_stamps_the_payload_session_not_the_machine_wide_file(tmp_path, monkeypatch):
@@ -834,7 +834,7 @@ async def test_env_session_id_is_stamped_only_inside_an_mcp_tool_call(_router_db
          patch("llm_router.router._call_text", _fake_call_text):
         await route_and_call(TaskType.QUERY, PROMPT)
     rows = _rows(_router_db)
-    assert len(rows) == 1 and (rows[0]["session_id"], rows[0]["tool_use_id"]) == (None, None)
+    assert len(rows) == 1 and (rows[0]["session_id"], rows[0]["tool_use_id"]) == ("unknown:non_mcp", None)
 
 
 def test_the_id_validator_does_not_load_the_mcp_server_stack():

@@ -121,7 +121,8 @@ async def test_outside_an_mcp_call_the_session_is_null_not_guessed(cache_env, re
     calls: list = []
     await _route("explain the retry policy", caller_context="c", calls=calls)
     await _route("explain the retry policy", caller_context="c", calls=calls)
-    assert _q(cache_env, "SELECT session_id FROM usage WHERE reason = 'cache_hit'") == [(None,)]
+    assert _q(cache_env, "SELECT session_id FROM usage WHERE reason = 'cache_hit'") == [
+        ("unknown:non_mcp",)]
     assert _q(cache_env, "SELECT session_id FROM semantic_cache_lookups ORDER BY id") == [(None,), (None,)]
 
 

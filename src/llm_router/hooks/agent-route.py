@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 19
+# llm_router-hook-version: 23
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -1018,6 +1018,38 @@ def _classify_task_type(prompt: str) -> str:
     return best if scores[best] > 0 else "analyze"
 
 
+def _engine_decision(prompt: str) -> tuple[str, str]:
+    """``(task_type, complexity)`` from the one engine (PLAN v16 P1.6, door ``agent_route``), verbatim:
+    the same vocabulary as every other door, ``deep_reasoning`` included (D-83). ``_classify`` folds
+    ``deep_reasoning`` into ``complex`` because this hook's profile table has three rows.
+    Fail-open to the old no-signal default if the engine cannot be imported."""
+    try:
+        from llm_router import engine
+
+        d = engine.decide(prompt, door="agent_route")
+        return d.task_type, d.complexity
+    except Exception:  # noqa: BLE001 — a classifier error must never stop a spawn
+        return "analyze", "moderate"
+
+
+def _classify(prompt: str) -> tuple[str, str]:
+    """``(task_type, complexity)`` the spawn is routed on. PLAN v16 P1.6 / D-72: the two regex
+    tables above decide; the one engine runs after them, L1 only, in shadow (never raises).
+    ``LLM_ROUTER_ENGINE_MODE=decide`` makes the engine decide (``_engine_decision``)."""
+    try:
+        from llm_router import engine
+
+        decides = engine.decides()
+    except Exception:  # noqa: BLE001 — no engine, rules as before
+        return _classify_task_type(prompt), _classify_complexity(prompt)
+    if decides:
+        task, cx = _engine_decision(prompt)
+        return task, "complex" if cx == "deep_reasoning" else cx  # three-row profile table
+    out = _classify_task_type(prompt), _classify_complexity(prompt)
+    engine.shadow(prompt, door="agent_route", rules_task=out[0], rules_complexity=out[1], l1_only=True)
+    return out
+
+
 def _complexity_to_profile(complexity: str, session: float, sonnet: float, weekly: float) -> str:
     """Map complexity + per-bucket pressure to the appropriate routing profile.
 
@@ -1236,6 +1268,7 @@ def _with_routing_note(tool_input: dict) -> dict:
 def _try_direct_subagent(
     prompt: str, task_type: str, complexity: str, session_id: str,
     subagent_type: str = "general-purpose", ledger_session_id: str | None = None,
+    transcript_path: str | None = None, project_root: str | None = None,
 ) -> str | None:
     """Run the subagent's task on a routed cheap model instead of spawning Opus.
 
@@ -1274,10 +1307,40 @@ def _try_direct_subagent(
         chain = build_chain(complexity, zone, task_type)
         if not chain:
             return None
+        request, context, history, agent_context, okf = prompt, None, None, None, True
+        try:
+            from llm_router.context_pack import build_pack
+            from llm_router.hooks.direct_executor import _local_num_ctx
+
+            # Privacy: the most external provider the chain may reach, because
+            # execute_chain hands the same history to every later model.
+            # D-91: privacy-local is narrower than cost-free (codex is cloud).
+            from llm_router.session_store import LOCAL_PROVIDERS as _PRIV_LOCAL
+            _target = next((m.provider for m in chain if m.provider not in _PRIV_LOCAL),
+                           chain[0].provider)
+            pack = build_pack(
+                prompt, session_id=ledger_session_id,
+                transcript_path=transcript_path, project_root=project_root,
+                target_window=(_local_num_ctx(chain[0].model) or 8192),
+                door="agent", target_provider=_target,
+            )
+            context = pack.system or None
+            history = pack.recent or None
+            recent_context = "\n\n".join(
+                f"[{turn['role']}]\n{turn['content']}" for turn in pack.recent
+            )
+            agent_context = "\n\n".join(
+                part for part in (context, recent_context) if part
+            ) or None
+            request = pack.request
+            okf = not pack.project  # the pack's project layer already ran inject()
+        except Exception:
+            request, context, history, agent_context, okf = prompt, None, None, None, True
         if needs_claude_tools(prompt, task_type):
-            result = execute_agent(prompt, chain, timeout=60)  # Ollama tool-loop
+            result = execute_agent(request, chain, timeout=60, context=agent_context)  # Ollama tool-loop
         else:
-            result = execute_chain(prompt, chain, task_type, timeout=15)
+            result = execute_chain(request, chain, task_type, timeout=15, context=context, history=history,
+                                  okf_inject=okf)
     except Exception:
         return None
 
@@ -2220,8 +2283,7 @@ def main() -> None:
 
     # ── Classify reasoning task ──────────────────────────────────────────────
     with _hl_phase("classify"):
-        task_type = _classify_task_type(prompt)
-        complexity = _classify_complexity(prompt)
+        task_type, complexity = _classify(prompt)
 
     # ── NS3: suitable spawns → Codex CLI FIRST (external, free from Claude quota) ──
     # Must run before _allow_routed_spawn() below: that branch defaults to ON and
@@ -2274,7 +2336,9 @@ def main() -> None:
     # are logged (host=claude_code_subagent). Falls through on any failure.
     with _hl_phase("direct_subagent"):  # routed model time when it runs
         _routed = (_try_direct_subagent(prompt, task_type, complexity, session_id, subagent_type,
-                                        ledger_session_id=hook_input.get("session_id"))
+                                        ledger_session_id=hook_input.get("session_id"),
+                                        transcript_path=hook_input.get("transcript_path"),
+                                        project_root=hook_input.get("cwd"))
                    if _qb_allowed else None)
     if not _qb_allowed:
         _log_agent_call(subagent_type, prompt,
