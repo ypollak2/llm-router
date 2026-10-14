@@ -193,7 +193,7 @@ class TestMaybeRefreshBenchmarks:
             patch("llm_router.benchmarks._installed", lambda: missing_path),
             patch("llm_router.benchmarks._refresh_in_progress", False),
             patch("llm_router.benchmarks._refresh_lock", threading.Lock()),
-            patch("llm_router.benchmark_fetcher.generate_benchmarks_json"),
+            patch("llm_router.benchmark_fetcher.fetch_pinned_catalog"),
         ):
             result = maybe_refresh_benchmarks_background(ttl_days=7)
         # Should attempt to start (file is missing = stale)
@@ -231,7 +231,7 @@ class TestMaybeRefreshBenchmarks:
             patch("llm_router.benchmarks._installed", lambda: benchmarks_file),
             patch("llm_router.benchmarks._refresh_in_progress", False),
             patch("llm_router.benchmarks._refresh_lock", original_lock),
-            patch("llm_router.benchmark_fetcher.generate_benchmarks_json", side_effect=swap_global_lock),
+            patch("llm_router.benchmark_fetcher.fetch_pinned_catalog", side_effect=swap_global_lock),
             patch("llm_router.benchmarks.threading.Thread", ImmediateThread),
         ):
             result = maybe_refresh_benchmarks_background(ttl_days=7)

@@ -1,0 +1,10 @@
+{
+  "benchmarks": {
+    "tag": "v15.4.0",
+    "sha256": "e0197cc7b449c0f835636f26aff280cecdef7641c5f677bdca701e0d2d826b41"
+  },
+  "community_profile": {
+    "url": "https://raw.githubusercontent.com/ypollak2/llm_router-profiles/main/community.json",
+    "sha256": null
+  }
+}

@@ -452,6 +452,11 @@ class ClassifyPolicy:
     query_moderate_min: int = 400  # query: len > this → moderate, else simple
     low_signal_default: str = "query"  # task_type when no category scores confidently
     apply_floor: bool = True  # clamp complexity up to the task-type floor (anti-under-routing)
+    # PLAN v16 P1.6 / D-69: keyword + length complexity (ENGINE_POLICY). A reasoning trigger
+    # (reason_gate) is deep_reasoning; a complex keyword in a prompt of at least
+    # ``keyword_min_len`` chars is complex; otherwise the length bands decide.
+    engine_keywords: bool = False
+    keyword_min_len: int = 40
 
 
 # The module default: keyword-aware, >500 -> complex, query-aware, WITH the
@@ -488,6 +493,28 @@ ROUTER_POLICY = ClassifyPolicy(
     task_aware_query=False,
 )
 
+# Complex-keyword signals the three scorers used before the engine, unioned for ENGINE_POLICY.
+# Each is verbatim from its source at da31df7e; the thresholds are tuned in engine.py's header.
+#   hook / HOOK_LIVE_POLICY ........ _COMPLEXITY_COMPLEX above (classify.py)
+#   agent-route.py _COMPLEX_SIGNALS  (the keyword table `_classify_complexity` used)
+#   gemini-cli-auto-route.py ....... `complex_patterns` in classify_complexity
+_ENGINE_AGENT_ROUTE_COMPLEX = re.compile(
+    r"\b(?:comprehensive|complete|full|entire|end-to-end|thorough|in-depth|"
+    r"detailed|deep dive|all (?:aspects?|parts?|components?|modules?|files?)|"
+    r"across (?:the )?(?:codebase|repo|project|all)|"
+    r"architecture|system design|multiple|several|various|every|"
+    r"production|scalable|critical|security|performance)\b",
+    re.IGNORECASE,
+)
+_ENGINE_GEMINI_COMPLEX = re.compile(
+    r"debug|refactor|implement|design|architecture|optimize|analyze", re.IGNORECASE)
+
+
+def _engine_keyword_complex(text: str) -> bool:
+    return bool(_COMPLEXITY_COMPLEX.search(text) or _ENGINE_AGENT_ROUTE_COMPLEX.search(text)
+                or _ENGINE_GEMINI_COMPLEX.search(text))
+
+
 # Gateway (external side door): pure length, <=400 simple / (400,2000] moderate /
 # >2000 complex; low-signal prompts default to analyze (its historical default).
 GATEWAY_POLICY = ClassifyPolicy(
@@ -501,6 +528,15 @@ GATEWAY_POLICY = ClassifyPolicy(
 
 
 def _base_complexity(text: str, task_type: str, policy: ClassifyPolicy) -> Complexity:
+    if policy.engine_keywords:
+        from llm_router.reason_gate import needs_reasoning
+
+        n = len(text)
+        if needs_reasoning(text):
+            return Complexity.DEEP_REASONING
+        if (n >= policy.keyword_min_len and _engine_keyword_complex(text)) or n > policy.complex_min:
+            return Complexity.COMPLEX
+        return Complexity.SIMPLE if n <= policy.simple_max else Complexity.MODERATE
     if policy.keyword_complexity:
         # Calibrated reason-gate replaces the bare `_COMPLEXITY_DEEP.search`.
         # It uses that same regex as one feature (deep-keyword hit is sufficient

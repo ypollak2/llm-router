@@ -209,7 +209,7 @@ def test_only_reason_codes_and_counts_are_written(tmp_path):
     ns.record_verify(a["unit_id"], res)
     text = p.read_text()
     last = json.loads(text.splitlines()[-1])
-    assert set(last) == {"unit_id", "verify"}
+    assert set(last) == {"unit_id", "verify", "task_id", "trace_id"}   # P1.10: ids only, no text
     assert set(last["verify"]) == {"verify_level", "verify_status", "verify_reason",
                                    "verify_n_candidates", "verify_n_f2p", "verify_ms",
                                    "verify_sandboxed", "verify_flags"}

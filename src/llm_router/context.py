@@ -610,6 +610,8 @@ async def build_context_messages(
     project_id: str | None = None,
     target_provider: str | None = None,
     project_root: str | None = None,
+    query: str | None = None,
+    include_current_session: bool = True,
 ) -> list[dict[str, str]]:
     """Assemble context messages for injection into LLM calls.
 
@@ -627,6 +629,9 @@ async def build_context_messages(
 
     Args:
         caller_context: Optional explicit context from the MCP tool caller.
+        query: Retrieval query; None preserves caller_context as the query.
+        include_current_session: False skips layers 2a and 2b, retaining
+            previous-session summaries and explicit caller context.
         max_session_messages: How many recent session messages to include.
         max_previous_sessions: How many past session summaries to load.
         max_context_tokens: Token budget for all context combined.
@@ -682,12 +687,13 @@ async def build_context_messages(
     # added to a second allowlist. NOTE: `local` mode governs history/context
     # attachment only — it does not change routing destination (whether the
     # current prompt goes external is decided by the routing chain).
-    _FREE_LOCAL_PROVIDERS = ("ollama", "codex", "gemini_cli")
     try:
         from llm_router import session_store
+        _FREE_LOCAL_PROVIDERS = session_store.LOCAL_PROVIDERS  # D-91: one privacy list
         privacy_mode = session_store.get_mode()
     except Exception:
         privacy_mode = "all"
+        _FREE_LOCAL_PROVIDERS = ()
     _blocks_external = (
         privacy_mode == "local" and target_provider not in _FREE_LOCAL_PROVIDERS
     )
@@ -706,7 +712,7 @@ async def build_context_messages(
     # Layer 2: Current session messages. Same privacy gate as layer 1 — the
     # in-process buffer is verbatim session content and must not leak to
     # external paid APIs under 'local', nor be sent at all under 'off'.
-    if not _context_suppressed:
+    if include_current_session and not _context_suppressed:
         buf = get_session_buffer(_ctx_project_id, _resolved_session_id)
         current_context = buf.format_for_injection(n=max_session_messages)
         if current_context:
@@ -723,7 +729,7 @@ async def build_context_messages(
         from llm_router import session_store
         from llm_router.config import get_config
 
-        if _resolved_session_id:
+        if include_current_session and not _context_suppressed and _resolved_session_id:
             try:
                 mcp_budget = get_config().session_context_max_tokens_mcp
             except Exception:
@@ -731,7 +737,7 @@ async def build_context_messages(
             durable_context = session_store.build_session_context(
                 _resolved_session_id,
                 max_tokens=mcp_budget,
-                query=caller_context,
+                query=query if query is not None else caller_context,
                 target_provider=target_provider,
                 # The caller's project, not this process's cwd. For the MCP
                 # server those differ and the cwd one is always wrong.

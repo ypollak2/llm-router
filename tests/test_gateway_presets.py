@@ -112,7 +112,9 @@ def test_responses_input_shapes_route_through_route_payload(monkeypatch):
     # the user text.
     assert calls[0]["system"] == "be terse"
     assert "be terse" not in calls[0]["prompt"]
-    assert "user: hello" in calls[0]["prompt"]
+    # P1.1 door 7: the trailing user turn is the request, sent verbatim.
+    assert calls[0]["prompt"] == "hello"
+    assert calls[0]["messages"] == []
 
 
 def test_route_endpoint_missing_prompt_is_400(monkeypatch):

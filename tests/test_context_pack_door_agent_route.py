@@ -1,0 +1,216 @@
+"""P1.1 door 5: hooks/agent-route.py DIRECT sub-agent runs build context via build_pack.
+
+The door name is "agent": it is the sub-agent member of context_pack.DOORS
+("agent_route" is not a member and build_pack raises on it).
+"""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+import pytest
+
+import llm_router.context_pack as cp
+import llm_router.hooks.chain_builder as cb
+import llm_router.hooks.direct_executor as de
+
+HOOK = Path(__file__).resolve().parent.parent / "hooks" / "agent-route.py"
+
+
+@pytest.fixture(autouse=True)
+def _home(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "lr"))
+
+
+def _hook():
+    spec = importlib.util.spec_from_file_location("agent_route_hook_p11", HOOK)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture
+def rig(monkeypatch):
+    seen = {"packs": [], "exec": []}
+    spec = de.ModelSpec("ollama", "fake")
+
+    def _exec(prompt, chain, *a, **k):
+        seen["exec"].append((prompt, k))
+        return de.DirectResult(text="routed", model=spec, latency_ms=1,
+                               input_tokens=1, output_tokens=1)
+
+    monkeypatch.setattr(cb, "build_chain", lambda *a, **k: [spec])
+    monkeypatch.setattr(cb, "get_current_pressure", lambda: ("green", 0.0))
+    monkeypatch.setattr(cb, "needs_claude_tools", lambda *a, **k: False)
+    monkeypatch.setattr(de, "execute_chain", _exec)
+    monkeypatch.setattr(de, "execute_agent", _exec)
+    real = cp.build_pack
+
+    def _spy(*a, **k):
+        seen["packs"].append((a, k))
+        return real(*a, **k)
+
+    monkeypatch.setattr(cp, "build_pack", _spy)
+    return seen
+
+
+def test_direct_run_builds_pack_once_with_agent_door(monkeypatch, rig):
+    monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")
+    assert _hook()._try_direct_subagent("implement foo", "code", "simple", "s1") == "routed"
+    assert len(rig["packs"]) == 1
+    assert rig["packs"][0][1]["door"] == "agent"
+    assert len(rig["exec"]) == 1
+
+
+def test_direct_off_builds_no_pack(monkeypatch, rig):
+    monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "off")
+    assert _hook()._try_direct_subagent("implement foo", "code", "simple", "s1") is None
+    monkeypatch.delenv("LLM_ROUTER_SUBAGENT_DIRECT")
+    assert _hook()._try_direct_subagent("implement foo", "code", "simple", "s1") is None
+    assert rig["packs"] == [] and rig["exec"] == []
+
+
+def test_request_untruncated(monkeypatch, rig):
+    monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")
+    big = "implement " + ("x" * 200_000) + " END"
+    assert _hook()._try_direct_subagent(big, "code", "simple", "s1") == "routed"
+    assert rig["exec"][0][0] == big
+
+
+def test_transcript_conversation_reaches_the_model(monkeypatch, rig, tmp_path):
+    monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")
+    t = tmp_path / "t.jsonl"
+    t.write_text(
+        '{"type":"user","message":{"role":"user","content":"earlier question"}}\n'
+        '{"type":"assistant","message":{"role":"assistant","content":"earlier answer"}}\n')
+    _hook()._try_direct_subagent("implement foo", "code", "simple", "s1",
+                                 transcript_path=str(t))
+    prompt, kw = rig["exec"][0]
+    assert prompt == "implement foo"
+    blob = repr(kw.get("history")) + repr(kw.get("context"))
+    assert "earlier question" in blob and "earlier answer" in blob
+
+
+def test_pack_error_fails_open(monkeypatch, rig):
+    monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")
+
+    def _boom(*a, **k):
+        raise RuntimeError("pack down")
+
+    monkeypatch.setattr(cp, "build_pack", _boom)
+    assert _hook()._try_direct_subagent("implement foo", "code", "simple", "s1") == "routed"
+    prompt, kw = rig["exec"][0]
+    assert prompt == "implement foo"
+    assert not kw.get("history") and not kw.get("context")
+
+
+# ── privacy gate (D-43) and single injection ────────────────────────────────
+
+MARK = "PRIVATE-TRANSCRIPT-MARKER"
+
+
+def _transcript(tmp_path):
+    t = tmp_path / "t.jsonl"
+    t.write_text(
+        f'{{"type":"user","message":{{"role":"user","content":"{MARK} q"}}}}\n'
+        f'{{"type":"assistant","message":{{"role":"assistant","content":"{MARK} a"}}}}\n')
+    return str(t)
+
+
+def _mixed(monkeypatch, mode):
+    monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", mode)
+    monkeypatch.setattr(cb, "build_chain", lambda *a, **k: [
+        de.ModelSpec("ollama", "fake"), de.ModelSpec("gemini", "fake")])
+
+
+def _leaked(rig):
+    _, kw = rig["exec"][0]
+    return MARK in repr(kw.get("history")) + repr(kw.get("context"))
+
+
+def test_local_mode_mixed_chain_withholds_session_content(monkeypatch, rig, tmp_path):
+    _mixed(monkeypatch, "local")
+    _hook()._try_direct_subagent("implement foo", "code", "simple", "s1",
+                                 transcript_path=_transcript(tmp_path))
+    assert len(rig["exec"]) == 1 and not _leaked(rig)
+
+
+def test_all_mode_mixed_chain_sends_session_content(monkeypatch, rig, tmp_path):
+    _mixed(monkeypatch, "all")
+    _hook()._try_direct_subagent("implement foo", "code", "simple", "s1",
+                                 transcript_path=_transcript(tmp_path))
+    assert _leaked(rig)
+
+
+def test_local_mode_all_local_chain_keeps_session_content(monkeypatch, rig, tmp_path):
+    monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "local")
+    _hook()._try_direct_subagent("implement foo", "code", "simple", "s1",
+                                 transcript_path=_transcript(tmp_path))
+    assert _leaked(rig)
+
+
+def test_local_mode_ollama_codex_chain_withholds_session_content(monkeypatch, rig, tmp_path):
+    # D-91: codex is cloud; an ollama+codex chain must not get content in "local".
+    monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "local")
+    monkeypatch.setattr(cb, "build_chain", lambda *a, **k: [
+        de.ModelSpec("ollama", "fake"), de.ModelSpec("codex", "fake")])
+    _hook()._try_direct_subagent("implement foo", "code", "simple", "s1",
+                                 transcript_path=_transcript(tmp_path))
+    assert len(rig["exec"]) == 1 and not _leaked(rig)
+
+
+def test_all_mode_ollama_codex_chain_sends_session_content(monkeypatch, rig, tmp_path):
+    monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "all")
+    monkeypatch.setattr(cb, "build_chain", lambda *a, **k: [
+        de.ModelSpec("ollama", "fake"), de.ModelSpec("codex", "fake")])
+    _hook()._try_direct_subagent("implement foo", "code", "simple", "s1",
+                                 transcript_path=_transcript(tmp_path))
+    assert _leaked(rig)
+
+
+def test_local_mode_ollama_gemini_cli_chain_withholds_session_content(monkeypatch, rig, tmp_path):
+    # D-95: gemini_cli is cloud; withheld in "local", sent in "all".
+    for mode, leaks in (("local", False), ("all", True)):
+        rig["exec"].clear()
+        monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")
+        monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", mode)
+        monkeypatch.setattr(cb, "build_chain", lambda *a, **k: [
+            de.ModelSpec("ollama", "fake"), de.ModelSpec("gemini_cli", "fake")])
+        _hook()._try_direct_subagent("implement foo", "code", "simple", "s1",
+                                     transcript_path=_transcript(tmp_path))
+        assert len(rig["exec"]) == 1 and _leaked(rig) is leaks
+
+
+def test_inject_once_per_direct_run(monkeypatch, tmp_path):
+    import llm_router.context_injection as ci
+    calls = []
+
+    def _inject(request, **k):
+        calls.append(k.get("root"))
+        return "KNOWLEDGE\n\n" + request
+
+    spec = de.ModelSpec("gemini", "fake")
+    seen = []
+    monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")
+    monkeypatch.setattr(ci, "inject", _inject)
+    monkeypatch.setattr(cb, "build_chain", lambda *a, **k: [spec])
+    monkeypatch.setattr(cb, "get_current_pressure", lambda: ("green", 0.0))
+    monkeypatch.setattr(cb, "needs_claude_tools", lambda *a, **k: False)
+    monkeypatch.setattr(de, "_paid_budget_exhausted", lambda p: False)
+    monkeypatch.setattr(de, "_provider_reset_blocked", lambda p: False)
+    monkeypatch.setattr(de, "_okf_enrich", lambda *a, **k: None)
+    monkeypatch.setitem(de._PROVIDER_CALLS, "gemini",
+                        lambda prompt, m, t, h, s: (seen.append((prompt, s)) or "ok " * 30,
+                                                    {"input_tokens": 1, "output_tokens": 1}))
+    root = tmp_path / "proj"
+    root.mkdir()
+    out = _hook()._try_direct_subagent("implement foo", "code", "simple", "s1",
+                                       project_root=str(root))
+    assert out and len(calls) == 1
+    assert "KNOWLEDGE" in seen[0][1] and "KNOWLEDGE" not in seen[0][0]

@@ -52,7 +52,7 @@ CATEGORIES = frozenset(
 
 #: name -> (category, first_module_that_reads_it, module_count_at_registration)
 ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
-    # ── llm_router  (153) ──
+    # ── llm_router  (154) ──
     "LLM_ROUTER_ADMIN_ACTIONS_PATH": ("llm_router", "admin_actions.py", 1),
     "LLM_ROUTER_AGENTIC_MODEL": ("llm_router", "hooks/agent-route.py", 1),
     "LLM_ROUTER_AGENTS_CONFIG": ("llm_router", "tools/agents.py", 1),
@@ -204,6 +204,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PROXY_STEP_BUDGET_S": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_MODEL": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_TRIM": ("llm_router", "proxy/server.py", 1),
+    "LLM_ROUTER_PROXY_FULL_CAP": ("llm_router", "proxy/backends.py", 1),
     "LLM_ROUTER_PROXY_NUM_CTX": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_UPSTREAM": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_PORT": ("llm_router", "proxy/server.py", 1),
@@ -226,6 +227,12 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_HAIKU_GUARD_SHADOW_VERDICTS": ("llm_router", "proxy/haiku_guard.py", 1),
     # GE4 (PLAN v16, OD-4): the Frontier shadow switch, off unless on/1/true/yes (shadow_frontier.py).
     "LLM_ROUTER_SHADOW_FRONTIER": ("llm_router", "shadow_frontier.py", 1),
+    # P1.7 decision ledger: kill switch (default on); shadow FLAG on ledger rows (off | on; on also
+    # needs a passing P1.7-c gate file; it does NOT govern LLM_ROUTER_LOCAL_CLASSIFIER, the older
+    # classifier shadow); and the flag's sampling rate (clamped to 5-10%).
+    "LLM_ROUTER_DECISION_LEDGER": ("llm_router", "decision_ledger.py", 1),
+    "LLM_ROUTER_DECISION_SHADOW": ("llm_router", "decision_ledger.py", 1),
+    "LLM_ROUTER_DECISION_SHADOW_RATE": ("llm_router", "decision_ledger.py", 1),
     # Kill switch for the tier decision's quota-pressure step (off/0/false/no).
     "LLM_ROUTER_PROXY_QUOTA_PRESSURE": ("llm_router", "proxy/quota_pressure.py", 1),
     # Escalation signals (proxy/escalation.py): the correction-signal
@@ -278,6 +285,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_SUMMARY_EVERY": ("llm_router", "context_summary.py", 1),
     "LLM_ROUTER_SUMMARY_MODEL": ("llm_router", "context_summary.py", 1),
     "LLM_ROUTER_OKF": ("llm_router", "okf.py", 1),
+    "LLM_ROUTER_OKF_BUDGET": ("llm_router", "okf.py", 1),
     "LLM_ROUTER_OKF_MIN_SCORE": ("llm_router", "okf.py", 1),
     "LLM_ROUTER_OLLAMA_MODEL": ("llm_router", "model_discovery.py", 1),
     "LLM_ROUTER_PROMOTE_GATE": ("llm_router", "model_discovery.py", 1),
@@ -321,6 +329,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_QUOTA_RETRY": ("llm_router", "quota_tracker.py", 1),
     "LLM_ROUTER_QUOTA_MAX_AGE": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_QUOTA_TTL": ("llm_router", "hooks/auto-route.py", 2),
+    "LLM_ROUTER_NO_DETACHED_SPAWN": ("llm_router", "hooks/auto-route.py", 1),
     # Verifier PR C (SHADOW): kill switch for patch capture + worker spawn, and the per-unit
     # verify budget (default 120 s, capped at 300 s).
     "LLM_ROUTER_VERIFY": ("llm_router", "verify_queue.py", 1),
@@ -341,6 +350,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_SEMANTIC_CLASSIFIER_BACKEND": ("llm_router", "semantic_classify.py", 1),
     "LLM_ROUTER_SEMANTIC_HISTORY": ("llm_router", "semantic/modes.py", 1),
     "LLM_ROUTER_SEMANTIC_INTERVENTION": ("llm_router", "semantic/modes.py", 1),
+    "LLM_ROUTER_SEMANTIC_REFRESH": ("llm_router", "semantic/refresh.py", 1),
+    "LLM_ROUTER_SEMANTIC_REFRESH_EVERY": ("llm_router", "semantic/refresh.py", 1),
     "LLM_ROUTER_SEMANTIC_SOURCE": ("llm_router", "semantic/modes.py", 1),
     "LLM_ROUTER_SEMANTIC_ST_MODEL": ("llm_router", "semantic_classify.py", 1),
     "LLM_ROUTER_SERVICE_PORT": ("llm_router", "hook_client.py", 3),
@@ -401,6 +412,14 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_LOCAL_KEEP_ALIVE": ("llm_router", "warm.py", 1),
     # P2 local-usage plan: shadow-only would-be "local" tier (log only, never routes).
     "LLM_ROUTER_LOCAL_TIER": ("llm_router", "local_tier.py", 1),
+    # P1.6 engine core: decide() cache mode sqlite|memory|off (default sqlite), and the L3 / calibration
+    # artifact path overrides (default $LLM_ROUTER_HOME/engine_lexical.json, engine_calibration.json).
+    "LLM_ROUTER_DECIDE_CACHE": ("llm_router", "engine.py", 1),
+    "LLM_ROUTER_ENGINE_ABSTAIN": ("llm_router", "engine.py", 1),
+    # P1.6 wiring mode (D-72): shadow (default) | decide | off. decide is opt-in; P1.6-g FAILed.
+    "LLM_ROUTER_ENGINE_MODE": ("llm_router", "engine.py", 1),
+    "LLM_ROUTER_ENGINE_LEXICAL": ("llm_router", "engine.py", 1),
+    "LLM_ROUTER_ENGINE_CALIBRATION": ("llm_router", "engine.py", 1),
     # LOCAL-TIMEOUT-1: seconds a local model that just timed out stays at the back of the chain (0 = off).
     "LLM_ROUTER_LOCAL_TIMEOUT_COOLDOWN_S": ("llm_router", "router.py", 1),
     # Local Ollama classifier (one v6 verdict per human turn): off|shadow|on, default off.

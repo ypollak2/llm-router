@@ -194,7 +194,11 @@ def test_the_broader_inheritance_count_is_recorded():
     # llm_router/statusline_tick.py Popen-s the fixed refresher argv (`llm-router
     # statusline --refresh`, or the operator's own LLM_ROUTER_STATUSLINE_REFRESH_CMD);
     # not model- or caller-supplied. POSIX uses fork + execv.
-    assert len(inheriting) <= 60, (
+    # 60 -> 61 (P1.8 task 8 re-discovery): `map_rediscovery._default_spawner` Popen-s
+    # the fixed argv `<sys.executable> -m llm_router.map_rediscovery --once`; not model-
+    # or caller-supplied. It must inherit: the child discovers API keys from the
+    # environment, and a scrubbed env would report every key as removed.
+    assert len(inheriting) <= 61, (
         f"{len(inheriting)} subprocess sites inherit the environment, up from "
         "51. If a new one runs caller-supplied argv, add it to "
         "MODEL_ARGV_SITES; if not, raise this number deliberately."

@@ -310,7 +310,8 @@ def _alarm(seconds: float):
 def _settle(m: Q.Marker, result, record) -> None:
     """Record the verdict, then delete the marker and its patch (the patch is the user's source)."""
     try:
-        record(m.unit_id, result)
+        ids = {k: m.data[k] for k in ("task_id", "trace_id") if isinstance(m.data.get(k), str)}
+        record(m.unit_id, result, **ids)  # P1.10: the dispatching call's ids, from the marker
     finally:
         Q.discard(m)
 

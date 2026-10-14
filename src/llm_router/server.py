@@ -479,6 +479,16 @@ def _startup_verify_or_die() -> None:
     sys.exit(1)
 
 
+def _start_map_poller() -> None:
+    # Poller starts only in real long-running entry points, never on import.
+    # Off switch: LLM_ROUTER_MAP_REDISCOVERY=0.
+    try:
+        from llm_router.map_rediscovery import maybe_start_poller
+        maybe_start_poller()
+    except Exception:
+        pass
+
+
 def main():
     """Start the MCP server (stdio transport by default)."""
     # Entered directly (`python -m llm_router.server`) this bypasses cli.main();
@@ -499,6 +509,7 @@ def main():
         print_startup_summary()
     except Exception:
         pass
+    _start_map_poller()
     mcp.run()
 
 
@@ -553,6 +564,7 @@ def main_sse(port: int | None = None) -> None:
     starlette_app = mcp.sse_app()
     config = uvicorn.Config(starlette_app, host=host, port=port, log_level="info")
     server = uvicorn.Server(config)
+    _start_map_poller()
     anyio.run(server.serve)
 
 
@@ -715,6 +727,7 @@ def main_sse_secured(
         starlette_app, host=host, port=port, log_level="info",
     )
     server = uvicorn.Server(config)
+    _start_map_poller()
     anyio.run(server.serve)
 
 

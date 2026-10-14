@@ -232,7 +232,8 @@ def test_patch_handles_new_and_deleted_files(iso):
 def test_old_ledger_db_is_migrated_with_null_verify_and_used(tmp_path):
     from llm_router import execution_ledger as L
     db = tmp_path / "usage.db"
-    legacy_ddl = L._DDL.replace("adoption_method TEXT,\n    verify TEXT,\n    used INTEGER\n",
+    legacy_ddl = L._DDL.replace("adoption_method TEXT,\n    verify TEXT,\n    used INTEGER,\n"
+                                "    task_id TEXT,\n    trace_id TEXT\n",
                                 "adoption_method TEXT\n")
     assert legacy_ddl != L._DDL
     raw = sqlite3.connect(str(db))

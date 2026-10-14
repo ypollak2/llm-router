@@ -1,5 +1,6 @@
 """Shared pytest fixtures for all llm_router tests."""
 
+import sys
 import json
 import os
 import re
@@ -26,6 +27,11 @@ _RUN_PERF = os.environ.get("LLM_ROUTER_RUN_PERF") == "1"
 for _k in [k for k in os.environ if k.startswith("LLM_ROUTER_")]:
     del os.environ[_k]
 os.environ["LLM_ROUTER_HOME"] = _tempfile.mkdtemp(prefix="llm_router-suite-home-")
+# Importing llm_router.server starts the map re-discovery poller thread (30 s tick, probes
+# Ollama on 127.0.0.1:11434). Left on, it outlives its test and fires inside whichever test
+# runs next in the worker: it made test_synthetic_replay fail on CI only (violations
+# 127.0.0.1:11434 and ::1:11434). Tests of the poller start their own and need no switch.
+os.environ["LLM_ROUTER_MAP_REDISCOVERY"] = "off"
 
 # 2026-10-06: the operator's live usage.db held 294 fixture rows written that day
 # (see tests/_real_home_guard.py). LLM_ROUTER_HOME alone is advisory: code that
@@ -137,6 +143,24 @@ def _real_home_untouched():
     yield
     new = _real_home_guard.VIOLATIONS[before:]
     assert not new, f"test touched the operator's real state: {new}"
+
+
+@pytest.fixture(autouse=True)
+def _drain_engine_shadow():
+    """Let queued engine-shadow work finish while this test's HOME is still in place.
+
+    The shadow worker (engine.shadow(background=True)) runs on a thread; work it left queued
+    used to run after HOME was restored and write the real ~/.llm-router (main CI 70847288).
+    Defined after _isolate_user_home and _real_home_untouched, so it tears down before both:
+    the drain happens before HOME unwinds and before the real-state check. Only drains when
+    the engine module was imported by this test run (no import cost elsewhere)."""
+    yield
+    eng = sys.modules.get("llm_router.engine")
+    if eng is not None and getattr(eng, "_pending", 0):
+        try:
+            eng.shadow_drain(timeout=10)
+        except Exception:  # noqa: BLE001 — a test that patched the clock; the real-state guard still runs
+            pass
 
 
 # ── Config-singleton isolation (CHZ-AUD-001) ────────────────────────────────
