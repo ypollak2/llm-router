@@ -5515,6 +5515,9 @@ def _walk_text(value, fn, *, payload: bool = False):
         for k, v in value.items():
             if payload or k in _PAYLOAD_KEYS:
                 out[k] = _walk_text(v, fn, payload=True)
+            elif k in ("content", "output") and isinstance(v, dict):
+                # A dict tool result is sent json-dumped (context_pack._as_text).
+                out[k] = _walk_text(v, fn, payload=True)
             elif k in _TEXT_KEYS:
                 out[k] = _walk_text(v, fn)
             else:

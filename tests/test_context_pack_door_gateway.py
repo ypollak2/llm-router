@@ -544,3 +544,19 @@ def test_every_string_inside_a_tool_input_is_redacted(monkeypatch):
     redacted, counts = router._redact_messages(history)
     assert "SECRET" not in repr(redacted) and counts == {"k": 4}
     assert redacted[0]["content"][0]["name"] == "set" and redacted[1]["tool_calls"][0]["id"] == "c"
+
+
+def test_a_dict_tool_result_is_redacted_and_counted(monkeypatch):
+    monkeypatch.setattr(router, "_maybe_redact",
+                        lambda t: (t.replace("SECRET", "[R]"), {"k": 1} if "SECRET" in t else {}))
+    history = [
+        {"role": "tool", "tool_call_id": "c", "content": {"result": "SECRET"}},
+        {"type": "function_call_output", "call_id": "r", "output": {"id": "SECRET"}},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t",
+                                      "content": {"rows": ["SECRET"]}}]},
+    ]
+    redacted, counts = router._redact_messages(history)
+    assert "SECRET" not in repr(redacted) and counts == {"k": 3}
+    assert router._messages_chars(history) == 18
+    rendered = [context_pack.render_message(m) for m in redacted]
+    assert all("SECRET" not in r for r in rendered) and "[R]" in rendered[0]
