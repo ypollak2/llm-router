@@ -13,8 +13,9 @@ Shape:
   (``statusline_tick._spawn_detached``: fork + execv, nothing waits on it).
 * :func:`maybe_update` (worker side) parses the transcript, decides whether a summary
   is due, and writes a row to ``rolling_summaries``.
-* :func:`load_summary` is what ``context_pack.build_pack`` will call. This module
-  does not import ``context_pack``; there is no dependency on PR #392.
+* :func:`load_summary` is what ``context_pack.build_pack`` calls (pack mode, the
+  hook / agent / mcp doors, only while this feature is on). This module does not
+  import ``context_pack``.
 
 Cadence: due when more than ``RECENT_WINDOW`` (7) messages are unsummarised, or
 ``LLM_ROUTER_SUMMARY_EVERY`` (default 4) human turns have passed. The summary covers

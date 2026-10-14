@@ -59,7 +59,7 @@ def test_golden_recent_is_last_seven_verbatim_with_tool_blocks():
         {"role": "user", "content": "[tool_result (error)] synthetic error 28\n[image]"},
     ]
     assert pack.request == REQUEST
-    assert pack.summary is None  # P1.2 not built
+    assert pack.summary is None  # P1.2 rolling summary is opt-in, off here
 
 
 def test_trailing_copy_of_the_request_is_dropped():
