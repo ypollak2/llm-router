@@ -610,45 +610,69 @@ def _session_content_allowed(target_provider: str) -> bool:
         return False  # privacy gate: an unreadable rule withholds, never leaks
 
 
-def _summary(door: str, session_id: str | None) -> str | None:
+def _summary(door: str, session_id: str | None,
+             transcript_path: str | None = None) -> str | None:
     """The stored P1.2 rolling summary for this session, or None.
 
     Opt-in: with ``LLM_ROUTER_ROLLING_SUMMARY`` off this reads one environment
-    variable and nothing else. It never creates ``sessions.db`` (``load_summary``
-    would). Text over ``SUMMARY_MAX_TOKENS`` keeps its head on whole lines.
-    Fail-open: any error is no summary.
+    variable and imports nothing. The session is the explicit ``session_id``,
+    else the transcript's file stem (the id the Stop hook stores it under), else,
+    at the mcp door only, the calling session. Read-only
+    (``context_summary.read_summary_text``): it never creates ``sessions.db``.
+    Layer tags inside the text are neutralised so they cannot close the
+    summary's own layer. Fail-open: any error is no summary.
     """
     if door not in SUMMARY_DOORS:
+        return None
+    if os.environ.get("LLM_ROUTER_ROLLING_SUMMARY", "").strip().lower() not in (
+            "1", "true", "on", "yes"):
         return None
     try:
         from llm_router import context_summary
         from llm_router.call_identity import clean_id
 
-        if not context_summary.enabled():
-            return None
+        if session_id is None and transcript_path:
+            session_id = Path(transcript_path).stem
         if session_id is None and door == "mcp":
             from llm_router.call_identity import call_session_id
             session_id = call_session_id()
         sid = clean_id(session_id)
-        path = context_summary.db_path()
-        if not sid or not path.is_file():
+        if not sid:
             return None
-        row = context_summary.load_summary(sid, path)
-        text = str((row or {}).get("text") or "").strip()
-        if estimate_tokens(text) > SUMMARY_MAX_TOKENS:
-            kept: list[str] = []
-            used = 0
-            for line in text.splitlines():
-                cost = len(line) + 1
-                if (used + cost) // 4 > SUMMARY_MAX_TOKENS:
-                    break
-                kept.append(line)
-                used += cost
-            # One line longer than the cap (a host compaction summary) is cut, not dropped.
-            text = "\n".join(kept).strip() or text[: SUMMARY_MAX_TOKENS * 4]
-        return text or None
+        text = (context_summary.read_summary_text(sid) or "").strip()
+        for tag in context_tags.TAGS.values():
+            text = text.replace(f"</{tag}", f"‹/{tag}").replace(f"<{tag}", f"‹{tag}")
+        return _fit_summary(text, SUMMARY_MAX_TOKENS)
     except Exception:                                        # noqa: BLE001
         return None
+
+
+def _fit_summary(text: str, max_tokens: int) -> str | None:
+    """``text`` within ``max_tokens``, or None when nothing fits.
+
+    Over the budget it first keeps only the sections ``pack_overflow`` never
+    trims (Goal, Current state), so the newest state survives; then whole lines
+    from the head, the first line that does not fit cut to the remaining room.
+    """
+    if not text or max_tokens <= 0:
+        return None
+    if estimate_tokens(text) <= max_tokens:
+        return text
+    from llm_router.pack_overflow import _shrink_summary
+
+    text = _shrink_summary(text) or text
+    kept: list[str] = []
+    used = 0
+    for line in text.splitlines():
+        cost = len(line) + 1
+        if (used + cost) // 4 > max_tokens:
+            room = max_tokens * 4 - used - 1
+            if room > 0:
+                kept.append(line[:room])
+            break
+        kept.append(line)
+        used += cost
+    return "\n".join(kept).strip() or None
 
 
 def _check_door(door: str) -> None:
@@ -720,7 +744,14 @@ def build_pack(request: str, messages: list | None = None, *,
 
     # The summary stands in for the turns before ``recent``; a full pack already
     # carries them all. It is session content, so the privacy gate applies.
-    summary = _summary(door, session_id) if mode == "pack" and content_allowed else None
+    summary = (_summary(door, session_id, transcript_path)
+               if mode == "pack" and content_allowed else None)
+    if summary and window > 0:
+        # The summary gets only what the window has left after everything else,
+        # on the same 0.8 x window budget as full mode.
+        used = estimate_tokens(request) + sum(estimate_tokens(m["content"]) for m in recent)
+        used += sum(estimate_tokens(x) for x in (instructions, project) if x)
+        summary = _fit_summary(summary, window * 4 // 5 - used)
     pack = ContextPack(
         request=request, recent=recent, summary=summary, project=project,
         instructions=instructions, mode=mode,
