@@ -137,7 +137,7 @@ def test_recommend_fit_and_limit(limit: int, expected: int) -> None:
     assert len(results) == expected
     models = {model["name"]: model for model in catalog["models"]}
     for result in results:
-        assert min(models[result.name]["mem_gb_by_ctx"].values()) <= 8
+        assert max(models[result.name]["mem_gb_by_ctx"].values()) <= 8
         assert result.name != "qwen2.5-coder:14b"
         assert "\n" not in result.reason
         assert "\r" not in result.reason
@@ -266,10 +266,18 @@ def test_languages_only_change_reason_text() -> None:
         assert he_result.reason == en_result.reason + "; Hebrew is unmeasured"
 
 
-def test_memory_minimum_and_size_fallback() -> None:
+def test_memory_at_the_largest_context_and_size_fallback() -> None:
+    # Fit is judged at the largest listed context, not the smallest: the router
+    # asks for a large window, so a model that fits only at 4k would swap.
     catalog = {"models": [
         {"name": "a", "runtime": "ollama", "size_gb": 2,
          "mem_gb_by_ctx": {"8192": 9, "4096": 3}, "quality": {}},
         {"name": "b", "runtime": "ollama", "size_gb": 4, "quality": {}},
     ]}
-    assert {r.name for r in mc.recommend({"usable_gb": 4}, catalog=catalog)} == {"a", "b"}
+    assert {r.name for r in mc.recommend({"usable_gb": 4}, catalog=catalog)} == {"b"}
+    assert {r.name for r in mc.recommend({"usable_gb": 9}, catalog=catalog)} == {"a", "b"}
+
+
+def test_14b_is_not_recommended_where_it_fits_only_at_4k() -> None:
+    names = {r.name for r in mc.recommend({"usable_gb": 10.2}, limit=3)}
+    assert "qwen2.5-coder:14b" not in names

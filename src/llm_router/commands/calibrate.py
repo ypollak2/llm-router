@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys
 
 _HELP = """usage: llm-router calibrate [--models a,b,*glob*] [--budget-s N] [--tokens N]
-                             [--allow-paid] [--yes] [--max-usd N] [--dry-run]
+                             [--allow-paid] [--yes] [--max-usd N] [--dry-run] [--fitness]
 
   --models      comma-separated model ids / substrings / globs (default: every local model)
   --budget-s    wall-clock budget for the whole run (default 300)
@@ -21,12 +21,15 @@ _HELP = """usage: llm-router calibrate [--models a,b,*glob*] [--budget-s N] [--t
                 would be probed
   --max-usd     refuse to start if the estimated metered cost exceeds N (default 1.00)
   --dry-run     print the plan and estimate, send nothing
+  --fitness     also run the six task-type fitness tasks on each local model and
+                record them in local_eligibility.json (inside the same budget)
 """
 
 
 def _parse(args: list[str]) -> dict | None:
     opts: dict = {"models": None, "budget_s": None, "tokens": None,
-                  "allow_paid": False, "dry_run": False, "yes": False, "max_usd": 1.0}
+                  "allow_paid": False, "dry_run": False, "yes": False, "max_usd": 1.0,
+                  "fitness": False}
     i = 0
     while i < len(args):
         a = args[i]
@@ -36,6 +39,8 @@ def _parse(args: list[str]) -> dict | None:
             opts["dry_run"] = True
         elif a == "--yes":
             opts["yes"] = True
+        elif a == "--fitness":
+            opts["fitness"] = True
         elif a in ("--models", "--budget-s", "--tokens", "--max-usd") and i + 1 < len(args):
             val = args[i + 1]
             i += 1
@@ -116,7 +121,7 @@ def cmd_calibrate(args: list[str]) -> int:
 
     report = cal.run_calibration(
         inv, patterns=opts["models"], allow_paid=opts["allow_paid"], budget_s=budget,
-        tokens=tokens, completer_for=completer_for,
+        tokens=tokens, completer_for=completer_for, fitness=opts["fitness"],
         on_start=lambda m: print(f"probing {m.id} ..."))
     if report.profiles:
         path = profile_mod.save_profiles(report.profiles)
@@ -126,6 +131,14 @@ def cmd_calibrate(args: list[str]) -> int:
             f"{n}={'?' if p.ok is None else ('pass' if p.ok else 'FAIL')}" for n, p in mp.probes.items())
         print(f"  {mid}: ceiling={mp.tier_ceiling or 'none'}  [{marks}]")
         print(f"      {mp.tier_detail}")
+    for mid, res in report.fitness.items():
+        done = {t: r.result for t, r in res.items() if r.n > 0}
+        if mid in report.fitness_errors:
+            print(f"  {mid}: fitness not recorded ({report.fitness_errors[mid]})")
+        elif done:
+            print(f"  {mid}: fitness " + " ".join(f"{t}={v}" for t, v in done.items()))
+        else:
+            print(f"  {mid}: fitness inconclusive, not recorded")
     for mid in report.unreachable:
         print(f"  {mid}: unreachable, not recorded (any earlier measurement is kept)")
     for mid in report.out_of_budget:

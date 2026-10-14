@@ -220,8 +220,10 @@ def recommend(
             continue
         memory = model.get("mem_gb_by_ctx", {})
         values = memory.values() if isinstance(memory, dict) else ()
+        # The largest listed context: the router asks Ollama for a 32k window by
+        # default, so the smallest listed estimate would recommend models that swap.
         estimates = [v for value in values if (v := _number(value)) is not None and v >= 0]
-        required = min(estimates) if estimates else size
+        required = max(estimates) if estimates else size
         if required > usable:
             continue
         quality = model.get("quality", {})

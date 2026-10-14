@@ -4,6 +4,10 @@ The single writer for that file is meant to be #441's ``grade`` / ``record_compe
 which is not on this base. This adapter touches only the ``fitness`` sub-key of a model's
 entry and keeps every other key, so the two converge on the same file. When #441 lands,
 replace the body of ``record_fitness`` with a call to it.
+
+Keys are bare Ollama names (``qwen2.5-coder:7b``), the key ``resource_map`` reads.
+Only conclusive task results (``n > 0``) are written, merged per task type, so a run
+that hit transport errors never overwrites an earlier measurement.
 """
 
 from __future__ import annotations
@@ -23,8 +27,14 @@ def eligibility_path() -> Path:
     return paths.state_path("local_eligibility.json")
 
 
-def record_fitness(model: str, results: dict[str, Any], *, path: Path | None = None) -> None:
-    """Merge ``results`` (task_type -> FitnessResult) under ``{model}.fitness``."""
+def record_fitness(model: str, results: dict[str, Any], *, path: Path | None = None) -> bool:
+    """Merge the conclusive ``results`` (task_type -> FitnessResult) under ``{model}.fitness``.
+
+    Returns False, writing nothing, when no result is conclusive.
+    """
+    conclusive = {t: r for t, r in results.items() if r.n > 0}
+    if not conclusive:
+        return False
     target = Path(path) if path else eligibility_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     with exclusive_lock(target.with_name(target.name + ".lock")):
@@ -36,10 +46,17 @@ def record_fitness(model: str, results: dict[str, Any], *, path: Path | None = N
             data = {}
         entry = data.get(model)
         entry = entry if isinstance(entry, dict) else {}
-        entry["fitness"] = {t: {k: v for k, v in asdict(r).items() if k != "task_type"}
-                            for t, r in results.items()}
+        fitness = entry.get("fitness")
+        fitness = fitness if isinstance(fitness, dict) else {}
+        fitness.update({t: {k: v for k, v in asdict(r).items() if k != "task_type"}
+                        for t, r in conclusive.items()})
+        entry["fitness"] = fitness
         entry["fitness_at"] = time.time()
         data[model] = entry
         tmp = target.with_name(target.name + f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
-        os.replace(tmp, target)
+        try:
+            tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
+            os.replace(tmp, target)
+        finally:
+            tmp.unlink(missing_ok=True)
+    return True

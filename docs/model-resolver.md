@@ -101,12 +101,16 @@ model is reported `unreachable, not recorded` and the earlier measurement is kep
 
 ### Fitness (task-type tasks)
 
-`calibrate` can also run six synthetic task-type tasks per local model (tech step, summary,
+`calibrate --fitness` also runs six synthetic task-type tasks per local model (tech step, summary,
 one-file edit with test, JSON, short Hebrew Q&A, code explanation), graded
 deterministically; model code is never executed. The pass mark per task type comes from
 the P2.0 preregistration, which does not exist yet: `fitness.PASS_MARKS` is frozen and
 empty, so every result is `unknown`, never `pass`. A transport error is `unknown` too.
-Results go to `local_eligibility.json` under `{model}.fitness` via
+The tasks run inside the calibration budget; a task that would start with 1 s or less
+left is skipped. Only conclusive results (at least one graded reply) are recorded,
+merged per task type, so a flaky run never overwrites an earlier measurement. Results go
+to `local_eligibility.json` under `{model}.fitness`, keyed by the bare Ollama name that
+`resource_map` reads, via
 `resolver/eligibility_store.record_fitness` (an adapter; it must converge with the single
 competence writer of #441). Models are pulled with Ollama `/api/pull` only after
 explicit approval (`model_pull.pull_model`). Tier ceilings are derived per model and stored with their basis:

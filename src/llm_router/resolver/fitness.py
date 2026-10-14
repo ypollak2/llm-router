@@ -3,11 +3,14 @@
 Six synthetic tasks (no user text), each graded deterministically; model output is
 never executed. The pass mark per task type is fixed by the P2.0 preregistration, which
 does not exist yet, so ``PASS_MARKS`` is empty and frozen: with no mark the result is
-``unknown``, never ``pass``. A transport failure is also ``unknown``.
+``unknown``, never ``pass``. A transport failure is also ``unknown``. With a
+``deadline``, a task that would start with 1 s or less left is not run at all (it is
+absent from the result, not ``unknown``), and each call gets at most the time left.
 """
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -79,14 +82,20 @@ class FitnessResult:
 
 def run_fitness(c: cal.Completer, model: str, *, pass_marks: Mapping[str, float] | None = None,
                 timeout: float = cal.DEFAULT_PROBE_TIMEOUT_S, trials: int = 1,
-                tasks: tuple[FitnessTask, ...] | None = None) -> dict[str, FitnessResult]:
+                tasks: tuple[FitnessTask, ...] | None = None, deadline: float | None = None,
+                clock: Callable[[], float] = time.monotonic) -> dict[str, FitnessResult]:
     marks = PASS_MARKS if pass_marks is None else pass_marks
     out: dict[str, FitnessResult] = {}
     for task in (tasks or TASKS)[:MAX_TASKS]:
+        if deadline is not None and deadline - clock() <= 1.0:
+            break
         scores: list[float] = []
         for _ in range(max(1, trials)):
+            left = timeout if deadline is None else min(timeout, deadline - clock())
+            if left <= 0:
+                break
             try:
-                r = c.chat(model, [{"role": "user", "content": task.prompt}], timeout=timeout)
+                r = c.chat(model, [{"role": "user", "content": task.prompt}], timeout=left)
             except Exception:  # noqa: BLE001
                 continue
             if r.error:

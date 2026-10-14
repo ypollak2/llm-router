@@ -347,6 +347,7 @@ class CalibrationReport:
     out_of_budget: list[str] = field(default_factory=list)
     unreachable: list[str] = field(default_factory=list)   # inconclusive: not recorded
     fitness: dict[str, dict[str, Any]] = field(default_factory=dict)   # model -> task_type -> result
+    fitness_errors: dict[str, str] = field(default_factory=dict)       # model -> error type, not recorded
 
 
 def select_models(inv: Inventory, patterns: list[str] | None, *, allow_paid: bool
@@ -441,10 +442,16 @@ def run_calibration(
             report.unreachable.append(m.id)
         else:
             report.profiles[m.id] = prof
-            if fitness and deadline - clock() > 1.0:
+            # Fitness is per local model: zero cost, so estimate_cost needs no share.
+            if fitness and m.route_kind == ROUTE_LOCAL and deadline - clock() > 1.0:
                 from llm_router.resolver import eligibility_store, fitness as fit
                 res = fit.run_fitness(completer_for(m), m.id, pass_marks=pass_marks,
-                                      timeout=probe_timeout)
+                                      timeout=probe_timeout, deadline=deadline, clock=clock)
                 report.fitness[m.id] = res
-                eligibility_store.record_fitness(m.id, res, path=eligibility_path)
+                try:
+                    eligibility_store.record_fitness(
+                        m.id.removeprefix("ollama/"), res, path=eligibility_path)
+                except OSError as exc:
+                    # The probes already ran; their profiles must still be saved.
+                    report.fitness_errors[m.id] = type(exc).__name__
     return report
