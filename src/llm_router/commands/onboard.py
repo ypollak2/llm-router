@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess as sp
 import sys
 from typing import Callable
 
@@ -65,11 +64,13 @@ def cmd_onboard(args: list[str]) -> int:
 def _run_onboard(
     input_fn: Callable[[str], str] = input,
     runner: Callable[[str], int] | None = None,
-    detect: Callable[[], list[str]] | None = None,
+    detect: Callable[[], dict[str, str]] | None = None,
+    interactive: Callable[[], bool] | None = None,
 ) -> None:
     """Zero-friction onboarding: detect capabilities, pick enforcement mode, write config, install.
 
-    ``input_fn``, ``runner`` and ``detect`` are injectable so tests never touch the host.
+    ``input_fn``, ``runner``, ``detect`` (``runtime_offer.runtime_status``) and
+    ``interactive`` (stdin is a terminal) are injectable so tests never touch the host.
     """
     from llm_router import runtime_offer as _ro
     from llm_router.onboard_needs import ask_needs
@@ -81,30 +82,26 @@ def _run_onboard(
     print(f"{_bold('╚══════════════════════════════════════════╝')}\n")
     print("  Detecting your setup...\n")
 
-    # ── 1. Detect Ollama ──────────────────────────────────────────────────────
-    ollama_ok = False
-    if detect is None:
-        try:
-            r = sp.run(["curl", "-sf", "http://localhost:11434/api/tags"],
-                       capture_output=True, timeout=3)
-            ollama_ok = r.returncode == 0
-        except Exception:
-            pass
-        runtimes = _ro.detect_runtimes()
-        if ollama_ok and "ollama" not in runtimes:
-            runtimes.append("ollama")
-    else:
-        runtimes = list(detect())
-        ollama_ok = "ollama" in runtimes
-    other_runtimes = [r for r in runtimes if r != "ollama"]
-    if ollama_ok:
+    # ── 1. Detect local runtimes ──────────────────────────────────────────────
+    runtimes = dict((detect or _ro.runtime_status)())
+    ollama = runtimes.get("ollama")
+    if ollama == "running":
         print(_ok("Ollama running  (free local tier, ~1–3s)"))
-    else:
-        print(_warn("Ollama not detected"))
+    elif ollama == "installed":
+        print(_warn("Ollama installed but not running  — start it with: ollama serve"))
+    for name, state in runtimes.items():
+        if name == "ollama":
+            continue
+        if state == "running":
+            print(_ok(f"Local runtime detected: {name}  (via openai_compat)"))
+        else:
+            print(_warn(f"Local runtime installed but not running: {name}  — start its server"))
+    if not runtimes:
+        print(_warn("No local model runtime detected"))
         print(_ro.runtime_offer())
-    for name in other_runtimes:
-        print(_ok(f"Local runtime detected: {name}  (via openai_compat)"))
-    local_ok = bool(runtimes)
+    # Installed Ollama counts: the session hook starts it. Other runtimes count
+    # only while their server answers.
+    local_ok = ollama is not None or "running" in runtimes.values()
 
     # ── 2. Detect Codex ───────────────────────────────────────────────────────
     codex_ok = shutil.which("codex") is not None
@@ -132,9 +129,15 @@ def _run_onboard(
         print(f"  {_bold('Recommended profile:')} {_yellow('balanced')}  (paid API routing)")
     else:
         print(f"\n  {_red('✗  No routing backends found!')}")
-        print(_ro.runtime_offer() + "\n")
+        if runtimes:
+            print(_ro.runtime_offer())
+        print("     Start a local runtime or set an API key, then re-run `llm-router onboard`.\n")
+        # Only a person at a terminal can approve a system install: piped input
+        # (`yes | llm-router onboard`) never runs it.
+        if not (interactive or sys.stdin.isatty)():
+            return
         try:
-            answer = input_fn("  Run it now? [y/N]: ").strip().lower()
+            answer = input_fn("  Run the install command above now? [y/N]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             answer = "n"
         if answer in ("y", "yes"):

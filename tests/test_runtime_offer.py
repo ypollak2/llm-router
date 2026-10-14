@@ -1,4 +1,4 @@
-"""PLAN v16 P2.8 task 2: one runtime_offer() text, installs only on approval."""
+"""PLAN v16 P2.8 task 2: one runtime_offer() text, installs only on a human's approval."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ class FakeRunner:
 
 @pytest.fixture
 def sentinel(monkeypatch):
-    monkeypatch.setattr(ro, "runtime_offer", lambda system=None: SENTINEL)
+    monkeypatch.setattr(ro, "runtime_offer", lambda system=None, **_k: SENTINEL)
 
 
 @pytest.mark.parametrize("system", ["Darwin", "Linux", "Windows"])
@@ -50,7 +50,13 @@ def test_offer_unknown_os_lists_all_and_mentions_alternatives():
     text = ro.runtime_offer("Plan9")
     for cmd in ro.OLLAMA_INSTALL_COMMANDS.values():
         assert cmd in text
-    assert "llm_setup" in text and "GEMINI_API_KEY" in text and "LM Studio" in text
+    assert "llm-router onboard" in text and "GEMINI_API_KEY" in text and "LM Studio" in text
+    assert "llm_setup" not in text and "confirm=True" not in text
+
+
+def test_offer_without_api_key_line():
+    text = ro.runtime_offer("Linux", api_keys=False)
+    assert "GEMINI_API_KEY" not in text and ro.OLLAMA_INSTALL_COMMANDS["linux"] in text
 
 
 def test_install_without_confirm_never_runs():
@@ -67,10 +73,42 @@ def test_install_confirm_must_be_literally_true():
 
 
 def test_install_confirm_runs_once_with_os_command():
-    runner = FakeRunner(code=3)
-    out = ro.install_runtime(confirm=True, runner=runner, system="Darwin")
+    runner = FakeRunner(code=0)
+    out = ro.install_runtime(confirm=True, runner=runner, system="Darwin", which=lambda n: "/b/ollama")
     assert runner.calls == ["brew install ollama"]
-    assert "brew install ollama" in out and "3" in out
+    assert out.startswith("Installed Ollama")
+
+
+def test_install_nonzero_exit_is_a_failure():
+    out = ro.install_runtime(confirm=True, runner=FakeRunner(code=3), system="Darwin",
+                             which=lambda n: "/b/ollama")
+    assert out.startswith("Install failed") and "code 3" in out
+
+
+def test_install_exit_zero_without_binary_is_not_success():
+    # `curl ... | sh` with a failed download used to exit 0 and read as installed.
+    out = ro.install_runtime(confirm=True, runner=FakeRunner(code=0), system="Linux",
+                             which=lambda n: None)
+    assert "still not on PATH" in out and not out.startswith("Installed")
+
+
+def test_default_runner_uses_pipefail_for_a_pipe(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen["argv"], seen["shell"] = argv, kw["shell"]
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(ro.subprocess, "run", fake_run)
+    monkeypatch.setattr(ro.shutil, "which", lambda n: "/bin/bash" if n == "bash" else None)
+    ro._default_runner(ro.OLLAMA_INSTALL_COMMANDS["linux"])
+    assert seen["argv"][:3] == ["bash", "-o", "pipefail"] and seen["shell"] is False
+    ro._default_runner("brew install ollama")
+    assert seen["argv"] == "brew install ollama" and seen["shell"] is True
+    # Fail-closed check of the real thing: a failed producer fails the pipe.
+    if shutil.which("bash"):
+        monkeypatch.undo()
+        assert ro._default_runner("false | cat") != 0
 
 
 def test_install_runner_exception_is_reported_not_raised():
@@ -79,15 +117,20 @@ def test_install_runner_exception_is_reported_not_raised():
     assert len(runner.calls) == 1 and "boom" in out
 
 
-def test_llm_setup_install_runtime(monkeypatch):
+def test_llm_setup_install_runtime_never_runs(monkeypatch):
+    # A flag the model sets is not a human's approval: the MCP tool only shows
+    # the command, and has no parameter that would run it.
+    import inspect
+
     from llm_router.tools import setup
 
-    runner = FakeRunner()
-    monkeypatch.setattr(setup, "_RUNTIME_RUNNER", runner)
-    asyncio.run(setup.llm_setup(action="install_runtime"))
-    assert runner.calls == []
-    out = asyncio.run(setup.llm_setup(action="install_runtime", confirm=True))
-    assert len(runner.calls) == 1 and "exit code 0" in out
+    calls = []
+    monkeypatch.setattr(ro, "_default_runner", lambda c: calls.append(c) or 0)
+    monkeypatch.setattr(ro, "install_runtime", lambda **k: calls.append(k) or "")
+    out = asyncio.run(setup.llm_setup(action="install_runtime"))
+    assert calls == []
+    assert ro.runtime_offer() in out and "not run from a tool call" in out
+    assert "confirm" not in inspect.signature(setup.llm_setup).parameters
 
 
 def test_llm_setup_unknown_action_lists_install_runtime():
@@ -96,31 +139,56 @@ def test_llm_setup_unknown_action_lists_install_runtime():
     assert "install_runtime" in asyncio.run(setup.llm_setup(action="nope"))
 
 
-def _detect(*, binaries=(), paths=(), urls=()):
-    return ro.detect_runtimes(
+def _status(*, binaries=(), paths=(), urls=()):
+    return ro.runtime_status(
         which=lambda n: f"/bin/{n}" if n in binaries else None,
         path_exists=lambda p: p in paths,
         http_ok=lambda u: u in urls,
     )
 
 
+OLLAMA_URL = "http://localhost:11434/api/tags"
+LMS_URL = "http://localhost:1234/v1/models"
+P8080 = "http://localhost:8080/v1/models"
+
+
+@pytest.fixture(autouse=True)
+def _default_ports(monkeypatch):
+    for key in ("OLLAMA", "LMSTUDIO", "LLAMACPP", "MLX"):
+        monkeypatch.delenv(f"LLM_ROUTER_LOCAL_{key}_PORT", raising=False)
+
+
 def test_detect_each_runtime():
-    assert _detect(binaries=("ollama",)) == ["ollama"]
-    assert _detect(urls=("http://localhost:11434/api/tags",)) == ["ollama"]
-    assert _detect(paths=("/Applications/LM Studio.app",)) == ["lmstudio"]
-    assert _detect(urls=("http://localhost:1234/v1/models",)) == ["lmstudio"]
-    assert _detect(binaries=("mlx_lm.generate",)) == ["mlx"]
-    assert _detect(binaries=("llama-server",)) == ["llamacpp"]
-    assert _detect(urls=("http://localhost:8080/health",)) == ["llamacpp"]
+    assert _status(binaries=("ollama",)) == {"ollama": "installed"}
+    assert _status(urls=(OLLAMA_URL,)) == {"ollama": "running"}
+    assert _status(paths=("/Applications/LM Studio.app",)) == {"lmstudio": "installed"}
+    assert _status(urls=(LMS_URL,)) == {"lmstudio": "running"}
+    assert _status(binaries=("mlx_lm.generate",)) == {"mlx": "installed"}
+    assert _status(binaries=("mlx_lm.server",), urls=(P8080,)) == {"mlx": "running"}
+    assert _status(binaries=("llama-server",)) == {"llamacpp": "installed"}
+    assert _status(urls=(P8080,)) == {"llamacpp": "running"}
+    assert ro.detect_runtimes(which=lambda n: None, path_exists=lambda p: False,
+                              http_ok=lambda u: u == OLLAMA_URL) == ["ollama"]
+
+
+def test_a_bare_health_endpoint_on_8080_is_not_a_runtime():
+    # Any dev server answers /health; only an OpenAI /v1/models answer counts.
+    assert _status(urls=("http://localhost:8080/health",)) == {}
+
+
+def test_detect_honours_the_port_overrides(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_LMSTUDIO_PORT", "5000")
+    assert _status(urls=("http://localhost:5000/v1/models",)) == {"lmstudio": "running"}
+    assert _status(urls=(LMS_URL,)) == {}
 
 
 def test_detect_nothing_and_never_raises():
-    assert _detect() == []
+    assert _status() == {}
 
     def boom(*_a):
         raise OSError("x")
 
-    assert ro.detect_runtimes(which=boom, path_exists=boom, http_ok=boom) == []
+    assert ro.runtime_status(which=boom, path_exists=boom, http_ok=boom) == {}
 
 
 # ── by symbol: each of the six sites takes its text from runtime_offer() ──────
@@ -137,7 +205,7 @@ def test_quickstart_site(sentinel, monkeypatch, capsys):
     assert SENTINEL in capsys.readouterr().out
 
 
-def _onboard(monkeypatch, tmp_path, *, detect, answers, runner, env_keys=()):
+def _onboard(monkeypatch, tmp_path, *, detect, answers, runner, env_keys=(), tty=True):
     from llm_router.commands import onboard
 
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -155,43 +223,72 @@ def _onboard(monkeypatch, tmp_path, *, detect, answers, runner, env_keys=()):
         except StopIteration:
             raise EOFError from None
 
-    onboard._run_onboard(input_fn=input_fn, runner=runner, detect=lambda: detect)
+    onboard._run_onboard(input_fn=input_fn, runner=runner, detect=lambda: detect,
+                         interactive=lambda: tty)
 
 
 def test_onboard_warn_message_site(sentinel, monkeypatch, tmp_path, capsys):
     runner = FakeRunner()
     # key present, no runtime: warn line, flow continues, hooks install is stubbed out
     monkeypatch.setattr("llm_router.install_hooks.install", lambda force=True: [])
-    _onboard(monkeypatch, tmp_path, detect=[], answers=[], runner=runner, env_keys=("GEMINI_API_KEY",))
+    _onboard(monkeypatch, tmp_path, detect={}, answers=[], runner=runner, env_keys=("GEMINI_API_KEY",))
     assert SENTINEL in capsys.readouterr().out
     assert runner.calls == []
 
 
 def test_onboard_final_message_site_declined(sentinel, monkeypatch, tmp_path, capsys):
     runner = FakeRunner()
-    _onboard(monkeypatch, tmp_path, detect=[], answers=["n"], runner=runner)
+    _onboard(monkeypatch, tmp_path, detect={}, answers=["n"], runner=runner)
     out = capsys.readouterr().out
-    assert out.count(SENTINEL) == 2  # warn line and final message
+    assert out.count(SENTINEL) == 1  # once, not again under "No routing backends"
     assert runner.calls == []
 
 
 def test_onboard_eof_never_installs(sentinel, monkeypatch, tmp_path):
     runner = FakeRunner()
-    _onboard(monkeypatch, tmp_path, detect=[], answers=[], runner=runner)
+    _onboard(monkeypatch, tmp_path, detect={}, answers=[], runner=runner)
     assert runner.calls == []
+
+
+def test_onboard_piped_yes_never_installs(sentinel, monkeypatch, tmp_path, capsys):
+    # `yes | llm-router onboard`: stdin is not a terminal, so no prompt and no run.
+    runner = FakeRunner()
+    _onboard(monkeypatch, tmp_path, detect={}, answers=["y"] * 20, runner=runner, tty=False)
+    assert runner.calls == []
+    assert "Run the install command" not in capsys.readouterr().out
 
 
 def test_onboard_yes_installs_once(monkeypatch, tmp_path, capsys):
     runner = FakeRunner()
     monkeypatch.setattr(ro, "_system_key", lambda system=None: "linux")
-    _onboard(monkeypatch, tmp_path, detect=[], answers=["y"], runner=runner)
+    _onboard(monkeypatch, tmp_path, detect={}, answers=["y"], runner=runner)
     assert runner.calls == [ro.OLLAMA_INSTALL_COMMANDS["linux"]]
+
+
+def test_onboard_installed_but_stopped_ollama_is_not_offered_an_install(
+    sentinel, monkeypatch, tmp_path, capsys
+):
+    runner = FakeRunner()
+    monkeypatch.setattr("llm_router.install_hooks.install", lambda force=True: [])
+    _onboard(monkeypatch, tmp_path, detect={"ollama": "installed"}, answers=[], runner=runner)
+    out = capsys.readouterr().out
+    assert "ollama serve" in out and SENTINEL not in out and "budget" in out
+    assert runner.calls == []
+
+
+def test_onboard_stopped_other_runtime_is_not_a_backend(sentinel, monkeypatch, tmp_path, capsys):
+    # An LM Studio install with its server off routes nothing: not budget.
+    runner = FakeRunner()
+    _onboard(monkeypatch, tmp_path, detect={"lmstudio": "installed"}, answers=["n"], runner=runner)
+    out = capsys.readouterr().out
+    assert "not running: lmstudio" in out and "No routing backends found" in out
+    assert "budget" not in out and runner.calls == []
 
 
 def test_onboard_other_runtime_counts_as_local_backend(monkeypatch, tmp_path, capsys):
     runner = FakeRunner()
     monkeypatch.setattr("llm_router.install_hooks.install", lambda force=True: [])
-    _onboard(monkeypatch, tmp_path, detect=["lmstudio"], answers=[], runner=runner)
+    _onboard(monkeypatch, tmp_path, detect={"lmstudio": "running"}, answers=[], runner=runner)
     out = capsys.readouterr().out
     assert "lmstudio" in out and "budget" in out and "Needs:" in out
     assert runner.calls == []
@@ -227,6 +324,24 @@ def test_route_and_call_site(sentinel):
         with pytest.raises(ValueError) as exc:
             asyncio.run(route_and_call(TaskType.QUERY, "test"))
     assert SENTINEL in str(exc.value)
+    assert "• " + SENTINEL not in str(exc.value)  # its own block, not inside a bullet
+
+
+def test_route_and_call_with_ollama_configured_has_no_install_offer(sentinel):
+    from llm_router.router import route_and_call
+    from llm_router.types import TaskType
+
+    with (
+        patch("llm_router.router.get_config") as mock_config,
+        patch("llm_router.router.get_tracker"),
+        patch("llm_router.router.cost.get_monthly_spend", new_callable=AsyncMock, return_value=0),
+        patch("llm_router.router.get_model_chain", return_value=["openai/gpt-4o"]),
+    ):
+        _empty_config(mock_config)
+        mock_config.return_value.available_providers = {"ollama"}
+        with pytest.raises(ValueError) as exc:
+            asyncio.run(route_and_call(TaskType.QUERY, "test"))
+    assert "No providers available" in str(exc.value) and SENTINEL not in str(exc.value)
 
 
 def test_route_and_stream_site(sentinel):

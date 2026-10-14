@@ -4887,11 +4887,15 @@ async def route_and_call(
                 )
             from llm_router.runtime_offer import runtime_offer
 
+            # The install offer only when no Ollama is configured; with one, the
+            # fix is doctor (its models were all filtered out or unreachable).
+            _offer = "" if "ollama" in available else (
+                "\n" + runtime_offer(api_keys=False) + "\nOr:"
+            )
             raise ValueError(
                 f"No providers available for {task_type.value}/{profile.value}. "
                 f"Configured providers: {available or 'none'}. "
-                "Fix: run `llm-router doctor` to diagnose, then one of:\n"
-                f"  • {runtime_offer()}\n"
+                f"Fix: run `llm-router doctor` to diagnose.{_offer}\n"
                 "  • Set GEMINI_API_KEY or OPENAI_API_KEY in ~/.llm-router/.env\n"
                 "  • Set LLM_ROUTER_CLAUDE_SUBSCRIPTION=true if you have Claude Pro/Max"
             )
