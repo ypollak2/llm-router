@@ -129,8 +129,8 @@ are normal agent work — just do it. When technical-op condensing is enabled
 read-only `git`/`ls`/`cat`/`find`/`rg` commands) may arrive pre-summarised by a local model;
 re-run the operation only if the summary is insufficient, and say so. With it off, results
 arrive raw.
-The exception is edit-shaped work on a small known file set — see `llm_edit` above: there
-the "thinking" being routed is figuring out the diff itself.
+Edit-shaped work on a small known file set is different — see `llm_edit` above: working
+out the diff itself is reasoning worth routing.
 
 ---
 

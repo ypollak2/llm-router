@@ -53,12 +53,17 @@ _BRANCH_OK = {"-a", "-r", "-v", "-vv", "--list", "-l", "--all", "--remotes", "--
               "--show-current", "--merged", "--no-merged", "--contains", "--no-color", "--color"}
 _FMT_WRITE = {"--fix", "-w", "--write"}
 _SEPARATORS = {";", "&&", "|"}
-_REDIRECT = re.compile(r"[<>]")
+_OPERATOR_CHARS = set("();&|<>")
+_ID = re.compile(r"[A-Za-z0-9_.:-]+")
+_REASON = re.compile(r"[a-z0-9_]+")
 
 
 def _formatter(argv: list[str]) -> bool:
-    """A listed formatter invoked in check-only mode."""
-    name = os.path.basename(argv[0])
+    """A listed formatter invoked in check-only mode. Bare names only: a path
+    (``./black``, ``/tmp/x/black``) runs whatever that file is."""
+    name = argv[0]
+    if "/" in name or "\\" in name:
+        return False
     rest = argv[1:]
     if name in ("black", "isort", "prettier"):
         pass
@@ -68,7 +73,7 @@ def _formatter(argv: list[str]) -> bool:
         pass
     else:
         return False
-    return "--check" in rest and not _FMT_WRITE.intersection(rest)
+    return "--check" in rest and not any(a.split("=", 1)[0] in _FMT_WRITE for a in rest)
 
 
 def _git_ok(argv: list[str]) -> bool:
@@ -126,17 +131,26 @@ def _segment_class(argv: list[str]) -> OpClass | None:
 def _classify_bash(command: str) -> OpClass | None:
     if not command.strip() or "\n" in command or "\r" in command:
         return None
-    lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+    # Non-posix lexing keeps quotes on each token, so an operator the shell sees
+    # (unquoted) is told apart from one that is only an argument ('|', ";").
+    lex = shlex.shlex(command, posix=False, punctuation_chars=True)
     lex.whitespace_split = True
     lex.commenters = ""
-    tokens = list(lex)
     segments: list[list[str]] = [[]]
-    for tok in tokens:
-        if tok in _SEPARATORS:
+    for raw in lex:
+        if raw in _SEPARATORS:
             segments.append([])
             continue
-        if tok and all(c in "();&|<>" for c in tok):
+        if raw and all(c in _OPERATOR_CHARS for c in raw):
             return None  # redirection, ||, &, subshell, any other operator
+        words = shlex.split(raw)
+        if len(words) != 1:
+            return None
+        tok = words[0]
+        if tok and all(c in _OPERATOR_CHARS for c in tok):
+            # A quoted operator is an argument to the command before it, so the
+            # words after it are that command's arguments too: fail closed.
+            return None
         segments[-1].append(tok)
     # Quoted text may legally hold < > ; unquoted ones were operator tokens above.
     if "$(" in command or "`" in command:
@@ -187,14 +201,12 @@ def _max_bytes() -> int:
         return _DEFAULT_MAX_BYTES
 
 
-def _token(value: object, limit: int) -> str | None:
-    """Basename-only, whitespace-free, truncated. Paths and commands cannot leak."""
-    if not isinstance(value, str) or not value:
+def _token(value: object, limit: int, pattern: re.Pattern = _ID) -> str | None:
+    """The value when it is a short identifier (``pattern``, at most ``limit``
+    chars), else None. A path, a command or free text is never stored."""
+    if not isinstance(value, str) or len(value) > limit or not pattern.fullmatch(value):
         return None
-    base = os.path.basename(value.replace("\\", "/").rstrip("/")) or None
-    if base is None:
-        return None
-    return re.sub(r"\s+", "_", base)[:limit]
+    return value
 
 
 def _int(value: object) -> int:
@@ -204,10 +216,14 @@ def _int(value: object) -> int:
 def record_op(*, session_id: object, task_id: object, tool: str,
               op_class: OpClass | str | None, bytes_in: int, bytes_out: int,
               served_by: str, skip_reason: str | None = None, ms: int = 0,
-              path: Path | None = None) -> bool:
+              model: str | None = None, re_read: bool = False,
+              session_kind: str | None = None, path: Path | None = None) -> bool:
     """Append one row to ``technical_ops.jsonl``; True when written. Never raises.
 
-    Stores no text: ids and the skip reason are reduced to short basename tokens.
+    Stores no text: ids, the model and the session kind are kept only when they
+    are identifiers (``[A-Za-z0-9_.:-]``), the skip reason only when it is a
+    lower-case code (``[a-z0-9_]``); anything else is stored as null. ``model``,
+    ``re_read`` and ``session_kind`` are the fields ``offload_share`` reads.
     """
     try:
         if served_by not in SERVED_BY:
@@ -217,12 +233,15 @@ def record_op(*, session_id: object, task_id: object, tool: str,
             "session_id": _token(session_id, 128),
             "task_id": _token(task_id, 128),
             "tool": _token(tool, 64),
-            "op_class": op_class.value if isinstance(op_class, OpClass) else _token(op_class, 32),
+            "op_class": op_class.value if isinstance(op_class, OpClass) else _token(op_class, 32, _REASON),
             "bytes_in": _int(bytes_in),
             "bytes_out": _int(bytes_out),
             "served_by": served_by,
-            "skip_reason": _token(skip_reason, 64),
+            "skip_reason": _token(skip_reason, 64, _REASON),
             "ms": _int(ms),
+            "model": _token(model, 128),
+            "re_read": re_read is True,
+            "session_kind": _token(session_kind, 32),
         }
         capped_log.append(path or technical_ops_path(),
                           (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8"),

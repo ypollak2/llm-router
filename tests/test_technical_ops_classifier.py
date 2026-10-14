@@ -56,6 +56,16 @@ BASH_CASES = [
     ("rm x", None), ("sed -i s/a/b/ f", None), ("python -c 'print(1)'", None),
     ("FOO=1 ls", None), ("", None), ("   ", None), ("ls 'unbalanced", None),
     ("echo hi", None),
+    # code review of #483: quoted operators are arguments, not separators
+    ("find . '|' cat -delete", None), ("git branch '|' cat -D main", None),
+    ("git diff ';' cat --output=x", None), ("tree '&&' cat -o out", None),
+    ('grep "|" f', None),
+    # a formatter must be the bare name, and --write= is a write
+    ("./black --check src", None), ("/tmp/evil/black --check", None),
+    ("prettier --check --write=true .", None), ("ruff format --check --fix=true", None),
+    ("black --check src", C.FORMAT_CHECK),
+    # quotes around ordinary words still classify
+    ("grep 'foo bar' src", C.SEARCH), ("cat 'my file.txt'", C.READ),
 ]
 
 
