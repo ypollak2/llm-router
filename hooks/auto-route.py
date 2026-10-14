@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 56
+# llm_router-hook-version: 57
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 56"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 57"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -3313,6 +3313,17 @@ _ANAPHORA_RE = re.compile(r"\bthe\s+(rest|remaining|others?|ones?)\b", re.I)
 _FREE_DRAFT_PROVIDERS = frozenset({"ollama", "codex", "gemini_cli"})
 
 
+def _privacy_target(chain) -> str:
+    """Provider that decides whether session content may reach a draft chain.
+
+    Every fallback model in the chain receives the same context, so the target is
+    the first provider outside ``session_store.LOCAL_PROVIDERS`` (read at call
+    time; D-91, D-95: codex and gemini_cli are not on-device), else "local".
+    """
+    from llm_router import session_store as _ss
+    return next((m.provider for m in chain if m.provider not in _ss.LOCAL_PROVIDERS), "local")
+
+
 def _free_tier_draft_chain(chain: list) -> list:
     """Keep only free/local-provider models so a draft never hits a paid API."""
     return [m for m in chain if getattr(m, "provider", None) in _FREE_DRAFT_PROVIDERS]
@@ -5445,14 +5456,30 @@ def main() -> None:
             except Exception:
                 pass
 
-            # Session Context Accumulator: build durable context for the draft
-            # model. The draft chain is free-tier (Ollama/Codex/Gemini CLI) but
-            # only Ollama is on-device (D-91, D-95): target_provider is the first
-            # chain provider outside session_store.LOCAL_PROVIDERS, else "local",
-            # so under privacy mode "local" a codex/gemini_cli chain gets no
-            # session content. Fail-open to no context.
+            _relay_off = os.environ.get(
+                "LLM_ROUTER_HISTORY_RELAY", "on"
+            ).strip().lower() in ("0", "off", "false", "no")
+            _pack = None
+            if _direct_chain:
+                try:
+                    from llm_router.context_pack import build_pack
+                    from llm_router.hooks.direct_executor import _local_num_ctx
+
+                    _pack_target = _privacy_target(_direct_chain)
+                    _pack = build_pack(
+                        prompt, session_id=session_id or None,
+                        transcript_path=hook_input.get("transcript_path") or None,
+                        project_root=hook_input.get("cwd") or os.getcwd(),
+                        target_window=(_local_num_ctx(_direct_chain[0].model) or 8192),
+                        door="hook", target_provider=_pack_target,
+                    )
+                except Exception:
+                    _pack = None  # Fail-open: keep the previous context path.
+
             _session_ctx: str | None = None
-            if session_id:
+            if _pack:
+                _session_ctx = _pack.system or None
+            elif session_id:
                 try:
                     from llm_router import session_store as _session_store
                     _session_ctx = _session_store.build_session_context(
@@ -5460,10 +5487,7 @@ def main() -> None:
                         max_tokens=_draft_context_budget(),
                         task_type=task_type,
                         query=prompt,
-                        target_provider=next(
-                            (m.provider for m in _direct_chain
-                             if m.provider not in _session_store.LOCAL_PROVIDERS),
-                            "local"),
+                        target_provider=_privacy_target(_direct_chain),
                     )
                 except Exception:
                     _session_ctx = None
@@ -5485,6 +5509,18 @@ def main() -> None:
                     )
                     # The rescue is only valid if the material actually ships.
                     _direct_enabled = False
+
+            _agent_ctx = _session_ctx
+            if _pack:
+                _recent_ctx = "\n\n".join(
+                    f"[{turn['role']}]\n{turn['content']}" for turn in _pack.recent
+                ) if not _relay_off else ""
+                _agent_ctx = "\n\n".join(
+                    part for part in (_session_ctx, _recent_ctx) if part
+                ) or None
+            _ground_ctx = (_agent_ctx or "") if _pack else (_session_ctx or "")
+            # The pack already carried the project layer: executors must not inject it again.
+            _okf_kw = {"okf_inject": False} if _pack and _pack.project else {}
 
             _direct_result = None
             # GH#57: wall-clock for the DIRECT attempt, so a timeout can be
@@ -5509,11 +5545,12 @@ def main() -> None:
                 # Gemini-CLI draft must not be reported as an Ollama call.
                 with _hl_phase("draft_chain"):
                     _direct_result = _execute_agent(
-                        prompt, _direct_chain, timeout=60, context=_session_ctx,
+                        prompt, _direct_chain, timeout=60, context=_agent_ctx,
                         deadline_s=_loop_deadline(),
                         project_root=hook_input.get("cwd") or os.getcwd(),
                         session_id=session_id,
                         read_only=task_type in ("query", "research", "analyze"),
+                        **_okf_kw,
                     )
                 if _direct_result:
                     _debug_log(f"[INVOCATION {invocation_id:.3f}] AGENT LOOP SUCCESS")
@@ -5524,14 +5561,13 @@ def main() -> None:
                 # an unreadable transcript yields [] and the stateless path.
                 # Privacy gate (audit P2): LLM_ROUTER_HISTORY_RELAY=off keeps direct
                 # execution but never sends transcript turns to external models.
-                _relay_off = os.environ.get(
-                    "LLM_ROUTER_HISTORY_RELAY", "on"
-                ).strip().lower() in ("0", "off", "false", "no")
                 if _relay_off:
                     _history = []
                     _debug_log(
                         f"[INVOCATION {invocation_id:.3f}] HISTORY RELAY OFF (privacy gate)"
                     )
+                elif _pack:
+                    _history = list(_pack.recent)
                 else:
                     with _hl_phase("session_io"):
                         _history = _load_conversation_history(
@@ -5548,9 +5584,9 @@ def main() -> None:
                     with _hl_phase("draft_chain"):
                         _direct_result = _execute_agent(
                             prompt, _direct_chain, project_root=_draft_root,
-                            timeout=OLLAMA_TIMEOUT, context=_session_ctx,
+                            timeout=OLLAMA_TIMEOUT, context=_agent_ctx,
                             deadline_s=_readonly_draft_deadline(), read_only=True,
-                            session_id=session_id,
+                            session_id=session_id, **_okf_kw,
                         )
                     _debug_log(
                         f"[INVOCATION {invocation_id:.3f}] READ-ONLY DRAFT LOOP: "
@@ -5565,6 +5601,7 @@ def main() -> None:
                             # I1: the session store and a scoped semantic index.
                             session_id=session_id,
                             root=_draft_root,
+                            **_okf_kw,
                         )
 
             # S2-6: a draft that cites a file nobody mentioned and that does not
@@ -5573,10 +5610,10 @@ def main() -> None:
             # the turn; a fallthrough costs a routing opportunity, relaying costs
             # the user's trust in every routed answer.
             if _direct_result and not _draft_is_relayable(
-                getattr(_direct_result, "text", "") or "", _session_ctx or "", prompt
+                getattr(_direct_result, "text", "") or "", _ground_ctx, prompt
             ):
                 _bad = _grounding_violations(
-                    getattr(_direct_result, "text", "") or "", _session_ctx or "", prompt
+                    getattr(_direct_result, "text", "") or "", _ground_ctx, prompt
                 )
                 _debug_log(
                     f"[INVOCATION {invocation_id:.3f}] DRAFT REJECTED (ungrounded): "

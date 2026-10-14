@@ -15,6 +15,7 @@ adds it, rather than weeks later in a log audit.
 """
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -33,12 +34,28 @@ EXECUTION_PATHS = [
 ]
 
 
+def _calls_build_pack(src: str) -> bool:
+    """A real `build_pack(...)` Call node; an import or a comment does not count."""
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            f = node.func
+            if (isinstance(f, ast.Name) and f.id == "build_pack") or (
+                isinstance(f, ast.Attribute) and f.attr == "build_pack"
+            ):
+                return True
+    return False
+
+
 def _crosses_choke_point(src: str, pack_src: str) -> bool:
-    """Directly, or through `context_pack`, whose project layer calls
-    `context_injection.inject` (P1.1 doors)."""
+    """Directly, or by calling `context_pack.build_pack`, whose project layer
+    calls `context_injection.inject` (P1.1 doors; behaviour pinned below)."""
     if "context_injection" in src:
         return True
-    return "context_pack" in src and "context_injection" in pack_src
+    return _calls_build_pack(src) and "context_injection" in pack_src
 
 
 @pytest.mark.parametrize("rel", EXECUTION_PATHS)
@@ -57,8 +74,53 @@ def test_a_module_bypassing_both_fails_the_choke_point_check():
     pack_src = (SRC / "context_pack.py").read_text()
     assert "context_injection" in pack_src  # the premise of the indirect route
     assert not _crosses_choke_point("import subprocess\nrun(prompt)\n", pack_src)
-    assert _crosses_choke_point("from llm_router.context_pack import build_pack", pack_src)
-    assert not _crosses_choke_point("from llm_router.context_pack import build_pack", "no seam")
+    real = "from llm_router.context_pack import build_pack\nbuild_pack(p, door='x', target_window=1)\n"
+    assert _crosses_choke_point(real, pack_src)
+    assert not _crosses_choke_point(real, "no seam")
+
+
+@pytest.mark.parametrize("mutant", [
+    "from llm_router.context_pack import build_pack\nrun(prompt)\n",  # import only
+    "# uses context_pack.build_pack(...) someday\nrun(prompt)\n",       # comment
+    '"""calls build_pack(x)"""\nrun(prompt)\n',                         # docstring
+    "from llm_router import context_pack\nrun(prompt)\n",               # module import only
+])
+def test_import_or_mention_of_context_pack_is_not_crossing(mutant):
+    pack_src = (SRC / "context_pack.py").read_text()
+    assert not _crosses_choke_point(mutant, pack_src)
+
+
+def test_attribute_call_to_build_pack_counts():
+    pack_src = (SRC / "context_pack.py").read_text()
+    src = "from llm_router import context_pack\ncontext_pack.build_pack(p, door='x', target_window=1)\n"
+    assert _crosses_choke_point(src, pack_src)
+
+
+def test_build_pack_really_calls_inject_unless_project_is_supplied(tmp_path, monkeypatch):
+    """Behaviour behind the indirect route: the textual claim is only true if
+    build_pack(project_root=...) reaches context_injection.inject, and the
+    #498 `project=` override deliberately skips it."""
+    from llm_router import context_injection, context_pack
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "CLAUDE.md").write_text("# Rules\n- always run the tests\n")
+    calls = []
+
+    def spy(request, *a, **kw):
+        calls.append(kw.get("root"))
+        return request
+
+    monkeypatch.setattr(context_injection, "inject", spy)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    context_pack.build_pack("fix the bug", project_root=str(repo), target_window=100000, door="codex")
+    assert calls == [str(repo)]
+
+    calls.clear()
+    context_pack.build_pack("fix the bug", project_root=str(repo), target_window=100000,
+                            door="mcp", project="already injected")
+    assert calls == []
 
 
 def test_only_the_choke_point_implements_injection():

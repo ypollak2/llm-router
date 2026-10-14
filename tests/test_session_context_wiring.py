@@ -102,6 +102,19 @@ class _Recorder:
         return self.build_session_context_return
 
 
+@pytest.fixture()
+def pack_unavailable(monkeypatch):
+    """P1.1 door 1: the hook builds context with context_pack.build_pack and falls
+    back to session_store.build_session_context only when the pack cannot be built.
+    These tests protect that fallback (fail-open) path, so they make the pack raise."""
+    import llm_router.context_pack as context_pack
+
+    def _boom(*a, **k):
+        raise RuntimeError("pack unavailable")
+
+    monkeypatch.setattr(context_pack, "build_pack", _boom)
+
+
 def _patch_direct_execution(ar, monkeypatch, *, execute_chain_fn, needs_tools=False):
     import llm_router.hooks.chain_builder as chain_builder
     import llm_router.hooks.direct_executor as direct_executor
@@ -115,8 +128,8 @@ def _patch_direct_execution(ar, monkeypatch, *, execute_chain_fn, needs_tools=Fa
     return fake_model
 
 
-def _run(ar, monkeypatch, prompt: str, session_id: str = "sess-abc123"):
-    payload = json.dumps({"prompt": prompt, "session_id": session_id})
+def _run(ar, monkeypatch, prompt: str, session_id: str = "sess-abc123", **extra):
+    payload = json.dumps({"prompt": prompt, "session_id": session_id, **extra})
     monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
     out = io.StringIO()
     monkeypatch.setattr(sys, "stdout", out)
@@ -137,7 +150,7 @@ def test_records_user_prompt_before_draft(ar, monkeypatch):
 
     import llm_router.hooks.direct_executor as direct_executor
 
-    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None):
+    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None, okf_inject=True):
         return direct_executor.DirectResult(
             text="os.path.join joins path components.",
             model=chain[0],
@@ -158,7 +171,7 @@ def test_records_user_prompt_before_draft(ar, monkeypatch):
     assert user_prompt_events[0]["task_type"] == "query"
 
 
-def test_builds_and_threads_session_context_into_execute_chain(ar, monkeypatch):
+def test_builds_and_threads_session_context_into_execute_chain(ar, monkeypatch, pack_unavailable):
     rec = _Recorder()
     import llm_router.session_store as real_session_store
     monkeypatch.setattr(real_session_store, "record_event", rec.record_event)
@@ -167,7 +180,7 @@ def test_builds_and_threads_session_context_into_execute_chain(ar, monkeypatch):
     import llm_router.hooks.direct_executor as direct_executor
     captured = {}
 
-    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None):
+    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None, okf_inject=True):
         captured["context"] = context
         captured["prompt"] = prompt
         return direct_executor.DirectResult(
@@ -196,7 +209,7 @@ def test_records_routed_qa_on_success(ar, monkeypatch):
 
     import llm_router.hooks.direct_executor as direct_executor
 
-    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None):
+    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None, okf_inject=True):
         return direct_executor.DirectResult(
             # A realistic draft, not a 15-char placeholder: since 2026-09-14 a
             # draft is only written to session memory if it is worth being the
@@ -230,7 +243,7 @@ def test_fail_open_when_record_event_raises(ar, monkeypatch):
 
     import llm_router.hooks.direct_executor as direct_executor
 
-    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None):
+    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None, okf_inject=True):
         return direct_executor.DirectResult(
             text="answer despite store failure", model=chain[0], latency_ms=1,
             input_tokens=1, output_tokens=1,
@@ -246,7 +259,7 @@ def test_fail_open_when_record_event_raises(ar, monkeypatch):
     assert "hookSpecificOutput" in output or output.get("decision") in ("block", "approve")
 
 
-def test_fail_open_when_build_session_context_raises(ar, monkeypatch):
+def test_fail_open_when_build_session_context_raises(ar, monkeypatch, pack_unavailable):
     rec = _Recorder()
     rec.build_session_context_raises = True
     import llm_router.session_store as real_session_store
@@ -256,7 +269,7 @@ def test_fail_open_when_build_session_context_raises(ar, monkeypatch):
     import llm_router.hooks.direct_executor as direct_executor
     captured = {}
 
-    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None):
+    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None, okf_inject=True):
         captured["context"] = context
         return direct_executor.DirectResult(
             text="answer despite context-build failure", model=chain[0], latency_ms=1,
@@ -278,7 +291,7 @@ def test_fail_open_when_build_session_context_raises(ar, monkeypatch):
 
 # ── 5: empty-context correctness ─────────────────────────────────────────────
 
-def test_empty_context_is_passed_through_not_fabricated(ar, monkeypatch):
+def test_empty_context_is_passed_through_not_fabricated(ar, monkeypatch, pack_unavailable):
     rec = _Recorder()
     rec.build_session_context_return = ""  # no prior events this session
     import llm_router.session_store as real_session_store
@@ -288,7 +301,7 @@ def test_empty_context_is_passed_through_not_fabricated(ar, monkeypatch):
     import llm_router.hooks.direct_executor as direct_executor
     captured = {}
 
-    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None):
+    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None, okf_inject=True):
         captured["context"] = context
         return direct_executor.DirectResult(
             text="answer", model=chain[0], latency_ms=1, input_tokens=1, output_tokens=1,
@@ -304,7 +317,7 @@ def test_empty_context_is_passed_through_not_fabricated(ar, monkeypatch):
     assert captured["context"] == ""
 
 
-def test_no_session_id_skips_all_session_store_calls(ar, monkeypatch):
+def test_no_session_id_skips_all_session_store_calls(ar, monkeypatch, tmp_path):
     rec = _Recorder()
     import llm_router.session_store as real_session_store
     monkeypatch.setattr(real_session_store, "record_event", rec.record_event)
@@ -313,7 +326,7 @@ def test_no_session_id_skips_all_session_store_calls(ar, monkeypatch):
     import llm_router.hooks.direct_executor as direct_executor
     captured = {}
 
-    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None):
+    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None, okf_inject=True):
         captured["context"] = context
         return direct_executor.DirectResult(
             text="answer", model=chain[0], latency_ms=1, input_tokens=1, output_tokens=1,
@@ -321,8 +334,40 @@ def test_no_session_id_skips_all_session_store_calls(ar, monkeypatch):
 
     _patch_direct_execution(ar, monkeypatch, execute_chain_fn=fake_execute_chain)
 
-    _run(ar, monkeypatch, SAFE_PROMPT, session_id="")
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({"type": "user", "message": {
+        "role": "user", "content": "SEEDED-TRANSCRIPT-MARKER earlier turn"}}) + "\n")
+    _run(ar, monkeypatch, SAFE_PROMPT, session_id="", transcript_path=str(transcript))
 
     assert rec.record_event_calls == []
     assert rec.build_session_context_calls == []
+    # Context is absent or project-only: no session or transcript content.
+    ctx = captured["context"]
+    assert ctx is None or ctx.startswith("<project-knowledge>")
+    assert "SEEDED-TRANSCRIPT-MARKER" not in (ctx or "")
+
+
+def test_pack_path_passes_none_when_no_context_exists(ar, monkeypatch, tmp_path):
+    """No transcript and an empty non-git project: the draft gets context=None, nothing fabricated."""
+    rec = _Recorder()
+    import llm_router.session_store as real_session_store
+    monkeypatch.setattr(real_session_store, "record_event", rec.record_event)
+    monkeypatch.setattr(real_session_store, "build_session_context", rec.build_session_context)
+
+    import llm_router.hooks.direct_executor as direct_executor
+    captured = {}
+
+    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None, okf_inject=True):
+        captured["context"] = context
+        captured["history"] = history
+        return direct_executor.DirectResult(
+            text="answer", model=chain[0], latency_ms=1, input_tokens=1, output_tokens=1,
+        )
+
+    _patch_direct_execution(ar, monkeypatch, execute_chain_fn=fake_execute_chain)
+    empty = tmp_path / "emptyproj"
+    empty.mkdir()
+    _run(ar, monkeypatch, SAFE_PROMPT, session_id="sess-none", cwd=str(empty))
+
     assert captured["context"] is None
+    assert not captured["history"]
