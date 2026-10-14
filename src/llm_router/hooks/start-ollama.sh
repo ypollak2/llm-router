@@ -79,7 +79,7 @@ fi
 
 if ! is_running; then
     if ! command -v ollama &>/dev/null; then
-        echo "❌ Ollama not installed — install from https://ollama.com" >&2
+        { python3 -m llm_router.runtime_offer 2>/dev/null; } >&2 || echo "Ollama is not installed. Run: llm-router onboard" >&2
         exit 1
     fi
 

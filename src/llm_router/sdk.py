@@ -66,41 +66,102 @@ def route(prompt: str, *, task_type: str | None = None,
     ``task_id`` (ids, ``[A-Za-z0-9_.:-]{1,128}``) name the caller's session and request on
     the ledger rows; omitted, the session is generated once per process and the task per call.
 
-    messages is the conversation so far as {"role", "content"} chat dicts,
-    excluding prompt, the current request, which is sent verbatim and never
-    trimmed. build_pack drops a trailing user message equal to prompt. None keeps
-    existing behavior. Supplied history is packed via door="sdk" per provider
-    attempt and sent only when session_store.allows_session_content allows it at
-    call time (only local/ollama are privacy-local). Disallowed attempts get just
-    the request; leading assistant turns are dropped for API providers. Pack
-    failures record CHZ-FO-ROUTER-SDK-PACK and send the plain prompt. A hash of
-    messages isolates semantic cache entries by conversation.
-
-    With ``messages`` the call goes through ``route_and_call`` as a text
-    completion, bounded by ``timeout`` (its wall-clock cap); file and tool tasks
-    do not get the local agent loop that the no-``messages`` path uses. A budget
-    refusal raises ``BudgetExceededError`` (never ``RoutingError``), so a caller
-    cannot fall back around a spend cap.
+    ``messages`` is the conversation so far as ``{"role", "content"}`` chat dicts,
+    excluding ``prompt`` (the current request, sent verbatim and never trimmed; a
+    trailing copy of it in ``messages`` is dropped). It feeds the context pack
+    (``build_pack(door="sdk")``) inside the same ``build_chain`` + ``execute_chain``
+    (or agent-loop) call the no-``messages`` path makes (D-98): model choice, agent
+    loop, ``timeout`` and the ``host="sdk"`` ledger rows are the same with or
+    without it. The history is sent only when ``session_store.allows_session_content``
+    allows the most external provider the executor will call (``claude`` entries are
+    never called from here; the agent loop calls ollama only), since a later fallback
+    model gets the same context (privacy mode "local" = on-device providers only). A
+    pack failure records ``CHZ-FO-SDK-PACK`` and sends the request alone. As without
+    ``messages``, ``timeout`` caps each model call, and a spend cap skips paid
+    providers (``RoutingError`` once the chain is exhausted).
     """
     from llm_router import call_identity
 
+    if messages is not None and (not isinstance(messages, list) or any(
+        not isinstance(message, dict)
+        or not isinstance(message.get("role"), str)
+        or not isinstance(message.get("content"), str)
+        for message in messages
+    )):
+        raise ValueError("messages must be a list of dicts with string role/content")
     sid = _sdk_session_id(session_id)
     with call_identity.scope(sid, task_id=task_id):
-        if messages is not None:
-            if not isinstance(messages, list) or any(
-                not isinstance(message, dict)
-                or not isinstance(message.get("role"), str)
-                or not isinstance(message.get("content"), str)
-                for message in messages
-            ):
-                raise ValueError("messages must be a list of dicts with string role/content")
-            return _route_messages(prompt, messages, task_type, complexity, sid, timeout)
         return _route(prompt, task_type=task_type, complexity=complexity,
-                      timeout=timeout, session_id=sid)
+                      timeout=timeout, session_id=sid, messages=messages)
+
+
+def _called(chain, *, agent: bool):
+    """The chain entries the executor will actually call. ``execute_chain`` skips
+    ``claude`` (it cannot be called from here); the agent loop runs ollama only."""
+    if agent:
+        return [m for m in chain if m.provider == "ollama"]
+    return [m for m in chain if m.provider != "claude"]
+
+
+def _privacy_target(chain) -> str:
+    """The most external provider the chain may reach: every fallback model gets
+    the same context, so the privacy gate must hold for the worst of them (D-91/D-95)."""
+    from llm_router.session_store import LOCAL_PROVIDERS
+
+    return next((m.provider for m in chain if m.provider not in LOCAL_PROVIDERS),
+                chain[0].provider if chain else "ollama")
+
+
+def _chat_turns(recent: list[dict]) -> list[dict]:
+    """The pack's turns in a shape every chat API takes: user/assistant roles only
+    (another role becomes a user turn labelled with it), consecutive same-role turns
+    merged, and no leading assistant turn."""
+    out: list[dict] = []
+    for m in recent:
+        role, content = m["role"], m["content"]
+        if role not in ("user", "assistant"):
+            role, content = "user", f"[{role}] {content}"
+        if out and out[-1]["role"] == role:
+            out[-1] = {"role": role, "content": f"{out[-1]['content']}\n\n{content}"}
+        elif out or role == "user":
+            out.append({"role": role, "content": content})
+    return out
+
+
+def _pack_kwargs(prompt: str, messages: list[dict] | None, chain,
+                 session_id: str, *, agent: bool = False) -> tuple[str, dict]:
+    """(request, extra executor kwargs) for ``messages``; ``(prompt, {})`` without them.
+
+    The executor kwargs carry the pack as ``history`` (text chain) or folded into
+    ``context`` (agent loop, which takes no history). ``okf_inject`` stays on: the
+    SDK passes no project root, so the pack has no project layer and the executor's
+    own OKF injection is the only one (D-43(e))."""
+    called = _called(chain, agent=agent)
+    if messages is None or not called:
+        return prompt, {}
+    try:
+        from llm_router.context_pack import build_pack
+        from llm_router.hooks.direct_executor import _local_num_ctx
+
+        pack = build_pack(
+            prompt, messages, session_id=session_id,
+            target_window=(_local_num_ctx(called[0].model) or 8192),
+            door="sdk", target_provider=_privacy_target(called),
+        )
+    except Exception as exc:  # noqa: BLE001 - fail open to the plain request
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-SDK-PACK", exc)
+        return prompt, {}
+    recent = _chat_turns(list(pack.recent))
+    rendered = "\n\n".join(f"[{m['role']}]\n{m['content']}" for m in recent)
+    agent_context = "\n\n".join(p for p in (pack.system, rendered) if p) or None
+    return pack.request, {"context": pack.system or None, "history": recent or None,
+                          "agent_context": agent_context}
 
 
 def _route(prompt: str, *, task_type: str | None, complexity: str | None,
-           timeout: int, session_id: str) -> RouteResult:
+           timeout: int, session_id: str, messages: list[dict] | None = None) -> RouteResult:
     # Lazy imports keep ``import llm_router`` cheap.
     from llm_router.gateway import _classify
     from llm_router.hooks.chain_builder import build_chain, get_current_pressure, needs_claude_tools
@@ -116,11 +177,15 @@ def _route(prompt: str, *, task_type: str | None, complexity: str | None,
     # File/local tasks → agent-loop (local tool-calling model); Q&A → text call.
     # The agent loop needs a capable tool-caller, so bias its chain to the coder tier.
     if needs_claude_tools(prompt, task_type):
-        result = execute_agent(prompt, build_chain("complex", zone, "code"),
-                               timeout=max(timeout, 180))
+        chain = build_chain("complex", zone, "code")
+        request, packed = _pack_kwargs(prompt, messages, chain, session_id, agent=True)
+        extra = {"context": packed["agent_context"]} if packed else {}
+        result = execute_agent(request, chain, timeout=max(timeout, 180), **extra)
     else:
-        result = execute_chain(prompt, build_chain(complexity, zone, task_type),
-                               task_type, timeout=timeout)
+        chain = build_chain(complexity, zone, task_type)
+        request, packed = _pack_kwargs(prompt, messages, chain, session_id)
+        extra = {"context": packed["context"], "history": packed["history"]} if packed else {}
+        result = execute_chain(request, chain, task_type, timeout=timeout, **extra)
     if result is None:
         raise RoutingError("LLM Router routing failed — model chain exhausted")
 
@@ -140,72 +205,4 @@ def _route(prompt: str, *, task_type: str | None, complexity: str | None,
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,
         latency_ms=int(result.latency_ms or 0),
-    )
-
-
-def _run_coro(coro):
-    """Run a coroutine synchronously, preserving caller identity in a worker."""
-    import asyncio
-
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-
-    from concurrent.futures import ThreadPoolExecutor
-    from contextvars import copy_context
-
-    context = copy_context()
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        return executor.submit(context.run, asyncio.run, coro).result()
-
-
-async def _drained(coro):
-    """Await ``coro``, then the turn's fire-and-forget tasks (receipts, savings
-    rows) before ``asyncio.run`` closes the loop and would cancel them."""
-    from llm_router.router import drain_bg_tasks
-
-    try:
-        return await coro
-    finally:
-        await drain_bg_tasks()
-
-
-def _route_messages(prompt: str, messages: list[dict], task_type: str | None,
-                    complexity: str | None, session_id: str, timeout: int) -> RouteResult:
-    """Route caller history within the SDK's existing identity scope."""
-    from llm_router.gateway import _classify
-    from llm_router.router import route_and_call
-    from llm_router.types import BudgetExceededError, TaskType
-
-    if not prompt or not prompt.strip():
-        raise ValueError("prompt is empty")
-    if not task_type or not complexity:
-        _t, _c = _classify(prompt)
-        task_type, complexity = task_type or _t, complexity or _c
-    try:
-        tt = TaskType(task_type)
-    except ValueError:
-        tt = TaskType.QUERY
-    try:
-        resp = _run_coro(_drained(route_and_call(
-            tt, prompt, complexity_hint=complexity, messages=messages,
-            max_wall_clock_seconds=timeout,
-        )))
-    except BudgetExceededError:
-        raise  # a refusal, not an exhausted chain
-    except (RuntimeError, ValueError, TimeoutError) as exc:
-        raise RoutingError(f"LLM Router routing failed: {exc}") from exc
-    try:  # meter, like the no-messages path and the gateway
-        from llm_router.route_server import _log_route_savings
-        _log_route_savings(resp, tt.value, complexity or resp.complexity or "moderate", "sdk")
-    except Exception:
-        pass
-    return RouteResult(
-        text=resp.content,
-        model=resp.model if "/" in resp.model else f"{resp.provider}/{resp.model}",
-        provider=resp.provider,
-        input_tokens=resp.input_tokens,
-        output_tokens=resp.output_tokens,
-        latency_ms=int(resp.latency_ms or 0),
     )

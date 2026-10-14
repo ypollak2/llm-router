@@ -97,7 +97,23 @@ A probe that was not run, or cannot run on the route, is `ok=None`, which is not
 pass. Nothing a model or provider said is ever written to the profile: a probe stores
 `ok` plus a fixed reason string (`wrong value`, `no response`, `provider error`, ...).
 If the run is inconclusive (every probe hit a transport error, or json/edit did), the
-model is reported `unreachable, not recorded` and the earlier measurement is kept. Tier ceilings are derived per model and stored with their basis:
+model is reported `unreachable, not recorded` and the earlier measurement is kept.
+
+### Fitness (task-type tasks)
+
+`calibrate --fitness` also runs six synthetic task-type tasks per local model (tech step, summary,
+one-file edit with test, JSON, short Hebrew Q&A, code explanation), graded
+deterministically; model code is never executed. The pass mark per task type comes from
+the P2.0 preregistration, which does not exist yet: `fitness.PASS_MARKS` is frozen and
+empty, so every result is `unknown`, never `pass`. A transport error is `unknown` too.
+The tasks run inside the calibration budget; a task that would start with 1 s or less
+left is skipped. Only conclusive results (at least one graded reply) are recorded,
+merged per task type, so a flaky run never overwrites an earlier measurement. Results go
+to `local_eligibility.json` under `{model}.fitness`, keyed by the bare Ollama name that
+`resource_map` reads, via
+`resolver/eligibility_store.record_fitness` (an adapter; it must converge with the single
+competence writer of #441). Models are pulled with Ollama `/api/pull` only after
+explicit approval (`model_pull.pull_model`). Tier ceilings are derived per model and stored with their basis:
 
 * EASY: `json` and `edit` pass.
 * MEDIUM: EASY, plus a tool round-trip (if the model is meant to use tools) and recall at >= 8000 tokens.
@@ -123,14 +139,16 @@ harnesses, so they are not a like-for-like ranking**:
 
 Wilson 95% intervals are wide (for 15/20, [53%, 89%]); Astra's review notes a 15/20 tie
 is weak evidence of equivalence. They are shown to explain why a local model is
-measured before it is trusted, not as a user-independent order. No code reads them.
+measured before it is trusted, not as a user-independent order. No code reads them. Fitness measured on the user's own machine is a separate record (see
+"Fitness" under Calibration), not these numbers.
 
 ## Resolver
 
 `resolve(tier, needs, setup) -> Resolution{status, model, route, fallbacks[], warnings[], reason, rejected[], keep_configured}`
 and `llm-router resolve --tier X --needs tools,vision [--configured M] [--verify] [--json]`
 (exit 0 routed, 3 no eligible model, 2 bad arguments). Pure function of the
-`Setup` it is given; it executes nothing and is not wired into live routing.
+`Setup` it is given; it executes nothing and is not wired into live routing. Fitness results are written to
+`local_eligibility.json`, which `resource_map` reads for the map only; routing is unchanged.
 
 1. **Hard eligibility, never averaged.** Every failing reason is recorded per model.
    Present in the inventory; privacy (`local-only` needs a local model); authorized;

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess as sp
 import sys
+from typing import Callable
 
 from llm_router import paths
 
@@ -61,8 +61,20 @@ def cmd_onboard(args: list[str]) -> int:
 
 # ── Implementation ─────────────────────────────────────────────────────────────
 
-def _run_onboard() -> None:
-    """Zero-friction onboarding: detect capabilities, pick enforcement mode, write config, install."""
+def _run_onboard(
+    input_fn: Callable[[str], str] = input,
+    runner: Callable[[str], int] | None = None,
+    detect: Callable[[], dict[str, str]] | None = None,
+    interactive: Callable[[], bool] | None = None,
+) -> None:
+    """Zero-friction onboarding: detect capabilities, pick enforcement mode, write config, install.
+
+    ``input_fn``, ``runner``, ``detect`` (``runtime_offer.runtime_status``) and
+    ``interactive`` (stdin is a terminal) are injectable so tests never touch the host.
+    """
+    from llm_router import runtime_offer as _ro
+    from llm_router.onboard_needs import ask_needs
+
     STATE_DIR = str(paths.llm_router_home())
 
     print(f"\n{_bold('╔══════════════════════════════════════════╗')}")
@@ -70,18 +82,26 @@ def _run_onboard() -> None:
     print(f"{_bold('╚══════════════════════════════════════════╝')}\n")
     print("  Detecting your setup...\n")
 
-    # ── 1. Detect Ollama ──────────────────────────────────────────────────────
-    ollama_ok = False
-    try:
-        r = sp.run(["curl", "-sf", "http://localhost:11434/api/tags"],
-                   capture_output=True, timeout=3)
-        ollama_ok = r.returncode == 0
-    except Exception:
-        pass
-    if ollama_ok:
+    # ── 1. Detect local runtimes ──────────────────────────────────────────────
+    runtimes = dict((detect or _ro.runtime_status)())
+    ollama = runtimes.get("ollama")
+    if ollama == "running":
         print(_ok("Ollama running  (free local tier, ~1–3s)"))
-    else:
-        print(_warn("Ollama not detected  — install from ollama.ai for free routing"))
+    elif ollama == "installed":
+        print(_warn("Ollama installed but not running  — start it with: ollama serve"))
+    for name, state in runtimes.items():
+        if name == "ollama":
+            continue
+        if state == "running":
+            print(_ok(f"Local runtime detected: {name}  (via openai_compat)"))
+        else:
+            print(_warn(f"Local runtime installed but not running: {name}  — start its server"))
+    if not runtimes:
+        print(_warn("No local model runtime detected"))
+        print(_ro.runtime_offer())
+    # Installed Ollama counts: the session hook starts it. Other runtimes count
+    # only while their server answers.
+    local_ok = ollama is not None or "running" in runtimes.values()
 
     # ── 2. Detect Codex ───────────────────────────────────────────────────────
     codex_ok = shutil.which("codex") is not None
@@ -101,7 +121,7 @@ def _run_onboard() -> None:
 
     # ── 4. Recommend profile ──────────────────────────────────────────────────
     print()
-    if ollama_ok or codex_ok:
+    if local_ok or codex_ok:
         profile = "budget"
         print(f"  {_bold('Recommended profile:')} {_green('budget')}  (free-first via Ollama/Codex)")
     elif found_keys:
@@ -109,8 +129,25 @@ def _run_onboard() -> None:
         print(f"  {_bold('Recommended profile:')} {_yellow('balanced')}  (paid API routing)")
     else:
         print(f"\n  {_red('✗  No routing backends found!')}")
-        print("     Install Ollama (ollama.ai) or set an API key to enable routing.\n")
+        if runtimes:
+            print(_ro.runtime_offer())
+        print("     Start a local runtime or set an API key, then re-run `llm-router onboard`.\n")
+        # Only a person at a terminal can approve a system install: piped input
+        # (`yes | llm-router onboard`) never runs it.
+        if not (interactive or sys.stdin.isatty)():
+            return
+        try:
+            answer = input_fn("  Run the install command above now? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = "n"
+        if answer in ("y", "yes"):
+            print("  " + _ro.install_runtime(confirm=True, runner=runner))
         return
+
+    # ── 4b. Needs questions (feed the task-4 recommender; not wired yet) ──────
+    print(f"\n  {_bold('A few questions (Enter keeps the default, s skips):')}")
+    needs = ask_needs(input_fn, print)
+    print(f"  Needs: {needs.main_use}, languages={','.join(needs.languages)}, priority={needs.priority}")
 
     # ── 5. Choose enforcement mode ────────────────────────────────────────────
     print(f"\n  {_bold('Enforcement mode:')}")
@@ -119,7 +156,7 @@ def _run_onboard() -> None:
     print(f"    {_dim('[3] enforce')}  — block Claude when routing is violated  {_dim('(maximum savings)')}")
     print()
     try:
-        choice = input("  Choose [1/2/3, default=1]: ").strip() or "1"
+        choice = input_fn("  Choose [1/2/3, default=1]: ").strip() or "1"
     except (EOFError, KeyboardInterrupt):
         choice = "1"
 

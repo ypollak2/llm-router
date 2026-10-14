@@ -1,0 +1,1 @@
+P2.8 tasks 4-5: sha-pinned model catalog (`catalog/models.json`, 7-day TTL, bundled fallback) with `recommend(hardware, answers)`; approval-gated Ollama pull with progress; task-type fitness tasks recorded in `local_eligibility.json` (pass marks empty until the P2.0 prereg, so results are `unknown`).

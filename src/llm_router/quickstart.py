@@ -148,9 +148,9 @@ def main() -> None:
         print("    3. Re-run this wizard")
         print("")
         print("  Free local option (no API key needed):")
-        print("    1. Install Ollama: ollama.com")
-        print("    2. ollama pull qwen2.5:0.5b")
-        print("    3. Re-run this wizard")
+        from llm_router.runtime_offer import runtime_offer
+
+        print(runtime_offer())
         print("")
         if not _ask_yes("Continue without API keys?", default=False):
             print("\n  Exiting. Add keys and re-run: llm-router quickstart\n")

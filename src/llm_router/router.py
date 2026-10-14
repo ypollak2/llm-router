@@ -1833,7 +1833,7 @@ async def _cli_prompt_with_context(
     project_root: str | None = None,
     *,
     conversation: list | None = None,
-    context_door: str = "sdk",
+    context_door: str = "gateway",
 ) -> str:
     """Fold accumulated session context into a CLI-dispatch prompt.
 
@@ -1856,7 +1856,7 @@ async def _cli_prompt_with_context(
     nothing recorded yet) all just return ``prompt`` unchanged — CLI
     dispatch is never blocked, delayed, or altered in shape by this.
 
-    ``conversation`` (P1.1 doors 6-7): a caller's own history replaces the
+    ``conversation`` (P1.1 door 7, the gateway): a caller's own history replaces the
     session accumulator. It is packed with ``build_pack(door=context_door)``
     under the same privacy gate as the LiteLLM path and folded in as a labelled
     background block, whatever ``context_enabled`` says.
@@ -2781,8 +2781,8 @@ async def _dispatch_model_loop(
     chain_attempts_out: list[str] | None = None,
     # Caller history is packed separately for each provider attempt.
     conversation: list | None = None,
-    # The P1.1 door that supplied ``conversation``: "sdk" or "gateway".
-    context_door: str = "sdk",
+    # The P1.1 door that supplied ``conversation``: "gateway" (the SDK packs in sdk.py, D-98).
+    context_door: str = "gateway",
 ) -> LLMResponse:
     """Execute the main model dispatch loop with primary + emergency fallback chains.
 
@@ -4250,7 +4250,7 @@ async def route_and_call(
     suppress_ledger: bool = False,
     route_directive_id: str | None = None,
     messages: list[dict] | None = None,
-    context_door: str = "sdk",
+    context_door: str = "gateway",
 ) -> LLMResponse:
     """Route a request to the best available model and return the response.
 
@@ -4294,16 +4294,17 @@ async def route_and_call(
         messages: Caller conversation so far as {"role", "content"} chat dicts,
             excluding the current request. prompt is sent verbatim and never
             trimmed; build_pack drops a trailing user message equal to it.
-            None preserves existing behavior. Each attempt builds an SDK pack
-            with its target provider, gating conversation at call time through
+            None preserves existing behavior. Each attempt builds a pack
+            (``door=context_door``) with its target provider, gating conversation at call time through
             session_store.allows_session_content (only local/ollama are privacy-local).
             Disallowed attempts receive just the request, plus explicit context.
             Leading assistant turns are dropped for API providers. Pack failures
-            record CHZ-FO-ROUTER-SDK-PACK and send the plain prompt. The semantic
+            record CHZ-FO-ROUTER-<DOOR>-PACK and send the plain prompt. The semantic
             cache key includes a hash of messages to isolate conversations.
-        context_door: The P1.1 door that supplied ``messages``, ``"sdk"``
-            (default) or ``"gateway"``. It names the pack's door and the
-            fail-open code (``CHZ-FO-ROUTER-GATEWAY-PACK`` for the gateway).
+        context_door: The P1.1 door that supplied ``messages``; ``"gateway"``
+            (the default; D-43(c)). The SDK door does not come through here: it
+            packs inside its own build_chain/execute_chain path (D-98). It names
+            the pack's door and the fail-open code (``CHZ-FO-ROUTER-GATEWAY-PACK``).
             Ignored when ``messages`` is None.
         deadline_monotonic: Track-3 agent-safety absolute deadline.
             When set, the routed turn refuses to start if
@@ -4885,11 +4886,17 @@ async def route_and_call(
                     f"from LLM_ROUTER_BLOCK_PROVIDERS, or ensure a non-blocked provider "
                     f"(e.g. ollama/*) has a reachable model."
                 )
+            from llm_router.runtime_offer import runtime_offer
+
+            # The install offer only when no Ollama is configured; with one, the
+            # fix is doctor (its models were all filtered out or unreachable).
+            _offer = "" if "ollama" in available else (
+                "\n" + runtime_offer(api_keys=False) + "\nOr:"
+            )
             raise ValueError(
                 f"No providers available for {task_type.value}/{profile.value}. "
                 f"Configured providers: {available or 'none'}. "
-                "Fix: run `llm-router doctor` to diagnose, then one of:\n"
-                "  • Install Ollama (free, local): https://ollama.com\n"
+                f"Fix: run `llm-router doctor` to diagnose.{_offer}\n"
                 "  • Set GEMINI_API_KEY or OPENAI_API_KEY in ~/.llm-router/.env\n"
                 "  • Set LLM_ROUTER_CLAUDE_SUBSCRIPTION=true if you have Claude Pro/Max"
             )
@@ -5492,27 +5499,62 @@ def _pack_window(model: str, door: str) -> int:
     return _GATEWAY_NON_LOCAL_WINDOW if door == "gateway" else _MCP_NON_LOCAL_WINDOW
 
 
+# Keys under which a message carries text the context pack sends
+# (``context_pack._render_block`` / ``_from_chat`` / ``_from_item``): message and
+# block ``content``/``text``, OpenAI ``tool_calls[].function``, tool ``output``.
+# Everything else (ids, images, files, thinking signatures) is never sent as text,
+# so it is neither redacted nor counted.
+_TEXT_KEYS = frozenset({"content", "text", "tool_calls", "function", "output"})
+# Tool payloads the pack sends whole (``json.dumps`` of a dict input): every string
+# inside them is text, whatever its key.
+_PAYLOAD_KEYS = frozenset({"input", "arguments", "action"})
+
+
+def _walk_text(value, fn, *, payload: bool = False):
+    """``value`` with ``fn`` applied to every string the pack would send: under
+    ``_TEXT_KEYS`` at message/block level, and anywhere inside ``_PAYLOAD_KEYS``."""
+    if isinstance(value, str):
+        return fn(value)
+    if isinstance(value, list):
+        return [_walk_text(v, fn, payload=payload) for v in value]
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            if payload or k in _PAYLOAD_KEYS:
+                out[k] = _walk_text(v, fn, payload=True)
+            elif k in ("content", "output") and isinstance(v, dict):
+                # A dict tool result is sent json-dumped (context_pack._as_text).
+                out[k] = _walk_text(v, fn, payload=True)
+            elif k in _TEXT_KEYS:
+                out[k] = _walk_text(v, fn)
+            else:
+                out[k] = v
+        return out
+    return value
+
+
 def _messages_chars(messages: list | None) -> int:
-    """Characters of text in a caller's message list (string content and the
-    text of content blocks), for the budget estimates that used to see only
-    ``prompt`` (P1.1 doors 6-7 carry the history outside it)."""
+    """Characters of text in a caller's message list that the pack would send
+    (content, content blocks, tool-call arguments/inputs/outputs), for the budget estimates that used to see
+    only ``prompt`` (the gateway door carries the history outside it)."""
     n = 0
+
+    def count(text: str) -> str:
+        nonlocal n
+        n += len(text)
+        return text
+
     for m in messages or []:
-        c = m.get("content") if isinstance(m, dict) else None
-        if isinstance(c, str):
-            n += len(c)
-        elif isinstance(c, list):
-            for b in c:
-                if isinstance(b, dict):
-                    t = b.get("text") if isinstance(b.get("text"), str) else b.get("content")
-                    n += len(t) if isinstance(t, str) else 0
+        if isinstance(m, dict):
+            _walk_text(m, count)
     return n
 
 
 def _redact_messages(messages: list) -> tuple[list, dict[str, int]]:
-    """T4-M1 redaction over a caller's message list: string content and the
-    string ``text`` / ``content`` of each block. Fail-closed like the prompt
-    (``maybe_redact`` raises when redaction is on but unavailable)."""
+    """T4-M1 redaction over a caller's message list: every string the pack would
+    send (content, content blocks, tool-call arguments and inputs, tool outputs;
+    ``_walk_text``). Fail-closed like the prompt (``maybe_redact`` raises when
+    redaction is on but unavailable)."""
     counts: dict[str, int] = {}
 
     def scrub(text: str) -> str:
@@ -5521,24 +5563,7 @@ def _redact_messages(messages: list) -> tuple[list, dict[str, int]]:
             counts[k] = counts.get(k, 0) + v
         return out
 
-    out = []
-    for m in messages:
-        if not isinstance(m, dict):
-            out.append(m)
-            continue
-        c = m.get("content")
-        if isinstance(c, str):
-            c = scrub(c)
-        elif isinstance(c, list):
-            blocks = []
-            for b in c:
-                if isinstance(b, dict):
-                    for key in ("text", "content"):
-                        if isinstance(b.get(key), str):
-                            b = {**b, key: scrub(b[key])}
-                blocks.append(b)
-            c = blocks
-        out.append({**m, "content": c})
+    out = [_walk_text(m, scrub) if isinstance(m, dict) else m for m in messages]
     return out, counts
 _MCP_SUMMARY_ONLY_MAX_TOKENS = 500
 
@@ -5558,7 +5583,7 @@ async def _call_text(
     *,
     caller_context: str | None = None,
     conversation: list | None = None,
-    context_door: str = "sdk",
+    context_door: str = "gateway",
     user_prompt: str | None = None,
     scope_root: str | None = None,
     use_thinking: bool = False,
@@ -5583,9 +5608,9 @@ async def _call_text(
             tasks add a recency filter for Perplexity).
         caller_context: Explicit context, deduplicated against transcript turns.
         conversation: Caller history excluding the current request. None keeps
-            MCP context handling; SDK packs gate history per provider attempt.
-        context_door: The door that supplied ``conversation`` ("sdk" or
-            "gateway"); used as the pack's door and in the fail-open code.
+            MCP context handling; the gateway pack gates history per provider attempt.
+        context_door: The door that supplied ``conversation`` ("gateway");
+            used as the pack's door and in the fail-open code.
         user_prompt: Raw request before project context injection.
         scope_root: Explicit project root for the pack's project layer.
 
@@ -5905,10 +5930,12 @@ async def route_and_stream(
 
     if not models_to_try:
         error_detail = f"No models available for {task_type.value} / {profile.value}"
+        from llm_router.runtime_offer import runtime_offer
+
         raise ValueError(
             f"{error_detail}. "
-            "Fix: run `llm-router doctor` to diagnose, then install Ollama (free) "
-            "or set GEMINI_API_KEY / OPENAI_API_KEY in ~/.llm-router/.env"
+            "Fix: run `llm-router doctor` to diagnose, then:\n"
+            f"{runtime_offer()}"
         )
 
     # ── Emit route.started event ──────────────────────────────────────────

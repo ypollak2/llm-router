@@ -50,7 +50,7 @@ PROVIDER_API = {
 # D-22 / D-89: fetched only after opt-in (LLM_ROUTER_AUTO_BENCHMARK_FETCH, default off),
 # and rejected unless the bytes match the sha256 in src/llm_router/data/catalog_pins.json.
 CATALOG_PINNED: dict[str, str] = {
-    "raw.githubusercontent.com": "benchmark catalog and default community profile, sha256-pinned in catalog_pins.json (benchmark_fetcher.py); the unpinned scraper moved to scripts/bench",
+    "raw.githubusercontent.com": "benchmark catalog and default community profile, sha256-pinned in catalog_pins.json (benchmark_fetcher.py); the unpinned scraper moved to scripts/bench; the D-22 model catalog (model_catalog.py), sha256-pinned in catalog/pins.json and fetched only when the caller passes a fetcher",
 }
 # The only raw.githubusercontent.com URLs allowed, matched in full (^...$): the
 # release-tag catalog template (sha256 in catalog_pins.json) and the community
@@ -60,6 +60,9 @@ CATALOG_URL_PATTERNS = (
     re.compile(r"^https://raw\.githubusercontent\.com/ypollak2/llm-router/"
                r"(?:\{tag\}|[A-Za-z0-9._\-]+)/src/llm_router/data/benchmarks\.json$"),
     re.compile(r"^https://raw\.githubusercontent\.com/ypollak2/llm_router-profiles/main/community\.json$"),
+    # D-22 model catalog at the release tag (sha256 in src/llm_router/catalog/pins.json).
+    re.compile(r"^https://raw\.githubusercontent\.com/ypollak2/llm-router/"
+               r"(?:v\{version\}|v[A-Za-z0-9._\-]+)/src/llm_router/catalog/models\.json$"),
 )
 # D-89: called, but only when the user types the command.
 USER_COMMAND = {
@@ -384,6 +387,8 @@ def test_pinned_url_patterns_are_end_anchored_and_exact(tmp_path):
         base + "ypollak2/llm-router/{tag}/src/llm_router/data/benchmarks.json",
         base + "ypollak2/llm-router/v1.2.3/src/llm_router/data/benchmarks.json",
         base + "ypollak2/llm_router-profiles/main/community.json",
+        base + "ypollak2/llm-router/v{version}/src/llm_router/catalog/models.json",
+        base + "ypollak2/llm-router/v16.0.0/src/llm_router/catalog/models.json",
     ]
     bad = [
         base + "ypollak2/llm_router-profiles/main/community.json.evil",
@@ -391,6 +396,8 @@ def test_pinned_url_patterns_are_end_anchored_and_exact(tmp_path):
         base + "ypollak2/llm-router/main/anything.json",
         base + "ypollak2/llm-router/main/src/llm_router/data/benchmarks.json.evil",
         base + "ypollak2/llm-router/a/b/src/llm_router/data/benchmarks.json",
+        base + "ypollak2/llm-router/main/src/llm_router/catalog/models.json",
+        base + "ypollak2/llm-router/v{version}/src/llm_router/catalog/models.json.evil",
     ]
     path = tmp_path / "src/pkg/raw.py"
     path.parent.mkdir(parents=True)

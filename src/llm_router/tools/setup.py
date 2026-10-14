@@ -188,9 +188,10 @@ async def llm_setup(
     - "provider": Show details about a specific provider
     - "install_hooks": Install auto-routing hooks globally (every Claude Code session)
     - "uninstall_hooks": Remove auto-routing hooks
+    - "install_runtime": Show the local model runtime install command (never runs it)
 
     Args:
-        action: What to do — "status", "guide", "discover", "add", "test", "provider", "install_hooks", or "uninstall_hooks".
+        action: What to do — "status", "guide", "discover", "add", "test", "provider", "install_hooks", "uninstall_hooks", or "install_runtime".
         provider: Provider name (for "add", "test", and "provider" actions).
         api_key: API key value (for "add" action only). Key is validated before saving.
     """
@@ -223,8 +224,15 @@ async def llm_setup(
         return _setup_install_hooks()
     elif action == "uninstall_hooks":
         return _setup_uninstall_hooks()
+    elif action == "install_runtime":
+        from llm_router.runtime_offer import install_runtime_hint
+
+        return install_runtime_hint()
     else:
-        return f"Unknown action: {action}. Use: status, guide, discover, add, test, provider, install_hooks, or uninstall_hooks."
+        return (
+            f"Unknown action: {action}. Use: status, guide, discover, add, test, provider, "
+            "install_hooks, uninstall_hooks, or install_runtime."
+        )
 
 
 async def llm_rate(good: bool, decision_id: int | None = None) -> str:
