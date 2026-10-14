@@ -2749,6 +2749,8 @@ async def _dispatch_model_loop(
     chain_attempts_out: list[str] | None = None,
     # Caller history is packed separately for each provider attempt.
     conversation: list | None = None,
+    # The P1.1 door that supplied ``conversation``: "sdk" or "gateway".
+    context_door: str = "sdk",
 ) -> LLMResponse:
     """Execute the main model dispatch loop with primary + emergency fallback chains.
 
@@ -3328,6 +3330,7 @@ async def _dispatch_model_loop(
                         model, prompt, system_prompt, temperature, max_tokens, task_type,
                         caller_context=caller_context,
                         conversation=conversation,
+                        context_door=context_door,
                         user_prompt=user_prompt,
                         scope_root=scope_root,
                         use_thinking=use_thinking,
@@ -3780,6 +3783,7 @@ async def _dispatch_model_loop(
                             model, prompt, system_prompt, temperature, max_tokens, task_type,
                             caller_context=caller_context,
                             conversation=conversation,
+                            context_door=context_door,
                             user_prompt=user_prompt,
                             scope_root=scope_root,
                             use_thinking=use_thinking,
@@ -4209,6 +4213,7 @@ async def route_and_call(
     suppress_ledger: bool = False,
     route_directive_id: str | None = None,
     messages: list[dict] | None = None,
+    context_door: str = "sdk",
 ) -> LLMResponse:
     """Route a request to the best available model and return the response.
 
@@ -4259,6 +4264,10 @@ async def route_and_call(
             Leading assistant turns are dropped for API providers. Pack failures
             record CHZ-FO-ROUTER-SDK-PACK and send the plain prompt. The semantic
             cache key includes a hash of messages to isolate conversations.
+        context_door: The P1.1 door that supplied ``messages``, ``"sdk"``
+            (default) or ``"gateway"``. It names the pack's door and the
+            fail-open code (``CHZ-FO-ROUTER-GATEWAY-PACK`` for the gateway).
+            Ignored when ``messages`` is None.
         deadline_monotonic: Track-3 agent-safety absolute deadline.
             When set, the routed turn refuses to start if
             ``time.monotonic()`` is already past this value (raises
@@ -5207,6 +5216,7 @@ async def route_and_call(
             semantic_key=_semantic_key,
             chain_attempts_out=_attempt_trace,
             conversation=messages,
+            context_door=context_door,
         )
         # T3-S2 + T3-M1: combined timeout + cancel handling. Both failure
         # modes share the same cleanup contract — release the budget
@@ -5441,6 +5451,7 @@ async def _call_text(
     *,
     caller_context: str | None = None,
     conversation: list | None = None,
+    context_door: str = "sdk",
     user_prompt: str | None = None,
     scope_root: str | None = None,
     use_thinking: bool = False,
@@ -5466,6 +5477,8 @@ async def _call_text(
         caller_context: Explicit context, deduplicated against transcript turns.
         conversation: Caller history excluding the current request. None keeps
             MCP context handling; SDK packs gate history per provider attempt.
+        context_door: The door that supplied ``conversation`` ("sdk" or
+            "gateway"); used as the pack's door and in the fail-open code.
         user_prompt: Raw request before project context injection.
         scope_root: Explicit project root for the pack's project layer.
 
@@ -5511,7 +5524,7 @@ async def _call_text(
                     project_root=scope_root,
                     target_window=(local_models.num_ctx(model.split("/", 1)[1])
                                    if model.startswith("ollama/") else _MCP_NON_LOCAL_WINDOW),
-                    door="sdk",
+                    door=context_door,
                     project=project,
                     target_provider=provider,
                 )
@@ -5567,7 +5580,7 @@ async def _call_text(
         except Exception as exc:
             from llm_router import failopen
             failopen.record(
-                "CHZ-FO-ROUTER-SDK-PACK" if conversation is not None
+                f"CHZ-FO-ROUTER-{context_door.upper()}-PACK" if conversation is not None
                 else "CHZ-FO-ROUTER-MCP-PACK", exc,
             )
 
