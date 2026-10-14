@@ -287,6 +287,20 @@ def test_task_notification_and_peer_message_are_not_typed_prompts():
     assert not t.is_typed_prompt(entry(origin={"kind": "task-notification"}))
 
 
+def test_interrupt_marker_and_compaction_summary_are_not_typed_prompts():
+    """Found by the synthetic P1.9-a run (D-99): each one added a "prompt" with no turn."""
+    from llm_router import o3_transcripts as t
+
+    def entry(content, **kw):
+        return {"type": "user", "message": {"role": "user", "content": content}, **kw}
+
+    assert not t.is_typed_prompt(entry([{"type": "text", "text": "[Request interrupted by user]"}]))
+    assert not t.is_typed_prompt(entry("[Request interrupted by user for tool use]"))
+    assert not t.is_typed_prompt(entry("This session is being continued from a previous conversation.",
+                                       isCompactSummary=True, isVisibleInTranscriptOnly=True))
+    assert t.is_typed_prompt(entry("why was the request interrupted?"))  # only the leading marker
+
+
 def test_transcript_role_of_a_task_notification_answer_is_meta(tmp_path):
     from llm_router import o3_transcripts as t
 

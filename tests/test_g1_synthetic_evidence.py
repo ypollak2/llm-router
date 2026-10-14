@@ -150,3 +150,81 @@ def test_summary_coverage_on_synthetic_sessions(g1):
     res = g1.run_summary(n_sessions=20, spawns=20)
     assert res["label"] == g1.LABEL
     assert res["coverage"]["n_sessions"] == 20 and res["coverage"]["covered"] == 20
+
+
+# ── P1.9-a: O3 integrity on synthetic transcripts ─────────────────────────────
+
+
+def test_o3_counts_one_turn_per_typed_prompt_and_applies_the_d58_rules(g1):
+    res = g1.run_o3()
+    s = res["sessions"]
+    assert res["label"] == g1.LABEL and res["verdict"] == "PASS" and res["measurable"] == 3
+    for sid in ("synth-o3-a", "synth-o3-b", "synth-o3-c"):
+        assert s[sid]["state"] == "PASS" and s[sid]["ratio"] == 1.0, sid
+    assert s["synth-o3-b"]["coverage"] < 1.0                     # lost rows, still >= 95%
+    assert s["synth-o3-d"]["state"] == "UNMEASURABLE"            # proxy down: coverage ~50%
+    assert s["synth-o3-e"]["state"] == "NOT A GATE UNIT"         # < 50 typed prompts
+    ex = res["excluded"]                                          # every M0.3 cause is exercised
+    assert ex["side_call_excluded"] and ex["unjoined"] and ex["meta_first"] and ex["subagent_first"]
+
+
+def test_o3_check_fails_without_the_transcript_join(g1, tmp_path, monkeypatch):
+    """The measurement can fail: with no transcript the proxy-only rule keeps the orphan calls."""
+    main, subs, rows = g1.build_o3_session("synth-o3-x", 60)
+    g1.write_o3_session(tmp_path / "with", "synth-o3-x", main, subs)
+    until = max(r["ts"] for r in rows) + 60
+    kinds = frozenset({"synthetic"})
+    ok = g1.o3_integrity(tmp_path / "with", rows, since=g1._EPOCH - 60, until=until, kinds=kinds)
+    assert ok["sessions"]["synth-o3-x"]["ratio"] == 1.0
+
+    import llm_router.o3_transcripts as o3t
+
+    monkeypatch.setattr(o3t, "thread_lookup", lambda **k: (lambda sid, mid: None))
+    bad = g1.o3_integrity(tmp_path / "with", rows, since=g1._EPOCH - 60, until=until, kinds=kinds)
+    assert bad["sessions"]["synth-o3-x"]["ratio"] > 1.10 and bad["sessions"]["synth-o3-x"]["state"] == "FAIL"
+
+
+# ── P1.10-a / P0.9: replay corpus and readout ─────────────────────────────────
+
+
+def test_replay_corpus_is_valid_for_the_replay_harness(g1, tmp_path):
+    spec = importlib.util.spec_from_file_location("synthetic_replay_under_test", ROOT / "scripts" / "synthetic_replay.py")
+    sr = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = sr
+    try:
+        spec.loader.exec_module(sr)
+        recs = g1.replay_corpus(n_sessions=3, turns=5)
+        p = tmp_path / "c.jsonl"
+        p.write_text("".join(json.dumps(r) + "\n" for r in recs))
+        loaded = sr.load_corpus(p)
+    finally:
+        sys.modules.pop(spec.name, None)
+    steps = [r["step"] for r in loaded]
+    assert len(loaded) == 3 * (5 * 2 + 4 * 3)
+    assert steps.count("turn_first") == 15 and steps.count("subagent") == 12
+    assert g1.replay_corpus(3) == g1.replay_corpus(3)
+
+
+def test_identity_readout_uses_the_kpi_rule(g1, tmp_path):
+    import sqlite3
+
+    state = tmp_path / "state"
+    state.mkdir()
+    proxy = [{"session_id": "synth-replay-1", "task_id": "0123456789abcdef"}] * 198 + \
+            [{"session_id": "synth-replay-1", "task_id": "gen-0123456789ab"},       # generated: missing
+             {"session_id": "unknown:hook", "task_id": "0123456789abcdef"}]          # unknown: missing
+    (state / "proxy_calls.jsonl").write_text("".join(json.dumps(r) + "\n" for r in proxy))
+    con = sqlite3.connect(state / "usage.db")
+    con.execute("CREATE TABLE usage (session_id TEXT, task_id TEXT)")
+    con.executemany("INSERT INTO usage VALUES (?, ?)", [("synth-replay-1", "0123456789abcdef")] * 50)
+    con.commit()
+    con.close()
+    summary = {"timing": {"lifecycle": {"session-start:SessionStart": {"n": 60, "p50_ms": 300.0, "p95_ms": 900.0}},
+                          "wall_s": 1.0},
+               "deterministic": {"errors": [], "network": {"violations": 0}, "corpus": {}},
+               "run": {"git_sha": "x"}}
+    res = g1.identity_from_replay(state, summary)
+    assert res["paths"]["proxy"]["n"] == 200 and res["paths"]["proxy"]["share"] == 0.99
+    assert res["paths"]["proxy"]["verdict"] == "PASS" and res["paths"]["usage"]["verdict"] == "n<200"
+    assert res["verdict_p110a"] == "NOT INFORMATIVE"
+    assert res["latency"]["P0.9-a session-start"]["verdict"] == "PASS"

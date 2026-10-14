@@ -25,7 +25,9 @@ the transcript's assistant entry. The transcript says what the call was:
 be said about the call.
 
 "Typed prompt": a ``user`` entry that is not a sidechain, not ``isMeta``, has non-blank text (a tool
-result has none), does not start with ``<command-`` and was not injected by the harness. Injected =
+result has none), does not start with ``<command-`` or ``[Request interrupted`` (the marker the host
+writes when a person stops a turn), is not the host's compaction summary (``isCompactSummary``) and
+was not injected by the harness. Injected =
 ``promptSource == "system"`` or an ``origin.kind`` other than ``human`` (a ``task-notification`` is
 ``promptSource=system`` with ``isMeta`` false: on the M0.3 session 113 of 209 "typed prompts" were such
 notifications, PR #295). ``$PP/scripts/o3_integrity.py`` still counts them (it is the frozen M0.3 gate); its
@@ -34,6 +36,7 @@ P1.9 variant does not. Reads message ids and entry kinds only: no prompt text le
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -44,6 +47,10 @@ ROLE_CONTINUATION = "continuation"
 ROLE_META = "meta"
 ROLE_SIDECHAIN = "sidechain"
 ROLE_ORPHAN = "orphan"
+
+#: The host writes this user text when a person stops a turn; it is not a prompt (``proxy/steps``
+#: reads it the same way, through ``groundtruth_sources._INTERRUPT``).
+_INTERRUPT = re.compile(r"^\s*\[Request interrupted", re.I)
 
 
 def typed_text(content: Any) -> str | None:
@@ -65,13 +72,20 @@ def is_injected(entry: dict) -> bool:
     return isinstance(kind, str) and kind != "human"
 
 
+def _not_typed(entry: dict, text: str) -> bool:
+    """A user entry with text that no person typed as a prompt: ``isMeta``, injected, a slash
+    command, an interrupt marker or the host's compaction summary."""
+    return bool(entry.get("isMeta") or entry.get("isCompactSummary") or is_injected(entry)
+                or text.lstrip().startswith("<command-") or _INTERRUPT.match(text))
+
+
 def is_typed_prompt(entry: dict) -> bool:
     """A ``user`` transcript entry counted as a typed human prompt (see the module docstring)."""
-    if entry.get("type") != "user" or entry.get("isSidechain") or entry.get("isMeta") or is_injected(entry):
+    if entry.get("type") != "user" or entry.get("isSidechain"):
         return False
     msg = entry.get("message")
     text = typed_text(msg.get("content") if isinstance(msg, dict) else None)
-    return bool(text and text.strip() and not text.lstrip().startswith("<command-"))
+    return bool(text and text.strip() and not _not_typed(entry, text))
 
 
 def _scan_main(path: Path, out: dict[str, str]) -> None:
@@ -109,7 +123,7 @@ def _scan_main(path: Path, out: dict[str, str]) -> None:
                 text = typed_text(msg.get("content") if isinstance(msg, dict) else None)
                 if text is None or not text.strip():
                     state = "tool"
-                elif d.get("isMeta") or is_injected(d) or text.lstrip().startswith("<command-"):
+                elif _not_typed(d, text):
                     # injected input never demotes a typed prompt or a tool result it follows
                     if state not in ("human", "tool"):
                         state = "meta"
