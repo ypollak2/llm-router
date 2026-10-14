@@ -732,7 +732,7 @@ def action_units(since: float, until: float, *, proxy_rows: list[dict] | None = 
     Returns ``{"actions": [...], "excluded": {...}, "sampled": {lane: batch}, "built": build_units result}``.
     Each action: ``ts, session_id, door, task_group, served_class, model, first, redone, reread, window_open,
     lane, sampled, numerator, spread``. ``excluded`` counts what is NOT an action and why."""
-    from llm_router import lane_quality, paths
+    from llm_router import lane_quality
     from llm_router.proxy import ledger as pl
 
     now, days = until, (until - since) / 86400.0
@@ -748,7 +748,8 @@ def action_units(since: float, until: float, *, proxy_rows: list[dict] | None = 
     mcp_rows = [u for u in mcp_rows if u.get("reason_code") != "cache_hit"
                 and not str(u.get("model") or "").startswith("cache/")]
     if techops is None:
-        techops = _read_jsonl(paths.state_path(TECHOP_FILE))
+        from llm_router import technical_ops
+        techops = technical_ops.read_ops()  # both generations of the capped log
     if edit_rows is None:
         from llm_router import northstar
         edit_rows = northstar._load_edit_outcomes()

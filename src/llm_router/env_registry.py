@@ -173,6 +173,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_AGENT_WINDOW": ("llm_router", "hooks/context_budget.py", 1),
     "LLM_ROUTER_MAX_TOOL_RESULT_CHARS": ("llm_router", "hooks/context_budget.py", 1),
     "LLM_ROUTER_LOCAL_VISION": ("llm_router", "vision_registry.py", 1),
+    "LLM_ROUTER_TECH_OPS_MAX_BYTES": ("llm_router", "technical_ops.py", 1),
     "LLM_ROUTER_VISION_MODEL": ("llm_router", "vision_registry.py", 1),
     "LLM_ROUTER_COMPRESS_EMIT": ("llm_router", "hooks/bash-compress.py", 1),
     "LLM_ROUTER_IMAGE_INTERCEPT": ("llm_router", "hooks/tool_intercept.py", 1),
