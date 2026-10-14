@@ -59,15 +59,24 @@ _WRITE_REDIRECTS = {">", ">>", ">|", "&>", "&>>", "<>", ">&"}
 _READ_REDIRECTS = {"<", "<<", "<<-", "<<<", "<&"}
 _NULL_DEVICES = {"/dev/null", "/dev/stdout", "/dev/stderr"}
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-_WRAPPERS = {"command", "exec", "time", "nohup", "nice", "builtin", "env", "timeout", "stdbuf"}
+_WRAPPERS = {"command", "exec", "time", "nohup", "nice", "builtin", "env", "timeout", "stdbuf",
+             "setsid"}
+_INTERPRETERS_STDIN_PATHS = {"-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"}
+#: Options of an interpreter that take a value, so the next word is not a script.
+_INTERP_VALUED = {
+    "python": {"-W", "-X", "-Q"}, "node": {"-r", "--require", "--import", "--loader"},
+    "sh": {"-o", "-O", "+o", "+O", "--rcfile", "--init-file"},
+    "perl": {"-I", "-M", "-m", "-x"}, "ruby": {"-I", "-r", "-C"},
+}
 
 _KEYWORDS = {"{", "}", "!", "do", "then", "else", "elif", "if", "while", "until",
              "done", "fi", "esac"}          # grammar words: the command follows them
 _HEADS = {"for", "select", "case"}           # whole segment is a loop/case head (data only)
-_ARITH_CMD = re.compile(r"(?<![\w$-])(?:let|declare|typeset)\b|\blocal\s+-\w*i|\(\(")
-_NESTED_EXEC = re.compile(r"\$\((?!\()|`")
-_ARITH_WHY = ("`$(`/backtick on a line that also evaluates arithmetic "
-              "(let/declare/typeset/local -i/((/$((): bash re-evaluates it even inside quotes)")
+_ARITH_CMD = re.compile(r"(?<![\w$-])(?:let|declare|typeset|read)\b|\blocal\s+-\w*i|\(\(|\[|\$\{!")
+_SED_WRITE = re.compile(r"(?:^|[/;}\s])[wW]\s*\S")
+_LOOPS_OR_FUNCS = re.compile(r"(?<![\w-])(?:for|while|until|select|function)(?![\w-])|\(\s*\)")
+_ARITH_WHY = ("`$(`/backtick on a line that also evaluates arithmetic or a subscript "
+              "(let/declare/typeset/read/local -i/((/[ ]/${!}: bash re-evaluates it even inside quotes)")
 
 _NOT_WIRED = " — not run (needs approval; approval is not wired, so treated as refused)"
 _ARITH = re.compile(r"[A-Za-z0-9_ \t+\-*/%()!~^=,?:$]*")
@@ -96,6 +105,20 @@ def _dollar_paren(cmd: str, i: int) -> tuple[int, bool]:
     return i + 2, True
 
 
+def _raw_nested_exec(cmd: str) -> bool:
+    """Any ``$(``/backtick in the raw text, quoted or not, that is not a strict
+    ``$((arithmetic))`` (so ``$((cmd) )`` counts)."""
+    if "`" in cmd:
+        return True
+    i = cmd.find("$(")
+    while i >= 0:
+        end, is_sub = _dollar_paren(cmd, i)
+        if is_sub:
+            return True
+        i = cmd.find("$(", max(end, i + 2))
+    return False
+
+
 Token = tuple[str, str, bool]          # (kind 'op'|'word', text, has_expansion)
 
 
@@ -105,7 +128,7 @@ def _tokenize(cmd: str) -> tuple[list[Token], bool]:
     data, not commands); an unquoted newline becomes a ``;`` operator."""
     toks: list[Token] = []
     subst = False
-    pending: list[tuple[str, bool]] = []
+    pending: list[tuple[str, bool, bool]] = []      # (delimiter, strip tabs, quoted)
     heredoc_next: bool | None = None
     last_word_end = -1
     i, n = 0, len(cmd)
@@ -114,13 +137,15 @@ def _tokenize(cmd: str) -> tuple[list[Token], bool]:
         if c == "\n":
             toks.append(("op", ";", False))
             i += 1
-            for delim, strip in pending:
+            for delim, strip, quoted in pending:
                 while i < n:
                     j = cmd.find("\n", i)
                     line = cmd[i:] if j < 0 else cmd[i:j]
                     i = n if j < 0 else j + 1
                     if (line.lstrip("\t") if strip else line) == delim:
                         break
+                    if not quoted and _raw_nested_exec(line):
+                        subst = True             # an unquoted heredoc body is expanded
             pending = []
             continue
         if c in " \t\r":
@@ -145,8 +170,12 @@ def _tokenize(cmd: str) -> tuple[list[Token], bool]:
             continue
         word: list[str] = []
         expands = False
+        quoted = False
+        brace = comma = False                   # unquoted `{`/`,` (brace expansion)
         while i < n and cmd[i] not in " \t\r\n" and cmd[i] not in _OP_START:
             c = cmd[i]
+            if c in "'\"\\":
+                quoted = True
             if c == "'":
                 j = cmd.find("'", i + 1)
                 if j < 0:
@@ -178,9 +207,18 @@ def _tokenize(cmd: str) -> tuple[list[Token], bool]:
                     word.append(d)
                     i += 1
             elif c == "\\":
+                if cmd[i + 1:i + 2] == "\n":
+                    i += 2                      # line continuation: joins the word
+                    continue
                 word.append(cmd[i + 1] if i + 1 < n else "")
                 i += 2
             else:
+                if c == "{":
+                    brace = True
+                elif c == "," and brace:
+                    comma = True
+                elif c == "}" and comma:
+                    expands = True              # {a,b}: bash brace expansion
                 if c == "$" and cmd[i + 1:i + 2] == "(":
                     i, sub = _dollar_paren(cmd, i)
                     subst = subst or sub
@@ -194,7 +232,7 @@ def _tokenize(cmd: str) -> tuple[list[Token], bool]:
                 i += 1
         text = "".join(word)
         if heredoc_next is not None:
-            pending.append((text, heredoc_next))
+            pending.append((text, heredoc_next, quoted))
             heredoc_next = None
         toks.append(("word", text, expands))
         last_word_end = i
@@ -259,6 +297,21 @@ def _split_opts(args: list[str]) -> tuple[list[str], list[str]]:
     return args[:k], args[k:]
 
 
+def _interp_opts(args: list[str], valued: set[str]) -> tuple[list[str], list[str]]:
+    """(options, the rest) of an interpreter's argv: options run until the first
+    positional (the script), skipping the value of an option that takes one
+    (``python -W ignore -c ...``)."""
+    k = 0
+    opts: list[str] = []
+    while k < len(args) and (args[k].startswith("-") or args[k].startswith("+")) and args[k] != "-":
+        if args[k] == "--":
+            k += 1
+            break
+        opts.append(args[k])
+        k += 2 if args[k] in valued else 1
+    return opts, args[k:]
+
+
 def _positionals(args: list[str], takes_value: set[str]) -> tuple[list[str], str | None]:
     """Positional args of a cp/mv/install/ln style command, plus a -t DIR value."""
     pos: list[str] = []
@@ -281,6 +334,13 @@ def _positionals(args: list[str], takes_value: set[str]) -> tuple[list[str], str
             k += 1
         elif a.startswith("-t") and not a.startswith("--") and len(a) > 2:
             tdir = a[2:]
+        elif not a.startswith("--") and "t" in a[1:]:
+            j = a.index("t", 1)                        # -vt DIR / -vtDIR
+            if j == len(a) - 1 and k + 1 < len(args):
+                tdir = args[k + 1]
+                k += 1
+            elif j < len(a) - 1:
+                tdir = a[j + 1:]
         elif a in takes_value:
             k += 1
         k += 1
@@ -306,6 +366,10 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
         elif w == "function":
             i += 2                                     # `function NAME`; the body follows
         elif w in _HEADS and i == 0:
+            texts = [t[1] for t in words]
+            if w != "case" and "do" in texts:
+                i = texts.index("do") + 1              # `for x do BODY`: the body is a command
+                continue
             return                                     # `for N in W`, `case W in`: data only
         elif base in _WRAPPERS or base in ("sudo", "doas"):
             if base in ("sudo", "doas"):
@@ -314,14 +378,23 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
             # the wrapper's own options (and their values)
             valued = {"timeout": {"-s", "-k", "--signal", "--kill-after"},
                       "stdbuf": {"-i", "-o", "-e", "--input", "--output", "--error"},
-                      "nice": {"-n", "--adjustment"}}.get(base, set())
+                      "nice": {"-n", "--adjustment"}, "env": {"-u", "--unset"},
+                      "exec": {"-a"}}.get(base, set())
             while i < len(words) and words[i][1].startswith("-") and words[i][1] != "-":
-                i += 2 if words[i][1] in valued else 1
+                o = words[i][1]
+                if base == "env" and (o in ("-S", "-C", "--split-string", "--chdir")
+                                      or o.startswith(("--split-string=", "--chdir="))
+                                      or (not o.startswith("--") and ("S" in o or "C" in o))):
+                    scan.need(f"env {o} runs a string or changes directory")
+                i += 2 if o in valued else 1
             if base == "timeout":
                 i += 1                                 # the DURATION operand
         else:
             break
     if i >= len(words):
+        return
+    if words[i][2]:
+        scan.need(f"command name built from an expansion: {words[i][1]}")
         return
     prog = os.path.basename(words[i][1])
     args = [w[1] for w in words[i + 1:]]
@@ -333,8 +406,10 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
 
     if prog in ("cd", "pushd"):
         pos = [a for a in args if not a.startswith("-") or a == "-"]
-        if not pos or pos[0] == "-" or pos[0].startswith("~-") or expands.get(pos[0], False) or scan.cwd is None:
-            scan.cwd = None
+        relative_name = bool(pos) and not pos[0].startswith(("/", "./", "../", "~")) and pos[0] not in (".", "..")
+        if (not pos or pos[0] == "-" or pos[0].startswith("~-") or expands.get(pos[0], False)
+                or scan.cwd is None or (relative_name and os.environ.get("CDPATH"))):
+            scan.cwd = None                            # CDPATH can send a bare name anywhere
         else:
             d0 = pos[0]
             if d0 == "~+" or d0.startswith("~+/"):
@@ -345,9 +420,13 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
     if prog == "popd":
         scan.cwd = None
         return
-    if rest[:1] == ["-"] and (re.fullmatch(r"python[\d.]*", prog) or prog in (
-            "node", "nodejs", "sh", "bash", "zsh", "dash", "ksh", "fish", "perl", "ruby")):
-        scan.need(f"{prog} - (code from stdin)")
+    family = ("python" if re.fullmatch(r"python[\d.]*", prog) else "node" if prog in ("node", "nodejs")
+              else "sh" if prog in ("sh", "bash", "zsh", "dash", "ksh", "fish") else prog)
+    if family in _INTERP_VALUED or family in ("php", "lua"):
+        opts, rest = _interp_opts(args, _INTERP_VALUED.get(family, set()))
+    if rest[:1] and rest[0] in _INTERPRETERS_STDIN_PATHS and family in (
+            "python", "node", "sh", "perl", "ruby"):
+        scan.need(f"{prog} {rest[0]} (code from stdin)")
     if prog == "eval":
         scan.need("eval")
     elif re.fullmatch(r"python[\d.]*", prog):
@@ -392,6 +471,9 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
         symbolic = prog == "ln" and any(
             o == "--symbolic" or (o.startswith("-") and not o.startswith("--") and "s" in o)
             for o in args if o.startswith("-"))
+        hard = (prog == "ln" and not symbolic) or (prog == "cp" and any(
+            o == "--link" or (o.startswith("-") and not o.startswith("--") and "l" in o)
+            for o in args if o.startswith("-")))
         if tdir is not None:
             tgt(tdir)
             dest_dir = scan.cwd / os.path.expanduser(tdir) if scan.cwd else None
@@ -417,12 +499,23 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
             # later `> link/x` in the same command line would not be seen.
             for s in srcs:
                 scan.target(s, expands.get(s, False), base=dest_dir)
+        elif hard:
+            # an in-root hard link to an outside inode: writing it writes outside
+            for s in srcs:
+                tgt(s)
     elif prog in _PATH_WRITERS:
         takes = _PATH_WRITERS[prog]
-        pos, _ = _positionals(args, takes)
-        if prog in ("chmod", "chown", "chgrp", "rename") and not any(
-                a.startswith("--reference") for a in args):
-            pos = pos[1:]                              # mode / owner / s-expression
+        if prog == "chmod":                            # -w, +x, =r are modes, not options
+            args_ = [a for a in args if not re.fullmatch(r"[-+=][rwxXstugoa,+=-]*", a)]
+            mode_like = len(args_) != len(args)
+            pos, _ = _positionals(args_, takes)
+            if not mode_like and not any(a.startswith("--reference") for a in args):
+                pos = pos[1:]
+        else:
+            pos, _ = _positionals(args, takes)
+            if prog in ("chown", "chgrp", "rename") and not any(
+                    a.startswith("--reference") for a in args):
+                pos = pos[1:]                          # owner / s-expression
         for a in pos:
             tgt(a)
     elif prog == "sed":
@@ -435,11 +528,29 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
                     has_script = True
                     k += 2
                     continue
+                if a.startswith(("--expression=", "--file=")) or (
+                        re.fullmatch(r"-[nEsurz]*[ef].+", a)):
+                    has_script = True                  # -eSCRIPT, --expression=SCRIPT
+                    k += 1
+                    continue
                 if not a.startswith("-") or a == "-":
                     files.append(a)
                 k += 1
             for f in (files if has_script else files[1:]):
                 tgt(f)
+        if any(_SED_WRITE.search(a) for a in args if not a.startswith("-")):
+            scan.need("sed w/W command writes files")
+    elif prog in ("awk", "gawk", "mawk", "nawk"):
+        if any("system" in a or ">" in a or "|" in a for a in args if not a.startswith("-")):
+            scan.need(f"{prog} program can run commands or write files")
+    elif prog == "find" and (set(args) & {"-delete", "-fprint", "-fprint0", "-fprintf", "-fls"}):
+        start = 0
+        while start < len(args) and not args[start].startswith(("-", "(", "!")):
+            tgt(args[start])                           # the search paths -delete may remove
+            start += 1
+        for k2, a in enumerate(args):
+            if a in ("-fprint", "-fprint0", "-fprintf", "-fls") and k2 + 1 < len(args):
+                tgt(args[k2 + 1])
     elif prog == "perl":
         if any(re.fullmatch(r"-[plnaw0-9]*i.*", o) for o in args if o.startswith("-")):
             has_script, files, k = False, [], 0
@@ -489,15 +600,19 @@ def check_command(cmd: str, root: Path) -> Verdict:
     scan = _Scan(root)
     if subst:
         scan.need(_SUBST_WHY)
-    if _ARITH_CMD.search(cmd) and _NESTED_EXEC.search(cmd):
+    if _ARITH_CMD.search(cmd) and _raw_nested_exec(cmd):
         scan.need(_ARITH_WHY)
+    if re.search(r"(?<![\w-])(?:cd|pushd|popd)(?![\w-])", cmd) and _LOOPS_OR_FUNCS.search(cmd):
+        scan.need("cd combined with a loop or a function: the body may run in another directory")
+    if "CDPATH" in cmd:
+        scan.need("CDPATH changes where cd goes")
 
     words: list[Token] = []
     redirs: list[tuple[str, Token | None]] = []
     prev_sep = ""
     stdin_code = False
     k = 0
-    cwd_stack: list[Path | None] = []
+    cwd_stack: list[tuple[str, Path | None]] = []   # ("sub", cwd) per `(`, ("case", None) per case
 
     def flush(sep: str) -> None:
         nonlocal words, redirs, prev_sep, stdin_code
@@ -521,9 +636,9 @@ def check_command(cmd: str, root: Path) -> Verdict:
         if kind == "op" and text in _SEPARATORS:
             flush(text)
             if text == "(":
-                cwd_stack.append(scan.cwd)             # a subshell's cd stays inside it
-            elif text == ")" and cwd_stack:
-                scan.cwd = cwd_stack.pop()
+                cwd_stack.append(("sub", scan.cwd))    # a subshell's cd stays inside it
+            elif text == ")" and cwd_stack and cwd_stack[-1][0] == "sub":
+                scan.cwd = cwd_stack.pop()[1]          # a case pattern's `)` closes nothing
         elif kind == "op" and (text in _WRITE_REDIRECTS or text in _READ_REDIRECTS):
             nxt = toks[k + 1] if k + 1 < len(toks) else None
             if nxt is not None and nxt[0] == "op" and nxt[1] == "(" and text in (">", "<"):
@@ -538,6 +653,13 @@ def check_command(cmd: str, root: Path) -> Verdict:
                     stdin_code = True
                 k += 1
         else:
+            if kind == "word" and not words and text == "case":
+                cwd_stack.append(("case", None))
+            elif kind == "word" and not words and text == "esac":
+                while cwd_stack and cwd_stack[-1][0] != "case":
+                    cwd_stack.pop()
+                if cwd_stack:
+                    cwd_stack.pop()
             words.append((kind, text, exp))
         k += 1
     flush("")

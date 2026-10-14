@@ -329,3 +329,81 @@ def test_r4_benign_compound_commands_are_allowed(tree, cmd):
     (root / "build").mkdir(exist_ok=True)
     v = check_command(cmd, root)
     assert v.decision == "allow", (cmd, v)
+
+
+# ---- review round 5 (#452 code review): escapes found by running each one under sh/bash ----
+
+GATED_R5 = [
+    # unquoted heredoc bodies are expanded
+    "cat <<EOF\n$(touch {out}/a)\nEOF",
+    "cat <<EOF\n`touch {out}/a`\nEOF",
+    # -c / -e after an option that takes a value
+    "python3 -W ignore -c \"open('{out}/r','w')\"",
+    "bash -o errexit -c 'touch {out}/s'",
+    "perl -I lib -e 'open F,\">{out}/t\"'",
+    # env -S / -C, exec -a, setsid
+    "env -S 'touch {out}/b'",
+    "env -C {out} touch c",
+    "exec -a foo touch {out}/d",
+    "setsid touch {out}/d",
+    # hard links to outside inodes
+    "ln {out}/f h && echo pwn >> h",
+    "cp -l {out}/f h2",
+    # cd inside loops and functions, CDPATH
+    "f(){{ touch v; }}; cd {out} && f",
+    "for i in 1 2; do touch w; cd ..; done",
+    "CDPATH=.. cd out && touch u",
+    # sed script forms and the w command
+    "sed -i --expression=s/x/y/ {out}/f",
+    "sed -i -es/x/y/ {out}/f",
+    "sed 's/x/y/w {out}/f' in.txt",
+    # a case pattern's `)` does not leave the subshell
+    "(cd {out}; case a in a) touch e;; esac)",
+    # for without `in`
+    "set -- a; for x do touch {out}/g; done",
+    # re-evaluated subscripts
+    "x='b[$(touch {out}/h)]'; a[x]=1",
+    "read 'a[$(touch {out}/k)]' <<< x",
+    "x='a[$(touch {out}/l)]'; echo ${{!x}}",
+    "let 'a[$((touch {out}/j) )]=1'",
+    # the shell rewrites the text before it runs
+    "tou\\\nch {out}/m",
+    "T=touch; $T {out}/o",
+    "{{touch,{out}/x}}",
+    "echo x | tee {{a,{out}/y}}",
+    "$'\\x74ouch' {out}/n",
+    # extras from the review
+    "cp -vt {out} f",
+    "chmod -w {out}/f",
+    "awk 'BEGIN{{system(\"touch {out}/z\")}}'",
+    "python3 /dev/stdin <<'E'\nopen('/tmp/q','w')\nE",
+    "find {out} -delete",
+    "find . -fprint {out}/list",
+]
+
+ALLOWED_R5 = [
+    "python3 -W ignore script.py",
+    "bash -o errexit script.sh",
+    "cat <<'EOF'\n$(not run)\nEOF",
+    "sed -i -es/x/y/ f.txt",
+    "cp -vt build f.txt",
+    "chmod -w f.txt",
+    "find . -name '*.pyc' -delete",
+    "ln -s a.txt l3",
+    "echo {a..c}",
+]
+
+
+@pytest.mark.parametrize("tpl", GATED_R5)
+def test_r5_review_escapes_are_gated(tree, tpl):
+    root, out = tree
+    v = check_command(tpl.format(out=out), root)
+    assert v.decision in ("refuse", "needs_approval"), (tpl, v)
+
+
+@pytest.mark.parametrize("cmd", ALLOWED_R5)
+def test_r5_in_root_forms_stay_allowed(tree, cmd):
+    root, _ = tree
+    (root / "build").mkdir(exist_ok=True)
+    v = check_command(cmd, root)
+    assert v.decision == "allow", (cmd, v)
