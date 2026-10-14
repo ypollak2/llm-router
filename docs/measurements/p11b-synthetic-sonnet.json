@@ -1,0 +1,481 @@
+{
+  "arms": "PACK vs FULL",
+  "bar": 0.02,
+  "better": 0,
+  "by_category": {
+    "early_assistant": {
+      "better": 0,
+      "n": 10,
+      "pack_pass": 0,
+      "ref_pass": 10,
+      "worse": 10
+    },
+    "early_tool": {
+      "better": 0,
+      "n": 10,
+      "pack_pass": 0,
+      "ref_pass": 10,
+      "worse": 10
+    },
+    "early_user": {
+      "better": 0,
+      "n": 10,
+      "pack_pass": 10,
+      "ref_pass": 10,
+      "worse": 0
+    },
+    "recent": {
+      "better": 0,
+      "n": 30,
+      "pack_pass": 30,
+      "ref_pass": 30,
+      "worse": 0
+    }
+  },
+  "cost_usd": 8.7304,
+  "errors": 0,
+  "items": 60,
+  "label": "synthetic (D-99)",
+  "mcnemar_exact_p": 1.9073486328125e-06,
+  "models": [
+    "claude-sonnet-5-5"
+  ],
+  "must": "P1.1-b",
+  "n": 60,
+  "pack_modes": {
+    "pack": 60
+  },
+  "pack_pass": 40,
+  "prereg": "PREREG-P11B-synthetic.md",
+  "prereg_sha256": "231fe6a415e2bc9202b2b224ff61fe5d1256307557c5b745cc7a8e50a181c585",
+  "ref_pass": 60,
+  "rows": [
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-000-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-001-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-002-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-003-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-004-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-005-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-006-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-007-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-008-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-009-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-010-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-011-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-012-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-013-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-014-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-015-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-016-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-017-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-018-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-019-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-020-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-021-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-022-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-023-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-024-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-025-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-026-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-027-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-028-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "recent",
+      "error": null,
+      "item": "p11b-029-recent",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "early_user",
+      "error": null,
+      "item": "p11b-030-early_user",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "early_user",
+      "error": null,
+      "item": "p11b-031-early_user",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "early_user",
+      "error": null,
+      "item": "p11b-032-early_user",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "early_user",
+      "error": null,
+      "item": "p11b-033-early_user",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "early_user",
+      "error": null,
+      "item": "p11b-034-early_user",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "early_user",
+      "error": null,
+      "item": "p11b-035-early_user",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "early_user",
+      "error": null,
+      "item": "p11b-036-early_user",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "early_user",
+      "error": null,
+      "item": "p11b-037-early_user",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "early_user",
+      "error": null,
+      "item": "p11b-038-early_user",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "early_user",
+      "error": null,
+      "item": "p11b-039-early_user",
+      "pack": true,
+      "ref": true
+    },
+    {
+      "category": "early_tool",
+      "error": null,
+      "item": "p11b-040-early_tool",
+      "pack": false,
+      "ref": true
+    },
+    {
+      "category": "early_tool",
+      "error": null,
+      "item": "p11b-041-early_tool",
+      "pack": false,
+      "ref": true
+    },
+    {
+      "category": "early_tool",
+      "error": null,
+      "item": "p11b-042-early_tool",
+      "pack": false,
+      "ref": true
+    },
+    {
+      "category": "early_tool",
+      "error": null,
+      "item": "p11b-043-early_tool",
+      "pack": false,
+      "ref": true
+    },
+    {
+      "category": "early_tool",
+      "error": null,
+      "item": "p11b-044-early_tool",
+      "pack": false,
+      "ref": true
+    },
+    {
+      "category": "early_tool",
+      "error": null,
+      "item": "p11b-045-early_tool",
+      "pack": false,
+      "ref": true
+    },
+    {
+      "category": "early_tool",
+      "error": null,
+      "item": "p11b-046-early_tool",
+      "pack": false,
+      "ref": true
+    },
+    {
+      "category": "early_tool",
+      "error": null,
+      "item": "p11b-047-early_tool",
+      "pack": false,
+      "ref": true
+    },
+    {
+      "category": "early_tool",
+      "error": null,
+      "item": "p11b-048-early_tool",
+      "pack": false,
+      "ref": true
+    },
+    {
+      "category": "early_tool",
+      "error": null,
+      "item": "p11b-049-early_tool",
+      "pack": false,
+      "ref": true
+    },
+    {
+      "category": "early_assistant",
+      "error": null,
+      "item": "p11b-050-early_assistant",
+      "pack": false,
+      "ref": true
+    },
+    {
+      "category": "early_assistant",
+      "error": null,
+      "item": "p11b-051-early_assistant",
+      "pack": false,
+      "ref": true
+    },
+    {
+      "category": "early_assistant",
+      "error": null,
+      "item": "p11b-052-early_assistant",
+      "pack": false,
+      "ref": true
+    },
+    {
+      "category": "early_assistant",
+      "error": null,
+      "item": "p11b-053-early_assistant",
+      "pack": false,
+      "ref": true
+    },
+    {
+      "category": "early_assistant",
+      "error": null,
+      "item": "p11b-054-early_assistant",
+      "pack": false,
+      "ref": true
+    },
+    {
+      "category": "early_assistant",
+      "error": null,
+      "item": "p11b-055-early_assistant",
+      "pack": false,
+      "ref": true
+    },
+    {
+      "category": "early_assistant",
+      "error": null,
+      "item": "p11b-056-early_assistant",
+      "pack": false,
+      "ref": true
+    },
+    {
+      "category": "early_assistant",
+      "error": null,
+      "item": "p11b-057-early_assistant",
+      "pack": false,
+      "ref": true
+    },
+    {
+      "category": "early_assistant",
+      "error": null,
+      "item": "p11b-058-early_assistant",
+      "pack": false,
+      "ref": true
+    },
+    {
+      "category": "early_assistant",
+      "error": null,
+      "item": "p11b-059-early_assistant",
+      "pack": false,
+      "ref": true
+    }
+  ],
+  "seed": 20261014,
+  "stratum": "sonnet",
+  "summary_model": "extractive",
+  "verdict": "FAIL",
+  "window": 8192,
+  "worse": 20,
+  "worse_minus_better_over_n": 0.3333
+}
