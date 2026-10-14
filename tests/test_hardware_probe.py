@@ -197,3 +197,79 @@ def test_probe_cached_ttl_and_copy(tmp_path):
     now["t"] += 31
     probe_cached(30, **kw)
     assert n["calls"] == 2 * first
+
+
+# ── review fixes ────────────────────────────────────────────────────────────
+
+def _nvidia_runner(rows):
+    def run(argv, timeout):
+        if argv[0] == "nvidia-smi":
+            return rows
+        raise AssertionError(argv)
+    return run
+
+
+def test_memory_failure_does_not_skip_the_gpu_probe(tmp_path):
+    r = probe(runner=_nvidia_runner("24576, 100\n"), system="Linux", machine="x86_64",
+              disk_path=tmp_path, meminfo_text="garbage")
+    assert r["gpu"] == "nvidia" and r["vram_gb"] == 24.0
+    assert r["total_gb"] is None and any(e.startswith("memory:") for e in r["errors"])
+
+
+def test_apple_silicon_under_rosetta(tmp_path):
+    def run(argv, timeout):
+        if argv == ["sysctl", "-n", "hw.optional.arm64"]:
+            return "1\n"
+        if argv[:2] == ["sysctl", "-n"]:
+            return "17179869184\n"
+        if argv == ["vm_stat"]:
+            return VM_STAT_ARM
+        raise AssertionError(argv)
+    r = probe(runner=run, system="Darwin", machine="x86_64", disk_path=tmp_path)
+    assert (r["gpu"], r["vram_gb"]) == ("apple_unified", 16.0)
+
+
+def test_nvidia_na_rows_are_skipped():
+    assert parse_nvidia_smi("[N/A], [N/A]\n24576, 100\n") == [(24576, 100)]
+    with pytest.raises(ValueError):
+        parse_nvidia_smi("[N/A], [N/A]\n")
+
+
+def test_cgroup_limit_caps_total_and_free(tmp_path):
+    r = probe(runner=_nvidia_runner("0, 0\n"), system="Linux", machine="x86_64",
+              disk_path=tmp_path, meminfo_text=MEMINFO,
+              cgroup_reader=lambda: (8 * GIB, 6 * GIB))
+    assert (r["total_gb"], r["free_gb"]) == (8.0, 2.0)
+    assert hardware.parse_cgroup_limit("max\n", "123\n") is None
+    assert hardware.parse_cgroup_limit("9223372036854771712\n", "1\n") is None
+    assert hardware.parse_cgroup_limit("1024\n", "512\n") == (1024, 512)
+
+
+def test_nvidia_smi_without_devices_is_not_an_error(tmp_path):
+    def run(stderr):
+        def _r(argv, timeout):
+            raise subprocess.CalledProcessError(6, argv, output="", stderr=stderr)
+        return _r
+    quiet = probe(runner=run("No devices were found\n"), system="Linux", machine="x86_64",
+                  disk_path=tmp_path, meminfo_text=MEMINFO)
+    assert (quiet["gpu"], quiet["errors"]) == ("none", [])
+    loud = probe(runner=run("Driver/library version mismatch\n"), system="Linux",
+                 machine="x86_64", disk_path=tmp_path, meminfo_text=MEMINFO)
+    assert loud["gpu"] == "none" and "version mismatch" in loud["errors"][0]
+
+
+def test_probe_cached_is_keyed_by_arguments_and_skips_errors(tmp_path):
+    calls = []
+
+    def run(argv, timeout):
+        calls.append(argv)
+        raise FileNotFoundError
+    a = probe_cached(runner=run, system="Linux", machine="x86_64", disk_path=tmp_path,
+                     meminfo_text=MEMINFO)
+    b = probe_cached(runner=run, system="Linux", machine="x86_64", disk_path=tmp_path / "x",
+                     meminfo_text=MEMINFO)
+    assert a["disk_free_gb"] is not None and b["disk_free_gb"] is None  # not a's result
+    n = len(calls)
+    probe_cached(runner=run, system="Linux", machine="x86_64", disk_path=tmp_path / "x",
+                 meminfo_text=MEMINFO)
+    assert len(calls) == n + 1  # b had errors, so it was not cached
