@@ -1833,7 +1833,7 @@ async def _cli_prompt_with_context(
     project_root: str | None = None,
     *,
     conversation: list | None = None,
-    context_door: str = "sdk",
+    context_door: str = "gateway",
 ) -> str:
     """Fold accumulated session context into a CLI-dispatch prompt.
 
@@ -1856,7 +1856,7 @@ async def _cli_prompt_with_context(
     nothing recorded yet) all just return ``prompt`` unchanged — CLI
     dispatch is never blocked, delayed, or altered in shape by this.
 
-    ``conversation`` (P1.1 doors 6-7): a caller's own history replaces the
+    ``conversation`` (P1.1 door 7, the gateway): a caller's own history replaces the
     session accumulator. It is packed with ``build_pack(door=context_door)``
     under the same privacy gate as the LiteLLM path and folded in as a labelled
     background block, whatever ``context_enabled`` says.
@@ -2781,8 +2781,8 @@ async def _dispatch_model_loop(
     chain_attempts_out: list[str] | None = None,
     # Caller history is packed separately for each provider attempt.
     conversation: list | None = None,
-    # The P1.1 door that supplied ``conversation``: "sdk" or "gateway".
-    context_door: str = "sdk",
+    # The P1.1 door that supplied ``conversation``: "gateway" (the SDK packs in sdk.py, D-98).
+    context_door: str = "gateway",
 ) -> LLMResponse:
     """Execute the main model dispatch loop with primary + emergency fallback chains.
 
@@ -4250,7 +4250,7 @@ async def route_and_call(
     suppress_ledger: bool = False,
     route_directive_id: str | None = None,
     messages: list[dict] | None = None,
-    context_door: str = "sdk",
+    context_door: str = "gateway",
 ) -> LLMResponse:
     """Route a request to the best available model and return the response.
 
@@ -4294,16 +4294,17 @@ async def route_and_call(
         messages: Caller conversation so far as {"role", "content"} chat dicts,
             excluding the current request. prompt is sent verbatim and never
             trimmed; build_pack drops a trailing user message equal to it.
-            None preserves existing behavior. Each attempt builds an SDK pack
-            with its target provider, gating conversation at call time through
+            None preserves existing behavior. Each attempt builds a pack
+            (``door=context_door``) with its target provider, gating conversation at call time through
             session_store.allows_session_content (only local/ollama are privacy-local).
             Disallowed attempts receive just the request, plus explicit context.
             Leading assistant turns are dropped for API providers. Pack failures
-            record CHZ-FO-ROUTER-SDK-PACK and send the plain prompt. The semantic
+            record CHZ-FO-ROUTER-<DOOR>-PACK and send the plain prompt. The semantic
             cache key includes a hash of messages to isolate conversations.
-        context_door: The P1.1 door that supplied ``messages``, ``"sdk"``
-            (default) or ``"gateway"``. It names the pack's door and the
-            fail-open code (``CHZ-FO-ROUTER-GATEWAY-PACK`` for the gateway).
+        context_door: The P1.1 door that supplied ``messages``; ``"gateway"``
+            (the default; D-43(c)). The SDK door does not come through here: it
+            packs inside its own build_chain/execute_chain path (D-98). It names
+            the pack's door and the fail-open code (``CHZ-FO-ROUTER-GATEWAY-PACK``).
             Ignored when ``messages`` is None.
         deadline_monotonic: Track-3 agent-safety absolute deadline.
             When set, the routed turn refuses to start if
@@ -5558,7 +5559,7 @@ async def _call_text(
     *,
     caller_context: str | None = None,
     conversation: list | None = None,
-    context_door: str = "sdk",
+    context_door: str = "gateway",
     user_prompt: str | None = None,
     scope_root: str | None = None,
     use_thinking: bool = False,
@@ -5583,9 +5584,9 @@ async def _call_text(
             tasks add a recency filter for Perplexity).
         caller_context: Explicit context, deduplicated against transcript turns.
         conversation: Caller history excluding the current request. None keeps
-            MCP context handling; SDK packs gate history per provider attempt.
-        context_door: The door that supplied ``conversation`` ("sdk" or
-            "gateway"); used as the pack's door and in the fail-open code.
+            MCP context handling; the gateway pack gates history per provider attempt.
+        context_door: The door that supplied ``conversation`` ("gateway");
+            used as the pack's door and in the fail-open code.
         user_prompt: Raw request before project context injection.
         scope_root: Explicit project root for the pack's project layer.
 

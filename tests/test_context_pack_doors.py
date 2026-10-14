@@ -24,10 +24,11 @@ WIRING = {
     "proxy": ("proxy/backends.py", r'build_pack\(.{0,600}?door="proxy"'),
     "codex": ("codex_agent.py", r'build_pack\(.{0,600}?door="codex"'),
     "agent": ("hooks/agent-route.py", r'build_pack\(.{0,600}?door="agent"'),
-    # sdk and gateway share route_and_call -> _call_text, which packs with
-    # door=context_door; sdk is that parameter's default, gateway is passed by
-    # route_server (the core behind every gateway endpoint).
-    "sdk": ("router.py", r'context_door: str = "sdk"'),
+    # The SDK packs inside its own build_chain/execute_chain path (D-98).
+    "sdk": ("sdk.py", r'build_pack\(.{0,600}?door="sdk"'),
+    # The gateway goes through route_and_call -> _call_text, which packs with
+    # door=context_door; route_server (the core behind every gateway endpoint)
+    # passes "gateway".
     "gateway": ("route_server.py", r'context_door="gateway"'),
 }
 
