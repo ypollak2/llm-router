@@ -23,6 +23,7 @@ def registry(monkeypatch):
         _meta("openai/gpt-9-mini", 128_000), _meta("groq/tiny-8b", 8_192), _meta("gemini/flash-9", 0),
         _meta("anthropic/claude-haiku-9-20990101", 200_000), _meta("anthropic/claude-haiku-8", 300_000),
         _meta("ollama/local-x", 999), _meta("groq/llama-3.1-8b-instant", 8_192),
+        _meta("mistral/med-1", 8_192), _meta("mistral/med-2", 128_000),   # a mixed-window family
     ])
     monkeypatch.setattr(model_registry, "_DEFAULT_REGISTRY", reg)
     return reg
@@ -41,6 +42,7 @@ def registry(monkeypatch):
     ("anthropic/claude-haiku", None),                  # a bare family is not a model
     ("anthropic/claude-mythic-1", None),               # no family in the registry
     ("groq/llama-3.3-70b-versatile", None),            # family spans a window under the cap: unknown
+    ("mistral/med-9", None),                           # mixed family: the 8k member decides, not the 128k one
     ("unknown/model", None), ("no-slash", None), (None, None),
 ])
 def test_registry_context_window(registry, model, want):

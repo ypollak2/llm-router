@@ -16,8 +16,8 @@ WHAT IT DOES
   * Starts a stub upstream on an ephemeral 127.0.0.1 port that answers Anthropic
     ``/v1/messages`` (JSON and SSE), OpenAI ``/v1/chat/completions`` and Ollama
     ``/api/tags`` with a tiny canned reply. No provider is ever called.
-  * WHAT THE NETWORK GUARD COVERS. Every child runs a scratch venv interpreter whose
-    ``sitecustomize`` is ``scripts/_replay_netguard.py`` with this run's allowlist BAKED
+  * WHAT THE NETWORK GUARD COVERS. Every child runs a scratch venv interpreter that
+    imports ``scripts/_replay_netguard.py`` at start-up (a ``.pth`` line) with this run's allowlist BAKED
     IN (see :class:`Scratch`): any Python process started with it, including a grandchild
     whose environment was emptied, refuses every connection and DNS lookup that is not the
     stub or this run's proxy, and the run exits 1 if one was attempted. The harness process
@@ -70,6 +70,8 @@ ROOT = Path(__file__).resolve().parent.parent
 #: The copies Claude Code runs (hooks.json: ${CLAUDE_PLUGIN_ROOT}/hooks/<name>.py).
 HOOKS_DIR = ROOT / "hooks"
 GUARD_SRC = Path(__file__).resolve().parent / "_replay_netguard.py"
+#: The baked guard's module name in the scratch venv (imported from ``00_replay_netguard.pth``).
+_GUARD_MODULE = "_replay_netguard_baked"
 
 ALL_DOORS = ("hook", "proxy", "gateway", "mcp", "sdk", "agent-route")
 #: Ports a replay must never bind or contact (the operator's live router processes).
@@ -511,8 +513,9 @@ class Scratch:
     violations file and a bin dir of shadowed executables.
 
     THE GUARDED INTERPRETER. ``<root>/pyenv`` is a venv (no pip) whose site-packages
-    holds the guard as ``sitecustomize.py`` with this run's allowlist and violations path
-    BAKED IN, plus a ``.pth`` that adds the project's site-packages. Every child is started
+    holds the guard (``_replay_netguard_baked.py``, imported by ``00_replay_netguard.pth``)
+    with this run's allowlist and violations path BAKED IN, plus a ``.pth`` that adds the
+    project's site-packages. Every child is started
     with that interpreter, and ``sys.executable`` in a child is that interpreter, so a
     grandchild started with an emptied environment (``safe_subprocess.get_delegated_env``
     drops LLM_ROUTER_*; ``agent_loop`` passes only PATH) is still guarded: the guard needs
@@ -553,10 +556,16 @@ class Scratch:
         site_dir.mkdir(parents=True, exist_ok=True)
         (site_dir / "_replay_project.pth").write_text(
             f"import site; site.addsitedir({_venv_site_packages()!r}); site.addsitedir({str(ROOT / 'src')!r})\n")
-        (site_dir / "sitecustomize.py").write_text(
+        # The guard loads from a .pth line, not as ``sitecustomize``: a distribution's own
+        # /usr/lib/python3.X/sitecustomize.py (Debian, Ubuntu) sits earlier on sys.path and
+        # shadows a site-packages one, which left every child unguarded with 0 violations.
+        # site.py runs ``import`` lines of every .pth in site-packages at start-up, in name
+        # order, so ``00_`` also runs before ``_replay_project.pth``.
+        (site_dir / f"{_GUARD_MODULE}.py").write_text(
             GUARD_SRC.read_text(encoding="utf-8")
             + "\n\n# Baked by scripts/synthetic_replay.py: active with or without any environment variable.\n"
             + f"install(allow={self.allow()!r}, violations={str(self.violations)!r})\n", encoding="utf-8")
+        (site_dir / "00_replay_netguard.pth").write_text(f"import {_GUARD_MODULE}\n", encoding="utf-8")
         return str(python)
 
     @staticmethod

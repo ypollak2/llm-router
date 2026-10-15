@@ -1,9 +1,10 @@
 """Outbound-connection guard for ``scripts/synthetic_replay.py``.
 
 The replay harness writes this file, followed by an ``install(...)`` call carrying the
-run's allowlist and violations path, as ``sitecustomize.py`` into the site-packages of a
-scratch venv, and starts every child with that venv's interpreter. Python imports
-``sitecustomize`` at start-up, so the guard is active before any hook or proxy code runs,
+run's allowlist and violations path, into the site-packages of a scratch venv, plus a
+``.pth`` file that imports it, and starts every child with that venv's interpreter. site.py
+runs ``.pth`` import lines at start-up (a distribution's own ``sitecustomize`` cannot shadow
+them, as it shadowed the earlier ``sitecustomize.py`` install), so the guard is active before any hook or proxy code runs,
 with or without any environment variable: a grandchild started with an emptied
 environment is still guarded as long as it runs that interpreter (``sys.executable``).
 The harness also calls :func:`install` / :func:`uninstall` in its own process around a run.
@@ -61,7 +62,7 @@ def _record(kind: str, host: object, port: object) -> None:
 
 def install(allow: str | None = None, violations: str | None = None) -> None:
     """Patch ``socket`` in this process. ``allow`` / ``violations`` default to the
-    environment variables above (the ``sitecustomize`` path)."""
+    environment variables above (the environment fallback)."""
     if getattr(socket, "_llm_router_replay_guard", False):
         return
     if violations:
