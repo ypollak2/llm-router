@@ -374,7 +374,10 @@ def context_window(model: str | None) -> int | None:
 
     An exact id wins; otherwise the longest registry id that ``model`` extends at a
     ``-``, ``:`` or ``@`` boundary (``anthropic/claude-sonnet-5-5`` takes
-    ``anthropic/claude-sonnet-5``). A provider alias (``codex/``, ``gemini_cli/``) is
+    ``anthropic/claude-sonnet-5``); otherwise the SMALLEST window among the registry
+    ids of the same family (``model_aliases.model_family``, the rule ``family_lookup``
+    already applies to costs): the routed ``anthropic/claude-sonnet-4-6`` is not in the
+    registry but its family is. A provider alias (``codex/``, ``gemini_cli/``) is
     mapped first. Unknown models, a non-positive window and any registry error give
     None: a caller keeps its own default rather than guessing a window."""
     if not isinstance(model, str) or "/" not in model:
@@ -393,4 +396,12 @@ def context_window(model: str | None) -> int | None:
                 best = mid
         meta = models.get(best) if best else None
     win = getattr(meta, "context_window", 0) if meta is not None else 0
+    if not (isinstance(win, int) and win > 0):
+        from llm_router.model_aliases import model_family
+
+        fam = model_family(model)
+        same = [m.context_window for mid, m in models.items()
+                if mid != fam and model_family(mid) == fam
+                and isinstance(m.context_window, int) and m.context_window > 0]
+        win = min(same) if fam != model and same else 0
     return win if isinstance(win, int) and win > 0 else None

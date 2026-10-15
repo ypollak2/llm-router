@@ -388,39 +388,41 @@ def run_fidelity(stratum: str, responder: Callable[[str], Answer], *, provider: 
     }
 
 
-# ── P1.1-b Sonnet stratum after repair 1: equivalence proof (PREREG-...-R1) ───
+# ── P1.1-b Sonnet stratum after repair 1: equivalence proof (PREREG-...-R2) ───
 
-PREREG_R1 = ROOT / "docs" / "prereg" / "PREREG-P11B-synthetic-R1.md"
-SONNET_MODEL = "anthropic/claude-sonnet-5-5"
-EQUIV_DOORS = ("gateway", "sdk")
+PREREG_R2 = ROOT / "docs" / "prereg" / "PREREG-P11B-synthetic-R2.md"
 
 
-def equivalence_item(item: Item, door: str, window: int) -> dict:
-    """PREREG-P11B-synthetic-R1 checks (a)-(d) for one item at one door."""
+def equivalence_item(item: Item, transcript: Path, window: int) -> dict:
+    """PREREG-P11B-synthetic-R2 checks (a)-(d) for one item at the MCP door at ``window``."""
     from llm_router.context_pack import build_pack, extract_turn_text
 
-    messages = [e["message"] for e in item.entries]
-    pack = build_pack(item.request, messages=messages, door=door, target_window=window,
-                      target_provider="anthropic", project="")
-    full = [t for t in (extract_turn_text(m["content"], keep_tools=True, cap=False).strip()
-                        for m in messages) if t]
+    pack = build_pack(item.request, door="mcp", transcript_path=str(transcript), session_id=item.item_id,
+                      target_window=window, target_provider="anthropic", project="")
+    full = [t for t in (extract_turn_text(e["message"]["content"], keep_tools=True, cap=False).strip()
+                        for e in item.entries) if t]
     sent = [str(m["content"]).strip() for m in pack.recent]
     blob = "\n".join(sent + [pack.summary or "", pack.request])
     checks = {"full_mode": pack.mode == "full", "no_summary": pack.summary is None,
               "same_messages": sent == full, "token_present": item.token in blob}
-    return {"item": item.item_id, "door": door, **checks, "equivalent": all(checks.values())}
+    return {**checks, "equivalent": all(checks.values())}
 
 
 def run_equivalence() -> dict:
-    """PREREG-P11B-synthetic-R1: PACK vs FULL equivalence at the Sonnet doors' window."""
-    from llm_router import router
+    """PREREG-P11B-synthetic-R2: PACK vs FULL at the MCP door for the routed Sonnet, at the
+    D-101 window and at the pre-D-101 window."""
+    from llm_router import model_registry, router
+    from llm_router.model_aliases import LATEST_CLAUDE
 
-    rows, windows = [], {}
-    with scratch_env():
-        for door in EQUIV_DOORS:
-            windows[door] = router._pack_window(SONNET_MODEL, door)
-            rows += [equivalence_item(it, door, windows[door]) for it in items()]
-    n_ok = sum(r["equivalent"] for r in rows)
+    model = LATEST_CLAUDE["anthropic/claude-sonnet"]
+    windows = {"new": router._pack_window(model, "mcp"), "old": router._MCP_NON_LOCAL_WINDOW}
+    rows = []
+    with scratch_env() as root:
+        for it in items():
+            path = write_transcript(it, root)
+            rows.append({"item": it.item_id, "category": it.category,
+                         **{k: equivalence_item(it, path, w) for k, w in windows.items()}})
+    eq = {k: sum(r[k]["equivalent"] for r in rows) for k in windows}
 
     def git(*args: str) -> str:
         try:
@@ -428,14 +430,19 @@ def run_equivalence() -> dict:
                                   timeout=10).stdout.strip()
         except (OSError, subprocess.SubprocessError):
             return ""
+    registry_files = [str(p.relative_to(ROOT)) if p.is_relative_to(ROOT) else str(p)
+                      for p in (Path.cwd() / "config" / "models.yaml",
+                                Path(model_registry.__file__).resolve().parent.parent.parent / "config" / "models.yaml")
+                      if p.exists()][:1] or ["bundled defaults"]
+    attributable = windows["new"] > windows["old"] and eq["new"] == N_ITEMS and eq["old"] == 0
     return {"label": LABEL, "must": "P1.1-b", "stratum": "sonnet", "repair": "R1 (D-101 real windows)",
+            "prereg": PREREG_R2.name, "prereg_sha256": hashlib.sha256(PREREG_R2.read_bytes()).hexdigest(),
+            "door": "mcp", "model": model, "windows": windows, "registry_file": registry_files[0],
             "git_sha": git("rev-parse", "HEAD") or None,
-            "git_dirty_src": bool(git("status", "--porcelain", "--", "src", "scripts")),
-            "prereg": PREREG_R1.name, "prereg_sha256": hashlib.sha256(PREREG_R1.read_bytes()).hexdigest(),
-            "model": SONNET_MODEL, "windows": windows, "items": N_ITEMS, "checked": len(rows),
-            "equivalent": n_ok,
-            "verdict": "PASS by construction" if n_ok == len(rows) == N_ITEMS * len(EQUIV_DOORS)
-            else "NOT INFORMATIVE", "rows": rows}
+            "git_dirty": bool(git("status", "--porcelain", "--", "src", "scripts", "config/models.yaml")),
+            "items": N_ITEMS, "equivalent": eq,
+            "verdict": "PASS by construction (repair-attributable)" if attributable else "NOT INFORMATIVE",
+            "rows": rows}
 
 
 # ── summary coverage (P1.2-a) ─────────────────────────────────────────────────
@@ -864,7 +871,7 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--out", type=Path, default=ROOT / "docs" / "measurements")
     s = sub.add_parser("summary")
     s.add_argument("--out", type=Path, default=ROOT / "docs" / "measurements")
-    sub.add_parser("equivalence", help="P1.1-b Sonnet after repair 1 (PREREG-P11B-synthetic-R1)").add_argument(
+    sub.add_parser("equivalence", help="P1.1-b Sonnet after repair 1 (PREREG-P11B-synthetic-R2)").add_argument(
         "--out", type=Path, default=ROOT / "docs" / "measurements")
     o = sub.add_parser("o3")
     o.add_argument("--out", type=Path, default=ROOT / "docs" / "measurements")
@@ -900,7 +907,7 @@ def main(argv: list[str] | None = None) -> int:
         name = f"p11b-synthetic-{args.stratum}.json" if not args.limit else \
             f"p11b-synthetic-{args.stratum}-limit{args.limit}.json"
     elif args.cmd == "equivalence":
-        res, name = run_equivalence(), "p11b-synthetic-sonnet-r1.json"
+        res, name = run_equivalence(), "p11b-synthetic-sonnet-r2.json"
     elif args.cmd == "o3":
         res, name = run_o3(), "p19a-synthetic.json"
     elif args.cmd == "identity":

@@ -21,6 +21,8 @@ def registry(monkeypatch):
     reg = ModelRegistry.from_models([
         _meta("anthropic/claude-sonnet-9", 1_000_000), _meta("openai/gpt-9", 400_000),
         _meta("openai/gpt-9-mini", 128_000), _meta("groq/tiny-8b", 8_192), _meta("gemini/flash-9", 0),
+        _meta("anthropic/claude-haiku-9-20990101", 200_000), _meta("anthropic/claude-haiku-8", 300_000),
+        _meta("ollama/local-x", 999),
     ])
     monkeypatch.setattr(model_registry, "_DEFAULT_REGISTRY", reg)
     return reg
@@ -31,9 +33,13 @@ def registry(monkeypatch):
     ("anthropic/claude-sonnet-9-5", 1_000_000),       # extends a registry id at "-"
     ("openai/gpt-9-mini", 128_000),                    # exact id beats the shorter prefix
     ("openai/gpt-9-mini-2026", 128_000),               # longest matching prefix
-    ("openai/gpt-95", None),                           # no boundary: not gpt-9
+    ("openai/gpt-95", 128_000),                        # no boundary: not gpt-9's 400k, family min
     ("codex/gpt-9", 400_000),                          # provider alias
     ("gemini/flash-9", None),                          # window 0 = unknown
+    ("anthropic/claude-sonnet-4-6", 1_000_000),        # family fallback: the routed Sonnet id
+    ("anthropic/claude-haiku-4-5", 200_000),           # family fallback takes the SMALLEST window
+    ("anthropic/claude-haiku", None),                  # a bare family is not a model
+    ("anthropic/claude-mythic-1", None),               # no family in the registry
     ("unknown/model", None), ("no-slash", None), (None, None),
 ])
 def test_registry_context_window(registry, model, want):
@@ -65,6 +71,9 @@ def test_router_pack_window_keeps_the_local_num_ctx(registry):
     from llm_router import local_models
 
     assert router._pack_window("ollama/qwen3.5:latest", "mcp") == local_models.num_ctx("qwen3.5:latest")
+    # a registry row for a local model never overrides its num_ctx (review 514, finding 5)
+    assert router._pack_window("ollama/local-x", "mcp") == local_models.num_ctx("local-x") != 999
+    assert sdk._pack_window(ModelSpec("ollama", "local-x")) != 999
 
 
 def test_sdk_pack_window(registry):
@@ -72,7 +81,7 @@ def test_sdk_pack_window(registry):
     assert sdk._pack_window(ModelSpec("groq", "tiny-8b")) == 8_192
     from llm_router.hooks.direct_executor import _local_num_ctx
 
-    assert sdk._pack_window(ModelSpec("openai", "gpt-95")) == _local_num_ctx("gpt-95")      # as before D-101
+    assert sdk._pack_window(ModelSpec("xai", "grok-95")) == _local_num_ctx("grok-95")       # unknown: as before D-101
     assert sdk._pack_window(ModelSpec("ollama", "qwen3.5:latest")) == _local_num_ctx("qwen3.5:latest")
 
 

@@ -279,24 +279,28 @@ def test_identity_readout_reports_replay_probe_envelopes_apart(g1, tmp_path):
     assert res["verdict_p110a"] == "PASS"
 
 
-# ── P1.1-b Sonnet stratum after repair 1 (PREREG-P11B-synthetic-R1) ───────────
+# ── P1.1-b Sonnet stratum after repair 1 (PREREG-P11B-synthetic-R2) ───────────
 
 
-def test_equivalence_holds_at_the_real_window_and_fails_at_the_old_one(g1):
+def test_equivalence_holds_at_the_d101_window_and_fails_at_the_pre_d101_one(g1):
     it = g1.items()[40]                                   # an early_tool item: the category PACK lost
-    with g1.scratch_env():
-        real = g1.equivalence_item(it, "gateway", 65_536)
-        old = g1.equivalence_item(it, "gateway", 8_192)  # the pre-D-101 window: pack mode
-    assert real["equivalent"] and all(real[k] for k in ("full_mode", "no_summary", "same_messages",
-                                                         "token_present"))
+    with g1.scratch_env() as root:
+        path = g1.write_transcript(it, root)
+        new = g1.equivalence_item(it, path, 65_536)
+        old = g1.equivalence_item(it, path, 8_192)       # the MCP door's pre-D-101 cloud window
+    assert new["equivalent"] and all(new[k] for k in ("full_mode", "no_summary", "same_messages",
+                                                       "token_present"))
     assert not old["equivalent"] and not old["full_mode"] and not old["same_messages"]
     assert not old["token_present"]                      # the token the original stratum lost
 
 
-def test_equivalence_verdict_is_never_fail(g1, monkeypatch):
+def test_equivalence_is_repair_attributable_and_never_fail(g1, monkeypatch):
     res = g1.run_equivalence()
-    assert (res["checked"], res["equivalent"], res["verdict"]) == (120, 120, "PASS by construction")
+    assert res["model"] == "anthropic/claude-sonnet-4-6" and res["door"] == "mcp"   # the routed Sonnet
+    assert res["windows"] == {"new": 65_536, "old": 8_192}
+    assert res["equivalent"] == {"new": 60, "old": 0}
+    assert res["verdict"] == "PASS by construction (repair-attributable)"
     from llm_router import router
 
-    monkeypatch.setattr(router, "_pack_window", lambda model, door: 8_192)
-    assert g1.run_equivalence()["verdict"] == "NOT INFORMATIVE"
+    monkeypatch.setattr(router, "_pack_window", lambda model, door: router._MCP_NON_LOCAL_WINDOW)
+    assert g1.run_equivalence()["verdict"] == "NOT INFORMATIVE"   # no repair: nothing to attribute
