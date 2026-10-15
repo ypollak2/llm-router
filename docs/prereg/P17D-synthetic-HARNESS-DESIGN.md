@@ -19,9 +19,11 @@ is frozen. A pins test reads the prereg `pins` block and fails if a constant dif
 | `$RUN/classifier_shadow.jsonl` | 0600 | no | `shadow`, via the production `ShadowScheduler._append` |
 | `$RUN/shadow_meta.json` | 0600 | no | `shadow` (nimble digest, quiet gate, warm-up ms, errors and retries, `done` marker) |
 | `$RUN/labels.jsonl` | 0600 | no | `label` (`{text_sha, session_id, truth}`) |
+| `$RUN/labels_planted.jsonl` | 0600 | no | `label` (first valid label per planted id; final, never re-asked) |
+| `$RUN/attach.pinned` | 0444 | no | written at freeze (sha256 of items.jsonl and attach_counts.json); attach refuses once it exists |
 | `$RUN/judgements.jsonl` | 0600 | yes (judge reasons) | `label` |
 | `$RUN/ledger.jsonl` | 0600 | no | `label` (per call: ts, ids, cost, tokens, model_ok, secs) |
-| `$RUN/use.log` | 0600, append-only | no | `score`, first action |
+| `$RUN/use.log` | 0600, append-only | no | `score` (`started` + labels/shadow shas, first action); `select` and `label` (`terminal <reason>`) |
 | `$RUN/result.json` | 0600 | no | `score` (full) |
 | `docs/measurements/p17d-synthetic.json` | repo | no | `score` (item ids, session indices, tiers, verdict, `synthetic (D-99)`) |
 
@@ -33,12 +35,12 @@ only.
 
 | Command | Reads | Calls | Refuses when |
 |---|---|---|---|
-| `attach` (sub-agent, D-107 c; read-only) | corpus, GE3 items/split (for §2a), `~/.claude/projects` (top-level files only), `~/.llm-router/proxy_calls.jsonl`, `~/.llm-router/.env` (one key only), `denylist.txt`, the proxy launchd plist and process argv, exec_sessions, the leakage sets | none | `$RUN/items.jsonl` exists; any pin sha differs; any write target outside `$PP` or any mode other than 0600/0700 |
-| `select` | items.jsonl | none | selection.json exists |
+| `attach` (sub-agent, D-107 c; read-only; single-shot) | corpus, GE3 items/split (for §2a), `~/.claude/projects` (top-level files only), `~/.llm-router/proxy_calls.jsonl`, `~/.llm-router/.env` (one key only), `denylist.txt`, the proxy launchd plist and process argv, exec_sessions, the leakage sets | none | `$RUN/items.jsonl` or `attach.pinned` exists, or the frozen prereg exists; any pin sha differs; any write target outside `$PP` or any mode other than 0600/0700 |
+| `select` | items.jsonl | none | selection.json exists; use.log has `terminal`. A feasibility stop writes `terminal` |
 | `shadow` | items, selection | Ollama localhost only | gate failed; labels.jsonl exists; nimble digest differs; quiet gate fails (PARKED) |
-| `label [--mode batch\|single]` | items, selection, shadow_meta (`done` only) | `claude -p` (Opus) | shadow not done; calibration < 6/6; spend guard; quota pause (exit 3) |
-| `score` | records, labels | none | use.log already has `started` |
-| `status` | counts files | none | never; it prints aggregates only |
+| `label` | items, selection, shadow_meta (`done` only) | `claude -p` (Opus) | shadow not done; use.log has `terminal`. It writes `terminal` on calibration < 6/6 or exit 4. A quota pause (exit 3) and the spend cap write nothing terminal, and resume skips labelled and planted ids |
+| `score` | records, labels | none | use.log already has `started` or `terminal` |
+| `status` | counts files, label line counts | none | never. It never parses `truth` |
 
 ## Functions
 
@@ -68,6 +70,9 @@ only.
 - `nimble_preflight()`: the digest check, the quiet gate, and one discarded synthetic warm-up.
 - `shadow_one(sched, item, body, rules) -> source`: `maybe_schedule` then `drain`. It handles the
   `cold` wait and the timeout cooldown, with one retry.
+- `resume_state(records, meta) -> todo`: reconciles by key, with the record file as the authority.
+- Harness env: `LLM_ROUTER_ENGINE_MODE=shadow` and a scratch HOME. `rules_tier` uses
+  `tier_for(...) or tier_of(requested)` (`tiers.py:1031`).
 
 **Labelling**
 - `judge_batch(items, ids, mode) -> labels`: builds the input from `shadowlab.scrub`,
@@ -77,6 +82,8 @@ only.
 - `spend_guard(ledger, cap)` and `quota_guard()`.
 
 **Scoring**
+- `last_per_key(records)`: keeps the final attempt per `(session_id, text_sha)` before
+  `shadow_eval.score`. This is the declared deviation from AMEND4 2(e).
 - `score(records, labels) -> result`: `shadow_eval.score` for the arms. On top of it the function
   computes:
   - the AMEND4 verdict n (llm/cache only) and the share;
@@ -85,7 +92,9 @@ only.
   - the strata;
   - the error-excluded sensitivity;
   - per-group (F, G) blocks, and fresh-vs-GE3 label κ on G;
-  - the verdict and the NOT INFORMATIVE reasons.
+  - the verdict, evaluated in the prereg §7 precedence order (procedural, errors, n, share, then
+    PASS or FAIL);
+  - the wide/normal intervals when there are fewer than 30 sessions, and Wilson intervals.
 
 ## Tests (synthetic fixtures, no real text, no network)
 
@@ -107,6 +116,14 @@ only.
    not fire at 100 F items.
 12. `resolve_tier_policy` respects the precedence order (fixtures for argv, plist env, .env and
    bundled).
+13. A successful retry is the scored row (last record per key). A crash after the record append
+   and before the meta write resumes without a third call.
+14. Calibration: a wrong planted label writes `terminal`, and a resumed `label` never resends a
+   planted id. A pause writes no use-log line.
+15. `ENGINE_MODE=decide` in the environment is overridden; the test asserts
+   `engine_door.decision` is never consulted.
+16. Verdict precedence: the error and procedural NOT INFORMATIVE triggers beat PASS on a fixture
+   that would otherwise PASS.
 
 ## Shadowlab pin: the fix design (not applied; `shadowlab.py` is unchanged)
 
@@ -130,7 +147,11 @@ so the check would verify only self-consistency. That weakens integrity.
    amend6, carries the evidence above, and has a pins block `GT500_SHA256=9cde774d…`.
    `test_shadowlab.py` already overlays AMEND pins on the PREREG pins, so the test turns red until
    the constant matches.
-2. In `shadowlab.py`, change the constant to `9cde774d…`. In `load_gt500`, add a second, AND-ed
+2. Edit `test_shadowlab.py:157-159`: the pin overlay reads PREREG plus AMEND1-3 only, so add
+   `AMEND5-shadowlab.md`. AMEND4's pins are informational (its §4) and name no module constant.
+   The test overlays them under an explicit allowlist and asserts that none of their keys is a
+   `shadowlab` attribute, so AMEND4 is read and cannot silently diverge. In `shadowlab.py`, change
+   the constant to `9cde774d…`. In `load_gt500`, add a second, AND-ed
    check: `SHA256SUMS` must list `scripts/gt500.py` with the **same** hash, otherwise refuse with
    exit 2. A refusal stays fatal, and nothing falls back. The constant is the authority and
    `SHA256SUMS` can only add a refusal, so no path accepts a hash that is not frozen in an
@@ -141,5 +162,7 @@ so the check would verify only self-consistency. That weakens integrity.
    * red when `gt500.py` differs from both;
    * green on the amend6 pair;
    * mutants: drop either check, which must turn a test red.
-4. An independent review, then reload the plist. The P1.7-d run does not depend on this fix: the
-   harness imports the gt500 helpers at its own amend6 pin and does not call `shadowlab.load_gt500`.
+4. **Order.** Editing `shadowlab.py` changes its sha (today `b89c7e17…`), and the P1.7-d prereg
+   pins that sha. So the fix lands first: AMEND5-shadowlab frozen, then the code and test change,
+   then an independent review. Only after that is the P1.7-d prereg frozen, pinning the **new**
+   sha. Then reload the plist for the live labeller. The `SHA256SUMS` agreement refusal stays.

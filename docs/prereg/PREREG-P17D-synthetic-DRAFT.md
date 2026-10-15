@@ -75,7 +75,8 @@ looked at" when the prereg is frozen.
   went live 2026-10-09.
 
 **Per item, attach stores** (in `items.jsonl`, 0600):
-* the opaque `item_id`;
+* `item_id` = the first 16 hex of `sha256("p17d:item:" + session_id + ":" + record_timestamp)`.
+  It is deterministic, and G items also keep `ge3_id`;
 * `session_id` (the transcript `sessionId`), the original `ts` and `cwd`;
 * the full prompt, capped at 20,000 characters as head and tail (AMEND1 B `PROMPT_STORE_CAP`);
 * the classifier-input pieces `cls_input.assemble` reads (`cls_input.py:62-108`): up to 3 earlier
@@ -83,6 +84,11 @@ looked at" when the prereg is frozen.
   `capped`. These come from the main-thread messages before the prompt;
 * `requested` (§4) and `requested_basis`;
 * the served tier, and the strata fields (§7).
+
+**Attach is single-shot.** At freeze the pins record the sha256 of `items.jsonl` and of
+`attach_counts.json`. `attach` refuses to run when `items.jsonl` exists, or when
+`$RUN/attach.pinned` exists (written at freeze), or when a frozen `PREREG-P17D-synthetic.md`
+exists. Every later step refuses if either file's sha256 differs from its pin.
 
 **Session unit** (used for the 60% cap and the bootstrap) is the transcript `sessionId`.
 
@@ -152,8 +158,13 @@ parts are:
 
 **What the rules were tuned on.** `classify_signals(GATEWAY_POLICY)` heuristics plus the YAML
 `route` table. No fitted parameters were found:
-* `git log` of `classify.py` and `claude_tiers.yaml` since 2026-09-01 shows wiring and feature
-  flags, no fit;
+* `git log` of `classify.py`, `claude_tiers.yaml` and `proxy/backends.py` from the corpus start
+  (2026-08-01) shows wiring and feature flags, with two exceptions:
+  * `57250744` (2026-08-19) is an upstream sync;
+  * **`c0b0e5ca` (2026-08-31) is a hand edit of the `research` intent pattern**, made after live
+    prompts were misclassified. That makes it rules tuning on real prompts. The prompts quoted in
+    its commit message and the string literals of `tests/test_first_forty_task14.py` join the
+    leakage set below as `rules_hand_edit`;
 * `complexity_knn: false` in the bundled YAML.
 
 Two neighbours are not arms here. The engine (P1.6) was tuned on **GE3 tune**
@@ -173,9 +184,15 @@ Two neighbours are not arms here. The engine (P1.6) was tuned on **GE3 tune**
 | E2-HO (p_eval held-out, M1.9) | 89 | same |
 | E1-tune (v7 tune) | 30 | `local-classifier/tasks_local.json` sha256 `128ed768…` |
 | E1-HO (M1.9) | 20 | same |
+| rules_hand_edit (c0b0e5ca) | the quoted prompts plus test literals of 4 words or more | `git show c0b0e5ca`; `tests/test_first_forty_task14.py` at the freeze SHA |
 
 Census on the corpus text, counts only: 497 of 2,658 lines hit the set. By set: GE3 held-out 221,
 GE3 tune 163, E2-cal 102, E2-HO 89, E1 0. A line can hit more than one set.
+
+**Why E2-HO and E1-HO stay out but GE3-HO may enter.** nimble's verdicts on E2-HO and E1-HO were
+already computed and read in M1.9 (amend5), and each held-out set is single-use per family
+(PREREGISTRATION.v2 §8; PLAN line 2611). nimble has never run on GE3-HO. rules_eff was scored on it
+once for P1.6-g, and the rules were not changed afterwards.
 
 The single exception is §2a. GE3 held-out was never used to tune nimble or the rules (§3 above). It
 re-enters only through the §2a trigger, and its E2-cal overlap stays excluded. This use is not a
@@ -222,12 +239,31 @@ It asserts that `cls_input.assemble(min_body)` equals the attach-time assemble o
   `timeout`, `parse_error`, `cold`, or `abstain`. A `cold` triggers a wait of up to 120 s for
   `/api/ps` to show the model resident. A `timeout` waits out the 30 s cooldown
   (`local_classifier.py:58`) so it cannot cascade. Each is then **retried once**. Still failing is
-  an error.
+  an error. `assemble_mismatch` is also an error. That item gets no nimble call and enters as a
+  fallback.
+* **The final attempt counts (declared deviation from AMEND4 2(e)).** Each attempt appends its own
+  record (`llm_shadow.py:177`), while `shadow_eval.score` keeps the **first** record per
+  `(session_id, text_sha)` (`shadow_eval.py:170-175`). Before scoring, the harness therefore
+  keeps the **last** record per key. All attempts stay in the file, and `n_attempts` is reported.
+  Reason: live, the shadow never retries a failed verdict, so "first" and "only" coincide there.
+  Here the retry is part of the procedure.
+* **Order and crash-resume.**
+  * Items run in selection order, F then G.
+  * After each record the harness appends `{item_id, attempt, source}` to `shadow_meta.json`
+    (fsync).
+  * On resume it reconciles from `classifier_shadow.jsonl`, the authority, by key. An item with a
+    final record (an `llm` or `cache` source, or a failed retry) is skipped. An item with a single
+    failed attempt gets its retry. An item with no record is run.
+  * Warm-up and the quiet gate are repeated on every resume.
 
 **rules_eff.**
-* `rules.tier` = `ClaudeTierPolicy.load(<policy>).tier_for(*backends._classify_class(tier_text(body),
-  capabilities=False))`. This is the policy table's own answer, `proposed = target.name`
-  (`tiers.py:1031-1032`; `backends.py:463-479`; `tiers.py:725-728`).
+* `rules.tier` = `(policy.tier_for(task, cx) or policy.tier_of(requested)).name`, where
+  `(task, cx) = backends._classify_class(tier_text(body), capabilities=False)`. This is the live
+  `target = self.tier_for(task, cx) or req_tier` followed by `proposed = target.name`
+  (`tiers.py:1031-1032`; `backends.py:463-479`; `tiers.py:725-728`). So a `None` table result falls
+  back as it does live.
+* The harness env pins **`LLM_ROUTER_ENGINE_MODE=shadow`**. In `decide` mode `_classify_class`
+  would take the engine's Decision (`backends.py:470-472`), and the engine was tuned on GE3 tune.
 * `<policy>` is the **live** tier policy (D-107 Q3). Attach resolves it read-only, in the proxy's
   own order. Nothing writes to the live install, and `doctor --fix-routing` is never run.
   1. The `--tier-policy` argument of the running proxy process. If the proxy is idle, the
@@ -272,7 +308,12 @@ It asserts that `cls_input.assemble(min_body)` equals the attach-time assemble o
   * `shadow_eval.boot_diff` (`:139-156`) resamples whole sessions;
   * **B = 2,000, seed = 20261003** (`BOOT_B`, `BOOT_SEED`, `:50-51`; AMEND4 pins);
   * the cost bootstrap is the one `score()` computes. The harness calls `boot_diff` again for
-    under-route with the same B and seed.
+    under-route with the same B and seed;
+  * both bootstraps use the same rows as the means: the verdict rows plus the fallback rows
+    (AMEND4 2(c)), last record per key. The error-excluded sensitivity reruns both;
+  * with fewer than 30 sessions, both the wide and the normal interval are printed (statistics
+    rule 1). Under-route rates print with Wilson 95% intervals (PREREG-shadowlab, repo, lines
+    55-56).
 
 ## 6. Labels
 
@@ -288,7 +329,9 @@ It asserts that `cls_input.assemble(min_body)` equals the attach-time assemble o
   (AMEND1 A, C). It never sees a tier, the session id, or any field of a record.
 
 The helpers are imported from `gt500.py` (`9cde774d…`, amend6: judge helpers unchanged) and
-`shadowlab.py` (sha256 `b89c7e17…`). `shadowlab.run` is **not** used: it reads the live sidecar,
+`shadowlab.py` at the sha256 produced by the shadowlab pin fix. That fix lands first (its own
+change, with AMEND5-shadowlab and a review), and this prereg pins its **new** sha at freeze;
+`b89c7e17…` is today's sha. `shadowlab.run` is **not** used: it reads the live sidecar,
 enforces the daily caps, and today refuses because its pin is the pre-amend6 gt500 sha
 (`work/launchd.err.log`).
 
@@ -300,8 +343,17 @@ enforces the daily caps, and today refuses because its pin is the pre-amend6 gt5
   still unlabelled is a label error.
 
 **Calibration.** The **first call is the 6 planted items** of `rubric.py` (cal-h1/h2, cal-s1/s2,
-cal-o1/o2) plus 2 real items. Opus is trusted only at **6/6**. Otherwise the run stops at once and
-is NOT INFORMATIVE.
+cal-o1/o2) plus the first 2 real items in label order. The order within that call is shuffled
+with seed 20261015.
+* Planted items get opaque ids from the same id space as real items, never `cal-*`.
+* **Declared deviation:** GE3 appended the planted items to the queue and shuffled them in
+  (`gt500.py:651-654`). Here they come first, so a failed labeller costs one call.
+* **No reroll.** The first valid label for each planted id is final and is never asked again. That
+  holds on retry and on resume, and it is enforced from `labels_planted.jsonl`. A call with no
+  valid parse may be retried under the batch rules. Any wrong planted label, as soon as it is
+  parsed, makes the run terminal.
+* Opus is trusted only at **6/6**. Otherwise `label` writes the terminal use-log record (§10) and
+  the result is NOT INFORMATIVE.
 
 **Every selected item is labelled**, including nimble-error items, for the §7 sensitivity analysis.
 F items are labelled before G items. If the spend guard stops the run, F is already complete.
@@ -314,27 +366,25 @@ reads.
 * `n` = labelled rows with nimble `source` in {`llm`, `cache`}. Error rows enter the two means as
   fallback (llm = rules_eff), are counted in `n_fallback`, and do not count toward n. The sign of
   the difference is the same either way;
-* one row per `(session_id, text_sha)`;
+* one row per `(session_id, text_sha)`: the last record per key (the declared deviation in §4);
 * largest-session share is computed over the n verdict rows.
 
 **Decision rule (P1.7-d verbatim; the point-estimate reading of PREREG-shadowlab, repo, frozen
-2026-10-11).** **PASS (synthetic, D-99)** only if all of these hold:
-1. n ≥ 100;
-2. the largest session holds ≤ 60% of the n rows;
-3. C-λ2-clamp(llm) ≤ C-λ2-clamp(rules_eff);
-4. under(llm) ≤ under(rules_eff);
-5. P1.7-c passed (PLAN P1.7 task 3, #327).
+2026-10-11).** It is evaluated in this order, and the first match is the verdict.
 
-Conditions 3 and 4 use point estimates. The paired session-bootstrap CIs are printed and do not
-gate (statistics rule 9). **FAIL** if 1, 2 and 5 hold and 3 or 4 does not.
+1. **NOT INFORMATIVE (procedural):** P1.7-c has not passed (PLAN P1.7 task 3, #327); or a
+   `classifier_shadow` row is dated before `frozen_utc`; or labeller calibration is below 6/6; or
+   the feasibility gate (§2a) fails; or a pin sha differs.
+2. **NOT INFORMATIVE (errors):** nimble errors + `assemble_mismatch` + label errors exceed **10%
+   of selected items**.
+3. **NOT INFORMATIVE (n):** n < 100, including when the spend cap stops labelling.
+4. **NOT INFORMATIVE (share):** the largest session holds more than 60% of the n rows.
+5. **PASS (synthetic, D-99)** if C-λ2-clamp(llm) ≤ C-λ2-clamp(rules_eff) **and**
+   under(llm) ≤ under(rules_eff).
+6. **FAIL** otherwise.
 
-**NOT INFORMATIVE** in any of these cases:
-* n < 100, including when the spend cap stops labelling;
-* the largest session holds more than 60% of the rows;
-* errors (nimble errors + label errors) exceed **10% of selected items**;
-* labeller calibration is below 6/6;
-* the feasibility gate (§2) fails;
-* any `classifier_shadow` row is dated before `frozen_utc`.
+The comparisons in 5 use point estimates. The paired session-bootstrap CIs are printed and do not
+gate (statistics rule 9).
 
 **Groups.** When §2a fired, the verdict is computed on F ∪ G. **Every number is also printed per group
 (F, G)** with its n and sessions, and the report leads with any group whose point estimate takes
@@ -381,6 +431,11 @@ the opposite side from the combined one.
 * **Quota pause.** Before every call the guard reads `usage.json`. It pauses (exit 3, resumable)
   at session ≥ 80%, at weekly ≥ 85%, or when the file is missing or more than 30 minutes old
   (PREREG-shadowlab §6).
+  * A pause makes no call. It writes no use-log line and consumes nothing.
+  * A resumed `label` continues from `ledger.jsonl`, `labels.jsonl` and `labels_planted.jsonl`. It
+    never repeats a planted item or an already-labelled item.
+  * **Known state at drafting:** the live weekly quota reads 100% (coordinator), so the first
+    `label` call will pause until weekly falls below 85%.
 * **Daily caps.** For this run only, shadowlab's 20 calls / 400,000 tokens per day are replaced by
   the $10 run cap (D-106).
 
@@ -399,10 +454,23 @@ the opposite side from the combined one.
 
 ## 10. Single use
 
-* `score` first appends `started <UTC> prereg_sha256=<…> git_sha=<…>` to `$PP/v16/p17d/use.log`
-  (0600, append-only), **before it opens `labels.jsonl`**. It refuses if the log already holds a
-  `started` line.
-* A crash, a NOT INFORMATIVE result and a feasibility stop each consume the use.
+* `score` first appends `started <UTC> prereg_sha256=<…> git_sha=<…> labels_sha256=<…>
+  shadow_sha256=<…>` to `$PP/v16/p17d/use.log` (0600, append-only). It does this **before it
+  parses `labels.jsonl`**: the two shas are taken over the raw bytes. It refuses if the log already
+  holds a `started` or `terminal` line.
+* **Terminal records.** Each of these appends `terminal <UTC> <reason>` to `use.log`, writes the
+  NOT INFORMATIVE gate file, and ends the run:
+  * `select` on a feasibility stop;
+  * `label` on calibration below 6/6;
+  * `label` on exit 4 (non-Opus model).
+
+  Every command refuses once `use.log` holds a `terminal` line. So no re-selection, re-label or
+  calibration reroll is possible.
+* A crash during `score`, and any NOT INFORMATIVE result, consume the use. A quota pause
+  (exit 3) and a spend-cap stop do not write `terminal`. After a spend-cap stop, `score` runs on
+  the labels that exist.
+* `status` prints counts only: line counts of labels, never truth values or a distribution of
+  them. It also prints the ledger spend and the use-log state.
 * No re-selection, re-seed, re-label or re-score happens without a new prereg written first.
 
 ## 11. Known biases (stated before any data)
@@ -445,8 +513,9 @@ Every owner question is answered (D-107 a-c, Q3). Before freezing, fill these in
 1. Attach counts: F pool, G admitted, sessions, largest share.
 2. `TIER_POLICY_SHA256` and its basis.
 3. `REPO_SHA`.
-4. The shadowlab re-pin amendment (AMEND5-shadowlab, harness design §Shadowlab pin). It is needed
-   only for the live labeller. This run imports the gt500 helpers at the amend6 pin.
+4. Land the shadowlab pin fix first (AMEND5-shadowlab plus the code change, reviewed). Then pin its
+   new sha here. The order is fixed because this run imports shadowlab helpers.
+5. `ITEMS_SHA256` and `ATTACH_COUNTS_SHA256`, then write `$RUN/attach.pinned`.
 
 ```pins
 LABEL=synthetic (D-99)
@@ -462,12 +531,17 @@ ADMIT_SEED_FORMAT=p17d:admit:20261015:{ge3_id}
 N_SELECT_ADMIT=250
 ADMIT_REUSE_GE3_LABELS=false
 TIER_POLICY_SHA256=<filled at freeze from attach>
+ITEMS_SHA256=<filled at freeze>
+ATTACH_COUNTS_SHA256=<filled at freeze>
+ITEM_ID_FORMAT=p17d:item:{session_id}:{record_timestamp}
+SHADOW_RECORD_RULE=last_per_key
+ENGINE_MODE=shadow
 REPO_SHA=<filled at freeze>
 FEASIBILITY_MIN_SELECTED=100
 FEASIBILITY_MAX_SHARE=0.55
 GT500_SHA256=9cde774dfe93387d6ee3dfcbd1b5481a537f265e5961d82f85a87d29d6328959
 SUPPLY_SHA256=12cd3e1eed7fc15658b4b44246d83422e2b61adc4ccb270dd9f5e729608fb0e8
-SHADOWLAB_SHA256=b89c7e17b4f6746c5b42fe1c136dc48122388ca0d391b319fc68facc5e96098a
+SHADOWLAB_SHA256=<new sha after the shadowlab pin fix lands; today b89c7e17b4f6746c5b42fe1c136dc48122388ca0d391b319fc68facc5e96098a>
 RUBRIC_MD5=1bcb3f441a0c9d056b3343a9d47c5565
 SHADOW_EVAL_SHA256=e9b89943f33b68b3095c5d2ea57976147368e0e6f28490aea7e74a82e32b1c57
 NIMBLE_BLOB=sha256-bbf1d6fc03bb0ed24d88f4c214ed7b5d1768aeb43d5cf433fb69eff0c8578013
