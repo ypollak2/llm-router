@@ -478,14 +478,21 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # not eat the step budget. On timeout the step goes ahead without it
             # (the worker thread finishes on its own and its result is dropped).
             okf_t0 = time.perf_counter()
+            # Within the step deadline: when the budget, not the attach's own 2 s cap, is
+            # what cuts it short, the step is out of time; that is not an attach failure
+            # and is not counted as one (status "budget", no failopen).
+            okf_cap = min(OKF_ATTACH_TIMEOUT_S, _budget_left(t0))
             try:
                 send, row["okf"] = await asyncio.wait_for(asyncio.to_thread(
                     okf_context.attach, send, body,
                     ceiling_tokens=cfg.local_agent.max_prompt_tokens if cfg.local_agent else DEFAULT_MAX_PROMPT_TOKENS),
-                    timeout=min(OKF_ATTACH_TIMEOUT_S, _budget_left(t0)))
+                    timeout=okf_cap)
             except asyncio.TimeoutError as exc:
-                failopen.record("LR-FO-PROXY-OKF-ATTACH-TIMEOUT", exc)
-                row["okf"] = {"status": "timeout"}
+                if okf_cap < OKF_ATTACH_TIMEOUT_S:
+                    row["okf"] = {"status": "budget"}
+                else:
+                    failopen.record("LR-FO-PROXY-OKF-ATTACH-TIMEOUT", exc)
+                    row["okf"] = {"status": "timeout"}
             # P0.9: context building, not the decision; reported beside it (S6).
             _add_phase(row, "okf_attach", (time.perf_counter() - okf_t0) * 1000.0)
             backend_t0 = time.monotonic()
