@@ -435,7 +435,7 @@ def run_equivalence() -> dict:
                                 Path(model_registry.__file__).resolve().parent.parent.parent / "config" / "models.yaml")
                       if p.exists()][:1] or ["bundled defaults"]
     attributable = windows["new"] > windows["old"] and eq["new"] == N_ITEMS and eq["old"] == 0
-    return {"label": LABEL, "must": "P1.1-b", "stratum": "sonnet", "repair": "R1 (D-101 real windows)",
+    return {"label": LABEL, "must": "P1.1-b", "stratum": "sonnet", "repair": "repair 1 (D-101 real windows)",
             "prereg": PREREG_R2.name, "prereg_sha256": hashlib.sha256(PREREG_R2.read_bytes()).hexdigest(),
             "door": "mcp", "model": model, "windows": windows, "registry_file": registry_files[0],
             "git_sha": git("rev-parse", "HEAD") or None,

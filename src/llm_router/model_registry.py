@@ -374,10 +374,13 @@ def context_window(model: str | None) -> int | None:
 
     An exact id wins; otherwise the longest registry id that ``model`` extends at a
     ``-``, ``:`` or ``@`` boundary (``anthropic/claude-sonnet-5-5`` takes
-    ``anthropic/claude-sonnet-5``); otherwise the SMALLEST window among the registry
-    ids of the same family (``model_aliases.model_family``, the rule ``family_lookup``
-    already applies to costs): the routed ``anthropic/claude-sonnet-4-6`` is not in the
-    registry but its family is. A provider alias (``codex/``, ``gemini_cli/``) is
+    ``anthropic/claude-sonnet-5``); otherwise, when EVERY registry id of the same family
+    (``model_aliases.model_family``, the rule ``family_lookup`` applies to costs) has a
+    window of at least ``context_pack.CLOUD_WINDOW_CAP``, the smallest of them: the
+    routed ``anthropic/claude-sonnet-4-6`` is not in the registry but its family is,
+    and any member would get the same capped pack window. A family that spans smaller
+    windows (``groq/llama``: an 8k member) says nothing about an unlisted member, so it
+    gives None and the caller keeps its default. A provider alias (``codex/``, ``gemini_cli/``) is
     mapped first. Unknown models, a non-positive window and any registry error give
     None: a caller keeps its own default rather than guessing a window."""
     if not isinstance(model, str) or "/" not in model:
@@ -403,5 +406,7 @@ def context_window(model: str | None) -> int | None:
         same = [m.context_window for mid, m in models.items()
                 if mid != fam and model_family(mid) == fam
                 and isinstance(m.context_window, int) and m.context_window > 0]
-        win = min(same) if fam != model and same else 0
+        from llm_router.context_pack import CLOUD_WINDOW_CAP
+
+        win = min(same) if fam != model and same and min(same) >= CLOUD_WINDOW_CAP else 0
     return win if isinstance(win, int) and win > 0 else None

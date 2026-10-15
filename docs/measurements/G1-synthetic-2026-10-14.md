@@ -59,6 +59,9 @@ summary.
 R2's other limits:
 
 - The claude-CLI dispatch path keeps 32,768, because it receives a bare provider name.
+- The family rule applies only when every family member is at least 65,536. An unlisted legacy model
+  in such a family (`openai/gpt-4`) is over-estimated; its provider rejects an oversized prompt and
+  the router fails over.
 - A wheel install ships no `config/models.yaml`, so most current models keep the old windows there.
 - An SDK chain that starts with a cloud model sizes the pack for that model; a local fallback in the
   same chain trims it.

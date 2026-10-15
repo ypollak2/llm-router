@@ -304,3 +304,13 @@ def test_equivalence_is_repair_attributable_and_never_fail(g1, monkeypatch):
 
     monkeypatch.setattr(router, "_pack_window", lambda model, door: router._MCP_NON_LOCAL_WINDOW)
     assert g1.run_equivalence()["verdict"] == "NOT INFORMATIVE"   # no repair: nothing to attribute
+
+
+def test_equivalence_is_not_attributable_when_the_old_window_already_sent_items_whole(g1, monkeypatch):
+    """Review 514 (D3): if the pre-D-101 window already fit the items (as R1's doors did),
+    60/60 at the new window proves nothing about the repair."""
+    from llm_router import router
+
+    monkeypatch.setattr(router, "_MCP_NON_LOCAL_WINDOW", 32_768)
+    res = g1.run_equivalence()
+    assert res["equivalent"] == {"new": 60, "old": 60} and res["verdict"] == "NOT INFORMATIVE"

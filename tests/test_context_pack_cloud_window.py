@@ -22,7 +22,7 @@ def registry(monkeypatch):
         _meta("anthropic/claude-sonnet-9", 1_000_000), _meta("openai/gpt-9", 400_000),
         _meta("openai/gpt-9-mini", 128_000), _meta("groq/tiny-8b", 8_192), _meta("gemini/flash-9", 0),
         _meta("anthropic/claude-haiku-9-20990101", 200_000), _meta("anthropic/claude-haiku-8", 300_000),
-        _meta("ollama/local-x", 999),
+        _meta("ollama/local-x", 999), _meta("groq/llama-3.1-8b-instant", 8_192),
     ])
     monkeypatch.setattr(model_registry, "_DEFAULT_REGISTRY", reg)
     return reg
@@ -40,6 +40,7 @@ def registry(monkeypatch):
     ("anthropic/claude-haiku-4-5", 200_000),           # family fallback takes the SMALLEST window
     ("anthropic/claude-haiku", None),                  # a bare family is not a model
     ("anthropic/claude-mythic-1", None),               # no family in the registry
+    ("groq/llama-3.3-70b-versatile", None),            # family spans a window under the cap: unknown
     ("unknown/model", None), ("no-slash", None), (None, None),
 ])
 def test_registry_context_window(registry, model, want):
@@ -65,6 +66,13 @@ def test_a_broken_registry_is_unknown_not_an_error(monkeypatch):
 ])
 def test_router_pack_window(registry, model, door, want):
     assert router._pack_window(model, door) == want
+
+
+def test_a_family_with_a_small_member_never_lowers_an_unlisted_model(registry):
+    """Review 514 (D1): groq/llama-3.3-70b-versatile is routed and unlisted; its only family
+    member is an 8k model. It keeps the old defaults instead of dropping to 8k."""
+    assert router._pack_window("groq/llama-3.3-70b-versatile", "gateway") == 32_768
+    assert router._pack_window("groq/llama-3.3-70b-versatile", "mcp") == 8_192
 
 
 def test_router_pack_window_keeps_the_local_num_ctx(registry):
