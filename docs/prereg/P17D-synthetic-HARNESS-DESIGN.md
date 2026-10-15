@@ -176,3 +176,11 @@ so the check would verify only self-consistency. That weakens integrity.
    pins that sha. So the fix lands first: AMEND5-shadowlab frozen, then the code and test change,
    then an independent review. Only after that is the P1.7-d prereg frozen, pinning the **new**
    sha. Then reload the plist for the live labeller. The `SHA256SUMS` agreement refusal stays.
+
+## PROGRESS-ready note (attach after BASE)
+
+The freeze-guard BASE for the prereg stays `44956ed1`. `scripts/p17d_attach.py` changed after BASE
+(review fixes: parsed UTC timestamps, refusals on a missing denylist or overrides, on zero
+transcripts and on zero corpus matches, real-home session kind, llm_router provenance, served model
+bounded by the next prompt). The sha256 that gets pinned at the freeze is the **final reviewed** file's
+sha256, the one in the commit attach runs from, not the BASE one.

@@ -24,6 +24,7 @@ import importlib.util
 import json
 import os
 import plistlib
+import pwd
 import re
 import shlex
 import subprocess
@@ -33,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-HOME = Path.home()
+HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)   # the real home, never $HOME (a scratch HOME must not change kinds)
 PP = HOME / ".rsi" / "research" / "primary-plan"
 
 LABEL = "synthetic (D-99)"
@@ -81,7 +82,7 @@ class Cfg:
     prereg_frozen: Path
     pins: dict = field(default_factory=lambda: dict(PINS))
     window_end: str = WINDOW_END_UTC
-    kind_home: str | None = None          # session_kind home (tests); None = the real home
+    kind_home: str | None = None          # session_kind home (tests); None = the real home (pwd)
     rules_hand_edit_texts: list | None = None   # None = read from git (c0b0e5ca) + the test file
     # tier-policy resolution inputs (None = discover on this machine)
     ps_text: str | None = None
@@ -326,6 +327,46 @@ def _text_blocks_raw(content) -> str:
     return ""
 
 
+def parse_ts(ts) -> dt.datetime | None:
+    """A transcript timestamp as an aware UTC datetime (fractional seconds kept); None if unparseable."""
+    if not isinstance(ts, str) or not ts:
+        return None
+    try:
+        v = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return v if v.tzinfo else v.replace(tzinfo=dt.timezone.utc)
+
+
+def _is_tool_result_only(content) -> bool:
+    return isinstance(content, list) and bool(content) and all(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+
+
+def _next_answer(recs: list, i: int):
+    """The first main-thread assistant record after ``recs[i]``, stopping at the next user prompt
+    (a user record that is not only tool results): a turn with no answer has no served model."""
+    for r in recs[i + 1:]:
+        if r["type"] == "assistant":
+            return r
+        m = r.get("message") if isinstance(r.get("message"), dict) else {}
+        if m.get("role") == "user" and not _is_tool_result_only(m.get("content")):
+            return None
+    return None
+
+
+def llm_router_provenance() -> dict:
+    """Which llm_router this run imports. Refuses unless it is this worktree's ``src``."""
+    import llm_router
+
+    pkg = Path(llm_router.__file__).resolve().parent
+    if not _inside(pkg, ROOT / "src"):
+        raise Refuse(f"refusing: llm_router imported from {pkg}, not {ROOT / 'src'}")
+    mods = ("proxy/cls_input.py", "proxy/steps.py", "prompt_key.py", "session_kind.py", "secret_scrubber.py",
+            "shadow_eval.py", "env_loader.py", "local_classifier.py")
+    return {"path": str(pkg), "sha256": {m: sha256_file(pkg / m) for m in mods}}
+
+
 def session_messages(raw: bytes):
     """Parse one transcript snapshot. Yields (record dict, messages-so-far, next main-thread assistant
     record) for every main-thread user record; consecutive assistant records of one message id merge."""
@@ -356,7 +397,7 @@ def session_messages(raw: bytes):
             continue
         msgs.append({"role": "user", "content": m.get("content")})
         last_asst_id = None
-        nxt = next((r for r in recs[i + 1:] if r["type"] == "assistant"), None)
+        nxt = _next_answer(recs, i)
         yield d, msgs, nxt
 
 
@@ -452,12 +493,22 @@ def attach(cfg: Cfg) -> dict:
     members += [(f"e1_{r['split']}", r["text"], None, None) for r in e1]
     members += [("rules_hand_edit", t, None, None) for t in hand]
     leak = LeakIndex(supply, members)
+    provenance = llm_router_provenance()
+    window_end = parse_ts(cfg.window_end)
+    proxy_era = parse_ts(PROXY_ERA_UTC)
     exec_ids = {m.group(0) for m in (re.match(r"^[0-9a-f-]{36}", x.strip()) for x in open(cfg.exec_sessions)) if m}
     try:
-        overrides = {k: (v or {}).get("kind") for k, v in json.load(open(cfg.overrides)).items() if isinstance(v, dict)}
-    except (OSError, ValueError):
-        overrides = {}
+        with open(cfg.overrides, encoding="utf-8") as f:
+            raw_ov = json.load(f)
+        overrides = {k: (v or {}).get("kind") for k, v in raw_ov.items() if isinstance(v, dict)}
+    except (OSError, ValueError, AttributeError) as exc:
+        raise Refuse(f"refusing: session-kind overrides unreadable ({type(exc).__name__})") from None
+    if not cfg.denylist.is_file():
+        raise Refuse("refusing: denylist missing (an empty file is fine; a missing one is not)")
     deny = gt.load_denylist(str(cfg.denylist))
+    transcripts = sorted(glob.glob(str(cfg.claude_root / "*" / "*.jsonl")))
+    if not transcripts:
+        raise Refuse(f"refusing: no transcript files under {cfg.claude_root}")
     deny_l = [x.lower() for x in deny]
     policy = resolve_tier_policy(cfg)
     policy_path = Path(policy["path"]).expanduser()
@@ -468,7 +519,7 @@ def attach(cfg: Cfg) -> dict:
 
     # ---- transcripts (snapshot per file, read-only)
     c, cand, seen = Counter(), [], set()
-    for path in sorted(glob.glob(str(cfg.claude_root / "*" / "*.jsonl"))):
+    for path in transcripts:
         try:
             with open(path, "rb") as f:
                 raw = f.read()
@@ -491,19 +542,24 @@ def attach(cfg: Cfg) -> dict:
             if not in_corpus and not g_cand:
                 continue
             c["frame_records_seen"] += 1
+            c["corpus_matched_records"] += int(in_corpus)
             text = supply.REMINDER.sub("", supply.text_of(content)).strip()
             cwd = d.get("cwd") or ""
             if not gt._is_human(r):
                 c["not_human_typed"] += 1
                 continue
-            if ts >= cfg.window_end:
+            tsd = parse_ts(ts)
+            if tsd is None:
+                c["bad_timestamp"] += 1
+                continue
+            if tsd >= window_end:
                 c["after_window"] += 1
                 continue
             if sid in exec_ids:
                 c["exec_session"] += 1
                 continue
             kind, basis = classify_with_basis(cwd=cwd, entrypoint=None, override=overrides.get(sid),
-                                              home=cfg.kind_home)
+                                              home=cfg.kind_home if cfg.kind_home is not None else str(HOME))
             if kind != "organic":
                 c[f"kind_{kind}"] += 1
                 continue
@@ -555,12 +611,14 @@ def attach(cfg: Cfg) -> dict:
                 "msg_id": nmsg.get("id"), "served_model": served_model,
                 "served_tier": shadow_eval.tier_name(served_model),
                 "kind": kind, "kind_basis": basis, "words": words, "length_band": length_band(words),
-                "first_in_session": FIRST_MARK in ctx, "era": "proxy" if ts >= PROXY_ERA_UTC else "pre_proxy",
+                "first_in_session": FIRST_MARK in ctx, "era": "proxy" if tsd >= proxy_era else "pre_proxy", "_tsd": tsd,
                 "month": ts[:7], "_text": text, "_p_eval_cal": bool(g3 and g3.get("p_eval_cal")),
             })
 
     # ---- leakage + dedupe (F in timestamp order, supply rules), then G
-    cand.sort(key=lambda x: x["ts"])
+    if not c["corpus_matched_records"]:
+        raise Refuse("refusing: no transcript record matched the corpus (wrong root or corpus?)")
+    cand.sort(key=lambda x: x["_tsd"])
     f_items, g_items, leak_hits = [], [], Counter()
     seen_exact, short_counts, long_sh = set(), Counter(), []
     for it in cand:
@@ -652,6 +710,10 @@ def attach(cfg: Cfg) -> dict:
         "context_withheld": sum(x["context_withheld"] for x in items),
         "capped": sum(x["capped"] for x in items),
         "tier_policy": {"basis": policy["basis"], "sha256": hashlib.sha256(policy_bytes).hexdigest()},
+        "inputs": {"transcript_files": len(transcripts), "denylist_entries": len(deny),
+                   "overrides_entries": len(overrides), "ledger_present": cfg.ledger.exists(),
+                   "ledger_joined": len(joined), "kind_home_is_real_home": cfg.kind_home is None},
+        "llm_router": provenance,
     }
     os.makedirs(cfg.run_dir, mode=0o700, exist_ok=True)
     os.chmod(cfg.run_dir, 0o700)

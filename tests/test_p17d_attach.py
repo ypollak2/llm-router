@@ -74,6 +74,11 @@ P = {  # fixture prompts (all carry the sentinel)
     "g1": f"ge3 held out prompt about debugging the {SENTINEL} websocket reconnect loop in prod",
     "gcal": f"ge3 held out prompt that is also an E2 calibration item about {SENTINEL} sessions",
     "unrelated": f"not in the corpus at all {SENTINEL} so attach never looks at it further",
+    "deny": f"a prompt that names the quarantinedproject codename in the {SENTINEL} module today",
+    "scrub": f"call the {SENTINEL} api with bearer abc123 and report what comes back from it",
+    "edge_in": f"just before the window end the {SENTINEL} prompt still counts for this run",
+    "edge_out": f"half a second after the window end the {SENTINEL} prompt must be excluded",
+    "g_e2": f"p eval calibration prompt about the {SENTINEL} classifier rubric and its tiers exactly?",
 }
 
 
@@ -91,9 +96,10 @@ def world(tmp_path):
         {"id": "gt-tune1", "session_id": S1, "timestamp": "2026-09-10T10:05:00Z", "prompt": P["ge3t"], "p_eval_cal": False},
         {"id": "gt-ho1", "session_id": S3, "timestamp": "2026-09-12T09:00:00Z", "prompt": P["g1"], "p_eval_cal": False},
         {"id": "gt-ho2", "session_id": S3, "timestamp": "2026-09-12T09:10:00Z", "prompt": P["gcal"], "p_eval_cal": True},
+        {"id": "gt-ho3", "session_id": S3, "timestamp": "2026-09-12T09:20:00Z", "prompt": P["g_e2"], "p_eval_cal": False},
     ]
     (gt / "items.jsonl").write_text("".join(json.dumps(r) + "\n" for r in ge3))
-    (gt / "split.json").write_text(json.dumps({"tune_ids": ["gt-tune1"], "heldout_ids": ["gt-ho1", "gt-ho2"]}))
+    (gt / "split.json").write_text(json.dumps({"tune_ids": ["gt-tune1"], "heldout_ids": ["gt-ho1", "gt-ho2", "gt-ho3"]}))
     pe = tmp_path / "sample.jsonl"
     pe.write_text(json.dumps({"session_id": "pe-s", "timestamp": "2026-08-01T00:00:00Z", "split": "calibration",
                               "text": P["pe"]}) + "\n")
@@ -101,7 +107,7 @@ def world(tmp_path):
     e1.write_text(json.dumps([{"id": "e1", "split": "tune", "text": "rename a variable in one file", "truth": "haiku"}]))
     execs = tmp_path / "exec_sessions.txt"
     execs.write_text(S4 + "  executor\n")
-    corpus_keys = ["a1", "a2", "a3", "b1", "sys", "late", "exec", "res", "slash", "haiku", "ge3t", "pe_near", "hand"]
+    corpus_keys = ["a1", "a2", "a3", "b1", "sys", "late", "exec", "res", "slash", "haiku", "ge3t", "pe_near", "hand", "deny", "scrub", "edge_in", "edge_out"]
     corpus = tmp_path / "corpus.jsonl"
     corpus.write_text("".join(json.dumps({"i": i, "text": P[k]}) + "\n" for i, k in enumerate(corpus_keys)))
     proj = tmp_path / "projects" / "-work-repo"
@@ -124,13 +130,16 @@ def world(tmp_path):
         user(S1, "2026-09-10T10:11:00Z", P["pe_near"]),
         user(S1, "2026-09-10T10:12:00Z", P["hand"]),
         user(S1, "2026-10-09T10:00:00Z", P["late"]),
+        user(S1, "2026-10-08T20:45:59.999Z", P["edge_in"]),
+        user(S1, "2026-10-08T20:46:00.500Z", P["edge_out"]),
         user(S1, "2026-09-10T10:13:00Z", P["unrelated"]),
     ]
     (proj / f"{S1}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in s1))
-    s2 = [user(S2, "2026-09-11T08:00:00Z", P["b1"]), asst(S2, "2026-09-11T08:00:05Z", "msg_g", "Plan drafted.")]
+    s2 = [user(S2, "2026-09-11T08:00:00Z", P["b1"]), asst(S2, "2026-09-11T08:00:05Z", "msg_g", "Plan drafted."),
+          user(S2, "2026-09-11T08:14:00Z", P["scrub"]), user(S2, "2026-09-11T08:15:00Z", P["deny"])]
     (proj / f"{S2}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in s2))
     s3 = [user(S3, "2026-09-12T09:00:00Z", P["g1"]), asst(S3, "2026-09-12T09:00:05Z", "msg_h", "Checking."),
-          user(S3, "2026-09-12T09:10:00Z", P["gcal"])]
+          user(S3, "2026-09-12T09:10:00Z", P["gcal"]), user(S3, "2026-09-12T09:20:00Z", P["g_e2"])]
     (proj / f"{S3}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in s3))
     s4 = [user(S4, "2026-09-13T09:00:00Z", P["exec"])]
     (proj / f"{S4}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in s4))
@@ -144,13 +153,17 @@ def world(tmp_path):
     pkg = tmp_path / "pkg"
     (pkg / "proxy").mkdir(parents=True)
     (pkg / "proxy" / "claude_tiers.yaml").write_text("route:\n  default:\n    simple: haiku\ncomplexity_knn: false\n")
+    ov = tmp_path / "overrides.json"
+    ov.write_text("{}")
+    deny = tmp_path / "denylist.txt"
+    deny.write_text("# comment\nquarantinedproject\n")
     pins = dict(pa.PINS)
     for name, path in (("corpus", corpus), ("ge3_items", gt / "items.jsonl"), ("ge3_split", gt / "split.json"),
                        ("p_eval_sample", pe), ("e1_tasks", e1), ("exec_sessions", execs)):
         pins[name] = sha(path)
     cfg = pa.Cfg(run_dir=pp / "v16" / "p17d", pp_root=pp, corpus=corpus, claude_root=tmp_path / "projects",
                  ledger=ledger, gt_dir=gt, p_eval_sample=pe, e1_tasks=e1, exec_sessions=execs,
-                 overrides=tmp_path / "none.json", denylist=tmp_path / "none.txt",
+                 overrides=ov, denylist=deny,
                  prereg_frozen=tmp_path / "PREREG-P17D-synthetic.md", pins=pins, kind_home=KIND_HOME,
                  rules_hand_edit_texts=[P["hand"]],
                  ps_text="", plists=[], dotenv_paths=[], live_pkg_dir=pkg)
@@ -166,14 +179,17 @@ def test_attach_selects_frame_items_and_counts_every_exclusion(world, capsys):
     counts = pa.attach(cfg)
     items = _items(cfg)
     f = {i["prompt"] for i in items if i["group"] == "F"}
-    assert f == {P["a1"], P["a2"], P["a3"], P["b1"]}
+    assert f == {P["a1"], P["a2"], P["a3"], P["b1"], P["edge_in"]}
     ex = counts["exclusions"]
-    assert ex["not_human_typed"] == 1 and ex["harness_or_slash"] == 1 and ex["after_window"] == 1
+    assert ex["not_human_typed"] == 1 and ex["harness_or_slash"] == 1 and ex["after_window"] == 2
+    assert ex["denylist"] == 1 and ex["secret_scrubber"] == 1
+    assert counts["inputs"]["denylist_entries"] == 1 and counts["inputs"]["transcript_files"] == 5
+    assert counts["llm_router"]["path"].startswith(str(ROOT / "src"))
     assert ex["exec_session"] == 1 and ex["kind_research"] == 1 and ex["served_haiku"] == 1
     assert ex["leakage"] == 3          # GE3 tune (session, ts), E2-cal near duplicate, rules_hand_edit
     assert counts["leak_hits_by_set"]["ge3_tune"] == 1 and counts["leak_hits_by_set"]["e2_cal"] == 1
     assert counts["leak_hits_by_set"]["rules_hand_edit"] == 1
-    assert counts["F"]["n"] == 4 and counts["F"]["sessions"] == 2
+    assert counts["F"]["n"] == 5 and counts["F"]["sessions"] == 2
     out = capsys.readouterr()
     assert SENTINEL not in out.out + out.err
 
@@ -184,6 +200,7 @@ def test_ge3_heldout_candidates_skip_p_eval_cal(world):
     g = [i for i in _items(cfg) if i["group"] == "G"]
     assert [i["ge3_id"] for i in g] == ["gt-ho1"]
     assert counts["exclusions"]["g_p_eval_cal"] == 1
+    assert counts["exclusions"]["g_leakage"] == 1 and counts["leak_hits_by_set"]["g:e2_cal"] == 1
 
 
 def test_item_fields_ids_context_and_requested(world):
@@ -308,3 +325,64 @@ def test_items_file_is_written_exclusively_and_last(world, monkeypatch):
     pa.attach(cfg)
     assert calls[-1] == ("items.jsonl", True)
     assert all(not ex for name, ex in calls[:-1])
+
+
+@pytest.mark.parametrize("break_it", ["no_denylist", "bad_overrides", "no_overrides", "no_transcripts", "no_frame"])
+def test_refuses_instead_of_burning_the_single_run(world, break_it):
+    cfg, tmp = world
+    if break_it == "no_denylist":
+        cfg.denylist.unlink()
+    elif break_it == "bad_overrides":
+        cfg.overrides.write_text("not json")
+    elif break_it == "no_overrides":
+        cfg.overrides.unlink()
+    elif break_it == "no_transcripts":
+        cfg.claude_root = tmp / "empty_projects"
+        cfg.claude_root.mkdir()
+    else:
+        cfg.corpus.write_text(json.dumps({"i": 0, "text": "nothing matches this line"}) + "\n")
+        cfg.pins["corpus"] = sha(cfg.corpus)
+    with pytest.raises(pa.Refuse) as exc:
+        pa.attach(cfg)
+    want = {"no_denylist": "denylist missing", "bad_overrides": "overrides unreadable",
+            "no_overrides": "overrides unreadable", "no_transcripts": "no transcript files",
+            "no_frame": "matched the corpus"}[break_it]
+    assert want in exc.value.msg
+    assert not (cfg.run_dir / "items.jsonl").exists()
+
+
+def test_refuses_a_foreign_llm_router(monkeypatch, tmp_path):
+    import llm_router
+    monkeypatch.setattr(llm_router, "__file__", str(tmp_path / "site-packages" / "llm_router" / "__init__.py"))
+    with pytest.raises(pa.Refuse) as exc:
+        pa.llm_router_provenance()
+    assert "not" in exc.value.msg and "src" in exc.value.msg
+
+
+def test_session_kind_uses_the_real_home_not_HOME(world, monkeypatch):
+    cfg, tmp = world
+    real = pwd.getpwuid(os.getuid()).pw_dir
+    sid = "66666666-6666-6666-6666-666666666666"
+    proj = tmp / "projects" / "-real-rsi"
+    proj.mkdir()
+    (proj / f"{sid}.jsonl").write_text(json.dumps(user(sid, "2026-09-15T09:00:00Z", P["res"], cwd=real + "/.rsi/y")) + "\n")
+    monkeypatch.setenv("HOME", str(tmp / "scratch_home"))
+    cfg.kind_home = None
+    counts = pa.attach(cfg)
+    assert counts["exclusions"]["kind_research"] == 1 and counts["inputs"]["kind_home_is_real_home"] is True
+
+
+def test_timestamp_boundary_is_parsed_not_string_compared():
+    end = pa.parse_ts(pa.WINDOW_END_UTC)
+    assert pa.parse_ts("2026-10-08T20:46:00.500Z") >= end
+    assert pa.parse_ts("2026-10-08T20:45:59.999Z") < end
+    assert pa.parse_ts("2026-10-08T20:46:00Z") >= end
+    assert pa.parse_ts("garbage") is None
+
+
+def test_served_model_stops_at_the_next_human_prompt():
+    recs = [user(S1, "t1", "first ask"), tool_result(S1, "t2"), user(S1, "t3", "second ask"),
+            asst(S1, "t4", "m9", "answer to the second ask")]
+    raw = "".join(json.dumps(r) + "\n" for r in recs).encode()
+    nxt = {d["timestamp"]: n for d, _, n in pa.session_messages(raw)}
+    assert nxt["t1"] is None and nxt["t3"]["message"]["id"] == "m9"
