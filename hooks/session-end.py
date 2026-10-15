@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 32
+# llm_router-hook-version: 33
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -2662,6 +2662,15 @@ def main() -> None:
                 {"method": d["method"], "count": d["hits"]}
                 for d in report_data.get("routing_logic", [])
             ]
+            dashboard_executed = None
+            try:
+                from llm_router.routing_report import executed_routes
+
+                dashboard_executed = executed_routes(24.0)
+            except Exception as _exc:  # noqa: BLE001 — reporting must never break Stop
+                from llm_router import failopen
+
+                failopen.record("CHZ-FO-STOP-EXECUTED-ROUTES", _exc)
 
             dashboard_savings = {}
             for label, calls, total_tokens, _, saved_usd in cumulative:
@@ -2818,6 +2827,7 @@ def main() -> None:
             dashboard.print_dashboard(
                 timestamp=f"Session · {datetime.now(timezone.utc).isoformat()}",
                 decisions=dashboard_decisions,
+                executed_routes=dashboard_executed,
                 savings=dashboard_savings,
                 daily_costs=daily_costs if daily_costs else None,
                 total_saved=total_saved,

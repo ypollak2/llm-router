@@ -219,17 +219,16 @@ def test_build_mini_summary_returns_compact_block(auto_route_module, monkeypatch
     block = auto_route_module._build_mini_summary()
     assert block is not None
     assert block.startswith("📊 llm_router session check")
-    assert "routes: 3" in block
+    assert "hints (3 classified prompts, not executed)" in block
     # Most common tier is "cheap" (2 vs 1), most common task is "query" (2 vs 1)
     assert "top tier: cheap" in block
     assert "top task: query" in block
     assert "llm-router summary" in block  # follow-up command pointer
-    assert block.count("\n") == 2  # exactly 3 lines
+    assert block.count("\n") == 3  # execution, hints, and follow-up below title
 
 
-def test_build_mini_summary_returns_none_when_no_rows(auto_route_module, monkeypatch) -> None:
-    """Empty store -> None — caller skips injection. Don't show a widget
-    with zero data; that's noise, not signal."""
+def test_build_mini_summary_keeps_execution_when_no_rows(auto_route_module, monkeypatch) -> None:
+    """An empty classifier log must not hide the execution report."""
     class _EmptyStore:
         def recent(self, limit: int = 200) -> list[dict]:
             return []
@@ -237,7 +236,9 @@ def test_build_mini_summary_returns_none_when_no_rows(auto_route_module, monkeyp
     monkeypatch.setattr(
         "llm_router.lineage.LineageStore", lambda *a, **kw: _EmptyStore()
     )
-    assert auto_route_module._build_mini_summary() is None
+    block = auto_route_module._build_mini_summary()
+    assert "routes 24h:" in block
+    assert "hints" not in block
 
 
 # ── Feature 3: Meta-bucket relabel in LineageStore.recent() ─────────────────
