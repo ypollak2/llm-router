@@ -5,7 +5,7 @@
     "old": 0
   },
   "git_dirty": false,
-  "git_sha": "a1a0b74d998d979b712dad6921993f10f506974f",
+  "git_sha": "7068df1a76781d9d68c3e466438d432fc2731b6d",
   "items": 60,
   "label": "synthetic (D-99)",
   "model": "anthropic/claude-sonnet-4-6",
@@ -13,7 +13,7 @@
   "prereg": "PREREG-P11B-synthetic-R2.md",
   "prereg_sha256": "eb81da2014d080d4c3d72a0ae80b4ad39492bd0bb77db7068049e7963bae7f3e",
   "registry_file": "config/models.yaml",
-  "repair": "R1 (D-101 real windows)",
+  "repair": "repair 1 (D-101 real windows)",
   "rows": [
     {
       "category": "recent",
