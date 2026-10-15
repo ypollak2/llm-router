@@ -90,7 +90,7 @@ def test_records_are_rebuilt_from_deltas_per_thread():
 
 
 def test_guard_refuses_everything_but_the_allowlist(tmp_path):
-    """The sitecustomize guard, as a child gets it: the allowed port connects, any other
+    """The guard's environment fallback (a sitecustomize on PYTHONPATH): the allowed port connects, any other
     port and any DNS lookup is refused before a packet is sent, and each refusal is logged."""
     violations = tmp_path / "v.jsonl"
     with socket.socket() as listener:
@@ -364,3 +364,38 @@ def test_a_poller_started_before_the_run_cannot_probe_ollama_through_the_guard(t
     n = len(probes)
     time.sleep(0.3)
     assert len(probes) == n                            # no tick after the run began
+
+
+def test_the_baked_guard_ignores_an_inherited_environment_allowlist(tmp_path):
+    """Review 516: a child that inherits LLM_ROUTER_REPLAY_* pointing elsewhere is still held to
+    the run's baked allowlist, and its refusals land in the run's violations file."""
+    with sr.StubServer() as stub:
+        scratch = sr.Scratch(tmp_path / "root", stub, None)
+        other = _closed_port()
+        stray = tmp_path / "stray.jsonl"
+        code = ("import socket\n"
+                "try:\n"
+                f"    socket.create_connection(('127.0.0.1', {other}), timeout=2)\n"
+                "except OSError:\n"
+                "    print('refused')\n")
+        env = {"PATH": "/usr/bin:/bin", "LLM_ROUTER_REPLAY_ALLOW": f"127.0.0.1:{other}",
+               "LLM_ROUTER_REPLAY_VIOLATIONS": str(stray)}
+        out = subprocess.run([scratch.python, "-c", code], env=env, capture_output=True, text=True, timeout=60)
+        assert out.returncode == 0 and out.stdout.split() == ["refused"], out.stderr
+        assert len(scratch.violation_rows()) == 1
+        assert not stray.exists() or not stray.read_text().strip()
+
+
+def test_a_guard_that_does_not_load_refuses_the_run(tmp_path, monkeypatch):
+    """Review 516: the start-up canary turns a silently unguarded interpreter into a hard error."""
+    monkeypatch.setattr(sr, "_GUARD_MODULE", "_replay_netguard_missing")
+    real_write = Path.write_text
+
+    def no_guard(self, data, *a, **k):            # the .pth names a module that is never written
+        if self.name == "_replay_netguard_missing.py":
+            return len(data)
+        return real_write(self, data, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", no_guard)
+    with sr.StubServer() as stub, pytest.raises(RuntimeError, match="not active"):
+        sr.Scratch(tmp_path / "root", stub, None)

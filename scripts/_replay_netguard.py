@@ -15,9 +15,12 @@ allowlist is refused BEFORE a packet leaves the process: the call raises, and on
 appended to the violations file. The harness fails the run when that file is non-empty.
 
 NOT covered: a process that does not run the scratch interpreter (a non-Python binary, a
-different Python). The harness shadows the network clients it knows of on PATH instead.
+different Python), and a child started with ``-S`` (no ``site``, so no ``.pth``). The harness
+shadows the network clients it knows of on PATH instead, and checks at start-up that the
+guard is live in an empty-environment child.
 
-Environment fallback (only when no baked call ran):
+Environment fallback (this module imported unbaked, e.g. a test or the harness process; the
+baked copy in the scratch venv drops it, so the run's baked allowlist always wins):
   LLM_ROUTER_REPLAY_ALLOW       comma list of ``host:port`` that may be contacted
   LLM_ROUTER_REPLAY_VIOLATIONS  file that receives one JSON line per refused attempt
 Unix-domain sockets are always allowed (no network). Nothing else is.
