@@ -69,6 +69,58 @@ R2's other limits:
 **G1 is still NOT passed.** The P1.1-b local stratum (PACK vs HOOK6) and P1.7-d still need a local
 model (D-105).
 
+## Update 2026-10-15: P1.1-b local stratum (PACK vs HOOK6), synthetic (D-99)
+
+**PASS on the frozen bar, but only because HOOK6 never passes anything.** Both arms lose every
+early fact. All figures are **synthetic (D-99)**. The raw file is `p11b-synthetic-local.json`.
+
+Governing rules: `PREREG-P11B-synthetic.md` (sha256 `231fe6a4…`) plus AMEND1 (`f8d97895…`).
+`check_prereg.py` matched both before the run. The run used origin/main 64e3c84c, on the owner's
+machine, from 2026-10-15T12:47:36Z to 12:52:09Z (273 s wall time).
+
+Settings, chosen by the coordinator before the run:
+
+| Setting | Value | Why |
+|---|---|---|
+| `--local-model` | `qwen3-coder:30b` | The production local tier. The live proxy has no model pin in its argv or its launchd plist, so the policy chain picks the model, and the code chain leads with qwen3-coder:30b (`router.py` LOCAL-TIMEOUT-1 note; `proxy/loop_guard.py`). `ollama list` shows it installed. |
+| `--summary-model` | none (extractive) | The harness default. It also avoids a second resident Ollama model. |
+| window | 8,192 | Frozen in the prereg; not changed. |
+| Ollama | 127.0.0.1:11434 | Before the run, `ollama ps` showed no other model resident. During the run qwen3-coder:30b sat at 100% GPU with num_ctx 32,768. |
+
+**Model calls.** The run made only Ollama `/api/chat` calls on loopback: 2 per item (PACK and
+HOOK6), 120 in all. The harness does not log silent retries, so there could have been up to 120
+more; no item ended in an error. There was no judge (grading is a deterministic token match) and
+no summary model. Cost: $0, with no paid cloud call. The harness's scratch HOME was checked: an
+outer HOME and LLM_ROUTER_HOME pointed at a second scratch directory received no llm-router state,
+only the system Python bytecode cache. The `--limit 2` SMOKE run (not scored) gave 0 errors.
+
+| Category | n | PACK pass | HOOK6 pass | worse | better |
+|---|---|---|---|---|---|
+| recent (last tool result) | 30 | 30 | 0 | 0 | 30 |
+| early_user (first request) | 10 | 10 | 0 | 0 | 10 |
+| early_tool (early tool output) | 10 | 0 | 0 | 0 | 0 |
+| early_assistant (early decision) | 10 | 0 | 0 | 0 | 0 |
+| **all** | **60** | **40** | **0** | **0** | **40** |
+
+The run had n = 60 paired items with 0 errors, so AMEND1 allows a verdict. (worse − better)/n is
+−0.667, against a bar of ≤ 0.02. The exact McNemar p is 1.8e-12. **Verdict per the prereg: PASS.**
+
+**How to read it.** A $0 check made no model calls. It rebuilt both contexts and looked for the
+answer token:
+
+- The token was in the PACK context for 30/30 recent items and 10/10 early_user items, and for
+  0/10 early_tool and 0/10 early_assistant items.
+- It was in the HOOK6 context for 0/60 items.
+- PACK contexts were at most ~1.8k estimated tokens, against the 8,192 window.
+
+The model passed exactly where the token was present, so **every failure comes from building the
+context, not from the model**. HOOK6 drops tool blocks and keeps only the last 6 text messages. In
+this generator that never includes the token, so the reference arm is a structural floor of 0/60.
+The comparison therefore shows that PACK is no worse than the pre-pack hook. It does not show that
+PACK keeps context. The early_tool and early_assistant loss (0/20) is the same one the Sonnet
+stratum found: the extractive summary holds no tool output and no decisions. In this stratum it is
+hidden because the reference arm loses those items too.
+
 ## Verdict (2026-10-14)
 
 **G1 is NOT passed.** Clause (3), context fidelity (P1.1-b), FAILs on the Sonnet stratum, and the
@@ -85,7 +137,7 @@ local stratum and P1.7-d cannot run in this container. P2 merges stay blocked (D
 | (2) | P1.6-g | **PASS by owner decision D-100** | — |
 | (2) | P1.7-a | N/A (D-82) | — |
 | (3) | P1.1-b Sonnet stratum, PACK vs FULL | **FAIL**: n=60, worse 20, better 0, (w-b)/n = 0.333 > 0.02, exact McNemar p = 1.9e-6 | `p11b-synthetic-sonnet.json` |
-| (3) | P1.1-b local stratum, PACK vs HOOK6 | **NOT RUN**: needs a local model (blocked as above) | — |
+| (3) | P1.1-b local stratum, PACK vs HOOK6 | **NOT RUN** on 2026-10-14: needs a local model (blocked as above). **Run 2026-10-15: PASS** (qwen3-coder:30b, n=60, 0 errors, worse 0, better 40, (w-b)/n = −0.667, p = 1.8e-12). HOOK6 scores 0/60, and both arms score 0/20 on early items; see "Update 2026-10-15: P1.1-b local stratum" | `p11b-synthetic-local.json` |
 | (4) | G0 guards P0.9-a..c | **PASS (synthetic replay and bench mechanics only)**: session-start p95 240 ms (n=60, bar 2,000); status-bar p95 94 ms (n=300, bar 300); statusline p95 44-47 ms (n=200 x 3 conditions, bar 100). The "last 7 days live" reading needs the live install | `p110a-p09-synthetic.json`, `p09c-statusline-synthetic.txt` |
 
 ## P1.1-b: what failed and why
