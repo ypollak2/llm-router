@@ -34,7 +34,9 @@ import shlex
 import subprocess
 import sys
 import time
+import types
 import urllib.request
+import uuid
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from fractions import Fraction
@@ -52,7 +54,7 @@ GT_SCRIPTS = PP / "v16" / "gt500" / "scripts"
 SHADOWLAB_PY = PP / "v16" / "shadowlab" / "shadowlab.py"
 GE3_LABELS = PP / "v16" / "gt500" / "work" / "labels_opus.jsonl"
 #: The quota file the GE3 / shadowlab guards read (PREREG-shadowlab section 6). Read-only; the one path under
-#: ~/.llm-router this harness opens (see the build report's ambiguity list).
+#: ~/.llm-router this harness opens (D-110: solely for the section 8 quota pause).
 USAGE_JSON = REAL_HOME / ".llm-router" / "usage.json"
 
 
@@ -63,14 +65,6 @@ def _load(name: str, path: Path):
     spec.loader.exec_module(mod)
     return mod
 
-
-# The attach helpers are imported, not copied; the attach file's sha256 is checked against its pin before any
-# command acts (check_common).
-pa = _load("_p17d_attach_helpers", ATTACH_SCRIPT)
-check_prereg = _load("_p17d_check_prereg", ROOT / "scripts" / "check_prereg.py")
-Refuse = pa.Refuse
-sha256_file = pa.sha256_file
-read_jsonl = pa.read_jsonl
 
 # ----------------------------------------------------------------------------- pins (prereg ```pins``` block)
 # tests/test_p17d_synthetic.py parses the frozen block and fails on any difference.
@@ -151,6 +145,32 @@ PASS, FAIL, NOT_INFORMATIVE = "PASS (synthetic, D-99)", "FAIL", "NOT INFORMATIVE
 HARNESS_RE = re.compile(r"^harness (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) sha=([0-9a-f]{7,40})$")
 
 
+DISCLOSURES = [
+    "D-110: label opens ~/.llm-router/usage.json read-only, solely for the section 8 quota pause; "
+    "the harness opens no other ~/.llm-router path."
+]
+
+
+def _load_verified_attach(name: str, path: Path):
+    raw = path.read_bytes()
+    got = hashlib.sha256(raw).hexdigest()
+    if got != ATTACH_SCRIPT_SHA256:
+        print(f"refusing: p17d_attach.py sha256 {got} != pinned {ATTACH_SCRIPT_SHA256}", file=sys.stderr)
+        raise SystemExit(2)
+    mod = types.ModuleType(name)
+    mod.__file__ = str(path)
+    sys.modules[name] = mod
+    exec(compile(raw, str(path), "exec"), mod.__dict__)
+    return mod
+
+
+pa = _load_verified_attach("_p17d_attach_helpers", ATTACH_SCRIPT)
+check_prereg = _load("_p17d_check_prereg", ROOT / "scripts" / "check_prereg.py")
+Refuse = pa.Refuse
+sha256_file = pa.sha256_file
+read_jsonl = pa.read_jsonl
+
+
 def default_pins() -> dict:
     return {"items": ITEMS_SHA256, "attach_counts": ATTACH_COUNTS_SHA256, "attach_script": ATTACH_SCRIPT_SHA256,
             "tier_policy": TIER_POLICY_SHA256, "shadow_eval": SHADOW_EVAL_SHA256, "gt500": GT500_SHA256,
@@ -170,6 +190,12 @@ def repo_src_matches(sha: str) -> bool:
     return p.returncode == 0
 
 
+def repo_tree_clean() -> bool:
+    p = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--", "scripts/", "src/"],
+                       capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    return p.returncode == 0 and not p.stdout.strip()
+
+
 @dataclass
 class Cfg:
     run: Path
@@ -185,6 +211,7 @@ class Cfg:
     now: object = time.time
     head_sha: object = git_head
     src_matches: object = repo_src_matches
+    tree_clean: object = repo_tree_clean
     asleep: object = asyncio.sleep
 
     def p(self, name: str) -> Path:
@@ -312,11 +339,22 @@ def harness_line_ok(cfg: Cfg) -> bool:
     return head.startswith(m.group(2))
 
 
+def label_finished(cfg: Cfg) -> bool:
+    return any(x.startswith(("label done ", "label stopped spend_cap ")) for x in use_lines(cfg))
+
+
+def check_code_identity(cfg: Cfg) -> None:
+    if not harness_line_ok(cfg):
+        raise Refuse("refusing: use.log's first line is not `harness <UTC> sha=<HARNESS_SHA>` for this commit")
+    if not cfg.tree_clean():
+        raise Refuse("refusing: uncommitted changes under scripts/ or src/ (git status --porcelain)")
+
+
 def terminal(cfg: Cfg, stage: str, reason: str) -> None:
     """Consume the use (section 10): the terminal use-log record and the NOT INFORMATIVE gate file."""
     append_line(cfg.use_log, f"terminal {utc(cfg.now())} {reason}")
     write_json_private(cfg.result, {"label": LABEL, "verdict": NOT_INFORMATIVE, "stage": stage, "reason": reason,
-                                    "utc": utc(cfg.now())})
+                                    "utc": utc(cfg.now()), "disclosures": DISCLOSURES})
 
 
 def check_common(cfg: Cfg, *, policy: bool = False) -> dict:
@@ -624,6 +662,19 @@ async def wait_resident(cfg: Cfg, budget_s: float = COLD_WAIT_S) -> bool:
     return False
 
 
+async def wait_cooldown(cfg: Cfg) -> None:
+    """Before every attempt (first or retry), wait for local_classifier's timeout cooldown on its own clock.
+    This prevents one item's final timeout from spilling into the next item's first attempt.
+    """
+    from llm_router import local_classifier as lc
+
+    while True:
+        left = lc._cool_until - lc._now()
+        if left <= 0:
+            return
+        await cfg.asleep(left)
+
+
 async def warm_up(cfg: Cfg) -> float:
     """One discarded synthetic warm-up call (the production warm-up: ``warm-up`` text, no record)."""
     from llm_router import local_classifier as lc
@@ -684,19 +735,17 @@ def save_meta(cfg: Cfg, meta: dict) -> None:
 
 
 async def shadow_one(cfg: Cfg, sched, item: dict, body: dict, rules: tuple, meta: dict) -> str:
-    """Run one item to its final record: ``maybe_schedule`` then ``drain``; a ``cold`` waits for /api/ps, a
-    ``timeout`` waits out the cooldown, and each failure is retried NIMBLE_RETRIES times."""
+    """Run one item to its final record: ``maybe_schedule`` then ``drain``; a ``cold`` retry waits for /api/ps.
+    Every attempt waits out the timeout cooldown; each failure is retried NIMBLE_RETRIES times."""
     from llm_router.proxy import llm_shadow
 
     key = record_key(body)
     k = (item.get("session_id") or "", key)
     sources = shadow_records(cfg).get(k, [])
     while not is_final(sources):
-        if sources:
-            if sources[-1] == "cold":
-                await wait_resident(cfg)
-            elif sources[-1] == "timeout":
-                await cfg.asleep(TIMEOUT_COOLDOWN_S)
+        if sources and sources[-1] == "cold":
+            await wait_resident(cfg)
+        await wait_cooldown(cfg)
         row = make_row(cfg, item, key, rules)
         status = sched.maybe_schedule(body, row)
         if status == llm_shadow.SCHEDULED:
@@ -741,8 +790,7 @@ def final_sources(cfg: Cfg, selected: list) -> dict:
 
 def cmd_shadow(cfg: Cfg) -> int:
     check_common(cfg, policy=True)
-    if not harness_line_ok(cfg):
-        raise Refuse("refusing: use.log's first line is not `harness <UTC> sha=<HARNESS_SHA>` for this commit")
+    check_code_identity(cfg)
     sel = load_selection(cfg)
     if not sel.get("ok"):
         raise Refuse("refusing: the selection gate failed")
@@ -815,16 +863,21 @@ def load_label_mods(cfg: Cfg):
 
 
 def spent(cfg: Cfg) -> tuple[float, float]:
-    costs = [float(r.get("total_cost_usd") or 0) for r in json_rows(cfg.ledger) if r.get("kind") == "call"]
+    rows = json_rows(cfg.ledger)
+    completed = {r.get("call_id") for r in rows if r.get("kind") == "call" and r.get("call_id")}
+    costs = [float(r.get("total_cost_usd") or 0) for r in rows if r.get("kind") == "call"]
+    costs.extend(float(r.get("est_usd") or 0) for r in rows
+                 if r.get("kind") == "call_pending" and r.get("call_id") not in completed)
     return sum(costs), max(costs, default=0.0)
 
 
-def spend_guard(cfg: Cfg, cap: float = SPEND_CAP_USD) -> None:
+def spend_guard(cfg: Cfg, cap: float = SPEND_CAP_USD) -> float:
     """Stop when spent + estimate (1.25 x the dearest call so far; first call $0.30) would exceed the cap."""
     total, top = spent(cfg)
     est = top * SPEND_EST_FACTOR if top > 0 else SPEND_FIRST_EST_USD
     if total + est > cap:
         raise SpendCap(f"spent {total:.4f} + est {est:.4f} > cap {cap:.2f}")
+    return est
 
 
 def claude_cmd() -> list:
@@ -834,12 +887,13 @@ def claude_cmd() -> list:
 def judge_call(cfg: Cfg, mods, entries: list, mode: str) -> dict:
     """One ``claude -p`` call with shadowlab.call_opus's flags. Returns {opaque id: valid label}."""
     gt, rub, sl = mods
-    spend_guard(cfg)
+    est = spend_guard(cfg)
     sl.quota_guard(gt, str(cfg.usage))  # raises gt.Paused: nothing called, nothing terminal
     ids = [e["oid"] for e in entries]
     if mode == "single":
         e = entries[0]
-        user = rub.ITEM_TEMPLATE.format(id=e["oid"], context=e["context"], prompt=e["prompt"]) + "\n\n" + rub.SINGLE_TAIL
+        user = (rub.ITEM_TEMPLATE.format(id=e["oid"], context=e["context"], prompt=e["prompt"])
+                + "\n\n" + rub.SINGLE_TAIL)
     else:
         user = "\n\n".join(rub.ITEM_TEMPLATE.format(id=e["oid"], context=e["context"], prompt=e["prompt"])
                            for e in entries) + "\n\n" + rub.BATCH_TAIL
@@ -849,32 +903,39 @@ def judge_call(cfg: Cfg, mods, entries: list, mode: str) -> dict:
                           "--tools", "", "--system-prompt", rub.RUBRIC, "--", user]
     env = dict(os.environ)
     env.pop("ANTHROPIC_BASE_URL", None)
+    cid = uuid.uuid4().hex
+    append_json(cfg.ledger, {"kind": "call_pending", "call_id": cid, "ts": utc(cfg.now()),
+                             "mode": mode, "ids": ids, "est_usd": est})
     t0 = time.time()
     d = None
     try:
         p = subprocess.run(cmd, cwd=str(cfg.claude_cwd), stdin=subprocess.DEVNULL, capture_output=True, text=True,
                            timeout=JUDGE_TIMEOUT_S, env=env)
-        if p.returncode == 0:
-            d = json.loads(p.stdout)
+        d = json.loads(p.stdout)
     except (subprocess.TimeoutExpired, OSError, ValueError):
         d = None
-    row = {"kind": "call", "ts": utc(cfg.now()), "mode": mode, "ids": ids,
-           "item_ids": [e.get("item_id") or e.get("planted_id") for e in entries], "total_cost_usd": 0.0,
-           "tokens_in": None, "tokens_out": None, "model_ok": None, "secs": round(time.time() - t0, 1)}
+    row = {"kind": "call", "call_id": cid, "ts": utc(cfg.now()), "mode": mode, "ids": ids,
+           "item_ids": [e.get("item_id") or e.get("planted_id") for e in entries], "total_cost_usd": est,
+           "cost_basis": "estimate", "tokens_in": None, "tokens_out": None, "model_ok": None,
+           "secs": round(time.time() - t0, 1)}
     if not isinstance(d, dict):
         append_json(cfg.ledger, row)
         return {}
-    try:
-        row["total_cost_usd"] = float(d.get("total_cost_usd") or 0)
-    except (TypeError, ValueError):
-        row["total_cost_usd"] = 0.0
+    cost = d.get("total_cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and math.isfinite(cost) and cost >= 0:
+        row["total_cost_usd"] = cost
+        row["cost_basis"] = "reported"
     u = d.get("usage") if isinstance(d.get("usage"), dict) else {}
     row["tokens_in"] = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens",
                                                        "cache_read_input_tokens")) if u else None
     row["tokens_out"] = int(u.get("output_tokens") or 0) if u else None
     mu = d.get("modelUsage") if isinstance(d.get("modelUsage"), dict) else {}
-    row["model_ok"] = bool(mu) and all(JUDGE_MODEL in str(k).lower() for k in mu)
+    row["model_ok"] = all(JUDGE_MODEL in str(k).lower() for k in mu) if mu else None
     append_json(cfg.ledger, row)
+    if p.returncode != 0:
+        if mu and not row["model_ok"]:
+            raise NotOpus(f"modelUsage {sorted(mu)}")
+        return {}
     if not row["model_ok"]:
         raise NotOpus(f"modelUsage {sorted(mu)}")
     try:
@@ -1004,6 +1065,7 @@ class Labeller:
 
 def cmd_label(cfg: Cfg) -> int:
     check_common(cfg)
+    check_code_identity(cfg)
     try:
         meta = json.loads(cfg.shadow_meta.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -1018,9 +1080,11 @@ def cmd_label(cfg: Cfg) -> int:
     status, code = "done", EXIT_OK
     try:
         lab.run()
+        append_line(cfg.use_log, f"label done {utc(cfg.now())}")
     except gt.Paused:
         status, code = "PAUSED", EXIT_PAUSED
     except SpendCap:
+        append_line(cfg.use_log, f"label stopped spend_cap {utc(cfg.now())}")
         status, code = "SPEND_CAP", EXIT_SPEND_CAP
     except NotOpus:
         terminal(cfg, "label", "judge_not_opus exit4")
@@ -1187,7 +1251,8 @@ def load_ge3_tiers(cfg: Cfg) -> dict:
 
 
 def score(cfg: Cfg, records_raw: list, labels: dict, items_by_key: dict, selection: dict, *, p17c_passed: bool,
-          pre_freeze_rows: int, calibration_ok: bool, label_error_ids: set, ge3_tiers: dict, kappa_fn=None) -> dict:
+          pre_freeze_rows: int, calibration_ok: bool, label_error_ids: set, ge3_tiers: dict, kappa_fn=None,
+          pins_ok: bool = True, pin_failures: list | None = None) -> dict:
     """The full section 7 analysis on the last record per key."""
     from llm_router import shadow_eval as se
 
@@ -1217,7 +1282,7 @@ def score(cfg: Cfg, records_raw: list, labels: dict, items_by_key: dict, selecti
     vs = Counter(t["session_id"] for t in verdict_rows)
     top = vs.most_common(1)[0][1] if n else 0
     verdict, why = decide(p17c_passed=p17c_passed, pre_freeze_rows=pre_freeze_rows, calibration_ok=calibration_ok,
-                          feasibility_ok=bool(selection.get("ok")), pins_ok=True, errors=errors,
+                          feasibility_ok=bool(selection.get("ok")), pins_ok=pins_ok, errors=errors,
                           n_selected=n_selected, n=n, top_session=top, c_llm=_arm(main, "llm", "c_lambda2_clamp"),
                           c_rules=_arm(main, "rules_eff", "c_lambda2_clamp"),
                           under_llm=_arm(main, "llm", "under_k"), under_rules=_arm(main, "rules_eff", "under_k"))
@@ -1303,6 +1368,7 @@ def score(cfg: Cfg, records_raw: list, labels: dict, items_by_key: dict, selecti
     lat = [t["ms"] for t in turns if t["source"] == "llm"]
     return {
         "label": LABEL, "verdict": verdict, "verdict_reason": why, "lead": lead,
+        "pin_failures": pin_failures,
         "n_selected": n_selected, "n_f": len(selection.get("f_ids", [])), "n_g": len(selection.get("g_ids", [])),
         "admitted": selection.get("admitted"), "n": n, "n_verdict_sessions": len(vs),
         "largest_session_share_verdict_rows": round(top / n, 4) if n else None,
@@ -1344,17 +1410,63 @@ def measurement(result: dict, records: list, labels: dict, items_by_key: dict, s
                          "truth": t.get("truth"), "source": t.get("source")})
     keep = ("verdict", "verdict_reason", "lead", "n_selected", "n_f", "n_g", "n", "n_labeled", "n_fallback",
             "errors", "arms", "boot_c_lambda2_clamp", "boot_under", "reference_arms")
-    return {"label": LABEL, "what": "P1.7-d synthetic: nimble:9b vs rules_eff on replayed past prompts",
+    return {"label": LABEL, "disclosures": DISCLOSURES,
+            "what": "P1.7-d synthetic: nimble:9b vs rules_eff on replayed past prompts",
             "prereg": "docs/prereg/PREREG-P17D-synthetic.md", **{k: result[k] for k in keep}, "items": rows}
+
+
+def rows_from_bytes(raw: bytes) -> list:
+    """Every object line from the snapshot; malformed lines are skipped."""
+    out = []
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            out.append(obj)
+    return out
+
+
+def labels_from_bytes(raw: bytes) -> dict:
+    """shadow_eval.load_labels on the exact bytes hashed in the started record."""
+    from llm_router import shadow_eval as se
+
+    out = {}
+    for r in rows_from_bytes(raw):
+        if not isinstance(r.get("text_sha"), str):
+            continue
+        truth = se.tier_name(r.get("truth"))
+        if truth:
+            out[(r.get("session_id") or "", r["text_sha"])] = truth
+    return out
+
+
+def before_freeze_count(records: list, frozen_utc: str) -> int:
+    cutoff = parse_utc(frozen_utc)
+    count = 0
+    for r in records:
+        ts = r.get("ts") if r.get("kind") == "classifier_shadow" else None
+        if isinstance(ts, str):
+            try:
+                ts = parse_utc(ts)
+            except ValueError:
+                ts = None
+        if isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts < cutoff:
+            count += 1
+    return count
 
 
 def cmd_score(cfg: Cfg, p17c_passed: bool) -> int:
     check_common(cfg, policy=True)
     if has_started(cfg):
         raise Refuse("refusing: use.log already holds a started record; score is single-use")
+    if not label_finished(cfg):
+        raise Refuse("refusing: label has not finished (no `label done` / `label stopped spend_cap` in use.log)")
+    check_code_identity(cfg)
     sel = load_selection(cfg)
     items = load_items(cfg)
-    res = check_prereg.check(cfg.prereg, cfg.shadow if cfg.shadow.exists() else None)
+    res = check_prereg.check(cfg.prereg)
     try:
         labels_raw, shadow_raw = cfg.labels.read_bytes(), cfg.shadow.read_bytes()
     except FileNotFoundError:
@@ -1362,10 +1474,14 @@ def cmd_score(cfg: Cfg, p17c_passed: bool) -> int:
     append_line(cfg.use_log, f"started {utc(cfg.now())} prereg_sha256={res['sha256']} git_sha={cfg.head_sha()} "
                              f"labels_sha256={hashlib.sha256(labels_raw).hexdigest()} "
                              f"shadow_sha256={hashlib.sha256(shadow_raw).hexdigest()}")
-    from llm_router import shadow_eval as se
-
-    labels = se.load_labels(cfg.labels)
-    records = json_rows(cfg.shadow)
+    pins_ok, pin_failures, gt = True, None, None
+    try:
+        gt, _, _ = load_label_mods(cfg)
+    except (Refuse, SystemExit, OSError) as exc:
+        pins_ok = False
+        pin_failures = [exc.msg if isinstance(exc, Refuse) else type(exc).__name__ + ": " + str(exc)]
+    labels = labels_from_bytes(labels_raw)
+    records = rows_from_bytes(shadow_raw)
     items_by_key: dict = defaultdict(list)
     for i in sel["ids"]:
         items_by_key[item_key(items[i])].append(items[i])
@@ -1374,19 +1490,16 @@ def cmd_score(cfg: Cfg, p17c_passed: bool) -> int:
     label_errors = {r.get("item_id") for r in json_rows(cfg.ledger) if r.get("kind") == "label_error"}
     kappa_fn = None
     ge3 = {}
-    if sel.get("g_ids"):
-        try:
-            gt, _, _ = load_label_mods(cfg)
-            kappa_fn = lambda a, b: gt.cohen_kappa(a, b)  # noqa: E731
-            ge3 = load_ge3_tiers(cfg)
-        except (Refuse, OSError) as exc:
-            print(f"kappa not computed ({type(exc).__name__})", file=sys.stderr)
+    if sel.get("g_ids") and gt is not None:
+        kappa_fn = lambda a, b: gt.cohen_kappa(a, b)  # noqa: E731
+        ge3 = load_ge3_tiers(cfg)
     result = score(cfg, records, labels, dict(items_by_key), sel, p17c_passed=p17c_passed,
-                   pre_freeze_rows=int(res.get("before_freeze") or 0), calibration_ok=calibration_ok,
-                   label_error_ids=label_errors, ge3_tiers=ge3, kappa_fn=kappa_fn)
+                   pre_freeze_rows=before_freeze_count(records, res["frozen_utc"]), calibration_ok=calibration_ok,
+                   label_error_ids=label_errors, ge3_tiers=ge3, kappa_fn=kappa_fn,
+                   pins_ok=pins_ok, pin_failures=pin_failures)
     total, _ = spent(cfg)
     result.update({"spend_usd": round(total, 4), "p17c_passed": p17c_passed, "utc": utc(cfg.now()),
-                   "prereg_sha256": res["sha256"], "harness_sha": cfg.head_sha()})
+                   "prereg_sha256": res["sha256"], "harness_sha": cfg.head_sha(), "disclosures": DISCLOSURES})
     write_json_private(cfg.result, result)
     cfg.measurement.parent.mkdir(parents=True, exist_ok=True)
     cfg.measurement.write_text(json.dumps(measurement(result, records, labels, dict(items_by_key), sel), indent=1,
@@ -1411,10 +1524,11 @@ def cmd_status(cfg: Cfg) -> int:
     calls = [r for r in json_rows(cfg.ledger) if r.get("kind") == "call"]
     lines = use_lines(cfg)
     emit({"step": "status", "selected": len(sel.get("ids", [])), "selection_ok": sel.get("ok"),
-          "shadow_records": len(recs), "shadow_sources": dict(sorted(Counter(str(r.get("source")) for r in recs).items())),
+          "shadow_records": len(recs),
+          "shadow_sources": dict(sorted(Counter(str(r.get("source")) for r in recs).items())),
           "shadow_done": meta.get("done") is True, "labels_lines": line_count(cfg.labels),
           "planted_lines": line_count(cfg.labels_planted), "judge_calls": len(calls),
-          "spend_usd": round(sum(float(r.get("total_cost_usd") or 0) for r in calls), 4),
+          "spend_usd": round(spent(cfg)[0], 4),
           "use_log": {"harness_line": bool(lines) and bool(HARNESS_RE.match(lines[0])),
                       "started": any(x.startswith("started ") for x in lines),
                       "terminal": any(x.startswith("terminal ") for x in lines)}})

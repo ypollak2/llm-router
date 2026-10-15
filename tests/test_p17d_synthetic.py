@@ -110,7 +110,7 @@ class World:
         self.set_usage(10, 10)
         self.cfg = ps.Cfg(run=self.run, measurement=tmp_path / "measure" / "p17d-synthetic.json", usage=self.usage,
                           ge3_labels=tmp_path / "ge3_labels.jsonl", head_sha=lambda: HEAD,
-                          src_matches=lambda _sha: True, asleep=_no_sleep)
+                          src_matches=lambda _sha: True, tree_clean=lambda: True, asleep=_no_sleep)
         self.cfg.pins.update(items=sha(self.run / "items.jsonl"), attach_counts=sha(self.run / "attach_counts.json"),
                              tier_policy=sha(self.run / "tier_policy.yaml"))
 
@@ -534,6 +534,7 @@ def test_shadow_refuses_without_the_harness_line_or_with_another_sha(world, olla
 def test_shadow_refuses_when_labels_exist_and_label_refuses_before_done(world, ollama, monkeypatch):
     do_select(world)
     install_judge(monkeypatch, Judge())
+    world.harness_line()
     with refuses("not done"):
         ps.cmd_label(world.cfg)
     world.cfg.labels.write_text("")
@@ -710,6 +711,7 @@ def test_label_calibration_first_then_batches_of_8_and_files(shadowed, monkeypat
     judge = Judge()
     install_judge(monkeypatch, judge)
     assert ps.cmd_label(w.cfg) == ps.EXIT_OK
+    assert any(x.startswith("label done ") for x in w.use())
     first = judge.calls[0]
     assert len(first["ids"]) == 8
     sel = json.loads(w.cfg.selection.read_text())
@@ -812,7 +814,7 @@ def test_spend_cap_stops_before_the_call_that_could_cross_10_dollars(shadowed, m
 
 def test_spend_guard_first_estimate_and_boundary(tmp_path):
     cfg = ps.Cfg(run=tmp_path)
-    ps.spend_guard(cfg)                                  # nothing spent: $0.30 estimate passes
+    assert ps.spend_guard(cfg, cap=0.30) == 0.30           # equality with the cap passes
     ps.append_json(cfg.ledger, {"kind": "call", "total_cost_usd": 9.70})
     with pytest.raises(ps.SpendCap):
         ps.spend_guard(cfg)                              # 9.70 + 12.125 > 10
@@ -1019,14 +1021,14 @@ def full_run(w, monkeypatch, judge=None):
 
 def test_score_end_to_end_started_before_labels_are_opened_and_single_use(world, ollama, monkeypatch, capsys):
     full_run(world, monkeypatch)
-    real = se.load_labels
+    real = ps.labels_from_bytes
     seen = []
 
     def spy(path):
         seen.append([x for x in world.use() if x.startswith("started ")])
         return real(path)
 
-    monkeypatch.setattr(se, "load_labels", spy)
+    monkeypatch.setattr(ps, "labels_from_bytes", spy)
     assert ps.cmd_score(world.cfg, True) == ps.EXIT_OK
     assert seen and seen[0], "started must be logged before labels.jsonl is parsed"
     line = seen[0][0]
@@ -1055,6 +1057,7 @@ def test_score_after_a_spend_cap_stop_runs_on_existing_labels(world, ollama, mon
     judge = Judge(cost=1.0)
     install_judge(monkeypatch, judge)
     assert ps.cmd_label(world.cfg) == ps.EXIT_SPEND_CAP
+    assert any(x.startswith("label stopped spend_cap ") for x in world.use())
     assert ps.cmd_score(world.cfg, True) == ps.EXIT_OK
     res = json.loads(world.cfg.result.read_text())
     assert res["verdict"] == ps.NOT_INFORMATIVE and res["verdict_reason"].startswith("n:")
@@ -1194,3 +1197,318 @@ def test_report_leads_with_a_group_on_the_opposite_side():
     assert res["verdict"] == ps.PASS
     assert any(x.startswith("group G takes the opposite side") for x in res["lead"])
     assert not any(x.startswith("group F") for x in res["lead"])
+
+
+def test_cooldown_is_waited_out_before_every_attempt_with_the_real_classify_async(tmp_path, monkeypatch):
+    from llm_router import engine_door, local_classifier as lc
+    from llm_router.local_classifier import Verdict
+
+    monkeypatch.setattr(ps, "ollama_modelfile", lambda: f"FROM /models/blobs/{ps.NIMBLE_BLOB}\nTEMPLATE x\n")
+    monkeypatch.setattr(ps, "blob_size", lambda _p: ps.NIMBLE_BLOB_SIZE)
+    monkeypatch.setattr(ps, "free_mem_pct", lambda: 60.0)
+    monkeypatch.setattr(ps, "load1", lambda: 1.0)
+    monkeypatch.setattr(ps, "ollama_ps", lambda: ["nimble:9b", "foreign:1b"])
+    monkeypatch.setattr(lc, "_warm", _no_sleep)
+
+    async def loaded(_m, _b):
+        return True
+
+    monkeypatch.setattr(lc, "_is_loaded", loaded)
+    monkeypatch.setattr(engine_door, "shadow", lambda *a, **k: None)
+    clock = [1000.0]
+    monkeypatch.setattr(lc, "_now", lambda: clock[0])
+    requests = Counter()
+    failing = set()
+
+    async def asleep(seconds):
+        clock[0] += seconds
+
+    async def classify(key, assembled, model, budget, derivation, t_h, t_s):
+        requests[key[1]] += 1
+        if key[1] in failing:
+            lc._cool_until = lc._now() + lc.COOLDOWN_S
+            return lc._fail("timeout", model, derivation, 2000.0)
+        return Verdict(None, "sonnet", None, None, None, None, None, "direct", "llm", "nimble:9b", "sys1",
+                       100.0, confidence=0.9)
+
+    monkeypatch.setattr(lc, "_classify", classify)
+    try:
+        for part in ("a", "b"):
+            lc._reset_state()
+            requests.clear()
+            root = tmp_path / part
+            root.mkdir()
+            w = World(root, big_items())
+            w.cfg.asleep = asleep
+            do_select(w)
+            sel = json.loads(w.cfg.selection.read_text())
+            items = {i["item_id"]: i for i in w.items}
+            keys = [ps.item_key(items[i]) for i in sel["ids"]]
+            failing = {k[1] for k in (keys[:1] if part == "a" else keys)}
+            w.harness_line()
+            assert ps.cmd_shadow(w.cfg) == (ps.EXIT_OK if part == "a" else ps.EXIT_TERMINAL)
+            sources = ps.shadow_records(w.cfg)
+            if part == "a":
+                assert requests[keys[0][1]] == 2 and sources[keys[0]] == ["timeout", "timeout"]
+                assert requests[keys[1][1]] == 1 and sources[keys[1]] == ["llm"]
+            else:
+                assert all(requests[k[1]] == 2 and sources[k] == ["timeout", "timeout"] for k in keys)
+                assert len(ps.json_rows(w.cfg.shadow)) == 2 * len(keys)
+    finally:
+        lc._reset_state()
+
+
+@pytest.mark.parametrize("rc,payload,error,prior,cost,basis", [
+    (1, {"total_cost_usd": 0.12, "modelUsage": {"opus": {}}}, None, None, 0.12, "reported"),
+    (1, "not json", None, None, 0.30, "estimate"),
+    (1, None, "timeout", 0.2, 0.25, "estimate"),
+    (1, None, "oserror", None, 0.30, "estimate"),
+    (0, {"modelUsage": {"opus": {}}, "result": "{}"}, None, None, 0.30, "estimate"),
+    (1, {}, None, None, 0.30, "estimate"),
+    (1, [], None, None, 0.30, "estimate"),
+    (1, {"total_cost_usd": True}, None, None, 0.30, "estimate"),
+    (1, {"total_cost_usd": -1}, None, None, 0.30, "estimate"),
+    (1, {"total_cost_usd": float("nan")}, None, None, 0.30, "estimate"),
+    (1, {"total_cost_usd": float("inf")}, None, None, 0.30, "estimate"),
+    (1, {"total_cost_usd": "0.12"}, None, None, 0.30, "estimate"),
+])
+def test_judge_failed_and_unpriced_calls_use_reported_cost_or_estimate(
+        tmp_path, monkeypatch, rc, payload, error, prior, cost, basis):
+    usage = tmp_path / "usage.json"
+    usage.write_text(json.dumps({"session_pct": 10, "weekly_pct": 10, "updated_at": time.time()}))
+    cfg = ps.Cfg(run=tmp_path, usage=usage)
+    if prior is not None:
+        ps.append_json(cfg.ledger, {"kind": "call", "total_cost_usd": prior})
+
+    def run(cmd, **kw):
+        if error == "timeout":
+            raise subprocess.TimeoutExpired(cmd, 900)
+        if error == "oserror":
+            raise OSError("failed")
+        stdout = payload if isinstance(payload, str) else json.dumps(payload)
+        return subprocess.CompletedProcess(cmd, rc, stdout, "")
+
+    monkeypatch.setattr(ps.subprocess, "run", run)
+    assert ps.judge_call(cfg, fake_mods(), [{"oid": "L001", "context": "", "prompt": ""}], "batch") == {}
+    rows = ps.json_rows(cfg.ledger)
+    row = rows[-1]
+    assert row["kind"] == "call" and row["total_cost_usd"] == cost and row["cost_basis"] == basis
+    assert rows[-2]["kind"] == "call_pending" and rows[-2]["call_id"] == row["call_id"]
+    assert ps.spent(cfg) == ((prior or 0) + cost, max(prior or 0, cost))
+
+
+@pytest.mark.parametrize("crash", [False, True])
+def test_judge_pending_cost_is_reconciled_or_survives_a_final_write_crash(tmp_path, monkeypatch, capsys, crash):
+    usage = tmp_path / "usage.json"
+    usage.write_text(json.dumps({"session_pct": 10, "weekly_pct": 10, "updated_at": time.time()}))
+    cfg = ps.Cfg(run=tmp_path, usage=usage)
+    payload = {"total_cost_usd": 0.12, "modelUsage": {"opus": {}}, "result": "{}"}
+    monkeypatch.setattr(ps.subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, json.dumps(payload), ""))
+    real = ps.append_json
+
+    def append(path, row):
+        if crash and row.get("kind") == "call":
+            raise RuntimeError("ledger write failed")
+        real(path, row)
+
+    monkeypatch.setattr(ps, "append_json", append)
+    entries = [{"oid": "L001", "context": "", "prompt": ""}]
+    if crash:
+        with pytest.raises(RuntimeError, match="ledger write failed"):
+            ps.judge_call(cfg, fake_mods(), entries, "batch")
+        assert ps.spent(cfg) == (0.30, 0.30)
+    else:
+        assert ps.judge_call(cfg, fake_mods(), entries, "batch") == {}
+        assert ps.spent(cfg) == (0.12, 0.12)
+        pending, final = ps.json_rows(cfg.ledger)
+        assert pending["kind"] == "call_pending" and final["kind"] == "call"
+        assert pending["call_id"] == final["call_id"]
+    ps.cmd_status(cfg)
+    assert json.loads(capsys.readouterr().out)["spend_usd"] == (0.30 if crash else 0.12)
+
+
+def test_failed_judge_call_still_rejects_sonnet(tmp_path, monkeypatch):
+    usage = tmp_path / "usage.json"
+    usage.write_text(json.dumps({"session_pct": 10, "weekly_pct": 10, "updated_at": time.time()}))
+    cfg = ps.Cfg(run=tmp_path, usage=usage)
+    payload = {"total_cost_usd": 0.12, "modelUsage": {"sonnet": {}}}
+    monkeypatch.setattr(ps.subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, json.dumps(payload), ""))
+    with pytest.raises(ps.NotOpus):
+        ps.judge_call(cfg, fake_mods(), [{"oid": "L001", "context": "", "prompt": ""}], "batch")
+    assert ps.json_rows(cfg.ledger)[-1]["model_ok"] is False
+
+
+def test_score_refuses_after_quota_pause(shadowed, monkeypatch):
+    w = shadowed
+    w.set_usage(10, 100)
+    install_judge(monkeypatch, Judge())
+    assert ps.cmd_label(w.cfg) == ps.EXIT_PAUSED
+    with refuses("label has not finished"):
+        ps.cmd_score(w.cfg, True)
+    assert not any(x.startswith("started ") for x in w.use())
+    assert not ps.label_finished(w.cfg)
+    assert not w.cfg.result.exists() and not w.cfg.measurement.exists()
+
+
+@pytest.mark.parametrize("command", ["shadow", "label", "score"])
+def test_code_identity_guards_refuse_before_work(world, ollama, monkeypatch, command):
+    if command == "shadow":
+        do_select(world)
+        world.harness_line()
+    else:
+        full_run(world, monkeypatch)
+    fn = {"shadow": ps.cmd_shadow, "label": ps.cmd_label, "score": lambda cfg: ps.cmd_score(cfg, True)}[command]
+    world.cfg.tree_clean = lambda: False
+    with refuses("uncommitted"):
+        fn(world.cfg)
+    world.cfg.tree_clean = lambda: True
+    world.cfg.head_sha = lambda: "f" * 40
+    with refuses("harness"):
+        fn(world.cfg)
+    assert not any(x.startswith("started ") for x in world.use())
+    if command == "shadow":
+        assert not world.cfg.shadow.exists()
+
+
+def test_repo_tree_clean_checks_scripts_and_src(monkeypatch):
+    seen = []
+    output = [""]
+
+    def run(args, **kw):
+        seen.append((args, kw))
+        return subprocess.CompletedProcess(args, 0, output[0], "")
+
+    monkeypatch.setattr(ps.subprocess, "run", run)
+    assert ps.repo_tree_clean()
+    args, kw = seen[-1]
+    assert args == ["git", "-C", str(ps.ROOT), "status", "--porcelain", "--", "scripts/", "src/"]
+    assert kw == {"capture_output": True, "text": True, "timeout": 60, "stdin": subprocess.DEVNULL}
+    output[0] = " M scripts/p17d_synthetic.py\n"
+    assert not ps.repo_tree_clean()
+
+
+@pytest.mark.parametrize("error", [
+    ps.Refuse("refusing: shadowlab.py sha256 x != pinned y"),
+    SystemExit("rubric md5 mismatch"),
+])
+def test_score_consumes_use_and_reports_label_pin_failure(world, ollama, monkeypatch, error):
+    full_run(world, monkeypatch)
+
+    def fail(_cfg):
+        raise error
+
+    monkeypatch.setattr(ps, "load_label_mods", fail)
+    assert ps.cmd_score(world.cfg, True) == ps.EXIT_OK
+    result = json.loads(world.cfg.result.read_text())
+    assert result["verdict"] == ps.NOT_INFORMATIVE and "pin" in result["verdict_reason"]
+    assert result["pin_failures"] == [
+        error.msg if isinstance(error, ps.Refuse) else type(error).__name__ + ": " + str(error)
+    ]
+    assert any(x.startswith("started ") for x in world.use())
+
+
+def test_attach_pin_is_checked_before_import_execution(tmp_path, capsys):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    for name in ("p17d_synthetic.py", "check_prereg.py"):
+        shutil.copy(ROOT / "scripts" / name, scripts / name)
+    marker = tmp_path / "executed"
+    raw = (ROOT / "scripts" / "p17d_attach.py").read_bytes()
+    (scripts / "p17d_attach.py").write_bytes(raw + f'\nopen({str(marker)!r}, "w").write("ran")\n'.encode())
+    name = "_p17d_tampered_import"
+    spec = importlib.util.spec_from_file_location(name, scripts / "p17d_synthetic.py")
+    mod = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get("_p17d_attach_helpers")
+    sys.modules[name] = mod
+    try:
+        with pytest.raises(SystemExit) as ei:
+            spec.loader.exec_module(mod)
+        assert ei.value.code == 2
+    finally:
+        sys.modules.pop(name, None)
+        if previous is None:
+            sys.modules.pop("_p17d_attach_helpers", None)
+        else:
+            sys.modules["_p17d_attach_helpers"] = previous
+    assert not marker.exists()
+    assert "p17d_attach.py sha256" in capsys.readouterr().err
+
+
+def test_score_uses_the_snapshots_hashed_before_started(world, ollama, monkeypatch):
+    full_run(world, monkeypatch)
+    labels_sha, shadow_sha = sha(world.cfg.labels), sha(world.cfg.shadow)
+    real = ps.append_line
+
+    def append(path, line):
+        real(path, line)
+        if path == world.cfg.use_log and line.startswith("started "):
+            world.cfg.labels.write_bytes(b"")
+            world.cfg.shadow.write_bytes(b"garbage\n")
+
+    monkeypatch.setattr(ps, "append_line", append)
+    assert ps.cmd_score(world.cfg, True) == ps.EXIT_OK
+    result = json.loads(world.cfg.result.read_text())
+    assert result["n_labeled"] == 120
+    started = next(x for x in world.use() if x.startswith("started "))
+    assert f"labels_sha256={labels_sha}" in started and f"shadow_sha256={shadow_sha}" in started
+    measure = json.loads(world.cfg.measurement.read_text())
+    assert sum(r["truth"] is not None for r in measure["items"]) == 120
+
+
+def test_before_freeze_count_matches_prereg_checker(tmp_path):
+    frozen = ps.check_prereg.check(ps.PREREG)["frozen_utc"]
+    cutoff = ps.parse_utc(frozen)
+    records = [{"kind": "classifier_shadow", "ts": ts} for ts in
+               (cutoff - 1, cutoff, cutoff + 1, "2026-10-15T16:32:57Z", frozen, "bad", None, True)]
+    records.append({"kind": "other", "ts": cutoff - 1})
+    raw = ("\n".join(json.dumps(r) for r in records) + "\nnot json\n[]\n").encode()
+    log = tmp_path / "shadow.jsonl"
+    log.write_bytes(raw)
+    assert ps.before_freeze_count(ps.rows_from_bytes(raw), frozen) == 2
+    assert ps.before_freeze_count(ps.rows_from_bytes(raw), frozen) == ps.check_prereg.check(ps.PREREG, log)[
+        "before_freeze"
+    ]
+
+
+def test_spend_guard_allows_exactly_ten_dollars(tmp_path):
+    cfg = ps.Cfg(run=tmp_path)
+    ps.append_json(cfg.ledger, {"kind": "call", "total_cost_usd": 0.5})
+    for _ in range(71):
+        ps.append_json(cfg.ledger, {"kind": "call", "total_cost_usd": 0.125})
+    assert ps.spent(cfg) == (9.375, 0.5)
+    assert ps.spend_guard(cfg) == 0.625
+    ps.append_json(cfg.ledger, {"kind": "call", "total_cost_usd": 0.125})
+    with pytest.raises(ps.SpendCap):
+        ps.spend_guard(cfg)
+
+
+@pytest.mark.parametrize("largest,feasible", [(55, True), (56, False)])
+def test_feasibility_share_boundary_without_admission(monkeypatch, largest, feasible):
+    items = [make_item("shared" if i < largest else f"session-{i}", i) for i in range(100)]
+    calls = []
+
+    def walk(*args):
+        calls.append(args)
+        return items if len(calls) == 1 else []
+
+    monkeypatch.setattr(ps, "walk", walk)
+    selected = ps.select(items)
+    assert selected["feasible"] is feasible and selected["admitted"] is False
+    assert len(calls) == 1
+
+
+def test_select_requires_strictly_after_frozen_utc(world):
+    world.cfg.now = lambda: ps.parse_utc("2026-10-15T16:32:58Z")
+    with refuses("frozen_utc"):
+        ps.cmd_select(world.cfg)
+    world.cfg.now = lambda: ps.parse_utc("2026-10-15T16:32:59Z")
+    do_select(world)
+
+
+def test_score_and_measurement_disclose_d110(world, ollama, monkeypatch):
+    full_run(world, monkeypatch)
+    assert ps.cmd_score(world.cfg, True) == ps.EXIT_OK
+    for path in (world.cfg.result, world.cfg.measurement):
+        assert any("D-110" in s for s in json.loads(path.read_text())["disclosures"])
