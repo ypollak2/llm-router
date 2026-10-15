@@ -12,7 +12,8 @@ is frozen. A pins test reads the prereg `pins` block and fails if a constant dif
 | `tests/test_p17d_synthetic.py` | repo | no (synthetic fixtures) | - |
 | `$RUN = $PP/v16/p17d/` | 0700 | - | `attach` creates it |
 | `$RUN/attach_counts.json` | 0600 | no | `attach` (exclusion counters, pool n, sessions, largest share) |
-| `$RUN/items.jsonl` | 0600 | **yes** | `attach` (§2 fields) |
+| `$RUN/items.jsonl` | 0600 | **yes** | `attach` (§2 fields; `group` F or G) |
+| `$RUN/tier_policy.yaml` + `tier_policy.json` | 0600 | no | `attach` (a copy of the live policy; path, basis, sha256, route, complexity_knn) |
 | `$RUN/selection.json` | 0444 after write | no | `select` (item ids, bound to sha256 of items.jsonl; gate result) |
 | `$RUN/scratch/` | 0700 | no | `shadow` (scratch HOME / LLM_ROUTER_HOME) |
 | `$RUN/classifier_shadow.jsonl` | 0600 | no | `shadow`, via the production `ShadowScheduler._append` |
@@ -32,7 +33,7 @@ only.
 
 | Command | Reads | Calls | Refuses when |
 |---|---|---|---|
-| `attach` (owner, TTY) | corpus, `~/.claude/projects` (top-level files only), `~/.llm-router/proxy_calls.jsonl`, `denylist.txt`, exec_sessions, the leakage sets | none | `$RUN/items.jsonl` exists; any pin sha differs |
+| `attach` (sub-agent, D-107 c; read-only) | corpus, GE3 items/split (for §2a), `~/.claude/projects` (top-level files only), `~/.llm-router/proxy_calls.jsonl`, `~/.llm-router/.env` (one key only), `denylist.txt`, the proxy launchd plist and process argv, exec_sessions, the leakage sets | none | `$RUN/items.jsonl` exists; any pin sha differs; any write target outside `$PP` or any mode other than 0600/0700 |
 | `select` | items.jsonl | none | selection.json exists |
 | `shadow` | items, selection | Ollama localhost only | gate failed; labels.jsonl exists; nimble digest differs; quiet gate fails (PARKED) |
 | `label [--mode batch\|single]` | items, selection, shadow_meta (`done` only) | `claude -p` (Opus) | shadow not done; calibration < 6/6; spend guard; quota pause (exit 3) |
@@ -49,13 +50,20 @@ only.
 - `attach(corpus, projects, ledger) -> counts`: runs the frozen record rules, the exact-text join to
   the corpus, eligibility, leakage, the window cut, and the organic kind. It builds the full body
   and stores the `assemble` pieces, `requested` and its basis, and the served tier.
-- `select(items, seed, n, max_share) -> ids`: a shadowlab-style capped walk, followed by the
-  feasibility gate.
+- `select(items, seed, n, max_share) -> ids`: a shadowlab-style capped walk over F.
+- `admit(ge3_items, split, f_ids) -> ids`: runs only if fewer than 100 F items were selected (§2a).
+  It filters to held-out, organic, claude, not `p_eval_cal`, and not a near duplicate of a GE3 tune
+  or F item, then continues the 0.50 walk in `p17d:admit` order up to 250 in total. Then the
+  feasibility gate runs.
+- `resolve_tier_policy() -> (path, basis)`: running-proxy argv `--tier-policy`, else the plist
+  `ProgramArguments`; else `LLM_ROUTER_PROXY_TIER_POLICY` from the plist env, then
+  `~/.llm-router/.env`; else `<live llm_router>/proxy/claude_tiers.yaml`. Read-only. It never
+  invokes `doctor`.
 
 **Shadow**
 - `min_body(item) -> dict` and `check_assemble(item, body)`: rebuild a minimal body, then assert
   that `assemble` reproduces the stored pieces.
-- `rules_tier(body, policy) -> str`: `tier_for(*_classify_class(tier_text(body),
+- `rules_tier(body, policy) -> str` (`policy` = `$RUN/tier_policy.yaml`, sha-checked against the pin): `tier_for(*_classify_class(tier_text(body),
   capabilities=False)).name`.
 - `nimble_preflight()`: the digest check, the quiet gate, and one discarded synthetic warm-up.
 - `shadow_one(sched, item, body, rules) -> source`: `maybe_schedule` then `drain`. It handles the
@@ -76,6 +84,7 @@ only.
   - the reference arms `always_opus` and `always_sonnet`;
   - the strata;
   - the error-excluded sensitivity;
+  - per-group (F, G) blocks, and fresh-vs-GE3 label κ on G;
   - the verdict and the NOT INFORMATIVE reasons.
 
 ## Tests (synthetic fixtures, no real text, no network)
@@ -91,5 +100,46 @@ only.
 7. A verdict fixture for each outcome: PASS, FAIL, and NOT INFORMATIVE for each of n, share,
    errors, calibration and pre-freeze rows.
 8. Nothing prints prompt text (capsys scan for fixture sentinels).
-9. No open() goes under `~/.claude` except in `attach`.
+9. No open() goes under `~/.claude` or `~/.llm-router` except in `attach`, and `attach` never opens
+   a path for writing outside `$PP`.
 10. A single-change mutant of each verdict comparison turns red.
+11. Admission: E2-cal-flagged and codex GE3 items never enter. G follows F in order. The trigger does
+   not fire at 100 F items.
+12. `resolve_tier_policy` respects the precedence order (fixtures for argv, plist env, .env and
+   bundled).
+
+## Shadowlab pin: the fix design (not applied; `shadowlab.py` is unchanged)
+
+**Defect.** `shadowlab.py` (sha256 `b89c7e17…`) hard-codes `GT500_SHA256 = c46d5d3c…` (line 45, the
+AMEND3 pin). `load_gt500` (lines 165-171) refuses on any other hash. PREREG-GT-amend6 changed
+`gt500.py` to `9cde774d…` and recorded it in `gt500/SHA256SUMS`. Since then every run exits with
+"refusing" (`work/launchd.err.log`), so the live labeller has made **0 labels since 2026-10-13**.
+
+**Evidence that a re-pin is safe.** `gt500.py.pre-ge3b-20261013` hashes to `c46d5d3c…` (the old
+pin). An AST source comparison against `gt500.py` (`9cde774d…`) shows these functions
+byte-identical: `load_rubric`, `render_context`, `prompt_view`, `extract_json`, `valid_label`,
+`quota_check`, `call_claude`, `claude_records`, `claude_records_ctx`. Amend6 touched only
+report/kappa fields.
+
+**Rejected option: read the pin from `SHA256SUMS`.** That file is mode 0644, in the same directory as
+`gt500.py` and written by the same hands. Whoever edits `gt500.py` can update it in the same step,
+so the check would verify only self-consistency. That weakens integrity.
+
+**Fix: pin the amend6 hash through a frozen amendment, and cross-check `SHA256SUMS`.**
+1. Write `AMEND5-shadowlab.md` (0444; sha256 logged in PROGRESS.md) before any code edit. It names
+   amend6, carries the evidence above, and has a pins block `GT500_SHA256=9cde774d…`.
+   `test_shadowlab.py` already overlays AMEND pins on the PREREG pins, so the test turns red until
+   the constant matches.
+2. In `shadowlab.py`, change the constant to `9cde774d…`. In `load_gt500`, add a second, AND-ed
+   check: `SHA256SUMS` must list `scripts/gt500.py` with the **same** hash, otherwise refuse with
+   exit 2. A refusal stays fatal, and nothing falls back. The constant is the authority and
+   `SHA256SUMS` can only add a refusal, so no path accepts a hash that is not frozen in an
+   amendment.
+3. Tests:
+   * red on the old constant;
+   * red when `SHA256SUMS` disagrees;
+   * red when `gt500.py` differs from both;
+   * green on the amend6 pair;
+   * mutants: drop either check, which must turn a test red.
+4. An independent review, then reload the plist. The P1.7-d run does not depend on this fix: the
+   harness imports the gt500 helpers at its own amend6 pin and does not call `shadowlab.load_gt500`.

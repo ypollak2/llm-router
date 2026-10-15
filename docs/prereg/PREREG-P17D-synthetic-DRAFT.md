@@ -1,7 +1,7 @@
 # PREREG-P17D-synthetic: nimble:9b vs rules_eff on replayed past prompts (PLAN v16 P1.7-d, D-106)
 
 Status: **DRAFT, not frozen.** Written 2026-10-15T13:13Z, before any shadow row, any nimble call, any
-judge call and any label for this run. To freeze it, resolve "Open before freeze", delete that
+judge call and any label for this run. Revised 2026-10-15T13:22Z for D-107, still before any of those. To freeze it, resolve "Open before freeze", delete that
 section and this status paragraph, rename the file to `PREREG-P17D-synthetic.md`, and write
 `PREREG-P17D-synthetic.sha256` (`<sha256>  PREREG-P17D-synthetic.md` and `frozen_utc <UTC>`, the format
 `scripts/check_prereg.py` reads). Then log the hash in `PROGRESS.md`. A changed byte is a new prereg
@@ -15,6 +15,13 @@ with a later `frozen_utc`.
   cap is $10.
 * **D-99**: every number from this run is labelled **`synthetic (D-99)`** and is never mixed into
   organic counts. D-42's organic-only clause for P1.7-d is overridden for G1 only.
+* **D-107** (owner answers to the draft's open questions, recorded in PLAN-v16):
+  * (a) labels in batches of 8 with the 6 planted calibration items, under GE3 batch rules; the
+    hard cap stays $10;
+  * (b) if fewer than 100 eligible organic prompts survive, the GE3 held-out prompts are admitted
+    as a separately reported group (§2a);
+  * (c) a sub-agent runs attach read-only and writes only 0600 files under `$PP`;
+  * Q3 (the coordinator's): the rules arm uses the live tier policy, resolved read-only (§4).
 * The decision rule is P1.7-d (PLAN-v16 MUST table), unchanged. The verdict-population rules are
   AMEND4-shadowlab (sha256 `5724370e…`), applied as §7 states. A PASS does not switch routing: the
   classifier stays in shadow (D-72, D-100). Switching L2 on is a 16.1 decision.
@@ -33,7 +40,11 @@ only `{i, text}`. It has **no session id, no timestamp, no context, no source an
 tier**. So the session unit and turn-first status cannot come from the corpus. They come from the
 owner-run attach step below.
 
-**Attach (owner-run, the only step that reads `~/.claude/projects` and `~/.llm-router`, read-only).**
+**Attach.** A sub-agent runs it (D-107 c). It is the only step that reads `~/.claude/projects`, the
+proxy ledger, `~/.llm-router/.env`, `denylist.txt` and the live install. It reads them read-only and
+writes only 0600 files under `$PP/v16/p17d/`. It calls no model and prints counts only. It may run
+before the freeze, because it reads no label and no verdict; its counts are recorded in "What was
+looked at" when the prereg is frozen.
 * It enumerates top-level `~/.claude/projects/*/*.jsonl` records. It uses the frozen GE3 record
   rules: `gt500.py` sha256 `9cde774d…` and `supply.py` sha256 `12cd3e1e…` (PREREG-GT §3). Those
   rules skip `isSidechain` records, skip `<session>/subagents/`, require human-typed records
@@ -92,10 +103,40 @@ owner-run attach step below.
 | nimble errors after one retry | about 2-5%. M1.9 held-out: 2/89 invalid, 0 slow, warm p95 617 ms |
 | Invalid labels after retries | about 0-2%. GE3: 0 of 342 missing |
 
-**Consequence, stated first: on this frame the most likely result is NOT INFORMATIVE by supply.**
-The attach count decides. **Feasibility gate (before any nimble or judge call, $0):** if fewer than
-100 items are selected, or the largest selected session holds more than 0.55 of them, the run
-stops. It writes a NOT INFORMATIVE gate file ("insufficient supply") and consumes the use (§10).
+**Consequence, stated first: on the frame alone the most likely result is fewer than 100 items.** That
+triggers §2a.
+
+### 2a. Admission of GE3 held-out (D-107 b)
+
+**Trigger.** After selection, fewer than 100 frame items (group **F**) are selected.
+
+**Admitted group (G).** A GE3 held-out item (`split.json` `heldout_ids`, 234) is admitted only if it
+passes every test below. Each exclusion is counted.
+* `kind == "organic"` (GE3 held-out organic: 184) and `source == "claude"`. Codex items have no
+  proxy turn.
+* It is **not** flagged `p_eval_cal` and is not an E2-cal, E2-HO or E1 near duplicate. E2-cal is
+  nimble's tuning set (PREREG-GT §3 leakage rule).
+* It is not a near duplicate of a GE3 tune item or of an F item.
+* Attach resolves its transcript record by `(session_id, timestamp)`.
+* It passes the §2 eligibility rules other than the GE3 leakage row: secret guard, served tier, and
+  so on. The window holds automatically, because GE3's window ends 2026-10-08T10:00Z.
+
+**Order and selection.**
+* All selected F items are accepted first.
+* G items follow, in `sha256("p17d:admit:20261015:" + ge3_id)` order.
+* The 0.50 session-cap walk is continued over the combined set until the total reaches
+  `N_SELECT_ADMIT` = 250 or a walk accepts nothing.
+* Each row carries `group` = F or G.
+
+**Labels.** G items are **relabelled fresh** in the same batches, with the same rubric and the same
+assemble context as F. The existing GE3 rubric labels are **not reused**: they were judged on the GE3
+context (600/1500 characters), a different label basis. The calibration gate applies to the whole
+run. Agreement between the fresh label and the GE3 label on G (Cohen's κ, exact) is reported as a
+labeller test-retest figure and never gates.
+
+**Feasibility gate (before any nimble or judge call, $0).** The run stops if, after admission, the
+selected total is under 100 or the largest session holds more than 0.55 of the total. It then writes
+a NOT INFORMATIVE gate file ("insufficient supply") and consumes the use (§10).
 
 ## 3. Leakage: excluded items, and what nimble and the rules were tuned on
 
@@ -135,6 +176,10 @@ Two neighbours are not arms here. The engine (P1.6) was tuned on **GE3 tune**
 
 Census on the corpus text, counts only: 497 of 2,658 lines hit the set. By set: GE3 held-out 221,
 GE3 tune 163, E2-cal 102, E2-HO 89, E1 0. A line can hit more than one set.
+
+The single exception is §2a. GE3 held-out was never used to tune nimble or the rules (§3 above). It
+re-enters only through the §2a trigger, and its E2-cal overlap stays excluded. This use is not a
+P1.6-g re-score: amend4 closes GE3 for P1.6-g only.
 
 Stated limit: the exclusion is per item, not per session. A kept item from a GE3 session can carry
 up to 300 characters of an excluded earlier prompt in its context. Its label and both verdicts are
@@ -182,8 +227,26 @@ It asserts that `cls_input.assemble(min_body)` equals the attach-time assemble o
 **rules_eff.**
 * `rules.tier` = `ClaudeTierPolicy.load(<policy>).tier_for(*backends._classify_class(tier_text(body),
   capabilities=False))`. This is the policy table's own answer, `proposed = target.name`
-  (`tiers.py:1031-1032`; `backends.py:463-479`; `tiers.py:725-728`). `<policy>` is the bundled
-  `claude_tiers.yaml` (sha256 `a5028010…`) unless the owner supplies the live file (Open question 3).
+  (`tiers.py:1031-1032`; `backends.py:463-479`; `tiers.py:725-728`).
+* `<policy>` is the **live** tier policy (D-107 Q3). Attach resolves it read-only, in the proxy's
+  own order. Nothing writes to the live install, and `doctor --fix-routing` is never run.
+  1. The `--tier-policy` argument of the running proxy process. If the proxy is idle, the
+     `ProgramArguments` of its launchd plist.
+  2. Otherwise `LLM_ROUTER_PROXY_TIER_POLICY`: the plist `EnvironmentVariables` first, then
+     `~/.llm-router/.env`. `load_dotenv_files` runs at proxy start (`server.py:1130-1131`) and the
+     real environment wins. The proxy reads the key at `server.py:221` and `--tier-policy` defaults
+     to it (`:1169`).
+  3. Otherwise the bundled `claude_tiers.yaml` beside the **live install's** `proxy/tiers.py`
+     (`DEFAULT_POLICY_PATH`, `tiers.py:148`, `:694`). The install is found from the proxy
+     interpreter's `import llm_router`.
+
+  Attach copies the file to `$RUN/tier_policy.yaml` (0600) and records the path, the basis (1, 2 or
+  3), the sha256, the `route` table and `complexity_knn`. The frozen prereg pins that sha256.
+  * If `complexity_knn` is true, the rules arm uses `with_complexity_knn` (`tiers.py:638`), and the
+    live kNN artifact's training set joins §3 before freeze.
+  * The Haiku guard override changes only `haiku_rewrite`, which does not touch `proposed_tier`.
+  * Finding: at `64e3c84c`, `llm-router doctor` prints no tier-policy line (grep of `doctor.py`).
+    This code-order resolution is therefore the report of truth.
 * rules_eff = `shadow_eval.rules_eff` (`shadow_eval.py:69-73`): Haiku is lifted to Sonnet. No row
   was served on Haiku, so this equals the PREREGISTRATION.v2 §1.4 definition (AMEND4 §1-2(a)).
 * It is computed for every item, including first prompts and pinned requests. Live, those leave
@@ -229,7 +292,7 @@ The helpers are imported from `gt500.py` (`9cde774d…`, amend6: judge helpers u
 enforces the daily caps, and today refuses because its pin is the pre-amend6 gt500 sha
 (`work/launchd.err.log`).
 
-**Batching (draft default, Open question 1)** follows PREREG-GT §5:
+**Batching (D-107 a)** follows PREREG-GT §5:
 * 8 items per call (`ITEM_TEMPLATE` × 8 + `BATCH_TAIL`);
 * order by `sha256("p17d:label:20261015:" + item_id)`, with opaque ids L001… assigned in that
   order;
@@ -241,6 +304,7 @@ cal-o1/o2) plus 2 real items. Opus is trusted only at **6/6**. Otherwise the run
 is NOT INFORMATIVE.
 
 **Every selected item is labelled**, including nimble-error items, for the §7 sensitivity analysis.
+F items are labelled before G items. If the spend guard stops the run, F is already complete.
 `labels.jsonl` (0600) holds `{text_sha, session_id, truth}`, which is what `shadow_eval.load_labels`
 reads.
 
@@ -272,8 +336,13 @@ gate (statistics rule 9). **FAIL** if 1, 2 and 5 hold and 3 or 4 does not.
 * the feasibility gate (§2) fails;
 * any `classifier_shadow` row is dated before `frozen_utc`.
 
+**Groups.** When §2a fired, the verdict is computed on F ∪ G. **Every number is also printed per group
+(F, G)** with its n and sessions, and the report leads with any group whose point estimate takes
+the opposite side from the combined one.
+
 **Reported, never decisive:**
 * the verdict with error items excluded from both arms;
+* fresh-vs-GE3 label agreement on G;
 * per-stratum C-λ2-clamp and under-route for both arms, with n. Strata: length band (w≤12,
   13-50, 51-150, >150), truth tier, first-in-session, requested tier, era (before or after
   2026-09-28T14:41Z), and the top-3 session counts;
@@ -298,12 +367,13 @@ gate (statistics rule 9). **FAIL** if 1, 2 and 5 hold and 3 or 4 does not.
 * `label` refuses to start until `shadow` has finished. `shadow` refuses if `labels.jsonl` exists.
   So no label is made before every verdict exists, and the labeller never opens the record file.
 * **Calls:**
-  * nimble (local, $0): 1 warm-up + up to 150 items + at most 10% retries, so at most 166;
-  * Opus at batch 8: ceil(156/8) = **20 calls** plus retries, about 20-24.
+  * nimble (local, $0): 1 warm-up + up to 150 items (250 with §2a) + at most 10% retries, so at
+    most 166 (276);
+  * Opus at batch 8: ceil(156/8) = **20 calls**, or ceil(256/8) = **32 calls** with §2a, plus
+    retries.
 * **Cost estimate:** GE3 measured $6.68 / 45 batch calls = $0.149 per call ($0.019 per item). That
-  gives **about $3.0-3.6** expected.
-  The single-call alternative uses shadowlab's own measurement: $0.080 mean, $0.095 max, n = 7
-  (`shadowlab/work/ledger.jsonl`). Its 6 + 110 calls come to about $9.3.
+  gives **about $3.0-3.6** expected, or **about $4.8-5.5** with §2a. The guard below keeps the worst
+  case under $10.
 * **Spend guard.** The guard sums `total_cost_usd` in `$RUN/ledger.jsonl`. Before each call it
   estimates the next call at 1.25 × the most expensive call so far (first call: $0.30). It stops
   the run if spent + estimate would exceed **$10.00** (D-106). Labels already written are kept. No
@@ -353,7 +423,12 @@ gate (statistics rule 9). **FAIL** if 1, 2 and 5 hold and 3 or 4 does not.
    context (600/1500). In batch mode it differs from live shadowlab's one-turn calls.
 7. **Requested-tier basis** varies by era (ledger join vs `message.model`). An imputed clamp moves
    both arms.
-8. **Code version.** The prompts are from August to October 2026. The rules and the scorer are
+8. **The admitted group G is not fresh.**
+   * Its Opus-rubric labels exist (on another context) and are known in aggregate.
+   * rules_eff was scored on it once for P1.6-g, with no change to the rules afterwards.
+   * It was GE3-sampled with a 35-per-session cap, so it differs in composition from F.
+   * It dominates n when admitted. That is why every number is printed per group.
+9. **Code version.** The prompts are from August to October 2026. The rules and the scorer are
    today's code at the pinned SHA.
 
 ## What was looked at before writing (counts only)
@@ -364,22 +439,14 @@ gate (statistics rule 9). **FAIL** if 1, 2 and 5 hold and 3 or 4 does not.
   ledgers, and the shadowlab launchd log.
 * No label, no verdict, no rules tier and no model output was read or computed for any corpus item.
 
-## Open before freeze (owner)
+## Open before freeze (resolved by D-107; mechanical steps only)
 
-1. **Label mode.**
-   * **Batch 8 + planted calibration (draft default):** about $3.3 and n up to 150. It departs from
-     shadowlab's one-turn-per-call.
-   * **Single call (D-106's literal "shadowlab.py"):** about $9.3. N_SELECT is capped at 110,
-     margin to $10 is about $0.7, and a cost overrun means NOT INFORMATIVE.
-2. **Supply.** If attach yields fewer than about 106 items, the options are:
-   * admit GE3 held-out, which was never used to tune nimble or the rules, relabelled fresh
-     (recommended);
-   * admit research sessions;
-   * accept NOT INFORMATIVE.
-3. **Rules policy.** Is the live proxy's tier policy the bundled `claude_tiers.yaml` (`route` table,
-   `complexity_knn`)? `llm-router doctor` reports it.
-4. **Attach.** It reads `~/.claude/projects` and the proxy ledger, owner-run, as GE3 extract did.
-   Without it the frame has no session or context, and the run cannot meet P1.7-d.
+Every owner question is answered (D-107 a-c, Q3). Before freezing, fill these in:
+1. Attach counts: F pool, G admitted, sessions, largest share.
+2. `TIER_POLICY_SHA256` and its basis.
+3. `REPO_SHA`.
+4. The shadowlab re-pin amendment (AMEND5-shadowlab, harness design §Shadowlab pin). It is needed
+   only for the live labeller. This run imports the gt500 helpers at the amend6 pin.
 
 ```pins
 LABEL=synthetic (D-99)
@@ -389,6 +456,13 @@ SESSION_KIND=organic
 SELECT_SEED=20261015
 N_SELECT=150
 SELECT_MAX_SHARE=0.50
+ADMIT_TRIGGER_F_LT=100
+ADMIT_SET=ge3_heldout,organic,claude,not_p_eval_cal
+ADMIT_SEED_FORMAT=p17d:admit:20261015:{ge3_id}
+N_SELECT_ADMIT=250
+ADMIT_REUSE_GE3_LABELS=false
+TIER_POLICY_SHA256=<filled at freeze from attach>
+REPO_SHA=<filled at freeze>
 FEASIBILITY_MIN_SELECTED=100
 FEASIBILITY_MAX_SHARE=0.55
 GT500_SHA256=9cde774dfe93387d6ee3dfcbd1b5481a537f265e5961d82f85a87d29d6328959
