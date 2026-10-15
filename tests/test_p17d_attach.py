@@ -22,10 +22,19 @@ GT_SCRIPTS = Path(os.environ.get("P17D_GT_SCRIPTS") or
                   Path(pwd.getpwuid(os.getuid()).pw_dir) / ".rsi/research/primary-plan/v16/gt500/scripts")
 HAVE_GT = (GT_SCRIPTS / "gt500.py").exists() and (GT_SCRIPTS / "supply.py").exists()
 
-spec = importlib.util.spec_from_file_location("p17d_attach", ROOT / "scripts" / "p17d_attach.py")
-pa = importlib.util.module_from_spec(spec)
-sys.modules["p17d_attach"] = pa
-spec.loader.exec_module(pa)
+
+def _load_script():
+    spec = importlib.util.spec_from_file_location("p17d_attach", ROOT / "scripts" / "p17d_attach.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.modules.pop(spec.name, None)
+    return mod
+
+
+pa = _load_script()
 
 SENTINEL = "zebrafinch"           # appears in every fixture prompt; must never reach stdout/stderr
 CWD = "/work/repo"
