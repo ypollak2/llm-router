@@ -4806,9 +4806,10 @@ async def route_and_call(
                 models_to_try, task_type.value,
                 _gate_configured_names(get_config(), get_repo_config()))
 
-        # M3.0 (D-14 = A): Q&A never goes to a local provider. Applied here, after the
-        # chain build, the subject specialist and the bandit reorder (either can add a
-        # local model), and before the daily-cap step. An explicit model_override is the
+        # D-114 (amends D-14): remove local Q&A models while a non-Claude provider
+        # remains; otherwise keep them before Claude. Applied here, after the chain
+        # build, the subject specialist and the bandit reorder (either can add a local
+        # model), and before the daily-cap step. An explicit model_override is the
         # caller's own pin and is left alone.
         if models_to_try and not model_override:
             models_to_try = _strip_local_for_qa(models_to_try, task_type)
