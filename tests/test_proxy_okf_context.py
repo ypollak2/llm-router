@@ -387,16 +387,23 @@ async def test_a_broken_attach_still_serves_the_step(home, tmp_path, policy, mon
 async def test_a_slow_attach_is_bounded_and_the_step_is_still_served(home, tmp_path, policy, monkeypatch):
     import time as _time
 
+    from llm_router import failopen
     from llm_router.proxy import server as proxy_server
     repo = _repo(tmp_path, "repo-a")
     monkeypatch.setattr(proxy_server, "OKF_ATTACH_TIMEOUT_S", 0.2)
     monkeypatch.setattr(okf_context, "attach", lambda *a, **k: (_time.sleep(1.0), (a[0], {}))[1])
+    codes = []
+    monkeypatch.setattr(failopen, "record", lambda code, *a, **k: codes.append(code))
     backend, up = _Backend(), _Upstream()
     t0 = _time.monotonic()
     r = await _post(_app(tmp_path, up, backend), _request(repo))
     assert r.status_code == 200 and up.requests == []
     assert backend.calls[0]["system"] == CONDENSED_SYSTEM
     assert _time.monotonic() - t0 < 0.9  # did not wait for the 1 s attach
+    # The attach cap (not the step budget) ended it: a real attach timeout, counted (review 515).
+    row = json.loads((tmp_path / "proxy_calls.jsonl").read_text().splitlines()[-1])
+    assert row["okf"] == {"status": "timeout"}
+    assert "LR-FO-PROXY-OKF-ATTACH-TIMEOUT" in codes
 
 
 async def test_pass_through_to_claude_is_never_touched(home, tmp_path, monkeypatch):
