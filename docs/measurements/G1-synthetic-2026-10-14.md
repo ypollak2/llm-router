@@ -66,8 +66,9 @@ R2's other limits:
 - An SDK chain that starts with a cloud model sizes the pack for that model; a local fallback in the
   same chain trims it.
 
-**G1 is still NOT passed.** The P1.1-b local stratum (PACK vs HOOK6) and P1.7-d still need a local
-model (D-105).
+**G1 is still NOT passed.** When this section was written, the P1.1-b local stratum (PACK vs
+HOOK6) and P1.7-d still needed a local model (D-105). The local stratum has since run; see the next
+section.
 
 ## Update 2026-10-15: P1.1-b local stratum (PACK vs HOOK6), synthetic (D-99)
 
@@ -120,6 +121,11 @@ The comparison therefore shows that PACK is no worse than the pre-pack hook. It 
 PACK keeps context. The early_tool and early_assistant loss (0/20) is the same one the Sonnet
 stratum found: the extractive summary holds no tool output and no decisions. In this stratum it is
 hidden because the reference arm loses those items too.
+
+**Window.** In production the local doors size the pack with `local_models.num_ctx`, which is 32,768
+for qwen3-coder:30b. The frozen 8,192 window is therefore stricter than production.
+
+**G1 still NOT passed: P1.7-d remains (D-106 synthetic run pending).**
 
 ## Verdict (2026-10-14)
 
