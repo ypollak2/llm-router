@@ -205,7 +205,10 @@ still new.
 ## 4. Arms (both on every selected item, paired by construction)
 
 Everything runs in a scratch `HOME`/`LLM_ROUTER_HOME` (the `g1_synthetic_evidence.scratch_env`
-pattern). The repo is pinned at the freeze SHA (draft: `64e3c84c`).
+pattern). The router code under test is pinned at the freeze (`REPO_SHA`, draft: `64e3c84c`).
+`attach` (`scripts/p17d_attach.py`) is built and independently reviewed before the freeze, and
+its file sha256 is pinned (`ATTACH_SCRIPT_SHA256`). The other harness commands are built after the
+freeze. Their commit SHA is logged in PROGRESS.md and in `use.log` before the first shadow row.
 
 **Request body.** The harness rebuilds a minimal body from the stored pieces:
 * `system`: `"Primary working directory: <cwd>"`;
@@ -516,6 +519,22 @@ Every owner question is answered (D-107 a-c, Q3). Before freezing, fill these in
 4. Land the shadowlab pin fix first (AMEND5-shadowlab plus the code change, reviewed). Then pin its
    new sha here. The order is fixed because this run imports shadowlab helpers.
 5. `ITEMS_SHA256` and `ATTACH_COUNTS_SHA256`, then write `$RUN/attach.pinned`.
+6. `ATTACH_SCRIPT_SHA256`.
+
+**Freeze guard.** After attach has run, only the fill-ins above may change:
+* the attach counts;
+* `TIER_POLICY_SHA256`;
+* `ITEMS_SHA256` and `ATTACH_COUNTS_SHA256`;
+* `ATTACH_SCRIPT_SHA256`;
+* `REPO_SHA`;
+* the new shadowlab sha;
+* the deletion of this section and the status paragraph.
+
+The freeze commit message records `git diff <BASE> -- <this file>`, where BASE is the commit that
+adds this guard (61198cd7 plus the build-order and guard text; its SHA is logged in PROGRESS.md
+before attach runs). An independent check
+confirms that every changed line is one of these. So N_SELECT, the share caps, the admission rule
+and every other rule cannot be retuned after the pool sizes are seen.
 
 ```pins
 LABEL=synthetic (D-99)
@@ -537,6 +556,7 @@ ITEM_ID_FORMAT=p17d:item:{session_id}:{record_timestamp}
 SHADOW_RECORD_RULE=last_per_key
 ENGINE_MODE=shadow
 REPO_SHA=<filled at freeze>
+ATTACH_SCRIPT_SHA256=<filled at freeze>
 FEASIBILITY_MIN_SELECTED=100
 FEASIBILITY_MAX_SHARE=0.55
 GT500_SHA256=9cde774dfe93387d6ee3dfcbd1b5481a537f265e5961d82f85a87d29d6328959

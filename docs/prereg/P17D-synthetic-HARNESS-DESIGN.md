@@ -1,14 +1,26 @@
-# P1.7-d synthetic harness: design (not built)
+# P1.7-d synthetic harness: design (`attach` built; the rest not built)
 
-Implements `PREREG-P17D-synthetic` (DRAFT). There is no code yet. It is built only after the prereg
-is frozen. A pins test reads the prereg `pins` block and fails if a constant differs (the
-`test_shadowlab.py` pattern).
+Implements `PREREG-P17D-synthetic` (DRAFT). A pins test reads the prereg `pins` block and fails if a
+constant differs (the `test_shadowlab.py` pattern).
+
+**Build order.**
+1. **`attach`** is built **before** the freeze, in its own file `scripts/p17d_attach.py`. It is
+   independently reviewed, run once by a sub-agent, and its file sha256 is pinned at the freeze
+   (`ATTACH_SCRIPT_SHA256`).
+2. **`select`, `shadow`, `label`, `score` and `status`** (`scripts/p17d_synthetic.py`) are built
+   **after** the freeze. Their commit SHA (`HARNESS_SHA`) is logged in PROGRESS.md and as the first
+   line of `use.log` (`harness <UTC> sha=<…>`) before the first shadow row. `shadow` refuses
+   without that line.
+3. `REPO_SHA` in the prereg is the router code under test (`src/llm_router`), pinned at the freeze.
+   It is not the harness: the harness does not exist at freeze time.
 
 ## Files
 
 | Path | Mode | Holds text | Written by |
 |---|---|---|---|
-| `scripts/p17d_synthetic.py` | repo | no | (the harness) |
+| `scripts/p17d_attach.py` | repo | no | (built before the freeze; its sha256 is pinned) |
+| `tests/test_p17d_attach.py` | repo | no (synthetic fixtures) | - |
+| `scripts/p17d_synthetic.py` | repo | no | (built after the freeze; `HARNESS_SHA` logged) |
 | `tests/test_p17d_synthetic.py` | repo | no (synthetic fixtures) | - |
 | `$RUN = $PP/v16/p17d/` | 0700 | - | `attach` creates it |
 | `$RUN/attach_counts.json` | 0600 | no | `attach` (exclusion counters, pool n, sessions, largest share) |
@@ -145,8 +157,6 @@ so the check would verify only self-consistency. That weakens integrity.
 **Fix: pin the amend6 hash through a frozen amendment, and cross-check `SHA256SUMS`.**
 1. Write `AMEND5-shadowlab.md` (0444; sha256 logged in PROGRESS.md) before any code edit. It names
    amend6, carries the evidence above, and has a pins block `GT500_SHA256=9cde774d…`.
-   `test_shadowlab.py` already overlays AMEND pins on the PREREG pins, so the test turns red until
-   the constant matches.
 2. Edit `test_shadowlab.py:157-159`: the pin overlay reads PREREG plus AMEND1-3 only, so add
    `AMEND5-shadowlab.md`. AMEND4's pins are informational (its §4) and name no module constant.
    The test overlays them under an explicit allowlist and asserts that none of their keys is a
