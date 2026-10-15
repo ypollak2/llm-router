@@ -399,3 +399,17 @@ def test_a_guard_that_does_not_load_refuses_the_run(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "write_text", no_guard)
     with sr.StubServer() as stub, pytest.raises(RuntimeError, match="not active"):
         sr.Scratch(tmp_path / "root", stub, None)
+
+
+def test_the_harness_copy_ignores_a_stale_environment(monkeypatch, tmp_path):
+    """Review 516: the harness loads the guard as ``_replay_netguard_self``; a stale
+    LLM_ROUTER_REPLAY_* in its environment must not install the guard ahead of the run's values."""
+    monkeypatch.setenv("LLM_ROUTER_REPLAY_VIOLATIONS", str(tmp_path / "stale.jsonl"))
+    monkeypatch.setenv("LLM_ROUTER_REPLAY_ALLOW", "127.0.0.1:1")
+    spec = importlib.util.spec_from_file_location("_replay_netguard_self_under_test", sr.GUARD_SRC)
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+        assert not getattr(socket, "_llm_router_replay_guard", False)   # nothing installed on import
+    finally:
+        mod.uninstall()

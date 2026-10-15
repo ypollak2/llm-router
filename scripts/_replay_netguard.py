@@ -19,8 +19,8 @@ different Python), and a child started with ``-S`` (no ``site``, so no ``.pth``)
 shadows the network clients it knows of on PATH instead, and checks at start-up that the
 guard is live in an empty-environment child.
 
-Environment fallback (this module imported unbaked, e.g. a test or the harness process; the
-baked copy in the scratch venv drops it, so the run's baked allowlist always wins):
+Environment fallback (only when this file is imported AS ``sitecustomize``; the baked copy and
+the harness's own copy never read it, so the run's allowlist always wins):
   LLM_ROUTER_REPLAY_ALLOW       comma list of ``host:port`` that may be contacted
   LLM_ROUTER_REPLAY_VIOLATIONS  file that receives one JSON line per refused attempt
 Unix-domain sockets are always allowed (no network). Nothing else is.
@@ -123,5 +123,8 @@ def uninstall() -> None:
     _VIOLATIONS[:] = []
 
 
-if os.environ.get("LLM_ROUTER_REPLAY_VIOLATIONS"):
+# Only as a real ``sitecustomize``: the baked copy (``_replay_netguard_baked``) and the
+# harness's own copy (``_replay_netguard_self``) pass the run's values to ``install``, and an
+# inherited LLM_ROUTER_REPLAY_* must not get there first (``install`` keeps the first call).
+if __name__ == "sitecustomize" and os.environ.get("LLM_ROUTER_REPLAY_VIOLATIONS"):
     install()

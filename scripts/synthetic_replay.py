@@ -72,8 +72,6 @@ HOOKS_DIR = ROOT / "hooks"
 GUARD_SRC = Path(__file__).resolve().parent / "_replay_netguard.py"
 #: The baked guard's module name in the scratch venv (imported from ``00_replay_netguard.pth``).
 _GUARD_MODULE = "_replay_netguard_baked"
-#: The guard module's environment fallback; removed from the baked copy (see ``_make_pyenv``).
-_GUARD_ENV_BLOCK = 'if os.environ.get("LLM_ROUTER_REPLAY_VIOLATIONS"):\n    install()\n'
 
 ALL_DOORS = ("hook", "proxy", "gateway", "mcp", "sdk", "agent-route")
 #: Ports a replay must never bind or contact (the operator's live router processes).
@@ -563,13 +561,10 @@ class Scratch:
         # shadows a site-packages one, which left every child unguarded with 0 violations.
         # site.py runs ``import`` lines of every .pth in site-packages at start-up, in name
         # order, so ``00_`` also runs before ``_replay_project.pth``.
-        # The baked copy drops the module's environment fallback: the baked allowlist and
-        # violations path are the run's, and an inherited LLM_ROUTER_REPLAY_* must not win.
-        src = GUARD_SRC.read_text(encoding="utf-8")
-        if _GUARD_ENV_BLOCK not in src:
-            raise RuntimeError("scripts/_replay_netguard.py no longer ends with its environment fallback block")
+        # Imported as ``_replay_netguard_baked``, the module skips its environment fallback
+        # (that is for ``sitecustomize`` only), so the baked run values below always win.
         (site_dir / f"{_GUARD_MODULE}.py").write_text(
-            src.replace(_GUARD_ENV_BLOCK, "")
+            GUARD_SRC.read_text(encoding="utf-8")
             + "\n\n# Baked by scripts/synthetic_replay.py: active with or without any environment variable.\n"
             + f"install(allow={self.allow()!r}, violations={str(self.violations)!r})\n", encoding="utf-8")
         (site_dir / "00_replay_netguard.pth").write_text(f"import {_GUARD_MODULE}\n", encoding="utf-8")
@@ -581,7 +576,9 @@ class Scratch:
              "sys.exit(0 if getattr(socket, '_llm_router_replay_guard', False) else 1)"],
             env={}, capture_output=True, text=True, timeout=60)
         if probe.returncode != 0:
-            raise RuntimeError(f"replay network guard is not active in the scratch interpreter: {probe.stderr[-500:]}")
+            raise RuntimeError("replay network guard is not active in the scratch interpreter "
+                               "(socket._llm_router_replay_guard not set in an empty-env child)"
+                               + (f": {probe.stderr[-500:]}" if probe.stderr.strip() else ""))
         return str(python)
 
     @staticmethod
