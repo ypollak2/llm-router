@@ -314,6 +314,7 @@ class _Backend:
 
     async def complete(self, body, timeout_s):
         self.calls.append(body)
+        self.timeouts = getattr(self, "timeouts", []) + [timeout_s]
         m, err = from_ollama({"message": {"role": "assistant", "content": "Done."}, "done_reason": "stop"}, body)
         return m, err, {"prompt_tokens": 10, "output_tokens": 2}
 
@@ -477,3 +478,20 @@ async def test_a_trim_that_cannot_get_a_thread_is_bounded_by_the_step_budget(hom
     assert _time.monotonic() - t0 < 0.9
     row = json.loads((tmp_path / "proxy_calls.jsonl").read_text().splitlines()[-1])
     assert (row["decision"], row["reason"]) == ("fallback", "budget_exceeded")
+
+
+@pytest.mark.timing
+async def test_the_trim_and_the_backend_share_one_step_deadline(home, tmp_path, policy, monkeypatch):
+    """#508 follow-up: the backend gets what is LEFT of the step budget after the trim and the
+    okf attach, not a fresh full budget (the edit protocol already used t0 + step_budget_s)."""
+    import time as _time
+
+    from llm_router.proxy import server as proxy_server
+
+    real = proxy_server.apply_trims
+    monkeypatch.setattr(proxy_server, "apply_trims", lambda *a, **k: (_time.sleep(0.4), real(*a, **k))[1])
+    repo = _repo(tmp_path, "repo-a")
+    backend, up = _Backend(), _Upstream()
+    r = await _post(_app(tmp_path, up, backend, step_budget_s=5.0), _request(repo))
+    assert r.status_code == 200 and up.requests == [] and len(backend.calls) == 1
+    assert 0 < backend.timeouts[0] <= 5.0 - 0.4     # the trim's 0.4 s came out of the budget
