@@ -47,9 +47,9 @@ only.
 
 | Command | Reads | Calls | Refuses when |
 |---|---|---|---|
-| `attach` (sub-agent, D-107 c; read-only; single-shot) | corpus, GE3 items/split (for §2a), `~/.claude/projects` (top-level files only), `~/.llm-router/proxy_calls.jsonl`, `~/.llm-router/.env` (one key only), `denylist.txt`, the proxy launchd plist and process argv, exec_sessions, the leakage sets | none | `$RUN/items.jsonl` or `attach.pinned` exists, or the frozen prereg exists; any pin sha differs; any write target outside `$PP` or any mode other than 0600/0700 |
-| `select` | items.jsonl | none | selection.json exists; use.log has `terminal`. A feasibility stop writes `terminal` |
-| `shadow` | items, selection | Ollama localhost only | gate failed; labels.jsonl exists; nimble digest differs; quiet gate fails (PARKED) |
+| `attach` (sub-agent, D-107 c; read-only; single-shot) | corpus, GE3 items/split (for §2a), `~/.claude/projects` (top-level files only), `~/.llm-router/proxy_calls.jsonl`, `~/.llm-router/.env` (one key only), `denylist.txt`, the proxy launchd plist and process argv, exec_sessions, the leakage sets | none | the run dir is not empty (anything at all, including `attach.pinned`), or the frozen prereg exists; never reads `$PP/v16/p17d-run1-void/`; any pin sha differs; any write target outside `$PP` or any mode other than 0600/0700 |
+| `select` | items.jsonl | none | selection.json exists; use.log has `terminal`. A feasibility stop, or `assemble_mismatch` over 10% of selected items, writes `terminal` ($0) |
+| `shadow` | items, selection | Ollama localhost only; after the last item, mismatches + nimble errors over 10% of selected items write `terminal` before any judge call | gate failed; labels.jsonl exists; nimble digest differs; quiet gate fails (PARKED) |
 | `label` | items, selection, shadow_meta (`done` only) | `claude -p` (Opus) | shadow not done; use.log has `terminal`. It writes `terminal` on calibration < 6/6 or exit 4. A quota pause (exit 3) and the spend cap write nothing terminal, and resume skips labelled and planted ids |
 | `score` | records, labels | none | use.log already has `started` or `terminal` |
 | `status` | counts files, label line counts | none | never. It never parses `truth` |
@@ -67,7 +67,8 @@ only.
 - `select(items, seed, n, max_share) -> ids`: a shadowlab-style capped walk over F.
 - `admit(ge3_items, split, f_ids) -> ids`: runs only if fewer than 100 F items were selected (§2a).
   It filters to held-out, organic, claude, not `p_eval_cal`, and not a near duplicate of a GE3 tune
-  or F item, then continues the 0.50 walk in `p17d:admit` order up to 250 in total. Then the
+  or F item, then continues the 0.50 walk in `p17d:admit` order up to 250 in total. F items refused
+  in the F walk do not re-enter. Then the
   feasibility gate runs.
 - `resolve_tier_policy() -> (path, basis)`: running-proxy argv `--tier-policy`, else the plist
   `ProgramArguments`; else `LLM_ROUTER_PROXY_TIER_POLICY` from the plist env, then
@@ -114,7 +115,7 @@ only.
 2. The leakage rule catches exact, near (Jaccard 0.8) and (session, ts) duplicates, and passes a
    0.79 near-miss.
 3. `min_body` round-trips `assemble` for each case: first prompt, three earlier prompts, a long
-   assistant text (the 501 tail), and a prompt longer than 2,000 characters.
+   assistant text (the 502 margin), whitespace at either cut (D-109), and a prompt longer than 2,000 characters.
 4. The selection cap never exceeds 0.50 at N ≥ 4, and the feasibility gate fires.
 5. `shadow` refuses when labels exist, and `label` refuses before `done`.
 6. `score` writes `started` before it opens labels, and refuses on a second run.
@@ -184,3 +185,13 @@ The freeze-guard BASE for the prereg stays `44956ed1`. `scripts/p17d_attach.py` 
 transcripts and on zero corpus matches, real-home session kind, llm_router provenance, served model
 bounded by the next prompt). The sha256 that gets pinned at the freeze is the **final reviewed** file's
 sha256, the one in the commit attach runs from, not the BASE one.
+
+## D-109 (attach run 1 void)
+
+- **Fix.** Pieces are stored with a margin: `EARLIER_KEEP = 301` and `ASSISTANT_KEEP = 502`.
+  `rebuild_matches` still compares the assemble outputs strictly. Tests cover the three run-1 shapes
+  (no mismatch) and genuine differences (still a mismatch).
+- **Re-run.** The coordinator renames `$PP/v16/p17d/` to `$PP/v16/p17d-run1-void/` (no delete).
+  `attach` refuses on any leftover in the run dir and never opens the archive; a test makes the
+  archive unreadable and passes.
+- **Pinning.** The pinned `ATTACH_SCRIPT_SHA256` is the sha of the file attach run 2 runs from.

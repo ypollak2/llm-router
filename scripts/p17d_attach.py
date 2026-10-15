@@ -41,7 +41,12 @@ LABEL = "synthetic (D-99)"
 WINDOW_END_UTC = "2026-10-08T20:46:00Z"        # first live classifier_shadow row (AMEND4)
 PROXY_ERA_UTC = "2026-09-28T14:41:00Z"         # proxy ledger starts (PREREG-v2-amend5)
 PROMPT_STORE_CAP = 20000                       # AMEND1-shadowlab B
-ASSISTANT_KEEP = 501                           # > cls_input.ASSISTANT_CHARS, so assemble re-truncates identically
+# Stored pieces keep a margin past assemble's own cut (D-109). Text is already normalised, so it holds no
+# double space: one extra char keeps a space at position 300 internal, and two extra keep a space at
+# -501 internal. Without the margin, re-normalising stripped that edge space and the rebuilt context
+# differed (attach run 1: 38/165 false assemble_mismatch, all whitespace edges).
+EARLIER_KEEP = 301                             # cls_input.EARLIER_CHARS (300) + 1
+ASSISTANT_KEEP = 502                           # cls_input.ASSISTANT_CHARS (500) + 2
 RULES_HAND_EDIT_COMMIT = "c0b0e5ca"
 RULES_HAND_EDIT_TEST = "tests/test_first_forty_task14.py"
 FIRST_MARK = "(This is the FIRST prompt of the session: no prior context.)"
@@ -401,6 +406,15 @@ def session_messages(raw: bytes):
         yield d, msgs, nxt
 
 
+def rebuild_matches(full, cwd: str, pieces: dict, stored_prompt: str) -> bool:
+    """True when the replay body gives exactly the classifier input ``full`` (= ``assemble`` of the whole
+    history): the same context and the same prompt, compared as strings with no normalisation."""
+    from llm_router.proxy import cls_input
+
+    re_asm = cls_input.assemble(min_body(cwd, pieces["earlier"], pieces["assistant_tail"], stored_prompt))
+    return re_asm.context == full.context and str(re_asm.prompt) == str(full.prompt)
+
+
 def assemble_pieces(msgs: list[dict]) -> dict:
     """The parts ``cls_input.assemble`` reads, found by the same backward scan (cls_input.py:62-108)."""
     from llm_router.proxy import cls_input
@@ -417,7 +431,7 @@ def assemble_pieces(msgs: list[dict]) -> dict:
         if role == "user" and len(earlier) < cls_input.EARLIER_PROMPTS:
             t = cls_input._human(msgs[i].get("content"))
             if t:
-                earlier.append(t[:cls_input.EARLIER_CHARS])
+                earlier.append(t[:EARLIER_KEEP])
         elif role == "assistant" and not assistant:
             assistant = cls_input._human(msgs[i].get("content"))
         if assistant and len(earlier) == cls_input.EARLIER_PROMPTS:
@@ -465,9 +479,10 @@ def attach(cfg: Cfg) -> dict:
         raise Refuse(f"refusing: run dir {cfg.run_dir} is not under {cfg.pp_root}")
     if cfg.prereg_frozen.exists():
         raise Refuse("refusing: the prereg is frozen; attach is single-shot")
-    for name in ("items.jsonl", "attach.pinned"):
-        if (cfg.run_dir / name).exists():
-            raise Refuse(f"refusing: {name} exists; attach is single-shot")
+    if cfg.run_dir.exists() and not cfg.run_dir.is_dir():
+        raise Refuse("refusing: the run dir path is not a directory")
+    if cfg.run_dir.exists() and any(cfg.run_dir.iterdir()):
+        raise Refuse("refusing: the run dir is not empty; attach is single-shot (archive it first)")
     gts = cfg.gt_dir / "scripts"
     supply = load_pinned("supply", gts / "supply.py", cfg.pins["supply"])
     gt = load_pinned("gt500", gts / "gt500.py", cfg.pins["gt500"])
@@ -596,8 +611,6 @@ def attach(cfg: Cfg) -> dict:
             prompt_full = steps.newest_human_text(body)
             pieces = assemble_pieces(body["messages"])
             stored_prompt = cap_prompt(prompt_full)
-            mb = min_body(cwd, pieces["earlier"], pieces["assistant_tail"], stored_prompt)
-            re_asm = cls_input.assemble(mb)
             words = len(text.split())
             cand.append({
                 "item_id": item_id(sid, ts), "group": "G" if g_cand else "F",
@@ -606,7 +619,7 @@ def attach(cfg: Cfg) -> dict:
                 "earlier": pieces["earlier"], "assistant_tail": pieces["assistant_tail"],
                 "capped": bool(getattr(assembled, "capped", False)),
                 "assembled_context": ctx,
-                "assemble_ok": (re_asm.context == ctx and str(re_asm.prompt) == str(assembled.prompt)),
+                "assemble_ok": rebuild_matches(assembled, cwd, pieces, stored_prompt),
                 "context_withheld": bool(supply.secret_hit(ctx)),
                 "msg_id": nmsg.get("id"), "served_model": served_model,
                 "served_tier": shadow_eval.tier_name(served_model),

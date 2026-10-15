@@ -213,7 +213,7 @@ def test_item_fields_ids_context_and_requested(world):
     assert a1["text_sha"] == key(P["a1"])
     assert a1["first_in_session"] is True and a2["first_in_session"] is False
     assert all(i["assemble_ok"] for i in items.values())
-    assert len(a2["assistant_tail"]) == pa.ASSISTANT_KEEP          # long assistant text kept as 501 tail
+    assert len(a2["assistant_tail"]) == pa.ASSISTANT_KEEP          # long assistant text kept with the 502 margin
     assert a2["requested_basis"] == "ledger" and a2["requested_tier"] == "opus"
     assert a2["served_tier"] == "sonnet"
     assert items[P["b1"]]["requested_basis"] == "transcript_served"
@@ -386,3 +386,68 @@ def test_served_model_stops_at_the_next_human_prompt():
     raw = "".join(json.dumps(r) + "\n" for r in recs).encode()
     nxt = {d["timestamp"]: n for d, _, n in pa.session_messages(raw)}
     assert nxt["t1"] is None and nxt["t3"]["message"]["id"] == "m9"
+
+
+def _edge_history(earlier_space: bool, assistant_space: bool, prompt: str = "the final ask for this turn"):
+    """Normalised texts that put a space exactly at assemble's cut (D-109 shapes)."""
+    from llm_router.proxy import cls_input
+    e = cls_input.EARLIER_CHARS
+    a = cls_input.ASSISTANT_CHARS
+    early = ("x" * (e - 1) + " tailword more words") if earlier_space else ("y" * (e + 40))
+    assert (early[:e].endswith(" ")) is earlier_space
+    reply = ("lead words " + "z" * 300 + " " + "q" * a) if assistant_space else ("r" * (a + 80))
+    assert (reply[-(a + 1)] == " ") is assistant_space
+    msgs = [{"role": "user", "content": early},
+            {"role": "assistant", "content": [{"type": "text", "text": reply}]},
+            {"role": "user", "content": prompt}]
+    return msgs
+
+
+@pytest.mark.parametrize("earlier_space,assistant_space", [(True, False), (False, True), (True, True), (False, False)])
+def test_whitespace_at_a_cut_is_not_a_mismatch(earlier_space, assistant_space):
+    from llm_router.proxy import cls_input
+    from llm_router.proxy import steps
+    msgs = _edge_history(earlier_space, assistant_space)
+    full = cls_input.assemble({"messages": msgs, "system": "Primary working directory: /w"})
+    pieces = pa.assemble_pieces(msgs)
+    prompt = pa.cap_prompt(steps.newest_human_text({"messages": msgs}))
+    assert pa.rebuild_matches(full, "/w", pieces, prompt)
+
+
+def test_a_genuine_difference_is_still_a_mismatch():
+    from llm_router.proxy import cls_input
+    from llm_router.proxy import steps
+    msgs = _edge_history(True, True)
+    full = cls_input.assemble({"messages": msgs, "system": "Primary working directory: /w"})
+    pieces = pa.assemble_pieces(msgs)
+    prompt = pa.cap_prompt(steps.newest_human_text({"messages": msgs}))
+    bad = {**pieces, "earlier": ["w" + pieces["earlier"][0][1:]]}
+    assert bad["earlier"] != pieces["earlier"]
+    assert not pa.rebuild_matches(full, "/w", bad, prompt)
+    assert not pa.rebuild_matches(full, "/elsewhere", pieces, prompt)
+    assert not pa.rebuild_matches(full, "/w", pieces, prompt + " extra")
+    harness = [*msgs[:-1], {"role": "user", "content": "<task-notification>job done</task-notification> the ask"}]
+    full_h = cls_input.assemble({"messages": harness, "system": "Primary working directory: /w"})
+    stored = pa.cap_prompt(steps.newest_human_text({"messages": harness}))
+    assert stored != cls_input._human(harness[-1]["content"])       # the views differ: a real mismatch
+    assert not pa.rebuild_matches(full_h, "/w", pa.assemble_pieces(harness), stored)
+
+
+def test_attach_refuses_any_leftover_and_never_reads_the_archive(world):
+    cfg, _ = world
+    archive = cfg.run_dir.parent / "p17d-run1-void"
+    archive.mkdir(parents=True)
+    (archive / "items.jsonl").write_text("not json at all\n")
+    os.chmod(archive, 0o000)            # any read of the archive would raise
+    try:
+        cfg.run_dir.mkdir()
+        (cfg.run_dir / "stray.txt").write_text("x")
+        with pytest.raises(pa.Refuse) as exc:
+            pa.attach(cfg)
+        assert "not empty" in exc.value.msg
+        (cfg.run_dir / "stray.txt").unlink()
+        counts = pa.attach(cfg)           # an empty run dir is fine; the archive beside it is untouched
+        assert counts["F"]["n"] > 0
+    finally:
+        os.chmod(archive, 0o700)
+    assert (archive / "items.jsonl").read_text() == "not json at all\n"

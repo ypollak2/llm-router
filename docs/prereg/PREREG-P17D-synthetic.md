@@ -1,5 +1,9 @@
 # PREREG-P17D-synthetic: nimble:9b vs rules_eff on replayed past prompts (PLAN v16 P1.7-d, D-106)
 
+Status: this file is frozen only when `PREREG-P17D-synthetic.sha256` exists beside it and
+`scripts/check_prereg.py` reports a match; until then it is a draft. Changing any byte changes the
+hash; a changed file is a new prereg with a later `frozen_utc`. The freeze record is the last section.
+
 ## Authority
 
 * **D-106** (owner, 2026-10-15T12:53:01Z): P1.7-d runs synthetically under D-99. Past prompts are
@@ -73,8 +77,11 @@ looked at" when the prereg is frozen.
 * `session_id` (the transcript `sessionId`), the original `ts` and `cwd`;
 * the full prompt, capped at 20,000 characters as head and tail (AMEND1 B `PROMPT_STORE_CAP`);
 * the classifier-input pieces `cls_input.assemble` reads (`cls_input.py:62-108`): up to 3 earlier
-  human prompts of 300 characters, the assistant's last text (tail of up to 501 characters) and
-  `capped`. These come from the main-thread messages before the prompt;
+  human prompts and the assistant's last text, and `capped`. These come from the main-thread messages
+  before the prompt. Each earlier prompt is stored to 301 characters and the assistant tail to its last
+  502, one and two characters past assemble's own cuts (300 and 500). **D-109 defect fix:** with no
+  margin, re-normalising the rebuilt body stripped a space at the cut and gave a false
+  `assemble_mismatch` (attach run 1). The equality check itself is unchanged and strict;
 * `requested` (§4) and `requested_basis`;
 * the served tier, and the strata fields (§7).
 
@@ -125,6 +132,8 @@ passes every test below. Each exclusion is counted.
 * G items follow, in `sha256("p17d:admit:20261015:" + ge3_id)` order.
 * The 0.50 session-cap walk is continued over the combined set until the total reaches
   `N_SELECT_ADMIT` = 250 or a walk accepts nothing.
+* **F items refused by the cap in the F walk do not re-enter** the continued walk; only G items are
+  walked in it (D-109 b).
 * Each row carries `group` = F or G.
 
 **Labels.** G items are **relabelled fresh** in the same batches, with the same rubric and the same
@@ -136,6 +145,14 @@ labeller test-retest figure and never gates.
 **Feasibility gate (before any nimble or judge call, $0).** The run stops if, after admission, the
 selected total is under 100 or the largest session holds more than 0.55 of the total. It then writes
 a NOT INFORMATIVE gate file ("insufficient supply") and consumes the use (§10).
+
+**Early error gate (D-109 a).** The §7 error gate is also applied before any spend:
+* at `select`, on `assemble_mismatch` among the selected items. More than 10% of selected items
+  writes the terminal use-log record and stops the run at $0;
+* after `shadow` and before `label`, on `assemble_mismatch` + nimble errors. More than 10% writes the
+  terminal record and stops at $0, before any judge call.
+
+The full gate, adding label errors, is applied again at `score`.
 
 ## 3. Leakage: excluded items, and what nimble and the rules were tuned on
 
@@ -372,7 +389,8 @@ reads.
    `classifier_shadow` row is dated before `frozen_utc`; or labeller calibration is below 6/6; or
    the feasibility gate (§2a) fails; or a pin sha differs.
 2. **NOT INFORMATIVE (errors):** nimble errors + `assemble_mismatch` + label errors exceed **10%
-   of selected items**.
+   of selected items**. Its parts are also checked at `select` and after `shadow`, and a failure there
+   stops the run at $0 (§2a, D-109 a).
 3. **NOT INFORMATIVE (n):** n < 100, including when the spend cap stops labelling.
 4. **NOT INFORMATIVE (share):** the largest session holds more than 60% of the n rows.
 5. **PASS (synthetic, D-99)** if C-λ2-clamp(llm) ≤ C-λ2-clamp(rules_eff) **and**
@@ -406,8 +424,8 @@ the opposite side from the combined one.
 * **Order:**
   1. freeze;
   2. `select`;
-  3. feasibility gate;
-  4. `shadow` (every nimble and rules row);
+  3. feasibility gate and the early error gate on `assemble_mismatch`;
+  4. `shadow` (every nimble and rules row), then the early error gate on mismatches + nimble errors;
   5. `label` (calibration first);
   6. `score`.
 * `label` refuses to start until `shadow` has finished. `shadow` refuses if `labels.jsonl` exists.
@@ -456,7 +474,8 @@ the opposite side from the combined one.
   holds a `started` or `terminal` line.
 * **Terminal records.** Each of these appends `terminal <UTC> <reason>` to `use.log`, writes the
   NOT INFORMATIVE gate file, and ends the run:
-  * `select` on a feasibility stop;
+  * `select` on a feasibility stop or on the early error gate;
+  * `shadow` on the post-shadow error gate;
   * `label` on calibration below 6/6;
   * `label` on exit 4 (non-Opus model).
 
@@ -502,7 +521,11 @@ the opposite side from the combined one.
 * The GE3 `supply.json` aggregates, `heldout_M19` latency and fallback, GE3 and shadowlab spend
   ledgers, and the shadowlab launchd log.
 * No label, no verdict, no rules tier and no model output was read or computed for any corpus item.
-* **Attach counts** (`attach_counts.json`, run once 2026-10-15T14:02Z by a sub-agent, exit 0):
+* **Attach run 1 is void (owner decision D-109).** Its outputs were archived (renamed, not deleted) to
+  `$PP/v16/p17d-run1-void/`. Attach never reads that path. Run 1 ended before any `select`: no shadow
+  verdict, no label and no rules tier existed for any item. Its counts follow; they decided nothing
+  except that the defect was found.
+* Attach run 1 counts (`attach_counts.json`, run once 2026-10-15T14:02Z by a sub-agent, exit 0):
   * transcript files 2,048; corpus-matched records 3,030; frame records seen 3,052;
   * exclusions: not human-typed 2,473; leakage 202; research kind 98; exec session 32; G p_eval_cal 44;
     G leakage 16; after window 8; image 7; secret_scrubber 3; harness or slash 2; served Haiku 2;
@@ -515,7 +538,10 @@ the opposite side from the combined one.
     moderate→sonnet, complex→opus, deep_reasoning→opus.
 * After attach, a counts-only check of `items.jsonl` (no text printed): for all 38 mismatched items the
   re-assembled context differs, and each one has whitespace at a stored truncation edge (an earlier
-  prompt ending in a space: 18; an assistant tail starting with a space: 22; overlap 2).
+  prompt ending in a space: 18; an assistant tail starting with a space: 22; overlap 2). Those are the
+  38 false mismatches the D-109 fix removes.
+* **Attach run 2 counts:** <filled at freeze from attach run 2: transcript files, exclusions, leak hits,
+  F and G summaries, assemble_mismatch, capped, context withheld, requested basis, tier policy>.
 
 ```pins
 LABEL=synthetic (D-99)
@@ -530,14 +556,14 @@ ADMIT_SET=ge3_heldout,organic,claude,not_p_eval_cal
 ADMIT_SEED_FORMAT=p17d:admit:20261015:{ge3_id}
 N_SELECT_ADMIT=250
 ADMIT_REUSE_GE3_LABELS=false
-TIER_POLICY_SHA256=04b5f4641bcc8dd7afee38c869950e82eed00533b227d4d2f97af884ac42be93
-ITEMS_SHA256=321ca3dbff1aa63049ad0d61158a534200b501b8f57f4999660708b6fa544d85
-ATTACH_COUNTS_SHA256=cbdd7a3ad5f2359b28ca9a02ea243c188701cd43f0eaa7436584c9dfd68c8fef
+TIER_POLICY_SHA256=<filled at freeze from attach run 2>
+ITEMS_SHA256=<filled at freeze from attach run 2>
+ATTACH_COUNTS_SHA256=<filled at freeze from attach run 2>
 ITEM_ID_FORMAT=p17d:item:{session_id}:{record_timestamp}
 SHADOW_RECORD_RULE=last_per_key
 ENGINE_MODE=shadow
 REPO_SHA=64e3c84cbf0a3160d134a9f3ba19035bf1f1b3e8
-ATTACH_SCRIPT_SHA256=88d3ef9eb74be2a00b532b65ac6426180212cfcb9e223472db9f7ee0a58f77bf
+ATTACH_SCRIPT_SHA256=<filled at freeze from attach run 2>
 FEASIBILITY_MIN_SELECTED=100
 FEASIBILITY_MAX_SHARE=0.55
 GT500_SHA256=9cde774dfe93387d6ee3dfcbd1b5481a537f265e5961d82f85a87d29d6328959
@@ -561,3 +587,29 @@ MAX_ERROR_SHARE=0.10
 COST=haiku:1.0,sonnet:2.7,opus:6.15
 LAMBDA=2
 ```
+
+## Freeze record
+
+**Fill-ins.** These are the only values filled in at the freeze:
+* the attach run 2 counts (in "What was looked at");
+* `TIER_POLICY_SHA256`, `ITEMS_SHA256`, `ATTACH_COUNTS_SHA256` and `ATTACH_SCRIPT_SHA256`, from attach
+  run 2;
+* `REPO_SHA` (router `src` under test; `64e3c84c`, unchanged since the draft);
+* `SHADOWLAB_SHA256` (`0d2d2b58…`, after AMEND5-shadowlab).
+
+**Freeze guard.** BASE is `44956ed1`. The freeze commit message records
+`git diff -M 44956ed1 -- <this file>`. An independent check confirms that every changed line is one of
+these:
+* a fill-in above;
+* the removal of the draft-only "Open before freeze" section and the draft status paragraph, which
+  this status line and section replace;
+* one of the **D-109 defect fixes** listed below.
+
+N_SELECT, the share caps, the seeds, the bars and the admission criteria may not change.
+
+**D-109 defect fixes (owner decision; these are not parameter retunes).**
+1. The 301/502 storage margin, so that an edge space cannot cause a false `assemble_mismatch` (§2).
+2. The early error gate at `select` and after `shadow`, stopping at $0 (§2a, §7, §8, §10).
+3. Refused F items do not re-enter the §2a walk. This states a rule the draft left ambiguous.
+4. This status line and this freeze-record section are kept in the frozen file.
+5. The disclosure of void attach run 1 in "What was looked at".
