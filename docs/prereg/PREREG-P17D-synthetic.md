@@ -541,8 +541,16 @@ the opposite side from the combined one.
   re-assembled context differs, and each one has whitespace at a stored truncation edge (an earlier
   prompt ending in a space: 18; an assistant tail starting with a space: 22; overlap 2). Those are the
   38 false mismatches the D-109 fix removes.
-* **Attach run 2 counts:** <filled at freeze from attach run 2: transcript files, exclusions, leak hits,
-  F and G summaries, assemble_mismatch, capped, context withheld, requested basis, tier policy>.
+* **Attach run 2 counts** (`attach_counts.json`, generated 2026-10-15T16:21:15Z, exit code not reported):
+  * transcript files 2,048; corpus-matched records 3,030; frame records seen 3,052;
+  * exclusions: not human-typed 2,473; leakage 202; research kind 98; exec session 32; G p_eval_cal 44;
+    G leakage 16; after window 8; image 7; secret_scrubber 3; harness or slash 2; served Haiku 2;
+  * leak hits by set: GE3 tune 94, E2-HO 78, E2-cal 48, GE3 held-out 12; for G, E2-cal 10 and E2-HO 7;
+  * **F**: 46 items from 4 sessions, largest share 0.6522 (top 3: 30, 12, 3);
+  * **G candidates**: 119 items from 22 sessions, largest share 0.1765 (top 3: 21, 21, 15);
+  * `assemble_mismatch` 0 of 165 (F 0, G 0); capped 2; context withheld 1;
+  * requested basis: ledger 5, transcript_served 160; denylist entries 0; overrides entries 1;
+  * tier policy basis `1:process_argv`, `complexity_knn` not reported, `route.default` not reported.
 
 ```pins
 LABEL=synthetic (D-99)
@@ -557,14 +565,14 @@ ADMIT_SET=ge3_heldout,organic,claude,not_p_eval_cal
 ADMIT_SEED_FORMAT=p17d:admit:20261015:{ge3_id}
 N_SELECT_ADMIT=250
 ADMIT_REUSE_GE3_LABELS=false
-TIER_POLICY_SHA256=<filled at freeze from attach run 2>
-ITEMS_SHA256=<filled at freeze from attach run 2>
-ATTACH_COUNTS_SHA256=<filled at freeze from attach run 2>
+TIER_POLICY_SHA256=04b5f4641bcc8dd7afee38c869950e82eed00533b227d4d2f97af884ac42be93
+ITEMS_SHA256=4dfb2a1132f759198da4a7548001b9547418ec2140aafd90c9bf55a81de16041
+ATTACH_COUNTS_SHA256=662c8073f1bc482f66565326b46ae6d91ec018ecd5ee8f23d0b0c74cb984d4ca
 ITEM_ID_FORMAT=p17d:item:{session_id}:{record_timestamp}
 SHADOW_RECORD_RULE=last_per_key
 ENGINE_MODE=shadow
 REPO_SHA=64e3c84cbf0a3160d134a9f3ba19035bf1f1b3e8
-ATTACH_SCRIPT_SHA256=<filled at freeze from attach run 2>
+ATTACH_SCRIPT_SHA256=9d9ffbe41301efb0aebc914f8b332a4a3a2b938bdcad8144e07f423dbc99e046
 FEASIBILITY_MIN_SELECTED=100
 FEASIBILITY_MAX_SHARE=0.55
 GT500_SHA256=9cde774dfe93387d6ee3dfcbd1b5481a537f265e5961d82f85a87d29d6328959
