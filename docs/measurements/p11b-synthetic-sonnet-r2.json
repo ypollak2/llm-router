@@ -1,0 +1,1105 @@
+{
+  "door": "mcp",
+  "equivalent": {
+    "new": 60,
+    "old": 0
+  },
+  "git_dirty": false,
+  "git_sha": "a1a0b74d998d979b712dad6921993f10f506974f",
+  "items": 60,
+  "label": "synthetic (D-99)",
+  "model": "anthropic/claude-sonnet-4-6",
+  "must": "P1.1-b",
+  "prereg": "PREREG-P11B-synthetic-R2.md",
+  "prereg_sha256": "eb81da2014d080d4c3d72a0ae80b4ad39492bd0bb77db7068049e7963bae7f3e",
+  "registry_file": "config/models.yaml",
+  "repair": "R1 (D-101 real windows)",
+  "rows": [
+    {
+      "category": "recent",
+      "item": "p11b-000-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-001-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-002-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-003-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-004-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-005-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-006-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-007-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-008-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-009-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-010-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-011-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-012-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-013-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-014-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-015-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-016-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-017-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-018-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-019-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-020-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-021-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-022-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-023-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-024-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-025-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-026-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-027-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-028-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "recent",
+      "item": "p11b-029-recent",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": true
+      }
+    },
+    {
+      "category": "early_user",
+      "item": "p11b-030-early_user",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_user",
+      "item": "p11b-031-early_user",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_user",
+      "item": "p11b-032-early_user",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_user",
+      "item": "p11b-033-early_user",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_user",
+      "item": "p11b-034-early_user",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_user",
+      "item": "p11b-035-early_user",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_user",
+      "item": "p11b-036-early_user",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_user",
+      "item": "p11b-037-early_user",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_user",
+      "item": "p11b-038-early_user",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_user",
+      "item": "p11b-039-early_user",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_tool",
+      "item": "p11b-040-early_tool",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_tool",
+      "item": "p11b-041-early_tool",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_tool",
+      "item": "p11b-042-early_tool",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_tool",
+      "item": "p11b-043-early_tool",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_tool",
+      "item": "p11b-044-early_tool",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_tool",
+      "item": "p11b-045-early_tool",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_tool",
+      "item": "p11b-046-early_tool",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_tool",
+      "item": "p11b-047-early_tool",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_tool",
+      "item": "p11b-048-early_tool",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_tool",
+      "item": "p11b-049-early_tool",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_assistant",
+      "item": "p11b-050-early_assistant",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_assistant",
+      "item": "p11b-051-early_assistant",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_assistant",
+      "item": "p11b-052-early_assistant",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_assistant",
+      "item": "p11b-053-early_assistant",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_assistant",
+      "item": "p11b-054-early_assistant",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_assistant",
+      "item": "p11b-055-early_assistant",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_assistant",
+      "item": "p11b-056-early_assistant",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_assistant",
+      "item": "p11b-057-early_assistant",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_assistant",
+      "item": "p11b-058-early_assistant",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    },
+    {
+      "category": "early_assistant",
+      "item": "p11b-059-early_assistant",
+      "new": {
+        "equivalent": true,
+        "full_mode": true,
+        "no_summary": true,
+        "same_messages": true,
+        "token_present": true
+      },
+      "old": {
+        "equivalent": false,
+        "full_mode": false,
+        "no_summary": true,
+        "same_messages": false,
+        "token_present": false
+      }
+    }
+  ],
+  "stratum": "sonnet",
+  "verdict": "PASS by construction (repair-attributable)",
+  "windows": {
+    "new": 65536,
+    "old": 8192
+  }
+}

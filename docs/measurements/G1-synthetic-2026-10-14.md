@@ -50,7 +50,7 @@ those two doors.
 before its code was written and before it ran. It covers the MCP door, the routed Sonnet
 (`anthropic/claude-sonnet-4-6`) and the session transcript. It compares the D-101 window (65,536)
 with the pre-D-101 window (8,192). The result is in `p11b-synthetic-sonnet-r2.json`
-(R2_RESULT_PLACEHOLDER).
+(run at a1a0b74d, clean, $0): **60/60 equivalent at 65,536 and 0/60 at 8,192**, so **PASS by construction, repair-attributable**.
 
 The original Sonnet FAIL below stays as the record of the pre-repair behaviour. It still describes
 sessions over ~52k tokens, where the pack falls back to the last 7 messages plus the extractive
