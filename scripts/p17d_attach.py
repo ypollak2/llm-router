@@ -38,6 +38,8 @@ HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)   # the real home, never $HOME (a 
 PP = HOME / ".rsi" / "research" / "primary-plan"
 
 LABEL = "synthetic (D-99)"
+#: The freeze marker is the .sha256 record (scripts/check_prereg.py), not the prereg file itself.
+FROZEN_MARKER = ROOT / "docs" / "prereg" / "PREREG-P17D-synthetic.sha256"
 WINDOW_END_UTC = "2026-10-08T20:46:00Z"        # first live classifier_shadow row (AMEND4)
 PROXY_ERA_UTC = "2026-09-28T14:41:00Z"         # proxy ledger starts (PREREG-v2-amend5)
 PROMPT_STORE_CAP = 20000                       # AMEND1-shadowlab B
@@ -478,7 +480,7 @@ def attach(cfg: Cfg) -> dict:
     if not _inside(cfg.run_dir, cfg.pp_root):
         raise Refuse(f"refusing: run dir {cfg.run_dir} is not under {cfg.pp_root}")
     if cfg.prereg_frozen.exists():
-        raise Refuse("refusing: the prereg is frozen; attach is single-shot")
+        raise Refuse("refusing: the prereg is frozen (its .sha256 exists); attach is single-shot")
     if cfg.run_dir.exists() and not cfg.run_dir.is_dir():
         raise Refuse("refusing: the run dir path is not a directory")
     if cfg.run_dir.exists() and any(cfg.run_dir.iterdir()):
@@ -751,7 +753,7 @@ def default_cfg(a) -> Cfg:
                claude_root=Path(a.claude_root), ledger=Path(a.ledger), gt_dir=Path(a.gt_dir),
                p_eval_sample=Path(a.p_eval_sample), e1_tasks=Path(a.e1_tasks),
                exec_sessions=Path(a.exec_sessions), overrides=Path(a.overrides), denylist=Path(a.denylist),
-               prereg_frozen=ROOT / "docs" / "prereg" / "PREREG-P17D-synthetic.md")
+               prereg_frozen=FROZEN_MARKER)
 
 
 def main(argv=None) -> int:

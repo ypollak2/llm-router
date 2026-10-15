@@ -164,7 +164,7 @@ def world(tmp_path):
     cfg = pa.Cfg(run_dir=pp / "v16" / "p17d", pp_root=pp, corpus=corpus, claude_root=tmp_path / "projects",
                  ledger=ledger, gt_dir=gt, p_eval_sample=pe, e1_tasks=e1, exec_sessions=execs,
                  overrides=ov, denylist=deny,
-                 prereg_frozen=tmp_path / "PREREG-P17D-synthetic.md", pins=pins, kind_home=KIND_HOME,
+                 prereg_frozen=tmp_path / "prereg" / "PREREG-P17D-synthetic.sha256", pins=pins, kind_home=KIND_HOME,
                  rules_hand_edit_texts=[P["hand"]],
                  ps_text="", plists=[], dotenv_paths=[], live_pkg_dir=pkg)
     return cfg, tmp_path
@@ -244,7 +244,8 @@ def test_refuses_to_rerun(world, make):
         cfg.run_dir.mkdir(parents=True)
         (cfg.run_dir / "attach.pinned").write_text("x")
     else:
-        cfg.prereg_frozen.write_text("frozen")
+        cfg.prereg_frozen.parent.mkdir(exist_ok=True)
+        cfg.prereg_frozen.write_text("abc  PREREG-P17D-synthetic.md\nfrozen_utc 2026-10-15T00:00:00Z\n")
     with pytest.raises(pa.Refuse):
         pa.attach(cfg)
 
@@ -451,3 +452,35 @@ def test_attach_refuses_any_leftover_and_never_reads_the_archive(world):
     finally:
         os.chmod(archive, 0o700)
     assert (archive / "items.jsonl").read_text() == "not json at all\n"
+
+
+def test_freeze_is_detected_by_the_sha256_record_not_the_prereg_file(world):
+    cfg, _ = world
+    assert pa.FROZEN_MARKER.name == "PREREG-P17D-synthetic.sha256"
+    assert pa.default_cfg(pa.argparse.Namespace(**{k: "/x" for k in (
+        "run_dir", "pp_root", "corpus", "claude_root", "ledger", "gt_dir", "p_eval_sample", "e1_tasks",
+        "exec_sessions", "overrides", "denylist")})).prereg_frozen == pa.FROZEN_MARKER
+    d = cfg.prereg_frozen.parent
+    d.mkdir(exist_ok=True)
+    (d / "PREREG-P17D-synthetic.md").write_text("# renamed, not frozen\n")
+    assert pa.attach(cfg)["F"]["n"] > 0                     # prereg present, no .sha256: runs
+    for p in cfg.run_dir.iterdir():
+        p.unlink()
+    (d / "PREREG-P17D-synthetic.sha256").write_text("abc  PREREG-P17D-synthetic.md\nfrozen_utc 2026-10-15T00:00:00Z\n")
+    with pytest.raises(pa.Refuse) as exc:                   # .sha256 present: refuses
+        pa.attach(cfg)
+    assert "frozen" in exc.value.msg
+
+
+def test_a_whitespace_only_context_difference_is_a_mismatch():
+    from llm_router.proxy import cls_input
+    from llm_router.proxy import steps
+    msgs = _edge_history(True, False)
+    full = cls_input.assemble({"messages": msgs, "system": "Primary working directory: /w"})
+    pieces = pa.assemble_pieces(msgs)
+    prompt = pa.cap_prompt(steps.newest_human_text({"messages": msgs}))
+    old = {**pieces, "earlier": [pieces["earlier"][0][:cls_input.EARLIER_CHARS]]}   # the run-1 storage
+    assert old["earlier"][0].endswith(" ")
+    rebuilt = cls_input.assemble(pa.min_body("/w", old["earlier"], old["assistant_tail"], prompt))
+    assert rebuilt.context.split() == full.context.split() and rebuilt.context != full.context
+    assert not pa.rebuild_matches(full, "/w", old, prompt)

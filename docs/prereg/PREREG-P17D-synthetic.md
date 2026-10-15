@@ -133,7 +133,8 @@ passes every test below. Each exclusion is counted.
 * The 0.50 session-cap walk is continued over the combined set until the total reaches
   `N_SELECT_ADMIT` = 250 or a walk accepts nothing.
 * **F items refused by the cap in the F walk do not re-enter** the continued walk; only G items are
-  walked in it (D-109 b).
+  walked in it (D-109 b). This was settled after attach run 1's counts were seen (Freeze record, D-109
+  item 3).
 * Each row carries `group` = F or G.
 
 **Labels.** G items are **relabelled fresh** in the same batches, with the same rubric and the same
@@ -611,5 +612,8 @@ N_SELECT, the share caps, the seeds, the bars and the admission criteria may not
 1. The 301/502 storage margin, so that an edge space cannot cause a false `assemble_mismatch` (§2).
 2. The early error gate at `select` and after `shadow`, stopping at $0 (§2a, §7, §8, §10).
 3. Refused F items do not re-enter the §2a walk. This states a rule the draft left ambiguous.
+   **Disclosure:** it was settled after attach run 1 showed a 30-item F session (0.6522 of F), so it
+   was decided with those counts in view. The owner chose the stricter reading, which admits fewer
+   items from that session.
 4. This status line and this freeze-record section are kept in the frozen file.
 5. The disclosure of void attach run 1 in "What was looked at".
