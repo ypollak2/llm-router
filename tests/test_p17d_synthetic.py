@@ -108,11 +108,20 @@ class World:
             os.chmod(f, 0o600)
         self.usage = tmp_path / "usage.json"
         self.set_usage(10, 10)
+        self.p1_gates = tmp_path / "P1.json"
+        self.set_gate(json.dumps({"test_gates_2026_10_13": {"P1.7-c": {
+            "verdict": "PASS", "value": "v",
+            "gap": "classifier shadow switched on before the artifact (process clause not judged)"
+        }}}).encode())
         self.cfg = ps.Cfg(run=self.run, measurement=tmp_path / "measure" / "p17d-synthetic.json", usage=self.usage,
+                          p1_gates=self.p1_gates,
                           ge3_labels=tmp_path / "ge3_labels.jsonl", head_sha=lambda: HEAD,
                           src_matches=lambda _sha: True, tree_clean=lambda: True, asleep=_no_sleep)
         self.cfg.pins.update(items=sha(self.run / "items.jsonl"), attach_counts=sha(self.run / "attach_counts.json"),
                              tier_policy=sha(self.run / "tier_policy.yaml"))
+
+    def set_gate(self, raw: bytes):
+        self.p1_gates.write_bytes(raw)
 
     def set_usage(self, session_pct, weekly_pct, age_s=0):
         self.usage.write_text(json.dumps({"session_pct": session_pct, "weekly_pct": weekly_pct,
@@ -351,7 +360,7 @@ def test_every_command_but_status_refuses_on_a_prereg_mismatch(world, tmp_path, 
     shutil.copy(ps.PREREG.with_suffix(".sha256"), bad.with_suffix(".sha256"))
     world.cfg.prereg = bad
     fn = {"select": ps.cmd_select, "shadow": ps.cmd_shadow, "label": ps.cmd_label,
-          "score": lambda c: ps.cmd_score(c, True)}[cmd]
+          "score": lambda c: ps.cmd_score(c)}[cmd]
     with refuses("differs from its freeze record"):
         fn(world.cfg)
     assert ps.cmd_status(world.cfg) == 0
@@ -368,7 +377,7 @@ def test_refuses_before_frozen_utc(world):
 def test_every_command_refuses_once_use_log_is_terminal(world, cmd):
     ps.append_line(world.cfg.use_log, "terminal 2026-10-15T17:00:00Z test")
     fn = {"select": ps.cmd_select, "shadow": ps.cmd_shadow, "label": ps.cmd_label,
-          "score": lambda c: ps.cmd_score(c, True)}[cmd]
+          "score": lambda c: ps.cmd_score(c)}[cmd]
     with refuses("terminal"):
         fn(world.cfg)
 
@@ -1029,7 +1038,7 @@ def test_score_end_to_end_started_before_labels_are_opened_and_single_use(world,
         return real(path)
 
     monkeypatch.setattr(ps, "labels_from_bytes", spy)
-    assert ps.cmd_score(world.cfg, True) == ps.EXIT_OK
+    assert ps.cmd_score(world.cfg) == ps.EXIT_OK
     assert seen and seen[0], "started must be logged before labels.jsonl is parsed"
     line = seen[0][0]
     assert f"labels_sha256={sha(world.cfg.labels)}" in line and f"shadow_sha256={sha(world.cfg.shadow)}" in line
@@ -1042,13 +1051,17 @@ def test_score_end_to_end_started_before_labels_are_opened_and_single_use(world,
     text = world.cfg.measurement.read_text()
     assert not any(it["session_id"] in text or SENTINEL in text for it in world.items)
     with refuses("started"):
-        ps.cmd_score(world.cfg, True)
+        ps.cmd_score(world.cfg)
 
 
-def test_score_with_p17c_not_passed_is_not_informative(world, ollama, monkeypatch, capsys):
+@pytest.mark.parametrize("verdict", ["FAIL", "pass", "NOT RUN"])
+def test_score_with_p17c_not_passed_is_not_informative(world, ollama, monkeypatch, verdict):
     full_run(world, monkeypatch)
-    ps.cmd_score(world.cfg, False)
-    assert json.loads(world.cfg.result.read_text())["verdict_reason"].startswith("procedural: P1.7-c")
+    world.set_gate(json.dumps({"test_gates_2026_10_13": {"P1.7-c": {"verdict": verdict}}}).encode())
+    ps.cmd_score(world.cfg)
+    result = json.loads(world.cfg.result.read_text())
+    assert result["verdict_reason"].startswith("procedural: P1.7-c")
+    assert result["p17c_passed"] is False
 
 
 def test_score_after_a_spend_cap_stop_runs_on_existing_labels(world, ollama, monkeypatch, capsys):
@@ -1058,7 +1071,7 @@ def test_score_after_a_spend_cap_stop_runs_on_existing_labels(world, ollama, mon
     install_judge(monkeypatch, judge)
     assert ps.cmd_label(world.cfg) == ps.EXIT_SPEND_CAP
     assert any(x.startswith("label stopped spend_cap ") for x in world.use())
-    assert ps.cmd_score(world.cfg, True) == ps.EXIT_OK
+    assert ps.cmd_score(world.cfg) == ps.EXIT_OK
     res = json.loads(world.cfg.result.read_text())
     assert res["verdict"] == ps.NOT_INFORMATIVE and res["verdict_reason"].startswith("n:")
     assert res["spend_usd"] <= ps.SPEND_CAP_USD
@@ -1073,7 +1086,7 @@ def test_kappa_on_g_is_reported_never_gates(tmp_path, ollama, monkeypatch, capsy
     w.cfg.ge3_labels.write_text("".join(json.dumps({"id": items[i]["ge3_id"], "tier": "sonnet"}) + "\n"
                                         for i in sel["g_ids"]))
     monkeypatch.setattr(ps, "load_label_mods", lambda cfg: fake_mods())
-    ps.cmd_score(w.cfg, True)
+    ps.cmd_score(w.cfg)
     res = json.loads(w.cfg.result.read_text())
     assert res["kappa_fresh_vs_ge3_on_G"]["n"] == len(sel["g_ids"])
     assert res["groups"]["G"]["n_labeled"] == len(sel["g_ids"])
@@ -1100,7 +1113,7 @@ def test_status_never_parses_labels_and_prints_counts_only(world, ollama, monkey
 
 def test_no_command_prints_prompt_text(world, ollama, monkeypatch, capsys):
     full_run(world, monkeypatch)
-    ps.cmd_score(world.cfg, True)
+    ps.cmd_score(world.cfg)
     ps.cmd_status(world.cfg)
     out = capsys.readouterr()
     assert SENTINEL not in out.out and SENTINEL not in out.err
@@ -1126,7 +1139,7 @@ def test_no_open_under_real_claude_or_llm_router(world, ollama, monkeypatch, cap
     _AUDIT_ON["on"] = True
     try:
         full_run(world, monkeypatch)
-        ps.cmd_score(world.cfg, True)
+        ps.cmd_score(world.cfg)
         ps.cmd_status(world.cfg)
     finally:
         _AUDIT_ON["on"] = False
@@ -1262,7 +1275,7 @@ def test_cooldown_is_waited_out_before_every_attempt_with_the_real_classify_asyn
     (1, {"total_cost_usd": 0.12, "modelUsage": {"opus": {}}}, None, None, 0.12, "reported"),
     (1, "not json", None, None, 0.30, "estimate"),
     (1, None, "timeout", 0.2, 0.25, "estimate"),
-    (1, None, "oserror", None, 0.30, "estimate"),
+    (1, None, "oserror", None, 0.0, "not_started"),
     (0, {"modelUsage": {"opus": {}}, "result": "{}"}, None, None, 0.30, "estimate"),
     (1, {}, None, None, 0.30, "estimate"),
     (1, [], None, None, 0.30, "estimate"),
@@ -1294,7 +1307,7 @@ def test_judge_failed_and_unpriced_calls_use_reported_cost_or_estimate(
     row = rows[-1]
     assert row["kind"] == "call" and row["total_cost_usd"] == cost and row["cost_basis"] == basis
     assert rows[-2]["kind"] == "call_pending" and rows[-2]["call_id"] == row["call_id"]
-    assert ps.spent(cfg) == ((prior or 0) + cost, max(prior or 0, cost))
+    assert ps.spent(cfg) == ((prior or 0) + cost, max(prior or 0, cost if basis == "reported" else 0))
 
 
 @pytest.mark.parametrize("crash", [False, True])
@@ -1317,7 +1330,7 @@ def test_judge_pending_cost_is_reconciled_or_survives_a_final_write_crash(tmp_pa
     if crash:
         with pytest.raises(RuntimeError, match="ledger write failed"):
             ps.judge_call(cfg, fake_mods(), entries, "batch")
-        assert ps.spent(cfg) == (0.30, 0.30)
+        assert ps.spent(cfg) == (0.30, 0.0)
     else:
         assert ps.judge_call(cfg, fake_mods(), entries, "batch") == {}
         assert ps.spent(cfg) == (0.12, 0.12)
@@ -1346,7 +1359,7 @@ def test_score_refuses_after_quota_pause(shadowed, monkeypatch):
     install_judge(monkeypatch, Judge())
     assert ps.cmd_label(w.cfg) == ps.EXIT_PAUSED
     with refuses("label has not finished"):
-        ps.cmd_score(w.cfg, True)
+        ps.cmd_score(w.cfg)
     assert not any(x.startswith("started ") for x in w.use())
     assert not ps.label_finished(w.cfg)
     assert not w.cfg.result.exists() and not w.cfg.measurement.exists()
@@ -1359,7 +1372,7 @@ def test_code_identity_guards_refuse_before_work(world, ollama, monkeypatch, com
         world.harness_line()
     else:
         full_run(world, monkeypatch)
-    fn = {"shadow": ps.cmd_shadow, "label": ps.cmd_label, "score": lambda cfg: ps.cmd_score(cfg, True)}[command]
+    fn = {"shadow": ps.cmd_shadow, "label": ps.cmd_label, "score": lambda cfg: ps.cmd_score(cfg)}[command]
     world.cfg.tree_clean = lambda: False
     with refuses("uncommitted"):
         fn(world.cfg)
@@ -1400,7 +1413,7 @@ def test_score_consumes_use_and_reports_label_pin_failure(world, ollama, monkeyp
         raise error
 
     monkeypatch.setattr(ps, "load_label_mods", fail)
-    assert ps.cmd_score(world.cfg, True) == ps.EXIT_OK
+    assert ps.cmd_score(world.cfg) == ps.EXIT_OK
     result = json.loads(world.cfg.result.read_text())
     assert result["verdict"] == ps.NOT_INFORMATIVE and "pin" in result["verdict_reason"]
     assert result["pin_failures"] == [
@@ -1448,7 +1461,7 @@ def test_score_uses_the_snapshots_hashed_before_started(world, ollama, monkeypat
             world.cfg.shadow.write_bytes(b"garbage\n")
 
     monkeypatch.setattr(ps, "append_line", append)
-    assert ps.cmd_score(world.cfg, True) == ps.EXIT_OK
+    assert ps.cmd_score(world.cfg) == ps.EXIT_OK
     result = json.loads(world.cfg.result.read_text())
     assert result["n_labeled"] == 120
     started = next(x for x in world.use() if x.startswith("started "))
@@ -1509,6 +1522,112 @@ def test_select_requires_strictly_after_frozen_utc(world):
 
 def test_score_and_measurement_disclose_d110(world, ollama, monkeypatch):
     full_run(world, monkeypatch)
-    assert ps.cmd_score(world.cfg, True) == ps.EXIT_OK
+    assert ps.cmd_score(world.cfg) == ps.EXIT_OK
     for path in (world.cfg.result, world.cfg.measurement):
         assert any("D-110" in s for s in json.loads(path.read_text())["disclosures"])
+
+
+def test_score_records_p17c_gate(world, ollama, monkeypatch):
+    full_run(world, monkeypatch)
+    raw = world.cfg.p1_gates.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    gap = json.loads(raw)["test_gates_2026_10_13"]["P1.7-c"]["gap"]
+    assert ps.cmd_score(world.cfg) == ps.EXIT_OK
+    result = json.loads(world.cfg.result.read_text())
+    assert result["p17c_passed"] is True
+    assert not result["verdict_reason"].startswith("procedural: P1.7-c")
+    expected = {"path": str(world.cfg.p1_gates), "sha256": digest, "verdict": "PASS", "gap": gap}
+    for path in (world.cfg.result, world.cfg.measurement):
+        doc = json.loads(path.read_text())
+        assert doc["p17c_gate"] == expected
+        assert any(s.startswith("D-111a") and digest in s and gap in s for s in doc["disclosures"])
+        assert any("D-110" in s for s in doc["disclosures"])
+
+
+@pytest.mark.parametrize("raw", [
+    None, "directory", b"{not json", b'{"test_gates_2026_10_13": {}}', b"[]",
+    b'{"test_gates_2026_10_13": {"P1.7-c": {"gap": "x"}}}',
+])
+def test_score_refuses_invalid_p17c_gate_before_started(world, ollama, monkeypatch, raw):
+    full_run(world, monkeypatch)
+    if raw is None or raw == "directory":
+        world.cfg.p1_gates.unlink()
+        if raw == "directory":
+            world.cfg.p1_gates.mkdir()
+    else:
+        world.set_gate(raw)
+    with refuses("D-111a"):
+        ps.cmd_score(world.cfg)
+    assert not any(line.startswith("started ") for line in world.use())
+    assert not world.cfg.result.exists() and not world.cfg.measurement.exists()
+
+
+def test_score_discloses_absent_p17c_gap(world, ollama, monkeypatch):
+    full_run(world, monkeypatch)
+    world.set_gate(b'{"test_gates_2026_10_13": {"P1.7-c": {"verdict": "PASS"}}}')
+    assert ps.cmd_score(world.cfg) == ps.EXIT_OK
+    result = json.loads(world.cfg.result.read_text())
+    assert result["p17c_gate"]["gap"] is None
+    assert any(s.startswith("D-111a") and "the record has no gap field" in s for s in result["disclosures"])
+
+
+def test_score_rejects_removed_p17c_flag(world, capsys):
+    assert ps.main(["score", "--run-dir", str(world.run), "--p17c", "passed"]) == ps.EXIT_REFUSED
+    assert "D-111a" in capsys.readouterr().err
+    assert not any(line.startswith("started ") for line in world.use())
+
+
+def test_p17c_gate_defaults_to_plan_path(tmp_path):
+    assert ps.P1_GATES == ps.PP / "gates" / "v16" / "P1.json"
+    assert ps.Cfg(run=tmp_path).p1_gates == ps.P1_GATES
+    assert ".llm-router" not in str(ps.P1_GATES)
+
+
+def test_spend_estimates_do_not_compound(tmp_path):
+    cfg = ps.Cfg(run=tmp_path)
+    for row in [
+        {"kind": "call", "total_cost_usd": 0.2, "cost_basis": "reported"},
+        {"kind": "call", "total_cost_usd": 0.25, "cost_basis": "estimate"},
+        {"kind": "call", "total_cost_usd": 0.0, "cost_basis": "not_started"},
+        {"kind": "call_pending", "call_id": "x", "est_usd": 0.9},
+    ]:
+        ps.append_json(cfg.ledger, row)
+    total, top = ps.spent(cfg)
+    assert total == pytest.approx(1.35)
+    assert top == 0.2
+    assert ps.spend_guard(cfg) == pytest.approx(0.25)
+    cfg.ledger.unlink()
+    for _ in range(2):
+        ps.append_json(cfg.ledger, {"kind": "call", "total_cost_usd": 0.30, "cost_basis": "estimate"})
+    assert ps.spend_guard(cfg) == 0.30
+
+
+@pytest.mark.parametrize("cool_until", [1010.0, 1000.0, 999.0])
+def test_wait_cooldown_handles_early_wakeups(tmp_path, monkeypatch, cool_until):
+    from llm_router import local_classifier as lc
+
+    clock = [1000.0]
+    recorded = []
+    monkeypatch.setattr(lc, "_now", lambda: clock[0])
+    monkeypatch.setattr(lc, "_cool_until", cool_until)
+
+    async def asleep(seconds):
+        recorded.append(seconds)
+        clock[0] += max(seconds / 2, 0.001)
+
+    cfg = ps.Cfg(run=tmp_path, asleep=asleep)
+    asyncio.run(ps.wait_cooldown(cfg))
+    if cool_until > 1000.0:
+        assert len(recorded) > 1
+        assert clock[0] >= 1010.0
+    else:
+        assert recorded == []
+
+
+def test_terminal_records_d110_disclosure(tmp_path):
+    cfg = ps.Cfg(run=tmp_path)
+    ps.terminal(cfg, "select", "test reason")
+    res = json.loads(cfg.result.read_text())
+    assert res["verdict"] == ps.NOT_INFORMATIVE
+    assert any("D-110" in s for s in res["disclosures"])
+    assert any(line.startswith("terminal ") for line in ps.use_lines(cfg))

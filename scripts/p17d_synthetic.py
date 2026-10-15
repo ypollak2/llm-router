@@ -5,8 +5,10 @@ docs/prereg/P17D-synthetic-HARNESS-DESIGN.md). Built after the freeze; its commi
     python3 scripts/p17d_synthetic.py select  [--run-dir DIR]
     python3 scripts/p17d_synthetic.py shadow  [--run-dir DIR]
     python3 scripts/p17d_synthetic.py label   [--run-dir DIR] [--usage FILE]
-    python3 scripts/p17d_synthetic.py score   [--run-dir DIR] --p17c passed|not_passed
+    python3 scripts/p17d_synthetic.py score   [--run-dir DIR]
     python3 scripts/p17d_synthetic.py status  [--run-dir DIR]
+
+Score reads the P1.7-c status from ~/.rsi/research/primary-plan/gates/v16/P1.json (D-111a).
 
 ``$RUN`` is ``--run-dir``, else ``$P17D_RUN_DIR``, else ``~/.rsi/research/primary-plan/v16/p17d`` (real home).
 Every command except ``status`` refuses unless ``check_prereg.check(PREREG)["match"]`` and
@@ -53,6 +55,8 @@ MEASUREMENT = ROOT / "docs" / "measurements" / "p17d-synthetic.json"
 GT_SCRIPTS = PP / "v16" / "gt500" / "scripts"
 SHADOWLAB_PY = PP / "v16" / "shadowlab" / "shadowlab.py"
 GE3_LABELS = PP / "v16" / "gt500" / "work" / "labels_opus.jsonl"
+#: D-111a: score reads the P1.7-c status from the plan gate file.
+P1_GATES = PP / "gates" / "v16" / "P1.json"
 #: The quota file the GE3 / shadowlab guards read (PREREG-shadowlab section 6). Read-only; the one path under
 #: ~/.llm-router this harness opens (D-110: solely for the section 8 quota pause).
 USAGE_JSON = REAL_HOME / ".llm-router" / "usage.json"
@@ -171,6 +175,32 @@ sha256_file = pa.sha256_file
 read_jsonl = pa.read_jsonl
 
 
+def read_p17c_gate(path: Path) -> dict:
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise Refuse(f"refusing: D-111a P1.7-c gate file {path} unreadable: {type(exc).__name__}") from None
+    digest = hashlib.sha256(raw).hexdigest()
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise Refuse(f"refusing: D-111a P1.7-c gate file {path} is not JSON") from None
+    gates = doc.get("test_gates_2026_10_13") if isinstance(doc, dict) else None
+    rec = gates.get("P1.7-c") if isinstance(gates, dict) else None
+    if not isinstance(rec, dict) or "verdict" not in rec:
+        raise Refuse(f'refusing: D-111a P1.7-c gate file {path} lacks test_gates_2026_10_13["P1.7-c"].verdict')
+    return {"path": str(path), "sha256": digest, "verdict": rec["verdict"],
+            "passed": rec["verdict"] == "PASS", "gap": rec.get("gap")}
+
+
+def p17c_disclosure(gate: dict) -> str:
+    text = (f'D-111a: P1.7-c status was read from {gate["path"]} '
+            f'(sha256 {gate["sha256"]}), verdict {gate["verdict"]!r}')
+    if isinstance(gate["gap"], str) and gate["gap"]:
+        return text + "; the record's gap field reads: " + json.dumps(gate["gap"])
+    return text + "; the record has no gap field"
+
+
 def default_pins() -> dict:
     return {"items": ITEMS_SHA256, "attach_counts": ATTACH_COUNTS_SHA256, "attach_script": ATTACH_SCRIPT_SHA256,
             "tier_policy": TIER_POLICY_SHA256, "shadow_eval": SHADOW_EVAL_SHA256, "gt500": GT500_SHA256,
@@ -206,6 +236,7 @@ class Cfg:
     shadowlab_py: Path = SHADOWLAB_PY
     ge3_labels: Path = GE3_LABELS
     usage: Path = USAGE_JSON
+    p1_gates: Path = P1_GATES
     pins: dict = field(default_factory=default_pins)
     repo_sha: str = REPO_SHA
     now: object = time.time
@@ -868,11 +899,13 @@ def spent(cfg: Cfg) -> tuple[float, float]:
     costs = [float(r.get("total_cost_usd") or 0) for r in rows if r.get("kind") == "call"]
     costs.extend(float(r.get("est_usd") or 0) for r in rows
                  if r.get("kind") == "call_pending" and r.get("call_id") not in completed)
-    return sum(costs), max(costs, default=0.0)
+    priced = [float(r.get("total_cost_usd") or 0) for r in rows
+              if r.get("kind") == "call" and r.get("cost_basis") not in ("estimate", "not_started")]
+    return sum(costs), max(priced, default=0.0)
 
 
 def spend_guard(cfg: Cfg, cap: float = SPEND_CAP_USD) -> float:
-    """Stop when spent + estimate (1.25 x the dearest call so far; first call $0.30) would exceed the cap."""
+    """Stop when spent + estimate (1.25 x the dearest priced call so far (estimated, not-started and pending rows excluded); $0.30 while none) would exceed the cap."""
     total, top = spent(cfg)
     est = top * SPEND_EST_FACTOR if top > 0 else SPEND_FIRST_EST_USD
     if total + est > cap:
@@ -908,15 +941,20 @@ def judge_call(cfg: Cfg, mods, entries: list, mode: str) -> dict:
                              "mode": mode, "ids": ids, "est_usd": est})
     t0 = time.time()
     d = None
+    not_started = False
     try:
         p = subprocess.run(cmd, cwd=str(cfg.claude_cwd), stdin=subprocess.DEVNULL, capture_output=True, text=True,
                            timeout=JUDGE_TIMEOUT_S, env=env)
         d = json.loads(p.stdout)
-    except (subprocess.TimeoutExpired, OSError, ValueError):
+    except OSError:
+        not_started = True
+    except (subprocess.TimeoutExpired, ValueError):
         d = None
     row = {"kind": "call", "call_id": cid, "ts": utc(cfg.now()), "mode": mode, "ids": ids,
-           "item_ids": [e.get("item_id") or e.get("planted_id") for e in entries], "total_cost_usd": est,
-           "cost_basis": "estimate", "tokens_in": None, "tokens_out": None, "model_ok": None,
+           "item_ids": [e.get("item_id") or e.get("planted_id") for e in entries],
+           "total_cost_usd": 0.0 if not_started else est,
+           "cost_basis": "not_started" if not_started else "estimate",
+           "tokens_in": None, "tokens_out": None, "model_ok": None,
            "secs": round(time.time() - t0, 1)}
     if not isinstance(d, dict):
         append_json(cfg.ledger, row)
@@ -1410,7 +1448,7 @@ def measurement(result: dict, records: list, labels: dict, items_by_key: dict, s
                          "truth": t.get("truth"), "source": t.get("source")})
     keep = ("verdict", "verdict_reason", "lead", "n_selected", "n_f", "n_g", "n", "n_labeled", "n_fallback",
             "errors", "arms", "boot_c_lambda2_clamp", "boot_under", "reference_arms")
-    return {"label": LABEL, "disclosures": DISCLOSURES,
+    return {"label": LABEL, "disclosures": result["disclosures"], "p17c_gate": result.get("p17c_gate"),
             "what": "P1.7-d synthetic: nimble:9b vs rules_eff on replayed past prompts",
             "prereg": "docs/prereg/PREREG-P17D-synthetic.md", **{k: result[k] for k in keep}, "items": rows}
 
@@ -1457,13 +1495,14 @@ def before_freeze_count(records: list, frozen_utc: str) -> int:
     return count
 
 
-def cmd_score(cfg: Cfg, p17c_passed: bool) -> int:
+def cmd_score(cfg: Cfg) -> int:
     check_common(cfg, policy=True)
     if has_started(cfg):
         raise Refuse("refusing: use.log already holds a started record; score is single-use")
     if not label_finished(cfg):
         raise Refuse("refusing: label has not finished (no `label done` / `label stopped spend_cap` in use.log)")
     check_code_identity(cfg)
+    gate = read_p17c_gate(cfg.p1_gates)
     sel = load_selection(cfg)
     items = load_items(cfg)
     res = check_prereg.check(cfg.prereg)
@@ -1493,13 +1532,15 @@ def cmd_score(cfg: Cfg, p17c_passed: bool) -> int:
     if sel.get("g_ids") and gt is not None:
         kappa_fn = lambda a, b: gt.cohen_kappa(a, b)  # noqa: E731
         ge3 = load_ge3_tiers(cfg)
-    result = score(cfg, records, labels, dict(items_by_key), sel, p17c_passed=p17c_passed,
+    result = score(cfg, records, labels, dict(items_by_key), sel, p17c_passed=gate["passed"],
                    pre_freeze_rows=before_freeze_count(records, res["frozen_utc"]), calibration_ok=calibration_ok,
                    label_error_ids=label_errors, ge3_tiers=ge3, kappa_fn=kappa_fn,
                    pins_ok=pins_ok, pin_failures=pin_failures)
     total, _ = spent(cfg)
-    result.update({"spend_usd": round(total, 4), "p17c_passed": p17c_passed, "utc": utc(cfg.now()),
-                   "prereg_sha256": res["sha256"], "harness_sha": cfg.head_sha(), "disclosures": DISCLOSURES})
+    result.update({"spend_usd": round(total, 4), "p17c_passed": gate["passed"], "utc": utc(cfg.now()),
+                   "prereg_sha256": res["sha256"], "harness_sha": cfg.head_sha(),
+                   "p17c_gate": {k: gate[k] for k in ("path", "sha256", "verdict", "gap")},
+                   "disclosures": DISCLOSURES + [p17c_disclosure(gate)]})
     write_json_private(cfg.result, result)
     cfg.measurement.parent.mkdir(parents=True, exist_ok=True)
     cfg.measurement.write_text(json.dumps(measurement(result, records, labels, dict(items_by_key), sel), indent=1,
@@ -1545,9 +1586,11 @@ def main(argv=None) -> int:
         if name == "label":
             s.add_argument("--usage", default=str(USAGE_JSON))
         if name == "score":
-            s.add_argument("--p17c", choices=("passed", "not_passed"), required=True,
-                           help="PLAN P1.7 task 3 state; not_passed makes the verdict NOT INFORMATIVE")
+            s.add_argument("--p17c", default=None, help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
+    if a.cmd == "score" and a.p17c is not None:
+        print(f"refusing: --p17c was removed by D-111a; score reads P1.7-c from {P1_GATES}", file=sys.stderr)
+        return EXIT_REFUSED
     cfg = Cfg(run=Path(a.run_dir))
     if a.cmd == "label":
         cfg.usage = Path(a.usage)
@@ -1562,7 +1605,7 @@ def main(argv=None) -> int:
             return cmd_shadow(cfg)
         if a.cmd == "label":
             return cmd_label(cfg)
-        return cmd_score(cfg, a.p17c == "passed")
+        return cmd_score(cfg)
     except Refuse as r:
         print(r.msg, file=sys.stderr)
         return EXIT_REFUSED
