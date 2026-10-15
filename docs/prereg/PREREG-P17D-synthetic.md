@@ -1,12 +1,5 @@
 # PREREG-P17D-synthetic: nimble:9b vs rules_eff on replayed past prompts (PLAN v16 P1.7-d, D-106)
 
-Status: **DRAFT, not frozen.** Written 2026-10-15T13:13Z, before any shadow row, any nimble call, any
-judge call and any label for this run. Revised 2026-10-15T13:22Z for D-107, still before any of those. To freeze it, resolve "Open before freeze", delete that
-section and this status paragraph, rename the file to `PREREG-P17D-synthetic.md`, and write
-`PREREG-P17D-synthetic.sha256` (`<sha256>  PREREG-P17D-synthetic.md` and `frozen_utc <UTC>`, the format
-`scripts/check_prereg.py` reads). Then log the hash in `PROGRESS.md`. A changed byte is a new prereg
-with a later `frozen_utc`.
-
 ## Authority
 
 * **D-106** (owner, 2026-10-15T12:53:01Z): P1.7-d runs synthetically under D-99. Past prompts are
@@ -509,32 +502,20 @@ the opposite side from the combined one.
 * The GE3 `supply.json` aggregates, `heldout_M19` latency and fallback, GE3 and shadowlab spend
   ledgers, and the shadowlab launchd log.
 * No label, no verdict, no rules tier and no model output was read or computed for any corpus item.
-
-## Open before freeze (resolved by D-107; mechanical steps only)
-
-Every owner question is answered (D-107 a-c, Q3). Before freezing, fill these in:
-1. Attach counts: F pool, G admitted, sessions, largest share.
-2. `TIER_POLICY_SHA256` and its basis.
-3. `REPO_SHA`.
-4. Land the shadowlab pin fix first (AMEND5-shadowlab plus the code change, reviewed). Then pin its
-   new sha here. The order is fixed because this run imports shadowlab helpers.
-5. `ITEMS_SHA256` and `ATTACH_COUNTS_SHA256`, then write `$RUN/attach.pinned`.
-6. `ATTACH_SCRIPT_SHA256`.
-
-**Freeze guard.** After attach has run, only the fill-ins above may change:
-* the attach counts;
-* `TIER_POLICY_SHA256`;
-* `ITEMS_SHA256` and `ATTACH_COUNTS_SHA256`;
-* `ATTACH_SCRIPT_SHA256`;
-* `REPO_SHA`;
-* the new shadowlab sha;
-* the deletion of this section and the status paragraph.
-
-The freeze commit message records `git diff <BASE> -- <this file>`, where BASE is the commit that
-adds this guard (61198cd7 plus the build-order and guard text; its SHA is logged in PROGRESS.md
-before attach runs). An independent check
-confirms that every changed line is one of these. So N_SELECT, the share caps, the admission rule
-and every other rule cannot be retuned after the pool sizes are seen.
+* **Attach counts** (`attach_counts.json`, run once 2026-10-15T14:02Z by a sub-agent, exit 0):
+  * transcript files 2,048; corpus-matched records 3,030; frame records seen 3,052;
+  * exclusions: not human-typed 2,473; leakage 202; research kind 98; exec session 32; G p_eval_cal 44;
+    G leakage 16; after window 8; image 7; secret_scrubber 3; harness or slash 2; served Haiku 2;
+  * leak hits by set: GE3 tune 94, E2-HO 78, E2-cal 48, GE3 held-out 12; for G, E2-cal 10 and E2-HO 7;
+  * **F**: 46 items from 4 sessions, largest share 0.6522 (top 3: 30, 12, 3);
+  * **G candidates**: 119 items from 22 sessions, largest share 0.1765 (top 3: 21, 21, 15);
+  * `assemble_mismatch` 38 of 165 (F 16, G 22); capped 2; context withheld 1;
+  * requested basis: ledger 5, transcript_served 160; denylist entries 0; overrides entries 1;
+  * tier policy basis `1:process_argv`, `complexity_knn` false, `route.default` simple→haiku,
+    moderate→sonnet, complex→opus, deep_reasoning→opus.
+* After attach, a counts-only check of `items.jsonl` (no text printed): for all 38 mismatched items the
+  re-assembled context differs, and each one has whitespace at a stored truncation edge (an earlier
+  prompt ending in a space: 18; an assistant tail starting with a space: 22; overlap 2).
 
 ```pins
 LABEL=synthetic (D-99)
@@ -549,19 +530,19 @@ ADMIT_SET=ge3_heldout,organic,claude,not_p_eval_cal
 ADMIT_SEED_FORMAT=p17d:admit:20261015:{ge3_id}
 N_SELECT_ADMIT=250
 ADMIT_REUSE_GE3_LABELS=false
-TIER_POLICY_SHA256=<filled at freeze from attach>
-ITEMS_SHA256=<filled at freeze>
-ATTACH_COUNTS_SHA256=<filled at freeze>
+TIER_POLICY_SHA256=04b5f4641bcc8dd7afee38c869950e82eed00533b227d4d2f97af884ac42be93
+ITEMS_SHA256=321ca3dbff1aa63049ad0d61158a534200b501b8f57f4999660708b6fa544d85
+ATTACH_COUNTS_SHA256=cbdd7a3ad5f2359b28ca9a02ea243c188701cd43f0eaa7436584c9dfd68c8fef
 ITEM_ID_FORMAT=p17d:item:{session_id}:{record_timestamp}
 SHADOW_RECORD_RULE=last_per_key
 ENGINE_MODE=shadow
-REPO_SHA=<filled at freeze>
-ATTACH_SCRIPT_SHA256=<filled at freeze>
+REPO_SHA=64e3c84cbf0a3160d134a9f3ba19035bf1f1b3e8
+ATTACH_SCRIPT_SHA256=88d3ef9eb74be2a00b532b65ac6426180212cfcb9e223472db9f7ee0a58f77bf
 FEASIBILITY_MIN_SELECTED=100
 FEASIBILITY_MAX_SHARE=0.55
 GT500_SHA256=9cde774dfe93387d6ee3dfcbd1b5481a537f265e5961d82f85a87d29d6328959
 SUPPLY_SHA256=12cd3e1eed7fc15658b4b44246d83422e2b61adc4ccb270dd9f5e729608fb0e8
-SHADOWLAB_SHA256=<new sha after the shadowlab pin fix lands; today b89c7e17b4f6746c5b42fe1c136dc48122388ca0d391b319fc68facc5e96098a>
+SHADOWLAB_SHA256=0d2d2b58bde9cb8a5466782da866c218a244595d1485ef8d2563ac8c02fb4def
 RUBRIC_MD5=1bcb3f441a0c9d056b3343a9d47c5565
 SHADOW_EVAL_SHA256=e9b89943f33b68b3095c5d2ea57976147368e0e6f28490aea7e74a82e32b1c57
 NIMBLE_BLOB=sha256-bbf1d6fc03bb0ed24d88f4c214ed7b5d1768aeb43d5cf433fb69eff0c8578013
