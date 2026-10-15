@@ -388,6 +388,56 @@ def run_fidelity(stratum: str, responder: Callable[[str], Answer], *, provider: 
     }
 
 
+# ── P1.1-b Sonnet stratum after repair 1: equivalence proof (PREREG-...-R1) ───
+
+PREREG_R1 = ROOT / "docs" / "prereg" / "PREREG-P11B-synthetic-R1.md"
+SONNET_MODEL = "anthropic/claude-sonnet-5-5"
+EQUIV_DOORS = ("gateway", "sdk")
+
+
+def equivalence_item(item: Item, door: str, window: int) -> dict:
+    """PREREG-P11B-synthetic-R1 checks (a)-(d) for one item at one door."""
+    from llm_router.context_pack import build_pack, extract_turn_text
+
+    messages = [e["message"] for e in item.entries]
+    pack = build_pack(item.request, messages=messages, door=door, target_window=window,
+                      target_provider="anthropic", project="")
+    full = [t for t in (extract_turn_text(m["content"], keep_tools=True, cap=False).strip()
+                        for m in messages) if t]
+    sent = [str(m["content"]).strip() for m in pack.recent]
+    blob = "\n".join(sent + [pack.summary or "", pack.request])
+    checks = {"full_mode": pack.mode == "full", "no_summary": pack.summary is None,
+              "same_messages": sent == full, "token_present": item.token in blob}
+    return {"item": item.item_id, "door": door, **checks, "equivalent": all(checks.values())}
+
+
+def run_equivalence() -> dict:
+    """PREREG-P11B-synthetic-R1: PACK vs FULL equivalence at the Sonnet doors' window."""
+    from llm_router import router
+
+    rows, windows = [], {}
+    with scratch_env():
+        for door in EQUIV_DOORS:
+            windows[door] = router._pack_window(SONNET_MODEL, door)
+            rows += [equivalence_item(it, door, windows[door]) for it in items()]
+    n_ok = sum(r["equivalent"] for r in rows)
+
+    def git(*args: str) -> str:
+        try:
+            return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True,
+                                  timeout=10).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+    return {"label": LABEL, "must": "P1.1-b", "stratum": "sonnet", "repair": "R1 (D-101 real windows)",
+            "git_sha": git("rev-parse", "HEAD") or None,
+            "git_dirty_src": bool(git("status", "--porcelain", "--", "src", "scripts")),
+            "prereg": PREREG_R1.name, "prereg_sha256": hashlib.sha256(PREREG_R1.read_bytes()).hexdigest(),
+            "model": SONNET_MODEL, "windows": windows, "items": N_ITEMS, "checked": len(rows),
+            "equivalent": n_ok,
+            "verdict": "PASS by construction" if n_ok == len(rows) == N_ITEMS * len(EQUIV_DOORS)
+            else "NOT INFORMATIVE", "rows": rows}
+
+
 # ── summary coverage (P1.2-a) ─────────────────────────────────────────────────
 
 
@@ -814,6 +864,8 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--out", type=Path, default=ROOT / "docs" / "measurements")
     s = sub.add_parser("summary")
     s.add_argument("--out", type=Path, default=ROOT / "docs" / "measurements")
+    sub.add_parser("equivalence", help="P1.1-b Sonnet after repair 1 (PREREG-P11B-synthetic-R1)").add_argument(
+        "--out", type=Path, default=ROOT / "docs" / "measurements")
     o = sub.add_parser("o3")
     o.add_argument("--out", type=Path, default=ROOT / "docs" / "measurements")
     c = sub.add_parser("replay-corpus", help="write the P1.10-a / P0.9 corpus for scripts/synthetic_replay.py")
@@ -847,6 +899,8 @@ def main(argv: list[str] | None = None) -> int:
                            progress=lambda s: print(s, file=sys.stderr, flush=True))
         name = f"p11b-synthetic-{args.stratum}.json" if not args.limit else \
             f"p11b-synthetic-{args.stratum}-limit{args.limit}.json"
+    elif args.cmd == "equivalence":
+        res, name = run_equivalence(), "p11b-synthetic-sonnet-r1.json"
     elif args.cmd == "o3":
         res, name = run_o3(), "p19a-synthetic.json"
     elif args.cmd == "identity":

@@ -12,7 +12,39 @@ produced them are in `scripts/g1_synthetic_evidence.py`.
 - **D-100:** "P1.6-g is approved to pass." P1.6-g is PASS by owner decision. It stays FAIL as a
   measurement under D-72, and the classifier stays in shadow.
 
-## Verdict
+## Update 2026-10-15: repair 1 for P1.1-b (D-101, D-102)
+
+Owner decisions in session, 2026-10-15:
+
+| Decision | Text |
+|---|---|
+| D-101 | Repair 1 = real per-model windows: a cloud door builds the pack for the model's registry window, capped at 65,536 tokens (was a flat 8,192 MCP/SDK, 32,768 gateway). |
+| D-102 | Re-score the Sonnet stratum with a $0 equivalence proof (`PREREG-P11B-synthetic-R1`), with no model calls. |
+| D-103 | The four P2 PRs merged earlier under "G1 met" (#467, #484, #483, #485) stay merged (owner exception). They are not deployed. |
+| D-104 | No deploy yet. |
+| D-105 | The owner allows ollama.com and huggingface.co in the container's network policy, for the local stratum and P1.7-d. |
+
+How the repair was chosen:
+
+1. **Local-model summary, ruled out first.** A $0 check (no model) showed a local-model summary alone
+   could not pass. The summary worker shows a model only the first 600 characters of each tool
+   result (`context_summary._TOOL_RESULT_CAP`), so 0/10 early_tool tokens ever reach it. That leaves
+   at least 10/60 worse, or 0.167.
+2. **Real windows, chosen.** The owner chose real windows instead.
+3. **The proof.** At the new window (65,536 for Sonnet) every frozen item (≤ 40k tokens, the plan's
+   FULL cap) is sent whole. **120/120 door-item pairs are equivalent** (gateway and SDK): full mode,
+   no summary, the same messages as FULL in order, and the token present. The verdict is
+   **PASS by construction** (`p11b-synthetic-sonnet-r1.json`). A test shows the same items fail the
+   proof at the old 8,192 window.
+
+The original Sonnet FAIL below stays as the record of the pre-repair behaviour. It still describes
+sessions longer than ~52k tokens, where the pack falls back to the last 7 messages plus the
+extractive summary.
+
+**G1 is still NOT passed.** The P1.1-b local stratum (PACK vs HOOK6) and P1.7-d still need a local
+model (D-105).
+
+## Verdict (2026-10-14)
 
 **G1 is NOT passed.** Clause (3), context fidelity (P1.1-b), FAILs on the Sonnet stratum, and the
 local stratum and P1.7-d cannot run in this container. P2 merges stay blocked (D-76).

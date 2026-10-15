@@ -120,12 +120,14 @@ async def test_builds_one_mcp_pack_per_call(monkeypatch, rig):
     assert seen == [[{"role": "system", "content": "[Additional context]\nCTX-TEXT"}, REQUEST]]
     await _call(model="openai/gpt-4o")
     assert len(calls) == 2
-    assert calls[1] == (("REQ-TEXT",), {
-        "session_id": None, "project_root": None, "target_window": 8192,
+    assert calls[1] == (("REQ-TEXT",), {                 # D-101: registry 128k, capped at 64k
+        "session_id": None, "project_root": None, "target_window": 65_536,
         "door": "mcp", "project": "", "target_provider": "openai",
     })
     assert windows == ["x"]
     assert seen[1] == [REQUEST]
+    await _call(model="openai/synthetic-unlisted-model")   # unknown to the registry: the old 8k
+    assert calls[2][1]["target_window"] == 8192
 
 
 @pytest.mark.asyncio

@@ -289,18 +289,39 @@ def test_chat_completion_reaches_the_provider_as_packed_turns(monkeypatch, clien
 
 @pytest.mark.asyncio
 async def test_gateway_cloud_window_keeps_a_mid_size_conversation_whole(rig):
-    """Owner decision: the gateway's cloud window is 32k, so a ~12k-token
-    conversation is sent whole; the SDK door (8k) keeps only the last 7."""
+    """A model the registry does not list keeps the old defaults: the gateway's
+    cloud window is 32k, so a ~12k-token conversation is sent whole; the SDK door
+    (8k) keeps only the last 7."""
     convo = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"T{i} " + "w" * 2400}
              for i in range(20)]
-    await _call(model="openai/gpt-4o", conversation=convo)
-    await router._call_text("openai/gpt-4o", "REQ-TEXT", None, None, None, TaskType.QUERY,
+    unlisted = "openai/synthetic-unlisted-model"
+    await _call(model=unlisted, conversation=convo)
+    await router._call_text(unlisted, "REQ-TEXT", None, None, None, TaskType.QUERY,
                             conversation=convo, context_door="sdk")
     gateway, sdk_door = rig
     assert [m["content"][:4] for m in gateway[:-1]] == [m["content"][:4] for m in convo]
     # Last 7 are T13..T19; T13 is an assistant turn, dropped as a leading one.
     assert len(sdk_door) == 7 and sdk_door[0]["content"].startswith("T14 ")
     assert router._GATEWAY_NON_LOCAL_WINDOW == 32_768
+
+
+@pytest.mark.asyncio
+async def test_a_listed_cloud_model_gets_its_registry_window_on_both_doors(rig):
+    """D-101: openai/gpt-4o (registry 128k) gets min(128k, CLOUD_WINDOW_CAP) on the
+    gateway AND the SDK door, so the same ~12k-token conversation goes whole on both."""
+    from llm_router import context_pack, model_registry
+
+    assert router._pack_window("openai/gpt-4o", "sdk") == min(
+        model_registry.context_window("openai/gpt-4o"), context_pack.CLOUD_WINDOW_CAP) == 65_536
+    convo = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"T{i} " + "w" * 2400}
+             for i in range(20)]
+    await _call(model="openai/gpt-4o", conversation=convo)
+    await router._call_text("openai/gpt-4o", "REQ-TEXT", None, None, None, TaskType.QUERY,
+                            conversation=convo, context_door="sdk")
+    gateway, sdk_door = rig
+    whole = [m["content"][:4] for m in convo]
+    assert [m["content"][:4] for m in gateway[:-1]] == whole
+    assert [m["content"][:4] for m in sdk_door[:-1]] == whole
 
 
 # ── review fixes (CLI providers, redaction, budgets, context off, roles, cache key) ──

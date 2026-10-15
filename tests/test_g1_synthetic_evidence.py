@@ -277,3 +277,26 @@ def test_identity_readout_reports_replay_probe_envelopes_apart(g1, tmp_path):
     assert res["paths"]["proxy_probe_envelopes"]["n"] == 150
     assert res["paths"]["proxy_probe_envelopes"]["share"] == 0.0
     assert res["verdict_p110a"] == "PASS"
+
+
+# ── P1.1-b Sonnet stratum after repair 1 (PREREG-P11B-synthetic-R1) ───────────
+
+
+def test_equivalence_holds_at_the_real_window_and_fails_at_the_old_one(g1):
+    it = g1.items()[40]                                   # an early_tool item: the category PACK lost
+    with g1.scratch_env():
+        real = g1.equivalence_item(it, "gateway", 65_536)
+        old = g1.equivalence_item(it, "gateway", 8_192)  # the pre-D-101 window: pack mode
+    assert real["equivalent"] and all(real[k] for k in ("full_mode", "no_summary", "same_messages",
+                                                         "token_present"))
+    assert not old["equivalent"] and not old["full_mode"] and not old["same_messages"]
+    assert not old["token_present"]                      # the token the original stratum lost
+
+
+def test_equivalence_verdict_is_never_fail(g1, monkeypatch):
+    res = g1.run_equivalence()
+    assert (res["checked"], res["equivalent"], res["verdict"]) == (120, 120, "PASS by construction")
+    from llm_router import router
+
+    monkeypatch.setattr(router, "_pack_window", lambda model, door: 8_192)
+    assert g1.run_equivalence()["verdict"] == "NOT INFORMATIVE"

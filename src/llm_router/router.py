@@ -5482,7 +5482,8 @@ async def route_and_call(
         return response
 
 
-# Non-ollama target window for the pack; real per-model windows arrive with the registry.
+# Non-ollama target window for the pack when the registry does not know the model
+# (D-101: a known model gets min(registry window, context_pack.CLOUD_WINDOW_CAP)).
 _MCP_NON_LOCAL_WINDOW = 8192
 # Owner decision (P1.1 door 7): gateway clients (Cursor, Codex, any OpenAI/Anthropic
 # SDK) send their own whole conversation, so a cloud attempt keeps up to this much
@@ -5491,11 +5492,18 @@ _GATEWAY_NON_LOCAL_WINDOW = 32_768
 
 
 def _pack_window(model: str, door: str) -> int:
-    """The target window a context pack is built for: a local model's num_ctx,
-    else the gateway's or the MCP/SDK non-local window."""
+    """The target window a context pack is built for: a local model's num_ctx; a
+    cloud model's registry window capped at ``CLOUD_WINDOW_CAP`` (D-101); else the
+    gateway's or the MCP non-local default."""
     if model.startswith("ollama/"):
         from llm_router import local_models
         return local_models.num_ctx(model.split("/", 1)[1])
+    from llm_router.context_pack import CLOUD_WINDOW_CAP
+    from llm_router.model_registry import context_window
+
+    known = context_window(model)
+    if known:
+        return min(known, CLOUD_WINDOW_CAP)
     return _GATEWAY_NON_LOCAL_WINDOW if door == "gateway" else _MCP_NON_LOCAL_WINDOW
 
 

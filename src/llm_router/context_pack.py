@@ -58,6 +58,10 @@ from llm_router.token_budget import estimate_tokens
 DOORS = ("hook", "mcp", "proxy", "codex", "agent", "sdk", "gateway")
 
 RECENT_N = 7
+#: Owner decision D-101 (2026-10-15): a cloud model's pack window is its registry
+#: context window (``model_registry.context_window``), capped here. The whole
+#: conversation goes up to 0.8 x this (~52k tokens), then the pack.
+CLOUD_WINDOW_CAP = 65_536
 TOOL_CAP_CHARS = 4_000
 TOOL_KEEP_CHARS = 1_500
 TAIL_BYTES = 2 * 1024 * 1024

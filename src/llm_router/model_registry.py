@@ -352,3 +352,45 @@ _BUNDLED_DEFAULTS: tuple[ModelMetadata, ...] = (
         notes="Web-grounded; cost includes search backend",
     ),
 )
+
+
+# ── Context windows for the context pack (owner decision D-101) ─────────────
+
+#: Provider names a chain or a call may carry, mapped to the registry's id prefix.
+_WINDOW_PROVIDER_ALIASES = {"codex": "openai", "gemini_cli": "gemini", "google": "gemini"}
+_DEFAULT_REGISTRY: "ModelRegistry | None" = None
+
+
+def _default_registry() -> "ModelRegistry":
+    """``ModelRegistry.load_default()``, read once per process."""
+    global _DEFAULT_REGISTRY
+    if _DEFAULT_REGISTRY is None:
+        _DEFAULT_REGISTRY = ModelRegistry.load_default()
+    return _DEFAULT_REGISTRY
+
+
+def context_window(model: str | None) -> int | None:
+    """The registry's context window (tokens) for ``model`` ("provider/name"), or None.
+
+    An exact id wins; otherwise the longest registry id that ``model`` extends at a
+    ``-``, ``:`` or ``@`` boundary (``anthropic/claude-sonnet-5-5`` takes
+    ``anthropic/claude-sonnet-5``). A provider alias (``codex/``, ``gemini_cli/``) is
+    mapped first. Unknown models, a non-positive window and any registry error give
+    None: a caller keeps its own default rather than guessing a window."""
+    if not isinstance(model, str) or "/" not in model:
+        return None
+    provider, _, name = model.partition("/")
+    model = f"{_WINDOW_PROVIDER_ALIASES.get(provider, provider)}/{name}"
+    try:
+        models = _default_registry().models
+    except Exception:  # noqa: BLE001 - a broken registry file means "unknown"
+        return None
+    meta = models.get(model)
+    if meta is None:
+        best = ""
+        for mid in models:
+            if len(mid) > len(best) and model.startswith(mid) and model[len(mid):][:1] in ("-", ":", "@"):
+                best = mid
+        meta = models.get(best) if best else None
+    win = getattr(meta, "context_window", 0) if meta is not None else 0
+    return win if isinstance(win, int) and win > 0 else None
