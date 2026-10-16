@@ -679,6 +679,8 @@ percent ($16)**. OpenRouter only under section 3.1, shared $20 cap (D-128), per-
 | CD-21 | Voided judge | truth = the other two judges, split to the higher tier, labelled `TRUTH_FALLBACK` (D-135) |
 | CD-22 | `.env` detector | keys matching KEY\|TOKEN\|SECRET\|PASSWORD\|PASS, length >= 8, empty skipped (D-134/135) |
 | CD-23 | Real digest | capped at 400 characters |
+| CD-24 | PINS-RUN append-only hash chain (each entry carries the previous entry's sha) | accepted by the coordinator |
+| CD-25 | Single-turn `claude -p` | no `--max-turns` (not in 2.1.299); an empty `--tools ""` list means no tools, so the call is single-turn print |
 
 ## 15. Freeze record
 
@@ -701,7 +703,7 @@ snapshot is kept, and the sha256 is logged at each use); the Ollama version and 
 `qwen3.5:latest`, `qwen3-coder:30b`, `nomic-embed-text`; the bge-small snapshot dir name; the `claude` and `codex`
 CLI versions and the **recorded `--help` output** (sha256 and every flag line the runners use: for `claude -p`
 `--safe-mode`, `--settings`, `--tools`, `--strict-mcp-config`, `--no-session-persistence`, `--setting-sources`,
-`--output-format`, `--max-turns`; for `codex exec` `-s`, `-C`, `--skip-git-repo-check`, `--ephemeral`), so a flag
+`--output-format`, `--model`; for `codex exec` `-s`, `-C`, `--skip-git-repo-check`, `--ephemeral`), so a flag
 the installed build lacks **blocks the freeze**; the model ids used for judging and generating; and the **v1**
 generator files (templates, 12 x 5 mask, project list, intent phrases, meta patterns; spec appendices A-D, hashed
 as files). A STATIC pin that cannot be computed is a freeze blocker, not an omission.
