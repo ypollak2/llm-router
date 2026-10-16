@@ -1,6 +1,6 @@
 # PREREG-P20-requal: local re-qualification with the full pack (PLAN v16 P2.0 tasks 1-5)
 
-Status: **DRAFT r5, not frozen.** This file is frozen only when `PREREG-P20-requal.sha256` exists
+Status: **DRAFT r6, not frozen.** This file is frozen only when `PREREG-P20-requal.sha256` exists
 beside it, an independent freeze-guard review has passed (D-122 rule: an author-written sidecar is
 void), and `scripts/check_prereg.py` reports a match. Until then `scripts/p20_requal.py` refuses every
 subcommand that writes an item, calls a model or writes a result. The one pre-freeze mode is
@@ -10,7 +10,8 @@ selected, no model has been called and nothing has been scored under this file.
 
 r2 applied the freeze-guard review of r1 (NOT READY) and D-123 / D-123a; r3 applies the r2 review
 (NOT READY on two text fixes) and D-123b; r4 adds the pre-freeze NITs; r5 corrects the `rx` stratum
-and adds the runner disclosures and hook-free Claude calls (coordinator, 2026-10-16).
+and adds the runner disclosures and hook-free Claude calls (coordinator, 2026-10-16); r6 pins every rx
+source and fixes three text points from the r5 review.
 
 ## 0. Contradictions and settled points (read first)
 
@@ -85,11 +86,15 @@ within 3 points of Sonnet's on the same items?
 Items are prompt-derived. They live only in `$REQ = ~/.rsi/research/primary-plan/v16/requal/`
 (directory 0700, files 0600). A pre-freeze **build step** (read-only, run by a sub-agent, like
 D-107 c) writes one pool file per set plus `$REQ/pools/build_manifest.json`. The manifest holds the
-sha256 of every source the pools were built from: the [RX] packet file and results file, the
-`fixtures/edit-*` tree hash, `split.json`, `manifest.json`, `task_ids.json`, `census.py`, the
+sha256 of every source the pools were built from: the [RX] packet file
+(`p2b_work/packets.jsonl` = `RX_PACKETS_SHA256`), `p2b_work/grades_grader1.jsonl`, `corpus.jsonl`,
+`real_corpus.jsonl`, `results_p2b_qwen38.md` (explanatory only: no pool field is read from it, but
+its pin is kept), `fixtures/manifest.json`, the `fixtures/edit-*` tree hash, `split.json`, `manifest.json`, `task_ids.json`, `census.py`, the
 `proxy_calls.jsonl` copy, each transcript file, and the secret-guard pattern list. The
 repo-external sources are also pinned in the constants block, and `select` refuses if the manifest
-disagrees with them (D-123b). The fixtures tree hash is the sha256 of the lines `relpath \0 sha256(file) \n`,
+disagrees with **any** of them (D-123b). From `grades_grader1.jsonl` only `packet_id` (membership)
+is read; `kind` and `task_type` come from `packets.jsonl`; verdict and reason fields are never
+read. The fixtures tree hash is the sha256 of the lines `relpath \0 sha256(file) \n`,
 sorted by path, over every file under `fixtures/edit-*` (paths relative to `fixtures/`, skipping
 `__pycache__`, dot-directories and `*.pyc`; 80 files on 2026-10-16). The pool sha256 values, the per-stratum pool counts and the realised N per set are freeze
 fill-ins. The build step reads no `~/.llm-router` file except a copy of `proxy_calls.jsonl` (its
@@ -122,7 +127,9 @@ set). Excluded counts are printed by reason; no text is printed.
   vendor weights. The pack builder (P1.1) was evaluated on its own synthetic set (PREREG-P11B).
 * GT-500 held-out prompts were seen by **classifiers** (P1.6-g held-out, P1.7-d group G), never by
   an answering model's tuning. Their Opus-rubric tier labels are known in aggregate.
-* `rx` items have **known prior outcomes**: 4/37 (qwen3.8 at the time) vs 34/37 (Sonnet) [RX]. Code
+* `rx` items have **known prior outcomes** only in part: the [RX] 4/37 (qwen3.8 at the time) vs
+  34/37 (Sonnet) cover the 37 real [RX] items, of which 7 code items are excluded here, and none of
+  the 20 gen items. They are not this stratum's own result. Code
   `noncloud` tasks have known prior outcomes: qwen3-coder:30b 12/34 on Haiku-truth tasks [NC], and
   Codex gpt-5.5 25/55. Strata are printed separately.
 * Tech-op items come from the same ledger window that feeds the census inputs s_tech and f_fit
@@ -158,6 +165,8 @@ live-faithful, so Claude arms may see more context than local arms (§16).
   * with `ANTHROPIC_BASE_URL` removed from the child environment, so the call goes straight to
     Anthropic and not through the llm-router proxy on :8787, which could re-tier it or write ledger
     rows.
+  * with `ANTHROPIC_API_KEY` removed from the child environment too (subscription OAuth only); the
+    harness asserts that neither variable is present in a child environment.
   * `--bare` is not used: it reads only `ANTHROPIC_API_KEY`, not the subscription OAuth.
   * So the user's llm-router hooks and proxy cannot route, draft or alter a reference or judge
     call, or add organic rows. Children also carry `LLM_ROUTER_SESSION_KIND=research` (rule 8),
@@ -390,7 +399,10 @@ the task. Fitness never grants eligibility; it only gates onboarding recommendat
 * Prompt text, answers and judge replies exist only in these places:
   * `$REQ` (0600);
   * the HTTP body sent to `localhost:11434`;
-  * the **stdin** of the Claude children.
+  * the **stdin** of the Claude children;
+  * the code runner's work copies: rx_edit work dirs under `$REQ/code_runs/`, and the noncloud
+    worktrees and junit files under the noncloud research directory (tag `p20_<arm>`, outside
+    `$REQ`).
 * Child argv carries only the model id and flags. These are visible in `ps`; no text is.
 * `ledger.jsonl`, `use.log`, `result.json` and the repo measurement file hold ids, counts and
   hashes only. No subcommand prints text.
@@ -440,7 +452,9 @@ final item, no re-judge (beyond the §7 order sample) and no re-score happens wi
     and may shift the judge's reading of them. Its effect is not measured.
 14. **Reference arm without customisation.** Claude arms run in safe mode without hooks, CLAUDE.md
     or MCP. This is cleaner than a user's live Claude Code turn, which has those layers, so it is
-    a reference for the model and not for the user's configured Claude Code.
+    a reference for the model and not for the user's configured Claude Code. The Claude Code
+    default framing that `claude -p` adds is shared by the three Claude arms only; local arms get
+    the plain pack messages.
 
 ## Fill-ins at the freeze (the only values that may change between draft and freeze)
 
@@ -504,6 +518,9 @@ GT_MANIFEST_SHA256=453ad8bd93782dcf4457715a37f98c20d3d234f4eded95ce988885f5a464e
 NONCLOUD_TASK_IDS_SHA256=e493f84f5f5ddba32311e6f9903783982834aaff41cbbf4fcddeca4a7ee92638
 RX_PACKETS_SHA256=252a2d664b01b7c6bc7aeef1f2a2453aa57bcedef4d01cfa374dd9a854aa9ce2
 RX_RESULTS_P2B_SHA256=f25e5c7d30d18ca8debdcb3262229fd04059514d2dea292155e4983fc07b57ff
+RX_GRADES_GRADER1_SHA256=d1162590142798cc054df7696da3548a860a8a1537fcced7f18a17c812c8d79f
+RX_CORPUS_SHA256=083ea397dc8842e47c3ceca514d60dd4b6fbda11c603dcef6280c451ed9e599f
+RX_REAL_CORPUS_SHA256=0a7fd1f96c96e39362705b4ff3a1cf5537c43ade2c6684827102daa058736cf7
 RX_EDIT_FIXTURES_TREE_SHA256=7c191707ca5de5753b60a363fec6de637a563105c31aa656e75d5b252a48524f
 REPO_SHA=FILL-AT-FREEZE
 CLAUDE_SONNET_ID=FILL-AT-FREEZE
