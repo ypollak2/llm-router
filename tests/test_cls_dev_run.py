@@ -17,6 +17,7 @@ import http.server
 import json
 import os
 import random
+import re
 import sys
 import threading
 from pathlib import Path
@@ -334,7 +335,7 @@ def test_manifest_counts_drops_dedup_secret_and_no_text(env, capsys):
          "batch": "b7", "timestamp": D.utc_str(t)},
     ]
     legacy = write_jsonl(env.dev / "legacy_opus.jsonl", [{"text_sha": S.text_sha(extra[6]["text"]), "session_id": "sz", "truth": "opus"}])
-    man_p = build_manifest(env, real + extra, syn, legacy_opus=legacy)
+    man_p = build_manifest(env, real + extra, syn, legacy_labels="opus=%s" % legacy)
     out = capsys.readouterr()
     man = json.loads(man_p.read_text())
     ids = {x["item_id"] for x in man["items"]}
@@ -394,6 +395,22 @@ def test_manifest_secret_exclusion_by_each_detector(env):
     assert man["items"] == [] and man["counts"]["n_excluded_secret"] == len(items)
     det = man["counts"]["excluded_secret_by_detector"]
     assert {"engine", "scrubber", "prose", "denylist", "env_value", "entropy"} <= set(det)
+
+
+def test_manifest_joins_existing_labels_for_the_label_runner(env):
+    import cls_label_run as L
+    real, _, truth = make_data(n_real=20, n_groups=10, n_syn=0)
+    son = [{"text_sha": S.text_sha(it["text"]), "session_id": it["session_id"], "truth": truth[it["item_id"]]}
+           for it in real[:8]]
+    son.append({"text_sha": "f" * 64, "session_id": "nobody", "truth": "opus"})       # unmapped, counted
+    sp = write_jsonl(env.dev / "legacy_sonnet.jsonl", son)
+    man_p = build_manifest(env, real, [], legacy_labels="sonnet=%s" % sp)
+    man = json.loads(man_p.read_text())
+    assert man["counts"]["n_existing_labels"] == {"sonnet": 8} and man["counts"]["n_unmapped_labels"] == {"sonnet": 1}
+    items = {it["item_id"]: it for it in real}
+    need = L.select_ids("real_dev", "sonnet", items, L.manifest_truth(man_p))
+    assert sorted(need) == sorted(it["item_id"] for it in real[8:])           # existing Sonnet labels are reused
+    assert sorted(L.select_ids("real_dev", "gpt", items, L.manifest_truth(man_p))) == sorted(items)
 
 
 def test_length_counts_are_the_generator_input(env):
@@ -515,11 +532,11 @@ def test_weights_real_keeps_half_the_loss_and_m_multiplier(monkeypatch):
 def test_fit_heads_c2_via_fake_ollama_end_to_end(env, ollama, capsys):
     real, syn, truth = make_data(n_real=40, n_groups=20, n_syn=12)
     real[0]["digest"] = "d" * 1000
-    build_manifest(env, real, syn)
     lp, dirs = write_labels(env, real, syn, truth)
+    build_manifest(env, real, syn, legacy_labels="opus=%s" % lp)
     srv = ollama()
     extra = ["--manifest", env.out / "dev_manifest.json", "--items", env.dev / "items.jsonl", "--syn-items",
-             env.dev / "syn_items.jsonl", "--legacy-labels", "opus=%s" % lp, "--label-dir", dirs[0], "--label-dir", dirs[1],
+             env.dev / "syn_items.jsonl", "--label-dir", dirs[0], "--label-dir", dirs[1],
              "--candidate", "C2", "--ollama-url", srv.url]
     assert env.run("fit-heads", *extra) == 0
     rep = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
@@ -811,15 +828,15 @@ def test_reference_arms_kw1_engine_and_sentinel_never_sent(env, ollama):
     real, syn, truth = make_data(n_real=12, n_groups=6, n_syn=0)
     real.append({"item_id": "zsecret", "text": "deploy with " + SENTINEL, "session_id": "s1", "source_set": "ge3_ho",
                  "timestamp": "2026-09-09T00:00:00Z"})
-    man_p = build_manifest(env, real, [])
-    man = json.loads(man_p.read_text())
     lp, dirs = write_labels(env, real[:-1], [], truth)
+    man_p = build_manifest(env, real, [], legacy_labels="opus=%s" % lp)
+    man = json.loads(man_p.read_text())
     rt = write_rules_tier(env, man)
     content = json.dumps({"scope": 2, "ambiguity": 2, "repo_knowledge": 2, "reasoning_depth": 4, "execution_load": 2, "risk": 2,
                           "needs_tools": False, "tier": "opus", "task_type": "code", "qa": False, "needs_repo_context": False,
                           "local_eligible": False, "reason": "x"})
     srv = ollama(chat_content=content)
-    args = ["--manifest", man_p, "--items", env.dev / "items.jsonl", "--legacy-labels", "opus=%s" % lp, "--label-dir", dirs[0],
+    args = ["--manifest", man_p, "--items", env.dev / "items.jsonl", "--label-dir", dirs[0],
             "--rules-tier", rt, "--arm", "nimble", "--arm", "engine_alone", "--ollama-url", srv.url]
     env.mp.setattr(D, "verify_engine_pin", lambda doc, path: None)
     assert env.run("reference-arms", *args) == 0
@@ -830,6 +847,64 @@ def test_reference_arms_kw1_engine_and_sentinel_never_sent(env, ollama):
     assert srv.unloaded[-1] == "nimble:9b"
     sent = "".join(b for _m, _p, b in srv.bodies)
     assert SENTINEL not in sent and "zsecret" not in json.dumps(arms)
+
+
+FAKE_RUBRIC = """
+RUBRIC = "RUBRIC fake text: rate each item"
+ITEM_TEMPLATE = "### ITEM id={id}\\n{context}\\n{prompt}\\n### END ITEM id={id}"
+BATCH_TAIL = "ANSWER labels for all items"
+SINGLE_TAIL = "ANSWER one label as json"
+DIMS = ["scope", "risk"]
+TIERS = ["haiku", "sonnet", "opus"]
+PLANTED = [{"id": i, "expect": e, "context": "c", "prompt": "p"} for i, e in (
+    ("cal-h1", "haiku"), ("cal-h2", "haiku"), ("cal-s1", "sonnet"), ("cal-s2", "sonnet"), ("cal-o1", "opus"), ("cal-o2", "opus"))]
+"""
+
+FAKE_GT500 = """
+import importlib.util, json
+RUBRIC_MD5 = "__MD5__"
+def load_rubric(path):
+    spec = importlib.util.spec_from_file_location("fake_rubric_b0", str(path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+def prompt_view(text):
+    return "VIEW[" + text + "]VIEW"
+def extract_json(text):
+    return json.loads(text.strip())
+def valid_label(lab, rub):
+    return lab.get("tier") in rub.TIERS and all(int(lab[k]) in range(1, 6) for k in rub.DIMS)
+"""
+
+
+def test_reference_arms_kb1_through_the_pinned_rubric_adapter(env, ollama):
+    rub = env.dev / "rubric.py"
+    rub.write_text(FAKE_RUBRIC)
+    md5 = hashlib.md5(rub.read_bytes()).hexdigest()
+    gt = env.dev / "gt500.py"
+    gt.write_text(FAKE_GT500.replace("__MD5__", md5))
+    env.mp.setattr(P, "RUBRIC_MD5", md5)
+    env.mp.setattr(P, "GT500_SHA256", S.sha256_file(gt))
+    env.pins_static.write_text(json.dumps({"params": {"rubric_py": str(rub), "gt500_py": str(gt)},
+                                           "pins": {"rubric": {"md5": md5, "sha256": S.sha256_file(rub)},
+                                                    "gt500": {"sha256": S.sha256_file(gt)}}}))
+    real, _, truth = make_data(n_real=8, n_groups=4, n_syn=0)
+    lp, dirs = write_labels(env, real, [], truth)
+    man_p = build_manifest(env, real, [], legacy_labels="opus=%s" % lp)
+    rt = write_rules_tier(env, json.loads(man_p.read_text()))
+    srv = ollama(chat_content=json.dumps({"id": "L001", "scope": 2, "risk": 4, "tier": "opus"}))
+    args = ["--manifest", man_p, "--items", env.dev / "items.jsonl", "--label-dir", dirs[0], "--rules-tier", rt,
+            "--arm", "qwen3coder", "--ollama-url", srv.url]
+    assert env.run("reference-arms", *args) == 0
+    arms = json.loads((env.out / "reference_arms.json").read_text())["arms"]
+    assert set(arms["qwen3coder"].values()) == {"opus"} and srv.unloaded[-1] == "qwen3-coder:30b"
+    sent = [json.loads(b)["messages"][0]["content"] for _m, p, b in srv.bodies if p == "/api/chat"]
+    assert len(sent) == 8 and all(c.startswith("RUBRIC fake text") and "VIEW[" in c and c.endswith("ANSWER one label as json")
+                                  for c in sent)
+    other = env.dev / "other_rubric.py"
+    other.write_text(FAKE_RUBRIC)
+    (env.out / "arm_part_qwen3coder.jsonl").unlink()
+    assert env.run("reference-arms", *args, "--prompt-module", other) == S.EXIT_PINS   # not the pinned file
 
 
 # ---------------------------------------------------------------------------------------------
@@ -851,13 +926,13 @@ def _reference_arms(man, truth, seed=5):
 
 def _assemble_setup(env, n_real, n_groups, n_syn, n_calls, *, voided_real=(), voided_syn=()):
     real, syn, truth = make_data(n_real=n_real, n_groups=n_groups, n_syn=n_syn, n_calls=n_calls, words=(8, 20, 30))
-    man_p = build_manifest(env, real, syn)
-    man = json.loads(man_p.read_text())
     lp, dirs = write_labels(env, real, syn, truth, voided_real=voided_real, voided_syn=voided_syn)
+    man_p = build_manifest(env, real, syn, legacy_labels="opus=%s" % lp)
+    man = json.loads(man_p.read_text())
     ra = env.dev / "reference_arms.json"
     S.write_private(ra, json.dumps(_reference_arms(man, truth)))
     common = ["--manifest", man_p, "--items", env.dev / "items.jsonl", "--syn-items", env.dev / "syn_items.jsonl",
-              "--legacy-labels", "opus=%s" % lp, "--label-dir", dirs[0], "--label-dir", dirs[1]]
+              "--label-dir", dirs[0], "--label-dir", dirs[1]]
     return man, common, ra
 
 
@@ -1236,7 +1311,8 @@ def _m_can_start_fixed10(now, longest_unit_s):
 
 def _m_c4_argmax(resp):
     content = (resp.get("message") or {}).get("content") or ""
-    t = D.parse_hard_verdict(content)
+    m = re.search(r'"tier"\s*:\s*"(haiku|sonnet|opus)"', content)
+    t = m.group(1) if m else None
     return [0.0 if x == t else -30.0 for x in D.TIERS] if t else None
 
 

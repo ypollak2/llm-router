@@ -38,7 +38,7 @@ OLLAMA_MODELS = {"C2": "nomic-embed-text", "C4": "qwen3.5:latest", D.ARM_KW1: "n
 EMBED_PREFIX = "classification: "
 UNIT_N = 25
 CLS_EVAL_TIMEOUT_S = 6 * 3600
-PATH_ARGS = ("items", "syn_items", "manifest", "legacy_opus", "reference_arms", "rules_tier", "prompt_module", "results",
+PATH_ARGS = ("items", "syn_items", "manifest", "reference_arms", "rules_tier", "prompt_module", "results",
              "trigger", "download_log", "cls_cache", "run_a", "run_b", "fit", "resemblance_label", "model_artifact",
              "result", "selftest_result", "denylist", "env_file", "out_dir", "pins_run", "pins_static")
 
@@ -195,14 +195,18 @@ def truth_rules(a) -> dict:
 
 
 def load_truths(a, items: list[dict], rules: dict) -> tuple[dict, dict]:
+    run = D.load_run_labels(getattr(a, "label_dir", None) or [])
+    return D.collect_truths(items, run, rules["voided"])
+
+
+def load_legacy(a) -> dict:
     legacy = {}
     for pair in getattr(a, "legacy_labels", None) or []:
-        judge, path = pair.split("=", 1)
-        if judge not in D.JUDGES:
-            raise S.CLSExit(S.EXIT_REFUSE, "--legacy-labels wants JUDGE=FILE")
+        judge, _sep, path = pair.partition("=")
+        if judge not in ("opus", "sonnet") or not path:
+            raise S.CLSExit(S.EXIT_REFUSE, "--legacy-labels wants opus=FILE or sonnet=FILE")
         legacy[judge] = S.read_jsonl(path)
-    run = D.load_run_labels(getattr(a, "label_dir", None) or [])
-    return D.collect_truths(items, legacy, run, rules["voided"])
+    return legacy
 
 
 def text_map(a) -> dict:
@@ -241,13 +245,13 @@ def cmd_manifest(a, deps) -> int:
         ctx = scrub_context(a)
         real = read_items(a, a.items)
         syn = read_items(a, a.syn_items) if a.syn_items else []
-        legacy_opus = S.read_jsonl(a.legacy_opus) if a.legacy_opus else []
+        legacy = load_legacy(a)
         den, env = a.denylist, a.env_file
         den_info = {"path": str(den) if den else None, "sha256": S.env_sha_at_use(den), "entries": len(S.load_denylist(den))}
         env_sha = S.env_sha_at_use(env)
         env_info = {"path": str(env) if env else None, "sha256": env_sha, "qualifying_values": S.load_env_values(env)[1]}
         manifest, length_counts = D.build_manifest(real, syn, ctx=ctx, t0=D.parse_utc(a.t0), cutoff=D.parse_utc(a.cutoff),
-                                                   legacy_opus=legacy_opus, env_info=env_info, denylist_info=den_info)
+                                                   legacy=legacy, env_info=env_info, denylist_info=den_info)
         kept = {x["text_sha"] for x in manifest["items"] if x["kind"] == "real"}
         shingles = {"text_sha": sorted(kept),
                     "sets": [sorted(S.shingle_hashes(it["text"])) for it in real if S.text_sha(it["text"]) in kept]}
@@ -541,15 +545,31 @@ def cmd_download_modernbert(a, deps) -> int:
 # reference arms
 # ---------------------------------------------------------------------------------------------
 
-def kb1_payload(prompt_module, model: str, context: str, prompt: str) -> dict:
-    """ADAPTER (the only place B0 touches the judge-prompt contract of build B-L): the K-B1 rubric request
-    built by cls_label_run from the pinned rubric module. Sent to the LOCAL Ollama only."""
+KB1_OPAQUE = "L001"
+
+
+def kb1_mods(a):
+    """ADAPTER, part 1 (B0 touches the B-L judge-prompt contract only here and in kb1_payload/kb1_verdict):
+    the pinned rubric.py + gt500.py through cls_label_run.load_judge_mods (md5/sha checked; exit 9 otherwise)."""
     import cls_label_run as L
-    mod = L.load_prompt_module(prompt_module)
-    body = L.build_payload(mod, [{"opaque": "L001", "ctx": context or "", "prompt": prompt}], single=True)
+    return L.load_judge_mods(a.pins_static, a.prompt_module)
+
+
+def kb1_payload(mods, model: str, context: str, prompt: str) -> dict:
+    """ADAPTER, part 2: the K-B1 rubric request = cls_label_run.build_payload for one item (rubric first,
+    gt.prompt_view form, SINGLE_TAIL verbatim). Sent to the LOCAL Ollama only."""
+    import cls_label_run as L
+    body = L.build_payload(mods, [{"opaque": KB1_OPAQUE, "ctx": context or "", "prompt": prompt}], single=True)
     return {"model": model, "stream": False, "think": False, "keep_alive": "30m",
             "messages": [{"role": "user", "content": body.decode("utf-8")}],
             "options": {"temperature": 0, "num_predict": 400, "num_ctx": 8192}}
+
+
+def kb1_verdict(mods, content) -> str | None:
+    """ADAPTER, part 3: the answer through cls_label_run.parse_labels (gt.extract_json + gt.valid_label)."""
+    import cls_label_run as L
+    lab = L.parse_labels(mods, content if isinstance(content, str) else "", [KB1_OPAQUE], single=True).get(KB1_OPAQUE)
+    return lab["tier"] if lab else None
 
 
 def kw1_payload(model: str, context: str, prompt: str) -> dict:
@@ -557,15 +577,13 @@ def kw1_payload(model: str, context: str, prompt: str) -> dict:
     return lc._payload(model, lc.Assembled(context or "(no context)", prompt))
 
 
-def hard_verdict(arm: str, content) -> str | None:
-    if arm == D.ARM_KW1:
-        from llm_router import local_classifier as lc
-        v = lc.parse_verdict(content if isinstance(content, str) else "")
-        return ("haiku" if v.tier == "local" else v.tier) if v.ok else None
-    return D.parse_hard_verdict(content)
+def kw1_verdict(content) -> str | None:
+    from llm_router import local_classifier as lc
+    v = lc.parse_verdict(content if isinstance(content, str) else "")
+    return ("haiku" if v.tier == "local" else v.tier) if v.ok else None
 
 
-def run_hard_arm(a, deps, ollama, arm, ids, texts, counts) -> dict:
+def run_hard_arm(a, deps, ollama, arm, ids, texts, counts, mods=None) -> dict:
     model = OLLAMA_MODELS[arm]
     part = out_path(a, "arm_part_%s.jsonl" % arm)
     done = {r["item_id"] for r in S.read_jsonl(part)}
@@ -576,9 +594,10 @@ def run_hard_arm(a, deps, ollama, arm, ids, texts, counts) -> dict:
         for i in unit:
             text, digest = texts[i]
             canon = deps.canonical(text)
-            payload = kw1_payload(model, digest, canon) if arm == D.ARM_KW1 else kb1_payload(a.prompt_module, model, digest, canon)
+            payload = kw1_payload(model, digest, canon) if arm == D.ARM_KW1 else kb1_payload(mods, model, digest, canon)
             try:
-                tier = hard_verdict(arm, ollama.chat(payload).get("message", {}).get("content"))
+                content = ollama.chat(payload).get("message", {}).get("content")
+                tier = kw1_verdict(content) if arm == D.ARM_KW1 else kb1_verdict(mods, content)
             except D.OllamaError:
                 tier = None
             S.append_jsonl(part, {"item_id": i, "tier": tier})
@@ -621,11 +640,10 @@ def cmd_reference_arms(a, deps) -> int:
             D.verify_engine_pin(read_json(a.pins_static), a.engine_module)
             arms[D.ARM_ENGINE] = {i: deps.engine_tier(texts[i][0]) if i in texts else None for i in ids}
         heavy = [x for x in (D.ARM_KW1, D.ARM_KB1) if x in want]
-        if D.ARM_KB1 in heavy and not a.prompt_module:
-            raise S.CLSExit(S.EXIT_REFUSE, "K-B1 needs --prompt-module (the pinned rubric)")
+        mods = kb1_mods(a) if D.ARM_KB1 in heavy else None
         ollama = get_ollama(a, deps) if heavy else None
         for arm in heavy:  # one heavy model at a time
-            got = run_hard_arm(a, deps, ollama, arm, ids, texts, counts)
+            got = run_hard_arm(a, deps, ollama, arm, ids, texts, counts, mods)
             if got:
                 arms[arm] = got
             else:
@@ -1035,13 +1053,13 @@ def build_parser():
         p.add_argument("--items")
         p.add_argument("--syn-items")
         p.add_argument("--label-dir", action="append", help="a cls_label_run run dir (real_dev or dev_syn)")
-        p.add_argument("--legacy-labels", action="append", metavar="JUDGE=FILE")
         return p
 
     p = base("manifest")
     p.add_argument("--items", required=True)
     p.add_argument("--syn-items")
-    p.add_argument("--legacy-opus", help="existing Opus labels, only for the excluded-by-Opus-tier count")
+    p.add_argument("--legacy-labels", action="append", metavar="JUDGE=FILE",
+                   help="existing Opus/Sonnet labels {text_sha, session_id, truth}, joined into the manifest")
     p.add_argument("--t0", default=D.T0_DEFAULT)
     p.add_argument("--cutoff", default=D.CUTOFF_DEFAULT)
     p.add_argument("--run-entry", default="dev_manifest", help="PINS-RUN entry name (unique)")
@@ -1066,7 +1084,7 @@ def build_parser():
     p.add_argument("--download-log", required=True)
     p = with_inputs("reference-arms")
     p.add_argument("--rules-tier", required=True)
-    p.add_argument("--prompt-module", help="the pinned rubric module (K-B1)")
+    p.add_argument("--prompt-module", help="optional: must name the rubric.py pinned in PINS-STATIC (K-B1)")
     p.add_argument("--arm", action="append", choices=(D.ARM_KW1, D.ARM_KB1, D.ARM_ENGINE))
     p.add_argument("--engine-module", default=str(S.REPO / "src" / "llm_router" / "engine.py"))
     p = with_inputs("latency")

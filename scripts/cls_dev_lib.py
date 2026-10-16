@@ -457,49 +457,57 @@ def set_key(item: dict) -> str:
     return SYN_SOURCE if item.get("kind") == "syn" else "real"
 
 
-def collect_truths(items: list[dict], legacy: dict, run_labels: dict, voided: dict) -> tuple[dict, dict]:
-    """{item_id: {judge: tier}} from legacy labels ({text_sha, session_id, truth}, joined to item ids by
-    (session_id, text_sha) then ("", text_sha) through the manifest map) and new label-run rows
-    ({item_id, judge, tier, ...}). A voided judge's labels for a set are discarded. Unmapped legacy labels
-    are counted, never guessed. Legacy labels win over a new label of the same judge (reused, not re-bought)."""
-    by_key: dict = {}
-    for it in items:
-        sid = "" if str(it["group"]).startswith(("unk:", "call:")) else it["group"]
-        by_key.setdefault((sid, it["text_sha"]), it["item_id"])
-        by_key.setdefault(("", it["text_sha"]), it["item_id"])
+def legacy_index(rows: list[dict]) -> dict:
+    """(session_id, text_sha) -> tier for existing labels ({text_sha, session_id, truth})."""
+    idx = {}
+    for r in rows:
+        t = r.get("truth") or r.get("tier")
+        if t in TIERS and r.get("text_sha"):
+            idx[(r.get("session_id") or "", r["text_sha"])] = t
+    return idx
+
+
+def join_legacy(idx: dict, session_id: str, sha: str, used: set):
+    """shadow_eval.load_labels join: (session_id, text_sha), then ("", text_sha); never guessed."""
+    for key in ((session_id or "", sha), ("", sha)):
+        if key in idx:
+            used.add(key)
+            return idx[key]
+    return None
+
+
+def collect_truths(items: list[dict], run_labels: dict, voided: dict) -> tuple[dict, dict]:
+    """{item_id: {judge: tier}}: the existing labels the manifest joined (item["truth"]) plus new label-run
+    rows ({item_id, judge, tier, ...}). A voided judge's labels for a set are discarded. An existing label
+    wins over a new label of the same judge (reused, not re-bought); overlaps and unknown ids are counted."""
     kind_of = {it["item_id"]: set_key(it) for it in items}
-    out = {it["item_id"]: {j: None for j in JUDGES} for it in items}
-    counts = {"n_unmapped_labels": {}, "n_label_overlap": {}, "n_labels": {}, "n_voided_labels_dropped": {}}
+    out, counts = {}, {"n_unknown_item_labels": {}, "n_label_overlap": {}, "n_labels": {}, "n_voided_labels_dropped": {}}
+    dropped = {j: 0 for j in JUDGES}
+    for it in items:
+        t = {j: (it.get("truth") or {}).get(j) for j in JUDGES}
+        for j in JUDGES:
+            if t[j] is not None and j in voided.get(kind_of[it["item_id"]], []):
+                t[j] = None
+                dropped[j] += 1
+        out[it["item_id"]] = {j: (v if v in TIERS else None) for j, v in t.items()}
     for j in JUDGES:
-        unmapped = overlap = n = dropped = 0
-        for r in legacy.get(j, []):
-            iid = by_key.get((r.get("session_id") or "", r.get("text_sha"))) or by_key.get(("", r.get("text_sha")))
-            t = r.get("truth") or r.get("tier")
-            if iid is None or t not in TIERS:
-                unmapped += 1
-                continue
-            if j in voided.get(kind_of[iid], []):
-                dropped += 1
-                continue
-            out[iid][j] = t
-            n += 1
+        unknown = overlap = 0
         for r in run_labels.get(j, []):
             iid, t = r.get("item_id"), r.get("tier")
             if iid not in out or t not in TIERS:
-                unmapped += 1
+                unknown += 1
                 continue
             if j in voided.get(kind_of[iid], []):
-                dropped += 1
+                dropped[j] += 1
                 continue
             if out[iid][j] is not None:
                 overlap += 1
                 continue
             out[iid][j] = t
-            n += 1
-        counts["n_unmapped_labels"][j] = unmapped
+        counts["n_unknown_item_labels"][j] = unknown
         counts["n_label_overlap"][j] = overlap
-        counts["n_labels"][j] = n
-        counts["n_voided_labels_dropped"][j] = dropped
+        counts["n_labels"][j] = sum(1 for v in out.values() if v[j] is not None)
+        counts["n_voided_labels_dropped"][j] = dropped[j]
     return out, counts
 
 
@@ -589,16 +597,17 @@ def _tally(values) -> dict:
     return dict(sorted(out.items()))
 
 
-def build_manifest(real_items, syn_items, *, ctx, t0, cutoff, legacy_opus=None, env_info=None,
+def build_manifest(real_items, syn_items, *, ctx, t0, cutoff, legacy=None, env_info=None,
                    denylist_info=None) -> tuple[dict, dict]:
-    """PREREG 1.1-1.3 (r3 order: counts and ids, no labels). Returns (manifest, length_counts). Item text is
-    read here and never leaves: the manifest holds ids, groups, bands, folds, text_sha and counts."""
+    """PREREG 1.1-1.3 (r3 order: before any NEW label). Returns (manifest, length_counts). Item text is read
+    here and never leaves: the manifest holds ids, groups, bands, folds, text_sha, counts and the EXISTING
+    Opus/Sonnet labels joined through the text_sha map (item["truth"], tiers only; the B-L label runner reads
+    it to skip items that already carry a Sonnet label). Unmapped existing labels are counted."""
     counts = {"n_input_real": len(real_items), "n_after_T0_dropped": 0, "n_after_cutoff_dropped": 0,
               "n_no_timestamp_dropped": 0, "n_dropped_dup": 0, "n_excluded_secret": 0,
               "excluded_secret_by_detector": {}, "excluded_secret_by_opus_tier": {}}
-    opus_idx = {}
-    for r in legacy_opus or []:
-        opus_idx[(r.get("session_id") or "", r.get("text_sha"))] = r.get("truth") or r.get("tier")
+    leg_idx = {j: legacy_index(rows) for j, rows in (legacy or {}).items() if j in JUDGES}
+    leg_used = {j: set() for j in leg_idx}
     recs = []
     for it in real_items:
         ts = parse_utc(it.get("timestamp"))
@@ -627,9 +636,7 @@ def build_manifest(real_items, syn_items, *, ctx, t0, cutoff, legacy_opus=None, 
             counts["n_excluded_secret"] += 1
             for h in hits:
                 counts["excluded_secret_by_detector"][h] = counts["excluded_secret_by_detector"].get(h, 0) + 1
-            sid = it.get("session_id") or ""
-            tier = opus_idx.get((sid, sha)) or opus_idx.get(("", sha))
-            tier = tier if tier in TIERS else "none"
+            tier = join_legacy(leg_idx.get("opus", {}), it.get("session_id") or "", sha, set()) or "none"
             counts["excluded_secret_by_opus_tier"][tier] = counts["excluded_secret_by_opus_tier"].get(tier, 0) + 1
             continue
         group = it.get("group") or it.get("session_id") or ""
@@ -637,10 +644,12 @@ def build_manifest(real_items, syn_items, *, ctx, t0, cutoff, legacy_opus=None, 
             group = "unk:%s:%s" % (it.get("source_set", "real"), it.get("batch") or "0")
             n_unk += 1
         req = it.get("requested")
+        truth = {j: join_legacy(leg_idx[j], it.get("session_id") or "", sha, leg_used[j]) if j in leg_idx else None
+                 for j in JUDGES}
         real_out.append({"item_id": it["item_id"], "kind": "real", "source_set": it.get("source_set", "real"),
                          "group": str(group), "band": length_band(it["text"]),
                          "requested": req if req in TIERS else None, "text_sha": sha, "has_digest": bool(dig),
-                         "generator": None, "task_type": None, "tool_need": None})
+                         "generator": None, "task_type": None, "tool_need": None, "truth": truth})
         real_sh.append(sh)
     real_sha = {x["text_sha"] for x in real_out}
     syn_out = []
@@ -668,7 +677,8 @@ def build_manifest(real_items, syn_items, *, ctx, t0, cutoff, legacy_opus=None, 
         syn_out.append({"item_id": it["item_id"], "kind": "syn", "source_set": SYN_SOURCE,
                         "group": "call:%s" % (it.get("group") or it["item_id"]), "band": length_band(text),
                         "requested": None, "text_sha": sha, "has_digest": bool(dig),
-                        "generator": it.get("generator"), "task_type": cell.get("task"), "tool_need": cell.get("tool")})
+                        "generator": it.get("generator"), "task_type": cell.get("task"), "tool_need": cell.get("tool"),
+                        "truth": {j: None for j in JUDGES}})
     counts.update(sc)
     counts["n_syn_dev"] = len(syn_out)
     counts["syn_leak_share"] = round(sc["n_syn_dropped_dup_vs_real"] / len(syn_items), 6) if syn_items else 0.0
@@ -687,6 +697,9 @@ def build_manifest(real_items, syn_items, *, ctx, t0, cutoff, legacy_opus=None, 
         "per_source_n": _tally(x["source_set"] for x in real_out),
         "per_length_band_n": _tally(x["band"] for x in real_out),
         "fold_sizes": _tally(x["fold"] for x in all_items),
+        "n_existing_labels": {j: sum(1 for x in real_out if x["truth"][j]) for j in leg_idx},
+        "n_unmapped_labels": {j: len(leg_idx[j]) - len(leg_used[j]) for j in leg_idx},
+        "per_judge_existing_tier_n": {j: _tally(x["truth"][j] for x in real_out if x["truth"][j]) for j in leg_idx},
     })
     counts["validity_floor"] = validity_floor(counts)
     manifest = {"manifest_version": 1, "t0": utc_str(t0), "cutoff": utc_str(cutoff), "counts": counts,
@@ -1260,27 +1273,6 @@ def engine_alone_tier(text: str) -> str | None:  # pragma: no cover (loads the e
     except Exception:  # noqa: BLE001 (an engine error is a None prediction, counted)
         return None
     return "haiku" if d.tier == "local" else (d.tier if d.tier in TIERS else None)
-
-
-_TIER_FIELD_RE = re.compile(r'"tier"\s*:\s*"(haiku|sonnet|opus)"', re.IGNORECASE)
-
-
-def parse_hard_verdict(content) -> str | None:
-    """A tier from a model's JSON answer ({"tier": ...} anywhere) or a bare tier word; else None."""
-    if not isinstance(content, str):
-        return None
-    try:
-        obj = json.loads(content)
-        t = obj.get("tier") if isinstance(obj, dict) else None
-        if isinstance(t, str) and t.lower() in TIERS:
-            return t.lower()
-    except ValueError:
-        pass
-    m = _TIER_FIELD_RE.search(content)
-    if m:
-        return m.group(1).lower()
-    m = re.fullmatch(r"\s*(haiku|sonnet|opus)\s*", content, re.IGNORECASE)
-    return m.group(1).lower() if m else None
 
 
 # ---------------------------------------------------------------------------------------------
