@@ -30,6 +30,10 @@ TEST-SYN under a later prereg (`PREREG-CLS-TEST`)?
 never evidence for authority. A survivor is only a finalist. P1.6-g is not cited as engine evidence (PASS by
 D-100 only; measured FAIL under D-71).
 
+The runner for everything in sections 1.3, 6, 7 (candidate fitting and scoring inputs), 9 and 10 is build **B0**
+(`scripts/cls_dev_run.py`, brief `brief-cls-b0.txt`); the scorer and threshold fit are B1 (`scripts/cls_eval.py`).
+The frozen prereg pins both scripts' sha256.
+
 ## 1. DEV data inventory
 
 All sets below are DEV only (D-130 a). Nothing here is test evidence, and nothing here may enter TEST.
@@ -408,14 +412,18 @@ below 2.0 at start and the block's mean below 1.5, no sample at or above 3.0 **[
 are coordinator defaults, to be checked against what P2.0 uses); `ollama ps` shows no model other than the
 candidate under test; no other `codex`, `claude -p`, `pytest`, `ruff` or build process owned by this user is
 running (counted by `ps -axo comm`, observed only; never `pkill` by pattern); the machine is on AC power and
-`pmset -g therm` shows no throttling. The readings are written into the log. An invalid block is discarded,
+`pmset -g therm` shows no throttling. In addition the P2.0 L13 gate is applied unchanged, since both runs share this machine:
+three readings 10 s apart, each with free memory >= 40 percent (`memory_pressure -Q`) and load1 < 4.0, and no
+foreign model resident (`/api/ps` lists none besides the candidate's own); the stricter CLS load limits above
+still apply. The harness never unloads a foreign model; failure parks the run. The readings are written into the log. An invalid block is discarded,
 logged as `invalid:<reason>`, and re-run; the number of discarded blocks is reported.
 
 ### 10.3 Exclusion window
 
 No timed block and no heavy-model run (C3 training, C4, K-W1, K-B1, any model above 4 GB resident) **starts
-or is running** between **00:00 and 07:00** (**UTC [CD]**: the plan stamps every log in UTC; the P2.0
-prereg's clock is to be confirmed). A run that reaches 00:00 is stopped by its own recorded PID (never by
+or is running** between **00:00 and 07:00** (**local machine time**, the same clock as the P2.0 L13 night window in
+`PREREG-P20-requal.md` section 13, `NIGHT_WINDOW=00:00-07:00` "local time", read on branch feat/p20-requal;
+log stamps stay UTC, only the window test uses local time). A run that reaches 00:00 is stopped by its own recorded PID (never by
 pattern), logged, and resumed after 07:00 from its resume state. Embedding arms C1 and C2 with the model
 resident under 1 GB, and CPU-only work on the manifest, are not heavy-model runs but still obey the
 quiet-machine rule when timed. This is a hard exclusion of the P2.0 requal windows (L13: one heavy slot).
@@ -482,7 +490,7 @@ report to the coordinator at 80 percent of any cap. No Opus call is part of this
 | CD-9 | Haiku precision floor | >= 0.70 with >= 10 haiku routes, else no haiku routing |
 | CD-10 | DEV validity floor | n_real >= 300, n_truth_opus >= 40, largest session <= 20 percent |
 | CD-11 | Quiet thresholds | load1 < 2.0 at start, block mean < 1.5, any sample >= 3.0 invalid |
-| CD-12 | Clock of the exclusion | UTC, 00:00-07:00 |
+| CD-12 | Clock of the exclusion | coordinator override: same clock as P2.0 L13, local time 00:00-07:00 |
 | CD-13 | Finalist diversity | prefer one LLM/logprob and one small learned head |
 | CD-14 | Arm B scoring on TEST | winning arm only per finalist |
 | CD-15 | Latency kill uses | pooled p95 over 3 blocks |
