@@ -76,7 +76,7 @@ class World:
 
     def passed(self, session: str, **kw) -> str:
         mid = self.call(session, **kw)
-        self.row(mid, session, tier_reason="policy")
+        self.row(mid, session, tier_reason="policy", tier_switch=True)
         return mid
 
     def flush(self) -> None:
@@ -546,7 +546,7 @@ def test_unbuilt_prereg_items_are_listed_in_every_result(w, tmp_path, capsys):
 
 
 def test_routed_share_beside_coverage_all_routed(w, tmp_path, capsys):
-    big(w)  # tier_reason "policy" on every row
+    big(w)  # tier_reason "policy" with a real switch on every row
     rc, res, cap = w.result(tmp_path, capsys)
     rs = res["routed_share"]
     assert (rs["passed"], rs["routed"], rs["routed_share"]) == (240, 240, 1.0)
@@ -563,12 +563,13 @@ def test_a_window_of_routing_off_rows_passes_coverage_but_is_not_evidence_for_rr
     rs = res["routed_share"]
     assert res["coverage"] == 1.0 and rc == 0, "decision-point coverage counts a recorded reason"
     assert (rs["off"], rs["routed"], rs["off_share"]) == (240, 0, 1.0)
-    assert rs["not_evidence_for_RRTE2"] is True and "routing_off/tiers_off" in rs["not_evidence_reason"]
+    assert rs["not_evidence_for_RRTE2"] is True and "off 240" in rs["not_evidence_reason"]
     assert "NOT EVIDENCE FOR R-RTE-2" in cap.out
 
 
 def test_routed_share_kinds_and_the_90_percent_line(w, tmp_path, capsys):
-    rows = ([dict(decision="served")] * 2 + [dict(tier_reason="policy")] * 3 + [dict(tier_reason="advise")] * 2
+    rows = ([dict(decision="served")] * 2 + [dict(tier_reason="policy", tier_switch=True)] * 3
+            + [dict(tier_reason="advise")] * 2
             + [dict(reason="routing_off")] * 2 + [dict(reason="tiers_off")] + [dict(reason="not_eligible")] * 2)
     for i, fields in enumerate(rows):
         m = w.call("s", offset_s=i)
@@ -577,16 +578,12 @@ def test_routed_share_kinds_and_the_90_percent_line(w, tmp_path, capsys):
     rs = res["routed_share"]
     assert (rs["routed"], rs["advise"], rs["off"], rs["other_reason"]) == (5, 2, 3, 2)
     assert rs["routed_share"] == round(5 / 12, 4) and rs["not_evidence_for_RRTE2"] is False
-    for i in range(60):
-        m = w.call("s", offset_s=100 + i)
-        w.row(m, "s", reason="routing_off")
+    _rows_of(w, [dict(reason="routing_off")] * 57, start=100)  # (5+57)/(12+57) = 89.9% unrouted
     _, res, _ = w.result(tmp_path, capsys, "--cap", "0")
-    assert res["routed_share"]["off_share"] == round(63 / 72, 4) and res["routed_share"]["not_evidence_for_RRTE2"] is False
-    for i in range(60):
-        m = w.call("s", offset_s=200 + i)
-        w.row(m, "s", reason="routing_off")
+    assert res["routed_share"]["not_evidence_for_RRTE2"] is False
+    _rows_of(w, [dict(reason="routing_off")], start=200)  # 63/70 = exactly 90%
     _, res, _ = w.result(tmp_path, capsys, "--cap", "0")
-    assert res["routed_share"]["off_share"] >= 0.9 and res["routed_share"]["not_evidence_for_RRTE2"] is True
+    assert res["routed_share"]["off"] == 61 and res["routed_share"]["not_evidence_for_RRTE2"] is True
 
 
 def test_a_window_of_advise_rows_is_not_evidence_either(w, tmp_path, capsys):
@@ -610,3 +607,77 @@ def test_the_uncapped_largest_session_rule_alone_makes_the_run_not_informative(w
     assert res["uncapped"]["largest_session_share"] == round(400 / 600, 4)
     assert (rc, res["verdict"]) == (1, "NOT INFORMATIVE")
     assert "largest_session_share_above_0.60" in res["not_informative_reasons"]
+
+
+# -- F12: routed = real switches only; decided_kept bucket; flag covers off + advise + decided_kept ----
+
+def _rows_of(w, rows, session="s", start=0):
+    for i, fields in enumerate(rows):
+        m = w.call(session, offset_s=start + i)
+        w.row(m, session, **fields)
+
+
+@pytest.mark.parametrize("fields,kind", [
+    (dict(decision="served"), "routed"),
+    (dict(decision="forwarded", tier_reason="policy", tier_switch=True), "routed"),
+    (dict(decision="served", tier_reason="sticky", tier_switch=False), "routed"),
+    (dict(decision="forwarded", tier_reason="policy", tier_switch=False), "decided_kept"),
+    (dict(decision="forwarded", tier_reason="first_call"), "decided_kept"),
+    (dict(decision="forwarded", tier_reason="side_call", tier_switch=False), "decided_kept"),
+    (dict(decision="forwarded", tier_reason="sticky", tier_switch=False), "decided_kept"),
+    (dict(decision="forwarded", tier_reason="user_pinned", tier_switch=False), "decided_kept"),
+    (dict(decision="forwarded", tier_reason="config_pinned", tier_switch=False), "decided_kept"),
+    (dict(decision="forwarded", tier_reason="unknown_model", tier_switch=False), "decided_kept"),
+    # the live config (tiers on, steps off): both fields on the row, nothing switched
+    (dict(decision="forwarded", tier_reason="policy", reason="routing_off", tier_switch=False), "decided_kept"),
+    (dict(decision="forwarded", tier_reason="advise", authority="advise", tier_switch=False), "advise"),
+    (dict(decision="forwarded", reason="routing_off"), "off"),
+    (dict(decision="forwarded", reason="tiers_off", tier_switch=False), "off"),
+    (dict(decision="forwarded", reason="not_eligible"), "other_reason"),
+])
+def test_route_kind_buckets(fields, kind):
+    assert cc.route_kind(fields) == kind
+
+
+def test_live_config_rows_are_decided_kept_not_routed(w, tmp_path, capsys):
+    live = dict(tier_reason="policy", reason="routing_off", tier_switch=False)
+    _rows_of(w, [live] * 6 + [dict(decision="served")] * 2 + [dict(tier_reason="policy", tier_switch=True)] * 2)
+    _, res, cap = w.result(tmp_path, capsys, "--cap", "0")
+    rs = res["routed_share"]
+    assert (rs["passed"], rs["routed"], rs["decided_kept"], rs["off"]) == (10, 4, 6, 0)
+    assert (rs["routed_share"], rs["decided_kept_share"]) == (0.4, 0.6)
+    assert "decided_kept 6" in cap.out and "routed 4 = served or tier switch" in cap.out
+
+
+def _flag_at(w, tmp_path, capsys, kept_rows, switch_rows, **kept_fields):
+    kept = dict(tier_reason="policy", tier_switch=False, **kept_fields)
+    _rows_of(w, [kept] * kept_rows + [dict(tier_reason="policy", tier_switch=True)] * switch_rows)
+    _, res, cap = w.result(tmp_path, capsys, "--cap", "0")
+    return res["routed_share"], cap.out
+
+
+@pytest.mark.parametrize("kept,switched,fires", [(89, 11, False), (90, 10, True), (100, 0, True)])
+def test_flag_counts_decided_kept_and_fires_exactly_at_90_percent(w, tmp_path, capsys, kept, switched, fires):
+    rs, out = _flag_at(w, tmp_path, capsys, kept, switched)
+    assert rs["not_evidence_for_RRTE2"] is fires and ("NOT EVIDENCE FOR R-RTE-2" in out) is fires
+    assert rs["decided_kept"] == kept
+    if fires:
+        assert f"decided_kept {kept}" in rs["not_evidence_reason"] and "decided_kept >= 90%" in out
+
+
+def test_flag_sums_off_advise_and_decided_kept(w, tmp_path, capsys):
+    _rows_of(w, [dict(reason="routing_off")] * 30 + [dict(tier_reason="advise")] * 30
+             + [dict(tier_reason="policy", tier_switch=False)] * 30 + [dict(decision="served")] * 10)
+    _, res, _ = w.result(tmp_path, capsys, "--cap", "0")
+    rs = res["routed_share"]
+    assert (rs["off"], rs["advise"], rs["decided_kept"], rs["routed"]) == (30, 30, 30, 10)
+    assert rs["not_evidence_for_RRTE2"] is True, "no single bucket reaches 90%, the sum does"
+
+
+def test_failopen_explained_count_is_printed_in_the_header(w, tmp_path, capsys):
+    big(w)
+    m = w.call("lonely", offset_s=5000)
+    w.failopen_rows.append({"c": "proxy_down", "ts": w._last[1].timestamp() + 30})
+    rc, res, cap = w.result(tmp_path, capsys)
+    assert res["classes"]["failopen_explained"] == 1
+    assert "failopen_explained: 1 (global" in cap.out and m

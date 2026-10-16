@@ -743,8 +743,17 @@ ledger row with `tier_reason` or `reason`, or served), caps each session at 40, 
 every call that did not pass to be explained, and prints Wilson 95% bounds. It reads message
 ids and timestamps only. `--write` leaves `coverage_check.json` for `llm-router kpi`. This
 is decision-point coverage, not routing coverage: a forward with a recorded reason passes, so it
-prints the routed share beside it and labels a window of (nearly) all `routing_off` / `advise`
-rows "not evidence for R-RTE-2". `--switch-file` (the owner's recorded switch time) is required
+prints the routed share beside it. A passed call is `routed` only if it was `served` or the tier
+policy switched the model (`tier_switch` True). A tier decision that did not switch (first_call,
+side_call, sticky, pinned, unknown_model, policy-kept) is `decided_kept`, even when the row also
+says `reason=routing_off` (the live config: tiers on, steps off). Other buckets: `advise`, `off`
+(routing_off / tiers_off with no tier decision), `other_reason`. JSON `routed_share` carries
+`routed`, `decided_kept`, `advise`, `off`, `other_reason`, `routed_share`, `decided_kept_share`,
+`off_share`, `advise_share`. The flag "NOT EVIDENCE FOR R-RTE-2" (`not_evidence_for_RRTE2`)
+fires when off + advise + decided_kept is at least 90% of passed calls, i.e. real switches are at
+most 10%. It covers only that share: it does not judge whether the switches were right. The
+header also prints `failopen_explained`; `fail_open` is a global explainer, so any no-row call
+within +-120 s of a `proxy_down` row counts as explained whatever its session. `--switch-file` (the owner's recorded switch time) is required
 for an informative run; without it the verdict is NOT INFORMATIVE (`switch_unknown`).
 
 ### Escalation to Opus (`proxy/escalation.py`)
