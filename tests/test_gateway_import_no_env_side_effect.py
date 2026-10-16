@@ -22,7 +22,11 @@ def test_import_gateway_leaves_env_unset():
     assert out.stdout.strip() == "None"
 
 
-def test_sdk_classify_path_leaves_env_unset():
+def test_import_sdk_then_gateway_leaves_env_unset():
+    """Import order sdk -> gateway (what sdk.route does lazily) leaves the env unset.
+
+    Import-only: sdk.route itself is not called here.
+    """
     code = (
         "import os\n"
         "from llm_router import sdk\n"
