@@ -245,6 +245,11 @@ def _tokenize(cmd: str) -> tuple[list[Token], bool]:
     return toks, subst
 
 
+def _unresolved_symlink(path: Path) -> bool:
+    """A fully resolved path has no symlink left; one left means resolve() hit a loop."""
+    return any(q.is_symlink() for q in (path, *path.parents))
+
+
 class _Scan:
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
@@ -279,6 +284,8 @@ class _Scan:
                 return
             p = anchor / p
         resolved = p.resolve()
+        if _unresolved_symlink(resolved):
+            raise RuntimeError("symlink loop")
         self.targets.append(str(resolved))
         if not resolved.is_relative_to(self.root):
             self.outside.append(str(resolved))
@@ -427,6 +434,8 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
                 d0 = str(scan.cwd) + d0[2:]
             p = Path(os.path.expanduser(d0))
             scan.cwd = (p if p.is_absolute() else scan.cwd / p).resolve()
+            if _unresolved_symlink(scan.cwd):
+                raise RuntimeError("symlink loop")
         return
     if prog == "popd":
         scan.cwd = None

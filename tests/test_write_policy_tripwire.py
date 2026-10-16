@@ -645,7 +645,7 @@ def test_r6_resolved_outside_targets_are_refused(tree, tpl, name):
     assert str((out / name).resolve()) in v.targets
 
 
-@pytest.mark.parametrize("cmd", ["echo x > a\x00b", "echo x > loop1/f"])
+@pytest.mark.parametrize("cmd", ["echo x > a\x00b", "echo x > loop1/f", "cd loop1 && echo x > f"])
 def test_r6_path_errors_need_approval(tree, cmd):
     root, _ = _r6_tree(tree)
     v = check_command(cmd, root)
