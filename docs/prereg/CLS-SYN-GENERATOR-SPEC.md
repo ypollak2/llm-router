@@ -163,7 +163,7 @@ intended difficulty, is **reported** so the rejection bias is visible.)
 
 ## 5. Generator prompts (frozen templates)
 
-Two templates, `tmpl_gpt.txt` and `tmpl_opus.txt`, identical in content apart from the wrapper each CLI
+Two templates, `tmpl_gpt.v1.txt` and `tmpl_opus.v1.txt`, identical in content apart from the wrapper each CLI
 needs; the body is Appendix C and both files get sha256 recorded in `gen_config.json` and PINS. Content, in order:
 
 1. Role: write realistic prompts a developer types into a coding agent, one per cell vector listed.
@@ -234,6 +234,7 @@ NOT INFORMATIVE; 40-79, "low power" label.
   the AUROC numbers of DEV-SYN** (no TEST-SYN exists yet). **No discriminator feature, weight, top term, error case
   or real text is shown to the amendment author.** At most **3 spec versions in all** (v1, v2, v3); each version
   and each DEV-SYN set is hashed and logged. The first version that passes is **frozen as vN**.
+* gen_config.json is run-time and not versioned by name (pinned in PINS-RUN).
 * **Pins.** The v1 generator files are in `PINS-STATIC.json` (frozen with this spec). Generator files are versioned by name (e.g. `tmpl_gpt.v1.txt`, `tmpl_gpt.v2.txt`). The v1 files are never edited. An amendment creates new-named files and a PINS-RUN entry for them. Every amendment (v2, v3) and
   every `gen_config.json` writes a new **`PINS-RUN`** entry (hashed, logged before use, never overwritten); the
   frozen vN's files are pinned there before TEST-SYN is generated.
@@ -340,13 +341,13 @@ prompt-derived directory, `~/.codex`, `~/.llm-router`, `~/.claude`. The spec's n
 | T12 data/analysis/plan editing | 0 | 1 | 1 | 1 | 1 |
 
 Within an allowed cell the tool-need weights of section 2.3 are renormalised over the allowed columns. The file
-form is `task_tool_mask.json`, hashed in PINS-STATIC (v1).
+form is `task_tool_mask.v1.json`, hashed in PINS-STATIC (v1).
 
 ## Appendix B. Project list (names only; disclosed to the generators and judges)
 
 `llm-router`, `rsi-engine`, `stockagent`, `callrec`, `loophole`, `agenticgraphs`, plus `null` (15 percent of
 items). The names come from a directory listing of the owner's Projects directory at the time of writing; the
-freeze-guard reviewer confirms the list at freeze. Hashed in PINS as `projects.json`.
+freeze-guard reviewer confirms the list at freeze. Hashed in PINS as `projects.v1.json`.
 
 ## Appendix C. Generator template (both families; wrapper differs only as the CLI needs)
 
@@ -372,10 +373,10 @@ Output: one JSON object per line: {"idx","prompt","digest"}. Nothing else.
 ```
 Intended-difficulty phrases (frozen): haiku-intent "a small, well-bounded change that one careful read settles";
 sonnet-intent "a normal multi-step change in one area of the code"; opus-intent "a change that needs careful
-reasoning across several files or an unclear root cause". Hashed in PINS as `tmpl_gpt.txt` / `tmpl_opus.txt` (the
-body above plus the CLI wrapper) and `intent_phrases.json`.
+reasoning across several files or an unclear root cause". Hashed in PINS as `tmpl_gpt.v1.txt` / `tmpl_opus.v1.txt` (the
+body above plus the CLI wrapper) and `intent_phrases.v1.json`.
 
 ## Appendix D. Meta-statement patterns (case-insensitive)
 
 `\b(haiku|sonnet|opus)\b`; `\bdifficulty\b`; `\btier\b`; `\b(easy|hard|trivial|simple|complex|difficult)\s+(task|one|prompt|request|job)\b`;
-`\bcomplexity\s+(level|score|rating)\b`. Hashed in PINS as `meta_patterns.json`. Per-pattern hit rates are reported.
+`\bcomplexity\s+(level|score|rating)\b`. Hashed in PINS as `meta_patterns.v1.json`. Per-pattern hit rates are reported.
