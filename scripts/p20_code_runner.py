@@ -169,9 +169,11 @@ def attempt_task(cfg, c, args, item, attempt, tc, tc_hash, runner_hash, nc, pi):
             # Task text comes from the pinned fixtures manifest (checked before the first
             # rx_edit task), matched by idx and name; the pool carries no task text.
             fixture = next(
-                f for f in json.loads((args.rx_dir / "fixtures/manifest.json").read_text())
-                if f.get("idx") == ref["idx"] and f.get("name") == ref["name"]
+                (f for f in json.loads((args.rx_dir / "fixtures/manifest.json").read_text())
+                 if f.get("idx") == ref["idx"] and f.get("name") == ref["name"]), None
             )
+            if fixture is None:
+                raise h.Refuse("refusing: rx fixture missing from manifest")
             prompt = (
                 f"In {fixture['module']}, change `{fixture['func']}` so that it does this: "
                 f"{fixture['summary']}\nEdit the file directly. "

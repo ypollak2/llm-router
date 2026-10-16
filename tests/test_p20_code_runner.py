@@ -309,3 +309,14 @@ def test_no_third_attempt_after_two_infra_attempts(setup):
     assert pi.calls == 0
     result = rows(setup, True)
     assert len(result) == 1 and result[0]["attempt"] == 2 and result[0]["hidden_pass"] is None
+
+
+def test_rx_manifest_row_missing_refuses(setup):
+    cfg, rx = setup[0], setup[6]
+    manifest = rx / "fixtures/manifest.json"
+    manifest.write_text("[]")
+    h.write_json(cfg.run_dir / "pools/build_manifest.json",
+                 {"sources": {"rx_fixtures_manifest": h.sha256_file(manifest)}})
+    assert invoke(setup) == 2
+    ids = {row["task_id"] for row in h.jsonl(cfg.run_dir / "code_results.raw.jsonl")}
+    assert "task-1" not in ids and "task-2" not in ids
