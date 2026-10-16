@@ -250,6 +250,7 @@ def test_dotenv_keys_arrive_through_env_loader_only(tmp_path, monkeypatch):
     assert ta.resolve("research") == ("research", ta.SERVABLE)   # minimax is in a research chain
 
 
+@pytest.mark.timing
 def test_fifo_dotenv_in_cwd_is_never_opened(tmp_path, monkeypatch):
     """D-153: a FIFO named .env in the cwd hung resolve() for >8 s via a raw read."""
     import builtins
