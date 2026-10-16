@@ -1,6 +1,6 @@
 # PREREG-P20-requal: local re-qualification with the full pack (PLAN v16 P2.0 tasks 1-5)
 
-Status: **DRAFT r2, not frozen.** This file is frozen only when `PREREG-P20-requal.sha256` exists
+Status: **DRAFT r3, not frozen.** This file is frozen only when `PREREG-P20-requal.sha256` exists
 beside it, an independent freeze-guard review has passed (D-122 rule: an author-written sidecar is
 void), and `scripts/check_prereg.py` reports a match. Until then `scripts/p20_requal.py` refuses every
 subcommand that writes an item, calls a model or writes a result. The one pre-freeze mode is
@@ -8,15 +8,16 @@ subcommand that writes an item, calls a model or writes a result. The one pre-fr
 freeze changes the hash; a changed file is a new prereg with a later `frozen_utc`. No item has been
 selected, no model has been called and nothing has been scored under this file.
 
-r2 applies the freeze-guard review of r1 (NOT READY) and coordinator decisions D-123 / D-123a.
+r2 applied the freeze-guard review of r1 (NOT READY) and D-123 / D-123a; r3 applies the r2 review
+(NOT READY on two text fixes) and D-123b.
 
 ## 0. Contradictions and settled points (read first)
 
-Every row is settled by D-123 (r1 defaults accepted) or D-123a (review fixes). None is open.
+Every row is settled by D-123 (r1 defaults accepted), D-123a or D-123b (review fixes). None is open.
 
 | # | Contradiction | Settled as (applied below) |
 |---|---|---|
-| Q1 | **The LB clause dominates; n = 60 cannot show parity below ~0.95.** `eligibility.grade` uses Newcombe method 10 (independent arms). For equal local and Sonnet rates (k = round(p·n), repo `grade`, 2026-10-16), the first passing n is: p = 0.95 → 60; 0.93 → 61; 0.90 → 75 (every n ≥ 79 passes); 0.85 → 101; 0.80 → 122 (every n ≥ 124); 0.70 → 160. At n = 60 the exact equal-rate threshold is 57/60 (0.95); 56/60 (0.933) fails at LB -10.1. At **n = 120** equal rates pass only when Sonnet ≥ 97/120 (0.808); at Sonnet ≤ 96/120 (0.80) even a local model identical to Sonnet fails. The LB ≥ -10 clause dominates gap ≤ 3 pts: at n = 60 no (k_cand, k_ref) pair fails on the gap alone; at n = 120 only 8 pairs do, all with Sonnet ≥ 115/120 (0.958). | D-123: **N = 120** target for Q&A and tech-op (60 is the floor); code takes all valid items (expected 75). D-123a(d): a set whose Sonnet rate is below the equal-rate threshold at its realised n is **INCONCLUSIVE** (power-limited), not evidence of ineligibility (§10). `grade` is unchanged; it is the one rule (P2.0-b). |
+| Q1 | **The LB clause dominates; n = 60 cannot show parity below ~0.95.** `eligibility.grade` uses Newcombe method 10 (independent arms). For equal local and Sonnet rates (k = round(p·n), repo `grade`, 2026-10-16), the first passing n is: p = 0.95 → 60; 0.93 → 61; 0.90 → 75 (every n ≥ 79 passes); 0.85 → 101; 0.80 → 122 (every n ≥ 124); 0.70 → 160. At n = 60 the exact equal-rate threshold is 57/60 (0.95); 56/60 (0.933) fails at LB -10.1. At **n = 120** equal rates pass only when Sonnet ≥ 97/120 (0.808); at Sonnet ≤ 96/120 (0.80) even a local model identical to Sonnet fails. The LB ≥ -10 clause dominates gap ≤ 3 pts: at n = 60 no (k_cand, k_ref) pair fails on the gap alone; at n = 120, 16 pairs do (8 at low rates with Sonnet 4-9/120, 8 at high rates with Sonnet 115-120/120). At very low k, equal counts also grade `eligible` (k ≤ 23 at n = 120, k ≤ 3 at n = 60), so the equal-rate threshold is taken in the upper region only (k ≥ n/2, §8) and `powered` means Sonnet ≥ that threshold. | D-123: **N = 120** target for Q&A and tech-op (60 is the floor); code takes all valid items (expected 75). D-123a(d): a set whose Sonnet rate is below the equal-rate threshold at its realised n is **INCONCLUSIVE** (power-limited), not evidence of ineligibility (§10). `grade` is unchanged; it is the one rule (P2.0-b). |
 | Q2 | D-99 is "for G1 only"; the brief said "synthetic/held-out per D-99". | D-123: the plan's real sources, replayed **offline** (like D-52 / D-106), prompt-derived data 0600 under `$REQ`. Generated items form a labelled stratum. Nothing is labelled `synthetic (D-99)`. |
 | Q3 | The plan names `$PP/v16/requal/PREREG.md` (0444); repo convention is `docs/prereg/` + `.sha256`. | D-123: the repo file is canonical. At the freeze a byte-identical 0444 copy goes to `$REQ/PREREG.md`; the harness refuses if that copy exists and differs. |
 | Q4 | The plan names `resolver/profile.py`; `grade()` merged as `src/llm_router/eligibility.py` (#484). | D-123: `llm_router.eligibility.grade` is the rule. |
@@ -28,7 +29,7 @@ Every row is settled by D-123 (r1 defaults accepted) or D-123a (review fixes). N
 | Q10 | T_P2 inputs: GE1 gives only a bound s_tech ∈ [1/45, 24/45]; post-deploy census n = 0; the P1.1-estimator f_fit re-run is not done. | D-123 / D-123a(b, g): §11. s_tech and f_fit are measured on the same non-complex tech-op population as e_tech. The **gating** T_P2 uses the conservative s_tech = 1/45 unless an informative census exists; 24/45 is printed only. |
 | Q11 | Spend. The plan budgets **P2.0 ≤ $10** (§5 effort table); this design needs more. | D-123 / D-123a(f): harness model calls are capped at **$60** via `claude -p` (subscription, quota-gated). **Disclosed deviation from the plan's ≤ $10.** The code runner is local and $0; its Sonnet runs go through `claude -p` and count against the same $60 ledger. Any paid external runner is an owner gate. The quota pause reads `usage.json` read-only, the same exception D-110 gave P1.7-d (disclosed). |
 | Q12 | GT-500 held-out was used for the classifier family (P1.6-g, P1.7-d group G). | Rule 3 is per candidate family; local answerers are a new family. After this run the Q&A items are spent for local answerers; P3.2 needs fresh items. |
-| Q13 | Kill vs power. The plan kills P2.1 / P2.10 when no local model is eligible for any class. | D-123a(d): §10 — kill only with ≥ 1 informative, adequately powered set in which every graded lane fails and no lane anywhere is eligible; all-NI / inconclusive → no kill, re-prereg. P2.1 still needs ≥ 1 eligible tech-op model. |
+| Q13 | Kill vs power. The plan kills P2.1 / P2.10 when no local model is eligible for any class. | D-123a(d) / D-123b: §10 — the kill is scoped **by class**: P2.1 is cancelled only by an informative, powered tech_op set in which every graded lane failed; P2.10 only by such a qa set; code results alone never kill; an inconclusive / NI class cancels nothing (re-prereg). P2.1 still needs ≥ 1 eligible tech-op model. |
 | Q14 | Fitness pass marks are "fixed" by P2.0-a; `fitness.PASS_MARKS` is frozen empty in code (#487). | §12 fixes them; the code change follows the freeze in its own PR. |
 | Q15 | An Opus judge grades Sonnet and Haiku (same vendor) against local models. | Opus judge, blind letters, two plant kinds, an order re-judge sample (§7). Disclosed (§16): conservative for eligibility, but it can cause a false kill. |
 | Q16 | D-21 is per (task_type, tier); the Q&A set pools the QA task types. | D-123a(c): a Q&A task type is re-enabled only if it has **≥ 20 items** in the graded set **and** the pooled lane is eligible; otherwise it stays stripped (§10). |
@@ -82,8 +83,14 @@ within 3 points of Sonnet's on the same items?
 
 Items are prompt-derived. They live only in `$REQ = ~/.rsi/research/primary-plan/v16/requal/`
 (directory 0700, files 0600). A pre-freeze **build step** (read-only, run by a sub-agent, like
-D-107 c) writes one pool file per set plus `$REQ/pools/build_manifest.json` with the source pins
-below. The pool sha256 values, the per-stratum pool counts and the realised N per set are freeze
+D-107 c) writes one pool file per set plus `$REQ/pools/build_manifest.json`. The manifest holds the
+sha256 of every source the pools were built from: the [RX] packet file and results file, the
+`fixtures/edit-*` tree hash, `split.json`, `manifest.json`, `task_ids.json`, `census.py`, the
+`proxy_calls.jsonl` copy, each transcript file, and the secret-guard pattern list. The
+repo-external sources are also pinned in the constants block, and `select` refuses if the manifest
+disagrees with them (D-123b). The fixtures tree hash is the sha256 of the lines `relpath \0 sha256(file) \n`,
+sorted by path, over every file under `fixtures/edit-*` (paths relative to `fixtures/`, skipping
+`__pycache__`, dot-directories and `*.pyc`; 80 files on 2026-10-16). The pool sha256 values, the per-stratum pool counts and the realised N per set are freeze
 fill-ins. The build step reads no `~/.llm-router` file except a copy of `proxy_calls.jsonl` (its
 sha256 is a fill-in) and never writes there.
 
@@ -172,14 +179,20 @@ live-faithful, so Claude arms may see more context than local arms (§16).
 * Errored local answers are not shown to the judge. They are unacceptable (§2).
 * **Plants (calibration), per set.** The **plant order** sorts the selected items by
   `sha256("20261016:plant:" + id)`.
-  * *Swapped:* items at plant-order indices 0-5 get one extra candidate, the Sonnet final answer of
-    the item at index (j + 1) mod 6.
-  * *Degraded:* among indices 6 onward, the first 6 items whose Sonnet final answer is ≥ 400
-    characters get one extra candidate. For Q&A it is the first 20% of that answer's characters.
-    For tech-op it is `{"final": "Done."}`.
-  * A plant is skipped (and counted) when its source Sonnet answer is not ok.
-  * The set counts only if **≥ 5 of 6 swapped** and **≥ 5 of 6 degraded** plants are judged
-    unacceptable. Otherwise the set is NOT INFORMATIVE (`calibration`).
+  * *Swapped:* the item at plant-order index j (j = 0-5) gets one extra candidate, the Sonnet final
+    answer of the item at index (j + 1) mod 6. A swapped plant is skipped (and counted) when that
+    source answer is not ok.
+  * *Degraded, tech-op:* the items at plant-order indices 6-11 (fixed, regardless of length) get
+    one extra candidate, `{"final": "Done."}`.
+  * *Degraded, Q&A:* from index 6 onward, the first 6 items whose own Sonnet final answer is ok and
+    ≥ 400 characters get one extra candidate: the first 20% of that answer's characters. If only
+    m < 6 items in the set qualify, m plants are placed.
+  * **Pass rule, per plant kind:** with m plants placed (m ≤ 6), at least **ceil(5/6 · m)** must be
+    judged unacceptable (m = 6 or 5 → 5; m = 4 → 4). The set is NOT INFORMATIVE (`calibration`) if
+    either kind fails its pass rule or places m < 4 plants.
+  * **Plants never change n.** The item that carries a plant and the item whose Sonnet answer
+    sourced it both stay in n; their real arms keep their own verdicts. A plant verdict is used
+    only for the pass rule. A plant shares the judge call with the real candidates (§16).
 * **Order re-judge (report only):** 10% of selected items (the first ceil(0.10 · n) in
   `sha256("20261016:rejudge:" + id)` order) are judged a second time with letters from
   `sha256("20261016:perm2:" + item_id + ":" + name)`. The report prints the per-(item, arm)
@@ -199,8 +212,10 @@ per-tier breakdown. Per (set, local model vs Sonnet), it prints:
 * gap_pts and the Newcombe method-10 CI (the gating LB);
 * the exact two-sided McNemar p on discordant pairs (b, c), and the discordant rate d = (b + c) / n;
 * the n implied for a 3-pt paired half-width (1.96² × d / 0.03², rule 9);
-* the equal-rate threshold at this n (the smallest k / n at and above which equal counts grade
-  `eligible`), whether Sonnet's rate reaches it (`powered`), and `grade`;
+* the equal-rate threshold at the lane's **final paired n**: the smallest k in [ceil(n/2), n] such
+  that equal counts (k, n, k, n) grade `eligible` for k and for every larger k. The search is
+  restricted to the upper region because equal counts at very low k also grade `eligible` (§0 Q1).
+  It prints whether Sonnet's k reaches it (`powered`), and `grade`;
 * for Q&A, each local rate against the [M013] baseline **7/22** with its Newcombe CI (descriptive;
   not part of the rule);
 * for tech-op, agreement with Sonnet (k/n).
@@ -245,14 +260,19 @@ Every check prints the number of items it checked. A qa / tech_op set with refer
 
 For code, "powered" uses each lane's own paired n.
 
-* **Kill:** fires only if (a) no lane in any set is `eligible`, **and** (b) at least one set is
-  informative and powered, and every graded lane in it is `failed`. Then P2.1 and P2.10 are
-  cancelled, v16 continues with Haiku / very-cheap offload, and D-27 is re-asked (plan text).
-* **No kill, re-prereg:** if no lane is `eligible` and every set is `not_informative` or
-  `inconclusive`, the outcome is "no decision". There is no kill, and a new prereg (larger n or a
-  different design) is written before any further run.
-* **P2.1** proceeds only with ≥ 1 `eligible` tech-op lane. Otherwise e_tech = 0 (§11), and P2.1
-  local tech-op serving does not start, whatever happens to the kill.
+* **Kill, by class (D-123b).** A set is *decisive-fail* when it is informative, it has ≥ 1 graded
+  lane, and every graded lane has verdict `failed` (so each is powered).
+  * **P2.1 is cancelled** only if the `tech_op` set is decisive-fail.
+  * **P2.10 is cancelled** only if the `qa` set is decisive-fail.
+  * **Code results alone never cancel anything.** A code lane only feeds the table and the catalog.
+  * A class whose set is `not_informative` or has any `inconclusive` lane (and no `eligible` lane)
+    cancels nothing. That class gets "no decision" and a new prereg (larger n or a different
+    design) before any further run.
+  * If both P2.1 and P2.10 are cancelled, v16 continues with Haiku / very-cheap offload and D-27 is
+    re-asked (plan text).
+* **P2.1 needs an eligible model.** It proceeds only with ≥ 1 `eligible` tech-op lane. Without one,
+  e_tech = 0 (§11), and P2.1 local tech-op serving does not start, even when P2.1 is not cancelled
+  (no decision). P2.10 likewise re-enables only the lanes D-21 allows.
 * **D-21 table (D-123a c):** a Q&A task type t is re-enabled for local at tiers simple and moderate
   for model m only if m's qa lane is `eligible` **and** the graded qa set holds **≥ 20 items** of
   type t. Every other type stays stripped. The table lists each type's item count. It is reported;
@@ -280,11 +300,19 @@ s_cheap = k/n: actions served local / very-cheap and not redone (P1.9 `kpi --jso
 * **Which value gates:** the gating T_P2 uses the census s_tech if it is informative. Otherwise
   it uses the conservative **s_tech = 1/45** (GE1 v0 lower bound), flagged. The value at 24/45 is
   printed beside it and never gates.
-* The plan's formula adds s_cheap (a share of remaining actions) to a share of all actions. This
-  overstates the total by a factor up to 1/(1 − s_tech) on the s_cheap term. It is kept as
-  written and disclosed.
-* All arithmetic is exact (fractions), never rounded before comparison. `tp2` records each input
-  as k/n, the sha256 of each evidence file, the flags and both T_P2 values. The reviewer recomputes
+* **The hashed value is the plan's formula** (D-123b). The plan adds s_cheap (a share of the
+  remaining actions) to a share of all actions, which overstates the s_cheap term by up to
+  1/(1 − s_tech). `tp2` also prints the share-of-all-actions form, **T_P2_alt** = 0.8 ×
+  (s_tech × f_fit × e_tech + (1 − s_tech) × s_cheap), with its ceiling, beside it. T_P2_alt is
+  never hashed and never gates.
+* **Baseline denominator.** P2-G-1's `s_cheap_baseline` is offload per action over **all**
+  actions (P1.9 `.offload.action`). It is not the remaining-action share used for s_cheap here.
+  `tp2` prints both, so the max(T_P2, baseline + g_min) comparison is read on the right basis.
+* All arithmetic is exact (fractions), never rounded before comparison. `tp2` implements the
+  non-complex split above: it takes the census counts restricted to non-complex technical_op steps
+  and the remaining-action counts as inputs. It records each input as k/n, the sha256 of each
+  evidence file, the flags, the gating T_P2, the 24/45 value and T_P2_alt. Its own sha256 goes to
+  `use.log`. The reviewer recomputes
   the inputs from raw files; then the coordinator puts the `tp2.json` sha256 in PREREG-V16 /
   PROGRESS.
 * T_P2 < 0.20 → the inputs go to the owner before P2.1 (D-27 = A: gate on T_P2). ceiling < 0.10 →
@@ -319,7 +347,9 @@ the task. Fitness never grants eligibility; it only gates onboarding recommendat
   older than 30 minutes → exit 3, resumable; no call is made and nothing is consumed.
 * **Spend guard:** the sum of `total_cost_usd` in `$REQ/ledger.jsonl` (all stages, the code runner
   included), plus an estimate of the next call (1.25 × the most expensive call so far; $0.30 for
-  the first), may not exceed **$60.00**. A stop keeps what exists. The estimate is about $30-55:
+  the first), may not exceed **$60.00**. A stop keeps what exists. A cap stop in the middle of a
+  set leaves that set incomplete; at `score` it is NOT INFORMATIVE (`incomplete` or `ref_missing`)
+  by design. There is no partial verdict and no further tranche without a new prereg. The estimate is about $30-55:
   240 Sonnet, 240 Haiku, 264 Opus judge calls including re-judges, and 75 Sonnet code runs.
   Disclosed deviation from the plan's P2.0 ≤ $10 (D-123a f).
 
@@ -360,8 +390,11 @@ final item, no re-judge (beyond the §7 order sample) and no re-score happens wi
 6. **Proposed, not executed.** The text tool protocol does not measure native tool calling, and the
    proposed action is judged without being executed (P2.1 shadow agreement measures live steps).
 7. **Generated items.** The `rx` stratum includes generated (`gen`) items; strata are printed.
-8. **Rubric tiers.** GT-500 tiers are Opus-rubric labels (κ with outcome 0.096); they are used only
-   to drop complex items.
+8. **Tier labels.** These are not truth labels, and they are used only to drop complex items:
+   * GT-500 tiers are Opus-rubric labels (κ with outcome 0.096).
+   * Tech-op tiers are the router's own **decision** tier (`tier_complexity` in the proxy ledger),
+     not a truth label. A misclassified complex step can enter the set, and a simple one can be
+     dropped.
 9. **Conservative LB.** Independent Newcombe is conservative for paired arms; the paired McNemar
    is printed beside it.
 10. **Code harness confound.** Local arms run in the Pi agent; Sonnet runs in Claude Code
@@ -371,6 +404,8 @@ final item, no re-judge (beyond the §7 order sample) and no re-score happens wi
 11. **Runner errors.** Infrastructure errors (`hidden_pass = null`) are removed per task, not
     charged to the arm. Model timeouts and empty patches are charged to the arm.
 12. **Prior outcomes.** `rx` and `noncloud` outcomes are known in aggregate (§4).
+13. **Plants share the call.** A plant candidate sits in the same judge call as the real answers
+    and may shift the judge's reading of them. Its effect is not measured.
 
 ## Fill-ins at the freeze (the only values that may change between draft and freeze)
 
@@ -395,7 +430,8 @@ ANSWER_CAP_CHARS=4000
 JUDGE_CONTEXT_CAP_CHARS=24000
 PLANTS_SWAPPED=6
 PLANTS_DEGRADED=6
-PLANTS_MIN_REJECTED=5
+PLANTS_PASS_SHARE=5/6
+PLANTS_MIN_PLACED=4
 DEGRADED_MIN_CHARS=400
 DEGRADED_KEEP_SHARE=0.20
 REJUDGE_SHARE=0.10
@@ -431,6 +467,9 @@ CENSUS_PY_SHA256=03941a4f9a8f49526eacd3ab3d116602da9a3667b2ec10c04c8f4e531d7c289
 GT_SPLIT_SHA256=8921a1549e458c8e648b8070ce84a8b97a1b9f0b055c99d6e932bcbc3ca5405b
 GT_MANIFEST_SHA256=453ad8bd93782dcf4457715a37f98c20d3d234f4eded95ce988885f5a464e4cc
 NONCLOUD_TASK_IDS_SHA256=e493f84f5f5ddba32311e6f9903783982834aaff41cbbf4fcddeca4a7ee92638
+RX_PACKETS_SHA256=252a2d664b01b7c6bc7aeef1f2a2453aa57bcedef4d01cfa374dd9a854aa9ce2
+RX_RESULTS_P2B_SHA256=f25e5c7d30d18ca8debdcb3262229fd04059514d2dea292155e4983fc07b57ff
+RX_EDIT_FIXTURES_TREE_SHA256=145e6226c0df5f25f7a8511c3e93adc1298c98ae83cb6ee1373ea16bf20debdc
 REPO_SHA=FILL-AT-FREEZE
 CLAUDE_SONNET_ID=FILL-AT-FREEZE
 CLAUDE_HAIKU_ID=FILL-AT-FREEZE
@@ -453,8 +492,8 @@ N_REALISED_CODE=FILL-AT-FREEZE
 
 The harness parses this block from the frozen file. It refuses while any value reads
 `FILL-AT-FREEZE`, and it refuses if a constant differs from its own copy. Only the `FILL-AT-FREEZE`
-values may change at the freeze. The build manifest (pinned) records the transcript file sha256s and
-the secret-guard patterns used, so the pool itself is the pin for item content. The build-step
+values may change at the freeze. The build manifest (pinned) records every source sha256 listed in §4,
+including the transcript file sha256s and the secret-guard patterns. The build-step
 exclusion counts by reason are added under "What was looked at". N targets, seeds, caps, bars,
 models and g_min may not change.
 
