@@ -64,9 +64,9 @@ TEST_TIMEOUT = HOOK_SUBPROCESS_TIMEOUT + 15
 pytestmark = [pytest.mark.usefixtures("qa_routing_on"), pytest.mark.timeout(TEST_TIMEOUT)]
 
 
-# P0.3 (D-14 = A at every door): a Q&A prompt is never served by a local provider, so the
-# render-mode mechanics below are exercised with a CODE prompt, which still goes local.
-# The Q&A prompt keeps its own test: zero-Claude blocks it without calling Ollama.
+# D-114/D-115: zero-Claude Q&A can use local as a last resort without external keys.
+# Render-mode mechanics below use a CODE prompt, which still goes local.
+# The Q&A test separately pins a local answer when no non-Claude provider remains.
 CODE_PROMPT = "Write a Python function that returns the nth Fibonacci number."
 QA_PROMPT = "What is the quick definition of a REST API?"
 
@@ -193,11 +193,10 @@ def test_simple_prompt_completes_via_external_direct_execution(
     assert requests
 
 
-def test_qa_prompt_is_blocked_not_served_by_local_in_zero_claude(
+def test_qa_prompt_is_served_by_local_as_last_resort_in_zero_claude(
     tmp_path: Path, fake_ollama: tuple[str, list[dict]]
 ) -> None:
-    """P0.3 (D-14 = A): with only Ollama available, a zero-Claude Q&A prompt is blocked
-    (fail-closed) and Ollama receives no chat request. On da31df7 Ollama answered it."""
+    """D-114/D-115: with only Ollama available, zero-Claude Q&A serves a local answer."""
     endpoint, requests = fake_ollama
     out = _run_zero_claude_hook(
         QA_PROMPT,
@@ -205,9 +204,9 @@ def test_qa_prompt_is_blocked_not_served_by_local_in_zero_claude(
         extra_env={"LLM_ROUTER_OLLAMA_URL": endpoint, "LLM_ROUTER_RENDER_MODE": "block"},
     )
     assert out is not None and out["decision"] == "block"
-    assert "ZERO_CLAUDE BLOCKED" in out["reason"]
-    assert "An external provider completed this answer without Claude." not in out["reason"]
-    assert requests == []
+    assert "An external provider completed this answer without Claude." in out["reason"]
+    assert "ZERO_CLAUDE BLOCKED" not in out["reason"]
+    assert requests
 
 
 def test_tool_task_fails_closed_when_external_agent_is_unavailable(tmp_path: Path) -> None:

@@ -76,9 +76,9 @@ from llm_router.model_discovery import ensure_grandfather, order_for_chain, sink
 from llm_router.profiles import get_model_chain, provider_from_model
 from llm_router.receipt_store import compute_receipt, store_receipt
 from llm_router.tracing import set_span_attributes, traced_span
-# M3.0 (PLAN D-14 = A): a Q&A task type is never served by a local provider through
-# ``route_and_call``. The rule and its provider set live in ``llm_router.qa_policy`` so the
-# hook DIRECT path and the SDK apply the same copy (P0.3); these names stay for callers.
+# D-14/D-114/D-115/D-116: put local Q&A models after the last non-Claude entry
+# and before trailing Claude entries. The shared ``llm_router.qa_policy`` also
+# serves SDK and hook callers; normal hook DIRECT mode still strips all local.
 from llm_router.qa_policy import QA_STRIP_PROVIDERS as _QA_STRIP_PROVIDERS  # noqa: F401
 from llm_router.qa_policy import strip_local_for_qa as _strip_local_for_qa
 from llm_router.types import BudgetExceededError, Complexity, CostBudgetExceeded, DeadlineExceeded, LLMResponse, RoutingProfile, TaskType, WallClockExceeded
@@ -3771,7 +3771,7 @@ async def _dispatch_model_loop(
         emergency_chain = await _build_and_filter_chain(
             task_type, RoutingProfile.BUDGET, None, complexity_hint, Complexity.SIMPLE, config
         )
-        # M3.0 (D-14 = A): the shared builder no longer strips local, so strip here.
+        # D-116: apply shared Q&A ordering here too; timeout demotion below still wins.
         emergency_chain = _strip_local_for_qa(emergency_chain, task_type)
         if emergency_chain and emergency_chain != _chain_as_built:
             emergency_chain = _demote_timed_out_local(emergency_chain)  # LOCAL-TIMEOUT-1
@@ -4806,9 +4806,10 @@ async def route_and_call(
                 models_to_try, task_type.value,
                 _gate_configured_names(get_config(), get_repo_config()))
 
-        # M3.0 (D-14 = A): Q&A never goes to a local provider. Applied here, after the
-        # chain build, the subject specialist and the bandit reorder (either can add a
-        # local model), and before the daily-cap step. An explicit model_override is the
+        # D-116 (amends D-14/D-114/D-115): insert local Q&A models after the last
+        # non-Claude entry, before trailing Claude entries. Applied after the chain
+        # build, the subject specialist and the bandit reorder (either can add a local
+        # model), and before the daily-cap step. An explicit model_override is the
         # caller's own pin and is left alone.
         if models_to_try and not model_override:
             models_to_try = _strip_local_for_qa(models_to_try, task_type)
@@ -5482,7 +5483,8 @@ async def route_and_call(
         return response
 
 
-# Non-ollama target window for the pack; real per-model windows arrive with the registry.
+# Non-ollama target window for the pack when the registry does not know the model
+# (D-101: a known model gets min(registry window, context_pack.CLOUD_WINDOW_CAP)).
 _MCP_NON_LOCAL_WINDOW = 8192
 # Owner decision (P1.1 door 7): gateway clients (Cursor, Codex, any OpenAI/Anthropic
 # SDK) send their own whole conversation, so a cloud attempt keeps up to this much
@@ -5491,11 +5493,18 @@ _GATEWAY_NON_LOCAL_WINDOW = 32_768
 
 
 def _pack_window(model: str, door: str) -> int:
-    """The target window a context pack is built for: a local model's num_ctx,
-    else the gateway's or the MCP/SDK non-local window."""
+    """The target window a context pack is built for: a local model's num_ctx; a
+    cloud model's registry window capped at ``CLOUD_WINDOW_CAP`` (D-101); else the
+    gateway's or the MCP non-local default."""
     if model.startswith("ollama/"):
         from llm_router import local_models
         return local_models.num_ctx(model.split("/", 1)[1])
+    from llm_router.context_pack import CLOUD_WINDOW_CAP
+    from llm_router.model_registry import context_window
+
+    known = context_window(model)
+    if known:
+        return min(known, CLOUD_WINDOW_CAP)
     return _GATEWAY_NON_LOCAL_WINDOW if door == "gateway" else _MCP_NON_LOCAL_WINDOW
 
 

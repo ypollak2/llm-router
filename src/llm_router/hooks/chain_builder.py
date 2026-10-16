@@ -219,23 +219,28 @@ def _claude_opus() -> ModelSpec:
     return ModelSpec("claude", model, quota_cost=3.0)
 
 
-def build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:
+def build_chain(complexity: str, zone: str, task_type: str, *,
+                qa_last_resort: bool = False) -> list[ModelSpec]:
     """Build an ordered model chain based on complexity and pressure zone.
 
     The chain is ordered cheapest-first. Claude models are included when
     pressure allows - direct_executor skips them (can't call from hook).
     A caller outside zero-Claude mode can then fall through to Claude.
 
-    D-14 = A (P0.3): for a Q&A task type no local provider is in the chain, at
-    any complexity (``qa_policy.strip_local_for_qa``, the same rule MCP
-    ``route_and_call`` applies). When only local models were available the Q&A
-    chain is empty, so the hook falls through to Claude and the SDK raises
-    ``RoutingError``. ``code`` and other non-Q&A types are unchanged.
+    D-14 = A (P0.3): default normal hook mode strips local Q&A models even
+    if the chain becomes empty or Claude-only: the hook turn falls through to
+    the host Claude session. Callers without that fallback (the SDK and the
+    zero-Claude hook) pass ``qa_last_resort=True`` for D-114/D-115/D-116: insert
+    local entries after the last non-Claude entry and before trailing Claude entries.
+    Listed providers may fail at call time; local is then tried before Claude,
+    accepting that a weaker local answer may win over a working Claude.
+    ``code`` and other non-Q&A types are unchanged.
 
     Args:
         complexity: simple / moderate / complex / deep_reasoning
         zone: green / yellow / orange / red / critical
         task_type: query / research / generate / analyze / code
+        qa_last_resort: retain local Q&A models after the last non-Claude entry
 
     Returns:
         Ordered list of ModelSpec to try.
@@ -243,7 +248,7 @@ def build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:
     from llm_router.qa_policy import strip_local_for_qa
 
     chain = strip_local_for_qa(_build_chain(complexity, zone, task_type), task_type,
-                               keep_if_only_local=False)
+                               keep_if_only_local=qa_last_resort)
     # P1.8: read-only use of the resource map; no fresh map file, no change.
     try:
         from llm_router import map_reader

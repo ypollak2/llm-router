@@ -128,6 +128,22 @@ def _chat_turns(recent: list[dict]) -> list[dict]:
     return out
 
 
+def _pack_window(spec) -> int:
+    """The pack's window for the first model the executor calls: a local model's
+    num_ctx; a cloud model's registry window capped at ``CLOUD_WINDOW_CAP`` (D-101);
+    else the local default request size, as before D-101."""
+    from llm_router.hooks.direct_executor import _local_num_ctx
+
+    if spec.provider != "ollama":
+        from llm_router.context_pack import CLOUD_WINDOW_CAP
+        from llm_router.model_registry import context_window
+
+        known = context_window(f"{spec.provider}/{spec.model}")
+        if known:
+            return min(known, CLOUD_WINDOW_CAP)
+    return _local_num_ctx(spec.model) or 8192
+
+
 def _pack_kwargs(prompt: str, messages: list[dict] | None, chain,
                  session_id: str, *, agent: bool = False) -> tuple[str, dict]:
     """(request, extra executor kwargs) for ``messages``; ``(prompt, {})`` without them.
@@ -141,11 +157,10 @@ def _pack_kwargs(prompt: str, messages: list[dict] | None, chain,
         return prompt, {}
     try:
         from llm_router.context_pack import build_pack
-        from llm_router.hooks.direct_executor import _local_num_ctx
 
         pack = build_pack(
             prompt, messages, session_id=session_id,
-            target_window=(_local_num_ctx(called[0].model) or 8192),
+            target_window=_pack_window(called[0]),
             door="sdk", target_provider=_privacy_target(called),
         )
     except Exception as exc:  # noqa: BLE001 - fail open to the plain request
@@ -182,7 +197,7 @@ def _route(prompt: str, *, task_type: str | None, complexity: str | None,
         extra = {"context": packed["agent_context"]} if packed else {}
         result = execute_agent(request, chain, timeout=max(timeout, 180), **extra)
     else:
-        chain = build_chain(complexity, zone, task_type)
+        chain = build_chain(complexity, zone, task_type, qa_last_resort=True)
         request, packed = _pack_kwargs(prompt, messages, chain, session_id)
         extra = {"context": packed["context"], "history": packed["history"]} if packed else {}
         result = execute_chain(request, chain, task_type, timeout=timeout, **extra)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 57
+# llm_router-hook-version: 59
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 57"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 59"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -4289,23 +4289,38 @@ def _bump_session_prompt_count(session_id: str) -> int:
 
 
 def _build_mini_summary() -> str | None:
-    """Compose a compact 4-line session-summary widget for additionalContext.
+    """Compose an execution summary with optional classifier hints.
 
-    Reads recent routing decisions via ``LineageStore.recent()`` (which
+    Reads recent classified prompts via ``LineageStore.recent()`` (which
     includes the legacy-fallback adapter from PR #11), computes a tiny
-    set of stats, and returns a markdown-formatted block. Returns None
-    if there's nothing to show — caller skips injection in that case.
+    set of stats, and returns a markdown-formatted block. Missing
+    execution data is labelled explicitly rather than hiding the banner.
 
     Format mirrors the full ``llm_router summary`` dashboard at a much
     smaller scale so users get the same shape of information every N
     prompts without the full table-rendering footprint.
     """
     try:
+        from llm_router.routing_report import executed_routes, format_executed_routes
+
+        execution_line = f"{format_executed_routes(executed_routes(24.0))} (executed, usage.db)"
+    except Exception as _exc:
+        from llm_router import failopen as _fo
+
+        _fo.record("CHZ-FO-HOOK-EXECUTED-ROUTES", _exc)
+        execution_line = "routes 24h: no execution data (usage.db missing or unreadable)"
+
+    banner = (
+        "📊 llm_router session check (every 10 prompts):\n"
+        f"   {execution_line}\n"
+    )
+    footer = "   run `llm-router summary` for the full dashboard."
+    try:
         from llm_router.lineage import LineageStore
         _LIMIT = 200
         rows = LineageStore().recent(limit=_LIMIT)
         if not rows:
-            return None
+            return banner + footer
         # audit/28: `n = len(rows)` reported the QUERY LIMIT as a count. Once
         # the store held >=200 rows this line read "routes: 200" forever —
         # measured at 9,015 rows while the banner said 200. A number that is
@@ -4339,15 +4354,16 @@ def _build_mini_summary() -> str | None:
             _accept = ""
         _scope = f"last {n}" if _capped else f"{n}"
         return (
-            "📊 llm_router session check (every 10 prompts):\n"
-            f"   routes: {_scope}  ·  top tier: {top_tier} ({top_tier_n})  ·  "
+            banner
+            + f"   hints ({_scope} classified prompts, not executed): "
+            f"top tier: {top_tier} ({top_tier_n})  ·  "
             f"top task: {top_task} ({top_task_n}){_accept}\n"
-            "   run `llm-router summary` for the full dashboard."
+            + footer
         )
     except Exception as _exc:
         from llm_router import failopen as _fo
         _fo.record("CHZ-FO-HOOK-LINEAGE-RECENT", _exc)
-        return None
+        return banner + footer
 
 
 def _debug_log(msg: str) -> None:
@@ -5423,7 +5439,13 @@ def main() -> None:
             # is built as a question; the routing hint below is unchanged.
             _draft_task = ("query" if task_type == "research" and not _needs_web(prompt)
                            else task_type)
-            _direct_chain = _build_direct_chain(complexity, _zone, _draft_task)
+            # D-114/D-115: zero-Claude has no host Claude fallback for Q&A, so it keeps
+            # local as a last resort. Normal mode calls build_chain exactly as before.
+            if zero_claude:
+                _direct_chain = _build_direct_chain(
+                    complexity, _zone, _draft_task, qa_last_resort=True)
+            else:
+                _direct_chain = _build_direct_chain(complexity, _zone, _draft_task)
 
             # #3: a DRAFT must NEVER hit a paid API. build_chain can include paid
             # externals (gemini/openai); routing a pre-generated draft there is

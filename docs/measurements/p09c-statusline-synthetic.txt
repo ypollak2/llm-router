@@ -1,0 +1,5 @@
+# P0.9-c statusline bench, synthetic (D-99), 2026-10-14T19:40Z, git 0f02ce48
+# scripts/bench_statusline.py --n 200, isolated HOME / LLM_ROUTER_HOME, load1 0.81 at start
+cold (no cache; refresher started every run)     n=200 p50=  35.1ms p95=  46.3ms max=  51.7ms  PASS (bar 100ms)
+warm (fresh cache)                               n=200 p50=  32.6ms p95=  44.3ms max=  47.6ms  PASS (bar 100ms)
+cold, refresher hangs 60 s                       n=200 p50=  35.9ms p95=  47.4ms max=  65.0ms  PASS (bar 100ms)

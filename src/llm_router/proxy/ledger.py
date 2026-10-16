@@ -115,8 +115,9 @@ Claude-tier rewrite fields (only when the proxy runs with ``--tiers on`` or
                         the decision (``classify``, ``quota_read``, ``stickiness``,
                         ``haiku_checks``; their sum is held to the PRD's 50 ms
                         heuristic bar) and context building beside it
-                        (``okf_attach`` on the local path, ``fold`` for the Haiku
-                        body rewrite). Names and numbers only; absent = not run
+                        (``trim`` and ``okf_attach`` on the local path, ``fold``
+                        for the Haiku body rewrite). Names and numbers only;
+                        absent = not run
   tier_detail           scrubbed error text when the decision itself failed, or
                         which signal/keep a fixed-reason decision came from
                         (escalation.REASON_*, or first_call /

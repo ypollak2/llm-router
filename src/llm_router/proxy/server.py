@@ -394,6 +394,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             failopen.record("LR-FO-PROXY-LEDGER-COST", exc)
         ledger.write_row(row, cfg.ledger_path)
 
+    def _budget_left(t0: float) -> float:
+        """Seconds left of the step budget that started at ``t0`` (never negative)."""
+        return max(0.0, t0 + cfg.step_budget_s - time.monotonic())
+
     async def try_serve(body: dict, row: dict) -> dict | None:
         t0 = time.monotonic()
         session_id = row.get("session_id")
@@ -456,7 +460,16 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                     src, checks = local_mode.annotate_failed_checks(body, lm, la_session_cwd(body))
                     if checks:
                         row["post_apply_checks"] = checks
-                send = apply_trims(src, trims, target_window=getattr(backend, "num_ctx", None))
+                # Off the event loop (D-94(a)): the ``fast`` trim builds the context pack
+                # and estimates tokens over the whole prompt. Bounded by what is left of the
+                # step budget, since it shares the default thread pool with okf attaches that
+                # may outlive their own timeout: a stuck pool is a budget_exceeded fallback,
+                # never a hang. An error still reaches the counted-fallback handler below.
+                trim_t0 = time.perf_counter()
+                send = await asyncio.wait_for(asyncio.to_thread(
+                    apply_trims, src, trims, target_window=getattr(backend, "num_ctx", None)),
+                    timeout=_budget_left(t0))
+                _add_phase(row, "trim", (time.perf_counter() - trim_t0) * 1000.0)
             # Repo knowledge for the local model (proxy.okf_context): the trimmed
             # request is all it sees. Local path only, never the pass-through;
             # fail-open; in a thread because retrieval and the repo-state line
@@ -465,19 +478,31 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # not eat the step budget. On timeout the step goes ahead without it
             # (the worker thread finishes on its own and its result is dropped).
             okf_t0 = time.perf_counter()
+            # Within the step deadline: when the budget, not the attach's own 2 s cap, is
+            # what cuts it short, the step is out of time; that is not an attach failure
+            # and is not counted as one (status "budget", no failopen).
+            okf_cap = min(OKF_ATTACH_TIMEOUT_S, _budget_left(t0))
             try:
                 send, row["okf"] = await asyncio.wait_for(asyncio.to_thread(
                     okf_context.attach, send, body,
                     ceiling_tokens=cfg.local_agent.max_prompt_tokens if cfg.local_agent else DEFAULT_MAX_PROMPT_TOKENS),
-                    timeout=OKF_ATTACH_TIMEOUT_S)
+                    timeout=okf_cap)
             except asyncio.TimeoutError as exc:
-                failopen.record("LR-FO-PROXY-OKF-ATTACH-TIMEOUT", exc)
-                row["okf"] = {"status": "timeout"}
+                if okf_cap < OKF_ATTACH_TIMEOUT_S:
+                    row["okf"] = {"status": "budget"}
+                else:
+                    failopen.record("LR-FO-PROXY-OKF-ATTACH-TIMEOUT", exc)
+                    row["okf"] = {"status": "timeout"}
             # P0.9: context building, not the decision; reported beside it (S6).
             _add_phase(row, "okf_attach", (time.perf_counter() - okf_t0) * 1000.0)
             backend_t0 = time.monotonic()
+            # One deadline for the whole step (t0 + step_budget_s, as the edit protocol
+            # below): the trim and the okf attach above spend from it, they do not add to it.
+            left = _budget_left(t0)
+            if left <= 0:
+                raise asyncio.TimeoutError
             message, err, backend_usage = await asyncio.wait_for(
-                backend.complete(send, cfg.step_budget_s), timeout=cfg.step_budget_s)
+                backend.complete(send, left), timeout=left)
             row["backend_usage"] = backend_usage
             if err:
                 reason = "validation"

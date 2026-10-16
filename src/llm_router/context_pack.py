@@ -58,6 +58,10 @@ from llm_router.token_budget import estimate_tokens
 DOORS = ("hook", "mcp", "proxy", "codex", "agent", "sdk", "gateway")
 
 RECENT_N = 7
+#: Owner decision D-101 (2026-10-15): a cloud model's pack window is its registry
+#: context window (``model_registry.context_window``), capped here. The whole
+#: conversation goes up to 0.8 x this (~52k tokens), then the pack.
+CLOUD_WINDOW_CAP = 65_536
 TOOL_CAP_CHARS = 4_000
 TOOL_KEEP_CHARS = 1_500
 TAIL_BYTES = 2 * 1024 * 1024
@@ -475,19 +479,19 @@ def messages_for(door: str, *, messages: list | None = None,
 # Project and instructions sections (fail-open)
 # ---------------------------------------------------------------------------
 
-def _project(request: str, root: str | None, session_id: str | None) -> str:
-    """OKF + semantic pack + repo state, via the one context choke point.
-    Empty for no root and for a root at $HOME (``_is_home``)."""
-    if not root or not request or _is_home(root):
+def _project(query: str, root: str | None, session_id: str | None) -> str:
+    """OKF + semantic pack + repo state for ``query``, via the one context choke
+    point. Empty for no root and for a root at $HOME (``_is_home``)."""
+    if not root or not query or _is_home(root):
         return ""
     try:
         from llm_router.context_injection import inject
 
-        enriched = inject(request, root=root, retrieval_sid=session_id, session_root=root,
+        enriched = inject(query, root=root, retrieval_sid=session_id, session_root=root,
                           reuse_repo_state=True)
-        if enriched == request or not enriched.endswith(request):
+        if enriched == query or not enriched.endswith(query):
             return ""
-        return enriched[: len(enriched) - len(request)].strip()
+        return enriched[: len(enriched) - len(query)].strip()
     except Exception:                                        # noqa: BLE001
         return ""
 
@@ -692,7 +696,7 @@ def build_pack(request: str, messages: list | None = None, *,
                project_root: str | None = None, target_window: int,
                door: str, context: str | None = None,
                target_provider: str | None = None,
-               project: str | None = None) -> ContextPack:
+               project: str | None = None, query: str | None = None) -> ContextPack:
     """Build the context pack for one request at one door.
 
     ``context`` is a caller-supplied context string (the MCP ``llm(context=)``
@@ -703,6 +707,12 @@ def build_pack(request: str, messages: list | None = None, *,
 
     ``project`` overrides the project layer verbatim when supplied, including
     an empty string; only ``None`` invokes ``_project`` and context injection.
+
+    ``query`` is the retrieval query for that project layer (OKF, semantic
+    pack) when it should differ from ``request``: a door whose request is not
+    the person's ask (the proxy's continuation step, whose request is a tool
+    result) passes the latest human ask (D-94(a)). ``None`` or blank uses
+    ``request``. It never changes ``request``, which is kept verbatim.
 
     ``target_provider`` is the privacy hook for doors: when given, ``recent``
     (session content) is emptied unless ``session_store.allows_session_content``
@@ -732,7 +742,8 @@ def build_pack(request: str, messages: list | None = None, *,
 
     instructions = _instructions(project_root)
     if project is None:
-        project = _project(request, project_root, session_id)
+        retrieval = query if isinstance(query, str) and query.strip() else request
+        project = _project(retrieval, project_root, session_id)
 
     try:
         window = int(target_window)

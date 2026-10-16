@@ -314,6 +314,7 @@ class _Backend:
 
     async def complete(self, body, timeout_s):
         self.calls.append(body)
+        self.timeouts = getattr(self, "timeouts", []) + [timeout_s]
         m, err = from_ollama({"message": {"role": "assistant", "content": "Done."}, "done_reason": "stop"}, body)
         return m, err, {"prompt_tokens": 10, "output_tokens": 2}
 
@@ -386,16 +387,23 @@ async def test_a_broken_attach_still_serves_the_step(home, tmp_path, policy, mon
 async def test_a_slow_attach_is_bounded_and_the_step_is_still_served(home, tmp_path, policy, monkeypatch):
     import time as _time
 
+    from llm_router import failopen
     from llm_router.proxy import server as proxy_server
     repo = _repo(tmp_path, "repo-a")
     monkeypatch.setattr(proxy_server, "OKF_ATTACH_TIMEOUT_S", 0.2)
     monkeypatch.setattr(okf_context, "attach", lambda *a, **k: (_time.sleep(1.0), (a[0], {}))[1])
+    codes = []
+    monkeypatch.setattr(failopen, "record", lambda code, *a, **k: codes.append(code))
     backend, up = _Backend(), _Upstream()
     t0 = _time.monotonic()
     r = await _post(_app(tmp_path, up, backend), _request(repo))
     assert r.status_code == 200 and up.requests == []
     assert backend.calls[0]["system"] == CONDENSED_SYSTEM
     assert _time.monotonic() - t0 < 0.9  # did not wait for the 1 s attach
+    # The attach cap (not the step budget) ended it: a real attach timeout, counted (review 515).
+    row = json.loads((tmp_path / "proxy_calls.jsonl").read_text().splitlines()[-1])
+    assert row["okf"] == {"status": "timeout"}
+    assert "LR-FO-PROXY-OKF-ATTACH-TIMEOUT" in codes
 
 
 async def test_pass_through_to_claude_is_never_touched(home, tmp_path, monkeypatch):
@@ -415,3 +423,131 @@ async def test_pass_through_to_claude_is_never_touched(home, tmp_path, monkeypat
     assert seen == [] and backend.calls == []
     assert json.loads(up.requests[0].content) == body
     assert b"knowledge_context" not in up.requests[0].content
+
+
+async def test_the_trim_runs_off_the_event_loop_and_is_timed(home, tmp_path, policy, monkeypatch):
+    """D-94(a): the ``fast`` trim builds the context pack (session reads, token estimates over the
+    whole prompt), so it runs in a worker thread; its time is the ``trim`` phase, outside the
+    P0.9-e decision sum."""
+    import threading
+
+    from llm_router.proxy import server as proxy_server
+    from llm_router.proxy.tiers import DECISION_PHASES
+
+    seen = []
+    real = proxy_server.apply_trims
+
+    def spy(*a, **k):
+        seen.append(threading.current_thread() is threading.main_thread())
+        return real(*a, **k)
+
+    monkeypatch.setattr(proxy_server, "apply_trims", spy)
+    repo = _repo(tmp_path, "repo-a")
+    backend, up = _Backend(), _Upstream()
+    r = await _post(_app(tmp_path, up, backend), _request(repo))
+    assert r.status_code == 200 and up.requests == []
+    assert seen == [False]
+    row = json.loads((tmp_path / "proxy_calls.jsonl").read_text().splitlines()[-1])
+    assert row["tier_phases_ms"]["trim"] >= 0 and "trim" not in DECISION_PHASES
+
+
+async def test_a_failing_trim_is_still_a_counted_fallback(home, tmp_path, policy, monkeypatch):
+    from llm_router.proxy import server as proxy_server
+
+    def boom(*a, **k):
+        raise RuntimeError("trim exploded")
+
+    monkeypatch.setattr(proxy_server, "apply_trims", boom)
+    repo = _repo(tmp_path, "repo-a")
+    backend, up = _Backend(), _Upstream()
+    r = await _post(_app(tmp_path, up, backend), _request(repo))
+    assert r.status_code == 200 and backend.calls == [] and len(up.requests) == 1
+    row = json.loads((tmp_path / "proxy_calls.jsonl").read_text().splitlines()[-1])
+    assert (row["decision"], row["reason"], row["detail"]) == (
+        "fallback", "backend_error", "RuntimeError: trim exploded")
+    assert "trim" not in (row.get("tier_phases_ms") or {})
+
+
+@pytest.mark.timing
+async def test_a_trim_that_cannot_get_a_thread_is_bounded_by_the_step_budget(home, tmp_path, policy,
+                                                                             monkeypatch):
+    """A stuck default thread pool (okf attaches outliving their timeout) must not hang the step."""
+    import time as _time
+
+    from llm_router.proxy import server as proxy_server
+
+    monkeypatch.setattr(proxy_server, "apply_trims", lambda *a, **k: (_time.sleep(1.0), a[0])[1])
+    repo = _repo(tmp_path, "repo-a")
+    backend, up = _Backend(), _Upstream()
+    t0 = _time.monotonic()
+    r = await _post(_app(tmp_path, up, backend, step_budget_s=0.2), _request(repo))
+    assert r.status_code == 200 and backend.calls == [] and len(up.requests) == 1
+    assert _time.monotonic() - t0 < 0.9
+    row = json.loads((tmp_path / "proxy_calls.jsonl").read_text().splitlines()[-1])
+    assert (row["decision"], row["reason"]) == ("fallback", "budget_exceeded")
+
+
+@pytest.mark.timing
+async def test_the_trim_and_the_backend_share_one_step_deadline(home, tmp_path, policy, monkeypatch):
+    """#508 follow-up: the backend gets what is LEFT of the step budget after the trim and the
+    okf attach, not a fresh full budget (the edit protocol already used t0 + step_budget_s)."""
+    import time as _time
+
+    from llm_router.proxy import server as proxy_server
+
+    real = proxy_server.apply_trims
+    monkeypatch.setattr(proxy_server, "apply_trims", lambda *a, **k: (_time.sleep(0.4), real(*a, **k))[1])
+    repo = _repo(tmp_path, "repo-a")
+    backend, up = _Backend(), _Upstream()
+    r = await _post(_app(tmp_path, up, backend, step_budget_s=5.0), _request(repo))
+    assert r.status_code == 200 and up.requests == [] and len(backend.calls) == 1
+    assert 0 < backend.timeouts[0] <= 5.0 - 0.4     # the trim's 0.4 s came out of the budget
+
+
+@pytest.mark.timing
+async def test_a_slow_backend_is_cut_at_the_step_deadline_not_a_fresh_budget(home, tmp_path, policy, monkeypatch):
+    """Review 515: the OUTER wait_for enforces the single deadline (httpx timeouts are per
+    operation). A 0.5 s trim plus a backend that never answers ends at ~1 budget, not 2."""
+    import asyncio as _asyncio
+    import time as _time
+
+    from llm_router.proxy import server as proxy_server
+
+    real = proxy_server.apply_trims
+    monkeypatch.setattr(proxy_server, "apply_trims", lambda *a, **k: (_time.sleep(0.5), real(*a, **k))[1])
+
+    class _Stuck(_Backend):
+        async def complete(self, body, timeout_s):
+            await _asyncio.sleep(30)
+
+    repo = _repo(tmp_path, "repo-a")
+    up = _Upstream()
+    t0 = _time.monotonic()
+    r = await _post(_app(tmp_path, up, _Stuck(), step_budget_s=1.0), _request(repo))
+    assert r.status_code == 200 and len(up.requests) == 1
+    assert _time.monotonic() - t0 < 1.45                 # one budget (1.0 s), not trim + a fresh 1.0 s
+    row = json.loads((tmp_path / "proxy_calls.jsonl").read_text().splitlines()[-1])
+    assert (row["decision"], row["reason"]) == ("fallback", "budget_exceeded")
+
+
+@pytest.mark.timing
+async def test_an_attach_cut_by_the_budget_is_not_counted_as_an_attach_failure(home, tmp_path, policy, monkeypatch):
+    """Review 515: when the step budget (not the 2 s attach cap) ends the attach, no
+    LR-FO-PROXY-OKF-ATTACH-TIMEOUT failopen is recorded; the step is a budget fallback."""
+    import time as _time
+
+    from llm_router import failopen
+    from llm_router.proxy import server as proxy_server
+
+    real = proxy_server.apply_trims
+    monkeypatch.setattr(proxy_server, "apply_trims", lambda *a, **k: (_time.sleep(0.6), real(*a, **k))[1])
+    monkeypatch.setattr(okf_context, "attach", lambda *a, **k: (_time.sleep(1.5), (a[0], {}))[1])
+    codes = []
+    monkeypatch.setattr(failopen, "record", lambda code, *a, **k: codes.append(code))
+    repo = _repo(tmp_path, "repo-a")
+    backend, up = _Backend(), _Upstream()
+    r = await _post(_app(tmp_path, up, backend, step_budget_s=1.0), _request(repo))
+    assert r.status_code == 200 and backend.calls == []
+    row = json.loads((tmp_path / "proxy_calls.jsonl").read_text().splitlines()[-1])
+    assert row["okf"] == {"status": "budget"} and row["reason"] == "budget_exceeded"
+    assert "LR-FO-PROXY-OKF-ATTACH-TIMEOUT" not in codes

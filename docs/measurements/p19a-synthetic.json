@@ -1,0 +1,98 @@
+{
+  "bar": [
+    0.9,
+    1.1
+  ],
+  "design": {
+    "synth-o3-a": {
+      "lost_continuations": 0.0,
+      "planned_prompts": 60,
+      "proxy_down_2nd_half": false
+    },
+    "synth-o3-b": {
+      "lost_continuations": 0.03,
+      "planned_prompts": 75,
+      "proxy_down_2nd_half": false
+    },
+    "synth-o3-c": {
+      "lost_continuations": 0.0,
+      "planned_prompts": 52,
+      "proxy_down_2nd_half": false
+    },
+    "synth-o3-d": {
+      "lost_continuations": 0.0,
+      "planned_prompts": 55,
+      "proxy_down_2nd_half": true
+    },
+    "synth-o3-e": {
+      "lost_continuations": 0.0,
+      "planned_prompts": 30,
+      "proxy_down_2nd_half": false
+    }
+  },
+  "excluded": {
+    "ledger_not_human": 0,
+    "meta_first": 32,
+    "no_transcript": 0,
+    "side_call_excluded": 70,
+    "step_subagent_first": 21,
+    "step_subagent_turn": 36,
+    "subagent_first": 19,
+    "unjoined": 46
+  },
+  "label": "synthetic (D-99)",
+  "measurable": 3,
+  "min_coverage": 0.95,
+  "min_prompts": 50,
+  "must": "P1.9-a",
+  "rates": {
+    "command": 0.05,
+    "failed_retry": 0.05,
+    "interrupt": 0.03,
+    "notification": 0.1,
+    "orphan": 0.15,
+    "side_call": 0.25,
+    "subagent": 0.12,
+    "subagent_mislabel": 0.3,
+    "typed_beside": 0.03
+  },
+  "seed": 20261014,
+  "sessions": {
+    "synth-o3-a": {
+      "coverage": 1.0,
+      "o3_turns": 65,
+      "ratio": 1.0,
+      "state": "PASS",
+      "typed_prompts": 65
+    },
+    "synth-o3-b": {
+      "coverage": 0.995,
+      "o3_turns": 81,
+      "ratio": 1.0,
+      "state": "PASS",
+      "typed_prompts": 81
+    },
+    "synth-o3-c": {
+      "coverage": 1.0,
+      "o3_turns": 55,
+      "ratio": 1.0,
+      "state": "PASS",
+      "typed_prompts": 55
+    },
+    "synth-o3-d": {
+      "coverage": 0.4902,
+      "o3_turns": 29,
+      "ratio": 0.5,
+      "state": "UNMEASURABLE",
+      "typed_prompts": 58
+    },
+    "synth-o3-e": {
+      "coverage": 1.0,
+      "o3_turns": 31,
+      "ratio": 1.0,
+      "state": "NOT A GATE UNIT",
+      "typed_prompts": 31
+    }
+  },
+  "verdict": "PASS"
+}

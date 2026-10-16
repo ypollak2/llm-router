@@ -1,4 +1,4 @@
-"""D-14 = A, one copy for every door: a Q&A task type is never served by a local provider.
+"""D-14/D-114/D-115/D-116: local Q&A fallback after non-Claude providers, before Claude.
 
 Evidence behind the rule: real Q&A prompts, local qwen 4/37 acceptable vs Sonnet 34/37
 (PLAN §0.3 [RX]); 65 local Q&A answers in 7 days [U]. M3.0 (#297) applied it to MCP
@@ -8,7 +8,7 @@ same rule.
 
 Why a separate module: the hook path must not import ``llm_router.router`` (cold import
 ~3.6 s; import time was ~77% of the slow hook tail [M41]). This module imports only
-``llm_router.types``, which the hook path already loads.
+``llm_router.types`` and the lightweight ``llm_router.contracts``.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from llm_router.contracts import CLAUDE_PROVIDERS
 from llm_router.types import LOCAL_PROVIDERS
 
 log = logging.getLogger("llm_router.qa_policy")
@@ -45,17 +46,20 @@ def _provider(entry: Any) -> str:
 
 
 def strip_local_for_qa(models: list, task_type: Any, *, keep_if_only_local: bool = True) -> list:
-    """Drop local providers from a chain when the task type is Q&A (D-14 = A).
+    """Order local Q&A fallbacks after the last non-Claude entry (D-116).
 
-    The next entry in the chain's existing order serves the call, so nothing is
-    reordered. Code task types (and every non-Q&A type) pass through unchanged, so a
-    ``code`` task can still go local. ``task_type`` may be a ``TaskType`` or a string.
+    D-114/D-115 amended D-14 for MCP ``route_and_call`` (including gateway and
+    route server), SDK, and zero-Claude hook callers. ``keep_if_only_local=True``
+    now retains locals even when a non-Claude provider is listed: insert them
+    after the last non-Claude entry in the non-local chain, or at the start if
+    none exists. Relative order within the local and kept groups is preserved.
+    A listed provider may fail at call time, so local ($0) is tried before the
+    trailing Claude entries. A weaker local answer may win over a working Claude.
 
-    ``keep_if_only_local`` (default True, the MCP ``route_and_call`` behaviour): when
-    nothing but local providers remain, return the chain as is, because an empty chain
-    fails an MCP call with "install Ollama". The hook and SDK pass False: there an empty
-    chain makes ``execute_chain`` return None and the turn falls through to Claude, the
-    same mechanism ``build_chain`` already uses for research.
+    With False (normal hook DIRECT path only), strip all local entries even if
+    the chain becomes empty or Claude-only; the host Claude session handles the
+    turn without an API key. Non-Q&A types pass through unchanged. ``task_type``
+    may be a ``TaskType`` or string. No local entries means the chain is unchanged.
 
     The caller must not apply this to an explicit ``model_override``: that is the
     caller's own pin, not routing.
@@ -64,8 +68,19 @@ def strip_local_for_qa(models: list, task_type: Any, *, keep_if_only_local: bool
     if tt not in QA_TASK_TYPES:
         return models
     kept = [m for m in models if _provider(m) not in QA_STRIP_PROVIDERS]
-    if not kept and keep_if_only_local:
+    local = [m for m in models if _provider(m) in QA_STRIP_PROVIDERS]
+    if not local:
         return models
+    if keep_if_only_local:
+        position = max(
+            (i for i, m in enumerate(kept) if _provider(m) not in CLAUDE_PROVIDERS),
+            default=-1,
+        ) + 1
+        log.debug(
+            "D-116: re-inserted %d local model(s) at position %d in the %s chain",
+            len(local), position, tt,
+        )
+        return kept[:position] + local + kept[position:]
     if len(kept) != len(models):
         log.debug("D-14: dropped %d local model(s) from the %s chain", len(models) - len(kept), tt)
     return kept

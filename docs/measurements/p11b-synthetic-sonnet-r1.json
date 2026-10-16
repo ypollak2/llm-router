@@ -1,0 +1,1101 @@
+{
+  "checked": 120,
+  "equivalent": 120,
+  "git_dirty_src": false,
+  "git_sha": "00ae0d995b412f59ddad8c1c0a8edcdc6e34f0c6",
+  "items": 60,
+  "label": "synthetic (D-99)",
+  "model": "anthropic/claude-sonnet-5-5",
+  "must": "P1.1-b",
+  "prereg": "PREREG-P11B-synthetic-R1.md",
+  "prereg_sha256": "203460e0c43a3643444fcc10cf96b8980344f3f326af5c4a0066f4697baea2d3",
+  "repair": "R1 (D-101 real windows)",
+  "rows": [
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-000-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-001-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-002-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-003-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-004-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-005-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-006-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-007-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-008-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-009-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-010-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-011-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-012-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-013-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-014-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-015-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-016-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-017-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-018-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-019-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-020-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-021-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-022-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-023-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-024-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-025-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-026-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-027-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-028-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-029-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-030-early_user",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-031-early_user",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-032-early_user",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-033-early_user",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-034-early_user",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-035-early_user",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-036-early_user",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-037-early_user",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-038-early_user",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-039-early_user",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-040-early_tool",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-041-early_tool",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-042-early_tool",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-043-early_tool",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-044-early_tool",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-045-early_tool",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-046-early_tool",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-047-early_tool",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-048-early_tool",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-049-early_tool",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-050-early_assistant",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-051-early_assistant",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-052-early_assistant",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-053-early_assistant",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-054-early_assistant",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-055-early_assistant",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-056-early_assistant",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-057-early_assistant",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-058-early_assistant",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "gateway",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-059-early_assistant",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-000-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-001-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-002-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-003-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-004-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-005-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-006-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-007-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-008-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-009-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-010-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-011-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-012-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-013-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-014-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-015-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-016-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-017-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-018-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-019-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-020-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-021-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-022-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-023-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-024-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-025-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-026-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-027-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-028-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-029-recent",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-030-early_user",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-031-early_user",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-032-early_user",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-033-early_user",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-034-early_user",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-035-early_user",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-036-early_user",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-037-early_user",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-038-early_user",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-039-early_user",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-040-early_tool",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-041-early_tool",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-042-early_tool",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-043-early_tool",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-044-early_tool",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-045-early_tool",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-046-early_tool",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-047-early_tool",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-048-early_tool",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-049-early_tool",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-050-early_assistant",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-051-early_assistant",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-052-early_assistant",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-053-early_assistant",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-054-early_assistant",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-055-early_assistant",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-056-early_assistant",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-057-early_assistant",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-058-early_assistant",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    },
+    {
+      "door": "sdk",
+      "equivalent": true,
+      "full_mode": true,
+      "item": "p11b-059-early_assistant",
+      "no_summary": true,
+      "same_messages": true,
+      "token_present": true
+    }
+  ],
+  "stratum": "sonnet",
+  "verdict": "PASS by construction",
+  "windows": {
+    "gateway": 65536,
+    "sdk": 65536
+  }
+}

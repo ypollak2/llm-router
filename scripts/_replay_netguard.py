@@ -1,9 +1,10 @@
 """Outbound-connection guard for ``scripts/synthetic_replay.py``.
 
 The replay harness writes this file, followed by an ``install(...)`` call carrying the
-run's allowlist and violations path, as ``sitecustomize.py`` into the site-packages of a
-scratch venv, and starts every child with that venv's interpreter. Python imports
-``sitecustomize`` at start-up, so the guard is active before any hook or proxy code runs,
+run's allowlist and violations path, into the site-packages of a scratch venv, plus a
+``.pth`` file that imports it, and starts every child with that venv's interpreter. site.py
+runs ``.pth`` import lines at start-up (a distribution's own ``sitecustomize`` cannot shadow
+them, as it shadowed the earlier ``sitecustomize.py`` install), so the guard is active before any hook or proxy code runs,
 with or without any environment variable: a grandchild started with an emptied
 environment is still guarded as long as it runs that interpreter (``sys.executable``).
 The harness also calls :func:`install` / :func:`uninstall` in its own process around a run.
@@ -14,9 +15,12 @@ allowlist is refused BEFORE a packet leaves the process: the call raises, and on
 appended to the violations file. The harness fails the run when that file is non-empty.
 
 NOT covered: a process that does not run the scratch interpreter (a non-Python binary, a
-different Python). The harness shadows the network clients it knows of on PATH instead.
+different Python), and a child started with ``-S`` (no ``site``, so no ``.pth``). The harness
+shadows the network clients it knows of on PATH instead, and checks at start-up that the
+guard is live in an empty-environment child.
 
-Environment fallback (only when no baked call ran):
+Environment fallback (only when this file is imported AS ``sitecustomize``; the baked copy and
+the harness's own copy never read it, so the run's allowlist always wins):
   LLM_ROUTER_REPLAY_ALLOW       comma list of ``host:port`` that may be contacted
   LLM_ROUTER_REPLAY_VIOLATIONS  file that receives one JSON line per refused attempt
 Unix-domain sockets are always allowed (no network). Nothing else is.
@@ -61,7 +65,7 @@ def _record(kind: str, host: object, port: object) -> None:
 
 def install(allow: str | None = None, violations: str | None = None) -> None:
     """Patch ``socket`` in this process. ``allow`` / ``violations`` default to the
-    environment variables above (the ``sitecustomize`` path)."""
+    environment variables above (the environment fallback)."""
     if getattr(socket, "_llm_router_replay_guard", False):
         return
     if violations:
@@ -119,5 +123,8 @@ def uninstall() -> None:
     _VIOLATIONS[:] = []
 
 
-if os.environ.get("LLM_ROUTER_REPLAY_VIOLATIONS"):
+# Only as a real ``sitecustomize``: the baked copy (``_replay_netguard_baked``) and the
+# harness's own copy (``_replay_netguard_self``) pass the run's values to ``install``, and an
+# inherited LLM_ROUTER_REPLAY_* must not get there first (``install`` keeps the first call).
+if __name__ == "sitecustomize" and os.environ.get("LLM_ROUTER_REPLAY_VIOLATIONS"):
     install()
