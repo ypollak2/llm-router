@@ -18,10 +18,13 @@ llm-router prefer --list | --remove p1 | --clear
   three English and three Hebrew examples; nothing is written. Free-form parsing is a
   separate, later item.
 - The parsed rule is echoed. A terminal asks `[y/N]`; without a terminal, pass `--yes`
-  (exit 3 otherwise). `--dry-run` writes nothing. Over MCP,
-  the setup tool's `prefer` action (registered only on the full tool surface, not the
-  default consolidated one) echoes when called with `text`, and stores when called
-  again with `confirm=true`.
+  (exit 3 otherwise). `--dry-run` writes nothing. Over MCP, use
+  `llm_router_admin(action="prefer", value="<text>")`: it returns the parsed rules and a
+  confirm token and writes nothing. Store by calling again with
+  `value='{"text": "<text>", "confirm": "<token>"}'`. The token is bound to the text and
+  the currently stored rules, so a stale or invented token stores nothing. (The setup
+  tool's own `prefer` action does the same with `confirm=true`, but that tool is only on
+  the full tool surface.)
 - Contradictions are refused at write time: an order cycle, a ban on an order's first
   target, bans that exclude every provider, `only local` with ollama banned, a cap out of
   range (day n >= 1, percent 1-100).

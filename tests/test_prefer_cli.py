@@ -236,3 +236,94 @@ def test_mutant_g4_parser_accepting_unknown_phrases_turns_refusal_red(path, monk
 
     monkeypatch.setattr(prefer_grammar, "parse", lenient)
     assert not _refused_phrasings_write_nothing(path), "mutant G4 survived"
+
+
+# ── llm_router_admin(action="prefer"): the consolidated door (D-151) ─────────
+
+def _admin_tool():
+    """The real registered MCP tool, called through an MCP server."""
+    # A fresh MCPServer with the real registration function: importing
+    # llm_router.server in-process leaks global state into other tests.
+    from mcp.server.mcpserver import MCPServer
+
+    from llm_router.tools import consolidated
+
+    mcp = MCPServer("p213-admin-door")
+    consolidated.register(mcp)
+
+    def call(action, value=""):
+        result = asyncio.run(mcp.call_tool("llm_router_admin", {"action": action, "value": value}, None))
+        content = getattr(result, "content", None)
+        if content is None:
+            content = result[0] if isinstance(result, tuple) else result
+        return "".join(getattr(b, "text", str(b)) for b in content)
+
+    return call
+
+
+def _token(echoed: str) -> str:
+    import re
+
+    return re.search(r'"confirm": "([0-9a-f]{12})"', echoed).group(1)
+
+
+def test_admin_door_two_step_store_preserves_bytes(path):
+    call = _admin_tool()
+    step1 = call("prefer", "never claude opus")
+    assert "claude-opus*" in step1 and "Nothing stored" in step1
+    assert path.read_bytes() == ORIGINAL                      # step 1 writes nothing
+    step2 = call("prefer", json.dumps({"text": "never claude opus", "confirm": _token(step1)}))
+    assert "Stored p1" in step2
+    data = path.read_bytes()
+    assert data.startswith(ORIGINAL) and [r["kind"] for r in user_rules.read_rules(path)] == ["ban"]
+    assert "Already stored" in call("prefer", json.dumps(
+        {"text": "never claude opus", "confirm": _token(call("prefer", "never claude opus"))}))
+
+
+def test_admin_door_wrong_or_stale_token_stores_nothing(path):
+    call = _admin_tool()
+    step1 = call("prefer", "no openai")
+    assert "Not stored" in call("prefer", json.dumps({"text": "no openai", "confirm": "000000000000"}))
+    assert "Not stored" in call("prefer", json.dumps({"text": "no groq", "confirm": _token(step1)}))
+    call("prefer", json.dumps({"text": "no codex", "confirm": _token(call("prefer", "no codex"))}))
+    stale = json.dumps({"text": "no openai", "confirm": _token(step1)})  # rules changed since
+    assert "Not stored" in call("prefer", stale)
+    assert [r["text"] for r in user_rules.read_rules(path)] == ["no codex"]
+    assert "Bad value" in call("prefer", "{not json")
+
+
+def test_admin_door_refusals_return_examples_and_write_nothing(path):
+    call = _admin_tool()
+    for text in FIXTURE["refused"] + [""]:
+        out = call("prefer", text)
+        assert "Stored" not in out
+    assert "Examples" in call("prefer", "make it faster")
+    call("prefer", json.dumps({"text": "codex before claude",
+                               "confirm": _token(call("prefer", "codex before claude"))}))
+    before = path.read_bytes()
+    conflict = call("prefer", "claude before codex")
+    assert "cycle" in conflict and "Nothing stored" not in conflict
+    assert path.read_bytes() == before
+
+
+def test_mutant_admin_door_storing_on_first_call_turns_the_two_step_red(path, monkeypatch):
+    from llm_router.commands import prefer as prefer_cmd
+
+    def two_step_holds() -> bool:
+        path.write_bytes(ORIGINAL)
+        _admin_tool()("prefer", "no openai")
+        return path.read_bytes() == ORIGINAL
+
+    assert two_step_holds()
+    real = prefer_cmd._confirm_token
+    monkeypatch.setattr(prefer_cmd, "_confirm_token", lambda text: real(text))
+    original_eval = prefer_cmd.evaluate
+
+    def storing_evaluate(text):
+        rules, refusal, echo = original_eval(text)
+        if not refusal:
+            user_rules.add_rules(rules, text)  # the mutant: store before any confirm
+        return rules, refusal, echo
+
+    monkeypatch.setattr(prefer_cmd, "evaluate", storing_evaluate)
+    assert not two_step_holds(), "mutant survived: nothing checks that step 1 writes nothing"

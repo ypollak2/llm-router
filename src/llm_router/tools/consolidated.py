@@ -321,7 +321,9 @@ def _cache_view(period: str) -> str:
 async def llm_router_admin(action: str, value: str = "") -> str:
     """Config/admin door — collapses the mutating/config llm_* tools into one
     *action* selector: set_profile (value=profile) · import_profile (value=url) ·
-    clear_cache · policy · budget. Old tools stay as aliases underneath."""
+    clear_cache · policy · budget · prefer (value=priority text, e.g. "codex before claude";
+    returns the parsed rules and a confirm token, stores nothing; store by calling again with
+    value=JSON {"text": ..., "confirm": token}). Old tools stay as aliases underneath."""
     a = (action or "").lower()
     if a == "set_profile":
         return await llm_set_profile(value)
@@ -333,7 +335,11 @@ async def llm_router_admin(action: str, value: str = "") -> str:
         return await llm_policy()
     if a == "budget":
         return await llm_budget()
-    return f"unknown admin action: {action!r} (try set_profile/import_profile/clear_cache/policy/budget)"
+    if a == "prefer":
+        from llm_router.commands.prefer import admin_prefer
+
+        return admin_prefer(value)
+    return f"unknown admin action: {action!r} (try set_profile/import_profile/clear_cache/policy/budget/prefer)"
 
 
 async def llm_router_session(
