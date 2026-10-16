@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from llm_router.codex_agent import is_codex_available, run_codex
+from llm_router.toolcall_text import neutralise_text
 
 
 async def llm_codex(
@@ -62,7 +63,7 @@ async def llm_codex(
     lines = [
         f"{status} **Codex** (`{result.model}`) — {result.duration_sec:.1f}s",
         "",
-        result.content,
+        neutralise_text(result.content, "llm_codex"),  # F4 (D-139)
     ]
     return "\n".join(lines)
 
