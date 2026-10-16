@@ -58,7 +58,7 @@ from urllib.parse import urlsplit
 from llm_router.local_agent import DEFAULT_MAX_PROMPT_TOKENS, LocalAgentConfig, enabled_from_env
 from llm_router.local_agent import capability as la_capability
 from llm_router.local_agent.compact import session_cwd as la_session_cwd
-from llm_router import failopen, local_models, prompt_key, shadow_frontier
+from llm_router import authority, failopen, local_models, prompt_key, shadow_frontier
 from llm_router import prefixes as user_prefixes
 from llm_router.proxy import haiku_arm, haiku_guard, ledger, llm_shadow, local_mode, local_shadow, okf_context
 from llm_router.proxy import escalation
@@ -87,7 +87,7 @@ from llm_router.proxy.loop_guard import (
     REASON_LOOP_GUARD,
     LoopGuard,
 )
-from llm_router.proxy.cache_cost import Stickiness, conversation_key
+from llm_router.proxy.cache_cost import ReadOnlyStickiness, Stickiness, conversation_key
 from llm_router.proxy.steps import (
     STEP_CLASSES, classify_text, has_client_tools, is_first_call, is_thread_continue, newest_human_text, session_id_of,
     step_class, step_fields, thread_parent, turn_fields,
@@ -770,7 +770,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         phases = row.setdefault("tier_phases_ms", {})
         phases[name] = round(phases.get(name, 0.0) + ms, 2)
 
-    async def decide_tier(body: dict, row: dict):
+    async def decide_tier(body: dict, row: dict, sticky_view=None):
         """The tier rewrite's decision, written onto ``row``. Any error forwards
         the call unchanged and says why: this path must never cost a call."""
         t0 = time.monotonic()
@@ -779,9 +779,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             if unlabelled:
                 # The call could not be labelled: no classification, no arm; the
                 # conversation's sticky tier (or the pin) holds, else it is forwarded as sent.
-                decision = tier_policy.decide_unclassified(body, row.get("session_id"), sticky)
+                decision = tier_policy.decide_unclassified(body, row.get("session_id"), sticky_view or sticky)
             else:
-                decision = await tier_policy.decide(body, row.get("session_id"), sticky)
+                decision = await tier_policy.decide(body, row.get("session_id"), sticky_view or sticky)
         except Exception as exc:  # noqa: BLE001 - fail-safe: forward unchanged
             row.update(served_model=body.get("model"), tier=None, tier_reason=REASON_DECISION_ERROR,
                        tier_proposed=None,
@@ -960,6 +960,23 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if msg_id and not row.get("msg_id"):
             row["msg_id"] = msg_id
 
+    async def advise_forward(request: Request, raw: bytes, body: dict, row: dict):
+        """Authority ``advise`` (P2.2-A, D-150): no local serving, no rewrite, no prefix
+        strip. The tier policy still decides, on a READ-ONLY view of the stickiness (a
+        proposal that is never applied must not pin later turns; the classifier shadow
+        may still run), so the ledger keeps ``tier_proposed`` and the ``tier_*`` detail,
+        and the would-be reason moves to ``tier_reason_proposed``. The client's own bytes
+        go upstream; the row says the requested model was served."""
+        if tier_policy is not None:
+            await decide_tier(body, row, ReadOnlyStickiness(sticky))
+            proposed = row.get("tier_reason")
+            if proposed is not None:
+                row["tier_reason_proposed"] = proposed
+            row.update(served_model=body.get("model"), tier=None, tier_switch=False,
+                       tier_switch_cost_usd=None)
+        row["tier_reason"] = authority.ADVISE
+        return await forward(request, raw, body, row)
+
     async def handle(request: Request):
         from llm_router.route_server import is_forbidden_cross_origin
 
@@ -1031,6 +1048,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             except Exception as exc:  # noqa: BLE001 -- telemetry is fail-open
                 failopen.record("LR-FO-PROXY-PREFIX", exc)
 
+        # P2.2-A: per request, so `llm-router mode advise|route` needs no restart. Advise is
+        # shadow under the P2.7 precedence (D-150): a prefix does not beat it, so even a
+        # user's `opus:` forwards the ORIGINAL bytes, unstripped, on the requested model.
+        row["authority"] = authority.mode()
+        if row["authority"] == authority.ADVISE:
+            if ov is not None:
+                prefix_outcome("advise:not_applied")
+            return await advise_forward(request, raw, body, row)
         # Decisions always see the original body. Only serving uses this copy.
         sent_body = stripped_body if ov is not None and ov.is_claude else None
         sent_raw = json.dumps(sent_body).encode() if sent_body is not None else raw

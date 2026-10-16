@@ -148,8 +148,66 @@ Usage:
                                      for every Claude Code session (docs/proxy.md).
                                      Verifies the proxy answers before touching settings.json.
   llm-router install --proxy-default off Revert it (same as `llm-router uninstall`)
+  llm-router install --authority route|advise
+                                     Install the proxy default (with its fail-open shim) AND
+                                     set the routing authority (`llm-router mode`). Plain
+                                     `install` leaves routing authority off.
+  llm-router install --no-authority      Never turn the proxy default on from this install
   llm-router install --help, -h          Show this help and exit (no changes made)
 """
+
+
+# Owner switch (D-104, PLAN-v16 P2.2): when True, a FRESH plain `llm-router install`
+# (no proxy-default sentinel, no ANTHROPIC_BASE_URL in settings.json) also installs the
+# proxy default with authority "route". It ships False: merging or deploying this code
+# changes nothing on a live install until the owner runs `install --authority` (or
+# flips this constant in a separate, owner-approved change).
+PROXY_DEFAULT_ON_INSTALL = False
+
+_AUTHORITY_HINT = (
+    "Routing authority is OFF by default; run `llm-router install --authority route` "
+    "(or advise) to enable it."
+)
+
+
+def _install_authority(mode: str) -> int:
+    """The explicit proxy-default install (``cmd_proxy_default``: fail-open shim included;
+    settings.json is touched only by that existing path, and only once the proxy answers),
+    then the mode. A refused install returns its non-zero code and sets no mode."""
+    from llm_router import authority
+    from llm_router.commands.proxy_default import cmd_proxy_default
+
+    rc = cmd_proxy_default("on")
+    if rc != 0:
+        print(f"  {_yellow('The routing authority was not set.')}\n")
+        return rc
+    authority.set_mode(mode)
+    print(_ok(f"routing authority: {mode} (change it any time with `llm-router mode advise|route`)"))
+    return 0
+
+
+def _fresh_for_proxy_default() -> bool:
+    """No sentinel, and settings.json (absent, or parseable) names no ANTHROPIC_BASE_URL."""
+    import json
+
+    from llm_router import proxy_default as pd
+    from llm_router.install_hooks import settings_path
+
+    if pd.read_sentinel() is not None:
+        return False
+    path = settings_path()
+    if not path.exists():
+        return True
+    try:
+        env = json.loads(path.read_text()).get("env")
+    except (OSError, ValueError, AttributeError):
+        return False  # unreadable: never treat as fresh
+    return not (isinstance(env, dict) and env.get("ANTHROPIC_BASE_URL"))
+
+
+def _flag_value(args: list[str], flag: str) -> str | None:
+    idx = args.index(flag)
+    return args[idx + 1].strip().lower() if idx + 1 < len(args) and not args[idx + 1].startswith("--") else None
 
 
 def cmd_install(args: list[str]) -> int:
@@ -168,7 +226,31 @@ def cmd_install(args: list[str]) -> int:
         sub = args[idx + 1].strip().lower() if idx + 1 < len(args) and not args[idx + 1].startswith("--") else "on"
         from llm_router.commands.proxy_default import cmd_proxy_default
         return cmd_proxy_default(sub)
+    if "--authority" in args:
+        from llm_router import authority
+
+        value = _flag_value(args, "--authority")
+        if value not in authority.MODES:
+            print("llm-router install: --authority takes route or advise", file=sys.stderr)
+            return 2
+        if "--no-authority" in args:
+            print("llm-router install: --authority and --no-authority contradict each other", file=sys.stderr)
+            return 2
+        return _install_authority(value)
     _run_install(args)
+    return _after_plain_install(args)
+
+
+def _after_plain_install(args: list[str]) -> int:
+    """The default-safe authority step of a plain install (see PROXY_DEFAULT_ON_INSTALL)."""
+    if "--no-authority" in args or "--check" in args or "--project" in args:
+        return 0
+    if "--host" in args and _flag_value(args, "--host") not in (None, "claude-code"):
+        return 0
+    if PROXY_DEFAULT_ON_INSTALL and _fresh_for_proxy_default():
+        return _install_authority("route")
+    if not PROXY_DEFAULT_ON_INSTALL:
+        print(_dim(f"  {_AUTHORITY_HINT}"))
     return 0
 
 
