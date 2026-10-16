@@ -1,6 +1,6 @@
-# PREREG-CLS-DEV (r3): DEV screening of learned tier classifiers (PLAN v16 CLS-v16, D-127..D-130)
+# PREREG-CLS-DEV (r4): DEV screening of learned tier classifiers (PLAN v16 CLS-v16, D-127..D-130)
 
-Revision r3 (2026-10-16, after the r1 and r2 freeze-guard reviews and coordinator decisions D-132, D-134, D-135). Status: DRAFT. Not frozen. This file is frozen only when `PREREG-CLS-DEV.sha256` exists beside it and
+Revision r4 (2026-10-16, after the r1-r3 freeze-guard reviews and coordinator decisions D-132, D-134, D-135). Status: DRAFT. Not frozen. This file is frozen only when `PREREG-CLS-DEV.sha256` exists beside it and
 `scripts/check_prereg.py` reports a match, after an independent freeze-guard review says READY. Changing
 any byte changes the hash. The freeze record is the last section. The author of this draft did not
 review it.
@@ -38,12 +38,15 @@ The runner for everything in sections 1.3, 6, 7 (candidate fitting and scoring i
 (`scripts/cls_dev_run.py`, brief `brief-cls-b0.txt`); the scorer and threshold fit are B1 (`scripts/cls_eval.py`).
 The relabel runner, generator runner, resemblance tool, send library and `PINS.json` builder are build **B-L**
 (`scripts/cls_label_run.py`, `cls_gen_run.py`, `cls_resemble.py`, `cls_send_lib.py`, `cls_pins.py`, brief
-`brief-cls-bl.txt`). `PINS.json` pins every script's sha256 (section 15).
+`brief-cls-bl.txt`). `PINS-STATIC.json` pins every script's sha256 at the freeze (section 15).
 
 ## 0a. Order of events (r3)
 
-1. Freeze this prereg, the generator spec (version 1) and `PINS.json` (section 15). The builds B0, B1, B-L (and
-   B2/B3 for later steps) merge **before** the freeze, because `cls_pins.py --verify` needs them.
+1. Freeze this prereg, the generator spec (version 1) and **`PINS-STATIC.json`** (section 15). The builds B0, B1,
+   B-L merge **before** the freeze, because `cls_pins.py --verify` pins them. **B2 and B3 may merge after the
+   freeze**: the engine is pinned by commit (`git show`), so a later merge does not change a pin.
+   Run-time values are pinned in **`PINS-RUN`** addenda written, hashed and logged before their first use
+   (sections 0a steps 2-4 and 15).
 2. **Attach step and manifest first** (counts and text, no labels): the real-DEV items, groups, length-band counts,
    dedup and secret exclusion (section 1.3). The manifest's **length-band counts file** is the only input the
    generator takes from real data (aggregate counts). There is no provisional-shares fallback: generation does not
@@ -121,11 +124,11 @@ only 0600 files under `$CLS/dev/` (the P17D attach pattern, D-107 c). It: (1) ta
 item files that produced its labels (held under `$PP`); (2) recovers `session_id`, record timestamp and
 `requested_tier` by the P17D attach rules (the GE3 record rules `gt500.py` `9cde774d...` and `supply.py`
 `12cd3e1e...`, the `sha256(text)` join, earliest record wins); (3) reads, read-only, the exclusion list
-`denylist.txt` that the P17D attach read (path named in `PINS.json` with its sha256; its semantics is an
+`denylist.txt` that the P17D attach read (path named in `PINS-STATIC.json` with its sha256; its semantics is an
 exclusion list of prompts, 0 entries at P17D, so any prompt matching an entry is excluded and counted) and the
 **values of keys in the owner's `.env` whose name matches `KEY|TOKEN|SECRET|PASSWORD|PASS`, of length >= 8,
-empty values skipped** (path named in `PINS.json`; only the count of qualifying values and the file sha256 are
-recorded; values are held in memory, never printed; **the `.env` sha256 changing is intentional and no snapshot
+empty values skipped** (path named in `PINS-STATIC.json`; only the count of qualifying values and the file sha256 are
+recorded; **the `.env` sha256 is also logged at each use**; values are held in memory, never printed; **the `.env` sha256 changing is intentional and no snapshot
 of the file is kept**); (4) joins existing labels: Opus (and Sonnet for GE3) labels
 are keyed by `text_sha` in the earlier `labels.jsonl` files (`{text_sha, session_id, truth}`); the manifest holds
 the `text_sha -> item_id` map and joins by `(session_id, text_sha)` as `shadow_eval.load_labels` does, falling
@@ -294,13 +297,16 @@ Codex; `claude -p` runs with its tools disabled), text via **stdin** (never argv
   sent (a read-only sandbox may still read the filesystem), and the exposure is then a decision, not a default.
   A negative result is **evidence, not proof** (the model may have declined or failed for other reasons); it is
   logged as such and the section 13 residual stands.
-* **Session logs.** The CLIs keep copies of what they were sent: `claude -p` transcripts under `~/.claude/projects`
-  (avoided here by `--no-session-persistence`; verified by listing at the end) and Codex session logs under
-  `~/.codex`. The harness uses the Codex CLI's non-persistence option if the installed build has one (verified
-  from `--help` at pin time and recorded in `PINS.json`). Otherwise the coordinator lists the Codex session-log
-  directory after the run (this prereg's author never reads `~/.codex`), records retention, and purges what the
-  run created (only files created during the run, by path, never by pattern). The listing and the purge are
-  in the log.
+* **Session logs.** The CLIs keep copies of what they were sent. `claude -p` (Claude Code 2.1.299, whose help text
+  lists `--safe-mode`, `--setting-sources`, `--no-session-persistence`, `--settings`; `--bare` exists and is not
+  used) runs with `--no-session-persistence`, so no transcript is written under `~/.claude/projects` (verified by
+  a listing at the end). `codex exec` (Codex 0.161.0, whose help text lists `-s/--sandbox`, `-C/--cd`,
+  `--skip-git-repo-check`, `--json`, `-m` and **`--ephemeral`**, "Run without persisting session files to disk")
+  runs with `--ephemeral`; **Codex has no `--no-session-persistence`**. The versions and flags above come from the
+  coordinator's help-text check on 2026-10-16; `PINS-STATIC.json` records the actual `--help` output at freeze.
+  If a listing after a run shows Codex session files were nevertheless created, the coordinator lists the
+  directory (this prereg's author never reads `~/.codex`), records retention, and purges what the run created
+  (only files created during the run, by path, never by pattern); the listing and purge are in the log.
 
 ### 3.3 Label procedure
 
@@ -320,7 +326,8 @@ Codex; `claude -p` runs with its tools disabled), text via **stdin** (never argv
   a voided GPT this is exactly `gpt_excluded` (Opus + Sonnet). The result is **labelled** (`TRUTH_FALLBACK:<judge>`),
   criterion 8 on the voided judge is not evaluable, and the coordinator brings it to the owner. This applies to
   real DEV and to DEV-SYN alike (an Opus or Sonnet void on DEV-SYN falls back to the other two). The fallback is
-  fixed here before any label exists; it is not chosen afterwards.
+  fixed here before any label exists; it is not chosen afterwards. **If two judges are voided in the same set, that
+  set is NOT INFORMATIVE** (one judge cannot define truth; no screen result is drawn from it).
 * A failed batch is retried up to 3 times, then items one at a time; an item still unlabelled is a label error,
   counted.
 * Resume state: the append-only `labels_<judge>.jsonl` and `plants_<judge>.jsonl`. A resumed run re-checks the
@@ -356,7 +363,7 @@ declined, D-R8-2); this is a stated gap.
 ## 4. Scoring (identical to the TEST scoring, so DEV numbers predict TEST numbers)
 
 The scorer is `scripts/cls_eval.py` (build B1, brief `brief-cls-b1.txt`), over the cost functions of
-`src/llm_router/shadow_eval.py` (sha256 pinned in `PINS.json`; at the r2 base the full hash is `e9b89943f33b68b3095c5d2ea57976147368e0e6f28490aea7e74a82e32b1c57`):
+`src/llm_router/shadow_eval.py` (sha256 pinned in `PINS-STATIC.json`, by commit; at the r2 base the full hash is `e9b89943f33b68b3095c5d2ea57976147368e0e6f28490aea7e74a82e32b1c57`):
 
 * c(haiku) = 1.0, c(sonnet) = 2.7, c(opus) = 6.15, lambda = 2; `C-lambda2-clamp` = mean of
   c(min(pred, requested)) plus 2 c(truth) when the clamped pred is below truth; under-route is unclamped
@@ -582,7 +589,8 @@ build or test run, which competes with Codex-build verification on the same mach
 
 ## 11. Run order, spend and stop rule
 
-1. Builds merge; freeze-guard review; freeze prereg, spec v1 and `PINS.json` (section 15).
+1. Builds B0, B1, B-L merge; freeze-guard review; freeze prereg, spec v1 and `PINS-STATIC.json` (section 15). B2/B3
+   may merge later.
 2. Attach step and manifest (counts and text, no labels), scrubber self-test, independent scan, Codex canary.
 3. DEV-SYN generation and resemblance iteration (max 3 versions, DEV-SYN numbers only); freeze vN; TEST-SYN
    generated once under vN by the separate agent, resemblance checked inside its step, chmod 0000, hashes
@@ -676,25 +684,34 @@ percent ($16)**. OpenRouter only under section 3.1, shared $20 cap (D-128), per-
 
 Not frozen. To freeze: the coordinator commissions an independent freeze-guard review (not the author, without
 the conversation). On READY write `PREREG-CLS-DEV.sha256` as `<sha256>  PREREG-CLS-DEV.md`, then
-`frozen_utc <UTC stamp from date -u>`, then **`pins_sha256 <sha256 of PINS.json>`**; `scripts/check_prereg.py`
-must report a match and `cls_pins.py --verify` must report every pin matched.
+`frozen_utc <UTC stamp from date -u>`, then **`pins_sha256 <sha256 of PINS-STATIC.json>`**;
+`scripts/check_prereg.py` must report a match and `cls_pins.py --verify` must report every STATIC pin matched.
 
-**`PINS.json`** (built by the B-L `pins` subcommand, hashed, committed with the freeze) holds: the sha256 of
-`scripts/cls_eval.py`, `cls_dev_run.py`, `cls_dev_lib.py`, `cls_label_run.py`, `cls_gen_run.py`,
-`cls_resemble.py`, `cls_send_lib.py`, `cls_pins.py`; the engine commit sha and the sha256 of `src/llm_router/engine.py`; the **full**
-sha256 of `src/llm_router/shadow_eval.py`; **both pinned by commit** (the content hashed is `git show <commit>:path`,
-not the working tree) (at the r2 base
+**Two pin files (r4).** Only STATIC pins are freeze blockers.
+
+**`PINS-STATIC.json`** (built by the B-L `pins --static` subcommand, hashed, committed with the freeze) holds what
+exists at the freeze: the sha256 of `scripts/cls_eval.py`, `cls_dev_run.py`, `cls_dev_lib.py`, `cls_label_run.py`,
+`cls_gen_run.py`, `cls_resemble.py`, `cls_send_lib.py`, `cls_pins.py`; the engine commit sha and the sha256 of
+`src/llm_router/engine.py` and the **full** sha256 of `src/llm_router/shadow_eval.py`, **both pinned by commit**
+(the hashed content is `git show <commit>:path`, not the working tree; at the r2 base the shadow_eval hash is
 `e9b89943f33b68b3095c5d2ea57976147368e0e6f28490aea7e74a82e32b1c57`); the rubric md5
-(`1bcb3f441a0c9d056b3343a9d47c5565`) and the sha256 of `rubric.py`; the **rules-tier file** (sha256, schema
-version, provenance: the resolver commit and resolution time; schema in the B0 brief); the exclusion-list and
-`.env` paths with sha256 and entry counts; the Ollama version and digests of `nimble:9b`, `qwen3.5:latest`,
-`qwen3-coder:30b`, `nomic-embed-text`; the bge-small snapshot dir name; the `claude` and `codex` CLI versions and the
-model ids used for judging and generating; the generator templates, `gen_config.json`, the 12 x 5
-compatibility mask and the project list (spec appendices A-C, hashed as files). Every runner calls
-`cls_pins.py --verify` at start and refuses (exit 9) on a mismatch. `PINS.json` also records the **verified `--help` output** (sha256 and the flag lines used) of `claude -p` and
-`codex exec`, so a flag the build does not have **blocks the freeze**. The `.env` sha256 is recorded as of the
-freeze; a later change is intentional and no snapshot is kept. The builds B0, B1, B-L merge **before** the freeze
-(`cls_pins.py --verify` pins the merged scripts). A pin that cannot be computed is a freeze
-blocker, not an omission.
+(`1bcb3f441a0c9d056b3343a9d47c5565`) and the sha256 of `rubric.py`; the exclusion-list and `.env` **paths** with
+sha256 and qualifying-value count (the `.env` sha256 is as of the freeze, a later change is intentional, no
+snapshot is kept, and the sha256 is logged at each use); the Ollama version and digests of `nimble:9b`,
+`qwen3.5:latest`, `qwen3-coder:30b`, `nomic-embed-text`; the bge-small snapshot dir name; the `claude` and `codex`
+CLI versions and the **recorded `--help` output** (sha256 and every flag line the runners use: for `claude -p`
+`--safe-mode`, `--settings`, `--tools`, `--strict-mcp-config`, `--no-session-persistence`, `--setting-sources`,
+`--output-format`, `--max-turns`; for `codex exec` `-s`, `-C`, `--skip-git-repo-check`, `--ephemeral`), so a flag
+the installed build lacks **blocks the freeze**; the model ids used for judging and generating; and the **v1**
+generator files (templates, 12 x 5 mask, project list, intent phrases, meta patterns; spec appendices A-D, hashed
+as files). A STATIC pin that cannot be computed is a freeze blocker, not an omission.
+
+**`PINS-RUN` addenda** (built by `pins --run`, each entry hashed and appended to `pins_run.jsonl` and logged
+**before its first use**; not freeze blockers, because their inputs do not exist at the freeze): the length
+counts file; `gen_config.json` (counts, seeds, shares, spec version); `rules_tier.jsonl` (sha256, schema version,
+provenance: resolver commit and resolution time; schema in the B0 brief); the manifest sha256; and the generator
+files of the frozen spec vN. **A spec amendment (v2 or v3) writes a new PINS-RUN entry** for its generator files
+and `gen_config.json`; entries are never overwritten. `pins --verify` checks **STATIC always** and **RUN once any
+RUN entry exists**; every runner calls it at start and refuses (exit 9) on a mismatch, naming the key.
 
 Items still open at the freeze must be answered in section 14 or stated as parked.

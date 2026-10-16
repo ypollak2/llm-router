@@ -105,12 +105,12 @@ and the item stays in its measured band.
 | N4 | web: needs outside information |
 
 Joint weights: N1 30, N2 30, N3 20, N0 12, N4 8 percent **[CD]**, then constrained by task type (T07 is
-mostly N0/N1, T09 mostly N3, T10 mostly N4/N0; the fixed 12 x 5 compatibility mask is Appendix A (hashed in PINS),
+mostly N0/N1, T09 mostly N3, T10 mostly N4/N0; the fixed 12 x 5 compatibility mask is Appendix A (hashed in PINS-STATIC (v1)),
 incompatible pairs have weight 0).
 
 ### 2.4 Project (6)
 
-Names only, no content: the six owner repo names of Appendix B (confirmed at freeze, hashed in PINS) plus one
+Names only, no content: the six owner repo names of Appendix B (confirmed at freeze, hashed in PINS-STATIC (v1)) plus one
 "unnamed/other" value for 15 percent of items where the prompt names no project. Equal weight across the six.
 
 ### 2.5 Intended difficulty (3), steering only
@@ -234,12 +234,16 @@ NOT INFORMATIVE; 40-79, "low power" label.
   the AUROC numbers of DEV-SYN** (no TEST-SYN exists yet). **No discriminator feature, weight, top term, error case
   or real text is shown to the amendment author.** At most **3 spec versions in all** (v1, v2, v3); each version
   and each DEV-SYN set is hashed and logged. The first version that passes is **frozen as vN**.
+* **Pins.** The v1 generator files are in `PINS-STATIC.json` (frozen with this spec). Every amendment (v2, v3) and
+  every `gen_config.json` writes a new **`PINS-RUN`** entry (hashed, logged before use, never overwritten); the
+  frozen vN's files are pinned there before TEST-SYN is generated.
 * **TEST-SYN is generated once under vN**, by the TEST-SYN agent, before any DEV screening. If it fails its own
   text-only checks (a), (b), (d), **one** regeneration under the same vN is allowed (no further amendment, no
   seed hunting beyond the next call-index nonces), before any TEST label exists and before any candidate is
   scored. If the second TEST-SYN also fails, or any of (e), (f), (g) fails after labelling, TEST-SYN is
   **NOT INFORMATIVE as a proxy**: no candidate verdict, no regeneration, no re-label. A replaced TEST-SYN is a
-  **discarded set**: hashed, chmod 0000, never read, never scored, never used to choose anything.
+  **discarded set**: the regeneration command itself calls `discard` on the previous set (rename + chmod 0000),
+  and it is hashed, never read, never scored, never used to choose anything.
 * **If no DEV-SYN version passes within 3:** screening proceeds with DEV-SYN labelled `RESEMBLANCE_FAILED`
   (reported with that label; it carries no weight in criterion 6), and TEST-SYN is declared **NOT INFORMATIVE as a
   proxy** without being generated.
@@ -336,7 +340,7 @@ prompt-derived directory, `~/.codex`, `~/.llm-router`, `~/.claude`. The spec's n
 | T12 data/analysis/plan editing | 0 | 1 | 1 | 1 | 1 |
 
 Within an allowed cell the tool-need weights of section 2.3 are renormalised over the allowed columns. The file
-form is `task_tool_mask.json`, hashed in PINS.
+form is `task_tool_mask.json`, hashed in PINS-STATIC (v1).
 
 ## Appendix B. Project list (names only; disclosed to the generators and judges)
 
