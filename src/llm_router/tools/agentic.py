@@ -98,25 +98,15 @@ async def resolve_project_root(ctx: Any = None) -> Path | None:
     host was launched (``$HOME`` in the field), not the caller's project.
     A candidate must be an existing directory.
     """
-    candidates: list[Path] = []
+    mcp_root: Path | None = None
     try:
         from llm_router.mcp_roots import root_from_ctx
         found = await root_from_ctx(ctx)
-        if found is not None:
-            candidates.append(Path(found))
+        mcp_root = Path(found) if found is not None else None
     except Exception:  # noqa: BLE001 — a failed lookup means "no root", never a crash
         pass
-    env_dir = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
-    if env_dir:
-        candidates.append(Path(env_dir))
-    for cand in candidates:
-        try:
-            resolved = cand.expanduser().resolve()
-        except (OSError, RuntimeError):
-            continue
-        if resolved.is_dir():
-            return resolved
-    return None
+    from llm_router.write_policy import pick_root
+    return pick_root(mcp_root).root
 
 
 def _default_adapters(root: Path | None = None) -> dict[int, Any]:

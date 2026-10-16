@@ -27,6 +27,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from llm_router import write_policy
 from llm_router.toolkit import sandbox
 
 TOOL_NAMES = ("read", "search", "list", "edit", "write", "bash", "finish")
@@ -113,16 +114,11 @@ _ALLOW = Decision(True, "ok", "")
 
 def resolve_in_workspace(raw: object, root: Path) -> tuple[Path | None, Decision | None]:
     """Realpath of `raw` if it is inside `root`, else (None, a deny Decision)."""
-    if not isinstance(raw, str) or not raw.strip():
-        return None, _deny("path", "path is missing or not a string")
-    if "\x00" in raw:
-        return None, _deny("path", "path contains a NUL byte")
-    if raw.strip().startswith("~"):
-        return None, _deny("path", "home-directory paths are not available")
-    candidate = Path(raw) if os.path.isabs(raw) else root / raw
-    real = Path(os.path.realpath(candidate))
-    if real != root and root not in real.parents:
-        return None, _deny("path_outside_workspace", f"'{raw}' resolves outside the workspace")
+    real, why = write_policy.contain(raw, root)
+    if real is None:
+        if why == write_policy.REASON_OUTSIDE:
+            return None, _deny("path_outside_workspace", f"'{raw}' resolves outside the workspace")
+        return None, _deny("path", str(why))
     return real, None
 
 
@@ -253,6 +249,10 @@ class Policy:
                 d = self._check_segment(seg["argv"])
                 if not d.allow:
                     return d
+        # P2.9-a: the shared write policy on top of the allowlist (never loosens it).
+        verdict = write_policy.check_action(cmd, self.root)
+        if verdict.decision != write_policy.ALLOW:
+            return _deny("write_policy", f"write policy {verdict.decision}: {verdict.reason}")
         return _ALLOW
 
     def _check_segment(self, argv: list[str]) -> Decision:

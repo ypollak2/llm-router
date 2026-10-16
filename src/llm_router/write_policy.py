@@ -29,6 +29,13 @@ Verdict policy (each choice is deliberate):
                      and fd dups such as ``2>&1`` are not writes.
 
 Precedence: refuse > needs_approval > allow.
+
+P2.9-a makes this ONE policy for ``llm_act``, ``llm_local_task`` and the toolkit:
+``contain`` is the single path-containment test and ``check_write`` its verdict
+form; ``check_action`` is ``check_command`` plus the ``DESTRUCTIVE`` table
+(``rm -r``, git state changes, package installs: needs approval, which is refused
+while approval is unwired); ``pick_root`` chooses the project root (MCP root, then
+``CLAUDE_PROJECT_DIR``, then the caller's request; never the process cwd).
 """
 from __future__ import annotations
 
@@ -1280,3 +1287,184 @@ def _check_tokens(cmd: str, root: Path, toks: list[Token], subst: bool) -> Verdi
     if scan.approvals:
         return Verdict(NEEDS_APPROVAL, "; ".join(scan.approvals) + _NOT_WIRED, targets)
     return Verdict(ALLOW, "", targets)
+
+
+# ── P2.9-a: one policy for the three local lanes ─────────────────────────────
+
+#: Reason ``contain`` gives for a path outside the root; lanes keep their own wording.
+REASON_OUTSIDE = "path escapes working directory"
+
+
+def contain(raw: object, root: Path) -> tuple[Path | None, str | None]:
+    """The ONE containment test: ``(resolved path, None)`` or ``(None, reason)``.
+
+    Relative paths are joined to *root*; symlinks are followed; a path that
+    resolves outside *root* is refused. Home-relative (``~``) paths are refused
+    rather than expanded.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None, "path is missing or not a string"
+    if "\x00" in raw:
+        return None, "path contains a NUL byte"
+    if raw.strip().startswith("~"):
+        return None, "home-directory paths are not available"
+    base = Path(root).resolve()
+    try:
+        candidate = Path(raw)
+        resolved = (candidate if candidate.is_absolute() else base / candidate).resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        return None, f"path cannot be resolved ({type(exc).__name__})"
+    if not resolved.is_relative_to(base):
+        return None, REASON_OUTSIDE
+    return resolved, None
+
+
+def check_write(path: object, root: Path) -> Verdict:
+    """Verdict form of ``contain`` for a file-tool write."""
+    resolved, why = contain(path, root)
+    if resolved is None:
+        return Verdict(REFUSE, f"{why}: {str(path)[:120]}")
+    return Verdict(ALLOW, "", (str(resolved),))
+
+
+_ALWAYS_APPROVAL = {"mkfs", "shred", "fdisk", "sudo", "doas", "su",
+                 "shutdown", "reboot", "halt", "poweroff"}
+_GIT_VALUED = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
+_PKG_SUBS = {
+    "pip": {"install", "uninstall"}, "pip3": {"install", "uninstall"},
+    "npm": {"install", "add", "publish"}, "pnpm": {"install", "add", "publish"},
+    "yarn": {"install", "add", "publish"}, "cargo": {"install", "publish", "yank"},
+    "go": {"install", "get"}, "gem": {"install"}, "brew": {"install", "uninstall"},
+    "apt": {"install", "remove"}, "apt-get": {"install", "remove"},
+    "poetry": {"add", "install"},
+}
+
+
+def _blocked_subcommands() -> dict[str, frozenset[str]]:
+    """The git/cargo/go/npm table lives in agent_writes (one table, not a copy)."""
+    from llm_router.hooks import agent_writes
+    return agent_writes._BLOCKED_SUBCOMMANDS
+
+
+def _first_sub(args: list[str], valued: set[str] = frozenset()) -> tuple[str, list[str]]:
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a.startswith("-"):
+            i += 2 if a in valued else 1
+            continue
+        return a, args[i + 1:]
+    return "", []
+
+
+def _segment_destructive(words: list[str]) -> str | None:
+    while words and (words[0] in _KEYWORDS or _ASSIGN.match(words[0])):
+        words = words[1:]
+    while words and os.path.basename(words[0]) in _WRAPPERS:
+        words = words[1:]
+        while words and (words[0].startswith("-") or words[0].replace(".", "").isdigit()
+                         or _ASSIGN.match(words[0])):
+            words = words[1:]
+    if not words:
+        return None
+    prog = os.path.basename(words[0])
+    args = words[1:]
+    if prog.startswith("mkfs") or prog in _ALWAYS_APPROVAL:
+        return f"'{prog}' needs approval"
+    opts = [a for a in args if a == "--" or a.startswith("-")]
+    opts = opts[:opts.index("--")] if "--" in opts else opts
+    cluster = "".join(o[1:] for o in opts if not o.startswith("--"))
+    longs = {o for o in opts if o.startswith("--")}
+    if prog == "rm" and ("r" in cluster or "R" in cluster or "--recursive" in longs):
+        return "'rm -r' needs approval (recursive delete)"
+    if prog in ("chmod", "chown") and ("R" in cluster or "--recursive" in longs):
+        return f"'{prog} -R' needs approval (recursive change)"
+    if prog == "dd" and any(a.startswith(("if=", "of=")) for a in args):
+        return "'dd' needs approval (raw device copy)"
+    table = _blocked_subcommands()
+    if prog == "git":
+        sub, rest = _first_sub(args, _GIT_VALUED)
+        if sub == "branch":
+            from llm_router.hooks import agent_writes
+            if all(a in agent_writes._GIT_BRANCH_READ_FLAGS for a in rest):
+                return None
+        if sub in table["git"]:
+            return f"'git {sub}' changes repository state and needs approval"
+        return None
+    if prog.startswith("python"):
+        if "-m" in args and args[args.index("-m") + 1:args.index("-m") + 2] == ["pip"]:
+            return "'python -m pip' needs approval (changes the environment)"
+        return None
+    if prog == "uv":
+        sub, rest = _first_sub(args)
+        if sub in ("add", "sync") or (sub == "pip" and rest[:1] and rest[0] in ("install", "uninstall")):
+            return f"'uv {sub}' needs approval (changes the environment)"
+        return None
+    sub, _rest = _first_sub(args)
+    if sub and (sub in table.get(prog, ()) or sub in _PKG_SUBS.get(prog, ())):
+        return f"'{prog} {sub}' needs approval (installs, publishes or changes state)"
+    return None
+
+
+def destructive_reason(cmd: str) -> str | None:
+    """Why *cmd* needs approval as a destructive/installing command, else None."""
+    try:
+        toks, _subst = _tokenize(cmd)
+    except ValueError:
+        return None                      # check_command already says needs approval
+    words: list[str] = []
+    skip_next = False
+    for kind, text, _exp in toks + [("op", ";", False)]:
+        if kind == "op" and text in _SEPARATORS:
+            if words:
+                why = _segment_destructive(words)
+                if why:
+                    return why
+            words = []
+            skip_next = False
+        elif kind == "op":
+            skip_next = text in _WRITE_REDIRECTS or text in _READ_REDIRECTS
+        elif skip_next:
+            skip_next = False            # a redirect target is not a word of the command
+        else:
+            words.append(text)
+    return None
+
+
+def check_action(cmd: str, root: Path) -> Verdict:
+    """``check_command`` then the destructive table: refuse > needs_approval > allow."""
+    verdict = check_command(cmd, root)
+    if verdict.decision == REFUSE:
+        return verdict
+    why = destructive_reason(cmd)
+    if why is not None:
+        return Verdict(NEEDS_APPROVAL, why + _NOT_WIRED, verdict.targets)
+    return verdict
+
+
+@dataclass(frozen=True)
+class RootChoice:
+    root: Path | None
+    source: str                          # "mcp" | "env" | "requested" | "none"
+    reason: str = ""
+
+
+def _existing_dir(raw: object) -> Path | None:
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        resolved = Path(str(raw)).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return resolved if resolved.is_dir() else None
+
+
+def pick_root(mcp_root: object = None, requested: object = None) -> RootChoice:
+    """MCP root, then ``$CLAUDE_PROJECT_DIR``, then *requested*; never the process cwd."""
+    for source, raw in (("mcp", mcp_root),
+                        ("env", os.environ.get("CLAUDE_PROJECT_DIR", "")),
+                        ("requested", requested)):
+        found = _existing_dir(raw)
+        if found is not None:
+            return RootChoice(found, source, f"root from {source}")
+    return RootChoice(None, "none", "no project root is known")
