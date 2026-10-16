@@ -223,6 +223,7 @@ def test_no_attempt_cap_outside_an_mcp_call():
     assert mcp_door.attempt_cap_s() is None
 
 
+@pytest.mark.timing  # asserts elapsed vs the deadline: serial `timing` CI lane
 @pytest.mark.asyncio
 async def test_real_llm_door_returns_readable_timeout_within_the_deadline(temp_db, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_MCP_DEADLINE_S", "0.5")
@@ -297,6 +298,7 @@ async def _route_door(chain: list[str], calls: list):
         return await _call(_probe(llm_query), "llm_query", {"q": PROMPT}, guard_s=20)
 
 
+@pytest.mark.timing  # asserts elapsed vs the deadline: serial `timing` CI lane
 @pytest.mark.asyncio
 async def test_a_hung_attempt_falls_through_to_a_fast_candidate_inside_the_deadline(
         temp_db, mock_env, _no_spend, monkeypatch):
@@ -313,6 +315,7 @@ async def test_a_hung_attempt_falls_through_to_a_fast_candidate_inside_the_deadl
     assert elapsed < 8.0 + 3.0, elapsed
 
 
+@pytest.mark.timing  # asserts elapsed vs the deadline: serial `timing` CI lane
 @pytest.mark.asyncio
 async def test_an_all_slow_chain_returns_the_timeout_text_naming_the_attempts(
         temp_db, mock_env, _no_spend, monkeypatch):
