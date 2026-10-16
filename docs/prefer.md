@@ -19,8 +19,9 @@ llm-router prefer --list | --remove p1 | --clear
   separate, later item.
 - The parsed rule is echoed. A terminal asks `[y/N]`; without a terminal, pass `--yes`
   (exit 3 otherwise). `--dry-run` writes nothing. Over MCP,
-  `llm_setup(action="prefer", text=...)` echoes and
-  `llm_setup(action="prefer", text=..., confirm=true)` stores.
+  the setup tool's `prefer` action (registered only on the full tool surface, not the
+  default consolidated one) echoes when called with `text`, and stores when called
+  again with `confirm=true`.
 - Contradictions are refused at write time: an order cycle, a ban on an order's first
   target, bans that exclude every provider, `only local` with ollama banned, a cap out of
   range (day n >= 1, percent 1-100).
