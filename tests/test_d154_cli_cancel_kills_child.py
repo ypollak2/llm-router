@@ -27,6 +27,7 @@ def _fake_cli(tmp_path: Path) -> tuple[Path, Path, Path]:
         f"echo $$ > '{pid_file}'\n"
         "sleep 60 &\n"
         f"echo $! > '{grandchild_file}'\n"
+        "echo started\n"
         "wait\n"
     )
     script.chmod(0o755)
@@ -52,7 +53,18 @@ async def _wait_for(path: Path, timeout: float = 10.0) -> int:
 
 
 async def _cancel_and_check(start_call, pid_file: Path, grandchild_file: Path) -> None:
-    task = asyncio.create_task(start_call())
+    """Cancel once the agent is reading the CLI's stdout (its ``on_event`` saw a line), i.e.
+    after ``create_subprocess_exec`` returned. Cancelling earlier lands inside asyncio's own
+    spawn and is not what a deadline cancel of a running call looks like (CI 2026-10-16:
+    the spawn-time cancel hung in ``transp._wait()`` on a loaded runner)."""
+    reading = asyncio.Event()
+
+    async def on_event(kind: str, text: str) -> None:
+        if text == "started":
+            reading.set()
+
+    task = asyncio.create_task(start_call(on_event))
+    await asyncio.wait_for(reading.wait(), 20)
     pid = await _wait_for(pid_file)
     grandchild = await _wait_for(grandchild_file)
     task.cancel()
@@ -72,7 +84,8 @@ async def test_cancelled_gemini_cli_call_kills_the_cli_tree(tmp_path, monkeypatc
     script, pid_file, grandchild_file = _fake_cli(tmp_path)
     monkeypatch.setattr(gemini_cli_agent, "find_gemini_binary", lambda: str(script))
     await _cancel_and_check(
-        lambda: gemini_cli_agent.run_gemini_cli("hi", model="m", working_dir=str(tmp_path)),
+        lambda on_event: gemini_cli_agent.run_gemini_cli("hi", model="m", working_dir=str(tmp_path),
+                                                         on_event=on_event),
         pid_file, grandchild_file)
 
 
@@ -83,7 +96,8 @@ async def test_cancelled_claude_cli_call_kills_the_cli_tree(tmp_path, monkeypatc
     script, pid_file, grandchild_file = _fake_cli(tmp_path)
     monkeypatch.setattr(claude_agent, "find_claude_binary", lambda: str(script))
     await _cancel_and_check(
-        lambda: claude_agent.run_claude("hi", model="sonnet", working_dir=str(tmp_path)),
+        lambda on_event: claude_agent.run_claude("hi", model="sonnet", working_dir=str(tmp_path),
+                                                 on_event=on_event),
         pid_file, grandchild_file)
 
 
