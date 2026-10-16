@@ -1,0 +1,1 @@
+Added the P2.0 requalification harness (preregistration draft, not frozen; the harness refuses until frozen) and the record_competence writer, which preserves fitness alongside validated competence lanes.
