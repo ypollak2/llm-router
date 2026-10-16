@@ -1144,7 +1144,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         # rewrite off. It never edits the YAML.
         shadow_frontier.prune_at_start()  # retention of the pair store, flag on or off
         guard_task = None
-        if tier_policy is not None and tier_policy.haiku_rewrite:
+        # also when the breaker (not the YAML) turned the rewrite off: recovery runs on this loop
+        if tier_policy is not None and (tier_policy.haiku_rewrite or getattr(tier_policy, "haiku_breaker", None) is not None):
             guard_task = asyncio.create_task(haiku_guard.guard_loop(tier_policy, run=haiku_guard_run))
         yield
         if task is not None and not task.done():

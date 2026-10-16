@@ -306,21 +306,75 @@ def test_wrong_shaped_breaker_state_fails_open(tmp_path):
     assert qb.trip("proxy_haiku", "haiku", reason="x", now=T0) is True
 
 
-def test_an_unreadable_probe_never_raises_and_reads_allowed(tmp_path):
+def test_an_unreadable_probe_keeps_an_open_demotion_and_a_half_open_probe(tmp_path):
     qb.trip("proxy_haiku", "haiku", reason="x", now=T0 - 2 * COOLDOWN)
 
     def boom(**_kw):
         raise RuntimeError("ledger gone")
 
-    d = qb.fed_decision("proxy_haiku", "haiku", units_fn=boom, now=T0)
-    assert d.allowed is True and "fail-open" in d.reason
+    d = qb.fed_decision("proxy_haiku", "haiku", units_fn=boom, now=T0 - 3600)
+    assert d.allowed is False and d.state == qb.OPEN  # OPEN stays demoted on a read error
+    assert qb.class_state("proxy_haiku", "haiku") == qb.OPEN
+    # an unreadable STATE FILE is the only thing that reads closed
+    _corrupt_state()
+    assert qb.fed_decision("proxy_haiku", "haiku", units_fn=boom, now=T0).allowed is True
+
+
+def test_a_ledger_error_during_the_cooldown_keeps_the_rewrite_off_even_at_proxy_start(tmp_path, monkeypatch):
+    qb.trip("proxy_haiku", "haiku", reason="x", now=time.time() - 3600)
+
+    def boom(*_a, **_k):
+        raise OSError("ledger unreadable")
+
+    monkeypatch.setattr("llm_router.proxy.ledger.read_rows", boom)
+    policy = _policy(tmp_path)
+    assert policy.haiku_rewrite is False  # load: open breaker + unreadable ledger = still demoted
+    hg.apply_override(policy)
+    assert policy.haiku_rewrite is False
+
+
+async def _ticks(policy, n=4):
+    """The real loop (run_once then apply_override), n ticks."""
+    seen = []
+
+    def run(p):
+        seen.append(1)
+        hg.run_once(p, now=time.time(), read_rows=lambda: _redo_ledger(30, 6, time.time()),
+                    notify=lambda r, e: None)
+
+    task = asyncio.create_task(hg.guard_loop(policy, interval_s=0.01, run=run))
+    for _ in range(500):
+        if len(seen) >= n:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(seen) >= n
+
+
+@pytest.mark.timing
+async def test_an_unwritable_state_keeps_the_demotion_across_loop_ticks(tmp_path, monkeypatch):
+    # the reviewer's repro: the state path is a directory, so no write can succeed
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    monkeypatch.setenv("LLM_ROUTER_QUALITY_BREAKER_PATH", str(blocked))
+    policy = _policy(tmp_path)
+    await _ticks(policy)
+    assert policy.haiku_rewrite is False  # tick 1 tripped; ticks 2-4 did not switch it back on
+    # once the state is writable again the demotion is persisted, still not lifted
+    monkeypatch.delenv("LLM_ROUTER_QUALITY_BREAKER_PATH")
+    await _ticks(policy, 2)
+    assert policy.haiku_rewrite is False
+    assert qb.class_state("proxy_haiku", "haiku") == qb.OPEN
 
 
 def test_an_unwritable_state_does_not_stop_the_live_demotion(tmp_path, monkeypatch):
     monkeypatch.setattr(qb, "_write_state", lambda state: False)
     policy, ev = _trip(tmp_path)
-    assert ev["action"] == "trip" and policy.haiku_rewrite is False  # in-process demotion holds
+    assert ev["action"] == "trip" and policy.haiku_rewrite is False
     assert qb.class_state("proxy_haiku", "haiku") == qb.CLOSED  # nothing persisted, nothing raised
+    assert hg.apply_override(policy) is False and policy.haiku_rewrite is False  # a bare closed read is not a recovery
 
 
 # ── proxy_haiku: the door (real proxy, fake upstream) ────────────────────────
@@ -517,3 +571,106 @@ def test_local_code_corrupt_state_fails_open():
     _corrupt_state()
     ok, why = asyncio.run(_cache(lambda: [], [2000.0]).allows("code"))
     assert ok is True
+
+
+# ── probe population ─────────────────────────────────────────────────────────
+
+
+def test_the_probe_counts_only_turns_the_proxy_moved_to_haiku(tmp_path):
+    _, t1 = _into_half_open(tmp_path)
+    # a client that asked for Haiku itself: served on Haiku, but not the rewrite
+    direct = [_turn(f"d{i}", t1 + 60 * (i + 1), reason="client_choice") for i in range(qb.probe_size())]
+    direct += [_turn(f"d{i}", t1 + 60 * (i + 1) + 20 * (k + 1), model=G_SONNET, reason="config_pinned")
+               for i in range(qb.probe_size()) for k in range(3)]
+    d = _decide(t1 + 3600, direct)
+    assert d.state == qb.HALF_OPEN and "pending" in d.reason  # none of them is probe evidence
+    arm = []
+    for i in range(qb.probe_size()):
+        sid, t = f"a{i}", t1 + 60 * (i + 1)
+        arm.append(_turn(sid, t, reason="config_pinned", tier_arm_assignment="treatment"))
+        arm += [_turn(sid, t + 20 * (k + 1), model=G_SONNET, reason="config_pinned") for k in range(3)]
+    assert _decide(t1 + 3600, arm).state == qb.CLOSED  # treatment-arm turns are
+
+
+# ── restart during the cooldown: the loop still runs and recovers ────────────
+
+
+@pytest.mark.timing
+async def test_door_restart_during_the_cooldown_still_recovers_through_the_loop(tmp_path, simple, monkeypatch):
+    import httpx
+    import yaml
+
+    from tests.test_proxy_tiers import _raw_policy
+
+    monkeypatch.setenv("LLM_ROUTER_QUALITY_BREAKER_COOLDOWN_S", "1.5")
+    qb.trip("proxy_haiku", "haiku", reason="x", now=time.time())  # tripped, then the proxy restarts
+    raw = _raw_policy()
+    raw["haiku_rewrite"] = True
+    raw["stickiness"]["switch_after_first_call"] = True
+    (tmp_path / "t.yaml").write_text(yaml.safe_dump(raw))
+    since: list[float] = []
+
+    def rows():  # the probe's evidence: 5 clean Haiku turns just after the half-open moment
+        cls = _state().get("proxy_haiku:haiku", {})
+        if cls.get("state") != qb.HALF_OPEN:
+            return []
+        t0 = cls["half_open_since"]
+        out = []
+        for i in range(qb.probe_size()):
+            t = t0 + 0.01 * (i + 1)
+            out.append(_turn(f"r{i}", t, msg_id=f"m{i}"))
+            out += [_turn(f"r{i}", t + 0.001 * (k + 1), model=G_SONNET, reason="config_pinned",
+                          msg_id=f"m{i}-{k}") for k in range(3)]
+        since.append(t0)
+        return [r for r in out if r["ts"] <= time.time()]
+
+    monkeypatch.setattr("llm_router.proxy.ledger.read_rows", lambda *a, **k: rows())
+    monkeypatch.setattr(hg, "INTERVAL_S", 0.05)
+    up = Upstream()
+    cfg = ps.ProxyConfig(steps=frozenset(), upstream="http://127.0.0.1:9", tiers=ps.TIERS_ON,
+                         tier_policy=str(tmp_path / "t.yaml"), ledger_path=tmp_path / "proxy_calls.jsonl")
+    app = ps.build_app(cfg, client=httpx.AsyncClient(transport=httpx.MockTransport(up)),
+                       haiku_guard_run=lambda p: None)
+    async with app.router.lifespan_context(app):
+        for _ in range(600):
+            if qb.class_state("proxy_haiku", "haiku") == qb.CLOSED and qb.recovered_at("proxy_haiku", "haiku"):
+                break
+            await asyncio.sleep(0.01)
+        assert qb.recovered_at("proxy_haiku", "haiku") is not None
+        assert (await _post(app, _first())).status_code == 200
+        assert (await _post(app, _no_system_reminders(_req()))).status_code == 200
+    assert since, "the loop never saw a half-open class"
+    assert json.loads(up.requests[1].content)["model"] == HAIKU
+
+
+# ── breaker internals: error direction and writers ───────────────────────────
+
+
+def test_an_error_in_the_breaker_itself_keeps_an_open_class_demoted(monkeypatch):
+    qb.trip("proxy_haiku", "haiku", reason="x", now=time.time() - 3600)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("breaker bug")
+
+    monkeypatch.setattr(qb, "fed_decision", boom)
+    d = hg.breaker_decision()
+    assert d is not None and d.allowed is False
+    # while closed, an error in the breaker reads as "no decision" (fail-open)
+    paths.state_path("quality_breaker.json").unlink()
+    assert hg.breaker_decision() is None
+
+
+def test_each_state_write_uses_its_own_temp_file(monkeypatch):
+    from pathlib import Path
+
+    seen = []
+    real = Path.replace
+
+    def spy(self, target):
+        seen.append(self.name)
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "replace", spy)
+    assert qb._write_state({"version": 1, "classes": {}}) and qb._write_state({"version": 1, "classes": {}})
+    assert len(seen) == 2 and seen[0] != seen[1] and all(n != "quality_breaker.tmp" for n in seen)
+    assert not list(paths.state_path("quality_breaker.json").parent.glob("*.tmp"))

@@ -218,19 +218,53 @@ def apply_override(policy, *, now: float | None = None) -> bool:
     d = breaker_decision(now=now)
     if d is not None and not d.allowed:
         policy.haiku_rewrite = False
-        policy.haiku_breaker = {"state": d.state, "reason": d.reason}
+        policy.haiku_breaker = dict(getattr(policy, "haiku_breaker", None) or {}, state=d.state,
+                                    reason=d.reason)
         return was_on
     if breaker_off:
-        policy.haiku_rewrite = True
-        policy.haiku_breaker = None
+        # The breaker's own record says half-open (cooldown elapsed) or closed after a passed
+        # probe, or it stamped a recovery after this demotion (another process ran the probe):
+        # the only ways back on. A bare "closed" read is NOT one: an unwritten or corrupt state
+        # file reads closed too.
+        if d is not None or _recovered_since_demotion(policy):
+            policy.haiku_rewrite = True
+            policy.haiku_breaker = None
+        else:
+            _persist_demotion(policy)
     return False
 
 
-def demote(policy, reason: str) -> None:
-    """Turn the live policy's rewrite off for a breaker trip (in-process, whatever the state write did)."""
+def _recovered_since_demotion(policy) -> bool:
+    try:
+        from llm_router import quality_breaker as qb
+        ts = policy.haiku_breaker.get("ts")
+        rec = qb.recovered_at(qb.LEVER_PROXY_HAIKU, qb.TASK_PROXY_HAIKU)
+        return isinstance(ts, (int, float)) and rec is not None and rec >= ts
+    except Exception:  # noqa: BLE001 - not provably recovered
+        return False
+
+
+def _persist_demotion(policy) -> None:
+    """A demotion held only in this process (the trip's state write failed) is written again;
+    the policy stays off until the breaker records a recovery. Never raises."""
+    try:
+        from llm_router import quality_breaker as qb
+        mark = policy.haiku_breaker
+        if isinstance(mark.get("ts"), (int, float)):
+            qb.trip(qb.LEVER_PROXY_HAIKU, qb.TASK_PROXY_HAIKU, reason=str(mark.get("reason", "")),
+                    now=float(mark["ts"]))
+    except Exception as exc:  # noqa: BLE001 - fail open
+        from llm_router import failopen
+        failopen.record("LR-FO-HAIKU-BREAKER-PERSIST", exc)
+
+
+def demote(policy, reason: str, ts: float | None = None) -> None:
+    """Turn the live policy's rewrite off for a breaker trip (in-process, whatever the state write
+    did). ``policy.haiku_breaker`` is also the "demoted, maybe not persisted" marker: it is cleared
+    only by a recovery the breaker recorded."""
     if policy is not None:
         policy.haiku_rewrite = False
-        policy.haiku_breaker = {"state": "open", "reason": reason}
+        policy.haiku_breaker = {"state": "open", "reason": reason, "ts": ts}
 
 
 # ── the breaker lever: proxy_haiku ──────────────────────────────────────────
@@ -245,9 +279,14 @@ def haiku_units(rows: list[dict], *, since: float, until: float, kinds: frozense
 
     built = osh.build_units(rows, [], now=until, days=(until - since) / 86400.0,
                             kind_of=_kind_resolver(rows), allowed=kinds, band_redone=set(band_redone))
+    # Only turns the proxy itself moved to Haiku (the rewrite, or a treatment-arm turn): a client
+    # that asked for Haiku directly is not evidence about the rewrite.
+    ours = {r.get("msg_id") for r in rows
+            if isinstance(r.get("msg_id"), str) and is_haiku_served(r)
+            and (r.get("tier_reason") == "haiku_rewrite" or r.get("tier_arm_assignment") == "treatment")}
     out = []
     for u in osh.turn_units(built["units"]):
-        if u["class"] != osh.CLASS_HAIKU or not since <= u["ts"] <= until:
+        if u["class"] != osh.CLASS_HAIKU or not since <= u["ts"] <= until or u.get("msg_id") not in ours:
             continue
         outcome = "redo" if u["redone"] else ("unknown" if u["window_open"] else "used")
         out.append({"ts": datetime.fromtimestamp(u["ts"], tz=timezone.utc).isoformat(),
@@ -288,9 +327,14 @@ def breaker_decision(*, now: float | None = None, read_rows: Callable[[], list[d
                                band_redone=_band_redone(since, t))
 
         return qb.fed_decision(qb.LEVER_PROXY_HAIKU, qb.TASK_PROXY_HAIKU, units_fn=units_fn, now=t)
-    except Exception as exc:  # noqa: BLE001 - fail open
+    except Exception as exc:  # noqa: BLE001 - fail open, except while the class is known to be open
         from llm_router import failopen
         failopen.record("LR-FO-HAIKU-BREAKER", exc)
+        if breaker_state() == "open":
+            from llm_router import quality_breaker as qb
+            return qb.Decision(allowed=False, state="open", key="proxy_haiku:haiku", n=0, failure_rate=None,
+                               reason=f"quality_breaker: proxy_haiku open — probe error "
+                                      f"({type(exc).__name__}), demotion kept")
         return None
 
 
@@ -600,7 +644,7 @@ def run_once(policy=None, *, now: float | None = None, read_rows: Callable[[], l
             reason = "; ".join(f"{name}: {ev['triggers'][name]['value']} ({ev['triggers'][name]['bar']})"
                                for name in ev["tripped"])
             qb.trip(qb.LEVER_PROXY_HAIKU, qb.TASK_PROXY_HAIKU, reason=reason, now=t)
-            demote(policy, reason)
+            demote(policy, reason, t)
             ev["action"] = "trip"
             _append(status_path(), f"{_stamp(t)} TRIP {status_fields(ev)} -> quality_breaker "
                                    f"proxy_haiku open, haiku_rewrite=false; {reason}")

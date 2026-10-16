@@ -454,7 +454,13 @@ rewrite off; the YAML is never edited. `ClaudeTierPolicy.load` applies the break
 so the demotion also holds across restarts. After the breaker's cooldown (24 h) the
 rewrite is switched on again as a half-open probe: 5 Haiku-served turns after that
 moment with a redo rate below 50% close the class, otherwise it reopens for another
-24 h. After a recovery the triggers look only at newer evidence. The owner override
+24 h. The probe counts only turns the proxy itself moved to Haiku (the rewrite, or a
+treatment-arm turn), not a client that asked for Haiku. Its bar (the breaker's generic
+redo rate < 50%) is deliberately looser than the 15% trip bar: it decides whether the
+lever is plainly broken, and a lever that is marginal trips again on the triggers. A probe
+that cannot be read keeps an open class demoted; only an unreadable state file reads
+closed. The guard loop also runs when the breaker, not the YAML, has the rewrite off, so
+recovery works after a restart during the cooldown. After a recovery the triggers look only at newer evidence. The owner override
 `~/.llm-router/tier_overrides.json` (`{"haiku_rewrite": false, "reason", "ts"}`) is
 written by the owner only, beats the breaker, and can only turn the rewrite off;
 the guard and the breaker never write or delete it, so no probe runs while it

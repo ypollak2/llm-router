@@ -76,6 +76,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -212,9 +213,15 @@ def _write_state(state: dict) -> bool:
     try:
         p = _state_path()
         p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state), encoding="utf-8")
-        tmp.replace(p)
+        # A unique temp name: trip/fed_decision add writers, and two processes sharing one
+        # ``quality_breaker.tmp`` could replace each other's half-written file.
+        tmp = p.with_suffix(f".{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+        try:
+            tmp.write_text(json.dumps(state), encoding="utf-8")
+            tmp.replace(p)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
         return True
     except Exception as exc:  # noqa: BLE001
         try:
@@ -569,9 +576,10 @@ def fed_decision(lever: str, task_type: str | None, *, units_fn: UnitsFn,
     """The decision for an externally-fed class. CLOSED stays closed here (only ``trip`` opens
     it, never a failure rate over ``units_fn``). OPEN / HALF_OPEN run the generic state machine
     over ``units_fn`` (called lazily, only then): cooldown, probe, reopen on a failed probe,
-    close on a passed one (stamping ``recovered_at``). Never raises: any error reads allowed."""
+    close on a passed one (stamping ``recovered_at``). Never raises: an error keeps the class's state."""
     key = class_key(lever, task_type)
     now = now if now is not None else time.time()
+    before = CLOSED
     try:
         cls = _class_state(key)
         before = cls.get("state", CLOSED)
@@ -591,14 +599,18 @@ def fed_decision(lever: str, task_type: str | None, *, units_fn: UnitsFn,
         classes[key] = new_cls
         _write_state({"version": 1, "classes": classes})
         return decision
-    except Exception as exc:  # noqa: BLE001 — an unreadable probe must not keep a lever off or crash
+    except Exception as exc:  # noqa: BLE001 — a probe that cannot be read must not lift a demotion
         try:
             from llm_router import failopen
             failopen.record("QB-FED-DECISION", exc)
         except Exception:  # noqa: BLE001
             pass
-        return Decision(allowed=True, state=CLOSED, key=key, n=0, failure_rate=None,
-                        reason=f"quality_breaker: {key} fail-open ({type(exc).__name__})")
+        # Only an unreadable STATE FILE reads closed (handled above: ``_class_state`` returns {}).
+        # Here the class is known to be open or half-open, so an error keeps the state: OPEN stays
+        # demoted for another evaluation, HALF_OPEN keeps probing.
+        return Decision(allowed=(before == HALF_OPEN), state=before, key=key, n=0, failure_rate=None,
+                        reason=f"quality_breaker: {key} {before} — probe unreadable "
+                               f"({type(exc).__name__}), state kept")
 
 
 # ── visibility: status / northstar / Stop-line ──────────────────────────────
