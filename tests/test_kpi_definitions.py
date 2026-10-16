@@ -140,6 +140,7 @@ def test_every_tier_reason_the_policy_can_emit_has_a_row_type():
     reasons = {v for k, v in vars(pt).items() if k.startswith("REASON_") and isinstance(v, str)}
     decided = {pt.REASON_SIDE_CALL, pt.REASON_UNKNOWN_MODEL, pt.REASON_CONFIG_PINNED,
                pt.REASON_USER_PINNED, pt.REASON_EXPLICIT_OPUS_PIN, pt.REASON_DECISION_ERROR,
+               pt.REASON_EXPLICIT_PREFIX_PIN,
                pt.REASON_FIRST_CALL, pt.REASON_LONG_FIRST_PROMPT}
     classifier_ran = {pt.REASON_POLICY, pt.REASON_THINKING_FLOOR, pt.REASON_STICKY,
                       pt.REASON_ESCALATION, pt.REASON_HAIKU_REWRITE, pt.REASON_QUOTA_PRESSURE,

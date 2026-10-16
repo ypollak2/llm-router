@@ -164,11 +164,6 @@ async def _guard_cross_origin(request, call_next):
     return await call_next(request)
 
 
-# Gateway mode fronts host tools such as Codex/Cursor/Pi. Calling Codex or
-# Gemini CLI again from inside the gateway can recurse or fail under launchd's
-# trimmed PATH, so keep subprocess host backends out unless an operator opts in.
-os.environ.setdefault("LLM_ROUTER_DISABLE_SUBPROCESS_BACKENDS", "codex,gemini_cli")
-
 def _classify(prompt: str) -> tuple[str, str]:
     # Unified engine (llm_router.classify), gateway policy — richer task_type than the
     # old code/analyze regex; same 400/2000 length tiers + analyze low-signal default.
@@ -1068,6 +1063,10 @@ async def ollama_generate(req: _OllamaGenerate, request: Request) -> dict:
 
 
 def main() -> None:
+    # Gateway mode fronts host tools such as Codex/Cursor/Pi. Calling Codex or
+    # Gemini CLI again from inside the gateway can recurse or fail under launchd's
+    # trimmed PATH, so keep subprocess host backends out unless an operator opts in.
+    os.environ.setdefault("LLM_ROUTER_DISABLE_SUBPROCESS_BACKENDS", "codex,gemini_cli")
     import uvicorn
 
     from llm_router import presets

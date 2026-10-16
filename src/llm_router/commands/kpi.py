@@ -943,7 +943,7 @@ def g3_row_type(row: dict) -> str:
     if reason == pt.REASON_SIDE_CALL:
         return "side_call"
     if reason in (pt.REASON_UNKNOWN_MODEL, pt.REASON_CONFIG_PINNED, pt.REASON_USER_PINNED,
-                  pt.REASON_EXPLICIT_OPUS_PIN):
+                  pt.REASON_EXPLICIT_OPUS_PIN, pt.REASON_EXPLICIT_PREFIX_PIN):
         return "pinned"
     if reason == pt.REASON_DECISION_ERROR:
         return "decision_error"

@@ -36,7 +36,8 @@ from __future__ import annotations
 import os
 import re
 
-from llm_router.proxy.steps import non_system, tier_text
+from llm_router import prefixes
+from llm_router.proxy.steps import newest_human_text, non_system, tier_text
 
 # Long enough to hold the whole first turn of a real "hard" prompt (the
 # trial's t1/t2/t3 were paragraph-length briefs), short enough to stay cheap
@@ -45,6 +46,7 @@ from llm_router.proxy.steps import non_system, tier_text
 # PREFIX of a long prompt, which is exactly the case these checks exist for.
 _TEXT_LIMIT = 8000
 
+# Kept for redo_signal (an `opus:` re-ask is a redo signal there); pin detection uses prefixes.parse.
 _OPUS_PIN_RE = re.compile(r"^opus:\s*", re.IGNORECASE)
 _CLAUDE_REASK_RE = re.compile(r"^claude:\s*", re.IGNORECASE)
 
@@ -72,10 +74,25 @@ def _tool_fail_n() -> int:
         os.environ.get("LLM_ROUTER_PROXY_ESCALATION_TOOL_FAIL_N"), DEFAULT_TOOL_FAIL_N)
 
 
+def explicit_override(body: dict) -> prefixes.Override | None:
+    """Read prefixes from the complete newest human turn; never raise."""
+    try:
+        return prefixes.parse(newest_human_text(body))
+    except Exception:  # noqa: BLE001 -- malformed bodies carry no override
+        return None
+
+
+def explicit_pin(body: dict) -> str | None:
+    """The explicitly requested Claude tier, if any."""
+    override = explicit_override(body)
+    if override is not None and override.name in prefixes.CLAUDE_TIER_PREFIXES:
+        return override.name
+    return None
+
+
 def explicit_opus_pin(body: dict) -> bool:
-    """True when the conversation's newest human turn starts with ``opus:``."""
-    text = tier_text(body, limit=_TEXT_LIMIT).lstrip()
-    return bool(_OPUS_PIN_RE.match(text))
+    """Compatibility predicate for callers interested only in Opus."""
+    return explicit_pin(body) == "opus"
 
 
 def _consecutive_failed_tool_turns(body: dict) -> int:
