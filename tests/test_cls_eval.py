@@ -1004,9 +1004,12 @@ def _test_run(tmp_path, capsys, table, tag="u"):
 
 def test_test_mode_is_code_gated_and_prints_labels_when_run_single_use(tmp_path, capsys):
     table = _noised(tmp_path)
-    for extra in ([], ["--single-use"], ["--use-log", tmp_path / "x.log"]):
+    cases = (([], "--mode test needs --single-use and --use-log"),
+             (["--single-use"], "--mode test needs --single-use and --use-log"),
+             (["--use-log", tmp_path / "x.log"], "--mode test needs --single-use and --use-log"))
+    for extra, expected in cases:
         rc, out, stdout, err = run(["score", table, "--mode", "test", *extra], capsys)
-        assert rc == 2 and stdout == "" and "--mode test" in err or "--single-use" in err
+        assert rc == 2 and stdout == "" and expected in err
     assert not (tmp_path / "x.log").exists()
     rc, out, _, _ = _test_run(tmp_path, capsys, table)
     assert rc == 0 and out["guard_free"] is True and out["screening_only"] is False and "label" not in out
@@ -1084,6 +1087,35 @@ def test_judge_robustness_block_shape(tmp_path, capsys):
         assert set(("sign_opus", "sign_gpt", "indeterminate")) <= set(e[metric])
     # always_haiku is far worse than rules_eff under every truth
     assert e["under"]["sign_opus"] == e["under"]["sign_gpt"] == 1 and e["under"]["indeterminate"] is False
+
+
+def _sub_se_table():
+    """Per kind: 11 items where cand under-routes and rules does not, 10 the reverse, 80 neutral. The paired under
+    diff is +1/101 (non-zero) against a bootstrap SE of about 0.04-0.05, so every judge's sign must be None."""
+    recs, i = [], 0
+    for kind in ("real", "syn"):
+        spec = [(11, "sonnet", "haiku"), (10, "opus", "opus"), (80, "sonnet", "sonnet")]
+        for n, truth, cand in spec:
+            rules = "sonnet"
+            for _ in range(n):
+                recs.append(item(f"{kind}{i}", f"{kind}{i}", truth, {"rules_eff": rules, "cand": cand}, kind=kind))
+                i += 1
+    return recs
+
+
+def _sub_se_legs():
+    its = [ce._parse_item(r, k) for k, r in enumerate(_sub_se_table())]
+    jr = ce.judge_robustness(its, ["rules_eff", "cand"], 200, ce.SEED, None)
+    return jr["arms"]["cand"]["under"], jr["syn_leg"]["arms"]["cand"]["under"]
+
+
+def test_criterion_8_floor_is_wired_into_both_legs_below_one_se():
+    real, syn = _sub_se_legs()
+    for leg, judges_ in ((real, ("opus", "gpt", "sonnet")), (syn, ("gpt", "sonnet"))):
+        for j in judges_:
+            assert leg[f"diff_{j}"] != 0 and abs(leg[f"diff_{j}"]) < leg[f"se_{j}"]
+            assert leg[f"sign_{j}"] is None
+        assert leg["indeterminate"] is True and leg["discordant"] is False
 
 
 # --------------------------------------------------------------------------- population, AUROC, kappa
@@ -1303,18 +1335,40 @@ def test_robust_flag_is_computed_when_truth_is_itself_a_robust_rule(tmp_path, ca
 
 
 def test_kappa_per_length_band_and_per_source(tmp_path, capsys):
-    recs = gen_recs(n_groups=40, per=5, arms=False, scored=None)
+    recs = gen_recs(n_groups=40, per=5, kinds=("real", "syn"), arms=False, scored=None)
     for i, r in enumerate(recs):
         r["strata"]["length_band"] = "w<=12" if i % 2 else "51-150"
-        r["strata"]["source"] = "A" if i < 190 else "B"
-        if i >= 195 and i % 2 == 0:
+        if r["kind"] == "syn":
+            r["strata"]["length_band"] = "13-50"
+        r["strata"]["source"] = "A" if i < 150 else "B"
+        if i >= 150 and i % 2 == 0 and r["kind"] == "real":
             r["truths"]["gpt"] = "opus" if r["truths"]["gpt"] != "opus" else "haiku"
     rc, out, _, _ = run(["score", write_table(tmp_path / "t.jsonl", recs), "--boot-b", B_FAST], capsys)
     k = out["kappa"]
-    assert set(k["by_length_band"]) == {"w<=12", "51-150"} and set(k["by_source"]) == {"A", "B"}
-    assert k["by_length_band"]["w<=12"]["opus-gpt"]["kappa"] == 1.0
-    assert k["by_source"]["B"]["opus-gpt"]["n"] == 10 and k["by_source"]["B"]["opus-gpt"]["kappa"] < 1.0
+    assert set(k["by_length_band"]) == {"real", "syn"}              # real DEV and DEV-SYN never share a band row
+    assert set(k["by_length_band"]["real"]) == {"w<=12", "51-150"} and set(k["by_length_band"]["syn"]) == {"13-50"}
+    n_real = sum(r["kind"] == "real" for r in recs)
+    n_syn = len(recs) - n_real
+    assert sum(v["opus-gpt"]["n"] for v in k["by_length_band"]["real"].values()) == n_real
+    assert k["by_length_band"]["syn"]["13-50"]["opus-gpt"]["n"] == n_syn
+    assert set(k["by_source"]) == {"A", "B"}
+    assert k["by_length_band"]["real"]["w<=12"]["opus-gpt"]["kappa"] == 1.0
+    assert k["by_source"]["B"]["opus-gpt"]["n"] == sum(r["strata"]["source"] == "B" for r in recs)   # by_source keeps both kinds
+    assert k["by_source"]["B"]["opus-gpt"]["kappa"] < 1.0
     assert k["by_source"]["A"]["opus-gpt"]["kappa"] == 1.0
+    # a kind with no rows still has its (empty) table
+    rc, out, _, _ = run(["score", write_table(tmp_path / "r.jsonl", gen_recs(n_groups=40, per=5, arms=False,
+                                                                           scored=None)), "--boot-b", B_FAST], capsys)
+    assert out["kappa"]["by_length_band"]["syn"] == {}
+
+
+def test_kappa_point_prints_n_only_below_five_pairs():
+    def pairs(n):
+        return [(f"g{i}", i % 3, (i + 1) % 3) for i in range(n)]
+    assert ce._kappa_point(pairs(0)) == {"n": 0}
+    assert ce._kappa_point(pairs(3)) == {"n": 3}                     # a `< 1` threshold would print kappa here
+    assert ce._kappa_point(pairs(4)) == {"n": 4}                     # a `< 4` threshold would too
+    assert "kappa" in ce._kappa_point(pairs(5)) and "exact_agreement" in ce._kappa_point(pairs(5))
 
 
 # --------------------------------------------------------------------------- mutants
@@ -1411,6 +1465,11 @@ def _checks():
     def one_se_floor():
         assert ce.floor_sign(0.5, 1.0) is None and ce.floor_sign(1.0, 1.0) == 1
 
+    def one_se_floor_wiring():
+        real, syn = _sub_se_legs()
+        assert real["sign_opus"] is None and real["sign_gpt"] is None and real["indeterminate"] is True
+        assert syn["sign_gpt"] is None and syn["sign_sonnet"] is None and syn["indeterminate"] is True
+
     def dev_no_pass_label():
         assert ce.display_status("PASS-STRONG", "dev") == "SCREEN-PASS"
         assert "PASS-" not in ce.display_status("PASS-WEAK", "dev")
@@ -1463,6 +1522,9 @@ def _checks():
 
 CHECKS = _checks()
 TMP_FREE = tuple(CHECKS)
+
+
+_ORIG_FLOOR_SIGN = ce.floor_sign
 
 
 def _run_checks():
@@ -1594,6 +1656,7 @@ MUTANTS = [
     ("m16_population_ignored", "select_population", _mut_population_ignored, "population_for_auroc"),
     ("m17_held_out_leaks_into_fit", "train_rows", _mut_train_all, "held_out_not_in_fit"),
     ("m18_one_se_floor_removed", "floor_sign", _mut_no_floor, "one_se_floor"),
+    ("m28_floor_call_site_se_zero", "floor_sign", lambda d, se_: _ORIG_FLOOR_SIGN(d, 0.0), "one_se_floor_wiring"),
     ("m19_dev_prints_pass", "display_status", _mut_dev_pass, "dev_no_pass_label"),
     ("m20_per_source_rule_ignored", "rule_for_source", _mut_source_ignored, "per_source_rule"),
     ("m21_other_two_higher_uses_lower", "rule_other_two_higher", _mut_other_lower, "other_two_higher"),
@@ -1607,12 +1670,12 @@ MUTANTS = [
 
 
 def test_unmutated_module_passes_every_invariant_check():
-    assert len(CHECKS) >= 27
+    assert len(CHECKS) >= 28
     assert _run_checks() == []
 
 
 def test_there_are_at_least_fifteen_distinct_mutants_each_with_a_named_killer():
-    assert len(MUTANTS) >= 27 and len({m[0] for m in MUTANTS}) == len(MUTANTS)
+    assert len(MUTANTS) >= 28 and len({m[0] for m in MUTANTS}) == len(MUTANTS)
     assert all(m[3] in CHECKS for m in MUTANTS)
 
 
