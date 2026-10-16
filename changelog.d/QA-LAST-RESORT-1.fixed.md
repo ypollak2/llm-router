@@ -7,5 +7,5 @@ SDK `llm_router.route`, and the zero-Claude hook. Normal hook DIRECT mode still 
 for Q&A, because its turn falls through to the host Claude session. Earlier D-14 tests now
 assert "after non-Claude, before Claude" instead of "absent". Under a daily cap, a capped Q&A
 chain that contains a local model is now served by it in smart and hard modes. Reconnect MCP
-servers to deploy; the auto-route hook refreshes at hook version 58.
+servers to deploy; the auto-route hook refreshes at hook version 59.
 Details in docs/bugs/QA-LAST-RESORT-1.md.

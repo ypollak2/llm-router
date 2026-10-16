@@ -1,6 +1,6 @@
 ---
 id: QA-LAST-RESORT-1
-status: fixed in `fix/d114-qa-local-last-resort` (deploy: reconnect MCP servers; the auto-route hook refreshes at hook version 58)
+status: fixed in `fix/d114-qa-local-last-resort` (deploy: reconnect MCP servers; the auto-route hook refreshes at hook version 59)
 ---
 ## QA-LAST-RESORT-1. MCP Q&A lost its local fallback when only Claude remained
 
