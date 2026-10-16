@@ -30,6 +30,7 @@ import check_prereg  # noqa: E402
 
 PREREG = REPO / "docs/prereg/PREREG-P20-requal.md"
 AMEND1 = REPO / "docs/prereg/PREREG-P20-requal-AMEND1.md"
+AMEND2 = REPO / "docs/prereg/PREREG-P20-requal-AMEND2.md"
 SETS = ("qa", "tech_op", "code")
 CONSTANTS: dict[str, str] = {
     "LABEL": "p20-requal",
@@ -106,6 +107,27 @@ FILL_KEYS = (
     "POOL_COUNT_CODE_NONCLOUD", "POOL_COUNT_CODE_RX_EDIT",
     "N_REALISED_QA", "N_REALISED_TECH_OP", "N_REALISED_CODE",
 )
+# AMEND2 (D-166): the only local arm, qa and code, is qwen3.8-uncensored:latest. The prereg's
+# three local arms and their ID_ pins are void; CONSTANTS above stays the prereg's frozen values.
+QWEN38 = "qwen3.8-uncensored:latest"
+AMEND2_FIXED = {
+    "LOCAL_MODELS": QWEN38,
+    "CODE_LOCAL_MODELS": QWEN38,
+    "SIZE_ORDER": QWEN38,
+    f"ID_{QWEN38}": "b3f4c17c6811",
+}
+AMEND2_SHA_KEYS = {"REPO_SHA": r"[0-9a-f]{40}", "CODE_RUNNER_SHA256": r"[0-9a-f]{64}"}
+
+
+def amended(constants: dict, overrides: dict) -> dict:
+    """Apply AMEND2: every prereg ID_ pin is dropped, then the AMEND2 block is applied."""
+    out = {key: value for key, value in constants.items() if not key.startswith("ID_")}
+    out.update(overrides)
+    return out
+
+
+# The pre-freeze view (status, select --dry-run, the code runner's --arm choices).
+STATIC = amended(CONSTANTS, AMEND2_FIXED)
 JUDGE_BRIEF_QA = (
     "an answer is *acceptable* if a competent senior engineer would accept it as the\n"
     "reply without asking again: it is correct, it addresses the actual ask, "
@@ -296,10 +318,39 @@ def frozen(cfg: Cfg) -> dict:
     amendment_copy = cfg.run_dir / "PREREG-AMEND1.md"
     if amendment_copy.exists() and amendment_copy.read_bytes() != cfg.amend1.read_bytes():
         raise Refuse("refusing: PREREG-AMEND1.md differs")
+    try:
+        second = check_prereg.check(cfg.amend2)
+        if not second["match"]:
+            raise ValueError("freeze")
+        second_text = cfg.amend2.read_text()
+    except (OSError, ValueError, IndexError, OverflowError) as exc:
+        raise Refuse("refusing: AMEND2 is not frozen") from exc
+    try:
+        second_epoch = datetime.fromisoformat(second["frozen_utc"].replace("Z", "+00:00"))
+        if (second_epoch.tzinfo is None
+                or not amendment_epoch.timestamp() < second_epoch.timestamp() < cfg.now()):
+            raise ValueError("freeze order")
+    except (ValueError, OverflowError) as exc:
+        raise Refuse("refusing: AMEND2 frozen_utc") from exc
+    try:
+        second_overrides = parse_block(second_text, "```text P20-AMEND2-CONSTANTS")
+        if (second_overrides.keys() != AMEND2_FIXED.keys() | AMEND2_SHA_KEYS.keys()
+                or any(second_overrides[k] != v for k, v in AMEND2_FIXED.items())
+                or not all(re.fullmatch(pattern, second_overrides[k])
+                           for k, pattern in AMEND2_SHA_KEYS.items())):
+            raise ValueError("constants")
+    except (Refuse, ValueError) as exc:
+        raise Refuse("refusing: AMEND2 constants") from exc
+    second_copy = cfg.run_dir / "PREREG-AMEND2.md"
+    if second_copy.exists() and second_copy.read_bytes() != cfg.amend2.read_bytes():
+        raise Refuse("refusing: PREREG-AMEND2.md differs")
     constants.update(overrides)
+    constants = amended(constants, second_overrides)
     return {"sha256": checked["sha256"], "frozen_utc": checked["frozen_utc"],
             "amend1_sha256": amendment["sha256"],
-            "amend1_frozen_utc": amendment["frozen_utc"], "constants": constants}
+            "amend1_frozen_utc": amendment["frozen_utc"],
+            "amend2_sha256": second["sha256"], "amend2_frozen_utc": second["frozen_utc"],
+            "constants": constants}
 
 
 def code_gate(repo: Path, repo_sha: str, module_file: str, run=subprocess.run) -> None:
@@ -357,6 +408,7 @@ class Cfg:
     run_dir: Path
     prereg: Path = PREREG
     amend1: Path = AMEND1
+    amend2: Path = AMEND2
     gate: Callable[[dict], None] | None = None
     now: Callable[[], float] = time.time
     local_hour: Callable[[], int] = lambda: datetime.now().hour
@@ -377,9 +429,10 @@ class OllamaHTTP:
         with urlopen(req, timeout=timeout) as response:
             return json.load(response)
 
-    def chat(self, model: str, messages: list[dict], *, timeout: int, options: dict) -> dict:
+    def chat(self, model: str, messages: list[dict], *, timeout: int, options: dict,
+             think: bool) -> dict:
         result = self.request("/api/chat", {
-            "model": model, "messages": messages, "stream": False,
+            "model": model, "messages": messages, "stream": False, "think": think,
             "options": options, "keep_alive": "10m",
         }, timeout)
         return {"text": result.get("message", {}).get("content", ""),
@@ -469,6 +522,16 @@ def read_quota() -> dict | None:
                 "age_s": time.time() - values[2]}
     except (OSError, ValueError, KeyError, TypeError):
         return None
+
+
+def foreign_rows(path: Path, allowed: list[str]) -> int:
+    return sum(row.get("arm") not in allowed for row in jsonl(path))
+
+
+def require_no_foreign(path: Path, allowed: list[str]) -> None:
+    count = foreign_rows(path, allowed)
+    if count:
+        raise Refuse(f"refusing: {count} foreign-arm rows in {path.parent.name}/{path.name}")
 
 
 def arms(c: dict, code: bool = False) -> list[str]:
@@ -644,6 +707,7 @@ def call_model(cfg: Cfg, c: dict, name: str, arm: str, ident: str, attempt: int,
             result = cfg.ollama.chat(
                 arm, messages, timeout=int(c["LOCAL_TIMEOUT_S"]),
                 options={"num_ctx": local_models.num_ctx(arm), "temperature": 0},
+                think=False,  # AMEND2: as production (providers._ollama_think_enabled off)
             )
         else:
             result = cfg.claude(model_id, flatten(messages), timeout=int(c["REF_TIMEOUT_S"]))
@@ -694,6 +758,7 @@ def quiet(cfg: Cfg, c: dict, arm: str) -> None:
 
 def run(cfg: Cfg, c: dict, name: str, chosen_arms: list[str] | None = None) -> dict:
     require_unused(cfg)
+    require_no_foreign(cfg.run_dir / f"answers/{name}.jsonl", arms(c))
     selected = selection(cfg)
     check_set(cfg, name)
     if (cfg.run_dir / f"judgements/{name}.jsonl").exists():
@@ -717,7 +782,8 @@ def run(cfg: Cfg, c: dict, name: str, chosen_arms: list[str] | None = None) -> d
             if local:
                 cfg.ollama.chat(arm, [{"role": "user", "content": "Reply OK."}],
                                 timeout=int(c["LOCAL_TIMEOUT_S"]),
-                                options={"num_ctx": local_models.num_ctx(arm), "temperature": 0})
+                                options={"num_ctx": local_models.num_ctx(arm), "temperature": 0},
+                                think=False)
             for item in pending:
                 window = local_models.num_ctx(arm) if local else int(c["REF_WINDOW"])
                 messages = cfg.pack_fn(item, name, window)
@@ -804,6 +870,7 @@ def judge_call(cfg: Cfg, c: dict, name: str, item: dict, candidates: dict,
 
 def judge(cfg: Cfg, c: dict, name: str) -> dict:
     require_unused(cfg)
+    require_no_foreign(cfg.run_dir / f"answers/{name}.jsonl", arms(c))
     check_set(cfg, name)
     selected = selection(cfg)
     items = items_for(cfg, name, selected)
@@ -851,6 +918,7 @@ def ingest_code(cfg: Cfg, c: dict, freeze: dict, results: Path, runner: Path) ->
     check_set(cfg, "code")
     if sha256_file(runner) != c["CODE_RUNNER_SHA256"]:
         raise Refuse("refusing: runner sha256")
+    require_no_foreign(results, arms(c, True))
     rows = jsonl(results)
     expected = {(ident, arm) for ident in selected["code"]["ids"] for arm in arms(c, True)}
     seen = set()
@@ -976,7 +1044,11 @@ def descriptive(items: list[dict], outcomes: dict) -> dict:
 
 def score(cfg: Cfg, c: dict, freeze: dict, measurement: Path | None = None) -> dict:
     require_unused(cfg)
+    for name in ("qa", "tech_op"):
+        require_no_foreign(cfg.run_dir / f"answers/{name}.jsonl", arms(c))
+    require_no_foreign(cfg.run_dir / "code_results.jsonl", arms(c, True))
     hashes = {"prereg_sha256": freeze["sha256"], "amend1_sha256": freeze["amend1_sha256"],
+              "amend2_sha256": freeze["amend2_sha256"],
               "git_sha": cfg.git_sha(),
               "selection_sha256": optional_hash(cfg.run_dir / "selection.json"),
               "answers_sha256": combined_hash(cfg, "answers"),
@@ -1251,9 +1323,11 @@ def tp2(cfg: Cfg, c: dict, args: argparse.Namespace) -> dict:
 
 def status(cfg: Cfg) -> dict:
     gate_status = "n/a"
+    c = STATIC
     try:
         freeze = frozen(cfg)
         is_frozen = True
+        c = freeze["constants"]
     except Refuse:
         is_frozen = False
     else:
@@ -1272,6 +1346,12 @@ def status(cfg: Cfg) -> dict:
         "finals": {s: dict(Counter(arm for _, arm in finals(cfg, s))) for s in ("qa", "tech_op")},
         "judged": {s: len(jsonl(cfg.run_dir / f"judgements/{s}.jsonl")) for s in ("qa", "tech_op")},
         "code_rows": len(jsonl(cfg.run_dir / "code_results.jsonl")),
+        "foreign_arm_rows": {
+            **{s: foreign_rows(cfg.run_dir / f"answers/{s}.jsonl", arms(c))
+               for s in ("qa", "tech_op")},
+            "code_raw": foreign_rows(cfg.run_dir / "code_results.raw.jsonl", arms(c, True)),
+            "code": foreign_rows(cfg.run_dir / "code_results.jsonl", arms(c, True)),
+        },
         "spend_usd": float(sum(Fraction(str(r.get("cost_usd", 0)))
                               for r in jsonl(cfg.run_dir / "ledger.jsonl"))),
         "use_kinds": dict(Counter(r[0] for r in uses(cfg) if r)),
@@ -1321,7 +1401,7 @@ def main(argv: list[str] | None = None, *, cfg: Cfg | None = None) -> int:
     try:
         prefreeze = args.command == "status" or (args.command == "select" and args.dry_run)
         freeze = None if prefreeze else frozen(cfg)
-        c = CONSTANTS if freeze is None else freeze["constants"]
+        c = STATIC if freeze is None else freeze["constants"]
         if freeze is not None:
             run_gate(cfg, c)
         if args.command == "status":

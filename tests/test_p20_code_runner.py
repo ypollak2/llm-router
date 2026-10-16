@@ -62,9 +62,10 @@ def setup(factory, tmp_path, monkeypatch):
     )
     (nc / "lib_pi.py").write_text(
         "from pathlib import Path\n"
-        "mode = 'pass'\ncalls = 0\n"
+        "mode = 'pass'\ncalls = 0\nseen = []\n"
         "def run_pi(prompt, cwd, timeout_s):\n"
         "    global calls\n    calls += 1\n"
+        "    seen.append((PI_MODEL, globals().get('PI_CONFIG_DIR')))\n"
         "    print('PRIVATE MODEL TEXT')\n"
         "    work = Path(cwd)\n"
         "    assert not (work / 'tests').exists()\n"
@@ -120,6 +121,7 @@ def setup(factory, tmp_path, monkeypatch):
     c["CODE_RUNNER_SHA256"] = h.sha256_file(Path(r.__file__))
     support.freeze_file(cfg, c)
     support.freeze_amend1(cfg, c)
+    support.freeze_amend2(cfg, c)
     tc = tmp_path / "contract.py"
     tc.write_text("raise RuntimeError('never import')\nTEST_CONTRACT = 'PRIVATE CONTRACT'\n")
     arm = c["CODE_LOCAL_MODELS"].split(",")[0]
@@ -240,15 +242,16 @@ def test_sonnet_and_ingest(setup, monkeypatch, capsys):
     for arm in h.arms(setup[1], True):
         assert invoke(setup, arm) == 0
     result = rows(setup)
-    assert len(result) == 9
-    assert len({(x["task_id"], x["arm"]) for x in result}) == 9
+    assert h.arms(setup[1], True) == [h.QWEN38, "sonnet"]
+    assert len(result) == 6
+    assert len({(x["task_id"], x["arm"]) for x in result}) == 6
     ledger = h.jsonl(cfg.run_dir / "ledger.jsonl")
     assert len(ledger) == 3
     assert all(x["stage"] == "code" and x["set"] == "code" for x in ledger)
     assert "PRIVATE" not in json.dumps(ledger)
     assert "PRIVATE" not in capsys.readouterr().out
     assert h.ingest_code(cfg, setup[1], h.frozen(cfg),
-                         cfg.run_dir / "code_results.raw.jsonl", Path(r.__file__)) == {"rows": 9}
+                         cfg.run_dir / "code_results.raw.jsonl", Path(r.__file__)) == {"rows": 6}
 
 
 def test_sonnet_mismatch(setup, monkeypatch):
@@ -340,3 +343,33 @@ def test_code_gate_before_agent(setup, monkeypatch):
     assert invoke(setup, "sonnet") == 2
     assert pi.calls == 0 and not rows(setup)
     assert before == {p: p.read_bytes() for p in cfg.run_dir.rglob("*") if p.is_file()}
+
+
+def test_arm_choices_are_amend2(setup):
+    action = next(a for a in r.parser()._actions if a.dest == "arm")
+    assert action.choices == [h.QWEN38, "sonnet"]
+    for old in ("qwen3.6:35b-a3b-coding", "qwen3-coder:30b"):
+        with pytest.raises(SystemExit):
+            r.parser().parse_args(["--arm", old])
+
+
+def test_pi_agent_thinking_off(setup):
+    """AMEND2: the Pi agent runs from a run-dir config whose only thinking level is off,
+    sent to Ollama's /v1 endpoint as reasoning_effort "none"."""
+    cfg, _, _, arm, pi, *_ = setup
+    assert arm == h.QWEN38
+    assert invoke(setup) == 0
+    config = cfg.run_dir / "pi_config"
+    assert pi.seen and all(seen == (arm, str(config)) for seen in pi.seen)
+    data = h.read_json(config / "models.json")
+    provider = data["providers"]["ollama"]
+    assert (provider["baseUrl"], provider["api"]) == (
+        "http://localhost:11434/v1", "openai-completions")
+    [model] = provider["models"]
+    assert (model["id"], model["name"], model["reasoning"]) == (arm, arm, True)
+    assert model["thinkingLevelMap"] == {"off": "none", "minimal": None, "low": None,
+                                         "medium": None, "high": None, "xhigh": None,
+                                         "max": None}
+    assert model["contextWindow"] == h.local_models.num_ctx(arm) == 32768
+    assert (config / "models.json").stat().st_mode & 0o777 == 0o600
+    assert config.stat().st_mode & 0o777 == 0o700

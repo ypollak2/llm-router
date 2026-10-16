@@ -36,6 +36,8 @@ h = _load_harness()
 NOW = 1_900_000_000.0
 PAST = "2026-01-01T00:00:00Z"
 AMEND_PAST = "2027-01-01T00:00:00Z"
+AMEND2_PAST = "2028-01-01T00:00:00Z"
+OLD_LOCAL = ("qwen3.6:35b-a3b-coding", "qwen3-coder:30b", "qwen3.5:latest")
 GIT_RUN = subprocess.run
 
 
@@ -106,12 +108,35 @@ def freeze_amend1(cfg, constants, *, text=None, date=AMEND_PAST):
     )
 
 
+def amend2_text(constants, **values):
+    block = {**h.AMEND2_FIXED, "REPO_SHA": "c" * 40,
+             "CODE_RUNNER_SHA256": constants["CODE_RUNNER_SHA256"], **values}
+    return ("# AMEND2\n\n```text P20-AMEND2-CONSTANTS\n"
+            + "".join(f"{k}={v}\n" for k, v in block.items()) + "```\n")
+
+
+def freeze_amend2(cfg, constants, *, text=None, date=AMEND2_PAST):
+    cfg.amend2.write_text(text if text is not None else amend2_text(constants))
+    cfg.amend2.with_suffix(".sha256").write_text(
+        f"{h.sha256_file(cfg.amend2)}  {cfg.amend2.name}\nfrozen_utc {date}\n"
+    )
+
+
+def effective(constants):
+    """The constants frozen() returns for the factory's prereg, AMEND1 and AMEND2."""
+    return h.amended({**constants, "REPO_SHA": "a" * 40}, {
+        **h.AMEND2_FIXED, "REPO_SHA": "c" * 40,
+        "CODE_RUNNER_SHA256": constants["CODE_RUNNER_SHA256"],
+    })
+
+
 class Ollama:
     def __init__(self):
         self.calls = []
+        self.thinks = []
         self.unloaded = []
-        self.ids = {m: set(h.CONSTANTS[f"ID_{m}"].split(","))
-                    for m in h.CONSTANTS["LOCAL_MODELS"].split(",")}
+        self.ids = {m: set(h.STATIC[f"ID_{m}"].split(","))
+                    for m in h.STATIC["LOCAL_MODELS"].split(",")}
         self.resident = []
         self.fail = False
 
@@ -121,8 +146,9 @@ class Ollama:
     def ps(self):
         return self.resident
 
-    def chat(self, model, messages, *, timeout, options):
+    def chat(self, model, messages, *, timeout, options, think):
         self.calls.append((model, messages, timeout, options))
+        self.thinks.append(think)
         if messages[0]["content"] == "Reply OK.":
             return {"text": "OK", "error": None}
         if self.fail:
@@ -190,6 +216,7 @@ def factory(tmp_path):
             quota=lambda: {"session_pct": 0, "weekly_pct": 0, "age_s": 0},
             pack_fn=lambda item, name, window: [{"role": "user", "content": item["request"]}],
             git_sha=lambda: "deadbeef", amend1=run_dir / "AMEND1.md",
+            amend2=run_dir / "AMEND2.md",
             gate=lambda constants: None,
         )
         pools = {s: pool_rows(s, 30 if small and s == "qa" else 75 if s == "code" else 130)
@@ -219,7 +246,8 @@ def factory(tmp_path):
         )
         freeze_file(cfg, constants)
         freeze_amend1(cfg, constants)
-        return cfg, constants, pools
+        freeze_amend2(cfg, constants)
+        return cfg, effective(constants), pools
     return make
 
 
@@ -319,6 +347,11 @@ def test_constants_and_real_freeze(factory, tmp_path):
         pytest.skip("real AMEND1 has no freeze sidecar")
     real = h.frozen(replace(cfg, prereg=h.PREREG, amend1=h.AMEND1, run_dir=tmp_path / "real2"))
     assert real["constants"]["REPO_SHA"] != h.CONSTANTS.get("REPO_SHA")
+    if not h.AMEND2.with_suffix(".sha256").exists():
+        pytest.skip("real AMEND2 has no freeze sidecar")
+    real = h.frozen(replace(cfg, prereg=h.PREREG, amend1=h.AMEND1, amend2=h.AMEND2,
+                            run_dir=tmp_path / "real3"))
+    assert h.arms(real["constants"], True) == [h.QWEN38, "sonnet"]
 
 
 def test_freeze_gates_and_read_only_modes(factory, capsys):
@@ -338,10 +371,9 @@ def test_freeze_gates_and_read_only_modes(factory, capsys):
         elif defect == "future":
             freeze_file(cfg, c, cfg.prereg.read_text(), "2099-01-01T00:00:00Z")
         elif defect == "fill":
-            freeze_file(cfg, c, cfg.prereg.read_text().replace("REPO_SHA=deadbeef",
-                                                             "REPO_SHA=FILL-AT-FREEZE"))
-            cfg.prereg.write_text(cfg.prereg.read_text().replace("REPO_SHA=deadbeef",
-                                                                "REPO_SHA=FILL-AT-FREEZE"))
+            # c is the amended view (REPO_SHA from AMEND2), so edit the prereg line directly.
+            cfg.prereg.write_text(re.sub(r"(?m)^REPO_SHA=.*$", "REPO_SHA=FILL-AT-FREEZE",
+                                         cfg.prereg.read_text()))
             cfg.prereg.with_suffix(".sha256").write_text(
                 f"{h.sha256_file(cfg.prereg)}  frozen.md\nfrozen_utc {PAST}\n"
             )
@@ -394,7 +426,7 @@ def test_selection(factory, capsys):
 
 
 def test_run_boundaries_and_resume(factory):
-    arm = h.CONSTANTS["LOCAL_MODELS"].split(",")[0]
+    arm = h.STATIC["LOCAL_MODELS"].split(",")[0]
     cfg, c, _ = selected_run(factory)
     cfg.ollama.ids[arm] = {"wrong"}
     assert call(cfg, "run", "--set", "qa", "--arms", arm) == 2
@@ -419,6 +451,7 @@ def test_run_boundaries_and_resume(factory):
     assert all(not r["ok"] for r in rows)
     assert sum(r["final"] for r in rows) == n
     assert cfg.ollama.unloaded == [arm]
+    assert cfg.ollama.thinks == [False] * len(cfg.ollama.calls)
     before = len(cfg.ollama.calls)
     assert call(cfg, "run", "--set", "qa", "--arms", arm) == 0
     assert len(cfg.ollama.calls) == before
@@ -500,11 +533,11 @@ def test_ingest_code(factory):
         assert call(cfg, "ingest-code", "--results", str(path), "--runner", str(runner)) == 2
     h.atomic(path, "".join(json.dumps(r) + "\n" for r in rows))
     assert call(cfg, "ingest-code", "--results", str(path), "--runner", str(runner)) == 0
-    assert len(h.jsonl(cfg.run_dir / "code_results.jsonl")) == 225
+    assert len(h.jsonl(cfg.run_dir / "code_results.jsonl")) == 75 * len(h.arms(c, True)) == 150
 
 
 def test_score_statistics_and_single_use(factory, capsys):
-    local = h.CONSTANTS["LOCAL_MODELS"].split(",")
+    local = h.STATIC["LOCAL_MODELS"].split(",")
     for k, kr, g, verdict, powered in (
         (57, 57, "eligible", "eligible", True),
         (54, 57, "failed", "failed", True),
@@ -524,7 +557,7 @@ def test_score_statistics_and_single_use(factory, capsys):
             for tiers in tasks.values():
                 for entry in tiers.values():
                     assert grade(entry) == entry["grade"]
-        assert "code" not in stored["qwen3.5:latest"]
+        assert set(stored) <= {h.QWEN38}
         assert call(cfg, "score") == 2
     cfg, c = prepare_score(factory, "corrupt")
     (cfg.run_dir / "judgements/qa.jsonl").write_text("{invalid")
@@ -574,7 +607,7 @@ def test_score_calibration_and_reference_missing(factory):
 
 
 def test_score_decisions_d21_and_code_pairs(factory):
-    locals_ = h.CONSTANTS["LOCAL_MODELS"].split(",")
+    locals_ = h.STATIC["LOCAL_MODELS"].split(",")
     fail = {m: 54 for m in locals_}
     fail["sonnet"] = 57
     for label, values, expected in (
@@ -613,7 +646,7 @@ def test_score_decisions_d21_and_code_pairs(factory):
     assert types["nineteen"] == {"n": 19, "action": "stays stripped"}
     lanes = result["sets"]["code"]["lanes"]
     assert lanes[arm]["n"] == 74 and lanes[arm]["removed"] == 1
-    assert lanes[locals_[1]]["n"] == 75
+    assert set(lanes) == {h.QWEN38}
 
 
 def test_record_competence(tmp_path):
@@ -729,6 +762,7 @@ def test_frozen_utc_must_be_strictly_in_the_past(factory):
         h.frozen(cfg)
     freeze_file(cfg, c, cfg.prereg.read_text(), "2030-03-17T17:46:39Z")
     freeze_amend1(cfg, c, date="2030-03-17T17:46:39.500000Z")
+    freeze_amend2(cfg, c, date="2030-03-17T17:46:39.750000Z")
     assert h.frozen(cfg)["frozen_utc"] == "2030-03-17T17:46:39Z"
 
 
@@ -816,22 +850,27 @@ def test_amend1_validation(factory, defect, reason, capsys):
     assert not (cfg.run_dir / "selection.json").exists()
 
 
-def test_amend1_overrides_and_score_log(factory):
+def test_amend_overrides_and_score_log(factory):
+    """AMEND1 overrides the prereg, then AMEND2 overrides both and voids the old ID_ pins."""
     cfg, c, _ = factory()
-    runner_sha = "b" * 64
     freeze_amend1(cfg, c, text=(
         f"```text P20-AMEND1-CONSTANTS\nREPO_SHA={'a' * 40}\n"
-        f"CODE_RUNNER_SHA256={runner_sha}\n```\n"
+        f"CODE_RUNNER_SHA256={'b' * 64}\n```\n"
     ))
+    freeze_amend2(cfg, c, text=amend2_text(c, CODE_RUNNER_SHA256="d" * 64))
     (cfg.run_dir / "PREREG-AMEND1.md").write_bytes(cfg.amend1.read_bytes())
+    (cfg.run_dir / "PREREG-AMEND2.md").write_bytes(cfg.amend2.read_bytes())
     freeze = h.frozen(cfg)
-    assert freeze["constants"] == {**c, "REPO_SHA": "a" * 40, "CODE_RUNNER_SHA256": runner_sha}
+    assert freeze["constants"] == {**c, "REPO_SHA": "c" * 40, "CODE_RUNNER_SHA256": "d" * 64}
     assert freeze["amend1_sha256"] == h.sha256_file(cfg.amend1)
     assert freeze["amend1_frozen_utc"] == AMEND_PAST
+    assert freeze["amend2_sha256"] == h.sha256_file(cfg.amend2)
+    assert freeze["amend2_frozen_utc"] == AMEND2_PAST
     assert call(cfg, "select") == 0
     assert call(cfg, "score") == 0
     started = next(row for row in h.uses(cfg) if row[0] == "started")
     assert f"amend1_sha256={freeze['amend1_sha256']}" in started
+    assert f"amend2_sha256={freeze['amend2_sha256']}" in started
 
 
 @pytest.mark.parametrize("command", GATED_COMMANDS)
@@ -846,7 +885,7 @@ def test_main_gate_before_writes(factory, command):
     cfg.gate = refuse
     before = {p: p.read_bytes() for p in cfg.run_dir.rglob("*") if p.is_file()}
     assert call(cfg, *command) == 2
-    assert len(seen) == 1 and seen[0]["REPO_SHA"] == "a" * 40
+    assert len(seen) == 1 and seen[0]["REPO_SHA"] == "c" * 40
     assert before == {p: p.read_bytes() for p in cfg.run_dir.rglob("*") if p.is_file()}
     assert not cfg.ollama.calls and not cfg.claude.calls
 
@@ -940,4 +979,215 @@ def test_run_gate_default(factory, monkeypatch):
     seen = []
     monkeypatch.setattr(h, "code_gate", lambda *args: seen.append(args))
     h.run_gate(cfg, h.frozen(cfg)["constants"])
-    assert seen == [(h.REPO, "a" * 40, h.llm_router.__file__)]
+    assert seen == [(h.REPO, "c" * 40, h.llm_router.__file__)]
+
+
+# AMEND2 (D-166): qwen3.8-uncensored:latest is the only local arm, think:false, a foreign-arm
+# guard, and frozen() enforces the amendment.
+
+
+def test_amend2_arm_lists_and_old_pins_gone(factory):
+    cfg, _, _ = factory()
+    for c in (h.STATIC, h.frozen(cfg)["constants"]):
+        assert c["LOCAL_MODELS"].split(",") == [h.QWEN38]
+        assert c["CODE_LOCAL_MODELS"].split(",") == [h.QWEN38]
+        assert c["SIZE_ORDER"].split(",") == [h.QWEN38]
+        assert h.arms(c) == [h.QWEN38, "sonnet", "haiku"]
+        assert h.arms(c, True) == [h.QWEN38, "sonnet"]
+        assert {k for k in c if k.startswith("ID_")} == {f"ID_{h.QWEN38}"}
+        assert c[f"ID_{h.QWEN38}"] == "b3f4c17c6811"
+        assert not any(old in value for old in OLD_LOCAL for value in c.values())
+        assert (c["REFERENCE"], c["REPORT_ARMS"], c["JUDGE"]) == ("sonnet", "haiku", "opus")
+    # The prereg's own constants are frozen and stay as they were.
+    assert h.CONSTANTS["LOCAL_MODELS"].split(",") == list(OLD_LOCAL)
+    assert h.local_models.num_ctx(h.QWEN38) == h.local_models.DEFAULT_NUM_CTX == 32768
+
+
+class RecordingOllama(h.OllamaHTTP):
+    """The real HTTP client with the transport replaced: records every request body."""
+
+    def __init__(self):
+        self.bodies = []
+
+    def request(self, route, body=None, timeout=60):
+        self.bodies.append((route, body))
+        if route != "/api/chat":
+            return {}
+        if body["messages"][0]["content"] == "Reply OK.":
+            return {"message": {"content": "OK"}}
+        ident = re.search(r"ID:(\S+)", h.flatten(body["messages"]))[1]
+        return {"message": {"content": "<think>hidden</think>" + answer(body["model"], ident)}}
+
+    def list_ids(self):
+        return {h.QWEN38: {"b3f4c17c6811"}}
+
+    def ps(self):
+        return []
+
+
+def test_think_false_in_every_local_payload(factory):
+    cfg, _, _ = selected_run(factory)
+    cfg.ollama = RecordingOllama()
+    assert call(cfg, "run", "--set", "qa", "--arms", h.QWEN38) == 0
+    n = h.selection(cfg)["qa"]["n"]
+    chats = [body for route, body in cfg.ollama.bodies if route == "/api/chat"]
+    assert len(chats) == 1 + n  # warm-up plus one answer call per item
+    assert all(body["think"] is False for body in chats)
+    assert all(body["options"] == {"num_ctx": 32768, "temperature": 0} for body in chats)
+    assert cfg.ollama.bodies[-1] == ("/api/generate", {"model": h.QWEN38, "keep_alive": 0})
+    rows = h.jsonl(cfg.run_dir / "answers/qa.jsonl")
+    assert len(rows) == n and all(r["ok"] and "<think>" not in r["text"] for r in rows)
+
+
+def foreign_row(ident):
+    return {"item_id": ident, "arm": OLD_LOCAL[0], "attempt": 1, "ok": True, "final": True,
+            "text": "x", "truncated": False, "error": None, "wall_s": 0, "ts": PAST}
+
+
+@pytest.mark.parametrize("command", [("run", "--set", "qa"), ("judge", "--set", "qa")])
+def test_foreign_arm_answers_refuse_run_and_judge(factory, command, capsys):
+    cfg, _, _ = selected_run(factory)
+    ident = h.selection(cfg)["qa"]["ids"][0]
+    h.append_row(cfg.run_dir / "answers/qa.jsonl", foreign_row(ident))
+    before = {p: p.read_bytes() for p in cfg.run_dir.rglob("*") if p.is_file()}
+    assert call(cfg, *command) == 2
+    assert "refusing: 1 foreign-arm rows in answers/qa.jsonl" in capsys.readouterr().err
+    assert before == {p: p.read_bytes() for p in cfg.run_dir.rglob("*") if p.is_file()}
+    assert not cfg.ollama.calls and not cfg.claude.calls
+    # The other set is not blocked by a stray qa row.
+    assert call(cfg, command[0], "--set", "tech_op") in (0, 2)
+    assert "foreign-arm" not in capsys.readouterr().err
+
+
+def test_foreign_arm_code_results_refuse_ingest(factory, capsys):
+    cfg, c, _ = selected_run(factory)
+    rows = [{"task_id": ident, "arm": arm, "hidden_pass": True, "ts": NOW}
+            for ident in h.selection(cfg)["code"]["ids"] for arm in h.arms(c, True)]
+    rows.append(dict(rows[0], arm=OLD_LOCAL[1]))
+    path = cfg.run_dir / "external.jsonl"
+    h.atomic(path, "".join(json.dumps(r) + "\n" for r in rows))
+    runner = cfg.run_dir / "runner.py"
+    assert call(cfg, "ingest-code", "--results", str(path), "--runner", str(runner)) == 2
+    assert "refusing: 1 foreign-arm rows in" in capsys.readouterr().err
+    assert not (cfg.run_dir / "code_results.jsonl").exists()
+    assert not any(r[0] == "ingested" for r in h.uses(cfg))
+
+
+@pytest.mark.parametrize("where", ["qa", "tech_op", "code"])
+def test_foreign_arm_rows_refuse_score_before_start(factory, where, capsys):
+    cfg, c = prepare_score(factory, f"foreign-{where}")
+    if where == "code":
+        h.append_row(cfg.run_dir / "code_results.jsonl",
+                     {"task_id": "code-000", "arm": OLD_LOCAL[1], "hidden_pass": True, "ts": NOW})
+    else:
+        h.append_row(cfg.run_dir / f"answers/{where}.jsonl", foreign_row(f"{where}-000"))
+    assert call(cfg, "score") == 2
+    assert "foreign-arm rows" in capsys.readouterr().err
+    assert not any(r[0] == "started" for r in h.uses(cfg))
+    assert not (cfg.run_dir / "result.json").exists()
+
+
+def test_status_counts_foreign_arm_rows(factory, capsys):
+    cfg, _, _ = selected_run(factory)
+    for i in range(16):
+        h.append_row(cfg.run_dir / "answers/qa.jsonl", foreign_row(f"qa-{i:03}"))
+    h.append_row(cfg.run_dir / "code_results.raw.jsonl",
+                 {"task_id": "code-000", "arm": OLD_LOCAL[1], "hidden_pass": None, "ts": NOW})
+    assert call(cfg, "status") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["foreign_arm_rows"] == {"qa": 16, "tech_op": 0, "code_raw": 1, "code": 0}
+    cfg.amend2.unlink()  # not frozen: counted against the AMEND2 arm list all the same
+    assert call(cfg, "status") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["frozen"] is False and out["code_gate"] == "n/a"
+    assert out["foreign_arm_rows"]["qa"] == 16
+    assert "x" * 5 not in json.dumps(out) and "ID:" not in json.dumps(out)
+
+
+@pytest.mark.parametrize("command", GATED_COMMANDS)
+def test_amend2_missing_gates_every_command(factory, command, capsys):
+    cfg, _, _ = factory()
+    cfg.amend2.unlink()
+    before = {p: p.read_bytes() for p in cfg.run_dir.rglob("*") if p.is_file()}
+    assert call(cfg, *command) == 2
+    assert "AMEND2 is not frozen" in capsys.readouterr().err
+    assert before == {p: p.read_bytes() for p in cfg.run_dir.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize("defect,reason", [
+    ("sidecar", "AMEND2 is not frozen"),
+    ("sha", "AMEND2 is not frozen"),
+    ("parse", "AMEND2 is not frozen"),
+    ("same_as_amend1", "AMEND2 frozen_utc"),
+    ("before_amend1", "AMEND2 frozen_utc"),
+    ("before_prereg", "AMEND2 frozen_utc"),
+    ("future", "AMEND2 frozen_utc"),
+    ("no_block", "AMEND2 constants"),
+    ("extra", "AMEND2 constants"),
+    ("old_pin", "AMEND2 constants"),
+    ("missing_size_order", "AMEND2 constants"),
+    ("missing_runner", "AMEND2 constants"),
+    ("old_arms", "AMEND2 constants"),
+    ("wrong_id", "AMEND2 constants"),
+    ("nonhex", "AMEND2 constants"),
+    ("duplicate", "AMEND2 constants"),
+    ("copy", "PREREG-AMEND2.md differs"),
+])
+def test_amend2_validation(factory, defect, reason, capsys):
+    cfg, c, _ = factory()
+    text = cfg.amend2.read_text()
+    if defect == "sidecar":
+        cfg.amend2.with_suffix(".sha256").unlink()
+    elif defect == "sha":
+        cfg.amend2.write_text(text + "\n")
+    elif defect == "parse":
+        cfg.amend2.with_suffix(".sha256").write_text("broken")
+    elif defect in ("same_as_amend1", "before_amend1", "before_prereg", "future"):
+        date = {"same_as_amend1": AMEND_PAST, "before_amend1": "2026-06-01T00:00:00Z",
+                "before_prereg": "2025-01-01T00:00:00Z",
+                "future": "2099-01-01T00:00:00Z"}[defect]
+        freeze_amend2(cfg, c, date=date)
+    elif defect == "copy":
+        (cfg.run_dir / "PREREG-AMEND2.md").write_text(text + "changed")
+    else:
+        if defect == "no_block":
+            text = "# AMEND2 without constants\n"
+        elif defect == "extra":
+            text = text.replace("REPO_SHA=", "N_MIN=61\nREPO_SHA=")
+        elif defect == "old_pin":
+            text = text.replace("REPO_SHA=", f"ID_{OLD_LOCAL[0]}=017eda0b7c34\nREPO_SHA=")
+        elif defect == "missing_size_order":
+            text = text.replace(f"SIZE_ORDER={h.QWEN38}\n", "")
+        elif defect == "missing_runner":
+            text = text.replace(f"CODE_RUNNER_SHA256={c['CODE_RUNNER_SHA256']}\n", "")
+        elif defect == "old_arms":
+            text = text.replace(f"LOCAL_MODELS={h.QWEN38}\nCODE",
+                                f"LOCAL_MODELS={h.QWEN38},{OLD_LOCAL[2]}\nCODE")
+        elif defect == "wrong_id":
+            text = text.replace("b3f4c17c6811", "000000000000")
+        elif defect == "nonhex":
+            text = text.replace("c" * 40, "g" * 40)
+        else:
+            text = text.replace("REPO_SHA=", f"REPO_SHA={'c' * 40}\nREPO_SHA=")
+        assert text != cfg.amend2.read_text()
+        freeze_amend2(cfg, c, text=text)
+    assert call(cfg, "select") == 2
+    assert reason in capsys.readouterr().err
+    assert not (cfg.run_dir / "selection.json").exists()
+
+
+def test_amend2_byte_identical_copy_accepted(factory):
+    cfg, _, _ = factory()
+    copy = cfg.run_dir / "PREREG-AMEND2.md"
+    copy.write_bytes(cfg.amend2.read_bytes())
+    copy.chmod(0o444)
+    assert h.frozen(cfg)["amend2_sha256"] == h.sha256_file(cfg.amend2)
+
+
+def test_real_amend2_constants_block_matches_the_harness():
+    if not h.AMEND2.exists():
+        pytest.skip("AMEND2 not written yet")
+    block = h.parse_block(h.AMEND2.read_text(), "```text P20-AMEND2-CONSTANTS")
+    assert block.keys() == h.AMEND2_FIXED.keys() | h.AMEND2_SHA_KEYS.keys()
+    assert {k: block[k] for k in h.AMEND2_FIXED} == h.AMEND2_FIXED
+    assert all(re.fullmatch(p, block[k]) for k, p in h.AMEND2_SHA_KEYS.items())

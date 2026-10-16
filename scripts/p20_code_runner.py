@@ -63,6 +63,27 @@ def gate(cfg, c, arm):
         raise h.Park("outside night window")
 
 
+# Every Pi thinking level but "off" is unsupported, and "off" is sent as reasoning_effort "none":
+# Ollama's /v1 endpoint thinks by default and stops on "none" (AMEND2; production sends
+# think:false).
+PI_THINKING_LEVELS = {"off": "none", "minimal": None, "low": None, "medium": None,
+                      "high": None, "xhigh": None, "max": None}
+
+
+def pi_config(run_dir, arm):
+    root = run_dir / "pi_config"
+    h.write_json(root / "models.json", {"providers": {"ollama": {
+        "baseUrl": "http://localhost:11434/v1", "api": "openai-completions", "apiKey": "ollama",
+        "models": [{
+            "id": arm, "name": arm, "input": ["text"], "output": ["text"],
+            "contextWindow": h.local_models.num_ctx(arm), "maxOutput": 8192,
+            "reasoning": True, "thinkingLevelMap": PI_THINKING_LEVELS,
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+        }],
+    }}})
+    return root
+
+
 def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
     if arm != "sonnet":
         pi.PI_MODEL = arm
@@ -269,6 +290,8 @@ def run(cfg, args):
         i["stratum"] == "noncloud" for i in pending
     ) else None
     pi = importlib.import_module("lib_pi") if args.arm != "sonnet" else None
+    if pi is not None:
+        pi.PI_CONFIG_DIR = str(pi_config(cfg.run_dir, args.arm))
     checked_rx = False
     attempts = h.jsonl(attempts_path)
     try:
@@ -312,7 +335,7 @@ def parser():
     ap = argparse.ArgumentParser()
     default = h.parser().get_default("run_dir")
     ap.add_argument("--run-dir", type=Path, default=default)
-    ap.add_argument("--arm", required=True, choices=h.arms(h.CONSTANTS, True))
+    ap.add_argument("--arm", required=True, choices=h.arms(h.STATIC, True))
     root = Path.home() / ".rsi/research"
     ap.add_argument("--noncloud-dir", type=Path,
                     default=root / "classifier-v2-release/ab/work/noncloud")
