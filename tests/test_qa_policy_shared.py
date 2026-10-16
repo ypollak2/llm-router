@@ -122,9 +122,14 @@ def test_strip_handles_model_specs_and_strings():
     from llm_router.qa_policy import strip_local_for_qa
 
     specs = [ModelSpec("ollama", "q"), ModelSpec("gemini", "g")]
-    assert strip_local_for_qa(specs, "query") == [ModelSpec("gemini", "g")]
+    assert strip_local_for_qa(specs, "query") == [
+        ModelSpec("gemini", "g"), ModelSpec("ollama", "q"),
+    ]
+    assert strip_local_for_qa(specs, "query", keep_if_only_local=False) == [
+        ModelSpec("gemini", "g"),
+    ]
     assert strip_local_for_qa(specs, "code") == specs
-    assert strip_local_for_qa(["ollama/q", "openai/o"], "query") == ["openai/o"]
+    assert strip_local_for_qa(["ollama/q", "openai/o"], "query") == ["openai/o", "ollama/q"]
     only_local = [ModelSpec("ollama", "q")]
     # MCP default: an Ollama-only chain is kept (an empty chain would fail the call).
     assert strip_local_for_qa(only_local, "query") == only_local

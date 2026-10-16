@@ -1,4 +1,4 @@
-"""D-14, amended by D-114: strip local Q&A models, with an MCP last resort before Claude.
+"""D-14/D-114/D-115/D-116: local Q&A fallback after non-Claude providers, before Claude.
 
 Evidence behind the rule: real Q&A prompts, local qwen 4/37 acceptable vs Sonnet 34/37
 (PLAN §0.3 [RX]); 65 local Q&A answers in 7 days [U]. M3.0 (#297) applied it to MCP
@@ -46,19 +46,20 @@ def _provider(entry: Any) -> str:
 
 
 def strip_local_for_qa(models: list, task_type: Any, *, keep_if_only_local: bool = True) -> list:
-    """Strip local Q&A models while a non-Claude provider remains (D-14, D-114).
+    """Order local Q&A fallbacks after the last non-Claude entry (D-116).
 
-    With ``keep_if_only_local=True`` (MCP ``route_and_call``, also serving the
-    gateway and route server; SDK; zero-Claude hook), retain locals before Claude
-    when stripping leaves no non-Claude provider: D-114 follows the 2026-10-15
-    env-doctor evidence of a fresh-process simple Q&A call failing on Haiku without an
-    Anthropic API key despite installed Ollama and ``LLM_ROUTER_CLAUDE_SUBSCRIPTION=true``.
+    D-114/D-115 amended D-14 for MCP ``route_and_call`` (including gateway and
+    route server), SDK, and zero-Claude hook callers. ``keep_if_only_local=True``
+    now retains locals even when a non-Claude provider is listed: insert them
+    after the last non-Claude entry in the non-local chain, or at the start if
+    none exists. Relative order within the local and kept groups is preserved.
+    A listed provider may fail at call time, so local ($0) is tried before the
+    trailing Claude entries. A weaker local answer may win over a working Claude.
 
-    With False (normal hook DIRECT path only), return the stripped chain even if
-    empty or Claude-only; the turn falls through to the host Claude session,
-    which needs no API key.
-    Non-Q&A types pass through unchanged. ``task_type`` may be a ``TaskType`` or string.
-    Relative order within the local and kept groups is preserved.
+    With False (normal hook DIRECT path only), strip all local entries even if
+    the chain becomes empty or Claude-only; the host Claude session handles the
+    turn without an API key. Non-Q&A types pass through unchanged. ``task_type``
+    may be a ``TaskType`` or string. No local entries means the chain is unchanged.
 
     The caller must not apply this to an explicit ``model_override``: that is the
     caller's own pin, not routing.
@@ -67,12 +68,19 @@ def strip_local_for_qa(models: list, task_type: Any, *, keep_if_only_local: bool
     if tt not in QA_TASK_TYPES:
         return models
     kept = [m for m in models if _provider(m) not in QA_STRIP_PROVIDERS]
-    if keep_if_only_local and not any(_provider(m) not in CLAUDE_PROVIDERS for m in kept):
-        local = [m for m in models if _provider(m) in QA_STRIP_PROVIDERS]
+    local = [m for m in models if _provider(m) in QA_STRIP_PROVIDERS]
+    if not local:
+        return models
+    if keep_if_only_local:
+        position = max(
+            (i for i, m in enumerate(kept) if _provider(m) not in CLAUDE_PROVIDERS),
+            default=-1,
+        ) + 1
         log.debug(
-            "D-114: kept %d local model(s) as last resort in the %s chain", len(local), tt
+            "D-116: re-inserted %d local model(s) at position %d in the %s chain",
+            len(local), position, tt,
         )
-        return local + kept
+        return kept[:position] + local + kept[position:]
     if len(kept) != len(models):
         log.debug("D-14: dropped %d local model(s) from the %s chain", len(models) - len(kept), tt)
     return kept

@@ -230,15 +230,17 @@ def build_chain(complexity: str, zone: str, task_type: str, *,
     D-14 = A (P0.3): default normal hook mode strips local Q&A models even
     if the chain becomes empty or Claude-only: the hook turn falls through to
     the host Claude session. Callers without that fallback (the SDK and the
-    zero-Claude hook) pass ``qa_last_resort=True`` for D-114/D-115: keep local
-    entries before Claude when no non-Claude provider remains in the chain.
+    zero-Claude hook) pass ``qa_last_resort=True`` for D-114/D-115/D-116: insert
+    local entries after the last non-Claude entry and before trailing Claude entries.
+    Listed providers may fail at call time; local is then tried before Claude,
+    accepting that a weaker local answer may win over a working Claude.
     ``code`` and other non-Q&A types are unchanged.
 
     Args:
         complexity: simple / moderate / complex / deep_reasoning
         zone: green / yellow / orange / red / critical
         task_type: query / research / generate / analyze / code
-        qa_last_resort: retain local Q&A models when only Claude or nothing remains
+        qa_last_resort: retain local Q&A models after the last non-Claude entry
 
     Returns:
         Ordered list of ModelSpec to try.

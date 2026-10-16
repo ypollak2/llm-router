@@ -18,23 +18,35 @@ status: fixed in `fix/d114-qa-local-last-resort` (deploy: reconnect MCP servers;
   leave an empty chain. Without an Anthropic API key, calling such an entry raises
   `AuthenticationError`. D-114 works around this by trying local first; it does
   not fix the AuthenticationError itself.
-- **Fix.** D-114 keeps D-14 stripping while any non-Claude provider remains.
-  Otherwise, MCP retains local entries before Claude entries, preserving relative
-  order within each group. Claude providers come from `contracts.CLAUDE_PROVIDERS`.
+- **Fix.** D-114/D-115 retain local Q&A fallbacks for MCP, SDK, and zero-Claude
+  hook callers. D-116 re-inserts local entries after the last non-Claude entry
+  in the non-local chain, preserving relative order within both groups. If none
+  exists, local goes first. Claude providers come from `contracts.CLAUDE_PROVIDERS`.
+  A listed non-Claude provider may fail at call time (quota, auth, CLI error), so
+  local ($0) is tried before trailing Claude entries. The accepted trade-off is
+  that a weaker local answer may win over a working Claude.
   Both primary and emergency BUDGET chains use this rule. The blast radius is MCP
   `llm()`/`llm_route`, gateway and route server via `route_and_call`, SDK
   `llm_router.route`, and the zero-Claude hook (D-115). These callers use
   `keep_if_only_local=True`. False is only the normal hook DIRECT path, which
   strips local even if empty or Claude-only: its turn falls through to the host
   Claude session. Normal hook mode is unchanged.
-  Under a daily cap, [ollama, anthropic] now serves Ollama ($0) in both smart and
-  hard modes, rather than falling through to Claude or raising BudgetExceededError.
+  Under a daily cap, any capped Q&A chain that contains a local model is now
+  served by it in smart and hard modes. Before D-116 a capped [openai, ollama]
+  Q&A chain raised `BudgetExceededError`; with Claude present smart fell through
+  to Claude. LOCAL-TIMEOUT-1 still demotes a recently timed-out local model to
+  the end, after Claude.
 - **Test.** `tests/test_d114_qa_local_last_resort.py` pins provider classification,
-  string and ModelSpec ordering, local-only and non-Q&A chains, normal hook
-  stripping, and Claude-only chains without locals. `test_build_chain_qa_last_resort`
-  and `test_sdk_qa_last_resort` pin builder and real SDK dispatch with and without
-  external keys. MCP harness tests pin local service before Claude, Claude after
-  local failure, stripping when a paid API remains, and emergency BUDGET fallback.
-  `tests/test_mcp_qa_no_local.py` pins smart/hard daily caps with only local and Claude.
+  string and ModelSpec ordering, interleaved chains, local-only and non-Q&A chains,
+  normal hook stripping, and Claude-only chains without locals.
+  `test_mcp_non_claude_call_failure_tries_local_before_claude` and
+  `test_mcp_non_claude_and_local_failure_tries_claude_last` pin call-time failures;
+  `test_mcp_local_timeout_cooldown_wins_over_d116` pins timeout demotion.
+  `test_build_chain_qa_last_resort` and `test_sdk_qa_last_resort` pin builder and
+  real SDK dispatch with and without external keys. MCP tests also pin emergency
+  BUDGET fallback. Updated D-14 tests in `tests/test_mcp_qa_no_local.py`, including
+  `test_qa_moves_local_after_the_last_non_claude_entry` and
+  `test_qa_moves_openai_compat_local_servers_after_non_claude`, now assert order
+  instead of absence and pin smart/hard daily caps for mixed Q&A chains.
   `test_qa_prompt_is_served_by_local_as_last_resort_in_zero_claude` in
   `tests/test_zero_claude_scenarios.py` pins the zero-Claude served answer.

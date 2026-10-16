@@ -76,9 +76,9 @@ from llm_router.model_discovery import ensure_grandfather, order_for_chain, sink
 from llm_router.profiles import get_model_chain, provider_from_model
 from llm_router.receipt_store import compute_receipt, store_receipt
 from llm_router.tracing import set_span_attributes, traced_span
-# D-14/D-114: remove local Q&A models while a non-Claude provider remains;
-# otherwise keep local before Claude. The rule lives in ``llm_router.qa_policy``,
-# shared with the hook DIRECT path and SDK; these names stay for callers.
+# D-14/D-114/D-115/D-116: put local Q&A models after the last non-Claude entry
+# and before trailing Claude entries. The shared ``llm_router.qa_policy`` also
+# serves SDK and hook callers; normal hook DIRECT mode still strips all local.
 from llm_router.qa_policy import QA_STRIP_PROVIDERS as _QA_STRIP_PROVIDERS  # noqa: F401
 from llm_router.qa_policy import strip_local_for_qa as _strip_local_for_qa
 from llm_router.types import BudgetExceededError, Complexity, CostBudgetExceeded, DeadlineExceeded, LLMResponse, RoutingProfile, TaskType, WallClockExceeded
@@ -3771,7 +3771,7 @@ async def _dispatch_model_loop(
         emergency_chain = await _build_and_filter_chain(
             task_type, RoutingProfile.BUDGET, None, complexity_hint, Complexity.SIMPLE, config
         )
-        # M3.0 (D-14 = A): the shared builder no longer strips local, so strip here.
+        # D-116: apply shared Q&A ordering here too; timeout demotion below still wins.
         emergency_chain = _strip_local_for_qa(emergency_chain, task_type)
         if emergency_chain and emergency_chain != _chain_as_built:
             emergency_chain = _demote_timed_out_local(emergency_chain)  # LOCAL-TIMEOUT-1
@@ -4806,8 +4806,8 @@ async def route_and_call(
                 models_to_try, task_type.value,
                 _gate_configured_names(get_config(), get_repo_config()))
 
-        # D-114 (amends D-14): remove local Q&A models while a non-Claude provider
-        # remains; otherwise keep them before Claude. Applied here, after the chain
+        # D-116 (amends D-14/D-114/D-115): insert local Q&A models after the last
+        # non-Claude entry, before trailing Claude entries. Applied after the chain
         # build, the subject specialist and the bandit reorder (either can add a local
         # model), and before the daily-cap step. An explicit model_override is the
         # caller's own pin and is left alone.

@@ -1,4 +1,4 @@
-"""D-114/D-115: keep local Q&A models as a last resort before Claude.
+"""D-114/D-115/D-116: local Q&A follows the last non-Claude entry, before Claude.
 
 env-doctor (2026-10-15) found a fresh-process llm_route(complexity_override="simple")
 Q&A chain collapsed to anthropic/claude-haiku-4-5. With no Anthropic API key and
@@ -12,8 +12,11 @@ and real SDK route. Daily caps are pinned in tests/test_mcp_qa_no_local.py;
 tests/test_zero_claude_scenarios.py covers zero-Claude hook dispatch.
 """
 
+import time
+
 import pytest
 
+from llm_router import router as router_module
 from llm_router.contracts import CLAUDE_PROVIDERS
 from llm_router.hooks import chain_builder, direct_executor
 from llm_router.hooks.direct_executor import ModelSpec
@@ -31,13 +34,13 @@ def _models_are_user_configured(monkeypatch):
 
 
 @pytest.mark.parametrize("task_type", sorted(QA_TASK_TYPES))
-def test_codex_still_strips_local_for_qa(task_type):
+def test_codex_present_puts_local_after_codex_for_qa(task_type):
     chain = [
         "ollama/qwen3.5:latest",
         "codex/gpt-5.5",
         "anthropic/claude-haiku-4-5",
     ]
-    assert strip_local_for_qa(chain, task_type) == chain[1:]
+    assert strip_local_for_qa(chain, task_type) == [chain[1], chain[0], chain[2]]
 
 
 @pytest.mark.parametrize(
@@ -49,9 +52,21 @@ def test_codex_still_strips_local_for_qa(task_type):
         "gemini_cli/gemini-2.5-pro",
     ],
 )
-def test_non_claude_provider_still_strips_local(provider_model):
+def test_non_claude_provider_puts_local_after_it(provider_model):
     kept = [provider_model, "anthropic/claude-haiku-4-5"]
-    assert strip_local_for_qa(["ollama/qwen3.5:latest", *kept], "query") == kept
+    assert strip_local_for_qa(["ollama/qwen3.5:latest", *kept], "query") == [
+        provider_model, "ollama/qwen3.5:latest", kept[1],
+    ]
+
+
+@pytest.mark.parametrize("task_type", sorted(QA_TASK_TYPES))
+def test_interleaved_local_follows_the_last_non_claude_entry(task_type):
+    chain = [
+        "codex/x", "ollama/a", "anthropic/h", "openai/o", "ollama/b", "claude/c",
+    ]
+    assert strip_local_for_qa(chain, task_type) == [
+        "codex/x", "anthropic/h", "openai/o", "ollama/a", "ollama/b", "claude/c",
+    ]
 
 
 @pytest.mark.parametrize("task_type", sorted(QA_TASK_TYPES))
@@ -153,7 +168,7 @@ async def test_mcp_local_failure_still_tries_claude():
 
 
 @pytest.mark.asyncio
-async def test_mcp_non_claude_provider_still_strips_local():
+async def test_mcp_non_claude_provider_serves_before_local():
     # openai, not codex: codex dispatches through its CLI, outside the harness's
     # providers.call_llm stub. The codex case is pinned by the pure-filter tests above.
     called = await _run(
@@ -161,6 +176,48 @@ async def test_mcp_non_claude_provider_still_strips_local():
         ["ollama/qwen3.5:latest", "openai/gpt-4o", "anthropic/claude-haiku-4-5"],
     )
     assert called == ["openai/gpt-4o"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_non_claude_call_failure_tries_local_before_claude():
+    called = await _run(
+        TaskType.QUERY,
+        ["ollama/qwen3.5:latest", "openai/gpt-4o", "anthropic/claude-haiku-4-5"],
+        fail={"openai/gpt-4o"},
+    )
+    assert called == ["openai/gpt-4o", "ollama/qwen3.5:latest"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_non_claude_and_local_failure_tries_claude_last():
+    called = await _run(
+        TaskType.QUERY,
+        ["ollama/qwen3.5:latest", "openai/gpt-4o", "anthropic/claude-haiku-4-5"],
+        fail={"openai/gpt-4o", "ollama/qwen3.5:latest"},
+    )
+    assert called[:3] == [
+        "openai/gpt-4o", "ollama/qwen3.5:latest", "anthropic/claude-haiku-4-5",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mcp_local_timeout_cooldown_wins_over_d116(monkeypatch):
+    monkeypatch.setitem(
+        router_module._local_timeout_at, "ollama/qwen3.5:latest", time.monotonic(),
+    )
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_TIMEOUT_COOLDOWN_S", "600")
+    called = await _run(
+        TaskType.QUERY,
+        ["ollama/qwen3.5:latest", "openai/gpt-4o", "anthropic/claude-haiku-4-5"],
+        fail={"openai/gpt-4o"},
+    )
+    assert called[:2] == ["openai/gpt-4o", "anthropic/claude-haiku-4-5"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_code_keeps_local_first_with_non_claude_provider():
+    called = await _run(TaskType.CODE, ["ollama/qwen3.5:latest", "openai/gpt-4o"])
+    assert called[:1] == ["ollama/qwen3.5:latest"]
 
 
 @pytest.mark.asyncio
@@ -210,17 +267,26 @@ def test_build_chain_qa_last_resort(monkeypatch, ollama_only_chain, task_type, c
     assert not any(spec.provider == "ollama" for spec in default)
 
 
-def test_build_chain_external_provider_still_strips_local(monkeypatch, ollama_only_chain):
-    """D-14 still applies when a non-Claude provider is listed in the chain."""
+def test_build_chain_external_provider_puts_local_after_it(monkeypatch, ollama_only_chain):
+    """D-116 keeps local after non-Claude providers and before trailing Claude."""
     monkeypatch.setenv("GEMINI_API_KEY", "test-not-a-key")
     monkeypatch.setenv("OPENAI_API_KEY", "test-not-a-key")
     chain = chain_builder.build_chain("simple", "green", "query", qa_last_resort=True)
-    assert not any(spec.provider == "ollama" for spec in chain)
+    assert ModelSpec("ollama", "ollama-model") in chain
+    local = [i for i, spec in enumerate(chain) if spec.provider == "ollama"]
+    external = [
+        i for i, spec in enumerate(chain)
+        if spec.provider not in CLAUDE_PROVIDERS and spec.provider != "ollama"
+    ]
+    claude = [i for i, spec in enumerate(chain) if spec.provider == "claude"]
+    assert external, chain  # the external keys really put a non-Claude provider in
+    assert all(i < j for i in external for j in local)
+    assert all(i < j for i in local for j in claude)
 
 
 @pytest.mark.parametrize("external", (False, True), ids=("ollama-only", "gemini"))
 def test_sdk_qa_last_resort(monkeypatch, ollama_only_chain, external):
-    """Real SDK routing serves local only when no non-Claude provider remains."""
+    """Real SDK routing tries Gemini before local when an external key is set."""
     calls = {"ollama": 0, "gemini": 0}
 
     def fake_ollama(prompt, model, timeout, history, system_prompt):
