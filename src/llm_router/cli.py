@@ -43,6 +43,7 @@ Usage:
     llm-router dashboard        — launch interactive TUI dashboard (real-time monitoring)
     llm-router dashboard --web [--port 7338]  — legacy web dashboard at localhost:7337
     llm-router set-enforce <mode>  — switch enforcement mode (smart|soft|hard|off)
+    llm-router prefer "<text>"     — natural-language routing priorities (English and Hebrew)
     llm-router team report [period]  — show team savings report (default: week)
     llm-router team push [period]    — push report to Slack/Discord/Telegram/webhook
     llm-router team setup            — interactively configure team endpoint
@@ -867,6 +868,7 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "demo",
         "dashboard",
         "set-enforce",
+        "prefer",
         "team",
         "budget",
         "config",
@@ -925,7 +927,8 @@ _HELP_FLAGS = ("-h", "--help")
 # position (argparse, or an explicit check over all args).
 _OWN_HELP_ANYWHERE = frozenset({
     "audit", "calibrate", "cp", "dev-refresh", "gc", "install", "inventory", "invoice",
-    "judge", "kpi", "last", "map", "migrate", "mod", "mode", "northstar", "pi", "policy", "proxy",
+    "judge", "kpi", "last", "map", "migrate", "mod", "mode", "northstar", "pi", "policy", "prefer",
+    "proxy",
     "quickstart", "replay", "resolve", "retrospect", "run", "serve", "snapshot", "stats",
     "statusline", "team-sync", "test-delta", "verify", "welcome",
 })
@@ -1148,6 +1151,9 @@ def main() -> None:
     elif args and args[0] == "map":
         from llm_router.commands.map import cmd_map
         sys.exit(cmd_map(args[1:]))
+    elif args and args[0] == "prefer":
+        from llm_router.commands.prefer import cmd_prefer
+        sys.exit(cmd_prefer(args[1:]))
     elif args and args[0] == "mode":
         from llm_router.commands.mode import cmd_mode
         sys.exit(cmd_mode(args[1:]))
