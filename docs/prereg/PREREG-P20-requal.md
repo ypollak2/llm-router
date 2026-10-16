@@ -190,6 +190,9 @@ live-faithful, so Claude arms may see more context than local arms (§16).
   * **Pass rule, per plant kind:** with m plants placed (m ≤ 6), at least **ceil(5/6 · m)** must be
     judged unacceptable (m = 6 or 5 → 5; m = 4 → 4). The set is NOT INFORMATIVE (`calibration`) if
     either kind fails its pass rule or places m < 4 plants.
+  * The pass rule and the m < 4 floor apply to **swapped plants too** (a swapped plant is skipped
+    when its source answer is not ok). This extends D-123b, which states the rule for Q&A degraded
+    plants only, and it is never more lenient.
   * **Plants never change n.** The item that carries a plant and the item whose Sonnet answer
     sourced it both stay in n; their real arms keep their own verdicts. A plant verdict is used
     only for the pass rule. A plant shares the judge call with the real candidates (§16).
@@ -263,7 +266,8 @@ For code, "powered" uses each lane's own paired n.
 * **Kill, by class (D-123b).** A set is *decisive-fail* when it is informative, it has ≥ 1 graded
   lane, and every graded lane has verdict `failed` (so each is powered).
   * **P2.1 is cancelled** only if the `tech_op` set is decisive-fail.
-  * **P2.10 is cancelled** only if the `qa` set is decisive-fail.
+  * **P2.10's Q&A re-enable is cancelled** only if the `qa` set is decisive-fail. Its other
+    local-first lanes (eligible code or tech-op lanes) still proceed.
   * **Code results alone never cancel anything.** A code lane only feeds the table and the catalog.
   * A class whose set is `not_informative` or has any `inconclusive` lane (and no `eligible` lane)
     cancels nothing. That class gets "no decision" and a new prereg (larger n or a different
