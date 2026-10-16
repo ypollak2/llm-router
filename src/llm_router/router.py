@@ -1535,7 +1535,7 @@ def _quota_score_chain(
             models, map_data, {"task_type": tt, "needs": ()},
             hold_providers=hold, exempt=exempt,
         )
-        log.info(
+        log.debug(
             "quota_score providers=%s explains=%s",
             [m.split("/", 1)[0] for m in new],
             [{k: e.get(k) for k in ("resource", "score", "terms")} for e in explains],

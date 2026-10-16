@@ -79,6 +79,26 @@ class ConvState:
     prefix_tokens: int | None = None
 
 
+class ReadOnlyStickiness:
+    """A view of a ``Stickiness`` that reads and never records (authority ``advise``, P2.2-A:
+    a tier proposal that is never applied must not pin the conversation's later turns)."""
+
+    def __init__(self, inner: "Stickiness") -> None:
+        self._inner = inner
+
+    def get(self, key: str):
+        return self._inner.get(key)
+
+    def is_cold(self, state) -> bool:
+        return self._inner.is_cold(state)
+
+    def record(self, *args, **kwargs) -> None:
+        return None
+
+    def record_usage(self, *args, **kwargs) -> None:
+        return None
+
+
 class Stickiness:
     """Per-conversation memory of the last model served. Thread-safe; bounded."""
 
