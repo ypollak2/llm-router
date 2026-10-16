@@ -4813,7 +4813,8 @@ def main() -> None:
                     )
 
     # Prefix beats classifier, learned routes, context inheritance, pressure
-    # downgrade and Q&A-quiet. It does not beat enforce off/shadow, kill switches,
+    # downgrade and Q&A-quiet. It does not beat enforce off/shadow (a refusal
+    # then only logs: no block, no strip, no forced target), kill switches,
     # zero-claude_edit, the sidecar fast path, or hard budget caps.
     _pfx = None
     _forced = None
@@ -4855,7 +4856,16 @@ def main() -> None:
                 )
             prefixes.record_example(
                 _pfx.stripped, forced=_name, decided=_decided, door="hook")
-            if _pfx.forces_external:
+            if _prefix_refusal:
+                try:
+                    from llm_router.enforce_config import resolve_enforce_mode
+                    _pfx_mode = resolve_enforce_mode()
+                except Exception:  # noqa: BLE001 -- same fallback as the main flow below
+                    _pfx_mode = os.environ.get("LLM_ROUTER_ENFORCE", "").strip().lower() or "smart"
+                if _pfx_mode in ("off", "shadow", "observe"):
+                    _prefix_refusal = None
+                    _pfx = None
+            if _pfx is not None and _pfx.forces_external:
                 prompt = _pfx.stripped
                 _forced, _forced_provider = _name, _provider
     except Exception as exc:

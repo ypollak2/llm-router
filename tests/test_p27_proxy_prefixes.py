@@ -170,3 +170,62 @@ async def test_strip_copy_and_malformed():
     for malformed in (None, [], {"messages": [None]}):
         assert escalation.explicit_override(malformed) is None
         assert escalation.explicit_pin(malformed) is None
+
+
+REMINDER = "<system-reminder>\nAs you answer, use the context below.\n</system-reminder>"
+
+
+def blocks_body(*texts):
+    body = request("x")
+    body["messages"] = [{"role": "user", "content": [{"type": "text", "text": t} for t in texts]}]
+    return body
+
+
+@pytest.mark.parametrize("texts,kept", [
+    ((REMINDER, "opus: explain"), [REMINDER, "explain"]),
+    (("   ", "opus: explain"), ["   ", "explain"]),
+    ((REMINDER + "\nopus: explain",), [REMINDER + "\nexplain"]),
+])
+def test_strip_selects_the_block_detection_selects(texts, kept):
+    body = blocks_body(*texts)
+    before = copy.deepcopy(body)
+    assert escalation.explicit_pin(body) == "opus"
+    stripped = prefixes.strip_body(body)
+    assert body == before
+    assert [b["text"] for b in stripped["messages"][0]["content"]] == kept
+
+
+async def test_multi_block_body_is_stripped_at_the_door(tmp_path, monkeypatch):
+    post, seen, _, policy = await door(tmp_path, monkeypatch)
+    body = blocks_body(REMINDER, "opus: explain")
+    body["model"] = policy.by_name["sonnet"].model
+    await post(body)
+    sent = json.loads(seen[0])
+    texts = [b["text"] for b in sent["messages"][0]["content"]]
+    assert texts == [REMINDER, "explain"]
+    assert sent["model"] == policy.by_name["opus"].model
+
+
+async def test_mid_text_prefix_is_forwarded_untouched(tmp_path, monkeypatch):
+    post, seen, _, _ = await door(tmp_path, monkeypatch)
+    _, raw, row = await post(request("please explain opus: why"))
+    assert seen == [raw]
+    assert "prefix" not in row
+
+
+async def test_pin_sticks_for_the_rest_of_the_conversation(monkeypatch):
+    policy = pt.ClaudeTierPolicy.load()
+    # The client asks for Sonnet on every call; only the recorded pin can hold Opus.
+    monkeypatch.setattr(policy, "allow_upgrade", True)
+    sticky = Stickiness(policy.cold_gap_s)
+    first = request("opus: explain this")
+    first["model"] = policy.by_name["sonnet"].model
+    d1 = await policy.decide(first, None, sticky)
+    assert d1.served_model == policy.by_name["opus"].model
+    later = copy.deepcopy(first)
+    later["messages"] += [
+        {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+        {"role": "user", "content": [{"type": "text", "text": "thanks, and now the next part"}]},
+    ]
+    d2 = await policy.decide(later, None, sticky)
+    assert (d2.served_model, d2.reason) == (policy.by_name["opus"].model, pt.REASON_STICKY)

@@ -180,3 +180,21 @@ def test_critical_pressure(tmp_path, ollama):
 def test_corrupt_examples_fails_open(tmp_path, ollama):
     (tmp_path / ".llm-router/examples.jsonl").mkdir(parents=True)
     run(tmp_path, ollama, f"local: {REQUEST}")
+
+
+@pytest.mark.parametrize("mode,blocked", [("off", False), ("shadow", False), ("hard", True)])
+def test_refusal_obeys_enforce_mode(tmp_path, mode, blocked):
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    out = run(tmp_path, f"http://127.0.0.1:{port}", f"local: {REQUEST}",
+              LLM_ROUTER_OLLAMA_MODEL=None, OLLAMA_HOST=f"http://127.0.0.1:{port}",
+              LLM_ROUTER_ENFORCE=mode)
+    assert bool(out and out.get("decision") == "block") is blocked
+    if blocked:
+        assert "refused" in out["reason"]
+    # The override is still recorded, whatever the mode.
+    assert examples(tmp_path)[0]["decided"] == "refused:no_local"
+    # Off/shadow: nothing forced, so the prompt keeps its prefix and no directive names one.
+    if not blocked:
+        assert "USER PREFIX" not in json.dumps(out)

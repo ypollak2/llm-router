@@ -189,6 +189,7 @@ async def llm(
     model = None
     override = None
     reply = None
+    decided = None
     try:
         override = prefixes.parse(prompt)
         if override:

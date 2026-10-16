@@ -70,11 +70,35 @@ def strip_prefix(text: str) -> str:
     return override.stripped if override else text
 
 
+def _human_remainder(text: str) -> str:
+    """The human text one block keeps, selected exactly as ``steps._human_parts``
+    does: harness blocks and a leading ``Caveat:`` line removed, then stripped."""
+    from llm_router.proxy.steps import _CAVEAT, _strip_block
+
+    rest = _strip_block(text)[0].strip()
+    if _CAVEAT.match(rest):
+        rest = rest.split("\n", 1)[1].strip() if "\n" in rest else ""
+    return rest
+
+
+def _strip_in_block(text: str) -> str | None:
+    """``text`` with the prefix removed from its human remainder, or None when that
+    remainder does not start with a prefix. Harness text in the same block stays."""
+    rest = _human_remainder(text)
+    override = parse(rest)
+    at = text.find(rest) if rest else -1
+    if override is None or at < 0:
+        return None
+    return text[:at] + override.stripped + text[at + len(rest):]
+
+
 def strip_body(body: dict) -> dict | None:
     """Copy the changed path to the newest human message, stripping one prefix.
 
-    Tool results and harness-only turns are skipped just as in newest_human_text.
-    Unchanged messages, blocks and request fields retain their original values.
+    The block is chosen as detection chooses it (``newest_human_text``): the first
+    text block that keeps human text once harness blocks, ``Caveat:`` lines and
+    whitespace-only blocks are removed. Tool results and harness-only turns are
+    skipped. Unchanged messages, blocks and request fields keep their values.
     """
     try:
         from llm_router.proxy.steps import newest_human_text
@@ -90,18 +114,19 @@ def strip_body(body: dict) -> dict | None:
                 continue
             content = message.get("content")
             if isinstance(content, str):
-                override = parse(content)
-                if override is None:
+                changed = _strip_in_block(content)
+                if changed is None:
                     return None
-                changed = override.stripped
             elif isinstance(content, list):
                 changed = list(content)
                 for block_index, block in enumerate(content):
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        override = parse(block.get("text"))
-                        if override is None:
+                    if (isinstance(block, dict) and block.get("type") == "text"
+                            and isinstance(block.get("text"), str)
+                            and _human_remainder(block["text"])):
+                        text = _strip_in_block(block["text"])
+                        if text is None:
                             return None
-                        changed[block_index] = dict(block, text=override.stripped)
+                        changed[block_index] = dict(block, text=text)
                         break
                 else:
                     return None

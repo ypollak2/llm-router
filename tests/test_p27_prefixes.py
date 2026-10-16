@@ -181,3 +181,12 @@ async def test_quality_breaker_still_blocks(mcp, monkeypatch):
     assert await door.llm("local: hi", mcp.ctx) == "blocked"
     assert not any(c.called for c in mcp.calls.values())
     assert json.loads(mcp.path.read_text())["decided"] == "ollama/qwen:7b"
+
+
+@pytest.mark.parametrize("text", [
+    "please explain opus: why", "Summarize this.\nlocal: foo", "see the claude: haiku: note",
+])
+def test_prefix_is_anchored_at_prompt_start(text):
+    # A prefix word later in the text is ordinary prose (kills .match -> .search).
+    assert prefixes.parse(text) is None
+    assert prefixes.strip_prefix(text) == text
