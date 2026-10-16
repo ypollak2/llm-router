@@ -422,7 +422,10 @@ def run_units(units: list, do_unit, *, clock, state_path, ollama, own_model: str
     longest = float(state.get("longest_unit_s", 0.0)) or None
     try:
         if quiet is not None:
-            q = quiet()
+            try:
+                q = quiet()
+            except OllamaError:
+                return {"status": "parked", "reason": "quiet:ollama_unreachable", "done": done, "readings": []}
             if not q["ok"]:
                 return {"status": "parked", "reason": "quiet:" + str(q["reason"]), "done": done,
                         "readings": q["readings"]}
@@ -1562,14 +1565,25 @@ def _robust_leg_status(m, voided: list, pair: tuple) -> dict:
     return {"status": "kill" if discordant > 1 else "pass", "discordant": discordant, "detail": m}
 
 
-def criterion8(m: dict | None, *, voided: list, syn: dict | None = None, voided_syn=()) -> dict:
+def syn_leg_status(syn: dict | None, voided_syn, syn_rows_present: bool) -> dict:
+    """The DEV-SYN leg (T-gpt vs T-sonnet). not_applicable ONLY when the table has no DEV-SYN rows at all
+    (F20); DEV-SYN rows present but the candidate's arm missing from cls_eval's syn leg -> pending."""
+    if not syn_rows_present:
+        return {"status": "not_applicable", "note": "no DEV-SYN rows in the table"}
+    if syn is None:
+        return {"status": "pending", "note": "DEV-SYN rows present but cls_eval's syn leg lacks this arm"}
+    return _robust_leg_status(syn, list(voided_syn), ("gpt", "sonnet"))
+
+
+def criterion8(m: dict | None, *, voided: list, syn: dict | None = None, voided_syn=(),
+               syn_rows_present: bool | None = None) -> dict:
     """Judge robustness through cls_eval's 1-SE floor (judge_robustness: a sign counts only when the paired
     difference is at least one bootstrap SE from 0). Real leg: T-opus vs T-gpt; DEV-SYN leg: T-gpt vs
     T-sonnet. A leg kills when its signs are discordant on more than 1 of the 2 metrics; a leg whose judge
-    is voided is not evaluable (r3-2). Nothing here recomputes the floor."""
+    is voided is not evaluable (r3-2). Nothing here recomputes the floor. assemble always passes
+    syn_rows_present; when omitted it is taken as `syn is not None`."""
     real = _robust_leg_status(m, list(voided), ("opus", "gpt"))
-    synl = (_robust_leg_status(syn, list(voided_syn), ("gpt", "sonnet")) if syn is not None
-            else {"status": "not_applicable", "note": "no DEV-SYN rows in the table"})
+    synl = syn_leg_status(syn, voided_syn, syn is not None if syn_rows_present is None else bool(syn_rows_present))
     legs = (real["status"], synl["status"])
     if "kill" in legs:
         status = "kill"

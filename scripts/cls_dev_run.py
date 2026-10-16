@@ -393,8 +393,12 @@ def cmd_fit_heads(a, deps) -> int:
 
 
 def heavy_preamble(deps, ollama, own_model) -> dict | None:
-    """Quiet gate and night rule before a heavy-model run; None when clear, else the parked record."""
-    q = D.quiet_gate(get_readers(deps, ollama, own_model), sleep=deps.sleep)
+    """Quiet gate and night rule before a heavy-model run; None when clear, else the parked record. An
+    unreachable Ollama during the gate parks the run (exit 3 by the callers), it never crashes it."""
+    try:
+        q = D.quiet_gate(get_readers(deps, ollama, own_model), sleep=deps.sleep)
+    except D.OllamaError:
+        return {"status": "parked", "reason": "quiet:ollama_unreachable", "readings": []}
     if not q["ok"]:
         return {"status": "parked", "reason": "quiet:" + str(q["reason"]), "readings": q["readings"]}
     ok, why = D.can_start_unit(deps.clock(), None)
@@ -906,7 +910,8 @@ def candidate_criteria(a, cand, *, floor, score, fit, n_error, n_pool, low_clust
                      resemblance_failed=resemblance_failed),
         D.criterion7({"identical_share": st.get("identical_share"), "n": st.get("n")}),
         D.criterion8(jr.get("arms", {}).get(cand), voided=voided_real,
-                     syn=(jr.get("syn_leg") or {}).get("arms", {}).get(cand) if n_syn_pool else None, voided_syn=voided_syn),
+                     syn=(jr.get("syn_leg") or {}).get("arms", {}).get(cand), voided_syn=voided_syn,
+                     syn_rows_present=bool(n_syn_pool)),
     ]
     tbl = D.criteria_table(rows)
     tbl["candidate"] = cand
