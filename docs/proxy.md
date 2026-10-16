@@ -749,3 +749,15 @@ Directly motivated by the trial's one unacceptable answer:
 | `LLM_ROUTER_PROXY_ESCALATION_TOOL_FAIL_N` | `2` consecutive failed tool turns before escalating |
 | `LLM_ROUTER_PROXY_LONG_PROMPT_WORDS` | `120` |
 | `LLM_ROUTER_PROXY_LONG_PROMPT_PARTS` | `3` |
+
+## Routing prefixes
+
+A prompt that starts with `local:`, `claude:`, `opus:`, `sonnet:`, `haiku:` or `codex:` (case-insensitive; `native:` means `claude:`) forces where it runs. The prefix is read only at the start of the prompt, is stripped before the text is forwarded, and each forced choice appends a text-free row (`text_sha`, `forced`, `decided`, `door`, `ts`) to `~/.llm-router/examples.jsonl`. A prefix beats the classifier, stickiness, the Q&A-quiet policy and soft quota pressure; it does not beat `LLM_ROUTER_ENFORCE=off|shadow`, kill switches, admin `pinned_models`, hard stops (media, prompt cap, unhealthy backend, open breaker) or budget caps.
+
+| Door | `claude:` | `opus:` `sonnet:` `haiku:` | `local:` | `codex:` |
+|---|---|---|---|---|
+| Hook | answers natively, nothing held | act as `claude:` (a hook cannot switch the host model) | forced to a local model, or a one-line refusal | forced to Codex, or a one-line refusal |
+| Proxy | forwarded, prefix stripped | pins that tier | served locally only with `--serve local-agent`, else forwarded unchanged | forwarded unchanged (no backend) |
+| MCP `llm()` | one-line "handle it yourself" | runs the API tier, or the same note in subscription mode | runs the first installed local model, or refuses | runs a Codex model, or refuses |
+
+P2.7-a is conditional-partial: 6/6 at the hook, 4/6 at the proxy. Unknown prefixes (`gpt:`) are ignored. Text whose first line begins with `Claude:`, `Local:`, `Opus:` and so on (a pasted dialogue, for example) is read as a prefix: put some text before it, or rephrase.
