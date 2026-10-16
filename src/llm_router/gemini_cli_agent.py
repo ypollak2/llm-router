@@ -212,6 +212,7 @@ async def run_gemini_cli(
     args = [binary, "-p", prompt, "--model", model]
 
     start = time.monotonic()
+    proc = None
     try:
         # Use safe environment that excludes API keys and tokens
         safe_env = get_safe_env()
@@ -223,6 +224,8 @@ async def run_gemini_cli(
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             env=safe_env,
+            # own session so a cancel can stop the whole tree (codex_agent._kill_tree)
+            start_new_session=(os.name == "posix"),
         )
         text_chunks: list[str] = []
         stderr_buf: list[bytes] = []
@@ -267,6 +270,13 @@ async def run_gemini_cli(
             content=output, model=model,
             exit_code=proc.returncode or 0, duration_sec=duration,
         )
+    except asyncio.CancelledError:
+        # D-154: a cancelled call (the MCP door's deadline, a client disconnect) must not
+        # leave the Gemini CLI process running; same contract as codex_agent.
+        if proc is not None:
+            from llm_router.codex_agent import _kill_tree
+            await _kill_tree(proc)
+        raise
     except asyncio.TimeoutError:
         return GeminiCLIResult(
             content=f"Gemini CLI timed out after {timeout}s",
