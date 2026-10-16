@@ -1332,12 +1332,40 @@ _ALWAYS_APPROVAL = {"mkfs", "shred", "fdisk", "sudo", "doas", "su",
 _GIT_VALUED = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
 _PKG_SUBS = {
     "pip": {"install", "uninstall"}, "pip3": {"install", "uninstall"},
-    "npm": {"install", "add", "publish"}, "pnpm": {"install", "add", "publish"},
-    "yarn": {"install", "add", "publish"}, "cargo": {"install", "publish", "yank"},
+    "pipx": {"install", "uninstall", "upgrade", "reinstall", "inject"},
+    "npm": {"install", "i", "ci", "add", "uninstall", "un", "remove", "rm", "publish",
+            "link", "update", "up"},
+    "pnpm": {"install", "i", "add", "remove", "rm", "uninstall", "un", "update", "up", "publish"},
+    "yarn": {"install", "add", "remove", "publish", "upgrade", "up"},
+    "cargo": {"install", "publish", "yank"},
     "go": {"install", "get"}, "gem": {"install"}, "brew": {"install", "uninstall"},
     "apt": {"install", "remove"}, "apt-get": {"install", "remove"},
     "poetry": {"add", "install"},
 }
+#: Subcommands in agent_writes' table (still used by that lane's allowlist mode)
+#: that this policy does NOT treat as destructive: `npm run <script>` is the same
+#: risk class as `npm test`, which is allowed.
+_TABLE_EXEMPT = {"npm": {"run"}}
+#: State-changing git subcommands missing from agent_writes' table (D-146).
+_GIT_EXTRA = frozenset({"commit", "pull"})
+_GIT_TAG_READ = {"-l", "--list"}
+_GIT_CONFIG_READ = {"--get", "--get-all", "--get-regexp", "--list", "-l"}
+
+
+def _git_read_only(sub: str, rest: list[str]) -> bool:
+    """Read-only forms of the git subcommands that are otherwise state changes."""
+    if sub == "branch":
+        from llm_router.hooks import agent_writes
+        return all(a in agent_writes._GIT_BRANCH_READ_FLAGS for a in rest)
+    if sub == "stash":
+        return rest[:1] in (["list"], ["show"])
+    if sub == "tag":
+        return not rest or rest[0] in _GIT_TAG_READ
+    if sub == "remote":
+        return not rest or rest[0] in ("-v", "--verbose", "show", "get-url")
+    if sub == "config":
+        return bool(rest) and rest[0] in _GIT_CONFIG_READ
+    return False
 
 
 def _blocked_subcommands() -> dict[str, frozenset[str]]:
@@ -1384,11 +1412,7 @@ def _segment_destructive(words: list[str]) -> str | None:
     table = _blocked_subcommands()
     if prog == "git":
         sub, rest = _first_sub(args, _GIT_VALUED)
-        if sub == "branch":
-            from llm_router.hooks import agent_writes
-            if all(a in agent_writes._GIT_BRANCH_READ_FLAGS for a in rest):
-                return None
-        if sub in table["git"]:
+        if (sub in table["git"] or sub in _GIT_EXTRA) and not _git_read_only(sub, rest):
             return f"'git {sub}' changes repository state and needs approval"
         return None
     if prog.startswith("python"):
@@ -1397,12 +1421,24 @@ def _segment_destructive(words: list[str]) -> str | None:
         return None
     if prog == "uv":
         sub, rest = _first_sub(args)
-        if sub in ("add", "sync") or (sub == "pip" and rest[:1] and rest[0] in ("install", "uninstall")):
+        if sub in ("add", "sync", "remove") or (
+                sub in ("pip", "tool") and rest[:1] and rest[0] in ("install", "uninstall")):
             return f"'uv {sub}' needs approval (changes the environment)"
+        if sub == "run":                              # `uv run pip install x` runs pip
+            inner = [a for a in rest if not a.startswith("-")]
+            for i in range(len(inner)):
+                why = _segment_destructive(inner[i:])
+                if why:
+                    return why
+            return None
         return None
     sub, _rest = _first_sub(args)
-    if sub and (sub in table.get(prog, ()) or sub in _PKG_SUBS.get(prog, ())):
-        return f"'{prog} {sub}' needs approval (installs, publishes or changes state)"
+    if prog == "yarn" and not sub and not {"--version", "-v", "--help", "-h"} & set(args):
+        return "bare 'yarn' installs dependencies and needs approval"
+    if sub in _PKG_SUBS.get(prog, ()):
+        return f"'{prog} {sub}' needs approval (installs, removes or publishes packages)"
+    if sub and sub in table.get(prog, ()) and sub not in _TABLE_EXEMPT.get(prog, ()):
+        return f"'{prog} {sub}' changes state and needs approval"
     return None
 
 
@@ -1460,7 +1496,12 @@ def _existing_dir(raw: object) -> Path | None:
 
 
 def pick_root(mcp_root: object = None, requested: object = None) -> RootChoice:
-    """MCP root, then ``$CLAUDE_PROJECT_DIR``, then *requested*; never the process cwd."""
+    """MCP root, then ``$CLAUDE_PROJECT_DIR``, then *requested*; never the process cwd.
+
+    Known limits: a RELATIVE *requested* resolves against the process cwd (today's
+    ``llm_local_task`` behaviour, kept); on a case-insensitive filesystem a path
+    spelled with different case than the root fails ``contain`` closed (a false
+    refusal, never an escape)."""
     for source, raw in (("mcp", mcp_root),
                         ("env", os.environ.get("CLAUDE_PROJECT_DIR", "")),
                         ("requested", requested)):

@@ -116,6 +116,11 @@ def run_attempt(lane: str, w: World, a: Attempt) -> tuple[bool, str]:
     return (not d.allow), f"{d.rule}: {d.reason}"
 
 
+#: rules a toolkit Policy refusal can carry; "write_policy" only fires via check_action.
+TOOLKIT_RULES = {"path", "path_outside_workspace", "program_not_allowed", "bash_parse",
+                 "bash_shape", "bash_flags", "write_policy", "secret", "protected"}
+
+
 def is_install(a: Attempt) -> bool:
     return a.arg in INSTALLS
 
@@ -184,14 +189,17 @@ def test_destructive_refused_10_of_10(world, lane):
 
 
 @pytest.mark.parametrize("lane", LANES)
-def test_every_refusal_names_the_shared_policy(world, lane):
+def test_every_refusal_names_the_lane_guard_that_made_it(world, lane):
     for a in outside_corpus(world) + destructive_corpus(world):
         if is_install(a) and lane != "toolkit":
             continue
         refused, text = run_attempt(lane, world, a)
         assert refused, a
         if lane == "toolkit":
-            assert not text.startswith("ok"), (a, text)
+            # The toolkit's own Policy refuses (allowlist / parser / containment rule),
+            # not check_action: assert the rule name is one of the Policy's own.
+            rule = text.split(":", 1)[0]
+            assert rule in TOOLKIT_RULES, (a, text)
         else:
             # two older lane guards may refuse first and say so: react's regex on
             # `rm -r` ("blocked (") and agent_loop's parser on a redirect into a file.
@@ -254,7 +262,15 @@ def test_check_write_verdicts(world):
     "uv sync", "npm install", "pnpm add x", "yarn publish", "cargo install x", "go get x",
     "gem install x", "brew install x", "apt-get install x", "poetry add x",
     "sudo ls", "mkfs.ext4 /dev/x", "dd if=/dev/zero of=/dev/null", "chmod -R 700 .", "chown -R me .",
-    "shutdown now", "shred f"])
+    "shutdown now", "shred f",
+    # install aliases (D-146 item 1)
+    "npm i x", "npm ci", "npm uninstall x", "npm un x", "npm rm x", "npm update", "yarn", "yarn remove x",
+    "pnpm i", "pnpm remove x", "uv run pip install x", "uv run --with y pip install x", "uv remove x",
+    "uv tool install x", "pipx install x", "pipx upgrade x",
+    # mutating git forms stay refused (item 3)
+    "git checkout -b new", "git commit -m x", "git stash push", "git stash pop", "git stash drop",
+    "git tag v1", "git branch -d x", "git branch -D x", "git config user.name x", "git remote add o u",
+    "git stash"])
 def test_destructive_table_needs_approval(world, cmd):
     v = wp.check_action(cmd, world.root)
     assert v.decision == wp.NEEDS_APPROVAL, v
@@ -265,10 +281,26 @@ def test_destructive_table_needs_approval(world, cmd):
 @pytest.mark.parametrize("cmd", [
     "rm file.txt", "rm -f file.txt", "git status", "git log --oneline", "git diff", "git show HEAD",
     "git branch --show-current", "git branch -a", "pip list", "python3 -m pytest -q", "uv run pytest",
-    "npm test", "ls -la", "echo 'git push' > note.txt", "grep -r push .", "echo ok 2>&1", ""])
+    "npm test", "npm run build", "npm run test -- -x", "yarn --version", "yarn test", "yarn run build",
+    "uv run pip list", "git stash list", "git stash show", "git tag", "git tag -l", "git tag --list",
+    "git branch", "git branch --list", "git branch -a", "git branch -r", "git remote", "git remote -v",
+    "git remote show origin", "git config --get user.name", "git config --list", "git rev-parse HEAD",
+    "git ls-files", "git blame a.txt", "git -C x log", "ls -la", "echo 'git push' > note.txt", "grep -r push .", "echo ok 2>&1", ""])
 def test_benign_commands_are_not_destructive(world, cmd):
     assert wp.destructive_reason(cmd) is None
     assert wp.check_action(cmd, world.root).decision == wp.ALLOW
+
+
+@pytest.mark.parametrize("lane", ("react", "agent_loop"))
+def test_read_only_git_runs_and_mutating_git_does_not_on_every_lane(world, lane):
+    for cmd in ("git status", "git log --oneline", "git diff", "git stash list", "git tag -l",
+                "git branch -a", "git remote -v", "git config --list", "git rev-parse --git-dir",
+                "git ls-files"):
+        refused, text = run_attempt(lane, world, Attempt("shell", f"git -C {world.repo} {cmd[4:]}"))
+        assert not refused or "write policy" not in text, (cmd, text)
+    for cmd in ("checkout -b nb", "stash push", "tag v9", "branch -D x", "config a.b c", "commit -m m"):
+        refused, text = run_attempt(lane, world, Attempt("shell", f"git -C {world.repo} {cmd}"))
+        assert refused and "write policy" in text, (cmd, text)
 
 
 def test_check_action_precedence_refuse_beats_approval(world):
@@ -401,7 +433,7 @@ async def test_d1_llm_act_door(world, monkeypatch, temp_db):
     assert len(results) == 3 and all(r.startswith("tool error") for r in results), results
     assert not (world.outside / "x_door.txt").exists()
     assert (world.victim / "keep.txt").exists() and (world.repo / "untracked.txt").exists()
-    assert "NEVER_SAID" not in json.dumps(out) or out.get("status") not in ("success", "done", "ok")
+    assert out.get("status") not in ("success", "done", "ok"), out
 
 
 # ── D3: toolkit door ─────────────────────────────────────────────────────────
@@ -447,6 +479,17 @@ def test_d3_toolkit_run_task_denies_and_is_not_used(world, monkeypatch, tmp_path
     assert not outside.exists() and not (tmp_path / "escape2.txt").exists()
     assert (src / "src" / "pkg.py").exists() and (src / "tests").is_dir()
     assert sandbox is not None
+
+
+def test_toolkit_file_containment_is_write_policy_contain(world, monkeypatch):
+    """The toolkit's file refusals come from write_policy.contain, not a private copy."""
+    pol = Policy(root=world.root, bash_allowed=True)
+    assert pol.decide("write", {"path": "../x.txt", "content": "x"}).rule == "path_outside_workspace"
+    calls: list[object] = []
+    real = wp.contain
+    monkeypatch.setattr(wp, "contain", lambda raw, root: (calls.append(raw), real(raw, root))[1])
+    pol.decide("write", {"path": "../y.txt", "content": "x"})
+    assert calls == ["../y.txt"]
 
 
 def test_toolkit_adds_the_write_policy_layer(world, monkeypatch):
@@ -536,3 +579,32 @@ async def test_m6_local_task_skipping_the_root_check_is_caught(world, monkeypatc
                         lambda mcp_root=None, requested=None: wp.RootChoice(None, "none", ""))
     failed = await door2(world, monkeypatch, [])
     assert failed and "outside workdir not blocked" in failed[0]
+
+
+# ── D-146 mutants: alias removed, run re-blocked, git read/mutate flipped ────
+
+def test_m7_removing_install_aliases_is_caught(world, monkeypatch):
+    aliases = ["npm i x", "npm ci", "yarn", "pnpm i", "uv run pip install x", "pipx install x"]
+    assert all(wp.destructive_reason(c) for c in aliases)
+    monkeypatch.setattr(wp, "_PKG_SUBS", {k: v - {"i", "ci", "install"} for k, v in wp._PKG_SUBS.items()})
+    assert not all(wp.destructive_reason(c) for c in aliases)
+
+
+def test_m8_run_reblocked_is_caught(world, monkeypatch):
+    assert wp.destructive_reason("npm run build") is None
+    monkeypatch.setattr(wp, "_TABLE_EXEMPT", {})
+    assert wp.destructive_reason("npm run build")
+
+
+def test_m9_read_only_git_refused_is_caught(world, monkeypatch):
+    reads = ["git stash list", "git tag -l", "git remote -v", "git config --list", "git branch -a"]
+    assert all(wp.destructive_reason(c) is None for c in reads)
+    monkeypatch.setattr(wp, "_git_read_only", lambda sub, rest: False)
+    assert any(wp.destructive_reason(c) for c in reads)
+
+
+def test_m10_mutating_git_allowed_is_caught(world, monkeypatch):
+    writes = ["git stash push", "git tag v1", "git config a b", "git remote add o u", "git branch -D x"]
+    assert all(wp.destructive_reason(c) for c in writes)
+    monkeypatch.setattr(wp, "_git_read_only", lambda sub, rest: True)
+    assert any(wp.destructive_reason(c) is None for c in writes)
