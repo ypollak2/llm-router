@@ -1163,10 +1163,11 @@ async def llm_quota_status() -> str:
     Monitors three subscription providers to help you understand which quota
     is being exhausted, and make routing decisions accordingly.
 
-    The order shown is the legacy quota_balance order. Live routing under the
-    QUOTA_BALANCED profile does not use this order or these pressure values: it
-    ranks the chain with resource_map.order_chain / resource_map.score (P2.3),
-    which reads the resource map's own per-resource quota rows.
+    The order shown is the legacy quota_balance order. Live routing does not
+    use this order: under the QUOTA_BALANCED profile the chain is ranked by
+    resource_map.order_chain / resource_map.score (P2.3). The pressure values
+    shown are still read live by the subscription-local demotion
+    (subscription_local_routing.get_subscription_pressure).
 
     Returns:
         Formatted quota status with usage percentages and the legacy provider order.
