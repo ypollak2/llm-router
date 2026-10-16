@@ -124,8 +124,8 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = _load_routing_
 # Two profiles have NO chains of their own in standard.yaml. They are
 # *reorderings* of another profile's chain, applied at a later stage:
 #
-#   QUOTA_BALANCED      reordered by quota_balance.reorder_chain_by_providers()
-#                       in router._build_and_filter_chain()
+#   QUOTA_BALANCED      reordered by resource_map.order_chain / resource_map.score (P2.3)
+#                       via router._quota_score_chain() in route_and_call()
 #   SUBSCRIPTION_LOCAL  reordered by
 #                       subscription_local_routing.reorder_for_subscription_local()
 #
@@ -482,7 +482,8 @@ def get_model_chain(
     research tasks since web search is required.
 
     QUOTA_BALANCED uses BALANCED as its base chain; the final reordering is
-    applied in _build_and_filter_chain() by quota_balance.reorder_chain_by_providers().
+    applied by resource_map.order_chain / resource_map.score (P2.3), called from
+    router._quota_score_chain() in route_and_call().
 
     Args:
         profile: The routing profile (budget/balanced/premium/quota_balanced).
