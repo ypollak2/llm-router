@@ -11,6 +11,20 @@ Output: counts and hashes only; the items file (text) is 0600 under --out-root.
 
 Template contract: a template file holds the Appendix C body with the marker {{ITEMS}} where the item
 blocks go (the spec author supplies the files; this tool does not invent their wording).
+
+Calls: every GPT call passes `-m <gen_gpt pin>` (D-147); a codex non-zero rc (bad id, timeout, CLI error) STOPS
+and parks the run (exit 24, resumable). Opus calls must report an opus model id (else exit 22). Every call writes
+a `pending` row to gen_calls.jsonl (0600, under --out-root) before the child starts and a `done` row (with the
+raw answer text) after it; Opus calls also write pending/final rows to the spend log. That log is the SAME file as
+the labelling spend log (default $CLS/spend_log.jsonl), so generator Opus spend counts toward the D-134 $20 cap
+(conservative: the cap is shared, not doubled).
+Resume: `run --resume` (and `test-syn-step --resume`) continues an incomplete set in the same out-root with the
+same allocation, call assignment and nonces; finished calls are replayed from gen_calls.jsonl, never re-sent.
+TEST-SYN is marked generated in custody.json only when a set completes.
+Regeneration nonces (spec 8.3 "no seed hunting beyond the next call-index nonces"): the one TEST-SYN regen keeps
+the frozen allocation (the same cell vectors) and offsets BOTH the call indexes and the item nonce indexes by
+1000 (REGEN_INDEX_BASE), beyond any index the first set used (items 0..n-1, replacements n..1.2n), so no regen
+request is textually identical to a discarded-set request. Item ids keep the item index.
 """
 from __future__ import annotations
 
@@ -426,8 +440,15 @@ def labels_exist(cls_root, label_run_dir=None) -> bool:
     return False
 
 
+TEXT_FILES = ("items.jsonl", "gen_calls.jsonl")  # the two files of a set that hold generated text
+
+
 def lock_items(items_path) -> None:
+    """chmod 0000 the items file and the call log next to it (both hold generated text)."""
     os.chmod(items_path, 0)
+    calls = Path(items_path).parent / "gen_calls.jsonl"
+    if calls.exists():
+        os.chmod(calls, 0)
 
 
 def spec_log_path(a) -> Path:
@@ -462,9 +483,9 @@ def discard_set(a, reason: str) -> Path:
         n += 1
         dest = root.parent / ("discarded-%s-%d" % (stamp, n))
     os.rename(root, dest)
-    items = dest / "items.jsonl"
-    if items.exists():
-        os.chmod(items, 0)
+    for name in TEXT_FILES:
+        if (dest / name).exists():
+            os.chmod(dest / name, 0)
     S.append_jsonl(S.test_syn_root(a.cls_root) / "discarded.jsonl",
                    {"utc": S.utc_now(), "reason": reason, "path": str(dest), "items_sha256": hashes.get("items_sha256"),
                     "allocation_sha256": hashes.get("allocation_sha256")})
@@ -490,6 +511,8 @@ class Gen:
         self.band_matrix = {b: {m: 0 for m in BANDS} for b in BANDS}
         self.band_misses = 0
         self.digest_checked = self.digest_valid = 0
+        self.calls_log = self.out / "gen_calls.jsonl"
+        self.replay = {}
 
     def _bump(self, d, family, key=None, n=1):
         sub = self.counters[d].setdefault(family, {} if key is not None else 0)
@@ -520,15 +543,19 @@ class Gen:
                         "files_sha": {k: files[k + "_sha"] for k in GEN_FILE_STEMS}}
         self.alloc_sha = alloc_sha(cells)
 
+    def alloc_bodies(self) -> dict:
+        """The exact bytes write_alloc writes (name -> text). A pure function of the prepared allocation."""
+        return {"allocation.json": json.dumps(self.cells, sort_keys=True) + "\n",
+                "allocation.sha256": self.alloc_sha + "  allocation.json\n",
+                "gen_config.json": json.dumps(self.cfg_doc, sort_keys=True, indent=1) + "\n"}
+
     def write_alloc(self):
         """Allocation table, its sha256 and gen_config.json are written BEFORE any generation call. Files
         that already exist (written by `alloc` and pinned with `pins --run`) are never rewritten: they must
         equal the recomputed ones."""
         self.out.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.out, 0o700)
-        want = {"allocation.json": json.dumps(self.cells, sort_keys=True) + "\n",
-                "allocation.sha256": self.alloc_sha + "  allocation.json\n",
-                "gen_config.json": json.dumps(self.cfg_doc, sort_keys=True, indent=1) + "\n"}
+        want = self.alloc_bodies()
         for name, body in want.items():
             p = self.out / name
             if p.exists():
@@ -547,38 +574,74 @@ class Gen:
             "seed": self.cfg["seed"], "nonces": nonces, "model_id": self.model_ids["gen_" + family],
             "reported_model_ids": reported, "utc": S.utc_now(), "set": self.set, "family": family})
 
+    def _ledger(self, **rec):
+        rec["utc"] = S.utc_now()
+        S.append_jsonl(self.calls_log, rec)
+
+    def load_replay(self) -> int:
+        """Finished calls of an interrupted run of this set (resume). Returns how many."""
+        self.replay = {r["call_id"]: r for r in S.read_jsonl(self.calls_log) if r.get("phase") == "done"}
+        return len(self.replay)
+
+    def _outcome(self, call_id, out, outcome):
+        if outcome == "scrub_abort":
+            self.counters["scrub_abort"] += 1
+        elif outcome != "ok":
+            self.counters["call_failures"] += 1
+        return call_id, out
+
     def call(self, call_index: int, family: str, cells: list[dict], nonces: list[str]):
-        """One generation call. Returns {idx: obj} or None on failure. ScrubAbort is counted and returns None."""
+        """One generation call. Returns (call_id, {idx: obj}) or (call_id, None) on failure. ScrubAbort is
+        counted and returns None. A codex non-zero rc parks (exit 24); an Opus call without an opus model id
+        stops (exit 22). A call already finished in an interrupted run is replayed, not re-sent."""
+        call_id = "%s-c%04d" % (self.cfg["ns"], call_index)
+        self.counters["calls"] += 1
+        if call_id in self.replay:
+            r = self.replay[call_id]
+            # the raw answer text is re-parsed, so a replayed call yields byte-identical items
+            out = parse_generation(r["text"]) if isinstance(r.get("text"), str) else None
+            return self._outcome(call_id, out, r.get("outcome"))
         template, tsha = self._template(family)
         payload = build_request(template, cells, nonces).encode("utf-8")
-        call_id = "%s-c%04d" % (self.cfg["ns"], call_index)
+        kind = "codex" if family == "gpt" else "claude"
+        model = self.model_ids["gen_" + family]
+        est = 0.0
         if family == "opus":
             self.spend.guard()
-        self.counters["calls"] += 1
+            est = self.spend.estimate()
+            self.spend.pending(call_id, model, "claude", est)
+        self._ledger(phase="pending", call_id=call_id, call_index=call_index, family=family)
         try:
-            res, leftover = S.child_call("codex" if family == "gpt" else "claude", self.model_ids["gen_" + family], payload,
-                                         self.out, claude_bin=self.a.claude_bin, codex_bin=self.a.codex_bin,
-                                         timeout=self.a.timeout, batch_id=call_id)
+            res, leftover = S.child_call(kind, model, payload, self.out, claude_bin=self.a.claude_bin,
+                                         codex_bin=self.a.codex_bin, timeout=self.a.timeout, batch_id=call_id)
         except S.ScrubAbort:
-            self.counters["scrub_abort"] += 1
-            return call_id, None
+            if family == "opus":
+                self.spend.record(model, "claude", 0, 0.0, call_id=call_id, cost_basis="not_sent")
+            self._ledger(phase="done", call_id=call_id, call_index=call_index, family=family, outcome="scrub_abort",
+                         rc=None, text=None)
+            return self._outcome(call_id, None, "scrub_abort")
         self.counters["cwd_leftover"] += leftover
         parsed = (S.parse_codex_jsonl if family == "gpt" else S.parse_claude_json)(res.stdout)
-        self._log_request(call_id, tsha, cells, nonces, family, parsed["model_ids"])
+        ids = S.served_model_ids(kind, parsed, model)
+        self._log_request(call_id, tsha, cells, nonces, family, ids)
         if family == "opus":
-            self.spend.record(self.model_ids["gen_opus"], "claude", parsed.get("tokens", 0), parsed.get("cost_usd", 0.0), call_id=call_id)
-        if res.returncode == 0:
-            want_family = "gpt" if family == "gpt" else "opus"
-            ids = parsed["model_ids"]
-            ok = bool(ids) and all(S.family_of(i) == want_family for i in ids)
-            if family == "gpt":
-                ok = ids == [self.model_ids["gen_gpt"]]
-            if not ok:
-                raise S.CLSExit(S.EXIT_MODEL_ID, "generator model id differs from the pin; call output discarded")
-        if res.returncode != 0 or not parsed.get("ok"):
-            self.counters["call_failures"] += 1
-            return call_id, None
-        return call_id, parse_generation(parsed["text"])
+            self.spend.record(model, "claude", parsed.get("tokens", 0), est if res.timed_out else parsed.get("cost_usd", 0.0),
+                              call_id=call_id, cost_basis="estimate" if res.timed_out else "reported")
+        if res.timed_out:
+            self.counters["timeouts"] = self.counters.get("timeouts", 0) + 1
+        if family == "gpt" and res.returncode != 0:
+            self._ledger(phase="parked", call_id=call_id, call_index=call_index, family=family, rc=res.returncode,
+                         timed_out=res.timed_out)
+            raise S.CLSExit(S.EXIT_GPT_PARK, "codex generation call failed (rc=%d%s); parked (resumable)" % (
+                res.returncode, ", timeout" if res.timed_out else ""))
+        if family == "opus" and res.returncode == 0 and not res.timed_out and not (
+                ids and all(S.family_of(i) == "opus" for i in ids)):
+            raise S.CLSExit(S.EXIT_MODEL_ID, "generator model id differs from the pin; call output discarded")
+        out = parse_generation(parsed["text"]) if (res.returncode == 0 and parsed.get("ok")) else None
+        outcome = "ok" if out is not None else ("timeout" if res.timed_out else "call_failed")
+        self._ledger(phase="done", call_id=call_id, call_index=call_index, family=family, outcome=outcome,
+                     rc=res.returncode, text=parsed["text"] if out is not None else None)
+        return self._outcome(call_id, out, outcome)
 
     # -- filters -----------------------------------------------------------------------------
     def evaluate(self, cell, obj, family, call_id, dedup, ctx) -> str | None:
@@ -622,10 +685,13 @@ class Gen:
         return None
 
     # -- the run -----------------------------------------------------------------------------
-    def run(self) -> dict:
+    def run(self, on_started=None) -> dict:
+        """The generation run. `on_started()` is called once every pre-call check (self-test, pins, canary) has
+        passed, right before the first generation call (the regen counts itself there)."""
         a = self.a
         S.require_fresh_selftest(a.selftest_result)
         ctx = S.ScrubContext(S.load_denylist(a.denylist), S.load_env_values(a.env_file)[0])
+        S.configure(ctx)  # detector (d) (denylist + .env values) also applies inside outgoing_check at send
         env_sha = S.env_sha_at_use(a.env_file)
         require_pinned(self.out / "gen_config.json", self.static, a.pins_run)
         require_pinned(a.length_counts, self.static, a.pins_run)
@@ -635,15 +701,15 @@ class Gen:
         calls = assign_to_calls(self.cells, self.cfg["calls"])
         dedup = Dedup(load_shingle_file(a.shingles_real), load_shingle_file(a.shingles_devsyn))
         if any(f == "gpt" for f in fam.values()):
-            S.codex_canary(lambda payload: S.parse_codex_jsonl(S.child_call(
-                "codex", self.model_ids["gen_gpt"], payload, self.out / "canary-run", claude_bin=a.claude_bin,
-                codex_bin=a.codex_bin, timeout=a.timeout, batch_id="canary")[0].stdout)["text"], self.out / "canary")
+            S.run_codex_canary(self.model_ids["gen_gpt"], self.out / "canary", codex_bin=a.codex_bin, timeout=a.timeout)
+        if on_started:
+            on_started()
         pending = []  # (cell, family) needing replacement
         for ci in order:
             idx = ci - self.base
             cells = calls[idx]
             family = fam[ci]
-            nonces = [nonce(self.cfg["ns"], c["item_index"]) for c in cells]
+            nonces = [nonce(self.cfg["ns"], self.base + c["item_index"]) for c in cells]
             call_id, out = self.call(ci, family, cells, nonces)
             self._take(cells, out, family, call_id, dedup, ctx, pending)
         cap = int(REPLACEMENT_CAP * self.cfg["n"])
@@ -707,6 +773,7 @@ class Gen:
                   "meta_pattern_rates": self.counters["meta"], "task_counts": tc, "band_counts": bc,
                   "band_quota": quota, "quota_ok": quota_ok, "quota_tolerance": 2 + shortfall, "calls": self.counters["calls"],
                   "call_failures": self.counters["call_failures"], "scrub_abort": self.counters["scrub_abort"],
+                  "timeouts": self.counters.get("timeouts", 0), "resumed_calls": len(self.replay),
                   "length_shares": self.shares, "env_sha_at_use": env_sha, "sha256": shas}
         S.write_private(self.out / "report.json", json.dumps(report, sort_keys=True, indent=1) + "\n")
         return report
@@ -765,23 +832,41 @@ def cmd_alloc(a) -> int:
     return S.EXIT_OK
 
 
-def _do_run(a, set_name: str, *, regen_index: int = 0) -> tuple[Gen, dict]:
-    VERIFY_PINS(a.pins_static, a.pins_run, check_ollama=False)
+def _partial_run(out: Path) -> bool:
+    rq = out / "gen_requests.jsonl"
+    return (rq.exists() and rq.stat().st_size > 0) or (out / "gen_calls.jsonl").exists()
+
+
+def _do_run(a, set_name: str, *, regen_index: int | None = None, verify_first: bool = True,
+            on_started=None) -> tuple[Gen, dict]:
+    """Generate one set. verify_first=False is the regen path: the previous set was just discarded (its pinned
+    gen_config.json moved away), so pins are verified only after write_alloc has re-created the identical files
+    (Gen.run verifies before any call). TEST-SYN is marked generated only when the set completes."""
+    if verify_first:
+        VERIFY_PINS(a.pins_static, a.pins_run, check_ollama=False)
     _guard_out(a, set_name)
+    out = Path(a.out_root)
+    resume = bool(getattr(a, "resume", False))
     if set_name == "test_syn":
         _test_syn_preconditions(a, a.spec_version)
-        if not regen_index and (load_custody(a.cls_root).get("generated", 0) or (Path(a.out_root) / "items.jsonl").exists()):
-            raise S.CLSExit(S.EXIT_REFUSE, "TEST-SYN is generated once; use regen after a failed own check")
-    out = Path(a.out_root)
-    if (out / "gen_requests.jsonl").exists() and (out / "gen_requests.jsonl").stat().st_size:
-        raise S.CLSExit(S.EXIT_REFUSE, "out-root already holds a generation run")
-    g = Gen(a, set_name, regen_index=regen_index)
+        cust = load_custody(a.cls_root)
+        if regen_index is None:
+            if cust.get("generated", 0) > cust.get("regen_count", 0) or (out / "items.jsonl").exists():
+                raise S.CLSExit(S.EXIT_REFUSE, "TEST-SYN is generated once; use regen after a failed own check")
+            regen_index = cust.get("regen_count", 0)
+    if _partial_run(out) and not resume:
+        raise S.CLSExit(S.EXIT_REFUSE, "out-root already holds a generation run (--resume continues an incomplete one)")
+    if resume and ((out / "report.json").exists() or (out / "items.jsonl").exists()):
+        raise S.CLSExit(S.EXIT_REFUSE, "the run in out-root is complete; nothing to resume")
+    g = Gen(a, set_name, regen_index=regen_index or 0)
     g.prepare(a.spec_version)
     g.write_alloc()
+    if resume:
+        g.load_replay()
+    report = g.run(on_started=on_started)
     if set_name == "test_syn":
-        S.write_private(S.test_syn_root(a.cls_root) / "custody.json", json.dumps(
-            dict(load_custody(a.cls_root), generated=load_custody(a.cls_root).get("generated", 0) + 1), sort_keys=True))
-    report = g.run()
+        cust = load_custody(a.cls_root)
+        save_custody(a.cls_root, dict(cust, generated=cust.get("generated", 0) + 1))
     _log_spec_run(a, g, report)
     return g, report
 
@@ -855,9 +940,28 @@ def cmd_discard(a) -> int:
     return S.EXIT_OK
 
 
+def regen_verify_before_discard(a, g: Gen) -> None:
+    """Before anything is discarded: the pins verify, and every PINS-RUN-pinned file under the out-root (the
+    set's gen_config.json, any pinned allocation file) is exactly what the regen will re-create, so the regen
+    cannot fail its own pin check after the one allowed discard (exit 9 otherwise)."""
+    VERIFY_PINS(a.pins_static, a.pins_run, check_ollama=False)
+    root = Path(a.out_root)
+    want = g.alloc_bodies()
+    for e in P.read_run(a.pins_run):
+        for f, h in e.get("files", {}).items():
+            if not S.under(f, root):
+                continue
+            rel = str(S._real(f).relative_to(S._real(root)))
+            body = want.get(rel)
+            if body is None or S.sha256_bytes(body.encode("utf-8")) != h:
+                raise S.CLSExit(S.EXIT_PINS, "regen would not re-create the pinned %s; nothing discarded" % rel)
+
+
 def cmd_regen(a) -> int:
-    """One regeneration under the same vN. The previous set is discarded first (rename + chmod 0000); a
-    failure to discard aborts. A second regen, or a regen after any TEST label, is refused (exit 18)."""
+    """One regeneration under the same vN. Every check, the pin verification included, runs BEFORE the previous
+    set is discarded (rename + chmod 0000); a failure to discard aborts. regen_count is incremented only when the
+    new run has started (all pre-call checks passed), so a regen that fails to start can be retried. A second
+    regen, or a regen after any TEST label, is refused (exit 18)."""
     VERIFY_PINS(a.pins_static, a.pins_run, check_ollama=False)
     _guard_out(a, "test_syn")
     cust = load_custody(a.cls_root)
@@ -874,9 +978,16 @@ def cmd_regen(a) -> int:
     now_files = {k: S.sha256_file(Path(a.gen_dir) / fn) for k, fn in gen_file_names(a.spec_version).items()}
     if now_files != fv["files_sha"]:
         raise S.CLSExit(S.EXIT_REFUSE, "the spec files differ from the frozen vN (no amendment between the two TEST-SYN sets)")
+    probe = Gen(a, "test_syn", regen_index=1)
+    probe.prepare(a.spec_version)
+    regen_verify_before_discard(a, probe)
     discard_set(a, "regen: previous TEST-SYN failed its own text-only checks")
-    save_custody(a.cls_root, dict(load_custody(a.cls_root), regen_count=cust.get("regen_count", 0) + 1))
-    _g, report = _do_run(a, "test_syn", regen_index=1)
+    a.resume = False
+
+    def started():
+        c = load_custody(a.cls_root)
+        save_custody(a.cls_root, dict(c, regen_count=c.get("regen_count", 0) + 1))
+    _g, report = _do_run(a, "test_syn", regen_index=1, verify_first=False, on_started=started)
     print(json.dumps(_summary(report), sort_keys=True))
     return S.EXIT_OK
 
@@ -926,13 +1037,14 @@ def build_parser():
             p.add_argument("--claude-bin", default="claude")
             p.add_argument("--codex-bin", default="codex")
             p.add_argument("--timeout", type=int, default=S.CLAUDE_TIMEOUT_S)
+            p.add_argument("--resume", action="store_true",
+                           help="continue an incomplete run in --out-root (same allocation, assignments and nonces)")
 
     for name in ("alloc", "run", "collect"):
         base(sub.add_parser(name), run=True)
     p = sub.add_parser("test-syn-step")
     base(p, run=True)
     p.add_argument("--real-items", required=True)
-    p.add_argument("--release-token")
     p = sub.add_parser("regen")
     base(p, run=True)
     p.add_argument("--resemble-result", required=True)

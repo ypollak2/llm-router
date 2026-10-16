@@ -47,7 +47,7 @@ def frag_secret() -> str:
 # ---------------------------------------------------------------------------------------------
 
 FAKE_CHILD = r'''#!PYTHON
-import sys, os, json, re
+import sys, os, json, re, time
 KIND = "KINDNAME"
 cfgp = os.environ["CLSFAKE_CFG"]
 cfg = json.load(open(cfgp))
@@ -68,25 +68,50 @@ rec = {"kind": KIND, "n": n, "argv": sys.argv[1:], "stdin": stdin, "cwd": os.get
        "session_kind": os.environ.get("LLM_ROUTER_SESSION_KIND")}
 with open(os.path.join(d, "record.jsonl"), "a") as f:
     f.write(json.dumps(rec) + "\n")
-models = cfg.get("models") or ["claude-sonnet-5-5"]
-model = models[min(n - 1, len(models) - 1)]
+if KIND == "codex":
+    # codex serves the -m model or exits 1 (an unknown id); there is no model field in --json events
+    model = sys.argv[sys.argv.index("-m") + 1] if "-m" in sys.argv else "default-codex-model"
+    if model in cfg.get("codex_reject", []):
+        sys.stderr.write("error: model not supported\n")
+        sys.exit(1)
+    plain = "--json" not in sys.argv
+else:
+    models = cfg.get("models") or ["claude-sonnet-5-5"]
+    model = models[min(n - 1, len(models) - 1)]
+    plain = False
+if n in cfg.get("sleep_calls", []):
+    time.sleep(cfg.get("sleep_s", 3))
 
 
-def emit(text, rc=0):
+def emit(text, rc=0, transcript=""):
     if KIND == "claude":
-        print(json.dumps({"result": text, "modelUsage": {model: {"inputTokens": 5, "outputTokens": 7}},
-                          "total_cost_usd": cfg.get("cost", 0.01), "is_error": False}))
+        out = {"result": text, "total_cost_usd": cfg.get("cost", 0.01), "is_error": False}
+        if not cfg.get("no_model_usage"):
+            out["modelUsage"] = {model: {"inputTokens": 5, "outputTokens": 7}}
+        print(json.dumps(out))
+    elif plain:
+        sys.stderr.write("OpenAI Codex (fake)\n--------\nworkdir: " + os.getcwd() + "\nmodel: "
+                         + cfg.get("codex_header_model", model) + "\nsandbox: read-only\n--------\n")
+        if transcript:
+            print(transcript)
+        print(text)
     else:
-        print(json.dumps({"type": "thread.started", "model": model}))
-        print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}}))
+        print(json.dumps({"type": "thread.started", "thread_id": "t1"}))
+        print(json.dumps({"type": "turn.started"}))
+        print(json.dumps({"type": "item.completed", "item": {"id": "i0", "type": "agent_message", "text": text}}))
+        print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1}}))
     sys.exit(rc)
 
 
 if cfg.get("die_from_call") and n >= cfg["die_from_call"]:
     emit("", 1)
+if KIND == "codex" and cfg.get("codex_die_from") and n >= cfg["codex_die_from"]:
+    emit("", 1)
 m = re.search(r"PATH PARTS: (.*)", stdin)
 if m:
     path = "/" + "/".join(p.replace(" ~ ", "") for p in m.group(1).strip().split(" | "))
+    if cfg.get("canary_leak") == "transcript" and os.path.exists(path):
+        emit("CANNOT READ", transcript="exec\ncat " + path + "\n" + open(path).read().strip() + "\nexit 0")
     if cfg.get("canary_leak") and os.path.exists(path):
         emit("the token is " + open(path).read().strip())
     emit("CANNOT READ")
@@ -122,35 +147,74 @@ if "nonce:" in stdin:
             digest["referent"] = "x" * 500
         lines.append(json.dumps({"idx": idx, "prompt": text, "digest": digest}))
     emit("\n".join(lines))
-blocks = re.findall(r"### (L\d+)\n(.*?)(?=\n### L|\nANSWER)", stdin, re.S)
+blocks = re.findall(r"### ITEM id=(L\d+)\n(.*?)\n### END ITEM id=", stdin, re.S)
 if cfg.get("fail_multi") and len(blocks) > 1:
     emit("", 1)
 if n in cfg.get("bad_calls", []):
     emit("nope")
-ans = {}
+labs = []
 for oid, body in blocks:
     mt = re.search(r"TIER=(haiku|sonnet|opus)", body)
     t = mt.group(1) if mt else "sonnet"
     if cfg.get("flip_plants_from_call") and n >= cfg["flip_plants_from_call"] and "PLANT" in body:
         t = "opus" if t != "opus" else "haiku"
-    ans[oid] = t
-emit(json.dumps(ans))
+    labs.append({"id": oid, "scope": 2, "risk": 3, "needs_tools": True, "tier": t, "reason": "r"})
+if "ANSWER one label" in stdin and labs:
+    one = dict(labs[0])
+    if cfg.get("single_no_id"):
+        one.pop("id")
+    emit(json.dumps(one))
+emit(json.dumps({"labels": labs}))
 '''
 
 FAKE_RUBRIC = '''
-RUBRIC = "RUBRIC fake text"
-ITEM_TEMPLATE = "### {id}\\ndigest: {ctx}\\nprompt: {prompt}\\n"
-BATCH_TAIL = "\\nANSWER json id to tier\\n"
-SINGLE_TAIL = "\\nANSWER single\\n"
-PLANTS = {
-    "cal-h1": {"text": "PLANT one TIER=haiku rename a variable", "digest": "", "expected": "haiku"},
-    "cal-h2": {"text": "PLANT two TIER=haiku fix a typo", "digest": "", "expected": "haiku"},
-    "cal-s1": {"text": "PLANT three TIER=sonnet add a small feature", "digest": "", "expected": "sonnet"},
-    "cal-s2": {"text": "PLANT four TIER=sonnet write a test", "digest": "", "expected": "sonnet"},
-    "cal-o1": {"text": "PLANT five TIER=opus redesign the module", "digest": "", "expected": "opus"},
-    "cal-o2": {"text": "PLANT six TIER=opus find the root cause", "digest": "", "expected": "opus"},
-}
+RUBRIC = "RUBRIC fake text: rate each item"
+ITEM_TEMPLATE = "### ITEM id={id}\\n[CONTEXT]\\n{context}\\n\\n[PROMPT TO LABEL]\\n{prompt}\\n### END ITEM id={id}"
+BATCH_TAIL = 'ANSWER labels as json {"labels": [{"id": ..., "tier": ...}]} for all {n} items'
+SINGLE_TAIL = "ANSWER one label as json"
+DIMS = ["scope", "risk"]
+TIERS = ["haiku", "sonnet", "opus"]
+PLANTED = [
+    {"id": "cal-h1", "expect": "haiku", "context": "Working directory: /repo", "prompt": "PLANT one TIER=haiku rename a variable"},
+    {"id": "cal-h2", "expect": "haiku", "context": "Working directory: /repo", "prompt": "PLANT two TIER=haiku fix a typo"},
+    {"id": "cal-s1", "expect": "sonnet", "context": "Working directory: /repo", "prompt": "PLANT three TIER=sonnet add a small feature"},
+    {"id": "cal-s2", "expect": "sonnet", "context": "Working directory: /repo", "prompt": "PLANT four TIER=sonnet write a test"},
+    {"id": "cal-o1", "expect": "opus", "context": "Working directory: /repo", "prompt": "PLANT five TIER=opus redesign the module"},
+    {"id": "cal-o2", "expect": "opus", "context": "Working directory: /repo", "prompt": "PLANT six TIER=opus find the root cause"},
+]
 '''
+
+FAKE_GT500 = '''
+import importlib.util
+import json
+
+RUBRIC_MD5 = "__MD5__"
+RUBRIC_PATH = None
+
+
+def load_rubric(path):
+    spec = importlib.util.spec_from_file_location("fake_rubric_mod", str(path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def prompt_view(text):
+    return "VIEW[" + text + "]VIEW"
+
+
+def extract_json(text):
+    return json.loads(text.strip())
+
+
+def valid_label(lab, rub):
+    try:
+        return (lab["tier"] in rub.TIERS and all(int(lab[k]) in range(1, 6) for k in rub.DIMS)
+                and isinstance(lab["needs_tools"], bool) and isinstance(lab["reason"], str))
+    except Exception:
+        return False
+'''
+
 
 HELP_CLAUDE = """Usage: claude [options]
   -p, --print                  print mode
@@ -192,12 +256,14 @@ class Ctx:
         (self.cls / "dev").mkdir(parents=True)
         (self.cls / "test-syn").mkdir(parents=True)
         self.rubric = tmp / "rubric_fake.py"
-        self.rubric.write_text(FAKE_RUBRIC)
+        self.gt500 = tmp / "gt500_fake.py"
         self.selftest = tmp / "selftest.json"
         ok, _ = S.self_test(self.selftest)
         assert ok
         self.pins_static = tmp / "PINS-STATIC.json"
-        self.pins_static.write_text(json.dumps({"params": {}, "pins": {"model_ids": PINNED, "generator_files": {}}}))
+        self.model_ids = dict(PINNED)
+        self.generator_files = {}
+        self.set_rubric(FAKE_RUBRIC)
         self.pins_run = tmp / "pins_run.jsonl"
         self.verify_calls = []
         for mod in (L, G, R):
@@ -212,6 +278,26 @@ class Ctx:
 
     def set_cfg(self, **kw):
         self.cfg_path.write_text(json.dumps(kw))
+
+    def write_static(self):
+        """PINS-STATIC as the runners read it: model ids, generator files, the pinned rubric and gt500."""
+        doc = {"params": {"rubric_py": str(self.rubric), "gt500_py": str(self.gt500)},
+               "pins": {"model_ids": self.model_ids, "generator_files": self.generator_files,
+                        "rubric": {"md5": self.rubric_md5, "sha256": S.sha256_file(self.rubric)},
+                        "gt500": {"sha256": S.sha256_file(self.gt500)}}}
+        self.pins_static.write_text(json.dumps(doc))
+
+    def set_rubric(self, text, gt_text=None, repin=True):
+        """Write the fake rubric.py and gt500.py; repin=True moves every pin (PINS-STATIC and the prereg
+        constants) to the new files, as a correctly rebuilt PINS-STATIC would."""
+        self.rubric.write_text(text)
+        md5 = hashlib.md5(self.rubric.read_bytes()).hexdigest()
+        self.gt500.write_text((gt_text or FAKE_GT500).replace("__MD5__", md5))
+        if repin:
+            self.rubric_md5 = md5
+            self.mp.setattr(P, "RUBRIC_MD5", md5)
+            self.mp.setattr(P, "GT500_SHA256", S.sha256_file(self.gt500))
+            self.write_static()
 
     def records(self) -> list[dict]:
         p = self.fake / "record.jsonl"
@@ -330,8 +416,8 @@ class GenEnv:
         (self.gen_dir / names["meta_patterns"]).write_text(json.dumps(META))
 
     def refresh_static(self):
-        gf = {n: S.sha256_file(self.gen_dir / n) for n in G.gen_file_names(1).values()}
-        self.ctx.pins_static.write_text(json.dumps({"params": {}, "pins": {"model_ids": PINNED, "generator_files": gf}}))
+        self.ctx.generator_files = {n: S.sha256_file(self.gen_dir / n) for n in G.gen_file_names(1).values()}
+        self.ctx.write_static()
 
     def argv(self, cmd, set_name="dev_syn", out_root=None, version=1, extra=()):
         c = self.ctx
@@ -421,7 +507,7 @@ def inv_digest_sentinel_never_sent(ctx, capsys):
 
 def inv_plant_text_sentinel_never_sent(ctx, capsys):
     """A secret in the final bytes that is not item text (a planted item) must stop the send."""
-    ctx.rubric.write_text(FAKE_RUBRIC.replace("PLANT one", "PLANT one " + frag_secret()))
+    ctx.set_rubric(FAKE_RUBRIC.replace("PLANT one", "PLANT one " + frag_secret()))
     ip = write_items(ctx, mk_items(12))
     code, out, err = run_label(ctx, capsys, "dev_syn", "sonnet", ip)
     assert not any(frag_secret() in r["stdin"] for r in ctx.records())
@@ -679,14 +765,18 @@ def test_claude_argv_has_empty_tools_no_max_turns_and_hooks_disabled(ctx, capsys
 
 def inv_codex_argv(ctx, capsys):
     ip = write_items(ctx, mk_items(8))
-    run_label(ctx, capsys, "dev_syn", "gpt", ip)
-    rec = next(r for r in ctx.records() if r["kind"] == "codex")
-    argv = rec["argv"]
-    assert argv[0] == "exec" and argv[argv.index("-s") + 1] == "read-only"
-    assert "--ephemeral" in argv and "--skip-git-repo-check" in argv and "--json" in argv
-    assert argv[argv.index("-m") + 1] == PINNED["judge_gpt"]
-    assert Path(argv[argv.index("-C") + 1]).resolve() == Path(rec["cwd"]).resolve() or True
-    assert rec["env"]["OPENAI_API_KEY"] is False
+    code, *_ = run_label(ctx, capsys, "dev_syn", "gpt", ip)
+    assert code == 0
+    recs = [r for r in ctx.records() if r["kind"] == "codex"]
+    assert len(recs) >= 2
+    for i, rec in enumerate(recs):
+        argv = rec["argv"]
+        assert argv[0] == "exec" and argv[argv.index("-s") + 1] == "read-only"
+        assert "--ephemeral" in argv and "--skip-git-repo-check" in argv
+        assert argv[argv.index("-m") + 1] == PINNED["judge_gpt"]          # every GPT call carries the pin
+        assert ("--json" in argv) is (i > 0)                              # the canary runs in plain mode
+        assert Path(argv[argv.index("-C") + 1]).resolve() == Path(rec["cwd"]).resolve()
+        assert rec["env"]["OPENAI_API_KEY"] is False
 
 
 def test_codex_argv_is_readonly_ephemeral_with_stdin(ctx, capsys):
@@ -754,17 +844,40 @@ def test_canary_negative_logs_evidence_not_proof_and_proceeds(ctx, capsys):
     assert len(ctx.records()) >= 2
 
 
-def test_canary_function_both_ways(ctx):
-    logs = []
-    assert S.codex_canary(lambda payload: "CANNOT READ", ctx.tmp / "c1", log=logs.append) is False
-    assert logs == ["canary: not readable (evidence, not proof)"]
+def _token_of(payload):
+    parts = re.search(rb"PATH PARTS: (.*)", payload).group(1).decode().split(" | ")
+    return Path("/" + "/".join(x.replace(" ~ ", "") for x in parts)).read_text().strip()
 
-    def leaky(payload):
-        parts = re.search(rb"PATH PARTS: (.*)", payload).group(1).decode().split(" | ")
-        return "token " + Path("/" + "/".join(x.replace(" ~ ", "") for x in parts)).read_text().strip()
-    with pytest.raises(S.CLSExit) as e:
-        S.codex_canary(leaky, ctx.tmp / "c2")
-    assert e.value.code == S.EXIT_CANARY
+
+def test_canary_function_every_park_path(ctx):
+    pin = "gpt-6-astra"
+    hdr = b"workdir: /x\nmodel: gpt-6-astra\nsandbox: read-only\n"
+    logs = []
+    assert S.codex_canary(lambda p: S.SendResult(0, b"CANNOT READ\n", hdr), ctx.tmp / "c1", model_pin=pin,
+                          log=logs.append) is False
+    assert logs and "not readable (evidence, not proof)" in logs[0]
+    cases = [
+        # the token in the final message, in a transcript line of stdout (not the last message), or on stderr
+        (lambda p: S.SendResult(0, ("token " + _token_of(p)).encode(), hdr), S.EXIT_CANARY),
+        (lambda p: S.SendResult(0, ("exec\ncat x\n" + _token_of(p) + "\nCANNOT READ\n").encode(), hdr), S.EXIT_CANARY),
+        (lambda p: S.SendResult(0, b"CANNOT READ", hdr + _token_of(p).encode()), S.EXIT_CANARY),
+        # a non-zero rc parks; a missing or different model header parks
+        (lambda p: S.SendResult(1, b"", b"error: model not supported"), S.EXIT_GPT_PARK),
+        (lambda p: S.SendResult(0, b"CANNOT READ", b"workdir: /x\n"), S.EXIT_MODEL_ID),
+        (lambda p: S.SendResult(0, b"CANNOT READ", b"model: gpt-other\n"), S.EXIT_MODEL_ID),
+    ]
+    for k, (sender, code) in enumerate(cases):
+        with pytest.raises(S.CLSExit) as e:
+            S.codex_canary(sender, ctx.tmp / ("c%d" % (k + 2)), model_pin=pin)
+        assert e.value.code == code, k
+        assert not (ctx.tmp / ("c%d" % (k + 2)) / "canary.txt").exists()
+
+
+def test_canary_catches_a_token_in_a_transcript_line_of_the_real_child(ctx, capsys):
+    ctx.set_cfg(canary_leak="transcript")
+    ip = write_items(ctx, mk_items(10))
+    code, *_ = run_label(ctx, capsys, "dev_syn", "gpt", ip)
+    assert code == S.EXIT_CANARY and len(ctx.records()) == 1
 
 
 def expect_refusal(fn, code):
@@ -892,9 +1005,9 @@ def test_first_call_is_six_plants_plus_two_real_shuffled_in_one_id_space(ctx, ca
     code, out, err = run_label(ctx, capsys, "dev_syn", "sonnet", ip)
     assert code == 0
     first = ctx.records()[0]["stdin"]
-    assert first.count("PLANT") == 6 and first.count("### L") == 8
+    assert first.count("PLANT") == 6 and first.count("### ITEM id=L") == 8
     plan = json.loads((run_dir(ctx) / "plan_sonnet.json").read_text())
-    ids_in_call = re.findall(r"### (L\d+)", first)
+    ids_in_call = re.findall(r"### ITEM id=(L\d+)", first)
     real_ids = {plan["ids"][i] for i in plan["first_call_real"]}
     assert real_ids <= set(ids_in_call)
     plant_ids = [i for i in ids_in_call if i not in real_ids]
@@ -999,11 +1112,21 @@ def test_mid_run_model_id_change_stops_the_run(ctx, capsys):
     assert not (run_dir(ctx) / "labels_sonnet.jsonl").exists()
 
 
-def test_gpt_model_id_must_equal_the_pin(ctx, capsys):
-    ctx.set_cfg(models=["gpt-other"])
+def test_gpt_pin_rejected_by_codex_or_absent_from_the_header_parks(ctx, capsys):
     ip = write_items(ctx, mk_items(12))
+    ctx.set_cfg(codex_reject=[PINNED["judge_gpt"]])       # codex exits 1 on an id it does not serve
     code, *_ = run_label(ctx, capsys, "dev_syn", "gpt", ip)
-    assert code == S.EXIT_MODEL_ID
+    assert code == S.EXIT_GPT_PARK and len(ctx.records()) == 1
+    st = json.loads((run_dir(ctx) / "status.json").read_text())
+    assert st["judges"]["gpt"]["state"] == "stopped" and st["voided"] == [] and "truth_fallback" not in st
+    ctx.set_cfg(codex_header_model="gpt-other")           # the plain-mode header must show the pin
+    code, *_ = run_label(ctx, capsys, "dev_syn", "gpt", ip)
+    assert code == S.EXIT_MODEL_ID and len(ctx.records()) == 2
+    assert not (run_dir(ctx) / "labels_gpt.jsonl").exists()
+    ctx.model_ids["judge_gpt"] = ""
+    ctx.write_static()
+    code, *_ = run_label(ctx, capsys, "dev_syn", "gpt", ip)
+    assert code == S.EXIT_PINS and len(ctx.records()) == 2  # no pinned id: nothing is sent at all
 
 
 def test_failed_batch_retries_three_times_then_singles(ctx, capsys):
@@ -1200,17 +1323,29 @@ def test_run_dir_belongs_to_one_set(ctx, capsys):
 
 
 def test_plan_preflight_refuses_a_template_that_trips_the_detector(ctx, capsys):
-    ctx.rubric.write_text(FAKE_RUBRIC.replace("RUBRIC fake text", "RUBRIC " + frag_secret()))
+    ctx.set_rubric(FAKE_RUBRIC.replace("RUBRIC fake text", "RUBRIC " + frag_secret()))
     ip = write_items(ctx, mk_items(10))
     capsys.readouterr()
     assert L.main(label_argv(ctx, "plan", "dev_syn", "sonnet", ip)) == S.EXIT_SCRUB_ABORT
 
 
-def test_parse_tiers_forms():
-    assert L.parse_tiers('{"L001": "haiku", "L2": "Opus"}') == {"L001": "haiku", "L2": "opus"}
-    assert L.parse_tiers('[{"id":"L003","tier":"sonnet"}]') == {"L003": "sonnet"}
-    assert L.parse_tiers("L004: haiku\nL005 - opus") == {"L004": "haiku", "L005": "opus"}
-    assert L.parse_tiers("nothing") == {}
+def test_parse_labels_follows_the_p17d_answer_contract(ctx):
+    mods = L.load_judge_mods(ctx.pins_static)
+    good = {"scope": 2, "risk": 3, "needs_tools": True, "reason": "r"}
+    batch = json.dumps({"labels": [dict(good, id="L001", tier="haiku"), dict(good, id="L002", tier="opus"),
+                                   dict(good, id="L009", tier="opus"), {"id": "L003", "tier": "sonnet"}]})
+    # only asked ids, only labels gt.valid_label accepts (L003 lacks the rubric dims)
+    assert {k: v["tier"] for k, v in L.parse_labels(mods, batch, ["L001", "L002", "L003"], single=False).items()} == \
+        {"L001": "haiku", "L002": "opus"}
+    assert L.parse_labels(mods, json.dumps({"L001": "haiku"}), ["L001"], single=False) == {}   # not the schema
+    assert L.parse_labels(mods, "not json", ["L001"], single=False) == {}
+    one = dict(good, id="L004", tier="sonnet")
+    assert L.parse_labels(mods, json.dumps(one), ["L004"], single=True)["L004"]["tier"] == "sonnet"
+    assert L.parse_labels(mods, json.dumps({"labels": [one]}), ["L004"], single=True)["L004"]["tier"] == "sonnet"
+    no_id = dict(good, tier="sonnet")
+    assert L.parse_labels(mods, json.dumps(no_id), ["L004"], single=True) == {}               # single answers carry id
+    assert L.parse_labels(mods, json.dumps(dict(one, id="L005")), ["L004"], single=True) == {}
+    assert L.parse_labels(mods, json.dumps(dict(one, tier="huge")), ["L004"], single=True) == {}
 
 
 # =============================================================================================
@@ -1286,10 +1421,7 @@ def test_request_builder_takes_only_template_cells_and_nonces():
 
 
 def patch_fake_models(ctx):
-    """The fake picks its model from cfg['models']; generation needs gpt for codex and opus for claude."""
-    code = (ctx.fake / "codex").read_text().replace('model = models[min(n - 1, len(models) - 1)]',
-                                                    'model = cfg.get("codex_model", "gpt-6-astra")')
-    (ctx.fake / "codex").write_text(code)
+    """The fake claude picks its model from cfg['models']; generation needs opus for claude (codex serves -m)."""
     code = (ctx.fake / "claude").read_text().replace('model = models[min(n - 1, len(models) - 1)]',
                                                      'model = cfg.get("claude_model", "claude-opus-5-5")')
     (ctx.fake / "claude").write_text(code)
@@ -2118,6 +2250,9 @@ class PinsEnv:
         self.rubric = t / "rubric.py"
         self.rubric.write_text("RUBRIC = 'x'\n")
         ctx.mp.setattr(P, "RUBRIC_MD5", hashlib.md5(self.rubric.read_bytes()).hexdigest())
+        self.gt500 = t / "gt500.py"
+        self.gt500.write_text("RUBRIC_MD5 = 'x'\n")
+        ctx.mp.setattr(P, "GT500_SHA256", S.sha256_file(self.gt500))
         self.denylist = ctx.wrote_private(t / "denylist.txt", "one\ntwo\n")
         self.env = ctx.wrote_private(t / ".env", "API_KEY=abcdefgh1234\nNAME=x\n")
         self.snap = t / "snap" / "5c38ec7c405e"
@@ -2127,7 +2262,8 @@ class PinsEnv:
         for n in P.GENERATOR_V1_FILES:
             (self.gen / n).write_text("v1 " + n)
         self.params = {"repo": str(self.repo), "scripts_dir": str(self.scripts), "engine_commit": self.commit,
-                       "rubric_py": str(self.rubric), "denylist": str(self.denylist), "env_file": str(self.env),
+                       "rubric_py": str(self.rubric), "gt500_py": str(self.gt500), "denylist": str(self.denylist),
+                       "env_file": str(self.env),
                        "ollama_url": "http://127.0.0.1:%d" % self.srv.server_address[1], "ollama_models": P.OLLAMA_MODELS,
                        "bge_snapshot_dir": str(self.snap), "claude_bin": str(ctx.claude), "codex_bin": str(ctx.codex),
                        "gen_dir": str(self.gen), "model_ids": dict(PINNED)}
@@ -2155,8 +2291,9 @@ def pins(ctx):
 
 def test_static_pins_compute_every_key_and_write_canonical_json(pins):
     doc = pins.build()
-    assert set(doc["pins"]) == {"scripts", "engine", "rubric", "denylist", "env", "ollama", "bge_snapshot", "claude_cli", "codex_cli",
-                                "model_ids", "generator_files", "session_log_dirs"}
+    assert set(doc["pins"]) == {"scripts", "engine", "rubric", "gt500", "denylist", "env", "ollama", "bge_snapshot", "claude_cli",
+                                "codex_cli", "model_ids", "generator_files", "session_log_dirs"}
+    assert doc["pins"]["gt500"]["sha256"] == S.sha256_file(pins.gt500)
     assert set(doc["pins"]["scripts"]) == set(P.SCRIPT_NAMES) and "cls_send_lib.py" in doc["pins"]["scripts"]
     assert doc["pins"]["engine"]["commit"] == pins.commit
     assert doc["pins"]["engine"]["engine_py_sha256"] == hashlib.sha256(b"ENGINE = 1\n").hexdigest()
@@ -2182,7 +2319,8 @@ def test_freeze_line_format_and_cli_pins(pins, capsys):
     assert re.fullmatch(r"pins_sha256 [0-9a-f]{64}", line) and line.endswith(S.sha256_file(pins.static))
     out = pins.ctx.tmp / "PINS-CLI.json"
     argv = ["pins", "--static", "--out", str(out), "--repo", str(pins.repo), "--scripts-dir", str(pins.scripts),
-            "--engine-commit", pins.commit, "--rubric-py", str(pins.rubric), "--denylist", str(pins.denylist),
+            "--engine-commit", pins.commit, "--rubric-py", str(pins.rubric), "--gt500-py", str(pins.gt500),
+            "--denylist", str(pins.denylist),
             "--env-file", str(pins.env), "--ollama-url", pins.params["ollama_url"], "--bge-snapshot-dir", str(pins.snap),
             "--claude-bin", pins.params["claude_bin"], "--codex-bin", pins.params["codex_bin"], "--gen-dir", str(pins.gen)]
     for k, v in PINNED.items():
@@ -2227,6 +2365,10 @@ def inv_verify_detects_every_single_mutation(pins):
         p.write_text(orig + " edited")
         check("generator_files.%s" % n)
         p.write_text(orig)
+    orig = pins.gt500.read_text()
+    pins.gt500.write_text(orig + "# edited\n")
+    check("gt500")
+    pins.gt500.write_text(orig)
     _Ollama.digests["nimble:9b"] = "changed"
     check("ollama")
     _Ollama.digests["nimble:9b"] = "d1"
@@ -2248,7 +2390,7 @@ def inv_verify_detects_every_single_mutation(pins):
     check("codex_cli")
     h2.write_text(orig)
     assert pins.verify()["ok"] is True
-    assert len(mutated) >= len(P.SCRIPT_NAMES) + 2 + len(P.GENERATOR_V1_FILES) + 5
+    assert len(mutated) >= len(P.SCRIPT_NAMES) + 3 + len(P.GENERATOR_V1_FILES) + 5
 
 
 def test_verify_detects_each_single_mutation_of_every_pinned_file(pins):
@@ -2440,6 +2582,324 @@ def test_ollama_pins_refuse_a_non_local_host(pins):
 
 
 # =============================================================================================
+# 8. D-147 repair: pinned judge-prompt contract, codex -m pin, park-not-void, regen pins, resume, ledger
+# =============================================================================================
+
+def _no_prompt_module_argv(ctx, set_name, judge, items_path, extra=()):
+    argv = label_argv(ctx, "run", set_name, judge, items_path, extra=extra)
+    i = argv.index("--prompt-module")
+    del argv[i:i + 2]
+    return argv
+
+
+def inv_pinned_rubric_only(ctx, capsys):
+    ip = write_items(ctx, mk_items(10))
+    copy = ctx.tmp / "rubric_copy.py"
+    copy.write_text(FAKE_RUBRIC + "\n# an unpinned edit\n")
+    code, *_ = run_label(ctx, capsys, "dev_syn", "sonnet", ip, extra=["--prompt-module", str(copy)])
+    assert code == S.EXIT_PINS and ctx.records() == []           # a module other than the pinned file
+    ctx.rubric.write_text(FAKE_RUBRIC + "# drift\n")
+    code, *_ = run_label(ctx, capsys, "dev_syn", "sonnet", ip)
+    assert code == S.EXIT_PINS and ctx.records() == []           # the pinned file's md5 drifted from PINS-STATIC
+    ctx.rubric.write_text(FAKE_RUBRIC)
+    gt = ctx.gt500.read_text()
+    ctx.gt500.write_text(gt + "# edited\n")
+    code, *_ = run_label(ctx, capsys, "dev_syn", "sonnet", ip)
+    assert code == S.EXIT_PINS and ctx.records() == []           # gt500.py differs from its pinned sha
+    ctx.gt500.write_text(gt)
+    capsys.readouterr()
+    assert L.main(_no_prompt_module_argv(ctx, "dev_syn", "sonnet", ip)) == 0   # default = the pinned rubric
+    assert ctx.records()
+
+
+def test_only_the_pinned_rubric_and_gt500_are_loaded(ctx, capsys):
+    inv_pinned_rubric_only(ctx, capsys)
+
+
+def inv_prompt_view_and_verbatim_tail(ctx, capsys):
+    ip = write_items(ctx, mk_items(12))
+    code, *_ = run_label(ctx, capsys, "dev_syn", "sonnet", ip)
+    assert code == 0
+    recs = ctx.records()
+    blocks = [b for r in recs for b in re.findall(r"\[PROMPT TO LABEL\]\n(.*?)\n### END ITEM", r["stdin"], re.S)]
+    assert len(blocks) >= 18 and all(b.startswith("VIEW[") and b.endswith("]VIEW") for b in blocks)
+    first = recs[0]["stdin"]
+    tail = 'ANSWER labels as json {"labels": [{"id": ..., "tier": ...}]} for all {n} items'
+    assert first.startswith("RUBRIC fake text: rate each item\n\n### ITEM id=L") and first.endswith("\n\n" + tail)
+    assert "Working directory: /repo" in first                   # the planted context, from rub.PLANTED
+    n = len(recs)
+    ctx.set_rubric(FAKE_RUBRIC, gt_text=FAKE_GT500.replace("def prompt_view", "def no_view"))
+    code, *_ = run_label(ctx, capsys, "dev_syn", "sonnet", ip)
+    assert code == S.EXIT_PINS and len(ctx.records()) == n      # no prompt_view: refused, nothing sent
+
+
+def test_items_go_out_in_prompt_view_form_with_the_rubric_first_and_the_tail_verbatim(ctx, capsys):
+    inv_prompt_view_and_verbatim_tail(ctx, capsys)
+
+
+def inv_gpt_pin_without_json_model_field(ctx, capsys):
+    ctx.set_cfg()
+    ip = write_items(ctx, mk_items(12))
+    code, *_ = run_label(ctx, capsys, "dev_syn", "gpt", ip)
+    assert code == 0
+    recs = [r for r in ctx.records() if r["kind"] == "codex"]
+    assert "PATH PARTS" in recs[0]["stdin"] and "--json" not in recs[0]["argv"]
+    assert all(r["argv"][r["argv"].index("-m") + 1] == PINNED["judge_gpt"] for r in recs)
+    lab = jl(run_dir(ctx) / "labels_gpt.jsonl")
+    assert len(lab) == 12 and {r["model_id"] for r in lab} == {PINNED["judge_gpt"]}
+    st = json.loads((run_dir(ctx) / "status.json").read_text())
+    assert "model header matches the pin" in st["judges"]["gpt"]["canary"]
+
+
+def test_gpt_runs_on_the_real_event_shape_with_no_model_field(ctx, capsys):
+    inv_gpt_pin_without_json_model_field(ctx, capsys)
+    out = S.parse_codex_jsonl(b'{"type":"thread.started","thread_id":"t"}\n{"type":"item.completed","item":'
+                              b'{"type":"agent_message","text":"hi"}}\n{"type":"turn.completed","model":"x"}\n')
+    assert out["text"] == "hi" and out["model_ids"] == []      # a model field, if any, is never read
+    assert S.served_model_ids("codex", out, "gpt-6-astra") == ["gpt-6-astra"]
+    assert S.served_model_ids("claude", {"model_ids": ["claude-opus-5-5"]}, "p") == ["claude-opus-5-5"]
+    with pytest.raises(S.CLSExit) as e:
+        S.codex_argv("/x", None)
+    assert e.value.code == S.EXIT_MODEL_ID
+
+
+def inv_park_not_void(ctx, capsys):
+    ip = write_items(ctx, mk_items(20))
+    rd = run_dir(ctx)
+    ctx.set_cfg(codex_die_from=3)  # canary (1) and calibration (2) work, batch 1 gets rc=1
+    code, *_ = run_label(ctx, capsys, "dev_syn", "gpt", ip)
+    assert code == S.EXIT_GPT_PARK
+    st = json.loads((rd / "status.json").read_text())
+    assert st["judges"]["gpt"]["state"] == "stopped" and st["voided"] == [] and "truth_fallback" not in st
+    assert (rd / "labels_gpt.jsonl").exists() and not (rd / "quarantine_gpt.jsonl").exists()
+    ctx.set_cfg(no_model_usage=True)  # claude answers rc 0 without a model id
+    code, *_ = run_label(ctx, capsys, "dev_syn", "sonnet", ip)
+    assert code == S.EXIT_MODEL_ID
+    st = json.loads((rd / "status.json").read_text())
+    assert st["judges"]["sonnet"]["state"] == "stopped" and st["voided"] == [] and "truth_fallback" not in st
+    ctx.set_cfg()  # parked runs resume once the CLI works again
+    assert run_label(ctx, capsys, "dev_syn", "gpt", ip)[0] == 0
+    assert len({r["item_id"] for r in jl(rd / "labels_gpt.jsonl")}) == 20
+
+
+def test_codex_failure_and_missing_claude_id_park_never_void(ctx, capsys):
+    inv_park_not_void(ctx, capsys)
+
+
+def inv_canary_header(ctx, capsys):
+    ctx.set_cfg(codex_header_model="gpt-other")
+    ip = write_items(ctx, mk_items(10))
+    code, *_ = run_label(ctx, capsys, "dev_syn", "gpt", ip)
+    assert code == S.EXIT_MODEL_ID and len(ctx.records()) == 1
+    assert not (run_dir(ctx) / "labels_gpt.jsonl").exists()
+
+
+def test_canary_header_must_show_the_pinned_model(ctx, capsys):
+    inv_canary_header(ctx, capsys)
+
+
+def inv_env_value_refused_at_send(ctx, capsys):
+    env = ctx.tmp / ".env"
+    env.write_text("SERVICE_TOKEN=Zq-8812-plainish\n")
+    ctx.set_rubric(FAKE_RUBRIC.replace("PLANT two", "PLANT two Zq-8812-plainish"))
+    ip = write_items(ctx, mk_items(10))
+    code, *_ = run_label(ctx, capsys, "dev_syn", "sonnet", ip, extra=["--env-file", str(env)])
+    assert not any("Zq-8812-plainish" in r["stdin"] for r in ctx.records())
+    assert code == S.EXIT_PLANT_VOID
+    assert json.loads((run_dir(ctx) / "status.json").read_text())["judges"]["sonnet"]["scrub_abort"] >= 1
+
+
+def test_an_env_value_in_a_plant_is_refused_at_send(ctx, capsys):
+    inv_env_value_refused_at_send(ctx, capsys)
+
+
+def test_generator_refuses_an_env_value_in_the_template_at_send(gen):
+    ctx = gen.ctx
+    patch_fake_models(ctx)
+    env = ctx.tmp / ".env"
+    env.write_text("SERVICE_TOKEN=Zq-8812-plainish\n")
+    gen.write_version(1, template=TEMPLATE + "ref Zq-8812-plainish\n")
+    gen.refresh_static()
+    gen.alloc_and_pin()
+    assert gen.run(extra=["--env-file", str(env)]) == 0
+    assert not any("Zq-8812-plainish" in r["stdin"] for r in ctx.records())
+    assert gen.report(gen.dev_out)["scrub_abort"] == SMALL["dev_syn"]["calls"] + int(0.2 * SMALL["dev_syn"]["n"])
+
+
+def test_send_turns_a_timeout_into_a_recorded_failure(ctx):
+    def runner(argv, **kw):
+        raise subprocess.TimeoutExpired(argv, kw["timeout"], output=b"partial")
+    cwd = S.fresh_empty_cwd(ctx.tmp / "w")
+    res = S.send(["x"], b"hello", {}, cwd, runner=runner, timeout=1)
+    assert res.timed_out is True and res.returncode == S.TIMEOUT_RC and res.stdout == b"partial"
+    sp = S.SpendLog(ctx.tmp / "sp.jsonl", 20.0)
+    sp.pending("c1", "m", "claude", 0.30)
+    assert sp.total() == pytest.approx(0.30)                     # a crash mid-call still counts its estimate
+    sp.record("m", "claude", 0, 0.30, call_id="c1", cost_basis="estimate")
+    assert sp.total() == pytest.approx(0.30) and sp.max_call() == 0.0 and sp.estimate() == 0.30
+    sp.record("m", "claude", 0, 1.0, call_id="c2", cost_basis="reported")
+    assert sp.total() == pytest.approx(1.30) and sp.estimate() == pytest.approx(1.25)
+
+
+def test_an_opus_timeout_is_ledgered_pending_first_and_charged_to_the_cap(ctx, capsys):
+    ctx.set_cfg(models=["claude-opus-5-5"], sleep_calls=[2], sleep_s=5)
+    ip = write_items(ctx, mk_items(12))
+    code, out, _ = run_label(ctx, capsys, "dev_syn", "opus", ip, extra=["--timeout", "1"])
+    assert code == 0 and json.loads(out)["timeouts"] == 1
+    calls = [r for r in jl(run_dir(ctx) / "calls_opus.jsonl") if r["call_id"] == "opus-000002"]
+    assert [r["phase"] for r in calls] == ["pending", "done"] and calls[1]["outcome"] == "timeout"
+    spend = [r for r in S.read_jsonl(ctx.cls / "spend_log.jsonl") if r.get("call_id") == "opus-000002"]
+    assert [r["kind"] for r in spend] == ["pending", "call"]
+    assert spend[1]["cost_basis"] == "estimate" and spend[1]["usd"] == spend[0]["est_usd"] > 0
+    assert S.SpendLog(ctx.cls / "spend_log.jsonl").total() >= spend[1]["usd"]
+    assert len({r["item_id"] for r in jl(run_dir(ctx) / "labels_opus.jsonl")}) == 12
+
+
+def test_a_gpt_timeout_parks(ctx, capsys):
+    ctx.set_cfg(sleep_calls=[2], sleep_s=5)
+    ip = write_items(ctx, mk_items(12))
+    code, *_ = run_label(ctx, capsys, "dev_syn", "gpt", ip, extra=["--timeout", "1"])
+    assert code == S.EXIT_GPT_PARK
+    st = json.loads((run_dir(ctx) / "status.json").read_text())
+    assert st["judges"]["gpt"]["state"] == "stopped" and st["voided"] == []
+
+
+def _discarded(ctx):
+    return sorted(p for p in (ctx.cls / "test-syn").iterdir() if p.name.startswith("discarded-"))
+
+
+def _real_run_verify(static_path, run_path=None, **kw):
+    """The REAL PINS-RUN check (P.verify_run); the generator env has no STATIC document to recompute."""
+    bad = P.verify_run(run_path)
+    if bad:
+        raise S.CLSExit(S.EXIT_PINS, "pins mismatch: " + ",".join(bad))
+    return {"ok": True}
+
+
+def inv_regen_verifies_pins_before_discard(gen):
+    ctx = gen.ctx
+    ctx.mp.setattr(G, "VERIFY_PINS", _real_run_verify)
+    freeze_v1(gen)
+    gen.alloc_and_pin("test_syn", name="gen_test_v1")
+    assert gen.step(bad_resemble) == S.EXIT_RESEMBLE_FAIL
+    failed = ctx.tmp / "test_res.json"
+    failed.write_text(json.dumps({"set": "test_syn", "spec_version": 1, "pass": False}))
+    base = gen.argv("regen", "test_syn", extra=["--resemble-result", str(failed)])
+    # (1) a regen that would not re-create its pinned gen_config.json is refused BEFORE anything is discarded
+    ctx.mp.setattr(G, "SET_CFG", dict(SMALL, test_syn=dict(SMALL["test_syn"], calls=4)))
+    assert G.main(base) == S.EXIT_PINS
+    assert _discarded(ctx) == [] and (gen.test_out / "items.jsonl").exists()
+    assert G.load_custody(ctx.cls).get("regen_count", 0) == 0
+    ctx.mp.setattr(G, "SET_CFG", SMALL)
+    # (2) a regen whose start fails after the discard (the canary parks) does not consume the one regen
+    ctx.set_cfg(canary_leak=True)
+    assert G.main(base) == S.EXIT_CANARY
+    assert len(_discarded(ctx)) == 1 and G.load_custody(ctx.cls).get("regen_count", 0) == 0
+    # (3) the one regen succeeds with the REAL verify_run over the moved and re-created gen_config.json
+    ctx.set_cfg()
+    assert G.main(base) == 0
+    cust = G.load_custody(ctx.cls)
+    assert cust["regen_count"] == 1 and cust["generated"] == 2 and len(_discarded(ctx)) == 2
+    assert (gen.test_out / "items.jsonl").exists() and P.verify_run(ctx.pins_run) == []
+    reqs = [r for r in S.read_jsonl(gen.test_out / "gen_requests.jsonl") if len(r["cell_vectors"]) > 1]
+    assert reqs and all(r["nonces"] == [G.nonce("testsyn", G.REGEN_INDEX_BASE + c["item_index"]) for c in r["cell_vectors"]]
+                        for r in reqs)
+
+
+def test_regen_verifies_pins_before_discarding_and_counts_only_a_started_run(gen):
+    inv_regen_verifies_pins_before_discard(gen)
+
+
+def test_test_syn_resume_continues_the_same_set_and_marks_generated_on_completion(gen):
+    ctx = gen.ctx
+    freeze_v1(gen)
+    gen.alloc_and_pin("test_syn", name="gen_test_v1")
+    ctx.set_cfg(codex_die_from=len(ctx.records()) + 4)
+    assert gen.run("test_syn") == S.EXIT_GPT_PARK
+    assert G.load_custody(ctx.cls).get("generated", 0) == 0 and not (gen.test_out / "items.jsonl").exists()
+    done_before = {r["call_id"] for r in jl(gen.test_out / "gen_calls.jsonl") if r["phase"] == "done"}
+    assert done_before
+    assert gen.run("test_syn") == S.EXIT_REFUSE                   # a partial run continues only with --resume
+    ctx.set_cfg()
+    n0 = len(ctx.records())
+    assert gen.run("test_syn", extra=["--resume"]) == 0
+    sent = sum(1 for r in ctx.records()[n0:] if "nonce:" in r["stdin"])
+    done_all = {r["call_id"] for r in jl(gen.test_out / "gen_calls.jsonl") if r["phase"] == "done"}
+    assert sent == len(done_all) - len(done_before)               # no finished call is sent again
+    rep = gen.report(gen.test_out)
+    assert rep["resumed_calls"] == len(done_before) and rep["n_items"] == SMALL["test_syn"]["n"]
+    for r in S.read_jsonl(gen.test_out / "gen_requests.jsonl"):
+        if len(r["cell_vectors"]) > 1:
+            assert r["nonces"] == [G.nonce("testsyn", c["item_index"]) for c in r["cell_vectors"]]
+    assert G.load_custody(ctx.cls)["generated"] == 1
+    assert gen.run("test_syn", extra=["--resume"]) == S.EXIT_REFUSE
+    assert gen.run("test_syn") == S.EXIT_REFUSE
+
+
+def test_resumed_dev_syn_equals_an_uninterrupted_run(gen):
+    ctx = gen.ctx
+    patch_fake_models(ctx)
+    other = ctx.cls / "dev-syn-b"
+    gen.alloc_and_pin(out_root=other, name="gen_dev_b")
+    assert gen.run(out_root=other) == 0
+    gen.alloc_and_pin()
+    ctx.set_cfg(codex_die_from=len(ctx.records()) + 3)
+    assert gen.run() == S.EXIT_GPT_PARK
+    ctx.set_cfg()
+    assert gen.run(extra=["--resume"]) == 0
+    assert S.sha256_file(gen.dev_out / "items.jsonl") == S.sha256_file(other / "items.jsonl")
+    assert stat.S_IMODE((gen.dev_out / "gen_calls.jsonl").stat().st_mode) == 0o600
+
+
+def test_step_and_discard_lock_the_call_log_too(gen):
+    freeze_v1(gen)
+    gen.alloc_and_pin("test_syn", name="gen_test_v1")
+    assert gen.step(ok_resemble) == 0
+    assert stat.S_IMODE((gen.test_out / "gen_calls.jsonl").stat().st_mode) == 0
+    assert G.main(gen.argv("discard", "test_syn", extra=["--reason", "t"])) == 0
+    d = _discarded(gen.ctx)[0]
+    assert stat.S_IMODE((d / "gen_calls.jsonl").stat().st_mode) == 0 and stat.S_IMODE((d / "items.jsonl").stat().st_mode) == 0
+
+
+def test_flag_recorder_matches_definition_lines_only(pins):
+    h = pins.ctx.fake / "help_claude.txt"
+    h.write_text("\n".join(ln for ln in HELP_CLAUDE.splitlines() if "--tools" not in ln)
+                 + "\n  --bare                       like --tools '' with hooks off\n")
+    with pytest.raises(S.CLSExit) as e:
+        P.build_static(pins.params)
+    assert e.value.code == S.EXIT_PINS and "claude_flag--tools" in str(e.value)
+    lines, missing = P._flag_lines(HELP_CODEX + "      --oss   pick with -m, see --json\n", P.CODEX_FLAGS)
+    assert missing == [] and lines["-m"].startswith("-m, --model") and lines["--json"].startswith("--json")
+    _l, missing = P._flag_lines("  --verbose   prints -s and --ephemeral notes\n  --ephemeral-x  other\n", ["-s", "--ephemeral"])
+    assert missing == ["-s", "--ephemeral"]
+
+
+def test_verify_checks_the_pins_file_sha_against_the_freeze_record(pins):
+    pins.build()
+    res = pins.verify()
+    assert res["ok"] is True and "pre_freeze_no_pins_sha256_record" in res["warnings"]
+    rec = pins.repo / P.FREEZE_RECORD_REL
+    rec.parent.mkdir(parents=True)
+    head = "%s  PREREG-CLS-DEV.md\nfrozen_utc 2026-10-16T00:00:00Z\n" % ("a" * 64)
+    rec.write_text(head + P.freeze_line(pins.static) + "\n")
+    res = pins.verify()
+    assert res["ok"] is True and res["warnings"] == []
+    rec.write_text(head + "pins_sha256 " + "0" * 64 + "\n")
+    res = pins.verify()
+    assert res["ok"] is False and "pins_file_sha256" in res["mismatches"]
+    with pytest.raises(S.CLSExit) as e:
+        P.verify_at_start(pins.static, pins.run_file)
+    assert e.value.code == S.EXIT_PINS and "pins_file_sha256" in str(e.value)
+    rec.write_text(head)
+    assert "freeze_record_lacks_pins_sha256" in pins.verify()["mismatches"]
+    rec.write_text(head + P.freeze_line(pins.static) + "\npins_sha256 " + "1" * 64 + "\n")
+    assert "freeze_record_ambiguous_pins_sha256" in pins.verify()["mismatches"]
+    rec.write_text(head + P.freeze_line(pins.static) + "\n")
+    pins.static.write_text(pins.static.read_text() + "\n")       # the PINS file changed after the freeze
+    assert "pins_file_sha256" in pins.verify()["mismatches"]
+
+
+# =============================================================================================
 # Mutants: patch ONE function, the invariant must fail. Unmutated code passes every invariant.
 # =============================================================================================
 
@@ -2453,7 +2913,8 @@ def m_skip_digest_check(mp):
 
     def mut(payload, **kw):
         text = payload.decode("utf-8", errors="replace")
-        text = "\n".join(ln for ln in text.splitlines() if not ln.startswith("digest:"))
+        lines = text.splitlines()
+        text = "\n".join(ln for i, ln in enumerate(lines) if not (i and lines[i - 1] == "[CONTEXT]"))
         return orig(text.encode("utf-8"), **kw)
     mp.setattr(S, "outgoing_check", mut)
 
@@ -2464,7 +2925,7 @@ def m_check_items_only_not_final_bytes(mp):
     def mut_send(child_argv, payload, env, cwd, *, batch_id="", timeout=900, runner=subprocess.run):
         S.assert_empty_cwd(cwd)
         text = payload.decode("utf-8", errors="replace")
-        items_only = "\n".join(ln for ln in text.splitlines() if ln.startswith("prompt: ") and "PLANT" not in ln)
+        items_only = "\n".join(ln for ln in text.splitlines() if ln.startswith("VIEW[") and "PLANT" not in ln)
         orig_check(items_only.encode("utf-8"), batch_id=batch_id)
         r = runner(list(child_argv), input=payload, env=env, cwd=str(cwd), shell=False, capture_output=True, timeout=timeout)
         return S.SendResult(r.returncode, r.stdout or b"", r.stderr or b"")
@@ -2499,7 +2960,7 @@ def m_wrong_plant_does_not_void(mp):
 
 
 def m_canary_ignored(mp):
-    mp.setattr(S, "codex_canary", lambda sender, work_dir, log=None: (sender(b"Attempt canary"), False)[1])
+    mp.setattr(S, "codex_canary", lambda sender, work_dir, *, model_pin, log=None: (sender(b"Attempt canary"), False)[1])
 
 
 def m_test_syn_path_accepted(mp):
@@ -2653,7 +3114,8 @@ def m_static_skipped_once_run_exists(mp):
 
 def m_codex_no_ephemeral(mp):
     orig = S.codex_argv
-    mp.setattr(S, "codex_argv", lambda cwd, model=None, codex_bin="codex": [a for a in orig(cwd, model, codex_bin) if a != "--ephemeral"])
+    mp.setattr(S, "codex_argv", lambda cwd, model=None, codex_bin="codex", **kw: [a for a in orig(cwd, model, codex_bin, **kw)
+                                                                                 if a != "--ephemeral"])
 
 
 def m_two_voids_accepted(mp):
@@ -2684,6 +3146,42 @@ def m_v2_written_over_v1(mp):
         p.write_text(content)
         return p
     mp.setattr(G, "write_gen_file", mut)
+
+
+def m_regen_no_preverify(mp):
+    mp.setattr(G, "regen_verify_before_discard", lambda a, g: None)
+
+
+def m_regen_verify_first(mp):
+    orig = G._do_run
+    mp.setattr(G, "_do_run", lambda a, set_name, **kw: orig(a, set_name, **dict(kw, verify_first=True)))
+
+
+def m_unpinned_module(mp):
+    mp.setattr(L, "resolve_rubric", lambda prompt_module, doc: (Path(prompt_module or doc["params"]["rubric_py"]),
+                                                                doc["pins"]["rubric"]["md5"]))
+
+
+def m_raw_prompt(mp):
+    mp.setattr(L, "render_item", lambda mods, opaque, ctx, prompt: mods.rub.ITEM_TEMPLATE.format(id=opaque, context=ctx,
+                                                                                              prompt=prompt))
+
+
+def m_json_model_field(mp):
+    mp.setattr(S, "served_model_ids", lambda kind, parsed, pinned: list(parsed.get("model_ids") or []))
+
+
+def m_park_becomes_void(mp):
+    orig = L.classify_call
+    mp.setattr(L, "classify_call", lambda *a: "void" if orig(*a) == "park" else orig(*a))
+
+
+def m_canary_header_ignored(mp):
+    mp.setattr(S, "codex_plain_header_model", lambda text: PINNED["judge_gpt"])
+
+
+def m_no_configure(mp):
+    mp.setattr(S, "configure", lambda ctx: None)
 
 
 def i_selftest(ctx, capsys, gen=None, pins=None):
@@ -2728,6 +3226,14 @@ MUTANTS = [
     (35, "regen without discard", m_regen_without_discard, "regen_rules"),
     (36, "--max-turns re-added", m_max_turns_readded, "claude_argv"),
     (37, "v2 written over the v1 file", m_v2_written_over_v1, "v1_overwrite"),
+    (38, "regen discards before verifying its pins", m_regen_no_preverify, "regen_pins"),
+    (39, "regen verifies the moved set before re-creating it", m_regen_verify_first, "regen_pins"),
+    (40, "unpinned prompt module accepted", m_unpinned_module, "pinned_rubric"),
+    (41, "raw prompt sent without prompt_view", m_raw_prompt, "prompt_view"),
+    (42, "GPT model id read from --json events", m_json_model_field, "gpt_pin"),
+    (43, "codex rc / missing id voids instead of parking", m_park_becomes_void, "park_not_void"),
+    (44, "canary model header ignored", m_canary_header_ignored, "canary_header"),
+    (45, "configure() never called (detector d at send)", m_no_configure, "env_at_send"),
 ]
 
 
@@ -2774,6 +3280,11 @@ def run_invariant(name, ctx, capsys, request):
         return inv_two_voids_are_not_informative(ctx, capsys)
     if name == "amendment":
         return inv_amendment_view_never_leaks_test_numbers(ctx, capsys, ctx.mp)
+    ctx_invs = {"pinned_rubric": inv_pinned_rubric_only, "prompt_view": inv_prompt_view_and_verbatim_tail,
+                "gpt_pin": inv_gpt_pin_without_json_model_field, "park_not_void": inv_park_not_void,
+                "canary_header": inv_canary_header, "env_at_send": inv_env_value_refused_at_send}
+    if name in ctx_invs:
+        return ctx_invs[name](ctx, capsys)
     gen = GenEnv(ctx)
     if name == "no_counts":
         patch_fake_models(ctx)
@@ -2790,6 +3301,8 @@ def run_invariant(name, ctx, capsys, request):
         return inv_discard_and_later_read_refused(gen)
     if name == "regen_rules":
         return inv_regen_rules(gen)
+    if name == "regen_pins":
+        return inv_regen_verifies_pins_before_discard(gen)
     if name == "token":
         return inv_release_token_is_never_created(gen)
     if name == "v1_overwrite":
