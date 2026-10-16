@@ -673,9 +673,10 @@ def test_tp2_exact_fallback_and_flags(factory, capsys):
     missing = list(args)
     start = missing.index("--f-fit")
     del missing[start:start + 2]
-    with pytest.raises(SystemExit) as error:
-        call(cfg, *missing)
-    assert error.value.code == 2
+    assert call(cfg, *missing) == 0  # e_tech is None here: f_fit is not required (§11)
+    out = h.read_json(cfg.run_dir / "tp2.json")
+    assert "f_fit_not_required" in out["flags"]
+    assert Fraction(out["fractions"]["T_P2"]) == Fraction(4, 5) * Fraction(2, 100)
     assert '"T_P2_alt"' in capsys.readouterr().out
 
 
@@ -705,3 +706,25 @@ def test_frozen_utc_must_be_strictly_in_the_past(factory):
         h.frozen(cfg)
     freeze_file(cfg, c, cfg.prereg.read_text(), "2030-03-17T17:46:39Z")
     assert h.frozen(cfg)["frozen_utc"] == "2030-03-17T17:46:39Z"
+
+
+def test_tp2_without_f_fit(factory):
+    """Prereg §11: with e_tech = 0, T_P2 = 0.8 x s_cheap and --f-fit is optional; with
+    e_tech > 0 a missing --f-fit refuses."""
+    cfg, c = prepare_score(factory, "tp2b")
+    assert call(cfg, "score") == 0
+    args = ("tp2", "--s-tech", "30/100", "--s-tech-sessions", "3", "--s-tech-largest", ".5",
+            "--s-cheap", "2/100")
+    result = h.read_json(cfg.run_dir / "result.json")
+    for e_tech, code in (({"model": c["LOCAL_MODELS"].split(",")[0], "k": 54, "n": 60}, 2),
+                         (None, 0)):
+        result["e_tech"] = e_tech
+        h.write_json(cfg.run_dir / "result.json", result)
+        h.append_use(cfg, "scored",
+                     f"result_sha256={h.sha256_file(cfg.run_dir / 'result.json')}")
+        assert call(cfg, *args) == code
+    out = h.read_json(cfg.run_dir / "tp2.json")
+    assert Fraction(out["fractions"]["T_P2"]) == Fraction(2, 125)
+    assert "f_fit_not_required" in out["flags"]
+    assert out["inputs"]["f_fit"] == "n/a"
+    assert call(cfg, *args, "--f-fit", "0/0") == 2  # a given f_fit still needs n > 0

@@ -1121,7 +1121,10 @@ def counts(value: str, allow_zero: bool = False) -> tuple[int, int]:
 def tp2(cfg: Cfg, c: dict, args: argparse.Namespace) -> dict:
     result = scored(cfg)
     sk, sn = counts(args.s_tech)
-    fk, fn = counts(args.f_fit)
+    candidate = result.get("e_tech")
+    if args.f_fit is None and candidate:
+        raise Refuse("refusing: --f-fit required when e_tech > 0")
+    fk, fn = counts(args.f_fit) if args.f_fit is not None else (0, 0)
     ck, cn = counts(args.s_cheap, True)
     if args.s_tech_sessions < 0:
         raise Refuse("refusing: session count")
@@ -1139,12 +1142,13 @@ def tp2(cfg: Cfg, c: dict, args: argparse.Namespace) -> dict:
         flags.append("s_tech_not_informative")
     if not cn:
         flags.append("s_cheap_n0")
-    candidate = result.get("e_tech")
     e = Fraction(candidate["k"], candidate["n"]) if candidate else Fraction(0)
     if not candidate:
         flags.append("no_eligible_tech_op")
     s = Fraction(sk, sn) if informative else Fraction(c["S_TECH_FALLBACK"])
-    f = Fraction(fk, fn)
+    if args.f_fit is None:
+        flags.append("f_fit_not_required")  # e_tech = 0: the tech term is 0 (prereg §11)
+    f = Fraction(fk, fn) if fn else Fraction(0)
     cheap = Fraction(ck, cn) if cn else Fraction(0)
     factor = Fraction(c["SAFETY_FACTOR"])
     ceiling = s * f * e + cheap
@@ -1159,7 +1163,7 @@ def tp2(cfg: Cfg, c: dict, args: argparse.Namespace) -> dict:
     if not informative:
         values["tp2_high"] = factor * (Fraction(c["S_TECH_FALLBACK_HIGH"]) * f * e + cheap)
     out = {
-        "inputs": {"s_tech": f"{sk}/{sn}", "f_fit": f"{fk}/{fn}", "s_cheap": f"{ck}/{cn}",
+        "inputs": {"s_tech": f"{sk}/{sn}", "f_fit": f"{fk}/{fn}" if args.f_fit is not None else "n/a", "s_cheap": f"{ck}/{cn}",
                    "s_tech_sessions": args.s_tech_sessions,
                    "s_tech_largest": str(largest)},
         "gating_s_tech_basis": "census" if informative else "fallback_1/45",
@@ -1219,7 +1223,8 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser("score").add_argument("--measurement", type=Path)
     sub.add_parser("install-eligibility").add_argument("--confirm", action="store_true")
     cmd = sub.add_parser("tp2")
-    for flag in ("s-tech", "s-tech-sessions", "s-tech-largest", "f-fit", "s-cheap"):
+    cmd.add_argument("--f-fit", default=None)
+    for flag in ("s-tech", "s-tech-sessions", "s-tech-largest", "s-cheap"):
         cmd.add_argument("--" + flag, required=True, type=int if flag.endswith("sessions") else str)
     cmd.add_argument("--baseline")
     cmd.add_argument("--evidence", type=Path, action="append", default=[])
