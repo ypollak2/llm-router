@@ -239,7 +239,7 @@ def _recovered_since_demotion(policy) -> bool:
         from llm_router import quality_breaker as qb
         ts = policy.haiku_breaker.get("ts")
         rec = qb.recovered_at(qb.LEVER_PROXY_HAIKU, qb.TASK_PROXY_HAIKU)
-        return isinstance(ts, (int, float)) and rec is not None and rec >= ts
+        return isinstance(ts, (int, float)) and rec is not None and rec > ts
     except Exception:  # noqa: BLE001 - not provably recovered
         return False
 
