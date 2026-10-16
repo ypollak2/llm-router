@@ -459,13 +459,15 @@ def test_text_beside_a_tool_result_keeps_both_in_the_request(client, payloads):
     assert "OUT-ANT" in payloads[0]["prompt"] and "now fix it" in payloads[0]["prompt"]
 
 
-def test_an_image_only_trailing_turn_still_flattens(client, payloads):
+def test_an_image_only_trailing_turn_is_refused_not_flattened(client, payloads):
+    """P2.4 ext-a: this request used to flatten to the text turns with the image dropped
+    silently; the gateway now refuses it (400), the same as `tools`."""
     r = client.post("/v1/messages", json={"messages": [
         REQUEST, {"role": "user", "content": [{"type": "image", "source": {
             "type": "base64", "media_type": "image/png", "data": "AAAA"}}]}],
         "max_tokens": 64})
-    assert r.status_code == 200, r.text
-    assert payloads[0]["prompt"] == "user: REQ-TEXT" and payloads[0]["messages"] == []
+    assert r.status_code == 400, r.text
+    assert "cannot read images" in r.json()["detail"] and payloads == []
 
 
 @pytest.mark.asyncio
