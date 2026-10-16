@@ -164,7 +164,8 @@ def route(chain, prompt, *, task=TaskType.CODE, messages=None, system=None, over
 
         async def go():
             return await route_and_call(task, prompt, profile=RoutingProfile.BALANCED,
-                                        messages=messages, system_prompt=system)
+                                        messages=messages, system_prompt=system,
+                                        model_override=override)
         try:
             if via is not None:
                 via()
@@ -666,3 +667,14 @@ def test_mutant_f7_whole_conversation_window_is_caught(monkeypatch):
 
     monkeypatch.setattr(cf, "needs_from_messages", whole)
     assert _history_exclusions() >= 2          # the 4096 and 32768 windows
+
+
+def test_a_pin_is_exempt_from_the_prompt_regex_tools_need_only():
+    """"What is the current version of Python?" trips the tools regex; a pinned perplexity
+    research call (tests/test_integration.py) must still run. Vision and window stay hard."""
+    pinned = {"llm_router.router._build_and_filter_chain": AsyncMock(return_value=[PERPLEXITY])}
+    out = route([PERPLEXITY], "What is the current version of Python?", task=TaskType.RESEARCH,
+                override=PERPLEXITY, extra=pinned)
+    assert out == [PERPLEXITY]
+    out = route([PERPLEXITY], "What is the current version of Python?", task=TaskType.RESEARCH, extra=pinned)
+    assert isinstance(out, ValueError) and "lacks tools" in str(out)     # unpinned: the filter applies

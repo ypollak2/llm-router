@@ -4898,6 +4898,11 @@ async def route_and_call(
                         _cf.needs_from_prompt(prompt, task_type.value, system_prompt or ""),
                         _cf.needs_from_messages(messages, prompt, system_prompt or ""),
                     )
+                    if model_override:
+                        # An explicit pin is not exempt from vision or window (facts), but the
+                        # tools need here is a prompt regex: "What is the current version of
+                        # Python?" trips it, and it would refuse a pinned perplexity research call.
+                        _cap_needs = _cf.Needs(False, _cap_needs.vision, _cap_needs.tokens)
                     models_to_try, _cap_excluded = _cf.filter_chain_report(models_to_try, _cap_needs)
             except Exception as _cap_err:  # noqa: BLE001 - fail-open: the chain stays as built
                 from llm_router import failopen
