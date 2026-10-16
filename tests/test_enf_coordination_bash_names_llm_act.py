@@ -41,11 +41,7 @@ def _pending(home, sid, **ov):
     (d / f"pending_route_{sid}.json").write_text(json.dumps(data))
 
 
-# P2.4: capability routing is on by default, which makes the FS exemption see git/command prompts
-# ("commit the result") that the legacy boolean did not, so enforce-route soft-allows them. These
-# tests pin the redirect under the legacy detector; the kill switch restores it.
-_ENV = {"LLM_ROUTER_ENFORCE": "hard", "LLM_ROUTER_DELEGATE": "on", "LLM_ROUTER_SLIM": "consolidated",
-        "LLM_ROUTER_CAPABILITY_ROUTING": "0"}
+_ENV = {"LLM_ROUTER_ENFORCE": "hard", "LLM_ROUTER_DELEGATE": "on", "LLM_ROUTER_SLIM": "consolidated"}
 
 
 def test_substantial_coordination_bash_names_llm_act(tmp_path):

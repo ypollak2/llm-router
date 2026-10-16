@@ -59,7 +59,7 @@ DOORS = ("router", "hook", "proxy", "gateway")
 
 def _row(resource, kind, chain_id, caps, limits=None):
     return rm._row(resource, kind, chain_id, status="connected", capabilities=list(caps),
-                   limits=limits or {}, effective_priority=1)
+                   limits=limits or {}, effective_priority=1, capabilities_reported=True)
 
 
 def map_rows():
@@ -678,3 +678,37 @@ def test_a_pin_is_exempt_from_the_prompt_regex_tools_need_only():
     assert out == [PERPLEXITY]
     out = route([PERPLEXITY], "What is the current version of Python?", task=TaskType.RESEARCH, extra=pinned)
     assert isinstance(out, ValueError) and "lacks tools" in str(out)     # unpinned: the filter applies
+
+
+def _ollama_map(tmp_path, show):
+    """The real resource_map builder over one Ollama model whose /api/show is *show*."""
+    from tests.test_resource_map import make_inputs
+
+    inp = make_inputs(tmp_path, models=("m:1",))
+    inp.http_post = lambda url, body: show
+    data = rm.build(inp)
+    data["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())   # the fixture clock is old
+    rm.write_map(data)
+    p = rm.map_path()
+    os.utime(p, ns=(p.stat().st_atime_ns, p.stat().st_mtime_ns + 1_000_000))
+    return data
+
+
+def test_ollama_without_a_reported_capabilities_list_is_unknown_and_kept(tmp_path):
+    _ollama_map(tmp_path, {})            # /api/show answered with no capabilities list
+    assert map_reader.load_view() is not None
+    c = cf.caps_of("ollama/m:1")
+    assert (c.tools, c.vision) == (None, None)       # unreported is unknown (the window is still known)
+    assert cf.filter_chain(["ollama/m:1"], Needs(tools=True, vision=True)) == ["ollama/m:1"]
+    out = route(["ollama/m:1", CODEX], TOOLS_PROMPT)
+    assert out == ["ollama/m:1", CODEX]
+
+
+def test_ollama_with_an_explicit_list_lacking_tools_is_excluded(tmp_path):
+    _ollama_map(tmp_path, {"capabilities": ["completion"]})
+    assert cf.caps_of("ollama/m:1").tools is False and cf.caps_of("ollama/m:1").vision is False
+    assert cf.filter_chain(["ollama/m:1"], Needs(tools=True)) == []
+    out = route(["ollama/m:1", CODEX], TOOLS_PROMPT)
+    assert out == [CODEX]
+    _ollama_map(tmp_path, {"capabilities": ["completion", "tools"]})
+    assert cf.filter_chain(["ollama/m:1"], Needs(tools=True)) == ["ollama/m:1"]

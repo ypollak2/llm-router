@@ -358,6 +358,9 @@ def _ollama_rows(inp: MapInputs, now: float) -> list[dict]:
             status="connected", reason=reason,
             marginal_cost={"value": 0.0, "label": "local; electricity not counted"},
             capabilities=caps,
+            # D-159: True only when /api/show reported a capabilities list. Without it the
+            # list above is just ``generate``, which says nothing about tools or vision.
+            capabilities_reported=known,
             digest=m.get("digest"),
             limits={
                 "num_ctx": local_models.num_ctx(name),

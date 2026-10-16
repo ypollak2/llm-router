@@ -69,7 +69,10 @@ def _expresses_order(policy: object) -> bool:
 def _index_caps(r: dict, caps_id: dict, caps_prov: dict, window: dict) -> None:
     """Capability facts of one connected row, known values only (never raises)."""
     try:
-        if r.get("kind") != "api":      # API rows list only ``generate``: says nothing of tools or vision
+        # API rows list only ``generate``, and a local row whose Ollama reported no
+        # capabilities list (``capabilities_reported`` not True) lists nothing either:
+        # both say nothing of tools or vision, so they stay unknown.
+        if r.get("kind") != "api" and (r.get("kind") != "local" or r.get("capabilities_reported") is True):
             caps = r.get("capabilities")
             if isinstance(caps, list) and caps:
                 pair = ("tools" in caps, "vision" in caps)
