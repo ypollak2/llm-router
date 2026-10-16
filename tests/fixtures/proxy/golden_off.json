@@ -13,6 +13,7 @@
      "output_tokens": 42
     },
     "auth": "oauth",
+    "authority": "route",
     "chain_head": [
      "ollama/qwen-golden:1",
      "anthropic/claude-sonnet-5"
@@ -146,6 +147,7 @@
      "output_tokens": 42
     },
     "auth": "oauth",
+    "authority": "route",
     "backend_usage": {
      "context_truncated": false,
      "eval_s": 0.4,
@@ -293,6 +295,7 @@
      "output_tokens": 42
     },
     "auth": "oauth",
+    "authority": "route",
     "backend_usage": {
      "context_truncated": false,
      "eval_s": 0.4,
@@ -440,6 +443,7 @@
      "output_tokens": 42
     },
     "auth": "oauth",
+    "authority": "route",
     "backend_health": {
      "state": "tripped",
      "trigger": "crash_signature"
@@ -583,6 +587,7 @@
      "output_tokens": 0
     },
     "auth": "oauth",
+    "authority": "route",
     "backend_usage": {
      "context_truncated": false,
      "eval_s": 0.4,
@@ -678,6 +683,7 @@
      "output_tokens": 0
     },
     "auth": "oauth",
+    "authority": "route",
     "backend_usage": {
      "context_truncated": false,
      "eval_s": 0.4,
@@ -774,6 +780,7 @@
      "output_tokens": 42
     },
     "auth": "oauth",
+    "authority": "route",
     "backend_usage": {
      "context_truncated": false,
      "eval_s": 0.4,
@@ -921,6 +928,7 @@
      "output_tokens": 42
     },
     "auth": "oauth",
+    "authority": "route",
     "cls_applied": false,
     "cls_arm": null,
     "cls_confidence": null,
@@ -1040,6 +1048,7 @@
      "output_tokens": 42
     },
     "auth": "oauth",
+    "authority": "route",
     "cls_applied": false,
     "cls_arm": null,
     "cls_confidence": null,
@@ -1161,6 +1170,7 @@
      "output_tokens": 0
     },
     "auth": "oauth",
+    "authority": "route",
     "backend_usage": {
      "context_truncated": false,
      "eval_s": 0.4,
@@ -1237,6 +1247,7 @@
      "output_tokens": 42
     },
     "auth": "oauth",
+    "authority": "route",
     "backend_usage": {
      "context_truncated": false,
      "eval_s": 0.4,
@@ -1395,6 +1406,7 @@
      "output_tokens": 42
     },
     "auth": "oauth",
+    "authority": "route",
     "cls_applied": false,
     "cls_arm": null,
     "cls_confidence": null,
@@ -1560,6 +1572,7 @@
      "output_tokens": 42
     },
     "auth": "oauth",
+    "authority": "route",
     "cls_applied": false,
     "cls_arm": null,
     "cls_confidence": null,
@@ -1681,6 +1694,7 @@
      "output_tokens": 42
     },
     "auth": "oauth",
+    "authority": "route",
     "cls_applied": false,
     "cls_arm": null,
     "cls_confidence": null,
@@ -1802,6 +1816,7 @@
      "output_tokens": 0
     },
     "auth": "oauth",
+    "authority": "route",
     "backend_usage": {
      "context_truncated": false,
      "eval_s": 0.4,
@@ -1998,6 +2013,7 @@
      "output_tokens": 42
     },
     "auth": "oauth",
+    "authority": "route",
     "chain_head": [
      "anthropic/claude-sonnet-5"
     ],
@@ -2125,6 +2141,7 @@
      "output_tokens": 42
     },
     "auth": "oauth",
+    "authority": "route",
     "cls_applied": false,
     "cls_arm": null,
     "cls_confidence": null,
@@ -2246,6 +2263,7 @@
      "output_tokens": 42
     },
     "auth": "oauth",
+    "authority": "route",
     "cls_applied": false,
     "cls_arm": null,
     "cls_confidence": null,
@@ -2367,6 +2385,7 @@
      "output_tokens": 0
     },
     "auth": "oauth",
+    "authority": "route",
     "cls_applied": false,
     "cls_arm": null,
     "cls_confidence": null,
