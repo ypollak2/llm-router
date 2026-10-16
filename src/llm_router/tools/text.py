@@ -488,7 +488,7 @@ def _format_response(resp: LLMResponse, task: str = "") -> str:
         Formatted response string.
     """
     # F4 (D-139): the one choke point for text answers going back to an MCP caller.
-    resp = neutralise_response(resp)
+    resp = neutralise_response(resp, f"llm:{task or 'text'}")
     explanation = _routing_explanation(resp, task)
     mode = _get_explain_mode()
 

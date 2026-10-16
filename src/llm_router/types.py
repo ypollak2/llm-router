@@ -559,6 +559,8 @@ class LLMResponse:
     # from `content` on its way out to an MCP caller. 0 = none removed. The visible
     # marker line in the answer carries the same number; this is the structured copy.
     toolcall_blocks_removed: int = 0
+    # D-152: fences holding only a tool call are kept (they are content) but counted here.
+    toolcall_fenced_seen: int = 0
 
     def summary(self) -> str:
         """Format a compact one-line summary for logging and CLI display.

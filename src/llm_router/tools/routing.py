@@ -458,7 +458,7 @@ async def llm_route(
         await ctx.warning(f"Failed to log routing usage: {e}")
 
     # Step 5: Build response with visible routing indicator
-    resp = neutralise_response(resp)  # F4 (D-139)
+    resp = neutralise_response(resp, "llm_route")  # F4 (D-139)
     total_cost = classification.classifier_cost_usd + resp.cost_usd
     
     # Add visible routing indicator footer
@@ -605,7 +605,7 @@ async def llm_auto(
         route_directive_id=_read_hook_route_directive(),
     )
 
-    resp = neutralise_response(resp)  # F4 (D-139)
+    resp = neutralise_response(resp, "llm_auto")  # F4 (D-139)
     total_cost = classification.classifier_cost_usd + resp.cost_usd
     
     # Add visible routing indicator footer
