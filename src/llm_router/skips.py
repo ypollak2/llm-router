@@ -19,8 +19,7 @@ import time
 from llm_router import capped_log, failopen, paths
 
 FILE_NAME = "skips.jsonl"
-#: Two generations of this size are kept. A default install writes one row per
-#: proxy call (``routing_off``), so the cap is sized for weeks, not days.
+#: Two generations of this size are kept (the rows are small: weeks of hook skips).
 MAX_BYTES = 8 * 1024 * 1024
 
 REASONS = frozenset({"headless", "base_url_override", "tiers_off", "routing_off"})

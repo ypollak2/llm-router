@@ -15,6 +15,7 @@ from llm_router import authority
 from llm_router.proxy import backends as pb
 from llm_router.proxy import ledger
 from llm_router.proxy import server as ps
+from tests import test_p27_proxy_prefixes as pfx
 from tests import test_proxy as tp
 from tests import test_proxy_tiers as tt
 
@@ -68,6 +69,7 @@ async def test_advise_forwards_the_original_bytes_and_logs_the_proposal(tmp_path
     assert [json.loads(b)["model"] for b in sent] == [OPUS, OPUS]
     first, second = tt._rows(tmp_path)
     assert second["authority"] == "advise" and second["tier_reason"] == "advise"
+    assert second["tier_reason_proposed"] not in (None, "advise"), "the would-be reason is kept apart"
     assert second["tier_proposed"] == "sonnet", "the proposal is still logged"
     assert second["requested_model"] == second["served_model"] == OPUS
     assert second["tier_switch"] is False and second["tier_switch_cost_usd"] is None
@@ -85,7 +87,7 @@ async def test_route_and_advise_rows_have_the_same_keys_but_the_routing_off_reas
     r = tt._rows(route_dir)[-1]
     a = tt._rows(advise_dir)[-1]
     # steps are off in this app: route says why it served nothing locally, advise never tries.
-    assert set(r) - set(a) == {"reason"} and set(a) - set(r) == set()
+    assert set(r) - set(a) == {"reason"} and set(a) - set(r) == {"tier_reason_proposed"}
 
 
 async def test_flipping_the_state_file_changes_the_next_request_without_a_restart(tmp_path, moderate):
@@ -138,39 +140,81 @@ async def test_advise_does_not_serve_locally_but_route_does(tmp_path, monkeypatc
     assert row["decision"] == ledger.DECISION_FORWARDED and row["authority"] == "advise"
 
 
-async def test_every_forward_without_a_tier_policy_writes_one_tiers_off_row(tmp_path, _scratch):
-    up = tp.Upstream()
-    app = tp._app(tmp_path, up, steps=frozenset({"continuation"}), tiers=ps.TIERS_OFF)
-    await tp._post(app, tp._first_call())  # not a continuation: forwarded
-    assert [(r["door"], r["reason"], r["session_id"]) for r in _skip_rows(_scratch)] == [
-        ("proxy", "tiers_off", tp.SID)]
-
-
-async def test_routing_off_writes_one_row(tmp_path, moderate, _scratch):
+async def test_the_proxy_writes_no_skip_rows_the_ledger_row_carries_the_reason(tmp_path, moderate, _scratch):
+    """D-150: a per-call proxy skip row would let coverage_check explain a call within +-120 s as
+    "skipped" and hide a proxy bypass. routing_off / tiers_off live on the ledger row only."""
     up = tt.Upstream()
-    app = tt._app(tmp_path, up)  # steps empty, tiers on
-    await tt._post(app, tt._first())
-    reasons = [(r["door"], r["reason"]) for r in _skip_rows(_scratch)]
-    assert reasons == [("proxy", "routing_off")]
+    await tt._post(tt._app(tmp_path, up), tt._first())                       # steps off, tiers on: routing_off
     assert tt._rows(tmp_path)[0]["reason"] == "routing_off"
+    off = tp.Upstream()
+    await tp._post(tp._app(tmp_path, off,
+                           steps=frozenset({"continuation"}), tiers=ps.TIERS_OFF), tp._first_call())
+    authority.set_mode("advise")
+    await tp._post(tp._app(tmp_path, tp.Upstream(), tiers=ps.TIERS_OFF), tp._req())  # advise, no policy
+    assert _skip_rows(_scratch) == [] and not (_scratch / "skips.jsonl").exists()
 
 
-async def test_advise_without_a_tier_policy_is_a_tiers_off_skip_and_still_passes(tmp_path, _scratch):
+async def test_advise_without_a_tier_policy_still_passes_with_reason_advise(tmp_path, _scratch):
     authority.set_mode("advise")
     up = tp.Upstream()
     app = tp._app(tmp_path, up, tiers=ps.TIERS_OFF)
     await tp._post(app, tp._req())
-    assert [r["reason"] for r in _skip_rows(_scratch)] == ["tiers_off"]
     (row,) = ledger.read_rows(tmp_path / "proxy_calls.jsonl")
-    assert row["tier_reason"] == "advise" and row["authority"] == "advise"
+    assert row["tier_reason"] == "advise" and row["authority"] == "advise" and "tier_reason_proposed" not in row
 
 
-async def test_a_failing_skips_writer_never_costs_the_call(tmp_path, moderate, monkeypatch):
-    from llm_router import skips
+# ── D-150: advise is shadow under the P2.7 precedence ────────────────────────
 
-    def boom(*a, **k):
-        raise OSError("disk full")
-    monkeypatch.setattr(skips.capped_log, "append", boom)
-    up = tt.Upstream()
-    r = await tt._post(tt._app(tmp_path, up), tt._first())
-    assert r.status_code == 200 and len(up.requests) == 1
+@pytest.mark.parametrize("name", ["opus", "sonnet", "haiku", "claude"])
+async def test_advise_with_a_claude_prefix_forwards_the_original_unstripped_bytes(tmp_path, monkeypatch, name):
+    post, seen, backend, policy = await pfx.door(tmp_path, monkeypatch)
+    authority.set_mode("advise")
+    body = pfx.request(f"{name}: explain this")
+    response, raw, row = await post(body)
+    assert response.status_code == 200 and not backend.calls
+    assert seen == [raw], "bytes_equal: the prefix is NOT stripped and no model is rewritten"
+    assert row["prefix"] == name and row["prefix_outcome"] == "advise:not_applied"
+    assert row["authority"] == "advise" and row["tier_reason"] == "advise"
+    assert row["tier_reason_proposed"] is not None and row["tier_switch"] is False
+    assert row["served_model"] == row["requested_model"] == body["model"]
+
+
+@pytest.mark.parametrize("name", ["local", "codex"])
+async def test_advise_with_a_local_or_codex_prefix_forwards_the_original_bytes(tmp_path, monkeypatch, name):
+    post, seen, backend, _ = await pfx.door(tmp_path, monkeypatch, local=True)
+    authority.set_mode("advise")
+    response, raw, row = await post(pfx.request(f"{name}: explain this"))
+    assert response.status_code == 200 and not backend.calls, "advise never serves locally"
+    assert seen == [raw]
+    assert row["prefix_outcome"] == "advise:not_applied" and row["tier_reason"] == "advise"
+
+
+async def test_route_with_an_opus_prefix_is_unchanged(tmp_path, monkeypatch):
+    post, seen, backend, policy = await pfx.door(tmp_path, monkeypatch)
+    response, raw, row = await post(pfx.request("opus: explain this"))
+    sent = json.loads(seen[0])
+    assert sent["messages"][0]["content"] == "explain this", "route still strips the prefix"
+    assert sent["model"] == policy.by_name["opus"].model
+    assert row["authority"] == "route" and row["prefix_outcome"] != "advise:not_applied"
+    assert row["tier_reason"] != "advise" and "tier_reason_proposed" not in row
+
+
+async def test_advise_never_updates_the_stickiness_but_route_does(tmp_path, moderate, monkeypatch):
+    from llm_router.proxy.cache_cost import Stickiness
+
+    records: list[str] = []
+    real = Stickiness.record
+
+    def spy(self, key, model, complexity, reason):
+        records.append(reason)
+        return real(self, key, model, complexity, reason)
+
+    monkeypatch.setattr(Stickiness, "record", spy)
+    authority.set_mode("advise")
+    await _two_calls(tmp_path)
+    assert records == [], "a proposal that is never applied must not pin later turns"
+    authority.set_mode("route")
+    d = tmp_path / "route"
+    d.mkdir()
+    await _two_calls(d)
+    assert records, "route records its decisions as before"

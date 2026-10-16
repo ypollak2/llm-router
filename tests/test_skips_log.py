@@ -90,3 +90,19 @@ def test_concurrent_writers_do_not_interleave(_scratch):
 def test_closed_sets():
     assert skips.REASONS == {"headless", "base_url_override", "tiers_off", "routing_off"}
     assert skips.DOORS == {"agent-route", "session-start", "proxy"}
+
+
+def test_the_shipped_cap_rotates_at_8_mb_not_before_and_not_much_after(_scratch):
+    """Behaviour of the real MAX_BYTES: ~2 MB of rows leaves one generation; past 8 MB it rotates.
+    (A cap raised to 80 MB would never rotate here.)"""
+    big_sid = "s" * 4000
+    row_bytes = len(json.dumps({"ts": "2026-10-20T00:00:00Z", "session_id": big_sid, "door": "proxy",
+                                "reason": "routing_off"}, separators=(",", ":"))) + 1
+    for _ in range(int(2 * 1024 * 1024 // row_bytes)):
+        skips.record("proxy", "routing_off", big_sid)
+    assert not (_scratch / "skips.jsonl.1").exists(), "2 MB is under the cap"
+    for _ in range(int(7 * 1024 * 1024 // row_bytes)):
+        skips.record("proxy", "routing_off", big_sid)
+    assert (_scratch / "skips.jsonl.1").exists(), "9 MB written: the log has rotated"
+    assert (_scratch / "skips.jsonl").stat().st_size < 8 * 1024 * 1024 + 2 * row_bytes
+    assert skips.MAX_BYTES == 8 * 1024 * 1024

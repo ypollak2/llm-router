@@ -22,6 +22,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import coverage_check as cc  # noqa: E402
 
+SWITCH = "2026-10-19T12:00:00Z"
 SINCE = "2026-10-20T00:00:00Z"
 UNTIL = "2026-10-21T00:00:00Z"
 T0 = datetime(2026, 10, 20, 6, 0, 0, tzinfo=timezone.utc)
@@ -85,10 +86,15 @@ class World:
         if self.failopen_rows:
             (self.state / "fail_open.jsonl").write_text("".join(json.dumps(r) + "\n" for r in self.failopen_rows))
 
-    def argv(self, *extra: str, since: str = SINCE, until: str = UNTIL) -> list[str]:
+    def argv(self, *extra: str, since: str = SINCE, until: str = UNTIL, switch: bool = True) -> list[str]:
+        switch_args: list[str] = []
+        if switch:
+            switch_file = self.root / "default-switch.json"
+            switch_file.write_text(json.dumps({"ts": SWITCH}))
+            switch_args = ["--switch-file", str(switch_file)]
         return ["--since", since, "--until", until, "--projects-dir", str(self.projects),
                 "--ledger", str(self.state / "proxy_calls.jsonl"), "--skips", str(self.state / "skips.jsonl"),
-                "--failopen", str(self.state / "fail_open.jsonl"), *extra]
+                "--failopen", str(self.state / "fail_open.jsonl"), *switch_args, *extra]
 
     def run(self, capsys, *extra: str, **kw):
         self.flush()
@@ -127,13 +133,14 @@ def test_exact_class_counts_on_three_sessions(w, tmp_path, capsys):
     w.row(m, "s1", decision="served")
     m = w.call("s1", offset_s=30)
     w.row(m, "s1")                       # no_decision
-    # s2: sidechain passed, call explained by a proxy skip within 120 s, one unexplained
+    # s2: sidechain passed; a call BEFORE the session-level skip (unexplained); two calls after it
     m = w.call("s2", offset_s=100, sidechain=True)
     w.row(m, "s2", tier_reason="policy")
+    w.call("s2", offset_s=10)
     w.call("s2", offset_s=3000)
-    w.call("s2", offset_s=20000)                                         # far from the skip: unexplained
-    w.skip_rows.append({"ts": iso(T0 + timedelta(seconds=3060)), "session_id": "s2", "door": "proxy",
-                        "reason": "routing_off"})
+    w.call("s2", offset_s=20000)
+    w.skip_rows.append({"ts": iso(T0 + timedelta(seconds=2950)), "session_id": "s2", "door": "agent-route",
+                        "reason": "headless"})
     # s3: headless; one call near a proxy_down fail-open row, one far from everything
     w.call("s3", offset_s=6000, entrypoint="sdk-cli")
     w.failopen_rows.append({"c": "proxy_down", "ts": (T0 + timedelta(seconds=6050)).timestamp()})
@@ -141,13 +148,13 @@ def test_exact_class_counts_on_three_sessions(w, tmp_path, capsys):
     # an orphan: a ledger row in the window whose message is in no transcript
     w.ledger_rows.append({"ts": T0.timestamp() + 5, "msg_id": "msg_orphan", "session_id": "s1", "reason": "x"})
     rc, res, cap = w.result(tmp_path, capsys)
-    assert res["classes"] == {"passed": 4, "no_decision": 1, "skip_explained": 1, "failopen_explained": 1,
+    assert res["classes"] == {"passed": 4, "no_decision": 1, "skip_explained": 2, "failopen_explained": 1,
                               "unexplained": 2, "no_decision_explained": 0}
-    assert res["n"] == 9 and res["passed"] == 4 and res["coverage"] == round(4 / 9, 4)
-    assert res["wilson95"] == cc.wilson(4, 9)
+    assert res["n"] == 10 and res["passed"] == 4 and res["coverage"] == 0.4
+    assert res["wilson95"] == cc.wilson(4, 10)
     assert res["orphan_ledger_rows"] == 1
-    assert res["strata"]["headless"]["n"] == 2 and res["strata"]["interactive"]["n"] == 7
-    assert res["strata"]["sidechain"]["n"] == 1 and res["strata"]["main"]["n"] == 8
+    assert res["strata"]["headless"]["n"] == 2 and res["strata"]["interactive"]["n"] == 8
+    assert res["strata"]["sidechain"]["n"] == 1 and res["strata"]["main"]["n"] == 9
     assert res["unexplained_breakdown"] == {"interactive/main": 2, "headless/main": 1}  # no_decision + 2 unexplained
     assert res["verdict"] == "NOT INFORMATIVE" and rc == 1
     assert res["n_sessions"] == 3
@@ -202,8 +209,8 @@ def test_a_no_decision_call_needs_an_explanation_too(w, tmp_path, capsys):
     w.row(m, "sess1")  # row exists, nothing decided
     rc, res, _ = w.result(tmp_path, capsys, "--cap", "0")
     assert res["classes"]["no_decision"] == 1 and res["clauses"]["B"] is False and rc == 1
-    w.skip_rows.append({"ts": iso(T0 + timedelta(seconds=700)), "session_id": "sess1", "door": "proxy",
-                        "reason": "tiers_off"})
+    w.skip_rows.append({"ts": iso(T0 + timedelta(seconds=600)), "session_id": "sess1", "door": "agent-route",
+                        "reason": "headless"})
     rc, res, _ = w.result(tmp_path, capsys, "--cap", "0")
     assert res["classes"]["no_decision"] == 1 and res["classes"]["no_decision_explained"] == 1
     assert res["clauses"]["B"] is True and rc == 0
@@ -351,10 +358,21 @@ def test_a_session_level_skip_explains_every_later_call_of_its_session_only(w, t
     assert res["skips"]["reasons"] == {"base_url_override": 1}
 
 
-def test_a_call_level_skip_outside_120_seconds_explains_nothing(w, tmp_path, capsys):
+@pytest.mark.parametrize("reason", ["tiers_off", "routing_off"])
+def test_a_proxy_door_skip_row_explains_nothing_even_at_the_same_instant(w, tmp_path, capsys, reason):
+    """D-150: a per-call proxy skip row would mark any call of its session within +-120 s as
+    explained and hide a proxy BYPASS. Only session-level skips and fail_open rows explain."""
     w.call("s", offset_s=0)
-    w.skip_rows.append({"ts": iso(T0 + timedelta(seconds=121)), "session_id": "s", "door": "proxy",
-                        "reason": "tiers_off"})
+    w.skip_rows.append({"ts": iso(T0), "session_id": "s", "door": "proxy", "reason": reason})
+    _, res, _ = w.result(tmp_path, capsys)
+    assert res["classes"]["skip_explained"] == 0 and res["classes"]["unexplained"] == 1
+    assert res["skips"]["invalid"] == 0, "the proxy door stays in the closed set (structure only)"
+
+
+def test_a_session_level_skip_does_not_explain_earlier_calls(w, tmp_path, capsys):
+    w.call("s", offset_s=0)
+    w.skip_rows.append({"ts": iso(T0 + timedelta(seconds=5)), "session_id": "s", "door": "agent-route",
+                        "reason": "headless"})
     _, res, _ = w.result(tmp_path, capsys)
     assert res["classes"]["skip_explained"] == 0 and res["classes"]["unexplained"] == 1
 
@@ -379,14 +397,16 @@ def test_exclusion_file_kind_rule_synthetic_window_and_prior_sessions(w, tmp_pat
     w.call("sess0", offset_s=1, synthetic=True)
     w.passed("early", ts=T0 - timedelta(days=1))          # before the window
     w.passed("late", ts=T0 + timedelta(days=2))           # after the window
-    w.passed("spans", ts=T0 - timedelta(hours=7))
-    w.passed("spans", offset_s=60)  # started before the window
+    w.passed("spans", ts=datetime(2026, 10, 19, 10, 0, tzinfo=timezone.utc))
+    w.passed("spans", offset_s=60)  # started before the switch: its environment was read before it
+    w.passed("between", ts=datetime(2026, 10, 19, 13, 0, tzinfo=timezone.utc))
+    w.passed("between", offset_s=60)  # started after the switch, before --since: counts
     excl = tmp_path / "exclude.txt"
     excl.write_text("# executors\nlisted\n")
     rc, res, _ = w.result(tmp_path, capsys, "--exclude-sessions", str(excl))
-    assert res["n"] == 241, "6 x 40 + the headless session's one call"
+    assert res["n"] == 242, "6 x 40 + the headless session's call + the session that began after the switch"
     assert res["excluded"]["sessions_listed"] == 1 and res["excluded"]["sessions_by_kind"] == 1
-    assert res["excluded"]["sessions_started_before_window"] == 1
+    assert res["excluded"]["sessions_started_before_switch"] == 1
     assert res["excluded"]["synthetic_entries"] == 1
     assert res["strata"]["headless"]["n"] == 1, "a headless session is a stratum, not an exclusion"
     rc, res2, _ = w.result(tmp_path, capsys, "--exclude-sessions", str(excl), "--all-kinds")
@@ -502,3 +522,91 @@ def test_output_names_itself_decision_point_coverage(w, capsys):
     big(w)
     _, cap = w.run(capsys)
     assert "decision-point coverage, not routing coverage" in cap.out
+
+
+# ── D-150 repairs ────────────────────────────────────────────────────────────
+
+def test_without_a_switch_file_the_run_is_not_informative(w, tmp_path, capsys):
+    big(w)
+    w.flush()
+    out = tmp_path / "r.json"
+    rc = cc.run(w.argv("--json", str(out), switch=False))
+    res = json.loads(out.read_text())
+    assert rc == 1 and res["verdict"] == "NOT INFORMATIVE" and "switch_unknown" in res["not_informative_reasons"]
+    assert res["switch"] == {"known": False, "ts": None}
+    assert res["coverage"] == 1.0, "the numbers are still computed and printed"
+
+
+def test_unbuilt_prereg_items_are_listed_in_every_result(w, tmp_path, capsys):
+    big(w)
+    rc, res, cap = w.result(tmp_path, capsys)
+    assert res["clauses"]["not_evaluated"] == ["D", "E", "F", "prereg_sha_check", "allowed_roots_refusal",
+                                                "supplement_sessions"]
+    assert "prereg_sha_check" in cap.out and res["switch"] == {"known": True, "ts": SWITCH}
+
+
+def test_routed_share_beside_coverage_all_routed(w, tmp_path, capsys):
+    big(w)  # tier_reason "policy" on every row
+    rc, res, cap = w.result(tmp_path, capsys)
+    rs = res["routed_share"]
+    assert (rs["passed"], rs["routed"], rs["routed_share"]) == (240, 240, 1.0)
+    assert rs["not_evidence_for_RRTE2"] is False and rc == 0
+    assert "routed share: 100.0% of 240 passed" in cap.out and "NOT EVIDENCE" not in cap.out
+
+
+def test_a_window_of_routing_off_rows_passes_coverage_but_is_not_evidence_for_rrte2(w, tmp_path, capsys):
+    for s in range(6):
+        for i in range(40):
+            m = w.call(f"sess{s}", offset_s=i)
+            w.row(m, f"sess{s}", reason="routing_off")
+    rc, res, cap = w.result(tmp_path, capsys)
+    rs = res["routed_share"]
+    assert res["coverage"] == 1.0 and rc == 0, "decision-point coverage counts a recorded reason"
+    assert (rs["off"], rs["routed"], rs["off_share"]) == (240, 0, 1.0)
+    assert rs["not_evidence_for_RRTE2"] is True and "routing_off/tiers_off" in rs["not_evidence_reason"]
+    assert "NOT EVIDENCE FOR R-RTE-2" in cap.out
+
+
+def test_routed_share_kinds_and_the_90_percent_line(w, tmp_path, capsys):
+    rows = ([dict(decision="served")] * 2 + [dict(tier_reason="policy")] * 3 + [dict(tier_reason="advise")] * 2
+            + [dict(reason="routing_off")] * 2 + [dict(reason="tiers_off")] + [dict(reason="not_eligible")] * 2)
+    for i, fields in enumerate(rows):
+        m = w.call("s", offset_s=i)
+        w.row(m, "s", **fields)
+    _, res, _ = w.result(tmp_path, capsys, "--cap", "0")
+    rs = res["routed_share"]
+    assert (rs["routed"], rs["advise"], rs["off"], rs["other_reason"]) == (5, 2, 3, 2)
+    assert rs["routed_share"] == round(5 / 12, 4) and rs["not_evidence_for_RRTE2"] is False
+    for i in range(60):
+        m = w.call("s", offset_s=100 + i)
+        w.row(m, "s", reason="routing_off")
+    _, res, _ = w.result(tmp_path, capsys, "--cap", "0")
+    assert res["routed_share"]["off_share"] == round(63 / 72, 4) and res["routed_share"]["not_evidence_for_RRTE2"] is False
+    for i in range(60):
+        m = w.call("s", offset_s=200 + i)
+        w.row(m, "s", reason="routing_off")
+    _, res, _ = w.result(tmp_path, capsys, "--cap", "0")
+    assert res["routed_share"]["off_share"] >= 0.9 and res["routed_share"]["not_evidence_for_RRTE2"] is True
+
+
+def test_a_window_of_advise_rows_is_not_evidence_either(w, tmp_path, capsys):
+    for s in range(6):
+        for i in range(40):
+            m = w.call(f"sess{s}", offset_s=i)
+            w.row(m, f"sess{s}", tier_reason="advise", authority="advise")
+    _, res, _ = w.result(tmp_path, capsys)
+    assert res["routed_share"]["advise"] == 240 and res["routed_share"]["not_evidence_for_RRTE2"] is True
+
+
+def test_the_uncapped_largest_session_rule_alone_makes_the_run_not_informative(w, tmp_path, capsys):
+    # capped shares are 40/240; uncapped the whale holds 400/600 = 67%
+    for i in range(400):
+        w.passed("whale", offset_s=i)
+    for s in range(5):
+        for i in range(40):
+            w.passed(f"small{s}", offset_s=i)
+    rc, res, _ = w.result(tmp_path, capsys)
+    assert res["largest_session_share"] == round(40 / 240, 4)
+    assert res["uncapped"]["largest_session_share"] == round(400 / 600, 4)
+    assert (rc, res["verdict"]) == (1, "NOT INFORMATIVE")
+    assert "largest_session_share_above_0.60" in res["not_informative_reasons"]
