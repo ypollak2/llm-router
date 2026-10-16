@@ -222,6 +222,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PROXY_LOCAL_SHADOW": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_TIERS": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_TIER_POLICY": ("llm_router", "proxy/server.py", 1),
+    # P2.2-A: routing authority, route (default) | advise; authority.py, per request.
+    "LLM_ROUTER_AUTHORITY": ("llm_router", "authority.py", 1),
     # P0.11 (PLAN v16, D-20): the proxy's Haiku guard inputs (proxy/haiku_guard.py).
     "LLM_ROUTER_HAIKU_GUARD_KINDS": ("llm_router", "proxy/haiku_guard.py", 1),
     "LLM_ROUTER_HAIKU_GUARD_AUDIT_DIR": ("llm_router", "proxy/haiku_guard.py", 1),
