@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 32
+# llm_router-hook-version: 33
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -2145,8 +2145,8 @@ def _condense(summary: str) -> str:
     Reports today's savings, lifetime savings, and remaining quota — the three
     numbers worth seeing every turn.
 
-    ROUTED COUNT AND QUOTA are still regex-extracted from the rendered box —
-    GH#53's "routed means EXECUTED" rule lives in that regex, unchanged.
+    EXECUTED COUNT AND QUOTA are regex-extracted from the rendered box —
+    GH#53's count comes from the executed-routes header (usage.db routing_decisions).
     MONEY IS NOT, as of 2026-09-27: it now comes from
     `dashboard_data.summary()`, the one canonical figure `llm-router status`,
     `savings-report`, `gain`, and the statusline all read (PR #173,
@@ -2182,15 +2182,10 @@ def _condense(summary: str) -> str:
         m = re.search(label + r"[^\n%]*?(\d{1,3})%", plain, re.I)
         return int(m.group(1)) if m else None
 
-    # GH#53: "routed" means EXECUTED, so this may only match counts that come
-    # from the routing_decisions store. The old fallback matched a bare
-    # "N calls", which the classifier-log line could supply the moment its
-    # wording changed — relabelling hints as executions in a compact badge
-    # where the reader has no figures to sanity-check against. "classified" is
-    # excluded explicitly so the two can never collapse into one number.
-    routes = re.search(r"(\d[\d,]*)\s+decisions?\b", plain, re.I) or \
-             re.search(r"(\d[\d,]*)\s+routes?\b", plain, re.I) or \
-             re.search(r"(\d[\d,]*)\s+(?!classified)calls?\b", plain, re.I)
+    # GH#53: report the executed count or no-data header from usage.db,
+    # never the classifier log's "hints today: N classified" line.
+    routes = re.search(r"(\d[\d,]*)\s+executed\b", plain, re.I)
+    executed_header = bool(routes or re.search(r"ROUTING\s+24h\s+no execution data", plain, re.I))
 
     # CONSUMED, matching the status line. This reported REMAINING for one
     # revision, which was correct arithmetic and a bad decision: the status line
@@ -2202,11 +2197,12 @@ def _condense(summary: str) -> str:
 
     bits: list[str] = []
     if routes:
-        # Sourced from the decisions/routes count above, never from "classified".
-        bits.append(f"{routes.group(1)} routed")
+        bits.append(f"{routes.group(1)} executed (24h)")
+    elif executed_header:
+        bits.append("no execution data (24h)")
 
     # Money: THE canonical `dashboard_data.summary()`, never regex over the
-    # rendered box (see docstring). GATED on `routes or quota` — the same
+    # rendered box (see docstring). GATED on `executed_header or quota` — the same
     # signal that used to come from finding money text IN the box — so the
     # "nothing happened this turn" case (the box is the bare "No session
     # activity" message, matched by neither) still returns "" instead of
@@ -2215,7 +2211,7 @@ def _condense(summary: str) -> str:
     # to suppress. Fail open: a broken DB or import must not blank out the
     # routed/quota bits that still work, so this is wrapped and runs without
     # disturbing them.
-    if routes or used_5h is not None or used_wk is not None:
+    if executed_header or used_5h is not None or used_wk is not None:
         try:
             from llm_router import dashboard_data as _dd
 
@@ -2662,6 +2658,15 @@ def main() -> None:
                 {"method": d["method"], "count": d["hits"]}
                 for d in report_data.get("routing_logic", [])
             ]
+            dashboard_executed = None
+            try:
+                from llm_router.routing_report import executed_routes
+
+                dashboard_executed = executed_routes(24.0)
+            except Exception as _exc:  # noqa: BLE001 — reporting must never break Stop
+                from llm_router import failopen
+
+                failopen.record("CHZ-FO-STOP-EXECUTED-ROUTES", _exc)
 
             dashboard_savings = {}
             for label, calls, total_tokens, _, saved_usd in cumulative:
@@ -2818,6 +2823,7 @@ def main() -> None:
             dashboard.print_dashboard(
                 timestamp=f"Session · {datetime.now(timezone.utc).isoformat()}",
                 decisions=dashboard_decisions,
+                executed_routes=dashboard_executed,
                 savings=dashboard_savings,
                 daily_costs=daily_costs if daily_costs else None,
                 total_saved=total_saved,

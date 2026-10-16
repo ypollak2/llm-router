@@ -4289,23 +4289,38 @@ def _bump_session_prompt_count(session_id: str) -> int:
 
 
 def _build_mini_summary() -> str | None:
-    """Compose a compact 4-line session-summary widget for additionalContext.
+    """Compose an execution summary with optional classifier hints.
 
-    Reads recent routing decisions via ``LineageStore.recent()`` (which
+    Reads recent classified prompts via ``LineageStore.recent()`` (which
     includes the legacy-fallback adapter from PR #11), computes a tiny
-    set of stats, and returns a markdown-formatted block. Returns None
-    if there's nothing to show — caller skips injection in that case.
+    set of stats, and returns a markdown-formatted block. Missing
+    execution data is labelled explicitly rather than hiding the banner.
 
     Format mirrors the full ``llm_router summary`` dashboard at a much
     smaller scale so users get the same shape of information every N
     prompts without the full table-rendering footprint.
     """
     try:
+        from llm_router.routing_report import executed_routes, format_executed_routes
+
+        execution_line = f"{format_executed_routes(executed_routes(24.0))} (executed, usage.db)"
+    except Exception as _exc:
+        from llm_router import failopen as _fo
+
+        _fo.record("CHZ-FO-HOOK-EXECUTED-ROUTES", _exc)
+        execution_line = "routes 24h: no execution data (usage.db missing or unreadable)"
+
+    banner = (
+        "📊 llm_router session check (every 10 prompts):\n"
+        f"   {execution_line}\n"
+    )
+    footer = "   run `llm-router summary` for the full dashboard."
+    try:
         from llm_router.lineage import LineageStore
         _LIMIT = 200
         rows = LineageStore().recent(limit=_LIMIT)
         if not rows:
-            return None
+            return banner + footer
         # audit/28: `n = len(rows)` reported the QUERY LIMIT as a count. Once
         # the store held >=200 rows this line read "routes: 200" forever —
         # measured at 9,015 rows while the banner said 200. A number that is
@@ -4339,15 +4354,16 @@ def _build_mini_summary() -> str | None:
             _accept = ""
         _scope = f"last {n}" if _capped else f"{n}"
         return (
-            "📊 llm_router session check (every 10 prompts):\n"
-            f"   routes: {_scope}  ·  top tier: {top_tier} ({top_tier_n})  ·  "
+            banner
+            + f"   hints ({_scope} classified prompts, not executed): "
+            f"top tier: {top_tier} ({top_tier_n})  ·  "
             f"top task: {top_task} ({top_task_n}){_accept}\n"
-            "   run `llm-router summary` for the full dashboard."
+            + footer
         )
     except Exception as _exc:
         from llm_router import failopen as _fo
         _fo.record("CHZ-FO-HOOK-LINEAGE-RECENT", _exc)
-        return None
+        return banner + footer
 
 
 def _debug_log(msg: str) -> None:

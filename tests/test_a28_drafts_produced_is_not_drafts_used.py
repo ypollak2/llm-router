@@ -158,7 +158,7 @@ def test_the_banner_prints_an_exact_count_below_the_limit(hook, monkeypatch) -> 
 
     monkeypatch.setattr(lineage, "LineageStore", _Store)
     out = hook._build_mini_summary()
-    assert "routes: 7" in out and "last" not in out
+    assert "hints (7 classified prompts, not executed)" in out and "last" not in out
 
 
 def test_the_banner_shows_drafts_used_over_offered(hook, monkeypatch) -> None:

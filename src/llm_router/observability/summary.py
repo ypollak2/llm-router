@@ -27,6 +27,7 @@ from pathlib import Path
 
 from llm_router.lineage import Inversion, LineageStore, Tier
 from llm_router.agents import SessionStore
+from llm_router.routing_report import executed_routes, format_executed_routes
 from llm_router.savings import (
     CanonicalSavings,
     is_verified_saving,
@@ -130,6 +131,8 @@ class SessionSummaryData:
     lineage_verified_count: int = 0
     lineage_unverified_count: int = 0
     lineage_unmeasured_count: int = 0
+    executed: dict | None = None
+    executed_window_hours: float = 24.0
 
     @property
     def health(self) -> str:
@@ -343,6 +346,8 @@ def collect(
         rows = [r for r in rows if r["timestamp"] >= cutoff]
 
     data = SessionSummaryData()
+    data.executed_window_hours = since_seconds / 3600 if since_seconds else 24.0
+    data.executed = executed_routes(data.executed_window_hours)
     if not rows:
         return data
 
@@ -649,7 +654,9 @@ def render(data: SessionSummaryData, *, console=None) -> None:
         (_fmt_cost(data.baseline_cost_usd), "dim"),
     )
     decisions_line = Text.assemble(
-        (f"{data.total_decisions} routing decisions", "bold"),
+        (format_executed_routes(data.executed, data.executed_window_hours), "bold"),
+        ("  ·  ", "dim"),
+        (f"{data.total_decisions} classified (hints)", "bold"),
         ("  ·  ", "dim"),
         (_fmt_duration(data.duration_seconds), "dim"),
         ("  ·  ", "dim"),
@@ -940,7 +947,8 @@ def render_markdown(data: SessionSummaryData) -> str:
         f"n={data.total_decisions}):** "
         f"**{_fmt_cost(data.savings_usd)} ({data.savings_pct * 100:.0f}%)**"
     )
-    out.append(f"- **Routing decisions:** {data.total_decisions}")
+    out.append(f"- **Executed routes:** {format_executed_routes(data.executed, data.executed_window_hours)}")
+    out.append(f"- **Classified prompts (hints):** {data.total_decisions}")
     out.append(f"- **Session duration:** {_fmt_duration(data.duration_seconds)}")
     out.append(
         f"- **Avg latency:** "
@@ -1066,10 +1074,11 @@ def cli_summary(
                                      force_terminal=True, color_system="auto")
                     if data.total_decisions == 0:
                         sub.print(
-                            f"\n[dim]No routing decisions recorded in the last "
+                            f"\n[dim]No classified prompts recorded in the last "
                             f"{since_hours:.0f}h. Waiting…  "
                             f"(refresh every {watch_interval:.0f}s, "
                             f"Ctrl+C to exit)[/]\n"
+                            f"{format_executed_routes(data.executed, since_hours)}\n"
                         )
                     else:
                         render(data, console=sub)
@@ -1082,9 +1091,10 @@ def cli_summary(
     data = collect(since_seconds=since_hours * 3600, limit=limit)
     if data.total_decisions == 0:
         print(
-            f"{_LLM_ROUTER_WORDMARK}  ·  no routing decisions in the last "
+            f"{_LLM_ROUTER_WORDMARK}  ·  no classified prompts in the last "
             f"{since_hours:.0f}h.\nRoute a few prompts, then re-run "
-            "`llm-router summary`."
+            "`llm-router summary`.\n"
+            f"{format_executed_routes(data.executed, since_hours)}"
         )
         return 0
     render(data)

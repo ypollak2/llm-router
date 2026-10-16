@@ -9,6 +9,7 @@ Run:  python -m llm_router.routing_report   →  writes ~/.llm-router/routing_re
 """
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 from enum import Enum
@@ -17,6 +18,68 @@ from typing import Any, Iterable
 
 from llm_router import paths
 from llm_router.provider_classes import not_error_row_sql, real_decision_sql
+
+
+def executed_routes(
+    window_hours: float = 24.0, db_path=None, timeout_s: float = 0.25,
+) -> dict | None:
+    """Count served runtime decisions in a UTC window without creating a DB."""
+    con = None
+    try:
+        p = Path(db_path if db_path is not None else (
+            os.environ.get("LLM_ROUTER_DB_PATH") or paths.state_path("usage.db")
+        ))
+        if not p.is_file():
+            return None
+        con = sqlite3.connect(
+            f"{p.resolve().as_uri()}?mode=ro", uri=True, timeout=timeout_s,
+        )
+        cols = {r[1] for r in con.execute("PRAGMA table_info(routing_decisions)")}
+        provenance = "AND provenance = 'runtime'" if "provenance" in cols else ""
+        rows = con.execute(
+            "SELECT COALESCE(NULLIF(final_provider, ''), 'unknown'), COUNT(*) "
+            "FROM routing_decisions WHERE timestamp >= datetime('now', ?) "
+            f"{provenance} AND ({real_decision_sql(con)}) "
+            "GROUP BY COALESCE(NULLIF(final_provider, ''), 'unknown')",
+            (f"-{window_hours} hours",),
+        ).fetchall()
+        by_provider = {provider: int(n) for provider, n in rows}
+        return {
+            "window_hours": window_hours,
+            "total": sum(by_provider.values()),
+            "by_provider": by_provider,
+        }
+    except (sqlite3.Error, OSError):
+        return None
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except sqlite3.Error:
+                pass
+
+
+def executed_provider_rows(result: dict) -> list[tuple[str, int]]:
+    """Return provider labels and counts in execution-report order."""
+    counts = dict(result["by_provider"])
+    counts.setdefault("ollama", 0)
+    return [
+        ("local" if provider == "ollama" else provider, n)
+        for provider, n in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def format_executed_routes(result: dict | None, window_hours: float = 24.0) -> str:
+    """Label execution counts separately from classifier hints."""
+    hours = result["window_hours"] if result is not None else window_hours
+    prefix = f"routes {hours:g}h:"
+    if result is None:
+        return f"{prefix} no execution data (usage.db missing or unreadable)"
+    parts = [f"{prefix} {result['total']} executed"]
+    for label, n in executed_provider_rows(result):
+        parts.append(f"{label} {n}")
+    return " · ".join(parts)
+
 
 def _home():
     return paths.llm_router_home()

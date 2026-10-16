@@ -261,8 +261,11 @@ class SessionSummaryDashboard:
         routing_effectiveness_pct: float = 0.0,
         session_cost_ratio: float | None = None,
         session_calls_ratio: float | None = None,
+        executed_routes: dict | None = None,
     ) -> RenderableType:
-        """Single panel: routing decisions (left) + savings (right) + quota + models."""
+        """Single panel: execution + hints (left), savings + quota + models."""
+        from llm_router.routing_report import executed_provider_rows
+
         decisions = decisions or []
         savings = savings or {}
 
@@ -280,12 +283,31 @@ class SessionSummaryDashboard:
         policy_sym, policy_color = _POLICY_STYLES.get(
             routing_policy, ("⚙️", PALETTE.text_dim)
         )
+        execution_status = (
+            f"{executed_routes['total']} executed"
+            if executed_routes is not None else "no execution data"
+        )
         left_lines: list[RenderableType] = [
             Text.assemble(
-                (f"ROUTING  today  {total_hits} decisions", f"bold {PALETTE.accent}"),
+                (f"ROUTING  24h  {execution_status}",
+                 f"bold {PALETTE.accent}"),
             ),
-            Text(""),
         ]
+        if executed_routes is not None:
+            provider_rows = executed_provider_rows(executed_routes)
+            provider_width = max((len(name) for name, _ in provider_rows), default=0)
+            for name, count in provider_rows:
+                left_lines.append(Text.assemble(
+                    (f"    {name:<{provider_width}}", PALETTE.text_dim),
+                    (f"  {count}", PALETTE.text_primary),
+                ))
+        left_lines.extend([
+            Text(""),
+            Text(
+                f"  hints today: {total_hits} classified",
+                style=PALETTE.text_dim,
+            ),
+        ])
 
         max_name_len = max(
             (len(_METHOD_SHORT.get(d.get("method", ""), d.get("method", "")[:12]))
@@ -1028,6 +1050,7 @@ class SessionSummaryDashboard:
         p95_latency: dict[str, float] | None = None,
         daily_cache_trend: list[float] | None = None,
         daily_tokens_saved: list[int] | None = None,
+        executed_routes: dict | None = None,
     ) -> RenderableType:
         """Two-panel dashboard: main summary + 14-day activity + quota timeline."""
         try:
@@ -1039,6 +1062,7 @@ class SessionSummaryDashboard:
         main = self.render_main_panel(
             timestamp=timestamp,
             decisions=decisions,
+            executed_routes=executed_routes,
             savings=savings,
             claude_quota_pct=claude_quota_pct,
             claude_session_pct=claude_session_pct,

@@ -33,26 +33,27 @@ Two properties that are easy to get wrong and are asserted below:
 from __future__ import annotations
 
 import importlib.util
+import io
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from rich.console import Console
+
+from llm_router.ui.session_summary import SessionSummaryDashboard
 
 _HOOK = Path(__file__).resolve().parents[1] / "src" / "llm_router" / "hooks" / "session-end.py"
 
-# CAPTURED FROM REAL OUTPUT, not written by hand.
-# The previous fixture was invented from memory and had the label/money order
-# BACKWARDS ("$1.23 lifetime" instead of "lifetime $1.23"). Every test passed
-# against it while _condense matched nothing in production and printed a bare
-# "682 routed" every turn. A fixture that is a guess tests the guess.
-#
-# 2026-09-27: this box's OWN "lifetime $2299.39" / "today $159.74" text is no
-# longer where the money in the condensed line comes from — see
-# `test_money_comes_from_dashboard_data_not_the_box` below. It still supplies
-# the routed count and the quota bars, which `_condense` still regex-extracts.
-_BOXED = '│  ROUTING  today  44 decisions           SAVINGS  all sessions      │\n│    🔄 fallback      16   36%              lifetime $2299.39        │\n│    🔨 build-fast     7   16%              today    $159.74         │\n│     5h ━━──────────────  16%                                       │\n│     weekly ━━━━━━──────────  39%                                   │'
+# Captured from render_main_panel with executed_routes on this branch
+# (Console width=120, heuristic=28, fallback=16, codex=40, ollama=4,
+# savings today=159.74/lifetime=2299.39, Claude 5h=16%/weekly=39%).
+# Keep this literal captured, not hand-written: invented fixtures previously
+# passed while production parsing failed. Money comes from dashboard_data;
+# the box supplies the executed count and quota bars.
+_BOXED = '╭────────────────────────────────────────────────────────────────────╮\n│                                                                    │\n│  ROUTING  24h  44 executed              SAVINGS  all sessions      │\n│      codex  40                                                     │\n│      local  4                             lifetime $2299.39        │\n│                                           today    $159.74         │\n│    hints today: 44 classified                                      │\n│    ⚡ heuristic   28   64%                                         │\n│    🔄 fallback    16   36%                                         │\n│                                                                    │\n│    Zero-cost: ━━━━━━━───── 64%                                     │\n│                                                                    │\n│    Policy ⚖️ balanced                                              │\n│                                                                    │\n│    QUOTA  Claude Subscription  live                                │\n│     5h ━━──────────────  16%                                       │\n│     weekly ━━━━━━──────────  39%                                   │\n│                                                                    │\n╰────────────────────────────────────────────────────────────────────╯\n'
 
 _EMPTY = "  " + "═" * 40 + "\n  No session activity detected\n  " + "═" * 40
 
@@ -156,7 +157,7 @@ def test_condensed_reports_today_lifetime_and_quota(hook, fixture_home):
     lifetime = dashboard_data.summary("lifetime", db_path=fixture_home)
 
     line = hook._condense(_BOXED)
-    assert "44 routed" in line
+    assert "44 executed (24h)" in line
     assert f"today {today.compact()}" in line
     assert f"lifetime {lifetime.compact()}" in line
     assert "quota used" in line, "quota missing"
@@ -253,3 +254,23 @@ def test_money_comes_from_dashboard_data_not_the_box(hook, fixture_home):
     line = hook._condense(altered)
     assert "9.99" not in line and "1.11" not in line
     assert f"lifetime {lifetime.compact()}" in line
+
+
+@pytest.mark.parametrize("execution", [
+    {"window_hours": 24.0, "total": 4, "by_provider": {"codex": 4}},
+    None,
+])
+def test_condensed_live_panel_uses_only_executions(hook, fixture_home, execution):
+    console = Console(record=True, width=120, file=io.StringIO())
+    console.print(SessionSummaryDashboard(console=console).render_main_panel(
+        decisions=[{"method": "heuristic", "count": 101}],
+        executed_routes=execution,
+    ))
+    line = hook._condense(console.export_text())
+    if execution is None:
+        assert "no execution data (24h)" in line
+        assert not re.search(r"\d+\s+executed", line)
+        assert "routed" not in line
+    else:
+        assert "4 executed (24h)" in line
+    assert "101" not in line
