@@ -1,0 +1,1 @@
+CLS-v16 F11: tests pin the criterion-8 1-SE floor wiring (real and DEV-SYN legs), the kappa n<5 rule and the `--mode test` gate; `kappa.by_length_band` in `scripts/cls_eval.py` is now split per kind (`real` / `syn`) as PREREG-CLS-DEV section 3.4 reports them, `by_source` unchanged. No decision rule changed.
