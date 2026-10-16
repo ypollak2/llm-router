@@ -50,7 +50,7 @@ status: fixed in `fix/turn-first-population` (deploy: restart the proxy; rows wr
   the classifier, the D-31 arm or the classifier shadow (`ClaudeTierPolicy.decide_unclassified`, in
   `_decide`'s order: a `pinned_models` pin kept, an `opus:` pin served on Opus, a `/model` choice kept,
   else the sticky tier held when the body is accepted on it, else forwarded as sent;
-  `tier_detail: step_error`; it reads stickiness and does not write it, the request path's usage and
+  `tier_detail: step_error`; it reads stickiness and does not write it (since P2.7, an honoured prefix pin is recorded), the request path's usage and
   tier-retry hooks still may). Only these labels are guarded: other body-shape reads on the request path
   (`has_served_turn`, `session_id_of`) are as before;
   `kpi` G1 counts such rows as `step_error`, O3 counts them with the null-step rows, never as turns. Residual: a reminder
