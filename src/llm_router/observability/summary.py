@@ -132,6 +132,7 @@ class SessionSummaryData:
     lineage_unverified_count: int = 0
     lineage_unmeasured_count: int = 0
     executed: dict | None = None
+    executed_window_hours: float = 24.0
 
     @property
     def health(self) -> str:
@@ -345,7 +346,8 @@ def collect(
         rows = [r for r in rows if r["timestamp"] >= cutoff]
 
     data = SessionSummaryData()
-    data.executed = executed_routes(since_seconds / 3600 if since_seconds else 24.0)
+    data.executed_window_hours = since_seconds / 3600 if since_seconds else 24.0
+    data.executed = executed_routes(data.executed_window_hours)
     if not rows:
         return data
 
@@ -652,7 +654,7 @@ def render(data: SessionSummaryData, *, console=None) -> None:
         (_fmt_cost(data.baseline_cost_usd), "dim"),
     )
     decisions_line = Text.assemble(
-        (format_executed_routes(data.executed), "bold"),
+        (format_executed_routes(data.executed, data.executed_window_hours), "bold"),
         ("  ·  ", "dim"),
         (f"{data.total_decisions} classified (hints)", "bold"),
         ("  ·  ", "dim"),
@@ -945,7 +947,7 @@ def render_markdown(data: SessionSummaryData) -> str:
         f"n={data.total_decisions}):** "
         f"**{_fmt_cost(data.savings_usd)} ({data.savings_pct * 100:.0f}%)**"
     )
-    out.append(f"- **Executed routes:** {format_executed_routes(data.executed)}")
+    out.append(f"- **Executed routes:** {format_executed_routes(data.executed, data.executed_window_hours)}")
     out.append(f"- **Classified prompts (hints):** {data.total_decisions}")
     out.append(f"- **Session duration:** {_fmt_duration(data.duration_seconds)}")
     out.append(

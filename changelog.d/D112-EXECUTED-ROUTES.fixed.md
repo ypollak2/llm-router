@@ -1,1 +1,1 @@
-Report executed runtime routes from usage.db over an explicit 24-hour window in prompt banners, Stop dashboards, and summaries; label classifier counts as hints.
+Report executed runtime routes from usage.db over 24h in prompt banners and Stop dashboards; the condensed Stop line shows `N executed (24h)`. `llm-router summary` uses its `--since-hours` window (default 24h); `llm_model_usage` labels its counts as classifier hints, and `explain-dashboard` distinguishes both sources.

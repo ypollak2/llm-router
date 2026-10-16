@@ -2145,8 +2145,8 @@ def _condense(summary: str) -> str:
     Reports today's savings, lifetime savings, and remaining quota — the three
     numbers worth seeing every turn.
 
-    ROUTED COUNT AND QUOTA are still regex-extracted from the rendered box —
-    GH#53's "routed means EXECUTED" rule lives in that regex, unchanged.
+    EXECUTED COUNT AND QUOTA are regex-extracted from the rendered box —
+    GH#53's count comes from the executed-routes header (usage.db routing_decisions).
     MONEY IS NOT, as of 2026-09-27: it now comes from
     `dashboard_data.summary()`, the one canonical figure `llm-router status`,
     `savings-report`, `gain`, and the statusline all read (PR #173,
@@ -2182,15 +2182,9 @@ def _condense(summary: str) -> str:
         m = re.search(label + r"[^\n%]*?(\d{1,3})%", plain, re.I)
         return int(m.group(1)) if m else None
 
-    # GH#53: "routed" means EXECUTED, so this may only match counts that come
-    # from the routing_decisions store. The old fallback matched a bare
-    # "N calls", which the classifier-log line could supply the moment its
-    # wording changed — relabelling hints as executions in a compact badge
-    # where the reader has no figures to sanity-check against. "classified" is
-    # excluded explicitly so the two can never collapse into one number.
-    routes = re.search(r"(\d[\d,]*)\s+decisions?\b", plain, re.I) or \
-             re.search(r"(\d[\d,]*)\s+routes?\b", plain, re.I) or \
-             re.search(r"(\d[\d,]*)\s+(?!classified)calls?\b", plain, re.I)
+    # GH#53: count only the executed-routes header from usage.db routing_decisions,
+    # never the classifier log's "hints today: N classified" line.
+    routes = re.search(r"(\d[\d,]*)\s+executed\b", plain, re.I)
 
     # CONSUMED, matching the status line. This reported REMAINING for one
     # revision, which was correct arithmetic and a bad decision: the status line
@@ -2202,8 +2196,7 @@ def _condense(summary: str) -> str:
 
     bits: list[str] = []
     if routes:
-        # Sourced from the decisions/routes count above, never from "classified".
-        bits.append(f"{routes.group(1)} routed")
+        bits.append(f"{routes.group(1)} executed (24h)")
 
     # Money: THE canonical `dashboard_data.summary()`, never regex over the
     # rendered box (see docstring). GATED on `routes or quota` — the same

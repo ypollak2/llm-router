@@ -1537,10 +1537,10 @@ async def llm_quality_guard(days: int = 7) -> str:
 
 
 async def llm_model_usage(ctx: Context, hours: int = 24) -> str:
-    """Analyze which models are being selected in routing.
+    """Show classifier hints separately from executed runtime routes.
 
-    Shows usage statistics for the last N hours:
-    - Top models selected
+    Shows hint statistics and an executed-route count for the last N hours:
+    - Top models suggested (hints, not executions)
     - Task type distribution (code/query/analyze/etc)
     - Classification methods used (heuristic/ollama/api/fallback)
     - Individual model success rates with quality feedback

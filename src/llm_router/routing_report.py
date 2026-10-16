@@ -19,6 +19,7 @@ from typing import Any, Iterable
 from llm_router import paths
 from llm_router.provider_classes import not_error_row_sql, real_decision_sql
 
+
 def executed_routes(
     window_hours: float = 24.0, db_path=None, timeout_s: float = 0.25,
 ) -> dict | None:

@@ -239,7 +239,7 @@ def get_model_success_rate(model: str, hours: int = 24) -> dict:
 
 
 def display_tracking_summary(hours: int = 24) -> str:
-    """Format tracking data for display.
+    """Format classifier hints alongside separately measured executions.
     
     Args:
         hours: Look back this many hours
@@ -247,13 +247,19 @@ def display_tracking_summary(hours: int = 24) -> str:
     Returns:
         Formatted string with usage statistics
     """
-    output = f"\n📊 Model Usage Tracking (Last {hours}h)\n"
+    from llm_router.routing_report import executed_routes, format_executed_routes
+
+    output = (
+        f"\n📊 Classifier hints (Last {hours}h) — "
+        "prompts classified by the hook, not executed routes\n"
+    )
+    output += f"Executed: {format_executed_routes(executed_routes(hours), hours)}\n"
     output += "─" * 70 + "\n\n"
     
     # Model usage
     model_stats = get_model_usage_stats(hours)
     if model_stats:
-        output += "**Top Models Selected**\n"
+        output += "**Top Models Suggested (hints)**\n"
         for model, count in list(model_stats.items())[:10]:
             output += f"  {model:40} — {count:3d} times\n"
     
