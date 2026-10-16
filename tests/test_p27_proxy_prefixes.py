@@ -229,3 +229,21 @@ async def test_pin_sticks_for_the_rest_of_the_conversation(monkeypatch):
     ]
     d2 = await policy.decide(later, None, sticky)
     assert (d2.served_model, d2.reason) == (policy.by_name["opus"].model, pt.REASON_STICKY)
+
+
+async def test_pin_sticks_through_decide_unclassified(monkeypatch):
+    policy = pt.ClaudeTierPolicy.load()
+    # The client asks for Sonnet on every call; only the pin recorded by decide_unclassified can hold Opus.
+    monkeypatch.setattr(policy, "allow_upgrade", True)
+    sticky = Stickiness(policy.cold_gap_s)
+    first = request("opus: explain this")
+    first["model"] = policy.by_name["sonnet"].model
+    d1 = policy.decide_unclassified(first, None, sticky)
+    assert (d1.served_model, d1.reason) == (policy.by_name["opus"].model, pt.REASON_EXPLICIT_OPUS_PIN)
+    later = copy.deepcopy(first)
+    later["messages"] += [
+        {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+        {"role": "user", "content": [{"type": "text", "text": "thanks, and now the next part"}]},
+    ]
+    d2 = policy.decide_unclassified(later, None, sticky)
+    assert (d2.served_model, d2.reason, d2.detail) == (policy.by_name["opus"].model, pt.REASON_STICKY, pt.STEP_ERROR)
