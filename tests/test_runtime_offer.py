@@ -403,6 +403,10 @@ def test_grep_finds_only_allowlist_and_the_offer_module():
     for ln in lines:
         if ln.startswith("src/llm_router/runtime_offer.py:") or ln.startswith(allow):
             continue
+        # The local manifest directory name (amend2-errata1 / AMEND1-P17D check), as in m18_r3.py: a path,
+        # not an install offer.
+        if ln.startswith("scripts/p17d_synthetic.py:") and '/ "registry.ollama.ai"' in ln:
+            continue
         m = re.match(r"src/llm_router/router\.py:\d+:\s*#", ln)
         if m:
             continue

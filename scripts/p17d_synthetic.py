@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""P1.7-d synthetic, steps 2-6 (docs/prereg/PREREG-P17D-synthetic.md, FROZEN; harness design
+"""P1.7-d synthetic, steps 2-6 (docs/prereg/PREREG-P17D-synthetic.md and
+docs/prereg/PREREG-P17D-synthetic-AMEND1.md, FROZEN; harness design
 docs/prereg/P17D-synthetic-HARNESS-DESIGN.md). Built after the freeze; its commit is HARNESS_SHA.
 
     python3 scripts/p17d_synthetic.py select  [--run-dir DIR]
@@ -11,8 +12,8 @@ docs/prereg/P17D-synthetic-HARNESS-DESIGN.md). Built after the freeze; its commi
 Score reads the P1.7-c status from ~/.rsi/research/primary-plan/gates/v16/P1.json (D-111a).
 
 ``$RUN`` is ``--run-dir``, else ``$P17D_RUN_DIR``, else ``~/.rsi/research/primary-plan/v16/p17d`` (real home).
-Every command except ``status`` refuses unless ``check_prereg.check(PREREG)["match"]`` and
-``frozen_utc`` < now, and while ``use.log`` holds a ``terminal`` line. Stdout is one JSON object of counts
+Every command except ``status`` requires PREREG and AMEND1 to match their freeze records with
+``frozen_utc`` < now, and refuses while ``use.log`` holds a ``terminal`` line. Stdout is one JSON object of counts
 and ids; no prompt, context or judge reason is ever printed.
 
 Exit: 0 done, 1 terminal (use consumed, NOT INFORMATIVE), 2 refused, 3 paused / parked (resumable, nothing
@@ -50,6 +51,7 @@ PP = REAL_HOME / ".rsi" / "research" / "primary-plan"
 DEFAULT_RUN = PP / "v16" / "p17d"
 RUN_ENV = "P17D_RUN_DIR"
 PREREG = ROOT / "docs" / "prereg" / "PREREG-P17D-synthetic.md"
+AMEND1 = ROOT / "docs" / "prereg" / "PREREG-P17D-synthetic-AMEND1.md"
 ATTACH_SCRIPT = ROOT / "scripts" / "p17d_attach.py"
 MEASUREMENT = ROOT / "docs" / "measurements" / "p17d-synthetic.json"
 GT_SCRIPTS = PP / "v16" / "gt500" / "scripts"
@@ -99,6 +101,7 @@ SUPPLY_SHA256 = "12cd3e1eed7fc15658b4b44246d83422e2b61adc4ccb270dd9f5e729608fb0e
 SHADOWLAB_SHA256 = "0d2d2b58bde9cb8a5466782da866c218a244595d1485ef8d2563ac8c02fb4def"
 RUBRIC_MD5 = "1bcb3f441a0c9d056b3343a9d47c5565"
 SHADOW_EVAL_SHA256 = "e9b89943f33b68b3095c5d2ea57976147368e0e6f28490aea7e74a82e32b1c57"
+# AMEND1 section 2 supersedes NIMBLE_BLOB and NIMBLE_BLOB_SIZE as a check.
 NIMBLE_BLOB = "sha256-bbf1d6fc03bb0ed24d88f4c214ed7b5d1768aeb43d5cf433fb69eff0c8578013"
 NIMBLE_TIMEOUT_MS = 2000
 NIMBLE_KEEP_ALIVE = "10m"
@@ -130,6 +133,11 @@ JUDGE_MODEL = "opus"
 JUDGE_TIMEOUT_S = 900
 NIMBLE_MODEL = "nimble:9b"
 NIMBLE_BLOB_SIZE = 9527501312                                 # section 4 "size 9,527,501,312 B"
+NIMBLE_MANIFEST = (REAL_HOME / ".ollama" / "models" / "manifests" / "registry.ollama.ai"
+                   / "library" / "nimble" / "9b")
+NIMBLE_MANIFEST_SHA256 = "dfed4f707396966698374b7ffe21bd4586271b772551a02f0114e5c79fd24a21"
+NIMBLE_LIST_ID = "13ae0a506102"
+NIMBLE_DETAILS = ("safetensors", "mxfp8", "mlx")  # /api/show: format, quantization_level, runner
 OLLAMA_URL = "http://localhost:11434"                         # localhost only
 QUIET_FREE_MEM_MIN_PCT = 40.0                                 # amend5 section 6.2 as section 4 quotes it
 QUIET_LOAD1_MAX = 4.0                                         # "load1 under 4" (float, strict)
@@ -149,9 +157,20 @@ PASS, FAIL, NOT_INFORMATIVE = "PASS (synthetic, D-99)", "FAIL", "NOT INFORMATIVE
 HARNESS_RE = re.compile(r"^harness (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) sha=([0-9a-f]{7,40})$")
 
 
+AMEND1_DISCLOSURE = (
+    "AMEND1 (D-117): the nimble:9b artifact and its check follow "
+    "eval/PREREG-v2-amend2-errata1.md section 2 (manifest sha256 "
+    "dfed4f707396966698374b7ffe21bd4586271b772551a02f0114e5c79fd24a21, "
+    "ollama list id 13ae0a506102, /api/show safetensors/mxfp8/mlx), replacing the frozen prereg's "
+    "GGUF pin sha256-bbf1d6fc... that cannot exist under Ollama 0.40.0; the harness at 7e20664d "
+    "refused shadow at 2026-10-16T06:33Z before any row; select (run under 7e20664d) was not "
+    "re-run and is re-derived before the first shadow row; use.log keeps every harness line (append-only)."
+)
+
 DISCLOSURES = [
     "D-110: label opens ~/.llm-router/usage.json read-only, solely for the section 8 quota pause; "
-    "the harness opens no other ~/.llm-router path."
+    "the harness opens no other ~/.llm-router path.",
+    AMEND1_DISCLOSURE,
 ]
 
 
@@ -230,6 +249,7 @@ def repo_tree_clean() -> bool:
 class Cfg:
     run: Path
     prereg: Path = PREREG
+    amend1: Path = AMEND1
     attach_script: Path = ATTACH_SCRIPT
     measurement: Path = MEASUREMENT
     gt_scripts: Path = GT_SCRIPTS
@@ -360,14 +380,44 @@ def has_started(cfg: Cfg) -> bool:
     return any(x.startswith("started ") for x in use_lines(cfg))
 
 
+def harness_lines(cfg: Cfg) -> list[str]:
+    return [line for line in use_lines(cfg) if line.startswith("harness")]
+
+
+def governing_harness_line(cfg: Cfg) -> str | None:
+    governing = None
+    ended = False
+    for line in use_lines(cfg):
+        if line.startswith("harness"):
+            if ended or HARNESS_RE.fullmatch(line) is None:
+                return None
+            governing = line
+        else:
+            ended = True
+    return governing
+
+
+def first_shadow_ts(cfg: Cfg) -> float | None:
+    timestamps = [row["ts"] for row in json_rows(cfg.shadow)
+                  if isinstance(row.get("ts"), (int, float)) and not isinstance(row["ts"], bool)]
+    return min(timestamps) if timestamps else None
+
+
+def recorded_preflight(cfg: Cfg) -> dict | None:
+    try:
+        meta = json.loads(cfg.shadow_meta.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    entries = meta.get("preflight") if isinstance(meta, dict) else None
+    if isinstance(entries, list) and entries and isinstance(entries[0], dict):
+        return entries[0]
+    return None
+
+
 def harness_line_ok(cfg: Cfg) -> bool:
-    """The first use.log line is ``harness <UTC> sha=<HARNESS_SHA>`` and names the commit this file runs from."""
-    lines = use_lines(cfg)
-    m = HARNESS_RE.match(lines[0]) if lines else None
-    if not m:
-        return False
-    head = cfg.head_sha() or ""
-    return head.startswith(m.group(2))
+    """The governing use.log line names this commit (AMEND1 s3)."""
+    line = governing_harness_line(cfg)
+    return line is not None and (cfg.head_sha() or "").startswith(HARNESS_RE.fullmatch(line).group(2))
 
 
 def label_finished(cfg: Cfg) -> bool:
@@ -376,7 +426,17 @@ def label_finished(cfg: Cfg) -> bool:
 
 def check_code_identity(cfg: Cfg) -> None:
     if not harness_line_ok(cfg):
-        raise Refuse("refusing: use.log's first line is not `harness <UTC> sha=<HARNESS_SHA>` for this commit")
+        raise Refuse("refusing: use.log has no governing `harness <UTC> sha=<HARNESS_SHA>` line "
+                     "for this commit (AMEND1 s3)")
+    ts0 = first_shadow_ts(cfg)
+    if ts0 is not None:
+        for line in harness_lines(cfg):
+            match = HARNESS_RE.fullmatch(line)
+            if match and parse_utc(match.group(1)) > ts0:
+                raise Refuse("refusing: a harness line is dated after the first shadow row (AMEND1 s3)")
+    rec = recorded_preflight(cfg)
+    if rec and rec.get("harness_line") is not None and rec["harness_line"] != governing_harness_line(cfg):
+        raise Refuse("refusing: the governing harness line differs from the one shadow recorded (AMEND1 s3)")
     if not cfg.tree_clean():
         raise Refuse("refusing: uncommitted changes under scripts/ or src/ (git status --porcelain)")
 
@@ -384,8 +444,13 @@ def check_code_identity(cfg: Cfg) -> None:
 def terminal(cfg: Cfg, stage: str, reason: str) -> None:
     """Consume the use (section 10): the terminal use-log record and the NOT INFORMATIVE gate file."""
     append_line(cfg.use_log, f"terminal {utc(cfg.now())} {reason}")
+    try:
+        amend1_sha = check_prereg.check(cfg.amend1)["sha256"]
+    except (OSError, ValueError, IndexError):
+        amend1_sha = None
     write_json_private(cfg.result, {"label": LABEL, "verdict": NOT_INFORMATIVE, "stage": stage, "reason": reason,
-                                    "utc": utc(cfg.now()), "disclosures": DISCLOSURES})
+                                    "utc": utc(cfg.now()), "disclosures": DISCLOSURES,
+                                    "amend1_sha256": amend1_sha})
 
 
 def check_common(cfg: Cfg, *, policy: bool = False) -> dict:
@@ -398,6 +463,15 @@ def check_common(cfg: Cfg, *, policy: bool = False) -> dict:
         raise Refuse("refusing: the prereg sha256 differs from its freeze record")
     if not parse_utc(res["frozen_utc"]) < cfg.now():
         raise Refuse("refusing: frozen_utc is not in the past")
+    try:
+        amendment = check_prereg.check(cfg.amend1)
+    except (OSError, ValueError, IndexError) as exc:
+        raise Refuse(f"refusing: AMEND1 freeze record unreadable ({type(exc).__name__})") from None
+    if not amendment["match"]:
+        raise Refuse("refusing: AMEND1 sha256 differs from its freeze record")
+    if not parse_utc(amendment["frozen_utc"]) < cfg.now():
+        raise Refuse("refusing: AMEND1 frozen_utc is not in the past")
+    res["amend1"] = amendment
     if has_terminal(cfg):
         raise Refuse("refusing: use.log holds a terminal record")
     checks = [("attach_script", cfg.attach_script), ("items", cfg.items), ("attach_counts", cfg.attach_counts)]
@@ -623,18 +697,29 @@ def harness_env(cfg: Cfg):
                 os.environ[k] = v
 
 
-def ollama_modelfile() -> str:
+def nimble_manifest_sha256() -> str | None:
+    try:
+        return sha256_file(NIMBLE_MANIFEST)
+    except OSError:
+        return None
+
+
+def ollama_list_ids() -> list[str]:
     env = dict(os.environ)
     env["HOME"] = str(REAL_HOME)
-    p = subprocess.run(["ollama", "show", NIMBLE_MODEL, "--modelfile"], capture_output=True, text=True, timeout=60,
+    p = subprocess.run(["ollama", "list"], capture_output=True, text=True, timeout=60,
                        stdin=subprocess.DEVNULL, env=env)
     if p.returncode != 0:
-        raise Refuse("refusing: `ollama show` failed; the nimble digest cannot be checked")
-    return p.stdout
+        raise Refuse("refusing: `ollama list` failed; the nimble artifact cannot be checked")
+    return [ln.split()[1] for ln in p.stdout.splitlines() if ln.split()[:1] == [NIMBLE_MODEL]]
 
 
-def blob_size(path: str) -> int:
-    return os.stat(path).st_size
+def ollama_show_details() -> dict:
+    request = urllib.request.Request(f"{OLLAMA_URL}/api/show",
+                                     data=json.dumps({"model": NIMBLE_MODEL}).encode("utf-8"),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.loads(response.read()).get("details") or {}
 
 
 def free_mem_pct() -> float:
@@ -655,15 +740,30 @@ def ollama_ps() -> list[str]:
 
 
 def digest_check() -> dict:
-    """``ollama show nimble:9b --modelfile`` names blob NIMBLE_BLOB of NIMBLE_BLOB_SIZE bytes; else refuse."""
-    m = re.search(r"^FROM\s+(\S+)\s*$", ollama_modelfile(), re.M)
-    path = m.group(1) if m else ""
-    if os.path.basename(path) != NIMBLE_BLOB:
-        raise Refuse("refusing: nimble:9b blob digest differs from the pin (not a result)")
-    size = blob_size(path)
-    if size != NIMBLE_BLOB_SIZE:
-        raise Refuse(f"refusing: nimble:9b blob size {size} != {NIMBLE_BLOB_SIZE} (not a result)")
-    return {"blob": NIMBLE_BLOB, "size": size}
+    """Check the errata1 artifact identity adopted by AMEND1 section 2."""
+    msha = nimble_manifest_sha256()
+    ids = ollama_list_ids()
+    try:
+        det = ollama_show_details()
+    except (OSError, ValueError):
+        raise Refuse("refusing: `/api/show` failed; the nimble artifact cannot be checked (not a result)") from None
+    if msha != NIMBLE_MANIFEST_SHA256:
+        raise Refuse("refusing: nimble:9b manifest sha256 differs from AMEND1 (not a result)")
+    if ids != [NIMBLE_LIST_ID]:
+        raise Refuse("refusing: nimble:9b `ollama list` id differs from AMEND1 (not a result)")
+    fields = ("format", "quantization_level", "runner")
+    if tuple(det.get(key) for key in fields) != NIMBLE_DETAILS:
+        raise Refuse("refusing: nimble:9b /api/show details differ from AMEND1 (not a result)")
+    return {"manifest_sha256": msha, "list_id": NIMBLE_LIST_ID,
+            "details": dict(zip(fields, NIMBLE_DETAILS)), "method": "AMEND1 s2 (amend2-errata1 s2)"}
+
+
+def check_selection_stands(cfg: Cfg, items: dict, sel: dict) -> str:
+    again = select(list(items.values()))
+    if (any(again[key] != sel.get(key) for key in ("f_ids", "g_ids", "admitted", "n"))
+            or sel.get("ids") != again["f_ids"] + again["g_ids"]):
+        raise Refuse("refusing: selection.json differs from the re-derived selection (AMEND1 s4)")
+    return sha256_file(cfg.selection)
 
 
 def quiet_gate() -> dict:
@@ -820,7 +920,7 @@ def final_sources(cfg: Cfg, selected: list) -> dict:
 
 
 def cmd_shadow(cfg: Cfg) -> int:
-    check_common(cfg, policy=True)
+    res = check_common(cfg, policy=True)
     check_code_identity(cfg)
     sel = load_selection(cfg)
     if not sel.get("ok"):
@@ -828,12 +928,15 @@ def cmd_shadow(cfg: Cfg) -> int:
     if cfg.labels.exists():
         raise Refuse("refusing: labels.jsonl exists; no verdict may be made after a label")
     items = load_items(cfg)
+    sel_sha = check_selection_stands(cfg, items, sel)
     selected = [items[i] for i in sel["ids"]]
     policy = load_policy(cfg)
     try:
         meta = json.loads(cfg.shadow_meta.read_text(encoding="utf-8"))
     except FileNotFoundError:
         meta = {"label": LABEL, "attempts": [], "preflight": [], "done": False}
+    if meta["preflight"] and meta["preflight"][0].get("selection_sha256") not in (None, sel_sha):
+        raise Refuse("refusing: selection.json changed since the first shadow preflight (AMEND1 s4)")
     if meta.get("done"):
         raise Refuse("refusing: shadow is already done")
     digest = digest_check()
@@ -847,7 +950,8 @@ def cmd_shadow(cfg: Cfg) -> int:
         async def run() -> None:
             warm_ms = await warm_up(cfg)
             meta["preflight"].append({"utc": utc(cfg.now()), "digest": digest, "quiet_gate": quiet,
-                                      "warmup_ms": warm_ms})
+                                      "warmup_ms": warm_ms, "harness_line": governing_harness_line(cfg),
+                                      "selection_sha256": sel_sha, "amend1_sha256": res["amend1"]["sha256"]})
             save_meta(cfg, meta)
             await shadow_all(cfg, selected, policy, meta)
 
@@ -1449,6 +1553,9 @@ def measurement(result: dict, records: list, labels: dict, items_by_key: dict, s
     keep = ("verdict", "verdict_reason", "lead", "n_selected", "n_f", "n_g", "n", "n_labeled", "n_fallback",
             "errors", "arms", "boot_c_lambda2_clamp", "boot_under", "reference_arms")
     return {"label": LABEL, "disclosures": result["disclosures"], "p17c_gate": result.get("p17c_gate"),
+            "amend1_sha256": result.get("amend1_sha256"),
+            "amend1_frozen_utc": result.get("amend1_frozen_utc"),
+            "amendments": ["docs/prereg/PREREG-P17D-synthetic-AMEND1.md"],
             "what": "P1.7-d synthetic: nimble:9b vs rules_eff on replayed past prompts",
             "prereg": "docs/prereg/PREREG-P17D-synthetic.md", **{k: result[k] for k in keep}, "items": rows}
 
@@ -1496,7 +1603,7 @@ def before_freeze_count(records: list, frozen_utc: str) -> int:
 
 
 def cmd_score(cfg: Cfg) -> int:
-    check_common(cfg, policy=True)
+    res = check_common(cfg, policy=True)
     if has_started(cfg):
         raise Refuse("refusing: use.log already holds a started record; score is single-use")
     if not label_finished(cfg):
@@ -1505,7 +1612,10 @@ def cmd_score(cfg: Cfg) -> int:
     gate = read_p17c_gate(cfg.p1_gates)
     sel = load_selection(cfg)
     items = load_items(cfg)
-    res = check_prereg.check(cfg.prereg)
+    rec = recorded_preflight(cfg)
+    sel_sha = sha256_file(cfg.selection)
+    if rec is None or rec.get("selection_sha256") != sel_sha:
+        raise Refuse("refusing: selection.json sha256 differs from the shadow preflight record (AMEND1 s4)")
     try:
         labels_raw, shadow_raw = cfg.labels.read_bytes(), cfg.shadow.read_bytes()
     except FileNotFoundError:
@@ -1532,13 +1642,17 @@ def cmd_score(cfg: Cfg) -> int:
     if sel.get("g_ids") and gt is not None:
         kappa_fn = lambda a, b: gt.cohen_kappa(a, b)  # noqa: E731
         ge3 = load_ge3_tiers(cfg)
+    frozen_utc = max((res["frozen_utc"], res["amend1"]["frozen_utc"]), key=parse_utc)
     result = score(cfg, records, labels, dict(items_by_key), sel, p17c_passed=gate["passed"],
-                   pre_freeze_rows=before_freeze_count(records, res["frozen_utc"]), calibration_ok=calibration_ok,
+                   pre_freeze_rows=before_freeze_count(records, frozen_utc), calibration_ok=calibration_ok,
                    label_error_ids=label_errors, ge3_tiers=ge3, kappa_fn=kappa_fn,
                    pins_ok=pins_ok, pin_failures=pin_failures)
     total, _ = spent(cfg)
     result.update({"spend_usd": round(total, 4), "p17c_passed": gate["passed"], "utc": utc(cfg.now()),
                    "prereg_sha256": res["sha256"], "harness_sha": cfg.head_sha(),
+                   "amend1_sha256": res["amend1"]["sha256"],
+                   "amend1_frozen_utc": res["amend1"]["frozen_utc"],
+                   "harness_lines": harness_lines(cfg), "selection_sha256": sel_sha,
                    "p17c_gate": {k: gate[k] for k in ("path", "sha256", "verdict", "gap")},
                    "disclosures": DISCLOSURES + [p17c_disclosure(gate)]})
     write_json_private(cfg.result, result)
@@ -1570,7 +1684,8 @@ def cmd_status(cfg: Cfg) -> int:
           "shadow_done": meta.get("done") is True, "labels_lines": line_count(cfg.labels),
           "planted_lines": line_count(cfg.labels_planted), "judge_calls": len(calls),
           "spend_usd": round(spent(cfg)[0], 4),
-          "use_log": {"harness_line": bool(lines) and bool(HARNESS_RE.match(lines[0])),
+          "harness_lines": len(harness_lines(cfg)),
+          "use_log": {"harness_line": governing_harness_line(cfg) is not None,
                       "started": any(x.startswith("started ") for x in lines),
                       "terminal": any(x.startswith("terminal ") for x in lines)}})
     return EXIT_OK
