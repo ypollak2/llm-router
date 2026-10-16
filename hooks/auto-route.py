@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 60
+# llm_router-hook-version: 61
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 60"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 61"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -5122,6 +5122,35 @@ def main() -> None:
         # install / pre-deploy): env override, else the "smart" default.
         _resolved_enforce = os.environ.get("LLM_ROUTER_ENFORCE", "").strip().lower() or "smart"
 
+    # ── F6 (D-141 C): never name, or hold tools for, a door no provider can serve ──
+    # Live 2026-10-16: providers {openrouter, ollama, xai}, no research provider,
+    # yet every research prompt got `llm(task="research")` and a held Bash until a
+    # dummy llm(task="query") released it. llm_router.task_availability answers
+    # from the cached resource map + key names (no network, no config import):
+    # unservable -> the documented nearest servable task, or no directive at all.
+    # Unknown availability (no/corrupt/stale map) keeps today's directive. A user
+    # prefix (P2.7) wins, and zero-Claude keeps its own fail-closed path.
+    _unservable_quiet = False
+    if not _forced and not zero_claude:
+        try:
+            from llm_router import task_availability as _ta
+            _f6_task, _f6_reason = _ta.resolve(task_type)
+        except Exception as _exc:  # noqa: BLE001 -- fail open: today's directive
+            from llm_router import failopen as _fo
+            _fo.record("LR-FO-HOOK-F6-AVAILABILITY", _exc)
+            _f6_task, _f6_reason = task_type, "availability_unknown"
+        if _f6_task is None:
+            _debug_log(f"[INVOCATION {invocation_id:.3f}] F6 UNSERVABLE: "
+                       f"task={task_type} -> none reason={_f6_reason}")
+            method = f"{method}+unservable"
+            _unservable_quiet = True
+        elif _f6_task != task_type:
+            _debug_log(f"[INVOCATION {invocation_id:.3f}] F6 UNSERVABLE: "
+                       f"task={task_type} -> {_f6_task} reason={_f6_reason}")
+            method = f"{method}+unservable:{task_type}"
+            task_type = _f6_task
+            tool = tool_for_task(task_type)
+
     # Map the resolved mode onto this hook's display vocabulary (shadow|suggest|
     # hard), HONESTLY. "smart" hard-enforces Q&A tasks (query/research/generate/
     # analyze) but is soft for code — so its banner tone must match per task type,
@@ -5168,7 +5197,8 @@ def main() -> None:
         "LLM_ROUTER_QA_ROUTING", "off").strip().lower() in ("1", "on", "true", "yes")
     _qa_quiet = _qa_task and not _qa_routing_on and not _forced
     _conversational_quiet = _conversational_task and not _qa_routing_on and not _forced
-    if _qa_quiet or _conversational_quiet or _resolved_enforce in ("off", "shadow", "observe"):
+    if (_qa_quiet or _conversational_quiet or _unservable_quiet
+            or _resolved_enforce in ("off", "shadow", "observe")):
         _enforce_mode = "shadow"
     elif _resolved_enforce in ("advise", "advisory"):
         # Route everywhere, but NEVER block and NEVER nag. Distinct from "suggest":
@@ -6007,6 +6037,13 @@ def main() -> None:
                 f"no routing directive."
             )
             indicator = f"👁 {task_type}/{complexity} — answered directly"
+        elif _unservable_quiet:
+            # F6: names no tool, so nothing invites a call that cannot succeed.
+            directive = (
+                f"👁 OBSERVATION [no-provider]: {task_type}/{complexity} — no provider "
+                f"on this machine can serve this task; no routing directive."
+            )
+            indicator = f"👁 {task_type}/{complexity} — no provider, answered directly"
         else:
             directive = (
                 f"👁 OBSERVATION [{_enforce_mode}]: ✨ {task_type}/{complexity} ✨ "
@@ -6092,7 +6129,8 @@ def main() -> None:
     # blind draft was already suppressed (see DIRECT SKIP above). Tell the caller
     # WHY and what to do instead: answer from real context, or route WITH context
     # via llm_query(context=…) — never relay a context-free draft as an answer.
-    if not zero_claude and not _qa_quiet and not _conversational_quiet and _is_context_dependent(prompt):
+    if (not zero_claude and not _qa_quiet and not _conversational_quiet
+            and not _unservable_quiet and _is_context_dependent(prompt)):
         # ENF-FIX-2 (GAP-ENF-2): a context-dependent prompt that ALSO needs local
         # execution / repo ops can't be completed by a text-only door even WITH
         # context — so name the PROVISIONED tool-capable door (llm_act with

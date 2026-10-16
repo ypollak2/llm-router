@@ -667,15 +667,19 @@ def kappa_block(items: list[dict], B: int, seed: int) -> dict:
             vals = sorted(bootstrap(gs, keys, stat, B, seed))
             out[name] = {"n": len(pairs), "kappa": r6(point), "ci95": [r6(x) for x in ci95(vals)],
                          "exact_agreement": r6(sum(i == j for _, i, j in pairs) / len(pairs))}
-    # per length band and per source (PREREG-CLS-DEV section 3.4): point values, a table with n < 5 prints n only
-    for dim, label in (("length_band", "by_length_band"), ("source", "by_source")):
+    # per length band (real and DEV-SYN separately, PREREG-CLS-DEV section 3.4) and per source: point values,
+    # a table with n < 5 prints n only
+    def table(its_all: list[dict], dim: str) -> dict:
         tab: dict = {}
-        for it in items:
+        for it in its_all:
             v = it["strata"].get(dim)
             tab.setdefault(v if isinstance(v, str) and v else "unknown", []).append(it)
-        out[label] = {val: {f"{a}-{b}": _kappa_point([(it["group"], RANK[it["truths"][a]] - 1, RANK[it["truths"][b]] - 1)
-                                                         for it in its if it["truths"][a] and it["truths"][b]])
-                            for a, b in pairs_of} for val, its in sorted(tab.items())}
+        return {val: {f"{x}-{y}": _kappa_point([(it["group"], RANK[it["truths"][x]] - 1, RANK[it["truths"][y]] - 1)
+                                                for it in its if it["truths"][x] and it["truths"][y]])
+                      for x, y in pairs_of} for val, its in sorted(tab.items())}
+    out["by_length_band"] = {kind: table([it for it in items if it["kind"] == kind], "length_band")
+                             for kind in ("real", "syn")}
+    out["by_source"] = table(items, "source")
     return out
 
 

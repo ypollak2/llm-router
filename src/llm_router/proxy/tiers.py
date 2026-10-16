@@ -900,14 +900,15 @@ class ClaudeTierPolicy:
     def decide_unclassified(self, body: dict, session_id: str | None, sticky: Stickiness) -> TierDecision:
         """The decision for a call the proxy could not label (``step_class == unknown``,
         ``step_error``): no classifier, no D-31 arm. This method reads stickiness and
-        does not write it (the request path's usage and tier-retry hooks still may). In
-        ``_decide``'s order: a ``pinned_models`` model stays pinned; a side call is kept;
-        an ``opus:`` pin is served on the Opus tier; a ``/model`` choice is kept (never
-        downgraded); otherwise the conversation's last served tier holds when the body
-        is accepted on it as sent (a Haiku tier, which may need a body rewrite, does
-        not hold); otherwise the call is forwarded as sent (``decision_error``).
-        ``detail`` is ``step_error`` on every path. A pin check that raises on the same
-        malformed body propagates and ``decide_tier`` forwards the call as sent."""
+        writes it only for an honoured prefix pin (P2.7); the request path's usage and
+        tier-retry hooks may still write too. In ``_decide``'s order: a
+        ``pinned_models`` model stays pinned; a side call is kept; an ``opus:`` pin is
+        served on the Opus tier; a ``/model`` choice is kept (never downgraded);
+        otherwise the conversation's last served tier holds when the body is accepted on
+        it as sent (a Haiku tier, which may need a body rewrite, does not hold);
+        otherwise the call is forwarded as sent (``decision_error``). ``detail`` is
+        ``step_error`` on every path. A pin check that raises on the same malformed
+        body propagates and ``decide_tier`` forwards the call as sent."""
         requested = body.get("model") if isinstance(body.get("model"), str) else None
         req_tier = self.tier_of(requested)
         name = req_tier.name if req_tier else None

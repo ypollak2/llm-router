@@ -23,6 +23,7 @@ from llm_router.prompt_injection import wrap_prompt_with_boundaries
 from llm_router.profiles import complexity_to_profile
 from llm_router.provider_budget import get_provider_budgets, rank_external_models
 from llm_router.router import route_and_call
+from llm_router.toolcall_text import neutralise_response
 from llm_router.statusline_hud import record_routing_decision
 from llm_router.tools.text import _read_hook_route_directive
 from llm_router.types import (
@@ -457,6 +458,7 @@ async def llm_route(
         await ctx.warning(f"Failed to log routing usage: {e}")
 
     # Step 5: Build response with visible routing indicator
+    resp = neutralise_response(resp, "llm_route")  # F4 (D-139)
     total_cost = classification.classifier_cost_usd + resp.cost_usd
     
     # Add visible routing indicator footer
@@ -464,6 +466,8 @@ async def llm_route(
     routing_footer = (
         f"🔀 **Routed to:** {model_name} ({resolved_task_type.value}/{classification.complexity.value.lower()}) · "
         f"Cost: ${resp.cost_usd:.4f}"
+        + (f" · {resp.toolcall_blocks_removed} tool-call block(s) removed"
+           if resp.toolcall_blocks_removed else "")
     )
     
     lines = [
@@ -601,6 +605,7 @@ async def llm_auto(
         route_directive_id=_read_hook_route_directive(),
     )
 
+    resp = neutralise_response(resp, "llm_auto")  # F4 (D-139)
     total_cost = classification.classifier_cost_usd + resp.cost_usd
     
     # Add visible routing indicator footer
@@ -608,6 +613,8 @@ async def llm_auto(
     routing_footer = (
         f"🔀 **Routed to:** {model_name} ({resolved_task_type.value}/{classification.complexity.value.lower()}) · "
         f"Cost: ${resp.cost_usd:.4f}"
+        + (f" · {resp.toolcall_blocks_removed} tool-call block(s) removed"
+           if resp.toolcall_blocks_removed else "")
     )
     
     lines = [

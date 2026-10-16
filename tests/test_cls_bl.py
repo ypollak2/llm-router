@@ -257,6 +257,8 @@ class Ctx:
         (self.cls / "test-syn").mkdir(parents=True)
         self.rubric = tmp / "rubric_fake.py"
         self.gt500 = tmp / "gt500_fake.py"
+        self.supply = tmp / "supply.py"   # the sibling of gt500 that gt500 may import (pinned)
+        self.supply.write_text("SUPPLY = 'fake'\n")
         self.selftest = tmp / "selftest.json"
         ok, _ = S.self_test(self.selftest)
         assert ok
@@ -284,7 +286,8 @@ class Ctx:
         doc = {"params": {"rubric_py": str(self.rubric), "gt500_py": str(self.gt500)},
                "pins": {"model_ids": self.model_ids, "generator_files": self.generator_files,
                         "rubric": {"md5": self.rubric_md5, "sha256": S.sha256_file(self.rubric)},
-                        "gt500": {"sha256": S.sha256_file(self.gt500)}}}
+                        "gt500": {"sha256": S.sha256_file(self.gt500)},
+                        "supply": {"sha256": S.sha256_file(self.supply)}}}
         self.pins_static.write_text(json.dumps(doc))
 
     def set_rubric(self, text, gt_text=None, repin=True):
@@ -297,6 +300,7 @@ class Ctx:
             self.rubric_md5 = md5
             self.mp.setattr(P, "RUBRIC_MD5", md5)
             self.mp.setattr(P, "GT500_SHA256", S.sha256_file(self.gt500))
+            self.mp.setattr(P, "SUPPLY_SHA256", S.sha256_file(self.supply))
             self.write_static()
 
     def records(self) -> list[dict]:
@@ -1343,7 +1347,11 @@ def test_parse_labels_follows_the_p17d_answer_contract(ctx):
     assert L.parse_labels(mods, json.dumps(one), ["L004"], single=True)["L004"]["tier"] == "sonnet"
     assert L.parse_labels(mods, json.dumps({"labels": [one]}), ["L004"], single=True)["L004"]["tier"] == "sonnet"
     no_id = dict(good, tier="sonnet")
-    assert L.parse_labels(mods, json.dumps(no_id), ["L004"], single=True) == {}               # single answers carry id
+    # P1.7-d rule (D-161): an id-less single answer to ONE asked id takes that id; batch labels need ids
+    assert L.parse_labels(mods, json.dumps(no_id), ["L004"], single=True)["L004"]["id"] == "L004"
+    assert L.parse_labels(mods, json.dumps({"labels": [no_id]}), ["L004"], single=True)["L004"]["tier"] == "sonnet"
+    assert L.parse_labels(mods, json.dumps(no_id), ["L004", "L005"], single=True) == {}
+    assert L.parse_labels(mods, json.dumps({"labels": [no_id]}), ["L004"], single=False) == {}
     assert L.parse_labels(mods, json.dumps(dict(one, id="L005")), ["L004"], single=True) == {}
     assert L.parse_labels(mods, json.dumps(dict(one, tier="huge")), ["L004"], single=True) == {}
 
@@ -2253,6 +2261,9 @@ class PinsEnv:
         self.gt500 = t / "gt500.py"
         self.gt500.write_text("RUBRIC_MD5 = 'x'\n")
         ctx.mp.setattr(P, "GT500_SHA256", S.sha256_file(self.gt500))
+        self.supply = t / "supply.py"
+        self.supply.write_text("SUPPLY = 1\n")
+        ctx.mp.setattr(P, "SUPPLY_SHA256", S.sha256_file(self.supply))
         self.denylist = ctx.wrote_private(t / "denylist.txt", "one\ntwo\n")
         self.env = ctx.wrote_private(t / ".env", "API_KEY=abcdefgh1234\nNAME=x\n")
         self.snap = t / "snap" / "5c38ec7c405e"
@@ -2291,9 +2302,10 @@ def pins(ctx):
 
 def test_static_pins_compute_every_key_and_write_canonical_json(pins):
     doc = pins.build()
-    assert set(doc["pins"]) == {"scripts", "engine", "rubric", "gt500", "denylist", "env", "ollama", "bge_snapshot", "claude_cli",
+    assert set(doc["pins"]) == {"scripts", "engine", "rubric", "gt500", "supply", "denylist", "env", "ollama", "bge_snapshot", "claude_cli",
                                 "codex_cli", "model_ids", "generator_files", "session_log_dirs"}
     assert doc["pins"]["gt500"]["sha256"] == S.sha256_file(pins.gt500)
+    assert doc["pins"]["supply"]["sha256"] == S.sha256_file(pins.supply)
     assert set(doc["pins"]["scripts"]) == set(P.SCRIPT_NAMES) and "cls_send_lib.py" in doc["pins"]["scripts"]
     assert doc["pins"]["engine"]["commit"] == pins.commit
     assert doc["pins"]["engine"]["engine_py_sha256"] == hashlib.sha256(b"ENGINE = 1\n").hexdigest()
@@ -2369,6 +2381,10 @@ def inv_verify_detects_every_single_mutation(pins):
     pins.gt500.write_text(orig + "# edited\n")
     check("gt500")
     pins.gt500.write_text(orig)
+    orig = pins.supply.read_text()
+    pins.supply.write_text(orig + "# edited\n")
+    check("supply")
+    pins.supply.write_text(orig)
     _Ollama.digests["nimble:9b"] = "changed"
     check("ollama")
     _Ollama.digests["nimble:9b"] = "d1"
@@ -2390,7 +2406,7 @@ def inv_verify_detects_every_single_mutation(pins):
     check("codex_cli")
     h2.write_text(orig)
     assert pins.verify()["ok"] is True
-    assert len(mutated) >= len(P.SCRIPT_NAMES) + 3 + len(P.GENERATOR_V1_FILES) + 5
+    assert len(mutated) >= len(P.SCRIPT_NAMES) + 4 + len(P.GENERATOR_V1_FILES) + 5
 
 
 def test_verify_detects_each_single_mutation_of_every_pinned_file(pins):
@@ -2899,6 +2915,39 @@ def test_verify_checks_the_pins_file_sha_against_the_freeze_record(pins):
     assert "pins_file_sha256" in pins.verify()["mismatches"]
 
 
+def inv_idless_single_answer_accepted(ctx, capsys):
+    ctx.set_cfg(bad_calls=[2, 3, 4], single_no_id=True)  # batch 1 fails 3 times; singles answer without an id
+    items = mk_items(12)
+    code, *_ = run_label(ctx, capsys, "dev_syn", "sonnet", write_items(ctx, items))
+    assert code == 0
+    assert {r["item_id"] for r in jl(run_dir(ctx) / "labels_sonnet.jsonl")} == {i["item_id"] for i in items}
+    assert json.loads((run_dir(ctx) / "status.json").read_text())["judges"]["sonnet"]["label_errors"] == 0
+
+
+def test_idless_single_answers_take_the_one_asked_id(ctx, capsys):
+    inv_idless_single_answer_accepted(ctx, capsys)
+
+
+def inv_supply_pinned_before_gt500(ctx, capsys):
+    ip = write_items(ctx, mk_items(10))
+    orig = ctx.supply.read_text()
+    ctx.supply.write_text(orig + "RAN = __import__('pathlib').Path(%r).write_text('x')\n" % str(ctx.tmp / "supply_ran"))
+    code, *_ = run_label(ctx, capsys, "dev_syn", "sonnet", ip)
+    assert code == S.EXIT_PINS and ctx.records() == [] and not (ctx.tmp / "supply_ran").exists()
+    ctx.supply.write_text(orig)
+    doc = json.loads(ctx.pins_static.read_text())
+    doc["pins"].pop("supply")
+    ctx.pins_static.write_text(json.dumps(doc))
+    code, *_ = run_label(ctx, capsys, "dev_syn", "sonnet", ip)
+    assert code == S.EXIT_PINS and ctx.records() == []           # no supply pin: refused
+    ctx.write_static()
+    assert run_label(ctx, capsys, "dev_syn", "sonnet", ip)[0] == 0
+
+
+def test_supply_py_is_verified_before_gt500_is_loaded(ctx, capsys):
+    inv_supply_pinned_before_gt500(ctx, capsys)
+
+
 # =============================================================================================
 # Mutants: patch ONE function, the invariant must fail. Unmutated code passes every invariant.
 # =============================================================================================
@@ -3184,6 +3233,19 @@ def m_no_configure(mp):
     mp.setattr(S, "configure", lambda ctx: None)
 
 
+def m_idless_single_rejected(mp):
+    orig = L.parse_labels
+
+    def mut(mods, text, ids, *, single):
+        out = orig(mods, text, ids, single=single)
+        return {} if single and '"id"' not in text else out
+    mp.setattr(L, "parse_labels", mut)
+
+
+def m_supply_unchecked(mp):
+    mp.setattr(L, "check_supply", lambda doc, gt500_path: None)
+
+
 def i_selftest(ctx, capsys, gen=None, pins=None):
     inv_selftest_fails_on_one_missed_shape(ctx)
 
@@ -3234,6 +3296,8 @@ MUTANTS = [
     (43, "codex rc / missing id voids instead of parking", m_park_becomes_void, "park_not_void"),
     (44, "canary model header ignored", m_canary_header_ignored, "canary_header"),
     (45, "configure() never called (detector d at send)", m_no_configure, "env_at_send"),
+    (46, "id-less single answer rejected (P1.7-d rule dropped)", m_idless_single_rejected, "single_no_id"),
+    (47, "supply.py not verified before gt500 loads", m_supply_unchecked, "supply_pin"),
 ]
 
 
@@ -3282,7 +3346,8 @@ def run_invariant(name, ctx, capsys, request):
         return inv_amendment_view_never_leaks_test_numbers(ctx, capsys, ctx.mp)
     ctx_invs = {"pinned_rubric": inv_pinned_rubric_only, "prompt_view": inv_prompt_view_and_verbatim_tail,
                 "gpt_pin": inv_gpt_pin_without_json_model_field, "park_not_void": inv_park_not_void,
-                "canary_header": inv_canary_header, "env_at_send": inv_env_value_refused_at_send}
+                "canary_header": inv_canary_header, "env_at_send": inv_env_value_refused_at_send,
+                "single_no_id": inv_idless_single_answer_accepted, "supply_pin": inv_supply_pinned_before_gt500}
     if name in ctx_invs:
         return ctx_invs[name](ctx, capsys)
     gen = GenEnv(ctx)
