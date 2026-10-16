@@ -35,7 +35,7 @@ from llm_router.agentic.engine import AgentRunResult
 from llm_router.agentic.ledger import Milestone
 from llm_router.proxy.loop_guard import REASON_LOOP_GUARD, LoopGuard
 from llm_router.safe_subprocess import get_delegated_env
-from llm_router.write_policy import check_command
+from llm_router import write_policy
 
 
 @dataclass
@@ -193,16 +193,12 @@ def default_tool_executor(cwd: str | None = None, timeout: float = 30.0) -> Tool
     base = Path(cwd).resolve() if cwd else Path.cwd().resolve()
 
     def _resolve(path_arg: str) -> Path:
-        # 🥷 Backslash-Security: using vibe-coding rules for Path Traversal & Directory Access
-        # Relative paths resolve UNDER the working dir (a relative "marker.txt"
-        # must land in cwd, not the process dir), and the result must stay within
-        # base — a model-supplied "../../etc/passwd" is rejected, not followed.
-        # resolve() follows symlinks first, so a link inside base that points
-        # outside it is rejected too.
-        p = Path(path_arg)
-        resolved = (p if p.is_absolute() else base / p).resolve()
-        if not resolved.is_relative_to(base):
-            raise ValueError(f"path escapes working directory: {path_arg}")
+        # P2.9-a: the one containment test (write_policy.contain): relative paths
+        # resolve UNDER the working dir, symlinks are followed, and a model-supplied
+        # "../../etc/passwd" or a link pointing outside is rejected, not followed.
+        resolved, why = write_policy.contain(path_arg, base)
+        if resolved is None:
+            raise ValueError(f"{why}: {path_arg}")
         return resolved
 
     def execute(name: str, args: dict[str, Any]) -> str:
@@ -216,7 +212,7 @@ def default_tool_executor(cwd: str | None = None, timeout: float = 30.0) -> Tool
                     return f"tool error: blocked ({reason}) — refusing: {command[:120]}"
                 # P2.9-b: static tripwire for redirects/copies/interpreters that
                 # write outside the root. Not a sandbox (see write_policy).
-                verdict = check_command(command, base)
+                verdict = write_policy.check_action(command, base)
                 if verdict.decision != "allow":
                     return (f"tool error: write policy {verdict.decision} "
                             f"({verdict.reason}): {command[:120]}")
@@ -236,7 +232,10 @@ def default_tool_executor(cwd: str | None = None, timeout: float = 30.0) -> Tool
             if name == "read_file":
                 return _resolve(args["path"]).read_text(encoding="utf-8", errors="ignore")[:4000]
             if name == "write_file":
-                p = _resolve(args["path"])
+                verdict = write_policy.check_write(args.get("path"), base)
+                if verdict.decision != "allow":
+                    return f"tool error: write policy {verdict.decision} ({verdict.reason})"
+                p = Path(verdict.targets[0])
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(str(args.get("content", "")), encoding="utf-8")
                 return f"wrote {p}"
