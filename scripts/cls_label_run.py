@@ -13,7 +13,9 @@ replacement and outgoing_check on the exact bytes). It is never printed, logged 
 Judge-prompt contract = the repo's P1.7-d labeller (scripts/p17d_synthetic.py load_label_mods / judge_call /
 Labeller), read from PINS-STATIC:
   * gt500.py from params.gt500_py, its sha256 equal to pins.gt500.sha256 and to cls_pins.GT500_SHA256 (as
-    p17d's load_pinned); gt.RUBRIC_MD5 must equal the rubric md5. Required: gt.load_rubric, gt.prompt_view,
+    p17d's load_pinned); gt.RUBRIC_MD5 must equal the rubric md5. Its sibling supply.py (which gt500 can
+    import: its directory goes on sys.path) is verified first against pins.supply.sha256 and
+    cls_pins.SUPPLY_SHA256, as p17d_synthetic.load_label_mods does. Required: gt.load_rubric, gt.prompt_view,
     gt.valid_label, gt.extract_json (a gt500 without prompt_view is refused: a raw prompt is never sent).
   * rubric.py from params.rubric_py, its md5 equal to pins.rubric.md5 and cls_pins.RUBRIC_MD5 and its sha256
     equal to pins.rubric.sha256, loaded through gt.load_rubric(path). `--prompt-module`, when given, must name
@@ -24,9 +26,10 @@ Labeller), read from PINS-STATIC:
   * RUBRIC placement: P17D passed rub.RUBRIC as `--system-prompt`; the frozen judge argv (PREREG 3.2, pinned
     help lines) has no such flag and codex has none, so rub.RUBRIC is the FIRST block of the stdin payload
     (RUBRIC, a blank line, then the items). It therefore also passes outgoing_check with the items.
-  * Answers: gt.extract_json(text); a batch answer is {"labels": [{"id", "tier", ...}]}; a single answer is
-    one label object (or {"labels": [one]}) that MUST carry "id" equal to the asked opaque id. A label is
-    kept only if gt.valid_label(label, rub) and its tier is haiku/sonnet/opus.
+  * Answers: gt.extract_json(text); a batch answer is {"labels": [{"id", "tier", ...}]} (ids required); a
+    single answer is one label object (or {"labels": [one]}): id-less, it takes the one asked id (the P1.7-d
+    rule, D-161); with an id, that id must be the asked one. A label is kept only if gt.valid_label(label,
+    rub) and its tier is haiku/sonnet/opus.
 Failure classes: a wrong plant or a model change (claude family differs, id changes mid-run) VOIDS the judge
 run (PREREG 3.3). A codex non-zero rc (bad -m, timeout, CLI error) and a claude answer with no model id STOP
 and PARK the run (D-147): never a void, never a TRUTH_FALLBACK.
@@ -114,12 +117,28 @@ def resolve_rubric(prompt_module, doc: dict) -> tuple[Path, str]:
     return pinned, md5
 
 
+def check_supply(doc: dict, gt500_path) -> None:
+    """supply.py next to gt500.py, pinned by sha256 (PINS-STATIC and the prereg value), verified BEFORE gt500
+    is loaded: gt500's directory goes on sys.path, so an unpinned sibling would run unchecked (exit 9)."""
+    want = (doc.get("pins", {}).get("supply") or {}).get("sha256")
+    if not want:
+        raise S.CLSExit(S.EXIT_PINS, "PINS-STATIC lacks the supply.py sha256")
+    path = P.supply_path(gt500_path)
+    try:
+        sha = S.sha256_file(path)
+    except OSError:
+        raise S.CLSExit(S.EXIT_PINS, "pinned supply.py not readable") from None
+    if sha != want or sha != P.SUPPLY_SHA256:
+        raise S.CLSExit(S.EXIT_PINS, "supply.py sha256 differs from PINS-STATIC")
+
+
 def _load_gt500(doc: dict):
     params, pins = doc.get("params", {}), doc.get("pins", {})
     want = (pins.get("gt500") or {}).get("sha256")
     path = params.get("gt500_py")
     if not path or not want:
         raise S.CLSExit(S.EXIT_PINS, "PINS-STATIC lacks the gt500 path or its sha256")
+    check_supply(doc, path)
     try:
         data = Path(path).read_bytes()
     except OSError:
@@ -260,8 +279,10 @@ def build_payload(mods: JudgeMods, entries: list[dict], *, single: bool) -> byte
 
 
 def parse_labels(mods: JudgeMods, text: str, ids: list[str], *, single: bool) -> dict:
-    """opaque id -> label dict, for labels that gt.valid_label accepts and whose tier is a known tier. Every
-    label, single answers included, must carry its id."""
+    """opaque id -> label dict, for labels that gt.valid_label accepts and whose tier is a known tier.
+    Batch answers must carry an id per label. A single answer follows the P1.7-d rule (p17d_synthetic.py
+    judge_call, `labs = {ids[0]: obj}`, D-161): when exactly one id was asked, an id-less answer gets that id
+    attached; an answer that does carry an id must carry the asked one."""
     try:
         obj = mods.gt.extract_json(text)
     except Exception:  # noqa: BLE001 - an unparsable answer labels nothing; the batch rules retry
@@ -271,6 +292,8 @@ def parse_labels(mods: JudgeMods, text: str, ids: list[str], *, single: bool) ->
         rows = [obj] if isinstance(obj, dict) else None
     if not isinstance(rows, list):
         return {}
+    if single and len(ids) == 1 and len(rows) == 1 and isinstance(rows[0], dict) and rows[0].get("id") is None:
+        rows = [dict(rows[0], id=ids[0])]
     out = {}
     for lab in rows:
         if not isinstance(lab, dict) or lab.get("id") is None or str(lab["id"]) not in ids:

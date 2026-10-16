@@ -42,6 +42,8 @@ RUBRIC_MD5 = "1bcb3f441a0c9d056b3343a9d47c5565"
 #: gt500.py (the GE3 labeller helpers: prompt_view, valid_label, extract_json, load_rubric), pinned by sha as
 #: in PREREG-CLS-DEV section 2 and scripts/p17d_synthetic.py GT500_SHA256.
 GT500_SHA256 = "9cde774dfe93387d6ee3dfcbd1b5481a537f265e5961d82f85a87d29d6328959"
+#: supply.py, the sibling gt500.py may import, pinned as p17d_synthetic.py SUPPLY_SHA256 (prereg 12cd3e1e...).
+SUPPLY_SHA256 = "12cd3e1eed7fc15658b4b44246d83422e2b61adc4ccb270dd9f5e729608fb0e8"
 #: Where p17d_synthetic.py finds gt500.py (GT_SCRIPTS): under the REAL home, never $HOME.
 DEFAULT_GT500_PY = str(Path(pwd.getpwuid(os.getuid()).pw_dir) / ".rsi" / "research" / "primary-plan" / "v16" / "gt500"
                        / "scripts" / "gt500.py")
@@ -99,6 +101,11 @@ def _flag_lines(help_text: str, flags: list[str]) -> tuple[dict, list[str]]:
     return lines, missing
 
 
+def supply_path(gt500_py) -> Path:
+    """supply.py lives next to gt500.py (p17d_synthetic.py: GT_SCRIPTS / "supply.py")."""
+    return Path(gt500_py).parent / "supply.py"
+
+
 def compute_static(params: dict, *, runner=_default_run, http_get=_default_http_get) -> tuple[dict, list[str]]:
     """Compute every STATIC pin from `params`. Returns (pins, errors); errors are key names."""
     pins: dict = {}
@@ -135,6 +142,14 @@ def compute_static(params: dict, *, runner=_default_run, http_get=_default_http_
             raise ValueError("gt500.py sha256 differs from the expected value")
         return {"sha256": sha, "path": str(params["gt500_py"])}
     sec("gt500", gt500)
+
+    def supply():
+        p = supply_path(params["gt500_py"])
+        sha = S.sha256_file(p)
+        if sha != SUPPLY_SHA256:
+            raise ValueError("supply.py sha256 differs from the expected value")
+        return {"sha256": sha, "path": str(p)}
+    sec("supply", supply)
 
     def denylist():
         p = params["denylist"]
