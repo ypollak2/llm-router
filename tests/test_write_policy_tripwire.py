@@ -407,3 +407,343 @@ def test_r5_in_root_forms_stay_allowed(tree, cmd):
     (root / "build").mkdir(exist_ok=True)
     v = check_command(cmd, root)
     assert v.decision == "allow", (cmd, v)
+
+
+# ---- review round 6 (#452 delta review, D-124) ----
+
+GATED_R6 = [
+    "sed -ne 's/a/b/w {out}/f' in.txt",
+    "sed -sf x",
+    "sed --exp='1w {out}/f' in.txt",
+    "sed --expr '1w {out}/f' in.txt",
+    "sed --fi=script.sed in.txt",
+    "sed --in-pl 's/a/b/' {out}/f",
+    "sed --unknown p f.txt",
+    "sed --s p f.txt",
+    "sed -nQ p f.txt",
+    "gawk -o{out}/f 'BEGIN{{}}'",
+    "gawk --pretty-print={out}/f 'BEGIN{{}}'",
+    "gawk -d{out}/f 'BEGIN{{}}'",
+    "gawk --dump-variables={out}/f 'BEGIN{{}}'",
+    "gawk -p{out}/f 'BEGIN{{}}'",
+    "gawk --profile={out}/f 'BEGIN{{}}'",
+    "gawk -e'BEGIN{{system(\"touch x\")}}' f.txt",
+    "gawk --so='BEGIN{{system(\"touch x\")}}' f.txt",
+    "gawk --fi=prog.awk f.txt",
+    "gawk '@load \"filefuncs\"; BEGIN{{}}'",
+    "gawk 'BEGIN{{f=\"system\"; @f(\"touch x\")}}'",
+    "gawk '@include \"prog.awk\"'",
+    "gawk '@namespace \"x\"; BEGIN{{}}'",
+    "gawk --unknown 'BEGIN{{}}'",
+    "gawk --p 'BEGIN{{}}'",
+    "mawk -W exec prog.awk",
+    "mawk -Wexec prog.awk",
+    "mawk -W version",
+    "osascript -l JavaScript -e 'x'",
+    "pwsh -NoProfile -Com 'x'",
+    "powershell -enc AAAA",
+    "powershell 'Remove-Item x'",
+    "tcsh -fc 'touch x'",
+    "echo 'touch x' | csh",
+    "mksh -c 'touch x'",
+    "yash -c 'touch x'",
+    "csh /dev/stdin",
+    "tcsh /dev/fd/4",
+    "strace -o '|sh' ls",
+    "strace -o '!sh' ls",
+    "fakeroot -s {out}/env touch a",
+    "uv run --refresh-package foo touch {out}/a",
+    "poetry -C {out} run touch a",
+    "uv --directory x run touch a",
+    "pipx --verbose run foo",
+    "poetry run -C {out} touch a",
+    "poetry run --directory={out} touch a",
+    "poetry run -P {out} touch a",
+    "poetry run --project={out} touch a",
+    "find . -nowarn {out} -delete",
+    "find . -warn {out} -delete",
+    "find . -acl {out} -delete",
+    "find . -xattr {out} -delete",
+    "find . -help {out} -delete",
+    "find . -version {out} -delete",
+    "cd {out}; gawk -o 'BEGIN{{}}'",
+    "cd {out}; gawk -d 'BEGIN{{}}'",
+    "cd {out}; gawk -p 'BEGIN{{}}'",
+    '(cd {out}; if true; then case x in x) :;; esac; fi; touch y)',
+    '(cd {out}; {{ case x in x) :;; esac; }}; touch y)',
+    '(cd {out}; ! case x in x) :;; esac; touch y)',
+    '(cd {out}; time case x in x) :;; esac; touch y)',
+    'find -L {out} -delete',
+    'find -H {out} -delete',
+    'find -P {out} -delete',
+    'find -L . -delete',
+    'find . -follow -delete',
+    "find '(' {out} ')' -delete",
+    "find '!' {out} -delete",
+    'find -D tree -O3 {out} -delete',
+    "sed '1w {out}/f' in.txt",
+    "sed '$w {out}/f' in.txt",
+    "sed '1,3w {out}/f' in.txt",
+    "sed '2!w {out}/f' in.txt",
+    "sed 's/a/b/w {out}/f' in.txt",
+    "sed 's/a/b/gw {out}/f' in.txt",
+    "sed 's/a/b/pw {out}/f' in.txt",
+    "sed 's,a,b,w {out}/f' in.txt",
+    "sed --expression='1w {out}/f' in.txt",
+    "sed -e'1w {out}/f' in.txt",
+    "sed -n -e p -e '/x/w {out}/f' in.txt",
+    'sed --file=script.sed in.txt',
+    'sed -f script.sed in.txt',
+    "sed '1e touch {out}/x' in.txt",
+    "sed 's/.*/touch {out}\\/y/e' in.txt",
+    "sed '/x/{{w {out}/f\n}}' in.txt",
+    'awk \'{{print > "{out}/f"}}\' f.txt',
+    'awk \'{{print $1 >> "{out}/f"}}\' f.txt',
+    'awk \'{{printf "%s", $0 > "{out}/f"}}\' f.txt',
+    'awk \'{{print | "sh"}}\' f.txt',
+    'awk \'BEGIN{{system("touch {out}/z")}}\'',
+    'awk \'BEGIN{{"date" | getline d}}\'',
+    'awk -f prog.awk f.txt',
+    'awk --file=prog.awk f.txt',
+    "gawk -l filefuncs 'BEGIN{{}}'",
+    "gawk -i inplace '{{print}}' {out}/f",
+    'for i in 1 2; do touch w; cd ..; done',
+    'f(){{ touch v; }}; cd {out} && f',
+    'function f {{ touch v; }}; cd {out} && f',
+    'cd sub && while true; do cd ..; touch q; break; done',
+    "x='b[$(touch {out}/h)]'; a[x]=1",
+    "read 'a[$(touch {out}/k)]' <<< x",
+    'ionice -c3 touch {out}/a',
+    'taskset 0x1 touch {out}/a',
+    'taskset -c 0 touch {out}/a',
+    'flock {out}/lock true',
+    "flock /tmp/l -c 'touch x'",
+    'chroot / touch {out}/a',
+    'strace -f touch {out}/a',
+    'strace -o {out}/log ls',
+    'unbuffer touch {out}/a',
+    'caffeinate -i touch {out}/a',
+    "watch -n1 'touch x'",
+    'fakeroot touch {out}/a',
+    'busybox touch {out}/a',
+    "busybox sh -c 'touch x'",
+    "uv run python -c 'print(1)'",
+    "uv run --with rich python -c 'print(1)'",
+    "poetry run python -c 'print(1)'",
+    "pipx run --spec x sh -c 'touch y'",
+    'uv run touch {out}/a',
+    "trap 'touch {out}/a' EXIT",
+    'trap "touch x" DEBUG',
+    'echo $[1<<2]\necho x > {out}/y',
+    'cat <<EOF > in.txt\r\nhello\r\nEOF\r\necho x > {out}/y',
+    'cat <<EOF\nno end',
+    'echo x > a\x00b',
+    'echo x > loop1/f',
+    'cp --target-dir={out} a.txt',
+    'cp --target {out} a.txt',
+    'cp -s {out}/real l4',
+    'cp --symbolic-link {out}/real l5',
+    'python3 /dev/fd/3',
+    'deno eval \'Deno.writeTextFileSync("x","y")\'',
+    "bun -e 'x'",
+    "tsx -e 'x'",
+    "Rscript -e 'x'",
+    "julia -e 'x'",
+    "osascript -e 'x'",
+    "pwsh -c 'x'",
+    "csh -c 'x'",
+    "expect -c 'x'",
+]
+
+ALLOWED_R6 = [
+    "uv run --frozen pytest -q",
+    "uv run -m pytest -q",
+    "gawk -v x=1 -F, '{{print $1}}' f.txt",
+    "sed -ne 's/a/b/p' f.txt",
+    "sed -E -n -e '/x/p' f.txt",
+    "awk -F: '$3 >= 1000 {{print $1}}' data.txt",
+    "pwsh -File build.ps1",
+    "sed -i.bak -e 's/a/b/' f.txt",
+    "sed --in-place=.bak 's/a/b/' f.txt",
+    "awk -v OFS=, '{{print $1, $2}}' f.txt",
+    "gawk -o 'BEGIN{{}}'",
+    "gawk -d 'BEGIN{{}}'",
+    "gawk -p 'BEGIN{{}}'",
+    "sed --expr 's/a/b/p' f.txt",
+    "sed --in-pl=.bak 's/a/b/' f.txt",
+    '(cd sub; case x in x) :;; esac; touch y); touch z',
+    "find . -name '*.pyc' -delete",
+    "find -P . -type f -name '*.tmp' -delete",
+    "find -L . -name '*.py'",
+    "sed -n '/warning/p' log.txt",
+    "sed 's/world/x/' f.txt",
+    "sed 's/a/w/' f.txt",
+    "sed 's/ww/x/' f.txt",
+    "sed -n '1,/^$/p' f.txt",
+    "sed 's/a/b/w out.txt' f.txt",
+    "sed -e 's/x/y/;/wq/d' f.txt",
+    "awk '$1 > 5' f.txt",
+    "awk 'NR>1' f.txt",
+    "awk 'length > 80' f.txt",
+    "awk '{{if($1>3)print}}' f.txt",
+    "awk -F'|' '{{print $2}}' f.txt",
+    "awk '/a|b/' f.txt",
+    "awk '$2 ~ /x|y/ && $3 > 1 {{print $1}}' f.txt",
+    "cd sub && git commit -m 'support for x'",
+    "cd sub && grep -rn 'for' .",
+    'cd sub && echo done for today',
+    "cd sub && pytest -k 'select or until'",
+    "git commit -m 'fix [thing] with `code`'",
+    'uv run pytest -q',
+    'poetry run pytest -q',
+    'ionice -c3 make > build.log 2>&1',
+    'trap - EXIT',
+    'trap -p',
+    'flock .lock make',
+    "cat <<'EOF' > in.txt\nhello\nEOF",
+    'cp -t build a.txt',
+    'Rscript analysis.R',
+]
+
+
+def _r6_tree(tree):
+    root, out = tree
+    (root / "sub").mkdir(exist_ok=True)
+    (root / "build").mkdir(exist_ok=True)
+    (root / "loop1").symlink_to(root / "loop2")
+    (root / "loop2").symlink_to(root / "loop1")
+    return root, out
+
+
+@pytest.mark.parametrize("tpl", GATED_R6)
+def test_r6_review_escapes_are_gated(tree, tpl):
+    root, out = _r6_tree(tree)
+    v = check_command(tpl.format(out=out), root)
+    assert v.decision in ("refuse", "needs_approval"), (tpl, v)
+
+
+@pytest.mark.parametrize("tpl", ALLOWED_R6)
+def test_r6_false_positives_are_allowed(tree, tpl):
+    root, out = _r6_tree(tree)
+    v = check_command(tpl.format(out=out), root)
+    assert v.decision == "allow", (tpl, v)
+
+
+@pytest.mark.parametrize(("tpl", "name"), [
+    ("sed 's/a/b/w {out}/f'", "f"),
+    ("find -P {out} -delete", ""),
+    ("flock {out}/lock true", "lock"),
+    ("strace -o {out}/log ls", "log"),
+    ("uv run touch {out}/a", "a"),
+    ("gawk -o{out}/f 'BEGIN{{}}'", "f"),
+    ("fakeroot -s {out}/env touch a", "env"),
+])
+def test_r6_resolved_outside_targets_are_refused(tree, tpl, name):
+    root, out = tree
+    v = check_command(tpl.format(out=out), root)
+    assert v.decision == "refuse", v
+    assert str((out / name).resolve()) in v.targets
+
+
+@pytest.mark.parametrize("cmd", ["echo x > a\x00b", "echo x > loop1/f"])
+def test_r6_path_errors_need_approval(tree, cmd):
+    root, _ = _r6_tree(tree)
+    v = check_command(cmd, root)
+    assert v.decision == "needs_approval", v
+    assert "cannot judge command (" in v.reason
+
+
+def test_r6_process_cdpath_changes_cd_resolution(tree, monkeypatch):
+    root, out = tree
+    (root / "sub").mkdir()
+    cmd = "cd sub && echo x > f"
+    monkeypatch.setenv("CDPATH", str(out))
+    assert check_command(cmd, root).decision == "needs_approval"
+    monkeypatch.delenv("CDPATH", raising=False)
+    assert check_command(cmd, root).decision == "allow"
+
+
+@pytest.mark.parametrize("tpl", [
+    "find -delete",
+    "find -E -X -d -s -x -f {out} -delete",
+    "find . -name ignored {out} -delete",
+    "find . -fprintf {out}/list '%p' -print",
+    "find . -fprint0 {out}/list",
+    "find . -fls {out}/list",
+    "sed --expression '1w {out}/f' in.txt",
+    "sed -fscript.sed in.txt",
+    "sed --file script.sed in.txt",
+    "sed 's/x/y/e' in.txt",
+    "sed 'unknown' in.txt",
+    "awk --source 'BEGIN{{system(\"x\")}}'",
+    "awk --source='{{print > \"x\"}}'",
+    "awk -e '{{print | \"sh\"}}'",
+    "gawk --load lib 'BEGIN{{}}'",
+    "gawk --include lib '{{print}}'",
+    "gawk -E script.awk",
+    "gawk --exec script.awk",
+    "uv run --directory sub touch x",
+    "uv run --project=sub touch x",
+    "flock 3 --command 'touch x'",
+    "trap 'touch x' INT",
+    "cat <<EOF",
+    "cp --t={out} a.txt",
+    "mv --target-dir {out} a.txt",
+    "install --target={out} a.txt",
+    "ln --target-dir={out} a.txt",
+    "node /dev/fd/4",
+    "sh /dev/fd/4",
+    "perl /dev/fd/4",
+    "ruby /dev/fd/4",
+    "bun --eval x",
+    "bun -p x",
+    "tsx --eval x",
+    "ts-node -e x",
+    "julia --eval x",
+    "pwsh -Command x",
+    "powershell -EncodedCommand eA==",
+    "powershell -c x",
+    "tcsh -c x",
+])
+def test_r6_additional_forms_need_a_gate(tree, tpl):
+    root, out = _r6_tree(tree)
+    # The default search path is cwd, so make it outside for this probe.
+    cmd = f"cd {out}; {tpl}" if tpl == "find -delete" else tpl
+    v = check_command(cmd.format(out=out), root)
+    assert v.decision in ("refuse", "needs_approval"), (tpl, v)
+
+
+@pytest.mark.parametrize("cmd", [
+    "find . -name outside -type f -maxdepth 1 -delete",
+    "sed -l 80 -n '/warning/p' f.txt",
+    "sed --line-length=80 --quiet 's/x/y/' f.txt",
+    "sed -e '1,3!p' -e 'y/a/b/' f.txt",
+    "sed -e '/x/{' -e 'p' -e '}' f.txt",
+    "sed -n '\\%warning%p' f.txt",
+    "sed 's/a/b/w /dev/stdout' f.txt",
+    "sed 'r outside.txt' f.txt",
+    "sed 'a write w outside.txt' f.txt",
+    "sed ':label;b label' f.txt",
+    "awk -v system=hello -F '|' '{print ($1 > 5)}' f.txt",
+    "awk --assign x=y --field-separator='|' '/a|b/ {print $1}'",
+    "awk '{x = $1 / 2; print x}' f.txt",
+    "awk '{print /a|b/}' f.txt",
+    "cd sub && 'for' x",
+    'cd sub && "select" x',
+    "awk '# system(\"x\")\\n{print \"system(x) > |\"}'",
+    "ionice -p 123",
+    "taskset -p 123",
+    "flock 3 true",
+    "strace -o local.log -e trace=open ls",
+    "caffeinate -t 5 pytest -q",
+    "fakeroot -s state true",
+    "pipx run --python python3 --spec pytest pytest -q",
+    "trap",
+    "trap -l",
+    "trap '' INT",
+    "deno -e x",
+])
+def test_r6_additional_benign_forms_are_allowed(tree, cmd):
+    root, _ = tree
+    v = check_command(cmd, root)
+    assert v.decision == "allow", (cmd, v)

@@ -22,7 +22,9 @@ Verdict policy (each choice is deliberate):
                      ``xargs``/``find -exec``, command substitution, a target
                      built from an unexpanded ``$VAR``, an unresolvable ``cd``,
                      and any parse failure (unbalanced quote, dangling
-                     redirect). Fail closed.
+                     redirect), sed shell commands/file scripts, awk effects,
+                     find deletion following symlinks, command-string wrappers,
+                     and path-resolution errors. Fail closed.
 * ``allow``          every target seen resolves inside ``root``; ``/dev/null``
                      and fd dups such as ``2>&1`` are not writes.
 
@@ -61,6 +63,7 @@ _NULL_DEVICES = {"/dev/null", "/dev/stdout", "/dev/stderr"}
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _WRAPPERS = {"command", "exec", "time", "nohup", "nice", "builtin", "env", "timeout", "stdbuf",
              "setsid"}
+_SH_FAMILY = {"sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "mksh", "yash"}
 _INTERPRETERS_STDIN_PATHS = {"-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"}
 #: Options of an interpreter that take a value, so the next word is not a script.
 _INTERP_VALUED = {
@@ -72,9 +75,6 @@ _INTERP_VALUED = {
 _KEYWORDS = {"{", "}", "!", "do", "then", "else", "elif", "if", "while", "until",
              "done", "fi", "esac"}          # grammar words: the command follows them
 _HEADS = {"for", "select", "case"}           # whole segment is a loop/case head (data only)
-_ARITH_CMD = re.compile(r"(?<![\w$-])(?:let|declare|typeset|read)\b|\blocal\s+-\w*i|\(\(|\[|\$\{!")
-_SED_WRITE = re.compile(r"(?:^|[/;}\s])[wW]\s*\S")
-_LOOPS_OR_FUNCS = re.compile(r"(?<![\w-])(?:for|while|until|select|function)(?![\w-])|\(\s*\)")
 _ARITH_WHY = ("`$(`/backtick on a line that also evaluates arithmetic or a subscript "
               "(let/declare/typeset/read/local -i/((/[ ]/${!}: bash re-evaluates it even inside quotes)")
 
@@ -138,14 +138,18 @@ def _tokenize(cmd: str) -> tuple[list[Token], bool]:
             toks.append(("op", ";", False))
             i += 1
             for delim, strip, quoted in pending:
+                found = False
                 while i < n:
                     j = cmd.find("\n", i)
                     line = cmd[i:] if j < 0 else cmd[i:j]
                     i = n if j < 0 else j + 1
                     if (line.lstrip("\t") if strip else line) == delim:
+                        found = True
                         break
                     if not quoted and _raw_nested_exec(line):
                         subst = True             # an unquoted heredoc body is expanded
+                if not found:
+                    raise ValueError("heredoc without terminator")
             pending = []
             continue
         if c in " \t\r":
@@ -236,6 +240,8 @@ def _tokenize(cmd: str) -> tuple[list[Token], bool]:
             heredoc_next = None
         toks.append(("word", text, expands))
         last_word_end = i
+    if pending or heredoc_next is not None:
+        raise ValueError("heredoc without terminator")
     return toks, subst
 
 
@@ -324,9 +330,12 @@ def _positionals(args: list[str], takes_value: set[str]) -> tuple[list[str], str
             pos.append(a)
         elif a == "--":
             end_opts = True
-        elif a.startswith("--target-directory="):
+        elif (a.startswith("--") and "=" in a
+              and "--target-directory".startswith(a.split("=", 1)[0])
+              and len(a.split("=", 1)[0]) >= 3):
             tdir = a.split("=", 1)[1]
-        elif a == "--target-directory" and k + 1 < len(args):
+        elif (a.startswith("--") and "--target-directory".startswith(a)
+              and len(a) >= 3 and k + 1 < len(args)):
             tdir = args[k + 1]
             k += 1
         elif a == "-t" and k + 1 < len(args):
@@ -365,12 +374,14 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
             i += 1
         elif w == "function":
             i += 2                                     # `function NAME`; the body follows
-        elif w in _HEADS and i == 0:
+        elif w in _HEADS and _grammar_prefix(words[:i]):
             texts = [t[1] for t in words]
             if w != "case" and "do" in texts:
                 i = texts.index("do") + 1              # `for x do BODY`: the body is a command
                 continue
             return                                     # `for N in W`, `case W in`: data only
+        elif (inner := _wrapper(scan, words, i)) is not None:
+            i = inner
         elif base in _WRAPPERS or base in ("sudo", "doas"):
             if base in ("sudo", "doas"):
                 scan.need("privilege escalation (sudo)")
@@ -421,12 +432,33 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
         scan.cwd = None
         return
     family = ("python" if re.fullmatch(r"python[\d.]*", prog) else "node" if prog in ("node", "nodejs")
-              else "sh" if prog in ("sh", "bash", "zsh", "dash", "ksh", "fish") else prog)
+              else "sh" if prog in _SH_FAMILY else prog)
     if family in _INTERP_VALUED or family in ("php", "lua"):
         opts, rest = _interp_opts(args, _INTERP_VALUED.get(family, set()))
-    if rest[:1] and rest[0] in _INTERPRETERS_STDIN_PATHS and family in (
-            "python", "node", "sh", "perl", "ruby"):
+    if (rest[:1] and (rest[0] in _INTERPRETERS_STDIN_PATHS
+                     or re.fullmatch(r"/dev/fd/\d+", rest[0])) and family in (
+            "python", "node", "sh", "perl", "ruby")):
         scan.need(f"{prog} {rest[0]} (code from stdin)")
+    extra_flags = {
+        "bun": {"-e", "--eval", "-p"}, "tsx": {"-e", "--eval"},
+        "ts-node": {"-e", "--eval"}, "Rscript": {"-e"}, "julia": {"-e", "--eval"},
+        "osascript": {"-e"}, "expect": {"-c"},
+    }
+    if prog in extra_flags and any(
+            a.split("=", 1)[0] in extra_flags[prog] for a in args):
+        scan.need(f"{prog} one-liner")
+    if prog == "deno" and rest[:1] == ["eval"]:
+        scan.need("deno eval")
+    if prog in ("pwsh", "powershell") and any(
+            a.lower().startswith(("-c", "-e")) for a in args):
+        scan.need(f"{prog} command string")
+    if prog == "powershell" and any(
+            not a.startswith("-") and not any(
+                b.lower() in ("-file", "-f") for b in args[:k])
+            for k, a in enumerate(args)):
+        scan.need("powershell positional command string")
+    if prog == "trap" and args and args[0] not in ("", "-", "-p", "-l"):
+        scan.need("trap runs a command string later")
     if prog == "eval":
         scan.need("eval")
     elif re.fullmatch(r"python[\d.]*", prog):
@@ -441,7 +473,7 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
             scan.need("node -e")
         elif not rest and not (set(opts) & {"-v", "--version", "-h", "--help"}):
             scan.need("node reading code from stdin")
-    elif prog in ("sh", "bash", "zsh", "dash", "ksh", "fish"):
+    elif prog in _SH_FAMILY:
         if any(re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", o) for o in opts):
             scan.need(f"{prog} -c")
         elif prev_sep in ("|", "|&"):
@@ -468,8 +500,9 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
     elif prog in ("cp", "mv", "install", "ln"):
         pos, tdir = _positionals(args, {"-m", "-o", "-g", "-S", "--mode", "--owner", "--group"}
                                  if prog == "install" else {"-S", "--suffix"})
-        symbolic = prog == "ln" and any(
-            o == "--symbolic" or (o.startswith("-") and not o.startswith("--") and "s" in o)
+        symbolic = prog in ("ln", "cp") and any(
+            o in ("--symbolic", "--symbolic-link") or (
+                o.startswith("-") and not o.startswith("--") and "s" in o)
             for o in args if o.startswith("-"))
         hard = (prog == "ln" and not symbolic) or (prog == "cp" and any(
             o == "--link" or (o.startswith("-") and not o.startswith("--") and "l" in o)
@@ -519,38 +552,11 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
         for a in pos:
             tgt(a)
     elif prog == "sed":
-        if any(re.fullmatch(r"-[nEsurz]*i.*|--in-place(=.*)?", o) for o in args
-               if o.startswith("-")):
-            has_script, files, k = False, [], 0
-            while k < len(args):
-                a = args[k]
-                if a in ("-e", "-f", "--expression", "--file"):
-                    has_script = True
-                    k += 2
-                    continue
-                if a.startswith(("--expression=", "--file=")) or (
-                        re.fullmatch(r"-[nEsurz]*[ef].+", a)):
-                    has_script = True                  # -eSCRIPT, --expression=SCRIPT
-                    k += 1
-                    continue
-                if not a.startswith("-") or a == "-":
-                    files.append(a)
-                k += 1
-            for f in (files if has_script else files[1:]):
-                tgt(f)
-        if any(_SED_WRITE.search(a) for a in args if not a.startswith("-")):
-            scan.need("sed w/W command writes files")
+        _sed_effects(scan, args, tgt)
     elif prog in ("awk", "gawk", "mawk", "nawk"):
-        if any("system" in a or ">" in a or "|" in a for a in args if not a.startswith("-")):
-            scan.need(f"{prog} program can run commands or write files")
-    elif prog == "find" and (set(args) & {"-delete", "-fprint", "-fprint0", "-fprintf", "-fls"}):
-        start = 0
-        while start < len(args) and not args[start].startswith(("-", "(", "!")):
-            tgt(args[start])                           # the search paths -delete may remove
-            start += 1
-        for k2, a in enumerate(args):
-            if a in ("-fprint", "-fprint0", "-fprintf", "-fls") and k2 + 1 < len(args):
-                tgt(args[k2 + 1])
+        _awk_effects(scan, args)
+    elif prog == "find":
+        _find_effects(scan, args, tgt)
     elif prog == "perl":
         if any(re.fullmatch(r"-[plnaw0-9]*i.*", o) for o in args if o.startswith("-")):
             has_script, files, k = False, [], 0
@@ -565,6 +571,561 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
                 k += 1
             for f in (files if has_script else files[1:]):
                 tgt(f)
+
+
+def _grammar_prefix(words: list[Token]) -> bool:
+    """Only shell grammar may precede a reserved word in this segment."""
+    return all(w[1] in _KEYWORDS | {"time"} or (
+        w[1] == "-p" and k > 0 and words[k - 1][1] == "time")
+        for k, w in enumerate(words))
+
+
+def _has_loop_or_function(cmd: str) -> bool:
+    # Quoting a reserved word makes it an ordinary command name, not shell grammar.
+    syntax = re.sub(r"""(?:\$'(?:\\.|[^'\\])*'|'[^']*'|"(?:\\.|[^"\\])*"|\\.)""",
+                    "__quoted__", cmd)
+    toks, _ = _tokenize(syntax)
+    position = True
+    for k, (kind, text, _) in enumerate(toks):
+        if kind == "op":
+            if text in _SEPARATORS:
+                position = True
+            continue
+        if not position:
+            continue
+        if text in {"for", "while", "until", "select", "function"}:
+            return True
+        if re.fullmatch(r"[A-Za-z_]\w*", text) and toks[k + 1:k + 3] == [
+                ("op", "(", False), ("op", ")", False)]:
+            return True
+        if text not in _KEYWORDS | {"time", "-p"} and not _ASSIGN.match(text):
+            position = False
+    return False
+
+
+def _without_single_quotes(cmd: str) -> str:
+    """Arithmetic punctuation in single-quoted data is not evaluated."""
+    result: list[str] = []
+    i, double = 0, False
+    while i < len(cmd):
+        c = cmd[i]
+        if c == "\\":
+            result.append(cmd[i:i + 2])
+            i += 2
+            continue
+        if c == '"':
+            double = not double
+        if c == "'" and not double:
+            ansi = i > 0 and cmd[i - 1] == "$"
+            i += 1
+            while i < len(cmd):
+                if ansi and cmd[i] == "\\":
+                    i += 2
+                elif cmd[i] == "'":
+                    i += 1
+                    break
+                else:
+                    i += 1
+            result.append(" ")
+            continue
+        result.append(c)
+        i += 1
+    return "".join(result)
+
+
+def _sed_script_effects(script: str) -> tuple[list[str], bool, bool]:
+    """Read sed syntax so letters inside regexes and replacements stay data."""
+    i, n, depth = 0, len(script), 0
+    files: list[str] = []
+    runs = False
+
+    def blanks() -> None:
+        nonlocal i
+        while i < n and script[i] in " \t\r":
+            i += 1
+
+    def delimited(delim: str) -> bool:
+        nonlocal i
+        while i < n:
+            c = script[i]
+            i += 1
+            if c == "\\":
+                if i == n:
+                    return False
+                i += 1
+            elif c == delim:
+                return True
+        return False
+
+    def address(second: bool = False) -> bool:
+        nonlocal i
+        blanks()
+        m = re.match(r"(?:\d+(?:~\d+)?|\$" + (r"|[+~]\d+" if second else "") + ")",
+                     script[i:])
+        if m:
+            i += len(m[0])
+            return True
+        if i < n and script[i] == "/":
+            i += 1
+            if not delimited("/"):
+                raise ValueError("sed address")
+            return True
+        if i + 1 < n and script[i] == "\\":
+            delim = script[i + 1]
+            i += 2
+            if not delimited(delim):
+                raise ValueError("sed address")
+            return True
+        return False
+
+    def line() -> str:
+        nonlocal i
+        start = i
+        while i < n and script[i] != "\n":
+            i += 1
+        return script[start:i].strip()
+
+    try:
+        while i < n:
+            if script[i] in " \t\r;\n":
+                i += 1
+                continue
+            if address():
+                blanks()
+                if i < n and script[i] == ",":
+                    i += 1
+                    if not address(True):
+                        return files, runs, False
+            blanks()
+            if i < n and script[i] == "!":
+                i += 1
+                blanks()
+            if i == n:
+                return files, runs, False
+            c = script[i]
+            i += 1
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth < 0:
+                    return files, runs, False
+            elif c in "#aicrR":
+                line()
+            elif c in "wW":
+                name = line()
+                if not name:
+                    return files, runs, False
+                files.append(name)
+            elif c == "e":
+                runs = True
+                line()
+            elif c in ":btT":
+                while i < n and script[i] not in ";\n":
+                    i += 1
+            elif c in "sy":
+                if i == n or script[i] in "\\\n":
+                    return files, runs, False
+                delim = script[i]
+                i += 1
+                if not delimited(delim) or not delimited(delim):
+                    return files, runs, False
+                if c == "s":
+                    while i < n and script[i] in "gpiImMe0123456789":
+                        runs |= script[i] == "e"
+                        i += 1
+                    blanks()
+                    if i < n and script[i] == "w":
+                        i += 1
+                        name = line()
+                        if not name:
+                            return files, runs, False
+                        files.append(name)
+            elif c in "=dDgGhHlnNpPqQxzFL":
+                if c in "qQlL":
+                    blanks()
+                    while i < n and script[i].isdigit():
+                        i += 1
+            else:
+                return files, runs, False
+            blanks()
+            if c != "{" and i < n and script[i] not in ";\n}":
+                return files, runs, False
+        return files, runs, depth == 0
+    except ValueError:
+        return files, runs, False
+
+
+def _long_option(arg: str, options: set[str]) -> str | None:
+    """Resolve exact names first, then unambiguous GNU-style prefixes."""
+    name = arg.split("=", 1)[0]
+    if name in options:
+        return name
+    matches = [option for option in options if option.startswith(name)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _sed_effects(scan: _Scan, args: list[str], tgt) -> None:
+    long_options = {
+        "--expression", "--file", "--in-place", "--line-length", "--null-data",
+        "--zero-terminated", "--quiet", "--silent", "--regexp-extended", "--separate",
+        "--sandbox", "--unbuffered", "--posix", "--debug", "--follow-symlinks",
+        "--binary", "--help", "--version",
+    }
+    scripts: list[str] = []
+    files: list[str] = []
+    explicit = inplace = False
+    k, end = 0, False
+    while k < len(args):
+        a = args[k]
+        if not end and a == "--":
+            end = True
+        elif not end and a.startswith("--"):
+            option = _long_option(a, long_options)
+            if option is None:
+                scan.need("sed option not recognised")
+            elif option == "--in-place":
+                inplace = True
+            elif option in ("--expression", "--file", "--line-length"):
+                value = a.split("=", 1)[1] if "=" in a else None
+                if value is None:
+                    k += 1
+                    value = args[k] if k < len(args) else None
+                if value is None:
+                    scan.need("sed option value missing")
+                if option != "--line-length":
+                    explicit = True
+                    if option == "--file":
+                        scan.need("sed script from a file")
+                    elif value is not None:
+                        scripts.append(value)
+            elif "=" in a:
+                scan.need("sed option not recognised")
+        elif not end and a.startswith("-") and a != "-":
+            j = 1
+            while j < len(a):
+                option = a[j]
+                j += 1
+                if option not in "nErsuziefl":
+                    scan.need("sed option not recognised")
+                    break
+                if option == "i":
+                    inplace = True
+                    break  # The remainder is an optional backup suffix.
+                if option in "efl":
+                    value = a[j:] or None
+                    if value is None:
+                        k += 1
+                        value = args[k] if k < len(args) else None
+                    if value is None:
+                        scan.need("sed option value missing")
+                    if option != "l":
+                        explicit = True
+                        if option == "f":
+                            scan.need("sed script from a file")
+                        elif value is not None:
+                            scripts.append(value)
+                    break
+        else:
+            files.append(a)
+        k += 1
+    if not explicit and files:
+        scripts.append(files.pop(0))
+    if inplace:
+        for name in files:
+            tgt(name)
+    if not scripts and not explicit:
+        scan.need("sed script could not be parsed")
+    if scripts:
+        # sed joins -e fragments; a block may begin in one and end in another.
+        writes, runs, ok = _sed_script_effects("\n".join(scripts))
+        for name in writes:
+            tgt(name)
+        if runs:
+            scan.need("sed e command runs a shell command")
+        if not ok:
+            scan.need("sed script could not be parsed")
+
+
+def _awk_runs_or_writes(program: str) -> bool:
+    """Tokenize awk before checking effects; strings, regexes and comments are data."""
+    tokens: list[str] = []
+    i, regex_next = 0, True
+    while i < len(program):
+        c = program[i]
+        if c in " \t\r":
+            i += 1
+            continue
+        if c == "#":
+            end = program.find("\n", i)
+            i = len(program) if end < 0 else end
+            continue
+        if c == '"' or (c == "/" and regex_next):
+            delim = c
+            i += 1
+            bracket = False
+            while i < len(program):
+                c = program[i]
+                i += 1
+                if c == "\\":
+                    i += 1
+                elif delim == "/" and c == "[":
+                    bracket = True
+                elif delim == "/" and c == "]":
+                    bracket = False
+                elif c == delim and not bracket:
+                    break
+            else:
+                return True  # malformed program cannot be judged
+            tokens.append("VALUE")
+            regex_next = False
+            continue
+        m = re.match(r"[A-Za-z_]\w*|\d+(?:\.\d+)?", program[i:])
+        if m:
+            token = m[0]
+            i += len(token)
+        else:
+            token = next((op for op in ("|&", "||", "&&", ">>", ">=", "<=", "==", "!=",
+                                        "++", "--", "!~") if program.startswith(op, i)), c)
+            i += len(token)
+        tokens.append(token)
+        regex_next = token in {"(", ",", "{", "}", ";", "!", "~", "&&", "||", "?", ":",
+                               "\n", "=", "+", "-", "*", "/", "%", "<", ">", ">=", "<=",
+                               "==", "!=", "!~", "+=", "-=", "^", "|", ">>", "$",
+                               "print", "printf", "return"}
+    depth = 0
+    prints: list[int] = []
+    for k, token in enumerate(tokens):
+        nxt = tokens[k + 1:k + 2]
+        if token == "@" or token == "system" and nxt == ["("]:
+            return True
+        if token == "|&" or token == "|" and nxt == ["getline"]:
+            return True
+        if token in ("print", "printf"):
+            prints.append(depth)
+        elif token in (";", "\n", "}"):
+            prints.clear()
+        elif token == "(":
+            depth += 1
+        elif token == ")":
+            prints = [d for d in prints if d < depth]
+            depth -= 1
+        elif token in (">", ">>", "|") and depth in prints:
+            return True
+    return False
+
+
+def _awk_effects(scan: _Scan, args: list[str]) -> None:
+    long_options = {
+        "--file", "--source", "--assign", "--field-separator", "--load", "--include",
+        "--exec", "--dump-variables", "--pretty-print", "--profile", "--debug", "--lint",
+        "--posix", "--traditional", "--sandbox", "--characters-as-bytes", "--use-lc-numeric",
+        "--non-decimal-data", "--optimize", "--no-optimize", "--re-interval", "--bignum",
+        "--copyright", "--gen-pot", "--help", "--version", "--csv",
+    }
+    valued = {"--file", "--source", "--assign", "--field-separator", "--load",
+              "--include", "--exec"}
+    short = {"f": "--file", "e": "--source", "v": "--assign", "F": "--field-separator",
+             "l": "--load", "i": "--include", "E": "--exec", "o": "--pretty-print",
+             "d": "--dump-variables", "p": "--profile"}
+    outputs = {"--pretty-print": "awkprof.out", "--dump-variables": "awkvars.out",
+               "--profile": "awkprof.out"}
+    programs: list[str] = []
+    positionals: list[str] = []
+    explicit = False
+    k, end = 0, False
+    while k < len(args):
+        a = args[k]
+        if not end and a == "--":
+            end = True
+        elif not end and a.startswith("-") and a != "-":
+            value = None
+            if a.startswith("--"):
+                option = _long_option(a, long_options)
+                if "=" in a:
+                    value = a.split("=", 1)[1]
+            else:
+                option = short.get(a[1])
+                value = a[2:] or None
+                if a.startswith("-W"):
+                    scan.need("mawk -W may run code")
+            if option is None:
+                scan.need("awk option not recognised")
+            elif option in outputs:
+                scan.target(value if value is not None else outputs[option])
+            elif option in valued:
+                if value is None:
+                    k += 1
+                    value = args[k] if k < len(args) else None
+                if value is None:
+                    scan.need("awk option value missing")
+                if option in ("--file", "--load", "--include", "--exec"):
+                    scan.need("awk loads code from a file or library")
+                elif option == "--source":
+                    explicit = True
+                    if value is not None:
+                        programs.append(value)
+        else:
+            positionals.append(a)
+        k += 1
+    if not explicit:
+        programs = positionals[:1]
+    if any(_awk_runs_or_writes(p) for p in programs):
+        scan.need("awk program can run commands or write files")
+
+
+def _find_effects(scan: _Scan, args: list[str], tgt) -> None:
+    nullary = {
+        "-delete", "-print", "-print0", "-ls", "-prune", "-quit", "-depth", "-xdev",
+        "-mount", "-empty", "-true", "-false", "-follow", "-nouser", "-nogroup",
+        "-readable", "-writable", "-executable", "-daystart", "-noleaf",
+        "-ignore_readdir_race", "-noignore_readdir_race", "-d",
+        "-nowarn", "-warn", "-acl", "-xattr", "-help", "-version",
+    }
+    operators = {"(", ")", "!", ",", "-a", "-o", "-and", "-or", "-not"}
+    paths: list[str] = []
+    follows = False
+    k = 0
+    while k < len(args):
+        a = args[k]
+        if a in ("-H", "-L", "-P", "-E", "-X", "-d", "-s", "-x") or re.fullmatch(
+                r"-O[0-3]", a):
+            follows |= a in ("-H", "-L")
+        elif a == "-D":
+            k += 1
+        elif a == "-f":
+            if k + 1 < len(args):
+                paths.append(args[k + 1])
+            k += 1
+        else:
+            break
+        k += 1
+    while k < len(args) and not args[k].startswith(("-", "(", ")", "!", ",")):
+        paths.append(args[k])
+        k += 1
+    delete = False
+    while k < len(args):
+        a = args[k]
+        if a in operators:
+            k += 1
+            continue
+        if a in ("-exec", "-execdir", "-ok", "-okdir"):
+            scan.need("find -exec runs arbitrary commands")
+            k += 1
+            while k < len(args) and args[k] not in (";", "+"):
+                k += 1
+            k += 1
+            continue
+        follows |= a == "-follow"
+        delete |= a == "-delete"
+        if a.startswith("-") and a not in nullary:
+            if a in ("-fprint", "-fprint0", "-fprintf", "-fls") and k + 1 < len(args):
+                tgt(args[k + 1])
+            k += 3 if a == "-fprintf" else 2
+        else:
+            if not a.startswith("-"):
+                paths.append(a)
+            k += 1
+    if delete:
+        for name in paths or ["."]:
+            tgt(name)
+        if follows:
+            scan.need("find follows symlinks while deleting")
+
+
+def _wrapper(scan: _Scan, words: list[Token], i: int) -> int | None:
+    """Return the inner argv index, recording wrapper writes before unwrapping."""
+    base = os.path.basename(words[i][1])
+    args = [w[1] for w in words]
+    n = len(args)
+    if base in ("chroot", "watch"):
+        scan.need(f"{base} changes path meaning or runs a command string")
+        return n
+    if base in ("uv", "poetry", "pipx"):
+        if i + 1 >= n or args[i + 1] != "run":
+            if "run" in args[i + 2:]:
+                scan.need("options before run")
+                return n
+            return None
+        base += " run"
+        i += 1
+    valued = {
+        "ionice": {"-c", "-n", "-t", "-p", "--class", "--classdata", "--pid", "--pgid", "--uid"},
+        "taskset": {"-c", "--cpu-list"},
+        "flock": {"-w", "-E", "--timeout", "--conflict-exit-code"},
+        "strace": {"-e", "-p", "-s", "-u", "-a", "-P", "-I", "-b", "-X", "-O", "-S"},
+        "unbuffer": set(), "caffeinate": {"-t", "-w"},
+        "fakeroot": {"-s", "-i", "-l", "-b"},
+        "busybox": set(),
+        "uv run": {"--with", "--with-editable", "--with-requirements", "-p", "--python",
+                   "--package", "--extra", "--group", "--env-file", "--index", "--index-url",
+                   "--extra-index-url", "-w", "--only-group", "--no-group", "--default-index",
+                   "--find-links", "-f", "--upgrade-package", "-P", "--reinstall-package",
+                   "--refresh-package", "--resolution", "--prerelease", "--index-strategy",
+                   "--keyring-provider", "--exclude-newer", "--exclude-newer-package",
+                   "--link-mode", "--config-setting", "-C", "--no-build-package",
+                   "--no-binary-package", "--python-platform", "--cache-dir", "--config-file",
+                   "--color", "--allow-insecure-host", "--no-sources-package", "--fork-strategy"},
+        "pipx run": {"--spec", "--python"}, "poetry run": set(),
+    }
+    if base not in valued:
+        return None
+    i += 1
+    if base == "busybox":
+        return i
+    cpu_list = False
+    pid = False
+    while i < n and args[i].startswith("-") and args[i] != "-":
+        a = args[i]
+        if a == "--":
+            i += 1
+            break
+        if base == "uv run" and a.split("=", 1)[0] in ("--directory", "--project"):
+            scan.need("uv run changes directory")
+            return n
+        if base == "poetry run" and a.split("=", 1)[0] in (
+                "-C", "--directory", "-P", "--project"):
+            scan.need("poetry run changes directory")
+            return n
+        if base == "fakeroot" and a.startswith("-s"):
+            name = args[i + 1] if a == "-s" and i + 1 < n else a[2:]
+            if name:
+                scan.target(name, any(t[1] == name and t[2] for t in words))
+            else:
+                scan.need("fakeroot state file missing")
+            i += 2 if a == "-s" else 1
+            continue
+        if base == "flock" and (a in ("-c", "--command") or a.startswith("--command=")):
+            scan.need("flock runs a command string")
+            return n
+        if base == "taskset":
+            cpu_list |= a in ("-c", "--cpu-list") or a.startswith("--cpu-list=")
+            pid |= a == "-p" or (not a.startswith("--") and "p" in a[1:])
+        if base == "ionice" and (a.startswith("-p") or a.split("=", 1)[0] in (
+                "--pid", "--pgid", "--uid")):
+            pid = True
+        if base == "strace" and (a == "-o" or a.startswith(("-o", "--output="))):
+            name = args[i + 1] if a == "-o" and i + 1 < n else (
+                a.split("=", 1)[1] if a.startswith("--output=") else a[2:])
+            if name.startswith(("|", "!")):
+                scan.need("strace output runs a command")
+            else:
+                scan.target(name, any(t[1] == name and t[2] for t in words))
+            i += 2 if a == "-o" else 1
+            continue
+        i += 2 if a in valued[base] else 1
+    if pid:
+        return n  # -p operates on an existing process, not an inner command
+    if base == "taskset" and not cpu_list:
+        i += 1  # affinity mask operand
+    if base == "flock" and i < n:
+        if not args[i].isdigit():
+            scan.target(args[i], words[i][2])
+        i += 1
+        if i < n and args[i] in ("-c", "--command"):
+            scan.need("flock runs a command string")
+            return n
+    return i
 
 
 def _arith_end(toks: list[Token], k: int) -> int | None:
@@ -590,19 +1151,29 @@ def _arith_end(toks: list[Token], k: int) -> int | None:
 
 
 def check_command(cmd: str, root: Path) -> Verdict:
-    """Judge a shell command line against the project *root* before it runs."""
+    """Judge before execution; parse and path-resolution errors need approval."""
     if not cmd.strip():
         return Verdict(ALLOW)
     try:
         toks, subst = _tokenize(cmd)
     except ValueError as exc:
         return Verdict(NEEDS_APPROVAL, f"cannot parse command ({exc})" + _NOT_WIRED)
+    try:
+        return _check_tokens(cmd, root, toks, subst)
+    except (ValueError, RuntimeError, OSError) as exc:
+        return Verdict(NEEDS_APPROVAL,
+                       f"cannot judge command ({type(exc).__name__})" + _NOT_WIRED)
+
+
+def _check_tokens(cmd: str, root: Path, toks: list[Token], subst: bool) -> Verdict:
     scan = _Scan(root)
     if subst:
         scan.need(_SUBST_WHY)
-    if _ARITH_CMD.search(cmd) and _raw_nested_exec(cmd):
+    arithmetic = (re.search(r"(?<![\w$-])(?:let|declare|typeset|read)\b|\blocal\s+-\w*i", cmd)
+                  or re.search(r"\(\(|\[|\$\{!", _without_single_quotes(cmd)))
+    if arithmetic and _raw_nested_exec(cmd):
         scan.need(_ARITH_WHY)
-    if re.search(r"(?<![\w-])(?:cd|pushd|popd)(?![\w-])", cmd) and _LOOPS_OR_FUNCS.search(cmd):
+    if re.search(r"(?<![\w-])(?:cd|pushd|popd)(?![\w-])", cmd) and _has_loop_or_function(cmd):
         scan.need("cd combined with a loop or a function: the body may run in another directory")
     if "CDPATH" in cmd:
         scan.need("CDPATH changes where cd goes")
@@ -653,9 +1224,9 @@ def check_command(cmd: str, root: Path) -> Verdict:
                     stdin_code = True
                 k += 1
         else:
-            if kind == "word" and not words and text == "case":
+            if kind == "word" and _grammar_prefix(words) and text == "case":
                 cwd_stack.append(("case", None))
-            elif kind == "word" and not words and text == "esac":
+            elif kind == "word" and _grammar_prefix(words) and text == "esac":
                 while cwd_stack and cwd_stack[-1][0] != "case":
                     cwd_stack.pop()
                 if cwd_stack:
