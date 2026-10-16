@@ -135,11 +135,15 @@ def case(tmp_path, monkeypatch):
         dict(task_id="missing", commit_sha=commit, parent_sha="0" * 40),
     ], True)
     put(paths["rx_fixtures_manifest"], [
-        dict(name="edit-one", path="original/path", test="pytest", idx=7),
-        dict(name="edit-missing", path="missing/path", test="pytest", idx=8),
+        dict(name="one", idx=7, path="/generated/elsewhere/fixtures/edit-07-one",
+             module="m.py", func="f", test="tests/test_one.py", summary="S"),
+        dict(name="missing", idx=9, path="/generated/elsewhere/fixtures/edit-09-missing",
+             module="m.py", func="f", test="tests/test_missing.py", summary="S"),
+        dict(name="two", idx=8, path="/generated/elsewhere/fixtures/edit-08-two",
+             module="m.py", func="f", test="../escape.py", summary="S"),
     ])
-    put(rx / "fixtures/edit-one/file.txt", "fixture")
-    put(rx / "fixtures/edit-two/file.txt", "second fixture")
+    put(rx / "fixtures/edit-07-one/file.txt", "fixture")
+    put(rx / "fixtures/edit-08-two/file.txt", "second fixture")
     put(paths["census_py"],
         "from _p20_fake_census import BASH_UNRESOLVED, step_kind_of, offline_tool_class\n")
     put(paths["exec_sessions"], "exec\n")
@@ -240,13 +244,14 @@ def test_build(case, capsys):
         ["Read", "Grep", "Glob", "Bash", "Edit", "Write", "Custom"]
     )
     code = read_pool(case, "code")
-    assert [r["id"] for r in code] == ["nc-ok", "rx-edit-edit-one"]
+    assert [r["id"] for r in code] == ["nc-ok", "rx-edit-one"]
     assert code[0]["tier"] == "complex"
     assert code[1]["task_ref"] == dict(
-        stratum="rx_edit", name="edit-one", path="original/path", test="pytest", idx=7
+        stratum="rx_edit", dir="edit-07-one", name="one", module="m.py", func="f",
+        test="tests/test_one.py", idx=7,
     )
     assert manifest["counts"]["code"]["excluded"] == {
-        "checkout_unavailable": 1, "fixture_missing": 1,
+        "checkout_unavailable": 1, "fixture_missing": 1, "fixture_test_invalid": 1,
     }
     assert manifest["counts"]["qa"]["excluded"] == {"not_qa": 1}
     for name in case.module.SETS:
@@ -268,7 +273,7 @@ def test_pin_mismatch(case, name, capsys, monkeypatch):
 
     monkeypatch.setattr(case.module, "load_module", guarded)
     if name == "rx_edit_fixtures_tree":
-        put(case.rx / "fixtures/edit-one/file.txt", "mutated")
+        put(case.rx / "fixtures/edit-07-one/file.txt", "mutated")
     else:
         with case.paths[name].open("ab") as stream:
             stream.write(b"\n")
@@ -300,15 +305,15 @@ def test_tree_hash(case):
     expected = sha(b"".join(
         name.encode() + b"\0" + sha(content).encode() + b"\n"
         for name, content in sorted([
-            ("edit-one/file.txt", b"fixture"),
-            ("edit-two/file.txt", b"second fixture"),
+            ("edit-07-one/file.txt", b"fixture"),
+            ("edit-08-two/file.txt", b"second fixture"),
         ])
     ))
     assert case.module.tree_digest(root) == expected
     for name in (".hidden/a", "__pycache__/a", "ignored.pyc"):
-        put(root / "edit-one" / name, "ignored")
+        put(root / "edit-07-one" / name, "ignored")
     assert case.module.tree_digest(root) == expected
-    put(root / "edit-one/file.txt", "changed")
+    put(root / "edit-07-one/file.txt", "changed")
     assert case.module.tree_digest(root) != expected
 
 
@@ -483,3 +488,18 @@ def test_refusal_reason_is_safe(case, capsys):
     err = capsys.readouterr().err
     assert err.startswith("pool build refused: ValueError pin mismatch line ")
     assert MARKER not in err
+
+
+def test_step_found_in_subagent_transcript(case, capsys):
+    """A step whose response id lives only in <project>/<session>/subagents/*.jsonl is rebuilt."""
+    put(case.transcript_path, [entry("user", "main ask"), entry("assistant", "other", "x")], True)
+    put(case.transcripts / "project/good/subagents/agent-1.jsonl", [
+        entry("user", "sub ask " + MARKER), entry("assistant", "STOP", "target"),
+    ], True)
+    assert case.module.main(case.args) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["counts"]["tech_op"]["rows"] == 1
+    tech = read_pool(case, "tech_op")[0]
+    assert tech["request"] == "sub ask " + MARKER
+    manifest = json.loads((case.out / "pools/build_manifest.json").read_text())
+    assert "project/good/subagents/agent-1.jsonl" in manifest["transcripts"]

@@ -116,6 +116,12 @@ def child_path(root, value):
     return path
 
 
+def test_path(value):
+    if not re.fullmatch(r"tests/[A-Za-z0-9_./-]+\.py", value) or ".." in value:
+        raise h.Refuse("refusing: unsafe test path")
+    return value
+
+
 def remove_tests(path):
     if path.is_symlink() or path.is_file():
         path.unlink()
@@ -150,7 +156,7 @@ def attempt_task(cfg, c, args, item, attempt, tc, tc_hash, runner_hash, nc, pi):
             h.private_dir(base)
             work = base / "work"
             shutil.copytree(
-                child_path(args.rx_dir / "fixtures", ref["name"]), work,
+                child_path(args.rx_dir / "fixtures", ref["dir"]), work,
                 ignore=shutil.ignore_patterns(".git", "__pycache__", ".ruff_cache", "*.pyc"),
             )
             hidden = base / "hidden_tests"
@@ -160,9 +166,16 @@ def attempt_task(cfg, c, args, item, attempt, tc, tc_hash, runner_hash, nc, pi):
             git(work, "-c", "user.name=P20", "-c", "user.email=p20@localhost",
                 "-c", "commit.gpgsign=false", "commit", "-qm", "base")
             parent = git(work, "rev-parse", "HEAD")
+            # Task text comes from the pinned fixtures manifest (checked before the first
+            # rx_edit task), matched by idx and name; the pool carries no task text.
+            fixture = next(
+                f for f in json.loads((args.rx_dir / "fixtures/manifest.json").read_text())
+                if f.get("idx") == ref["idx"] and f.get("name") == ref["name"]
+            )
             prompt = (
-                f"In {ref['path']}, change `{ref['func']}` so that it does this: "
-                f"{ref['summary']}\nEdit the file directly. Do not create new top-level files."
+                f"In {fixture['module']}, change `{fixture['func']}` so that it does this: "
+                f"{fixture['summary']}\nEdit the file directly. "
+                "Do not create new top-level files."
             )
         else:
             raise h.Refuse("refusing: unknown code stratum")
@@ -185,7 +198,7 @@ def attempt_task(cfg, c, args, item, attempt, tc, tc_hash, runner_hash, nc, pi):
             try:
                 result = subprocess.run(
                     [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-                     f"tests/{ref['test']}"],
+                     test_path(ref["test"])],
                     cwd=work, stdin=subprocess.DEVNULL, capture_output=True, timeout=120,
                     env={"PATH": os.environ.get("PATH", ""), "HOME": str(work),
                          "PYTHONDONTWRITEBYTECODE": "1"}, check=False,

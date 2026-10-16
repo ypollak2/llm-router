@@ -83,19 +83,26 @@ def setup(factory, tmp_path, monkeypatch):
     nc_module = __import__("run_codex")
     pi = __import__("lib_pi")
     refs = [{"task_id": "nc"}]
+    rows = []
     for number in range(2):
-        name = f"edit-{number}"
-        fixture = rx / "fixtures" / name
+        name = f"fx{number}"
+        directory = f"edit-{number:02d}-{name}"
+        fixture = rx / "fixtures" / directory
         (fixture / "tests").mkdir(parents=True)
         (fixture / "fix.py").write_text("value = 0\n")
         (fixture / "tests/test_fix.py").write_text(
             "import runpy\n"
             "def test_hidden():\n    assert runpy.run_path('fix.py')['value'] == 1\n"
         )
-        refs.append(dict(name=name, path="fix.py", func="value", summary="PRIVATE SUMMARY",
-                         test="test_fix.py"))
+        # Real manifest shape: name, idx, absolute path of edit-<idx>-<name>, module, func,
+        # summary, and test with its tests/ prefix; the pool's task_ref carries no summary.
+        rows.append(dict(name=name, idx=number, path=f"/elsewhere/fixtures/{directory}",
+                         module="fix.py", func="value", summary="PRIVATE SUMMARY",
+                         test="tests/test_fix.py"))
+        refs.append(dict(stratum="rx_edit", dir=directory, name=name, idx=number,
+                         module="fix.py", func="value", test="tests/test_fix.py"))
     manifest = rx / "fixtures/manifest.json"
-    manifest.write_text("{}")
+    manifest.write_text(json.dumps(rows))
     h.write_json(cfg.run_dir / "pools/build_manifest.json", {
         "sources": {"rx_fixtures_manifest": h.sha256_file(manifest)},
     })

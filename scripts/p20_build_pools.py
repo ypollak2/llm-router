@@ -343,10 +343,19 @@ def build(args):
         if not matches:
             exclude("tech_op", "transcript_missing")
             continue
-        path = matches[0]
-        raw = path.read_bytes()
-        transcripts[path.relative_to(args.transcripts_root).as_posix()] = digest(raw)
-        messages, tools, request, reason = transcript(raw, msg_id)
+        # The session's own transcript first, then its sub-agent transcripts
+        # (<project>/<session>/**/*.jsonl): a step's response id can live in either.
+        main = matches[0]
+        candidates = [main] + sorted(
+            p for p in (main.parent / session).glob("**/*.jsonl") if p.is_file()
+        )
+        reason = "msg_not_found"
+        for path in candidates:
+            raw = path.read_bytes()
+            transcripts[path.relative_to(args.transcripts_root).as_posix()] = digest(raw)
+            messages, tools, request, reason = transcript(raw, msg_id)
+            if reason != "msg_not_found":
+                break
         if reason:
             exclude("tech_op", reason)
             continue
@@ -380,12 +389,21 @@ def build(args):
     fixtures = rows(json.loads(data["rx_fixtures_manifest"]))
     index(fixtures, "name")
     for fixture in fixtures:
-        if not (rx / "fixtures" / fixture["name"]).is_dir():
+        # The fixture directory is edit-<idx:02d>-<name> (manifest "path" is its absolute
+        # location on the machine that generated it); "name" alone is not a directory.
+        directory = f"edit-{int(fixture['idx']):02d}-{fixture['name']}"
+        test = str(fixture.get("test", ""))
+        if (Path(str(fixture.get("path", ""))).name != directory
+                or not (rx / "fixtures" / directory).is_dir()):
             exclude("code", "fixture_missing")
+            continue
+        if not re.fullmatch(r"tests/[A-Za-z0-9_./-]+\.py", test) or ".." in test:
+            exclude("code", "fixture_test_invalid")
             continue
         add("code", "rx_edit", "rx-edit-" + fixture["name"], "real", "rx_edit",
             "unlabelled", "code", task_ref=dict(
-                stratum="rx_edit", **{k: fixture[k] for k in ("name", "path", "test", "idx")}
+                stratum="rx_edit", dir=directory,
+                **{k: fixture[k] for k in ("name", "module", "func", "test", "idx")}
             ))
     return finish(args, out, pools, counts, sources, transcripts, membership)
 
@@ -422,7 +440,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     base = "~/.rsi/research/"
     for name, default in {
-        "out": base + "primary-plan/v16/requal",
+        "out": base + "primary-plan/v16/requal/b2",
         "rx-dir": base + "routing-experiment-2026-10-01",
         "gt-dir": base + "primary-plan/v16/gt500",
         "noncloud-dir": base + "classifier-v2-release/ab/work/noncloud",

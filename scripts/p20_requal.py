@@ -1203,7 +1203,7 @@ def status(cfg: Cfg) -> dict:
 def parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     default = os.environ.get("P20_REQUAL_DIR", str(
-        Path.home() / ".rsi/research/primary-plan/v16/requal",
+        Path.home() / ".rsi/research/primary-plan/v16/requal/b2",
     ))
     ap.add_argument("--run-dir", type=Path, default=Path(default))
     sub = ap.add_subparsers(dest="command", required=True)
