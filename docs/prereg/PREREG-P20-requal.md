@@ -272,8 +272,8 @@ For code, "powered" uses each lane's own paired n.
   * A class whose set is `not_informative` or has any `inconclusive` lane (and no `eligible` lane)
     cancels nothing. That class gets "no decision" and a new prereg (larger n or a different
     design) before any further run.
-  * If both P2.1 and P2.10 are cancelled, v16 continues with Haiku / very-cheap offload and D-27 is
-    re-asked (plan text).
+  * If P2.1 is cancelled and no local lane is eligible in any set, v16 continues with Haiku /
+    very-cheap offload and D-27 is re-asked.
 * **P2.1 needs an eligible model.** It proceeds only with ≥ 1 `eligible` tech-op lane. Without one,
   e_tech = 0 (§11), and P2.1 local tech-op serving does not start, even when P2.1 is not cancelled
   (no decision). P2.10 likewise re-enables only the lanes D-21 allows.
