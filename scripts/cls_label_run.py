@@ -10,20 +10,38 @@ Nothing here runs until PREREG-CLS-DEV is frozen. Output: counts only (stdout an
 Item text lives only in the 0600 input items file and in the stdin of a judge child (after scrub, PII
 replacement and outgoing_check on the exact bytes). It is never printed, logged or put in an exception.
 
-Prompt contract (cls_label_run reads it from the module named by --prompt-module, normally the pinned
-rubric.py): RUBRIC (str), ITEM_TEMPLATE, BATCH_TAIL, SINGLE_TAIL (format strings; fields id, ctx, prompt),
-PLANTS ({plant_id: {text, digest, expected}}), optional prompt_view(str).
+Judge-prompt contract = the repo's P1.7-d labeller (scripts/p17d_synthetic.py load_label_mods / judge_call /
+Labeller), read from PINS-STATIC:
+  * gt500.py from params.gt500_py, its sha256 equal to pins.gt500.sha256 and to cls_pins.GT500_SHA256 (as
+    p17d's load_pinned); gt.RUBRIC_MD5 must equal the rubric md5. Required: gt.load_rubric, gt.prompt_view,
+    gt.valid_label, gt.extract_json (a gt500 without prompt_view is refused: a raw prompt is never sent).
+  * rubric.py from params.rubric_py, its md5 equal to pins.rubric.md5 and cls_pins.RUBRIC_MD5 and its sha256
+    equal to pins.rubric.sha256, loaded through gt.load_rubric(path). `--prompt-module`, when given, must name
+    that same pinned file (anything else exits 9).
+  * rub.PLANTED = list of {id, expect, context, prompt} (the 6 cal-* items); rub.ITEM_TEMPLATE.format(id=,
+    context=, prompt=gt.prompt_view(prompt)); items joined by a blank line, then a blank line and
+    rub.BATCH_TAIL (or rub.SINGLE_TAIL) VERBATIM (no format_map).
+  * RUBRIC placement: P17D passed rub.RUBRIC as `--system-prompt`; the frozen judge argv (PREREG 3.2, pinned
+    help lines) has no such flag and codex has none, so rub.RUBRIC is the FIRST block of the stdin payload
+    (RUBRIC, a blank line, then the items). It therefore also passes outgoing_check with the items.
+  * Answers: gt.extract_json(text); a batch answer is {"labels": [{"id", "tier", ...}]}; a single answer is
+    one label object (or {"labels": [one]}) that MUST carry "id" equal to the asked opaque id. A label is
+    kept only if gt.valid_label(label, rub) and its tier is haiku/sonnet/opus.
+Failure classes: a wrong plant or a model change (claude family differs, id changes mid-run) VOIDS the judge
+run (PREREG 3.3). A codex non-zero rc (bad -m, timeout, CLI error) and a claude answer with no model id STOP
+and PARK the run (D-147): never a void, never a TRUTH_FALLBACK.
+Ledger: every call writes a `pending` row (calls_<judge>.jsonl; for Opus also the shared spend log) BEFORE the
+child starts and a `done` row after it; a timeout is a recorded failure (Opus: charged at the estimate).
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
 import random
-import re
 import sys
+import types
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -42,6 +60,7 @@ INTERLEAVE_EVERY = 10
 MAX_BATCH_TRIES = 3
 PLANT_IDS = ["cal-h1", "cal-h2", "cal-s1", "cal-s2", "cal-o1", "cal-o2"]
 FIRST_CALL_REAL = 2
+PROVIDER = {"gpt": "codex", "sonnet": "claude", "opus": "claude"}
 
 VERIFY_PINS = P.verify_at_start  # patched in tests; every command calls it first
 
@@ -53,29 +72,101 @@ class Void(Exception):
         self.code = code
 
 
-class _Safe(dict):
-    def __missing__(self, key):
-        return ""
-
-
 def sha_order(item_id: str) -> str:
     return hashlib.sha256((ORDER_PREFIX + item_id).encode()).hexdigest()
 
 
-def load_prompt_module(path):
-    spec = importlib.util.spec_from_file_location("cls_prompt_module", str(path))
-    if spec is None or spec.loader is None:
-        raise S.CLSExit(S.EXIT_REFUSE, "prompt module not loadable")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    for name in ("RUBRIC", "ITEM_TEMPLATE", "BATCH_TAIL", "SINGLE_TAIL", "PLANTS"):
-        if not hasattr(mod, name):
-            raise S.CLSExit(S.EXIT_REFUSE, "prompt module lacks %s" % name)
-    plants = mod.PLANTS
-    if sorted(plants) != sorted(PLANT_IDS):
-        raise S.CLSExit(S.EXIT_REFUSE, "prompt module must define exactly the 6 planted items")
-    return mod
+# ---------------------------------------------------------------------------------------------
+# The pinned judge-prompt modules (gt500.py + rubric.py)
+# ---------------------------------------------------------------------------------------------
 
+class JudgeMods:
+    """The pinned gt500 module and the rubric module it loaded, plus their identifying hashes."""
+
+    def __init__(self, gt, rub, rubric_md5: str, gt500_sha256: str):
+        self.gt, self.rub, self.rubric_md5, self.gt500_sha256 = gt, rub, rubric_md5, gt500_sha256
+
+
+def _static_doc(pins_static) -> dict:
+    try:
+        return json.loads(Path(pins_static).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        raise S.CLSExit(S.EXIT_PINS, "PINS-STATIC not readable") from None
+
+
+def resolve_rubric(prompt_module, doc: dict) -> tuple[Path, str]:
+    """The rubric.py path to load and its md5, after the pin checks. Refuses (exit 9) a --prompt-module that is
+    not the pinned file, and a pinned file whose md5/sha256 differ from PINS-STATIC or the prereg md5."""
+    params, pins = doc.get("params", {}), doc.get("pins", {})
+    want = pins.get("rubric") or {}
+    if not params.get("rubric_py") or not want.get("md5") or not want.get("sha256"):
+        raise S.CLSExit(S.EXIT_PINS, "PINS-STATIC lacks the rubric path or its md5/sha256")
+    pinned = Path(params["rubric_py"])
+    if prompt_module and os.path.realpath(str(prompt_module)) != os.path.realpath(str(pinned)):
+        raise S.CLSExit(S.EXIT_PINS, "--prompt-module is not the pinned rubric.py")
+    try:
+        data = pinned.read_bytes()
+    except OSError:
+        raise S.CLSExit(S.EXIT_PINS, "pinned rubric.py not readable") from None
+    md5 = hashlib.md5(data).hexdigest()  # noqa: S324 (identification: the prereg pins the rubric by md5)
+    if md5 != want["md5"] or md5 != P.RUBRIC_MD5 or S.sha256_bytes(data) != want["sha256"]:
+        raise S.CLSExit(S.EXIT_PINS, "rubric.py md5/sha256 differ from PINS-STATIC")
+    return pinned, md5
+
+
+def _load_gt500(doc: dict):
+    params, pins = doc.get("params", {}), doc.get("pins", {})
+    want = (pins.get("gt500") or {}).get("sha256")
+    path = params.get("gt500_py")
+    if not path or not want:
+        raise S.CLSExit(S.EXIT_PINS, "PINS-STATIC lacks the gt500 path or its sha256")
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        raise S.CLSExit(S.EXIT_PINS, "pinned gt500.py not readable") from None
+    sha = S.sha256_bytes(data)
+    if sha != want or sha != P.GT500_SHA256:
+        raise S.CLSExit(S.EXIT_PINS, "gt500.py sha256 differs from PINS-STATIC")
+    # As p17d_attach.load_pinned: no bytecode, the helper's own directory importable for its siblings. The
+    # verified bytes are what is executed (no second read of the file).
+    sys.dont_write_bytecode = True
+    parent = str(Path(path).resolve().parent)
+    if parent not in sys.path:
+        sys.path.append(parent)
+    mod = types.ModuleType("cls_gt500")
+    mod.__file__ = str(path)
+    sys.modules["cls_gt500"] = mod
+    exec(compile(data, str(path), "exec"), mod.__dict__)  # noqa: S102 (pinned by sha256 just above)
+    return mod, sha
+
+
+def load_judge_mods(pins_static, prompt_module=None) -> JudgeMods:
+    """gt500.py by its pinned sha, rubric.py from its pinned path with the md5 check, through gt.load_rubric
+    (the P1.7-d contract). Any missing name refuses before anything is sent."""
+    doc = _static_doc(pins_static)
+    rub_path, md5 = resolve_rubric(prompt_module, doc)
+    gt, gsha = _load_gt500(doc)
+    for name in ("load_rubric", "prompt_view", "valid_label", "extract_json"):
+        if not callable(getattr(gt, name, None)):
+            raise S.CLSExit(S.EXIT_PINS, "gt500 lacks %s" % name)
+    if getattr(gt, "RUBRIC_MD5", None) != md5:
+        raise S.CLSExit(S.EXIT_PINS, "gt500 RUBRIC_MD5 differs from the pinned rubric md5")
+    rub = gt.load_rubric(rub_path)
+    for name in ("RUBRIC", "ITEM_TEMPLATE", "BATCH_TAIL", "SINGLE_TAIL"):
+        if not isinstance(getattr(rub, name, None), str):
+            raise S.CLSExit(S.EXIT_REFUSE, "rubric lacks %s" % name)
+    planted = getattr(rub, "PLANTED", None)
+    if not isinstance(planted, list) or not all(isinstance(p, dict) and {"id", "expect", "context", "prompt"} <= set(p)
+                                                 for p in planted):
+        raise S.CLSExit(S.EXIT_REFUSE, "rubric PLANTED must be a list of {id, expect, context, prompt}")
+    if sorted(p["id"] for p in planted) != sorted(PLANT_IDS) or any(p["expect"] not in TIERS for p in planted):
+        raise S.CLSExit(S.EXIT_REFUSE, "rubric must define exactly the 6 planted items")
+    return JudgeMods(gt, rub, md5, gsha)
+
+
+# ---------------------------------------------------------------------------------------------
+# Items, plan, payload, answers
+# ---------------------------------------------------------------------------------------------
 
 def read_items(text: str) -> dict:
     out = {}
@@ -155,51 +246,48 @@ def build_plan(set_name: str, judge: str, kept: list[dict]) -> dict:
             "first_call_real": first, "batches": batches}
 
 
-def render_item(mod, opaque: str, ctx: str, prompt: str) -> str:
-    view = getattr(mod, "prompt_view", None)
-    p = view(prompt) if callable(view) else prompt
-    return mod.ITEM_TEMPLATE.format_map(_Safe(id=opaque, ctx=ctx, context=ctx, digest=ctx, prompt=p, text=p))
+def render_item(mods: JudgeMods, opaque: str, ctx: str, prompt: str) -> str:
+    """One item block: rub.ITEM_TEMPLATE with the P17D field names; the prompt always in gt.prompt_view form."""
+    return mods.rub.ITEM_TEMPLATE.format(id=opaque, context=ctx, prompt=mods.gt.prompt_view(prompt))
 
 
-def build_payload(mod, entries: list[dict], *, single: bool) -> bytes:
-    """The final bytes: rubric + one item block per entry + the tail. This is what outgoing_check sees."""
-    tail = mod.SINGLE_TAIL if single else mod.BATCH_TAIL
-    body = "".join(render_item(mod, e["opaque"], e["ctx"], e["prompt"]) for e in entries)
-    return (mod.RUBRIC + "\n" + body + tail.format_map(_Safe(n=len(entries)))).encode("utf-8")
+def build_payload(mods: JudgeMods, entries: list[dict], *, single: bool) -> bytes:
+    """The final bytes: rub.RUBRIC, a blank line, the item blocks joined by a blank line, a blank line and the
+    tail verbatim. This is what outgoing_check sees."""
+    tail = mods.rub.SINGLE_TAIL if single else mods.rub.BATCH_TAIL
+    user = "\n\n".join(render_item(mods, e["opaque"], e["ctx"], e["prompt"]) for e in entries) + "\n\n" + tail
+    return (mods.rub.RUBRIC + "\n\n" + user).encode("utf-8")
 
 
-_TIER_RE = re.compile(r"\b(L\d+)\b[^A-Za-z0-9]{1,12}(haiku|sonnet|opus)\b", re.IGNORECASE)
-
-
-def parse_tiers(text: str) -> dict:
-    """opaque id -> tier. Tries JSON (dict id->tier, or a list of {id, tier}) first, then id/tier pairs."""
+def parse_labels(mods: JudgeMods, text: str, ids: list[str], *, single: bool) -> dict:
+    """opaque id -> label dict, for labels that gt.valid_label accepts and whose tier is a known tier. Every
+    label, single answers included, must carry its id."""
+    try:
+        obj = mods.gt.extract_json(text)
+    except Exception:  # noqa: BLE001 - an unparsable answer labels nothing; the batch rules retry
+        return {}
+    rows = obj.get("labels") if isinstance(obj, dict) else None
+    if single and not isinstance(rows, list):
+        rows = [obj] if isinstance(obj, dict) else None
+    if not isinstance(rows, list):
+        return {}
     out = {}
-    m = re.search(r"[\[{].*[\]}]", text, re.DOTALL)
-    if m:
+    for lab in rows:
+        if not isinstance(lab, dict) or lab.get("id") is None or str(lab["id"]) not in ids:
+            continue
         try:
-            obj = json.loads(m.group(0))
-        except ValueError:
-            obj = None
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                if isinstance(v, str) and v.lower() in TIERS:
-                    out[str(k)] = v.lower()
-        elif isinstance(obj, list):
-            for d in obj:
-                if isinstance(d, dict):
-                    t = d.get("tier") or d.get("label") or d.get("rating")
-                    if d.get("id") and isinstance(t, str) and t.lower() in TIERS:
-                        out[str(d["id"])] = t.lower()
-    if not out:
-        for oid, t in _TIER_RE.findall(text):
-            out[oid] = t.lower()
+            ok = bool(mods.gt.valid_label(lab, mods.rub))
+        except Exception:  # noqa: BLE001 - a label the validator cannot judge is not valid
+            ok = False
+        if ok and lab.get("tier") in TIERS:
+            out[str(lab["id"])] = lab
     return out
 
 
 def check_model_id(judge: str, ids: list[str], pinned_id: str | None, recorded_id: str | None) -> tuple[bool, str]:
-    """claude: every reported model id is of the judge's family (opus/sonnet pinned) and equals the id seen
-    earlier in this run; codex: the CLI-reported id equals the pinned id. A differing family or a mid-run
-    id change is not ok."""
+    """claude: every reported model id is of the judge's family and equals the id seen earlier in this run.
+    codex: the served id (the -m pin, see S.served_model_ids) equals the pin. An empty list is
+    `no_model_id_reported` (a park, see classify_call); a differing family or a mid-run change is a void."""
     if not ids:
         return False, "no_model_id_reported"
     if judge == "gpt":
@@ -210,6 +298,22 @@ def check_model_id(judge: str, ids: list[str], pinned_id: str | None, recorded_i
     if recorded_id and ids != [recorded_id]:
         return False, "model_id_changed_mid_run"
     return True, ""
+
+
+def classify_call(judge: str, rc: int, timed_out: bool, id_ok: bool, id_reason: str) -> str:
+    """ok | retry | park | void for one finished call (D-147).
+    codex: any non-zero rc (an unknown -m id exits 1; a timeout) -> park.
+    claude: rc 0 with no model id -> park; rc 0 with a wrong family / mid-run change -> void; a non-zero rc or a
+    timeout -> retry under the batch rules (recorded first)."""
+    if judge == "gpt":
+        if rc != 0 or timed_out:
+            return "park"
+        return "ok" if id_ok else "park"
+    if rc != 0 or timed_out:
+        return "retry"
+    if id_ok:
+        return "ok"
+    return "park" if id_reason == "no_model_id_reported" else "void"
 
 
 class Status:
@@ -228,7 +332,8 @@ class Status:
     def judge(self, j) -> dict:
         return self.doc["judges"].setdefault(j, {"state": "new", "calls": 0, "batches_done": 0, "label_errors": 0,
                                                  "scrub_abort": 0, "retro_exclusions": 0, "excluded_detector": {},
-                                                 "plants": {"asked": 0, "correct": 0, "wrong": 0}, "cwd_leftover": 0})
+                                                 "plants": {"asked": 0, "correct": 0, "wrong": 0}, "cwd_leftover": 0,
+                                                 "timeouts": 0})
 
     def save(self):
         voided = sorted(j for j, v in self.doc["judges"].items() if v.get("state") == "voided")
@@ -258,6 +363,8 @@ class Runner:
         self.plan_path = self.run_dir / ("plan_%s.json" % judge)
         self.pinned = S_load_model_ids(a.pins_static)
         self.pinned_id = self.pinned.get("judge_" + judge)
+        if not self.pinned_id:
+            raise S.CLSExit(S.EXIT_PINS, "PINS-STATIC has no model id for judge_%s" % judge)
         self.spend = S.SpendLog(a.spend_log or (Path(a.cls_root) / "spend_log.jsonl"), a.cap_usd)
 
     # -- inputs ------------------------------------------------------------------------------
@@ -272,8 +379,9 @@ class Runner:
             text = S.read_guarded_text(a.items, a.cls_root)
         items = read_items(text)
         truth = manifest_truth(a.manifest) if a.manifest else None
-        self.mod = load_prompt_module(a.prompt_module)
+        self.mods = load_judge_mods(a.pins_static, a.prompt_module)
         self.ctx = S.ScrubContext(S.load_denylist(a.denylist), S.load_env_values(a.env_file)[0])
+        S.configure(self.ctx)  # detector (d) (denylist + .env values) also applies inside outgoing_check at send
         return items, truth
 
     def make_plan(self, items, truth, *, write=True):
@@ -296,7 +404,7 @@ class Runner:
 
     # -- calls -------------------------------------------------------------------------------
     def _n_calls(self) -> int:
-        return len(S.read_jsonl(self.calls_path))
+        return sum(1 for r in S.read_jsonl(self.calls_path) if r.get("phase") == "pending")
 
     def _log_call(self, **rec):
         rec.update({"utc": S.utc_now(), "judge": self.judge})
@@ -304,38 +412,66 @@ class Runner:
 
     def _send(self, payload: bytes, batch_id: str):
         a = self.a
-        res, leftover = S.child_call("codex" if self.judge == "gpt" else "claude", self.pinned_id or self.judge,
-                                     payload, self.run_dir, claude_bin=a.claude_bin, codex_bin=a.codex_bin,
-                                     timeout=a.timeout, batch_id=batch_id)
+        res, leftover = S.child_call(PROVIDER[self.judge], self.pinned_id, payload, self.run_dir, claude_bin=a.claude_bin,
+                                     codex_bin=a.codex_bin, timeout=a.timeout, batch_id=batch_id)
         self.js["cwd_leftover"] += leftover
         return res
 
     def ask(self, entries, *, single, batch_no, attempt, kind) -> dict | None:
-        """One call. Returns {tiers, call_id, ids, usd} on a complete parse, None on a failed call.
-        ScrubAbort propagates (caller counts it). A model-id problem raises Void."""
-        if self.judge == "opus":
-            self.spend.guard()
-        payload = build_payload(self.mod, entries, single=single)
+        """One call. Returns {labels, tiers, call_id, model_id, usd} on a complete parse, None on a failed call
+        (retried by the caller). ScrubAbort propagates (caller counts it). A model change raises Void; a codex
+        failure or a missing claude model id raises CLSExit (park)."""
+        payload = build_payload(self.mods, entries, single=single)
         call_id = "%s-%06d" % (self.judge, self._n_calls() + 1)
-        res = self._send(payload, call_id)
+        priced = self.judge == "opus"
+        est = 0.0
+        if priced:
+            self.spend.guard()
+            est = self.spend.estimate()
+            self.spend.pending(call_id, self.pinned_id, PROVIDER[self.judge], est)
+        base = {"call_id": call_id, "batch": batch_no, "attempt": attempt, "kind": kind, "n_items": len(entries)}
+        self._log_call(phase="pending", **base)
+        try:
+            res = self._send(payload, call_id)
+        except S.ScrubAbort:
+            self._log_call(phase="done", outcome="scrub_abort", rc=None, model_ids=[], usd=0.0, **base)
+            if priced:
+                self.spend.record(self.pinned_id, PROVIDER[self.judge], 0, 0.0, call_id=call_id, cost_basis="not_sent")
+            raise
+        except OSError:
+            self._log_call(phase="done", outcome="not_started", rc=None, model_ids=[], usd=0.0, **base)
+            if priced:
+                self.spend.record(self.pinned_id, PROVIDER[self.judge], 0, 0.0, call_id=call_id, cost_basis="not_sent")
+            raise S.CLSExit(S.EXIT_REFUSE, "judge child could not be started") from None
         self.js["calls"] += 1
         parsed = (S.parse_codex_jsonl if self.judge == "gpt" else S.parse_claude_json)(res.stdout)
-        usd = parsed.get("cost_usd", 0.0) if self.judge == "opus" else 0.0
-        if self.judge == "opus" or parsed.get("cost_usd"):
-            self.spend.record(self.pinned_id or self.judge, "claude" if self.judge != "gpt" else "codex",
-                              parsed.get("tokens", 0), usd, call_id=call_id)
-        ok, reason = check_model_id(self.judge, parsed["model_ids"], self.pinned_id, self.js.get("model_id"))
-        self._log_call(call_id=call_id, batch=batch_no, attempt=attempt, kind=kind, rc=res.returncode,
-                       model_ids=parsed["model_ids"], n_items=len(entries), usd=usd)
-        if res.returncode == 0 and not ok:
+        usd = 0.0
+        if priced:
+            usd = est if res.timed_out else float(parsed.get("cost_usd", 0.0) or 0.0)
+            self.spend.record(self.pinned_id, PROVIDER[self.judge], parsed.get("tokens", 0), usd, call_id=call_id,
+                              cost_basis="estimate" if res.timed_out else "reported")
+        if res.timed_out:
+            self.js["timeouts"] += 1
+        ids = S.served_model_ids(PROVIDER[self.judge], parsed, self.pinned_id)
+        ok, reason = check_model_id(self.judge, ids, self.pinned_id, self.js.get("model_id"))
+        verdict = classify_call(self.judge, res.returncode, res.timed_out, ok, reason)
+        self._log_call(phase="done", outcome="timeout" if res.timed_out else verdict, rc=res.returncode,
+                       model_ids=ids, usd=usd, **base)
+        if verdict == "void":
             raise Void(reason, S.EXIT_MODEL_ID)
-        if res.returncode != 0 or not parsed.get("ok"):
+        if verdict == "park":
+            if self.judge == "gpt":
+                raise S.CLSExit(S.EXIT_GPT_PARK, "codex call failed (rc=%d%s); parked, not voided" % (
+                    res.returncode, ", timeout" if res.timed_out else ""))
+            raise S.CLSExit(S.EXIT_MODEL_ID, "%s; parked, not voided" % reason)
+        if verdict == "retry" or not parsed.get("ok"):
             return None
-        tiers = parse_tiers(parsed["text"])
-        if any(e["opaque"] not in tiers for e in entries):
+        labels = parse_labels(self.mods, parsed["text"], [e["opaque"] for e in entries], single=single)
+        if any(e["opaque"] not in labels for e in entries):
             return None
-        self.js["model_id"] = parsed["model_ids"][0]
-        return {"tiers": tiers, "call_id": call_id, "model_id": parsed["model_ids"][0], "usd": usd}
+        self.js["model_id"] = ids[0]
+        return {"labels": labels, "tiers": {k: v["tier"] for k, v in labels.items()}, "call_id": call_id,
+                "model_id": ids[0], "usd": usd}
 
     # -- plants ------------------------------------------------------------------------------
     def _cursor(self) -> int:
@@ -347,11 +483,12 @@ class Runner:
         if cur + len(plant_ids) > len(pool):
             raise S.CLSExit(S.EXIT_REFUSE, "opaque id pool for plants exhausted")
         S.write_private(self.state_path, json.dumps({"plant_cursor": cur + len(plant_ids)}) + "\n")
+        planted = {p["id"]: p for p in self.mods.rub.PLANTED}
         out = []
         for k, pid in enumerate(plant_ids):
-            pl = self.mod.PLANTS[pid]
-            out.append({"opaque": pool[cur + k], "plant_id": pid, "plant": True, "expected": pl["expected"],
-                        "ctx": S.pii_replace((pl.get("digest") or "")[:S.DIGEST_CAP]), "prompt": pl["text"]})
+            pl = planted[pid]
+            out.append({"opaque": pool[cur + k], "plant_id": pid, "plant": True, "expected": pl["expect"],
+                        "ctx": S.pii_replace(pl["context"] or ""), "prompt": S.pii_replace(pl["prompt"] or "")})
         return out
 
     def interleave_pair(self) -> list[str]:
@@ -451,6 +588,7 @@ class Runner:
             raise S.CLSExit(self.js.get("code", S.EXIT_PLANT_VOID), "judge run is voided (terminal)")
         plan = self.make_plan(items, truth)
         self.js["state"] = "running"
+        self.js.pop("stop_reason", None)
         code = S.EXIT_OK
         try:
             if not plan["order"]:
@@ -493,16 +631,14 @@ class Runner:
         return code
 
     def canary(self):
-        def sender(payload: bytes) -> str:
-            res = self._send(payload, "canary")
-            return S.parse_codex_jsonl(res.stdout)["text"]
-        S.codex_canary(sender, self.run_dir / "canary", log=lambda m: self.js.__setitem__("canary", m))
+        S.run_codex_canary(self.pinned_id, self.run_dir / "canary", codex_bin=self.a.codex_bin, timeout=self.a.timeout,
+                           log=lambda m: self.js.__setitem__("canary", m))
 
 
 def S_load_model_ids(pins_static) -> dict:
     try:
         return json.loads(Path(pins_static).read_text(encoding="utf-8"))["pins"]["model_ids"]
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, TypeError):
         raise S.CLSExit(S.EXIT_PINS, "model_ids not readable from PINS-STATIC") from None
 
 
@@ -521,7 +657,8 @@ def build_parser():
             p.add_argument("--judge", required=True, choices=JUDGES)
             p.add_argument("--items", required=True)
             p.add_argument("--manifest")
-            p.add_argument("--prompt-module", required=True)
+            p.add_argument("--prompt-module", default=None,
+                           help="optional; must be the pinned rubric.py (PINS-STATIC params.rubric_py), else exit 9")
             p.add_argument("--denylist")
             p.add_argument("--env-file")
             p.add_argument("--release-token")
@@ -546,7 +683,7 @@ def cmd_plan(a) -> int:
     r = Runner(a, a.judge)
     items, truth = r.load()
     plan = r.make_plan(items, truth)
-    S.outgoing_check(r.mod.RUBRIC.encode("utf-8"), batch_id="rubric")  # the template itself must be clean
+    S.outgoing_check(r.mods.rub.RUBRIC.encode("utf-8"), batch_id="rubric")  # the template itself must be clean
     r.status.save()
     print(json.dumps({"set": a.set, "judge": a.judge, "n_items": len(plan["order"]),
                       "n_batches": len(plan["batches"]), "excluded_detector": r.js["excluded_detector"],
@@ -558,13 +695,14 @@ def cmd_run(a) -> int:
     env_sha = _start(a)
     r = Runner(a, a.judge)
     items, truth = r.load()
-    S.outgoing_check(r.mod.RUBRIC.encode("utf-8"), batch_id="rubric")
+    S.outgoing_check(r.mods.rub.RUBRIC.encode("utf-8"), batch_id="rubric")
     code = r.run(items, truth)
     js = r.js
     print(json.dumps({"set": a.set, "judge": a.judge, "state": js["state"], "calls": js["calls"],
                       "batches": js["batches_done"], "label_errors": js["label_errors"],
                       "scrub_abort": js["scrub_abort"], "retro_exclusions": js["retro_exclusions"],
-                      "plants": js["plants"], "env_sha_at_use": env_sha, "exit": code}, sort_keys=True))
+                      "plants": js["plants"], "timeouts": js.get("timeouts", 0), "env_sha_at_use": env_sha,
+                      "exit": code}, sort_keys=True))
     return code
 
 

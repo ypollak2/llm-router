@@ -3,18 +3,23 @@
 
   cls_pins.py pins --static --out PINS-STATIC.json --engine-commit SHA [--repo R] ...
   cls_pins.py pins --run --entry NAME --files F [F...] [--rules-tier FILE] [--pins-run pins_run.jsonl]
-  cls_pins.py pins --verify PINS-STATIC.json [--pins-run pins_run.jsonl]
+  cls_pins.py pins --verify PINS-STATIC.json [--pins-run pins_run.jsonl] [--freeze-record F]
   cls_pins.py pins --freeze-line PINS-STATIC.json
 
 A STATIC pin that cannot be computed is an ERROR (exit 9) naming it. Nothing is omitted silently.
 `--verify` checks STATIC always and RUN entries once any exist; the .env sha256 is never a hard pin
-(it logs env_sha_at_use and warns env_changed_since_freeze). Output: counts and key names only.
+(it logs env_sha_at_use and warns env_changed_since_freeze). `--verify` also checks the sha256 of the
+PINS-STATIC file itself against the `pins_sha256` line of the freeze record (PREREG section 15:
+`docs/prereg/PREREG-CLS-DEV.sha256` under the pinned repo): fail closed once that record exists, a named
+warning before the freeze. Output: counts and key names only.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import os
+import pwd
 import re
 import subprocess
 import sys
@@ -34,6 +39,13 @@ GENERATOR_V1_FILES = ["tmpl_gpt.v1.txt", "tmpl_opus.v1.txt", "task_tool_mask.v1.
                       "intent_phrases.v1.json", "meta_patterns.v1.json"]
 OLLAMA_MODELS = ["nimble:9b", "qwen3.5:latest", "qwen3-coder:30b", "nomic-embed-text"]
 RUBRIC_MD5 = "1bcb3f441a0c9d056b3343a9d47c5565"
+#: gt500.py (the GE3 labeller helpers: prompt_view, valid_label, extract_json, load_rubric), pinned by sha as
+#: in PREREG-CLS-DEV section 2 and scripts/p17d_synthetic.py GT500_SHA256.
+GT500_SHA256 = "9cde774dfe93387d6ee3dfcbd1b5481a537f265e5961d82f85a87d29d6328959"
+#: Where p17d_synthetic.py finds gt500.py (GT_SCRIPTS): under the REAL home, never $HOME.
+DEFAULT_GT500_PY = str(Path(pwd.getpwuid(os.getuid()).pw_dir) / ".rsi" / "research" / "primary-plan" / "v16" / "gt500"
+                       / "scripts" / "gt500.py")
+FREEZE_RECORD_REL = "docs/prereg/PREREG-CLS-DEV.sha256"
 CLAUDE_FLAGS = ["--safe-mode", "--settings", "--tools", "--strict-mcp-config", "--no-session-persistence",
                 "--setting-sources", "--output-format", "--model"]
 CODEX_FLAGS = ["-s", "-C", "--skip-git-repo-check", "--ephemeral", "--json", "-m"]
@@ -67,10 +79,18 @@ def _git_show(repo, commit, path) -> bytes:
     return r.stdout
 
 
+def _flag_pattern(fl: str):
+    """A DEFINITION line of the flag only: `--flag` (optionally after `-x, `) or `-x` at the start of the
+    line. A flag named inside another option's description does not count."""
+    if fl.startswith("--"):
+        return re.compile(r"^\s*(?:-\w,\s*)?" + re.escape(fl) + r"(?![\w-])")
+    return re.compile(r"^\s*" + re.escape(fl) + r"(?=,|\s|$)")
+
+
 def _flag_lines(help_text: str, flags: list[str]) -> tuple[dict, list[str]]:
     lines, missing = {}, []
     for fl in flags:
-        pat = re.compile(r"(?:^|[\s,])" + re.escape(fl) + r"(?=[\s,=<\[]|$)")
+        pat = _flag_pattern(fl)
         hit = next((ln.strip() for ln in help_text.splitlines() if pat.search(ln)), None)
         if hit is None:
             missing.append(fl)
@@ -107,6 +127,14 @@ def compute_static(params: dict, *, runner=_default_run, http_get=_default_http_
             raise ValueError("rubric md5 differs from the expected value")
         return {"md5": md5, "sha256": S.sha256_bytes(b), "path": str(params["rubric_py"])}
     sec("rubric", rubric)
+
+    def gt500():
+        b = Path(params["gt500_py"]).read_bytes()
+        sha = S.sha256_bytes(b)
+        if sha != GT500_SHA256:
+            raise ValueError("gt500.py sha256 differs from the expected value")
+        return {"sha256": sha, "path": str(params["gt500_py"])}
+    sec("gt500", gt500)
 
     def denylist():
         p = params["denylist"]
@@ -171,7 +199,7 @@ def compute_static(params: dict, *, runner=_default_run, http_get=_default_http_
 
 
 DEFAULT_PARAMS = {"ollama_url": "http://127.0.0.1:11434", "ollama_models": OLLAMA_MODELS,
-                  "claude_bin": "claude", "codex_bin": "codex"}
+                  "claude_bin": "claude", "codex_bin": "codex", "gt500_py": DEFAULT_GT500_PY}
 
 
 def build_static(params: dict, **kw) -> dict:
@@ -275,12 +303,45 @@ def _diff(a, b, prefix=""):
     return out
 
 
-def verify(static_path, run_path=None, *, check_ollama: bool = True, **kw) -> dict:
-    """Recompute STATIC (always) and RUN entries (once any exist). Returns
-    {"ok", "mismatches", "warnings", "env_sha_at_use", "run_entries"}; never raises on a mismatch."""
+_FREEZE_PINS_RE = re.compile(r"^pins_sha256\s+([0-9a-f]{64})\s*$", re.MULTILINE)
+
+
+def freeze_record_path(params: dict, freeze_record=None) -> Path | None:
+    if freeze_record:
+        return Path(freeze_record)
+    if params.get("freeze_record"):
+        return Path(params["freeze_record"])
+    if params.get("repo"):
+        return Path(params["repo"]) / FREEZE_RECORD_REL
+    return None
+
+
+def check_freeze_record(static_path, record) -> tuple[list[str], list[str]]:
+    """(mismatches, warnings). Record absent: warning `pre_freeze_no_pins_sha256_record` (not frozen yet).
+    Record present: it must hold exactly one `pins_sha256 <sha>` value equal to the PINS-STATIC file's sha256,
+    else a mismatch (fail closed)."""
+    if record is None or not Path(record).is_file():
+        return [], ["pre_freeze_no_pins_sha256_record"]
+    shas = set(_FREEZE_PINS_RE.findall(Path(record).read_text(encoding="utf-8", errors="replace")))
+    if not shas:
+        return ["freeze_record_lacks_pins_sha256"], []
+    if len(shas) > 1:
+        return ["freeze_record_ambiguous_pins_sha256"], []
+    if shas.pop() != S.sha256_file(static_path):
+        return ["pins_file_sha256"], []
+    return [], []
+
+
+def verify(static_path, run_path=None, *, check_ollama: bool = True, freeze_record=None, **kw) -> dict:
+    """Recompute STATIC (always) and RUN entries (once any exist), and check the PINS-STATIC file sha256
+    against the freeze record. Returns {"ok", "mismatches", "warnings", "env_sha_at_use", "run_entries"};
+    never raises on a mismatch."""
     mism, warns = [], []
     doc = json.loads(Path(static_path).read_text(encoding="utf-8"))
     params = doc["params"]
+    fm, fw = check_freeze_record(static_path, freeze_record_path(params, freeze_record))
+    mism += fm
+    warns += fw
     now, errors = compute_static(params, **kw)
     frozen = doc["pins"]
     for k in errors:
@@ -341,6 +402,8 @@ def main(argv=None) -> int:
     p.add_argument("--scripts-dir")
     p.add_argument("--engine-commit")
     p.add_argument("--rubric-py")
+    p.add_argument("--gt500-py", default=DEFAULT_GT500_PY, help="pinned by sha (GT500_SHA256); default as p17d")
+    p.add_argument("--freeze-record", help="verify only: the freeze record (default <repo>/%s)" % FREEZE_RECORD_REL)
     p.add_argument("--denylist")
     p.add_argument("--env-file")
     p.add_argument("--ollama-url", default=DEFAULT_PARAMS["ollama_url"])
@@ -365,7 +428,8 @@ def main(argv=None) -> int:
             mids = dict(kv.split("=", 1) for kv in args.model_id if "=" in kv)
             params = {"repo": str(Path(args.repo).resolve()),
                       "scripts_dir": str(Path(args.scripts_dir or Path(args.repo) / "scripts").resolve()),
-                      "engine_commit": args.engine_commit, "rubric_py": args.rubric_py, "denylist": args.denylist,
+                      "engine_commit": args.engine_commit, "rubric_py": args.rubric_py, "gt500_py": args.gt500_py,
+                      "denylist": args.denylist,
                       "env_file": args.env_file, "ollama_url": args.ollama_url, "ollama_models": OLLAMA_MODELS,
                       "bge_snapshot_dir": args.bge_snapshot_dir, "claude_bin": args.claude_bin,
                       "codex_bin": args.codex_bin, "gen_dir": args.gen_dir, "model_ids": mids}
@@ -383,7 +447,7 @@ def main(argv=None) -> int:
                               "utc": e["utc"]}, sort_keys=True))
             return S.EXIT_OK
         if args.verify:
-            res = verify(args.verify, args.pins_run, check_ollama=not args.no_ollama)
+            res = verify(args.verify, args.pins_run, check_ollama=not args.no_ollama, freeze_record=args.freeze_record)
             print(json.dumps(res, sort_keys=True))
             if not res["ok"]:
                 print("pins mismatch: " + ",".join(res["mismatches"]), file=sys.stderr)

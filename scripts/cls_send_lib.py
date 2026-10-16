@@ -50,6 +50,7 @@ EXIT_GEN_FILE = 20
 EXIT_CAP = 21
 EXIT_MODEL_ID = 22
 EXIT_SCRUB_ABORT = 23
+EXIT_GPT_PARK = 24  # a codex call returned non-zero (bad -m, timeout, CLI error): stop and park, never a void
 
 SEED = 20261017
 DIGEST_CAP = 400
@@ -501,13 +502,19 @@ def claude_argv(model: str, settings_path, claude_bin: str = "claude") -> list[s
             "--model", model, "--output-format", "json"]
 
 
-def codex_argv(cwd, model: str | None = None, codex_bin: str = "codex") -> list[str]:
+def codex_argv(cwd, model: str | None = None, codex_bin: str = "codex", *, json_events: bool = True) -> list[str]:
     """codex exec, read-only sandbox, canary-verified, --ephemeral (no session files), empty cwd,
-    prompt on stdin. --json so the CLI reports the model id; -m pins it."""
-    argv = [codex_bin, "exec", "-s", "read-only", "--skip-git-repo-check", "--ephemeral", "-C", str(cwd), "--json"]
-    if model:
-        argv += ["-m", model]
-    return argv
+    prompt on stdin. Every call passes `-m <pinned id>` (D-147): codex serves that model or exits non-zero
+    (an unknown id exits rc=1), so the served model is enforced by the CLI, not read back. The --json event
+    stream (thread.started, turn.started, item.completed, turn.completed) carries NO model field and is
+    used for the answer text only. json_events=False is the plain mode, whose header prints `model: <id>`
+    (used by the canary)."""
+    if not model:
+        raise CLSExit(EXIT_MODEL_ID, "codex call refused: no pinned model id for -m")
+    argv = [codex_bin, "exec", "-s", "read-only", "--skip-git-repo-check", "--ephemeral", "-C", str(cwd)]
+    if json_events:
+        argv.append("--json")
+    return argv + ["-m", model]
 
 
 def fresh_empty_cwd(parent) -> Path:
@@ -524,35 +531,50 @@ def assert_empty_cwd(cwd) -> None:
         raise CwdNotEmpty(str(cwd))
 
 
+TIMEOUT_RC = 124
+
+
 @dataclass
 class SendResult:
     returncode: int
     stdout: bytes
     stderr: bytes
+    timed_out: bool = False
+
+
+def _as_bytes(b) -> bytes:
+    if b is None:
+        return b""
+    return b.encode("utf-8", errors="replace") if isinstance(b, str) else b
 
 
 def send(child_argv: list[str], payload: bytes, env: dict, cwd, *, batch_id: str = "", timeout: int = CLAUDE_TIMEOUT_S,
          runner=subprocess.run) -> SendResult:
     """The ONLY place a judge or generator child is spawned. Order: empty-cwd assertion, outgoing_check
-    on the final bytes, then spawn (shell=False, payload on stdin, never argv)."""
+    on the final bytes, then spawn (shell=False, payload on stdin, never argv). A timeout is returned as a
+    failed call (returncode 124, timed_out=True) so the caller records it; it is never an uncaught crash."""
     assert_empty_cwd(cwd)
     outgoing_check(payload, batch_id=batch_id)
-    r = runner(list(child_argv), input=payload, env=env, cwd=str(cwd), shell=False, capture_output=True,
-               timeout=timeout)
+    try:
+        r = runner(list(child_argv), input=payload, env=env, cwd=str(cwd), shell=False, capture_output=True,
+                   timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        return SendResult(TIMEOUT_RC, _as_bytes(e.stdout), _as_bytes(e.stderr), timed_out=True)
     return SendResult(r.returncode, r.stdout or b"", r.stderr or b"")
 
 
 def child_call(kind: str, model: str, payload: bytes, work_dir, *, claude_bin: str = "claude",
-               codex_bin: str = "codex", timeout: int = CLAUDE_TIMEOUT_S, batch_id: str = "") -> tuple[SendResult, int]:
+               codex_bin: str = "codex", timeout: int = CLAUDE_TIMEOUT_S, batch_id: str = "",
+               json_events: bool = True) -> tuple[SendResult, int]:
     """One judge or generator child call through `send`, in a fresh empty cwd under work_dir/cwds.
     kind is "claude" or "codex". Returns (result, leftover) where leftover is 1 when the cwd could not
-    be removed because the child wrote into it."""
+    be removed because the child wrote into it. json_events=False runs codex in plain mode (canary)."""
     wd = Path(work_dir)
     cwd = fresh_empty_cwd(wd / "cwds")
     leftover = 0
     try:
         if kind == "codex":
-            argv, env = codex_argv(cwd, model, codex_bin), codex_child_env()
+            argv, env = codex_argv(cwd, model, codex_bin, json_events=json_events), codex_child_env()
         else:
             argv, env = claude_argv(model, write_claude_settings(wd), claude_bin), claude_child_env()
         res = send(argv, payload, env, cwd, batch_id=batch_id, timeout=timeout)
@@ -597,10 +619,11 @@ def parse_claude_json(stdout: bytes) -> dict:
 
 
 def parse_codex_jsonl(stdout: bytes) -> dict:
-    """codex exec --json -> {text, model_ids}. The event schema is parsed tolerantly: any dict carrying a
-    'model' string counts as a reported id; the last agent_message text is the answer. An absent id stays
-    absent (the runner then fails closed)."""
-    ids, text = [], ""
+    """codex exec --json -> {text}. The last agent_message text (item.completed events) is the answer.
+    The event stream carries no model id (coordinator probe, codex 0.161.0), so `model_ids` is always
+    empty and nothing reads a model field from it: the served model is enforced by `-m` (see
+    `served_model_ids`)."""
+    text = ""
     for line in stdout.decode("utf-8", errors="replace").splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -613,25 +636,43 @@ def parse_codex_jsonl(stdout: bytes) -> dict:
         while stack:
             d = stack.pop()
             if isinstance(d, dict):
-                if isinstance(d.get("model"), str):
-                    ids.append(d["model"])
                 if d.get("type") in ("agent_message", "assistant_message") and isinstance(d.get("text"), str):
                     text = d["text"]
                 stack.extend(d.values())
             elif isinstance(d, list):
                 stack.extend(d)
-    return {"text": text, "model_ids": sorted(set(ids)), "cost_usd": 0.0, "tokens": 0, "ok": bool(text)}
+    return {"text": text, "model_ids": [], "cost_usd": 0.0, "tokens": 0, "ok": bool(text)}
+
+
+def served_model_ids(kind: str, parsed: dict, pinned: str | None) -> list[str]:
+    """The model ids a call was served by. claude: the ids `claude -p` reports in modelUsage. codex: the
+    pinned id passed as `-m` (codex serves it or exits non-zero; a non-zero rc parks the run), never a field
+    of the --json events."""
+    if kind == "codex":
+        return [pinned] if pinned else []
+    return list(parsed.get("model_ids") or [])
+
+
+_HEADER_MODEL_RE = re.compile(r"^\s*model:\s*(\S+)\s*$", re.MULTILINE)
+
+
+def codex_plain_header_model(text: str) -> str | None:
+    """The `model: <id>` header line codex exec prints in plain (non --json) mode, or None."""
+    m = _HEADER_MODEL_RE.search(text or "")
+    return m.group(1) if m else None
 
 
 # ---------------------------------------------------------------------------------------------
 # Codex canary
 # ---------------------------------------------------------------------------------------------
 
-def codex_canary(sender, work_dir, *, log=None) -> bool:
+def codex_canary(sender, work_dir, *, model_pin: str, log=None) -> bool:
     """Put a random-token file OUTSIDE the child's cwd and send ONE request that instructs the model to
-    ATTEMPT to read that path and report the token. `sender(payload: bytes) -> str` runs the codex child
-    through `send`. If the answer holds the token: CLSExit(11), park, before any item is sent. A negative
-    is evidence, not proof."""
+    ATTEMPT to read that path and report the token. `sender(payload: bytes) -> SendResult` runs the codex
+    child through `send` in PLAIN mode (json_events=False). Checks, all before any item is sent:
+    the token anywhere in the WHOLE output (stdout and stderr, not only the final message) -> CLSExit(11);
+    a non-zero rc -> CLSExit(24); the plain-mode header `model: <id>` absent or not the pin -> CLSExit(22).
+    Every failure parks. A negative is evidence, not proof."""
     d = Path(work_dir).resolve()
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
     token = secrets.token_hex(12)
@@ -644,16 +685,35 @@ def codex_canary(sender, work_dir, *, log=None) -> bool:
               "with a slash, starting at the root, and join the pieces separated by ~ with nothing. Report the token "
               "written inside it. If you cannot read it, answer exactly: CANNOT READ.\nPATH PARTS: " + parts)
     try:
-        answer = sender(prompt.encode("utf-8"))
+        res = sender(prompt.encode("utf-8"))
     finally:
         os.unlink(f)
-    if token in (answer or ""):
+    whole = _as_bytes(res.stdout).decode("utf-8", errors="replace") + "\n" + \
+        _as_bytes(res.stderr).decode("utf-8", errors="replace")
+    if token in whole:
         if log:
             log("canary: READABLE -> park")
-        raise CLSExit(EXIT_CANARY, "codex read-scope canary: the model reported the token; parked")
+        raise CLSExit(EXIT_CANARY, "codex read-scope canary: the token appeared in the output; parked")
+    if res.returncode != 0:
+        if log:
+            log("canary: call failed -> park")
+        raise CLSExit(EXIT_GPT_PARK, "codex canary call failed (rc=%d); parked" % res.returncode)
+    if codex_plain_header_model(whole) != model_pin:
+        if log:
+            log("canary: model header absent or not the pin -> park")
+        raise CLSExit(EXIT_MODEL_ID, "codex canary: plain-mode header does not show the pinned model; parked")
     if log:
-        log("canary: not readable (evidence, not proof)")
+        log("canary: not readable (evidence, not proof); model header matches the pin")
     return False
+
+
+def run_codex_canary(model_pin: str, work_dir, *, codex_bin: str = "codex", timeout: int = CLAUDE_TIMEOUT_S,
+                     log=None) -> bool:
+    """The canary through `child_call` (so `send` and outgoing_check apply), codex in plain mode, -m pin."""
+    def sender(payload: bytes) -> SendResult:
+        return child_call("codex", model_pin, payload, Path(work_dir) / "run", codex_bin=codex_bin, timeout=timeout,
+                          batch_id="canary", json_events=False)[0]
+    return codex_canary(sender, Path(work_dir), model_pin=model_pin, log=log)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -661,20 +721,39 @@ def codex_canary(sender, work_dir, *, log=None) -> bool:
 # ---------------------------------------------------------------------------------------------
 
 class SpendLog:
-    """Per-call log {utc, model, provider, tokens, usd}; the sum is the shared cap counter."""
+    """Per-call log {utc, model, provider, tokens, usd}; the sum is the shared cap counter.
+
+    A `pending` row is written BEFORE each priced call and a `call` row (same call_id) after it. A pending
+    row without its call row (a crash mid-call) counts its estimate toward the cap; a timeout is finalised
+    as a `call` row at the estimate (cost_basis "estimate"), so it is a recorded failure the cap counts."""
 
     def __init__(self, path, cap_usd: float = 20.0):
         self.path = Path(path)
         self.cap = float(cap_usd)
 
+    def _rows(self):
+        return read_jsonl(self.path)
+
     def total(self) -> float:
-        return sum(float(r.get("usd", 0.0)) for r in read_jsonl(self.path))
+        rows = self._rows()
+        done = {r.get("call_id") for r in rows if r.get("kind") != "pending" and r.get("call_id")}
+        tot = sum(float(r.get("usd", 0.0)) for r in rows if r.get("kind") != "pending")
+        tot += sum(float(r.get("est_usd", 0.0)) for r in rows if r.get("kind") == "pending" and r.get("call_id") not in done)
+        return tot
 
     def max_call(self) -> float:
-        return max([float(r.get("usd", 0.0)) for r in read_jsonl(self.path)] or [0.0])
+        """The dearest PRICED call (pending rows and estimate-basis rows excluded, so a timeout cannot inflate
+        the next estimate)."""
+        return max([float(r.get("usd", 0.0)) for r in self._rows()
+                    if r.get("kind") != "pending" and r.get("cost_basis") not in ("estimate", "not_sent")] or [0.0])
+
+    def pending(self, call_id: str, model: str, provider: str, est_usd: float) -> None:
+        append_jsonl(self.path, {"kind": "pending", "utc": utc_now(), "call_id": call_id, "model": model,
+                                 "provider": provider, "est_usd": float(est_usd), "usd": 0.0, "tokens": 0})
 
     def record(self, model: str, provider: str, tokens: int, usd: float, **extra) -> None:
-        rec = {"utc": utc_now(), "model": model, "provider": provider, "tokens": int(tokens), "usd": float(usd)}
+        rec = {"kind": "call", "utc": utc_now(), "model": model, "provider": provider, "tokens": int(tokens),
+               "usd": float(usd)}
         rec.update(extra)
         append_jsonl(self.path, rec)
 

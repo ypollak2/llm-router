@@ -6,6 +6,11 @@
 The ONLY tool that reads TEST-SYN text before release (inside the TEST-SYN agent's own step, or with a
 release token). OUTPUT IS pass/fail and AUROC numbers ONLY: no features, weights, top terms, error cases,
 item ids or text, in stdout, stderr or the output file. There is no flag that dumps features.
+Besides the a1/a2 pass/fail and AUROC with CI that section 12 names, the result also carries the aggregate
+numbers of the other 8.1 checks the gate is made of: (b) the four length-band shares of each set, (c) the two
+median word counts, (d) the generator's quota flag and band-miss rate. These are set-level aggregates, not
+features, ids or text; `--amendment-view` (what a spec author may see) strips them to pass/fail and the
+DEV-SYN AUROC numbers.
 Exit codes: 0 pass, 14 fail. Heavy libraries (numpy, scikit-learn, sentence_transformers) are imported
 lazily inside the default scorers; tests inject scorers.
 """
