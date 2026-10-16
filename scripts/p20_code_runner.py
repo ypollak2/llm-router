@@ -227,6 +227,7 @@ def attempt_task(cfg, c, args, item, attempt, tc, tc_hash, runner_hash, nc, pi):
 
 def run(cfg, args):
     c = h.frozen(cfg)["constants"]
+    h.run_gate(cfg, c)
     selected = h.selection(cfg)
     if not (cfg.run_dir / "items/code.jsonl").is_file():
         raise h.Refuse("refusing: code items missing")

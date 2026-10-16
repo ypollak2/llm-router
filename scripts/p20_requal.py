@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.request import Request, urlopen
 
+import llm_router
 from llm_router import eligibility, local_models
 from llm_router.context_pack import build_pack, to_messages
 from llm_router.resolver.eligibility_store import record_competence
@@ -28,6 +29,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 import check_prereg  # noqa: E402
 
 PREREG = REPO / "docs/prereg/PREREG-P20-requal.md"
+AMEND1 = REPO / "docs/prereg/PREREG-P20-requal-AMEND1.md"
 SETS = ("qa", "tech_op", "code")
 CONSTANTS: dict[str, str] = {
     "LABEL": "p20-requal",
@@ -131,9 +133,13 @@ class Terminal(Exception):
 
 
 def parse_constants(text: str) -> dict[str, str]:
+    return parse_block(text, "```text P20-CONSTANTS")
+
+
+def parse_block(text: str, marker: str) -> dict[str, str]:
     lines = text.splitlines()
     try:
-        start = lines.index("\x60\x60\x60text P20-CONSTANTS") + 1
+        start = lines.index(marker) + 1
         end = lines.index("\x60\x60\x60", start)
     except ValueError as exc:
         raise Refuse("refusing: missing constants block") from exc
@@ -265,8 +271,64 @@ def frozen(cfg: Cfg) -> dict:
     copy = cfg.run_dir / "PREREG.md"
     if copy.exists() and copy.read_bytes() != cfg.prereg.read_bytes():
         raise Refuse("refusing: PREREG.md differs")
+    try:
+        amendment = check_prereg.check(cfg.amend1)
+        if not amendment["match"]:
+            raise ValueError("freeze")
+        amendment_text = cfg.amend1.read_text()
+    except (OSError, ValueError, IndexError, OverflowError) as exc:
+        raise Refuse("refusing: AMEND1 is not frozen") from exc
+    try:
+        amendment_epoch = datetime.fromisoformat(amendment["frozen_utc"].replace("Z", "+00:00"))
+        if (amendment_epoch.tzinfo is None
+                or not epoch.timestamp() < amendment_epoch.timestamp() < cfg.now()):
+            raise ValueError("freeze order")
+    except (ValueError, OverflowError) as exc:
+        raise Refuse("refusing: AMEND1 frozen_utc") from exc
+    try:
+        overrides = parse_block(amendment_text, "```text P20-AMEND1-CONSTANTS")
+        if (overrides.keys() != {"REPO_SHA", "CODE_RUNNER_SHA256"}
+                or not re.fullmatch(r"[0-9a-f]{40}", overrides["REPO_SHA"])
+                or not re.fullmatch(r"[0-9a-f]{64}", overrides["CODE_RUNNER_SHA256"])):
+            raise ValueError("constants")
+    except (Refuse, ValueError) as exc:
+        raise Refuse("refusing: AMEND1 constants") from exc
+    amendment_copy = cfg.run_dir / "PREREG-AMEND1.md"
+    if amendment_copy.exists() and amendment_copy.read_bytes() != cfg.amend1.read_bytes():
+        raise Refuse("refusing: PREREG-AMEND1.md differs")
+    constants.update(overrides)
     return {"sha256": checked["sha256"], "frozen_utc": checked["frozen_utc"],
-            "constants": constants}
+            "amend1_sha256": amendment["sha256"],
+            "amend1_frozen_utc": amendment["frozen_utc"], "constants": constants}
+
+
+def code_gate(repo: Path, repo_sha: str, module_file: str, run=subprocess.run) -> None:
+    def git(*args: str):
+        try:
+            return run(["git", "-C", str(repo), *args], stdin=subprocess.DEVNULL,
+                       capture_output=True, text=True, timeout=60, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise Refuse("refusing: code gate git error") from exc
+
+    diff = git("diff", "--quiet", repo_sha, "--", "scripts", "src", "tests")
+    if diff.returncode not in (0, 1):
+        raise Refuse("refusing: code gate git error")
+    if diff.returncode:
+        raise Refuse("refusing: code differs from REPO_SHA")
+    state = git("status", "--porcelain", "--", "scripts", "src", "tests")
+    if state.returncode:
+        raise Refuse("refusing: code gate git error")
+    if state.stdout:
+        raise Refuse("refusing: uncommitted code under scripts/src/tests")
+    if not Path(module_file).resolve().is_relative_to(repo.resolve()):
+        raise Refuse("refusing: llm_router imported from outside the run worktree")
+
+
+def run_gate(cfg: Cfg, constants: dict) -> None:
+    if cfg.gate is not None:
+        cfg.gate(constants)
+    else:
+        code_gate(REPO, constants["REPO_SHA"], llm_router.__file__)
 
 
 def flatten(messages: list[dict]) -> str:
@@ -294,6 +356,8 @@ def default_pack(item: dict, name: str, window: int) -> list[dict]:
 class Cfg:
     run_dir: Path
     prereg: Path = PREREG
+    amend1: Path = AMEND1
+    gate: Callable[[dict], None] | None = None
     now: Callable[[], float] = time.time
     local_hour: Callable[[], int] = lambda: datetime.now().hour
     sleep: Callable[[float], None] = time.sleep
@@ -345,7 +409,8 @@ def claude_settings(run_dir: Path) -> Path:
 
 
 def claude_argv(model_id: str, run_dir: Path, tools: str | None) -> list[str]:
-    args = ["claude", "-p", "--safe-mode", "--settings", str(claude_settings(run_dir)),
+    args = ["claude", "-p", "--safe-mode", "--no-session-persistence",
+            "--settings", str(claude_settings(run_dir)),
             "--model", model_id, "--output-format", "json"]
     return args + (["--tools", tools] if tools is not None else [])
 
@@ -911,7 +976,8 @@ def descriptive(items: list[dict], outcomes: dict) -> dict:
 
 def score(cfg: Cfg, c: dict, freeze: dict, measurement: Path | None = None) -> dict:
     require_unused(cfg)
-    hashes = {"prereg_sha256": freeze["sha256"], "git_sha": cfg.git_sha(),
+    hashes = {"prereg_sha256": freeze["sha256"], "amend1_sha256": freeze["amend1_sha256"],
+              "git_sha": cfg.git_sha(),
               "selection_sha256": optional_hash(cfg.run_dir / "selection.json"),
               "answers_sha256": combined_hash(cfg, "answers"),
               "judgements_sha256": combined_hash(cfg, "judgements"),
@@ -1184,15 +1250,23 @@ def tp2(cfg: Cfg, c: dict, args: argparse.Namespace) -> dict:
 
 
 def status(cfg: Cfg) -> dict:
+    gate_status = "n/a"
     try:
-        frozen(cfg)
+        freeze = frozen(cfg)
         is_frozen = True
     except Refuse:
         is_frozen = False
+    else:
+        try:
+            run_gate(cfg, freeze["constants"])
+            gate_status = "ok"
+        except Refuse as exc:
+            gate_status = str(exc)
     path = cfg.run_dir / "selection.json"
     selected = read_json(path).get("sets", {}) if path.exists() else {}
     return {
         "frozen": is_frozen,
+        "code_gate": gate_status,
         "pools": {s: (cfg.run_dir / f"pools/{s}.jsonl").exists() for s in SETS},
         "selection_n": {s: r["n"] for s, r in selected.items()},
         "finals": {s: dict(Counter(arm for _, arm in finals(cfg, s))) for s in ("qa", "tech_op")},
@@ -1248,6 +1322,8 @@ def main(argv: list[str] | None = None, *, cfg: Cfg | None = None) -> int:
         prefreeze = args.command == "status" or (args.command == "select" and args.dry_run)
         freeze = None if prefreeze else frozen(cfg)
         c = CONSTANTS if freeze is None else freeze["constants"]
+        if freeze is not None:
+            run_gate(cfg, c)
         if args.command == "status":
             out = status(cfg)
         elif args.command == "select":

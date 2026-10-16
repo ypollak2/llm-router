@@ -119,6 +119,7 @@ def setup(factory, tmp_path, monkeypatch):
                  f"selection_sha256={h.sha256_file(cfg.run_dir / 'selection.json')}")
     c["CODE_RUNNER_SHA256"] = h.sha256_file(Path(r.__file__))
     support.freeze_file(cfg, c)
+    support.freeze_amend1(cfg, c)
     tc = tmp_path / "contract.py"
     tc.write_text("raise RuntimeError('never import')\nTEST_CONTRACT = 'PRIVATE CONTRACT'\n")
     arm = c["CODE_LOCAL_MODELS"].split(",")[0]
@@ -216,6 +217,7 @@ def fake_claude(setup, monkeypatch, served=None):
 
     def call(argv, **kwargs):
         assert "--safe-mode" in argv
+        assert "--no-session-persistence" in argv
         settings = Path(argv[argv.index("--settings") + 1])
         assert h.read_json(settings) == {"disableAllHooks": True}
         assert "--permission-mode" in argv and "--allowedTools" in argv
@@ -320,3 +322,21 @@ def test_rx_manifest_row_missing_refuses(setup):
     assert invoke(setup) == 2
     ids = {row["task_id"] for row in h.jsonl(cfg.run_dir / "code_results.raw.jsonl")}
     assert "task-1" not in ids and "task-2" not in ids
+
+
+def test_code_gate_before_agent(setup, monkeypatch):
+    cfg, _, _, _, pi, *_ = setup
+
+    def refuse(constants):
+        raise h.Refuse("refusing: test code gate")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("agent called before code gate")
+
+    cfg.gate = refuse
+    monkeypatch.setattr(r, "agent", forbidden)
+    before = {p: p.read_bytes() for p in cfg.run_dir.rglob("*") if p.is_file()}
+    assert invoke(setup) == 2
+    assert invoke(setup, "sonnet") == 2
+    assert pi.calls == 0 and not rows(setup)
+    assert before == {p: p.read_bytes() for p in cfg.run_dir.rglob("*") if p.is_file()}

@@ -4,6 +4,7 @@ import importlib.util
 import json
 import math
 import re
+import subprocess
 import sys
 from collections import Counter
 from dataclasses import replace
@@ -34,6 +35,8 @@ def _load_harness():
 h = _load_harness()
 NOW = 1_900_000_000.0
 PAST = "2026-01-01T00:00:00Z"
+AMEND_PAST = "2027-01-01T00:00:00Z"
+GIT_RUN = subprocess.run
 
 
 @pytest.fixture(autouse=True)
@@ -89,6 +92,17 @@ def freeze_file(cfg, constants, text=None, date=PAST):
     cfg.prereg.write_text(text)
     cfg.prereg.with_suffix(".sha256").write_text(
         f"{h.sha256_file(cfg.prereg)}  {cfg.prereg.name}\nfrozen_utc {date}\n"
+    )
+
+
+def freeze_amend1(cfg, constants, *, text=None, date=AMEND_PAST):
+    if text is None:
+        text = ("# AMEND1\n\n```text P20-AMEND1-CONSTANTS\n"
+                f"REPO_SHA={'a' * 40}\n"
+                f"CODE_RUNNER_SHA256={constants['CODE_RUNNER_SHA256']}\n```\n")
+    cfg.amend1.write_text(text)
+    cfg.amend1.with_suffix(".sha256").write_text(
+        f"{h.sha256_file(cfg.amend1)}  {cfg.amend1.name}\nfrozen_utc {date}\n"
     )
 
 
@@ -175,7 +189,8 @@ def factory(tmp_path):
             sleep=lambda _: None, ollama=Ollama(), claude=Claude(), machine=Machine(),
             quota=lambda: {"session_pct": 0, "weekly_pct": 0, "age_s": 0},
             pack_fn=lambda item, name, window: [{"role": "user", "content": item["request"]}],
-            git_sha=lambda: "deadbeef",
+            git_sha=lambda: "deadbeef", amend1=run_dir / "AMEND1.md",
+            gate=lambda constants: None,
         )
         pools = {s: pool_rows(s, 30 if small and s == "qa" else 75 if s == "code" else 130)
                  for s in h.SETS}
@@ -203,6 +218,7 @@ def factory(tmp_path):
             POOL_COUNT_CODE_NONCLOUD="55", POOL_COUNT_CODE_RX_EDIT="20",
         )
         freeze_file(cfg, constants)
+        freeze_amend1(cfg, constants)
         return cfg, constants, pools
     return make
 
@@ -268,7 +284,8 @@ def test_claude_boundary(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "private")
     args = h.claude_argv("test-sonnet", tmp_path, tools="")
     assert args == [
-        "claude", "-p", "--safe-mode", "--settings", str(tmp_path / "claude_settings.json"),
+        "claude", "-p", "--safe-mode", "--no-session-persistence",
+        "--settings", str(tmp_path / "claude_settings.json"),
         "--model", "test-sonnet", "--output-format", "json", "--tools", "",
     ]
     path = Path(args[args.index("--settings") + 1])
@@ -298,6 +315,10 @@ def test_constants_and_real_freeze(factory, tmp_path):
     if not h.PREREG.with_suffix(".sha256").exists():
         pytest.skip("real prereg has no freeze sidecar")
     assert h.frozen(replace(cfg, prereg=h.PREREG, run_dir=tmp_path / "real"))
+    if not h.AMEND1.with_suffix(".sha256").exists():
+        pytest.skip("real AMEND1 has no freeze sidecar")
+    real = h.frozen(replace(cfg, prereg=h.PREREG, amend1=h.AMEND1, run_dir=tmp_path / "real2"))
+    assert real["constants"]["REPO_SHA"] != h.CONSTANTS.get("REPO_SHA")
 
 
 def test_freeze_gates_and_read_only_modes(factory, capsys):
@@ -707,6 +728,7 @@ def test_frozen_utc_must_be_strictly_in_the_past(factory):
     with pytest.raises(h.Refuse, match="not frozen"):
         h.frozen(cfg)
     freeze_file(cfg, c, cfg.prereg.read_text(), "2030-03-17T17:46:39Z")
+    freeze_amend1(cfg, c, date="2030-03-17T17:46:39.500000Z")
     assert h.frozen(cfg)["frozen_utc"] == "2030-03-17T17:46:39Z"
 
 
@@ -730,3 +752,192 @@ def test_tp2_without_f_fit(factory):
     assert "f_fit_not_required" in out["flags"]
     assert out["inputs"]["f_fit"] == "n/a"
     assert call(cfg, *args, "--f-fit", "0/0") == 2  # a given f_fit still needs n > 0
+
+
+GATED_COMMANDS = [
+    ("select",), ("run", "--set", "qa"), ("judge", "--set", "qa"),
+    ("ingest-code", "--results", "/missing", "--runner", "/missing"), ("score",),
+    ("install-eligibility", "--confirm"),
+    ("tp2", "--s-tech", "30/100", "--s-tech-sessions", "3", "--s-tech-largest", ".5",
+     "--s-cheap", "2/100"),
+]
+
+
+@pytest.mark.parametrize("command", GATED_COMMANDS)
+def test_amend1_missing_gates_every_command(factory, command):
+    cfg, _, _ = factory()
+    cfg.amend1.unlink()
+    assert call(cfg, *command) == 2
+
+
+@pytest.mark.parametrize("defect,reason", [
+    ("sidecar", "AMEND1 is not frozen"),
+    ("sha", "AMEND1 is not frozen"),
+    ("parse", "AMEND1 is not frozen"),
+    ("same_date", "AMEND1 frozen_utc"),
+    ("earlier_date", "AMEND1 frozen_utc"),
+    ("future", "AMEND1 frozen_utc"),
+    ("extra", "AMEND1 constants"),
+    ("nonhex", "AMEND1 constants"),
+    ("runner_nonhex", "AMEND1 constants"),
+    ("missing_key", "AMEND1 constants"),
+    ("duplicate", "AMEND1 constants"),
+    ("copy", "PREREG-AMEND1.md differs"),
+])
+def test_amend1_validation(factory, defect, reason, capsys):
+    cfg, c, _ = factory()
+    text = cfg.amend1.read_text()
+    if defect == "sidecar":
+        cfg.amend1.with_suffix(".sha256").unlink()
+    elif defect == "sha":
+        cfg.amend1.write_text(text + "\n")
+    elif defect == "parse":
+        cfg.amend1.with_suffix(".sha256").write_text("broken")
+    elif defect in ("same_date", "earlier_date", "future"):
+        date = {"same_date": PAST, "earlier_date": "2025-01-01T00:00:00Z",
+                "future": "2099-01-01T00:00:00Z"}[defect]
+        freeze_amend1(cfg, c, date=date)
+    elif defect == "copy":
+        (cfg.run_dir / "PREREG-AMEND1.md").write_text(text + "changed")
+    else:
+        if defect == "extra":
+            text = text.replace("REPO_SHA=", "EXTRA=value\nREPO_SHA=")
+        elif defect == "nonhex":
+            text = text.replace("a" * 40, "g" * 40)
+        elif defect == "runner_nonhex":
+            text = text.replace(c["CODE_RUNNER_SHA256"], "g" * 64)
+        elif defect == "missing_key":
+            text = text.replace(f"REPO_SHA={'a' * 40}\n", "")
+        else:
+            text = text.replace("REPO_SHA=", f"REPO_SHA={'a' * 40}\nREPO_SHA=")
+        freeze_amend1(cfg, c, text=text)
+    assert call(cfg, "select") == 2
+    assert reason in capsys.readouterr().err
+    assert not (cfg.run_dir / "selection.json").exists()
+
+
+def test_amend1_overrides_and_score_log(factory):
+    cfg, c, _ = factory()
+    runner_sha = "b" * 64
+    freeze_amend1(cfg, c, text=(
+        f"```text P20-AMEND1-CONSTANTS\nREPO_SHA={'a' * 40}\n"
+        f"CODE_RUNNER_SHA256={runner_sha}\n```\n"
+    ))
+    (cfg.run_dir / "PREREG-AMEND1.md").write_bytes(cfg.amend1.read_bytes())
+    freeze = h.frozen(cfg)
+    assert freeze["constants"] == {**c, "REPO_SHA": "a" * 40, "CODE_RUNNER_SHA256": runner_sha}
+    assert freeze["amend1_sha256"] == h.sha256_file(cfg.amend1)
+    assert freeze["amend1_frozen_utc"] == AMEND_PAST
+    assert call(cfg, "select") == 0
+    assert call(cfg, "score") == 0
+    started = next(row for row in h.uses(cfg) if row[0] == "started")
+    assert f"amend1_sha256={freeze['amend1_sha256']}" in started
+
+
+@pytest.mark.parametrize("command", GATED_COMMANDS)
+def test_main_gate_before_writes(factory, command):
+    cfg, _, _ = factory()
+    seen = []
+
+    def refuse(constants):
+        seen.append(constants)
+        raise h.Refuse("refusing: test code gate")
+
+    cfg.gate = refuse
+    before = {p: p.read_bytes() for p in cfg.run_dir.rglob("*") if p.is_file()}
+    assert call(cfg, *command) == 2
+    assert len(seen) == 1 and seen[0]["REPO_SHA"] == "a" * 40
+    assert before == {p: p.read_bytes() for p in cfg.run_dir.rglob("*") if p.is_file()}
+    assert not cfg.ollama.calls and not cfg.claude.calls
+
+
+def test_gate_status_and_dry_run(factory, capsys):
+    cfg, _, _ = factory()
+    assert call(cfg, "status") == 0
+    assert json.loads(capsys.readouterr().out)["code_gate"] == "ok"
+    seen = []
+
+    def refuse(constants):
+        seen.append(constants)
+        raise h.Refuse("refusing: test code gate")
+
+    cfg.gate = refuse
+    assert call(cfg, "status") == 0
+    assert json.loads(capsys.readouterr().out)["code_gate"] == "refusing: test code gate"
+    assert len(seen) == 1
+    assert call(cfg, "select", "--dry-run") == 0
+    assert len(seen) == 1
+    cfg.amend1.unlink()
+    assert h.status(cfg)["code_gate"] == "n/a"
+    assert len(seen) == 1
+
+
+@pytest.fixture
+def gate_repo(tmp_path, monkeypatch):
+    for key, value in {
+        "GIT_AUTHOR_NAME": "Test", "GIT_COMMITTER_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@localhost", "GIT_COMMITTER_EMAIL": "test@localhost",
+    }.items():
+        monkeypatch.setenv(key, value)
+    repo = tmp_path / "gate-repo"
+    repo.mkdir()
+
+    def git(*args):
+        return GIT_RUN(["git", "-C", str(repo), *args], stdin=subprocess.DEVNULL,
+                       capture_output=True, text=True, timeout=60, check=True).stdout.strip()
+
+    git("init", "-q")
+    for directory in ("scripts", "src", "tests"):
+        (repo / directory).mkdir()
+        (repo / directory / "tracked.txt").write_text("base\n")
+    git("add", ".")
+    git("-c", "commit.gpgsign=false", "commit", "-qm", "base")
+    return repo, git("rev-parse", "HEAD"), str(repo / "src/tracked.txt"), git
+
+
+def test_code_gate_clean_and_docs(gate_repo):
+    repo, sha, module, _ = gate_repo
+    h.code_gate(repo, sha, module, run=GIT_RUN)
+    (repo / "docs").mkdir()
+    (repo / "docs/x.md").write_text("documentation change\n")
+    h.code_gate(repo, sha, module, run=GIT_RUN)
+
+
+@pytest.mark.parametrize("defect,reason", [
+    ("edit", "code differs from REPO_SHA"),
+    ("untracked", "uncommitted code under scripts/src/tests"),
+    ("outside", "llm_router imported from outside the run worktree"),
+    ("bogus_sha", "refusing:"),
+])
+def test_code_gate_refusals(gate_repo, defect, reason):
+    repo, sha, module, _ = gate_repo
+    if defect == "edit":
+        (repo / "scripts/tracked.txt").write_text("edited\n")
+    elif defect == "untracked":
+        (repo / "tests/untracked.txt").write_text("new\n")
+    elif defect == "outside":
+        module = str(repo.parent / "outside.py")
+    else:
+        sha = "not-a-revision"
+    with pytest.raises(h.Refuse, match=reason):
+        h.code_gate(repo, sha, module, run=GIT_RUN)
+
+
+@pytest.mark.parametrize("error", [OSError("git unavailable"), subprocess.TimeoutExpired("git", 60)])
+def test_code_gate_subprocess_errors(tmp_path, error):
+    def run(argv, **kwargs):
+        assert kwargs == {"stdin": subprocess.DEVNULL, "capture_output": True,
+                          "text": True, "timeout": 60, "check": False}
+        raise error
+
+    with pytest.raises(h.Refuse, match="code gate git error"):
+        h.code_gate(tmp_path, "a" * 40, str(tmp_path / "module.py"), run=run)
+
+
+def test_run_gate_default(factory, monkeypatch):
+    cfg, _, _ = factory()
+    cfg.gate = None
+    seen = []
+    monkeypatch.setattr(h, "code_gate", lambda *args: seen.append(args))
+    h.run_gate(cfg, h.frozen(cfg)["constants"])
+    assert seen == [(h.REPO, "a" * 40, h.llm_router.__file__)]
