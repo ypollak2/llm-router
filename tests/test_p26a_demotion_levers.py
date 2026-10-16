@@ -369,6 +369,47 @@ async def test_an_unwritable_state_keeps_the_demotion_across_loop_ticks(tmp_path
     assert qb.class_state("proxy_haiku", "haiku") == qb.OPEN
 
 
+def _recovered_once(tmp_path):
+    """Trip, run the half-open probe, pass it: the class is CLOSED with a recovered_at stamp."""
+    policy, t1 = _into_half_open(tmp_path)
+    t2 = t1 + 3600
+    assert _decide(t2, _probe_rows(t1, qb.probe_size(), 0)).state == qb.CLOSED
+    hg.apply_override(policy, now=t2)
+    assert policy.haiku_rewrite is True
+    rec = qb.recovered_at(qb.LEVER_PROXY_HAIKU, qb.TASK_PROXY_HAIKU)
+    assert rec is not None
+    return policy, rec
+
+
+@pytest.mark.timing
+async def test_f17_a_stale_recovery_stamp_cannot_re_enable_a_second_unpersisted_trip(tmp_path, monkeypatch):
+    policy, rec = _recovered_once(tmp_path)
+    assert rec < time.time()  # the loop's trip below is stamped after the recovery
+    # the state stays readable (so the old recovered_at is visible) but no write lands
+    monkeypatch.setattr(qb, "_write_state", lambda state: False)
+    await _ticks(policy)  # tick 1 trips on new evidence; ticks 2-4 must not read the old stamp as a recovery
+    assert policy.haiku_rewrite is False
+    assert policy.haiku_breaker is not None and policy.haiku_breaker["ts"] > rec
+    monkeypatch.undo()
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    await _ticks(policy, 2)  # writable again: the demotion is persisted, not lifted
+    assert policy.haiku_rewrite is False
+    assert qb.class_state("proxy_haiku", "haiku") == qb.OPEN
+
+
+def test_f17_a_recovery_stamp_equal_to_the_trip_ts_does_not_count_as_a_recovery(tmp_path):
+    policy, rec = _recovered_once(tmp_path)
+    mark = {"state": qb.OPEN, "reason": "equal stamp", "ts": rec}
+    policy.haiku_rewrite = False
+    policy.haiku_breaker = dict(mark)
+    assert hg._recovered_since_demotion(policy) is False  # equal is not "since"
+    hg.apply_override(policy)
+    assert policy.haiku_rewrite is False
+    policy.haiku_breaker = dict(mark, ts=rec - 1.0)  # a stamp strictly after the trip is a recovery
+    assert hg._recovered_since_demotion(policy) is True
+
+
 def test_an_unwritable_state_does_not_stop_the_live_demotion(tmp_path, monkeypatch):
     monkeypatch.setattr(qb, "_write_state", lambda state: False)
     policy, ev = _trip(tmp_path)
