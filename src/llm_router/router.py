@@ -5246,6 +5246,9 @@ async def route_and_call(
         # supports 3.10+. On timeout, release the budget reservation, write
         # a timeout audit row, and raise WallClockExceeded.
         _attempt_trace: list[str] = []
+        # D-141: an MCP door's readable error/deadline text names the models this list records.
+        from llm_router.mcp_door import attach_trace as _mcp_attach_trace
+        _mcp_attach_trace(_attempt_trace)
         _dispatch_coro = _dispatch_model_loop(
             models_to_try=models_to_try,
             task_type=task_type,

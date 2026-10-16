@@ -19,6 +19,7 @@ Safety invariants (Phase B):
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from collections.abc import AsyncIterator
@@ -327,7 +328,19 @@ async def call_llm(
         check_overflow({"messages": cached_messages}, num_ctx=kwargs.get("num_ctx"),
                        model=kwargs["model"], site="providers.call_llm")
 
-    response = await litellm.acompletion(**kwargs)  # llm_router: direct-ok (router provider layer)
+    # D-141: inside a deadline-bound MCP call one attempt gets at most half the deadline
+    # (45 s of 90 s by default), so a hung provider times out and the router falls through
+    # to the next candidate before the call's overall deadline expires.
+    from llm_router.mcp_door import attempt_cap_s
+    _attempt_cap = attempt_cap_s()
+    if _attempt_cap is not None:
+        kwargs["timeout"] = min(kwargs["timeout"], _attempt_cap)
+        response = await asyncio.wait_for(
+            litellm.acompletion(**kwargs),  # llm_router: direct-ok (router provider layer)
+            timeout=_attempt_cap,
+        )
+    else:
+        response = await litellm.acompletion(**kwargs)  # llm_router: direct-ok (router provider layer)
     elapsed_ms = (time.monotonic() - start) * 1000
 
     content = extract_content(response.choices[0].message)

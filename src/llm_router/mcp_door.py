@@ -1,0 +1,185 @@
+"""The MCP tool door: a readable error instead of a bare one, and an overall deadline (D-141).
+
+A. ``mcp`` 2.x reduces any unexpected exception a tool raises to the text
+``Error executing tool <name>`` and keeps the exception's own message on the server
+(``mcp/server/mcpserver/tools/base.py``). Our router raises messages written for the
+user ("No providers available for research/premium ... Fix: run `llm-router doctor`"),
+and Claude Code showed only the bare string (coordinator repro 2026-10-16, D-141).
+``run_door`` is the one choke point: ``IdentityMCPServer.call_tool`` runs every tool
+call through it, so an unexpected exception from ANY tool comes back as a result whose
+first line is ``llm-router error: <ExceptionType>: <message>``, plus the models tried
+when the router recorded any. ``asyncio.CancelledError`` and ``KeyboardInterrupt`` are
+never caught here (they are not ``Exception`` and ``mcp`` does not wrap them).
+
+B. A routed call had no overall deadline: a ``task="query"`` chain of four local models
+hung >150 s while other processes held the same Ollama model, and the MCP client stops
+waiting at ~120 s. The routed doors (``DEADLINE_TOOLS``) now run under one deadline,
+``LLM_ROUTER_MCP_DEADLINE_S`` (default 90 s, below the client's ~120 s; 0 turns it off).
+Inside that deadline each provider attempt made through ``providers.call_llm`` is capped
+at half the deadline (45 s by default, below ``request_timeout``'s 120 s), so one hung
+attempt still leaves room for the next candidate in the chain. When the deadline itself
+expires the door returns ``llm-router error: deadline <N>s exceeded; tried: <models>; ...``.
+
+Light on purpose: stdlib only at import; ``mcp`` is imported inside ``run_door``.
+"""
+from __future__ import annotations
+
+import asyncio
+import math
+import os
+from contextvars import ContextVar
+from typing import Any, Awaitable
+
+#: Default overall deadline for a routed MCP call, seconds. Below the MCP client's ~120 s.
+MCP_DEADLINE_DEFAULT_S = 90.0
+
+#: Share of the deadline one provider attempt may use, so a hung attempt leaves room for
+#: at least one more candidate inside the same deadline.
+ATTEMPT_SHARE = 0.5
+
+#: The doors that route a completion: ``llm()``, ``llm_route`` and the task aliases.
+DEADLINE_TOOLS = frozenset({
+    "llm", "llm_route",
+    "llm_query", "llm_research", "llm_generate", "llm_analyze", "llm_reason", "llm_code",
+})
+
+_MAX_MESSAGE_CHARS = 2000
+
+
+class _CallState:
+    """One MCP tool call: its deadline and the router's attempt lists (shared by reference)."""
+
+    __slots__ = ("deadline_s", "traces")
+
+    def __init__(self, deadline_s: float) -> None:
+        self.deadline_s = deadline_s
+        self.traces: list[list[str]] = []
+
+
+_STATE: ContextVar[_CallState | None] = ContextVar("llm_router_mcp_door", default=None)
+
+
+def deadline_s() -> float:
+    """``LLM_ROUTER_MCP_DEADLINE_S`` (default 90). 0 or negative turns the deadline off;
+    an unparsable or non-finite value falls back to the default."""
+    raw = os.environ.get("LLM_ROUTER_MCP_DEADLINE_S", "").strip()
+    if not raw:
+        return MCP_DEADLINE_DEFAULT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return MCP_DEADLINE_DEFAULT_S
+    if not math.isfinite(value):
+        return MCP_DEADLINE_DEFAULT_S
+    return value if value > 0 else 0.0
+
+
+def attempt_cap_s() -> float | None:
+    """The per-attempt timeout inside a deadline-bound MCP call, else None (no cap)."""
+    state = _STATE.get()
+    if state is None or state.deadline_s <= 0:
+        return None
+    return state.deadline_s * ATTEMPT_SHARE
+
+
+def attach_trace(attempts: list[str]) -> None:
+    """Register the router's live attempt list for this MCP call (no-op outside one).
+
+    The list object is kept, not copied: the router appends to it as it walks the chain,
+    so the models tried are known even when the deadline cancels the walk half way."""
+    state = _STATE.get()
+    if state is not None:
+        state.traces.append(attempts)
+
+
+def _tried(state: _CallState) -> list[str]:
+    try:
+        from llm_router.quality_feedback import is_skip_marker
+    except Exception:  # noqa: BLE001 -- the error text must not fail on a missing helper
+        def is_skip_marker(entry: str) -> bool:
+            return False
+    out: list[str] = []
+    for trace in state.traces:
+        for model in list(trace):
+            if isinstance(model, str) and not is_skip_marker(model) and model not in out:
+                out.append(model)
+    return out
+
+
+def _root_cause(exc: BaseException) -> BaseException:
+    """The exception the tool actually raised, under ``mcp``'s ``UnexpectedToolError`` wrappers."""
+    from mcp.server.mcpserver.exceptions import UnexpectedToolError
+
+    seen = 0
+    while isinstance(exc, UnexpectedToolError) and exc.__cause__ is not None and seen < 10:
+        exc = exc.__cause__
+        seen += 1
+    return exc
+
+
+def error_text(exc: BaseException, tried: list[str]) -> str:
+    """``llm-router error: <ExceptionType>: <message>`` (+ ``tried: ...`` when known)."""
+    message = str(exc).strip() or "(no message)"
+    if len(message) > _MAX_MESSAGE_CHARS:
+        message = message[:_MAX_MESSAGE_CHARS] + " ..."
+    text = f"llm-router error: {type(exc).__name__}: {message}"
+    if tried:
+        text += "\ntried: " + ", ".join(tried)
+    return text
+
+
+def deadline_text(limit: float, tried: list[str]) -> str:
+    models = ", ".join(tried) if tried else "no model attempt recorded"
+    return (
+        f"llm-router error: deadline {limit:g}s exceeded; tried: {models}; "
+        "local models may be busy (Ollama queue) — retry or use tier=fast"
+    )
+
+
+def _result(text: str) -> Any:
+    from mcp.types import CallToolResult, TextContent
+
+    return CallToolResult(content=[TextContent(type="text", text=text)], is_error=True)
+
+
+def _record(code: str, exc: BaseException | None, detail: str) -> None:
+    """Ids only in the log: the tool name and exception type, never the message or prompt."""
+    try:
+        from llm_router import failopen
+
+        failopen.record(code, exc, detail=detail)
+        from llm_router.logging import get_logger
+
+        get_logger("llm_router.mcp_door").warning(
+            "mcp_tool_error", code=code, exc_type=type(exc).__name__ if exc else None, detail=detail,
+        )
+    except Exception:  # noqa: BLE001 -- telemetry never changes the reply
+        pass
+
+
+async def run_door(name: str, call: Awaitable[Any]) -> Any:
+    """Await one MCP tool call (``call``) under the door's contract; see the module doc."""
+    from mcp.server.mcpserver.exceptions import UnexpectedToolError
+
+    limit = deadline_s() if name in DEADLINE_TOOLS else 0.0
+    state = _CallState(limit)
+    token = _STATE.set(state)
+    try:
+        if limit <= 0:
+            return await call
+        timer = asyncio.timeout(limit)
+        try:
+            async with timer:
+                return await call
+        except TimeoutError:
+            if not timer.expired():
+                raise
+            _record("CHZ-FO-MCP-DEADLINE", None,
+                    f"tool={name} deadline_s={limit:g} attempts={len(_tried(state))}")
+            return _result(deadline_text(limit, _tried(state)))
+    except UnexpectedToolError as exc:
+        root = _root_cause(exc)
+        _record("CHZ-FO-MCP-TOOL-ERROR", root, f"tool={name}")
+        return _result(error_text(root, _tried(state)))
+    finally:
+        _STATE.reset(token)
