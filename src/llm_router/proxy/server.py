@@ -54,7 +54,7 @@ from urllib.parse import urlsplit
 from llm_router.local_agent import DEFAULT_MAX_PROMPT_TOKENS, LocalAgentConfig, enabled_from_env
 from llm_router.local_agent import capability as la_capability
 from llm_router.local_agent.compact import session_cwd as la_session_cwd
-from llm_router import failopen, local_models, prompt_key, shadow_frontier
+from llm_router import authority, failopen, local_models, prompt_key, shadow_frontier, skips
 from llm_router.proxy import haiku_arm, haiku_guard, ledger, llm_shadow, local_mode, local_shadow, okf_context
 
 from llm_router.proxy.backend_health import (
@@ -929,6 +929,23 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if msg_id and not row.get("msg_id"):
             row["msg_id"] = msg_id
 
+    async def advise_forward(request: Request, raw: bytes, body: dict, row: dict):
+        """Authority ``advise`` (P2.2-A): no local serving, no rewrite. The tier
+        policy still decides, so the ledger keeps its proposal (``tier_proposed``
+        and the ``tier_*`` detail), but the client's own bytes go upstream and the
+        row says the requested model was served."""
+        if tier_policy is None:
+            skips.record("proxy", "tiers_off", row.get("session_id"))
+        else:
+            decision = await decide_tier(body, row)
+            if decision is not None:  # a decision error keeps its own reason
+                row["tier_reason"] = authority.ADVISE
+            row.update(served_model=body.get("model"), tier=None, tier_switch=False,
+                       tier_switch_cost_usd=None)
+        if row.get("tier_reason") is None:
+            row["tier_reason"] = authority.ADVISE
+        return await forward(request, raw, body, row)
+
     async def handle(request: Request):
         from llm_router.route_server import is_forbidden_cross_origin
 
@@ -974,6 +991,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             **request_fields(body, raw, parent_main),
             "cls_source": "rules", "cls_ms": None, "cls_arm": None, "cls_applied": False,
         }
+        # P2.2-A: per request, so `llm-router mode advise|route` needs no restart.
+        row["authority"] = authority.mode()
+        if row["authority"] == authority.ADVISE:
+            return await advise_forward(request, raw, body, row)
         if lm is not None:
             message = await local_step(body, row)
             if message is not None:
@@ -983,6 +1004,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 return Response(json.dumps(message), media_type="application/json")
         elif not cfg.steps:
             row["reason"] = "routing_off"
+            skips.record("proxy", "routing_off", row.get("session_id"))
         elif step_class(body, cfg.steps) is None:
             row["reason"] = "not_eligible"
         else:
@@ -994,6 +1016,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 return Response(json.dumps(message), media_type="application/json")
         on_reply = start_shadow(body, row, len(raw)) if shadow is not None else None
         if tier_policy is None:
+            skips.record("proxy", "tiers_off", row.get("session_id"))
             return await forward(request, raw, body, row, on_reply=on_reply)
         decision = await decide_tier(body, row)
         if decision is None:

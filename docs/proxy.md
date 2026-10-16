@@ -704,6 +704,42 @@ a sha256 of the `env` block and the file's mtime (never the URL). The repair
 appends a `write` row with the keys changed and the backup path. The next
 unexplained removal then falls between two session starts.
 
+### Routing authority: `route` or `advise` (P2.2-A, `llm_router/authority.py`)
+
+```bash
+llm-router mode                  # "mode: route (default)" / "(file)" / "(env)"
+llm-router mode advise           # the proxy forwards the model you asked for; logs its proposal only
+llm-router mode route            # back to today's behaviour (the default)
+llm-router install --authority route|advise   # proxy default + fail-open shim, then the mode
+```
+
+`advise` skips local serving and every rewrite: the tier policy still decides, so the
+ledger row keeps `tier_proposed` and the `tier_*` detail, but the client's own request
+bytes go upstream, `served_model` is the requested model, `tier` is null and `tier_reason`
+is `advise`. Every proxy row carries `authority` (`route` | `advise`). The mode is read on
+every request from `LLM_ROUTER_AUTHORITY` (wins when set), else the one-word file
+`~/.llm-router/authority`, else `route`; a toggle therefore never restarts the proxy. An
+unrecognised value is read as `route` and counted as `CHZ-FO-AUTHORITY-MODE`. Nothing here
+writes `settings.json` or a service definition.
+
+**Shipped off.** A plain `llm-router install` does not turn the proxy default on: it prints
+one line saying so. `commands/install.py` `PROXY_DEFAULT_ON_INSTALL = False` is the owner's
+switch (D-104): when True, a fresh install (no sentinel, no `ANTHROPIC_BASE_URL` in
+`settings.json`) installs the proxy default with `route`, unless `--no-authority`.
+
+**Skips.** `~/.llm-router/skips.jsonl` holds `{ts, session_id, door, reason}`; a row with no
+reason is refused. The proxy writes `tiers_off` (a forward with no tier policy) and
+`routing_off` (steps off); the hook sites (`headless`, `base_url_override`) are round B.
+With the shipped service (`--steps off`) every call writes a `routing_off` row, so the
+file rotates at 8 MB (two generations).
+
+**Coverage.** `scripts/coverage_check.py --since ... --until ...` counts host model calls
+(assistant message ids in the Claude Code transcripts) that passed a decision point (a
+ledger row with `tier_reason` or `reason`, or served), caps each session at 40, requires
+every call that did not pass to be explained, and prints Wilson 95% bounds. It reads message
+ids and timestamps only. `--write` leaves `coverage_check.json` for `llm-router kpi`. This
+is decision-point coverage, not routing coverage: a forward with a recorded reason passes.
+
 ### Escalation to Opus (`proxy/escalation.py`)
 
 Directly motivated by the trial's one unacceptable answer:
