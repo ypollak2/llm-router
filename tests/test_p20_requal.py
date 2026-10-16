@@ -83,7 +83,9 @@ def pool_rows(name, n):
 def freeze_file(cfg, constants, text=None, date=PAST):
     text = text if text is not None else h.PREREG.read_text()
     for key in h.FILL_KEYS:
-        text = text.replace(f"{key}=FILL-AT-FREEZE", f"{key}={constants[key]}")
+        # Works on the draft (FILL-AT-FREEZE) and on the frozen prereg (real fill-ins).
+        text, count = re.subn(rf"(?m)^{re.escape(key)}=.*$", f"{key}={constants[key]}", text)
+        assert count == 1, key
     cfg.prereg.write_text(text)
     cfg.prereg.with_suffix(".sha256").write_text(
         f"{h.sha256_file(cfg.prereg)}  {cfg.prereg.name}\nfrozen_utc {date}\n"
@@ -280,8 +282,8 @@ def test_claude_boundary(tmp_path, monkeypatch):
 
 def test_constants_and_real_freeze(factory, tmp_path):
     parsed = h.parse_constants(h.PREREG.read_text())
-    assert {k: v for k, v in parsed.items() if v != "FILL-AT-FREEZE"} == h.CONSTANTS
-    assert tuple(k for k, v in parsed.items() if v == "FILL-AT-FREEZE") == h.FILL_KEYS
+    assert {k: v for k, v in parsed.items() if k not in h.FILL_KEYS} == h.CONSTANTS
+    assert tuple(k for k in parsed if k not in h.CONSTANTS) == h.FILL_KEYS
     cfg, c, _ = factory()
     assert h.frozen(cfg)["constants"]["PLANTS_PASS_SHARE"] == "5/6"
     assert h.frozen(cfg)["constants"]["PLANTS_MIN_PLACED"] == "4"
