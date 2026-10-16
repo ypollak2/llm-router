@@ -1166,6 +1166,8 @@ async def llm_quota_status() -> str:
     The QUOTA_BALANCED profile uses this data to dynamically reorder the
     routing chain — keeping usage balanced across all three subscriptions.
 
+    The order shown is the legacy quota_balance order; live routing under QUOTA_BALANCED uses resource_map.order_chain (P2.3).
+
     Returns:
         Formatted quota status with usage percentages and route recommendations.
     """
@@ -1216,7 +1218,7 @@ async def llm_quota_status() -> str:
             "gemini_cli": "gemini-pro",
         }
         priority_models = " → ".join([f"{p} ({model_map.get(p, p)})" for p in order])
-        status_lines.append(f"Model chain: {priority_models}")
+        status_lines.append(f"Model chain (legacy quota_balance order, not the P2.3 live score): {priority_models}")
 
         # Reset times
         from datetime import datetime, timezone, timedelta
