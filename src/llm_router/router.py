@@ -955,31 +955,9 @@ async def _build_and_filter_chain(
             if m not in _seen and not _seen.add(m)  # type: ignore[func-returns-value]
         ]
 
-        # ── Quota-balanced reordering (v7.1.0) ─────────────────────────────────
-        # QUOTA_BALANCED: dynamically reorder chain to balance usage across
-        # Claude, Gemini CLI, and Codex subscription providers.
-        if profile == RoutingProfile.QUOTA_BALANCED:
-            try:
-                from llm_router.quota_balance import (
-                    get_provider_pressures,
-                    get_balanced_provider_order,
-                    reorder_chain_by_providers,
-                )
-                pressures = await get_provider_pressures()
-                order = get_balanced_provider_order(pressures)
-                models_to_try = reorder_chain_by_providers(models_to_try, order)
-
-                # Log priority change with visual indicator
-                spread = max(pressures.values()) - min(pressures.values())
-                in_band = spread <= 0.10
-                log.info(
-                    "🔄 QUOTA_BALANCED: Provider priorities reordered | Spread: %s | Providers: %s | Reason: %s",
-                    f"{spread:.0%}",
-                    " → ".join([f"{p}({pressures[p]:.0%})" for p in order]),
-                    "all balanced (free-first tiebreak)" if in_band else f"imbalanced — prioritize {order[0]}",
-                )
-            except Exception as _quota_err:
-                log.warning("QUOTA_BALANCED reordering failed: %s", _quota_err)
+        # P2.3: the QUOTA_BALANCED reorder moved to route_and_call (one score
+        # pass after sink_unvalidated, before the D-116 strip); see
+        # docs/prereg/PREREG-P23-quota-score.md
 
         # ── Final pin re-assert ─────────────────────────────────────────────
         # _reorder_for_agent_context groups the chain strictly by provider tier
@@ -987,7 +965,7 @@ async def _build_and_filter_chain(
         # per-task pin, so for SIMPLE/MODERATE complexity it unconditionally
         # returns `ollama + codex + ...` — silently burying a pin like
         # analyze -> codex/gpt-5.4 behind every local model. The routing-policy
-        # and QUOTA_BALANCED passes below it can do the same. An explicit user
+        # pass below it can do the same. An explicit user
         # pin is the strongest signal in the system, so it must win over all of
         # them; re-assert it here, after every reorder, right before return.
         if pinned_model:
@@ -1043,7 +1021,8 @@ async def _build_and_filter_chain(
     # P1.8: the resource map, when a fresh one is on disk, drops resources that are
     # not connected and orders by its effective_priority. No map, no change. An
     # explicit pin or the headless codex re-assert above keeps its place (filter only).
-    _keep_order = bool(pinned_model) or (
+    # QUOTA_BALANCED also only filters: its later score uses effective_priority.
+    _keep_order = bool(pinned_model) or profile == RoutingProfile.QUOTA_BALANCED or (
         "codex" in _broker_provs
         and profile in (RoutingProfile.PREMIUM, RoutingProfile.REASONING)
     )
@@ -1540,6 +1519,33 @@ def _local_in_timeout_cooldown(model: str) -> bool:
     t = _local_timeout_at.get(model)
     cooldown = _local_timeout_cooldown_s()
     return t is not None and cooldown > 0 and time.monotonic() - t < cooldown
+
+
+def _quota_score_chain(
+    models: list[str], task_type, *, exempt: str | None = None,
+) -> list[str]:
+    """One subscription score pass; constants stay in resource_map (P2.3 prereg)."""
+    try:
+        from llm_router import map_reader, qa_policy, resource_map
+
+        map_data = map_reader.load_data() or resource_map.live_subscription_rows()
+        tt = getattr(task_type, "value", task_type)
+        hold = frozenset({"anthropic"}) if tt in qa_policy.QA_TASK_TYPES else frozenset()
+        new, explains = resource_map.order_chain(
+            models, map_data, {"task_type": tt, "needs": ()},
+            hold_providers=hold, exempt=exempt,
+        )
+        log.info(
+            "quota_score providers=%s explains=%s",
+            [m.split("/", 1)[0] for m in new],
+            [{k: e.get(k) for k in ("resource", "score", "terms")} for e in explains],
+        )
+        return new
+    except Exception as exc:
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-ROUTER-QUOTA-SCORE", exc)
+        return models
 
 
 def _demote_timed_out_local(models: list[str], exempt: str | None = None) -> list[str]:
@@ -4805,6 +4811,11 @@ async def route_and_call(
             models_to_try = sink_unvalidated(
                 models_to_try, task_type.value,
                 _gate_configured_names(get_config(), get_repo_config()))
+
+        # P2.3 single site: precision/specialist/bandit run before this pass
+        # and can only change subscription ties; D-116 and TQ-007 run after it.
+        if models_to_try and not model_override and profile == RoutingProfile.QUOTA_BALANCED:
+            models_to_try = _quota_score_chain(models_to_try, task_type, exempt=pinned_model)
 
         # D-116 (amends D-14/D-114/D-115): insert local Q&A models after the last
         # non-Claude entry, before trailing Claude entries. Applied after the chain

@@ -144,6 +144,18 @@ def load_view(path: Path | None = None, now: float | None = None) -> MapView | N
         return None
 
 
+def load_data(path: Path | None = None, now: float | None = None) -> dict | None:
+    """Return the cached map under exactly load_view's freshness rules."""
+    try:
+        if load_view(path, now) is None:
+            return None
+        with _lock:
+            hit = _cache.get(str(_path(path)))
+            return hit[1] if hit is not None else None
+    except Exception:
+        return None
+
+
 def apply_to_chain(
     chain: Sequence[T],
     key: Callable[[T], str] = lambda m: m,  # type: ignore[assignment,return-value]
