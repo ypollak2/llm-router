@@ -13,8 +13,9 @@ Hook-safe: no network, no ``llm_router.config`` import (pydantic-settings,
 * the resource map, through :func:`map_reader.load_data` (fresh map only): its
   connected rows give the seats (claude, codex, gemini_cli), the Ollama models and
   the API keys :mod:`llm_router.discovery.keys` found (env, ``.env``, keychain);
-* the API-key NAMES set in the process environment or in the ``.env`` files
-  ``RouterConfig`` and ``env_loader`` read (cwd, state dir, home). A value is only
+* the API-key NAMES set in the process environment, into which the hook has
+  already loaded the ``.env`` files through ``env_loader`` (this module reads no
+  file itself, D-153). A value is only
   tested for being non-empty; it is never kept, logged or returned. This covers
   providers the map's key table does not list (xai, minimax, zhipu, ...), which
   ``config.available_providers`` does count;
@@ -43,7 +44,6 @@ from __future__ import annotations
 
 import os
 import re
-from pathlib import Path
 
 #: The text task types the hook names a door for. Anything else is not checked.
 TEXT_TASKS: tuple[str, ...] = ("query", "research", "generate", "analyze", "code")
@@ -76,32 +76,16 @@ _INJECTED = frozenset({"codex", "gemini_cli"})
 
 
 def _env_names() -> dict[str, str]:
-    """Upper-cased setting name -> value, from the env and the ``.env`` files.
+    """Upper-cased setting name -> value, from the process environment ONLY.
 
-    The process environment wins over the files, as in ``RouterConfig``.
+    This module never opens a ``.env`` file itself (D-153: a raw read of a FIFO
+    named ``.env`` in the cwd hung a prompt for >8 s). The hook has already merged
+    the ``.env`` files into ``os.environ`` at import (``auto-route._load_dotenv`` ->
+    ``env_loader.load_dotenv_files``: regular files only, SEC-002/003 allowlist for
+    the cwd file). An in-process caller that wants the file keys too calls
+    ``env_loader.load_dotenv_files()`` first.
     """
-    names: dict[str, str] = {}
-    try:
-        from llm_router import paths
-
-        files = [Path.home() / ".env", paths.state_path(".env"), Path.cwd() / ".env"]
-    except Exception:  # noqa: BLE001 -- no state dir: the env alone
-        files = []
-    for path in files:
-        try:
-            text = path.read_text(errors="replace")
-        except (OSError, ValueError):
-            continue
-        for line in text.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            name, _, value = line.partition("=")
-            name = name.strip().removeprefix("export ").strip().upper()
-            names[name] = value.strip().strip("'\"")
-    for name, value in os.environ.items():
-        names[name.upper()] = value
-    return names
+    return {name.upper(): value for name, value in os.environ.items()}
 
 
 def available_providers() -> frozenset[str] | None:

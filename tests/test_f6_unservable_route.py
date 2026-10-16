@@ -216,19 +216,70 @@ def test_resolver_rules(monkeypatch):
     assert ta.resolve("research") == ("research", ta.UNKNOWN)
 
 
-def test_key_names_from_env_and_dotenv(tmp_path, monkeypatch):
-    home = tmp_path / "h"
+def _isolate_keys(monkeypatch, home: Path, cwd: Path) -> Path:
     state = home / ".llm-router"
     write_map(home, [CLAUDE_LOGIN])
-    (state / ".env").write_text("export MINIMAX_API_KEY='k'\nDEEPSEEK_API_KEY=\n")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("LLM_ROUTER_HOME", str(state))
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(cwd)
     for var in list(os.environ):
         if var.endswith("_API_KEY") or var in ("LLM_ROUTER_CLAUDE_SUBSCRIPTION",
                                                "OPENAI_COMPAT_BASE_URL"):
             monkeypatch.delenv(var)
+    return state
+
+
+def test_key_names_come_from_os_environ(tmp_path, monkeypatch):
+    _isolate_keys(monkeypatch, tmp_path / "h", tmp_path)
     monkeypatch.setenv("XAI_API_KEY", "x")
-    got = ta.available_providers()
-    assert got == frozenset({"minimax", "xai"})   # empty value and login-only claude excluded
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "")
+    assert ta.available_providers() == frozenset({"xai"})   # empty value, login-only claude out
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "http://127.0.0.1:8080/v1")
+    assert ta.available_providers() == frozenset({"xai", "openai_compat"})
+
+
+def test_dotenv_keys_arrive_through_env_loader_only(tmp_path, monkeypatch):
+    state = _isolate_keys(monkeypatch, tmp_path / "h", tmp_path)
+    (state / ".env").write_text("MINIMAX_API_KEY='k'\n")
+    assert ta.available_providers() == frozenset()           # the module reads no .env itself
+    from llm_router import env_loader
+
+    for name, value in env_loader.load_dotenv_files(cwd=tmp_path, target={}).items():
+        monkeypatch.setenv(name, value)                      # what the hook does at import
+    assert ta.available_providers() == frozenset({"minimax"})
     assert ta.resolve("research") == ("research", ta.SERVABLE)   # minimax is in a research chain
+
+
+def test_fifo_dotenv_in_cwd_is_never_opened(tmp_path, monkeypatch):
+    """D-153: a FIFO named .env in the cwd hung resolve() for >8 s via a raw read."""
+    import builtins
+    import threading
+    import time
+
+    _isolate_keys(monkeypatch, tmp_path / "h", tmp_path)
+    os.mkfifo(tmp_path / ".env")
+    (tmp_path / "h" / ".env").write_text("XAI_API_KEY=x\n")
+    opened: list[str] = []
+    real_read, real_open = Path.read_text, builtins.open
+
+    def spy_read(self, *a, **kw):
+        opened.append(self.name)
+        return real_read(self, *a, **kw)
+
+    def spy_open(file, *a, **kw):
+        opened.append(Path(str(file)).name)
+        return real_open(file, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", spy_read)
+    monkeypatch.setattr(builtins, "open", spy_open)
+    out: list = []
+    t0 = time.monotonic()
+    worker = threading.Thread(target=lambda: out.append(ta.resolve("research")), daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+    elapsed = time.monotonic() - t0
+    assert out, "resolve() blocked on the FIFO .env"
+    assert elapsed < 1.0
+    assert ".env" not in opened
+    assert out[0] == (None, ta.NO_PROVIDER)   # neither the FIFO nor ~/.env was read
+
