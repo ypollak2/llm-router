@@ -1,6 +1,6 @@
 # PREREG-P20-requal: local re-qualification with the full pack (PLAN v16 P2.0 tasks 1-5)
 
-Status: **DRAFT r6, not frozen.** This file is frozen only when `PREREG-P20-requal.sha256` exists
+Status: **DRAFT r7, not frozen.** This file is frozen only when `PREREG-P20-requal.sha256` exists
 beside it, an independent freeze-guard review has passed (D-122 rule: an author-written sidecar is
 void), and `scripts/check_prereg.py` reports a match. Until then `scripts/p20_requal.py` refuses every
 subcommand that writes an item, calls a model or writes a result. The one pre-freeze mode is
@@ -11,7 +11,9 @@ selected, no model has been called and nothing has been scored under this file.
 r2 applied the freeze-guard review of r1 (NOT READY) and D-123 / D-123a; r3 applies the r2 review
 (NOT READY on two text fixes) and D-123b; r4 adds the pre-freeze NITs; r5 corrects the `rx` stratum
 and adds the runner disclosures and hook-free Claude calls (coordinator, 2026-10-16); r6 pins every rx
-source and fixes three text points from the r5 review.
+source and fixes three text points from the r5 review; r7 (D-131) records build 1 as void, fixes the
+`rx_edit` directory mapping and the sub-agent transcript search, moves the run to `requal/b2`, and
+discloses the two ungraded rx packets and the tech-op shortfall.
 
 ## 0. Contradictions and settled points (read first)
 
@@ -83,8 +85,20 @@ within 3 points of Sonnet's on the same items?
 
 ## 4. Sets and item sources
 
-Items are prompt-derived. They live only in `$REQ = ~/.rsi/research/primary-plan/v16/requal/`
-(directory 0700, files 0600). A pre-freeze **build step** (read-only, run by a sub-agent, like
+Items are prompt-derived. They live only under `~/.rsi/research/primary-plan/v16/requal/`
+(directories 0700, files 0600). The run directory is **`$REQ = ~/.rsi/research/primary-plan/v16/requal/b2/`**
+(build 2).
+
+**Build 1 is void (D-131).** Build 1 ran on 2026-10-16T13:10Z into `requal/pools/`. Its outputs are
+kept, never overwritten or reused. It had two defects:
+* **Builder path bug.** All 20 `rx_edit` tasks were dropped as `fixture_missing`, because the
+  fixtures manifest's `name` (e.g. `clamp`) is not the directory name (`edit-00-clamp`).
+* **Transcript search too narrow.** Tech-op steps were looked up only in the session's main
+  transcript, so `msg_not_found` hit 288 steps. A counts-only id check found some of those
+  response ids in the session's sub-agent transcripts.
+
+Build 2 uses the fixed builder (below), and its outputs and fill-ins supersede build 1's. Nothing
+from build 1 was selected, run or scored. A pre-freeze **build step** (read-only, run by a sub-agent, like
 D-107 c) writes one pool file per set plus `$REQ/pools/build_manifest.json`. The manifest holds the
 sha256 of every source the pools were built from: the [RX] packet file
 (`p2b_work/packets.jsonl` = `RX_PACKETS_SHA256`), `p2b_work/grades_grader1.jsonl`, `corpus.jsonl`,
@@ -114,6 +128,33 @@ and `context`; tech-op rows add `request`, `messages` and `tools`; code rows add
 on 2026-10-16; `rx-real` if absent). Every generated `rx` row uses the single session `rx-gen` (one
 generation run), so the session cap bounds them. A code row
 uses its stratum name as the session (the cap does not apply to code).
+
+**Build 2 fixes (builder, before the freeze).**
+* **`rx_edit` directory.** It is `fixtures/edit-<idx:02d>-<name>`, and it must equal the basename of
+  the manifest's `path`; `test` must be a relative `tests/….py` path. On 2026-10-16 all 20 manifest
+  rows pass, so code n is expected to be 75. The runner reads `module`, `func` and `summary` from
+  the pinned manifest by `idx` and `name`; the pool carries no task text.
+* **Tech-op rebuild.** The rebuild searches the session's main transcript first, then its sub-agent
+  transcripts (`<project>/<session>/**/*.jsonl`). Every file read is pinned in the build manifest.
+
+**Two `rx` packets are ungraded, and their exclusion is not outcome-driven.**
+* The build counts 52 main Q&A packets, of which 50 were graded by grader1.
+* The two ungraded ones (1 real/complex, 1 gen/simple) are in the tail of 7 packets that grader1
+  never reached: its log ends `GRADER1 STOP at cap: cum=$4.9008 + est $0.1221 > $5.00`.
+* Grader1's log never names either packet, so no grade of theirs existed to select on. Both were
+  graded by grader2, which is not read here.
+* The complex one would be dropped by the tier filter anyway, so the exclusion removes one item
+  that would otherwise be eligible.
+
+**Tech-op shortfall (D-131, stated before selection).**
+* Build 1 gave a tech-op pool of 15 and n = 1. A counts-only estimate for build 2 from ledger
+  metadata plus id lookups (no text) gives about 11 admissible organic steps after the 20% session
+  cap.
+* The non-organic stratum D-131(b) proposed (main-thread tech-op steps from headless, research
+  and harness sessions) would admit **0**: every such row has no `tier_complexity` label, so all
+  are `no_tier`. So it is not added.
+* If tech-op n < 60, the set is **NOT INFORMATIVE by design**. P2.1 waits: there is no kill and no
+  P2.1 cancellation. Q&A and code proceed.
 
 **Selection** (`select`, once). Rows are ordered by `sha256("20261016:" + id)`, with stratum `rx`
 first for `qa`. The walk admits a row unless its session already holds `floor(0.20 × N_target)`
@@ -311,6 +352,8 @@ For code, "powered" uses each lane's own paired n.
     design) before any further run.
   * If P2.1 is cancelled and no local lane is eligible in any set, v16 continues with Haiku /
     very-cheap offload and D-27 is re-asked.
+* **Tech-op not informative (D-131 c).** A tech-op set with n < 60 cancels nothing; P2.1 waits
+  for a new prereg with a larger tech-op population.
 * **P2.1 needs an eligible model.** It proceeds only with ≥ 1 `eligible` tech-op lane. Without one,
   e_tech = 0 (§11), and P2.1 local tech-op serving does not start, even when P2.1 is not cancelled
   (no decision). P2.10 likewise re-enables only the lanes D-21 allows.
@@ -544,7 +587,9 @@ N_REALISED_CODE=FILL-AT-FREEZE
 
 The harness parses this block from the frozen file. It refuses while any value reads
 `FILL-AT-FREEZE`, and it refuses if a constant differs from its own copy. Only the `FILL-AT-FREEZE`
-values may change at the freeze. The build manifest (pinned) records every source sha256 listed in §4,
+values may change at the freeze. **`REPO_SHA`** is the harness commit checked out for the run: the
+last pre-freeze commit, after every builder fix. Its `src/` diff against caaf8d28 is limited to
+`resolver/eligibility_store.py` (`record_competence`), and the freeze record states that diff. The build manifest (pinned) records every source sha256 listed in §4,
 including the transcript file sha256s and the secret-guard patterns. The build-step
 exclusion counts by reason are added under "What was looked at". N targets, seeds, caps, bars,
 models and g_min may not change.
