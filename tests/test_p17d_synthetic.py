@@ -361,6 +361,12 @@ def test_the_frozen_prereg_matches_its_freeze_record():
     assert res["match"] and res["frozen_utc"] == "2026-10-15T16:32:58Z"
 
 
+def test_the_frozen_amend1_matches_its_freeze_record():
+    res = ps.check_prereg.check(ps.AMEND1)
+    assert res["match"] and res["frozen_utc"] == "2026-10-16T08:19:58Z"
+    assert ps.parse_utc(res["frozen_utc"]) > ps.parse_utc(ps.check_prereg.check(ps.PREREG)["frozen_utc"])
+
+
 # ============================================================ common refusals
 @pytest.mark.parametrize("cmd", ["select", "shadow", "label", "score"])
 def test_every_command_but_status_refuses_on_a_prereg_mismatch(world, tmp_path, cmd, capsys):
