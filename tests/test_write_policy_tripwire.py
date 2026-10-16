@@ -747,3 +747,112 @@ def test_r6_additional_benign_forms_are_allowed(tree, cmd):
     root, _ = tree
     v = check_command(cmd, root)
     assert v.decision == "allow", (cmd, v)
+
+
+# ---- review round 8 (#452 re-review of 92975f78..50dc231f) ----
+
+
+@pytest.mark.parametrize("cmd", [
+    'sed -n "w $D/x" a.txt',
+    "sed -n 'w '$D/x a.txt",
+    'sed -n "w ${D}x" a.txt',
+    'sed -n "1w $HOME/x" a.txt',
+    "sed -n 'w '\"$D\"'/x' a.txt",
+    "sed -n -e 'w '$D/x a.txt",
+    'sed "s/a/b/w $D/x" a.txt',
+])
+def test_r8_sed_w_name_from_an_expansion_needs_approval(tree, cmd):
+    root, _ = tree
+    assert check_command(cmd, root).decision == "needs_approval", cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    "uv run --constraints c.txt python -c x",
+    "uv run -c c.txt python -c x",
+    "uv run --overrides o.txt python -c x",
+    "uv run --editable . python -c x",
+    "uv run -e . python -c x",
+    "uv run --no-install-package x python -c x",
+    "uv run --only-binary x python -c x",
+    "uv run --no-build-isolation-package x python -c x",
+])
+def test_r8_uv_run_unknown_option_needs_approval(tree, cmd):
+    root, _ = tree
+    assert check_command(cmd, root).decision == "needs_approval", cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    "uv run --frozen pytest -q",
+    "uv run --with rich python script.py",
+    "uv run -m pytest -q",
+    "uv run --no-sync --locked pytest",
+])
+def test_r8_uv_run_known_options_stay_allowed(tree, cmd):
+    root, _ = tree
+    assert check_command(cmd, root).decision == "allow", cmd
+
+
+@pytest.mark.parametrize("tpl", [
+    "awk '{{ print \"a\" \\\n > \"{out}/x\" }}' f.txt",
+    "awk 'BEGIN{{ \"echo x\" |\\\ngetline }}'",
+])
+def test_r8_awk_backslash_newline_is_joined(tree, tpl):
+    root, out = tree
+    assert check_command(tpl.format(out=out), root).decision == "needs_approval", tpl
+
+
+@pytest.mark.parametrize("cmd", [
+    "gsed -n 'w /tmp/r8-outside' a.txt",
+    "gsed -i s/a/b/ /tmp/r8-outside",
+    "gsed 'e' a.txt",
+])
+def test_r8_gsed_is_sed(tree, cmd):
+    root, _ = tree
+    assert check_command(cmd, root).decision in ("refuse", "needs_approval"), cmd
+
+
+def test_r8_gsed_benign_is_allowed(tree):
+    root, _ = tree
+    assert check_command("gsed -n '/warning/p' log.txt", root).decision == "allow"
+
+
+@pytest.mark.parametrize("cmd", [
+    "awk '{print > \"/dev/stderr\"}' f.txt",
+    "awk '{print $1 >> \"/dev/stdout\"}' f.txt",
+    "awk '{printf \"%s\\n\", $0 > \"/dev/null\"}' f.txt",
+])
+def test_r8_awk_print_to_std_streams_is_allowed(tree, cmd):
+    root, _ = tree
+    assert check_command(cmd, root).decision == "allow", cmd
+
+
+def test_r8_awk_print_to_a_file_still_gated(tree):
+    root, out = tree
+    assert check_command(f"awk '{{print > \"{out}/f\"}}' f.txt", root).decision != "allow"
+    assert check_command("awk '{print | \"/dev/stderr\"}' f.txt", root).decision != "allow"
+
+
+def test_r8_plain_sed_w_command_is_a_write_target(tree):
+    root, out = tree
+    v = check_command(f"sed -n 'w {out}/f' a.txt", root)
+    assert v.decision == "refuse" and str((out / "f").resolve()) in v.targets
+    assert check_command("sed -n 'w in-root.txt' a.txt", root).decision == "allow"
+
+
+@pytest.mark.parametrize("cmd", ["sed e a.txt", "sed -n 'e' a.txt", "sed '1e' a.txt"])
+def test_r8_plain_sed_e_command_runs_a_shell_command(tree, cmd):
+    root, _ = tree
+    v = check_command(cmd, root)
+    assert v.decision == "needs_approval" and "sed e command" in v.reason, (cmd, v)
+
+
+@pytest.mark.parametrize("cmd", [
+    "uvx ruff check .", "pdm run python -c x", "hatch run python -c x", "conda run python -c x",
+    "rye run python -c x", "pipenv run python -c x", "npx some-tool", "pnpm exec some-tool",
+    "bunx some-tool", "bundle exec rake", "xvfb-run make", "dbus-run-session make",
+    "su -c 'touch x' root", "runuser -c 'touch x' root", "pkexec touch x", "systemd-run touch x",
+    "nsenter -t 1 touch x", "unshare -r touch x",
+])
+def test_r8_launchers_that_run_an_inner_command_need_approval(tree, cmd):
+    root, _ = tree
+    assert check_command(cmd, root).decision == "needs_approval", cmd

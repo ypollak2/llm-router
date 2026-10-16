@@ -560,8 +560,8 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
                 pos = pos[1:]                          # owner / s-expression
         for a in pos:
             tgt(a)
-    elif prog == "sed":
-        _sed_effects(scan, args, tgt)
+    elif prog in ("sed", "gsed"):
+        _sed_effects(scan, args, tgt)  # gsed: GNU sed on macOS/BSD
     elif prog in ("awk", "gawk", "mawk", "nawk"):
         _awk_effects(scan, args)
     elif prog == "find":
@@ -849,7 +849,11 @@ def _sed_effects(scan: _Scan, args: list[str], tgt) -> None:
         # sed joins -e fragments; a block may begin in one and end in another.
         writes, runs, ok = _sed_script_effects("\n".join(scripts))
         for name in writes:
-            tgt(name)
+            if "$" in name or "`" in name:
+                # the shell expands it before sed runs; the real path is unknown
+                scan.need("sed w file name built from an expansion")
+            else:
+                tgt(name)
         if runs:
             scan.need("sed e command runs a shell command")
         if not ok:
@@ -858,6 +862,8 @@ def _sed_effects(scan: _Scan, args: list[str], tgt) -> None:
 
 def _awk_runs_or_writes(program: str) -> bool:
     """Tokenize awk before checking effects; strings, regexes and comments are data."""
+    # awk joins a backslash-newline continuation; without this `print "a" \<nl> > F` hides F
+    program = program.replace("\\\n", " ")
     tokens: list[str] = []
     i, regex_next = 0, True
     while i < len(program):
@@ -871,6 +877,7 @@ def _awk_runs_or_writes(program: str) -> bool:
             continue
         if c == '"' or (c == "/" and regex_next):
             delim = c
+            start = i
             i += 1
             bracket = False
             while i < len(program):
@@ -886,7 +893,8 @@ def _awk_runs_or_writes(program: str) -> bool:
                     break
             else:
                 return True  # malformed program cannot be judged
-            tokens.append("VALUE")
+            # keep a string's text so a redirect to a standard stream can be recognised
+            tokens.append("STR:" + program[start + 1:i - 1] if delim == '"' else "VALUE")
             regex_next = False
             continue
         m = re.match(r"[A-Za-z_]\w*|\d+(?:\.\d+)?", program[i:])
@@ -920,6 +928,8 @@ def _awk_runs_or_writes(program: str) -> bool:
             prints = [d for d in prints if d < depth]
             depth -= 1
         elif token in (">", ">>", "|") and depth in prints:
+            if token != "|" and nxt and nxt[0].startswith("STR:") and nxt[0][4:] in _NULL_DEVICES:
+                continue  # print > "/dev/stderr" writes no file
             return True
     return False
 
@@ -1050,6 +1060,13 @@ def _wrapper(scan: _Scan, words: list[Token], i: int) -> int | None:
     if base in ("chroot", "watch"):
         scan.need(f"{base} changes path meaning or runs a command string")
         return n
+    sub = {"pdm": "run", "hatch": "run", "conda": "run", "rye": "run", "pipenv": "run",
+           "pnpm": "exec", "bundle": "exec"}.get(base)
+    if base in ("uvx", "npx", "bunx", "xvfb-run", "dbus-run-session", "su", "runuser",
+                "pkexec", "systemd-run", "nsenter", "unshare") or (
+            sub is not None and sub in args[i + 1:]):
+        scan.need(f"{base} runs another command")
+        return n
     if base in ("uv", "poetry", "pipx"):
         if i + 1 >= n or args[i + 1] != "run":
             if "run" in args[i + 2:]:
@@ -1091,6 +1108,18 @@ def _wrapper(scan: _Scan, words: list[Token], i: int) -> int | None:
             break
         if base == "uv run" and a.split("=", 1)[0] in ("--directory", "--project"):
             scan.need("uv run changes directory")
+            return n
+        if base == "uv run" and a.split("=", 1)[0] not in valued[base] | {
+                "--frozen", "--locked", "--no-sync", "--isolated", "--no-project", "--all-extras",
+                "--no-dev", "--dev", "--no-default-groups", "--all-groups", "--script", "-s",
+                "--module", "-m", "--gui-script", "--no-cache", "-n", "--offline", "--quiet",
+                "-q", "--verbose", "-v", "--active", "--no-active", "--exact", "--inexact",
+                "--native-tls", "--refresh", "--reinstall", "--upgrade", "-U", "--no-build",
+                "--no-binary", "--compile-bytecode", "--no-env-file", "--no-editable",
+                "--all-packages", "--no-config", "--no-progress", "--preview",
+                "--no-python-downloads", "--managed-python", "--no-managed-python"}:
+            # an option we do not know may take a value and hide the inner command
+            scan.need("uv run option not recognised")
             return n
         if base == "poetry run" and a.split("=", 1)[0] in (
                 "-C", "--directory", "-P", "--project"):
