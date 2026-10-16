@@ -277,6 +277,7 @@ def test_deep_nesting_does_not_escape():
     assert neutralise(text).removed == 0
 
 
+@pytest.mark.timing
 @pytest.mark.parametrize(
     "name,build",
     [
