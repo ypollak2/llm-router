@@ -906,16 +906,20 @@ def test_reference_arms_kb1_through_the_pinned_rubric_adapter(env, ollama):
     md5 = hashlib.md5(rub.read_bytes()).hexdigest()
     gt = env.dev / "gt500.py"
     gt.write_text(FAKE_GT500.replace("__MD5__", md5))
+    sup = P.supply_path(gt)
+    sup.write_text("# fake supply.py sibling\n")
     env.mp.setattr(P, "RUBRIC_MD5", md5)
     env.mp.setattr(P, "GT500_SHA256", S.sha256_file(gt))
+    env.mp.setattr(P, "SUPPLY_SHA256", S.sha256_file(sup))
     env.pins_static.write_text(json.dumps({"params": {"rubric_py": str(rub), "gt500_py": str(gt)},
                                            "pins": {"rubric": {"md5": md5, "sha256": S.sha256_file(rub)},
-                                                    "gt500": {"sha256": S.sha256_file(gt)}}}))
+                                                    "gt500": {"sha256": S.sha256_file(gt)},
+                                                    "supply": {"sha256": S.sha256_file(sup)}}}))
     real, _, truth = make_data(n_real=8, n_groups=4, n_syn=0)
     lp, dirs = write_labels(env, real, [], truth)
     man_p = build_manifest(env, real, [], legacy_labels="opus=%s" % lp)
     rt = write_rules_tier(env, json.loads(man_p.read_text()))
-    srv = ollama(chat_content=json.dumps({"id": "L001", "scope": 2, "risk": 4, "tier": "opus"}))
+    srv = ollama(chat_content=json.dumps({"scope": 2, "risk": 4, "tier": "opus"}))   # id-less single answer (D-161)
     args = ["--manifest", man_p, "--items", env.dev / "items.jsonl", "--label-dir", dirs[0], "--rules-tier", rt,
             "--arm", "qwen3coder", "--ollama-url", srv.url]
     assert env.run("reference-arms", *args) == 0
@@ -924,9 +928,19 @@ def test_reference_arms_kb1_through_the_pinned_rubric_adapter(env, ollama):
     sent = [json.loads(b)["messages"][0]["content"] for _m, p, b in srv.bodies if p == "/api/chat"]
     assert len(sent) == 8 and all(c.startswith("RUBRIC fake text") and "VIEW[" in c and c.endswith("ANSWER one label as json")
                                   for c in sent)
+    class _A:
+        pins_static, prompt_module = env.pins_static, None
+    mods = R.kb1_mods(_A)
+    assert R.kb1_verdict(mods, json.dumps({"id": "L001", "scope": 2, "risk": 4, "tier": "haiku"})) == "haiku"
+    assert R.kb1_verdict(mods, json.dumps({"id": "L999", "scope": 2, "risk": 4, "tier": "haiku"})) is None
+    assert R.kb1_verdict(mods, "not json") is None
+    sup.write_text("# changed supply.py\n")                                  # supply pin mismatch: exit 9
+    (env.out / "arm_part_qwen3coder.jsonl").unlink()
+    assert env.run("reference-arms", *args) == S.EXIT_PINS
+    sup.write_text("# fake supply.py sibling\n")
     other = env.dev / "other_rubric.py"
     other.write_text(FAKE_RUBRIC)
-    (env.out / "arm_part_qwen3coder.jsonl").unlink()
+    (env.out / "arm_part_qwen3coder.jsonl").unlink(missing_ok=True)
     assert env.run("reference-arms", *args, "--prompt-module", other) == S.EXIT_PINS   # not the pinned file
 
 
