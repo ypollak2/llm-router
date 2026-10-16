@@ -1,6 +1,6 @@
 # PREREG-P20-requal: local re-qualification with the full pack (PLAN v16 P2.0 tasks 1-5)
 
-Status: **DRAFT r9, not frozen.** This file is frozen only when `PREREG-P20-requal.sha256` exists
+Status: **r9 with freeze fill-ins.** This file is frozen only when `PREREG-P20-requal.sha256` exists
 beside it, an independent freeze-guard review has passed (D-122 rule: an author-written sidecar is
 void), and `scripts/check_prereg.py` reports a match. Until then `scripts/p20_requal.py` refuses every
 subcommand that writes an item, calls a model or writes a result. The one pre-freeze mode is
@@ -605,24 +605,24 @@ RX_GRADES_GRADER1_SHA256=d1162590142798cc054df7696da3548a860a8a1537fcced7f18a17c
 RX_CORPUS_SHA256=083ea397dc8842e47c3ceca514d60dd4b6fbda11c603dcef6280c451ed9e599f
 RX_REAL_CORPUS_SHA256=0a7fd1f96c96e39362705b4ff3a1cf5537c43ade2c6684827102daa058736cf7
 RX_EDIT_FIXTURES_TREE_SHA256=7c191707ca5de5753b60a363fec6de637a563105c31aa656e75d5b252a48524f
-REPO_SHA=FILL-AT-FREEZE
-CLAUDE_SONNET_ID=FILL-AT-FREEZE
-CLAUDE_HAIKU_ID=FILL-AT-FREEZE
-CLAUDE_OPUS_ID=FILL-AT-FREEZE
-PROXY_CALLS_COPY_SHA256=FILL-AT-FREEZE
-BUILD_MANIFEST_SHA256=FILL-AT-FREEZE
-POOL_QA_SHA256=FILL-AT-FREEZE
-POOL_TECH_OP_SHA256=FILL-AT-FREEZE
-POOL_CODE_SHA256=FILL-AT-FREEZE
-CODE_RUNNER_SHA256=FILL-AT-FREEZE
-POOL_COUNT_QA_RX=FILL-AT-FREEZE
-POOL_COUNT_QA_GT=FILL-AT-FREEZE
-POOL_COUNT_TECH_OP=FILL-AT-FREEZE
-POOL_COUNT_CODE_NONCLOUD=FILL-AT-FREEZE
-POOL_COUNT_CODE_RX_EDIT=FILL-AT-FREEZE
-N_REALISED_QA=FILL-AT-FREEZE
-N_REALISED_TECH_OP=FILL-AT-FREEZE
-N_REALISED_CODE=FILL-AT-FREEZE
+REPO_SHA=c643afbb9d18a4a2101b5908edee0fe5f60a880c
+CLAUDE_SONNET_ID=claude-sonnet-5-5
+CLAUDE_HAIKU_ID=claude-haiku-5-5
+CLAUDE_OPUS_ID=claude-opus-5-5
+PROXY_CALLS_COPY_SHA256=af32895bb121827c56d94fc42a4d6ff7c0dfe6d97a00e09a80875684929a8ca0
+BUILD_MANIFEST_SHA256=085b1a8f71dcb2b20bcbca95abe418aee545aa276aa9c087bffab4b7f6d7ef33
+POOL_QA_SHA256=bb4bbbfeed66a352991cc728419ffca2338903271c870835e572c5d8fc4ba2b0
+POOL_TECH_OP_SHA256=30619a610c8209f8c38449dfc12047da7f0ad1d378496dd35438c31ab99d9667
+POOL_CODE_SHA256=58132f140d78dd58d081171578b1a730fed2f6fb7401496889795a720d709737
+CODE_RUNNER_SHA256=14239fb5c76c7783aaa94a1ac6f4efe0720cc7853fc8c790a1b74e3f3f5e767e
+POOL_COUNT_QA_RX=43
+POOL_COUNT_QA_GT=169
+POOL_COUNT_TECH_OP=15
+POOL_COUNT_CODE_NONCLOUD=55
+POOL_COUNT_CODE_RX_EDIT=20
+N_REALISED_QA=118
+N_REALISED_TECH_OP=1
+N_REALISED_CODE=75
 ```
 
 The harness parses this block from the frozen file. It refuses while any value reads
@@ -645,7 +645,49 @@ models and g_min may not change.
 * `grade` evaluated on synthetic counts for Q1, §10 and §11 (author and reviewer computations
   agree after r2).
 * No prompt, answer or label text was read.
+* **Build 2** (`requal/b2`, until 2026-10-16T13:23:27Z; builder at 507a7510, identical builder code
+  at REPO_SHA): pool rows qa 212 (rx 43, gt 169), tech_op 15, code 75 (noncloud 55, rx_edit 20).
+  * Build exclusions: qa not_qa 11, secret_pattern 11; tech_op not_organic 23,372,
+    not_continuation 14,415, not_technical_op 3,813, bash_unresolved 3,613, msg_not_found 288,
+    not_main_thread 95, secret_pattern 1; code none.
+  * `select --dry-run`: qa n 118 (tier_complex 73, too_short 21); tech_op n 1 (no_tier 14);
+    code n 75.
+  * `rx_membership`: 52 main Q&A packets, 50 graded, difference 2 (explained in §4). 817
+    transcript files are pinned in the build manifest.
+  * The two bash wrapper scripts and the counts-only estimates were run by the coordinator or
+    the driver; outputs hold counts and sha256s only.
 
 ## Freeze record
 
-Not frozen.
+* **Fill-ins** (the only values changed from the reviewed r9 text, together with this record and
+  the status line): REPO_SHA, the three Claude model ids, the proxy copy, build manifest, pool and
+  runner sha256s, the per-stratum pool counts and the realised N per set (constants block).
+* **REPO_SHA `c643afbb`** is the last code commit. `git diff caaf8d28 c643afbb -- src/` touches only
+  `src/llm_router/resolver/eligibility_store.py` (+64/−10, `record_competence`), and
+  `git diff REPO_SHA..HEAD -- scripts/ src/ tests/` is empty at the freeze commit.
+* **Model ids.** Three probe calls (`claude -p`, `--safe-mode`, `--settings {"disableAllHooks": true}`,
+  no `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY`, prompt "Reply OK", $0.0185 in total) served
+  `claude-sonnet-5-5`, `claude-haiku-5-5` and `claude-opus-5-5`.
+* **Scratch-HOME check.** In a scratch HOME, `claude --help` (2.1.299) lists `--safe-mode`, and the
+  2.1.299 build contains `disableAllHooks`.
+* **Pins recomputed at the freeze.** Every source pin equals its constant, including the fixtures
+  tree `7c191707…` (80 files), and every source sha256 in `build_manifest.json` equals its
+  constant. `ollama list` IDs equal the `ID_*` pins.
+* **Who wrote the code (D-66, D-126, D-137).**
+  * Codex: the harness, builder and runner (round 1 each).
+  * Driver (Claude), by hand: the r7 builder and runner fixes, which the freeze-guard review of r8
+    confirmed (a D-66 deviation, recorded).
+  * The local model (qwen3-coder:30b, D-126): the runner's missing-manifest-row refusal.
+  * Claude under D-137: the `tp2` e_tech = 0 change (e996e843), and a test-only fix (c643afbb).
+    The harness tests had substituted `KEY=FILL-AT-FREEZE` lines, which stop matching once the
+    real prereg carries its fill-ins. A first freeze attempt was undone for this before any commit (its
+    sidecar and 0444 copy were removed; nothing had been selected or run).
+* **Reviews (freeze-guard).**
+  * r1 and r2: NOT READY.
+  * r3: READY TO FREEZE; the r3→r4 diff was CONFIRMED.
+  * r5: three text fixes.
+  * r6: CONFIRMED.
+  * r6→r8 (including the r7 hand fixes): CONFIRMED.
+  * r9 applies the r8 review's S1, S2 and NITs.
+* The sidecar `PREREG-P20-requal.sha256` holds the sha256 of these bytes and `frozen_utc` from
+  `date -u` at the freeze commit. A byte-identical 0444 copy is `requal/b2/PREREG.md`.
