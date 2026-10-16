@@ -1,9 +1,10 @@
 # CLS-SYN-GENERATOR-SPEC: frozen synthetic Claude-Code-style prompt generator (PLAN v16 CLS-v16, D-130 a)
 
-Spec version: 1. Status: DRAFT, not frozen. Frozen when `CLS-SYN-GENERATOR-SPEC.sha256` exists beside
-it after an independent freeze-guard review says READY. Generation of DEV-SYN may start only after the
-freeze; generation of TEST-SYN only after the DEV-SYN resemblance checks of section 8.1 and under the spec
-version that passed them. Marks: **[CD]** coordinator default; **[EST]** estimate.
+Spec version: 1 (draft r2, after the freeze-guard review and D-132). Status: DRAFT, not frozen. Frozen when `CLS-SYN-GENERATOR-SPEC.sha256` exists beside
+it after an independent freeze-guard review says READY. Generation of DEV-SYN and TEST-SYN may start only after the
+freeze. **r2 order (D-132 b): TEST-SYN is generated and hashed BEFORE any DEV screening starts**, by a separate
+agent (section 12), together with DEV-SYN, under the same spec version; the resemblance checks of section 8.1 run on
+both; a spec amendment after a failed check regenerates both (section 8.3). Marks: **[CD]** coordinator default; **[EST]** estimate.
 
 Purpose. Produce DEV-SYN (n = 300) and TEST-SYN (n = 400): synthetic prompts that look like Claude Code
 turns, each with a short synthetic context digest, so that learned tier classifiers can be screened (DEV) and
@@ -37,7 +38,15 @@ Enforced by construction, then checked:
    5-shingle Jaccard >= 0.8 against any DEV item (real or DEV-SYN) drops the item. More than 3 percent hits
    of a set means the generator is generic or memorising and is reported; the set stays INFORMATIVE only if
    dropped items are replaced under section 7.3.
-6. **The generator models never labelled or saw DEV in this workflow.** The GPT used for generation and
+6. **Generator call hygiene.** Scratch config, no hooks: `claude -p` runs with `--safe-mode`, `--settings
+   <run-dir>/claude_settings.json` holding `{"disableAllHooks": true}`, `--tools ""`, `--strict-mcp-config`,
+   `--no-session-persistence`, `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` removed from the child
+   environment, an empty scratch cwd, the prompt on stdin (the P2.0 pattern). `codex exec` runs `-s read-only`,
+   in an empty cwd, prompt on stdin, after the Codex read-scope canary of PREREG-CLS-DEV section 3.2 (the generator
+   needs no file access, so a canary that shows the model can read outside the cwd parks the run). Every
+   generator request goes through `outgoing_check` on its exact bytes (the cell vectors, template and nonce hold no
+   secret, but the check runs and its self-test is part of PINS).
+7. **The generator models never labelled or saw DEV in this workflow.** The GPT used for generation and
    the GPT used for relabelling are separate processes with separate scratch dirs; no relabel prompt is
    reused as a generation prompt.
 
@@ -96,16 +105,13 @@ and the item stays in its measured band.
 | N4 | web: needs outside information |
 
 Joint weights: N1 30, N2 30, N3 20, N0 12, N4 8 percent **[CD]**, then constrained by task type (T07 is
-mostly N0/N1, T09 mostly N3, T10 mostly N4/N0; a fixed 12 x 5 compatibility mask is in `gen_config.json`,
+mostly N0/N1, T09 mostly N3, T10 mostly N4/N0; the fixed 12 x 5 compatibility mask is Appendix A (hashed in PINS),
 incompatible pairs have weight 0).
 
 ### 2.4 Project (6)
 
-Names only, no content: the six owner repo names the digest may mention, taken from the frozen list in
-`gen_config.json` (a list of directory names under the owner's Projects directory at freeze time; the
-author's current set includes `llm-router`, `rsi-engine`, `stockagent`, `callrec`, `loophole`, `agenticgraphs`
-**[CD]**; the freeze-guard reviewer confirms the list at freeze). Equal weight; one extra "unnamed/other"
-value for 15 percent of items where the prompt names no project.
+Names only, no content: the six owner repo names of Appendix B (confirmed at freeze, hashed in PINS) plus one
+"unnamed/other" value for 15 percent of items where the prompt names no project. Equal weight across the six.
 
 ### 2.5 Intended difficulty (3), steering only
 
@@ -147,13 +153,17 @@ Each item carries a digest, at most 400 characters, in a fixed schema produced i
 
 The digest feeds `ctx_digest` of the engine and the judge's context view. Fixed digest facts describe a
 scene; they do not state the difficulty. The generator must not write the intended tier or any rating
-into the prompt or the digest (a check in section 6 rejects items that contain words from a fixed list:
-"haiku", "sonnet", "opus", "difficulty", "complexity", "tier", "easy task", "hard task").
+into the prompt or the digest (a check in section 6 rejects items that make a **meta-statement about difficulty or routing**, by the fixed
+patterns of Appendix D: the model-tier names as words, "difficulty", "tier", and "easy/hard/trivial/simple/
+complex/difficult" directly followed by "task/one/prompt/request/job", and "complexity level/score/rating". The
+list is deliberately narrow so that ordinary developer wording ("a simple fix", "this is hard to reproduce") is not
+rejected, which would bias the set toward bland prompts. The rate of every pattern, by generator family and by
+intended difficulty, is **reported** so the rejection bias is visible.)
 
 ## 5. Generator prompts (frozen templates)
 
 Two templates, `tmpl_gpt.txt` and `tmpl_opus.txt`, identical in content apart from the wrapper each CLI
-needs; both get sha256 recorded in `gen_config.json`. Content, in order:
+needs; the body is Appendix C and both files get sha256 recorded in `gen_config.json` and PINS. Content, in order:
 
 1. Role: write realistic prompts a developer types into a coding agent, one per cell vector listed.
 2. The cell vector of each item as plain field lines (task type meaning, band bounds in words, tool need
@@ -171,7 +181,7 @@ call assignment; no call is generated by both.
 ## 6. Acceptance filters (applied per item before the item is counted)
 
 1. Parse: valid JSON; prompt and digest present; digest within schema and 400 characters.
-2. Forbidden words (section 4) and secret detector of PREREG-CLS-DEV section 3.2 (any hit drops the item).
+2. Meta-statement patterns (section 4, Appendix D) and the secret detector of PREREG-CLS-DEV section 3.2 (any hit drops the item).
 3. Band check (section 2.2): measured band recorded; band miss counted, not dropped.
 4. Dedup (section 7).
 5. A dropped item is replaced by one fresh item for the **same cell vector** from a fresh call whose
@@ -191,14 +201,18 @@ call assignment; no call is generated by both.
 
 All thresholds are frozen here. Computed on text and measured quantities only until labelling exists.
 
-### 8.1 Text-only checks (before any label; run on DEV-SYN first, then on TEST-SYN before labelling)
+### 8.1 Text-only checks (before any label; run on both sets before any label exists)
 
-(a) **Discriminator.** A char-n-gram (2-5, TF-IDF, sublinear tf) logistic regression (C = 1, balanced
-class weights) separating the synthetic set from real DEV prompts. Session/call-grouped 5-fold,
-`group` as in the DEV prereg. **Pooled out-of-fold AUROC <= 0.75** (design D-130 a), with the group
-bootstrap 95 percent CI reported. The real class is subsampled to the synthetic n if larger, seed 20261017.
+(a) **Discriminators (two; both must pass).** Each separates the synthetic set from **all** real DEV prompts, with
+balanced class weights (no subsampling), session/call-grouped 5-fold with `group` as in the DEV prereg.
+ (a1) char-n-gram (2-5, TF-IDF, sublinear tf) logistic regression, C = 1.
+ (a2) **embedding + logistic regression**: `bge-small-en-v1.5` embedding (the pinned snapshot), L2-normalised,
+ logistic regression C = 1. This is the stronger discriminator: it sees semantics and style, not only characters.
+ **Gate: pooled out-of-fold AUROC <= 0.75 (D-130 a) AND the 95 percent group-bootstrap CI upper bound <= 0.80
+ [CD]**, for each of a1 and a2. A point estimate under the bar with a CI that reaches 0.85 is not a pass.
+ The tool prints pass/fail and the AUROC with CI only (section 12).
 (b) **Length-band shares** of the synthetic set within **10 points** of the real DEV shares in every band.
-(c) **Digest-agnostic length distribution**: median words within 30 percent of real DEV's median, reported
+(c) **Length distribution**: median words within 30 percent of real DEV's median, reported
 (a drift check, not a gate). **[CD]**
 (d) **Quota fidelity**: every marginal quota of section 3 met within the stated tolerance; band misses at
 most 15 percent of items.
@@ -212,24 +226,30 @@ about 40 percent on P17D).
 (g) **n_truth_opus >= 80** on TEST-SYN (at 42 percent opus share n = 400 gives about 170 [EST]); below 40,
 NOT INFORMATIVE; 40-79, "low power" label.
 
-### 8.3 Consequence
+### 8.3 Consequence (r2)
 
-* DEV-SYN failing (a) or (b) or (d): spec version 2 (an amendment with the reason and the new hash) may
-  change strata weights, templates or filters, **using DEV-SYN and real DEV only**, and DEV-SYN is
-  regenerated. TEST-SYN has not been generated.
-* TEST-SYN: generated once under the spec version that passed DEV-SYN. Checks (a), (b), (d) run before
-  labelling. If one fails, **one** regeneration under an amended spec is allowed, only before any label
-  exists and before any candidate is scored on TEST-SYN; the regeneration count is recorded. A second
-  failure, or any failure of (e), (f), (g) after labelling, marks TEST-SYN **NOT INFORMATIVE as a proxy**: no
-  candidate verdict from it, no regeneration, no re-label. (Regenerating after truth exists would let truth
-  steer the set.)
+* DEV-SYN and TEST-SYN are generated together under spec version 1 (section 12), and the text-only checks (a), (b),
+  (d) run on both. If any fails on either set: spec version 2 (an amendment recording the reason and the new
+  hash) may change strata weights, templates or filters, **using only the pass/fail results and the AUROC
+  numbers** the tool printed. **No discriminator feature, weight, top term, error case or real text is shown to the
+  amendment author.** Both sets are regenerated by the same process. The replaced TEST-SYN set is a **discarded
+  set**: kept, hashed, never read for any purpose, never scored, never used to pick between versions.
+* **At most one** TEST-SYN regeneration, only before any TEST-SYN label exists and before any candidate is scored
+  on it; the count is recorded. A second failure, or any failure of (e), (f), (g) after labelling, marks
+  TEST-SYN **NOT INFORMATIVE as a proxy**: no candidate verdict, no regeneration, no re-label. (Regenerating after
+  truth exists would let truth steer the set.)
+* DEV-SYN may be regenerated more than once for its own training use, each version hashed and logged; the amendments
+  that follow remain bound to pass/fail + AUROC numbers.
+* **Non-independence, stated.** An amended spec is tuned until it passes the same checks that then certify it.
+  A pass shows the spec was made to pass, not that the set resembles traffic in every respect; the checks cannot
+  be read as independent validation.
 
 ## 9. What makes TEST-SYN not informative
 
 TEST-SYN is NOT INFORMATIVE (no verdict on any candidate, recorded as such) if any of these holds:
 
 1. a resemblance check of section 8 fails after the allowed regeneration, or the discriminator AUROC > 0.75;
-2. any judge's calibration is below 6/6 (TEST prereg);
+2. any judge's calibration fails (the first-call 6/6 or any interleaved plant, as PREREG-CLS-DEV section 3.3; the TEST prereg adopts the same rule);
 3. the known-better arm is not separated from the known-worse arm on TEST-SYN (D-130 e);
 4. `n_truth_opus` < 40, or truth is missing for more than 5 percent of items;
 5. any TEST-SYN item is a leak against real DEV or DEV-SYN (a hit that survived section 7);
@@ -254,7 +274,29 @@ matrix; digest schema validity; discriminator AUROC with CI; length-band shares;
 table, `gen_config.json`, both templates, `gen_requests.jsonl`, and each set's `items.jsonl` (the item files
 themselves hold text and stay 0600 outside the repo; the repo gets the hashes and counts).
 
-## 11. Coordinator defaults used in this spec
+## 12. Separation and custody (D-132 b)
+
+* The **TEST-SYN agent** generates and hashes TEST-SYN. It never sees finalists, thresholds, DEV labels or real text.
+  Its allocation table, `gen_requests.jsonl` and items file are hashed before DEV screening starts.
+* Storage: `$CLS/test-syn/`, items file mode 0600, directory 0700, **outside every DEV tooling path**. No DEV tool
+  takes a path under it (the B0 path guard refuses it, tested). Candidate-running processes do not read it until
+  the finalists file is hashed. Same Unix user: the control is procedural plus the path guard (stated residual).
+* The **resemblance tool** (`cls_resemble.py`, build B-L) reads both sets and the real DEV text and prints **only**
+  pass/fail and AUROC with CI. It prints no features, terms, weights, errors or text, and is the only tool that
+  reads TEST-SYN text before release.
+* Release: after the finalists file is hashed, TEST-SYN is handed to the TEST prereg, whose three-judge labelling
+  happens before any finalist is scored.
+
+## 13. What was read when writing this spec
+
+Read: `cls-v16-design.md`, `cls-v16-candidates.md`, PLAN-v16 decisions D-127..D-132, `BUILDER-RULES.md`,
+`PREREG-P17D-synthetic.md` (structure, label rules), `PREREG-P20-requal.md` sections 6 and 13 (hygiene, night window),
+`src/llm_router/shadow_eval.py`, `engine.py`, `persist_redaction.py`, `secret_scrubber.py` (names and shapes), the
+counts in `gates/v16/GE3.json` and `P1.json`, a directory listing of the owner's Projects directory (names only),
+the cached bge-small snapshot directory name and `sysctl hw.memsize`. **Not read:** any real prompt text, any
+prompt-derived directory, `~/.codex`, `~/.llm-router`, `~/.claude`. The spec's numbers come from those counts and the design, not from real prompts.
+
+## 14. Coordinator defaults used in this spec
 
 | # | Default |
 |---|---|
@@ -262,9 +304,68 @@ themselves hold text and stay 0600 outside the repo; the repo gets the hashes an
 | G-2 | length shares from the DEV manifest rounded to 5 points; provisional 35/35/20/10 |
 | G-3 | ack flag share 10 percent |
 | G-4 | intended difficulty weights 20/40/40 |
-| G-5 | tool-need weights 30/30/20/12/8 with a task-type mask |
-| G-6 | project list = the six directory names above plus 15 percent unnamed, confirmed at freeze |
+| G-5 | tool-need weights 30/30/20/12/8 with the Appendix A task-type mask |
+| G-6 | project list = Appendix B, confirmed at freeze |
 | G-7 | replacement cap 20 percent; shortfall floor n >= 360 for TEST-SYN |
 | G-8 | one regeneration of TEST-SYN allowed before labels exist |
 | G-9 | median-length drift is reported, not gated |
 | G-10 | seeds 20261017 (DEV-SYN) and 20261018 (TEST-SYN) |
+| G-11 | discriminator gate: AUROC <= 0.75 and CI upper <= 0.80, for a1 and a2 |
+
+## Appendix A. Task-type by tool-need compatibility mask (12 x 5; 1 = allowed, 0 = weight 0)
+
+| | N0 | N1 | N2 | N3 | N4 |
+|---|---|---|---|---|---|
+| T01 bug fix | 0 | 1 | 1 | 1 | 0 |
+| T02 feature | 0 | 1 | 1 | 1 | 0 |
+| T03 refactor | 0 | 1 | 1 | 1 | 0 |
+| T04 tests | 0 | 1 | 1 | 1 | 0 |
+| T05 debug a failure | 1 | 1 | 0 | 1 | 1 |
+| T06 review | 1 | 1 | 0 | 1 | 0 |
+| T07 explain | 1 | 1 | 0 | 0 | 1 |
+| T08 config/devops | 0 | 1 | 1 | 1 | 1 |
+| T09 git/release | 0 | 1 | 0 | 1 | 0 |
+| T10 research | 1 | 1 | 0 | 0 | 1 |
+| T11 docs/commit text | 1 | 1 | 1 | 0 | 0 |
+| T12 data/analysis/plan editing | 0 | 1 | 1 | 1 | 1 |
+
+Within an allowed cell the tool-need weights of section 2.3 are renormalised over the allowed columns. The file
+form is `task_tool_mask.json`, hashed in PINS.
+
+## Appendix B. Project list (names only; disclosed to the generators and judges)
+
+`llm-router`, `rsi-engine`, `stockagent`, `callrec`, `loophole`, `agenticgraphs`, plus `null` (15 percent of
+items). The names come from a directory listing of the owner's Projects directory at the time of writing; the
+freeze-guard reviewer confirms the list at freeze. Hashed in PINS as `projects.json`.
+
+## Appendix C. Generator template (both families; wrapper differs only as the CLI needs)
+
+```
+You write realistic messages a developer types into an AI coding agent. For each item below write ONE message
+and ONE context digest.
+Items (one block per item):
+  idx: <n>
+  task: <task type meaning>
+  length: <band bounds> words
+  tool need: <meaning>
+  project: <name or none>
+  situation: <intended-difficulty phrase, written as a scene, never as a rating>
+  follow-up: <yes/no; if yes the message refers to something in the digest>
+  nonce: <12 hex>
+Rules: human-typed, imperfect, lowercase allowed; no quotation marks around the whole message; no numbering of
+items inside a message; never mention models, tiers, cost, rating or difficulty; code fences only for bands 51+ and
+task types 1-5; no secrets of any shape, real or fake; no real people or companies; URLs only at example.com;
+items in this call must differ in vocabulary and sentence shape.
+Digest schema (JSON, <= 400 chars): {"project","turn":first|follow_up|plan_approval|after_error|after_test_run,
+"files_touched":0-6,"last_tool_outcome":none|ok|error|test_fail,"branch_state":clean|dirty|pr_open,"referent":str|null}
+Output: one JSON object per line: {"idx","prompt","digest"}. Nothing else.
+```
+Intended-difficulty phrases (frozen): haiku-intent "a small, well-bounded change that one careful read settles";
+sonnet-intent "a normal multi-step change in one area of the code"; opus-intent "a change that needs careful
+reasoning across several files or an unclear root cause". Hashed in PINS as `tmpl_gpt.txt` / `tmpl_opus.txt` (the
+body above plus the CLI wrapper) and `intent_phrases.json`.
+
+## Appendix D. Meta-statement patterns (case-insensitive)
+
+`\b(haiku|sonnet|opus)\b`; `\bdifficulty\b`; `\btier\b`; `\b(easy|hard|trivial|simple|complex|difficult)\s+(task|one|prompt|request|job)\b`;
+`\bcomplexity\s+(level|score|rating)\b`. Hashed in PINS as `meta_patterns.json`. Per-pattern hit rates are reported.
