@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from llm_router.gemini_cli_agent import is_gemini_cli_available, run_gemini_cli
+from llm_router.toolcall_text import neutralise
 
 
 async def llm_gemini(
@@ -61,7 +62,7 @@ async def llm_gemini(
     lines = [
         f"{status} **Gemini CLI** (`{result.model}`) — {result.duration_sec:.1f}s",
         "",
-        result.content,
+        neutralise(result.content)[0],  # F4 (D-139)
     ]
     return "\n".join(lines)
 

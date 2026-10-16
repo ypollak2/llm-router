@@ -12,6 +12,7 @@ from llm_router.config import get_config
 from llm_router.cost import log_compression_stat
 from llm_router.response_router import route_response
 from llm_router.router import route_and_call
+from llm_router.toolcall_text import keep_marker, neutralise_response
 from llm_router.types import LLMResponse, RoutingProfile, TaskType
 
 
@@ -198,7 +199,7 @@ async def _apply_response_router(formatted: str) -> str:
     if not formatted:
         return formatted
     try:
-        return await route_response(formatted)
+        return keep_marker(formatted, await route_response(formatted))
     except Exception:
         # Never let response-routing failures mask the underlying tool
         # response — the user is owed an answer even if the optimiser
@@ -359,6 +360,7 @@ def _routing_explanation(resp: LLMResponse, task: str) -> str:
     except Exception:
         pass
 
+    removed = getattr(resp, "toolcall_blocks_removed", 0)
     if mode == "verbose":
         # Full breakdown with chain walk
         conf_str = f"{resp.confidence:.0%}" if resp.confidence > 0 else "n/a"
@@ -380,6 +382,8 @@ def _routing_explanation(resp: LLMResponse, task: str) -> str:
             lines.append(f"→ Chain: {' → '.join(chain_display)}")
         if ctx_info:
             lines.append(f"→ Context{ctx_info.replace(' | ctx ', ': ')}")
+        if removed:
+            lines.append(f"→ Tool-call blocks removed: {removed}")
         return "\n─────\n" + "\n".join(lines)
 
     # Compact one-line format for footer and header
@@ -389,6 +393,8 @@ def _routing_explanation(resp: LLMResponse, task: str) -> str:
     parts.append(cost_str)
     if savings_label:
         parts.append(f"({savings_label})")
+    if removed:
+        parts.append(f"{removed} tool-call block(s) removed")
     compact = " · ".join(parts) + ctx_info
 
     if mode == "header":
@@ -481,6 +487,8 @@ def _format_response(resp: LLMResponse, task: str = "") -> str:
     Returns:
         Formatted response string.
     """
+    # F4 (D-139): the one choke point for text answers going back to an MCP caller.
+    resp = neutralise_response(resp)
     explanation = _routing_explanation(resp, task)
     mode = _get_explain_mode()
 
