@@ -1,6 +1,6 @@
 # PREREG-P20-requal: local re-qualification with the full pack (PLAN v16 P2.0 tasks 1-5)
 
-Status: **DRAFT r3, not frozen.** This file is frozen only when `PREREG-P20-requal.sha256` exists
+Status: **DRAFT r5, not frozen.** This file is frozen only when `PREREG-P20-requal.sha256` exists
 beside it, an independent freeze-guard review has passed (D-122 rule: an author-written sidecar is
 void), and `scripts/check_prereg.py` reports a match. Until then `scripts/p20_requal.py` refuses every
 subcommand that writes an item, calls a model or writes a result. The one pre-freeze mode is
@@ -9,7 +9,8 @@ freeze changes the hash; a changed file is a new prereg with a later `frozen_utc
 selected, no model has been called and nothing has been scored under this file.
 
 r2 applied the freeze-guard review of r1 (NOT READY) and D-123 / D-123a; r3 applies the r2 review
-(NOT READY on two text fixes) and D-123b.
+(NOT READY on two text fixes) and D-123b; r4 adds the pre-freeze NITs; r5 corrects the `rx` stratum
+and adds the runner disclosures and hook-free Claude calls (coordinator, 2026-10-16).
 
 ## 0. Contradictions and settled points (read first)
 
@@ -96,7 +97,7 @@ sha256 is a fill-in) and never writes there.
 
 | Set | Pool `$REQ/pools/<set>.jsonl` | Tier provenance | Filters | N |
 |---|---|---|---|---|
-| `qa` | Stratum `rx`: the 37 [RX] Q&A items graded in `routing-experiment-2026-10-01/results_p2b_qwen38.md` (`source` real or gen, both kept). Stratum `gt`: GE3 held-out ids from `gt500/split.json` (sha256 `8921a154…405b`, 234 ids), `kind == organic`, whose task class by the router's rules classifier at REPO_SHA is in `qa_policy.QA_TASK_TYPES`. | `rx`: the packet's `complexity` field. `gt`: `gt500/manifest.json` (sha256 `453ad8bd…4cc`) `tier_opus`: haiku → simple, sonnet → moderate, opus → complex. | drop `complex`; drop missing tier (`no_tier`); drop < 4 words (trivial acks, the [M013] lesson); drop requests matching the engine secret guard at REPO_SHA (`secret_pattern`) | **120** target, ≥ 60 |
+| `qa` | Stratum `rx`: the [RX] p2b packets (`routing-experiment-2026-10-01/p2b_work/packets.jsonl`) graded by grader1 (`grades_grader1.jsonl`) with kind main and task_type in `QA_TASK_TYPES` (30 real + 20 gen on 2026-10-16; the [RX] "37" of `results_p2b_qwen38.md` is the real set incl. 7 code items, which are excluded). Request and context come from `corpus.jsonl` by `ref_id`. Stratum `gt`: GE3 held-out ids from `gt500/split.json` (sha256 `8921a154…405b`, 234 ids), `kind == organic`, whose task class by the router's rules classifier at REPO_SHA is in `qa_policy.QA_TASK_TYPES`. | `rx`: the packet's `complexity` field. `gt`: `gt500/manifest.json` (sha256 `453ad8bd…4cc`) `tier_opus`: haiku → simple, sonnet → moderate, opus → complex. | drop `complex`; drop missing tier (`no_tier`); drop < 4 words (trivial acks, the [M013] lesson); drop requests matching the engine secret guard at REPO_SHA (`secret_pattern`) | **120** target, ≥ 60 |
 | `tech_op` | Organic continuation steps from 2026-09-28T00:00Z (GE1 v0 start) to the build time (recorded in the manifest), in the `proxy_calls.jsonl` copy, that GE1 `census.py` (sha256 `03941a4f9a8f49526eacd3ab3d116602da9a3667b2ec10c04c8f4e531d7c289a`) classifies as `technical_op`. The request body is rebuilt from the session transcript up to that step: messages, the latest human ask, and tool names with one-line descriptions. The manifest lists each transcript file's sha256; its own sha256 is a fill-in. | The ledger row's `tier_complexity` (simple / moderate; complex and deep_reasoning → complex). | drop `complex`; drop missing tier; drop steps whose transcript cannot be found or rebuilt (by reason); drop secret-pattern hits | **120** target, ≥ 60 |
 | `code` | Stratum `noncloud`: the 55 tasks of `classifier-v2-release/ab/work/noncloud/task_ids.json` (sha256 `e493f84f…2638`), hidden tests. Stratum `rx_edit`: the 20 `routing-experiment-2026-10-01/fixtures/edit-*` tasks, hidden tests. | `noncloud`: the [NC] truth tier of the task (`unlabelled` if absent). `rx_edit`: `unlabelled`. Code items are **not** filtered by tier (bench design fixed); the pooled code lane may include complex-tier tasks, which biases against local (§16). | a task the runner cannot check out at its base is dropped (by reason) | **all** (75), ≥ 60 |
 
@@ -104,8 +105,9 @@ sha256 is a fill-in) and never writes there.
 `tier` (`simple` / `moderate` / `complex` / `unlabelled`) and `task_type`. Q&A rows add `request`
 and `context`; tech-op rows add `request`, `messages` and `tools`; code rows add `task_ref` only
 (the runner owns the code). **Sessions:** a `gt` or `tech_op` row uses its real session id. A real
-`rx` row uses its real session id if the packet has one, else `rx-real`. Every generated `rx` row
-uses the single session `rx-gen` (one generation run), so the session cap bounds them. A code row
+`rx` row uses `_orig_session_id` from `real_corpus.jsonl` by `ref_id` (19 sessions, ≤ 5 items each
+on 2026-10-16; `rx-real` if absent). Every generated `rx` row uses the single session `rx-gen` (one
+generation run), so the session cap bounds them. A code row
 uses its stratum name as the session (the cap does not apply to code).
 
 **Selection** (`select`, once). Rows are ordered by `sha256("20261016:" + id)`, with stratum `rx`
@@ -147,18 +149,44 @@ live-faithful, so Claude arms may see more context than local arms (§16).
   reply or served-model mismatch. The last attempt is final; every attempt is kept.
 * **Warm-up:** one discarded synthetic call per local model before its first item, and on every
   resume.
-* Claude children run with `LLM_ROUTER_SESSION_KIND=research` (rule 8) in a scratch cwd, with tools
-  disabled and the real HOME (auth). They are never organic.
+* **Every `claude -p` call** (the Sonnet and Haiku arms, the Opus judge, the Sonnet code arm and the
+  model-id probes) runs **without Claude Code hooks or user customisation**:
+  * `--safe-mode` (Claude Code 2.1.299 `--help`: hooks, CLAUDE.md, skills, plugins and MCP servers
+    disabled; auth, model selection and built-in tools work normally);
+  * plus `--settings <run-dir>/claude_settings.json` holding `{"disableAllHooks": true}` (a setting
+    key present in the 2.1.299 build);
+  * with `ANTHROPIC_BASE_URL` removed from the child environment, so the call goes straight to
+    Anthropic and not through the llm-router proxy on :8787, which could re-tier it or write ledger
+    rows.
+  * `--bare` is not used: it reads only `ANTHROPIC_API_KEY`, not the subscription OAuth.
+  * So the user's llm-router hooks and proxy cannot route, draft or alter a reference or judge
+    call, or add organic rows. Children also carry `LLM_ROUTER_SESSION_KIND=research` (rule 8),
+    run in a scratch cwd with the real HOME (auth only), and Q&A / tech-op / judge calls run with
+    tools disabled.
 * **Code:** a **local, $0** runner pinned by sha256 (`CODE_RUNNER_SHA256`). The runner also pins
   the Pi agent version, its prompt (`run_codex.build_prompt` + `TEST_CONTRACT`) and the Claude
   invocation. It runs each (task, arm) in a clean checkout: Pi agent for local arms (as [NC] /
-  M3.5) and `claude -p --model <CLAUDE_SONNET_ID>` with tools for Sonnet. The cap is 900 s. It uses
+  M3.5) and `claude -p --model <CLAUDE_SONNET_ID>` with tools for Sonnet (hooks disabled as above).
+  The cap is **900 s**, and a model timeout is a fail ([NC] used 420 s; no "timeout but pass"). It
+  uses
   the same quiet gate and night window (§13), and it appends its Claude costs to `$REQ/ledger.jsonl`
   (stage `code`) under the same $60 guard. It writes one row per (task, arm): `{task_id, arm,
   hidden_pass: true|false|null, wall_s, timed_out, patch_empty, ts}`. `hidden_pass = null` is
   reserved for **infrastructure** errors: checkout failure, runner crash, Ollama or CLI
   unreachable. A model timeout, an empty patch or a failing test is `false`. The harness only
   ingests these rows; it never executes model output.
+* **Runner details (disclosed):**
+  * `rx_edit` fixtures keep their tests inside the fixture tree, so the runner moves `tests/` out of
+    the work copy while the agent runs and restores it, replacing anything the agent wrote there,
+    for grading.
+  * The `rx_edit` task text lives in `fixtures/manifest.json`, outside the pinned tree hash; it is
+    pinned through `build_manifest.json`, and the runner checks that sha256 before the first task.
+  * Noncloud runs reuse [NC]'s `run_codex.make_wt` / `grade_all`, which write worktrees and junit
+    files under the noncloud research directory (tag `p20_<arm>`), outside `$REQ`. No text is
+    printed.
+  * `TEST_CONTRACT` is read from `tool-layer/phase_d/amend3/run_codex_tc_v2.py` by AST
+    literal-evaluation (the file is never imported or executed), and that file's sha256 is
+    recorded in every runner row.
 
 ## 7. Grading
 
@@ -406,10 +434,13 @@ final item, no re-judge (beyond the §7 order sample) and no re-score happens wi
     agentic hidden-test tasks with single-file edits, and the pooled lane may include
     complex-tier tasks; strata and tiers are printed.
 11. **Runner errors.** Infrastructure errors (`hidden_pass = null`) are removed per task, not
-    charged to the arm. Model timeouts and empty patches are charged to the arm.
+    charged to the arm. Model timeouts (900 s cap) and empty patches are charged to the arm.
 12. **Prior outcomes.** `rx` and `noncloud` outcomes are known in aggregate (§4).
 13. **Plants share the call.** A plant candidate sits in the same judge call as the real answers
     and may shift the judge's reading of them. Its effect is not measured.
+14. **Reference arm without customisation.** Claude arms run in safe mode without hooks, CLAUDE.md
+    or MCP. This is cleaner than a user's live Claude Code turn, which has those layers, so it is
+    a reference for the model and not for the user's configured Claude Code.
 
 ## Fill-ins at the freeze (the only values that may change between draft and freeze)
 
