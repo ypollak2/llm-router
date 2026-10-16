@@ -1,0 +1,1 @@
+Pin `uv.lock` to the exact versions of the live uv-tool install (55 packages moved, 6 transitive additions; e.g. litellm 1.82.6 to 1.103.0, mcp 2.0.0 to 2.2.0) so CI tests what runs (D-164, F10). Add `scripts/check_live_matches_lock.py` to verify a given interpreter against the lock at deploy time.
