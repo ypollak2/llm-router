@@ -203,7 +203,12 @@ absent from its context and the indexed repo, falling through to Claude.
 
 `LLM_ROUTER_DIRECT_EXECUTION` is default on — a local model gets `write_file`,
 `edit_file` and `run_command` under a confined, allowlisted path, and none of
-that stops targeted deletes, `git push --force`, or exfiltration. Turn it off
+that stops targeted deletes, `git push --force`, or exfiltration. Shell
+redirects and copies that write outside the project root are refused by a static
+tripwire, not a sandbox; an OS sandbox is 16.1. A command the tripwire
+cannot judge (an interpreter one-liner, `sudo`, a `$(...)`) returns
+`needs_approval`, but approval is not wired anywhere yet, so both command paths
+treat it as refused and do not run it. Turn it off
 with `LLM_ROUTER_DIRECT_EXECUTION=false`. Full analysis:
 **[SECURITY.md](SECURITY.md)**.
 

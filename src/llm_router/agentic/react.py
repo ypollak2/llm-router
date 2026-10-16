@@ -35,6 +35,7 @@ from llm_router.agentic.engine import AgentRunResult
 from llm_router.agentic.ledger import Milestone
 from llm_router.proxy.loop_guard import REASON_LOOP_GUARD, LoopGuard
 from llm_router.safe_subprocess import get_delegated_env
+from llm_router.write_policy import check_command
 
 
 @dataclass
@@ -213,6 +214,12 @@ def default_tool_executor(cwd: str | None = None, timeout: float = 30.0) -> Tool
                 reason = _bash_block_reason(command)
                 if reason is not None:
                     return f"tool error: blocked ({reason}) — refusing: {command[:120]}"
+                # P2.9-b: static tripwire for redirects/copies/interpreters that
+                # write outside the root. Not a sandbox (see write_policy).
+                verdict = check_command(command, base)
+                if verdict.decision != "allow":
+                    return (f"tool error: write policy {verdict.decision} "
+                            f"({verdict.reason}): {command[:120]}")
                 # RED6-01 (P0): an explicit allowlisted env. Without `env=` the
                 # child inherited every provider key in the parent process, so a
                 # single injected `env` / `printenv` in a model-authored command
