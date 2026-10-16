@@ -61,8 +61,9 @@ def _no_spend(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_premise_a_plain_mcp_server_sends_only_the_bare_text():
-    """The bug's cause, pinned: without the door the client gets the bare string only."""
-    from mcp.server.mcpserver import MCPServer
+    """The bug's cause, pinned: without the door, mcp >= 2.2 (live: 2.2.0) sends the client
+    the bare string only. 2.0.0 (uv.lock) still appended the message; the door handles both."""
+    from mcp.server.mcpserver import MCPServer, exceptions
 
     async def boom() -> str:
         raise ValueError(LIVE_MESSAGE)
@@ -71,7 +72,10 @@ async def test_premise_a_plain_mcp_server_sends_only_the_bare_text():
     server.tool()(boom)
     result = await _call(server, "boom", {})
     assert result.is_error
-    assert _text(result) == "Error executing tool boom"
+    if hasattr(exceptions, "UnexpectedToolError"):
+        assert _text(result) == "Error executing tool boom"
+    else:
+        assert _text(result) == f"Error executing tool boom: {LIVE_MESSAGE}"
 
 
 # ── A. the door, on every tool family of the real server ──────────────────────

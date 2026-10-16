@@ -1,8 +1,10 @@
 """The MCP tool door: a readable error instead of a bare one, and an overall deadline (D-141).
 
-A. ``mcp`` 2.x reduces any unexpected exception a tool raises to the text
-``Error executing tool <name>`` and keeps the exception's own message on the server
-(``mcp/server/mcpserver/tools/base.py``). Our router raises messages written for the
+A. ``mcp`` >= 2.2 (the live install, 2.2.0) reduces any unexpected exception a tool raises
+to the text ``Error executing tool <name>`` and keeps the exception's own message on the
+server (``UnexpectedToolError`` in ``mcp/server/mcpserver/tools/base.py``); 2.0.0, the version
+``uv.lock`` pins, wraps it as ``ToolError("Error executing tool <name>: <message>")``. Both
+put the tool's own exception in ``__cause__``. Our router raises messages written for the
 user ("No providers available for research/premium ... Fix: run `llm-router doctor`"),
 and Claude Code showed only the bare string (coordinator repro 2026-10-16, D-141).
 ``run_door`` is the one choke point: ``IdentityMCPServer.call_tool`` runs every tool
@@ -106,15 +108,33 @@ def _tried(state: _CallState) -> list[str]:
     return out
 
 
-def _root_cause(exc: BaseException) -> BaseException:
-    """The exception the tool actually raised, under ``mcp``'s ``UnexpectedToolError`` wrappers."""
-    from mcp.server.mcpserver.exceptions import UnexpectedToolError
+def _unexpected_types() -> tuple[type, ...]:
+    """mcp's crash wrapper type(s): ``UnexpectedToolError`` on mcp >= 2.2, none on 2.0."""
+    from mcp.server.mcpserver import exceptions
 
-    seen = 0
-    while isinstance(exc, UnexpectedToolError) and exc.__cause__ is not None and seen < 10:
-        exc = exc.__cause__
-        seen += 1
-    return exc
+    t = getattr(exceptions, "UnexpectedToolError", None)
+    return (t,) if isinstance(t, type) else ()
+
+
+def _tool_crash(exc: BaseException) -> BaseException | None:
+    """The exception a tool crashed with, under ``Tool.run``'s ``ToolError`` wrapper, or None
+    when mcp's own text is already the readable one: an unknown tool (no ``__cause__``), a
+    deliberate ``ToolError``/``ResourceError`` from the tool, or argument validation."""
+    from mcp.server.mcpserver.exceptions import ResourceError, ToolError
+    from pydantic import ValidationError
+
+    unexpected = _unexpected_types()
+    cause = exc.__cause__
+    for _ in range(10):
+        if cause is None:
+            return None
+        if unexpected and isinstance(cause, unexpected):
+            cause = cause.__cause__  # a nested tool or resource crash: keep unwrapping
+            continue
+        if isinstance(cause, (ToolError, ResourceError, ValidationError)):
+            return None
+        return cause
+    return None
 
 
 def error_text(exc: BaseException, tried: list[str]) -> str:
@@ -159,7 +179,7 @@ def _record(code: str, exc: BaseException | None, detail: str) -> None:
 
 async def run_door(name: str, call: Awaitable[Any]) -> Any:
     """Await one MCP tool call (``call``) under the door's contract; see the module doc."""
-    from mcp.server.mcpserver.exceptions import UnexpectedToolError
+    from mcp.server.mcpserver.exceptions import ToolError
 
     limit = deadline_s() if name in DEADLINE_TOOLS else 0.0
     state = _CallState(limit)
@@ -177,9 +197,11 @@ async def run_door(name: str, call: Awaitable[Any]) -> Any:
             _record("CHZ-FO-MCP-DEADLINE", None,
                     f"tool={name} deadline_s={limit:g} attempts={len(_tried(state))}")
             return _result(deadline_text(limit, _tried(state)))
-    except UnexpectedToolError as exc:
-        root = _root_cause(exc)
-        _record("CHZ-FO-MCP-TOOL-ERROR", root, f"tool={name}")
-        return _result(error_text(root, _tried(state)))
+    except ToolError as exc:  # UnexpectedToolError (mcp >= 2.2) is a ToolError too
+        crash = _tool_crash(exc)
+        if crash is None:
+            raise
+        _record("CHZ-FO-MCP-TOOL-ERROR", crash, f"tool={name}")
+        return _result(error_text(crash, _tried(state)))
     finally:
         _STATE.reset(token)
