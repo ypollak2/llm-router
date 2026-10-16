@@ -2789,6 +2789,9 @@ async def _dispatch_model_loop(
     conversation: list | None = None,
     # The P1.1 door that supplied ``conversation``: "gateway" (the SDK packs in sdk.py, D-98).
     context_door: str = "gateway",
+    # P2.4: the request's capability needs, computed once by route_and_call (None =
+    # filter off); the emergency BUDGET chain is filtered with the same needs.
+    capability_needs: Any = None,
 ) -> LLMResponse:
     """Execute the main model dispatch loop with primary + emergency fallback chains.
 
@@ -3779,6 +3782,10 @@ async def _dispatch_model_loop(
         )
         # D-116: apply shared Q&A ordering here too; timeout demotion below still wins.
         emergency_chain = _strip_local_for_qa(emergency_chain, task_type)
+        if emergency_chain and capability_needs is not None:
+            # P2.4: the emergency chain is filtered too; the primary chain already was.
+            from llm_router import capability_filter as _cf
+            emergency_chain = _cf.filter_chain(emergency_chain, capability_needs)
         if emergency_chain and emergency_chain != _chain_as_built:
             emergency_chain = _demote_timed_out_local(emergency_chain)  # LOCAL-TIMEOUT-1
             for attempt, model in enumerate(emergency_chain, start=len(models_to_try) + 1):
@@ -4877,12 +4884,41 @@ async def route_and_call(
                     await _release_reservation_if_held()
                     raise _daily_cap_exc
 
+        # P2.4: the capability filter is the LAST transform (RED1-01/RED1-02: a hard
+        # filter placed before the specialist or the bandit is undone by them). It
+        # excludes, never reorders, and only on KNOWN lack of tools, vision or window.
+        # An explicit model_override is not exempt: hard means hard.
+        _cap_needs = None
+        _cap_excluded: list = []
+        if models_to_try:
+            try:
+                from llm_router import capability_filter as _cf
+                if _cf.enabled():
+                    _cap_needs = _cf.merge(
+                        _cf.needs_from_prompt(prompt, task_type.value, system_prompt or ""),
+                        _cf.needs_from_messages(messages, prompt, system_prompt or ""),
+                    )
+                    models_to_try, _cap_excluded = _cf.filter_chain_report(models_to_try, _cap_needs)
+            except Exception as _cap_err:  # noqa: BLE001 - fail-open: the chain stays as built
+                from llm_router import failopen
+                failopen.record("CHZ-FO-ROUTER-CAPABILITY-FILTER", _cap_err)
+
         if not models_to_try:
             set_span_attributes(
                 route_span,
                 available_providers=sorted(available),
                 candidate_count=0,
             )
+            if _cap_excluded:
+                await _release_reservation_if_held()
+                from llm_router import capability_filter as _cf
+                raise ValueError(
+                    f"No providers available for {task_type.value}/{profile.value}. "
+                    f"Capability filter excluded: {_cf.describe(_cap_excluded)}. "
+                    f"Configured providers: {available or 'none'}. "
+                    "Fix: remove the request's tools or images, shorten the prompt, or connect "
+                    "a model that supports them; LLM_ROUTER_CAPABILITY_ROUTING=0 turns the filter off."
+                )
             # #32: when a LLM_ROUTER_BLOCK_PROVIDERS hard filter is active (see
             # _blocked_providers) and the chain came out empty, surface the block
             # as a likely cause — otherwise the generic "install Ollama / set a key"
@@ -5280,6 +5316,7 @@ async def route_and_call(
             chain_attempts_out=_attempt_trace,
             conversation=messages,
             context_door=context_door,
+            capability_needs=_cap_needs,
         )
         # T3-S2 + T3-M1: combined timeout + cancel handling. Both failure
         # modes share the same cleanup contract — release the budget

@@ -808,6 +808,40 @@ def _refuse_tools_if_present(tools, tool_choice=None) -> None:
         raise HTTPException(status_code=400, detail=_TOOLS_UNSUPPORTED)
 
 
+# P2.4 ext-a. `_content_text` keeps only the `text` of a content-part list, so an image
+# part was dropped without a word and the model answered a question about an image it
+# never saw: the same silent wrongness R10 closed for `tools`. `route_and_call` has no
+# image channel, so the gateway refuses instead.
+_IMAGES_UNSUPPORTED = (
+    "This gateway routes to a text-completion backend and cannot read images. "
+    "The request included image content, which would have been silently ignored, "
+    "so it is refused instead. Remove the image parts to route this prompt as text."
+)
+
+_IMAGE_PART_TYPES = ("image", "image_url", "input_image", "image_file")
+
+
+def _has_image(value) -> bool:
+    """True when *value* (a content, a message, or a list of either) carries an image part."""
+    if isinstance(value, list):
+        return any(_has_image(v) for v in value)
+    if isinstance(value, dict):
+        if value.get("type") in _IMAGE_PART_TYPES or value.get("images"):
+            return True
+        return _has_image(value.get("content"))
+    return False
+
+
+def _refuse_images_if_present(*values) -> None:
+    """Raise 400 when any request field carries image content (P2.4 ext-a, R10 class).
+
+    Called with the messages, the Responses ``input`` or the Ollama ``images`` field of
+    every completion endpoint; `tests/test_r10_refuse_what_cannot_be_served.py` and
+    `tests/test_p24_empty_chain_table.py` discover the routes."""
+    if any(_has_image(v) for v in values):
+        raise HTTPException(status_code=400, detail=_IMAGES_UNSUPPORTED)
+
+
 STREAM_UNSUPPORTED = "streaming not supported yet (v16 A.2)"
 
 
@@ -876,6 +910,7 @@ class _OAIRequest(BaseModel):
 async def openai_chat(req: _OAIRequest, request: Request) -> dict:
     _refuse_stream(req.stream)
     _refuse_tools_if_present(req.tools, req.tool_choice)
+    _refuse_images_if_present(req.messages)
     system, messages = _split_system(req.messages)
     prompt, history = _request_and_history(messages)
     r = await _route(prompt, req.task_type, req.complexity,
@@ -919,6 +954,7 @@ class _ResponsesRequest(BaseModel):
 async def openai_responses(req: _ResponsesRequest, request: Request) -> dict:
     _refuse_stream(req.stream)
     _refuse_tools_if_present(req.tools, req.tool_choice)
+    _refuse_images_if_present(req.input)
     # `instructions` is the Responses API's system prompt; system/developer
     # items in `input` are too. Both go to the model as its system prompt
     # (P0.6), and neither is classified (T-03, see _route).
@@ -983,6 +1019,7 @@ class _AnthropicRequest(BaseModel):
 async def anthropic_messages(req: _AnthropicRequest, request: Request) -> dict:
     _refuse_stream(req.stream)
     _refuse_tools_if_present(req.tools, req.tool_choice)
+    _refuse_images_if_present(req.messages)
     # `req.system` is the model's system prompt and is never classified (T-03).
     prompt, history = _request_and_history(req.messages)
     r = await _route(prompt, None, None,
@@ -1028,11 +1065,15 @@ class _OllamaGenerate(BaseModel):
     # upstream API would have accepted it either.
     tools: list | None = None
     tool_choice: object | None = None
+    # P2.4 ext-a: Ollama's base64 image list. Declared so the handler sees it (an
+    # undeclared field is dropped by Pydantic) and refuses it.
+    images: list | None = None
 
 
 @app.post("/api/chat")
 async def ollama_chat(req: _OllamaChat, request: Request) -> dict:
     _refuse_tools_if_present(req.tools, req.tool_choice)
+    _refuse_images_if_present(req.messages)
     system, messages = _split_system(req.messages)
     max_tokens, temperature = _ollama_options(req.options)
     prompt, history = _request_and_history(messages)
@@ -1053,6 +1094,7 @@ async def ollama_chat(req: _OllamaChat, request: Request) -> dict:
 @app.post("/api/generate")
 async def ollama_generate(req: _OllamaGenerate, request: Request) -> dict:
     _refuse_tools_if_present(req.tools, req.tool_choice)
+    _refuse_images_if_present({"images": req.images})
     max_tokens, temperature = _ollama_options(req.options)
     r = await _route(req.prompt, None, None,
                      prefer_model=_qualify_model(req.model, "ollama"),

@@ -14,7 +14,7 @@ each door's existing nothing-routable path takes over (the host model answers).
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Sequence, TypeVar
 
@@ -38,6 +38,11 @@ class MapView:
     rank_by_id: dict          # chain_id -> effective_priority (connected rows)
     rank_by_provider: dict    # provider -> best effective_priority
     orders: bool = False      # the map's policy expresses an order (not balanced/unknown)
+    # P2.4 (capability filter). Only KNOWN values: an API-key row or a row with an
+    # empty capability list is absent here, so an absent entry means unknown.
+    caps_by_id: dict = field(default_factory=dict)        # chain_id -> (tools, vision)
+    caps_by_provider: dict = field(default_factory=dict)  # provider -> (tools, vision), seat rows
+    window_by_id: dict = field(default_factory=dict)      # chain_id -> window tokens
 
     def provider_ok(self, provider: str) -> bool:
         """False only when the map knows the provider and none of its rows is connected."""
@@ -61,10 +66,34 @@ def _expresses_order(policy: object) -> bool:
     return isinstance(policy, str) and policy != "balanced" and policy in known_policies()
 
 
+def _index_caps(r: dict, caps_id: dict, caps_prov: dict, window: dict) -> None:
+    """Capability facts of one connected row, known values only (never raises)."""
+    try:
+        if r.get("kind") != "api":      # API rows list only ``generate``: says nothing of tools or vision
+            caps = r.get("capabilities")
+            if isinstance(caps, list) and caps:
+                pair = ("tools" in caps, "vision" in caps)
+                caps_id[r["chain_id"]] = pair
+                if r.get("kind") == "subscription":
+                    caps_prov[_provider(r["chain_id"])] = pair
+        limits = r.get("limits")
+        if isinstance(limits, dict):
+            for k in ("max_context", "num_ctx"):
+                v = limits.get(k)
+                if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+                    window[r["chain_id"]] = v
+                    break
+    except Exception:
+        return
+
+
 def _index(data: dict) -> MapView:
     known, connected, kinds = set(), set(), set()
     by_id: dict[str, int] = {}
     by_prov: dict[str, int] = {}
+    caps_id: dict[str, tuple[bool, bool]] = {}
+    caps_prov: dict[str, tuple[bool, bool]] = {}
+    window: dict[str, int] = {}
     for r in data["resources"]:
         prov = _provider(r["chain_id"])
         known.add(prov)
@@ -72,12 +101,13 @@ def _index(data: dict) -> MapView:
             continue
         connected.add(prov)
         kinds.add(r["kind"])
+        _index_caps(r, caps_id, caps_prov, window)
         p = r.get("effective_priority")
         if isinstance(p, int):
             by_id[r["chain_id"]] = p
             by_prov[prov] = min(p, by_prov.get(prov, p))
     return MapView(frozenset(known), frozenset(connected), frozenset(kinds), by_id, by_prov,
-                   _expresses_order(data.get("policy")))
+                   _expresses_order(data.get("policy")), caps_id, caps_prov, window)
 
 
 _lock = threading.Lock()
