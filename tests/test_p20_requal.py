@@ -17,10 +17,21 @@ from llm_router.paths import state_path
 from llm_router.resolver.eligibility_store import record_competence
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("p20_requal", ROOT / "scripts/p20_requal.py")
-h = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = h
-SPEC.loader.exec_module(h)
+
+
+def _load_harness():
+    # A unique name that shadows no real module; registered because @dataclass resolves
+    # string annotations through sys.modules[cls.__module__].
+    spec = importlib.util.spec_from_file_location(
+        "_test_p20_requal_harness", ROOT / "scripts/p20_requal.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+h = _load_harness()
 NOW = 1_900_000_000.0
 PAST = "2026-01-01T00:00:00Z"
 
