@@ -649,6 +649,7 @@ async def llm_generate(
     temperature: float | None = None,
     max_tokens: int | None = None,
     context: str | None = None,
+    model: str | None = None,
 ) -> str:
     """Generate creative or long-form content — routes to the best generation model.
 
@@ -669,6 +670,7 @@ async def llm_generate(
     resp = await route_and_call(
         TaskType.GENERATE,
         prompt,
+        model_override=model,
         complexity_hint=effective,
         system_prompt=system_prompt,
         temperature=temperature,
@@ -688,6 +690,7 @@ async def llm_analyze(
     system_prompt: str | None = None,
     max_tokens: int | None = None,
     context: str | None = None,
+    model: str | None = None,
 ) -> str:
     """Deep analysis task — routes to the strongest reasoning model.
 
@@ -712,6 +715,7 @@ async def llm_analyze(
     resp = await route_and_call(
         TaskType.ANALYZE,
         prompt,
+        model_override=model,
         complexity_hint=effective_complexity,
         system_prompt=system_prompt,
         temperature=0.3,
@@ -800,6 +804,7 @@ async def llm_code(
     max_tokens: int | None = None,
     context: str | None = None,
     use_ponytail: bool = True,
+    model: str | None = None,
 ) -> str:
     """Coding task — routes to the best coding model.
 
@@ -829,6 +834,7 @@ async def llm_code(
     resp = await route_and_call(
         TaskType.CODE,
         prompt,
+        model_override=model,
         complexity_hint=effective,
         system_prompt=effective_system,
         temperature=0.2,

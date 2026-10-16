@@ -26,6 +26,10 @@ rewrites the tools array, it forwards the resulting ``tool_reference`` blocks
 unchanged, so setting ``ENABLE_TOOL_SEARCH=true`` is safe here and restores
 first-party token usage.
 
+Prefixes beat classification, stickiness and soft quota pressure. Admin
+pinned_models, side calls and local hard stops (kill switch, media, prompt
+cap, backend health and quality breaker) take precedence over a prefix.
+
 Safety rules, each enforced here:
   * a served reply must pass ``translate.from_ollama`` validation;
   * a backend error, a validation failure, or a miss of the per-step latency
@@ -55,7 +59,9 @@ from llm_router.local_agent import DEFAULT_MAX_PROMPT_TOKENS, LocalAgentConfig, 
 from llm_router.local_agent import capability as la_capability
 from llm_router.local_agent.compact import session_cwd as la_session_cwd
 from llm_router import failopen, local_models, prompt_key, shadow_frontier
+from llm_router import prefixes as user_prefixes
 from llm_router.proxy import haiku_arm, haiku_guard, ledger, llm_shadow, local_mode, local_shadow, okf_context
+from llm_router.proxy import escalation
 
 from llm_router.proxy.backend_health import (
     DEFAULT_COOLDOWN_S,
@@ -83,7 +89,7 @@ from llm_router.proxy.loop_guard import (
 )
 from llm_router.proxy.cache_cost import Stickiness, conversation_key
 from llm_router.proxy.steps import (
-    STEP_CLASSES, classify_text, is_first_call, is_thread_continue, newest_human_text, session_id_of,
+    STEP_CLASSES, classify_text, has_client_tools, is_first_call, is_thread_continue, newest_human_text, session_id_of,
     step_class, step_fields, thread_parent, turn_fields,
 )
 from llm_router import call_identity, session_kind
@@ -278,6 +284,14 @@ def parse_steps(raw: str) -> frozenset:
 
 def _error_json(message: str) -> bytes:
     return json.dumps({"type": "error", "error": {"type": "api_error", "message": message}}).encode()
+
+
+def refusal_message(text: str, model: str | None) -> dict:
+    """A normal Anthropic message, usable for JSON and SSE responses."""
+    return {"id": "msg_lr_prefix_refusal", "type": "message", "role": "assistant",
+            "model": model, "content": [{"type": "text", "text": text}],
+            "stop_reason": "end_turn", "stop_sequence": None,
+            "usage": {"input_tokens": 0, "output_tokens": 0}}
 
 
 def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clock=None, breaker_fn=None,
@@ -587,7 +601,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                    served_stop_reason=message["stop_reason"])
         return message
 
-    async def local_step(body: dict, row: dict) -> dict | None:
+    async def local_step(body: dict, row: dict, *, force=False) -> dict | None:
         """``--serve local-agent``: pin, decide, serve. Returns the served
         message, or ``None`` after writing the reason and the egress notice."""
         row["serve_mode"] = local_mode.SERVE_LOCAL_AGENT
@@ -595,8 +609,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             row.update(decision=ledger.DECISION_FORWARDED, reason=local_mode.REASON_NOT_ELIGIBLE)
             return None
         key = conversation_key(body, row.get("session_id"))
-        pinned = lm.pin_of(key)
-        started_elsewhere = pinned is None and not is_first_call(body)
+        pinned = local_mode.PIN_LOCAL if force else lm.pin_of(key)
+        if force:
+            lm.set_pin(key, local_mode.PIN_LOCAL)
+        started_elsewhere = not force and pinned is None and not is_first_call(body)
         if started_elsewhere:
             # Never migrate a conversation already on Claude (or one this
             # process never saw the start of): its prompt cache lives there.
@@ -617,13 +633,19 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 row["local_mode"]["pin"] = local_mode.PIN_LOCAL
             message = await try_serve(body, row)
             if message is not None:
+                if force:
+                    row["prefix_outcome"] = "served_local"
                 return message
+            if force:
+                return refuse_local(row, row.get("reason") or "validation")
             # A failed local step: this step goes to Claude and the conversation
             # stays there (one logged move, never back and forth).
             lm.set_pin(key, local_mode.PIN_CLAUDE)
             row["local_mode"]["pin_change"] = "local->claude"
             reason = row.get("reason") or "validation"
         else:
+            if force:
+                return refuse_local(row, decision.reason)
             reason = decision.reason
             row.update(decision=ledger.DECISION_FORWARDED, reason=reason, detail=decision.detail or None)
             if pinned is None or reason in local_mode.STRUCTURAL_REASONS:
@@ -632,6 +654,15 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         row["egress"] = True
         print(local_mode.egress_notice(str(reason), row.get("session_id")), file=sys.stderr, flush=True)
         return None
+
+    def refuse_local(row: dict, reason: str) -> dict:
+        row.update(decision=ledger.DECISION_SERVED, reason=reason, egress=False,
+                   prefix_outcome=f"refused:{reason}")
+        message = refusal_message(
+            f"[llm_router] `local:` refused: {reason}; not sent to Claude.",
+            row.get("requested_model"))
+        row["msg_id"] = message["id"]
+        return message
 
     async def shadow_local(body: dict):
         """The shadow job's local call, on a deep copy it is handed. Reads no file
@@ -948,6 +979,15 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if not isinstance(body, dict):
             return await forward(request, raw, None, None)
 
+        ov = None
+        stripped_body = None
+        try:
+            if has_client_tools(body):
+                ov = escalation.explicit_override(body)
+                stripped_body = user_prefixes.strip_body(body) if ov is not None else None
+        except Exception as exc:  # noqa: BLE001 -- prefixes must fail open
+            failopen.record("LR-FO-PROXY-PREFIX", exc)
+            ov = stripped_body = None
         row: dict = {
             "ts": time.time(), "session_id": session_id_of(body), "msg_id": None,
             "stream": bool(body.get("stream")), "requested_model": body.get("model"),
@@ -970,19 +1010,55 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             **identity_fields(session_id_of(body)),
             "tier_policy_version": tier_policy.policy_version if tier_policy is not None else None,
             "tier_proposed": None, "tier_retry": None,
+            # Only on prefixed turns: an unprefixed row stays byte-identical (golden tests).
+            **({"prefix": ov.name, "prefix_outcome": None} if ov is not None else {}),
             # M0.5: request-shape and prompt-hash fields, never prompt text. The
             # classifier columns say the verdict still comes from the rules and
             # nothing is applied; M1 shadow and M2 canary fill them in.
             **request_fields(body, raw, parent_main),
             "cls_source": "rules", "cls_ms": None, "cls_arm": None, "cls_applied": False,
         }
-        if lm is not None:
-            message = await local_step(body, row)
+        example_written = False
+
+        def prefix_outcome(outcome):
+            nonlocal example_written
+            row["prefix_outcome"] = outcome
+            if ov is None or example_written:
+                return
+            try:
+                if is_first_call(body) or row["step_class"] == "turn_first":
+                    example_written = True
+                    user_prefixes.record_example(
+                        ov.stripped, forced=ov.name, decided=outcome, door="proxy")
+            except Exception as exc:  # noqa: BLE001 -- telemetry is fail-open
+                failopen.record("LR-FO-PROXY-PREFIX", exc)
+
+        # Decisions always see the original body. Only serving uses this copy.
+        sent_body = stripped_body if ov is not None and ov.is_claude else None
+        sent_raw = json.dumps(sent_body).encode() if sent_body is not None else raw
+        original = (raw, body) if sent_body is not None else None
+        unserved = ov is not None and (
+            ov.name == "codex" or (ov.name == "local" and lm is None))
+        if unserved:
+            prefix_outcome(f"unserved:no_{ov.name}_backend")
+        if ov is not None and ov.is_claude:
+            prefix_outcome("forwarded_claude" if ov.name == "claude"
+                           else f"tier:{row.get('tier') or body.get('model')}")
+        force_local = (ov is not None and ov.name == "local" and lm is not None
+                       and local_mode.is_agent_turn(body))
+        bypass_local = ov is not None and ov.is_claude
+        if lm is not None and not bypass_local:
+            message = await local_step(
+                stripped_body or body if force_local else body, row, force=force_local)
             if message is not None:
+                if force_local:
+                    prefix_outcome(row["prefix_outcome"])
                 write(row)
                 if body.get("stream"):
                     return Response(sse_from_message(message), media_type="text/event-stream")
                 return Response(json.dumps(message), media_type="application/json")
+        elif bypass_local:
+            row["reason"] = "explicit_prefix"
         elif not cfg.steps:
             row["reason"] = "routing_off"
         elif step_class(body, cfg.steps) is None:
@@ -996,10 +1072,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 return Response(json.dumps(message), media_type="application/json")
         on_reply = start_shadow(body, row, len(raw)) if shadow is not None else None
         if tier_policy is None:
-            return await forward(request, raw, body, row, on_reply=on_reply)
+            return await forward(request, sent_raw, sent_body or body, row,
+                                 original=original, on_reply=on_reply)
         decision = await decide_tier(body, row)
+        if ov is not None and ov.name in user_prefixes.CLAUDE_TIER_PREFIXES:
+            prefix_outcome(f"tier:{row.get('tier') or body.get('model')}")
         if decision is None:
-            return await forward(request, raw, body, row, on_reply=on_reply)
+            return await forward(request, sent_raw, sent_body or body, row,
+                                 original=original, on_reply=on_reply)
         if (frontier is not None and row.get("tier_reason") == REASON_HAIKU_REWRITE
                 and decision.served_model != body.get("model")):
             on_reply = frontier_on_reply(request, raw, row, on_reply)
@@ -1009,8 +1089,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             sticky.record_usage(key, usage)
 
         if not decision.rewritten and decision.body_rewrite is None:
-            return await forward(request, raw, body, row, on_usage=_on_usage, on_reply=on_reply)
-        sent = dict(body, model=decision.served_model)
+            return await forward(request, sent_raw, sent_body or body, row, original=original,
+                                 on_usage=_on_usage, on_reply=on_reply)
+        sent = dict(sent_body or body, model=decision.served_model)
         if decision.body_rewrite == REWRITE_HAIKU:
             # Haiku 4.5 400s on `thinking.type: adaptive` and has no effort
             # parameter: serve it a body it accepts (translate.for_haiku).
