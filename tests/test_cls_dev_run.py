@@ -271,6 +271,8 @@ class FakeOllama:
                     out = {"message": {"role": "assistant", "content": content}}
                     if fake.logprobs and req.get("logprobs"):
                         toks = ['{"', 'scope', '": ', '2', ', "', 'tier', '": "', 'op', 'us', '"}']
+                        if fake.logprobs == "no_tier":
+                            toks = ['{"', 'scope', '": ', '2', '}']
                         top = [{"token": "op", "logprob": -0.2}, {"token": "son", "logprob": -1.9}, {"token": "ha", "logprob": -3.1}]
                         out["logprobs"] = [{"token": t, "logprob": -0.1, "top_logprobs": top if t == "op" else
                                             [{"token": t, "logprob": -0.1}]} for t in toks]
@@ -564,12 +566,26 @@ def test_c4_precheck_ok_and_killed_and_c4_run_refuses(env, ollama, capsys):
     bad = ollama(logprobs=False)
     assert env.run("c4-precheck", "--ollama-url", bad.url) == D.EXIT_C4_KILLED
     st = json.loads((env.out / "c4_status.json").read_text())
-    assert st["c4"] == "killed" and st["criterion"] == 1 and st["reason"] == "no_logprobs" and st["ollama_version"]
+    assert st["c4"] == "killed" and st["criterion"] == 1 and st["reason"] == "no_logprobs_field" and st["ollama_version"]
     capsys.readouterr()
     real, syn, truth = make_data(n_real=10, n_groups=5, n_syn=0)
     build_manifest(env, real, [])
     assert env.run("c4-run", "--manifest", env.out / "dev_manifest.json", "--ollama-url", bad.url) == D.EXIT_C4_KILLED
     assert not [b for b in bad.bodies if b[1] == "/api/chat" and "rename" not in b[2]]   # no item was sent
+
+
+def test_c4_precheck_tier_token_not_located_parks_for_the_coordinator(env, ollama):
+    srv = ollama(logprobs="no_tier")
+    assert env.run("c4-precheck", "--ollama-url", srv.url) == D.EXIT_PARK
+    st = json.loads((env.out / "c4_status.json").read_text())
+    assert st["c4"] == "parked_for_coordinator" and st["reason"] == "tier_token_not_located" and "criterion" not in st
+    assert st["shape"] == {"n_tokens": 5, "n_with_top": 5, "top_len_max": 1, "has_message": True}
+    assert "scope" not in json.dumps(st)                                   # counts and shapes only, never token text
+    real, _, _ = make_data(n_real=6, n_groups=3, n_syn=0)
+    man = build_manifest(env, real, [])
+    assert env.run("c4-run", "--manifest", man, "--ollama-url", srv.url) == D.EXIT_PARK
+    t = D.criterion1({"runtime_parked": True})
+    assert t["status"] == "pending"
 
 
 def test_c4_features_never_fall_back_to_argmax():
@@ -625,6 +641,8 @@ def test_trigger_mb_boundary(env, capsys):
     ]
     for cands, fire in sets:
         assert D.mb_trigger(cands)["fire"] is fire
+    w = D.mb_trigger({"C1": {"survives_1_4": False, "pending_1_4": True, "auroc": 0.9}, "C4": {"survives_1_4": False}})
+    assert w["fire"] is False and w["wait"] is True and w["pending"] == ["C1"]
     p = env.dev / "res.json"
     S.write_private(p, json.dumps({"candidates": sets[0][0]}))
     assert env.run("trigger-mb", "--results", p) == 0
@@ -646,9 +664,14 @@ def test_quiet_gate_cases():
     slept = []
     D.quiet_gate(quiet_readers(), sleep=slept.append)
     assert slept == [10.0, 10.0]
-    assert D.evaluate_block([0.5, 3.0, 0.5]) == "invalid:load_sample"
-    assert D.evaluate_block([0.5, 2.0, 2.0]) == "invalid:load_mean"
-    assert D.evaluate_block([0.5, 1.0, 1.2]) is None
+    rd = lambda load, **o: dict({"load1": load, "foreign_models": [], "claude_p": 0, "on_ac": True, "throttled": False}, **o)  # noqa: E731
+    assert D.evaluate_block([rd(0.5), rd(3.0), rd(0.5)]) == "invalid:load_sample"
+    assert D.evaluate_block([rd(0.5), rd(2.0), rd(2.0)]) == "invalid:load_mean"
+    assert D.evaluate_block([rd(2.0), rd(0.1), rd(0.1)]) == "invalid:load_start"
+    assert D.evaluate_block([rd(0.5), rd(1.0), rd(1.2)]) is None
+    for over, why in (({"foreign_models": ["x:7b"]}, "foreign_model"), ({"claude_p": 1}, "claude_p"),
+                      ({"on_ac": False}, "not_on_ac"), ({"throttled": True}, "thermal")):
+        assert D.evaluate_block([rd(0.5), rd(0.5, **over), rd(0.5)]) == "invalid:" + why
 
 
 def test_count_claude_p_only_foreign_claude_print():
@@ -718,7 +741,7 @@ def test_latency_maths_spacing_and_codex_refused(env):
         return t[0]
     now = [datetime.datetime(2026, 10, 20, 10, 0, tzinfo=UTC)]
     deps = quiet_deps(perf=perf, l2_score=lambda c, a: (lambda text, dig: {"haiku": 0.2, "sonnet": 0.5, "opus": 0.3}),
-                      utc_clock=lambda: now[0], load_sampler=lambda: 0.5, rss_gib=lambda: 0.4)
+                      utc_clock=lambda: now[0], rss_gib=lambda: 0.4)
     args = ["--manifest", man, "--items", env.dev / "items.jsonl", "--candidate", "C1", "--n", 8, "--warmups", 2]
     assert env.run("latency", *args, deps=deps) == 0
     assert env.run("latency", *args, deps=deps) == D.EXIT_PARK          # second block < 30 min later
@@ -940,7 +963,11 @@ def test_assemble_end_to_end_table_criteria_and_finalist(env, capsys):
     man, common, ra = _assemble_setup(env, 320, 80, 40, 8)
     deps = quiet_deps(embedder=lambda c, a: FakeEmbedder())
     assert env.run("fit-heads", *common, "--candidate", "C1", deps=deps) == 0
-    S.write_private(env.out / "latency_C1.json", json.dumps({"p95_ms": 40.0, "rss_gib": 0.6, "model_gib": 0.0, "n_calls": 600, "n_blocks": 3}))
+    oof_p = env.out / "oof_C1.jsonl"
+    oof_rows = S.read_jsonl(oof_p)
+    dropped = {r["item_id"] for r in oof_rows[:3]}                      # 3 error items (0.8 percent): fallback
+    write_jsonl(oof_p, oof_rows[3:])
+    S.write_private(env.out / "latency_C1.json", json.dumps({"p95_ms": 2400.0, "rss_gib": 0.6, "model_gib": 0.0, "n_calls": 600, "n_blocks": 3}))
     S.write_private(env.out / "stability_C1.json", json.dumps({"identical_share": 1.0, "n": 360}))
     capsys.readouterr()
     rc = env.run("assemble", *common, "--oof", "C1=%s" % (env.out / "oof_C1.jsonl"), "--reference-arms", ra,
@@ -960,6 +987,14 @@ def test_assemble_end_to_end_table_criteria_and_finalist(env, capsys):
     assert res["criteria"]["C1"]["killed_by"] is None, [(r["n"], r["status"]) for r in rows]
     assert [f["candidate"] for f in fin["finalists"]] == ["C1"] and fin["finalists"][0]["arm"] in ("A", "B")
     assert fin["finalists"][0]["thresholds"]["t_hi"] is not None
+    assert fin["finalists"][0]["labels"] == ["async_only"] and fin["finalists"][0]["sync_authority"] is False
+    assert fin["finalists"][0]["arm_choice"]["t_conf_method"] == "in-sample screen (no 7.2/7.3)"
+    c3 = rows[3]
+    assert c3["population"] == "real, fallback items excluded" and c3["auroc_with_fallback"]["auroc"] is not None
+    noerr = [json.loads(x)["item_id"] for x in (env.out / "arms_table_noerr_C1.jsonl").read_text().splitlines()]
+    assert dropped.isdisjoint(noerr) and len(noerr) == len(raws) - 3
+    assert c3["n_scored"] == json.loads((env.out / "score_noerr_C1.json").read_text())["auroc"]["C1"]["n"]
+    assert rows[2]["n_error"] == 3 and rows[2]["status"] == "pass"
     for p in ("cls_dev_result.json", "cls_dev_finalists.json"):
         assert (env.out / (p + ".sha256")).read_text().split()[0] == S.sha256_file(env.out / p)
     blob = "".join(p.read_text() for p in env.out.iterdir() if p.is_file() and p.suffix in (".json", ".jsonl"))
@@ -993,7 +1028,8 @@ def test_criteria_table_order_all_numbers_after_early_kill_and_flags():
     t = D.criteria_table(list(reversed(rows)))
     assert [r["n"] for r in t["rows"]] == list(range(9)) and t["killed_by"] == 0 and not t["eligible"]
     st = {r["n"]: r for r in t["rows"]}
-    assert st[1]["p95_ms"] == 2000.0 and st[2]["error_rate"] == 0.09 and st[3]["auroc"] == 0.6
+    assert st[1]["p95_ms"] == 2000.0 and st[1]["status"] == "async_only" and st[1]["fired"] == ["slow"]
+    assert st[2]["error_rate"] == 0.09 and st[3]["auroc"] == 0.6 and t["labels"] == ["async_only"]
     assert st[4]["status"] == "kill" and st[5]["status"] == "report_only" and st[5]["flag"] == "COST_HIGH"
     assert st[6]["status"] == "report_only" and st[6]["would_kill"] is True
     assert st[8]["status"] == "not_evaluable" and st[7]["status"] == "kill"
@@ -1026,6 +1062,80 @@ def test_arm_choice_only_outside_engine_seen():
     assert [r["strata"]["source"] for r in D.arm_choice_items(rows)] == ["ge3_ho", "dev_syn", "p17d_f"]
     a = {"cost": 1.0, "opus_share": 0.2, "raw_cost": 2.0}
     assert D.choose_arm(a, dict(a)) == "A" and D.choose_arm(a, {"cost": 0.9, "opus_share": 0.3, "raw_cost": 2.5}) == "B"
+
+
+def test_criterion_boundaries():
+    c1 = lambda p95, mem=1.0: D.criterion1({"p95_ms": p95, "rss_gib": mem, "model_gib": 0.0})  # noqa: E731
+    assert c1(1500.0)["status"] == "pass" and c1(1501.0)["status"] == "async_only"
+    assert c1(15000.0)["status"] == "async_only" and c1(15001.0)["status"] == "kill"
+    assert c1(15001.0)["fired"] == ["slow_beyond_async_budget"]
+    assert c1(100.0, 12.0)["status"] == "pass" and c1(100.0, 12.01)["status"] == "kill" and c1(100.0, 12.01)["fired"] == ["memory"]
+    assert c1(2000.0, 12.5)["status"] == "kill" and c1(2000.0, 12.5)["fired"] == ["memory", "slow"]
+    assert D.criterion1({"runtime_unavailable": True})["fired"] == ["runtime"]
+    assert D.criterion2({"n": 100, "n_error": 5})["status"] == "pass" and D.criterion2({"n": 100, "n_error": 6})["status"] == "kill"
+    c3 = lambda pt, lo: D.criterion3({"auroc": pt, "ci95": [lo, 0.99]})["status"]  # noqa: E731
+    assert c3(0.65, 0.55) == "pass" and c3(0.6499, 0.6) == "kill" and c3(0.8, 0.5499) == "kill"
+
+
+def test_fallback_scores_decode_to_rules_tier_over_the_whole_grid():
+    ce = D.load_cls_eval(SCRIPTS / "cls_eval.py")
+    grid = [(h, lo) for h in ce.GRID_HI for lo in ce.GRID_LO]
+    assert len(grid) == 192
+    for rules, want in (("sonnet", "sonnet"), ("opus", "opus"), ("haiku", "sonnet"), (None, "sonnet")):
+        f = D.fallback_scores(rules)
+        sc = (f["p_haiku"], f["p_sonnet"], f["p_opus"])
+        assert {ce.decide(sc, h, lo) for h, lo in grid} == {want}
+
+
+def test_criterion8_pending_unless_a_judge_is_voided():
+    bad = {"under": {"evaluable": False}, "cost": {"evaluable": False}}
+    ok = {"under": {"discordant": False}, "cost": {"discordant": False}}
+    assert D.criterion8(bad, voided=[], syn=ok)["status"] == "pending"
+    assert D.criterion8(None, voided=[], syn=ok)["status"] == "pending"
+    assert D.criterion8(ok, voided=[], syn=bad)["status"] == "pending"
+    assert D.criterion8(bad, voided=["gpt"], syn=ok)["status"] == "pass"
+    t = D.criteria_table([D.criterion8(bad, voided=[], syn=ok)])
+    assert not t["eligible"] and t["pending"] == [8]
+
+
+def test_timed_block_samples_every_60s_during_the_block():
+    seq = iter([quiet_readers()] * 3 + [quiet_readers(foreign_models=["intruder:7b"])] + [quiet_readers()] * 20)
+    clock = [0.0]
+
+    def mono():
+        clock[0] += 31.0
+        return clock[0]
+    perf = iter(float(i) / 1000 for i in range(1000))
+    timings, readings, n_none = D.run_timed_block([("t", "d")] * 8, lambda t, d: {"opus": 1}, take=lambda: D.take_reading(next(seq)),
+                                                  perf=lambda: next(perf), mono=mono)
+    assert len(timings) == 8 and len(readings) >= 5 and n_none == 0
+    assert D.evaluate_block(readings) == "invalid:foreign_model"
+
+
+def test_latency_block_checks_foreign_models_for_c1_and_records_readings(env, ollama):
+    srv = ollama(ps_models=["foreign:7b"])
+    real, _, _ = make_data(n_real=12, n_groups=6, n_syn=0)
+    man = build_manifest(env, real, [])
+    deps = quiet_deps(readers=lambda o, own: quiet_readers(foreign_models=[m["name"] for m in o.ps() if m["name"] != own]),
+                      l2_score=lambda c, a: (lambda t, d: {"opus": 0.5}))
+    args = ["--manifest", man, "--items", env.dev / "items.jsonl", "--candidate", "C1", "--n", 4, "--warmups", 1,
+            "--ollama-url", srv.url]
+    assert env.run("latency", *args, deps=deps) == D.EXIT_PARK          # C1 too: the foreign model parks the block
+    assert srv.unloaded == []
+    srv.ps_models = []
+    assert env.run("latency", *args, deps=deps) == 0
+    blk = S.read_jsonl(env.out / "latency_blocks_C1.jsonl")[-1]
+    assert blk["valid"] and blk["n_readings"] >= 2 and blk["n"] == 4
+
+
+def test_stratified_sample_largest_remainder_exact_n():
+    items = [{"item_id": "i%03d" % i, "band": b} for i, b in enumerate(["L1"] * 7 + ["L2"] * 50 + ["L3"] * 30 + ["L4"] * 13)]
+    out = D.stratified_sample(items, 10)
+    got = {b: sum(1 for x in out if x["band"] == b) for b in D.BANDS}
+    assert len(out) == 10 and got == {"L1": 1, "L2": 5, "L3": 3, "L4": 1}
+    assert D.stratified_sample(items, 10) == out and len(D.stratified_sample(items, 200)) == 100
+    out7 = D.stratified_sample(items, 7)
+    assert len(out7) == 7 and sum(1 for x in out7 if x["band"] == "L4") == 1
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1264,6 +1374,82 @@ def inv_foreign_not_unloaded(c):
     assert ol.unloaded == ["qwen3.5:latest"]
 
 
+def inv_p95_sync_budget(c):
+    assert D.criterion1({"p95_ms": 1501.0, "rss_gib": 1.0})["status"] == "async_only"
+    assert D.criterion1({"p95_ms": 1500.0, "rss_gib": 1.0})["status"] == "pass"
+
+
+def inv_p95_async_budget(c):
+    assert D.criterion1({"p95_ms": 15001.0, "rss_gib": 1.0})["status"] == "kill"
+    assert D.criterion1({"p95_ms": 15000.0, "rss_gib": 1.0})["status"] == "async_only"
+
+
+def inv_memory_budget(c):
+    assert D.criterion1({"p95_ms": 10.0, "rss_gib": 12.01})["status"] == "kill"
+    assert D.criterion1({"p95_ms": 10.0, "rss_gib": 12.0})["status"] == "pass"
+
+
+def inv_err_kill(c):
+    assert D.criterion2({"n": 100, "n_error": 6})["status"] == "kill"
+    assert D.criterion2({"n": 100, "n_error": 5})["status"] == "pass"
+
+
+def inv_fallback_decode(c):
+    test_fallback_scores_decode_to_rules_tier_over_the_whole_grid()
+
+
+def inv_crit8_pending(c):
+    bad = {"under": {"evaluable": False}, "cost": {"evaluable": False}}
+    assert D.criterion8(bad, voided=[], syn=None)["status"] == "pending"
+
+
+def inv_c4_park_not_kill(c):
+    resp = {"logprobs": [{"token": "{", "logprob": -0.1, "top_logprobs": [{"token": "{", "logprob": -0.1}]}]}
+    assert D.c4_precheck_status(resp)["c4"] == "parked_for_coordinator"
+    assert D.c4_precheck_status({"message": {"content": "x"}})["c4"] == "killed"
+
+
+def inv_block_sampling(c):
+    test_timed_block_samples_every_60s_during_the_block()
+
+
+def inv_auroc_excludes_errors(c):
+    rows = [{"item_id": "a"}, {"item_id": "b"}, {"item_id": "c"}]
+    assert [r["item_id"] for r in D.exclude_error_rows(rows, {"a", "c"})] == ["a", "c"]
+
+
+def inv_tmb_waits(c):
+    w = D.mb_trigger({"C1": {"survives_1_4": False, "pending_1_4": True}})
+    assert w["fire"] is False and w.get("wait") is True
+
+
+def _m_tmb_ignores_pending(results):
+    surv = [k for k, v in results.items() if v.get("survives_1_4")]
+    return {"fire": not surv, "wait": False, "reasons": ["no_survivor"] if not surv else []}
+
+
+def _m_block_start_only(calls, score, *, take, perf, mono, interval=60.0):
+    readings = [take()]
+    timings = []
+    for text, digest in calls:
+        t0 = perf()
+        score(text, digest)
+        timings.append((perf() - t0) * 1000.0)
+    return timings, readings, 0
+
+
+def _m_leg_nonevaluable_passes(m, voided, pair):
+    v = [j for j in voided if j in pair]
+    if v or not m or any(not isinstance(m.get(k), dict) or m[k].get("evaluable") is False for k in ("under", "cost")):
+        return {"status": "not_evaluable"}
+    n = sum(bool(m[k].get("discordant")) for k in ("under", "cost"))
+    return {"status": "kill" if n > 1 else "pass"}
+
+
+def _m_c4_park_is_kill(resp):
+    return {"c4": "ok"} if D.logprob_ok(resp) else {"c4": "killed", "criterion": 1, "reason": "no_logprobs"}
+
+
 # mutant implementations ------------------------------------------------------------------------
 
 def _m_run_units_start_only(units, do_unit, *, clock, state_path, ollama, own_model, artifact_shas, quiet=None, perf=None):
@@ -1397,11 +1583,23 @@ MUTANTS = [
     ("31_two_void_set_scored_with_fallback", D, "resolve_truth_rules", _m_rules_two_void_fallback, inv_two_voids),
     ("32_unload_skipped_on_exception", D, "run_units", _m_run_units_no_finally, inv_unload_on_exception),
     ("33_foreign_model_unloaded", D, "unload_own", _m_unload_all, inv_foreign_not_unloaded),
+    # D-160 repair round
+    ("34_p95_sync_budget_15000", D, "P95_MAX_MS", 15000.0, inv_p95_sync_budget),
+    ("35_err_kill_0_5", D, "ERR_KILL", 0.5, inv_err_kill),
+    ("36_fallback_decodes_haiku", D, "fallback_scores", lambda rt: {"p_haiku": 0.998, "p_sonnet": 0.001, "p_opus": 0.001},
+     inv_fallback_decode),
+    ("37_crit8_nonevaluable_passes_without_void", D, "_robust_leg_status", _m_leg_nonevaluable_passes, inv_crit8_pending),
+    ("38_c4_tier_not_located_is_a_kill", D, "c4_precheck_status", _m_c4_park_is_kill, inv_c4_park_not_kill),
+    ("39_block_sampled_only_at_start", D, "run_timed_block", _m_block_start_only, inv_block_sampling),
+    ("40_auroc_keeps_fallback_items", D, "exclude_error_rows", lambda rows, scored_ids: list(rows), inv_auroc_excludes_errors),
+    ("41_async_budget_ignored", D, "P95_ASYNC_MAX_MS", float("inf"), inv_p95_async_budget),
+    ("42_memory_budget_raised", D, "MEM_MAX_GIB", 24.0, inv_memory_budget),
+    ("43_tmb_fires_while_pending", D, "mb_trigger", _m_tmb_ignores_pending, inv_tmb_waits),
 ]
 
 
 def test_mutant_list_is_complete():
-    assert len(MUTANTS) == 33 and len({m[0] for m in MUTANTS}) == 33
+    assert len(MUTANTS) == 43 and len({m[0] for m in MUTANTS}) == 43
 
 
 @pytest.mark.parametrize("name,mod,attr,mutant,invariant", MUTANTS, ids=[m[0] for m in MUTANTS])

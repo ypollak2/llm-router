@@ -58,7 +58,7 @@ class Deps:
         self.canonical = kw.get("canonical") or D.canonical_text_default
         self.l2_score = kw.get("l2_score")        # (cand, a) -> callable(text, digest) -> probs
         self.rss_gib = kw.get("rss_gib") or D.peak_rss_gib
-        self.load_sampler = kw.get("load_sampler") or (lambda: os.getloadavg()[0])
+        self.monotonic = kw.get("monotonic") or time.monotonic  # the 60 s in-block sampling schedule
         self.engine_tier = kw.get("engine_tier") or D.engine_alone_tier
         self.ollama = kw.get("ollama")            # (url) -> Ollama-like
 
@@ -422,13 +422,11 @@ def cmd_c4_precheck(a, deps) -> int:
             pass
         finally:
             D.unload_own(ollama, model)
-        ok = D.logprob_ok(resp)
-        status = ({"c4": "ok", "ollama_version": ver} if ok else
-                  {"c4": "killed", "criterion": 1, "reason": "no_logprobs", "ollama_version": ver})
+        status = dict(D.c4_precheck_status(resp), ollama_version=ver)
         write_json(a, "c4_status.json", status)
         counts.update(status)
         emit(status)
-        return S.EXIT_OK if ok else D.EXIT_C4_KILLED
+        return {"ok": S.EXIT_OK, "killed": D.EXIT_C4_KILLED}.get(status["c4"], D.EXIT_PARK)
     return logged(a, "c4-precheck", work)
 
 
@@ -440,10 +438,12 @@ def cmd_c4_run(a, deps) -> int:
         st_path = out_path(a, "c4_status.json")
         status = read_json(st_path) if st_path.exists() else None
         if not status or status.get("c4") != "ok":
-            refusal = {"c4": "killed", "criterion": 1, "reason": (status or {}).get("reason", "no_precheck")}
+            parked = bool(status) and status.get("c4") == "parked_for_coordinator"
+            refusal = ({"c4": "parked_for_coordinator", "reason": status.get("reason")} if parked else
+                       {"c4": "killed", "criterion": 1, "reason": (status or {}).get("reason", "no_precheck")})
             counts.update(refusal)
             emit(refusal)
-            return D.EXIT_C4_KILLED
+            return D.EXIT_PARK if parked else D.EXIT_C4_KILLED
         man = load_manifest(a)
         rules = truth_rules(a)
         truths, _lc = load_truths(a, man["items"], rules)
@@ -496,7 +496,7 @@ def cmd_trigger_mb(a, deps) -> int:
         res = D.mb_trigger(read_json(a.results).get("candidates", {}))
         write_json(a, "mb_trigger.json", res)
         counts.update(res)
-        print("fire" if res["fire"] else "no-fire")
+        print("wait" if res.get("wait") else ("fire" if res["fire"] else "no-fire"))
         return 0
     return logged(a, "trigger-mb", work)
 
@@ -515,7 +515,8 @@ def cmd_fit_modernbert(a, deps) -> int:
         rules = truth_rules(a)
         truths, _lc = load_truths(a, man["items"], rules)
         rows, c = train_rows(cls_eval, man["items"], truths, rules)
-        park = heavy_preamble(deps, None, None)
+        ollama = get_ollama(a, deps)  # D-160: foreign-resident models are checked via /api/ps
+        park = heavy_preamble(deps, ollama, None)
         if park:
             counts.update(park)
             emit(park)
@@ -696,7 +697,7 @@ def cmd_latency(a, deps) -> int:
             counts.update(park)
             emit(park)
             return D.EXIT_PARK
-        ollama = get_ollama(a, deps) if uses_ollama else None
+        ollama = get_ollama(a, deps)  # every candidate: foreign-resident models are checked via /api/ps (D-160)
         own = OLLAMA_MODELS.get(a.candidate)
         park = heavy_preamble(deps, ollama, own)
         if park:
@@ -707,27 +708,25 @@ def cmd_latency(a, deps) -> int:
         sample = D.stratified_sample([x for x in man["items"] if x["kind"] == "real"], a.n)
         texts = text_map(a)
         score = deps.l2_score(a.candidate, a) if deps.l2_score else make_l2_scorer(a.candidate, a, deps, ollama)
-        warm, timings, loads, n_none = [], [], [deps.load_sampler()], 0
+        readers = get_readers(deps, ollama, own)
+        warm = []
         try:
             for k in range(a.warmups):
                 text, digest = texts[sample[k % len(sample)]["item_id"]]
                 t0 = deps.perf()
                 score(text, digest)
                 warm.append((deps.perf() - t0) * 1000.0)
-            for x in sample:
-                text, digest = texts[x["item_id"]]
-                t0 = deps.perf()
-                n_none += score(text, digest) is None
-                timings.append((deps.perf() - t0) * 1000.0)
-                loads.append(deps.load_sampler())
-            model_gib = D.ollama_model_gib(ollama, own) if ollama is not None else None
+            timings, readings, n_none = D.run_timed_block([texts[x["item_id"]] for x in sample], score,
+                                                          take=lambda: D.take_reading(readers), perf=deps.perf,
+                                                          mono=deps.monotonic)
+            model_gib = D.ollama_model_gib(ollama, own) if own else None
         finally:
-            if ollama is not None and own:
+            if own:
                 D.unload_own(ollama, own)
-        invalid = D.evaluate_block(loads)
+        invalid = D.evaluate_block(readings)
         rec = {"start_utc": D.utc_str(now), "valid": invalid is None, "invalid": invalid, "timings_ms": timings,
                "warmup_ms": warm, "n": len(timings), "n_none": n_none, "rss_gib": deps.rss_gib(), "model_gib": model_gib,
-               "readings": park}
+               "readings": readings, "n_readings": len(readings)}
         S.append_jsonl(blocks_path, rec)
         discarded = sum(1 for r in prev if not r.get("valid")) + (0 if rec["valid"] else 1)
         counts.update(valid=rec["valid"], invalid=invalid, n=len(timings), discarded_blocks=discarded)
@@ -801,9 +800,19 @@ def load_oof(a) -> dict:
     return out
 
 
+def shadow_eval_pin(a) -> str | None:
+    try:
+        return read_json(a.pins_static)["pins"]["engine"]["shadow_eval_py_sha256"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def run_cls_eval(a, argv: list[str], out: Path, ok_codes=(0,)) -> tuple[dict | None, int]:
     """cls_eval as a subprocess through its documented argv only (no import coupling beyond truth_for)."""
     cmd = [sys.executable, str(a.cls_eval)] + argv + ["--seed", str(D.SEED), "--boot-b", str(a.boot_b), "--out", str(out)]
+    se_pin = shadow_eval_pin(a)
+    if se_pin:  # the shadow_eval sha pinned (by engine commit) in PINS-STATIC; cls_eval exits 3 on a mismatch
+        cmd += ["--pin-shadow-eval-sha", se_pin]
     r = subprocess.run(cmd, capture_output=True, timeout=CLS_EVAL_TIMEOUT_S, shell=False)
     if r.returncode not in ok_codes:
         raise S.CLSExit(S.EXIT_REFUSE, "cls_eval %s exited %d" % (argv[0], r.returncode))
@@ -832,6 +841,9 @@ def _armb_ok(m: dict, truth_opus_share: float) -> bool:
     return m["haiku_routes"] == 0 or (m["haiku_routes"] >= 10 and (m["haiku_precision"] or 0.0) >= 0.70)
 
 
+T_CONF_METHOD = "in-sample screen (no 7.2/7.3)"  # D-160: stated in the finalist file; cls_eval fitting is not reimplemented
+
+
 def fit_arm_b(a, cand: str, rows: list[dict], tbs: str, truth_opus_share: float) -> dict:
     """Arm A vs arm B for one finalist (PREREG 9.2): t_conf over {0.50..0.95} and the A/B choice are made
     ONLY on arm_choice_items (outside GE3 tune / E2-cal, plus DEV-SYN); both arms are also scored on the
@@ -855,11 +867,11 @@ def fit_arm_b(a, cand: str, rows: list[dict], tbs: str, truth_opus_share: float)
         out[part] = {"n": len(sel), "A": _metrics_of(sc, "A"), "B": {c: _metrics_of(sc, c) for c in cols}}
     ch = out["choice"]
     if not ch.get("n") or ch["A"] is None:
-        return {"arm": "A", "t_conf": None, "detail": out, "note": "no arm-choice items"}
+        return {"arm": "A", "t_conf": None, "t_conf_method": T_CONF_METHOD, "detail": out, "note": "no arm-choice items"}
     okb = [(D.objective_key(m) + (-cols[c],), c) for c, m in ch["B"].items() if m and _armb_ok(m, truth_opus_share)]
     best = min(okb)[1] if okb else None
     arm = D.choose_arm(ch["A"], ch["B"][best] if best else None)
-    return {"arm": arm, "t_conf": cols[best] if best else None, "detail": out}
+    return {"arm": arm, "t_conf": cols[best] if best else None, "t_conf_method": T_CONF_METHOD, "detail": out}
 
 
 def c4_status(a) -> dict | None:
@@ -868,7 +880,7 @@ def c4_status(a) -> dict | None:
 
 
 def candidate_criteria(a, cand, *, floor, score, fit, n_error, n_pool, low_cluster, resemblance_failed, voided_real,
-                       voided_syn=(), n_syn_pool=0):
+                       voided_syn=(), n_syn_pool=0, score_noerr=None):
     lat_p, st_p = out_path(a, "latency_%s.json" % cand), out_path(a, "stability_%s.json" % cand)
     lat = read_json(lat_p) if lat_p.exists() else {}
     st = read_json(st_p) if st_p.exists() else {}
@@ -880,12 +892,14 @@ def candidate_criteria(a, cand, *, floor, score, fit, n_error, n_pool, low_clust
     jr = (score or {}).get("judge_robustness") or {}
     rows = [
         D.criterion0(floor),
-        D.criterion1({"runtime_unavailable": bool(c4 and c4.get("c4") == "killed"), "reason": (c4 or {}).get("reason"),
+        D.criterion1({"runtime_unavailable": bool(c4 and c4.get("c4") == "killed"),
+                      "runtime_parked": bool(c4 and c4.get("c4") == "parked_for_coordinator"), "reason": (c4 or {}).get("reason"),
                       "p95_ms": lat.get("p95_ms"), "worst_block_p95_ms": lat.get("worst_block_p95_ms"),
                       "rss_gib": lat.get("rss_gib"), "model_gib": lat.get("model_gib"), "n_calls": lat.get("n_calls"),
                       "n_blocks": lat.get("n_blocks")}),
         D.criterion2({"n": n_pool, "n_error": n_error}),
-        D.criterion3(((score or {}).get("auroc") or {}).get(cand) or {}),
+        D.criterion3(((score_noerr if score_noerr is not None else score or {}).get("auroc") or {}).get(cand) or {},
+                     with_fallback=((score or {}).get("auroc") or {}).get(cand) or {}),
         D.criterion4(dict(po, admissible=bool(po.get("admissible")) and bool((fit or {}).get("admissible")))),
         D.criterion5({"raw": raw, "raw_re": re_raw, "ratio": (raw / re_raw) if raw is not None and re_raw else None}),
         D.criterion6({"real": sr.get("real"), "syn": sr.get("syn")}, low_cluster=low_cluster,
@@ -947,10 +961,15 @@ def cmd_assemble(a, deps) -> int:
         rows = rows_with(decisions)
         table = write_jsonl(a, "arms_table.jsonl", rows)
         table_sha = write_sha(table)
-        scores = {}
+        scores, scores_noerr = {}, {}
         for c in sorted(oofs):
             scores[c], _ = run_cls_eval(a, ["score", str(table), "--truth-by-source", tbs, "--mode", "dev", "--pooled-oos",
                                             "--arm", c, "--split-rows", "real,syn"], out_path(a, "score_%s.json" % c))
+            if n_error[c]:  # criterion 3 on the items the candidate actually scored (D-160); cls_eval computes it
+                kept = D.exclude_error_rows(rows, set(oofs[c]))
+                tp = write_jsonl(a, "arms_table_noerr_%s.jsonl" % c, kept)
+                scores_noerr[c], _ = run_cls_eval(a, ["score", str(tp), "--truth-by-source", tbs, "--mode", "dev"],
+                                                  out_path(a, "score_noerr_%s.json" % c))
         base_score = next(iter(scores.values()), None)
         if base_score is None:
             base_score, _ = run_cls_eval(a, ["score", str(table), "--truth-by-source", tbs, "--mode", "dev"],
@@ -968,9 +987,10 @@ def cmd_assemble(a, deps) -> int:
             tables[c] = candidate_criteria(a, c, floor=floor, score=scores[c], fit=fits[c], n_error=n_error[c],
                                            n_pool=len(pooled), low_cluster=low_cluster,
                                            resemblance_failed=resemblance_failed, voided_real=voided_real,
-                                           voided_syn=voided_syn, n_syn_pool=len(pooled) - n_real)
+                                           voided_syn=voided_syn, n_syn_pool=len(pooled) - n_real,
+                                           score_noerr=scores_noerr.get(c))
         c4 = c4_status(a)
-        if "C4" not in oofs and c4 and c4.get("c4") == "killed":
+        if "C4" not in oofs and c4 and c4.get("c4") in ("killed", "parked_for_coordinator"):
             tables["C4"] = candidate_criteria(a, "C4", floor=floor, score=None, fit=None, n_error=0, n_pool=len(pooled),
                                               low_cluster=low_cluster, resemblance_failed=resemblance_failed,
                                               voided_real=voided_real)
@@ -987,7 +1007,8 @@ def cmd_assemble(a, deps) -> int:
         for c in sel["finalists"]:
             arm = fit_arm_b(a, c, rows, tbs, truth_opus_share)
             mp = out_path(a, "model_%s.json" % c)
-            finalists.append({"candidate": c, "family": D.FAMILY[c], "arm": arm["arm"], "arm_choice": arm,
+            finalists.append({"candidate": c, "family": D.FAMILY[c], "labels": tables[c]["labels"],
+                              "sync_authority": "async_only" not in tables[c]["labels"], "arm": arm["arm"], "arm_choice": arm,
                               "artifact_sha256": [read_json(mp)["artifact_sha256"]] if mp.exists() else [],
                               "thresholds": {"t_hi": fits[c]["frozen"].get("t_hi"), "t_lo": fits[c]["frozen"].get("t_lo"),
                                              "t_conf": arm["t_conf"]},
@@ -1009,6 +1030,8 @@ def cmd_assemble(a, deps) -> int:
         screen = "NOT_INFORMATIVE" if floor["status"] != "OK" or validity.get("reasons") else "SCREENED"
         cand_summary = {c: {"killed_by": t["killed_by"], "eligible": t["eligible"],
                             "survives_1_4": all(r["status"] in D.PASSING for r in t["rows"] if 1 <= r["n"] <= 4),
+                            "pending_1_4": any(r["status"] == "pending" for r in t["rows"] if 1 <= r["n"] <= 4),
+                            "labels": t["labels"],
                             "auroc": next(r.get("auroc") for r in t["rows"] if r["n"] == 3)} for c, t in tables.items()}
         result = dict(extra, screen=screen, validity_floor=floor, validity_8_1=validity, criteria=tables,
                       candidates=cand_summary, ranked=sel["ranked"], displaced=sel["displaced"], label_counts=lc,

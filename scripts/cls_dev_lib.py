@@ -74,6 +74,8 @@ LABEL_FLAGS = {"guard_free": True, "screening_only": True}
 CRIT_NAMES = {0: "data_validity", 1: "hard_fit", 2: "errors", 3: "signal", 4: "operating_point", 5: "cost",
               6: "shift", 7: "stability", 8: "judge_robustness"}
 P95_MAX_MS = 1500.0
+P95_ASYNC_MAX_MS = 15000.0   # D-160: async budget; above it the candidate is killed
+BLOCK_SAMPLE_S = 60.0        # PREREG 10.2: sample at the start and every 60 s during a timed block
 MEM_MAX_GIB = 12.0
 ERR_KILL = 0.05
 AUROC_MIN = 0.65
@@ -339,18 +341,47 @@ def quiet_gate(readers: dict, *, sleep=time.sleep, interval: float = QUIET_INTER
     return {"ok": reason is None, "reason": reason, "readings": readings}
 
 
-def evaluate_block(samples: list[float]) -> str | None:
-    """A timed block is valid when load1 < 2.0 at start, its mean < 1.5 and no sample >= 3.0. Returns the
-    `invalid:<reason>` string or None."""
-    if not samples:
+def evaluate_block(readings: list[dict]) -> str | None:
+    """PREREG 10.2 block validity over the readings taken at the start and every 60 s during the block:
+    load1 < 2.0 at start, block mean < 1.5, no sample >= 3.0, and at EVERY sample no foreign Ollama model,
+    no foreign `claude -p`, AC power, no thermal throttling. Returns `invalid:<reason>` or None."""
+    if not readings:
         return "invalid:no_samples"
-    if samples[0] >= 2.0:
+    loads = [r["load1"] for r in readings]
+    if loads[0] >= 2.0:
         return "invalid:load_start"
-    if max(samples) >= 3.0:
+    if max(loads) >= 3.0:
         return "invalid:load_sample"
-    if sum(samples) / len(samples) >= 1.5:
+    if sum(loads) / len(loads) >= 1.5:
         return "invalid:load_mean"
+    for r in readings:
+        if r.get("foreign_models"):
+            return "invalid:foreign_model"
+        if r.get("claude_p"):
+            return "invalid:claude_p"
+        if not r.get("on_ac", True):
+            return "invalid:not_on_ac"
+        if r.get("throttled"):
+            return "invalid:thermal"
     return None
+
+
+def run_timed_block(calls: list, score, *, take, perf, mono, interval: float = BLOCK_SAMPLE_S) -> tuple[list, list, int]:
+    """Time each call with perf around the whole score(text, digest); take a reading at the start, between
+    calls whenever `interval` seconds (monotonic) have passed, and at the end. Readings are never taken
+    inside a timed call. Returns (timings_ms, readings, n_none)."""
+    readings = [take()]
+    last = mono()
+    timings, n_none = [], 0
+    for text, digest in calls:
+        if mono() - last >= interval:
+            readings.append(take())
+            last = mono()
+        t0 = perf()
+        n_none += score(text, digest) is None
+        timings.append((perf() - t0) * 1000.0)
+    readings.append(take())
+    return timings, readings, n_none
 
 
 def local_now() -> datetime.datetime:
@@ -380,7 +411,9 @@ def run_units(units: list, do_unit, *, clock, state_path, ollama, own_model: str
               artifact_shas: dict, quiet=None, perf=time.perf_counter) -> dict:
     """Heavy-work loop: the quiet gate first (also on every resume), the night rule before EVERY unit,
     resume state after every unit, and the harness's own model unloaded on every way out (try/finally,
-    including exceptions). Returns {"status": "done"|"parked", "reason", "done"}."""
+    including exceptions). Returns {"status": "done"|"parked", "reason", "done"}. Resume scope: a resume is
+    refused (exit 9) when `artifact_shas` differs from the saved state; the caller decides what it covers
+    (c4-run: the manifest sha; the hard reference arms: the hash of the item-id list)."""
     sp = Path(state_path)
     state = json.loads(sp.read_text(encoding="utf-8")) if sp.exists() else {}
     if state and state.get("artifact_shas") != artifact_shas:
@@ -531,7 +564,9 @@ def primary_truths(cls_eval, items: list[dict], truths: dict, rules: dict) -> di
 # ---------------------------------------------------------------------------------------------
 
 def time_filter(ts: datetime.datetime | None, t0: datetime.datetime, cutoff: datetime.datetime) -> str | None:
-    """Drop reason, or None: no timestamp; at or after T0 (amend4 window); after the P17D cutoff."""
+    """Drop reason, or None: at or after T0 (amend4 window); after the P17D cutoff; or NO timestamp. The
+    PREREG has no rule for a record without a timestamp; B0 drops it (it cannot be shown to precede T0) and
+    counts it as n_no_timestamp_dropped, so the attach step's misses are visible."""
     if ts is None:
         return "n_no_timestamp_dropped"
     if ts >= t0:
@@ -1013,6 +1048,34 @@ def logprob_ok(resp: dict) -> bool:
     return top is not None and bool(tier_logprobs(top))
 
 
+def logprobs_field_ok(resp: dict) -> bool:
+    """The response carries a non-empty logprobs list whose entries have a token and a finite logprob."""
+    lp = resp.get("logprobs") if isinstance(resp, dict) else None
+    return (isinstance(lp, list) and bool(lp)
+            and all(isinstance(e, dict) and isinstance(e.get("token"), str) and _finite(e.get("logprob")) for e in lp))
+
+
+def logprob_shape(resp: dict) -> dict:
+    """Counts and shapes only (never token text): for a coordinator to judge a not-located tier token."""
+    lp = resp.get("logprobs") if isinstance(resp, dict) else None
+    lp = lp if isinstance(lp, list) else []
+    tops = [e.get("top_logprobs") for e in lp if isinstance(e, dict)]
+    return {"n_tokens": len(lp), "n_with_top": sum(1 for t in tops if isinstance(t, list) and t),
+            "top_len_max": max((len(t) for t in tops if isinstance(t, list)), default=0),
+            "has_message": bool(isinstance(resp, dict) and (resp.get("message") or {}).get("content"))}
+
+
+def c4_precheck_status(resp: dict) -> dict:
+    """D-160: no logprobs field (or malformed/non-finite) -> killed by criterion 1 (no_logprobs_field);
+    logprobs present but the tier token not located -> parked_for_coordinator (tier_token_not_located,
+    counts and shapes only), NOT a kill; else ok."""
+    if not logprobs_field_ok(resp):
+        return {"c4": "killed", "criterion": 1, "reason": "no_logprobs_field"}
+    if not logprob_ok(resp):
+        return {"c4": "parked_for_coordinator", "reason": "tier_token_not_located", "shape": logprob_shape(resp)}
+    return {"c4": "ok"}
+
+
 def c4_features_from_response(resp: dict):
     """lp_haiku, lp_sonnet, lp_opus (softmax-renormalised over the three tier tokens), or None when the
     response has no usable logprobs. There is NO fallback to the answer's argmax or hard verdict."""
@@ -1047,6 +1110,10 @@ def mb_trigger(results: dict) -> dict:
     T-primary opus) among those survivors is below 0.75. results: {cand: {"survives_1_4", "auroc"}}."""
     cands = {k: v for k, v in results.items() if k in ("C1", "C2", "C4")}
     survivors = sorted(k for k, v in cands.items() if v.get("survives_1_4"))
+    pending = sorted(k for k, v in cands.items() if v.get("pending_1_4"))
+    if pending and not survivors:  # D-160 nit: no "no survivor" verdict while criteria 1-4 are still pending
+        return {"fire": False, "wait": True, "reasons": ["criteria_1_4_pending"], "pending": pending,
+                "survivors": [], "best_auroc": None}
     aurocs = [cands[k]["auroc"] for k in survivors if cands[k].get("auroc") is not None]
     best = max(aurocs) if aurocs else None
     reasons = []
@@ -1054,7 +1121,8 @@ def mb_trigger(results: dict) -> dict:
         reasons.append("no_survivor")
     if best is None or best < MB_BASELINE_AUROC:
         reasons.append("best_auroc_below_0.75")
-    return {"fire": bool(reasons), "reasons": reasons, "survivors": survivors, "best_auroc": best}
+    return {"fire": bool(reasons), "wait": False, "reasons": reasons, "survivors": survivors, "best_auroc": best,
+            "pending": pending}
 
 
 def system_hf_cache() -> Path:
@@ -1293,19 +1361,24 @@ def bootstrap_p95_ci(values: list[float], B: int = 2000, seed: int = SEED) -> tu
 
 
 def stratified_sample(items: list[dict], n: int, seed: int = SEED) -> list[dict]:
-    """n items stratified by length band (proportional, at least one per non-empty band), seed 20261017."""
+    """Exactly min(n, len(items)) items stratified by length band with largest-remainder allocation (ties by
+    band order), seed 20261017."""
     rng = random.Random(seed)
     by = {b: sorted((x for x in items if x["band"] == b), key=lambda x: x["item_id"]) for b in BANDS}
     total = len(items)
+    n = min(n, total)
+    if n <= 0:
+        return []
+    quota = {b: n * len(by[b]) / total for b in BANDS}
+    alloc = {b: int(math.floor(quota[b])) for b in BANDS}
+    for b in sorted(BANDS, key=lambda b: (-(quota[b] - alloc[b]), BANDS.index(b)))[:n - sum(alloc.values())]:
+        alloc[b] += 1
     out = []
     for b in BANDS:
-        if not by[b]:
-            continue
-        k = max(1, round(n * len(by[b]) / total))
         pool = list(by[b])
         rng.shuffle(pool)
-        out += pool[:k]
-    return out[:n]
+        out += pool[:alloc[b]]
+    return out
 
 
 def latency_summary(blocks: list[list[float]], warmups: list[float], cold_ms: float | None, B: int = 2000) -> dict:
@@ -1364,6 +1437,11 @@ def fallback_scores(rules_tier: str | None) -> dict:
     return {"p_haiku": 0.001, "p_sonnet": 0.998 if t == "sonnet" else 0.001, "p_opus": 0.998 if t == "opus" else 0.001}
 
 
+def exclude_error_rows(rows: list[dict], scored_ids: set) -> list[dict]:
+    """The table rows a candidate actually scored (its fallback/error items removed), for criterion 3."""
+    return [r for r in rows if r["item_id"] in scored_ids]
+
+
 def build_arms_row(item: dict, *, truths: dict, preds: dict, scores: dict, weight: float) -> dict:
     vals = [t for t in truths.values() if t]
     contested = (len(set(vals)) > 1) if len(vals) == len(JUDGES) else None
@@ -1387,18 +1465,30 @@ def criterion0(floor: dict) -> dict:
 
 
 def criterion1(m: dict) -> dict:
-    """Hard fit: pooled p95 > 1500 ms, or peak resident memory (process RSS + Ollama model size) > 12 GiB,
-    or the runtime/logprob build unavailable. No latency file yet: pending."""
+    """Hard fit (D-160): the runtime/logprob build unavailable -> kill (runtime); peak resident memory
+    (process RSS + Ollama model size) > 12 GiB -> kill (memory); pooled p95 > 15000 ms -> kill (slow beyond
+    the async budget); 1500 < p95 <= 15000 with memory and runtime ok -> async_only (a finalist only with
+    that label, no sync authority). No latency file yet: pending. `fired` names the conditions."""
     if m.get("runtime_unavailable"):
-        return _row(1, "kill", runtime_unavailable=True, reason=m.get("reason"))
+        return _row(1, "kill", fired=["runtime"], runtime_unavailable=True, reason=m.get("reason"))
+    if m.get("runtime_parked"):
+        return _row(1, "pending", fired=[], runtime_parked=True, reason=m.get("reason"))
     p95, rss, model_gib = m.get("p95_ms"), m.get("rss_gib"), m.get("model_gib")
     if p95 is None:
-        return _row(1, "pending", p95_ms=None)
+        return _row(1, "pending", fired=[], p95_ms=None)
     mem = (rss or 0.0) + (model_gib or 0.0)
-    slow, heavy = p95 > P95_MAX_MS, mem > MEM_MAX_GIB
-    return _row(1, "kill" if slow or heavy else "pass", p95_ms=p95, worst_block_p95_ms=m.get("worst_block_p95_ms"),
+    fired = []
+    if mem > MEM_MAX_GIB:
+        fired.append("memory")
+    if p95 > P95_ASYNC_MAX_MS:
+        fired.append("slow_beyond_async_budget")
+    elif p95 > P95_MAX_MS:
+        fired.append("slow")
+    status = "kill" if ("memory" in fired or "slow_beyond_async_budget" in fired) else ("async_only" if fired else "pass")
+    return _row(1, status, fired=fired, p95_ms=p95, worst_block_p95_ms=m.get("worst_block_p95_ms"),
                 peak_mem_gib=mem, rss_gib=rss, model_gib=model_gib, n_calls=m.get("n_calls"),
-                n_blocks=m.get("n_blocks"), runtime_unavailable=False)
+                n_blocks=m.get("n_blocks"), runtime_unavailable=False, sync_budget_ms=P95_MAX_MS,
+                async_budget_ms=P95_ASYNC_MAX_MS)
 
 
 def criterion2(m: dict) -> dict:
@@ -1407,13 +1497,18 @@ def criterion2(m: dict) -> dict:
     return _row(2, "pending" if rate is None else ("kill" if rate > ERR_KILL else "pass"), error_rate=rate, n_items=n, n_error=e)
 
 
-def criterion3(m: dict) -> dict:
+def criterion3(m: dict, with_fallback: dict | None = None) -> dict:
+    """Signal on real DEV with fallback (error) items EXCLUDED (D-160): AUROC < 0.65 or its session-bootstrap
+    lower bound < 0.55 kills. The AUROC with the fallback items included is reported beside it."""
+    wf = {k: (with_fallback or {}).get(k) for k in ("auroc", "ci95", "n")} if with_fallback is not None else None
     pt, ci = m.get("auroc"), m.get("ci95") or [None, None]
     if pt is None:
-        return _row(3, "kill", auroc=None, auroc_ci95=ci, basis=m.get("basis"), n_scored=m.get("n"))
+        return _row(3, "kill", auroc=None, auroc_ci95=ci, basis=m.get("basis"), n_scored=m.get("n"),
+                    population="real, fallback items excluded", auroc_with_fallback=wf)
     lo = ci[0]
     kill = pt < AUROC_MIN or lo is None or lo < AUROC_LO_MIN
-    return _row(3, "kill" if kill else "pass", auroc=pt, auroc_ci95=ci, basis=m.get("basis"), n_scored=m.get("n"))
+    return _row(3, "kill" if kill else "pass", auroc=pt, auroc_ci95=ci, basis=m.get("basis"), n_scored=m.get("n"),
+                population="real, fallback items excluded", auroc_with_fallback=wf)
 
 
 def criterion4(m: dict) -> dict:
@@ -1456,11 +1551,13 @@ def criterion7(m: dict) -> dict:
 
 
 def _robust_leg_status(m, voided: list, pair: tuple) -> dict:
+    """not_evaluable (passing) ONLY when a judge of the pair is voided (r3-2, D-160); any other
+    non-evaluable leg is pending (blocks eligibility)."""
     v = [j for j in voided if j in pair]
     if v:
         return {"status": "not_evaluable", "voided": v}
     if not m or any(not isinstance(m.get(k), dict) or m[k].get("evaluable") is False for k in ("under", "cost")):
-        return {"status": "not_evaluable", "detail": m}
+        return {"status": "pending", "detail": m}
     discordant = sum(bool(m[k].get("discordant")) for k in ("under", "cost"))
     return {"status": "kill" if discordant > 1 else "pass", "discordant": discordant, "detail": m}
 
@@ -1471,13 +1568,21 @@ def criterion8(m: dict | None, *, voided: list, syn: dict | None = None, voided_
     T-sonnet. A leg kills when its signs are discordant on more than 1 of the 2 metrics; a leg whose judge
     is voided is not evaluable (r3-2). Nothing here recomputes the floor."""
     real = _robust_leg_status(m, list(voided), ("opus", "gpt"))
-    synl = _robust_leg_status(syn, list(voided_syn), ("gpt", "sonnet")) if syn is not None else {"status": "not_evaluable"}
+    synl = (_robust_leg_status(syn, list(voided_syn), ("gpt", "sonnet")) if syn is not None
+            else {"status": "not_applicable", "note": "no DEV-SYN rows in the table"})
     legs = (real["status"], synl["status"])
-    status = "kill" if "kill" in legs else ("pass" if "pass" in legs else "not_evaluable")
+    if "kill" in legs:
+        status = "kill"
+    elif "pending" in legs:
+        status = "pending"
+    elif "pass" in legs:
+        status = "pass"
+    else:
+        status = "not_evaluable"
     return _row(8, status, real_leg=real, syn_leg=synl, voided=[j for j in voided if j in ("opus", "gpt")])
 
 
-PASSING = {"pass", "report_only", "not_evaluable"}
+PASSING = {"pass", "report_only", "not_evaluable", "async_only"}
 
 
 def criteria_table(rows: list[dict]) -> dict:
@@ -1487,7 +1592,8 @@ def criteria_table(rows: list[dict]) -> dict:
     killed = next((r["n"] for r in table if r["status"] == "kill"), None)
     eligible = killed is None and all(r["status"] in PASSING for r in table)
     return {"rows": table, "killed_by": killed, "eligible": eligible,
-            "pending": [r["n"] for r in table if r["status"] == "pending"], **LABEL_FLAGS}
+            "pending": [r["n"] for r in table if r["status"] == "pending"],
+            "labels": ["async_only"] if any(r["status"] == "async_only" for r in table) else [], **LABEL_FLAGS}
 
 
 FAMILY = {"C1": "small_learned_head", "C2": "small_learned_head", "C3": "small_learned_head", "C4": "logprob_llm"}
