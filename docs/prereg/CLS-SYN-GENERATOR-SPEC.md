@@ -234,7 +234,7 @@ NOT INFORMATIVE; 40-79, "low power" label.
   the AUROC numbers of DEV-SYN** (no TEST-SYN exists yet). **No discriminator feature, weight, top term, error case
   or real text is shown to the amendment author.** At most **3 spec versions in all** (v1, v2, v3); each version
   and each DEV-SYN set is hashed and logged. The first version that passes is **frozen as vN**.
-* **Pins.** The v1 generator files are in `PINS-STATIC.json` (frozen with this spec). Every amendment (v2, v3) and
+* **Pins.** The v1 generator files are in `PINS-STATIC.json` (frozen with this spec). Generator files are versioned by name (e.g. `tmpl_gpt.v1.txt`, `tmpl_gpt.v2.txt`). The v1 files are never edited. An amendment creates new-named files and a PINS-RUN entry for them. Every amendment (v2, v3) and
   every `gen_config.json` writes a new **`PINS-RUN`** entry (hashed, logged before use, never overwritten); the
   frozen vN's files are pinned there before TEST-SYN is generated.
 * **TEST-SYN is generated once under vN**, by the TEST-SYN agent, before any DEV screening. If it fails its own

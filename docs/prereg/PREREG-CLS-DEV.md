@@ -680,7 +680,7 @@ percent ($16)**. OpenRouter only under section 3.1, shared $20 cap (D-128), per-
 | CD-22 | `.env` detector | keys matching KEY\|TOKEN\|SECRET\|PASSWORD\|PASS, length >= 8, empty skipped (D-134/135) |
 | CD-23 | Real digest | capped at 400 characters |
 | CD-24 | PINS-RUN append-only hash chain (each entry carries the previous entry's sha) | accepted by the coordinator |
-| CD-25 | Single-turn `claude -p` | no `--max-turns` (not in 2.1.299); an empty `--tools ""` list means no tools, so the call is single-turn print |
+| CD-25 | Single-turn `claude -p` | no `--max-turns` (not in 2.1.299); an empty `--tools ""` list means no tools, so the call is single-turn print; the pins record this (the recorded `claude -p` help lines and the `--tools ""` argv) |
 
 ## 15. Freeze record
 
@@ -706,7 +706,7 @@ CLI versions and the **recorded `--help` output** (sha256 and every flag line th
 `--output-format`, `--model`; for `codex exec` `-s`, `-C`, `--skip-git-repo-check`, `--ephemeral`), so a flag
 the installed build lacks **blocks the freeze**; the model ids used for judging and generating; and the **v1**
 generator files (templates, 12 x 5 mask, project list, intent phrases, meta patterns; spec appendices A-D, hashed
-as files). A STATIC pin that cannot be computed is a freeze blocker, not an omission.
+as files). Generator files are versioned by name (e.g. `tmpl_gpt.v1.txt`, `tmpl_gpt.v2.txt`). The v1 files are never edited. An amendment creates new-named files and a PINS-RUN entry for them. A STATIC pin that cannot be computed is a freeze blocker, not an omission.
 
 **`PINS-RUN` addenda** (built by `pins --run`, each entry hashed and appended to `pins_run.jsonl` and logged
 **before its first use**; not freeze blockers, because their inputs do not exist at the freeze): the length
