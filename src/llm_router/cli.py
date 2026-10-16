@@ -34,6 +34,7 @@ Usage:
     llm-router provider unban <name>  — lift that skip now (or --all)
     llm-router inventory [--json]     — models this machine can run: route, path, quota, privacy
     llm-router map [--json]           — the one resource map: seats, local models, keys, quota, priority
+    llm-router mode [advise|route]    — routing authority: route (default) or advise (the proxy forwards the model you asked for and only logs its proposal)
     llm-router calibrate [--models M] [--allow-paid] — measure per-model capability (local-only by default)
     llm-router resolve --tier T [--needs tools,vision] — what the resolver would pick (inspection only)
     llm-router semantic status  — project scope, derived index, and selected arm
@@ -883,6 +884,7 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "gateway",
         "proxy",
         "proxy-shim",
+        "mode",
         "pi",
         "invoice",
         "cp",
@@ -925,7 +927,8 @@ _HELP_FLAGS = ("-h", "--help")
 # position (argparse, or an explicit check over all args).
 _OWN_HELP_ANYWHERE = frozenset({
     "audit", "calibrate", "cp", "dev-refresh", "gc", "install", "inventory", "invoice",
-    "judge", "kpi", "last", "map", "migrate", "mod", "northstar", "pi", "policy", "prefer", "proxy",
+    "judge", "kpi", "last", "map", "migrate", "mod", "mode", "northstar", "pi", "policy", "prefer",
+    "proxy",
     "quickstart", "replay", "resolve", "retrospect", "run", "serve", "snapshot", "stats",
     "statusline", "team-sync", "test-delta", "verify", "welcome",
 })
@@ -1151,6 +1154,9 @@ def main() -> None:
     elif args and args[0] == "prefer":
         from llm_router.commands.prefer import cmd_prefer
         sys.exit(cmd_prefer(args[1:]))
+    elif args and args[0] == "mode":
+        from llm_router.commands.mode import cmd_mode
+        sys.exit(cmd_mode(args[1:]))
     elif args and args[0] == "calibrate":
         # Short per-model capability probes; local-only unless --allow-paid.
         from llm_router.commands.calibrate import cmd_calibrate
