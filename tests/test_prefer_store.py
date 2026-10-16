@@ -288,3 +288,62 @@ def test_stored_rule_json_shape(path):
     (rule,) = user_rules.read_rules(path)
     assert rule == {"id": "p1", **ORDER, "text": "codex before claude"}
     assert json.loads(json.dumps(rule)) == rule
+
+
+def test_rewrite_of_an_existing_block_in_a_crlf_file_stays_crlf(path):
+    path.write_bytes(USER_CRLF)
+    user_rules.add_rules([ORDER], "first")
+    user_rules.add_rules([BAN], "second")         # rewrite of an existing block
+    user_rules.remove_rule("p1")                  # and another
+    data = path.read_bytes()
+    assert b"\r\n" in data and b"\n" not in data.replace(b"\r\n", b"")
+    assert data.startswith(USER_CRLF)
+    assert [r["id"] for r in user_rules.read_rules(path)] == ["p2"]
+
+
+MALFORMED = {
+    "invalid-json": b'preferences: [ {"id": "p1", oops ]',
+    "extra-key": b'preferences: []\nother: 1',
+    "mapping": b"preferences: {}",
+    "list-of-ints": b"preferences: [1, 2]",
+}
+
+
+@pytest.mark.parametrize("name", sorted(MALFORMED))
+def test_malformed_block_is_a_clean_refusal_everywhere(path, name, capsys, monkeypatch):
+    import asyncio
+
+    from llm_router.commands.prefer import admin_prefer, cmd_prefer
+    from llm_router.tools.setup import llm_setup
+
+    original = (b"# mine\n" + user_rules._BEGIN + b"\n" + MALFORMED[name] + b"\n" + user_rules._END + b"\n")
+    path.write_bytes(original)
+    monkeypatch.setattr(failopen, "record", lambda *a, **k: None)
+    with pytest.raises(user_rules.StoreError, match="unreadable"):
+        user_rules.add_rules([ORDER], "t")
+    with pytest.raises(user_rules.StoreError, match="unreadable"):
+        user_rules.load_rules(path)
+    assert user_rules.read_rules(path) == []                       # readers stay fail-open
+    assert cmd_prefer(["--yes", "no openai"]) == 2
+    assert "unreadable" in capsys.readouterr().err
+    assert cmd_prefer(["--list"]) == 2
+    err = capsys.readouterr()
+    assert "unreadable" in err.err and "No stored preferences" not in err.out + err.err
+    assert cmd_prefer(["--yes", "--clear"]) == 2
+    assert "unreadable" in asyncio.run(llm_setup(action="prefer", text="no openai", confirm=True))
+    assert "unreadable" in admin_prefer("no openai")
+    assert "unreadable" in admin_prefer('{"text": "no openai", "confirm": "abc"}')
+    assert path.read_bytes() == original
+
+
+def test_mutant_forcing_lf_on_rewrite_turns_the_crlf_test_red(path, monkeypatch):
+    def crlf_survives() -> bool:
+        path.write_bytes(USER_CRLF)
+        user_rules.add_rules([ORDER], "first")
+        user_rules.add_rules([BAN], "second")
+        data = path.read_bytes()
+        return b"\n" not in data.replace(b"\r\n", b"")
+
+    assert crlf_survives()
+    monkeypatch.setattr(user_rules, "_newline", lambda data: "\n")
+    assert not crlf_survives(), "mutant survived: rewrite newline style is not checked"

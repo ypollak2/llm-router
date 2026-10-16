@@ -84,20 +84,34 @@ def _parse_block(block: bytes) -> list[dict]:
     return rules
 
 
-def read_rules(path: Path | None = None) -> list[dict]:
-    """Stored rules, or [] when absent or unreadable (fail-open, recorded)."""
+def _block_rules(block: bytes) -> list[dict]:
+    try:
+        return _parse_block(block)
+    except ValueError as exc:  # JSONDecodeError and UnicodeDecodeError are ValueErrors
+        raise StoreError(f"the managed preferences block in routing.yaml is unreadable ({exc}); "
+                         "fix it by hand or remove the block") from exc
+
+
+def load_rules(path: Path | None = None) -> list[dict]:
+    """Stored rules; [] when there is no file or block. Raises StoreError when the
+    block is damaged or unreadable (writers and `--list` must not mistake that
+    for "no preferences")."""
     target = path or routing_path()
     try:
         data = target.read_bytes()
     except FileNotFoundError:
         return []
     except OSError as exc:
-        failopen.record("CHZ-FO-USER-RULES-READ", exc)
-        return []
+        raise StoreError(f"routing.yaml cannot be read: {exc}") from exc
+    span = _find_block(data)
+    return [] if span is None else _block_rules(data[span[0]:span[1]])
+
+
+def read_rules(path: Path | None = None) -> list[dict]:
+    """Stored rules, or [] when absent or unreadable (fail-open, recorded)."""
     try:
-        span = _find_block(data)
-        return [] if span is None else _parse_block(data[span[0]:span[1]])
-    except (StoreError, ValueError) as exc:  # json.JSONDecodeError is a ValueError
+        return load_rules(path)
+    except StoreError as exc:
         failopen.record("CHZ-FO-USER-RULES-READ", exc)
         return []
 
@@ -222,7 +236,7 @@ def mutate_rules(change: Callable[[list[dict]], list[dict]], path: Path | None =
         if _OUTSIDE_KEY.search(outside):
             raise StoreError("routing.yaml already has a top-level `preferences:` key outside "
                              "the managed block; rename or remove it first (nothing was written)")
-        current = _parse_block(data[span[0]:span[1]]) if span else []
+        current = _block_rules(data[span[0]:span[1]]) if span else []
         new_rules = change(list(current))
         if span:
             nl = _newline(data[span[0]:span[1]])

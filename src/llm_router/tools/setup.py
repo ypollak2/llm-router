@@ -177,6 +177,8 @@ async def llm_setup(
     provider: str | None = None,
     api_key: str | None = None,
     text: str | None = None,
+    # `confirm` belongs to action="prefer" only; every other action (install_runtime
+    # included) ignores it, so a model-set flag never approves anything else.
     confirm: bool = False,
 ) -> str:
     """Set up and manage API providers, hooks, and routing enforcement.

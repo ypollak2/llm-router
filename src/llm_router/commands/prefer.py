@@ -38,7 +38,11 @@ def evaluate(text: str) -> tuple[list[dict], str | None, list[str]]:
     result = prefer_grammar.parse(text)
     if result.refusal:
         return [], result.refusal, []
-    reason = user_rules.check_conflicts(user_rules.read_rules(), result.rules)
+    try:
+        stored = user_rules.load_rules()
+    except user_rules.StoreError as exc:
+        return [], f"Cannot read the stored preferences: {exc}", []
+    reason = user_rules.check_conflicts(stored, result.rules)
     if reason:
         return [], f"Conflicts with the stored preferences: {reason}.", []
     return result.rules, None, result.echo
@@ -59,7 +63,7 @@ def _confirm(question: str, assume_yes: bool) -> int | None:
 
 
 def _list() -> int:
-    rules = user_rules.read_rules()
+    rules = user_rules.load_rules()  # StoreError (block unreadable) is reported by the caller
     if not rules:
         print("No stored preferences.")
         return 0
@@ -80,7 +84,7 @@ def cmd_prefer(args: list[str]) -> int:
         if "--list" in rest:
             return _list()
         if "--clear" in rest:
-            if not user_rules.read_rules():
+            if not user_rules.load_rules():
                 print("No stored preferences.")
                 return 0
             if dry:
@@ -145,7 +149,7 @@ def _confirm_token(text: str) -> str:
     """
     import hashlib
 
-    basis = prefer_grammar.normalize(text) + json.dumps(user_rules.read_rules(), sort_keys=True)
+    basis = prefer_grammar.normalize(text) + json.dumps(user_rules.load_rules(), sort_keys=True)
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:12]
 
 
