@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 59
+# llm_router-hook-version: 60
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 59"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 60"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -2808,9 +2808,6 @@ def _safe_sid(session_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", session_id or "") or "unknown"
 _PENDING_ROUTE_TTL_SEC = 3600  # 1h TTL — survives context compaction; auto-route resets on each new prompt
 
-# A strict mode for users protecting Claude Code subscription quota. In this
-# mode the hook is the routing boundary: native Claude execution is opt-in.
-_EXPLICIT_CLAUDE_PREFIX_RE = re.compile(r"^\s*(?:claude|native|opus)\s*:\s*", re.IGNORECASE)
 
 
 def _zero_claude_enabled() -> bool:
@@ -4815,12 +4812,65 @@ def main() -> None:
                         f"injected (session prompt #{_prompt_n})"
                     )
 
-    # Native use is always explicit in zero-Claude mode. The prefix remains in
-    # the prompt as a visible record that the user chose quota-consuming work.
-    if zero_claude and _EXPLICIT_CLAUDE_PREFIX_RE.match(prompt):
-        _debug_log(f"[INVOCATION {invocation_id:.3f}] ZERO_CLAUDE EXPLICIT_NATIVE")
+    # Prefix beats classifier, learned routes, context inheritance, pressure
+    # downgrade and Q&A-quiet. It does not beat enforce off/shadow, kill switches,
+    # zero-claude_edit, the sidecar fast path, or hard budget caps.
+    _pfx = None
+    _forced = None
+    _forced_provider = None
+    _prefix_refusal = None
+    _original_prompt = prompt
+    try:
+        from llm_router import prefixes
+
+        _pfx = prefixes.parse(prompt)
+        if _pfx is not None:
+            _name = _pfx.name
+            if _pfx.is_claude:
+                # The hook cannot switch the host model: opus/sonnet/haiku
+                # therefore choose native Claude here, exactly like claude:.
+                _decided = "claude"
+                _provider = "claude"
+            elif _pfx.forces_external:
+                _provider = "ollama" if _name == "local" else "codex"
+                if _name == "local":
+                    from llm_router.model_discovery import first_installed
+                    _available = first_installed() is not None
+                    _unavailable = "no healthy local model (Ollama unreachable or no model installed)"
+                else:
+                    from llm_router.codex_agent import is_codex_available
+                    _available = is_codex_available()
+                    _unavailable = "Codex unavailable"
+                _decided = _name if _available else f"refused:no_{_name}"
+                if not _available:
+                    _prefix_refusal = (
+                        f"[llm_router] `{_name}:` refused: {_unavailable}; "
+                        "not sent to Claude."
+                    )
+            if _pfx.is_claude or _prefix_refusal:
+                log_routing_decision(
+                    task_type="query", complexity="moderate",
+                    classification_method="prefix", selected_model=_name,
+                    provider=_provider, notes=f"user prefix {_name}:",
+                )
+            prefixes.record_example(
+                _pfx.stripped, forced=_name, decided=_decided, door="hook")
+            if _pfx.forces_external:
+                prompt = _pfx.stripped
+                _forced, _forced_provider = _name, _provider
+    except Exception as exc:
+        from llm_router import failopen as _fo
+        _fo.record("LR-FO-HOOK-PREFIX", exc)
+        _pfx = _forced = _forced_provider = _prefix_refusal = None
+        prompt = _original_prompt
+    if _pfx is not None and _pfx.is_claude:
+        _debug_log(f"[INVOCATION {invocation_id:.3f}] EXPLICIT_NATIVE {_pfx.name}")
         _coverage_unobserved("EXPLICIT_CLAUDE_PREFIX")
         _consume_stale_pending_before_exit(session_id)
+        sys.exit(0)
+    if _prefix_refusal:
+        _consume_stale_pending_before_exit(session_id)
+        json.dump({"decision": "block", "reason": _prefix_refusal}, sys.stdout)
         sys.exit(0)
 
     # ── v6.0 Visibility: Initialize HUD session state ─────────────────────────
@@ -5006,6 +5056,9 @@ def main() -> None:
             # Save classification so the next turn can inherit if it's a continuation
             _save_last_route(session_id, task_type, complexity, tool)
 
+    if _forced:
+        method = f"prefix:{_forced}"
+
     # ── Claude Code routing: Always use MCP tools (free-first chain) ──────────
     # v6.11.1: Prioritize Ollama → Codex → OpenAI → Gemini over subscription Sonnet
     # This ensures maximum cost savings by routing through available models first.
@@ -5024,7 +5077,7 @@ def main() -> None:
         # Only override routing to /model if pressure is CRITICAL (>=95%).
         # Otherwise always use MCP tools which have better cost optimization.
         _critical = _critical_pressure_reading(pressure)
-        if _critical is not None:
+        if _critical is not None and not _forced:
             # Critical pressure: use direct subscription fallback
             if complexity == "complex":
                 # Complex tasks truly need Opus
@@ -5103,8 +5156,8 @@ def main() -> None:
         _conversational_task = True
     _qa_routing_on = os.environ.get(
         "LLM_ROUTER_QA_ROUTING", "off").strip().lower() in ("1", "on", "true", "yes")
-    _qa_quiet = _qa_task and not _qa_routing_on
-    _conversational_quiet = _conversational_task and not _qa_routing_on
+    _qa_quiet = _qa_task and not _qa_routing_on and not _forced
+    _conversational_quiet = _conversational_task and not _qa_routing_on and not _forced
     if _qa_quiet or _conversational_quiet or _resolved_enforce in ("off", "shadow", "observe"):
         _enforce_mode = "shadow"
     elif _resolved_enforce in ("advise", "advisory"):
@@ -5461,6 +5514,16 @@ def main() -> None:
                         f"[INVOCATION {invocation_id:.3f}] FREE-TIER DRAFT: "
                         f"dropped {_before - len(_direct_chain)} paid provider(s) from draft chain"
                     )
+
+            if _forced:
+                try:
+                    _direct_chain = [
+                        entry for entry in _direct_chain
+                        if entry.provider == _forced_provider
+                    ]
+                except Exception as exc:
+                    from llm_router import failopen as _fo
+                    _fo.record("LR-FO-HOOK-PREFIX", exc)
 
             _debug_log(
                 f"[INVOCATION {invocation_id:.3f}] DIRECT: zone={_zone} "
@@ -6078,6 +6141,20 @@ def main() -> None:
                 f"route WITH context via {_ctx_call}. Never relay a context-free draft."
             )
         indicator = f"🧠 {task_type}/{complexity} → {_ctx_disp} · context-dependent [via {method}]"
+
+    if _forced:
+        try:
+            _target = "a local model" if _forced == "local" else "Codex"
+            _prefix_call = f'llm(task="auto", prompt="{_forced}: <user\'s request>")'
+            directive = (
+                f"🎯 USER PREFIX `{_forced}:` — the user forced this request onto "
+                f"{_target}. Call {_prefix_call} (the MCP llm() door honours the "
+                "prefix and strips it) and do not answer it yourself.\n"
+                + directive
+            )
+        except Exception as exc:
+            from llm_router import failopen as _fo
+            _fo.record("LR-FO-HOOK-PREFIX", exc)
 
     # ── Per-session paid-API spend cap (#3) ──────────────────────────────────────
     # Drafts are already free-only; this is the backstop for the rest of routing.

@@ -14,7 +14,7 @@ import contextlib
 
 from mcp.server.mcpserver import Context
 
-from llm_router import call_identity
+from llm_router import call_identity, failopen, prefixes
 
 from llm_router.tools.admin import (
     llm_budget,
@@ -186,25 +186,84 @@ async def llm(
     llm_query/analyze/code/research/generate; those remain as aliases underneath."""
     complexity = _TIER_TO_COMPLEXITY.get((tier or "").lower(), "moderate")
     t = (task or "auto").lower()
+    model = None
+    override = None
+    reply = None
+    try:
+        override = prefixes.parse(prompt)
+        if override:
+            name = override.name
+            if override.is_claude:
+                tier_id = None
+                if name in prefixes.CLAUDE_TIER_PREFIXES:
+                    from llm_router.config import get_config
+                    from llm_router.proxy.tiers import tier_model
+
+                    config = get_config()
+                    if (not config.llm_router_claude_subscription
+                            and "anthropic" in config.available_providers):
+                        tier_id = tier_model(name)
+                if tier_id:
+                    model = f"anthropic/{tier_id}"
+                elif name == "claude":
+                    reply = ("[llm_router] `claude:` forces Claude: not routed, "
+                             "handle this request yourself.")
+                    decided = "claude"
+                else:
+                    reply = (f"[llm_router] `{name}:` forces Claude {name}: not routed "
+                             "through the API door; handle this request yourself at that tier.")
+                    decided = "host"
+            elif name == "local":
+                from llm_router.model_discovery import first_installed
+
+                local_model = first_installed()
+                if local_model:
+                    model = f"ollama/{local_model}"
+                else:
+                    reply = ("[llm_router] `local:` refused: no healthy local model "
+                             "(Ollama unreachable or no model installed); "
+                             "not sent to any other model.")
+                    decided = "refused:no_local"
+            elif name == "codex":
+                from llm_router import codex_agent
+
+                if codex_agent.is_codex_available():
+                    codex_model = codex_agent.CODEX_MODELS[0]
+                    model = (codex_model if codex_model.startswith("codex/")
+                             else f"codex/{codex_model}")
+                else:
+                    reply = ("[llm_router] `codex:` refused: Codex CLI not available; "
+                             "not sent to any other model.")
+                    decided = "refused:no_codex"
+    except Exception as exc:  # noqa: BLE001 -- lookup failures preserve the original request
+        failopen.record("LR-FO-PREFIX-MCP", exc)
+        override, model, reply = None, None, None
+    if override:
+        prompt = override.stripped
+        prefixes.record_example(prompt, forced=override.name, decided=model or decided, door="mcp")
+    model_kwargs = {"model": model} if model is not None else {}
     async with _ledger_guard(t) as guard:
+        if reply is not None:
+            guard.refused = True
+            return reply
         _blocked = _quality_breaker_block("mcp_llm", t)
         if _blocked:
             guard.refused = True
             return _blocked
-        if t == "research":
+        if t == "research" and model is None:
             return await llm_research(prompt, ctx, system_prompt=system_prompt, context=context)
         if t == "analyze":
             return await llm_analyze(prompt, ctx, complexity=complexity,
-                                     system_prompt=system_prompt, context=context)
+                                     system_prompt=system_prompt, context=context, **model_kwargs)
         if t == "code":
             return await llm_code(prompt, ctx, complexity=complexity,
-                                  system_prompt=system_prompt, context=context)
+                                  system_prompt=system_prompt, context=context, **model_kwargs)
         if t == "generate":
             return await llm_generate(prompt, ctx, complexity=complexity,
-                                      system_prompt=system_prompt, context=context)
+                                      system_prompt=system_prompt, context=context, **model_kwargs)
         # auto / query — the general default
         return await llm_query(prompt, ctx, complexity=complexity,
-                               system_prompt=system_prompt, context=context)
+                               system_prompt=system_prompt, context=context, **model_kwargs)
 
 
 async def llm_router_status(view: str = "summary", period: str = "today") -> str:
