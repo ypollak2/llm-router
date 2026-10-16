@@ -28,8 +28,11 @@ Rules (each one is pinned by tests/test_f4_toolcall_text.py):
 * Never touched: text indented 4+ spaces, text right after a backtick, bullets, prose.
 * Adjacent blocks separated only by whitespace count as one.
 * Fails open: any exception returns the text unchanged and records it with ``failopen``.
+* An unclosed wrapper runs to the end only when it opens at the START of a line; mid-line
+  (prose) it stops at the next blank line (F16).
 * Work is bounded: only the first 256 KB are scanned (cut on a line), every pass is
-  linear, JSON decoding is limited to 64 attempts of 64 KB each.
+  linear, JSON decoding is limited to 64 attempts of 64 KB each. Hitting either limit is
+  recorded (``CHZ-FO-F4-LIMIT``, ``limited`` in the ledger row).
 """
 from __future__ import annotations
 
@@ -52,6 +55,7 @@ SCAN_CAP = 256 * 1024
 _JSON_WINDOW = 64 * 1024
 _JSON_ATTEMPTS = 64
 LEDGER_NAME = "toolcall_neutralised.jsonl"
+LEDGER_MAX_BYTES = 1024 * 1024
 
 
 class Neutralised(NamedTuple):
@@ -139,7 +143,7 @@ def _xml_spans(s: str) -> list[tuple[int, int]]:
             continue  # indented code is content
         if closed:
             end = ends[j]
-        elif name in _WRAPPERS:
+        elif name in _WRAPPERS and m.start() == line_start:
             end = len(s)
         else:
             b = bisect_right(blanks, m.end() - 1)
@@ -154,7 +158,7 @@ def _xml_spans(s: str) -> list[tuple[int, int]]:
         pos = end
 
 
-def _json_spans(s: str) -> list[tuple[int, int]]:
+def _json_spans(s: str, hit: list[bool] | None = None) -> list[tuple[int, int]]:
     marks = [m.start() for m in _JSON_MARK_RE.finditer(s)]
     if not marks:
         return []
@@ -175,6 +179,8 @@ def _json_spans(s: str) -> list[tuple[int, int]]:
             continue
         attempts += 1
         if attempts > _JSON_ATTEMPTS:
+            if hit is not None:
+                hit.append(True)  # budget spent: later lines were not examined
             break
         try:
             obj, n = _decoder.raw_decode(s[start:start + _JSON_WINDOW])
@@ -259,15 +265,15 @@ def _segments(text: str) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
     return plain, bodies
 
 
-def _find_spans(text: str) -> tuple[list[tuple[int, int]], int]:
+def _find_spans(text: str, hit: list[bool]) -> tuple[list[tuple[int, int]], int]:
     plain, bodies = _segments(text)
     fenced_seen = sum(1 for a, b in bodies if _fence_is_tool_call(text[a:b]))
     spans: list[tuple[int, int]] = []
     segs = [(a, b) for a, b in plain if b > a]
     for a, b in segs:
         seg = text[a:b]
-        for finder in (_xml_spans, _json_spans):
-            spans.extend((a + s, a + e) for s, e in finder(seg))
+        spans.extend((a + s, a + e) for s, e in _xml_spans(seg))
+        spans.extend((a + s, a + e) for s, e in _json_spans(seg, hit))
     signal = bool(spans)
     for a, b in segs:
         spans.extend((a + s, a + e) for s, e in _call_line_spans(text[a:b], signal))
@@ -281,15 +287,19 @@ def _find_spans(text: str) -> tuple[list[tuple[int, int]], int]:
     return [(s, e) for s, e in merged], fenced_seen
 
 
-def _neutralise(text: str) -> Neutralised:
+def _neutralise(text: str) -> tuple[Neutralised, bool]:
+    """The result and whether a scan limit (size cap or JSON attempt budget) was hit."""
     tail = ""
+    hit: list[bool] = []
     if len(text) > SCAN_CAP:
+        hit.append(True)
         cut = text.rfind("\n", 0, SCAN_CAP)
         cut = SCAN_CAP if cut < 0 else cut + 1
         text, tail = text[:cut], text[cut:]
-    spans, fenced_seen = _find_spans(text)
+    spans, fenced_seen = _find_spans(text, hit)
+    limited = bool(hit)
     if not spans:
-        return Neutralised(text + tail, 0, fenced_seen)
+        return Neutralised(text + tail, 0, fenced_seen), limited
     marker = MARKER_TEMPLATE.format(n=len(spans))
     head = _TRAIL_BLANKS_RE.sub("", text[: spans[0][0]])
     out = f"{head}\n\n{marker}" if head.strip() else marker
@@ -300,21 +310,32 @@ def _neutralise(text: str) -> Neutralised:
             out += "\n\n" + kept
     if tail:
         out += "\n" + tail
-    return Neutralised(out, len(spans), fenced_seen)
+    return Neutralised(out, len(spans), fenced_seen), limited
 
 
-def neutralise(text: str) -> Neutralised:
-    """Return ``Neutralised(text, removed, fenced_seen)``; text is unchanged when removed is 0.
-    Fails open on ANY exception (RecursionError included)."""
+def neutralise_ex(text: str) -> tuple[Neutralised, bool]:
+    """``(Neutralised(text, removed, fenced_seen), limited)``; ``limited`` is True when the
+    256 KB cap or the JSON attempt budget cut the scan short (``CHZ-FO-F4-LIMIT`` is recorded).
+    Text is unchanged when removed is 0. Fails open on ANY exception (RecursionError included)."""
     if not text:
-        return Neutralised(text, 0, 0)
+        return Neutralised(text, 0, 0), False
     try:
-        return _neutralise(text)
+        res, limited = _neutralise(text)
     except Exception as exc:  # noqa: BLE001 -- a bug here must never lose a paid answer
         from llm_router import failopen
 
         failopen.record("CHZ-FO-F4-NEUTRALISE", exc)
-        return Neutralised(text, 0, 0)
+        return Neutralised(text, 0, 0), False
+    if limited:
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-F4-LIMIT", detail="scan limit hit; part of the answer was not examined")
+    return res, limited
+
+
+def neutralise(text: str) -> Neutralised:
+    """Return ``Neutralised(text, removed, fenced_seen)``; text is unchanged when removed is 0."""
+    return neutralise_ex(text)[0]
 
 
 def _ledger_path():
@@ -323,26 +344,23 @@ def _ledger_path():
     return paths.state_path(LEDGER_NAME)
 
 
-def append_ledger(door: str, removed: int, fenced_seen: int) -> None:
-    """Append-only count record (count, fenced_seen, door, ts; never any text)."""
+def append_ledger(door: str, removed: int, fenced_seen: int, limited: bool = False) -> None:
+    """Append-only count record (count, fenced_seen, door, ts, limited only when a scan limit
+    was hit; never any text). Written through ``capped_log`` so it cannot grow without bound."""
     try:
         if os.environ.get("PYTEST_CURRENT_TEST"):
             from llm_router import paths
 
             if not paths.is_isolated():
                 return  # a test must not write the real state directory
-        path = _ledger_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(
-            {"ts": round(time.time(), 3), "door": door, "removed": removed,
-             "fenced_seen": fenced_seen},
-            separators=(",", ":"),
-        ) + "\n"
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        try:
-            os.write(fd, line.encode("utf-8"))
-        finally:
-            os.close(fd)
+        from llm_router import capped_log
+
+        row = {"ts": round(time.time(), 3), "door": door, "removed": removed,
+               "fenced_seen": fenced_seen}
+        if limited:
+            row["limited"] = True
+        capped_log.append(_ledger_path(), (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8"),
+                          LEDGER_MAX_BYTES)
     except Exception as exc:  # noqa: BLE001 -- telemetry never changes the answer
         from llm_router import failopen
 
@@ -362,10 +380,13 @@ def neutralise_response(resp: Any, door: str = "") -> Any:
     """Return ``resp`` with ``content`` neutralised and the counts stored in
     ``toolcall_blocks_removed`` / ``toolcall_fenced_seen``, and one ledger record appended;
     the same object when there was nothing to remove or count."""
-    res = neutralise(getattr(resp, "content", "") or "")
+    res, limited = neutralise_ex(getattr(resp, "content", "") or "")
+    if limited:
+        append_ledger(door, res.removed, res.fenced_seen, True)
     if not (res.removed or res.fenced_seen):
         return resp
-    append_ledger(door, res.removed, res.fenced_seen)
+    if not limited:
+        append_ledger(door, res.removed, res.fenced_seen)
     return dataclasses.replace(
         resp, content=res.text, toolcall_blocks_removed=res.removed,
         toolcall_fenced_seen=res.fenced_seen,
@@ -374,9 +395,9 @@ def neutralise_response(resp: Any, door: str = "") -> Any:
 
 def neutralise_text(text: str, door: str) -> str:
     """Neutralise a bare answer string (doors that have no LLMResponse) and ledger the counts."""
-    res = neutralise(text or "")
-    if res.removed or res.fenced_seen:
-        append_ledger(door, res.removed, res.fenced_seen)
+    res, limited = neutralise_ex(text or "")
+    if res.removed or res.fenced_seen or limited:
+        append_ledger(door, res.removed, res.fenced_seen, limited)
     return res.text
 
 

@@ -303,6 +303,65 @@ def test_scan_cap_leaves_tail_untouched_and_is_line_cut():
     assert n == 1 and out.count(INV) == 1
 
 
+# ---- F16: an unclosed wrapper only runs to the end when it OPENS a line ---------------------
+
+TC = LT + "tool_call>"
+N16 = (
+    f"Hermes wraps each call in {TC} tags; inside is JSON with a \"name\": key.\n\n"
+    "SECOND-PARAGRAPH stays.\n\nTHIRD-PARAGRAPH stays too."
+)
+
+
+def test_n16_wrapper_mentioned_in_prose_keeps_later_paragraphs():
+    out, _, _ = neutralise(N16)
+    assert "SECOND-PARAGRAPH" in out and "THIRD-PARAGRAPH" in out
+
+
+def test_unclosed_wrapper_at_line_start_still_runs_to_end():
+    text = f"Answer.\n{TC}\n" + '{"name": "search"}\n\nlater prose\n\nmore prose'
+    out, n, _ = neutralise(text)
+    assert n == 1 and "Answer." in out
+    assert "later prose" not in out and "more prose" not in out
+
+
+def test_unclosed_wrapper_mid_line_stops_at_blank_line():
+    text = f"Go: {TC}" + '{"name": "x"}\n\nkept paragraph'
+    out, n, _ = neutralise(text)
+    assert n == 1 and "kept paragraph" in out
+
+
+# ---- F16: a hit scan limit is visible ---------------------------------------------------------
+
+
+def test_scan_cap_hit_is_reported_and_ledgered():
+    pad = "plain line\n" * (toolcall_text.SCAN_CAP // 11 + 10)
+    res, limited = toolcall_text.neutralise_ex(f"{FC}\n{pad}")
+    assert limited and res.removed == 1
+    assert toolcall_text.neutralise_ex(f"{FC}\nshort")[1] is False
+    toolcall_text.neutralise_text(f"{FC}\n{pad}", "limit-door")
+    row = toolcall_text.read_ledger()[-1]
+    assert row["door"] == "limit-door" and row["limited"] is True
+
+
+def test_json_attempt_budget_hit_is_reported_and_ledgered():
+    text = '{"tool_calls"\n' * (toolcall_text._JSON_ATTEMPTS + 10)
+    res, limited = toolcall_text.neutralise_ex(text)
+    assert limited and res.removed == 0 and res.text == text
+    toolcall_text.neutralise_text(text, "budget-door")
+    rows = toolcall_text.read_ledger()
+    assert rows[-1]["limited"] is True and rows[-1]["removed"] == 0
+
+
+def test_limit_hit_records_failopen_note(monkeypatch):
+    seen = []
+    from llm_router import failopen
+
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, **kw: seen.append(code))
+    pad = "plain line\n" * (toolcall_text.SCAN_CAP // 11 + 10)
+    toolcall_text.neutralise(pad)
+    assert "CHZ-FO-F4-LIMIT" in seen
+
+
 # ---- ledger ----------------------------------------------------------------------------
 
 
