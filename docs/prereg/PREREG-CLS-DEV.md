@@ -36,7 +36,9 @@ D-100 only; measured FAIL under D-71).
 
 The runner for everything in sections 1.3, 6, 7 (candidate fitting and scoring inputs), 9 and 10 is build **B0**
 (`scripts/cls_dev_run.py`, brief `brief-cls-b0.txt`); the scorer and threshold fit are B1 (`scripts/cls_eval.py`).
-The frozen prereg pins both scripts' sha256.
+The relabel runner, generator runner, resemblance tool, send library and `PINS.json` builder are build **B-L**
+(`scripts/cls_label_run.py`, `cls_gen_run.py`, `cls_resemble.py`, `cls_send_lib.py`, `cls_pins.py`, brief
+`brief-cls-bl.txt`). `PINS.json` pins every script's sha256 (section 15).
 
 ## 0a. Order of events (r2: TEST-SYN is made first)
 
