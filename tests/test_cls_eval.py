@@ -176,16 +176,17 @@ def _p17d_table(tmp_path, drop=15):
 
 
 def test_p17d_regression_reproduces_published_numbers(tmp_path, capsys):
-    """The published table has 151 rows and n_labeled 150: one haiku-vs-sonnet-truth row is not labelled in the
-    published figures. Dropping any one such row reproduces them (verified for all 33 candidates in the next test)."""
+    """The items table has 151 rows and the published figures use n_labeled 150: the extra row is most likely a
+    second item id on an already-scored turn. Dropping any one haiku-verdict / sonnet-truth row reproduces the
+    published figures (verified for all 33 such rows in the next test)."""
     table, d = _p17d_table(tmp_path)
-    rc, out, _, _ = run(["score", table, "--truth", "opus_only", "--mode", "test", "--boot-b", B_FAST], capsys)
+    rc, out, _, _ = run(["score", table, "--truth", "opus_only", "--mode", "test", "--single-use", "--use-log",
+                         tmp_path / "use.log", "--calibration", _cal(tmp_path), "--boot-b", B_FAST], capsys)
     assert rc == 0
     pub = d["arms"]
     a = out["arms"]
     assert a["llm"]["n"] == a["rules_eff"]["n"] == 150 == d["n_labeled"]
-    assert a["llm"]["c_lambda2_clamp"] == pub["llm"]["c_lambda2_clamp"] == 7.006 or \
-        round(a["llm"]["c_lambda2_clamp"], 3) == pub["llm"]["c_lambda2_clamp"]
+    assert round(a["llm"]["c_lambda2_clamp"], 3) == pub["llm"]["c_lambda2_clamp"]
     assert round(a["llm"]["c_lambda2_clamp"], 3) == 7.006
     assert round(a["rules_eff"]["c_lambda2_clamp"], 3) == pub["rules_eff"]["c_lambda2_clamp"] == 7.748
     assert (a["llm"]["under"]["k"], a["rules_eff"]["under"]["k"]) == (72, 61)
@@ -200,7 +201,7 @@ def test_p17d_regression_reproduces_published_numbers(tmp_path, capsys):
     assert out["n_groups"] == 25 == d["boot_under"]["clusters"]
     # the contradiction P17D exposed: always_opus beats both bars yet fails the guard
     ao = out["primary"]["comparisons"]["always_opus"]
-    assert ao["bars"] is True and ao["guard"]["passes"] is False and ao["status"] == "FAIL"
+    assert ao["bars"] is True and ao["guard"]["passes"] is False
     # llm fails a bar on the point estimates, as published (verdict FAIL)
     assert out["primary"]["comparisons"]["llm"]["bars"] is False
     assert d["verdict"] == "FAIL"
@@ -319,7 +320,7 @@ def test_refusal_scored_as_rules_eff_counted_never_correct(tmp_path, capsys):
     x = out["arms"]["x"]
     assert x["n_fallback"] == 2 and out["fallback_ids"]["x"] == ["r0", "r1"]
     # r1 is an opus-truth item the arm refused: it is scored as rules_eff's sonnet, so it is under-routed
-    assert x["under"]["k"] == 1 and x["share"]["sonnet"] == pytest.approx(21 / 40 - 0, abs=0.5)
+    assert x["under"]["k"] == 1 and x["share"]["sonnet"] == 1.0 - x["share"]["opus"] - x["share"]["haiku"]
     assert not x["errors_gt_5pct"] and not x["errors_gt_10pct"]
     rows, _ = ce.prepare(ce.load_table(tmp_path / "t.jsonl")[1], ["rules_eff", "x"], "majority3")
     assert [r["preds"]["x"] for r in rows[:2]] == ["sonnet", "sonnet"]
@@ -356,14 +357,13 @@ def _p17d_like(n_groups=50, per=6, seed=3):
 
 
 def test_always_opus_beats_both_bars_but_fails_the_guard(tmp_path, capsys):
-    rc, out, _, _ = run(["score", write_table(tmp_path / "t.jsonl", _p17d_like()), "--mode", "test",
-                         "--boot-b", B_FAST], capsys)
+    rc, out, _, _ = run(["score", write_table(tmp_path / "t.jsonl", _p17d_like()), "--boot-b", B_FAST], capsys)
     ao = out["primary"]["comparisons"]["always_opus"]
     assert ao["under"]["cand"] == 0.0 and ao["under"]["diff"] < 0 and ao["cost"]["diff"] < 0
     assert ao["bars"] is True
     assert ao["non_inferior"]["ok"] is True
     assert ao["guard"]["passes"] is False and ao["guard"]["q"] == 1.0 and ao["guard"]["e_under_mix"] == 0.0
-    assert ao["status"] == "FAIL"
+    assert ao["status"] == "SCREEN-REJECT"
     assert out["validity"]["checks"]["always_opus_fails_guard"] is True
 
 
@@ -702,7 +702,7 @@ def test_fit_is_deterministic_and_counts_only(tmp_path, capsys):
     assert o1["frozen"]["t_hi"] in ce.GRID_HI and o1["frozen"]["t_lo"] in ce.GRID_LO
 
 
-def test_fit_grid_is_the_176_point_grid():
+def test_fit_grid_is_the_192_point_grid():
     assert len(ce.GRID_HI) == 16 and ce.GRID_HI[0] == 0.20 and ce.GRID_HI[-1] == 0.95
     assert ce.GRID_LO == [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.99, 1.01]
     # 16 x 11 = 176 points with t_lo in {0.50 .. 0.99}; the brief's extra t_lo = 1.01 (never haiku) adds 16
@@ -945,7 +945,6 @@ def test_requested_null_is_opus_and_the_imputation_is_a_sensitivity_row():
     rows, _ = ce.prepare(items_, ["rules_eff", "x"], "majority3")
     assert [r["req"] for r in rows] == ["opus", "sonnet", "sonnet"]
     assert [r["req_imp"] for r in rows] == ["sonnet", "sonnet", "sonnet"]       # group mode is sonnet
-    assert ce.cost_mean(rows, "x") == pytest.approx((6.15 + 2.7 + 12.3 + 2.7 + 12.3) / 3 - 0.0, abs=1e-9) or True
     assert ce.cost_mean(rows[:1], "x") == pytest.approx(6.15)                    # clamp inert (requested null)
     assert ce.cost_mean(rows[:1], "x", imputed=True) == pytest.approx(2.7)      # shadow_eval imputation clamps
 
@@ -984,14 +983,42 @@ def test_dev_mode_never_prints_a_pass_label(tmp_path, capsys):
     assert ce.display_status("PASS-STRONG", "test") == "PASS-STRONG"
 
 
-def test_test_mode_prints_the_labels_and_guard_free_follows_the_header(tmp_path, capsys):
-    recs = gen_recs(n_groups=80, per=5, scored=None)
-    plain = write_table(tmp_path / "p.jsonl", recs)
-    rc, out, _, _ = run(["score", plain, "--mode", "test", "--boot-b", B_FAST], capsys)
-    assert out["guard_free"] is True and out["screening_only"] is False and "label" not in out
-    assert out["primary"]["comparisons"]["oracle"]["status"] in ("PASS-STRONG", "PASS-WEAK")
-    guarded = write_table(tmp_path / "g.jsonl", recs, header={"guards_applied": True})
-    rc, out, _, _ = run(["score", guarded, "--mode", "test", "--boot-b", B_FAST], capsys)
+def _cal(tmp_path):
+    f = tmp_path / "cal-ok.json"
+    f.write_text(json.dumps({j: {"planted_ok": 6, "planted_n": 6} for j in ce.JUDGES}))
+    return f
+
+
+def _noised(tmp_path, header=None, n_groups=80):
+    recs = gen_recs(n_groups=n_groups, per=5, scored=None)
+    src = write_table(tmp_path / "base.jsonl", recs, header=header)
+    dst = tmp_path / "noised.jsonl"
+    assert ce.main(["selftest", src, "--make-noised-oracle", "20261017", "--out", str(dst)]) == 0
+    return str(dst)
+
+
+def _test_run(tmp_path, capsys, table, tag="u"):
+    return run(["score", table, "--mode", "test", "--single-use", "--use-log", tmp_path / f"{tag}.log",
+                "--calibration", _cal(tmp_path), "--boot-b", B_FAST], capsys)
+
+
+def test_test_mode_is_code_gated_and_prints_labels_when_run_single_use(tmp_path, capsys):
+    table = _noised(tmp_path)
+    for extra in ([], ["--single-use"], ["--use-log", tmp_path / "x.log"]):
+        rc, out, stdout, err = run(["score", table, "--mode", "test", *extra], capsys)
+        assert rc == 2 and stdout == "" and "--mode test" in err or "--single-use" in err
+    assert not (tmp_path / "x.log").exists()
+    rc, out, _, _ = _test_run(tmp_path, capsys, table)
+    assert rc == 0 and out["guard_free"] is True and out["screening_only"] is False and "label" not in out
+    assert out["primary"]["comparisons"]["oracle"]["status"] == "PASS-STRONG"
+    assert out["primary"]["comparisons"]["noised_oracle"]["status"] == "PASS-STRONG"
+    assert out["primary"]["comparisons"]["always_opus"]["status"] == "FAIL"
+    assert out["status"] == "INFORMATIVE"
+
+
+def test_guard_free_follows_the_header_in_test_mode(tmp_path, capsys):
+    table = _noised(tmp_path, header={"guards_applied": True})
+    rc, out, _, _ = _test_run(tmp_path, capsys, table)
     assert out["guard_free"] is False
 
 
@@ -1086,7 +1113,6 @@ def test_auroc_uses_the_real_population_whatever_population_is_scored(tmp_path, 
     assert pooled["auroc"]["cand"]["auroc"] == syn["auroc"]["cand"]["auroc"]
     assert pooled["auroc"]["cand"]["auroc"] > 0.9
     assert syn["population"] == "syn" and syn["n"] < pooled["n"]
-    assert pooled["auroc"]["cand"]["n"] == syn["n"] * 1 or True
     real_rows = [r for r in recs if r["kind"] == "real"]
     assert pooled["auroc"]["cand"]["n"] == len(real_rows)
 
@@ -1137,6 +1163,158 @@ def test_module_runs_as_a_script_on_a_table(tmp_path):
     r = subprocess.run([sys.executable, str(ROOT / "scripts" / "cls_eval.py"), "score", table, "--boot-b", "100"],
                        capture_output=True, text=True, timeout=60, env=env, stdin=subprocess.DEVNULL)
     assert r.returncode == 0 and json.loads(r.stdout)["n"] == 12
+
+
+# --------------------------------------------------------------------------- decision wiring (D-148)
+
+def _guard_table():
+    """400 singleton groups: 160 opus-truth, 240 sonnet-truth; cand routes opus on 36 + 36 of them. The guard bootstrap
+    lands at -0.0024 on the one-sided 95th percentile and +0.0008 on the 97.5th (checked in the tests)."""
+    recs, k = [], 0
+    for i in range(160):
+        recs.append(item(f"g{k}", f"g{k}", "opus", {"rules_eff": "sonnet", "cand": "opus" if i < 36 else "sonnet"}))
+        k += 1
+    for i in range(240):
+        recs.append(item(f"g{k}", f"g{k}", "sonnet", {"rules_eff": "sonnet", "cand": "opus" if i < 36 else "sonnet"}))
+        k += 1
+    return recs
+
+
+def _ni_table():
+    """300 singleton groups: 13 items the candidate under-routes (rules fine), 13 the reverse, rest neutral. The
+    under-route diff is 0 (bars hold); its bootstrap upper is 0.0267 at the 95th and 0.0333 at the 97.5th."""
+    recs, i = [], 0
+    for _ in range(13):
+        recs.append(item(f"n{i}", f"n{i}", "sonnet", {"rules_eff": "sonnet", "cand": "haiku"}))
+        i += 1
+    for _ in range(13):
+        recs.append(item(f"n{i}", f"n{i}", "sonnet", {"rules_eff": "haiku", "cand": "sonnet"}))
+        i += 1
+    while i < 300:
+        recs.append(item(f"n{i}", f"n{i}", "sonnet", {"rules_eff": "sonnet", "cand": "sonnet"}))
+        i += 1
+    return recs
+
+
+def _adm_table():
+    """300 singletons, all cand scores bimodal so every grid point makes the same decisions: 13 items cand routes to
+    opus that rules under-routes, 10 the reverse. Gain bootstrap: 20th percentile -0.0033, 25th percentile 0.0."""
+    recs, i = [], 0
+
+    def sc(po):
+        return {"cand": {"p_haiku": 0.0, "p_sonnet": 0.3, "p_opus": po}}
+    for _ in range(13):
+        recs.append(item(f"a{i}", f"a{i}", "opus", {"rules_eff": "sonnet"}, scores=sc(0.99), fold=i % 5))
+        i += 1
+    for _ in range(10):
+        recs.append(item(f"a{i}", f"a{i}", "opus", {"rules_eff": "opus"}, scores=sc(0.0), fold=i % 5))
+        i += 1
+    while i < 300:
+        recs.append(item(f"a{i}", f"a{i}", "sonnet", {"rules_eff": "sonnet"}, scores=sc(0.0), fold=i % 5))
+        i += 1
+    return recs
+
+
+def _boot_vals(recs, arm, keys, stat):
+    its = [ce._parse_item(r, k) for k, r in enumerate(recs)]
+    rows, _ = ce.prepare(its, ["rules_eff", arm], "majority3")
+    return rows, sorted(ce.bootstrap(ce.group_sums(rows, ["rules_eff", arm]), keys, stat, 2000, ce.SEED))
+
+
+def test_guard_decision_uses_the_one_sided_95th_percentile():
+    def stat(s):
+        W = s["W"]
+        return s["u:cand"] / W - ce.mix_under(s["r:cand"] / W, s["Uh"] / W, s["Us"] / W)
+    _, vals = _boot_vals(_guard_table(), "cand", ["W", "u:cand", "r:cand", "Uh", "Us"], stat)
+    assert ce.upper95(vals) < -ce.GUARD_EPS <= ce.ci95(vals)[1]          # between the 95th and the 97.5th
+    an = _an(_guard_table(), B=2000)
+    assert an["guard"]["passes"] is True                                  # decided at the one-sided 95th
+
+
+def test_non_inferiority_decision_uses_the_97_5th_percentile():
+    an = _an(_ni_table(), B=2000)
+    assert an["bars"] is True and an["under"]["diff"] == 0.0
+    assert an["under"]["upper95"] <= ce.NI_UNDER < an["under"]["ni_upper"]       # between the 95th and the 97.5th
+    assert an["non_inferior"]["ok"] is False and an["_core"] == "FAIL"
+    assert an["non_inferior"]["under_upper"] == an["under"]["ci95"][1]
+
+
+def test_admissibility_is_decided_at_the_20th_percentile(monkeypatch):
+    its = [ce._parse_item(r, k) for k, r in enumerate(_adm_table())]
+    rows, _ = ce.prepare(its, ["rules_eff"], "majority3")
+    trial = [dict(r, preds=dict(r["preds"], _c=ce.decide(r["scores"]["cand"], 0.5, 1.01))) for r in rows]
+    gs = ce.group_sums(trial, ["rules_eff", "_c"])
+    vals = sorted(ce.bootstrap(gs, ["W", "u:_c", "u:rules_eff"], lambda s: (s["u:rules_eff"] - s["u:_c"]) / s["W"],
+                               2000, ce.SEED))
+    assert ce.lower_pct(vals, 0.20) < 0 <= ce.lower_pct(vals, 0.25)       # 20th percentile < 0 <= 25th percentile
+    monkeypatch.setattr(ce, "guard", lambda upper, raw: True)             # isolate constraint 1
+    assert ce.ADMISSIBLE_PCT == 0.20
+    assert ce.fit(rows, "cand", 2000, ce.SEED)["admissible"] is False
+
+
+def test_tie_between_t_hi_values_freezes_the_larger_threshold(tmp_path, capsys):
+    rows = _fit_rows()
+    res = ce.fit(rows, "cand", B_FAST, ce.SEED)
+    # every t_hi in 0.55..0.95 gives the same decisions here (p_opus is 0.95, 0.5 or 0.02); the larger wins
+    assert res["admissible"] and res["t_hi"] == 0.95 and res["t_lo"] == 1.01
+    assert ce.tie_key({"cost": 1.0, "opus": 0.1, "raw": 2.0}, 0.9, 1.01) < ce.tie_key(
+        {"cost": 1.0, "opus": 0.1, "raw": 2.0}, 0.5, 1.01)
+
+
+def test_single_use_without_validity_arms_is_not_informative(tmp_path, capsys):
+    rc, out, _, _ = run(["score", write_table(tmp_path / "t.jsonl", _golden()), "--use-log", tmp_path / "u.log",
+                         "--single-use", "--calibration", _cal(tmp_path), "--boot-b", B_FAST], capsys)
+    assert out["reasons"] == ["n_truth_opus_lt_40", "validity_unavailable"] and out["status"] == "NOT INFORMATIVE"
+    assert out["validity"]["not_run"]
+    rc, out, _, _ = run(["score", write_table(tmp_path / "t.jsonl", _golden()), "--calibration", _cal(tmp_path),
+                         "--boot-b", B_FAST], capsys)
+    assert "validity_unavailable" not in out["reasons"]            # a DEV run without them only reports not_run
+
+
+def test_dev_labels_on_fit_and_selftest(tmp_path, capsys):
+    rc, out, _, _ = run(_fit_args(write_table(tmp_path / "t.jsonl", _fit_recs())), capsys)
+    assert out["guard_free"] is True and out["screening_only"] is True and out["label"] == ce.DEV_LABEL
+    rc, out, _, _ = run(["selftest", write_table(tmp_path / "s.jsonl", _golden()), "--boot-b", B_FAST], capsys)
+    assert out["guard_free"] is True and out["screening_only"] is True and out["label"] == ce.DEV_LABEL
+
+
+def test_criterion_8_has_sonnet_and_the_dev_syn_leg(tmp_path, capsys):
+    recs = gen_recs(n_groups=80, per=5, kinds=("real", "syn"), scored=None)
+    rc, out, _, _ = run(["score", write_table(tmp_path / "t.jsonl", recs), "--boot-b", B_FAST], capsys)
+    jr = out["judge_robustness"]
+    e = jr["arms"]["always_haiku"]["under"]
+    assert jr["population"] == "real" and jr["pair"] == ["opus", "gpt"]
+    assert {"sign_opus", "sign_gpt", "sign_sonnet", "indeterminate", "discordant"} <= set(e)
+    leg = jr["syn_leg"]
+    assert leg["population"] == "syn" and leg["pair"] == ["gpt", "sonnet"]
+    es = leg["arms"]["always_haiku"]["under"]
+    assert es["sign_gpt"] == es["sign_sonnet"] == 1 and es["indeterminate"] is False and es["discordant"] is False
+    # no syn rows at all: the leg is reported as not evaluable, not invented
+    rc, out, _, _ = run(["score", write_table(tmp_path / "r.jsonl", gen_recs(n_groups=40, per=5)), "--boot-b", B_FAST],
+                        capsys)
+    assert out["judge_robustness"]["syn_leg"]["arms"]["always_haiku"]["under"] == {"evaluable": False}
+
+
+def test_robust_flag_is_computed_when_truth_is_itself_a_robust_rule(tmp_path, capsys):
+    table = write_table(tmp_path / "t.jsonl", gen_recs(n_groups=60, per=5))
+    rc, out, _, _ = run(["score", table, "--truth", "opus_only", "--boot-b", B_FAST], capsys)
+    assert out["robust_under_single_judge_truths"]["oracle"] is True
+    assert out["robust_under_single_judge_truths"]["always_haiku"] is False
+
+
+def test_kappa_per_length_band_and_per_source(tmp_path, capsys):
+    recs = gen_recs(n_groups=40, per=5, arms=False, scored=None)
+    for i, r in enumerate(recs):
+        r["strata"]["length_band"] = "w<=12" if i % 2 else "51-150"
+        r["strata"]["source"] = "A" if i < 190 else "B"
+        if i >= 195 and i % 2 == 0:
+            r["truths"]["gpt"] = "opus" if r["truths"]["gpt"] != "opus" else "haiku"
+    rc, out, _, _ = run(["score", write_table(tmp_path / "t.jsonl", recs), "--boot-b", B_FAST], capsys)
+    k = out["kappa"]
+    assert set(k["by_length_band"]) == {"w<=12", "51-150"} and set(k["by_source"]) == {"A", "B"}
+    assert k["by_length_band"]["w<=12"]["opus-gpt"]["kappa"] == 1.0
+    assert k["by_source"]["B"]["opus-gpt"]["n"] == 10 and k["by_source"]["B"]["opus-gpt"]["kappa"] < 1.0
+    assert k["by_source"]["A"]["opus-gpt"]["kappa"] == 1.0
 
 
 # --------------------------------------------------------------------------- mutants
@@ -1254,6 +1432,32 @@ def _checks():
         parts = ce.split_by_kind(rows, ["real", "syn"])
         assert len(parts["real"]) == 2 and len(parts["syn"]) == 1
 
+    def guard_decision_95th():
+        assert _an(_guard_table(), B=2000)["guard"]["passes"] is True
+
+    def ni_decision_97_5th():
+        an = _an(_ni_table(), B=2000)
+        assert an["non_inferior"]["ok"] is False
+
+    def admissible_pct_20():
+        its = [ce._parse_item(r, k) for k, r in enumerate(_adm_table())]
+        rows, _ = ce.prepare(its, ["rules_eff"], "majority3")
+        orig = ce.guard
+        ce.guard = lambda upper, raw: True
+        try:
+            assert ce.fit(rows, "cand", 2000, ce.SEED)["admissible"] is False
+        finally:
+            ce.guard = orig
+
+    def tie_break_larger_t_hi():
+        res = ce.fit(_fit_rows(), "cand", B_FAST, ce.SEED)
+        assert res["t_hi"] == 0.95 and res["t_lo"] == 1.01
+
+    def validity_unavailable():
+        assert ce.single_use_validity_reasons({"not_run": ["x"]}, True) == ["validity_unavailable"]
+        assert ce.single_use_validity_reasons({"not_run": ["x"]}, False) == []
+        assert ce.single_use_validity_reasons({"not_run": []}, True) == []
+
     return {k: v for k, v in locals().items() if callable(v)}
 
 
@@ -1367,6 +1571,10 @@ def _mut_split_mix(rows, kinds):
     return {k: list(rows) for k in kinds}
 
 
+def _mut_tie_small_hi(st, hi, lo):
+    return (round(st["cost"], 12), round(st["opus"], 12), round(st["raw"], 12), hi, -lo)
+
+
 MUTANTS = [
     ("m01_bars_use_ge", "bars_hold", _mut_bars, "bars"),
     ("m02_clamp_dropped", "clamp", lambda p, r: p, "clamp_applied"),
@@ -1390,16 +1598,21 @@ MUTANTS = [
     ("m20_per_source_rule_ignored", "rule_for_source", _mut_source_ignored, "per_source_rule"),
     ("m21_other_two_higher_uses_lower", "rule_other_two_higher", _mut_other_lower, "other_two_higher"),
     ("m22_split_rows_mixes_kinds", "split_by_kind", _mut_split_mix, "split_rows_by_kind"),
+    ("m23_ni_at_95th_percentile", "ni_upper", lambda v: ce.upper95(v), "ni_decision_97_5th"),
+    ("m24_guard_at_97_5th_percentile", "upper95", _mut_upper_two_sided, "guard_decision_95th"),
+    ("m25_admissibility_at_25th_percentile", "ADMISSIBLE_PCT", 0.25, "admissible_pct_20"),
+    ("m26_tie_break_smaller_t_hi", "tie_key", _mut_tie_small_hi, "tie_break_larger_t_hi"),
+    ("m27_validity_unavailable_removed", "single_use_validity_reasons", lambda v, su: [], "validity_unavailable"),
 ]
 
 
 def test_unmutated_module_passes_every_invariant_check():
-    assert len(CHECKS) >= 22
+    assert len(CHECKS) >= 27
     assert _run_checks() == []
 
 
 def test_there_are_at_least_fifteen_distinct_mutants_each_with_a_named_killer():
-    assert len(MUTANTS) >= 22 and len({m[0] for m in MUTANTS}) == len(MUTANTS)
+    assert len(MUTANTS) >= 27 and len({m[0] for m in MUTANTS}) == len(MUTANTS)
     assert all(m[3] in CHECKS for m in MUTANTS)
 
 

@@ -15,6 +15,10 @@ TABLE is a JSONL "arms table", one record per item: ``item_id, group, requested,
 kind?, fold?, weight?`` (an optional first line ``{"_header": {...}}``). It never holds prompt text; a record with a
 key named text, prompt, digest, reason or content is refused (exit 2, the message names the key, never the value).
 
+Statistics (D-148): the non-inferiority bound is the 97.5th percentile of the paired bootstrap (the upper end of the
+reported two-sided 95% CI); the NOT-TRIVIAL guard is the one-sided 95th percentile. ``--mode test`` (PASS-* labels)
+needs ``--single-use --use-log``; DEV mode prints SCREEN-PASS / SCREEN-REJECT only.
+
 Exit: 0 done, 2 refused input or usage, 3 shadow_eval sha pin mismatch, 4 single-use log already holds a
 "started" line, 5 fit found no admissible operating point (selftest: 1 when a validity check fails).
 """
@@ -450,6 +454,12 @@ def upper95(sorted_vals: list[float]):
     return sorted_vals[max(int(0.95 * n) - 1, 0)] if n else None
 
 
+def ni_upper(sorted_vals: list[float]):
+    """Non-inferiority bound: the upper end of the two-sided 95% CI (97.5th percentile), the same bound the
+    reported CI prints (D-148). The guard stays one-sided (upper95)."""
+    return ci95(sorted_vals)[1]
+
+
 def lower_pct(sorted_vals: list[float], p: float):
     n = len(sorted_vals)
     return sorted_vals[min(int(p * n), n - 1)] if n else None
@@ -537,7 +547,7 @@ def analyze_arm(gs: list[dict], arm: str, base: str = "rules_eff", B: int = B_DE
     g_up = upper95(dg)
     ci_u, ci_c = ci95(du), ci95(dc)
     bars = bars_hold(uc, ub, cc, cb)
-    ni_u, ni_c = upper95(du), upper95(dc)
+    ni_u, ni_c = ni_upper(du), ni_upper(dc)
     ni = non_inferior(ni_u, ni_c)
     g_ok = guard(g_up, raw)
     rb = t[f"r:{base}"] / W
@@ -546,12 +556,12 @@ def analyze_arm(gs: list[dict], arm: str, base: str = "rules_eff", B: int = B_DE
     return {
         "evaluable": True,
         "under": {"cand": r6(uc), "base": r6(ub), "diff": r6(uc - ub), "ci95": [r6(x) for x in ci_u],
-                  "upper95": r6(ni_u), "se": r6(statistics.stdev(du)) if len(du) > 1 else None},
+                  "upper95": r6(upper95(du)), "ni_upper": r6(ni_u), "se": r6(statistics.stdev(du)) if len(du) > 1 else None},
         "cost": {"cand": r6(cc), "base": r6(cb), "diff": r6(cc - cb), "ci95": [r6(x) for x in ci_c],
-                 "upper95": r6(ni_c), "se": r6(statistics.stdev(dc)) if len(dc) > 1 else None},
+                 "upper95": r6(upper95(dc)), "ni_upper": r6(ni_c), "se": r6(statistics.stdev(dc)) if len(dc) > 1 else None},
         "raw_cost": r6(raw), "raw_cost_ci95": [r6(x) for x in raw_ci], "raw_ratio_to_rules_eff": r6(ratio),
         "COST_HIGH": bool(ratio is not None and ratio > COST_HIGH_RATIO), "bars": bars,
-        "non_inferior": {"ok": ni, "under_upper95": r6(ni_u), "cost_upper95": r6(ni_c),
+        "non_inferior": {"ok": ni, "under_upper": r6(ni_u), "cost_upper": r6(ni_c),
                          "under_bound": NI_UNDER, "cost_bound": NI_COST},
         "guard": {"raw_cost": r6(raw), "q": r6(q), "e_under_mix": r6(e_mix), "diff": r6(uc - e_mix),
                   "upper95": r6(g_up), "passes": g_ok},
@@ -623,10 +633,20 @@ def qwk(m: list[list[float]]):
     return None if den == 0 else 1 - num / den
 
 
+def _kappa_point(pairs: list) -> dict:
+    m = [[0.0] * 3 for _ in range(3)]
+    for _, i, j in pairs:
+        m[i][j] += 1
+    if len(pairs) < 5:
+        return {"n": len(pairs)}
+    return {"n": len(pairs), "kappa": r6(qwk(m)), "exact_agreement": r6(sum(i == j for _, i, j in pairs) / len(pairs))}
+
+
 def kappa_block(items: list[dict], B: int, seed: int) -> dict:
     out: dict = {}
+    pairs_of = (("opus", "gpt"), ("opus", "sonnet"), ("gpt", "sonnet"))
     for kind in ("real", "syn"):
-        for a, b in (("opus", "gpt"), ("opus", "sonnet"), ("gpt", "sonnet")):
+        for a, b in pairs_of:
             pairs = [(it["group"], RANK[it["truths"][a]] - 1, RANK[it["truths"][b]] - 1)
                      for it in items if it["kind"] == kind and it["truths"][a] and it["truths"][b]]
             name = f"{kind}:{a}-{b}"
@@ -647,6 +667,15 @@ def kappa_block(items: list[dict], B: int, seed: int) -> dict:
             vals = sorted(bootstrap(gs, keys, stat, B, seed))
             out[name] = {"n": len(pairs), "kappa": r6(point), "ci95": [r6(x) for x in ci95(vals)],
                          "exact_agreement": r6(sum(i == j for _, i, j in pairs) / len(pairs))}
+    # per length band and per source (PREREG-CLS-DEV section 3.4): point values, a table with n < 5 prints n only
+    for dim, label in (("length_band", "by_length_band"), ("source", "by_source")):
+        tab: dict = {}
+        for it in items:
+            v = it["strata"].get(dim)
+            tab.setdefault(v if isinstance(v, str) and v else "unknown", []).append(it)
+        out[label] = {val: {f"{a}-{b}": _kappa_point([(it["group"], RANK[it["truths"][a]] - 1, RANK[it["truths"][b]] - 1)
+                                                         for it in its if it["truths"][a] and it["truths"][b]])
+                            for a, b in pairs_of} for val, its in sorted(tab.items())}
     return out
 
 
@@ -659,30 +688,43 @@ def floor_sign(diff, se):
     return 1 if diff > 0 else -1
 
 
-def judge_robustness(items: list[dict], arms: list[str], B: int, seed: int, voided) -> dict:
+def _robust_leg(items: list[dict], arms: list[str], B: int, seed: int, population: str, pair: tuple,
+                extra: tuple = ()) -> dict:
+    judges = tuple(pair) + tuple(extra)
     per_rule = {}
-    for rule in ("opus_only", "gpt_only"):
-        rows, _ = prepare(items, arms, rule)
-        rows = select_population(rows, "real")
+    for j in judges:
+        rows, _ = prepare(items, arms, f"{j}_only")
+        rows = select_population(rows, population)
         gs = group_sums(rows, arms)
-        per_rule[rule] = {a: analyze_arm(gs, a, "rules_eff", B, seed) for a in arms if a != "rules_eff"} if rows else {}
-    out = {"population": "real", "arms": {}}
+        per_rule[j] = {a: analyze_arm(gs, a, "rules_eff", B, seed) for a in arms if a != "rules_eff"} if rows else {}
+    out = {"population": population, "pair": list(pair), "arms": {}}
     for a in arms:
         if a == "rules_eff":
             continue
         entry = {}
-        ok = all(per_rule[r].get(a, {}).get("evaluable") for r in per_rule)
+        ok = all(per_rule[j].get(a, {}).get("evaluable") for j in judges)
         for metric in ("under", "cost"):
             if not ok:
                 entry[metric] = {"evaluable": False}
                 continue
-            do, so = (per_rule["opus_only"][a][metric][k] for k in ("diff", "se"))
-            dg_, sg = (per_rule["gpt_only"][a][metric][k] for k in ("diff", "se"))
-            s_o, s_g = floor_sign(do, so), floor_sign(dg_, sg)
-            entry[metric] = {"diff_opus": do, "se_opus": so, "sign_opus": s_o, "diff_gpt": dg_, "se_gpt": sg,
-                             "sign_gpt": s_g, "indeterminate": s_o is None or s_g is None,
-                             "discordant": s_o is not None and s_g is not None and s_o != s_g}
+            m = {}
+            for j in judges:
+                d, se_ = (per_rule[j][a][metric][k] for k in ("diff", "se"))
+                m[f"diff_{j}"], m[f"se_{j}"], m[f"sign_{j}"] = d, se_, floor_sign(d, se_)
+            s1, s2 = m[f"sign_{pair[0]}"], m[f"sign_{pair[1]}"]
+            m["indeterminate"] = s1 is None or s2 is None
+            m["discordant"] = s1 is not None and s2 is not None and s1 != s2
+            entry[metric] = m
         out["arms"][a] = entry
+    return out
+
+
+def judge_robustness(items: list[dict], arms: list[str], B: int, seed: int, voided) -> dict:
+    """Criterion 8 (PREREG-CLS-DEV section 8): the paired diff vs rules_eff under each single-judge truth, with
+    the 1-bootstrap-SE floor. Real leg: T-opus vs T-gpt (T-sonnet reported beside them). DEV-SYN leg: T-gpt vs
+    T-sonnet on the syn rows."""
+    out = _robust_leg(items, arms, B, seed, "real", ("opus", "gpt"), ("sonnet",))
+    out["syn_leg"] = _robust_leg(items, arms, B, seed, "syn", ("gpt", "sonnet"))
     return out
 
 
@@ -807,6 +849,11 @@ def _point_stats(rows: list[dict], preds: tuple) -> dict:
     return {"cost": cost, "raw": raw, "opus": opus, "n_h": len(hroutes), "prec": prec}
 
 
+def tie_key(st: dict, hi: float, lo: float) -> tuple:
+    """Objective, then ties: lower opus share, lower raw cost, larger t_hi, larger t_lo."""
+    return (round(st["cost"], 12), round(st["opus"], 12), round(st["raw"], 12), -hi, -lo)
+
+
 def fit(rows: list[dict], arm: str, B: int = B_DEFAULT, seed: int = SEED) -> dict:
     """Deterministic grid fit on ``rows`` (the training folds): minimise weighted C-lambda2-clamp over the
     grid points that meet constraints 1-4 of PREREG-CLS-DEV section 7.2."""
@@ -821,7 +868,7 @@ def fit(rows: list[dict], arm: str, B: int = B_DEFAULT, seed: int = SEED) -> dic
             if preds not in cache:
                 cache[preds] = _point_stats(rows, preds)
             st = cache[preds]
-            cands.append(((round(st["cost"], 12), round(st["opus"], 12), round(st["raw"], 12), -hi, -lo), hi, lo, preds))
+            cands.append((tie_key(st, hi, lo), hi, lo, preds))
     cands.sort(key=lambda c: c[0])
     boot_cache: dict[tuple, dict] = {}
     checked = 0
@@ -939,12 +986,24 @@ def _rule_block(items, arms, rule, by_source, voided, population, B, seed, scree
     return block, rows, gs
 
 
+def dev_labels(mode: str, header: dict) -> dict:
+    """R2-6: every DEV-mode result is guard-free and screening only, and says so."""
+    if mode == "dev":
+        return {"guard_free": True, "screening_only": True, "label": DEV_LABEL}
+    return {"guard_free": not bool(header.get("guards_applied")), "screening_only": False}
+
+
 def _fallback_judge(rule: str, voided):
     if rule.startswith("other_two_higher:"):
         return rule.split(":", 1)[1]
     if rule == "other_two_higher":
         return voided
     return "gpt" if rule == "gpt_excluded" else None
+
+
+def single_use_validity_reasons(validity: dict, single_use: bool) -> list[str]:
+    """A single-use run whose validity arms are absent proves nothing: NOT INFORMATIVE."""
+    return ["validity_unavailable"] if single_use and validity["not_run"] else []
 
 
 def run_score(args, header, items, table_sha, harness_sha, se_sha, cal) -> dict:
@@ -974,15 +1033,12 @@ def run_score(args, header, items, table_sha, harness_sha, se_sha, cal) -> dict:
     gs_v = group_sums(prim_rows, arms) if prim_rows else []
     validity = validity_checks(gs_v, arms, B, seed, mode) if prim_rows else {"checks": {}, "reasons": [], "not_run": [], "ok": True}
     screen_reasons += validity["reasons"]
-    if args.single_use and validity["not_run"]:
-        screen_reasons.append("validity_unavailable")
+    screen_reasons += single_use_validity_reasons(validity, args.single_use)
 
     primary, rows, gs = _rule_block(items, arms, args.truth, by_source, voided, population, B, seed,
                                     screen_reasons, mode, primary=True)
     sens = {}
     for rule in SENSITIVITY:
-        if rule == args.truth and not by_source:
-            continue
         sblock, _, _ = _rule_block(items, arms, rule, by_source, voided, population, B, seed, screen_reasons, mode)
         sens[rule] = sblock
     robust = {}
@@ -997,8 +1053,6 @@ def run_score(args, header, items, table_sha, harness_sha, se_sha, cal) -> dict:
 
     result: dict = {
         "command": "score", "mode": mode, "population": population,
-        "guard_free": True if mode == "dev" else not bool(header.get("guards_applied")),
-        "screening_only": mode == "dev",
         "harness_sha": harness_sha, "shadow_eval_sha": se_sha, "table_sha": table_sha,
         "seed": seed, "B": B, "n_items": len(items), "n": len(rows),
         "n_groups": len({r["group"] for r in rows}),
@@ -1014,8 +1068,7 @@ def run_score(args, header, items, table_sha, harness_sha, se_sha, cal) -> dict:
         "auroc_population": "real",
         "judge_robustness": judge_robustness(items, arms, B, seed, voided),
     }
-    if mode == "dev":
-        result["label"] = DEV_LABEL
+    result.update(dev_labels(mode, header))
     result["reasons"] = sorted(set(primary.get("reasons", [])))
     result["status"] = "NOT INFORMATIVE" if result["reasons"] else "INFORMATIVE"
     if args.list_fallback_ids:
@@ -1099,7 +1152,8 @@ def run_fit(args, header, items, table_sha, harness_sha, se_sha) -> tuple[dict, 
                  "harness_sha": harness_sha, "shadow_eval_sha": se_sha, "table_sha": table_sha,
                  "seed": seed, "B": B, "n": len(rows), "n_groups": len({r["group"] for r in rows}),
                  "n_no_truth": info["n_no_truth"], "frozen": final, "fold_thresholds": oos["fold_thresholds"],
-                 "bootstrap_group_visits": OPS["group_visits"] - ops0["group_visits"]}
+                 "bootstrap_group_visits": OPS["group_visits"] - ops0["group_visits"],
+                 **dev_labels(args.mode, header)}
     if not final["admissible"] or not oos["admissible"]:
         out["admissible"] = False
         if not oos["admissible"]:
@@ -1149,8 +1203,7 @@ def run_selftest(args, header, items, table_sha, harness_sha, se_sha, cal) -> tu
            "table_sha": table_sha, "seed": args.seed, "B": args.boot_b, "n": len(rows),
            "validity": validity, "status": "INFORMATIVE" if validity["ok"] else "NOT INFORMATIVE",
            "reasons": validity["reasons"]}
-    if args.mode == "dev":
-        out["label"] = DEV_LABEL
+    out.update(dev_labels(args.mode, header))
     return out, 0 if validity["ok"] else 1
 
 
@@ -1271,6 +1324,8 @@ def main(argv=None) -> int:
             return 0
         code = 0
         if args.cmd == "score":
+            if args.mode == "test" and not (args.single_use and args.use_log):
+                raise Refuse(2, "refusing: --mode test needs --single-use and --use-log")
             if args.single_use and not args.use_log:
                 raise Refuse(2, "refusing: --single-use needs --use-log")
             if (args.pooled_oos or args.split_rows) and not args.arm:
