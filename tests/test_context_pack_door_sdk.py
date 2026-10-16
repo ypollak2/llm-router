@@ -70,7 +70,7 @@ class Rig:
 
         monkeypatch.setattr(context_pack, "build_pack", spy)
 
-    def _build_chain(self, complexity, zone, task_type):
+    def _build_chain(self, complexity, zone, task_type, **_kwargs):
         self.chains.append((complexity, zone, task_type))
         return list(self.chain)
 
@@ -329,7 +329,7 @@ def test_history_reaches_the_provider_call_through_the_real_executor(monkeypatch
 
     monkeypatch.setattr(chain_builder, "get_current_pressure", lambda: ("green", 0.0))
     monkeypatch.setattr(chain_builder, "needs_claude_tools", lambda p, t: False)
-    monkeypatch.setattr(chain_builder, "build_chain", lambda c, z, t: [OPENAI])
+    monkeypatch.setattr(chain_builder, "build_chain", lambda c, z, t, **k: [OPENAI])
     monkeypatch.setitem(direct_executor._PROVIDER_CALLS, "openai", fake_call)
     monkeypatch.setattr(direct_executor, "_paid_budget_exhausted", lambda p: False)
     monkeypatch.setattr(direct_executor, "_provider_reset_blocked", lambda p: False)

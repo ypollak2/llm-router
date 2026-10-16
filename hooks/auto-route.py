@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 57
+# llm_router-hook-version: 58
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 57"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 58"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -5423,7 +5423,13 @@ def main() -> None:
             # is built as a question; the routing hint below is unchanged.
             _draft_task = ("query" if task_type == "research" and not _needs_web(prompt)
                            else task_type)
-            _direct_chain = _build_direct_chain(complexity, _zone, _draft_task)
+            # D-114/D-115: zero-Claude has no host Claude fallback for Q&A, so it keeps
+            # local as a last resort. Normal mode calls build_chain exactly as before.
+            if zero_claude:
+                _direct_chain = _build_direct_chain(
+                    complexity, _zone, _draft_task, qa_last_resort=True)
+            else:
+                _direct_chain = _build_direct_chain(complexity, _zone, _draft_task)
 
             # #3: a DRAFT must NEVER hit a paid API. build_chain can include paid
             # externals (gemini/openai); routing a pre-generated draft there is

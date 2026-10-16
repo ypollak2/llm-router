@@ -48,13 +48,15 @@ def _provider(entry: Any) -> str:
 def strip_local_for_qa(models: list, task_type: Any, *, keep_if_only_local: bool = True) -> list:
     """Strip local Q&A models while a non-Claude provider remains (D-14, D-114).
 
-    With ``keep_if_only_local=True`` (MCP), retain locals before Claude when stripping
-    leaves no non-Claude provider: D-114 follows the 2026-10-15 env-doctor evidence of
-    a fresh-process simple Q&A call failing on Haiku without an Anthropic API key
-    despite installed Ollama and ``LLM_ROUTER_CLAUDE_SUBSCRIPTION=true``.
+    With ``keep_if_only_local=True`` (MCP ``route_and_call``, also serving the
+    gateway and route server; SDK; zero-Claude hook), retain locals before Claude
+    when stripping leaves no non-Claude provider: D-114 follows the 2026-10-15
+    env-doctor evidence of a fresh-process simple Q&A call failing on Haiku without an
+    Anthropic API key despite installed Ollama and ``LLM_ROUTER_CLAUDE_SUBSCRIPTION=true``.
 
-    With False (hook/SDK), always return the stripped chain, even empty or Claude-only;
-    an empty chain falls through to the host Claude session, which needs no API key.
+    With False (normal hook DIRECT path only), return the stripped chain even if
+    empty or Claude-only; the turn falls through to the host Claude session,
+    which needs no API key.
     Non-Q&A types pass through unchanged. ``task_type`` may be a ``TaskType`` or string.
     Relative order within the local and kept groups is preserved.
 

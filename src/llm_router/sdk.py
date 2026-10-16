@@ -197,7 +197,7 @@ def _route(prompt: str, *, task_type: str | None, complexity: str | None,
         extra = {"context": packed["agent_context"]} if packed else {}
         result = execute_agent(request, chain, timeout=max(timeout, 180), **extra)
     else:
-        chain = build_chain(complexity, zone, task_type)
+        chain = build_chain(complexity, zone, task_type, qa_last_resort=True)
         request, packed = _pack_kwargs(prompt, messages, chain, session_id)
         extra = {"context": packed["context"], "history": packed["history"]} if packed else {}
         result = execute_chain(request, chain, task_type, timeout=timeout, **extra)

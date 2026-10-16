@@ -1,4 +1,5 @@
-"""M3.0 (PLAN D-14 = A): a Q&A task type is never served by a local provider.
+"""M3.0 (PLAN D-14 = A): Q&A is never served locally while a non-Claude provider remains
+(D-114 amends; see tests/test_d114_qa_local_last_resort.py).
 
 Evidence behind the rule: real Q&A prompts, local qwen 4/37 acceptable vs Sonnet 34/37
 (PLAN 0.3 [RX]); 65 local Q&A answers in 7 days through MCP ``llm()`` [U]. Code task
@@ -257,9 +258,10 @@ async def test_the_proxy_still_routes_a_qa_step_to_the_local_model(mock_env):
 
 
 # --- strip-before-cap order (M3.0 x TQ-007) -------------------------------------------
-# The cap step downgrades to {ollama, codex, gemini_cli}. If the Q&A strip ran AFTER it,
-# a capped Q&A call would be served by Ollama, which D-14 = A forbids. Driven through the
-# TQ-007 harness (tests/test_tq007_daily_cap_downgrade._run) with TaskType.QUERY.
+# With a non-Claude provider in the chain, D-14 still strips Ollama before the cap
+# step, so a capped Q&A call is not served by Ollama. When only Claude remains
+# (D-114), Ollama is kept and the cap step serves it (pinned below). Driven through
+# the TQ-007 harness (tests/test_tq007_daily_cap_downgrade._run) with TaskType.QUERY.
 CAP_CHAIN = ["openai/gpt-4o", "ollama/qwen2.5:7b"]
 
 
@@ -294,4 +296,24 @@ async def test_the_same_capped_chain_for_code_is_still_served_by_ollama():
     """Control: same chain, same cap, task type CODE. Ollama is the free fallback, so the
     Q&A blocks above are the strip's work, not an inert cap step."""
     resp = await t._run(CAP_CHAIN, task_cap=0.0001, enforce="hard", task_type=TaskType.CODE)
+    assert resp.provider == "ollama", resp.model
+
+
+@pytest.mark.asyncio
+async def test_capped_qa_claude_only_serves_ollama_smart():
+    """D-114 keeps local before Claude: smart caps now serve Ollama, not Claude."""
+    resp = await t._run(
+        ["ollama/qwen2.5:7b", "anthropic/claude-sonnet-4-6"],
+        task_cap=0.0001, enforce="smart", task_type=TaskType.QUERY,
+    )
+    assert resp.provider == "ollama", resp.model
+
+
+@pytest.mark.asyncio
+async def test_capped_qa_claude_only_serves_ollama_hard():
+    """D-114 keeps local before Claude: hard caps serve Ollama instead of raising."""
+    resp = await t._run(
+        ["ollama/qwen2.5:7b", "anthropic/claude-sonnet-4-6"],
+        task_cap=0.0001, enforce="hard", task_type=TaskType.QUERY,
+    )
     assert resp.provider == "ollama", resp.model

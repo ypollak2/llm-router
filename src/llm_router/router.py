@@ -76,9 +76,9 @@ from llm_router.model_discovery import ensure_grandfather, order_for_chain, sink
 from llm_router.profiles import get_model_chain, provider_from_model
 from llm_router.receipt_store import compute_receipt, store_receipt
 from llm_router.tracing import set_span_attributes, traced_span
-# M3.0 (PLAN D-14 = A): a Q&A task type is never served by a local provider through
-# ``route_and_call``. The rule and its provider set live in ``llm_router.qa_policy`` so the
-# hook DIRECT path and the SDK apply the same copy (P0.3); these names stay for callers.
+# D-14/D-114: remove local Q&A models while a non-Claude provider remains;
+# otherwise keep local before Claude. The rule lives in ``llm_router.qa_policy``,
+# shared with the hook DIRECT path and SDK; these names stay for callers.
 from llm_router.qa_policy import QA_STRIP_PROVIDERS as _QA_STRIP_PROVIDERS  # noqa: F401
 from llm_router.qa_policy import strip_local_for_qa as _strip_local_for_qa
 from llm_router.types import BudgetExceededError, Complexity, CostBudgetExceeded, DeadlineExceeded, LLMResponse, RoutingProfile, TaskType, WallClockExceeded

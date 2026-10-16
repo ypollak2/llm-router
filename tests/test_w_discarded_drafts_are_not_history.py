@@ -50,7 +50,7 @@ def _run(monkeypatch, tmp_path, env):
     import llm_router.hooks.direct_executor as de
     model = de.ModelSpec(provider="ollama", model="fake-model")
     monkeypatch.setattr(cb, "get_current_pressure", lambda: ("green", 10.0))
-    monkeypatch.setattr(cb, "build_chain", lambda c, z, t: [model])
+    monkeypatch.setattr(cb, "build_chain", lambda c, z, t, **k: [model])
     monkeypatch.setattr(cb, "needs_claude_tools", lambda p, t: False)
     res = de.DirectResult(text=DRAFT, model=model, latency_ms=5)
     monkeypatch.setattr(de, "execute_chain", lambda *a, **k: res)

@@ -79,7 +79,7 @@ def test_auto_route_skips_an_open_direct_class_and_logs_why(monkeypatch, tmp_pat
     attempted: list[str] = []
     monkeypatch.setattr(chain_builder, "get_current_pressure", lambda: ("green", 10.0))
     monkeypatch.setattr(chain_builder, "build_chain",
-                         lambda c, z, t: attempted.append("build_chain") or [])
+                         lambda c, z, t, **k: attempted.append("build_chain") or [])
     monkeypatch.setattr(chain_builder, "needs_claude_tools", lambda p, t: False)
     monkeypatch.setattr(de, "execute_chain", lambda *a, **k: attempted.append("execute_chain"))
     monkeypatch.setattr(de, "execute_agent", lambda *a, **k: attempted.append("execute_agent"))
