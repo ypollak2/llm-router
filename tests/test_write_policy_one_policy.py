@@ -270,7 +270,14 @@ def test_check_write_verdicts(world):
     # mutating git forms stay refused (item 3)
     "git checkout -b new", "git commit -m x", "git stash push", "git stash pop", "git stash drop",
     "git tag v1", "git branch -d x", "git branch -D x", "git config user.name x", "git remote add o u",
-    "git stash"])
+    "git stash",
+    # D-162: -v does not make remote read-only; option values before the subcommand
+    "git remote -v add o U", "git remote -v set-url o U", "git remote --verbose rename o p",
+    "git remote -v remove o", "git remote -v prune o", "git remote add -v o U",
+    "npm --prefix . i x", "yarn --cwd . add x", "pnpm -C . add x", "pnpm --dir . i",
+    "pip --index-url U install y", "yarn global add x", "npm install-test", "npm it", "npm cit",
+    "npm in x", "npm isntall x", "npm exec foo", "npm x foo", "yarn dlx foo", "pnpm dlx foo",
+    "pipx run foo", "npm --prefix . exec foo"])
 def test_destructive_table_needs_approval(world, cmd):
     v = wp.check_action(cmd, world.root)
     assert v.decision == wp.NEEDS_APPROVAL, v
@@ -285,7 +292,9 @@ def test_destructive_table_needs_approval(world, cmd):
     "uv run pip list", "git stash list", "git stash show", "git tag", "git tag -l", "git tag --list",
     "git branch", "git branch --list", "git branch -a", "git branch -r", "git remote", "git remote -v",
     "git remote show origin", "git config --get user.name", "git config --list", "git rev-parse HEAD",
-    "git ls-files", "git blame a.txt", "git -C x log", "ls -la", "echo 'git push' > note.txt", "grep -r push .", "echo ok 2>&1", ""])
+    "git ls-files", "git blame a.txt", "git remote -v show origin", "git remote --verbose",
+    "npm --prefix . run build", "npm --prefix . test", "yarn --cwd . test", "pip --version",
+    "pip --index-url U list", "npm run i", "npm test -- add", "git -C x log", "ls -la", "echo 'git push' > note.txt", "grep -r push .", "echo ok 2>&1", ""])
 def test_benign_commands_are_not_destructive(world, cmd):
     assert wp.destructive_reason(cmd) is None
     assert wp.check_action(cmd, world.root).decision == wp.ALLOW
@@ -608,3 +617,26 @@ def test_m10_mutating_git_allowed_is_caught(world, monkeypatch):
     assert all(wp.destructive_reason(c) for c in writes)
     monkeypatch.setattr(wp, "_git_read_only", lambda sub, rest: True)
     assert any(wp.destructive_reason(c) is None for c in writes)
+
+
+def test_m11_remote_v_prefix_mutant_is_caught(world, monkeypatch):
+    cmds = ["git remote -v add o U", "git remote --verbose rename o p"]
+    assert all(wp.destructive_reason(c) for c in cmds)
+    real = wp._git_read_only
+    monkeypatch.setattr(wp, "_git_read_only", lambda sub, rest: (
+        True if sub == "remote" and rest[:1] in (["-v"], ["--verbose"]) else real(sub, rest)))
+    assert any(wp.destructive_reason(c) is None for c in cmds)
+
+
+def test_m12_first_positional_only_scan_mutant_is_caught(world, monkeypatch):
+    cmds = ["npm --prefix . i x", "yarn --cwd . add x", "pip --index-url U install y"]
+    assert all(wp.destructive_reason(c) for c in cmds)
+    monkeypatch.setattr(wp, "_SCRIPT_RUNNERS", frozenset({"."}))      # scan stops at the option value
+    assert any(wp.destructive_reason(c) is None for c in cmds)
+
+
+def test_m13_exec_runners_removed_is_caught(world, monkeypatch):
+    cmds = ["npm exec foo", "npm x foo", "yarn dlx foo", "pnpm dlx foo", "pipx run foo"]
+    assert all(wp.destructive_reason(c) for c in cmds)
+    monkeypatch.setattr(wp, "_PKG_SUBS", {k: v - {"exec", "x", "dlx", "run"} for k, v in wp._PKG_SUBS.items()})
+    assert all(wp.destructive_reason(c) is None for c in cmds)

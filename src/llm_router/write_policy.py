@@ -1332,11 +1332,13 @@ _ALWAYS_APPROVAL = {"mkfs", "shred", "fdisk", "sudo", "doas", "su",
 _GIT_VALUED = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
 _PKG_SUBS = {
     "pip": {"install", "uninstall"}, "pip3": {"install", "uninstall"},
-    "pipx": {"install", "uninstall", "upgrade", "reinstall", "inject"},
+    "pipx": {"install", "uninstall", "upgrade", "reinstall", "inject", "run"},
     "npm": {"install", "i", "ci", "add", "uninstall", "un", "remove", "rm", "publish",
-            "link", "update", "up"},
-    "pnpm": {"install", "i", "add", "remove", "rm", "uninstall", "un", "update", "up", "publish"},
-    "yarn": {"install", "add", "remove", "publish", "upgrade", "up"},
+            "link", "update", "up", "install-test", "it", "cit", "install-ci-test", "ic",
+            "in", "isntall", "exec", "x"},
+    "pnpm": {"install", "i", "add", "remove", "rm", "uninstall", "un", "update", "up", "publish",
+             "dlx"},
+    "yarn": {"install", "add", "remove", "publish", "upgrade", "up", "dlx"},
     "cargo": {"install", "publish", "yank"},
     "go": {"install", "get"}, "gem": {"install"}, "brew": {"install", "uninstall"},
     "apt": {"install", "remove"}, "apt-get": {"install", "remove"},
@@ -1348,6 +1350,7 @@ _PKG_SUBS = {
 _TABLE_EXEMPT = {"npm": {"run"}}
 #: State-changing git subcommands missing from agent_writes' table (D-146).
 _GIT_EXTRA = frozenset({"commit", "pull"})
+_SCRIPT_RUNNERS = frozenset({"run", "run-script", "test", "t", "start", "stop", "restart"})
 _GIT_TAG_READ = {"-l", "--list"}
 _GIT_CONFIG_READ = {"--get", "--get-all", "--get-regexp", "--list", "-l"}
 
@@ -1362,7 +1365,9 @@ def _git_read_only(sub: str, rest: list[str]) -> bool:
     if sub == "tag":
         return not rest or rest[0] in _GIT_TAG_READ
     if sub == "remote":
-        return not rest or rest[0] in ("-v", "--verbose", "show", "get-url")
+        while rest[:1] and rest[0] in ("-v", "--verbose"):
+            rest = rest[1:]
+        return not rest or rest[0] in ("show", "get-url")
     if sub == "config":
         return bool(rest) and rest[0] in _GIT_CONFIG_READ
     return False
@@ -1435,8 +1440,15 @@ def _segment_destructive(words: list[str]) -> str | None:
     sub, _rest = _first_sub(args)
     if prog == "yarn" and not sub and not {"--version", "-v", "--help", "-h"} & set(args):
         return "bare 'yarn' installs dependencies and needs approval"
-    if sub in _PKG_SUBS.get(prog, ()):
-        return f"'{prog} {sub}' needs approval (installs, removes or publishes packages)"
+    # Scan every argument, not just the first positional: `npm --prefix . i x`,
+    # `yarn --cwd . add x`, `pip --index-url U install y` carry an option VALUE where
+    # the subcommand was expected (same lesson as agent_writes' `git -C /tmp push`).
+    # Script runners stop the scan: their remaining words belong to the script.
+    for a in args:
+        if a in _PKG_SUBS.get(prog, ()):
+            return f"'{prog} {a}' needs approval (installs, removes, publishes or runs packages)"
+        if a in _SCRIPT_RUNNERS:
+            break
     if sub and sub in table.get(prog, ()) and sub not in _TABLE_EXEMPT.get(prog, ()):
         return f"'{prog} {sub}' changes state and needs approval"
     return None
