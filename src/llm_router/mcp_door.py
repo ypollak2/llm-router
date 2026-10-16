@@ -15,12 +15,17 @@ never caught here (they are not ``Exception`` and ``mcp`` does not wrap them).
 
 B. A routed call had no overall deadline: a ``task="query"`` chain of four local models
 hung >150 s while other processes held the same Ollama model, and the MCP client stops
-waiting at ~120 s. The routed doors (``DEADLINE_TOOLS``) now run under one deadline,
-``LLM_ROUTER_MCP_DEADLINE_S`` (default 90 s, below the client's ~120 s; 0 turns it off).
-Inside that deadline each provider attempt made through ``providers.call_llm`` is capped
-at half the deadline (45 s by default, below ``request_timeout``'s 120 s), so one hung
-attempt still leaves room for the next candidate in the chain. When the deadline itself
-expires the door returns ``llm-router error: deadline <N>s exceeded; tried: <models>; ...``.
+waiting at ~120 s. The routed doors (``DEADLINE_TOOLS``: every MCP tool that calls
+``route_and_call``) now run under one deadline, ``LLM_ROUTER_MCP_DEADLINE_S`` (default
+90 s, below the client's ~120 s; 0 turns it off). Inside that deadline each LOCAL
+(``ollama/``) attempt made through ``providers.call_llm`` is capped at half the deadline
+(45 s by default, below ``request_timeout``'s 120 s), so one hung local model still leaves
+room for the next candidate. Cloud attempts are not capped (D-154: extended-thinking and
+research calls legitimately take 45-120 s); they run until the overall deadline. A cap
+expiry raises ``AttemptCapExceeded``, which is not a timeout to the router: it does not
+start the LOCAL-TIMEOUT-1 cooldown or count as a provider failure, so routing does not
+change. When the deadline itself expires the door returns
+``llm-router error: deadline <N>s exceeded; tried: <models>; ...``.
 
 Light on purpose: stdlib only at import; ``mcp`` is imported inside ``run_door``.
 """
@@ -29,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import math
 import os
+import traceback
 from contextvars import ContextVar
 from typing import Any, Awaitable
 
@@ -39,11 +45,27 @@ MCP_DEADLINE_DEFAULT_S = 90.0
 #: at least one more candidate inside the same deadline.
 ATTEMPT_SHARE = 0.5
 
-#: The doors that route a completion: ``llm()``, ``llm_route`` and the task aliases.
+#: Every MCP tool that calls ``route_and_call``: ``llm()``, ``llm_route``, the task aliases,
+#: ``llm_edit``, ``llm_text_job`` and ``llm_router_agent_route`` (D-154).
 DEADLINE_TOOLS = frozenset({
     "llm", "llm_route",
     "llm_query", "llm_research", "llm_generate", "llm_analyze", "llm_reason", "llm_code",
+    "llm_edit", "llm_text_job", "llm_router_agent_route",
 })
+
+
+class AttemptCapExceeded(Exception):
+    """A local attempt gave no answer within its share of the MCP deadline.
+
+    Deliberately NOT a ``TimeoutError`` and without "timeout" in its name: the router's
+    LOCAL-TIMEOUT-1 cooldown (``router._is_timeout_error``) must not fire for a cap the door
+    imposed, and the router records it as ``fallback_reason="deadline_cap"``."""
+
+    def __init__(self, model: str, cap_s: float) -> None:
+        super().__init__(f"deadline_cap: {model} gave no answer within the {cap_s:g}s "
+                         "per-attempt cap of the MCP deadline")
+        self.model = model
+        self.cap_s = cap_s
 
 _MAX_MESSAGE_CHARS = 2000
 
@@ -76,10 +98,13 @@ def deadline_s() -> float:
     return value if value > 0 else 0.0
 
 
-def attempt_cap_s() -> float | None:
-    """The per-attempt timeout inside a deadline-bound MCP call, else None (no cap)."""
+def attempt_cap_s(model: str) -> float | None:
+    """The per-attempt cap for ``model`` inside a deadline-bound MCP call, else None.
+
+    Local (``ollama/``) models only, the incident class (a busy Ollama queue). A cloud
+    attempt is bounded by the overall deadline alone (D-154)."""
     state = _STATE.get()
-    if state is None or state.deadline_s <= 0:
+    if state is None or state.deadline_s <= 0 or not str(model).startswith("ollama/"):
         return None
     return state.deadline_s * ATTEMPT_SHARE
 
@@ -138,8 +163,13 @@ def _tool_crash(exc: BaseException) -> BaseException | None:
 
 
 def error_text(exc: BaseException, tried: list[str]) -> str:
-    """``llm-router error: <ExceptionType>: <message>`` (+ ``tried: ...`` when known)."""
-    message = str(exc).strip() or "(no message)"
+    """``llm-router error: <ExceptionType>: <message>`` (+ ``tried: ...`` when known).
+
+    The message is secret-scrubbed before it reaches the client. F4's ``neutralise()``
+    (tool-call text) is to be applied here too once #530 merges (D-154 follow-up)."""
+    from llm_router.secret_scrubber import scrub_text
+
+    message = scrub_text(str(exc)).strip() or "(no message)"
     if len(message) > _MAX_MESSAGE_CHARS:
         message = message[:_MAX_MESSAGE_CHARS] + " ..."
     text = f"llm-router error: {type(exc).__name__}: {message}"
@@ -177,6 +207,19 @@ def _record(code: str, exc: BaseException | None, detail: str) -> None:
         pass
 
 
+def _debug_traceback(name: str, exc: BaseException) -> None:
+    """The crash's traceback at DEBUG (D-154): mcp 2.2 no longer logs it once the door turns
+    the crash into a result. Traceback text only (no frame locals), secret-scrubbed."""
+    try:
+        from llm_router.logging import get_logger
+        from llm_router.secret_scrubber import scrub_text
+
+        text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        get_logger("llm_router.mcp_door").debug("mcp_tool_traceback", tool=name, traceback=scrub_text(text))
+    except Exception:  # noqa: BLE001 -- telemetry never changes the reply
+        pass
+
+
 async def run_door(name: str, call: Awaitable[Any]) -> Any:
     """Await one MCP tool call (``call``) under the door's contract; see the module doc."""
     from mcp.server.mcpserver.exceptions import ToolError
@@ -202,6 +245,7 @@ async def run_door(name: str, call: Awaitable[Any]) -> Any:
         if crash is None:
             raise
         _record("CHZ-FO-MCP-TOOL-ERROR", crash, f"tool={name}")
+        _debug_traceback(name, crash)
         return _result(error_text(crash, _tried(state)))
     finally:
         _STATE.reset(token)

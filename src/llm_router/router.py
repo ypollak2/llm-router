@@ -3669,7 +3669,21 @@ async def _dispatch_model_loop(
             is_rate_limit = _is_rate_limit_error(e)
             is_content_filter = not is_rate_limit and _is_content_filter_error(e)
             is_auth = not is_rate_limit and not is_content_filter and _is_auth_error(e)
-            if is_rate_limit:
+            from llm_router.mcp_door import AttemptCapExceeded as _AttemptCapExceeded
+            if isinstance(e, _AttemptCapExceeded):
+                # D-154: the MCP door's per-attempt cap, not a provider fault: no health
+                # failure, no LOCAL-TIMEOUT-1 cooldown (not a TimeoutError), so routing
+                # stays as it was; recorded under its own reason.
+                await _notify(ctx, "warning", f"{model} hit the MCP deadline cap — trying next...")
+                route_log.warning(
+                    "routing_fallback",
+                    correlation_id=correlation_id,
+                    model=model,
+                    provider=provider,
+                    error_type=type(e).__name__,
+                    fallback_reason="deadline_cap",
+                )
+            elif is_rate_limit:
                 await _notify(ctx, "warning", f"{model} rate-limited — switching provider...")
                 log.warning("Rate limit on %s, switching to next", model)
                 route_log.warning(

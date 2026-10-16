@@ -174,6 +174,7 @@ async def run_claude(
     args = [binary, "-p", prompt, "--output-format", "text", "--model", _model_alias(model)]
 
     start = time.monotonic()
+    proc = None
     try:
         env = get_safe_env()
         proc = await asyncio.create_subprocess_exec(
@@ -183,6 +184,8 @@ async def run_claude(
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             env=env,
+            # own session so a cancel can stop the whole tree (codex_agent._kill_tree)
+            start_new_session=(os.name == "posix"),
         )
 
         text_chunks: list[str] = []
@@ -228,6 +231,13 @@ async def run_claude(
             content=output, model=model,
             exit_code=proc.returncode or 0, duration_sec=duration,
         )
+    except asyncio.CancelledError:
+        # D-154: a cancelled call (the MCP door's deadline, a client disconnect) must not
+        # leave the Claude Code process running; same contract as codex_agent.
+        if proc is not None:
+            from llm_router.codex_agent import _kill_tree
+            await _kill_tree(proc)
+        raise
     except asyncio.TimeoutError:
         return ClaudeResult(
             content=f"Claude Code timed out after {timeout}s",

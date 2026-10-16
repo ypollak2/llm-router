@@ -328,17 +328,20 @@ async def call_llm(
         check_overflow({"messages": cached_messages}, num_ctx=kwargs.get("num_ctx"),
                        model=kwargs["model"], site="providers.call_llm")
 
-    # D-141: inside a deadline-bound MCP call one attempt gets at most half the deadline
-    # (45 s of 90 s by default), so a hung provider times out and the router falls through
-    # to the next candidate before the call's overall deadline expires.
-    from llm_router.mcp_door import attempt_cap_s
-    _attempt_cap = attempt_cap_s()
+    # D-141/D-154: inside a deadline-bound MCP call a LOCAL (ollama/) attempt gets at most
+    # half the deadline (45 s of 90 s by default), so a busy Ollama queue falls through to
+    # the next candidate before the overall deadline. Cloud attempts are not capped. The
+    # cap raises AttemptCapExceeded (not a timeout: no LOCAL-TIMEOUT-1 cooldown).
+    from llm_router.mcp_door import AttemptCapExceeded, attempt_cap_s
+    _attempt_cap = attempt_cap_s(model)
     if _attempt_cap is not None:
-        kwargs["timeout"] = min(kwargs["timeout"], _attempt_cap)
-        response = await asyncio.wait_for(
-            litellm.acompletion(**kwargs),  # llm_router: direct-ok (router provider layer)
-            timeout=_attempt_cap,
-        )
+        try:
+            response = await asyncio.wait_for(
+                litellm.acompletion(**kwargs),  # llm_router: direct-ok (router provider layer)
+                timeout=_attempt_cap,
+            )
+        except TimeoutError as exc:
+            raise AttemptCapExceeded(model, _attempt_cap) from exc
     else:
         response = await litellm.acompletion(**kwargs)  # llm_router: direct-ok (router provider layer)
     elapsed_ms = (time.monotonic() - start) * 1000
