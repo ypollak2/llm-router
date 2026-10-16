@@ -1,6 +1,6 @@
 # PREREG-P20-requal: local re-qualification with the full pack (PLAN v16 P2.0 tasks 1-5)
 
-Status: **DRAFT r7, not frozen.** This file is frozen only when `PREREG-P20-requal.sha256` exists
+Status: **DRAFT r8, not frozen.** This file is frozen only when `PREREG-P20-requal.sha256` exists
 beside it, an independent freeze-guard review has passed (D-122 rule: an author-written sidecar is
 void), and `scripts/check_prereg.py` reports a match. Until then `scripts/p20_requal.py` refuses every
 subcommand that writes an item, calls a model or writes a result. The one pre-freeze mode is
@@ -13,7 +13,8 @@ r2 applied the freeze-guard review of r1 (NOT READY) and D-123 / D-123a; r3 appl
 and adds the runner disclosures and hook-free Claude calls (coordinator, 2026-10-16); r6 pins every rx
 source and fixes three text points from the r5 review; r7 (D-131) records build 1 as void, fixes the
 `rx_edit` directory mapping and the sub-agent transcript search, moves the run to `requal/b2`, and
-discloses the two ungraded rx packets and the tech-op shortfall.
+discloses the two ungraded rx packets and the tech-op shortfall; r8 (D-133, D-133a) corrects the tech-op
+estimate and records tech-op as NOT INFORMATIVE by design.
 
 ## 0. Contradictions and settled points (read first)
 
@@ -146,15 +147,34 @@ uses its stratum name as the session (the cap does not apply to code).
 * The complex one would be dropped by the tier filter anyway, so the exclusion removes one item
   that would otherwise be eligible.
 
-**Tech-op shortfall (D-131, stated before selection).**
-* Build 1 gave a tech-op pool of 15 and n = 1. A counts-only estimate for build 2 from ledger
-  metadata plus id lookups (no text) gives about 11 admissible organic steps after the 20% session
-  cap.
-* The non-organic stratum D-131(b) proposed (main-thread tech-op steps from headless, research
-  and harness sessions) would admit **0**: every such row has no `tier_complexity` label, so all
-  are `no_tier`. So it is not added.
-* If tech-op n < 60, the set is **NOT INFORMATIVE by design**. P2.1 waits: there is no kill and no
-  P2.1 cancellation. Q&A and code proceed.
+**Tech-op is NOT INFORMATIVE by design (D-131, D-133, D-133a; stated before selection).**
+All estimates below are counts only, from ledger metadata plus response-id lookups in
+transcripts; no text was read.
+* **Build 1** gave a tech-op pool of 15 and n = 1.
+* **Organic, row-stamp rule** (kept by D-133a). The builder admits rows whose ledger
+  `session_kind` stamp is `organic`. After the sub-agent search and the 20% cap, that admits about
+  11 steps.
+* **Organic, census-exact rule.** Resolving kinds the way GE1 `census.py` does (`KindIndex` over the
+  backfill, the overrides and the per-session tag files) admits about **1** step. The row-stamp
+  rule therefore differs from the census population by about 10 rows, which census resolves to
+  research. No decision depends on this difference, because tech-op is not informative under
+  either rule.
+* **Untagged sessions** (`session_kind` null; the D-133 `untagged_census` stratum). All of them
+  resolve to research under census's `KindIndex`, so the stratum admits **0** and is not added.
+* **Non-organic main-thread steps** (headless, research, harness; D-131 b). Every such row lacks
+  `tier_complexity`, so it is `no_tier` and the stratum admits **0**. It is not added.
+* **Unexplained `msg_id` loss.** For 301 untagged and 147 organic tech-op steps, the session's
+  transcript exists but the proxy's response `msg_id` appears in neither the main transcript nor
+  any sub-agent transcript. The cause is unknown.
+* **`is_main_thread` is unreliable.** Of the organic-stamped tech-op rows flagged
+  `is_main_thread = true`, 27 have their response id only in a sub-agent transcript. The flag is
+  used only to drop rows flagged `false`.
+* **Consequence.** Tech-op n is far below 60, so the set is NOT INFORMATIVE by design. P2.1 waits;
+  there is no kill and no P2.1 cancellation. Q&A (dry-run n 118) and code (expected n 75) proceed.
+  The T_P2 tech-op lever is 0 for now (e_tech = 0, §11). The expected consequence is
+  T_P2 < 20%, which goes to the owner under D-27.
+* **Follow-up F3.** First make the proxy ledger record `tier_complexity` on continuation steps and
+  stamp session kinds at write time. Then write a separate tech-op requalification prereg.
 
 **Selection** (`select`, once). Rows are ordered by `sha256("20261016:" + id)`, with stratum `rx`
 first for `qa`. The walk admits a row unless its session already holds `floor(0.20 × N_target)`
