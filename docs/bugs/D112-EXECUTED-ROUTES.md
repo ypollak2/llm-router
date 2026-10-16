@@ -17,6 +17,8 @@ status: fixed in fix/dashboard-executed-routes
   executed counts and label classifier counts as hints. Stop now says
   `ROUTING  24h  N executed` with per-provider rows and `hints today: N classified`;
   its default condensed line shows `N executed (24h)` instead of `N routed`.
+  When usage.db has no routing_decisions data, it shows `no execution data (24h)`,
+  so the line's presence does not depend on database timing.
   `llm-router summary` uses its `--since-hours` window (default 24h).
   `llm_model_usage` labels classifier hints separately from executions;
   `explain-dashboard` documents both sources and their windows.

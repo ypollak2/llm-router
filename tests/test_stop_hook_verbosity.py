@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -267,7 +268,8 @@ def test_condensed_live_panel_uses_only_executions(hook, fixture_home, execution
     ))
     line = hook._condense(console.export_text())
     if execution is None:
-        assert "executed" not in line
+        assert "no execution data (24h)" in line
+        assert not re.search(r"\d+\s+executed", line)
         assert "routed" not in line
     else:
         assert "4 executed (24h)" in line

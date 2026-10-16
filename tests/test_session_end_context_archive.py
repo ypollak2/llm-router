@@ -93,8 +93,6 @@ def test_stop_never_archives(hook, monkeypatch):
     """Stop fires after every turn. It must not delete the session's context."""
     _resolve_calls, archive_calls = _spy(monkeypatch)
 
-    # Use full mode: condensed is correctly empty with no usage.db.
-    monkeypatch.setenv("LLM_ROUTER_STOP_HOOK", "full")
     out = _run_main(hook, monkeypatch, {"session_id": "cc-session-real", "hook_event_name": "Stop"})
 
     assert archive_calls == []
@@ -190,8 +188,6 @@ def test_non_dict_hook_input_never_archives(hook, monkeypatch):
     """A non-dict payload carries no hook_event_name, so it cannot be SessionEnd."""
     _resolve_calls, archive_calls = _spy(monkeypatch)
 
-    # Use full mode: condensed is correctly empty with no usage.db.
-    monkeypatch.setenv("LLM_ROUTER_STOP_HOOK", "full")
     out = _run_main(hook, monkeypatch, json.dumps(["not", "a", "dict"]))
 
     assert archive_calls == []
@@ -201,8 +197,6 @@ def test_non_dict_hook_input_never_archives(hook, monkeypatch):
 def test_malformed_json_stdin_never_archives(hook, monkeypatch):
     _resolve_calls, archive_calls = _spy(monkeypatch)
 
-    # Use full mode: condensed is correctly empty with no usage.db.
-    monkeypatch.setenv("LLM_ROUTER_STOP_HOOK", "full")
     out = _run_main(hook, monkeypatch, "{not valid json")
 
     assert archive_calls == []
