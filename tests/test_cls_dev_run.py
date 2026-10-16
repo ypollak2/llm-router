@@ -1101,6 +1101,44 @@ def test_fallback_scores_decode_to_rules_tier_over_the_whole_grid():
         assert {ce.decide(sc, h, lo) for h, lo in grid} == {want}
 
 
+def test_criterion8_syn_leg_missing_arm_is_pending_not_applicable_only_without_syn_rows(tmp_path):
+    ok = {"under": {"discordant": False}, "cost": {"discordant": False}}
+    r = D.criterion8(ok, voided=[], syn=None, syn_rows_present=True)
+    assert r["status"] == "pending" and r["syn_leg"]["status"] == "pending"
+    assert not D.criteria_table([r])["eligible"]
+    r = D.criterion8(ok, voided=[], syn=None, syn_rows_present=False)
+    assert r["status"] == "pass" and r["syn_leg"]["status"] == "not_applicable"
+
+    class _A:
+        out_dir = str(tmp_path)
+    score = {"judge_robustness": {"arms": {"C1": ok}, "syn_leg": {"arms": {}}}}             # syn leg lacks C1
+    floor = {"status": "OK", "failed": [], "pending": []}
+    t = R.candidate_criteria(_A, "C1", floor=floor, score=score, fit={}, n_error=0, n_pool=100, low_cluster=False,
+                             resemblance_failed=False, voided_real=[], n_syn_pool=30)
+    assert t["rows"][8]["status"] == "pending" and 8 in t["pending"] and not t["eligible"]
+    t = R.candidate_criteria(_A, "C1", floor=floor, score=score, fit={}, n_error=0, n_pool=100, low_cluster=False,
+                             resemblance_failed=False, voided_real=[], n_syn_pool=0)
+    assert t["rows"][8]["status"] == "pass"
+
+
+def test_unreachable_ollama_in_the_quiet_gate_parks(env, tmp_path):
+    real, _, _ = make_data(n_real=8, n_groups=4, n_syn=0)
+    man = build_manifest(env, real, [])
+    deps = quiet_deps(readers=lambda o, own: quiet_readers(foreign_models=[m["name"] for m in o.ps()]),
+                      l2_score=lambda c, a: (lambda t, d: {"opus": 0.5}))
+    args = ["--manifest", man, "--items", env.dev / "items.jsonl", "--candidate", "C1", "--n", 4, "--warmups", 1,
+            "--ollama-url", "http://127.0.0.1:1"]
+    assert env.run("latency", *args, deps=deps) == D.EXIT_PARK
+    log = S.read_jsonl(env.out / "cls_dev_log.jsonl")
+    assert log[-1]["counts"]["reason"] == "quiet:ollama_unreachable"
+
+    def boom():
+        raise D.OllamaError("URLError")
+    res = D.run_units([1], lambda i, u: None, clock=local_clock(9), state_path=tmp_path / "s.json", ollama=None,
+                      own_model=None, artifact_shas={}, quiet=boom)
+    assert res["status"] == "parked" and res["reason"] == "quiet:ollama_unreachable"
+
+
 def test_criterion8_pending_unless_a_judge_is_voided():
     bad = {"under": {"evaluable": False}, "cost": {"evaluable": False}}
     ok = {"under": {"discordant": False}, "cost": {"discordant": False}}
@@ -1464,6 +1502,37 @@ def _m_c4_park_is_kill(resp):
     return {"c4": "ok"} if D.logprob_ok(resp) else {"c4": "killed", "criterion": 1, "reason": "no_logprobs"}
 
 
+def inv_syn_leg_missing_arm(c):
+    ok = {"under": {"discordant": False}, "cost": {"discordant": False}}
+    assert D.criterion8(ok, voided=[], syn=None, syn_rows_present=True)["status"] == "pending"
+
+
+def inv_quiet_unreachable_parks(c):
+    real, _, _ = make_data(n_real=8, n_groups=4, n_syn=0, seed=98)
+    man = build_manifest(c.env, real, [])
+    deps = quiet_deps(readers=lambda o, own: quiet_readers(foreign_models=[m["name"] for m in o.ps()]),
+                      l2_score=lambda cand, a: (lambda t, d: {"opus": 0.5}))
+    try:
+        rc = c.env.run("latency", "--manifest", man, "--items", c.env.dev / "items.jsonl", "--candidate", "C1", "--n", 4,
+                       "--warmups", 1, "--ollama-url", "http://127.0.0.1:1", deps=deps)
+    except D.OllamaError:
+        raise AssertionError("the quiet gate crashed on an unreachable Ollama") from None
+    assert rc == D.EXIT_PARK
+
+
+def _m_syn_leg_none_not_applicable(syn, voided_syn, syn_rows_present):
+    if syn is None:
+        return {"status": "not_applicable"}
+    return D._robust_leg_status(syn, list(voided_syn), ("gpt", "sonnet"))
+
+
+def _m_heavy_preamble_no_catch(deps, ollama, own_model):
+    q = D.quiet_gate(R.get_readers(deps, ollama, own_model), sleep=deps.sleep)
+    if not q["ok"]:
+        return {"status": "parked", "reason": "quiet:" + str(q["reason"]), "readings": q["readings"]}
+    return None
+
+
 # mutant implementations ------------------------------------------------------------------------
 
 def _m_run_units_start_only(units, do_unit, *, clock, state_path, ollama, own_model, artifact_shas, quiet=None, perf=None):
@@ -1609,11 +1678,14 @@ MUTANTS = [
     ("41_async_budget_ignored", D, "P95_ASYNC_MAX_MS", float("inf"), inv_p95_async_budget),
     ("42_memory_budget_raised", D, "MEM_MAX_GIB", 24.0, inv_memory_budget),
     ("43_tmb_fires_while_pending", D, "mb_trigger", _m_tmb_ignores_pending, inv_tmb_waits),
+    # F20
+    ("44_syn_leg_missing_arm_not_applicable", D, "syn_leg_status", _m_syn_leg_none_not_applicable, inv_syn_leg_missing_arm),
+    ("45_quiet_gate_ollama_error_crashes", R, "heavy_preamble", _m_heavy_preamble_no_catch, inv_quiet_unreachable_parks),
 ]
 
 
 def test_mutant_list_is_complete():
-    assert len(MUTANTS) == 43 and len({m[0] for m in MUTANTS}) == 43
+    assert len(MUTANTS) == 45 and len({m[0] for m in MUTANTS}) == 45
 
 
 @pytest.mark.parametrize("name,mod,attr,mutant,invariant", MUTANTS, ids=[m[0] for m in MUTANTS])
