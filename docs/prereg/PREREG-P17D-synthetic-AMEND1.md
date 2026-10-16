@@ -40,9 +40,10 @@ field (errata1 §2).
 | Runner / quantisation | mlx, mxfp8 | `/api/show` details: format safetensors, quantization_level mxfp8, runner mlx |
 | Params layer `sha256:fc258d6a…` | `{"num_ctx":8192,"temperature":0}` | equal |
 
-**The check** (replaces the §4 "nimble digest" bullet; it is errata1's digest check as
-`scripts/m18_r3.py` `preflight` ran it for round 3). Before the quiet gate, on every `shadow`
-invocation:
+**The check** (replaces the §4 "nimble digest" bullet). It is errata1's "Digest check" row, which
+`scripts/m18_r3.py` `preflight` also ran for round 3. That preflight also checked Ollama >= 0.35
+and the prereg files' modes; those two checks are not adopted. Before the quiet gate, on every
+`shadow` invocation:
 
 1. sha256 of the local manifest file equals `dfed4f70…4a21`;
 2. the `ollama list` rows named `nimble:9b` have exactly the ID list `[13ae0a506102]`;
@@ -73,6 +74,9 @@ history (append-only). The new SHA is logged in PROGRESS.md as §4 requires.
   `use.log`, before the first line of any other kind. Its SHA must prefix HEAD.
 * A `harness` line after any other `use.log` line, or dated after the earliest row of
   `classifier_shadow.jsonl`, refuses.
+* `shadow` also refuses, before any preflight, row or Ollama call, if any `harness` line is dated
+  after the current time. Otherwise a future-dated line would let `shadow` run and then lock
+  `label` and `score` out for good.
 * `shadow` records the governing line in `shadow_meta.json` at its first preflight. Later `shadow`,
   `label` and `score` runs refuse if the governing line differs from that record.
 
@@ -81,15 +85,18 @@ history (append-only). The new SHA is logged in PROGRESS.md as §4 requires.
 `select` ran once under `7e20664d` (admitted, n = 151: F 32, G 119, 25 sessions); `selection.json`
 is 0444. AMEND1 changes no code that `select` runs (`git diff 7e20664d -- scripts/p17d_synthetic.py`
 shows no change in `select`, `walk`, `share_cap`, `seed_order`, `load_items`, `build_body`,
-`check_assemble` or `cmd_select`; the shared `check_common` gains only the AMEND1 freeze check).
+`check_assemble` or `cmd_select`). Three shared changes touch the `select` command, and none
+changes its output: `check_common` gains the AMEND1 freeze check, `Cfg` gains the `amend1` path
+field, and `terminal()` adds `amend1_sha256` to the gate file.
 So `select` is **not** re-run (§10: no re-selection). Instead:
 
 * `items.jsonl` and `attach_counts.json` stay checked against their pins, as before;
 * before the first shadow row, `shadow` re-derives the selection from the pinned `items.jsonl` with
   the unchanged `select` and refuses unless `ids`, `f_ids`, `g_ids`, `admitted` and `n` equal
   `selection.json`;
-* `shadow` records the sha256 of `selection.json` in `shadow_meta.json`. `score` refuses, before
-  its `started` line, if the file's sha256 differs from that record.
+* `shadow` records the sha256 of `selection.json` in `shadow_meta.json`. A later `shadow` run
+  refuses if the file's sha256 differs from that record. `label` refuses before any Opus call, and
+  `score` before its `started` line, on the same condition.
 
 ## 5. Disclosure
 

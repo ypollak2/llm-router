@@ -384,6 +384,15 @@ def harness_lines(cfg: Cfg) -> list[str]:
     return [line for line in use_lines(cfg) if line.startswith("harness")]
 
 
+def future_harness_line(cfg: Cfg) -> bool:
+    now = cfg.now()
+    for line in harness_lines(cfg):
+        match = HARNESS_RE.fullmatch(line)
+        if match and parse_utc(match.group(1)) > now:
+            return True
+    return False
+
+
 def governing_harness_line(cfg: Cfg) -> str | None:
     governing = None
     ended = False
@@ -412,6 +421,14 @@ def recorded_preflight(cfg: Cfg) -> dict | None:
     if isinstance(entries, list) and entries and isinstance(entries[0], dict):
         return entries[0]
     return None
+
+
+def check_selection_record(cfg: Cfg) -> str:
+    rec = recorded_preflight(cfg)
+    sel_sha = sha256_file(cfg.selection)
+    if rec is None or rec.get("selection_sha256") != sel_sha:
+        raise Refuse("refusing: selection.json sha256 differs from the shadow preflight record (AMEND1 s4)")
+    return sel_sha
 
 
 def harness_line_ok(cfg: Cfg) -> bool:
@@ -707,11 +724,20 @@ def nimble_manifest_sha256() -> str | None:
 def ollama_list_ids() -> list[str]:
     env = dict(os.environ)
     env["HOME"] = str(REAL_HOME)
-    p = subprocess.run(["ollama", "list"], capture_output=True, text=True, timeout=60,
-                       stdin=subprocess.DEVNULL, env=env)
+    failure = "refusing: `ollama list` failed; the nimble artifact cannot be checked (not a result)"
+    try:
+        p = subprocess.run(["ollama", "list"], capture_output=True, text=True, timeout=60,
+                           stdin=subprocess.DEVNULL, env=env)
+    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError):
+        raise Refuse(failure) from None
     if p.returncode != 0:
-        raise Refuse("refusing: `ollama list` failed; the nimble artifact cannot be checked")
-    return [ln.split()[1] for ln in p.stdout.splitlines() if ln.split()[:1] == [NIMBLE_MODEL]]
+        raise Refuse(failure)
+    ids = []
+    for line in p.stdout.splitlines():
+        fields = line.split()
+        if fields[:1] == [NIMBLE_MODEL]:
+            ids.append(fields[1] if len(fields) > 1 else "")
+    return ids
 
 
 def ollama_show_details() -> dict:
@@ -719,7 +745,12 @@ def ollama_show_details() -> dict:
                                      data=json.dumps({"model": NIMBLE_MODEL}).encode("utf-8"),
                                      headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(request, timeout=10) as response:
-        return json.loads(response.read()).get("details") or {}
+        data = json.loads(response.read())
+    if not isinstance(data, dict):
+        raise ValueError("not a dict")
+    if "details" in data and not isinstance(data["details"], dict):
+        raise ValueError("not a dict")
+    return data.get("details", {})
 
 
 def free_mem_pct() -> float:
@@ -922,6 +953,8 @@ def final_sources(cfg: Cfg, selected: list) -> dict:
 def cmd_shadow(cfg: Cfg) -> int:
     res = check_common(cfg, policy=True)
     check_code_identity(cfg)
+    if future_harness_line(cfg):
+        raise Refuse("refusing: a harness line is dated in the future (AMEND1 s3)")
     sel = load_selection(cfg)
     if not sel.get("ok"):
         raise Refuse("refusing: the selection gate failed")
@@ -1215,6 +1248,7 @@ def cmd_label(cfg: Cfg) -> int:
     if meta.get("done") is not True:
         raise Refuse("refusing: shadow is not done")
     sel = load_selection(cfg)
+    check_selection_record(cfg)
     items = load_items(cfg)
     mods = load_label_mods(cfg)
     lab = Labeller(cfg, mods, [items[i] for i in sel["ids"]], set(sel["f_ids"]))
@@ -1612,10 +1646,7 @@ def cmd_score(cfg: Cfg) -> int:
     gate = read_p17c_gate(cfg.p1_gates)
     sel = load_selection(cfg)
     items = load_items(cfg)
-    rec = recorded_preflight(cfg)
-    sel_sha = sha256_file(cfg.selection)
-    if rec is None or rec.get("selection_sha256") != sel_sha:
-        raise Refuse("refusing: selection.json sha256 differs from the shadow preflight record (AMEND1 s4)")
+    sel_sha = check_selection_record(cfg)
     try:
         labels_raw, shadow_raw = cfg.labels.read_bytes(), cfg.shadow.read_bytes()
     except FileNotFoundError:

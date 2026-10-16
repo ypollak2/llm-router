@@ -10,7 +10,8 @@ constant differs (the `test_shadowlab.py` pattern).
 2. **`select`, `shadow`, `label`, `score` and `status`** (`scripts/p17d_synthetic.py`) are built
    **after** the freeze. Their commit SHA (`HARNESS_SHA`) is logged in PROGRESS.md and as the first
    line of `use.log` (`harness <UTC> sha=<…>`) before the first shadow row. `shadow` refuses
-   without that line.
+   without that line. *(Superseded by `PREREG-P17D-synthetic-AMEND1.md` §3: the governing line is
+   the last of the `harness` lines that open `use.log`, and a re-recorded line is appended.)*
 3. `REPO_SHA` in the prereg is the router code under test (`src/llm_router`), pinned at the freeze.
    It is not the harness: the harness does not exist at freeze time.
 

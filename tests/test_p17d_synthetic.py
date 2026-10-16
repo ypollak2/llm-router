@@ -18,6 +18,7 @@ import stat
 import subprocess
 import sys
 import time
+import urllib.error
 from collections import Counter
 from fractions import Fraction
 from pathlib import Path
@@ -1854,3 +1855,194 @@ def test_terminal_discloses_amend1_best_effort(world, missing):
     result = json.loads(world.cfg.result.read_text())
     assert ps.AMEND1_DISCLOSURE in result["disclosures"]
     assert result["amend1_sha256"] == (None if missing else digest)
+
+
+@pytest.mark.parametrize("past_after", [False, True])
+def test_future_dated_harness_line_refuses_shadow_before_any_row(world, ollama, monkeypatch, past_after):
+    do_select(world)
+    future = time.time() + 3 * 3600
+    ps.append_line(world.cfg.use_log, f"harness {ps.utc(future)} sha={HEAD}")
+    if past_after:
+        world.harness_line()
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("future harness line must refuse before preflight or file creation")
+
+    with monkeypatch.context() as guard:
+        for name in ("digest_check", "quiet_gate", "touch_private"):
+            guard.setattr(ps, name, unexpected)
+        with refuses("dated in the future"):
+            ps.cmd_shadow(world.cfg)
+    assert not world.cfg.shadow.exists()
+    assert not world.cfg.shadow_meta.exists()
+    assert sum(ollama["nimble"].calls.values()) == 0
+    world.cfg.now = lambda: future + 60
+    assert ps.cmd_shadow(world.cfg) == ps.EXIT_OK
+
+
+@pytest.mark.parametrize("timestamp,prefreeze", [
+    ("2026-10-15T20:00:00Z", True),
+    ("2026-10-16T00:00:01Z", False),
+])
+def test_score_prefreeze_uses_amend1_cutoff(world, ollama, monkeypatch, timestamp, prefreeze):
+    full_run(world, monkeypatch)
+    rows = ps.json_rows(world.cfg.shadow)
+    rows[0]["ts"] = ps.parse_utc(timestamp)
+    world.cfg.shadow.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    assert ps.cmd_score(world.cfg) == ps.EXIT_OK
+    result = json.loads(world.cfg.result.read_text())
+    reason = result["verdict_reason"]
+    if prefreeze:
+        assert result["verdict"] == ps.NOT_INFORMATIVE
+        assert reason == "procedural: 1 classifier_shadow rows dated before frozen_utc"
+    else:
+        assert "classifier_shadow rows dated before frozen_utc" not in reason
+
+
+@pytest.mark.parametrize("reverse_f", [False, True])
+def test_selection_rederive_refuses_reordered_ids(world, ollama, reverse_f):
+    do_select(world)
+    world.harness_line()
+    sel = json.loads(world.cfg.selection.read_text())
+    if reverse_f:
+        sel["f_ids"].reverse()
+        sel["ids"] = sel["f_ids"] + sel["g_ids"]
+    else:
+        sel["ids"].reverse()
+    world.cfg.selection.chmod(0o600)
+    world.cfg.selection.write_text(json.dumps(sel))
+    with refuses("re-derived"):
+        ps.cmd_shadow(world.cfg)
+    assert not world.cfg.shadow.exists()
+    assert not world.cfg.shadow_meta.exists()
+    assert sum(ollama["nimble"].calls.values()) == 0
+
+
+def test_shadow_resume_refuses_when_selection_changed_since_first_preflight(world, ollama):
+    do_select(world)
+    do_shadow(world)
+    meta = json.loads(world.cfg.shadow_meta.read_text())
+    meta["done"] = False
+    meta["preflight"][0]["selection_sha256"] = "0" * 64
+    world.cfg.shadow_meta.write_text(json.dumps(meta))
+    with refuses("changed since the first shadow preflight"):
+        ps.cmd_shadow(world.cfg)
+    meta["preflight"][0]["selection_sha256"] = sha(world.cfg.selection)
+    world.cfg.shadow_meta.write_text(json.dumps(meta))
+    assert ps.cmd_shadow(world.cfg) == ps.EXIT_OK
+
+
+@pytest.mark.parametrize("missing_sha", [False, True])
+def test_label_refuses_on_selection_change_before_any_judge_call(world, ollama, monkeypatch, missing_sha):
+    do_select(world)
+    do_shadow(world)
+    judge = Judge()
+    install_judge(monkeypatch, judge)
+    if missing_sha:
+        meta = json.loads(world.cfg.shadow_meta.read_text())
+        del meta["preflight"][0]["selection_sha256"]
+        world.cfg.shadow_meta.write_text(json.dumps(meta))
+    else:
+        world.cfg.selection.chmod(0o600)
+        world.cfg.selection.write_bytes(world.cfg.selection.read_bytes() + b"\n \n")
+    with refuses("preflight record"):
+        ps.cmd_label(world.cfg)
+    assert judge.calls == []
+    assert not world.cfg.labels.exists()
+    assert ps.json_rows(world.cfg.ledger) == []
+
+
+@pytest.mark.parametrize("error", [
+    FileNotFoundError("missing"),
+    OSError("unreadable"),
+    subprocess.TimeoutExpired(cmd=["ollama", "list"], timeout=60),
+])
+def test_ollama_list_unreadable_refuses(monkeypatch, error):
+    def run(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(ps.subprocess, "run", run)
+    monkeypatch.setattr(ps, "nimble_manifest_sha256", lambda: ps.NIMBLE_MANIFEST_SHA256)
+    details = dict(zip(("format", "quantization_level", "runner"), ps.NIMBLE_DETAILS))
+    monkeypatch.setattr(ps, "ollama_show_details", lambda: details)
+    for call in (ps.ollama_list_ids, ps.digest_check):
+        with refuses("ollama list"):
+            call()
+
+
+@pytest.mark.parametrize("returncode,stdout", [(0, "nimble:9b\n"), (1, "")])
+def test_ollama_list_malformed_or_failed_refuses(monkeypatch, returncode, stdout):
+    monkeypatch.setattr(
+        ps.subprocess, "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, returncode, stdout, ""),
+    )
+    monkeypatch.setattr(ps, "nimble_manifest_sha256", lambda: ps.NIMBLE_MANIFEST_SHA256)
+    details = dict(zip(("format", "quantization_level", "runner"), ps.NIMBLE_DETAILS))
+    monkeypatch.setattr(ps, "ollama_show_details", lambda: details)
+    if returncode == 0:
+        assert ps.ollama_list_ids() == [""]
+    else:
+        with refuses("ollama list"):
+            ps.ollama_list_ids()
+    with refuses("list"):
+        ps.digest_check()
+
+
+@pytest.mark.parametrize("raw", [b"[1, 2]", b'{"details": [1]}', b"not json", b"\xff"])
+def test_ollama_show_invalid_json_shape_refuses(monkeypatch, raw):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return raw
+
+    monkeypatch.setattr(ps.urllib.request, "urlopen", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(ps, "nimble_manifest_sha256", lambda: ps.NIMBLE_MANIFEST_SHA256)
+    monkeypatch.setattr(ps, "ollama_list_ids", lambda: [ps.NIMBLE_LIST_ID])
+    with pytest.raises(ValueError):
+        ps.ollama_show_details()
+    with refuses("api/show"):
+        ps.digest_check()
+
+
+def test_ollama_show_url_error_refuses(monkeypatch):
+    def urlopen(*args, **kwargs):
+        raise urllib.error.URLError("down")
+
+    monkeypatch.setattr(ps.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(ps, "nimble_manifest_sha256", lambda: ps.NIMBLE_MANIFEST_SHA256)
+    monkeypatch.setattr(ps, "ollama_list_ids", lambda: [ps.NIMBLE_LIST_ID])
+    with refuses("api/show"):
+        ps.digest_check()
+
+
+def test_crash_after_preflight_then_new_harness_line_refuses(world, ollama):
+    do_select(world)
+    world.harness_line()
+    assert ps.cmd_shadow(world.cfg) == ps.EXIT_OK
+    meta = json.loads(world.cfg.shadow_meta.read_text())
+    meta["done"] = False
+    world.cfg.shadow_meta.write_text(json.dumps(meta))
+    world.cfg.shadow.write_bytes(b"")
+    new_head = "d" * 40
+    ps.append_line(world.cfg.use_log, f"harness 2026-10-15T18:00:00Z sha={new_head}")
+    world.cfg.head_sha = lambda: new_head
+    with refuses("differs from the one shadow recorded"):
+        ps.cmd_shadow(world.cfg)
+
+
+def test_selection_rederive_refuses_moved_group_with_ids_unchanged(world, ollama):
+    do_select(world)
+    world.harness_line()
+    sel = json.loads(world.cfg.selection.read_text())
+    sel["g_ids"].insert(0, sel["f_ids"].pop())       # same `ids` order, different F/G membership
+    assert sel["ids"] == sel["f_ids"] + sel["g_ids"]
+    world.cfg.selection.chmod(0o600)
+    world.cfg.selection.write_text(json.dumps(sel))
+    with refuses("re-derived"):
+        ps.cmd_shadow(world.cfg)
+    assert not world.cfg.shadow.exists() and not world.cfg.shadow_meta.exists()
