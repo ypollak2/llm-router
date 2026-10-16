@@ -218,3 +218,32 @@ async def test_advise_never_updates_the_stickiness_but_route_does(tmp_path, mode
     d.mkdir()
     await _two_calls(d)
     assert records, "route records its decisions as before"
+
+
+async def test_advise_forwards_non_default_json_bytes_unchanged(tmp_path, moderate):
+    """F12-C / mutant M14: ``raw`` must reach upstream untouched. A body with non-default
+    separators, non-sorted keys and non-ASCII text differs from ``json.dumps(body)`` in every
+    one of those ways, so a re-serialisation cannot pass."""
+    import httpx
+
+    authority.set_mode("advise")
+    up = tt.Upstream()
+    app = tt._app(tmp_path, up)
+    body = tt._req()
+    body = {"zz_last_first": "naïve – 日本語 – ✓", **dict(reversed(list(body.items())))}
+    body["messages"][-1]["content"] = "héllo wörld – 日本語 ✓"
+    raw = json.dumps(body, separators=(", ", ": "), ensure_ascii=False).encode("utf-8")
+    assert raw != json.dumps(body).encode() and raw != json.dumps(body, sort_keys=True).encode()
+    assert list(json.loads(raw)) != sorted(json.loads(raw))
+    h = {"authorization": "Bearer sk-ant-oat01-" + "Zq9" * 20, "anthropic-version": "2023-06-01",
+         "content-type": "application/json"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8787") as c:
+        assert (await c.post("/v1/messages?beta=true", content=tt_first_bytes(), headers=h)).status_code == 200
+        r = await c.post("/v1/messages?beta=true", content=raw, headers=h)
+    assert r.status_code == 200
+    assert up.requests[-1].content == raw, "advise sent something other than the client's own bytes"
+    assert tt._rows(tmp_path)[-1]["authority"] == "advise"
+
+
+def tt_first_bytes() -> bytes:
+    return json.dumps(tt._first()).encode()
