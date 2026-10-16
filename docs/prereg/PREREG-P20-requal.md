@@ -1,6 +1,6 @@
 # PREREG-P20-requal: local re-qualification with the full pack (PLAN v16 P2.0 tasks 1-5)
 
-Status: **DRAFT r8, not frozen.** This file is frozen only when `PREREG-P20-requal.sha256` exists
+Status: **DRAFT r9, not frozen.** This file is frozen only when `PREREG-P20-requal.sha256` exists
 beside it, an independent freeze-guard review has passed (D-122 rule: an author-written sidecar is
 void), and `scripts/check_prereg.py` reports a match. Until then `scripts/p20_requal.py` refuses every
 subcommand that writes an item, calls a model or writes a result. The one pre-freeze mode is
@@ -14,7 +14,8 @@ and adds the runner disclosures and hook-free Claude calls (coordinator, 2026-10
 source and fixes three text points from the r5 review; r7 (D-131) records build 1 as void, fixes the
 `rx_edit` directory mapping and the sub-agent transcript search, moves the run to `requal/b2`, and
 discloses the two ungraded rx packets and the tech-op shortfall; r8 (D-133, D-133a) corrects the tech-op
-estimate and records tech-op as NOT INFORMATIVE by design.
+estimate and records tech-op as NOT INFORMATIVE by design; r9 states the partial P2.0-a, the e_tech = 0
+case of T_P2, the build-2 counts and the fill-ins.
 
 ## 0. Contradictions and settled points (read first)
 
@@ -42,6 +43,9 @@ Every row is settled by D-123 (r1 defaults accepted), D-123a or D-123b (review f
 ## 1. Authority
 
 * PLAN-v16 P2.0 tasks 1-5, MUST P2.0-a; P2.0-b is met by #484 (`grade`).
+* **P2.0-a is PARTIAL (owner-visible deviation under D-27).** This run gives the eligibility
+  matrix for `qa` and `code` only. The `tech_op` matrix is deferred to follow-up F3 (§4), so the
+  plan's P2.1 precondition (an eligible tech-op model) cannot hold yet.
 * D-21 (recorded default), as refined by D-123a(c).
 * D-29 = A: point gap ≤ 3 pts at n ≥ 60, Newcombe LB ≥ -10, CI printed. §1.4 rules 1-4, 8, 9, 10.
 * D-27 = A: the gate uses T_P2 even below 20%; the inputs go to the owner first.
@@ -150,10 +154,17 @@ uses its stratum name as the session (the cap does not apply to code).
 **Tech-op is NOT INFORMATIVE by design (D-131, D-133, D-133a; stated before selection).**
 All estimates below are counts only, from ledger metadata plus response-id lookups in
 transcripts; no text was read.
-* **Build 1** gave a tech-op pool of 15 and n = 1.
+* **Build 1** gave a tech-op pool of 15 and n = 1. **Build 2** (`requal/b2`, 2026-10-16T13:23Z)
+  also gave a pool of 15 and a realised n of **1** (14 `no_tier`). Its build exclusions:
+  not_organic 23,372; not_continuation 14,415; not_technical_op 3,813; bash_unresolved 3,613;
+  msg_not_found 288; not_main_thread 95; secret_pattern 1.
 * **Organic, row-stamp rule** (kept by D-133a). The builder admits rows whose ledger
-  `session_kind` stamp is `organic`. After the sub-agent search and the 20% cap, that admits about
-  11 steps.
+  `session_kind` stamp is `organic`.
+  * About 11 steps was a pre-build, pre-cap, row-stamp estimate.
+  * Build 2 gives 1. The sub-agent search found no extra step, because the transcript parser
+    drops `isSidechain` entries, and every entry of a sub-agent transcript is a sidechain entry.
+  * This builder defect affects only the not-informative tech-op set. It is left unfixed in the
+    frozen code, disclosed here, and deferred to F3.
 * **Organic, census-exact rule.** Resolving kinds the way GE1 `census.py` does (`KindIndex` over the
   backfill, the overrides and the per-session tag files) admits about **1** step. The row-stamp
   rule therefore differs from the census population by about 10 rows, which census resolves to
@@ -393,7 +404,7 @@ T_P2    = 0.8 × (s_tech × f_fit × e_tech + s_cheap)          ceiling = s_tech
 s_tech  = k/n: organic non-complex technical_op actions / all organic actions in W14 (GE1 census.py).
           Informative iff n ≥ 60, ≥ 3 sessions and largest session ≤ 0.60.
 f_fit   = k/n: of those steps, the share whose pack fits the e_tech model's num_ctx (census re-run
-          with the P1.1 estimator, W14). Required: without it `tp2` refuses.
+          with the P1.1 estimator, W14). Required when e_tech > 0; without it `tp2` refuses.
 e_tech  = k/n on `tech_op` of the eligible local model with the highest rate (ties: the smaller
           model). No eligible model → 0.
 s_cheap = k/n: actions served local / very-cheap and not redone (P1.9 `kpi --json .offload.action`)
@@ -401,6 +412,9 @@ s_cheap = k/n: actions served local / very-cheap and not redone (P1.9 `kpi --jso
           technical_op steps of s_tech (no double count). n = 0 → 0, flagged.
 ```
 
+* **e_tech = 0 (expected for this run, §4).** The tech term is 0, f_fit is not required, and
+  T_P2 = 0.8 × s_cheap; `tp2` does not refuse for a missing `--f-fit` in that case. It flags
+  `f_fit_not_required`.
 * **Which value gates:** the gating T_P2 uses the census s_tech if it is informative. Otherwise
   it uses the conservative **s_tech = 1/45** (GE1 v0 lower bound), flagged. The value at 24/45 is
   printed beside it and never gates.
@@ -441,6 +455,12 @@ the task. Fitness never grants eligibility; it only gates onboarding recommendat
   (local) → `judge --set qa` / `judge --set tech_op` → `ingest-code` → `score` → independent
   recompute → `install-eligibility` → `tp2`. `judge` refuses until every (item, arm) of its set
   has a final answer. `run` refuses once that set's judging has started.
+* **Sets below N_MIN are skipped.** At `select`, a set whose realised n is below 60 (here
+  `tech_op`, n = 1) gets a `terminal <UTC> <set> n_min` line in `use.log`. After that, `run` and
+  `judge` on it stop with exit 4 (`terminal: <set>`) and make no model call, and `score` reports
+  it as not informative.
+* **Code identity at the run:** `git diff REPO_SHA..HEAD -- scripts/ src/ tests/` must be empty
+  when the prereg is frozen and when each subcommand runs.
 * **Night window (L13):** local arms and the code runner run only between 00:00 and 07:00 local
   time. Outside it, `run` parks (exit 3) before any local call. Each window is logged in PROGRESS.
 * **Quiet machine (L13)**, before each local arm and on every resume:
