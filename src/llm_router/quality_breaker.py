@@ -498,6 +498,109 @@ def evaluate_dry(lever: str, task_type: str | None, *, model: str | None = None,
     return decision
 
 
+# ── P2.6-a levers ────────────────────────────────────────────────────────────
+#
+# ``techop_local`` (local technical-operation serving, P2.1) is an ordinary units-based class:
+# ``should_route(LEVER_TECHOP_LOCAL, TASK_TECHOP_LOCAL)`` trips and recovers like any other. The
+# lever exists; it is NOT live, because ``technical_ops.py`` has no call site and no unit kind
+# yet (P2.1 is blocked on P2.0).
+#
+# ``proxy_haiku`` is externally fed: the trigger lives in ``proxy/haiku_guard.py`` (its five D-20
+# triggers), not in a failure rate over ``northstar.units()``. What the breaker owns for it is
+# the part the guard never had, the way back. ``trip`` opens a closed class; from there the SAME
+# state machine as every other class applies (``_evaluate_core``: cooldown_seconds() = 24 h by
+# default, then half_open, then probe_size() units judged against threshold()). No new
+# statistic and no new threshold.
+
+LEVER_PROXY_HAIKU = "proxy_haiku"
+TASK_PROXY_HAIKU = "haiku"
+LEVER_TECHOP_LOCAL = "techop_local"
+TASK_TECHOP_LOCAL = "tech_op"
+
+
+def _class_state(key: str) -> dict:
+    classes = _read_state().get("classes")
+    cls = classes.get(key) if isinstance(classes, dict) else None
+    return dict(cls) if isinstance(cls, dict) else {}
+
+
+def class_state(lever: str, task_type: str | None) -> str:
+    """CLOSED / OPEN / HALF_OPEN as persisted. Missing or corrupt state reads CLOSED (fail-open)."""
+    state = _class_state(class_key(lever, task_type)).get("state", CLOSED)
+    return state if state in (CLOSED, OPEN, HALF_OPEN) else CLOSED
+
+
+def recovered_at(lever: str, task_type: str | None) -> float | None:
+    """When the last half-open probe closed this class, else None. A trigger that feeds the
+    lever uses it as an evidence floor, so the evidence that opened the class cannot re-open it."""
+    raw = _class_state(class_key(lever, task_type)).get("recovered_at")
+    return float(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool) else None
+
+
+def trip(lever: str, task_type: str | None, *, reason: str, now: float | None = None) -> bool:
+    """Open a CLOSED class on an external trigger. True when this call opened it; False when it
+    was already open or half-open (a probe in progress is never overridden) or the state could
+    not be written. Never raises (fail-open: a lost write means the class stays closed)."""
+    try:
+        now = now if now is not None else time.time()
+        key = class_key(lever, task_type)
+        state = _read_state()
+        classes = state.get("classes")
+        if not isinstance(classes, dict):
+            classes = {}
+        cls = dict(classes[key]) if isinstance(classes.get(key), dict) else {}
+        if cls.get("state", CLOSED) in (OPEN, HALF_OPEN):
+            return False
+        cls.update(state=OPEN, opened_at=now, half_open_since=None, tripped_by=str(reason)[:300],
+                   last_eval_at=now)
+        classes[key] = cls
+        return _write_state({"version": 1, "classes": classes})
+    except Exception as exc:  # noqa: BLE001 — a trip must never raise into the guard
+        try:
+            from llm_router import failopen
+            failopen.record("QB-FED-TRIP", exc)
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+
+def fed_decision(lever: str, task_type: str | None, *, units_fn: UnitsFn,
+                  now: float | None = None) -> Decision:
+    """The decision for an externally-fed class. CLOSED stays closed here (only ``trip`` opens
+    it, never a failure rate over ``units_fn``). OPEN / HALF_OPEN run the generic state machine
+    over ``units_fn`` (called lazily, only then): cooldown, probe, reopen on a failed probe,
+    close on a passed one (stamping ``recovered_at``). Never raises: any error reads allowed."""
+    key = class_key(lever, task_type)
+    now = now if now is not None else time.time()
+    try:
+        cls = _class_state(key)
+        before = cls.get("state", CLOSED)
+        if before not in (OPEN, HALF_OPEN):
+            return Decision(allowed=True, state=CLOSED, key=key, n=0, failure_rate=None,
+                            reason=f"quality_breaker: {key} closed — externally fed, no trip")
+        units = sorted((dict(u) for u in units_fn(days=lookback_days())),
+                       key=lambda u: (_ts(u) is None, _ts(u) or 0.0))
+        decision, new_cls = _evaluate_core(cls, key, units, now, threshold(), min_n(), window_size(),
+                                           cooldown_seconds(), probe_size())
+        if before == HALF_OPEN and decision.state == CLOSED:
+            new_cls["recovered_at"] = now
+        state = _read_state()
+        classes = state.get("classes")
+        if not isinstance(classes, dict):
+            classes = {}
+        classes[key] = new_cls
+        _write_state({"version": 1, "classes": classes})
+        return decision
+    except Exception as exc:  # noqa: BLE001 — an unreadable probe must not keep a lever off or crash
+        try:
+            from llm_router import failopen
+            failopen.record("QB-FED-DECISION", exc)
+        except Exception:  # noqa: BLE001
+            pass
+        return Decision(allowed=True, state=CLOSED, key=key, n=0, failure_rate=None,
+                        reason=f"quality_breaker: {key} fail-open ({type(exc).__name__})")
+
+
 # ── visibility: status / northstar / Stop-line ──────────────────────────────
 
 def open_classes(*, units_fn: UnitsFn | None = None) -> list[dict]:
