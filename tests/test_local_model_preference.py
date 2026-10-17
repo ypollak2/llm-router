@@ -275,6 +275,7 @@ def rec_server(monkeypatch):
         srv.server_close()
 
 
+@pytest.mark.timing
 def test_gate_issues_no_generate_or_chat_and_is_fast_with_a_2s_generate(rec_server):
     t0 = time.monotonic()
     assert wd.gate(now=1000.0) is None

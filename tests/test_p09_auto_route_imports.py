@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+
+import pytest
 import os
 import subprocess
 import sys
@@ -43,20 +45,30 @@ def test_importing_the_hook_loads_neither_profiles_nor_config(tmp_path):
     assert loaded == {m: False for m in _HEAVY}, loaded
 
 
-def test_selected_model_still_reads_the_routing_table():
+@pytest.mark.parametrize("discovered", ["", "user-local-model:1b"])
+def test_selected_model_still_reads_the_routing_table(monkeypatch, discovered):
+    """Head of the table, with the local entry resolved from discovery (no hard-coded model).
+
+    No local model discovered -> the local head is skipped for the next non-local entry
+    (this is what a CI box without Ollama sees). One discovered -> ``ollama/<that model>``.
+    """
     from llm_router.profiles import ROUTING_TABLE
     from llm_router.types import RoutingProfile, TaskType
 
     spec = importlib.util.spec_from_file_location("auto_route_sel", HOOK)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    monkeypatch.setattr(mod, "OLLAMA_MODEL", discovered)
     for task, cx, profile, tt in (("code", "complex", RoutingProfile.PREMIUM, TaskType.CODE),
                                   ("query", "simple", RoutingProfile.BUDGET, TaskType.QUERY)):
-        head = ROUTING_TABLE[(profile, tt)][0]
+        chain = ROUTING_TABLE[(profile, tt)]
+        head = chain[0]
+        if head.startswith("ollama/") and not discovered:
+            head = next(m for m in chain if not m.startswith("ollama/"))
         want_provider = head.split("/")[0] if "/" in head else head
         model, provider = mod._get_selected_model(task, cx)
         assert provider == want_provider
-        assert model == (f"ollama/{mod.OLLAMA_MODEL}" if want_provider == "ollama" else head)
+        assert model == (f"ollama/{discovered}" if want_provider == "ollama" else head)
     assert mod._get_selected_model("nonsense", "complex") == ("unknown", "unknown")
 
 

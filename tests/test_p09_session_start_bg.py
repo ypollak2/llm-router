@@ -106,7 +106,8 @@ def test_main_returns_while_a_5s_background_phase_still_runs(hook, monkeypatch, 
     assert not marker.exists(), "main() waited for the detached child"
     release.write_text("go")
     deadline = time.monotonic() + 90
-    while not marker.exists() and time.monotonic() < deadline:
+    # exists() is true between the child's create and its write: wait for the content.
+    while (not marker.exists() or marker.read_text() != "done") and time.monotonic() < deadline:
         time.sleep(0.1)
     assert marker.read_text() == "done", "the detached child never ran"
 
