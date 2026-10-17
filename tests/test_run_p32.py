@@ -22,7 +22,7 @@ SRC = RELEASE_DIR / "run_p32.py"
 SHA_A = "a" * 40
 
 
-def _load(path: pathlib.Path, name: str):
+def _load(path: pathlib.Path, name: str, guard: bool = True):
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     sys.path.insert(0, str(path.parent))   # the copy's sibling release_evals.py
@@ -31,6 +31,8 @@ def _load(path: pathlib.Path, name: str):
     finally:
         sys.path.remove(str(path.parent))
     mod.ROOT = REPO
+    if guard and hasattr(mod, "spawn_stab_child"):
+        _guard_callers(mod)
     return mod
 
 
@@ -116,10 +118,35 @@ def check_agt_outcome(M):
 def check_fidelity_retention_outcome(M):
     assert M.retained("quokka-ember-123", "port is Quokka-Ember-123.") is True
     assert M.retained("quokka-ember-123", "port is quokka-ember-124") is False
-    rows = M.run_fid(REPO, indices=[0, 30, 40, 50])      # recent, early_user, early_tool, early_assistant
-    assert [r["id"] for r in rows] == ["fid-0", "fid-30", "fid-40", "fid-50"]
+    with _invented_g1(M):
+        rows = M.run_fid(REPO)                           # 4 invented items, one per stratum
+    assert [r["id"] for r in rows] == ["fid-1000", "fid-1001", "fid-1002", "fid-1003"]
     assert all(r["full"] is True for r in rows), "the token is in the FULL context by construction"
     assert all(type(r["pack"]) is bool for r in rows)
+
+
+@contextlib.contextmanager
+def _invented_g1(M):
+    """Swap the g1 item source for 4 invented items (indices 1000+, outside the real 0..59), so run_fid's
+    retention logic runs without computing an outcome on any real fid_syn_60 item."""
+    real = M.load_g1(REPO)
+    mine = [real.build_item(1000 + k, cat) for k, cat in
+            enumerate(("recent", "early_user", "early_tool", "early_assistant"))]
+
+    class _G1:
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        @staticmethod
+        def items():
+            return list(mine)
+
+    saved = M.load_g1
+    M.load_g1 = lambda root=REPO: _G1()
+    try:
+        yield
+    finally:
+        M.load_g1 = saved
 
 
 # ── stability ─────────────────────────────────────────────────────────────────
@@ -154,8 +181,13 @@ def check_stability_refuses_bad_children(M):
 
 
 def check_stability_real_children_are_separate_processes(M):
-    items = (M.load_hand(REPO)[:4] + M.load_agt(REPO)[:2] + M.stab_items(REPO)[-4:])
-    rows, meta = M.run_stability([{"id": i["id"], "text": i["text"]} for i in items])
+    real = {i["text"] for i in M.stab_items(REPO)}
+    texts = ["zzq invented probe one: sort a list of kiwis", "zzq invented probe two", "zzq what colour is a zebra's tongue",
+             "zzq write a limerick about a stapler", "zzq draft a poem for a lighthouse keeper", "zzq convert 5 furlongs to metres"]
+    texts += M.stab_generated(real, 4)                      # same generator, next 4 texts past the real 500
+    assert len(texts) == 10 and not real & set(texts)
+    items = [{"id": f"st-zz{k}", "text": t} for k, t in enumerate(texts)]
+    rows, meta = M.run_stability(items)
     assert len(rows) == 10 and all(r["a"] == r["b"] for r in rows)
     assert os.getpid() not in meta["pids"] and meta["pids"][0] != meta["pids"][1]
     d = json.loads(rows[0]["a"])
@@ -311,12 +343,60 @@ def check_fixtures_identity_detects_an_edit(M):
     assert ident["FIXTURES"]["identical"] is False and ident["FLOOR_FIXTURES"]["identical"] is True
 
 
-def _real_texts() -> frozenset:
-    m = _load(SRC, "_p32_texts")
-    return frozenset(i["text"] for i in m.load_hand(REPO) + m.load_agt(REPO))
+def _real_sets():
+    """ids, texts and fid tokens of every real P32 item. Read through an UNGUARDED module copy; only
+    identifiers are collected here, no outcome is computed."""
+    m = _load(SRC, "_p32_texts", guard=False)
+    stab = m.stab_items(REPO)
+    g1 = m.load_g1(REPO).items()
+    ids = frozenset(i["id"] for i in m.load_hand(REPO) + m.load_agt(REPO) + stab) | \
+        frozenset(m.fid_id(it) for it in g1)
+    texts = frozenset(i["text"] for i in stab)               # includes every hand and a1 text
+    return ids, texts, frozenset(it.token for it in g1)
 
 
-_REAL_TEXTS = _real_texts()    # texts only; nothing is scored here
+_REAL_IDS, _REAL_TEXTS, _REAL_TOKENS = _real_sets()    # nothing is scored here
+
+
+def _is_real(item) -> bool:
+    return item.get("id") in _REAL_IDS or item.get("text") in _REAL_TEXTS
+
+
+def _guard_callers(mod):
+    """PREREG-P32 caller guard. Wrap every scoring entry point of `mod` so it raises when handed a real
+    item: score_hand, score_agt, decide_all, run_stability, spawn_stab_child, and run_fid (which checks the
+    items its g1 source would score). Applied by _load to EVERY module copy, mutants included, so a check
+    cannot score a real set whichever copy it runs on. Id-only and dry-run paths (item_ids, write_manifests,
+    dry_run, the loaders) compute no outcome and are left alone."""
+    def items_guard(name):
+        inner = getattr(mod, name)
+
+        def wrapped(items, *a, **k):
+            if any(_is_real(i) for i in items):
+                raise AssertionError(f"REAL P32 item reached {name} before the freeze")
+            return inner(items, *a, **k)
+        return wrapped
+
+    for name in ("score_hand", "score_agt", "decide_all", "run_stability"):
+        setattr(mod, name, items_guard(name))
+    inner_spawn = mod.spawn_stab_child
+    mod.spawn_stab_child = lambda items, hashseed: _spawn_checked(inner_spawn, items, hashseed)
+    inner_fid = mod.run_fid
+
+    def run_fid(root=mod.ROOT, indices=None):
+        chosen = mod.load_g1(root).items()
+        chosen = chosen if indices is None else [chosen[i] for i in indices]
+        if any(it.token in _REAL_TOKENS or mod.fid_id(it) in _REAL_IDS for it in chosen):
+            raise AssertionError("REAL P32 item reached run_fid before the freeze")
+        return inner_fid(root, indices)
+    mod.run_fid = run_fid
+
+
+def _spawn_checked(inner, items, hashseed):
+    if any(_is_real(i) for i in items):
+        raise AssertionError("REAL P32 item reached spawn_stab_child before the freeze")
+    return inner(items, hashseed)
+
 
 CHECKS = {fn.__name__: fn for fn in (
     check_loaders_n_unique_prefix, check_ids_stable_across_runs_and_order,
@@ -356,6 +436,30 @@ def test_guard_blocks_scoring_the_real_sets(M):
     ok = {"id": "x", "text": "zzz not a real item", "policy": "ROUTER_POLICY", "task_type": "code",
           "complexity": "moderate"}
     assert len(M.score_hand([ok])) == 1                     # synthetic items still score
+
+
+def test_caller_guard_blocks_every_scoring_path_on_real_items(M):
+    """Each guarded path raises on real items; the id-only paths still work. Also holds on a mutant copy."""
+    unguarded = _load(SRC, "_p32_unguarded", guard=False)
+    hand, agt, stab = unguarded.load_hand(REPO), unguarded.load_agt(REPO), unguarded.stab_items(REPO)
+    paths = {
+        "score_hand": lambda m: m.score_hand(hand[:1]),
+        "score_agt": lambda m: m.score_agt(agt[:1]),
+        "decide_all": lambda m: m.decide_all(stab[:1]),
+        "run_stability": lambda m: m.run_stability(stab[:1]),
+        "run_stability(stub spawn)": lambda m: m.run_stability(stab[:1], spawn=lambda it, s: {}),
+        "spawn_stab_child": lambda m: m.spawn_stab_child(stab[-1:], 0),
+        "run_fid": lambda m: m.run_fid(REPO, indices=[0]),
+        "run_fid(all)": lambda m: m.run_fid(REPO),
+    }
+    for name, call in paths.items():
+        with pytest.raises(AssertionError, match="REAL P32"):
+            call(M)
+    # a fresh copy loaded through _load is guarded the same way
+    with pytest.raises(AssertionError, match="REAL P32"):
+        paths["spawn_stab_child"](_load(SRC, "_p32_fresh"))
+    # id-only paths compute no outcome and stay open
+    assert len(M.item_ids("stab_syn_500", REPO)) == 500 and len(M.item_ids("fid_syn_60", REPO)) == 60
 
 
 @pytest.fixture(scope="module")
