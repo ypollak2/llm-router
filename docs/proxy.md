@@ -184,9 +184,11 @@ Gate off is byte-identical to before: no file read, no ledger key.
   (missing, empty, unreadable or malformed file; never fails open), `ineligible_lane`,
   `breaker_open` (quality_breaker `techop_local/tech_op`, or `proxy_local/<lane>`; an error
   reading the breaker also forwards; half-open lets one probe per step budget through),
-  `promote_gated` (P0.15), `capability_excluded` (F14), `no_local_model`, `backend_unhealthy`,
+  `promote_gated` (P0.15), `needs_unknown` (capability routing off: what the request needs
+  cannot be checked, so it forwards), `capability_excluded` (F14), `no_local_model`, `backend_unhealthy`,
   `pack_over_window`, `gate_error`, and `served_local`. A local failure after the gate passed
-  falls back to Claude as before and the row says `local_failed`.
+  falls back to Claude as before and the row says `local_failed`; a local reply that repeats a recent
+  served tool call is dropped by the loop guard and the row says `local_repeat`.
 - **Breaker feed.** A served step whose next two tool calls re-issue one of its own tool calls
   (same tool and file path, pattern or command) is one failure unit; two calls without that are
   one success. Units are in `proxy_local_units.jsonl` in the state directory.

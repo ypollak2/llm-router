@@ -91,8 +91,11 @@ R_PACK = "pack_over_window"
 R_ERROR = "gate_error"
 R_SERVED = "served_local"
 R_LOCAL_FAILED = "local_failed"
+R_NEEDS_UNKNOWN = "needs_unknown"
+R_LOCAL_REPEAT = "local_repeat"
 REASONS = (R_NOT_CONTINUATION, R_LANE_UNMAPPED, R_UNREADABLE, R_INELIGIBLE, R_BREAKER, R_PROMOTE,
-           R_CAPABILITY, R_NO_MODEL, R_UNHEALTHY, R_PACK, R_ERROR, R_SERVED, R_LOCAL_FAILED)
+           R_CAPABILITY, R_NO_MODEL, R_UNHEALTHY, R_PACK, R_ERROR, R_SERVED, R_LOCAL_FAILED,
+           R_NEEDS_UNKNOWN, R_LOCAL_REPEAT)
 
 _QA_TASKS = frozenset({"query", "research", "analyze"})
 _REREAD_WINDOW = 2          # tool calls after a served step that can count as a re-read
@@ -440,7 +443,15 @@ class LaneGate:
             self._probe_at[(lever, task)] = now
         if not d.promoted(model, lane):
             return LaneDecision(False, model, R_PROMOTE, lane)
-        if needs is not None and not d.capability_ok(model, needs):
+        if needs is None or getattr(needs, "tokens", None) is None:
+            # Capability routing is off (or the caller could not size the request): what the
+            # request needs (tools, vision, window) is unknown, and the filter that would
+            # check it is a no-op when disabled, so it cannot be recomputed here. An unknown
+            # need forwards; it never serves (F48). needs_from_anthropic_body swallows its
+            # own errors and returns Needs() with tokens=None; its normal path always sets an
+            # int (_estimate), so tokens None means the body could not be read.
+            return LaneDecision(False, model, R_NEEDS_UNKNOWN, lane)
+        if not d.capability_ok(model, needs):
             return LaneDecision(False, model, R_CAPABILITY, lane)
         ok, why = await d.can_serve(body, self.steps, choice or {}, model)
         if not ok:
@@ -450,9 +461,8 @@ class LaneGate:
         hung = await asyncio.to_thread(d.watchdog)
         if hung:
             return LaneDecision(False, model, R_UNHEALTHY, lane, "watchdog")
-        if needs is not None and getattr(needs, "tokens", None):
-            from llm_router.capability_filter import WINDOW_MARGIN
+        from llm_router.capability_filter import WINDOW_MARGIN
 
-            if needs.tokens > WINDOW_MARGIN * d.window(model):
-                return LaneDecision(False, model, R_PACK, lane)
+        if needs.tokens > WINDOW_MARGIN * d.window(model):
+            return LaneDecision(False, model, R_PACK, lane)
         return LaneDecision(True, model, R_SERVED, lane)
