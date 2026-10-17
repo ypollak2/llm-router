@@ -787,6 +787,9 @@ REASON_ERROR_DENIED = "error_routing_denied"
 REASON_ERROR_OTHER = "error_exception"
 # N21: the quality breaker refused the call before dispatch (mirrors provider_classes.REASON_BREAKER_OPEN).
 REASON_BREAKER_OPEN = "breaker_open"
+# F25 / D-170: a research call refused before dispatch because its chain was empty (no reachable research
+# provider); mirrors provider_classes.REASON_REFUSED_NO_RESEARCH_PROVIDER and is excluded like breaker_open.
+REASON_REFUSED_NO_RESEARCH_PROVIDER = "refused_no_research_provider"
 # N22: the exhaustion floor served a gate-rejected answer. A real served call (attribution, mix, latency, M0-3
 # include it) that is NOT a success: its usage row has success=0, so success-filtered quality/cost/bandit readers skip it.
 REASON_DEGRADED_FLOOR = "degraded_floor"
@@ -2299,7 +2302,8 @@ async def log_routing_decision(
     # names no real provider ("cache", or "none" when nothing was attempted); its reason_code
     # is the whole reason it may skip the provider allowlist.
     _non_call = bool(reason_code) and (
-        reason_code in (REASON_CACHE_HIT, REASON_BREAKER_OPEN) or reason_code.startswith("error_")
+        reason_code in (REASON_CACHE_HIT, REASON_BREAKER_OPEN, REASON_REFUSED_NO_RESEARCH_PROVIDER)
+        or reason_code.startswith("error_")
     )
     if not _non_call:
         _validate_routing_insert(final_model, final_provider, cost_usd)
