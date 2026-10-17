@@ -29,6 +29,10 @@ from pathlib import Path
 
 import pytest
 
+# the 50k-row ledgers are generated in module fixtures; on a loaded runner that setup alone
+# can pass the suite-wide 30 s per-test timeout
+pytestmark = pytest.mark.timeout(300)
+
 ROOT = Path(__file__).resolve().parents[1]
 HOOK_PATH = ROOT / "src" / "llm_router" / "hooks" / "session-end.py"
 ROWS = 50_000
