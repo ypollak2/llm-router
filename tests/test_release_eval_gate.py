@@ -290,6 +290,24 @@ def check_pin_refusals(G, R):
     refuses(mutate=lambda ms: ms["perf"].update(min_n=50))
 
 
+def check_prereg_file_problems(G, R):
+    import hashlib
+    import tempfile
+    with tempfile.TemporaryDirectory() as t:
+        pf = pathlib.Path(t) / "PREREG-P32.md"
+        missing = pathlib.Path(t) / "absent.md"
+        good = hashlib.sha256(b"frozen text").hexdigest()
+        assert G.prereg_file_problems(missing, good, pin_present=False) == []   # nothing to check
+        assert G.prereg_file_problems(missing, good, pin_present=True), "pin without its prereg file must refuse"
+        pf.write_text("frozen text")
+        assert G.prereg_file_problems(pf, good, pin_present=True) == []         # pass case
+        assert G.prereg_file_problems(pf, good, pin_present=False) == []
+        assert G.prereg_file_problems(pf, None, pin_present=True), "file with no sidecar must refuse"
+        assert G.prereg_file_problems(pf, "d" * 64, pin_present=True), "hash mismatch must refuse"
+        pf.write_text("edited after freeze")
+        assert G.prereg_file_problems(pf, good, pin_present=False), "edited file must refuse even without a pin"
+
+
 CHECKS = {fn.__name__: fn for fn in (
     check_perf_4pt_drop_blocks, check_perf_exactly_3pt_passes, check_perf_2pt_drop_passes,
     check_perf_improvement_and_offset_pass, check_perf_pairs_by_id_not_position,
@@ -298,6 +316,7 @@ CHECKS = {fn.__name__: fn for fn in (
     check_n_checks_inside_the_comparator, check_missing_set_and_no_manifests_not_informative,
     check_wrong_sha_not_informative, check_non_bool_values_not_informative,
     check_pin_consistent_fixture_still_passes, check_pin_refusals, check_fidelity_bar, check_stability_bar, check_skip_policy,
+    check_prereg_file_problems,
 )}
 
 
@@ -308,7 +327,7 @@ def test_check_green_on_the_real_gate(name, G, R):
 
 def test_checks_found_something():
     # an empty table would pass everything
-    assert len(CHECKS) >= 18
+    assert len(CHECKS) >= 19
 
 
 # ── statistics ────────────────────────────────────────────────────────────────

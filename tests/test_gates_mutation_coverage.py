@@ -436,6 +436,8 @@ _P32_MUTANTS = [
      [("pin_problems(pin, manifests, baseline, prereg_sidecar)",
        'pin_problems(pin, manifests, baseline, (pin or {}).get("prereg_sha256"))')],
      "check_pin_refusals"),
+    ("M11 prereg file hash check skipped", [("    if got != sidecar:\n", "    if False:\n")],
+     "check_prereg_file_problems"),
     ("M7 skip refusal off", [("if not on_tag:", "if True:")], "check_skip_policy"),
     ("M7b owner override accepts any value",
      [('env.get("LLM_ROUTER_RELEASE_OWNER_OVERRIDE") == "1"', 'env.get("LLM_ROUTER_RELEASE_OWNER_OVERRIDE")')],

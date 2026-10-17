@@ -5,6 +5,7 @@ the real file (green) and each mutated copy (must go red); the mutant table is a
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
@@ -95,7 +96,7 @@ def check_stab_generator_pinned_and_hashseed_independent(M):
 # ── outcomes ──────────────────────────────────────────────────────────────────
 
 def check_hand_outcome(M):
-    ok = {"id": "x1", "text": "implement a function that reverses a linked list", "policy": "ROUTER_POLICY",
+    ok = {"id": "x1", "text": "implement a function that reverses a doubly linked list in place", "policy": "ROUTER_POLICY",
           "task_type": "code", "complexity": "moderate"}
     wrong_label = dict(ok, id="x2", complexity="simple")
     wrong_type = dict(ok, id="x3", task_type="image")
@@ -105,7 +106,7 @@ def check_hand_outcome(M):
 
 
 def check_agt_outcome(M):
-    ok = {"id": "a1-x", "text": "What is the capital of Portugal?", "task_type": "query", "tier": "haiku"}
+    ok = {"id": "a1-x", "text": "What is the capital of Brazil?", "task_type": "query", "tier": "haiku"}
     bad = dict(ok, id="a1-y", task_type="image")
     tier_ignored = dict(ok, id="a1-z", tier="opus")
     got = {r["id"]: r["pass"] for r in M.score_agt([ok, bad, tier_ignored])}
@@ -210,18 +211,45 @@ def check_candidate_worktree_must_be_root(M):
         assert not out.exists()
 
 
+@contextlib.contextmanager
+def _offline_synthetic(M):
+    """Synthetic stand-in sets and a clean-tree answer: a CLI check must neither score a real set nor
+    depend on whether the dev tree has uncommitted edits."""
+    saved = M.load_set, M.dirty_paths
+    M.load_set, M.dirty_paths = _synthetic_load_set, lambda *a, **k: []
+    try:
+        yield
+    finally:
+        M.load_set, M.dirty_paths = saved
+
+
 def check_cli_refuses_and_writes_nothing(M):
-    with tempfile.TemporaryDirectory() as t:
-        out = pathlib.Path(t) / "o.json"
-        base = ["--sets", "rt_hand_60", "--worktree", str(REPO), "--out", str(out)]
-        assert M.main(["--role", "candidate", "--sha", SHA_A, *base]) == 1       # HEAD is not aaaa...
-        # provenance is satisfied here (real HEAD), so only the baseline rule can refuse
-        head = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True, text=True,
-                              check=True).stdout.strip()
-        for sets in ("fid_syn_60", "stab_syn_500", "rt_hand_60,fid_syn_60"):
-            assert M.main(["--role", "baseline", "--sha", head, "--sets", sets, "--worktree", str(REPO),
-                           "--out", str(out)]) == 1
-        assert not out.exists()
+    with _offline_synthetic(M):
+        with tempfile.TemporaryDirectory() as t:
+            out = pathlib.Path(t) / "o.json"
+            base = ["--sets", "rt_hand_60", "--worktree", str(REPO), "--out", str(out)]
+            assert M.main(["--role", "candidate", "--sha", SHA_A, *base]) == 1       # HEAD is not aaaa...
+            # provenance is satisfied here (real HEAD), so only the baseline rule can refuse
+            head = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True, text=True,
+                                  check=True).stdout.strip()
+            for sets in ("fid_syn_60", "stab_syn_500", "rt_hand_60,fid_syn_60"):
+                assert M.main(["--role", "baseline", "--sha", head, "--sets", sets, "--worktree", str(REPO),
+                               "--out", str(out)]) == 1
+            assert not out.exists()
+
+
+def _synthetic_load_set(set_id, root=REPO):
+    """Invented stand-ins (not the real FIXTURES / a1 items), so the e2e path never scores a real set."""
+    if set_id == "rt_hand_60":
+        return [{"id": f"cg-syn{i}", "text": t, "policy": "ROUTER_POLICY", "task_type": tt, "complexity": cx}
+                for i, (t, tt, cx) in enumerate([("implement a function that reverses a doubly linked list in place", "code", "moderate"),
+                                                 ("what is the tallest mountain in Norway", "query", "simple"),
+                                                 ("zzz qqq unlabeled nonsense", "code", "complex")])]
+    if set_id == "rt_agt_50":
+        return [{"id": f"a1-syn{i}", "text": t, "task_type": tt, "tier": "haiku"}
+                for i, (t, tt) in enumerate([("What is the capital of Brazil?", "query"),
+                                             ("write a haiku about autumn rain", "generate")])]
+    raise ValueError(set_id)
 
 
 def check_end_to_end_file_passes_the_gate_and_manifests_match_freeze(M):
@@ -233,8 +261,9 @@ def check_end_to_end_file_passes_the_gate_and_manifests_match_freeze(M):
     with tempfile.TemporaryDirectory() as t:
         t = pathlib.Path(t)
         out = t / f"{head}.json"
-        assert M.main(["--role", "candidate", "--sha", head, "--sets", ",".join(sets), "--worktree", str(REPO),
-                       "--out", str(out)]) == 0
+        with _offline_synthetic(M):
+            assert M.main(["--role", "candidate", "--sha", head, "--sets", ",".join(sets), "--worktree", str(REPO),
+                           "--out", str(out)]) == 0
         doc = json.loads(out.read_text())
         assert doc["sha"] == head and set(doc["sets"]) == set(sets)
         prov = doc["provenance"]
@@ -250,7 +279,10 @@ def check_end_to_end_file_passes_the_gate_and_manifests_match_freeze(M):
             assert (mdir / f"{sid}.json").read_bytes() == (t / "frozen" / f"{sid}.json").read_bytes()
         manifests = rel.load_manifests(mdir)
         assert all(rel.manifest_problems(m) == [] and m["n"] == m["min_n"] for m in manifests.values())
-        # the gate accepts the file as candidate and as baseline (identical -> PASS)
+        # the gate accepts the file as candidate and as baseline (identical -> PASS). The file holds only
+        # synthetic stand-ins, so the gate is judged against manifests frozen over the same stand-in ids.
+        manifests = {sid: rel.make_manifest(sid, M.SETS[sid][0], len(doc["sets"][sid]["items"]),
+                                            [i["id"] for i in doc["sets"][sid]["items"]]) for sid in sets}
         pin = rel.make_pin(manifests, head, "c" * 64)
         code, lines = gate.run_gate(doc, doc, manifests, expect_sha=head, pin=pin, prereg_sidecar="c" * 64)
         assert code == gate.PASS, lines
@@ -279,6 +311,13 @@ def check_fixtures_identity_detects_an_edit(M):
     assert ident["FIXTURES"]["identical"] is False and ident["FLOOR_FIXTURES"]["identical"] is True
 
 
+def _real_texts() -> frozenset:
+    m = _load(SRC, "_p32_texts")
+    return frozenset(i["text"] for i in m.load_hand(REPO) + m.load_agt(REPO))
+
+
+_REAL_TEXTS = _real_texts()    # texts only; nothing is scored here
+
 CHECKS = {fn.__name__: fn for fn in (
     check_loaders_n_unique_prefix, check_ids_stable_across_runs_and_order,
     check_stab_generator_pinned_and_hashseed_independent, check_hand_outcome, check_agt_outcome,
@@ -289,6 +328,34 @@ CHECKS = {fn.__name__: fn for fn in (
     check_end_to_end_file_passes_the_gate_and_manifests_match_freeze, check_dry_run_counts,
     check_fixtures_identity_detects_an_edit,
 )}
+
+
+@pytest.fixture(autouse=True)
+def forbid_scoring_real_items(monkeypatch):
+    """PREREG-P32: no real set may be scored before the freeze. Every test in this file runs with
+    classify_signals wrapped to raise on any text that belongs to the real hand/a1 sets, so a test
+    cannot score them even through a mutated module copy. Texts only are read here (no outcomes)."""
+    lists = _REAL_TEXTS
+    from llm_router import classify
+    real = classify.classify_signals
+
+    def guarded(text, *a, **k):
+        if text in lists:
+            raise AssertionError("test attempted to score a REAL P32 item before the freeze")
+        return real(text, *a, **k)
+
+    monkeypatch.setattr(classify, "classify_signals", guarded)
+
+
+def test_guard_blocks_scoring_the_real_sets(M):
+    hand, agt = M.load_hand(REPO), M.load_agt(REPO)
+    with pytest.raises(AssertionError, match="REAL P32"):
+        M.score_hand(hand[:1])
+    with pytest.raises(AssertionError, match="REAL P32"):
+        M.score_agt(agt[:1])
+    ok = {"id": "x", "text": "zzz not a real item", "policy": "ROUTER_POLICY", "task_type": "code",
+          "complexity": "moderate"}
+    assert len(M.score_hand([ok])) == 1                     # synthetic items still score
 
 
 @pytest.fixture(scope="module")
@@ -302,7 +369,7 @@ def test_check_green_on_the_real_harness(name, M):
 
 
 def test_checks_found_something():
-    assert len(CHECKS) >= 16   # an empty table would pass everything
+    assert len(CHECKS) >= 16 and _REAL_TEXTS   # an empty table would pass everything
 
 
 # ── mutants: each must turn its named check red ───────────────────────────────
