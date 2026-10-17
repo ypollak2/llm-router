@@ -1,0 +1,27 @@
+{
+ "baseline_sha": "9e8b1460eea9a48f2686eacca184e5a2e7a232e5",
+ "prereg_sha256": "d2e175aa6dc776635b01659811266717d8759bf7923ae20426a83569a5585fa3",
+ "schema": 1,
+ "sets": {
+  "fid_syn_60": {
+   "manifest_sha256": "1c7fadb02e580e11f5f2bfe9fc8e42654a12c18799dbf872a8bc54aae95d14ec",
+   "min_n": 60,
+   "n": 60
+  },
+  "rt_agt_50": {
+   "manifest_sha256": "3dc6217a733d6af275dbb1f902b1f23ee38fd3991222300f5de3a19da656e6cd",
+   "min_n": 50,
+   "n": 50
+  },
+  "rt_hand_60": {
+   "manifest_sha256": "c2d9bcffd2536f1507b006e1d2d80c9964ebb36ff7d84e8c50e93d6c33ef1005",
+   "min_n": 60,
+   "n": 60
+  },
+  "stab_syn_500": {
+   "manifest_sha256": "736a65cda3475509051de4513dc0dfe810de1414ad15479ecd559b30a023724a",
+   "min_n": 500,
+   "n": 500
+  }
+ }
+}
