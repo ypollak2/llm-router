@@ -21,6 +21,7 @@ from pathlib import Path
 import aiosqlite
 
 from llm_router import pricing as _pricing
+from llm_router import skip_causes as _skip_causes
 from llm_router.provenance import Measured
 from llm_router.provider_classes import SQL_REAL_DECISION
 # R11: `state_path` comes from `llm_router.paths`, the canonical resolver.
@@ -818,6 +819,18 @@ def _row_identity(session_id: str | None, task_id: str | None,
             _ci.clean_id(trace_id) or bound_trace)
 
 
+MIGRATE_ROUTING_DECISIONS_ADD_SKIP_CAUSES = [
+    "ALTER TABLE routing_decisions ADD COLUMN skipped_json TEXT",
+    "ALTER TABLE routing_decisions ADD COLUMN served_by_last_resort INTEGER",
+]
+"""F23: which providers the router passed over before the served one, and why.
+
+``skipped_json`` is compact JSON, a list of ``{"model", "reason"[, "until"]}`` (vocabulary:
+``llm_router.skip_causes``); ``[]`` = nothing was skipped. ``served_by_last_resort`` is 1 when a
+local Q&A model served after a non-local entry was skipped or failed (D-116). Both have NO
+DEFAULT: NULL = the row predates the column or its writer keeps no skip list (hooks, direct
+path). It is reported as ``unknown``, never as ``[]`` or 0, which would assert "nothing skipped"."""
+
 MIGRATE_ADD_TASK_TYPE_RAW = [
     "ALTER TABLE usage ADD COLUMN task_type_raw TEXT",
     "ALTER TABLE routing_decisions ADD COLUMN task_type_raw TEXT",
@@ -1278,6 +1291,7 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_USAGE_ADD_REASON
         + MIGRATE_ADD_TASK_IDENTITY
         + MIGRATE_ADD_TASK_TYPE_RAW
+        + MIGRATE_ROUTING_DECISIONS_ADD_SKIP_CAUSES
         # Defined in v6.2 and never applied: compression_stats was declared,
         # log_compression_stat wrote to it, and the table did not exist. The
         # write raised OperationalError straight into bash-compress's bare
@@ -2256,6 +2270,8 @@ async def log_routing_decision(
     policy_stage: str | None = None,
     grade_basis: str | None = None,
     inventory_sig: str | None = None,
+    skipped: list[dict] | None = None,
+    served_by_last_resort: bool | None = None,
 ) -> None:
     """Persist a complete routing decision to the routing_decisions table.
 
@@ -2297,6 +2313,8 @@ async def log_routing_decision(
             (P1.7); None = not decided by the engine (NULL).
         policy_id, policy_stage, grade_basis, inventory_sig: the dynamic-policy fields
             (P1.7-e). The first three are stored as ``'none'`` when absent, never NULL.
+        skipped, served_by_last_resort: F23 skip causes (``llm_router.skip_causes``). None =
+            unknown (NULL); an empty list = nothing was skipped.
     """
     # Validate inputs before database insert. A cache-served or failed call (LEDGER-ERR-1)
     # names no real provider ("cache", or "none" when nothing was attempted); its reason_code
@@ -2367,8 +2385,9 @@ async def log_routing_decision(
                 correlation_id, requested_complexity, complexity_downgraded, subject,
                 provenance, capabilities_json, shadow_tier, session_id, tool_use_id,
                 task_type_raw, layer, confidence, reason, abstain, engine_version,
-                policy_id, policy_stage, grade_basis, inventory_sig, task_id, trace_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                policy_id, policy_stage, grade_basis, inventory_sig, task_id, trace_id,
+                skipped_json, served_by_last_resort)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 _prompt_hash(prompt),
                 task_type,
@@ -2406,6 +2425,8 @@ async def log_routing_decision(
                 inventory_sig,
                 row_task_id,
                 row_trace_id,
+                _skip_causes.to_json(skipped),
+                None if served_by_last_resort is None else (1 if served_by_last_resort else 0),
             ),
         )
         await db.commit()

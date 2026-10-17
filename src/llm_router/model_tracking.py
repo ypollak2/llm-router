@@ -247,13 +247,16 @@ def display_tracking_summary(hours: int = 24) -> str:
     Returns:
         Formatted string with usage statistics
     """
-    from llm_router.routing_report import executed_routes, format_executed_routes
+    from llm_router.routing_report import executed_routes, format_executed_routes, format_local_by_cause
 
     output = (
         f"\n📊 Classifier hints (Last {hours}h) — "
         "prompts classified by the hook, not executed routes\n"
     )
-    output += f"Executed: {format_executed_routes(executed_routes(hours), hours)}\n"
+    _executed = executed_routes(hours)
+    output += f"Executed: {format_executed_routes(_executed, hours)}\n"
+    if format_local_by_cause(_executed):
+        output += f"Executed: {format_local_by_cause(_executed)}\n"
     output += "─" * 70 + "\n\n"
     
     # Model usage
