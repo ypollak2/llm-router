@@ -70,4 +70,5 @@ jobs:
             --baseline release_evals/baseline.json \
             --manifests release_evals/manifests \
             --pin release_evals/PIN.json \
+            --prereg release_evals/PREREG.sha256 \
             --sha "${SHA}"

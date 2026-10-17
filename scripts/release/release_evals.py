@@ -21,8 +21,10 @@ EVAL FILE  release_evals/<sha>.json
     stability    {"id": "...", "a": "<decision>", "b": "<decision>"}
 
 PIN  release_evals/PIN.json  (committed; written once at the PREREG-P32 freeze)
-    {"schema": 1, "baseline_sha": "<40 hex>",
+    {"schema": 1, "baseline_sha": "<40 hex>", "prereg_sha256": "<64 hex>",
      "sets": {"<set_id>": {"manifest_sha256", "n", "min_n"}}}
+  prereg_sha256 is the hash of the frozen PREREG-P32 document; the committed one-line
+  sidecar release_evals/PREREG.sha256 (sha256sum format) must carry the same hash.
   The gate refuses (NOT INFORMATIVE) if a pinned manifest is missing or extra, its
   sha256 (canonical JSON) differs, n or min_n differ from the pin, the baseline file's
   recorded sha is not baseline_sha, or manifests exist with no pin. Written by
@@ -47,6 +49,20 @@ from pathlib import Path
 SCHEMA = 1
 KINDS = ("performance", "fidelity", "stability")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def read_prereg_sidecar(path: Path) -> str | None:
+    """The hash in a one-line `sha256sum` sidecar; None when the file is absent.
+    A present but unparseable sidecar raises ValueError (never read as absent)."""
+    path = Path(path)
+    if not path.is_file():
+        return None
+    lines = [ln for ln in path.read_text().splitlines() if ln.strip()]
+    token = lines[0].split()[0] if len(lines) == 1 else ""
+    if not SHA256_RE.match(token):
+        raise ValueError(f"{path}: must be one line starting with a 64-hex sha256")
+    return token
 
 
 def ids_sha256(ids: list[str]) -> str:
@@ -102,16 +118,20 @@ def manifest_sha256(m: dict) -> str:
     return hashlib.sha256(json.dumps(m, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def make_pin(manifests: dict[str, dict], baseline_sha: str) -> dict:
+def make_pin(manifests: dict[str, dict], baseline_sha: str, prereg_sha256: str) -> dict:
     if not SHA_RE.match(str(baseline_sha)):
         raise ValueError(f"baseline_sha must be 40 lowercase hex chars, got {baseline_sha!r}")
-    return {"schema": SCHEMA, "baseline_sha": baseline_sha,
+    if not SHA256_RE.match(str(prereg_sha256)):
+        raise ValueError(f"prereg_sha256 must be 64 lowercase hex chars, got {prereg_sha256!r}")
+    return {"schema": SCHEMA, "baseline_sha": baseline_sha, "prereg_sha256": prereg_sha256,
             "sets": {sid: {"manifest_sha256": manifest_sha256(m), "n": m["n"], "min_n": m["min_n"]}
                      for sid, m in sorted(manifests.items())}}
 
 
-def pin_problems(pin: dict | None, manifests: dict[str, dict], baseline: dict | None) -> list[str]:
-    """Reasons the committed manifests/baseline differ from the freeze pin."""
+def pin_problems(pin: dict | None, manifests: dict[str, dict], baseline: dict | None,
+                 prereg_sidecar: str | None = None) -> list[str]:
+    """Reasons the committed manifests/baseline/prereg differ from the freeze pin.
+    prereg_sidecar is the hash read from release_evals/PREREG.sha256 (None = file absent)."""
     if pin is None:
         return ["no pin file (release_evals/PIN.json) but manifests exist: nothing proves they "
                 "are the frozen sets"] if manifests else []
@@ -119,6 +139,13 @@ def pin_problems(pin: dict | None, manifests: dict[str, dict], baseline: dict | 
             or not SHA_RE.match(str(pin.get("baseline_sha"))):
         return ["pin file is malformed (needs sets object and 40-hex baseline_sha)"]
     p: list[str] = []
+    pinned_prereg = pin.get("prereg_sha256")
+    if not SHA256_RE.match(str(pinned_prereg)):
+        p.append("pin has no valid prereg_sha256")
+    elif prereg_sidecar is None:
+        p.append("release_evals/PREREG.sha256 is absent: the pin cannot be tied to the frozen prereg")
+    elif prereg_sidecar != pinned_prereg:
+        p.append("release_evals/PREREG.sha256 differs from the prereg_sha256 recorded in the pin")
     for sid in sorted(set(pin["sets"]) - set(manifests)):
         p.append(f"{sid}: pinned set has no manifest (deleted?)")
     for sid in sorted(set(manifests) - set(pin["sets"])):
@@ -215,6 +242,8 @@ def main(argv: list[str] | None = None) -> int:
                                     "baseline (run once, at the PREREG-P32 freeze)")
     pn.add_argument("--manifests", default="release_evals/manifests")
     pn.add_argument("--baseline", default="release_evals/baseline.json")
+    pn.add_argument("--prereg", default="release_evals/PREREG.sha256",
+                    help="one-line sha256sum sidecar of the frozen prereg; its hash is recorded in the pin")
     pn.add_argument("--out", default="release_evals/PIN.json")
     a = ap.parse_args(argv)
 
@@ -238,7 +267,10 @@ def main(argv: list[str] | None = None) -> int:
             bad = [f"{sid}: {x}" for sid, m in manifests.items() for x in manifest_problems(m)]
             if not manifests or bad:
                 raise ValueError("; ".join(bad) or "no manifests to pin")
-            pin = make_pin(manifests, json.loads(Path(a.baseline).read_text()).get("sha"))
+            prereg = read_prereg_sidecar(Path(a.prereg))
+            if prereg is None:
+                raise ValueError(f"{a.prereg} not found (the frozen prereg's sha256 sidecar)")
+            pin = make_pin(manifests, json.loads(Path(a.baseline).read_text()).get("sha"), prereg)
         except (ValueError, OSError) as e:
             print(f"refusing to write pin: {e}", file=sys.stderr)
             return 1

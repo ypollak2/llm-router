@@ -27,6 +27,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 RELEASE_DIR = REPO / "scripts" / "release"
 SHA_A = "a" * 40
 SHA_B = "b" * 40
+PREREG = "c" * 64   # sha256 of a (synthetic) frozen prereg
 
 
 def load_gate_from_source(path: pathlib.Path, name: str):
@@ -76,8 +77,8 @@ def _doc(sha, sets):
 def _run(G, R, cand, base, manifests, expect_sha=None, pin="auto"):
     """run_gate with a pin freshly derived from the manifests/baseline (a consistent freeze)."""
     if pin == "auto":
-        pin = R.make_pin(manifests, (base or {}).get("sha", SHA_B))
-    return G.run_gate(cand, base, manifests, expect_sha=expect_sha, pin=pin)
+        pin = R.make_pin(manifests, (base or {}).get("sha", SHA_B), PREREG)
+    return G.run_gate(cand, base, manifests, expect_sha=expect_sha, pin=pin, prereg_sidecar=PREREG)
 
 
 def _gate_perf(G, R, **kw):
@@ -253,16 +254,16 @@ def check_non_bool_values_not_informative(G, R):
     assert _run(G, R, _doc(SHA_A, {"stab": items}), None, {"stab": ms})[0] == G.NOT_INFORMATIVE
 
 
-def _pinned(G, R, mutate=None, pin_mutate=None, base_sha=SHA_B, with_pin=True):
+def _pinned(G, R, mutate=None, pin_mutate=None, base_sha=SHA_B, with_pin=True, sidecar=PREREG):
     m, base, cand = _perf(R)
     manifests = {"perf": m}
-    pin = R.make_pin(manifests, SHA_B)
+    pin = R.make_pin(manifests, SHA_B, PREREG)
     if mutate:
         mutate(manifests)
     if pin_mutate:
         pin_mutate(pin)
     return G.run_gate(_doc(SHA_A, {"perf": cand}), _doc(base_sha, {"perf": base}), manifests,
-                      pin=pin if with_pin else None)
+                      pin=pin if with_pin else None, prereg_sidecar=sidecar)
 
 
 def check_pin_consistent_fixture_still_passes(G, R):
@@ -278,6 +279,10 @@ def check_pin_refusals(G, R):
     refuses(mutate=lambda ms: ms.clear())                          # manifest deleted
     refuses(mutate=lambda ms: ms.update(extra=_manifest(R, "extra", "stability")))   # manifest added
     refuses(base_sha=SHA_A)                                        # baseline is not the pinned release
+    # PREREG.sha256 sidecar: absent, different, or no prereg_sha256 in the pin
+    refuses(sidecar=None)
+    refuses(sidecar="d" * 64)
+    refuses(pin_mutate=lambda p: p.pop("prereg_sha256"))
     refuses(pin_mutate=lambda p: p["sets"]["perf"].update(manifest_sha256="0" * 64))  # sha differs
     # n / min_n edited CONSISTENTLY in the manifest (ids dropped, hash recomputed): pin catches it
     refuses(mutate=lambda ms: ms.update(perf=R.make_manifest("perf", "performance", 80, _ids("perf", 80))))
@@ -405,7 +410,8 @@ def _write_case(R, tmp_path, cand_fail=(), base_fail=(), manifests=True):
     mdir.mkdir()
     if manifests:
         (mdir / "perf.json").write_text(json.dumps(m))
-    (tmp_path / "PIN.json").write_text(json.dumps(R.make_pin({"perf": m}, SHA_B)))
+    (tmp_path / "PIN.json").write_text(json.dumps(R.make_pin({"perf": m}, SHA_B, PREREG)))
+    (tmp_path / "PREREG.sha256").write_text(f"{PREREG}  PREREG-P32.md\n")
     (tmp_path / "base.json").write_text(json.dumps(_doc(SHA_B, {"perf": base})))
     (tmp_path / f"{SHA_A}.json").write_text(json.dumps(_doc(SHA_A, {"perf": cand})))
 
@@ -414,7 +420,8 @@ def _cli(G, tmp_path, *extra):
     return G.main(["compare", "--candidate", str(tmp_path / f"{SHA_A}.json"),
                    "--baseline", str(tmp_path / "base.json"),
                    "--manifests", str(tmp_path / "manifests"),
-                   "--pin", str(tmp_path / "PIN.json"), *extra])
+                   "--pin", str(tmp_path / "PIN.json"),
+                   "--prereg", str(tmp_path / "PREREG.sha256"), *extra])
 
 
 def test_cli_exit_codes(G, R, tmp_path, capsys):
@@ -587,14 +594,35 @@ def test_pin_cli_roundtrip_and_cli_gate_needs_the_pin(G, R, tmp_path, capsys):
     assert _cli(G, tmp_path, "--sha", SHA_A) == 2          # manifests, no pin
     assert "provenance" in capsys.readouterr().out
     assert R.main(["pin", "--manifests", str(tmp_path / "manifests"),
-                   "--baseline", str(tmp_path / "base.json"), "--out", str(tmp_path / "PIN.json")]) == 0
+                   "--baseline", str(tmp_path / "base.json"), "--prereg", str(tmp_path / "PREREG.sha256"),
+                   "--out", str(tmp_path / "PIN.json")]) == 0
     assert _cli(G, tmp_path, "--sha", SHA_A) == 0
     (tmp_path / "manifests" / "perf.json").unlink()        # delete the manifest after the freeze
     capsys.readouterr()
     assert _cli(G, tmp_path, "--sha", SHA_A) == 2
     assert R.main(["pin", "--manifests", str(tmp_path / "manifests"),
-                   "--baseline", str(tmp_path / "base.json"), "--out", str(tmp_path / "P2.json")]) == 1
+                   "--baseline", str(tmp_path / "base.json"), "--prereg", str(tmp_path / "PREREG.sha256"),
+                   "--out", str(tmp_path / "P2.json")]) == 1
 
 
 def test_release_workflow_passes_the_pin():
     assert "--pin release_evals/PIN.json" in (REPO / ".github" / "workflows" / "release.yml").read_text()
+
+
+def test_cli_prereg_sidecar_absent_mismatched_or_malformed_is_not_informative(G, R, tmp_path, capsys):
+    _write_case(R, tmp_path)
+    side = tmp_path / "PREREG.sha256"
+    assert _cli(G, tmp_path, "--sha", SHA_A) == 0
+    side.write_text(f"{'d' * 64}  PREREG-P32.md\n")                  # different prereg
+    assert _cli(G, tmp_path, "--sha", SHA_A) == 2
+    assert "PREREG.sha256" in capsys.readouterr().out
+    side.write_text("not a hash\n")                                   # malformed is not "absent"
+    assert _cli(G, tmp_path, "--sha", SHA_A) == 2
+    side.unlink()                                                     # absent while a pin exists
+    assert _cli(G, tmp_path, "--sha", SHA_A) == 2
+    assert R.main(["pin", "--manifests", str(tmp_path / "manifests"), "--baseline", str(tmp_path / "base.json"),
+                   "--prereg", str(side), "--out", str(tmp_path / "P3.json")]) == 1   # pin needs the sidecar
+
+
+def test_release_workflow_passes_the_prereg_sidecar():
+    assert "--prereg release_evals/PREREG.sha256" in (REPO / ".github" / "workflows" / "release.yml").read_text()
