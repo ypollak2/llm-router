@@ -99,8 +99,15 @@ def env(monkeypatch, tmp_path):
     import llm_router.config as config_module
 
     config_module._config = None
+    # The dynamic routing table is a process global that unpinned chain building reads; a table
+    # left by another test (other providers) emptied the chain in a full xdist run (tests/conftest
+    # mock_env resets it for the same reason). Pinned-model tests never read it.
+    from llm_router.dynamic_routing import reset_dynamic_routing
+
+    reset_dynamic_routing()
     yield
     config_module._config = None
+    reset_dynamic_routing()
 
 
 @pytest.fixture
