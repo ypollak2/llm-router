@@ -463,6 +463,42 @@ async def test_irreducible_tokens_over_the_serving_window_is_pack_over_window(en
     assert row["local_gate"]["reason"] == "pack_over_window" and backend.calls == []
 
 
+async def test_unknown_needs_forward_and_never_serve(env, monkeypatch):
+    """F48: capability routing off means needs is None; the gate must not skip its checks and serve."""
+    monkeypatch.setenv("LLM_ROUTER_CAPABILITY_ROUTING", "off")
+    backend = Backend()
+    r = await _post(env.app(backend), _req_after("Read"))
+    assert r.status_code == 200 and len(env.up.requests) == 1
+    row = _gate_row(env.rows())
+    assert row["decision"] == "forwarded" and row["local_gate"]["reason"] == "needs_unknown"
+    assert row["local_gate"]["model"] == MODEL and backend.calls == []
+
+
+async def test_check_order_is_breaker_before_promote(env):
+    """A state failing both the breaker and the promote check reports the breaker."""
+    (env.elig.parent / "grandfathered_models.json").write_text(json.dumps({"at": 1, "ids": []}))
+    await _post(env.app(Backend(), breaker=Breaker(allowed=False)), _req_after("Read"))
+    assert _gate_row(env.rows())["local_gate"]["reason"] == "breaker_open"
+
+
+async def test_proxy_never_writes_the_eligibility_file(env):
+    before_bytes, before_mtime = env.elig.read_bytes(), env.elig.stat().st_mtime_ns
+    r = await _post(env.app(Backend()), _req_after("Read"))
+    assert r.status_code == 200 and _gate_row(env.rows())["local_gate"]["reason"] == "served_local"
+    assert env.elig.read_bytes() == before_bytes and env.elig.stat().st_mtime_ns == before_mtime
+
+
+async def test_loop_guard_drop_has_its_own_reason_code(env):
+    backend = Backend(_ollama("", [_call("Read", {"file_path": "/work/repo/x.py"})]))
+    app = env.app(backend)
+    await _post(app, _req_after("Read"))
+    assert env.rows()[-1]["decision"] == "served"
+    await _post(app, _req_after("Read"))
+    row = env.rows()[-1]
+    assert row["decision"] == "fallback" and row["reason"] == "loop_guard"
+    assert row["local_gate"]["reason"] == "local_repeat" and "local_repeat" in local_gate.REASONS
+
+
 async def test_unsuitable_task_type_is_no_local_model(env):
     env.policy.update(task_type="generate")
     backend = Backend()

@@ -628,7 +628,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # served step: served/avoided metrics must never see it.
             guard.reset(session_id)
             if gate_decision is not None:
-                row["local_gate"] = dict(row["local_gate"], reason=local_gate.R_LOCAL_FAILED)
+                row["local_gate"] = dict(row["local_gate"], reason=local_gate.R_LOCAL_REPEAT)
             row.update(decision=ledger.DECISION_FALLBACK, reason=REASON_LOOP_GUARD,
                        detail=repeat, added_latency_s=elapsed)
             return None
