@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 33
+# llm_router-hook-version: 34
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -119,9 +119,13 @@ STAR_CTA_THRESHOLD_USD = 0.50
 # instead of hardcoding a stale copy. Before this, session-end used $15/$75 (Opus
 # 4.6) while cost.py had moved to the current Opus price — so the end-of-session
 # summary was mispriced independently of every other surface. Fail-open to the
-# prior literals if cost.py can't be imported (a hook must never crash).
+# prior literals if the price table can't be imported (a hook must never crash).
+# D-171 S3: read from ``pricing`` (the table cost.py itself derives these two
+# constants from) so the Stop never imports ``llm_router.cost`` and, through it,
+# pydantic (70 ms of every Stop).
 try:
-    from llm_router.cost import _HOST_INPUT_PER_M as _CI, _HOST_OUTPUT_PER_M as _CO
+    from llm_router.pricing import savings_baseline_rates as _baseline_rates
+    _CI, _CO = _baseline_rates()
     HOST_INPUT_PER_M  = float(_CI)
     HOST_OUTPUT_PER_M = float(_CO)
 except Exception:
@@ -578,7 +582,7 @@ def _sync_import_savings_log() -> None:
             pass
 
 
-def _query_cumulative_savings() -> list[tuple[str, int, int, int, float]]:
+def _query_cumulative_savings(window_totals: dict | None = None) -> list[tuple[str, int, int, int, float]]:
     """Return list of (label, calls, total_in_tokens, total_out_tokens, saved_usd) per period.
 
     v10.1.6: delegates to ``llm_router.dashboard_data`` so the UNION logic
@@ -587,6 +591,11 @@ def _query_cumulative_savings() -> list[tuple[str, int, int, int, float]]:
     and silently missed sources when the schema evolved. The returned
     tuple shape is preserved so downstream renderers don't break — total
     tokens are folded into ``total_in`` (renderer only uses ``ti+to``).
+
+    ``window_totals`` ({window: WindowTotals}) lets the background child compute
+    each window once and share it with its other figures (D-171 S2). A window
+    absent from it is queried here. The Stop does NOT call this: it renders the
+    child's cache (``_ledger_cumulative``).
     """
     if not os.path.exists(_db_path()):
         return []
@@ -608,7 +617,9 @@ def _query_cumulative_savings() -> list[tuple[str, int, int, int, float]]:
         if window is None:
             continue
         try:
-            totals = query_window(window, db_path=_db_path())
+            totals = (window_totals or {}).get(window)
+            if totals is None:
+                totals = query_window(window, db_path=_db_path())
         except Exception:
             continue
         results.append((label, totals.calls, totals.tokens, 0, totals.saved_usd))
@@ -682,9 +693,15 @@ def _host_baseline(in_tok: int, out_tok: int) -> float:
 
 def _load_config_for_subscription():
     """Return the LLM Router config. Split out so a test can force the failure path."""
-    from llm_router.config import get_config
+    from types import SimpleNamespace
 
-    return get_config()
+    from llm_router.config_lite import config_value
+
+    # D-171 S3: config_lite returns the declared default without importing
+    # pydantic-settings unless something can set the field.
+    return SimpleNamespace(
+        llm_router_claude_subscription=config_value("llm_router_claude_subscription")
+    )
 
 
 def _is_subscription_mode() -> bool:
@@ -1588,7 +1605,7 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
         )
 
     # 14-day sparkline
-    daily_14d = _query_daily_14d()
+    daily_14d = _daily_14d_for_render()
     if daily_14d:
         total_calls = sum(d[1] for d in daily_14d)
         total_tokens = sum(d[2] for d in daily_14d)
@@ -1938,7 +1955,7 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
             render_enhanced_sparkline,
             query_last_prompt_model,
         )
-        daily_14d = _query_daily_14d()
+        daily_14d = _daily_14d_for_render()
         if daily_14d:
             lines.append("")
             lines.append(f"  {'─' * (WIDTH - 4)}")
@@ -2027,7 +2044,14 @@ def _collect_report_data(
     is_live: bool,
     cumulative: list[tuple[str, int, int, int, float]],
 ) -> dict:
-    """Gather all metrics into a single data dict for the renderer."""
+    """Gather all metrics into a single data dict for the renderer.
+
+    D-171 S1: ``daily_14d`` is the background child's cached figure on the Stop.
+    ``efficiency``, ``overhead``, ``cache_stats`` and ``savings_by_task`` are no
+    longer collected: each is a full-table scan of today's rows, and nothing read
+    them (the Rich render uses ``routing_logic`` and ``daily_14d`` only; ``_format``
+    does not take this dict).
+    """
     session_id = None
     try:
         with open(_session_id_file()) as f:
@@ -2045,16 +2069,12 @@ def _collect_report_data(
         "cc_is_live": is_live,
         "routing_logic": _query_routing_logic(session_start),
         "cumulative": cumulative,
-        "daily_14d": _query_daily_14d(),
-        "efficiency": _query_router_efficiency(),
-        "overhead": _query_classifier_overhead(),
-        "cache_stats": _query_cache_hit_stats(),
+        "daily_14d": _daily_14d_for_render(),
         "paid_rows": paid_rows,
         "cc_rows": cc_rows,
         "free_rows": free_rows,
         "tools": tools,
         "complexity_data": _query_session_complexity_breakdown(session_start),
-        "savings_by_task": _query_savings_by_task_type(),
     }
 
 
@@ -2213,15 +2233,16 @@ def _condense(summary: str) -> str:
     # disturbing them.
     if executed_header or used_5h is not None or used_wk is not None:
         try:
-            from llm_router import dashboard_data as _dd
-
             # 2026-09-27 product decision: ONE labelled estimate per window
             # (realized+unverified merged), never "verified"/"unverified"
             # wording — Summary.compact() is the single implementation this
-            # line, the statusline, and codex-stop.py all call.
+            # line, the statusline, and codex-stop.py all call. On the Stop the
+            # fragment is the child's cached ``Summary.compact()`` (D-171 S1):
+            # absent on a first run, then the line carries no money figures.
             for label, window in (("today", "today"), ("lifetime", "lifetime")):
-                s = _dd.summary(window)
-                bits.append(f"{label} {s.compact()}")
+                compact = _ledger_compact(window)
+                if compact:
+                    bits.append(f"{label} {compact}")
         except Exception:
             pass
 
@@ -2255,7 +2276,7 @@ def _condense(summary: str) -> str:
 # the full box (profile rescanned, benchmarks updated) is shown by the NEXT Stop.
 
 #: Steps the child runs, in order; each is fail-open on its own.
-_STOP_BACKGROUND_STEPS = ("_refresh_northstar_line", "_fetch_live_usage",
+_STOP_BACKGROUND_STEPS = ("_refresh_northstar_line", "_refresh_ledger_cache", "_fetch_live_usage",
                           "_build_and_save_learned_profile",
                           "_maybe_rescan_profile", "_maybe_evaluate_models",
                           "_link_decision_outcomes")
@@ -2433,6 +2454,168 @@ def _cached_northstar_line(session_id: str, now: float | None = None) -> str | N
         return d["line"]
     except Exception:  # noqa: BLE001
         return None
+
+
+# -- D-171 S1: ledger-wide figures come from a cache the child writes ------------
+# Live session-end p95 was 4,237 ms. Synthetic ledgers reproduce the mechanism: a
+# Stop re-ran full-table aggregates (``dashboard_data.query_window`` for five
+# windows, ``summary`` for two, ``query_daily``), some of them 2 or 3 times, so
+# its cost grew with usage.db (500 ms p50 at 50k rows per table, 2,302 ms at
+# 250k). The child now computes each aggregate ONCE and writes this cache; the
+# Stop only reads it. The figures are one turn old (the same trade as the
+# north-star line, P09-SE-1). With no usable cache the Stop renders without them.
+
+_LEDGER_CACHE_FILENAME = "ledger_aggregates.json"
+_LEDGER_CACHE_VERSION = 1
+#: A cache older than this is not shown. Generous because the figures are
+#: ledger-wide totals, not per-turn state; the same-local-day check below keeps
+#: "today" from carrying yesterday's number across midnight.
+_LEDGER_CACHE_MAX_AGE_S = 3600.0
+#: ``_STOP_LEDGER`` outside a Stop run: helpers compute live, as before the cache.
+_LEDGER_LIVE = object()
+_STOP_LEDGER = _LEDGER_LIVE
+
+
+def _ledger_cache_path() -> str:
+    return os.path.join(_state_dir(), _LEDGER_CACHE_FILENAME)
+
+
+def _local_day() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _compute_ledger_aggregates() -> dict:
+    """Every ledger-wide figure the Stop shows, each aggregate computed once.
+
+    Each figure is fail-open on its own: one that raises is left out of the dict
+    and the Stop renders without it."""
+    out: dict = {"v": _LEDGER_CACHE_VERSION, "ts": time.time(), "day": _local_day()}
+    totals: dict = {}
+    try:
+        from llm_router import dashboard_data as _dd
+    except Exception:  # noqa: BLE001
+        return out
+    db = _db_path()
+    for window in ("today", "week", "14d", "month", "lifetime"):
+        try:
+            totals[window] = _dd.query_window(window, db_path=db)
+        except Exception:  # noqa: BLE001
+            continue
+    try:
+        out["cumulative"] = [list(r) for r in _query_cumulative_savings(totals)]
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        out["daily_14d"] = [list(r) for r in _query_daily_14d()]
+    except Exception:  # noqa: BLE001
+        pass
+    for window in ("today", "lifetime"):
+        try:
+            if window in totals:
+                out[f"{window}_compact"] = _dd.summary(
+                    window, db_path=db, totals=totals[window]
+                ).compact()
+        except Exception:  # noqa: BLE001
+            continue
+    try:
+        if "lifetime" in totals:
+            from llm_router.savings import unverified_note
+
+            lt = totals["lifetime"]
+            out["lifetime_note"] = unverified_note(lt.unverified_saved_usd, lt.unverified_calls) or ""
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _refresh_ledger_cache() -> None:
+    """Child step: compute the ledger-wide figures and cache them for the next Stop.
+    Written atomically, so a Stop reading mid-write sees the old file or the new
+    one, never half of either."""
+    data = _compute_ledger_aggregates()
+    path = _ledger_cache_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.remove(tmp)  # only still there when the write or replace failed
+        except OSError as _exc:
+            # Fail-open (litter), not silent (T-14 ratchet).
+            try:
+                from llm_router import failopen as _fo
+                _fo.record("CHZ-FO-LEDGER-CACHE-TMP-REMOVE", _exc)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _read_ledger_cache(now: float | None = None) -> dict:
+    """The child's cache, or ``{}`` (none written yet, corrupt, another version,
+    older than ``_LEDGER_CACHE_MAX_AGE_S``, or from another local day). One small
+    file read; never queries the ledger, never raises, never waits."""
+    try:
+        with open(_ledger_cache_path(), encoding="utf-8") as f:
+            d = json.load(f)
+        if not isinstance(d, dict) or d.get("v") != _LEDGER_CACHE_VERSION:
+            return {}
+        ts = d.get("ts")
+        now = time.time() if now is None else now
+        if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not 0 <= now - ts <= _LEDGER_CACHE_MAX_AGE_S:
+            return {}
+        if d.get("day") != _local_day():
+            return {}
+        return d
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _cached_rows(key: str, width: int) -> list[tuple]:
+    """``_STOP_LEDGER[key]`` as a list of tuples of ``width``, else ``[]``."""
+    try:
+        rows = _STOP_LEDGER.get(key)  # type: ignore[union-attr]
+        if not isinstance(rows, list):
+            return []
+        out = [tuple(r) for r in rows if isinstance(r, (list, tuple)) and len(r) == width]
+        return out if len(out) == len(rows) else []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _ledger_cumulative() -> list[tuple[str, int, int, int, float]]:
+    if _STOP_LEDGER is _LEDGER_LIVE:
+        return _query_cumulative_savings()
+    return _cached_rows("cumulative", 5)
+
+
+def _daily_14d_for_render() -> list[tuple[str, int, int, float, int]]:
+    if _STOP_LEDGER is _LEDGER_LIVE:
+        return _query_daily_14d()
+    return _cached_rows("daily_14d", 5)
+
+
+def _ledger_compact(window: str) -> str | None:
+    """``Summary.compact()`` for ``today`` or ``lifetime``; None when not cached."""
+    if _STOP_LEDGER is _LEDGER_LIVE:
+        from llm_router import dashboard_data as _dd
+
+        return _dd.summary(window).compact()
+    v = _STOP_LEDGER.get(f"{window}_compact")  # type: ignore[union-attr]
+    return v if isinstance(v, str) and v else None
+
+
+def _ledger_lifetime_note() -> str | None:
+    """The lifetime unverified-savings note, or None."""
+    if _STOP_LEDGER is _LEDGER_LIVE:
+        from llm_router.dashboard_data import query_window as _qw
+        from llm_router.savings import unverified_note
+
+        _lt = _qw("lifetime")
+        return unverified_note(_lt.unverified_saved_usd, _lt.unverified_calls)
+    v = _STOP_LEDGER.get("lifetime_note")  # type: ignore[union-attr]
+    return v if isinstance(v, str) and v else None
 
 
 def _link_decision_outcomes() -> None:
@@ -2637,7 +2820,10 @@ def main() -> None:
     with _hl_phase("savings_sync"):
         _sync_import_savings_log()          # flush JSONL before cumulative query
     with _hl_phase("cumulative"):
-        cumulative                  = _query_cumulative_savings()
+        # D-171 S1: the child's cache, never a ledger scan (see _read_ledger_cache).
+        global _STOP_LEDGER
+        _STOP_LEDGER                = _read_ledger_cache()
+        cumulative                  = _ledger_cumulative()
 
     # Try SessionSummaryDashboard (Rich) renderer; fall back to legacy ANSI
     _laps = _Laps()
@@ -2881,10 +3067,7 @@ def main() -> None:
     # savings_stats money nobody observed being used is kept OUT of the figures
     # above (savings.VERIFIED_SAVED_SQL) and shown here, labelled, instead.
     try:
-        from llm_router.dashboard_data import query_window as _qw
-        from llm_router.savings import unverified_note
-        _lt = _qw("lifetime")
-        _note = unverified_note(_lt.unverified_saved_usd, _lt.unverified_calls)
+        _note = _ledger_lifetime_note()
         if _note:
             final_summary_output += f"\n  lifetime {_note}\n"
     except Exception:
@@ -3052,6 +3235,10 @@ def main() -> None:
                     json.dump(current, f)
             except OSError:
                 pass
+
+    # The cache read is scoped to this run: a caller that uses the helpers after
+    # it (a test, a CLI) gets live figures again.
+    _STOP_LEDGER = _LEDGER_LIVE
 
 
 def _entry(argv: list[str]) -> None:

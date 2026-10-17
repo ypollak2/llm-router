@@ -1706,38 +1706,11 @@ def format_spend_for_display(spend_usd: float) -> str:
 # _are_provenance_filtered.py` enumerates the surfaces and fails when a new one
 # appears without this clause.
 
-PROVENANCE_COLUMN = "is_simulated"
-
-
-def production_only(include_simulated: bool = False, *, prefix: str = "AND",
-                    table: str = "") -> str:
-    """WHERE fragment that keeps synthetic rows out of a money figure.
-
-    FAIL-CLOSED, and the `= 0` is the whole point. `IS NOT 1` admits NULL, so a
-    row whose provenance was never established counts as production — the same
-    defect as `is_evaluable` treating a missing field as real. Only a row
-    explicitly stamped 0 at write time is production data.
-
-    `include_simulated` is the named escape hatch for tests that exercise the
-    aggregate arithmetic over rows they wrote themselves (pytest stamps every
-    such row synthetic). No production caller passes it, and the default stays
-    exclusive.
-    """
-    if include_simulated:
-        # An empty string is only safe where the caller APPENDS the fragment
-        # (`f"{where} {production_only(...)}"`). Five callers instead EMBED it
-        # (`f"WHERE {production_only(..., prefix='')} AND date(...)"`), and there
-        # an empty fragment composes to the literal `WHERE  AND date(...)` —
-        # `sqlite3.OperationalError: near "AND": syntax error`. So a caller that
-        # supplies no prefix is embedding, and gets a predicate that is always
-        # true rather than nothing at all.
-        #
-        # Found by the agent updating the tests for this change, on the first
-        # call that passed `include_simulated=True`. The escape hatch had never
-        # been exercised on these five surfaces.
-        return "" if prefix else "1=1"
-    col = f"{table}.{PROVENANCE_COLUMN}" if table else PROVENANCE_COLUMN
-    return f"{prefix} {col} = 0".strip()
+# `PROVENANCE_COLUMN` and `production_only` live in `llm_router.savings` (a module
+# with no heavy imports) so the Stop hook and `dashboard_data` can build the filter
+# without importing this module and, through it, pydantic. Re-exported here: every
+# existing `cost.production_only` caller and test keeps working.
+from llm_router.savings import PROVENANCE_COLUMN, production_only  # noqa: E402,F401
 
 
 async def _count_unknown_provenance(db, where: str) -> int:
