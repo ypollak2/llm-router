@@ -249,7 +249,7 @@ async def test_executed_routes_matches_the_ledger(home):
     assert res["total"] == sum(EXPECTED_EXEC["24h"].values())
     # F23: the two runtime ollama rows (R1, R10) have no skip list -> "unknown"; proxy rows carry none.
     assert res["local_by_cause"]["unknown"] == 2 and sum(res["local_by_cause"].values()) == 2
-    assert set(res["local_by_cause"]) == {"bench", "last_resort", "policy", "other_skip", "unknown"}
+    assert set(res["local_by_cause"]) == {"floor", "bench", "last_resort", "policy", "other_skip", "unknown"}
 
 
 async def test_get_savings_by_period_uses_the_same_rows_as_the_ledger(home):
