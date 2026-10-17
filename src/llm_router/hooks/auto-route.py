@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 62
+# llm_router-hook-version: 63
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 62"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 63"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -325,9 +325,21 @@ def _load_discovered_ollama_split() -> tuple[list[str], list[str]]:
 
 
 _DISCOVERED_OLLAMA_VALIDATED, _DISCOVERED_OLLAMA_UNVALIDATED = _load_discovered_ollama_split()
+# Owner decision 2026-10-17: the local model is qwen3.8-uncensored. Move it to the front of
+# whichever list it is already in (never adds it, so the promote gate's split is untouched).
+try:
+    from llm_router.model_discovery import PREFERRED_LOCAL_MODEL as _PREFERRED_LOCAL_MODEL
+    from llm_router.model_discovery import prefer_first as _prefer_first
+    from llm_router.model_discovery import preferred_local_model as _preferred_local_model
+except Exception:                                            # noqa: BLE001 - older llm_router
+    _PREFERRED_LOCAL_MODEL = "qwen3.8-uncensored:latest"
+    _prefer_first = list
+    _preferred_local_model = lambda installed=None, **_k: _PREFERRED_LOCAL_MODEL  # noqa: E731
+_DISCOVERED_OLLAMA_VALIDATED = _prefer_first(_DISCOVERED_OLLAMA_VALIDATED)
+_DISCOVERED_OLLAMA_UNVALIDATED = _prefer_first(_DISCOVERED_OLLAMA_UNVALIDATED)
 _DISCOVERED_OLLAMA = _DISCOVERED_OLLAMA_VALIDATED + _DISCOVERED_OLLAMA_UNVALIDATED
 # First validated model used as the single-model fallback (e.g. for tracking)
-OLLAMA_MODEL = _DISCOVERED_OLLAMA_VALIDATED[0] if _DISCOVERED_OLLAMA_VALIDATED else "qwen3.5:latest"
+OLLAMA_MODEL = _DISCOVERED_OLLAMA_VALIDATED[0] if _DISCOVERED_OLLAMA_VALIDATED else _preferred_local_model([])
 # 4s was the old default and no local model could ever meet it: measured p50s on
 # this machine are 11.4s (lfm2.5:8b), 15.8s (qwen3-coder:30b) and 28.5s (qwen3.8),
 # and even "Say OK." took 6.6s warm. Every DIRECT attempt therefore aborted at
@@ -2279,9 +2291,9 @@ def _extract_category(raw: str) -> str | None:
 # OLLAMA_MODELS and OLLAMA_CODE_MODELS both use the same discovered list; there is no
 # longer a separate hard-coded "code specialization" list because we cannot know which
 # local models are code-focused without discovery metadata.
-OLLAMA_MODELS = _DISCOVERED_OLLAMA or ["qwen3.5:latest"]
+OLLAMA_MODELS = _DISCOVERED_OLLAMA or [_preferred_local_model([])]
 # Code work is a critical chain (D-60c): only validated models, never an unvalidated one.
-OLLAMA_CODE_MODELS = _DISCOVERED_OLLAMA_VALIDATED or ["qwen3.5:latest"]
+OLLAMA_CODE_MODELS = _DISCOVERED_OLLAMA_VALIDATED or [_preferred_local_model([])]
 
 
 def classify_with_ollama(text: str) -> str | None:
@@ -2290,7 +2302,7 @@ def classify_with_ollama(text: str) -> str | None:
     Uses the chat API with think=False to disable thinking mode on reasoning
     models (qwen3.5, etc.) — otherwise they waste the token budget on CoT.
     
-    Automatically uses qwen3-coder-next for code-looking text, qwen3.5 for others.
+    Automatically uses qwen3-coder-next for code-looking text, the preferred local model for others.
     """
     # Detect if this looks like a code task
     code_indicators = re.compile(

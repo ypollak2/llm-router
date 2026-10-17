@@ -109,6 +109,19 @@ def server(monkeypatch):
         srv.server_close()
 
 
+@pytest.fixture(autouse=True)
+def spawns(monkeypatch):
+    """gate() starts a detached probe process; nothing here may start a real one."""
+    started: list = []
+    monkeypatch.setattr(wd, "_spawn_background_probe", lambda: started.append(1) or True)
+    return started
+
+
+def _background_round():
+    """What the detached ``--probe`` process does, run in-process with no sleeping."""
+    return wd.confirm(sleep=lambda _s: None)
+
+
 @pytest.fixture
 def no_real_process_calls(monkeypatch):
     """Nothing in this file may signal, list, quit or launch a real process."""
@@ -231,33 +244,38 @@ def test_corrupt_state_file_fails_open(server):
 
 # ── the gate: rate limiting and fail-fast ────────────────────────────────────
 
-def test_gate_is_rate_limited(server):
+def test_gate_is_rate_limited_and_spawns_instead_of_probing(server, spawns):
     assert wd.gate(now=1000.0) is None
-    assert len(_generates()) == 1
-    assert wd.gate(now=1010.0) is None        # inside min_interval: no network call
+    assert len(spawns) == 1 and _generates() == []      # spawned, never probed inline
+    assert wd.gate(now=1010.0) is None                  # inside min_interval: nothing
     assert wd.gate(now=1059.0) is None
-    assert len(_generates()) == 1
-    assert wd.gate(now=1061.0) is None        # past it: probes again
-    assert len(_generates()) == 2
+    assert len(spawns) == 1
+    assert wd.gate(now=1061.0) is None                  # past it: one more spawn
+    assert len(spawns) == 2 and _generates() == []
 
 
-def test_gate_fails_fast_on_a_stalled_server_and_serves_the_verdict_from_state(server):
+def test_gate_fails_fast_once_the_background_round_has_found_a_hang(server, spawns):
     _Stub.hang_generate = True
-    reason = wd.gate(now=2000.0)
-    assert reason and reason.startswith("backend_unhealthy")
-    # second failure inside the interval is answered from state, with no probe
+    assert wd.gate(now=2000.0) is None                  # first prompt: no verdict yet, no stall
+    assert _generates() == []
+    _background_round()                                 # the detached process
     posts_before = len(_generates())
-    wd.record_probe(wd.ProbeResult(False, "stalled"), now=2001.0)   # reaches fail_n=2
-    assert wd.gate(now=2002.0) and len(_generates()) == posts_before
+    reason = wd.gate()
+    assert reason and reason.startswith("backend_unhealthy")
+    assert len(_generates()) == posts_before            # served from state
 
 
-def test_gate_clears_the_flag_when_the_server_recovers(server):
+def test_gate_clears_the_flag_when_the_server_recovers(server, spawns):
     bad = wd.ProbeResult(False, "stalled")
     wd.record_probe(bad, now=3000.0)
     wd.record_probe(bad, now=3000.0)
-    assert wd.gate(now=3010.0)                # hung, fresh: fail fast, no probe
-    assert wd.gate(now=3100.0) is None        # stale + healthy: probe clears it
+    assert wd.gate(now=3010.0)                # hung, fresh: fail fast, nothing spawned
+    assert spawns == []
+    assert wd.gate(now=3100.0)                # stale: still answers from state, and spawns
+    assert len(spawns) == 1 and _generates() == []
+    _background_round()                       # healthy server: the round clears the flag
     assert wd.read_state()["hung"] is False
+    assert wd.gate() is None
 
 
 def test_gate_off_switch_does_nothing(server, monkeypatch):
@@ -280,6 +298,7 @@ def test_gate_unknown_server_proceeds(monkeypatch):
 
 def test_direct_executor_skips_a_hung_ollama_without_calling_it(server):
     _Stub.hang_generate = True
+    _background_round()
     out = direct_executor.execute_chain("what is 2+2", [ModelSpec("ollama", MODEL)], "query")
     assert out is None
     assert [p for path, p in _Stub.posts if path == "/api/chat"] == []
@@ -297,6 +316,7 @@ def test_zero_claude_edit_falls_through_fast_on_a_hung_ollama(server, tmp_path, 
     subprocess.run(["git", "add", "-A"], cwd=root, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "i"], cwd=root, check=True)
     _Stub.hang_generate = True
+    _background_round()
     t0 = time.monotonic()
     out = zce.maybe_replace(prompt="rename old_name to new_name in foo.py", cwd=str(root),
                             deadline_s=time.monotonic() + 36)

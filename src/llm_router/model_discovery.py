@@ -555,5 +555,62 @@ def first_installed(prefer: tuple[str, ...] = ()) -> str | None:
     return installed[0]
 
 
+
+#: Owner decision 2026-10-17: the router's local model is qwen3.8, not qwen3.5.
+#: Anything that used to name ``qwen3.5:latest`` as "the local model" resolves
+#: through ``preferred_local_model`` instead.
+PREFERRED_LOCAL_MODEL = "qwen3.8-uncensored:latest"
+
+
+def _preferred_installed(installed: "list[str] | tuple[str, ...]") -> str | None:
+    """The preferred model as it is spelled in ``installed`` (any tag of its family)."""
+    family = PREFERRED_LOCAL_MODEL.split(":")[0]
+    if PREFERRED_LOCAL_MODEL in installed:
+        return PREFERRED_LOCAL_MODEL
+    for have in installed:
+        if have.split(":")[0] == family:
+            return have
+    return None
+
+
+def prefer_first(models: "list[str]") -> "list[str]":
+    """``models`` with the preferred local model moved to the front; order otherwise kept.
+
+    Never adds a name: a model that is not in the list stays out, so the promote
+    gate (``order_for_chain``) and its validated/unvalidated split are untouched.
+    """
+    models = list(models)
+    hit = _preferred_installed(models)
+    return [hit] + [m for m in models if m != hit] if hit else models
+
+
+def preferred_local_model(installed: "list[str] | None" = None, *, prefer: tuple[str, ...] = ()) -> str:
+    """The one local model the router names when it must name a single one.
+
+    Order: ``LLM_ROUTER_OLLAMA_MODEL`` (the existing explicit setting) →
+    ``qwen3.8-uncensored:latest`` when installed → the first installed model that
+    matches ``prefer`` → the first installed model (current discovery order) →
+    ``PREFERRED_LOCAL_MODEL`` when nothing is known (it replaces the old hardcoded
+    qwen3.5 default). ``installed=None`` asks ``available_ollama_models()``, which
+    may probe; hook-path callers pass the list they already hold.
+    """
+    explicit = os.environ.get("LLM_ROUTER_OLLAMA_MODEL", "").strip()
+    if explicit:
+        return explicit
+    if installed is None:
+        try:
+            installed = available_ollama_models()
+        except Exception:                                    # noqa: BLE001
+            installed = []
+    hit = _preferred_installed(installed)
+    if hit:
+        return hit
+    for want in prefer:
+        for have in installed:
+            if have == want or have.split(":")[0] == want.split(":")[0]:
+                return have
+    return installed[0] if installed else PREFERRED_LOCAL_MODEL
+
+
 if __name__ == "__main__":  # the detached refresher started by available_ollama_models_nowait
     available_ollama_models()
