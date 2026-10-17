@@ -131,7 +131,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 58
     strategy:
       fail-fast: false
       matrix:
@@ -211,7 +211,7 @@ jobs:
             --junit-xml=/tmp/pytest-results.xml &
           PYTEST_PID=$!
 
-          # Wait up to 2100s for pytest to exit normally.
+          # Wait up to 3000s for pytest to exit normally.
           #
           # History: 150s (sized for ~2,700 tests) -> 900s (~6,900 tests) -> here.
           # Each time the suite outgrew the wait, the hang-handler fired on a
@@ -225,10 +225,17 @@ jobs:
           # normally take 16-25 min, so headroom was ~5%. Raised to ~40% over
           # the 25 min upper range.
           #
-          # 2100s is the ceiling, not the expectation: with -n auto a healthy
+          # 2026-10-17: 2100s -> 3000s. Healthy test jobs now take 25-35 min
+          # (main run 39044196854: 34.4 and 35.3 min), so 2100s left no headroom:
+          # "suite exceeded the 2100s budget" fired on PR #556 run 39047662346
+          # (test 3.13) twice, attempts 1 and 2, with test (3.11) green on
+          # attempt 1. Raised to ~40% over 35 min
+          # again; the real fix (a faster suite) is tracked as F39 in P2-QUEUE.
+          #
+          # 3000s is the ceiling, not the expectation: with -n auto a healthy
           # run is a few minutes and exits the loop immediately. timeout-minutes
           # on the job is raised to match, or the job dies before the loop can.
-          for i in $(seq 1 2100); do
+          for i in $(seq 1 3000); do
             if ! kill -0 $PYTEST_PID 2>/dev/null; then
               wait $PYTEST_PID
               exit $?
@@ -236,7 +243,7 @@ jobs:
             sleep 1
           done
 
-          # Still running after 2100s. Two different situations look the same
+          # Still running after 3000s. Two different situations look the same
           # from here, and only the junit xml tells them apart: pytest writes it
           # when the run FINISHES, so
           #   xml present -> tests are done, the process hangs on exit (aiosqlite
@@ -245,7 +252,7 @@ jobs:
           #                  budget. That is a failure of the budget, not a pass
           #                  and not an exit hang, and it says so.
           if [ ! -s /tmp/pytest-results.xml ]; then
-            echo "::error::suite exceeded the 2100s budget: pytest is still running tests (no junit xml written yet), so this is NOT the aiosqlite exit hang. Raise the budget or speed the suite up."
+            echo "::error::suite exceeded the 3000s budget: pytest is still running tests (no junit xml written yet), so this is NOT the aiosqlite exit hang. Raise the budget or speed the suite up."
             kill $PYTEST_PID 2>/dev/null || true
             exit 1
           fi
