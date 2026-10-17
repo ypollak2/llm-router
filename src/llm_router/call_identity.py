@@ -180,7 +180,7 @@ def unknown_session(door: str | None = None) -> str:
 class LedgerGuard:
     """LEDGER-EVERY-EXIT-1: which ledger tables one tool call has written to so far."""
 
-    __slots__ = ("tables", "refused", "refused_reason", "profile")
+    __slots__ = ("tables", "refused", "refused_reason", "profile", "floor_tier")
 
     def __init__(self) -> None:
         self.tables: set[str] = set()
@@ -189,6 +189,8 @@ class LedgerGuard:
         self.refused_reason: str | None = None
         #: F25 / D-170 (4): the routing profile the router resolved for this call (None = not routed yet).
         self.profile: Any = None
+        #: F26 / D-175: the last-resort floor tier that answered an empty chain (None = floor not used).
+        self.floor_tier: str | None = None
 
 
 _LEDGER_GUARD: ContextVar[LedgerGuard | None] = ContextVar("llm_router_ledger_guard", default=None)
@@ -209,6 +211,14 @@ def note_ledger_profile(profile: Any) -> None:
     guard = _LEDGER_GUARD.get()
     if guard is not None:
         guard.profile = profile
+
+
+def note_ledger_floor_tier(tier: str) -> None:
+    """F26 / D-175: record that the call's empty chain was answered from the last-resort floor
+    (``local`` | ``cli`` | ``claude_cli`` | ``static``). No-op outside a guarded call."""
+    guard = _LEDGER_GUARD.get()
+    if guard is not None:
+        guard.floor_tier = tier
 
 
 def refuse_ledger_call(reason: str) -> None:

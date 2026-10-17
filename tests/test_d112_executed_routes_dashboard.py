@@ -96,7 +96,7 @@ def test_runtime_provider_counts_and_format(usage_db, non_utc_timezone):
         "window_hours": 24.0,
         "total": 4,
         "by_provider": {"codex": 3, "ollama": 1},
-        "local_by_cause": {"policy": 0, "bench": 0, "last_resort": 0, "other_skip": 0, "unknown": 1},  # F23: fixture has no skipped_json column: unknown
+        "local_by_cause": {"policy": 0, "floor": 0, "bench": 0, "last_resort": 0, "other_skip": 0, "unknown": 1},  # F23: fixture has no skipped_json column: unknown
     }
     assert format_executed_routes(result) == (
         "routes 24h: 4 executed · codex 3 · local 1"
@@ -122,7 +122,7 @@ def test_utc_window_boundary(tmp_path, monkeypatch, non_utc_timezone):
         con.close()
     assert executed_routes() == {
         "window_hours": 24.0, "total": 1, "by_provider": {"codex": 1},
-        "local_by_cause": {"policy": 0, "bench": 0, "last_resort": 0, "other_skip": 0, "unknown": 0},
+        "local_by_cause": {"policy": 0, "floor": 0, "bench": 0, "last_resort": 0, "other_skip": 0, "unknown": 0},
     }
     assert format_executed_routes(executed_routes()) == (
         "routes 24h: 1 executed · codex 1 · local 0"
@@ -220,7 +220,7 @@ def test_legacy_schema_and_explicit_path_precedence(tmp_path, monkeypatch):
         con.close()
     assert executed_routes(2.5, db_path=path) == {
         "window_hours": 2.5, "total": 1, "by_provider": {"unknown": 1},
-        "local_by_cause": {"policy": 0, "bench": 0, "last_resort": 0, "other_skip": 0, "unknown": 0},
+        "local_by_cause": {"policy": 0, "floor": 0, "bench": 0, "last_resort": 0, "other_skip": 0, "unknown": 0},
     }
     assert format_executed_routes(executed_routes(2.5, db_path=path)) == (
         "routes 2.5h: 1 executed · unknown 1 · local 0"
@@ -348,5 +348,5 @@ def test_stop_main_passes_executed_routes_to_dashboard(usage_db, monkeypatch):
     assert len(captured) == 1
     assert captured[0]["executed_routes"] == {
         "window_hours": 24.0, "total": 4, "by_provider": {"codex": 3, "ollama": 1},
-        "local_by_cause": {"policy": 0, "bench": 0, "last_resort": 0, "other_skip": 0, "unknown": 1},
+        "local_by_cause": {"policy": 0, "floor": 0, "bench": 0, "last_resort": 0, "other_skip": 0, "unknown": 1},
     }

@@ -306,8 +306,8 @@ LOCAL_BY_CAUSE_PROVIDERS = LOCAL_PROVIDERS | {"openai_compat"}
 
 
 def local_by_cause(bounds: Bounds, *, db_path=None, timeout_s: float = 0.25) -> dict[str, int] | None:
-    """F23: the served-local count split by why local served (``bench`` / ``last_resort`` /
-    ``other_skip`` / ``policy`` / ``unknown``; one cause per row, first match wins in that order).
+    """F23: the served-local count split by why local served (``floor`` (F26, wins over the
+    others) / ``bench`` / ``last_resort`` / ``other_skip`` / ``policy`` / ``unknown``; one cause per row, first match wins in that order).
     Same window, provenance and real-decision filter as :func:`executed_by_provider`'s
     ``routing_decisions`` half (proxy rows carry no skip list). ``None`` without a database."""
     from llm_router import skip_causes as sc
@@ -326,6 +326,7 @@ def local_by_cause(bounds: Bounds, *, db_path=None, timeout_s: float = 0.25) -> 
         marks = ",".join("?" for _ in local)
         if "skipped_json" in cols and "served_by_last_resort" in cols:
             case = ("CASE WHEN skipped_json IS NULL THEN 'unknown' "
+                    "WHEN skipped_json LIKE '%\"reason\":\"floor\"%' THEN 'floor' "
                     "WHEN skipped_json LIKE '%\"reason\":\"bench\"%' THEN 'bench' "
                     "WHEN served_by_last_resort = 1 THEN 'last_resort' "
                     "WHEN skipped_json != '[]' THEN 'other_skip' ELSE 'policy' END")
