@@ -20,6 +20,7 @@ Safety invariants (Phase B):
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from collections.abc import AsyncIterator
@@ -77,6 +78,9 @@ _ALLOWED_EXTRA_PARAMS: frozenset[str] = frozenset({
     # Provider-specific safe pass-through keys
     "extra_body",   # used for Perplexity search_recency_filter
     "thinking",     # used for Anthropic extended thinking
+    # A.2-t: a caller's function-calling request (OpenAI form), gateway door only.
+    "tools",
+    "tool_choice",
 })
 
 
@@ -347,6 +351,7 @@ async def call_llm(
     elapsed_ms = (time.monotonic() - start) * 1000
 
     content = extract_content(response.choices[0].message)
+    tool_calls = _extract_tool_calls(response.choices[0].message)
     # Plan 07 D.3: surface empty-content responses as a routing failure
     # so the router falls through to the next model in the chain instead
     # of silently returning an empty LLMResponse. This also covers the
@@ -357,7 +362,9 @@ async def call_llm(
     # promote reasoning/thinking text into `content` (that would silently
     # return the model's scratch-pad as if it were the response), so an
     # empty `content` here always raises below rather than returning "".
-    content = ensure_non_empty_content(content, model)
+    # A.2-t: a reply that is only tool calls has no text and is a complete answer.
+    if not tool_calls:
+        content = ensure_non_empty_content(content, model)
     usage = response.usage
 
     # LiteLLM provides cost calculation based on its internal pricing tables;
@@ -425,8 +432,30 @@ async def call_llm(
         cache_creation_input_tokens=cache_creation,
         cache_read_input_tokens=cache_read,
         finish_reason=finish_reason,
+        tool_calls=tool_calls,
     )
 
+
+def _extract_tool_calls(message) -> list[dict]:
+    """The message's tool calls as OpenAI-shape dicts (``[]`` when it made none).
+
+    ``arguments`` is always a JSON string, as OpenAI sends it: LiteLLM already
+    serialises Anthropic's ``input`` object, and a dict from another backend is
+    dumped here. The gateway parses it back for Anthropic's ``tool_use.input``."""
+    raw = message.get("tool_calls") if isinstance(message, dict) else getattr(message, "tool_calls", None)
+    out: list[dict] = []
+    for tc in raw or []:
+        get = tc.get if isinstance(tc, dict) else (lambda k, d=None, _t=tc: getattr(_t, k, d))
+        fn = get("function") or {}
+        fget = fn.get if isinstance(fn, dict) else (lambda k, d=None, _f=fn: getattr(_f, k, d))
+        args = fget("arguments")
+        if args is None:
+            args = ""
+        elif not isinstance(args, str):
+            args = json.dumps(args)
+        out.append({"id": get("id") or f"call_{len(out)}", "type": "function",
+                    "function": {"name": fget("name") or "", "arguments": args}})
+    return out
 
 
 #: R15. Backend stop reasons normalised to OpenAI's vocabulary.
