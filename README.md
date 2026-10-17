@@ -104,6 +104,8 @@ through MCP tools and local models. Adding provider keys widens the pool;
 nothing requires them. See **[guide/PROVIDERS.md](guide/PROVIDERS.md)**. To
 install into another host, see [Works With](#works-with).
 
+Python agents route in-process, no server: `from llm_router import Router; r = Router(budget_usd=0.50).run("...")` (`await .arun(...)` in async code; `BudgetExceeded` when the cap is spent).
+
 ---
 
 ## Works With

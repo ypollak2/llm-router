@@ -242,11 +242,21 @@ def rank_external_models(
         candidates.append((model, quality, cost))
 
     # Add Codex local agent as a candidate (free -- uses OpenAI subscription)
-    from llm_router.codex_agent import is_codex_available
+    # F27: only models in the Codex allow-list (CODEX_MODELS) may be offered; a
+    # rejected one becomes the first allowed model, kept once at its best score.
+    from llm_router.codex_agent import accepted_codex_entry, is_codex_available
     if is_codex_available():
-        candidates.append(("codex/gpt-5.4", 0.97, 0.0))   # free, very capable
-        candidates.append(("codex/o3", 0.95, 0.0))          # free, deep reasoning
-        candidates.append(("codex/gpt-4o", 0.88, 0.0))      # free, balanced
+        seen: set[str] = set()
+        for name, quality in (
+            ("codex/gpt-5.4", 0.97),   # free, very capable
+            ("codex/o3", 0.95),        # free, deep reasoning
+            ("codex/gpt-4o", 0.88),    # free, balanced
+        ):
+            accepted = accepted_codex_entry(name)
+            if accepted is None or accepted in seen:
+                continue
+            seen.add(accepted)
+            candidates.append((accepted, quality, 0.0))
 
     # Sort by quality descending, then cost ascending
     candidates.sort(key=lambda x: (-x[1], x[2]))

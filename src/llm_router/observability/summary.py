@@ -27,7 +27,7 @@ from pathlib import Path
 
 from llm_router.lineage import Inversion, LineageStore, Tier
 from llm_router.agents import SessionStore
-from llm_router.routing_report import executed_routes, format_executed_routes
+from llm_router.routing_report import executed_routes, format_executed_routes, format_local_by_cause
 from llm_router.savings import (
     CanonicalSavings,
     is_verified_saving,
@@ -948,6 +948,9 @@ def render_markdown(data: SessionSummaryData) -> str:
         f"**{_fmt_cost(data.savings_usd)} ({data.savings_pct * 100:.0f}%)**"
     )
     out.append(f"- **Executed routes:** {format_executed_routes(data.executed, data.executed_window_hours)}")
+    _cause_line = format_local_by_cause(data.executed)
+    if _cause_line:
+        out.append(f"- **Local share by cause:** {_cause_line.removeprefix('local by cause: ')}")
     out.append(f"- **Classified prompts (hints):** {data.total_decisions}")
     out.append(f"- **Session duration:** {_fmt_duration(data.duration_seconds)}")
     out.append(

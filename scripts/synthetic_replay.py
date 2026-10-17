@@ -1388,11 +1388,6 @@ def _inproc_worker(jobs_path: str, out_path: str, doors_csv: str) -> int:  # pra
     captured: dict[str, Any] = {}
     real_classify = gateway._classify
 
-    def spy_classify(prompt: str) -> tuple[str, str]:
-        t, c = real_classify(prompt)
-        captured["task_type"], captured["complexity"] = t, c
-        return t, c
-
     if "sdk" in doors:
         import llm_router.hooks.direct_executor as de
         from llm_router import sdk
@@ -1407,7 +1402,14 @@ def _inproc_worker(jobs_path: str, out_path: str, doors_csv: str) -> int:  # pra
 
         de.execute_chain = fake_chain  # sdk.route imports these at call time
         de.execute_agent = fake_agent
-        gateway._classify = spy_classify
+        real_decide = sdk._decide  # AGT A.1: the SDK door classifies in sdk._decide (door "sdk")
+
+        def spy_decide(prompt: str, **k: Any):
+            t, c, d = real_decide(prompt, **k)
+            captured["task_type"], captured["complexity"] = t, c
+            return t, c, d
+
+        sdk._decide = spy_decide
     if "mcp" in doors:
         from llm_router import ensemble
     loop = asyncio.new_event_loop()

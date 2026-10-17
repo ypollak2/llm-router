@@ -170,8 +170,12 @@ def generate_profile_yaml(detected: ServiceDetection) -> str:
         free_subscriptions.append("claude-sonnet-4-6")
         free_subscriptions.append("claude-haiku-4-5-20251001")
     if detected.get("codex_available"):
-        free_subscriptions.append("codex/gpt-5.4")
-        free_subscriptions.append("codex/o3")
+        # F27: only Codex-allow-list models (CODEX_MODELS) are written.
+        from llm_router.codex_agent import accepted_codex_entry
+        for _name in ("codex/gpt-5.4", "codex/o3"):
+            _accepted = accepted_codex_entry(_name)
+            if _accepted is not None and _accepted not in free_subscriptions:
+                free_subscriptions.append(_accepted)
     if detected.get("gemini_cli_available"):
         free_subscriptions.append("gemini_cli/gemini-2.5-flash")
         free_subscriptions.append("gemini_cli/gemini-2.0-flash")

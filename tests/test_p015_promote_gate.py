@@ -469,8 +469,9 @@ SCAN_ROOTS = (ROOT / "src" / "llm_router", ROOT / "scripts")
 #: -> (kind, why). `order` calls feed a chain and must sit in a function that calls
 #: order_for_chain; `existence` calls only ask "is there / which models exist".
 CALLERS: dict[tuple[str, str, str, int], tuple[str, str]] = {
-    ("src/llm_router/router.py", "_build_and_filter_chain", "all_ollama_models", 0): ("existence", "provider filter: is any Ollama model there"),
-    ("src/llm_router/router.py", "_build_and_filter_chain", "all_ollama_models", 1): ("order", "door D1, Ollama injection"),
+    ("src/llm_router/router.py", "_keep_reachable_providers", "all_ollama_models", 0): ("existence", "provider filter: is any Ollama model there"),
+    ("src/llm_router/router.py", "_build_and_filter_chain", "all_ollama_models", 0): ("order", "door D1, Ollama injection"),
+    ("src/llm_router/router.py", "_empty_chain_floor", "all_ollama_models", 0): ("order", "F26 / D-175 last-resort floor, local tier (gate honoured)"),
     ("src/llm_router/router.py", "_build_and_filter_chain", "all_openai_compat_models", 0): ("existence", "first-run grandfather input (ensure_grandfather); injects nothing"),
     ("src/llm_router/router.py", "_build_and_filter_chain", "all_openai_compat_models", 1): ("order", "door D1, openai-compat injection"),
     ("src/llm_router/hooks/chain_builder.py", "_ollama_models", "available_ollama_models", 0): ("order", "door D2, the hook chain builder"),
@@ -610,7 +611,7 @@ def test_every_caller_of_the_five_list_functions_is_marked_order_or_existence():
 
 def test_every_order_caller_sits_in_a_function_that_calls_the_gate():
     orders = [k for k, (kind, _) in CALLERS.items() if kind == "order"]
-    assert len(orders) == 6  # +1: providers._ollama_window_candidates (P1.3 bigger-window pick)
+    assert len(orders) == 7  # +1: providers._ollama_window_candidates (P1.3 bigger-window pick); +1: F26 floor
     for rel, fn, name, n in orders:
         assert "order_for_chain(" in _function_source(rel, fn), f"{rel}:{fn} injects without the gate"
         assert order_result_used((ROOT / rel).read_text(), fn), f"{rel}:{fn} calls the gate but drops its result"

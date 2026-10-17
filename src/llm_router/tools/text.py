@@ -11,7 +11,7 @@ from mcp.server.mcpserver import Context
 from llm_router.config import get_config
 from llm_router.cost import log_compression_stat
 from llm_router.response_router import route_response
-from llm_router.router import route_and_call
+from llm_router.router import NoRoutableModelsError, route_and_call
 from llm_router.toolcall_text import keep_marker, neutralise_response
 from llm_router.types import LLMResponse, RoutingProfile, TaskType
 
@@ -604,6 +604,41 @@ def _apply_research_trust_contract(
     return out
 
 
+async def _premium_research_reachable(config) -> bool:
+    """F25 / D-170 (1): True when the premium research chain, built and filtered exactly as the
+    router builds it, keeps at least one model. Since #382 removed its local entry it is empty on a
+    machine with Claude in subscription mode and no OpenAI/MiniMax key. F26: a probe, so the
+    last-resort floor is off (it must not record a floor tier or warn); the real call may still be
+    answered by the floor."""
+    from llm_router.router import _build_and_filter_chain
+    from llm_router.types import Complexity
+
+    chain = await _build_and_filter_chain(
+        TaskType.RESEARCH, RoutingProfile.PREMIUM, None, None, Complexity.MODERATE, config,
+        last_resort_floor=False,
+    )
+    return bool(chain)
+
+
+def _refuse_no_research_provider(exc: NoRoutableModelsError, *, premium_empty: bool) -> str:
+    """F25 / D-170 (2): the reply for a research call whose chain is empty. The guarded call is
+    marked refused (reason ``refused_no_research_provider``), never ``error_exception``."""
+    from llm_router import call_identity
+    from llm_router.cost import REASON_REFUSED_NO_RESEARCH_PROVIDER
+
+    call_identity.refuse_ledger_call(REASON_REFUSED_NO_RESEARCH_PROVIDER)
+    chains = [f"{exc.task_type.value}/{exc.profile.value}"]
+    if premium_empty and exc.profile != RoutingProfile.PREMIUM:
+        chains.append(f"{TaskType.RESEARCH.value}/{RoutingProfile.PREMIUM.value}")
+    return (
+        f"[llm_router] research refused ({REASON_REFUSED_NO_RESEARCH_PROVIDER}): the "
+        f"{' and '.join(chains)} routing chain{'s are' if len(chains) > 1 else ' is'} empty — "
+        "no model this machine can reach is in "
+        f"{'them' if len(chains) > 1 else 'it'}, so nothing was sent. "
+        "Do this research yourself."
+    )
+
+
 async def llm_research(
     prompt: str,
     ctx: Context,
@@ -625,19 +660,26 @@ async def llm_research(
     no_perplexity = not _cfg.perplexity_api_key
     await _announce_routing(ctx, "research", "moderate")
 
-    resp = await route_and_call(
-        TaskType.RESEARCH,
-        prompt,
-        # Without Perplexity, escalate to PREMIUM so the fallback chain uses
-        # o3 / Gemini 2.5 Pro rather than silently degrading to BALANCED tier.
-        profile=RoutingProfile.PREMIUM if no_perplexity else None,
-        system_prompt=system_prompt,
-        max_tokens=max_tokens,
-        temperature=0.3,
-        ctx=ctx,
-        caller_context=context,
-        route_directive_id=_read_hook_route_directive(),
-    )
+    # Without Perplexity, escalate to PREMIUM so the fallback chain uses the
+    # strongest reasoning models — but only when that chain has a model this
+    # machine can reach (F25 / D-170 (1)). Otherwise keep the default profile,
+    # whose cheap tiers reach local models; the answer is still labelled not
+    # web-grounded by the trust contract below.
+    premium_empty = no_perplexity and not await _premium_research_reachable(_cfg)
+    try:
+        resp = await route_and_call(
+            TaskType.RESEARCH,
+            prompt,
+            profile=RoutingProfile.PREMIUM if no_perplexity and not premium_empty else None,
+            system_prompt=system_prompt,
+            max_tokens=max_tokens,
+            temperature=0.3,
+            ctx=ctx,
+            caller_context=context,
+            route_directive_id=_read_hook_route_directive(),
+        )
+    except NoRoutableModelsError as exc:
+        return _refuse_no_research_provider(exc, premium_empty=premium_empty)
     _record_quality(resp, "research", "moderate")
 
     result = _apply_research_trust_contract(

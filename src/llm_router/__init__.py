@@ -51,10 +51,13 @@ def _resolve_version() -> str:
 # ``python -X importtime`` (PG4 / P2-G-3). ``from llm_router import route`` and
 # ``llm_router.route`` still work; the import just happens when the name is used.
 
-__all__ = ["route", "RouteResult", "RoutingError", "route_response_explanations"]
+__all__ = ["route", "Router", "RouteResult", "RoutingError", "BudgetExceeded",
+           "route_response_explanations"]
 
 _LAZY_EXPORTS = {
     "route": ("llm_router.sdk", "route"),
+    "Router": ("llm_router.sdk", "Router"),
+    "BudgetExceeded": ("llm_router.agents.budget", "BudgetExceeded"),
     "RouteResult": ("llm_router.sdk", "RouteResult"),
     "RoutingError": ("llm_router.sdk", "RoutingError"),
     "route_response_explanations": ("llm_router.response_router", "route_response"),

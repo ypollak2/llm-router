@@ -39,7 +39,6 @@ from typing import Any
 from llm_router.compaction import collapse_whitespace, dedup_sections
 from llm_router.file_lock import exclusive_lock
 from llm_router.paths import llm_router_home
-from llm_router.token_budget import truncate_to_budget
 
 _log = logging.getLogger("llm_router.session_store")
 
@@ -1019,6 +1018,10 @@ def build_session_context(
         text = dedup_sections(text)
         # Records are oldest -> newest, so keep the tail: the newest event is the
         # one a routed model most needs (P0.1; head-keeping dropped it first).
+        # Imported here: token_budget pulls tiktoken (~10 ms), and the UserPromptSubmit
+        # hook imports this module on every prompt but only renders context on some (D-171 A3).
+        from llm_router.token_budget import truncate_to_budget
+
         text = truncate_to_budget(text, max_tokens, keep="tail")
         if not text.strip():
             return ""

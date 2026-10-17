@@ -28,6 +28,10 @@ ERROR_REASON_PREFIX = "error_"
 #: served call and not a routing decision, so every predicate below leaves it out, like an error row.
 REASON_BREAKER_OPEN = "breaker_open"
 
+#: F25 / D-170: a research call REFUSED before dispatch because its chain was empty (no reachable research
+#: provider). Like a breaker refusal it is attributable but never routed, so every predicate below leaves it out.
+REASON_REFUSED_NO_RESEARCH_PROVIDER = "refused_no_research_provider"
+
 #: N22: exhaustion-floor answer (every candidate gate-rejected, best one served). A REAL served call, so no predicate
 #: below excludes it (attribution, mix, latency, M0-3 count it); it is written success=0, so readers that filter
 #: on success (quality, cost/savings, bandit) do not count it as a good answer.
@@ -37,7 +41,8 @@ REASON_DEGRADED_FLOOR = "degraded_floor"
 #: (nor breaker-refusal rows).
 SQL_NOT_ERROR_ROW = (
     "COALESCE(reason, '') NOT LIKE 'error\\_%' ESCAPE '\\' "
-    "AND COALESCE(reason, '') != 'breaker_open'"
+    "AND COALESCE(reason, '') != 'breaker_open' "
+    "AND COALESCE(reason, '') != 'refused_no_research_provider'"
 )
 
 
@@ -53,13 +58,15 @@ SQL_REAL_DECISION = (
     "COALESCE(reason_code, '') NOT LIKE 'error\\_%' ESCAPE '\\' "
     "AND COALESCE(reason_code, '') != 'cache_hit' "
     "AND COALESCE(reason_code, '') != 'breaker_open' "
+    "AND COALESCE(reason_code, '') != 'refused_no_research_provider' "
     "AND COALESCE(final_provider, '') != 'cache'"
 )
 
 
 def is_non_decision_reason(reason: object) -> bool:
     """True for a ``reason_code`` that marks a cache-served or failed call."""
-    return reason in (REASON_CACHE_HIT_CODE, REASON_BREAKER_OPEN) or is_error_reason(reason)
+    return (reason in (REASON_CACHE_HIT_CODE, REASON_BREAKER_OPEN, REASON_REFUSED_NO_RESEARCH_PROVIDER)
+            or is_error_reason(reason))
 
 
 def real_decision_sql(con, alias: str = "") -> str:
@@ -76,6 +83,7 @@ def real_decision_sql(con, alias: str = "") -> str:
         parts.append(f"COALESCE({a}reason_code, '') NOT LIKE 'error\\_%' ESCAPE '\\'")
         parts.append(f"COALESCE({a}reason_code, '') != 'cache_hit'")
         parts.append(f"COALESCE({a}reason_code, '') != 'breaker_open'")
+        parts.append(f"COALESCE({a}reason_code, '') != 'refused_no_research_provider'")
     if "final_provider" in cols:
         parts.append(f"COALESCE({a}final_provider, '') != 'cache'")
     return " AND ".join(parts) or "1"
@@ -93,6 +101,7 @@ async def real_decision_sql_async(db) -> str:
         parts.append(SQL_REAL_DECISION.split(" AND ")[0])
         parts.append("COALESCE(reason_code, '') != 'cache_hit'")
         parts.append("COALESCE(reason_code, '') != 'breaker_open'")
+        parts.append("COALESCE(reason_code, '') != 'refused_no_research_provider'")
     if "final_provider" in cols:
         parts.append("COALESCE(final_provider, '') != 'cache'")
     return " AND ".join(parts) or "1"

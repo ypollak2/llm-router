@@ -35,13 +35,19 @@ def decides() -> bool:
         return False
 
 
-def decision(text: str, *, door: str, proxy: bool = False):
-    """The engine's Decision when it decides, else None. None also on failure: use the rules."""
+def decision(text: str, *, door: str, proxy: bool = False, session_id: str | None = None,
+             task_id: str | None = None):
+    """The engine's Decision when it decides, else None. None also on failure: use the rules.
+    ``session_id`` / ``task_id`` go to the decision ledger row only (not the decision)."""
     try:
         eng = _engine()
         if not eng.decides():
             return None
-        return eng.decide_for_proxy(text) if proxy else eng.decide(text, door=door)
+        if proxy:
+            return eng.decide_for_proxy(text)
+        if session_id is None and task_id is None:
+            return eng.decide(text, door=door)
+        return eng.decide(text, door=door, session_id=session_id, task_id=task_id)
     except Exception as exc:  # noqa: BLE001
         _record(exc)
         return None
