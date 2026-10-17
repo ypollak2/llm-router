@@ -11,6 +11,8 @@ PYTEST_CURRENT_TEST explicitly.
 """
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from llm_router.contract import GateType, build_contract
@@ -370,3 +372,104 @@ def test_syntax_only_first_ten_lines_are_scanned_for_indicators():
     lines = ["def f(:"] + ["just some prose here"] * 9 + ["class B(:"]  # 11 lines
     r = _check_syntax(c, "\n".join(lines))
     assert r.passed is True
+
+
+# ── P3.2 release eval gate: real source mutants ───────────────────────────────
+#
+# Unlike the sections above (which pin behaviours a mutmut run found unexercised),
+# these apply a named textual mutation to a COPY of scripts/release/eval_gate.py and
+# require the named check from tests/test_release_eval_gate.py to turn red. The
+# unmutated copy must be green on every check (negative control), and every
+# replacement must match exactly once, so a refactor that moves the line cannot
+# turn a mutant into a silent no-op.
+
+_GATE_SRC = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "release" / "eval_gate.py"
+_REL_SRC = _GATE_SRC.with_name("release_evals.py")
+
+_FIDELITY_CALL = "code, text = judge_fidelity(m, cand_items)"
+_STABILITY_CALL = "code, text = judge_stability(m, cand_items)"
+_POSITIONAL_OLD = (
+    '    for i in manifest["item_ids"]:\n'
+    '        bp, cp = bool(base[i]["pass"]), bool(cand[i]["pass"])\n'
+)
+_POSITIONAL_NEW = (
+    '    for k, i in enumerate(manifest["item_ids"]):\n'
+    '        bp, cp = bool(base_items[k]["pass"]), bool(cand_items[k]["pass"])\n'
+)
+
+# (id, [(old, new), ...], check that must go red)
+_P32_MUTANTS = [
+    ("M1 drop > 3.0 becomes >=", [("if drop > DROP_BLOCK_PTS:", "if drop >= DROP_BLOCK_PTS:")],
+     "check_perf_exactly_3pt_passes"),
+    ("M2 baseline/candidate sign swapped", [("Fraction(b - c, n) * 100", "Fraction(c - b, n) * 100")],
+     "check_perf_4pt_drop_blocks"),
+    ("M3 unpaired: gains (c) ignored", [("Fraction(b - c, n) * 100", "Fraction(b, n) * 100")],
+     "check_perf_improvement_and_offset_pass"),
+    ("M3b unpaired: items matched by position, not id", [(_POSITIONAL_OLD, _POSITIONAL_NEW)],
+     "check_perf_pairs_by_id_not_position"),
+    ("M4 n checks dropped (min_n and manifest n)",
+     [('if len(items) < manifest["min_n"]:', "if False:"),
+      ('if len(items) != manifest["n"]:', "if False:")],
+     "check_n_checks_inside_the_comparator"),
+    ("M4b duplicate-id check dropped", [("    if dup:\n", "    if False:\n")],
+     "check_duplicate_id_not_informative"),
+    ("M4c missing-set / no-manifests tolerated", [("if not manifests:", "if False:")],
+     "check_missing_set_and_no_manifests_not_informative"),
+    ("M4d candidate sha not checked", [("if expect_sha is not None and", "if False and")],
+     "check_wrong_sha_not_informative"),
+    ("M5 fidelity step disabled", [(_FIDELITY_CALL, 'code, text = PASS, "skipped"')],
+     "check_fidelity_bar"),
+    ("M5b fidelity bar > becomes >=", [("if gap > FIDELITY_MAX:", "if gap >= FIDELITY_MAX:")],
+     "check_fidelity_bar"),
+    ("M6 stability step disabled", [(_STABILITY_CALL, 'code, text = PASS, "skipped"')],
+     "check_stability_bar"),
+    ("M6b stability bar < becomes <=", [("if share < STABILITY_MIN:", "if share <= STABILITY_MIN:")],
+     "check_stability_bar"),
+    ("M7 skip refusal off", [("if not on_tag:", "if True:")], "check_skip_policy"),
+    ("M7b owner override accepts any value",
+     [('env.get("LLM_ROUTER_RELEASE_OWNER_OVERRIDE") == "1"', 'env.get("LLM_ROUTER_RELEASE_OWNER_OVERRIDE")')],
+     "check_skip_policy"),
+]
+
+
+def _load_p32(tmp_path, src_text, tag):
+    import importlib.util
+    d = tmp_path / tag
+    d.mkdir()
+    (d / "eval_gate.py").write_text(src_text)
+    (d / "release_evals.py").write_text(_REL_SRC.read_text())
+    spec = importlib.util.spec_from_file_location(f"_p32_{tag}", d / "eval_gate.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    rel = importlib.util.spec_from_file_location(f"_p32_rel_{tag}", d / "release_evals.py")
+    rmod = importlib.util.module_from_spec(rel)
+    rel.loader.exec_module(rmod)
+    return mod, rmod
+
+
+def test_p32_unmutated_copy_is_green_on_every_check(tmp_path):
+    """Negative control: the harness itself must not fail a clean copy, and the
+    table must be non-empty (an empty one passes everything)."""
+    from tests.test_release_eval_gate import CHECKS
+    mod, rmod = _load_p32(tmp_path, _GATE_SRC.read_text(), "clean")
+    assert CHECKS and _P32_MUTANTS
+    for name, check in CHECKS.items():
+        check(mod, rmod)
+
+
+@pytest.mark.parametrize("mid,edits,killer", _P32_MUTANTS, ids=[m[0].split()[0] for m in _P32_MUTANTS])
+def test_p32_mutant_turns_its_check_red(tmp_path, mid, edits, killer):
+    from tests.test_release_eval_gate import CHECKS
+    src = _GATE_SRC.read_text()
+    for old, new in edits:
+        assert src.count(old) == 1, f"{mid}: anchor must match exactly once: {old!r}"
+        src = src.replace(old, new)
+    mod, rmod = _load_p32(tmp_path, src, "mut")
+    # pytest.fail / raises-miss raise Failed, which is not an Exception subclass
+    failed = []
+    for name, check in CHECKS.items():
+        try:
+            check(mod, rmod)
+        except (Exception, pytest.fail.Exception):
+            failed.append(name)
+    assert killer in failed, f"{mid}: killed by {failed}, expected {killer}"

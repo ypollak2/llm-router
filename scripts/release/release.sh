@@ -183,9 +183,18 @@ main() {
     # Headings are Keep-a-Changelog form: `## [12.0.0] — Subtitle (date)`.
     changelog_entry=$(sed -n "/^## \[${current_version}\]/,/^## /p" CHANGELOG.md | head -n -1 | tail -n +2)
 
+    # P3.2: .github/workflows/release.yml fetches release_evals/<sha>.json from
+    # this release's assets and gates publish on it. Refuse BEFORE tagging: a tag
+    # without the file can only fail in CI, after the tag is public.
+    eval_asset="release_evals/$(git rev-parse HEAD).json"
+    if [[ ! -f "$eval_asset" ]]; then
+        log_error "Missing $eval_asset - run the release eval sets for this commit first (scripts/release/release_evals.py)"
+        exit 1
+    fi
+
     if git tag "v${current_version}" && \
        git push origin --tags && \
-       gh release create "v${current_version}" --title "v${current_version}" --latest --notes "${changelog_entry}" 2>&1; then
+       gh release create "v${current_version}" "$eval_asset" --title "v${current_version}" --latest --notes "${changelog_entry}" 2>&1; then
         log_success "GitHub release created"
     else
         log_error "Failed to create GitHub release"

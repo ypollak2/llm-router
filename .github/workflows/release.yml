@@ -1,0 +1,72 @@
+name: Release eval gate
+
+# PLAN v16 P3.2 (decision D-192). Gates publish.yml: publish.yml calls this file
+# as a reusable workflow and its publish job `needs:` it, so a tag whose eval file
+# is missing, NOT INFORMATIVE or a >3.0-pt regression never reaches PyPI.
+# It also triggers on the tag by itself so the verdict shows as its own run.
+#
+# Where the eval file comes from (chosen: release asset; no secrets):
+#   scripts/release/release.sh attaches release_evals/<sha>.json to the GitHub
+#   Release it creates right after pushing the tag. This job downloads that asset
+#   with the workflow's own GITHUB_TOKEN (contents: read) and compares it to the
+#   committed release_evals/baseline.json using the committed
+#   release_evals/manifests/*.json. A committed file cannot work: the tag commit
+#   cannot contain a file named after its own sha.
+#   The Release is created seconds after the tag push, so the job polls for it
+#   (10 x 30 s). If the Release never appears the job fails; re-run it.
+# No model, no network beyond api.github.com, no prompt text.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  eval-gate:
+    name: Release eval gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: |
+          uv python install 3.11
+          uv sync --extra dev
+
+      - name: Fetch release_evals/<sha>.json from the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          mkdir -p release_evals
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+                 --pattern "${SHA}.json" --dir release_evals 2>/dev/null; then
+              echo "fetched release_evals/${SHA}.json (attempt ${attempt})"
+              exit 0
+            fi
+            echo "attempt ${attempt}: release or asset ${SHA}.json not there yet, waiting 30s"
+            sleep 30
+          done
+          echo "::error::release_evals/${SHA}.json is not attached to the GitHub Release for ${TAG}. A release without its eval file is NOT INFORMATIVE and does not publish."
+          exit 1
+
+      - name: Run the release eval gate
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          uv run python scripts/release/eval_gate.py compare \
+            --candidate "release_evals/${SHA}.json" \
+            --baseline release_evals/baseline.json \
+            --manifests release_evals/manifests \
+            --sha "${SHA}"
