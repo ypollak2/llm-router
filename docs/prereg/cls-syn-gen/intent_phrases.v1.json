@@ -1,0 +1,5 @@
+{
+ "haiku": "a small, well-bounded change that one careful read settles",
+ "sonnet": "a normal multi-step change in one area of the code",
+ "opus": "a change that needs careful reasoning across several files or an unclear root cause"
+}

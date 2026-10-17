@@ -355,6 +355,15 @@ freeze-guard reviewer confirms the list at freeze. Hashed in PINS as `projects.v
 
 The template file holds the body below with the marker `{{ITEMS}}` in place of the "Items (one block per item)" list;
 `cls_gen_run.py` substitutes the item blocks at that marker and refuses a template without it.
+The space after `0-6,` in the digest-schema line is required: without it that line is one whitespace token of more than
+24 characters with letters, digits and Shannon entropy >= 3.3, so detector (e) of PREREG-CLS-DEV section 3.2 fires on
+every request and `outgoing_check` aborts every generation call (r3 text had no space; found when the v1 files were
+authored, checked by running `outgoing_check` on all 140 v1 request bodies).
+The v1 files are committed in `docs/prereg/cls-syn-gen/` (the `--gen-dir` of `cls_gen_run.py` and `cls_pins.py`; neither
+has a default). `tmpl_opus.v1.txt` is the body exactly; `tmpl_gpt.v1.txt` is the same body after one wrapper line for
+`codex exec`, which is an agent that can run commands and whose answer is read from its last message:
+`Do not run commands, read files or use any tool; reply with the output below as your one final message.`
+`claude -p` runs with `--tools ""`, so the Opus file needs no wrapper.
 
 ```
 You write realistic messages a developer types into an AI coding agent. For each item below write ONE message
@@ -373,7 +382,7 @@ items inside a message; never mention models, tiers, cost, rating or difficulty;
 task types 1-5; no secrets of any shape, real or fake; no real people or companies; URLs only at example.com;
 items in this call must differ in vocabulary and sentence shape.
 Digest schema (JSON, <= 400 chars): {"project","turn":first|follow_up|plan_approval|after_error|after_test_run,
-"files_touched":0-6,"last_tool_outcome":none|ok|error|test_fail,"branch_state":clean|dirty|pr_open,"referent":str|null}
+"files_touched":0-6, "last_tool_outcome":none|ok|error|test_fail,"branch_state":clean|dirty|pr_open,"referent":str|null}
 Output: one JSON object per line: {"idx","prompt","digest"}. Nothing else.
 ```
 Intended-difficulty phrases (frozen): haiku-intent "a small, well-bounded change that one careful read settles";
