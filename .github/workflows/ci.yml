@@ -27,6 +27,29 @@ jobs:
       - run: uv python install 3.11
       - run: uvx ruff check src/ tests/
 
+  # P3.2: the release eval gate's CI half. Comparator + synthetic stability + pack
+  # goldens + the gate mutants. No network, no models, no prompt-derived data; the
+  # real frozen sets run at release time (see release.yml).
+  release-eval-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+      - run: uv python install 3.11
+      - run: uv sync --extra dev
+      - name: Comparator, synthetic stability, mutants, pack goldens
+        env:
+          OPENAI_API_KEY: sk-test-dummy-key-for-ci-only-no-real-calls-made
+        run: |
+          uv run pytest -q -p no:cacheprovider \
+            tests/test_release_eval_gate.py \
+            tests/test_gates_mutation_coverage.py \
+            tests/test_context_pack.py tests/test_context_pack_summary.py \
+            tests/proxy/test_tier_decisions_golden.py
+
   identity-gate:
     runs-on: ubuntu-latest
     steps:
