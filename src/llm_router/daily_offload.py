@@ -1,16 +1,18 @@
-"""P3.3: one offload row per closed UTC day, and the 14-day streak that PLAN v16 section 7.1 c3 needs.
+"""P3.3: one offload row per closed UTC day, and the 7-day streak that PLAN v16 section 7.1 c3 needs (D-210).
 
 ``compute_day`` measures one UTC day [00:00, 24:00) with ``offload_share.action_units`` / ``build_units`` /
-``turn_units`` (reused unchanged) and splits it into three populations that are never mixed:
+``turn_units`` (reused unchanged) and splits it into populations that are reported separately:
 
-* ``organic``: session kind organic. The only release basis (section 7.1).
+* ``organic``: session kind organic. Always reported on its own, never merged silently into another number.
 * ``synthetic (D-167)``: kind research AND the session id is in the manifest given with
   ``--synthetic-manifest`` (the synth-live driver's ``manifest.jsonl``; ids are read, nothing else).
-* ``other``: every other research session, harness, headless. Counts only, never a rate.
+* ``other``: every other research session, harness, headless. Counts only, never a rate. Never counts.
+* ``release_clock`` (D-210): organic UNION synthetic, with its own n, floors, value and CI. The streak reads
+  this block. Without ``--synthetic-manifest`` it is organic only (the row's ``note`` says so).
 
 A line below ``MIN_ACTIONS_DAY`` actions / ``MIN_TURNS_DAY`` turns is ``{measured: false, reason:
-"unmeasured", n}`` with no value and no interval (D-193; the minimums are not in the plan, they await owner
-ratification at release; D-176's 30 is the precedent). ``cluster95`` is a session-clustered bootstrap
+"unmeasured", n}`` with no value and no interval (D-193; the floors of 30 actions / 10 turns and the 7-day streak
+are owner-ratified, D-210, 2026-10-17). ``cluster95`` is a session-clustered bootstrap
 (:func:`boot_rate`), seeded from the date so a rerun matches.
 
 Rows live at ``paths.state_path("daily")/<date>.json``. Writes are atomic and idempotent: a closed day with a
@@ -37,7 +39,7 @@ from typing import Any, Iterable
 SCHEMA = "daily-offload/1"
 MIN_ACTIONS_DAY = 30
 MIN_TURNS_DAY = 10
-STREAK_REQUIRED = 14
+STREAK_REQUIRED = 7                # D-210 (2026-10-17): 7 consecutive measured days, not 14
 BOOT_B = 2000
 TARGET = 0.60                    # == offload_share.TARGET (asserted by a test)
 SYNTH_LABEL = "synthetic (D-167)"
@@ -296,11 +298,18 @@ def compute_day(day: Date, inputs: Inputs, *, now: float | None = None,
     if not res["sampled"]:
         base_cav.insert(0, "no quality-sampled lane: the action numerator is 0 by rule (PLAN section 1.1); see "
                            "diagnostics.k_if_all_lanes_sampled")
+    rc_note = ("release_clock = organic + synthetic (D-210); synthetic membership from --synthetic-manifest" if ids
+               else "no --synthetic-manifest given: release_clock = organic only (D-210)")
+    rc = _population("release_clock (organic + synthetic, D-210)", ds, "release_clock",
+                     by_pop["organic"][0] + by_pop["synthetic"][0], by_pop["organic"][1] + by_pop["synthetic"][1],
+                     res["sampled"], excluded, base_cav + [rc_note])
+    rc["note"] = rc_note
     pops = {
         "organic": _population("organic", ds, "organic", *by_pop["organic"], res["sampled"], excluded, base_cav),
         "synthetic": _population(SYNTH_LABEL, ds, "synthetic", *by_pop["synthetic"], res["sampled"], excluded,
                                  base_cav + ["synthetic sessions (D-167): never in the organic numerator or "
-                                             "denominator; not a release basis"]),
+                                             "denominator; counted only in release_clock (D-210)"]),
+        "release_clock": rc,
     }
     oa, ot = by_pop["other"]
     kind_counts: dict[str, int] = {}
@@ -428,14 +437,15 @@ def write_day(row: dict, *, force: bool = False, partial: bool = False, base: Pa
 
 # ---------------------------------------------------------------- streak
 
-def _day_state(ds: str, base: Path) -> tuple[bool, str | None]:
-    """``(measured, reason)`` for a date; reason is why the file does not count (None when it does)."""
+def _day_state(ds: str, base: Path, pop: str = "release_clock") -> tuple[bool, str | None]:
+    """``(measured, reason)`` for a date on population ``pop``; reason is why the file does not count (None
+    when it does). A row written before D-210 has no ``release_clock`` block: invalid_schema (rerun --force)."""
     p = day_file(ds, base)
     if p is None:
         return False, "missing"
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
-        org = d["populations"]["organic"]
+        org = d["populations"][pop]
         ok = d.get("schema") == SCHEMA and d.get("date") == ds and isinstance(org, dict)
     except (OSError, ValueError, KeyError, TypeError):
         ok = False
@@ -456,10 +466,16 @@ def _written(ds: str, base: Path) -> tuple[bool, str | None]:
     return (ok or why in ("unmeasured_action", "unmeasured_turn")), why
 
 
+def _organic_state(ds: str, base: Path) -> tuple[bool, str | None]:
+    return _day_state(ds, base, "organic")
+
+
 def streak(end: Date | None = None, *, now: float | None = None, base: Path | None = None,
            required: int = STREAK_REQUIRED) -> dict:
-    """Walk back from ``end`` (default: the last closed UTC day) over the organic block. A day counts when its
-    row exists, the schema is valid, ``partial`` is false and the organic action AND turn lines are measured.
+    """Walk back from ``end`` (default: the last closed UTC day) over the ``release_clock`` block (organic +
+    synthetic, D-210). A day counts when its row exists, the schema is valid, ``partial`` is false and the
+    release_clock action AND turn lines are measured. ``organic_streak`` is the same walk over the organic
+    block alone, reported beside it and never merged into it.
     ``written_streak`` counts valid closed rows whether or not measured. Pass (section 7.1 c3): measured_streak
     >= ``required``. A date at or after today is never counted (an open day has no closed row)."""
     base = daily_dir() if base is None else base
@@ -478,9 +494,11 @@ def streak(end: Date | None = None, *, now: float | None = None, base: Path | No
 
     ms, mbreak = walk(_day_state)
     ws, wbreak = walk(_written)
+    os_, obreak = walk(_organic_state)
     return {"end": end.isoformat(), "required": required, "measured_streak": ms, "written_streak": ws,
             "first_break": mbreak, "written_first_break": wbreak, "pass": ms >= required,
-            "basis": "organic action AND turn measured, closed (not partial) rows"}
+            "organic_streak": os_, "organic_first_break": obreak,
+            "basis": "release_clock (organic + synthetic, D-210) action AND turn measured, closed (not partial) rows"}
 
 
 # ---------------------------------------------------------------- scheduler text (print only)
@@ -546,7 +564,9 @@ def run_daily(*, date: str | None, backfill: int, force: bool, partial: bool, ma
         row = compute_day(d, inp, now=now, manifest_ids=ids)
         res = write_day(row, force=force, partial=partial, base=base)
         org = row["populations"]["organic"]
-        out.append({"date": d.isoformat(), **res, "organic_action": org["action"], "organic_turn": org["turn"]})
+        rc = row["populations"]["release_clock"]
+        out.append({"date": d.isoformat(), **res, "organic_action": org["action"], "organic_turn": org["turn"],
+                    "release_clock_action": rc["action"], "release_clock_turn": rc["turn"]})
     if as_json:
         print(json.dumps(out, indent=2, sort_keys=True))
     else:
@@ -556,6 +576,8 @@ def run_daily(*, date: str | None, backfill: int, force: bool, partial: bool, ma
                 a, t = o["organic_action"], o["organic_turn"]
                 fmt = lambda x: (f"{x['k']}/{x['n']}={x['value']}" if x.get("measured") else f"unmeasured n={x['n']}")  # noqa: E731
                 line += f"  organic action {fmt(a)}  turn {fmt(t)}"
+                line += (f"  release_clock action {fmt(o['release_clock_action'])}  "
+                         f"turn {fmt(o['release_clock_turn'])}")
             print(line)
     return 0
 
@@ -570,8 +592,11 @@ def run_streak(*, end: str | None, as_json: bool = False, now: float | None = No
     if as_json:
         print(json.dumps(r, indent=2, sort_keys=True))
     else:
-        print(f"end {r['end']}  measured_streak {r['measured_streak']}  written_streak {r['written_streak']}  "
-              f"required {r['required']}  {'PASS' if r['pass'] else 'FAIL'}")
+        print(f"end {r['end']}  release_clock measured_streak {r['measured_streak']}  "
+              f"written_streak {r['written_streak']}  required {r['required']}  {'PASS' if r['pass'] else 'FAIL'}")
+        ob = r["organic_first_break"]
+        print(f"organic (reported separately) measured_streak {r['organic_streak']}  first break: "
+              + (f"{ob['date']} ({ob['reason']})" if ob else "none within the walk"))
         b = r["first_break"]
         print("first break: " + (f"{b['date']} ({b['reason']})" if b else "none within the walk"))
         wb = r["written_first_break"]
