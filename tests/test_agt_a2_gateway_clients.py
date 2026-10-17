@@ -266,37 +266,119 @@ def test_anthropic_tool_schema_is_mapped_to_a_function_tool(ant, fake):
     assert sent["function"]["description"] == "Get the weather"
 
 
-# ── the semantic cache is never consulted or written for a tools request ─────────────────
+# ── the semantic cache is never consulted or written for a tools request ──────────────────
+# End to end against the REAL semantic cache, UNPINNED model (a pinned model skips the cache
+# anyway, so a pinned test cannot see REQUEST_HAS_TOOLS). A.2-t review: three mutants survived
+# the earlier mock-only test (REQUEST_HAS_TOOLS dropped from _cache_disabled, its reset removed,
+# gates / quality escalation applied to tool-call replies).
 
-def test_a_tools_request_bypasses_the_semantic_cache_and_a_plain_one_does_not(monkeypatch):
-    """What the router sees while a request is in flight: the cache is off with a tools
-    array, on without one (anti-vacuity). Driven through route_payload_async, the door every
-    gateway endpoint uses. (An end-to-end same-prompt-twice test needs an unpinned model, and
-    unpinned chain building depends on process state other suites leave behind.)"""
+LONG_PROMPT = ("what is the weather in Lisbon right now, and should I bring an umbrella and a "
+               "jacket for the evening walk along the river, please check carefully")
+
+
+@pytest.mark.parametrize("m", ["auto", "llm-router", "unknown-model-xyz"])
+def test_unpinned_tools_request_twice_reaches_the_backend_twice(oai, fake, m):
+    msgs = [{"role": "user", "content": PROMPT}]
+    for _ in range(2):
+        r = oai.chat.completions.create(model=m, messages=msgs, tools=[CHAT_TOOL])
+        assert r.choices[0].finish_reason == "tool_calls"
+    assert len(fake.with_tools()) == 2, "a tool-call turn was replayed from the cache"
+
+
+def test_unpinned_plain_then_tools_then_plain(oai, fake):
+    """plain primes the cache; tools must NOT be answered from it; plain is cached again."""
+    msgs = [{"role": "user", "content": PROMPT}]
+    r = oai.chat.completions.create(model="auto", messages=msgs)
+    assert r.choices[0].message.content == FINAL
+    assert len(fake.calls) == 1
+    r = oai.chat.completions.create(model="auto", messages=msgs, tools=[CHAT_TOOL])
+    assert r.choices[0].finish_reason == "tool_calls", "tools request got the cached text"
+    assert len(fake.with_tools()) == 1
+    r = oai.chat.completions.create(model="auto", messages=msgs)
+    assert r.choices[0].message.content == FINAL
+    assert not r.choices[0].message.tool_calls
+
+
+def test_plain_request_after_tools_request_in_the_same_context_uses_the_cache(monkeypatch):
+    """M1: the REQUEST_HAS_TOOLS reset. Both requests run in ONE task (asyncio.run copies the
+    context, so separate runs hide a leak). A tools request must not leave the bypass on."""
     import asyncio
 
     import llm_router.route_server as rs
     import llm_router.router as R
     from llm_router import semantic_cache
+    from llm_router.types import LLMResponse
 
     seen = []
 
     async def _fake(task_type, prompt, **kw):
         seen.append(semantic_cache._cache_disabled())
-        return litellm_free_resp()
-
-    def litellm_free_resp():
-        from llm_router.types import LLMResponse
         return LLMResponse(content="ok", model="openai/gpt-4o", input_tokens=1, output_tokens=1,
                            cost_usd=0.0, latency_ms=1.0, provider="openai")
+
+    async def both():
+        await rs.route_payload_async({"prompt": "p", "tools": [CHAT_TOOL]})
+        mid = semantic_cache.REQUEST_HAS_TOOLS.get()
+        await rs.route_payload_async({"prompt": "p"})
+        return mid
 
     monkeypatch.setenv("LLM_ROUTER_SEMANTIC_CACHE", "on")
     monkeypatch.setattr(R, "route_and_call", _fake)
     monkeypatch.setattr(rs, "_log_route_savings", lambda *a, **k: None)
-    asyncio.run(rs.route_payload_async({"prompt": "p", "tools": [CHAT_TOOL]}))
-    asyncio.run(rs.route_payload_async({"prompt": "p"}))
+    mid = asyncio.run(both())
     assert seen == [True, False]
-    assert semantic_cache.REQUEST_HAS_TOOLS.get() is False, "the bypass leaked past the request"
+    assert mid is False, "REQUEST_HAS_TOOLS leaked past the tools request"
+
+
+@pytest.fixture
+def spies(monkeypatch):
+    """Record every contract-gate run and every quality score, and still call the real ones.
+    With one model in the chain a rejected reply is still returned (exhaustion floor), so a
+    retry count cannot see a gate that wrongly ran; the call itself can."""
+    import llm_router.quality_feedback as qf
+    import llm_router.router as R
+
+    seen = {"gates": [], "scores": []}
+    real_gates, real_score = R.run_gates, qf.score_response
+
+    def gates(contract, content):
+        seen["gates"].append(content)
+        return real_gates(contract, content)
+
+    def score(content, *a, **k):
+        seen["scores"].append(content)
+        return real_score(content, *a, **k)
+
+    monkeypatch.setattr(R, "run_gates", gates)
+    monkeypatch.setattr(qf, "score_response", score)
+    return seen
+
+
+def test_tool_only_reply_skips_the_contract_gates_and_quality_scoring(oai, fake, spies):
+    """M2 + M6. Empty content + tool_calls on a gated task type (the gateway classifies this
+    prompt QUERY/SIMPLE: length gate, min 1 char, and an empty string fails it). Neither the
+    gates nor quality escalation may judge a tool-call reply by its (empty) text."""
+    msgs = [{"role": "user", "content": LONG_PROMPT}]
+    r = oai.chat.completions.create(model="auto", tools=[CHAT_TOOL], messages=msgs)
+    assert r.choices[0].finish_reason == "tool_calls"
+    assert r.choices[0].message.tool_calls[0].function.name == "get_weather"
+    assert len(fake.calls) == 1
+    assert spies == {"gates": [], "scores": []}, "a tool-call reply was gated or scored"
+
+
+def test_plain_reply_is_still_gated_and_scored(oai, fake, spies):
+    """Anti-vacuity for the test above: the spies do fire for a text reply."""
+    oai.chat.completions.create(model="auto", messages=[{"role": "user", "content": LONG_PROMPT}])
+    assert spies["gates"] == [FINAL] and spies["scores"] == [FINAL]
+
+
+def test_tool_call_reply_is_not_escalated_to_another_model(oai, fake, monkeypatch):
+    """M6 behaviour: even with the threshold at 1.0 and a long prompt, a tool call is one call."""
+    monkeypatch.setenv("LLM_ROUTER_ESCALATE_THRESHOLD", "1.0")
+    r = oai.chat.completions.create(model="auto", tools=[CHAT_TOOL],
+                                    messages=[{"role": "user", "content": LONG_PROMPT}])
+    assert r.choices[0].finish_reason == "tool_calls"
+    assert len(fake.calls) == 1
 
 
 # ── refusals that stay ──────────────────────────────────────────────────────────────
