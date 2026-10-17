@@ -668,14 +668,20 @@ class RouterConfig(BaseSettings):
         return (
             init_settings,
             env_settings,
-            _ProjectDotEnvSource(settings_cls, env_file=".env", env_file_encoding=enc),
-            DotEnvSettingsSource(settings_cls, env_file=paths.state_path(".env"),
+            _ProjectDotEnvSource(settings_cls, env_file=paths.regular_file_or_none(".env"),
+                                 env_file_encoding=enc),
+            DotEnvSettingsSource(settings_cls,
+                                 env_file=paths.regular_file_or_none(paths.state_path(".env")),
                                  env_file_encoding=enc),
             file_secret_settings,
         )
 
     model_config = {
-        "env_file": (paths.state_path(".env"), ".env"),
+        # None on purpose: BaseSettings builds its own default dotenv source from
+        # this key BEFORE settings_customise_sources runs, and pydantic-settings
+        # >= 2.15 opens a FIFO there (F15 hang). The two guarded .env sources in
+        # settings_customise_sources are the only readers.
+        "env_file": None,
         "env_file_encoding": "utf-8",
         "extra": "ignore",
         # GH#69: llm_router_profile sets an explicit validation_alias

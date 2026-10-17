@@ -42,6 +42,23 @@ def state_path(*parts: str) -> Path:
     return llm_router_home().joinpath(*parts)
 
 
+def regular_file_or_none(path: "Path | str") -> "Path | None":
+    """``path`` when it is a regular file, else ``None``.
+
+    A ``.env`` that is a FIFO, device or directory must never be opened: newer
+    pydantic-settings (>= 2.15) opens FIFOs, and ``open()`` on one with no writer
+    blocks forever (F15: UserPromptSubmit hook hang). ``os.stat`` is used only
+    for its mode and never opens the path.
+    """
+    import stat as _stat
+
+    p = Path(path)
+    try:
+        return p if _stat.S_ISREG(p.stat().st_mode) else None
+    except (OSError, ValueError):
+        return None
+
+
 def is_isolated() -> bool:
     """True when ``LLM_ROUTER_HOME`` is set and this module will honour it.
 

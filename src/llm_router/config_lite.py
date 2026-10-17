@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 
 #: field -> the default declared on ``RouterConfig``.
 DEFAULTS: dict[str, object] = {
@@ -39,7 +38,10 @@ def could_be_set(field: str) -> bool:
             return True
         from llm_router.paths import state_path
 
-        return state_path(".env").exists() or Path(".env").exists()
+        from llm_router.paths import regular_file_or_none
+
+        return (regular_file_or_none(state_path(".env")) is not None
+                or regular_file_or_none(".env") is not None)
     except Exception:  # noqa: BLE001 -- cannot tell: take the real path
         return True
 
