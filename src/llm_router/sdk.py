@@ -1,19 +1,34 @@
-"""In-process routing SDK — ``from llm_router import route``.
+"""In-process routing SDK — ``from llm_router import Router`` (or ``route``).
 
 For Python agents that prefer a direct call over the HTTP gateway. Same router
-(``build_chain`` + ``execute_chain``), same metering into ``usage.db``, no server:
+(``build_chain`` + ``execute_chain``, D-98), same metering into ``usage.db``, no server:
 
-    from llm_router import route
-    r = route("Summarize this 10-K risk section ...")
-    print(r.text, "via", r.model)
-    r = route("Explain further", messages=[{"role": "user", "content": "What is routing?"}])
+    from llm_router import Router
+    router = Router(budget_usd=0.50)
+    r = router.run("Summarize this 10-K risk section ...")
+    print(r.text, "via", r.model, f"${r.cost_usd:.4f}")
+    r = await router.arun("Explain further",
+                          messages=[{"role": "user", "content": "What is routing?"}])
 
-Returns a :class:`RouteResult`. Raises :class:`RoutingError` if the model chain
-is exhausted (so callers can fall back to a direct provider if they wish).
+``route(prompt, ...)`` is the one-call form (a shim over ``Router``). Both return a
+:class:`RouteResult`. :class:`RoutingError` means the model chain is exhausted (so callers
+can fall back to a direct provider if they wish); :class:`BudgetExceeded` means the
+Router's ``budget_usd`` is spent.
 """
 from __future__ import annotations
 
+import asyncio
+import math
+import threading
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from llm_router.agents.budget import BudgetEnvelope, BudgetExceeded
+
+if TYPE_CHECKING:
+    from llm_router.engine import Decision
+
+__all__ = ["BudgetExceeded", "RouteResult", "Router", "RoutingError", "route"]
 
 
 class RoutingError(RuntimeError):
@@ -28,6 +43,13 @@ class RouteResult:
     input_tokens: int
     output_tokens: int
     latency_ms: int
+    #: The engine's Decision for the prompt (door ``sdk``) when ``LLM_ROUTER_ENGINE_MODE=decide``;
+    #: None in shadow/off mode (the gateway rules routed) or when task type and complexity were
+    #: both given. An explicit ``tier`` / ``task_type`` overrides its fields for routing.
+    decision: Decision | None = None
+    session_id: str = ""    # the ledger session the call's rows carry
+    task_id: str = ""       # the ledger task id the call's rows carry
+    cost_usd: float = 0.0   # list-price cost of the answering model (``savings_logger._cost_for``)
 
     @property
     def total_tokens(self) -> int:
@@ -56,11 +78,121 @@ def _sdk_session_id(session_id: str | None) -> str:
     return _PROCESS_SESSION
 
 
+#: Router ``tier`` -> the complexity the chain is built for. Mirrors ``engine._TIER_COMPLEXITY``
+#: (a test pins the two).
+_TIER_COMPLEXITY = {"haiku": "simple", "sonnet": "moderate", "opus": "complex"}
+
+
+def _check_messages(messages) -> None:
+    if messages is not None and (not isinstance(messages, list) or any(
+        not isinstance(message, dict)
+        or not isinstance(message.get("role"), str)
+        or not isinstance(message.get("content"), str)
+        for message in messages
+    )):
+        raise ValueError("messages must be a list of dicts with string role/content")
+
+
+class Router:
+    """A routing client for one agent: its session, its spend cap, its calls.
+
+    ``session`` is the caller's session id (``[A-Za-z0-9_.:-]{1,128}``) stamped on every ledger
+    row; omitted, one id is generated per process (``sdk-...``). ``budget_usd`` caps what this
+    Router may spend: before each call it raises :class:`BudgetExceeded` once the consumed cost
+    reaches the cap, and after each call it adds the answering model's list-price cost. The cap is
+    checked before a call, not reserved, so a call that starts under the cap may end over it, and
+    calls already in flight when the cap is reached are not stopped. ``project`` and ``policy`` are
+    stored on the Router only: per-project routing is A.4 and named policies come later; neither
+    changes a route today.
+
+    ``run`` is synchronous; ``arun`` runs ``run`` in a worker thread (``asyncio.to_thread``, which
+    copies the caller's contextvars) so an event loop is never blocked by a model call.
+    """
+
+    def __init__(self, session: str | None = None, budget_usd: float | None = None,
+                 project: str | None = None, policy: str | None = None) -> None:
+        if budget_usd is not None:
+            if isinstance(budget_usd, bool) or not isinstance(budget_usd, (int, float)) \
+                    or not math.isfinite(budget_usd) or budget_usd < 0:
+                raise ValueError("budget_usd must be a finite number >= 0")
+        self.session_id = _sdk_session_id(session)
+        self.project = project
+        self.policy = policy
+        self._lock = threading.Lock()
+        self._budget = None if budget_usd is None else BudgetEnvelope(cap_usd=float(budget_usd))
+
+    @property
+    def budget(self) -> BudgetEnvelope | None:
+        """The current envelope (cap and consumed), or None without ``budget_usd``."""
+        with self._lock:
+            return self._budget
+
+    def run(self, prompt: str, *, context: str | None = None, task: str | None = None,
+            parent: str | None = None, tier: str | None = None,
+            messages: list[dict] | None = None) -> RouteResult:
+        """Route one prompt and return the answer + routing metadata.
+
+        ``context`` is extra system context for the model. ``task`` is the caller's task id for
+        the ledger rows (omitted: the session's current turn, else generated). ``tier``
+        (``haiku`` / ``sonnet`` / ``opus``) forces the complexity the chain is built for
+        (simple / moderate / complex). ``messages`` is the conversation so far (see
+        :func:`route`). ``parent`` (the parent session, for agent lineage) is accepted but not
+        recorded yet: lineage lands in A.3. Raises :class:`BudgetExceeded` when the budget is spent
+        and :class:`RoutingError` when the chain is exhausted.
+        """
+        del parent  # A.3 records lineage; accepted now so callers can pass it
+        return self._call(prompt, context=context, task=task, tier=tier, messages=messages)
+
+    async def arun(self, prompt: str, *, context: str | None = None, task: str | None = None,
+                   parent: str | None = None, tier: str | None = None,
+                   messages: list[dict] | None = None) -> RouteResult:
+        """``run`` in a worker thread: the event loop keeps running while the model answers."""
+        return await asyncio.to_thread(self.run, prompt, context=context, task=task,
+                                       parent=parent, tier=tier, messages=messages)
+
+    def _check_budget(self) -> None:
+        with self._lock:
+            env = self._budget
+            if env is not None and env.exhausted:  # consumed >= cap
+                raise BudgetExceeded(session_id=self.session_id, cap_usd=env.cap_usd,
+                                     consumed_usd=env.consumed_usd, proposed_usd=0.0)
+
+    def _consume(self, cost_usd: float) -> None:
+        with self._lock:
+            if self._budget is not None:
+                self._budget = self._budget.consume(max(0.0, float(cost_usd or 0.0)))
+
+    def _call(self, prompt: str, *, context: str | None = None, task: str | None = None,
+              tier: str | None = None, messages: list[dict] | None = None,
+              task_type: str | None = None, complexity: str | None = None,
+              timeout: int = 150) -> RouteResult:
+        from llm_router import call_identity
+
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("prompt is empty")
+        _check_messages(messages)
+        if context is not None and not isinstance(context, str):
+            raise ValueError("context must be a string")
+        if tier is not None:
+            if tier not in _TIER_COMPLEXITY:
+                raise ValueError(f"tier must be one of {', '.join(_TIER_COMPLEXITY)}")
+            complexity = _TIER_COMPLEXITY[tier]
+        self._check_budget()
+        with call_identity.scope(self.session_id, task_id=task) as (task_id, _trace):
+            result = _route(prompt, task_type=task_type, complexity=complexity, timeout=timeout,
+                            session_id=self.session_id, task_id=task_id, messages=messages,
+                            context=context)
+        self._consume(result.cost_usd)
+        return result
+
+
 def route(prompt: str, *, task_type: str | None = None,
           complexity: str | None = None, timeout: int = 150,
           session_id: str | None = None, task_id: str | None = None,
           messages: list[dict] | None = None) -> RouteResult:
     """Route one prompt through LLM Router and return the answer + routing metadata.
+
+    A shim over :class:`Router` (no budget): ``Router(session=session_id)`` routes the call.
 
     task_type / complexity are inferred from the prompt when omitted. ``session_id`` and
     ``task_id`` (ids, ``[A-Za-z0-9_.:-]{1,128}``) name the caller's session and request on
@@ -80,19 +212,47 @@ def route(prompt: str, *, task_type: str | None = None,
     ``messages``, ``timeout`` caps each model call, and a spend cap skips paid
     providers (``RoutingError`` once the chain is exhausted).
     """
-    from llm_router import call_identity
+    return Router(session=session_id)._call(
+        prompt, task=task_id, messages=messages, task_type=task_type,
+        complexity=complexity, timeout=timeout)
 
-    if messages is not None and (not isinstance(messages, list) or any(
-        not isinstance(message, dict)
-        or not isinstance(message.get("role"), str)
-        or not isinstance(message.get("content"), str)
-        for message in messages
-    )):
-        raise ValueError("messages must be a list of dicts with string role/content")
-    sid = _sdk_session_id(session_id)
-    with call_identity.scope(sid, task_id=task_id):
-        return _route(prompt, task_type=task_type, complexity=complexity,
-                      timeout=timeout, session_id=sid, messages=messages)
+
+def _decide(prompt: str, *, session_id: str | None = None,
+            task_id: str | None = None) -> tuple[str, str, Decision | None]:
+    """(task_type, complexity, Decision or None) for the SDK door.
+
+    ``LLM_ROUTER_ENGINE_MODE=decide``: the engine decides (``engine_door.decision(door="sdk")``,
+    the same ``engine.decide`` the MCP door calls, so the same text gets the same Decision).
+    Otherwise the gateway rules route (``classify_signals(GATEWAY_POLICY)``, as before) and the
+    engine runs after them in shadow with door ``sdk`` (D-72)."""
+    from llm_router import engine_door
+    from llm_router.classify import GATEWAY_POLICY, classify_signals
+
+    d = engine_door.decision(prompt, door="sdk", session_id=session_id, task_id=task_id)
+    if d is not None:
+        return d.task_type, d.complexity, d
+    s = classify_signals(prompt, GATEWAY_POLICY)
+    task_type, complexity = s.task_type.value, s.complexity.value
+    engine_door.shadow(prompt, door="sdk", rules_task=task_type, rules_complexity=complexity)
+    return task_type, complexity, None
+
+
+def _join(*parts: str | None) -> str | None:
+    return "\n\n".join(p for p in parts if p) or None
+
+
+def _cost_usd(result) -> float:
+    """The answering model's list-price cost; 0.0 (recorded) if pricing fails."""
+    try:
+        from llm_router.hooks.savings_logger import _cost_for
+
+        return float(_cost_for(result.model.provider, result.model.model,
+                               result.input_tokens, result.output_tokens))
+    except Exception as exc:  # noqa: BLE001 - pricing never breaks a routed answer
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-SDK-COST", exc)
+        return 0.0
 
 
 def _called(chain, *, agent: bool):
@@ -176,16 +336,15 @@ def _pack_kwargs(prompt: str, messages: list[dict] | None, chain,
 
 
 def _route(prompt: str, *, task_type: str | None, complexity: str | None,
-           timeout: int, session_id: str, messages: list[dict] | None = None) -> RouteResult:
+           timeout: int, session_id: str, task_id: str = "",
+           messages: list[dict] | None = None, context: str | None = None) -> RouteResult:
     # Lazy imports keep ``import llm_router`` cheap.
-    from llm_router.gateway import _classify
     from llm_router.hooks.chain_builder import build_chain, get_current_pressure, needs_claude_tools
     from llm_router.hooks.direct_executor import execute_agent, execute_chain
 
-    if not prompt or not prompt.strip():
-        raise ValueError("prompt is empty")
+    decision = None
     if not task_type or not complexity:
-        _t, _c = _classify(prompt)
+        _t, _c, decision = _decide(prompt, session_id=session_id, task_id=task_id)
         task_type, complexity = task_type or _t, complexity or _c
 
     zone, _pct = get_current_pressure()
@@ -194,15 +353,19 @@ def _route(prompt: str, *, task_type: str | None, complexity: str | None,
     if needs_claude_tools(prompt, task_type):
         chain = build_chain("complex", zone, "code")
         request, packed = _pack_kwargs(prompt, messages, chain, session_id, agent=True)
-        extra = {"context": packed["agent_context"]} if packed else {}
+        agent_context = _join(context, packed.get("agent_context"))
+        extra = {"context": agent_context} if agent_context else {}
         result = execute_agent(request, chain, timeout=max(timeout, 180), **extra)
     else:
         chain = build_chain(complexity, zone, task_type, qa_last_resort=True)
         request, packed = _pack_kwargs(prompt, messages, chain, session_id)
         extra = {"context": packed["context"], "history": packed["history"]} if packed else {}
+        if context:
+            extra["context"] = _join(context, extra.get("context"))
         result = execute_chain(request, chain, task_type, timeout=timeout, **extra)
     if result is None:
         raise RoutingError("LLM Router routing failed — model chain exhausted")
+    cost_usd = _cost_usd(result)
 
     try:  # meter, like the gateway/hook paths
         from llm_router.hooks.savings_logger import log_direct_savings, log_direct_to_db
@@ -220,4 +383,8 @@ def _route(prompt: str, *, task_type: str | None, complexity: str | None,
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,
         latency_ms=int(result.latency_ms or 0),
+        decision=decision,
+        session_id=session_id,
+        task_id=task_id or "",
+        cost_usd=cost_usd,
     )
