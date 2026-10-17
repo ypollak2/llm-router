@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 35
+# llm_router-hook-version: 36
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -2543,6 +2543,8 @@ def _refresh_ledger_cache() -> None:
     finally:
         try:
             os.remove(tmp)  # only still there when the write or replace failed
+        except FileNotFoundError:
+            pass  # the normal path: os.replace already moved it. Not a fail-open.
         except OSError as _exc:
             # Fail-open (litter), not silent (T-14 ratchet).
             try:
