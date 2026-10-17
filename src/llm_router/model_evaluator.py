@@ -140,7 +140,11 @@ async def eval_codex_model(task_type: str = "reasoning") -> Optional[ModelScore]
         prompt = BenchmarkSuite.get_prompt(task_type)
         
         start = time.time()
-        result = await run_codex(prompt, model="gpt-5.4", timeout=10)
+        from llm_router.codex_agent import accepted_codex_entry
+        codex_entry = accepted_codex_entry("codex/gpt-5.4")  # F27 allow-list
+        if codex_entry is None:
+            return None
+        result = await run_codex(prompt, model=codex_entry[len("codex/"):], timeout=10)
         latency_ms = (time.time() - start) * 1000
         
         if not result.success:
@@ -149,7 +153,7 @@ async def eval_codex_model(task_type: str = "reasoning") -> Optional[ModelScore]
         quality = BenchmarkSuite.assess_response(task_type, result.content)
         
         return ModelScore(
-            model="codex/gpt-5.4",
+            model=codex_entry,
             provider="codex",
             latency_ms=latency_ms,
             quality=quality,
