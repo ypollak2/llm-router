@@ -140,6 +140,22 @@ def freeze_amend3(cfg, constants, *, text=None, date=AMEND3_PAST):
     )
 
 
+AMEND4_PAST = "2030-01-01T00:00:00Z"
+
+
+def amend4_text(**values):
+    block = {"REPO_SHA": "f" * 40, **values}
+    return ("# AMEND4\n\n```text P20-AMEND4-CONSTANTS\n"
+            + "".join(f"{k}={v}\n" for k, v in block.items()) + "```\n")
+
+
+def freeze_amend4(cfg, *, text=None, date=AMEND4_PAST):
+    cfg.amend4.write_text(text if text is not None else amend4_text())
+    cfg.amend4.with_suffix(".sha256").write_text(
+        f"{h.sha256_file(cfg.amend4)}  {cfg.amend4.name}\nfrozen_utc {date}\n"
+    )
+
+
 def effective(constants):
     """The constants frozen() returns for the factory's prereg, AMEND1 and AMEND2."""
     return h.amended({**constants, "REPO_SHA": "a" * 40}, {
@@ -236,6 +252,7 @@ def factory(tmp_path):
             pack_fn=lambda item, name, window: [{"role": "user", "content": item["request"]}],
             git_sha=lambda: "deadbeef", amend1=run_dir / "AMEND1.md",
             amend2=run_dir / "AMEND2.md", amend3=run_dir / "AMEND3.md",
+            amend4=run_dir / "AMEND4.md",
             gate=lambda constants: None,
         )
         pools = {s: pool_rows(s, 30 if small and s == "qa" else 75 if s == "code" else 130)
@@ -1354,3 +1371,96 @@ def test_amend3_score_log_records_hash(factory):
     assert call(cfg, "select") == 0 and call(cfg, "score") == 0
     started = next(row for row in h.uses(cfg) if row[0] == "started")
     assert f"amend3_sha256={h.sha256_file(cfg.amend3)}" in started
+
+
+# AMEND4: AMEND3 is a plain merge (it must not drop AMEND2's ID_ pin); optional REPO_SHA re-pin.
+QWEN_ID = f"ID_{h.QWEN38}"
+
+
+def test_amend3_and_amend4_keep_every_amend2_key(factory):
+    cfg, c, _ = factory()
+    freeze_amend3(cfg, c)
+    third = h.frozen(cfg)["constants"]
+    assert third[QWEN_ID] == "b3f4c17c6811"
+    freeze_amend4(cfg)
+    fourth = h.frozen(cfg)["constants"]
+    assert fourth[QWEN_ID] == "b3f4c17c6811"
+    for key, value in h.AMEND2_FIXED.items():
+        assert third[key] == value and fourth[key] == value, key
+    assert third["REPO_SHA"] == "e" * 40 and fourth["REPO_SHA"] == "f" * 40
+    assert fourth["NIGHT_WINDOW"] == "none"
+    assert not any(k.startswith("ID_") and k != QWEN_ID for k in fourth)
+
+
+@pytest.mark.parametrize("amend4", [False, True])
+def test_run_after_real_frozen_with_all_amendments_is_not_refused(factory, amend4):
+    cfg, c, _ = selected_run(factory)
+    freeze_amend3(cfg, c)
+    if amend4:
+        freeze_amend4(cfg)
+    rc = call(cfg, "run", "--set", "qa")
+    assert rc in (0, 3)  # never 2 ("invalid input", the KeyError on ID_<arm>)
+    assert cfg.ollama.calls and cfg.ollama.calls[0][1][0]["content"] == "Reply OK."
+
+
+def test_amend4_frozen_enforcement(factory):
+    cfg, c, _ = factory()
+    freeze_amend3(cfg, c)
+    base = h.frozen(cfg)
+    assert "amend4_sha256" not in base and base["constants"]["REPO_SHA"] == "e" * 40
+    freeze_amend4(cfg)
+    got = h.frozen(cfg)
+    assert got["amend4_sha256"] == h.sha256_file(cfg.amend4)
+    assert got["amend4_frozen_utc"] == AMEND4_PAST
+    (cfg.run_dir / "PREREG-AMEND4.md").write_text("different")
+    with pytest.raises(h.Refuse, match="PREREG-AMEND4.md differs"):
+        h.frozen(cfg)
+    (cfg.run_dir / "PREREG-AMEND4.md").write_bytes(cfg.amend4.read_bytes())
+    assert h.frozen(cfg)["amend4_sha256"] == got["amend4_sha256"]
+    (cfg.run_dir / "PREREG-AMEND4.md").unlink()
+    cases = [
+        (dict(date=AMEND3_PAST), "AMEND4 frozen_utc"),
+        (dict(date="2031-01-01T00:00:00Z"), "AMEND4 frozen_utc"),
+        (dict(date="2030-01-01T00:00:00"), "AMEND4 frozen_utc"),
+        (dict(text=amend4_text(CODE_RUNNER_SHA256="d" * 64)), "AMEND4 constants"),
+        (dict(text=amend4_text(REPO_SHA="zz")), "AMEND4 constants"),
+        (dict(text=amend4_text(REPO_SHA="F" * 40)), "AMEND4 constants"),
+        (dict(text="# AMEND4\n```text P20-AMEND4-CONSTANTS\n```\n"), "AMEND4 constants"),
+    ]
+    for kwargs, message in cases:
+        freeze_amend4(cfg, **kwargs)
+        with pytest.raises(h.Refuse, match=message):
+            h.frozen(cfg)
+    freeze_amend4(cfg)
+    cfg.amend4.write_text(cfg.amend4.read_text() + " ")  # sidecar no longer matches
+    with pytest.raises(h.Refuse, match="AMEND4 is not frozen"):
+        h.frozen(cfg)
+    assert call(cfg, "select") == 2
+
+
+def test_amend4_sidecar_without_frozen_amend3_refuses(factory):
+    cfg, c, _ = factory()
+    freeze_amend4(cfg)
+    with pytest.raises(h.Refuse, match="AMEND4 requires a frozen AMEND3"):
+        h.frozen(cfg)
+
+
+def test_amend4_score_log_records_hash(factory):
+    cfg, c, _ = factory()
+    freeze_amend3(cfg, c)
+    freeze_amend4(cfg)
+    assert call(cfg, "select") == 0 and call(cfg, "score") == 0
+    started = next(row for row in h.uses(cfg) if row[0] == "started")
+    assert f"amend4_sha256={h.sha256_file(cfg.amend4)}" in started
+
+
+def test_without_amend4_sidecar_behaviour_is_unchanged(factory):
+    cfg, c, _ = factory()
+    freeze_amend3(cfg, c)
+    cfg.amend4.write_text(amend4_text(REPO_SHA="0" * 40))  # a draft with no sidecar is inert
+    got = h.frozen(cfg)
+    assert not any(k.startswith("amend4") for k in got)
+    assert got["constants"]["REPO_SHA"] == "e" * 40
+    assert set(got) == {"sha256", "frozen_utc", "amend1_sha256", "amend1_frozen_utc",
+                        "amend2_sha256", "amend2_frozen_utc", "amend3_sha256",
+                        "amend3_frozen_utc", "constants"}

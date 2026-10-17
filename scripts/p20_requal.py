@@ -35,6 +35,7 @@ PREREG = REPO / "docs/prereg/PREREG-P20-requal.md"
 AMEND1 = REPO / "docs/prereg/PREREG-P20-requal-AMEND1.md"
 AMEND2 = REPO / "docs/prereg/PREREG-P20-requal-AMEND2.md"
 AMEND3 = REPO / "docs/prereg/PREREG-P20-requal-AMEND3.md"
+AMEND4 = REPO / "docs/prereg/PREREG-P20-requal-AMEND4.md"
 # AMEND3 (D-202): the exclusive lock a local model call holds; the P2.0-T harness takes the same
 # one (fcntl.flock LOCK_EX on this path). Tests point Cfg.lock_path or this name elsewhere.
 OLLAMA_LOCK = Path.home() / ".rsi/research/primary-plan/v16/requal/ollama.lock"
@@ -128,6 +129,9 @@ AMEND2_SHA_KEYS = {"REPO_SHA": r"[0-9a-f]{40}", "CODE_RUNNER_SHA256": r"[0-9a-f]
 # pins replace AMEND2's. AMEND2's other keys stay.
 AMEND3_FIXED = {"NIGHT_WINDOW": "none"}
 AMEND3_SHA_KEYS = AMEND2_SHA_KEYS
+# AMEND4: the harness fix (AMEND3 is a plain merge; it must not drop AMEND2's ID_ pin) and a
+# re-pin of REPO_SHA. It sets no other key.
+AMEND4_SHA_KEYS = {"REPO_SHA": r"[0-9a-f]{40}"}
 
 
 def amended(constants: dict, overrides: dict) -> dict:
@@ -389,8 +393,40 @@ def frozen(cfg: Cfg) -> dict:
         third_copy = cfg.run_dir / "PREREG-AMEND3.md"
         if third_copy.exists() and third_copy.read_bytes() != cfg.amend3.read_bytes():
             raise Refuse("refusing: PREREG-AMEND3.md differs")
-        constants = amended(constants, third_overrides)
+        # A plain merge: amended() would drop AMEND2's ID_ pin (AMEND4 fixes that bug).
+        constants = {**constants, **third_overrides}
         out.update(amend3_sha256=third["sha256"], amend3_frozen_utc=third["frozen_utc"])
+        if cfg.amend4.with_suffix(".sha256").exists():
+            # AMEND4 is in force as soon as its sidecar exists; a draft without one is not.
+            try:
+                fourth = check_prereg.check(cfg.amend4)
+                if not fourth["match"]:
+                    raise ValueError("freeze")
+                fourth_text = cfg.amend4.read_text()
+            except (OSError, ValueError, IndexError, OverflowError) as exc:
+                raise Refuse("refusing: AMEND4 is not frozen") from exc
+            try:
+                fourth_epoch = datetime.fromisoformat(fourth["frozen_utc"].replace("Z", "+00:00"))
+                if (fourth_epoch.tzinfo is None
+                        or not third_epoch.timestamp() < fourth_epoch.timestamp() < cfg.now()):
+                    raise ValueError("freeze order")
+            except (ValueError, OverflowError) as exc:
+                raise Refuse("refusing: AMEND4 frozen_utc") from exc
+            try:
+                fourth_overrides = parse_block(fourth_text, "```text P20-AMEND4-CONSTANTS")
+                if (fourth_overrides.keys() != AMEND4_SHA_KEYS.keys()
+                        or not all(re.fullmatch(pattern, fourth_overrides[k])
+                                   for k, pattern in AMEND4_SHA_KEYS.items())):
+                    raise ValueError("constants")
+            except (Refuse, ValueError) as exc:
+                raise Refuse("refusing: AMEND4 constants") from exc
+            fourth_copy = cfg.run_dir / "PREREG-AMEND4.md"
+            if fourth_copy.exists() and fourth_copy.read_bytes() != cfg.amend4.read_bytes():
+                raise Refuse("refusing: PREREG-AMEND4.md differs")
+            constants = {**constants, **fourth_overrides}
+            out.update(amend4_sha256=fourth["sha256"], amend4_frozen_utc=fourth["frozen_utc"])
+    elif cfg.amend4.with_suffix(".sha256").exists():
+        raise Refuse("refusing: AMEND4 requires a frozen AMEND3")
     out["constants"] = constants
     return out
 
@@ -452,6 +488,7 @@ class Cfg:
     amend1: Path = AMEND1
     amend2: Path = AMEND2
     amend3: Path = AMEND3
+    amend4: Path = AMEND4
     lock_path: Path | None = None
     local_used: set = dc_field(default_factory=set)
     gate: Callable[[dict], None] | None = None
@@ -1146,6 +1183,7 @@ def score(cfg: Cfg, c: dict, freeze: dict, measurement: Path | None = None) -> d
     hashes = {"prereg_sha256": freeze["sha256"], "amend1_sha256": freeze["amend1_sha256"],
               "amend2_sha256": freeze["amend2_sha256"],
               **({"amend3_sha256": freeze["amend3_sha256"]} if "amend3_sha256" in freeze else {}),
+              **({"amend4_sha256": freeze["amend4_sha256"]} if "amend4_sha256" in freeze else {}),
               "git_sha": cfg.git_sha(),
               "selection_sha256": optional_hash(cfg.run_dir / "selection.json"),
               "answers_sha256": combined_hash(cfg, "answers"),
