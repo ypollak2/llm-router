@@ -134,14 +134,14 @@ def instant(value):
     return datetime.fromisoformat(value[:-1] + "+00:00")
 
 
-def transcript(data, msg_id):
+def transcript(data, msg_id, sidechain=False):
     entries = []
     for line in data.splitlines():
         try:
             entry = json.loads(line)
         except (ValueError, UnicodeError):
             continue
-        if not isinstance(entry, dict) or entry.get("isSidechain"):
+        if not isinstance(entry, dict) or (entry.get("isSidechain") and not sidechain):
             continue
         message = entry.get("message")
         if not isinstance(message, dict):
