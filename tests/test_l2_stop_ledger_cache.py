@@ -37,6 +37,10 @@ ROOT = Path(__file__).resolve().parents[1]
 HOOK_PATH = ROOT / "src" / "llm_router" / "hooks" / "session-end.py"
 ROWS = 50_000
 _CACHE = "ledger_aggregates.json"
+# rolling windows the dashboard/hook query with datetime('now', '-N ...'): 24h (executed
+# header), 7 days (week), 14 days. The margin outlasts the 300 s module timeout.
+_ROLLING_EDGES_S = (86400, 7 * 86400, 14 * 86400)
+_EDGE_MARGIN_S = 1800
 
 # ── synthetic ledger ──────────────────────────────────────────────────────────
 
@@ -64,7 +68,13 @@ def _seed(state: Path, n: int) -> None:
         # i == 0 .. 9 land inside "today"; the rest spread over 60 days
         if i < 10:
             return (now - timedelta(minutes=i)).strftime("%Y-%m-%d %H:%M:%S")
-        return (now - timedelta(seconds=rng.uniform(0, 60 * 86400))).strftime("%Y-%m-%d %H:%M:%S")
+        # F40: never land within _EDGE_MARGIN_S of a rolling window edge. Those edges are
+        # SQL ``datetime('now', '-N')`` and move with the wall clock, so a row sitting on
+        # one is counted by the cached Stop and not by the live one a second later.
+        while True:
+            age = rng.uniform(0, 60 * 86400)
+            if all(abs(age - edge) > _EDGE_MARGIN_S for edge in _ROLLING_EDGES_S):
+                return (now - timedelta(seconds=age)).strftime("%Y-%m-%d %H:%M:%S")
 
     def fill(table: str, gen) -> None:
         have = {r[1] for r in c.execute(f"pragma table_info({table})")}
@@ -324,6 +334,27 @@ def test_cached_render_is_byte_identical_to_the_live_computation(big_state, monk
         assert "today ~$" in body and "lifetime ~$" in body
     else:
         assert "lifetime" in body and "14-DAY ACTIVITY" in body
+
+
+@pytest.mark.parametrize("table", ["usage", "routing_decisions", "savings_stats", "quota_snapshots",
+                                   "claude_usage"])
+def test_seeded_rows_keep_clear_of_every_rolling_window_edge(big_state, table):
+    """F40: the byte-identity test flaked (about 1 in 200 runs) when a seeded row sat on the
+    24h/7d/14d edge: the cached Stop (computed first) and the live Stop (seconds later) then
+    disagreed by one row ('872 executed' vs '873', '$192.61' vs '$192.63'). Pin the
+    seeding invariant, with a floor well above the runtime of one test."""
+    c = sqlite3.connect(big_state / "usage.db")
+    try:
+        n = c.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        assert n == ROWS, "the table was seeded (the check below is not over an empty set)"
+        for edge in _ROLLING_EDGES_S:
+            near = c.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE ABS(strftime('%s','now') - strftime('%s', timestamp) - ?) < ?",
+                (edge, _EDGE_MARGIN_S // 2),
+            ).fetchone()[0]
+            assert near == 0, f"{near} {table} rows within {_EDGE_MARGIN_S // 2}s of the {edge}s edge"
+    finally:
+        c.close()
 
 
 def test_full_mode_carries_the_lifetime_unverified_note(big_state, monkeypatch):
