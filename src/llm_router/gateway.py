@@ -37,7 +37,7 @@ def _load_dotenv() -> None:
     has no GEMINI_API_KEY/etc. and every cloud-model route fails. Mirrors the
     hook's loader (no override of existing env)."""
     for env_path in (paths.state_path(".env"), Path.home() / ".env"):
-        if not env_path.exists():
+        if paths.regular_file_or_none(env_path) is None:
             continue
         try:
             for line in env_path.read_text().splitlines():
