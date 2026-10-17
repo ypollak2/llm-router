@@ -45,6 +45,16 @@ _FREE_EXTERNAL_MODELS: frozenset[str] = frozenset({
     "gemini_cli/gemini-3-flash-preview",
 })
 
+
+def is_free_external_model(model: str) -> bool:
+    """True for a free external model: any ``codex/*`` entry, or a listed one.
+
+    Every Codex model runs on the subscription, so the test is the provider, not
+    a literal id: policy chains name whichever model ``CODEX_MODELS`` allows
+    (F22), e.g. ``codex/gpt-5.5`` or an ``LLM_ROUTER_CODEX_MODELS`` choice.
+    """
+    return model.startswith("codex/") or model in _FREE_EXTERNAL_MODELS
+
 # Cheap-but-not-free models (< $0.002/1K tokens blended).
 # deepseek-v4-flash is $0.14/$0.28 per 1M — belongs in the cheap tier for
 # pressure reordering. (v4-pro, the deepseek-reasoner successor, is mid-tier
@@ -400,7 +410,7 @@ def reorder_for_pressure(
             codex_available = False
 
         def _hard_cap_priority(m: str) -> int:
-            if m in _FREE_EXTERNAL_MODELS and codex_available:
+            if is_free_external_model(m) and codex_available:
                 return 0
             if m in _CHEAP_MODELS:
                 return 1
@@ -427,7 +437,7 @@ def reorder_for_pressure(
         codex_available = False
 
     def _priority(m: str) -> int:
-        if m in _FREE_EXTERNAL_MODELS and codex_available:
+        if is_free_external_model(m) and codex_available:
             return 0   # Codex: free via OpenAI subscription
         if m in _CHEAP_MODELS:
             return 1   # Gemini Flash, Groq, DeepSeek, etc.

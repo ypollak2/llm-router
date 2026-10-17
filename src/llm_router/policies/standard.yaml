@@ -15,6 +15,12 @@ description: |
   BUDGET still names ollama/qwen3.5:latest and ollama/hermes3:8b, which are subject
   to the same drift and are filtered the same way (profiles.get_model_chain).
 
+  Codex (F22): every codex/* entry names a model the Codex CLI accepts
+  (codex_agent._load_codex_models). gpt-4o-mini and gpt-4o were listed here and
+  the CLI rejects them (HTTP 400, "Model metadata ... not found"). At load time
+  any codex/* entry not in CODEX_MODELS becomes codex/CODEX_MODELS[0], so the
+  slot honours LLM_ROUTER_CODEX_MODELS (policy._resolve_chain).
+
 # ── Behavior knobs (defaults; not overridden today) ───────────────────────────
 confidence_threshold: 4
 skip_acknowledgements: true
@@ -27,7 +33,7 @@ prefer_ollama: true
 # corresponding chains entries.
 workhorses:
   - ollama/qwen3.5:latest
-  - codex/gpt-4o
+  - codex/gpt-5.5
   - moonshot/moonshot-v1-128k
   - zhipu/glm-4
   - deepseek/deepseek-chat
@@ -51,7 +57,7 @@ chains:
     query:
       - ollama/qwen3.5:latest
       - ollama/hermes3:8b
-      - codex/gpt-4o-mini
+      - codex/gpt-5.5
       - moonshot/moonshot-v1-8k
       - minimax/MiniMax-Text-01
       - zhipu/glm-4-flash
@@ -66,7 +72,7 @@ chains:
       - openai/gpt-4o-mini
     generate:
       - ollama/hermes3:8b
-      - codex/gpt-4o-mini
+      - codex/gpt-5.5
       - moonshot/moonshot-v1-8k
       - arcee/arcee-nova
       - deepseek/deepseek-chat
@@ -75,7 +81,7 @@ chains:
       - anthropic/claude-haiku-4-5-20251001
     analyze:
       - ollama/hermes3:8b
-      - codex/gpt-4o-mini
+      - codex/gpt-5.5
       - zhipu/glm-4-flash
       - deepseek/deepseek-reasoner
       - groq/llama-3.3-70b-versatile
@@ -83,7 +89,7 @@ chains:
       - anthropic/claude-haiku-4-5-20251001
     code:
       - ollama/hermes3:8b
-      - codex/gpt-4o-mini
+      - codex/gpt-5.5
       - moonshot/moonshot-v1-8k
       - deepseek/deepseek-chat
       - groq/llama-3.3-70b-versatile
@@ -103,7 +109,7 @@ chains:
   balanced:
     query:
       - ollama/qwen3.5:latest
-      - codex/gpt-4o
+      - codex/gpt-5.5
       - moonshot/moonshot-v1-128k
       - zhipu/glm-4
       - deepseek/deepseek-chat
@@ -115,7 +121,7 @@ chains:
       - anthropic/claude-sonnet-4-6
       - openai/gpt-4o
     generate:
-      - codex/gpt-4o
+      - codex/gpt-5.5
       - arcee/arcee-nova
       - deepseek/deepseek-chat
       - openai/gpt-4o
@@ -123,14 +129,14 @@ chains:
       - anthropic/claude-sonnet-4-6
       - anthropic/claude-haiku-4-5-20251001
     analyze:
-      - codex/gpt-4o
+      - codex/gpt-5.5
       - zhipu/glm-4
       - deepseek/deepseek-reasoner
       - openai/gpt-4o
       - anthropic/claude-sonnet-4-6
       - anthropic/claude-haiku-4-5-20251001
     code:
-      - codex/gpt-4o
+      - codex/gpt-5.5
       - moonshot/moonshot-v1-128k
       - deepseek/deepseek-chat
       - openai/gpt-4o
