@@ -64,6 +64,25 @@ See :func:`_load_codex_models` for the env-var override and the tier-specific
 default rationale.
 """
 
+
+def accepted_codex_entry(model: str, codex_models: list[str] | None = None) -> str | None:
+    """Map a policy chain entry onto a Codex model the CLI accepts (F22).
+
+    A ``codex/<m>`` entry whose ``<m>`` is not in :data:`CODEX_MODELS` becomes
+    ``codex/<CODEX_MODELS[0]>`` — the ``LLM_ROUTER_CODEX_MODELS`` choice when set,
+    else the repo default. Policy files named ``codex/gpt-4o-mini`` and
+    ``codex/gpt-4o``, which the CLI rejects (HTTP 400, "Model metadata ... not
+    found"), so every routed call that reached the slot burned one failed attempt
+    before the next model answered. Returns ``None`` (drop the entry) when no Codex
+    model is configured. Non-Codex entries are returned unchanged.
+    """
+    if not model.startswith("codex/"):
+        return model
+    accepted = CODEX_MODELS if codex_models is None else codex_models
+    if model[len("codex/"):] in accepted:
+        return model
+    return f"codex/{accepted[0]}" if accepted else None
+
 # ── BLOCKING I/O MITIGATION ──────────────────────────────────────────────
 # CRITICAL: is_codex_available() is called from _build_and_filter_chain(),
 # which is async. Any synchronous filesystem I/O (os.path.isfile, os.access,

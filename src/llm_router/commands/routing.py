@@ -43,7 +43,7 @@ def _dim(s: str) -> str:
 def _run_routing() -> None:
     """Display current routing configuration and model chains."""
     from llm_router.profiles import (
-        ROUTING_TABLE, _FREE_EXTERNAL_MODELS,
+        ROUTING_TABLE, is_free_external_model,
         reorder_for_pressure
     )
     from llm_router.types import RoutingProfile, TaskType
@@ -139,7 +139,7 @@ def _run_routing() -> None:
             if reordered:
                 selected = reordered[0]
                 selected_indicator = ""
-                if selected in _FREE_EXTERNAL_MODELS:
+                if is_free_external_model(selected):
                     selected_indicator = " " + _green("✓ FREE")
                 elif "ollama" in selected:
                     selected_indicator = " " + _green("✓ LOCAL")
@@ -153,7 +153,7 @@ def _run_routing() -> None:
             print(f"    {_dim('Fallback chain:')}")
             for i, model in enumerate(reordered[:5], 1):
                 cost_indicator = ""
-                if model in _FREE_EXTERNAL_MODELS:
+                if is_free_external_model(model):
                     cost_indicator = " " + _green("FREE")
                 elif "ollama" in model:
                     cost_indicator = " " + _green("LOCAL")
