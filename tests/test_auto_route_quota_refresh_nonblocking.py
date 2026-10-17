@@ -114,6 +114,7 @@ def _load_hook(hooks: Path, monkeypatch, home: Path):
 
 
 @pytest.mark.timing
+@pytest.mark.usefixtures("allow_detached_spawn")  # F44: asserts the detached usage-refresh child starts
 def test_stale_cache_does_not_block_while_refresh_runs_in_background(sandbox):
     hooks, home, tmp = sandbox
     _write_usage(home, age_s=900)
@@ -137,6 +138,7 @@ def test_stale_cache_is_no_slower_than_fresh_cache(sandbox):
     assert stale < fresh + 2.0, f"stale {stale:.2f}s vs fresh {fresh:.2f}s"
 
 
+@pytest.mark.usefixtures("allow_detached_spawn")  # F44: asserts the detached usage-refresh child starts
 def test_child_output_never_reaches_hook_stdout_or_stderr(sandbox):
     hooks, home, tmp = sandbox
     _write_usage(home, age_s=900)
@@ -171,6 +173,7 @@ def _payload(tmp: Path) -> str:
 
 
 @pytest.mark.timing
+@pytest.mark.usefixtures("allow_detached_spawn")  # F44: asserts the detached usage-refresh child starts
 def test_concurrent_invocations_start_one_refresh(sandbox):
     """6 hooks at once, 3 rounds, each round on a fresh marker. Weak alone (the
     check-then-touch window is tiny) - the flock test below is the
@@ -210,6 +213,7 @@ def test_claim_is_serialized_by_the_flock(sandbox):
 
 
 @pytest.mark.timing
+@pytest.mark.usefixtures("allow_detached_spawn")  # F44: asserts the detached usage-refresh child starts
 def test_back_to_back_runs_do_not_respawn_within_cooldown(sandbox):
     hooks, home, tmp = sandbox
     _write_usage(home, age_s=900)
@@ -220,6 +224,7 @@ def test_back_to_back_runs_do_not_respawn_within_cooldown(sandbox):
     assert (home / "stub_started.log").read_text().splitlines() == ["started"]
 
 
+@pytest.mark.usefixtures("allow_detached_spawn")  # F44: asserts the detached usage-refresh child starts
 def test_stale_marker_does_not_wedge_future_refreshes(sandbox):
     hooks, home, tmp = sandbox
     _write_usage(home, age_s=900)
@@ -261,6 +266,7 @@ def test_missing_refresh_script_degrades_without_blocking(sandbox):
     assert r.returncode == 0 and elapsed < 3.0
 
 
+@pytest.mark.usefixtures("allow_detached_spawn")  # F44: asserts the detached usage-refresh child starts
 def test_future_dated_marker_does_not_block_refresh(sandbox):
     hooks, home, tmp = sandbox
     _write_usage(home, age_s=900)
@@ -272,6 +278,7 @@ def test_future_dated_marker_does_not_block_refresh(sandbox):
     assert _wait_for(home / "stub_started.log"), "a future-dated marker blocked the refresh"
 
 
+@pytest.mark.usefixtures("allow_detached_spawn")  # F44: asserts the detached usage-refresh child starts
 def test_spawn_is_detached_and_env_is_minimal(sandbox, monkeypatch):
     hooks, home, tmp = sandbox
     mod = _load_hook(hooks, monkeypatch, home)
