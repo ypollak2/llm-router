@@ -89,7 +89,7 @@ def sixteen(skip=None, small=None):
 # ------------------------------------------------------------------ constants and seeds
 
 def test_constants_pinned():
-    assert (do.MIN_ACTIONS_DAY, do.MIN_TURNS_DAY, do.STREAK_REQUIRED, do.BOOT_B) == (30, 10, 14, 2000)
+    assert (do.MIN_ACTIONS_DAY, do.MIN_TURNS_DAY, do.STREAK_REQUIRED, do.BOOT_B) == (30, 10, 7, 2000)
     assert do.TARGET == osh.TARGET
 
 
@@ -112,10 +112,10 @@ def test_sixteen_organic_days_streak_16(home):
 
 
 def test_missing_day_stops_streak_and_names_date(home):
-    fill(sixteen(skip=5))
+    fill(sixteen(skip=12))
     r = do.streak(now=NOW)
-    assert r["measured_streak"] == 11 and r["written_streak"] == 11
-    assert r["first_break"] == {"date": _day(5).isoformat(), "reason": "missing"}
+    assert r["measured_streak"] == 4 and r["written_streak"] == 4
+    assert r["first_break"] == {"date": _day(12).isoformat(), "reason": "missing"}
     assert r["pass"] is False and do.run_streak(end=None, now=NOW) == 1
 
 
@@ -157,14 +157,14 @@ def test_streak_ignores_partial_rows_and_files(home):
     assert do.streak(end=today, now=NOW)["end"] == LAST.isoformat()
 
 
-def test_streak_fourteen_boundary(home):
-    pairs = [(_day(i), day_rows(_day(i))) for i in range(3, 17)]     # exactly 14 days
+def test_streak_seven_boundary(home):
+    pairs = [(_day(i), day_rows(_day(i))) for i in range(10, 17)]    # exactly 7 days (D-210)
     fill(pairs)
-    assert do.streak(now=NOW)["measured_streak"] == 14 and do.streak(now=NOW)["pass"] is True
-    for d, _ in pairs[:1]:
-        do.day_file(d.isoformat()).unlink()
     r = do.streak(now=NOW)
-    assert r["measured_streak"] == 13 and r["pass"] is False
+    assert r["measured_streak"] == 7 and r["required"] == 7 and r["pass"] is True
+    do.day_file(pairs[0][0].isoformat()).unlink()
+    r = do.streak(now=NOW)
+    assert r["measured_streak"] == 6 and r["pass"] is False and do.run_streak(end=None, now=NOW) == 1
 
 
 def test_streak_invalid_schema_breaks(home):
@@ -185,7 +185,8 @@ def test_synthetic_only_day(home):
     assert p["synthetic"]["action"]["n"] == 36 and p["synthetic"]["action"]["measured"]
     assert p["other"]["action"]["n"] == 0
     do.write_day(row)
-    assert do.streak(now=NOW)["measured_streak"] == 0       # never counts toward §7.1 c3
+    assert p["release_clock"]["action"]["measured"] is True    # D-210: synthetic counts in release_clock
+    assert do.streak(now=NOW)["measured_streak"] == 1 and do.streak(now=NOW)["organic_streak"] == 0
 
 
 def test_synthetic_never_in_organic_counts(home):
@@ -382,6 +383,112 @@ def test_day_local_by_cause_window_half_open(tmp_path):
     con.close()
     s, e = do.day_bounds(LAST)
     assert sum(lv.local_by_cause(lv.Bounds("day", "d", s, e - 1), db_path=p).values()) == 2
+
+
+# ------------------------------------------------------------------ release_clock (D-210)
+
+def _mix(d, org_n, syn_n, other_n=0):
+    rows = day_rows(d, n=org_n, sessions=10) + day_rows(d, prefix="syn", n=syn_n, sessions=10)
+    if other_n:
+        rows += day_rows(d, prefix="res", n=other_n, sessions=10)
+    return rows
+
+
+def test_release_clock_measured_when_organic_alone_is_not(home):
+    d = _day(16)
+    row = do.compute_day(d, inputs(_mix(d, 20, 15)), now=NOW, manifest_ids={f"syn-{d}-{j}" for j in range(10)},
+                         code_rev="t")
+    p = row["populations"]
+    assert p["organic"]["action"] == {"measured": False, "reason": "unmeasured", "n": 20, "min_n": 30}
+    rc = p["release_clock"]
+    assert rc["action"]["measured"] is True and rc["action"]["n"] == 35 and rc["turn"]["measured"] is True
+    assert rc["counts"]["action"]["n"] == 35 and "cluster95" in rc["action"]
+    assert p["synthetic"]["counts"]["action"]["n"] == 15            # blocks unchanged
+    do.write_day(row)
+    r = do.streak(now=NOW)
+    assert (r["measured_streak"], r["organic_streak"]) == (1, 0)
+    assert r["organic_first_break"]["reason"] == "unmeasured_action"
+
+
+def test_release_clock_streak_seven_pass_six_not(home):
+    ids = set()
+    pairs = []
+    for i in range(10, 17):
+        d = _day(i)
+        ids |= {f"syn-{d}-{j}" for j in range(10)}
+        pairs.append((d, _mix(d, 20, 15)))
+    fill(pairs, manifest_ids=ids)
+    r = do.streak(now=NOW)
+    assert (r["measured_streak"], r["pass"], r["organic_streak"]) == (7, True, 0)
+    assert do.run_streak(end=None, now=NOW) == 0
+    do.day_file(_day(10).isoformat()).unlink()
+    r = do.streak(now=NOW)
+    assert (r["measured_streak"], r["pass"]) == (6, False)
+
+
+def test_other_never_counts_in_release_clock(home):
+    d = _day(16)
+    row = do.compute_day(d, inputs(_mix(d, 20, 5, other_n=40)), now=NOW, manifest_ids={f"syn-{d}-0"},
+                         code_rev="t")
+    p = row["populations"]
+    assert p["other"]["action"]["n"] == 40 + 4            # 40 unlisted research + 4 unlisted syn-* rows
+    n_org, n_syn = p["organic"]["counts"]["action"]["n"], p["synthetic"]["counts"]["action"]["n"]
+    assert (n_org, n_syn) == (20, 1) and p["release_clock"]["counts"]["action"]["n"] == 21
+    assert p["release_clock"]["action"]["measured"] is False
+
+
+def test_no_manifest_release_clock_is_organic(home):
+    d = _day(16)
+    row = do.compute_day(d, inputs(_mix(d, 36, 36)), now=NOW, code_rev="t")
+    p = row["populations"]
+    assert p["release_clock"]["counts"] == p["organic"]["counts"]
+    assert p["release_clock"]["action"] == p["organic"]["action"]
+    assert "organic only" in p["release_clock"]["note"]
+    assert p["other"]["action"]["n"] == 36
+
+
+def test_organic_is_reported_beside_release_clock(home, capsys):
+    d = _day(16)
+    inp = inputs(_mix(d, 20, 15))
+    assert do.run_daily(date=str(d), backfill=0, force=False, partial=False, manifest=None, inputs=inp,
+                        now=NOW) == 0
+    out = capsys.readouterr().out
+    assert "organic action unmeasured n=" in out and "release_clock action" in out
+    do.run_streak(end=None, now=NOW)
+    assert "organic (reported separately) measured_streak" in capsys.readouterr().out
+
+
+def test_pre_d210_row_without_release_clock_is_invalid(home):
+    fill([(_day(16), day_rows(_day(16)))])
+    p = do.day_file(_day(16).isoformat())
+    row = json.loads(p.read_text())
+    del row["populations"]["release_clock"]
+    row["schema"] = "daily-offload/1"
+    p.write_text(json.dumps(row))
+    assert do.SCHEMA == "daily-offload/2"
+    assert do.streak(now=NOW)["first_break"]["reason"] == "old_schema_rerun_force"
+
+
+def test_unknown_schema_is_invalid_schema(home):
+    fill([(_day(16), day_rows(_day(16)))])
+    p = do.day_file(_day(16).isoformat())
+    row = json.loads(p.read_text())
+    row["schema"] = "daily-offload/9"
+    p.write_text(json.dumps(row))
+    assert do.streak(now=NOW)["first_break"]["reason"] == "invalid_schema"
+
+
+def test_manifest_listed_organic_session_counts_once(home):
+    d = _day(16)
+    rows = day_rows(d, n=20, sessions=10) + day_rows(d, prefix="syn", n=15, sessions=10)
+    ids = {f"syn-{d}-{j}" for j in range(10)} | {f"org-{d}-{j}" for j in range(10)}   # organic ids also listed
+    p = do.compute_day(d, inputs(rows), now=NOW, manifest_ids=ids, code_rev="t")["populations"]
+    assert p["organic"]["counts"]["action"]["n"] == 20 and p["synthetic"]["counts"]["action"]["n"] == 15
+    assert p["release_clock"]["counts"]["action"]["n"] == 35
+    assert p["release_clock"]["counts"]["action"]["n"] == (p["organic"]["counts"]["action"]["n"]
+                                                          + p["synthetic"]["counts"]["action"]["n"])
+    assert p["release_clock"]["counts"]["turn"]["n"] == (p["organic"]["counts"]["turn"]["n"]
+                                                        + p["synthetic"]["counts"]["turn"]["n"])
 
 
 # ------------------------------------------------------------------ CLI
