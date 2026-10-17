@@ -10,7 +10,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import textwrap
 
 import pytest
 
@@ -26,6 +25,10 @@ _SNIPPETS = {
     ),
     "hook_get_mode": (
         "from llm_router import session_store; print(session_store.get_mode())"
+    ),
+    "discovery_keys": (
+        "from pathlib import Path; from llm_router.discovery import keys; "
+        "print(len(keys._dotenv_values(Path('.env'))))"
     ),
     "could_be_set_then_real": (
         "from llm_router import config_lite; "
