@@ -142,6 +142,7 @@ client tools are never routed.
 | `--tier-policy` | `LLM_ROUTER_PROXY_TIER_POLICY` | the bundled `proxy/claude_tiers.yaml` |
 | `--backend-fail-n` | `LLM_ROUTER_PROXY_BACKEND_FAIL_N` | `3` (consecutive empty or sub-second invalid replies before local serving pauses; a crash signature pauses at once; `0` disables) |
 | `--backend-cooldown-s` | `LLM_ROUTER_PROXY_BACKEND_COOLDOWN_S` | `60` (pause before a one-token probe checks the backend) |
+| `--local-gate` | `LLM_ROUTER_PROXY_LOCAL_GATE` | `off`. `on`: a continuation is served locally only on a lane that `local_eligibility.json` marks eligible (section below). Needs `--steps continuation`; not with `--serve local-agent`. |
 
 The model, the trims (`proxy/backends.py: TRIMS`) and the backends
 (`BACKENDS`) are plug points. A measured speed lever can be added as a named trim
@@ -162,6 +163,37 @@ That run used a dedicated tuned server. The proxy's defaults follow it:
 - **Warm.** `keep_alive: 600` (seconds; `--keep-alive -1` pins forever) is sent on every call, plus one warm-up call at
   start. A cold load took 8-110 s in that spike.
 - **Hedge.** 8 s to the first token.
+
+### Local gate (`--local-gate on`, default off)
+
+Without it the proxy picks a local model from the routing policy alone and never reads
+`local_eligibility.json` (found 2026-10-17: the live proxy forwarded every step,
+`routing_off`). With the gate on, a step is served locally only when its lane is qualified.
+Gate off is byte-identical to before: no file read, no ledger key.
+
+- **Which steps.** Only `continuation`. The lane comes from the class of the tools the step
+  answers: `technical_op` is `tech_op/simple`; after `web` tools, policy task type
+  query/research/analyze is `qa/<tier>` and `code` is `code/<tier>` (tier = the policy's
+  `simple` or `moderate`). Edit, exec, agent and other tools stay on Claude. An edit-shaped
+  local reply is never served.
+- **Which model.** The highest-`n` entry of the lane with `eligible: true`, `verdict:
+  "eligible"` and `grade: "eligible"` in `{model: {task_type: {tier: lane}}}`, as
+  `ollama/<name>`. `--model` does not make an ineligible lane serve.
+- **Reason codes** (`local_gate.reason` in the ledger row, beside `lane` and `model`; the first
+  failing check forwards): `not_continuation`, `lane_unmapped`, `eligibility_unreadable`
+  (missing, empty, unreadable or malformed file; never fails open), `ineligible_lane`,
+  `breaker_open` (quality_breaker `techop_local/tech_op`, or `proxy_local/<lane>`; an error
+  reading the breaker also forwards; half-open lets one probe per step budget through),
+  `promote_gated` (P0.15), `capability_excluded` (F14), `no_local_model`, `backend_unhealthy`,
+  `pack_over_window`, `gate_error`, and `served_local`. A local failure after the gate passed
+  falls back to Claude as before and the row says `local_failed`.
+- **Breaker feed.** A served step whose next two tool calls re-issue one of its own tool calls
+  (same tool and file path, pattern or command) is one failure unit; two calls without that are
+  one success. Units are in `proxy_local_units.jsonl` in the state directory.
+- **Turning it on** (owner step, after a lane is eligible): `proxy --port 8797 --steps
+  continuation --local-gate on --tiers conversation --tier-policy ~/.llm-router/claude_tiers.yaml`
+  or `LLM_ROUTER_PROXY_STEPS=continuation LLM_ROUTER_PROXY_LOCAL_GATE=on`, then restart the
+  proxy service. Keep the Opus pin and do not combine with `--serve local-agent`.
 
 ### Optional: a dedicated tuned Ollama server (not auto-configured)
 
