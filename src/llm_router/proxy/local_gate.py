@@ -67,7 +67,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from llm_router import paths
+from llm_router import failopen, paths
 
 ENV_VAR = "LLM_ROUTER_PROXY_LOCAL_GATE"
 ELIGIBILITY_NAME = "local_eligibility.json"
@@ -235,8 +235,8 @@ def _append_unit(unit: dict, path: Path | None = None) -> None:
             tmp = target.with_name(target.name + f".{os.getpid()}.tmp")
             tmp.write_text("\n".join(lines[-_UNITS_KEEP:]) + "\n", encoding="utf-8")
             os.replace(tmp, target)
-    except OSError:
-        pass
+    except OSError as exc:
+        failopen.record("PROXY-LOCAL-GATE-UNITS-TRIM", exc)
 
 
 def _calls_in(content: Any) -> list[tuple[str, str]]:
@@ -394,16 +394,16 @@ class LaneGate:
     def observe(self, body: dict, session_id: str | None) -> None:
         try:
             self.feed.observe(body, session_id)
-        except Exception:  # noqa: BLE001 - the feed never costs a request
-            pass
+        except Exception as exc:  # noqa: BLE001 - the feed never costs a request
+            failopen.record("PROXY-LOCAL-GATE-OBSERVE", exc)
 
     def note_served(self, session_id: str | None, decision: LaneDecision, message: dict,
                     session_kind: str | None = None) -> None:
         try:
             if decision.lane and decision.model:
                 self.feed.note_served(session_id, decision.lane, decision.model, message, session_kind)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            failopen.record("PROXY-LOCAL-GATE-NOTE-SERVED", exc)
 
     async def decide(self, body: dict, row: dict, choice: dict | None, needs: Any = None) -> LaneDecision:
         try:
