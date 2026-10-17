@@ -30,6 +30,7 @@ SIX = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
 
 
 ORIG_RESERVE = h.judge_reserve
+REAL_RUN = h.subprocess.run  # captured before the autouse fixture forbids subprocess
 
 
 @pytest.fixture(autouse=True)
@@ -245,6 +246,9 @@ def test_dry_run_prints_counts_only_and_status_no_freeze(factory, capsys):
     sel = out["sets"]["tech_op"]
     assert sel["n"] == 40 and "ids" not in sel and sel["freeze"]["ready"] is False
     assert out["builder_counts"]["excluded"]["subagent_step"] == 3
+    for key in ("stratum_counts", "selected_strata", "org_n", "rowstamp_org", "sessions",
+                "equal_rate_threshold_k"):  # H12: strata, org both ways, sessions, threshold
+        assert key in sel
     assert "ask" not in json.dumps(out) and "ID:" not in json.dumps(out)
     assert call(cfg, "status") == 0
     st = json.loads(capsys.readouterr().out)
@@ -730,3 +734,48 @@ def test_real_prereg_constants_block_matches_when_present():
     block = base.parse_block(path.read_text(), h.BLOCK)
     assert block.keys() == h.CONSTANTS_T.keys() | set(h.FILL_KEYS_T)
     assert all(block[k] == v for k, v in h.CONSTANTS_T.items())
+
+
+def test_repeat_plant_is_placed_even_when_the_previous_call_would_fail_validity(factory):
+    pool = [make_item(i) for i in range(130)]
+    for row in pool:  # the previous call names a tool outside the item's list: invalid reply
+        row["messages"][1]["content"] = '[tool_use Gone] {"x": 1}'
+    cfg, c, _ = factory("badprev", items=pool)
+    answers = {(i["id"], "sonnet"): {"ok": True, "text": reply(i["id"])} for i in pool}
+    plants, stats = h.plant_candidates(pool, answers, c)
+    assert sum("__repeat__" in v for v in plants.values()) == 6
+    assert stats["plants_skipped"]["repeat"] == 0
+
+
+def test_h13_repo_sha_must_hold_the_gate_and_record_competence(tmp_path, monkeypatch):
+    monkeypatch.setattr(h.subprocess, "run", REAL_RUN)
+    repo = tmp_path / "r"
+    (repo / "src/llm_router/proxy").mkdir(parents=True)
+    (repo / "src/llm_router/resolver").mkdir(parents=True)
+
+    def git(*a):
+        return REAL_RUN(["git", "-c", "user.email=t@t", "-c", "user.name=t", *a], cwd=repo,
+                        capture_output=True, text=True, check=True).stdout.strip()
+
+    git("init", "-q")
+    (repo / "x").write_text("x")
+    git("add", "-A"), git("commit", "-qm", "base")
+    bare = git("rev-parse", "HEAD")
+    gate = repo / "src/llm_router/proxy/local_gate.py"
+    store = repo / "src/llm_router/resolver/eligibility_store.py"
+    gate.write_text("# gate\n"), store.write_text("def other(): pass\n")
+    git("add", "-A"), git("commit", "-qm", "no record_competence")
+    half = git("rev-parse", "HEAD")
+    store.write_text("def record_competence(): pass\n")
+    git("add", "-A"), git("commit", "-qm", "both")
+    full = git("rev-parse", "HEAD")
+    for sha in (bare, half):
+        with pytest.raises(h.Refuse, match="H13"):
+            h.h13_check(repo, sha)
+    h.h13_check(repo, full)
+    h.h13_check(h.REPO, git_head())  # this worktree itself carries both
+
+
+def git_head():
+    return REAL_RUN(["git", "rev-parse", "HEAD"], cwd=h.REPO, capture_output=True, text=True,
+                    check=True).stdout.strip()

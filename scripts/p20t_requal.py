@@ -629,7 +629,7 @@ def plant_candidates(items: list[dict], answers: dict, c: dict) -> tuple[dict, d
     for ident in order[swapped + degraded:swapped + degraded + repeat]:  # REPEAT-PLANT
         calls = prior_calls(by_id[ident])
         text = json.dumps({"tool": calls[-1][0], "input": calls[-1][1]}) if calls else ""
-        if text and valid_reply(text, by_id[ident]):
+        if text:  # F1: a plant bypasses the validity and redundant pre-checks
             plants.setdefault(ident, {})["__repeat__"] = text
             skipped["repeat_plant_precheck_redundant"] += is_redundant(text, by_id[ident])
         else:
@@ -1016,10 +1016,26 @@ def status(cfg: CfgT) -> dict:
     }
 
 
+H13_PATHS = ("src/llm_router/proxy/local_gate.py", "src/llm_router/resolver/eligibility_store.py")
+
+
+def h13_check(repo: Path, sha: str) -> None:
+    """H13/N12: REPO_SHA holds the proxy local gate and #523 (record_competence)."""
+    def git(*args: str):
+        return subprocess.run(["git", *args], cwd=repo, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=60)
+
+    store = git("show", f"{sha}:{H13_PATHS[1]}")
+    if (git("cat-file", "-e", f"{sha}:{H13_PATHS[0]}").returncode != 0
+            or store.returncode != 0 or "def record_competence" not in store.stdout):
+        raise Refuse("refusing: REPO_SHA lacks the proxy local gate or record_competence (H13)")
+
+
 def run_gate(cfg: CfgT, constants: dict) -> None:
     if cfg.gate is not None:
         cfg.gate(constants)
     else:
+        h13_check(REPO, constants["REPO_SHA"])
         base.code_gate(REPO, constants["REPO_SHA"], llm_router.__file__)
 
 

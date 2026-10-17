@@ -36,7 +36,11 @@ def default_fits(messages, window):
     try:
         from llm_router import capability_filter  # present once the gate/P2.4 base is in
 
-        needs = capability_filter.needs_from_messages(messages)
+        # the gate's own estimate (needs_from_anthropic_body: system + newest user turn + tool
+        # schemas). A rebuilt item holds the newest user turn only; the system prompt and the
+        # tool schemas are not in a transcript, so this under-counts them (named in the prereg).
+        last = next((m for m in reversed(messages) if m["role"] == "user"), None)
+        needs = capability_filter.needs_from_anthropic_body({"messages": [last] if last else []})
         return not (needs.tokens and needs.tokens > capability_filter.WINDOW_MARGIN * window)
     except ImportError:
         return irreducible_tokens(messages) <= WINDOW_MARGIN * window
