@@ -285,7 +285,11 @@ async def llm_route(
         max_tokens: Maximum output tokens.
         context: Optional conversation context to help the model understand the broader task.
     """
-    # Step 0: Sanitize prompt to prevent injection attacks
+    # Step 0: Sanitize prompt to prevent injection attacks. The model receives the wrapped
+    # prompt; the classifier sees the caller's raw prompt (D-168 (ii)): the ~370-char banner
+    # moved prompts near the 599-char simple band into another class than the SDK and every
+    # other door give the same text.
+    raw_prompt = prompt
     prompt = wrap_prompt_with_boundaries(prompt, log_suspected=True)
 
     # Step 0.5: Validate routing parameters
@@ -326,7 +330,7 @@ async def llm_route(
             # Notify user that classification is starting (prevents silent hangs)
             # Use animated spinner in interactive contexts, text feedback in MCP
             await ctx.info("🔍 Analyzing task complexity...")
-            classification = await classify_for_routing(prompt, timeout_seconds=10.0)
+            classification = await classify_for_routing(raw_prompt, timeout_seconds=10.0)
             task_type_label = classification.inferred_task_type.value if classification.inferred_task_type else "generic"
             await ctx.info(f"✓ Classified: {classification.complexity.value}/{task_type_label} ({classification.confidence:.0%} confidence)")
         except Exception as e:
