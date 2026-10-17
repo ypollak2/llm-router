@@ -275,6 +275,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_MAX_AGENT_DEPTH": ("llm_router", "hooks/agent-route.py", 1),
     "LLM_ROUTER_MAX_CONCURRENT_AGENTS": ("llm_router", "hooks/agent-route.py", 1),
     "LLM_ROUTER_METRICS_INCLUDE_PRESSURE": ("llm_router", "admin_api.py", 1),
+    "LLM_ROUTER_MCP_DEADLINE_S": ("llm_router", "mcp_door.py", 1),
     "LLM_ROUTER_MINI_SUMMARY_EVERY": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_OIDC_AUDIENCE": ("llm_router", "enterprise/oidc.py", 1),
     "LLM_ROUTER_OIDC_DEFAULT_ORG": ("llm_router", "server.py", 2),

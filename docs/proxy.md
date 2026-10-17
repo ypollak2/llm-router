@@ -448,11 +448,23 @@ only takes effect after a cold gap or a complexity change.
 ### Haiku guard (`proxy/haiku_guard.py`): `haiku_rewrite` turns itself off
 
 While the live policy has `haiku_rewrite: true`, the proxy runs a guard at
-start and then every hour. A trip writes `~/.llm-router/tier_overrides.json`
-(`{"haiku_rewrite": false, "reason", "ts"}`) and turns the running policy's
-rewrite off; the YAML is never edited. `ClaudeTierPolicy.load` reads the file
-after the YAML, so the override also holds across restarts. The override can
-only turn the rewrite off. To undo a trip, delete the file and restart the
+start and then every hour. A trip opens the `proxy_haiku` class of the quality
+breaker (`~/.llm-router/quality_breaker.json`) and turns the running policy's
+rewrite off; the YAML is never edited. `ClaudeTierPolicy.load` applies the breaker,
+so the demotion also holds across restarts. After the breaker's cooldown (24 h) the
+rewrite is switched on again as a half-open probe: 5 Haiku-served turns after that
+moment with a redo rate below 50% close the class, otherwise it reopens for another
+24 h. The probe counts only turns the proxy itself moved to Haiku (the rewrite, or a
+treatment-arm turn), not a client that asked for Haiku. Its bar (the breaker's generic
+redo rate < 50%) is deliberately looser than the 15% trip bar: it decides whether the
+lever is plainly broken, and a lever that is marginal trips again on the triggers. A probe
+that cannot be read keeps an open class demoted; only an unreadable state file reads
+closed. The guard loop also runs when the breaker, not the YAML, has the rewrite off, so
+recovery works after a restart during the cooldown. After a recovery the triggers look only at newer evidence. The owner override
+`~/.llm-router/tier_overrides.json` (`{"haiku_rewrite": false, "reason", "ts"}`) is
+written by the owner only, beats the breaker, and can only turn the rewrite off;
+the guard and the breaker never write or delete it, so no probe runs while it
+exists. To lift it, delete the file and restart the
 proxy. Triggers (one is enough; a trigger below its minimum n never trips):
 
 | Trigger | Trips when |
@@ -743,8 +755,17 @@ ledger row with `tier_reason` or `reason`, or served), caps each session at 40, 
 every call that did not pass to be explained, and prints Wilson 95% bounds. It reads message
 ids and timestamps only. `--write` leaves `coverage_check.json` for `llm-router kpi`. This
 is decision-point coverage, not routing coverage: a forward with a recorded reason passes, so it
-prints the routed share beside it and labels a window of (nearly) all `routing_off` / `advise`
-rows "not evidence for R-RTE-2". `--switch-file` (the owner's recorded switch time) is required
+prints the routed share beside it. A passed call is `routed` only if it was `served` or the tier
+policy switched the model (`tier_switch` True). A tier decision that did not switch (first_call,
+side_call, sticky, pinned, unknown_model, policy-kept) is `decided_kept`, even when the row also
+says `reason=routing_off` (the live config: tiers on, steps off). Other buckets: `advise`, `off`
+(routing_off / tiers_off with no tier decision), `other_reason`. JSON `routed_share` carries
+`routed`, `decided_kept`, `advise`, `off`, `other_reason`, `routed_share`, `decided_kept_share`,
+`off_share`, `advise_share`. The flag "NOT EVIDENCE FOR R-RTE-2" (`not_evidence_for_RRTE2`)
+fires when off + advise + decided_kept is at least 90% of passed calls, i.e. real switches are at
+most 10%. It covers only that share: it does not judge whether the switches were right. The
+header also prints `failopen_explained`; `fail_open` is a global explainer, so any no-row call
+within +-120 s of a `proxy_down` row counts as explained whatever its session. `--switch-file` (the owner's recorded switch time) is required
 for an informative run; without it the verdict is NOT INFORMATIVE (`switch_unknown`).
 
 ### Escalation to Opus (`proxy/escalation.py`)

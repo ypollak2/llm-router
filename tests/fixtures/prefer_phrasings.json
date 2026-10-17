@@ -1,0 +1,339 @@
+{
+ "_source": "P2.13 brief s.d, fixed before the grammar was written (anti-overfit corpus, n=20 + 4 refused)",
+ "phrasings": [
+  {
+   "id": "EN-1",
+   "text": "codex before claude",
+   "rules": [
+    {
+     "kind": "order",
+     "first": {
+      "providers": [
+       "codex"
+      ],
+      "model": null
+     },
+     "then": {
+      "providers": [
+       "anthropic"
+      ],
+      "model": null
+     }
+    }
+   ]
+  },
+  {
+   "id": "EN-2",
+   "text": "ollama before codex before claude",
+   "rules": [
+    {
+     "kind": "order",
+     "first": {
+      "providers": [
+       "ollama"
+      ],
+      "model": null
+     },
+     "then": {
+      "providers": [
+       "codex"
+      ],
+      "model": null
+     }
+    },
+    {
+     "kind": "order",
+     "first": {
+      "providers": [
+       "codex"
+      ],
+      "model": null
+     },
+     "then": {
+      "providers": [
+       "anthropic"
+      ],
+      "model": null
+     }
+    }
+   ]
+  },
+  {
+   "id": "EN-3",
+   "text": "prefer local over claude",
+   "rules": [
+    {
+     "kind": "order",
+     "first": {
+      "providers": [
+       "ollama"
+      ],
+      "model": null
+     },
+     "then": {
+      "providers": [
+       "anthropic"
+      ],
+      "model": null
+     }
+    }
+   ]
+  },
+  {
+   "id": "EN-4",
+   "text": "never claude opus",
+   "rules": [
+    {
+     "kind": "ban",
+     "target": {
+      "providers": [
+       "anthropic"
+      ],
+      "model": "claude-opus*"
+     }
+    }
+   ]
+  },
+  {
+   "id": "EN-5",
+   "text": "no gemini",
+   "rules": [
+    {
+     "kind": "ban",
+     "target": {
+      "providers": [
+       "gemini",
+       "gemini_cli"
+      ],
+      "model": null
+     }
+    }
+   ]
+  },
+  {
+   "id": "EN-6",
+   "text": "no openai",
+   "rules": [
+    {
+     "kind": "ban",
+     "target": {
+      "providers": [
+       "openai"
+      ],
+      "model": null
+     }
+    }
+   ]
+  },
+  {
+   "id": "EN-7",
+   "text": "no paid API",
+   "rules": [
+    {
+     "kind": "no_paid_api"
+    }
+   ]
+  },
+  {
+   "id": "EN-8",
+   "text": "cap claude 80%",
+   "rules": [
+    {
+     "kind": "cap",
+     "target": {
+      "providers": [
+       "anthropic"
+      ],
+      "model": null
+     },
+     "unit": "pct",
+     "n": 80
+    }
+   ]
+  },
+  {
+   "id": "EN-9",
+   "text": "cap codex 20/day",
+   "rules": [
+    {
+     "kind": "cap",
+     "target": {
+      "providers": [
+       "codex"
+      ],
+      "model": null
+     },
+     "unit": "day",
+     "n": 20
+    }
+   ]
+  },
+  {
+   "id": "EN-10",
+   "text": "only local for code",
+   "rules": [
+    {
+     "kind": "local_only",
+     "task": "code"
+    }
+   ]
+  },
+  {
+   "id": "EN-11",
+   "text": "only local for questions",
+   "rules": [
+    {
+     "kind": "local_only",
+     "task": "query"
+    }
+   ]
+  },
+  {
+   "id": "EN-12",
+   "text": "don't use gemini cli",
+   "rules": [
+    {
+     "kind": "ban",
+     "target": {
+      "providers": [
+       "gemini_cli"
+      ],
+      "model": null
+     }
+    }
+   ]
+  },
+  {
+   "id": "HE-13",
+   "text": "codex לפני claude",
+   "rules": [
+    {
+     "kind": "order",
+     "first": {
+      "providers": [
+       "codex"
+      ],
+      "model": null
+     },
+     "then": {
+      "providers": [
+       "anthropic"
+      ],
+      "model": null
+     }
+    }
+   ]
+  },
+  {
+   "id": "HE-14",
+   "text": "מקומי לפני codex",
+   "rules": [
+    {
+     "kind": "order",
+     "first": {
+      "providers": [
+       "ollama"
+      ],
+      "model": null
+     },
+     "then": {
+      "providers": [
+       "codex"
+      ],
+      "model": null
+     }
+    }
+   ]
+  },
+  {
+   "id": "HE-15",
+   "text": "אף פעם לא opus",
+   "rules": [
+    {
+     "kind": "ban",
+     "target": {
+      "providers": [
+       "anthropic"
+      ],
+      "model": "claude-opus*"
+     }
+    }
+   ]
+  },
+  {
+   "id": "HE-16",
+   "text": "בלי API בתשלום",
+   "rules": [
+    {
+     "kind": "no_paid_api"
+    }
+   ]
+  },
+  {
+   "id": "HE-17",
+   "text": "הגבל את claude ל-80%",
+   "rules": [
+    {
+     "kind": "cap",
+     "target": {
+      "providers": [
+       "anthropic"
+      ],
+      "model": null
+     },
+     "unit": "pct",
+     "n": 80
+    }
+   ]
+  },
+  {
+   "id": "HE-18",
+   "text": "הגבל את codex ל-20 ביום",
+   "rules": [
+    {
+     "kind": "cap",
+     "target": {
+      "providers": [
+       "codex"
+      ],
+      "model": null
+     },
+     "unit": "day",
+     "n": 20
+    }
+   ]
+  },
+  {
+   "id": "HE-19",
+   "text": "רק מקומי לקוד",
+   "rules": [
+    {
+     "kind": "local_only",
+     "task": "code"
+    }
+   ]
+  },
+  {
+   "id": "HE-20",
+   "text": "לא להשתמש ב-gemini",
+   "rules": [
+    {
+     "kind": "ban",
+     "target": {
+      "providers": [
+       "gemini",
+       "gemini_cli"
+      ],
+      "model": null
+     }
+    }
+   ]
+  }
+ ],
+ "refused": [
+  "make it faster",
+  "claude before claude",
+  "cap claude 150%",
+  "כמה שיותר מהר"
+ ]
+}

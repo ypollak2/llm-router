@@ -411,7 +411,8 @@ def __getattr__(name: str):
     from mcp.server.mcpserver import MCPServer
 
     class IdentityMCPServer(MCPServer):
-        """``MCPServer`` that binds the caller's ``tool_use`` id around each tool call."""
+        """``MCPServer`` that binds the caller's ``tool_use`` id around each tool call and
+        runs it through ``mcp_door.run_door`` (readable errors, routed-call deadline)."""
 
         async def call_tool(self, name, arguments, context=None):  # type: ignore[override]
             token = bind(tool_use_id_from_context(context))
@@ -420,7 +421,11 @@ def __getattr__(name: str):
             try:
                 # P1.10: every routed call of this tool call shares one task id.
                 with scope(call_session_id()):
-                    return await super().call_tool(name, arguments, context)
+                    # D-141: one choke point for every tool — a readable error, not the bare
+                    # "Error executing tool <name>", and the routed doors' overall deadline.
+                    from llm_router.mcp_door import run_door
+
+                    return await run_door(name, super().call_tool(name, arguments, context))
             finally:
                 _CLIENT_IS_CLAUDE_CODE.reset(cc)
                 _IN_MCP_CALL.reset(flag)

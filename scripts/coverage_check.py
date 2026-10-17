@@ -296,40 +296,47 @@ OFF_SHARE_FLAG = 0.90
 
 
 def route_kind(row: dict) -> str:
-    """How a PASSING ledger row passed: ``routed`` (served locally, or the tier policy decided in
-    route mode), ``advise`` (the proxy only proposed), ``off`` (routing_off / tiers_off with no
-    tier decision) or ``other_reason`` (any other recorded reason, e.g. not_eligible)."""
-    if row.get("decision") == "served":
+    """How a PASSING ledger row passed. ``routed`` = a real switch: served locally, or the tier
+    policy switched the model (``tier_switch`` True). ``decided_kept`` = a tier decision that did
+    not switch (first_call, side_call, sticky, pinned, unknown_model, policy-kept ...; any
+    non-advise ``tier_reason`` with ``tier_switch`` False/absent), whatever ``reason`` also says.
+    ``advise`` = the proxy only proposed. ``off`` = routing_off / tiers_off with no tier decision.
+    ``other_reason`` = any other recorded reason (e.g. not_eligible)."""
+    if row.get("decision") == "served" or row.get("tier_switch") is True:
         return "routed"
     if row.get("tier_reason") == "advise" or row.get("authority") == "advise":
         return "advise"
     if _set(row.get("tier_reason")):
-        return "routed"
+        return "decided_kept"
     if row.get("reason") in NOT_ROUTED_REASONS:
         return "off"
     return "other_reason"
 
 
 def routed_share(calls: list[dict]) -> dict:
-    """Beside coverage (prereg C2): of the PASSED calls, how many a decision actually routed.
-    Coverage counts a recorded reason as a decision point; a proxy that never routes but always
-    logs ``routing_off`` would score 100%, so a window of (nearly) all ``off`` / ``advise`` rows is
-    flagged as no evidence for R-RTE-2 (the router executes by default)."""
-    kinds = {"routed": 0, "advise": 0, "off": 0, "other_reason": 0}
+    """Beside coverage (prereg C2): of the PASSED calls, how many were truly routed (served, or
+    the tier policy switched the model). Coverage counts a recorded reason as a decision point; a
+    proxy that never routes but always logs a reason would score 100%. The flag
+    ``not_evidence_for_RRTE2`` fires when off + advise + decided_kept is >= 90% of passed: then
+    "routing works" is unsupported because at most 10% of calls were real switches. It covers
+    ONLY that share; it says nothing about whether the switches were right or the rest correct."""
+    kinds = {"routed": 0, "decided_kept": 0, "advise": 0, "off": 0, "other_reason": 0}
     for c in calls:
         if c["class"] == "passed":
             kinds[c["route_kind"]] += 1
     n = sum(kinds.values())
     share = lambda k: round(k / n, 4) if n else None  # noqa: E731
     off_share, advise_share = share(kinds["off"]), share(kinds["advise"])
+    kept_share = share(kinds["decided_kept"])
+    unrouted = kinds["off"] + kinds["advise"] + kinds["decided_kept"]
     reasons = []
-    if off_share is not None and off_share >= OFF_SHARE_FLAG:
-        reasons.append(f"routing_off/tiers_off is {_pct(off_share)} of passed calls")
-    if advise_share is not None and advise_share >= OFF_SHARE_FLAG:
-        reasons.append(f"advise is {_pct(advise_share)} of passed calls")
+    if n and unrouted * 100 >= round(OFF_SHARE_FLAG * 100) * n:  # integer test, no float edge
+        reasons.append(f"off + advise + decided_kept is {_pct(unrouted / n)} of passed calls "
+                       f"(off {kinds['off']}, advise {kinds['advise']}, decided_kept {kinds['decided_kept']}; "
+                       f"real switches {_pct(share(kinds['routed']))})")
     return {"passed": n, **kinds, "routed_share": share(kinds["routed"]), "off_share": off_share,
-            "advise_share": advise_share, "not_evidence_for_RRTE2": bool(reasons),
-            "not_evidence_reason": "; ".join(reasons) or None}
+            "advise_share": advise_share, "decided_kept_share": kept_share,
+            "not_evidence_for_RRTE2": bool(reasons), "not_evidence_reason": "; ".join(reasons) or None}
 
 
 def _failopen_times(rows: list[dict]) -> list[float]:
@@ -588,8 +595,10 @@ def render(res: dict) -> str:
         f"coverage: {_pct(res['coverage'])} ({res['passed']}/{res['n']}, Wilson95 "
         f"{_pct(ci[0]) if ci else 'n/a'}-{_pct(ci[1]) if ci else 'n/a'})  cap {res['cap']}/session, min n {res['min_n']}",
         f"routed share: {_pct(res['routed_share']['routed_share'])} of {res['routed_share']['passed']} passed "
-        f"(routed {res['routed_share']['routed']}, advise {res['routed_share']['advise']}, "
+        f"(routed {res['routed_share']['routed']} = served or tier switch, "
+        f"decided_kept {res['routed_share']['decided_kept']}, advise {res['routed_share']['advise']}, "
         f"off {res['routed_share']['off']}, other reason {res['routed_share']['other_reason']})",
+        f"failopen_explained: {c['failopen_explained']} (global: any session within +-120 s of a fail_open row)",
         f"uncapped: {_pct(res['uncapped']['coverage'])} ({res['uncapped']['passed']}/{res['uncapped']['n']})",
         f"sessions: {res['n_sessions']}  largest share {_pct(res['largest_session_share'])}  "
         f"top3 {', '.join(_pct(s) for s in res['top3_session_shares']) or 'n/a'}",
@@ -602,7 +611,8 @@ def render(res: dict) -> str:
                                 if k != "not_evaluated") + "  (not evaluated here: " + ", ".join(res["clauses"]["not_evaluated"]) + ")",
     ]
     if res["routed_share"]["not_evidence_for_RRTE2"]:
-        lines.append("NOT EVIDENCE FOR R-RTE-2: " + res["routed_share"]["not_evidence_reason"])
+        lines.append("NOT EVIDENCE FOR R-RTE-2 (covers only the share of real switches; fires when off + advise + "
+                     "decided_kept >= 90% of passed): " + res["routed_share"]["not_evidence_reason"])
     if res["not_informative_reasons"]:
         lines.append("NOT INFORMATIVE: " + "; ".join(res["not_informative_reasons"]))
     if not res["preregistered_params"]:

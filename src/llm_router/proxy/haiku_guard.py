@@ -5,15 +5,24 @@ Haiku. This module watches the evidence and turns the rewrite OFF when it goes b
 the in-repo port of the research guard ``~/.rsi/research/local-usage/haiku_guard/haiku_guard.py``
 (thresholds and the M0.8b changes unchanged), plus the D-20 triggers.
 
-THE LEVER: an override file, never the YAML. A trip writes ``<state dir>/tier_overrides.json``::
+THE LEVER (P2.6-a, D-140): a trip opens the ``proxy_haiku`` class of ``quality_breaker`` (state
+in ``quality_breaker.json``, next to every other class) and turns the live policy's rewrite off.
+The breaker then owns the way back, with its own thresholds: after its cooldown (24 h) the rewrite
+is switched on again as a half-open probe over Haiku-served turns, and a passed probe closes the
+class (a failed one reopens it and restarts the cooldown). After a recovery the triggers only look
+at evidence newer than the recovery. ``ClaudeTierPolicy.load`` and the guard tick both apply the
+breaker, so a restart keeps the demotion.
+
+THE OWNER OVERRIDE: ``<state dir>/tier_overrides.json``, written by the owner, never by the guard
+or the breaker::
 
     {"haiku_rewrite": false, "reason": "...", "ts": <epoch seconds>}
 
-``ClaudeTierPolicy.load`` reads it after the YAML (override beats YAML), and the running proxy
-applies it to its live policy on the next guard tick, so no restart is needed. The override is
-one-way: it can turn the rewrite OFF, never on (a ``true`` in it is ignored). This module never
-edits ``claude_tiers.yaml``. Rollback: delete ``tier_overrides.json`` (the YAML value applies
-again at the next proxy start).
+It beats the YAML and the breaker, and is one-way: it can turn the rewrite OFF, never on (a
+``true`` in it is ignored); the breaker never deletes or rewrites it, so while it exists no probe
+can turn the rewrite on. This module never edits ``claude_tiers.yaml``. Rollback: delete
+``tier_overrides.json``. (Before P2.6-a a guard trip wrote this file; it no longer does, because
+a file the breaker may not touch cannot be recovered from.)
 
 WHEN IT RUNS: on proxy start and then every ``INTERVAL_S`` (one hour) on an asyncio timer inside
 the proxy (``guard_loop``), only while the live policy has the rewrite on. Every run appends one
@@ -187,16 +196,146 @@ def write_override(reason: str, ts: float) -> Path:
     return p
 
 
-def apply_override(policy) -> bool:
-    """Turn ``policy.haiku_rewrite`` off when the override says so. True when it changed."""
-    if policy is None or not getattr(policy, "haiku_rewrite", False):
+def apply_override(policy, *, now: float | None = None) -> bool:
+    """Apply the owner override, then the ``proxy_haiku`` breaker, to ``policy.haiku_rewrite``.
+
+    The override wins: it turns the rewrite off and nothing here turns it back on. Without one,
+    an open breaker turns it off (``policy.haiku_breaker`` = the decision's state and reason) and
+    a half-open or closed breaker turns it back on, but only when the breaker itself had turned it
+    off (``policy.haiku_breaker`` set): a YAML ``haiku_rewrite: false`` is never switched on. True
+    when the rewrite went from on to off."""
+    if policy is None:
+        return False
+    was_on = bool(getattr(policy, "haiku_rewrite", False))
+    breaker_off = getattr(policy, "haiku_breaker", None) is not None
+    if not was_on and not breaker_off:
         return False
     ov = read_override()
-    if ov is None:
+    if ov is not None:
+        policy.haiku_rewrite = False
+        policy.haiku_override = ov
+        return was_on
+    d = breaker_decision(now=now)
+    if d is not None and not d.allowed:
+        policy.haiku_rewrite = False
+        policy.haiku_breaker = dict(getattr(policy, "haiku_breaker", None) or {}, state=d.state,
+                                    reason=d.reason)
+        return was_on
+    if breaker_off:
+        # The breaker's own record says half-open (cooldown elapsed) or closed after a passed
+        # probe, or it stamped a recovery after this demotion (another process ran the probe):
+        # the only ways back on. A bare "closed" read is NOT one: an unwritten or corrupt state
+        # file reads closed too.
+        if d is not None or _recovered_since_demotion(policy):
+            policy.haiku_rewrite = True
+            policy.haiku_breaker = None
+        else:
+            _persist_demotion(policy)
+    return False
+
+
+def _recovered_since_demotion(policy) -> bool:
+    try:
+        from llm_router import quality_breaker as qb
+        ts = policy.haiku_breaker.get("ts")
+        rec = qb.recovered_at(qb.LEVER_PROXY_HAIKU, qb.TASK_PROXY_HAIKU)
+        return isinstance(ts, (int, float)) and rec is not None and rec > ts
+    except Exception:  # noqa: BLE001 - not provably recovered
         return False
-    policy.haiku_rewrite = False
-    policy.haiku_override = ov
-    return True
+
+
+def _persist_demotion(policy) -> None:
+    """A demotion held only in this process (the trip's state write failed) is written again;
+    the policy stays off until the breaker records a recovery. Never raises."""
+    try:
+        from llm_router import quality_breaker as qb
+        mark = policy.haiku_breaker
+        if isinstance(mark.get("ts"), (int, float)):
+            qb.trip(qb.LEVER_PROXY_HAIKU, qb.TASK_PROXY_HAIKU, reason=str(mark.get("reason", "")),
+                    now=float(mark["ts"]))
+    except Exception as exc:  # noqa: BLE001 - fail open
+        from llm_router import failopen
+        failopen.record("LR-FO-HAIKU-BREAKER-PERSIST", exc)
+
+
+def demote(policy, reason: str, ts: float | None = None) -> None:
+    """Turn the live policy's rewrite off for a breaker trip (in-process, whatever the state write
+    did). ``policy.haiku_breaker`` is also the "demoted, maybe not persisted" marker: it is cleared
+    only by a recovery the breaker recorded."""
+    if policy is not None:
+        policy.haiku_rewrite = False
+        policy.haiku_breaker = {"state": "open", "reason": reason, "ts": ts}
+
+
+# ── the breaker lever: proxy_haiku ──────────────────────────────────────────
+
+
+def haiku_units(rows: list[dict], *, since: float, until: float, kinds: frozenset[str],
+                band_redone: Iterable[str] = ()) -> list[dict]:
+    """The probe's units: Haiku-served human turns in ``[since, until]`` as quality_breaker units.
+    ``redo`` = redone (O3's definition), ``unknown`` = window still open (not read as a pass),
+    else ``used``. ``ts`` is ISO so the breaker can order and window them."""
+    from llm_router import offload_share as osh
+
+    built = osh.build_units(rows, [], now=until, days=(until - since) / 86400.0,
+                            kind_of=_kind_resolver(rows), allowed=kinds, band_redone=set(band_redone))
+    # Only turns the proxy itself moved to Haiku (the rewrite, or a treatment-arm turn): a client
+    # that asked for Haiku directly is not evidence about the rewrite.
+    ours = {r.get("msg_id") for r in rows
+            if isinstance(r.get("msg_id"), str) and is_haiku_served(r)
+            and (r.get("tier_reason") == "haiku_rewrite" or r.get("tier_arm_assignment") == "treatment")}
+    out = []
+    for u in osh.turn_units(built["units"]):
+        if u["class"] != osh.CLASS_HAIKU or not since <= u["ts"] <= until or u.get("msg_id") not in ours:
+            continue
+        outcome = "redo" if u["redone"] else ("unknown" if u["window_open"] else "used")
+        out.append({"ts": datetime.fromtimestamp(u["ts"], tz=timezone.utc).isoformat(),
+                    "lever": "proxy_haiku", "task_type": "haiku", "model": u.get("model"),
+                    "outcome": outcome})
+    return out
+
+
+def breaker_state() -> str:
+    """The persisted ``proxy_haiku`` state; unreadable state reads closed. Never raises."""
+    try:
+        from llm_router import quality_breaker as qb
+        return qb.class_state(qb.LEVER_PROXY_HAIKU, qb.TASK_PROXY_HAIKU)
+    except Exception as exc:  # noqa: BLE001 - fail open
+        from llm_router import failopen
+        failopen.record("LR-FO-HAIKU-BREAKER-STATE", exc)
+        return "closed"
+
+
+def breaker_decision(*, now: float | None = None, read_rows: Callable[[], list[dict]] | None = None):
+    """The breaker's decision for ``proxy_haiku``, or None when it is closed or on any error
+    (fail-open: the rewrite is left as it is). Reads the ledger only while the class is open or
+    half-open."""
+    try:
+        from llm_router import quality_breaker as qb
+        if breaker_state() == qb.CLOSED:
+            return None
+        t = time.time() if now is None else now
+        since = t - WINDOW_DAYS * 86400.0
+
+        def units_fn(**_kw):
+            if read_rows is None:
+                from llm_router.proxy import ledger
+                rows = ledger.read_rows(days=WINDOW_DAYS + 1)
+            else:
+                rows = read_rows()
+            return haiku_units(rows, since=since, until=t, kinds=guard_kinds(),
+                               band_redone=_band_redone(since, t))
+
+        return qb.fed_decision(qb.LEVER_PROXY_HAIKU, qb.TASK_PROXY_HAIKU, units_fn=units_fn, now=t)
+    except Exception as exc:  # noqa: BLE001 - fail open, except while the class is known to be open
+        from llm_router import failopen
+        failopen.record("LR-FO-HAIKU-BREAKER", exc)
+        if breaker_state() == "open":
+            from llm_router import quality_breaker as qb
+            return qb.Decision(allowed=False, state="open", key="proxy_haiku:haiku", n=0, failure_rate=None,
+                               reason=f"quality_breaker: proxy_haiku open — probe error "
+                                      f"({type(exc).__name__}), demotion kept")
+        return None
 
 
 # ── statistics ──────────────────────────────────────────────────────────────
@@ -487,20 +626,32 @@ def run_once(policy=None, *, now: float | None = None, read_rows: Callable[[], l
             rows = ledger.read_rows(days=WINDOW_DAYS + 1)
         else:
             rows = read_rows()
-        ev = evaluate(rows, since=since, until=t, band_redone=_band_redone(since, t))
+        from llm_router import quality_breaker as qb
+
+        # Evidence floor: after a probe closed the class, only newer evidence can trip it again.
+        floor = qb.recovered_at(qb.LEVER_PROXY_HAIKU, qb.TASK_PROXY_HAIKU)
+        extra: dict = {}
+        if floor is not None:
+            since = max(since, floor)
+            extra["audits"] = [a for a in read_audits() if a["mtime"] >= floor]
+            extra["shadow_rows"] = [r for r in read_jsonl(shadow_verdicts_path())
+                                    if _num(r.get("ts")) is not None and _num(r.get("ts")) >= floor]
+        ev = evaluate(rows, since=since, until=t, band_redone=_band_redone(since, t), **extra)
         on = getattr(policy, "haiku_rewrite", None) if policy is not None else None
         overridden = read_override() is not None
-        if ev["tripped"] and not overridden and on is not False:
+        state = breaker_state()
+        if ev["tripped"] and not overridden and on is not False and state == qb.CLOSED:
             reason = "; ".join(f"{name}: {ev['triggers'][name]['value']} ({ev['triggers'][name]['bar']})"
                                for name in ev["tripped"])
-            write_override(reason, t)
-            apply_override(policy)
+            qb.trip(qb.LEVER_PROXY_HAIKU, qb.TASK_PROXY_HAIKU, reason=reason, now=t)
+            demote(policy, reason, t)
             ev["action"] = "trip"
-            _append(status_path(), f"{_stamp(t)} TRIP {status_fields(ev)} -> {OVERRIDE_NAME} "
-                                   f"haiku_rewrite=false; {reason}")
+            _append(status_path(), f"{_stamp(t)} TRIP {status_fields(ev)} -> quality_breaker "
+                                   f"proxy_haiku open, haiku_rewrite=false; {reason}")
             (notify or _notify)(reason, ev)
         else:
-            ev["action"] = "already_off" if (overridden or on is False) else "ok"
+            ev["action"] = ("already_off" if (overridden or on is False or state == qb.OPEN)
+                            else "probing" if state == qb.HALF_OPEN else "ok")
             _append(status_path(), f"{_stamp(t)} {ev['action'].upper()} {status_fields(ev)}")
         return ev
     except Exception as exc:  # noqa: BLE001 - a guard bug must never trip, only report
@@ -515,11 +666,11 @@ def run_once(policy=None, *, now: float | None = None, read_rows: Callable[[], l
 
 def _notify(reason: str, ev: dict) -> None:
     """Tell the owner: the proxy's stderr (launchd log) and the operational alert sink."""
-    print(f"llm-router proxy: HAIKU GUARD TRIPPED, haiku_rewrite now off via {override_path()}: {reason}",
-          file=sys.stderr, flush=True)
+    print(f"llm-router proxy: HAIKU GUARD TRIPPED, haiku_rewrite now off (quality_breaker proxy_haiku; "
+          f"a probe retries after its cooldown): {reason}", file=sys.stderr, flush=True)
     from llm_router import alerts
     alerts.emit_alert(alerts.HAIKU_GUARD_TRIP, detail={
-        "tripped": ev["tripped"], "override": str(override_path()),
+        "tripped": ev["tripped"], "lever": "quality_breaker:proxy_haiku",
         "counts": {k: [v["k"], v["n"]] for k, v in ev["triggers"].items()}})
 
 
