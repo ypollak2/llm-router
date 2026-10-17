@@ -2929,7 +2929,41 @@ def cmd_kpi(args: list[str]) -> int:
                      help="the daily Haiku Option A watch (PLAN v16 P0.11, D-20) over --since/--until: "
                           "Haiku-decided calls, tier_retry, redo, blind audit and shadow triggers, each "
                           "with its n; exit 1 when a D-20 trigger is not evaluable (the day fails)")
+    ap.add_argument("--daily", action="store_true",
+                     help="P3.3: write the offload row of one closed UTC day (organic / synthetic / other) to "
+                          "<state>/daily/<date>.json; idempotent; default date is the last closed UTC day")
+    ap.add_argument("--date", metavar="YYYY-MM-DD", default=None, help="with --daily: the UTC day")
+    ap.add_argument("--backfill", metavar="N", type=int, default=0,
+                     help="with --daily: also fill the N-1 closed days before --date that have no row")
+    ap.add_argument("--force", action="store_true",
+                     help="with --daily: write <date>.revN.json when the measurement changed (never overwrites)")
+    ap.add_argument("--partial", action="store_true",
+                     help="with --daily: snapshot today to <date>.partial.json (never counted by the streak)")
+    ap.add_argument("--synthetic-manifest", metavar="PATH", default=None,
+                     help="with --daily: the synth-live manifest.jsonl; research sessions whose id is listed "
+                          "are 'synthetic (D-167)', other research sessions are 'other' (counts only)")
+    ap.add_argument("--daily-streak", action="store_true",
+                     help="P3.3: the run of closed UTC days whose organic action AND turn lines are measured; "
+                          "exit 1 below 14 (PLAN v16 section 7.1 c3)")
+    ap.add_argument("--end", metavar="YYYY-MM-DD", default=None, help="with --daily-streak: last day to count")
+    ap.add_argument("--daily-render-plist", action="store_true",
+                     help="print a launchd plist for 'kpi --daily --backfill 3'; prints only, installs nothing")
     parsed = ap.parse_args(args)
+    if parsed.daily_render_plist:
+        from llm_router import daily_offload
+        print(daily_offload.render_plist(), end="")
+        return 0
+    if parsed.daily_streak:
+        from llm_router import daily_offload
+        return daily_offload.run_streak(end=parsed.end, as_json=parsed.json)
+    if parsed.daily:
+        from llm_router import daily_offload
+        return daily_offload.run_daily(date=parsed.date, backfill=parsed.backfill, force=parsed.force,
+                                       partial=parsed.partial, manifest=parsed.synthetic_manifest,
+                                       as_json=parsed.json)
+    for flag in ("date", "backfill", "force", "partial", "synthetic_manifest", "end"):
+        if getattr(parsed, flag):
+            ap.error(f"--{flag.replace('_', '-')} needs --daily (or --daily-streak for --end)")
     if parsed.dry_run and not parsed.backfill_tags:
         ap.error("--dry-run needs --backfill-tags")
     if parsed.strict and not parsed.health:

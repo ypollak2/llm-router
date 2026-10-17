@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sqlite3
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable
@@ -23,8 +24,10 @@ from llm_router.provider_classes import not_error_row_sql, real_decision_sql
 
 def executed_routes(
     window_hours: float = 24.0, db_path=None, timeout_s: float = 0.25,
+    since: float | None = None, until: float | None = None,
 ) -> dict | None:
-    """Count served runtime decisions in a UTC window without creating a DB."""
+    """Count served runtime decisions in a UTC window without creating a DB. ``since`` / ``until`` (epoch
+    seconds, both needed) replace the rolling window with ``[since, until)`` (P3.3 daily rows)."""
     con = None
     try:
         p = Path(db_path if db_path is not None else (
@@ -37,19 +40,20 @@ def executed_routes(
         )
         cols = {r[1] for r in con.execute("PRAGMA table_info(routing_decisions)")}
         provenance = "AND provenance = 'runtime'" if "provenance" in cols else ""
+        where, params = _window_clause(window_hours, since, until)
         rows = con.execute(
             "SELECT COALESCE(NULLIF(final_provider, ''), 'unknown'), COUNT(*) "
-            "FROM routing_decisions WHERE timestamp >= datetime('now', ?) "
+            f"FROM routing_decisions WHERE {where} "
             f"{provenance} AND ({real_decision_sql(con)}) "
             "GROUP BY COALESCE(NULLIF(final_provider, ''), 'unknown')",
-            (f"-{window_hours} hours",),
+            params,
         ).fetchall()
         by_provider = {provider: int(n) for provider, n in rows}
         return {
             "window_hours": window_hours,
             "total": sum(by_provider.values()),
             "by_provider": by_provider,
-            "local_by_cause": _local_by_cause(con, cols, provenance, window_hours),
+            "local_by_cause": _local_by_cause(con, cols, provenance, window_hours, since, until),
         }
     except (sqlite3.Error, OSError):
         return None
@@ -61,7 +65,19 @@ def executed_routes(
                 pass
 
 
-def _local_by_cause(con, cols: set, provenance: str, window_hours: float) -> dict[str, int]:
+def _window_clause(window_hours: float, since: float | None, until: float | None) -> tuple[str, tuple]:
+    """The ``timestamp`` filter: rolling ``window_hours`` back from now, or ``[since, until)`` epoch seconds
+    (both given) rendered as the UTC ``YYYY-MM-DD HH:MM:SS`` text SQLite's ``datetime('now')`` writes."""
+    if since is not None and until is not None:
+        fmt = "%Y-%m-%d %H:%M:%S"
+        lo = datetime.fromtimestamp(since, timezone.utc).strftime(fmt)
+        hi = datetime.fromtimestamp(until, timezone.utc).strftime(fmt)
+        return "timestamp >= ? AND timestamp < ?", (lo, hi)
+    return "timestamp >= datetime('now', ?)", (f"-{window_hours} hours",)
+
+
+def _local_by_cause(con, cols: set, provenance: str, window_hours: float,
+                    since: float | None = None, until: float | None = None) -> dict[str, int]:
     """Split the served-local count by why local served (F23): ``bench`` (a benched provider was
     skipped), ``last_resort`` (D-116: a non-local entry was skipped or failed first),
     ``other_skip`` (something else was skipped), ``policy`` (nothing skipped: local was the
@@ -84,12 +100,13 @@ def _local_by_cause(con, cols: set, provenance: str, window_hours: float) -> dic
         )
     else:
         case = "'unknown'"
+    where, params = _window_clause(window_hours, since, until)
     rows = con.execute(
         f"SELECT {case}, COUNT(*) FROM routing_decisions "
-        "WHERE timestamp >= datetime('now', ?) "
+        f"WHERE {where} "
         f"{provenance} AND ({real_decision_sql(con)}) "
         f"AND COALESCE(final_provider, '') IN ({marks}) GROUP BY 1",
-        (f"-{window_hours} hours", *local),
+        (*params, *local),
     ).fetchall()
     for cause, n in rows:
         out[cause] = int(n)
