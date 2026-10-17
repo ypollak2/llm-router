@@ -4900,8 +4900,10 @@ async def route_and_call(
 
         # P2.4: the capability filter is the LAST transform (RED1-01/RED1-02: a hard
         # filter placed before the specialist or the bandit is undone by them). It
-        # excludes, never reorders, and only on KNOWN lack of tools, vision or window.
-        # An explicit model_override is not exempt: hard means hard.
+        # excludes, never reorders, and only on KNOWN lack of vision or window: this
+        # door has no tools array, and the prompt-text tools regex is shadow only
+        # (D-165), so a pinned or unpinned perplexity research call keeps its slot.
+        # An explicit model_override is not exempt from vision or window: hard means hard.
         _cap_needs = None
         _cap_excluded: list = []
         if models_to_try:
@@ -4912,11 +4914,6 @@ async def route_and_call(
                         _cf.needs_from_prompt(prompt, task_type.value, system_prompt or ""),
                         _cf.needs_from_messages(messages, prompt, system_prompt or ""),
                     )
-                    if model_override:
-                        # An explicit pin is not exempt from vision or window (facts), but the
-                        # tools need here is a prompt regex: "What is the current version of
-                        # Python?" trips it, and it would refuse a pinned perplexity research call.
-                        _cap_needs = _cf.Needs(False, _cap_needs.vision, _cap_needs.tokens)
                     models_to_try, _cap_excluded = _cf.filter_chain_report(models_to_try, _cap_needs)
             except Exception as _cap_err:  # noqa: BLE001 - fail-open: the chain stays as built
                 from llm_router import failopen

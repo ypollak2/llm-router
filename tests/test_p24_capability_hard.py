@@ -1,10 +1,15 @@
-"""P2.4-a: the capability filter is hard at four doors (tools, vision, window), default on.
+"""P2.4-a: the capability filter at four doors (tools, vision, window), default on.
 
 12 door cases = {router (MCP), hook + SDK, proxy, gateway} x {tools, vision, window}, each
 over one mixed chain (see CHAIN). For each case the models the door ACTUALLY dispatches or
 attempts are compared with a literal expected list: every model known to lack the capability
 is absent, every capable model stays in its original relative order, an unknown-capability
 model stays, and with ``LLM_ROUTER_CAPABILITY_ROUTING=0`` the chain is unchanged.
+
+D-165: the tools need is HARD only from a real tools array in the request body (the proxy).
+At the router, gateway and hook the only tools signal is the prompt-text regex, which trips
+on ordinary questions, so there it never excludes: the chain is unchanged and the would-be
+exclusions are traced as ``capability.shadow``. Vision and window stay hard everywhere.
 
 Mutants F1, F2, F3, F5, F7 are monkeypatch negative controls: each makes a named test fail
 (a helper counts violations; it is 0 normally and > 0 under the mutant).
@@ -53,6 +58,14 @@ EXPECTED = {
 EXCLUDED = {cap: [m for m in CHAIN if m not in EXPECTED[cap]] for cap in EXPECTED}
 CAPS = tuple(EXPECTED)
 DOORS = ("router", "hook", "proxy", "gateway")
+#: Doors whose only tools signal is the prompt regex: shadow, never exclusion (D-165).
+SHADOW_TOOLS_DOORS = ("router", "hook", "gateway")
+#: Ordinary prompts that trip the tools regex (D-165 (1)); they must never hard-exclude.
+ORDINARY_TOOL_REGEX_PROMPTS = ("What is the current version of Python?", "explain how git rebase works")
+
+
+def expected(door, cap):
+    return list(CHAIN) if cap == "tools" and door in SHADOW_TOOLS_DOORS else EXPECTED[cap]
 
 
 # ── world: a fresh map with per-model capabilities, a registry, an empty bandit ──
@@ -101,6 +114,20 @@ def world(monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_BANDIT", "off")
     monkeypatch.setattr(model_registry, "_DEFAULT_REGISTRY", _registry())
     put_map()
+
+
+@pytest.fixture
+def traced(monkeypatch):
+    """Every trace event the filter emits, as ``(event, fields)``."""
+    from llm_router import trace
+
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(trace, "emit", lambda event, **f: events.append((event, f)))
+    return events
+
+
+def shadow_excluded(events) -> list[str]:
+    return [m for e, f in events if e == "capability.shadow" for m in f["would_exclude"]]
 
 
 def _kill_switch(monkeypatch):
@@ -178,33 +205,32 @@ def route(chain, prompt, *, task=TaskType.CODE, messages=None, system=None, over
 
 
 def _spec_for_cap(cap):
-    if cap == "tools":
-        return dict(prompt=TOOLS_PROMPT)
-    if cap == "vision":
-        return dict(prompt="describe the picture", messages=[
-            {"role": "user", "content": [{"type": "text", "text": "look"},
-                                         {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}]}])
-    return dict(prompt=LONG_PROMPT)
+    return dict(prompt={"tools": TOOLS_PROMPT, "vision": VISION_PROMPT, "window": LONG_PROMPT}[cap])
 
 
 def door_router(cap):
     return route(CHAIN, **_spec_for_cap(cap))
 
 
-def door_gateway(cap):
-    """The gateway door: HTTP request in, dispatch chain out. Tools and window ride the HTTP
-    text path; vision rides route_and_call(messages=) because the gateway refuses image parts."""
-    if cap == "vision":
-        return route(CHAIN, **_spec_for_cap(cap))
+def gateway_client():
     pytest.importorskip("fastapi.testclient")
     from fastapi.testclient import TestClient
 
     from llm_router.gateway import app
 
-    client = TestClient(app, base_url="http://127.0.0.1", raise_server_exceptions=False)
-    prompt = TOOLS_PROMPT if cap == "tools" else LONG_PROMPT
+    return TestClient(app, base_url="http://127.0.0.1", raise_server_exceptions=False)
+
+
+def door_gateway(cap, messages=None):
+    """The gateway door: HTTP request in, dispatch chain out, all three caps on the HTTP text
+    path (vision from the host's ``[Image #N]`` marker; image PARTS in the newest turn are
+    refused, see tests/test_p24_empty_chain_table.py)."""
+    client = gateway_client()
+    if messages is None:
+        messages = [{"role": "user", "content": _spec_for_cap(cap)["prompt"]}]
+
     def via():
-        r = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": prompt}], "task_type": "code"})
+        r = client.post("/v1/chat/completions", json={"messages": messages, "task_type": "code"})
         assert r.status_code == 200, r.text[:200]
 
     out = route(CHAIN, "unused", via=via)
@@ -282,32 +308,36 @@ def door_proxy(cap, monkeypatch):
 
 # ── the 12 door cases ────────────────────────────────────────────────────────
 
-def _assert_case(seen, cap, *, attempted_only=None):
-    expected = EXPECTED[cap] if attempted_only is None else attempted_only
-    assert seen == expected, f"{cap}: dispatched {seen}, expected {expected}"
-    for m in EXCLUDED[cap]:
-        assert m not in seen, f"{m} lacks {cap} and was dispatched"
-    assert len(EXCLUDED[cap]) >= 1, "a case that excludes nothing proves nothing"
+def _assert_case(seen, cap, door, events, *, drop=()):
+    exp = [m for m in expected(door, cap) if m not in drop]
+    assert seen == exp, f"{door}/{cap}: dispatched {seen}, expected {exp}"
     assert MYSTERY in seen, "an unknown-capability model must stay"
     ranks = [CHAIN.index(m) for m in seen]
     assert ranks == sorted(ranks), "survivors changed relative order"
+    if cap == "tools" and door in SHADOW_TOOLS_DOORS:
+        # D-165 (1): the regex need is shadow only; what it WOULD have excluded is traced.
+        assert shadow_excluded(events) == [m for m in EXCLUDED["tools"] if m not in drop]
+        assert not [e for e, _ in events if e == "capability.filter"]
+        return
+    for m in EXCLUDED[cap]:
+        assert m not in seen, f"{m} lacks {cap} and was dispatched"
+    assert len(EXCLUDED[cap]) >= 1, "a case that excludes nothing proves nothing"
 
 
 @pytest.mark.parametrize("cap", CAPS)
-def test_router_door(cap):
-    _assert_case(door_router(cap), cap)
+def test_router_door(cap, traced):
+    _assert_case(door_router(cap), cap, "router", traced)
 
 
 @pytest.mark.parametrize("cap", CAPS)
-def test_gateway_door(cap):
-    _assert_case(door_gateway(cap), cap)
+def test_gateway_door(cap, traced):
+    _assert_case(door_gateway(cap), cap, "gateway", traced)
 
 
 @pytest.mark.parametrize("cap", CAPS)
-def test_hook_door(cap, monkeypatch):
+def test_hook_door(cap, monkeypatch, traced):
     attempted = door_hook(cap, monkeypatch)
-    no_claude = [m for m in EXPECTED[cap] if m != CLAUDE]           # the hook cannot call claude
-    _assert_case(attempted, cap, attempted_only=no_claude)
+    _assert_case(attempted, cap, "hook", traced, drop=(CLAUDE,))   # the hook cannot call claude
 
 
 @pytest.mark.parametrize("cap", CAPS)
@@ -397,7 +427,7 @@ def test_proxy_app_serves_the_first_capable_model_and_the_kill_switch_restores_t
 
 def _reprepend_bandit(filter_first: bool):
     async def reorder(self, models, *, profile, subject):
-        kept = cf.filter_chain(models, Needs(tools=True)) if filter_first else list(models)
+        kept = cf.filter_chain(models, Needs(vision=True)) if filter_first else list(models)
         return [TEXTONLY] + [m for m in kept if m != TEXTONLY]
     return reorder
 
@@ -406,15 +436,15 @@ def _order_violations(*, mutant: bool) -> int:
     """How many excluded models a bandit that re-prepends one still gets dispatched."""
     extra = {"llm_router.capability_filter.filter_chain_report":
              (lambda chain, needs, **k: (list(chain), []))} if mutant else None
-    out = route(CHAIN, TOOLS_PROMPT, bandit=_reprepend_bandit(filter_first=mutant), extra=extra)
+    out = route(CHAIN, VISION_PROMPT, bandit=_reprepend_bandit(filter_first=mutant), extra=extra)
     assert isinstance(out, list), out
-    return sum(m in EXCLUDED["tools"] for m in out)
+    return sum(m in EXCLUDED["vision"] for m in out)
 
 
 def test_filter_runs_after_the_bandit_re_prepends_an_excluded_model():
     assert _order_violations(mutant=False) == 0
-    out = route(CHAIN, TOOLS_PROMPT, bandit=_reprepend_bandit(filter_first=False))
-    assert out == EXPECTED["tools"]
+    out = route(CHAIN, VISION_PROMPT, bandit=_reprepend_bandit(filter_first=False))
+    assert out == EXPECTED["vision"]
 
 
 def test_mutant_f3_filter_before_the_bandit_is_caught():
@@ -429,9 +459,9 @@ def test_d116_qa_order_is_preserved_among_survivors(monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_QA_ROUTING", "on")
     qa_chain = [TEXTONLY, OPENAI, CODEX, TOOLY, CLAUDE, MYSTERY, PERPLEXITY]
     stripped = _strip_local_for_qa(list(qa_chain), TaskType.QUERY)
-    out = route(qa_chain, TOOLS_PROMPT, task=TaskType.QUERY)
+    out = route(qa_chain, VISION_PROMPT, task=TaskType.QUERY)
     assert isinstance(out, list), out
-    assert out == [m for m in stripped if m not in EXCLUDED["tools"]]
+    assert out == [m for m in stripped if m not in EXCLUDED["vision"]]
     assert len(out) < len(stripped), "nothing was excluded: the interaction is untested"
     assert TEXTONLY not in out
 
@@ -541,13 +571,17 @@ def test_fail_open_on_a_raising_registry_and_a_raising_caps_lookup(monkeypatch):
 
 def test_needs_from_prompt_messages_and_body():
     n = cf.needs_from_prompt(TOOLS_PROMPT, "code", "sys")
-    assert n.tools and not n.vision and n.tokens == (len("sys") + len(TOOLS_PROMPT)) // 4
+    assert not n.tools and n.tools_shadow, "the prompt regex is shadow only (D-165)"
+    assert not n.vision and n.tokens == (len("sys") + len(TOOLS_PROMPT)) // 4
     assert cf.needs_from_prompt(VISION_PROMPT, "code").vision
     plain = cf.needs_from_prompt("hello there", "query")
-    assert not plain.tools and not plain.vision
-    history = [{"role": "user", "content": "h" * 4000}]
+    assert not plain.tools and not plain.tools_shadow and not plain.vision
+    history = [{"role": "user", "content": "h" * 4000},
+               {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,"}}]}]
     m = cf.needs_from_messages(history, "short", "")
     assert m.tokens == max(1, len("short") // 4), "history must not count"
+    assert not m.vision, "an image only in history is flattened to [image]: no vision need"
+    assert cf.merge(n, m).tools_shadow and not cf.merge(n, m).tools
     body = {"system": "s" * 40, "tools": [{"name": "Read"}],
             "messages": [{"role": "user", "content": [{"type": "image", "source": {}}]},
                          {"role": "assistant", "content": "ok"},
@@ -577,8 +611,9 @@ LEGACY_VS_VECTOR = [
 
 @pytest.mark.parametrize("prompt", LEGACY_VS_VECTOR)
 def test_default_on_widens_needs_claude_tools_documented_consequence(prompt, monkeypatch):
-    """The hook falls through to Claude more often by default: the 8-bit vector sees what the
-    legacy boolean does not. Four fixed prompts; the kill switch restores the legacy answer."""
+    """By default ``needs_claude_tools`` answers from the 8-bit vector, which sees what the
+    legacy boolean does not. Four fixed prompts flip False -> True; the kill switch restores
+    the legacy answer. (No frequency claim: this pins the flip, not how often it happens.)"""
     from llm_router.hooks.chain_builder import needs_claude_tools
 
     assert needs_claude_tools(prompt, "code") is True
@@ -600,10 +635,13 @@ def test_provider_caps_equal_what_the_map_builds_for_fixture_seats(tmp_path):
 
 # ── mutants: each makes a named test fail ────────────────────────────────────
 
+HARD_AT_ROUTER = ("vision", "window")
+
+
 def _excluded_dispatched() -> int:
-    """Models known to lack the capability that the router still dispatched, over the 3 caps."""
+    """Models known to lack a hard capability that the router still dispatched."""
     n = 0
-    for cap in CAPS:
+    for cap in HARD_AT_ROUTER:
         out = door_router(cap)
         assert isinstance(out, list), out
         n += sum(m in EXCLUDED[cap] for m in out)
@@ -613,12 +651,12 @@ def _excluded_dispatched() -> int:
 def test_mutant_f1_identity_filter_is_caught(monkeypatch):
     assert _excluded_dispatched() == 0
     monkeypatch.setattr(cf, "filter_chain_report", lambda chain, needs, **k: (list(chain), []))
-    assert _excluded_dispatched() == sum(len(v) for v in EXCLUDED.values())
+    assert _excluded_dispatched() == sum(len(EXCLUDED[c]) for c in HARD_AT_ROUTER)
 
 
 def _unknown_removed() -> int:
     """Unknown-capability models the router dropped (they must all stay)."""
-    out = door_router("tools")
+    out = door_router("vision")
     return sum(m not in out for m in (MYSTERY, OPENAI))
 
 
@@ -638,7 +676,7 @@ def test_mutant_f5_default_off_is_caught(monkeypatch):
     from llm_router import capabilities
 
     def violations() -> int:
-        return int(not cf.enabled()) + int(door_router("tools") == CHAIN)
+        return int(not cf.enabled()) + int(door_router("vision") == CHAIN)
 
     assert violations() == 0
 
@@ -676,8 +714,81 @@ def test_a_pin_is_exempt_from_the_prompt_regex_tools_need_only():
     out = route([PERPLEXITY], "What is the current version of Python?", task=TaskType.RESEARCH,
                 override=PERPLEXITY, extra=pinned)
     assert out == [PERPLEXITY]
-    out = route([PERPLEXITY], "What is the current version of Python?", task=TaskType.RESEARCH, extra=pinned)
-    assert isinstance(out, ValueError) and "lacks tools" in str(out)     # unpinned: the filter applies
+    out = route([PERPLEXITY], VISION_PROMPT, task=TaskType.RESEARCH, override=PERPLEXITY, extra=pinned)
+    assert isinstance(out, ValueError) and "lacks vision" in str(out)    # the pin is not exempt from vision
+
+
+# ── D-165 (1): the prompt-text tools regex never hard-excludes ───────────────
+
+@pytest.mark.parametrize("prompt", ORDINARY_TOOL_REGEX_PROMPTS)
+def test_unpinned_research_keeps_perplexity_in_the_chain(prompt, traced):
+    """Regression (D-165): unpinned research silently dropped perplexity/sonar because the
+    prompt regex trips on these ordinary questions."""
+    assert cf.needs_from_prompt(prompt, "research").tools_shadow, "the prompt no longer trips the regex: the test proves nothing"
+    chain = [PERPLEXITY, OPENAI, CLAUDE]
+    out = route(chain, prompt, task=TaskType.RESEARCH)
+    assert out == chain
+    assert shadow_excluded(traced) == [PERPLEXITY]          # logged, not enforced
+
+
+def _ollama_only_map(caps):
+    put_map([_row("ollama/qwen:1", "local", "ollama/qwen:1", caps, {"num_ctx": 8192, "max_context": 32768})])
+
+
+@pytest.mark.parametrize("prompt", ORDINARY_TOOL_REGEX_PROMPTS)
+def test_ordinary_prompts_on_an_ollama_only_box_do_not_raise_or_exclude(prompt, traced, monkeypatch):
+    """Regression (D-165): an Ollama-only box whose model reports no ``tools`` raised
+    ValueError("No providers available") on ordinary prompts, at the router and the hook."""
+    _ollama_only_map(["generate"])
+    assert cf.caps_of("ollama/qwen:1").tools is False, "the model must be KNOWN to lack tools"
+    out = route(["ollama/qwen:1"], prompt, task=TaskType.QUERY)
+    assert out == ["ollama/qwen:1"], out
+    assert shadow_excluded(traced) == ["ollama/qwen:1"]
+    from llm_router.hooks.direct_executor import execute_chain
+
+    rig = HookRig(monkeypatch)
+    execute_chain(prompt, specs(["ollama/qwen:1"]), "query")
+    assert rig.attempted == ["ollama/qwen:1"]
+
+
+def test_a_real_tools_array_still_hard_excludes_tool_less_models(traced, monkeypatch):
+    """The strong signal stays hard: a request body carrying tools (the proxy door) never
+    reaches a model known to lack tools, even for an ordinary prompt."""
+    from llm_router.proxy import backends
+
+    async def policy_chain(text):
+        return "query", "simple", [TEXTONLY, PERPLEXITY, TOOLY, MYSTERY]
+
+    monkeypatch.setattr(backends, "policy_chain", policy_chain)
+    body = {"system": "be brief", "tools": [{"name": "Read", "input_schema": {"type": "object"}}],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": ORDINARY_TOOL_REGEX_PROMPTS[0]}]}]}
+    needs = cf.needs_from_anthropic_body(body)
+    assert needs.tools
+    choice = asyncio.run(backends.choose_model("x", None, needs=needs))
+    assert choice["chain_head"] == [TOOLY, MYSTERY] and choice["model"] == TOOLY
+    assert [e for e, _ in traced if e == "capability.filter"], "the exclusion must be traced as hard"
+    body["tools"] = []
+    choice = asyncio.run(backends.choose_model("x", None, needs=cf.needs_from_anthropic_body(body)))
+    assert choice["model"] == TEXTONLY                          # teeth: without the array nothing is excluded
+
+
+def test_choose_model_rechecks_a_pin_against_the_filter(monkeypatch):
+    """backends.choose_model: a pin the policy allows but the filter excludes keeps the call
+    on Claude (the pin-exclusion recheck after ``model = pinned``)."""
+    from llm_router.proxy import backends
+
+    async def policy_chain(text):
+        return "code", "moderate", [TEXTONLY, TOOLY]
+
+    monkeypatch.setattr(backends, "policy_chain", policy_chain)
+    tools = Needs(tools=True)
+    assert backends.tool_capable(TEXTONLY) and cf.caps_of(TEXTONLY).tools is False
+    choice = asyncio.run(backends.choose_model("x", TEXTONLY, needs=tools))
+    assert choice["chain_head"] == [TOOLY] and choice["model"] is None
+    choice = asyncio.run(backends.choose_model("x", TOOLY, needs=tools))
+    assert choice["model"] == TOOLY                             # a capable pin still serves
+    choice = asyncio.run(backends.choose_model("x", TEXTONLY, needs=None))
+    assert choice["model"] == TEXTONLY                          # teeth: no needs, the pin serves
 
 
 def _ollama_map(tmp_path, show):
@@ -708,7 +819,20 @@ def test_ollama_with_an_explicit_list_lacking_tools_is_excluded(tmp_path):
     _ollama_map(tmp_path, {"capabilities": ["completion"]})
     assert cf.caps_of("ollama/m:1").tools is False and cf.caps_of("ollama/m:1").vision is False
     assert cf.filter_chain(["ollama/m:1"], Needs(tools=True)) == []
-    out = route(["ollama/m:1", CODEX], TOOLS_PROMPT)
-    assert out == [CODEX]
+    out = route(["ollama/m:1", GEMINI], VISION_PROMPT)
+    assert out == [GEMINI]
+    out = route(["ollama/m:1", GEMINI], TOOLS_PROMPT)
+    assert out == ["ollama/m:1", GEMINI]                    # the prompt regex alone never excludes (D-165)
     _ollama_map(tmp_path, {"capabilities": ["completion", "tools"]})
     assert cf.filter_chain(["ollama/m:1"], Needs(tools=True)) == ["ollama/m:1"]
+
+
+def test_gateway_history_image_adds_no_vision_need(traced):
+    """D-165 (4): an image only in an earlier turn is flattened (``[image]``), so the gateway
+    routes the newest text turn over the whole chain; no model is excluded for vision."""
+    img = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}
+    messages = [{"role": "user", "content": [{"type": "text", "text": "what is this"}, img]},
+                {"role": "assistant", "content": "a cat"},
+                {"role": "user", "content": "thanks, tell me a joke"}]
+    assert door_gateway("vision", messages=messages) == CHAIN
+    assert not [e for e, _ in traced if e == "capability.filter"]

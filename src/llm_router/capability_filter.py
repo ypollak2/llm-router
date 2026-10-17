@@ -1,9 +1,11 @@
 """P2.4: the capability filter. Exclude, never reorder.
 
 A chain entry is removed when it is KNOWN to lack something the request needs:
-tools (the request carries tools or the prompt needs them), vision (images are
+tools (the request body carries a real tools array: the proxy), vision (images are
 present) or window (the tokens that cannot be packed away exceed the model's
-window). An unknown capability never excludes: API-key rows in the resource map
+window). The prompt-text tools regex never excludes (D-165): it trips on ordinary
+questions ("What is the current version of Python?"), so its verdict rides in
+``Needs.tools_shadow`` and is only traced (``capability.shadow``). An unknown capability never excludes: API-key rows in the resource map
 list only ``generate`` and registry capability lists are optional, so
 "exclude unless proven capable" would delete every API model.
 
@@ -56,9 +58,12 @@ _IMAGE_MARKER = re.compile(r"\[Image #\d+\]")
 
 @dataclass(frozen=True)
 class Needs:
+    #: HARD: a real tools array in the request body (or an explicit caller flag).
     tools: bool = False
     vision: bool = False
     tokens: int | None = None
+    #: SHADOW: the prompt-text tools regex. Traced, never excludes (D-165).
+    tools_shadow: bool = False
 
 
 @dataclass(frozen=True)
@@ -117,33 +122,30 @@ def _has_media(content: Any, types: frozenset[str]) -> bool:
 
 
 def needs_from_prompt(prompt: str, task_type: str = "", system: str = "") -> Needs:
-    """Needs of a prompt: tools from ``detect_capabilities`` (the 8-bit vector;
-    regex, so a false positive costs a cheaper model, not correctness), vision
-    from the host's literal ``[Image #N]`` marker, tokens from system + prompt."""
+    """Needs of a prompt: vision from the host's literal ``[Image #N]`` marker,
+    tokens from system + prompt. The tools need is never set here: the
+    ``detect_capabilities`` regex verdict goes to ``tools_shadow`` only (D-165), so
+    "explain how git rebase works" cannot empty an Ollama-only chain."""
     try:
         from llm_router.capabilities import detect_capabilities
 
         text = prompt or ""
-        tools = detect_capabilities(text, task_type or "").required.needs_tools
-        return Needs(tools=tools, vision=bool(_IMAGE_MARKER.search(text)),
-                     tokens=_estimate((system or "") + text))
+        shadow = detect_capabilities(text, task_type or "").required.needs_tools
+        return Needs(vision=bool(_IMAGE_MARKER.search(text)),
+                     tokens=_estimate((system or "") + text), tools_shadow=shadow)
     except Exception as exc:  # noqa: BLE001
         _failopen("CHZ-FO-CAPABILITY-FILTER", exc)
         return Needs()
 
 
 def needs_from_messages(messages: Sequence[Any] | None, prompt: str = "", system: str = "") -> Needs:
-    """Needs of a messages list: vision when any message carries an image part (or an
-    Ollama ``images`` field). Tokens come from system + prompt only, never the history."""
+    """Needs a caller's history adds to the request: none. ``messages`` excludes the
+    request itself and every door renders it through the context pack, where an image
+    part becomes the text ``[image]`` (the model never sees it, so it needs no vision:
+    D-165 (4), images only in history keep the flattened handling) and a long history
+    is packed down to each model's window (D-101). Tokens are system + prompt only."""
     try:
-        vision = False
-        for m in messages or []:
-            if not isinstance(m, dict):
-                continue
-            if _has_media(m.get("content"), _IMAGE_TYPES) or m.get("images"):
-                vision = True
-                break
-        return Needs(vision=vision, tokens=_estimate((system or "") + (prompt or "")))
+        return Needs(tokens=_estimate((system or "") + (prompt or "")))
     except Exception as exc:  # noqa: BLE001
         _failopen("CHZ-FO-CAPABILITY-FILTER", exc)
         return Needs()
@@ -152,7 +154,8 @@ def needs_from_messages(messages: Sequence[Any] | None, prompt: str = "", system
 def merge(a: Needs, b: Needs) -> Needs:
     """OR for the flags, max for the tokens."""
     toks = [t for t in (a.tokens, b.tokens) if t is not None]
-    return Needs(a.tools or b.tools, a.vision or b.vision, max(toks) if toks else None)
+    return Needs(a.tools or b.tools, a.vision or b.vision, max(toks) if toks else None,
+                 a.tools_shadow or b.tools_shadow)
 
 
 def needs_from_anthropic_body(body: dict) -> Needs:
@@ -253,7 +256,7 @@ def filter_chain_report(
     try:
         if needs is None or not enabled() or not out:
             return out, []
-        if not (needs.tools or needs.vision or needs.tokens):
+        if not (needs.tools or needs.vision or needs.tokens or needs.tools_shadow):
             return out, []
         if view is None:
             from llm_router import map_reader
@@ -261,6 +264,7 @@ def filter_chain_report(
             view = map_reader.load_view()
         kept: list[T] = []
         excluded: list[tuple[T, str]] = []
+        shadow: list[str] = []
         unknown = 0
         for m in out:
             caps = caps_of(key(m), view)
@@ -273,6 +277,8 @@ def filter_chain_report(
                 why = f"window {caps.window} < {needs.tokens} irreducible tokens"
             if why is None:
                 kept.append(m)
+                if needs.tools_shadow and not needs.tools and caps.tools is False:
+                    shadow.append(key(m))
                 unknown += int((needs.tools and caps.tools is None)
                                or (needs.vision and caps.vision is None))
             else:
@@ -284,6 +290,14 @@ def filter_chain_report(
                 trace.emit("capability.filter",
                            excluded=[{"model": key(m), "why": w} for m, w in excluded],
                            unknown=unknown)
+            except Exception:  # noqa: BLE001 - a trace emit must not break routing
+                pass
+        if shadow:
+            try:
+                from llm_router import trace
+
+                trace.emit("capability.shadow", need="tools", source="prompt_regex",
+                           would_exclude=shadow)
             except Exception:  # noqa: BLE001 - a trace emit must not break routing
                 pass
         return kept, excluded

@@ -489,3 +489,67 @@ def test_mutant_f6_removing_the_image_refusal_is_caught(client, router_never_cal
         client.post(path, json=dict(IMAGE_BODIES[path]))
     assert len(router_never_called) == len(IMAGE_BODIES), (
         "with the refusal removed every image request must reach the router", router_never_called)
+
+
+# ── D-165 (4): only the NEWEST user turn is refused; history images are flattened ──
+
+_IMG_PART = {
+    "/v1/chat/completions": {"type": "image_url", "image_url": {"url": "data:image/png;base64," + IMG}},
+    "/v1/messages": {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": IMG}},
+    "/v1/responses": {"type": "input_image", "image_url": "data:image/png;base64," + IMG},
+}
+
+
+def _turns(path, *, image_in):
+    """A three-turn body (user, assistant, user) with an image in the ``history`` turn or the
+    ``newest`` one; the other user turn is plain text."""
+    def user(with_image, text):
+        if path == "/api/chat":
+            return {"role": "user", "content": text, **({"images": [IMG]} if with_image else {})}
+        kind = "input_text" if path == "/v1/responses" else "text"
+        return {"role": "user", "content": [{"type": kind, "text": text}] + ([_IMG_PART[path]] if with_image else [])}
+
+    turns = [user(image_in == "history", "what is in this picture"),
+             {"role": "assistant", "content": "a cat"},
+             user(image_in == "newest", "and what colour is it")]
+    if path == "/v1/responses":
+        return {"input": turns}
+    return {"messages": turns, **({"max_tokens": 16} if path == "/v1/messages" else {})}
+
+
+HISTORY_ROUTES = ("/api/chat", "/v1/chat/completions", "/v1/messages", "/v1/responses")
+
+
+@pytest.mark.parametrize("path", HISTORY_ROUTES)
+def test_an_image_only_in_history_is_flattened_not_refused(path, client, monkeypatch):
+    seen = []
+
+    async def fake(payload):
+        seen.append(payload)
+        raise ValueError("No providers available (stub)")
+
+    monkeypatch.setattr("llm_router.route_server.route_payload_async", fake)
+    resp = client.post(path, json=_turns(path, image_in="history"))
+    assert resp.status_code == 400 and "No providers available" in resp.json()["detail"], resp.text[:200]
+    assert len(seen) == 1, "the request never reached the router"
+    assert seen[0]["prompt"] == "and what colour is it"          # the newest turn is the request
+
+
+@pytest.mark.parametrize("path", HISTORY_ROUTES)
+def test_an_image_in_the_newest_turn_after_a_text_history_is_refused(path, client, router_never_called):
+    from llm_router.gateway import _IMAGES_UNSUPPORTED
+
+    resp = client.post(path, json=_turns(path, image_in="newest"))
+    assert resp.status_code == 400 and resp.json()["detail"] == _IMAGES_UNSUPPORTED, resp.text[:200]
+    assert router_never_called == []
+
+
+def test_a_bare_responses_part_list_is_one_turn_whatever_the_order(client, router_never_called):
+    """Role-less parts at the top of a Responses ``input`` are one user turn: an image before
+    the text is still in the request."""
+    from llm_router.gateway import _IMAGES_UNSUPPORTED
+
+    body = {"input": [_IMG_PART["/v1/responses"], {"type": "input_text", "text": "what is this"}]}
+    resp = client.post("/v1/responses", json=body)
+    assert resp.status_code == 400 and resp.json()["detail"] == _IMAGES_UNSUPPORTED
+    assert router_never_called == []

@@ -804,9 +804,12 @@ def _refuse_tools_if_present(tools, tool_choice=None) -> None:
 
 
 # P2.4 ext-a. `_content_text` keeps only the `text` of a content-part list, so an image
-# part was dropped without a word and the model answered a question about an image it
-# never saw: the same silent wrongness R10 closed for `tools`. `route_and_call` has no
-# image channel, so the gateway refuses instead.
+# part in the request was dropped without a word and the model answered a question about
+# an image it never saw: the same silent wrongness R10 closed for `tools`. `route_and_call`
+# has no image channel, so the gateway refuses instead. D-165 (4): only an image in the
+# NEWEST user turn (the request) is refused; an image only in earlier turns keeps the
+# handling it had before P2.4: the history is flattened (the context pack renders the
+# part as `[image]`) and the request routes as text.
 _IMAGES_UNSUPPORTED = (
     "This gateway routes to a text-completion backend and cannot read images. "
     "The request included image content, which would have been silently ignored, "
@@ -814,6 +817,8 @@ _IMAGES_UNSUPPORTED = (
 )
 
 _IMAGE_PART_TYPES = ("image", "image_url", "input_image", "image_file")
+# Role-less content parts at the top of a Responses `input` list are one user turn.
+_BARE_PART_TYPES = _IMAGE_PART_TYPES + ("text", "input_text", "input_file")
 
 
 def _has_image(value) -> bool:
@@ -827,13 +832,35 @@ def _has_image(value) -> bool:
     return False
 
 
+def _newest_user_turn(value):
+    """The newest user turn of a request field: the trailing run of role-less content
+    parts (a bare Responses part list), else the last item whose role is ``user`` (a
+    role-less typed item, such as a tool output, counts as the caller's). A dict (the
+    Ollama generate ``images`` field) is the request itself; anything else has none."""
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, list):
+        return None
+    i = len(value)
+    while i > 0 and isinstance(value[i - 1], dict) and "role" not in value[i - 1] \
+            and value[i - 1].get("type") in _BARE_PART_TYPES:
+        i -= 1
+    if i < len(value):
+        return value[i:]
+    for item in reversed(value):
+        if isinstance(item, dict) and item.get("role", "user") == "user":
+            return item
+    return None
+
+
 def _refuse_images_if_present(*values) -> None:
-    """Raise 400 when any request field carries image content (P2.4 ext-a, R10 class).
+    """Raise 400 when the newest user turn of any request field carries image content
+    (P2.4 ext-a, R10 class; D-165 (4): images only in history are flattened, not refused).
 
     Called with the messages, the Responses ``input`` or the Ollama ``images`` field of
     every completion endpoint; `tests/test_r10_refuse_what_cannot_be_served.py` and
     `tests/test_p24_empty_chain_table.py` discover the routes."""
-    if any(_has_image(v) for v in values):
+    if any(_has_image(_newest_user_turn(v)) for v in values):
         raise HTTPException(status_code=400, detail=_IMAGES_UNSUPPORTED)
 
 

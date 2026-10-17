@@ -20,6 +20,15 @@ The tokens mean:
 
 The gateway returns 400, not 503, because it maps the router's `ValueError`; a 503 would be a separate decision.
 
+The capability filter cannot empty a chain on a tools need from the prompt text: the tools need is hard only when the request body carries a real tools array (the proxy), and the prompt-text tools regex is traced as `capability.shadow` without excluding anything (D-165). Vision and window can empty a chain.
+
+Gateway image parts (D-165 (4)), on every completion route:
+
+- Image parts in the newest user turn (or the Ollama generate `images` field): HTTP 400 with the images-unsupported detail; the router is not called.
+- Image parts only in earlier turns: flattened as before P2.4. The history goes to the context pack, which renders each image as `[image]`; there is no vision need, and the newest turn routes as text.
+
+The newest user turn is the trailing run of role-less content parts (a bare Responses `input` part list), else the last item whose role is `user`. `tests/test_p24_empty_chain_table.py` and `tests/test_p24_capability_hard.py` pin both rows.
+
 Chains the map must not empty:
 
 | situation | behaviour |
