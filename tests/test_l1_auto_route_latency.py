@@ -669,3 +669,80 @@ def test_a_real_hook_run_writes_router_added_ms_and_the_new_phase_names(big, tmp
     assert row["router_added_ms"] <= row["elapsed_ms"] + 0.1
     phases = set(row["phases_ms"])
     assert {"import", "session_io", "engine", "mini_summary", "trend"} <= phases, phases
+
+
+# ── readers of the rotated debug log see every generation ────────────────────────────
+
+def _inv(i: int, day: str = "2026-10-17") -> str:
+    return (f"[{day} 10:00:00] [INVOCATION START] ID={i}.5\n"
+            f"[{day} 10:00:00] [INVOCATION {i}.5] prompt_len=40 session_id=abcdef12\n"
+            f"[{day} 10:00:01] [INVOCATION {i}.5] DIRECT SUCCESS\n")
+
+
+def _rotated(tmp_path: Path) -> Path:
+    """invocations 1-2 in the .2 generation, 3-4 in .1, 5-6 in the live file."""
+    log = tmp_path / "auto-route-debug.log"
+    (tmp_path / "auto-route-debug.log.2").write_text(_inv(1) + _inv(2))
+    (tmp_path / "auto-route-debug.log.1").write_text(_inv(3) + _inv(4))
+    log.write_text(_inv(5) + _inv(6))
+    return log
+
+
+def test_the_hook_and_the_readers_agree_on_how_many_generations_exist(hook):
+    from llm_router import routing_log
+
+    assert hook._DEBUG_LOG_BACKUPS == routing_log.BACKUPS == routing_report._DRAFT_BACKUPS
+
+
+def test_routing_log_load_reads_every_generation(tmp_path):
+    from llm_router import routing_log
+
+    log = _rotated(tmp_path)
+    assert [p.name for p in routing_log.generations(log)] == [
+        "auto-route-debug.log.2", "auto-route-debug.log.1", "auto-route-debug.log"]
+    assert len(routing_log.load(log)) == 6
+
+
+def test_routing_report_counts_every_generation(tmp_path):
+    log = _rotated(tmp_path)
+    assert routing_report._outcome_counts(log)["DIRECT SUCCESS"] == 6
+    assert routing_report.unterminated_invocations(log) == (0, 6)
+
+
+def test_a_log_whose_live_file_was_just_rotated_away_is_still_read(tmp_path):
+    from llm_router import routing_log
+
+    (tmp_path / "auto-route-debug.log.1").write_text(_inv(3) + _inv(4))
+    log = tmp_path / "auto-route-debug.log"  # absent: the next write has not happened yet
+    assert len(routing_log.load(log)) == 2
+    assert routing_report._outcome_counts(log)["DIRECT SUCCESS"] == 2
+
+
+def test_routing_health_and_northstar_read_every_generation(tmp_path):
+    import datetime as dt
+
+    from llm_router import northstar, routing_health
+
+    log = _rotated(tmp_path)
+    assert len(northstar._parse_debug_log(log)) == 6
+    days = routing_health.summarize(log, days=3, today=dt.date(2026, 10, 17))
+    assert sum(d["prompts"] for d in days.values()) == 6
+
+
+def test_an_unwritable_counter_sidecar_is_counted_and_the_answer_is_still_right(tmp_path, monkeypatch):
+    from llm_router import failopen
+
+    log = tmp_path / "auto-route-debug.log"
+    log.write_text(_log_lines(200), encoding="utf-8")
+    seen = []
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, **kw: seen.append(code))
+    real_replace = os.replace
+
+    def boom(src, dst):
+        if str(dst).endswith(".draft_counts.json"):
+            raise OSError("read-only")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(routing_report.os, "replace", boom)
+    assert routing_report.draft_acceptance(log) == _old_full_scan(log)
+    assert seen == ["CHZ-FO-DRAFT-COUNTS-WRITE"]

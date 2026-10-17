@@ -634,10 +634,12 @@ def _parse_debug_log(path: Path | None = None) -> dict[str, dict]:
     """One record per invocation id (which is itself a unix timestamp)."""
     path = path if path is not None else _debug_log_path()
     records: dict[str, dict] = {}
-    if not path.exists():
-        return records
+    from llm_router.routing_log import generations
+
+    lines: list[str] = []
     try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        for gen in generations(path):  # the hook rotates this log: read every generation
+            lines.extend(gen.read_text(encoding="utf-8", errors="replace").splitlines())
     except OSError:
         return records
     for raw in lines:

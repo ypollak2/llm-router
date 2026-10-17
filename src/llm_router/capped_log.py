@@ -79,10 +79,9 @@ def _rotate(path: Path, max_bytes: int, backups: int = 1) -> None:
         except FileNotFoundError:
             return
         for n in range(max(1, backups) - 1, 0, -1):
-            try:
-                os.replace(path.with_name(f"{path.name}.{n}"), path.with_name(f"{path.name}.{n + 1}"))
-            except FileNotFoundError:
-                pass
+            older = path.with_name(f"{path.name}.{n}")
+            if older.exists():  # we hold the rotation lock: nobody else moves these
+                os.replace(older, path.with_name(f"{path.name}.{n + 1}"))
         os.replace(path, path.with_name(path.name + ".1"))
 
 

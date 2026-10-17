@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 
 from llm_router.provider_classes import not_error_row_sql
-from llm_router.routing_log import MIN_SAMPLE, default_log, is_human, is_real, load
+from llm_router.routing_log import MIN_SAMPLE, default_log, generations, is_human, is_real, load
 
 _LATENCY = re.compile(r"latency=(\d+)ms")
 _FILES = re.compile(r"files_read=(\d+)")
@@ -35,7 +35,7 @@ def summarize(log: Path | None = None, days: int = 7,
               today: _dt.date | None = None) -> dict[str, dict]:
     """Per-day counters over the last *days* days (inclusive of today)."""
     path = log or default_log()
-    if not path.exists():
+    if not generations(path):
         return {}
     since = ((today or _dt.date.today()) - _dt.timedelta(days=days - 1)).isoformat()
     out: dict[str, dict] = collections.defaultdict(lambda: {

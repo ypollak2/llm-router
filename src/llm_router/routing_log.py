@@ -16,6 +16,20 @@ _START = re.compile(r"\[(\d{4}-\d\d-\d\d) [\d:]+\] \[INVOCATION START\] ID=([\d.
 _LINE = re.compile(r"\[(\d{4}-\d\d-\d\d) [\d:]+\] \[INVOCATION ([\d.]+)\] (.*)")
 
 
+#: Older generations the routing hook keeps when it rotates the debug log
+#: (``hooks/auto-route.py`` ``_DEBUG_LOG_BACKUPS``; a test pins the two together).
+BACKUPS = 3
+
+
+def generations(path: Path) -> list[Path]:
+    """The debug log's generations that exist, oldest first, the live file last.
+
+    The hook rotates ``auto-route-debug.log`` at a size cap (D-171 A2), so a reader of
+    "the log" that opened only the live file would lose history at every rotation."""
+    older = [path.with_name(f"{path.name}.{n}") for n in range(BACKUPS, 0, -1)]
+    return [p for p in older + [path] if p.exists()]
+
+
 def default_log() -> Path:
     from llm_router import paths
     return paths.state_path("auto-route-debug.log")
@@ -23,7 +37,10 @@ def default_log() -> Path:
 
 def load(path: Path) -> dict[str, dict]:
     inv: dict[str, dict] = {}
-    for line in path.read_text(errors="replace").splitlines():
+    lines: list[str] = []
+    for gen in generations(path):
+        lines.extend(gen.read_text(errors="replace").splitlines())
+    for line in lines:
         m = _LINE.match(line)
         if not m:
             m2 = _START.match(line)

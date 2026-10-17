@@ -17,7 +17,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable
 
-from llm_router import paths
+from llm_router import paths, routing_log
 from llm_router.provider_classes import not_error_row_sql, real_decision_sql
 
 
@@ -217,6 +217,13 @@ def summarise(records: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return days
 
 
+def _generation_lines(log: Path) -> Iterable[str]:
+    """Every line of the debug log across its rotated generations, oldest first."""
+    for gen in routing_log.generations(log):
+        with gen.open(encoding="utf-8", errors="ignore") as fh:
+            yield from fh
+
+
 def draft_acceptance(log: Path | None = None) -> tuple[int, int]:
     """(drafts RELAYED as the answer, drafts OFFERED) over the log.
 
@@ -256,7 +263,7 @@ def draft_acceptance(log: Path | None = None) -> tuple[int, int]:
 # generation the sidecar described is counted, then the newer generations in full.
 # A missing, corrupt or unwritable sidecar costs one full scan, never a wrong count.
 _DRAFT_SIG_BYTES = 256
-_DRAFT_BACKUPS = 3  # generations looked for next to the log; the hook rotates with this many
+_DRAFT_BACKUPS = routing_log.BACKUPS  # generations the hook keeps when it rotates the log
 
 
 def _count_draft_bytes(data: bytes) -> tuple[int, int]:
@@ -355,8 +362,10 @@ def _draft_counts(log: Path) -> tuple[int, int]:
         tmp = side.with_name(side.name + f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(new, separators=(",", ":")), encoding="utf-8")
         os.replace(tmp, side)
-    except Exception:  # noqa: BLE001 -- a counter cache that cannot be written is only slower
-        pass
+    except Exception as exc:  # noqa: BLE001 -- a counter cache that cannot be written is only slower
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-DRAFT-COUNTS-WRITE", exc)
     return (used + tail_u, offered + tail_o)
 
 
@@ -381,10 +390,9 @@ def unterminated_invocations(log: Path | None = None) -> tuple[int, int]:
     were 54% of this file once.
     """
     log = log or (_home() / "auto-route-debug.log")
-    if not log.exists():
+    if not routing_log.generations(log):
         return (0, 0)
-    with log.open(encoding="utf-8", errors="ignore") as fh:
-        days = summarise(parse_log(fh))
+    days = summarise(parse_log(_generation_lines(log)))
     return (
         sum(d["other"] for d in days.values()),
         sum(d["prompts"] for d in days.values()),
@@ -402,10 +410,9 @@ def _outcome_counts(log: Path) -> dict[str, int]:
     non-sessions, so the numbers reconcile with the per-day view and with each
     other.
     """
-    if not log.exists():
+    if not routing_log.generations(log):
         return {k: 0 for k in ("DIRECT SUCCESS", "DIRECT SKIP", "DIRECT FAILED")}
-    with log.open(encoding="utf-8", errors="ignore") as fh:
-        days = summarise(parse_log(fh))
+    days = summarise(parse_log(_generation_lines(log)))
     return {
         "DIRECT SUCCESS": sum(d["success"] for d in days.values()),
         "DIRECT SKIP": sum(d["skipped"] for d in days.values()),
