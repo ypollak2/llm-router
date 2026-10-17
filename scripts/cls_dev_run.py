@@ -61,6 +61,8 @@ class Deps:
         self.monotonic = kw.get("monotonic") or time.monotonic  # the 60 s in-block sampling schedule
         self.engine_tier = kw.get("engine_tier") or D.engine_alone_tier
         self.ollama = kw.get("ollama")            # (url) -> Ollama-like
+        self.mb_tokenizer = kw.get("mb_tokenizer") or D.modernbert_tokenizer  # (cache_dir) -> HF-like tokenizer
+        self.mb_oof = kw.get("mb_oof") or D.modernbert_oof  # (rows, inputs, cache_dir, tok=) -> oof rows
 
 
 # ---------------------------------------------------------------------------------------------
@@ -313,9 +315,9 @@ class OllamaEmbedder:
 
     def __init__(self, ollama, model: str):
         self.ollama, self.model = ollama, model
-        self.info = {"model": model, "model_digest": ollama.tags().get(model), "prefix": EMBED_PREFIX}
+        self.info = {"model": model, "model_digests": ollama.tags().get(P.ollama_name(model)), "prefix": EMBED_PREFIX}
 
-    def count_tokens(self, text):  # a word count is an upper-bound proxy; Ollama truncates at the model limit
+    def count_tokens(self, text):  # whitespace words (no local tokenizer); capped at D.C2_WORD_CAP (CD-18, D-169)
         return D.count_words(text)
 
     def embed(self, texts):
@@ -353,12 +355,13 @@ def make_embedder(cand, a, deps, ollama):
     return BgeEmbedder(read_json(a.pins_static)["params"]["bge_snapshot_dir"])  # pragma: no cover
 
 
-def candidate_inputs(a, deps, rows, count_tokens) -> list[str]:
+def candidate_inputs(a, deps, rows, count_tokens, max_tokens) -> list[str]:
     texts = text_map(a)
     missing = [r["item_id"] for r in rows if r["item_id"] not in texts]
     if missing:
         raise S.CLSExit(S.EXIT_REFUSE, "items file lacks %d manifest items" % len(missing))
-    return [D.model_input(texts[r["item_id"]][1], deps.canonical(texts[r["item_id"]][0]), count_tokens=count_tokens)
+    return [D.model_input(texts[r["item_id"]][1], deps.canonical(texts[r["item_id"]][0]), count_tokens=count_tokens,
+                          max_tokens=max_tokens)
             for r in rows]
 
 
@@ -373,7 +376,7 @@ def cmd_fit_heads(a, deps) -> int:
         rows, c = train_rows(cls_eval, man["items"], truths, rules)
         ollama = get_ollama(a, deps) if a.candidate == "C2" else None
         emb = make_embedder(a.candidate, a, deps, ollama)
-        inputs = candidate_inputs(a, deps, rows, emb.count_tokens)
+        inputs = candidate_inputs(a, deps, rows, emb.count_tokens, D.input_cap(a.candidate)["cap"])
         try:
             vecs = [D.l2_normalise(v) for v in emb.embed(inputs)]
         finally:
@@ -381,7 +384,7 @@ def cmd_fit_heads(a, deps) -> int:
                 D.unload_own(ollama, OLLAMA_MODELS["C2"])
         res = D.fit_candidate(deps.trainer, vecs, rows)
         write_jsonl(a, "oof_%s.jsonl" % a.candidate, res["oof"])
-        art = dict(res["artifact"], candidate=a.candidate, embedder=emb.info, seed=D.SEED, input_cap_tokens=D.TOKEN_CAP,
+        art = dict(res["artifact"], candidate=a.candidate, embedder=emb.info, seed=D.SEED, input_cap=D.input_cap(a.candidate),
                    artifact_sha256=res["artifact_sha256"], truth_rules=rules["rules"])
         write_json(a, "model_%s.json" % a.candidate, art)
         counts.update(c, n_oof=len(res["oof"]), artifact_sha256=res["artifact_sha256"], labels=lc)
@@ -514,7 +517,7 @@ def cmd_fit_modernbert(a, deps) -> int:
             raise S.CLSExit(D.EXIT_MB_GATE, "fit-modernbert needs a trigger file that says fire")
         cache = D.check_mb_cache(a.cls_cache)
         D.check_mb_download_log(a.download_log, cache)
-        cls_eval = D.load_cls_eval(a.cls_eval)  # pragma: no cover (below needs torch and the download)
+        cls_eval = D.load_cls_eval(a.cls_eval)
         man = load_manifest(a)
         rules = truth_rules(a)
         truths, _lc = load_truths(a, man["items"], rules)
@@ -525,8 +528,9 @@ def cmd_fit_modernbert(a, deps) -> int:
             counts.update(park)
             emit(park)
             return D.EXIT_PARK
-        inputs = candidate_inputs(a, deps, rows, D.count_words)
-        oof = D.modernbert_oof(rows, inputs, cache)
+        tok = deps.mb_tokenizer(cache)  # CD-18: real C3 token counts, digest whole, prompt tail kept
+        inputs = candidate_inputs(a, deps, rows, D.hf_token_counter(tok), D.TOKEN_CAP)
+        oof = deps.mb_oof(rows, inputs, cache, tok=tok)
         write_jsonl(a, "oof_C3.jsonl", oof)
         counts.update(c, n_oof=len(oof))
         emit({"candidate": "C3", "n_oof": len(oof), **c})
@@ -677,7 +681,7 @@ def make_l2_scorer(cand, a, deps, ollama):  # pragma: no cover (real models; tes
     emb = make_embedder(cand, a, deps, ollama)
 
     def score(text, digest):
-        x = D.model_input(digest, deps.canonical(text), count_tokens=emb.count_tokens)
+        x = D.model_input(digest, deps.canonical(text), count_tokens=emb.count_tokens, max_tokens=D.input_cap(cand)["cap"])
         return head(D.l2_normalise(emb.embed([x])[0]))
     return score
 
@@ -1017,7 +1021,7 @@ def cmd_assemble(a, deps) -> int:
                               "artifact_sha256": [read_json(mp)["artifact_sha256"]] if mp.exists() else [],
                               "thresholds": {"t_hi": fits[c]["frozen"].get("t_hi"), "t_lo": fits[c]["frozen"].get("t_lo"),
                                              "t_conf": arm["t_conf"]},
-                              "runtime_config": {"model": OLLAMA_MODELS.get(c), "input_cap_tokens": D.TOKEN_CAP,
+                              "runtime_config": {"model": OLLAMA_MODELS.get(c), "input_cap": D.input_cap(c),
                                                  "seed": D.SEED},
                               "dev_cv_metrics": scores[c]["pooled_oos"], "criteria": tables[c],
                               "strata_tables": scores[c].get("strata", {}).get(c),

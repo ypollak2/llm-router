@@ -2207,14 +2207,16 @@ def test_resemble_on_test_syn_needs_a_release_token_and_the_custody_root(ctx, ca
 # =============================================================================================
 
 class _Ollama(http.server.BaseHTTPRequestHandler):
-    digests = {"nimble:9b": "d1", "qwen3.5:latest": "d2", "qwen3-coder:30b": "d3", "nomic-embed-text": "d4"}
+    digests = {"nimble:9b": "d1", "qwen3.5:latest": "d2", "qwen3-coder:30b": "d3", "nomic-embed-text:latest": "d4"}
+    extra: list = []  # (name, digest) rows listed after `digests` (a name may repeat, as in real /api/tags)
     version = "0.99.0"
 
     def do_GET(self):  # noqa: N802
         if self.path == "/api/version":
             body = {"version": type(self).version}
         elif self.path == "/api/tags":
-            body = {"models": [{"name": k, "digest": v} for k, v in type(self).digests.items()]}
+            body = {"models": [{"name": k, "digest": v} for k, v in type(self).digests.items()]
+                    + [{"name": k, "digest": v} for k, v in type(self).extra]}
         else:
             self.send_response(404)
             self.end_headers()
@@ -2240,6 +2242,7 @@ class PinsEnv:
         self.ctx = ctx
         t = ctx.tmp
         ctx.mp.setattr(_Ollama, "digests", dict(_Ollama.digests))
+        ctx.mp.setattr(_Ollama, "extra", [])
         ctx.mp.setattr(_Ollama, "version", "0.99.0")
         self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Ollama)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
@@ -2321,6 +2324,53 @@ def test_static_pins_compute_every_key_and_write_canonical_json(pins):
     raw = pins.static.read_text()
     assert raw.endswith("\n") and raw == P.canonical(json.loads(raw))
     assert pins.verify()["ok"] is True
+
+
+def test_ollama_name_bare_means_latest():
+    assert P.ollama_name("nomic-embed-text") == "nomic-embed-text:latest"
+    assert P.ollama_name("qwen3.5:latest") == "qwen3.5:latest" and P.ollama_name("nimble:9b") == "nimble:9b"
+    assert P.ollama_name("host:5000/m") == "host:5000/m:latest"          # a registry port is not a tag
+    assert P.ollama_name("host:5000/m:7b") == "host:5000/m:7b"
+
+
+def test_ollama_digest_sets_keep_every_digest_sorted_never_last_wins():
+    rows = [{"name": "qwen3.5:latest", "digest": "2e16"}, {"name": "x:1", "digest": "e"},
+            {"name": "qwen3.5:latest", "digest": "44a3"}, {"name": "qwen3.5:latest", "digest": "2e16"}]
+    assert P.ollama_digest_sets(rows) == {"qwen3.5:latest": ["2e16", "44a3"], "x:1": ["e"]}
+    assert P.ollama_digest_sets(list(reversed(rows))) == P.ollama_digest_sets(rows)   # listing order is irrelevant
+    assert P.ollama_digest_sets([{"name": "nomic-embed-text", "digest": "d"}]) == {"nomic-embed-text:latest": ["d"]}
+
+
+def test_static_pin_resolves_bare_nomic_name_to_latest(pins):
+    # real /api/tags lists only `nomic-embed-text:latest`; OLLAMA_MODELS asks for the bare name (D-169 (1))
+    assert "nomic-embed-text" in P.OLLAMA_MODELS and "nomic-embed-text" not in _Ollama.digests
+    doc = pins.build()
+    assert doc["pins"]["ollama"]["digests"]["nomic-embed-text"] == ["d4"]
+    del _Ollama.digests["nomic-embed-text:latest"]
+    with pytest.raises(S.CLSExit) as e:
+        P.build_static(pins.params)
+    assert e.value.code == S.EXIT_PINS and "ollama" in str(e.value)
+
+
+def test_static_pin_records_all_digests_of_a_duplicate_name_and_verify_fails_on_set_change(pins):
+    _Ollama.extra = [("qwen3.5:latest", "44a3")]          # listed twice, as qwen3.5:latest is (D-169 (2))
+    doc = pins.build()
+    assert doc["pins"]["ollama"]["digests"]["qwen3.5:latest"] == ["44a3", "d2"]
+    assert all(isinstance(v, list) for v in doc["pins"]["ollama"]["digests"].values())
+    assert pins.verify()["ok"] is True
+    _Ollama.digests = {"qwen3.5:latest": "44a3", **{k: v for k, v in _Ollama.digests.items() if k != "qwen3.5:latest"}}
+    _Ollama.extra = [("qwen3.5:latest", "d2")]            # same set, other listing order: still ok
+    assert pins.verify()["ok"] is True
+    _Ollama.extra = []                                    # one digest gone: the set changed
+    res = pins.verify()
+    assert res["ok"] is False and res["mismatches"] == ["ollama.digests.qwen3.5:latest"]
+    _Ollama.extra = [("qwen3.5:latest", "d2"), ("qwen3.5:latest", "ffff")]   # one digest added
+    res = pins.verify()
+    assert res["ok"] is False and res["mismatches"] == ["ollama.digests.qwen3.5:latest"]
+    _Ollama.extra = [("qwen3.5:latest", "d2")]
+    assert P.main(["pins", "--verify", str(pins.static), "--pins-run", str(pins.run_file)]) == 0
+    _Ollama.extra = []
+    assert P.main(["pins", "--verify", str(pins.static), "--pins-run", str(pins.run_file)]) == S.EXIT_PINS
 
 
 def test_freeze_line_format_and_cli_pins(pins, capsys):
