@@ -24,76 +24,29 @@ from llm_router.provider_classes import not_error_row_sql, real_decision_sql
 def executed_routes(
     window_hours: float = 24.0, db_path=None, timeout_s: float = 0.25,
 ) -> dict | None:
-    """Count served runtime decisions in a UTC window without creating a DB."""
-    con = None
+    """Count served runtime decisions in the rolling ``window_hours`` window without creating a DB.
+
+    P3.4-A: delegates to ``ledger_view`` (runtime provenance, real decisions, plus proxy ledger
+    rows once each; the window is the named one when ``window_hours`` is 6/24/168/336)."""
+    from llm_router import ledger_view as lv
+
     try:
-        p = Path(db_path if db_path is not None else (
-            os.environ.get("LLM_ROUTER_DB_PATH") or paths.state_path("usage.db")
-        ))
-        if not p.is_file():
-            return None
-        con = sqlite3.connect(
-            f"{p.resolve().as_uri()}?mode=ro", uri=True, timeout=timeout_s,
-        )
-        cols = {r[1] for r in con.execute("PRAGMA table_info(routing_decisions)")}
-        provenance = "AND provenance = 'runtime'" if "provenance" in cols else ""
-        rows = con.execute(
-            "SELECT COALESCE(NULLIF(final_provider, ''), 'unknown'), COUNT(*) "
-            "FROM routing_decisions WHERE timestamp >= datetime('now', ?) "
-            f"{provenance} AND ({real_decision_sql(con)}) "
-            "GROUP BY COALESCE(NULLIF(final_provider, ''), 'unknown')",
-            (f"-{window_hours} hours",),
-        ).fetchall()
-        by_provider = {provider: int(n) for provider, n in rows}
-        return {
-            "window_hours": window_hours,
-            "total": sum(by_provider.values()),
-            "by_provider": by_provider,
-            "local_by_cause": _local_by_cause(con, cols, provenance, window_hours),
-        }
+        bounds = lv.rolling(window_hours)
+        by_provider = lv.executed_by_provider(bounds, db_path=db_path, timeout_s=timeout_s)
+        by_cause = lv.local_by_cause(bounds, db_path=db_path, timeout_s=timeout_s)
     except (sqlite3.Error, OSError):
         return None
-    finally:
-        if con is not None:
-            try:
-                con.close()
-            except sqlite3.Error:
-                pass
-
-
-def _local_by_cause(con, cols: set, provenance: str, window_hours: float) -> dict[str, int]:
-    """Split the served-local count by why local served (F23): ``bench`` (a benched provider was
-    skipped), ``last_resort`` (D-116: a non-local entry was skipped or failed first),
-    ``other_skip`` (something else was skipped), ``policy`` (nothing skipped: local was the
-    chain's own choice), ``unknown`` (the row predates ``skipped_json`` or its writer kept no
-    skip list). One cause per row, first match wins in that order. Same window, provenance and
-    real-decision filter as ``executed_routes``."""
-    from llm_router import skip_causes as sc
-    from llm_router.qa_policy import QA_STRIP_PROVIDERS
-
-    out = {c: 0 for c in sc.CAUSES}
-    local = sorted(QA_STRIP_PROVIDERS)
-    marks = ",".join("?" for _ in local)
-    if "skipped_json" in cols and "served_by_last_resort" in cols:
-        case = (
-            "CASE WHEN skipped_json IS NULL THEN 'unknown' "
-            "WHEN skipped_json LIKE '%\"reason\":\"bench\"%' THEN 'bench' "
-            "WHEN served_by_last_resort = 1 THEN 'last_resort' "
-            "WHEN skipped_json != '[]' THEN 'other_skip' "
-            "ELSE 'policy' END"
-        )
-    else:
-        case = "'unknown'"
-    rows = con.execute(
-        f"SELECT {case}, COUNT(*) FROM routing_decisions "
-        "WHERE timestamp >= datetime('now', ?) "
-        f"{provenance} AND ({real_decision_sql(con)}) "
-        f"AND COALESCE(final_provider, '') IN ({marks}) GROUP BY 1",
-        (f"-{window_hours} hours", *local),
-    ).fetchall()
-    for cause, n in rows:
-        out[cause] = int(n)
-    return out
+    if by_provider is None:
+        return None
+    if by_cause is None:
+        from llm_router import skip_causes as sc
+        by_cause = {c: 0 for c in sc.CAUSES}
+    return {
+        "window_hours": window_hours,
+        "total": sum(by_provider.values()),
+        "by_provider": by_provider,
+        "local_by_cause": by_cause,
+    }
 
 
 def executed_provider_rows(result: dict) -> list[tuple[str, int]]:

@@ -459,6 +459,10 @@ class Surface:
     #: What it does instead, when `canonical` is False. Required: an unmigrated
     #: surface with no stated discrepancy is a surface nobody has looked at.
     divergence: str = ""
+    #: P3.4-A / D-194: True once the surface's executed-by-provider, local/paid mix, saved and
+    #: window come from `ledger_view` (one definition per metric, one localtime window table).
+    #: `tests/test_p34a_ledger_view_identity.py` pins the flagged surfaces to identical figures.
+    ledger_view: bool = False
 
 
 #: Every user-facing savings surface found by the 2026-09-22 audit.
@@ -472,7 +476,7 @@ SURFACES: tuple[Surface, ...] = (
             "headline from canonical_savings; the per-model free/paid "
             "breakdown still reads savings_stats (the only table carrying it) "
             "but is now provenance-filtered the same way, and the ledger total "
-            "is shown BESIDE the canonical figure, never instead of it"),
+            "is shown BESIDE the canonical figure, never instead of it", ledger_view=True),
     Surface("cli_share", "commands/share.py:242", False,
             "SONNET baseline BY DESIGN — the card's framing is 'cheaper than "
             "always-Sonnet', so canonicalising the baseline would change what "
@@ -483,8 +487,8 @@ SURFACES: tuple[Surface, ...] = (
             "raw SQL over routing_decisions; no filter; hardcoded per-model "
             "multiplier table as a fourth baseline methodology"),
     Surface("cli_status_premium", "ui/status_premium.py:134", False,
-            "dashboard_data.query_window, which has zero provenance-filter "
-            "references anywhere in the module"),
+            "dashboard_data.summary -> ledger_view (P3.4-A): production provenance "
+            "and the named localtime windows; still not canonical_savings()", ledger_view=True),
     Surface("hook_session_end_headline", "hooks/session-end.py:806", False,
             "raw SQL over usage; no provenance filter; 'Net saved' means net "
             "of SPEND, not of routing overhead"),
@@ -508,10 +512,10 @@ SURFACES: tuple[Surface, ...] = (
     Surface("web_dashboard_tiles", "dashboard/server.py:1039", False,
             "raw SQL over usage; unfiltered; SONNET baseline"),
     Surface("web_dashboard_metrics", "dashboard/server.py:1276", False,
-            "cost.get_savings_by_period — filtered, but GROSS and Opus-based"),
+            "cost.get_savings_by_period — filtered, but GROSS and Opus-based", ledger_view=True),
     Surface("mcp_llm_savings", "tools/admin.py:672", False,
             "cost.get_savings_by_period — filtered; splits 'Avoided' from "
-            "'Real $' on its own axis"),
+            "'Real $' on its own axis", ledger_view=True),
     Surface("mcp_llm_usage_cache", "tools/admin.py:159", False,
             "cost.get_cache_savings — filtered, gross"),
     Surface("mcp_llm_usage_routing", "tools/admin.py:175", False,
@@ -527,15 +531,14 @@ SURFACES: tuple[Surface, ...] = (
     Surface("terminal_session_summary", "observability/summary.py:218", False,
             "PR5: does not call canonical_savings() (that reads claude_usage/"
             "codex_usage/gemini_usage, a DIFFERENT table with no realized-vs-"
-            "discarded provenance). Reads savings_stats directly via this "
-            "module's own VERIFIED_SAVED_SQL/UNVERIFIED_SAVED_SQL/"
-            "savings_split_sql — sync stdlib sqlite3, read-only, no DB-creation "
-            "side effect (an aiosqlite connection via cost._get_db() would "
-            "create ~/.llm-router/usage.db on every `llm-router summary`). "
-            "Shown beside the lineage-derived baseline-equivalent estimate "
-            "(a routing-decision counterfactual, not a verified saving), "
-            "never instead of it — see summary._verified_savings_window and "
-            "summary._lineage_verified_state"),
+            "discarded provenance). P3.4-A: verified/unverified dollars, executed-by-provider "
+            "and the mix come from ledger_view (sync stdlib sqlite3, read-only, no DB-creation "
+            "side effect), the same figures dashboard_data.summary prints for the same window; "
+            "shown beside the lineage-derived baseline-equivalent estimate (a routing-decision "
+            "counterfactual, not a verified saving), never instead of it", ledger_view=True),
+    Surface("cli_kpi_o1", "commands/kpi.py:1505", False,
+            "O1's estimate is dashboard_data.summary -> ledger_view (P3.4-A); the "
+            "reconciled branch reads the proxy ledger's real per-call usage instead", ledger_view=True),
 )
 
 
