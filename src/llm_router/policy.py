@@ -22,6 +22,11 @@ from llm_router.types import ClassificationResult
 
 from llm_router import paths
 
+#: libyaml's C loader parses the policy files ~10x faster than the pure-Python
+#: ``SafeLoader`` and has the same safe-tag set and the same ``YAMLError`` family.
+#: It is absent from a PyYAML built without libyaml, hence the fallback (D-171 A3).
+_SafeLoader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
 
 @dataclass(frozen=True)
 class RoutingPolicy:
@@ -217,7 +222,7 @@ class PolicyManager:
         """
         try:
             with open(path) as f:
-                data = yaml.safe_load(f)
+                data = yaml.load(f, Loader=_SafeLoader)
         except yaml.YAMLError as e:
             raise ValueError(f"Invalid YAML in {path}: {e}")
         except OSError as e:
@@ -464,7 +469,7 @@ def load_org_policy(path: Path | None = None) -> OrgPolicy | None:
 
     try:
         with open(path) as f:
-            data = yaml.safe_load(f) or {}
+            data = yaml.load(f, Loader=_SafeLoader) or {}
 
         return OrgPolicy(
             block_providers=data.get("block_providers", []),

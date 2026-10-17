@@ -638,7 +638,9 @@ def test_a_real_auto_route_process_that_classifies_and_logs_names_those_phases(t
 #: Every phase name each hook may write. A phase in a code path a unit run does not reach
 #: (draft_chain needs a model, session-start spawns processes) is pinned here by reading the source.
 _PHASE_NAMES = {
-    "auto-route": {"session_io", "zce", "hud", "classify", "db_write", "draft_chain"},
+    # D-171 L1: engine / availability / mini_summary / trend name time that was unattributed.
+    "auto-route": {"session_io", "zce", "hud", "classify", "db_write", "draft_chain",
+                   "engine", "availability", "mini_summary", "trend"},
     "status-bar": {"read_cache", "spawn"},  # P0.9-b
     # P0.9: ollama_up, pxpipe and rules_update moved into the background child.
     "session-start": {"session_io", "reset_state", "proxy_health", "usage", "hints", "bg_spawn", "banner"},
