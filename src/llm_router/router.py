@@ -27,7 +27,7 @@ from typing import Any, AsyncIterator, TYPE_CHECKING
 from contextvars import ContextVar
 from uuid import uuid4
 
-from llm_router import cost, media, provider_reset, providers
+from llm_router import cost, media, provider_reset, providers, skip_causes
 from llm_router.cost import (  # constants, so a test that patches ``cost`` keeps the codes
     REASON_ERROR_ALL_FAILED,
     REASON_ERROR_BUDGET,
@@ -105,6 +105,22 @@ _COMPLEXITY_TO_PROFILE: dict[Complexity, RoutingProfile] = {
 }
 
 log = get_logger("llm_router.router")
+
+
+class NoRoutableModelsError(ValueError):
+    """F25 / D-170: the candidate chain for ``task_type``/``profile`` came out empty, so nothing was
+    attempted. A ``ValueError`` (every existing handler still catches it) that carries the chain's
+    name, so a door can refuse with its own reason instead of a generic ``error_exception``."""
+
+    def __init__(self, message: str, task_type: TaskType, profile: RoutingProfile) -> None:
+        super().__init__(message)
+        self.task_type = task_type
+        self.profile = profile
+
+
+#: F25 / D-170 (3): (profile, task) pairs whose empty dynamic chain was already logged at WARNING,
+#: so a long-lived server says it once per chain instead of on every call.
+_EMPTY_DYNAMIC_CHAIN_WARNED: set[tuple[str, str]] = set()
 
 
 class RoutingDenied(RuntimeError):
@@ -370,6 +386,12 @@ def _task_aware_default_order(models: list[str], task_type: "TaskType") -> list[
     return sorted(rotated, key=_score, reverse=True)
 
 
+def _note_dropped(before: list[str], after: list[str], reason: str) -> None:
+    """F23: record every entry a chain-build filter removed (no-op outside a call)."""
+    kept = set(after)
+    skip_causes.note_many([m for m in before if m not in kept], reason)
+
+
 async def _build_and_filter_chain(
     task_type: TaskType,
     profile: RoutingProfile,
@@ -377,6 +399,8 @@ async def _build_and_filter_chain(
     complexity_hint: Complexity | str | None,
     c: Complexity,
     config,
+    *,
+    last_resort_floor: bool = True,
 ) -> list[str]:
     """Build and filter the ordered list of candidate models to try.
 
@@ -390,9 +414,13 @@ async def _build_and_filter_chain(
         complexity_hint: Raw complexity hint (string or enum) for dynamic chain selection.
         c: Resolved Complexity enum (from _resolve_profile).
         config: Application config.
+        last_resort_floor: F26 / D-175. When a TEXT chain is still empty after every filter and
+            injection, answer from the floor (:func:`_empty_chain_floor`). The proxy passes False:
+            its chain is informational and must not change.
 
     Returns:
-        Ordered list of model identifiers, highest priority first. May be empty.
+        Ordered list of model identifiers, highest priority first. May be empty (media tasks, or
+        when not even the floor reaches a model).
     """
     # Defined up front so the pin re-assert and the headless codex re-assert
     # (both near the return) never hit UnboundLocalError on paths that skip the
@@ -486,6 +514,16 @@ async def _build_and_filter_chain(
         dynamic_chain = get_dynamic_model_chain(profile, task_type)
         if dynamic_chain is not None:
             models_to_try = dynamic_chain
+            _chain_key = (profile.value, task_type.value)
+            if not dynamic_chain and _chain_key not in _EMPTY_DYNAMIC_CHAIN_WARNED:
+                # F25 / D-170 (3): an empty table entry is taken as the whole chain (the static
+                # chain is not consulted), so only injected local/CLI models can serve it.
+                _EMPTY_DYNAMIC_CHAIN_WARNED.add(_chain_key)
+                log.warning(
+                    "Dynamic routing chain %s/%s is empty: no provider in the session-start "
+                    "table can serve it; only injected local/CLI models remain",
+                    profile.value, task_type.value,
+                )
             log.debug(
                 "Using session-start dynamic routing table for %s/%s",
                 profile.value, task_type.value,
@@ -528,27 +566,20 @@ async def _build_and_filter_chain(
         # legitimate anthropic/* entries were ALSO being dropped, leaving an
         # empty chain — the router's worst possible failure mode.
         available = config.available_providers
-        _codex_ok = is_codex_available()
-        _gemini_cli_ok = is_gemini_cli_available()
-        _ollama_ok = bool(config.all_ollama_models())
-        _claude_sub_ok = bool(config.llm_router_claude_subscription)
-        models_to_try = [
-            m for m in models_to_try
-            if provider_from_model(m) in available
-            or (provider_from_model(m) == "codex" and _codex_ok)
-            or (provider_from_model(m) == "gemini_cli" and _gemini_cli_ok)
-            or (provider_from_model(m) == "ollama" and _ollama_ok)
-            or (provider_from_model(m) == "anthropic" and _claude_sub_ok)
-        ]
+        _before_avail = models_to_try
+        models_to_try = _keep_reachable_providers(models_to_try, config)
+        _note_dropped(_before_avail, models_to_try, skip_causes.UNAVAILABLE)
 
         # ── Repo config: block_providers + model/provider pin ─────────────────
         repo_cfg = get_repo_config()
         if repo_cfg.block_providers:
             blocked = set(repo_cfg.block_providers)
+            _before_block = models_to_try
             models_to_try = [
                 m for m in models_to_try
                 if provider_from_model(m) not in blocked
             ]
+            _note_dropped(_before_block, models_to_try, skip_causes.BLOCKED)
 
         # ── Policy engine ─────────────────────────────────────────────────────
         from llm_router.policy import OrgPolicy, apply_policy
@@ -567,9 +598,11 @@ async def _build_and_filter_chain(
             source="merged",
         )
         if _merged_block or _merged_allow:
+            _before_policy = models_to_try
             models_to_try, _policy_blocked = apply_policy(
                 models_to_try, task_type.value, _policy,
             )
+            _note_dropped(_before_policy, models_to_try, skip_causes.POLICY)
 
         # Per-task pins AND the local-first Ollama injection below apply ONLY to
         # the cheap tiers (BUDGET / BALANCED). Complex and deep-reasoning tasks
@@ -606,6 +639,9 @@ async def _build_and_filter_chain(
             configured=_gate_names, read_routing_yaml=False,
         )
         _unvalidated_tail.extend(_ollama_tail)
+        # F23: unvalidated local models dropped from a critical chain (P0.15 gate).
+        _known_local = set(ollama_models) | set(_ollama_tail)
+        skip_causes.note_many([m for m in _local_all if m not in _known_local], skip_causes.CAPABILITY_FILTERED)
         if ollama_models:
             # Without an explicit pin, every task type used to see this SAME
             # list prepended in the SAME order — so whichever model happened to
@@ -955,31 +991,9 @@ async def _build_and_filter_chain(
             if m not in _seen and not _seen.add(m)  # type: ignore[func-returns-value]
         ]
 
-        # ── Quota-balanced reordering (v7.1.0) ─────────────────────────────────
-        # QUOTA_BALANCED: dynamically reorder chain to balance usage across
-        # Claude, Gemini CLI, and Codex subscription providers.
-        if profile == RoutingProfile.QUOTA_BALANCED:
-            try:
-                from llm_router.quota_balance import (
-                    get_provider_pressures,
-                    get_balanced_provider_order,
-                    reorder_chain_by_providers,
-                )
-                pressures = await get_provider_pressures()
-                order = get_balanced_provider_order(pressures)
-                models_to_try = reorder_chain_by_providers(models_to_try, order)
-
-                # Log priority change with visual indicator
-                spread = max(pressures.values()) - min(pressures.values())
-                in_band = spread <= 0.10
-                log.info(
-                    "🔄 QUOTA_BALANCED: Provider priorities reordered | Spread: %s | Providers: %s | Reason: %s",
-                    f"{spread:.0%}",
-                    " → ".join([f"{p}({pressures[p]:.0%})" for p in order]),
-                    "all balanced (free-first tiebreak)" if in_band else f"imbalanced — prioritize {order[0]}",
-                )
-            except Exception as _quota_err:
-                log.warning("QUOTA_BALANCED reordering failed: %s", _quota_err)
+        # P2.3: the QUOTA_BALANCED reorder moved to route_and_call (one score
+        # pass after sink_unvalidated, before the D-116 strip); see
+        # docs/prereg/PREREG-P23-quota-score.md
 
         # ── Final pin re-assert ─────────────────────────────────────────────
         # _reorder_for_agent_context groups the chain strictly by provider tier
@@ -987,7 +1001,7 @@ async def _build_and_filter_chain(
         # per-task pin, so for SIMPLE/MODERATE complexity it unconditionally
         # returns `ollama + codex + ...` — silently burying a pin like
         # analyze -> codex/gpt-5.4 behind every local model. The routing-policy
-        # and QUOTA_BALANCED passes below it can do the same. An explicit user
+        # pass below it can do the same. An explicit user
         # pin is the strongest signal in the system, so it must win over all of
         # them; re-assert it here, after every reorder, right before return.
         if pinned_model:
@@ -1029,9 +1043,11 @@ async def _build_and_filter_chain(
     # headless gateway daemon — see _blocked_providers().
     _blocked = _blocked_providers()
     if _blocked:
+        _before_hard = models_to_try
         models_to_try = [
             m for m in models_to_try if provider_from_model(m) not in _blocked
         ]
+        _note_dropped(_before_hard, models_to_try, skip_causes.BLOCKED)
         if not models_to_try:
             log.warning(
                 "LLM_ROUTER_BLOCK_PROVIDERS=%s removed every candidate for %s/%s — "
@@ -1043,12 +1059,15 @@ async def _build_and_filter_chain(
     # P1.8: the resource map, when a fresh one is on disk, drops resources that are
     # not connected and orders by its effective_priority. No map, no change. An
     # explicit pin or the headless codex re-assert above keeps its place (filter only).
-    _keep_order = bool(pinned_model) or (
+    # QUOTA_BALANCED also only filters: its later score uses effective_priority.
+    _keep_order = bool(pinned_model) or profile == RoutingProfile.QUOTA_BALANCED or (
         "codex" in _broker_provs
         and profile in (RoutingProfile.PREMIUM, RoutingProfile.REASONING)
     )
     from llm_router import map_reader
+    _before_map = models_to_try
     models_to_try = map_reader.apply_to_chain(models_to_try, reorder=not _keep_order)
+    _note_dropped(_before_map, models_to_try, skip_causes.UNAVAILABLE)
 
     # ── Unvalidated local models: last, after every reorder (P0.15, D-60c = A) ──
     # Appended here, not at the injection point: the agent-context reorder, the
@@ -1068,11 +1087,143 @@ async def _build_and_filter_chain(
         _tail = map_reader.apply_to_chain(_tail, reorder=False)
         models_to_try = models_to_try + _tail
 
+    # F26 / D-175: a TEXT chain that is still empty after every filter and injection gets the floor.
+    # A non-empty chain is returned untouched; media keeps raising (its static entries need keys).
+    if not models_to_try and last_resort_floor and task_type not in MEDIA_TASK_TYPES:
+        return _empty_chain_floor(
+            task_type, profile, config, repo_cfg, _policy, _merged_block, _merged_allow,
+            _broker_provs, _gate_critical, _gate_names,
+        )
+
     # M3.0: the Q&A local strip is NOT applied here. This builder is shared with the
     # proxy (proxy/backends.py policy_chain), whose routing must not change. The strip
     # lives in route_and_call (primary chain, after the specialist and bandit steps) and
     # at the emergency BUDGET build.
     return models_to_try
+
+
+def _keep_reachable_providers(models: list[str], config) -> list[str]:
+    """The provider filter of ``_build_and_filter_chain``: keep a model only when its provider is
+    configured, or its subprocess/local/subscription tier is really available (not a phantom entry).
+    Shared with the F26 floor so both apply the same predicate. Subscription mode never exports an
+    Anthropic API key, so ``anthropic/*`` survives only through the Claude CLI subscription."""
+    available = config.available_providers
+    _codex_ok = is_codex_available()
+    _gemini_cli_ok = is_gemini_cli_available()
+    _ollama_ok = bool(config.all_ollama_models())
+    _claude_sub_ok = bool(config.llm_router_claude_subscription)
+    return [
+        m for m in models
+        if provider_from_model(m) in available
+        or (provider_from_model(m) == "codex" and _codex_ok)
+        or (provider_from_model(m) == "gemini_cli" and _gemini_cli_ok)
+        or (provider_from_model(m) == "ollama" and _ollama_ok)
+        or (provider_from_model(m) == "anthropic" and _claude_sub_ok)
+    ]
+
+
+#: F26 / D-175: (profile, task) pairs whose empty chain was already answered from the floor and
+#: logged at WARNING, so a long-lived server says it once per chain.
+_FLOOR_WARNED: set[tuple[str, str]] = set()
+
+#: F26 / D-175: the floor tier of the last chain it served, per (profile, task). A tier is
+#: ``local`` | ``cli`` | ``claude_cli`` | ``static``.
+_FLOOR_TIERS: dict[tuple[str, str], str] = {}
+
+
+def _floor_tier_of(model: str) -> str:
+    prov = provider_from_model(model)
+    if prov in ("ollama", "openai_compat"):
+        return "local"
+    if prov in ("codex", "gemini_cli"):
+        return "cli"
+    if prov == "anthropic":
+        return "claude_cli"
+    return "static"
+
+
+def record_floor_tier(task_type: TaskType, profile: RoutingProfile, tier: str) -> None:
+    """F26 / D-175: record which floor tier answers an empty chain. Writes the module table and the
+    ledger guard (``call_identity.note_ledger_floor_tier``).
+
+    Also emits a ``floor`` skip-cause entry carrying the tier (F23 API), so the routing row's
+    ``skipped_json`` shows it and ``routing_report`` splits it out. This is the single hook."""
+    _FLOOR_TIERS[(profile.value, task_type.value)] = tier
+    _ci_scope.note_ledger_floor_tier(tier)
+    skip_causes.note(f"floor/{tier}", skip_causes.FLOOR, tier=tier)
+
+
+def _empty_chain_floor(
+    task_type: TaskType,
+    profile: RoutingProfile,
+    config,
+    repo_cfg,
+    policy,
+    merged_block: list[str],
+    merged_allow: list[str],
+    broker_provs: frozenset[str],
+    gate_critical: bool,
+    gate_names,
+) -> list[str]:
+    """F26 / D-175 (option b): the last-resort chain for a TEXT task whose chain is empty.
+
+    Order: local models (any profile, P0.15 promote gate honoured), then Codex / Gemini CLI when
+    reachable (any text task), then the static chain re-filtered by the same provider predicate as
+    the main build (so Claude only through the CLI subscription, never an API key in subscription
+    mode), Claude entries last (D-116). The block / policy / hard-block / resource-map filters are
+    applied again, so they still win. ``[]`` when nothing is reachable: the caller raises
+    ``NoRoutableModelsError`` naming the chain."""
+    disabled = _disabled_subprocess_backends()
+    local_front, local_tail = order_for_chain(
+        config.all_ollama_models(), task_type.value, critical=gate_critical,
+        configured=gate_names, read_routing_yaml=False,
+    )
+    local = _task_aware_default_order(local_front, task_type) if local_front else []
+    cli: list[str] = []
+    if (is_codex_available() and "codex" not in disabled) or "codex" in broker_provs:
+        cli += [f"codex/{m}" for m in CODEX_MODELS[:2]]
+    if (is_gemini_cli_available() and "gemini_cli" not in disabled) or "gemini_cli" in broker_provs:
+        cli += [f"gemini_cli/{m}" for m in GEMINI_MODELS[:2]]
+    static = _keep_reachable_providers(
+        get_model_chain(
+            profile, task_type,
+            is_subscription_mode=bool(
+                config.llm_router_claude_subscription or config.llm_router_gemini_subscription
+            ),
+        ),
+        config,
+    )
+    static = [m for m in static if provider_from_model(m) != "anthropic"] + [
+        m for m in static if provider_from_model(m) == "anthropic"
+    ]
+    seen: set[str] = set()
+    chain = [m for m in local + cli + static + local_tail if not (m in seen or seen.add(m))]  # type: ignore[func-returns-value]
+
+    if repo_cfg.block_providers:
+        _bp = set(repo_cfg.block_providers)
+        chain = [m for m in chain if provider_from_model(m) not in _bp]
+    if chain and (merged_block or merged_allow):
+        from llm_router.policy import apply_policy
+
+        chain, _ = apply_policy(chain, task_type.value, policy)
+    _blocked_now = _blocked_providers()
+    if _blocked_now:
+        chain = [m for m in chain if provider_from_model(m) not in _blocked_now]
+    from llm_router import map_reader
+
+    chain = map_reader.apply_to_chain(chain, reorder=False)
+    if chain:
+        tier = _floor_tier_of(chain[0])
+        record_floor_tier(task_type, profile, tier)
+        key = (profile.value, task_type.value)
+        if key not in _FLOOR_WARNED:
+            _FLOOR_WARNED.add(key)
+            log.warning(
+                "Routing chain %s/%s has no model after filters and injections; answering from the "
+                "last-resort floor (first tier: %s, chain: %s)",
+                profile.value, task_type.value, tier, chain,
+            )
+    return chain
 
 
 def _resolve_profile(
@@ -1540,6 +1691,33 @@ def _local_in_timeout_cooldown(model: str) -> bool:
     t = _local_timeout_at.get(model)
     cooldown = _local_timeout_cooldown_s()
     return t is not None and cooldown > 0 and time.monotonic() - t < cooldown
+
+
+def _quota_score_chain(
+    models: list[str], task_type, *, exempt: str | None = None,
+) -> list[str]:
+    """One subscription score pass; constants stay in resource_map (P2.3 prereg)."""
+    try:
+        from llm_router import map_reader, qa_policy, resource_map
+
+        map_data = map_reader.load_data() or resource_map.live_subscription_rows()
+        tt = getattr(task_type, "value", task_type)
+        hold = frozenset({"anthropic"}) if tt in qa_policy.QA_TASK_TYPES else frozenset()
+        new, explains = resource_map.order_chain(
+            models, map_data, {"task_type": tt, "needs": ()},
+            hold_providers=hold, exempt=exempt,
+        )
+        log.debug(
+            "quota_score providers=%s explains=%s",
+            [m.split("/", 1)[0] for m in new],
+            [{k: e.get(k) for k in ("resource", "score", "terms")} for e in explains],
+        )
+        return new
+    except Exception as exc:
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-ROUTER-QUOTA-SCORE", exc)
+        return models
 
 
 def _demote_timed_out_local(models: list[str], exempt: str | None = None) -> list[str]:
@@ -2569,6 +2747,10 @@ async def _finalize_successful_route(
     # actually resolved for model selection, and the model that actually ran.
     _cd = classification_data or {}
     _unhinted = classification_data is None
+    # F23: what the loop passed over before this answer, and whether D-116 served it last.
+    from llm_router.quality_feedback import is_skip_marker as _is_skip_marker
+    _skipped = skip_causes.entries_so_far()
+    _failed_before = [m for m in chain_attempts if m != model and not _is_skip_marker(m)]
     try:
         from llm_router import call_identity as _call_identity
 
@@ -2648,6 +2830,9 @@ async def _finalize_successful_route(
             # started from a Claude Code shell inherits its session id. See call_identity.py.
             session_id=_call_identity.call_session_id(),
             tool_use_id=_call_identity.tool_use_id(),
+            skipped=_skipped,
+            served_by_last_resort=skip_causes.served_by_last_resort(
+                response.provider, _cd.get("task_type", task_type.value), _skipped, _failed_before),
         )
         if classification_data:
             if response.provider in {"claude_subscription", "subscription", "anthropic", "claude"}:
@@ -2783,6 +2968,9 @@ async def _dispatch_model_loop(
     conversation: list | None = None,
     # The P1.1 door that supplied ``conversation``: "gateway" (the SDK packs in sdk.py, D-98).
     context_door: str = "gateway",
+    # P2.4: the request's capability needs, computed once by route_and_call (None =
+    # filter off); the emergency BUDGET chain is filtered with the same needs.
+    capability_needs: Any = None,
 ) -> LLMResponse:
     """Execute the main model dispatch loop with primary + emergency fallback chains.
 
@@ -2940,9 +3128,16 @@ async def _dispatch_model_loop(
             and (_local_timed_out_in_call or _local_in_timeout_cooldown(model))
         ):
             chain_errors.append((model, "skipped:local_timeout_with_answer_in_hand"))
+            skip_causes.note(model, skip_causes.LOCAL_TIMEOUT)
             continue
 
         if not tracker.is_healthy(provider):
+            # F23: a persisted usage-limit bench (until=epoch) is not a breaker trip.
+            _bench_until = provider_reset.get_provider_reset_until(provider)
+            if _bench_until is not None:
+                skip_causes.note(model, skip_causes.BENCH, kind="provider_reset", until=_bench_until)
+            else:
+                skip_causes.note(model, skip_causes.BREAKER)
             await _notify(ctx, "warning", f"⚠️  {provider} unhealthy — trying next")
             log.info("Skipping unhealthy provider: %s", provider)
             route_log.warning(
@@ -2974,6 +3169,7 @@ async def _dispatch_model_loop(
             rbac_skipped.append(
                 (model, f"classification:{task_type.value}->{provider}")
             )
+            skip_causes.note(model, skip_causes.ALLOWLIST)
             continue
         elif _cls_mode == _CLS_WARN and not _cls_ok:
             route_log.warning(
@@ -3017,6 +3213,7 @@ async def _dispatch_model_loop(
                     max_cost_per_task=max_cost_per_task,
                 )
                 cost_skipped.append((model, projected))
+                skip_causes.note(model, skip_causes.BUDGET)
                 continue
 
         # T3-XL1: agent-aware routing policy gates. Two checks, both
@@ -3041,6 +3238,7 @@ async def _dispatch_model_loop(
                         policy_skipped.append(
                             (model, f"policy:provider:{provider}")
                         )
+                        skip_causes.note(model, skip_causes.AGENT_POLICY)
                         continue
                     else:  # warn — log, proceed
                         route_log.warning(
@@ -3079,6 +3277,7 @@ async def _dispatch_model_loop(
                     policy_skipped.append(
                         (model, f"policy:turn_cost:{_turn_projected:.4f}")
                     )
+                    skip_causes.note(model, skip_causes.AGENT_POLICY)
                     continue
 
         # Quality feedback: skip models with poor track record for this task pattern.
@@ -3117,6 +3316,7 @@ async def _dispatch_model_loop(
                 _stats = get_quality_stats(model, task_type.value, c.value)
                 _avg, _n = _stats if _stats is not None else (0.0, 0)
                 chain_attempts.append(format_skip_marker(model, _avg, _n))
+                skip_causes.note(model, skip_causes.QUALITY)
                 continue
         except Exception as e:
             log.warning("quality_feedback_failed", error=str(e))
@@ -3137,6 +3337,7 @@ async def _dispatch_model_loop(
             log.info("Skipping budget-exhausted provider: %s", provider)
             last_error = BudgetExceededError(f"{provider} budget exhausted")
             chain_errors.append((model, "budget exhausted"))
+            skip_causes.note(model, skip_causes.BUDGET)
             continue
 
         # ── P3: premium spend hard-cap ───────────────────────────────────────
@@ -3168,6 +3369,7 @@ async def _dispatch_model_loop(
                 cap=_premium_max_pressure,
             )
             chain_errors.append((model, f"premium_capped@{budget_state.pressure:.2f}"))
+            skip_causes.note(model, skip_causes.BUDGET)
             continue
 
         # Show provider context for QUOTA_BALANCED
@@ -3663,7 +3865,21 @@ async def _dispatch_model_loop(
             is_rate_limit = _is_rate_limit_error(e)
             is_content_filter = not is_rate_limit and _is_content_filter_error(e)
             is_auth = not is_rate_limit and not is_content_filter and _is_auth_error(e)
-            if is_rate_limit:
+            from llm_router.mcp_door import AttemptCapExceeded as _AttemptCapExceeded
+            if isinstance(e, _AttemptCapExceeded):
+                # D-154: the MCP door's per-attempt cap, not a provider fault: no health
+                # failure, no LOCAL-TIMEOUT-1 cooldown (not a TimeoutError), so routing
+                # stays as it was; recorded under its own reason.
+                await _notify(ctx, "warning", f"{model} hit the MCP deadline cap — trying next...")
+                route_log.warning(
+                    "routing_fallback",
+                    correlation_id=correlation_id,
+                    model=model,
+                    provider=provider,
+                    error_type=type(e).__name__,
+                    fallback_reason="deadline_cap",
+                )
+            elif is_rate_limit:
                 await _notify(ctx, "warning", f"{model} rate-limited — switching provider...")
                 log.warning("Rate limit on %s, switching to next", model)
                 route_log.warning(
@@ -3773,6 +3989,10 @@ async def _dispatch_model_loop(
         )
         # D-116: apply shared Q&A ordering here too; timeout demotion below still wins.
         emergency_chain = _strip_local_for_qa(emergency_chain, task_type)
+        if emergency_chain and capability_needs is not None:
+            # P2.4: the emergency chain is filtered too; the primary chain already was.
+            from llm_router import capability_filter as _cf
+            emergency_chain = _cf.filter_chain(emergency_chain, capability_needs)
         if emergency_chain and emergency_chain != _chain_as_built:
             emergency_chain = _demote_timed_out_local(emergency_chain)  # LOCAL-TIMEOUT-1
             for attempt, model in enumerate(emergency_chain, start=len(models_to_try) + 1):
@@ -4370,6 +4590,7 @@ async def route_and_call(
         RuntimeError: All candidate models failed (wraps the last error).
     """
     config = get_config()
+    skip_causes.begin()  # F23: fresh per-call list of passed-over entries
     correlation_id = uuid4().hex[:8]
     # Phase 0.5 (Option A sidecar bridge): when the hook minted a directive id
     # for this turn (threaded down from an MCP door), the BILLABLE-ROW
@@ -4509,6 +4730,8 @@ async def route_and_call(
     profile, c, use_thinking = _resolve_profile(
         profile, complexity_hint, classification_data, prompt, model_override, config
     )
+    # F25 / D-170 (4): a row the MCP ledger guard writes for this call names this profile.
+    _ci_scope.note_ledger_profile(profile)
     effective_complexity = c.value if hasattr(c, "value") else str(complexity_hint or "moderate")
     available = config.available_providers
     with traced_span(
@@ -4806,6 +5029,11 @@ async def route_and_call(
                 models_to_try, task_type.value,
                 _gate_configured_names(get_config(), get_repo_config()))
 
+        # P2.3 single site: precision/specialist/bandit run before this pass
+        # and can only change subscription ties; D-116 and TQ-007 run after it.
+        if models_to_try and not model_override and profile == RoutingProfile.QUOTA_BALANCED:
+            models_to_try = _quota_score_chain(models_to_try, task_type, exempt=pinned_model)
+
         # D-116 (amends D-14/D-114/D-115): insert local Q&A models after the last
         # non-Claude entry, before trailing Claude entries. Applied after the chain
         # build, the subject specialist and the bandit reorder (either can add a local
@@ -4866,12 +5094,43 @@ async def route_and_call(
                     await _release_reservation_if_held()
                     raise _daily_cap_exc
 
+        # P2.4: the capability filter is the LAST transform (RED1-01/RED1-02: a hard
+        # filter placed before the specialist or the bandit is undone by them). It
+        # excludes, never reorders, and only on KNOWN lack of vision or window: this
+        # door has no tools array, and the prompt-text tools regex is shadow only
+        # (D-165), so a pinned or unpinned perplexity research call keeps its slot.
+        # An explicit model_override is not exempt from vision or window: hard means hard.
+        _cap_needs = None
+        _cap_excluded: list = []
+        if models_to_try:
+            try:
+                from llm_router import capability_filter as _cf
+                if _cf.enabled():
+                    _cap_needs = _cf.merge(
+                        _cf.needs_from_prompt(prompt, task_type.value, system_prompt or ""),
+                        _cf.needs_from_messages(messages, prompt, system_prompt or ""),
+                    )
+                    models_to_try, _cap_excluded = _cf.filter_chain_report(models_to_try, _cap_needs)
+            except Exception as _cap_err:  # noqa: BLE001 - fail-open: the chain stays as built
+                from llm_router import failopen
+                failopen.record("CHZ-FO-ROUTER-CAPABILITY-FILTER", _cap_err)
+
         if not models_to_try:
             set_span_attributes(
                 route_span,
                 available_providers=sorted(available),
                 candidate_count=0,
             )
+            if _cap_excluded:
+                await _release_reservation_if_held()
+                from llm_router import capability_filter as _cf
+                raise ValueError(
+                    f"No providers available for {task_type.value}/{profile.value}. "
+                    f"Capability filter excluded: {_cf.describe(_cap_excluded)}. "
+                    f"Configured providers: {available or 'none'}. "
+                    "Fix: remove the request's tools or images, shorten the prompt, or connect "
+                    "a model that supports them; LLM_ROUTER_CAPABILITY_ROUTING=0 turns the filter off."
+                )
             # #32: when a LLM_ROUTER_BLOCK_PROVIDERS hard filter is active (see
             # _blocked_providers) and the chain came out empty, surface the block
             # as a likely cause — otherwise the generic "install Ollama / set a key"
@@ -4879,13 +5138,14 @@ async def route_and_call(
             await _release_reservation_if_held()  # RED1-3-01: don't leak on empty-chain
             _blocked = _blocked_providers()
             if _blocked:
-                raise ValueError(
+                raise NoRoutableModelsError(
                     f"No routable models for {task_type.value}/{profile.value} with "
                     f"LLM_ROUTER_BLOCK_PROVIDERS={sorted(_blocked)} active — the hard "
                     f"provider block may have removed every candidate. Configured "
                     f"providers: {sorted(available) or 'none'}. Fix: remove a provider "
                     f"from LLM_ROUTER_BLOCK_PROVIDERS, or ensure a non-blocked provider "
-                    f"(e.g. ollama/*) has a reachable model."
+                    f"(e.g. ollama/*) has a reachable model.",
+                    task_type, profile,
                 )
             from llm_router.runtime_offer import runtime_offer
 
@@ -4894,12 +5154,13 @@ async def route_and_call(
             _offer = "" if "ollama" in available else (
                 "\n" + runtime_offer(api_keys=False) + "\nOr:"
             )
-            raise ValueError(
+            raise NoRoutableModelsError(
                 f"No providers available for {task_type.value}/{profile.value}. "
                 f"Configured providers: {available or 'none'}. "
                 f"Fix: run `llm-router doctor` to diagnose.{_offer}\n"
                 "  • Set GEMINI_API_KEY or OPENAI_API_KEY in ~/.llm-router/.env\n"
-                "  • Set LLM_ROUTER_CLAUDE_SUBSCRIPTION=true if you have Claude Pro/Max"
+                "  • Set LLM_ROUTER_CLAUDE_SUBSCRIPTION=true if you have Claude Pro/Max",
+                task_type, profile,
             )
 
         # Resolved ONCE, here, and reused by the semantic-cache key, context
@@ -5235,6 +5496,9 @@ async def route_and_call(
         # supports 3.10+. On timeout, release the budget reservation, write
         # a timeout audit row, and raise WallClockExceeded.
         _attempt_trace: list[str] = []
+        # D-141: an MCP door's readable error/deadline text names the models this list records.
+        from llm_router.mcp_door import attach_trace as _mcp_attach_trace
+        _mcp_attach_trace(_attempt_trace)
         _dispatch_coro = _dispatch_model_loop(
             models_to_try=models_to_try,
             task_type=task_type,
@@ -5269,6 +5533,7 @@ async def route_and_call(
             chain_attempts_out=_attempt_trace,
             conversation=messages,
             context_door=context_door,
+            capability_needs=_cap_needs,
         )
         # T3-S2 + T3-M1: combined timeout + cancel handling. Both failure
         # modes share the same cleanup contract — release the budget
@@ -5945,6 +6210,29 @@ async def route_and_stream(
             f"{error_detail}. "
             "Fix: run `llm-router doctor` to diagnose, then:\n"
             f"{runtime_offer()}"
+        )
+
+    # F14 (D-159): the same capability filter as route_and_call, same needs rules. This
+    # door has no tools array and the prompt-text tools regex is shadow only (D-165), so
+    # only a KNOWN lack of vision (the host's ``[Image #N]`` marker) or window excludes.
+    # ``system_prompt`` is never sent by this door, so it is not counted. A filter-emptied
+    # chain raises ValueError before the first event, like the empty chain above.
+    try:
+        from llm_router import capability_filter as _cf
+        _cap_excluded: list = []
+        if _cf.enabled():
+            models_to_try, _cap_excluded = _cf.filter_chain_report(
+                models_to_try, _cf.needs_from_prompt(prompt, task_type.value))
+    except Exception as _cap_err:  # noqa: BLE001 - fail-open: the chain stays as built
+        from llm_router import failopen
+        failopen.record("CHZ-FO-ROUTER-CAPABILITY-FILTER", _cap_err)
+        _cap_excluded = []
+    if not models_to_try and _cap_excluded:
+        raise ValueError(
+            f"No providers available for {task_type.value}/{profile.value}. "
+            f"Capability filter excluded: {_cf.describe(_cap_excluded)}. "
+            "Fix: remove the request's images, shorten the prompt, or connect "
+            "a model that supports them; LLM_ROUTER_CAPABILITY_ROUTING=0 turns the filter off."
         )
 
     # ── Emit route.started event ──────────────────────────────────────────

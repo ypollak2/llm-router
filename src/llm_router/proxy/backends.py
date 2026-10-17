@@ -499,7 +499,8 @@ async def policy_chain(text: str) -> tuple[str, str, list[str]]:
     if ckey not in _chain_cache:
         c = Complexity(key[1])
         _chain_cache[ckey] = await _build_and_filter_chain(
-            TaskType(key[0]), complexity_to_profile(c), None, c, c, get_config())
+            TaskType(key[0]), complexity_to_profile(c), None, c, c, get_config(),
+            last_resort_floor=False)  # F26: the proxy chain is informational; unchanged
     return key[0], key[1], _chain_cache[ckey]
 
 
@@ -526,14 +527,28 @@ async def tier_classify(text: str, pinned: str | None = None, *, anthropic: bool
     return {"task_type": task, "complexity": cx, "chain_head": chain[:4], "model": model}
 
 
-async def choose_model(text: str, pinned: str | None, *, anthropic: bool = False) -> dict:
+async def choose_model(text: str, pinned: str | None, *, anthropic: bool = False,
+                       needs=None) -> dict:
     """``{"task_type", "complexity", "chain_head", "model"}``; ``model`` is None
     when the policy keeps the call on Claude. With ``anthropic=True`` an
-    ``anthropic/*`` chain entry is a valid target too (the tier rewrite)."""
+    ``anthropic/*`` chain entry is a valid target too (the tier rewrite).
+
+    ``needs`` (P2.4, ``capability_filter.Needs``) drops the entries known to lack
+    tools, vision or window BEFORE the pick, after the cached policy chain; a pin the
+    filter excludes keeps the call on Claude, like any pin the policy does not allow."""
     task, cx, chain = await policy_chain(text)
+    if needs is not None:
+        from llm_router import capability_filter
+
+        chain = capability_filter.filter_chain(chain, needs)
     model = next((m for m in chain if tool_capable(m, anthropic=anthropic)), None)
     # A pin changes WHICH model serves, never WHETHER: the policy's decision to
     # keep a step on Claude (no tool-capable entry) stands.
     if model is not None and pinned:
         model = pinned if tool_capable(pinned, anthropic=anthropic) else None
+        if model is not None and needs is not None:
+            from llm_router import capability_filter
+
+            if not capability_filter.filter_chain([model], needs):
+                model = None
     return {"task_type": task, "complexity": cx, "chain_head": chain[:4], "model": model}

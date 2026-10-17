@@ -119,9 +119,8 @@ def test_install_runner_exception_is_reported_not_raised():
 
 def test_llm_setup_install_runtime_never_runs(monkeypatch):
     # A flag the model sets is not a human's approval: the MCP tool only shows
-    # the command, and has no parameter that would run it.
-    import inspect
-
+    # the command. P2.13 added `confirm` to llm_setup for action="prefer"; it
+    # must stay inert for install_runtime (asserted below by passing it).
     from llm_router.tools import setup
 
     calls = []
@@ -130,7 +129,9 @@ def test_llm_setup_install_runtime_never_runs(monkeypatch):
     out = asyncio.run(setup.llm_setup(action="install_runtime"))
     assert calls == []
     assert ro.runtime_offer() in out and "not run from a tool call" in out
-    assert "confirm" not in inspect.signature(setup.llm_setup).parameters
+    out = asyncio.run(setup.llm_setup(action="install_runtime", confirm=True))
+    assert calls == []
+    assert ro.runtime_offer() in out and "not run from a tool call" in out
 
 
 def test_llm_setup_unknown_action_lists_install_runtime():
@@ -402,6 +403,10 @@ def test_grep_finds_only_allowlist_and_the_offer_module():
     remaining = []
     for ln in lines:
         if ln.startswith("src/llm_router/runtime_offer.py:") or ln.startswith(allow):
+            continue
+        # The local manifest directory name (amend2-errata1 / AMEND1-P17D check), as in m18_r3.py: a path,
+        # not an install offer.
+        if ln.startswith("scripts/p17d_synthetic.py:") and '/ "registry.ollama.ai"' in ln:
             continue
         m = re.match(r"src/llm_router/router\.py:\d+:\s*#", ln)
         if m:

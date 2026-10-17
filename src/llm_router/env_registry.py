@@ -222,6 +222,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PROXY_LOCAL_SHADOW": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_TIERS": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_TIER_POLICY": ("llm_router", "proxy/server.py", 1),
+    # P2.2-A: routing authority, route (default) | advise; authority.py, per request.
+    "LLM_ROUTER_AUTHORITY": ("llm_router", "authority.py", 1),
     # P0.11 (PLAN v16, D-20): the proxy's Haiku guard inputs (proxy/haiku_guard.py).
     "LLM_ROUTER_HAIKU_GUARD_KINDS": ("llm_router", "proxy/haiku_guard.py", 1),
     "LLM_ROUTER_HAIKU_GUARD_AUDIT_DIR": ("llm_router", "proxy/haiku_guard.py", 1),
@@ -273,6 +275,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_MAX_AGENT_DEPTH": ("llm_router", "hooks/agent-route.py", 1),
     "LLM_ROUTER_MAX_CONCURRENT_AGENTS": ("llm_router", "hooks/agent-route.py", 1),
     "LLM_ROUTER_METRICS_INCLUDE_PRESSURE": ("llm_router", "admin_api.py", 1),
+    "LLM_ROUTER_MCP_DEADLINE_S": ("llm_router", "mcp_door.py", 1),
     "LLM_ROUTER_MINI_SUMMARY_EVERY": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_OIDC_AUDIENCE": ("llm_router", "enterprise/oidc.py", 1),
     "LLM_ROUTER_OIDC_DEFAULT_ORG": ("llm_router", "server.py", 2),
@@ -518,8 +521,9 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "VAULT_ADDR": ("external_tool", "org_policy.py", 1),
     "ANTHROPIC_BASE_URL": ("external_tool", "hooks/session-start.py", 1),
     "_SESSION_BUDGET_WARNING": ("external_tool", "hooks/enforce-route.py", 1),
-    # ── platform  (4) ──
+    # ── platform  (5) ──
     "APPDATA": ("platform", "commands/doctor.py", 4),
+    "CDPATH": ("platform", "write_policy.py", 1),
     "NO_COLOR": ("platform", "commands/budget.py", 16),
     "PATH": ("platform", "statusline_tick.py", 1),
     "XDG_CONFIG_HOME": ("platform", "install_hooks.py", 1),

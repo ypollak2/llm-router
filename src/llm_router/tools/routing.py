@@ -23,6 +23,7 @@ from llm_router.prompt_injection import wrap_prompt_with_boundaries
 from llm_router.profiles import complexity_to_profile
 from llm_router.provider_budget import get_provider_budgets, rank_external_models
 from llm_router.router import route_and_call
+from llm_router.toolcall_text import neutralise_response
 from llm_router.statusline_hud import record_routing_decision
 from llm_router.tools.text import _read_hook_route_directive
 from llm_router.types import (
@@ -284,7 +285,11 @@ async def llm_route(
         max_tokens: Maximum output tokens.
         context: Optional conversation context to help the model understand the broader task.
     """
-    # Step 0: Sanitize prompt to prevent injection attacks
+    # Step 0: Sanitize prompt to prevent injection attacks. The model receives the wrapped
+    # prompt; the classifier sees the caller's raw prompt (D-168 (ii)): the ~370-char banner
+    # moved prompts near the 599-char simple band into another class than the SDK and every
+    # other door give the same text.
+    raw_prompt = prompt
     prompt = wrap_prompt_with_boundaries(prompt, log_suspected=True)
 
     # Step 0.5: Validate routing parameters
@@ -325,7 +330,7 @@ async def llm_route(
             # Notify user that classification is starting (prevents silent hangs)
             # Use animated spinner in interactive contexts, text feedback in MCP
             await ctx.info("🔍 Analyzing task complexity...")
-            classification = await classify_for_routing(prompt, timeout_seconds=10.0)
+            classification = await classify_for_routing(raw_prompt, timeout_seconds=10.0)
             task_type_label = classification.inferred_task_type.value if classification.inferred_task_type else "generic"
             await ctx.info(f"✓ Classified: {classification.complexity.value}/{task_type_label} ({classification.confidence:.0%} confidence)")
         except Exception as e:
@@ -457,6 +462,7 @@ async def llm_route(
         await ctx.warning(f"Failed to log routing usage: {e}")
 
     # Step 5: Build response with visible routing indicator
+    resp = neutralise_response(resp, "llm_route")  # F4 (D-139)
     total_cost = classification.classifier_cost_usd + resp.cost_usd
     
     # Add visible routing indicator footer
@@ -464,6 +470,8 @@ async def llm_route(
     routing_footer = (
         f"🔀 **Routed to:** {model_name} ({resolved_task_type.value}/{classification.complexity.value.lower()}) · "
         f"Cost: ${resp.cost_usd:.4f}"
+        + (f" · {resp.toolcall_blocks_removed} tool-call block(s) removed"
+           if resp.toolcall_blocks_removed else "")
     )
     
     lines = [
@@ -601,6 +609,7 @@ async def llm_auto(
         route_directive_id=_read_hook_route_directive(),
     )
 
+    resp = neutralise_response(resp, "llm_auto")  # F4 (D-139)
     total_cost = classification.classifier_cost_usd + resp.cost_usd
     
     # Add visible routing indicator footer
@@ -608,6 +617,8 @@ async def llm_auto(
     routing_footer = (
         f"🔀 **Routed to:** {model_name} ({resolved_task_type.value}/{classification.complexity.value.lower()}) · "
         f"Cost: ${resp.cost_usd:.4f}"
+        + (f" · {resp.toolcall_blocks_removed} tool-call block(s) removed"
+           if resp.toolcall_blocks_removed else "")
     )
     
     lines = [

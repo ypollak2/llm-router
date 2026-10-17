@@ -21,6 +21,7 @@ from pathlib import Path
 import aiosqlite
 
 from llm_router import pricing as _pricing
+from llm_router import skip_causes as _skip_causes
 from llm_router.provenance import Measured
 from llm_router.provider_classes import SQL_REAL_DECISION
 # R11: `state_path` comes from `llm_router.paths`, the canonical resolver.
@@ -787,6 +788,9 @@ REASON_ERROR_DENIED = "error_routing_denied"
 REASON_ERROR_OTHER = "error_exception"
 # N21: the quality breaker refused the call before dispatch (mirrors provider_classes.REASON_BREAKER_OPEN).
 REASON_BREAKER_OPEN = "breaker_open"
+# F25 / D-170: a research call refused before dispatch because its chain was empty (no reachable research
+# provider); mirrors provider_classes.REASON_REFUSED_NO_RESEARCH_PROVIDER and is excluded like breaker_open.
+REASON_REFUSED_NO_RESEARCH_PROVIDER = "refused_no_research_provider"
 # N22: the exhaustion floor served a gate-rejected answer. A real served call (attribution, mix, latency, M0-3
 # include it) that is NOT a success: its usage row has success=0, so success-filtered quality/cost/bandit readers skip it.
 REASON_DEGRADED_FLOOR = "degraded_floor"
@@ -814,6 +818,18 @@ def _row_identity(session_id: str | None, task_id: str | None,
     return (_ci.ledger_task_id(task_id) or bound_task,
             _ci.clean_id(trace_id) or bound_trace)
 
+
+MIGRATE_ROUTING_DECISIONS_ADD_SKIP_CAUSES = [
+    "ALTER TABLE routing_decisions ADD COLUMN skipped_json TEXT",
+    "ALTER TABLE routing_decisions ADD COLUMN served_by_last_resort INTEGER",
+]
+"""F23: which providers the router passed over before the served one, and why.
+
+``skipped_json`` is compact JSON, a list of ``{"model", "reason"[, "until"]}`` (vocabulary:
+``llm_router.skip_causes``); ``[]`` = nothing was skipped. ``served_by_last_resort`` is 1 when a
+local Q&A model served after a non-local entry was skipped or failed (D-116). Both have NO
+DEFAULT: NULL = the row predates the column or its writer keeps no skip list (hooks, direct
+path). It is reported as ``unknown``, never as ``[]`` or 0, which would assert "nothing skipped"."""
 
 MIGRATE_ADD_TASK_TYPE_RAW = [
     "ALTER TABLE usage ADD COLUMN task_type_raw TEXT",
@@ -1275,6 +1291,7 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_USAGE_ADD_REASON
         + MIGRATE_ADD_TASK_IDENTITY
         + MIGRATE_ADD_TASK_TYPE_RAW
+        + MIGRATE_ROUTING_DECISIONS_ADD_SKIP_CAUSES
         # Defined in v6.2 and never applied: compression_stats was declared,
         # log_compression_stat wrote to it, and the table did not exist. The
         # write raised OperationalError straight into bash-compress's bare
@@ -1706,38 +1723,11 @@ def format_spend_for_display(spend_usd: float) -> str:
 # _are_provenance_filtered.py` enumerates the surfaces and fails when a new one
 # appears without this clause.
 
-PROVENANCE_COLUMN = "is_simulated"
-
-
-def production_only(include_simulated: bool = False, *, prefix: str = "AND",
-                    table: str = "") -> str:
-    """WHERE fragment that keeps synthetic rows out of a money figure.
-
-    FAIL-CLOSED, and the `= 0` is the whole point. `IS NOT 1` admits NULL, so a
-    row whose provenance was never established counts as production — the same
-    defect as `is_evaluable` treating a missing field as real. Only a row
-    explicitly stamped 0 at write time is production data.
-
-    `include_simulated` is the named escape hatch for tests that exercise the
-    aggregate arithmetic over rows they wrote themselves (pytest stamps every
-    such row synthetic). No production caller passes it, and the default stays
-    exclusive.
-    """
-    if include_simulated:
-        # An empty string is only safe where the caller APPENDS the fragment
-        # (`f"{where} {production_only(...)}"`). Five callers instead EMBED it
-        # (`f"WHERE {production_only(..., prefix='')} AND date(...)"`), and there
-        # an empty fragment composes to the literal `WHERE  AND date(...)` —
-        # `sqlite3.OperationalError: near "AND": syntax error`. So a caller that
-        # supplies no prefix is embedding, and gets a predicate that is always
-        # true rather than nothing at all.
-        #
-        # Found by the agent updating the tests for this change, on the first
-        # call that passed `include_simulated=True`. The escape hatch had never
-        # been exercised on these five surfaces.
-        return "" if prefix else "1=1"
-    col = f"{table}.{PROVENANCE_COLUMN}" if table else PROVENANCE_COLUMN
-    return f"{prefix} {col} = 0".strip()
+# `PROVENANCE_COLUMN` and `production_only` live in `llm_router.savings` (a module
+# with no heavy imports) so the Stop hook and `dashboard_data` can build the filter
+# without importing this module and, through it, pydantic. Re-exported here: every
+# existing `cost.production_only` caller and test keeps working.
+from llm_router.savings import PROVENANCE_COLUMN, production_only  # noqa: E402,F401
 
 
 async def _count_unknown_provenance(db, where: str) -> int:
@@ -2253,6 +2243,8 @@ async def log_routing_decision(
     policy_stage: str | None = None,
     grade_basis: str | None = None,
     inventory_sig: str | None = None,
+    skipped: list[dict] | None = None,
+    served_by_last_resort: bool | None = None,
 ) -> None:
     """Persist a complete routing decision to the routing_decisions table.
 
@@ -2294,12 +2286,15 @@ async def log_routing_decision(
             (P1.7); None = not decided by the engine (NULL).
         policy_id, policy_stage, grade_basis, inventory_sig: the dynamic-policy fields
             (P1.7-e). The first three are stored as ``'none'`` when absent, never NULL.
+        skipped, served_by_last_resort: F23 skip causes (``llm_router.skip_causes``). None =
+            unknown (NULL); an empty list = nothing was skipped.
     """
     # Validate inputs before database insert. A cache-served or failed call (LEDGER-ERR-1)
     # names no real provider ("cache", or "none" when nothing was attempted); its reason_code
     # is the whole reason it may skip the provider allowlist.
     _non_call = bool(reason_code) and (
-        reason_code in (REASON_CACHE_HIT, REASON_BREAKER_OPEN) or reason_code.startswith("error_")
+        reason_code in (REASON_CACHE_HIT, REASON_BREAKER_OPEN, REASON_REFUSED_NO_RESEARCH_PROVIDER)
+        or reason_code.startswith("error_")
     )
     if not _non_call:
         _validate_routing_insert(final_model, final_provider, cost_usd)
@@ -2363,8 +2358,9 @@ async def log_routing_decision(
                 correlation_id, requested_complexity, complexity_downgraded, subject,
                 provenance, capabilities_json, shadow_tier, session_id, tool_use_id,
                 task_type_raw, layer, confidence, reason, abstain, engine_version,
-                policy_id, policy_stage, grade_basis, inventory_sig, task_id, trace_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                policy_id, policy_stage, grade_basis, inventory_sig, task_id, trace_id,
+                skipped_json, served_by_last_resort)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 _prompt_hash(prompt),
                 task_type,
@@ -2402,6 +2398,8 @@ async def log_routing_decision(
                 inventory_sig,
                 row_task_id,
                 row_trace_id,
+                _skip_causes.to_json(skipped),
+                None if served_by_last_resort is None else (1 if served_by_last_resort else 0),
             ),
         )
         await db.commit()

@@ -733,6 +733,31 @@ def _note_reset(model: ModelSpec, later: list[ModelSpec], text: str,
         pass
 
 
+def _capability_filtered(prompt: str, chain: list[ModelSpec], task_type: str,
+                         *, needs_tools: bool = False) -> list[ModelSpec]:
+    """*chain* without the models known to lack tools, vision or window for *prompt* (P2.4).
+    ``needs_tools`` is the explicit caller flag (the agent loop cannot run without tools),
+    a hard need unlike the prompt-text regex. Fail-open: any error leaves the chain as given."""
+    try:
+        from llm_router import capability_filter as cf
+
+        if not chain or not cf.enabled():
+            return chain
+        needs = cf.needs_from_prompt(prompt, task_type)
+        if needs_tools:
+            needs = cf.merge(needs, cf.Needs(tools=True))
+        return cf.filter_chain(
+            chain, needs,
+            key=lambda s: f"{'anthropic' if s.provider == 'claude' else s.provider}/{s.model}")
+    except Exception as exc:  # noqa: BLE001
+        try:
+            from llm_router import failopen
+            failopen.record("CHZ-FO-DIRECT-CAPABILITY-FILTER", exc)
+        except Exception:  # noqa: BLE001
+            pass
+        return chain
+
+
 def execute_chain(
     prompt: str,
     chain: list[ModelSpec],
@@ -759,6 +784,12 @@ def execute_chain(
 
     Returns DirectResult on success, None if all models failed or only Claude remains.
     """
+    # P2.4: the hook, agent-route and SDK all hold the prompt here and nowhere earlier
+    # (build_chain sees none), so this is their capability filter. A chain the filter
+    # empties is the existing "nothing to run" result: the caller falls through to Claude.
+    chain = _capability_filtered(prompt, chain, task_type)
+    if not chain:
+        return None
     _ollama_alive: bool | None = None  # lazily evaluated once per chain execution
     _ollama_hung: str | None | object = _UNSET  # watchdog verdict, once per chain
     _ollama_installed: set[str] | None = _UNSET  # tag set, fetched once per chain
@@ -970,6 +1001,14 @@ def execute_agent(
     try:
         from llm_router.hooks.agent_loop import run_agent_loop
     except ImportError:
+        return None
+
+    # F14 (D-159): the agent loop is all tool calls, so a model KNOWN to lack tools (or
+    # vision/window for this prompt) cannot serve it. Unknown never excludes. A chain the
+    # filter empties attempts nothing and returns None: every caller (auto-route, agent-route
+    # subagent delegation, the SDK) already treats None as "fall through to Claude / raise".
+    chain = _capability_filtered(prompt, chain, "code", needs_tools=True)
+    if not chain:
         return None
 
     if project_root:

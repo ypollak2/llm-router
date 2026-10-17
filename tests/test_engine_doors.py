@@ -151,7 +151,7 @@ def _doors():
     from llm_router.ensemble import engine_classification
     from llm_router.proxy import backends
     from llm_router.types import RoutingProfile
-    from llm_router import router
+    from llm_router import router, sdk
 
     hook = _load("hook_doors", "auto-route.py")
     agent = _load("agent_doors", "agent-route.py")
@@ -175,6 +175,7 @@ def _doors():
         "agent_route": agent._engine_decision,
         "gemini_cli": lambda t: (None, asyncio.run(gemini.engine_complexity(t))[0]),
         "router": lambda t: (None, router._resolve_profile(None, None, None, t, None, cfg)[1].value),
+        "sdk": lambda t: sdk._decide(t)[:2],  # AGT A.1
     }
 
 

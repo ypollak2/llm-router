@@ -176,6 +176,10 @@ async def llm_setup(
     action: str = "status",
     provider: str | None = None,
     api_key: str | None = None,
+    text: str | None = None,
+    # `confirm` belongs to action="prefer" only; every other action (install_runtime
+    # included) ignores it, so a model-set flag never approves anything else.
+    confirm: bool = False,
 ) -> str:
     """Set up and manage API providers, hooks, and routing enforcement.
 
@@ -189,11 +193,15 @@ async def llm_setup(
     - "install_hooks": Install auto-routing hooks globally (every Claude Code session)
     - "uninstall_hooks": Remove auto-routing hooks
     - "install_runtime": Show the local model runtime install command (never runs it)
+    - "prefer": Parse a routing priority in English or Hebrew (``text``), echo it, and store it in
+      routing.yaml only when called again with ``confirm=True``
 
     Args:
-        action: What to do — "status", "guide", "discover", "add", "test", "provider", "install_hooks", "uninstall_hooks", or "install_runtime".
+        action: What to do — "status", "guide", "discover", "add", "test", "provider", "install_hooks", "uninstall_hooks", "install_runtime", or "prefer".
         provider: Provider name (for "add", "test", and "provider" actions).
         api_key: API key value (for "add" action only). Key is validated before saving.
+        text: The priority sentence (for "prefer"), e.g. "codex before claude" or "בלי API בתשלום".
+        confirm: For "prefer": False echoes what was understood; True stores it.
     """
     if action == "status":
         return _setup_status()
@@ -228,11 +236,36 @@ async def llm_setup(
         from llm_router.runtime_offer import install_runtime_hint
 
         return install_runtime_hint()
+    elif action == "prefer":
+        return _setup_prefer(text, confirm)
     else:
         return (
             f"Unknown action: {action}. Use: status, guide, discover, add, test, provider, "
-            "install_hooks, uninstall_hooks, or install_runtime."
+            "install_hooks, uninstall_hooks, install_runtime, or prefer."
         )
+
+
+def _setup_prefer(text: str | None, confirm: bool) -> str:
+    """Two-step: echo the parsed rule, store it only on confirm=True."""
+    from llm_router import user_rules
+    from llm_router.commands.prefer import evaluate
+
+    if not text or not text.strip():
+        return "Give the priority in `text`, e.g. llm_setup(action='prefer', text='codex before claude')."
+    rules, refusal, echo = evaluate(text)
+    if refusal:
+        return refusal
+    shown = "\n".join(echo)
+    if not confirm:
+        return f"{shown}\n\nNothing stored yet. Call again with confirm=true to store."
+    try:
+        _all, added = user_rules.add_rules(rules, text.strip())
+    except user_rules.StoreError as exc:
+        return f"Not stored: {exc}"
+    if not added:
+        return f"{shown}\n\nAlready stored; nothing changed."
+    ids = ", ".join(r["id"] for r in added)
+    return f"{shown}\n\nStored {ids} in {user_rules.routing_path()}. Stored only: routing honours it once the doors read it."
 
 
 async def llm_rate(good: bool, decision_id: int | None = None) -> str:
@@ -377,8 +410,10 @@ async def _setup_discover() -> str:
     ]
     for env_path in env_paths:
         # Offload synchronous Path.exists() to thread pool to avoid blocking event loop
-        exists = await asyncio.to_thread(env_path.exists)
-        if exists:
+        from llm_router.paths import regular_file_or_none
+
+        exists = await asyncio.to_thread(regular_file_or_none, env_path)
+        if exists is not None:
             try:
                 content = await asyncio.to_thread(env_path.read_text)
                 for provider, reg in _PROVIDER_REGISTRY.items():
@@ -441,12 +476,14 @@ def _setup_add(provider: str, api_key: str) -> str:
         return "API key contains whitespace. Please check and try again."
 
     # Find the .env file
+    from llm_router.paths import regular_file_or_none
+
     env_path = Path.cwd() / ".env"
-    if not env_path.exists():
+    if regular_file_or_none(env_path) is None:
         # Try project root — tools/setup.py is 4 levels deep from project root
         env_path = Path(__file__).parent.parent.parent.parent / ".env"
 
-    if env_path.exists():
+    if regular_file_or_none(env_path) is not None:
         content = env_path.read_text()
         # Check if key already exists
         new_lines = []

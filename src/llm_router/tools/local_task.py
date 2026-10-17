@@ -48,7 +48,10 @@ import threading
 import time
 from pathlib import Path
 
+from mcp.server.mcpserver import Context
+
 from llm_router import trace as _trace
+from llm_router import write_policy
 from llm_router.agent_exec import run_agent
 
 # Terminal statuses. `verified_complete` is the ONLY one that means the work is
@@ -472,6 +475,7 @@ async def llm_local_task(
     budget_s: float = DEFAULT_BUDGET_S,
     apply_writes: bool = False,
     wait: bool = True,
+    ctx: Context | None = None,
 ) -> str:
     """Run a whole multi-step task on a local model and report a typed result.
 
@@ -523,7 +527,25 @@ async def llm_local_task(
             "reason": f"workdir is not a directory: {workdir}",
             "changed_files": [], "check_passed": None, "elapsed_s": 0.0,
         })
-    run = _local_task_run(objective, root, acceptance_check, model, budget_s, apply_writes)
+    # P2.9-a: workdir must sit inside the project root when one is known (MCP
+    # roots, then CLAUDE_PROJECT_DIR). With no known root the caller's workdir is
+    # the root, as before (P0.13 read-only applies to llm_act, not this tool).
+    mcp_root = None
+    try:
+        from llm_router.mcp_roots import root_from_ctx
+        mcp_root = await root_from_ctx(ctx)
+    except Exception:                                        # noqa: BLE001
+        mcp_root = None
+    choice = write_policy.pick_root(mcp_root, requested=root)
+    if choice.source in ("mcp", "env") and not root.resolve().is_relative_to(choice.root):
+        return json.dumps({
+            "status": BLOCKED,
+            "reason": "workdir is outside the project root",
+            "root_source": choice.source,
+            "changed_files": [], "check_passed": None, "elapsed_s": 0.0,
+        })
+    run = _local_task_run(objective, root, acceptance_check, model, budget_s, apply_writes,
+                          root_source=choice.source)
     if not wait:
         from llm_router.jobs import start_job
         return json.dumps(start_job("llm_local_task", run))
@@ -532,7 +554,8 @@ async def llm_local_task(
 
 
 async def _local_task_run(objective: str, root: Path, acceptance_check: str | list[str] | None,
-                          model: str, budget_s: float, apply_writes: bool) -> str:
+                          model: str, budget_s: float, apply_writes: bool,
+                          root_source: str = "requested") -> str:
     try:
         from llm_router.hooks.agent_loop import run_agent_loop
     except ImportError as exc:                                 # noqa: BLE001
@@ -568,6 +591,7 @@ async def _local_task_run(objective: str, root: Path, acceptance_check: str | li
         "queued_s": round(queued, 1),
         "budget_s": budget_s,
         "writes_applied": bool(apply_writes),
+        "root_source": root_source,
         "error": error,
         "report": (report or "")[:1500],
         "note": (

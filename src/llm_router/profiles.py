@@ -45,6 +45,16 @@ _FREE_EXTERNAL_MODELS: frozenset[str] = frozenset({
     "gemini_cli/gemini-3-flash-preview",
 })
 
+
+def is_free_external_model(model: str) -> bool:
+    """True for a free external model: any ``codex/*`` entry, or a listed one.
+
+    Every Codex model runs on the subscription, so the test is the provider, not
+    a literal id: policy chains name whichever model ``CODEX_MODELS`` allows
+    (F22), e.g. ``codex/gpt-5.5`` or an ``LLM_ROUTER_CODEX_MODELS`` choice.
+    """
+    return model.startswith("codex/") or model in _FREE_EXTERNAL_MODELS
+
 # Cheap-but-not-free models (< $0.002/1K tokens blended).
 # deepseek-v4-flash is $0.14/$0.28 per 1M — belongs in the cheap tier for
 # pressure reordering. (v4-pro, the deepseek-reasoner successor, is mid-tier
@@ -124,8 +134,8 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = _load_routing_
 # Two profiles have NO chains of their own in standard.yaml. They are
 # *reorderings* of another profile's chain, applied at a later stage:
 #
-#   QUOTA_BALANCED      reordered by quota_balance.reorder_chain_by_providers()
-#                       in router._build_and_filter_chain()
+#   QUOTA_BALANCED      reordered by resource_map.order_chain / resource_map.score (P2.3)
+#                       via router._quota_score_chain() in route_and_call()
 #   SUBSCRIPTION_LOCAL  reordered by
 #                       subscription_local_routing.reorder_for_subscription_local()
 #
@@ -400,7 +410,7 @@ def reorder_for_pressure(
             codex_available = False
 
         def _hard_cap_priority(m: str) -> int:
-            if m in _FREE_EXTERNAL_MODELS and codex_available:
+            if is_free_external_model(m) and codex_available:
                 return 0
             if m in _CHEAP_MODELS:
                 return 1
@@ -427,7 +437,7 @@ def reorder_for_pressure(
         codex_available = False
 
     def _priority(m: str) -> int:
-        if m in _FREE_EXTERNAL_MODELS and codex_available:
+        if is_free_external_model(m) and codex_available:
             return 0   # Codex: free via OpenAI subscription
         if m in _CHEAP_MODELS:
             return 1   # Gemini Flash, Groq, DeepSeek, etc.
@@ -482,7 +492,8 @@ def get_model_chain(
     research tasks since web search is required.
 
     QUOTA_BALANCED uses BALANCED as its base chain; the final reordering is
-    applied in _build_and_filter_chain() by quota_balance.reorder_chain_by_providers().
+    applied by resource_map.order_chain / resource_map.score (P2.3), called from
+    router._quota_score_chain() in route_and_call().
 
     Args:
         profile: The routing profile (budget/balanced/premium/quota_balanced).

@@ -11,7 +11,8 @@ from mcp.server.mcpserver import Context
 from llm_router.config import get_config
 from llm_router.cost import log_compression_stat
 from llm_router.response_router import route_response
-from llm_router.router import route_and_call
+from llm_router.router import NoRoutableModelsError, route_and_call
+from llm_router.toolcall_text import keep_marker, neutralise_response
 from llm_router.types import LLMResponse, RoutingProfile, TaskType
 
 
@@ -198,7 +199,7 @@ async def _apply_response_router(formatted: str) -> str:
     if not formatted:
         return formatted
     try:
-        return await route_response(formatted)
+        return keep_marker(formatted, await route_response(formatted))
     except Exception:
         # Never let response-routing failures mask the underlying tool
         # response — the user is owed an answer even if the optimiser
@@ -359,6 +360,7 @@ def _routing_explanation(resp: LLMResponse, task: str) -> str:
     except Exception:
         pass
 
+    removed = getattr(resp, "toolcall_blocks_removed", 0)
     if mode == "verbose":
         # Full breakdown with chain walk
         conf_str = f"{resp.confidence:.0%}" if resp.confidence > 0 else "n/a"
@@ -380,6 +382,8 @@ def _routing_explanation(resp: LLMResponse, task: str) -> str:
             lines.append(f"→ Chain: {' → '.join(chain_display)}")
         if ctx_info:
             lines.append(f"→ Context{ctx_info.replace(' | ctx ', ': ')}")
+        if removed:
+            lines.append(f"→ Tool-call blocks removed: {removed}")
         return "\n─────\n" + "\n".join(lines)
 
     # Compact one-line format for footer and header
@@ -389,6 +393,8 @@ def _routing_explanation(resp: LLMResponse, task: str) -> str:
     parts.append(cost_str)
     if savings_label:
         parts.append(f"({savings_label})")
+    if removed:
+        parts.append(f"{removed} tool-call block(s) removed")
     compact = " · ".join(parts) + ctx_info
 
     if mode == "header":
@@ -481,6 +487,8 @@ def _format_response(resp: LLMResponse, task: str = "") -> str:
     Returns:
         Formatted response string.
     """
+    # F4 (D-139): the one choke point for text answers going back to an MCP caller.
+    resp = neutralise_response(resp, f"llm:{task or 'text'}")
     explanation = _routing_explanation(resp, task)
     mode = _get_explain_mode()
 
@@ -596,6 +604,41 @@ def _apply_research_trust_contract(
     return out
 
 
+async def _premium_research_reachable(config) -> bool:
+    """F25 / D-170 (1): True when the premium research chain, built and filtered exactly as the
+    router builds it, keeps at least one model. Since #382 removed its local entry it is empty on a
+    machine with Claude in subscription mode and no OpenAI/MiniMax key. F26: a probe, so the
+    last-resort floor is off (it must not record a floor tier or warn); the real call may still be
+    answered by the floor."""
+    from llm_router.router import _build_and_filter_chain
+    from llm_router.types import Complexity
+
+    chain = await _build_and_filter_chain(
+        TaskType.RESEARCH, RoutingProfile.PREMIUM, None, None, Complexity.MODERATE, config,
+        last_resort_floor=False,
+    )
+    return bool(chain)
+
+
+def _refuse_no_research_provider(exc: NoRoutableModelsError, *, premium_empty: bool) -> str:
+    """F25 / D-170 (2): the reply for a research call whose chain is empty. The guarded call is
+    marked refused (reason ``refused_no_research_provider``), never ``error_exception``."""
+    from llm_router import call_identity
+    from llm_router.cost import REASON_REFUSED_NO_RESEARCH_PROVIDER
+
+    call_identity.refuse_ledger_call(REASON_REFUSED_NO_RESEARCH_PROVIDER)
+    chains = [f"{exc.task_type.value}/{exc.profile.value}"]
+    if premium_empty and exc.profile != RoutingProfile.PREMIUM:
+        chains.append(f"{TaskType.RESEARCH.value}/{RoutingProfile.PREMIUM.value}")
+    return (
+        f"[llm_router] research refused ({REASON_REFUSED_NO_RESEARCH_PROVIDER}): the "
+        f"{' and '.join(chains)} routing chain{'s are' if len(chains) > 1 else ' is'} empty — "
+        "no model this machine can reach is in "
+        f"{'them' if len(chains) > 1 else 'it'}, so nothing was sent. "
+        "Do this research yourself."
+    )
+
+
 async def llm_research(
     prompt: str,
     ctx: Context,
@@ -617,19 +660,26 @@ async def llm_research(
     no_perplexity = not _cfg.perplexity_api_key
     await _announce_routing(ctx, "research", "moderate")
 
-    resp = await route_and_call(
-        TaskType.RESEARCH,
-        prompt,
-        # Without Perplexity, escalate to PREMIUM so the fallback chain uses
-        # o3 / Gemini 2.5 Pro rather than silently degrading to BALANCED tier.
-        profile=RoutingProfile.PREMIUM if no_perplexity else None,
-        system_prompt=system_prompt,
-        max_tokens=max_tokens,
-        temperature=0.3,
-        ctx=ctx,
-        caller_context=context,
-        route_directive_id=_read_hook_route_directive(),
-    )
+    # Without Perplexity, escalate to PREMIUM so the fallback chain uses the
+    # strongest reasoning models — but only when that chain has a model this
+    # machine can reach (F25 / D-170 (1)). Otherwise keep the default profile,
+    # whose cheap tiers reach local models; the answer is still labelled not
+    # web-grounded by the trust contract below.
+    premium_empty = no_perplexity and not await _premium_research_reachable(_cfg)
+    try:
+        resp = await route_and_call(
+            TaskType.RESEARCH,
+            prompt,
+            profile=RoutingProfile.PREMIUM if no_perplexity and not premium_empty else None,
+            system_prompt=system_prompt,
+            max_tokens=max_tokens,
+            temperature=0.3,
+            ctx=ctx,
+            caller_context=context,
+            route_directive_id=_read_hook_route_directive(),
+        )
+    except NoRoutableModelsError as exc:
+        return _refuse_no_research_provider(exc, premium_empty=premium_empty)
     _record_quality(resp, "research", "moderate")
 
     result = _apply_research_trust_contract(
@@ -649,6 +699,7 @@ async def llm_generate(
     temperature: float | None = None,
     max_tokens: int | None = None,
     context: str | None = None,
+    model: str | None = None,
 ) -> str:
     """Generate creative or long-form content — routes to the best generation model.
 
@@ -669,6 +720,7 @@ async def llm_generate(
     resp = await route_and_call(
         TaskType.GENERATE,
         prompt,
+        model_override=model,
         complexity_hint=effective,
         system_prompt=system_prompt,
         temperature=temperature,
@@ -688,6 +740,7 @@ async def llm_analyze(
     system_prompt: str | None = None,
     max_tokens: int | None = None,
     context: str | None = None,
+    model: str | None = None,
 ) -> str:
     """Deep analysis task — routes to the strongest reasoning model.
 
@@ -712,6 +765,7 @@ async def llm_analyze(
     resp = await route_and_call(
         TaskType.ANALYZE,
         prompt,
+        model_override=model,
         complexity_hint=effective_complexity,
         system_prompt=system_prompt,
         temperature=0.3,
@@ -800,6 +854,7 @@ async def llm_code(
     max_tokens: int | None = None,
     context: str | None = None,
     use_ponytail: bool = True,
+    model: str | None = None,
 ) -> str:
     """Coding task — routes to the best coding model.
 
@@ -829,6 +884,7 @@ async def llm_code(
     resp = await route_and_call(
         TaskType.CODE,
         prompt,
+        model_override=model,
         complexity_hint=effective,
         system_prompt=effective_system,
         temperature=0.2,

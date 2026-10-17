@@ -39,6 +39,7 @@ from llm_router.local_context_guard import (
 # wrappers/aliases because hooks, registries and tests import them from here.
 from llm_router.toolkit import tools as _kit
 from llm_router.toolkit.adapters import ollama as _ollama
+from llm_router import write_policy
 
 
 # ── Tool Definitions (sent to the LLM) ───────────────────────────────────────
@@ -161,18 +162,13 @@ def _resolve_path(path: str, project_root: Path) -> Path:
 
     Prevents path traversal attacks (../../etc/passwd).
     """
-    # Handle absolute paths by making them relative
-    if os.path.isabs(path):
-        resolved = Path(path).resolve()
-    else:
-        resolved = (project_root / path).resolve()
-
-    # Ensure the resolved path is within the project root
-    try:
-        resolved.relative_to(project_root.resolve())
-    except ValueError:
-        raise PermissionError(f"Path '{path}' resolves outside project root")
-
+    # P2.9-a: the one containment test shared by all local lanes. An empty path
+    # still means the root itself here (list_files/search_files default).
+    resolved, why = write_policy.contain(path if path.strip() else ".", project_root)
+    if resolved is None:
+        if why == write_policy.REASON_OUTSIDE:
+            raise PermissionError(f"Path '{path}' resolves outside project root")
+        raise PermissionError(str(why))
     return resolved
 
 
@@ -335,6 +331,10 @@ def _run_command_line(cmd: str, project_root: Path) -> str:
             allowed, refusal = _writes.guard_command(seg["argv"])
             if not allowed:
                 return refusal
+    # P2.9-b: static tripwire (not a sandbox) — a non-allow verdict never runs.
+    verdict = write_policy.check_action(cmd, project_root)
+    if verdict.decision != "allow":
+        return (f"Error: write policy {verdict.decision} ({verdict.reason}): {cmd[:120]}")
     # R4: the child gets an ALLOWLISTED environment, never the parent's — the
     # allowlist above permits programs that can read os.environ. Fail-closed.
     try:

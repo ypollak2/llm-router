@@ -1054,8 +1054,8 @@ class SessionSummaryDashboard:
     ) -> RenderableType:
         """Two-panel dashboard: main summary + 14-day activity + quota timeline."""
         try:
-            from llm_router.config import get_config
-            _routing_policy = get_config().llm_router_routing_policy
+            from llm_router.config_lite import config_value
+            _routing_policy = config_value("llm_router_routing_policy")
         except Exception:
             _routing_policy = "balanced"
 

@@ -81,7 +81,7 @@ async def test_local_tier_builds_the_pack_once_per_request_with_door_proxy(tmp_p
 
 
 async def test_policy_kept_request_never_builds_a_pack(tmp_path, monkeypatch):
-    async def choose(text, pinned):
+    async def choose(text, pinned, **_kw):
         return {"task_type": "code", "complexity": "moderate",
                 "model": None, "chain_head": []}
 

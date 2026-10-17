@@ -200,9 +200,6 @@ def test_executor_without_cwd_is_read_only(tmp_path, monkeypatch):
     assert ex("read_file", {"path": "r.txt"}) == "ok"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Known gap, owned by P2.9 (OS sandbox): a bash command can still redirect "
-    "output outside the project root. P0.13 confines the file tools only."))
 def test_bash_redirect_outside_root_is_refused(tmp_path):
     root, out = tmp_path / "root", tmp_path / "out"
     root.mkdir()

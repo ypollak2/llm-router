@@ -33,7 +33,7 @@ P, S, T, V, L = ("toolkit/policy.py", "toolkit/sandbox.py", "toolkit/tools.py", 
 
 # (id, file, old text, new text, test file, -k expression, needs the OS sandbox)
 MUTATIONS = [
-    ("path-containment", P, "if real != root and root not in real.parents:", "if False:",
+    ("path-containment", "write_policy.py", "if not resolved.is_relative_to(base):", "if False:",
      SAFETY, "traversal or symlink", False),
     ("secret-deny-read", P, 'if rel != "." and is_secret_relpath(rel):\n            return _deny("secret", "that path is not available")\n        if tool == "search":',
      'if False:\n            return _deny("secret", "that path is not available")\n        if tool == "search":',

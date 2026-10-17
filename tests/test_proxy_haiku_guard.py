@@ -16,6 +16,7 @@ import httpx
 import pytest
 
 from llm_router import paths
+from llm_router import quality_breaker as qb
 from llm_router.commands import kpi
 from llm_router.proxy import haiku_guard as hg
 from llm_router.proxy import server as ps
@@ -288,7 +289,7 @@ def test_override_lives_in_the_state_dir():
 
 
 @pytest.mark.parametrize("trigger", ["redo", "tier_retry", "audit_daily"])
-def test_run_once_trip_writes_override_turns_policy_off_and_leaves_yaml_untouched(tmp_path, monkeypatch,
+def test_run_once_trip_opens_the_breaker_turns_policy_off_and_leaves_yaml_untouched(tmp_path, monkeypatch,
                                                                                 trigger):
     now = time.time()
     rows = {"redo": _redo_ledger(30, 6, now), "tier_retry": _retry_ledger(100, 2, now),
@@ -307,7 +308,9 @@ def test_run_once_trip_writes_override_turns_policy_off_and_leaves_yaml_untouche
     ev = hg.run_once(policy, now=now, read_rows=lambda: rows, notify=lambda r, e: notes.append(r))
     assert ev["action"] == "trip" and trigger in ev["tripped"]
     assert policy.haiku_rewrite is False
-    assert json.loads(hg.override_path().read_text())["haiku_rewrite"] is False
+    # P2.6-a: the trip goes to the quality breaker (it can recover); the owner override file is not written
+    assert not hg.override_path().exists()
+    assert qb.class_state("proxy_haiku", "haiku") == qb.OPEN
     assert pt.ClaudeTierPolicy.load(y).haiku_rewrite is False
     assert _sha(y) == before  # the YAML is never edited
     assert len(notes) == 1
@@ -376,7 +379,7 @@ def test_run_once_reads_the_real_ledger_path(tmp_path):
 
 def test_status_line_carries_no_message_ids(tmp_path):
     hg.run_once(None, now=NOW, read_rows=lambda: _redo_ledger(30, 6, NOW), notify=lambda r, e: None)
-    text = hg.status_path().read_text() + hg.override_path().read_text()
+    text = hg.status_path().read_text() + paths.state_path(qb.STATE_FILE).read_text()
     assert "msg_" not in text and "s1" not in text.split("since=")[0]
 
 

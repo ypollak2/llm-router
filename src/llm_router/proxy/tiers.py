@@ -25,6 +25,10 @@ The decision, per call, in order (the first that applies wins):
                     bypassing ``allow_upgrade`` the same way ``config_pinned``
                     does. Checked BEFORE ``user_pinned`` so it can still
                     escalate a conversation that ran ``/model`` earlier.
+``explicit_prefix_pin`` ``sonnet:`` or ``haiku:`` pins that tier with the same
+                    precedence as ``opus:`` and bypasses the soft quota cap.
+                    An unservable Haiku body keeps the requested model;
+                    supported bodies are rewritten for Haiku when necessary.
 ``user_pinned``     the transcript shows the user ran ``/model``: unchanged.
 ``long_first_prompt_floor`` the conversation's first call, and the prompt is
                     long or multi-part (``proxy/escalation.py``,
@@ -191,6 +195,7 @@ STEP_ERROR = "step_error"  # tier_detail of decide_unclassified: the call could 
 # and the long-first-prompt safety floor. See that module's docstring for the
 # trial evidence behind each one.
 REASON_EXPLICIT_OPUS_PIN = "explicit_opus_pin"
+REASON_EXPLICIT_PREFIX_PIN = "explicit_prefix_pin"
 REASON_ESCALATION = "escalation"  # detail carries escalation.REASON_* (contradiction/claude_reask/tool_failures)
 REASON_LONG_FIRST_PROMPT = "long_first_prompt_floor"
 # Phase "haiku-tier": opt-in body rewrite in place of the thinking floor, see
@@ -860,8 +865,10 @@ class ClaudeTierPolicy:
             return stay(haiku_arm.WHY_NO_HAIKU_TIER)
         if self.rank[req_tier.name] <= self.rank[haiku.name]:
             return stay(haiku_arm.WHY_NOT_ABOVE_HAIKU)
-        if escalation.explicit_opus_pin(body):
-            return stay(haiku_arm.WHY_OPUS_PIN)
+        pin = escalation.explicit_pin(body)
+        if pin is not None:
+            return stay(haiku_arm.WHY_OPUS_PIN if pin == "opus"
+                        else haiku_arm.WHY_PREFIX_PIN)
         if user_pinned_model(body):
             return stay(haiku_arm.WHY_USER_PIN)
         first = is_first_call(body)
@@ -893,14 +900,15 @@ class ClaudeTierPolicy:
     def decide_unclassified(self, body: dict, session_id: str | None, sticky: Stickiness) -> TierDecision:
         """The decision for a call the proxy could not label (``step_class == unknown``,
         ``step_error``): no classifier, no D-31 arm. This method reads stickiness and
-        does not write it (the request path's usage and tier-retry hooks still may). In
-        ``_decide``'s order: a ``pinned_models`` model stays pinned; a side call is kept;
-        an ``opus:`` pin is served on the Opus tier; a ``/model`` choice is kept (never
-        downgraded); otherwise the conversation's last served tier holds when the body
-        is accepted on it as sent (a Haiku tier, which may need a body rewrite, does
-        not hold); otherwise the call is forwarded as sent (``decision_error``).
-        ``detail`` is ``step_error`` on every path. A pin check that raises on the same
-        malformed body propagates and ``decide_tier`` forwards the call as sent."""
+        writes it only for an honoured prefix pin (P2.7); the request path's usage and
+        tier-retry hooks may still write too. In ``_decide``'s order: a
+        ``pinned_models`` model stays pinned; a side call is kept; an ``opus:`` pin is
+        served on the Opus tier; a ``/model`` choice is kept (never downgraded);
+        otherwise the conversation's last served tier holds when the body is accepted on
+        it as sent (a Haiku tier, which may need a body rewrite, does not hold);
+        otherwise the call is forwarded as sent (``decision_error``). ``detail`` is
+        ``step_error`` on every path. A pin check that raises on the same malformed
+        body propagates and ``decide_tier`` forwards the call as sent."""
         requested = body.get("model") if isinstance(body.get("model"), str) else None
         req_tier = self.tier_of(requested)
         name = req_tier.name if req_tier else None
@@ -911,11 +919,16 @@ class ClaudeTierPolicy:
             return TierDecision(requested, requested, name, REASON_CONFIG_PINNED, detail=STEP_ERROR)
         if not has_client_tools(body):
             return TierDecision(requested, requested, name, REASON_SIDE_CALL, detail=STEP_ERROR)
-        opus_tier = self.by_name.get("opus")
-        if opus_tier is not None and escalation.explicit_opus_pin(body):
-            return TierDecision(requested, opus_tier.model, opus_tier.name, REASON_EXPLICIT_OPUS_PIN,
-                                switched=_canonical(opus_tier.model) != _canonical(requested),
-                                detail=STEP_ERROR)
+        pin = escalation.explicit_pin(body)
+        pin_tier = self.by_name.get(pin)
+        if pin_tier is not None:
+            decision = self._prefix_decision(body, requested, req_tier, pin_tier)
+            if decision.reason != REASON_HAIKU_BODY:
+                sticky.record(conversation_key(body, session_id), decision.served_model,
+                              None, decision.reason)
+            if decision.detail is None:
+                decision.detail = STEP_ERROR
+            return decision
         if user_pinned_model(body):
             return TierDecision(requested, requested, name, REASON_USER_PINNED, detail=STEP_ERROR)
         state = sticky.get(conversation_key(body, session_id))
@@ -929,6 +942,29 @@ class ClaudeTierPolicy:
             served = requested if _canonical(state.model) == _canonical(requested) else state.model
             return TierDecision(requested, served, prev.name, REASON_STICKY, detail=STEP_ERROR)
         return TierDecision(requested, requested, name, REASON_DECISION_ERROR, detail=STEP_ERROR)
+
+    def _prefix_decision(self, body, requested, req_tier, target, block=None):
+        def keep(reason, **kw):
+            return TierDecision(requested, requested, req_tier.name, reason, **kw)
+
+        rewrite = None
+        if target.name == "haiku":
+            if not self._haiku_body_ok(body, block):
+                return keep(REASON_HAIKU_BODY, detail="prefix_unservable:haiku_body")
+            thinking = body.get("thinking")
+            thinking = thinking.get("type") if isinstance(thinking, dict) else None
+            thinking = thinking if thinking in THINKING_TYPES else None
+            oc = body.get("output_config")
+            effort = isinstance(oc, dict) and oc.get("effort") is not None
+            if (not self._accepts(target, thinking, effort)
+                    or (self.haiku_folds_system
+                        and _has_mid_conversation_system_message(body))):
+                rewrite = REWRITE_HAIKU
+        reason = (REASON_EXPLICIT_OPUS_PIN if target.name == "opus"
+                  else REASON_EXPLICIT_PREFIX_PIN)
+        return TierDecision(requested, target.model, target.name, reason,
+                            switched=_canonical(target.model) != _canonical(requested),
+                            body_rewrite=rewrite)
 
     async def decide(self, body: dict, session_id: str | None, sticky: Stickiness,
                      classify=None) -> TierDecision:
@@ -977,15 +1013,13 @@ class ClaudeTierPolicy:
         with phases("stickiness"):
             key = conversation_key(body, session_id)
         opus_tier = self.by_name.get("opus")
-        if opus_tier is not None and escalation.explicit_opus_pin(body):
-            # `opus:` — an explicit pin, never subject to the no-upgrade rule
-            # (config_pinned/pinned_models bypass it the same way): the user
-            # asked for Opus by name, so this call and, via stickiness, the
-            # rest of the conversation go there regardless of what the
-            # classifier would have said.
-            sticky.record(key, opus_tier.model, None, REASON_EXPLICIT_OPUS_PIN)
-            return TierDecision(requested, opus_tier.model, opus_tier.name, REASON_EXPLICIT_OPUS_PIN,
-                                switched=_canonical(opus_tier.model) != _canonical(requested))
+        pin = escalation.explicit_pin(body)
+        pin_tier = self.by_name.get(pin)
+        if pin_tier is not None:
+            decision = self._prefix_decision(body, requested, req_tier, pin_tier, block)
+            if decision.reason != REASON_HAIKU_BODY:
+                sticky.record(key, decision.served_model, None, decision.reason)
+            return decision
         if user_pinned_model(body):
             return keep(REASON_USER_PINNED)
         thinking = (body.get("thinking") or {}).get("type") if isinstance(body.get("thinking"), dict) else None

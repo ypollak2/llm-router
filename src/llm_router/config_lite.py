@@ -17,6 +17,7 @@ the value comes from ``get_config()`` exactly as before. ``DEFAULTS`` is pinned 
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -28,7 +29,26 @@ DEFAULTS: dict[str, object] = {
     "session_context_enabled": True,
     "session_context_share_external": True,
     "session_context_max_tokens_draft": 3000,
+    "llm_router_claude_subscription": False,
+    "llm_router_routing_policy": "balanced",
 }
+
+
+def _dotenv_names(path: Path, field: str) -> bool:
+    """True when the ``.env`` file at ``path`` could set ``field``: a line naming it
+    (``FIELD=...``, ``export FIELD=...``, a bare ``FIELD``; case-insensitive, like
+    pydantic-settings) or a file that cannot be read. A ``.env`` that holds only other
+    keys (every API-key file) cannot change this field, so it no longer forces the
+    pydantic import (D-171 S3: a state ``.env`` is the usual case on a real install)."""
+    try:
+        from llm_router.paths import regular_file_or_none
+
+        if regular_file_or_none(path) is None:  # missing, FIFO, device or dir: never opened (F15)
+            return False
+        pat = re.compile(r"^\s*(?:export\s+)?" + re.escape(field) + r"\s*(?:[=:]|$)", re.I | re.M)
+        return bool(pat.search(path.read_text(encoding="utf-8", errors="replace")))
+    except Exception:  # noqa: BLE001 -- cannot tell: take the real path
+        return True
 
 
 def could_be_set(field: str) -> bool:
@@ -39,7 +59,7 @@ def could_be_set(field: str) -> bool:
             return True
         from llm_router.paths import state_path
 
-        return state_path(".env").exists() or Path(".env").exists()
+        return _dotenv_names(state_path(".env"), field) or _dotenv_names(Path(".env"), field)
     except Exception:  # noqa: BLE001 -- cannot tell: take the real path
         return True
 

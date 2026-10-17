@@ -1,0 +1,7 @@
+[
+ "\\b(haiku|sonnet|opus)\\b",
+ "\\bdifficulty\\b",
+ "\\btier\\b",
+ "\\b(easy|hard|trivial|simple|complex|difficult)\\s+(task|one|prompt|request|job)\\b",
+ "\\bcomplexity\\s+(level|score|rating)\\b"
+]
