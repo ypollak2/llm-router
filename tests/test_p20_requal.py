@@ -506,6 +506,10 @@ def test_run_boundaries_and_resume(factory):
     assert all(r["error"] == "served_model_mismatch" for r in rows)
 
 
+# CPU-bound, not a timing test: ~1,500 stubbed model calls, each re-reading the answer ledger
+# in quota_guard (4.8 s of the 7.8 s profile). 6.5 s on an idle laptop, over the 30 s default on
+# a loaded parallel CI runner (F52: #523, #571).
+@pytest.mark.timeout(180)
 def test_judge_plants_and_retries(factory):
     cfg, c, pools = selected_run(factory)
     assert call(cfg, "judge", "--set", "qa") == 2
