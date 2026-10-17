@@ -443,6 +443,25 @@ def test_cli_missing_candidate_file_is_not_informative(G, tmp_path, capsys):
     assert rc == 2
 
 
+def test_cli_prereg_file_hash_and_missing(G, R, tmp_path, capsys):
+    import hashlib
+    _write_case(R, tmp_path, cand_fail=range(2))
+    pf = tmp_path / "PREREG-P32.md"
+    pf.write_text("frozen text")
+    good = hashlib.sha256(b"frozen text").hexdigest()
+    (tmp_path / "PREREG.sha256").write_text(f"{good}  PREREG-P32.md\n")
+    (tmp_path / "PIN.json").write_text(json.dumps(R.make_pin(
+        R.load_manifests(tmp_path / "manifests"), SHA_B, good)))
+    assert _cli(G, tmp_path, "--sha", SHA_A, "--prereg-file", str(pf)) == 0
+    capsys.readouterr()
+    pf.write_text("edited after freeze")                                   # hash differs from sidecar
+    assert _cli(G, tmp_path, "--sha", SHA_A, "--prereg-file", str(pf)) == 2
+    assert "differs from its sidecar" in capsys.readouterr().out
+    pf.unlink()                                                            # pin present, file missing
+    assert _cli(G, tmp_path, "--sha", SHA_A, "--prereg-file", str(pf)) == 2
+    assert "missing but a pin exists" in capsys.readouterr().out
+
+
 # ── --skip-quality policy: CLI + shell wiring ─────────────────────────────────
 
 def _git(cwd, *args):
@@ -542,6 +561,7 @@ def test_release_workflow_gates_on_the_sha_file_and_runs_the_gate():
     text = (REPO / ".github" / "workflows" / "release.yml").read_text()
     assert "github.sha" in text and ".json" in text
     assert "scripts/release/eval_gate.py compare" in text
+    assert "--prereg-file docs/prereg/PREREG-P32.md" in text
     assert "--sha" in text
     assert "secrets." not in text
     assert wf["permissions"] == {"contents": "read"}

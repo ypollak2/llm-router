@@ -42,6 +42,7 @@ LLM_ROUTER_RELEASE_OWNER_OVERRIDE=1. Off a tag the skip is allowed and appended 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -278,6 +279,20 @@ def _cmd_skip_check(a: argparse.Namespace) -> int:
     return 0
 
 
+def prereg_file_problems(prereg_file: Path, sidecar: str | None, pin_present: bool) -> list[str]:
+    """scripts/check_prereg.py cannot be used here (it needs a `frozen_utc` field in the sidecar,
+    exits 1, and cannot express a missing file), so the equivalent check lives in the gate:
+    the prereg file's sha256 must equal the sidecar; a pin without its prereg file is refused."""
+    if not prereg_file.is_file():
+        return [f"{prereg_file} is missing but a pin exists"] if pin_present else []
+    got = hashlib.sha256(prereg_file.read_bytes()).hexdigest()
+    if sidecar is None:
+        return [f"{prereg_file} exists but has no prereg sidecar to check it against"]
+    if got != sidecar:
+        return [f"{prereg_file} sha256 {got[:12]} differs from its sidecar {sidecar[:12]}"]
+    return []
+
+
 def _cmd_compare(a: argparse.Namespace) -> int:
     try:
         candidate = json.loads(Path(a.candidate).read_text())
@@ -308,6 +323,11 @@ def _cmd_compare(a: argparse.Namespace) -> int:
     except (ValueError, OSError) as e:
         print(f"NOT INFORMATIVE prereg sidecar unreadable: {e}")
         return NOT_INFORMATIVE
+    if a.prereg_file:
+        bad = prereg_file_problems(Path(a.prereg_file), prereg, pin is not None)
+        if bad:
+            print("NOT INFORMATIVE prereg file: " + "; ".join(bad))
+            return NOT_INFORMATIVE
     code, lines = run_gate(candidate, baseline, manifests, expect_sha=a.sha, pin=pin,
                            prereg_sidecar=prereg)
     print("\n".join(lines))
@@ -325,6 +345,8 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--pin", default="release_evals/PIN.json")
     c.add_argument("--prereg", default="release_evals/PREREG.sha256",
                    help="one-line sha256sum sidecar; must match prereg_sha256 in the pin")
+    c.add_argument("--prereg-file", default=None,
+                   help="the frozen prereg document; its sha256 must equal the sidecar, and it must exist when a pin does")
     c.add_argument("--sha", default=None, help="the sha the candidate file must be for")
     s = sub.add_parser("skip-check", help="apply the --skip-quality tag policy")
     s.add_argument("--reason", required=True)

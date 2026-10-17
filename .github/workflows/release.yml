@@ -71,4 +71,5 @@ jobs:
             --manifests release_evals/manifests \
             --pin release_evals/PIN.json \
             --prereg release_evals/PREREG.sha256 \
+            --prereg-file docs/prereg/PREREG-P32.md \
             --sha "${SHA}"

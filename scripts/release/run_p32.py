@@ -376,7 +376,29 @@ def git_head(worktree: Path) -> str | None:
     return r.stdout.strip() if r.returncode == 0 else None
 
 
-def check_provenance(worktree: Path, sha: str, pkg_file: str) -> list[str]:
+def dirty_paths(worktree: Path, role: str | None = None) -> list[str]:
+    """Tracked-file changes in the worktree (`git status --porcelain --untracked-files=no`). For
+    --role candidate, paths under release_evals/ (the output location) are ignored."""
+    r = subprocess.run(["git", "-C", str(worktree), "status", "--porcelain", "--untracked-files=no"],
+                       capture_output=True, text=True, check=False)
+    if r.returncode != 0:
+        return [f"git status failed: {r.stderr.strip()}"]
+    lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+    if role == "candidate":
+        lines = [ln for ln in lines if not ln[3:].strip().strip('"').startswith("release_evals/")]
+    return lines
+
+
+def check_root(role: str | None, worktree: Path, root: Path) -> list[str]:
+    """A candidate scores items and hashes taken from ROOT, so --worktree must be ROOT itself.
+    A baseline worktree is the v15.4.0 checkout, intentionally elsewhere."""
+    if role == "candidate" and Path(worktree).resolve() != Path(root).resolve():
+        return [f"--role candidate: --worktree {worktree} is not this script's checkout {root} "
+                "(items and hashes come from the script's checkout)"]
+    return []
+
+
+def check_provenance(worktree: Path, sha: str, pkg_file: str, role: str | None = None) -> list[str]:
     """Reasons to refuse to run; empty means the package under test is the --sha checkout."""
     problems = []
     if not SHA_RE.match(str(sha)):
@@ -388,6 +410,9 @@ def check_provenance(worktree: Path, sha: str, pkg_file: str) -> list[str]:
         Path(pkg_file).resolve().relative_to(Path(worktree).resolve())
     except ValueError:
         problems.append(f"imported llm_router ({pkg_file}) is not under the worktree {worktree}")
+    dirty = dirty_paths(worktree, role)
+    if dirty:
+        problems.append(f"worktree {worktree} has {len(dirty)} uncommitted tracked change(s): {dirty[:5]}")
     return problems
 
 
@@ -487,7 +512,7 @@ def run(a: argparse.Namespace) -> int:
     worktree = Path(a.worktree or subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True,
                                                   text=True, check=False).stdout.strip() or ".")
     import llm_router
-    problems = check_provenance(worktree, a.sha, llm_router.__file__)
+    problems = check_root(a.role, worktree, root) + check_provenance(worktree, a.sha, llm_router.__file__, a.role)
     if problems:
         print("refusing to run: " + "; ".join(problems), file=sys.stderr)
         return 1

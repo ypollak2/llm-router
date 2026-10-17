@@ -174,6 +174,42 @@ def check_provenance_refusals(M):
         assert M.check_provenance(wt, "abc", pkg), "a malformed --sha must refuse"
 
 
+def check_dirty_tree_refusal(M):
+    with tempfile.TemporaryDirectory() as t:
+        wt = pathlib.Path(t)
+        head = _git_repo(wt)
+        pkg = str(wt / "src" / "llm_router" / "__init__.py")
+        (wt / "f").write_text("changed")                                   # tracked file modified
+        assert M.check_provenance(wt, head, pkg), "dirty tree must refuse"
+        assert M.check_provenance(wt, head, pkg, "candidate"), "dirty tree must refuse for a candidate"
+        (wt / "f").write_text("x")
+        (wt / "untracked").write_text("u")                                 # untracked is not dirty
+        assert M.check_provenance(wt, head, pkg, "candidate") == []
+        (wt / "release_evals").mkdir()
+        (wt / "release_evals" / "o.json").write_text("{}")
+        subprocess.run(["git", "-C", str(wt), "add", "-f", "release_evals/o.json"], check=True)
+        subprocess.run(["git", "-C", str(wt), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "o"],
+                       check=True)
+        head = subprocess.run(["git", "-C", str(wt), "rev-parse", "HEAD"], capture_output=True, text=True,
+                              check=True).stdout.strip()
+        (wt / "release_evals" / "o.json").write_text("[]")                 # output location edited
+        assert M.check_provenance(wt, head, pkg, "candidate") == [], "release_evals/ is ignored for a candidate"
+        assert M.check_provenance(wt, head, pkg, "baseline"), "but not for a baseline"
+
+
+def check_candidate_worktree_must_be_root(M):
+    with tempfile.TemporaryDirectory() as t:
+        other = pathlib.Path(t)
+        assert M.check_root("candidate", REPO, REPO) == []
+        assert M.check_root("candidate", other, REPO), "candidate worktree != ROOT must refuse"
+        assert M.check_root("baseline", other, REPO) == [], "a baseline worktree is intentionally elsewhere"
+        head = _git_repo(other)
+        out = other / "o.json"
+        assert M.main(["--role", "candidate", "--sha", head, "--sets", "rt_hand_60", "--worktree", str(other),
+                       "--out", str(out)]) == 1
+        assert not out.exists()
+
+
 def check_cli_refuses_and_writes_nothing(M):
     with tempfile.TemporaryDirectory() as t:
         out = pathlib.Path(t) / "o.json"
@@ -248,7 +284,8 @@ CHECKS = {fn.__name__: fn for fn in (
     check_stab_generator_pinned_and_hashseed_independent, check_hand_outcome, check_agt_outcome,
     check_fidelity_retention_outcome, check_stability_detects_nondeterministic_stub,
     check_stability_refuses_bad_children, check_stability_real_children_are_separate_processes,
-    check_provenance_refusals, check_cli_refuses_and_writes_nothing,
+    check_provenance_refusals, check_dirty_tree_refusal, check_candidate_worktree_must_be_root,
+    check_cli_refuses_and_writes_nothing,
     check_end_to_end_file_passes_the_gate_and_manifests_match_freeze, check_dry_run_counts,
     check_fixtures_identity_detects_an_edit,
 )}
@@ -265,7 +302,7 @@ def test_check_green_on_the_real_harness(name, M):
 
 
 def test_checks_found_something():
-    assert len(CHECKS) >= 14   # an empty table would pass everything
+    assert len(CHECKS) >= 16   # an empty table would pass everything
 
 
 # ── mutants: each must turn its named check red ───────────────────────────────
@@ -293,6 +330,11 @@ MUTANTS = [
     ("MA2 drop the package-under-worktree check", [("        Path(pkg_file).resolve().relative_to(Path(worktree).resolve())\n",
                                                     "        pass\n")],
      "check_provenance_refusals"),
+    ("MH drop the dirty-tree check", [("    if dirty:\n", "    if False:\n")], "check_dirty_tree_refusal"),
+    ("MH2 candidate ignores more than release_evals/", [('if role == "candidate":', "if True:")],
+     "check_dirty_tree_refusal"),
+    ("MI drop the candidate worktree==ROOT check", [('if role == "candidate" and Path(worktree)', "if False and Path(worktree)")],
+     "check_candidate_worktree_must_be_root"),
     ("MB positional hand ids", _POSITIONAL_HAND, "check_ids_stable_across_runs_and_order"),
     ("MB2 positional a1 ids", _POSITIONAL_A1, "check_ids_stable_across_runs_and_order"),
     ("MC stability run in the same process", _SAME_PROCESS, "check_stability_detects_nondeterministic_stub"),
