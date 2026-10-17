@@ -166,10 +166,14 @@ def test_drops_are_counted(case):
                            entry("assistant", [use("SubagentHandback", message="x")], "pre"),
                            entry("assistant", "s", "t")])
     case.session("big", [entry("user", "q" * 4000), entry("assistant", "s", "t")])
+    case.session("noask", [entry("assistant", [use("Read", file_path="/a")], "pre"),
+                           entry("assistant", "s", "t")])
     rows = [case.row(n, "t", session_kind="organic") for n in ("a", "exec", "main", "secret", "big")]
     rows[2]["is_main_thread"] = False
     rows += [case.row("agent", "t", session_kind="organic"),
              case.row("ghost", "t", session_kind="organic"),
+             case.row("noask", "t", session_kind="organic"),
+             dict(case.row("a", "t", session_kind="organic"), prev_tool_class="unresolved-bash"),
              case.row("a", "missing", session_kind="organic"),
              dict(case.row("a", "t", session_kind="organic"), kind="side_call"),
              dict(case.row("a", "t", session_kind="organic"), prev_tool_class="web"),
@@ -185,8 +189,22 @@ def test_drops_are_counted(case):
     excluded = manifest(case)["counts"]["excluded"]
     assert excluded == {"exec_session": 1, "not_main_thread": 1, "secret_pattern": 1,
                         "pack_over_window": 1, "subagent_step": 1, "transcript_missing": 1,
-                        "msg_not_found": 1, "not_continuation": 1, "not_technical_op": 1}
+                        "msg_not_found": 1, "not_continuation": 1, "not_technical_op": 1,
+                        "bash_unresolved": 1, "no_human_ask": 1}
     assert [r["session"] for r in pool(case)] == ["a"]
+
+
+def test_pack_over_window_with_the_real_default_fits(case):
+    # no stand-in estimator: the gate's own estimate (capability_filter) drops the long item
+    from llm_router import capability_filter  # noqa: F401  (the real path, not the fallback)
+
+    case.session("short", [entry("user", "ask"), entry("assistant", "s", "t")])
+    case.session("long", [entry("user", "q" * 4 * 40000), entry("assistant", "s", "t")])
+    case.calls([case.row("short", "t", session_kind="organic"),
+                case.row("long", "t", session_kind="organic")])
+    assert b.main(case.args) == 0
+    assert [r["session"] for r in pool(case)] == ["short"]
+    assert manifest(case)["counts"]["excluded"] == {"pack_over_window": 1}
 
 
 def test_branch_b_does_not_drop_subagent_tool_evidence(case):
@@ -194,6 +212,15 @@ def test_branch_b_does_not_drop_subagent_tool_evidence(case):
                            entry("user", "ask"), entry("assistant", "s", "t")])
     case.calls([case.row("agent", "t", session_kind="organic")])
     assert b.main(case.args) == 0 and len(pool(case)) == 1
+
+
+def test_branch_a_tests_only_tool_evidence(case):
+    # FIX 4: branch A is the gate's tool-name test over the history, nothing about file or
+    # parent session; a sub-agent step with no SubagentHandback in its history is NOT dropped.
+    case.session("file", [entry("user", "ask"), entry("assistant", "s", "t")])
+    case.calls([case.row("file", "t", session_kind="organic")])
+    assert b.main(case.args + ["--subagent-branch", "A"]) == 0
+    assert len(pool(case)) == 1 and manifest(case)["counts"]["excluded"] == {}
 
 
 def test_secret_in_organic_action_excludes_item(case):

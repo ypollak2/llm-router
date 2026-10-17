@@ -73,9 +73,6 @@ CONSTANTS_T: dict[str, str] = {
     "QUIET_LOAD1_MAX": "4.0",
     "QUIET_READINGS": "3",
     "QUIET_INTERVAL_S": "10",
-    "RUN_BLOCK_START": "23:15",
-    "RUN_BLOCK_END": "07:00",
-    "RUN_BLOCK_WHILE": "P2.0_UNFINISHED",
     "QUOTA_SESSION_PAUSE_PCT": "80",
     "QUOTA_WEEKLY_PAUSE_PCT": "85",
     "QUOTA_MAX_AGE_S": "1800",
@@ -125,12 +122,11 @@ CALL_RE = re.compile(r"^\[tool_use (\S+)\] (\{.*\})$", re.M)
 class CfgT(base.Cfg):
     prereg: Path = PREREG_T
     p20_amend2: Path = base.AMEND2
-    p20_use_log: Path = P20_REQUAL_DIR / "b2/use.log"
     lock_path: Path = P20_REQUAL_DIR / "ollama.lock"
-    local_minute: Callable[[], int] = lambda: datetime.now().hour * 60 + datetime.now().minute
     ps_fn: Callable[[], list] = lambda: subprocess.run(
         ["ps", "-axo", "command"], stdin=subprocess.DEVNULL, capture_output=True, text=True,
         timeout=30, check=False).stdout.splitlines()
+    local_touched: bool = False  # BLOCKER-1: set once this process passed the gate for a local call
 
 
 def default_dir() -> Path:
@@ -326,6 +322,15 @@ def equal_threshold(n: int):
     return threshold
 
 
+def prompt_tokens_est(item: dict) -> int:
+    return sum(len(str(m.get("content", ""))) for m in item["messages"]) // 4
+
+
+def nearest_rank(values: list[int], share: Fraction) -> int | None:
+    ordered = sorted(values)
+    return ordered[math.ceil(share * len(ordered)) - 1] if ordered else None
+
+
 def select_tech_op(pool: list[dict], c: dict) -> dict:
     """No tier filter (C1); strata org+ho on one hash order; session cap; >= 5 sessions."""
     excluded: Counter = Counter()
@@ -376,6 +381,9 @@ def select_tech_op(pool: list[dict], c: dict) -> dict:
         "from_subagent_file": Counter(r["stratum"] for r in chosen
                                       if r.get("from_subagent_file")),
         "freeze": {"ready": not reasons, "reasons": reasons},
+        "prompt_tokens_est": {  # §15.7: chars/4 of the rebuilt messages, selected items
+            "median": median(prompt_tokens_est(r) for r in chosen) if chosen else None,
+            "p90": nearest_rank([prompt_tokens_est(r) for r in chosen], Fraction(9, 10))},
     }
 
 
@@ -451,31 +459,15 @@ def active_arms(cfg: CfgT, c: dict) -> list[str]:
     return [a for a in base.arms(c) if a not in skipped]
 
 
-def p20_unfinished(cfg: CfgT) -> bool:
-    """D-199/F4: P2.0 is finished iff its use.log holds a `started` line (written by score).
-    Read-only; unreadable counts as unfinished."""
-    try:
-        rows = [line.split() for line in cfg.p20_use_log.read_text().splitlines()]
-    except OSError:
-        return True
-    return not any(row and row[0] == "started" for row in rows)
-
-
-def minutes(value: str) -> int:
-    hour, minute = value.split(":")
-    return int(hour) * 60 + int(minute)
-
-
-def in_run_block(cfg: CfgT, c: dict) -> bool:
-    now, start, end = cfg.local_minute(), minutes(c["RUN_BLOCK_START"]), minutes(c["RUN_BLOCK_END"])
-    return now >= start or now < end
-
-
 def quiet(cfg: CfgT, c: dict, arm: str) -> list[dict]:
     """The local-call gate, re-checked before EVERY local call; returns the readings."""
-    if in_run_block(cfg, c) and p20_unfinished(cfg):  # RUN-BLOCK
-        raise Park("run block: P2.0 unfinished")
-    if any("p20_requal.py" in line for line in cfg.ps_fn()):
+    try:
+        lines = cfg.ps_fn()
+    except Exception as exc:  # fail closed: cannot see the process table, so cannot rule P2.0 out
+        raise Park("ps failed") from exc
+    if not lines:
+        raise Park("ps empty")
+    if any("p20_requal.py" in line for line in lines):
         raise Park("P2.0 harness running")
     readings = []
     for reading in range(int(c["QUIET_READINGS"])):
@@ -506,12 +498,51 @@ def ollama_lock(path: Path):
         os.close(fd)  # closing releases the flock
 
 
-def local_call(cfg: CfgT, c: dict, arm: str, ident: str, attempt: int, messages: list[dict]):
-    readings = quiet(cfg, c, arm)
+@contextmanager
+def local_gate(cfg: CfgT, c: dict, arm: str):
+    """Lock, then quiet, then the call (the P2.0 AMEND3 order); yields the quiet readings."""
     with ollama_lock(cfg.lock_path):
+        readings = quiet(cfg, c, arm)
+        cfg.local_touched = True  # the model may now be resident because of this process
+        yield readings
+
+
+def local_call(cfg: CfgT, c: dict, arm: str, ident: str, attempt: int, messages: list[dict]):
+    with local_gate(cfg, c, arm) as readings:
         row = base.call_model(cfg, c, SET, arm, ident, attempt, messages)
     row["quiet"] = readings
     return row
+
+
+def unload_if_touched(cfg: CfgT, arm: str) -> None:
+    """BLOCKER-1: unload only what this process used, under the lock, never waiting for it."""
+    if not cfg.local_touched:
+        return
+    try:
+        with ollama_lock(cfg.lock_path):
+            cfg.ollama.unload(arm)
+    except Park:
+        pass  # the sibling harness holds the lock and may be using the model: leave it loaded
+
+
+def unchecked_local_rows(cfg: CfgT, c: dict) -> int:
+    """Local answer rows written without a passing quiet re-check (must be 0): a row with no
+    readings, fewer than QUIET_READINGS, or any reading outside the thresholds."""
+    def bad(row: dict) -> bool:
+        readings = row.get("quiet")
+        if not isinstance(readings, list) or len(readings) != int(c["QUIET_READINGS"]):
+            return True
+        return any(not math.isfinite(r["free_pct"]) or not math.isfinite(r["load1"])
+                   or r["free_pct"] < float(c["QUIET_FREE_MEM_MIN_PCT"])
+                   or r["load1"] >= float(c["QUIET_LOAD1_MAX"]) for r in readings)
+    return sum(bad(r) for r in base.jsonl(cfg.run_dir / f"answers/{SET}.jsonl")
+               if r["arm"] == c["LOCAL_MODEL"])
+
+
+def over_attempts(cfg: CfgT, c: dict) -> int:
+    """Items with more than RETRIES+1 attempt rows in any arm (must be 0)."""
+    rows = Counter((r["item_id"], r["arm"]) for r in base.jsonl(cfg.run_dir / f"answers/{SET}.jsonl"))
+    return sum(n > int(c["RETRIES"]) + 1 for n in rows.values())
 
 
 def spent(cfg: CfgT) -> Fraction:
@@ -549,6 +580,8 @@ def run(cfg: CfgT, c: dict, chosen_arms: list[str] | None = None) -> dict:
     items = base.items_for(cfg, SET, selected)
     done = base.finals(cfg, SET)
     local_arm, count = c["LOCAL_MODEL"], 0
+    cfg.local_touched = False
+    answers_path = cfg.run_dir / f"answers/{SET}.jsonl"
     for arm in chosen_arms:
         if arm not in active_arms(cfg, c):
             continue
@@ -568,15 +601,17 @@ def run(cfg: CfgT, c: dict, chosen_arms: list[str] | None = None) -> dict:
         try:
             if local:
                 warm = [{"role": "user", "content": "Reply OK."}]
-                quiet(cfg, c, arm)
-                with ollama_lock(cfg.lock_path):
+                with local_gate(cfg, c, arm):
                     cfg.ollama.chat(arm, warm, timeout=int(c["LOCAL_TIMEOUT_S"]),
                                     options={"num_ctx": local_models.num_ctx(arm), "temperature": 0},
                                     think=False)
+            prior = Counter(r["item_id"] for r in base.jsonl(answers_path)
+                            if r["arm"] == arm and not r.get("final"))
             for item in pending:
                 window = local_models.num_ctx(arm) if local else int(c["REF_WINDOW"])
                 messages = cfg.pack_fn(item, SET, window)
-                for attempt in range(1, int(c["RETRIES"]) + 2):
+                # weak spot (d): resume at the next attempt number, so no item exceeds RETRIES+1
+                for attempt in range(prior[item["id"]] + 1, int(c["RETRIES"]) + 2):
                     row = (local_call(cfg, c, arm, item["id"], attempt, messages) if local
                            else base.call_model(cfg, c, SET, arm, item["id"], attempt, messages))
                     row["final"] = row["ok"] or attempt == int(c["RETRIES"]) + 1
@@ -586,7 +621,7 @@ def run(cfg: CfgT, c: dict, chosen_arms: list[str] | None = None) -> dict:
                         break
         finally:
             if local:
-                cfg.ollama.unload(arm)
+                unload_if_touched(cfg, arm)
     claude_arms = [a for a in chosen_arms if a != local_arm and a in active_arms(cfg, c)]
     if claude_arms:
         sample = [i for i in items if i["id"] in rejudge_sample(items, c)]
@@ -604,7 +639,9 @@ def run(cfg: CfgT, c: dict, chosen_arms: list[str] | None = None) -> dict:
                     if row["final"]:
                         break
     return {"attempts": count, "finals": len(base.finals(cfg, SET)),
-            "ew_finals": len(ew_finals(cfg))}
+            "ew_finals": len(ew_finals(cfg)),
+            "items_over_retries_plus_1_attempt_rows": over_attempts(cfg, c),
+            "items_run_after_failed_recheck": unchecked_local_rows(cfg, c)}
 
 
 # ---- H7: plants and judge --------------------------------------------------------------
@@ -814,8 +851,7 @@ def secondary(arm: str, items: list[dict], answers: dict, judged: dict, ref: str
             "latency_s": {"median": median(times) if times else None,
                           "p95": percentile95(times), "n": len(times),
                           "prompt_tokens_est_median": median(
-                              sum(len(str(m.get("content", ""))) for m in i["messages"]) // 4
-                              for i in rows) if rows else None},
+                              prompt_tokens_est(i) for i in rows) if rows else None},
             "by_organic_tool": dict(Counter(
                 (i["organic_action"].get("tool") or "final") for i in rows)),
         }

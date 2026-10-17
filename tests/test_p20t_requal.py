@@ -145,8 +145,7 @@ def sidecar(path, date):
 
 @pytest.fixture
 def factory(tmp_path):
-    def make(label="run", n=130, items=None, bad=(), cost=0.001, hour_min=12 * 60,
-             p20_log="started x\n", **extra):
+    def make(label="run", n=130, items=None, bad=(), cost=0.001, **extra):
         run_dir = tmp_path / label
         run_dir.mkdir()
         pool = items if items is not None else [make_item(i) for i in range(n)]
@@ -172,11 +171,9 @@ def factory(tmp_path):
         amend = run_dir / "AMEND2.md"
         amend.write_text("# AMEND2\n")
         sidecar(amend, "2026-12-01T00:00:00Z")
-        p20log = run_dir / "p20_use.log"
-        p20log.write_text(p20_log)
         cfg = h.CfgT(
-            run_dir, prereg=prereg, p20_amend2=amend, p20_use_log=p20log,
-            lock_path=run_dir / "ollama.lock", now=lambda: NOW, local_minute=lambda: hour_min,
+            run_dir, prereg=prereg, p20_amend2=amend,
+            lock_path=run_dir / "ollama.lock", now=lambda: NOW,
             ps_fn=lambda: ["python other.py"], sleep=lambda _: None, ollama=Ollama(bad),
             claude=Claude(cost), machine=Machine(),
             quota=lambda: {"session_pct": 0, "weekly_pct": 0, "age_s": 0},
@@ -237,6 +234,20 @@ def test_org_floor_blocks_freeze_ready():
     pool = [make_item(i, stratum="org" if i < 10 else "ho") for i in range(130)]
     out = h.select_tech_op(pool, h.STATIC)
     assert "org_n" in out["freeze"]["reasons"] and out["org_ok"] is False
+
+
+def test_dry_run_prints_median_and_p90_prompt_tokens_est(factory, capsys):
+    pool = [make_item(i) for i in range(100)]
+    for i, row in enumerate(pool):
+        row["messages"][0]["content"] = "x" * (400 * (i + 1))  # 100, 200, ... tokens (+ history)
+    cfg, c, _ = factory("tok", items=pool)
+    assert call(cfg, "select", "--dry-run") == 0
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    est = out["sets"]["tech_op"]["prompt_tokens_est"]
+    chosen = h.select_tech_op(pool, h.STATIC)["ids"]
+    vals = sorted(h.prompt_tokens_est(r) for r in pool if r["id"] in set(chosen))
+    assert est["median"] == h.median(vals) and est["p90"] == vals[-(-9 * len(vals) // 10) - 1]
+    assert est["p90"] > est["median"] > 0
 
 
 def test_dry_run_prints_counts_only_and_status_no_freeze(factory, capsys):
@@ -421,7 +432,7 @@ def test_run_records_quiet_readings_and_checks_before_every_call(factory):
     cfg, c, pool = full_run(factory, "quiet")
     local_rows = [r for r in base.jsonl(cfg.run_dir / "answers/tech_op.jsonl") if r["arm"] == h.LOCAL]
     assert local_rows and all(len(r["quiet"]) == 3 for r in local_rows)
-    assert cfg.ollama.unloaded == [h.LOCAL]
+    assert cfg.ollama.unloaded == [h.LOCAL]  # this process called: one unload, at the end
 
 
 def test_quiet_failure_parks_before_any_row(factory):
@@ -453,46 +464,146 @@ def test_quiet_rechecked_mid_run_parks_after_current_item(factory):
     assert 1 <= len(rows) < 120 and all(r["final"] for r in rows)
 
 
-def test_run_block_while_p20_unfinished(factory):
-    cfg, c, pool = factory("blk", hour_min=23 * 60 + 15, p20_log="")
-    assert call(cfg, "select") == 0
-    assert call(cfg, "run", "--set", "tech_op") == 3
-    assert not (cfg.run_dir / "answers/tech_op.jsonl").exists()
-    cfg.local_minute = lambda: 6 * 60 + 59
-    assert call(cfg, "run", "--set", "tech_op") == 3
-    cfg.local_minute = lambda: 7 * 60
-    assert call(cfg, "run", "--set", "tech_op") == 0  # block ended; P2.0 unfinished is irrelevant
-    cfg2, c2, _ = factory("blk2", hour_min=23 * 60 + 20, p20_log="started x\n")
-    assert call(cfg2, "select") == 0
-    assert call(cfg2, "run", "--set", "tech_op") == 0  # P2.0 finished: no block
+def hold_lock(path):
+    import fcntl
+    import os
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
 
 
-def test_run_block_unreadable_p20_log_is_unfinished_and_before_block_is_open(factory):
-    cfg, c, pool = factory("unread", hour_min=1 * 60)
-    cfg.p20_use_log.unlink()
-    assert h.p20_unfinished(cfg) is True
+def lock_is_held(path):
+    import fcntl
+    import os
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+    except OSError:
+        return True
+    finally:
+        os.close(fd)
+
+
+def test_no_time_of_day_run_block(factory):
+    # D-204: the sibling P2.0 harness is frozen under AMEND3 and shares the lock, so the
+    # D-199 23:15-07:00 block is gone from code and constants.
+    assert not any(k.startswith("RUN_BLOCK") for k in h.CONSTANTS_T)
+    assert not hasattr(h, "in_run_block") and not hasattr(h, "p20_unfinished")
+    assert not hasattr(h.CfgT, "local_minute") and "local_minute" not in h.CfgT.__dataclass_fields__
+    cfg, c, pool = factory("noblock")
     assert call(cfg, "select") == 0
-    assert call(cfg, "run", "--set", "tech_op") == 3
-    cfg.local_minute = lambda: 23 * 60 + 14
     assert call(cfg, "run", "--set", "tech_op") == 0
 
 
-def test_p20_harness_process_parks_and_lock_held_parks(factory):
+def test_p20_harness_process_parks_before_any_call_and_does_not_unload(factory):
     cfg, c, pool = factory("proc")
     assert call(cfg, "select") == 0
     cfg.ps_fn = lambda: ["python scripts/p20_requal.py run --set qa"]
     assert call(cfg, "run", "--set", "tech_op") == 3
-    cfg.ps_fn = lambda: ["python scripts/p20t_requal.py run --set tech_op"]
-    import fcntl
-    import os
-    fd = os.open(cfg.lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    assert not (cfg.run_dir / "answers/tech_op.jsonl").exists()
+    assert cfg.ollama.unloaded == []  # BLOCKER 1: the model is P2.0's; this process never used it
+    assert cfg.ollama.calls == []
+
+
+def test_lock_held_before_any_call_parks_and_does_not_unload(factory):
+    cfg, c, pool = factory("lockfirst")
+    assert call(cfg, "select") == 0
+    fd = hold_lock(cfg.lock_path)
     try:
         assert call(cfg, "run", "--set", "tech_op") == 3
     finally:
+        import os
         os.close(fd)
     assert not (cfg.run_dir / "answers/tech_op.jsonl").exists()
+    assert cfg.ollama.unloaded == [] and cfg.ollama.calls == []
     assert call(cfg, "run", "--set", "tech_op") == 0
+    assert cfg.ollama.unloaded == [h.LOCAL]
+
+
+def test_lock_taken_after_warmup_parks_per_attempt_and_end_unload_skipped(factory):
+    # FIX 2: the lock is taken around EVERY local call, not once. The sibling grabs it after
+    # the warm-up and the first item; the next attempt must park, and the unload (this process
+    # did call) must be skipped silently because the lock is held.
+    import os
+    cfg, c, pool = factory("lockmid")
+    assert call(cfg, "select") == 0
+    held, packed = [], []
+
+    def pack(item, name, window):
+        packed.append(item["id"])
+        if len(packed) == 2:  # the second item is being packed: warm-up and item 1 are done
+            held.append(hold_lock(cfg.lock_path))
+        return [{"role": "user", "content": item["request"]}]
+
+    cfg.pack_fn = pack
+    try:
+        assert call(cfg, "run", "--set", "tech_op") == 3
+    finally:
+        for fd in held:
+            os.close(fd)
+    rows = base.jsonl(cfg.run_dir / "answers/tech_op.jsonl")
+    assert len(held) == 1 and len(rows) == 1 and rows[0]["final"]
+    assert cfg.ollama.unloaded == []  # held lock at the end: no unload
+
+
+def test_quiet_is_read_inside_the_lock(factory):
+    cfg, c, pool = factory("order")
+    assert call(cfg, "select") == 0
+    seen = []
+    load = cfg.machine.load1
+    cfg.machine.load1 = lambda: (seen.append(lock_is_held(cfg.lock_path)), load())[1]
+    assert call(cfg, "run", "--set", "tech_op") == 0
+    assert seen and all(seen)  # AMEND3 order: lock, then quiet, then the call
+
+
+def test_ps_fails_closed(factory):
+    cfg, c, pool = factory("ps")
+    assert call(cfg, "select") == 0
+    cfg.ps_fn = lambda: []  # ps returned nothing: cannot rule P2.0 out
+    assert call(cfg, "run", "--set", "tech_op") == 3
+
+    def boom():
+        raise OSError("ps")
+
+    cfg.ps_fn = boom
+    assert call(cfg, "run", "--set", "tech_op") == 3
+    assert not (cfg.run_dir / "answers/tech_op.jsonl").exists() and cfg.ollama.unloaded == []
+    cfg.ps_fn = lambda: ["python other.py"]
+    assert call(cfg, "run", "--set", "tech_op") == 0
+
+
+def test_resume_continues_at_next_attempt_number(factory):
+    # weak spot (d): a parked item resumes at the next attempt; no item gets > RETRIES+1 rows
+    cfg, c, pool = factory("resume")
+    assert call(cfg, "select") == 0
+    first = json.loads((cfg.run_dir / "items/tech_op.jsonl").read_text().splitlines()[0])["id"]
+    seed = {"item_id": first, "arm": h.LOCAL, "attempt": 1, "ok": False, "final": False,
+            "text": "", "error": "empty"}
+    base.append_row(cfg.run_dir / "answers/tech_op.jsonl", seed)
+    assert call(cfg, "run", "--set", "tech_op") == 0
+    mine = [r for r in base.jsonl(cfg.run_dir / "answers/tech_op.jsonl")
+            if r["item_id"] == first and r["arm"] == h.LOCAL]
+    assert [r["attempt"] for r in mine] == [1, 2] and mine[-1]["final"]
+    assert h.over_attempts(cfg, c) == 0
+
+
+def test_over_attempt_detector_and_run_report_fields(factory, capsys):
+    cfg, c, pool = factory("report")
+    assert call(cfg, "select") == 0
+    assert call(cfg, "run", "--set", "tech_op") == 0
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out["items_over_retries_plus_1_attempt_rows"] == 0
+    assert out["items_run_after_failed_recheck"] == 0
+    # the checks find something when it is there (an empty set would pass everything)
+    path = cfg.run_dir / "answers/tech_op.jsonl"
+    row = base.jsonl(path)[0]
+    for attempt in (7, 8):
+        base.append_row(path, {**row, "attempt": attempt, "final": False})
+    assert h.over_attempts(cfg, c) == 1
+    base.append_row(path, {**row, "item_id": "x", "quiet": [{"free_pct": 50.0, "load1": 9.0}] * 3})
+    base.append_row(path, {**row, "item_id": "y", "quiet": []})
+    assert h.unchecked_local_rows(cfg, c) == 2
 
 
 def test_identity_mismatch_and_foreign_arm_refuse(factory):
