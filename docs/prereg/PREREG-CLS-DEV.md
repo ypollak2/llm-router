@@ -1,7 +1,7 @@
 # PREREG-CLS-DEV (r5): DEV screening of learned tier classifiers (PLAN v16 CLS-v16, D-127..D-130)
 
-Revision r5 (2026-10-17, text brought in line with the merged builds B0 #537, B1 #526 + F11 #539, B-L #527 and F20 #544, and with coordinator decisions D-143, D-147, D-148, D-160, D-161 and D-169). Status: DRAFT. Not frozen. This file is frozen only when `PREREG-CLS-DEV.sha256` exists beside it and
-`scripts/check_prereg.py` reports a match, after an independent freeze-guard review says READY. Changing
+Revision r5 (2026-10-17, text brought in line with the merged builds B0 #537, B1 #526 + F11 #539, B-L #527 and F20 #544, and with coordinator decisions D-143, D-147, D-148, D-160, D-161 and D-169). Status: this file is frozen only when `PREREG-CLS-DEV.sha256` exists beside it and
+`scripts/check_prereg.py` reports a match, after an independent freeze-guard review says READY; until then it is a draft. Changing
 any byte changes the hash. The freeze record is the last section. The author of this draft did not
 review it.
 
@@ -34,8 +34,18 @@ review it.
   when the set changes, and C4 runs `qwen3.5:latest` as Ollama resolves it.
 * 15 (D-169): a bare Ollama name is looked up as `name:latest` (Ollama semantics; `nomic-embed-text` ->
   `nomic-embed-text:latest`).
-* 3.1, 15 (D-169): model ids `judge_gpt` = `gen_gpt` = `gpt-6-astra` (D-118; confirmed by a coordinator `codex exec -m`
+* 3.1, 15 (D-169): model ids `judge_gpt` = `gen_gpt` = `gpt-6-astra` (D-118; to be confirmed by a coordinator `codex exec -m`
   probe before the freeze), `judge_sonnet` = `claude-sonnet-5-5`, `judge_opus` = `gen_opus` = `claude-opus-5-5`.
+* Freeze-guard text fixes (D-181; 18 changes, no number that decides a candidate moved): 2.1 input-string rules (digest-only
+  overflow is a B0 error; special tokens counted for C1/C3; `input_cap` in the 9.3 runtime config); 3.3 single-answer id
+  rule stated as main's `parse_labels` implements it; 8 row 7 one repeat run, row 8 moved into the table, status
+  paragraph below it; 9.1 ties in C-lambda2-clamp; 9.5 finalists are exactly the `finalists` list; 10.2 discarded blocks
+  re-run; 2.1 C4 `tier_token_not_located` has two resolution paths; 13 new bullets (intent phrases, library versions);
+  15 spec freeze record, build commands from a main checkout >= b95e83ee, `codex exec -m` probe gate, "to be confirmed"
+  for the Codex model id, and `PINS-STATIC.json` stored outside the repo (mode 0600) and not committed (D-181); status
+  lines are conditional (frozen only when the `.sha256` exists), so the frozen bytes carry no draft banner.
+* Generator template (r5): code-fence rule names the task meanings, because the request carries meanings, not T-numbers
+  (spec 5 item 3, Appendix C, `tmpl_gpt.v1.txt`, `tmpl_opus.v1.txt`); the 140 request bodies were re-scanned.
 * 1.3, 15 (D-169): the exclusion-list path is the P17D attach's `~/.llm-router/denylist.txt` (named and hashed only);
   the `.env` is `~/.llm-router/.env`, hashed by the coordinator at the real pins build, never a hard pin.
 * 15 (D-169): the six v1 generator files are committed in `docs/prereg/cls-syn-gen/` (the `--gen-dir`), authored
@@ -225,7 +235,7 @@ score), and a DEV number is never a verdict or a claim.
 | C1 | `bge-small-en-v1.5` embedding + ordinal logistic regression | LR on DEV | offline from the HF cache; revision = the cached snapshot dir name recorded in the manifest (`5c38ec7c405ec4b44b94cc5a9bb96e735b38267a` at the time of writing; the run re-reads it) |
 | C2 | `nomic-embed-text` (Ollama `/api/embed`) embedding + ordinal LR | LR on DEV | Ollama model digest recorded (the bare name is looked up as `nomic-embed-text:latest`, D-169); task prefix `classification: ` fixed [CD] |
 | C3 | ModernBERT-base head, fine-tuned | fine-tune on DEV | **conditional** on trigger T-MB; one download, pinned revision sha, `HF_HOME` set to the CLS-v16 cache dir (never system-wide); card licence read and recorded before download (expected Apache-2.0, to be verified, not assumed) |
-| C4 | Qwen3.5 (`qwen3.5:latest`) logprob readout of the existing v6 prompt (`local_classifier.py`, thinking off) | calibration only | runs `qwen3.5:latest` as Ollama resolves it; `/api/tags` lists that name twice (digests `2e16a80fe3d7...` and `44a38603922e...`, one manifest file on disk), so the pin is the sorted set of both digests and verify fails if the set changes (D-169). First-token logprobs of the tier tokens, then a 3-feature ordinal LR fitted in-fold. Needs an Ollama build that returns logprobs; if not available, kill criterion 1 applies (no silent fallback to argmax). `c4-precheck` splits the failure (D-160): no usable `logprobs` field is a criterion-1 kill (`no_logprobs_field`); logprobs present but the tier token not located is **parked for the coordinator** (`tier_token_not_located`, counts and shapes only, never token text) and is not a kill |
+| C4 | Qwen3.5 (`qwen3.5:latest`) logprob readout of the existing v6 prompt (`local_classifier.py`, thinking off) | calibration only | runs `qwen3.5:latest` as Ollama resolves it; `/api/tags` lists that name twice (digests `2e16a80fe3d7...` and `44a38603922e...`, one manifest file on disk), so the pin is the sorted set of both digests and verify fails if the set changes (D-169). First-token logprobs of the tier tokens, then a 3-feature ordinal LR fitted in-fold. Needs an Ollama build that returns logprobs; if not available, kill criterion 1 applies (no silent fallback to argmax). `c4-precheck` splits the failure (D-160): no usable `logprobs` field is a criterion-1 kill (`no_logprobs_field`); logprobs present but the tier token not located is **parked for the coordinator** (`tier_token_not_located`, counts and shapes only, never token text) and is not a kill; resolution has two paths only: the coordinator kills C4 as `runtime`, or amends the extraction rule of this section by an amendment dated before any C4 DEV score exists; C4 is not scored while parked |
 
 **Context digest.** A real item's digest is the one the P17D/GE3 judge saw if the attach step recovered it, else
 none; it is **capped at 400 characters** (truncated, same cap as DEV-SYN digests). A candidate's feature set is
@@ -235,12 +245,12 @@ frozen with the candidate.
 
 * **Input string.** `"[ctx] " + digest + " [prompt] " + canonical_text` when a digest exists, else
   `canonical_text`. `canonical_text` = harness blocks stripped, last 3,000 characters. Input length is capped
-  **[CD]** (CD-18, amended r5, D-169): C1 (bge-small) and C3 (ModernBERT) at 512 tokens of their own tokenizer; C2
+  **[CD]** (CD-18, amended r5, D-169): C1 (bge-small) and C3 (ModernBERT) at 512 tokens of their own tokenizer (special tokens included: C1 counts `len(tokenize(text)) + 2`, C3 `add_special_tokens=True`); C2
   (nomic, Ollama) at **384 whitespace-delimited words**, because no local nomic tokenizer exists; 384 words is a
   conservative stand-in for 512 tokens and is an **approximation**, not a token count (a text of unusual words can
   still exceed 512 tokens; it is then sent to Ollama as cut and no further cap is applied by the harness). For every embedder, when over the cap the
   **digest part is kept whole and the prompt part is truncated from its head (the tail is kept)**; no truncation
-  cuts the digest.
+  cuts the digest. If the digest part alone (`[ctx] <digest> [prompt] `) exceeds the cap, B0 raises (`cls_dev_lib.model_input`): a harness error, never a truncation of the digest and never silently skipped.
 * **Embedding.** L2-normalised vector, then `StandardScaler` fitted on the training fold only.
 * **Binary heads.** `sklearn.linear_model.LogisticRegression`, penalty L2, solver lbfgs, `max_iter=1000`,
   `tol=1e-4`, `class_weight=None`. Head k takes `sample_weight = w_pool * m`, where `w_pool` is the real/synthetic
@@ -409,8 +419,7 @@ Codex; `claude -p` runs with its tools disabled), text via **stdin** (never argv
   `gt.prompt_view` form, joined by a blank line, then `rub.BATCH_TAIL` (or `rub.SINGLE_TAIL`) verbatim. **The rubric
   is the first block of the stdin payload** (the frozen judge argv has no `--system-prompt` flag, and Codex has none),
   so `outgoing_check` sees it with the items. A batch answer is `{"labels": [{"id", "tier", ...}]}` with an id per label;
-  a single-item answer may omit the id and then takes the one id that was asked (the P1.7-d rule,
-  `scripts/p17d_synthetic.py:1121`, D-161), an answer that carries an id must carry the asked one; a label counts
+  a single-item answer may omit the id and then takes the one id that was asked (after the P1.7-d rule, `scripts/p17d_synthetic.py:1121`, which attaches the asked id to a single answer; CLS additionally rejects a single answer whose own id differs from the asked one, D-161), an answer that carries an id must carry the asked one; a label counts
   only if `gt.valid_label` accepts it and its tier is haiku, sonnet or opus.
 * **Batches of 8**, ordered by `sha256("clsdev:label:20261017:" + item_id)`.
 * **Calibration, first call.** The first call of each judge's run is the 6 planted items of `rubric.py`
@@ -620,14 +629,14 @@ are validity checks) but subject to section 8.1.
 | 4 | Operating point | pooled out-of-sample | no admissible (t_hi, t_lo) in the second-level fits; **or** the **pooled out-of-sample decisions** fail any of: under(cand) <= under(R-E); C-lambda2-clamp(cand) <= C-lambda2-clamp(R-E); the NOT-TRIVIAL guard passes; the non-inferiority upper 95 percent bounds hold (under <= +3 points, C-lambda2-clamp <= +0.3) |
 | 5 | Cost | pooled out-of-sample | **informative, not gating** (D-130 c: raw cost is reported, not gated; r1 wrongly made it a kill). Reported: raw cost with CI and the ratio to R-E raw cost (R-E raw 2.746 on P17D); a ratio above 1.35 prints the flag `COST_HIGH` and goes into the finalist file |
 | 6 | Shift | real vs DEV-SYN | **definition (r3):** take the pooled out-of-sample decisions (section 7.3, thresholds fitted on the pooled data) and score separately their **real rows** and their **DEV-SYN rows**. Kill when the candidate is significantly worse than R-E on the real rows (CI lower bound of the paired difference > 0 on either under-route or C-lambda2-clamp) **while** passing criterion 4's four conditions on the DEV-SYN rows: it fits the generator, not the traffic. Report-only under `LOW CLUSTER FIDELITY`, and carries no weight when DEV-SYN is `RESEMBLANCE_FAILED` |
-| 7 | Stability | pooled | decisions identical on a repeat run for < 98 percent of items (P1.6-b). Repeat = a second full run with an unchanged config in a different quiet window; `pending` until the repeat exists (B0 `stability` compares two OOF score files at the frozen thresholds) |
+| 7 | Stability | pooled | decisions identical on a repeat run for < 98 percent of items (P1.6-b). Repeat = a second full run with an unchanged config in a different quiet window; `pending` until the repeat exists (B0 `stability` compares two OOF score files at the frozen thresholds). Exactly one repeat run counts; a further repeat is an amendment. |
+| 8 | Judge robustness | real (and DEV-SYN: T-gpt vs T-sonnet) | two legs. **Real leg:** the sign of (under, C-lambda2-clamp) minus R-E under T-opus differs from the sign under T-gpt on more than 1 of the 2 metrics (T-sonnet is computed beside them and not gated). **DEV-SYN leg:** the same test between T-gpt and T-sonnet on the DEV-SYN rows. **A sign counts only if the paired difference under that truth is at least 1 bootstrap standard error from 0** (a **1-SE magnitude floor**: smaller differences are indeterminate, not discordant). Status per leg: discordant on both metrics `kill`; a leg whose judge (of its pair) is voided is `not_evaluable`; **any other leg that cannot be evaluated is `pending`** and blocks eligibility (F20: DEV-SYN rows present but the candidate's arm absent from the DEV-SYN leg is `pending`, never a pass); a table with no DEV-SYN rows at all is `not_applicable` for that leg. The row passes when no leg kills or is pending (legs `pass`, `not_evaluable`, `not_applicable`); `not_evaluable` passes only because a judge was voided (D-160) |
 
 **Status vocabulary (r5; B0 `criteria_table`).** Each row is `pass`, `kill`, `pending`, `report_only` (rows 5, and 6 under its
 conditions), `async_only` (row 1) or `not_evaluable` / `not_applicable` (row 8). `killed_by` is the first kill in
 the order above. A candidate is **eligible** when no row kills and no row is `pending`; a `pending` row is never a
 pass. Only eligible candidates enter ranking (9), and only when the DEV validity floor is `OK` and all of the
 section 8.1 validity checks ran and passed.
-| 8 | Judge robustness | real (and DEV-SYN: T-gpt vs T-sonnet) | two legs. **Real leg:** the sign of (under, C-lambda2-clamp) minus R-E under T-opus differs from the sign under T-gpt on more than 1 of the 2 metrics (T-sonnet is computed beside them and not gated). **DEV-SYN leg:** the same test between T-gpt and T-sonnet on the DEV-SYN rows. **A sign counts only if the paired difference under that truth is at least 1 bootstrap standard error from 0** (a **1-SE magnitude floor**: smaller differences are indeterminate, not discordant). Status per leg: discordant on both metrics `kill`; a leg whose judge (of its pair) is voided is `not_evaluable`; **any other leg that cannot be evaluated is `pending`** and blocks eligibility (F20: DEV-SYN rows present but the candidate's arm absent from the DEV-SYN leg is `pending`, never a pass); a table with no DEV-SYN rows at all is `not_applicable` for that leg. The row passes when no leg kills or is pending (legs `pass`, `not_evaluable`, `not_applicable`); `not_evaluable` passes only because a judge was voided (D-160) |
 
 ### 8.1 Validity of the screen (run in the same pass, never decisive for a candidate, decisive for the screen)
 
@@ -652,8 +661,8 @@ section 8.1 validity checks ran and passed.
    than R-E. Keep the top 2, preferring diverse families **[CD]**: one logprob-or-LLM arm and one small learned
    head if both exist among survivors. **Note (CD-13):** the diversity rule can displace the rank-2 candidate by a
    lower-ranked one of another family; the displaced candidate, its rank and its numbers are named in the
-   finalist file so the choice is visible. If only one family survives, one finalist. Ties in the objective are
-   broken by candidate id (C1 before C2 before C3 before C4). Families: C1, C2, C3 are small learned heads, C4 is the
+   finalist file so the choice is visible. If only one family survives, one finalist. Ties in C-lambda2-clamp are
+   broken by candidate id (`rank_survivors` sorts by (cost, id)) (C1 before C2 before C3 before C4). Families: C1, C2, C3 are small learned heads, C4 is the
    logprob/LLM arm. A candidate labelled `async_only` ranks like any other and keeps its label (CD-16).
 2. **Arm definitions (frozen).** The L2 tier of a candidate is the section 7.1 threshold rule on its
    probabilities; its confidence is `max(P_haiku, P_sonnet, P_opus)`. Arm A returns the L2 tier. Arm B returns
@@ -674,14 +683,13 @@ section 8.1 validity checks ran and passed.
    once on TEST-SYN only for the winning arm of each finalist; the loser is reported from DEV only.
 3. **Output** `cls_dev_result.json` (counts, ids and tiers only; no text) and `cls_dev_finalists.json`:
    per finalist: candidate id, family, labels (`async_only`) and `sync_authority`, arm and the arm-choice detail with
-   `t_conf_method`, artifact sha256 list, frozen thresholds (t_hi, t_lo, t_conf), runtime
-   config, DEV-CV metrics with CIs, the full kill-criteria table including every number, the per-stratum
+   `t_conf_method`, artifact sha256 list, frozen thresholds (t_hi, t_lo, t_conf), runtime config (model, `input_cap` {cap, unit}: 512 tokens or 384 whitespace words, seed), DEV-CV metrics with CIs, the full kill-criteria table including every number, the per-stratum
    tables (length band, truth tier, task type, tool need, source, generator family) and the manifest sha256.
    Both files get a `.sha256` and are cited by sha256 in `PREREG-CLS-TEST`.
 4. **At most 2 finalists.** If 0 survive: the CLS-v16 L2 route stops here; the result is "no candidate
    passed DEV", recorded with the table, not reworked on TEST. A candidate killed here is not re-run without
    an amendment that says what changed and why.
-5. The coordinator names the finalists; no model is run on TEST-SYN during this prereg. TEST-SYN labels are
+5. The finalists are exactly the `finalists` list of `cls_dev_finalists.json` (at most 2, section 9.1); the coordinator publishes it and has no discretion to add, drop or reorder; no model is run on TEST-SYN during this prereg. TEST-SYN labels are
    produced and hashed under the TEST prereg before any finalist is scored on them.
 
 ## 10. Latency, quiet-machine rule and the 00:00-07:00 exclusion
@@ -715,7 +723,7 @@ observed only; never `pkill` by pattern; r2 narrows the r1 list, per D-132 g); t
 three readings 10 s apart, each with free memory >= 40 percent (`memory_pressure -Q`) and load1 < 4.0, and no
 foreign model resident (`/api/ps` lists none besides the candidate's own); the stricter CLS load limits above
 still apply. The harness never unloads a foreign model; failure parks the run. The readings are written into the log. An invalid block is discarded,
-logged as `invalid:<reason>`, and re-run; the number of discarded blocks is reported.
+logged as `invalid:<reason>`, and re-run; the number of discarded blocks is reported. A discarded block is re-run until three valid blocks exist; validity depends only on the machine-state readings, never on the latency values.
 
 ### 10.3 Exclusion window
 
@@ -801,6 +809,8 @@ percent ($16)**. OpenRouter only under section 3.1, shared $20 cap (D-128), per-
 * **TEST prereg duty.** The TEST prereg must report a **real-only comparator** and a **per-source breakdown**, so a
   pass on synthetic items cannot hide behavior on real turns.
 * **Judge-defined truth** uses three LLM judges from two families; their errors can correlate (the same rubric).
+* **Intent phrases (generator).** The three intent phrases say 'a change', and they are inserted for every task type, including explain and research items. They steer generation only (spec 2.5); truth is judged. The mismatch can blur the intended mix; it is reported through the judged truth shares, not corrected.
+* **Library versions.** scikit-learn, numpy, scipy, transformers, torch and Python are not pinned by PINS-STATIC. `local_classifier.py`, `proxy/steps.py` (via `engine.canonical_text`), `secret_scrubber.py` and `persist_redaction.py` are covered only by running from the clean frozen checkout (section 15, Building and checking) and the scrubber self-test staleness hash, not by a STATIC sha. The coordinator logs the `pip freeze` sha256 at the first B0 run. A code follow-up to pin them is open and is not a freeze blocker.
 * Thresholds, `n_real_dev` and `n_truth_opus` are not known at writing; the estimates in section 1 are not
   inputs to any rule.
 
@@ -842,14 +852,16 @@ percent ($16)**. OpenRouter only under section 3.1, shared $20 cap (D-128), per-
 
 ## 15. Freeze record
 
-Not frozen. To freeze: the coordinator commissions an independent freeze-guard review (not the author, without
+To freeze: the coordinator commissions an independent freeze-guard review (not the author, without
 the conversation). On READY write `PREREG-CLS-DEV.sha256` as `<sha256>  PREREG-CLS-DEV.md`, then
 `frozen_utc <UTC stamp from date -u>`, then **`pins_sha256 <sha256 of PINS-STATIC.json>`**;
 `scripts/check_prereg.py` must report a match and `cls_pins.py --verify` must report every STATIC pin matched.
+On READY also write `docs/prereg/CLS-SYN-GENERATOR-SPEC.sha256` as `<sha256>  CLS-SYN-GENERATOR-SPEC.md` then `frozen_utc <date -u>`; `scripts/check_prereg.py docs/prereg/CLS-SYN-GENERATOR-SPEC.md` must report a match.
+The freeze does not proceed until the coordinator's `codex exec -m gpt-6-astra` probe has exited 0 and printed `model: gpt-6-astra`; the probe's UTC stamp and result go in the freeze log.
 
 **Two pin files (r4).** Only STATIC pins are freeze blockers.
 
-**`PINS-STATIC.json`** (built by the B-L `pins --static` subcommand, hashed, committed with the freeze) holds what
+**`PINS-STATIC.json`** (built by the B-L `pins --static` subcommand and hashed; **not committed** (D-181), see the storage paragraph below) holds what
 exists at the freeze: the sha256 of `scripts/cls_eval.py`, `cls_dev_run.py`, `cls_dev_lib.py`, `cls_label_run.py`,
 `cls_gen_run.py`, `cls_resemble.py`, `cls_send_lib.py`, `cls_pins.py`; the engine commit sha and the sha256 of
 `src/llm_router/engine.py` and the **full** sha256 of `src/llm_router/shadow_eval.py`, **both pinned by commit**
@@ -872,7 +884,7 @@ only when a help line **defines** it, not when another option's text names it), 
 the installed build lacks **blocks the freeze**; the exact `argv_template` of each CLI (the argv of 3.2) and the session-log directories
 (`~/.claude/projects`, `~/.codex/sessions`, as strings, never read by a build); the model ids used for judging
 and generating, as five keys (`judge_gpt`, `judge_sonnet`, `judge_opus`, `gen_gpt`, `gen_opus`; a missing key blocks the freeze;
-values (D-169): `judge_gpt` = `gen_gpt` = `gpt-6-astra` (D-118, confirmed by the coordinator's `codex exec -m` probe before the
+values (D-169): `judge_gpt` = `gen_gpt` = `gpt-6-astra` (D-118, to be confirmed by the coordinator's `codex exec -m` probe before the
 freeze), `judge_sonnet` = `claude-sonnet-5-5`, `judge_opus` = `gen_opus` = `claude-opus-5-5`); and the **v1**
 generator files (templates, 12 x 5 mask, project list, intent phrases, meta patterns; spec appendices A-D, hashed
 as files; committed in `docs/prereg/cls-syn-gen/`, which is the `--gen-dir` passed to `cls_pins.py` and `cls_gen_run.py`).
@@ -881,7 +893,9 @@ Generator files are versioned by name (e.g. `tmpl_gpt.v1.txt`, `tmpl_gpt.v2.txt`
 marker `{{ITEMS}}` where the item blocks go (`cls_gen_run.py`; the spec author supplies the files and the tool does not invent
 their wording).
 
-**Building and checking (r5).** `PINS-STATIC.json` records absolute paths in `params` (repo, scripts directory, helper files,
+**Where `PINS-STATIC.json` lives (D-181).** The repo is public and the file holds absolute home paths and the `.env` sha256, so it is **not committed**. It is stored outside the repo at `~/.rsi/research/primary-plan/v16/cls/PINS-STATIC.json` (mode 0600) and is bound by the `pins_sha256` line of the committed `PREREG-CLS-DEV.sha256`. `pins --verify` is run on that stored file.
+
+**Building and checking (r5).** Run from a checkout of main (>= b95e83ee, so it holds #548) with #545 merged, `git status --porcelain -- scripts src docs/prereg` empty, in a directory with no `pins_run.jsonl`. Record `git rev-parse HEAD` in the freeze log. `python3 scripts/cls_pins.py pins --static --out <stored path above> --engine-commit <sha> --rubric-py <real rubric.py> --denylist ~/.llm-router/denylist.txt --env-file ~/.llm-router/.env --bge-snapshot-dir <snapshot dir> --gen-dir docs/prereg/cls-syn-gen --model-id judge_gpt=gpt-6-astra --model-id gen_gpt=gpt-6-astra --model-id judge_sonnet=claude-sonnet-5-5 --model-id judge_opus=claude-opus-5-5 --model-id gen_opus=claude-opus-5-5`; then `pins --verify <file>` (warning `pre_freeze_no_pins_sha256_record` expected), `pins --freeze-line <file>` -> the third line of the .sha256, then `check_prereg.py` and `pins --verify` again (no warning, ok true). `--rubric-py` is required and has no default (it sits beside gt500.py in the P17D labeller scripts directory). `PINS-STATIC.json` records absolute paths in `params` (repo, scripts directory, helper files,
 Ollama URL, snapshot and generator directories) and `pins --verify` recomputes every pin from them, so it is built and verified from
 the checkout that holds the frozen commit, with `--engine-commit` set to a commit that contains the frozen engine files (their hashes
 are taken by `git show`, not from the working tree). `pins --verify PINS-STATIC.json` prints `{"ok", "mismatches", "warnings",

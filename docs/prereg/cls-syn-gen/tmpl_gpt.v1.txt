@@ -4,8 +4,7 @@ and ONE context digest.
 Items (one block per item):
 {{ITEMS}}
 Rules: human-typed, imperfect, lowercase allowed; no quotation marks around the whole message; no numbering of
-items inside a message; never mention models, tiers, cost, rating or difficulty; code fences only for bands 51+ and
-task types 1-5; no secrets of any shape, real or fake; no real people or companies; URLs only at example.com;
+items inside a message; never mention models, tiers, cost, rating or difficulty; code fences only when the message is over 50 words and the task is a bug fix, a new feature, a refactor, tests or debugging a failure; no secrets of any shape, real or fake; no real people or companies; URLs only at example.com;
 items in this call must differ in vocabulary and sentence shape.
 Digest schema (JSON, <= 400 chars): {"project","turn":first|follow_up|plan_approval|after_error|after_test_run,
 "files_touched":0-6, "last_tool_outcome":none|ok|error|test_fail,"branch_state":clean|dirty|pr_open,"referent":str|null}
