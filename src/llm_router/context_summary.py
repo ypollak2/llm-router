@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS rolling_summaries (
 """
 
 # Family preference among the map's connected local generate models.
-_PREFERRED = ("qwen3.5", "qwen3.6", "qwen3", "llama3", "gemma", "mistral", "phi")
+_PREFERRED = ("qwen3.8", "qwen3.5", "qwen3.6", "qwen3", "llama3", "gemma", "mistral", "phi")
 _EXCLUDED = ("llmr-", "embed", "classifier", "systemone", "coder:30b")
 
 

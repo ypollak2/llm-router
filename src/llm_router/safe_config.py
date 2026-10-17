@@ -98,7 +98,7 @@ perplexity_api_key: "{discovered.get('perplexity_api_key', '')}"
 
 # Ollama (local inference — free, no API key needed)
 ollama_base_url: "{discovered.get('ollama_base_url', 'http://localhost:11434')}"
-ollama_budget_models: "{discovered.get('ollama_budget_models', 'gemma4:latest,qwen3.5:latest')}"
+ollama_budget_models: "{discovered.get('ollama_budget_models', 'qwen3.8-uncensored:latest,gemma4:latest')}"
 
 # Agentic model — preferred model for agentic / tool-reasoning tasks
 # (analyze, generate, query, research). When set, it is pinned at the FRONT of

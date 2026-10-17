@@ -233,11 +233,11 @@ def probe_generation(timeout: float | None = None) -> ProbeResult:
         if isinstance(resident, ProbeResult):
             return ProbeResult(resident.ok, resident.detail, None, time.monotonic() - started)
         if not any(resident):
-            return ProbeResult(True, "no model resident; nothing to hang", None,
+            return ProbeResult(None, "no model resident; cannot tell", None,
                                time.monotonic() - started)
         model = _pick_model(resident)
         if model is None:
-            return ProbeResult(True, "preferred local model not resident; nothing to probe", None,
+            return ProbeResult(None, "preferred local model not resident; cannot tell", None,
                                time.monotonic() - started)
         from llm_router import warm
         try:
@@ -294,15 +294,18 @@ def read_state() -> dict:
         return {}
 
 
-def _write_state(state: dict) -> None:
+def _write_state(state: dict) -> bool:
+    """Persist ``state``. True when written; False (and fail-open recorded) when not."""
     path = _state_file()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         tmp.write_text(json.dumps(state, separators=(",", ":")), encoding="utf-8")
         tmp.replace(path)
+        return True
     except Exception as exc:                                     # noqa: BLE001
         failopen.record("OLLAMA-WATCHDOG-STATE-WRITE", exc)
+        return False
 
 
 def _within(state: dict, key: str, now: float, window: float) -> bool:
@@ -381,6 +384,11 @@ def _spawn_background_probe() -> bool:
         return False
 
 
+#: In-process guard: when the state dir is unwritable the persisted ``bg_spawn_ts``
+#: cannot throttle, so a long-lived caller would otherwise spawn on every call.
+_last_spawn_ts: float | None = None
+
+
 def gate(*, now: float | None = None) -> str | None:
     """None to proceed with local work, or a reason to fail fast to Claude.
 
@@ -396,8 +404,13 @@ def gate(*, now: float | None = None) -> str | None:
         state = read_state()
         if (not _within(state, "last_probe_ts", ts, min_interval_s())
                 and not _within(state, "bg_spawn_ts", ts, min_interval_s())):
-            _write_state(dict(state, bg_spawn_ts=ts))        # claim before spawning
-            _spawn_background_probe()
+            global _last_spawn_ts
+            recent = _last_spawn_ts is not None and 0 <= ts - _last_spawn_ts < min_interval_s()
+            # Spawn only when the claim persisted (else the child cannot take the
+            # lease and every call would respawn) and not within the in-process window.
+            if not recent and _write_state(dict(state, bg_spawn_ts=ts)):
+                _last_spawn_ts = ts
+                _spawn_background_probe()
         return _reason(state) if state.get("hung") else None
     except Exception as exc:                                     # noqa: BLE001
         failopen.record("OLLAMA-WATCHDOG-GATE", exc)

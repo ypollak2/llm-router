@@ -17,7 +17,7 @@ route_coordination: false
 prefer_ollama: true
 
 workhorses:
-  - ollama/qwen3.5:latest
+  - ollama/qwen3.8-uncensored:latest
   - openrouter/qwen/qwen3-235b-a22b-2507
   - openrouter/deepseek/deepseek-v4-flash
   - openrouter/google/gemini-3.1-flash-lite
@@ -43,7 +43,7 @@ cost_cap_per_query: 0.05
 chains:
   budget:
     query:
-      - ollama/qwen3.5:latest
+      - ollama/qwen3.8-uncensored:latest
       - openrouter/google/gemini-3.1-flash-lite
       - openrouter/qwen/qwen3-235b-a22b-2507
       - openrouter/deepseek/deepseek-v4-flash
@@ -53,7 +53,7 @@ chains:
       - openrouter/google/gemini-3.1-flash-lite
       - codex/gpt-5.4
     generate:
-      - ollama/qwen3.5:latest
+      - ollama/qwen3.8-uncensored:latest
       - openrouter/google/gemini-3.1-flash-lite
       - openrouter/deepseek/deepseek-v4-flash
       - openrouter/qwen/qwen3-235b-a22b-2507
@@ -68,7 +68,7 @@ chains:
       - codex/gpt-5.4
   balanced:
     query:
-      - ollama/qwen3.5:latest
+      - ollama/qwen3.8-uncensored:latest
       - openrouter/qwen/qwen3-235b-a22b-2507
       - openrouter/deepseek/deepseek-v4-flash
       - openrouter/google/gemini-3.1-flash-lite

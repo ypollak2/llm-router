@@ -355,7 +355,7 @@ class RouterConfig(BaseSettings):
     # Note: OLLAMA_URL (used by hooks) is separate — it controls which model
     # classifies prompts locally. OLLAMA_BASE_URL here controls which models
     # ANSWER tasks. Both should be set for full local-first operation.
-    # Example: ollama_budget_models="gemma4:latest,qwen3.5:latest"
+    # Example: ollama_budget_models="qwen3.8-uncensored:latest,gemma4:latest"
     ollama_base_url: str = ""               # empty = Ollama disabled
     ollama_budget_models: str = ""          # comma-separated model names
 

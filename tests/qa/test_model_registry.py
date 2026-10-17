@@ -135,7 +135,7 @@ def test_pareto_frontier_on_bundled_defaults_includes_endpoints():
     front = reg.pareto_frontier()
     front_ids = {m.id for m in front}
     # Cheapest (Ollama, $0) and highest-quality (o3) should be on the frontier
-    assert "ollama/qwen3.5:latest" in front_ids
+    assert "ollama/qwen3.8-uncensored:latest" in front_ids
     # The highest-quality premium model should be on the frontier
     front_qualities = {m.quality_score for m in front}
     assert max(front_qualities) >= 0.90

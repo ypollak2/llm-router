@@ -114,6 +114,7 @@ def spawns(monkeypatch):
     """gate() starts a detached probe process; nothing here may start a real one."""
     started: list = []
     monkeypatch.setattr(wd, "_spawn_background_probe", lambda: started.append(1) or True)
+    monkeypatch.setattr(wd, "_last_spawn_ts", None)
     return started
 
 
@@ -175,7 +176,7 @@ def test_cold_server_is_not_probed_and_not_hung(server):
     _Stub.ps_models = []
     _Stub.hang_generate = True                # would hang, but nothing is resident
     r = wd.probe_generation()
-    assert r.ok is True and _generates() == []
+    assert r.ok is None and _generates() == []   # cannot tell: not proof of health
 
 
 def test_unreachable_server_is_unknown_not_hung(monkeypatch):
@@ -211,6 +212,26 @@ def test_hung_only_after_n_consecutive_failures_and_one_success_clears_it(server
     wd.record_probe(wd.ProbeResult(True, "ok"))
     st = wd.read_state()
     assert st["hung"] is False and st["streak"] == 0
+
+
+def test_stale_hung_flag_survives_a_not_resident_probe_and_a_real_success_clears_it(server):
+    bad = wd.ProbeResult(False, "stalled")
+    wd.record_probe(bad)
+    wd.record_probe(bad)
+    assert wd.read_state()["hung"] is True
+    _Stub.ps_models = ["some-other-model:latest"]        # preferred model not resident
+    r = wd.probe_generation()
+    assert r.ok is None
+    wd.record_probe(r)
+    assert wd.read_state()["hung"] is True and wd.read_state()["streak"] == 2
+    _Stub.ps_models = []                                 # nothing resident
+    r = wd.probe_generation()
+    assert r.ok is None
+    wd.record_probe(r)
+    assert wd.read_state()["hung"] is True
+    _Stub.ps_models = [MODEL]
+    wd.record_probe(wd.probe_generation())               # real success
+    assert wd.read_state()["hung"] is False
 
 
 def test_unknown_changes_neither_the_streak_nor_the_hung_flag(server):
@@ -252,6 +273,16 @@ def test_gate_is_rate_limited_and_spawns_instead_of_probing(server, spawns):
     assert len(spawns) == 1
     assert wd.gate(now=1061.0) is None                  # past it: one more spawn
     assert len(spawns) == 2 and _generates() == []
+
+
+def test_unwritable_state_dir_spawns_at_most_once_across_20_gates(server, spawns, monkeypatch):
+    def fail(*_a, **_k):
+        raise OSError("read-only")
+    monkeypatch.setattr(wd.Path, "mkdir", fail)
+    assert wd._write_state({"x": 1}) is False
+    for i in range(20):
+        assert wd.gate(now=5000.0 + i) is None
+    assert len(spawns) <= 1
 
 
 def test_gate_fails_fast_once_the_background_round_has_found_a_hang(server, spawns):

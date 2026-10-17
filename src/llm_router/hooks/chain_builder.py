@@ -49,7 +49,7 @@ def _ollama_models(task_type: str = "code", *, critical: bool = True
     """Ollama models available right now, as ``(front, tail)`` (P0.15, DISC-PROMOTE-1).
 
     This used to read two env vars and fall back to a hardcoded
-    "qwen3.5:latest". It was the hot path — every draft chain came through here
+    "qwen3.5:latest" (the router's local model is now qwen3.8). It was the hot path — every draft chain came through here
     — and it ignored both `discovery.json` and the operator's configured model.
     An operator who set LLM_ROUTER_ENSEMBLE_PRIMARY=ollama/qwen3.8:latest got
     qwen3.5 on all 69 of a day's draft calls and nothing said why.
@@ -66,9 +66,12 @@ def _ollama_models(task_type: str = "code", *, critical: bool = True
     ``model_discovery.order_for_chain``; ``LLM_ROUTER_PROMOTE_GATE=off`` puts
     every model in ``front``.
     """
-    from llm_router.model_discovery import available_ollama_models, order_for_chain
+    from llm_router.model_discovery import (
+        available_ollama_models, order_for_chain, prefer_first)
+    # The preferred local model (qwen3.8) is tried first; prefer_first only reorders.
     front, tail = order_for_chain(
-        [f"ollama/{m}" for m in available_ollama_models()], task_type, critical=critical)
+        [f"ollama/{m}" for m in prefer_first(list(available_ollama_models()))],
+        task_type, critical=critical)
     return (
         _demote_unreliable([ModelSpec("ollama", m.removeprefix("ollama/")) for m in front]),
         [ModelSpec("ollama", m.removeprefix("ollama/")) for m in tail],

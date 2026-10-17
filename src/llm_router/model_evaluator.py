@@ -245,7 +245,7 @@ async def evaluate_available_models(task_types: list[str] = None) -> EvaluationR
     ollama_models = []
     if cfg.ollama_base_url:
         ollama_models = [
-            "qwen3.5:latest",
+            "qwen3.8-uncensored:latest",
             "qwen3-coder-next",
             "kimi-k2.6:cloud",
             "qwen2.5:latest",

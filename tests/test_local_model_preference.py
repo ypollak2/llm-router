@@ -160,5 +160,46 @@ def test_background_probe_does_not_generate_on_a_non_preferred_resident(rec_serv
     _Rec.gen_delay = 0.0
     monkeypatch.setenv("LLM_ROUTER_OLLAMA_MODEL", OLD)     # preferred = qwen3.5, resident = qwen3.8
     r = wd.probe_generation()
-    assert r.ok is True and r.model is None
+    assert r.ok is None and r.model is None
     assert "/api/generate" not in _Rec.paths
+
+
+# ── the goal, end to end: with both installed, every default path picks qwen3.8 ──
+
+def test_with_both_installed_every_default_path_resolves_to_qwen38(monkeypatch):
+    import subprocess
+
+    import yaml
+
+    both = [OLD, PREF]
+    monkeypatch.setenv("OLLAMA_MODELS", ",".join(both))
+    monkeypatch.setenv("LLM_ROUTER_PROMOTE_GATE", "off")
+    monkeypatch.delenv("LLM_ROUTER_OLLAMA_WARMUP_MODEL", raising=False)
+    monkeypatch.delenv("LLM_ROUTER_OLLAMA_WARMUP", raising=False)
+    monkeypatch.setattr(md, "available_ollama_models", lambda *a, **k: list(both))
+    monkeypatch.setattr(md, "available_ollama_models_nowait", lambda **_k: list(both))
+
+    # 1. session-start warm-up (the packaged copy; the other is byte-identical)
+    posted: list[str] = []
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, *a, **k: posted.append(cmd[-1]))
+    ss = _load_hook(ROOT / "src/llm_router/hooks/session-start.py")
+    monkeypatch.setattr(ss, "_EDIT_WARMED_MODEL", False, raising=False)
+    ss._warm_ollama_bg()
+    assert posted and json.loads(posted[0])["model"] == PREF
+
+    # 2. chain_builder local order
+    from llm_router.hooks import chain_builder
+    monkeypatch.setattr(chain_builder, "_demote_unreliable", lambda ms: ms)
+    front, _tail = chain_builder._ollama_models("code")
+    assert front[0].model == PREF
+
+    # 3. auto-route default
+    ar = _load_hook(ROOT / "src/llm_router/hooks/auto-route.py")
+    assert ar.OLLAMA_MODEL == PREF
+
+    # 4. standard policy: the first local entry
+    text = (ROOT / "src/llm_router/policies/standard.yaml").read_text()
+    local = [ln.split("ollama/", 1)[1].strip() for ln in text.splitlines()
+             if ln.strip().startswith("- ollama/")]
+    assert local and local[0] == PREF and OLD not in local
+    yaml.safe_load(text)
