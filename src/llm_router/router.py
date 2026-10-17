@@ -107,6 +107,22 @@ _COMPLEXITY_TO_PROFILE: dict[Complexity, RoutingProfile] = {
 log = get_logger("llm_router.router")
 
 
+class NoRoutableModelsError(ValueError):
+    """F25 / D-170: the candidate chain for ``task_type``/``profile`` came out empty, so nothing was
+    attempted. A ``ValueError`` (every existing handler still catches it) that carries the chain's
+    name, so a door can refuse with its own reason instead of a generic ``error_exception``."""
+
+    def __init__(self, message: str, task_type: TaskType, profile: RoutingProfile) -> None:
+        super().__init__(message)
+        self.task_type = task_type
+        self.profile = profile
+
+
+#: F25 / D-170 (3): (profile, task) pairs whose empty dynamic chain was already logged at WARNING,
+#: so a long-lived server says it once per chain instead of on every call.
+_EMPTY_DYNAMIC_CHAIN_WARNED: set[tuple[str, str]] = set()
+
+
 class RoutingDenied(RuntimeError):
     """Every candidate was refused by policy before any dispatch happened.
 
@@ -486,6 +502,16 @@ async def _build_and_filter_chain(
         dynamic_chain = get_dynamic_model_chain(profile, task_type)
         if dynamic_chain is not None:
             models_to_try = dynamic_chain
+            _chain_key = (profile.value, task_type.value)
+            if not dynamic_chain and _chain_key not in _EMPTY_DYNAMIC_CHAIN_WARNED:
+                # F25 / D-170 (3): an empty table entry is taken as the whole chain (the static
+                # chain is not consulted), so only injected local/CLI models can serve it.
+                _EMPTY_DYNAMIC_CHAIN_WARNED.add(_chain_key)
+                log.warning(
+                    "Dynamic routing chain %s/%s is empty: no provider in the session-start "
+                    "table can serve it; only injected local/CLI models remain",
+                    profile.value, task_type.value,
+                )
             log.debug(
                 "Using session-start dynamic routing table for %s/%s",
                 profile.value, task_type.value,
@@ -4536,6 +4562,8 @@ async def route_and_call(
     profile, c, use_thinking = _resolve_profile(
         profile, complexity_hint, classification_data, prompt, model_override, config
     )
+    # F25 / D-170 (4): a row the MCP ledger guard writes for this call names this profile.
+    _ci_scope.note_ledger_profile(profile)
     effective_complexity = c.value if hasattr(c, "value") else str(complexity_hint or "moderate")
     available = config.available_providers
     with traced_span(
@@ -4942,13 +4970,14 @@ async def route_and_call(
             await _release_reservation_if_held()  # RED1-3-01: don't leak on empty-chain
             _blocked = _blocked_providers()
             if _blocked:
-                raise ValueError(
+                raise NoRoutableModelsError(
                     f"No routable models for {task_type.value}/{profile.value} with "
                     f"LLM_ROUTER_BLOCK_PROVIDERS={sorted(_blocked)} active — the hard "
                     f"provider block may have removed every candidate. Configured "
                     f"providers: {sorted(available) or 'none'}. Fix: remove a provider "
                     f"from LLM_ROUTER_BLOCK_PROVIDERS, or ensure a non-blocked provider "
-                    f"(e.g. ollama/*) has a reachable model."
+                    f"(e.g. ollama/*) has a reachable model.",
+                    task_type, profile,
                 )
             from llm_router.runtime_offer import runtime_offer
 
@@ -4957,12 +4986,13 @@ async def route_and_call(
             _offer = "" if "ollama" in available else (
                 "\n" + runtime_offer(api_keys=False) + "\nOr:"
             )
-            raise ValueError(
+            raise NoRoutableModelsError(
                 f"No providers available for {task_type.value}/{profile.value}. "
                 f"Configured providers: {available or 'none'}. "
                 f"Fix: run `llm-router doctor` to diagnose.{_offer}\n"
                 "  • Set GEMINI_API_KEY or OPENAI_API_KEY in ~/.llm-router/.env\n"
-                "  • Set LLM_ROUTER_CLAUDE_SUBSCRIPTION=true if you have Claude Pro/Max"
+                "  • Set LLM_ROUTER_CLAUDE_SUBSCRIPTION=true if you have Claude Pro/Max",
+                task_type, profile,
             )
 
         # Resolved ONCE, here, and reused by the semantic-cache key, context
