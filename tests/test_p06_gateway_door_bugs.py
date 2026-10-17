@@ -176,6 +176,19 @@ def test_stream_true_is_an_explicit_400(client, router_calls, path):
 
 
 @pytest.mark.parametrize("path", SSE_ENDPOINTS)
+def test_stream_true_with_tools_keeps_the_refusal_until_a2s(client, router_calls, path):
+    """A.2-t serves tools without streaming; tools + stream stays the explicit 400 until A.2-s
+    (decision D-168 (iii): then one buffered SSE). The stream check runs before the tools one."""
+    tools = {"/v1/messages": [{"name": "f", "input_schema": {"type": "object"}}]}.get(
+        path, [{"type": "function", "function": {"name": "f"}}] if path != "/v1/responses"
+        else [{"type": "function", "name": "f"}])
+    r = client.post(path, json=_body(path, stream=True, tools=tools))
+    assert r.status_code == 400
+    assert r.json()["detail"] == "streaming not supported yet (v16 A.2)"
+    assert router_calls == []
+
+
+@pytest.mark.parametrize("path", SSE_ENDPOINTS)
 def test_stream_false_still_routes(client, router_calls, path):
     r = client.post(path, json=_body(path, stream=False))
     assert r.status_code == 200, r.text

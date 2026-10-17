@@ -10,12 +10,13 @@ well-formed, plausible answer to a question it had not asked, with nothing
 anywhere to indicate its tools had been thrown away. A wrong answer that looks
 right and reports success is the worst shape a failure can take.
 
-**Why this refuses rather than implements.** The router returns text:
-`route_and_call` has no tool-call channel and no backend in the chain is wired
-for one. Building that is a feature, not a remediation, and half-building it
-would reproduce the same silent wrongness somewhere new. Refusing is the honest
-behaviour — the client learns immediately, in its own protocol, that this
-gateway cannot serve the request, and is told what to do instead.
+**A.2-t changed the remedy on three endpoints.** H-03 refused because `route_and_call`
+had no tool-call channel. A.2-t built one (tools in, `tool_calls` out, official-client
+round trips in tests/test_agt_a2_gateway_clients.py), so `/v1/chat/completions`,
+`/v1/responses` and `/v1/messages` now SERVE a tools array: this file pins that the
+array reaches the router (it is not dropped) and that what still cannot be served is
+still refused: `tool_choice` without `tools`, the Ollama endpoints (test_r10), and
+`stream: true` with tools (A.2-s).
 """
 
 from __future__ import annotations
@@ -82,28 +83,62 @@ def client():
     return TestClient(gateway.app, raise_server_exceptions=False)
 
 
-def test_openai_chat_refuses_a_tool_call_request(client):
+class _Resp:
+    content = "ok"
+    model = "openai/gpt-4o"
+    provider = "openai"
+    cost_usd = 0.0
+    input_tokens = 3
+    output_tokens = 1
+    complexity = "simple"
+    finish_reason = "stop"
+    tool_calls: list = []
+
+
+@pytest.fixture
+def routed(monkeypatch):
+    """``route_and_call`` faked: what the gateway hands the router, no provider."""
+    import llm_router.route_server as rs
+    import llm_router.router as R
+
+    calls: list[dict] = []
+
+    async def _fake(task_type, prompt, **kw):
+        calls.append({"prompt": prompt, **kw})
+        return _Resp()
+
+    monkeypatch.setattr(R, "route_and_call", _fake)
+    monkeypatch.setattr(rs, "_log_route_savings", lambda *a, **k: None)
+    return calls
+
+
+def test_openai_chat_forwards_a_tool_call_request(client, routed):
     r = client.post("/v1/chat/completions", headers=LOOPBACK, json={
         "model": "gpt-4o",
         "messages": [{"role": "user", "content": "what is the weather in Lisbon"}],
         "tools": TOOLS,
     })
-    assert r.status_code == 400, (
-        f"gateway returned {r.status_code}; a dropped tool definition must not "
-        f"look like success"
-    )
-    detail = r.json().get("detail", "")
-    assert "tool" in detail.lower()
-    assert "remove" in detail.lower(), "the refusal must say what to do instead"
+    assert r.status_code == 200, r.text
+    assert routed[0]["tools"] == TOOLS, "the tools array was dropped before the router"
 
 
-def test_anthropic_messages_refuses_a_tool_call_request(client):
+def test_anthropic_messages_forwards_a_tool_call_request(client, routed):
     r = client.post("/v1/messages", headers=LOOPBACK, json={
-        "model": "claude-opus-4-6",
+        "model": "claude-opus-4-6", "max_tokens": 16,
         "messages": [{"role": "user", "content": "what is the weather in Lisbon"}],
-        "tools": TOOLS,
+        "tools": [{"name": "get_weather", "description": "Get the weather",
+                   "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}}],
     })
-    assert r.status_code == 400, f"anthropic endpoint returned {r.status_code}"
+    assert r.status_code == 200, r.text
+    assert routed[0]["tools"] == TOOLS, "Anthropic tools must reach the router in OpenAI form"
+
+
+def test_the_tools_refusal_is_still_in_force_where_tools_are_not_served(client, routed):
+    r = client.post("/api/chat", headers=LOOPBACK, json={
+        "model": "llama3.2", "messages": [{"role": "user", "content": "hi"}], "tools": TOOLS})
+    assert r.status_code == 400
+    assert "remove" in r.json().get("detail", "").lower(), "the refusal must say what to do instead"
+    assert routed == []
 
 
 def test_a_forced_tool_choice_is_also_refused(client):

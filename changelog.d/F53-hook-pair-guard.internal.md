@@ -1,0 +1,1 @@
+CI now fetches full history in the test job and a new test (tests/test_hook_pair_guard.py) fails when a stamped hook's two copies (hooks/ and src/llm_router/hooks/) differ, or when its content changes without a higher llm_router-hook-version than the merge base with origin/main (F53, after PR #568).

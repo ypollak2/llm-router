@@ -351,16 +351,43 @@ def test_proxy_door(cap, monkeypatch):
     assert len(EXCLUDED[cap]) >= 1
 
 
-def test_gateway_http_still_refuses_a_tools_field():
+def test_gateway_http_still_refuses_a_tools_field_on_the_ollama_doors():
+    """A.2-t serves tools on the OpenAI / Anthropic endpoints only; Ollama's keep the refusal."""
     pytest.importorskip("fastapi.testclient")
     from fastapi.testclient import TestClient
 
     from llm_router.gateway import _TOOLS_UNSUPPORTED, app
 
     r = TestClient(app, base_url="http://127.0.0.1", raise_server_exceptions=False).post(
-        "/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}],
-                                      "tools": [{"type": "function", "function": {"name": "f"}}]})
+        "/api/chat", json={"messages": [{"role": "user", "content": "hi"}],
+                           "tools": [{"type": "function", "function": {"name": "f"}}]})
     assert r.status_code == 400 and r.json()["detail"] == _TOOLS_UNSUPPORTED
+
+
+def _gateway_tools_chain(monkeypatch=None):
+    client = gateway_client()
+
+    def via():
+        r = client.post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "hi"}], "task_type": "code",
+            "tools": [{"type": "function", "function": {"name": "f"}}]})
+        assert r.status_code == 200, r.text[:200]
+
+    out = route(CHAIN, "unused", via=via)
+    assert not isinstance(out, Exception), out
+    return out
+
+
+def test_gateway_request_tools_array_is_the_hard_tools_need():
+    """A.2-t: the gateway's real tools array (D-165's signal) reaches Needs(tools=True): models
+    known to lack tools go (textonly, perplexity), and the CLI backends go (codex, gemini_cli
+    return text only); the tool-capable and the unknown stay, in order."""
+    assert _gateway_tools_chain() == [TOOLY, OPENAI, CLAUDE, MYSTERY]
+
+
+def test_gateway_tools_keep_the_cli_backends_out_with_the_filter_off(monkeypatch):
+    _kill_switch(monkeypatch)
+    assert _gateway_tools_chain() == [m for m in CHAIN if m not in (CODEX, GEMINI)]
 
 
 @pytest.mark.parametrize("door", DOORS)

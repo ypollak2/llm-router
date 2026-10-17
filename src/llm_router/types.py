@@ -540,6 +540,10 @@ class LLMResponse:
     # "stop". Ollama and the CLI-backed providers report nothing, and inferring
     # success from silence is the substitution this audit keeps finding.
     finish_reason: str = ""
+    # A.2-t: tool calls the model made, OpenAI shape: ``{"id", "type": "function",
+    # "function": {"name", "arguments": <JSON string>}}``. Empty for a text answer and
+    # for every provider path that cannot return tool calls (the CLI backends).
+    tool_calls: list[dict] = field(default_factory=list)
     # T-10 (audit 2026-09-22). Set when the EXHAUSTION FLOOR served this
     # response: every candidate was rejected by a dispatch gate, and the
     # best-rejected answer was returned anyway because the alternative was
