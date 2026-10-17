@@ -1,9 +1,31 @@
-# PREREG-CLS-DEV (r4): DEV screening of learned tier classifiers (PLAN v16 CLS-v16, D-127..D-130)
+# PREREG-CLS-DEV (r5): DEV screening of learned tier classifiers (PLAN v16 CLS-v16, D-127..D-130)
 
-Revision r4 (2026-10-16, after the r1-r3 freeze-guard reviews and coordinator decisions D-132, D-134, D-135). Status: DRAFT. Not frozen. This file is frozen only when `PREREG-CLS-DEV.sha256` exists beside it and
+Revision r5 (2026-10-17, text brought in line with the merged builds B0 #537, B1 #526 + F11 #539, B-L #527 and F20 #544, and with coordinator decisions D-143, D-147, D-148, D-160, D-161). Status: DRAFT. Not frozen. This file is frozen only when `PREREG-CLS-DEV.sha256` exists beside it and
 `scripts/check_prereg.py` reports a match, after an independent freeze-guard review says READY. Changing
 any byte changes the hash. The freeze record is the last section. The author of this draft did not
 review it.
+
+**r5 changes (text only; no number that decides a candidate moved).**
+
+* 1.1, 1.3: a real record with no timestamp is dropped and counted (`n_no_timestamp_dropped`); the manifest order and
+  its counters are stated; DEV-SYN is also deduplicated within itself and secret-screened; the floor adds the 5 percent
+  missing-truth term; the manifest outputs are registered in PINS-RUN.
+* 2.2: how each reference arm is built (rules_tier file, K-B1 payload, E-0 call, the `oracle` arm).
+* 3.1-3.3: GPT is pinned by `-m` (D-147); the Codex canary runs in plain mode and checks the `model:` header; a Codex
+  non-zero exit parks the run and is never a void; the judge prompt contract (pinned gt500.py, supply.py, rubric.py;
+  rubric as the first block of stdin; single-answer id rule, D-161); `calibration_call_failed` voids; file list.
+* 3.2: `.env` key match is case-insensitive; exact judge argv; self-test is 23 shapes and goes stale with the scrubber.
+* 3.4, 4: kappa tables split real and DEV-SYN; the non-inferiority bound is the 97.5th percentile, the guard the
+  one-sided 95th (D-148); DEV prints SCREEN-PASS or SCREEN-REJECT only, `--mode test` is single-use.
+* 5, 8, 8.1, 9: T-MB waits while criteria 1-4 are pending; the criteria table has one status vocabulary; criterion 1
+  gets the 15 s async budget (D-160); criterion 3 excludes fallback items (D-160); criterion 8 statuses and the
+  DEV-SYN leg (D-160, F20); a missing validity arm means no finalist; Arm B `t_conf` is an in-sample screen
+  (D-160); ranking ties.
+* 7.1: the threshold grid is 16 x 12 = 192 points (D-143).
+* 10.1: the latency sample and p95 definition are stated.
+* 14: CD-26..CD-31 added for the above.
+* 15: PINS-STATIC also pins `gt500.py` and `supply.py` (D-161), the model-id keys, the Codex `--json` and `-m` flags,
+  the argv templates and the session-log directories; the absolute-path note and `--freeze-line`.
 
 Marks: **[CD]** = coordinator default for an open question (section 14 lists all of them; the coordinator
 may overrule any before the freeze). **[EST]** = an estimate, not a measurement.
@@ -99,7 +121,9 @@ Not in DEV (excluded, counted in the manifest):
 * amend4 fresh window items (T0 2026-10-12T09:18:13Z) and any record with a timestamp at or after T0. They
   are reserved for PREREG-GT-amend4. Rule: no DEV item may have a record timestamp at or after T0.
 * P17D items already carry the P17D cutoff (record timestamp before 2026-10-08T20:46:00Z); the same cutoff
-  is applied to the whole DEV union (a DEV item with a later timestamp is dropped).
+  is applied to the whole DEV union (a DEV item with a later timestamp is dropped). A real record with **no recoverable
+  timestamp** cannot be shown to precede T0 and is dropped too (`n_no_timestamp_dropped`; B0 `cls_dev_lib.time_filter`).
+  The three drop reasons are counted separately (`n_after_T0_dropped`, `n_after_cutoff_dropped`, `n_no_timestamp_dropped`).
 * `door_corpus.jsonl` (2,658 lines, no labels, 1,045 of 1,680 text-rule survivors above 150 words, not a pool
   of human prompts): not DEV data. It has no truth.
 * RouterArena, MMLU-Pro and the other generic datasets in the HF cache: forbidden (RouterArena rules forbid
@@ -135,11 +159,15 @@ the `text_sha -> item_id` map and joins by `(session_id, text_sha)` as `shadow_e
 back to `("", text_sha)`; (5) writes `items.jsonl` (text, 0600) and the inputs of the manifest.
 
 Before any candidate runs, the attach output builds `dev_manifest.json` (counts and ids only,
-no text, mode 0600, never committed with text). It records:
+no text, mode 0600, never committed with text) with `cls_dev_run.py manifest`. Order inside it: time filter (1.1),
+then dedup, then the secret detector, then group and fold assignment. The command also writes `length_counts.json`
+(the four band counts, the generator's only real input) and `shingles_real.json`, and registers all three in a
+PINS-RUN entry before first use (section 15); every later B0 command reads the manifest only through a matching entry.
+It records:
 
 1. the unique real DEV set after dedup: exact `text_sha` match, then 5-shingle Jaccard >= 0.8 (the
    `supply.py` rule). Within a duplicate pair the item with the earliest record timestamp is kept and the
-   other is counted as `dropped_dup`;
+   other is counted as `n_dropped_dup`;
 2. each item's `group`: its session uuid where the attach step recovers it (the `text_sha` join the P17D
    attach used). An item whose session cannot be recovered gets group `unk:<set>:<label-batch>`; the count
    of such items is reported. **[CD]** If more than 15 percent of real DEV items have no recovered session,
@@ -154,14 +182,18 @@ no text, mode 0600, never committed with text). It records:
 6. excluded-by-secret counts **by Opus truth tier and by detector** (no text), so a tier-skewed exclusion is
    visible.
 
-DEV-SYN dedup against real DEV: exact `text_sha` and 5-shingle Jaccard >= 0.8; a hit drops the synthetic
-item (counted). If more than 3 percent of DEV-SYN items hit, the generator is flagged as memorising and the
+DEV-SYN is screened by the same secret detector (a hit drops the item, `n_syn_excluded_secret`) and deduplicated
+against real DEV and within itself: exact `text_sha` and 5-shingle Jaccard >= 0.8; a hit drops the synthetic
+item (counted as `n_syn_dropped_dup_vs_real` and `n_syn_dropped_dup_within`). If more than 3 percent of DEV-SYN
+items hit real DEV (`syn_leak_share`), the generator is flagged as memorising (`syn_memorising_flag`) and the
 coordinator is told (the generator never saw real text, so a hit means generic text, not copying).
 
 **DEV validity floor.** The screen is NOT INFORMATIVE if, after the manifest: `n_real_dev` < 300, or
 `n_truth_opus` (primary truth, real) < 40, or the largest session holds more than 20 percent of real DEV
 items **[CD]** (the shadow_eval rule is 60 percent of scored items; 20 percent is stricter because DEV is
-also used for training).
+also used for training), or more than 5 percent of real DEV items lack the primary truth (section 3.3). The
+two truth terms are `PENDING` until labels exist (B0 `validity_floor` returns OK, PENDING or NOT_INFORMATIVE;
+PENDING is not a pass: criterion 0 is `pending` and blocks finalists).
 
 ## 2. Arms
 
@@ -177,7 +209,7 @@ score), and a DEV number is never a verdict or a claim.
 | C1 | `bge-small-en-v1.5` embedding + ordinal logistic regression | LR on DEV | offline from the HF cache; revision = the cached snapshot dir name recorded in the manifest (`5c38ec7c405ec4b44b94cc5a9bb96e735b38267a` at the time of writing; the run re-reads it) |
 | C2 | `nomic-embed-text` (Ollama `/api/embed`) embedding + ordinal LR | LR on DEV | Ollama model digest recorded; task prefix `classification: ` fixed [CD] |
 | C3 | ModernBERT-base head, fine-tuned | fine-tune on DEV | **conditional** on trigger T-MB; one download, pinned revision sha, `HF_HOME` set to the CLS-v16 cache dir (never system-wide); card licence read and recorded before download (expected Apache-2.0, to be verified, not assumed) |
-| C4 | Qwen3.5 (`qwen3.5:latest`) logprob readout of the existing v6 prompt (`local_classifier.py`, thinking off) | calibration only | first-token logprobs of the tier tokens, then a 3-feature ordinal LR fitted in-fold. Needs an Ollama build that returns logprobs; if not available, kill criterion 1 applies (no silent fallback to argmax) |
+| C4 | Qwen3.5 (`qwen3.5:latest`) logprob readout of the existing v6 prompt (`local_classifier.py`, thinking off) | calibration only | first-token logprobs of the tier tokens, then a 3-feature ordinal LR fitted in-fold. Needs an Ollama build that returns logprobs; if not available, kill criterion 1 applies (no silent fallback to argmax). `c4-precheck` splits the failure (D-160): no usable `logprobs` field is a criterion-1 kill (`no_logprobs_field`); logprobs present but the tier token not located is **parked for the coordinator** (`tier_token_not_located`, counts and shapes only, never token text) and is not a kill |
 
 **Context digest.** A real item's digest is the one the P17D/GE3 judge saw if the attach step recovered it, else
 none; it is **capped at 400 characters** (truncated, same cap as DEV-SYN digests). A candidate's feature set is
@@ -199,7 +231,11 @@ frozen with the candidate.
   then P(haiku) = 1 - P(>=sonnet), P(sonnet) = P(>=sonnet) - P(>=opus), P(opus) = P(>=opus).
 * **C4's three features.** The first-token logprobs of the three tier tokens of the v6 prompt, renormalised over
   those three tokens (softmax): `lp_haiku`, `lp_sonnet`, `lp_opus`. They feed the same two binary heads
-  (three features, one fitted LR each, same weights, C grid and ordinal assembly).
+  (three features, one fitted LR each, same weights, C grid and ordinal assembly). Mechanics (B0
+  `cls_dev_lib`): the v6 request of `local_classifier._payload` plus `logprobs: true, top_logprobs: 20`; the tier
+  token is the first token after `"tier": "`; a top-20 alternative counts for a tier when its stripped lowercase
+  text is a non-empty prefix of exactly one tier word (best logprob wins); a tier absent from the top 20 takes
+  logprob -30 before the softmax. A response without a usable tier token is an error (`None`), never an argmax.
 * **Confidence** of any candidate is `max(P_haiku, P_sonnet, P_opus)`.
 
 **C7 (NVIDIA prompt-task-and-complexity-classifier as a feature): EXCLUDED in this prereg [CD].** Two
@@ -227,6 +263,23 @@ downloaded or fails; would need its own amendment because its download is not ap
 | E-0 | engine alone (L1 + L3 lexical, shadow defaults, frozen engine SHA) | null for arm B; reported |
 | M-q | uninformed sonnet/opus (haiku/sonnet below 2.7) mixture at the candidate's raw cost | the NOT-TRIVIAL guard comparator (computed, not run) |
 
+**How the reference arms are built (r5; `cls_dev_run.py reference-arms`).**
+
+* R-E and R-U come from `rules_tier.jsonl` (header `{"schema": "rules_tier/1", resolver_commit, produced_utc}`, then
+  one row per item). The file is read only through a matching PINS-RUN entry (exit 9 otherwise) and is refused (exit 5)
+  when a row's `haiku_live` contradicts its record time (live from 2026-10-09T00:00:00Z). R-E lifts haiku to sonnet;
+  R-U keeps haiku for `haiku_live` rows and equals R-E before the live date.
+* K-W1 sends the live classifier payload (`local_classifier._payload`, verdict parsed by `parse_verdict`); K-B1 sends
+  the pinned rubric through the B-L single-item judge payload (3.3) to the local Ollama (`think: false`,
+  `num_predict` 400, `num_ctx` 8192) and parses it with the same label validator. Both run in 25-item units
+  under the quiet gate and the night rule of section 10, one heavy model at a time.
+* E-0 is `engine._decide_light(text, door="router", lexical=True)` (L1 + L3 lexical, no capability detector, no
+  cache, no network; tier `local` is read as haiku), after the engine module's sha256 is checked against the
+  PINS-STATIC engine pin.
+* The constants (always_haiku, always_sonnet, always_opus), the random arm (seed 20261017) and the noised oracle
+  (25 percent flips of the primary truth, seed 20261017; at the lowest or highest tier the only neighbour is used)
+  are computed, not run. An `oracle` arm (the primary truth itself) is also written and is reported only.
+
 ### 2.3 Combination arms
 
 Per finalist candidate two pre-registered arms, as D-130 f: **A** (L2 alone: tier from thresholds on L2
@@ -244,8 +297,13 @@ finalist is a (candidate, arm) pair. No stacking, no learned fusion.
 * **Sonnet**: labels **all real DEV**. GE3's 342 existing Sonnet labels (rubric kappa 0.6242 to Opus) are reused
   **[CD]**; every other real item gets a new Sonnet label. DEV-SYN: new Sonnet labels on all 300. Subscription, $0.
 * **GPT**: new labels on all real DEV and all DEV-SYN via Codex CLI (`gpt-6-astra`, ChatGPT subscription, real
-  HOME because its auth lives there). The harness records the model id of every call and discards a call whose
-  model family differs from the pinned one, as the Opus `modelUsage` family check does.
+  HOME because its auth lives there). **Every Codex call passes `-m <pinned id>` (D-147).** The `--json` event stream
+  of Codex 0.161.0 carries no model field (coordinator probe 2026-10-16), so the served model is enforced by the CLI,
+  which exits non-zero on an unknown id, not read back; the id recorded for a GPT call is the pin. A non-zero
+  exit (bad id, timeout, CLI error) **stops and parks the run (exit 24), resumable; it is never a void and never a
+  `TRUTH_FALLBACK`.** For Sonnet and Opus the harness reads the model ids of `modelUsage`: an id of another
+  family, or an id that changes inside a run, voids that judge's run (3.3); a call that reports no id parks the
+  run (exit 22).
 * OpenRouter: **only** with providers whose data policy is no-training and no-retention (the routing option that
   denies data collection and requires zero-data-retention endpoints, recorded per call). If no such provider
   serves the model, OpenRouter is **not used at all**. Shared $20 cap (D-128), per-call log.
@@ -259,7 +317,7 @@ and counts as `scrub_abort`.
 
 **Detector** = the union of (a) `engine._secret_names(text)`; (b) `secret_scrubber.scrub_text(text) != text`; (c)
 `persist_redaction._PROSE_SECRET_RE`; (d) any entry of the exclusion list `denylist.txt` (a prompt exclusion list, D-134) and any qualifying `.env`
-value (keys matching `KEY|TOKEN|SECRET|PASSWORD|PASS`, length >= 8, empty skipped; D-134, D-135) found in the
+value (keys matching `KEY|TOKEN|SECRET|PASSWORD|PASS`, **case-insensitive**, length >= 8, empty skipped, surrounding quotes stripped; D-134, D-135) found in the
 text (section 1.3 attach), with hits **reported by detector**; (e) any whitespace-delimited token of length >= 24 whose
 Shannon entropy is >= 3.3 bits and that contains a letter and a digit.
 
@@ -274,10 +332,13 @@ owner's own repository and project names are **allowed through and disclosed**: 
 in prompts and in the generator's cell vectors. Judges therefore see slightly different text than the earlier
 Opus labels did; this is declared, not corrected, and shows in the kappa figures.
 
-**Self-test (per shape).** One fake secret of every shape in the detector (fake values assembled from fragments;
-never a real-looking literal in the repo) and one clean control per shape. The run starts only if **every shape
+**Self-test (per shape).** One fake secret of every shape in the detector (23 shapes at r5: the engine, scrubber,
+prose, denylist, `.env`-value and entropy shapes and six shapes of the independent scanner; fake values assembled
+from fragments; never a real-looking literal in the repo) and one clean control per shape. The run starts only if **every shape
 fires its own detector** (reported per shape, not as an aggregate) and 0 controls flag. A failed self-test is
-terminal for the run.
+terminal for the run. Every other B0 and B-L command refuses (exit 6) without a passing result file, and a result
+file goes **stale** (exit 6) when the scrubber changes: the result records a sha over `cls_send_lib.py`, `engine.py`,
+`secret_scrubber.py` and `persist_redaction.py`.
 
 **Independent scan.** After the sent set is fixed and before the first call, a second scanner independent of
 the detector (gitleaks or trufflehog if installed; else a documented regex set that shares no pattern with
@@ -286,17 +347,23 @@ retroactively, voids its labels, and is counted. A spot-check sample is not a su
 
 **Call hygiene (all judge and generator calls).** Empty scratch cwd, **read-only sandbox, canary-verified** (for
 Codex; `claude -p` runs with its tools disabled), text via **stdin** (never argv).
-* `claude -p` calls: `--safe-mode` plus `--settings <run-dir>/claude_settings.json` holding
-  `{"disableAllHooks": true}`, `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` removed from the child environment
-  (asserted), `--tools ""`, `--strict-mcp-config`, `--no-session-persistence`, `--setting-sources project,local`
-  as the P17D judge call, scratch cwd, real HOME (auth only), `LLM_ROUTER_SESSION_KIND=research` (as PREREG-P20
-  section 6). This matches the P2.0 pattern so the router hooks and proxy cannot route, draft or alter a call.
-* `codex exec` calls: `-s read-only`, an empty cwd, prompt on stdin. **Canary at run time:** a file with a random
-  token is placed outside the sandbox cwd; the canary request **instructs the model to attempt to read that path**
-  and report the token. If Codex reports it, the run **parks and goes to the coordinator** before any item is
-  sent (a read-only sandbox may still read the filesystem), and the exposure is then a decision, not a default.
-  A negative result is **evidence, not proof** (the model may have declined or failed for other reasons); it is
-  logged as such and the section 13 residual stands.
+* `claude -p` calls (the argv of `cls_send_lib.claude_argv`, recorded as `argv_template` in PINS-STATIC):
+  `claude -p --safe-mode --settings <run-dir>/claude_settings.json` (holding `{"disableAllHooks": true}`) `--tools ""
+  --strict-mcp-config --no-session-persistence --setting-sources project,local --model <pinned id> --output-format json`;
+  `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` removed from the child environment (asserted), a fresh empty scratch
+  cwd per call, real HOME (auth only), `LLM_ROUTER_SESSION_KIND=research` (as PREREG-P20 section 6). This matches the P2.0
+  pattern so the router hooks and proxy cannot route, draft or alter a call. There is **no `--system-prompt`**: the
+  rubric is the first block of the stdin payload (3.3).
+* `codex exec` calls: `codex exec -s read-only --skip-git-repo-check --ephemeral -C <empty cwd> --json -m <pinned id>`,
+  prompt on stdin; `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` removed so the subscription login
+  is used. **Canary at run time (before any item is sent, plain mode without `--json`):** a file with a random token
+  is placed outside the sandbox cwd; the canary request **instructs the model to attempt to read that path**
+  and report the token (the path is sent in pieces of at most 12 characters so the request passes the entropy
+  detector). The whole output, stdout and stderr, is scanned. If the token appears, the run **parks (exit 11) and goes to the
+  coordinator** (a read-only sandbox may still read the filesystem), and the exposure is then a decision, not a
+  default. A non-zero exit parks (exit 24). The plain-mode header line `model: <id>` (printed on stderr) must equal the pin,
+  else the run parks (exit 22) (D-147). A negative result is **evidence, not proof** (the model may have declined or
+  failed for other reasons); it is logged as such and the section 13 residual stands.
 * **Session logs.** The CLIs keep copies of what they were sent. `claude -p` (Claude Code 2.1.299, whose help text
   lists `--safe-mode`, `--setting-sources`, `--no-session-persistence`, `--settings`; `--bare` exists and is not
   used) runs with `--no-session-persistence`, so no transcript is written under `~/.claude/projects` (verified by
@@ -312,31 +379,53 @@ Codex; `claude -p` runs with its tools disabled), text via **stdin** (never argv
 
 * **Blinded**: opaque ids `L001...`, no tier, no session id, no set name, no other judge's label. The judge sees only
   the id, the scrubbed digest where one exists and the scrubbed prompt, in the P17D `prompt_view` form.
+* **Judge prompt contract (r5, D-147, D-161): the P1.7-d labeller, loaded from pinned files.** `cls_label_run.py`
+  loads `gt500.py` (sha256 pinned in PINS-STATIC and equal to `GT500_SHA256`) after verifying its sibling `supply.py`
+  (sha256 `12cd3e1e...`, pinned, because gt500's directory goes on the import path), and `rubric.py` (md5
+  `1bcb3f44...` and sha256 pinned) through `gt.load_rubric`; a `--prompt-module` that is not the pinned `rubric.py`, a
+  `gt500.py` without `prompt_view`, or any hash mismatch exits 9 before anything is sent. The six planted items are
+  `rub.PLANTED` (`cal-h1, cal-h2, cal-s1, cal-s2, cal-o1, cal-o2`). Item blocks are `rub.ITEM_TEMPLATE` with the prompt in
+  `gt.prompt_view` form, joined by a blank line, then `rub.BATCH_TAIL` (or `rub.SINGLE_TAIL`) verbatim. **The rubric
+  is the first block of the stdin payload** (the frozen judge argv has no `--system-prompt` flag, and Codex has none),
+  so `outgoing_check` sees it with the items. A batch answer is `{"labels": [{"id", "tier", ...}]}` with an id per label;
+  a single-item answer may omit the id and then takes the one id that was asked (the P1.7-d rule,
+  `scripts/p17d_synthetic.py:1121`, D-161), an answer that carries an id must carry the asked one; a label counts
+  only if `gt.valid_label` accepts it and its tier is haiku, sonnet or opus.
 * **Batches of 8**, ordered by `sha256("clsdev:label:20261017:" + item_id)`.
 * **Calibration, first call.** The first call of each judge's run is the 6 planted items of `rubric.py`
   (cal-h1/h2, cal-s1/s2, cal-o1/o2) plus the first 2 real items, shuffled with seed 20261017, planted items under
   opaque ids from the same id space. No reroll of a plant id: the first valid label is final.
 * **Interleaved plants (r2).** Every 10th batch of a judge's run (and every resumed run's first batch) carries two
   of the 6 plants under **fresh opaque ids** and shuffled positions, rotating through the 6. A wrong plant at any
-  point voids that judge's whole run (**NOT INFORMATIVE**, labels discarded), not only the first-call check. This
+  point voids that judge's whole run (**NOT INFORMATIVE**; the judge's labels are moved to a quarantine file and
+  never joined), not only the first-call check. A calibration call that fails its 3 tries also voids
+  (`calibration_call_failed`). This
   covers a rate-limited multi-day run whose model could change silently. The TEST prereg adopts the same rule.
 * Required: **all plants correct (6/6 first call; every interleaved plant)** per judge per run.
-  **Pre-stated fallback (D-135):** if any judge's run is voided (a failed plant, `NO SECOND JUDGE`, a model-id
-  change), truth for the affected set becomes the **other two judges, a split resolving to the higher tier**; for
+  **Pre-stated fallback (D-135):** if any judge's run is voided (a failed plant or calibration call, a model family
+  or model-id change; **not** a Codex failure or a missing Claude model id, which park, 3.1), truth for the affected
+  set becomes the **other two judges, a split resolving to the higher tier**; for
   a voided GPT this is exactly `gpt_excluded` (Opus + Sonnet). The result is **labelled** (`TRUTH_FALLBACK:<judge>`),
   criterion 8 on the voided judge is not evaluable, and the coordinator brings it to the owner. This applies to
   real DEV and to DEV-SYN alike (an Opus or Sonnet void on DEV-SYN falls back to the other two). The fallback is
   fixed here before any label exists; it is not chosen afterwards. **If two judges are voided in the same set, that
   set is NOT INFORMATIVE** (one judge cannot define truth; no screen result is drawn from it).
-* A failed batch is retried up to 3 times, then items one at a time; an item still unlabelled is a label error,
-  counted.
-* Resume state: the append-only `labels_<judge>.jsonl` and `plants_<judge>.jsonl`. A resumed run re-checks the
-  model id on its first call; a model-id change mid-run stops the run.
+* A failed batch is retried up to 3 times, then items one at a time (a scrub abort goes straight to single items:
+  the same bytes would abort again); an item still unlabelled is a label error, counted. A claude non-zero exit or
+  timeout is a retry; every call writes a `pending` row to `calls_<judge>.jsonl` before the child starts and a
+  `done` row after it (for Opus also to the shared spend log, a timeout charged at the estimate).
+* Resume state: the append-only `labels_<judge>.jsonl`, `plants_<judge>.jsonl`, `calls_<judge>.jsonl`,
+  `excluded_<judge>.jsonl` (retroactive independent-scan exclusions, removed from the labels at collection) and
+  `quarantine_<judge>.jsonl`, plus `plan_<judge>.json`, `state_<judge>.json` and `status.json` (counts only; one
+  run directory is one set). A resumed run re-checks the model id on its first call; a model-id change mid-run
+  voids the run. `--max-batches N` pauses a run after N batches (resumable).
 * Schemas. `labels_<judge>.jsonl` line: `{"item_id", "judge", "tier", "batch", "call_id", "model_id", "utc",
   "attempt"}`. `plants_<judge>.jsonl` line: `{"plant_id", "opaque_id", "expected", "got", "call_id", "position",
   "interleaved", "utc"}`. Existing Opus/Sonnet labels enter as `labels_opus.jsonl` / `labels_sonnet.jsonl` through
   the `text_sha -> item_id` map of the manifest, with `"attempt": 0` and `"call_id": "legacy"`.
-* Spend: Codex and Sonnet $0; Opus per section 1.2. Stop and report at 80 percent of any cap.
+* Spend: Codex and Sonnet $0; Opus per section 1.2. Stop and report at 80 percent of any cap: before an Opus call
+  the runner stops (exit 21) when the spent total plus the estimate of the call would pass 80 percent of the
+  cap (default `--cap-usd 20`); generator Opus calls write to the same spend log, so the $20 is shared.
 * An item without a valid label from a required judge is excluded from every truth rule that needs it, counted.
   If more than 5 percent of items are missing the primary truth: NOT INFORMATIVE.
 
@@ -356,7 +445,10 @@ that cannot supply three judges is excluded from primary scoring and counted, an
 sensitivity rows (T-higher2 etc.).
 
 Reported: weighted (quadratic) kappa and exact agreement for Opus-GPT, Opus-Sonnet, GPT-Sonnet, on real DEV and on
-DEV-SYN, with session-bootstrap CIs and per-length-band and per-source tables. The side figure R3 (effort signal)
+DEV-SYN **separately** (never pooled), with session-bootstrap CIs, and per-length-band (real and DEV-SYN separately)
+and per-source tables as point values (a table cell with fewer than 5 pairs prints its n only). `cls_eval.py` also
+prints the sensitivity truths `opus_only`, `gpt_only`, `agree_only`, `gpt_excluded` and `higher2`; `sonnet_only`
+is available as a truth rule (criterion 8, DEV-SYN leg). The side figure R3 (effort signal)
 is reported where it exists as a rank-agreement check across truth bases. There is no human validation (the owner
 declined, D-R8-2); this is a stated gap.
 
@@ -377,9 +469,18 @@ The scorer is `scripts/cls_eval.py` (build B1, brief `brief-cls-b1.txt`), over t
   guard, CIs, AUROC, SE), clusters = `group` of section 1.3 (DEV-SYN: the generation call id). The scorer works
   on per-group sufficient sums, so a resample costs O(groups).
 * Bars (necessary): under(cand) <= under(R-E) and C-lambda2-clamp(cand) <= C-lambda2-clamp(R-E). Non-
-  inferiority: upper 95 percent bound of (cand - R-E) <= +3 points of under-route and <= +0.3 C-lambda2.
-  NOT-TRIVIAL guard: under(cand) below the uninformed mixture M-q at equal raw cost with the one-sided 95
-  percent bootstrap bound below 0. always_opus must fail it. Raw cost is reported with CI and not gated.
+  inferiority: the upper bound of the paired bootstrap difference (cand - R-E) <= +3 points of under-route and
+  <= +0.3 C-lambda2. **The non-inferiority bound is the 97.5th percentile of the paired bootstrap, the upper end of the
+  reported two-sided 95 percent CI (D-148; index `int(0.975 B) - 1` of the sorted values, the `shadow_eval.boot_diff`
+  convention).** NOT-TRIVIAL guard: under(cand) below the uninformed mixture M-q at equal raw cost, **one-sided**: the
+  95th percentile of the bootstrap of (under(cand) - expected under of M-q) must be below -1e-9 (so always_opus,
+  whose difference is 0 up to float noise, fails). Raw cost is reported with CI and not gated.
+* A candidate row is labelled `PASS-STRONG`, `PASS-WEAK` or `FAIL` by `cls_eval.py --mode test` only (bars, non-
+  inferiority and guard all hold, and no CI lower bound above 0; STRONG when both CI upper bounds are <= 0).
+  **`--mode test` is single-use**: it needs `--single-use` and `--use-log`, refuses a log that already holds a
+  `started` line (exit 4), and a single-use run whose validity arms are absent is NOT INFORMATIVE
+  (`validity_unavailable`). **`--mode dev` (this prereg) prints `SCREEN-PASS` or `SCREEN-REJECT` only** and every
+  output carries `guard_free`, `screening_only` and the label "DEV figures are guard-free and screening only".
 * On DEV these are screening quantities (kill criteria 4-6), not verdicts. No DEV result carries a PASS label
   into any claim.
 
@@ -387,7 +488,9 @@ The scorer is `scripts/cls_eval.py` (build B1, brief `brief-cls-b1.txt`), over t
 
 **T-MB (ModernBERT is screened).** C3 is screened only if, after C1 and C2 and C4 are scored under criteria
 1-4, **no embedding or logprob arm survives to ranking, or the best of them has real-DEV AUROC(P(opus),
-T-primary opus) below 0.75** **[CD]**. "Not enough" in D-129 is thereby fixed in advance. If T-MB does not
+T-primary opus) below 0.75** **[CD]**. "Survives" here means no kill in rows 1-4 only (rows 5-8 are not read); **while
+any of C1, C2, C4 still has a pending row among 1-4 and none survives, the trigger answers `wait`, not `fire`** (B0
+`trigger-mb`; a latency block not yet measured must not fire a download). "Not enough" in D-129 is thereby fixed in advance. If T-MB does not
 fire, C3 is not downloaded and the manifest says so. If it fires, the coordinator runs the download once:
 official repo only, revision sha recorded, cache dir `$CLS/hf`, licence from the card recorded in the log
 before the first byte, file sha256s recorded after.
@@ -438,8 +541,9 @@ at least 50 percent of the loss. The loss is ordinal and asymmetric: under-route
 ### 7.1 Decision form
 
 For a candidate with probabilities (P_h, P_s, P_o): route **opus** if P_o >= t_hi; else **haiku** if
-P_h >= t_lo; else **sonnet** (conservative default). Grid: t_hi in {0.20, 0.25, ..., 0.95}, t_lo in {0.50,
-0.55, ..., 0.99}. A hard-verdict arm (nimble, K-B1) has no thresholds and is scored at its verdict.
+P_h >= t_lo; else **sonnet** (conservative default). Grid: t_hi in {0.20, 0.25, ..., 0.95} (16 values), t_lo in {0.50,
+0.55, ..., 0.95, 0.99, 1.01} (12 values; 1.01 is "no haiku routing", constraint 3), **16 x 12 = 192 points** (D-143; r4
+wrote 16 x 11 = 176 and missed the 1.01 column that constraint 3 needs). A hard-verdict arm (nimble, K-B1) has no thresholds and is scored at its verdict.
 
 ### 7.2 Constraints (all must hold at a grid point)
 
@@ -457,7 +561,8 @@ The pooled-versus-real split is stated per criterion in section 8.
 2. opus share of predictions <= the truth-opus share (T-primary), training folds.
 3. haiku-route precision (pred haiku and truth haiku, over pred haiku) >= 0.70 with at least 10 haiku routes;
    with fewer than 10, no haiku routing is allowed (t_lo = 1.01).
-4. NOT-TRIVIAL guard holds on the training folds (section 4).
+4. NOT-TRIVIAL guard holds on the training folds (section 4: the one-sided 95th percentile of the same bootstrap
+   that gives the constraint 1 percentile, one bootstrap per distinct decision vector).
 
 Objective: minimise the weighted C-lambda2-clamp on the training folds; ties broken by lower opus share, then
 lower raw cost, then larger t_hi, then larger t_lo (deterministic). **No admissible grid point on a training
@@ -488,14 +593,20 @@ are validity checks) but subject to section 8.1.
 | # | Criterion | Population | Kill when |
 |---|---|---|---|
 | 0 | Data validity | real | the DEV validity floor of section 1.3 fails: no candidate verdict, the screen is NOT INFORMATIVE |
-| 1 | Hard fit | real sample | p95 latency (section 10.1) > 1,500 ms uncontended for a sync candidate; or **peak resident memory (process RSS plus Ollama's reported model size) > 12 GiB** (a quarter of this machine's 48 GiB **[CD]**; the machine's RAM is `sysctl -n hw.memsize`, recorded in the log); or the runtime/Ollama version needed is unavailable. A candidate that is fast enough only async is marked **async-only** (no sync authority) and may be a finalist only with that label **[CD]** |
+| 1 | Hard fit | real sample | **peak resident memory (process RSS plus Ollama's reported model size) > 12 GiB** (a quarter of this machine's 48 GiB **[CD]**; the machine's RAM is `sysctl -n hw.memsize`, recorded in the log) kills (`memory`); or the runtime/Ollama version needed is unavailable (`runtime`; for C4 no usable `logprobs` field, 2.1) kills. Pooled p95 latency (section 10.1) of **1,500 ms or less passes**; **above 1,500 ms and up to the 15,000 ms async budget (D-160) marks the candidate `async_only`** (no sync authority; it may be a finalist only with that label **[CD]**); **above 15,000 ms kills** (`slow_beyond_async_budget`). The row records which conditions fired. No latency file yet: `pending`. C4 parked for the coordinator (2.1): `pending` |
 | 2 | Errors | pooled | parse/error/timeout rate > 5 percent (nimble precedent 4/151) |
-| 3 | Signal | real | AUROC(score, truth is opus) < 0.65, or its session-bootstrap 95 percent lower bound < 0.55. For a hard-verdict arm the verdict rank is the score |
+| 3 | Signal | real | AUROC(score, truth is opus) < 0.65, or its session-bootstrap 95 percent lower bound < 0.55. For a hard-verdict arm the verdict rank is the score. **Items the candidate could not score (error or fallback) are excluded from this AUROC (D-160)**: B0 runs `cls_eval.py score` a second time on the table without those items; the AUROC with them included is reported beside it |
 | 4 | Operating point | pooled out-of-sample | no admissible (t_hi, t_lo) in the second-level fits; **or** the **pooled out-of-sample decisions** fail any of: under(cand) <= under(R-E); C-lambda2-clamp(cand) <= C-lambda2-clamp(R-E); the NOT-TRIVIAL guard passes; the non-inferiority upper 95 percent bounds hold (under <= +3 points, C-lambda2-clamp <= +0.3) |
 | 5 | Cost | pooled out-of-sample | **informative, not gating** (D-130 c: raw cost is reported, not gated; r1 wrongly made it a kill). Reported: raw cost with CI and the ratio to R-E raw cost (R-E raw 2.746 on P17D); a ratio above 1.35 prints the flag `COST_HIGH` and goes into the finalist file |
 | 6 | Shift | real vs DEV-SYN | **definition (r3):** take the pooled out-of-sample decisions (section 7.3, thresholds fitted on the pooled data) and score separately their **real rows** and their **DEV-SYN rows**. Kill when the candidate is significantly worse than R-E on the real rows (CI lower bound of the paired difference > 0 on either under-route or C-lambda2-clamp) **while** passing criterion 4's four conditions on the DEV-SYN rows: it fits the generator, not the traffic. Report-only under `LOW CLUSTER FIDELITY`, and carries no weight when DEV-SYN is `RESEMBLANCE_FAILED` |
-| 7 | Stability | pooled | decisions identical on a repeat run for < 98 percent of items (P1.6-b). Repeat = a second full run with an unchanged config in a different quiet window |
-| 8 | Judge robustness | real (and DEV-SYN: T-gpt vs T-sonnet) | the sign of (under, C-lambda2-clamp) minus R-E under T-opus differs from the sign under T-gpt on more than 1 of the 2 metrics, **where a sign counts only if the paired difference under that truth is at least 1 bootstrap standard error from 0** (a **1-SE magnitude floor**: smaller differences are indeterminate, not discordant) |
+| 7 | Stability | pooled | decisions identical on a repeat run for < 98 percent of items (P1.6-b). Repeat = a second full run with an unchanged config in a different quiet window; `pending` until the repeat exists (B0 `stability` compares two OOF score files at the frozen thresholds) |
+
+**Status vocabulary (r5; B0 `criteria_table`).** Each row is `pass`, `kill`, `pending`, `report_only` (rows 5, and 6 under its
+conditions), `async_only` (row 1) or `not_evaluable` / `not_applicable` (row 8). `killed_by` is the first kill in
+the order above. A candidate is **eligible** when no row kills and no row is `pending`; a `pending` row is never a
+pass. Only eligible candidates enter ranking (9), and only when the DEV validity floor is `OK` and all of the
+section 8.1 validity checks ran and passed.
+| 8 | Judge robustness | real (and DEV-SYN: T-gpt vs T-sonnet) | two legs. **Real leg:** the sign of (under, C-lambda2-clamp) minus R-E under T-opus differs from the sign under T-gpt on more than 1 of the 2 metrics (T-sonnet is computed beside them and not gated). **DEV-SYN leg:** the same test between T-gpt and T-sonnet on the DEV-SYN rows. **A sign counts only if the paired difference under that truth is at least 1 bootstrap standard error from 0** (a **1-SE magnitude floor**: smaller differences are indeterminate, not discordant). Status per leg: discordant on both metrics `kill`; a leg whose judge (of its pair) is voided is `not_evaluable`; **any other leg that cannot be evaluated is `pending`** and blocks eligibility (F20: DEV-SYN rows present but the candidate's arm absent from the DEV-SYN leg is `pending`, never a pass); a table with no DEV-SYN rows at all is `not_applicable` for that leg. The row passes when no leg kills or is pending (legs `pass`, `not_evaluable`, `not_applicable`); `not_evaluable` passes only because a judge was voided (D-160) |
 
 ### 8.1 Validity of the screen (run in the same pass, never decisive for a candidate, decisive for the screen)
 
@@ -508,6 +619,11 @@ are validity checks) but subject to section 8.1.
   than TEST, so this check is weaker than the TEST one; it is a sanity floor.
 * Spread (under, C-lambda2-clamp) of K-B1 minus K-W1 with its CI, and the known-worse trio (always_haiku,
   random, nimble) all failing the bars, are reported.
+* **A validity check whose arm is absent is `not_run`, and a screen with any `not_run` check names no finalist**
+  (B0 `no_finalist_reason: validity_8_1_failed_or_not_run`); a single-use `--mode test` run treats it as NOT INFORMATIVE
+  (section 4). An empty set passes everything, so absence is never a pass. "Known-better separates" is computed
+  as K-B1 versus K-W1 with an improvement on at least one metric (CI upper bound below 0) and no metric reversed
+  (CI lower bound above 0).
 
 ## 9. Ranking and the finalist output
 
@@ -515,18 +631,29 @@ are validity checks) but subject to section 8.1.
    than R-E. Keep the top 2, preferring diverse families **[CD]**: one logprob-or-LLM arm and one small learned
    head if both exist among survivors. **Note (CD-13):** the diversity rule can displace the rank-2 candidate by a
    lower-ranked one of another family; the displaced candidate, its rank and its numbers are named in the
-   finalist file so the choice is visible. If only one family survives, one finalist.
+   finalist file so the choice is visible. If only one family survives, one finalist. Ties in the objective are
+   broken by candidate id (C1 before C2 before C3 before C4). Families: C1, C2, C3 are small learned heads, C4 is the
+   logprob/LLM arm. A candidate labelled `async_only` ranks like any other and keeps its label (CD-16).
 2. **Arm definitions (frozen).** The L2 tier of a candidate is the section 7.1 threshold rule on its
    probabilities; its confidence is `max(P_haiku, P_sonnet, P_opus)`. Arm A returns the L2 tier. Arm B returns
-   the engine tier (E-0) unless confidence >= t_conf, in which case it returns the L2 tier (up or down). For each
-   finalist fit `t_conf` (grid {0.50, 0.55, ..., 0.95}) by the section 7 procedure with the same constraints.
+   the engine tier (E-0) unless confidence >= t_conf, in which case it returns the L2 tier (up or down; the L2
+   tier is the candidate's pooled out-of-sample decision). **`t_conf` is an in-sample screen, not a section 7.2/7.3
+   fit (D-160).** For each finalist, each of the ten values of the grid {0.50, 0.55, ..., 0.95} gives one arm-B
+   decision column, scored by `cls_eval.py score --mode dev` on the arm-choice items below; a value is eligible only
+   if arm B holds the guard and the bars, its opus share is <= the truth-opus share, and it makes either no haiku
+   route or at least 10 with precision >= 0.70. The chosen value minimises (C-lambda2-clamp, opus share, raw cost),
+   ties to the larger `t_conf`. There is no admissibility bootstrap and no out-of-sample refit for `t_conf`
+   (B0 does not reimplement `cls_eval` fitting); the finalist file labels the method
+   `in-sample screen (no 7.2/7.3)`.
    **The choice between arm A and arm B is made only on items outside the engine's own fitting sets** (real items
    not in GE3 tune or E2-cal, which fitted engine L3 under D-69, plus DEV-SYN); both arms are also reported on the
    engine-fitted items, flagged `engine-seen`, so the bias is visible. The finalist pair (candidate, arm) is
-   the better of arm A and arm B by the same deterministic objective. **[CD]** Both arms are then scored
+   the better of arm A and arm B by the objective (C-lambda2-clamp, then opus share, then raw cost; a tie or no
+   eligible `t_conf` gives arm A). **[CD]** Both arms are then scored
    once on TEST-SYN only for the winning arm of each finalist; the loser is reported from DEV only.
 3. **Output** `cls_dev_result.json` (counts, ids and tiers only; no text) and `cls_dev_finalists.json`:
-   per finalist: candidate id, arm, artifact sha256 list, frozen thresholds (t_hi, t_lo, t_conf), runtime
+   per finalist: candidate id, family, labels (`async_only`) and `sync_authority`, arm and the arm-choice detail with
+   `t_conf_method`, artifact sha256 list, frozen thresholds (t_hi, t_lo, t_conf), runtime
    config, DEV-CV metrics with CIs, the full kill-criteria table including every number, the per-stratum
    tables (length band, truth tier, task type, tool need, source, generator family) and the manifest sha256.
    Both files get a `.sha256` and are cited by sha256 in `PREREG-CLS-TEST`.
@@ -543,8 +670,12 @@ are validity checks) but subject to section 8.1.
 * Measured on this machine, on the interface B2 defines, `l2_score(text, ctx) -> (probs, ms)`, wall time by
   `time.perf_counter()` around the whole call (tokenise or embed, HTTP to Ollama where used, the head, and
   parse). Sync candidates only; Codex/OpenRouter candidates are not sync candidates and are not measured.
-* Sample: 200 prompts drawn from real DEV stratified by length band (seed 20261017), run sequentially,
-  single thread, the model resident (keep-alive set, `ollama ps` confirms only the candidate is resident).
+* Sample: 200 prompts drawn from real DEV stratified by length band (largest-remainder allocation, ties by band
+  order, seed 20261017; the same sample in every block), run sequentially,
+  single thread, the model resident (keep-alive set, `ollama ps` confirms only the candidate is resident; every
+  candidate, C1 included, has `/api/ps` checked for foreign models). A percentile is the nearest rank
+  (`ceil(p n)`-th sorted value); the p95 CI is a bootstrap with B = 2000, seed 20261017. The three blocks are
+  summarised only when three valid blocks exist at least 30 minutes apart (`latency --summarize`).
   5 warm-up calls are discarded and reported separately with the cold first-load time.
 * Three blocks, each in a different quiet window (at least 30 minutes apart). Pooled p50, p95, p99 with a
   bootstrap CI on p95. Criterion 1 uses pooled p95 (point estimate) and the worst block's p95, both
@@ -681,6 +812,12 @@ percent ($16)**. OpenRouter only under section 3.1, shared $20 cap (D-128), per-
 | CD-23 | Real digest | capped at 400 characters |
 | CD-24 | PINS-RUN append-only hash chain (each entry carries the previous entry's sha) | accepted by the coordinator |
 | CD-25 | Single-turn `claude -p` | no `--max-turns` (not in 2.1.299); an empty `--tools ""` list means no tools, so the call is single-turn print; the pins record this (the recorded `claude -p` help lines and the `--tools ""` argv) |
+| CD-26 | Async latency budget (criterion 1) | p95 <= 1,500 ms pass; to 15,000 ms `async_only`; above, kill (D-160) |
+| CD-27 | Non-inferiority bound | 97.5th percentile of the paired bootstrap; the guard stays one-sided 95th (D-148) |
+| CD-28 | Threshold grid | 16 t_hi x 12 t_lo = 192 points, t_lo = 1.01 included (D-143) |
+| CD-29 | Arm B `t_conf` | in-sample screen on the arm-choice items, labelled in the finalist file (D-160) |
+| CD-30 | Criterion 8 non-evaluable | `not_evaluable` passes only when a judge of the leg's pair is voided; any other non-evaluable leg is `pending`; DEV-SYN leg pending when the arm is missing (D-160, F20) |
+| CD-31 | Judge/Codex plumbing | GPT pinned by `-m`; a Codex failure parks, never voids; single-answer id rule of P1.7-d; `supply.py` and `gt500.py` pinned (D-147, D-161) |
 
 ## 15. Freeze record
 
@@ -697,21 +834,44 @@ exists at the freeze: the sha256 of `scripts/cls_eval.py`, `cls_dev_run.py`, `cl
 `src/llm_router/engine.py` and the **full** sha256 of `src/llm_router/shadow_eval.py`, **both pinned by commit**
 (the hashed content is `git show <commit>:path`, not the working tree; at the r2 base the shadow_eval hash is
 `e9b89943f33b68b3095c5d2ea57976147368e0e6f28490aea7e74a82e32b1c57`); the rubric md5
-(`1bcb3f441a0c9d056b3343a9d47c5565`) and the sha256 of `rubric.py`; the exclusion-list and `.env` **paths** with
+(`1bcb3f441a0c9d056b3343a9d47c5565`) and the sha256 of `rubric.py`; the sha256 of `gt500.py`
+(`9cde774dfe93387d6ee3dfcbd1b5481a537f265e5961d82f85a87d29d6328959`, the `GT500_SHA256` of `cls_pins.py` and of
+`scripts/p17d_synthetic.py`) and of its sibling `supply.py`
+(`12cd3e1eed7fc15658b4b44246d83422e2b61adc4ccb270dd9f5e729608fb0e8`, `SUPPLY_SHA256`, loaded and verified first as
+`p17d_synthetic.py` does; D-161), each at the path `params.gt500_py` names (the real `~/.rsi/research/primary-plan/v16/gt500/scripts/` of
+the P17D labeller), so a changed helper blocks the freeze; the exclusion-list and `.env` **paths** with
 sha256 and qualifying-value count (the `.env` sha256 is as of the freeze, a later change is intentional, no
 snapshot is kept, and the sha256 is logged at each use); the Ollama version and digests of `nimble:9b`,
 `qwen3.5:latest`, `qwen3-coder:30b`, `nomic-embed-text`; the bge-small snapshot dir name; the `claude` and `codex`
 CLI versions and the **recorded `--help` output** (sha256 and every flag line the runners use: for `claude -p`
 `--safe-mode`, `--settings`, `--tools`, `--strict-mcp-config`, `--no-session-persistence`, `--setting-sources`,
-`--output-format`, `--model`; for `codex exec` `-s`, `-C`, `--skip-git-repo-check`, `--ephemeral`), so a flag
-the installed build lacks **blocks the freeze**; the model ids used for judging and generating; and the **v1**
+`--output-format`, `--model`; for `codex exec` `-s`, `-C`, `--skip-git-repo-check`, `--ephemeral`, `--json`, `-m`; a flag counts
+only when a help line **defines** it, not when another option's text names it), so a flag
+the installed build lacks **blocks the freeze**; the exact `argv_template` of each CLI (the argv of 3.2) and the session-log directories
+(`~/.claude/projects`, `~/.codex/sessions`, as strings, never read by a build); the model ids used for judging
+and generating, as five keys (`judge_gpt`, `judge_sonnet`, `judge_opus`, `gen_gpt`, `gen_opus`; a missing key blocks the freeze); and the **v1**
 generator files (templates, 12 x 5 mask, project list, intent phrases, meta patterns; spec appendices A-D, hashed
-as files). Generator files are versioned by name (e.g. `tmpl_gpt.v1.txt`, `tmpl_gpt.v2.txt`). The v1 files are never edited. An amendment creates new-named files and a PINS-RUN entry for them. A STATIC pin that cannot be computed is a freeze blocker, not an omission.
+as files). Generator files are versioned by name (e.g. `tmpl_gpt.v1.txt`, `tmpl_gpt.v2.txt`). The v1 files are never edited. An amendment creates new-named files and a PINS-RUN entry for them. A STATIC pin that cannot be computed is a freeze blocker, not an omission:
+`pins --static` exits 9 and names the keys it could not compute. A generator template file holds the Appendix C body with the
+marker `{{ITEMS}}` where the item blocks go (`cls_gen_run.py`; the spec author supplies the files and the tool does not invent
+their wording).
+
+**Building and checking (r5).** `PINS-STATIC.json` records absolute paths in `params` (repo, scripts directory, helper files,
+Ollama URL, snapshot and generator directories) and `pins --verify` recomputes every pin from them, so it is built and verified from
+the checkout that holds the frozen commit, with `--engine-commit` set to a commit that contains the frozen engine files (their hashes
+are taken by `git show`, not from the working tree). `pins --verify PINS-STATIC.json` prints `{"ok", "mismatches", "warnings",
+"env_sha_at_use", "run_entries"}` and exits 9 on any mismatch (names only). Before the freeze record exists it warns
+`pre_freeze_no_pins_sha256_record`; once it exists, the `pins_sha256` line must match the file's sha256 or the check fails
+closed. A changed `.env` sha256 is the warning `env_changed_since_freeze`, never a mismatch. `pins --freeze-line PINS-STATIC.json`
+prints the `pins_sha256 <sha256>` line for the freeze record. Ollama digests are the ones `/api/tags` lists for the exact
+names above; a name that `/api/tags` lists twice with different digests, or lists only with a tag, must be resolved before the
+freeze.
 
 **`PINS-RUN` addenda** (built by `pins --run`, each entry hashed and appended to `pins_run.jsonl` and logged
 **before its first use**; not freeze blockers, because their inputs do not exist at the freeze): the length
 counts file; `gen_config.json` (counts, seeds, shares, spec version); `rules_tier.jsonl` (sha256, schema version,
-provenance: resolver commit and resolution time; schema in the B0 brief); the manifest sha256; and the generator
+provenance: resolver commit and resolution time, read from its header line; schema in the B0 brief); the manifest sha256 (one
+entry, `cls_dev_run.py manifest`, that also holds `length_counts.json` and `shingles_real.json`); and the generator
 files of the frozen spec vN. **A spec amendment (v2 or v3) writes a new PINS-RUN entry** for its generator files
 and `gen_config.json`; entries are never overwritten. `pins --verify` checks **STATIC always** and **RUN once any
 RUN entry exists**; every runner calls it at start and refuses (exit 9) on a mismatch, naming the key.

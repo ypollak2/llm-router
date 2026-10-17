@@ -41,9 +41,11 @@ Enforced by construction, then checked:
    dropped items are replaced under section 7.3.
 6. **Generator call hygiene.** Scratch config, no hooks: `claude -p` runs with `--safe-mode`, `--settings
    <run-dir>/claude_settings.json` holding `{"disableAllHooks": true}`, `--tools ""`, `--strict-mcp-config`,
-   `--no-session-persistence`, `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` removed from the child
-   environment, an empty scratch cwd, the prompt on stdin (the P2.0 pattern). `codex exec` runs `-s read-only`,
-   in an empty cwd, prompt on stdin, after the Codex read-scope canary of PREREG-CLS-DEV section 3.2 (the generator
+   `--no-session-persistence`, `--setting-sources project,local`, `--model <pinned id>`, `--output-format json`,
+   `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` removed from the child
+   environment, an empty scratch cwd, the prompt on stdin (the P2.0 pattern). `codex exec` runs `-s read-only
+   --skip-git-repo-check --ephemeral --json -m <pinned id>` (every GPT call passes `-m`, D-147), in an empty cwd, prompt
+   on stdin, after the Codex read-scope canary of PREREG-CLS-DEV section 3.2 (the generator
    needs no file access, so a canary that shows the model can read outside the cwd parks the run). Every
    generator request goes through `outgoing_check` on its exact bytes (the cell vectors, template and nonce hold no
    secret, but the check runs and its self-test is part of PINS).
@@ -350,6 +352,9 @@ items). The names come from a directory listing of the owner's Projects director
 freeze-guard reviewer confirms the list at freeze. Hashed in PINS as `projects.v1.json`.
 
 ## Appendix C. Generator template (both families; wrapper differs only as the CLI needs)
+
+The template file holds the body below with the marker `{{ITEMS}}` in place of the "Items (one block per item)" list;
+`cls_gen_run.py` substitutes the item blocks at that marker and refuses a template without it.
 
 ```
 You write realistic messages a developer types into an AI coding agent. For each item below write ONE message
