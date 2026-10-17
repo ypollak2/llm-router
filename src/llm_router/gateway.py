@@ -16,6 +16,7 @@ Run:  llm_router gateway   (or: python -m llm_router.gateway)
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -197,10 +198,14 @@ class _RoutedResult:
     ``.model.provider`` / ``.model.model`` / ``.input_tokens`` / ``.output_tokens``
     shape the gateway's wire-format endpoints expect."""
 
-    __slots__ = ("text", "input_tokens", "output_tokens", "cost_usd", "model")
+    __slots__ = ("text", "input_tokens", "output_tokens", "cost_usd", "model",
+                 "tool_calls", "finish_reason")
 
     def __init__(self, d: dict) -> None:
         self.text = d.get("text", "")
+        # A.2-t: the tool calls the model made (OpenAI shape) and its own stop reason.
+        self.tool_calls = d.get("tool_calls") or []
+        self.finish_reason = d.get("finish_reason") or ""
         self.input_tokens = d.get("input_tokens", 0) or 0
         self.output_tokens = d.get("output_tokens", 0) or 0
         self.cost_usd = d.get("cost_usd", 0.0) or 0.0
@@ -323,7 +328,8 @@ async def _route(prompt: str, task_type: str | None, complexity: str | None,
                  prefer_model: str | None = None, project_root: str | None = None,
                  classify_text: str | None = None, *,
                  system: str | None = None, max_tokens: int | None = None,
-                 temperature: float | None = None, messages: list | None = None):
+                 temperature: float | None = None, messages: list | None = None,
+                 tools: list | None = None, tool_choice: object | None = None):
     """Shared core for every wire-format endpoint: classify (if needed) → route
     through LLM Router's FULL router and adapt the result.
 
@@ -362,6 +368,10 @@ async def _route(prompt: str, task_type: str | None, complexity: str | None,
     history), so ``route_and_call`` builds the pack with ``door="gateway"`` from
     the caller's own turns and never from this process's session. ``None`` (the
     native ``/route``) keeps the old path.
+
+    ``tools`` / ``tool_choice`` (A.2-t): the caller's function-calling request, already
+    normalised to the OpenAI form by the endpoint (``_openai_tools``, ``_responses_tools``,
+    ``_anthropic_tools``). The reply's ``tool_calls`` are on the result.
     """
     if not prompt.strip():
         raise HTTPException(status_code=400, detail="no prompt content")
@@ -381,6 +391,8 @@ async def _route(prompt: str, task_type: str | None, complexity: str | None,
             "max_tokens": max_tokens,
             "temperature": temperature,
             "messages": messages,
+            "tools": tools,
+            "tool_choice": tool_choice,
         })
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -769,7 +781,11 @@ def ollama_tags() -> dict:
 # well-formed answer to a question it had not asked, with nothing to indicate
 # that its tool definitions had been thrown away.
 #
-# WHY THIS REFUSES RATHER THAN IMPLEMENTS. The router returns text: `route_and_call`
+# A.2-t: the three OpenAI / Anthropic endpoints now SERVE tools (see _openai_tools and the
+# A.2-t block below); `_TOOLS_UNSUPPORTED` and `_refuse_tools_if_present` remain for the two
+# Ollama endpoints. The rest of this comment is the H-03 history.
+#
+# WHY THIS REFUSED RATHER THAN IMPLEMENTED. The router returned text: `route_and_call`
 # has no tool-call channel, and no backend in the chain is wired for one. Building
 # that is a feature, not a remediation, and half-building it would produce the
 # same silent wrongness in a new place. Refusing is the honest behaviour -- the
@@ -864,6 +880,133 @@ def _refuse_images_if_present(*values) -> None:
         raise HTTPException(status_code=400, detail=_IMAGES_UNSUPPORTED)
 
 
+# ── A.2-t: tools on the three OpenAI / Anthropic endpoints ───────────────────
+# Each wire format is normalised to the OpenAI chat form (the router's one tools shape,
+# and what LiteLLM sends every provider) and the reply is rendered back in the caller's
+# own format. Only function tools exist here: a hosted tool (web_search, file_search,
+# code_interpreter, an Anthropic server tool) runs on the vendor's side and this gateway
+# cannot run it, so it is refused rather than dropped (the R10 rule).
+def _tools_400(what: str) -> HTTPException:
+    return HTTPException(status_code=400, detail=(
+        f"This gateway serves function tools only; {what} cannot be served and would have "
+        "been silently ignored, so the request is refused. Remove it, or call the provider "
+        "directly."))
+
+
+_TOOL_CHOICE_WORDS = ("none", "auto", "required")
+
+
+def _function_tool(name, description, parameters, strict=None) -> dict:
+    fn: dict = {"name": name, "parameters": parameters or {"type": "object", "properties": {}}}
+    if description:
+        fn["description"] = description
+    if strict is not None:
+        fn["strict"] = strict
+    return {"type": "function", "function": fn}
+
+
+def _normalise_tools(tools, tool_choice, convert, convert_choice) -> tuple[list | None, object | None]:
+    """``(tools, tool_choice)`` in OpenAI chat form, or ``(None, None)`` for a request
+    without tools. ``tool_choice`` other than ``none`` with no tools is refused, as it
+    was before A.2 and as OpenAI's own API does: the caller is asking to be forced into
+    a call it never offered."""
+    if not tools:
+        if tool_choice not in (None, "none"):
+            raise _tools_400("`tool_choice` without `tools`")
+        return None, None
+    if not isinstance(tools, list):
+        raise _tools_400("a `tools` value that is not a list")
+    out = []
+    for t in tools:
+        if not isinstance(t, dict):
+            raise _tools_400("a tool that is not an object")
+        out.append(convert(t))
+    return out, (convert_choice(tool_choice) if tool_choice is not None else None)
+
+
+def _named_choice(name) -> dict:
+    return {"type": "function", "function": {"name": name}}
+
+
+def _openai_choice(c):
+    if c in _TOOL_CHOICE_WORDS:
+        return c
+    if isinstance(c, dict) and c.get("type") == "function" and \
+            isinstance((c.get("function") or {}).get("name"), str):
+        return _named_choice(c["function"]["name"])
+    raise _tools_400(f"`tool_choice` {json.dumps(c, default=str)[:80]}")
+
+
+def _openai_tool(t: dict) -> dict:
+    fn = t.get("function")
+    if t.get("type") != "function" or not isinstance(fn, dict) or not isinstance(fn.get("name"), str):
+        raise _tools_400(f"tool type {t.get('type')!r}")
+    return t
+
+
+def _openai_tools(tools, tool_choice):
+    """Chat Completions: already the OpenAI form; validated."""
+    return _normalise_tools(tools, tool_choice, _openai_tool, _openai_choice)
+
+
+def _responses_tool(t: dict) -> dict:
+    if t.get("type") != "function" or not isinstance(t.get("name"), str):
+        raise _tools_400(f"tool type {t.get('type')!r}")
+    return _function_tool(t["name"], t.get("description"), t.get("parameters"), t.get("strict"))
+
+
+def _responses_choice(c):
+    if c in _TOOL_CHOICE_WORDS:
+        return c
+    if isinstance(c, dict) and c.get("type") == "function":
+        name = c.get("name") or (c.get("function") or {}).get("name")
+        if isinstance(name, str):
+            return _named_choice(name)
+    raise _tools_400(f"`tool_choice` {json.dumps(c, default=str)[:80]}")
+
+
+def _responses_tools(tools, tool_choice):
+    """Responses API: flat ``{"type": "function", "name", "parameters"}`` items."""
+    return _normalise_tools(tools, tool_choice, _responses_tool, _responses_choice)
+
+
+def _anthropic_tool(t: dict) -> dict:
+    if t.get("type") not in (None, "custom") or not isinstance(t.get("name"), str):
+        raise _tools_400(f"tool type {t.get('type')!r}")
+    return _function_tool(t["name"], t.get("description"), t.get("input_schema"))
+
+
+def _anthropic_choice(c):
+    kind = c.get("type") if isinstance(c, dict) else None
+    if kind in ("auto", "none"):
+        return kind
+    if kind == "any":
+        return "required"
+    if kind == "tool" and isinstance(c.get("name"), str):
+        return _named_choice(c["name"])
+    raise _tools_400(f"`tool_choice` {json.dumps(c, default=str)[:80]}")
+
+
+def _anthropic_tools(tools, tool_choice):
+    """Messages API: ``{"name", "description", "input_schema"}`` items."""
+    return _normalise_tools(tools, tool_choice, _anthropic_tool, _anthropic_choice)
+
+
+def _tool_input(tc: dict) -> dict:
+    """The ``input`` object of an Anthropic ``tool_use`` block: the call's JSON arguments
+    parsed (OpenAI carries them as a string, Anthropic as an object)."""
+    raw = (tc.get("function") or {}).get("arguments") or ""
+    try:
+        value = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        value = None
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=502, detail=(
+            f"the model returned arguments for tool {(tc.get('function') or {}).get('name')!r} "
+            "that are not a JSON object"))
+    return value
+
+
 STREAM_UNSUPPORTED = "streaming not supported yet (v16 A.2)"
 
 
@@ -895,6 +1038,10 @@ def _finish_reason(result) -> str:
     rather than asserted, so a truncated answer is not reported as a complete
     one.
     """
+    if getattr(result, "tool_calls", None):
+        # A.2-t: some backends report "stop" beside a tool call; the caller must see
+        # "tool_calls" or it never runs the tool.
+        return "tool_calls"
     raw = getattr(result, "finish_reason", None) or getattr(result, "stop_reason", None)
     if isinstance(raw, str) and raw:
         return {"max_tokens": "length", "end_turn": "stop"}.get(raw, raw)
@@ -926,12 +1073,17 @@ class _OAIRequest(BaseModel):
     max_tokens: int | None = None
     max_completion_tokens: int | None = None
     temperature: float | None = None
+    # A.2-t: declared so they are seen. Accepted for client compatibility; the router
+    # does not act on them (it returns the calls the model made, in one reply).
+    parallel_tool_calls: bool | None = None
+    stream_options: dict | None = None
+    store: bool | None = None
 
 
 @app.post("/v1/chat/completions")
 async def openai_chat(req: _OAIRequest, request: Request) -> dict:
     _refuse_stream(req.stream)
-    _refuse_tools_if_present(req.tools, req.tool_choice)
+    tools, tool_choice = _openai_tools(req.tools, req.tool_choice)
     _refuse_images_if_present(req.messages)
     system, messages = _split_system(req.messages)
     prompt, history = _request_and_history(messages)
@@ -941,13 +1093,17 @@ async def openai_chat(req: _OAIRequest, request: Request) -> dict:
                      classify_text=_latest_user_turn(req.messages),
                      system=system,
                      max_tokens=req.max_completion_tokens or req.max_tokens,
-                     temperature=req.temperature, messages=history)
+                     temperature=req.temperature, messages=history,
+                     tools=tools, tool_choice=tool_choice)
+    message: dict = {"role": "assistant", "content": r.text}
+    if r.tool_calls:
+        message = {"role": "assistant", "content": r.text or None, "tool_calls": r.tool_calls}
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
         "object": "chat.completion",
         "created": int(time.time()),
         "model": f"{r.model.provider}/{r.model.model}",
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": r.text},
+        "choices": [{"index": 0, "message": message,
                      "finish_reason": _finish_reason(r)}],
         "usage": {"prompt_tokens": r.input_tokens, "completion_tokens": r.output_tokens,
                   "total_tokens": r.input_tokens + r.output_tokens},
@@ -970,12 +1126,16 @@ class _ResponsesRequest(BaseModel):
     stream: bool = False  # P0.6: refused until A.2
     max_output_tokens: int | None = None
     temperature: float | None = None
+    # A.2-t: declared so they are seen; accepted, not acted on (see _OAIRequest).
+    parallel_tool_calls: bool | None = None
+    store: bool | None = None
+    include: list | None = None
 
 
 @app.post("/v1/responses")
 async def openai_responses(req: _ResponsesRequest, request: Request) -> dict:
     _refuse_stream(req.stream)
-    _refuse_tools_if_present(req.tools, req.tool_choice)
+    tools, tool_choice = _responses_tools(req.tools, req.tool_choice)
     _refuse_images_if_present(req.input)
     # `instructions` is the Responses API's system prompt; system/developer
     # items in `input` are too. Both go to the model as its system prompt
@@ -992,29 +1152,34 @@ async def openai_responses(req: _ResponsesRequest, request: Request) -> dict:
                      classify_text=classify_text,
                      system=_join_system(req.instructions, input_system),
                      max_tokens=req.max_output_tokens,
-                     temperature=req.temperature, messages=history)
+                     temperature=req.temperature, messages=history,
+                     tools=tools, tool_choice=tool_choice)
     output_id = f"msg_{uuid.uuid4().hex[:24]}"
+    output = []
+    if r.text or not r.tool_calls:
+        output.append({
+            "id": output_id,
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": r.text, "annotations": []}],
+        })
+    for tc in r.tool_calls:
+        output.append({
+            "id": f"fc_{uuid.uuid4().hex[:24]}",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": tc["id"],
+            "name": tc["function"]["name"],
+            "arguments": tc["function"]["arguments"],
+        })
     return {
         "id": f"resp_{uuid.uuid4().hex[:24]}",
         "object": "response",
         "created_at": int(time.time()),
         "status": "completed",
         "model": f"{r.model.provider}/{r.model.model}",
-        "output": [
-            {
-                "id": output_id,
-                "type": "message",
-                "status": "completed",
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "output_text",
-                        "text": r.text,
-                        "annotations": [],
-                    }
-                ],
-            }
-        ],
+        "output": output,
         "output_text": r.text,
         "usage": {
             "input_tokens": r.input_tokens,
@@ -1040,7 +1205,7 @@ class _AnthropicRequest(BaseModel):
 @app.post("/v1/messages")
 async def anthropic_messages(req: _AnthropicRequest, request: Request) -> dict:
     _refuse_stream(req.stream)
-    _refuse_tools_if_present(req.tools, req.tool_choice)
+    tools, tool_choice = _anthropic_tools(req.tools, req.tool_choice)
     _refuse_images_if_present(req.messages)
     # `req.system` is the model's system prompt and is never classified (T-03).
     prompt, history = _request_and_history(req.messages)
@@ -1050,16 +1215,21 @@ async def anthropic_messages(req: _AnthropicRequest, request: Request) -> dict:
                      classify_text=_latest_user_turn(req.messages),
                      system=req.system or None,
                      max_tokens=req.max_tokens,
-                     temperature=req.temperature, messages=history)
+                     temperature=req.temperature, messages=history,
+                     tools=tools, tool_choice=tool_choice)
+    content: list = [{"type": "text", "text": r.text}] if r.text or not r.tool_calls else []
+    content += [{"type": "tool_use", "id": tc["id"], "name": tc["function"]["name"],
+                 "input": _tool_input(tc)} for tc in r.tool_calls]
     return {
         "id": f"msg_{uuid.uuid4().hex[:24]}",
         "type": "message",
         "role": "assistant",
         "model": f"{r.model.provider}/{r.model.model}",
-        "content": [{"type": "text", "text": r.text}],
+        "content": content,
         # H-03: derived where the backend reports one, so a truncated answer is
         # not returned as a completed turn.
-        "stop_reason": {"length": "max_tokens"}.get(_finish_reason(r), "end_turn"),
+        "stop_reason": {"length": "max_tokens", "tool_calls": "tool_use"}.get(
+            _finish_reason(r), "end_turn"),
         "usage": {"input_tokens": r.input_tokens, "output_tokens": r.output_tokens},
     }
 

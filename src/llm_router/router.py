@@ -2629,7 +2629,8 @@ async def _finalize_successful_route(
                 False if ledger_outcome == "degraded"  # N22: gate-rejected floor answer, not a win
                 else False if getattr(response, "quality_degraded", False)
                 else False if _finish_reason_is_failure(response)
-                else _response_is_usable(getattr(response, "content", "") or "")
+                else bool(getattr(response, "tool_calls", None))  # A.2-t: a tool call is an answer
+                or _response_is_usable(getattr(response, "content", "") or "")
             ),
             input_tokens=response.input_tokens,
             output_tokens=response.output_tokens,
@@ -2792,6 +2793,9 @@ async def _dispatch_model_loop(
     # P2.4: the request's capability needs, computed once by route_and_call (None =
     # filter off); the emergency BUDGET chain is filtered with the same needs.
     capability_needs: Any = None,
+    # A.2-t: the caller's tools array / tool_choice (OpenAI form), sent to every API attempt.
+    tools: list[dict] | None = None,
+    tool_choice: object | None = None,
 ) -> LLMResponse:
     """Execute the main model dispatch loop with primary + emergency fallback chains.
 
@@ -3327,7 +3331,7 @@ async def _dispatch_model_loop(
                         latency_ms=gemini_result.duration_sec * 1000,
                         provider="gemini_cli",
                     )
-                elif provider == "anthropic" and claude_offload_available(config):
+                elif provider == "anthropic" and not tools and claude_offload_available(config):
                     # Claude Code CLI dispatch (subscription auth, no API key), taken
                     # ONLY when offload is truly available: subscription on + `claude`
                     # CLI installed + combined 5h/weekly pressure under the cap. When
@@ -3381,6 +3385,7 @@ async def _dispatch_model_loop(
                         scope_root=scope_root,
                         use_thinking=use_thinking,
                         correlation_id=correlation_id,
+                        tools=tools, tool_choice=tool_choice,
                     )
 
                 set_span_attributes(
@@ -3400,7 +3405,7 @@ async def _dispatch_model_loop(
                 complexity=c,
                 model=model,
             )
-            if _contract.gates and task_type not in MEDIA_TASK_TYPES:
+            if _contract.gates and task_type not in MEDIA_TASK_TYPES and not response.tool_calls:
                 _gates_passed, _gate_results = run_gates(_contract, response.content)
                 if not _gates_passed:
                     _failed = [r for r in _gate_results if not r.passed]
@@ -3436,7 +3441,7 @@ async def _dispatch_model_loop(
             # chain — exactly like a failed gate above. Always record the score so
             # `should_skip_model` keeps learning, even when we don't escalate
             # (last model in chain, media task, or feature disabled).
-            if _escalate_on_quality and task_type not in MEDIA_TASK_TYPES:
+            if _escalate_on_quality and task_type not in MEDIA_TASK_TYPES and not response.tool_calls:
                 try:
                     from llm_router.quality_feedback import record_quality, score_response
                     _qs = score_response(response.content, task_type.value, model, c.value)
@@ -3852,6 +3857,7 @@ async def _dispatch_model_loop(
                             scope_root=scope_root,
                             use_thinking=use_thinking,
                             correlation_id=correlation_id,
+                            tools=tools, tool_choice=tool_choice,
                         )
 
                     tracker.record_success(provider)
@@ -4149,9 +4155,8 @@ def _finish_reason_is_failure(response) -> bool:
 
     Kept as a named predicate rather than inlined at the one call site, so the
     set of reasons is greppable and so the accompanying counter has something
-    to attach to. `tool_calls` is deliberately NOT here: the gateway refuses
-    tool requests outright (H-03), so it cannot arrive on this path, and
-    listing it would imply a handling that does not exist.
+    to attach to. `tool_calls` is deliberately NOT here: since A.2-t it is how a
+    tool-call answer ends, and the dispatch loop accepts it as a complete answer.
     """
     reason = getattr(response, "finish_reason", "") or ""
     if reason not in _FAILED_FINISH_REASONS:
@@ -4278,6 +4283,8 @@ async def route_and_call(
     route_directive_id: str | None = None,
     messages: list[dict] | None = None,
     context_door: str = "gateway",
+    tools: list[dict] | None = None,
+    tool_choice: object | None = None,
 ) -> LLMResponse:
     """Route a request to the best available model and return the response.
 
@@ -4333,6 +4340,11 @@ async def route_and_call(
             packs inside its own build_chain/execute_chain path (D-98). It names
             the pack's door and the fail-open code (``CHZ-FO-ROUTER-GATEWAY-PACK``).
             Ignored when ``messages`` is None.
+        tools, tool_choice: A.2-t, the caller's function-calling request in OpenAI form
+            (gateway door). Only API models that can return tool calls are tried (the
+            codex / gemini_cli CLI backends are out), and a tool-call reply is a usable
+            answer: ``LLMResponse.tool_calls``. The caller bypasses the semantic cache
+            (``semantic_cache.REQUEST_HAS_TOOLS``).
         deadline_monotonic: Track-3 agent-safety absolute deadline.
             When set, the routed turn refuses to start if
             ``time.monotonic()`` is already past this value (raises
@@ -4914,10 +4926,17 @@ async def route_and_call(
                         _cf.needs_from_prompt(prompt, task_type.value, system_prompt or ""),
                         _cf.needs_from_messages(messages, prompt, system_prompt or ""),
                     )
+                    if tools:  # A.2-t: a real request tools array is the HARD tools need (D-165)
+                        _cap_needs = _cf.merge(_cap_needs, _cf.Needs(tools=True))
                     models_to_try, _cap_excluded = _cf.filter_chain_report(models_to_try, _cap_needs)
             except Exception as _cap_err:  # noqa: BLE001 - fail-open: the chain stays as built
                 from llm_router import failopen
                 failopen.record("CHZ-FO-ROUTER-CAPABILITY-FILTER", _cap_err)
+            if tools:
+                # A.2-t: the CLI backends return text only, whatever the filter is set to.
+                _cli = [m for m in models_to_try if provider_from_model(m) in ("codex", "gemini_cli")]
+                models_to_try = [m for m in models_to_try if m not in _cli]
+                _cap_excluded = list(_cap_excluded) + [(m, "CLI backend cannot return tool calls") for m in _cli]
 
         if not models_to_try:
             set_span_attributes(
@@ -5336,6 +5355,8 @@ async def route_and_call(
             conversation=messages,
             context_door=context_door,
             capability_needs=_cap_needs,
+            tools=tools,
+            tool_choice=tool_choice,
         )
         # T3-S2 + T3-M1: combined timeout + cancel handling. Both failure
         # modes share the same cleanup contract — release the budget
@@ -5664,6 +5685,8 @@ async def _call_text(
     scope_root: str | None = None,
     use_thinking: bool = False,
     correlation_id: str | None = None,
+    tools: list[dict] | None = None,
+    tool_choice: object | None = None,
 ) -> LLMResponse:
     """Dispatch a text completion call through LiteLLM's unified API.
 
@@ -5801,6 +5824,11 @@ async def _call_text(
     # Only apply to Perplexity models — other providers reject this field.
     if task_type == TaskType.RESEARCH and "perplexity" in model.lower():
         extra["extra_body"] = {"search_recency_filter": "week"}
+    # A.2-t: the caller's function-calling request, forwarded as given (OpenAI form).
+    if tools:
+        extra["tools"] = tools
+        if tool_choice is not None:
+            extra["tool_choice"] = tool_choice
 
     # Extended thinking — enabled for deep_reasoning complexity.
     # Each provider exposes a different API surface:
