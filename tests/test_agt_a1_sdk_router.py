@@ -281,6 +281,16 @@ def test_c_routing_decisions_row_carries_caller_session_and_task(fake):
     assert rows == [(SID, TASK), ("a1-shim-session", "a1-shim-task")]
 
 
+def test_c_no_task_given_uses_the_callers_session_turn(fake):
+    from llm_router import Router, call_identity
+
+    turn = call_identity.begin_turn(SID)
+    assert turn and not call_identity.is_generated_task_id(turn)
+    r = Router(session=SID).run(PROMPT)
+    assert r.task_id == turn, "the scope must be bound to the caller's session to find its turn"
+    assert _db_rows("SELECT session_id, task_id FROM routing_decisions") == [(SID, turn)]
+
+
 def test_c_decide_mode_ledger_row_carries_caller_ids(fake, monkeypatch):
     from llm_router import Router, decision_ledger
 
