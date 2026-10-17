@@ -393,6 +393,8 @@ async def _build_and_filter_chain(
     complexity_hint: Complexity | str | None,
     c: Complexity,
     config,
+    *,
+    last_resort_floor: bool = True,
 ) -> list[str]:
     """Build and filter the ordered list of candidate models to try.
 
@@ -406,9 +408,13 @@ async def _build_and_filter_chain(
         complexity_hint: Raw complexity hint (string or enum) for dynamic chain selection.
         c: Resolved Complexity enum (from _resolve_profile).
         config: Application config.
+        last_resort_floor: F26 / D-175. When a TEXT chain is still empty after every filter and
+            injection, answer from the floor (:func:`_empty_chain_floor`). The proxy passes False:
+            its chain is informational and must not change.
 
     Returns:
-        Ordered list of model identifiers, highest priority first. May be empty.
+        Ordered list of model identifiers, highest priority first. May be empty (media tasks, or
+        when not even the floor reaches a model).
     """
     # Defined up front so the pin re-assert and the headless codex re-assert
     # (both near the return) never hit UnboundLocalError on paths that skip the
@@ -554,18 +560,7 @@ async def _build_and_filter_chain(
         # legitimate anthropic/* entries were ALSO being dropped, leaving an
         # empty chain — the router's worst possible failure mode.
         available = config.available_providers
-        _codex_ok = is_codex_available()
-        _gemini_cli_ok = is_gemini_cli_available()
-        _ollama_ok = bool(config.all_ollama_models())
-        _claude_sub_ok = bool(config.llm_router_claude_subscription)
-        models_to_try = [
-            m for m in models_to_try
-            if provider_from_model(m) in available
-            or (provider_from_model(m) == "codex" and _codex_ok)
-            or (provider_from_model(m) == "gemini_cli" and _gemini_cli_ok)
-            or (provider_from_model(m) == "ollama" and _ollama_ok)
-            or (provider_from_model(m) == "anthropic" and _claude_sub_ok)
-        ]
+        models_to_try = _keep_reachable_providers(models_to_try, config)
 
         # ── Repo config: block_providers + model/provider pin ─────────────────
         repo_cfg = get_repo_config()
@@ -1073,11 +1068,142 @@ async def _build_and_filter_chain(
         _tail = map_reader.apply_to_chain(_tail, reorder=False)
         models_to_try = models_to_try + _tail
 
+    # F26 / D-175: a TEXT chain that is still empty after every filter and injection gets the floor.
+    # A non-empty chain is returned untouched; media keeps raising (its static entries need keys).
+    if not models_to_try and last_resort_floor and task_type not in MEDIA_TASK_TYPES:
+        return _empty_chain_floor(
+            task_type, profile, config, repo_cfg, _policy, _merged_block, _merged_allow,
+            _broker_provs, _gate_critical, _gate_names,
+        )
+
     # M3.0: the Q&A local strip is NOT applied here. This builder is shared with the
     # proxy (proxy/backends.py policy_chain), whose routing must not change. The strip
     # lives in route_and_call (primary chain, after the specialist and bandit steps) and
     # at the emergency BUDGET build.
     return models_to_try
+
+
+def _keep_reachable_providers(models: list[str], config) -> list[str]:
+    """The provider filter of ``_build_and_filter_chain``: keep a model only when its provider is
+    configured, or its subprocess/local/subscription tier is really available (not a phantom entry).
+    Shared with the F26 floor so both apply the same predicate. Subscription mode never exports an
+    Anthropic API key, so ``anthropic/*`` survives only through the Claude CLI subscription."""
+    available = config.available_providers
+    _codex_ok = is_codex_available()
+    _gemini_cli_ok = is_gemini_cli_available()
+    _ollama_ok = bool(config.all_ollama_models())
+    _claude_sub_ok = bool(config.llm_router_claude_subscription)
+    return [
+        m for m in models
+        if provider_from_model(m) in available
+        or (provider_from_model(m) == "codex" and _codex_ok)
+        or (provider_from_model(m) == "gemini_cli" and _gemini_cli_ok)
+        or (provider_from_model(m) == "ollama" and _ollama_ok)
+        or (provider_from_model(m) == "anthropic" and _claude_sub_ok)
+    ]
+
+
+#: F26 / D-175: (profile, task) pairs whose empty chain was already answered from the floor and
+#: logged at WARNING, so a long-lived server says it once per chain.
+_FLOOR_WARNED: set[tuple[str, str]] = set()
+
+#: F26 / D-175: the floor tier of the last chain it served, per (profile, task). A tier is
+#: ``local`` | ``cli`` | ``claude_cli`` | ``static``.
+_FLOOR_TIERS: dict[tuple[str, str], str] = {}
+
+
+def _floor_tier_of(model: str) -> str:
+    prov = provider_from_model(model)
+    if prov in ("ollama", "openai_compat"):
+        return "local"
+    if prov in ("codex", "gemini_cli"):
+        return "cli"
+    if prov == "anthropic":
+        return "claude_cli"
+    return "static"
+
+
+def record_floor_tier(task_type: TaskType, profile: RoutingProfile, tier: str) -> None:
+    """F26 / D-175: record which floor tier answers an empty chain. Writes the module table and the
+    ledger guard (``call_identity.note_ledger_floor_tier``).
+
+    HOOK FOR F23 (skip-cause API on routing rows): when it is on main, emit the cause
+    ``empty_chain_floor:<tier>`` here, in this one function; no other call site needs to change."""
+    _FLOOR_TIERS[(profile.value, task_type.value)] = tier
+    _ci_scope.note_ledger_floor_tier(tier)
+
+
+def _empty_chain_floor(
+    task_type: TaskType,
+    profile: RoutingProfile,
+    config,
+    repo_cfg,
+    policy,
+    merged_block: list[str],
+    merged_allow: list[str],
+    broker_provs: frozenset[str],
+    gate_critical: bool,
+    gate_names,
+) -> list[str]:
+    """F26 / D-175 (option b): the last-resort chain for a TEXT task whose chain is empty.
+
+    Order: local models (any profile, P0.15 promote gate honoured), then Codex / Gemini CLI when
+    reachable (any text task), then the static chain re-filtered by the same provider predicate as
+    the main build (so Claude only through the CLI subscription, never an API key in subscription
+    mode), Claude entries last (D-116). The block / policy / hard-block / resource-map filters are
+    applied again, so they still win. ``[]`` when nothing is reachable: the caller raises
+    ``NoRoutableModelsError`` naming the chain."""
+    disabled = _disabled_subprocess_backends()
+    local_front, local_tail = order_for_chain(
+        config.all_ollama_models(), task_type.value, critical=gate_critical,
+        configured=gate_names, read_routing_yaml=False,
+    )
+    local = _task_aware_default_order(local_front, task_type) if local_front else []
+    cli: list[str] = []
+    if (is_codex_available() and "codex" not in disabled) or "codex" in broker_provs:
+        cli += [f"codex/{m}" for m in CODEX_MODELS[:2]]
+    if (is_gemini_cli_available() and "gemini_cli" not in disabled) or "gemini_cli" in broker_provs:
+        cli += [f"gemini_cli/{m}" for m in GEMINI_MODELS[:2]]
+    static = _keep_reachable_providers(
+        get_model_chain(
+            profile, task_type,
+            is_subscription_mode=bool(
+                config.llm_router_claude_subscription or config.llm_router_gemini_subscription
+            ),
+        ),
+        config,
+    )
+    static = [m for m in static if provider_from_model(m) != "anthropic"] + [
+        m for m in static if provider_from_model(m) == "anthropic"
+    ]
+    seen: set[str] = set()
+    chain = [m for m in local + cli + static + local_tail if not (m in seen or seen.add(m))]  # type: ignore[func-returns-value]
+
+    if repo_cfg.block_providers:
+        _bp = set(repo_cfg.block_providers)
+        chain = [m for m in chain if provider_from_model(m) not in _bp]
+    if chain and (merged_block or merged_allow):
+        from llm_router.policy import apply_policy
+
+        chain, _ = apply_policy(chain, task_type.value, policy)
+    _blocked_now = _blocked_providers()
+    if _blocked_now:
+        chain = [m for m in chain if provider_from_model(m) not in _blocked_now]
+    from llm_router import map_reader
+
+    chain = map_reader.apply_to_chain(chain, reorder=False)
+    if chain:
+        tier = _floor_tier_of(chain[0])
+        record_floor_tier(task_type, profile, tier)
+        key = (profile.value, task_type.value)
+        if key not in _FLOOR_WARNED:
+            _FLOOR_WARNED.add(key)
+            log.warning(
+                "Routing chain %s/%s has no model after filters and injections; answering from the "
+                "last-resort floor (first tier: %s, chain: %s)",
+                profile.value, task_type.value, tier, chain,
+            )
+    return chain
 
 
 def _resolve_profile(

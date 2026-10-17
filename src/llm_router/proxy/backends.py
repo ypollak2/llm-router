@@ -499,7 +499,8 @@ async def policy_chain(text: str) -> tuple[str, str, list[str]]:
     if ckey not in _chain_cache:
         c = Complexity(key[1])
         _chain_cache[ckey] = await _build_and_filter_chain(
-            TaskType(key[0]), complexity_to_profile(c), None, c, c, get_config())
+            TaskType(key[0]), complexity_to_profile(c), None, c, c, get_config(),
+            last_resort_floor=False)  # F26: the proxy chain is informational; unchanged
     return key[0], key[1], _chain_cache[ckey]
 
 
