@@ -1,6 +1,6 @@
 # PREREG-P20-requal AMEND2: qwen3.8 as the only local arm, thinking off, a foreign-arm guard
 
-**DRAFT, not frozen.** This file will be frozen by the hash in `PREREG-P20-requal-AMEND2.sha256`.
+This file is frozen by the hash in `PREREG-P20-requal-AMEND2.sha256`.
 It amends `PREREG-P20-requal.md` (sha256 `59e27eb889601b4eff80cac645b21442333ff850109219ef10b6de68bd2029b2`,
 frozen_utc 2026-10-16T15:43:02Z) as already amended by `PREREG-P20-requal-AMEND1.md` (sha256
 `6c5b867ac97198b70109d1b5961de6ec64e2f1aba3b0b38068c090f70cfdeabd`, frozen_utc 2026-10-16T17:22:05Z).
@@ -152,7 +152,8 @@ an approved Ollama upgrade").
     §4 is unchanged: those outcomes are known in aggregate, and they are not this stratum's result.
 19. **Timeout pressure.** A dense 27.3B at about 23 tokens/s gives roughly 4,000 output tokens in
     the 180 s local timeout. Long answers time out more often than they would on the MoE arms
-    the prereg planned. Timeouts are charged to the arm (§6).
+    the prereg planned. Timeouts are charged to the arm (§6: one retry, the last attempt is final;
+    §16 item 11 for the code runner).
 
 ## Run rule
 
@@ -165,6 +166,16 @@ Unchanged:
 * the order of §13.
 
 Before the first AMEND2 `run`, `answers/qa.jsonl` is moved aside as described above.
+
+Pre-run checks added at the freeze (independent review NITs 2-3, procedure, no code change):
+
+* **Pi version.** The code arm's "thinking off" relies on Pi 0.99.1 internals (its default level
+  falls back to off and every request carries `reasoning_effort: "none"`). Before the first code
+  run, `pi --version` is recorded in PROGRESS and must print `0.99.1` (it did at the freeze); any
+  other version stops the code arm until a new amendment.
+* **No foreign code rows.** Before each code-runner invocation, harness `status` must show zero
+  foreign-arm rows in the raw code results; the runner itself does not check this, and
+  `ingest-code` would refuse only after the night's runs.
 
 ## Constants (override the prereg's and AMEND1's values of these keys; every other prereg ID_ pin is void)
 
@@ -180,7 +191,13 @@ CODE_RUNNER_SHA256=7fb952a10d024e3281d3a6615ea38275671fb540e023ac89c20f6e12f8017
 ## Freeze record
 
 * Written by the build agent (Claude) under D-166. The code commit was also written by Claude, not
-  by Codex. That is a disclosed D-66 deviation.
-* **Not frozen.** The coordinator freezes it after an independent review. The sidecar will hold
-  the sha256 of these bytes and `frozen_utc` from `date -u`. A byte-identical 0444 copy goes to
+  by Codex; under D-137 (Codex unavailable, builds go to Claude agents) that is the standing rule,
+  not a deviation.
+* Independent review of d1f2c043..ad3ea4c0: PASS, no MUST or SHOULD, 4 NITs (18/18 mutants red).
+  At the freeze the coordinator changed only this document: the §6/§16 citation (NIT 4), the two
+  pre-run checks above (NITs 2-3) and this record. NIT 1 (a changelog fragment line) needs no
+  change.
+* Frozen by the coordinator. The sidecar holds the sha256 of these bytes and `frozen_utc` from
+  `date -u`. The independent freeze-guard review of the frozen bytes is commissioned by the
+  coordinator. A byte-identical 0444 copy goes to
   `requal/b2/PREREG-AMEND2.md`, and the harness checks that copy if it is present.
