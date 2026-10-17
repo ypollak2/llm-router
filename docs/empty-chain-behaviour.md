@@ -29,6 +29,32 @@ Gateway image parts (D-165 (4)), on every completion route:
 
 The newest user turn is the trailing run of role-less content parts (a bare Responses `input` part list), else the last item whose role is `user`. `tests/test_p24_empty_chain_table.py` and `tests/test_p24_capability_hard.py` pin both rows.
 
+## Filter-emptied chains (P2.4, F14)
+
+The capability filter empties a chain when every entry is KNOWN to lack what the request needs. Needs are strong signals only: vision from image parts or the host's `[Image #N]` marker, window from the irreducible tokens, tools from a real tools array (proxy) or from the agent loop itself (`execute_agent` always needs tools). The prompt-text tools regex never excludes (shadow only). An unknown capability never excludes. `tests/test_f14_capability_coverage.py` parses this table and fails if an observed behaviour differs.
+
+| door | trigger | behaviour |
+| --- | --- | --- |
+| router | every entry known to lack vision | raises_no_providers |
+| stream | every entry known to lack vision | raises_value_error |
+| hook | every entry known to lack vision | falls_through_to_claude |
+| agent | every ollama entry known to lack tools | returns_none |
+| subagent | every ollama entry known to lack tools | real_spawn |
+| sdk | every entry known to lack vision | routing_error |
+| gateway | every entry known to lack vision | http_400 |
+| route | every entry known to lack vision | http_400 |
+| proxy | tools array, every entry known to lack tools | forwarded_policy_kept |
+| local_mode | the pinned model known to lack what the request needs | forwarded_policy_kept |
+
+The extra tokens mean:
+
+- `raises_value_error`: `route_and_stream` raises `ValueError("No providers available ... Capability filter excluded: ...")` on the first iteration, before any `route.started` event (the same place its existing empty chain raises).
+- `returns_none`: `execute_agent` attempts nothing and returns `None`; its callers (auto-route, the SDK) treat `None` as they treat a failed loop.
+- `real_spawn`: subagent delegation (`_try_direct_subagent`) returns `None`, so the real subagent is spawned.
+- `forwarded_policy_kept` for `local_mode`: the pin is held to the filter as in `choose_model`; a pin the filter excludes keeps the call on Claude (`model: None`, empty `chain_head`).
+
+Native `/route` (the gateway endpoint) refuses image parts in `prompt` and the Ollama-style `images` field with the same HTTP 400 as the other gateway routes; `messages` there is history and is flattened, never refused (D-165 (4)). The zero-dependency `route_server` has no image refusal.
+
 Chains the map must not empty:
 
 | situation | behaviour |

@@ -733,16 +733,21 @@ def _note_reset(model: ModelSpec, later: list[ModelSpec], text: str,
         pass
 
 
-def _capability_filtered(prompt: str, chain: list[ModelSpec], task_type: str) -> list[ModelSpec]:
+def _capability_filtered(prompt: str, chain: list[ModelSpec], task_type: str,
+                         *, needs_tools: bool = False) -> list[ModelSpec]:
     """*chain* without the models known to lack tools, vision or window for *prompt* (P2.4).
-    Fail-open: any error leaves the chain as given."""
+    ``needs_tools`` is the explicit caller flag (the agent loop cannot run without tools),
+    a hard need unlike the prompt-text regex. Fail-open: any error leaves the chain as given."""
     try:
         from llm_router import capability_filter as cf
 
         if not chain or not cf.enabled():
             return chain
+        needs = cf.needs_from_prompt(prompt, task_type)
+        if needs_tools:
+            needs = cf.merge(needs, cf.Needs(tools=True))
         return cf.filter_chain(
-            chain, cf.needs_from_prompt(prompt, task_type),
+            chain, needs,
             key=lambda s: f"{'anthropic' if s.provider == 'claude' else s.provider}/{s.model}")
     except Exception as exc:  # noqa: BLE001
         try:
@@ -996,6 +1001,14 @@ def execute_agent(
     try:
         from llm_router.hooks.agent_loop import run_agent_loop
     except ImportError:
+        return None
+
+    # F14 (D-159): the agent loop is all tool calls, so a model KNOWN to lack tools (or
+    # vision/window for this prompt) cannot serve it. Unknown never excludes. A chain the
+    # filter empties attempts nothing and returns None: every caller (auto-route, agent-route
+    # subagent delegation, the SDK) already treats None as "fall through to Claude / raise".
+    chain = _capability_filtered(prompt, chain, "code", needs_tools=True)
+    if not chain:
         return None
 
     if project_root:

@@ -6044,6 +6044,29 @@ async def route_and_stream(
             f"{runtime_offer()}"
         )
 
+    # F14 (D-159): the same capability filter as route_and_call, same needs rules. This
+    # door has no tools array and the prompt-text tools regex is shadow only (D-165), so
+    # only a KNOWN lack of vision (the host's ``[Image #N]`` marker) or window excludes.
+    # ``system_prompt`` is never sent by this door, so it is not counted. A filter-emptied
+    # chain raises ValueError before the first event, like the empty chain above.
+    try:
+        from llm_router import capability_filter as _cf
+        _cap_excluded: list = []
+        if _cf.enabled():
+            models_to_try, _cap_excluded = _cf.filter_chain_report(
+                models_to_try, _cf.needs_from_prompt(prompt, task_type.value))
+    except Exception as _cap_err:  # noqa: BLE001 - fail-open: the chain stays as built
+        from llm_router import failopen
+        failopen.record("CHZ-FO-ROUTER-CAPABILITY-FILTER", _cap_err)
+        _cap_excluded = []
+    if not models_to_try and _cap_excluded:
+        raise ValueError(
+            f"No providers available for {task_type.value}/{profile.value}. "
+            f"Capability filter excluded: {_cf.describe(_cap_excluded)}. "
+            "Fix: remove the request's images, shorten the prompt, or connect "
+            "a model that supports them; LLM_ROUTER_CAPABILITY_ROUTING=0 turns the filter off."
+        )
+
     # ── Emit route.started event ──────────────────────────────────────────
     seq += 1
     yield {
