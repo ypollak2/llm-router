@@ -313,3 +313,13 @@ def test_unswallowed_refusal_exits_4_with_no_output(da, tmp_path, monkeypatch, w
         da.REFUSALS.clear()
     assert not out.exists()
     assert socket.getaddrinfo("127.0.0.1", 9)  # guard undone after the run
+
+
+def test_main_keeps_litellm_offline(da, monkeypatch):
+    # F30: the mcp site imports litellm, which fetches its cost map from GitHub at
+    # import unless LITELLM_LOCAL_MODEL_COST_MAP is set; the no-network guard then
+    # aborts the run. main() must set it before any site loads.
+    monkeypatch.delenv("LITELLM_LOCAL_MODEL_COST_MAP", raising=False)
+    with pytest.raises(SystemExit):
+        da.main(["--help"])
+    assert os.environ.get("LITELLM_LOCAL_MODEL_COST_MAP") == "True"
