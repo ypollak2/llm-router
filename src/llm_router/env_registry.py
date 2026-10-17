@@ -387,6 +387,9 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # row; anything else (the default, "full") = the full status line only.
     "LLM_ROUTER_STATUSLINE": ("llm_router", "hooks/statusline-command.sh", 1),
     "LLM_ROUTER_STATUSLINE_TIMING": ("llm_router", "hooks/statusline-command.sh", 1),
+    # Read by scripts/release/eval_gate.py (--skip-quality tag policy, PLAN v16 P3.2),
+    # a release script outside src/ -- hand-declared, like the other out-of-scan readers.
+    "LLM_ROUTER_RELEASE_OWNER_OVERRIDE": ("llm_router", "scripts/release/eval_gate.py", 1),
     "LLM_ROUTER_STATUSLINE_REFRESH_CMD": ("llm_router", "statusline_tick.py", 1),
     "LLM_ROUTER_STATUSLINE_SLOW_MS": ("llm_router", "statusline_refresh.py", 1),
     "LLM_ROUTER_STATUS_EVERY": ("llm_router", "hooks/status-bar-clawcode.py", 2),

@@ -427,7 +427,7 @@ async def test_floor_notes_a_floor_cause_with_the_tier_and_non_floor_notes_none(
 def test_report_floor_cause_wins_and_other_rows_keep_their_cause(tmp_path):
     import sqlite3
 
-    from llm_router import routing_report
+    from llm_router import ledger_view
 
     db = tmp_path / "usage.db"
     con = sqlite3.connect(db)
@@ -444,8 +444,7 @@ def test_report_floor_cause_wins_and_other_rows_keep_their_cause(tmp_path):
         con.execute("INSERT INTO routing_decisions VALUES (datetime('now'), 'ollama', ?, ?, 'runtime')", (sk, lr))
     con.commit()
     con.close()
-    cause = routing_report._local_by_cause(sqlite3.connect(db), {"skipped_json", "served_by_last_resort",
-                                                                   "provenance"}, "AND provenance = 'runtime'", 1)
+    cause = ledger_view.local_by_cause(ledger_view.rolling(1), db_path=db)
     assert cause["floor"] == 2 and cause["policy"] == 1 and cause["bench"] == 1 and cause["unknown"] == 1, cause
 
 

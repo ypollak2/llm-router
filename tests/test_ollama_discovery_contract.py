@@ -105,10 +105,12 @@ class TestPrecedence:
         assert "qwen2.5:7b" in mod._DISCOVERED_OLLAMA
         assert "gpt-4o" not in mod._DISCOVERED_OLLAMA
 
-    def test_empty_env_gives_non_empty_fallback(self, tmp_home: Path) -> None:
+    def test_empty_env_has_no_local_model_and_no_guessed_fallback(self, tmp_home: Path) -> None:
+        """Nothing discovered means no local model (owner rule 2026-10-17): the hook never
+        names one of its own, so local is skipped."""
         mod = _load_hook_module({}, tmp_home)
-        assert isinstance(mod.OLLAMA_MODEL, str)
-        assert mod.OLLAMA_MODEL
+        assert mod.OLLAMA_MODEL is None
+        assert mod.OLLAMA_MODELS == [] and mod.OLLAMA_CODE_MODELS == []
 
 
 class TestForbiddenValues:

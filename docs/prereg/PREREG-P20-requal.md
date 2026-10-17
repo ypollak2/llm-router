@@ -1,0 +1,693 @@
+# PREREG-P20-requal: local re-qualification with the full pack (PLAN v16 P2.0 tasks 1-5)
+
+Status: **r9 with freeze fill-ins.** This file is frozen only when `PREREG-P20-requal.sha256` exists
+beside it, an independent freeze-guard review has passed (D-122 rule: an author-written sidecar is
+void), and `scripts/check_prereg.py` reports a match. Until then `scripts/p20_requal.py` refuses every
+subcommand that writes an item, calls a model or writes a result. The one pre-freeze mode is
+`select --dry-run`, which reads the pools and prints counts only (§4). Changing any byte after the
+freeze changes the hash; a changed file is a new prereg with a later `frozen_utc`. No item has been
+selected, no model has been called and nothing has been scored under this file.
+
+r2 applied the freeze-guard review of r1 (NOT READY) and D-123 / D-123a; r3 applies the r2 review
+(NOT READY on two text fixes) and D-123b; r4 adds the pre-freeze NITs; r5 corrects the `rx` stratum
+and adds the runner disclosures and hook-free Claude calls (coordinator, 2026-10-16); r6 pins every rx
+source and fixes three text points from the r5 review; r7 (D-131) records build 1 as void, fixes the
+`rx_edit` directory mapping and the sub-agent transcript search, moves the run to `requal/b2`, and
+discloses the two ungraded rx packets and the tech-op shortfall; r8 (D-133, D-133a) corrects the tech-op
+estimate and records tech-op as NOT INFORMATIVE by design; r9 states the partial P2.0-a, the e_tech = 0
+case of T_P2, the build-2 counts and the fill-ins.
+
+## 0. Contradictions and settled points (read first)
+
+Every row is settled by D-123 (r1 defaults accepted), D-123a or D-123b (review fixes). None is open.
+
+| # | Contradiction | Settled as (applied below) |
+|---|---|---|
+| Q1 | **The LB clause dominates; n = 60 cannot show parity below ~0.95.** `eligibility.grade` uses Newcombe method 10 (independent arms). For equal local and Sonnet rates (k = round(p·n), repo `grade`, 2026-10-16), the first passing n is: p = 0.95 → 60; 0.93 → 61; 0.90 → 75 (every n ≥ 79 passes); 0.85 → 101; 0.80 → 122 (every n ≥ 124); 0.70 → 160. At n = 60 the exact equal-rate threshold is 57/60 (0.95); 56/60 (0.933) fails at LB -10.1. At **n = 120** equal rates pass only when Sonnet ≥ 97/120 (0.808); at Sonnet ≤ 96/120 (0.80) even a local model identical to Sonnet fails. The LB ≥ -10 clause dominates gap ≤ 3 pts: at n = 60 no (k_cand, k_ref) pair fails on the gap alone; at n = 120, 16 pairs do (8 at low rates with Sonnet 4-9/120, 8 at high rates with Sonnet 115-120/120). At very low k, equal counts also grade `eligible` (k ≤ 23 at n = 120, k ≤ 3 at n = 60), so the equal-rate threshold is taken in the upper region only (k ≥ n/2, §8) and `powered` means Sonnet ≥ that threshold. | D-123: **N = 120** target for Q&A and tech-op (60 is the floor); code takes all valid items (expected 75). D-123a(d): a set whose Sonnet rate is below the equal-rate threshold at its realised n is **INCONCLUSIVE** (power-limited), not evidence of ineligibility (§10). `grade` is unchanged; it is the one rule (P2.0-b). |
+| Q2 | D-99 is "for G1 only"; the brief said "synthetic/held-out per D-99". | D-123: the plan's real sources, replayed **offline** (like D-52 / D-106), prompt-derived data 0600 under `$REQ`. Generated items form a labelled stratum. Nothing is labelled `synthetic (D-99)`. |
+| Q3 | The plan names `$PP/v16/requal/PREREG.md` (0444); repo convention is `docs/prereg/` + `.sha256`. | D-123: the repo file is canonical. At the freeze a byte-identical 0444 copy goes to `$REQ/PREREG.md`; the harness refuses if that copy exists and differs. |
+| Q4 | The plan names `resolver/profile.py`; `grade()` merged as `src/llm_router/eligibility.py` (#484). | D-123: `llm_router.eligibility.grade` is the rule. |
+| Q5 | "`record_competence` is the only writer"; it did not exist. `record_fitness` writes only `{model}.fitness`. | D-123: `record_competence` is added to `resolver/eligibility_store` (same lock, keeps `fitness`). It refuses a lane whose stored grade differs from `grade(lane)`. |
+| Q6 | Code set: bench_v2 (55 noncloud hidden-test tasks; never run; no Sonnet arm) + 4 eligible ctxfid code items = 59 < 60, and the rule needs a Sonnet rate. | D-123: code = noncloud 55 + the 20 [RX] `fixtures/edit-*` tasks = 75, hidden tests, local pinned runner, Sonnet arm added; ctxfid dropped (a different, judge-graded truth). |
+| Q7 | Tech-op "agreement with Sonnet" gives Sonnet 100% by definition; `claude -p` cannot take tool schemas. | D-123: every arm (Sonnet included) is graded by the same blind judge; agreement is computed as in P2.1-a and printed, never gating. One text tool protocol for all arms. |
+| Q8 | The output is per (task_type, tier), but 120 items per set cannot give 60 per tier. | Q&A and tech-op items with a complex tier are excluded (tier provenance per set, §4). The pooled set verdict is written to tiers `simple` and `moderate` (`basis: pooled_simple_moderate`); per-tier rates are printed only; `complex` / `deep_reasoning` are never written (absent = `unknown`). |
+| Q9 | Installed models beyond the plan's three; `qwen3.5:latest` listed under two IDs. | D-123: the three plan models (§3). `qwen3.8-uncensored:latest` excluded (not the plan's qwen3.8, which needs an approved Ollama upgrade). `nimble:9b` excluded (`/api/show` capabilities `["decision"]` only; not adopted, D-119). Classifier, runner-alias and embedding models excluded. qwen3.5 pins both IDs; the ambiguity is disclosed. |
+| Q10 | T_P2 inputs: GE1 gives only a bound s_tech ∈ [1/45, 24/45]; post-deploy census n = 0; the P1.1-estimator f_fit re-run is not done. | D-123 / D-123a(b, g): §11. s_tech and f_fit are measured on the same non-complex tech-op population as e_tech. The **gating** T_P2 uses the conservative s_tech = 1/45 unless an informative census exists; 24/45 is printed only. |
+| Q11 | Spend. The plan budgets **P2.0 ≤ $10** (§5 effort table); this design needs more. | D-123 / D-123a(f): harness model calls are capped at **$60** via `claude -p` (subscription, quota-gated). **Disclosed deviation from the plan's ≤ $10.** The code runner is local and $0; its Sonnet runs go through `claude -p` and count against the same $60 ledger. Any paid external runner is an owner gate. The quota pause reads `usage.json` read-only, the same exception D-110 gave P1.7-d (disclosed). |
+| Q12 | GT-500 held-out was used for the classifier family (P1.6-g, P1.7-d group G). | Rule 3 is per candidate family; local answerers are a new family. After this run the Q&A items are spent for local answerers; P3.2 needs fresh items. |
+| Q13 | Kill vs power. The plan kills P2.1 / P2.10 when no local model is eligible for any class. | D-123a(d) / D-123b: §10 — the kill is scoped **by class**: P2.1 is cancelled only by an informative, powered tech_op set in which every graded lane failed; P2.10 only by such a qa set; code results alone never kill; an inconclusive / NI class cancels nothing (re-prereg). P2.1 still needs ≥ 1 eligible tech-op model. |
+| Q14 | Fitness pass marks are "fixed" by P2.0-a; `fitness.PASS_MARKS` is frozen empty in code (#487). | §12 fixes them; the code change follows the freeze in its own PR. |
+| Q15 | An Opus judge grades Sonnet and Haiku (same vendor) against local models. | Opus judge, blind letters, two plant kinds, an order re-judge sample (§7). Disclosed (§16): conservative for eligibility, but it can cause a false kill. |
+| Q16 | D-21 is per (task_type, tier); the Q&A set pools the QA task types. | D-123a(c): a Q&A task type is re-enabled only if it has **≥ 20 items** in the graded set **and** the pooled lane is eligible; otherwise it stays stripped (§10). |
+
+## 1. Authority
+
+* PLAN-v16 P2.0 tasks 1-5, MUST P2.0-a; P2.0-b is met by #484 (`grade`).
+* **P2.0-a is PARTIAL (owner-visible deviation under D-27).** This run gives the eligibility
+  matrix for `qa` and `code` only. The `tech_op` matrix is deferred to follow-up F3 (§4), so the
+  plan's P2.1 precondition (an eligible tech-op model) cannot hold yet.
+* D-21 (recorded default), as refined by D-123a(c).
+* D-29 = A: point gap ≤ 3 pts at n ≥ 60, Newcombe LB ≥ -10, CI printed. §1.4 rules 1-4, 8, 9, 10.
+* D-27 = A: the gate uses T_P2 even below 20%; the inputs go to the owner first.
+* D-22: the catalog takes quality scores only from P2.0 / fitness.
+* L13 (single Ollama slot, quiet machine, night windows).
+* G1 passed by D-121. D-123, D-123a.
+
+## 2. Question and decision rule
+
+For each local model m in §3 and each set s ∈ {`qa`, `tech_op`, `code`}: is m's acceptable rate on s
+within 3 points of Sonnet's on the same items?
+
+* **Rule:** `llm_router.eligibility.grade({"k_cand": k_m, "n_cand": n, "k_ref": k_sonnet, "n_ref": n})`.
+  `eligible` iff n ≥ 60 and gap_pts ≤ 3.0 and lb_pts ≥ -10.0 (Newcombe method 10, inclusive,
+  unrounded); `failed` at n ≥ 60 otherwise; `probe` at 0 < n < 60; `unknown` at n = 0.
+* **Paired n (qa, tech_op):** the selected items that have a final reference verdict (§8). A local
+  answer that errored, timed out or was empty after its retry is **unacceptable**: a failed serve
+  is a failed offload.
+* **Paired n (code):** per lane, the tasks where both the local arm and Sonnet have a non-null
+  `hidden_pass` (§7).
+* The **verdict** of a lane (§10) adds set-level power and informativeness to the grade.
+* Haiku is graded against Sonnet the same way, **report only**; it is never written to
+  `local_eligibility.json`.
+
+## 3. Models (arms)
+
+| Arm | Sets | Identity pin (checked before every `run`; mismatch = refuse, not a result) |
+|---|---|---|
+| `qwen3.6:35b-a3b-coding` | qa, tech_op, code | `ollama list` ID `017eda0b7c34`; `/api/show` gguf / Q4_K_M / llamacpp / 35.5B |
+| `qwen3-coder:30b` | qa, tech_op, code | `ollama list` ID `06c1097efce0`; `/api/show` gguf / Q4_K_M / 30.5B (no runner field) |
+| `qwen3.5:latest` | qa, tech_op | `ollama list` IDs {`2e16a80fe3d7`, `44a38603922e`}; `/api/show` gguf / Q4_K_M / llamacpp / 9.7B |
+| `sonnet` (reference) | qa, tech_op, code | `claude -p --model <CLAUDE_SONNET_ID>` (fill-in: the full model id); a call whose served model differs is an error |
+| `haiku` (report only) | qa, tech_op | `claude -p --model <CLAUDE_HAIKU_ID>` (fill-in), same check |
+| `opus` (judge) | qa, tech_op | `claude -p --model <CLAUDE_OPUS_ID>` (fill-in), same check |
+
+* qwen3.5 is left out of code: plan M3.5 benches the two coder models, and the [LA] priors for the
+  9.7B model are weak. Its code lane stays absent (= `unknown`).
+* Local options: `num_ctx = local_models.num_ctx(model)` (32,768 for all three today), temperature
+  0, `keep_alive` 10m. One heavy model is resident at a time (L13). The harness runs arm-major and
+  unloads only its **own** model (`keep_alive: 0`) after the arm. It never unloads or loads around
+  a model another job holds.
+
+## 4. Sets and item sources
+
+Items are prompt-derived. They live only under `~/.rsi/research/primary-plan/v16/requal/`
+(directories 0700, files 0600). The run directory is **`$REQ = ~/.rsi/research/primary-plan/v16/requal/b2/`**
+(build 2).
+
+**Build 1 is void (D-131).** Build 1 ran on 2026-10-16T13:10Z into `requal/pools/`. Its outputs are
+kept, never overwritten or reused. It had two defects:
+* **Builder path bug.** All 20 `rx_edit` tasks were dropped as `fixture_missing`, because the
+  fixtures manifest's `name` (e.g. `clamp`) is not the directory name (`edit-00-clamp`).
+* **Transcript search too narrow.** Tech-op steps were looked up only in the session's main
+  transcript, so `msg_not_found` hit 288 steps. A counts-only id check found some of those
+  response ids in the session's sub-agent transcripts.
+
+Build 2 uses the fixed builder (below), and its outputs and fill-ins supersede build 1's. Nothing
+from build 1 was selected, run or scored. A pre-freeze **build step** (read-only, run by a sub-agent, like
+D-107 c) writes one pool file per set plus `$REQ/pools/build_manifest.json`. The manifest holds the
+sha256 of every source the pools were built from: the [RX] packet file
+(`p2b_work/packets.jsonl` = `RX_PACKETS_SHA256`), `p2b_work/grades_grader1.jsonl`, `corpus.jsonl`,
+`real_corpus.jsonl`, `results_p2b_qwen38.md` (explanatory only: no pool field is read from it, but
+its pin is kept), `fixtures/manifest.json`, the `fixtures/edit-*` tree hash, `split.json`, `manifest.json`, `task_ids.json`, `census.py`, the
+`proxy_calls.jsonl` copy, each transcript file, and the secret-guard pattern list. The
+repo-external sources are also pinned in the constants block, and `select` refuses if the manifest
+disagrees with **any** of them (D-123b). From `grades_grader1.jsonl` only `packet_id` (membership)
+is read; `kind` and `task_type` come from `packets.jsonl`; verdict and reason fields are never
+read. The fixtures tree hash is the sha256 of the lines `relpath \0 sha256(file) \n`,
+sorted by path, over every file under `fixtures/edit-*` (paths relative to `fixtures/`, skipping
+`__pycache__`, dot-directories and `*.pyc`; 80 files on 2026-10-16). The pool sha256 values, the per-stratum pool counts and the realised N per set are freeze
+fill-ins. The build step reads no `~/.llm-router` file except a copy of `proxy_calls.jsonl` (its
+sha256 is a fill-in) and never writes there.
+
+| Set | Pool `$REQ/pools/<set>.jsonl` | Tier provenance | Filters | N |
+|---|---|---|---|---|
+| `qa` | Stratum `rx`: the [RX] p2b packets (`routing-experiment-2026-10-01/p2b_work/packets.jsonl`) graded by grader1 (`grades_grader1.jsonl`) with kind main and task_type in `QA_TASK_TYPES` (30 real + 20 gen on 2026-10-16; the [RX] "37" of `results_p2b_qwen38.md` is the real set incl. 7 code items, which are excluded). Request and context come from `corpus.jsonl` by `ref_id`. Stratum `gt`: GE3 held-out ids from `gt500/split.json` (sha256 `8921a154…405b`, 234 ids), `kind == organic`, whose task class by the router's rules classifier at REPO_SHA is in `qa_policy.QA_TASK_TYPES`. | `rx`: the packet's `complexity` field. `gt`: `gt500/manifest.json` (sha256 `453ad8bd…4cc`) `tier_opus`: haiku → simple, sonnet → moderate, opus → complex. | drop `complex`; drop missing tier (`no_tier`); drop < 4 words (trivial acks, the [M013] lesson); drop requests matching the engine secret guard at REPO_SHA (`secret_pattern`) | **120** target, ≥ 60 |
+| `tech_op` | Organic continuation steps from 2026-09-28T00:00Z (GE1 v0 start) to the build time (recorded in the manifest), in the `proxy_calls.jsonl` copy, that GE1 `census.py` (sha256 `03941a4f9a8f49526eacd3ab3d116602da9a3667b2ec10c04c8f4e531d7c289a`) classifies as `technical_op`. The request body is rebuilt from the session transcript up to that step: messages, the latest human ask, and tool names with one-line descriptions. The manifest lists each transcript file's sha256; its own sha256 is a fill-in. | The ledger row's `tier_complexity` (simple / moderate; complex and deep_reasoning → complex). | drop `complex`; drop missing tier; drop steps whose transcript cannot be found or rebuilt (by reason); drop secret-pattern hits | **120** target, ≥ 60 |
+| `code` | Stratum `noncloud`: the 55 tasks of `classifier-v2-release/ab/work/noncloud/task_ids.json` (sha256 `e493f84f…2638`), hidden tests. Stratum `rx_edit`: the 20 `routing-experiment-2026-10-01/fixtures/edit-*` tasks, hidden tests. | `noncloud`: the [NC] truth tier of the task (`unlabelled` if absent). `rx_edit`: `unlabelled`. Code items are **not** filtered by tier (bench design fixed); the pooled code lane may include complex-tier tasks, which biases against local (§16). | a task the runner cannot check out at its base is dropped (by reason) | **all** (75), ≥ 60 |
+
+**Pool row fields.** Every row has `id`, `set`, `stratum`, `source` (`real` or `gen`), `session`,
+`tier` (`simple` / `moderate` / `complex` / `unlabelled`) and `task_type`. Q&A rows add `request`
+and `context`; tech-op rows add `request`, `messages` and `tools`; code rows add `task_ref` only
+(the runner owns the code). **Sessions:** a `gt` or `tech_op` row uses its real session id. A real
+`rx` row uses `_orig_session_id` from `real_corpus.jsonl` by `ref_id` (19 sessions, ≤ 5 items each
+on 2026-10-16; `rx-real` if absent). Every generated `rx` row uses the single session `rx-gen` (one
+generation run), so the session cap bounds them. A code row
+uses its stratum name as the session (the cap does not apply to code).
+
+**Build 2 fixes (builder, before the freeze).**
+* **`rx_edit` directory.** It is `fixtures/edit-<idx:02d>-<name>`, and it must equal the basename of
+  the manifest's `path`; `test` must be a relative `tests/….py` path. On 2026-10-16 all 20 manifest
+  rows pass, so code n is expected to be 75. The runner reads `module`, `func` and `summary` from
+  the pinned manifest by `idx` and `name`; the pool carries no task text.
+* **Tech-op rebuild.** The rebuild searches the session's main transcript first, then its sub-agent
+  transcripts (`<project>/<session>/**/*.jsonl`). Every file read is pinned in the build manifest.
+
+**Two `rx` packets are ungraded, and their exclusion is not outcome-driven.**
+* The build counts 52 main Q&A packets, of which 50 were graded by grader1.
+* The two ungraded ones (1 real/complex, 1 gen/simple) are in the tail of 7 packets that grader1
+  never reached: its log ends `GRADER1 STOP at cap: cum=$4.9008 + est $0.1221 > $5.00`.
+* Grader1's log never names either packet, so no grade of theirs existed to select on. Both were
+  graded by grader2, which is not read here.
+* The complex one would be dropped by the tier filter anyway, so the exclusion removes one item
+  that would otherwise be eligible.
+
+**Tech-op is NOT INFORMATIVE by design (D-131, D-133, D-133a; stated before selection).**
+All estimates below are counts only, from ledger metadata plus response-id lookups in
+transcripts; no text was read.
+* **Build 1** gave a tech-op pool of 15 and n = 1. **Build 2** (`requal/b2`, 2026-10-16T13:23Z)
+  also gave a pool of 15 and a realised n of **1** (14 `no_tier`). Its build exclusions:
+  not_organic 23,372; not_continuation 14,415; not_technical_op 3,813; bash_unresolved 3,613;
+  msg_not_found 288; not_main_thread 95; secret_pattern 1.
+* **Organic, row-stamp rule** (kept by D-133a). The builder admits rows whose ledger
+  `session_kind` stamp is `organic`.
+  * About 11 steps was a pre-build, pre-cap, row-stamp estimate.
+  * Build 2 gives 1. The sub-agent search found no extra step, because the transcript parser
+    drops `isSidechain` entries, and every entry of a sub-agent transcript is a sidechain entry.
+  * This builder defect affects only the not-informative tech-op set. It is left unfixed in the
+    frozen code, disclosed here, and deferred to F3.
+* **Organic, census-exact rule.** Resolving kinds the way GE1 `census.py` does (`KindIndex` over the
+  backfill, the overrides and the per-session tag files) admits about **1** step. The row-stamp
+  rule therefore differs from the census population by about 10 rows, which census resolves to
+  research. No decision depends on this difference, because tech-op is not informative under
+  either rule.
+* **Untagged sessions** (`session_kind` null; the D-133 `untagged_census` stratum). All of them
+  resolve to research under census's `KindIndex`, so the stratum admits **0** and is not added.
+* **Non-organic main-thread steps** (headless, research, harness; D-131 b). Every such row lacks
+  `tier_complexity`, so it is `no_tier` and the stratum admits **0**. It is not added.
+* **Unexplained `msg_id` loss.** For 301 untagged and 147 organic tech-op steps, the session's
+  transcript exists but the proxy's response `msg_id` appears in neither the main transcript nor
+  any sub-agent transcript. The cause is unknown.
+* **`is_main_thread` is unreliable.** Of the organic-stamped tech-op rows flagged
+  `is_main_thread = true`, 27 have their response id only in a sub-agent transcript. The flag is
+  used only to drop rows flagged `false`.
+* **Consequence.** Tech-op n is far below 60, so the set is NOT INFORMATIVE by design. P2.1 waits;
+  there is no kill and no P2.1 cancellation. Q&A (dry-run n 118) and code (expected n 75) proceed.
+  The T_P2 tech-op lever is 0 for now (e_tech = 0, §11). The expected consequence is
+  T_P2 < 20%, which goes to the owner under D-27.
+* **Follow-up F3.** First make the proxy ledger record `tier_complexity` on continuation steps and
+  stamp session kinds at write time. Then write a separate tech-op requalification prereg.
+
+**Selection** (`select`, once). Rows are ordered by `sha256("20261016:" + id)`, with stratum `rx`
+first for `qa`. The walk admits a row unless its session already holds `floor(0.20 × N_target)`
+admitted rows (24 at N = 120), and stops at N_target. Code admits every valid row. `select` refuses
+if the realised n of any set differs from its `N_REALISED_<SET>` fill-in (computed by
+`select --dry-run` before the freeze). A set with n < 60 is **NOT INFORMATIVE** (terminal for that
+set). Excluded counts are printed by reason; no text is printed.
+
+**Leakage and prior outcomes (stated before any data).**
+* No local model, prompt template or pack setting is tuned on any item here. Local weights are
+  vendor weights. The pack builder (P1.1) was evaluated on its own synthetic set (PREREG-P11B).
+* GT-500 held-out prompts were seen by **classifiers** (P1.6-g held-out, P1.7-d group G), never by
+  an answering model's tuning. Their Opus-rubric tier labels are known in aggregate.
+* `rx` items have **known prior outcomes** only in part: the [RX] 4/37 (qwen3.8 at the time) vs
+  34/37 (Sonnet) cover the 37 real [RX] items, of which 7 code items are excluded here, and none of
+  the 20 gen items. They are not this stratum's own result. Code
+  `noncloud` tasks have known prior outcomes: qwen3-coder:30b 12/34 on Haiku-truth tasks [NC], and
+  Codex gpt-5.5 25/55. Strata are printed separately.
+* Tech-op items come from the same ledger window that feeds the census inputs s_tech and f_fit
+  (§11). Those inputs are shares of the population, not quality, so the overlap does not leak a
+  label. e_tech is measured on the items only.
+
+## 5. Context: PACK (P1.1)
+
+Every arm gets the context its live door would give it. Q&A: `context_pack.build_pack(request,
+context=<item context>, door="mcp", project="", target_window=W)`. Tech-op: `build_pack(request,
+messages=<rebuilt messages>, door="proxy", project="", query=<latest human ask>, target_window=W)`.
+W = `local_models.num_ctx(model)` for local arms and 65,536 for Claude arms (D-101 cap). Local arms
+receive `to_messages(pack)` through Ollama `/api/chat`. Claude arms receive the same messages
+flattened into one prompt (`### system`, `### user`, `### assistant` headers) on **stdin**. This is
+live-faithful, so Claude arms may see more context than local arms (§16).
+
+## 6. Arm protocol
+
+* **Q&A:** the request is answered as the next assistant turn.
+* **Tech-op (text protocol):** the prompt lists the tools and asks for exactly one JSON object:
+  `{"tool": <name>, "input": {...}}` for the next action, or `{"final": <text>}` if the request is
+  already satisfied. The proposed action is judged; it is **not executed** (§16).
+* **Timeouts:** local 180 s, Claude 300 s. **Retry:** one retry after an error, timeout, empty
+  reply or served-model mismatch. The last attempt is final; every attempt is kept.
+* **Warm-up:** one discarded synthetic call per local model before its first item, and on every
+  resume.
+* **Every `claude -p` call** (the Sonnet and Haiku arms, the Opus judge, the Sonnet code arm and the
+  model-id probes) runs **without Claude Code hooks or user customisation**:
+  * `--safe-mode` (Claude Code 2.1.299 `--help`: hooks, CLAUDE.md, skills, plugins and MCP servers
+    disabled; auth, model selection and built-in tools work normally);
+  * plus `--settings <run-dir>/claude_settings.json` holding `{"disableAllHooks": true}` (a setting
+    key present in the 2.1.299 build);
+  * with `ANTHROPIC_BASE_URL` removed from the child environment, so the call goes straight to
+    Anthropic and not through the llm-router proxy on :8787, which could re-tier it or write ledger
+    rows.
+  * with `ANTHROPIC_API_KEY` removed from the child environment too (subscription OAuth only); the
+    harness asserts that neither variable is present in a child environment.
+  * `--bare` is not used: it reads only `ANTHROPIC_API_KEY`, not the subscription OAuth.
+  * So the user's llm-router hooks and proxy cannot route, draft or alter a reference or judge
+    call, or add organic rows. Children also carry `LLM_ROUTER_SESSION_KIND=research` (rule 8),
+    run in a scratch cwd with the real HOME (auth only), and Q&A / tech-op / judge calls run with
+    tools disabled.
+* **Code:** a **local, $0** runner pinned by sha256 (`CODE_RUNNER_SHA256`). The runner also pins
+  the Pi agent version, its prompt (`run_codex.build_prompt` + `TEST_CONTRACT`) and the Claude
+  invocation. It runs each (task, arm) in a clean checkout: Pi agent for local arms (as [NC] /
+  M3.5) and `claude -p --model <CLAUDE_SONNET_ID>` with tools for Sonnet (hooks disabled as above).
+  The cap is **900 s**, and a model timeout is a fail ([NC] used 420 s; no "timeout but pass"). It
+  uses
+  the same quiet gate and night window (§13), and it appends its Claude costs to `$REQ/ledger.jsonl`
+  (stage `code`) under the same $60 guard. It writes one row per (task, arm): `{task_id, arm,
+  hidden_pass: true|false|null, wall_s, timed_out, patch_empty, ts}`. `hidden_pass = null` is
+  reserved for **infrastructure** errors: checkout failure, runner crash, Ollama or CLI
+  unreachable. A model timeout, an empty patch or a failing test is `false`. The harness only
+  ingests these rows; it never executes model output.
+* **Runner details (disclosed):**
+  * `rx_edit` fixtures keep their tests inside the fixture tree, so the runner moves `tests/` out of
+    the work copy while the agent runs and restores it, replacing anything the agent wrote there,
+    for grading.
+  * The `rx_edit` task text lives in `fixtures/manifest.json`, outside the pinned tree hash; it is
+    pinned through `build_manifest.json`, and the runner checks that sha256 before the first task.
+  * Noncloud runs reuse [NC]'s `run_codex.make_wt` / `grade_all`, which write worktrees and junit
+    files under the noncloud research directory (tag `p20_<arm>`), outside `$REQ`. No text is
+    printed.
+  * `TEST_CONTRACT` is read from `tool-layer/phase_d/amend3/run_codex_tc_v2.py` by AST
+    literal-evaluation (the file is never imported or executed), and that file's sha256 is
+    recorded in every runner row.
+
+## 7. Grading
+
+* **Judge (qa, tech_op):** one call per item to the Opus judge. It sees the request, the context
+  (cut to the last 24,000 characters) and every arm's final answer. Each answer is capped at 4,000
+  characters after `<think>` blocks are removed; the number of truncated answers per arm is
+  reported. Letters are assigned by sorting candidates on `sha256("20261016:" + item_id + ":" +
+  name)`. Arm names are never shown.
+* **Brief, Q&A:** an answer is *acceptable* if a competent senior engineer would accept it as the
+  reply without asking again: it is correct, it addresses the actual ask, and it suggests nothing
+  destructive. Length and style do not count.
+* **Brief, tech-op:** a next action is *acceptable* if it is a reasonable next step toward the
+  request given the conversation. A different but reasonable tool or argument is acceptable. A
+  `final` is acceptable only if the request is already satisfied.
+* **Reply:** JSON `{"<letter>": "acceptable" | "unacceptable", ...}` covering every letter. An
+  invalid reply is retried once. Still invalid: the item is a judge error, and it leaves n for every
+  arm.
+* Errored local answers are not shown to the judge. They are unacceptable (§2).
+* **Plants (calibration), per set.** The **plant order** sorts the selected items by
+  `sha256("20261016:plant:" + id)`.
+  * *Swapped:* the item at plant-order index j (j = 0-5) gets one extra candidate, the Sonnet final
+    answer of the item at index (j + 1) mod 6. A swapped plant is skipped (and counted) when that
+    source answer is not ok.
+  * *Degraded, tech-op:* the items at plant-order indices 6-11 (fixed, regardless of length) get
+    one extra candidate, `{"final": "Done."}`.
+  * *Degraded, Q&A:* from index 6 onward, the first 6 items whose own Sonnet final answer is ok and
+    ≥ 400 characters get one extra candidate: the first 20% of that answer's characters. If only
+    m < 6 items in the set qualify, m plants are placed.
+  * **Pass rule, per plant kind:** with m plants placed (m ≤ 6), at least **ceil(5/6 · m)** must be
+    judged unacceptable (m = 6 or 5 → 5; m = 4 → 4). The set is NOT INFORMATIVE (`calibration`) if
+    either kind fails its pass rule or places m < 4 plants.
+  * The pass rule and the m < 4 floor apply to **swapped plants too** (a swapped plant is skipped
+    when its source answer is not ok). This extends D-123b, which states the rule for Q&A degraded
+    plants only, and it is never more lenient.
+  * **Plants never change n.** The item that carries a plant and the item whose Sonnet answer
+    sourced it both stay in n; their real arms keep their own verdicts. A plant verdict is used
+    only for the pass rule. A plant shares the judge call with the real candidates (§16).
+* **Order re-judge (report only):** 10% of selected items (the first ceil(0.10 · n) in
+  `sha256("20261016:rejudge:" + id)` order) are judged a second time with letters from
+  `sha256("20261016:perm2:" + item_id + ":" + name)`. The report prints the per-(item, arm)
+  agreement k/n. Below 0.80 it is flagged `judge_order_sensitive` in the result; it does not gate.
+* **Agreement (tech-op, printed, never gating; P2.1-a definition):** a local action agrees with
+  Sonnet's when both are tool calls with the same tool name **and** the same normalised target.
+  The target is the first present of `file_path` / `path` (`os.path.normpath`), `pattern`
+  (stripped), or `command` (whitespace collapsed). Both `final` counts as agreement.
+* **Code:** `hidden_pass == true` is acceptable, `false` is unacceptable. A `null` for either arm
+  removes the task from that lane's pairs. A lane with null-removed tasks above 10% of the selected
+  code tasks is NOT INFORMATIVE. Removed counts are printed per arm.
+
+## 8. Metrics and statistics
+
+Per (set, arm), the report prints: k, n, the rate with its Wilson 95% CI, and the per-stratum and
+per-tier breakdown. Per (set, local model vs Sonnet), it prints:
+* gap_pts and the Newcombe method-10 CI (the gating LB);
+* the exact two-sided McNemar p on discordant pairs (b, c), and the discordant rate d = (b + c) / n;
+* the n implied for a 3-pt paired half-width (1.96² × d / 0.03², rule 9);
+* the equal-rate threshold at the lane's **final paired n**: the smallest k in [ceil(n/2), n] such
+  that equal counts (k, n, k, n) grade `eligible` for k and for every larger k. The search is
+  restricted to the upper region because equal counts at very low k also grade `eligible` (§0 Q1).
+  It prints whether Sonnet's k reaches it (`powered`), and `grade`;
+* for Q&A, each local rate against the [M013] baseline **7/22** with its Newcombe CI (descriptive;
+  not part of the rule);
+* for tech-op, agreement with Sonnet (k/n).
+
+Every check prints the number of items it checked. A qa / tech_op set with reference-missing items
+(Sonnet final not ok, or judge error) above 10% of selected is NOT INFORMATIVE (`ref_missing`).
+
+## 9. Outputs
+
+* `$REQ/result.json` (0600): every number in §8, the lane verdicts, the kill flag, the D-21 table,
+  the e_tech candidate, the prereg sha256, the git sha and the input shas.
+* `$REQ/local_eligibility.json` (0600), written by `score` through `record_competence`. Keys are
+  bare Ollama names, as `resource_map` reads them:
+
+```json
+{"qwen3-coder:30b": {
+  "qa": {"simple": LANE, "moderate": LANE},
+  "tech_op": {"simple": LANE, "moderate": LANE},
+  "code": {"simple": LANE, "moderate": LANE},
+  "fitness": {"...": "kept as written by record_fitness"}}}
+```
+
+  `LANE = {"grade", "verdict", "eligible", "rate", "ci", "n", "k", "gap_pts", "lb_pts", "ub_pts",
+  "ref": {"model": "sonnet", "k", "n", "rate", "ci"}, "powered", "basis": "pooled_simple_moderate",
+  "source": "p2.0-requal", "prereg_sha256", "scored_utc", "population"}`. The plan's `{eligible,
+  rate, ci, n}` is a subset. `eligible` is `verdict == "eligible"`. `grade(LANE)` reproduces
+  `LANE.grade`; `record_competence` refuses otherwise, and a test checks it for every written lane.
+* `install-eligibility --confirm` merges the run's lanes into `paths.state_path("local_eligibility.json")`.
+  It runs only after `score` and after the independent recompute, and it never writes `fitness`.
+* `docs/measurements/p20-requal.json` (repo): counts, verdicts and item ids only.
+
+## 10. Verdicts, kill rule, D-21 table
+
+**Lane verdict:**
+
+| Set status | `grade` | verdict |
+|---|---|---|
+| NOT INFORMATIVE (n < 60, calibration, ref_missing, incomplete, null share) | (`unknown`, n = 0 written) | `not_informative` |
+| informative | `eligible` | `eligible` |
+| informative, Sonnet rate < equal-rate threshold at realised n (**power-limited**) | `failed` / `probe` | `inconclusive` |
+| informative, powered | `failed` | `failed` |
+
+For code, "powered" uses each lane's own paired n.
+
+* **Kill, by class (D-123b).** A set is *decisive-fail* when it is informative, it has ≥ 1 graded
+  lane, and every graded lane has verdict `failed` (so each is powered).
+  * **P2.1 is cancelled** only if the `tech_op` set is decisive-fail.
+  * **P2.10's Q&A re-enable is cancelled** only if the `qa` set is decisive-fail. Its other
+    local-first lanes (eligible code or tech-op lanes) still proceed.
+  * **Code results alone never cancel anything.** A code lane only feeds the table and the catalog.
+  * A class whose set is `not_informative` or has any `inconclusive` lane (and no `eligible` lane)
+    cancels nothing. That class gets "no decision" and a new prereg (larger n or a different
+    design) before any further run.
+  * If P2.1 is cancelled and no local lane is eligible in any set, v16 continues with Haiku /
+    very-cheap offload and D-27 is re-asked.
+* **Tech-op not informative (D-131 c).** A tech-op set with n < 60 cancels nothing; P2.1 waits
+  for a new prereg with a larger tech-op population.
+* **P2.1 needs an eligible model.** It proceeds only with ≥ 1 `eligible` tech-op lane. Without one,
+  e_tech = 0 (§11), and P2.1 local tech-op serving does not start, even when P2.1 is not cancelled
+  (no decision). P2.10 likewise re-enables only the lanes D-21 allows.
+* **D-21 table (D-123a c):** a Q&A task type t is re-enabled for local at tiers simple and moderate
+  for model m only if m's qa lane is `eligible` **and** the graded qa set holds **≥ 20 items** of
+  type t. Every other type stays stripped. The table lists each type's item count. It is reported;
+  the routing change itself is P2.10's.
+
+## 11. T_P2 and g_min
+
+Population: **non-complex technical-op steps** (tier ≠ complex by `tier_complexity`, as in the
+tech-op set), so that s_tech, f_fit and e_tech describe one population. Window **W14** = the 14
+days ending at this prereg's `frozen_utc` (absolute; `--since/--until`).
+
+```
+T_P2    = 0.8 × (s_tech × f_fit × e_tech + s_cheap)          ceiling = s_tech × f_fit × e_tech + s_cheap
+s_tech  = k/n: organic non-complex technical_op actions / all organic actions in W14 (GE1 census.py).
+          Informative iff n ≥ 60, ≥ 3 sessions and largest session ≤ 0.60.
+f_fit   = k/n: of those steps, the share whose pack fits the e_tech model's num_ctx (census re-run
+          with the P1.1 estimator, W14). Required when e_tech > 0; without it `tp2` refuses.
+e_tech  = k/n on `tech_op` of the eligible local model with the highest rate (ties: the smaller
+          model). No eligible model → 0.
+s_cheap = k/n: actions served local / very-cheap and not redone (P1.9 `kpi --json .offload.action`)
+          over the REMAINING actions in W14, i.e. all organic actions minus the non-complex
+          technical_op steps of s_tech (no double count). n = 0 → 0, flagged.
+```
+
+* **e_tech = 0 (expected for this run, §4).** The tech term is 0, f_fit is not required, and
+  T_P2 = 0.8 × s_cheap; `tp2` does not refuse for a missing `--f-fit` in that case. It flags
+  `f_fit_not_required`.
+* **Which value gates:** the gating T_P2 uses the census s_tech if it is informative. Otherwise
+  it uses the conservative **s_tech = 1/45** (GE1 v0 lower bound), flagged. The value at 24/45 is
+  printed beside it and never gates.
+* **The hashed value is the plan's formula** (D-123b). The plan adds s_cheap (a share of the
+  remaining actions) to a share of all actions, which overstates the s_cheap term by up to
+  1/(1 − s_tech). `tp2` also prints the share-of-all-actions form, **T_P2_alt** = 0.8 ×
+  (s_tech × f_fit × e_tech + (1 − s_tech) × s_cheap), with its ceiling, beside it. T_P2_alt is
+  never hashed and never gates.
+* **Baseline denominator.** P2-G-1's `s_cheap_baseline` is offload per action over **all**
+  actions (P1.9 `.offload.action`). It is not the remaining-action share used for s_cheap here.
+  `tp2` prints both, so the max(T_P2, baseline + g_min) comparison is read on the right basis.
+* All arithmetic is exact (fractions), never rounded before comparison. `tp2` implements the
+  non-complex split above: it takes the census counts restricted to non-complex technical_op steps
+  and the remaining-action counts as inputs. It records each input as k/n, the sha256 of each
+  evidence file, the flags, the gating T_P2, the 24/45 value and T_P2_alt. Its own sha256 goes to
+  `use.log`. The reviewer recomputes
+  the inputs from raw files; then the coordinator puts the `tp2.json` sha256 in PREREG-V16 /
+  PROGRESS.
+* T_P2 < 0.20 → the inputs go to the owner before P2.1 (D-27 = A: gate on T_P2). ceiling < 0.10 →
+  the release notes say that 60% has no supported path on this machine.
+* **g_min = 5.0 points**, fixed now. P2-G-1 passes only if offload ≥ max(T_P2, s_cheap_baseline +
+  0.05) **and** Newcombe LB(P2 − baseline) > 0. Reason: at P2-G-1's minimum of 300 actions per arm,
+  LB > 0 needs a gain of 1.7 / 2.0 / 2.7 / 3.3 / 4.3 / 5.0 / 5.7 points at baselines 0 / 1 / 3 / 6 /
+  15 / 24 / 30 out of 300 (computed 2026-10-16). 5 points is at or above that bar for every
+  baseline up to 24/300 (8%; today's per-call value is 0.2% [K]). It is also a quarter of the 20%
+  aspiration.
+
+## 12. Fitness pass marks (P2.8 fitness tasks)
+
+Every one of the six `resolver/fitness.TASKS` gets the mark **1.0**: `tech_step`, `summary`,
+`edit_with_test`, `json`, `hebrew_qa`, `code_explanation`. Each is one synthetic, deterministic
+smoke task, so a miss is a fail. With mark 1.0 there is **no flake margin**: one bad sample fails
+the task. Fitness never grants eligibility; it only gates onboarding recommendations (P2.8).
+
+## 13. Run rule, spend and stop
+
+* **Order:** freeze → `select` → `run --set qa` / `run --set tech_op` (arm-major) → code runner
+  (local) → `judge --set qa` / `judge --set tech_op` → `ingest-code` → `score` → independent
+  recompute → `install-eligibility` → `tp2`. `judge` refuses until every (item, arm) of its set
+  has a final answer. `run` refuses once that set's judging has started.
+* **Sets below N_MIN are skipped.** At `select`, a set whose realised n is below 60 (here
+  `tech_op`, n = 1) gets a `terminal <UTC> <set> n_min` line in `use.log`. After that, `run` and
+  `judge` on it stop with exit 4 (`terminal: <set>`) and make no model call, and `score` reports
+  it as not informative.
+* **Code identity at the run:** `git diff REPO_SHA..HEAD -- scripts/ src/ tests/` must be empty
+  when the prereg is frozen and when each subcommand runs.
+* **Night window (L13):** local arms and the code runner run only between 00:00 and 07:00 local
+  time. Outside it, `run` parks (exit 3) before any local call. Each window is logged in PROGRESS.
+* **Quiet machine (L13)**, before each local arm and on every resume:
+  * three readings 10 s apart, each with free memory ≥ 40% (`memory_pressure -Q`) and load1 < 4.0;
+  * **no foreign model resident** (`/api/ps` lists none besides the arm's own model).
+  * Failure parks the run (exit 3) and writes no row. The harness never unloads a foreign model.
+* **Quota pause** before each Claude call: session ≥ 80%, weekly ≥ 85%, or `usage.json` missing or
+  older than 30 minutes → exit 3, resumable; no call is made and nothing is consumed.
+* **Spend guard:** the sum of `total_cost_usd` in `$REQ/ledger.jsonl` (all stages, the code runner
+  included), plus an estimate of the next call (1.25 × the most expensive call so far; $0.30 for
+  the first), may not exceed **$60.00**. A stop keeps what exists. A cap stop in the middle of a
+  set leaves that set incomplete; at `score` it is NOT INFORMATIVE (`incomplete` or `ref_missing`)
+  by design. There is no partial verdict and no further tranche without a new prereg. The estimate is about $30-55:
+  240 Sonnet, 240 Haiku, 264 Opus judge calls including re-judges, and 75 Sonnet code runs.
+  Disclosed deviation from the plan's P2.0 ≤ $10 (D-123a f).
+
+## 14. Privacy
+
+* Prompt text, answers and judge replies exist only in these places:
+  * `$REQ` (0600);
+  * the HTTP body sent to `localhost:11434`;
+  * the **stdin** of the Claude children;
+  * the code runner's work copies: rx_edit work dirs under `$REQ/code_runs/`, and the noncloud
+    worktrees and junit files under the noncloud research directory (tag `p20_<arm>`, outside
+    `$REQ`).
+* Child argv carries only the model id and flags. These are visible in `ps`; no text is.
+* `ledger.jsonl`, `use.log`, `result.json` and the repo measurement file hold ids, counts and
+  hashes only. No subcommand prints text.
+* The harness writes nothing under `~/.llm-router` except through `install-eligibility`, and
+  nothing under `~/.claude`. It reads `~/.llm-router/usage.json` read-only for the quota pause.
+
+## 15. Single use
+
+`score` appends `started <UTC> prereg_sha256=… git_sha=… selection_sha256=… answers_sha256=…
+judgements_sha256=… code_sha256=…` to `$REQ/use.log` **before** it parses any input. It refuses if
+the log already holds a `started` line. A crash during `score` consumes the use. A NOT INFORMATIVE
+set appends `terminal <UTC> <set> <reason>`, which stops that set. No re-selection, no re-run of a
+final item, no re-judge (beyond the §7 order sample) and no re-score happens without a new prereg.
+
+## 16. Known biases (stated before any data)
+
+1. **Offline replay.** Warm, uncontended, with no live door latency. Not a live result.
+2. **Unequal context.** Claude arms may get a larger pack (65,536 vs 32,768). This is
+   live-faithful but not equal input.
+3. **Same-family judge.** The judge is Opus, the same vendor family as the reference; self-identifying
+   phrases are not removed.
+   * Self-preference favours Sonnet, so it is conservative for eligibility (it cannot create a
+     false `eligible`).
+   * It can push lanes to `failed` and so cause a **false kill**.
+4. **Implicit reference.** One call judges all arms together, so Sonnet's answer acts as a
+   reference inside the call. The judgement is comparative, not absolute.
+5. **Truncation.** The 4,000-character answer cap can cut a correct long answer. It is the same for
+   every arm, and truncated counts are printed.
+6. **Proposed, not executed.** The text tool protocol does not measure native tool calling, and the
+   proposed action is judged without being executed (P2.1 shadow agreement measures live steps).
+7. **Generated items.** The `rx` stratum includes generated (`gen`) items; strata are printed.
+8. **Tier labels.** These are not truth labels, and they are used only to drop complex items:
+   * GT-500 tiers are Opus-rubric labels (κ with outcome 0.096).
+   * Tech-op tiers are the router's own **decision** tier (`tier_complexity` in the proxy ledger),
+     not a truth label. A misclassified complex step can enter the set, and a simple one can be
+     dropped.
+9. **Conservative LB.** Independent Newcombe is conservative for paired arms; the paired McNemar
+   is printed beside it.
+10. **Code harness confound.** Local arms run in the Pi agent; Sonnet runs in Claude Code
+    (`claude -p`). The comparison is model + harness, not model alone. The code set also mixes
+    agentic hidden-test tasks with single-file edits, and the pooled lane may include
+    complex-tier tasks; strata and tiers are printed.
+11. **Runner errors.** Infrastructure errors (`hidden_pass = null`) are removed per task, not
+    charged to the arm. Model timeouts (900 s cap) and empty patches are charged to the arm.
+12. **Prior outcomes.** `rx` and `noncloud` outcomes are known in aggregate (§4).
+13. **Plants share the call.** A plant candidate sits in the same judge call as the real answers
+    and may shift the judge's reading of them. Its effect is not measured.
+14. **Reference arm without customisation.** Claude arms run in safe mode without hooks, CLAUDE.md
+    or MCP. This is cleaner than a user's live Claude Code turn, which has those layers, so it is
+    a reference for the model and not for the user's configured Claude Code. The Claude Code
+    default framing that `claude -p` adds is shared by the three Claude arms only; local arms get
+    the plain pack messages.
+
+## Fill-ins at the freeze (the only values that may change between draft and freeze)
+
+```text P20-CONSTANTS
+LABEL=p20-requal
+SELECT_SEED=20261016
+N_TARGET_QA=120
+N_TARGET_TECH_OP=120
+N_MIN=60
+SESSION_CAP_SHARE=0.20
+LOCAL_MODELS=qwen3.6:35b-a3b-coding,qwen3-coder:30b,qwen3.5:latest
+CODE_LOCAL_MODELS=qwen3.6:35b-a3b-coding,qwen3-coder:30b
+SIZE_ORDER=qwen3.5:latest,qwen3-coder:30b,qwen3.6:35b-a3b-coding
+REFERENCE=sonnet
+REPORT_ARMS=haiku
+JUDGE=opus
+REF_WINDOW=65536
+LOCAL_TIMEOUT_S=180
+REF_TIMEOUT_S=300
+RETRIES=1
+ANSWER_CAP_CHARS=4000
+JUDGE_CONTEXT_CAP_CHARS=24000
+PLANTS_SWAPPED=6
+PLANTS_DEGRADED=6
+PLANTS_PASS_SHARE=5/6
+PLANTS_MIN_PLACED=4
+DEGRADED_MIN_CHARS=400
+DEGRADED_KEEP_SHARE=0.20
+REJUDGE_SHARE=0.10
+REJUDGE_FLAG_BELOW=0.80
+MAX_REF_MISSING_SHARE=0.10
+QA_TYPE_MIN_ITEMS=20
+QUIET_FREE_MEM_MIN_PCT=40
+QUIET_LOAD1_MAX=4.0
+QUIET_READINGS=3
+QUIET_INTERVAL_S=10
+NIGHT_WINDOW=00:00-07:00
+QUOTA_SESSION_PAUSE_PCT=80
+QUOTA_WEEKLY_PAUSE_PCT=85
+QUOTA_MAX_AGE_S=1800
+SPEND_CAP_USD=60.00
+FIRST_CALL_EST_USD=0.30
+SAFETY_FACTOR=0.8
+G_MIN_PTS=5.0
+TP2_REPORT_BELOW=0.20
+CEILING_NOTE_BELOW=0.10
+S_TECH_MIN_N=60
+S_TECH_MIN_SESSIONS=3
+S_TECH_MAX_SESSION_SHARE=0.60
+S_TECH_FALLBACK=1/45
+S_TECH_FALLBACK_HIGH=24/45
+TIERS_WRITTEN=simple,moderate
+QA_BASELINE=7/22
+FITNESS_PASS_MARK=1.0
+ID_qwen3.6:35b-a3b-coding=017eda0b7c34
+ID_qwen3-coder:30b=06c1097efce0
+ID_qwen3.5:latest=2e16a80fe3d7,44a38603922e
+CENSUS_PY_SHA256=03941a4f9a8f49526eacd3ab3d116602da9a3667b2ec10c04c8f4e531d7c289a
+GT_SPLIT_SHA256=8921a1549e458c8e648b8070ce84a8b97a1b9f0b055c99d6e932bcbc3ca5405b
+GT_MANIFEST_SHA256=453ad8bd93782dcf4457715a37f98c20d3d234f4eded95ce988885f5a464e4cc
+NONCLOUD_TASK_IDS_SHA256=e493f84f5f5ddba32311e6f9903783982834aaff41cbbf4fcddeca4a7ee92638
+RX_PACKETS_SHA256=252a2d664b01b7c6bc7aeef1f2a2453aa57bcedef4d01cfa374dd9a854aa9ce2
+RX_RESULTS_P2B_SHA256=f25e5c7d30d18ca8debdcb3262229fd04059514d2dea292155e4983fc07b57ff
+RX_GRADES_GRADER1_SHA256=d1162590142798cc054df7696da3548a860a8a1537fcced7f18a17c812c8d79f
+RX_CORPUS_SHA256=083ea397dc8842e47c3ceca514d60dd4b6fbda11c603dcef6280c451ed9e599f
+RX_REAL_CORPUS_SHA256=0a7fd1f96c96e39362705b4ff3a1cf5537c43ade2c6684827102daa058736cf7
+RX_EDIT_FIXTURES_TREE_SHA256=7c191707ca5de5753b60a363fec6de637a563105c31aa656e75d5b252a48524f
+REPO_SHA=c643afbb9d18a4a2101b5908edee0fe5f60a880c
+CLAUDE_SONNET_ID=claude-sonnet-5-5
+CLAUDE_HAIKU_ID=claude-haiku-5-5
+CLAUDE_OPUS_ID=claude-opus-5-5
+PROXY_CALLS_COPY_SHA256=af32895bb121827c56d94fc42a4d6ff7c0dfe6d97a00e09a80875684929a8ca0
+BUILD_MANIFEST_SHA256=085b1a8f71dcb2b20bcbca95abe418aee545aa276aa9c087bffab4b7f6d7ef33
+POOL_QA_SHA256=bb4bbbfeed66a352991cc728419ffca2338903271c870835e572c5d8fc4ba2b0
+POOL_TECH_OP_SHA256=30619a610c8209f8c38449dfc12047da7f0ad1d378496dd35438c31ab99d9667
+POOL_CODE_SHA256=58132f140d78dd58d081171578b1a730fed2f6fb7401496889795a720d709737
+CODE_RUNNER_SHA256=14239fb5c76c7783aaa94a1ac6f4efe0720cc7853fc8c790a1b74e3f3f5e767e
+POOL_COUNT_QA_RX=43
+POOL_COUNT_QA_GT=169
+POOL_COUNT_TECH_OP=15
+POOL_COUNT_CODE_NONCLOUD=55
+POOL_COUNT_CODE_RX_EDIT=20
+N_REALISED_QA=118
+N_REALISED_TECH_OP=1
+N_REALISED_CODE=75
+```
+
+The harness parses this block from the frozen file. It refuses while any value reads
+`FILL-AT-FREEZE`, and it refuses if a constant differs from its own copy. Only the `FILL-AT-FREEZE`
+values may change at the freeze. **`REPO_SHA`** is the harness commit checked out for the run: the
+last pre-freeze commit, after every builder fix. Its `src/` diff against caaf8d28 is limited to
+`resolver/eligibility_store.py` (`record_competence`), and the freeze record states that diff. The build manifest (pinned) records every source sha256 listed in §4,
+including the transcript file sha256s and the secret-guard patterns. The build-step
+exclusion counts by reason are added under "What was looked at". N targets, seeds, caps, bars,
+models and g_min may not change.
+
+## What was looked at before writing (counts and metadata only)
+
+* `ollama list` and `/api/show` details (format, quantisation, runner, parameter size,
+  capabilities) for the installed models; Ollama 0.40.0.
+* GE1.json criteria (bounds and n only); `gt500/split.json` and `manifest.json` (counts, fields,
+  sha256); `ctxfid/supply.json` (counts); [RX] packet counts and fields; noncloud `task_ids.json`
+  (structure, sha256) and `summary.md` header; `proxy_calls.jsonl` `step_class` × `session_kind`
+  counts; `usage.json` field names and scale.
+* `grade` evaluated on synthetic counts for Q1, §10 and §11 (author and reviewer computations
+  agree after r2).
+* No prompt, answer or label text was read.
+* **Build 2** (`requal/b2`, until 2026-10-16T13:23:27Z; builder at 507a7510, identical builder code
+  at REPO_SHA): pool rows qa 212 (rx 43, gt 169), tech_op 15, code 75 (noncloud 55, rx_edit 20).
+  * Build exclusions: qa not_qa 11, secret_pattern 11; tech_op not_organic 23,372,
+    not_continuation 14,415, not_technical_op 3,813, bash_unresolved 3,613, msg_not_found 288,
+    not_main_thread 95, secret_pattern 1; code none.
+  * `select --dry-run`: qa n 118 (tier_complex 73, too_short 21); tech_op n 1 (no_tier 14);
+    code n 75.
+  * `rx_membership`: 52 main Q&A packets, 50 graded, difference 2 (explained in §4). 817
+    transcript files are pinned in the build manifest.
+  * The two bash wrapper scripts and the counts-only estimates were run by the coordinator or
+    the driver; outputs hold counts and sha256s only.
+
+## Freeze record
+
+* **Fill-ins** (the only values changed from the reviewed r9 text, together with this record and
+  the status line): REPO_SHA, the three Claude model ids, the proxy copy, build manifest, pool and
+  runner sha256s, the per-stratum pool counts and the realised N per set (constants block).
+* **REPO_SHA `c643afbb`** is the last code commit. `git diff caaf8d28 c643afbb -- src/` touches only
+  `src/llm_router/resolver/eligibility_store.py` (+64/−10, `record_competence`), and
+  `git diff REPO_SHA..HEAD -- scripts/ src/ tests/` is empty at the freeze commit.
+* **Model ids.** Three probe calls (`claude -p`, `--safe-mode`, `--settings {"disableAllHooks": true}`,
+  no `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY`, prompt "Reply OK", $0.0185 in total) served
+  `claude-sonnet-5-5`, `claude-haiku-5-5` and `claude-opus-5-5`.
+* **Scratch-HOME check.** In a scratch HOME, `claude --help` (2.1.299) lists `--safe-mode`, and the
+  2.1.299 build contains `disableAllHooks`.
+* **Pins recomputed at the freeze.** Every source pin equals its constant, including the fixtures
+  tree `7c191707…` (80 files), and every source sha256 in `build_manifest.json` equals its
+  constant. `ollama list` IDs equal the `ID_*` pins.
+* **Who wrote the code (D-66, D-126, D-137).**
+  * Codex: the harness, builder and runner (round 1 each).
+  * Driver (Claude), by hand: the r7 builder and runner fixes, which the freeze-guard review of r8
+    confirmed (a D-66 deviation, recorded).
+  * The local model (qwen3-coder:30b, D-126): the runner's missing-manifest-row refusal.
+  * Claude under D-137: the `tp2` e_tech = 0 change (e996e843), and a test-only fix (c643afbb).
+    The harness tests had substituted `KEY=FILL-AT-FREEZE` lines, which stop matching once the
+    real prereg carries its fill-ins. A first freeze attempt was undone for this before any commit (its
+    sidecar and 0444 copy were removed; nothing had been selected or run).
+* **Reviews (freeze-guard).**
+  * r1 and r2: NOT READY.
+  * r3: READY TO FREEZE; the r3→r4 diff was CONFIRMED.
+  * r5: three text fixes.
+  * r6: CONFIRMED.
+  * r6→r8 (including the r7 hand fixes): CONFIRMED.
+  * r9 applies the r8 review's S1, S2 and NITs.
+* The sidecar `PREREG-P20-requal.sha256` holds the sha256 of these bytes and `frozen_utc` from
+  `date -u` at the freeze commit. A byte-identical 0444 copy is `requal/b2/PREREG.md`.

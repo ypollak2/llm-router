@@ -12,8 +12,10 @@ description: |
   injects what discovery finds (config.all_ollama_models(), task-ordered by
   router._task_aware_default_order) at the front of BUDGET/BALANCED chains at route
   time. PREMIUM/REASONING get no local entry (they never had an injected one).
-  BUDGET still names ollama/qwen3.5:latest and ollama/hermes3:8b, which are subject
-  to the same drift and are filtered the same way (profiles.get_model_chain).
+  BUDGET names `ollama/@local` (the user's local model, resolved from their
+  LLM_ROUTER_OLLAMA_MODEL setting or discovered inventory by policy._resolve_chain,
+  dropped when there is none) and ollama/hermes3:8b, which is subject to the same
+  drift and is filtered the same way (profiles.get_model_chain).
 
   Codex (F22): every codex/* entry names a model the Codex CLI accepts
   (codex_agent._load_codex_models). gpt-4o-mini and gpt-4o were listed here and
@@ -32,7 +34,7 @@ prefer_ollama: true
 # single source of truth at read time. Test enforces these match the
 # corresponding chains entries.
 workhorses:
-  - ollama/qwen3.5:latest
+  - ollama/@local
   - codex/gpt-5.5
   - moonshot/moonshot-v1-128k
   - zhipu/glm-4
@@ -55,7 +57,7 @@ specialists: {}
 chains:
   budget:
     query:
-      - ollama/qwen3.5:latest
+      - ollama/@local
       - ollama/hermes3:8b
       - codex/gpt-5.5
       - moonshot/moonshot-v1-8k
@@ -108,7 +110,7 @@ chains:
 
   balanced:
     query:
-      - ollama/qwen3.5:latest
+      - ollama/@local
       - codex/gpt-5.5
       - moonshot/moonshot-v1-128k
       - zhipu/glm-4

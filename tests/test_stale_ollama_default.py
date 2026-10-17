@@ -34,6 +34,11 @@ from llm_router.types import Complexity, RoutingProfile, TaskType
 GOLDEN = Path(__file__).parent / "fixtures" / "stale_ollama_chains_base.json"
 FAKE_CACHE = ["ollama/qwen3-coder:30b", "ollama/qwen3.8", "ollama/nimble:9b"]
 STALE = "ollama/qwen3:32b"
+# The standard policy's BUDGET/query chain used to name this model literally. It now names the
+# dynamic ``ollama/@local`` token (the user's discovered model), which is dropped when the
+# policy loads with nothing discovered, so the literal is gone from the dynamic chains too.
+NAMED_LOCAL = "ollama/qwen3.5:latest"
+_GONE = (STALE, NAMED_LOCAL)
 _PROFILES = (
     RoutingProfile.BUDGET, RoutingProfile.BALANCED,
     RoutingProfile.PREMIUM, RoutingProfile.REASONING,
@@ -91,7 +96,7 @@ def _expected_from_base(base: dict) -> dict:
     exp = json.loads(json.dumps(base))
     for mode in exp:
         for key, chain in exp[mode].items():
-            exp[mode][key] = [m for m in chain if m != STALE]
+            exp[mode][key] = [m for m in chain if m not in _GONE]
     return exp
 
 
@@ -128,7 +133,8 @@ async def test_the_difference_from_base_is_exactly_the_stale_entry(fake_local):
     changed = {
         f"{mode}:{k}" for mode in base for k in base[mode] if base[mode][k] != got[mode][k]
     }
-    carried = {f"{mode}:{k}" for mode in base for k, c in base[mode].items() if STALE in c}
+    carried = {f"{mode}:{k}" for mode in base for k, c in base[mode].items()
+               if any(g in c for g in _GONE)}
     assert carried, "golden must show the stale entry on base, or this proves nothing"
     assert changed == carried
     assert all(STALE not in c for mode in got for c in got[mode].values())

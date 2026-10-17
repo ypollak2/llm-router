@@ -10,7 +10,11 @@
 #
 # --skip-quality is forwarded to step 12 (the answer-quality bench). It is
 # NOT a way to skip step 11 (the classifier regression gate) -- that one runs
-# offline with no model calls and has no reason to ever be skipped.
+# offline with no model calls and has no reason to ever be skipped. On a tag
+# (GITHUB_REF is refs/tags/*, or HEAD is tagged) it is REFUSED unless
+# LLM_ROUTER_RELEASE_OWNER_OVERRIDE=1; off a tag it is allowed and logged
+# (scripts/release/eval_gate.py skip-check). Step 12b, the release eval gate, has
+# no skip flag at all.
 
 set -e
 
@@ -45,6 +49,13 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# P3.2: the skip policy is decided up front, before any slow step runs.
+if [[ -n "$SKIP_QUALITY_REASON" ]]; then
+    if ! uv run python scripts/release/eval_gate.py skip-check --reason "$SKIP_QUALITY_REASON"; then
+        exit 1
+    fi
+fi
 
 echo "🚀 Pre-Release Verification Checklist"
 echo "===================================="
@@ -218,6 +229,24 @@ fi
 if ! uv run python scripts/release/quality_gate.py "${QUALITY_ARGS[@]}"; then
     echo -e "${RED}❌ Answer-quality bench failed, or the local backend is "
     echo -e "   unavailable and no --skip-quality reason was given.${NC}"
+    exit 1
+fi
+echo ""
+
+# 12b. Release eval gate (PLAN v16 P3.2): the paired >3.0-pt comparator over the
+# frozen release sets, plus PACK-vs-FULL fidelity and decision stability. Mandatory:
+# no skip flag. NOT INFORMATIVE (too few items, missing file, missing set) fails.
+echo "1️⃣2️⃣b Running the release eval gate..."
+EVAL_SHA=$(git rev-parse HEAD)
+if [[ ! -f "release_evals/${EVAL_SHA}.json" ]]; then
+    echo -e "${RED}❌ release_evals/${EVAL_SHA}.json is missing${NC}"
+    echo "   Run the release sets for this commit and write it with"
+    echo "   scripts/release/release_evals.py write --sha ${EVAL_SHA} --results <file>"
+    exit 1
+fi
+if ! uv run python scripts/release/eval_gate.py compare \
+        --candidate "release_evals/${EVAL_SHA}.json" --sha "${EVAL_SHA}"; then
+    echo -e "${RED}❌ Release eval gate failed (BLOCK or NOT INFORMATIVE)${NC}"
     exit 1
 fi
 echo ""
