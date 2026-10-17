@@ -790,6 +790,8 @@ def model_input(digest, canonical: str, *, max_tokens: int = TOKEN_CAP, count_to
     truncated from its head (the tail is kept)."""
     d = cap_digest(digest)
     head = ("[ctx] " + d + " [prompt] ") if d else ""
+    if head and count_tokens(head) > max_tokens:
+        raise ValueError(f"digest part alone exceeds the {max_tokens}-token cap (CD-18): harness error, not truncated")
     body = canonical
     if count_tokens(head + body) <= max_tokens:
         return head + body

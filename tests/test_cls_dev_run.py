@@ -1494,6 +1494,17 @@ def inv_digest_cap(c):
     assert x.count("q") == 400
 
 
+def test_model_input_digest_over_cap_is_a_harness_error_not_truncated():
+    # CD-18 (D-169): the digest part is kept whole; if it alone exceeds the cap, fail loudly.
+    def words(s):
+        return len(s.split())
+
+    with pytest.raises(ValueError, match="CD-18"):
+        D.model_input(" ".join(f"w{i}" for i in range(30)), "p p p", max_tokens=12, count_tokens=words)
+    out = D.model_input("d1 d2 d3", "p " * 50, max_tokens=12, count_tokens=words)
+    assert words(out) <= 12 and out.startswith("[ctx] d1 d2 d3 [prompt] ")
+
+
 def inv_run_pin(c):
     man = _manifested(c)
     other = c.env.dev / "copy_manifest.json"
