@@ -1,6 +1,6 @@
 # PREREG-CLS-DEV (r5): DEV screening of learned tier classifiers (PLAN v16 CLS-v16, D-127..D-130)
 
-Revision r5 (2026-10-17, text brought in line with the merged builds B0 #537, B1 #526 + F11 #539, B-L #527 and F20 #544, and with coordinator decisions D-143, D-147, D-148, D-160, D-161). Status: DRAFT. Not frozen. This file is frozen only when `PREREG-CLS-DEV.sha256` exists beside it and
+Revision r5 (2026-10-17, text brought in line with the merged builds B0 #537, B1 #526 + F11 #539, B-L #527 and F20 #544, and with coordinator decisions D-143, D-147, D-148, D-160, D-161 and D-169). Status: DRAFT. Not frozen. This file is frozen only when `PREREG-CLS-DEV.sha256` exists beside it and
 `scripts/check_prereg.py` reports a match, after an independent freeze-guard review says READY. Changing
 any byte changes the hash. The freeze record is the last section. The author of this draft did not
 review it.
@@ -26,6 +26,21 @@ review it.
 * 14: CD-26..CD-31 added for the above.
 * 15: PINS-STATIC also pins `gt500.py` and `supply.py` (D-161), the model-id keys, the Codex `--json` and `-m` flags,
   the argv templates and the session-log directories; the absolute-path note and `--freeze-line`.
+* 2.1, 14 (D-169): CD-18 amended for C2 only: a 384 whitespace-word cap (digest kept whole, prompt tail kept), stated
+  as an approximation because C2 has no local tokenizer; C3 follows CD-18 (512 tokens, digest whole, tail kept); C1
+  unchanged.
+* 2.1, 15 (D-169): `qwen3.5:latest` is listed twice by Ollama `/api/tags` (digests `2e16a80fe3d7...` and
+  `44a38603922e...`); the pin is the sorted set of every digest listed under a name (never the last one), verify fails
+  when the set changes, and C4 runs `qwen3.5:latest` as Ollama resolves it.
+* 15 (D-169): a bare Ollama name is looked up as `name:latest` (Ollama semantics; `nomic-embed-text` ->
+  `nomic-embed-text:latest`).
+* 3.1, 15 (D-169): model ids `judge_gpt` = `gen_gpt` = `gpt-6-astra` (D-118; confirmed by a coordinator `codex exec -m`
+  probe before the freeze), `judge_sonnet` = `claude-sonnet-5-5`, `judge_opus` = `gen_opus` = `claude-opus-5-5`.
+* 1.3, 15 (D-169): the exclusion-list path is the P17D attach's `~/.llm-router/denylist.txt` (named and hashed only);
+  the `.env` is `~/.llm-router/.env`, hashed by the coordinator at the real pins build, never a hard pin.
+* 15 (D-169): the six v1 generator files are committed in `docs/prereg/cls-syn-gen/` (the `--gen-dir`), authored
+  from the generator spec text and reviewed at the freeze; the spec's Appendix C digest-schema line gains one space
+  after `0-6,`, because without it detector (e) of 3.2 fires on every generation request.
 
 Marks: **[CD]** = coordinator default for an open question (section 14 lists all of them; the coordinator
 may overrule any before the freeze). **[EST]** = an estimate, not a measurement.
@@ -148,10 +163,11 @@ only 0600 files under `$CLS/dev/` (the P17D attach pattern, D-107 c). It: (1) ta
 item files that produced its labels (held under `$PP`); (2) recovers `session_id`, record timestamp and
 `requested_tier` by the P17D attach rules (the GE3 record rules `gt500.py` `9cde774d...` and `supply.py`
 `12cd3e1e...`, the `sha256(text)` join, earliest record wins); (3) reads, read-only, the exclusion list
-`denylist.txt` that the P17D attach read (path named in `PINS-STATIC.json` with its sha256; its semantics is an
+`denylist.txt` that the P17D attach read (`~/.llm-router/denylist.txt`, the `--denylist` default of the pinned
+`scripts/p17d_attach.py`; path named in `PINS-STATIC.json` with its sha256; its semantics is an
 exclusion list of prompts, 0 entries at P17D, so any prompt matching an entry is excluded and counted) and the
 **values of keys in the owner's `.env` whose name matches `KEY|TOKEN|SECRET|PASSWORD|PASS`, of length >= 8,
-empty values skipped** (path named in `PINS-STATIC.json`; only the count of qualifying values and the file sha256 are
+empty values skipped** (`~/.llm-router/.env`; path named in `PINS-STATIC.json`; only the count of qualifying values and the file sha256 are
 recorded; **the `.env` sha256 is also logged at each use**; values are held in memory, never printed; **the `.env` sha256 changing is intentional and no snapshot
 of the file is kept**); (4) joins existing labels: Opus (and Sonnet for GE3) labels
 are keyed by `text_sha` in the earlier `labels.jsonl` files (`{text_sha, session_id, truth}`); the manifest holds
@@ -207,9 +223,9 @@ score), and a DEV number is never a verdict or a claim.
 | Id | Candidate | Fit needed | Notes |
 |---|---|---|---|
 | C1 | `bge-small-en-v1.5` embedding + ordinal logistic regression | LR on DEV | offline from the HF cache; revision = the cached snapshot dir name recorded in the manifest (`5c38ec7c405ec4b44b94cc5a9bb96e735b38267a` at the time of writing; the run re-reads it) |
-| C2 | `nomic-embed-text` (Ollama `/api/embed`) embedding + ordinal LR | LR on DEV | Ollama model digest recorded; task prefix `classification: ` fixed [CD] |
+| C2 | `nomic-embed-text` (Ollama `/api/embed`) embedding + ordinal LR | LR on DEV | Ollama model digest recorded (the bare name is looked up as `nomic-embed-text:latest`, D-169); task prefix `classification: ` fixed [CD] |
 | C3 | ModernBERT-base head, fine-tuned | fine-tune on DEV | **conditional** on trigger T-MB; one download, pinned revision sha, `HF_HOME` set to the CLS-v16 cache dir (never system-wide); card licence read and recorded before download (expected Apache-2.0, to be verified, not assumed) |
-| C4 | Qwen3.5 (`qwen3.5:latest`) logprob readout of the existing v6 prompt (`local_classifier.py`, thinking off) | calibration only | first-token logprobs of the tier tokens, then a 3-feature ordinal LR fitted in-fold. Needs an Ollama build that returns logprobs; if not available, kill criterion 1 applies (no silent fallback to argmax). `c4-precheck` splits the failure (D-160): no usable `logprobs` field is a criterion-1 kill (`no_logprobs_field`); logprobs present but the tier token not located is **parked for the coordinator** (`tier_token_not_located`, counts and shapes only, never token text) and is not a kill |
+| C4 | Qwen3.5 (`qwen3.5:latest`) logprob readout of the existing v6 prompt (`local_classifier.py`, thinking off) | calibration only | runs `qwen3.5:latest` as Ollama resolves it; `/api/tags` lists that name twice (digests `2e16a80fe3d7...` and `44a38603922e...`, one manifest file on disk), so the pin is the sorted set of both digests and verify fails if the set changes (D-169). First-token logprobs of the tier tokens, then a 3-feature ordinal LR fitted in-fold. Needs an Ollama build that returns logprobs; if not available, kill criterion 1 applies (no silent fallback to argmax). `c4-precheck` splits the failure (D-160): no usable `logprobs` field is a criterion-1 kill (`no_logprobs_field`); logprobs present but the tier token not located is **parked for the coordinator** (`tier_token_not_located`, counts and shapes only, never token text) and is not a kill |
 
 **Context digest.** A real item's digest is the one the P17D/GE3 judge saw if the attach step recovered it, else
 none; it is **capped at 400 characters** (truncated, same cap as DEV-SYN digests). A candidate's feature set is
@@ -218,9 +234,13 @@ frozen with the candidate.
 **Frozen fitting choices (r2).**
 
 * **Input string.** `"[ctx] " + digest + " [prompt] " + canonical_text` when a digest exists, else
-  `canonical_text`. `canonical_text` = harness blocks stripped, last 3,000 characters. Tokenisation is capped at
-  512 tokens for every embedder (bge-small, nomic, ModernBERT) **[CD]**; when over the cap the **digest part is
-  kept whole and the prompt part is truncated from its head (the tail is kept)**.
+  `canonical_text`. `canonical_text` = harness blocks stripped, last 3,000 characters. Input length is capped
+  **[CD]** (CD-18, amended r5, D-169): C1 (bge-small) and C3 (ModernBERT) at 512 tokens of their own tokenizer; C2
+  (nomic, Ollama) at **384 whitespace-delimited words**, because no local nomic tokenizer exists; 384 words is a
+  conservative stand-in for 512 tokens and is an **approximation**, not a token count (a text of unusual words can
+  still exceed 512 tokens; it is then sent to Ollama as cut and no further cap is applied by the harness). For every embedder, when over the cap the
+  **digest part is kept whole and the prompt part is truncated from its head (the tail is kept)**; no truncation
+  cuts the digest.
 * **Embedding.** L2-normalised vector, then `StandardScaler` fitted on the training fold only.
 * **Binary heads.** `sklearn.linear_model.LogisticRegression`, penalty L2, solver lbfgs, `max_iter=1000`,
   `tol=1e-4`, `class_weight=None`. Head k takes `sample_weight = w_pool * m`, where `w_pool` is the real/synthetic
@@ -296,7 +316,8 @@ finalist is a (candidate, arm) pair. No stacking, no learned fusion.
   GE3/P17D rules): **reused, not re-bought** **[CD]**. **New Opus pass on all 300 DEV-SYN items** (section 1.2).
 * **Sonnet**: labels **all real DEV**. GE3's 342 existing Sonnet labels (rubric kappa 0.6242 to Opus) are reused
   **[CD]**; every other real item gets a new Sonnet label. DEV-SYN: new Sonnet labels on all 300. Subscription, $0.
-* **GPT**: new labels on all real DEV and all DEV-SYN via Codex CLI (`gpt-6-astra`, ChatGPT subscription, real
+* **GPT**: new labels on all real DEV and all DEV-SYN via Codex CLI (`gpt-6-astra`, D-118; the coordinator confirms the id with one `codex exec -m gpt-6-astra` probe
+  before the freeze, and if Codex is unavailable at run time the D-147 park rule applies; ChatGPT subscription, real
   HOME because its auth lives there). **Every Codex call passes `-m <pinned id>` (D-147).** The `--json` event stream
   of Codex 0.161.0 carries no model field (coordinator probe 2026-10-16), so the served model is enforced by the CLI,
   which exits non-zero on an unknown id, not read back; the id recorded for a GPT call is the pin. A non-zero
@@ -804,7 +825,7 @@ percent ($16)**. OpenRouter only under section 3.1, shared $20 cap (D-128), per-
 | CD-15 | Latency kill uses | pooled p95 over 3 blocks |
 | CD-16 | async-only candidate | may be a finalist, labelled, no sync authority |
 | CD-17 | LOW CLUSTER FIDELITY | > 15 percent of real items without a recovered session: criterion 6 report-only |
-| CD-18 | Embedding token cap | 512 for every embedder, digest kept, prompt tail kept |
+| CD-18 | Embedding token cap | **r5 (D-169):** C1 and C3 512 tokens; C2 384 whitespace words (approximation, no local tokenizer); digest kept whole, prompt tail kept, for all |
 | CD-19 | Peak-RSS limit (criterion 1) | 12 GiB (a quarter of 48 GiB) |
 | CD-20 | Opus on DEV-SYN | all 300 items; D-134 cap $20 total, stop at 80 percent |
 | CD-21 | Voided judge | truth = the other two judges, split to the higher tier, labelled `TRUTH_FALLBACK` (D-135) |
@@ -840,7 +861,8 @@ exists at the freeze: the sha256 of `scripts/cls_eval.py`, `cls_dev_run.py`, `cl
 (`12cd3e1eed7fc15658b4b44246d83422e2b61adc4ccb270dd9f5e729608fb0e8`, `SUPPLY_SHA256`, loaded and verified first as
 `p17d_synthetic.py` does; D-161), each at the path `params.gt500_py` names (the real `~/.rsi/research/primary-plan/v16/gt500/scripts/` of
 the P17D labeller), so a changed helper blocks the freeze; the exclusion-list and `.env` **paths** with
-sha256 and qualifying-value count (the `.env` sha256 is as of the freeze, a later change is intentional, no
+sha256 and qualifying-value count (exclusion list `~/.llm-router/denylist.txt`, the path the P17D attach used; `.env`
+`~/.llm-router/.env`, hashed by the coordinator at the real pins build and never a hard pin; the `.env` sha256 is as of the freeze, a later change is intentional, no
 snapshot is kept, and the sha256 is logged at each use); the Ollama version and digests of `nimble:9b`,
 `qwen3.5:latest`, `qwen3-coder:30b`, `nomic-embed-text`; the bge-small snapshot dir name; the `claude` and `codex`
 CLI versions and the **recorded `--help` output** (sha256 and every flag line the runners use: for `claude -p`
@@ -849,9 +871,12 @@ CLI versions and the **recorded `--help` output** (sha256 and every flag line th
 only when a help line **defines** it, not when another option's text names it), so a flag
 the installed build lacks **blocks the freeze**; the exact `argv_template` of each CLI (the argv of 3.2) and the session-log directories
 (`~/.claude/projects`, `~/.codex/sessions`, as strings, never read by a build); the model ids used for judging
-and generating, as five keys (`judge_gpt`, `judge_sonnet`, `judge_opus`, `gen_gpt`, `gen_opus`; a missing key blocks the freeze); and the **v1**
+and generating, as five keys (`judge_gpt`, `judge_sonnet`, `judge_opus`, `gen_gpt`, `gen_opus`; a missing key blocks the freeze;
+values (D-169): `judge_gpt` = `gen_gpt` = `gpt-6-astra` (D-118, confirmed by the coordinator's `codex exec -m` probe before the
+freeze), `judge_sonnet` = `claude-sonnet-5-5`, `judge_opus` = `gen_opus` = `claude-opus-5-5`); and the **v1**
 generator files (templates, 12 x 5 mask, project list, intent phrases, meta patterns; spec appendices A-D, hashed
-as files). Generator files are versioned by name (e.g. `tmpl_gpt.v1.txt`, `tmpl_gpt.v2.txt`). The v1 files are never edited. An amendment creates new-named files and a PINS-RUN entry for them. A STATIC pin that cannot be computed is a freeze blocker, not an omission:
+as files; committed in `docs/prereg/cls-syn-gen/`, which is the `--gen-dir` passed to `cls_pins.py` and `cls_gen_run.py`).
+Generator files are versioned by name (e.g. `tmpl_gpt.v1.txt`, `tmpl_gpt.v2.txt`). The v1 files are never edited. An amendment creates new-named files and a PINS-RUN entry for them. A STATIC pin that cannot be computed is a freeze blocker, not an omission:
 `pins --static` exits 9 and names the keys it could not compute. A generator template file holds the Appendix C body with the
 marker `{{ITEMS}}` where the item blocks go (`cls_gen_run.py`; the spec author supplies the files and the tool does not invent
 their wording).
@@ -863,9 +888,11 @@ are taken by `git show`, not from the working tree). `pins --verify PINS-STATIC.
 "env_sha_at_use", "run_entries"}` and exits 9 on any mismatch (names only). Before the freeze record exists it warns
 `pre_freeze_no_pins_sha256_record`; once it exists, the `pins_sha256` line must match the file's sha256 or the check fails
 closed. A changed `.env` sha256 is the warning `env_changed_since_freeze`, never a mismatch. `pins --freeze-line PINS-STATIC.json`
-prints the `pins_sha256 <sha256>` line for the freeze record. Ollama digests are the ones `/api/tags` lists for the exact
-names above; a name that `/api/tags` lists twice with different digests, or lists only with a tag, must be resolved before the
-freeze.
+prints the `pins_sha256 <sha256>` line for the freeze record. Ollama digests are the ones `/api/tags` lists for the names
+above, with a bare name looked up as `name:latest` (Ollama semantics; `nomic-embed-text` -> `nomic-embed-text:latest`). A name
+that `/api/tags` lists more than once is pinned as the **sorted set of every digest listed under it**, never the last one, and
+verify fails when that set changes. At r5 this holds for `qwen3.5:latest` (`2e16a80fe3d7...`, `44a38603922e...`; one manifest
+file on disk); C4 runs that name as Ollama resolves it (D-169).
 
 **`PINS-RUN` addenda** (built by `pins --run`, each entry hashed and appended to `pins_run.jsonl` and logged
 **before its first use**; not freeze blockers, because their inputs do not exist at the freeze): the length
