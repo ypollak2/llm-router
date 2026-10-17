@@ -82,6 +82,11 @@ class Ollama:
     def ps(self):
         return self.resident
 
+    size = 0
+
+    def resident_bytes(self, model):
+        return self.size if model in self.resident else 0
+
     def chat(self, model, messages, *, timeout, options, think):
         assert think is False
         self.calls.append(messages)
@@ -178,7 +183,8 @@ def factory(tmp_path):
             claude=Claude(cost), machine=Machine(),
             quota=lambda: {"session_pct": 0, "weekly_pct": 0, "age_s": 0},
             pack_fn=lambda item, name, window: [{"role": "user", "content": item["request"]}],
-            git_sha=lambda: "deadbeef", gate=lambda constants: None)
+            git_sha=lambda: "deadbeef", gate=lambda constants: None,
+            amend1_t=run_dir / "AMEND1.md", mem_total_fn=lambda: 48 * 2**30)
         return cfg, {**c, "LOCAL_MODELS": h.LOCAL}, pool
     return make
 
@@ -935,3 +941,118 @@ def test_h13_repo_sha_must_hold_the_gate_and_record_competence(tmp_path, monkeyp
 def git_head():
     return REAL_RUN(["git", "rev-parse", "HEAD"], cwd=h.REPO, capture_output=True, text=True,
                     check=True).stdout.strip()
+
+
+# ---- AMEND1-T: the free-memory floor counts the arm's own resident model -----------------
+
+AMEND1_DATE = "2028-01-01T00:00:00Z"
+
+
+def amend1_text(**values):
+    block = {**h.AMEND1_FIXED, "REPO_SHA": "9" * 40, **values}
+    return ("# AMEND1\n\n" + h.AMEND1_BLOCK + "\n"
+            + "".join(f"{k}={v}\n" for k, v in block.items()) + "```\n")
+
+
+def freeze_amend1(cfg, *, text=None, date=AMEND1_DATE):
+    cfg.amend1_t.write_text(text if text is not None else amend1_text())
+    sidecar(cfg.amend1_t, date)
+
+
+def test_amend1_frozen_enforcement(factory):
+    cfg, c, _ = factory("a1")
+    base_out = h.frozen(cfg)
+    assert "amend1_sha256" not in base_out
+    assert "QUIET_FREE_MEM_BASIS" not in base_out["constants"]
+    freeze_amend1(cfg)
+    got = h.frozen(cfg)
+    assert got["amend1_sha256"] == base.sha256_file(cfg.amend1_t)
+    assert got["amend1_frozen_utc"] == AMEND1_DATE
+    assert got["constants"]["QUIET_FREE_MEM_BASIS"] == "excl_own_arm"
+    assert got["constants"]["REPO_SHA"] == "9" * 40
+    assert got["constants"]["LOCAL_MODELS"] == h.LOCAL
+    (cfg.run_dir / "PREREG-AMEND1.md").write_text("different")
+    with pytest.raises(h.Refuse, match="PREREG-AMEND1.md differs"):
+        h.frozen(cfg)
+    (cfg.run_dir / "PREREG-AMEND1.md").unlink()
+    cases = [
+        (dict(date="2026-12-31T00:00:00Z"), "AMEND1 frozen_utc"),  # before the prereg
+        (dict(date="2031-01-01T00:00:00Z"), "AMEND1 frozen_utc"),  # after now
+        (dict(date="2028-01-01T00:00:00"), "AMEND1 frozen_utc"),
+        (dict(text=amend1_text(QUIET_FREE_MEM_BASIS="raw")), "AMEND1 constants"),
+        (dict(text=amend1_text(QUIET_FREE_MEM_MIN_PCT="10")), "AMEND1 constants"),
+        (dict(text=amend1_text(REPO_SHA="zz")), "AMEND1 constants"),
+        (dict(text="# AMEND1\n" + h.AMEND1_BLOCK + "\nREPO_SHA=" + "9" * 40 + "\n```\n"),
+         "AMEND1 constants"),
+    ]
+    for kwargs, message in cases:
+        freeze_amend1(cfg, **kwargs)
+        with pytest.raises(h.Refuse, match=message):
+            h.frozen(cfg)
+    freeze_amend1(cfg)
+    cfg.amend1_t.write_text(cfg.amend1_t.read_text() + " ")
+    with pytest.raises(h.Refuse, match="AMEND1 is not frozen"):
+        h.frozen(cfg)
+
+
+def test_amend1_quiet_counts_only_the_arms_own_model(factory):
+    cfg, c, _ = factory("a1q")
+    cfg.ollama.size = 24 * 2**30  # 50% of the fake 48 GiB
+    cfg.machine.free = 27.0
+    cfg.ollama.resident = [h.LOCAL]
+    with pytest.raises(h.Park, match="machine not quiet"):  # raw basis (prereg as frozen)
+        h.quiet(cfg, c, h.LOCAL)
+    c1 = {**c, **h.AMEND1_FIXED}
+    got = h.quiet(cfg, c1, h.LOCAL)
+    assert got == [{"free_pct": 27.0, "load1": 1.0, "own_pct": 50.0}] * 3
+    cfg.ollama.resident = []
+    with pytest.raises(h.Park, match="machine not quiet"):
+        h.quiet(cfg, c1, h.LOCAL)
+    cfg.ollama.resident = ["foreign:latest"]
+    with pytest.raises(h.Park, match="machine not quiet"):
+        h.quiet(cfg, c1, h.LOCAL)
+    cfg.machine.free = 80.0
+    with pytest.raises(h.Park, match="foreign model resident"):
+        h.quiet(cfg, c1, h.LOCAL)
+    cfg.ollama.resident = [h.LOCAL]
+    cfg.machine.free = float("nan")
+    with pytest.raises(h.Park, match="machine not quiet"):
+        h.quiet(cfg, c1, h.LOCAL)
+    # the integrity check accepts own-basis readings only under the basis, and needs own_pct
+    ok = {"free_pct": 27.0, "load1": 1.0, "own_pct": 50.0}
+    path = cfg.run_dir / "answers/tech_op.jsonl"
+    base.append_row(path, {"item_id": "a", "arm": h.LOCAL, "quiet": [ok] * 3})
+    base.append_row(path, {"item_id": "b", "arm": h.LOCAL,
+                           "quiet": [{"free_pct": 27.0, "load1": 1.0}] * 3})
+    base.append_row(path, {"item_id": "c", "arm": h.LOCAL,
+                           "quiet": [{**ok, "own_pct": -5.0}] * 3})
+    assert h.unchecked_local_rows(cfg, c1) == 2
+    assert h.unchecked_local_rows(cfg, c) == 3
+
+
+@pytest.mark.parametrize("amend1", [False, True])
+def test_amend1_run_survives_own_model_residency(factory, amend1):
+    """The bug AMEND1-T fixes: loading the arm drops raw free memory under the floor, so every
+    call after the warm-up parked (rc 3) and no answer row was written."""
+    cfg, c, _ = factory(f"a1r{int(amend1)}")
+    if amend1:
+        freeze_amend1(cfg)
+    assert call(cfg, "select") == 0
+    cfg.ollama.size = 24 * 2**30
+    original = cfg.ollama.chat
+
+    def chat(model, messages, **kw):
+        cfg.ollama.resident = [model]
+        return original(model, messages, **kw)
+
+    cfg.ollama.chat = chat
+    cfg.machine.free_mem_pct = lambda: 27.0 if cfg.ollama.resident else 80.0
+    rc = call(cfg, "run", "--set", "tech_op")
+    path = cfg.run_dir / "answers/tech_op.jsonl"
+    local = [r for r in base.jsonl(path) if r["arm"] == h.LOCAL] if path.exists() else []
+    if not amend1:
+        assert rc == 3 and local == []
+        return
+    assert rc == 0 and local
+    assert all(q["own_pct"] == 50.0 for r in local for q in r["quiet"])
+    assert h.unchecked_local_rows(cfg, h.frozen(cfg)["constants"]) == 0

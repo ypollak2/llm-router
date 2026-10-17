@@ -34,6 +34,12 @@ import p20_requal as base  # noqa: E402
 
 Refuse, Park, Terminal = base.Refuse, base.Park, base.Terminal
 PREREG_T = REPO / "docs/prereg/PREREG-P20T-techop.md"
+# AMEND1-T: the free-memory floor counts the arm's own resident model as available (a loaded
+# qwen3.8 at 32k context takes ~51% of RAM, so the raw floor parked every call after warm-up).
+AMEND1_T = REPO / "docs/prereg/PREREG-P20T-techop-AMEND1.md"
+AMEND1_BLOCK = "```text P20T-AMEND1-CONSTANTS"
+AMEND1_FIXED = {"QUIET_FREE_MEM_BASIS": "excl_own_arm"}
+AMEND1_SHA_KEYS = {"REPO_SHA": r"[0-9a-f]{40}"}
 BLOCK = "```text P20T-CONSTANTS"
 SET = "tech_op"
 STRATA = ("org", "ho")
@@ -128,6 +134,17 @@ class CfgT(base.Cfg):
         ["ps", "-axo", "command"], stdin=subprocess.DEVNULL, capture_output=True, text=True,
         timeout=30, check=False).stdout.splitlines()
     local_touched: bool = False  # BLOCKER-1: set once this process passed the gate for a local call
+    amend1_t: Path = AMEND1_T
+    mem_total_fn: Callable[[], int] = lambda: int(subprocess.run(
+        ["sysctl", "-n", "hw.memsize"], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+        timeout=30, check=True).stdout)
+
+
+class OllamaT(base.OllamaHTTP):
+    def resident_bytes(self, model: str) -> int:
+        """AMEND1-T: bytes Ollama reports resident for `model` (0 when it is not loaded)."""
+        return sum(int(row.get("size", 0)) for row in self.request("/api/ps").get("models", [])
+                   if row.get("name") == model)
 
 
 def default_dir() -> Path:
@@ -179,9 +196,40 @@ def frozen(cfg: CfgT) -> dict:
             raise ValueError("freeze order")
     except (OSError, ValueError, IndexError, OverflowError) as exc:
         raise Refuse("refusing: P2.0 AMEND2 is not frozen before this prereg") from exc
-    return {"sha256": checked["sha256"], "frozen_utc": checked["frozen_utc"],
-            "amend2_sha256": second["sha256"], "amend2_frozen_utc": second["frozen_utc"],
-            "constants": {**constants, "LOCAL_MODELS": constants["LOCAL_MODEL"]}}
+    out = {"sha256": checked["sha256"], "frozen_utc": checked["frozen_utc"],
+           "amend2_sha256": second["sha256"], "amend2_frozen_utc": second["frozen_utc"]}
+    if cfg.amend1_t.with_suffix(".sha256").exists():
+        # AMEND1-T is in force as soon as its sidecar exists; a draft without one is not.
+        try:
+            first = check_prereg.check(cfg.amend1_t)
+            if not first["match"]:
+                raise ValueError("freeze")
+            first_text = cfg.amend1_t.read_text()
+        except (OSError, ValueError, IndexError, OverflowError) as exc:
+            raise Refuse("refusing: AMEND1 is not frozen") from exc
+        try:
+            first_epoch = datetime.fromisoformat(first["frozen_utc"].replace("Z", "+00:00"))
+            if (first_epoch.tzinfo is None
+                    or not epoch.timestamp() < first_epoch.timestamp() < cfg.now()):
+                raise ValueError("freeze order")
+        except (ValueError, OverflowError) as exc:
+            raise Refuse("refusing: AMEND1 frozen_utc") from exc
+        try:
+            overrides = base.parse_block(first_text, AMEND1_BLOCK)
+            if (overrides.keys() != AMEND1_FIXED.keys() | AMEND1_SHA_KEYS.keys()
+                    or any(overrides[k] != v for k, v in AMEND1_FIXED.items())
+                    or not all(re.fullmatch(pattern, overrides[k])
+                               for k, pattern in AMEND1_SHA_KEYS.items())):
+                raise ValueError("constants")
+        except (Refuse, ValueError) as exc:
+            raise Refuse("refusing: AMEND1 constants") from exc
+        first_copy = cfg.run_dir / "PREREG-AMEND1.md"
+        if first_copy.exists() and first_copy.read_bytes() != cfg.amend1_t.read_bytes():
+            raise Refuse("refusing: PREREG-AMEND1.md differs")
+        constants = {**constants, **overrides}
+        out.update(amend1_sha256=first["sha256"], amend1_frozen_utc=first["frozen_utc"])
+    out["constants"] = {**constants, "LOCAL_MODELS": constants["LOCAL_MODEL"]}
+    return out
 
 
 # ---- tool protocol ---------------------------------------------------------------------
@@ -485,14 +533,18 @@ def quiet(cfg: CfgT, c: dict, arm: str) -> list[dict]:
         raise Park("ps empty")
     if any("p20_requal.py" in line for line in lines):
         raise Park("P2.0 harness running")
+    own_basis = c.get("QUIET_FREE_MEM_BASIS") == "excl_own_arm"  # AMEND1-T
     readings = []
     for reading in range(int(c["QUIET_READINGS"])):
         if reading:
             cfg.sleep(float(c["QUIET_INTERVAL_S"]))
         free, load = cfg.machine.free_mem_pct(), cfg.machine.load1()
-        readings.append({"free_pct": free, "load1": load})
+        own = (100.0 * cfg.ollama.resident_bytes(arm) / cfg.mem_total_fn()
+               if own_basis else 0.0)
+        readings.append({"free_pct": free, "load1": load, **({"own_pct": own} if own_basis else {})})
         if (not math.isfinite(free) or not math.isfinite(load)
-                or free < float(c["QUIET_FREE_MEM_MIN_PCT"])
+                or not math.isfinite(own) or own < 0
+                or free + own < float(c["QUIET_FREE_MEM_MIN_PCT"])
                 or load >= float(c["QUIET_LOAD1_MAX"])):
             raise Park("machine not quiet")
     if any(model != arm for model in cfg.ollama.ps()):
@@ -544,12 +596,20 @@ def unload_if_touched(cfg: CfgT, arm: str) -> None:
 def unchecked_local_rows(cfg: CfgT, c: dict) -> int:
     """Local answer rows written without a passing quiet re-check (must be 0): a row with no
     readings, fewer than QUIET_READINGS, or any reading outside the thresholds."""
+    own_basis = c.get("QUIET_FREE_MEM_BASIS") == "excl_own_arm"  # AMEND1-T
+
+    def own(r: dict) -> float:
+        value = r.get("own_pct") if own_basis else 0.0
+        return value if isinstance(value, (int, float)) and math.isfinite(value) and value >= 0 \
+            else float("nan")
+
     def bad(row: dict) -> bool:
         readings = row.get("quiet")
         if not isinstance(readings, list) or len(readings) != int(c["QUIET_READINGS"]):
             return True
         return any(not math.isfinite(r["free_pct"]) or not math.isfinite(r["load1"])
-                   or r["free_pct"] < float(c["QUIET_FREE_MEM_MIN_PCT"])
+                   or not math.isfinite(own(r))
+                   or r["free_pct"] + own(r) < float(c["QUIET_FREE_MEM_MIN_PCT"])
                    or r["load1"] >= float(c["QUIET_LOAD1_MAX"]) for r in readings)
     return sum(bad(r) for r in base.jsonl(cfg.run_dir / f"answers/{SET}.jsonl")
                if r["arm"] == c["LOCAL_MODEL"])
@@ -888,7 +948,7 @@ def score(cfg: CfgT, c: dict, freeze: dict, measurement: Path | None = None) -> 
     local = c["LOCAL_MODEL"]
     base.require_no_foreign(cfg.run_dir / f"answers/{SET}.jsonl", arms)
     base.require_no_foreign(cfg.run_dir / f"answers/{SET}_ew.jsonl", arms)
-    hashes = {"prereg_sha256": freeze["sha256"], "amend_sha256": "none",
+    hashes = {"prereg_sha256": freeze["sha256"], "amend_sha256": freeze.get("amend1_sha256", "none"),
               "git_sha": cfg.git_sha(),
               "selection_sha256": base.optional_hash(cfg.run_dir / "selection.json"),
               "answers_sha256": combined_hash(cfg, "answers"),
@@ -1118,7 +1178,7 @@ def real_cfg(run_dir: Path) -> CfgT:
         return subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, timeout=60, check=True).stdout.strip()
 
-    return CfgT(run_dir, ollama=base.OllamaHTTP(), claude=base.ClaudeCLI(run_dir),
+    return CfgT(run_dir, ollama=OllamaT(), claude=base.ClaudeCLI(run_dir),
                 machine=base.Machine(), quota=base.read_quota, git_sha=git_sha)
 
 
