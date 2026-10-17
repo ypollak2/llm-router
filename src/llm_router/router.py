@@ -2596,7 +2596,7 @@ async def _finalize_successful_route(
     _unhinted = classification_data is None
     # F23: what the loop passed over before this answer, and whether D-116 served it last.
     from llm_router.quality_feedback import is_skip_marker as _is_skip_marker
-    _skipped = skip_causes.snapshot()
+    _skipped = skip_causes.entries_so_far()
     _failed_before = [m for m in chain_attempts if m != model and not _is_skip_marker(m)]
     try:
         from llm_router import call_identity as _call_identity

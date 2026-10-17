@@ -7,7 +7,7 @@ local share could not be told from policy-driven local share.
 
 One per-call list lives in a ``ContextVar``. ``begin()`` starts it at the top of ``route_and_call``;
 ``note()`` is called where an entry is dropped or skipped; ``log_routing_decision`` reads
-``snapshot()`` and stores it as compact JSON in ``routing_decisions.skipped_json``. A writer that
+``entries_so_far()`` and stores it as compact JSON in ``routing_decisions.skipped_json``. A writer that
 never called ``begin()`` (hooks, direct path) stores NULL = unknown, never ``[]``.
 
 Entry shape: ``{"model": "codex/gpt-5", "reason": "bench", "until": 1790000000.0}``.
@@ -65,7 +65,7 @@ def note_many(models: list[str], reason: str) -> None:
         note(m, reason)
 
 
-def snapshot() -> list[dict[str, Any]] | None:
+def entries_so_far() -> list[dict[str, Any]] | None:
     """The entries so far, or None when this context never began a list (unknown)."""
     entries = _log.get()
     return None if entries is None else list(entries)

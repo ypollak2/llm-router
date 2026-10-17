@@ -143,7 +143,7 @@ async def test_capability_filtered_local_model_is_recorded(env, monkeypatch):
     skip_causes.begin()
     await r._build_and_filter_chain(
         TaskType.QUERY, r.RoutingProfile.BALANCED, None, None, r.Complexity.SIMPLE, cfg)
-    notes = skip_causes.snapshot()
+    notes = skip_causes.entries_so_far()
     assert {"model": "qwen3:8b", "reason": "capability_filtered"} in notes
 
 
@@ -152,7 +152,7 @@ def test_no_begin_means_unknown_not_empty():
     import contextvars
 
     def run():
-        return skip_causes.snapshot(), skip_causes.to_json(skip_causes.snapshot())
+        return skip_causes.entries_so_far(), skip_causes.to_json(skip_causes.entries_so_far())
 
     assert contextvars.Context().run(run) == (None, None)
 
