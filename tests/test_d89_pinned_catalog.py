@@ -125,6 +125,7 @@ def test_session_start_unset_makes_zero_outbound_calls(
     assert calls == []
 
 
+@pytest.mark.usefixtures("allow_detached_spawn")
 @pytest.mark.parametrize("matches", [True, False])
 def test_session_start_flag_on_uses_catalog_only_on_matching_sha(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, matches: bool,
