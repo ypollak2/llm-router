@@ -84,7 +84,9 @@ For non-interactive setup, write ~/.llm-router/.env directly.""",
 
     # Load existing .env if present
     existing: dict[str, str] = {}
-    if env_path.exists():
+    from llm_router.paths import regular_file_or_none
+
+    if regular_file_or_none(env_path) is not None:
         for line in env_path.read_text().splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:

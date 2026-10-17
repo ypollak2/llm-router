@@ -60,6 +60,10 @@ class KeyInfo:
 
 def _dotenv_values(path: Path) -> dict[str, str]:
     out: dict[str, str] = {}
+    from llm_router.paths import regular_file_or_none
+
+    if regular_file_or_none(path) is None:  # F15: never open a FIFO/device .env
+        return out
     try:
         text = path.read_text(errors="replace")
     except OSError:

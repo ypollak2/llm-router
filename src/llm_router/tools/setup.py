@@ -410,8 +410,10 @@ async def _setup_discover() -> str:
     ]
     for env_path in env_paths:
         # Offload synchronous Path.exists() to thread pool to avoid blocking event loop
-        exists = await asyncio.to_thread(env_path.exists)
-        if exists:
+        from llm_router.paths import regular_file_or_none
+
+        exists = await asyncio.to_thread(regular_file_or_none, env_path)
+        if exists is not None:
             try:
                 content = await asyncio.to_thread(env_path.read_text)
                 for provider, reg in _PROVIDER_REGISTRY.items():
@@ -474,12 +476,14 @@ def _setup_add(provider: str, api_key: str) -> str:
         return "API key contains whitespace. Please check and try again."
 
     # Find the .env file
+    from llm_router.paths import regular_file_or_none
+
     env_path = Path.cwd() / ".env"
-    if not env_path.exists():
+    if regular_file_or_none(env_path) is None:
         # Try project root — tools/setup.py is 4 levels deep from project root
         env_path = Path(__file__).parent.parent.parent.parent / ".env"
 
-    if env_path.exists():
+    if regular_file_or_none(env_path) is not None:
         content = env_path.read_text()
         # Check if key already exists
         new_lines = []

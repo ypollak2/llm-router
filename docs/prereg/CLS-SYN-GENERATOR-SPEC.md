@@ -1,6 +1,6 @@
 # CLS-SYN-GENERATOR-SPEC: frozen synthetic Claude-Code-style prompt generator (PLAN v16 CLS-v16, D-130 a)
 
-Spec version: 1 (draft r3, after the r1/r2 freeze-guard reviews and D-132, D-134, D-135). Status: DRAFT, not frozen. Frozen when `CLS-SYN-GENERATOR-SPEC.sha256` exists beside
+Spec version: 1 (draft r3 + r5 text fixes: Appendix C template marker, one-space digest-schema fix, wrapper line, task meanings; after the r1/r2 freeze-guard reviews and D-132, D-134, D-135). Status: frozen only when `CLS-SYN-GENERATOR-SPEC.sha256` exists beside
 it after an independent freeze-guard review says READY. Generation may start only after the freeze and after the
 DEV manifest exists (the manifest's length-band counts file is an input; no counts file, no generation).
 **r3 order (D-135):** DEV-SYN iterates alone (at most 3 spec versions, only DEV-SYN numbers visible); the first
@@ -41,12 +41,14 @@ Enforced by construction, then checked:
    dropped items are replaced under section 7.3.
 6. **Generator call hygiene.** Scratch config, no hooks: `claude -p` runs with `--safe-mode`, `--settings
    <run-dir>/claude_settings.json` holding `{"disableAllHooks": true}`, `--tools ""`, `--strict-mcp-config`,
-   `--no-session-persistence`, `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` removed from the child
-   environment, an empty scratch cwd, the prompt on stdin (the P2.0 pattern). `codex exec` runs `-s read-only`,
-   in an empty cwd, prompt on stdin, after the Codex read-scope canary of PREREG-CLS-DEV section 3.2 (the generator
+   `--no-session-persistence`, `--setting-sources project,local`, `--model <pinned id>`, `--output-format json`,
+   `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` removed from the child
+   environment, an empty scratch cwd, the prompt on stdin (the P2.0 pattern). `codex exec` runs `-s read-only
+   --skip-git-repo-check --ephemeral --json -m <pinned id>` (every GPT call passes `-m`, D-147), in an empty cwd, prompt
+   on stdin, after the Codex read-scope canary of PREREG-CLS-DEV section 3.2 (the generator
    needs no file access, so a canary that shows the model can read outside the cwd parks the run). Every
    generator request goes through `outgoing_check` on its exact bytes (the cell vectors, template and nonce hold no
-   secret, but the check runs and its self-test is part of PINS).
+   secret, but the check runs and its self-test is part of PINS). An Opus call that reports no opus model id stops the run (exit 22); a GPT non-zero exit parks it (exit 24, resumable).
 7. **The generator models never labelled or saw DEV in this workflow.** The GPT used for generation and
    the GPT used for relabelling are separate processes with separate scratch dirs; no relabel prompt is
    reused as a generation prompt.
@@ -92,7 +94,7 @@ The real DEV shares come from the **manifest's length-band counts file** (aggreg
 provisional-shares fallback**: the generator refuses to start without that file. The used shares are written into
 `gen_config.json` (hashed) before generation starts; a later change is a new spec version. A generated item's band is **measured** (whitespace words), not trusted: an item outside
 its requested band by more than 25 percent of the band bounds counts as a band miss; misses are reported
-and the item stays in its measured band.
+and the item stays in its measured band. A rounding remainder goes to the largest band.
 
 ### 2.3 Tool need (5)
 
@@ -120,7 +122,7 @@ mix implied by the always_haiku and always_sonnet under-route rates (80.8 and 41
 section 1: roughly 19 / 39 / 42 percent haiku / sonnet / opus). Intent is an instruction to the
 generator ("a task a small model would finish", "a task that needs careful multi-file reasoning"), not a
 label, and no later step reads it as truth. A resemblance check (section 8) compares the **judged**
-truth shares, not the intent.
+truth shares, not the intent. The three intent phrases say 'a change', and they are inserted for every task type, including explain and research items. They steer generation only (spec 2.5); truth is judged. The mismatch can blur the intended mix; it is reported through the judged truth shares, not corrected.
 
 ## 3. Quotas and counts
 
@@ -133,8 +135,7 @@ truth shares, not the intent.
   (`group` = call id); items in a call share generator, model state and style drift.
 * Allocation: for item k of set S, draw (task type, length band, tool need, project, difficulty, ack) from
   the marginals with a `random.Random(seed)` stream in item order; apply the compatibility mask by
-  rejection (fixed cap 50 draws, then the nearest valid cell). Then rebalance by swapping cells between
-  items so that every task type has n/12 +- 2 items and every length band is within 2 items of its quota.
+  rejection (fixed cap 50 draws, then the nearest valid cell). Then rebalance by reassigning the last over-quota item to the most under-quota task type or band (mask re-applied), because a swap cannot change a count (`cls_gen_run.allocate`) so that every task type has n/12 +- 2 items and every length band is within 2 items of its quota.
   The allocation table (cell vector per item id) is hashed before any generation call.
 * Call assignment to GPT or Opus: calls ordered by `sha256("clssyn:call:" + seed + ":" + call_index)`; the
   first round(0.7 x calls) are GPT. Items in a call all come from one generator.
@@ -171,7 +172,7 @@ needs; the body is Appendix C and both files get sha256 recorded in `gen_config.
    meaning, project name or none, intended difficulty phrase, ack flag).
 3. Style rules: human-typed, imperfect, lowercase allowed, no quotation marks around the whole prompt, no
    numbering of items inside the prompt, no mention of tiers, models, cost or rating, no code fences unless
-   the band is L3 or L4 and the task type is T01-T05, no secrets of any shape (fake or not), no real
+   the band is L3 or L4 and the task meaning is one of T01-T05 (bug fix, new feature, refactor, tests, debug a failure), no secrets of any shape (fake or not), no real
    people or companies, no URLs except `example.com`.
 4. Output schema: JSON lines, one per item, `{"idx", "prompt", "digest"}`; nothing else.
 5. Diversity rule: items in a call must differ in vocabulary and sentence shape.
@@ -240,7 +241,7 @@ NOT INFORMATIVE; 40-79, "low power" label.
   frozen vN's files are pinned there before TEST-SYN is generated.
 * **TEST-SYN is generated once under vN**, by the TEST-SYN agent, before any DEV screening. If it fails its own
   text-only checks (a), (b), (d), **one** regeneration under the same vN is allowed (no further amendment, no
-  seed hunting beyond the next call-index nonces), before any TEST label exists and before any candidate is
+  seed hunting beyond the next call-index nonces; the single regeneration keeps the frozen allocation and offsets call and nonce indexes by 1000, `REGEN_INDEX_BASE`), before any TEST label exists and before any candidate is
   scored. If the second TEST-SYN also fails, or any of (e), (f), (g) fails after labelling, TEST-SYN is
   **NOT INFORMATIVE as a proxy**: no candidate verdict, no regeneration, no re-label. A replaced TEST-SYN is a
   **discarded set**: the regeneration command itself calls `discard` on the previous set (rename + chmod 0000),
@@ -351,6 +352,18 @@ freeze-guard reviewer confirms the list at freeze. Hashed in PINS as `projects.v
 
 ## Appendix C. Generator template (both families; wrapper differs only as the CLI needs)
 
+The template file holds the body below with the marker `{{ITEMS}}` in place of the "Items (one block per item)" list;
+`cls_gen_run.py` substitutes the item blocks at that marker and refuses a template without it.
+The space after `0-6,` in the digest-schema line is required: without it that line is one whitespace token of more than
+24 characters with letters, digits and Shannon entropy >= 3.3, so detector (e) of PREREG-CLS-DEV section 3.2 fires on
+every request and `outgoing_check` aborts every generation call (r3 text had no space; found when the v1 files were
+authored, checked by running `outgoing_check` on all 140 v1 request bodies). The 140 bodies were checked with the built-in independent scanner only (gitleaks and trufflehog were not on PATH); `cls_send_lib.independent_scan` uses a tool on PATH when present, so the freeze log records which scanner and version ran.
+The v1 files are committed in `docs/prereg/cls-syn-gen/` (the `--gen-dir` of `cls_gen_run.py` and `cls_pins.py`; neither
+has a default). `tmpl_opus.v1.txt` is the body exactly; `tmpl_gpt.v1.txt` is the same body after one wrapper line for
+`codex exec`, which is an agent that can run commands and whose answer is read from its last message:
+`Do not run commands, read files or use any tool; reply with the output below as your one final message.`
+`claude -p` runs with `--tools ""`, so the Opus file needs no wrapper.
+
 ```
 You write realistic messages a developer types into an AI coding agent. For each item below write ONE message
 and ONE context digest.
@@ -364,11 +377,10 @@ Items (one block per item):
   follow-up: <yes/no; if yes the message refers to something in the digest>
   nonce: <12 hex>
 Rules: human-typed, imperfect, lowercase allowed; no quotation marks around the whole message; no numbering of
-items inside a message; never mention models, tiers, cost, rating or difficulty; code fences only for bands 51+ and
-task types 1-5; no secrets of any shape, real or fake; no real people or companies; URLs only at example.com;
+items inside a message; never mention models, tiers, cost, rating or difficulty; code fences only when the message is over 50 words and the task is a bug fix, a new feature, a refactor, tests or debugging a failure; no secrets of any shape, real or fake; no real people or companies; URLs only at example.com;
 items in this call must differ in vocabulary and sentence shape.
 Digest schema (JSON, <= 400 chars): {"project","turn":first|follow_up|plan_approval|after_error|after_test_run,
-"files_touched":0-6,"last_tool_outcome":none|ok|error|test_fail,"branch_state":clean|dirty|pr_open,"referent":str|null}
+"files_touched":0-6, "last_tool_outcome":none|ok|error|test_fail,"branch_state":clean|dirty|pr_open,"referent":str|null}
 Output: one JSON object per line: {"idx","prompt","digest"}. Nothing else.
 ```
 Intended-difficulty phrases (frozen): haiku-intent "a small, well-bounded change that one careful read settles";

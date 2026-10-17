@@ -49,6 +49,7 @@ def executed_routes(
             "window_hours": window_hours,
             "total": sum(by_provider.values()),
             "by_provider": by_provider,
+            "local_by_cause": _local_by_cause(con, cols, provenance, window_hours),
         }
     except (sqlite3.Error, OSError):
         return None
@@ -58,6 +59,41 @@ def executed_routes(
                 con.close()
             except sqlite3.Error:
                 pass
+
+
+def _local_by_cause(con, cols: set, provenance: str, window_hours: float) -> dict[str, int]:
+    """Split the served-local count by why local served (F23): ``bench`` (a benched provider was
+    skipped), ``last_resort`` (D-116: a non-local entry was skipped or failed first),
+    ``other_skip`` (something else was skipped), ``policy`` (nothing skipped: local was the
+    chain's own choice), ``unknown`` (the row predates ``skipped_json`` or its writer kept no
+    skip list). One cause per row, first match wins in that order. Same window, provenance and
+    real-decision filter as ``executed_routes``."""
+    from llm_router import skip_causes as sc
+    from llm_router.qa_policy import QA_STRIP_PROVIDERS
+
+    out = {c: 0 for c in sc.CAUSES}
+    local = sorted(QA_STRIP_PROVIDERS)
+    marks = ",".join("?" for _ in local)
+    if "skipped_json" in cols and "served_by_last_resort" in cols:
+        case = (
+            "CASE WHEN skipped_json IS NULL THEN 'unknown' "
+            "WHEN skipped_json LIKE '%\"reason\":\"bench\"%' THEN 'bench' "
+            "WHEN served_by_last_resort = 1 THEN 'last_resort' "
+            "WHEN skipped_json != '[]' THEN 'other_skip' "
+            "ELSE 'policy' END"
+        )
+    else:
+        case = "'unknown'"
+    rows = con.execute(
+        f"SELECT {case}, COUNT(*) FROM routing_decisions "
+        "WHERE timestamp >= datetime('now', ?) "
+        f"{provenance} AND ({real_decision_sql(con)}) "
+        f"AND COALESCE(final_provider, '') IN ({marks}) GROUP BY 1",
+        (f"-{window_hours} hours", *local),
+    ).fetchall()
+    for cause, n in rows:
+        out[cause] = int(n)
+    return out
 
 
 def executed_provider_rows(result: dict) -> list[tuple[str, int]]:
@@ -80,6 +116,15 @@ def format_executed_routes(result: dict | None, window_hours: float = 24.0) -> s
     for label, n in executed_provider_rows(result):
         parts.append(f"{label} {n}")
     return " · ".join(parts)
+
+
+def format_local_by_cause(result: dict | None) -> str:
+    """``local by cause: policy 3 bench 2 ...`` (zero causes omitted), or ``""`` when no local
+    route was served or there is no data. A separate line, so the executed header keeps its form."""
+    by_cause = (result or {}).get("local_by_cause") or {}
+    if not sum(by_cause.values()):
+        return ""
+    return "local by cause: " + " ".join(f"{c} {n}" for c, n in by_cause.items() if n)
 
 
 def _home():

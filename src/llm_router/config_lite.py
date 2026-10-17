@@ -41,7 +41,9 @@ def _dotenv_names(path: Path, field: str) -> bool:
     keys (every API-key file) cannot change this field, so it no longer forces the
     pydantic import (D-171 S3: a state ``.env`` is the usual case on a real install)."""
     try:
-        if not path.exists():
+        from llm_router.paths import regular_file_or_none
+
+        if regular_file_or_none(path) is None:  # missing, FIFO, device or dir: never opened (F15)
             return False
         pat = re.compile(r"^\s*(?:export\s+)?" + re.escape(field) + r"\s*(?:[=:]|$)", re.I | re.M)
         return bool(pat.search(path.read_text(encoding="utf-8", errors="replace")))
