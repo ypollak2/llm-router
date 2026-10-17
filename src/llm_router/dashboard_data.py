@@ -48,7 +48,6 @@ from llm_router import paths
 from llm_router.savings import (
     ELIGIBLE_TURN_PRED_SQL,
     REALIZED_MODE,
-    VERIFIED_CALLS_SQL,
     savings_split_sql,
 )
 
@@ -74,7 +73,7 @@ def _sum_where(cols, col: str, pred: str) -> str:
 #: surface cannot drift from the ledger writer or the session-end hook.
 _BASELINE_MODEL = _pricing.savings_baseline_model()
 
-WindowLiteral = Literal["today", "week", "month", "lifetime", "14d"]
+WindowLiteral = Literal["today", "week", "month", "lifetime", "14d", "6h", "24h", "7d"]
 
 def _default_db_path():
     return paths.state_path("usage.db")
@@ -120,6 +119,9 @@ def _window_sql(window: WindowLiteral) -> str:
     mapping = {
         "today":    "date(timestamp,'localtime')=date('now','localtime')",
         "week":     "timestamp >= datetime('now','-7 days')",
+        "7d":       "timestamp >= datetime('now','-7 days')",
+        "24h":      "timestamp >= datetime('now','-24 hours')",
+        "6h":       "timestamp >= datetime('now','-6 hours')",
         "month":    "timestamp >= datetime('now','start of month')",
         "lifetime": "1=1",
         "14d":      "timestamp >= datetime('now','-14 days')",
@@ -383,6 +385,7 @@ def query_window(
     window: WindowLiteral,
     *,
     db_path: Path | str | None = None,
+    now: float | None = None,
 ) -> WindowTotals:
     """Return aggregate calls/tokens/savings for ``window`` across all sources.
 
@@ -406,175 +409,23 @@ def query_window(
       whose provenance isn't established production traffic; it no longer
       promotes a row to verified.
     """
+    from llm_router import ledger_view as _lv
+
     db = Path(db_path) if db_path else _default_db_path()
-    if not db.exists():
-        return WindowTotals(
-            window=window, calls=0, tokens=0, saved_usd=0.0, **_coverage_fields()
-        )
-
-    where = _window_sql(window)
-    conn = sqlite3.connect(str(db))
-    by_source: dict[str, dict] = {}
-    total_calls = total_tokens = 0
-    total_saved = 0.0
-    total_cost = 0.0
-    unverified_saved = 0.0
-    unverified_calls = 0
-    verified_calls = 0
-    uncosted: list[str] = []
-    try:
-        # Legacy ``usage`` table — recalculate savings from in/out at Opus rates.
-        # Opus: $15/M input, $75/M output.  Stored saved_usd used a blended
-        # $0.045/1K estimate that is inaccurate for input-heavy calls.
-        # Subscription provider rows have no meaningful token cost so exclude them.
-        # RED8-01: these were hardcoded at $15/$75 — the retired Opus 3 rate,
-        # 3x the real one — and this read path feeds ~26 reporting surfaces, so
-        # every savings figure downstream was overstated by the same factor.
-        # Sourced from llm_router.pricing now; a literal here fails scripts/lint_pricing.py.
-        _OPUS_IN_PER_M = _pricing.input_rate(_BASELINE_MODEL)
-        _OPUS_OUT_PER_M = _pricing.output_rate(_BASELINE_MODEL)
-        if _table_exists(conn, _LEGACY_TABLE):
-            cols = _columns(conn, _LEGACY_TABLE)
-            prod = _production_pred(cols)
-            row = conn.execute(  # nosec B608 — table/where are module constants & validated enum, not user input
-                f"SELECT COUNT(*), "
-                f"{_sum_if_present(cols, 'input_tokens')}, "
-                f"{_sum_if_present(cols, 'output_tokens')}, "
-                f"{_sum_if_present(cols, 'cost_usd')}, "
-                f"{_sum_where(cols, 'input_tokens', prod)}, "
-                f"{_sum_where(cols, 'output_tokens', prod)}, "
-                f"{_sum_where(cols, 'cost_usd', prod)}, "
-                f"COALESCE(SUM(CASE WHEN {prod} THEN 1 ELSE 0 END),0) "
-                f"FROM {_LEGACY_TABLE} "
-                f"WHERE success=1 AND (provider IS NULL OR provider != 'subscription') AND {where}"
-            ).fetchone()
-            calls = int(row[0])
-            in_tok = int(row[1])
-            out_tok = int(row[2])
-            cost = float(row[3])
-            prod_calls = int(row[7])
-
-            def _baseline(i, o):
-                return (int(i) * _OPUS_IN_PER_M + int(o) * _OPUS_OUT_PER_M) / 1_000_000
-            # PR6 / North Star 8+12: `usage` carries no "used" column, so it can
-            # never say the draft REPLACED Claude's turn — only savings_stats's
-            # mode='block' (savings.VERIFIED_SAVED_SQL, PR #147) can. A production
-            # row here is therefore UNVERIFIED, never added to `total_saved`.
-            # `_production_pred` is now purely a drop filter: non-production rows
-            # (ACC-01's sentinel/unknown-provenance rows) are excluded from the
-            # money figure entirely rather than folded into "unverified" — a
-            # fixture row counted as a real, if unconfirmed, user saving would be
-            # the same defect ACC-01 fixed for the verified headline.
-            saved = _baseline(row[4], row[5]) - float(row[6])
-            unverified_saved += saved
-            unverified_calls += prod_calls
-            by_source[_LEGACY_TABLE] = {
-                "calls": calls, "tokens": in_tok + out_tok,
-                "cost_usd": cost, "saved_usd": 0.0,
-            }
-            total_calls += calls
-            total_tokens += in_tok + out_tok
-            total_cost += cost  # the one table with a genuine cost column
-
-        # Per-platform tables — tokens_used + cost_saved_usd.
-        for table in _PLATFORM_TABLES:
-            if not _table_exists(conn, table):
-                continue
-            prod = _production_pred(_columns(conn, table))
-            row = conn.execute(
-                f"SELECT COUNT(*), "
-                f"COALESCE(SUM(tokens_used),0), "
-                f"COALESCE(SUM(CASE WHEN {prod} THEN cost_saved_usd ELSE 0 END),0), "
-                f"COALESCE(SUM(CASE WHEN {prod} THEN 1 ELSE 0 END),0) "
-                f"FROM {table} WHERE {where}"
-            ).fetchone()
-            calls = int(row[0])
-            tokens = int(row[1])
-            saved = float(row[2])
-            prod_calls = int(row[3])
-            # Same reasoning as the legacy `usage` table above: no "used" column,
-            # so a production row's saving is UNVERIFIED, never verified.
-            # Non-production rows are dropped, not folded into "unverified".
-            unverified_saved += saved
-            unverified_calls += prod_calls
-            by_source[table] = {
-                "calls": calls, "tokens": tokens, "saved_usd": 0.0,
-            }
-            total_calls += calls
-            total_tokens += tokens
-            # `cost_saved_usd` is a SAVINGS column. This table records no spend,
-            # so it contributes none — and says so rather than implying $0.00.
-            if calls:
-                uncosted.append(table)
-
-        # ``savings_stats`` — DIRECT-routed (free-provider) calls. Token columns
-        # added in v7.4; older DBs lack them, so sum defensively.
-        if _table_exists(conn, _JSONL_TABLE):
-            cols = _columns(conn, _JSONL_TABLE)
-            verified_sql, unverified_sql, unverified_n_sql = savings_split_sql(cols)
-            # Same column gate savings_split_sql applies to VERIFIED_SAVED_SQL:
-            # a table predating host/model_used/mode cannot say a row was
-            # verified, so its verified-row COUNT is 0, not "every row".
-            verified_n_sql = (
-                VERIFIED_CALLS_SQL
-                if {"host", "model_used", "timestamp", "mode"} <= cols
-                else "0"
-            )
-            # Measured 2026-09-27: 17% of savings_stats (1,559 of 9,057 rows)
-            # is test traffic, and unlike `usage`/`claude_usage`/`codex_usage`/
-            # `gemini_usage` above — which all gate their money sums through
-            # `_production_pred` — this block summed verified/unverified money
-            # with NO provenance filter at all. A test row could reach the
-            # headline through this table alone. `_production_pred` is applied
-            # the same way it is for every other table: it drops a row from
-            # the money figures, it never promotes one to verified.
-            prod = _production_pred(cols)
-            verified_sql = f"(CASE WHEN {prod} THEN ({verified_sql}) ELSE 0 END)"
-            unverified_sql = f"(CASE WHEN {prod} THEN ({unverified_sql}) ELSE 0 END)"
-            unverified_n_sql = f"(CASE WHEN {prod} THEN ({unverified_n_sql}) ELSE 0 END)"
-            verified_n_sql = f"(CASE WHEN {prod} THEN ({verified_n_sql}) ELSE 0 END)"
-            row = conn.execute(  # nosec B608 — table/where are module constants & validated enum, not user input
-                f"SELECT COUNT(*), "
-                f"COALESCE(SUM({verified_sql}),0), "
-                f"{_sum_if_present(cols, 'input_tokens')}, "
-                f"{_sum_if_present(cols, 'output_tokens')}, "
-                f"COALESCE(SUM({unverified_sql}),0), "
-                f"COALESCE(SUM({unverified_n_sql}),0), "
-                f"COALESCE(SUM({verified_n_sql}),0) "
-                f"FROM {_JSONL_TABLE} WHERE {where}"
-            ).fetchone()
-            calls = int(row[0])
-            saved = float(row[1])
-            tokens = int(row[2]) + int(row[3])
-            jsonl_unverified_saved = float(row[4])
-            jsonl_unverified_calls = int(row[5])
-            jsonl_verified_calls = int(row[6])
-            unverified_saved += jsonl_unverified_saved
-            unverified_calls += jsonl_unverified_calls
-            verified_calls += jsonl_verified_calls
-            by_source[_JSONL_TABLE] = {
-                "calls": calls, "tokens": tokens, "saved_usd": saved,
-                "unverified_saved_usd": jsonl_unverified_saved,
-                "unverified_calls": jsonl_unverified_calls,
-                "verified_calls": jsonl_verified_calls,
-            }
-            total_calls += calls
-            total_tokens += tokens
-            total_saved += saved
-    finally:
-        conn.close()
-
+    # P3.4-A: the SQL and the window arithmetic live in ledger_view (one definition per metric).
+    # ``week`` is the 7-day rolling window under its table name; ``month`` starts at LOCAL midnight.
+    m = _lv.money_window(_lv.resolve(window, now=now), db_path=db)
     return WindowTotals(
         window=window,
-        calls=total_calls,
-        tokens=total_tokens,
-        saved_usd=total_saved,
-        cost_usd=total_cost,
-        uncosted_sources=tuple(uncosted),
-        by_source=by_source,
-        unverified_saved_usd=unverified_saved,
-        unverified_calls=unverified_calls,
-        verified_calls=verified_calls,
+        calls=m.calls,
+        tokens=m.tokens,
+        saved_usd=m.verified_usd,
+        cost_usd=m.cost_usd,
+        uncosted_sources=tuple(m.uncosted),
+        by_source=m.by_source,
+        unverified_saved_usd=m.unverified_usd,
+        unverified_calls=m.unverified_calls,
+        verified_calls=m.verified_calls,
         **_coverage_fields(),
     )
 
@@ -914,8 +765,12 @@ def _window_epoch_bounds(window: WindowLiteral) -> tuple[float, float]:
         local_now = datetime.now().astimezone()
         local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
         return local_midnight.timestamp(), local_now.timestamp()
-    if window == "week":
+    if window in ("week", "7d"):
         return (now_utc - timedelta(days=7)).timestamp(), now_utc.timestamp()
+    if window == "24h":
+        return (now_utc - timedelta(hours=24)).timestamp(), now_utc.timestamp()
+    if window == "6h":
+        return (now_utc - timedelta(hours=6)).timestamp(), now_utc.timestamp()
     if window == "month":
         start_of_month = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         return start_of_month.timestamp(), now_utc.timestamp()
@@ -1144,6 +999,12 @@ class Summary:
     #: recorded at all — neither verified nor unverified, per S9.
     unmeasured_n: int
     by_model: dict = field(default_factory=dict)
+    #: P3.4-A: the window's executed-by-provider / mix / saved figures, from ``ledger_view``.
+    ledger: "object | None" = None
+
+    def ledger_line(self) -> str:
+        """The one printed ledger line (``ledger_view.format_line``); empty without a ledger."""
+        return self.ledger.line() if self.ledger is not None else ""
 
     def headline(self) -> str:
         """BOTH figures, side by side, so routing activity is visible instead
@@ -1226,6 +1087,7 @@ def summary(
     *,
     db_path: Path | str | None = None,
     totals: WindowTotals | None = None,
+    now: float | None = None,
 ) -> Summary:
     """THE canonical summary. Every surface showing a savings headline calls
     this — ``llm-router status``, ``llm-router savings-report``,
@@ -1242,7 +1104,9 @@ def summary(
     """
     window: WindowLiteral = _PERIOD_ALIASES.get(period, period)  # type: ignore[assignment]
     if totals is None:
-        totals = query_window(window, db_path=db_path)
+        totals = query_window(window, db_path=db_path, now=now)
+    from llm_router import ledger_view as _lv
+    ledger = _lv.window_summary(window, now=now, db_path=db_path)
     metric = query_primary_metric(
         "lifetime" if window == "lifetime" else window, db_path=db_path
     )
@@ -1257,6 +1121,7 @@ def summary(
         routed_n=totals.calls,
         unmeasured_n=metric.unmeasured_n,
         by_model=model_stats["by_model"],
+        ledger=ledger,
     )
 
 

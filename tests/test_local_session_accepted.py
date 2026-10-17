@@ -422,7 +422,7 @@ def test_other_kpis_are_byte_identical_with_attributable_accepted_local_answers(
     rest = [ln for ln in full if ln not in o3_lines and not ln.startswith("local (shadow): ")
             # P0.14-a: new, time-dependent proxy ledger liveness line; not in the golden.
             # P0.5-b: per-project semantic-cache block reads usage.db; not in the golden either.
-            and not ln.startswith(("proxy_rows_24h:", "WARN proxy ledger",
+            and not ln.startswith(("proxy_rows_24h:", "WARN proxy ledger", "  ledger ",  # P3.4-A: ledger_view line
                                    "semantic cache (= result cache)"))]
     # P0.9-g: the sync-hook wall/live gate lines are new and outside "kpis"; not in the golden.
     from llm_router import hook_wall

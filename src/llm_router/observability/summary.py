@@ -18,7 +18,6 @@ basic `llm_router --help` stays snappy.
 """
 from __future__ import annotations
 
-import sqlite3
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -32,7 +31,6 @@ from llm_router.savings import (
     CanonicalSavings,
     is_verified_saving,
     label_money,
-    savings_split_sql,
     under_subscription,
     unverified_note,
 )
@@ -133,6 +131,9 @@ class SessionSummaryData:
     lineage_unmeasured_count: int = 0
     executed: dict | None = None
     executed_window_hours: float = 24.0
+    #: P3.4-A: executed-by-provider / local-paid mix / saved / n for the window, from
+    #: ``ledger_view`` (never from the capped lineage rows above). ``ledger.line()`` is printed.
+    ledger: object | None = None
 
     @property
     def health(self) -> str:
@@ -240,62 +241,17 @@ def _usage_db_path() -> Path:
 def _verified_savings_window(
     since_seconds: float | None,
 ) -> tuple[float, int, float, int]:
-    """(verified_usd, verified_n, unverified_usd, unverified_n) from
-    ``savings_stats`` for rows newer than ``since_seconds`` (None = all-time).
-
-    Reuses savings.py's own SQL predicate (``savings_split_sql`` ->
-    VERIFIED_SAVED_SQL / UNVERIFIED_SAVED_SQL / UNVERIFIED_CALLS_SQL) rather
-    than a second copy of it — the same constants
-    ``commands/savings_report.py`` and ``cost.get_lifetime_savings_summary``
-    already query with. Excludes ``is_simulated`` rows the same way those two
-    surfaces do (a benchmark run inflating an unlabelled "verified" figure is
-    the exact incident savings.py's module docstring records).
-
-    Read-only, sync, stdlib ``sqlite3`` — same connection shape as
-    ``observability.surface_status._read_stats_records`` — so ``collect()``
-    stays synchronous, touches no network, and never CREATES
-    ``~/.llm-router/usage.db`` as a side effect of a status read (an
-    ``aiosqlite`` connection via ``cost._get_db()`` would). Missing db/table
-    -> all zeros, not an exception: a summary with nothing routed yet is not
-    a failure.
+    """(verified_usd, verified_n, unverified_usd, unverified_n) for the last ``since_seconds``
+    (None = all-time), from ``ledger_view.money_window`` (P3.4-A): the same figure
+    ``dashboard_data.summary`` shows for the same window, over ``usage``, the platform tables
+    and ``savings_stats``, production provenance only. Read-only, never creates the database;
+    a missing database or table is all zeros.
     """
-    db_path = _usage_db_path()
-    if not db_path.is_file():
-        return 0.0, 0, 0.0, 0
-    try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.0)
-    except sqlite3.Error:
-        return 0.0, 0, 0.0, 0
-    try:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(savings_stats)")}
-        if not cols:
-            return 0.0, 0, 0.0, 0
-        verified_sql, unverified_sql, unverified_n_sql = savings_split_sql(cols)
-        where, params = "", ()
-        has_is_simulated = "is_simulated" in cols
-        if has_is_simulated:
-            where = "WHERE COALESCE(is_simulated, 1) = 0"
-        if since_seconds is not None and "timestamp" in cols:
-            cutoff_iso = datetime.fromtimestamp(
-                time.time() - since_seconds, tz=timezone.utc
-            ).isoformat()
-            where = f"{where} {'AND' if where else 'WHERE'} timestamp >= ?"
-            params = (cutoff_iso,)
-        row = conn.execute(
-            f"SELECT COUNT(*), COALESCE(SUM({verified_sql}), 0), "
-            f"COALESCE(SUM({unverified_sql}), 0), "
-            f"COALESCE(SUM({unverified_n_sql}), 0) "
-            f"FROM savings_stats {where}",
-            params,
-        ).fetchone()
-    finally:
-        conn.close()
-    if not row:
-        return 0.0, 0, 0.0, 0
-    total_n, verified_usd, unverified_usd, unverified_n = row
-    unverified_n = int(unverified_n or 0)
-    verified_n = max(0, int(total_n or 0) - unverified_n)
-    return float(verified_usd or 0.0), verified_n, float(unverified_usd or 0.0), unverified_n
+    from llm_router import ledger_view as lv
+
+    bounds = lv.resolve("lifetime") if since_seconds is None else lv.rolling(since_seconds / 3600.0)
+    m = lv.money_window(bounds, db_path=_usage_db_path())
+    return m.verified_usd, m.verified_calls, m.unverified_usd, m.unverified_calls
 
 
 def _verified_and_unverified_strings(data: SessionSummaryData) -> tuple[str, str]:
@@ -348,6 +304,10 @@ def collect(
     data = SessionSummaryData()
     data.executed_window_hours = since_seconds / 3600 if since_seconds else 24.0
     data.executed = executed_routes(data.executed_window_hours)
+    from llm_router import ledger_view as lv
+    data.ledger = lv.window_summary(
+        lv.resolve("lifetime") if since_seconds is None else lv.rolling(data.executed_window_hours),
+        db_path=_usage_db_path())
     if not rows:
         return data
 
@@ -662,8 +622,9 @@ def render(data: SessionSummaryData, *, console=None) -> None:
         ("  ·  ", "dim"),
         (f"{data.total_latency_ms / max(1, data.total_decisions):.0f} ms avg", "dim"),
     )
+    ledger_text = ([Text(data.ledger.line(), style="dim")] if data.ledger is not None else [])
     headline = Panel(
-        Group(*headline_lines, spend_line, decisions_line),
+        Group(*headline_lines, spend_line, decisions_line, *ledger_text),
         title=f"{_LLM_ROUTER_PANEL_PREFIX}Headline",
         border_style="bright_blue",
         padding=(1, 2),
@@ -948,6 +909,8 @@ def render_markdown(data: SessionSummaryData) -> str:
         f"**{_fmt_cost(data.savings_usd)} ({data.savings_pct * 100:.0f}%)**"
     )
     out.append(f"- **Executed routes:** {format_executed_routes(data.executed, data.executed_window_hours)}")
+    if data.ledger is not None:
+        out.append(f"- **{data.ledger.line()}**")
     _cause_line = format_local_by_cause(data.executed)
     if _cause_line:
         out.append(f"- **Local share by cause:** {_cause_line.removeprefix('local by cause: ')}")

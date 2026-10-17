@@ -1461,6 +1461,12 @@ def _period_for_days(days: int) -> str:
     return "all"
 
 
+def _ledger_window_for_days(days: int) -> str:
+    """The ``ledger_view`` named window for a ``--days`` value (P3.4-A): the same table every
+    other surface resolves its period against. ``week`` is the rolling 7 days."""
+    return {"day": "today", "week": "7d", "month": "month", "all": "lifetime"}[_period_for_days(days)]
+
+
 def _o1_reconciled(days: int, win: "_Window | None" = None) -> dict | None:
     """O1 from the proxy ledger's REAL per-call usage (``proxy.cost_accounting``),
     over sessions whose every row carries cost fields and passes the ledger's
@@ -1511,7 +1517,7 @@ def _o1_quota_avoided(days: int, win: "_Window | None" = None) -> dict:
         from llm_router.dashboard_data import newest_timestamp, summary
 
         period = _period_for_days(days)
-        s = summary(period)
+        s = summary(_ledger_window_for_days(days))
         n = s.estimated_n
         newest = newest_timestamp()
     except Exception as exc:  # noqa: BLE001
@@ -1526,6 +1532,22 @@ def _o1_quota_avoided(days: int, win: "_Window | None" = None) -> dict:
     if n < MIN_N:
         return _too_few(n, newest_ts=newest) | {"value": f"{TOO_FEW} ({display}, n={n})"}
     return _measured(note, n, newest_ts=newest, estimated_usd=s.estimated_usd)
+
+
+def _ledger_line(days: int, win: "_Window | None") -> str:
+    """The ledger line for the scorecard's window (P3.4-A): ``ledger_view``'s named window, or the absolute
+    ``--since/--until`` window. The same string ``dashboard_data.summary`` and ``llm-router
+    summary`` print for the same window; empty when the ledger cannot be read."""
+    try:
+        from llm_router import ledger_view as lv
+
+        if win is None:
+            bounds = lv.resolve(_ledger_window_for_days(days))
+        else:
+            bounds = lv.Bounds("custom", f"{_iso(win.since)}..{_iso(win.until)}", win.since, win.until)
+        return lv.window_summary(bounds).line()
+    except Exception:  # noqa: BLE001 -- read-only command: report nothing rather than raise
+        return ""
 
 
 # ── O2 / D5: frozen benchmark only ────────────────────────────────────────────
@@ -2615,6 +2637,7 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
                                   identity_out=identity_r)
     g3_r["lines"] = _g3_prd_lines(g3_r["prd"])
     o1_r = _o1_quota_avoided(days, win)
+    ledger_line = _ledger_line(days, win)
     bench = _load_benchmark()
     o2_r = _o2_quality_held(bench)
     d5_r = _d5_classifier_accuracy(bench)
@@ -2631,6 +2654,10 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         "window_days": days,
         "include_research": include_research,
         "joins": joins,
+        # P3.4-A: executed by provider / local-paid mix / saved / n for the window, from
+        # `ledger_view`: the same line `dashboard_data.summary` and `llm-router summary` print.
+        # Outside "kpis" (informational; _ORDER and --health are unchanged).
+        "ledger": {"line": ledger_line},
         # PLAN v16 P1.10-a: per-writer share of rows with session_id and a real task_id. Outside "kpis".
         "identity": identity_r,
         "verify_shadow": _verify_shadow(unit_list, win),
@@ -2786,6 +2813,8 @@ def render_scorecard(data: dict) -> str:
             v = data["verify_shadow"]
             lines.append(f"      verify (shadow): {v['verified']} verified, {v['weak']} weak, "
                          f"{v['fail']} failed, {v['unavailable']} unavailable (informational; not in NS/D1/D2)")
+    if (data.get("ledger") or {}).get("line"):
+        lines.append(f"  {data['ledger']['line']}")
     for key, r in (data.get("kpis_diag") or {}).items():
         if not r.get("measurable"):
             continue  # nothing to compare: the card stays as it was

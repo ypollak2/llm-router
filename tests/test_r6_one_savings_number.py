@@ -104,6 +104,8 @@ _ACCESSOR_MODULES = {
     "llm_router/cost.py",
     "llm_router/savings.py",
     "llm_router/dashboard_data.py",
+    # P3.4-A: dashboard_data.query_window's SQL moved here (one definition per ledger metric).
+    "llm_router/ledger_view.py",
     "llm_router/execution_ledger.py",
     "llm_router/quota_savings.py",
     "llm_router/tiers.py",

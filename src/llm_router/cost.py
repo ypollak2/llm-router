@@ -4336,8 +4336,8 @@ def refresh_baseline_pricing_from_api() -> bool:
 async def get_savings_by_period(*, include_simulated: bool = False) -> dict[str, dict]:
     """Return time-bucketed savings aggregates for the savings dashboard.
 
-    Queries the usage table for four periods: today, this week (Mon–Sun),
-    this calendar month, and all-time. For each period returns:
+    Queries the usage table (via ``ledger_view``) for four periods: today (local
+    midnight), the rolling 7 days (``week``), this calendar month (local), and all-time. For each period returns:
         saved_usd:    total dollars saved vs Opus baseline
         actual_usd:   total dollars actually spent on paid API calls
         baseline_usd: what Opus would have cost for the same tokens
@@ -4347,91 +4347,70 @@ async def get_savings_by_period(*, include_simulated: bool = False) -> dict[str,
     Rows with saved_usd populated (v2.1+) use that directly. Pre-v2.1 rows
     fall back to estimating the Opus baseline from token counts.
     """
-    db = await _get_db()
-    try:
-        # Build period boundaries as SQLite datetime expressions. timestamp is
-        # stored UTC; compare in the user's LOCAL timezone (both column and
-        # boundary get 'localtime') so "today"/"week"/"month" line up with the
-        # user's wall clock instead of UTC — otherwise savings for the last N
-        # hours before local midnight leak into the wrong period.
-        periods = {
-            "today": "date('now','localtime')",
-            "week": "date('now','localtime', 'weekday 0', '-6 days')",
-            "month": "date('now','localtime', 'start of month')",
-            "all_time": "'1970-01-01'",
+    # P3.4-A: window arithmetic and the usage read live in `ledger_view` (one definition per
+    # metric). `week` is the rolling 7 days (it was since-Monday); "today"/"month" are LOCAL.
+    # The schema/migrations are still applied first, exactly as before.
+    from llm_router import ledger_view as _lv
+
+    _db = await _get_db()
+    await _db.close()
+    _path = get_config().llm_router_db_path
+    result: dict[str, dict] = {}
+    for name, window in (("today", "today"), ("week", "7d"), ("month", "month"),
+                         ("all_time", "lifetime")):
+        rows = _lv.usage_period_rows(_lv.resolve(window), db_path=_path,
+                                     include_simulated=include_simulated) or []
+        actual = baseline = saved_total = 0.0
+        calls = 0
+        subscription_calls = 0   # T-26: counted, not silently merged
+        for provider, in_tok, out_tok, cost in rows:
+            in_tok = in_tok or 0
+            out_tok = out_tok or 0
+            cost = cost or 0.0
+            # T-26 (audit 2026-09-22). `calls` was incremented BEFORE the
+            # subscription skip, so `calls` counted rows the dollar figures
+            # then ignored: a period's "N calls, $X saved" quoted two
+            # different populations, and the efficiency multiplier divided
+            # one by the other. Both now describe the same rows, and the
+            # skipped ones are reported separately rather than folded in.
+            if provider == "subscription":
+                subscription_calls += 1
+                continue  # CC subscription rows have no token cost data
+            calls += 1
+            # Always recalculate from actual in/out counts at Opus rates.
+            # Stored saved_col used a blended $0.045/1K estimate; accurate
+            # pricing requires separate input/output rates ($5/M and $25/M
+            # for the latest Opus — see _OPUS_PRICING).
+            host_est = (in_tok * _HOST_INPUT_PER_M + out_tok * _HOST_OUTPUT_PER_M) / 1_000_000
+            baseline += host_est
+            if provider in _FREE_PROVIDERS:
+                saved_total += host_est
+            else:
+                actual += cost
+                saved_total += net_saved(host_est, cost)
+
+        efficiency = baseline / actual if actual > 0.001 else 0.0
+        # RETROSPECTIVE B-7: report two figures, never conflated.
+        #  - baseline_avoided_usd: Opus-baseline vs actual (== legacy saved_usd).
+        #  - real_dollars_avoided_usd: dollars the user would ACTUALLY have paid.
+        #    ~$0 on a flat-rate subscription (host call is marginal-$0); equals
+        #    the baseline figure only in metered API mode.
+        real_avoided = saved_total if _host_is_metered() else 0.0
+        result[name] = {
+            "saved_usd": round(saved_total, 4),  # back-compat alias
+            "baseline_avoided_usd": round(saved_total, 4),
+            "real_dollars_avoided_usd": round(real_avoided, 4),
+            "actual_usd": round(actual, 4),
+            "baseline_usd": round(baseline, 4),
+            "calls": calls,
+            # T-26: rows the dollar figures deliberately exclude,
+            # reported rather than merged into `calls`. "12 calls, $0
+            # saved" with no explanation is how a working install reads
+            # as idle.
+            "subscription_calls": subscription_calls,
+            "efficiency": round(efficiency, 1),
         }
-        # C-02. `include_simulated` mirrors `summarize(include_unevaluable=...)`:
-        # a named escape hatch for tests that exercise the aggregate arithmetic
-        # over rows they wrote themselves (every such row is stamped synthetic,
-        # because pytest sets PYTEST_CURRENT_TEST). No production caller passes
-        # it, and the default stays exclusive.
-        # T13, fail-closed. `IS NOT 1` admits NULL, so an UNKNOWN row counted as
-        # production -- the same defect as `is_evaluable` treating a missing field
-        # as real. Only rows explicitly stamped 0 at write time are production.
-        _sim_clause = "" if include_simulated else "AND is_simulated = 0"
-
-        result: dict[str, dict] = {}
-        for name, since_expr in periods.items():
-            rows = await db.execute_fetchall(
-                f"""SELECT provider, input_tokens, output_tokens, cost_usd, saved_usd
-                    FROM usage
-                    WHERE date(timestamp,'localtime') >= {since_expr}
-                      AND success = 1
-                      {_sim_clause}""",
-            )
-            actual = baseline = saved_total = 0.0
-            calls = 0
-            subscription_calls = 0   # T-26: counted, not silently merged
-            for provider, in_tok, out_tok, cost, saved_col in rows:
-                in_tok = in_tok or 0
-                out_tok = out_tok or 0
-                cost = cost or 0.0
-                # T-26 (audit 2026-09-22). `calls` was incremented BEFORE the
-                # subscription skip, so `calls` counted rows the dollar figures
-                # then ignored: a period's "N calls, $X saved" quoted two
-                # different populations, and the efficiency multiplier divided
-                # one by the other. Both now describe the same rows, and the
-                # skipped ones are reported separately rather than folded in.
-                if provider == "subscription":
-                    subscription_calls += 1
-                    continue  # CC subscription rows have no token cost data
-                calls += 1
-                # Always recalculate from actual in/out counts at Opus rates.
-                # Stored saved_col used a blended $0.045/1K estimate; accurate
-                # pricing requires separate input/output rates ($5/M and $25/M
-                # for the latest Opus — see _OPUS_PRICING).
-                host_est = (in_tok * _HOST_INPUT_PER_M + out_tok * _HOST_OUTPUT_PER_M) / 1_000_000
-                baseline += host_est
-                if provider in _FREE_PROVIDERS:
-                    saved_total += host_est
-                else:
-                    actual += cost
-                    saved_total += net_saved(host_est, cost)
-
-            efficiency = baseline / actual if actual > 0.001 else 0.0
-            # RETROSPECTIVE B-7: report two figures, never conflated.
-            #  - baseline_avoided_usd: Opus-baseline vs actual (== legacy saved_usd).
-            #  - real_dollars_avoided_usd: dollars the user would ACTUALLY have paid.
-            #    ~$0 on a flat-rate subscription (host call is marginal-$0); equals
-            #    the baseline figure only in metered API mode.
-            real_avoided = saved_total if _host_is_metered() else 0.0
-            result[name] = {
-                "saved_usd": round(saved_total, 4),  # back-compat alias
-                "baseline_avoided_usd": round(saved_total, 4),
-                "real_dollars_avoided_usd": round(real_avoided, 4),
-                "actual_usd": round(actual, 4),
-                "baseline_usd": round(baseline, 4),
-                "calls": calls,
-                # T-26: rows the dollar figures deliberately exclude,
-                # reported rather than merged into `calls`. "12 calls, $0
-                # saved" with no explanation is how a working install reads
-                # as idle.
-                "subscription_calls": subscription_calls,
-                "efficiency": round(efficiency, 1),
-            }
-        return result
-    finally:
-        await db.close()
+    return result
 
 
 async def get_model_failure_rates(window_days: int = 30) -> dict[str, float]:
