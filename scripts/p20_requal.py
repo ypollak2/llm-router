@@ -36,6 +36,7 @@ AMEND1 = REPO / "docs/prereg/PREREG-P20-requal-AMEND1.md"
 AMEND2 = REPO / "docs/prereg/PREREG-P20-requal-AMEND2.md"
 AMEND3 = REPO / "docs/prereg/PREREG-P20-requal-AMEND3.md"
 AMEND4 = REPO / "docs/prereg/PREREG-P20-requal-AMEND4.md"
+AMEND5 = REPO / "docs/prereg/PREREG-P20-requal-AMEND5.md"
 # AMEND3 (D-202): the exclusive lock a local model call holds; the P2.0-T harness takes the same
 # one (fcntl.flock LOCK_EX on this path). Tests point Cfg.lock_path or this name elsewhere.
 OLLAMA_LOCK = Path.home() / ".rsi/research/primary-plan/v16/requal/ollama.lock"
@@ -132,6 +133,10 @@ AMEND3_SHA_KEYS = AMEND2_SHA_KEYS
 # AMEND4: the harness fix (AMEND3 is a plain merge; it must not drop AMEND2's ID_ pin) and a
 # re-pin of REPO_SHA. It sets no other key.
 AMEND4_SHA_KEYS = {"REPO_SHA": r"[0-9a-f]{40}"}
+# AMEND5: the free-memory floor counts the arm's own resident model as available (a loaded
+# qwen3.8 at 32k context takes ~51% of RAM, so the raw floor parked every call after warm-up).
+AMEND5_FIXED = {"QUIET_FREE_MEM_BASIS": "excl_own_arm"}
+AMEND5_SHA_KEYS = {"REPO_SHA": r"[0-9a-f]{40}"}
 
 
 def amended(constants: dict, overrides: dict) -> dict:
@@ -425,8 +430,42 @@ def frozen(cfg: Cfg) -> dict:
                 raise Refuse("refusing: PREREG-AMEND4.md differs")
             constants = {**constants, **fourth_overrides}
             out.update(amend4_sha256=fourth["sha256"], amend4_frozen_utc=fourth["frozen_utc"])
+            if cfg.amend5.with_suffix(".sha256").exists():
+                # AMEND5 is in force as soon as its sidecar exists; a draft without one is not.
+                try:
+                    fifth = check_prereg.check(cfg.amend5)
+                    if not fifth["match"]:
+                        raise ValueError("freeze")
+                    fifth_text = cfg.amend5.read_text()
+                except (OSError, ValueError, IndexError, OverflowError) as exc:
+                    raise Refuse("refusing: AMEND5 is not frozen") from exc
+                try:
+                    fifth_epoch = datetime.fromisoformat(fifth["frozen_utc"].replace("Z", "+00:00"))
+                    if (fifth_epoch.tzinfo is None
+                            or not fourth_epoch.timestamp() < fifth_epoch.timestamp() < cfg.now()):
+                        raise ValueError("freeze order")
+                except (ValueError, OverflowError) as exc:
+                    raise Refuse("refusing: AMEND5 frozen_utc") from exc
+                try:
+                    fifth_overrides = parse_block(fifth_text, "```text P20-AMEND5-CONSTANTS")
+                    if (fifth_overrides.keys() != AMEND5_FIXED.keys() | AMEND5_SHA_KEYS.keys()
+                            or any(fifth_overrides[k] != v for k, v in AMEND5_FIXED.items())
+                            or not all(re.fullmatch(pattern, fifth_overrides[k])
+                                       for k, pattern in AMEND5_SHA_KEYS.items())):
+                        raise ValueError("constants")
+                except (Refuse, ValueError) as exc:
+                    raise Refuse("refusing: AMEND5 constants") from exc
+                fifth_copy = cfg.run_dir / "PREREG-AMEND5.md"
+                if fifth_copy.exists() and fifth_copy.read_bytes() != cfg.amend5.read_bytes():
+                    raise Refuse("refusing: PREREG-AMEND5.md differs")
+                constants = {**constants, **fifth_overrides}
+                out.update(amend5_sha256=fifth["sha256"], amend5_frozen_utc=fifth["frozen_utc"])
+        elif cfg.amend5.with_suffix(".sha256").exists():
+            raise Refuse("refusing: AMEND5 requires a frozen AMEND4")
     elif cfg.amend4.with_suffix(".sha256").exists():
         raise Refuse("refusing: AMEND4 requires a frozen AMEND3")
+    elif cfg.amend5.with_suffix(".sha256").exists():
+        raise Refuse("refusing: AMEND5 requires a frozen AMEND4")
     out["constants"] = constants
     return out
 
@@ -489,6 +528,7 @@ class Cfg:
     amend2: Path = AMEND2
     amend3: Path = AMEND3
     amend4: Path = AMEND4
+    amend5: Path = AMEND5
     lock_path: Path | None = None
     local_used: set = dc_field(default_factory=set)
     gate: Callable[[dict], None] | None = None
@@ -534,6 +574,11 @@ class OllamaHTTP:
 
     def ps(self) -> list[str]:
         return [row["name"] for row in self.request("/api/ps").get("models", [])]
+
+    def resident_bytes(self, model: str) -> int:
+        """AMEND5: bytes Ollama reports resident for `model` (0 when it is not loaded)."""
+        return sum(int(row.get("size", 0)) for row in self.request("/api/ps").get("models", [])
+                   if row.get("name") == model)
 
 
 def claude_settings(run_dir: Path) -> Path:
@@ -590,6 +635,11 @@ class Machine:
 
     def load1(self) -> float:
         return os.getloadavg()[0]
+
+    def total_bytes(self) -> int:
+        result = subprocess.run(["sysctl", "-n", "hw.memsize"], stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=60, check=True)
+        return int(result.stdout)
 
 
 def read_quota() -> dict | None:
@@ -825,23 +875,34 @@ def call_model(cfg: Cfg, c: dict, name: str, arm: str, ident: str, attempt: int,
 
 
 def quiet(cfg: Cfg, c: dict, arm: str) -> dict:
-    """The quiet gate (AMEND3: any time of day). Returns the readings it passed on."""
+    """The quiet gate (AMEND3: any time of day). Returns the readings it passed on.
+    AMEND5: with QUIET_FREE_MEM_BASIS=excl_own_arm the floor applies to free memory plus the
+    arm's own resident model (as a share of RAM); the raw reading is still recorded."""
+    own_basis = c.get("QUIET_FREE_MEM_BASIS") == "excl_own_arm"
     free_all: list[float] = []
     load_all: list[float] = []
+    own_all: list[float] = []
     for reading in range(int(c["QUIET_READINGS"])):
         if reading:
             cfg.sleep(float(c["QUIET_INTERVAL_S"]))
         free, load = cfg.machine.free_mem_pct(), cfg.machine.load1()
+        own = (100.0 * cfg.ollama.resident_bytes(arm) / cfg.machine.total_bytes()
+               if own_basis else 0.0)
         if (not math.isfinite(free) or not math.isfinite(load)
-                or free < float(c["QUIET_FREE_MEM_MIN_PCT"])
+                or not math.isfinite(own) or own < 0
+                or free + own < float(c["QUIET_FREE_MEM_MIN_PCT"])
                 or load >= float(c["QUIET_LOAD1_MAX"])):
             raise Park("machine not quiet")
         free_all.append(free)
         load_all.append(load)
+        own_all.append(own)
     resident = cfg.ollama.ps()
     if any(model != arm for model in resident):
         raise Park("foreign model resident")
-    return {"free_mem_pct": free_all, "load1": load_all, "resident": resident}
+    readings = {"free_mem_pct": free_all, "load1": load_all, "resident": resident}
+    if own_basis:
+        readings["own_resident_pct"] = own_all
+    return readings
 
 
 @contextlib.contextmanager
@@ -1184,6 +1245,7 @@ def score(cfg: Cfg, c: dict, freeze: dict, measurement: Path | None = None) -> d
               "amend2_sha256": freeze["amend2_sha256"],
               **({"amend3_sha256": freeze["amend3_sha256"]} if "amend3_sha256" in freeze else {}),
               **({"amend4_sha256": freeze["amend4_sha256"]} if "amend4_sha256" in freeze else {}),
+              **({"amend5_sha256": freeze["amend5_sha256"]} if "amend5_sha256" in freeze else {}),
               "git_sha": cfg.git_sha(),
               "selection_sha256": optional_hash(cfg.run_dir / "selection.json"),
               "answers_sha256": combined_hash(cfg, "answers"),

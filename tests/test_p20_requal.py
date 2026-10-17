@@ -156,6 +156,22 @@ def freeze_amend4(cfg, *, text=None, date=AMEND4_PAST):
     )
 
 
+AMEND5_PAST = "2030-02-01T00:00:00Z"
+
+
+def amend5_text(**values):
+    block = {**h.AMEND5_FIXED, "REPO_SHA": "9" * 40, **values}
+    return ("# AMEND5\n\n```text P20-AMEND5-CONSTANTS\n"
+            + "".join(f"{k}={v}\n" for k, v in block.items()) + "```\n")
+
+
+def freeze_amend5(cfg, *, text=None, date=AMEND5_PAST):
+    cfg.amend5.write_text(text if text is not None else amend5_text())
+    cfg.amend5.with_suffix(".sha256").write_text(
+        f"{h.sha256_file(cfg.amend5)}  {cfg.amend5.name}\nfrozen_utc {date}\n"
+    )
+
+
 def effective(constants):
     """The constants frozen() returns for the factory's prereg, AMEND1 and AMEND2."""
     return h.amended({**constants, "REPO_SHA": "a" * 40}, {
@@ -179,6 +195,11 @@ class Ollama:
 
     def ps(self):
         return self.resident
+
+    def resident_bytes(self, model):
+        return self.size if model in self.resident else 0
+
+    size = 0
 
     def chat(self, model, messages, *, timeout, options, think):
         self.calls.append((model, messages, timeout, options))
@@ -238,6 +259,9 @@ class Machine:
     def load1(self):
         return self.load
 
+    def total_bytes(self):
+        return 48 * 2**30
+
 
 @pytest.fixture
 def factory(tmp_path):
@@ -253,6 +277,7 @@ def factory(tmp_path):
             git_sha=lambda: "deadbeef", amend1=run_dir / "AMEND1.md",
             amend2=run_dir / "AMEND2.md", amend3=run_dir / "AMEND3.md",
             amend4=run_dir / "AMEND4.md",
+            amend5=run_dir / "AMEND5.md",
             gate=lambda constants: None,
         )
         pools = {s: pool_rows(s, 30 if small and s == "qa" else 75 if s == "code" else 130)
@@ -1464,3 +1489,105 @@ def test_without_amend4_sidecar_behaviour_is_unchanged(factory):
     assert set(got) == {"sha256", "frozen_utc", "amend1_sha256", "amend1_frozen_utc",
                         "amend2_sha256", "amend2_frozen_utc", "amend3_sha256",
                         "amend3_frozen_utc", "constants"}
+
+
+# AMEND5: the free-memory floor counts the arm's own resident model as available.
+def test_amend5_frozen_enforcement(factory):
+    cfg, c, _ = factory()
+    freeze_amend3(cfg, c)
+    freeze_amend5(cfg)
+    with pytest.raises(h.Refuse, match="AMEND5 requires a frozen AMEND4"):
+        h.frozen(cfg)
+    freeze_amend4(cfg)
+    got = h.frozen(cfg)
+    assert got["amend5_sha256"] == h.sha256_file(cfg.amend5)
+    assert got["amend5_frozen_utc"] == AMEND5_PAST
+    assert got["constants"]["QUIET_FREE_MEM_BASIS"] == "excl_own_arm"
+    assert got["constants"]["REPO_SHA"] == "9" * 40
+    assert got["constants"][f"ID_{h.QWEN38}"]  # AMEND2's pin survives every merge
+    (cfg.run_dir / "PREREG-AMEND5.md").write_text("different")
+    with pytest.raises(h.Refuse, match="PREREG-AMEND5.md differs"):
+        h.frozen(cfg)
+    (cfg.run_dir / "PREREG-AMEND5.md").unlink()
+    cases = [
+        (dict(date=AMEND4_PAST), "AMEND5 frozen_utc"),
+        (dict(date="2031-01-01T00:00:00Z"), "AMEND5 frozen_utc"),
+        (dict(date="2030-02-01T00:00:00"), "AMEND5 frozen_utc"),
+        (dict(text=amend5_text(QUIET_FREE_MEM_BASIS="raw")), "AMEND5 constants"),
+        (dict(text=amend5_text(QUIET_FREE_MEM_MIN_PCT="10")), "AMEND5 constants"),
+        (dict(text=amend5_text(REPO_SHA="zz")), "AMEND5 constants"),
+        (dict(text="# AMEND5\n```text P20-AMEND5-CONSTANTS\nREPO_SHA=" + "9" * 40 + "\n```\n"),
+         "AMEND5 constants"),
+    ]
+    for kwargs, message in cases:
+        freeze_amend5(cfg, **kwargs)
+        with pytest.raises(h.Refuse, match=message):
+            h.frozen(cfg)
+    freeze_amend5(cfg)
+    cfg.amend5.write_text(cfg.amend5.read_text() + " ")
+    with pytest.raises(h.Refuse, match="AMEND5 is not frozen"):
+        h.frozen(cfg)
+    cfg.amend3.with_suffix(".sha256").unlink()
+    cfg.amend4.with_suffix(".sha256").unlink()
+    with pytest.raises(h.Refuse, match="AMEND5 requires a frozen AMEND4"):
+        h.frozen(cfg)
+
+
+def test_amend5_quiet_counts_only_the_arms_own_model(factory):
+    arm = h.QWEN38
+    cfg, c, _ = factory()
+    cfg.ollama.size = 24 * 2**30  # 50% of the fake 48 GiB
+    cfg.machine.free = [27.0]
+    cfg.ollama.resident = [arm]
+    with pytest.raises(h.Park, match="machine not quiet"):  # raw basis (AMEND3/4)
+        h.quiet(cfg, c, arm)
+    c5 = {**c, **h.AMEND5_FIXED}
+    got = h.quiet(cfg, c5, arm)
+    assert got["free_mem_pct"] == [27.0] * 3 and got["own_resident_pct"] == [50.0] * 3
+    cfg.ollama.resident = []  # same free memory, but nothing of ours is resident
+    with pytest.raises(h.Park, match="machine not quiet"):
+        h.quiet(cfg, c5, arm)
+    cfg.ollama.resident = ["foreign"]  # a foreign model's memory never counts
+    with pytest.raises(h.Park, match="machine not quiet"):
+        h.quiet(cfg, c5, arm)
+    cfg.machine.free = [80.0]
+    with pytest.raises(h.Park, match="foreign model resident"):
+        h.quiet(cfg, c5, arm)
+    cfg.ollama.resident = [arm]
+    cfg.machine.free = [-60.0]  # own share can lift a reading, never a negative one past the floor
+    with pytest.raises(h.Park, match="machine not quiet"):
+        h.quiet(cfg, c5, arm)
+    cfg.machine.free = [float("nan")]
+    with pytest.raises(h.Park, match="machine not quiet"):
+        h.quiet(cfg, c5, arm)
+
+
+@pytest.mark.parametrize("amend5", [False, True])
+def test_amend5_run_survives_own_model_residency(factory, amend5):
+    """The bug AMEND5 fixes: loading the arm drops raw free memory under the floor, so every
+    call after the warm-up parked (rc 3) and no answer row was ever written."""
+    arm = h.QWEN38
+    cfg, c, _ = selected_run(factory)
+    freeze_amend3(cfg, c)
+    freeze_amend4(cfg)
+    if amend5:
+        freeze_amend5(cfg)
+    cfg.ollama.ids[arm] = set(c[f"ID_{arm}"].split(","))
+    cfg.ollama.size = 24 * 2**30
+    original = cfg.ollama.chat
+
+    def chat(model, messages, **kw):
+        cfg.ollama.resident = [model]
+        return original(model, messages, **kw)
+
+    cfg.ollama.chat = chat
+    cfg.machine.free_mem_pct = lambda: 27.0 if cfg.ollama.resident else 80.0
+    rc = call(cfg, "run", "--set", "qa", "--arms", arm)
+    rows = h.jsonl(cfg.run_dir / "answers/qa.jsonl")
+    if not amend5:
+        assert rc == 3 and rows == []
+        return
+    assert rc == 0 and rows and all(r["arm"] == arm for r in rows)
+    quiet_rows = h.jsonl(cfg.run_dir / "quiet.jsonl")
+    assert quiet_rows[0]["own_resident_pct"] == [0.0] * 3  # warm-up: not yet loaded
+    assert all(r["own_resident_pct"] == [50.0] * 3 for r in quiet_rows[1:])
