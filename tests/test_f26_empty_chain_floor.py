@@ -385,6 +385,13 @@ async def test_long_research_prompt_on_the_incident_machine_is_answered_by_the_f
     finally:
         con.close()
     assert rows and rows[-1][:2] == ("premium", f"ollama/{LOCAL}") and rows[-1][2] != "error_exception", rows
+    # F26 SHOULD 1: the floor tier is on the routing row (the report split is unit-tested below)
+    con = sqlite3.connect(str(machine.db))
+    try:
+        sk = con.execute("SELECT skipped_json FROM routing_decisions WHERE task_type='research'").fetchall()
+    finally:
+        con.close()
+    assert sk and '"reason":"floor"' in sk[-1][0] and '"tier":"local"' in sk[-1][0], sk
 
 
 @pytest.mark.asyncio
@@ -396,3 +403,68 @@ async def test_nothing_reachable_still_raises_naming_the_chain(machine):
         await router.route_and_call(TaskType.ANALYZE, "analyse x", profile=RoutingProfile.PREMIUM)
     assert (ei.value.task_type, ei.value.profile) == (TaskType.ANALYZE, RoutingProfile.PREMIUM)
     assert "analyze/premium" in str(ei.value)
+
+
+# -- F26 repair: the tier is persisted through the F23 skip-cause API; API keys; the probe --
+
+@pytest.mark.asyncio
+async def test_floor_notes_a_floor_cause_with_the_tier_and_non_floor_notes_none(machine):
+    from llm_router import skip_causes
+
+    cfg = machine(codex=False, ollama=True, subscription=True)
+    skip_causes.begin()
+    await _chain(TaskType.RESEARCH, RoutingProfile.PREMIUM, cfg)
+    floor = [e for e in skip_causes.entries_so_far() if e["reason"] == skip_causes.FLOOR]
+    assert floor == [{"model": "floor/local", "reason": "floor", "tier": "local"}], skip_causes.entries_so_far()
+    skip_causes.begin()
+    await _chain(TaskType.QUERY, RoutingProfile.BALANCED, cfg)  # non-empty without the floor
+    assert not [e for e in skip_causes.entries_so_far() if e["reason"] == skip_causes.FLOOR]
+    skip_causes.begin()
+    await _chain(TaskType.RESEARCH, RoutingProfile.PREMIUM, cfg, last_resort_floor=False)
+    assert not [e for e in skip_causes.entries_so_far() if e["reason"] == skip_causes.FLOOR]
+
+
+def test_report_floor_cause_wins_and_other_rows_keep_their_cause(tmp_path):
+    import sqlite3
+
+    from llm_router import routing_report
+
+    db = tmp_path / "usage.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE routing_decisions (timestamp TEXT, final_provider TEXT, skipped_json TEXT, "
+                "served_by_last_resort INTEGER, provenance TEXT)")
+    rows = [
+        ('[{"model":"floor/local","reason":"floor","tier":"local"}]', 0),
+        ('[{"model":"codex/x","reason":"bench"},{"model":"floor/local","reason":"floor","tier":"local"}]', 0),
+        ("[]", 0),
+        ('[{"model":"codex/x","reason":"bench"}]', 0),
+        (None, None),
+    ]
+    for sk, lr in rows:
+        con.execute("INSERT INTO routing_decisions VALUES (datetime('now'), 'ollama', ?, ?, 'runtime')", (sk, lr))
+    con.commit()
+    con.close()
+    cause = routing_report._local_by_cause(sqlite3.connect(db), {"skipped_json", "served_by_last_resort",
+                                                                   "provenance"}, "AND provenance = 'runtime'", 1)
+    assert cause["floor"] == 2 and cause["policy"] == 1 and cause["bench"] == 1 and cause["unknown"] == 1, cause
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("codex,ollama", [(False, False), (True, True)])
+async def test_api_key_present_without_subscription_only_configured_providers(machine, monkeypatch, codex, ollama):
+    """No subscription but one API key: the floor offers that provider (and local/Codex when up) and no
+    unconfigured paid provider; no anthropic (no key, no subscription)."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
+    cfg = machine(codex=codex, ollama=ollama, subscription=False)
+    seen = 0
+    for profile, task in itertools.product(PROFILES, TEXT):
+        chain = await _chain(task, profile, cfg)
+        provs = {_prov(m) for m in chain}
+        where = f"{profile.value}/{task.value}: {chain}"
+        assert provs <= {"openai", "ollama", "codex"}, where
+        assert ("ollama" in provs) <= ollama and ("codex" in provs) <= codex, where
+        assert "anthropic" not in provs and "gemini" not in provs, where
+        if not (codex or ollama):
+            assert not chain or provs == {"openai"}, where
+        seen += bool(chain)
+    assert seen > 0  # the key made at least one chain reachable

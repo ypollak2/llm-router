@@ -201,7 +201,7 @@ def test_report_splits_local_share_by_cause(tmp_path):
     con.close()
     res = executed_routes(24.0, db_path=p)
     assert res["by_provider"]["ollama"] == 8
-    assert res["local_by_cause"] == {"policy": 3, "bench": 2, "last_resort": 1, "other_skip": 1, "unknown": 1}
+    assert res["local_by_cause"] == {"policy": 3, "floor": 0, "bench": 2, "last_resort": 1, "other_skip": 1, "unknown": 1}
     assert format_local_by_cause(res) == "local by cause: policy 3 bench 2 last_resort 1 other_skip 1 unknown 1"
     assert format_local_by_cause({"local_by_cause": {}}) == ""
 

@@ -63,7 +63,8 @@ def executed_routes(
 
 def _local_by_cause(con, cols: set, provenance: str, window_hours: float) -> dict[str, int]:
     """Split the served-local count by why local served (F23): ``bench`` (a benched provider was
-    skipped), ``last_resort`` (D-116: a non-local entry was skipped or failed first),
+    skipped), ``floor`` (F26: the chain was empty and the last-resort floor answered; wins over the
+    others), ``last_resort`` (D-116: a non-local entry was skipped or failed first),
     ``other_skip`` (something else was skipped), ``policy`` (nothing skipped: local was the
     chain's own choice), ``unknown`` (the row predates ``skipped_json`` or its writer kept no
     skip list). One cause per row, first match wins in that order. Same window, provenance and
@@ -77,6 +78,7 @@ def _local_by_cause(con, cols: set, provenance: str, window_hours: float) -> dic
     if "skipped_json" in cols and "served_by_last_resort" in cols:
         case = (
             "CASE WHEN skipped_json IS NULL THEN 'unknown' "
+            "WHEN skipped_json LIKE '%\"reason\":\"floor\"%' THEN 'floor' "
             "WHEN skipped_json LIKE '%\"reason\":\"bench\"%' THEN 'bench' "
             "WHEN served_by_last_resort = 1 THEN 'last_resort' "
             "WHEN skipped_json != '[]' THEN 'other_skip' "

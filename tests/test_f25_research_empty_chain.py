@@ -163,6 +163,7 @@ async def test_reachable_premium_research_chain_is_still_chosen(env):
 
 @pytest.mark.asyncio
 async def test_the_reachability_probe_is_the_router_chain_builder(env):
+    from llm_router import router
     from llm_router.tools import text
 
     cfg = env(installed=False, subscription=False)  # nothing reachable: the floor is empty too
@@ -171,8 +172,11 @@ async def test_the_reachability_probe_is_the_router_chain_builder(env):
     cfg = env(installed=False, subscription=True)
     assert await text._premium_research_reachable(cfg) is True
     env.tables.clear()
-    cfg = env(installed=True)  # F26: an empty table is no longer unreachable while a local model is
-    assert await text._premium_research_reachable(cfg) is True
+    router._FLOOR_TIERS.clear()
+    router._FLOOR_WARNED.clear()
+    cfg = env(installed=True)  # F26: the probe runs with the floor off, so an empty table stays empty
+    assert await text._premium_research_reachable(cfg) is False
+    assert not router._FLOOR_TIERS and not router._FLOOR_WARNED
 
 
 # ── (2) an empty research chain is a refusal with its own reason ────────────

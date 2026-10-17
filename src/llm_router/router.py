@@ -1146,10 +1146,11 @@ def record_floor_tier(task_type: TaskType, profile: RoutingProfile, tier: str) -
     """F26 / D-175: record which floor tier answers an empty chain. Writes the module table and the
     ledger guard (``call_identity.note_ledger_floor_tier``).
 
-    HOOK FOR F23 (skip-cause API on routing rows): when it is on main, emit the cause
-    ``empty_chain_floor:<tier>`` here, in this one function; no other call site needs to change."""
+    Also emits a ``floor`` skip-cause entry carrying the tier (F23 API), so the routing row's
+    ``skipped_json`` shows it and ``routing_report`` splits it out. This is the single hook."""
     _FLOOR_TIERS[(profile.value, task_type.value)] = tier
     _ci_scope.note_ledger_floor_tier(tier)
+    skip_causes.note(f"floor/{tier}", skip_causes.FLOOR, tier=tier)
 
 
 def _empty_chain_floor(
