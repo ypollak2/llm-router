@@ -10,8 +10,14 @@ permissions:
   id-token: write  # required for OIDC trusted publisher
 
 jobs:
+  # P3.2: nothing is published unless the release eval gate passes.
+  eval-gate:
+    name: Release eval gate
+    uses: ./.github/workflows/release.yml
+
   publish:
     name: Build and publish
+    needs: eval-gate
     runs-on: ubuntu-latest
     environment: pypi
 

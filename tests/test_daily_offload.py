@@ -367,9 +367,9 @@ def test_turn_line_counts_first_calls(home):
 
 # ------------------------------------------------------------------ routing_report window
 
-def test_executed_routes_since_until(tmp_path):
+def test_day_local_by_cause_window_half_open(tmp_path):
     from llm_router.cost import CREATE_ROUTING_DECISIONS_TABLE
-    from llm_router.routing_report import executed_routes
+    from llm_router import ledger_view as lv
 
     p = tmp_path / "usage.db"
     con = sqlite3.connect(p)
@@ -381,7 +381,7 @@ def test_executed_routes_since_until(tmp_path):
     con.commit()
     con.close()
     s, e = do.day_bounds(LAST)
-    assert executed_routes(24.0, db_path=p, since=s, until=e)["by_provider"] == {"ollama": 2}
+    assert sum(lv.local_by_cause(lv.Bounds("day", "d", s, e - 1), db_path=p).values()) == 2
 
 
 # ------------------------------------------------------------------ CLI

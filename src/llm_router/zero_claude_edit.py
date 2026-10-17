@@ -426,26 +426,18 @@ _EDIT_SYSTEM_PROMPT = (
 )
 
 
-def edit_model() -> str:
-    """The local model this lever calls — qwen3.5 unless overridden.
+def edit_model() -> str | None:
+    """The local model this lever calls, or None when there is none.
 
-    ``LLM_ROUTER_OLLAMA_MODEL`` (the same override every other direct-execution
-    path in this hook honours) wins when set. Otherwise the best INSTALLED
-    model preferring the qwen3.5 family, via ``model_discovery.first_installed``
-    — never a hardcoded name that might not be pulled (that module's own
-    docstring: a hardcoded default that is not installed 404s silently).
+    ``model_discovery.local_model()``: the user's ``LLM_ROUTER_OLLAMA_MODEL`` when it is
+    installed, else the first discovered model, else None (the caller skips local).
+    Never a name from code -- a hardcoded default that is not pulled 404s silently.
     """
-    override = os.environ.get("LLM_ROUTER_OLLAMA_MODEL", "").strip()
-    if override:
-        return override
     try:
         from llm_router import model_discovery
-        found = model_discovery.first_installed(prefer=("qwen3.5", "qwen3-coder", "qwen3.8"))
-        if found:
-            return found
+        return model_discovery.local_model()
     except Exception:                                            # noqa: BLE001
-        pass
-    return "qwen3.5:latest"
+        return None
 
 
 def generate_edits(
@@ -641,6 +633,8 @@ def maybe_replace(
         )
 
     model = edit_model()
+    if model is None:
+        return ScopedEditOutcome("fallthrough", "ZERO_CLAUDE_EDIT: no local model discovered")
 
     # Ollama availability gate — same signals direct_executor.execute_chain
     # uses (§2.4): an unpulled or unreachable model 404s, which must not

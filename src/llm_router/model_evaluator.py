@@ -244,14 +244,10 @@ async def evaluate_available_models(task_types: list[str] = None) -> EvaluationR
     # Find available Ollama models
     ollama_models = []
     if cfg.ollama_base_url:
-        ollama_models = [
-            "qwen3.5:latest",
-            "qwen3-coder-next",
-            "kimi-k2.6:cloud",
-            "qwen2.5:latest",
-            "gemma4:latest",
-        ]
-    
+        # The user's own installed models (discovery), never a list from code.
+        from llm_router.model_discovery import available_ollama_models
+        ollama_models = list(available_ollama_models())
+
     # Evaluate each model on each task type
     for task_type in task_types:
         log.info(f"Evaluating models on '{task_type}' task...")

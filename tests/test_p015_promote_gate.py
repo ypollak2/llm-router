@@ -485,6 +485,7 @@ CALLERS: dict[tuple[str, str, str, int], tuple[str, str]] = {
     ("src/llm_router/zero_claude_edit.py", "maybe_replace", "available_ollama_models", 0): ("existence", "is the configured edit model installed"),
     ("src/llm_router/judge.py", "_select_judge_model", "get_cached_ollama_models", 0): ("existence", "picks a grader for a stored row, not a routed answer"),
     ("src/llm_router/hooks/direct_executor.py", "execute_chain", "available_ollama_models", 0): ("existence", "is each chain entry pulled; adds none"),
+    ("src/llm_router/model_evaluator.py", "evaluate_available_models", "available_ollama_models", 0): ("existence", "which installed models to benchmark; builds no chain"),
     ("src/llm_router/model_discovery.py", "first_installed", "available_ollama_models", 0): ("existence", "auxiliary pick (warm-up, compressor), not a routing chain"),
     ("src/llm_router/providers.py", "_ollama_window_candidates", "available_ollama_models", 0): ("order", "P1.3 bigger-window pick: order_for_chain(critical=True), validated ids only"),
     ("src/llm_router/model_discovery.py", "ensure_grandfather", "all_openai_compat_models", 0): ("existence", "first-run grandfather input (P0.15-2); records ids, injects nothing"),

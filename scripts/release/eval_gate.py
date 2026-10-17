@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+"""Release eval gate: paired comparator (PLAN v16 P3.2, decision D-192).
+
+Exit codes: 0 PASS, 1 BLOCK (a measured regression), 2 NOT INFORMATIVE (the
+evidence cannot support a verdict; this FAILS the release, it is not a pass).
+
+Rules, per manifest set (formats in release_evals.py):
+  performance  paired candidate vs baseline on the SAME item ids. b = items the
+               baseline passed and the candidate failed, c = the reverse.
+               drop = (b - c) / n. BLOCK iff drop > 3.0 points, strictly.
+               Exact McNemar p, Newcombe paired CI, discordant rate and n are
+               printed. Exact integer/Fraction arithmetic decides the verdict, so
+               3.0 exactly never blocks and 3.0000000000000004 cannot appear.
+  fidelity     PACK vs FULL within one sha. BLOCK iff (worse - better) / n > 0.02,
+               worse = PACK failed where FULL passed.
+  stability    share of items whose two decisions are identical. BLOCK iff < 0.98.
+
+NOT INFORMATIVE: no manifests; a manifest that is malformed or has n below its
+min_n; a set missing from the candidate (or, for performance, the baseline);
+duplicate, missing or extra item ids; a recorded n that differs from the manifest.
+
+POWER NOTE (printed on every run): this is a point-estimate guard. At n=60 only a
+drop of roughly 10 points or more is detectable; a PASS is not evidence of no
+regression below that. It never replaces looking at the CI.
+
+--skip-quality policy (used by pre-release-verify.sh via `skip-check`): refused on a
+tag (GITHUB_REF is refs/tags/*, or HEAD carries a tag) unless
+LLM_ROUTER_RELEASE_OWNER_OVERRIDE=1. Off a tag the skip is allowed and appended to a log.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import subprocess
+import sys
+from fractions import Fraction
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from release_evals import load_manifests, manifest_problems  # noqa: E402
+
+from llm_router.eligibility import _Z95, _wilson  # noqa: E402
+
+DROP_BLOCK_PTS = Fraction(3)       # performance: block iff drop strictly above this
+FIDELITY_MAX = Fraction(2, 100)    # (worse - better) / n must be <= this
+STABILITY_MIN = Fraction(98, 100)  # identical-decision share must be >= this
+POWER_NOTE = ("point-estimate guard: at n=60 only a drop of roughly 10+ points is "
+              "detectable; PASS does not show absence of a smaller regression")
+
+PASS, BLOCK, NOT_INFORMATIVE = 0, 1, 2
+
+
+class NotInformative(Exception):
+    pass
+
+
+# ── statistics ────────────────────────────────────────────────────────────────
+
+def mcnemar_exact_p(b: int, c: int) -> float:
+    """Two-sided exact McNemar (binomial, p=0.5) on the discordant pairs."""
+    m = b + c
+    if m == 0:
+        return 1.0
+    k = min(b, c)
+    tail = sum(math.comb(m, i) for i in range(k + 1))
+    return min(1.0, 2 * tail / 2 ** m)
+
+
+def newcombe_paired_ci(a: int, b: int, c: int, d: int, z: float = _Z95) -> tuple[float, float]:
+    """Newcombe (1998) method 10: CI for p1 - p2 from a PAIRED 2x2 table, using the
+    Wilson intervals from eligibility.py plus the phi correlation correction.
+    a = both pass, b = baseline-only pass, c = candidate-only pass, d = both fail.
+    p1 = baseline pass rate, p2 = candidate pass rate; the interval is for the drop."""
+    n = a + b + c + d
+    if n <= 0:
+        raise ValueError("empty table")
+    p1, p2 = (a + b) / n, (a + c) / n
+    l1, u1 = _wilson(a + b, n, z)
+    l2, u2 = _wilson(a + c, n, z)
+    den = math.sqrt((a + b) * (c + d) * (a + c) * (b + d))
+    phi = 0.0 if den == 0 else max(-1.0, min(1.0, (a * d - b * c) / den))
+    delta = p1 - p2
+    lo_sq = (p1 - l1) ** 2 - 2 * phi * (p1 - l1) * (u2 - p2) + (u2 - p2) ** 2
+    hi_sq = (u1 - p1) ** 2 - 2 * phi * (u1 - p1) * (p2 - l2) + (p2 - l2) ** 2
+    return delta - math.sqrt(max(0.0, lo_sq)), delta + math.sqrt(max(0.0, hi_sq))
+
+
+# ── loading and validation ────────────────────────────────────────────────────
+
+def _items_by_id(set_id: str, items: list[dict], manifest: dict, who: str) -> dict[str, dict]:
+    ids = [i.get("id") for i in items]
+    dup = sorted({i for i in ids if ids.count(i) > 1})
+    if dup:
+        raise NotInformative(f"{set_id}: duplicate item ids in {who}: {dup[:3]}")
+    want = set(manifest["item_ids"])
+    have = set(ids)
+    if want - have:
+        raise NotInformative(f"{set_id}: {len(want - have)} item(s) missing from {who}, e.g. "
+                             f"{sorted(want - have)[:3]}")
+    if have - want:
+        raise NotInformative(f"{set_id}: {len(have - want)} item(s) in {who} not in the manifest, "
+                             f"e.g. {sorted(have - want)[:3]}")
+    if len(items) != manifest["n"]:
+        raise NotInformative(f"{set_id}: n={len(items)} in {who} but the manifest says {manifest['n']}")
+    if len(items) < manifest["min_n"]:
+        raise NotInformative(f"{set_id}: n={len(items)} in {who} is below min_n={manifest['min_n']}")
+    return {i["id"]: i for i in items}
+
+
+def _set_items(doc: dict, set_id: str, who: str) -> list[dict]:
+    s = (doc.get("sets") or {}).get(set_id)
+    if s is None:
+        raise NotInformative(f"{set_id}: set missing from {who}")
+    items = s.get("items")
+    if not isinstance(items, list):
+        raise NotInformative(f"{set_id}: {who} items is not a list")
+    return items
+
+
+# ── per-kind verdicts ─────────────────────────────────────────────────────────
+
+def judge_performance(manifest: dict, cand_items: list[dict], base_items: list[dict]) -> tuple[int, str]:
+    sid = manifest["set_id"]
+    cand = _items_by_id(sid, cand_items, manifest, "candidate")
+    base = _items_by_id(sid, base_items, manifest, "baseline")
+    a = b = c = d = 0
+    for i in manifest["item_ids"]:
+        bp, cp = bool(base[i]["pass"]), bool(cand[i]["pass"])
+        if bp and cp:
+            a += 1
+        elif bp:
+            b += 1
+        elif cp:
+            c += 1
+        else:
+            d += 1
+    n = a + b + c + d
+    drop = Fraction(b - c, n) * 100
+    lo, hi = newcombe_paired_ci(a, b, c, d)
+    line = (f"{sid} [performance] n={n} baseline-only-pass b={b} candidate-only-pass c={c} "
+            f"discordant={b + c} ({(b + c) / n:.1%}) drop={float(drop):.2f} pts "
+            f"McNemar exact p={mcnemar_exact_p(b, c):.4f} "
+            f"Newcombe paired 95% CI for drop=[{lo * 100:.2f}, {hi * 100:.2f}] pts")
+    if drop > DROP_BLOCK_PTS:
+        return BLOCK, f"BLOCK {line} > {DROP_BLOCK_PTS} pts"
+    return PASS, f"PASS  {line} <= {DROP_BLOCK_PTS} pts"
+
+
+def judge_fidelity(manifest: dict, cand_items: list[dict]) -> tuple[int, str]:
+    sid = manifest["set_id"]
+    items = _items_by_id(sid, cand_items, manifest, "candidate")
+    worse = sum(1 for i in items.values() if i["full"] and not i["pack"])
+    better = sum(1 for i in items.values() if i["pack"] and not i["full"])
+    n = len(items)
+    gap = Fraction(worse - better, n)
+    line = f"{sid} [fidelity] n={n} worse={worse} better={better} (worse-better)/n={float(gap):.4f}"
+    if gap > FIDELITY_MAX:
+        return BLOCK, f"BLOCK {line} > {float(FIDELITY_MAX)}"
+    return PASS, f"PASS  {line} <= {float(FIDELITY_MAX)}"
+
+
+def judge_stability(manifest: dict, cand_items: list[dict]) -> tuple[int, str]:
+    sid = manifest["set_id"]
+    items = _items_by_id(sid, cand_items, manifest, "candidate")
+    same = sum(1 for i in items.values() if i["a"] == i["b"])
+    n = len(items)
+    share = Fraction(same, n)
+    line = f"{sid} [stability] n={n} identical={same} share={float(share):.4f}"
+    if share < STABILITY_MIN:
+        return BLOCK, f"BLOCK {line} < {float(STABILITY_MIN)}"
+    return PASS, f"PASS  {line} >= {float(STABILITY_MIN)}"
+
+
+# ── whole gate ────────────────────────────────────────────────────────────────
+
+def run_gate(candidate: dict, baseline: dict | None, manifests: dict[str, dict],
+             expect_sha: str | None = None) -> tuple[int, list[str]]:
+    lines: list[str] = []
+    worst = PASS
+
+    def record(code: int, text: str) -> None:
+        nonlocal worst
+        lines.append(text)
+        # NOT INFORMATIVE outranks BLOCK outranks PASS.
+        if code == NOT_INFORMATIVE or (code == BLOCK and worst != NOT_INFORMATIVE):
+            worst = code
+
+    if not manifests:
+        record(NOT_INFORMATIVE, "NOT INFORMATIVE no manifests: an empty set of sets passes nothing")
+    if expect_sha is not None and candidate.get("sha") != expect_sha:
+        record(NOT_INFORMATIVE, f"NOT INFORMATIVE candidate file is for sha {candidate.get('sha')!r}, "
+                                f"expected {expect_sha!r}")
+    for sid, m in sorted(manifests.items()):
+        bad = manifest_problems(m)
+        if bad:
+            record(NOT_INFORMATIVE, f"NOT INFORMATIVE {sid}: manifest invalid: " + "; ".join(bad))
+            continue
+        try:
+            cand_items = _set_items(candidate, sid, "candidate")
+            if m["kind"] == "performance":
+                if baseline is None:
+                    raise NotInformative(f"{sid}: no baseline file")
+                code, text = judge_performance(m, cand_items, _set_items(baseline, sid, "baseline"))
+            elif m["kind"] == "fidelity":
+                code, text = judge_fidelity(m, cand_items)
+            else:
+                code, text = judge_stability(m, cand_items)
+        except NotInformative as e:
+            code, text = NOT_INFORMATIVE, f"NOT INFORMATIVE {e}"
+        except (KeyError, TypeError) as e:
+            code, text = NOT_INFORMATIVE, f"NOT INFORMATIVE {sid}: malformed item record ({type(e).__name__}: {e})"
+        record(code, text)
+    verdict = {PASS: "PASS", BLOCK: "BLOCK", NOT_INFORMATIVE: "NOT INFORMATIVE (fails the release)"}[worst]
+    lines.append(f"eval gate: {verdict}")
+    lines.append(f"note: {POWER_NOTE}")
+    return worst, lines
+
+
+# ── --skip-quality policy ─────────────────────────────────────────────────────
+
+def head_is_tagged() -> bool:
+    try:
+        out = subprocess.run(["git", "tag", "--points-at", "HEAD"], capture_output=True,
+                             text=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return bool(out.stdout.strip())
+
+
+def skip_quality_decision(env: dict[str, str], head_tagged: bool) -> tuple[bool, str]:
+    """(allowed, why). Refused on a tag unless the owner override is set to 1."""
+    on_tag = env.get("GITHUB_REF", "").startswith("refs/tags/") or head_tagged
+    if not on_tag:
+        return True, "not a tag: skip allowed"
+    if env.get("LLM_ROUTER_RELEASE_OWNER_OVERRIDE") == "1":
+        return True, "tag: skip allowed only because LLM_ROUTER_RELEASE_OWNER_OVERRIDE=1"
+    return False, ("tag: --skip-quality is refused on a tag; fix the quality bench, or the owner "
+                   "sets LLM_ROUTER_RELEASE_OWNER_OVERRIDE=1")
+
+
+def _cmd_skip_check(a: argparse.Namespace) -> int:
+    allowed, why = skip_quality_decision(dict(os.environ), head_is_tagged())
+    if not allowed:
+        print(f"--skip-quality REFUSED: {why}", file=sys.stderr)
+        return 1
+    stamp = subprocess.run(["date", "-u", "+%Y-%m-%dT%H:%M:%SZ"], capture_output=True, text=True).stdout.strip()
+    log = Path(a.log)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("a") as fh:
+        fh.write(f"{stamp}\t{why}\treason={a.reason}\n")
+    print(f"--skip-quality accepted ({why}); logged to {log}")
+    return 0
+
+
+def _cmd_compare(a: argparse.Namespace) -> int:
+    try:
+        candidate = json.loads(Path(a.candidate).read_text())
+    except (OSError, ValueError) as e:
+        print(f"NOT INFORMATIVE candidate file unreadable: {e}")
+        return NOT_INFORMATIVE
+    baseline = None
+    if a.baseline and Path(a.baseline).is_file():
+        try:
+            baseline = json.loads(Path(a.baseline).read_text())
+        except ValueError as e:
+            print(f"NOT INFORMATIVE baseline file unreadable: {e}")
+            return NOT_INFORMATIVE
+    try:
+        manifests = load_manifests(Path(a.manifests)) if Path(a.manifests).is_dir() else {}
+    except (ValueError, OSError) as e:
+        print(f"NOT INFORMATIVE manifests unreadable: {e}")
+        return NOT_INFORMATIVE
+    code, lines = run_gate(candidate, baseline, manifests, expect_sha=a.sha)
+    print("\n".join(lines))
+    return code
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    c = sub.add_parser("compare", help="run the paired comparator")
+    c.add_argument("--candidate", required=True, help="release_evals/<sha>.json")
+    c.add_argument("--baseline", default="release_evals/baseline.json")
+    c.add_argument("--manifests", default="release_evals/manifests")
+    c.add_argument("--sha", default=None, help="the sha the candidate file must be for")
+    s = sub.add_parser("skip-check", help="apply the --skip-quality tag policy")
+    s.add_argument("--reason", required=True)
+    s.add_argument("--log", default="release-artifacts/skip-quality.log")
+    a = ap.parse_args(argv)
+    return _cmd_compare(a) if a.cmd == "compare" else _cmd_skip_check(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

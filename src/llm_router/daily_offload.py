@@ -248,7 +248,7 @@ def compute_day(day: Date, inputs: Inputs, *, now: float | None = None,
                 local_by_cause=None) -> dict:
     """The row for one UTC ``day`` (see the module docstring). ``partial`` is True when the day has not
     ended at ``now``; the window then ends at ``now``. ``local_by_cause``: None reads ``usage.db``
-    (``routing_report.executed_routes``, F23), or pass a dict / ``False`` (skip)."""
+    (``ledger_view.local_by_cause``, F23), or pass a dict / ``False`` (skip)."""
     from llm_router import offload_share as osh
     from llm_router import session_kind as sk
 
@@ -319,9 +319,9 @@ def compute_day(day: Date, inputs: Inputs, *, now: float | None = None,
                     "counted, never rated"],
     }
     if local_by_cause is None:
-        from llm_router import routing_report
-        r = routing_report.executed_routes(since=start, until=until)
-        local_by_cause = (r or {}).get("local_by_cause") if r else None
+        from llm_router import ledger_view as lv
+        # ledger_view's upper bound is inclusive; end-1 keeps the day half-open at 1 s resolution.
+        local_by_cause = lv.local_by_cause(lv.Bounds("day", f"UTC day {ds}", start, until - 1))
     return {
         "schema": SCHEMA, "date": ds, "tz": "UTC", "window": {"since": start, "until": until},
         "generated_at": datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -330,8 +330,8 @@ def compute_day(day: Date, inputs: Inputs, *, now: float | None = None,
         "synthetic_manifest_ids": len(ids),
         "populations": pops,
         "day_wide": {"local_by_cause": local_by_cause or None,
-                     "local_by_cause_note": "usage.db routed decisions that day; NOT filtered to organic "
-                                            "sessions, cross-check only"},
+                     "local_by_cause_note": "usage.db routing_decisions served local that day (proxy ledger rows are NOT "
+                                            "included); NOT filtered to organic sessions, cross-check only"},
     }
 
 

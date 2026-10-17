@@ -24,7 +24,7 @@ bash scripts/<bucket>/<script>.sh
 
 | Script | Purpose |
 |---|---|
-| `pre-release-verify.sh` | Pre-flight checklist: clean tree, version sync, plugin sync, tests. Run this first. |
+| `release/pre-release-verify.sh` | Pre-flight checklist: clean tree, version sync, plugin sync, tests. Run this first. |
 | `release.sh` | Full release flow — tag, build, sdist leak-check, publish. |
 | `release.py` | Python half of the release flow (changelog/tag/artifact handling). |
 | `verify-release.py` | Post-release verification of the published artifact. |

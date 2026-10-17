@@ -211,6 +211,8 @@ def warm_edit_model_bg(model: str | None = None) -> str | None:
         if model is None:
             from llm_router.zero_claude_edit import edit_model
             model = edit_model()
+        if not model:
+            return None                                  # no local model discovered: nothing to warm
         payload = json.dumps(warmup_payload(model))
         subprocess.Popen(
             [

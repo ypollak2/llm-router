@@ -66,9 +66,14 @@ def _ollama_models(task_type: str = "code", *, critical: bool = True
     ``model_discovery.order_for_chain``; ``LLM_ROUTER_PROMOTE_GATE=off`` puts
     every model in ``front``.
     """
-    from llm_router.model_discovery import available_ollama_models, order_for_chain
+    from llm_router.model_discovery import (
+        available_ollama_models, local_model, order_for_chain, prefer_first)
+    # The user's local model (their setting, else discovery order) leads; nothing is
+    # added or ranked by name, so the promote gate's front/tail split is untouched.
+    installed = list(available_ollama_models())
     front, tail = order_for_chain(
-        [f"ollama/{m}" for m in available_ollama_models()], task_type, critical=critical)
+        [f"ollama/{m}" for m in prefer_first(installed, local_model(installed) or "")],
+        task_type, critical=critical)
     return (
         _demote_unreliable([ModelSpec("ollama", m.removeprefix("ollama/")) for m in front]),
         [ModelSpec("ollama", m.removeprefix("ollama/")) for m in tail],
