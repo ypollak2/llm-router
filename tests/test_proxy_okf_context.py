@@ -337,7 +337,7 @@ def policy(monkeypatch):
     decision = {"task_type": "code", "complexity": "moderate",
                 "chain_head": ["ollama/fake:1"], "model": "ollama/fake:1"}
 
-    async def _choose(text, pinned):
+    async def _choose(text, pinned, **_kw):
         return dict(decision)
 
     monkeypatch.setattr(ps, "choose_model", _choose)
@@ -411,7 +411,7 @@ async def test_pass_through_to_claude_is_never_touched(home, tmp_path, monkeypat
     bytes: no knowledge block, no attach call at all."""
     repo = _repo(tmp_path, "repo-a")
 
-    async def _keep(text, pinned):
+    async def _keep(text, pinned, **_kw):
         return {"task_type": "code", "complexity": "hard", "chain_head": [], "model": None}
 
     monkeypatch.setattr(ps, "choose_model", _keep)

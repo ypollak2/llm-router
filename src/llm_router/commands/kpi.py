@@ -943,7 +943,7 @@ def g3_row_type(row: dict) -> str:
     if reason == pt.REASON_SIDE_CALL:
         return "side_call"
     if reason in (pt.REASON_UNKNOWN_MODEL, pt.REASON_CONFIG_PINNED, pt.REASON_USER_PINNED,
-                  pt.REASON_EXPLICIT_OPUS_PIN):
+                  pt.REASON_EXPLICIT_OPUS_PIN, pt.REASON_EXPLICIT_PREFIX_PIN):
         return "pinned"
     if reason == pt.REASON_DECISION_ERROR:
         return "decision_error"
@@ -2206,6 +2206,38 @@ def _local_answers_result(la: dict, local_no_session: int, *, local_failed: int 
     return out
 
 
+COVERAGE_FILE = "coverage_check.json"
+
+
+def _coverage_summary() -> dict:
+    """``data["coverage"]`` (P2.2-a): the file ``scripts/coverage_check.py --write`` left in the state
+    directory, as written, or ``{"measurable": False, ...}`` when there is none or it is not a result.
+    Never raises: a missing file is the normal state before the first run."""
+    from llm_router import paths
+
+    path = paths.state_path(COVERAGE_FILE)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"measurable": False, "reason": "no coverage_check run"}
+    if not (isinstance(data, dict) and isinstance(data.get("verdict"), str) and isinstance(data.get("n"), int)):
+        return {"measurable": False, "reason": "coverage_check.json is not a coverage_check result"}
+    return data
+
+
+def _coverage_render_lines(cov: dict) -> list[str]:
+    label = "Decision-point coverage (P2.2-a)"
+    if "verdict" not in cov:
+        # No run yet: the key says so, the human output stays as it was (no new line on every card).
+        return []
+    ci = cov.get("wilson95")
+    interval = f", Wilson95 {_pct(ci[0])}-{_pct(ci[1])}" if isinstance(ci, list) and len(ci) == 2 else ""
+    value = "n/a" if cov.get("coverage") is None else _pct(cov["coverage"])
+    window = cov.get("window") or {}
+    return [f"  {label:<42s} {value} ({cov.get('passed')}/{cov.get('n')}{interval}) {cov['verdict']}  "
+            f"[{window.get('since', '?')} .. {window.get('until', '?')}, run {cov.get('generated_at', '?')}]"]
+
+
 def _offload_render_lines(off: dict) -> list[str]:
     """The `offload` block (P1.9) as printed by `kpi`: one line per measure, then the caveats."""
     if "action" not in off:
@@ -2609,6 +2641,8 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         "o3": o3_r,
         # PLAN v16 P1.9: the S1 offload share per action / call / turn, spread, lanes. Outside "kpis" too.
         "offload": _offload_prd(days, allowed, index, all_rows, now_ts, win, o3_r, o3_inputs, o3_thread_of),
+        # P2.2-a: the last `scripts/coverage_check.py --write` result, or an honest "not run". Outside "kpis".
+        "coverage": _coverage_summary(),
         "proxy_local_shadow": _proxy_shadow_summary(days, win),
         # P0.14-a: is the proxy ledger alive? Outside "kpis" (a liveness check, not a KPI).
         "proxy_liveness": _proxy_liveness(now_ts, all_rows,
@@ -2760,6 +2794,8 @@ def render_scorecard(data: dict) -> str:
         lines += _o3_render_lines(data["o3"])
     if data.get("offload") is not None:
         lines += _offload_render_lines(data["offload"])
+    if data.get("coverage") is not None:
+        lines += _coverage_render_lines(data["coverage"])
     lines.append("")
     local_line = _local_shadow_line(data.get("local_shadow"))
     if local_line:

@@ -11,12 +11,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import signal
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+# (old, new) Codex entries already reported by accepted_codex_entry, so a rewrite
+# is logged once per pair, not once per call.
+_REWRITES_LOGGED: set[tuple[str, str]] = set()
 
 # Default context window budget for Codex packs.
 CODEX_TARGET_WINDOW = 200_000
@@ -50,6 +57,10 @@ def _load_codex_models() -> list[str]:
     extend the list with ``LLM_ROUTER_CODEX_MODELS`` (comma-separated, e.g.
     ``"gpt-5.5,gpt-5.4,o3,gpt-4o"``). Empty / whitespace-only entries are
     dropped silently.
+
+    The list is the Codex **allow-list** (F27): any other ``codex/<m>`` named in
+    a policy, a profile or a fallback ranking is replaced by the first allowed
+    model (see :func:`accepted_codex_entry`). To use a Codex model, list it here.
     """
     env = os.environ.get("LLM_ROUTER_CODEX_MODELS", "").strip()
     if env:
@@ -63,6 +74,38 @@ CODEX_MODELS = _load_codex_models()
 See :func:`_load_codex_models` for the env-var override and the tier-specific
 default rationale.
 """
+
+
+def accepted_codex_entry(model: str, codex_models: list[str] | None = None) -> str | None:
+    """Map a policy chain entry onto a Codex model the CLI accepts (F22).
+
+    A ``codex/<m>`` entry whose ``<m>`` is not in :data:`CODEX_MODELS` becomes
+    ``codex/<CODEX_MODELS[0]>`` — the ``LLM_ROUTER_CODEX_MODELS`` choice when set,
+    else the repo default. Policy files named ``codex/gpt-4o-mini`` and
+    ``codex/gpt-4o``, which the CLI rejects (HTTP 400, "Model metadata ... not
+    found"), so every routed call that reached the slot burned one failed attempt
+    before the next model answered. Returns ``None`` (drop the entry) when no Codex
+    model is configured. Non-Codex entries are returned unchanged.
+
+    ``CODEX_MODELS`` (``LLM_ROUTER_CODEX_MODELS``) is the Codex allow-list: any
+    other codex model named anywhere is replaced by the first allowed model. Each
+    distinct rewrite is logged once at INFO (F27), not once per call.
+    """
+    if not model.startswith("codex/"):
+        return model
+    accepted = CODEX_MODELS if codex_models is None else codex_models
+    if model[len("codex/"):] in accepted:
+        return model
+    if not accepted:
+        return None
+    new = f"codex/{accepted[0]}"
+    if (model, new) not in _REWRITES_LOGGED:
+        _REWRITES_LOGGED.add((model, new))
+        log.info(
+            "Codex allow-list: %s is not in LLM_ROUTER_CODEX_MODELS %s; using %s",
+            model, list(accepted), new,
+        )
+    return new
 
 # ── BLOCKING I/O MITIGATION ──────────────────────────────────────────────
 # CRITICAL: is_codex_available() is called from _build_and_filter_chain(),

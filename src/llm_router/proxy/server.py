@@ -26,6 +26,10 @@ rewrites the tools array, it forwards the resulting ``tool_reference`` blocks
 unchanged, so setting ``ENABLE_TOOL_SEARCH=true`` is safe here and restores
 first-party token usage.
 
+Prefixes beat classification, stickiness and soft quota pressure. Admin
+pinned_models, side calls and local hard stops (kill switch, media, prompt
+cap, backend health and quality breaker) take precedence over a prefix.
+
 Safety rules, each enforced here:
   * a served reply must pass ``translate.from_ollama`` validation;
   * a backend error, a validation failure, or a miss of the per-step latency
@@ -54,8 +58,10 @@ from urllib.parse import urlsplit
 from llm_router.local_agent import DEFAULT_MAX_PROMPT_TOKENS, LocalAgentConfig, enabled_from_env
 from llm_router.local_agent import capability as la_capability
 from llm_router.local_agent.compact import session_cwd as la_session_cwd
-from llm_router import failopen, local_models, prompt_key, shadow_frontier
-from llm_router.proxy import haiku_arm, haiku_guard, ledger, llm_shadow, local_mode, local_shadow, okf_context
+from llm_router import authority, failopen, local_models, prompt_key, shadow_frontier
+from llm_router import prefixes as user_prefixes
+from llm_router.proxy import haiku_arm, haiku_guard, ledger, llm_shadow, local_gate, local_mode, local_shadow, okf_context
+from llm_router.proxy import escalation
 
 from llm_router.proxy.backend_health import (
     DEFAULT_COOLDOWN_S,
@@ -81,9 +87,9 @@ from llm_router.proxy.loop_guard import (
     REASON_LOOP_GUARD,
     LoopGuard,
 )
-from llm_router.proxy.cache_cost import Stickiness, conversation_key
+from llm_router.proxy.cache_cost import ReadOnlyStickiness, Stickiness, conversation_key
 from llm_router.proxy.steps import (
-    STEP_CLASSES, classify_text, is_first_call, is_thread_continue, newest_human_text, session_id_of,
+    STEP_CLASSES, classify_text, has_client_tools, is_first_call, is_thread_continue, newest_human_text, session_id_of,
     step_class, step_fields, thread_parent, turn_fields,
 )
 from llm_router import call_identity, session_kind
@@ -197,6 +203,9 @@ class ProxyConfig:
     # LLM_ROUTER_LOCAL_CLASSIFIER=shadow (proxy.llm_shadow, M1.6): the local classifier's
     # verdict is logged next to the rules' and never applied. Overrides the record file.
     classifier_shadow_path: Path | None = None
+    # ``--local-gate on`` (proxy.local_gate): a continuation is served locally only on a lane
+    # that local_eligibility.json marks eligible. Off (default) = byte-identical to before.
+    local_gate: bool = False
 
     def __post_init__(self) -> None:
         if self.num_ctx is None and self.model:
@@ -225,6 +234,7 @@ class ProxyConfig:
                                                     DEFAULT_COOLDOWN_S)),
             serve=local_mode.parse_serve_mode(os.environ.get("LLM_ROUTER_PROXY_LOCAL_AGENT_MODE", "off")),
             shadow=local_shadow.parse_on_off(os.environ.get("LLM_ROUTER_PROXY_LOCAL_SHADOW", "off")),
+            local_gate=local_gate.parse_gate(os.environ.get("LLM_ROUTER_PROXY_LOCAL_GATE", "off")),
         )
 
 
@@ -280,13 +290,23 @@ def _error_json(message: str) -> bytes:
     return json.dumps({"type": "error", "error": {"type": "api_error", "message": message}}).encode()
 
 
+def refusal_message(text: str, model: str | None) -> dict:
+    """A normal Anthropic message, usable for JSON and SSE responses."""
+    return {"id": "msg_lr_prefix_refusal", "type": "message", "role": "assistant",
+            "model": model, "content": [{"type": "text", "text": text}],
+            "stop_reason": "end_turn", "stop_sequence": None,
+            "usage": {"input_tokens": 0, "output_tokens": 0}}
+
+
 def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clock=None, breaker_fn=None,
-              haiku_guard_run=None):
+              haiku_guard_run=None, local_gate_deps=None):
     """The Starlette app. ``client`` (an ``httpx.AsyncClient``),
     ``backend_factory(model) -> Backend``, the backend-health breaker's
     ``health_clock``, the quality breaker (``breaker_fn``, local-agent mode)
     and the Haiku guard's run function (``haiku_guard_run(policy)``) are
-    injectable for tests."""
+    injectable for tests; so are the local gate's dependencies (``local_gate_deps``,
+    a ``local_gate.GateDeps``). With ``--local-gate`` on, ``breaker_fn(lever, task_type)``
+    is the gate's breaker."""
     import httpx
     from starlette.applications import Starlette
     from starlette.requests import Request
@@ -322,6 +342,16 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         lm_breaker = la_capability.BreakerCache(fn=breaker_fn)
     if cfg.shadow and (lm is not None or not (cfg.model or "").startswith("ollama/")):
         raise ValueError("--shadow on needs --model ollama/<tag> and --serve off (shadow never serves)")
+    lane_gate = None
+    if cfg.local_gate:
+        if lm is not None:
+            raise ValueError("--local-gate on does not combine with --serve local-agent (that mode pins its own model)")
+        deps = local_gate_deps or local_gate.GateDeps()
+        if breaker_fn is not None and local_gate_deps is None:
+            deps.breaker = lambda lever, task_type, model: breaker_fn(lever, task_type)
+        if local_gate_deps is None:
+            deps.backend_open = lambda model: health.is_open(model)
+        lane_gate = local_gate.LaneGate(cfg.steps, cfg.step_budget_s, deps)
 
     def _ollama_url() -> str:
         from llm_router.config import get_config, validate_ollama_url
@@ -410,12 +440,19 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                        detail=exhausted, added_latency_s=round(time.monotonic() - t0, 3))
             return None
         try:
+            from llm_router import capability_filter
+            needs = capability_filter.needs_from_anthropic_body(body) if capability_filter.enabled() else None
             if lm is not None:
-                # P2: the pinned model serves; the policy is not consulted.
+                # P2: the pinned model serves; the policy is not consulted. F14: the pin is
+                # still held to the capability filter, as in choose_model: a pin KNOWN to
+                # lack what the request needs (tools array, images, window) keeps the call
+                # on Claude (model None, forwarded as policy_kept).
+                pin_ok = needs is None or bool(capability_filter.filter_chain([cfg.model], needs))
                 choice = {"task_type": "local_agent", "complexity": "pinned",
-                          "chain_head": [cfg.model], "model": cfg.model}
+                          "chain_head": [cfg.model] if pin_ok else [],
+                          "model": cfg.model if pin_ok else None}
             else:
-                choice = await choose_model(classify_text(body), cfg.model)
+                choice = await choose_model(classify_text(body), cfg.model, needs=needs)
         except Exception as exc:  # noqa: BLE001 - any policy failure forwards the call
             guard.reset(session_id)
             row.update(decision=ledger.DECISION_FALLBACK, reason="policy_error",
@@ -424,6 +461,19 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             return None
         row.update(task_type=choice["task_type"], complexity=choice["complexity"],
                    chain_head=choice["chain_head"], model=choice["model"])
+        gate_decision = None
+        if lane_gate is not None:
+            # The local gate decides alone: the policy's pick is replaced by the lane's
+            # eligible model, and any forward reason ends the step on Claude.
+            gate_decision = await lane_gate.decide(body, row, choice, needs)
+            row["local_gate"] = gate_decision.as_row()
+            if not gate_decision.serve:
+                guard.reset(session_id)
+                row.update(decision=ledger.DECISION_FORWARDED, reason=gate_decision.reason,
+                           added_latency_s=round(time.monotonic() - t0, 3))
+                return None
+            choice = dict(choice, model=gate_decision.model)
+            row["model"] = gate_decision.model
         if choice["model"] is None:
             guard.reset(session_id)
             row.update(decision=ledger.DECISION_FORWARDED, reason="policy_kept")
@@ -519,7 +569,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                     row["local_agent"] = dict(row.get("local_agent") or {}, reply=verdict.as_row())
                 if lm is not None:
                     row["local_mode_reply"] = verdict.as_row()
-                if verdict.route == la_capability.ROUTE_CLAUDE:
+                if gate_decision is not None and message is not None and la_capability._edit_calls(message):
+                    # The local gate never serves an edit-shaped reply, protocol or not.
+                    message, err, reason = None, "edit-shaped reply; the local gate serves none", "edit_to_claude"
+                elif verdict.route == la_capability.ROUTE_CLAUDE:
                     message, err, reason = None, verdict.detail or verdict.reason, verdict.reason
                 elif verdict.route == la_capability.ROUTE_EDIT and lm is not None:
                     # P3: the validated edit protocol; if it cannot produce a
@@ -563,6 +616,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         elapsed = round(time.monotonic() - t0, 3)
         row["route_latency_s"] = elapsed
         if err or message is None:
+            if gate_decision is not None:
+                row["local_gate"] = dict(row["local_gate"], reason=local_gate.R_LOCAL_FAILED)
             guard.reset(session_id)
             row.update(decision=ledger.DECISION_FALLBACK, reason=reason or "validation",
                        detail=ledger.scrub_detail(err or "no message"), added_latency_s=elapsed)
@@ -572,10 +627,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # The candidate is real (passed validation) but repeats a recent
             # served step: served/avoided metrics must never see it.
             guard.reset(session_id)
+            if gate_decision is not None:
+                row["local_gate"] = dict(row["local_gate"], reason=local_gate.R_LOCAL_FAILED)
             row.update(decision=ledger.DECISION_FALLBACK, reason=REASON_LOOP_GUARD,
                        detail=repeat, added_latency_s=elapsed)
             return None
         guard.record_served(session_id, message)
+        if gate_decision is not None:
+            lane_gate.note_served(session_id, gate_decision, message, row.get("session_kind"))
         if lm is not None:
             lm.remember_edits(message)
         row.update(decision=ledger.DECISION_SERVED, reason=None, msg_id=message["id"],
@@ -585,7 +644,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                    served_stop_reason=message["stop_reason"])
         return message
 
-    async def local_step(body: dict, row: dict) -> dict | None:
+    async def local_step(body: dict, row: dict, *, force=False) -> dict | None:
         """``--serve local-agent``: pin, decide, serve. Returns the served
         message, or ``None`` after writing the reason and the egress notice."""
         row["serve_mode"] = local_mode.SERVE_LOCAL_AGENT
@@ -593,8 +652,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             row.update(decision=ledger.DECISION_FORWARDED, reason=local_mode.REASON_NOT_ELIGIBLE)
             return None
         key = conversation_key(body, row.get("session_id"))
-        pinned = lm.pin_of(key)
-        started_elsewhere = pinned is None and not is_first_call(body)
+        pinned = local_mode.PIN_LOCAL if force else lm.pin_of(key)
+        if force:
+            lm.set_pin(key, local_mode.PIN_LOCAL)
+        started_elsewhere = not force and pinned is None and not is_first_call(body)
         if started_elsewhere:
             # Never migrate a conversation already on Claude (or one this
             # process never saw the start of): its prompt cache lives there.
@@ -615,13 +676,19 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 row["local_mode"]["pin"] = local_mode.PIN_LOCAL
             message = await try_serve(body, row)
             if message is not None:
+                if force:
+                    row["prefix_outcome"] = "served_local"
                 return message
+            if force:
+                return refuse_local(row, row.get("reason") or "validation")
             # A failed local step: this step goes to Claude and the conversation
             # stays there (one logged move, never back and forth).
             lm.set_pin(key, local_mode.PIN_CLAUDE)
             row["local_mode"]["pin_change"] = "local->claude"
             reason = row.get("reason") or "validation"
         else:
+            if force:
+                return refuse_local(row, decision.reason)
             reason = decision.reason
             row.update(decision=ledger.DECISION_FORWARDED, reason=reason, detail=decision.detail or None)
             if pinned is None or reason in local_mode.STRUCTURAL_REASONS:
@@ -630,6 +697,15 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         row["egress"] = True
         print(local_mode.egress_notice(str(reason), row.get("session_id")), file=sys.stderr, flush=True)
         return None
+
+    def refuse_local(row: dict, reason: str) -> dict:
+        row.update(decision=ledger.DECISION_SERVED, reason=reason, egress=False,
+                   prefix_outcome=f"refused:{reason}")
+        message = refusal_message(
+            f"[llm_router] `local:` refused: {reason}; not sent to Claude.",
+            row.get("requested_model"))
+        row["msg_id"] = message["id"]
+        return message
 
     async def shadow_local(body: dict):
         """The shadow job's local call, on a deep copy it is handed. Reads no file
@@ -739,7 +815,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         phases = row.setdefault("tier_phases_ms", {})
         phases[name] = round(phases.get(name, 0.0) + ms, 2)
 
-    async def decide_tier(body: dict, row: dict):
+    async def decide_tier(body: dict, row: dict, sticky_view=None):
         """The tier rewrite's decision, written onto ``row``. Any error forwards
         the call unchanged and says why: this path must never cost a call."""
         t0 = time.monotonic()
@@ -748,9 +824,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             if unlabelled:
                 # The call could not be labelled: no classification, no arm; the
                 # conversation's sticky tier (or the pin) holds, else it is forwarded as sent.
-                decision = tier_policy.decide_unclassified(body, row.get("session_id"), sticky)
+                decision = tier_policy.decide_unclassified(body, row.get("session_id"), sticky_view or sticky)
             else:
-                decision = await tier_policy.decide(body, row.get("session_id"), sticky)
+                decision = await tier_policy.decide(body, row.get("session_id"), sticky_view or sticky)
         except Exception as exc:  # noqa: BLE001 - fail-safe: forward unchanged
             row.update(served_model=body.get("model"), tier=None, tier_reason=REASON_DECISION_ERROR,
                        tier_proposed=None,
@@ -929,6 +1005,23 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if msg_id and not row.get("msg_id"):
             row["msg_id"] = msg_id
 
+    async def advise_forward(request: Request, raw: bytes, body: dict, row: dict):
+        """Authority ``advise`` (P2.2-A, D-150): no local serving, no rewrite, no prefix
+        strip. The tier policy still decides, on a READ-ONLY view of the stickiness (a
+        proposal that is never applied must not pin later turns; the classifier shadow
+        may still run), so the ledger keeps ``tier_proposed`` and the ``tier_*`` detail,
+        and the would-be reason moves to ``tier_reason_proposed``. The client's own bytes
+        go upstream; the row says the requested model was served."""
+        if tier_policy is not None:
+            await decide_tier(body, row, ReadOnlyStickiness(sticky))
+            proposed = row.get("tier_reason")
+            if proposed is not None:
+                row["tier_reason_proposed"] = proposed
+            row.update(served_model=body.get("model"), tier=None, tier_switch=False,
+                       tier_switch_cost_usd=None)
+        row["tier_reason"] = authority.ADVISE
+        return await forward(request, raw, body, row)
+
     async def handle(request: Request):
         from llm_router.route_server import is_forbidden_cross_origin
 
@@ -946,6 +1039,15 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if not isinstance(body, dict):
             return await forward(request, raw, None, None)
 
+        ov = None
+        stripped_body = None
+        try:
+            if has_client_tools(body):
+                ov = escalation.explicit_override(body)
+                stripped_body = user_prefixes.strip_body(body) if ov is not None else None
+        except Exception as exc:  # noqa: BLE001 -- prefixes must fail open
+            failopen.record("LR-FO-PROXY-PREFIX", exc)
+            ov = stripped_body = None
         row: dict = {
             "ts": time.time(), "session_id": session_id_of(body), "msg_id": None,
             "stream": bool(body.get("stream")), "requested_model": body.get("model"),
@@ -968,19 +1070,65 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             **identity_fields(session_id_of(body)),
             "tier_policy_version": tier_policy.policy_version if tier_policy is not None else None,
             "tier_proposed": None, "tier_retry": None,
+            # Only on prefixed turns: an unprefixed row stays byte-identical (golden tests).
+            **({"prefix": ov.name, "prefix_outcome": None} if ov is not None else {}),
             # M0.5: request-shape and prompt-hash fields, never prompt text. The
             # classifier columns say the verdict still comes from the rules and
             # nothing is applied; M1 shadow and M2 canary fill them in.
             **request_fields(body, raw, parent_main),
             "cls_source": "rules", "cls_ms": None, "cls_arm": None, "cls_applied": False,
         }
-        if lm is not None:
-            message = await local_step(body, row)
+        example_written = False
+
+        def prefix_outcome(outcome):
+            nonlocal example_written
+            row["prefix_outcome"] = outcome
+            if ov is None or example_written:
+                return
+            try:
+                if is_first_call(body) or row["step_class"] == "turn_first":
+                    example_written = True
+                    user_prefixes.record_example(
+                        ov.stripped, forced=ov.name, decided=outcome, door="proxy")
+            except Exception as exc:  # noqa: BLE001 -- telemetry is fail-open
+                failopen.record("LR-FO-PROXY-PREFIX", exc)
+
+        # P2.2-A: per request, so `llm-router mode advise|route` needs no restart. Advise is
+        # shadow under the P2.7 precedence (D-150): a prefix does not beat it, so even a
+        # user's `opus:` forwards the ORIGINAL bytes, unstripped, on the requested model.
+        if lane_gate is not None:
+            lane_gate.observe(body, row.get("session_id"))
+        row["authority"] = authority.mode()
+        if row["authority"] == authority.ADVISE:
+            if ov is not None:
+                prefix_outcome("advise:not_applied")
+            return await advise_forward(request, raw, body, row)
+        # Decisions always see the original body. Only serving uses this copy.
+        sent_body = stripped_body if ov is not None and ov.is_claude else None
+        sent_raw = json.dumps(sent_body).encode() if sent_body is not None else raw
+        original = (raw, body) if sent_body is not None else None
+        unserved = ov is not None and (
+            ov.name == "codex" or (ov.name == "local" and lm is None))
+        if unserved:
+            prefix_outcome(f"unserved:no_{ov.name}_backend")
+        if ov is not None and ov.is_claude:
+            prefix_outcome("forwarded_claude" if ov.name == "claude"
+                           else f"tier:{row.get('tier') or body.get('model')}")
+        force_local = (ov is not None and ov.name == "local" and lm is not None
+                       and local_mode.is_agent_turn(body))
+        bypass_local = ov is not None and ov.is_claude
+        if lm is not None and not bypass_local:
+            message = await local_step(
+                stripped_body or body if force_local else body, row, force=force_local)
             if message is not None:
+                if force_local:
+                    prefix_outcome(row["prefix_outcome"])
                 write(row)
                 if body.get("stream"):
                     return Response(sse_from_message(message), media_type="text/event-stream")
                 return Response(json.dumps(message), media_type="application/json")
+        elif bypass_local:
+            row["reason"] = "explicit_prefix"
         elif not cfg.steps:
             row["reason"] = "routing_off"
         elif step_class(body, cfg.steps) is None:
@@ -994,10 +1142,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 return Response(json.dumps(message), media_type="application/json")
         on_reply = start_shadow(body, row, len(raw)) if shadow is not None else None
         if tier_policy is None:
-            return await forward(request, raw, body, row, on_reply=on_reply)
+            return await forward(request, sent_raw, sent_body or body, row,
+                                 original=original, on_reply=on_reply)
         decision = await decide_tier(body, row)
+        if ov is not None and ov.name in user_prefixes.CLAUDE_TIER_PREFIXES:
+            prefix_outcome(f"tier:{row.get('tier') or body.get('model')}")
         if decision is None:
-            return await forward(request, raw, body, row, on_reply=on_reply)
+            return await forward(request, sent_raw, sent_body or body, row,
+                                 original=original, on_reply=on_reply)
         if (frontier is not None and row.get("tier_reason") == REASON_HAIKU_REWRITE
                 and decision.served_model != body.get("model")):
             on_reply = frontier_on_reply(request, raw, row, on_reply)
@@ -1007,8 +1159,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             sticky.record_usage(key, usage)
 
         if not decision.rewritten and decision.body_rewrite is None:
-            return await forward(request, raw, body, row, on_usage=_on_usage, on_reply=on_reply)
-        sent = dict(body, model=decision.served_model)
+            return await forward(request, sent_raw, sent_body or body, row, original=original,
+                                 on_usage=_on_usage, on_reply=on_reply)
+        sent = dict(sent_body or body, model=decision.served_model)
         if decision.body_rewrite == REWRITE_HAIKU:
             # Haiku 4.5 400s on `thinking.type: adaptive` and has no effort
             # parameter: serve it a body it accepts (translate.for_haiku).
@@ -1038,7 +1191,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         # rewrite off. It never edits the YAML.
         shadow_frontier.prune_at_start()  # retention of the pair store, flag on or off
         guard_task = None
-        if tier_policy is not None and tier_policy.haiku_rewrite:
+        # also when the breaker (not the YAML) turned the rewrite off: recovery runs on this loop
+        if tier_policy is not None and (tier_policy.haiku_rewrite or getattr(tier_policy, "haiku_breaker", None) is not None):
             guard_task = asyncio.create_task(haiku_guard.guard_loop(tier_policy, run=haiku_guard_run))
         yield
         if task is not None and not task.done():
@@ -1081,6 +1235,7 @@ llm-router proxy [--port N] [--steps continuation|off] [--step-budget-s S]
                  [--loop-max-consecutive N] [--loop-repeat-window N]
                  [--tiers off|on|conversation] [--tier-policy FILE.yaml] [--local-agent]
                  [--backend-fail-n N] [--backend-cooldown-s S] [--serve off|local-agent]
+                 [--local-gate off|on]
 llm-router proxy stats [--days N] [--json]
 
 Opt-in, per session. Nothing is enabled until you point a session at it:
@@ -1185,6 +1340,12 @@ def cmd_proxy(argv: list[str]) -> int:
                          "a copy in parallel; only agreement, latency and reason codes are logged "
                          "(proxy_local_shadow.jsonl). Needs --model ollama/<tag> and --serve off "
                          "(also LLM_ROUTER_PROXY_LOCAL_SHADOW)")
+    ap.add_argument("--local-gate", default=str(env.local_gate and "on" or "off"),
+                    help="off (default; byte-identical to before) or on: a continuation is served by a local "
+                         "model only when its lane (tech_op, qa, code) is eligible in local_eligibility.json "
+                         "and the breaker, promote gate and capability checks pass; every step's reason is "
+                         "in the ledger row's local_gate (also LLM_ROUTER_PROXY_LOCAL_GATE). "
+                         "Needs --steps continuation; not with --serve local-agent")
     ap.add_argument("--shadow-budget-s", type=float, default=local_shadow.DEFAULT_BUDGET_S,
                     help="wall budget of one shadow job; it is dropped when Claude answers first")
     a = ap.parse_args(argv)
@@ -1196,6 +1357,11 @@ def cmd_proxy(argv: list[str]) -> int:
         serve = local_mode.parse_serve_mode(a.serve)
     except ValueError as exc:
         sys.stderr.write(f"llm-router proxy: {exc}\n")
+        return 2
+    try:
+        gate_on = local_gate.parse_gate(a.local_gate)
+    except ValueError as exc:
+        sys.stderr.write(f"llm-router proxy: --local-gate: {exc}\n")
         return 2
     try:
         shadow_on = local_shadow.parse_on_off(a.shadow)
@@ -1218,7 +1384,7 @@ def cmd_proxy(argv: list[str]) -> int:
         cfg = ProxyConfig(steps=parse_steps(a.steps), step_budget_s=a.step_budget_s, model=a.model,
                           trim=a.trim, num_ctx=a.num_ctx, upstream=env.upstream,
                           ledger_path=Path(a.ledger) if a.ledger else None,
-                          serve=serve, shadow=shadow_on, shadow_budget_s=a.shadow_budget_s,
+                          serve=serve, shadow=shadow_on, shadow_budget_s=a.shadow_budget_s, local_gate=gate_on,
                           hedge_s=parse_hedge(a.hedge_s) if a.hedge_s is not None else env.hedge_s,
                           keep_alive=parse_keep_alive(a.keep_alive), warm_up=not a.no_warm_up,
                           ollama_url=a.ollama_url, loop_max_consecutive=a.loop_max_consecutive,
@@ -1253,6 +1419,10 @@ def cmd_proxy(argv: list[str]) -> int:
           f"local_agent={'on' if cfg.local_agent else 'off'}  "
           f"backend_health(fail_n={cfg.backend_fail_n}, cooldown={cfg.backend_cooldown_s:g}s)")
     print(f"  enable per session: {enable_hint(a.host, a.port)}")
+    if cfg.local_gate:
+        note = "" if cfg.steps else "  (INACTIVE: --steps off never reaches it)"
+        print(f"  LOCAL GATE on: a continuation is served locally only on a lane eligible in "
+              f"{local_gate.eligibility_path()}{note}", flush=True)
     if cfg.shadow:
         print(f"  SHADOW on: Claude serves every step; {cfg.model} answers a copy in parallel "
               f"(1 job at a time, {cfg.shadow_budget_s:g}s budget, dropped when Claude answers first); "

@@ -69,7 +69,7 @@ def abstain_enforced() -> bool:
     L1/L3 decided. ``enforce`` is the spec behaviour (one tier safer)."""
     return os.environ.get("LLM_ROUTER_ENGINE_ABSTAIN", "log").strip().lower() == "enforce"
 
-DOORS = ("proxy", "mcp", "hook", "gateway", "agent_route", "gemini_cli", "router")
+DOORS = ("proxy", "mcp", "hook", "gateway", "agent_route", "gemini_cli", "router", "sdk")
 Layer = Literal["prefix", "L1", "cache", "L3", "L2", "fallback"]
 
 #: Mirrors ``proxy/claude_tiers.yaml`` route.default (a test pins the two).

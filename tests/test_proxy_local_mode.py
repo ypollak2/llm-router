@@ -622,7 +622,7 @@ async def test_local_mode_sends_the_larger_output_cap_to_ollama_and_off_mode_kee
                              trim="none", serve=serve, hedge_s=None, warm_up=False,
                              kill_switch=tmp_path / "kill", ollama_url="http://127.0.0.1:11999")
 
-        async def policy(text, pinned):
+        async def policy(text, pinned, **_kw):
             return {"task_type": "code", "complexity": "moderate", "chain_head": [MODEL], "model": MODEL}
 
         orig, ps.choose_model = ps.choose_model, policy

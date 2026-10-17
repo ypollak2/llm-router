@@ -180,11 +180,15 @@ def unknown_session(door: str | None = None) -> str:
 class LedgerGuard:
     """LEDGER-EVERY-EXIT-1: which ledger tables one tool call has written to so far."""
 
-    __slots__ = ("tables", "refused")
+    __slots__ = ("tables", "refused", "refused_reason", "profile")
 
     def __init__(self) -> None:
         self.tables: set[str] = set()
         self.refused = False
+        #: F25 / D-170: the reason code of a refusal that is not a breaker refusal (None = ``breaker_open``).
+        self.refused_reason: str | None = None
+        #: F25 / D-170 (4): the routing profile the router resolved for this call (None = not routed yet).
+        self.profile: Any = None
 
 
 _LEDGER_GUARD: ContextVar[LedgerGuard | None] = ContextVar("llm_router_ledger_guard", default=None)
@@ -197,6 +201,23 @@ def open_ledger_guard() -> tuple[LedgerGuard, Token]:
 
 def close_ledger_guard(token: Token) -> None:
     _LEDGER_GUARD.reset(token)
+
+
+def note_ledger_profile(profile: Any) -> None:
+    """F25 / D-170 (4): record the call's resolved routing profile, so a row the guard writes names it
+    instead of the process-wide active profile. No-op outside a guarded call."""
+    guard = _LEDGER_GUARD.get()
+    if guard is not None:
+        guard.profile = profile
+
+
+def refuse_ledger_call(reason: str) -> None:
+    """F25 / D-170 (2): mark the guarded call as refused for ``reason``; the guard's row carries that code.
+    No-op outside a guarded call."""
+    guard = _LEDGER_GUARD.get()
+    if guard is not None:
+        guard.refused = True
+        guard.refused_reason = reason
 
 
 def note_ledger_write(table: str) -> None:
@@ -411,7 +432,8 @@ def __getattr__(name: str):
     from mcp.server.mcpserver import MCPServer
 
     class IdentityMCPServer(MCPServer):
-        """``MCPServer`` that binds the caller's ``tool_use`` id around each tool call."""
+        """``MCPServer`` that binds the caller's ``tool_use`` id around each tool call and
+        runs it through ``mcp_door.run_door`` (readable errors, routed-call deadline)."""
 
         async def call_tool(self, name, arguments, context=None):  # type: ignore[override]
             token = bind(tool_use_id_from_context(context))
@@ -420,7 +442,11 @@ def __getattr__(name: str):
             try:
                 # P1.10: every routed call of this tool call shares one task id.
                 with scope(call_session_id()):
-                    return await super().call_tool(name, arguments, context)
+                    # D-141: one choke point for every tool — a readable error, not the bare
+                    # "Error executing tool <name>", and the routed doors' overall deadline.
+                    from llm_router.mcp_door import run_door
+
+                    return await run_door(name, super().call_tool(name, arguments, context))
             finally:
                 _CLIENT_IS_CLAUDE_CODE.reset(cc)
                 _IN_MCP_CALL.reset(flag)

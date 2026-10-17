@@ -14,7 +14,7 @@ import contextlib
 
 from mcp.server.mcpserver import Context
 
-from llm_router import call_identity
+from llm_router import call_identity, failopen, prefixes
 
 from llm_router.tools.admin import (
     llm_budget,
@@ -95,7 +95,7 @@ async def _ledger_exit(guard, task: str, exc: BaseException | None, started: flo
         if not missing:
             return
         if refused:
-            reason = cost.REASON_BREAKER_OPEN
+            reason = getattr(guard, "refused_reason", None) or cost.REASON_BREAKER_OPEN
         elif exc is not None:
             reason = _route_error_reason(exc)
         else:
@@ -104,8 +104,11 @@ async def _ledger_exit(guard, task: str, exc: BaseException | None, started: flo
             task_type = TaskType(task if task != "auto" else "query")
         except ValueError:
             task_type = None
+        # F25 / D-170 (4): the profile the router resolved for this call; the active profile only
+        # when the call never reached profile resolution.
+        profile = getattr(guard, "profile", None) or get_active_profile()
         await asyncio.shield(cost.log_route_error(
-            task_type, get_active_profile(), reason=reason, correlation_id=uuid.uuid4().hex[:8],
+            task_type, profile, reason=reason, correlation_id=uuid.uuid4().hex[:8],
             latency_ms=(time.monotonic() - started) * 1000.0,
             only=None if len(missing) == 2 else missing,
         ))
@@ -186,25 +189,85 @@ async def llm(
     llm_query/analyze/code/research/generate; those remain as aliases underneath."""
     complexity = _TIER_TO_COMPLEXITY.get((tier or "").lower(), "moderate")
     t = (task or "auto").lower()
+    model = None
+    override = None
+    reply = None
+    decided = None
+    try:
+        override = prefixes.parse(prompt)
+        if override:
+            name = override.name
+            if override.is_claude:
+                tier_id = None
+                if name in prefixes.CLAUDE_TIER_PREFIXES:
+                    from llm_router.config import get_config
+                    from llm_router.proxy.tiers import tier_model
+
+                    config = get_config()
+                    if (not config.llm_router_claude_subscription
+                            and "anthropic" in config.available_providers):
+                        tier_id = tier_model(name)
+                if tier_id:
+                    model = f"anthropic/{tier_id}"
+                elif name == "claude":
+                    reply = ("[llm_router] `claude:` forces Claude: not routed, "
+                             "handle this request yourself.")
+                    decided = "claude"
+                else:
+                    reply = (f"[llm_router] `{name}:` forces Claude {name}: not routed "
+                             "through the API door; handle this request yourself at that tier.")
+                    decided = "host"
+            elif name == "local":
+                from llm_router.model_discovery import first_installed
+
+                local_model = first_installed()
+                if local_model:
+                    model = f"ollama/{local_model}"
+                else:
+                    reply = ("[llm_router] `local:` refused: no healthy local model "
+                             "(Ollama unreachable or no model installed); "
+                             "not sent to any other model.")
+                    decided = "refused:no_local"
+            elif name == "codex":
+                from llm_router import codex_agent
+
+                if codex_agent.is_codex_available():
+                    codex_model = codex_agent.CODEX_MODELS[0]
+                    model = (codex_model if codex_model.startswith("codex/")
+                             else f"codex/{codex_model}")
+                else:
+                    reply = ("[llm_router] `codex:` refused: Codex CLI not available; "
+                             "not sent to any other model.")
+                    decided = "refused:no_codex"
+    except Exception as exc:  # noqa: BLE001 -- lookup failures preserve the original request
+        failopen.record("LR-FO-PREFIX-MCP", exc)
+        override, model, reply = None, None, None
+    if override:
+        prompt = override.stripped
+        prefixes.record_example(prompt, forced=override.name, decided=model or decided, door="mcp")
+    model_kwargs = {"model": model} if model is not None else {}
     async with _ledger_guard(t) as guard:
+        if reply is not None:
+            guard.refused = True
+            return reply
         _blocked = _quality_breaker_block("mcp_llm", t)
         if _blocked:
             guard.refused = True
             return _blocked
-        if t == "research":
+        if t == "research" and model is None:
             return await llm_research(prompt, ctx, system_prompt=system_prompt, context=context)
         if t == "analyze":
             return await llm_analyze(prompt, ctx, complexity=complexity,
-                                     system_prompt=system_prompt, context=context)
+                                     system_prompt=system_prompt, context=context, **model_kwargs)
         if t == "code":
             return await llm_code(prompt, ctx, complexity=complexity,
-                                  system_prompt=system_prompt, context=context)
+                                  system_prompt=system_prompt, context=context, **model_kwargs)
         if t == "generate":
             return await llm_generate(prompt, ctx, complexity=complexity,
-                                      system_prompt=system_prompt, context=context)
+                                      system_prompt=system_prompt, context=context, **model_kwargs)
         # auto / query — the general default
         return await llm_query(prompt, ctx, complexity=complexity,
-                               system_prompt=system_prompt, context=context)
+                               system_prompt=system_prompt, context=context, **model_kwargs)
 
 
 async def llm_router_status(view: str = "summary", period: str = "today") -> str:
@@ -261,7 +324,9 @@ def _cache_view(period: str) -> str:
 async def llm_router_admin(action: str, value: str = "") -> str:
     """Config/admin door — collapses the mutating/config llm_* tools into one
     *action* selector: set_profile (value=profile) · import_profile (value=url) ·
-    clear_cache · policy · budget. Old tools stay as aliases underneath."""
+    clear_cache · policy · budget · prefer (value=priority text, e.g. "codex before claude";
+    returns the parsed rules and a confirm token, stores nothing; store by calling again with
+    value=JSON {"text": ..., "confirm": token}). Old tools stay as aliases underneath."""
     a = (action or "").lower()
     if a == "set_profile":
         return await llm_set_profile(value)
@@ -273,7 +338,11 @@ async def llm_router_admin(action: str, value: str = "") -> str:
         return await llm_policy()
     if a == "budget":
         return await llm_budget()
-    return f"unknown admin action: {action!r} (try set_profile/import_profile/clear_cache/policy/budget)"
+    if a == "prefer":
+        from llm_router.commands.prefer import admin_prefer
+
+        return admin_prefer(value)
+    return f"unknown admin action: {action!r} (try set_profile/import_profile/clear_cache/policy/budget/prefer)"
 
 
 async def llm_router_session(

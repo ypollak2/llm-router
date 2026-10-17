@@ -1,0 +1,1691 @@
+{
+ "amend1_frozen_utc": "2026-10-16T08:19:58Z",
+ "amend1_sha256": "e2d18748884602e05946d5254f6322d263c982d7169a7fad3d3209b375e8ee35",
+ "amendments": [
+  "docs/prereg/PREREG-P17D-synthetic-AMEND1.md"
+ ],
+ "arms": {
+  "llm": {
+   "HP": {
+    "ci95": [
+     0.2024,
+     0.4236
+    ],
+    "k": 19,
+    "n": 63,
+    "rate": 0.3016
+   },
+   "HR": {
+    "ci95": [
+     0.4735,
+     0.8006
+    ],
+    "k": 19,
+    "n": 29,
+    "rate": 0.6552
+   },
+   "c_lambda2": 6.947,
+   "c_lambda2_clamp": 7.006,
+   "exact": {
+    "ci95": [
+     0.3758,
+     0.5332
+    ],
+    "k": 68,
+    "n": 150,
+    "rate": 0.4533
+   },
+   "under": {
+    "ci95": [
+     0.4016,
+     0.5594
+    ],
+    "k": 72,
+    "n": 150,
+    "rate": 0.48
+   }
+  },
+  "rules_eff": {
+   "HP": {
+    "ci95": null,
+    "k": 0,
+    "n": 0,
+    "rate": null
+   },
+   "HR": {
+    "ci95": [
+     0.0,
+     0.117
+    ],
+    "k": 0,
+    "n": 29,
+    "rate": 0.0
+   },
+   "c_lambda2": 7.748,
+   "c_lambda2_clamp": 7.748,
+   "exact": {
+    "ci95": [
+     0.325,
+     0.48
+    ],
+    "k": 60,
+    "n": 150,
+    "rate": 0.4
+   },
+   "under": {
+    "ci95": [
+     0.3313,
+     0.4867
+    ],
+    "k": 61,
+    "n": 150,
+    "rate": 0.4067
+   }
+  }
+ },
+ "boot_c_lambda2_clamp": {
+  "ci95": [
+   -1.5103,
+   0.2931
+  ],
+  "ci95_normal": [
+   -1.5642,
+   0.0802
+  ],
+  "ci95_wide": [
+   -1.5103,
+   0.2931
+  ],
+  "clusters": 25,
+  "diff": -0.742,
+  "wide_rule": "fewer than 30 sessions"
+ },
+ "boot_under": {
+  "ci95": [
+   -0.0433,
+   0.2444
+  ],
+  "ci95_normal": [
+   -0.0565,
+   0.2031
+  ],
+  "ci95_wide": [
+   -0.0433,
+   0.2444
+  ],
+  "clusters": 25,
+  "diff": 0.0733,
+  "wide_rule": "fewer than 30 sessions"
+ },
+ "disclosures": [
+  "D-110: label opens ~/.llm-router/usage.json read-only, solely for the section 8 quota pause; the harness opens no other ~/.llm-router path.",
+  "AMEND1 (D-117): the nimble:9b artifact and its check follow eval/PREREG-v2-amend2-errata1.md section 2 (manifest sha256 dfed4f707396966698374b7ffe21bd4586271b772551a02f0114e5c79fd24a21, ollama list id 13ae0a506102, /api/show safetensors/mxfp8/mlx), replacing the frozen prereg's GGUF pin sha256-bbf1d6fc... that cannot exist under Ollama 0.40.0; the harness at 7e20664d refused shadow at 2026-10-16T06:33Z before any row; select (run under 7e20664d) was not re-run and is re-derived before the first shadow row; use.log keeps every harness line (append-only).",
+  "D-111a: P1.7-c status was read from /Users/yaliandrona/.rsi/research/primary-plan/gates/v16/P1.json (sha256 e9fc10e84af8ae0e6787a2fc1210c0a63a08395cebfeb6c67bd7b93f19632948), verdict 'PASS'; the record's gap field reads: \"classifier shadow switched on 2026-10-08 before the uncontended 10-11 artifact (process clause not judged)\""
+ ],
+ "errors": {
+  "assemble_mismatch": 0,
+  "by_source": {
+   "llm": 147,
+   "parse_error": 4
+  },
+  "label": 0,
+  "nimble": 4,
+  "total": 4
+ },
+ "items": [
+  {
+   "group": "F",
+   "item_id": "9a016cb828119c18",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 0,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "F",
+   "item_id": "445fa48bdd25b9ba",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 0,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "F",
+   "item_id": "290aec63223e7c8e",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "F",
+   "item_id": "b27eefec9fce1492",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "F",
+   "item_id": "cc6ff9b41242f803",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 2,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "F",
+   "item_id": "e20b50ae1d3eb05c",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 0,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "F",
+   "item_id": "3b561f780d9c9fb5",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "F",
+   "item_id": "6ce3cb67db19e44f",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 0,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "F",
+   "item_id": "12553eb67fe31781",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "F",
+   "item_id": "60443e0631dcb632",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 0,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "F",
+   "item_id": "9356e528b2efb4b3",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "F",
+   "item_id": "3304cb17f98542f6",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 0,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "F",
+   "item_id": "ba7f224485d4dd2e",
+   "llm": "haiku",
+   "requested": "sonnet",
+   "rules_eff": "sonnet",
+   "session_index": 3,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "F",
+   "item_id": "13f4913d7eaabff8",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 0,
+   "source": "parse_error",
+   "truth": "opus"
+  },
+  {
+   "group": "F",
+   "item_id": "b44a71dbdd43d86c",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 2,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "F",
+   "item_id": "5b156accd3f28d16",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 0,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "F",
+   "item_id": "ce564cb898488c38",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "F",
+   "item_id": "67913651435c4781",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "F",
+   "item_id": "b825252fd0350d76",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 0,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "F",
+   "item_id": "dd04ce3be5d61fa7",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 0,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "F",
+   "item_id": "508e31217f1d3f67",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "F",
+   "item_id": "abe3ad50a438538a",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 2,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "F",
+   "item_id": "856a54608e6e98f6",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 0,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "F",
+   "item_id": "f84a17da6e88b755",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 0,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "F",
+   "item_id": "a77ff7c9176e083c",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "F",
+   "item_id": "8515f7a942cf83b5",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 0,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "F",
+   "item_id": "60a42ebf1cc8a4ca",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "F",
+   "item_id": "d100589ff5c997c4",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "F",
+   "item_id": "0071219ff12ddb45",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 0,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "F",
+   "item_id": "c3e33fccbeeee1d0",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 0,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "F",
+   "item_id": "d6d7fea2896837ef",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "F",
+   "item_id": "96793303ac0306da",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 0,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "94d90f94a40abc0a",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 4,
+   "source": "parse_error",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "e3c041b55ad5fd64",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 5,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "bf9a8741304f5a42",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 6,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "ebac3c4f47b573a3",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 7,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "6d25706d9a6b36b1",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 8,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "b422522e93f35da4",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 9,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "b20814eed27853ed",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 10,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "2d2f507a1a1459e0",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 11,
+   "source": "parse_error",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "aec076adb8df5525",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 9,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "4ab75057ef46c011",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 4,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "a95aa6cabe033d42",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 5,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "0cfd06c49c5c0885",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 12,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "c1c56e6c2d744e2d",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 13,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "8ce8bde46d310606",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 8,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "9023530386014577",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "ba21a0e35a5d0012",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "d0e5d86c12c169cc",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "efee75c084738286",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 5,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "4fd542fbe62be929",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "5b707763b1af0e5a",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 14,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "19d46bb0a034e856",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 9,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "3b63421678f591f3",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 9,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "c9d063bfd4b02143",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "718cad1cb6480d0e",
+   "llm": "sonnet",
+   "requested": "sonnet",
+   "rules_eff": "sonnet",
+   "session_index": 15,
+   "source": "parse_error",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "665c8c2c760e2c11",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 11,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "23be07f8fd58da14",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "c984b06ed08db1a0",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 16,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "062ebe766a7604e4",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 17,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "c6c46c5e2331edff",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 4,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "4eb0cb69ebf2070b",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 9,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "8aafc96e3241971a",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 4,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "00ebff0073b90670",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 17,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "eb55583909a00014",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 18,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "465c61adddc9cf73",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "9584a365d4bc38df",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 17,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "e2281beea02a41cb",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 18,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "19d113359fb7f4a5",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "8aec1d77f185b9dc",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 9,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "ff6dd7607a9c8a87",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "9e19bf88d36642fb",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 8,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "8dc48f43717ce11b",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "28b76eccb380a0bf",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "a41bb2e6e3539c9c",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 18,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "938f83b406ee6be5",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 5,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "c2b84a72f77993e6",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 4,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "46f43586feac1e3e",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "opus",
+   "session_index": 10,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "99d2a92f9238d9de",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 19,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "c90f00b8ae4b4e3a",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 18,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "4a88d09496a95396",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 20,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "5e69f3cf3e4ed158",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 5,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "203f6cdb469e21ee",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "bd50d0b7445980f7",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 10,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "2827397074cb6bca",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 7,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "3479ffab1f2379a5",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 9,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "4b76f83a1894f59f",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 9,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "f46dae22dca43639",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 17,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "0c3f25a1569fab02",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "6a11d78ae6134211",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 20,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "c5c52e7bb674f753",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "0f8ae5215a1edfa1",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 4,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "c43d8740789662d2",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 9,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "47ab8fe1ffccd18c",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 5,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "91dfb6f25b2c1b77",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 5,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "5768397823ad750b",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 9,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "1ae68127ed59dd66",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "0776b3b0be0c0dfc",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 4,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "88a9cfaaff7b80f4",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 21,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "d5cd8f9ec2b36a57",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 17,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "82d4cb49fb2bdc34",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 9,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "8aaa5166b2f1265a",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 9,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "81b988d549ceb10e",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 4,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "5d6c01b4393afccd",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 5,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "ec9740b55ec1aa9f",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "0c9c611a25cc2f93",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "b3d0607cafce143e",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 18,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "886d46538b2f2868",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "b9c343ae5c5bce02",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "a508487f564c087a",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "opus",
+   "session_index": 22,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "7f991c588f6e15e8",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 18,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "0f0b9d2d72fae14c",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 9,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "674f9fd1dfe6ea02",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 5,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "60e6d4057072dafc",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 18,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "1da91e2445af280e",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "4eaa2c08cf4fb1ac",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 18,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "3ff3de160bbbf297",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 18,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "e09ccbf614eebd32",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 5,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "84524243a7d587c6",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 8,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "b9c744bb4293303f",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 21,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "a9b9c65418896264",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 9,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "0652c1ab32a3db0f",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 7,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "a528449d7ddfa2a2",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 4,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "9931e54d33ce195c",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 22,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "9b781146b66b73f4",
+   "llm": "haiku",
+   "requested": "sonnet",
+   "rules_eff": "sonnet",
+   "session_index": 23,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "e626fe836cfe2b2b",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 18,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "a2446b804b655b1a",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 18,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "69843e1585198869",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 5,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "3214971ca6441352",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 9,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "3962e5f14f35758a",
+   "llm": "sonnet",
+   "requested": "sonnet",
+   "rules_eff": "sonnet",
+   "session_index": 15,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "322128868bb6569d",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 6,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "5911c6b0f9bbedd2",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 18,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "2f7bc0588560679a",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 1,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "576ac8f17f6e7ca8",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 8,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "c9bf29f2ac6fcc6c",
+   "llm": "opus",
+   "requested": "sonnet",
+   "rules_eff": "sonnet",
+   "session_index": 15,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "e1176f0d8ce020bc",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 17,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "19edabf8623b1677",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 19,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "6770d451f0282047",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 9,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "accaa1c328f28ae1",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 9,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "2a3d710e898c150a",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 9,
+   "source": "llm",
+   "truth": "haiku"
+  },
+  {
+   "group": "G",
+   "item_id": "e494c63312094165",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 5,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "bc06702bd934c917",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 9,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "279c31a6138f9a5a",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 18,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "27b2e692e145c895",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 9,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "16ab2fb765147f21",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 5,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "8ee1fa837b892841",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 9,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "505778e011cb71f7",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 18,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "91f803110109b5a3",
+   "llm": "haiku",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 16,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "64b02acd9f5562fe",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 24,
+   "source": "llm",
+   "truth": "sonnet"
+  },
+  {
+   "group": "G",
+   "item_id": "948e193dde040c12",
+   "llm": "sonnet",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 18,
+   "source": "llm",
+   "truth": "opus"
+  },
+  {
+   "group": "G",
+   "item_id": "663f4cbd7a035c60",
+   "llm": "opus",
+   "requested": "opus",
+   "rules_eff": "sonnet",
+   "session_index": 4,
+   "source": "llm",
+   "truth": "opus"
+  }
+ ],
+ "label": "synthetic (D-99)",
+ "lead": [],
+ "n": 146,
+ "n_f": 32,
+ "n_fallback": 4,
+ "n_g": 119,
+ "n_labeled": 150,
+ "n_selected": 151,
+ "p17c_gate": {
+  "gap": "classifier shadow switched on 2026-10-08 before the uncontended 10-11 artifact (process clause not judged)",
+  "path": "/Users/yaliandrona/.rsi/research/primary-plan/gates/v16/P1.json",
+  "sha256": "e9fc10e84af8ae0e6787a2fc1210c0a63a08395cebfeb6c67bd7b93f19632948",
+  "verdict": "PASS"
+ },
+ "prereg": "docs/prereg/PREREG-P17D-synthetic.md",
+ "reference_arms": {
+  "always_opus": {
+   "c_lambda2_clamp": 6.117,
+   "under": {
+    "ci95": [
+     0.0,
+     0.025
+    ],
+    "k": 0,
+    "n": 150,
+    "rate": 0.0
+   }
+  },
+  "always_sonnet": {
+   "c_lambda2_clamp": 7.866,
+   "under": {
+    "ci95": [
+     0.344,
+     0.5
+    ],
+    "k": 63,
+    "n": 150,
+    "rate": 0.42
+   }
+  }
+ },
+ "verdict": "FAIL",
+ "verdict_reason": "a bar does not hold on the point estimates",
+ "what": "P1.7-d synthetic: nimble:9b vs rules_eff on replayed past prompts"
+}

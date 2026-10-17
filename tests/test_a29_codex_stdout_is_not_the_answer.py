@@ -24,7 +24,7 @@ Three defects, two of them fixed here:
 2. An `item.completed` whose item is `{"type": "error"}` carries `message`, not
    `text`, so the old code read `""` and dropped it in silence. A model the CLI
    does not know looked like an empty success.
-3. NOT fixed here: `codex/gpt-4o-mini` should not be in a routing chain at all —
+3. Not fixed here (closed later by docs/BUGS.md F22): `codex/gpt-4o-mini` should not be in a routing chain at all —
    the CLI has no metadata for it and the turn used 0 tokens. That is the
    capability-filter gap (architecture/GAP_ANALYSIS.md §10), not an adapter bug.
 """

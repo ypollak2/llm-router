@@ -121,9 +121,13 @@ tests/hook_rendering/
 # is the same failure that left the Codex plugin pointing at a .mcp.json
 # no clone ever contained.
 !/docs/ROUTERARENA.md
+# P2.4 ext-a: the empty-chain table tests/test_p24_empty_chain_table.py parses.
+!/docs/empty-chain-behaviour.md
 # The POST /ground contract — shipped surface, so it has to be readable by
 # someone who does not have this checkout.
 !/docs/GROUNDING_API.md
+# `llm-router prefer` user documentation (P2.13): shipped surface.
+!/docs/prefer.md
 # The per-change KPI ledger — a permanent record (one row per merged PR), same
 # category as /docs/repo_goals/ below, not a working note.
 !/docs/KPI-LEDGER.md

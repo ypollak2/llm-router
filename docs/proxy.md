@@ -142,6 +142,7 @@ client tools are never routed.
 | `--tier-policy` | `LLM_ROUTER_PROXY_TIER_POLICY` | the bundled `proxy/claude_tiers.yaml` |
 | `--backend-fail-n` | `LLM_ROUTER_PROXY_BACKEND_FAIL_N` | `3` (consecutive empty or sub-second invalid replies before local serving pauses; a crash signature pauses at once; `0` disables) |
 | `--backend-cooldown-s` | `LLM_ROUTER_PROXY_BACKEND_COOLDOWN_S` | `60` (pause before a one-token probe checks the backend) |
+| `--local-gate` | `LLM_ROUTER_PROXY_LOCAL_GATE` | `off`. `on`: a continuation is served locally only on a lane that `local_eligibility.json` marks eligible (section below). Needs `--steps continuation`; not with `--serve local-agent`. |
 
 The model, the trims (`proxy/backends.py: TRIMS`) and the backends
 (`BACKENDS`) are plug points. A measured speed lever can be added as a named trim
@@ -162,6 +163,37 @@ That run used a dedicated tuned server. The proxy's defaults follow it:
 - **Warm.** `keep_alive: 600` (seconds; `--keep-alive -1` pins forever) is sent on every call, plus one warm-up call at
   start. A cold load took 8-110 s in that spike.
 - **Hedge.** 8 s to the first token.
+
+### Local gate (`--local-gate on`, default off)
+
+Without it the proxy picks a local model from the routing policy alone and never reads
+`local_eligibility.json` (found 2026-10-17: the live proxy forwarded every step,
+`routing_off`). With the gate on, a step is served locally only when its lane is qualified.
+Gate off is byte-identical to before: no file read, no ledger key.
+
+- **Which steps.** Only `continuation`. The lane comes from the class of the tools the step
+  answers: `technical_op` is `tech_op/simple`; after `web` tools, policy task type
+  query/research/analyze is `qa/<tier>` and `code` is `code/<tier>` (tier = the policy's
+  `simple` or `moderate`). Edit, exec, agent and other tools stay on Claude. An edit-shaped
+  local reply is never served.
+- **Which model.** The highest-`n` entry of the lane with `eligible: true`, `verdict:
+  "eligible"` and `grade: "eligible"` in `{model: {task_type: {tier: lane}}}`, as
+  `ollama/<name>`. `--model` does not make an ineligible lane serve.
+- **Reason codes** (`local_gate.reason` in the ledger row, beside `lane` and `model`; the first
+  failing check forwards): `not_continuation`, `lane_unmapped`, `eligibility_unreadable`
+  (missing, empty, unreadable or malformed file; never fails open), `ineligible_lane`,
+  `breaker_open` (quality_breaker `techop_local/tech_op`, or `proxy_local/<lane>`; an error
+  reading the breaker also forwards; half-open lets one probe per step budget through),
+  `promote_gated` (P0.15), `capability_excluded` (F14), `no_local_model`, `backend_unhealthy`,
+  `pack_over_window`, `gate_error`, and `served_local`. A local failure after the gate passed
+  falls back to Claude as before and the row says `local_failed`.
+- **Breaker feed.** A served step whose next two tool calls re-issue one of its own tool calls
+  (same tool and file path, pattern or command) is one failure unit; two calls without that are
+  one success. Units are in `proxy_local_units.jsonl` in the state directory.
+- **Turning it on** (owner step, after a lane is eligible): `proxy --port 8797 --steps
+  continuation --local-gate on --tiers conversation --tier-policy ~/.llm-router/claude_tiers.yaml`
+  or `LLM_ROUTER_PROXY_STEPS=continuation LLM_ROUTER_PROXY_LOCAL_GATE=on`, then restart the
+  proxy service. Keep the Opus pin and do not combine with `--serve local-agent`.
 
 ### Optional: a dedicated tuned Ollama server (not auto-configured)
 
@@ -448,11 +480,23 @@ only takes effect after a cold gap or a complexity change.
 ### Haiku guard (`proxy/haiku_guard.py`): `haiku_rewrite` turns itself off
 
 While the live policy has `haiku_rewrite: true`, the proxy runs a guard at
-start and then every hour. A trip writes `~/.llm-router/tier_overrides.json`
-(`{"haiku_rewrite": false, "reason", "ts"}`) and turns the running policy's
-rewrite off; the YAML is never edited. `ClaudeTierPolicy.load` reads the file
-after the YAML, so the override also holds across restarts. The override can
-only turn the rewrite off. To undo a trip, delete the file and restart the
+start and then every hour. A trip opens the `proxy_haiku` class of the quality
+breaker (`~/.llm-router/quality_breaker.json`) and turns the running policy's
+rewrite off; the YAML is never edited. `ClaudeTierPolicy.load` applies the breaker,
+so the demotion also holds across restarts. After the breaker's cooldown (24 h) the
+rewrite is switched on again as a half-open probe: 5 Haiku-served turns after that
+moment with a redo rate below 50% close the class, otherwise it reopens for another
+24 h. The probe counts only turns the proxy itself moved to Haiku (the rewrite, or a
+treatment-arm turn), not a client that asked for Haiku. Its bar (the breaker's generic
+redo rate < 50%) is deliberately looser than the 15% trip bar: it decides whether the
+lever is plainly broken, and a lever that is marginal trips again on the triggers. A probe
+that cannot be read keeps an open class demoted; only an unreadable state file reads
+closed. The guard loop also runs when the breaker, not the YAML, has the rewrite off, so
+recovery works after a restart during the cooldown. After a recovery the triggers look only at newer evidence. The owner override
+`~/.llm-router/tier_overrides.json` (`{"haiku_rewrite": false, "reason", "ts"}`) is
+written by the owner only, beats the breaker, and can only turn the rewrite off;
+the guard and the breaker never write or delete it, so no probe runs while it
+exists. To lift it, delete the file and restart the
 proxy. Triggers (one is enough; a trigger below its minimum n never trips):
 
 | Trigger | Trips when |
@@ -704,6 +748,58 @@ a sha256 of the `env` block and the file's mtime (never the URL). The repair
 appends a `write` row with the keys changed and the backup path. The next
 unexplained removal then falls between two session starts.
 
+### Routing authority: `route` or `advise` (P2.2-A, `llm_router/authority.py`)
+
+```bash
+llm-router mode                  # "mode: route (default)" / "(file)" / "(env)"
+llm-router mode advise           # the proxy forwards the model you asked for; logs its proposal only
+llm-router mode route            # back to today's behaviour (the default)
+llm-router install --authority route|advise   # proxy default + fail-open shim, then the mode
+```
+
+`advise` is shadow under the P2.7 precedence (D-150): no local serving, no rewrite, and a
+user's own prefix (`opus:`, `local:`, ...) does not beat it. The tier policy still decides, on a
+read-only view of the stickiness (a proposal that is never applied must not pin later turns), so
+the ledger row keeps `tier_proposed` and the `tier_*` detail, the would-be reason moves to
+`tier_reason_proposed`, and the client's ORIGINAL bytes (prefix included) go upstream:
+`served_model` is the requested model, `tier` is null, `tier_reason` is `advise`, and a prefixed
+turn records `prefix_outcome: advise:not_applied`. Every proxy row carries `authority`
+(`route` | `advise`). The mode is read on every request from `LLM_ROUTER_AUTHORITY` (wins when
+set), else the one-word file `~/.llm-router/authority`, else `route`; a toggle therefore never
+restarts the proxy. An unrecognised value is read as `route` and counted as
+`CHZ-FO-AUTHORITY-MODE`. Nothing here writes `settings.json` or a service definition.
+
+**Shipped off.** A plain `llm-router install` does not turn the proxy default on: it prints
+one line saying so. `commands/install.py` `PROXY_DEFAULT_ON_INSTALL = False` is the owner's
+switch (D-104): when True, a fresh install (no sentinel, no `ANTHROPIC_BASE_URL` in
+`settings.json`) installs the proxy default with `route`, unless `--no-authority`.
+
+**Skips.** `~/.llm-router/skips.jsonl` holds `{ts, session_id, door, reason}`; a row with no
+reason is refused. The proxy writes none: `routing_off` and the tier reasons are already on its
+ledger row, and a per-call skip row would let `coverage_check` call a bypassed call "explained".
+The hook sites (`headless`, `base_url_override`; round B) are the writers, and only those two
+session-level skips (plus fail-open `proxy_down` rows) explain a call with no ledger row. The file
+rotates at 8 MB (two generations).
+
+**Coverage.** `scripts/coverage_check.py --since ... --until ...` counts host model calls
+(assistant message ids in the Claude Code transcripts) that passed a decision point (a
+ledger row with `tier_reason` or `reason`, or served), caps each session at 40, requires
+every call that did not pass to be explained, and prints Wilson 95% bounds. It reads message
+ids and timestamps only. `--write` leaves `coverage_check.json` for `llm-router kpi`. This
+is decision-point coverage, not routing coverage: a forward with a recorded reason passes, so it
+prints the routed share beside it. A passed call is `routed` only if it was `served` or the tier
+policy switched the model (`tier_switch` True). A tier decision that did not switch (first_call,
+side_call, sticky, pinned, unknown_model, policy-kept) is `decided_kept`, even when the row also
+says `reason=routing_off` (the live config: tiers on, steps off). Other buckets: `advise`, `off`
+(routing_off / tiers_off with no tier decision), `other_reason`. JSON `routed_share` carries
+`routed`, `decided_kept`, `advise`, `off`, `other_reason`, `routed_share`, `decided_kept_share`,
+`off_share`, `advise_share`. The flag "NOT EVIDENCE FOR R-RTE-2" (`not_evidence_for_RRTE2`)
+fires when off + advise + decided_kept is at least 90% of passed calls, i.e. real switches are at
+most 10%. It covers only that share: it does not judge whether the switches were right. The
+header also prints `failopen_explained`; `fail_open` is a global explainer, so any no-row call
+within +-120 s of a `proxy_down` row counts as explained whatever its session. `--switch-file` (the owner's recorded switch time) is required
+for an informative run; without it the verdict is NOT INFORMATIVE (`switch_unknown`).
+
 ### Escalation to Opus (`proxy/escalation.py`)
 
 Directly motivated by the trial's one unacceptable answer:
@@ -743,3 +839,15 @@ Directly motivated by the trial's one unacceptable answer:
 | `LLM_ROUTER_PROXY_ESCALATION_TOOL_FAIL_N` | `2` consecutive failed tool turns before escalating |
 | `LLM_ROUTER_PROXY_LONG_PROMPT_WORDS` | `120` |
 | `LLM_ROUTER_PROXY_LONG_PROMPT_PARTS` | `3` |
+
+## Routing prefixes
+
+A prompt that starts with `local:`, `claude:`, `opus:`, `sonnet:`, `haiku:` or `codex:` (case-insensitive; `native:` means `claude:`) forces where it runs. The prefix is read only at the start of the prompt, is stripped before the text is forwarded, and each forced choice appends a text-free row (`text_sha`, `forced`, `decided`, `door`, `ts`) to `~/.llm-router/examples.jsonl`. A prefix beats the classifier, stickiness, the Q&A-quiet policy and soft quota pressure; it does not beat `LLM_ROUTER_ENFORCE=off|shadow`, kill switches, admin `pinned_models`, hard stops (media, prompt cap, unhealthy backend, open breaker) or budget caps.
+
+| Door | `claude:` | `opus:` `sonnet:` `haiku:` | `local:` | `codex:` |
+|---|---|---|---|---|
+| Hook | answers natively, nothing held | act as `claude:` (a hook cannot switch the host model) | forced to a local model, or a one-line refusal | forced to Codex, or a one-line refusal |
+| Proxy | forwarded, prefix stripped | pins that tier | served locally only with `--serve local-agent`, else forwarded unchanged | forwarded unchanged (no backend) |
+| MCP `llm()` | one-line "handle it yourself" | runs the API tier, or the same note in subscription mode | runs the first installed local model, or refuses | runs a Codex model, or refuses |
+
+P2.7-a is conditional-partial: 6/6 at the hook, 4/6 at the proxy. Unknown prefixes (`gpt:`) are ignored. Text whose first line begins with `Claude:`, `Local:`, `Opus:` and so on (a pasted dialogue, for example) is read as a prefix: put some text before it, or rephrase.

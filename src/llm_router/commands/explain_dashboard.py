@@ -74,14 +74,17 @@ def _today_sql_window() -> str:
 
 def _routing_panel_block() -> list[str]:
     """Explain the executed header (24h) and classifier hints (today)."""
-    from llm_router.routing_report import executed_routes, format_executed_routes
+    from llm_router.routing_report import executed_routes, format_executed_routes, format_local_by_cause
 
     out = _panel_header("ROUTING panel")
     out.append(_note("Source:  usage.db routing_decisions (executed header)"))
     out.append(_note("Filter:  provenance='runtime', real decisions"))
     out.append(_note("Code:    routing_report.executed_routes"))
     out.append(_note("Window:  last 24h (UTC)"))
-    out.append(_note(format_executed_routes(executed_routes(24.0))))
+    _executed = executed_routes(24.0)
+    out.append(_note(format_executed_routes(_executed)))
+    if format_local_by_cause(_executed):
+        out.append(_note(format_local_by_cause(_executed)))
     out.append(_blank())
     out.append(_note("Hints today: classifier log model_tracking.jsonl"))
     out.append(_note("Code:    session-end.py:_query_routing_logic"))

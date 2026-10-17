@@ -89,6 +89,7 @@ async def build_chain(
         try:
             chain = await _build_dynamic_chain(task_type, complexity, profile)
             chain = await _apply_subscription_local(chain, complexity, profile)
+            chain = _apply_quota_score(chain, task_type, profile)
             top = chain[0] if chain else None
             set_span_attributes(span, chain_length=len(chain), top_model=top)
             return chain
@@ -96,6 +97,7 @@ async def build_chain(
             log.debug("dynamic chain builder failed, using static: %s", e)
             chain = _static_chain(task_type, profile)
             chain = await _apply_subscription_local(chain, complexity, profile)
+            chain = _apply_quota_score(chain, task_type, profile)
             set_span_attributes(
                 span,
                 fallback_reason="dynamic_chain_builder_failed",
@@ -103,6 +105,29 @@ async def build_chain(
                 top_model=chain[0] if chain else None,
             )
             return chain
+
+
+def _apply_quota_score(chain, task_type, profile):
+    """Compatibility door; read weights in resource_map at call time (P2.3 prereg)."""
+    from llm_router.types import RoutingProfile
+
+    if profile not in (RoutingProfile.QUOTA_BALANCED, "quota_balanced"):
+        return chain
+    try:
+        from llm_router import map_reader, qa_policy, resource_map
+
+        data = map_reader.load_data() or resource_map.live_subscription_rows()
+        tt = getattr(task_type, "value", task_type)
+        hold = frozenset({"anthropic"}) if tt in qa_policy.QA_TASK_TYPES else frozenset()
+        new, _ = resource_map.order_chain(
+            chain, data, {"task_type": tt, "needs": ()}, hold_providers=hold,
+        )
+        return new
+    except Exception as exc:
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-CHAIN-BUILDER-QUOTA-SCORE", exc)
+        return chain
 
 
 async def _apply_subscription_local(

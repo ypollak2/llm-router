@@ -358,6 +358,9 @@ def _ollama_rows(inp: MapInputs, now: float) -> list[dict]:
             status="connected", reason=reason,
             marginal_cost={"value": 0.0, "label": "local; electricity not counted"},
             capabilities=caps,
+            # D-159: True only when /api/show reported a capabilities list. Without it the
+            # list above is just ``generate``, which says nothing about tools or vision.
+            capabilities_reported=known,
             digest=m.get("digest"),
             limits={
                 "num_ctx": local_models.num_ctx(name),
@@ -549,3 +552,234 @@ def render_table(data: dict) -> str:
     lines += ["  ".join(v.ljust(w) for v, w in zip(row, widths)).rstrip() for row in out]
     lines.append(f"policy={data['policy']}  generated_at={data['generated_at']}")
     return "\n".join(lines)
+
+
+# ── score (P2.3) ──
+# Read these module attributes at call time; see docs/prereg/PREREG-P23-quota-score.md.
+SCORE_W1 = 10.0
+SCORE_W2 = 0.05
+SCORE_W3 = 1.0
+RESET_FLOOR_H = 0.25
+SCORE_PMAX_HIGH = 0.95
+UNKNOWN = "unknown"
+
+
+def _known_number(x, lo=None, hi=None) -> float | None:
+    import math
+
+    if type(x) not in (int, float):
+        return None
+    try:
+        value = float(x)
+    except (ValueError, OverflowError):
+        return None
+    if not math.isfinite(value):
+        return None
+    if lo is not None and value < lo:
+        return None
+    if hi is not None and value > hi:
+        return None
+    return value
+
+
+def _quota_pressure(q):
+    if not isinstance(q, dict):
+        return None
+    provenance = q.get("provenance")
+    if not isinstance(provenance, str) or provenance not in ("measured", "estimated"):
+        return None
+    return _known_number(q.get("value"), 0, 1)
+
+
+def _pmax(resource):
+    if not isinstance(resource, dict):
+        return None
+    quota = resource.get("quota")
+    if not isinstance(quota, dict):
+        return None
+    values = [_quota_pressure(quota.get(k)) for k in ("pressure", "weekly_pressure")]
+    known = [v for v in values if v is not None]
+    return max(known) if known else None
+
+
+def _reset_in_h(reset_at, now):
+    if not isinstance(reset_at, str):
+        return None
+    try:
+        reset = datetime.fromisoformat(reset_at)
+        if reset.tzinfo is None:
+            reset = reset.replace(tzinfo=timezone.utc)
+        hours = (reset.timestamp() - now) / 3600
+        return _known_number(hours) if hours > 0 else None
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
+
+
+def _score_resource_name(resource):
+    name = resource.get("resource") if isinstance(resource, dict) else None
+    return name if isinstance(name, str) else UNKNOWN
+
+
+def _score_cost(resource):
+    cost = resource.get("marginal_cost")
+    return _known_number(cost.get("value"), 0) if isinstance(cost, dict) else None
+
+
+def score(resource, decision=None) -> tuple[float, dict]:
+    """Sum known terms only; the reset bonus is positive (prereg §1)."""
+    row = resource if isinstance(resource, dict) else {}
+    d = decision if isinstance(decision, dict) else {}
+    inputs = dict.fromkeys(("effective_priority", "pressure", "reset_in_h", "marginal_cost"))
+    terms = dict.fromkeys(("priority", "pressure", "reset", "marginal_cost"))
+    p = row.get("effective_priority")
+    if type(p) is int and p >= 1 and d.get("priority_ordered") is True:
+        known_p = _known_number(p, 1)
+        if known_p is not None:
+            inputs["effective_priority"] = known_p
+            terms["priority"] = 1 / p
+    pressure = _pmax(row)
+    if pressure is not None:
+        inputs["pressure"] = pressure
+        terms["pressure"] = -SCORE_W1 * pressure
+    now = _known_number(d.get("now"))
+    if now is None:
+        now = time.time()
+    reset = _reset_in_h(row.get("reset_at"), now)
+    if reset is not None:
+        inputs["reset_in_h"] = reset
+        terms["reset"] = SCORE_W2 / max(reset, RESET_FLOOR_H)
+    cost = _score_cost(row)
+    if cost is not None:
+        inputs["marginal_cost"] = cost
+        terms["marginal_cost"] = -SCORE_W3 * cost
+    value = float(sum(v for v in terms.values() if v is not None))
+    return value, {
+        "resource": _score_resource_name(row), "score": value,
+        "terms": {k: UNKNOWN if v is None else float(v) for k, v in terms.items()},
+        "inputs": {k: UNKNOWN if v is None else float(v) for k, v in inputs.items()},
+    }
+
+
+def _eligible(resource, decision) -> str | None:
+    row = resource if isinstance(resource, dict) else {}
+    d = decision if isinstance(decision, dict) else {}
+    status = row.get("status")
+    if not isinstance(status, str):
+        return "status unknown"
+    if status != "connected":
+        return "status " + status
+    caps = row.get("capabilities")
+    if not isinstance(caps, (list, tuple)):
+        return "capabilities unknown"
+    capabilities = {c for c in caps if isinstance(c, str)}
+    if "generate" not in capabilities:
+        return "capability generate missing"
+    needs = d.get("needs")
+    if isinstance(needs, (list, tuple, set, frozenset)):
+        if any(n not in capabilities for n in needs if isinstance(n, str)):
+            return "capabilities missing"
+    competence = row.get("competence")
+    task_type = d.get("task_type")
+    if isinstance(competence, dict) and isinstance(task_type, str):
+        task = competence.get(task_type)
+        if isinstance(task, dict):
+            tiers = [v for v in task.values() if isinstance(v, dict)]
+            if tiers and all(t.get("eligible") is False for t in tiers):
+                return "competence failed"
+    return None
+
+
+def order_resources(resources, decision=None) -> tuple[list[dict], list[dict]]:
+    if resources is None or isinstance(resources, (str, bytes)):
+        return [], []
+    try:
+        rows = list(resources)
+    except Exception:
+        return [], []
+    ranked, explains = [], []
+    for index, row in enumerate(rows):
+        reason = _eligible(row, decision)
+        if reason is not None:
+            explains.append({"resource": _score_resource_name(row), "filtered": reason})
+            continue
+        value, explain = score(row, decision)
+        kind = row.get("kind")
+        subscription = isinstance(kind, str) and kind == "subscription"
+        cost_group = int(not subscription and _score_cost(row) is None)
+        pressure = _pmax(row)
+        pressure_group = 0
+        if subscription:
+            pressure_group = 1 if pressure is None else (2 if pressure >= SCORE_PMAX_HIGH else 0)
+        ranked.append(((cost_group, pressure_group, -value, index), row, explain))
+        explains.append(explain)
+    ranked.sort(key=lambda item: item[0])
+    for rank, (_, _, explain) in enumerate(ranked, 1):
+        explain["rank"] = rank
+    return [row for _, row, _ in ranked], explains
+
+
+def order_chain(
+    chain, map_data, decision=None, *, key=lambda m: m,
+    hold_providers=frozenset(), exempt=None,
+) -> tuple[list, list[dict]]:
+    out = list(chain)
+    if not isinstance(map_data, dict):
+        return out, []
+    from llm_router import map_reader
+
+    resources = map_data.get("resources")
+    if not isinstance(resources, (list, tuple)):
+        return out, []
+    rows = []
+    for row in resources:
+        if not isinstance(row, dict):
+            continue
+        kind, cid = row.get("kind"), row.get("chain_id")
+        if isinstance(kind, str) and kind == "subscription" and isinstance(cid, str):
+            rows.append(row)
+    d = dict(decision) if isinstance(decision, dict) else {}
+    d["priority_ordered"] = map_reader._expresses_order(map_data.get("policy"))
+    ordered, explains = order_resources(rows, d)
+    providers = {r["chain_id"].split("/", 1)[0] for r in rows}
+    positions = {}
+    for row in ordered:
+        provider = row["chain_id"].split("/", 1)[0]
+        if provider not in positions:
+            positions[provider] = len(positions)
+    slots = []
+    for index, entry in enumerate(out):
+        cid = key(entry)
+        if not isinstance(cid, str):
+            continue
+        provider = cid.split("/", 1)[0]
+        if provider in providers and provider not in hold_providers and cid != exempt:
+            slots.append(index)
+    moved = sorted(
+        (out[i] for i in slots),
+        key=lambda entry: positions.get(key(entry).split("/", 1)[0], len(positions)),
+    )
+    for index, entry in zip(slots, moved):
+        out[index] = entry
+    return out, explains
+
+
+def live_subscription_rows(now=None) -> dict:
+    """Build live subscription readings without discovery or Codex rollout reads."""
+    from types import SimpleNamespace
+
+    from llm_router import failopen
+
+    timestamp = _known_number(now)
+    if timestamp is None:
+        timestamp = time.time()
+    seat = SimpleNamespace(
+        present=True, plan=None, reason="", kind="live", plan_stale=False, status="connected",
+    )
+    inp = MapInputs(codex_sessions=None)
+    rows = []
+    for builder in (_claude_row, _codex_row, _gemini_row):
+        try:
+            rows.append(builder(seat, inp, timestamp))
+        except Exception as exc:
+            failopen.record("CHZ-FO-QUOTA-SCORE-LIVE-ROW", exc)
+    return {"schema": SCHEMA, "policy": None, "resources": rows}

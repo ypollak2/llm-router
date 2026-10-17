@@ -174,8 +174,8 @@ def test_the_child_runs_every_moved_step_in_order(hook, state, monkeypatch):
         monkeypatch.setattr(hook, name, (lambda n: lambda *a, **k: ran.append(n))(name))
     hook._run_background_stop_work()
     assert ran == list(hook._STOP_BACKGROUND_STEPS)
-    assert ran[:2] == ["_refresh_northstar_line", "_fetch_live_usage"], (
-        "the cheap north-star refresh runs before the 8 s HTTPS usage fetch")
+    assert ran[:3] == ["_refresh_northstar_line", "_refresh_ledger_cache", "_fetch_live_usage"], (
+        "the cheap north-star and ledger-cache refreshes run before the 8 s HTTPS usage fetch")
 
 
 def test_one_failing_child_step_does_not_skip_the_rest(hook, state, monkeypatch):
@@ -353,11 +353,12 @@ def test_an_unwritable_claim_starts_no_child(hook, state, monkeypatch):
 
 # ── #325 review gaps (mutation survivors) ────────────────────────────────────
 
-def test_the_background_steps_are_exactly_these_six_in_order(hook):
+def test_the_background_steps_are_exactly_these_seven_in_order(hook):
     """The two tests above iterate ``_STOP_BACKGROUND_STEPS`` itself, so dropping a
     step from it (the profile rescan) left them green."""
     assert hook._STOP_BACKGROUND_STEPS == (
-        "_refresh_northstar_line", "_fetch_live_usage", "_build_and_save_learned_profile",
+        "_refresh_northstar_line", "_refresh_ledger_cache", "_fetch_live_usage",
+        "_build_and_save_learned_profile",
         "_maybe_rescan_profile", "_maybe_evaluate_models", "_link_decision_outcomes")
     for name in hook._STOP_BACKGROUND_STEPS:
         assert callable(getattr(hook, name)), name

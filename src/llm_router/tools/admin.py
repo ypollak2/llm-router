@@ -1163,11 +1163,14 @@ async def llm_quota_status() -> str:
     Monitors three subscription providers to help you understand which quota
     is being exhausted, and make routing decisions accordingly.
 
-    The QUOTA_BALANCED profile uses this data to dynamically reorder the
-    routing chain — keeping usage balanced across all three subscriptions.
+    The order shown is the legacy quota_balance order. Live routing does not
+    use this order: under the QUOTA_BALANCED profile the chain is ranked by
+    resource_map.order_chain / resource_map.score (P2.3). The pressure values
+    shown are still read live by the subscription-local demotion
+    (subscription_local_routing.get_subscription_pressure).
 
     Returns:
-        Formatted quota status with usage percentages and route recommendations.
+        Formatted quota status with usage percentages and the legacy provider order.
     """
     try:
         from llm_router.quota_balance import get_provider_pressures, get_balanced_provider_order
@@ -1177,7 +1180,7 @@ async def llm_quota_status() -> str:
 
         # Format status table
         rows = []
-        rows.append("Provider       │ Usage    │ Route Priority")
+        rows.append("Provider       │ Usage    │ Legacy order")
         rows.append("───────────────┼──────────┼────────────────")
 
         provider_info = {
@@ -1190,7 +1193,7 @@ async def llm_quota_status() -> str:
             provider, pressure = provider_key
             pct_str = f"{pressure:.0%}".rjust(5)
             bar = "█" * int(pressure * 10) + "░" * (10 - int(pressure * 10))
-            priority_icon = "1st ← next" if order[0] == provider else ""
+            priority_icon = "1st (legacy order)" if order[0] == provider else ""
             if order[1] == provider:
                 priority_icon = "2nd" if not priority_icon else "2nd (in band)"
             elif order[2] == provider and not priority_icon:
@@ -1203,10 +1206,11 @@ async def llm_quota_status() -> str:
         spread = max_p - min_p
 
         status_lines = [
+            "Order shown: legacy quota_balance order, not the live P2.3 routing (live QUOTA_BALANCED routing ranks with resource_map.score).",
             "",
             "\n".join(rows),
             "",
-            f"Balance: spread={spread:.0%} — {'routing to {0} (exceeds ±10% band)'.format(order[0].upper()) if spread > 0.10 else 'all providers in ±10% band'}",
+            f"Balance: spread={spread:.0%} — {'legacy order prefers {0} (exceeds ±10% band)'.format(order[0].upper()) if spread > 0.10 else 'all providers in ±10% band'}",
         ]
 
         # Show model routing priorities
@@ -1216,7 +1220,7 @@ async def llm_quota_status() -> str:
             "gemini_cli": "gemini-pro",
         }
         priority_models = " → ".join([f"{p} ({model_map.get(p, p)})" for p in order])
-        status_lines.append(f"Model chain: {priority_models}")
+        status_lines.append(f"Model chain (legacy quota_balance order, not the P2.3 live score): {priority_models}")
 
         # Reset times
         from datetime import datetime, timezone, timedelta

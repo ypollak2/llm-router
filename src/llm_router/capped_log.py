@@ -32,11 +32,14 @@ import json
 import os
 from pathlib import Path
 
-__all__ = ["append", "read_dicts"]
+__all__ = ["append", "read_dicts", "rotate_if_full"]
 
 
-def append(path: Path, data: bytes, max_bytes: int) -> None:
-    """Append ``data`` (one complete line) to ``path``; rotate when it is full."""
+def append(path: Path, data: bytes, max_bytes: int, backups: int = 1) -> None:
+    """Append ``data`` (one complete line) to ``path``; rotate when it is full.
+
+    ``backups`` generations are kept (``<name>.1`` newest ... ``<name>.<backups>``
+    oldest); the default of 1 is the two-generation cap the KPI logs use."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
     try:
         fd = os.open(path, flags, 0o600)
@@ -50,10 +53,21 @@ def append(path: Path, data: bytes, max_bytes: int) -> None:
     finally:
         os.close(fd)
     if size > max_bytes:
-        _rotate(path, max_bytes)
+        _rotate(path, max_bytes, backups)
 
 
-def _rotate(path: Path, max_bytes: int) -> None:
+def rotate_if_full(path: Path, max_bytes: int, backups: int = 1) -> None:
+    """Rotate ``path`` when it is over ``max_bytes``. For a log whose writer opens and
+    writes the file itself (text mode, many small lines) and so cannot use
+    :func:`append`. Never raises."""
+    try:
+        if path.stat().st_size > max_bytes:
+            _rotate(path, max_bytes, backups)
+    except Exception:  # noqa: BLE001 -- rotation is housekeeping, never a failure
+        return
+
+
+def _rotate(path: Path, max_bytes: int, backups: int = 1) -> None:
     from llm_router.file_lock import exclusive_lock
 
     with exclusive_lock(path.with_name(path.name + ".lock"), timeout=0.0) as locked:
@@ -64,6 +78,10 @@ def _rotate(path: Path, max_bytes: int) -> None:
                 return  # someone rotated while this writer was getting here
         except FileNotFoundError:
             return
+        for n in range(max(1, backups) - 1, 0, -1):
+            older = path.with_name(f"{path.name}.{n}")
+            if older.exists():  # we hold the rotation lock: nobody else moves these
+                os.replace(older, path.with_name(f"{path.name}.{n + 1}"))
         os.replace(path, path.with_name(path.name + ".1"))
 
 

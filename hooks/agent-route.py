@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 23
+# llm_router-hook-version: 24
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -2031,6 +2031,51 @@ def _verify_enqueue_marker(res, session_id: str, ts) -> None:
             pass
 
 
+def _codex_quota_spread_declines(task_type, subagent_type, complexity, session_id) -> bool:
+    """The fresh-map delegation gate; weights stay in resource_map (P2.3 prereg)."""
+    profile = (os.environ.get("LLM_ROUTER_PROFILE", "")
+               or os.environ.get("LLM_ROUTER_COST_PROFILE", "")).strip().lower()
+    if profile != "quota_balanced":
+        return False
+    try:
+        from llm_router import map_reader, resource_map
+
+        data = map_reader.load_data()
+        if data is None:
+            return False
+        rows = []
+        for row in data.get("resources", []):
+            if not isinstance(row, dict):
+                continue
+            kind, cid = row.get("kind"), row.get("chain_id")
+            if (isinstance(kind, str) and kind == "subscription"
+                    and isinstance(cid, str) and cid.split("/", 1)[0] in ("anthropic", "codex")):
+                rows.append(row)
+        ordered, explains = resource_map.order_resources(
+            rows, {"task_type": task_type, "needs": (),
+                   "priority_ordered": map_reader._expresses_order(data.get("policy"))},
+        )
+        providers = [row["chain_id"].split("/", 1)[0] for row in ordered]
+        if "anthropic" not in providers or "codex" not in providers:
+            return False
+        if providers.index("anthropic") >= providers.index("codex"):
+            return False
+        scores = {e["resource"]: e.get("score", "unknown") for e in explains if "rank" in e}
+        _record_north_star_unit(
+            "agent_route_codex", model="", outcome="quota_spread",
+            subagent_type=subagent_type, task_type=task_type, complexity=complexity,
+            session_id=session_id, path="ns3",
+            reason=("resource_map.score ranks claude above codex: codex %s vs claude %s"
+                    % (scores.get("codex", "unknown"), scores.get("claude", "unknown")))[:200],
+        )
+        return True
+    except Exception as exc:
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-AGENT-ROUTE-QUOTA-SCORE", exc)
+        return False
+
+
 def _try_codex_subagent_delegation(
     prompt: str, task_type: str, complexity: str, subagent_type: str, session_id: str,
     cwd: str | None = None, ledger_session_id: str | None = None,
@@ -2107,6 +2152,9 @@ def _try_codex_subagent_delegation(
             complexity=complexity, session_id=session_id, path="ns3",
             reason=f"Codex usage limit; benched until {_fmt_clock(benched_until)}",
         )
+        return None
+
+    if _codex_quota_spread_declines(task_type, subagent_type, complexity, session_id):
         return None
 
     if _codex_window_declines("ns3", prompt, subagent_type, task_type, complexity, session_id):

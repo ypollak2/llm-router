@@ -81,7 +81,8 @@ def test_react_carry_forward_in_prompt():
 
 def test_default_executor_runs_and_files_no_model(tmp_path):
     ex = default_tool_executor(cwd=str(tmp_path))
-    out = ex("bash", {"command": f"{sys.executable} -c 'print(42)'"})
+    (tmp_path / "p.py").write_text("print(42)")   # `python -c` needs approval (P2.9-b)
+    out = ex("bash", {"command": f"{sys.executable} p.py"})
     assert "42" in out and "[exit 0]" in out
     ex("write_file", {"path": str(tmp_path / "x.txt"), "content": "hello"})
     assert (tmp_path / "x.txt").read_text() == "hello"
