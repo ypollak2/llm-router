@@ -18,7 +18,11 @@ import json
 import re
 import subprocess
 import sys
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    print("check_live_matches_lock.py needs Python >= 3.11 (tomllib)", file=sys.stderr)
+    sys.exit(2)
 from pathlib import Path
 
 _DUMP = (
@@ -60,7 +64,11 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, subprocess.CalledProcessError, ValueError) as exc:
         print(f"cannot query {args.python}: {exc}", file=sys.stderr)
         return 2
-    lock = locked(Path(args.lock))
+    try:
+        lock = locked(Path(args.lock))
+    except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError) as exc:
+        print(f"cannot read lock {args.lock}: {exc}", file=sys.stderr)
+        return 2
     bad, overlap = compare(live, lock)
     print(f"overlap={overlap} mismatches={len(bad)} live_only={len(set(live) - set(lock))} lock_only={len(set(lock) - set(live))}")
     for name, lv, kv in bad:
