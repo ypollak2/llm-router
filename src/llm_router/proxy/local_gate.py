@@ -443,11 +443,13 @@ class LaneGate:
             self._probe_at[(lever, task)] = now
         if not d.promoted(model, lane):
             return LaneDecision(False, model, R_PROMOTE, lane)
-        if needs is None:
+        if needs is None or getattr(needs, "tokens", None) is None:
             # Capability routing is off (or the caller could not size the request): what the
             # request needs (tools, vision, window) is unknown, and the filter that would
             # check it is a no-op when disabled, so it cannot be recomputed here. An unknown
-            # need forwards; it never serves (F48).
+            # need forwards; it never serves (F48). needs_from_anthropic_body swallows its
+            # own errors and returns Needs() with tokens=None; its normal path always sets an
+            # int (_estimate), so tokens None means the body could not be read.
             return LaneDecision(False, model, R_NEEDS_UNKNOWN, lane)
         if not d.capability_ok(model, needs):
             return LaneDecision(False, model, R_CAPABILITY, lane)
@@ -459,9 +461,8 @@ class LaneGate:
         hung = await asyncio.to_thread(d.watchdog)
         if hung:
             return LaneDecision(False, model, R_UNHEALTHY, lane, "watchdog")
-        if getattr(needs, "tokens", None):
-            from llm_router.capability_filter import WINDOW_MARGIN
+        from llm_router.capability_filter import WINDOW_MARGIN
 
-            if needs.tokens > WINDOW_MARGIN * d.window(model):
-                return LaneDecision(False, model, R_PACK, lane)
+        if needs.tokens > WINDOW_MARGIN * d.window(model):
+            return LaneDecision(False, model, R_PACK, lane)
         return LaneDecision(True, model, R_SERVED, lane)

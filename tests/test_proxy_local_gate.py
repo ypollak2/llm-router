@@ -474,6 +474,17 @@ async def test_unknown_needs_forward_and_never_serve(env, monkeypatch):
     assert row["local_gate"]["model"] == MODEL and backend.calls == []
 
 
+async def test_unreadable_needs_forward_and_never_serve(env, monkeypatch):
+    """F48: needs_from_anthropic_body swallows errors and returns Needs() (tokens None); that is unknown, not 'needs nothing'."""
+    monkeypatch.setattr(capability_filter, "needs_from_anthropic_body", lambda body: capability_filter.Needs())
+    backend = Backend()
+    r = await _post(env.app(backend), _req_after("Read"))
+    assert r.status_code == 200 and len(env.up.requests) == 1
+    row = _gate_row(env.rows())
+    assert row["decision"] == "forwarded" and row["local_gate"]["reason"] == "needs_unknown"
+    assert backend.calls == []
+
+
 async def test_check_order_is_breaker_before_promote(env):
     """A state failing both the breaker and the promote check reports the breaker."""
     (env.elig.parent / "grandfathered_models.json").write_text(json.dumps({"at": 1, "ids": []}))
