@@ -197,7 +197,7 @@ def full_run(factory, label="full", **kw):
 
 # ---- H4: selection ---------------------------------------------------------------------
 
-def test_no_tier_selection_and_strata_interleave():
+def test_no_tier_selection_and_org_first():
     pool = [make_item(i, tier=("complex" if i % 3 == 0 else "unlabelled" if i % 3 else "simple"))
             for i in range(130)]
     out = h.select_tech_op(pool, h.STATIC)
@@ -207,6 +207,49 @@ def test_no_tier_selection_and_strata_interleave():
     assert any(r["tier"] == "complex" and r["id"] in chosen for r in pool)
     assert any(r["tier"] == "unlabelled" and r["id"] in chosen for r in pool)
     assert out["selected_strata"]["org"] > 0 and out["selected_strata"]["ho"] > 0
+    assert out["selected_strata"] == {"org": 30, "ho": 90}  # D-206: all org, ho fills the rest
+
+
+def test_org_first_selects_every_org_row_before_any_ho():
+    pool = [make_item(i, stratum="org" if i < 32 else "ho", session=f"s{i % 16}")
+            for i in range(32 + 679)]
+    ids = h.select_tech_op(pool, h.STATIC)["ids"]
+    stratum = {r["id"]: r["stratum"] for r in pool}
+    order = [stratum[i] for i in ids]
+    assert order[:32] == ["org"] * 32 and set(order[32:]) == {"ho"} and len(ids) == 120
+    out = h.select_tech_op(pool, h.STATIC)
+    assert out["org_n"] == 32 and out["freeze"]["ready"] is True
+
+
+def test_org_first_still_obeys_the_session_cap():
+    pool = [make_item(i, stratum="org" if i < 40 else "ho",
+                      session="big" if i < 30 else f"s{i % 8}") for i in range(300)]
+    out = h.select_tech_op(pool, h.STATIC)
+    chosen = {r["id"]: r for r in pool}
+    in_big = sum(chosen[i]["session"] == "big" for i in out["ids"])
+    assert in_big == 24 and out["excluded"]["session_cap"] >= 6  # floor(0.20 x 120)
+    assert out["selected_strata"]["org"] == 10 + 24 and out["n"] == 120
+
+
+def test_window_filter_boundary_is_strictly_greater_and_counted(monkeypatch):
+    monkeypatch.setattr(h.local_models, "num_ctx", lambda model=None: 1000)  # limit 900.0
+    def sized(i, tokens, stratum):
+        row = make_item(i, stratum=stratum, history=False)
+        row["messages"][0]["content"] = "x" * (4 * tokens)
+        return row
+    pool = [sized(0, 900, "org"), sized(1, 901, "org"), sized(2, 900, "ho"), sized(3, 901, "ho"),
+            sized(4, 5000, "ho")]
+    assert [h.prompt_tokens_est(r) for r in pool] == [900, 901, 900, 901, 5000]
+    out = h.select_tech_op(pool, h.STATIC)
+    assert set(out["ids"]) == {"tech-000", "tech-002"}
+    assert out["excluded"]["over_gate_window"] == 3
+    assert out["over_gate_window_by_stratum"] == {"org": 1, "ho": 2}
+    assert out["gate_window_limit"] == 900.0
+
+
+def test_window_limit_follows_local_model_num_ctx():
+    out = h.select_tech_op([make_item(0)], h.STATIC)
+    assert out["gate_window_limit"] == 0.9 * h.local_models.num_ctx(h.LOCAL)
 
 
 def test_unknown_stratum_and_missing_field_dropped_and_duplicates_refuse():
@@ -681,12 +724,12 @@ def org_bad_ids(pool, org_bad, ho_bad=0):
 
 
 def test_organic_check_downgrades_when_org_disagrees(factory):
-    pool = [make_item(i) for i in range(130)]
+    pool = [make_item(i, stratum="org" if i < 22 else "ho") for i in range(130)]
     sel = h.select_tech_op(pool, h.STATIC)
     chosen = set(sel["ids"])
     org = [r for r in pool if r["stratum"] == "org" and r["id"] in chosen]
     bad, seen = [], set()
-    for r in org:  # three misses in three different sessions: org gap 3/26 = 11.5 pts, pooled 2.5
+    for r in org:  # org-first selects all 22 org rows: three misses in three sessions, org gap 3/22 = 13.6 pts
         if r["session"] not in seen and len(bad) < 3:
             seen.add(r["session"])
             bad.append(r["id"])
@@ -753,7 +796,9 @@ def test_secondary_report_fields(factory):
     assert sec["all"]["latency_s"]["p95"] is not None
     assert "secondary_reference" in result["sets"]["tech_op"]
     assert lane["session_sensitivity"]["sessions"] == 8
-    assert lane["without_subagent_file"]["removed"] == 10
+    picked = set(h.select_tech_op(pool, h.STATIC)["ids"])
+    assert lane["without_subagent_file"]["removed"] == sum(
+        r["from_subagent_file"] for r in pool if r["id"] in picked) == 12
     assert lane["agreement"] == {"k": 120, "n": 120}
     assert result["sets"]["tech_op"]["equal_window_sample"]["n"] == 12
     assert lane["strata"]["org"]["n"] + lane["strata"]["ho"]["n"] == 120

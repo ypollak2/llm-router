@@ -48,6 +48,7 @@ CONSTANTS_T: dict[str, str] = {
     "MIN_SESSIONS": "5",
     "SESSION_CAP_SHARE": "0.20",
     "ORG_MIN_N": "20",
+    "GATE_WINDOW_FACTOR": "0.9",
     "ORG_MAX_GAP_PTS": "10.0",
     "LOCAL_MODEL": LOCAL,
     f"ID_{LOCAL}": "b3f4c17c6811",
@@ -332,7 +333,8 @@ def nearest_rank(values: list[int], share: Fraction) -> int | None:
 
 
 def select_tech_op(pool: list[dict], c: dict) -> dict:
-    """No tier filter (C1); strata org+ho on one hash order; session cap; >= 5 sessions."""
+    """No tier filter (C1); org-first (D-206): every eligible org row by hash order, then ho rows
+    by hash order, up to N_TARGET; session cap on both; rows above the gate's window are dropped."""
     excluded: Counter = Counter()
     counts = Counter(row.get("stratum", "missing") for row in pool)
     seen, valid = set(), []
@@ -348,20 +350,33 @@ def select_tech_op(pool: list[dict], c: dict) -> dict:
             excluded["unknown_stratum"] += 1
         else:
             valid.append(row)
+    # D-206: the proxy local gate forwards a step when tokens > WINDOW_MARGIN x window (local_gate)
+    limit = Fraction(c["GATE_WINDOW_FACTOR"]) * local_models.num_ctx(c["LOCAL_MODEL"])
+    over_window: Counter = Counter()
+    kept = []
+    for row in valid:
+        if prompt_tokens_est(row) > limit:
+            excluded["over_gate_window"] += 1
+            over_window[row["stratum"]] += 1
+        else:
+            kept.append(row)
     seed = c["SELECT_SEED"]
-    valid.sort(key=lambda row: base.digest(f"{seed}:{row['id']}"))
+    kept.sort(key=lambda row: base.digest(f"{seed}:{row['id']}"))
     target = int(c["N_TARGET_TECH_OP"])
     cap = math.floor(Fraction(c["SESSION_CAP_SHARE"]) * target)
     chosen: list[dict] = []
     sessions: Counter = Counter()
-    for row in valid:
-        if len(chosen) == target:
-            break
-        if sessions[row["session"]] >= cap:
-            excluded["session_cap"] += 1
-            continue
-        chosen.append(row)
-        sessions[row["session"]] += 1
+    for stratum in STRATA:  # org first, then ho; each in hash order
+        for row in kept:
+            if len(chosen) == target:
+                break
+            if row["stratum"] != stratum:
+                continue
+            if sessions[row["session"]] >= cap:
+                excluded["session_cap"] += 1
+                continue
+            chosen.append(row)
+            sessions[row["session"]] += 1
     strata = Counter(row["stratum"] for row in chosen)
     n, n_sessions = len(chosen), len(sessions)
     reasons = []
@@ -373,7 +388,8 @@ def select_tech_op(pool: list[dict], c: dict) -> dict:
         reasons.append("org_n")
     return {
         "ids": [row["id"] for row in chosen], "n": n, "excluded": dict(excluded),
-        "stratum_counts": dict(counts), "selected_strata": dict(strata),
+        "stratum_counts": dict(counts), "over_gate_window_by_stratum": dict(over_window),
+        "gate_window_limit": float(limit), "selected_strata": dict(strata),
         "sessions": n_sessions, "org_n": strata.get("org", 0),
         "org_ok": strata.get("org", 0) >= int(c["ORG_MIN_N"]),
         "rowstamp_org": sum(r.get("row_stamp") == "organic" for r in chosen),
