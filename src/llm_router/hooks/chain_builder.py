@@ -358,9 +358,9 @@ def needs_claude_tools(prompt: str, task_type: str = "") -> bool:
     shared predicate for exemption / routing / provisioning / permissions (CF-2). This
     module holds no regex of its own; all detection lives in ``capabilities``.
 
-    Default (shadow mode) returns the LEGACY boolean so routing is byte-identical to
-    the pre-CF-2 behavior. With ``LLM_ROUTER_CAPABILITY_ROUTING=1`` it returns the richer
-    8-bit vector's ``needs_tools`` (symbol/write/command aware).
+    Since P2.4 capability routing is on by default, so this returns the richer 8-bit
+    vector's ``needs_tools`` (symbol/write/command aware). ``LLM_ROUTER_CAPABILITY_ROUTING=0``
+    returns the LEGACY boolean, the pre-CF-2 behaviour.
     """
     from llm_router.capabilities import capability_routing_enabled, detect_capabilities
     decision = detect_capabilities(prompt, task_type)

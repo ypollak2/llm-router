@@ -91,3 +91,17 @@ def test_no_task_type_dead_ends_execution_at_the_text_only_door():
             f"execution work classified {tt!r} was dead-ended at the text-only door: {reason!r}")
         if reason:  # when it DID block, it must name the tool-capable door
             assert "llm_act" in reason, f"{tt!r} block must name llm_act, got {reason!r}"
+
+
+def test_capability_routing_flag_never_weakens_enforcement(monkeypatch):
+    """D-159: enforce-route uses the legacy needs-tools detector whatever
+    LLM_ROUTER_CAPABILITY_ROUTING says. The 8-bit vector counts "commit" as a git need,
+    which would FS-exempt this prompt; the legacy boolean does not, so it is still held."""
+    from llm_router.capabilities import detect_capabilities
+
+    d = detect_capabilities(_EXEC_PROMPT, "query")
+    assert d.required.needs_tools and not d.legacy_match   # the two detectors disagree here
+    for flag in ("1", "0", ""):
+        monkeypatch.setenv("LLM_ROUTER_CAPABILITY_ROUTING", flag)
+        reason = _door_named(f"flag{flag or 'default'}", "query")
+        assert "llm_act" in reason, (flag, reason)

@@ -429,7 +429,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 choice = {"task_type": "local_agent", "complexity": "pinned",
                           "chain_head": [cfg.model], "model": cfg.model}
             else:
-                choice = await choose_model(classify_text(body), cfg.model)
+                from llm_router import capability_filter
+                needs = capability_filter.needs_from_anthropic_body(body) if capability_filter.enabled() else None
+                choice = await choose_model(classify_text(body), cfg.model, needs=needs)
         except Exception as exc:  # noqa: BLE001 - any policy failure forwards the call
             guard.reset(session_id)
             row.update(decision=ledger.DECISION_FALLBACK, reason="policy_error",

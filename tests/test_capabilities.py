@@ -67,17 +67,18 @@ def test_ambiguous_prompt_low_confidence_conservative():
 
 # ── shared-predicate wiring (default shadow mode) ─────────────────────────────
 
-def test_needs_claude_tools_default_is_legacy(monkeypatch):
-    monkeypatch.delenv("LLM_ROUTER_CAPABILITY_ROUTING", raising=False)
+def test_needs_claude_tools_kill_switch_is_legacy(monkeypatch):
+    # P2.4: capability routing is on by default; =0 restores the legacy boolean.
+    monkeypatch.setenv("LLM_ROUTER_CAPABILITY_ROUTING", "0")
     from llm_router.hooks.chain_builder import needs_claude_tools
-    # a symbol-only prompt: rich detector says needs_tools, but DEFAULT stays legacy(False)
+    # a symbol-only prompt: rich detector says needs_tools, but the kill switch gives legacy(False)
     assert needs_claude_tools("What does `foo` do?", "query") is False
     # a legacy pattern still fires by default
     assert needs_claude_tools("look in the codebase", "query") is True
 
 
 def test_needs_claude_tools_flag_on_uses_rich_vector(monkeypatch):
-    monkeypatch.setenv("LLM_ROUTER_CAPABILITY_ROUTING", "1")
+    monkeypatch.delenv("LLM_ROUTER_CAPABILITY_ROUTING", raising=False)   # P2.4: on by default
     from llm_router.hooks.chain_builder import needs_claude_tools
     assert needs_claude_tools("What does `foo` do?", "query") is True  # rich: repo_search
 
