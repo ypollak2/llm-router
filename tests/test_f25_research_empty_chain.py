@@ -1,5 +1,9 @@
 """F25 / D-170: ``llm(task="research")`` no longer fails silently when the premium research chain is empty.
 
+F26 / D-175 amends this: an empty TEXT chain is answered by a last-resort floor (local, then Codex/Gemini CLI,
+then the Claude CLI subscription). The refusal path below therefore needs a nothing-reachable machine (no local
+model, no CLI, no Claude subscription, no key); on the incident machine the floor now answers.
+
 Incident (2026-10-16, 12:48-16:07Z, ledger rows 2481-2492): with no Perplexity key and Claude in
 subscription mode, ``llm_research`` forced PREMIUM; the premium/research dynamic chain was ``[]``
 (#382 removed its only local entry; subscription mode drops ``anthropic``), the router raised
@@ -78,7 +82,10 @@ def env(cache_env, monkeypatch):
         return out
     monkeypatch.setattr(router, "_resolve_profile", _spy)
 
-    def ollama(installed: bool):
+    def ollama(installed: bool, subscription: bool = True):
+        # F26 / D-175: with Claude in subscription mode the last-resort floor reaches the Claude CLI, so the
+        # nothing-reachable fixture (where research is still refused) needs ``subscription=False`` too.
+        monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "true" if subscription else "false")
         if installed:
             monkeypatch.setenv("OLLAMA_BUDGET_MODELS", LOCAL)
         else:
@@ -123,9 +130,9 @@ async def _research(calls: list, *, tool_use="toolu_f25"):
 # ── (1) premium only when reachable ─────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_no_perplexity_subscription_with_ollama_answers_via_default_profile(env):
-    """The incident machine plus a local model: research is answered by the local model through the
-    default profile (no explicit PREMIUM), and the answer says it is not web-grounded."""
+async def test_no_perplexity_subscription_with_ollama_answers_via_the_floor(env):
+    """The incident machine plus a local model: research is answered by the local model (F26: through the
+    floor of the empty premium chain, local first), and the answer says it is not web-grounded."""
     env(installed=True)
     calls: list = []
     out = await _research(calls)
@@ -133,7 +140,6 @@ async def test_no_perplexity_subscription_with_ollama_answers_via_default_profil
     assert calls == [f"ollama/{LOCAL}"], out
     assert "Local answer about the topic." in out
     assert "UNVERIFIED — not web-grounded" in out
-    assert env.resolved and env.resolved[-1] != RoutingProfile.PREMIUM, env.resolved
     rows = _q(env.db, "SELECT task_type, profile, final_model, reason_code FROM routing_decisions "
                       "WHERE task_type = 'research'")
     assert rows and rows[-1][1] == env.resolved[-1].value and rows[-1][2] == f"ollama/{LOCAL}", rows
@@ -157,19 +163,27 @@ async def test_reachable_premium_research_chain_is_still_chosen(env):
 
 @pytest.mark.asyncio
 async def test_the_reachability_probe_is_the_router_chain_builder(env):
+    from llm_router import router
     from llm_router.tools import text
 
-    cfg = env(installed=True)
+    cfg = env(installed=False, subscription=False)  # nothing reachable: the floor is empty too
     assert await text._premium_research_reachable(cfg) is False
     env.tables[(RoutingProfile.PREMIUM, TaskType.RESEARCH)] = ["anthropic/claude-opus-4-1"]
+    cfg = env(installed=False, subscription=True)
     assert await text._premium_research_reachable(cfg) is True
+    env.tables.clear()
+    router._FLOOR_TIERS.clear()
+    router._FLOOR_WARNED.clear()
+    cfg = env(installed=True)  # F26: the probe runs with the floor off, so an empty table stays empty
+    assert await text._premium_research_reachable(cfg) is False
+    assert not router._FLOOR_TIERS and not router._FLOOR_WARNED
 
 
 # ── (2) an empty research chain is a refusal with its own reason ────────────
 
 @pytest.mark.asyncio
 async def test_empty_research_chain_is_a_refusal_not_an_error(env):
-    env(installed=False)
+    env(installed=False, subscription=False)
     calls: list = []
     out = await _research(calls)  # must not raise
 
@@ -190,7 +204,7 @@ async def test_refusal_row_records_the_calls_real_profile_not_the_active_one(env
     the process-wide active profile (here REASONING, which this prompt never resolves to)."""
     from llm_router import state
 
-    env(installed=False)
+    env(installed=False, subscription=False)
     monkeypatch.setattr(state, "get_active_profile", lambda: RoutingProfile.REASONING)
     await _research([])
     assert len(env.resolved) == 1 and env.resolved[0] != RoutingProfile.REASONING, env.resolved
@@ -206,7 +220,7 @@ async def test_error_row_for_another_task_also_records_the_real_profile(env, mon
     from llm_router import state
     from llm_router.tools import consolidated
 
-    env(installed=False)
+    env(installed=False, subscription=False)
     monkeypatch.setattr(state, "get_active_profile", lambda: RoutingProfile.REASONING)
     with pytest.raises(ValueError):
         await consolidated.llm("write a haiku", _Ctx(), task="generate")
@@ -242,7 +256,7 @@ async def test_empty_dynamic_chain_logs_a_warning_once(env, monkeypatch):
     from llm_router import router
     from llm_router.types import Complexity
 
-    cfg = env(installed=False)
+    cfg = env(installed=False, subscription=False)
     log = MagicMock()
     monkeypatch.setattr(router, "log", log)
     for _ in range(2):
