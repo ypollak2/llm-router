@@ -18,11 +18,12 @@ the app and requires each one to be classified: either it accepts prompts and
 must refuse unservable capabilities, or it is explicitly listed as not a
 completion endpoint. A route added later is unclassified and fails here.
 
-WHY REFUSE RATHER THAN IMPLEMENT (carried over from H-03, still true): the
-router returns text. `route_and_call` has no tool-call channel and no backend
-in the chain is wired for one. Building that is a feature; half-building it
-reproduces the same silent wrongness somewhere new. Refusing tells the client
-immediately, in its own protocol, that this gateway cannot serve the request.
+A.2-t (tools served on three endpoints). The router now has a tool-call channel, so
+`/v1/chat/completions`, `/v1/responses` and `/v1/messages` SERVE a tools array
+(TOOLS_SERVED below; round trips with the official clients are in
+tests/test_agt_a2_gateway_clients.py). The two Ollama endpoints keep the refusal. A
+completion endpoint must be in exactly one of the two sets, so a new one still has to
+choose.
 """
 
 from __future__ import annotations
@@ -81,6 +82,11 @@ COMPLETION_ENDPOINTS = {
     "/api/generate": {"model": "x", "prompt": "hi"},
 }
 
+#: Endpoints that serve tools since A.2-t (and so must forward them, not drop them).
+TOOLS_SERVED = {"/v1/chat/completions", "/v1/messages", "/v1/responses"}
+#: Endpoints that still refuse tools.
+TOOLS_REFUSED = set(COMPLETION_ENDPOINTS) - TOOLS_SERVED
+
 _TOOLS = [{
     "type": "function",
     "function": {"name": "get_weather", "parameters": {"type": "object"}},
@@ -110,7 +116,48 @@ def test_the_route_scan_finds_the_endpoints():
         assert known in found, f"route discovery no longer finds {known}"
 
 
-@pytest.mark.parametrize("path", sorted(COMPLETION_ENDPOINTS))
+def test_every_completion_endpoint_serves_or_refuses_tools():
+    assert TOOLS_SERVED < set(COMPLETION_ENDPOINTS) and TOOLS_REFUSED == {"/api/chat", "/api/generate"}
+
+
+@pytest.fixture
+def routed(monkeypatch):
+    """``route_and_call`` faked, so a served request reaches no provider."""
+    import llm_router.route_server as rs
+    import llm_router.router as R
+
+    calls: list[dict] = []
+
+    class _Resp:
+        content, model, provider = "ok", "openai/gpt-4o", "openai"
+        cost_usd, input_tokens, output_tokens, complexity = 0.0, 1, 1, "simple"
+        finish_reason, tool_calls = "stop", []
+
+    async def _fake(task_type, prompt, **kw):
+        calls.append(kw)
+        return _Resp()
+
+    monkeypatch.setattr(R, "route_and_call", _fake)
+    monkeypatch.setattr(rs, "_log_route_savings", lambda *a, **k: None)
+    return calls
+
+
+@pytest.mark.parametrize("path", sorted(TOOLS_SERVED))
+def test_a_tool_request_is_served_not_dropped(client, routed, path):
+    tools = {
+        "/v1/chat/completions": _TOOLS,
+        "/v1/responses": [{"type": "function", "name": "get_weather", "parameters": {"type": "object"}}],
+        "/v1/messages": [{"name": "get_weather", "input_schema": {"type": "object"}}],
+    }[path]
+    body = dict(COMPLETION_ENDPOINTS[path])
+    body["tools"] = tools
+    resp = client.post(path, json=body)
+    assert resp.status_code == 200, resp.text[:300]
+    assert [t["function"]["name"] for t in routed[0]["tools"]] == ["get_weather"], (
+        f"{path} answered 200 but the router never saw the tools: a dropped tool array")
+
+
+@pytest.mark.parametrize("path", sorted(TOOLS_REFUSED))
 def test_a_tool_request_is_refused_not_silently_dropped(client, path):
     body = dict(COMPLETION_ENDPOINTS[path])
     body["tools"] = _TOOLS
@@ -154,7 +201,7 @@ def test_the_refusal_fires_on_each_unservable_shape():
     from llm_router.gateway import _refuse_tools_if_present
 
     for tools, choice in ((_TOOLS, None), (None, "required"), (None, "auto"),
-                          (_TOOLS, "required")):
+                          (_TOOLS, "required")):  # the helper the Ollama endpoints still call
         with pytest.raises(HTTPException) as exc:
             _refuse_tools_if_present(tools, choice)
         assert exc.value.status_code == 400
