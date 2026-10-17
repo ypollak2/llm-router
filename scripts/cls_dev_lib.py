@@ -66,6 +66,9 @@ CLIP = (0.001, 0.999)
 M_ASYM = 2.0
 INNER_FOLDS = 4
 TOKEN_CAP = 512
+#: C2 has no local tokenizer: CD-18 as amended by D-169 caps its input at 384 whitespace words, a conservative
+#: approximation of the 512-token cap (digest kept whole, prompt tail kept).
+C2_WORD_CAP = 384
 LR_MAX_ITER = 1000
 LR_TOL = 1e-4
 LOGPROB_FLOOR = -30.0
@@ -204,7 +207,8 @@ class Ollama:
         return str(self._call("GET", "/api/version").get("version"))
 
     def tags(self) -> dict:
-        return {m.get("name"): m.get("digest") for m in self._call("GET", "/api/tags").get("models", [])}
+        """{name: sorted list of every digest listed under it}; names normalised to `<name>:latest` (D-169)."""
+        return P.ollama_digest_sets(self._call("GET", "/api/tags").get("models", []))
 
     def ps(self) -> list[dict]:
         return list(self._call("GET", "/api/ps").get("models", []))
@@ -772,6 +776,14 @@ def count_words(text: str) -> int:
     return len(text.split())
 
 
+def input_cap(cand) -> dict:
+    """The model-input cap per candidate (CD-18, D-169): 384 whitespace words for C2 (no local tokenizer),
+    512 tokens otherwise."""
+    if cand == "C2":
+        return {"cap": C2_WORD_CAP, "unit": "whitespace_words"}
+    return {"cap": TOKEN_CAP, "unit": "tokens"}
+
+
 def model_input(digest, canonical: str, *, max_tokens: int = TOKEN_CAP, count_tokens=count_words) -> str:
     """"[ctx] " + digest + " [prompt] " + canonical_text with a digest, else canonical_text. The digest is
     capped at 400 characters; over the token cap the digest part is kept whole and the prompt part is
@@ -1197,15 +1209,31 @@ def download_modernbert(*, confirm_d129: bool, revision, cls_cache, log_path) ->
     return {"licence": lic, "files": len(files)}
 
 
-def modernbert_oof(rows, texts, cache_dir, *, k: int = FOLDS):  # pragma: no cover (needs torch + the download)
+def modernbert_tokenizer(cache_dir, auto_tokenizer=None):
+    """The C3 tokenizer, offline, RIGHT-side truncation (CD-18, D-169). Inputs arrive already fitted to 512
+    tokens by model_input (digest whole, prompt tail kept), so this truncation never fires on them; a
+    left-side truncation over the whole string would cut the digest first."""
+    if auto_tokenizer is None:  # pragma: no cover (needs transformers + the download)
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        from transformers import AutoTokenizer as auto_tokenizer
+    return auto_tokenizer.from_pretrained(str(cache_dir), local_files_only=True, truncation_side="right")
+
+
+def hf_token_counter(tok):
+    """count_tokens for model_input under an HF tokenizer: the exact encoded length, special tokens included."""
+    return lambda text: len(tok(text, add_special_tokens=True)["input_ids"])
+
+
+def modernbert_oof(rows, texts, cache_dir, *, k: int = FOLDS, tok=None):  # pragma: no cover (needs torch + the download)
     """C3: fine-tune ModernBERT-base per outer fold (5-fold OOF) and once on all DEV. lr 2e-5, 4 epochs,
-    batch 16, last 512 tokens, seed 20261017, two ordinal heads with the C1 weights; MPS if available else
-    CPU. Hyper-parameters are constants, not options. Not exercised by the offline tests (no torch there)."""
+    batch 16, inputs fitted to 512 tokens by model_input (digest whole, prompt tail kept; CD-18), seed
+    20261017, two ordinal heads with the C1 weights; MPS if available else CPU. Hyper-parameters are
+    constants, not options. Not exercised by the offline tests (no torch there)."""
     os.environ["HF_HUB_OFFLINE"] = "1"
     import torch
-    from transformers import AutoModel, AutoTokenizer
+    from transformers import AutoModel
     device = "mps" if torch.backends.mps.is_available() else "cpu"
-    tok = AutoTokenizer.from_pretrained(str(cache_dir), local_files_only=True, truncation_side="left")
+    tok = tok if tok is not None else modernbert_tokenizer(cache_dir)
 
     def train(idx):
         torch.manual_seed(SEED)
