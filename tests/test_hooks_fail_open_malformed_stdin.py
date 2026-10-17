@@ -40,6 +40,7 @@ def test_hook_fails_open_on_malformed_stdin(hook: Path, stdin_text: str, tmp_pat
         LLM_ROUTER_HOME=str(router_home),
         LLM_ROUTER_DB_PATH=str(router_home / "usage.db"),
         CLAUDE_SESSION_ID="",
+        LLM_ROUTER_NO_DETACHED_SPAWN="1",  # F44: the scrub above dropped the suite-wide flag
     )
     r = subprocess.run(
         [sys.executable, str(hook)],

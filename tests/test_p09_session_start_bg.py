@@ -89,6 +89,8 @@ def test_main_does_not_run_any_moved_step_inline(hook, monkeypatch):
     assert out["hookSpecificOutput"]["hookEventName"] == "SessionStart"
 
 
+@pytest.mark.real_detached_spawn  # the child is the test's own sleeper, released before the test ends
+@pytest.mark.usefixtures("allow_detached_spawn")
 def test_main_returns_while_a_5s_background_phase_still_runs(hook, monkeypatch, tmp_path):
     """The real spawn path: the child is detached, so main() returns first."""
     marker = tmp_path / "child_done"

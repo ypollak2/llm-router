@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("allow_detached_spawn")  # F44: these fake Popen and assert the spawn
+
 HOOK_PATH = Path(__file__).parent.parent / "src" / "llm_router" / "hooks" / "session-start.py"
 
 # SessionStart must return within this bound even if the refresh would hang.

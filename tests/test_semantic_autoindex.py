@@ -17,6 +17,8 @@ import pytest
 
 from llm_router.semantic import autoindex
 
+pytestmark = pytest.mark.usefixtures("allow_detached_spawn")  # F44: spawns are faked unless marked real_detached_spawn
+
 
 def _git(root: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(root), *args], check=True,
@@ -86,6 +88,7 @@ def test_an_index_file_with_zero_rows_still_counts_as_empty(repo):
 # ── maybe_start_background_index: the guards ────────────────────────────────
 
 
+@pytest.mark.real_detached_spawn  # waits for the real index child to finish
 def test_starts_a_build_for_an_unindexed_git_repo(repo):
     started = autoindex.maybe_start_background_index(repo)
     assert started is True
@@ -414,6 +417,7 @@ def test_claim_lock_falls_back_to_inprocess_marker_when_dir_unwritable(
 # ── wired into retrieval (pack.build) ────────────────────────────────────────
 
 
+@pytest.mark.real_detached_spawn  # waits for the real index child to finish
 def test_pack_build_triggers_autoindex_for_an_unindexed_project(repo):
     from llm_router.semantic import pack
 

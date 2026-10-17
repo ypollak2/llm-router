@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 38
+# llm_router-hook-version: 39
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -1179,9 +1179,17 @@ def _spawn_background_usage_refresh() -> None:
         _release_usage_refresh_claim()
 
 
+def _detached_spawn_disabled() -> bool:
+    """LLM_ROUTER_NO_DETACHED_SPAWN: no detached child may start (set by the test suite, F44)."""
+    flag = os.environ.get("LLM_ROUTER_NO_DETACHED_SPAWN", "")
+    return bool(flag) and flag.lower() not in ("0", "off", "false", "no")
+
+
 def _spawn_detached(argv: list[str]) -> bool:
     """Start ``argv`` detached (own session, no stdio), the one way this hook
     starts a re-run of itself. True when it started. Never raises."""
+    if _detached_spawn_disabled():
+        return False
     try:
         subprocess.Popen(
             argv,
@@ -1716,6 +1724,8 @@ def _warm_ollama_bg() -> None:
         os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
     ).rstrip("/")
     payload = json.dumps({"model": model, "prompt": " ", "stream": False})
+    if _detached_spawn_disabled():
+        return
     try:
         subprocess.Popen(
             [
@@ -1782,6 +1792,8 @@ def _ollama_watchdog_bg() -> None:
         from llm_router.ollama_watchdog import enabled
         if not enabled():
             return
+        if _detached_spawn_disabled():
+            return
         subprocess.Popen(
             [sys.executable, "-m", "llm_router.ollama_watchdog"],
             stdout=subprocess.DEVNULL,
@@ -1814,6 +1826,8 @@ def _drain_judge_queue_bg() -> None:
         "import asyncio; from llm_router.judge import drain_queue; "
         "asyncio.run(drain_queue())"
     )
+    if _detached_spawn_disabled():
+        return
     try:
         subprocess.Popen(
             [sys.executable, "-c", script],
@@ -1879,6 +1893,8 @@ def _maybe_refresh_benchmarks_bg() -> None:
         f"from pathlib import Path; "
         f"fetch_pinned_catalog(Path('{benchmarks_path}'))"
     )
+    if _detached_spawn_disabled():
+        return
     try:
         subprocess.Popen(
             [uv_path, "run", "--directory", project_dir, "python", "-c", script],
@@ -1959,6 +1975,8 @@ def _maybe_reindex_okf_bg(cwd: str | None = None) -> None:
         "from pathlib import Path; from llm_router import okf; "
         f"okf.index_project(Path({root!r}))"
     )
+    if _detached_spawn_disabled():
+        return
     try:
         with open(log, "w") as errfh:
             subprocess.Popen(
