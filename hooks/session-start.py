@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 37
+# llm_router-hook-version: 38
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -1689,8 +1689,9 @@ def _warm_ollama_bg() -> None:
     finds the model already loaded.
 
     Opt-out: ``LLM_ROUTER_OLLAMA_WARMUP=off``. Override the model with
-    ``LLM_ROUTER_OLLAMA_WARMUP_MODEL`` (default: the router's preferred local model,
-    qwen3.8 when installed, else the first installed model).
+    ``LLM_ROUTER_OLLAMA_WARMUP_MODEL`` (default: ``model_discovery.local_model()``
+    -- the user's LLM_ROUTER_OLLAMA_MODEL when installed, else the first discovered model;
+    nothing discovered means no warm-up).
     """
     if os.environ.get("LLM_ROUTER_OLLAMA_WARMUP", "on").strip().lower() in ("0", "off", "false", "no"):
         return
@@ -1700,10 +1701,8 @@ def _warm_ollama_bg() -> None:
     model = os.environ.get("LLM_ROUTER_OLLAMA_WARMUP_MODEL", "").strip()
     if not model:
         try:
-            from llm_router.model_discovery import first_installed, preferred_local_model
-            # first_installed() is the "is anything installed" guard (None -> no
-            # warm-up); preferred_local_model() then picks qwen3.8 over the rest.
-            model = preferred_local_model() if first_installed() else ""
+            from llm_router.model_discovery import local_model
+            model = local_model() or ""
         except Exception:
             model = ""
     if not model:

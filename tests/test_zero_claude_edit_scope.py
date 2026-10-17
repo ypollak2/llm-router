@@ -390,6 +390,9 @@ def _run(prompt: str, home: Path, repo_dir: Path, ollama_url: str | None, extra_
     if ollama_url:
         env["LLM_ROUTER_OLLAMA_URL"] = ollama_url
         env["LLM_ROUTER_OLLAMA_MODEL"] = STUB_MODEL
+        # model_discovery (the local-model resolver) lists models from OLLAMA_HOST; point it
+        # at the stub too, or it would verify the setting against the machine's real Ollama.
+        env["OLLAMA_HOST"] = ollama_url
     env["LLM_ROUTER_DISABLE_LLM_CLASSIFIERS"] = "1"
     env["OPENAI_API_KEY"] = ""
     env["GEMINI_API_KEY"] = ""

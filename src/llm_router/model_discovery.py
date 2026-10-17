@@ -556,60 +556,111 @@ def first_installed(prefer: tuple[str, ...] = ()) -> str | None:
 
 
 
-#: Owner decision 2026-10-17: the router's local model is qwen3.8, not qwen3.5.
-#: Anything that used to name ``qwen3.5:latest`` as "the local model" resolves
-#: through ``preferred_local_model`` instead.
-PREFERRED_LOCAL_MODEL = "qwen3.8-uncensored:latest"
+#: Policy-chain token for "the user's local model". Resolved by ``policy._resolve_chain``
+#: through ``local_model()``; dropped when there is none. Not a model name.
+LOCAL_PLACEHOLDER = "ollama/@local"
+
+#: Why the last ``local_model()`` call skipped the user's setting (None = it did not).
+#: Diagnostic only; read it from tests or ``llm-router doctor``-style tooling.
+last_skip_reason: str | None = None
 
 
-def _preferred_installed(installed: "list[str] | tuple[str, ...]") -> str | None:
-    """The preferred model as it is spelled in ``installed`` (any tag of its family)."""
-    family = PREFERRED_LOCAL_MODEL.split(":")[0]
-    if PREFERRED_LOCAL_MODEL in installed:
-        return PREFERRED_LOCAL_MODEL
-    for have in installed:
-        if have.split(":")[0] == family:
-            return have
-    return None
+def user_local_model_setting() -> str:
+    """The user's own choice of local model: ``LLM_ROUTER_OLLAMA_MODEL``, or ''.
+
+    It lives in the user's config (``$LLM_ROUTER_HOME/.env``, loaded into the
+    environment by ``env_loader`` in every hook) or the shell. Nothing in the
+    codebase supplies a value.
+    """
+    return os.environ.get("LLM_ROUTER_OLLAMA_MODEL", "").strip()
 
 
-def prefer_first(models: "list[str]") -> "list[str]":
-    """``models`` with the preferred local model moved to the front; order otherwise kept.
+def _same_model(a: str, b: str) -> bool:
+    """Ollama treats ``name`` and ``name:latest`` as one model."""
+    def norm(x: str) -> str:
+        x = x.strip().removeprefix("ollama/")
+        return x if ":" in x else f"{x}:latest"
+    return norm(a) == norm(b)
 
-    Never adds a name: a model that is not in the list stays out, so the promote
-    gate (``order_for_chain``) and its validated/unvalidated split are untouched.
+
+def _inventory(*, allow_probe: bool) -> list[str]:
+    """What this user has installed, in discovery order, WITHOUT the single-model override.
+
+    ``available_ollama_models`` short-circuits to ``[LLM_ROUTER_OLLAMA_MODEL]`` when that
+    is set, which would make "set but not installed" undetectable.
+    """
+    listed = _from_env_inventory()
+    if listed:
+        return listed
+    cached, age = _read_cache()
+    if cached and age <= _ttl_hours():
+        return cached
+    if allow_probe:
+        live = probe_ollama()
+        if live:
+            _write_cache(live)
+            return live
+    return cached
+
+
+def _from_env_inventory() -> list[str]:
+    for raw in (os.environ.get("OLLAMA_BUDGET_MODELS", ""), os.environ.get("OLLAMA_MODELS", "")):
+        models = [m.strip() for m in raw.strip().split(",") if m.strip()]
+        if models:
+            return models
+    return []
+
+
+def prefer_first(models: "list[str]", setting: str = "") -> "list[str]":
+    """``models`` with the entry matching ``setting`` moved to the front; order otherwise kept.
+
+    Generic: it ranks nothing by name or family. With no ``setting`` (or no match) the
+    list comes back unchanged. It never adds a name.
     """
     models = list(models)
-    hit = _preferred_installed(models)
+    if not setting:
+        return models
+    hit = next((m for m in models if _same_model(m, setting)), None)
     return [hit] + [m for m in models if m != hit] if hit else models
 
 
-def preferred_local_model(installed: "list[str] | None" = None, *, prefer: tuple[str, ...] = ()) -> str:
-    """The one local model the router names when it must name a single one.
+def local_model(installed: "list[str] | tuple[str, ...] | None" = None, *,
+                setting: str | None = None, allow_probe: bool = True) -> str | None:
+    """The one local model to use when a caller must name a single one, or None.
 
-    Order: ``LLM_ROUTER_OLLAMA_MODEL`` (the existing explicit setting) →
-    ``qwen3.8-uncensored:latest`` when installed → the first installed model that
-    matches ``prefer`` → the first installed model (current discovery order) →
-    ``PREFERRED_LOCAL_MODEL`` when nothing is known (it replaces the old hardcoded
-    qwen3.5 default). ``installed=None`` asks ``available_ollama_models()``, which
-    may probe; hook-path callers pass the list they already hold.
+    Order:
+      1. the user's setting (``user_local_model_setting()``), when it is installed;
+         when it is set but not installed it is skipped and ``last_skip_reason`` says why;
+      2. the first model of the discovered inventory, in discovery order (no family
+         or name preference);
+      3. None: there is no local model, and the caller skips local.
+
+    An EMPTY inventory cannot show that the setting is missing (Ollama down, no cache
+    yet), so the setting is then used as given; the caller's own reachability gate
+    reports the real failure. Only a non-empty inventory that lacks it skips it.
+
+    Nothing here names a model. ``installed=None`` reads the inventory
+    (``allow_probe=False`` for cache/env only); hook-path callers pass the list they hold.
     """
-    explicit = os.environ.get("LLM_ROUTER_OLLAMA_MODEL", "").strip()
-    if explicit:
-        return explicit
+    global last_skip_reason
+    last_skip_reason = None
     if installed is None:
         try:
-            installed = available_ollama_models()
+            installed = _inventory(allow_probe=allow_probe)
         except Exception:                                    # noqa: BLE001
             installed = []
-    hit = _preferred_installed(installed)
-    if hit:
-        return hit
-    for want in prefer:
-        for have in installed:
-            if have == want or have.split(":")[0] == want.split(":")[0]:
-                return have
-    return installed[0] if installed else PREFERRED_LOCAL_MODEL
+    installed = list(installed)
+    want = user_local_model_setting() if setting is None else setting.strip()
+    if want:
+        hit = next((m for m in installed if _same_model(m, want)), None)
+        if hit:
+            return hit
+        if not installed:
+            return want                                      # nothing to check it against
+        last_skip_reason = f"LLM_ROUTER_OLLAMA_MODEL={want!r} is not installed (installed: {installed or 'none'})"
+        import logging
+        logging.getLogger("llm_router.model_discovery").warning("%s; using discovery order", last_skip_reason)
+    return installed[0] if installed else None
 
 
 if __name__ == "__main__":  # the detached refresher started by available_ollama_models_nowait

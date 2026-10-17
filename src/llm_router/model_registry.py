@@ -270,7 +270,7 @@ def _priced(
 
 _BUNDLED_DEFAULTS: tuple[ModelMetadata, ...] = (
     _priced(
-        id="ollama/qwen3.8-uncensored:latest", provider="ollama", tier=Tier.LOCAL,
+        id="ollama/qwen3.5:latest", provider="ollama", tier=Tier.LOCAL,
         quality_score=0.68,
         latency_p50_ms=1800, context_window=32768,
         capabilities=("function-calling",),

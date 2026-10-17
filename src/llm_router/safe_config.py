@@ -97,8 +97,9 @@ groq_api_key: "{discovered.get('groq_api_key', '')}"
 perplexity_api_key: "{discovered.get('perplexity_api_key', '')}"
 
 # Ollama (local inference — free, no API key needed)
+# ollama_budget_models: leave empty to use the models llm-router discovers on this machine.
 ollama_base_url: "{discovered.get('ollama_base_url', 'http://localhost:11434')}"
-ollama_budget_models: "{discovered.get('ollama_budget_models', 'qwen3.8-uncensored:latest,gemma4:latest')}"
+ollama_budget_models: "{discovered.get('ollama_budget_models', '')}"
 
 # Agentic model — preferred model for agentic / tool-reasoning tasks
 # (analyze, generate, query, research). When set, it is pinned at the FRONT of

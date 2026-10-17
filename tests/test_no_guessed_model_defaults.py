@@ -69,9 +69,59 @@ def test_no_hardcoded_model_default(rel):
 
 @pytest.mark.parametrize("rel", GUESS_FREE)
 def test_each_one_asks_discovery_instead(rel):
-    assert "first_installed" in (SRC / rel).read_text(), (
+    text = (SRC / rel).read_text()
+    assert "first_installed" in text or "local_model" in text, (
         f"{rel} no longer hardcodes a model but does not consult discovery either"
     )
+
+
+# Owner rule 2026-10-17: the router is dynamic; the user's local model is the user's
+# configuration. The default-path call sites below may not carry ANY model-family
+# string constant (qwen/llama/gemma/...) outside docstrings and comments.
+LOCAL_MODEL_CALL_SITES = [
+    "../../hooks/auto-route.py",
+    "../../hooks/session-start.py",
+    "hooks/chain_builder.py",
+    "zero_claude_edit.py",
+    "ollama_watchdog.py",
+    "warm.py",
+    "model_discovery.py",
+    "policy.py",
+]
+_FAMILY = re.compile(r"(qwen|llama|gemma|mistral|phi\d|deepseek|hermes|lfm|kimi|granite|smollm)", re.I)
+
+
+def _family_literals(path: Path) -> list[tuple[int, str]]:
+    tree = ast.parse(path.read_text())
+    docstrings = {
+        id(n.body[0].value) for n in ast.walk(tree)
+        if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and n.body and isinstance(n.body[0], ast.Expr)
+        and isinstance(n.body[0].value, ast.Constant)
+    }
+    out = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docstrings:
+            if re.fullmatch(r"[A-Z0-9_]+", n.value):
+                continue                      # an environment-variable name (DEEPSEEK_API_KEY)
+            if _FAMILY.search(re.sub(r"ollama", "", n.value, flags=re.I)):
+                out.append((n.lineno, n.value))
+    return out
+
+
+@pytest.mark.parametrize("rel", LOCAL_MODEL_CALL_SITES)
+def test_local_model_call_sites_name_no_model_family(rel):
+    found = _family_literals((SRC / rel).resolve())
+    assert not found, (
+        f"{rel} carries model-name literals {found}. The local model is the user's "
+        "configuration, resolved by model_discovery.local_model(); code never names one."
+    )
+
+
+def test_the_family_check_catches_a_literal(tmp_path):
+    f = tmp_path / "m.py"
+    f.write_text('"""doc qwen"""\nx = "gemma4:latest"\ny = "ollama/qwen3.5:latest"\nz = "ollama"\n')
+    assert [v for _, v in _family_literals(f)] == ["gemma4:latest", "ollama/qwen3.5:latest"]
 
 
 class TestFirstInstalled:

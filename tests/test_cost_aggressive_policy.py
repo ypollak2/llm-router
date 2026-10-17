@@ -158,18 +158,25 @@ class TestRouterArenaTunedPolicy:
         # filename, the loader normalises.
         assert policy.name == "cost_aggressive"
 
-    def test_workhorses_are_free_or_cheap(self, policy):
-        """First workhorse must be free (Ollama) — free-first is the policy thesis."""
-        assert policy.workhorses[0].startswith("ollama/")
-        # All remaining workhorses must be cheap (OpenRouter or codex
-        # subscription). No paid OpenAI/Anthropic direct API in the
-        # workhorse pool.
+    def test_workhorses_are_free_or_cheap(self, monkeypatch):
+        """First workhorse must be free (the user's local Ollama model) — free-first is the
+        policy thesis. The YAML names the dynamic ``ollama/@local`` token; it resolves to
+        whatever the user has installed, and is dropped when nothing is discovered."""
+        monkeypatch.setenv("OLLAMA_MODELS", "some-local-model:7b")
+        policy = PolicyManager().load_policy("cost_aggressive")
+        assert policy.workhorses[0] == "ollama/some-local-model:7b"
+        # All remaining workhorses must be cheap (OpenRouter or codex subscription).
+        # No paid OpenAI/Anthropic direct API in the workhorse pool.
         for model in policy.workhorses[1:]:
             prefix = model.split("/", 1)[0]
             assert prefix in {"openrouter", "codex"}, (
                 f"workhorse {model!r} uses paid direct API — "
                 f"breaks RouterArena cost strategy"
             )
+        # Nothing discovered: the local entry is dropped, never replaced by a guess.
+        monkeypatch.delenv("OLLAMA_MODELS")
+        policy = PolicyManager().load_policy("cost_aggressive")
+        assert not any(m.startswith("ollama/") for m in policy.workhorses)
 
     def test_specialists_cover_routerarena_subjects(self, policy):
         """The plan calls out code/cloze/narrative/history/medical as the

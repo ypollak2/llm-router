@@ -426,20 +426,18 @@ _EDIT_SYSTEM_PROMPT = (
 )
 
 
-def edit_model() -> str:
-    """The local model this lever calls — ``model_discovery.preferred_local_model``.
+def edit_model() -> str | None:
+    """The local model this lever calls, or None when there is none.
 
-    ``LLM_ROUTER_OLLAMA_MODEL`` wins when set, then qwen3.8-uncensored when
-    installed (owner decision 2026-10-17), then the best INSTALLED model
-    preferring qwen3-coder — never a hardcoded name that might not be pulled
-    (that module's own docstring: a hardcoded default that is not installed
-    404s silently).
+    ``model_discovery.local_model()``: the user's ``LLM_ROUTER_OLLAMA_MODEL`` when it is
+    installed, else the first discovered model, else None (the caller skips local).
+    Never a name from code -- a hardcoded default that is not pulled 404s silently.
     """
     try:
         from llm_router import model_discovery
-        return model_discovery.preferred_local_model(prefer=("qwen3-coder",))
+        return model_discovery.local_model()
     except Exception:                                            # noqa: BLE001
-        return os.environ.get("LLM_ROUTER_OLLAMA_MODEL", "").strip() or "qwen3.8-uncensored:latest"
+        return None
 
 
 def generate_edits(
@@ -635,6 +633,8 @@ def maybe_replace(
         )
 
     model = edit_model()
+    if model is None:
+        return ScopedEditOutcome("fallthrough", "ZERO_CLAUDE_EDIT: no local model discovered")
 
     # Ollama availability gate — same signals direct_executor.execute_chain
     # uses (§2.4): an unpulled or unreachable model 404s, which must not

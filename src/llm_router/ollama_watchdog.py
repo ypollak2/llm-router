@@ -17,9 +17,9 @@ already resident, with a short deadline.
 
 F38 / F41 (2026-10-17): that probe used to run INLINE from ``gate``, i.e. on the
 hook path of a prompt (auto-route ``router_added`` p95 7.2 s), and it targeted
-whichever model happened to be resident -- so it also kept the old qwen3.5 warm.
+whichever model happened to be resident -- so it also kept a superseded model warm.
 Now the generate probe runs ONLY in a detached background process, ONLY against
-the preferred local model (``model_discovery.preferred_local_model``) and only
+the user's local model (``model_discovery.local_model``) and only
 when that model is already resident (so a probe never loads anything). ``gate``
 itself does no network I/O at all: it answers from the persisted state and, when
 that state is stale, spawns the background probe (single-flight, rate limited).
@@ -209,14 +209,17 @@ def _resident_models(base: str, timeout: float) -> list[str] | ProbeResult:
 
 
 def _pick_model(resident: list[str]) -> str | None:
-    """The resident name of the preferred local model, or None when it is not resident.
+    """The resident name of the local model (``local_model()``), or None.
 
-    Only the preferred model is ever probed (F41): probing "whatever is resident"
-    kept the superseded model busy. A model that is not resident is not probed,
-    so the probe cannot load anything.
+    Only that model is ever probed (F41): probing "whatever is resident" kept a
+    superseded model busy. A model that is not resident, or no local model at
+    all, is not probed, so the probe cannot load anything. Cache/env inventory
+    only (no probe of /api/tags): this runs in the detached background child.
     """
     from llm_router import model_discovery, warm
-    wanted = model_discovery.preferred_local_model()
+    wanted = model_discovery.local_model(allow_probe=False)
+    if wanted is None:
+        return None
     for r in resident:
         if r and warm.model_matches(wanted, r):
             return r
@@ -237,7 +240,7 @@ def probe_generation(timeout: float | None = None) -> ProbeResult:
                                time.monotonic() - started)
         model = _pick_model(resident)
         if model is None:
-            return ProbeResult(None, "preferred local model not resident; cannot tell", None,
+            return ProbeResult(None, "local model not resident (or none discovered); cannot tell", None,
                                time.monotonic() - started)
         from llm_router import warm
         try:
