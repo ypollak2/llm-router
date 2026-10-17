@@ -1,4 +1,4 @@
-**DRAFT. Not frozen.**
+This file is frozen by the hash in `PREREG-P20-requal-AMEND4.sha256`.
 
 # PREREG-P20-requal AMEND4: AMEND3 constants are merged, not re-amended (harness fix) and REPO_SHA is re-pinned
 
@@ -69,14 +69,24 @@ None added. The change does not alter what is run, scored or measured.
 
 ## Freeze procedure
 
-1. Independent review of the code diff `c6727ee2..<REPO_SHA>` (verifier is not the author).
+1. Independent review of the code diff `c6727ee2..<REPO_SHA>` and of the doc commit (verifier is
+   not the author).
 2. Verify pins: `git rev-parse <code commit>` equals REPO_SHA above;
    `shasum -a 256 scripts/p20_code_runner.py` equals the CODE_RUNNER_SHA256 above; otherwise edit
    the block, nothing else.
-3. Write `PREREG-P20-requal-AMEND4.sha256` as `<sha256>  PREREG-P20-requal-AMEND4.md` plus
+3. Real-path precondition dry run, before committing the sidecar: from a worktree at the freeze
+   commit, write the sidecar there uncommitted (no run-dir copy yet) and run the harness's real
+   `frozen()`, `run_gate` (code gate) and `run()`'s preconditions up to and including the identity
+   check against the real run dir. Record counts only: constants key count, that
+   `ID_qwen3.8-uncensored:latest` is present, that REPO_SHA equals the pin, that the code gate
+   passes, and the qa item count. Make no model call and write no row to `answers/` or
+   `quiet.jsonl`. `run --set qa` is NOT this dry run. If any check fails, delete the uncommitted
+   sidecar and do not freeze. This step exists because AMEND3 was frozen with no test through the
+   real path and refused on its first run.
+4. Commit `PREREG-P20-requal-AMEND4.sha256` as `<sha256>  PREREG-P20-requal-AMEND4.md` plus
    `frozen_utc <date -u>` (after AMEND3's 2026-10-17T17:45:51Z), and a byte-identical 0444 copy to
    `requal/b2/PREREG-AMEND4.md`.
-4. Run from a worktree at the freeze commit (the code gate requires `scripts/`, `src/`, `tests/`
+5. Run from a worktree at the freeze commit (the code gate requires `scripts/`, `src/`, `tests/`
    to equal REPO_SHA).
 
 ## Constants (override AMEND3's REPO_SHA)
