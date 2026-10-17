@@ -463,8 +463,32 @@ def test_pre_d210_row_without_release_clock_is_invalid(home):
     p = do.day_file(_day(16).isoformat())
     row = json.loads(p.read_text())
     del row["populations"]["release_clock"]
+    row["schema"] = "daily-offload/1"
+    p.write_text(json.dumps(row))
+    assert do.SCHEMA == "daily-offload/2"
+    assert do.streak(now=NOW)["first_break"]["reason"] == "old_schema_rerun_force"
+
+
+def test_unknown_schema_is_invalid_schema(home):
+    fill([(_day(16), day_rows(_day(16)))])
+    p = do.day_file(_day(16).isoformat())
+    row = json.loads(p.read_text())
+    row["schema"] = "daily-offload/9"
     p.write_text(json.dumps(row))
     assert do.streak(now=NOW)["first_break"]["reason"] == "invalid_schema"
+
+
+def test_manifest_listed_organic_session_counts_once(home):
+    d = _day(16)
+    rows = day_rows(d, n=20, sessions=10) + day_rows(d, prefix="syn", n=15, sessions=10)
+    ids = {f"syn-{d}-{j}" for j in range(10)} | {f"org-{d}-{j}" for j in range(10)}   # organic ids also listed
+    p = do.compute_day(d, inputs(rows), now=NOW, manifest_ids=ids, code_rev="t")["populations"]
+    assert p["organic"]["counts"]["action"]["n"] == 20 and p["synthetic"]["counts"]["action"]["n"] == 15
+    assert p["release_clock"]["counts"]["action"]["n"] == 35
+    assert p["release_clock"]["counts"]["action"]["n"] == (p["organic"]["counts"]["action"]["n"]
+                                                          + p["synthetic"]["counts"]["action"]["n"])
+    assert p["release_clock"]["counts"]["turn"]["n"] == (p["organic"]["counts"]["turn"]["n"]
+                                                        + p["synthetic"]["counts"]["turn"]["n"])
 
 
 # ------------------------------------------------------------------ CLI

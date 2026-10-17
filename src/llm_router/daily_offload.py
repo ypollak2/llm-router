@@ -36,13 +36,14 @@ from datetime import date as Date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-SCHEMA = "daily-offload/1"
+SCHEMA = "daily-offload/2"
 MIN_ACTIONS_DAY = 30
 MIN_TURNS_DAY = 10
 STREAK_REQUIRED = 7                # D-210 (2026-10-17): 7 consecutive measured days, not 14
 BOOT_B = 2000
 TARGET = 0.60                    # == offload_share.TARGET (asserted by a test)
 SYNTH_LABEL = "synthetic (D-167)"
+OLD_SCHEMA = "daily-offload/1"      # pre-D-210 rows: no release_clock block
 SYNTH_SCHEMA = "synth-live-manifest/1"
 T_P2_FILE = "prereg_t_p2.json"
 _REV_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.rev(\d+)\.json$")
@@ -439,12 +440,16 @@ def write_day(row: dict, *, force: bool = False, partial: bool = False, base: Pa
 
 def _day_state(ds: str, base: Path, pop: str = "release_clock") -> tuple[bool, str | None]:
     """``(measured, reason)`` for a date on population ``pop``; reason is why the file does not count (None
-    when it does). A row written before D-210 has no ``release_clock`` block: invalid_schema (rerun --force)."""
+    when it does). A ``daily-offload/1`` row (written before D-210, no ``release_clock`` block) breaks the streak
+    with ``old_schema_rerun_force`` (rerun ``kpi --daily --force``, which writes a ``.revN``); any other bad
+    schema or shape is ``invalid_schema``."""
     p = day_file(ds, base)
     if p is None:
         return False, "missing"
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(d, dict) and d.get("schema") == OLD_SCHEMA:
+            return False, "old_schema_rerun_force"
         org = d["populations"][pop]
         ok = d.get("schema") == SCHEMA and d.get("date") == ds and isinstance(org, dict)
     except (OSError, ValueError, KeyError, TypeError):
