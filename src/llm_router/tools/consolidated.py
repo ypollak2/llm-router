@@ -95,7 +95,7 @@ async def _ledger_exit(guard, task: str, exc: BaseException | None, started: flo
         if not missing:
             return
         if refused:
-            reason = cost.REASON_BREAKER_OPEN
+            reason = getattr(guard, "refused_reason", None) or cost.REASON_BREAKER_OPEN
         elif exc is not None:
             reason = _route_error_reason(exc)
         else:
@@ -104,8 +104,11 @@ async def _ledger_exit(guard, task: str, exc: BaseException | None, started: flo
             task_type = TaskType(task if task != "auto" else "query")
         except ValueError:
             task_type = None
+        # F25 / D-170 (4): the profile the router resolved for this call; the active profile only
+        # when the call never reached profile resolution.
+        profile = getattr(guard, "profile", None) or get_active_profile()
         await asyncio.shield(cost.log_route_error(
-            task_type, get_active_profile(), reason=reason, correlation_id=uuid.uuid4().hex[:8],
+            task_type, profile, reason=reason, correlation_id=uuid.uuid4().hex[:8],
             latency_ms=(time.monotonic() - started) * 1000.0,
             only=None if len(missing) == 2 else missing,
         ))

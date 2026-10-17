@@ -83,7 +83,7 @@ def test_door_does_not_change_the_decision_and_unknown_door_raises():
     for door in engine.DOORS:
         engine.clear_cache(persistent=False)  # a cache hit reports layer="cache"; compare like with like
         ds.append(engine.decide("write a python function that sorts a list", door=door))
-    assert len(engine.DOORS) == 7
+    assert len(engine.DOORS) == 8  # AGT A.1 added "sdk"
     assert all(d == ds[0] for d in ds)
     with pytest.raises(ValueError):
         engine.decide("hi", door="nope")

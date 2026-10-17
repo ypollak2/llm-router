@@ -58,7 +58,7 @@ class CrashedBackend:
 
 @pytest.fixture
 def policy(monkeypatch):
-    async def _choose(text, pinned):
+    async def _choose(text, pinned, **_kw):
         return {"task_type": "code", "complexity": "moderate",
                 "chain_head": ["ollama/fake:1"], "model": "ollama/fake:1"}
 

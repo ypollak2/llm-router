@@ -13,10 +13,10 @@ Two honest limits are called out up front:
   * Relevant-context collection is best-effort and bounded. It may miss files in
     unusual layouts and it deliberately excludes secrets even when they'd be useful.
 
-``needs_claude_tools()`` in ``chain_builder`` delegates here; by default it returns the
-LEGACY boolean (``CapabilityDecision.legacy_match``) so shipping this module does not
-change default routing. The richer 8-bit vector is used by direct callers and, when
-``LLM_ROUTER_CAPABILITY_ROUTING=1``, by the routing path (Branch 3 ships in shadow mode).
+``needs_claude_tools()`` in ``chain_builder`` delegates here. Since P2.4 capability
+routing is on by default, so it returns the richer 8-bit vector's ``needs_tools``;
+``LLM_ROUTER_CAPABILITY_ROUTING=0`` restores the LEGACY boolean
+(``CapabilityDecision.legacy_match``) and turns the capability filter off.
 """
 from __future__ import annotations
 
@@ -216,9 +216,11 @@ def detect_capabilities(
 
 
 def capability_routing_enabled() -> bool:
-    """Branch 3 ships in shadow mode: the richer capability boolean only drives
-    routing when explicitly enabled."""
-    return os.environ.get("LLM_ROUTER_CAPABILITY_ROUTING", "").strip().lower() in ("1", "on", "true", "yes")
+    """P2.4: capability routing is ON by default. ``LLM_ROUTER_CAPABILITY_ROUTING``
+    set to 0, off, false or no is the kill switch: it turns off both the exclusion
+    (:mod:`llm_router.capability_filter`) and the hook's 8-bit needs vector (the legacy
+    boolean returns)."""
+    return os.environ.get("LLM_ROUTER_CAPABILITY_ROUTING", "").strip().lower() not in ("0", "off", "false", "no")
 
 
 def serialize_capability_decision(decision: CapabilityDecision) -> str:

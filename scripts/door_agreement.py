@@ -12,6 +12,9 @@ target is 0.
     # every time: measure
     $ python scripts/door_agreement.py --corpus PATH --sites hook,gateway --out OUT.json
 
+    # a fixed-seed sample of the corpus (e.g. AGT A.1-a: 50 prompts, sdk vs mcp)
+    $ python scripts/door_agreement.py --corpus PATH --sites sdk,mcp --sample 50 --seed 168 --out OUT.json
+
     # optional: a counts-only per-line date sidecar, then a split by date
     $ python scripts/door_agreement.py --corpus PATH --freeze-dates DATES
     $ python scripts/door_agreement.py --corpus PATH --dates DATES --date-cutoff 2026-09-23 ...
@@ -176,6 +179,16 @@ def _load_mcp() -> Classify:
     return classify
 
 
+def _load_sdk() -> Classify:
+    from llm_router import sdk
+
+    def classify(text: str):
+        task_type, complexity, _decision = sdk._decide(text)  # AGT A.1: the SDK door
+        return task_type, complexity
+
+    return classify
+
+
 def _load_agent_route() -> Classify:
     mod = _load_hook_module("_door_agreement_agent_route", "agent-route.py")
 
@@ -265,6 +278,13 @@ SITES: dict[str, Site] = {
             "available from the P1.6 wiring PR on",
             _load_mcp,
             no_llm_note="engine.decide: sync L1/L3, no LLM",
+        ),
+        Site(
+            "sdk",
+            "sdk._decide (in-process SDK Router / route()): engine_door.decision(door='sdk') in "
+            "decide mode, else classify_signals(GATEWAY_POLICY); available from AGT A.1 on",
+            _load_sdk,
+            no_llm_note="no LLM layer: engine.decide (sync L1/L3) or the gateway heuristic",
         ),
         Site(
             "agent_route",
@@ -634,6 +654,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", type=Path)
     ap.add_argument("--dates", type=Path, help="date sidecar from --freeze-dates")
     ap.add_argument("--date-cutoff", default="2026-09-23", help="YYYY-MM-DD, with --dates")
+    ap.add_argument("--sample", type=int, help="measure a random sample of N corpus lines (fixed --seed)")
+    ap.add_argument("--seed", type=int, default=0, help="random seed for --sample")
     args = ap.parse_args(argv)
 
     if args.freeze_corpus:
@@ -659,6 +681,18 @@ def main(argv: list[str] | None = None) -> int:
     buckets = None
     if args.dates:
         buckets = date_buckets(read_dates(args.dates, corpus_sha, len(prompts)), args.date_cutoff)
+    sample = None
+    if args.sample is not None:
+        if not 0 < args.sample <= len(prompts):
+            print(f"--sample must be in 1..{len(prompts)}", file=sys.stderr)
+            return 2
+        import random
+
+        idx = sorted(random.Random(args.seed).sample(range(len(prompts)), args.sample))
+        sample = {"n": args.sample, "of": len(prompts), "seed": args.seed}
+        prompts = [prompts[i] for i in idx]
+        if buckets is not None:
+            buckets = [buckets[i] for i in idx]
 
     # This tool measures whether the doors AGREE when the engine decides (P1.6-a/-i); the default
     # mode is shadow (D-72), where the doors route with their own rules. An explicit value wins.
@@ -708,6 +742,7 @@ def main(argv: list[str] | None = None) -> int:
                          "UDP sendto, subprocesses",
         "network_refusals": len(REFUSALS),
         **({"date_cutoff": args.date_cutoff, "dates_sha256": file_sha256(args.dates)} if args.dates else {}),
+        **({"sample": sample} if sample else {}),
         **{k: v for k, v in result.items() if k != "n"},
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)

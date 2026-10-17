@@ -180,7 +180,7 @@ class TestPersistence:
             f"on every routed call"
         )
 
-    @pytest.mark.parametrize("flag,expect_written", [("1", True), ("", False)])
+    @pytest.mark.parametrize("flag,expect_written", [("1", True), ("0", False), ("", True)])  # P2.4: default on
     def test_flag_controls_whether_anything_is_written(
         self, monkeypatch, flag, expect_written
     ):

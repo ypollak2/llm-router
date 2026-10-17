@@ -22,6 +22,11 @@ from llm_router.types import ClassificationResult
 
 from llm_router import paths
 
+#: libyaml's C loader parses the policy files ~10x faster than the pure-Python
+#: ``SafeLoader`` and has the same safe-tag set and the same ``YAMLError`` family.
+#: It is absent from a PyYAML built without libyaml, hence the fallback (D-171 A3).
+_SafeLoader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
 
 @dataclass(frozen=True)
 class RoutingPolicy:
@@ -118,9 +123,28 @@ def _parse_chains(raw: object) -> Dict[str, Dict[str, List[str]]]:
                 f"`chains.{profile_key}` must be a dict, got {type(tasks).__name__}"
             )
         out[str(profile_key)] = {
-            str(task_key): [_resolve_alias(m) for m in (chain or [])]
+            str(task_key): _resolve_chain(chain or [])
             for task_key, chain in tasks.items()
         }
+    return out
+
+
+def _resolve_chain(models: List[str]) -> List[str]:
+    """Resolve every entry of a policy model list, in the shared load path.
+
+    Aliases resolve to concrete ids, and a ``codex/*`` entry the Codex CLI does
+    not accept becomes the configured Codex model (F22,
+    :func:`llm_router.codex_agent.accepted_codex_entry`). When two Codex entries
+    land on the same model, the first keeps its slot; other entries are untouched.
+    """
+    from llm_router.codex_agent import accepted_codex_entry
+
+    out: List[str] = []
+    for m in models:
+        resolved = accepted_codex_entry(_resolve_alias(m))
+        if resolved is None or (resolved.startswith("codex/") and resolved in out):
+            continue
+        out.append(resolved)
     return out
 
 
@@ -217,7 +241,7 @@ class PolicyManager:
         """
         try:
             with open(path) as f:
-                data = yaml.safe_load(f)
+                data = yaml.load(f, Loader=_SafeLoader)
         except yaml.YAMLError as e:
             raise ValueError(f"Invalid YAML in {path}: {e}")
         except OSError as e:
@@ -244,9 +268,9 @@ class PolicyManager:
             skip_acknowledgements=bool(data.get("skip_acknowledgements", False)),
             route_coordination=bool(data.get("route_coordination", False)),
             prefer_ollama=bool(data.get("prefer_ollama", True)),
-            workhorses=[_resolve_alias(m) for m in data.get("workhorses", [])],
+            workhorses=_resolve_chain(data.get("workhorses", [])),
             specialists=dict(data.get("specialists", {})),
-            fallback_chain_complex=[_resolve_alias(m) for m in data.get("fallback_chain_complex", [])],
+            fallback_chain_complex=_resolve_chain(data.get("fallback_chain_complex", [])),
             cost_cap_per_query=cost_cap,
             chains=_parse_chains(data.get("chains", {})),
         )
@@ -464,7 +488,7 @@ def load_org_policy(path: Path | None = None) -> OrgPolicy | None:
 
     try:
         with open(path) as f:
-            data = yaml.safe_load(f) or {}
+            data = yaml.load(f, Loader=_SafeLoader) or {}
 
         return OrgPolicy(
             block_providers=data.get("block_providers", []),

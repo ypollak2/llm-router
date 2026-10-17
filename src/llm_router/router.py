@@ -107,6 +107,22 @@ _COMPLEXITY_TO_PROFILE: dict[Complexity, RoutingProfile] = {
 log = get_logger("llm_router.router")
 
 
+class NoRoutableModelsError(ValueError):
+    """F25 / D-170: the candidate chain for ``task_type``/``profile`` came out empty, so nothing was
+    attempted. A ``ValueError`` (every existing handler still catches it) that carries the chain's
+    name, so a door can refuse with its own reason instead of a generic ``error_exception``."""
+
+    def __init__(self, message: str, task_type: TaskType, profile: RoutingProfile) -> None:
+        super().__init__(message)
+        self.task_type = task_type
+        self.profile = profile
+
+
+#: F25 / D-170 (3): (profile, task) pairs whose empty dynamic chain was already logged at WARNING,
+#: so a long-lived server says it once per chain instead of on every call.
+_EMPTY_DYNAMIC_CHAIN_WARNED: set[tuple[str, str]] = set()
+
+
 class RoutingDenied(RuntimeError):
     """Every candidate was refused by policy before any dispatch happened.
 
@@ -486,6 +502,16 @@ async def _build_and_filter_chain(
         dynamic_chain = get_dynamic_model_chain(profile, task_type)
         if dynamic_chain is not None:
             models_to_try = dynamic_chain
+            _chain_key = (profile.value, task_type.value)
+            if not dynamic_chain and _chain_key not in _EMPTY_DYNAMIC_CHAIN_WARNED:
+                # F25 / D-170 (3): an empty table entry is taken as the whole chain (the static
+                # chain is not consulted), so only injected local/CLI models can serve it.
+                _EMPTY_DYNAMIC_CHAIN_WARNED.add(_chain_key)
+                log.warning(
+                    "Dynamic routing chain %s/%s is empty: no provider in the session-start "
+                    "table can serve it; only injected local/CLI models remain",
+                    profile.value, task_type.value,
+                )
             log.debug(
                 "Using session-start dynamic routing table for %s/%s",
                 profile.value, task_type.value,
@@ -2789,6 +2815,9 @@ async def _dispatch_model_loop(
     conversation: list | None = None,
     # The P1.1 door that supplied ``conversation``: "gateway" (the SDK packs in sdk.py, D-98).
     context_door: str = "gateway",
+    # P2.4: the request's capability needs, computed once by route_and_call (None =
+    # filter off); the emergency BUDGET chain is filtered with the same needs.
+    capability_needs: Any = None,
 ) -> LLMResponse:
     """Execute the main model dispatch loop with primary + emergency fallback chains.
 
@@ -3793,6 +3822,10 @@ async def _dispatch_model_loop(
         )
         # D-116: apply shared Q&A ordering here too; timeout demotion below still wins.
         emergency_chain = _strip_local_for_qa(emergency_chain, task_type)
+        if emergency_chain and capability_needs is not None:
+            # P2.4: the emergency chain is filtered too; the primary chain already was.
+            from llm_router import capability_filter as _cf
+            emergency_chain = _cf.filter_chain(emergency_chain, capability_needs)
         if emergency_chain and emergency_chain != _chain_as_built:
             emergency_chain = _demote_timed_out_local(emergency_chain)  # LOCAL-TIMEOUT-1
             for attempt, model in enumerate(emergency_chain, start=len(models_to_try) + 1):
@@ -4529,6 +4562,8 @@ async def route_and_call(
     profile, c, use_thinking = _resolve_profile(
         profile, complexity_hint, classification_data, prompt, model_override, config
     )
+    # F25 / D-170 (4): a row the MCP ledger guard writes for this call names this profile.
+    _ci_scope.note_ledger_profile(profile)
     effective_complexity = c.value if hasattr(c, "value") else str(complexity_hint or "moderate")
     available = config.available_providers
     with traced_span(
@@ -4891,12 +4926,43 @@ async def route_and_call(
                     await _release_reservation_if_held()
                     raise _daily_cap_exc
 
+        # P2.4: the capability filter is the LAST transform (RED1-01/RED1-02: a hard
+        # filter placed before the specialist or the bandit is undone by them). It
+        # excludes, never reorders, and only on KNOWN lack of vision or window: this
+        # door has no tools array, and the prompt-text tools regex is shadow only
+        # (D-165), so a pinned or unpinned perplexity research call keeps its slot.
+        # An explicit model_override is not exempt from vision or window: hard means hard.
+        _cap_needs = None
+        _cap_excluded: list = []
+        if models_to_try:
+            try:
+                from llm_router import capability_filter as _cf
+                if _cf.enabled():
+                    _cap_needs = _cf.merge(
+                        _cf.needs_from_prompt(prompt, task_type.value, system_prompt or ""),
+                        _cf.needs_from_messages(messages, prompt, system_prompt or ""),
+                    )
+                    models_to_try, _cap_excluded = _cf.filter_chain_report(models_to_try, _cap_needs)
+            except Exception as _cap_err:  # noqa: BLE001 - fail-open: the chain stays as built
+                from llm_router import failopen
+                failopen.record("CHZ-FO-ROUTER-CAPABILITY-FILTER", _cap_err)
+
         if not models_to_try:
             set_span_attributes(
                 route_span,
                 available_providers=sorted(available),
                 candidate_count=0,
             )
+            if _cap_excluded:
+                await _release_reservation_if_held()
+                from llm_router import capability_filter as _cf
+                raise ValueError(
+                    f"No providers available for {task_type.value}/{profile.value}. "
+                    f"Capability filter excluded: {_cf.describe(_cap_excluded)}. "
+                    f"Configured providers: {available or 'none'}. "
+                    "Fix: remove the request's tools or images, shorten the prompt, or connect "
+                    "a model that supports them; LLM_ROUTER_CAPABILITY_ROUTING=0 turns the filter off."
+                )
             # #32: when a LLM_ROUTER_BLOCK_PROVIDERS hard filter is active (see
             # _blocked_providers) and the chain came out empty, surface the block
             # as a likely cause — otherwise the generic "install Ollama / set a key"
@@ -4904,13 +4970,14 @@ async def route_and_call(
             await _release_reservation_if_held()  # RED1-3-01: don't leak on empty-chain
             _blocked = _blocked_providers()
             if _blocked:
-                raise ValueError(
+                raise NoRoutableModelsError(
                     f"No routable models for {task_type.value}/{profile.value} with "
                     f"LLM_ROUTER_BLOCK_PROVIDERS={sorted(_blocked)} active — the hard "
                     f"provider block may have removed every candidate. Configured "
                     f"providers: {sorted(available) or 'none'}. Fix: remove a provider "
                     f"from LLM_ROUTER_BLOCK_PROVIDERS, or ensure a non-blocked provider "
-                    f"(e.g. ollama/*) has a reachable model."
+                    f"(e.g. ollama/*) has a reachable model.",
+                    task_type, profile,
                 )
             from llm_router.runtime_offer import runtime_offer
 
@@ -4919,12 +4986,13 @@ async def route_and_call(
             _offer = "" if "ollama" in available else (
                 "\n" + runtime_offer(api_keys=False) + "\nOr:"
             )
-            raise ValueError(
+            raise NoRoutableModelsError(
                 f"No providers available for {task_type.value}/{profile.value}. "
                 f"Configured providers: {available or 'none'}. "
                 f"Fix: run `llm-router doctor` to diagnose.{_offer}\n"
                 "  • Set GEMINI_API_KEY or OPENAI_API_KEY in ~/.llm-router/.env\n"
-                "  • Set LLM_ROUTER_CLAUDE_SUBSCRIPTION=true if you have Claude Pro/Max"
+                "  • Set LLM_ROUTER_CLAUDE_SUBSCRIPTION=true if you have Claude Pro/Max",
+                task_type, profile,
             )
 
         # Resolved ONCE, here, and reused by the semantic-cache key, context
@@ -5297,6 +5365,7 @@ async def route_and_call(
             chain_attempts_out=_attempt_trace,
             conversation=messages,
             context_door=context_door,
+            capability_needs=_cap_needs,
         )
         # T3-S2 + T3-M1: combined timeout + cancel handling. Both failure
         # modes share the same cleanup contract — release the budget

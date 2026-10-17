@@ -227,8 +227,9 @@ def jaccard_pair(n_shared, n_extra, seed):
 # ---------------------------------------------------------------------------------------------
 
 class FakeOllama:
-    def __init__(self, *, logprobs=True, ps_models=(), chat_content=None):
+    def __init__(self, *, logprobs=True, ps_models=(), chat_content=None, tags_models=None):
         self.logprobs, self.ps_models, self.chat_content = logprobs, list(ps_models), chat_content
+        self.tags_models = tags_models if tags_models is not None else [{"name": "nomic-embed-text", "digest": "d" * 64}]
         self.bodies, self.unloaded = [], []
         fake = self
 
@@ -249,7 +250,7 @@ class FakeOllama:
                 if self.path == "/api/version":
                     return self._send({"version": "0.99.0-fake"})
                 if self.path == "/api/tags":
-                    return self._send({"models": [{"name": "nomic-embed-text", "digest": "d" * 64}]})
+                    return self._send({"models": fake.tags_models})
                 if self.path == "/api/ps":
                     return self._send({"models": [{"name": n, "size": 1 << 30} for n in fake.ps_models]})
                 self._send({})
@@ -549,7 +550,44 @@ def test_fit_heads_c2_via_fake_ollama_end_to_end(env, ollama, capsys):
     assert first.count("d" * 400) == 1 and "d" * 401 not in first          # digest capped at 400
     assert "nomic-embed-text" in srv.unloaded                              # own model unloaded at the end
     model = json.loads((env.out / "model_C2.json").read_text())
-    assert model["embedder"]["model_digest"] == "d" * 64 and model["artifact_sha256"]
+    assert model["embedder"]["model_digests"] == ["d" * 64] and model["artifact_sha256"]
+    assert model["input_cap"] == {"cap": D.C2_WORD_CAP, "unit": "whitespace_words"} and D.C2_WORD_CAP == 384
+
+
+def test_c2_embedder_digests_bare_name_latest_and_every_duplicate(ollama):
+    # real /api/tags: only `nomic-embed-text:latest`, here listed twice with two digests (D-169 (1), (2))
+    srv = ollama(tags_models=[{"name": "nomic-embed-text:latest", "digest": "b" * 64},
+                              {"name": "qwen3.5:latest", "digest": "q"},
+                              {"name": "nomic-embed-text:latest", "digest": "a" * 64}])
+    emb = R.OllamaEmbedder(D.Ollama(srv.url), R.OLLAMA_MODELS["C2"])
+    assert R.OLLAMA_MODELS["C2"] == "nomic-embed-text"
+    assert emb.info["model_digests"] == ["a" * 64, "b" * 64]
+    assert D.Ollama(srv.url).tags() == {"nomic-embed-text:latest": ["a" * 64, "b" * 64], "qwen3.5:latest": ["q"]}
+
+
+def _long_item(real, n_words):
+    """real[1] becomes a long prompt with a recognisable tail and a 1000-char digest (capped at 400)."""
+    words = ["v%04d" % i for i in range(n_words)]
+    real[1]["text"] = " ".join(words) + " " + real[1]["text"].split()[-1]
+    real[1]["digest"] = "g" * 1000
+    return real[1]["text"]
+
+
+def test_c2_input_cap_384_words_digest_whole_tail_kept(env, ollama, capsys):
+    real, syn, truth = make_data(n_real=40, n_groups=20, n_syn=12)
+    text = _long_item(real, 600)
+    lp, _dirs = write_labels(env, real, syn, truth)
+    build_manifest(env, real, syn, legacy_labels="opus=%s" % lp)
+    srv = ollama()
+    assert env.run("fit-heads", "--manifest", env.out / "dev_manifest.json", "--items", env.dev / "items.jsonl",
+                   "--syn-items", env.dev / "syn_items.jsonl", "--label-dir", _dirs[0], "--label-dir", _dirs[1],
+                   "--candidate", "C2", "--ollama-url", srv.url) == 0
+    inputs = [x[len(R.EMBED_PREFIX):] for m, p, b in srv.bodies if p == "/api/embed" for x in json.loads(b)["input"]]
+    x = [i for i in inputs if "g" * 400 in i][0]
+    assert x.startswith("[ctx] " + "g" * 400 + " [prompt] ") and "g" * 401 not in x    # digest whole (capped)
+    assert D.count_words(x) == 384                                                     # 384-word cap, filled
+    assert x.endswith(" ".join(text.split()[-300:]))                                   # the prompt TAIL is kept
+    assert "v0000" not in x                                                            # the head is what goes
 
 
 # ---------------------------------------------------------------------------------------------
@@ -630,6 +668,65 @@ def test_modernbert_gates_and_download_refusals(env, monkeypatch):
     assert env.run("download-modernbert", "--download-log", dl, "--cls-cache", cache, "--revision", "a" * 40, "--confirm-d129") == 0
     phases = [r["phase"] for r in S.read_jsonl(dl)]
     assert phases == ["pre", "post"] and called[0][0] == D.MB_REPO              # licence read before the download
+
+
+class FakeSubwordTokenizer:
+    """HF-shaped: every whitespace word is split into 3-character pieces, plus 2 special tokens, so a word
+    count UNDER-counts tokens (a 5-char word is 2 tokens)."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, text, add_special_tokens=True):
+        self.calls += 1
+        ids = [0] * sum((len(w) + 2) // 3 for w in text.split())
+        return {"input_ids": ([1] + ids + [2]) if add_special_tokens else ids}
+
+
+def test_c3_inputs_real_token_cap_digest_whole_tail_kept(env, ollama, capsys):
+    real, syn, truth = make_data(n_real=40, n_groups=20, n_syn=0)
+    text = _long_item(real, 600)
+    lp, dirs = write_labels(env, real, syn, truth)
+    man = build_manifest(env, real, syn, legacy_labels="opus=%s" % lp)
+    cache = env.cls / "hf"
+    cache.mkdir()
+    trig = env.dev / "trig.json"
+    S.write_private(trig, json.dumps({"fire": True}))
+    log = env.dev / "dl.jsonl"
+    S.write_private(log, "".join(json.dumps(r) + "\n" for r in [
+        {"phase": "pre", "repo_id": D.MB_REPO, "revision": "a" * 40, "licence": "apache-2.0", "cache_dir": str(cache),
+         "utc": "1"},
+        {"phase": "post", "files": {"config.json": "0" * 64}, "utc": "2"}]))
+    tok, seen = FakeSubwordTokenizer(), {}
+
+    def fake_oof(rows, inputs, cache_dir, *, tok=None):
+        seen.update(inputs=list(inputs), tok=tok)
+        return [{"item_id": r["item_id"], "fold": r["fold"], "group": r["group"], "p_haiku": 0.2, "p_sonnet": 0.5,
+                 "p_opus": 0.3, "confidence": 0.5} for r in rows]
+    srv = ollama()
+    deps = quiet_deps(mb_tokenizer=lambda c: tok, mb_oof=fake_oof)
+    assert env.run("fit-modernbert", "--manifest", man, "--items", env.dev / "items.jsonl", "--label-dir", dirs[0],
+                   "--label-dir", dirs[1], "--trigger", trig, "--download-log", log, "--cls-cache", cache,
+                   "--ollama-url", srv.url, deps=deps) == 0
+    assert seen["tok"] is tok
+    count = D.hf_token_counter(tok)
+    assert all(count(x) <= D.TOKEN_CAP for x in seen["inputs"])                 # nothing for truncation to cut
+    x = [i for i in seen["inputs"] if "g" * 400 in i][0]
+    assert x.startswith("[ctx] " + "g" * 400 + " [prompt] ") and "g" * 401 not in x    # digest whole (capped)
+    assert count(x) >= D.TOKEN_CAP - 2                                         # filled up to the real token cap
+    assert x.endswith(" ".join(text.split()[-150:])) and "v0000" not in x      # the prompt TAIL is kept
+
+
+def test_c3_tokenizer_truncates_right_never_left(tmp_path):
+    seen = {}
+
+    class Auto:
+        @staticmethod
+        def from_pretrained(path, **kw):
+            seen.update(kw, path=path)
+            return "tok"
+    assert D.modernbert_tokenizer(tmp_path, auto_tokenizer=Auto) == "tok"
+    assert seen["truncation_side"] == "right" and seen["local_files_only"] is True and seen["path"] == str(tmp_path)
 
 
 def test_trigger_mb_boundary(env, capsys):
@@ -1395,6 +1492,17 @@ def inv_crit6_resemblance(c):
 def inv_digest_cap(c):
     x = D.model_input("q" * 1000, "the prompt", max_tokens=10 ** 6)
     assert x.count("q") == 400
+
+
+def test_model_input_digest_over_cap_is_a_harness_error_not_truncated():
+    # CD-18 (D-169): the digest part is kept whole; if it alone exceeds the cap, fail loudly.
+    def words(s):
+        return len(s.split())
+
+    with pytest.raises(ValueError, match="CD-18"):
+        D.model_input(" ".join(f"w{i}" for i in range(30)), "p p p", max_tokens=12, count_tokens=words)
+    out = D.model_input("d1 d2 d3", "p " * 50, max_tokens=12, count_tokens=words)
+    assert words(out) <= 12 and out.startswith("[ctx] d1 d2 d3 [prompt] ")
 
 
 def inv_run_pin(c):

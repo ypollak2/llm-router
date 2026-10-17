@@ -118,7 +118,7 @@ async def test_env_override_wins_over_the_file(tmp_path, moderate, monkeypatch):
 
 
 async def test_advise_does_not_serve_locally_but_route_does(tmp_path, monkeypatch):
-    async def choose(text, pinned):
+    async def choose(text, pinned, **_kw):
         return {"task_type": "code", "complexity": "moderate", "chain_head": ["ollama/fake:1"],
                 "model": "ollama/fake:1"}
     monkeypatch.setattr(ps, "choose_model", choose)

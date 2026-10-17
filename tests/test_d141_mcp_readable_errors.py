@@ -114,9 +114,11 @@ async def test_real_llm_door_no_provider_message_reaches_the_client(temp_db):
 
 @pytest.mark.asyncio
 async def test_real_llm_door_end_to_end_with_no_providers(no_providers_env, monkeypatch):
-    """No fake router: the real route_and_call finds no provider and its own text arrives."""
+    """No fake router: the real route_and_call finds no provider and its own text arrives.
+    (task="query": since F25 / D-170 an empty research chain is a refusal, not an error;
+    tests/test_f25_research_empty_chain.py covers that door.)"""
     monkeypatch.setattr("llm_router.router.is_codex_available", lambda: False)
-    result = await _call(_real_server(), "llm", {"prompt": PROMPT, "task": "research"}, guard_s=60)
+    result = await _call(_real_server(), "llm", {"prompt": PROMPT, "task": "query"}, guard_s=60)
     first = _first_line(result)
     assert result.is_error
     assert first.startswith("llm-router error: "), first

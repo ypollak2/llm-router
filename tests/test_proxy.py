@@ -322,7 +322,7 @@ def policy(monkeypatch):
     decision = {"task_type": "code", "complexity": "moderate",
                 "chain_head": ["ollama/fake:1"], "model": "ollama/fake:1"}
 
-    async def _choose(text, pinned):
+    async def _choose(text, pinned, **_kw):
         return dict(decision)
 
     monkeypatch.setattr(ps, "choose_model", _choose)

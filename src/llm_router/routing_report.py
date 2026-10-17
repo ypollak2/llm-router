@@ -9,6 +9,7 @@ Run:  python -m llm_router.routing_report   →  writes ~/.llm-router/routing_re
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -16,7 +17,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable
 
-from llm_router import paths
+from llm_router import paths, routing_log
 from llm_router.provider_classes import not_error_row_sql, real_decision_sql
 
 
@@ -216,6 +217,13 @@ def summarise(records: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return days
 
 
+def _generation_lines(log: Path) -> Iterable[str]:
+    """Every line of the debug log across its rotated generations, oldest first."""
+    for gen in routing_log.generations(log):
+        with gen.open(encoding="utf-8", errors="ignore") as fh:
+            yield from fh
+
+
 def draft_acceptance(log: Path | None = None) -> tuple[int, int]:
     """(drafts RELAYED as the answer, drafts OFFERED) over the log.
 
@@ -242,17 +250,123 @@ def draft_acceptance(log: Path | None = None) -> tuple[int, int]:
     is a second thing that can disagree.
     """
     log = log or (_home() / "auto-route-debug.log")
-    if not log.exists():
-        return (0, 0)
+    return _draft_counts(log)
+
+
+# ── incremental draft counters (D-171 A2) ───────────────────────────────────
+# `draft_acceptance` ran on every 10th prompt and read the whole, unbounded debug
+# log (81 ms at 50 MB, 325 ms at 200 MB, measured). The counts are now kept in a
+# sidecar next to the log: ``used``/``offered`` over the log up to ``offset``, plus a
+# fingerprint of the file's first bytes. A call scans only what was appended since,
+# which is the same answer as a full scan of an append-only log. If the log was
+# rotated (``capped_log``: ``<log>.1`` newest backup), the unread remainder of the
+# generation the sidecar described is counted, then the newer generations in full.
+# A missing, corrupt or unwritable sidecar costs one full scan, never a wrong count.
+_DRAFT_SIG_BYTES = 256
+_DRAFT_BACKUPS = routing_log.BACKUPS  # generations the hook keeps when it rotates the log
+
+
+def _count_draft_bytes(data: bytes) -> tuple[int, int]:
     used = offered = 0
-    with log.open(encoding="utf-8", errors="ignore") as fh:
-        for line in fh:
-            if "DRAFT UNUSED:" in line:
-                offered += 1
-            elif "DRAFT USED:" in line or "relayed as the answer" in line:
-                used += 1
-                offered += 1
-    return (used, offered)
+    for line in data.split(b"\n"):
+        if b"DRAFT UNUSED:" in line:
+            offered += 1
+        elif b"DRAFT USED:" in line or b"relayed as the answer" in line:
+            used += 1
+            offered += 1
+    return used, offered
+
+
+def _scan_from(path: Path, offset: int) -> tuple[int, int, int, int, int]:
+    """(used, offered) over the COMPLETE lines of ``path`` from ``offset``, the offset
+    just past the last complete line, and the (used, offered) of an unterminated
+    last line (counted in the answer, not stored: it will be re-read once finished)."""
+    with path.open("rb") as fh:
+        fh.seek(offset)
+        data = fh.read()
+    cut = data.rfind(b"\n") + 1
+    used, offered = _count_draft_bytes(data[:cut])
+    tail_used, tail_offered = _count_draft_bytes(data[cut:])
+    return used, offered, offset + cut, tail_used, tail_offered
+
+
+def _head(path: Path, n: int) -> bytes:
+    with path.open("rb") as fh:
+        return fh.read(n)
+
+
+def _draft_counts(log: Path) -> tuple[int, int]:
+    import hashlib
+
+    side = log.with_name(log.name + ".draft_counts.json")
+    state = None
+    try:
+        raw = json.loads(side.read_text(encoding="utf-8"))
+        if (raw.get("v") == 1 and all(isinstance(raw.get(k), int) and raw[k] >= 0
+                                      for k in ("offset", "sig_len", "used", "offered"))
+                and isinstance(raw.get("sig"), str)):
+            state = raw
+    except (OSError, ValueError, AttributeError):
+        state = None
+
+    def matches(path: Path) -> bool:
+        try:
+            if path.stat().st_size < state["offset"]:
+                return False
+            head = _head(path, state["sig_len"])
+            return (len(head) == state["sig_len"]
+                    and hashlib.sha1(head).hexdigest() == state["sig"])
+        except OSError:
+            return False
+
+    backups = [log.with_name(f"{log.name}.{n}") for n in range(1, _DRAFT_BACKUPS + 1)]
+    backups = [b for b in backups if b.exists()]
+    if not log.exists():
+        return (state["used"], state["offered"]) if state else (0, 0)
+
+    used = offered = 0
+    todo: list[tuple[Path, int]]  # (file, offset) in the order they were written
+    if state is not None and matches(log):
+        used, offered = state["used"], state["offered"]
+        todo = [(log, state["offset"])]
+    elif state is not None and any(matches(b) for b in backups):
+        k = next(i for i, b in enumerate(backups) if matches(b))
+        used, offered = state["used"], state["offered"]
+        todo = [(backups[k], state["offset"])]
+        todo += [(b, 0) for b in reversed(backups[:k])] + [(log, 0)]
+    else:
+        todo = [(b, 0) for b in reversed(backups)] + [(log, 0)]
+
+    end = 0
+    tail_u = tail_o = 0
+    log_scanned = False
+    for path, off in todo:
+        try:
+            u, o, e, tu, to = _scan_from(path, off)
+        except OSError:
+            continue
+        used += u
+        offered += o
+        if path is log:
+            end, tail_u, tail_o, log_scanned = e, tu, to, True
+        else:  # a finished generation: its unterminated last line is final, count it
+            used += tu
+            offered += to
+    if not log_scanned:
+        return (used, offered)
+    try:
+        sig_len = min(_DRAFT_SIG_BYTES, end)
+        new = {"v": 1, "offset": end, "sig_len": sig_len,
+               "sig": hashlib.sha1(_head(log, sig_len)).hexdigest(),
+               "used": used, "offered": offered}
+        tmp = side.with_name(side.name + f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(new, separators=(",", ":")), encoding="utf-8")
+        os.replace(tmp, side)
+    except Exception as exc:  # noqa: BLE001 -- a counter cache that cannot be written is only slower
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-DRAFT-COUNTS-WRITE", exc)
+    return (used + tail_u, offered + tail_o)
 
 
 def unterminated_invocations(log: Path | None = None) -> tuple[int, int]:
@@ -276,10 +390,9 @@ def unterminated_invocations(log: Path | None = None) -> tuple[int, int]:
     were 54% of this file once.
     """
     log = log or (_home() / "auto-route-debug.log")
-    if not log.exists():
+    if not routing_log.generations(log):
         return (0, 0)
-    with log.open(encoding="utf-8", errors="ignore") as fh:
-        days = summarise(parse_log(fh))
+    days = summarise(parse_log(_generation_lines(log)))
     return (
         sum(d["other"] for d in days.values()),
         sum(d["prompts"] for d in days.values()),
@@ -297,10 +410,9 @@ def _outcome_counts(log: Path) -> dict[str, int]:
     non-sessions, so the numbers reconcile with the per-day view and with each
     other.
     """
-    if not log.exists():
+    if not routing_log.generations(log):
         return {k: 0 for k in ("DIRECT SUCCESS", "DIRECT SKIP", "DIRECT FAILED")}
-    with log.open(encoding="utf-8", errors="ignore") as fh:
-        days = summarise(parse_log(fh))
+    days = summarise(parse_log(_generation_lines(log)))
     return {
         "DIRECT SUCCESS": sum(d["success"] for d in days.values()),
         "DIRECT SKIP": sum(d["skipped"] for d in days.values()),

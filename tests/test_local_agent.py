@@ -391,7 +391,7 @@ def _sse():
 
 @pytest.fixture
 def policy(monkeypatch):
-    async def _choose(text, pinned):
+    async def _choose(text, pinned, **_kw):
         return {"task_type": "code", "complexity": "moderate", "chain_head": ["ollama/fake:1"],
                 "model": "ollama/fake:1"}
     monkeypatch.setattr(ps, "choose_model", _choose)
@@ -454,7 +454,7 @@ async def test_local_agent_serves_a_compacted_non_edit_step(tmp_path, policy, mo
 
 
 async def test_local_agent_capability_decline_is_logged(tmp_path, monkeypatch):
-    async def _choose(text, pinned):
+    async def _choose(text, pinned, **_kw):
         return {"task_type": "generate", "complexity": "moderate", "chain_head": [], "model": "ollama/fake:1"}
     monkeypatch.setattr(ps, "choose_model", _choose)
     backend = FakeBackend(_ollama("Done."))

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 17
+# llm_router-hook-version: 18
 """PreToolUse[*] hook — enforce routing compliance.
 
 When auto-route.py issues a ⚡ MANDATORY ROUTE directive, it writes a
@@ -1239,8 +1239,11 @@ def main() -> None:
         _fs_task = pending.get("task_type", "")
         if _fs_prompt:
             try:
-                from llm_router.hooks.chain_builder import needs_claude_tools
-                _needs_local_tools = needs_claude_tools(_fs_prompt, _fs_task)
+                # D-159: the LEGACY boolean, whatever LLM_ROUTER_CAPABILITY_ROUTING says.
+                # The 8-bit vector (default on since P2.4) also sees git/command prompts
+                # ("commit the result") and would soft-allow execution work this gate holds.
+                from llm_router.capabilities import detect_capabilities
+                _needs_local_tools = detect_capabilities(_fs_prompt, _fs_task).legacy_match
             except Exception:
                 _needs_local_tools = False
             # Operational prompts are exempt from the FS exemption: llm_delegate
