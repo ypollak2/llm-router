@@ -27,7 +27,7 @@ from typing import Any, AsyncIterator, TYPE_CHECKING
 from contextvars import ContextVar
 from uuid import uuid4
 
-from llm_router import cost, media, provider_reset, providers
+from llm_router import cost, media, provider_reset, providers, skip_causes
 from llm_router.cost import (  # constants, so a test that patches ``cost`` keeps the codes
     REASON_ERROR_ALL_FAILED,
     REASON_ERROR_BUDGET,
@@ -386,6 +386,12 @@ def _task_aware_default_order(models: list[str], task_type: "TaskType") -> list[
     return sorted(rotated, key=_score, reverse=True)
 
 
+def _note_dropped(before: list[str], after: list[str], reason: str) -> None:
+    """F23: record every entry a chain-build filter removed (no-op outside a call)."""
+    kept = set(after)
+    skip_causes.note_many([m for m in before if m not in kept], reason)
+
+
 async def _build_and_filter_chain(
     task_type: TaskType,
     profile: RoutingProfile,
@@ -560,16 +566,20 @@ async def _build_and_filter_chain(
         # legitimate anthropic/* entries were ALSO being dropped, leaving an
         # empty chain — the router's worst possible failure mode.
         available = config.available_providers
+        _before_avail = models_to_try
         models_to_try = _keep_reachable_providers(models_to_try, config)
+        _note_dropped(_before_avail, models_to_try, skip_causes.UNAVAILABLE)
 
         # ── Repo config: block_providers + model/provider pin ─────────────────
         repo_cfg = get_repo_config()
         if repo_cfg.block_providers:
             blocked = set(repo_cfg.block_providers)
+            _before_block = models_to_try
             models_to_try = [
                 m for m in models_to_try
                 if provider_from_model(m) not in blocked
             ]
+            _note_dropped(_before_block, models_to_try, skip_causes.BLOCKED)
 
         # ── Policy engine ─────────────────────────────────────────────────────
         from llm_router.policy import OrgPolicy, apply_policy
@@ -588,9 +598,11 @@ async def _build_and_filter_chain(
             source="merged",
         )
         if _merged_block or _merged_allow:
+            _before_policy = models_to_try
             models_to_try, _policy_blocked = apply_policy(
                 models_to_try, task_type.value, _policy,
             )
+            _note_dropped(_before_policy, models_to_try, skip_causes.POLICY)
 
         # Per-task pins AND the local-first Ollama injection below apply ONLY to
         # the cheap tiers (BUDGET / BALANCED). Complex and deep-reasoning tasks
@@ -627,6 +639,9 @@ async def _build_and_filter_chain(
             configured=_gate_names, read_routing_yaml=False,
         )
         _unvalidated_tail.extend(_ollama_tail)
+        # F23: unvalidated local models dropped from a critical chain (P0.15 gate).
+        _known_local = set(ollama_models) | set(_ollama_tail)
+        skip_causes.note_many([m for m in _local_all if m not in _known_local], skip_causes.CAPABILITY_FILTERED)
         if ollama_models:
             # Without an explicit pin, every task type used to see this SAME
             # list prepended in the SAME order — so whichever model happened to
@@ -1028,9 +1043,11 @@ async def _build_and_filter_chain(
     # headless gateway daemon — see _blocked_providers().
     _blocked = _blocked_providers()
     if _blocked:
+        _before_hard = models_to_try
         models_to_try = [
             m for m in models_to_try if provider_from_model(m) not in _blocked
         ]
+        _note_dropped(_before_hard, models_to_try, skip_causes.BLOCKED)
         if not models_to_try:
             log.warning(
                 "LLM_ROUTER_BLOCK_PROVIDERS=%s removed every candidate for %s/%s — "
@@ -1048,7 +1065,9 @@ async def _build_and_filter_chain(
         and profile in (RoutingProfile.PREMIUM, RoutingProfile.REASONING)
     )
     from llm_router import map_reader
+    _before_map = models_to_try
     models_to_try = map_reader.apply_to_chain(models_to_try, reorder=not _keep_order)
+    _note_dropped(_before_map, models_to_try, skip_causes.UNAVAILABLE)
 
     # ── Unvalidated local models: last, after every reorder (P0.15, D-60c = A) ──
     # Appended here, not at the injection point: the agent-context reorder, the
@@ -2727,6 +2746,10 @@ async def _finalize_successful_route(
     # actually resolved for model selection, and the model that actually ran.
     _cd = classification_data or {}
     _unhinted = classification_data is None
+    # F23: what the loop passed over before this answer, and whether D-116 served it last.
+    from llm_router.quality_feedback import is_skip_marker as _is_skip_marker
+    _skipped = skip_causes.entries_so_far()
+    _failed_before = [m for m in chain_attempts if m != model and not _is_skip_marker(m)]
     try:
         from llm_router import call_identity as _call_identity
 
@@ -2806,6 +2829,9 @@ async def _finalize_successful_route(
             # started from a Claude Code shell inherits its session id. See call_identity.py.
             session_id=_call_identity.call_session_id(),
             tool_use_id=_call_identity.tool_use_id(),
+            skipped=_skipped,
+            served_by_last_resort=skip_causes.served_by_last_resort(
+                response.provider, _cd.get("task_type", task_type.value), _skipped, _failed_before),
         )
         if classification_data:
             if response.provider in {"claude_subscription", "subscription", "anthropic", "claude"}:
@@ -3101,9 +3127,16 @@ async def _dispatch_model_loop(
             and (_local_timed_out_in_call or _local_in_timeout_cooldown(model))
         ):
             chain_errors.append((model, "skipped:local_timeout_with_answer_in_hand"))
+            skip_causes.note(model, skip_causes.LOCAL_TIMEOUT)
             continue
 
         if not tracker.is_healthy(provider):
+            # F23: a persisted usage-limit bench (until=epoch) is not a breaker trip.
+            _bench_until = provider_reset.get_provider_reset_until(provider)
+            if _bench_until is not None:
+                skip_causes.note(model, skip_causes.BENCH, kind="provider_reset", until=_bench_until)
+            else:
+                skip_causes.note(model, skip_causes.BREAKER)
             await _notify(ctx, "warning", f"⚠️  {provider} unhealthy — trying next")
             log.info("Skipping unhealthy provider: %s", provider)
             route_log.warning(
@@ -3135,6 +3168,7 @@ async def _dispatch_model_loop(
             rbac_skipped.append(
                 (model, f"classification:{task_type.value}->{provider}")
             )
+            skip_causes.note(model, skip_causes.ALLOWLIST)
             continue
         elif _cls_mode == _CLS_WARN and not _cls_ok:
             route_log.warning(
@@ -3178,6 +3212,7 @@ async def _dispatch_model_loop(
                     max_cost_per_task=max_cost_per_task,
                 )
                 cost_skipped.append((model, projected))
+                skip_causes.note(model, skip_causes.BUDGET)
                 continue
 
         # T3-XL1: agent-aware routing policy gates. Two checks, both
@@ -3202,6 +3237,7 @@ async def _dispatch_model_loop(
                         policy_skipped.append(
                             (model, f"policy:provider:{provider}")
                         )
+                        skip_causes.note(model, skip_causes.AGENT_POLICY)
                         continue
                     else:  # warn — log, proceed
                         route_log.warning(
@@ -3240,6 +3276,7 @@ async def _dispatch_model_loop(
                     policy_skipped.append(
                         (model, f"policy:turn_cost:{_turn_projected:.4f}")
                     )
+                    skip_causes.note(model, skip_causes.AGENT_POLICY)
                     continue
 
         # Quality feedback: skip models with poor track record for this task pattern.
@@ -3278,6 +3315,7 @@ async def _dispatch_model_loop(
                 _stats = get_quality_stats(model, task_type.value, c.value)
                 _avg, _n = _stats if _stats is not None else (0.0, 0)
                 chain_attempts.append(format_skip_marker(model, _avg, _n))
+                skip_causes.note(model, skip_causes.QUALITY)
                 continue
         except Exception as e:
             log.warning("quality_feedback_failed", error=str(e))
@@ -3298,6 +3336,7 @@ async def _dispatch_model_loop(
             log.info("Skipping budget-exhausted provider: %s", provider)
             last_error = BudgetExceededError(f"{provider} budget exhausted")
             chain_errors.append((model, "budget exhausted"))
+            skip_causes.note(model, skip_causes.BUDGET)
             continue
 
         # ── P3: premium spend hard-cap ───────────────────────────────────────
@@ -3329,6 +3368,7 @@ async def _dispatch_model_loop(
                 cap=_premium_max_pressure,
             )
             chain_errors.append((model, f"premium_capped@{budget_state.pressure:.2f}"))
+            skip_causes.note(model, skip_causes.BUDGET)
             continue
 
         # Show provider context for QUOTA_BALANCED
@@ -4549,6 +4589,7 @@ async def route_and_call(
         RuntimeError: All candidate models failed (wraps the last error).
     """
     config = get_config()
+    skip_causes.begin()  # F23: fresh per-call list of passed-over entries
     correlation_id = uuid4().hex[:8]
     # Phase 0.5 (Option A sidecar bridge): when the hook minted a directive id
     # for this turn (threaded down from an MCP door), the BILLABLE-ROW

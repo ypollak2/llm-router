@@ -645,6 +645,7 @@ def _git_dirty(where: Path) -> bool | None:
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
+    os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")  # litellm fetches its cost map from GitHub at import otherwise; keep the run hermetic
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--freeze-corpus", type=Path, help="collect and write the corpus (0600), then exit")
     ap.add_argument("--freeze-dates", type=Path,

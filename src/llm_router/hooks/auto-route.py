@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 61
+# llm_router-hook-version: 62
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 61"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 62"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -3633,7 +3633,77 @@ def _draft_context_budget() -> int:
     return max(1, min(value, _DRAFT_CTX_MAX))
 
 
-def _last_assistant_text(transcript_path: str) -> str:
+#: Tail window for the transcript read. Claude Code transcripts reach tens of MB over
+#: a long session; the hook needs only the last few turns, and it runs on EVERY
+#: prompt. 256 KB holds many turns of prose; a tool-heavy tail grows the window
+#: (doubling) until enough turns are found, up to the whole file (D-171 A1).
+_TRANSCRIPT_TAIL_BYTES = 256 * 1024
+#: Turns the hook may need from one parse: the most any consumer keeps (persist 6,
+#: draft history 6, last-assistant 2) plus one, because a trailing user turn equal
+#: to the current prompt is dropped before the slice.
+_CC_TURNS_NEEDED = max(_ASSISTANT_PERSIST_TURNS, 6, 2) + 1
+
+
+def _parse_cc_line(raw: bytes):
+    """One transcript line -> {"role","content"} or None (not a text turn)."""
+    line = raw.decode("utf-8", "replace").strip()
+    if not line:
+        return None
+    try:
+        entry = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    msg = entry.get("message") or {}
+    role = msg.get("role")
+    if role not in ("user", "assistant"):
+        return None
+    text = _extract_turn_text(msg.get("content")).strip()
+    if not text:
+        return None
+    return {"role": role, "content": text}
+
+
+def _read_cc_turns(transcript_path: str, need: int = _CC_TURNS_NEEDED) -> list[dict]:
+    """The last ``need`` user/assistant text turns of the CC transcript (fewer if the
+    file holds fewer), oldest first, read from the END of the file.
+
+    The old read took ``readlines()`` of the whole file and parsed every line on
+    every prompt, twice: 3.3 ms per MB, 167 ms at 50 MB (D-171 A1, measured). This
+    reads a tail window and parses lines backwards until ``need`` turns are found;
+    a window with too few turns doubles, so the result equals the full parse's
+    last ``need`` turns whatever the shape of the tail. The first line of a
+    window that starts mid-file is partial and is dropped. Missing/unreadable
+    file -> []. Never raises.
+    """
+    if not transcript_path or need <= 0:
+        return []
+    try:
+        with open(transcript_path, "rb") as fh:
+            size = fh.seek(0, 2)
+            window = _TRANSCRIPT_TAIL_BYTES
+            while True:
+                start = max(0, size - window)
+                fh.seek(start)
+                blob = fh.read(size - start)
+                if start:
+                    nl = blob.find(b"\n")
+                    blob = blob[nl + 1:] if nl >= 0 else b""
+                found: list[dict] = []
+                for raw in reversed(blob.split(b"\n")):
+                    turn = _parse_cc_line(raw)
+                    if turn is not None:
+                        found.append(turn)
+                        if len(found) >= need:
+                            break
+                if len(found) >= need or start == 0:
+                    found.reverse()
+                    return found
+                window *= 2
+    except Exception:  # noqa: BLE001 -- OSError and anything odd: history is best-effort
+        return []
+
+
+def _last_assistant_text(transcript_path: str, cc_turns: list[dict] | None = None) -> str:
     """The most recent assistant reply from the CC transcript, or "".
 
     Used to judge whether the previous draft was relayed. Best-effort: an
@@ -3643,7 +3713,9 @@ def _last_assistant_text(transcript_path: str) -> str:
     if not transcript_path:
         return ""
     try:
-        turns = _load_conversation_history(transcript_path, current_prompt="", max_turns=2)
+        turns = _load_conversation_history(
+            transcript_path, current_prompt="", max_turns=2, cc_turns=cc_turns,
+        )
     except Exception:  # noqa: BLE001
         return ""
     for turn in reversed(turns or []):
@@ -3657,6 +3729,7 @@ def _persist_assistant_turns(
     session_id: str,
     current_prompt: str = "",
     max_turns: int = _ASSISTANT_PERSIST_TURNS,
+    cc_turns: list[dict] | None = None,
 ) -> int:
     """Copy Claude's recent answers from the CC transcript into the session store.
 
@@ -3684,7 +3757,7 @@ def _persist_assistant_turns(
     try:
         turns = _load_conversation_history(
             transcript_path, current_prompt or "", max_turns=max_turns,
-            session_id=session_id,
+            session_id=session_id, cc_turns=cc_turns,
         )
     except Exception:  # noqa: BLE001
         return 0
@@ -3695,7 +3768,10 @@ def _persist_assistant_turns(
         from llm_router import session_store as _ss
 
         try:
-            from llm_router.okf import _KNOWLEDGE_CTX_RE as _KCTX
+            try:
+                from llm_router.knowledge_ctx import KNOWLEDGE_CTX_RE as _KCTX
+            except ImportError:  # a library older than this hook: the same pattern lives in okf
+                from llm_router.okf import _KNOWLEDGE_CTX_RE as _KCTX
         except Exception:  # noqa: BLE001 — stripping is a guard, not a dependency
             _KCTX = None
 
@@ -3734,8 +3810,12 @@ def _load_conversation_history(
     max_turns: int = 6,
     max_chars: int = 16000,  # ~4k tokens at ~4 chars/token
     session_id: str = "",
+    cc_turns: list[dict] | None = None,
 ) -> list[dict]:
     """Return the last ``max_turns`` user/assistant turns from the CC transcript.
+
+    ``cc_turns``: the transcript already parsed by ``_read_cc_turns`` (the hook
+    parses once per prompt and shares it); None reads the tail here.
 
     Audit §2.5: routed models were stateless (system + prompt only), so a
     bypassed context-dependent turn was answered blind. This reads Claude Code's
@@ -3751,28 +3831,10 @@ def _load_conversation_history(
         # A missing/absent CC transcript must NOT short-circuit the shard merge
         # below: sessions whose prompts were all blocked (zero-claude) have no
         # CC transcript at all — the shard is their only history source.
-        _cc_lines: list[str] = []
-        if transcript_path:
-            try:
-                with open(transcript_path, encoding="utf-8") as fh:
-                    _cc_lines = fh.readlines()
-            except OSError:
-                _cc_lines = []
-        for line in _cc_lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            msg = entry.get("message") or {}
-            role = msg.get("role")
-            if role not in ("user", "assistant"):
-                continue
-            text = _extract_turn_text(msg.get("content")).strip()
-            if text:
-                turns.append({"role": role, "content": text})
+        if cc_turns is not None:
+            turns = list(cc_turns)  # the caller's list is shared: never mutate it
+        elif transcript_path:
+            turns = _read_cc_turns(transcript_path, max_turns + 1)
 
         # Drop a trailing user turn identical to the current prompt (the hook
         # passes the prompt separately, so including it here would duplicate it).
@@ -4363,6 +4425,12 @@ def _build_mini_summary() -> str | None:
         return banner + footer
 
 
+#: auto-route-debug.log was unbounded (6.7 MB live, 10-17) and `draft_acceptance` scanned
+#: all of it. Rotated at this size; this many older generations are kept (D-171 A2).
+_DEBUG_LOG_MAX_BYTES = 8_000_000
+_DEBUG_LOG_BACKUPS = 3
+
+
 def _debug_log(msg: str) -> None:
     """Log debug info to help diagnose hook invocation issues.
 
@@ -4374,8 +4442,14 @@ def _debug_log(msg: str) -> None:
     """
     try:
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        with open(_debug_log_path(), "a") as f:
+        _dlp = _debug_log_path()
+        with open(_dlp, "a") as f:
             f.write(f"[{timestamp}] {msg}\n")
+            f.flush()
+            _dl_size = os.fstat(f.fileno()).st_size
+        if _dl_size > _DEBUG_LOG_MAX_BYTES:
+            from llm_router import capped_log as _capped_log
+            _capped_log.rotate_if_full(_dlp, _DEBUG_LOG_MAX_BYTES, _DEBUG_LOG_BACKUPS)
     except Exception:
         pass  # Silently fail if logging doesn't work
     try:
@@ -4728,10 +4802,11 @@ def main() -> None:
     _p16_decision = None
     if session_id:
         try:
-            from llm_router import engine as _engine
+            with _hl_phase("engine"):
+                from llm_router import engine as _engine
 
-            if _engine.decides():
-                _p16_decision = engine_decision(prompt)
+                if _engine.decides():
+                    _p16_decision = engine_decision(prompt)
         except Exception as _exc:                                    # noqa: BLE001
             from llm_router import failopen as _fo
             _fo.record("P16-HOOK-DECISION", _exc)
@@ -4796,6 +4871,7 @@ def main() -> None:
     # 0 to disable entirely. Computed once here and stashed for the
     # rest of main() to append into whichever additionalContext path
     # ends up firing.
+    _cc_turns: list[dict] | None = None  # the one transcript-tail parse (D-171 A1)
     _mini_summary_block: str | None = None
     if session_id:
         try:
@@ -4805,7 +4881,8 @@ def main() -> None:
         if _every > 0:
             _prompt_n = _bump_session_prompt_count(session_id)
             if _prompt_n > 0 and _prompt_n % _every == 0:
-                _mini_summary_block = _build_mini_summary()
+                with _hl_phase("mini_summary"):
+                    _mini_summary_block = _build_mini_summary()
                 if _mini_summary_block:
                     _debug_log(
                         f"[INVOCATION {invocation_id:.3f}] MINI_SUMMARY "
@@ -5133,8 +5210,9 @@ def main() -> None:
     _unservable_quiet = False
     if not _forced and not zero_claude:
         try:
-            from llm_router import task_availability as _ta
-            _f6_task, _f6_reason = _ta.resolve(task_type)
+            with _hl_phase("availability"):
+                from llm_router import task_availability as _ta
+                _f6_task, _f6_reason = _ta.resolve(task_type)
         except Exception as _exc:  # noqa: BLE001 -- fail open: today's directive
             from llm_router import failopen as _fo
             _fo.record("LR-FO-HOOK-F6-AVAILABILITY", _exc)
@@ -5316,8 +5394,12 @@ def main() -> None:
         # the other half of the conversation gets persisted. Fail-open.
         try:
             with _hl_phase("session_io"):
+                # ONE parse of the transcript tail per prompt, shared by the persist
+                # below, the draft-usage audit and the draft's own history (D-171 A1).
+                _cc_turns = _read_cc_turns(hook_input.get("transcript_path", ""))
                 _n = _persist_assistant_turns(
                     hook_input.get("transcript_path", ""), session_id, current_prompt=prompt,
+                    cc_turns=_cc_turns,
                 )
             if _n:
                 _debug_log(
@@ -5338,7 +5420,8 @@ def main() -> None:
 
             with _hl_phase("session_io"):
                 _verdict = _draft_usage.audit(
-                    session_id, _last_assistant_text(hook_input.get("transcript_path", "")),
+                    session_id,
+                    _last_assistant_text(hook_input.get("transcript_path", ""), cc_turns=_cc_turns),
                 )
             if _verdict is not None:
                 _outcome, _rec = _verdict
@@ -5697,7 +5780,7 @@ def main() -> None:
                     with _hl_phase("session_io"):
                         _history = _load_conversation_history(
                             hook_input.get("transcript_path", ""), prompt,
-                            session_id=session_id,
+                            session_id=session_id, cc_turns=_cc_turns,
                         )
                 _draft_root = hook_input.get("cwd") or os.getcwd()
                 # I4: the draft may open files. Read-only — it answers before
@@ -6346,26 +6429,27 @@ def main() -> None:
     # ── Append mid-session trend indicator for visibility ────────────────────────
     trend_indicator = ""
     try:
-        from llm_router.monitoring.live_tracker import get_live_trend_indicator
-        trend_indicator = get_live_trend_indicator()
-        
-        # Attempt to capture hourly snapshot (async, fire-and-forget)
-        try:
-            from llm_router.monitoring.live_tracker import check_and_capture_hourly_snapshot
-            import threading
-            def _capture_snapshot():
-                try:
-                    import asyncio
-                    asyncio.run(check_and_capture_hourly_snapshot())
-                except Exception:
-                    pass
-            thread = threading.Thread(target=_capture_snapshot, daemon=True)
-            thread.start()
-        except Exception:
-            pass
+        with _hl_phase("trend"):
+            from llm_router.monitoring.live_tracker import get_live_trend_indicator
+            trend_indicator = get_live_trend_indicator()
+
+            # Attempt to capture hourly snapshot (async, fire-and-forget)
+            try:
+                from llm_router.monitoring.live_tracker import check_and_capture_hourly_snapshot
+                import threading
+                def _capture_snapshot():
+                    try:
+                        import asyncio
+                        asyncio.run(check_and_capture_hourly_snapshot())
+                    except Exception:
+                        pass
+                thread = threading.Thread(target=_capture_snapshot, daemon=True)
+                thread.start()
+            except Exception:
+                pass
     except Exception:
         pass
-    
+
     if trend_indicator:
         indicator = f"{indicator}  {trend_indicator}"
 

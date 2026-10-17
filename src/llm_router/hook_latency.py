@@ -111,6 +111,7 @@ __all__ = [
     "max_bytes",
     "HOOK_TIMEOUTS_MS",
     "MODEL_PHASES",
+    "ALWAYS_REPORT_ADDED",
     "set_session",
     "model_ms",
     "router_added_ms",
@@ -182,6 +183,13 @@ DEFAULT_TIMEOUT_MS = 60_000
 #: time). ``cold_wait`` is usually reported from INSIDE one of the other two;
 #: the recorder knows when it is (``_model_depth``) and subtracts it once.
 MODEL_PHASES: tuple[str, ...] = ("draft_chain", "zce_model", "codex_delegation", "cold_wait")
+
+#: Hooks whose row ALWAYS carries ``router_added_ms`` (elapsed minus ``MODEL_PHASES``,
+#: the same definition ``agent-route`` writes), also when no model phase ran. Their
+#: other rows had no field, so a reader fell back to ``elapsed_ms`` and the KPI could
+#: not tell a router-added figure from a bare elapsed one (D-171, auto-route n=186).
+#: A hook not listed keeps writing the field only on a row that named a model phase.
+ALWAYS_REPORT_ADDED: frozenset[str] = frozenset({"auto-route"})
 
 _OFF_VALUES = frozenset({"0", "off", "false", "no", "disabled"})
 
@@ -447,7 +455,7 @@ def _finish() -> None:
     elapsed = (_monotonic() - pending["t0"]) * 1000.0
     phases = dict(_phases) if _phases else None
     added = None
-    if phases and any(k in phases for k in MODEL_PHASES):
+    if (phases and any(k in phases for k in MODEL_PHASES)) or pending["hook"] in ALWAYS_REPORT_ADDED:
         added = max(0.0, elapsed - model_ms(phases, _nested_model_ms))
     record(pending["hook"], pending["event"], elapsed, phases_ms=phases,
            router_added_ms=added, session_id=_session_id, host=pending.get("host"),

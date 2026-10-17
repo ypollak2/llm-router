@@ -116,22 +116,33 @@ def available_providers() -> frozenset[str] | None:
     return frozenset(found)
 
 
-def candidate_providers(task: str) -> frozenset[str]:
-    """Providers whose models the router may try for *task* (over-inclusive)."""
+def _policy_chains() -> dict:
+    """The active policy's ``chains`` (profile -> task -> models); ``{}`` when it cannot be read."""
+    try:
+        from llm_router.policy import get_active_policy
+
+        return dict(getattr(get_active_policy(), "chains", None) or {})
+    except Exception:  # noqa: BLE001 -- the standard chains alone
+        return {}
+
+
+def candidate_providers(task: str, policy_chains: dict | None = None) -> frozenset[str]:
+    """Providers whose models the router may try for *task* (over-inclusive).
+
+    ``policy_chains``: the active policy's chains, when the caller already loaded them
+    (:func:`resolve` loads once per call, not once per task it tries); None loads them here.
+    """
     from llm_router.profiles import ROUTING_TABLE, provider_from_model
     from llm_router.types import LOCAL_PROVIDERS
 
     chains = [chain for (_profile, task_type), chain in ROUTING_TABLE.items()
               if task_type.value == task]
-    try:
-        from llm_router.policy import get_active_policy
-
-        for tasks in (getattr(get_active_policy(), "chains", None) or {}).values():
-            chain = tasks.get(task) if isinstance(tasks, dict) else None
-            if chain:
-                chains.append(list(chain))
-    except Exception:  # noqa: BLE001 -- the standard chains alone
-        pass
+    if policy_chains is None:
+        policy_chains = _policy_chains()
+    for tasks in policy_chains.values():
+        chain = tasks.get(task) if isinstance(tasks, dict) else None
+        if chain:
+            chains.append(list(chain))
     out = {provider_from_model(m) for chain in chains for m in chain}
     local = set(LOCAL_PROVIDERS) | {"openai_compat"}
     if task == "research":
@@ -139,7 +150,9 @@ def candidate_providers(task: str) -> frozenset[str]:
     return frozenset(out | local | _INJECTED)
 
 
-def servable(task: str, available: frozenset[str] | None = None) -> bool | None:
+def servable(
+    task: str, available: frozenset[str] | None = None, policy_chains: dict | None = None,
+) -> bool | None:
     """True/False for a checked task with a fresh map; ``None`` when unknown or unchecked."""
     if task not in TEXT_TASKS:
         return None
@@ -147,7 +160,7 @@ def servable(task: str, available: frozenset[str] | None = None) -> bool | None:
         available = available_providers()
         if available is None:
             return None
-    return bool(candidate_providers(task) & available)
+    return bool(candidate_providers(task, policy_chains) & available)
 
 
 def resolve(task: str) -> tuple[str | None, str]:
@@ -164,10 +177,11 @@ def resolve(task: str) -> tuple[str | None, str]:
         available = available_providers()
         if available is None:
             return task, UNKNOWN
-        if servable(task, available):
+        chains = _policy_chains()  # one policy read for the task and every fallback
+        if servable(task, available, chains):
             return task, SERVABLE
         for fallback in FALLBACKS.get(task, ()):
-            if servable(fallback, available):
+            if servable(fallback, available, chains):
                 return fallback, FALLBACK
         return None, NO_PROVIDER
     except Exception:  # noqa: BLE001 -- fail open to today's directive

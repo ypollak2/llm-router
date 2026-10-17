@@ -12,6 +12,10 @@ A STATIC pin that cannot be computed is an ERROR (exit 9) naming it. Nothing is 
 PINS-STATIC file itself against the `pins_sha256` line of the freeze record (PREREG section 15:
 `docs/prereg/PREREG-CLS-DEV.sha256` under the pinned repo): fail closed once that record exists, a named
 warning before the freeze. Output: counts and key names only.
+
+Ollama digests (D-169): a bare model name is looked up as `<name>:latest` (Ollama semantics), and the pin
+records the sorted set of EVERY digest `/api/tags` lists under that name (never last-wins), so `--verify`
+fails when that set changes.
 """
 from __future__ import annotations
 
@@ -101,6 +105,21 @@ def _flag_lines(help_text: str, flags: list[str]) -> tuple[dict, list[str]]:
     return lines, missing
 
 
+def ollama_name(model: str) -> str:
+    """Ollama semantics: a name without a tag means `<name>:latest` (nomic-embed-text ->
+    nomic-embed-text:latest). A registry `host:port/` prefix is not a tag."""
+    return model if ":" in model.rsplit("/", 1)[-1] else model + ":latest"
+
+
+def ollama_digest_sets(tags_models) -> dict:
+    """/api/tags `models` -> {normalised name: sorted list of every distinct digest listed under it}. A name
+    listed twice keeps both digests (D-169: qwen3.5:latest is listed twice); never last-wins."""
+    out: dict = {}
+    for m in tags_models:
+        out.setdefault(ollama_name(m["name"]), set()).add(m["digest"])
+    return {k: sorted(v) for k, v in out.items()}
+
+
 def supply_path(gt500_py) -> Path:
     """supply.py lives next to gt500.py (p17d_synthetic.py: GT_SCRIPTS / "supply.py")."""
     return Path(gt500_py).parent / "supply.py"
@@ -164,12 +183,12 @@ def compute_static(params: dict, *, runner=_default_run, http_get=_default_http_
     def ollama():
         base = params["ollama_url"].rstrip("/")
         ver = http_get(base + "/api/version")["version"]
-        tags = {m["name"]: m["digest"] for m in http_get(base + "/api/tags")["models"]}
+        sets = ollama_digest_sets(http_get(base + "/api/tags")["models"])
         digs = {}
         for m in params["ollama_models"]:
-            if m not in tags:
+            if ollama_name(m) not in sets:
                 raise ValueError("model absent")
-            digs[m] = tags[m]
+            digs[m] = sets[ollama_name(m)]
         return {"version": ver, "digests": digs}
     sec("ollama", ollama)
 

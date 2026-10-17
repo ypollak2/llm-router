@@ -54,13 +54,13 @@ from llm_router.savings import (
 
 
 def _production_pred(cols) -> str:
-    """ACC-01: the canonical provenance predicate (cost.production_only) for a
+    """ACC-01: the canonical provenance predicate (savings.production_only) for a
     money table, or a constant-false one when the table has no provenance
     column. A row whose provenance was never established is UNVERIFIED — kept
     out of the headline, reported beside it (S9: unknown is not favourable)."""
     if "is_simulated" not in cols:
         return "0"
-    from llm_router.cost import production_only
+    from llm_router.savings import production_only
     return production_only(prefix="")
 
 
@@ -1221,7 +1221,12 @@ class Summary:
 _PERIOD_ALIASES = {"day": "today", "all": "lifetime"}
 
 
-def summary(period: str, *, db_path: Path | str | None = None) -> Summary:
+def summary(
+    period: str,
+    *,
+    db_path: Path | str | None = None,
+    totals: WindowTotals | None = None,
+) -> Summary:
     """THE canonical summary. Every surface showing a savings headline calls
     this — ``llm-router status``, ``llm-router savings-report``,
     ``llm-router gain``, and the statusline hook.
@@ -1229,9 +1234,15 @@ def summary(period: str, *, db_path: Path | str | None = None) -> Summary:
     ``period`` accepts any :data:`WindowLiteral` plus the CLI's own spellings
     (``"day"`` -> ``"today"``, ``"all"`` -> ``"lifetime"``), so callers don't
     have to translate their own vocabulary first.
+
+    ``totals`` is the caller's already-computed ``query_window(window, db_path=...)``
+    for this same window and db. A caller building several figures from one set of
+    windows passes it to avoid scanning the ledger again (D-171 S2); it is not a way
+    to substitute a different figure.
     """
     window: WindowLiteral = _PERIOD_ALIASES.get(period, period)  # type: ignore[assignment]
-    totals = query_window(window, db_path=db_path)
+    if totals is None:
+        totals = query_window(window, db_path=db_path)
     metric = query_primary_metric(
         "lifetime" if window == "lifetime" else window, db_path=db_path
     )
