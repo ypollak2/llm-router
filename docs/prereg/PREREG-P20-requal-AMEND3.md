@@ -1,7 +1,6 @@
 # PREREG-P20-requal AMEND3: any-time runs under a per-call quiet gate and an exclusive Ollama lock
 
-**DRAFT. Not frozen.** This file becomes binding only when `PREREG-P20-requal-AMEND3.sha256`
-exists next to it (the freeze procedure is at the end). Until then the harness ignores it.
+This file is frozen by the hash in `PREREG-P20-requal-AMEND3.sha256`.
 
 It amends `PREREG-P20-requal.md` (sha256 `59e27eb889601b4eff80cac645b21442333ff850109219ef10b6de68bd2029b2`,
 frozen_utc 2026-10-16T15:43:02Z) as already amended by `PREREG-P20-requal-AMEND1.md` (sha256
@@ -46,6 +45,10 @@ the P2.0-T (tech-op) harness (branch `feat/p20t-techop`).
    * The end-of-arm unload runs only if this run made a local call, and only if the lock is free.
      It is skipped (not parked) when the lock is held, so the harness cannot evict a model the
      other harness is using.
+     The unload is not itself gated by the quiet check (it only evicts the arm's own model, and
+     only if this run called it).
+   * The quiet gate's 20 s of sleeps run while the lock is held, so a concurrent P2.0-T harness
+     parks and resumes during that time.
 4. **The amendment is enforced.** If `PREREG-P20-requal-AMEND3.sha256` exists, `frozen()` requires
    all of:
    * the sidecar matches this file;
