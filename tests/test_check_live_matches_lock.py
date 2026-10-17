@@ -63,3 +63,43 @@ def test_unqueryable_interpreter_exits_two(tmp_path):
     lock.write_text(LOCK)
     r = subprocess.run([sys.executable, str(SCRIPT), str(tmp_path / "nope"), "--lock", str(lock)], capture_output=True, text=True)
     assert r.returncode == 2
+
+
+def _run_lock_text(tmp_path: Path, text: str | None):
+    lock = tmp_path / "uv.lock"
+    if text is not None:
+        lock.write_text(text)
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), _fake_python(tmp_path, {"alpha": "1.0.0"}), "--lock", str(lock)],
+        capture_output=True, text=True,
+    )
+
+
+def test_missing_lock_exits_two_without_traceback(tmp_path):
+    r = _run_lock_text(tmp_path, None)
+    assert r.returncode == 2
+    assert "Traceback" not in r.stderr and "cannot read lock" in r.stderr
+
+
+def test_malformed_lock_exits_two_without_traceback(tmp_path):
+    r = _run_lock_text(tmp_path, "x = [not toml")
+    assert r.returncode == 2
+    assert "Traceback" not in r.stderr and "cannot read lock" in r.stderr
+
+
+def test_lock_without_packages_exits_two_without_traceback(tmp_path):
+    r = _run_lock_text(tmp_path, "version = 1\n")
+    assert r.returncode == 2
+    assert "Traceback" not in r.stderr and "cannot read lock" in r.stderr
+
+
+def test_old_python_without_tomllib_exits_two(tmp_path):
+    # Simulate Python < 3.11: a sitecustomize-free shim that hides tomllib.
+    shim = tmp_path / "hide_tomllib"
+    shim.mkdir()
+    (shim / "tomllib.py").write_text("raise ModuleNotFoundError(\"No module named 'tomllib'\")\n")
+    import os
+    env = dict(os.environ, PYTHONPATH=str(shim))
+    r = subprocess.run([sys.executable, str(SCRIPT), "x"], capture_output=True, text=True, env=env)
+    assert r.returncode == 2
+    assert "Traceback" not in r.stderr and "needs Python >= 3.11" in r.stderr
