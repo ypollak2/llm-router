@@ -15,6 +15,20 @@ deadline (~37 s for a zero-Claude edit) before failing.
 So the only honest probe is a 1-token ``/api/generate`` against a model that is
 already resident, with a short deadline.
 
+F38 / F41 (2026-10-17): that probe used to run INLINE from ``gate``, i.e. on the
+hook path of a prompt (auto-route ``router_added`` p95 7.2 s), and it targeted
+whichever model happened to be resident -- so it also kept a superseded model warm.
+Now the generate probe runs ONLY in a detached background process, ONLY against
+the user's local model (``model_discovery.local_model``) and only
+when that model is already resident (so a probe never loads anything). ``gate``
+itself does no network I/O at all: it answers from the persisted state and, when
+that state is stale, spawns the background probe (single-flight, rate limited).
+The hung-detection semantics are kept (``fail_n`` consecutive failures flip
+``hung``, one success clears it, ``ok=None`` changes nothing); what changes is
+latency: a hang is now noticed by the background round, so the first prompt after
+a wedge can still be served by the local path once, where the inline probe used to
+stop it. The persisted flag then stops every later one.
+
 DESIGN
 ------
 * ``probe_generation`` — the probe. Three outcomes, never conflated:
@@ -28,11 +42,12 @@ DESIGN
   runner-crash regex so there is one vocabulary for "the local backend is
   unhealthy". ``fail_n`` consecutive failures flip ``hung``; one success clears it.
 * ``gate`` — what the local paths call (zero-Claude edit, direct executor). It
-  returns ``None`` (proceed) or a reason (fail fast to Claude). It is rate
-  limited: within ``min_interval`` it answers from the persisted state with no
-  network call; past it, it runs one inline probe, which is also how a recovered
-  server clears the flag. The probe is claimed in the state file BEFORE it runs,
-  so concurrent hooks do not stampede a server that is already struggling.
+  returns ``None`` (proceed) or a reason (fail fast to Claude). It never touches
+  the network: it answers from the persisted state, and past ``min_interval`` it
+  spawns one detached ``python -m llm_router.ollama_watchdog --probe`` (that
+  round is also how a recovered server clears the flag). The spawn is claimed in
+  the state file BEFORE it happens, so concurrent hooks do not stampede a server
+  that is already struggling.
 * ``main`` / ``confirm`` — what session start runs detached in the background
   (``python -m llm_router.ollama_watchdog``): up to ``fail_n`` probes spaced
   apart, and, only if restart is opted in, a restart.
@@ -193,19 +208,22 @@ def _resident_models(base: str, timeout: float) -> list[str] | ProbeResult:
     return [str(m.get("name") or m.get("model") or "") for m in models if isinstance(m, dict)]
 
 
-def _pick_model(resident: list[str]) -> str:
-    """The edit model when resident (it is the one the edit path needs), else the first."""
-    from llm_router import warm
-    names = [r for r in resident if r]
-    try:
-        from llm_router.zero_claude_edit import edit_model
-        wanted = edit_model()
-        for r in names:
-            if warm.model_matches(wanted, r):
-                return r
-    except Exception as exc:                                     # noqa: BLE001
-        failopen.record("OLLAMA-WATCHDOG-PICK-MODEL", exc)
-    return names[0]
+def _pick_model(resident: list[str]) -> str | None:
+    """The resident name of the local model (``local_model()``), or None.
+
+    Only that model is ever probed (F41): probing "whatever is resident" kept a
+    superseded model busy. A model that is not resident, or no local model at
+    all, is not probed, so the probe cannot load anything. Cache/env inventory
+    only (no probe of /api/tags): this runs in the detached background child.
+    """
+    from llm_router import model_discovery, warm
+    wanted = model_discovery.local_model(allow_probe=False)
+    if wanted is None:
+        return None
+    for r in resident:
+        if r and warm.model_matches(wanted, r):
+            return r
+    return None
 
 
 def probe_generation(timeout: float | None = None) -> ProbeResult:
@@ -218,9 +236,12 @@ def probe_generation(timeout: float | None = None) -> ProbeResult:
         if isinstance(resident, ProbeResult):
             return ProbeResult(resident.ok, resident.detail, None, time.monotonic() - started)
         if not any(resident):
-            return ProbeResult(True, "no model resident; nothing to hang", None,
+            return ProbeResult(None, "no model resident; cannot tell", None,
                                time.monotonic() - started)
         model = _pick_model(resident)
+        if model is None:
+            return ProbeResult(None, "local model not resident (or none discovered); cannot tell", None,
+                               time.monotonic() - started)
         from llm_router import warm
         try:
             data = _post_json(f"{base}/api/generate", warm.warmup_payload(model), t)
@@ -276,15 +297,18 @@ def read_state() -> dict:
         return {}
 
 
-def _write_state(state: dict) -> None:
+def _write_state(state: dict) -> bool:
+    """Persist ``state``. True when written; False (and fail-open recorded) when not."""
     path = _state_file()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         tmp.write_text(json.dumps(state, separators=(",", ":")), encoding="utf-8")
         tmp.replace(path)
+        return True
     except Exception as exc:                                     # noqa: BLE001
         failopen.record("OLLAMA-WATCHDOG-STATE-WRITE", exc)
+        return False
 
 
 def _within(state: dict, key: str, now: float, window: float) -> bool:
@@ -350,29 +374,47 @@ def hung_hint() -> str | None:
             f"fail over to Claude until it recovers — {restart_note}")
 
 
+def _spawn_background_probe() -> bool:
+    """Start one detached probe round (``--probe``: no settle delay). True when started."""
+    try:
+        subprocess.Popen(
+            [sys.executable, "-m", "llm_router.ollama_watchdog", "--probe"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+            start_new_session=True, env=os.environ.copy())
+        return True
+    except Exception as exc:                                     # noqa: BLE001
+        failopen.record("OLLAMA-WATCHDOG-SPAWN", exc)
+        return False
+
+
+#: In-process guard: when the state dir is unwritable the persisted ``bg_spawn_ts``
+#: cannot throttle, so a long-lived caller would otherwise spawn on every call.
+_last_spawn_ts: float | None = None
+
+
 def gate(*, now: float | None = None) -> str | None:
     """None to proceed with local work, or a reason to fail fast to Claude.
 
-    Rate limited: within ``min_interval`` this reads the persisted state only.
-    Past it, one inline probe runs (claimed in the state file first). A probe
-    that fails returns a reason even before ``fail_n`` is reached — that probe
-    just proved generation stalls, so this call would stall too. Never raises;
-    unknown / disabled / any error proceeds.
+    Hook-path safe: reads the persisted state only, no network, no model load.
+    Past ``min_interval`` since the last probe (and since the last spawn) it
+    claims a ``bg_spawn_ts`` stamp and starts one detached probe round, whose
+    verdict the NEXT call reads. Never raises; disabled / any error proceeds.
     """
     try:
         if not enabled():
             return None
         ts = time.time() if now is None else now
         state = read_state()
-        fresh = _within(state, "last_probe_ts", ts, min_interval_s())
-        if fresh:
-            return _reason(state) if state.get("hung") else None
-        _write_state(dict(state, last_probe_ts=ts))          # claim before probing
-        result = probe_generation()
-        reason = record_probe(result, now=ts)
-        if result.ok is False:
-            return reason or _reason(read_state() | {"detail": result.detail})
-        return None
+        if (not _within(state, "last_probe_ts", ts, min_interval_s())
+                and not _within(state, "bg_spawn_ts", ts, min_interval_s())):
+            global _last_spawn_ts
+            recent = _last_spawn_ts is not None and 0 <= ts - _last_spawn_ts < min_interval_s()
+            # Spawn only when the claim persisted (else the child cannot take the
+            # lease and every call would respawn) and not within the in-process window.
+            if not recent and _write_state(dict(state, bg_spawn_ts=ts)):
+                _last_spawn_ts = ts
+                _spawn_background_probe()
+        return _reason(state) if state.get("hung") else None
     except Exception as exc:                                     # noqa: BLE001
         failopen.record("OLLAMA-WATCHDOG-GATE", exc)
         return None
@@ -560,10 +602,15 @@ def confirm(*, sleep: Callable[[float], None] = time.sleep, now: float | None = 
     return out
 
 
-def main() -> int:
-    """``python -m llm_router.ollama_watchdog`` — one confirmation round."""
+def main(argv: list[str] | None = None) -> int:
+    """``python -m llm_router.ollama_watchdog [--probe]`` — one confirmation round.
+
+    Session start runs it with the settle delay (a model warm-up may be loading);
+    ``--probe`` (spawned by ``gate``) skips the delay.
+    """
+    args = sys.argv[1:] if argv is None else argv
     try:
-        outcome = confirm(settle_s=SETTLE_S)
+        outcome = confirm(settle_s=0.0 if "--probe" in args else SETTLE_S)
     except Exception as exc:                                     # noqa: BLE001
         failopen.record("OLLAMA-WATCHDOG-CONFIRM", exc)
         return 0

@@ -129,10 +129,23 @@ def _parse_chains(raw: object) -> Dict[str, Dict[str, List[str]]]:
     return out
 
 
+_LOCAL_PLACEHOLDER = "ollama/@local"   # == model_discovery.LOCAL_PLACEHOLDER (kept literal: cheap import)
+
+
+def _resolve_local_placeholder() -> "str | None":
+    try:
+        from llm_router.model_discovery import local_model
+        found = local_model(allow_probe=False)
+    except Exception:                                        # noqa: BLE001 - never break policy load
+        return None
+    return f"ollama/{found}" if found else None
+
+
 def _resolve_chain(models: List[str]) -> List[str]:
     """Resolve every entry of a policy model list, in the shared load path.
 
-    Aliases resolve to concrete ids, and a ``codex/*`` entry the Codex CLI does
+    ``ollama/@local`` becomes the user's local model (``model_discovery.local_model``)
+    or is dropped. Aliases resolve to concrete ids, and a ``codex/*`` entry the Codex CLI does
     not accept becomes the configured Codex model (F22,
     :func:`llm_router.codex_agent.accepted_codex_entry`). When two Codex entries
     land on the same model, the first keeps its slot; other entries are untouched.
@@ -141,6 +154,12 @@ def _resolve_chain(models: List[str]) -> List[str]:
 
     out: List[str] = []
     for m in models:
+        if m == _LOCAL_PLACEHOLDER:
+            # The user's local model, from their setting / discovered inventory. Cache and
+            # env only (no probe: this runs at import). None -> no local model -> dropped.
+            m = _resolve_local_placeholder()
+            if m is None or m in out:
+                continue
         resolved = accepted_codex_entry(_resolve_alias(m))
         if resolved is None or (resolved.startswith("codex/") and resolved in out):
             continue
