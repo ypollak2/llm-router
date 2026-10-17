@@ -60,7 +60,7 @@ from llm_router.local_agent import capability as la_capability
 from llm_router.local_agent.compact import session_cwd as la_session_cwd
 from llm_router import authority, failopen, local_models, prompt_key, shadow_frontier
 from llm_router import prefixes as user_prefixes
-from llm_router.proxy import haiku_arm, haiku_guard, ledger, llm_shadow, local_mode, local_shadow, okf_context
+from llm_router.proxy import haiku_arm, haiku_guard, ledger, llm_shadow, local_gate, local_mode, local_shadow, okf_context
 from llm_router.proxy import escalation
 
 from llm_router.proxy.backend_health import (
@@ -203,6 +203,9 @@ class ProxyConfig:
     # LLM_ROUTER_LOCAL_CLASSIFIER=shadow (proxy.llm_shadow, M1.6): the local classifier's
     # verdict is logged next to the rules' and never applied. Overrides the record file.
     classifier_shadow_path: Path | None = None
+    # ``--local-gate on`` (proxy.local_gate): a continuation is served locally only on a lane
+    # that local_eligibility.json marks eligible. Off (default) = byte-identical to before.
+    local_gate: bool = False
 
     def __post_init__(self) -> None:
         if self.num_ctx is None and self.model:
@@ -231,6 +234,7 @@ class ProxyConfig:
                                                     DEFAULT_COOLDOWN_S)),
             serve=local_mode.parse_serve_mode(os.environ.get("LLM_ROUTER_PROXY_LOCAL_AGENT_MODE", "off")),
             shadow=local_shadow.parse_on_off(os.environ.get("LLM_ROUTER_PROXY_LOCAL_SHADOW", "off")),
+            local_gate=local_gate.parse_gate(os.environ.get("LLM_ROUTER_PROXY_LOCAL_GATE", "off")),
         )
 
 
@@ -295,12 +299,14 @@ def refusal_message(text: str, model: str | None) -> dict:
 
 
 def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clock=None, breaker_fn=None,
-              haiku_guard_run=None):
+              haiku_guard_run=None, local_gate_deps=None):
     """The Starlette app. ``client`` (an ``httpx.AsyncClient``),
     ``backend_factory(model) -> Backend``, the backend-health breaker's
     ``health_clock``, the quality breaker (``breaker_fn``, local-agent mode)
     and the Haiku guard's run function (``haiku_guard_run(policy)``) are
-    injectable for tests."""
+    injectable for tests; so are the local gate's dependencies (``local_gate_deps``,
+    a ``local_gate.GateDeps``). With ``--local-gate`` on, ``breaker_fn(lever, task_type)``
+    is the gate's breaker."""
     import httpx
     from starlette.applications import Starlette
     from starlette.requests import Request
@@ -336,6 +342,16 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         lm_breaker = la_capability.BreakerCache(fn=breaker_fn)
     if cfg.shadow and (lm is not None or not (cfg.model or "").startswith("ollama/")):
         raise ValueError("--shadow on needs --model ollama/<tag> and --serve off (shadow never serves)")
+    lane_gate = None
+    if cfg.local_gate:
+        if lm is not None:
+            raise ValueError("--local-gate on does not combine with --serve local-agent (that mode pins its own model)")
+        deps = local_gate_deps or local_gate.GateDeps()
+        if breaker_fn is not None and local_gate_deps is None:
+            deps.breaker = lambda lever, task_type, model: breaker_fn(lever, task_type)
+        if local_gate_deps is None:
+            deps.backend_open = lambda model: health.is_open(model)
+        lane_gate = local_gate.LaneGate(cfg.steps, cfg.step_budget_s, deps)
 
     def _ollama_url() -> str:
         from llm_router.config import get_config, validate_ollama_url
@@ -445,6 +461,19 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             return None
         row.update(task_type=choice["task_type"], complexity=choice["complexity"],
                    chain_head=choice["chain_head"], model=choice["model"])
+        gate_decision = None
+        if lane_gate is not None:
+            # The local gate decides alone: the policy's pick is replaced by the lane's
+            # eligible model, and any forward reason ends the step on Claude.
+            gate_decision = await lane_gate.decide(body, row, choice, needs)
+            row["local_gate"] = gate_decision.as_row()
+            if not gate_decision.serve:
+                guard.reset(session_id)
+                row.update(decision=ledger.DECISION_FORWARDED, reason=gate_decision.reason,
+                           added_latency_s=round(time.monotonic() - t0, 3))
+                return None
+            choice = dict(choice, model=gate_decision.model)
+            row["model"] = gate_decision.model
         if choice["model"] is None:
             guard.reset(session_id)
             row.update(decision=ledger.DECISION_FORWARDED, reason="policy_kept")
@@ -540,7 +569,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                     row["local_agent"] = dict(row.get("local_agent") or {}, reply=verdict.as_row())
                 if lm is not None:
                     row["local_mode_reply"] = verdict.as_row()
-                if verdict.route == la_capability.ROUTE_CLAUDE:
+                if gate_decision is not None and message is not None and la_capability._edit_calls(message):
+                    # The local gate never serves an edit-shaped reply, protocol or not.
+                    message, err, reason = None, "edit-shaped reply; the local gate serves none", "edit_to_claude"
+                elif verdict.route == la_capability.ROUTE_CLAUDE:
                     message, err, reason = None, verdict.detail or verdict.reason, verdict.reason
                 elif verdict.route == la_capability.ROUTE_EDIT and lm is not None:
                     # P3: the validated edit protocol; if it cannot produce a
@@ -584,6 +616,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         elapsed = round(time.monotonic() - t0, 3)
         row["route_latency_s"] = elapsed
         if err or message is None:
+            if gate_decision is not None:
+                row["local_gate"] = dict(row["local_gate"], reason=local_gate.R_LOCAL_FAILED)
             guard.reset(session_id)
             row.update(decision=ledger.DECISION_FALLBACK, reason=reason or "validation",
                        detail=ledger.scrub_detail(err or "no message"), added_latency_s=elapsed)
@@ -593,10 +627,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # The candidate is real (passed validation) but repeats a recent
             # served step: served/avoided metrics must never see it.
             guard.reset(session_id)
+            if gate_decision is not None:
+                row["local_gate"] = dict(row["local_gate"], reason=local_gate.R_LOCAL_FAILED)
             row.update(decision=ledger.DECISION_FALLBACK, reason=REASON_LOOP_GUARD,
                        detail=repeat, added_latency_s=elapsed)
             return None
         guard.record_served(session_id, message)
+        if gate_decision is not None:
+            lane_gate.note_served(session_id, gate_decision, message, row.get("session_kind"))
         if lm is not None:
             lm.remember_edits(message)
         row.update(decision=ledger.DECISION_SERVED, reason=None, msg_id=message["id"],
@@ -1058,6 +1096,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         # P2.2-A: per request, so `llm-router mode advise|route` needs no restart. Advise is
         # shadow under the P2.7 precedence (D-150): a prefix does not beat it, so even a
         # user's `opus:` forwards the ORIGINAL bytes, unstripped, on the requested model.
+        if lane_gate is not None:
+            lane_gate.observe(body, row.get("session_id"))
         row["authority"] = authority.mode()
         if row["authority"] == authority.ADVISE:
             if ov is not None:
@@ -1195,6 +1235,7 @@ llm-router proxy [--port N] [--steps continuation|off] [--step-budget-s S]
                  [--loop-max-consecutive N] [--loop-repeat-window N]
                  [--tiers off|on|conversation] [--tier-policy FILE.yaml] [--local-agent]
                  [--backend-fail-n N] [--backend-cooldown-s S] [--serve off|local-agent]
+                 [--local-gate off|on]
 llm-router proxy stats [--days N] [--json]
 
 Opt-in, per session. Nothing is enabled until you point a session at it:
@@ -1299,6 +1340,12 @@ def cmd_proxy(argv: list[str]) -> int:
                          "a copy in parallel; only agreement, latency and reason codes are logged "
                          "(proxy_local_shadow.jsonl). Needs --model ollama/<tag> and --serve off "
                          "(also LLM_ROUTER_PROXY_LOCAL_SHADOW)")
+    ap.add_argument("--local-gate", default=str(env.local_gate and "on" or "off"),
+                    help="off (default; byte-identical to before) or on: a continuation is served by a local "
+                         "model only when its lane (tech_op, qa, code) is eligible in local_eligibility.json "
+                         "and the breaker, promote gate and capability checks pass; every step's reason is "
+                         "in the ledger row's local_gate (also LLM_ROUTER_PROXY_LOCAL_GATE). "
+                         "Needs --steps continuation; not with --serve local-agent")
     ap.add_argument("--shadow-budget-s", type=float, default=local_shadow.DEFAULT_BUDGET_S,
                     help="wall budget of one shadow job; it is dropped when Claude answers first")
     a = ap.parse_args(argv)
@@ -1310,6 +1357,11 @@ def cmd_proxy(argv: list[str]) -> int:
         serve = local_mode.parse_serve_mode(a.serve)
     except ValueError as exc:
         sys.stderr.write(f"llm-router proxy: {exc}\n")
+        return 2
+    try:
+        gate_on = local_gate.parse_gate(a.local_gate)
+    except ValueError as exc:
+        sys.stderr.write(f"llm-router proxy: --local-gate: {exc}\n")
         return 2
     try:
         shadow_on = local_shadow.parse_on_off(a.shadow)
@@ -1332,7 +1384,7 @@ def cmd_proxy(argv: list[str]) -> int:
         cfg = ProxyConfig(steps=parse_steps(a.steps), step_budget_s=a.step_budget_s, model=a.model,
                           trim=a.trim, num_ctx=a.num_ctx, upstream=env.upstream,
                           ledger_path=Path(a.ledger) if a.ledger else None,
-                          serve=serve, shadow=shadow_on, shadow_budget_s=a.shadow_budget_s,
+                          serve=serve, shadow=shadow_on, shadow_budget_s=a.shadow_budget_s, local_gate=gate_on,
                           hedge_s=parse_hedge(a.hedge_s) if a.hedge_s is not None else env.hedge_s,
                           keep_alive=parse_keep_alive(a.keep_alive), warm_up=not a.no_warm_up,
                           ollama_url=a.ollama_url, loop_max_consecutive=a.loop_max_consecutive,
@@ -1367,6 +1419,10 @@ def cmd_proxy(argv: list[str]) -> int:
           f"local_agent={'on' if cfg.local_agent else 'off'}  "
           f"backend_health(fail_n={cfg.backend_fail_n}, cooldown={cfg.backend_cooldown_s:g}s)")
     print(f"  enable per session: {enable_hint(a.host, a.port)}")
+    if cfg.local_gate:
+        note = "" if cfg.steps else "  (INACTIVE: --steps off never reaches it)"
+        print(f"  LOCAL GATE on: a continuation is served locally only on a lane eligible in "
+              f"{local_gate.eligibility_path()}{note}", flush=True)
     if cfg.shadow:
         print(f"  SHADOW on: Claude serves every step; {cfg.model} answers a copy in parallel "
               f"(1 job at a time, {cfg.shadow_budget_s:g}s budget, dropped when Claude answers first); "
