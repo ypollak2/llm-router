@@ -424,13 +424,18 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                        detail=exhausted, added_latency_s=round(time.monotonic() - t0, 3))
             return None
         try:
+            from llm_router import capability_filter
+            needs = capability_filter.needs_from_anthropic_body(body) if capability_filter.enabled() else None
             if lm is not None:
-                # P2: the pinned model serves; the policy is not consulted.
+                # P2: the pinned model serves; the policy is not consulted. F14: the pin is
+                # still held to the capability filter, as in choose_model: a pin KNOWN to
+                # lack what the request needs (tools array, images, window) keeps the call
+                # on Claude (model None, forwarded as policy_kept).
+                pin_ok = needs is None or bool(capability_filter.filter_chain([cfg.model], needs))
                 choice = {"task_type": "local_agent", "complexity": "pinned",
-                          "chain_head": [cfg.model], "model": cfg.model}
+                          "chain_head": [cfg.model] if pin_ok else [],
+                          "model": cfg.model if pin_ok else None}
             else:
-                from llm_router import capability_filter
-                needs = capability_filter.needs_from_anthropic_body(body) if capability_filter.enabled() else None
                 choice = await choose_model(classify_text(body), cfg.model, needs=needs)
         except Exception as exc:  # noqa: BLE001 - any policy failure forwards the call
             guard.reset(session_id)

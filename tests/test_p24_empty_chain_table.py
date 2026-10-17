@@ -49,6 +49,8 @@ def parse_doc(path: Path = DOC) -> tuple[dict[str, str], dict[str, str]]:
             mode = "callers"
         elif cells == ["situation", "behaviour"]:
             mode = "guards"
+        elif cells == ["door", "trigger", "behaviour"]:
+            mode = None   # the F14 filter-emptied table: parsed by tests/test_f14_capability_coverage.py
         elif set(cells[0]) <= {"-", " "}:
             continue
         elif mode == "callers" and len(cells) == 3:
