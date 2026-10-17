@@ -114,11 +114,16 @@ def format_executed_routes(result: dict | None, window_hours: float = 24.0) -> s
     parts = [f"{prefix} {result['total']} executed"]
     for label, n in executed_provider_rows(result):
         parts.append(f"{label} {n}")
-    by_cause = result.get("local_by_cause") or {}
-    if sum(by_cause.values()):
-        parts.append("local by cause: " + " ".join(
-            f"{c} {n}" for c, n in by_cause.items() if n))
     return " · ".join(parts)
+
+
+def format_local_by_cause(result: dict | None) -> str:
+    """``local by cause: policy 3 bench 2 ...`` (zero causes omitted), or ``""`` when no local
+    route was served or there is no data. A separate line, so the executed header keeps its form."""
+    by_cause = (result or {}).get("local_by_cause") or {}
+    if not sum(by_cause.values()):
+        return ""
+    return "local by cause: " + " ".join(f"{c} {n}" for c, n in by_cause.items() if n)
 
 
 def _home():

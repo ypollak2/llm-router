@@ -180,7 +180,7 @@ OTHER = '[{"model":"gemini/x","reason":"budget"}]'
 
 
 def test_report_splits_local_share_by_cause(tmp_path):
-    from llm_router.routing_report import executed_routes, format_executed_routes
+    from llm_router.routing_report import executed_routes, format_local_by_cause
 
     p = tmp_path / "usage.db"
     con = _fixture_db(p)
@@ -202,7 +202,8 @@ def test_report_splits_local_share_by_cause(tmp_path):
     res = executed_routes(24.0, db_path=p)
     assert res["by_provider"]["ollama"] == 8
     assert res["local_by_cause"] == {"policy": 3, "bench": 2, "last_resort": 1, "other_skip": 1, "unknown": 1}
-    assert "local by cause: policy 3 bench 2 last_resort 1 other_skip 1 unknown 1" in format_executed_routes(res)
+    assert format_local_by_cause(res) == "local by cause: policy 3 bench 2 last_resort 1 other_skip 1 unknown 1"
+    assert format_local_by_cause({"local_by_cause": {}}) == ""
 
 
 def test_report_on_old_schema_reads_all_local_as_unknown(tmp_path):
