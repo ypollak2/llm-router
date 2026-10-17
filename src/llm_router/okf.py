@@ -145,7 +145,8 @@ def _okf_enabled() -> bool:
 
 
 # Never re-capture an injected knowledge block back into the store (feedback loop).
-_KNOWLEDGE_CTX_RE = re.compile(r"<knowledge_context>.*?</knowledge_context>", re.DOTALL | re.IGNORECASE)
+# Defined in knowledge_ctx so the hook can use it without importing this module.
+from llm_router.knowledge_ctx import KNOWLEDGE_CTX_RE as _KNOWLEDGE_CTX_RE  # noqa: E402
 
 # Verified-structure extractors — the ONLY things pulled from text into the store.
 # Real file paths (checkable) and defined symbol NAMES (checkable), never prose.
