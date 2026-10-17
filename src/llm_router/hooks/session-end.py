@@ -2543,6 +2543,8 @@ def _refresh_ledger_cache() -> None:
     finally:
         try:
             os.remove(tmp)  # only still there when the write or replace failed
+        except FileNotFoundError:
+            pass  # the normal path: os.replace already moved it. Not a fail-open.
         except OSError as _exc:
             # Fail-open (litter), not silent (T-14 ratchet).
             try:
