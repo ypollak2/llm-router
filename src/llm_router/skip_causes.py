@@ -31,16 +31,18 @@ ALLOWLIST = "allowlist"              # per-classification provider allow-list
 AGENT_POLICY = "agent_policy"        # agent routing policy (provider preference / turn cost)
 QUALITY = "quality"                  # quality circuit-breaker skip
 LOCAL_TIMEOUT = "local_timeout"      # local model timed out, answer already in hand
+FLOOR = "floor"                      # F26: chain was empty after all filters; served from the last-resort floor (``tier``)
 
-BUILD_REASONS = frozenset({UNAVAILABLE, BLOCKED, POLICY, CAPABILITY_FILTERED})
+BUILD_REASONS = frozenset({UNAVAILABLE, BLOCKED, POLICY, CAPABILITY_FILTERED, FLOOR})
 
 # Causes the report splits local share into (see routing_report.executed_routes).
 CAUSE_BENCH = "bench"
 CAUSE_LAST_RESORT = "last_resort"
 CAUSE_OTHER_SKIP = "other_skip"
+CAUSE_FLOOR = "floor"
 CAUSE_POLICY = "policy"
 CAUSE_UNKNOWN = "unknown"
-CAUSES = (CAUSE_POLICY, CAUSE_BENCH, CAUSE_LAST_RESORT, CAUSE_OTHER_SKIP, CAUSE_UNKNOWN)
+CAUSES = (CAUSE_POLICY, CAUSE_FLOOR, CAUSE_BENCH, CAUSE_LAST_RESORT, CAUSE_OTHER_SKIP, CAUSE_UNKNOWN)
 
 _log: ContextVar[list[dict[str, Any]] | None] = ContextVar("llm_router_skip_causes", default=None)
 

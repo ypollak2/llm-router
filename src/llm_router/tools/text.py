@@ -607,12 +607,15 @@ def _apply_research_trust_contract(
 async def _premium_research_reachable(config) -> bool:
     """F25 / D-170 (1): True when the premium research chain, built and filtered exactly as the
     router builds it, keeps at least one model. Since #382 removed its local entry it is empty on a
-    machine with Claude in subscription mode and no OpenAI/MiniMax key."""
+    machine with Claude in subscription mode and no OpenAI/MiniMax key. F26: a probe, so the
+    last-resort floor is off (it must not record a floor tier or warn); the real call may still be
+    answered by the floor."""
     from llm_router.router import _build_and_filter_chain
     from llm_router.types import Complexity
 
     chain = await _build_and_filter_chain(
         TaskType.RESEARCH, RoutingProfile.PREMIUM, None, None, Complexity.MODERATE, config,
+        last_resort_floor=False,
     )
     return bool(chain)
 
