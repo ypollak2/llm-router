@@ -2,7 +2,6 @@
 import importlib.util
 import json
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -368,7 +367,6 @@ def test_judge_never_sees_invalid_or_redundant_replies(factory):
     cfg, c, pool = factory("gate")
     cfg.ollama.bad = set()
     assert call(cfg, "select") == 0
-    rows = base.jsonl  # local replies: make the first selected item's local reply invalid
     items = base.jsonl(cfg.run_dir / "items/tech_op.jsonl")
     first = items[0]["id"]
     orig = cfg.ollama.chat
@@ -440,7 +438,6 @@ def test_quiet_rechecked_mid_run_parks_after_current_item(factory):
     cfg, c, pool = factory("mid")
     assert call(cfg, "select") == 0
     seen = {"n": 0}
-    original = cfg.machine.load1
 
     def load1():
         seen["n"] += 1
@@ -571,20 +568,22 @@ def org_bad_ids(pool, org_bad, ho_bad=0):
 def test_organic_check_downgrades_when_org_disagrees(factory):
     pool = [make_item(i) for i in range(130)]
     sel = h.select_tech_op(pool, h.STATIC)
-    chosen = {i: r for i, r in ((r["id"], r) for r in pool) if i in set(sel["ids"])}
-    org_ids = [i for i, r in chosen.items() if r["stratum"] == "org"]
-    # 40% of org items wrong: gap far above 10 points; pooled gap stays small only with few ho failures
-    bad = org_ids[:max(8, len(org_ids) // 3)]
+    chosen = set(sel["ids"])
+    org = [r for r in pool if r["stratum"] == "org" and r["id"] in chosen]
+    bad, seen = [], set()
+    for r in org:  # three misses in three different sessions: org gap 3/26 = 11.5 pts, pooled 2.5
+        if r["session"] not in seen and len(bad) < 3:
+            seen.add(r["session"])
+            bad.append(r["id"])
     cfg, c, _ = factory("orgbad", items=pool, bad=bad)
     assert call(cfg, "select") == 0
     assert call(cfg, "run", "--set", "tech_op") == 0
     assert call(cfg, "judge", "--set", "tech_op") == 0
     assert call(cfg, "score") == 0
     lane = json.loads((cfg.run_dir / "result.json").read_text())["sets"]["tech_op"]["lanes"][h.LOCAL]
-    assert lane["strata"]["org"]["gap_pts"] > 10
-    assert lane["verdict"] != "eligible" and lane["eligible"] is False
-    if lane["grade"] == "eligible":
-        assert lane["verdict"] == "inconclusive" and lane["org_check"] == "org_disagrees"
+    assert lane["grade"] == "eligible" and lane["strata"]["org"]["gap_pts"] > 10
+    assert lane["verdict"] == "inconclusive" and lane["eligible"] is False
+    assert lane["org_check"] == "org_disagrees"
 
 
 def test_ho_alone_never_makes_a_lane_eligible(factory):

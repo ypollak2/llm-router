@@ -13,10 +13,9 @@ import os
 import re
 import subprocess
 import sys
-import time
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
 from statistics import median
@@ -569,7 +568,7 @@ def run(cfg: CfgT, c: dict, chosen_arms: list[str] | None = None) -> dict:
         try:
             if local:
                 warm = [{"role": "user", "content": "Reply OK."}]
-                readings = quiet(cfg, c, arm)
+                quiet(cfg, c, arm)
                 with ollama_lock(cfg.lock_path):
                     cfg.ollama.chat(arm, warm, timeout=int(c["LOCAL_TIMEOUT_S"]),
                                     options={"num_ctx": local_models.num_ctx(arm), "temperature": 0},
