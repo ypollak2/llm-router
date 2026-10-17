@@ -139,6 +139,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # tests/test_hook_pair_guard.py needs the merge base with origin/main.
+          fetch-depth: 0
 
       - name: Fetch OKF baseline commit
         run: git fetch --no-tags --depth=1 origin da31df7e9031fbcb437ea754b0cc216888af383d
@@ -173,6 +176,8 @@ jobs:
           # two runners of one suite that disagree about its environment is how
           # a release gate ends up contradicting CI.
           OPENAI_API_KEY: sk-test-dummy-key-for-ci-only-no-real-calls-made
+          # Fail (not skip) the hook version-bump check if history is missing.
+          LLM_ROUTER_REQUIRE_HOOK_BASE: "1"
         run: |
           # Run pytest in the background so we can detect the aiosqlite thread hang.
           # pytest writes junit xml before the hang; we read that to determine pass/fail.
