@@ -523,6 +523,8 @@ LEVER_PROXY_HAIKU = "proxy_haiku"
 TASK_PROXY_HAIKU = "haiku"
 LEVER_TECHOP_LOCAL = "techop_local"
 TASK_TECHOP_LOCAL = "tech_op"
+# The proxy local gate's qa and code lanes (proxy/local_gate.py), keyed by lane as task_type.
+LEVER_PROXY_LOCAL = "proxy_local"
 
 
 def _class_state(key: str) -> dict:

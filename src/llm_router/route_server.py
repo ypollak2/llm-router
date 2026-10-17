@@ -76,6 +76,12 @@ async def route_payload_async(payload: dict) -> dict:
         _override = None
 
     system = payload.get("system") or None
+    # A.2-t: the caller's function-calling request, OpenAI form (the gateway normalises
+    # the three wire formats before it gets here). An empty list is no request.
+    tools = payload.get("tools") or None
+    if tools is not None and (not isinstance(tools, list) or not all(isinstance(t, dict) for t in tools)):
+        raise ValueError("'tools' must be a list of tool objects")
+    tool_choice = payload.get("tool_choice") if tools else None
     # PLAN v16 P1.1 door 7: the caller's conversation before ``prompt``, as
     # chat message dicts. Absent keeps the old path (no caller history).
     messages = payload.get("messages")
@@ -90,6 +96,8 @@ async def route_payload_async(payload: dict) -> dict:
     # until the key carries the system prompt (P0.5 owns the key).
     from llm_router import semantic_cache
     _sc_token = semantic_cache.CALLER_SYSTEM_PROMPT.set(True) if system else None
+    # A.2-t: same bypass for a request with tools (see semantic_cache.REQUEST_HAS_TOOLS).
+    _tools_token = semantic_cache.REQUEST_HAS_TOOLS.set(True) if tools else None
     try:
         resp = await route_and_call(
             task_type, prompt,
@@ -105,8 +113,11 @@ async def route_payload_async(payload: dict) -> dict:
             project_root=payload.get("project_root") or None,
             messages=messages,
             context_door="gateway",
+            **({"tools": tools, "tool_choice": tool_choice} if tools else {}),
         )
     finally:
+        if _tools_token is not None:
+            semantic_cache.REQUEST_HAS_TOOLS.reset(_tools_token)
         if _sc_token is not None:
             semantic_cache.CALLER_SYSTEM_PROMPT.reset(_sc_token)
 
@@ -126,6 +137,9 @@ async def route_payload_async(payload: dict) -> dict:
         "input_tokens": resp.input_tokens,
         "output_tokens": resp.output_tokens,
         "complexity": resp.complexity,
+        # A.2-t: the backend's own stop reason and the tool calls it made (OpenAI shape).
+        "finish_reason": getattr(resp, "finish_reason", "") or "",
+        "tool_calls": getattr(resp, "tool_calls", None) or [],
     }
 
 

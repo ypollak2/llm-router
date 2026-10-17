@@ -398,9 +398,18 @@ CALLER_SYSTEM_PROMPT: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 
 
+#: A.2-t: set by ``route_server.route_payload_async`` while a call carries a tools array.
+#: The key does not include the tool definitions, so a cached text answer to a request
+#: without tools would answer one with them (and a tool-call turn must never be replayed
+#: from a cache: the client executes the call). Neither read nor written.
+REQUEST_HAS_TOOLS: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "llm_router_semantic_cache_request_has_tools", default=False
+)
+
+
 def _cache_disabled() -> bool:
     """C-03: a per-request off switch. There was none."""
-    if CALLER_SYSTEM_PROMPT.get():
+    if CALLER_SYSTEM_PROMPT.get() or REQUEST_HAS_TOOLS.get():
         return True
     val = os.getenv("LLM_ROUTER_SEMANTIC_CACHE", "").strip().lower()
     return val in ("0", "off", "false", "no", "disable", "disabled")

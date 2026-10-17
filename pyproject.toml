@@ -58,6 +58,8 @@ dev = [
     "pytest-timeout>=2.3",
     "pytest-xdist>=3.5",
     "ruff>=0.4",
+    "openai>=2.54",
+    "anthropic>=0.40",
 ]
 test = [
     "pytest>=8.0",
