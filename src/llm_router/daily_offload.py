@@ -489,7 +489,7 @@ def render_plist(label: str = "com.llm-router.kpi-daily") -> str:
     """A launchd plist as text. Printed, never written or loaded: installing it is an owner action (D-104)."""
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!-- PRINT ONLY. Nothing is installed by this command. Installing is an owner action (D-104):
-     save as ~/Library/LaunchAgents/{label}.plist and load it yourself (see docs/proxy-default.md).
+     save as ~/Library/LaunchAgents/{label}.plist and load it with launchd yourself.
      --backfill 3 makes a missed run heal itself; rows are per UTC day. launchd times are LOCAL. -->
 <plist version="1.0">
 <dict>
