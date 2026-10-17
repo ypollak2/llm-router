@@ -56,13 +56,6 @@ def empty_patch(work, parent):
     return changed == 0 and not git(work, "ls-files", "--others", "--exclude-standard")
 
 
-def gate(cfg, c, arm):
-    if arm != "sonnet":
-        h.quiet(cfg, c, arm)
-    elif not 0 <= cfg.local_hour() < 7:
-        raise h.Park("outside night window")
-
-
 # Every Pi thinking level but "off" is unsupported, and "off" is sent as reasoning_effort "none":
 # Ollama's /v1 endpoint thinks by default and stops on "none" (AMEND2; production sends
 # think:false).
@@ -87,7 +80,10 @@ def pi_config(run_dir, arm):
 def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
     if arm != "sonnet":
         pi.PI_MODEL = arm
-        result = pi.run_pi(prompt, cwd=work, timeout_s=900)
+        # AMEND3 (D-202): lock + quiet gate before every local call, any time of day.
+        with h.local_call(cfg, c, arm, {"stage": "code", "set": "code", "item_id": ident,
+                                        "attempt": attempt}):
+            result = pi.run_pi(prompt, cwd=work, timeout_s=900)
         timed_out = bool(result["timed_out"])
         infra = not timed_out and (
             result["returncode"] != 0 or result["n_events"] == 0
@@ -279,7 +275,6 @@ def run(cfg, args):
     })
     if not pending:
         return counts
-    gate(cfg, c, args.arm)
     if args.arm != "sonnet":
         if cfg.ollama.list_ids().get(args.arm) != set(c[f"ID_{args.arm}"].split(",")):
             raise h.Refuse("refusing: model identity differs")
@@ -296,7 +291,6 @@ def run(cfg, args):
     attempts = h.jsonl(attempts_path)
     try:
         for item in pending:
-            gate(cfg, c, args.arm)
             if item["stratum"] == "rx_edit" and not checked_rx:
                 manifest = h.read_json(cfg.run_dir / "pools/build_manifest.json")
                 if h.sha256_file(args.rx_dir / "fixtures/manifest.json") != (
@@ -310,7 +304,6 @@ def run(cfg, args):
             if row is None or (row["infra_class"] and row["attempt"] < 2):
                 first = row["attempt"] + 1 if row else 1
                 for number in range(first, 3):
-                    gate(cfg, c, args.arm)
                     row = attempt_task(
                         cfg, c, args, item, number, tc, tc_hash, runner_hash, nc, pi,
                     )
@@ -327,7 +320,7 @@ def run(cfg, args):
                 counts[key] += int(row[key])
     finally:
         if args.arm != "sonnet":
-            cfg.ollama.unload(args.arm)
+            h.unload_local(cfg, args.arm)
     return counts
 
 

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import fcntl
 import importlib.util
 import json
 import math
+import os
 import re
 import subprocess
 import sys
@@ -37,6 +39,7 @@ NOW = 1_900_000_000.0
 PAST = "2026-01-01T00:00:00Z"
 AMEND_PAST = "2027-01-01T00:00:00Z"
 AMEND2_PAST = "2028-01-01T00:00:00Z"
+AMEND3_PAST = "2029-01-01T00:00:00Z"
 OLD_LOCAL = ("qwen3.6:35b-a3b-coding", "qwen3-coder:30b", "qwen3.5:latest")
 GIT_RUN = subprocess.run
 
@@ -48,6 +51,7 @@ def isolate(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("LLM_ROUTER_HOME", str(home / "state"))
     monkeypatch.delenv("P20_REQUAL_DIR", raising=False)
+    monkeypatch.setattr(h, "OLLAMA_LOCK", tmp_path / "default-ollama.lock")
 
     def forbidden(*args, **kwargs):
         raise AssertionError("real external call")
@@ -119,6 +123,20 @@ def freeze_amend2(cfg, constants, *, text=None, date=AMEND2_PAST):
     cfg.amend2.write_text(text if text is not None else amend2_text(constants))
     cfg.amend2.with_suffix(".sha256").write_text(
         f"{h.sha256_file(cfg.amend2)}  {cfg.amend2.name}\nfrozen_utc {date}\n"
+    )
+
+
+def amend3_text(constants, **values):
+    block = {**h.AMEND3_FIXED, "REPO_SHA": "e" * 40,
+             "CODE_RUNNER_SHA256": constants["CODE_RUNNER_SHA256"], **values}
+    return ("# AMEND3\n\n```text P20-AMEND3-CONSTANTS\n"
+            + "".join(f"{k}={v}\n" for k, v in block.items()) + "```\n")
+
+
+def freeze_amend3(cfg, constants, *, text=None, date=AMEND3_PAST):
+    cfg.amend3.write_text(text if text is not None else amend3_text(constants))
+    cfg.amend3.with_suffix(".sha256").write_text(
+        f"{h.sha256_file(cfg.amend3)}  {cfg.amend3.name}\nfrozen_utc {date}\n"
     )
 
 
@@ -211,12 +229,13 @@ def factory(tmp_path):
         run_dir = tmp_path / label
         run_dir.mkdir()
         cfg = h.Cfg(
-            run_dir, prereg=run_dir / "frozen.md", now=lambda: NOW, local_hour=lambda: 0,
+            run_dir, prereg=run_dir / "frozen.md", now=lambda: NOW,
+            lock_path=tmp_path / "ollama.lock",
             sleep=lambda _: None, ollama=Ollama(), claude=Claude(), machine=Machine(),
             quota=lambda: {"session_pct": 0, "weekly_pct": 0, "age_s": 0},
             pack_fn=lambda item, name, window: [{"role": "user", "content": item["request"]}],
             git_sha=lambda: "deadbeef", amend1=run_dir / "AMEND1.md",
-            amend2=run_dir / "AMEND2.md",
+            amend2=run_dir / "AMEND2.md", amend3=run_dir / "AMEND3.md",
             gate=lambda constants: None,
         )
         pools = {s: pool_rows(s, 30 if small and s == "qa" else 75 if s == "code" else 130)
@@ -432,7 +451,6 @@ def test_run_boundaries_and_resume(factory):
     assert call(cfg, "run", "--set", "qa", "--arms", arm) == 2
     assert not cfg.ollama.calls
     cfg.ollama.ids[arm] = set(c[f"ID_{arm}"].split(","))
-    assert call(replace(cfg, local_hour=lambda: 7), "run", "--set", "qa", "--arms", arm) == 3
     cfg.machine.free = [40, 39.9, 40]
     assert call(cfg, "run", "--set", "qa", "--arms", arm) == 3
     cfg.machine.free, cfg.machine.load = [40] * 3, 4.0
@@ -1191,3 +1209,148 @@ def test_real_amend2_constants_block_matches_the_harness():
     assert block.keys() == h.AMEND2_FIXED.keys() | h.AMEND2_SHA_KEYS.keys()
     assert {k: block[k] for k in h.AMEND2_FIXED} == h.AMEND2_FIXED
     assert all(re.fullmatch(p, block[k]) for k, p in h.AMEND2_SHA_KEYS.items())
+
+
+# AMEND3 (D-202): any time of day, quiet gate + exclusive lock before every local call.
+def test_amend3_daytime_run_allowed_when_quiet(factory):
+    arm = h.STATIC["LOCAL_MODELS"].split(",")[0]
+    cfg, c, _ = selected_run(factory)
+    cfg.ollama.ids[arm] = set(c[f"ID_{arm}"].split(","))
+    assert call(cfg, "run", "--set", "qa", "--arms", arm) == 0
+    rows = h.jsonl(cfg.run_dir / "answers/qa.jsonl")
+    quiet_rows = h.jsonl(cfg.run_dir / "quiet.jsonl")
+    assert rows and len(quiet_rows) == len(rows) + 1  # + warm-up
+    assert quiet_rows[-1]["load1"] == [3.99] * 3 and len(quiet_rows[-1]["free_mem_pct"]) == 3
+    assert quiet_rows[-1]["item_id"] == rows[-1]["item_id"]
+    assert not hasattr(cfg, "local_hour")
+
+
+def test_amend3_quiet_gate_parks_mid_run_without_row(factory):
+    arm = h.STATIC["LOCAL_MODELS"].split(",")[0]
+    cfg, c, _ = selected_run(factory)
+    cfg.ollama.ids[arm] = set(c[f"ID_{arm}"].split(","))
+    original = cfg.ollama.chat
+
+    def chat(model, messages, **kw):
+        out = original(model, messages, **kw)
+        if len(cfg.ollama.calls) == 4:  # warm-up + 3 answers, then the machine gets busy
+            cfg.machine.load = 4.0
+        return out
+
+    cfg.ollama.chat = chat
+    assert call(cfg, "run", "--set", "qa", "--arms", arm) == 3
+    assert len(cfg.ollama.calls) == 4
+    assert len(h.jsonl(cfg.run_dir / "answers/qa.jsonl")) == 3
+    assert len(h.jsonl(cfg.run_dir / "quiet.jsonl")) == 4
+    cfg.machine.load = 3.99
+    cfg.ollama.resident = [arm]
+    assert call(cfg, "run", "--set", "qa", "--arms", arm) == 0  # resumes
+    cfg.ollama.resident = ["foreign"]
+    cfg.machine.index = 0
+    with pytest.raises(h.Park, match="foreign model resident"):
+        with h.local_call(cfg, c, arm, {}):
+            pass
+
+
+def test_amend3_lock_held_parks_and_is_released_after_each_call(factory, tmp_path):
+    arm = h.STATIC["LOCAL_MODELS"].split(",")[0]
+    cfg, c, _ = selected_run(factory)
+    cfg.ollama.ids[arm] = set(c[f"ID_{arm}"].split(","))
+    other = os.open(cfg.lock_path, os.O_RDWR | os.O_CREAT)
+    fcntl.flock(other, fcntl.LOCK_EX)
+    try:
+        assert call(cfg, "run", "--set", "qa", "--arms", arm) == 3
+        assert not cfg.ollama.calls
+        assert not (cfg.run_dir / "answers/qa.jsonl").exists()
+    finally:
+        os.close(other)
+    seen = []
+    original = cfg.ollama.chat
+
+    def chat(model, messages, **kw):
+        probe = os.open(cfg.lock_path, os.O_RDWR)
+        try:
+            with pytest.raises(OSError):  # held while the call is outstanding
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            seen.append(1)
+        finally:
+            os.close(probe)
+        return original(model, messages, **kw)
+
+    cfg.ollama.chat = chat
+    assert call(cfg, "run", "--set", "qa", "--arms", arm) == 0
+    assert len(seen) == len(cfg.ollama.calls) > 1
+    free = os.open(cfg.lock_path, os.O_RDWR)
+    fcntl.flock(free, fcntl.LOCK_EX | fcntl.LOCK_NB)  # released at the end
+    os.close(free)
+
+
+def test_amend3_lock_released_on_exception_and_park(factory):
+    arm = h.STATIC["LOCAL_MODELS"].split(",")[0]
+    cfg, c, _ = factory()
+
+    def can_lock():
+        fd = os.open(cfg.lock_path, os.O_RDWR | os.O_CREAT)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            return False
+        finally:
+            os.close(fd)
+
+    with pytest.raises(RuntimeError):
+        with h.local_call(cfg, c, arm, {}):
+            raise RuntimeError("boom")
+    assert can_lock()
+    cfg.machine.load = 4.0
+    with pytest.raises(h.Park):
+        with h.local_call(cfg, c, arm, {}):
+            pass
+    assert can_lock()
+    cfg.machine.load = 3.99
+    cfg.ollama.fail = True  # a timeout inside call_model becomes an error row; lock still freed
+    row = h.call_model(cfg, c, "qa", arm, "x", 1, [{"role": "user", "content": "ID:x"}])
+    assert row["error"] == "exception" and can_lock()
+
+
+def test_amend3_frozen_enforcement(factory):
+    cfg, c, _ = factory()
+    base = h.frozen(cfg)
+    assert "amend3_sha256" not in base and base["constants"]["NIGHT_WINDOW"] == "00:00-07:00"
+    freeze_amend3(cfg, c)
+    got = h.frozen(cfg)
+    assert got["constants"]["REPO_SHA"] == "e" * 40
+    assert got["constants"]["NIGHT_WINDOW"] == "none"
+    assert got["constants"]["LOCAL_MODELS"] == h.QWEN38  # AMEND2 keys remain
+    assert got["amend3_sha256"] == h.sha256_file(cfg.amend3)
+    assert got["amend3_frozen_utc"] == AMEND3_PAST
+    (cfg.run_dir / "PREREG-AMEND3.md").write_text("different")
+    with pytest.raises(h.Refuse, match="PREREG-AMEND3.md differs"):
+        h.frozen(cfg)
+    (cfg.run_dir / "PREREG-AMEND3.md").unlink()
+    cases = [
+        (dict(date=AMEND2_PAST), "AMEND3 frozen_utc"),
+        (dict(date="2031-01-01T00:00:00Z"), "AMEND3 frozen_utc"),
+        (dict(text=amend3_text(c, NIGHT_WINDOW="00:00-07:00")), "AMEND3 constants"),
+        (dict(text=amend3_text(c, REPO_SHA="zz")), "AMEND3 constants"),
+        (dict(text="# AMEND3\n```text P20-AMEND3-CONSTANTS\nREPO_SHA=" + "e" * 40 + "\n```\n"),
+         "AMEND3 constants"),
+    ]
+    for kwargs, message in cases:
+        freeze_amend3(cfg, c, **kwargs)
+        with pytest.raises(h.Refuse, match=message):
+            h.frozen(cfg)
+    freeze_amend3(cfg, c)
+    cfg.amend3.write_text(cfg.amend3.read_text() + " ")  # sidecar no longer matches
+    with pytest.raises(h.Refuse, match="AMEND3 is not frozen"):
+        h.frozen(cfg)
+    assert call(cfg, "select") == 2
+
+
+def test_amend3_score_log_records_hash(factory):
+    cfg, c, _ = factory()
+    freeze_amend3(cfg, c)
+    assert call(cfg, "select") == 0 and call(cfg, "score") == 0
+    started = next(row for row in h.uses(cfg) if row[0] == "started")
+    assert f"amend3_sha256={h.sha256_file(cfg.amend3)}" in started

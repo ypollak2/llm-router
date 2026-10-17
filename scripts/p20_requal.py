@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import math
@@ -13,6 +15,7 @@ import sys
 import time
 from collections import Counter
 from dataclasses import dataclass
+from dataclasses import field as dc_field
 from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
@@ -31,6 +34,10 @@ import check_prereg  # noqa: E402
 PREREG = REPO / "docs/prereg/PREREG-P20-requal.md"
 AMEND1 = REPO / "docs/prereg/PREREG-P20-requal-AMEND1.md"
 AMEND2 = REPO / "docs/prereg/PREREG-P20-requal-AMEND2.md"
+AMEND3 = REPO / "docs/prereg/PREREG-P20-requal-AMEND3.md"
+# AMEND3 (D-202): the exclusive lock a local model call holds; the P2.0-T harness takes the same
+# one (fcntl.flock LOCK_EX on this path). Tests point Cfg.lock_path or this name elsewhere.
+OLLAMA_LOCK = Path.home() / ".rsi/research/primary-plan/v16/requal/ollama.lock"
 SETS = ("qa", "tech_op", "code")
 CONSTANTS: dict[str, str] = {
     "LABEL": "p20-requal",
@@ -117,6 +124,10 @@ AMEND2_FIXED = {
     f"ID_{QWEN38}": "b3f4c17c6811",
 }
 AMEND2_SHA_KEYS = {"REPO_SHA": r"[0-9a-f]{40}", "CODE_RUNNER_SHA256": r"[0-9a-f]{64}"}
+# AMEND3 (D-202): no night window (the quiet gate before every local call replaces it); its two
+# pins replace AMEND2's. AMEND2's other keys stay.
+AMEND3_FIXED = {"NIGHT_WINDOW": "none"}
+AMEND3_SHA_KEYS = AMEND2_SHA_KEYS
 
 
 def amended(constants: dict, overrides: dict) -> dict:
@@ -346,11 +357,42 @@ def frozen(cfg: Cfg) -> dict:
         raise Refuse("refusing: PREREG-AMEND2.md differs")
     constants.update(overrides)
     constants = amended(constants, second_overrides)
-    return {"sha256": checked["sha256"], "frozen_utc": checked["frozen_utc"],
-            "amend1_sha256": amendment["sha256"],
-            "amend1_frozen_utc": amendment["frozen_utc"],
-            "amend2_sha256": second["sha256"], "amend2_frozen_utc": second["frozen_utc"],
-            "constants": constants}
+    out = {"sha256": checked["sha256"], "frozen_utc": checked["frozen_utc"],
+           "amend1_sha256": amendment["sha256"],
+           "amend1_frozen_utc": amendment["frozen_utc"],
+           "amend2_sha256": second["sha256"], "amend2_frozen_utc": second["frozen_utc"]}
+    if cfg.amend3.with_suffix(".sha256").exists():
+        # AMEND3 (D-202) is in force as soon as its sidecar exists; a draft without one is not.
+        try:
+            third = check_prereg.check(cfg.amend3)
+            if not third["match"]:
+                raise ValueError("freeze")
+            third_text = cfg.amend3.read_text()
+        except (OSError, ValueError, IndexError, OverflowError) as exc:
+            raise Refuse("refusing: AMEND3 is not frozen") from exc
+        try:
+            third_epoch = datetime.fromisoformat(third["frozen_utc"].replace("Z", "+00:00"))
+            if (third_epoch.tzinfo is None
+                    or not second_epoch.timestamp() < third_epoch.timestamp() < cfg.now()):
+                raise ValueError("freeze order")
+        except (ValueError, OverflowError) as exc:
+            raise Refuse("refusing: AMEND3 frozen_utc") from exc
+        try:
+            third_overrides = parse_block(third_text, "```text P20-AMEND3-CONSTANTS")
+            if (third_overrides.keys() != AMEND3_FIXED.keys() | AMEND3_SHA_KEYS.keys()
+                    or any(third_overrides[k] != v for k, v in AMEND3_FIXED.items())
+                    or not all(re.fullmatch(pattern, third_overrides[k])
+                               for k, pattern in AMEND3_SHA_KEYS.items())):
+                raise ValueError("constants")
+        except (Refuse, ValueError) as exc:
+            raise Refuse("refusing: AMEND3 constants") from exc
+        third_copy = cfg.run_dir / "PREREG-AMEND3.md"
+        if third_copy.exists() and third_copy.read_bytes() != cfg.amend3.read_bytes():
+            raise Refuse("refusing: PREREG-AMEND3.md differs")
+        constants = amended(constants, third_overrides)
+        out.update(amend3_sha256=third["sha256"], amend3_frozen_utc=third["frozen_utc"])
+    out["constants"] = constants
+    return out
 
 
 def code_gate(repo: Path, repo_sha: str, module_file: str, run=subprocess.run) -> None:
@@ -409,9 +451,11 @@ class Cfg:
     prereg: Path = PREREG
     amend1: Path = AMEND1
     amend2: Path = AMEND2
+    amend3: Path = AMEND3
+    lock_path: Path | None = None
+    local_used: set = dc_field(default_factory=set)
     gate: Callable[[dict], None] | None = None
     now: Callable[[], float] = time.time
-    local_hour: Callable[[], int] = lambda: datetime.now().hour
     sleep: Callable[[float], None] = time.sleep
     ollama: Any = None
     claude: Any = None
@@ -704,11 +748,13 @@ def call_model(cfg: Cfg, c: dict, name: str, arm: str, ident: str, attempt: int,
     start = cfg.now()
     try:
         if local:
-            result = cfg.ollama.chat(
-                arm, messages, timeout=int(c["LOCAL_TIMEOUT_S"]),
-                options={"num_ctx": local_models.num_ctx(arm), "temperature": 0},
-                think=False,  # AMEND2: as production (providers._ollama_think_enabled off)
-            )
+            with local_call(cfg, c, arm, {"stage": stage, "set": name, "item_id": ident,
+                                          "attempt": attempt}):
+                result = cfg.ollama.chat(
+                    arm, messages, timeout=int(c["LOCAL_TIMEOUT_S"]),
+                    options={"num_ctx": local_models.num_ctx(arm), "temperature": 0},
+                    think=False,  # AMEND2: as production (providers._ollama_think_enabled off)
+                )
         else:
             result = cfg.claude(model_id, flatten(messages), timeout=int(c["REF_TIMEOUT_S"]))
     except (Refuse, Park, Terminal):
@@ -741,9 +787,10 @@ def call_model(cfg: Cfg, c: dict, name: str, arm: str, ident: str, attempt: int,
             "error": error, "wall_s": wall, "ts": utc(cfg)}
 
 
-def quiet(cfg: Cfg, c: dict, arm: str) -> None:
-    if not 0 <= cfg.local_hour() < 7:
-        raise Park("outside night window")
+def quiet(cfg: Cfg, c: dict, arm: str) -> dict:
+    """The quiet gate (AMEND3: any time of day). Returns the readings it passed on."""
+    free_all: list[float] = []
+    load_all: list[float] = []
     for reading in range(int(c["QUIET_READINGS"])):
         if reading:
             cfg.sleep(float(c["QUIET_INTERVAL_S"]))
@@ -752,8 +799,56 @@ def quiet(cfg: Cfg, c: dict, arm: str) -> None:
                 or free < float(c["QUIET_FREE_MEM_MIN_PCT"])
                 or load >= float(c["QUIET_LOAD1_MAX"])):
             raise Park("machine not quiet")
-    if any(model != arm for model in cfg.ollama.ps()):
+        free_all.append(free)
+        load_all.append(load)
+    resident = cfg.ollama.ps()
+    if any(model != arm for model in resident):
         raise Park("foreign model resident")
+    return {"free_mem_pct": free_all, "load1": load_all, "resident": resident}
+
+
+@contextlib.contextmanager
+def ollama_lock(cfg: Cfg):
+    """Exclusive flock on the shared Ollama lock file; Park if another process holds it."""
+    path = Path(cfg.lock_path or OLLAMA_LOCK)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise Park("ollama lock held") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def local_call(cfg: Cfg, c: dict, arm: str, tag: dict):
+    """AMEND3 (D-202): hold the exclusive Ollama lock and pass the quiet gate for ONE local
+    call. Held lock or a failed gate parks (exit 3) before the call and before any answer row;
+    the lock is released on every exit path. Passed readings go to quiet.jsonl."""
+    with ollama_lock(cfg):
+        readings = quiet(cfg, c, arm)
+        append_row(cfg.run_dir / "quiet.jsonl", {"ts": utc(cfg), "arm": arm, **tag, **readings})
+        cfg.local_used.add(arm)
+        yield readings
+
+
+def unload_local(cfg: Cfg, arm: str) -> None:
+    """Unload the arm model only if this run called it, and never while another process holds
+    the lock (it may be using the same model)."""
+    if arm not in cfg.local_used:
+        return
+    try:
+        with ollama_lock(cfg):
+            cfg.ollama.unload(arm)
+        cfg.local_used.discard(arm)
+    except Park:
+        pass
 
 
 def run(cfg: Cfg, c: dict, name: str, chosen_arms: list[str] | None = None) -> dict:
@@ -776,14 +871,15 @@ def run(cfg: Cfg, c: dict, name: str, chosen_arms: list[str] | None = None) -> d
         pending = [item for item in items if (item["id"], arm) not in done]
         if not pending:
             continue
-        if local:
-            quiet(cfg, c, arm)
         try:
             if local:
-                cfg.ollama.chat(arm, [{"role": "user", "content": "Reply OK."}],
-                                timeout=int(c["LOCAL_TIMEOUT_S"]),
-                                options={"num_ctx": local_models.num_ctx(arm), "temperature": 0},
-                                think=False)
+                with local_call(cfg, c, arm, {"stage": "warmup", "set": name,
+                                              "item_id": None, "attempt": 0}):
+                    cfg.ollama.chat(arm, [{"role": "user", "content": "Reply OK."}],
+                                    timeout=int(c["LOCAL_TIMEOUT_S"]),
+                                    options={"num_ctx": local_models.num_ctx(arm),
+                                             "temperature": 0},
+                                    think=False)
             for item in pending:
                 window = local_models.num_ctx(arm) if local else int(c["REF_WINDOW"])
                 messages = cfg.pack_fn(item, name, window)
@@ -796,7 +892,7 @@ def run(cfg: Cfg, c: dict, name: str, chosen_arms: list[str] | None = None) -> d
                         break
         finally:
             if local:
-                cfg.ollama.unload(arm)
+                unload_local(cfg, arm)
     return {"attempts": count, "finals": len(finals(cfg, name))}
 
 
@@ -1049,6 +1145,7 @@ def score(cfg: Cfg, c: dict, freeze: dict, measurement: Path | None = None) -> d
     require_no_foreign(cfg.run_dir / "code_results.jsonl", arms(c, True))
     hashes = {"prereg_sha256": freeze["sha256"], "amend1_sha256": freeze["amend1_sha256"],
               "amend2_sha256": freeze["amend2_sha256"],
+              **({"amend3_sha256": freeze["amend3_sha256"]} if "amend3_sha256" in freeze else {}),
               "git_sha": cfg.git_sha(),
               "selection_sha256": optional_hash(cfg.run_dir / "selection.json"),
               "answers_sha256": combined_hash(cfg, "answers"),

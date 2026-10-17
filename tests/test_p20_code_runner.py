@@ -159,7 +159,6 @@ def test_freeze_selection_and_score_gates(setup):
 
 def test_parking(setup):
     cfg, _, _, arm, pi, *_ = setup
-    assert invoke(setup, cfg=replace(cfg, local_hour=lambda: 12)) == 3
     cfg.ollama.resident = ["foreign"]
     assert invoke(setup) == 3
     assert not cfg.ollama.unloaded
@@ -262,9 +261,8 @@ def test_sonnet_mismatch(setup, monkeypatch):
     assert len(h.jsonl(cfg.run_dir / "ledger.jsonl")) == 6
 
 
-def test_quota_spend_and_night(setup, monkeypatch):
+def test_quota_and_spend(setup, monkeypatch):
     cfg = fake_claude(setup, monkeypatch)
-    assert invoke(setup, "sonnet", cfg=replace(cfg, local_hour=lambda: 7)) == 3
     assert invoke(setup, "sonnet", cfg=replace(cfg, quota=lambda: None)) == 3
     h.append_row(cfg.run_dir / "ledger.jsonl", {"cost_usd": 60})
     assert invoke(setup, "sonnet") == 3
@@ -289,8 +287,9 @@ def test_refusal_and_park_reasons_reach_stderr(setup, capsys):
     assert invoke(setup) == 2
     assert capsys.readouterr().err.strip() == "refusing: prereg is not frozen"
     sidecar.write_bytes(saved)
-    assert invoke(setup, cfg=replace(cfg, local_hour=lambda: 12)) == 3
-    assert capsys.readouterr().err.strip() == "outside night window"
+    cfg.machine.load = 4
+    assert invoke(setup) == 3
+    assert capsys.readouterr().err.strip() == "machine not quiet"
 
 
 def test_contract_picks_the_named_assignment(tmp_path):
