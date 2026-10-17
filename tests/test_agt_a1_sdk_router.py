@@ -62,6 +62,7 @@ class _Exec:
     def __init__(self, sleep: float = 0.0):
         self.sleep = sleep
         self.calls = 0
+        self.threads: list[int] = []
         self.chains: list[tuple] = []
         self._lock = threading.Lock()
 
@@ -73,6 +74,7 @@ class _Exec:
     def execute_chain(self, request, chain, task_type, **_k):
         with self._lock:
             self.calls += 1
+            self.threads.append(threading.get_ident())
         if self.sleep:
             time.sleep(self.sleep)
         return DirectResult(text="answer", model=chain[0], latency_ms=5,
@@ -215,6 +217,15 @@ def test_b_sync_run_returns_a_result(fake):
     assert r.text == "answer" and r.model == "openai/gpt-4o-mini" and fake.calls == 1
 
 
+async def test_b_arun_runs_the_model_call_in_a_worker_thread(fake):
+    from llm_router import Router
+
+    r = await Router(session=SID).arun(PROMPT)
+    assert r.text == "answer" and fake.calls == 1
+    assert fake.threads[0] != threading.get_ident(), "arun must not run the call on the loop thread"
+
+
+@pytest.mark.timing  # wall-clock assertions: the serial timing lane (TIMING-1)
 async def test_b_arun_runs_off_the_loop_two_parallel_calls_overlap(fake):
     from llm_router import Router
 
