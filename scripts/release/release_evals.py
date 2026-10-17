@@ -20,6 +20,15 @@ EVAL FILE  release_evals/<sha>.json
     fidelity     {"id": "...", "pack": true|false, "full": true|false}
     stability    {"id": "...", "a": "<decision>", "b": "<decision>"}
 
+PIN  release_evals/PIN.json  (committed; written once at the PREREG-P32 freeze)
+    {"schema": 1, "baseline_sha": "<40 hex>",
+     "sets": {"<set_id>": {"manifest_sha256", "n", "min_n"}}}
+  The gate refuses (NOT INFORMATIVE) if a pinned manifest is missing or extra, its
+  sha256 (canonical JSON) differs, n or min_n differ from the pin, the baseline file's
+  recorded sha is not baseline_sha, or manifests exist with no pin. Written by
+  `release_evals.py pin --baseline release_evals/baseline.json` AFTER the manifests
+  and baseline are frozen; from then on any edit needs a visible PIN.json change.
+
 HOW THE FILE REACHES CI (chosen: release asset, no secrets)
   The tag commit cannot contain a file named after its own sha, so the file is
   NOT committed. release.sh attaches release_evals/<sha>.json to the GitHub
@@ -88,15 +97,96 @@ def load_manifests(directory: Path) -> dict[str, dict]:
     return out
 
 
-def build_eval_file(sha: str, sets: dict[str, list[dict]]) -> dict:
+def manifest_sha256(m: dict) -> str:
+    """sha256 of the manifest's canonical JSON (formatting-independent)."""
+    return hashlib.sha256(json.dumps(m, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def make_pin(manifests: dict[str, dict], baseline_sha: str) -> dict:
+    if not SHA_RE.match(str(baseline_sha)):
+        raise ValueError(f"baseline_sha must be 40 lowercase hex chars, got {baseline_sha!r}")
+    return {"schema": SCHEMA, "baseline_sha": baseline_sha,
+            "sets": {sid: {"manifest_sha256": manifest_sha256(m), "n": m["n"], "min_n": m["min_n"]}
+                     for sid, m in sorted(manifests.items())}}
+
+
+def pin_problems(pin: dict | None, manifests: dict[str, dict], baseline: dict | None) -> list[str]:
+    """Reasons the committed manifests/baseline differ from the freeze pin."""
+    if pin is None:
+        return ["no pin file (release_evals/PIN.json) but manifests exist: nothing proves they "
+                "are the frozen sets"] if manifests else []
+    if not isinstance(pin, dict) or not isinstance(pin.get("sets"), dict) \
+            or not SHA_RE.match(str(pin.get("baseline_sha"))):
+        return ["pin file is malformed (needs sets object and 40-hex baseline_sha)"]
+    p: list[str] = []
+    for sid in sorted(set(pin["sets"]) - set(manifests)):
+        p.append(f"{sid}: pinned set has no manifest (deleted?)")
+    for sid in sorted(set(manifests) - set(pin["sets"])):
+        p.append(f"{sid}: manifest is not in the pin (added after freeze?)")
+    for sid in sorted(set(pin["sets"]) & set(manifests)):
+        want, m = pin["sets"][sid], manifests[sid]
+        if not isinstance(want, dict):
+            p.append(f"{sid}: pin entry malformed")
+            continue
+        if want.get("manifest_sha256") != manifest_sha256(m):
+            p.append(f"{sid}: manifest sha256 differs from the pin")
+        for k in ("n", "min_n"):
+            if want.get(k) != m.get(k):
+                p.append(f"{sid}: {k}={m.get(k)!r} differs from the pinned {want.get(k)!r}")
+    if baseline is not None and baseline.get("sha") != pin["baseline_sha"]:
+        p.append(f"baseline file is for sha {baseline.get('sha')!r}, pin expects {pin['baseline_sha']!r}")
+    return p
+
+
+def item_problems(kind: str, item: object) -> list[str]:
+    """Strict field types: a truthy string or 0/1 must never count as a boolean."""
+    if not isinstance(item, dict):
+        return ["item is not an object"]
+    if not isinstance(item.get("id"), str) or not item["id"]:
+        return ["id must be a non-empty string"]
+    if kind == "performance":
+        fields, want = ("pass",), bool
+    elif kind == "fidelity":
+        fields, want = ("pack", "full"), bool
+    else:
+        fields, want = ("a", "b"), str
+    out = []
+    for f in fields:
+        v = item.get(f)
+        if not isinstance(v, want) or (want is str and not v):
+            out.append(f"{item['id']}: {f}={v!r} must be a {'true/false boolean' if want is bool else 'non-empty string'}")
+    return out
+
+
+def infer_kind(items: list) -> str | None:
+    first = items[0] if items and isinstance(items[0], dict) else {}
+    for kind, key in (("performance", "pass"), ("fidelity", "pack"), ("stability", "a")):
+        if key in first:
+            return kind
+    return None
+
+
+def build_eval_file(sha: str, sets: dict[str, list[dict]], kinds: dict[str, str] | None = None) -> dict:
+    """kinds maps set_id -> manifest kind; without it the kind is inferred from the first item."""
     if not SHA_RE.match(sha):
         raise ValueError(f"sha must be 40 lowercase hex chars, got {sha!r}")
+    kinds = kinds or {}
+    for sid, items in sets.items():
+        if not isinstance(items, list):
+            raise ValueError(f"{sid}: items must be a list")
+        kind = kinds.get(sid) or infer_kind(items)
+        if kind is None:
+            raise ValueError(f"{sid}: cannot tell the set kind from its items")
+        bad = [x for it in items for x in item_problems(kind, it)]
+        if bad:
+            raise ValueError(f"{sid}: invalid item values, e.g. " + "; ".join(bad[:3]))
     return {"schema": SCHEMA, "sha": sha,
             "sets": {sid: {"items": list(items)} for sid, items in sets.items()}}
 
 
-def write_eval_file(out_dir: Path, sha: str, sets: dict[str, list[dict]]) -> Path:
-    doc = build_eval_file(sha, sets)
+def write_eval_file(out_dir: Path, sha: str, sets: dict[str, list[dict]],
+                    kinds: dict[str, str] | None = None) -> Path:
+    doc = build_eval_file(sha, sets, kinds)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{sha}.json"
@@ -119,6 +209,13 @@ def main(argv: list[str] | None = None) -> int:
     w.add_argument("--sha", required=True)
     w.add_argument("--results", required=True)
     w.add_argument("--out-dir", default="release_evals")
+    w.add_argument("--manifests", default="release_evals/manifests",
+                   help="set kinds are read from here when it exists")
+    pn = sub.add_parser("pin", help="write release_evals/PIN.json from the frozen manifests and "
+                                    "baseline (run once, at the PREREG-P32 freeze)")
+    pn.add_argument("--manifests", default="release_evals/manifests")
+    pn.add_argument("--baseline", default="release_evals/baseline.json")
+    pn.add_argument("--out", default="release_evals/PIN.json")
     a = ap.parse_args(argv)
 
     if a.cmd == "freeze":
@@ -135,10 +232,27 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {path} (n={m['n']}, min_n={m['min_n']}, sha256={m['items_sha256'][:12]})")
         return 0
 
-    sets = json.loads(Path(a.results).read_text())
+    if a.cmd == "pin":
+        try:
+            manifests = load_manifests(Path(a.manifests)) if Path(a.manifests).is_dir() else {}
+            bad = [f"{sid}: {x}" for sid, m in manifests.items() for x in manifest_problems(m)]
+            if not manifests or bad:
+                raise ValueError("; ".join(bad) or "no manifests to pin")
+            pin = make_pin(manifests, json.loads(Path(a.baseline).read_text()).get("sha"))
+        except (ValueError, OSError) as e:
+            print(f"refusing to write pin: {e}", file=sys.stderr)
+            return 1
+        Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(a.out).write_text(json.dumps(pin, indent=1, sort_keys=True) + "\n")
+        print(f"wrote {a.out} ({len(pin['sets'])} sets, baseline {pin['baseline_sha'][:12]})")
+        return 0
+
     try:
-        path = write_eval_file(Path(a.out_dir), a.sha, sets)
-    except ValueError as e:
+        sets = json.loads(Path(a.results).read_text())
+        kinds = ({sid: m.get("kind") for sid, m in load_manifests(Path(a.manifests)).items()}
+                 if Path(a.manifests).is_dir() else {})
+        path = write_eval_file(Path(a.out_dir), a.sha, sets, kinds)
+    except (ValueError, OSError) as e:
         print(f"refusing to write eval file: {e}", file=sys.stderr)
         return 1
     print(f"wrote {path}")

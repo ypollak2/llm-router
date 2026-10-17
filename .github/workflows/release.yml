@@ -69,4 +69,5 @@ jobs:
             --candidate "release_evals/${SHA}.json" \
             --baseline release_evals/baseline.json \
             --manifests release_evals/manifests \
+            --pin release_evals/PIN.json \
             --sha "${SHA}"

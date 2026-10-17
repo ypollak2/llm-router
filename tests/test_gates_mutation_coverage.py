@@ -390,11 +390,11 @@ _FIDELITY_CALL = "code, text = judge_fidelity(m, cand_items)"
 _STABILITY_CALL = "code, text = judge_stability(m, cand_items)"
 _POSITIONAL_OLD = (
     '    for i in manifest["item_ids"]:\n'
-    '        bp, cp = bool(base[i]["pass"]), bool(cand[i]["pass"])\n'
+    '        bp, cp = base[i]["pass"], cand[i]["pass"]\n'
 )
 _POSITIONAL_NEW = (
     '    for k, i in enumerate(manifest["item_ids"]):\n'
-    '        bp, cp = bool(base_items[k]["pass"]), bool(cand_items[k]["pass"])\n'
+    '        bp, cp = base_items[k]["pass"], cand_items[k]["pass"]\n'
 )
 
 # (id, [(old, new), ...], check that must go red)
@@ -425,6 +425,13 @@ _P32_MUTANTS = [
      "check_stability_bar"),
     ("M6b stability bar < becomes <=", [("if share < STABILITY_MIN:", "if share <= STABILITY_MIN:")],
      "check_stability_bar"),
+    ("M8 non-bool values coerced again (item validation dropped)",
+     [('    bad = [x for it in items for x in item_problems(manifest["kind"], it)]\n',
+       '    bad = []\n')],
+     "check_non_bool_values_not_informative"),
+    ("M9 provenance pin check skipped", [("for problem in pin_problems(pin, manifests, baseline):",
+                                          "for problem in []:")],
+     "check_pin_refusals"),
     ("M7 skip refusal off", [("if not on_tag:", "if True:")], "check_skip_policy"),
     ("M7b owner override accepts any value",
      [('env.get("LLM_ROUTER_RELEASE_OWNER_OVERRIDE") == "1"', 'env.get("LLM_ROUTER_RELEASE_OWNER_OVERRIDE")')],
