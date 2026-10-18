@@ -122,6 +122,7 @@ def test_stop_runs_none_of_the_moved_steps_inline(hook, state, monkeypatch, tmp_
 
 def test_stop_returns_while_a_5s_child_still_runs(hook, state, monkeypatch, tmp_path):
     """The real spawn path: the child is detached, so main() returns first."""
+    monkeypatch.delenv("LLM_ROUTER_NO_DETACHED_SPAWN", raising=False)  # F67: the hook honours it now
     _write_usage(state, time.time())
     _trap_slow_steps(hook, monkeypatch, tmp_path)
     marker = tmp_path / "child_done"
@@ -327,6 +328,7 @@ def test_an_agent_route_run_names_its_phases(state, monkeypatch, armed):
 def test_a_burst_of_stops_starts_one_child(hook, state, monkeypatch):
     import llm_router.statusline_tick as tick
 
+    monkeypatch.delenv("LLM_ROUTER_NO_DETACHED_SPAWN", raising=False)
     started: list = []
     monkeypatch.setattr(tick, "_spawn_detached", started.append)
     for _ in range(5):
@@ -344,6 +346,7 @@ def test_the_claim_expires_after_its_window(hook, state):
 def test_an_unwritable_claim_starts_no_child(hook, state, monkeypatch):
     import llm_router.statusline_tick as tick
 
+    monkeypatch.delenv("LLM_ROUTER_NO_DETACHED_SPAWN", raising=False)
     started: list = []
     monkeypatch.setattr(tick, "_spawn_detached", started.append)
     monkeypatch.setattr(hook, "_state_dir", lambda: "/dev/null/not-a-dir")
@@ -670,3 +673,124 @@ def test_importing_the_hook_loads_neither_rich_nor_urllib():
         "print(sorted(x for x in ('rich', 'urllib.request') if x in sys.modules))\n")
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0 and r.stdout.strip() == "[]", (r.stdout, r.stderr[-500:])
+
+
+# ── F67: session-end follow-ups from the PR #587 review ──────────────────────
+
+def _write_cache(state: Path, hook, *, age_s: float, day: str | None = None, **extra) -> None:
+    data = {"v": hook._LEDGER_CACHE_VERSION, "ts": time.time() - age_s,
+            "day": day if day is not None else hook._local_day(), **extra}
+    (state / hook._LEDGER_CACHE_FILENAME).write_text(json.dumps(data))
+
+
+def _executed_in_stop(hook, state, monkeypatch, live_total=7):
+    """_executed_24h() as a Stop sees it (cache read for this run); returns (value, live_calls)."""
+    import llm_router.routing_report as rr
+
+    live: list = []
+    monkeypatch.setattr(rr, "executed_routes",
+                        lambda *a, **k: live.append(1) or ({"total": live_total} if live_total is not None else None))
+    monkeypatch.setattr(hook, "_STOP_LEDGER", hook._read_ledger_cache())
+    return hook._executed_24h(), live
+
+
+def test_f67_stale_same_day_cache_is_shown_without_a_live_call(hook, state, monkeypatch):
+    _write_cache(state, hook, age_s=hook._LEDGER_CACHE_MAX_AGE_S + 600, executed_24h=42)
+    v, live = _executed_in_stop(hook, state, monkeypatch)
+    assert v == 42 and live == []
+
+
+def test_f67_stale_same_day_unknown_stays_none_not_zero(hook, state, monkeypatch):
+    _write_cache(state, hook, age_s=hook._LEDGER_CACHE_MAX_AGE_S + 600, executed_24h=None)
+    v, live = _executed_in_stop(hook, state, monkeypatch)
+    assert v is None and live == []
+
+
+def test_f67_stale_other_day_cache_goes_live(hook, state, monkeypatch):
+    _write_cache(state, hook, age_s=hook._LEDGER_CACHE_MAX_AGE_S + 600, day="1999-01-01", executed_24h=42)
+    v, live = _executed_in_stop(hook, state, monkeypatch)
+    assert v == 7 and live == [1]
+
+
+def test_f67_missing_cache_goes_live(hook, state, monkeypatch):
+    v, live = _executed_in_stop(hook, state, monkeypatch)
+    assert v == 7 and live == [1]
+
+
+@pytest.mark.parametrize("body", ["{not json", "[1, 2]", json.dumps({"v": 999, "day": "x"})])
+def test_f67_corrupt_cache_goes_live(hook, state, monkeypatch, body):
+    (state / hook._LEDGER_CACHE_FILENAME).write_text(body)
+    v, live = _executed_in_stop(hook, state, monkeypatch)
+    assert v == 7 and live == [1]
+
+
+def test_f67_stale_cache_without_the_count_goes_live(hook, state, monkeypatch):
+    _write_cache(state, hook, age_s=hook._LEDGER_CACHE_MAX_AGE_S + 600)
+    v, live = _executed_in_stop(hook, state, monkeypatch)
+    assert v == 7 and live == [1]
+
+
+def test_f67_last_summary_ansi_is_written_atomically(hook, state):
+    target = state / "last_summary.ansi"
+    target.write_text("old")
+    hook._write_text_atomic(target, "new")
+    assert target.read_text() == "new" and [p.name for p in state.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_f67_no_partial_file_is_visible_during_the_write(hook, state, monkeypatch):
+    target = state / "last_summary.ansi"
+    target.write_text("old")
+    seen: list = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        seen.append(target.read_text())  # tmp is complete on disk, target still the old one
+        assert Path(src).read_text() == "new-content"
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", spy)
+    hook._write_text_atomic(target, "new-content")
+    assert seen == ["old"] and target.read_text() == "new-content"
+
+
+def test_f67_failed_replace_cleans_the_tmp_and_keeps_the_old_file(hook, state, monkeypatch):
+    target = state / "last_summary.ansi"
+    target.write_text("old")
+
+    def boom(src, dst):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(OSError):
+        hook._write_text_atomic(target, "new")
+    assert target.read_text() == "old"
+    assert [p.name for p in state.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_f67_no_detached_spawn_flag_starts_no_child(hook, state, monkeypatch):
+    import llm_router.statusline_tick as tick
+
+    started: list = []
+    monkeypatch.setattr(tick, "_spawn_detached", started.append)
+    monkeypatch.setenv("LLM_ROUTER_NO_DETACHED_SPAWN", "1")
+    hook._spawn_background_stop_work()
+    assert started == []
+    assert not (state / hook._STOP_BG_CLAIM_FILENAME).exists(), "a refused spawn must not take the claim"
+    monkeypatch.delenv("LLM_ROUTER_NO_DETACHED_SPAWN")
+    hook._spawn_background_stop_work()
+    assert len(started) == 1
+
+
+def test_f67_disabled_mode_does_no_live_call_and_builds_no_box(hook, state, monkeypatch, tmp_path):
+    import llm_router.routing_report as rr
+
+    monkeypatch.setenv("LLM_ROUTER_STOP_HOOK", "disabled")
+    _write_usage(state, time.time())
+    _trap_slow_steps(hook, monkeypatch, tmp_path)
+    monkeypatch.setattr(hook, "_spawn_background_stop_work", lambda: None)
+    live: list = []
+    monkeypatch.setattr(rr, "executed_routes", lambda *a, **k: live.append(1) or {"total": 7})
+    boxes: list = []
+    monkeypatch.setattr(hook, "_cheap_summary_box", lambda *a: boxes.append(1) or "")
+    _e, out = _run_main(hook, monkeypatch)
+    assert live == [] and boxes == [] and out == ""
