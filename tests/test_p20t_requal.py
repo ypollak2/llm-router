@@ -680,6 +680,77 @@ def test_reserve_parks_before_first_sonnet_call(factory, monkeypatch):
     assert not any(m != h.LOCAL for m, _ in cfg.claude.calls)
 
 
+AMEND2_DATE = "2029-01-01T00:00:00Z"
+
+
+def freeze_amend2(cfg, *, text=None, date=AMEND2_DATE):
+    block = {**h.AMEND2_FIXED, "REPO_SHA": "8" * 40}
+    cfg.amend2_t.write_text(text if text is not None else (
+        "# AMEND2\n\n" + h.AMEND2_BLOCK + "\n"
+        + "".join(f"{k}={v}\n" for k, v in block.items()) + "```\n"))
+    sidecar(cfg.amend2_t, date)
+
+
+def test_amend2_reserve_fits_under_the_raised_cap(factory, monkeypatch):
+    """AMEND2-T (D-223): the same 49.5 reserve that parks at 40.00 lets the Sonnet arm start at 60.00."""
+    monkeypatch.setattr(h, "judge_reserve", ORIG_RESERVE)
+    cfg, c, pool = factory("a2fit")
+    freeze_amend1(cfg)
+    cfg.amend2_t = cfg.run_dir / "AMEND2T.md"
+    freeze_amend2(cfg)
+    got = h.frozen(cfg)
+    assert got["constants"]["SPEND_CAP_USD"] == "60.00" and got["constants"]["REPO_SHA"] == "8" * 40
+    assert got["amend2_t_sha256"] == base.sha256_file(cfg.amend2_t)
+    assert call(cfg, "select") == 0
+    assert call(cfg, "run", "--set", "tech_op", "--arms", "sonnet") == 0
+    assert any(m != h.LOCAL for m, _ in cfg.claude.calls)
+
+
+def test_amend2_reserve_still_parks_when_spent_plus_reserve_exceeds_cap(factory, monkeypatch):
+    monkeypatch.setattr(h, "judge_reserve", ORIG_RESERVE)
+    cfg, c, pool = factory("a2park")
+    freeze_amend1(cfg)
+    cfg.amend2_t = cfg.run_dir / "AMEND2T.md"
+    freeze_amend2(cfg)
+    assert call(cfg, "select") == 0
+    base.append_row(cfg.run_dir / "ledger.jsonl", {"stage": "run", "cost_usd": 10.6})  # 10.6 + 49.5 > 60
+    assert call(cfg, "run", "--set", "tech_op", "--arms", "sonnet") == 3
+    assert not any(m != h.LOCAL for m, _ in cfg.claude.calls)
+
+
+def test_amend2_frozen_enforcement(factory):
+    cfg, c, _ = factory("a2f")
+    cfg.amend2_t = cfg.run_dir / "AMEND2T.md"
+    freeze_amend2(cfg)
+    with pytest.raises(h.Refuse, match="AMEND2 requires AMEND1"):
+        h.frozen(cfg)
+    freeze_amend1(cfg)
+    assert h.frozen(cfg)["constants"]["SPEND_CAP_USD"] == "60.00"
+    (cfg.run_dir / "PREREG-AMEND2.md").write_text("different")
+    with pytest.raises(h.Refuse, match="PREREG-AMEND2.md differs"):
+        h.frozen(cfg)
+    (cfg.run_dir / "PREREG-AMEND2.md").unlink()
+    block = h.AMEND2_BLOCK + "\n"
+    cases = [
+        (dict(date=AMEND1_DATE), "AMEND2 frozen_utc"),  # not after AMEND1
+        (dict(date="2031-01-01T00:00:00Z"), "AMEND2 frozen_utc"),  # after now
+        (dict(text="# A\n" + block + "SPEND_CAP_USD=61.00\nREPO_SHA=" + "8" * 40 + "\n```\n"),
+         "AMEND2 constants"),
+        (dict(text="# A\n" + block + "SPEND_CAP_USD=60.00\n```\n"), "AMEND2 constants"),
+        (dict(text="# A\n" + block + "SPEND_CAP_USD=60.00\nQUIET_LOAD1_MAX=9\nREPO_SHA="
+                   + "8" * 40 + "\n```\n"), "AMEND2 constants"),
+        (dict(text="# A\n" + block + "SPEND_CAP_USD=60.00\nREPO_SHA=zz\n```\n"), "AMEND2 constants"),
+    ]
+    for kwargs, message in cases:
+        freeze_amend2(cfg, **kwargs)
+        with pytest.raises(h.Refuse, match=message):
+            h.frozen(cfg)
+    freeze_amend2(cfg)
+    cfg.amend2_t.write_text(cfg.amend2_t.read_text() + " ")
+    with pytest.raises(h.Refuse, match="AMEND2 is not frozen"):
+        h.frozen(cfg)
+
+
 def test_haiku_skipped_on_budget_and_judge_treats_arm_as_complete(factory, monkeypatch):
     cfg, c, pool = factory("hk")
     assert call(cfg, "select") == 0

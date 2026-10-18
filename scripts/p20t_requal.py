@@ -40,6 +40,12 @@ AMEND1_T = REPO / "docs/prereg/PREREG-P20T-techop-AMEND1.md"
 AMEND1_BLOCK = "```text P20T-AMEND1-CONSTANTS"
 AMEND1_FIXED = {"QUIET_FREE_MEM_BASIS": "excl_own_arm"}
 AMEND1_SHA_KEYS = {"REPO_SHA": r"[0-9a-f]{40}"}
+# AMEND2-T (D-223): SPEND_CAP_USD 40.00 -> 60.00. CONSTANTS_T keeps the frozen prereg's 40.00 (frozen()
+# compares the prereg block to it byte for byte); the cap is overridden only by a frozen AMEND2.
+AMEND2_T = REPO / "docs/prereg/PREREG-P20T-techop-AMEND2.md"
+AMEND2_BLOCK = "```text P20T-AMEND2-CONSTANTS"
+AMEND2_FIXED = {"SPEND_CAP_USD": "60.00"}
+AMEND2_SHA_KEYS = {"REPO_SHA": r"[0-9a-f]{40}"}
 BLOCK = "```text P20T-CONSTANTS"
 SET = "tech_op"
 STRATA = ("org", "ho")
@@ -135,6 +141,7 @@ class CfgT(base.Cfg):
         timeout=30, check=False).stdout.splitlines()
     local_touched: bool = False  # BLOCKER-1: set once this process passed the gate for a local call
     amend1_t: Path = AMEND1_T
+    amend2_t: Path = AMEND2_T
     mem_total_fn: Callable[[], int] = lambda: int(subprocess.run(
         ["sysctl", "-n", "hw.memsize"], stdin=subprocess.DEVNULL, capture_output=True, text=True,
         timeout=30, check=True).stdout)
@@ -228,6 +235,38 @@ def frozen(cfg: CfgT) -> dict:
             raise Refuse("refusing: PREREG-AMEND1.md differs")
         constants = {**constants, **overrides}
         out.update(amend1_sha256=first["sha256"], amend1_frozen_utc=first["frozen_utc"])
+        if cfg.amend2_t.with_suffix(".sha256").exists():
+            # AMEND2-T is in force as soon as its sidecar exists; it builds on AMEND1-T.
+            try:
+                third = check_prereg.check(cfg.amend2_t)
+                if not third["match"]:
+                    raise ValueError("freeze")
+                third_text = cfg.amend2_t.read_text()
+            except (OSError, ValueError, IndexError, OverflowError) as exc:
+                raise Refuse("refusing: AMEND2 is not frozen") from exc
+            try:
+                third_epoch = datetime.fromisoformat(third["frozen_utc"].replace("Z", "+00:00"))
+                if (third_epoch.tzinfo is None
+                        or not first_epoch.timestamp() < third_epoch.timestamp() < cfg.now()):
+                    raise ValueError("freeze order")
+            except (ValueError, OverflowError) as exc:
+                raise Refuse("refusing: AMEND2 frozen_utc") from exc
+            try:
+                overrides = base.parse_block(third_text, AMEND2_BLOCK)
+                if (overrides.keys() != AMEND2_FIXED.keys() | AMEND2_SHA_KEYS.keys()
+                        or any(overrides[k] != v for k, v in AMEND2_FIXED.items())
+                        or not all(re.fullmatch(pattern, overrides[k])
+                                   for k, pattern in AMEND2_SHA_KEYS.items())):
+                    raise ValueError("constants")
+            except (Refuse, ValueError) as exc:
+                raise Refuse("refusing: AMEND2 constants") from exc
+            third_copy = cfg.run_dir / "PREREG-AMEND2.md"
+            if third_copy.exists() and third_copy.read_bytes() != cfg.amend2_t.read_bytes():
+                raise Refuse("refusing: PREREG-AMEND2.md differs")
+            constants = {**constants, **overrides}
+            out.update(amend2_t_sha256=third["sha256"], amend2_t_frozen_utc=third["frozen_utc"])
+    elif cfg.amend2_t.with_suffix(".sha256").exists():
+        raise Refuse("refusing: AMEND2 requires AMEND1")
     out["constants"] = {**constants, "LOCAL_MODELS": constants["LOCAL_MODEL"]}
     return out
 
@@ -949,6 +988,7 @@ def score(cfg: CfgT, c: dict, freeze: dict, measurement: Path | None = None) -> 
     base.require_no_foreign(cfg.run_dir / f"answers/{SET}.jsonl", arms)
     base.require_no_foreign(cfg.run_dir / f"answers/{SET}_ew.jsonl", arms)
     hashes = {"prereg_sha256": freeze["sha256"], "amend_sha256": freeze.get("amend1_sha256", "none"),
+              "amend2_sha256": freeze.get("amend2_t_sha256", "none"),
               "git_sha": cfg.git_sha(),
               "selection_sha256": base.optional_hash(cfg.run_dir / "selection.json"),
               "answers_sha256": combined_hash(cfg, "answers"),
