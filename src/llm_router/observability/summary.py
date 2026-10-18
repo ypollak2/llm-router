@@ -72,7 +72,6 @@ class SessionSummaryData:
 
     total_decisions: int = 0
     total_cost_usd: float = 0.0
-    total_latency_ms: int = 0
     baseline_cost_usd: float = 0.0
     savings_usd: float = 0.0
     savings_pct: float = 0.0
@@ -95,11 +94,9 @@ class SessionSummaryData:
     earliest_ts: float = 0.0
     latest_ts: float = 0.0
     host_counts: dict[str, int] = field(default_factory=dict)
-    # v2 — latency distribution + per-tier latency
+    # v2 — latency histogram input: RECORDED lineage latencies only (a row without one is not 0 ms).
+    # The printed percentiles are the ledger's (``ledger.latency_p50/95/99``, P3.4-B5).
     latencies_ms: list[int] = field(default_factory=list)
-    latency_p50_ms: int = 0
-    latency_p95_ms: int = 0
-    latency_p99_ms: int = 0
     # v2 — outcome breakdown for the status badge
     success_count: int = 0
     fail_count: int = 0
@@ -318,16 +315,18 @@ def collect(
     # Cost + latency + tier + provider aggregation
     for row in rows:
         cost = row.get("cost_usd", 0.0) or 0.0
-        latency = row.get("latency_ms", 0) or 0
-        tier = row.get("model_tier", Tier.UNKNOWN.value)
-        model = row.get("model_chosen", "<unknown>")
+        recorded_ms = row.get("latency_ms")
+        tier = row.get("model_tier") or Tier.UNKNOWN.value
+        model = row.get("model_chosen") or ""
         provider = model.split("/", 1)[0] if "/" in model else model
+        if not provider or provider == "<unknown>":
+            provider = UNCLASSIFIED       # cannot be derived: shown as "unclassified (n)", never folded
         host = row.get("host", "<unknown>")
         outcome = row.get("outcome", "success")
 
         data.total_cost_usd += cost
-        data.total_latency_ms += latency
-        data.latencies_ms.append(latency)
+        if recorded_ms is not None and recorded_ms > 0:   # NULL and the writers' 0 default: not recorded
+            data.latencies_ms.append(recorded_ms)
         if outcome == "success":
             data.success_count += 1
         else:
@@ -415,14 +414,6 @@ def collect(
         for (tt, tier), count in route_counts.most_common(8)
     ]
 
-    # Latency percentiles
-    if data.latencies_ms:
-        sorted_lat = sorted(data.latencies_ms)
-        n = len(sorted_lat)
-        data.latency_p50_ms = sorted_lat[n // 2]
-        data.latency_p95_ms = sorted_lat[int(n * 0.95)] if n > 1 else sorted_lat[-1]
-        data.latency_p99_ms = sorted_lat[int(n * 0.99)] if n > 1 else sorted_lat[-1]
-
     # Cost sparkline — bucket spend into 24 time buckets across session
     if data.duration_seconds > 0:
         buckets = 24
@@ -487,6 +478,55 @@ def collect(
 _SPARK_CHARS = " ▁▂▃▄▅▆▇█"
 
 
+UNCLASSIFIED = "unclassified"
+
+
+def _window_label(data: SessionSummaryData) -> str:
+    """The window every figure on this surface is printed with (the ledger's own label)."""
+    lw = data.ledger
+    return lw.window if lw is not None else f"{data.executed_window_hours:g}h"
+
+
+def _spent_text(data: SessionSummaryData) -> str:
+    """``$X (n=N, window)`` from the ledger's spend figure, or ``n/a`` (no usage database)."""
+    from llm_router import ledger_view as lv
+
+    fig = data.ledger.figures().get("spent") if data.ledger is not None else None
+    if lv.show(fig) is None:
+        return "n/a (no usage database)"
+    return f"{_fmt_cost(fig.value)} (n={fig.n:,}, {fig.window})"
+
+
+def _latency_text(data: SessionSummaryData) -> str:
+    """Latency percentiles over RECORDED latencies only, with how many rows recorded one."""
+    from llm_router import ledger_view as lv
+
+    lw = data.ledger
+    if lw is None:
+        return "n/a (no ledger)"
+    shown = [(label, lv.show(getattr(lw, f"latency_{label}"), "{:.0f}")) for label in ("p50", "p95", "p99")]
+    if any(v is None for _l, v in shown):
+        why = next((f.na_reason for f in (lw.latency_p50,) if f is not None and f.na_reason), "not recorded")
+        return f"n/a ({why}, {lw.window})"
+    return (" · ".join(f"{label} {v} ms" for label, v in shown)
+            + f" (n={lw.latency_n_recorded} of {lw.latency_n_total} rows, {lw.window})")
+
+
+def _tier_label(tier: str, n: int) -> str:
+    return f"{UNCLASSIFIED} ({n})" if tier == Tier.UNKNOWN.value else tier
+
+
+def _provider_rows(data: SessionSummaryData) -> list[tuple[str, int, float]]:
+    """Top eight named providers by calls, then ``unclassified (n)`` when any row had none."""
+    named = sorted(((p, c) for p, c in data.provider_counts.items() if p != UNCLASSIFIED),
+                   key=lambda kv: -kv[1])[:8]
+    rows = [(p, c, data.provider_costs.get(p, 0.0)) for p, c in named]
+    unc = data.provider_counts.get(UNCLASSIFIED)
+    if unc:
+        rows.append((f"{UNCLASSIFIED} ({unc})", unc, data.provider_costs.get(UNCLASSIFIED, 0.0)))
+    return rows
+
+
 def _render_sparkline(values: list[float], width: int = 24) -> str:
     """Render a list of floats as a unicode bar sparkline."""
     if not values:
@@ -500,6 +540,8 @@ def _render_sparkline(values: list[float], width: int = 24) -> str:
 
 
 def _fmt_cost(usd: float) -> str:
+    if usd < 0:                       # signed, never clamped: a loss must read as a loss
+        return "-" + _fmt_cost(-usd)
     if usd >= 1.0:
         return f"${usd:.2f}"
     if usd >= 0.01:
@@ -600,18 +642,19 @@ def render(data: SessionSummaryData, *, console=None) -> None:
         ("Verified savings  ", "bold"),
         (_verified_label, "bold green" if data.verified_usd > 0 else "white"),
     )
-    headline_lines = [headline_text]
+    _win = _window_label(data)
+    headline_lines = [headline_text, Text(f"window {_win}", style="dim")]
     if _unverified_str:
-        headline_lines.append(Text(_unverified_str, style="dim yellow"))
+        headline_lines.append(Text(f"{_unverified_str}, {_win}", style="dim yellow"))
     # baseline_cost_usd/savings_usd below are a routing-decision COUNTERFACTUAL
     # ("what if every prompt had gone to always-premium instead") — never a
     # dollar figure anyone was actually charged or credited — so it stays out
     # of the headline and is labelled as vs-baseline, not as "saved".
     spend_line = Text.assemble(
         ("Spent ", "dim"),
-        (_fmt_cost(data.total_cost_usd), "bold"),
+        (_spent_text(data), "bold"),
         ("  ·  vs always-premium baseline ", "dim"),
-        (_fmt_cost(data.baseline_cost_usd), "dim"),
+        (f"{_fmt_cost(data.baseline_cost_usd)} (lineage.db estimate, n={data.total_decisions}, {_win})", "dim"),
     )
     decisions_line = Text.assemble(
         (format_executed_routes(data.executed, data.executed_window_hours), "bold"),
@@ -619,8 +662,6 @@ def render(data: SessionSummaryData, *, console=None) -> None:
         (f"{data.total_decisions} classified (hints)", "bold"),
         ("  ·  ", "dim"),
         (_fmt_duration(data.duration_seconds), "dim"),
-        ("  ·  ", "dim"),
-        (f"{data.total_latency_ms / max(1, data.total_decisions):.0f} ms avg", "dim"),
     )
     ledger_text = ([Text(data.ledger.line(), style="dim")] if data.ledger is not None else [])
     headline = Panel(
@@ -663,11 +704,12 @@ def render(data: SessionSummaryData, *, console=None) -> None:
         bar = ProgressBar(total=max_calls, completed=n,
                           complete_style=color, finished_style=color)
         tier_table.add_row(
-            Text(tier, style=color),
+            Text(_tier_label(tier, n), style=color),
             str(n), _fmt_cost(cost), bar,
         )
     tier_panel = Panel(tier_table,
-                       title=f"{_LLM_ROUTER_PANEL_PREFIX}Tier distribution",
+                       title=f"{_LLM_ROUTER_PANEL_PREFIX}Tier distribution  "
+                             f"(n={data.total_decisions}, {_win})",
                        border_style="green", padding=(0, 1))
 
     # ── PROVIDERS ─────────────────────────────────────────────────────
@@ -676,16 +718,11 @@ def render(data: SessionSummaryData, *, console=None) -> None:
     provider_table.add_column("Provider")
     provider_table.add_column("Calls", justify="right")
     provider_table.add_column("Cost", justify="right")
-    for provider, count in sorted(
-        data.provider_counts.items(), key=lambda kv: -kv[1]
-    )[:8]:
-        provider_table.add_row(
-            provider,
-            str(count),
-            _fmt_cost(data.provider_costs.get(provider, 0.0)),
-        )
+    for provider, count, pcost in _provider_rows(data):
+        provider_table.add_row(provider, str(count), _fmt_cost(pcost))
     provider_panel = Panel(provider_table,
-                           title=f"{_LLM_ROUTER_PANEL_PREFIX}Providers",
+                           title=f"{_LLM_ROUTER_PANEL_PREFIX}Providers  "
+                                 f"(n={data.total_decisions}, {_win})",
                            border_style="cyan", padding=(0, 1))
 
     # ── INVERSIONS ────────────────────────────────────────────────────
@@ -800,7 +837,7 @@ def render(data: SessionSummaryData, *, console=None) -> None:
         punch_parts.append(
             f"caught {data.pii_catches} PII leak(s) → forced local"
         )
-    if data.savings_usd > 0:
+    if data.savings_usd != 0:     # signed: a negative saving prints as a loss, never dropped
         # Point 8/12: baseline-equivalent COUNTERFACTUAL, not a verified saving
         # — see the headline panel above for the actually-observed figure. n
         # is the row count this estimate was computed over (CLAUDE.md: "a rate
@@ -809,7 +846,7 @@ def render(data: SessionSummaryData, *, console=None) -> None:
         punch_parts.append(
             f"≈{_fmt_cost(data.savings_usd)} "
             f"({data.savings_pct * 100:.0f}%) vs always-premium baseline "
-            f"(unverified, n={data.total_decisions})"
+            f"(unverified, n={data.total_decisions}, {_win})"
         )
     punchline = "  ·  ".join(punch_parts) + "."
     punchline_panel = Panel(
@@ -820,26 +857,20 @@ def render(data: SessionSummaryData, *, console=None) -> None:
     )
 
     # ── LATENCY DISTRIBUTION ──────────────────────────────────────────
-    latency_panel = None
+    # Percentiles are the ledger's, over RECORDED latencies only; n/a when none was recorded.
+    lat_summary = Text(f"latency {_latency_text(data)}", style="bold")
     if data.latencies_ms:
-        hist_lines = _histogram(data.latencies_ms, buckets=10, width=30)
-        hist_text = Text("\n".join(hist_lines), style="cyan")
-        lat_summary = Text.assemble(
-            ("p50: ", "dim"),
-            (f"{data.latency_p50_ms} ms", "bold green"),
-            ("    p95: ", "dim"),
-            (f"{data.latency_p95_ms} ms",
-             "bold yellow" if data.latency_p95_ms > 5000 else "bold"),
-            ("    p99: ", "dim"),
-            (f"{data.latency_p99_ms} ms",
-             "bold red" if data.latency_p99_ms > 10000 else "bold"),
-        )
-        latency_panel = Panel(
-            Group(lat_summary, Text(""), hist_text),
-            title=f"{_LLM_ROUTER_PANEL_PREFIX}Latency distribution",
-            border_style="cyan",
-            padding=(0, 1),
-        )
+        hist_text = Text("\n".join(_histogram(data.latencies_ms, buckets=10, width=30)), style="cyan")
+        lat_body = Group(lat_summary, Text(f"lineage histogram, n={len(data.latencies_ms)} recorded", style="dim"),
+                         hist_text)
+    else:
+        lat_body = lat_summary
+    latency_panel = Panel(
+        lat_body,
+        title=f"{_LLM_ROUTER_PANEL_PREFIX}Latency distribution",
+        border_style="cyan",
+        padding=(0, 1),
+    )
 
     # ── SIGNATURE — sign-off line for brand consistency ───────────────
     # Keeps the dashboard feeling like one product, not a stack of tables.
@@ -896,16 +927,16 @@ def render_markdown(data: SessionSummaryData) -> str:
     # _verified_and_unverified_strings' docstring for what "verified" means
     # here (savings_stats, not the lineage-derived baseline estimate below).
     _verified_label, _unverified_str = _verified_and_unverified_strings(data)
-    out.append(f"- **Verified savings:** {_verified_label}")
+    _win = _window_label(data)
+    out.append(f"- **Verified savings:** {_verified_label}, {_win}")
     if _unverified_str:
-        out.append(f"  {_unverified_str}")
+        out.append(f"  {_unverified_str}, {_win}")
+    # P3.4-B5: "Spent" is the ledger's spend (n + window) or n/a; the always-premium figure is the
+    # lineage counterfactual, so it names its source, n and window (it is not a ledger figure).
+    out.append(f"- **Spent:** {_spent_text(data)}")
     out.append(
-        f"- **Session cost:** {_fmt_cost(data.total_cost_usd)}  "
-        f"_(baseline {_fmt_cost(data.baseline_cost_usd)})_"
-    )
-    out.append(
-        f"- **Savings vs always-premium (unverified, baseline-equivalent, "
-        f"n={data.total_decisions}):** "
+        f"- **Savings vs always-premium (unverified, baseline-equivalent, lineage.db estimate, "
+        f"n={data.total_decisions}, {_win}):** "
         f"**{_fmt_cost(data.savings_usd)} ({data.savings_pct * 100:.0f}%)**"
     )
     out.append(f"- **Executed routes:** {format_executed_routes(data.executed, data.executed_window_hours)}")
@@ -916,10 +947,7 @@ def render_markdown(data: SessionSummaryData) -> str:
         out.append(f"- **Local share by cause:** {_cause_line.removeprefix('local by cause: ')}")
     out.append(f"- **Classified prompts (hints):** {data.total_decisions}")
     out.append(f"- **Session duration:** {_fmt_duration(data.duration_seconds)}")
-    out.append(
-        f"- **Avg latency:** "
-        f"{data.total_latency_ms / max(1, data.total_decisions):.0f} ms"
-    )
+    out.append(f"- **Latency:** {_latency_text(data)}")
     out.append("")
 
     out.append("## Spend pattern\n")
@@ -927,7 +955,7 @@ def render_markdown(data: SessionSummaryData) -> str:
         out.append(f"```\n{_render_sparkline(data.cost_sparkline)}\n```")
     out.append("")
 
-    out.append("## Tier distribution\n")
+    out.append(f"## Tier distribution (n={data.total_decisions}, {_win})\n")
     out.append("| Tier | Calls | Cost |")
     out.append("|---|---:|---:|")
     for tier in [Tier.LOCAL.value, Tier.CHEAP.value, Tier.MID.value,
@@ -936,14 +964,14 @@ def render_markdown(data: SessionSummaryData) -> str:
         if n == 0:
             continue
         c = data.tier_costs.get(tier, 0.0)
-        out.append(f"| `{tier}` | {n} | {_fmt_cost(c)} |")
+        out.append(f"| `{_tier_label(tier, n)}` | {n} | {_fmt_cost(c)} |")
     out.append("")
 
-    out.append("## Providers\n")
+    out.append(f"## Providers (n={data.total_decisions}, {_win})\n")
     out.append("| Provider | Calls | Cost |")
     out.append("|---|---:|---:|")
-    for p, n in sorted(data.provider_counts.items(), key=lambda kv: -kv[1])[:8]:
-        out.append(f"| `{p}` | {n} | {_fmt_cost(data.provider_costs[p])} |")
+    for p, n, pc in _provider_rows(data):
+        out.append(f"| `{p}` | {n} | {_fmt_cost(pc)} |")
     out.append("")
 
     out.append("## Routing health\n")

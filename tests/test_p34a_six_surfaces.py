@@ -280,16 +280,13 @@ def _summary_markdown() -> str:
     return summary.render_markdown(summary.collect(LineageStore(), SessionStore(), since_seconds=86400.0))
 
 
-@pytest.mark.xfail(strict=True, reason="P3.4-B5: summary prints 'Avg latency: 0 ms' for rows that "
-                   "recorded no latency (latency_ms or 0); unknown must read n/a")
 def test_summary_does_not_print_unrecorded_latency_as_zero(six):
     md = _summary_markdown()
     assert "Classified prompts (hints):** 3" in md        # the three rows without latency are in
-    assert "Avg latency:** 0 ms" not in md
+    assert "Avg latency" not in md and "0 ms" not in md
+    assert "**Latency:** n/a (no latency recorded (0 of 6 rows), 24h)" in md   # 6 = hand-counted 24h rows
 
 
-@pytest.mark.xfail(strict=True, reason="P3.4-B5: summary headline prints cost and savings figures "
-                   "with no window (and the always-premium line has no ledger source)")
 def test_summary_headline_figures_carry_n_and_window(six):
     head = _summary_markdown().split("## Spend pattern")[0]
     assert _ungrounded(head, "\n") == [], head
@@ -393,3 +390,84 @@ def test_proxy_auth_decides_subscription_vs_paid(tmp_path):
     proxy.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
     w = lv.window_summary("24h", now=NOW, db_path=tmp_path / "absent.db", proxy_path=proxy)
     assert (w.local_n, w.subscription_n, w.paid_n) == (1, 1, 1)
+
+
+# -- P3.4-B5 (F70): what `llm-router summary` itself prints ---------------------------------------
+# Evidence: F70 showed "Avg latency: 0 ms" for rows that recorded none (`latency_ms or 0`), a tier
+# "unknown", `Spent $0.00` for subscription traffic and a headline with no window or source.
+
+def _set_latency(six, value) -> None:
+    con = sqlite3.connect(six.db)
+    con.execute("UPDATE routing_decisions SET latency_ms = ?", (value,))
+    con.commit()
+    con.close()
+
+
+def test_latency_percentiles_come_from_recorded_rows_with_their_n(six):
+    _set_latency(six, 250.0)
+    md = _summary_markdown()
+    # 6 = the hand-counted routing_decisions rows of the 24h window (the 3 proxy rows carry no latency)
+    assert "**Latency:** p50 250 ms · p95 250 ms · p99 250 ms (n=6 of 6 rows, 24h)" in md, md
+
+
+def test_a_zero_latency_is_not_a_recorded_latency(six):
+    _set_latency(six, 0.0)       # the writers' `latency_ms or 0.0` default for "not measured"
+    md = _summary_markdown()
+    assert "**Latency:** n/a" in md and "0 ms" not in md, md
+
+
+def test_tier_and_provider_panels_name_unclassified_with_n(six):
+    md = _summary_markdown()
+    tiers = md.split("## Tier distribution")[1].split("## Providers")[0]
+    assert "`unclassified (3)` | 3 |" in tiers and "unknown" not in tiers.replace("(n=3", ""), tiers
+    assert "(n=3, 24h)" in md.split("## Tier distribution")[1].splitlines()[0]
+    from llm_router.agents import SessionStore
+    from llm_router.observability import summary
+
+    class _Rows:                      # a row whose model cannot name a provider
+        def recent(self, limit=5000):
+            return [{"timestamp": time.time(), "model_chosen": "", "model_tier": None, "host": "h",
+                     "cost_usd": 0.0}]
+
+    data = summary.collect(_Rows(), SessionStore(), since_seconds=86400.0)
+    providers = md_providers = summary.render_markdown(data).split("## Providers")[1].split("## Routing")[0]
+    assert "`unclassified (1)` | 1 |" in providers, md_providers
+
+
+def test_spent_carries_n_and_window_or_is_na(six):
+    md = _summary_markdown()
+    line = next(ln for ln in md.splitlines() if ln.startswith("- **Spent:**"))
+    assert " (n=" in line and line.endswith(", 24h)"), line
+    six.db.unlink()                    # no usage database: unknown, never $0.00
+    md = _summary_markdown()
+    assert "- **Spent:** n/a (no usage database)" in md, md
+
+
+def test_lineage_counterfactual_names_its_source_n_and_window(six):
+    md = _summary_markdown()
+    line = next(ln for ln in md.splitlines() if "always-premium" in ln)
+    assert "lineage.db estimate" in line and "n=3" in line and "24h" in line, line
+
+
+def test_a_negative_saving_renders_signed_not_clamped(six):
+    """rv-613: a loss prints with its sign on the summary surface (markdown and terminal)."""
+    from rich.console import Console
+
+    from llm_router.agents import SessionStore
+    from llm_router.observability import summary
+
+    assert summary._fmt_cost(-2.5) == "-$2.50" and summary._fmt_cost(0.0) == "$0.00"
+
+    class _Loss:                       # 100 tokens priced far above the always-premium baseline
+        def recent(self, limit=5000):
+            return [{"timestamp": time.time(), "model_chosen": "x/y", "model_tier": "premium",
+                     "host": "h", "cost_usd": 5.0, "input_tokens": 100, "output_tokens": 100}]
+
+    data = summary.collect(_Loss(), SessionStore(), since_seconds=86400.0)
+    assert data.savings_usd < 0
+    md = summary.render_markdown(data)
+    line = next(ln for ln in md.splitlines() if "always-premium" in ln)
+    assert "**-$" in line and "(-" in line, line          # signed amount and signed percentage
+    console = Console(record=True, width=200)
+    summary.render(data, console=console)
+    assert "≈-$" in console.export_text()
