@@ -156,13 +156,14 @@ def _panel(**kw) -> str:
     console = Console(record=True, width=120, file=io.StringIO())
     console.print(SessionSummaryDashboard(console=console).render_main_panel(
         decisions=[{"method": "heuristic", "count": 5}], executed_routes=None, **kw))
-    return console.export_text()
+    # The panel is narrow and wraps a long line: compare the words, not the box.
+    return " ".join(re.sub(r"[│╭╮╰╯─━]", " ", console.export_text()).split())
 
 
 def test_effective_and_escalated_show_the_unclassified_count():
     text = _panel(routing_effectiveness_pct=50.0, escalation_count=1, escalation_pct=25.0,
                   unclassified_count=2, decisions_n=4, session_basis="n=4, session abc")
-    assert re.search(r"Effective:.*50%.*\(2 unclassified\)", text), text
+    assert re.search(r"Effective: 50% \(2 unclassified\)", text), text
     assert re.search(r"Escalated 1 \(25%\) \(2 unclassified\)", text), text
 
 
@@ -171,7 +172,7 @@ def test_effective_and_escalated_are_na_when_every_row_is_unclassified():
                   unclassified_count=3, decisions_n=3, session_basis="n=3, session abc")
     assert re.search(r"Effective: n/a \(3 unclassified\)", text), text
     assert re.search(r"Escalated n/a \(3 unclassified\)", text), text
-    assert "Escalated 0" not in text and "0%" not in text
+    assert "Escalated 0" not in text and "Effective: 0" not in text
 
 
 def test_a_fully_classified_session_prints_no_unclassified_note():
