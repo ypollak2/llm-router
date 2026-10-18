@@ -162,3 +162,61 @@ def test_the_sync_path_still_reads_only_the_cache(hook, monkeypatch, tmp_path, c
     hook.main()
     out = json.loads(capsys.readouterr().out)
     assert out["hookSpecificOutput"]["systemMessage"] == line
+
+
+def _break_ledger_import(monkeypatch, exc: BaseException):
+    """Make ``from llm_router import ledger_view`` raise ``exc`` at import time (F92)."""
+    import importlib.abc
+
+    class _Boom(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path, target=None):
+            if fullname == "llm_router.ledger_view":
+                raise exc
+            return None
+
+    import llm_router
+
+    monkeypatch.delitem(sys.modules, "llm_router.ledger_view", raising=False)
+    monkeypatch.delattr(llm_router, "ledger_view", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [_Boom(), *sys.meta_path])
+
+
+def test_a_non_import_error_in_the_ledger_import_degrades_to_na_and_is_counted(hook, monkeypatch, tmp_path):
+    """F92: ``_lv`` caught only ImportError, so a RuntimeError inside the package left the refresher
+    raising and the bar showing the last good line. Now it is counted (class only) and the line
+    is n/a."""
+    from llm_router import failopen
+
+    failopen.clear()
+    _break_ledger_import(monkeypatch, RuntimeError("secret-detail-text"))
+    assert hook._lv() is None
+    failopen.reset_cache()
+    assert failopen.snapshot().by_code == {"CHZ-FO-STATUS-BAR-LEDGER-IMPORT": 1}
+    stored = failopen.store_path().read_text(encoding="utf-8")
+    assert "RuntimeError" in stored and "secret-detail-text" not in stored      # class only
+    for mode in ("compact", "full"):
+        hook.STATUS_MODE = mode
+        line = ANSI.sub("", hook._format_status())
+        assert "\U0001f4b0 n/a" in line or "D:n/a" in line, line
+        assert "$0" not in line, line
+
+
+def test_the_refresher_replaces_a_stale_line_when_the_ledger_import_breaks(hook, monkeypatch, tmp_path):
+    stale = "\U0001f4ca STALE LINE D:$9.99·today n=3"
+    hook._write_cache(stale)
+    _break_ledger_import(monkeypatch, RuntimeError("boom"))
+    hook._refresh_cache()
+    line, _age = hook._read_cache()
+    assert line is not None and "STALE LINE" not in line, line
+    assert "n/a" in ANSI.sub("", line) and "$9.99" not in line, line
+
+
+def test_an_import_error_is_still_the_silent_standalone_case(hook, monkeypatch):
+    """The standalone copy (ImportError) is not a failure: nothing is counted."""
+    from llm_router import failopen
+
+    failopen.clear()
+    _break_ledger_import(monkeypatch, ImportError("no package"))
+    assert hook._lv() is None
+    failopen.reset_cache()
+    assert failopen.snapshot().by_code == {}

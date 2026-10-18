@@ -177,6 +177,22 @@ def test_flagged_hook_surfaces_point_at_a_named_function_that_exists():
         assert fn in defs, f"{rel} has no function {fn}"
 
 
+def test_every_surface_ref_names_a_function_that_exists():
+    """F95: a line number drifts (rv-618: two lines in a day). EVERY ``SURFACES`` entry is
+    ``file:function`` and the function is defined in that file; a numeric ref fails."""
+    from llm_router.savings import SURFACES
+
+    assert len(SURFACES) >= 20                        # an empty registry would pass the loop
+    for s in SURFACES:
+        rel, _, ref = s.where.partition(":")
+        assert ref.isidentifier(), f"{s.id}: {s.where!r} must be file:function, not a line number"
+        path = SRC / rel
+        assert path.is_file(), f"{s.id}: no file {rel}"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        defs = {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        assert ref in defs, f"{s.id}: {rel} has no function {ref}"
+
+
 def test_named_windows_table():
     from llm_router import ledger_view as lv
 

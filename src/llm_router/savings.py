@@ -471,22 +471,22 @@ class Surface:
 #: grew because nobody could see how many there were; a list that a test
 #: enforces means the twenty-first has to join it.
 SURFACES: tuple[Surface, ...] = (
-    Surface("mcp_session_dashboard", "tools/admin.py:963", True),
-    Surface("cli_savings_report", "commands/savings_report.py:100", True,
+    Surface("mcp_session_dashboard", "tools/admin.py:llm_session_dashboard", True),
+    Surface("cli_savings_report", "commands/savings_report.py:_canonical_headline", True,
             "headline from canonical_savings; the per-model free/paid "
             "breakdown still reads savings_stats (the only table carrying it) "
             "but is now provenance-filtered the same way, and the ledger total "
             "is shown BESIDE the canonical figure, never instead of it", ledger_view=True),
-    Surface("cli_share", "commands/share.py:242", False,
+    Surface("cli_share", "commands/share.py:render_svg", False,
             "SONNET baseline BY DESIGN — the card's framing is 'cheaper than "
             "always-Sonnet', so canonicalising the baseline would change what "
             "it claims, not just what it computes. Now provenance-filtered "
             "(a published number must not carry the project's own benchmark "
             "rows) and every dollar figure states its baseline"),
-    Surface("cli_gain", "commands/gain.py:262", False,
+    Surface("cli_gain", "commands/gain.py:compute_savings", False,
             "raw SQL over routing_decisions; no filter; hardcoded per-model "
             "multiplier table as a fourth baseline methodology"),
-    Surface("cli_status_premium", "ui/status_premium.py:134", False,
+    Surface("cli_status_premium", "ui/status_premium.py:render_routing_savings", False,
             "dashboard_data.summary -> ledger_view (P3.4-A): production provenance "
             "and the named localtime windows; still not canonical_savings()", ledger_view=True),
     Surface("hook_session_end_headline", "hooks/session-end.py:_net_session_line", False,
@@ -497,10 +497,10 @@ SURFACES: tuple[Surface, ...] = (
             "the Stop's cached aggregates: the 24h and today windows embed ledger_view."
             "LedgerWindow (P3.4-B4), lifetime is dashboard_data.query_window -> ledger_view; "
             "still not canonical_savings()", ledger_view=True),
-    Surface("hook_session_end_clawcode", "hooks/session-end-clawcode.py:159", False,
+    Surface("hook_session_end_clawcode", "hooks/session-end-clawcode.py:_format_routing_section", False,
             "raw SQL over usage; unfiltered; CLAMPED to >= 0, so it disagrees "
             "with the unclamped headline on the same rows"),
-    Surface("hook_status_bar", "hooks/status-bar.py:279", False,
+    Surface("hook_status_bar", "hooks/status-bar.py:_money_part", False,
             "D:/W:/M: from ledger_view.window_summary (P3.4-B3), local-time windows, each "
             "with n and window; signed, n/a when unknown; still not canonical_savings()",
             ledger_view=True),
@@ -508,36 +508,36 @@ SURFACES: tuple[Surface, ...] = (
             "the statusline's mix and money come from ledger_view.window_summary "
             "(P3.4-B2, D-218: session for the mix, today for money); still not "
             "canonical_savings()", ledger_view=True),
-    Surface("hook_status_bar_clawcode", "hooks/status-bar-clawcode.py:100", False,
+    Surface("hook_status_bar_clawcode", "hooks/status-bar-clawcode.py:_read_session_stats", False,
             "raw SQL over usage; unfiltered; clamped"),
-    Surface("observability_surface_status", "observability/surface_status.py:391", False,
+    Surface("observability_surface_status", "observability/surface_status.py:_read_stats_records", False,
             "raw SQL over savings_stats, last 2000 rows only; unfiltered"),
-    Surface("cli_explain_dashboard", "commands/explain_dashboard.py:225", True,
+    Surface("cli_explain_dashboard", "commands/explain_dashboard.py:_savings_panel_block", True,
             "its per-panel figures stay RAW on purpose — this command exists "
             "to show why the panels disagree, and filtering them would hide "
             "the rows causing it. What was missing was a reference to compare "
             "against; it now prints the canonical figure at the top and says "
             "the panels below are deliberately unfiltered"),
-    Surface("web_dashboard_tiles", "dashboard/server.py:1039", False,
+    Surface("web_dashboard_tiles", "dashboard/server.py:_get_stats", False,
             "raw SQL over usage; unfiltered; SONNET baseline"),
-    Surface("web_dashboard_metrics", "dashboard/server.py:1276", False,
+    Surface("web_dashboard_metrics", "dashboard/server.py:handle_metrics", False,
             "cost.get_savings_by_period — filtered, but GROSS and Opus-based", ledger_view=True),
-    Surface("mcp_llm_savings", "tools/admin.py:672", False,
+    Surface("mcp_llm_savings", "tools/admin.py:llm_savings", False,
             "cost.get_savings_by_period — filtered; splits 'Avoided' from "
             "'Real $' on its own axis", ledger_view=True),
-    Surface("mcp_llm_usage_cache", "tools/admin.py:159", False,
+    Surface("mcp_llm_usage_cache", "tools/admin.py:llm_usage", False,
             "cost.get_cache_savings — filtered, gross"),
-    Surface("mcp_llm_usage_routing", "tools/admin.py:175", False,
+    Surface("mcp_llm_usage_routing", "tools/admin.py:llm_usage", False,
             "cost.get_savings_summary — filtered, gross, claude_usage only"),
-    Surface("mcp_llm_usage_lifetime", "tools/admin.py:207", False,
+    Surface("mcp_llm_usage_lifetime", "tools/admin.py:llm_usage", False,
             "cost.get_routing_savings_vs_sonnet — named for Sonnet, baselines "
             "against Opus"),
-    Surface("mcp_llm_stream_envelope", "tools/routing.py:621", False,
+    Surface("mcp_llm_stream_envelope", "tools/routing.py:llm_auto", False,
             "cost.get_lifetime_savings_summary — labelled 'net saved' but nets "
             "against spend, not overhead"),
-    Surface("cli_team", "commands/team.py:69", False,
+    Surface("cli_team", "commands/team.py:_run_team", False,
             "cost.get_team_savings — filtered, gross; broadcast to Slack"),
-    Surface("terminal_session_summary", "observability/summary.py:218", False,
+    Surface("terminal_session_summary", "observability/summary.py:_verified_and_unverified_strings", False,
             "PR5: does not call canonical_savings() (that reads claude_usage/"
             "codex_usage/gemini_usage, a DIFFERENT table with no realized-vs-"
             "discarded provenance). P3.4-A: verified/unverified dollars, executed-by-provider "
@@ -545,7 +545,7 @@ SURFACES: tuple[Surface, ...] = (
             "side effect), the same figures dashboard_data.summary prints for the same window; "
             "shown beside the lineage-derived baseline-equivalent estimate (a routing-decision "
             "counterfactual, not a verified saving), never instead of it", ledger_view=True),
-    Surface("cli_kpi_o1", "commands/kpi.py:1505", False,
+    Surface("cli_kpi_o1", "commands/kpi.py:_o1_quota_avoided", False,
             "O1's estimate is dashboard_data.summary -> ledger_view (P3.4-A); the "
             "reconciled branch reads the proxy ledger's real per-call usage instead", ledger_view=True),
 )

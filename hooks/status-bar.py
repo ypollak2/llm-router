@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 8
+# llm_router-hook-version: 9
 """UserPromptSubmit hook — enhanced savings + routing status bar.
 
 Displays a two-mode status line:
@@ -223,12 +223,27 @@ def _now() -> float:
 
 def _lv():
     """``llm_router.ledger_view``, or None for a standalone copy without the package: the
-    caller then prints n/a and scans nothing."""
+    caller then prints n/a and scans nothing. Any OTHER import-time error inside the package
+    (F92) is counted (class only) and degrades the same way: the refresher then caches ``💰 n/a``
+    instead of raising and leaving the last good line on screen."""
     try:
         from llm_router import ledger_view
     except ImportError:
         return None
+    except Exception as exc:  # noqa: BLE001 -- counted below; the figures degrade to n/a
+        _failopen("CHZ-FO-STATUS-BAR-LEDGER-IMPORT", exc)
+        return None
     return ledger_view
+
+
+def _failopen(code: str, exc: BaseException) -> None:
+    """Count a swallowed exception (class name only, no text); never raises."""
+    try:
+        from llm_router import failopen
+
+        failopen.record(code, exc)
+    except Exception:  # noqa: BLE001 -- accounting must not raise; the package may be what is broken
+        return
 
 
 def _ledger_window(lv, window: str):
