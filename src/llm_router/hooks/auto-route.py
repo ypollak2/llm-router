@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 64
+# llm_router-hook-version: 65
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 64"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 65"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -5109,7 +5109,8 @@ def main() -> None:
         complexity = "simple"
         tool       = "llm_query"
         method     = "intent-override-display"
-    elif last_route and _is_short_code_followup(prompt, last_route):
+    elif (last_route and _is_short_code_followup(prompt, last_route)
+            and not _is_coordination_task(prompt)):
         # v6.13: Check code-context-inherit BEFORE generic context-inherit so
         # short follow-ups after code tasks get the specific telemetry label.
         # Negative continuations (no/stop/skip) still downgrade to query —
@@ -5125,7 +5126,8 @@ def main() -> None:
             tool       = last_route["tool"]
             method     = "code-context-inherit"
         # Don't save — preserve original code context for subsequent turns.
-    elif last_route and _is_continuation(prompt):
+    elif (last_route and _is_continuation(prompt)
+            and not _is_coordination_task(prompt)):
         task_type  = last_route["task_type"]
         complexity = last_route["complexity"]
         tool       = last_route["tool"]

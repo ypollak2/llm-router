@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 18
+# llm_router-hook-version: 20
 """PreToolUse[*] hook — enforce routing compliance.
 
 When auto-route.py issues a ⚡ MANDATORY ROUTE directive, it writes a
@@ -464,8 +464,7 @@ _BASH_LOCAL_TOOL_RE = re.compile(
         mkdir|rmdir|rm|mv|cp|cd|chmod|chown|chgrp|ln|touch|# filesystem
         docker|docker-compose|kubectl|helm|terraform|ansible| # infra (local CLI)
         sed|awk|sort|uniq|cut|tr|xargs|tee|jq|             # local text pipelines
-        python|python3|                                    # local script runner
-        llm-router|llm_router                              # the router's OWN cli
+        python|python3                                     # local script runner
     )(?:\s|$|;|\||&)""",
     re.VERBOSE | re.IGNORECASE,
 )
@@ -482,6 +481,36 @@ _BASH_ROUTABLE_ESCAPE_RE = re.compile(
     )""",
     re.VERBOSE | re.IGNORECASE,
 )
+
+
+# F60: `python -c 'import openai; ...'` passed because `python` is a local tool.
+# An INLINE python program (-c, stdin `-`, or a heredoc) that names a provider
+# SDK or a provider API host is a shell-driven LLM call and stays route-eligible.
+# `python script.py`, `python -m pytest` and `python -c 'print(1)'` stay exempt.
+_PY_INLINE_RE = re.compile(
+    r"\bpython[0-9.]*\s+(?:-[A-Za-z]*c\b|-(?:\s|<|$)|[^|;&\n]*<<)",
+    re.IGNORECASE,
+)
+_PY_PROVIDER_RE = re.compile(
+    r"""(?:
+        \b(?:import|from)\s+(?:openai|anthropic|litellm|ollama|cohere|mistralai|
+            groq|together|replicate|google\.generativeai|google\.genai|
+            google\s+import\s+genai|vertexai|langchain\w*|llm_router)\b|
+        \b__import__\(\s*['"](?:openai|anthropic|litellm|ollama|google\.genai)|
+        api\.(?:openai|anthropic|groq|mistral|cohere|together|perplexity|moonshot)\.(?:com|ai|xyz)|
+        generativelanguage\.googleapis\.com|aiplatform\.googleapis\.com|
+        openrouter\.ai|api\.deepseek\.com|api\.x\.ai|
+        localhost:11434|127\.0\.0\.1:11434
+    )""",
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
+def _is_shell_llm_call(command: str) -> bool:
+    """True when a Bash command drives another LLM from the shell (never exempt)."""
+    if _BASH_ROUTABLE_ESCAPE_RE.search(command):
+        return True
+    return bool(_PY_INLINE_RE.search(command) and _PY_PROVIDER_RE.search(command))
 
 
 # ── The router's own CLI is never held ────────────────────────────────────────
@@ -519,6 +548,37 @@ _ROUTER_SELF_CLI_RE = re.compile(
 )
 
 
+# F60: only config / admin / diagnostic subcommands are exempt. Anything that can
+# make a model call (run, judge, benchmark, soak, probe, calibrate, demo, replay,
+# quickstart, test, tui, serve, gateway, proxy, broker, ...) and any unknown word
+# stays route-eligible. Allowlist, so a newly added subcommand defaults to held.
+# Names verified against the dispatch in src/llm_router/cli.py.
+_ROUTER_ADMIN_SUBCOMMANDS = frozenset({
+    "install", "uninstall", "update", "setup", "status", "welcome", "dev-refresh",
+    "routing-health", "routing-report", "northstar", "pi", "kpi", "statusline",
+    "mod", "invoice", "cp", "routing", "profile", "init-claude-memory", "sessions",
+    "okf", "provider", "inventory", "map", "prefer", "mode", "resolve", "semantic",
+    "doctor", "dashboard", "summary", "share", "onboard", "config", "init-policy",
+    "set-enforce", "team", "budget", "verify", "audit", "last", "gc", "gain",
+    "retrospect", "snapshot", "stats", "savings-report", "test-delta", "migrate",
+    "team-sync", "policy", "explain-dashboard", "discover", "version", "help",
+})
+_ROUTER_ADMIN_FLAGS = frozenset({"-h", "--help", "-V", "--version"})
+_ROUTER_SUB_RE = re.compile(r"\s*(\S*)")
+
+
+def _router_invocations_admin_only(command: str) -> bool:
+    """Every llm-router invocation in `command` names an admin subcommand."""
+    found = False
+    for m in _ROUTER_SELF_CLI_RE.finditer(command):
+        found = True
+        word = _ROUTER_SUB_RE.match(command, m.end()).group(1)
+        word = word.rstrip(";|&")
+        if word not in _ROUTER_ADMIN_SUBCOMMANDS and word not in _ROUTER_ADMIN_FLAGS:
+            return False
+    return found
+
+
 def _is_router_self_command(command: str) -> bool:
     """True when the command drives llm-router's own CLI.
 
@@ -527,9 +587,9 @@ def _is_router_self_command(command: str) -> bool:
     """
     if not command or not command.strip():
         return False
-    if _BASH_ROUTABLE_ESCAPE_RE.search(command):
+    if _is_shell_llm_call(command):
         return False
-    return bool(_ROUTER_SELF_CLI_RE.search(command))
+    return _router_invocations_admin_only(command)
 
 
 def _bash_exempt_from_hold(task_type: str, command: str, redirect_fires: bool) -> bool:
@@ -555,11 +615,40 @@ def _bash_exempt_from_hold(task_type: str, command: str, redirect_fires: bool) -
     """
     if not command or not command.strip():
         return False
-    if _BASH_ROUTABLE_ESCAPE_RE.search(command):
+    if _is_shell_llm_call(command):
         return False
     if task_type in _QA_TASK_TYPES or task_type == "code" or redirect_fires:
         return False
     return _is_local_only_bash(command)
+
+
+# F59 review: the smart-ops exemption is deny-list based, so it also refuses any
+# network fetch (with or without a scheme) and provider CLIs - shell-driven LLM
+# calls must stay route-eligible. (python -c / llm-router are governed by the
+# older local-tool and own-CLI exemptions; see F60.)
+_SMART_OPS_LLM_ESCAPE_RE = re.compile(
+    r"""(?:
+        \bcurl\b|\bwget\b|\bhttpie\b|\bhttp\s+(?:get|post)\b|
+        \b(?:openai|anthropic)\s+(?:api|messages|chat|completions)\b
+    )""",
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
+def _smart_ops_bash_exempt(enforce: str, task_type: str, command: str) -> bool:
+    """Smart mode never holds Bash for an operational ("coordination") task.
+
+    F59 (observed 2026-10-18): "deploy main now" / "merge it" classify as
+    coordination, whose commands (git fast-forward, launchctl, ...) need local
+    machine state no routed model can see. Hard mode keeps its llm_act redirect;
+    network fetches and shell-driven LLM calls stay route-eligible.
+    """
+    if enforce != "smart" or task_type != "coordination":
+        return False
+    if not command or not command.strip():
+        return False
+    return not (_is_shell_llm_call(command)
+                or _SMART_OPS_LLM_ESCAPE_RE.search(command))
 
 
 def _is_local_only_bash(command: str) -> bool:
@@ -573,11 +662,11 @@ def _is_local_only_bash(command: str) -> bool:
     """
     if not command or not command.strip():
         return False
-    if _BASH_ROUTABLE_ESCAPE_RE.search(command):
+    if _is_shell_llm_call(command):
         return False
     if _is_readonly_bash(command):
         return True
-    return bool(_BASH_LOCAL_TOOL_RE.match(command))
+    return bool(_BASH_LOCAL_TOOL_RE.match(command)) or _is_router_self_command(command)
 
 
 # ── Session-Type Tracking ─────────────────────────────────────────────────────
@@ -1322,7 +1411,8 @@ def main() -> None:
         _lb_redirect = _delegate_redirect_fires(
             pending.get("original_prompt", ""), pending.get("complexity", "simple")
         )
-        if _bash_exempt_from_hold(_lb_task, _bash_cmd, _lb_redirect):
+        if (_bash_exempt_from_hold(_lb_task, _bash_cmd, _lb_redirect)
+                or _smart_ops_bash_exempt(enforce, _lb_task, _bash_cmd)):
             enforce = "soft"
             try:
                 _router_dir().mkdir(parents=True, exist_ok=True)

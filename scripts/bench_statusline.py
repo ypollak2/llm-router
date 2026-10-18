@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -75,7 +76,9 @@ def main() -> int:
         warm.append(_run(env))
     results["warm (fresh cache)"] = warm
 
-    hang = f"{sys.executable} -c 'import time; time.sleep(60)'"
+    hang_pidfile = Path(tempfile.gettempdir()) / f"bench_statusline_hang_{os.getpid()}.pid"
+    hang = (f"{sys.executable} -c \"import os,time; open({str(hang_pidfile)!r},'w').write(str(os.getpid())); "
+            "time.sleep(60)\"")
     env_hang = {**env, "LLM_ROUTER_STATUSLINE_REFRESH_CMD": hang}
     hung = []
     for _ in range(n):
@@ -93,7 +96,12 @@ def main() -> int:
         else:
             ok &= p95 <= BAR_MS
         print(f"{name:48s} n={len(vals)} p50={p50:6.1f}ms p95={p95:6.1f}ms max={mx:6.1f}ms  {verdict} (bar {BAR_MS:.0f}ms)")
-    subprocess.run(["pkill", "-f", "time.sleep(60)"], check=False)
+    # Terminate only the sleeper this run started (it recorded its own pid), never a name match.
+    try:
+        os.kill(int(hang_pidfile.read_text().strip()), signal.SIGTERM)
+    except (OSError, ValueError):
+        pass
+    hang_pidfile.unlink(missing_ok=True)
     return 0 if ok else 1
 
 

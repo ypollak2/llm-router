@@ -260,8 +260,11 @@ def _refresh_argv() -> list[str] | None:
     return [exe, "statusline", "--refresh"] if exe else None
 
 
-def _spawn_detached(argv: list[str]) -> None:
+def _spawn_detached(argv: list[str]) -> int | None:
     """Start ``argv`` in its own session with no stdio, and do not wait for it.
+
+    Returns the child pid (callers that need to reap or stop it, e.g. the G1 evidence
+    script, use it; the hooks ignore it).
 
     ``os.fork`` + ``execv`` where it exists: importing ``subprocess`` costs ~15 ms
     a tick on this machine's python3, which is the whole margin of a 100 ms bar."""
@@ -276,11 +279,11 @@ def _spawn_detached(argv: list[str]) -> None:
                 os.execv(argv[0], argv)
             finally:
                 os._exit(127)
-        return
+        return pid
     import subprocess  # Windows: no fork
 
-    subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,  # noqa: S603
-                     stderr=subprocess.DEVNULL, close_fds=True)
+    return subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,  # noqa: S603
+                            stderr=subprocess.DEVNULL, close_fds=True).pid
 
 
 def maybe_refresh(home: str, cache: dict | None, now: float) -> bool:

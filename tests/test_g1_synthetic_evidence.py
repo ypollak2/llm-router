@@ -155,17 +155,67 @@ def test_errors_are_retried_once_then_counted(g1):
     assert len(calls) == 2 * 2 * 2  # 2 items x 2 arms x (call + one retry)
 
 
-def test_summary_coverage_comes_from_the_real_detached_workers(g1, monkeypatch):
-    res = g1.run_summary(n_sessions=20, wait_s=120)
-    assert res["label"] == g1.LABEL and res["workers_started"] == 20
-    assert res["coverage"]["n_sessions"] == 20 and res["coverage"]["covered"] == 20
-    assert res["verdict"] == "NOT INFORMATIVE"                    # 20 spawns < the 100 the bar needs
+def _inline_worker(argv):
+    """Stand-in for the detached worker: the same summary update, run in-process, no model."""
     from llm_router import context_summary as cs
 
-    real = cs.spawn
-    monkeypatch.setattr(cs, "spawn", lambda sid, p, argv=None: real(sid, p, argv=[sys.executable, "-c", "pass"]))
-    res = g1.run_summary(n_sessions=20, wait_s=2)
+    cs.maybe_update(argv[argv.index("--session") + 1], argv[argv.index("--transcript") + 1],
+                    model=None, free_pct=100.0)
+
+
+def test_summary_coverage_counts_stored_summaries(g1, monkeypatch):
+    """Evidence logic only: workers are faked (F45), so no process is started or left behind."""
+    from llm_router import statusline_tick
+
+    monkeypatch.setattr(statusline_tick, "_spawn_detached", _inline_worker)
+    res = g1.run_summary(n_sessions=20, wait_s=30)
+    assert res["label"] == g1.LABEL and res["workers_started"] == 20 and res["workers_forced_stop"] == 0
+    assert res["coverage"]["n_sessions"] == 20 and res["coverage"]["covered"] == 20
+    assert res["verdict"] == "NOT INFORMATIVE"                    # 20 spawns < the 100 the bar needs
+    monkeypatch.setattr(statusline_tick, "_spawn_detached", lambda argv: None)
+    res = g1.run_summary(n_sessions=20, wait_s=30)                # no worker: returns at once
     assert res["coverage"]["covered"] == 0                        # no worker, no summary
+
+
+def test_reap_children_stops_a_stuck_child(g1):
+    import os
+    import subprocess
+
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    try:
+        assert g1.reap_children([p.pid], grace_s=0.2, term_s=5.0) == 1
+        with pytest.raises(ProcessLookupError):
+            os.kill(p.pid, 0)
+    finally:
+        if p.poll() is None:
+            p.kill()
+            p.wait()
+
+
+def test_run_summary_stops_a_worker_that_outlives_the_wait(g1, monkeypatch):
+    import os
+    import subprocess
+
+    from llm_router import statusline_tick
+
+    children = []
+
+    def fake_spawn(argv):
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        children.append(p)
+        return p.pid
+
+    monkeypatch.setattr(statusline_tick, "_spawn_detached", fake_spawn)
+    try:
+        res = g1.run_summary(n_sessions=1, wait_s=0.3)
+        assert len(children) == 1 and res["workers_forced_stop"] == 1
+        with pytest.raises(ProcessLookupError):
+            os.kill(children[0].pid, 0)
+    finally:
+        for p in children:
+            if p.poll() is None:
+                p.kill()
+            p.wait()
 
 
 def test_summary_verdict_bars(g1):
