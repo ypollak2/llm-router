@@ -1636,6 +1636,16 @@ _ACK_NEW_REQUEST_RE = re.compile(
     r"\b(?:why|what|how|when|where|which|who|now|then|next|also|please|can you|could you|would you|will you|and (?:then )?\w+e)\b",
     re.IGNORECASE,
 )
+# A report followed by a second clause or a request verb is "report, then ask"
+# ("I fixed it, write the tests"): it must keep routing (review of #591, round 1).
+_ACK_SECOND_CLAUSE_RE = re.compile(
+    r"[,;\u2014]|\s-+\s|\s(?:so|and|then|but|while|because)\s", re.IGNORECASE)
+_ACK_REQUEST_VERB_RE = re.compile(
+    r"\b(?:write|fix|find|add|review|refactor|rewrite|summari[sz]e|explain|check|run|"
+    r"update|make|create|implement|debug|translate|test|ship|migrate|deploy|show|tell|"
+    r"list|build|generate|remove|delete|merge|push|commit|open|read|look|help)\b",
+    re.IGNORECASE,
+)
 _ACK_MAX_WORDS = 10
 
 # F69: a prompt that is just a pasted shell command ("llm-router summary`", with or
@@ -1649,14 +1659,16 @@ _CMD_EXECUTABLES = frozenset({
 _CMD_PROSE_WORDS_RE = re.compile(
     r"(?<![\w-])(?:why|what|how|when|where|which|who|is|are|was|were|does|do|did|the|a|an|my|"
     r"it|its|i|we|you|to|not|fails?|failed|please|can|could|should|would|will|"
-    r"now|then|next|also)(?![\w-])",
+    r"now|then|next|also|summari[sz]e|explain|write|fix|refactor|rewrite|translate|"
+    r"implement|describe|tell)(?![\w-])",
     re.IGNORECASE,
 )
 # Publishing/mutating shared-state commands keep the older executable-coordination
 # handling (directive + pending route so llm_act can run them; see
 # tests/test_coordination_introspection_not_routed.py), so they are not claimed here.
 _CMD_SHARED_STATE_RE = re.compile(
-    r"(?<![\w-])(?:push|merge|deploy|release|commit)(?![\w-])", re.IGNORECASE)
+    r"(?<![\w-])(?:push|merge|deploy|release|commit|publish|tag|rebase|reset|"
+    r"(?:--)?force|delete|destroy|upload|apply|rm)(?![\w-])", re.IGNORECASE)
 _CMD_MAX_WORDS = 12
 
 
@@ -1686,7 +1698,8 @@ def _is_acknowledgement(prompt: str) -> bool:
     if _ACK_ONLY_RE.match(stripped):
         return True
     rest = _ACK_LEAD_RE.sub("", stripped, count=1).strip()
-    if not rest or _ACK_NEW_REQUEST_RE.search(rest):
+    if (not rest or _ACK_NEW_REQUEST_RE.search(rest)
+            or _ACK_SECOND_CLAUSE_RE.search(rest) or _ACK_REQUEST_VERB_RE.search(rest)):
         return False
     return bool(_ACK_REPORT_RE.match(rest))
 

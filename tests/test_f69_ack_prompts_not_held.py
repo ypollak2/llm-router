@@ -168,3 +168,50 @@ def test_command_prompt_not_inherited_and_smart_bash_free(tmp_path, prompt):
 def test_question_mentioning_command_still_routes(tmp_path):
     line = _route_line(_turn("why does git rebase fail?", "c2", tmp_path))
     assert "coordination-fast-path" not in line  # unchanged: classified by the normal heuristic
+
+
+# Round-1 repair (review of #591): "report, then ask" must keep routing.
+REPORT_THEN_ASK = [
+    "I fixed it, write the tests for router.py",
+    "I pasted the logs below, find the bug",
+    "I updated the config so rewrite the parser",
+    "I fixed the import; explain the change",
+]
+# Not an ack either, but already coordination-classified on main by the ambient path
+# (F71, out of scope): only the ack verdict is asserted.
+REPORT_THEN_ASK_AMBIENT = [
+    "I pasted the diff and review it",
+    "ok I restarted it - summarise the logs",
+    "Yeah I updated the readme then refactor the hooks",
+    "I copied the file so translate it to french",
+]
+
+
+@pytest.mark.parametrize("prompt", REPORT_THEN_ASK + REPORT_THEN_ASK_AMBIENT)
+def test_report_then_ask_not_ack(auto_mod, prompt):
+    assert not auto_mod._is_acknowledgement(prompt)
+
+
+@pytest.mark.parametrize("prompt", REPORT_THEN_ASK)
+def test_report_then_ask_not_ack_and_still_routes(auto_mod, prompt):
+    assert not auto_mod._is_acknowledgement(prompt)
+    assert not auto_mod._is_coordination_task(prompt)
+
+
+OUTWARD_CMDS = [
+    "npm publish", "git tag v1.0", "git rebase --force origin/main", "git reset --hard HEAD~1",
+    "git push --force origin main", "git push -f origin main", "gh release delete v1",
+    "terraform destroy", "twine upload dist/x", "pip upload x", "docker push img:1",
+    "kubectl delete pod x", "kubectl apply -f x.yaml", "npm publish --tag next",
+]
+
+
+@pytest.mark.parametrize("prompt", OUTWARD_CMDS)
+def test_outward_commands_keep_directive(auto_mod, prompt):
+    assert not auto_mod._is_command_shaped(prompt)
+
+
+@pytest.mark.parametrize("prompt", ["cat README.md summarise", "cat README.md explain",
+                                    "grep foo src fix"])
+def test_command_plus_request_verb_not_command_shaped(auto_mod, prompt):
+    assert not auto_mod._is_command_shaped(prompt)
