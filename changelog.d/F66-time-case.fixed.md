@@ -1,0 +1,1 @@
+- `time case ...` / `time -p case ...`: the case arm bodies are now classified like any other case (the `time` prefix no longer hides them from the Bash exemption checks). (F66)

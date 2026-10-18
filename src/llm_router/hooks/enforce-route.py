@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 22
+# llm_router-hook-version: 23
 """PreToolUse[*] hook — enforce routing compliance.
 
 When auto-route.py issues a ⚡ MANDATORY ROUTE directive, it writes a
@@ -591,7 +591,7 @@ def _seg_arith_end(s: str, i: int):
 
 
 _CASE_HDR_RE = re.compile(
-    r"^(?:(?:do|then|else|elif|if|while|until|!|\{|\()\s+)*"
+    r"^(?:(?:do|then|else|elif|if|while|until|!|\{|\(|time(?:\s+-p)?)\s+)*"
     r"case\s+(?P<w>.+?)\s+in(?:\s+(?P<p>.*))?$", re.S)
 
 
