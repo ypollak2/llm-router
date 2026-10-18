@@ -1,24 +1,18 @@
-"""Framework adapter contract tests — 6 stubs (v0.0.3 implementations).
+"""Framework adapter contract tests (AGT A.6).
 
-Six framework adapters ship as stubs in v0.0.2: Hermes, LangGraph,
-CrewAI, OpenAI Agents SDK, Claude Agent SDK, Pydantic AI. Each has:
+Five thin ``base_url`` adapters sit beside Agno: LangGraph, CrewAI, OpenAI Agents SDK, Claude Agent
+SDK, Pydantic AI. (Hermes was removed: it names several tool-call formats, not one framework.)
+This suite pins what every adapter shares:
 
-    - A documented protocol shape (FrameworkAdapter)
-    - A skeleton class with placeholder behavior
-    - An *_AVAILABLE module flag that returns False until concrete impl
-    - A wrap_model() that raises NotImplementedError with a clear hint
+    1. The FrameworkAdapter protocol shape and a unique `name` matching the slug.
+    2. is_available() returns the module's *_AVAILABLE flag.
+    3. detect_agent_id() handles mock framework objects and never raises.
+    4. Importing the module is cheap (no framework dependency hit).
+    5. No adapter raises NotImplementedError (A.6-a).
+    6. The slug is accepted by lineage and session stores.
 
-This suite pins those contracts so v0.0.3 implementations don't drift
-from the protocol. Specifically:
-
-    1. Every adapter exposes the FrameworkAdapter protocol shape.
-    2. Every wrap_model() raises NotImplementedError citing v0.0.3.
-    3. detect_agent_id() handles mock framework objects correctly.
-    4. is_available() returns the module's *_AVAILABLE flag.
-    5. Importing the module is cheap (no framework dependency hit).
-    6. Every adapter has a unique `name` matching the framework slug.
-
-Agno is excluded — it has its own deep-test suite (test_agno_deep.py).
+What wrap_model builds is pinned in tests/test_a6_framework_adapters.py. Agno is excluded: it has its
+own deep-test suite (test_agno_deep.py).
 """
 from __future__ import annotations
 
@@ -29,12 +23,11 @@ import pytest
 
 
 # ────────────────────────────────────────────────────────────────────────
-# The six stubs
+# The five adapters
 # ────────────────────────────────────────────────────────────────────────
 
 FRAMEWORKS = [
     # (module_name, adapter_class_name, expected_name, expected_available_flag)
-    ("llm_router.frameworks.hermes",            "HermesAdapter",            "hermes",            "HERMES_AVAILABLE"),
     ("llm_router.frameworks.langgraph",         "LangGraphAdapter",         "langgraph",         "LANGGRAPH_AVAILABLE"),
     ("llm_router.frameworks.crewai",            "CrewAIAdapter",            "crewai",            "CREWAI_AVAILABLE"),
     ("llm_router.frameworks.openai_agents",     "OpenAIAgentsAdapter",      "openai-agents",     "OPENAI_AGENTS_AVAILABLE"),
@@ -119,63 +112,9 @@ def test_is_available_matches_flag(
     assert cls.is_available() == flag
 
 
-@pytest.mark.parametrize(
-    "module_name,class_name,expected_name,available_flag",
-    FRAMEWORKS,
-    ids=[fw[2] for fw in FRAMEWORKS],
-)
-def test_stubs_report_unavailable(
-    module_name: str, class_name: str, expected_name: str, available_flag: str
-):
-    """All 6 stubs are NOT available in v0.0.2 — flag must be False.
-    When v0.0.3 lands concrete impls, this test flips per-adapter."""
-    _, cls = _load(module_name, class_name)
-    assert cls.is_available() is False, (
-        f"{class_name}.is_available() returned True in v0.0.2 — "
-        f"if concrete impl landed, update this test to expect True"
-    )
-
-
 # ────────────────────────────────────────────────────────────────────────
-# Pillar 2: wrap_model raises NotImplementedError
+# Pillar 2: (removed) wrap_model used to raise NotImplementedError; see test_a6_framework_adapters.py
 # ────────────────────────────────────────────────────────────────────────
-
-@pytest.mark.parametrize(
-    "module_name,class_name,expected_name,available_flag",
-    FRAMEWORKS,
-    ids=[fw[2] for fw in FRAMEWORKS],
-)
-def test_wrap_model_raises_not_implemented(
-    module_name: str, class_name: str, expected_name: str, available_flag: str
-):
-    """Every stub's wrap_model must raise NotImplementedError so callers
-    fail fast instead of getting silent no-ops."""
-    _, cls = _load(module_name, class_name)
-    adapter = cls()
-    with pytest.raises(NotImplementedError):
-        adapter.wrap_model(framework_model=None)
-
-
-@pytest.mark.parametrize(
-    "module_name,class_name,expected_name,available_flag",
-    FRAMEWORKS,
-    ids=[fw[2] for fw in FRAMEWORKS],
-)
-def test_wrap_model_error_message_references_v003(
-    module_name: str, class_name: str, expected_name: str, available_flag: str
-):
-    """The NotImplementedError message must tell the user when concrete
-    impl is expected — sets expectations correctly."""
-    _, cls = _load(module_name, class_name)
-    adapter = cls()
-    try:
-        adapter.wrap_model(framework_model=None)
-    except NotImplementedError as exc:
-        msg = str(exc)
-        assert "v0.0.3" in msg or "0.0.3" in msg, (
-            f"{class_name}.wrap_model error should reference v0.0.3, got: {msg!r}"
-        )
-
 
 # ────────────────────────────────────────────────────────────────────────
 # Pillar 3: detect_agent_id on mock framework objects
@@ -313,7 +252,7 @@ def test_adapter_construction_is_constant_time(
 # Pillar 6: cross-adapter uniqueness — names must be distinct
 # ────────────────────────────────────────────────────────────────────────
 
-def test_all_six_framework_names_are_unique():
+def test_all_framework_names_are_unique():
     """No two adapters share a `name` — collisions would corrupt
     lineage.framework attribution."""
     names = []

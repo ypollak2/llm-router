@@ -1,6 +1,6 @@
 """Framework adapters — wrap agent-framework model calls through LLM Router.
 
-Each adapter sits between an agent framework (Agno, Hermes, LangGraph,
+Each adapter sits between an agent framework (Agno, LangGraph,
 CrewAI, OpenAI Agents SDK, Claude Agent SDK, Pydantic AI) and LLM Router's
 routing brain. The adapter:
 
@@ -13,15 +13,18 @@ This means the same LLM Router signal/decision config applies regardless of
 which framework owns the agent loop. Pick the framework you like; routing
 quality stays consistent.
 
-Status as of v0.0.2:
-    - agno         — concrete, ported from llm_router.integrations.agno
-                     (RouteredModel, RouteredTeam)
-    - hermes       — skeleton; concrete impl in v0.0.3
-    - langgraph    — stub; PR welcome
-    - crewai       — stub; PR welcome
-    - openai_agents — stub (OpenAI Agents SDK, formerly Swarm)
-    - claude_agent_sdk — stub (Anthropic's official agent SDK)
-    - pydantic_ai  — stub
+Status (AGT A.6): every adapter is a thin ``base_url`` wrapper around the framework's own
+OpenAI- or Anthropic-compatible client, pointed at ``llm-router gateway``. The framework package
+is the user's to install; none is a llm-router dependency.
+    - agno             — RouteredModel, RouteredTeam (llm_router.integrations.agno)
+    - langgraph        — langchain_openai.ChatOpenAI
+    - crewai           — crewai.LLM
+    - openai_agents    — agents.OpenAIChatCompletionsModel over AsyncOpenAI
+    - claude_agent_sdk — ClaudeAgentOptions with ANTHROPIC_BASE_URL
+    - pydantic_ai      — OpenAIChatModel over OpenAIProvider
+There is no Hermes adapter: "Hermes" names several tool-call formats, not one framework to wrap,
+and a Hermes-format model is served by any OpenAI-compatible client against the gateway.
+Runnable examples: examples/. Guide: docs/integration.md.
 """
 from llm_router.frameworks.base import FrameworkAdapter
 
@@ -37,9 +40,3 @@ def get_agno_adapter():
 
     return agno
 
-
-def get_hermes_adapter():
-    """Return the Hermes adapter."""
-    from llm_router.frameworks import hermes
-
-    return hermes
