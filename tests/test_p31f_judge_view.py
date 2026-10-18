@@ -113,8 +113,8 @@ def test_n_mean_and_not_informative_per_door(home):
     assert (d["seen"], d["picked"]) == (530, 53)
     text = "\n".join(jv.render_lines(s))
     assert "(n=53)" in text and "mean 0.51" in text
-    assert re.search(r"hook\s+n=3\s+mean 0\.67.*not informative \(n<50\)", text)
-    assert not re.search(r"mcp\s+n=50.*not informative", text)
+    assert re.search(r"judge door hook\s+n=3\s+mean 0\.67.*not informative \(n<50\)", text)
+    assert not re.search(r"judge door mcp\s+n=50.*not informative", text)
     assert "seen 500/picked 50" in text
     assert jv.format_line(s) == "judge: mean 0.51 (n=53, 14d)"
 

@@ -275,14 +275,14 @@ def render_lines(js: "JudgeSummary | dict | None") -> list[str]:
         head = f"  judge quality ({win}): mean {_fmt_mean(mean)} (n={n}){flag}"
     ung = ", ".join(f"{k} {v}" for k, v in sorted((d.get("ungraded") or {}).items())) or "none"
     lines = [head,
-             f"      self-judge: {na(d.get('self_judge'))} (must be 0)   "
+             f"  judge self-judge: {na(d.get('self_judge'))} (must be 0)   "
              f"ungraded: {ung}   sampler (lifetime): seen {na(d.get('seen'))}, picked {na(d.get('picked'))}"]
     for door, s in (d.get("doors") or {}).items():
         tag = f"  not informative (n<{min_n})" if s.get("not_informative") else ""
-        lines.append(f"      {door:<14s} n={na(s.get('n'))}  mean {_fmt_mean(s.get('mean'))}  "
+        lines.append(f"  judge door {door:<14s} n={na(s.get('n'))}  mean {_fmt_mean(s.get('mean'))}  "
                      f"self-judge {na(s.get('self_judge'))}  seen {na(s.get('seen'))}/picked {na(s.get('picked'))}{tag}")
     if d.get("skipped_rows"):
-        lines.append(f"      {d['skipped_rows']} malformed judge_results rows skipped")
+        lines.append(f"  judge {d['skipped_rows']} malformed judge_results rows skipped")
     return lines
 
 
@@ -302,13 +302,9 @@ def refresh_cache(days: float = DEFAULT_WINDOW_DAYS, *, now: float | None = None
     try:
         tmp.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
         os.replace(tmp, path)
-    finally:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            failopen.record("CHZ-FO-JUDGE-VIEW-TMP-REMOVE", exc)
+    except BaseException:
+        tmp.unlink(missing_ok=True)      # only a failed write or replace leaves the tmp file
+        raise
     return data
 
 
