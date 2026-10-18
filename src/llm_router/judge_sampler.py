@@ -88,6 +88,28 @@ def _load(path) -> dict:
         return {}
 
 
+def _load_for_update(path) -> dict:
+    """The state to update under the lock. A corrupt or wrong-shaped file must not
+    stop judging for good (rv-598): it is moved aside, recorded, and counting
+    restarts from empty; door entries that are not count dicts are dropped."""
+    try:
+        state = _load(path)
+    except (ValueError, UnicodeDecodeError) as exc:
+        failopen.record("CHZ-FO-JUDGE-SAMPLER-CORRUPT", exc)
+        try:
+            os.replace(path, path.with_name(path.name + ".corrupt"))
+        except OSError as move_exc:
+            failopen.record("CHZ-FO-JUDGE-SAMPLER-CORRUPT", move_exc)
+        return {}
+    clean: dict = {}
+    for d, c in state.items():
+        if isinstance(c, dict):
+            clean[d] = {k: v for k, v in c.items() if isinstance(v, int) and not isinstance(v, bool)}
+        else:
+            failopen.record("CHZ-FO-JUDGE-SAMPLER-CORRUPT", None, detail=f"door={d} entry dropped")
+    return clean
+
+
 def pick(door: str | None) -> bool:
     """Count one eligible call on ``door``; True if it is the sampled one.
 
@@ -106,7 +128,7 @@ def pick(door: str | None) -> bool:
                 _pending_skips[d] = _pending_skips.get(d, 0) + 1
                 failopen.record("CHZ-FO-JUDGE-SAMPLER-LOCK", None, detail=f"door={d} lock {status.get('state')}")
                 return False
-            state = _load(path)
+            state = _load_for_update(path)
             for skipped_door, n in _pending_skips.items():
                 state.setdefault(skipped_door, {})["lock_skipped"] = (
                     state.get(skipped_door, {}).get("lock_skipped", 0) + n

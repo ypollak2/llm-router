@@ -130,3 +130,17 @@ async def test_drain_writes_result_row_without_text(home, monkeypatch):
     assert outcome == "ungraded"
     raw = (home / "judge_results.jsonl").read_text()
     assert "SECRET" not in raw and json.loads(raw)["door"] == "agent"
+
+
+@pytest.mark.parametrize("content", ["{garbage", '{"sdk": 5}', '["not", "a", "dict"]', '{"sdk": {"seen": "x"}}'])
+def test_corrupt_state_is_repaired_and_judging_continues(tmp_path, monkeypatch, content):
+    # rv-598: a corrupt or wrong-shaped counters file used to make every pick()
+    # fail open forever (judging silently at 0%).
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    monkeypatch.setenv("LLM_ROUTER_JUDGE_SAMPLE_RATE", "0.1")
+    path = judge_sampler._state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    picks = sum(judge_sampler.pick("sdk") for _ in range(20))
+    assert picks == 2
+    assert judge_sampler.counters()["sdk"]["seen"] == 20
