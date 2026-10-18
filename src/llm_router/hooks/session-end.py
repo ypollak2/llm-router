@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 38
+# llm_router-hook-version: 39
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -392,20 +392,29 @@ _DEDICATED_PANEL_PROVIDERS = {"codex"}
 
 
 def _query_session_data(session_start: float) -> tuple[list[dict], list[dict], list[dict]]:
-    """Return (paid_rows, cc_rows, free_rows) split by provider type."""
+    """Return (paid_rows, cc_rows, free_rows) split by provider type.
+
+    P3.4-B4 (F32): when this run knows its Claude Code session id, the rows are that
+    session's (``usage.session_id``), not every row since a start time: two sessions
+    open at once used to show each other's calls. Without an id (no hook payload, no
+    ``--session`` argv) the start-time window is the fallback, as before."""
     if not os.path.exists(_db_path()):
         return [], [], []
     try:
         conn = sqlite3.connect(_db_path())
         conn.row_factory = sqlite3.Row
+        if _STOP_SESSION_ID:
+            where, arg = "session_id = ? AND success = 1", _STOP_SESSION_ID
+        else:
+            where, arg = "timestamp >= ? AND success = 1", _session_start_iso(session_start)
         rows = conn.execute(
-            """
+            f"""
             SELECT task_type, model, provider, input_tokens, output_tokens, cost_usd
             FROM usage
-            WHERE timestamp >= ? AND success = 1
+            WHERE {where}
             ORDER BY rowid
-            """,
-            (_session_start_iso(session_start),),
+            """,  # nosec B608 -- `where` is one of two literals above
+            (arg,),
         ).fetchall()
         conn.close()
         all_rows = [dict(r) for r in rows]
@@ -1511,9 +1520,9 @@ def _format_routing_logic(session_start: float | None) -> list[str]:
     # + source + window) so the two counts are not misread as one denominator.
     lines = [
         f"  {_BOLD}Routing{_RESET}  {_C_GREEN}●{_RESET} "
-        f"{_C_WHITE}{total_hits}{_RESET} classified · "
+        f"{_C_WHITE}{total_hits}{_RESET} classified hints · "
         f"{pct_color}{zero_pct}% zero-cost{_RESET}  "
-        f"{_C_MUTED}today · classifier log{_RESET}"
+        f"{_C_MUTED}today · classifier log, not executed routes{_RESET}"
     ]
     # Find max method name length for alignment
     max_name = max(len(d["method"]) for d in data)
@@ -2209,7 +2218,11 @@ def _condense(summary: str) -> str:
     # GH#53: report the executed count or no-data header from usage.db,
     # never the classifier log's "hints today: N classified" line.
     routes = re.search(r"(\d[\d,]*)\s+executed\b", plain, re.I)
-    executed_header = bool(routes or re.search(r"ROUTING\s+24h\s+no execution data", plain, re.I))
+    # F73: an older cache carries "(as of HH:MM)"; no cache prints "n/a (no ledger yet)".
+    as_of = re.search(r"ROUTING\s+24h\s+[\d,]+\s+executed\s+\(as of (\d\d:\d\d)\)", plain, re.I)
+    executed_na = bool(re.search(r"ROUTING\s+24h\s+n/a\b", plain, re.I))
+    executed_header = bool(routes or executed_na
+                           or re.search(r"ROUTING\s+24h\s+no execution data", plain, re.I))
 
     # CONSUMED, matching the status line. This reported REMAINING for one
     # revision, which was correct arithmetic and a bad decision: the status line
@@ -2221,7 +2234,10 @@ def _condense(summary: str) -> str:
 
     bits: list[str] = []
     if routes:
-        bits.append(f"{routes.group(1)} executed (24h)")
+        bits.append(f"{routes.group(1)} executed (24h, as of {as_of.group(1)})" if as_of
+                    else f"{routes.group(1)} executed (24h)")
+    elif executed_na:
+        bits.append("executed n/a (24h)")
     elif executed_header:
         bits.append("no execution data (24h)")
 
@@ -2246,7 +2262,9 @@ def _condense(summary: str) -> str:
             for label, window in (("today", "today"), ("lifetime", "lifetime")):
                 compact = _ledger_compact(window)
                 if compact:
-                    bits.append(f"{label} {compact}")
+                    # The cached today figure ends "(n=N, today)": the label leads, so the
+                    # window is not said twice.
+                    bits.append(f"{label} {compact.replace(f', {label})', ')')}")
         except Exception:
             pass
 
@@ -2470,7 +2488,12 @@ def _cached_northstar_line(session_id: str, now: float | None = None) -> str | N
 # north-star line, P09-SE-1). With no usable cache the Stop renders without them.
 
 _LEDGER_CACHE_FILENAME = "ledger_aggregates.json"
-_LEDGER_CACHE_VERSION = 1
+#: v2 (P3.4-B4): ``window_24h`` / ``window_today`` hold ``LedgerWindow.to_json()``; v1 files
+#: are ignored (they carry no windows and ``today_compact`` has no n).
+_LEDGER_CACHE_VERSION = 2
+#: F73: the one-line Stop prints the executed count as live only while the cache is younger
+#: than this; older, it is printed with the time it was computed ("as of HH:MM").
+_LEDGER_ASOF_TTL_S = 300.0
 #: A cache older than this is not shown. Generous because the figures are
 #: ledger-wide totals, not per-turn state; the same-local-day check below keeps
 #: "today" from carrying yesterday's number across midnight.
@@ -2488,6 +2511,14 @@ def _local_day() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
+def _today_compact(wt) -> str | None:
+    """The Stop's money fragment for today: the ledger's estimated saving with its n and window
+    (``~$1.25 est (n=7, today)``); None when the ledger has no usage database (n/a, never $0)."""
+    if wt is None or wt.saved_usd is None or wt.saved_n is None:
+        return None
+    return f"~${wt.saved_usd:,.2f} est (n={wt.saved_n:,}, {wt.window})"
+
+
 def _compute_ledger_aggregates() -> dict:
     """Every ledger-wide figure the Stop shows, each aggregate computed once.
 
@@ -2495,6 +2526,24 @@ def _compute_ledger_aggregates() -> dict:
     and the Stop renders without it."""
     out: dict = {"v": _LEDGER_CACHE_VERSION, "ts": time.time(), "day": _local_day()}
     totals: dict = {}
+    # P3.4-B4: the 24h and today windows come from ONE ledger_view call each (the same call
+    # every other surface makes); the cache embeds its JSON, so the Stop prints figures the
+    # ledger computed, with their window and n, and never counts rows itself.
+    windows: dict = {}
+    for key, name in (("window_24h", "24h"), ("window_today", "today")):
+        try:
+            from llm_router import ledger_view as _lv
+
+            windows[key] = _lv.window_summary(name)
+            out[key] = windows[key].to_json()
+        except Exception as _exc:  # noqa: BLE001 -- one window failing leaves it out of the cache
+            _record_failopen("CHZ-FO-STOP-LEDGER-WINDOW", _exc)
+    if "window_24h" in windows:
+        # None = the ledger has no execution source (distinct from an absent key).
+        out["executed_24h"] = windows["window_24h"].n
+    _today = _today_compact(windows.get("window_today"))
+    if _today:
+        out["today_compact"] = _today
     try:
         from llm_router import dashboard_data as _dd
     except Exception:  # noqa: BLE001
@@ -2514,22 +2563,12 @@ def _compute_ledger_aggregates() -> dict:
     except Exception:  # noqa: BLE001
         pass
     try:
-        # F65: the one-line Stop reads this instead of scanning routing_decisions.
-        # None = no data (the live call said so), distinct from an absent key.
-        from llm_router.routing_report import executed_routes as _er
-
-        _res = _er(24.0)
-        out["executed_24h"] = _res["total"] if _res is not None else None
+        if "lifetime" in totals:
+            out["lifetime_compact"] = _dd.summary(
+                "lifetime", db_path=db, totals=totals["lifetime"]
+            ).compact()
     except Exception:  # noqa: BLE001
         pass
-    for window in ("today", "lifetime"):
-        try:
-            if window in totals:
-                out[f"{window}_compact"] = _dd.summary(
-                    window, db_path=db, totals=totals[window]
-                ).compact()
-        except Exception:  # noqa: BLE001
-            continue
     try:
         if "lifetime" in totals:
             from llm_router.savings import unverified_note
@@ -2588,58 +2627,65 @@ def _read_ledger_cache(now: float | None = None) -> dict:
         return {}
 
 
-def _stale_same_day_executed() -> tuple[bool, int | None]:
-    """(found, count) from a cache that ``_read_ledger_cache`` rejected only for age.
-    Found needs a readable cache of this version, written today, holding a valid
-    ``executed_24h`` (None = the child saw no data, kept as unknown). Missing,
-    corrupt, other-day or other-version caches are not found. Never raises."""
+def _record_failopen(code: str, exc: BaseException) -> None:
+    """Leave a trace of a swallowed exception; the accounting itself never raises."""
     try:
-        with open(_ledger_cache_path(), encoding="utf-8") as f:
-            d = json.load(f)
-        if not isinstance(d, dict) or d.get("v") != _LEDGER_CACHE_VERSION:
-            return (False, None)
-        if d.get("day") != _local_day() or "executed_24h" not in d:
-            return (False, None)
-        v = d["executed_24h"]
-        if v is None or (isinstance(v, int) and not isinstance(v, bool) and v >= 0):
-            return (True, v)
-    except Exception:  # noqa: BLE001 -- unreadable cache: the caller goes live
+        from llm_router import failopen as _fo
+
+        _fo.record(code, exc)
+    except Exception:  # noqa: BLE001 -- accounting must not break the hook it serves
         pass
-    return (False, None)
 
 
-def _executed_24h() -> int | None:
-    """Executed routes in the last 24 h for the one-line Stop: the child's cached
-    count when it has one; a stale cache from the same local day next (the count
-    is a day-scale figure, and a live call costs up to ~0.5 s on the Stop); one
-    live ``executed_routes`` call only when there is no usable cache (missing,
-    corrupt, another day or version). None = no data. Never raises."""
-    if _STOP_LEDGER is not _LEDGER_LIVE:
-        if "executed_24h" in _STOP_LEDGER:  # type: ignore[operator]
-            v = _STOP_LEDGER["executed_24h"]  # type: ignore[index]
-            if v is None or (isinstance(v, int) and not isinstance(v, bool) and v >= 0):
-                return v
-        found, stale = _stale_same_day_executed()
-        if found:
-            return stale
+def _valid_count(v) -> bool:
+    return v is None or (isinstance(v, int) and not isinstance(v, bool) and v >= 0)
+
+
+def _cached_executed() -> tuple[bool, int | None, float | None]:
+    """(found, count, computed_at) for the one-line Stop. Found needs a cache of this version,
+    written today, holding a valid ``executed_24h`` (None = the child saw no data, kept as
+    unknown, never 0). The run's cache (``_STOP_LEDGER``) is used when it has the count;
+    otherwise the file is read whatever its age (``_read_ledger_cache`` drops it after an hour),
+    because a day-scale count with its time beats no count. Another day's, another version's,
+    corrupt or missing caches are not found. One small file read; never queries the ledger."""
     try:
-        from llm_router.routing_report import executed_routes
+        d = _STOP_LEDGER if _STOP_LEDGER is not _LEDGER_LIVE else None
+        if not isinstance(d, dict) or "executed_24h" not in d:
+            with open(_ledger_cache_path(), encoding="utf-8") as f:
+                d = json.load(f)
+        if not isinstance(d, dict) or d.get("v") != _LEDGER_CACHE_VERSION:
+            return (False, None, None)
+        ts = d.get("ts")
+        if d.get("day") != _local_day() or "executed_24h" not in d:
+            return (False, None, None)
+        if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not _valid_count(d["executed_24h"]):
+            return (False, None, None)
+        return (True, d["executed_24h"], float(ts))
+    except Exception:  # noqa: BLE001 -- unreadable cache: reported as n/a, never a live scan
+        return (False, None, None)
 
-        res = executed_routes(24.0)
-        return res["total"] if res is not None else None
-    except Exception as _exc:  # noqa: BLE001 -- reporting must never break Stop
-        from llm_router import failopen
 
-        failopen.record("CHZ-FO-STOP-EXECUTED-ROUTES", _exc)
-        return None
+def _executed_24h() -> str:
+    """The Stop's executed-routes header text (F73). A fresh cache prints the plain count; an
+    older one prints it with the time it was computed (local ``HH:MM``), never as live; no usable
+    cache prints ``n/a``. The Stop runs no ledger query (the live ``executed_routes`` fallback
+    that F67 left on this path cost up to ~0.5 s)."""
+    found, n, ts = _cached_executed()
+    if not found or ts is None:
+        return "n/a (no ledger yet)"
+    if n is None:
+        return "no execution data"
+    text = f"{n} executed"
+    if time.time() - ts > _LEDGER_ASOF_TTL_S:
+        text += f" (as of {datetime.fromtimestamp(ts).strftime('%H:%M')})"
+    return text
 
 
 def _cheap_summary_box(current: dict | None) -> str:
     """What the one-line modes need from the box, without rendering it: the
     ``ROUTING 24h N executed`` header and the 5h / weekly percentages, in the
     shapes ``_condense`` reads (same text the dashboard prints for them)."""
-    n = _executed_24h()
-    lines = ["  ROUTING  24h  " + (f"{n} executed" if n is not None else "no execution data")]
+    lines = ["  ROUTING  24h  " + _executed_24h()]
     if current:
         # An absent or non-numeric reading is unknown (None), never 0 (lint_unknown_as_number).
         def _pct(key: str) -> float | None:
@@ -2682,6 +2728,10 @@ def _daily_14d_for_render() -> list[tuple[str, int, int, float, int]]:
 def _ledger_compact(window: str) -> str | None:
     """``Summary.compact()`` for ``today`` or ``lifetime``; None when not cached."""
     if _STOP_LEDGER is _LEDGER_LIVE:
+        if window == "today":
+            from llm_router import ledger_view as _lv
+
+            return _today_compact(_lv.window_summary("today"))
         from llm_router import dashboard_data as _dd
 
         return _dd.summary(window).compact()
