@@ -267,7 +267,9 @@ def test_unlintable_original_is_unverified_not_a_pass(tmp_path, monkeypatch):
     result = _verify(root, "good.py", CLEAN_PY, CLEAN_PY)
     assert not result.ok
     assert "unverified" in result.reason
-    assert calls == ["original"]  # the baseline is linted first, and its failure is final
+    # F64: the two lints start together, so the candidate is also launched; the baseline's
+    # failure is still final (its result is read first and raises).
+    assert sorted(calls) == ["candidate", "original"]
 
 
 def test_no_linter_available_degrades_to_pass(tmp_path, monkeypatch):
@@ -279,3 +281,25 @@ def test_no_linter_available_degrades_to_pass(tmp_path, monkeypatch):
     assert result.ok
     assert result.ran == ()
     assert "no linter" in result.reason
+
+
+def test_original_and_candidate_lints_run_concurrently(tmp_path, monkeypatch):
+    """F64: each lint waits (bounded) for the other to have started. Run one after the other, the
+    first would time out waiting and the gate would report the file as unverified."""
+    import threading
+
+    root = _repo(tmp_path, {"pyproject.toml": RUFF_F})
+    started = {"original": threading.Event(), "candidate": threading.Event()}
+    seen_other = {}
+
+    def run(argv, config, cwd, rels, remaining):
+        me = "original" if "original" in cwd.parts else "candidate"
+        other = "candidate" if me == "original" else "original"
+        started[me].set()
+        seen_other[me] = started[other].wait(10)
+        return {rel: [] for rel in rels}
+
+    monkeypatch.setattr(verify, "_run_ruff", run)
+    result = _verify(root, "good.py", CLEAN_PY, CLEAN_PY)
+    assert result.ok, result.reason
+    assert seen_other == {"original": True, "candidate": True}

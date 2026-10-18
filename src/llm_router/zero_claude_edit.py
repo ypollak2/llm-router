@@ -61,6 +61,7 @@ import difflib
 import os
 import re
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -426,16 +427,21 @@ _EDIT_SYSTEM_PROMPT = (
 )
 
 
-def edit_model() -> str | None:
+def edit_model(*, allow_probe: bool = True) -> str | None:
     """The local model this lever calls, or None when there is none.
 
     ``model_discovery.local_model()``: the user's ``LLM_ROUTER_OLLAMA_MODEL`` when it is
     installed, else the first discovered model, else None (the caller skips local).
     Never a name from code -- a hardcoded default that is not pulled 404s silently.
+
+    ``allow_probe=False`` answers from env / the discovery cache only (the hook-path rule in
+    ``model_discovery``: never wait on the network). The hook uses it: a stale cache otherwise
+    cost a live ``/api/tags`` probe of up to 2 s on the synchronous path (F64), and the
+    reachability / installed gate that follows is what actually protects the edit.
     """
     try:
         from llm_router import model_discovery
-        return model_discovery.local_model()
+        return model_discovery.local_model(allow_probe=allow_probe)
     except Exception:                                            # noqa: BLE001
         return None
 
@@ -551,6 +557,35 @@ class ScopedEditOutcome:
     applied: bool = False  # meaningful only when action == "block"
 
 
+class _Prefetch:
+    """Run ``fn(*args, **kwargs)`` on a daemon thread now; ``result()`` joins it.
+
+    The scoped-edit pre-flight asks Ollama two bounded questions (what is installed, what is
+    resident) and git a few more; asked one after another their timeouts add up (F64: a busy
+    Ollama answering just inside both 0.5 s limits cost ~1.4 s of the synchronous path).
+    Started together they overlap. A failure is ``None``, which every caller already reads as
+    "could not find out". Daemon thread: an early return never waits for it.
+    """
+
+    def __init__(self, fn, *args, **kwargs):
+        self._box: list = []
+        self._thread = threading.Thread(target=self._run, args=(fn, args, kwargs), daemon=True)
+        self._thread.start()
+
+    def _run(self, fn, args, kwargs) -> None:
+        try:
+            self._box.append(fn(*args, **kwargs))
+        except Exception as exc:                                 # noqa: BLE001
+            from llm_router import failopen as _fo
+
+            _fo.record("CHZ-FO-ZCE-PREFETCH", exc)               # never raises
+            self._box.append(None)
+
+    def result(self):
+        self._thread.join()
+        return self._box[0] if self._box else None
+
+
 def _scope_enabled() -> bool:
     return os.environ.get("LLM_ROUTER_ZERO_CLAUDE_SCOPE", "").strip().lower() == "edit"
 
@@ -626,13 +661,20 @@ def maybe_replace(
             f"ZERO_CLAUDE_EDIT: none of {targets} exist in the repo",
         )
 
+    # F64: the two Ollama questions below are network round trips with their own timeouts
+    # (0.5 s each); start them now so they overlap with the git status instead of following it.
+    from llm_router.hooks.direct_executor import available_ollama_models, ollama_is_alive
+    from llm_router import warm
+    tags_pf = _Prefetch(available_ollama_models, timeout=0.5)
+    ps_pf = _Prefetch(warm.ollama_ps)
+
     dirty = dirty_files(root, resolved)
     if dirty:
         return ScopedEditOutcome(
             "fallthrough", f"ZERO_CLAUDE_EDIT: target file(s) have uncommitted changes — {dirty}",
         )
 
-    model = edit_model()
+    model = edit_model(allow_probe=False)
     if model is None:
         return ScopedEditOutcome("fallthrough", "ZERO_CLAUDE_EDIT: no local model discovered")
 
@@ -642,8 +684,7 @@ def maybe_replace(
     # the fallthrough gates above, an unreachable model is a FAILED attempt,
     # not a reason to hand the turn to Claude — per the owner's choice,
     # failure blocks.
-    from llm_router.hooks.direct_executor import available_ollama_models, ollama_is_alive
-    installed = available_ollama_models(timeout=0.5)
+    installed = tags_pf.result()
     if installed is not None:
         model_ok = model in installed or (":" not in model and f"{model}:latest" in installed)
     else:
@@ -660,8 +701,7 @@ def maybe_replace(
     # plus an edit, hand the turn to Claude NOW (not a block: nothing went
     # wrong) and start the warm-up so the next edit finds the model resident.
     # Unknown state (Ollama unreachable, odd /api/ps) proceeds as before.
-    from llm_router import warm
-    cold_reason = warm.should_skip_cold(model, deadline_s)
+    cold_reason = warm.should_skip_cold(model, deadline_s, resident=ps_pf.result())
     if cold_reason:
         warm.warm_edit_model_bg(model)
         return ScopedEditOutcome("fallthrough", f"ZERO_CLAUDE_EDIT: cold model — {cold_reason}")
