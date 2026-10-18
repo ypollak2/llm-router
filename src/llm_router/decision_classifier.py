@@ -1,6 +1,6 @@
 """Decision-model backend for the local tier classifier: Ollama ``POST /v1/systemone``.
 
-A decision model (nimble, a Jev-style typed classifier) answers a named ``choice``
+A decision model (a typed classifier served on /v1/systemone) answers a named ``choice``
 question with a probability per option in one forward pass: no decode loop, no JSON
 to coax out of a chat model. This module is the second classifier backend next to the
 ``/api/chat`` v6 one in :mod:`llm_router.local_classifier`. It is selected by
@@ -31,7 +31,7 @@ import os
 from llm_router import local_classifier as lc
 
 PROMPT_VERSION = "sys1"
-DEFAULT_MODEL = "nimble:9b"
+DEFAULT_MODEL = ""  # D-205: no named model; see _model()
 DEFAULT_KEEP_ALIVE = "30m"
 QUESTION = "tier"
 OPTIONS = lc.MODEL_TIERS  # ("haiku", "sonnet", "opus")
@@ -53,7 +53,14 @@ CRITERIA = {
 
 
 def _model() -> str:
-    return os.environ.get("LLM_ROUTER_DECISION_MODEL", "").strip() or DEFAULT_MODEL
+    """The user's LLM_ROUTER_DECISION_MODEL, else the discovered local model (cache/env
+    only: this runs on the event loop, so no probe), else "" = the classifier is off."""
+    set_ = os.environ.get("LLM_ROUTER_DECISION_MODEL", "").strip()
+    if set_:
+        return set_
+    from llm_router import model_discovery
+
+    return model_discovery.local_model(allow_probe=False) or DEFAULT_MODEL
 
 
 def abstain_below() -> float:

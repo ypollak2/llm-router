@@ -58,7 +58,7 @@ def num_ctx(model: str | None = None) -> int:
 # was built for one narrow job, so the roles are declared here, next to the
 # window. A model not listed here serves ``generate``. ``resource_map`` reads
 # this table; nothing else should guess a model's role from its name.
-# nimble:9b is the typed decision model (``decision_classifier.DEFAULT_MODEL``):
+# nimble:9b is a typed decision model a user may set as LLM_ROUTER_DECISION_MODEL:
 # a generate call to it returns HTTP 400 (bug N19).
 ROLES: dict[str, frozenset[str]] = {
     "nimble:9b": frozenset({"decision"}),
