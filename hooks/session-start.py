@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 39
+# llm_router-hook-version: 40
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -1425,6 +1425,21 @@ def _seats_hint() -> str:
     return "\n💺 Seats: " + cached.summary_line()
 
 
+def _maybe_rescan_discovery_bg() -> str:
+    """D-205: first-use / periodic / on-change rediscovery, in a detached child.
+
+    ``maybe_rescan_async`` is a cheap local check (state file + key NAMES); the network
+    probe and seat detection run in the child, throttled so a session start never waits
+    and a dead Ollama costs one child per window. Fails open.
+    """
+    try:
+        from llm_router.discovery_rescan import maybe_rescan_async
+        maybe_rescan_async()
+    except Exception:  # noqa: BLE001 -- a rescan problem must not affect session start
+        return ""
+    return ""
+
+
 def _weekly_digest() -> str:
     """Return a one-line weekly savings summary shown on Mondays (or after 6+ day gap).
 
@@ -2201,6 +2216,7 @@ def _run_background_session_work(cwd: str, session_id: str = "") -> None:
         hints += _step(fn)
     _write_cached_hints(hints)
 
+    _step(_maybe_rescan_discovery_bg)
     _step(_maybe_refresh_benchmarks_bg)
     _step(_maybe_reindex_okf_bg, cwd)
     _step(_maybe_refresh_semantic_bg, cwd)

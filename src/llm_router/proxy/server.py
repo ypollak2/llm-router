@@ -1195,7 +1195,16 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         # also when the breaker (not the YAML) turned the rewrite off: recovery runs on this loop
         if tier_policy is not None and (tier_policy.haiku_rewrite or getattr(tier_policy, "haiku_breaker", None) is not None):
             guard_task = asyncio.create_task(haiku_guard.guard_loop(tier_policy, run=haiku_guard_run))
+        rescan_task = None
+        try:  # D-205: periodic / on-change rediscovery without a restart
+            from llm_router.discovery_rescan import rescan_loop
+            rescan_task = asyncio.create_task(rescan_loop())
+        except Exception as exc:  # noqa: BLE001
+            from llm_router import failopen
+            failopen.record("CHZ-FO-DISCOVERY-RESCAN-START", exc)
         yield
+        if rescan_task is not None:
+            rescan_task.cancel()
         if task is not None and not task.done():
             task.cancel()
         if guard_task is not None and not guard_task.done():

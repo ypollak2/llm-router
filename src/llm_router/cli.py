@@ -32,6 +32,7 @@ Usage:
     llm-router okf gc           — find stored model prose; --apply quarantines it
     llm-router provider list    — providers skipped until a reported reset time
     llm-router provider unban <name>  — lift that skip now (or --all)
+    llm-router discover [--rescan] [--json]  — local models, key names and seats found; --rescan re-scans now
     llm-router inventory [--json]     — models this machine can run: route, path, quota, privacy
     llm-router map [--json]           — the one resource map: seats, local models, keys, quota, priority
     llm-router mode [advise|route]    — routing authority: route (default) or advise (the proxy forwards the model you asked for and only logs its proposal)
@@ -926,7 +927,7 @@ _HELP_FLAGS = ("-h", "--help")
 # CLI-HELP-1: subcommands that print their own help for -h/--help in any
 # position (argparse, or an explicit check over all args).
 _OWN_HELP_ANYWHERE = frozenset({
-    "audit", "calibrate", "cp", "dev-refresh", "gc", "install", "inventory", "invoice",
+    "audit", "calibrate", "cp", "dev-refresh", "discover", "gc", "install", "inventory", "invoice",
     "judge", "kpi", "last", "map", "migrate", "mod", "mode", "northstar", "pi", "policy", "prefer",
     "proxy",
     "quickstart", "replay", "resolve", "retrospect", "run", "serve", "snapshot", "stats",
@@ -1148,6 +1149,9 @@ def main() -> None:
         # Read-only: what models this machine can run (never prints a secret).
         from llm_router.commands.inventory import cmd_inventory
         sys.exit(cmd_inventory(args[1:]))
+    elif args and args[0] == "discover":
+        from llm_router.commands.discover import cmd_discover
+        sys.exit(cmd_discover(args[1:]))
     elif args and args[0] == "map":
         from llm_router.commands.map import cmd_map
         sys.exit(cmd_map(args[1:]))

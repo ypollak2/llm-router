@@ -22,6 +22,8 @@ same convention for media models (though media bypasses LiteLLM).
 
 from __future__ import annotations
 
+from collections.abc import MutableMapping
+
 from llm_router.logging import get_logger
 from llm_router.types import Complexity, RoutingProfile, TaskType
 
@@ -122,7 +124,92 @@ def _load_routing_table_from_policy() -> dict[tuple[RoutingProfile, TaskType], l
 # YAML and the in-memory dict is impossible because there is only the YAML.
 # tests/test_standard_policy_mirror.py is the canonical guardrail.
 
-ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = _load_routing_table_from_policy()
+class _LateBoundTable(MutableMapping):
+    """ROUTING_TABLE that re-resolves ``ollama/@local`` when the user's local model changes.
+
+    Records the resolved ``@local`` value the chains were BUILT with and, on every read,
+    compares it with the current cached resolution (``policy.local_placeholder_seen()``:
+    cache/env only, no network, throttled). A difference builds a complete new mapping and
+    swaps ONE reference, so a concurrent reader sees the old or the new table, never a
+    half-built one. Every importer holds this same object.
+
+    Writes through the table (``__setitem__``, ``setdefault``, ``pop``, ``__delitem__``)
+    go into the CURRENT snapshot and are dropped at the next rebuild (when the local
+    model or its env inputs change). Fine for tests; not a persistence mechanism.
+    """
+
+    def __init__(self, build):
+        # ``build`` is a callable. The ``@local`` value is resolved BEFORE building, so a
+        # model that appears in between makes the next read rebuild instead of being adopted.
+        try:
+            from llm_router.policy import _resolve_local_placeholder
+            self._built_with = _resolve_local_placeholder()
+        except Exception as exc:  # noqa: BLE001 - never break import on a refresh
+            from llm_router import failopen
+            failopen.record("CHZ-FO-ROUTING-TABLE-LATE-BIND", exc)
+            self._built_with = None
+        self._data = build() if callable(build) else build
+
+    def _snap(self):
+        try:
+            from llm_router.policy import local_placeholder_seen
+            current = local_placeholder_seen()
+        except Exception as exc:  # noqa: BLE001 - never break routing on a refresh
+            from llm_router import failopen
+            failopen.record("CHZ-FO-ROUTING-TABLE-LATE-BIND", exc)
+            return self._data
+        if current != self._built_with:
+            try:
+                fresh = _load_routing_table_from_policy()
+            except Exception as exc:  # noqa: BLE001
+                from llm_router import failopen
+                failopen.record("CHZ-FO-ROUTING-TABLE-RELOAD", exc)
+                return self._data
+            self._data = fresh              # single reference swap: atomic for readers
+            self._built_with = current
+        return self._data
+
+    def __getitem__(self, key):
+        return self._snap()[key]
+
+    def __setitem__(self, key, value):
+        self._snap()[key] = value
+
+    def __delitem__(self, key):
+        del self._snap()[key]
+
+    def __iter__(self):
+        return iter(self._snap())
+
+    def __len__(self):
+        return len(self._snap())
+
+    def __contains__(self, key):
+        return key in self._snap()
+
+    def get(self, key, default=None):
+        return self._snap().get(key, default)
+
+    def items(self):
+        return self._snap().items()
+
+    def values(self):
+        return self._snap().values()
+
+    def keys(self):
+        return self._snap().keys()
+
+    def setdefault(self, key, default=None):
+        return self._snap().setdefault(key, default)
+
+    def pop(self, key, *default):
+        return self._snap().pop(key, *default)
+
+    def copy(self):
+        return dict(self._snap())
+
+
+ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = _LateBoundTable(_load_routing_table_from_policy)
 
 # Historical literal removed — see git history (commit 2faaa08) for the
 # previous hardcoded chains. To inspect or edit chains, modify

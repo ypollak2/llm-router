@@ -132,6 +132,53 @@ def _parse_chains(raw: object) -> Dict[str, Dict[str, List[str]]]:
 _LOCAL_PLACEHOLDER = "ollama/@local"   # == model_discovery.LOCAL_PLACEHOLDER (kept literal: cheap import)
 
 
+# Late binding of ``ollama/@local`` (D-205). The chains are resolved when a policy is
+# loaded, so a long-running server would keep yesterday's local model. ``local_epoch()``
+# re-resolves the placeholder from the current cache/env (no network) at most every
+# ``_EPOCH_CHECK_S`` and bumps a counter when the answer changed; holders of resolved
+# chains (ROUTING_TABLE, the active policy) rebuild when the counter moves.
+_EPOCH_CHECK_S = 2.0
+_epoch = 0
+_epoch_seen: "str | None" = None
+_epoch_primed = False
+_epoch_checked_at = 0.0
+_epoch_env_key: tuple = ()
+
+# Every environment input that changes what ``ollama/@local`` resolves to (see
+# model_discovery._from_env / _from_env_inventory / user_local_model_setting / _cache_path /
+# _ttl_hours). Compared on EVERY call (a handful of dict lookups, no I/O) so an env change
+# or its restoration re-resolves at once instead of waiting out the throttle. Without this
+# a temporary override (OLLAMA_BUDGET_MODELS in a test, a shell export) left the rebuilt
+# table stale for up to ``_EPOCH_CHECK_S`` after the env was put back.
+_LOCAL_ENV_VARS = (
+    "LLM_ROUTER_OLLAMA_MODEL", "OLLAMA_BUDGET_MODELS", "OLLAMA_MODELS",
+    "LLM_ROUTER_HOME", "LLM_ROUTER_DISCOVERY_TTL_HOURS",
+)
+
+
+def local_epoch() -> int:
+    global _epoch, _epoch_seen, _epoch_primed, _epoch_checked_at, _epoch_env_key
+    import time as _time
+
+    now = _time.monotonic()
+    env_key = tuple(os.environ.get(v, "") for v in _LOCAL_ENV_VARS)
+    if _epoch_primed and env_key == _epoch_env_key and now - _epoch_checked_at < _EPOCH_CHECK_S:
+        return _epoch
+    _epoch_checked_at = now
+    _epoch_env_key = env_key
+    current = _resolve_local_placeholder()
+    if _epoch_primed and current != _epoch_seen:
+        _epoch += 1
+    _epoch_seen, _epoch_primed = current, True
+    return _epoch
+
+
+def local_placeholder_seen() -> "str | None":
+    """The ``@local`` resolution as of the latest (throttled) check."""
+    local_epoch()
+    return _epoch_seen
+
+
 def _resolve_local_placeholder() -> "str | None":
     try:
         from llm_router.model_discovery import local_model
@@ -191,6 +238,7 @@ class PolicyManager:
         """Initialize policy manager."""
         self._active_policy: Optional[RoutingPolicy] = None
         self._policy_cache: Dict[str, RoutingPolicy] = {}
+        self._local_epoch = local_epoch()
         self._ensure_policy_dir()
 
     def _ensure_policy_dir(self) -> None:
@@ -318,6 +366,18 @@ class PolicyManager:
         Returns:
             Active RoutingPolicy
         """
+        epoch = local_epoch()
+        if epoch != self._local_epoch:
+            # The user's local model changed (rescan): re-resolve ``ollama/@local``.
+            self._local_epoch = epoch
+            self._policy_cache.clear()
+            if self._active_policy is not None:
+                try:
+                    self._active_policy = self.load_policy(self._active_policy.name)
+                except (FileNotFoundError, ValueError) as exc:
+                    # keep the policy already in force; never break routing on a reload
+                    from llm_router import failopen
+                    failopen.record("CHZ-FO-POLICY-LOCAL-RELOAD", exc)
         if self._active_policy is not None:
             return self._active_policy
 
