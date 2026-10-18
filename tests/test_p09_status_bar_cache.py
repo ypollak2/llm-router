@@ -60,9 +60,11 @@ def _put_cache(mod, line, age_s):
 
 
 def _no_sqlite(monkeypatch, mod):
+    import sqlite3
+
     def boom(*a, **k):
         raise AssertionError("the hook opened sqlite on the prompt's path")
-    monkeypatch.setattr(mod.sqlite3, "connect", boom)
+    monkeypatch.setattr(sqlite3, "connect", boom)
 
 
 def _forbid_sync_work(monkeypatch, mod):
@@ -80,7 +82,7 @@ def _forbid_sync_work(monkeypatch, mod):
             raise AssertionError(f"{name} ran synchronously on the status-bar hot path")
         return boom
 
-    for fn in ("_format_status", "_refresh_cache", "_read_savings", "_read_session_calls",
+    for fn in ("_format_status", "_refresh_cache", "_ledger_window", "_lv",
                "_read_claude_credits", "_read_provider_health"):
         monkeypatch.setattr(mod, fn, forbid(fn))
     for fn in ("run", "call", "check_call", "check_output"):
@@ -145,7 +147,9 @@ def test_the_refresher_survives_sqlite_raising_and_the_hook_still_shows_a_line(h
     def boom(*a, **k):
         raise RuntimeError("database is locked")
 
-    monkeypatch.setattr(hook.sqlite3, "connect", boom)
+    import sqlite3
+
+    monkeypatch.setattr(sqlite3, "connect", boom)
     hook._refresh_cache()
     line, age = hook._read_cache()
     assert isinstance(line, str) and line.startswith("📊") and age is not None and age < 5
@@ -192,7 +196,7 @@ def test_the_prompt_path_never_waits_on_a_locked_usage_db(hook, monkeypatch):
         time.sleep(2.0)
         raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(hook.sqlite3, "connect", locked)
+    monkeypatch.setattr(sqlite3, "connect", locked)
     monkeypatch.setattr(hook, "_spawn_refresh", lambda: None, raising=False)
     ms, _out = _main(hook, monkeypatch)
     assert ms < 300.0, f"status-bar took {ms:.0f} ms behind a locked usage.db (PRD bar 300 ms)"

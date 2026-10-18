@@ -76,12 +76,13 @@ def test_opus_aliases_resolve_to_opus_5_5(alias) -> None:
     assert pricing.resolve(alias) == "claude-opus-5-5"
 
 
-def test_statusline_host_rate_is_the_baseline() -> None:
-    """The statusline prices the host as ``price_for("opus")``."""
+def test_status_bar_prices_nothing_and_names_the_baseline_model() -> None:
+    """P3.4-B3: the hook holds no host rate of its own; its label is the priced baseline model."""
     spec = importlib.util.spec_from_file_location("_sb_o55", _SRC / "hooks" / "status-bar.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    assert (mod.HOST_INPUT_PER_M, mod.HOST_OUTPUT_PER_M) == pricing.savings_baseline_rates()
+    assert not hasattr(mod, "HOST_INPUT_PER_M") and not hasattr(mod, "HOST_OUTPUT_PER_M")
+    assert mod._baseline_label() == pricing.savings_baseline_model() == "claude-opus-5-5"
 
 
 def test_latest_opus_is_opus_5_5() -> None:

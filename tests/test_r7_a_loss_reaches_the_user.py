@@ -108,7 +108,6 @@ def _net_helpers() -> list[pathlib.Path]:
     return [
         REPO / "src/llm_router/commands/share.py",
         REPO / "src/llm_router/hooks/session-end-clawcode.py",
-        REPO / "src/llm_router/hooks/status-bar.py",
         REPO / "src/llm_router/hooks/status-bar-clawcode.py",
         REPO / "src/llm_router/dashboard/server.py",
     ]

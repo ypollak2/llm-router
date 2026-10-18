@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 7
+# llm_router-hook-version: 8
 """UserPromptSubmit hook — enhanced savings + routing status bar.
 
 Displays a two-mode status line:
-  compact (~80 chars):  📊 CC 45%s·28%w | 🦙✔ ⚙️✔ ☁️✔ | 💰 D:$1.42 W:$9.88 | 🛡️ enforce | 14.2x
-  full    (~140 chars): 📊 CC 45%s·28%w·61%♪ | Ollama✔ Codex✔ APIs✔ | 💰 D:$1.42 W:$9.88 M:$41.15 (vs Opus:$58) | enforce🛡️ | eff 14.2x
+  compact: 📊 CC 45%s·28%w | 🦙✔ ⚙️✔ ☁️✔ | 💰 D:$1.42·today n=4 W:$9.88·7d n=31 | 🛡️
+  full:    📊 CC 45%s·28%w·61%♪ | Ollama✔ Codex✔ APIs✔ | 💰 D:$1.42·today n=4 W:$9.88·7d n=31
+           M:$41.15·month n=120 (vs <baseline model>) | enforce🛡️ | sub:4 free:3 paid:1 n=8 session
 
-Time buckets: today, this week (Mon), this calendar month, all-time.
+Every money figure is the ledger's (P3.4-B3, D-218): ``ledger_view.window_summary`` for the LOCAL
+day, the rolling 7 days and the local month, printed with its n and window. Session call counts
+are the session's mix (local/subscription/paid by evidence, proxy rows included; ``free`` = local,
+``unc`` = unclassified). An unknown figure prints ``n/a``, never 0; a copy without ``llm_router``
+(standalone) prints ``💰 n/a`` and scans nothing.
 Provider health: read from ~/.llm-router/health.json (written by background checks).
 Enforcement mode: read from LLM_ROUTER_ENFORCE env var.
 
@@ -23,10 +28,8 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import sys
 import time
-from datetime import datetime, timezone
 
 # -- KPI G1: record how long this invocation ran (llm_router.hook_latency) -----
 # The clock starts BEFORE the first llm_router import, so the package import is
@@ -65,19 +68,6 @@ except Exception:
 # so naming one hands the caller "Error: No such tool available" — after which
 # it silently does the work on the expensive model and the savings dashboard
 # cannot distinguish that from "chose not to route".
-def _net(baseline_usd: float, actual_usd: float) -> float:
-    """`savings.net_saved`, with a SIGNED fallback if the import fails.
-
-    The fallback is deliberately the same arithmetic rather than a clamp: a
-    surface that silently reverts to clamping when an import breaks is the
-    defect returning through the error path, which is how it came back four
-    times before.
-    """
-    try:
-        from llm_router.savings import net_saved
-        return net_saved(baseline_usd, actual_usd)
-    except Exception:  # noqa: BLE001
-        return float(baseline_usd) - float(actual_usd)
 
 
 def _router_home():
@@ -153,31 +143,6 @@ STATUS_EVERY = os.environ.get("LLM_ROUTER_STATUS_EVERY", "0")
 STATUS_MODE = os.environ.get("LLM_ROUTER_STATUS_MODE", "compact")  # compact | full
 ENFORCE_MODE = os.environ.get("LLM_ROUTER_ENFORCE", "hard").lower()
 
-# Baseline cost for "what would Opus have cost?" comparison.
-#
-# WP-03: was a hardcoded 15.0/75.0 — the retired Opus 3 tier — so the savings
-# figure on the status line, the number a user sees on every prompt, was
-# overstated 3x. The pricing lint missed this: its value check wants both halves
-# of a retired pair inside ONE assignment and these are two separate scalars,
-# while its structural check only fires on dict/list/tuple containers. A bare
-# float named ..._PER_M slips through both. Recorded as a lint gap — the lint is
-# an immutable asset for this work package and cannot be edited here.
-# P0.8: one name for the baseline, used both to price it and to label it. The label
-# said "vs Sonnet" while the price below was Opus's.
-HOST_BASELINE_TIER = "opus"
-HOST_BASELINE_LABEL = HOST_BASELINE_TIER.capitalize()
-
-try:
-    from llm_router import pricing as _pricing
-
-    _host_price = _pricing.price_for(HOST_BASELINE_TIER)
-except ImportError:  # pragma: no cover — copied to ~/.claude/hooks/, runs standalone
-    _host_price = None
-
-HOST_PRICE_KNOWN = _host_price is not None
-HOST_INPUT_PER_M = _host_price.input if _host_price else 0.0
-HOST_OUTPUT_PER_M = _host_price.output if _host_price else 0.0
-
 # ── ANSI colours ───────────────────────────────────────────────────────────
 G = "\033[92m"   # green  — savings, provider OK, enforce
 Y = "\033[93m"   # yellow — suggest mode, warn
@@ -188,9 +153,6 @@ DIM = "\033[90m" # grey   — labels, separators
 RST = "\033[0m"  # reset
 
 SEP = f"{DIM} │ {RST}"
-
-_FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
-_CACHE_PROVIDER = "cache"  # semantic-cache-served call: not paid/free/subscription (provider_classes.py)
 
 
 # ── Claude subscription credits ────────────────────────────────────────────
@@ -250,106 +212,48 @@ def _health_icon(status: str, label: str = "", compact: bool = True) -> str:
     return f"{label}{col}{icon}{RST}"
 
 
-# ── Savings queries ────────────────────────────────────────────────────────
+# ── Ledger figures (P3.4-B3, D-218) ────────────────────────────────────────
+# One source for every printed number: ledger_view.window_summary, local-time windows, each
+# figure shown through ledger_view.show() with its n and window. No SQL in this file.
 
-def _time_bucket_starts() -> dict[str, str]:
-    """Return SQL-ready datetime strings for today, week, month."""
-    now = datetime.now(tz=timezone.utc)
-    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    # Monday of this week
-    week_start = today.replace(day=today.day - today.weekday())
-    # First of this month
-    month_start = today.replace(day=1)
-    return {
-        "today": today.strftime("%Y-%m-%d %H:%M:%S"),
-        "week": week_start.strftime("%Y-%m-%d %H:%M:%S"),
-        "month": month_start.strftime("%Y-%m-%d %H:%M:%S"),
-    }
+def _now() -> float:
+    """The refresher's clock (one seam, so a test can freeze it)."""
+    return time.time()
 
 
-def _savings_for_period(conn: sqlite3.Connection, since: str) -> tuple[float, float]:
-    """Return (saved_usd, baseline_usd) for calls since `since`."""
-    rows = conn.execute(
-        "SELECT provider, input_tokens, output_tokens, cost_usd FROM usage "
-        "WHERE timestamp >= ? AND success = 1",
-        (since,),
-    ).fetchall()
-
-    if not HOST_PRICE_KNOWN:
-        # No price source: report nothing rather than a baseline of $0, which
-        # would render as "saved $0.00" and read as a measurement.
-        return 0.0, 0.0
-
-    actual = baseline = 0.0
-    for provider, in_tok, out_tok, cost in rows:
-        in_tok = in_tok or 0
-        out_tok = out_tok or 0
-        cost = cost or 0.0
-        host_cost = (in_tok * HOST_INPUT_PER_M + out_tok * HOST_OUTPUT_PER_M) / 1_000_000
-        if provider == "subscription":
-            continue  # no token data for subscription calls
-        elif provider in _FREE_PROVIDERS:
-            baseline += host_cost
-            # actual cost is $0 for free providers
-        else:
-            actual += cost
-            baseline += host_cost
-
-    # AUD-06: signed, never clamped. A loss must reach the user — the clamp is exactly what stopped them finding out. This file was outside the CHZ-SS-01 lint's hand-maintained module list until R6 derived that list from `savings.SURFACES`.
-    return _net(baseline, actual), baseline
-
-
-def _read_savings() -> dict[str, tuple[float, float]]:
-    """Return {today, week, month, session} → (saved_usd, baseline_usd)."""
-    result: dict[str, tuple[float, float]] = {
-        "today": (0.0, 0.0),
-        "week": (0.0, 0.0),
-        "month": (0.0, 0.0),
-        "session": (0.0, 0.0),
-    }
+def _lv():
+    """``llm_router.ledger_view``, or None for a standalone copy without the package: the
+    caller then prints n/a and scans nothing."""
     try:
-        buckets = _time_bucket_starts()
-        conn = sqlite3.connect(_usage_db(), timeout=2)
-        for key, since in buckets.items():
-            result[key] = _savings_for_period(conn, since)
-
-        # Session savings (since session start file)
-        try:
-            start_ts = float(open(_session_start_file()).read().strip())
-            start_str = datetime.fromtimestamp(start_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-            result["session"] = _savings_for_period(conn, start_str)
-        except (OSError, ValueError):
-            pass
-
-        conn.close()
-    except Exception:
-        pass
-    return result
+        from llm_router import ledger_view
+    except ImportError:
+        return None
+    return ledger_view
 
 
-def _read_session_calls() -> tuple[int, int, int]:
-    """Return (sub_calls, free_calls, paid_calls) for this session."""
+def _ledger_window(lv, window: str):
+    """``LedgerWindow`` for ``today`` | ``7d`` | ``month`` | ``session``, or None when this home
+    has no ledger at all. Called by the detached refresher only (it loads seats.json)."""
+    from pathlib import Path
+
+    root = _router_home()
+    db, proxy = Path(_usage_db()), root / "proxy_calls.jsonl"
+    if not db.is_file() and not proxy.is_file():
+        return None
+    if window == "session":
+        return lv.window_summary("session", now=_now(), session_id=lv.read_session_id(root),
+                                 session_start=lv.read_session_start(root), db_path=db,
+                                 proxy_path=proxy)
+    return lv.window_summary(window, now=_now(), db_path=db, proxy_path=proxy)
+
+
+def _baseline_label() -> str | None:
+    """The model every saving is measured against (``pricing.savings_baseline_model``)."""
     try:
-        start = float(open(_session_start_file()).read().strip())
-        start_str = datetime.fromtimestamp(start, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        conn = sqlite3.connect(_usage_db(), timeout=2)
-        rows = conn.execute(
-            "SELECT provider FROM usage WHERE timestamp >= ? AND success = 1 "
-            "AND COALESCE(provider, '') != ?",
-            (start_str, _CACHE_PROVIDER),
-        ).fetchall()
-        conn.close()
-        sub = free = paid = 0
-        for (provider,) in rows:
-            if provider == "subscription":
-                sub += 1
-            elif provider in _FREE_PROVIDERS:
-                free += 1
-            else:
-                paid += 1
-        return sub, free, paid
-    except Exception:
-        return 0, 0, 0
+        from llm_router import pricing
+    except ImportError:
+        return None
+    return pricing.savings_baseline_model()
 
 
 # ── Enforcement mode badge ─────────────────────────────────────────────────
@@ -370,43 +274,48 @@ def _enforce_badge(compact: bool = True) -> str:
     return f"{col}{icon} {label}{RST}"
 
 
-# ── Efficiency multiplier ──────────────────────────────────────────────────
-
-def _efficiency(saved: float, baseline: float) -> str:
-    """Return coloured Nx efficiency string, or empty if no data."""
-    if baseline < 0.001:
-        return ""
-    multiplier = baseline / max(baseline - saved, 0.0001)
-    if multiplier >= 2.0:
-        return f"{B}{multiplier:.1f}x{RST}"
-    return f"{DIM}{multiplier:.1f}x{RST}"
-
-
 # ── Format helpers ─────────────────────────────────────────────────────────
 
-def _savings_str_compact(savings: dict[str, tuple[float, float]]) -> str:
-    """D:$1.42 W:$9.88 — green when positive."""
-    parts = []
-    for label, key in [("D", "today"), ("W", "week")]:
-        saved, _ = savings[key]
-        col = G if saved >= 0.01 else DIM
-        parts.append(f"{col}{label}:${saved:.2f}{RST}")
+def _money_part(lv, label: str, lw) -> str:
+    """``D:$1.42·today n=4`` (green when positive), or ``D:n/a`` when the figure is unknown."""
+    fig = None if lw is None else lw.figures()["saved"]
+    text = lv.show(fig, "{:.2f}")
+    if text is None:
+        return f"{DIM}{label}:n/a{RST}"
+    col = G if fig.value >= 0.01 else DIM
+    return f"{col}{label}:${text}·{fig.window} n={fig.n}{RST}"
+
+
+def _savings_str(lv, compact: bool) -> str:
+    """D:$1.42·today n=4 W:$9.88·7d n=31 [M:$41.15·month n=120 (vs <baseline>)]."""
+    if lv is None:
+        return f"{DIM}n/a{RST}"
+    keys = [("D", "today"), ("W", "7d")] + ([] if compact else [("M", "month")])
+    windows = {window: _ledger_window(lv, window) for _label, window in keys}
+    parts = [_money_part(lv, label, windows[window]) for label, window in keys]
+    if not compact:
+        baseline, month = _baseline_label(), windows["month"]
+        if baseline and month is not None and lv.show(month.figures()["saved"]) is not None:
+            parts.append(f"{DIM}(vs {baseline}){RST}")
     return " ".join(parts)
 
 
-def _savings_str_full(savings: dict[str, tuple[float, float]]) -> str:
-    """D:$1.42 W:$9.88 M:$41.15 (vs Opus:$58) — with baseline comparison."""
-    parts = []
-    for label, key in [("D", "today"), ("W", "week"), ("M", "month")]:
-        saved, _ = savings[key]
-        col = G if saved >= 0.01 else DIM
-        parts.append(f"{col}{label}:${saved:.2f}{RST}")
-
-    month_saved, month_baseline = savings["month"]
-    if month_baseline >= 0.01:
-        parts.append(f"{DIM}(vs {HOST_BASELINE_LABEL}:${month_baseline:.0f}){RST}")
-
-    return " ".join(parts)
+def _calls_str(lv) -> str:
+    """The session's mix: ``sub:4 free:3 paid:1 [unc:8] n=16 session`` (free = local). Empty
+    when the session's figures are unknown or it executed nothing."""
+    if lv is None:
+        return ""
+    lw = _ledger_window(lv, "session")
+    if lw is None:
+        return ""
+    figs = lw.figures()
+    sub, free, paid, total = (lv.show(figs[k], "{:.0f}") for k in
+                              ("mix_subscription", "mix_local", "mix_paid", "executed"))
+    if None in (sub, free, paid, total) or int(total) == 0:
+        return ""
+    unc = f" unc:{lw.unclassified_n}" if lw.unclassified_n else ""
+    window = "session" if lw.scope == "session_id" else "session~"   # ~ = by timestamp
+    return f"sub:{sub} free:{free} paid:{paid}{unc} n={total} {window}"
 
 
 def _provider_health_compact(health: dict[str, str]) -> str:
@@ -444,9 +353,8 @@ def _read_gemini_credits() -> tuple[int | None, int | None, float | None]:
 def _format_status() -> str:
     session_pct, weekly_pct, sonnet_pct, stale = _read_claude_credits()
     g_count, g_limit, g_pressure = _read_gemini_credits()
-    savings = _read_savings()
+    lv = _lv()
     health = _read_provider_health()
-    sub, free, paid = _read_session_calls()
     compact = STATUS_MODE != "full"
 
     # ── Claude subscription segment ──
@@ -472,41 +380,30 @@ def _format_status() -> str:
         health_seg = _provider_health_compact(health) if compact else _provider_health_full(health)
 
     # ── Savings segment ──
-    savings_seg = (
-        f"💰 {_savings_str_compact(savings)}"
-        if compact
-        else f"💰 {_savings_str_full(savings)}"
-    )
+    savings_seg = f"💰 {_savings_str(lv, compact)}"
 
     # ── Enforcement mode ──
     enforce_seg = _enforce_badge(compact=compact)
 
-    # ── Efficiency multiplier ──
-    month_saved, month_baseline = savings["month"]
-    eff = _efficiency(month_saved, month_baseline)
-
     # ── Session call counts (full mode only) ──
     calls_seg = ""
-    if not compact and (sub + free + paid) > 0:
-        calls_seg = f"{DIM}sub:{sub} free:{free} paid:{paid}{RST}"
+    if not compact:
+        counts = _calls_str(lv)
+        calls_seg = f"{DIM}{counts}{RST}" if counts else ""
 
     # ── Assemble ──
     if compact:
-        # 📊 CC 45%s·28%w │ ♊ 2% │ [🦙✔ ⚙️✔ ☁️✔ │] 💰 D:$1.42 W:$9.88 │ 🛡️ │ 14.2x
+        # 📊 CC 45%s·28%w │ ♊ 2% │ [🦙✔ ⚙️✔ ☁️✔ │] 💰 D:$1.42·today n=4 W:$9.88·7d n=31 │ 🛡️
         parts = ["📊 ", cc, g_seg]
         if health_seg:
             parts += [SEP, health_seg]
         parts += [SEP, savings_seg, SEP, enforce_seg]
-        if eff:
-            parts += [SEP, eff]
     else:
-        # 📊 CC 45%s·28%w·61%♪ │ ♊ 2% │ [Ollama✔ Codex✔ APIs✔ │] 💰 D:$1.42 W:$9.88 M:$41.15 │ enforce🛡️ │ eff 14.2x
+        # 📊 CC 45%s·28%w·61%♪ │ ♊ 2% │ [Ollama✔ Codex✔ APIs✔ │] 💰 D:… W:… M:… (vs <baseline>) │ enforce🛡️ │ sub:… free:… paid:…
         parts = ["📊 ", cc, g_seg]
         if health_seg:
             parts += [SEP, health_seg]
         parts += [SEP, savings_seg, SEP, enforce_seg]
-        if eff:
-            parts += [SEP, f"{DIM}eff {RST}{eff}"]
         if calls_seg:
             parts += [SEP, calls_seg]
 
@@ -602,7 +499,7 @@ def _spawn_refresh() -> None:
 
 
 def _refresh_cache() -> None:
-    """The refresher: compute the line (sqlite, Gemini quota, health) and cache it."""
+    """The refresher: compute the line (ledger, Gemini quota, health) and cache it."""
     try:
         _write_cache(_format_status())
     except Exception:  # noqa: BLE001 -- a broken refresh leaves the last good line

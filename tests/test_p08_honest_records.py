@@ -219,13 +219,15 @@ def test_stop_line_north_star_uses_the_strict_rule(monkeypatch):
     assert strict == 10
 
 
-def test_status_bar_baseline_label_names_the_priced_model():
+def test_status_bar_baseline_label_names_the_priced_model(monkeypatch):
+    """P3.4-B3: the label is ``pricing.savings_baseline_model()`` (the private Opus constants are gone)."""
+    from llm_router import pricing
+
     hook = _load_hook("status-bar.py", "_p08_status_bar")
-    out = hook._savings_str_full({"today": (1.0, 2.0), "week": (1.0, 2.0), "month": (5.0, 58.0),
-                                  "session": (0.0, 0.0)})
-    assert "vs Sonnet" not in out
-    assert f"vs {hook.HOST_BASELINE_LABEL}:$58" in out
-    assert hook.HOST_BASELINE_LABEL == "Opus" and hook.HOST_BASELINE_TIER == "opus"
+    assert not hasattr(hook, "HOST_BASELINE_LABEL") and not hasattr(hook, "HOST_INPUT_PER_M")
+    monkeypatch.delenv("LLM_ROUTER_SAVINGS_BASELINE", raising=False)
+    assert hook._baseline_label() == pricing.savings_baseline_model() == pricing.SAVINGS_BASELINE_MODEL
+    assert "sonnet" not in hook._baseline_label().lower()
 
 
 def test_cc_usage_track_session_rule_matches_call_identity():
