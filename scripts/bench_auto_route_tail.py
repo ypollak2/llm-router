@@ -42,6 +42,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+os.environ.setdefault("LLM_ROUTER_SYNTHETIC", "1")  # a bench run is synthetic unless the operator says otherwise (M02)
+
 REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / "hooks" / "auto-route.py"
 MODEL = "fakemodel:latest"
@@ -166,7 +168,7 @@ def run_cell(name: str, scratch: Path, n: int, port: int, busy_s: float) -> dict
         "HOME": str(home), "LLM_ROUTER_HOME": str(state),
         "PATH": f"{REPO / '.venv' / 'bin'}:/usr/bin:/bin",
         "LLM_ROUTER_OLLAMA_URL": url, "OLLAMA_BASE_URL": url, "OLLAMA_HOST": url,
-        "LLM_ROUTER_OLLAMA_MODEL": MODEL, "LLM_ROUTER_SYNTHETIC": "1", "UV_OFFLINE": "1",
+        "LLM_ROUTER_OLLAMA_MODEL": MODEL, "LLM_ROUTER_SYNTHETIC": os.environ["LLM_ROUTER_SYNTHETIC"], "UV_OFFLINE": "1",
         "LLM_ROUTER_NO_DETACHED_SPAWN": "1",
         # this tree's package, not whatever the venv's editable install points at (A/B against a base tree)
         "PYTHONPATH": str(REPO / "src"),
