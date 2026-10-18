@@ -315,6 +315,48 @@ def _pgrep(pattern: str) -> list[str]:
     return subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True).stdout.split()
 
 
+def _kill_own_tree(pidfile: Path) -> None:
+    """Terminate the shell whose pid the test's command wrote to `pidfile`, and its descendants.
+    Never matches by name, so it cannot hit a process the test did not start."""
+    import signal
+
+    try:
+        root = int(pidfile.read_text().strip())
+    except (OSError, ValueError):
+        return
+    if root <= 1:
+        return
+
+    def descendants(pid: int) -> list[int]:
+        out = subprocess.run(["pgrep", "-P", str(pid)], capture_output=True, text=True).stdout.split()
+        kids = [int(x) for x in out]
+        return kids + [d for k in kids for d in descendants(k)]
+
+    pids = descendants(root)[::-1] + [root]
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        alive = []
+        for pid in pids:
+            try:
+                os.kill(pid, 0)
+                alive.append(pid)
+            except ProcessLookupError:
+                pass
+        if not alive:
+            return
+        time.sleep(0.05)
+    for pid in alive:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
 @pytest.mark.timing
 @pytest.mark.timeout(90)
 def test_e2e_sigint_kills_the_running_shell_command(tmp_path):
@@ -322,7 +364,7 @@ def test_e2e_sigint_kills_the_running_shell_command(tmp_path):
     marker = f"sleep 47.{os.getpid() % 1000}"
     ws = tmp_path / "ws"
     ws.mkdir()
-    srv = h.MockServer([{"tool_calls": [{"name": "bash", "arguments": {"command": f"{marker} && touch after.txt"}}]},
+    srv = h.MockServer([{"tool_calls": [{"name": "bash", "arguments": {"command": f"echo $$ > {tmp_path / 'shell.pid'}; {marker} && touch after.txt"}}]},
                         {"text": "finished"}], tmp_path)
     try:
         h.write_agent_dir(tmp_path / "agent", srv.port)
@@ -332,7 +374,7 @@ def test_e2e_sigint_kills_the_running_shell_command(tmp_path):
         assert r["rc"] == 130, r["stderr"]
         assert _pgrep(marker) == [], "the shell command outlived Pi"
     finally:
-        subprocess.run(["pkill", "-f", marker])
+        _kill_own_tree(tmp_path / "shell.pid")
         srv.close()
 
 
@@ -436,7 +478,7 @@ def test_e2e_interrupting_the_parent_stops_the_sub_agents_shell_command(tmp_path
     ws = tmp_path / "ws"
     ws.mkdir()
     srv = h.MockServer([{"tool_calls": [{"name": "subagent", "arguments": {"task": "run the long job"}}]},
-                        {"tool_calls": [{"name": "bash", "arguments": {"command": f"{marker} && touch after.txt"}}]},
+                        {"tool_calls": [{"name": "bash", "arguments": {"command": f"echo $$ > {tmp_path / 'shell.pid'}; {marker} && touch after.txt"}}]},
                         {"text": "done"}, {"text": "done"}], tmp_path)
     child_exts = os.pathsep.join(str(PROFILE / "extensions" / n) for n in pic.CHILD_EXTENSIONS)
     try:
@@ -451,7 +493,7 @@ def test_e2e_interrupting_the_parent_stops_the_sub_agents_shell_command(tmp_path
         assert _pgrep(marker) == [], "the sub-agent's shell command outlived the parent"
         assert not (ws / "after.txt").exists()
     finally:
-        subprocess.run(["pkill", "-f", marker])
+        _kill_own_tree(tmp_path / "shell.pid")
         srv.close()
 
 

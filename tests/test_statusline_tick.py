@@ -20,6 +20,7 @@ import ast
 import itertools
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -245,6 +246,27 @@ def _env(home: Path, refresh_cmd: str, *, fast: bool = True) -> dict:
     return env
 
 
+def _terminate_pid(pid: int, wait_s: float = 3.0) -> None:
+    """SIGTERM exactly this pid (one the test started), SIGKILL after a bounded wait."""
+    if pid <= 1:
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 def _run(env: dict) -> tuple[str, float]:
     t0 = time.perf_counter()
     r = subprocess.run(["bash", str(SCRIPT)], input=json.dumps({"prompt": PROMPT, "session_id": "s"}),
@@ -441,11 +463,17 @@ def test_other_values_stay_single_line(tmp_path, value, fast_only):
 
 @pytest.mark.timing
 def test_both_fast_part_never_blocks_on_a_hung_refresher(tmp_path):
-    hang = f"{sys.executable} -c 'import time; time.sleep(30)'"
+    pidfile = tmp_path / "hang.pid"
+    hang = (f"{sys.executable} -c \"import os,time; open({str(pidfile)!r},'w').write(str(os.getpid())); "
+            "time.sleep(30)\"")
     try:
         out, dt = _run({**_env(tmp_path, hang, fast=False), "LLM_ROUTER_STATUSLINE": "both"})
     finally:
-        subprocess.run(["pkill", "-f", "time.sleep(30)"], check=False)
+        # Only the sleeper this test started (it recorded its own pid); never a name match.
+        try:
+            _terminate_pid(int(pidfile.read_text().strip()))
+        except (OSError, ValueError):
+            pass
     assert len(out.splitlines()) == 2 and dt < 10, (dt, out)
 
 
