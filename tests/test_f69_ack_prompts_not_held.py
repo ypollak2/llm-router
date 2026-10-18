@@ -26,7 +26,8 @@ ACK_PROMPTS = [
     "copied the hooks", "yes, go ahead", "thanks", "Yeah, I reconnected the mcp.",
     "I pushed v1.2.3", "ok, I restarted it!", "I edited config.yaml",
     "yep I restarted the daemon", "I pushed the branch", "I ran the tests in CI",
-    "ok. I ran it", "I restarted it again",
+    "ok. I ran it", "I restarted it again", "I merged it into main",
+    "I pushed it to origin/main", "I ran it in CI", "I copied the hooks into ~/.claude/hooks",
 ]
 FOLLOWUP_QUESTIONS = ["why?", "and the tests?", "what about X", "why did it fail",
                       "reconnected the mcp, why does it fail"]
@@ -237,6 +238,9 @@ REPORT_THEN_ASK_SHAPE = [
     "I merged it brainstorm names", "I merged it triage bugs", "I fixed it audit the repo",
     "I merged it investigate", "I pushed it brainstorm", "I fixed the bug triage the rest",
     "I need the logs", "I want it faster",
+    # round 4: -ed imperatives and a bare verb as the "place"
+    "Embed the logo", "embed it", "Speed it", "Exceed it",
+    "I merged it to brainstorm", "I merged it with audit", "I merged to investigate",
 ]
 
 

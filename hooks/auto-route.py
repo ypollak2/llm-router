@@ -1659,12 +1659,16 @@ _ACK_CLAUSE_BREAK_RE = re.compile(r"[:.!]\s+\S|\n")
 _ACK_TOKEN = r"[\w./:@+~-]+"
 _ACK_REPORT_WHOLE_RE = re.compile(
     r"^(?:(?:i|we)(?:'ve|\s+have|\s+just|\s+already)?\s+)?"
-    r"(?!(?:need|want|feed|seed|proceed)\b)"
+    r"(?!\w*(?:eed|mbed)\b|need|want)"  # "embed it", "speed it": imperatives, not reports
     r"(?:\w+ed|ran|did|made|got|sent|set|put|built|wrote|took|pasted|restarted)"
     r"(?:\s+(?:it|them|this|that|everything|all|"
     rf"(?:the|my|our|your|a|an|those|these)\s+{_ACK_TOKEN}|"
     r"[\w/:@+-]*[./\d_][\w./:@+-]*))?"
-    rf"(?:\s+(?:in|on|to|into|from|for|at|with|via)\s+(?:(?:the|my|our|a|an)\s+)?{_ACK_TOKEN})?"
+    # the place is a determiner + word, a path/ref token, or a known place; never a
+    # bare word ("I merged it to brainstorm" is a request)
+    r"(?:\s+(?:in|on|to|into|from|for|at|with|via)\s+(?:(?:the|my|our|a|an)\s+[\w./:@+~-]+|"
+    r"[\w/:@+~-]*[./\d_~][\w./:@+~-]*|main|master|prod|production|staging|origin|ci|"
+    r"github|clipboard|terminal|chrome|mcp))?"
     r"(?:\s+(?:again|already|now|too|locally))?"
     r"[\s.!]*$",
     re.IGNORECASE,
