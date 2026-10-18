@@ -448,38 +448,96 @@ def run_equivalence() -> dict:
 # ── summary coverage (P1.2-a) ─────────────────────────────────────────────────
 
 
+def _gone(pid: int) -> bool:
+    """True once ``pid`` has exited and been reaped (it is our own child, so waitpid works)."""
+    try:
+        done, _ = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        return True  # already reaped elsewhere
+    return done == pid
+
+
+def reap_children(pids: list[int], grace_s: float = 5.0, term_s: float = 2.0) -> int:
+    """Wait up to ``grace_s`` for our own children, then SIGTERM, then SIGKILL the survivors.
+
+    Only the pids passed in are ever signalled. Every child is reaped, so none is left as a
+    zombie or a running process. Returns how many had to be signalled."""
+    import signal
+
+    live = set(pids)
+    forced = 0
+    for sig, wait in ((None, grace_s), (signal.SIGTERM, term_s), (signal.SIGKILL, term_s)):
+        if sig is not None:
+            for pid in live:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, sig)
+            if sig == signal.SIGTERM:
+                forced += len(live)
+        end = time.monotonic() + wait
+        while live and time.monotonic() < end:
+            live = {p for p in live if not _gone(p)}
+            if live:
+                time.sleep(0.02)
+        live = {p for p in live if not _gone(p)}
+        if not live:
+            break
+    return forced
+
+
 def run_summary(n_sessions: int = 100, wait_s: float = 300.0) -> dict:
     """P1.2-a on synthetic sessions. For each session, ``context_summary.spawn()`` (what the Stop
     hook calls) starts the real detached worker with its default argv. Coverage counts sessions
     with a stored summary once the workers are done (or ``wait_s`` passed). Spawn p95 is the wall
     time of those same ``spawn()`` calls. The Stop hook process itself is not run here: its wall
-    time is P0.9's."""
-    from llm_router import context_summary
+    time is P0.9's. Every worker pid is tracked; before the scratch dir is removed the workers are
+    waited for (bounded) and any survivor is stopped, so the script leaves no process behind."""
+    from llm_router import context_summary, statusline_tick
+
+    pids: list[int] = []
+    real_spawn = statusline_tick._spawn_detached
+
+    def tracking_spawn(argv):
+        pid = real_spawn(argv)
+        if pid:
+            pids.append(pid)
+        return pid
 
     src = str(ROOT / "src")
     pythonpath = os.pathsep.join([src] + [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p])
-    with scratch_env({"PYTHONPATH": pythonpath}) as root:
-        tdir = root / "transcripts"
-        tdir.mkdir()
-        counts: dict[str, int] = {}
-        times: list[float] = []
-        started = 0
-        for i in range(n_sessions):
-            it = build_item(10_000 + i, MIX[i % len(MIX)][0])
-            path = write_transcript(it, tdir)
-            sid = f"synth-p12a-{i:03d}"
-            counts[sid] = len(context_summary.read_messages(path))
-            t0 = time.perf_counter()
-            started += bool(context_summary.spawn(sid, str(path)))
-            times.append((time.perf_counter() - t0) * 1000)
-        deadline = time.monotonic() + wait_s
-        while time.monotonic() < deadline:
+    statusline_tick._spawn_detached = tracking_spawn
+    forced = 0
+    try:
+        with scratch_env({"PYTHONPATH": pythonpath}) as root:
+            try:
+                tdir = root / "transcripts"
+                tdir.mkdir()
+                counts: dict[str, int] = {}
+                times: list[float] = []
+                started = 0
+                for i in range(n_sessions):
+                    it = build_item(10_000 + i, MIX[i % len(MIX)][0])
+                    path = write_transcript(it, tdir)
+                    sid = f"synth-p12a-{i:03d}"
+                    counts[sid] = len(context_summary.read_messages(path))
+                    t0 = time.perf_counter()
+                    started += bool(context_summary.spawn(sid, str(path)))
+                    times.append((time.perf_counter() - t0) * 1000)
+                deadline = time.monotonic() + wait_s
+                alive = set(pids)
+                while time.monotonic() < deadline:
+                    cov = context_summary.coverage(counts, min_messages=12)
+                    alive = {p for p in alive if not _gone(p)}
+                    # covered everything, or no worker is left to add a summary: nothing can change
+                    if cov["covered"] == cov["n_sessions"] or not alive:
+                        break
+                    time.sleep(0.05)
+            finally:
+                forced = reap_children([p for p in pids if not _gone(p)])
             cov = context_summary.coverage(counts, min_messages=12)
-            if cov["covered"] == cov["n_sessions"]:
-                break
-            time.sleep(0.5)
-        cov = context_summary.coverage(counts, min_messages=12)
+    finally:
+        statusline_tick._spawn_detached = real_spawn
     return {"label": LABEL, "must": "P1.2-a", "workers_started": started,
+            "workers_forced_stop": forced,
             "method": "spawn() with the real detached worker per session; Stop hook process not run",
             **summary_verdict(cov, times)}
 
