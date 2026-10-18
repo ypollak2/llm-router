@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 71
+# llm_router-hook-version: 72
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 71"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 72"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -1742,11 +1742,32 @@ _CMD_SHARED_STATE_RE = re.compile(
     r"(?<![\w-])(?:push|merge|deploy|release|commit|publish|tag|rebase|reset|"
     r"(?:--)?force|delete|destroy|upload|apply|rm)(?![\w-])", re.IGNORECASE)
 _CMD_MAX_WORDS = 12
-# F83: a pipe into a shell/interpreter runs arbitrary downloaded text ("curl x | sh"), so
-# it is never command-shaped, bare or behind "!" (command-shaped exempts the whole turn).
-_CMD_PIPE_TO_SHELL_RE = re.compile(
-    r"\|\s*(?:sudo\s+)?(?:\S*/)?(?:ba|z|k|da|fi|c|tc)?sh\b|\|\s*(?:sudo\s+)?(?:\S*/)?"
-    r"(?:python[\d.]*|perl|ruby|node|php|eval|source|xargs|env)\b", re.IGNORECASE)
+# F83/F89: a pipe (or &&, ;) into a shell/interpreter runs arbitrary downloaded text
+# ("curl x | sh"), so it is never command-shaped, bare or behind "!" (command-shaped
+# exempts the whole turn). F89: wrapper commands (sudo -E bash, doas sh, busybox sh) and a
+# later `&&` / `;` segment ("curl -o f x && bash f") are covered the same way.
+_CMD_SEGMENT_SPLIT_RE = re.compile(r"\|\|?|&&?|;")
+_CMD_SHELL_NAME_RE = re.compile(
+    r"(?:(?:ba|z|k|da|fi|c|tc|a)?sh|python[\d.]*|perl|ruby|node|php|eval|source|xargs|env|exec)",
+    re.IGNORECASE)
+_CMD_WRAPPERS = frozenset((
+    "sudo doas busybox command nohup time nice setsid stdbuf timeout su chroot").split())
+
+
+def _cmd_pipes_into_shell(t: str) -> bool:
+    for i, seg in enumerate(_CMD_SEGMENT_SPLIT_RE.split(t)):
+        toks = seg.split()
+        if not toks:
+            continue
+        base = [x.rsplit("/", 1)[-1] for x in toks]
+        # a wrapper makes every later token a candidate ("sudo -u root sh"); otherwise
+        # only the segment's own command word can be a shell, and the leading segment
+        # is the command being pasted, so only later segments count
+        wrapped = base[0] in _CMD_WRAPPERS
+        if (i > 0 or wrapped) and any(
+                _CMD_SHELL_NAME_RE.fullmatch(x) for x in (base if wrapped else base[:1])):
+            return True
+    return False
 
 
 # F71: the "ambient" continuation paths in ``_is_coordination_task`` (an ack-style
@@ -1881,6 +1902,39 @@ def _status_subject_ok(tail: str, skip: int = 1) -> bool:
                    for i, t in enumerate(toks) if i >= skip)
 
 
+# F89: "status of/on X" is an allow-list, not a verb deny-list: no verb list is complete
+# ("status of X push it", "...ship it", "...commit"). After "of/on" the subject is ONE
+# determiner-led noun phrase of 1-3 words ("the deploy run"), or ONE bare word optionally
+# followed by a number ("X", "PR 89"); only a closing politeness/time token may follow, and
+# no object pronoun ("push it"), second determiner, or action verb ending a multi-word
+# phrase ("the build ship"; a pin: "status on the loop guard PR" is 3 words and stays). Anything longer or odder is a
+# false reject (one routing check); "status of the tests" stays coordination.
+_STATUS_CLOSING_TOKENS = frozenset("please pls thanks thx thank you yet now today currently".split())
+_STATUS_OBJECT_PRONOUNS = frozenset("it them they him her me us".split())
+_STATUS_ACTION_ENDINGS = frozenset((
+    "push deploy merge ship commit release publish optimize optimise handle do check test "
+    "build launch start stop restart kill").split())
+
+
+def _status_of_subject_ok(tail: str) -> bool:
+    toks = _AMBIENT_TOKEN_RE.findall(tail.replace("\u2019", "'").lower())
+    if toks and toks[0] in ("of", "on"):
+        toks = toks[1:]
+    while toks and toks[-1] in _STATUS_CLOSING_TOKENS:
+        toks.pop()
+    if not toks:
+        return True
+    if toks[0] in _STATUS_SUBJECT_DETS:
+        body, shape = toks[1:], 1 <= len(toks) - 1 <= 3
+    else:
+        body, shape = toks, len(toks) == 1 or (len(toks) == 2 and toks[1].isdigit())
+    if len(body) > 1 and body[-1] in _STATUS_ACTION_ENDINGS:
+        return False
+    return (shape and not any(t in _STATUS_SUBJECT_DETS or t in _STATUS_OBJECT_PRONOUNS
+                              for t in body)
+            and _status_subject_ok(" ".join(toks)))
+
+
 def _status_clause_ok(seg: str) -> bool:
     ms = list(_COORDINATE_STATUS_RE.finditer(seg))
     if not ms:
@@ -1888,6 +1942,8 @@ def _status_clause_ok(seg: str) -> bool:
     rest, last = [], 0
     for m in ms:
         if _STATUS_SUBJECT_OPEN_RE.match(m.group(0)) or _STATUS_SUBJECT_TAIL_RE.match(seg, m.end()):
+            if re.search(r"status(?:\s+(?:of|on))?$", m.group(0), re.IGNORECASE):
+                return _status_of_subject_ok(seg[m.end():])
             return _status_subject_ok(seg[m.end():])
         if _STATUS_DONE_SHAPE_RE.match(m.group(0)):
             # F83: "is it done now fix the bug": a complete status shape, tail must be filler
@@ -1998,7 +2054,7 @@ def _is_command_shaped(prompt: str) -> bool:
         bang = True
     if not t or "?" in t or "\n" in t or len(t.split()) > _CMD_MAX_WORDS:
         return False
-    if _CMD_PIPE_TO_SHELL_RE.search(t):
+    if _cmd_pipes_into_shell(t):
         return False
     first = t.split()[0]
     if (first not in _CMD_EXECUTABLES and not (bang and first in _CMD_BANG_EXECUTABLES)
