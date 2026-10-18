@@ -32,6 +32,7 @@ Usage:
     llm-router okf gc           — find stored model prose; --apply quarantines it
     llm-router provider list    — providers skipped until a reported reset time
     llm-router provider unban <name>  — lift that skip now (or --all)
+    llm-router discover [--rescan] [--json]  — local models, key names and seats found; --rescan re-scans now
     llm-router inventory [--json]     — models this machine can run: route, path, quota, privacy
     llm-router map [--json]           — the one resource map: seats, local models, keys, quota, priority
     llm-router mode [advise|route]    — routing authority: route (default) or advise (the proxy forwards the model you asked for and only logs its proposal)
