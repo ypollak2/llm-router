@@ -1,0 +1,62 @@
+name: Examples
+
+# AGT A.6: every directory under examples/ runs against the real llm-router gateway / router / MCP
+# server / proxy on a deterministic offline fake backend (examples/fake_backend.py). No provider key
+# is set and no provider is called. Framework packages are pinned in each example's own
+# requirements.txt and installed here only, never as llm-router dependencies.
+# tests/test_a6_examples_wired.py fails when a directory is missing from this matrix.
+
+on:
+  push:
+    branches: [main]
+    paths: ["examples/**", "src/llm_router/**", "pyproject.toml", "uv.lock", ".github/workflows/examples.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["examples/**", "src/llm_router/**", "pyproject.toml", "uv.lock", ".github/workflows/examples.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  examples:
+    name: example / ${{ matrix.example }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        example:
+          - python_sdk
+          - mcp
+          - proxy
+          - langgraph
+          - openai_agents
+          - crewai
+          - claude_agent_sdk
+          - pydantic_ai
+          - typescript_openai
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Install llm-router and this example's pinned requirements
+        run: |
+          uv venv --python 3.12 "$RUNNER_TEMP/venv"
+          args=(-e .)
+          if [ -f "examples/${{ matrix.example }}/requirements.txt" ]; then
+            args+=(-r "examples/${{ matrix.example }}/requirements.txt")
+          fi
+          uv pip install --python "$RUNNER_TEMP/venv/bin/python" "${args[@]}"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: matrix.example == 'typescript_openai'
+        with:
+          node-version: "24"
+      - name: Install the example's npm packages (locked)
+        if: matrix.example == 'typescript_openai'
+        run: npm ci --no-audit --no-fund
+        working-directory: examples/typescript_openai
+      - name: Run the example
+        run: |
+          out="$("$RUNNER_TEMP/venv/bin/python" examples/${{ matrix.example }}/main.py)"
+          echo "$out"
+          echo "$out" | grep -qx OK
