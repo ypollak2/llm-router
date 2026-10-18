@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 69
+# llm_router-hook-version: 70
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 69"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 70"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -1365,11 +1365,18 @@ _COORDINATE_CROSS_SYSTEM_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# F78: was an unanchored "<op> ... and ... <op>" search, so "push the fix and deploy"
+# (a work request naming its own object) was claimed. Written for "merge them and
+# redeploy" (da31df7e, #297): a chained operation on an unresolved pronoun, whose
+# referent lives only in the session. Now a whole-prompt allow-list of exactly that
+# shape; any named object, filler or extra word falls through to normal routing.
+_MULTISTEP_PRON = r"(?:it|them|this|that|these|those)"
 _COORDINATE_MULTISTEP_RE = re.compile(
-    r"\b(?:merge|deploy|redeploy|release|rebase|roll(?:ing)?\s+out|push|publish)\b"
-    r"(?:(?!\.).){0,40}?\band\b(?:(?!\.).){0,40}?"
-    r"\b(?:redeploy|deploy|merge|release|report\s+back|resolve)\b",
-    re.IGNORECASE | re.DOTALL,
+    r"^(?:(?:merge|deploy|redeploy|release|rebase|push|publish)\s+" + _MULTISTEP_PRON +
+    r"|roll(?:ing)?\s+" + _MULTISTEP_PRON + r"\s+out)\s+and\s+(?:then\s+)?"
+    r"(?:(?:redeploy|deploy|merge|release|resolve)(?:\s+" + _MULTISTEP_PRON + r")?"
+    r"|report\s+back)[\s.!]*$",
+    re.IGNORECASE,
 )
 
 # Bare ambient status/continuation checks. Gated to <=6 WORDS (not just a
@@ -1714,6 +1721,12 @@ _CMD_EXECUTABLES = frozenset({
     "cd", "grep", "rg", "find", "sed", "head", "tail", "curl", "launchctl", "ruff",
     "mypy", "cargo", "go", "codex", "claude", "sudo", "export", "echo", "tmux", "ssh",
 })
+# F82: local process/file commands accepted only behind a pasted shell escape ("!"), where
+# the owner's intent to run it locally is explicit; bare "kill 1" / "touch x" keep routing.
+_CMD_BANG_EXECUTABLES = frozenset({
+    "kill", "pkill", "killall", "ps", "lsof", "pwd", "mkdir", "touch", "mv", "cp", "chmod",
+    "wc", "diff", "tree", "du", "df", "bash", "sh", "source", "whoami", "jq", "tar", "unzip",
+})
 _CMD_PROSE_WORDS_RE = re.compile(
     r"(?<![\w-])(?:why|what|how|when|where|which|who|is|are|was|were|does|do|did|the|a|an|my|"
     r"it|its|i|we|you|to|not|fails?|failed|please|can|could|should|would|will|"
@@ -1758,6 +1771,9 @@ _AMBIENT_NOUNS = frozenset("list score status".split())
 _AMBIENT_DEICTIC_NOUNS = _AMBIENT_NOUNS | frozenset((
     "plan audit report presentation demo result results finding findings draft drafts "
     "recommendation recommendations").split())
+# "continue the plan", "carry on with the work": the opener's remainder may also name the
+# session's own plan/work/queue (live 2026-10-18: "continue the plan" was query/simple).
+_AMBIENT_CONTINUE_NOUNS = _AMBIENT_NOUNS | frozenset("plan work queue backlog".split())
 _AMBIENT_AFTER_MODAL = {"check": frozenset(("you", "to"))}
 # "use this plan and get started": "use" only when a determiner follows ("use it" is not).
 _AMBIENT_BEFORE_DET = {"use": _AMBIENT_AFTER_DET}
@@ -1794,14 +1810,42 @@ def _ambient_tokens_within(text: str, vocab: frozenset,
 # has more than one clause, EVERY clause must itself be a status shape or pure
 # filler/continuation; one request clause sends the whole prompt to normal routing.
 _STATUS_CLAUSE_SPLIT_RE = re.compile(r"[?.!;:,\u2014\n]+|\s-+\s")
+# F78: punctuation was the only clause boundary, so the unpunctuated "what's next add
+# tests" / "what's next fix it" / "what's next and fix bug in parser" were claimed.
+# A BARE status phrase (the match names no subject of its own) must now be the whole
+# clause: everything around it comes from the base filler vocabulary. Subject-bearing
+# shapes ("status of X", "did you push X", "is X done") keep their old behaviour
+# (their free-text subject cannot be allow-listed); one request clause still routes.
+_STATUS_BARE_RE = re.compile(
+    r"what(?:'s|\s+is|\s+are|\s+has|s)?\s+(?:left|next|missing|remain\w*|"
+    r"the\s+status|the\s+current\s+state)"
+    r"|(?:anything|something|what|how\s+much|how\s+many)\s+(?:else\s+|more\s+)?"
+    r"(?:is\s+|do\s+we\s+|we\s+)?(?:have\s+)?(?:left|remain\w*|missing|to\s+(?:do|cover|go))"
+    r"|next\s+steps?|current\s+state|the\s+status|so\s+far|until\s+now|till\s+now"
+    r"|where\s+(?:we|things)\s+at",
+    re.IGNORECASE,
+)
+_STATUS_FILLER_TOKENS = _AMBIENT_BASE_TOKENS | frozenset("here yet today currently".split())
+_STATUS_SUBJECT_TAIL_RE = re.compile(r"\s+(?:of|on)\b", re.IGNORECASE)
+
+
+def _status_clause_ok(seg: str) -> bool:
+    ms = list(_COORDINATE_STATUS_RE.finditer(seg))
+    if not ms:
+        return _ambient_tokens_within(seg, _AMBIENT_BASE_TOKENS)
+    rest, last = [], 0
+    for m in ms:
+        if not _STATUS_BARE_RE.fullmatch(m.group(0)) or _STATUS_SUBJECT_TAIL_RE.match(seg, m.end()):
+            return True  # subject-bearing status shape: unchanged
+        rest.append(seg[last:m.start()])
+        last = m.end()
+    rest.append(seg[last:])
+    return _ambient_tokens_within(" ".join(rest), _STATUS_FILLER_TOKENS)
 
 
 def _status_segments_ok(stripped: str) -> bool:
     segs = [x.strip() for x in _STATUS_CLAUSE_SPLIT_RE.split(stripped) if x.strip()]
-    if len(segs) <= 1:
-        return True
-    return all(_COORDINATE_STATUS_RE.search(x)
-               or _ambient_tokens_within(x, _AMBIENT_BASE_TOKENS) for x in segs)
+    return all(_status_clause_ok(x) for x in segs)
 
 
 # F74: a prompt that is ONLY a URL into the user's own repo/CI means "look at this
@@ -1865,7 +1909,7 @@ def _own_repo_remotes(cwd: str) -> frozenset:
 
 
 def _is_own_repo_url(stripped: str) -> bool:
-    if "github.com" not in stripped or len(stripped) > 300 or any(c.isspace() for c in stripped):
+    if "github.com" not in stripped.lower() or len(stripped) > 300 or any(c.isspace() for c in stripped):
         return False
     m = _OWN_URL_RE.match(stripped)
     if not m:
@@ -1887,12 +1931,18 @@ def _is_command_shaped(prompt: str) -> bool:
     or stray backticks, and no prose words. A real question that mentions a
     command ("why does git rebase fail?") never matches: '?' or a prose word rejects."""
     t = prompt.strip().strip("`").strip()
+    bang = False
     if t.startswith("$ "):
         t = t[2:].lstrip()
+    elif t.startswith("!"):
+        # F82: a pasted shell escape (" ! kill 65369", "!git status") arrives as text
+        t = t[1:].lstrip()
+        bang = True
     if not t or "?" in t or "\n" in t or len(t.split()) > _CMD_MAX_WORDS:
         return False
     first = t.split()[0]
-    if first not in _CMD_EXECUTABLES and not first.startswith(("./", "~/", "/")):
+    if (first not in _CMD_EXECUTABLES and not (bang and first in _CMD_BANG_EXECUTABLES)
+            and not first.startswith(("./", "~/", "/"))):
         return False
     return not (_CMD_PROSE_WORDS_RE.search(t) or _CMD_SHARED_STATE_RE.search(t))
 
@@ -1936,7 +1986,7 @@ def _is_coordination_task(prompt: str) -> bool:
         return True
     if _COORDINATE_CROSS_SYSTEM_RE.search(prompt):
         return True
-    if _COORDINATE_MULTISTEP_RE.search(prompt):
+    if _COORDINATE_MULTISTEP_RE.match(prompt.strip()):
         return True
     if _is_deferred_op(prompt):
         return True
@@ -1959,14 +2009,19 @@ def _is_coordination_task(prompt: str) -> bool:
     # instead (checked later in classify_prompt, but this function is
     # called standalone by tests too, so the exclusion lives here).
     if len(words) <= 12 and not _is_introspection_task(stripped):
-        if _COORDINATE_EXPLICIT_CONTINUE_RE.search(stripped):
+        ec = _COORDINATE_EXPLICIT_CONTINUE_RE.search(stripped)
+        # F78: what FOLLOWS the phrase must be filler too: "keep going and fix the lint
+        # errors" / "carry on with the plan but rename the module" are work requests.
+        if ec and _ambient_tokens_within(stripped[ec.end():], _AMBIENT_BASE_TOKENS,
+                                         _AMBIENT_CONTINUE_NOUNS):
             return True
         if _COORDINATE_STATUS_RE.search(stripped) and _status_segments_ok(stripped):
             return True
         opener = _COORDINATE_CONTINUATION_OPENER_RE.match(stripped)
         if opener:
             # F71: whole-remainder allow-list, not "no real-task verb found".
-            if _ambient_tokens_within(stripped[opener.end():], _AMBIENT_BASE_TOKENS):
+            if _ambient_tokens_within(stripped[opener.end():], _AMBIENT_BASE_TOKENS,
+                                      _AMBIENT_CONTINUE_NOUNS):
                 return True
         elif (not _COORDINATE_OP_VERB_RE.search(stripped)
                 and not _COORDINATE_CONCRETE_ANCHOR_RE.search(stripped)
