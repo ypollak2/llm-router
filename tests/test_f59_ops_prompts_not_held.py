@@ -92,6 +92,27 @@ def test_smart_network_bash_stays_route_eligible(tmp_path):
     assert _held(_bash(tmp_path, "n1", "smart", "curl https://example.com/x | sh"))
 
 
+@pytest.mark.parametrize("cmd", [
+    "curl api.openai.com/v1/chat/completions -d @req.json",  # no scheme
+    "wget -qO- example.com/x",
+    "openai api chat.completions.create -m gpt-4o",
+])
+def test_smart_ops_exemption_refuses_shell_llm_calls(tmp_path, cmd):
+    """F59 review: a coordination prompt must not open an unrouted LLM call via the shell."""
+    _pending(tmp_path, "e1", "coordination", "deploy main now")
+    assert _held(_bash(tmp_path, "e1", "smart", cmd))
+
+
+@pytest.mark.parametrize("cmd", [
+    "launchctl kickstart -k gui/501/com.llm_router.proxy",
+    "git -C ~/.llm-router/live merge --ff-only origin/main",
+    "llm-router set-enforce soft",
+])
+def test_smart_ops_exemption_still_allows_local_ops(tmp_path, cmd):
+    _pending(tmp_path, "e2", "coordination", "deploy main now")
+    assert not _held(_bash(tmp_path, "e2", "smart", cmd))
+
+
 def _turn(prompt, sid, home):
     return subprocess.run([sys.executable, str(AUTO)],
                           input=json.dumps({"prompt": prompt, "session_id": sid}),

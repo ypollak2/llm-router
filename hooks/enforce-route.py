@@ -562,6 +562,19 @@ def _bash_exempt_from_hold(task_type: str, command: str, redirect_fires: bool) -
     return _is_local_only_bash(command)
 
 
+# F59 review: the smart-ops exemption is deny-list based, so it also refuses any
+# network fetch (with or without a scheme) and provider CLIs - shell-driven LLM
+# calls must stay route-eligible. (python -c / llm-router are governed by the
+# older local-tool and own-CLI exemptions; see F60.)
+_SMART_OPS_LLM_ESCAPE_RE = re.compile(
+    r"""(?:
+        \bcurl\b|\bwget\b|\bhttpie\b|\bhttp\s+(?:get|post)\b|
+        \b(?:openai|anthropic)\s+(?:api|messages|chat|completions)\b
+    )""",
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
 def _smart_ops_bash_exempt(enforce: str, task_type: str, command: str) -> bool:
     """Smart mode never holds Bash for an operational ("coordination") task.
 
@@ -574,7 +587,8 @@ def _smart_ops_bash_exempt(enforce: str, task_type: str, command: str) -> bool:
         return False
     if not command or not command.strip():
         return False
-    return not _BASH_ROUTABLE_ESCAPE_RE.search(command)
+    return not (_BASH_ROUTABLE_ESCAPE_RE.search(command)
+                or _SMART_OPS_LLM_ESCAPE_RE.search(command))
 
 
 def _is_local_only_bash(command: str) -> bool:
