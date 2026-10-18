@@ -324,3 +324,14 @@ def test_r1_e2e_lowering_exports_never_held(tmp_path, enforce, task, cmd):
 @pytest.mark.parametrize("task", ["research", "query"])
 def test_r1_e2e_export_then_rm_not_never_held(tmp_path, enforce, task):
     assert _run("export LLM_ROUTER_ENFORCE=off; rm -rf x", tmp_path, enforce, task), (enforce, task)
+
+
+# F66 (rv-586 r2): a `time` prefix before `case` must not hide the arm bodies.
+@pytest.mark.parametrize("cmd", [
+    "time case x in x) llm-router query x;; esac",
+    "time -p case x in x) llm-router query x;; esac",
+    "time case x in x) curl api.openai.com;; esac",
+])
+@pytest.mark.parametrize("mode", ["smart", "hard"])
+def test_f66_time_prefixed_case_arm_is_held(tmp_path, cmd, mode):
+    assert _run(cmd, tmp_path, mode, "coordination"), (mode, cmd)
