@@ -343,7 +343,8 @@ def test_breakdown_and_gaps(home):
     bd = org["breakdown"]
     assert set(bd) == {"by_task_group", "by_served_model", "by_lane"}
     assert bd["by_served_model"]["claude-haiku-4-5-20251001"]["k"] == 36
-    assert bd["by_served_model"]["claude-sonnet-5-5"] == {"k": 0, "n": 40, "value": 0.0}
+    sn = bd["by_served_model"]["claude-sonnet-5-5"]
+    assert (sn["k"], sn["n"], sn["value"]) == (0, 40, 0.0)
     assert org["action"]["value"] == round(36 / 76, 4)
     assert org["gap_to_0.60"]["action"] == round(36 / 76 - 0.6, 4)
     assert org["t_p2"] is None and org["gap_to_T_P2"]["action"] is None and "prereg" in org["gap_to_T_P2"]["note"]
@@ -505,7 +506,7 @@ def test_cli_daily_and_streak_under_tmp_home(home, capsys):
     assert do.run_daily(date=str(LAST), backfill=3, force=False, partial=False, manifest=None, inputs=inp,
                         now=NOW) == 0
     assert [ln.split()[1] for ln in capsys.readouterr().out.splitlines()] == ["exists"] * 3
-    assert sorted(os.listdir(do.daily_dir())) == [f"{_day(i)}.json" for i in (14, 15, 16)]
+    assert sorted(f for f in os.listdir(do.daily_dir()) if not f.startswith(".")) == [f"{_day(i)}.json" for i in (14, 15, 16)]
 
 
 def test_kpi_flags_route_to_daily(home, capsys, monkeypatch):
@@ -517,3 +518,141 @@ def test_kpi_flags_route_to_daily(home, capsys, monkeypatch):
     with pytest.raises(SystemExit):
         kpi.cmd_kpi(["--date", "2026-10-19"])                                 # needs --daily
     assert kpi.cmd_kpi(["--daily", "--date", "2026-10-19", "--synthetic-manifest", "/nonexistent/m.jsonl"]) == 2
+
+
+# ------------------------------------------------------------------ P33-1: group CIs, provenance, status
+
+def _org(d, rows, **kw):
+    return do.compute_day(d, inputs(rows), now=NOW, code_rev="t", **kw)
+
+
+def test_breakdown_groups_carry_wilson_and_gaps(home):
+    d = _day(16)
+    org = _org(d, day_rows(d) + day_rows(d, prefix="org2", tier="sonnet", n=40, sessions=10))["populations"]["organic"]
+    g = org["breakdown"]["by_served_model"]["claude-haiku-4-5-20251001"]
+    assert g["informative"] is True and g["wilson95"] == do.wilson_ci(36, 36)
+    assert g["gap_to_0.60"] == round(1.0 - 0.6, 4)
+    assert "gap_to_T_P2" not in g           # no prereg file: key absent, never 0
+    for grp in org["breakdown"].values():
+        for v in grp.values():
+            assert {"k", "n", "value", "wilson95", "gap_to_0.60", "informative"} <= set(v)
+
+
+def test_breakdown_gap_to_t_p2_when_file_exists(home):
+    from llm_router import paths
+    paths.state_path("prereg_t_p2.json").parent.mkdir(parents=True, exist_ok=True)
+    paths.state_path("prereg_t_p2.json").write_text(json.dumps({"T_P2": 0.25}))
+    d = _day(16)
+    row = _org(d, day_rows(d))
+    g = row["populations"]["organic"]["breakdown"]["by_served_model"]["claude-haiku-4-5-20251001"]
+    assert g["gap_to_T_P2"] == 0.75
+    assert row["breakdown_basis"]["below_T_P2"] is False
+
+
+def test_breakdown_group_below_floor_is_uninformative(home):
+    d = _day(16)
+    org = _org(d, day_rows(d, n=29))["populations"]["organic"]
+    g = org["breakdown"]["by_served_model"]["claude-haiku-4-5-20251001"]
+    assert (g["k"], g["n"]) == (29, 29)
+    assert g["value"] is None and g["wilson95"] is None and g["gap_to_0.60"] is None
+    assert g["informative"] is False
+
+
+def test_breakdown_basis_null_without_t_p2(home):
+    d = _day(16)
+    b = _org(d, day_rows(d))["breakdown_basis"]
+    assert b["vs_0.60"] is True and b["below_T_P2"] is None and "prereg_t_p2.json" in b["note"]
+
+
+def test_scheduled_run_stamps_run_by_and_lateness(home, monkeypatch):
+    d = _day(16)
+    monkeypatch.delenv("LLM_ROUTER_SCHEDULED", raising=False)
+    assert _org(d, day_rows(d))["run_by"] == "manual"
+    monkeypatch.setenv("LLM_ROUTER_SCHEDULED", "1")
+    row = _org(d, day_rows(d))
+    assert row["run_by"] == "scheduler"
+    assert row["lateness_h"] == round((NOW - do.day_bounds(d)[1]) / 3600, 2)
+
+
+def test_force_equality_ignores_provenance(home, monkeypatch):
+    d = _day(16)
+    monkeypatch.delenv("LLM_ROUTER_SCHEDULED", raising=False)
+    r1 = do.write_day(_org(d, day_rows(d)))
+    monkeypatch.setenv("LLM_ROUTER_SCHEDULED", "1")
+    later = do.compute_day(d, inputs(day_rows(d)), now=NOW + 7200, code_rev="t")
+    assert later["run_by"] == "scheduler" and later["lateness_h"] != _org(d, day_rows(d))["lateness_h"]
+    assert do.write_day(later, force=True)["status"] == "unchanged"
+    assert r1["status"] == "written"
+
+
+def test_last_run_written_even_with_zero_days(home, capsys):
+    d = _day(16)
+    do.write_day(_org(d, day_rows(d)))
+    rc = do.run_daily(date=d.isoformat(), backfill=0, force=False, partial=False, manifest=None,
+                      inputs=inputs([]), now=NOW)
+    assert rc == 0
+    lr = json.loads((do.daily_dir() / ".last_run.json").read_text())
+    assert lr["days_written"] == 0 and lr["days_existing"] == 1 and lr["exit"] == 0 and lr["ts"] == NOW
+
+
+def test_last_run_records_refusal_exit(home, capsys):
+    rc = do.run_daily(date="2026-10-20", backfill=0, force=False, partial=False, manifest=None,
+                      inputs=inputs([]), now=NOW)
+    assert rc == 2
+    lr = json.loads((do.daily_dir() / ".last_run.json").read_text())
+    assert lr["exit"] == 2 and lr["days_written"] == 0
+
+
+def test_daily_status_without_rows_is_na_never_zero(home, capsys):
+    assert do.run_status(as_json=True, now=NOW) == 0
+    r = json.loads(capsys.readouterr().out)
+    assert r["last_run"] is None and r["newest_row_lateness_h"] is None
+    assert r["scheduler_entry"] is False and r["scheduled_days"] is None and r["late_days"] is None
+    do.run_status(as_json=False, now=NOW)
+    assert "n/a" in capsys.readouterr().out
+
+
+def test_daily_status_with_rows(home, capsys, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_SCHEDULED", "1")
+    do.write_day(_org(LAST, day_rows(LAST)))
+    monkeypatch.delenv("LLM_ROUTER_SCHEDULED")
+    prev = LAST - timedelta(days=1)
+    do.write_day(do.compute_day(prev, inputs(day_rows(prev)), now=NOW + 30 * 3600, code_rev="t"))
+    do.run_daily(date=LAST.isoformat(), backfill=0, force=False, partial=False, manifest=None,
+                 inputs=inputs([]), now=NOW)
+    capsys.readouterr()
+    do.run_status(as_json=True, now=NOW)
+    r = json.loads(capsys.readouterr().out)
+    assert r["last_run"]["exit"] == 0
+    assert r["newest_row_date"] == LAST.isoformat()
+    assert r["newest_row_lateness_h"] == round((NOW - do.day_bounds(LAST)[1]) / 3600, 2)
+    assert r["scheduled_days"] == 1 and r["late_days"] == 1
+    s = do.streak(now=NOW)
+    assert s["scheduled_days"] == 1 and s["late_days"] == 1
+
+
+def test_daily_status_scheduler_entry_from_install_manifest(home):
+    from llm_router import install_manifest as im
+    assert do.scheduler_entry() is False
+    f = home / "Library" / "LaunchAgents" / "com.llm_router.kpi-daily.plist"
+    f.parent.mkdir(parents=True)
+    f.write_text("x")
+    im.record("created_file", f)
+    assert do.scheduler_entry() is True
+
+
+def test_cli_daily_status_flag(home, capsys):
+    assert kpi.cmd_kpi(["--daily-status", "--json"]) == 0
+    assert "scheduled_days" in json.loads(capsys.readouterr().out)
+
+
+def test_local_by_cause_call_shape_pinned(home, monkeypatch):
+    """compute_day must call ledger_view.local_by_cause(Bounds("day", label, start, end-1)) (P3.4-B1 guard)."""
+    from llm_router import ledger_view as lv
+    seen = []
+    monkeypatch.setattr(lv, "local_by_cause", lambda b, *a, **k: seen.append((b, a, k)) or {})
+    d = _day(16)
+    do.compute_day(d, inputs(day_rows(d)), now=NOW, code_rev="t")
+    (b, a, k), = seen
+    s, e = do.day_bounds(d)
+    assert (b.name, b.label, b.since_ts, b.until_ts) == ("day", f"UTC day {d}", s, e - 1) and a == () and k == {}

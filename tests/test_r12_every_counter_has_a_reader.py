@@ -59,6 +59,12 @@ _EXACT = {"counters", "snapshot", "count"}
 #: allowlisted wholesale and the allowlist would become the defect.
 NOT_INSTRUMENTATION: dict[str, tuple[str, str]] = {
     # name → (reason, a module that must still reference it — "" to skip)
+    "llm_router.daily_offload:provenance_counts": (
+        "a pure read of the daily/*.json rows' run_by and lateness_h fields; it "
+        "retains nothing, and its reader is `kpi --daily-status` / `--daily-streak "
+        "--json` via run_status() and streak() in the same module (P33-1)",
+        "llm_router/daily_offload.py",
+    ),
     "llm_router.eligibility:evidence_from_counts": (
         "a pure function of its arguments — it turns k/n success counts into "
         "Evidence and retains nothing, so there is no tally for anyone to read",

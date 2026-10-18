@@ -2977,6 +2977,9 @@ def cmd_kpi(args: list[str]) -> int:
                           "lines are measured; organic is printed beside it; exit 1 below 7 (D-210, PLAN v16 "
                           "section 7.1 c3)")
     ap.add_argument("--end", metavar="YYYY-MM-DD", default=None, help="with --daily-streak: last day to count")
+    ap.add_argument("--daily-status", action="store_true",
+                     help="P33: last 'kpi --daily' run, newest row lateness, whether the install manifest has a "
+                          "scheduler entry, scheduled_days / late_days over the last 7; n/a when unknown")
     ap.add_argument("--daily-render-plist", action="store_true",
                      help="print a launchd plist for 'kpi --daily --backfill 3'; prints only, installs nothing")
     parsed = ap.parse_args(args)
@@ -2984,6 +2987,9 @@ def cmd_kpi(args: list[str]) -> int:
         from llm_router import daily_offload
         print(daily_offload.render_plist(), end="")
         return 0
+    if parsed.daily_status:
+        from llm_router import daily_offload
+        return daily_offload.run_status(as_json=parsed.json)
     if parsed.daily_streak:
         from llm_router import daily_offload
         return daily_offload.run_streak(end=parsed.end, as_json=parsed.json)

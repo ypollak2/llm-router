@@ -175,7 +175,14 @@ def _counts(rows: list[tuple[Any, bool]]) -> dict:
     return {"k": sum(1 for _, h in rows if h), "n": len(rows)}
 
 
-def _breakdown(actions: list[dict]) -> dict:
+def wilson_ci(k: int, n: int) -> list[float] | None:
+    from llm_router.shadow_eval import wilson
+    return wilson(k, n)
+
+
+def _breakdown(actions: list[dict], t_p2: float | None = None) -> dict:
+    """Per group: ``k``/``n`` always; ``value``, ``wilson95`` and the gaps only at n >= MIN_ACTIONS_DAY
+    (``informative``), else None. ``gap_to_T_P2`` is present only when the prereg T_P2 is known."""
     def split(keyf) -> dict:
         groups: dict[str, list[dict]] = {}
         for a in actions:
@@ -183,7 +190,13 @@ def _breakdown(actions: list[dict]) -> dict:
         out = {}
         for key, rows in sorted(groups.items()):
             k, n = sum(1 for a in rows if a["numerator"]), len(rows)
-            out[key] = {"k": k, "n": n, "value": round(k / n, 4) if n >= MIN_ACTIONS_DAY else None}
+            inf = n >= MIN_ACTIONS_DAY
+            val = round(k / n, 4) if inf else None
+            g = {"k": k, "n": n, "value": val, "wilson95": wilson_ci(k, n) if inf else None,
+                 "gap_to_0.60": round(val - TARGET, 4) if val is not None else None, "informative": inf}
+            if t_p2 is not None:
+                g["gap_to_T_P2"] = round(val - t_p2, 4) if val is not None else None
+            out[key] = g
         return out
     return {"by_task_group": split(lambda a: a["task_group"]),
             "by_served_model": split(lambda a: str(a.get("model") or "none")),
@@ -232,7 +245,7 @@ def _population(label: str, day: str, key: str, actions: list[dict], turns: list
         "spread": _line(spread, MIN_ACTIONS_DAY, seed("spread")),
         "counts": {"action": _counts(act), "turn": _counts(turn), "call": _counts(call),
                    "spread": _counts(spread)},
-        "breakdown": _breakdown(actions),
+        "breakdown": _breakdown(actions, t_p2),
         "gap_to_0.60": {"action": gap(action_l, TARGET), "turn": gap(turn_l, TARGET)},
         "t_p2": t_p2,
         "gap_to_T_P2": {"action": gap(action_l, t_p2), "turn": gap(turn_l, t_p2), "note": t_note},
@@ -332,8 +345,16 @@ def compute_day(day: Date, inputs: Inputs, *, now: float | None = None,
         from llm_router import ledger_view as lv
         # ledger_view's upper bound is inclusive; end-1 keeps the day half-open at 1 s resolution.
         local_by_cause = lv.local_by_cause(lv.Bounds("day", f"UTC day {ds}", start, until - 1))
+    rc_act = rc["action"]
+    t_p2, t_note = _t_p2()
+    below = (rc_act["value"] < t_p2) if (t_p2 is not None and rc_act.get("measured")) else None
+    basis_note = (t_note if t_p2 is None else
+                  "below_T_P2: release_clock action value < prereg T_P2; null when that line is unmeasured")
     return {
         "schema": SCHEMA, "date": ds, "tz": "UTC", "window": {"since": start, "until": until},
+        "breakdown_basis": {"vs_0.60": True, "below_T_P2": below, "note": basis_note},
+        "run_by": "scheduler" if os.environ.get("LLM_ROUTER_SCHEDULED") == "1" else "manual",
+        "lateness_h": None if partial else round((now - end) / 3600, 2),
         "generated_at": datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "code_rev": code_rev if code_rev is not None else _code_rev(),
         "partial": partial,
@@ -368,8 +389,11 @@ def daily_dir() -> Path:
     return paths.state_path("daily")
 
 
+_VOLATILE = ("generated_at", "code_rev", "run_by", "lateness_h")   # provenance, not measurement
+
+
 def _payload(row: dict) -> str:
-    return json.dumps({k: v for k, v in row.items() if k not in ("generated_at", "code_rev")},
+    return json.dumps({k: v for k, v in row.items() if k not in _VOLATILE},
                       sort_keys=True)
 
 
@@ -500,10 +524,84 @@ def streak(end: Date | None = None, *, now: float | None = None, base: Path | No
     ms, mbreak = walk(_day_state)
     ws, wbreak = walk(_written)
     os_, obreak = walk(_organic_state)
-    return {"end": end.isoformat(), "required": required, "measured_streak": ms, "written_streak": ws,
+    prov = provenance_counts(end, base=base)
+    return {**prov, "end": end.isoformat(), "required": required, "measured_streak": ms, "written_streak": ws,
             "first_break": mbreak, "written_first_break": wbreak, "pass": ms >= required,
             "organic_streak": os_, "organic_first_break": obreak,
             "basis": "release_clock (organic + synthetic, D-210) action AND turn measured, closed (not partial) rows"}
+
+
+# ---------------------------------------------------------------- provenance and status
+
+LATE_H = 26.0       # PLAN P3.3 7/7 check: lateness_h <= 26 is on time
+STATUS_DAYS = 7
+
+
+def provenance_counts(end: Date, *, base: Path, days: int = STATUS_DAYS) -> dict:
+    """``scheduled_days`` (run_by == scheduler) and ``late_days`` (lateness_h > 26) over the ``days`` closed
+    days ending ``end``. None, not 0, when no row in the window carries that provenance field (rows written
+    before P33-1 have neither)."""
+    sched = late = 0
+    seen_by = seen_late = False
+    for i in range(days):
+        p = day_file((end - timedelta(days=i)).isoformat(), base)
+        if p is None:
+            continue
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(d, dict):
+            continue
+        if "run_by" in d:
+            seen_by = True
+            sched += d["run_by"] == "scheduler"
+        if isinstance(d.get("lateness_h"), (int, float)):
+            seen_late = True
+            late += d["lateness_h"] > LATE_H
+    return {"scheduled_days": sched if seen_by else None, "late_days": late if seen_late else None}
+
+
+def scheduler_entry() -> bool:
+    """Whether the install manifest records a kpi-daily scheduler entry (P33-2 writes it). The OS scheduler
+    is never queried."""
+    from llm_router import install_manifest
+    return any(isinstance(r, dict) and "kpi-daily" in str(r.get("path", "")) for r in install_manifest._load())
+
+
+def run_status(*, as_json: bool = False, now: float | None = None) -> int:
+    """``kpi --daily-status``: last run, newest row lateness, scheduler entry, scheduled/late days of the last 7."""
+    now = _now() if now is None else now
+    base = daily_dir()
+    try:
+        last = json.loads((base / LAST_RUN).read_text(encoding="utf-8"))
+        last = last if isinstance(last, dict) else None
+    except (OSError, ValueError):
+        last = None
+    dates = sorted({m.group(1) for p in (base.iterdir() if base.is_dir() else [])
+                    if (m := re.match(r"^(\d{4}-\d{2}-\d{2})(?:\.rev\d+)?\.json$", p.name))})
+    newest_date = dates[-1] if dates else None
+    lateness = None
+    if newest_date:
+        try:
+            v = json.loads(day_file(newest_date, base).read_text(encoding="utf-8")).get("lateness_h")
+            lateness = v if isinstance(v, (int, float)) else None
+        except (OSError, ValueError, AttributeError):
+            lateness = None
+    r = {"last_run": last, "newest_row_date": newest_date, "newest_row_lateness_h": lateness,
+         "scheduler_entry": scheduler_entry(), **provenance_counts(last_closed_day(now), base=base),
+         "window_days": STATUS_DAYS}
+    if as_json:
+        print(json.dumps(r, indent=2, sort_keys=True))
+        return 0
+    na = lambda v: "n/a" if v is None else v  # noqa: E731
+    print("last run: " + (f"ts {last.get('ts')} exit {last.get('exit')} written {last.get('days_written')} "
+                          f"existing {last.get('days_existing')}" if last else "n/a"))
+    print(f"newest row: {na(newest_date)}  lateness_h {na(lateness)}")
+    print(f"scheduler entry in install manifest: {'yes' if r['scheduler_entry'] else 'no'}")
+    print(f"last {STATUS_DAYS} days: scheduled_days {na(r['scheduled_days'])}  late_days {na(r['late_days'])} "
+          f"(late = lateness_h > {LATE_H:g})")
+    return 0
 
 
 # ---------------------------------------------------------------- scheduler text (print only)
@@ -536,10 +634,27 @@ def _parse_day(text: str, flag: str) -> Date:
         raise DailyError(f"{flag}: expected YYYY-MM-DD, got {text!r}") from exc
 
 
+LAST_RUN = ".last_run.json"
+
+
 def run_daily(*, date: str | None, backfill: int, force: bool, partial: bool, manifest: str | None,
               as_json: bool = False, inputs: Inputs | None = None, now: float | None = None) -> int:
-    """``kpi --daily``. Exit 0 ok, 2 refused."""
+    """``kpi --daily``. Exit 0 ok, 2 refused. Every run (even one that writes nothing) records
+    ``daily/.last_run.json`` {ts, exit, days_written, days_existing}."""
     now = _now() if now is None else now
+    stats = {"days_written": 0, "days_existing": 0}
+    rc = 1
+    try:
+        rc = _run_daily(date, backfill, force, partial, manifest, as_json, inputs, now, stats)
+        return rc
+    finally:
+        try:
+            _atomic_write(daily_dir() / LAST_RUN, {"ts": now, "exit": rc, **stats})
+        except OSError as exc:
+            print(f"kpi --daily: could not write {LAST_RUN} ({type(exc).__name__})", file=sys.stderr)
+
+
+def _run_daily(date, backfill, force, partial, manifest, as_json, inputs, now, stats) -> int:
     try:
         target = _parse_day(date, "--date") if date else last_closed_day(now)
         if backfill < 0:
@@ -565,11 +680,13 @@ def run_daily(*, date: str | None, backfill: int, force: bool, partial: bool, ma
     for d in days:
         if d not in todo:
             out.append({"date": d.isoformat(), "status": "exists", "path": str(day_file(d.isoformat(), base))})
+            stats["days_existing"] += 1
             continue
         row = compute_day(d, inp, now=now, manifest_ids=ids)
         res = write_day(row, force=force, partial=partial, base=base)
         org = row["populations"]["organic"]
         rc = row["populations"]["release_clock"]
+        stats["days_written" if res["status"] in ("written", "rev", "partial") else "days_existing"] += 1
         out.append({"date": d.isoformat(), **res, "organic_action": org["action"], "organic_turn": org["turn"],
                     "release_clock_action": rc["action"], "release_clock_turn": rc["turn"]})
     if as_json:
