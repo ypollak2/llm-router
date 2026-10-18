@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src" / "llm_router"
 
 _FAMILY = (r"(?:qwen|(?<!o)llama|gemma|hermes|mistral|deepseek|phi\d|granite|smollm|lfm|"
-           r"codellama|starcoder|nemotron|devstral|codestral)")
+           r"codellama|starcoder|nemotron|devstral|codestral|nimble|llmr)")
 # A local-model TAG: ``family...:tag`` or ``ollama/family...``
 TAG = re.compile(rf"(?i)(?:{_FAMILY}[\w.\-]*:[\w.\-]+|ollama/{_FAMILY})")
 BARE_FAMILY = re.compile(rf"(?i){_FAMILY}")
@@ -61,7 +61,15 @@ ACTING_FILES = [
     "src/llm_router/hooks/direct_executor.py",
     "src/llm_router/model_discovery.py",
     "src/llm_router/policy.py",
+    "src/llm_router/decision_classifier.py",
+    "src/llm_router/local_classifier.py",
 ]
+
+# Exact literals an acting file may keep: an EXCLUSION marker keeps a model OUT, selects nothing.
+ACTING_LITERAL_OK: dict[tuple[str, str], str] = {
+    ("src/llm_router/context_summary.py", '"llmr-"'):
+        "_EXCLUDED prefix: keeps the user's own alias models out of summarising",
+}
 
 
 def _code_strings(path: Path) -> list[tuple[int, str]]:
@@ -131,7 +139,8 @@ def test_allowlist_has_no_stale_entries():
 def test_acting_files_carry_no_model_family_literal(rel):
     strings = _code_strings(ROOT / rel)
     assert strings, f"{rel}: no string literals scanned"
-    hits = [(n, s) for n, s in strings if BARE_FAMILY.search(s)]
+    hits = [(n, s) for n, s in strings
+            if BARE_FAMILY.search(s) and (rel, s) not in ACTING_LITERAL_OK]
     assert not hits, f"{rel} names a model family in code: {hits[:3]}"
 
 
@@ -250,3 +259,57 @@ def test_local_task_uses_the_user_model(quiet, tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_OLLAMA_MODEL", "mine:7b")
     out = json.loads(asyncio.run(lt.llm_local_task(objective="x", workdir=str(tmp_path))))
     assert seen["model"] == "mine:7b" and out["status"] == lt.PROPOSED
+
+
+# ── F61: classifier defaults ────────────────────────────────────────────────
+
+@pytest.fixture
+def classifier_quiet(quiet, monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_CLASSIFIER_MODEL", raising=False)
+    monkeypatch.delenv("LLM_ROUTER_DECISION_MODEL", raising=False)
+    monkeypatch.delenv("LLM_ROUTER_CLASSIFIER_BACKEND", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
+    return quiet
+
+
+@pytest.mark.parametrize("backend", ["chat", "systemone"])
+def test_classifier_off_without_setting_or_inventory(classifier_quiet, monkeypatch, backend):
+    from llm_router import decision_classifier, local_classifier as lc
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_BACKEND", backend)
+    assert lc.DEFAULT_MODEL == "" and decision_classifier.DEFAULT_MODEL == ""
+    assert lc._model() == ""
+
+    def boom(*a, **k):
+        raise AssertionError("Ollama was called with no model")
+    monkeypatch.setattr(lc, "_post", boom)
+    monkeypatch.setattr(lc, "_classify", boom)
+    v = asyncio.run(lc.classify_async("fix the bug", session_id="s", text_sha="x"))
+    assert v.source == "off" and v.tier is None
+    v = lc.classify_local("fix the bug")
+    assert v.source == "off" and v.tier is None
+
+
+def test_classifier_setting_wins_then_discovery(classifier_quiet, monkeypatch):
+    from llm_router import decision_classifier, local_classifier as lc
+    classifier_quiet["inv"] = ["found:3b"]
+    assert lc._model() == "found:3b"
+    # rv-583: the systemone decision model is never guessed from discovery (a generic
+    # chat model does not serve /v1/systemone); without the setting it is off.
+    assert decision_classifier._model() == ""
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_BACKEND", "systemone")
+    assert lc._model() == ""
+    monkeypatch.delenv("LLM_ROUTER_CLASSIFIER_BACKEND")
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_MODEL", "mine:7b")
+    monkeypatch.setenv("LLM_ROUTER_DECISION_MODEL", "dec:9b")
+    assert lc._model() == "mine:7b"
+    assert decision_classifier._model() == "dec:9b"
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_BACKEND", "systemone")
+    assert lc._model() == "dec:9b"
+
+
+def test_guard_catches_a_reintroduced_named_classifier_default(tmp_path):
+    f = tmp_path / "m.py"
+    f.write_text('DEFAULT_MODEL = "nimble:9b"\nOTHER = "llmr-classifier"\n')
+    strings = [s for _, s in _code_strings(f)]
+    assert any(TAG.search(s) for s in strings)
+    assert all(BARE_FAMILY.search(s) for s in strings)

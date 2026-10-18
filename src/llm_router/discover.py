@@ -134,7 +134,7 @@ def _is_embedding_model(name: str, meta: dict | None = None) -> bool:
 # without "completion" answers /api/generate with 400 "does not support generate",
 # so it must not enter a routing chain (nimble:9b, a decision-only classifier,
 # failed in ~30 ms on every llm(task=code) call). The classifier path names its
-# model explicitly (decision_classifier.DEFAULT_MODEL) and never reads this list.
+# model through decision_classifier._model() and never reads this list.
 #: (base_url, model) -> (verdict, expires_at). A definite answer lives 1 h (a re-pulled or
 #: replaced model gets a fresh verdict); an unknown one (Ollama down, /api/show erroring or
 #: 404, no ``capabilities``) is remembered as fail-open for 60 s so a route does not pay the

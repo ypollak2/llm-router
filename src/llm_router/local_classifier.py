@@ -45,7 +45,7 @@ BACKENDS = ("chat", "systemone")  # LLM_ROUTER_CLASSIFIER_BACKEND; anything else
 # complexity is only filled for callers that still key on it; tier is never derived from it.
 TIER_TO_COMPLEXITY = {"local": "simple", "haiku": "simple", "sonnet": "moderate", "opus": "complex"}
 
-DEFAULT_MODEL = "llmr-classifier"
+DEFAULT_MODEL = ""  # D-205: no named model; see _model()
 DEFAULT_KEEP_ALIVE = "30m"
 DEFAULT_TIMEOUT_MS = 2000  # D-4 = A: the turn-first verdict waits up to 2.0 s
 DEFAULT_DERIVATION = "direct"
@@ -218,7 +218,13 @@ def _model() -> str:
         from llm_router import decision_classifier
 
         return decision_classifier._model()
-    return os.environ.get("LLM_ROUTER_CLASSIFIER_MODEL", "").strip() or DEFAULT_MODEL
+    set_ = os.environ.get("LLM_ROUTER_CLASSIFIER_MODEL", "").strip()
+    if set_:
+        return set_
+    from llm_router import model_discovery
+
+    # cache/env only (no probe): classify_async runs on the event loop. "" = classifier off.
+    return model_discovery.local_model(allow_probe=False) or DEFAULT_MODEL
 
 
 def _keep_alive() -> str | int:
@@ -345,6 +351,8 @@ def classify_local(assembled: str, *, model: str | None = None, timeout_s: float
     model = model or _model()
     if derivation not in DERIVATIONS:
         derivation = DEFAULT_DERIVATION
+    if not model:  # D-205: no setting and nothing discovered -> off, never an empty model name
+        return _fail("off", model, derivation)
     if not assembled or not str(assembled).strip():
         return _fail("parse_error", model, derivation)
     budget = timeout_s if timeout_s is not None else _timeout_s()
@@ -580,7 +588,7 @@ async def classify_async(assembled: str, *, session_id: str | None, text_sha: st
     model = model or _model()
     if derivation not in DERIVATIONS:
         derivation = DEFAULT_DERIVATION
-    if mode() == "off":
+    if mode() == "off" or not model:  # no model: off, zero Ollama calls (D-205)
         return _fail("off", model, derivation)
     key = _key(session_id, text_sha, model, derivation, t_h, t_s)
     hit = _cache_get(key)

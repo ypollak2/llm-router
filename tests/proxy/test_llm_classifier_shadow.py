@@ -43,6 +43,10 @@ def _env(monkeypatch):
         monkeypatch.delenv(k, raising=False)
     # No test may reach a real Ollama: an unreachable port, so a call that escapes the fakes fails fast.
     monkeypatch.setenv("LLM_ROUTER_OLLAMA_URL", "http://127.0.0.1:9")
+    # F61 (D-205): classifier models are the user's setting, never a code default; these are
+    # test data so the shadow path has a model to (fake-)call.
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_MODEL", "llmr-classifier")
+    monkeypatch.setenv("LLM_ROUTER_DECISION_MODEL", "nimble:9b")
     lc._reset_state()
     yield
     lc._reset_state()
@@ -245,7 +249,7 @@ async def test_the_same_text_twice_makes_one_ollama_call_and_one_record(tmp_path
     assert (rec["tier_reason_live"], rec["tier_live"], rec["requested_tier"], rec["policy_version"]) == (
         first["tier_reason"], first["tier"], first["requested_model"], first["tier_policy_version"])
     assert rec["session_kind"] == first["session_kind"]
-    assert (rec["model"], rec["prompt_version"]) == (lc.DEFAULT_MODEL, lc.PROMPT_VERSION)
+    assert (rec["model"], rec["prompt_version"]) == (lc._model(), lc.PROMPT_VERSION)
 
 
 async def test_the_same_text_pending_twice_is_one_task(tmp_path, monkeypatch, simple):
@@ -615,7 +619,7 @@ def test_is_cached_reads_without_asking(monkeypatch):
     lc._reset_state()
     monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "shadow")
     assert lc.is_cached("s", "sha") is False
-    lc._cache_put(lc._key("s", "sha", lc.DEFAULT_MODEL, "direct", lc.T_H, lc.T_S),
+    lc._cache_put(lc._key("s", "sha", lc._model(), "direct", lc.T_H, lc.T_S),
                   lc.parse_verdict(_reply(8)))
     assert lc.is_cached("s", "sha") is True and lc.is_cached("s", "other") is False
     assert lc.is_cached("s", "sha", model="another-model") is False

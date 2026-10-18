@@ -1,0 +1,1 @@
+The local classifier and the decision classifier no longer default to a named model (`llmr-classifier`, `nimble:9b`). The model is `LLM_ROUTER_CLASSIFIER_MODEL` / `LLM_ROUTER_DECISION_MODEL` if set, else the discovered local model, else the classifier is off and the caller's fallback runs (D-205). Set the matching variable in `~/.llm-router/.env` to keep a specific model.

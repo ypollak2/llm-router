@@ -113,6 +113,9 @@ def _env(monkeypatch):
     for k in ("LLM_ROUTER_LOCAL_CLASSIFIER", "LLM_ROUTER_CLASSIFIER_MODEL",
               "LLM_ROUTER_CLASSIFIER_KEEP_ALIVE", "LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS"):
         monkeypatch.delenv(k, raising=False)
+    # D-205: no code default; this is the user's setting for the test (test data only)
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_MODEL", "llmr-classifier")
+    monkeypatch.delenv("LLM_ROUTER_DECISION_MODEL", raising=False)
     lc._reset_state()
 
 
