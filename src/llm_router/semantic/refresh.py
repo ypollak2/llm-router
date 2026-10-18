@@ -143,6 +143,9 @@ def run(root: Path | str | None = None, base: Path | None = None):
 
 
 def _spawn_child(root: Path) -> None:
+    from llm_router.safe_subprocess import detached_spawn_disabled
+    if detached_spawn_disabled():
+        return
     script = (
         "from pathlib import Path; from llm_router.semantic import refresh; "
         f"refresh.run(Path({str(root)!r}))"

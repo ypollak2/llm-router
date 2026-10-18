@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("allow_detached_spawn")  # F44: these fake Popen and assert the spawn
+
 HOOK = Path(__file__).resolve().parent.parent / "src/llm_router/hooks/session-start.py"
 
 spec = importlib.util.spec_from_file_location("_sshook", HOOK)

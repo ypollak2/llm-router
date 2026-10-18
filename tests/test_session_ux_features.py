@@ -27,6 +27,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("allow_detached_spawn")  # F44: these fake Popen and assert the spawn
+
 
 _HOOKS_SRC = Path(__file__).resolve().parent.parent / "src" / "llm_router" / "hooks"
 

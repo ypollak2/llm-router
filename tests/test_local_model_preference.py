@@ -303,6 +303,7 @@ def test_background_probe_does_not_generate_on_a_non_selected_resident(rec_serve
 
 # ── (iv) the user setting wins on every default path ─────────────────────────
 
+@pytest.mark.usefixtures("allow_detached_spawn")
 def test_user_setting_wins_on_every_default_path(monkeypatch, tmp_path):
     import subprocess
 

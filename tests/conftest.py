@@ -33,6 +33,13 @@ os.environ["LLM_ROUTER_HOME"] = _tempfile.mkdtemp(prefix="llm_router-suite-home-
 # 127.0.0.1:11434 and ::1:11434). Tests of the poller start their own and need no switch.
 os.environ["LLM_ROUTER_MAP_REDISCOVERY"] = "off"
 
+# F44: no test may leave a detached background child behind. Hooks run as real
+# subprocesses (they inherit this env) and used to start `semantic index`,
+# `ollama_watchdog`, judge-drain and model-discovery children that outlived the
+# run at ~48% CPU each. Every spawn site honours this flag; a test that exercises
+# spawning itself must `monkeypatch.delenv("LLM_ROUTER_NO_DETACHED_SPAWN")` and fake Popen.
+os.environ["LLM_ROUTER_NO_DETACHED_SPAWN"] = "1"
+
 # 2026-10-06: the operator's live usage.db held 294 fixture rows written that day
 # (see tests/_real_home_guard.py). LLM_ROUTER_HOME alone is advisory: code that
 # resolves `Path.home() / ".llm-router"` at import or call time ignores it, and a
@@ -50,6 +57,59 @@ os.environ["USERPROFILE"] = _SUITE_USER_HOME
 for _x in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
     os.environ.pop(_x, None)
 _real_home_guard.install()
+
+
+class _FakeDetachedProc:
+    """Stand-in for a detached child: already exited, never ran."""
+
+    returncode = 0
+    pid = 0
+
+    def __init__(self, args=None):
+        self.args = args
+
+    def poll(self):
+        return 0
+
+    def wait(self, timeout=None):
+        return 0
+
+    def communicate(self, *a, **k):
+        return (b"", b"")
+
+    def terminate(self):
+        pass
+
+    kill = terminate
+
+
+@pytest.fixture
+def allow_detached_spawn(monkeypatch, request):
+    """Opt out of the F44 flag for a test that asserts a detached spawn happens.
+
+    The flag is cleared so the spawn site runs, but ``subprocess.Popen(...,
+    start_new_session=True)`` is replaced by a fake: the test sees the call and
+    NO real child is started (before F44 these tests really launched
+    ``llm_router.cli semantic index``). Returns the list of recorded argv's.
+    Other Popen calls (git, curl against a stub) are real.
+    """
+    import subprocess
+
+    monkeypatch.delenv("LLM_ROUTER_NO_DETACHED_SPAWN", raising=False)
+    calls: list = []
+    if request.node.get_closest_marker("real_detached_spawn"):
+        return calls  # the test runs the real child to completion and waits for it
+    real = subprocess.Popen
+
+    class _GuardedPopen(real):  # type: ignore[misc, valid-type]
+        def __new__(cls, args, *a, **k):
+            if k.get("start_new_session"):
+                calls.append(args)
+                return _FakeDetachedProc(args)
+            return super().__new__(cls)
+
+    monkeypatch.setattr(subprocess, "Popen", _GuardedPopen)
+    return calls
 
 
 # ── G-D: prove the wheel is what is under test ──────────────────────────────

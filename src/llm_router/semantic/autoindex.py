@@ -303,6 +303,10 @@ def maybe_start_background_index(
         if not _enabled():
             return False
 
+        from llm_router.safe_subprocess import detached_spawn_disabled
+        if detached_spawn_disabled():
+            return False
+
         from llm_router.semantic.scope import resolve_scope
 
         scope = resolve_scope(root)

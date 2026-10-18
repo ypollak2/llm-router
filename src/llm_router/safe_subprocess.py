@@ -64,6 +64,16 @@ _SECRET_ENV_VARS = {
 }
 
 
+def detached_spawn_disabled() -> bool:
+    """True when ``LLM_ROUTER_NO_DETACHED_SPAWN`` forbids starting detached children.
+
+    Set for the whole test session by tests/conftest.py (F44): a detached child
+    outlives the test, loads the machine and may write real state.
+    """
+    flag = os.environ.get("LLM_ROUTER_NO_DETACHED_SPAWN", "")
+    return bool(flag) and flag.lower() not in ("0", "off", "false", "no")
+
+
 def _is_sensitive_var(var_name: str) -> bool:
     """Return True if this environment variable contains sensitive data."""
     import re

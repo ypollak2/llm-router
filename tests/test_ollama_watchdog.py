@@ -532,6 +532,7 @@ def _load_session_start():
     return mod
 
 
+@pytest.mark.usefixtures("allow_detached_spawn")  # F44: asserts the detached watchdog spawn
 def test_session_start_spawns_the_watchdog_detached_with_an_explicit_env(monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_OLLAMA_WATCHDOG", "on")
     mod = _load_session_start()

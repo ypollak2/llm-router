@@ -376,6 +376,9 @@ def hung_hint() -> str | None:
 
 def _spawn_background_probe() -> bool:
     """Start one detached probe round (``--probe``: no settle delay). True when started."""
+    from llm_router.safe_subprocess import detached_spawn_disabled
+    if detached_spawn_disabled():
+        return False
     try:
         subprocess.Popen(
             [sys.executable, "-m", "llm_router.ollama_watchdog", "--probe"],

@@ -90,6 +90,8 @@ def test_main_does_not_run_any_moved_step_inline(hook, monkeypatch):
 
 
 @pytest.mark.timeout(120)  # the 90 s child wait below must fit inside the per-test timeout (30 s default)
+@pytest.mark.real_detached_spawn  # the child is the test's own sleeper, released before the test ends
+@pytest.mark.usefixtures("allow_detached_spawn")
 def test_main_returns_while_a_5s_background_phase_still_runs(hook, monkeypatch, tmp_path):
     """The real spawn path: the child is detached, so main() returns first."""
     marker = tmp_path / "child_done"

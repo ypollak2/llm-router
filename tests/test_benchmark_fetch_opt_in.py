@@ -94,6 +94,7 @@ def test_env_explicitly_off_does_not_spawn_a_fetch(state_dir, monkeypatch):
     assert not calls
 
 
+@pytest.mark.usefixtures("allow_detached_spawn")
 def test_env_on_spawns_a_fetch_when_stale(state_dir, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_AUTO_BENCHMARK_FETCH", "1")
     calls = _spawned(monkeypatch)
