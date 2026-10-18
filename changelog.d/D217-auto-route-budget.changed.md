@@ -1,0 +1,1 @@
+- The auto-route hook's latency budget is 750 ms (router-added p95), an owner-ratified deviation from the PRD's 300 ms (D-217): zero-Claude edits wait on Ollama metadata. Other hooks keep their bars. (D-217)

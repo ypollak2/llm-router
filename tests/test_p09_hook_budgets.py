@@ -61,13 +61,13 @@ def _lines():
 
 
 def test_budgets_are_the_prd_bars():
-    sync_hooks = set(hl.HOOK_BUDGETS_MS) - {"session-start", "statusline"}
+    sync_hooks = set(hl.HOOK_BUDGETS_MS) - {"session-start", "statusline", "auto-route"}
     assert sync_hooks, "the table lost its sync hooks"
     assert {h: hl.HOOK_BUDGETS_MS[h] for h in sync_hooks} == {h: 300 for h in sync_hooks}
     assert hl.HOOK_BUDGETS_MS["session-start"] == 2_000
     assert hl.HOOK_BUDGETS_MS["status-bar"] == 300
     assert hl.HOOK_BUDGETS_MS["statusline"] == 100
-    assert hl.HOOK_BUDGETS_MS["auto-route"] == 300
+    assert hl.HOOK_BUDGETS_MS["auto-route"] == 750  # D-217: owner-ratified PRD deviation
     assert hl.DEFAULT_BUDGET_MS == 300
 
 
@@ -102,7 +102,7 @@ def test_kpi_judges_router_added_and_reports_it_for_a_10s_draft():
     assert ar["p95_elapsed_ms"] == 10_120.0
     assert ar["model_time_rows"] == 60
     assert g1["value"].startswith("all 1 measurable hook(s) within budget")
-    assert "router-added p50=120ms p95=120ms vs 300ms budget" in g1["lines"][0]
+    assert "router-added p50=120ms p95=120ms vs 750ms budget" in g1["lines"][0]
 
 
 def test_kpi_says_the_agent_route_bar_is_deferred():
