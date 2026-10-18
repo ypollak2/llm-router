@@ -71,7 +71,6 @@ _EXHAUSTION_MARKERS = (
 _NOISE = {"__pycache__", ".pytest_cache", ".git", ".DS_Store", ".ruff_cache", ".mypy_cache"}
 
 DEFAULT_BUDGET_S = 600.0
-DEFAULT_MODEL = "qwen3-coder:30b"
 
 
 # A snapshot exists to tell which files the run CHANGED. It does not need to
@@ -471,7 +470,7 @@ async def llm_local_task(
     objective: str,
     workdir: str,
     acceptance_check: str | None = None,
-    model: str = DEFAULT_MODEL,
+    model: str = "",
     budget_s: float = DEFAULT_BUDGET_S,
     apply_writes: bool = False,
     wait: bool = True,
@@ -491,7 +490,8 @@ async def llm_local_task(
             a string is rejected with an error. Without one the result
             can never be ``verified_complete`` — an unverified success is
             reported as ``proposed``, because nothing established that it works.
-        model: Ollama model to drive the loop.
+        model: Ollama model to drive the loop. Empty (default) means the user's own local
+            model: ``LLM_ROUTER_OLLAMA_MODEL``, else the first discovered model.
         budget_s: Wall-clock ceiling for the whole task, check included.
         apply_writes: Whether edits reach disk. Defaults to False since
             2026-09-14: True ALSO set LLM_ROUTER_AGENT_COMMANDS=all, and
@@ -518,6 +518,18 @@ async def llm_local_task(
         output, not the task's edits) and the model's own final ``report``. The report is the worker's
         account of what it did and is never evidence on its own.
     """
+    if not model:
+        try:
+            from llm_router.model_discovery import local_model
+            model = local_model() or ""
+        except Exception:                                    # noqa: BLE001
+            model = ""
+        if not model:
+            return json.dumps({
+                "status": BLOCKED,
+                "reason": "no local model discovered (set LLM_ROUTER_OLLAMA_MODEL or pull a model in Ollama)",
+                "changed_files": [], "check_passed": None, "elapsed_s": 0.0,
+            })
     root = Path(workdir).expanduser()
     if not root.is_dir():
         # Checked before any job starts: a bad workdir is an answer now, not a

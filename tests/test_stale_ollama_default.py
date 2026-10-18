@@ -38,7 +38,9 @@ STALE = "ollama/qwen3:32b"
 # dynamic ``ollama/@local`` token (the user's discovered model), which is dropped when the
 # policy loads with nothing discovered, so the literal is gone from the dynamic chains too.
 NAMED_LOCAL = "ollama/qwen3.5:latest"
-_GONE = (STALE, NAMED_LOCAL)
+# F50 (D-205): the BUDGET chains' literal ``ollama/hermes3:8b`` became ``ollama/@local`` too.
+NAMED_LOCAL_2 = "ollama/hermes3:8b"
+_GONE = (STALE, NAMED_LOCAL, NAMED_LOCAL_2)
 _PROFILES = (
     RoutingProfile.BUDGET, RoutingProfile.BALANCED,
     RoutingProfile.PREMIUM, RoutingProfile.REASONING,

@@ -432,7 +432,7 @@ def _render_host_explainer() -> str:
         "      1. Agent-loop reasoning is the hardest LLM task. The host has\n"
         "         to hold the conversation, plan multi-step solutions, generate\n"
         "         working code, and recover from tool failures. Local models\n"
-        "         (qwen3.5, llama-3) drop coherence after 2-3 turns of that\n"
+        "         (small local models) drop coherence after 2-3 turns of that\n"
         "         work — great at single-shot answers, not at multi-turn\n"
         "         orchestration.\n\n"
         "      2. Tool-call format conformance. The host must emit tool calls\n"
@@ -1205,7 +1205,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
             else:
                 print(
                     _warn(
-                        "running but no models pulled — run `ollama pull qwen2.5:0.5b`"
+                        "running but no models pulled — run `ollama pull <a model you want>`"
                     )
                 )
 
@@ -1218,7 +1218,15 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
             from llm_router import ensemble as _ensemble
 
             _primary = _ensemble.primary_model()
-            if not _ensemble.model_installed(_primary, model_names):
+            if not _primary:
+                print(
+                    _warn(
+                        "no local model discovered for the ensemble classifier — it "
+                        "falls back to the heuristic (set LLM_ROUTER_OLLAMA_MODEL or "
+                        "`export LLM_ROUTER_ENSEMBLE_PRIMARY=ollama/<an installed model>`)"
+                    )
+                )
+            elif not _ensemble.model_installed(_primary, model_names):
                 _bare_primary = _primary.removeprefix("ollama/")
                 print(
                     _warn(

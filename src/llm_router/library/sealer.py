@@ -40,13 +40,10 @@ def _validated_ollama_env_url(raw: str) -> str:
 
 
 def _default_librarian_model() -> str:
-    """First installed model, preferring a coder variant if one exists.
-
-    Hardcoded to qwen2.5-coder:7b, which is not installed here.
-    """
+    """The user's local model (setting, else discovered inventory); '' when there is none."""
     try:
-        from llm_router.model_discovery import first_installed
-        return first_installed(("qwen3-coder:30b", "qwen2.5-coder:7b")) or ""
+        from llm_router.model_discovery import local_model
+        return local_model() or ""
     except Exception:
         return ""
 

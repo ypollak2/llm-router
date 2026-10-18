@@ -246,10 +246,10 @@ def default_tool_executor(cwd: str | None = None, timeout: float = 30.0) -> Tool
 
 
 def _default_local_model() -> str:
-    """First installed Ollama model that can drive a tool-calling loop."""
+    """The user's local model (setting, else discovered inventory); '' when there is none."""
     try:
-        from llm_router.model_discovery import first_installed
-        return first_installed(("qwen3-coder:30b", "qwen3.8:latest")) or ""
+        from llm_router.model_discovery import local_model
+        return local_model() or ""
     except Exception:                                        # noqa: BLE001
         return ""
 

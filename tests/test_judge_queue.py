@@ -195,23 +195,35 @@ def test_select_judge_model_returns_none_when_ollama_unavailable():
     assert picked is None
 
 
-def test_select_judge_model_prefers_a_stronger_judge_when_installed():
-    """feat/judge-discrimination: among several independent candidates, prefer
-    the ones in `_JUDGE_MODEL_PREFERENCE` order rather than whatever happens
-    to come first from discovery — measured to separate correct/wrong answers
-    better on tests/fixtures/judge_eval_set.py."""
+def test_select_judge_model_prefers_the_users_own_local_model(monkeypatch):
+    """D-205: the only name-based preference is the user's LLM_ROUTER_OLLAMA_MODEL
+    setting; no family is ranked by code. Discovery order puts it LAST here."""
     from llm_router.judge import _select_judge_model
 
+    monkeypatch.setenv("LLM_ROUTER_OLLAMA_MODEL", "mine:7b")
     with patch("llm_router.discover.is_ollama_available", return_value=True), \
          patch(
              "llm_router.discover.get_cached_ollama_models",
-             # Discovery order deliberately puts the LEAST-preferred model
-             # first, so this only passes if preference order is honoured.
+             return_value=["ollama/first:1b", "ollama/mine:7b"],
+         ):
+        picked = _select_judge_model("ollama/some-other-answering-model")
+
+    assert picked == "ollama/mine:7b"
+
+
+def test_select_judge_model_names_no_family_without_a_setting(monkeypatch):
+    """Without a user setting, discovery order decides (no hard-coded preference)."""
+    from llm_router.judge import _select_judge_model
+
+    monkeypatch.delenv("LLM_ROUTER_OLLAMA_MODEL", raising=False)
+    with patch("llm_router.discover.is_ollama_available", return_value=True), \
+         patch(
+             "llm_router.discover.get_cached_ollama_models",
              return_value=["ollama/qwen3.5:latest", "ollama/qwen3-coder:30b"],
          ):
         picked = _select_judge_model("ollama/some-other-answering-model")
 
-    assert picked == "ollama/qwen3-coder:30b"
+    assert picked == "ollama/qwen3.5:latest"
 
 
 def test_select_judge_model_falls_back_when_no_preferred_name_installed():

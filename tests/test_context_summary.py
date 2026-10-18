@@ -165,8 +165,14 @@ def test_pick_model_uses_resource_map(monkeypatch):
 
 def test_pick_model(monkeypatch):
     monkeypatch.delenv("LLM_ROUTER_SUMMARY_MODEL", raising=False)
-    assert cs.pick_model(["llmr-edit:latest", "nomic-embed-text", "qwen3-coder:30b"]) is None
-    assert cs.pick_model(["llmr-edit:latest", "qwen3.5:9b", "llama3:8b"]) == "qwen3.5:9b"
+    monkeypatch.delenv("LLM_ROUTER_OLLAMA_MODEL", raising=False)
+    # D-205: no family preference; excluded internals skipped, then discovery order.
+    assert cs.pick_model(["llmr-edit:latest", "nomic-embed-text"]) is None
+    assert cs.pick_model([]) is None
+    assert cs.pick_model(["llmr-edit:latest", "zeta:9b", "alpha:8b"]) == "zeta:9b"
+    monkeypatch.setenv("LLM_ROUTER_OLLAMA_MODEL", "alpha:8b")        # the user's own setting wins
+    assert cs.pick_model(["llmr-edit:latest", "zeta:9b", "alpha:8b"]) == "alpha:8b"
+    monkeypatch.delenv("LLM_ROUTER_OLLAMA_MODEL")
     monkeypatch.setenv("LLM_ROUTER_SUMMARY_MODEL", "x:1")
     assert cs.pick_model([]) == "x:1"
 
