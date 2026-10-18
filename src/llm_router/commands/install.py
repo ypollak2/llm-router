@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import os
+import platform
 import shutil
 import sys
+import time
+from pathlib import Path
 from llm_router.tool_surface import route_tool  # CHZ-SURF-01: never print a raw tool name
 
 from llm_router import paths
@@ -153,6 +156,9 @@ Usage:
                                      set the routing authority (`llm-router mode`). Plain
                                      `install` leaves routing authority off.
   llm-router install --no-authority      Never turn the proxy default on from this install
+  llm-router install --schedule-daily    Also install the daily KPI job (asked [Y/n] on a terminal;
+                                     headless installs write it only with this flag)
+  llm-router install --no-schedule       Never install the daily KPI job from this install
   llm-router install --help, -h          Show this help and exit (no changes made)
 """
 
@@ -369,7 +375,7 @@ def _run_install(flags: list[str]) -> None:
     headless  = "--headless"  in flags
 
     if headless:
-        _run_install_headless()
+        _run_install_headless(flags)
         return
 
     run_full(interactive=True, flags=flags)
@@ -383,7 +389,54 @@ _NOT_GLOBALLY_WIRABLE = {
 }
 
 
-def run_full(interactive: bool = True, flags: list[str] | None = None) -> list[str]:
+def _daily_schedule_step(*, interactive: bool, flags: list[str], schedule: dict | None = None,
+                         ask=input, stdin_tty: bool | None = None) -> bool:
+    """D-220: install the daily KPI scheduler entry only with explicit consent.
+
+    ``--no-schedule`` skips; ``--schedule-daily`` consents; otherwise an interactive terminal is asked
+    [Y/n] and anything else (headless, piped, CI) writes nothing. ``schedule`` holds keyword arguments for
+    ``daily_schedule.install`` (home, system, runner), so tests never reach the real home or a real
+    scheduler. Returns True when an entry was installed."""
+    if "--no-schedule" in flags:
+        return False
+    from llm_router import daily_schedule
+    kw = dict(schedule or {})
+    if "--schedule-daily" not in flags:
+        tty = sys.stdin.isatty() if stdin_tty is None else stdin_tty
+        if not (interactive and tty):
+            return False
+        plan = daily_schedule.build_plan(
+            system=kw.get("system") or platform.system(), home=kw.get("home") or Path.home(),
+            state_dir=paths.llm_router_home(), python=sys.executable, now=time.time(),
+            home_override=daily_schedule.install_home_override(kw.get("home") or Path.home()))
+        print(f"\n{_bold('  Daily KPI job')}")
+        for line in daily_schedule.plan_lines(plan, plan["system"]):
+            print(f"  {line}")
+        print("  The job reads only your local ledgers and writes one summary file per day under the state dir.")
+        try:
+            answer = ask("  Install the daily KPI job? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = "n"
+        if answer not in ("", "y", "yes"):
+            print(_dim("  daily KPI job not installed (`llm-router kpi --daily-install` adds it later)"))
+            return False
+    try:
+        r = daily_schedule.install(**kw)
+    except Exception as exc:  # noqa: BLE001 -- install must not fail on an optional job
+        from llm_router import failopen
+        failopen.record("P33-3-DAILY-SCHEDULE-INSTALL", exc)
+        print(_yellow(f"  daily KPI job not installed: {exc}"))
+        return False
+    ok = r["status"] == "installed"
+    detail = f": {r['detail']}" if r.get("detail") else ""
+    print(f"  {_green('✓') if ok else _yellow('⚠')}  daily KPI job {r['status']}{detail}")
+    if r.get("manual"):
+        print(f"     run it from your own scheduler: {r['manual']}")
+    return ok
+
+
+def run_full(interactive: bool = True, flags: list[str] | None = None, *,
+             schedule: dict | None = None) -> list[str]:
     """Install globally and return the labels of hosts wired by this run."""
     from llm_router.install_hooks import check_api_keys, install
 
@@ -470,6 +523,8 @@ def run_full(interactive: bool = True, flags: list[str] | None = None) -> list[s
         except Exception:  # noqa: BLE001 -- see above
             pass
 
+    _daily_schedule_step(interactive=interactive, flags=flags, schedule=schedule)
+
     print(f"\n{_green('✓')} {_bold('LLM Router installed globally.')}")
     print(f"  Every {' and '.join(installed_hosts)} session will now auto-route tasks.")
     print("  Restart Claude Code (and Claude Desktop if installed) to activate.\n")
@@ -498,7 +553,7 @@ def run_full(interactive: bool = True, flags: list[str] | None = None) -> list[s
 
 # ── install --headless ─────────────────────────────────────────────────────────
 
-def _run_install_headless() -> None:
+def _run_install_headless(flags: list[str] | None = None, *, schedule: dict | None = None) -> None:
     """Install for Docker / CI / agent environments (API-key mode, no OAuth).
 
     Runs the standard hook + MCP install, then prints a Dockerfile snippet showing
@@ -514,6 +569,8 @@ def _run_install_headless() -> None:
     actions = install()
     for a in actions:
         print(f"  {_green('✓')}  {a}")
+
+    _daily_schedule_step(interactive=False, flags=flags or [], schedule=schedule)
 
     print(f"\n{_green('✓')} {_bold('Hooks and MCP server installed.')}\n")
 

@@ -302,6 +302,16 @@ def render_default_plist() -> str:
     return render_plist(sys.executable, sd / "logs", h, m, scheduled_env(install_home_override(home)))
 
 
+def plan_lines(plan: dict[str, Any], system: str) -> list[str]:
+    """The lines that say exactly what an install writes and runs."""
+    lines = [f"daily scheduler entry ({system}): runs {shlex.join(plan['command'])}",
+             f"at {plan['run_time_local']} local ({plan['run_time_utc']} UTC), env {plan['env']}"]
+    lines += [f"writes {dest}" for dest, _ in plan["files"]]
+    if plan["manual"] is None and plan["activate"]:
+        lines.append(f"activates with: {plan['activate']}")
+    return lines
+
+
 def run_install(*, yes: bool, runner: Callable = subprocess.run, system: str | None = None,
                 home: Path | None = None, stdin_tty: bool | None = None) -> int:
     """``kpi --daily-install [--yes]``. Shows what will be written and run, asks unless ``--yes``."""
@@ -309,12 +319,7 @@ def run_install(*, yes: bool, runner: Callable = subprocess.run, system: str | N
     home = home or Path.home()
     plan = build_plan(system=system, home=home, state_dir=paths.llm_router_home(), python=sys.executable,
                       now=time.time(), home_override=install_home_override(home))
-    print(f"daily scheduler entry ({system}): runs {shlex.join(plan['command'])}")
-    print(f"at {plan['run_time_local']} local ({plan['run_time_utc']} UTC), env {plan['env']}")
-    for dest, _ in plan["files"]:
-        print(f"writes {dest}")
-    if plan["manual"] is None and plan["activate"]:
-        print(f"activates with: {plan['activate']}")
+    print("\n".join(plan_lines(plan, system)))
     if not yes:
         tty = sys.stdin.isatty() if stdin_tty is None else stdin_tty
         if not tty:

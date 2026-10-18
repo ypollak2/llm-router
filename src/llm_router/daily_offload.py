@@ -570,6 +570,24 @@ def scheduler_entry() -> bool:
     return any(isinstance(r, dict) and "kpi-daily" in str(r.get("path", "")) for r in install_manifest.records())
 
 
+def doctor_summary(*, now: float | None = None) -> dict:
+    """What ``llm-router doctor`` shows: scheduler entry in the manifest, age of the last run in hours and
+    ``late_days``. ``last_run_age_h`` and ``late_days`` are None (unknown), never 0, when there is no run record
+    or no row carries the field."""
+    now = _now() if now is None else now
+    base = daily_dir()
+    age = None
+    try:
+        last = json.loads((base / LAST_RUN).read_text(encoding="utf-8"))
+        ts = last.get("ts") if isinstance(last, dict) else None
+        if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+            age = max(0.0, (now - ts) / 3600.0)
+    except (OSError, ValueError):
+        age = None
+    return {"scheduler_entry": scheduler_entry(), "last_run_age_h": age,
+            "late_days": provenance_counts(last_closed_day(now), base=base)["late_days"]}
+
+
 def run_status(*, as_json: bool = False, now: float | None = None) -> int:
     """``kpi --daily-status``: last run, newest row lateness, scheduler entry, scheduled/late days of the last 7."""
     now = _now() if now is None else now

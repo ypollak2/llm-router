@@ -92,7 +92,8 @@ def _remove_derived_state() -> list[str]:
     return actions
 
 
-def _run_uninstall(flags: list[str] | None = None) -> None:
+def _run_uninstall(flags: list[str] | None = None, *, schedule: dict | None = None) -> None:
+    """``schedule`` (tests): keyword arguments for ``daily_schedule.uninstall`` (home, system, runner)."""
     import shutil
 
     purge = "--purge" in (flags or [])
@@ -118,6 +119,16 @@ def _run_uninstall(flags: list[str] | None = None) -> None:
         actions.extend(uninstall_ide_configs())
     except Exception as e:
         actions.append(f"IDE-config cleanup skipped: {e}")
+    # P33-3: the daily KPI job is unloaded/disabled/deleted BEFORE the manifest replay. The replay only
+    # unlinks recorded files; run first it would leave the job loaded in launchd/systemd/Task Scheduler.
+    # After this call the replay has nothing left to unlink for it.
+    try:
+        from llm_router import daily_schedule
+        r = daily_schedule.uninstall(**(schedule or {}))
+        if r["status"] == "removed":
+            actions.append("Removed daily KPI scheduler entry" + "".join(f" {p}" for p in r["removed"]))
+    except Exception as e:
+        actions.append(f"daily-schedule cleanup skipped: {e}")
     # RED2-9-*: replay the install manifest — every artifact a write recorded is
     # reversed here (JSON MCP entries, TOML tables, appended blocks, created
     # files, copied hook scripts, dirs). This is the authoritative, coverage-safe
