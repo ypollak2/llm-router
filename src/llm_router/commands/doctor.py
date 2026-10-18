@@ -908,6 +908,24 @@ def _floor_report() -> list[str]:
     return lines
 
 
+def _daily_schedule_section(issues: list[str]) -> None:
+    """One row: daily KPI scheduler entry, last run age, late_days. Unknown is "n/a", never 0."""
+    try:
+        from llm_router import daily_offload as _do
+
+        r = _do.doctor_summary()
+        na = lambda v, fmt="{}": "n/a" if v is None else fmt.format(v)  # noqa: E731
+        if not r["scheduler_entry"]:
+            print(f"    {_dim('not installed — llm-router kpi --daily-install to enable')}  "
+                  f"last run {na(r['last_run_age_h'], '{:.1f}h ago')}  late_days {na(r['late_days'])}")
+        else:
+            print(_ok(f"scheduler entry present  last run {na(r['last_run_age_h'], '{:.1f}h ago')}  "
+                      f"late_days {na(r['late_days'])}"))
+    except Exception as exc:  # noqa: BLE001 — doctor must still finish
+        print(f"    {_red(f'daily scheduler status unavailable: {exc}')}")
+        issues.append(f"daily scheduler status unavailable: {exc}")
+
+
 def _proxy_default_section(issues: list[str]) -> None:
     """Proxy-default health lines for `llm-router doctor`; appends to ``issues``."""
     try:
@@ -1639,6 +1657,10 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     print()
     print(_bold("  Proxy-default (ANTHROPIC_BASE_URL)"))
     _proxy_default_section(issues)
+
+    print()
+    print(_bold("  Daily KPI scheduler"))
+    _daily_schedule_section(issues)
 
     # P0.14-a: a project-level ANTHROPIC_BASE_URL (or a silent ledger) means the proxy
     # is "up" but nothing goes through it. Read-only; path and host only, never the value.
