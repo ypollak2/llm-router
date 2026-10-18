@@ -132,6 +132,33 @@ def _parse_chains(raw: object) -> Dict[str, Dict[str, List[str]]]:
 _LOCAL_PLACEHOLDER = "ollama/@local"   # == model_discovery.LOCAL_PLACEHOLDER (kept literal: cheap import)
 
 
+# Late binding of ``ollama/@local`` (D-205). The chains are resolved when a policy is
+# loaded, so a long-running server would keep yesterday's local model. ``local_epoch()``
+# re-resolves the placeholder from the current cache/env (no network) at most every
+# ``_EPOCH_CHECK_S`` and bumps a counter when the answer changed; holders of resolved
+# chains (ROUTING_TABLE, the active policy) rebuild when the counter moves.
+_EPOCH_CHECK_S = 2.0
+_epoch = 0
+_epoch_seen: "str | None" = None
+_epoch_primed = False
+_epoch_checked_at = 0.0
+
+
+def local_epoch() -> int:
+    global _epoch, _epoch_seen, _epoch_primed, _epoch_checked_at
+    import time as _time
+
+    now = _time.monotonic()
+    if _epoch_primed and now - _epoch_checked_at < _EPOCH_CHECK_S:
+        return _epoch
+    _epoch_checked_at = now
+    current = _resolve_local_placeholder()
+    if _epoch_primed and current != _epoch_seen:
+        _epoch += 1
+    _epoch_seen, _epoch_primed = current, True
+    return _epoch
+
+
 def _resolve_local_placeholder() -> "str | None":
     try:
         from llm_router.model_discovery import local_model
@@ -191,6 +218,7 @@ class PolicyManager:
         """Initialize policy manager."""
         self._active_policy: Optional[RoutingPolicy] = None
         self._policy_cache: Dict[str, RoutingPolicy] = {}
+        self._local_epoch = local_epoch()
         self._ensure_policy_dir()
 
     def _ensure_policy_dir(self) -> None:
@@ -318,6 +346,18 @@ class PolicyManager:
         Returns:
             Active RoutingPolicy
         """
+        epoch = local_epoch()
+        if epoch != self._local_epoch:
+            # The user's local model changed (rescan): re-resolve ``ollama/@local``.
+            self._local_epoch = epoch
+            self._policy_cache.clear()
+            if self._active_policy is not None:
+                try:
+                    self._active_policy = self.load_policy(self._active_policy.name)
+                except (FileNotFoundError, ValueError) as exc:
+                    # keep the policy already in force; never break routing on a reload
+                    from llm_router import failopen
+                    failopen.record("CHZ-FO-POLICY-LOCAL-RELOAD", exc)
         if self._active_policy is not None:
             return self._active_policy
 

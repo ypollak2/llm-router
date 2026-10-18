@@ -926,7 +926,7 @@ _HELP_FLAGS = ("-h", "--help")
 # CLI-HELP-1: subcommands that print their own help for -h/--help in any
 # position (argparse, or an explicit check over all args).
 _OWN_HELP_ANYWHERE = frozenset({
-    "audit", "calibrate", "cp", "dev-refresh", "gc", "install", "inventory", "invoice",
+    "audit", "calibrate", "cp", "dev-refresh", "discover", "gc", "install", "inventory", "invoice",
     "judge", "kpi", "last", "map", "migrate", "mod", "mode", "northstar", "pi", "policy", "prefer",
     "proxy",
     "quickstart", "replay", "resolve", "retrospect", "run", "serve", "snapshot", "stats",
@@ -1148,6 +1148,9 @@ def main() -> None:
         # Read-only: what models this machine can run (never prints a secret).
         from llm_router.commands.inventory import cmd_inventory
         sys.exit(cmd_inventory(args[1:]))
+    elif args and args[0] == "discover":
+        from llm_router.commands.discover import cmd_discover
+        sys.exit(cmd_discover(args[1:]))
     elif args and args[0] == "map":
         from llm_router.commands.map import cmd_map
         sys.exit(cmd_map(args[1:]))

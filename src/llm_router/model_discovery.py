@@ -216,8 +216,8 @@ def _claim_probe_attempt(now: float | None = None) -> bool:
         return False  # cannot record the attempt: do not spawn unthrottled
 
 
-def _spawn_probe_child() -> bool:
-    """``python -m llm_router.model_discovery`` detached; never raises, never blocks."""
+def _spawn_probe_child(module: str = "llm_router.model_discovery") -> bool:
+    """``python -m <module>`` detached (default: this refresher); never raises, never blocks."""
     import subprocess
     import sys
 
@@ -229,7 +229,7 @@ def _spawn_probe_child() -> bool:
         # under an overridden home refreshes that cache and never another one.
         env = dict(os.environ, LLM_ROUTER_HOME=str(_cache_path().parent))
         subprocess.Popen(
-            [sys.executable, "-m", "llm_router.model_discovery"],
+            [sys.executable, "-m", module],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True, env=env,
         )

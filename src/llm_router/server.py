@@ -26,6 +26,7 @@ responses are displayed directly to the user in the Claude Code UI.
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from llm_router.call_identity import IdentityMCPServer
@@ -69,9 +70,19 @@ async def _lifespan(_server):
     tears down. This runs on the SAME event loop as those tasks, so it can await
     them — an atexit handler cannot (the tasks belong to the already-closed loop).
     """
+    # D-205: pick up `ollama pull`/`rm`, key and seat changes without a restart.
+    rescan_task = None
+    try:
+        from llm_router.discovery_rescan import rescan_loop
+        rescan_task = asyncio.create_task(rescan_loop())
+    except Exception as exc:
+        from llm_router import failopen
+        failopen.record("CHZ-FO-DISCOVERY-RESCAN-START", exc)
     try:
         yield
     finally:
+        if rescan_task is not None:
+            rescan_task.cancel()
         try:
             from llm_router.router import drain_bg_tasks
             await drain_bg_tasks(timeout_s=5.0)
