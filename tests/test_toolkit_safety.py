@@ -509,13 +509,20 @@ def test_script_cannot_use_launchservices_to_start_another_process(env):
         p = subprocess.run(["/usr/bin/open", "-g", "-j", "-a", "Calculator"], capture_output=True, text=True)
         print("OPEN_RC", p.returncode)
     """)
+    launched_pids: list[int] = []
     try:
         env.run("bash", command=f"python {name}", timeout_s=20)
         time.sleep(1.5)
-        launched = subprocess.run(["/usr/bin/pgrep", "-x", "Calculator"], capture_output=True).returncode == 0
-        assert not launched, "a sandboxed script launched an app through LaunchServices"
+        found = subprocess.run(["/usr/bin/pgrep", "-x", "Calculator"], capture_output=True, text=True)
+        # None existed before (skip above), so any pid found now was started by this test.
+        launched_pids = [int(x) for x in found.stdout.split()]
+        assert not launched_pids, "a sandboxed script launched an app through LaunchServices"
     finally:
-        subprocess.run(["/usr/bin/pkill", "-x", "Calculator"], capture_output=True)
+        for pid in launched_pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
 
 
 @pytest.mark.timing

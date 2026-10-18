@@ -1,0 +1,1 @@
+Tests and `scripts/bench_statusline.py` no longer run machine-wide `pkill -f`/`pkill -x`: each terminates only the pid it started (pid file written by the child, bounded wait); `tests/test_f56_no_machine_wide_kill.py` fails if `pkill`, `killall`, `taskkill` or `kill $(pgrep ...)` reappear under `tests/` or `scripts/`.
