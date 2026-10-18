@@ -19,7 +19,7 @@ Rows live at ``paths.state_path("daily")/<date>.json``. Writes are atomic and id
 row is left alone; ``--force`` writes ``<date>.revN.json`` and never overwrites. An open day is refused unless
 ``partial`` is asked for, and its row (``<date>.partial.json``) is never read by the streak.
 
-No prompt text is read anywhere: rows hold ids, models, enums and counts. Nothing here installs a schedule.
+No prompt text is read anywhere: rows hold ids, models, enums and counts. Nothing here installs a schedule; ``daily_schedule`` does, on request.
 """
 from __future__ import annotations
 
@@ -540,7 +540,8 @@ STATUS_DAYS = 7
 def provenance_counts(end: Date, *, base: Path, days: int = STATUS_DAYS) -> dict:
     """``scheduled_days`` (run_by == scheduler) and ``late_days`` (lateness_h > 26) over the ``days`` closed
     days ending ``end``. None, not 0, when no row in the window carries that provenance field (rows written
-    before P33-1 have neither)."""
+    before P33-1 have neither). Over a window that mixes pre- and post-P33-1 rows only the rows carrying the
+    key are counted, so the numbers are lower bounds until all 7 days are post-P33-1 rows."""
     sched = late = 0
     seen_by = seen_late = False
     for i in range(days):
@@ -563,10 +564,10 @@ def provenance_counts(end: Date, *, base: Path, days: int = STATUS_DAYS) -> dict
 
 
 def scheduler_entry() -> bool:
-    """Whether the install manifest records a kpi-daily scheduler entry (P33-2 writes it). The OS scheduler
+    """Whether the install manifest records a kpi-daily scheduler entry (``daily_schedule`` writes it). The OS scheduler
     is never queried."""
     from llm_router import install_manifest
-    return any(isinstance(r, dict) and "kpi-daily" in str(r.get("path", "")) for r in install_manifest._load())
+    return any(isinstance(r, dict) and "kpi-daily" in str(r.get("path", "")) for r in install_manifest.records())
 
 
 def run_status(*, as_json: bool = False, now: float | None = None) -> int:
@@ -604,27 +605,6 @@ def run_status(*, as_json: bool = False, now: float | None = None) -> int:
     return 0
 
 
-# ---------------------------------------------------------------- scheduler text (print only)
-
-def render_plist(label: str = "com.llm-router.kpi-daily") -> str:
-    """A launchd plist as text. Printed, never written or loaded: installing it is an owner action (D-104)."""
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<!-- PRINT ONLY. Nothing is installed by this command. Installing is an owner action (D-104):
-     save as ~/Library/LaunchAgents/{label}.plist and load it with launchd yourself.
-     --backfill 3 makes a missed run heal itself; rows are per UTC day. launchd times are LOCAL. -->
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>{label}</string>
-  <key>ProgramArguments</key>
-  <array><string>llm-router</string><string>kpi</string><string>--daily</string>
-         <string>--backfill</string><string>3</string></array>
-  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>15</integer></dict>
-  <key>RunAtLoad</key><false/>
-</dict>
-</plist>
-"""
-
-
 # ---------------------------------------------------------------- CLI
 
 def _parse_day(text: str, flag: str) -> Date:
@@ -637,21 +617,49 @@ def _parse_day(text: str, flag: str) -> Date:
 LAST_RUN = ".last_run.json"
 
 
+def bench_marker() -> Path:
+    """The file whose presence means a benchmark / requalification owns the machine. No benchmark script in
+    this repo writes a generic marker (``scripts/p20_requal.py`` holds a private flock under the research
+    tree), so this is an opt-in switch: whoever starts a benchmark may ``touch`` it. Without it the scheduled
+    job relies on Nice 10 / low-priority IO alone."""
+    from llm_router import paths
+    return paths.state_path("bench.active")
+
+
+def _record_last_run(now: float, rc: int, stats: dict, **extra: Any) -> None:
+    try:
+        _atomic_write(daily_dir() / LAST_RUN, {"ts": now, "exit": rc, **stats, **extra})
+    except Exception as exc:  # noqa: BLE001 - the run's exit code must not depend on the bookkeeping file
+        print(f"kpi --daily: could not write {LAST_RUN} ({type(exc).__name__})", file=sys.stderr)
+        from llm_router import failopen
+        failopen.record("CHZ-FO-DAILY-LAST-RUN", exc)
+
+
 def run_daily(*, date: str | None, backfill: int, force: bool, partial: bool, manifest: str | None,
               as_json: bool = False, inputs: Inputs | None = None, now: float | None = None) -> int:
-    """``kpi --daily``. Exit 0 ok, 2 refused. Every run (even one that writes nothing) records
-    ``daily/.last_run.json`` {ts, exit, days_written, days_existing}."""
+    """``kpi --daily``. Exit 0 ok, 2 refused. Every run that does the work (even one that writes nothing)
+    records ``daily/.last_run.json`` {ts, exit, days_written, days_existing}. Single instance: a second run
+    while ``daily/.lock`` is held prints ``busy`` and exits 0 without touching ``.last_run.json``. A
+    scheduled run (``LLM_ROUTER_SCHEDULED=1``) with :func:`bench_marker` present exits 0 ``deferred_busy`` and
+    records that in ``.last_run.json`` (``status``); the next day's ``--backfill`` heals the gap."""
+    from llm_router import file_lock
     now = _now() if now is None else now
     stats = {"days_written": 0, "days_existing": 0}
-    rc = 1
-    try:
-        rc = _run_daily(date, backfill, force, partial, manifest, as_json, inputs, now, stats)
-        return rc
-    finally:
+    if os.environ.get("LLM_ROUTER_SCHEDULED") == "1" and bench_marker().exists():
+        print("kpi --daily: deferred_busy (benchmark marker present); nothing written")
+        _record_last_run(now, 0, stats, status="deferred_busy")
+        return 0
+    lock_status: dict = {}
+    with file_lock.exclusive_lock(daily_dir() / ".lock", timeout=0, status=lock_status) as got:
+        if not got and lock_status.get("state") == "held":
+            print("kpi --daily: busy (another run holds daily/.lock); exiting 0")
+            return 0
+        rc = 1
         try:
-            _atomic_write(daily_dir() / LAST_RUN, {"ts": now, "exit": rc, **stats})
-        except OSError as exc:
-            print(f"kpi --daily: could not write {LAST_RUN} ({type(exc).__name__})", file=sys.stderr)
+            rc = _run_daily(date, backfill, force, partial, manifest, as_json, inputs, now, stats)
+            return rc
+        finally:
+            _record_last_run(now, rc, stats)
 
 
 def _run_daily(date, backfill, force, partial, manifest, as_json, inputs, now, stats) -> int:

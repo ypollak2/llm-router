@@ -87,7 +87,7 @@ Usage:
     llm-router routing-report   — routing accuracy and share over a window
     llm-router routing-health   — reach, context, USED and latency per day, with n
     llm-router northstar        — routed-and-used share, per session (NS1)
-    llm-router kpi              — NS/O1-O2/D1-D5/G1-G4 scorecard; --health: measured/blind/stale
+    llm-router kpi              — NS/O1-O2/D1-D5/G1-G4 scorecard; --health: measured/blind/stale; --daily-install/--daily-uninstall: daily row scheduler
     llm-router statusline       — status line cache refresh (--refresh); prints the line otherwise
     llm-router mod              — receipt band mod for Claude Code: install / uninstall (opt-in)
     llm-router sessions         — list recorded sessions

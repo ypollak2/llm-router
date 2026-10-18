@@ -2981,12 +2981,25 @@ def cmd_kpi(args: list[str]) -> int:
                      help="P33: last 'kpi --daily' run, newest row lateness, whether the install manifest has a "
                           "scheduler entry, scheduled_days / late_days over the last 7; n/a when unknown")
     ap.add_argument("--daily-render-plist", action="store_true",
-                     help="print a launchd plist for 'kpi --daily --backfill 3'; prints only, installs nothing")
+                     help="print the launchd plist 'kpi --daily-install' would write on macOS; prints only, installs nothing")
+    ap.add_argument("--daily-install", action="store_true",
+                     help="P33: install the opt-in OS scheduler entry that runs 'kpi --daily --backfill 7' at the local "
+                          "equivalent of 01:15 UTC (launchd on macOS, systemd user timer on Linux, Task Scheduler on "
+                          "Windows); asks first unless --yes; Linux/Windows entries are not verified live")
+    ap.add_argument("--daily-uninstall", action="store_true",
+                     help="P33: deactivate and remove the scheduler entry written by --daily-install")
+    ap.add_argument("--yes", action="store_true", help="with --daily-install: do not ask")
     parsed = ap.parse_args(args)
     if parsed.daily_render_plist:
-        from llm_router import daily_offload
-        print(daily_offload.render_plist(), end="")
+        from llm_router import daily_schedule
+        print(daily_schedule.render_default_plist(), end="")
         return 0
+    if parsed.daily_install:
+        from llm_router import daily_schedule
+        return daily_schedule.run_install(yes=parsed.yes)
+    if parsed.daily_uninstall:
+        from llm_router import daily_schedule
+        return daily_schedule.run_uninstall()
     if parsed.daily_status:
         from llm_router import daily_offload
         return daily_offload.run_status(as_json=parsed.json)
@@ -2998,6 +3011,8 @@ def cmd_kpi(args: list[str]) -> int:
         return daily_offload.run_daily(date=parsed.date, backfill=parsed.backfill, force=parsed.force,
                                        partial=parsed.partial, manifest=parsed.synthetic_manifest,
                                        as_json=parsed.json)
+    if parsed.yes:
+        ap.error("--yes needs --daily-install")
     for flag in ("date", "backfill", "force", "partial", "synthetic_manifest", "end"):
         if getattr(parsed, flag):
             ap.error(f"--{flag.replace('_', '-')} needs --daily (or --daily-streak for --end)")

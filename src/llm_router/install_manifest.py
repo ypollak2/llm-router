@@ -56,6 +56,25 @@ def _load() -> list[dict[str, Any]]:
         return []
 
 
+def records() -> list[dict[str, Any]]:
+    """The recorded artifacts, oldest first (a copy; read-only public view of the manifest)."""
+    return list(_load())
+
+
+def forget(path: Any) -> int:
+    """Drop every record for ``path`` (after its file was removed by hand). Returns how many were dropped.
+    Never raises."""
+    try:
+        target = str(pathlib.Path(path).absolute())
+        recs = _load()
+        keep = [r for r in recs if not (isinstance(r, dict) and r.get("path") in (target, str(path)))]
+        if len(keep) != len(recs):
+            _manifest_path().write_text(json.dumps(keep, indent=2))
+        return len(recs) - len(keep)
+    except Exception:  # noqa: BLE001 - best-effort like record()
+        return 0
+
+
 def record(kind: str, path: Any, **meta: Any) -> None:
     """Append an artifact record. Never raises — a manifest hiccup must not break
     install. De-duplicates identical records so repeated installs don't bloat it.
