@@ -89,69 +89,53 @@ def _ensemble_enabled() -> bool:
     return _engine_mode() == "legacy"
 
 
-# Primary local classifier — one env knob shared by warmup and routing so they
-# always target the same model.
-DEFAULT_PRIMARY = "ollama/qwen2.5:7b"
-
-# Secondary (tiebreak) local classifier — consulted only on a thin margin
-# (see _MARGIN_TIEBREAK). Same env-knob pattern as the primary.
-DEFAULT_SECONDARY = "ollama/qwen2.5-coder:32b"
-
-
-# L (2026-09-24): a default that is not installed fails on every classify and
-# falls back silently — Claude Desktop's server logged "model 'qwen2.5:7b' not
-# found" on every start for days. When the default is missing, use the first
-# installed match below; the order mirrors the maintainer's measured Claude Code
-# config (PRIMARY=qwen3.8, SECONDARY=qwen3-coder). An explicit env var wins.
-_PRIMARY_FALLBACKS = ("qwen3.8", "qwen3.5", "qwen3-coder", "qwen2.5", "llama3")
-_SECONDARY_FALLBACKS = ("qwen3-coder", "qwen2.5-coder", "qwen3.8", "qwen3.5", "llama3")
+# Local classifier models are the USER's configuration (D-205): nothing here names one.
+# Primary = LLM_ROUTER_ENSEMBLE_PRIMARY, else the user's local model
+# (model_discovery.local_model: LLM_ROUTER_OLLAMA_MODEL, else the discovered inventory),
+# else "" = no local model, and classification fails open to the heuristic.
+# Secondary (tiebreak, consulted only on a thin margin, see _MARGIN_TIEBREAK) =
+# LLM_ROUTER_ENSEMBLE_SECONDARY, else the first other discovered model, else "" (no tiebreak).
 
 
 def _installed_local_models() -> list[str]:
-    """Installed Ollama chat models as ``ollama/<name>``, from the discovery CACHE
-    only — never a live probe: this runs on every classification, and a network
-    call here would also make the result depend on whether Ollama is up."""
+    """Discovered Ollama chat models as ``ollama/<name>``, cache/env only, never a
+    live probe: this runs on every classification, and a network call here would
+    also make the result depend on whether Ollama is up."""
     try:
-        from llm_router.discover import _is_embedding_model, _load_cache
-        cached = _load_cache(ttl=86400) or {}
-        return [m for m, d in cached.items()
-                if isinstance(d, dict) and d.get("provider") == "ollama"
-                and not _is_embedding_model(m.split("/", 1)[-1], d)]
-    except Exception:  # noqa: BLE001 — unknown means "keep the default"
+        from llm_router.model_discovery import available_ollama_models
+        return [f"ollama/{m}" for m in available_ollama_models(allow_probe=False)]
+    except Exception:  # noqa: BLE001 — unknown means "no local model"
         return []
-
-
-def _resolve(explicit: str, default: str, prefs: tuple[str, ...],
-             avoid: str | None = None) -> str:
-    explicit = explicit.strip()
-    if explicit:
-        return explicit
-    installed = _installed_local_models()
-    bare = [m.removeprefix("ollama/") for m in installed]
-    if not installed or model_installed(default, bare):
-        return default
-    for pref in prefs:
-        for m in installed:
-            if pref in m and m != avoid:
-                return m
-    others = [m for m in installed if m != avoid]
-    return others[0] if others else installed[0]
 
 
 def _primary_model() -> str:
     # Names spelled out at the read: test_env_registry scans for literal reads.
-    return _resolve(os.environ.get("LLM_ROUTER_ENSEMBLE_PRIMARY", ""),
-                    DEFAULT_PRIMARY, _PRIMARY_FALLBACKS)
+    explicit = os.environ.get("LLM_ROUTER_ENSEMBLE_PRIMARY", "").strip()
+    if explicit:
+        return explicit
+    try:
+        from llm_router.model_discovery import local_model
+        found = local_model(allow_probe=False)
+    except Exception:  # noqa: BLE001
+        found = None
+    return f"ollama/{found}" if found else ""
 
 
 def _secondary_model() -> str:
-    return _resolve(os.environ.get("LLM_ROUTER_ENSEMBLE_SECONDARY", ""),
-                    DEFAULT_SECONDARY, _SECONDARY_FALLBACKS, avoid=_primary_model())
+    explicit = os.environ.get("LLM_ROUTER_ENSEMBLE_SECONDARY", "").strip()
+    if explicit:
+        return explicit
+    primary = _primary_model()
+    if not primary:
+        return ""
+    from llm_router.model_discovery import _same_model
+    return next((m for m in _installed_local_models() if not _same_model(m, primary)), "")
 
 
 def primary_model() -> str:
     """Public accessor: the ensemble's configured primary classifier model
-    (``LLM_ROUTER_ENSEMBLE_PRIMARY`` override, else ``DEFAULT_PRIMARY``).
+    (``LLM_ROUTER_ENSEMBLE_PRIMARY`` override, else the user's discovered local model;
+    ``""`` when there is none).
 
     Exists so other modules (e.g. ``commands.doctor``, ``commands.verify``) can
     read the effective primary without reaching into the private ``_primary_model``.
@@ -161,18 +145,18 @@ def primary_model() -> str:
 
 def secondary_model() -> str:
     """Public accessor: the ensemble's configured secondary (tiebreak) classifier
-    model (``LLM_ROUTER_ENSEMBLE_SECONDARY`` override, else ``DEFAULT_SECONDARY``).
+    model (``LLM_ROUTER_ENSEMBLE_SECONDARY`` override, else another discovered model;
+    ``""`` when there is none).
     """
     return _secondary_model()
 
 
 def model_installed(model: str, installed_names: list[str]) -> bool:
-    """True if ``model`` (e.g. ``"ollama/qwen2.5:7b"``) is present among Ollama's
+    """True if ``model`` (e.g. ``"ollama/<name>:<tag>"``) is present among Ollama's
     installed model names (as returned by ``/api/tags``).
 
     Strips the ``ollama/`` provider prefix and normalizes Ollama's implicit
-    ``:latest`` tag, so a bare name (``"qwen2.5:7b"``... already tagged, but also
-    ``"llama3"``) matches an installed ``"<name>:latest"`` entry and vice versa.
+    ``:latest`` tag, so a bare name (``"name"``) matches an installed ``"<name>:latest"`` entry and vice versa.
     """
     if not model:
         return False
@@ -196,7 +180,7 @@ def warm_primary(model: str | None = None) -> None:
     if not _ensemble_enabled():
         return
     target = model or _primary_model()
-    if not target.startswith("ollama/"):
+    if not target or not target.startswith("ollama/"):
         return
 
     def _run() -> None:
@@ -284,8 +268,10 @@ async def local_llm_classify(
     still reach them directly).
 
     Never raises: any failure returns the safe moderate fallback so routing
-    proceeds.
+    proceeds. An empty ``model`` (no local model discovered) fails open the same way.
     """
+    if not model:
+        return _fallback_result("no local model discovered")
     try:
         sanitized = sanitize_prompt(prompt)
     except ValueError as e:
@@ -408,8 +394,8 @@ def _knn_vote(
 async def classify_ensemble(
     prompt: str,
     *,
-    primary: str = DEFAULT_PRIMARY,
-    secondary: str | None = DEFAULT_SECONDARY,
+    primary: str = "",
+    secondary: str | None = None,
     allow_secondary: bool = True,
     timeout_seconds: float = 120.0,
 ) -> ClassificationResult:

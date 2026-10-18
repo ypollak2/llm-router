@@ -88,9 +88,13 @@ def test_secondary_model_env_override(monkeypatch):
     assert ensemble.secondary_model() == "ollama/mymodel:latest"
 
 
-def test_secondary_model_default(monkeypatch):
+def test_secondary_model_default_is_discovery_driven(monkeypatch):
+    """D-205: no hard-coded default; with no override and nothing discovered, no secondary."""
     monkeypatch.delenv("LLM_ROUTER_ENSEMBLE_SECONDARY", raising=False)
-    assert ensemble.secondary_model() == ensemble.DEFAULT_SECONDARY
+    monkeypatch.delenv("LLM_ROUTER_ENSEMBLE_PRIMARY", raising=False)
+    monkeypatch.delenv("LLM_ROUTER_OLLAMA_MODEL", raising=False)
+    monkeypatch.setattr(ensemble, "_installed_local_models", lambda: [])
+    assert ensemble.secondary_model() == ""
 
 
 # ── doctor: the actual repro from the issue ─────────────────────────────────
@@ -98,7 +102,7 @@ def test_secondary_model_default(monkeypatch):
 
 def test_doctor_warns_when_ensemble_primary_is_not_installed(monkeypatch, capsys):
     """THE repro: /api/tags omits the primary the ensemble will request."""
-    monkeypatch.delenv("LLM_ROUTER_ENSEMBLE_PRIMARY", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_ENSEMBLE_PRIMARY", "ollama/absent-primary:7b")
     monkeypatch.delenv("LLM_ROUTER_ENSEMBLE_SECONDARY", raising=False)
     monkeypatch.setattr(
         doc.urllib.request,
@@ -109,7 +113,7 @@ def test_doctor_warns_when_ensemble_primary_is_not_installed(monkeypatch, capsys
     code, issues = doc._run_doctor()
     text = capsys.readouterr().out
 
-    assert ensemble.DEFAULT_PRIMARY.removeprefix("ollama/") in text
+    assert "absent-primary:7b" in text
     assert "ollama pull" in text
     assert "LLM_ROUTER_ENSEMBLE_PRIMARY" in text
     assert any("ensemble" in i.lower() and "primary" in i.lower() for i in issues), issues
@@ -124,7 +128,7 @@ def test_doctor_warns_when_ensemble_primary_is_not_installed(monkeypatch, capsys
 
 def test_doctor_warns_when_ensemble_secondary_is_not_installed(monkeypatch, capsys):
     monkeypatch.setenv("LLM_ROUTER_ENSEMBLE_PRIMARY", "ollama/qwen3.5")
-    monkeypatch.delenv("LLM_ROUTER_ENSEMBLE_SECONDARY", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_ENSEMBLE_SECONDARY", "ollama/absent-secondary:9b")
     monkeypatch.setattr(
         doc.urllib.request,
         "urlopen",
@@ -134,7 +138,7 @@ def test_doctor_warns_when_ensemble_secondary_is_not_installed(monkeypatch, caps
     code, issues = doc._run_doctor()
     text = capsys.readouterr().out
 
-    assert "qwen2.5-coder" in text  # DEFAULT_SECONDARY, bare form
+    assert "absent-secondary:9b" in text
     assert "LLM_ROUTER_ENSEMBLE_SECONDARY" in text
     assert any("ensemble" in i.lower() and "secondary" in i.lower() for i in issues), issues
     ensemble_line = next(line for line in text.splitlines() if "ensemble" in line.lower() and "secondary" in line.lower())
@@ -182,7 +186,7 @@ def test_doctor_bare_vs_latest_edge_does_not_false_positive(monkeypatch, capsys)
 
 
 def test_verify_check_ollama_flags_missing_ensemble_model(monkeypatch):
-    monkeypatch.delenv("LLM_ROUTER_ENSEMBLE_PRIMARY", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_ENSEMBLE_PRIMARY", "ollama/absent-primary:7b")
     monkeypatch.delenv("LLM_ROUTER_ENSEMBLE_SECONDARY", raising=False)
     monkeypatch.setattr(
         verify.urllib.request,
@@ -193,7 +197,7 @@ def test_verify_check_ollama_flags_missing_ensemble_model(monkeypatch):
     success, msg = verify.check_ollama()
 
     assert success is True, "missing ensemble model must stay non-fatal"
-    assert ensemble.DEFAULT_PRIMARY.removeprefix("ollama/") in msg
+    assert "absent-primary:7b" in msg
     assert "LLM_ROUTER_ENSEMBLE_PRIMARY" in msg or "ollama pull" in msg
 
 

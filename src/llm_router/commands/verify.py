@@ -157,7 +157,9 @@ def check_ollama() -> tuple[bool, str]:
 
         _missing = []
         _primary = _ensemble.primary_model()
-        if not _ensemble.model_installed(_primary, model_names):
+        if not _primary:
+            _missing.append("primary (no local model discovered)")
+        elif not _ensemble.model_installed(_primary, model_names):
             _missing.append(f"primary '{_primary.removeprefix('ollama/')}'")
         _secondary = _ensemble.secondary_model()
         if _secondary and not _ensemble.model_installed(_secondary, model_names):

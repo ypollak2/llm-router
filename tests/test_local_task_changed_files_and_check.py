@@ -271,3 +271,12 @@ def test_more_unquoted_shell_syntax_rejected(tmp_path, check):
 def test_metacharacters_inside_quotes_are_literal_and_allowed(tmp_path, check):
     ok, msg = lt._run_check(check, tmp_path, timeout=10)
     assert ok is True, msg
+
+
+import pytest as _pytest_f50  # noqa: E402
+
+
+@_pytest_f50.fixture(autouse=True)
+def _user_local_model_f50(monkeypatch):
+    """D-205: llm_local_task has no built-in model; the user's setting names one."""
+    monkeypatch.setenv("LLM_ROUTER_OLLAMA_MODEL", "usermodel:1b")

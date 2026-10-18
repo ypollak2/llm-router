@@ -129,7 +129,8 @@ def test_a_door_pointed_off_the_stub_fails_the_run(tmp_path, monkeypatch):
 
     def env(self, **extra):
         e = real_env(self, **extra)
-        e.update({"OLLAMA_HOST": off, "OLLAMA_BASE_URL": off, "OLLAMA_URL": off, "LLM_ROUTER_OLLAMA_URL": off})
+        e.update({"LLM_ROUTER_OLLAMA_MODEL": "usermodel:1b",  # D-205: the user's own model, so the door tries Ollama
+                  "OLLAMA_HOST": off, "OLLAMA_BASE_URL": off, "OLLAMA_URL": off, "LLM_ROUTER_OLLAMA_URL": off})
         return e
 
     monkeypatch.setattr(sr.Scratch, "env", env)

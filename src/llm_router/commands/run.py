@@ -21,7 +21,7 @@ def _parser() -> argparse.ArgumentParser:
                                 description="Run one task through the router-owned tool layer (propose-only).")
     p.add_argument("task", nargs="?", help="the task text (or use --task-file)")
     p.add_argument("--task-file", help="read the task text from this file")
-    p.add_argument("--model", required=True, help="local Ollama model, e.g. qwen3.6:35b-a3b-coding")
+    p.add_argument("--model", required=True, help="local Ollama model (a name from `ollama list`)")
     p.add_argument("--workspace", default=".", help="source tree to copy (default: current directory)")
     p.add_argument("--verify", help="test command run before and after, e.g. 'pytest -q tests/test_x.py'")
     p.add_argument("--python-dir", help="bin directory whose python/pytest the sandboxed commands use")

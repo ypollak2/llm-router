@@ -109,3 +109,12 @@ def test_write_mode_is_restored_after_the_call(tmp_path, monkeypatch):
     monkeypatch.setattr("llm_router.hooks.agent_loop.run_agent_loop", lambda **kw: "ok")
     _call(objective="x", workdir=str(tmp_path), apply_writes=True)
     assert os.environ["LLM_ROUTER_AGENT_WRITES"] == "propose"
+
+
+import pytest as _pytest_f50  # noqa: E402
+
+
+@_pytest_f50.fixture(autouse=True)
+def _user_local_model_f50(monkeypatch):
+    """D-205: llm_local_task has no built-in model; the user's setting names one."""
+    monkeypatch.setenv("LLM_ROUTER_OLLAMA_MODEL", "usermodel:1b")

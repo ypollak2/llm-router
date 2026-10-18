@@ -550,8 +550,7 @@ def display_detected_services(detected: ServiceDetection) -> str:
 
     output += "🆓 FREE LOCAL (Unlimited)\n"
     if detected.get("ollama_available"):
-        output += "  ✓ Ollama — Qwen3.5 (primary), Kimi-K2.6 (code expert, 256K context)\n"
-        output += "           Qwen3-Coder (code), Qwen2.5 (fallback), Gemma4 (lightweight)\n"
+        output += "  ✓ Ollama — local models discovered at runtime (see `llm-router doctor`)\n"
     else:
         output += "  ✗ Ollama (not running on localhost:11434)\n"
 

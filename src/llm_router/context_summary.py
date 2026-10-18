@@ -58,9 +58,7 @@ CREATE TABLE IF NOT EXISTS rolling_summaries (
 );
 """
 
-# Family preference among the map's connected local generate models.
-_PREFERRED = ("qwen3.5", "qwen3.6", "qwen3", "llama3", "gemma", "mistral", "phi")
-_EXCLUDED = ("llmr-", "embed", "classifier", "systemone", "coder:30b")
+_EXCLUDED = ("llmr-", "embed", "classifier", "systemone")
 
 
 def enabled() -> bool:
@@ -322,18 +320,18 @@ def map_candidates(data: dict | None) -> list[str] | None:
 def pick_model(installed: list[str], map_data: dict | None = None) -> str | None:
     """Best local summary model: the map's connected generate models when a map
     exists (file read only, no network), else the ``/api/tags`` list; then the
-    family preference order. ``LLM_ROUTER_SUMMARY_MODEL`` overrides."""
+    user's own local-model setting (``LLM_ROUTER_OLLAMA_MODEL``) when it is among them,
+    else the first in discovery order (no family or name preference, D-205); None when
+    there is none. ``LLM_ROUTER_SUMMARY_MODEL`` overrides."""
     override = os.environ.get("LLM_ROUTER_SUMMARY_MODEL", "").strip()
     if override:
         return override
     mapped = map_candidates(map_data)
     pool = mapped if mapped is not None else installed
     ok = [m for m in pool if not any(x in m.lower() for x in _EXCLUDED)]
-    for fam in _PREFERRED:
-        for m in ok:
-            if m.lower().startswith(fam):
-                return m
-    return None
+    from llm_router.model_discovery import prefer_first, user_local_model_setting
+    ok = prefer_first(ok, user_local_model_setting())
+    return ok[0] if ok else None
 
 
 def _prompt(prev: str, chunk: str) -> str:
