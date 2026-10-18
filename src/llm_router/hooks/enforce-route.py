@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 18
+# llm_router-hook-version: 19
 """PreToolUse[*] hook — enforce routing compliance.
 
 When auto-route.py issues a ⚡ MANDATORY ROUTE directive, it writes a
@@ -560,6 +560,35 @@ def _bash_exempt_from_hold(task_type: str, command: str, redirect_fires: bool) -
     if task_type in _QA_TASK_TYPES or task_type == "code" or redirect_fires:
         return False
     return _is_local_only_bash(command)
+
+
+# F59 review: the smart-ops exemption is deny-list based, so it also refuses any
+# network fetch (with or without a scheme) and provider CLIs - shell-driven LLM
+# calls must stay route-eligible. (python -c / llm-router are governed by the
+# older local-tool and own-CLI exemptions; see F60.)
+_SMART_OPS_LLM_ESCAPE_RE = re.compile(
+    r"""(?:
+        \bcurl\b|\bwget\b|\bhttpie\b|\bhttp\s+(?:get|post)\b|
+        \b(?:openai|anthropic)\s+(?:api|messages|chat|completions)\b
+    )""",
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
+def _smart_ops_bash_exempt(enforce: str, task_type: str, command: str) -> bool:
+    """Smart mode never holds Bash for an operational ("coordination") task.
+
+    F59 (observed 2026-10-18): "deploy main now" / "merge it" classify as
+    coordination, whose commands (git fast-forward, launchctl, ...) need local
+    machine state no routed model can see. Hard mode keeps its llm_act redirect;
+    network fetches and shell-driven LLM calls stay route-eligible.
+    """
+    if enforce != "smart" or task_type != "coordination":
+        return False
+    if not command or not command.strip():
+        return False
+    return not (_BASH_ROUTABLE_ESCAPE_RE.search(command)
+                or _SMART_OPS_LLM_ESCAPE_RE.search(command))
 
 
 def _is_local_only_bash(command: str) -> bool:
@@ -1322,7 +1351,8 @@ def main() -> None:
         _lb_redirect = _delegate_redirect_fires(
             pending.get("original_prompt", ""), pending.get("complexity", "simple")
         )
-        if _bash_exempt_from_hold(_lb_task, _bash_cmd, _lb_redirect):
+        if (_bash_exempt_from_hold(_lb_task, _bash_cmd, _lb_redirect)
+                or _smart_ops_bash_exempt(enforce, _lb_task, _bash_cmd)):
             enforce = "soft"
             try:
                 _router_dir().mkdir(parents=True, exist_ok=True)
