@@ -62,7 +62,7 @@ HAS_N = re.compile(r"\bn=\d|\bn \d|\d+ executed")
 HAS_WINDOW = re.compile(r"\b(session|today|24h|7d|month|lifetime)\b")
 
 
-async def _seed_six(home: Path) -> Path:
+async def _seed_six(home: Path) -> Path:  # noqa: F811 -- pytest fixture name
     db = await _seed(home)
     con = sqlite3.connect(db)
     # usage.latency_ms is NOT NULL (a recorded latency); routing_decisions.latency_ms is nullable and
@@ -89,7 +89,7 @@ async def _seed_six(home: Path) -> Path:
 
 
 @pytest.fixture
-async def six(home, tmp_path_factory):
+async def six(home, tmp_path_factory):  # noqa: F811 -- pytest fixture name
     """Seeded home plus a fake HOME whose ``.llm-router`` is that home (the shell hardcodes it)."""
     db = await _seed_six(home)
     fake = tmp_path_factory.mktemp("fakehome")
