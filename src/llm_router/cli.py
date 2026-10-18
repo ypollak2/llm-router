@@ -52,6 +52,7 @@ Usage:
     llm-router budget set <p> <amt>  — set monthly cap in USD for provider p
     llm-router budget remove <p>     — clear the cap for provider p
     llm-router last [--count N]      — show your last N routing decisions (default: 5)
+    llm-router why [--last N] [--json] — why the router chose that: class, confidence, layer, quota, alternatives
     llm-router run --model M --verify CMD "task" — one task through the tool layer (propose-only patch)
     llm-router replay [--limit N]    — full transcript of routing decisions this session
     llm-router snapshot [--date DATE] — mid-session monitoring: accuracy trends and gap detection
@@ -903,6 +904,7 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "verify",
         "audit",
         "last",
+        "why",
         "replay",
         "gc",
         "soak",
@@ -931,7 +933,7 @@ _OWN_HELP_ANYWHERE = frozenset({
     "judge", "kpi", "last", "map", "migrate", "mod", "mode", "northstar", "pi", "policy", "prefer",
     "proxy",
     "quickstart", "replay", "resolve", "retrospect", "run", "serve", "snapshot", "stats",
-    "statusline", "team-sync", "test-delta", "verify", "welcome",
+    "statusline", "team-sync", "test-delta", "verify", "welcome", "why",
 })
 # ...only when the flag comes straight after the subcommand (`okf --help`,
 # not `okf gc --help`).
@@ -1288,6 +1290,9 @@ def main() -> None:
     elif args and args[0] == "last":
         from llm_router.commands.last import main as _last_main
         sys.exit(_last_main(args[1:]))  # CFG-010: propagate the exit code
+    elif args and args[0] == "why":
+        from llm_router.commands.why import main as _why_main
+        sys.exit(_why_main(args[1:]))
     elif args and args[0] == "gc":
         from llm_router.commands.gc import main as _gc_main
         sys.exit(_gc_main(args[1:]))
