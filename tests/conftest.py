@@ -898,6 +898,20 @@ def _isolate_provider_api_keys(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_budget_cache():
+    """Clear ``llm_router.budget._cache`` (60 s TTL) before and after each test.
+
+    F62: tests/test_budget.py caches an anthropic BudgetState with pressure 0.9x; a later
+    test in the same process (test_f25 premium-research chain) then hit the premium cap
+    (0.85) and fell back to the local model. ``monkeypatch`` cannot restore this global.
+    """
+    from llm_router.budget import invalidate_cache
+    invalidate_cache()
+    yield
+    invalidate_cache()
+
+
+@pytest.fixture(autouse=True)
 def _reset_quality_store():
     """Reset the module-global quality-feedback store before and after each test.
 
