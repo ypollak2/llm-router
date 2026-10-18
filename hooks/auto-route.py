@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 68
+# llm_router-hook-version: 69
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 68"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 69"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -1558,6 +1558,33 @@ _COORDINATE_BARE_OP_PRONOUN_RE = re.compile(
     re.IGNORECASE,
 )
 
+# F75: the bare-pronoun operational verb used to be claimed ANYWHERE in the prompt
+# ("ok thanks. now deploy it", "deploy it now", "ok merge it" were swallowed: they are
+# work requests). It is now a whole-prompt allow-list for the one shape that is
+# genuinely a deferred session instruction: "<op> <pronoun> <wait-clause>" where the
+# wait clause ("once the checks are green", "and let me know when it's live") is built
+# only from a closed vocabulary. Everything else falls through to normal classification.
+_DEFERRED_OP_RE = re.compile(
+    r"^(?:merge|deploy|redeploy)\s+(?:it|this|that|them|these|those)\s+"
+    r"(?:(?:once|when|whenever|after|if|as\s+soon\s+as)\b|and\s+(?:let|tell)\s+me\b|"
+    r"and\s+report\s+back\b)(?P<tail>.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_DEFERRED_TAIL_TOKENS = frozenset((
+    "a an the it it's its them they is are was be been get gets got when once after if "
+    "as soon as and or let me know tell report back keep going green red pass passes "
+    "passed passing clean ready done finished complete completed live merged deployed "
+    "checks check tests test ci build suite pipeline everything all lands land "
+    "up in with have has you we i i'm").split())
+
+
+def _is_deferred_op(prompt: str) -> bool:
+    m = _DEFERRED_OP_RE.match(prompt.strip())
+    if not m:
+        return False
+    toks = _AMBIENT_TOKEN_RE.findall(m.group("tail").replace("\u2019", "'").lower())
+    return all(t in _DEFERRED_TAIL_TOKENS for t in toks)
+
 # "commit"/"push" specifically. Their presence suppresses the generic
 # deictic check below: "commit it", "push it once the check passes", "commit
 # these too once the suite is clean" read as ambiguous in isolation, but
@@ -1660,6 +1687,9 @@ _ACK_TOKEN = r"[\w./:@+~-]+"
 _ACK_REPORT_WHOLE_RE = re.compile(
     r"^(?:(?:i|we)(?:'ve|\s+have|\s+just|\s+already)?\s+)?"
     r"(?!\w*(?:eed|mbed)\b|need|want)"  # "embed it", "speed it": imperatives, not reports
+    # F75: failure-status fragments ("Failed in CI", "Crashed on prod") carry an implicit
+    # "please debug"; shed/shred are base-form imperatives that end in -ed.
+    r"(?!(?:fail|crash|error|hang|stall|block|expir|die)\w*\b|shr?ed\b)"
     r"(?:\w+ed|ran|did|made|got|sent|set|put|built|wrote|took|pasted|restarted)"
     r"(?:\s+(?:it|them|this|that|everything|all|"
     rf"(?:the|my|our|your|a|an|those|these)\s+{_ACK_TOKEN}|"
@@ -1759,6 +1789,97 @@ def _ambient_tokens_within(text: str, vocab: frozenset,
     return True
 
 
+# F75: _COORDINATE_STATUS_RE matches ANYWHERE, so "ok thanks, what's next? add tests"
+# was claimed on "what's next" although the second clause is a request. When the prompt
+# has more than one clause, EVERY clause must itself be a status shape or pure
+# filler/continuation; one request clause sends the whole prompt to normal routing.
+_STATUS_CLAUSE_SPLIT_RE = re.compile(r"[?.!;:,\u2014\n]+|\s-+\s")
+
+
+def _status_segments_ok(stripped: str) -> bool:
+    segs = [x.strip() for x in _STATUS_CLAUSE_SPLIT_RE.split(stripped) if x.strip()]
+    if len(segs) <= 1:
+        return True
+    return all(_COORDINATE_STATUS_RE.search(x)
+               or _ambient_tokens_within(x, _AMBIENT_BASE_TOKENS) for x in segs)
+
+
+# F74: a prompt that is ONLY a URL into the user's own repo/CI means "look at this
+# here" (live 2026-10-18: a bare Actions job URL was routed research/moderate and
+# held a read-only `gh run view`). "Own" = owner/repo equals one of the current
+# checkout's git remotes, read from .git/config (no network, no subprocess). Any
+# other word in the prompt, or a third-party URL, keeps normal routing.
+_OWN_URL_RE = re.compile(
+    r"^[<`(\[]?https?://(?:www\.)?github\.com/(?P<o>[\w.-]+)/(?P<r>[\w.-]+)"
+    r"/(?:actions|pull|pulls|issues|commit|commits|tree|blob)(?:/[^\s<>`)\]]*)?[>`)\]]?[.,]?$",
+    re.IGNORECASE,
+)
+_REMOTE_URL_RE = re.compile(
+    r"^\s*url\s*=\s*\S*github\.com[:/](?P<o>[\w.-]+)/(?P<r>[\w.-]+?)(?:\.git)?/?\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_OWN_REMOTES_CACHE: dict = {}
+
+
+def _own_repo_remotes(cwd: str) -> frozenset:
+    """{(owner, repo)} lower-cased, from the git config of ``cwd``'s checkout."""
+    if cwd in _OWN_REMOTES_CACHE:
+        return _OWN_REMOTES_CACHE[cwd]
+    found: set = set()
+    try:
+        d = os.path.abspath(cwd)
+        for _ in range(12):
+            g = os.path.join(d, ".git")
+            if os.path.isdir(g):
+                break
+            if os.path.isfile(g):  # linked worktree: "gitdir: <common>/worktrees/<n>"
+                with open(g, encoding="utf-8", errors="replace") as fh:
+                    line = fh.read().strip()
+                if line.startswith("gitdir:"):
+                    gd = line[7:].strip()
+                    if not os.path.isabs(gd):
+                        gd = os.path.join(d, gd)
+                    cd = os.path.join(gd, "commondir")
+                    if os.path.isfile(cd):
+                        with open(cd, encoding="utf-8", errors="replace") as fh:
+                            gd = os.path.join(gd, fh.read().strip())
+                    g = os.path.normpath(gd)
+                    break
+            parent = os.path.dirname(d)
+            if parent == d:
+                g = ""
+                break
+            d = parent
+        else:
+            g = ""
+        cfg = os.path.join(g, "config") if g else ""
+        if cfg and os.path.isfile(cfg):
+            with open(cfg, encoding="utf-8", errors="replace") as fh:
+                for m in _REMOTE_URL_RE.finditer(fh.read(65536)):
+                    found.add((m.group("o").lower(), m.group("r").lower()))
+    except OSError:
+        pass  # unreadable git config: no remotes known, URL keeps normal routing
+    _OWN_REMOTES_CACHE[cwd] = frozenset(found)
+    return _OWN_REMOTES_CACHE[cwd]
+
+
+def _is_own_repo_url(stripped: str) -> bool:
+    if "github.com" not in stripped or len(stripped) > 300 or any(c.isspace() for c in stripped):
+        return False
+    m = _OWN_URL_RE.match(stripped)
+    if not m:
+        return False
+    repo = m.group("r")
+    if repo.lower().endswith(".git"):
+        repo = repo[:-4]
+    own = (m.group("o").lower(), repo.lower())
+    dirs = [os.getcwd()]
+    pd = os.environ.get("CLAUDE_PROJECT_DIR")
+    if pd:
+        dirs.append(pd)
+    return any(own in _own_repo_remotes(d) for d in dirs)
+
+
 def _is_command_shaped(prompt: str) -> bool:
     """True when the whole prompt is one shell-command line: first token is a
     known executable (or a ./ ~/ / path), optional ``$ `` prefix, optional wrapping
@@ -1816,10 +1937,12 @@ def _is_coordination_task(prompt: str) -> bool:
         return True
     if _COORDINATE_MULTISTEP_RE.search(prompt):
         return True
-    if _COORDINATE_BARE_OP_PRONOUN_RE.search(prompt):
+    if _is_deferred_op(prompt):
         return True
     stripped = prompt.strip()
     words = stripped.split()
+    if _is_own_repo_url(stripped):
+        return True
     if len(words) <= 6 and _COORDINATE_AMBIENT_RE.match(stripped):
         return True
     if _is_acknowledgement(stripped) or _is_command_shaped(stripped):
@@ -1837,7 +1960,7 @@ def _is_coordination_task(prompt: str) -> bool:
     if len(words) <= 12 and not _is_introspection_task(stripped):
         if _COORDINATE_EXPLICIT_CONTINUE_RE.search(stripped):
             return True
-        if _COORDINATE_STATUS_RE.search(stripped):
+        if _COORDINATE_STATUS_RE.search(stripped) and _status_segments_ok(stripped):
             return True
         opener = _COORDINATE_CONTINUATION_OPENER_RE.match(stripped)
         if opener:
