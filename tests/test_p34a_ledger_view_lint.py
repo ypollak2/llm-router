@@ -7,9 +7,9 @@ question got several answers. This lint keeps the three rewired surfaces and the
 growing a private read again. SCOPE (part A): ``dashboard_data.query_window`` / ``summary``,
 ``routing_report.executed_routes``, ``cost.get_savings_by_period``, all of
 ``observability/summary.py`` and ``commands/kpi.py``. B2 adds ``statusline_segments.py``, B3 the status-bar hook;
-B5 adds the session-end functions B4 migrated. The session-end functions that still scan the tables
-(the detached child's private scans, P3.4-B4b) are pinned by name in ``SESSION_END_B4B``: a new private
-read there fails the allow-list test instead of passing unscoped.
+B5 adds the session-end functions B4 migrated; B4b moves the rest of the file, so all of
+``hooks/session-end.py`` is in scope. ``SESSION_END_B4B`` is the (empty) ratchet of private reads that
+may remain there, as a per-function COUNT: a new read inside a pinned function fails it too (F95).
 """
 from __future__ import annotations
 
@@ -34,18 +34,13 @@ SCOPE = (
     ("commands/kpi.py", None),
     ("statusline_segments.py", None),          # B2: the statusline's mix and money (D-218)
     ("hooks/status-bar.py", None),             # B3: the status-bar's D:/W:/M: and session calls
-    ("hooks/session-end.py", "_compute_ledger_aggregates"),   # B4/B5: the Stop's 24h and today windows
-    ("hooks/session-end.py", "_ledger_compact"),              # B4/B5: the Stop's compact figures
+    ("hooks/session-end.py", None),            # B4/B5/B4b: every figure the Stop and its child print
 )
 
-#: P3.4-B4b (not done in B5): the session-end functions that still read ``usage`` /
-#: ``routing_decisions`` themselves. They run in the detached child (inline only in "full" mode).
-#: The allow-list is exact: removing a function from it is the B4b work; adding one is refused.
-SESSION_END_B4B = frozenset({
-    "_lifetime_saved", "_query_classifier_overhead", "_query_daily_cache_trend",
-    "_query_router_efficiency", "_query_session_complexity_breakdown", "_query_session_data",
-    "_query_session_metrics", "_render_rich_summary",
-})
+#: Session-end functions allowed a private ``usage`` / ``routing_decisions`` read, with how many
+#: reads each may hold. P3.4-B4b moved every one onto ``ledger_view``: nothing is kept. Adding an
+#: entry is refused by review; a pinned function growing a second read fails the count (F95).
+SESSION_END_B4B: dict[str, int] = {}
 
 
 def _violations(source: str, function: str | None) -> list[str]:
@@ -76,32 +71,40 @@ def test_no_surface_module_reads_the_ledger_tables_outside_ledger_view():
         f"ledger_view instead: {bad}")
 
 
-def _violating_functions(source: str) -> set[str | None]:
-    """Innermost function (None = module level) around each private table read."""
-    found: set[str | None] = set()
+def _private_read_counts(source: str) -> dict[str | None, int]:
+    """Private table reads per innermost function (None = module level)."""
+    found: dict[str | None, int] = {}
 
     def walk(node, fn):
         for child in ast.iter_child_nodes(node):
             inner = child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else fn
             if isinstance(child, ast.Constant) and isinstance(child.value, str) \
                     and _TABLE_READ.search(child.value):
-                found.add(inner)
+                found[inner] = found.get(inner, 0) + len(_TABLE_READ.findall(child.value))
             if isinstance(child, ast.Name) and child.id in _TABLE_NAME_REF:
-                found.add(inner)
+                found[inner] = found.get(inner, 0) + 1
             walk(child, inner)
 
     walk(ast.parse(source), None)
     return found
 
 
-def test_session_end_private_reads_are_exactly_the_named_b4b_list():
-    """The rest of session-end is outside SCOPE only because B4b has not moved those scans."""
-    found = _violating_functions((SRC / "hooks" / "session-end.py").read_text(encoding="utf-8"))
-    assert found, "the scan found no private read in session-end: it is vacuous or B4b is done"
-    assert found == set(SESSION_END_B4B), (
-        f"new private reads: {sorted(map(str, found - SESSION_END_B4B))}; "
-        f"already moved (shrink SESSION_END_B4B): {sorted(SESSION_END_B4B - found)}")
-    assert _violating_functions("def f():\n    return 'SELECT 1 FROM usage'\n") == {"f"}
+def test_session_end_private_reads_are_exactly_the_pinned_counts():
+    """Per function, not per name: a new read inside a pinned function is refused (F95)."""
+    found = _private_read_counts((SRC / "hooks" / "session-end.py").read_text(encoding="utf-8"))
+    assert found == SESSION_END_B4B, (
+        f"private reads differ from the pinned counts: found {found}, pinned {SESSION_END_B4B}")
+
+
+def test_the_count_pin_sees_a_second_read_in_a_pinned_function():
+    """Anti-vacuity for the ratchet: the old name-set check passed a second read in the same function."""
+    one = "def f():\n    return 'SELECT 1 FROM usage'\n"
+    two = "def f():\n    a = 'SELECT 1 FROM usage'\n    return a + ' JOIN (SELECT 2 FROM routing_decisions)'\n"
+    assert _private_read_counts(one) == {"f": 1}
+    assert _private_read_counts(two) == {"f": 2}
+    assert _private_read_counts("X = 'SELECT 1 FROM usage'\n") == {None: 1}
+    assert _private_read_counts("def f():\n    return _LEGACY_TABLE\n") == {"f": 1}
+    assert _private_read_counts("def f():\n    return 1\n") == {}
 
 
 def test_the_lint_finds_a_violation_and_the_one_place_that_may_read():
@@ -152,9 +155,26 @@ def test_surfaces_flagged_for_ledger_view():
     assert {"cli_status_premium", "terminal_session_summary", "cli_kpi_o1",
             "mcp_llm_savings"} <= flagged
     # part B: the hooks whose figures come from ledger_view (B2 statusline, B3 status-bar, B4
-    # session-end Stop). The session-end headline is a private scan until B4b, so it is NOT flagged.
-    assert {"statusline_segments", "hook_status_bar", "hook_session_end_cumulative"} <= flagged
-    assert "hook_session_end_headline" not in flagged
+    # session-end Stop, B4b the session-end headline's rows).
+    assert {"statusline_segments", "hook_status_bar", "hook_session_end_cumulative",
+            "hook_session_end_headline"} <= flagged
+
+
+def test_flagged_hook_surfaces_point_at_a_named_function_that_exists():
+    """rv-618: ``session-end.py:985`` was off by two lines within a day. A flagged hook surface
+    names its function (``file:function``) and the function must exist in that file."""
+    from llm_router.savings import SURFACES
+
+    named = {"hook_session_end_headline": "_net_session_line",
+             "hook_session_end_cumulative": "_compute_ledger_aggregates",
+             "statusline_segments": "_ledger"}
+    by_id = {s.id: s for s in SURFACES}
+    for sid, fn in named.items():
+        rel, _, ref = by_id[sid].where.partition(":")
+        assert ref == fn, f"{sid}: {by_id[sid].where!r} should name {fn}"
+        tree = ast.parse((SRC / rel).read_text(encoding="utf-8"))
+        defs = {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        assert fn in defs, f"{rel} has no function {fn}"
 
 
 def test_named_windows_table():

@@ -489,11 +489,11 @@ SURFACES: tuple[Surface, ...] = (
     Surface("cli_status_premium", "ui/status_premium.py:134", False,
             "dashboard_data.summary -> ledger_view (P3.4-A): production provenance "
             "and the named localtime windows; still not canonical_savings()", ledger_view=True),
-    Surface("hook_session_end_headline", "hooks/session-end.py:985", False,
-            "raw SQL over usage; no provenance filter; 'Net saved' means net "
-            "of SPEND, not of routing overhead; still a private scan in the detached child "
-            "(P3.4-B4b moves it onto ledger_view)"),
-    Surface("hook_session_end_cumulative", "hooks/session-end.py:2514", False,
+    Surface("hook_session_end_headline", "hooks/session-end.py:_net_session_line", False,
+            "the session's rows come from ledger_view.session_usage_rows (P3.4-B4b; the session "
+            "id's rows, else since session start), printed with n; 'Net saved' means net "
+            "of SPEND, not of routing overhead; still not canonical_savings()", ledger_view=True),
+    Surface("hook_session_end_cumulative", "hooks/session-end.py:_compute_ledger_aggregates", False,
             "the Stop's cached aggregates: the 24h and today windows embed ledger_view."
             "LedgerWindow (P3.4-B4), lifetime is dashboard_data.query_window -> ledger_view; "
             "still not canonical_savings()", ledger_view=True),
@@ -504,7 +504,7 @@ SURFACES: tuple[Surface, ...] = (
             "D:/W:/M: from ledger_view.window_summary (P3.4-B3), local-time windows, each "
             "with n and window; signed, n/a when unknown; still not canonical_savings()",
             ledger_view=True),
-    Surface("statusline_segments", "statusline_segments.py:260", False,
+    Surface("statusline_segments", "statusline_segments.py:_ledger", False,
             "the statusline's mix and money come from ledger_view.window_summary "
             "(P3.4-B2, D-218: session for the mix, today for money); still not "
             "canonical_savings()", ledger_view=True),

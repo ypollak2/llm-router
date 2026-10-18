@@ -87,18 +87,6 @@ async def test_other_readers_exclude_error_and_cache_rows(cache_env, monkeypatch
     assert len(got) == 6
 
 
-def test_session_end_hook_predicate_equals_the_shared_one():
-    root = Path(__file__).resolve().parent.parent
-    for rel in ("hooks/session-end.py", "src/llm_router/hooks/session-end.py"):
-        text = (root / rel).read_text()
-        ns: dict = {}
-        line = next(i for i, ln in enumerate(text.splitlines()) if ln.startswith("_REAL_DECISION = "))
-        block = "\n".join(text.splitlines()[line:line + 2])
-        exec(block, ns)
-        assert ns["_REAL_DECISION"] == SQL_REAL_DECISION, rel
-
-
-@pytest.mark.asyncio
 async def test_feedback_without_an_id_lands_on_the_latest_real_decision(cache_env):
     from llm_router import cost
 
