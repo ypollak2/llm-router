@@ -149,21 +149,27 @@ def enqueue_for_grading(
     if not judge_sampler.pick(door):
         return False
 
+    from llm_router import judge_hygiene
+    text = judge_hygiene.prepare(prompt, response)
+    if text is None:
+        return False  # secret or unredactable text: the whole entry is skipped, recorded without text
     entry = {
         "door": judge_sampler.normalize_door(door),
         "routing_decision_id": routing_decision_id,
-        "prompt": prompt,
-        "response": response,
+        "prompt": text[0],
+        "response": text[1],
         "task_type": task_type,
         "answering_model": answering_model,
         "queued_at": time.time(),
     }
     try:
         path = _queue_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a") as f:
-            f.write(json.dumps(entry) + "\n")
-        _enforce_queue_cap(path)
+        try:
+            size_before = path.stat().st_size
+        except FileNotFoundError:
+            size_before = 0
+        judge_hygiene.append_private(path, [json.dumps(entry)])
+        _enforce_queue_cap(path, size_before)
         return True
     except Exception as exc:
         from llm_router import failopen
@@ -187,32 +193,43 @@ def _queue_max_entries() -> int:
         return _DEFAULT_QUEUE_MAX_ENTRIES
 
 
-def _enforce_queue_cap(path) -> int:
-    """Keep at most `_queue_max_entries()` newest lines in the queue file.
+#: A queue file this small is checked on every enqueue (reading it costs well under
+#: a millisecond); a larger one only when an append crosses a multiple of the stride.
+#: Size comes from one ``stat``; the queue is never re-read per enqueue on the hook
+#: path. Between checks the queue can overshoot the entry cap by at most a stride.
+_EXACT_CHECK_BYTES = 64 * 1024
+_CHECK_STRIDE_BYTES = 256 * 1024
+
+
+def _enforce_queue_cap(path, size_before: int = 0) -> int:
+    """Keep at most `_queue_max_entries()` newest lines, and drop expired ones.
 
     Drops the OLDEST entries first — a queue nobody has drained in a while
     should still prefer grading recent traffic once something finally does
-    drain it. Runs on every enqueue (not just at drain time) so growth stays
-    bounded even if nothing ever drains the queue.
+    drain it. Runs at enqueue time (not just at drain time) so growth stays
+    bounded even if nothing ever drains the queue; the same pass physically
+    purges entries past the retention bound (``judge_hygiene.purge_expired``).
 
     Never raises — a failure here must not break the enqueue that triggered
-    it. Returns the number of entries dropped (0 if already within cap).
+    it. Returns the number of entries dropped for the cap (0 if within cap or
+    not checked this time).
     """
     cap = _queue_max_entries()
     if cap <= 0:
         return 0
     dropped = 0
     try:
+        size = path.stat().st_size
+        if size > _EXACT_CHECK_BYTES and size_before // _CHECK_STRIDE_BYTES == size // _CHECK_STRIDE_BYTES:
+            return 0
+        from llm_router import judge_hygiene
+        judge_hygiene.purge_expired(path)
         with open(path) as f:
             lines = [line for line in f.readlines() if line.strip()]
         if len(lines) <= cap:
             return 0
         dropped = len(lines) - cap
-        kept = lines[-cap:]
-        tmp_path = f"{path}.capping.{os.getpid()}.{time.monotonic_ns()}"
-        with open(tmp_path, "w") as f:
-            f.writelines(kept)
-        os.replace(tmp_path, str(path))
+        judge_hygiene.rewrite_private(path, lines[-cap:])
     except Exception as exc:
         from llm_router import failopen
         failopen.record("CHZ-FO-JUDGE-QUEUE-CAP", exc)
@@ -392,10 +409,8 @@ def _requeue(path, items: list[dict]) -> None:
     if not items:
         return
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a") as f:
-            for item in items:
-                f.write(json.dumps(item) + "\n")
+        from llm_router import judge_hygiene
+        judge_hygiene.append_private(path, [json.dumps(item) for item in items])
     except Exception as exc:
         from llm_router import failopen
         failopen.record("CHZ-FO-JUDGE-QUEUE-WRITE", exc)
@@ -411,22 +426,37 @@ async def _grade_one(item: dict) -> str:
     """
     answering_model = item.get("answering_model") or ""
     judge_model = _select_judge_model(answering_model)
-    from llm_router import judge_select, judge_sampler
+    from llm_router import judge_select, judge_sampler, judge_ledger
     judge_kind = judge_select.kind_of(judge_model)
 
-    def _record(status: str, score: float | None = None) -> str:
+    def _record(status: str, score: float | None = None, ledger: dict | None = None) -> str:
+        shown = ledger["outcome"] if ledger and status == "ungraded" else status
         judge_sampler.record_result(
             door=item.get("door"), answering_model=answering_model,
             judge_model=judge_model, judge_kind=judge_kind,
-            status=judge_select.STATUS_NO_JUDGE if status == "ungraded" else status,
+            status=judge_select.STATUS_NO_JUDGE if shown == "ungraded" else shown,
             score=score,
         )
+        if ledger is not None:
+            judge_ledger.record(
+                door=item.get("door"), answering_model=answering_model, judge_model=judge_model,
+                judge_kind=judge_kind, tokens=ledger.get("tokens"), cost_usd=ledger.get("cost_usd"),
+                outcome=ledger["outcome"],
+            )
         return status
 
     # Independence guard on canonical identity (name, tag, digest, family); it
     # refuses on doubt, even if selection were bypassed or misconfigured.
     if judge_model is None or not judge_select.independent(answering_model, judge_model):
         return _record("ungraded")
+
+    text_len = len(item.get("prompt", "") or "") + len(item.get("response", "") or "")
+    if judge_kind == judge_select.KIND_SUBSCRIPTION:
+        # The only judge that spends quota and sends a local answer's prompt off
+        # the machine: privacy flag, quota reading and daily caps all fail closed.
+        stop = judge_ledger.admit_haiku(time.time(), est_tokens=text_len // 4)
+        if stop is not None:
+            return _record("ungraded", ledger={"outcome": stop})
 
     outcome: dict = {}
     ok = await _evaluate_background(
@@ -437,7 +467,10 @@ async def _grade_one(item: dict) -> str:
         model=judge_model,
         outcome=outcome,
     )
-    return _record("graded" if ok else "failed", outcome.get("score"))
+    status = "graded" if ok else "failed"
+    return _record(status, outcome.get("score"), ledger={
+        "outcome": status, "tokens": outcome.get("tokens"), "cost_usd": outcome.get("cost_usd"),
+    })
 
 
 async def drain_queue(batch_size: int = 50, time_budget_s: float = 20.0) -> dict:
@@ -456,6 +489,8 @@ async def drain_queue(batch_size: int = 50, time_budget_s: float = 20.0) -> dict
     """
     path = _queue_path()
     _recover_orphaned_claims(path)
+    from llm_router import judge_hygiene
+    judge_hygiene.purge_expired(path)
     items = _claim_queue(path)
     to_process, overflow = items[:batch_size], items[batch_size:]
     _requeue(path, overflow)
@@ -509,17 +544,21 @@ async def _evaluate_background(
     try:
         judge_prompt = _build_judge_prompt(prompt, response, task_type)
 
-        judge_response = await call_llm(
-            model=model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": judge_prompt,
-                }
-            ],
-            temperature=0.0,  # Deterministic scoring
-            max_tokens=50,  # Score is short JSON
-        )
+        from llm_router import judge_ledger
+        with judge_ledger.no_proxy_env():  # a judge call never loops through the local proxy
+            judge_response = await call_llm(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": judge_prompt,
+                    }
+                ],
+                temperature=0.0,  # Deterministic scoring
+                max_tokens=50,  # Score is short JSON
+            )
+        if outcome is not None:
+            outcome.update(_spend_of(judge_response))
 
         # Parse score from response
         score = _parse_judge_score(judge_response.content)
@@ -540,6 +579,22 @@ async def _evaluate_background(
         from llm_router import failopen
         failopen.record("CHZ-FO-JUDGE-EVAL", exc)
         return False
+
+
+def _spend_of(resp) -> dict:
+    """tokens and cost_usd of one judge call; None where the response does not say.
+
+    A reported cost of 0 is kept (a measured local call is 0). A missing or
+    non-numeric field is unknown (None), never 0.
+    """
+    def _num(v):
+        return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+    tin, tout = _num(getattr(resp, "input_tokens", None)), _num(getattr(resp, "output_tokens", None))
+    return {
+        "tokens": int(tin + tout) if tin is not None and tout is not None else None,
+        "cost_usd": _num(getattr(resp, "cost_usd", None)),
+    }
 
 
 def _build_judge_prompt(prompt: str, response: str, task_type: str) -> str:

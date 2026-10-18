@@ -2,6 +2,7 @@
 """llm-router judge — drain the out-of-band LLM-judge grading queue.
 
 Command: uv run llm-router judge drain [--batch-size N] [--time-budget SECONDS]
+         uv run llm-router judge status
 
 CHZ-JUDGE-QUEUE. The routing hot path only enqueues sampled responses to
 ``~/.llm-router/judge_queue.jsonl`` (``judge.enqueue_for_grading``) — it makes
@@ -41,7 +42,14 @@ def main(argv: list[str] | None = None) -> int:
         help="maximum wall-clock seconds to spend grading (default: 20.0)",
     )
 
+    sub.add_parser("status", help="today's judge calls and tokens against the daily caps")
+
     args = parser.parse_args(argv)
+    if args.action == "status":
+        from llm_router import judge_ledger
+
+        print(judge_ledger.status_text())
+        return 0
     if args.action != "drain":
         parser.print_help(file=sys.stderr)
         return 2

@@ -2958,6 +2958,8 @@ def cmd_kpi(args: list[str]) -> int:
                      help="the daily Haiku Option A watch (PLAN v16 P0.11, D-20) over --since/--until: "
                           "Haiku-decided calls, tier_retry, redo, blind audit and shadow triggers, each "
                           "with its n; exit 1 when a D-20 trigger is not evaluable (the day fails)")
+    ap.add_argument("--judge", action="store_true",
+                     help="P3.1-4: today's judge calls and tokens (Haiku and local) against the daily caps")
     ap.add_argument("--daily", action="store_true",
                      help="P3.3: write the offload row of one closed UTC day (organic / synthetic / other) to "
                           "<state>/daily/<date>.json; idempotent; default date is the last closed UTC day")
@@ -2990,6 +2992,10 @@ def cmd_kpi(args: list[str]) -> int:
                      help="P33: deactivate and remove the scheduler entry written by --daily-install")
     ap.add_argument("--yes", action="store_true", help="with --daily-install: do not ask")
     parsed = ap.parse_args(args)
+    if parsed.judge:
+        from llm_router import judge_ledger
+        print(judge_ledger.status_text())
+        return 0
     if parsed.daily_render_plist:
         from llm_router import daily_schedule
         print(daily_schedule.render_default_plist(), end="")
