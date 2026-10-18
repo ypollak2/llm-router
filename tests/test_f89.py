@@ -59,7 +59,8 @@ def test_lists_are_populated():
 def test_hook_copies_identical_and_version_72():
     assert SHIPPED.read_bytes() == REPO_COPY.read_bytes()
     head = SHIPPED.read_text().splitlines()[1]
-    assert head == "# llm_router-hook-version: 72"
+    assert head.startswith("# llm_router-hook-version: ")
+    assert int(head.rsplit(" ", 1)[1]) >= 72  # F96 bumped to 73; the stamp must only match the constant
     assert f'_THIS_VERSION_LINE = "{head}"' in SHIPPED.read_text()
 
 
