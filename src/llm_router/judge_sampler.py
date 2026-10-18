@@ -161,14 +161,14 @@ def counters() -> dict | None:
 
 def record_result(
     *, door: str | None, answering_model: str, judge_model: str | None,
-    status: str, score: float | None,
+    status: str, score: float | None, judge_kind: str | None = None,
 ) -> None:
     """Append one text-free outcome row to ``judge_results.jsonl``."""
     import time
     row = {
         "ts": time.time(), "door": normalize_door(door),
         "answering_model": answering_model, "judge_model": judge_model,
-        "status": status, "score": score,
+        "judge_kind": judge_kind, "status": status, "score": score,
     }
     try:
         path = paths.state_path("judge_results.jsonl")

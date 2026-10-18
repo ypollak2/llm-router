@@ -131,6 +131,7 @@ async def test_evaluate_background_writes_judge_score(temp_db, monkeypatch):
             response="The answer is 4",
             task_type="query",
             routing_decision_id=decision_id,
+            model="judge-under-test",
         )
 
     # Assert judge_score was written to the DB
@@ -364,7 +365,7 @@ async def test_get_judge_scores_for_model_no_data(temp_db):
     """Test getting judge scores for model with no historical data."""
     scores = await get_judge_scores_for_model("openai/gpt-4o")
     
-    assert scores["avg_score"] == 0.0
+    assert scores["avg_score"] is None
     assert scores["sample_count"] == 0
     assert scores["model"] == "openai/gpt-4o"
 

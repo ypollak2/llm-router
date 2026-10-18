@@ -244,6 +244,9 @@ def _update_discovery_cache(ollama_models: list[dict]) -> None:
             "task_types": ["query", "generate", "analyze", "code"],
             "task_types_assumed": True,
         }
+        # P3.1-3: ranking metadata for judge selection; absent stays absent.
+        from llm_router.judge_select import tag_metadata
+        models[model_id].update({k: v for k, v in tag_metadata(m).items() if v is not None})
 
     cache_data = {
         "cached_at": time.time(),

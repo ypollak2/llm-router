@@ -1503,11 +1503,11 @@ async def llm_quality_guard(days: int = 7) -> str:
         alerts = []
         for model in models:
             scores = await get_judge_scores_for_model(model, days=days)
-            avg_score = scores.get("avg_score", 0.0)
+            avg_score = scores.get("avg_score")  # None = no judged rows, unknown
             sample_count = scores.get("sample_count", 0)
 
             # Determine status
-            if sample_count < 3:
+            if sample_count < 3 or avg_score is None:
                 status = "insufficient"
             elif avg_score >= 0.85:
                 status = "✨ excellent"
@@ -1519,7 +1519,7 @@ async def llm_quality_guard(days: int = 7) -> str:
             else:
                 status = "⚠️  warning"
 
-            score_display = f"{avg_score:.2f}" if sample_count > 0 else "—"
+            score_display = f"{avg_score:.2f}" if avg_score is not None else "—"
             sample_display = str(sample_count) if sample_count > 0 else "—"
 
             lines.append(f"{model:<30} {score_display:<10} {sample_display:<10} {status:<15}")

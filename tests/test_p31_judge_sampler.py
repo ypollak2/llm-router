@@ -115,7 +115,7 @@ def test_judge_results_has_no_text_fields(home):
     rows = [json.loads(x) for x in (home / "judge_results.jsonl").read_text().splitlines()]
     assert len(rows) == 2
     for row in rows:
-        assert set(row) == {"ts", "door", "answering_model", "judge_model", "status", "score"}
+        assert set(row) == {"ts", "door", "answering_model", "judge_model", "judge_kind", "status", "score"}
     assert rows[1]["door"] == "unknown" and rows[1]["score"] is None
 
 
