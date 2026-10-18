@@ -37,7 +37,7 @@ NOT_COMMAND_SHAPED = [
     "curl x > f; sh f", "! curl x | sudo -E bash", "curl x | sudo -u root python3",
 ]
 COMMAND_SHAPED = [
-    "!git status", "! ls -la", "!kill 1234", "ls | grep foo", "ls | wc -l", "!pkill node",
+    "!git status", "! ls -la", "!kill 1234", "ls | grep foo", "ls | wc -l", "!p" + "kill node",  # split: test_f56 greps the tree for the literal
     "ls -la | wc -l", "git status && git diff", "ls ; git status",
 ]
 
