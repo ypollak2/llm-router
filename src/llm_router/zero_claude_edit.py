@@ -575,7 +575,10 @@ class _Prefetch:
     def _run(self, fn, args, kwargs) -> None:
         try:
             self._box.append(fn(*args, **kwargs))
-        except Exception:                                        # noqa: BLE001
+        except Exception as exc:                                 # noqa: BLE001
+            from llm_router import failopen as _fo
+
+            _fo.record("CHZ-FO-ZCE-PREFETCH", exc)               # never raises
             self._box.append(None)
 
     def result(self):

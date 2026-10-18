@@ -231,6 +231,7 @@ def test_a_tool_heavy_tail_scans_each_byte_once_and_stops_at_the_cap(hook, tmp_p
     """F64: ~100 MB of tool results after the last prose turns used to be re-read and re-parsed at
     every window doubling (247 ms session_io at a 100 MB tool-heavy transcript, measured). Now the
     scan is one backward pass over at most ``_TRANSCRIPT_SCAN_CAP_BYTES``."""
+    monkeypatch.setattr(hook, "_TRANSCRIPT_SCAN_CAP_BYTES", 8 * 1024 * 1024)  # small cap keeps it fast
     p = tmp_path / "huge-tools.jsonl"
     with p.open("w") as fh:
         for i in range(6):
@@ -822,3 +823,32 @@ def test_an_unwritable_counter_sidecar_is_counted_and_the_answer_is_still_right(
     monkeypatch.setattr(routing_report.os, "replace", boom)
     assert routing_report.draft_acceptance(log) == _old_full_scan(log)
     assert seen == ["CHZ-FO-DRAFT-COUNTS-WRITE"]
+
+
+# F64 review (owner 2026-10-18): the scan cap defaults to 32 MiB, is configurable, and a hit
+# is marked on the latency row so truncated context stays measurable.
+def test_scan_cap_default_and_override(hook, monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_TRANSCRIPT_SCAN_CAP_MB", raising=False)
+    assert hook._scan_cap_bytes() == 32 * 1024 * 1024
+    for raw, mb in (("64", 64), ("0", 1), ("5000", 1024), ("junk", 32), ("", 32)):
+        monkeypatch.setenv("LLM_ROUTER_TRANSCRIPT_SCAN_CAP_MB", raw)
+        assert hook._scan_cap_bytes() == mb * 1024 * 1024, raw
+
+
+def test_a_cap_hit_is_marked_on_the_latency_row(hook, tmp_path, monkeypatch):
+    marks = []
+    monkeypatch.setattr(hook_latency, "add_phase", lambda name, ms: marks.append((name, ms)))
+    monkeypatch.setattr(hook, "_TRANSCRIPT_SCAN_CAP_BYTES", 1024 * 1024)
+    p = tmp_path / "capped.jsonl"
+    with p.open("w") as fh:
+        fh.write(_line("user", "old question") + "\n")
+        row = _line("user", [{"type": "tool_result", "tool_use_id": "x", "content": "z" * 60_000}]) + "\n"
+        for _ in range(40):  # ~2.4 MB of tool output, more than the 1 MiB cap
+            fh.write(row)
+    assert hook._read_cc_turns(str(p), 7) == []
+    assert ("cc_scan_capped", 0.0) in marks
+    marks.clear()
+    q = tmp_path / "small.jsonl"
+    q.write_text(_line("user", "q") + "\n" + _line("assistant", [{"type": "text", "text": "a"}]) + "\n")
+    hook._read_cc_turns(str(q), 7)  # whole file read, cap not hit
+    assert marks == []

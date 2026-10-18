@@ -3664,7 +3664,18 @@ _CC_TURNS_NEEDED = max(_ASSISTANT_PERSIST_TURNS, 6, 2) + 1
 #: session (F64, measured: 247 ms mean at a 100 MB tool-heavy transcript, flat 3 ms at
 #: 100 MB of prose). History is best-effort context: turns older than this much tool noise
 #: are dropped, not waited for.
-_TRANSCRIPT_SCAN_CAP_BYTES = 8 * 1024 * 1024
+def _scan_cap_bytes() -> int:
+    """LLM_ROUTER_TRANSCRIPT_SCAN_CAP_MB (1..1024), default 32 MiB: measured ~0.86 ms per MiB
+    when the cap is hit (rv-589, N=20: 32 MiB p50 27.5 ms), so 32 MiB keeps the worst case far
+    inside the auto-route budget while covering long silent tool runs."""
+    try:
+        mb = int(os.environ.get("LLM_ROUTER_TRANSCRIPT_SCAN_CAP_MB", "") or 32)
+    except ValueError:
+        mb = 32
+    return max(1, min(mb, 1024)) * 1024 * 1024
+
+
+_TRANSCRIPT_SCAN_CAP_BYTES = _scan_cap_bytes()
 #: A line that carries one of these block types and no ``"text"`` token cannot hold a text
 #: block (``_extract_turn_text`` only keeps ``type == "text"`` blocks), so it is skipped
 #: before the JSON parse. A plain-string user turn has none of them unescaped.
@@ -3738,6 +3749,15 @@ def _read_cc_turns(transcript_path: str, need: int = _CC_TURNS_NEEDED) -> list[d
                         if len(found) >= need:
                             found.reverse()
                             return found
+            if pos > 0:
+                # Cap hit before `need` turns: mark it on the latency row (0 ms, so no time is
+                # double-counted) so how often context is truncated stays measurable.
+                try:
+                    from llm_router.hook_latency import add_phase as _hl_add_phase
+                except ImportError:  # llm_router not importable on this host: no recorder
+                    _hl_add_phase = None
+                if _hl_add_phase is not None:
+                    _hl_add_phase("cc_scan_capped", 0.0)  # never raises
             found.reverse()
             return found
     except Exception:  # noqa: BLE001 -- OSError and anything odd: history is best-effort
