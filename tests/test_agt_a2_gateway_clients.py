@@ -837,8 +837,8 @@ def test_a_rate_limit_behind_a_wrapper_is_429(base, fake, monkeypatch):
         try:
             raise RateLimitError()
         except RateLimitError as inner:
-            raise ValueError("wrapped") from inner
-    except ValueError as wrapped:
+            raise LookupError("wrapped") from inner
+    except LookupError as wrapped:
         _fail_route(monkeypatch, wrapped)
     plain = {k: v for k, v in _body("/v1/messages").items() if k != "stream"}
     assert httpx.post(base + "/v1/messages", json=plain, timeout=30).status_code == 429
