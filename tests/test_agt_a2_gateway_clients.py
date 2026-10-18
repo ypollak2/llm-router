@@ -762,7 +762,9 @@ def test_stream_sends_keep_alive_comments_while_the_model_works(base, fake, monk
     first_data = next(i for i, ln in enumerate(lines) if ln.startswith("data:"))
     assert any(ln == ": keep-alive" for ln in lines[:first_data]), lines[:first_data + 1]
     assert "data: [DONE]" in lines
-    assert FINAL in "".join(lines)
+    deltas = [json.loads(ln[5:])["choices"][0]["delta"].get("content") or ""
+              for ln in lines if ln.startswith("data:") and ln != "data: [DONE]"]
+    assert "".join(deltas) == FINAL
 
 
 def test_a_call_that_finished_before_the_disconnect_keeps_its_success_row(base, fake):
