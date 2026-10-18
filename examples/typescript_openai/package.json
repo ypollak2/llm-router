@@ -1,0 +1,9 @@
+{
+  "name": "llm-router-example-typescript-openai",
+  "private": true,
+  "type": "module",
+  "description": "The official openai TypeScript client pointed at the llm-router gateway.",
+  "dependencies": {
+    "openai": "7.38.0"
+  }
+}

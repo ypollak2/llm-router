@@ -141,6 +141,8 @@ tests/hook_rendering/
 # The opt-in per-call proxy: user-facing enablement page, and the spike that
 # is its design record (the numbers docs/proxy.md relies on).
 !/docs/proxy.md
+# A.6: framework/door integration guide (links every examples/ dir; read by tests/test_a6_examples_wired.py).
+!/docs/integration.md
 !/docs/spikes/
 /docs/spikes/*
 !/docs/spikes/per-call-proxy-2026-09-28.md
