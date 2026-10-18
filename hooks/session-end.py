@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 37
+# llm_router-hook-version: 38
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -2588,14 +2588,40 @@ def _read_ledger_cache(now: float | None = None) -> dict:
         return {}
 
 
+def _stale_same_day_executed() -> tuple[bool, int | None]:
+    """(found, count) from a cache that ``_read_ledger_cache`` rejected only for age.
+    Found needs a readable cache of this version, written today, holding a valid
+    ``executed_24h`` (None = the child saw no data, kept as unknown). Missing,
+    corrupt, other-day or other-version caches are not found. Never raises."""
+    try:
+        with open(_ledger_cache_path(), encoding="utf-8") as f:
+            d = json.load(f)
+        if not isinstance(d, dict) or d.get("v") != _LEDGER_CACHE_VERSION:
+            return (False, None)
+        if d.get("day") != _local_day() or "executed_24h" not in d:
+            return (False, None)
+        v = d["executed_24h"]
+        if v is None or (isinstance(v, int) and not isinstance(v, bool) and v >= 0):
+            return (True, v)
+    except Exception:  # noqa: BLE001 -- unreadable cache: the caller goes live
+        pass
+    return (False, None)
+
+
 def _executed_24h() -> int | None:
     """Executed routes in the last 24 h for the one-line Stop: the child's cached
-    count when it has one, else one live ``executed_routes`` call (a first Stop, a
-    stale cache). None = no data. Never raises."""
-    if _STOP_LEDGER is not _LEDGER_LIVE and "executed_24h" in _STOP_LEDGER:  # type: ignore[operator]
-        v = _STOP_LEDGER["executed_24h"]  # type: ignore[index]
-        if v is None or (isinstance(v, int) and not isinstance(v, bool) and v >= 0):
-            return v
+    count when it has one; a stale cache from the same local day next (the count
+    is a day-scale figure, and a live call costs up to ~0.5 s on the Stop); one
+    live ``executed_routes`` call only when there is no usable cache (missing,
+    corrupt, another day or version). None = no data. Never raises."""
+    if _STOP_LEDGER is not _LEDGER_LIVE:
+        if "executed_24h" in _STOP_LEDGER:  # type: ignore[operator]
+            v = _STOP_LEDGER["executed_24h"]  # type: ignore[index]
+            if v is None or (isinstance(v, int) and not isinstance(v, bool) and v >= 0):
+                return v
+        found, stale = _stale_same_day_executed()
+        if found:
+            return stale
     try:
         from llm_router.routing_report import executed_routes
 
@@ -2761,10 +2787,18 @@ def _claim_background_stop_work(now: float | None = None) -> bool:
         return False
 
 
+def _detached_spawn_disabled() -> bool:
+    """LLM_ROUTER_NO_DETACHED_SPAWN: no detached child may start (set by the test suite, F44)."""
+    flag = os.environ.get("LLM_ROUTER_NO_DETACHED_SPAWN", "")
+    return bool(flag) and flag.lower() not in ("0", "off", "false", "no")
+
+
 def _spawn_background_stop_work() -> None:
     """Detach the child, at most once per ``_STOP_BG_CLAIM_S``. Uses
     ``statusline_tick._spawn_detached`` (fork + execv, no new subprocess site).
     Never raises: a failed spawn costs this turn's usage refresh, never the Stop."""
+    if _detached_spawn_disabled():
+        return  # before the claim: a refused spawn must not use up the window
     if not _claim_background_stop_work():
         return
     try:
@@ -2792,6 +2826,28 @@ class _Laps:
         if self._open is not None:
             self._open.__exit__(None, None, None)
             self._open = None
+
+
+def _write_text_atomic(path, text: str) -> None:
+    """Write ``text`` to ``path`` via a tmp file in the same directory and
+    ``os.replace``, so a reader sees the old file or the new one, never half.
+    The tmp file is removed if the write or replace fails; the error propagates."""
+    path = os.fspath(path)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError as _exc:
+                try:
+                    from llm_router import failopen as _fo
+                    _fo.record("CHZ-FO-SUMMARY-TMP-REMOVE", _exc)
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 def _render_rich_summary(session_start, paid_rows, cc_rows, free_rows, tools,
@@ -3016,7 +3072,7 @@ def _render_rich_summary(session_start, paid_rows, cc_rows, free_rows, tools,
     try:
         _llm_router_dir = _router_home()
         _llm_router_dir.mkdir(parents=True, exist_ok=True)
-        (_llm_router_dir / "last_summary.ansi").write_text(colored_output, encoding="utf-8")
+        _write_text_atomic(_llm_router_dir / "last_summary.ansi", colored_output)
     except Exception:
         pass
     # systemMessage gets plain text (ANSI codes stripped) for Claude Code UI.
@@ -3148,7 +3204,10 @@ def main() -> None:
     _laps.next("render")
     final_summary_output = ""
 
-    if not _full:
+    if _stop_hook_mode() == "disabled":
+        # Nothing is emitted in this mode: no box, so no executed_routes call.
+        final_summary_output = ""
+    elif not _full:
         # F65: the line is built from the executed count, the quota and the lines
         # appended below, never from the rest of the box: skip the box.
         final_summary_output = _cheap_summary_box(current)
