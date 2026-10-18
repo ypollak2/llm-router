@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 40
+# llm_router-hook-version: 41
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -1833,15 +1833,20 @@ def _drain_judge_queue_bg() -> None:
     reachable directly via `llm-router judge drain` for anyone who wants to
     run it on a schedule instead of piggybacking on session start.
 
-    Opt-out: LLM_ROUTER_JUDGE_AUTODRAIN=0.
+    Opt-out: LLM_ROUTER_JUDGE_AUTODRAIN=0. Also skipped while the benchmark marker exists, when the queue
+    is empty, or when either trigger claimed a drain in the last 30 minutes (F101).
     """
-    if os.environ.get("LLM_ROUTER_JUDGE_AUTODRAIN", "").strip().lower() in ("0", "off", "false", "no"):
-        return
-    script = (
-        "import asyncio; from llm_router.judge import drain_queue; "
-        "asyncio.run(drain_queue())"
-    )
     if _detached_spawn_disabled():
+        return
+    try:
+        # F101: one guard for both triggers (opt-out, empty queue, benchmark marker, shared 30 min claim).
+        from llm_router import judge_view as _jv
+
+        if not _jv.drain_due():
+            return
+        script = _jv.DRAIN_SCRIPT  # niced like the session-end trigger
+    except Exception as exc:  # noqa: BLE001 - no guard answer means no drain; never block session start
+        print(f"llm-router: judge drain guard failed ({type(exc).__name__}); no drain", file=sys.stderr)
         return
     try:
         subprocess.Popen(

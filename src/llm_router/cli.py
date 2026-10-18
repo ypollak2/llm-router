@@ -107,7 +107,7 @@ Usage:
     llm-router probe            — probe provider reachability
     llm-router benchmark        — run the routing benchmark suite
     llm-router migrate          — migrate state from an older layout
-    llm-router judge drain      — grade queued responses with an independent judge model
+    llm-router judge drain      — grade queued responses with an independent judge model (--force: drain during a benchmark)
     llm-router judge status     — today's judge calls and tokens against the daily caps
 
   Every command above is dispatchable; `tests/test_f38_every_command_is_documented.py`

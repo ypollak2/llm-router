@@ -482,7 +482,7 @@ async def _grade_one(item: dict) -> str:
             judge_ledger.release_reservation(rid, outcome.get("tokens"))
 
 
-async def drain_queue(batch_size: int = 50, time_budget_s: float = 20.0) -> dict:
+async def drain_queue(batch_size: int = 50, time_budget_s: float = 20.0, *, force: bool = False) -> dict:
     """Drain the judge queue out of band, grading with an independent judge.
 
     Bounded on two axes so this can safely run detached from session start
@@ -493,9 +493,16 @@ async def drain_queue(batch_size: int = 50, time_budget_s: float = 20.0) -> dict
     past the batch size, or not reached before the time budget — is appended
     back to the queue for the next drain.
 
+    F101: while the benchmark marker (``daily_offload.bench_marker()``) exists, nothing is claimed and no
+    model is called; the result carries ``deferred="benchmark active"``. ``force=True`` overrides.
+
     Returns:
         dict with counts: graded, ungraded, failed, requeued.
     """
+    if not force:
+        from llm_router import judge_view
+        if judge_view.bench_active():
+            return {"graded": 0, "ungraded": 0, "failed": 0, "requeued": 0, "deferred": "benchmark active"}
     path = _queue_path()
     _recover_orphaned_claims(path)
     from llm_router import judge_hygiene
