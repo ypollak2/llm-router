@@ -107,7 +107,7 @@ _COMPLEXITY_TO_PROFILE: dict[Complexity, RoutingProfile] = {
 log = get_logger("llm_router.router")
 
 
-class NoRoutableModelsError(ValueError):
+class NoRoutableModelsError(RouterInputError):
     """F25 / D-170: the candidate chain for ``task_type``/``profile`` came out empty, so nothing was
     attempted. A ``ValueError`` (every existing handler still catches it) that carries the chain's
     name, so a door can refuse with its own reason instead of a generic ``error_exception``."""
