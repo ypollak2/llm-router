@@ -167,3 +167,15 @@ def test_own_url_check_is_cheap(hook, repo):
     for _ in range(200):
         hook._is_coordination_task(url)
     assert (time.perf_counter() - t0) / 200 < 0.005
+
+
+@pytest.mark.timing
+def test_remote_url_regex_is_linear_on_a_pathological_config(hook):
+    # rv-601: `^\s*` under MULTILINE also ate newlines, so 64 KB of blank lines
+    # took ~7.8 s on the hook's sync path; the scan reads at most 64 KiB.
+    blob = "\n" * 65536
+    t0 = time.perf_counter()
+    assert list(hook._REMOTE_URL_RE.finditer(blob)) == []
+    assert time.perf_counter() - t0 < 0.5
+    cfg = '[remote "origin"]\n\turl = git@github.com:owner/repo.git\n'
+    assert [(m["o"], m["r"]) for m in hook._REMOTE_URL_RE.finditer(cfg)] == [("owner", "repo")]

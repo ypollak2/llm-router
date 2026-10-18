@@ -1815,7 +1815,8 @@ _OWN_URL_RE = re.compile(
     re.IGNORECASE,
 )
 _REMOTE_URL_RE = re.compile(
-    r"^\s*url\s*=\s*\S*github\.com[:/](?P<o>[\w.-]+)/(?P<r>[\w.-]+?)(?:\.git)?/?\s*$",
+    # [ \t]* not \s*: \s also eats newlines, which made a blank-line config quadratic (rv-601)
+    r"^[ \t]*url[ \t]*=[ \t]*\S*github\.com[:/](?P<o>[\w.-]+)/(?P<r>[\w.-]+?)(?:\.git)?/?[ \t]*$",
     re.IGNORECASE | re.MULTILINE,
 )
 _OWN_REMOTES_CACHE: dict = {}
