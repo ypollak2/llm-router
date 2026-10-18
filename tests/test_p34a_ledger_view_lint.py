@@ -6,8 +6,10 @@ routing_decisions`` with its own window, provenance filter and row exclusions; t
 question got several answers. This lint keeps the three rewired surfaces and their delegates from
 growing a private read again. SCOPE (part A): ``dashboard_data.query_window`` / ``summary``,
 ``routing_report.executed_routes``, ``cost.get_savings_by_period``, all of
-``observability/summary.py`` and ``commands/kpi.py``. B2 adds ``statusline_segments.py``, B3 the status-bar hook; the
-session-end hook joins in B4.
+``observability/summary.py`` and ``commands/kpi.py``. B2 adds ``statusline_segments.py``, B3 the status-bar hook;
+B5 adds the session-end functions B4 migrated. The session-end functions that still scan the tables
+(the detached child's private scans, P3.4-B4b) are pinned by name in ``SESSION_END_B4B``: a new private
+read there fails the allow-list test instead of passing unscoped.
 """
 from __future__ import annotations
 
@@ -32,7 +34,18 @@ SCOPE = (
     ("commands/kpi.py", None),
     ("statusline_segments.py", None),          # B2: the statusline's mix and money (D-218)
     ("hooks/status-bar.py", None),             # B3: the status-bar's D:/W:/M: and session calls
+    ("hooks/session-end.py", "_compute_ledger_aggregates"),   # B4/B5: the Stop's 24h and today windows
+    ("hooks/session-end.py", "_ledger_compact"),              # B4/B5: the Stop's compact figures
 )
+
+#: P3.4-B4b (not done in B5): the session-end functions that still read ``usage`` /
+#: ``routing_decisions`` themselves. They run in the detached child (inline only in "full" mode).
+#: The allow-list is exact: removing a function from it is the B4b work; adding one is refused.
+SESSION_END_B4B = frozenset({
+    "_lifetime_saved", "_query_classifier_overhead", "_query_daily_cache_trend",
+    "_query_router_efficiency", "_query_session_complexity_breakdown", "_query_session_data",
+    "_query_session_metrics", "_render_rich_summary",
+})
 
 
 def _violations(source: str, function: str | None) -> list[str]:
@@ -61,6 +74,34 @@ def test_no_surface_module_reads_the_ledger_tables_outside_ledger_view():
     assert not bad, (
         "private reads of usage / routing_decisions on a ledger_view surface; call "
         f"ledger_view instead: {bad}")
+
+
+def _violating_functions(source: str) -> set[str | None]:
+    """Innermost function (None = module level) around each private table read."""
+    found: set[str | None] = set()
+
+    def walk(node, fn):
+        for child in ast.iter_child_nodes(node):
+            inner = child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else fn
+            if isinstance(child, ast.Constant) and isinstance(child.value, str) \
+                    and _TABLE_READ.search(child.value):
+                found.add(inner)
+            if isinstance(child, ast.Name) and child.id in _TABLE_NAME_REF:
+                found.add(inner)
+            walk(child, inner)
+
+    walk(ast.parse(source), None)
+    return found
+
+
+def test_session_end_private_reads_are_exactly_the_named_b4b_list():
+    """The rest of session-end is outside SCOPE only because B4b has not moved those scans."""
+    found = _violating_functions((SRC / "hooks" / "session-end.py").read_text(encoding="utf-8"))
+    assert found, "the scan found no private read in session-end: it is vacuous or B4b is done"
+    assert found == set(SESSION_END_B4B), (
+        f"new private reads: {sorted(map(str, found - SESSION_END_B4B))}; "
+        f"already moved (shrink SESSION_END_B4B): {sorted(SESSION_END_B4B - found)}")
+    assert _violating_functions("def f():\n    return 'SELECT 1 FROM usage'\n") == {"f"}
 
 
 def test_the_lint_finds_a_violation_and_the_one_place_that_may_read():
@@ -110,8 +151,10 @@ def test_surfaces_flagged_for_ledger_view():
     flagged = {s.id for s in SURFACES if s.ledger_view}
     assert {"cli_status_premium", "terminal_session_summary", "cli_kpi_o1",
             "mcp_llm_savings"} <= flagged
-    # the hook surfaces are part B: not flagged yet
-    assert not {s.id for s in SURFACES if s.id.startswith("hook_") and s.ledger_view}
+    # part B: the hooks whose figures come from ledger_view (B2 statusline, B3 status-bar, B4
+    # session-end Stop). The session-end headline is a private scan until B4b, so it is NOT flagged.
+    assert {"statusline_segments", "hook_status_bar", "hook_session_end_cumulative"} <= flagged
+    assert "hook_session_end_headline" not in flagged
 
 
 def test_named_windows_table():

@@ -489,16 +489,25 @@ SURFACES: tuple[Surface, ...] = (
     Surface("cli_status_premium", "ui/status_premium.py:134", False,
             "dashboard_data.summary -> ledger_view (P3.4-A): production provenance "
             "and the named localtime windows; still not canonical_savings()", ledger_view=True),
-    Surface("hook_session_end_headline", "hooks/session-end.py:806", False,
+    Surface("hook_session_end_headline", "hooks/session-end.py:985", False,
             "raw SQL over usage; no provenance filter; 'Net saved' means net "
-            "of SPEND, not of routing overhead"),
-    Surface("hook_session_end_cumulative", "hooks/session-end.py:1758", False,
-            "dashboard_data.query_window; unfiltered"),
+            "of SPEND, not of routing overhead; still a private scan in the detached child "
+            "(P3.4-B4b moves it onto ledger_view)"),
+    Surface("hook_session_end_cumulative", "hooks/session-end.py:2514", False,
+            "the Stop's cached aggregates: the 24h and today windows embed ledger_view."
+            "LedgerWindow (P3.4-B4), lifetime is dashboard_data.query_window -> ledger_view; "
+            "still not canonical_savings()", ledger_view=True),
     Surface("hook_session_end_clawcode", "hooks/session-end-clawcode.py:159", False,
             "raw SQL over usage; unfiltered; CLAMPED to >= 0, so it disagrees "
             "with the unclamped headline on the same rows"),
-    Surface("hook_status_bar", "hooks/status-bar.py:332", False,
-            "raw SQL over usage; unfiltered; clamped"),
+    Surface("hook_status_bar", "hooks/status-bar.py:279", False,
+            "D:/W:/M: from ledger_view.window_summary (P3.4-B3), local-time windows, each "
+            "with n and window; signed, n/a when unknown; still not canonical_savings()",
+            ledger_view=True),
+    Surface("statusline_segments", "statusline_segments.py:260", False,
+            "the statusline's mix and money come from ledger_view.window_summary "
+            "(P3.4-B2, D-218: session for the mix, today for money); still not "
+            "canonical_savings()", ledger_view=True),
     Surface("hook_status_bar_clawcode", "hooks/status-bar-clawcode.py:100", False,
             "raw SQL over usage; unfiltered; clamped"),
     Surface("observability_surface_status", "observability/surface_status.py:391", False,
