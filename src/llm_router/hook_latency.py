@@ -143,7 +143,7 @@ _DEFAULT_MAX_BYTES = 4 * 1024 * 1024
 #: ``HOOK_TIMEOUTS_MS`` below.
 HOOK_BUDGETS_MS: dict[str, int] = {
     "agent-route": 300,
-    "auto-route": 300,
+    "auto-route": 750,  # D-217 (owner 2026-10-18): PRD 300 ms; zero-Claude edits wait on Ollama metadata
     "status-bar": 300,
     "enforce-route": 300,
     "subagent-start": 300,
