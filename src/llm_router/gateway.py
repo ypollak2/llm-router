@@ -1358,7 +1358,7 @@ def _responses_body(r) -> dict:
 class _AnthropicRequest(BaseModel):
     model: str | None = None
     messages: list
-    system: str | None = None
+    system: str | list | None = None  # a string, or text blocks (Claude Code / the Agent SDK send blocks)
     max_tokens: int | None = None
     # H-03: same gap on the Anthropic wire format.
     tools: list | None = None
@@ -1377,7 +1377,7 @@ async def anthropic_messages(req: _AnthropicRequest, request: Request) -> dict |
                   prefer_model=_qualify_model(req.model, "anthropic"),
                   project_root=_resolve_project_scope(request),
                   classify_text=_latest_user_turn(req.messages),
-                  system=req.system or None,
+                  system=_content_text(req.system) or None,
                   max_tokens=req.max_tokens,
                   temperature=req.temperature, messages=history,
                   tools=tools, tool_choice=tool_choice)
