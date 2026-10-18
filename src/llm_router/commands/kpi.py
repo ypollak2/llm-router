@@ -2597,6 +2597,20 @@ def _semantic_cache_lines(s: dict | None) -> list[str]:
     return sc.per_project_lines(s["projects"], current_scope=s.get("current_scope"))
 
 
+def _judge_quality(days: float, now_ts: float, win: "_Window | None") -> dict | None:
+    """The judge quality section for the card's window, or None if it could not be read."""
+    try:
+        from llm_router import judge_view as jv
+
+        since, until = (win.since, win.until) if win is not None else (now_ts - days * 86400.0, now_ts)
+        return jv.judge_summary(since, until, label=jv.window_label(days)).to_dict()
+    except Exception as exc:  # noqa: BLE001 -- the card renders without the section, recorded
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-KPI-JUDGE-VIEW", exc)
+        return None
+
+
 # ── assembly ───────────────────────────────────────────────────────────────
 
 def compute_scorecard(days: int = 7, *, include_research: bool = False,
@@ -2658,6 +2672,9 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         # `ledger_view`: the same line `dashboard_data.summary` and `llm-router summary` print.
         # Outside "kpis" (informational; _ORDER and --health are unchanged).
         "ledger": {"line": ledger_line},
+        # P3.1-6: judged-answer quality, per door, from judge_results.jsonl + judge_sampler.json
+        # (files only; no database). Outside "kpis": informational, _ORDER and --health unchanged.
+        "judge": _judge_quality(days, now_ts, win),
         # PLAN v16 P1.10-a: per-writer share of rows with session_id and a real task_id. Outside "kpis".
         "identity": identity_r,
         "verify_shadow": _verify_shadow(unit_list, win),
@@ -2819,6 +2836,10 @@ def render_scorecard(data: dict) -> str:
         if not r.get("measurable"):
             continue  # nothing to compare: the card stays as it was
         lines.append(f"  {key:<42s} {r['value']}   [diagnostic, not a target]")
+    if data.get("judge") is not None:
+        from llm_router import judge_view
+
+        lines += judge_view.render_lines(data["judge"])
     if data.get("o3") is not None:
         lines += _o3_render_lines(data["o3"])
     if data.get("offload") is not None:
