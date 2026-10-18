@@ -1368,14 +1368,15 @@ _COORDINATE_CROSS_SYSTEM_RE = re.compile(
 # F78: was an unanchored "<op> ... and ... <op>" search, so "push the fix and deploy"
 # (a work request naming its own object) was claimed. Written for "merge them and
 # redeploy" (da31df7e, #297): a chained operation on an unresolved pronoun, whose
-# referent lives only in the session. Now a whole-prompt allow-list of exactly that
+# referent lives only in the session, plus the object-less "push and create a release"
+# (tests/test_coordination_fastpath.py pins it). Now a whole-prompt allow-list of exactly that
 # shape; any named object, filler or extra word falls through to normal routing.
 _MULTISTEP_PRON = r"(?:it|them|this|that|these|those)"
 _COORDINATE_MULTISTEP_RE = re.compile(
-    r"^(?:(?:merge|deploy|redeploy|release|rebase|push|publish)\s+" + _MULTISTEP_PRON +
+    r"^(?:(?:merge|deploy|redeploy|release|rebase|push|publish)(?:\s+" + _MULTISTEP_PRON + r")?"
     r"|roll(?:ing)?\s+" + _MULTISTEP_PRON + r"\s+out)\s+and\s+(?:then\s+)?"
     r"(?:(?:redeploy|deploy|merge|release|resolve)(?:\s+" + _MULTISTEP_PRON + r")?"
-    r"|report\s+back)[\s.!]*$",
+    r"|create\s+(?:a\s+|the\s+)?release|report\s+back)[\s.!]*$",
     re.IGNORECASE,
 )
 
@@ -1826,6 +1827,10 @@ _STATUS_BARE_RE = re.compile(
     re.IGNORECASE,
 )
 _STATUS_FILLER_TOKENS = _AMBIENT_BASE_TOKENS | frozenset("here yet today currently".split())
+# "what's left before we can ship?" (real-traffic pin in test_coordination_fastpath.py)
+_STATUS_BEFORE_SHIP_RE = re.compile(
+    r"\bbefore\s+(?:we|i)\s+(?:can\s+)?(?:ship|release|merge|deploy|launch|finish)"
+    r"(?:\s+(?:it|this))?\b", re.IGNORECASE)
 _STATUS_SUBJECT_TAIL_RE = re.compile(r"\s+(?:of|on)\b", re.IGNORECASE)
 
 
@@ -1840,7 +1845,8 @@ def _status_clause_ok(seg: str) -> bool:
         rest.append(seg[last:m.start()])
         last = m.end()
     rest.append(seg[last:])
-    return _ambient_tokens_within(" ".join(rest), _STATUS_FILLER_TOKENS)
+    tail = _STATUS_BEFORE_SHIP_RE.sub(" ", " ".join(rest))
+    return _ambient_tokens_within(tail, _STATUS_FILLER_TOKENS)
 
 
 def _status_segments_ok(stripped: str) -> bool:
@@ -2020,8 +2026,11 @@ def _is_coordination_task(prompt: str) -> bool:
         opener = _COORDINATE_CONTINUATION_OPENER_RE.match(stripped)
         if opener:
             # F71: whole-remainder allow-list, not "no real-task verb found".
-            if _ambient_tokens_within(stripped[opener.end():], _AMBIENT_BASE_TOKENS,
-                                      _AMBIENT_CONTINUE_NOUNS):
+            # "Proceed with the plan" is pinned as a request (F71), so only the
+            # continue/carry-on/keep-going openers may name the plan/work/queue.
+            nouns = (_AMBIENT_NOUNS if opener.group(0).lower().startswith("proceed")
+                     else _AMBIENT_CONTINUE_NOUNS)
+            if _ambient_tokens_within(stripped[opener.end():], _AMBIENT_BASE_TOKENS, nouns):
                 return True
         elif (not _COORDINATE_OP_VERB_RE.search(stripped)
                 and not _COORDINATE_CONCRETE_ANCHOR_RE.search(stripped)

@@ -38,7 +38,7 @@ MUST_ROUTE_INVENTED = [
     "roll out the new config and report back", "push and deploy the hotfix",
     "merge it and then write release notes", "deploy it and rewrite the readme",
     "!git push origin main", "! rm -rf build", " ! git commit -m 'x'", "!fix the failing test",
-    "continue the plan and add tests", "continue refactoring the parser",
+    "Proceed with the plan", "continue the plan and add tests", "continue refactoring the parser",
     "keep going and fix the lint errors", "go on and write the tests",
     "carry on with the plan but rename the module",
 ]
@@ -51,7 +51,8 @@ STAYS_COORDINATION = [
     "what's the status of the migration run?", "did you already push the branch?",
     "ok thanks. what's next? and the rest?", "what's next, keep going",
     "merge them and redeploy", "merge it and deploy it", "deploy it and report back",
-    "roll it out and report back", "merge it once the checks are green",
+    "roll it out and report back", "push and deploy", "push and create a release",
+    "what's left before we can ship?", "merge it once the checks are green",
     "deploy it and let me know when it's live", "continue the plan", "continue",
     "keep going", "go on", "carry on", "carry on with the plan", "continue with the plan",
     "ok, continue the plan", "keep going with the plan", "continue with the rest",
