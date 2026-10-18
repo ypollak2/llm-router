@@ -12,7 +12,7 @@ with the outcome recorded, when any of these holds:
   * the subscription quota reading is stale, unknown, session >= 80% or
     weekly >= 85% (``shadow_frontier.quota_skip``)          -> ``quota_skip``
   * today's Haiku calls reached ``LLM_ROUTER_JUDGE_HAIKU_MAX_CALLS`` (20)  -> ``cap_calls``
-  * today's Haiku tokens would pass ``LLM_ROUTER_JUDGE_HAIKU_MAX_TOKENS`` (400000)
+  * today's Haiku tokens would pass ``LLM_ROUTER_JUDGE_HAIKU_DAILY_VOLUME`` (400000, in tokens)
                                                             -> ``cap_tokens``
 A day is a UTC day. A call whose token use is unknown counts as a call, not as tokens.
 """
@@ -49,8 +49,8 @@ def ledger_path():
     return paths.state_path(LEDGER_FILENAME)
 
 
-def _int_env(name: str, default: int) -> int:
-    raw = os.environ.get(name, "").strip()
+def _non_negative_int(raw: str, default: int, name: str) -> int:
+    raw = raw.strip()
     if not raw:
         return default
     try:
@@ -62,8 +62,10 @@ def _int_env(name: str, default: int) -> int:
 
 def haiku_caps() -> tuple[int, int]:
     """(calls per day, tokens per day)."""
-    return (_int_env("LLM_ROUTER_JUDGE_HAIKU_MAX_CALLS", DEFAULT_MAX_CALLS),
-            _int_env("LLM_ROUTER_JUDGE_HAIKU_MAX_TOKENS", DEFAULT_MAX_TOKENS))
+    return (
+        _non_negative_int(os.environ.get("LLM_ROUTER_JUDGE_HAIKU_MAX_CALLS", ""), DEFAULT_MAX_CALLS, "max calls"),
+        _non_negative_int(os.environ.get("LLM_ROUTER_JUDGE_HAIKU_DAILY_VOLUME", ""), DEFAULT_MAX_TOKENS, "daily volume"),
+    )
 
 
 def _day(ts: float) -> str:

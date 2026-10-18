@@ -24,7 +24,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
     monkeypatch.setenv("LLM_ROUTER_JUDGE_SAMPLE_RATE", "1.0")
     for var in ("LLM_ROUTER_JUDGE_HAIKU_FALLBACK", "LLM_ROUTER_JUDGE_HAIKU_MAX_CALLS",
-                "LLM_ROUTER_JUDGE_HAIKU_MAX_TOKENS", "LLM_ROUTER_JUDGE_QUEUE_MAX_AGE_DAYS"):
+                "LLM_ROUTER_JUDGE_HAIKU_DAILY_VOLUME", "LLM_ROUTER_JUDGE_QUEUE_MAX_AGE_DAYS"):
         monkeypatch.delenv(var, raising=False)
     judge_sampler._pending_skips.clear()
     failopen.reset_cache()
@@ -202,7 +202,7 @@ def _ledger():
 def test_the_21st_haiku_call_in_a_day_is_stopped(haiku_world):
     call = AsyncMock(return_value=_resp())
     with patch.object(judge, "call_llm", call):
-        results = [_grade(_item(i)) for i in range(21)]
+        results = [_grade(_item(i)) for i in range(1, 22)]
     assert call.await_count == 20
     assert results[:20] == ["graded"] * 20 and results[20] == "ungraded"
     assert _ledger()[-1]["outcome"] == "cap_calls" and _ledger()[-1]["judge_kind"] == "subscription"
@@ -210,7 +210,7 @@ def test_the_21st_haiku_call_in_a_day_is_stopped(haiku_world):
 
 
 def test_token_cap_stops_before_the_call(haiku_world, monkeypatch):
-    monkeypatch.setenv("LLM_ROUTER_JUDGE_HAIKU_MAX_TOKENS", "123")
+    monkeypatch.setenv("LLM_ROUTER_JUDGE_HAIKU_DAILY_VOLUME", "123")
     call = AsyncMock(return_value=_resp())
     with patch.object(judge, "call_llm", call):
         assert _grade(_item(1)) == "graded"      # 120 tokens used
