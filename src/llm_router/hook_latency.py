@@ -549,7 +549,7 @@ def read_rows(since: float | None = None, until: float | None = None) -> list[di
 
 def _stamp_elapsed_ms(start_path: str, end_path: str) -> float | None:
     """Milliseconds between the mtimes of two stamp files, or None when either is
-    missing. Removes both (they are single-use). The statusline stamps start and end
+    missing or the end is earlier than the start. Removes both (they are single-use). The statusline stamps start and end
     with a shell redirect (``: > file``, no process), so no interpreter start-up is
     inside the number; the resolution is the filesystem's (ns on APFS, up to one
     kernel tick on Linux)."""
@@ -562,7 +562,9 @@ def _stamp_elapsed_ms(start_path: str, end_path: str) -> float | None:
         end.unlink(missing_ok=True)
     except OSError:
         return None
-    return max(0.0, (t1 - t0) / 1e6)
+    if t1 < t0:  # a clock step back: unknown, not a 0 ms render
+        return None
+    return (t1 - t0) / 1e6
 
 
 def _main(argv: list[str] | None = None) -> int:

@@ -18,9 +18,10 @@
 # mtime. The start and the end are each ONE shell redirect (`: > file`, a builtin,
 # no process); the backgrounded writer reads the two mtimes. This replaced two
 # `perl -MTime::HiRes` processes, whose start-up was inside the number and, at
-# machine load >= 8, was most of the live p95 (F68: p95 425 ms at load >= 8 vs 96
-# ms below 4, with a render that is pure bash). The number still excludes the
-# bash start-up before this line, as the hooks' numbers exclude the interpreter's.
+# machine load, was most of the live p95 (the render itself is pure bash). The
+# number still excludes the bash start-up before this line, as the hooks' numbers
+# exclude the interpreter's. The end stamp is written by the EXIT trap, so in
+# LLM_ROUTER_STATUSLINE=both and =fast the python tick IS inside the number.
 # Resolution is the filesystem's (ns on APFS; one kernel tick on Linux).
 # Unsampled calls pay only the env test and $RANDOM below (no process).
 _slt_on="${LLM_ROUTER_STATUSLINE_TIMING:-}"
@@ -62,7 +63,7 @@ _chz_find_py() {
 # removed by the child, so none leak).
 _slt_finish() {
     [ -n "$_slt_t0" ] || return 0
-    { : > "$_slt_e"; } 2>/dev/null || return 0
+    { : > "$_slt_e"; } 2>/dev/null || { rm -f "$_slt_s"; return 0; }
     local _sid="" _re='"session_id"[[:space:]]*:[[:space:]]*"([A-Za-z0-9._-]+)"'
     [[ "$input" =~ $_re ]] && _sid="${BASH_REMATCH[1]}"
     ( { [ -n "$_chz_py" ] || _chz_find_py

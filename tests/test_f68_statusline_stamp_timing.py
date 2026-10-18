@@ -1,8 +1,7 @@
 """F68: the statusline's timing row no longer starts a clock process.
 
-Live 7-day statusline p95 was 200-216 ms (n=548) against a 100 ms bar, and 425 ms at
-machine load >= 8 versus 96 ms below 4. The render is pure bash; the sampled number
-included two `perl -MTime::HiRes` start-ups (one per clock read). Now start and end
+The live statusline p95 was over its 100 ms bar, worst under machine load. The
+render is pure bash; the sampled number included two `perl -MTime::HiRes` start-ups (one per clock read). Now start and end
 are each a shell redirect and the row is written from the two file mtimes by
 ``hook_latency record-stamps``, with ``phases_ms = {cache_hit | cache_stale |
 cache_miss | fast: elapsed}`` so the render path is measurable.
@@ -70,6 +69,8 @@ def _seg(home: Path, age_s: int) -> None:
 
 def test_record_stamps_writes_phase_and_removes_the_stamps(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    monkeypatch.delenv("LLM_ROUTER_HOOK_LATENCY", raising=False)  # in-process hook tests leak "off"
+    monkeypatch.delenv("LLM_ROUTER_HOOK_LATENCY_MAX_BYTES", raising=False)
     s, e = tmp_path / "s", tmp_path / "e"
     s.write_text("")
     e.write_text("")
@@ -92,6 +93,8 @@ def test_record_stamps_with_a_missing_stamp_writes_nothing(tmp_path, monkeypatch
 
 def test_record_stamps_usage_error_and_record_raw_unchanged(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    monkeypatch.delenv("LLM_ROUTER_HOOK_LATENCY", raising=False)
+    monkeypatch.delenv("LLM_ROUTER_HOOK_LATENCY_MAX_BYTES", raising=False)
     assert hl._main(["record-stamps", "statusline"]) == 2
     assert hl._main(["record-raw", "statusline", "Statusline", "7.5"]) == 0
     row = json.loads((tmp_path / hl.STORE_FILENAME).read_text().splitlines()[-1])
@@ -132,3 +135,16 @@ def test_unwritable_state_dir_renders_without_a_row(tmp_path):
     finally:
         (home / ".llm-router").chmod(0o700)
     assert out.strip()
+
+
+def test_record_stamps_with_the_end_before_the_start_writes_nothing(tmp_path, monkeypatch):
+    # A clock step back is an unknown duration, never a 0 ms render.
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    monkeypatch.delenv("LLM_ROUTER_HOOK_LATENCY", raising=False)
+    s, e = tmp_path / "s", tmp_path / "e"
+    s.write_text("")
+    e.write_text("")
+    os.utime(s, ns=(2_000_000_000, 2_000_000_000))
+    os.utime(e, ns=(1_000_000_000, 1_000_000_000))
+    assert hl._main(["record-stamps", "statusline", "Statusline", str(s), str(e)]) == 1
+    assert not (tmp_path / hl.STORE_FILENAME).exists()
