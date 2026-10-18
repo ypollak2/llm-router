@@ -56,7 +56,7 @@ def test_sdk_route_tags_its_db_write_sdk(monkeypatch):
 
     monkeypatch.setattr(chain_builder, "get_current_pressure", lambda: ("green", 5))
     monkeypatch.setattr(chain_builder, "needs_claude_tools", lambda *a, **k: False)
-    monkeypatch.setattr(chain_builder, "build_chain", lambda *a, **k: ["m"])
+    monkeypatch.setattr(chain_builder, "build_chain", lambda *a, **k: [ModelSpec(provider="ollama", model="qwen3.5:latest")])
     monkeypatch.setattr(direct_executor, "execute_chain", lambda *a, **k: _direct_result())
     seen = {}
     monkeypatch.setattr(savings_logger, "log_direct_to_db", lambda **k: seen.update(k))
