@@ -104,6 +104,7 @@ NON_NETWORK = {
     "www.apple.com": "plist DTD URI",
     "www.perplexity.ai": "Perplexity key signup link printed by setup",
     "www.w3.org": "SVG XML namespace",
+    "schemas.microsoft.com": "Task Scheduler XML namespace (identifier, never fetched)",
     "your-server.com": "Placeholder server in team endpoint setup hints",
 }
 # code.claude.com occurs only in a skipped shell comment, not a swept literal.
