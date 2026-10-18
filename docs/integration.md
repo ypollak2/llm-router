@@ -1,0 +1,129 @@
+# Integrating with llm-router
+
+llm-router has four doors. Every framework below uses one of them; most use the gateway, which needs
+one line of configuration. Each section links a runnable example under [`examples/`](../examples/)
+that CI runs on every change against a deterministic offline fake backend (no keys, no provider is
+called): see [`.github/workflows/examples.yml`](../.github/workflows/examples.yml).
+
+| Door | Use it when | Example |
+|---|---|---|
+| Gateway | your framework or client takes a `base_url` | [`langgraph`](../examples/langgraph/), [`openai_agents`](../examples/openai_agents/), [`crewai`](../examples/crewai/), [`pydantic_ai`](../examples/pydantic_ai/), [`claude_agent_sdk`](../examples/claude_agent_sdk/), [`typescript_openai`](../examples/typescript_openai/) |
+| SDK | Python code that prefers a function call to a server | [`python_sdk`](../examples/python_sdk/) |
+| MCP | an MCP host (Claude Code, Cursor, Claude Desktop) calls routed tools | [`mcp`](../examples/mcp/) |
+| Hooks / proxy | one Claude Code session, per-call | [`proxy`](../examples/proxy/) |
+
+## The gateway: one `base_url`
+
+```bash
+llm-router gateway                                   # http://127.0.0.1:17900
+export OPENAI_BASE_URL=http://127.0.0.1:17900/v1     # OpenAI-compatible clients
+export ANTHROPIC_BASE_URL=http://127.0.0.1:17900     # Anthropic clients
+```
+
+Endpoints: `/v1/chat/completions`, `/v1/responses`, `/v1/messages` (plus Ollama's `/api/chat` and
+`/api/generate`). Send `model: "auto"` to let the router choose, or a model name to pin it. Tool calls
+work on the three `/v1` endpoints. If you set `LLM_ROUTER_GATEWAY_TOKEN` (or have a `gateway.token`
+in the state dir), send it as the API key.
+
+**Streaming.** `stream: true` returns server-sent events in each endpoint's own protocol. The stream is
+the routed call's complete answer re-framed as chunks, for every provider; it is not provider token
+streaming, so the first token arrives when the model has finished. If routing fails after the
+response has started, the HTTP status is still **200** and the failure arrives as an `error` event in
+the endpoint's own shape (a chat stream sends no `[DONE]` after it); official clients raise on it.
+Requests the gateway refuses (hosted tools, images) are an HTTP 400 before any event.
+
+The thin adapters in `llm_router.frameworks` build the framework's own model object with this URL
+(`LLM_ROUTER_GATEWAY_URL` overrides it) and the gateway token if one is set. They never import a
+provider SDK, and the framework packages are not llm-router dependencies: install the one you use.
+
+### LangGraph
+
+```python
+from llm_router.frameworks.langgraph import LangGraphAdapter
+agent = create_react_agent(LangGraphAdapter().wrap_model("auto"), tools)
+```
+Runnable, streaming plus a tool call: [`examples/langgraph`](../examples/langgraph/).
+
+### OpenAI Agents SDK
+
+```python
+from llm_router.frameworks.openai_agents import OpenAIAgentsAdapter
+agent = Agent(name="x", model=OpenAIAgentsAdapter().wrap_model("auto"), tools=[...])
+```
+Runnable, `Runner.run_streamed` plus a tool call: [`examples/openai_agents`](../examples/openai_agents/).
+
+### CrewAI
+
+```python
+from llm_router.frameworks.crewai import CrewAIAdapter
+agent = Agent(role="...", goal="...", backstory="...", llm=CrewAIAdapter().wrap_model("auto"))
+```
+Runnable: [`examples/crewai`](../examples/crewai/).
+
+### Pydantic AI
+
+```python
+from llm_router.frameworks.pydantic_ai import PydanticAiAdapter
+agent = Agent(PydanticAiAdapter().wrap_model("auto"))
+```
+Runnable, `run_stream` plus a tool call: [`examples/pydantic_ai`](../examples/pydantic_ai/).
+
+### Claude Agent SDK
+
+```python
+from llm_router.frameworks.claude_agent_sdk import ClaudeAgentSdkAdapter
+async for message in query(prompt="...", options=ClaudeAgentSdkAdapter().wrap_model("auto")):
+    ...
+```
+The SDK's Claude Code process reads `ANTHROPIC_BASE_URL`; the adapter sets it (and the key) in the
+options' `env`. Runnable: [`examples/claude_agent_sdk`](../examples/claude_agent_sdk/).
+
+### TypeScript (and any other language)
+
+```ts
+const client = new OpenAI({ baseURL: "http://127.0.0.1:17900/v1", apiKey: "unused" });
+```
+Runnable, streaming plus a tool call with the official `openai` client:
+[`examples/typescript_openai`](../examples/typescript_openai/).
+
+### Agno
+
+Agno has a concrete adapter that predates this page: `llm_router.frameworks.agno.RouteredModel`.
+
+### Hermes-format models
+
+There is no Hermes adapter: "Hermes" names several tool-call formats, not a framework. A Hermes-format
+model behind Ollama or any OpenAI-compatible server is routed like any other model; call the gateway
+with an OpenAI client.
+
+## SDK
+
+```python
+from llm_router import Router
+result = Router(budget_usd=0.50).run("Summarize this ...")
+print(result.text, result.model)
+```
+No server; the call and its ledger row happen in your process. Runnable: [`examples/python_sdk`](../examples/python_sdk/).
+
+## MCP
+
+`llm-router install` registers the MCP server with your host; the host then lists the routed tools
+(`llm`, `llm_route`, `llm_edit`, ...). Runnable client over stdio with the official `mcp` package:
+[`examples/mcp`](../examples/mcp/).
+
+## Hooks / proxy
+
+`llm-router proxy` sits at `ANTHROPIC_BASE_URL` for one Claude Code session and forwards each call
+unchanged unless a step class is enabled (see [proxy.md](proxy.md)); it writes one row per call to
+the proxy ledger. The hooks that `llm-router install` adds work beside it. Runnable, with a loopback
+fake in place of Anthropic: [`examples/proxy`](../examples/proxy/).
+No example runs a hook script itself: the hooks run inside Claude Code, which the proxy example
+does not start. The example exercises the proxy half of this door.
+
+## Running an example yourself
+
+```bash
+pip install -e . -r examples/langgraph/requirements.txt     # the framework, pinned, for this example only
+python examples/langgraph/main.py                           # prints the answer, then OK
+python examples/fake_backend.py                             # or: serve the fake-backed gateway by hand
+```
