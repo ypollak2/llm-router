@@ -729,3 +729,15 @@ def test_anthropic_unparseable_tool_arguments_become_an_error_event_when_streami
     event, data = frames[-1]
     assert event == "error" and "not a JSON object" in json.loads(data)["error"]["message"]
     assert not any(e == "content_block_start" for e, _ in frames)
+
+
+def test_anthropic_system_as_text_blocks_is_accepted_and_forwarded(ant, fake):
+    """A.6: Claude Code and the Claude Agent SDK send `system` as a list of text blocks (with
+    cache_control), not a string; the gateway used to answer 422."""
+    reply = ant.messages.create(
+        model="claude-haiku-4-5", max_tokens=64, messages=[{"role": "user", "content": PROMPT}],
+        system=[{"type": "text", "text": "billing-header"},
+                {"type": "text", "text": "be brief", "cache_control": {"type": "ephemeral"}}])
+    assert reply.content[0].text == FINAL
+    sent = fake.calls[0]["messages"]
+    assert any(m["role"] == "system" and "be brief" in json.dumps(m["content"]) for m in sent), sent

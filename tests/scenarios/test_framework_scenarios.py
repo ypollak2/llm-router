@@ -3,10 +3,10 @@
 For Agno (concrete adapter): the story exercises a real agent session
 with budget enforcement, lineage tagging, and multi-step routing.
 
-For the other six (Hermes, LangGraph, CrewAI, OpenAI Agents SDK, Claude
-Agent SDK, Pydantic AI): the story documents the v0.0.3 expected
-behavior and verifies the v0.0.2 stub fails honestly with
-NotImplementedError + the right error shape.
+For the other five (LangGraph, CrewAI, OpenAI Agents SDK, Claude Agent SDK,
+Pydantic AI): thin base_url wrappers (AGT A.6). The story states what the
+wrapper points at the gateway, and verifies it fails honestly with an
+ImportError that names the package to install when the framework is absent.
 """
 from __future__ import annotations
 
@@ -208,101 +208,74 @@ def test_scenario_agno_budget_breach_terminates_session(scenario_collector, tmp_
 
 
 # ════════════════════════════════════════════════════════════════════════
-# Stub frameworks — each has a v0.0.3 story + a v0.0.2 honest-failure check
+# Thin base_url frameworks — each has a story + an honest missing-package check
 # ════════════════════════════════════════════════════════════════════════
 
-STUB_FRAMEWORKS = [
-    ("hermes", "llm_router.frameworks.hermes", "HermesAdapter",
-     "function-calling protocol (Nous Hermes / open-weight tool-use)",
-     "Hermes agent makes a single tool call; concrete impl streams tokens "
-     "and invokes the tool when <tool_call>...</tool_call> is detected."),
+BASE_URL_FRAMEWORKS = [
     ("langgraph", "llm_router.frameworks.langgraph", "LangGraphAdapter",
      "graph-based agent runtime",
      "A LangGraph workflow with 3 nodes (plan → act → reflect). Each node "
-     "is one routed call. LLM Router tags lineage with the node name as agent_id."),
+     "is one routed call through the gateway; the node name is the agent id."),
     ("crewai", "llm_router.frameworks.crewai", "CrewAIAdapter",
      "multi-agent crew (Crew/Task/Agent abstraction)",
      "A CrewAI crew of 2 agents (researcher, writer) executes a sequential "
-     "task. LLM Router's adapter wraps the LiteLLM call CrewAI makes."),
+     "task. Each agent's crewai.LLM points at the gateway."),
     ("openai-agents", "llm_router.frameworks.openai_agents", "OpenAIAgentsAdapter",
      "OpenAI Agents SDK (formerly Swarm)",
      "An Agents-SDK Runner runs a research agent that hands off to a writer "
-     "agent. LLM Router detects the handoff via agent_id changes in successive calls."),
+     "agent. Each agent's model points at the gateway."),
     ("claude-agent-sdk", "llm_router.frameworks.claude_agent_sdk",
      "ClaudeAgentSdkAdapter", "Anthropic Claude Agent SDK",
-     "A Claude Agent SDK loop with tool_use streaming. LLM Router intercepts the "
-     "anthropic client and routes each generation through the signal layer."),
+     "A Claude Agent SDK loop with tool_use streaming. The "
+     "agent's ANTHROPIC_BASE_URL points at the gateway."),
     ("pydantic-ai", "llm_router.frameworks.pydantic_ai", "PydanticAiAdapter",
      "type-safe Pydantic AI agents",
-     "A Pydantic AI Agent with a typed result_type. LLM Router's adapter is a "
-     "Model implementation that delegates to llm_router.router."),
+     "A Pydantic AI Agent with a typed result_type. The model's "
+     "provider base_url points at the gateway."),
 ]
 
 
 @pytest.mark.parametrize(
     "slug,module_name,class_name,description,future_story",
-    STUB_FRAMEWORKS,
-    ids=[fw[0] for fw in STUB_FRAMEWORKS],
+    BASE_URL_FRAMEWORKS,
+    ids=[fw[0] for fw in BASE_URL_FRAMEWORKS],
 )
-def test_scenario_stub_framework_documents_v003_path(
+def test_scenario_base_url_framework_wraps_or_names_the_missing_package(
     scenario_collector, slug, module_name, class_name, description, future_story
 ):
-    """For each stub framework: document the v0.0.3 story + verify the
-    v0.0.2 stub fails honestly with NotImplementedError citing v0.0.3."""
+    """For each framework: the adapter is a real wrapper. With the framework absent
+    wrap_model raises an ImportError naming what to install; with it present it returns
+    a model object. Never NotImplementedError."""
     import importlib
 
     s = Scenario(
         id=f"fw-{slug}",
-        title=f"{slug}: v0.0.2 stub fails honestly; v0.0.3 will implement",
+        title=f"{slug}: thin base_url wrapper",
         framework=slug,
-        narrative=(
-            f"{description}. {future_story} v0.0.2 ships only the adapter "
-            f"protocol shape; wrap_model raises NotImplementedError citing "
-            f"v0.0.3. This scenario verifies both the documented future "
-            f"story and the current honest-failure contract."
-        ),
+        narrative=f"{description}. {future_story}",
         expected_outcome=(
-            "v0.0.2 adapter exists, exposes protocol shape, "
-            "wrap_model raises NotImplementedError with v0.0.3 hint"
+            "wrap_model returns a gateway-pointed model, or raises an ImportError "
+            "that says 'pip install' when the framework package is not installed"
         ),
     )
     mod = importlib.import_module(module_name)
     adapter_cls = getattr(mod, class_name)
-    s.framework_event("adapter imported",
-                      module=module_name, adapter=class_name,
+    s.framework_event("adapter imported", module=module_name, adapter=class_name,
                       protocol_name=adapter_cls.name)
-
     available = adapter_cls.is_available()
     s.framework_event("is_available() queried", available=available)
-    if available:
-        s.note(
-            "Concrete implementation exists — flip this test to exercise "
-            "the real adapter path"
-        )
 
     adapter = adapter_cls()
-    s.framework_event("adapter constructed (no IO, O(1))")
-    s.framework_event("attempting wrap_model() on stub")
-    raised = None
+    outcome, ok = "", False
     try:
-        adapter.wrap_model(framework_model=None)
-    except NotImplementedError as exc:
-        raised = exc
-        s.framework_event("NotImplementedError raised as documented",
-                          message=str(exc))
-    except Exception as exc:
-        raised = exc
-        s.framework_event("unexpected exception type", type=type(exc).__name__)
-
-    s.outcome(
-        f"Stub correctly raised NotImplementedError citing v0.0.3 — "
-        f"v0.0.3 concrete impl will follow the documented integration path: "
-        f"{future_story}",
-        success=(
-            isinstance(raised, NotImplementedError)
-            and ("v0.0.3" in str(raised) or "0.0.3" in str(raised))
-        ),
-    )
+        model = adapter.wrap_model(None)
+        outcome, ok = f"built {type(model).__name__}", available
+    except ImportError as exc:
+        outcome, ok = f"ImportError: {exc}", (not available) and "pip install" in str(exc)
+    except Exception as exc:  # noqa: BLE001 -- recorded, then the scenario fails
+        outcome = f"unexpected {type(exc).__name__}: {exc}"
+    s.framework_event("wrap_model(None) attempted", result=outcome)
+    s.outcome(f"wrap_model(None): {outcome}", success=ok)
     scenario_collector.add(s)
     assert s.passed
 
@@ -310,24 +283,24 @@ def test_scenario_stub_framework_documents_v003_path(
 def test_scenario_framework_attribution_round_trip(
     scenario_collector, tmp_path
 ):
-    """All 7 framework slugs round-trip through lineage + sessions."""
+    """All 6 framework slugs round-trip through lineage + sessions."""
     s = Scenario(
         id="fw-attribution",
-        title="All 7 framework slugs round-trip through lineage + sessions",
+        title="All 6 framework slugs round-trip through lineage + sessions",
         framework="*all*",
         narrative=(
-            "For each of Agno, Hermes, LangGraph, CrewAI, OpenAI Agents, "
+            "For each of Agno, LangGraph, CrewAI, OpenAI Agents, "
             "Claude Agent SDK, Pydantic AI: write a lineage record + open "
             "a session tagged with the framework slug; verify "
             "by_framework() and SessionStore.get().framework return them "
             "correctly. This proves lineage attribution is uniform across "
             "frameworks regardless of concrete impl status."
         ),
-        expected_outcome="all 7 slugs round-trip without error",
+        expected_outcome="all 6 slugs round-trip without error",
     )
     lineage = LineageStore(db_path=tmp_path / "l.db")
     sessions = SessionStore(db_path=tmp_path / "s.db")
-    slugs = ["agno", "hermes", "langgraph", "crewai",
+    slugs = ["agno", "langgraph", "crewai",
              "openai-agents", "claude-agent-sdk", "pydantic-ai"]
     all_ok = True
     for slug in slugs:
