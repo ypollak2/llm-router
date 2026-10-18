@@ -342,6 +342,10 @@ def _read_draft_acceptance() -> CounterReading:
         return CounterReading(None, unknown_reason=type(exc).__name__)
 
 
+#: Fewest seen+skipped calls before the lock-skip share can alarm (1 skip in 9 is noise).
+_JUDGE_SKIP_MIN_N = 20
+
+
 def _read_judge_sampler() -> CounterReading:
     """Calls picked for judging, out of eligible calls seen, over all doors (P3.1).
 
@@ -356,16 +360,22 @@ def _read_judge_sampler() -> CounterReading:
         if not state:
             return CounterReading(None, unknown_reason="no judge sampler counters yet")
         def _total(key: str) -> int:
-            # Only counts that are present and integral; an absent key adds nothing.
+            # Only counts that are present and integral (bool is not a count); an
+            # absent key adds nothing.
             return sum(v for c in state.values() if isinstance(c, dict)
-                       for k, v in c.items() if k == key and isinstance(v, int))
+                       for k, v in c.items()
+                       if k == key and isinstance(v, int) and not isinstance(v, bool))
 
         seen, picked, skipped = _total("seen"), _total("picked"), _total("lock_skipped")
-        if not seen:
+        # Skipped is read before the seen==0 return: a door that only ever skipped
+        # (100% lock contention) is the worst case of the alarm, not an unknown.
+        # A share of a handful of calls is noise, so it needs a minimum sample.
+        skip_alarm = (seen + skipped) >= _JUDGE_SKIP_MIN_N and skipped * 10 > seen + skipped
+        if not seen and not skipped:
             return CounterReading(None, unknown_reason="no eligible calls seen yet")
         return CounterReading(
             float(picked),
-            alarming=(seen >= 100 and picked == 0) or (skipped * 10 > seen + skipped),
+            alarming=(seen >= 100 and picked == 0) or skip_alarm,
             detail=(
                 f"of {seen} eligible seen across {len(state)} door(s); {skipped} lock-skipped",
                 "judging that stops silently leaves every quality figure unmeasured",

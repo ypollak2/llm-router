@@ -347,6 +347,11 @@ def log_receipt_savings(
         pass
 
 
+#: classifier_type -> judge-sampler door, for the callers that are not the main-session
+#: hook. Anything else through ``log_direct_to_db`` is the DIRECT hook path (P3.1-2).
+_DOOR_BY_CLASSIFIER = {"sdk": "sdk", "agent-route": "agent", "agent-route-cli": "agent"}
+
+
 def log_direct_to_db(
     result: "DirectResult",
     *,
@@ -356,6 +361,7 @@ def log_direct_to_db(
     classifier_type: str = "hook",
     profile: str = "balanced",
     session_id: str = "",
+    door: str | None = None,
 ) -> None:
     """Persist a successful DIRECT routing into the ``usage`` and
     ``routing_decisions`` tables of ``~/.llm-router/usage.db``.
@@ -490,6 +496,7 @@ def log_direct_to_db(
                 # O3 could not scope it to a session. Ids only: free text, a non-string
                 # or a placeholder ("sdk", "unknown") is stored as NULL.
                 session_id=_ledger_session_id(session_id),
+                door=door or _DOOR_BY_CLASSIFIER.get(classifier_type, "hook"),
             )
 
         # Persist. The standalone UserPromptSubmit hook is synchronous with no
