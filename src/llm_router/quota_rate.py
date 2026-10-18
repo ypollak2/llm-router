@@ -77,8 +77,10 @@ def _read(path: Path, since: float) -> tuple[list[dict], int]:
                 continue
             if not isinstance(r, dict):
                 bad += 1
-            elif (_num(r.get("ts")) or 0.0) >= since:
-                rows.append(r)
+            else:
+                ts = _num(r.get("ts"))
+                if ts is not None and ts >= since:       # a row with no timestamp is not in any window
+                    rows.append(r)
     return rows, bad
 
 

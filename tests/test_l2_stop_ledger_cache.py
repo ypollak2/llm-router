@@ -263,7 +263,8 @@ def test_child_writes_the_ledger_cache(big_state, monkeypatch):
     assert len(d["cumulative"]) == 5 and [r[0] for r in d["cumulative"]][0] == "today"
     assert d["cumulative"][-1][1] > 0, "lifetime calls come from the seeded ledger"
     assert d["today_compact"].startswith("~$") and d["lifetime_compact"].startswith("~$")
-    assert re.search(r" est \(n=[\d,]+, today\)$", d["today_compact"]), d["today_compact"]
+    # P35-1: measured is a separate segment, so the fragment ends "est (n=..)" or "measured (n=..)".
+    assert re.search(r" (est|measured) \(n=[\d,]+, today\)$", d["today_compact"]), d["today_compact"]
     from llm_router import ledger_view as lv      # the embedded windows are the ledger's own JSON
     assert lv.LedgerWindow.from_json(d["window_24h"]).window == "24h"
     assert lv.LedgerWindow.from_json(d["window_today"]).window == "today"
