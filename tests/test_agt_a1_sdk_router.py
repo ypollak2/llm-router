@@ -64,6 +64,7 @@ class _Exec:
         self.calls = 0
         self.threads: list[int] = []
         self.chains: list[tuple] = []
+        self.barrier: threading.Barrier | None = None  # set: each call waits here for its peer
         self._lock = threading.Lock()
 
     def build_chain(self, complexity, zone, task_type, **_k):
@@ -75,6 +76,11 @@ class _Exec:
         with self._lock:
             self.calls += 1
             self.threads.append(threading.get_ident())
+        if self.barrier is not None:
+            # Returns only when a second call is in flight at the same moment: overlap is
+            # proven by the rendezvous, not inferred from a wall-clock ratio (F52). Serialised
+            # calls break the barrier after 10 s and the call raises.
+            self.barrier.wait(timeout=10)
         if self.sleep:
             time.sleep(self.sleep)
         return DirectResult(text="answer", model=chain[0], latency_ms=5,
@@ -233,10 +239,9 @@ async def test_b_arun_runs_off_the_loop_two_parallel_calls_overlap(fake):
     router.run(PROMPT)  # warm imports outside the timed section
     fake.sleep = 0.4
 
-    t0 = time.perf_counter()
     r = await router.arun(PROMPT)
-    one = time.perf_counter() - t0
     assert r.text == "answer"
+    fake.barrier = threading.Barrier(2)
 
     lag = 0.0
     stop = asyncio.Event()
@@ -250,13 +255,11 @@ async def test_b_arun_runs_off_the_loop_two_parallel_calls_overlap(fake):
 
     tick = asyncio.create_task(ticker())
     await asyncio.sleep(0.02)
-    t0 = time.perf_counter()
     both = await asyncio.gather(router.arun(PROMPT), router.arun(PROMPT, task="a1-task-2"))
-    two = time.perf_counter() - t0
     stop.set()
     await tick
     assert [b.text for b in both] == ["answer", "answer"]
-    assert two <= 1.3 * one, (two, one)
+    assert fake.barrier.n_waiting == 0 and not fake.barrier.broken, "the two calls never overlapped"
     assert lag <= 0.1, lag
 
 

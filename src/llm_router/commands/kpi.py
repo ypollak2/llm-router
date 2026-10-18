@@ -2970,10 +2970,12 @@ def cmd_kpi(args: list[str]) -> int:
                      help="with --daily: snapshot today to <date>.partial.json (never counted by the streak)")
     ap.add_argument("--synthetic-manifest", metavar="PATH", default=None,
                      help="with --daily: the synth-live manifest.jsonl; research sessions whose id is listed "
-                          "are 'synthetic (D-167)', other research sessions are 'other' (counts only)")
+                          "are 'synthetic (D-167)' and count in release_clock (D-210); other research sessions are "
+                          "'other' (counts only, never counted); without it release_clock = organic")
     ap.add_argument("--daily-streak", action="store_true",
-                     help="P3.3: the run of closed UTC days whose organic action AND turn lines are measured; "
-                          "exit 1 below 14 (PLAN v16 section 7.1 c3)")
+                     help="P3.3: the run of closed UTC days whose release_clock (organic + synthetic) action AND turn "
+                          "lines are measured; organic is printed beside it; exit 1 below 7 (D-210, PLAN v16 "
+                          "section 7.1 c3)")
     ap.add_argument("--end", metavar="YYYY-MM-DD", default=None, help="with --daily-streak: last day to count")
     ap.add_argument("--daily-render-plist", action="store_true",
                      help="print a launchd plist for 'kpi --daily --backfill 3'; prints only, installs nothing")

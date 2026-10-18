@@ -27,6 +27,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 RELEASE_DIR = REPO / "scripts" / "release"
 SHA_A = "a" * 40
 SHA_B = "b" * 40
+PREREG = "c" * 64   # sha256 of a (synthetic) frozen prereg
 
 
 def load_gate_from_source(path: pathlib.Path, name: str):
@@ -73,9 +74,16 @@ def _doc(sha, sets):
     return {"schema": 1, "sha": sha, "sets": {k: {"items": v} for k, v in sets.items()}}
 
 
+def _run(G, R, cand, base, manifests, expect_sha=None, pin="auto"):
+    """run_gate with a pin freshly derived from the manifests/baseline (a consistent freeze)."""
+    if pin == "auto":
+        pin = R.make_pin(manifests, (base or {}).get("sha", SHA_B), PREREG)
+    return G.run_gate(cand, base, manifests, expect_sha=expect_sha, pin=pin, prereg_sidecar=PREREG)
+
+
 def _gate_perf(G, R, **kw):
     m, base, cand = _perf(R, **kw)
-    return G.run_gate(_doc(SHA_A, {"perf": cand}), _doc(SHA_B, {"perf": base}), {"perf": m})[0]
+    return _run(G, R, _doc(SHA_A, {"perf": cand}), _doc(SHA_B, {"perf": base}), {"perf": m})[0]
 
 
 def _fid_items(ids, worse=0, better=0):
@@ -92,7 +100,7 @@ def _fid_items(ids, worse=0, better=0):
 
 def _gate_fid(G, R, worse=0, better=0, n=100):
     m = _manifest(R, "fid", "fidelity", n=n)
-    return G.run_gate(_doc(SHA_A, {"fid": _fid_items(m["item_ids"], worse, better)}), None, {"fid": m})[0]
+    return _run(G, R, _doc(SHA_A, {"fid": _fid_items(m["item_ids"], worse, better)}), None, {"fid": m})[0]
 
 
 def _stab_items(ids, differ=0):
@@ -101,7 +109,7 @@ def _stab_items(ids, differ=0):
 
 def _gate_stab(G, R, differ=0, n=100):
     m = _manifest(R, "stab", "stability", n=n)
-    return G.run_gate(_doc(SHA_A, {"stab": _stab_items(m["item_ids"], differ)}), None, {"stab": m})[0]
+    return _run(G, R, _doc(SHA_A, {"stab": _stab_items(m["item_ids"], differ)}), None, {"stab": m})[0]
 
 
 # ── checks (each takes the module under test) ─────────────────────────────────
@@ -132,14 +140,14 @@ def check_perf_pairs_by_id_not_position(G, R):
     # the same 10 items fail in both runs but the candidate file lists items in the
     # opposite order: paired by id there are 0 discordant pairs, by position 20
     m, base, cand = _perf(R, base_fail=range(10), cand_fail=range(10))
-    code, lines = G.run_gate(_doc(SHA_A, {"perf": list(reversed(cand))}),
+    code, lines = _run(G, R, _doc(SHA_A, {"perf": list(reversed(cand))}),
                              _doc(SHA_B, {"perf": base}), {"perf": m})
     assert code == G.PASS and "discordant=0" in "\n".join(lines)
 
 
 def check_perf_clean_control_passes_and_prints_stats(G, R):
     m, base, cand = _perf(R, base_fail=[5], cand_fail=[5])
-    code, lines = G.run_gate(_doc(SHA_A, {"perf": cand}), _doc(SHA_B, {"perf": base}), {"perf": m})
+    code, lines = _run(G, R, _doc(SHA_A, {"perf": cand}), _doc(SHA_B, {"perf": base}), {"perf": m})
     text = "\n".join(lines)
     assert code == G.PASS and "eval gate: PASS" in text
     for needle in ("n=100", "McNemar exact p=", "Newcombe paired 95% CI", "discordant=0", "drop=0.00"):
@@ -148,14 +156,14 @@ def check_perf_clean_control_passes_and_prints_stats(G, R):
 
 def check_deleted_item_not_informative(G, R):
     m, base, cand = _perf(R)
-    code, lines = G.run_gate(_doc(SHA_A, {"perf": cand[:-1]}), _doc(SHA_B, {"perf": base}), {"perf": m})
+    code, lines = _run(G, R, _doc(SHA_A, {"perf": cand[:-1]}), _doc(SHA_B, {"perf": base}), {"perf": m})
     assert code == G.NOT_INFORMATIVE and "missing" in "\n".join(lines)
 
 
 def check_duplicate_id_not_informative(G, R):
     m, base, cand = _perf(R)
     cand[-1] = dict(cand[0])  # same n, an id duplicated and another missing
-    code, lines = G.run_gate(_doc(SHA_A, {"perf": cand}), _doc(SHA_B, {"perf": base}), {"perf": m})
+    code, lines = _run(G, R, _doc(SHA_A, {"perf": cand}), _doc(SHA_B, {"perf": base}), {"perf": m})
     assert code == G.NOT_INFORMATIVE and "duplicate" in "\n".join(lines)
 
 
@@ -164,7 +172,7 @@ def check_lowered_n_in_manifest_not_informative(G, R):
     # min_n kept: n < min_n is NOT INFORMATIVE even though the file is self-consistent
     m = R.make_manifest("perf", "performance", 100, _ids("perf", 80))
     ids = m["item_ids"]
-    code, lines = G.run_gate(_doc(SHA_A, {"perf": _perf_items(ids)}),
+    code, lines = _run(G, R, _doc(SHA_A, {"perf": _perf_items(ids)}),
                              _doc(SHA_B, {"perf": _perf_items(ids)}), {"perf": m})
     assert code == G.NOT_INFORMATIVE and "below min_n" in "\n".join(lines)
 
@@ -183,16 +191,16 @@ def check_n_checks_inside_the_comparator(G, R):
 
 def check_missing_set_and_no_manifests_not_informative(G, R):
     m, base, cand = _perf(R)
-    assert G.run_gate(_doc(SHA_A, {}), _doc(SHA_B, {"perf": base}), {"perf": m})[0] == G.NOT_INFORMATIVE
-    assert G.run_gate(_doc(SHA_A, {"perf": cand}), _doc(SHA_B, {"perf": base}), {})[0] == G.NOT_INFORMATIVE
-    assert G.run_gate(_doc(SHA_A, {"perf": cand}), None, {"perf": m})[0] == G.NOT_INFORMATIVE
+    assert _run(G, R, _doc(SHA_A, {}), _doc(SHA_B, {"perf": base}), {"perf": m})[0] == G.NOT_INFORMATIVE
+    assert _run(G, R, _doc(SHA_A, {"perf": cand}), _doc(SHA_B, {"perf": base}), {})[0] == G.NOT_INFORMATIVE
+    assert _run(G, R, _doc(SHA_A, {"perf": cand}), None, {"perf": m})[0] == G.NOT_INFORMATIVE
 
 
 def check_wrong_sha_not_informative(G, R):
     m, base, cand = _perf(R)
     args = (_doc(SHA_A, {"perf": cand}), _doc(SHA_B, {"perf": base}), {"perf": m})
-    assert G.run_gate(*args, expect_sha=SHA_A)[0] == G.PASS
-    assert G.run_gate(*args, expect_sha=SHA_B)[0] == G.NOT_INFORMATIVE
+    assert _run(G, R, *args, expect_sha=SHA_A)[0] == G.PASS
+    assert _run(G, R, *args, expect_sha=SHA_B)[0] == G.NOT_INFORMATIVE
 
 
 def check_fidelity_bar(G, R):
@@ -224,13 +232,91 @@ def check_skip_policy(G, R):
                                     "GITHUB_REF": "refs/tags/v1"}, False)[0]
 
 
+def _str_false_cand(G, R, bad):
+    m, base, cand = _perf(R)
+    cand = [dict(i, **{"pass": bad}) for i in cand]
+    return _run(G, R, _doc(SHA_A, {"perf": cand}), _doc(SHA_B, {"perf": base}), {"perf": m})
+
+
+def check_non_bool_values_not_informative(G, R):
+    # F46: every candidate pass is the truthy string "false" vs an all-pass baseline: used to
+    # coerce to True and PASS. Strings, 0/1 and null are refused, never coerced.
+    for bad in ("false", "true", 1, 0, None):
+        code, lines = _str_false_cand(G, R, bad)
+        assert code == G.NOT_INFORMATIVE and "invalid item values" in "\n".join(lines), bad
+    m = _manifest(R, "fid", "fidelity")
+    items = _fid_items(m["item_ids"])
+    items[0]["pack"] = "false"
+    assert _run(G, R, _doc(SHA_A, {"fid": items}), None, {"fid": m})[0] == G.NOT_INFORMATIVE
+    ms = _manifest(R, "stab", "stability")
+    items = _stab_items(ms["item_ids"])
+    items[0]["a"] = 1
+    assert _run(G, R, _doc(SHA_A, {"stab": items}), None, {"stab": ms})[0] == G.NOT_INFORMATIVE
+
+
+def _pinned(G, R, mutate=None, pin_mutate=None, base_sha=SHA_B, with_pin=True, sidecar=PREREG):
+    m, base, cand = _perf(R)
+    manifests = {"perf": m}
+    pin = R.make_pin(manifests, SHA_B, PREREG)
+    if mutate:
+        mutate(manifests)
+    if pin_mutate:
+        pin_mutate(pin)
+    return G.run_gate(_doc(SHA_A, {"perf": cand}), _doc(base_sha, {"perf": base}), manifests,
+                      pin=pin if with_pin else None, prereg_sidecar=sidecar)
+
+
+def check_pin_consistent_fixture_still_passes(G, R):
+    assert _pinned(G, R)[0] == G.PASS
+
+
+def check_pin_refusals(G, R):
+    def refuses(**kw):
+        code, lines = _pinned(G, R, **kw)
+        assert code == G.NOT_INFORMATIVE and "provenance" in "\n".join(lines), kw
+
+    refuses(with_pin=False)                                        # manifests, no pin
+    refuses(mutate=lambda ms: ms.clear())                          # manifest deleted
+    refuses(mutate=lambda ms: ms.update(extra=_manifest(R, "extra", "stability")))   # manifest added
+    refuses(base_sha=SHA_A)                                        # baseline is not the pinned release
+    # PREREG.sha256 sidecar: absent, different, or no prereg_sha256 in the pin
+    refuses(sidecar=None)
+    refuses(sidecar="d" * 64)
+    refuses(pin_mutate=lambda p: p.pop("prereg_sha256"))
+    refuses(pin_mutate=lambda p: p["sets"]["perf"].update(manifest_sha256="0" * 64))  # sha differs
+    # n / min_n edited CONSISTENTLY in the manifest (ids dropped, hash recomputed): pin catches it
+    refuses(mutate=lambda ms: ms.update(perf=R.make_manifest("perf", "performance", 80, _ids("perf", 80))))
+    # min_n lowered alone, everything else self-consistent
+    refuses(mutate=lambda ms: ms["perf"].update(min_n=50))
+
+
+def check_prereg_file_problems(G, R):
+    import hashlib
+    import tempfile
+    with tempfile.TemporaryDirectory() as t:
+        pf = pathlib.Path(t) / "PREREG-P32.md"
+        missing = pathlib.Path(t) / "absent.md"
+        good = hashlib.sha256(b"frozen text").hexdigest()
+        assert G.prereg_file_problems(missing, good, pin_present=False) == []   # nothing to check
+        assert G.prereg_file_problems(missing, good, pin_present=True), "pin without its prereg file must refuse"
+        pf.write_text("frozen text")
+        assert G.prereg_file_problems(pf, good, pin_present=True) == []         # pass case
+        assert G.prereg_file_problems(pf, good, pin_present=False) == []
+        assert G.prereg_file_problems(pf, None, pin_present=True), "file with no sidecar must refuse"
+        assert G.prereg_file_problems(pf, "d" * 64, pin_present=True), "hash mismatch must refuse"
+        pf.write_text("edited after freeze")
+        assert G.prereg_file_problems(pf, good, pin_present=False), "edited file must refuse even without a pin"
+
+
 CHECKS = {fn.__name__: fn for fn in (
     check_perf_4pt_drop_blocks, check_perf_exactly_3pt_passes, check_perf_2pt_drop_passes,
     check_perf_improvement_and_offset_pass, check_perf_pairs_by_id_not_position,
     check_perf_clean_control_passes_and_prints_stats, check_deleted_item_not_informative,
     check_duplicate_id_not_informative, check_lowered_n_in_manifest_not_informative,
     check_n_checks_inside_the_comparator, check_missing_set_and_no_manifests_not_informative,
-    check_wrong_sha_not_informative, check_fidelity_bar, check_stability_bar, check_skip_policy,
+    check_wrong_sha_not_informative, check_non_bool_values_not_informative,
+    check_pin_consistent_fixture_still_passes, check_pin_refusals, check_fidelity_bar, check_stability_bar, check_skip_policy,
+    check_prereg_file_problems,
 )}
 
 
@@ -241,7 +327,7 @@ def test_check_green_on_the_real_gate(name, G, R):
 
 def test_checks_found_something():
     # an empty table would pass everything
-    assert len(CHECKS) >= 15
+    assert len(CHECKS) >= 19
 
 
 # ── statistics ────────────────────────────────────────────────────────────────
@@ -276,19 +362,19 @@ def test_no_float_rounding_at_the_boundary(G, R):
     ids = m["item_ids"]
     cand = _perf_items(ids, set(ids[:9]))
     base = _perf_items(ids)
-    assert G.run_gate(_doc(SHA_A, {"perf": cand}), _doc(SHA_B, {"perf": base}), {"perf": m})[0] == G.PASS
+    assert _run(G, R, _doc(SHA_A, {"perf": cand}), _doc(SHA_B, {"perf": base}), {"perf": m})[0] == G.PASS
     cand = _perf_items(ids, set(ids[:10]))
-    assert G.run_gate(_doc(SHA_A, {"perf": cand}), _doc(SHA_B, {"perf": base}), {"perf": m})[0] == G.BLOCK
+    assert _run(G, R, _doc(SHA_A, {"perf": cand}), _doc(SHA_B, {"perf": base}), {"perf": m})[0] == G.BLOCK
 
 
 def test_worst_verdict_wins(G, R):
     mp, base, cand = _perf(R, cand_fail=range(4))          # BLOCK
     ms = _manifest(R, "stab", "stability")                 # fine
     docs = _doc(SHA_A, {"perf": cand, "stab": _stab_items(ms["item_ids"])})
-    code, _ = G.run_gate(docs, _doc(SHA_B, {"perf": base}), {"perf": mp, "stab": ms})
+    code, _ = _run(G, R, docs, _doc(SHA_B, {"perf": base}), {"perf": mp, "stab": ms})
     assert code == G.BLOCK
     docs["sets"].pop("stab")                               # now also NOT INFORMATIVE
-    code, _ = G.run_gate(docs, _doc(SHA_B, {"perf": base}), {"perf": mp, "stab": ms})
+    code, _ = _run(G, R, docs, _doc(SHA_B, {"perf": base}), {"perf": mp, "stab": ms})
     assert code == G.NOT_INFORMATIVE
 
 
@@ -308,7 +394,7 @@ def test_manifest_edited_to_hide_a_deleted_item_is_caught_through_the_gate(G, R)
     m = _manifest(R, "perf", "performance")
     ids = m["item_ids"][:-1]
     tampered = dict(m, item_ids=ids, n=99)
-    code, lines = G.run_gate(_doc(SHA_A, {"perf": _perf_items(ids)}),
+    code, lines = _run(G, R, _doc(SHA_A, {"perf": _perf_items(ids)}),
                              _doc(SHA_B, {"perf": _perf_items(ids)}), {"perf": tampered})
     assert code == G.NOT_INFORMATIVE and "manifest invalid" in "\n".join(lines)
 
@@ -343,6 +429,8 @@ def _write_case(R, tmp_path, cand_fail=(), base_fail=(), manifests=True):
     mdir.mkdir()
     if manifests:
         (mdir / "perf.json").write_text(json.dumps(m))
+    (tmp_path / "PIN.json").write_text(json.dumps(R.make_pin({"perf": m}, SHA_B, PREREG)))
+    (tmp_path / "PREREG.sha256").write_text(f"{PREREG}  PREREG-P32.md\n")
     (tmp_path / "base.json").write_text(json.dumps(_doc(SHA_B, {"perf": base})))
     (tmp_path / f"{SHA_A}.json").write_text(json.dumps(_doc(SHA_A, {"perf": cand})))
 
@@ -350,7 +438,9 @@ def _write_case(R, tmp_path, cand_fail=(), base_fail=(), manifests=True):
 def _cli(G, tmp_path, *extra):
     return G.main(["compare", "--candidate", str(tmp_path / f"{SHA_A}.json"),
                    "--baseline", str(tmp_path / "base.json"),
-                   "--manifests", str(tmp_path / "manifests"), *extra])
+                   "--manifests", str(tmp_path / "manifests"),
+                   "--pin", str(tmp_path / "PIN.json"),
+                   "--prereg", str(tmp_path / "PREREG.sha256"), *extra])
 
 
 def test_cli_exit_codes(G, R, tmp_path, capsys):
@@ -370,6 +460,25 @@ def test_cli_missing_candidate_file_is_not_informative(G, tmp_path, capsys):
     rc = G.main(["compare", "--candidate", str(tmp_path / f"{SHA_A}.json"),
                  "--manifests", str(tmp_path / "none")])
     assert rc == 2
+
+
+def test_cli_prereg_file_hash_and_missing(G, R, tmp_path, capsys):
+    import hashlib
+    _write_case(R, tmp_path, cand_fail=range(2))
+    pf = tmp_path / "PREREG-P32.md"
+    pf.write_text("frozen text")
+    good = hashlib.sha256(b"frozen text").hexdigest()
+    (tmp_path / "PREREG.sha256").write_text(f"{good}  PREREG-P32.md\n")
+    (tmp_path / "PIN.json").write_text(json.dumps(R.make_pin(
+        R.load_manifests(tmp_path / "manifests"), SHA_B, good)))
+    assert _cli(G, tmp_path, "--sha", SHA_A, "--prereg-file", str(pf)) == 0
+    capsys.readouterr()
+    pf.write_text("edited after freeze")                                   # hash differs from sidecar
+    assert _cli(G, tmp_path, "--sha", SHA_A, "--prereg-file", str(pf)) == 2
+    assert "differs from its sidecar" in capsys.readouterr().out
+    pf.unlink()                                                            # pin present, file missing
+    assert _cli(G, tmp_path, "--sha", SHA_A, "--prereg-file", str(pf)) == 2
+    assert "missing but a pin exists" in capsys.readouterr().out
 
 
 # ── --skip-quality policy: CLI + shell wiring ─────────────────────────────────
@@ -471,6 +580,7 @@ def test_release_workflow_gates_on_the_sha_file_and_runs_the_gate():
     text = (REPO / ".github" / "workflows" / "release.yml").read_text()
     assert "github.sha" in text and ".json" in text
     assert "scripts/release/eval_gate.py compare" in text
+    assert "--prereg-file docs/prereg/PREREG-P32.md" in text
     assert "--sha" in text
     assert "secrets." not in text
     assert wf["permissions"] == {"contents": "read"}
@@ -499,3 +609,59 @@ def test_release_sh_attaches_the_eval_file_before_tagging():
     sh = (RELEASE_DIR / "release.sh").read_text()
     assert sh.index('eval_asset="release_evals/') < sh.index('git tag "v${current_version}"')
     assert '"$eval_asset"' in sh.split("gh release create")[1].splitlines()[0]
+
+
+# ── F46/F47 file level: write validates, pin CLI, gate CLI refuses without a pin ──
+
+def test_write_cli_refuses_non_bool_results(R, tmp_path, capsys):
+    m, _, cand = _perf(R)
+    good = tmp_path / "good.json"
+    good.write_text(json.dumps({"perf": cand}))
+    assert R.main(["write", "--sha", SHA_A, "--results", str(good), "--out-dir", str(tmp_path / "o1"),
+                   "--manifests", str(tmp_path / "none")]) == 0
+    for bad in ("false", 1):
+        (tmp_path / "bad.json").write_text(json.dumps({"perf": [dict(i, **{"pass": bad}) for i in cand]}))
+        assert R.main(["write", "--sha", SHA_A, "--results", str(tmp_path / "bad.json"),
+                       "--out-dir", str(tmp_path / "o2"), "--manifests", str(tmp_path / "none")]) == 1
+    assert not (tmp_path / "o2").exists()
+    assert "invalid item values" in capsys.readouterr().err
+
+
+def test_pin_cli_roundtrip_and_cli_gate_needs_the_pin(G, R, tmp_path, capsys):
+    _write_case(R, tmp_path)
+    (tmp_path / "PIN.json").unlink()
+    assert _cli(G, tmp_path, "--sha", SHA_A) == 2          # manifests, no pin
+    assert "provenance" in capsys.readouterr().out
+    assert R.main(["pin", "--manifests", str(tmp_path / "manifests"),
+                   "--baseline", str(tmp_path / "base.json"), "--prereg", str(tmp_path / "PREREG.sha256"),
+                   "--out", str(tmp_path / "PIN.json")]) == 0
+    assert _cli(G, tmp_path, "--sha", SHA_A) == 0
+    (tmp_path / "manifests" / "perf.json").unlink()        # delete the manifest after the freeze
+    capsys.readouterr()
+    assert _cli(G, tmp_path, "--sha", SHA_A) == 2
+    assert R.main(["pin", "--manifests", str(tmp_path / "manifests"),
+                   "--baseline", str(tmp_path / "base.json"), "--prereg", str(tmp_path / "PREREG.sha256"),
+                   "--out", str(tmp_path / "P2.json")]) == 1
+
+
+def test_release_workflow_passes_the_pin():
+    assert "--pin release_evals/PIN.json" in (REPO / ".github" / "workflows" / "release.yml").read_text()
+
+
+def test_cli_prereg_sidecar_absent_mismatched_or_malformed_is_not_informative(G, R, tmp_path, capsys):
+    _write_case(R, tmp_path)
+    side = tmp_path / "PREREG.sha256"
+    assert _cli(G, tmp_path, "--sha", SHA_A) == 0
+    side.write_text(f"{'d' * 64}  PREREG-P32.md\n")                  # different prereg
+    assert _cli(G, tmp_path, "--sha", SHA_A) == 2
+    assert "PREREG.sha256" in capsys.readouterr().out
+    side.write_text("not a hash\n")                                   # malformed is not "absent"
+    assert _cli(G, tmp_path, "--sha", SHA_A) == 2
+    side.unlink()                                                     # absent while a pin exists
+    assert _cli(G, tmp_path, "--sha", SHA_A) == 2
+    assert R.main(["pin", "--manifests", str(tmp_path / "manifests"), "--baseline", str(tmp_path / "base.json"),
+                   "--prereg", str(side), "--out", str(tmp_path / "P3.json")]) == 1   # pin needs the sidecar
+
+
+def test_release_workflow_passes_the_prereg_sidecar():
+    assert "--prereg release_evals/PREREG.sha256" in (REPO / ".github" / "workflows" / "release.yml").read_text()

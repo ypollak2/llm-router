@@ -552,3 +552,17 @@ def test_config_lite_takes_the_real_path_when_the_dotenv_names_the_field(tmp_pat
     (tmp_path / "state").mkdir()
     out = _config_probe(tmp_path / "state", line + "\n", "llm_router_claude_subscription")
     assert out == ["True", "True"]
+
+
+def test_successful_cache_refresh_records_no_fail_open(big_state, monkeypatch):
+    """F51: the success path (os.replace moved the tmp file) used to hit
+    os.remove -> FileNotFoundError -> CHZ-FO-LEDGER-CACHE-TMP-REMOVE on every
+    refresh. A fail-open ledger must stay empty when nothing failed."""
+    hook = _isolate(monkeypatch, big_state)
+    from llm_router import failopen
+
+    fo_path = failopen.store_path()
+    fo_path.unlink(missing_ok=True)
+    hook._refresh_ledger_cache()
+    assert (big_state / _CACHE).exists(), "the refresh wrote its cache (the check had something to check)"
+    assert not fo_path.exists() or fo_path.read_text() == "", fo_path.read_text()

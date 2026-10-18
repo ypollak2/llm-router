@@ -628,7 +628,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # served step: served/avoided metrics must never see it.
             guard.reset(session_id)
             if gate_decision is not None:
-                row["local_gate"] = dict(row["local_gate"], reason=local_gate.R_LOCAL_FAILED)
+                row["local_gate"] = dict(row["local_gate"], reason=local_gate.R_LOCAL_REPEAT)
             row.update(decision=ledger.DECISION_FALLBACK, reason=REASON_LOOP_GUARD,
                        detail=repeat, added_latency_s=elapsed)
             return None
@@ -861,9 +861,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # exclude it, so it is also recorded on its own (milliseconds only, no request
             # content) for the kpi "shadow schedule" figure, and only when a shadow call
             # was actually scheduled (P09-13).
-            row["tier_decision_s"] = round(time.monotonic() - t0, 3)
+            t_end = time.monotonic()  # one read: the schedule time can never exceed the decision time
+            row["tier_decision_s"] = round(t_end - t0, 3)
             if status == llm_shadow.SCHEDULED:
-                row["tier_shadow_schedule_ms"] = round((time.monotonic() - t_sched) * 1000.0, 3)
+                row["tier_shadow_schedule_ms"] = round((t_end - t_sched) * 1000.0, 3)
         if decision.proposed_tier == "haiku" and decision.haiku_block is not None:
             # The decision already computed it (and timed it as haiku_checks):
             # reuse it rather than serializing the whole body a second time (P0.9-e).
