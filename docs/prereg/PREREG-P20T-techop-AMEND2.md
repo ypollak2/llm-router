@@ -92,7 +92,7 @@ if its projection plus the reserve breaches the cap.
 
 * **Changed by the block below:** `SPEND_CAP_USD` and `REPO_SHA`.
 * **REPO_SHA** is the last commit touching `scripts/`, `src/` or `tests/` (branch
-  `prereg/p20t-amend2`, parent `063f493b`): `857fa73b33a0565b3b57d6527fbf428dd0e2023b`. If it is
+  `prereg/p20t-amend2`, parent `063f493b`): `0f5a4253674eab73be08d753d35906482e3068dc`. If it is
   rebased before the freeze, REPO_SHA is recomputed.
 
 ## Freeze procedure
@@ -111,5 +111,5 @@ if its projection plus the reserve breaches the cap.
 
 ```text P20T-AMEND2-CONSTANTS
 SPEND_CAP_USD=60.00
-REPO_SHA=857fa73b33a0565b3b57d6527fbf428dd0e2023b
+REPO_SHA=0f5a4253674eab73be08d753d35906482e3068dc
 ```
