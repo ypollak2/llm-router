@@ -208,25 +208,39 @@ def test_compute_aggregates_weekly_and_5h(
 # ── 4. Calibration env var ────────────────────────────────────────────────
 
 
-def test_calibration_default_tracks_the_subscription_price(
+def test_calibration_without_config_is_unconfigured_not_a_default_price(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("LLM_ROUTER_WEEKLY_QUOTA_USD_OPUS_EQUIV", raising=False)
+    """P35-1 (D-205): was ``$200/month`` -> ``200/4.345/100`` per pp. A plan price is the user's
+    config; with none set the calibration is None and every pp figure is None (n/a), never a guess."""
+    for k in ("LLM_ROUTER_WEEKLY_QUOTA_USD_OPUS_EQUIV", "LLM_ROUTER_WEEKLY_QUOTA_USD",
+              "LLM_ROUTER_SUBSCRIPTION_USD_PER_MONTH"):
+        monkeypatch.delenv(k, raising=False)
     with patch(
         "llm_router.state.get_last_usage",
         return_value=_FakeCachedUsage(weekly=0.0, session=0.0),
     ):
         snap = compute_quota_savings()
     assert snap is not None
-    # RED8-05 / WP-05: was a flat $50/week -> $0.50/pp, and the $50 was
-    # justified in-comment as an Opus equivalent at $15/$75 per million —
-    # the RETIRED Opus 3 rate. The test name even froze the number.
-    #
-    # Quota value is anchored to what the SUBSCRIPTION COSTS, not to a token
-    # rate: $200/month over 4.345 weeks. Under the old reasoning this figure
-    # would have had to fall by two thirds when Opus repriced, and nothing
-    # here would have noticed.
-    assert snap.calibration_usd_per_pp == pytest.approx(200.0 / 4.345 / 100.0, abs=1e-4)
+    assert snap.calibration_usd_per_pp is None and snap.calibration_source == "unconfigured"
+    assert snap.weekly_pp_saved is None and snap.session_pp_saved is None
+    assert snap.weekly_counterfactual_pct is None and not snap.is_meaningful()
+    assert snap.short_form() == "saved n/a (no plan configured)"
+
+
+def test_calibration_follows_the_users_monthly_plan_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LLM_ROUTER_WEEKLY_QUOTA_USD_OPUS_EQUIV", raising=False)
+    monkeypatch.delenv("LLM_ROUTER_WEEKLY_QUOTA_USD", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_SUBSCRIPTION_USD_PER_MONTH", "100")
+    with patch(
+        "llm_router.state.get_last_usage",
+        return_value=_FakeCachedUsage(weekly=0.0, session=0.0),
+    ):
+        snap = compute_quota_savings()
+    assert snap is not None
+    assert snap.calibration_usd_per_pp == pytest.approx(100.0 / 4.345 / 100.0, abs=1e-4)
 
 
 def test_calibration_respects_env_override(
@@ -242,9 +256,11 @@ def test_calibration_respects_env_override(
     assert snap.calibration_usd_per_pp == pytest.approx(1.00)
 
 
-def test_calibration_invalid_env_falls_back_to_default(
+def test_calibration_invalid_env_is_ignored_and_unconfigured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    for k in ("LLM_ROUTER_WEEKLY_QUOTA_USD", "LLM_ROUTER_SUBSCRIPTION_USD_PER_MONTH"):
+        monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("LLM_ROUTER_WEEKLY_QUOTA_USD_OPUS_EQUIV", "not-a-number")
     with patch(
         "llm_router.state.get_last_usage",
@@ -252,12 +268,15 @@ def test_calibration_invalid_env_falls_back_to_default(
     ):
         snap = compute_quota_savings()
     assert snap is not None
-    assert snap.calibration_usd_per_pp == pytest.approx(200.0 / 4.345 / 100.0, abs=1e-4)
+    # P35-1: an invalid value no longer falls back to a built-in plan price; it is n/a.
+    assert snap.calibration_usd_per_pp is None and snap.weekly_pp_saved is None
 
 
-def test_calibration_negative_env_falls_back_to_default(
+def test_calibration_negative_env_is_ignored_and_unconfigured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    for k in ("LLM_ROUTER_WEEKLY_QUOTA_USD", "LLM_ROUTER_SUBSCRIPTION_USD_PER_MONTH"):
+        monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("LLM_ROUTER_WEEKLY_QUOTA_USD_OPUS_EQUIV", "-5")
     with patch(
         "llm_router.state.get_last_usage",
@@ -265,7 +284,8 @@ def test_calibration_negative_env_falls_back_to_default(
     ):
         snap = compute_quota_savings()
     assert snap is not None
-    assert snap.calibration_usd_per_pp == pytest.approx(200.0 / 4.345 / 100.0, abs=1e-4)
+    # P35-1: an invalid value no longer falls back to a built-in plan price; it is n/a.
+    assert snap.calibration_usd_per_pp is None and snap.weekly_pp_saved is None
 
 
 # ── 5. llm_quota_saved tool surface ───────────────────────────────────────
@@ -591,3 +611,22 @@ def test_route_prefix_omits_hint_for_ollama_routes(
     )
     assert "wk left" not in prefix_line
     assert "30d on" not in prefix_line
+
+
+async def test_llm_quota_saved_without_a_plan_value_prints_na_not_a_guess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P35-1 (D-205): no configured plan value -> pp saved is n/a, the dollars are not turned into pp."""
+    from llm_router.tools.subscription import llm_quota_saved
+
+    for k in ("LLM_ROUTER_WEEKLY_QUOTA_USD_OPUS_EQUIV", "LLM_ROUTER_WEEKLY_QUOTA_USD",
+              "LLM_ROUTER_SUBSCRIPTION_USD_PER_MONTH"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("LLM_ROUTER_USAGE_DB_PATH", str(tmp_path / "missing.db"))
+    with patch(
+        "llm_router.state.get_last_usage",
+        return_value=_FakeCachedUsage(weekly=0.89, session=0.01),
+    ):
+        out = await llm_quota_saved()
+    assert "89.0%" in out and "saved n/a (no plan value configured)" in out
+    assert "would be" not in out and "0.0pp" not in out

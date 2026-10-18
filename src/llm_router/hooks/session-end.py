@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 41
+# llm_router-hook-version: 42
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -2345,10 +2345,16 @@ def _local_day() -> str:
 
 def _today_compact(wt) -> str | None:
     """The Stop's money fragment for today: the ledger's estimated saving with its n and window
-    (``~$1.25 est (n=7, today)``); None when the ledger has no usage database (n/a, never $0)."""
+    (``~$1.25 est (n=7, today)``, plus ``· $0.50 measured`` when the ledger holds measured dollars); None when the ledger has no usage database (n/a, never $0)."""
     if wt is None or wt.saved_usd is None or wt.saved_n is None:
         return None
-    return f"~${wt.saved_usd:,.2f} est (n={wt.saved_n:,}, {wt.window})"
+    # P35-1 (D-220): measured apart from estimated, never one summed figure.
+    measured, estimated = wt.verified_usd, wt.unverified_usd
+    if measured is None or estimated is None:
+        measured, estimated = None, wt.saved_usd
+    from llm_router import ledger_view as _lv
+
+    return f"{_lv.money_fragment(measured, estimated)} (n={wt.saved_n:,}, {wt.window})"
 
 
 def _compute_ledger_aggregates() -> dict:
