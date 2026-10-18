@@ -3752,8 +3752,34 @@ _TRANSCRIPT_TAIL_BYTES = 256 * 1024
 _CC_TURNS_NEEDED = max(_ASSISTANT_PERSIST_TURNS, 6, 2) + 1
 
 
+#: Hard ceiling on the bytes one transcript read may scan. A tool-heavy tail (file reads,
+#: screenshots: tens of KB a line) can hold no text turn for the last hundreds of MB; the
+#: old window-doubling read re-read and re-parsed all of it, so `session_io` grew with the
+#: session (F64, measured: 247 ms mean at a 100 MB tool-heavy transcript, flat 3 ms at
+#: 100 MB of prose). History is best-effort context: turns older than this much tool noise
+#: are dropped, not waited for.
+def _scan_cap_bytes() -> int:
+    """LLM_ROUTER_TRANSCRIPT_SCAN_CAP_MB (1..1024), default 32 MiB: measured ~0.86 ms per MiB
+    when the cap is hit (rv-589, N=20: 32 MiB p50 27.5 ms), so 32 MiB keeps the worst case far
+    inside the auto-route budget while covering long silent tool runs."""
+    try:
+        mb = int(os.environ.get("LLM_ROUTER_TRANSCRIPT_SCAN_CAP_MB", "") or 32)
+    except ValueError:
+        mb = 32
+    return max(1, min(mb, 1024)) * 1024 * 1024
+
+
+_TRANSCRIPT_SCAN_CAP_BYTES = _scan_cap_bytes()
+#: A line that carries one of these block types and no ``"text"`` token cannot hold a text
+#: block (``_extract_turn_text`` only keeps ``type == "text"`` blocks), so it is skipped
+#: before the JSON parse. A plain-string user turn has none of them unescaped.
+_CC_NO_TEXT_MARKERS = (b'"tool_result"', b'"tool_use"', b'"image"')
+
+
 def _parse_cc_line(raw: bytes):
     """One transcript line -> {"role","content"} or None (not a text turn)."""
+    if b'"text"' not in raw and any(m in raw for m in _CC_NO_TEXT_MARKERS):
+        return None
     line = raw.decode("utf-8", "replace").strip()
     if not line:
         return None
@@ -3777,36 +3803,57 @@ def _read_cc_turns(transcript_path: str, need: int = _CC_TURNS_NEEDED) -> list[d
 
     The old read took ``readlines()`` of the whole file and parsed every line on
     every prompt, twice: 3.3 ms per MB, 167 ms at 50 MB (D-171 A1, measured). This
-    reads a tail window and parses lines backwards until ``need`` turns are found;
-    a window with too few turns doubles, so the result equals the full parse's
-    last ``need`` turns whatever the shape of the tail. The first line of a
-    window that starts mid-file is partial and is dropped. Missing/unreadable
+    reads a tail window and parses lines backwards until ``need`` turns are found.
+    A window with too few turns does not restart: the next (doubled) chunk is read
+    from just before the one already scanned, so every byte is read and parsed at
+    most once (F64: the restart re-did all of it per doubling), and at most
+    ``_TRANSCRIPT_SCAN_CAP_BYTES`` are scanned. Within the cap the result equals the
+    full parse's last ``need`` turns whatever the shape of the tail. The line cut by
+    the start of the scanned region is partial and is dropped. Missing/unreadable
     file -> []. Never raises.
     """
     if not transcript_path or need <= 0:
         return []
     try:
         with open(transcript_path, "rb") as fh:
-            size = fh.seek(0, 2)
+            pos = fh.seek(0, 2)
             window = _TRANSCRIPT_TAIL_BYTES
-            while True:
-                start = max(0, size - window)
-                fh.seek(start)
-                blob = fh.read(size - start)
-                if start:
+            scanned = 0
+            carry = b""  # head of the line that straddles the chunk read last (its start is earlier)
+            found: list[dict] = []
+            while pos > 0 and scanned < _TRANSCRIPT_SCAN_CAP_BYTES:
+                step = min(window, pos, _TRANSCRIPT_SCAN_CAP_BYTES - scanned)
+                pos -= step
+                fh.seek(pos)
+                blob = fh.read(step) + carry
+                scanned += step
+                window *= 2
+                if pos:
                     nl = blob.find(b"\n")
-                    blob = blob[nl + 1:] if nl >= 0 else b""
-                found: list[dict] = []
+                    if nl < 0:
+                        carry = blob
+                        continue
+                    carry, blob = blob[:nl], blob[nl + 1:]
+                else:
+                    carry = b""
                 for raw in reversed(blob.split(b"\n")):
                     turn = _parse_cc_line(raw)
                     if turn is not None:
                         found.append(turn)
                         if len(found) >= need:
-                            break
-                if len(found) >= need or start == 0:
-                    found.reverse()
-                    return found
-                window *= 2
+                            found.reverse()
+                            return found
+            if pos > 0:
+                # Cap hit before `need` turns: mark it on the latency row (0 ms, so no time is
+                # double-counted) so how often context is truncated stays measurable.
+                try:
+                    from llm_router.hook_latency import add_phase as _hl_add_phase
+                except ImportError:  # llm_router not importable on this host: no recorder
+                    _hl_add_phase = None
+                if _hl_add_phase is not None:
+                    _hl_add_phase("cc_scan_capped", 0.0)  # never raises
+            found.reverse()
+            return found
     except Exception:  # noqa: BLE001 -- OSError and anything odd: history is best-effort
         return []
 

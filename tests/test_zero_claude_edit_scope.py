@@ -636,3 +636,59 @@ def test_resolve_bare_filename_not_inferred_when_disabled(tmp_path):
     repo = _symbol_repo(tmp_path, {"src/pkg/helpers.py": "x = 1\n"})
     resolved, _ = zce.resolve_target_files(("helpers.py",), repo, infer_bare=False)
     assert resolved == []
+
+
+# ── F64: the pre-flight stays off the slow path ─────────────────────────────
+
+
+def test_edit_model_without_probe_never_touches_the_network(tmp_path, monkeypatch):
+    """The hook path answers from env / cache; a stale or missing cache used to cost a live
+    /api/tags probe (up to 2 s) before the edit could even start."""
+    from llm_router import model_discovery as md
+
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("LLM_ROUTER_OLLAMA_MODEL", raising=False)
+    monkeypatch.delenv("OLLAMA_BUDGET_MODELS", raising=False)
+    monkeypatch.delenv("OLLAMA_MODELS", raising=False)
+    probes = []
+    monkeypatch.setattr(md, "probe_ollama", lambda: probes.append(1) or ["probed:7b"])
+    assert zce.edit_model(allow_probe=False) is None
+    assert probes == []
+    assert zce.edit_model() == "probed:7b"          # the default is unchanged for other callers
+    assert probes == [1]
+
+
+def test_maybe_replace_asks_ollama_while_git_status_runs(tmp_path, monkeypatch):
+    """/api/tags and /api/ps are started together (each waits for the other to have started; run
+    one after the other the first would wait out its timeout and read as unreachable)."""
+    from llm_router import warm
+    from llm_router.hooks import direct_executor as de
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_repo(repo)
+    (repo / "foo.py").write_text("def old_name():\n    pass\n")
+    _commit_all(repo, "init")
+    monkeypatch.setenv("LLM_ROUTER_ZERO_CLAUDE_SCOPE", "edit")
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("LLM_ROUTER_OLLAMA_MODEL", "m:1")
+    seen = {}
+    started = {"tags": threading.Event(), "ps": threading.Event()}
+
+    def tags(timeout=0.5):
+        started["tags"].set()
+        seen["tags_saw_ps"] = started["ps"].wait(10)
+        return {"m:1"}
+
+    def ps(timeout=0.5):
+        started["ps"].set()
+        seen["ps_saw_tags"] = started["tags"].wait(10)
+        return []                                    # cold
+
+    monkeypatch.setattr(de, "available_ollama_models", tags)
+    monkeypatch.setattr(warm, "ollama_ps", ps)
+    monkeypatch.setattr(warm, "warm_edit_model_bg", lambda model: None)
+    out = zce.maybe_replace(prompt="rename old_name to new_name in foo.py", cwd=str(repo),
+                            deadline_s=time.monotonic() + 5)
+    assert seen == {"tags_saw_ps": True, "ps_saw_tags": True}
+    assert out is not None and out.action == "fallthrough" and "cold" in out.log_reason

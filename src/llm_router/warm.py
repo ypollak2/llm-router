@@ -131,15 +131,23 @@ def is_model_loaded(model: str, resident: list[str]) -> bool:
     return any(model_matches(model, r) for r in resident)
 
 
-def should_skip_cold(model: str, deadline_s: float, *, now: float | None = None) -> str | None:
+_FETCH = object()  # "ask /api/ps yourself" (a caller that already holds the answer passes it)
+
+
+def should_skip_cold(model: str, deadline_s: float, *, now: float | None = None,
+                     resident: "list[str] | None | object" = _FETCH) -> str | None:
     """A reason string when the edit should fall through to Claude, else None.
 
     Skips only when ALL hold: ``/api/ps`` answered, the model is not resident,
     and the time left before ``deadline_s`` (an absolute ``time.monotonic()``
     instant) is below ``cold_budget_s()``. Unknown state, a resident model, or a
     generous deadline all return None, i.e. proceed exactly as before.
+
+    ``resident`` is ``ollama_ps()``'s answer when the caller already fetched it (the
+    zero-Claude edit path prefetches it beside its git checks, F64); omitted, it is asked here.
     """
-    resident = ollama_ps()
+    if resident is _FETCH:
+        resident = ollama_ps()
     if resident is None or is_model_loaded(model, resident):
         return None
     remaining = deadline_s - (time.monotonic() if now is None else now)
