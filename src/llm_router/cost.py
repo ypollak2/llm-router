@@ -2245,6 +2245,7 @@ async def log_routing_decision(
     inventory_sig: str | None = None,
     skipped: list[dict] | None = None,
     served_by_last_resort: bool | None = None,
+    door: str | None = None,
 ) -> None:
     """Persist a complete routing decision to the routing_decisions table.
 
@@ -2429,6 +2430,7 @@ async def log_routing_decision(
                     response=response,
                     task_type=task_type,
                     answering_model=final_model,
+                    door=door,
                 )
             except Exception as exc:
                 # The judge is optional, but a permanently failing judge means
