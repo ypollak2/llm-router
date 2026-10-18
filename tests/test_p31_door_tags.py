@@ -146,7 +146,7 @@ def test_route_server_declares_the_gateway_door(monkeypatch):
 def test_agent_route_pretooluse_never_samples_or_writes(tmp_path):
     """The non-DIRECT agent-route path (PreToolUse approve/block) is not a door: it must
     not pick, count or queue anything even with every call sampled."""
-    from tests.test_agent_route_hook import _load_hook_module, _run
+    from tests.test_agent_route_hook import _run
 
     code, _out = _run("implement the foo module", tmp_path=tmp_path, subagent_direct=False,
                       extra_env={"LLM_ROUTER_JUDGE_SAMPLE_RATE": "1.0"})
