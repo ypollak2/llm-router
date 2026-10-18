@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 65
+# llm_router-hook-version: 66
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 65"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 66"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -1612,6 +1612,85 @@ _COORDINATE_IMPERATIVE_OBJECT_RE = re.compile(
 )
 
 
+# F69: short acknowledgement / confirmation prompts that report an owner action
+# ("ok", "done", "yeah I reconnected the mcp", "copied the hooks", "yes, go ahead",
+# "thanks"). The next step after one of these is always local work, never a routable
+# Q&A, so they must not context-inherit a Q&A class (observed 2026-10-18: "Yeah, I
+# reconnected the mcp" inherited analyze/moderate and held Bash, violation 1/4).
+_ACK_WORD = (r"(?:ok(?:ay)?|yeah|yep|yup|yes|sure|done|thanks?(?:\s+you)?|thx|great|"
+             r"cool|nice|perfect|alright|got\s+it|right|good|sounds\s+good|looks\s+good)")
+_ACK_ONLY_RE = re.compile(
+    rf"^(?:{_ACK_WORD}|go\s+ahead|do\s+it|proceed|please\s+do|that\s+works)"
+    rf"(?:[\s,.!;-]+(?:{_ACK_WORD}|go\s+ahead|do\s+it|proceed|please\s+do|that\s+works))*"
+    r"[\s.!]*$",
+    re.IGNORECASE,
+)
+_ACK_LEAD_RE = re.compile(rf"^(?:{_ACK_WORD}[\s,.!;-]+)+", re.IGNORECASE)
+_ACK_REPORT_RE = re.compile(
+    r"^(?:(?:i|we)(?:'ve|\s+have|\s+just|\s+already)?\s+"
+    r"(?:\w+ed|ran|did|made|got|sent|set|put|built|wrote|took|pasted|restarted)"
+    r"|\w+ed)\b",
+    re.IGNORECASE,
+)
+_ACK_NEW_REQUEST_RE = re.compile(
+    r"\b(?:why|what|how|when|where|which|who|now|then|next|also|please|can you|could you|would you|will you|and (?:then )?\w+e)\b",
+    re.IGNORECASE,
+)
+_ACK_MAX_WORDS = 10
+
+# F69: a prompt that is just a pasted shell command ("llm-router summary`", with or
+# without a stray backtick) is operational: the next step is running it locally.
+_CMD_EXECUTABLES = frozenset({
+    "llm-router", "git", "gh", "uv", "uvx", "pytest", "python", "python3", "pip", "ls",
+    "cat", "npm", "npx", "pnpm", "yarn", "node", "make", "docker", "kubectl", "brew",
+    "cd", "grep", "rg", "find", "sed", "head", "tail", "curl", "launchctl", "ruff",
+    "mypy", "cargo", "go", "codex", "claude", "sudo", "export", "echo", "tmux", "ssh",
+})
+_CMD_PROSE_WORDS_RE = re.compile(
+    r"(?<![\w-])(?:why|what|how|when|where|which|who|is|are|was|were|does|do|did|the|a|an|my|"
+    r"it|its|i|we|you|to|not|fails?|failed|please|can|could|should|would|will|"
+    r"now|then|next|also)(?![\w-])",
+    re.IGNORECASE,
+)
+# Publishing/mutating shared-state commands keep the older executable-coordination
+# handling (directive + pending route so llm_act can run them; see
+# tests/test_coordination_introspection_not_routed.py), so they are not claimed here.
+_CMD_SHARED_STATE_RE = re.compile(
+    r"(?<![\w-])(?:push|merge|deploy|release|commit)(?![\w-])", re.IGNORECASE)
+_CMD_MAX_WORDS = 12
+
+
+def _is_command_shaped(prompt: str) -> bool:
+    """True when the whole prompt is one shell-command line: first token is a
+    known executable (or a ./ ~/ / path), optional ``$ `` prefix, optional wrapping
+    or stray backticks, and no prose words. A real question that mentions a
+    command ("why does git rebase fail?") never matches: '?' or a prose word rejects."""
+    t = prompt.strip().strip("`").strip()
+    if t.startswith("$ "):
+        t = t[2:].lstrip()
+    if not t or "?" in t or "\n" in t or len(t.split()) > _CMD_MAX_WORDS:
+        return False
+    first = t.split()[0]
+    if first not in _CMD_EXECUTABLES and not first.startswith(("./", "~/", "/")):
+        return False
+    return not (_CMD_PROSE_WORDS_RE.search(t) or _CMD_SHARED_STATE_RE.search(t))
+
+
+def _is_acknowledgement(prompt: str) -> bool:
+    """True for a short, non-question acknowledgement or past-tense owner-action
+    report. Genuine follow-up questions ("why?", "and the tests?") never match:
+    '?' rejects them, and a report must open with a past-tense verb."""
+    stripped = prompt.strip()
+    if not stripped or "?" in stripped or len(stripped.split()) > _ACK_MAX_WORDS:
+        return False
+    if _ACK_ONLY_RE.match(stripped):
+        return True
+    rest = _ACK_LEAD_RE.sub("", stripped, count=1).strip()
+    if not rest or _ACK_NEW_REQUEST_RE.search(rest):
+        return False
+    return bool(_ACK_REPORT_RE.match(rest))
+
+
 def _is_coordination_task(prompt: str) -> bool:
     """Return True when the prompt needs Claude's own session/local state
     rather than a stateless routed model — multi-agent orchestration, or one
@@ -1641,6 +1720,8 @@ def _is_coordination_task(prompt: str) -> bool:
     stripped = prompt.strip()
     words = stripped.split()
     if len(words) <= 6 and _COORDINATE_AMBIENT_RE.match(stripped):
+        return True
+    if _is_acknowledgement(stripped) or _is_command_shaped(stripped):
         return True
 
     # Real-traffic shapes (see the block comment above _COORDINATE_STATUS_RE):
