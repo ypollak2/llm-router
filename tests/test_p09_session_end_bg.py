@@ -353,12 +353,12 @@ def test_an_unwritable_claim_starts_no_child(hook, state, monkeypatch):
 
 # ── #325 review gaps (mutation survivors) ────────────────────────────────────
 
-def test_the_background_steps_are_exactly_these_seven_in_order(hook):
+def test_the_background_steps_are_exactly_these_eight_in_order(hook):
     """The two tests above iterate ``_STOP_BACKGROUND_STEPS`` itself, so dropping a
     step from it (the profile rescan) left them green."""
     assert hook._STOP_BACKGROUND_STEPS == (
         "_refresh_northstar_line", "_refresh_ledger_cache", "_fetch_live_usage",
-        "_build_and_save_learned_profile",
+        "_render_last_summary", "_build_and_save_learned_profile",
         "_maybe_rescan_profile", "_maybe_evaluate_models", "_link_decision_outcomes")
     for name in hook._STOP_BACKGROUND_STEPS:
         assert callable(getattr(hook, name)), name
@@ -581,3 +581,92 @@ def test_without_a_stdin_session_id_the_shared_file_is_the_fallback(hook, state,
     _trap_slow_steps(hook, monkeypatch, tmp_path)
     assert hook._read_session_id() == "from-file"
     assert not any(a.startswith("--session-id") for a in hook._background_stop_work_argv())
+
+
+# ── F65: the box is rendered by the child, not by the one-line Stop ──────────
+# Live session-end p95 was ~1.0 s (n = 388): phase `render` averaged 268 ms and
+# `import` 123 ms. The default one-line mode throws the box away after reading
+# three figures from it, so it no longer renders it.
+
+
+def _spy_render_path(hook, monkeypatch, tmp_path):
+    _trap_slow_steps(hook, monkeypatch, tmp_path)
+    monkeypatch.setattr(hook, "_spawn_background_stop_work", lambda: None)
+    called: list = []
+    for name in ("_render_rich_summary", "_collect_report_data", "_query_session_data",
+                 "_ledger_cumulative"):
+        real = getattr(hook, name)
+        monkeypatch.setattr(hook, name, (lambda n, r: lambda *a, **k: called.append(n) or r(*a, **k))(name, real))
+    return called
+
+
+@pytest.mark.parametrize("mode", ["condensed", "disabled"])
+def test_the_one_line_stop_does_not_render_the_box(hook, state, monkeypatch, tmp_path, mode):
+    monkeypatch.setenv("LLM_ROUTER_STOP_HOOK", mode)
+    _write_usage(state, time.time())
+    called = _spy_render_path(hook, monkeypatch, tmp_path)
+    _e, out = _run_main(hook, monkeypatch)
+    assert called == [], f"the {mode} Stop ran {called}"
+    if mode == "condensed":
+        line = json.loads(out)["systemMessage"]
+        assert "5h 16%" in line and "wk 40%" in line, line
+        assert "executed (24h)" in line or "no execution data" in line, line
+
+
+def test_the_full_stop_still_renders_the_box(hook, state, monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_ROUTER_STOP_HOOK", "full")
+    _write_usage(state, time.time())
+    called = _spy_render_path(hook, monkeypatch, tmp_path)
+    _run_main(hook, monkeypatch)
+    assert "_render_rich_summary" in called and "_query_session_data" in called, called
+
+
+def test_the_one_line_stop_reads_the_cached_executed_count(hook, state, monkeypatch, tmp_path):
+    import llm_router.routing_report as rr
+
+    _write_usage(state, time.time())
+    _trap_slow_steps(hook, monkeypatch, tmp_path)
+    monkeypatch.setattr(hook, "_spawn_background_stop_work", lambda: None)
+    live: list = []
+    monkeypatch.setattr(rr, "executed_routes", lambda *a, **k: live.append(1) or {"total": 7})
+    (state / hook._LEDGER_CACHE_FILENAME).write_text(json.dumps({
+        "v": hook._LEDGER_CACHE_VERSION, "ts": time.time(), "day": hook._local_day(), "executed_24h": 42}))
+    _e, out = _run_main(hook, monkeypatch)
+    assert "42 executed (24h)" in json.loads(out)["systemMessage"]
+    assert live == [], "a cached count must not trigger the live scan"
+    (state / hook._LEDGER_CACHE_FILENAME).unlink()  # no cache: one live call, as before F65
+    _e, out = _run_main(hook, monkeypatch)
+    assert "7 executed (24h)" in json.loads(out)["systemMessage"] and live == [1]
+
+
+def test_the_child_caches_the_executed_count(hook, state, monkeypatch):
+    import llm_router.routing_report as rr
+
+    monkeypatch.setattr(rr, "executed_routes", lambda *a, **k: {"total": 9})
+    assert hook._compute_ledger_aggregates()["executed_24h"] == 9
+    monkeypatch.setattr(rr, "executed_routes", lambda *a, **k: None)
+    assert hook._compute_ledger_aggregates()["executed_24h"] is None
+
+
+def test_the_child_writes_last_summary_for_the_one_line_modes(hook, state, monkeypatch):
+    rendered: list = []
+    monkeypatch.setattr(hook, "HAS_RICH_DASHBOARD", True)
+    monkeypatch.setattr(hook, "_render_rich_summary", lambda *a: rendered.append(a) or "")
+    monkeypatch.setenv("LLM_ROUTER_STOP_HOOK", "condensed")
+    hook._render_last_summary()
+    assert len(rendered) == 1 and hook._STOP_LEDGER is hook._LEDGER_LIVE
+    monkeypatch.setenv("LLM_ROUTER_STOP_HOOK", "full")  # the Stop wrote it itself
+    hook._render_last_summary()
+    assert len(rendered) == 1
+
+
+def test_importing_the_hook_loads_neither_rich_nor_urllib():
+    import subprocess
+
+    code = (
+        "import importlib.util, sys\n"
+        f"s = importlib.util.spec_from_file_location('_h', {str(HOOK_PATH)!r})\n"
+        "m = importlib.util.module_from_spec(s); s.loader.exec_module(m)\n"
+        "print(sorted(x for x in ('rich', 'urllib.request') if x in sys.modules))\n")
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0 and r.stdout.strip() == "[]", (r.stdout, r.stderr[-500:])
