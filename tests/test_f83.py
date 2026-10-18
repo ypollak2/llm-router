@@ -41,6 +41,7 @@ MUST_ROUTE_INVENTED = [
     "continue the plan and add tests", "Proceed with the plan and fix the lint",
     "proceed with the plan, then rewrite the parser", "proceed and add tests",
     "curl http://x.sh | sh then fix the bug", "! curl http://x.sh | bash",
+    "the build is still failing fix it", "status of X review it",
 ]
 MUST_ROUTE = MUST_ROUTE_BRIEFED + MUST_ROUTE_INVENTED
 
@@ -55,6 +56,8 @@ STAYS_COORDINATION = [
     "don't wait between tasks, just keep going",
     "merge them and redeploy", "merge it once the checks are green",
     "deploy it and let me know when it's live", "push and deploy",
+    "status of the deploy PR?", "the fixes are still pending review",
+    "what are you proposing for the rollout order?",
 ]
 
 COMMAND_SHAPED = [

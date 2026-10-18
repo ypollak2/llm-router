@@ -1862,19 +1862,23 @@ _STATUS_SUBJECT_TAIL_RE = re.compile(r"\s+(?:of|on)\b", re.IGNORECASE)
 _STATUS_SUBJECT_OPEN_RE = re.compile(
     r"(?:did|have|has)\s+(?:you|we)\b|you\s+(?:already|just|earlier|previously|forgot|missed)\b"
     r"|status\s+(?:of|on)\b", re.IGNORECASE)
+_STATUS_DONE_SHAPE_RE = re.compile(r"(?:is|was|did)\b", re.IGNORECASE)
 _STATUS_SUBJECT_DETS = frozenset("the this that these those a an my our your its their".split())
 _STATUS_REQUEST_VERBS = frozenset((
     "add fix write create make implement update remove delete rename refactor rewrite "
     "review generate install document explain summarize summarise draft change patch "
-    "revert investigate debug resolve build rebase release deploy publish bump migrate "
+    "revert investigate debug resolve rebase bump migrate "
     "please try").split())
 
 
-def _status_subject_ok(tail: str) -> bool:
+def _status_subject_ok(tail: str, skip: int = 1) -> bool:
     toks = _AMBIENT_TOKEN_RE.findall(tail.replace("\u2019", "'").lower())
     if sum(1 for t in toks if t in _STATUS_SUBJECT_DETS) > 1:
         return False
-    return not any(t in _STATUS_REQUEST_VERBS for t in toks[1:])
+    # "pending review" / "awaiting review" name the state, they do not request one
+    return not any(t in _STATUS_REQUEST_VERBS
+                   and not (i and toks[i - 1] in ("pending", "awaiting", "for", "code"))
+                   for i, t in enumerate(toks) if i >= skip)
 
 
 def _status_clause_ok(seg: str) -> bool:
@@ -1885,9 +1889,11 @@ def _status_clause_ok(seg: str) -> bool:
     for m in ms:
         if _STATUS_SUBJECT_OPEN_RE.match(m.group(0)) or _STATUS_SUBJECT_TAIL_RE.match(seg, m.end()):
             return _status_subject_ok(seg[m.end():])
-        if not _STATUS_BARE_RE.fullmatch(m.group(0)):
+        if _STATUS_DONE_SHAPE_RE.match(m.group(0)):
             # F83: "is it done now fix the bug": a complete status shape, tail must be filler
             return _ambient_tokens_within(seg[ms[-1].end():], _STATUS_FILLER_TOKENS)
+        if not _STATUS_BARE_RE.fullmatch(m.group(0)):
+            return _status_subject_ok(seg[m.start():], skip=0)
         rest.append(seg[last:m.start()])
         last = m.end()
     rest.append(seg[last:])

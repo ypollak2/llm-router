@@ -38,7 +38,7 @@ MUST_ROUTE_INVENTED = [
     "roll out the new config and report back", "push and deploy the hotfix",
     "merge it and then write release notes", "deploy it and rewrite the readme",
     "!git push origin main", "! rm -rf build", " ! git commit -m 'x'", "!fix the failing test",
-    "Proceed with the plan", "continue the plan and add tests", "continue refactoring the parser",
+    "continue the plan and add tests", "continue refactoring the parser",
     "keep going and fix the lint errors", "go on and write the tests",
     "carry on with the plan but rename the module",
 ]
@@ -56,6 +56,8 @@ STAYS_COORDINATION = [
     "deploy it and let me know when it's live", "continue the plan", "continue",
     "keep going", "go on", "carry on", "carry on with the plan", "continue with the plan",
     "ok, continue the plan", "keep going with the plan", "continue with the rest",
+    # D-222 (F83): moved from MUST_ROUTE; "Proceed with the plan" is coordination.
+    "Proceed with the plan",
 ]
 
 COMMAND_SHAPED = [
