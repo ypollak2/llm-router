@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 36
+# llm_router-hook-version: 37
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -13,7 +13,6 @@ import re
 import sqlite3
 import sys
 import time
-import urllib.request
 import io
 import uuid
 from datetime import datetime, timezone
@@ -60,11 +59,14 @@ try:
 except Exception:
     pass
 
+# F65: rich + the dashboard are imported inside ``_render_rich_summary`` (~30 ms), only
+# when a box is rendered. Here only their presence is checked (a find_spec, no import).
 try:
-    from rich.console import Console
-    from llm_router.ui.session_summary import SessionSummaryDashboard
-    HAS_RICH_DASHBOARD = True
-except ImportError:
+    import importlib.util as _importlib_util
+
+    HAS_RICH_DASHBOARD = (_importlib_util.find_spec("rich") is not None
+                          and _importlib_util.find_spec("llm_router") is not None)
+except (ImportError, ValueError):
     HAS_RICH_DASHBOARD = False
 
 # Import timeout config from llm_router package if available
@@ -209,6 +211,8 @@ def _read_claude_oauth(timeout, env=None):
 
 
 def _fetch_live_usage() -> dict | None:
+    import urllib.request  # F65: ~22 ms, and only this child-run step needs it
+
     try:
         token = (_read_claude_oauth(subprocess_timeout()) or {}).get("accessToken", "")
         if not token:
@@ -2277,7 +2281,7 @@ def _condense(summary: str) -> str:
 
 #: Steps the child runs, in order; each is fail-open on its own.
 _STOP_BACKGROUND_STEPS = ("_refresh_northstar_line", "_refresh_ledger_cache", "_fetch_live_usage",
-                          "_build_and_save_learned_profile",
+                          "_render_last_summary", "_build_and_save_learned_profile",
                           "_maybe_rescan_profile", "_maybe_evaluate_models",
                           "_link_decision_outcomes")
 _STOP_NOTES_FILENAME = "stop_notes.json"
@@ -2509,6 +2513,15 @@ def _compute_ledger_aggregates() -> dict:
         out["daily_14d"] = [list(r) for r in _query_daily_14d()]
     except Exception:  # noqa: BLE001
         pass
+    try:
+        # F65: the one-line Stop reads this instead of scanning routing_decisions.
+        # None = no data (the live call said so), distinct from an absent key.
+        from llm_router.routing_report import executed_routes as _er
+
+        _res = _er(24.0)
+        out["executed_24h"] = _res["total"] if _res is not None else None
+    except Exception:  # noqa: BLE001
+        pass
     for window in ("today", "lifetime"):
         try:
             if window in totals:
@@ -2575,6 +2588,44 @@ def _read_ledger_cache(now: float | None = None) -> dict:
         return {}
 
 
+def _executed_24h() -> int | None:
+    """Executed routes in the last 24 h for the one-line Stop: the child's cached
+    count when it has one, else one live ``executed_routes`` call (a first Stop, a
+    stale cache). None = no data. Never raises."""
+    if _STOP_LEDGER is not _LEDGER_LIVE and "executed_24h" in _STOP_LEDGER:  # type: ignore[operator]
+        v = _STOP_LEDGER["executed_24h"]  # type: ignore[index]
+        if v is None or (isinstance(v, int) and not isinstance(v, bool) and v >= 0):
+            return v
+    try:
+        from llm_router.routing_report import executed_routes
+
+        res = executed_routes(24.0)
+        return res["total"] if res is not None else None
+    except Exception as _exc:  # noqa: BLE001 -- reporting must never break Stop
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-STOP-EXECUTED-ROUTES", _exc)
+        return None
+
+
+def _cheap_summary_box(current: dict | None) -> str:
+    """What the one-line modes need from the box, without rendering it: the
+    ``ROUTING 24h N executed`` header and the 5h / weekly percentages, in the
+    shapes ``_condense`` reads (same text the dashboard prints for them)."""
+    n = _executed_24h()
+    lines = ["  ROUTING  24h  " + (f"{n} executed" if n is not None else "no execution data")]
+    if current:
+        session_pct = current.get("session_pct", 0.0) or 0.0
+        weekly_pct = current.get("weekly_pct", 0.0) or 0.0
+        if session_pct > 0 or weekly_pct > 0:
+            lines.append("  QUOTA  Claude Subscription  live")
+            if session_pct > 0:
+                lines.append(f"   5h  {session_pct:.0f}%")
+            if weekly_pct > 0:
+                lines.append(f"   weekly  {weekly_pct:.0f}%")
+    return "\n".join(lines) + "\n  " + "═" * (WIDTH - 2)
+
+
 def _cached_rows(key: str, width: int) -> list[tuple]:
     """``_STOP_LEDGER[key]`` as a list of tuples of ``width``, else ``[]``."""
     try:
@@ -2628,6 +2679,27 @@ def _link_decision_outcomes() -> None:
 
     outcome_link.link()
     decision_report.backfill_daily(7)
+
+
+def _render_last_summary() -> None:
+    """Child step (F65): render the full box into last_summary.ansi, the file the
+    footer and ``llm-router summary`` point at, off the Stop's path. The full mode
+    renders (and writes it) in the Stop itself, so this skips there."""
+    global _STOP_LEDGER
+    if _stop_hook_mode() == "full" or not HAS_RICH_DASHBOARD:
+        return
+    session_start = _read_session_start()
+    paid_rows, cc_rows, free_rows = _query_session_data(session_start)
+    tools = _aggregate(paid_rows) if paid_rows else {}
+    start, current, is_live = _get_cc_usage()
+    # _refresh_ledger_cache ran just before: use its cache, not a second ledger scan.
+    _STOP_LEDGER = _read_ledger_cache()
+    try:
+        cumulative = _ledger_cumulative()
+        _render_rich_summary(session_start, paid_rows, cc_rows, free_rows, tools,
+                             start, current, is_live, cumulative)
+    finally:
+        _STOP_LEDGER = _LEDGER_LIVE
 
 
 def _run_background_stop_work() -> None:
@@ -2717,6 +2789,240 @@ class _Laps:
         if self._open is not None:
             self._open.__exit__(None, None, None)
             self._open = None
+
+
+def _render_rich_summary(session_start, paid_rows, cc_rows, free_rows, tools,
+                         start, current, is_live, cumulative) -> str:
+    """The Rich SessionSummaryDashboard box as plain text (the colored version is
+    written to last_summary.ansi). The expensive half of the Stop: Rich layout plus
+    the queries only the full box shows. Raises on failure; the caller falls back.
+    Heavy imports are here, not at module top, so a Stop that never renders pays none."""
+    from rich.console import Console
+    from llm_router.ui.session_summary import SessionSummaryDashboard
+
+    report_data = _collect_report_data(
+        session_start, paid_rows, cc_rows, free_rows, tools,
+        start, current, is_live, cumulative,
+    )
+
+    # Prepare data for SessionSummaryDashboard
+    # Use canonical "method" key (e.g. "heuristic", "ollama") not the human "reason"
+    # string — the renderer's _METHOD_SYMBOLS lookup requires canonical IDs.
+    dashboard_decisions = [
+        {"method": d["method"], "count": d["hits"]}
+        for d in report_data.get("routing_logic", [])
+    ]
+    dashboard_executed = None
+    try:
+        from llm_router.routing_report import executed_routes
+
+        dashboard_executed = executed_routes(24.0)
+    except Exception as _exc:  # noqa: BLE001 — reporting must never break Stop
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-STOP-EXECUTED-ROUTES", _exc)
+
+    dashboard_savings = {}
+    for label, calls, total_tokens, _, saved_usd in cumulative:
+        if label == "today":
+            dashboard_savings["today"] = saved_usd
+            dashboard_savings["today_tokens"] = total_tokens
+        elif label == "this week":
+            dashboard_savings["week"] = saved_usd
+            dashboard_savings["week_tokens"] = total_tokens
+        elif label == "14 days":
+            dashboard_savings["14d"] = saved_usd
+            dashboard_savings["14d_tokens"] = total_tokens
+        elif label == "this month":
+            dashboard_savings["month"] = saved_usd
+            dashboard_savings["month_tokens"] = total_tokens
+        elif label == "all time":
+            dashboard_savings["lifetime"] = saved_usd
+            dashboard_savings["lifetime_tokens"] = total_tokens
+
+    # Redirect to StringIO so Rich doesn't pollute stdout.
+    # Console(record=True) without file= defaults to sys.stdout AND records;
+    # that mix would corrupt the JSON envelope Claude Code reads from stdout.
+    _rich_buf = io.StringIO()
+    console = Console(record=True, force_terminal=True, color_system="truecolor", file=_rich_buf)
+    dashboard = SessionSummaryDashboard(console=console)
+
+    # Gather 14-day cost data from report
+    daily_14d_data = report_data.get("daily_14d", [])
+    daily_costs = [d[3] for d in daily_14d_data] if daily_14d_data else []
+
+    # NOTE: this used to synthesise a 7-day history when the query
+    # returned nothing, by scaling today's figure by invented ratios
+    # (0.3, 0.35, 0.4, ...). That is fabricated data presented as a
+    # measurement, and it is the one thing a savings report must never
+    # do — a chart of made-up numbers is worse than an empty chart,
+    # because an empty chart is honest about what is known. When there
+    # is no daily data, show none.
+
+    total_saved = sum(daily_costs) if daily_costs else 0.0
+
+    # Gather 14-day model breakdown directly from routing_decisions.final_model.
+    # This is the authoritative source — previous code fell through to routing
+    # method names (heuristic, build-fast-path) because it never queried here.
+    # COVERAGE, NOT JUST NUMBERS (audit doc 27).
+    #
+    # `routing_decisions` is written ONLY by llm_route and llm_auto. The whole
+    # llm(task=…) family calls route_and_call() without `classification_data`,
+    # and router.py guards the write with `if classification_data:` — so the
+    # dominant traffic never appears here and nothing records the omission.
+    #
+    # This panel therefore describes ONE TOOL's routing, and was rendered as
+    # "MODELS 14-day mix" as though it described everything. Worse, when no
+    # llm_route call has happened inside the window the newest row can be weeks
+    # old and the percentages still render as current — which is exactly what was
+    # observed: 643 rows into `usage` in 24h against 0 into routing_decisions.
+    #
+    # So the panel now carries what it covers and how fresh it is. The fix is to
+    # NAME the difference, not to widen the query — adding the missing traffic
+    # would move every historical percentage silently.
+    model_breakdown: dict[str, float] = {}
+    model_breakdown_note = ""
+    try:
+        if os.path.exists(_db_path()):
+            _mb_conn = sqlite3.connect(_db_path())
+            _mb_rows = _mb_conn.execute(
+                "SELECT final_model, COUNT(*) AS cnt "
+                "FROM routing_decisions "
+                "WHERE final_model IS NOT NULL AND final_model != '' "
+                "  AND date(timestamp) >= date('now', '-14 days') AND " + _real_decision(_mb_conn) + " "
+                "GROUP BY final_model "
+                "ORDER BY cnt DESC "
+                "LIMIT 8"
+            ).fetchall()
+            _mb_newest = _mb_conn.execute(
+                "SELECT MAX(timestamp) FROM routing_decisions"
+            ).fetchone()[0]
+            _mb_conn.close()
+            _mb_total = sum(r[1] for r in _mb_rows)
+            if _mb_total > 0:
+                for _model, _cnt in _mb_rows:
+                    model_breakdown[_model] = (_cnt / _mb_total) * 100
+                model_breakdown_note = "classified routes only"
+            elif _mb_newest:
+                # Rows exist but NONE inside the window. Say so rather than
+                # rendering nothing, which reads as "no routing happened".
+                model_breakdown_note = f"no classified routes since {_mb_newest[:10]}"
+    except Exception:
+        pass
+
+    # Gather quota data from Claude subscription.
+    # Both *_pct values are stored as 0-100 (not 0-1) — do NOT multiply by 100.
+    claude_quota_pct = current.get("weekly_pct", 0.0) if current else 0.0
+    claude_session_pct = current.get("session_pct", 0.0) if current else 0.0
+    claude_session_resets_at = current.get("session_resets_at", "") if current else ""
+    gemini_quota_pct = 0.0  # Placeholder for future Gemini integration
+    claude_remaining = current.get("session_resets_at", "Unknown") if current else "Unknown"
+
+    # If the session reset time is unknown, fall back to showing weekly
+    # savings. Pull the "this week" bucket and label it truthfully.
+    # Previously this summed the "all time" row but printed "saved this
+    # week" — the mislabel that made the SessionEnd figure disagree with
+    # the llm_savings weekly bucket by the lifetime/weekly ratio
+    # (RETROSPECTIVE B-6). Value and label must name the same window.
+    if not claude_remaining or claude_remaining == "Unknown":
+        weekly_saved = sum(d[4] for d in cumulative if d[0] == "this week")
+        if weekly_saved > 0:
+            claude_remaining = f"~{weekly_saved:.2f} USD saved this week"
+
+    gemini_remaining = "Unknown"
+
+    # Build daily_calls / daily_tokens from the 14-day data already computed above.
+    # daily_14d_data rows are (date_str, calls, tokens, cost_usd, tokens_saved).
+    daily_calls_list = [d[1] for d in daily_14d_data] if daily_14d_data else []
+    daily_tokens_list = [d[2] for d in daily_14d_data] if daily_14d_data else []
+    daily_tokens_saved_list = [d[4] for d in daily_14d_data] if daily_14d_data else []
+
+    # Gather session-level metrics: burn rate, fallback %, p95 latency, etc.
+    session_metrics = _query_session_metrics(session_start)
+    daily_cache_trend = _query_daily_cache_trend()
+
+    # Build session_models from tools_data so the MODELS panel shows "this session".
+    # Format: [{"model": str, "calls": int, "tokens": int, "cost": float, "saved": float}]
+    # The panel is titled "MODELS this session", so it aggregates EVERY model
+    # invoked this session — paid, subscription and free/local alike. It was
+    # previously built from `report_data["tools"]`, which is `_aggregate(paid_rows)`:
+    # that silently excluded `_FREE_PROVIDERS` (ollama, codex, gemini_cli), so a
+    # session routed mostly to a local model showed a panel that did not contain
+    # it. A "free" cost column already exists precisely to render those rows.
+    all_session_rows = paid_rows + cc_rows + free_rows
+    session_models_list: list[dict] = []
+    if all_session_rows:
+        model_agg: dict[str, dict] = {}
+        for data in _aggregate(all_session_rows).values():
+            if not isinstance(data, dict):
+                continue
+            for model, totals in data.get("model_totals", {}).items():
+                agg = model_agg.setdefault(
+                    model, {"calls": 0, "tokens": 0, "cost": 0.0}
+                )
+                # Real per-model sums — NOT tool_total * call_count, which
+                # inflated tokens and cost by the tool's row count.
+                agg["calls"]  += totals["calls"]
+                agg["tokens"] += totals["in"] + totals["out"]
+                agg["cost"]   += totals["cost"]
+        for model, agg in sorted(model_agg.items(), key=lambda x: -x[1]["calls"]):
+            session_models_list.append({
+                "model": model,
+                "calls": agg["calls"],
+                "tokens": agg["tokens"],
+                "cost": agg["cost"],
+                "saved": 0.0,
+            })
+
+    dashboard.print_dashboard(
+        timestamp=f"Session · {datetime.now(timezone.utc).isoformat()}",
+        decisions=dashboard_decisions,
+        executed_routes=dashboard_executed,
+        savings=dashboard_savings,
+        daily_costs=daily_costs if daily_costs else None,
+        total_saved=total_saved,
+        model_breakdown=model_breakdown if model_breakdown else None,
+        model_breakdown_note=model_breakdown_note or None,
+        session_models=session_models_list if session_models_list else None,
+        claude_quota_pct=claude_quota_pct,
+        claude_session_pct=claude_session_pct,
+        claude_session_resets_at=claude_session_resets_at,
+        gemini_quota_pct=gemini_quota_pct,
+        claude_remaining=claude_remaining,
+        gemini_remaining=gemini_remaining,
+        daily_calls=daily_calls_list,
+        daily_tokens=daily_tokens_list,
+        daily_tokens_saved=daily_tokens_saved_list,
+        # New session-level metrics
+        burn_rate_per_hr=session_metrics.get("burn_rate_per_hr", 0.0),
+        session_cost_usd=session_metrics.get("session_cost_usd", 0.0),
+        fallback_pct=session_metrics.get("fallback_pct", 0.0),
+        escalation_pct=session_metrics.get("escalation_pct", 0.0),
+        fallback_count=session_metrics.get("fallback_count", 0),
+        escalation_count=session_metrics.get("escalation_count", 0),
+        p95_latency=session_metrics.get("p95_latency", {}),
+        routing_effectiveness_pct=session_metrics.get("routing_effectiveness_pct", 0.0),
+        session_cost_ratio=session_metrics.get("session_cost_ratio"),
+        session_calls_ratio=session_metrics.get("session_calls_ratio"),
+        daily_cache_trend=daily_cache_trend if daily_cache_trend else None,
+    )
+    colored_output = console.export_text(clear=False, styles=True)
+    # Save ANSI version to disk — Claude Code UI can't render terminal
+    # colors, but the user can view it with: cat ~/.llm-router/last_summary.ansi
+    import re as _re
+    try:
+        _llm_router_dir = _router_home()
+        _llm_router_dir.mkdir(parents=True, exist_ok=True)
+        (_llm_router_dir / "last_summary.ansi").write_text(colored_output, encoding="utf-8")
+    except Exception:
+        pass
+    # systemMessage gets plain text (ANSI codes stripped) for Claude Code UI.
+    final_summary_output = _re.sub(r"\x1b\[[0-9;]*[mGKHF]", "", colored_output)
+    # Append color hint so user knows how to view the colored version.
+    final_summary_output = final_summary_output.rstrip() + (
+        "\n\n🎨  Full colored summary: cat ~/.llm-router/last_summary.ansi  (or: llm-router summary)\n"
+    )
+    return final_summary_output
 
 
 def main() -> None:
@@ -2814,9 +3120,15 @@ def main() -> None:
                                    str(_hook_input.get("transcript_path") or ""))
         except Exception:  # noqa: BLE001 -- fail open: a summary is never worth a Stop
             pass
+    # F65: only the full box needs the session rows and the cumulative table; the
+    # default one-line mode reads neither (the child renders them for last_summary.ansi).
+    _full = _stop_hook_mode() == "full"
     with _hl_phase("session_data"):
         session_start               = _read_session_start()
-        paid_rows, cc_rows, free_rows = _query_session_data(session_start)
+        if _full:
+            paid_rows, cc_rows, free_rows = _query_session_data(session_start)
+        else:
+            paid_rows, cc_rows, free_rows = [], [], []
         tools                       = _aggregate(paid_rows) if paid_rows else {}
     with _hl_phase("cc_usage"):
         start, current, is_live     = _get_cc_usage()
@@ -2826,236 +3138,22 @@ def main() -> None:
         # D-171 S1: the child's cache, never a ledger scan (see _read_ledger_cache).
         global _STOP_LEDGER
         _STOP_LEDGER                = _read_ledger_cache()
-        cumulative                  = _ledger_cumulative()
+        cumulative                  = _ledger_cumulative() if _full else []
 
     # Try SessionSummaryDashboard (Rich) renderer; fall back to legacy ANSI
     _laps = _Laps()
     _laps.next("render")
     final_summary_output = ""
 
-    if HAS_RICH_DASHBOARD:
+    if not _full:
+        # F65: the line is built from the executed count, the quota and the lines
+        # appended below, never from the rest of the box: skip the box.
+        final_summary_output = _cheap_summary_box(current)
+    elif HAS_RICH_DASHBOARD:
         try:
-            report_data = _collect_report_data(
+            final_summary_output = _render_rich_summary(
                 session_start, paid_rows, cc_rows, free_rows, tools,
                 start, current, is_live, cumulative,
-            )
-
-            # Prepare data for SessionSummaryDashboard
-            # Use canonical "method" key (e.g. "heuristic", "ollama") not the human "reason"
-            # string — the renderer's _METHOD_SYMBOLS lookup requires canonical IDs.
-            dashboard_decisions = [
-                {"method": d["method"], "count": d["hits"]}
-                for d in report_data.get("routing_logic", [])
-            ]
-            dashboard_executed = None
-            try:
-                from llm_router.routing_report import executed_routes
-
-                dashboard_executed = executed_routes(24.0)
-            except Exception as _exc:  # noqa: BLE001 — reporting must never break Stop
-                from llm_router import failopen
-
-                failopen.record("CHZ-FO-STOP-EXECUTED-ROUTES", _exc)
-
-            dashboard_savings = {}
-            for label, calls, total_tokens, _, saved_usd in cumulative:
-                if label == "today":
-                    dashboard_savings["today"] = saved_usd
-                    dashboard_savings["today_tokens"] = total_tokens
-                elif label == "this week":
-                    dashboard_savings["week"] = saved_usd
-                    dashboard_savings["week_tokens"] = total_tokens
-                elif label == "14 days":
-                    dashboard_savings["14d"] = saved_usd
-                    dashboard_savings["14d_tokens"] = total_tokens
-                elif label == "this month":
-                    dashboard_savings["month"] = saved_usd
-                    dashboard_savings["month_tokens"] = total_tokens
-                elif label == "all time":
-                    dashboard_savings["lifetime"] = saved_usd
-                    dashboard_savings["lifetime_tokens"] = total_tokens
-
-            # Redirect to StringIO so Rich doesn't pollute stdout.
-            # Console(record=True) without file= defaults to sys.stdout AND records;
-            # that mix would corrupt the JSON envelope Claude Code reads from stdout.
-            _rich_buf = io.StringIO()
-            console = Console(record=True, force_terminal=True, color_system="truecolor", file=_rich_buf)
-            dashboard = SessionSummaryDashboard(console=console)
-
-            # Gather 14-day cost data from report
-            daily_14d_data = report_data.get("daily_14d", [])
-            daily_costs = [d[3] for d in daily_14d_data] if daily_14d_data else []
-
-            # NOTE: this used to synthesise a 7-day history when the query
-            # returned nothing, by scaling today's figure by invented ratios
-            # (0.3, 0.35, 0.4, ...). That is fabricated data presented as a
-            # measurement, and it is the one thing a savings report must never
-            # do — a chart of made-up numbers is worse than an empty chart,
-            # because an empty chart is honest about what is known. When there
-            # is no daily data, show none.
-
-            total_saved = sum(daily_costs) if daily_costs else 0.0
-
-            # Gather 14-day model breakdown directly from routing_decisions.final_model.
-            # This is the authoritative source — previous code fell through to routing
-            # method names (heuristic, build-fast-path) because it never queried here.
-            # COVERAGE, NOT JUST NUMBERS (audit doc 27).
-            #
-            # `routing_decisions` is written ONLY by llm_route and llm_auto. The whole
-            # llm(task=…) family calls route_and_call() without `classification_data`,
-            # and router.py guards the write with `if classification_data:` — so the
-            # dominant traffic never appears here and nothing records the omission.
-            #
-            # This panel therefore describes ONE TOOL's routing, and was rendered as
-            # "MODELS 14-day mix" as though it described everything. Worse, when no
-            # llm_route call has happened inside the window the newest row can be weeks
-            # old and the percentages still render as current — which is exactly what was
-            # observed: 643 rows into `usage` in 24h against 0 into routing_decisions.
-            #
-            # So the panel now carries what it covers and how fresh it is. The fix is to
-            # NAME the difference, not to widen the query — adding the missing traffic
-            # would move every historical percentage silently.
-            model_breakdown: dict[str, float] = {}
-            model_breakdown_note = ""
-            try:
-                if os.path.exists(_db_path()):
-                    _mb_conn = sqlite3.connect(_db_path())
-                    _mb_rows = _mb_conn.execute(
-                        "SELECT final_model, COUNT(*) AS cnt "
-                        "FROM routing_decisions "
-                        "WHERE final_model IS NOT NULL AND final_model != '' "
-                        "  AND date(timestamp) >= date('now', '-14 days') AND " + _real_decision(_mb_conn) + " "
-                        "GROUP BY final_model "
-                        "ORDER BY cnt DESC "
-                        "LIMIT 8"
-                    ).fetchall()
-                    _mb_newest = _mb_conn.execute(
-                        "SELECT MAX(timestamp) FROM routing_decisions"
-                    ).fetchone()[0]
-                    _mb_conn.close()
-                    _mb_total = sum(r[1] for r in _mb_rows)
-                    if _mb_total > 0:
-                        for _model, _cnt in _mb_rows:
-                            model_breakdown[_model] = (_cnt / _mb_total) * 100
-                        model_breakdown_note = "classified routes only"
-                    elif _mb_newest:
-                        # Rows exist but NONE inside the window. Say so rather than
-                        # rendering nothing, which reads as "no routing happened".
-                        model_breakdown_note = f"no classified routes since {_mb_newest[:10]}"
-            except Exception:
-                pass
-
-            # Gather quota data from Claude subscription.
-            # Both *_pct values are stored as 0-100 (not 0-1) — do NOT multiply by 100.
-            claude_quota_pct = current.get("weekly_pct", 0.0) if current else 0.0
-            claude_session_pct = current.get("session_pct", 0.0) if current else 0.0
-            claude_session_resets_at = current.get("session_resets_at", "") if current else ""
-            gemini_quota_pct = 0.0  # Placeholder for future Gemini integration
-            claude_remaining = current.get("session_resets_at", "Unknown") if current else "Unknown"
-
-            # If the session reset time is unknown, fall back to showing weekly
-            # savings. Pull the "this week" bucket and label it truthfully.
-            # Previously this summed the "all time" row but printed "saved this
-            # week" — the mislabel that made the SessionEnd figure disagree with
-            # the llm_savings weekly bucket by the lifetime/weekly ratio
-            # (RETROSPECTIVE B-6). Value and label must name the same window.
-            if not claude_remaining or claude_remaining == "Unknown":
-                weekly_saved = sum(d[4] for d in cumulative if d[0] == "this week")
-                if weekly_saved > 0:
-                    claude_remaining = f"~{weekly_saved:.2f} USD saved this week"
-
-            gemini_remaining = "Unknown"
-
-            # Build daily_calls / daily_tokens from the 14-day data already computed above.
-            # daily_14d_data rows are (date_str, calls, tokens, cost_usd, tokens_saved).
-            daily_calls_list = [d[1] for d in daily_14d_data] if daily_14d_data else []
-            daily_tokens_list = [d[2] for d in daily_14d_data] if daily_14d_data else []
-            daily_tokens_saved_list = [d[4] for d in daily_14d_data] if daily_14d_data else []
-
-            # Gather session-level metrics: burn rate, fallback %, p95 latency, etc.
-            session_metrics = _query_session_metrics(session_start)
-            daily_cache_trend = _query_daily_cache_trend()
-
-            # Build session_models from tools_data so the MODELS panel shows "this session".
-            # Format: [{"model": str, "calls": int, "tokens": int, "cost": float, "saved": float}]
-            # The panel is titled "MODELS this session", so it aggregates EVERY model
-            # invoked this session — paid, subscription and free/local alike. It was
-            # previously built from `report_data["tools"]`, which is `_aggregate(paid_rows)`:
-            # that silently excluded `_FREE_PROVIDERS` (ollama, codex, gemini_cli), so a
-            # session routed mostly to a local model showed a panel that did not contain
-            # it. A "free" cost column already exists precisely to render those rows.
-            all_session_rows = paid_rows + cc_rows + free_rows
-            session_models_list: list[dict] = []
-            if all_session_rows:
-                model_agg: dict[str, dict] = {}
-                for data in _aggregate(all_session_rows).values():
-                    if not isinstance(data, dict):
-                        continue
-                    for model, totals in data.get("model_totals", {}).items():
-                        agg = model_agg.setdefault(
-                            model, {"calls": 0, "tokens": 0, "cost": 0.0}
-                        )
-                        # Real per-model sums — NOT tool_total * call_count, which
-                        # inflated tokens and cost by the tool's row count.
-                        agg["calls"]  += totals["calls"]
-                        agg["tokens"] += totals["in"] + totals["out"]
-                        agg["cost"]   += totals["cost"]
-                for model, agg in sorted(model_agg.items(), key=lambda x: -x[1]["calls"]):
-                    session_models_list.append({
-                        "model": model,
-                        "calls": agg["calls"],
-                        "tokens": agg["tokens"],
-                        "cost": agg["cost"],
-                        "saved": 0.0,
-                    })
-
-            dashboard.print_dashboard(
-                timestamp=f"Session · {datetime.now(timezone.utc).isoformat()}",
-                decisions=dashboard_decisions,
-                executed_routes=dashboard_executed,
-                savings=dashboard_savings,
-                daily_costs=daily_costs if daily_costs else None,
-                total_saved=total_saved,
-                model_breakdown=model_breakdown if model_breakdown else None,
-                model_breakdown_note=model_breakdown_note or None,
-                session_models=session_models_list if session_models_list else None,
-                claude_quota_pct=claude_quota_pct,
-                claude_session_pct=claude_session_pct,
-                claude_session_resets_at=claude_session_resets_at,
-                gemini_quota_pct=gemini_quota_pct,
-                claude_remaining=claude_remaining,
-                gemini_remaining=gemini_remaining,
-                daily_calls=daily_calls_list,
-                daily_tokens=daily_tokens_list,
-                daily_tokens_saved=daily_tokens_saved_list,
-                # New session-level metrics
-                burn_rate_per_hr=session_metrics.get("burn_rate_per_hr", 0.0),
-                session_cost_usd=session_metrics.get("session_cost_usd", 0.0),
-                fallback_pct=session_metrics.get("fallback_pct", 0.0),
-                escalation_pct=session_metrics.get("escalation_pct", 0.0),
-                fallback_count=session_metrics.get("fallback_count", 0),
-                escalation_count=session_metrics.get("escalation_count", 0),
-                p95_latency=session_metrics.get("p95_latency", {}),
-                routing_effectiveness_pct=session_metrics.get("routing_effectiveness_pct", 0.0),
-                session_cost_ratio=session_metrics.get("session_cost_ratio"),
-                session_calls_ratio=session_metrics.get("session_calls_ratio"),
-                daily_cache_trend=daily_cache_trend if daily_cache_trend else None,
-            )
-            colored_output = console.export_text(clear=False, styles=True)
-            # Save ANSI version to disk — Claude Code UI can't render terminal
-            # colors, but the user can view it with: cat ~/.llm-router/last_summary.ansi
-            import re as _re
-            try:
-                _llm_router_dir = _router_home()
-                _llm_router_dir.mkdir(parents=True, exist_ok=True)
-                (_llm_router_dir / "last_summary.ansi").write_text(colored_output, encoding="utf-8")
-            except Exception:
-                pass
-            # systemMessage gets plain text (ANSI codes stripped) for Claude Code UI.
-            final_summary_output = _re.sub(r"\x1b\[[0-9;]*[mGKHF]", "", colored_output)
-            # Append color hint so user knows how to view the colored version.
-            final_summary_output = final_summary_output.rstrip() + (
-                "\n\n🎨  Full colored summary: cat ~/.llm-router/last_summary.ansi  (or: llm-router summary)\n"
             )
         except Exception as e:
             # 🥷 Backslash-Security: using vibe-coding rules for Logging & Error Handling
