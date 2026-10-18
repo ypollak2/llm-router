@@ -92,6 +92,7 @@ import tempfile
 import time
 import tomllib
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -312,6 +313,11 @@ def verify_changed_files(
             for config, files in by_config.items():
                 config_dir_rel = config.resolve().parent.relative_to(root)
                 results = {}
+                # F64: the two lints are independent subprocesses (an `uvx ruff` start is
+                # hundreds of ms), so they run side by side: the gate costs one lint, not two.
+                # Each keeps the budget rule of the sequential loop: remaining time is read when
+                # it starts, and the same _Unverified / budget results come out.
+                jobs = []
                 for label in ("original", "candidate"):
                     remaining = deadline_s - time.monotonic()
                     if remaining < _MIN_VERIFY_S:
@@ -320,7 +326,14 @@ def verify_changed_files(
                     cwd.mkdir(parents=True, exist_ok=True)
                     present = [f for f in files if (trees[label] / f).exists()]
                     rels = [(trees[label] / f).relative_to(cwd).as_posix() for f in present]
-                    results[label] = (present, _run_ruff(argv, config, cwd, rels, remaining), cwd)
+                    jobs.append((label, present, rels, cwd, remaining))
+                with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+                    futures = {
+                        label: pool.submit(_run_ruff, argv, config, cwd, rels, remaining)
+                        for label, _present, rels, cwd, remaining in jobs
+                    }
+                    for label, present, _rels, cwd, _remaining in jobs:
+                        results[label] = (present, futures[label].result(), cwd)
                 for rel in files:
                     cand_present, cand, cand_cwd = results["candidate"]
                     _orig_present, orig, orig_cwd = results["original"]

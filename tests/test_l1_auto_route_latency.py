@@ -15,6 +15,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import random
 import subprocess
 import sys
 import textwrap
@@ -224,6 +225,81 @@ def test_a_tool_heavy_tail_grows_the_window_and_still_matches(hook, tmp_path, mo
     got = hook._read_cc_turns(str(p), 7)
     assert got == _old_full_read_turns(str(p))[-7:]
     assert counter.bytes > hook._TRANSCRIPT_TAIL_BYTES  # the window did grow
+
+
+def test_a_tool_heavy_tail_scans_each_byte_once_and_stops_at_the_cap(hook, tmp_path, monkeypatch):
+    """F64: ~100 MB of tool results after the last prose turns used to be re-read and re-parsed at
+    every window doubling (247 ms session_io at a 100 MB tool-heavy transcript, measured). Now the
+    scan is one backward pass over at most ``_TRANSCRIPT_SCAN_CAP_BYTES``."""
+    p = tmp_path / "huge-tools.jsonl"
+    with p.open("w") as fh:
+        for i in range(6):
+            fh.write(_line("user", f"early question {i}") + "\n")
+            fh.write(_line("assistant", [{"type": "text", "text": f"early answer {i}"}]) + "\n")
+        row = _line("user", [{"type": "tool_result", "tool_use_id": "x", "content": "z" * 60_000}]) + "\n"
+        for _ in range(500):  # ~30 MB, far more than the cap
+            fh.write(row)
+    assert p.stat().st_size > 3 * hook._TRANSCRIPT_SCAN_CAP_BYTES
+    counter = _CountingOpen(p)
+    monkeypatch.setattr(hook, "open", counter, raising=False)
+    assert hook._read_cc_turns(str(p), 7) == []  # the prose is beyond the cap: dropped, not waited for
+    assert counter.opens == 1
+    assert counter.bytes <= hook._TRANSCRIPT_SCAN_CAP_BYTES, counter.bytes
+
+
+def test_each_byte_is_read_once_when_the_window_grows(hook, tmp_path, monkeypatch):
+    p = tmp_path / "grow.jsonl"
+    with p.open("w") as fh:
+        for i in range(6):
+            fh.write(_line("user", f"early question {i}") + "\n")
+            fh.write(_line("assistant", [{"type": "text", "text": f"early answer {i}"}]) + "\n")
+        for i in range(8):
+            fh.write(_line("user", [{"type": "tool_result", "tool_use_id": f"x{i}",
+                                     "content": _words(30000, i)}]) + "\n")
+    counter = _CountingOpen(p)
+    monkeypatch.setattr(hook, "open", counter, raising=False)
+    got = hook._read_cc_turns(str(p), 7)
+    assert got == _old_full_read_turns(str(p))[-7:]
+    assert counter.bytes <= p.stat().st_size  # the old restart read the first windows again
+
+
+def _fuzz_line(rng: random.Random, i: int) -> str:
+    """Every shape the skip-before-parse filter must not get wrong, in either JSON spacing."""
+    kind = rng.randrange(9)
+    if kind == 0:
+        c = f"plain user text {i}"
+    elif kind == 1:
+        c = f'user text quoting "tool_result" and "type": "tool_use" and "image" {i}'
+    elif kind == 2:
+        c = [{"type": "text", "text": f"assistant text {i}"}]
+    elif kind == 3:
+        c = [{"type": "tool_use", "id": f"t{i}", "name": "Bash", "input": {"command": "ls"}}]
+    elif kind == 4:
+        c = [{"type": "tool_result", "tool_use_id": f"t{i}", "content": "r" * rng.randrange(1, 400)}]
+    elif kind == 5:  # text and tool blocks in ONE message: the text must survive
+        c = [{"type": "tool_result", "tool_use_id": "q", "content": "r"}, {"type": "text", "text": f"mixed {i}"}]
+    elif kind == 6:
+        c = [{"type": "image", "source": {"type": "base64", "data": "A" * rng.randrange(1, 300)}}]
+    elif kind == 7:  # tool_result whose own content holds a text block
+        c = [{"type": "tool_result", "tool_use_id": "q", "content": [{"type": "text", "text": f"inner {i}"}]}]
+    else:
+        c = [{"type": "thinking", "thinking": "hmm"}, {"type": "text", "text": f"after thinking {i}"}]
+    role = rng.choice(("user", "assistant"))
+    sep = rng.choice(((",", ":"), (", ", ": ")))
+    return json.dumps({"type": role, "message": {"role": role, "content": c}}, separators=sep)
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_the_skip_before_parse_filter_and_chunk_joins_match_the_full_parse(hook, tmp_path, monkeypatch, seed):
+    """Tiny chunks (so lines straddle many chunk edges) over fuzzed lines equal the old full read."""
+    rng = random.Random(seed)
+    p = tmp_path / f"fuzz{seed}.jsonl"
+    lines = [_fuzz_line(rng, i) for i in range(rng.randrange(1, 400))]
+    p.write_text("\n".join(lines) + rng.choice(("", "\n")), encoding="utf-8")
+    monkeypatch.setattr(hook, "_TRANSCRIPT_TAIL_BYTES", rng.choice((64, 200, 1000)))
+    full = _old_full_read_turns(str(p))
+    for need in (1, 3, 7, 50):
+        assert hook._read_cc_turns(str(p), need) == full[-need:], (seed, need)
 
 
 @pytest.mark.parametrize("case", ["empty", "short", "no_trailing_newline", "bad_json", "crlf", "missing"])

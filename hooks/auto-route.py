@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 65
+# llm_router-hook-version: 66
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 65"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 66"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -3658,8 +3658,23 @@ _TRANSCRIPT_TAIL_BYTES = 256 * 1024
 _CC_TURNS_NEEDED = max(_ASSISTANT_PERSIST_TURNS, 6, 2) + 1
 
 
+#: Hard ceiling on the bytes one transcript read may scan. A tool-heavy tail (file reads,
+#: screenshots: tens of KB a line) can hold no text turn for the last hundreds of MB; the
+#: old window-doubling read re-read and re-parsed all of it, so `session_io` grew with the
+#: session (F64, measured: 247 ms mean at a 100 MB tool-heavy transcript, flat 3 ms at
+#: 100 MB of prose). History is best-effort context: turns older than this much tool noise
+#: are dropped, not waited for.
+_TRANSCRIPT_SCAN_CAP_BYTES = 8 * 1024 * 1024
+#: A line that carries one of these block types and no ``"text"`` token cannot hold a text
+#: block (``_extract_turn_text`` only keeps ``type == "text"`` blocks), so it is skipped
+#: before the JSON parse. A plain-string user turn has none of them unescaped.
+_CC_NO_TEXT_MARKERS = (b'"tool_result"', b'"tool_use"', b'"image"')
+
+
 def _parse_cc_line(raw: bytes):
     """One transcript line -> {"role","content"} or None (not a text turn)."""
+    if b'"text"' not in raw and any(m in raw for m in _CC_NO_TEXT_MARKERS):
+        return None
     line = raw.decode("utf-8", "replace").strip()
     if not line:
         return None
@@ -3683,36 +3698,48 @@ def _read_cc_turns(transcript_path: str, need: int = _CC_TURNS_NEEDED) -> list[d
 
     The old read took ``readlines()`` of the whole file and parsed every line on
     every prompt, twice: 3.3 ms per MB, 167 ms at 50 MB (D-171 A1, measured). This
-    reads a tail window and parses lines backwards until ``need`` turns are found;
-    a window with too few turns doubles, so the result equals the full parse's
-    last ``need`` turns whatever the shape of the tail. The first line of a
-    window that starts mid-file is partial and is dropped. Missing/unreadable
+    reads a tail window and parses lines backwards until ``need`` turns are found.
+    A window with too few turns does not restart: the next (doubled) chunk is read
+    from just before the one already scanned, so every byte is read and parsed at
+    most once (F64: the restart re-did all of it per doubling), and at most
+    ``_TRANSCRIPT_SCAN_CAP_BYTES`` are scanned. Within the cap the result equals the
+    full parse's last ``need`` turns whatever the shape of the tail. The line cut by
+    the start of the scanned region is partial and is dropped. Missing/unreadable
     file -> []. Never raises.
     """
     if not transcript_path or need <= 0:
         return []
     try:
         with open(transcript_path, "rb") as fh:
-            size = fh.seek(0, 2)
+            pos = fh.seek(0, 2)
             window = _TRANSCRIPT_TAIL_BYTES
-            while True:
-                start = max(0, size - window)
-                fh.seek(start)
-                blob = fh.read(size - start)
-                if start:
+            scanned = 0
+            carry = b""  # head of the line that straddles the chunk read last (its start is earlier)
+            found: list[dict] = []
+            while pos > 0 and scanned < _TRANSCRIPT_SCAN_CAP_BYTES:
+                step = min(window, pos, _TRANSCRIPT_SCAN_CAP_BYTES - scanned)
+                pos -= step
+                fh.seek(pos)
+                blob = fh.read(step) + carry
+                scanned += step
+                window *= 2
+                if pos:
                     nl = blob.find(b"\n")
-                    blob = blob[nl + 1:] if nl >= 0 else b""
-                found: list[dict] = []
+                    if nl < 0:
+                        carry = blob
+                        continue
+                    carry, blob = blob[:nl], blob[nl + 1:]
+                else:
+                    carry = b""
                 for raw in reversed(blob.split(b"\n")):
                     turn = _parse_cc_line(raw)
                     if turn is not None:
                         found.append(turn)
                         if len(found) >= need:
-                            break
-                if len(found) >= need or start == 0:
-                    found.reverse()
-                    return found
-                window *= 2
+                            found.reverse()
+                            return found
+            found.reverse()
+            return found
     except Exception:  # noqa: BLE001 -- OSError and anything odd: history is best-effort
         return []
 

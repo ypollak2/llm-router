@@ -448,3 +448,16 @@ def test_session_start_contention_hint(stub, monkeypatch):
     assert hint.startswith("\n") and "a:latest" in hint and "b:7b" in hint
     _Stub.ps_body = {"ok": True}
     assert mod._ollama_contention_hint() == ""
+
+
+def test_should_skip_cold_uses_a_resident_list_the_caller_already_holds(stub, monkeypatch):
+    """F64: the hook prefetches /api/ps beside its git checks and passes the answer in; no second
+    round trip, same decision as the self-fetching call."""
+    def boom(*a, **k):
+        raise AssertionError("/api/ps asked again")
+
+    monkeypatch.setattr(warm, "ollama_ps", boom)
+    deadline = time.monotonic() + 5
+    assert warm.should_skip_cold(MODEL, deadline, resident=[]) is not None         # cold, tight: skip
+    assert warm.should_skip_cold(MODEL, deadline, resident=[MODEL]) is None        # resident
+    assert warm.should_skip_cold(MODEL, deadline, resident=None) is None           # unknown: proceed
