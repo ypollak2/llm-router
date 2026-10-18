@@ -53,7 +53,8 @@ def router_calls(monkeypatch, tmp_path):
 
         override = kw.get("model_override")
         if override and "/" not in override and override not in {"codex", "ollama", "gemini_cli"}:
-            raise ValueError(f"Invalid model_override format: {override!r}")
+            from llm_router.types import RouterInputError
+            raise RouterInputError(f"Invalid model_override format: {override!r}")
         calls.append({"task_type": task_type, "prompt": prompt,
                       "cache_disabled": semantic_cache._cache_disabled(), **kw})
         return _Resp()

@@ -51,15 +51,26 @@ def is_auto_model(name: object) -> bool:
 
 
 def _client_failure(what: str, exc: BaseException) -> None:
-    """F87: log the secret-scrubbed detail locally (logger ``llm_router.gateway``, as the
-    gateway does). The client response carries only the exception class and a fixed message,
-    because provider text can echo the prompt."""
+    """Log a failure to the local ``llm_router.gateway`` logger: the exception CLASS and the
+    length of its text, never the text (F91). Exception text can hold the prompt or a
+    provider's echo of it, and no scrubber can tell prompt text from other text. The client
+    response carries only the class and a fixed message too."""
     import logging
 
-    from llm_router.proxy.ledger import scrub_detail
-
     logging.getLogger("llm_router.gateway").warning(
-        "%s: %s: %s", what, type(exc).__name__, scrub_detail(str(exc)))
+        "%s: %s (detail withheld, %d chars)", what, type(exc).__name__, len(str(exc)))
+
+
+def invalid_request_message(exc: ValueError) -> str:
+    """The 400 body text for a ValueError (F91). A router-authored ``RouterInputError``
+    echoes its own message; any other ValueError (pydantic, JSON, a library) is answered
+    ``<Class>: invalid request`` and logged by class only."""
+    from llm_router.types import RouterInputError
+
+    if isinstance(exc, RouterInputError):
+        return str(exc)
+    _client_failure("invalid request", exc)
+    return f"{type(exc).__name__}: invalid request"
 
 
 async def route_payload_async(payload: dict) -> dict:
@@ -70,11 +81,11 @@ async def route_payload_async(payload: dict) -> dict:
     cap, and cost logging. Importing inside keeps module import cheap and lets
     tests monkeypatch ``llm_router.router.route_and_call``."""
     from llm_router.router import route_and_call
-    from llm_router.types import TaskType
+    from llm_router.types import RouterInputError, TaskType
 
     prompt = (payload.get("prompt") or "").strip()
     if not prompt:
-        raise ValueError("missing 'prompt'")
+        raise RouterInputError("missing 'prompt'")
     try:
         task_type = TaskType(payload.get("task_type", "code"))
     except ValueError:
@@ -92,7 +103,7 @@ async def route_payload_async(payload: dict) -> dict:
     # the three wire formats before it gets here). An empty list is no request.
     tools = payload.get("tools") or None
     if tools is not None and (not isinstance(tools, list) or not all(isinstance(t, dict) for t in tools)):
-        raise ValueError("'tools' must be a list of tool objects")
+        raise RouterInputError("'tools' must be a list of tool objects")
     tool_choice = payload.get("tool_choice") if tools else None
     # PLAN v16 P1.1 door 7: the caller's conversation before ``prompt``, as
     # chat message dicts. Absent keeps the old path (no caller history).
@@ -100,7 +111,7 @@ async def route_payload_async(payload: dict) -> dict:
     if messages is not None and (
         not isinstance(messages, list) or not all(isinstance(m, dict) for m in messages)
     ):
-        raise ValueError("'messages' must be a list of message objects")
+        raise RouterInputError("'messages' must be a list of message objects")
     # P0.6: the semantic cache keys on ``prompt`` and task type only. Once the
     # gateway forwards a caller's system prompt separately (instead of folding it
     # into ``prompt``), two callers with different system prompts and the same
@@ -333,7 +344,7 @@ def make_handler():
             try:
                 self._send(200, route_payload(payload))
             except ValueError as e:
-                self._send(400, {"error": str(e)})
+                self._send(400, {"error": invalid_request_message(e)})
             except Exception as e:                      # routing / provider failure
                 _client_failure("route failed", e)
                 self._send(502, {"error": "{}: routing failed".format(type(e).__name__)})

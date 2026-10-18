@@ -370,6 +370,13 @@ def _budget_bar(pct: float, width: int = 20) -> str:
     return "[" + "=" * filled + "." * (width - filled) + "]"
 
 
+class RouterInputError(ValueError):
+    """A ValueError the router itself wrote about the caller's request (bad ``model``
+    format, missing prompt, no usable provider...). The HTTP surfaces echo its message in a
+    400; any other ValueError (pydantic, JSON, a provider library) is not router-authored
+    and is answered with ``<Class>: invalid request`` only (F91)."""
+
+
 class BudgetExceededError(RuntimeError):
     """Raised when the monthly spend has reached or exceeded the configured budget.
 

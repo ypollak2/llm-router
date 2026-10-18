@@ -371,10 +371,10 @@ def _routing_failure(exc: Exception) -> HTTPException:
     """The client-facing error for a failed route (F76). The client gets the exception CLASS
     and a fixed message, never the provider's text (it can echo the prompt); the scrubbed
     detail goes to the local log only."""
-    from llm_router.proxy.ledger import scrub_detail
+    from llm_router.route_server import _client_failure
 
     limited = _rate_limit_cause(exc)
-    _LOG.warning("routing failed: %s: %s", type(exc).__name__, scrub_detail(str(exc)))
+    _client_failure("routing failed", exc)
     if limited is None:
         return HTTPException(status_code=502, detail=f"{type(exc).__name__}: routing failed")
     secs = _retry_after_s(limited)
@@ -456,7 +456,8 @@ async def _route(prompt: str, task_type: str | None, complexity: str | None,
             "tool_choice": tool_choice,
         })
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        from llm_router.route_server import invalid_request_message
+        raise HTTPException(status_code=400, detail=invalid_request_message(e))
     except Exception as e:
         raise _routing_failure(e) from e
     return _RoutedResult(out)
@@ -746,7 +747,8 @@ async def route(payload: dict, request: Request) -> dict:
     try:
         return await route_payload_async(payload)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        from llm_router.route_server import invalid_request_message
+        raise HTTPException(status_code=400, detail=invalid_request_message(e))
     except Exception as e:
         raise _routing_failure(e) from e  # F87: class + fixed message, detail to the local log
 
@@ -800,10 +802,10 @@ async def ground(payload: dict, request: Request) -> dict:
         symbol_hits = grounding.symbol_violations(draft, context, prompt)
         relayable = grounding.draft_is_relayable(draft, context, prompt)
     except Exception as e:  # noqa: BLE001
-        from llm_router.proxy.ledger import scrub_detail
+        from llm_router.route_server import _client_failure
 
-        # F87: the client gets the class and a fixed message; the scrubbed detail stays local.
-        _LOG.warning("grounding check failed: %s: %s", type(e).__name__, scrub_detail(str(e)))
+        # F87: the client gets the class and a fixed message; F91: the log gets the class only.
+        _client_failure("grounding check failed", e)
         raise HTTPException(status_code=502, detail=f"{type(e).__name__}: grounding check failed") from e
     finally:
         # Restore rather than delete: the process may have had a scope already,
@@ -1143,7 +1145,8 @@ def _sse_response(route_call, build, error_frame) -> StreamingResponse:
         except HTTPException as e:
             yield error_frame(e.status_code, _scrubbed(str(e.detail)))
         except Exception as e:  # noqa: BLE001 - headers are out: the protocol's error event
-            _LOG.warning("stream failed: %s: %s", type(e).__name__, _scrubbed(str(e)))
+            from llm_router.route_server import _client_failure
+            _client_failure("stream failed", e)
             yield error_frame(500, f"stream failed: {type(e).__name__}")
         finally:
             if not task.done():
