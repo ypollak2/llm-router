@@ -6,8 +6,8 @@ routing_decisions`` with its own window, provenance filter and row exclusions; t
 question got several answers. This lint keeps the three rewired surfaces and their delegates from
 growing a private read again. SCOPE (part A): ``dashboard_data.query_window`` / ``summary``,
 ``routing_report.executed_routes``, ``cost.get_savings_by_period``, all of
-``observability/summary.py`` and ``commands/kpi.py``. B2 adds ``statusline_segments.py``; the
-status-bar and session-end hooks join in B3/B4.
+``observability/summary.py`` and ``commands/kpi.py``. B2 adds ``statusline_segments.py``, B3 the status-bar hook; the
+session-end hook joins in B4.
 """
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ SCOPE = (
     ("observability/summary.py", None),
     ("commands/kpi.py", None),
     ("statusline_segments.py", None),          # B2: the statusline's mix and money (D-218)
+    ("hooks/status-bar.py", None),             # B3: the status-bar's D:/W:/M: and session calls
 )
 
 

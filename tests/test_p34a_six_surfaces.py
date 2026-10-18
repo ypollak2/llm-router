@@ -201,14 +201,10 @@ def test_statusline_figures_carry_n_and_window(six):
 # -- surface 2: status-bar hook (formatter in a subprocess, HOME = the fixture) ------------------
 
 _SB_DRIVER = """
-import datetime as D, importlib.util, sys
+import importlib.util, sys
 spec = importlib.util.spec_from_file_location("sb", sys.argv[1])
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-class FrozenDT(D.datetime):
-    @classmethod
-    def now(cls, tz=None):
-        return D.datetime.fromtimestamp(float(sys.argv[2]), tz)
-m.datetime = FrozenDT
+m._now = lambda: float(sys.argv[2])      # the hook's one clock seam (B3): windows are local to this instant
 print(m._format_status())
 """
 
@@ -220,31 +216,35 @@ def _status_bar(six) -> str:
     return ANSI.sub("", r.stdout).strip()
 
 
-@pytest.mark.xfail(strict=True, reason="P3.4-B3: status-bar D: is a UTC day over usage rows only "
-                   "with a private baseline, not the local-day ledger figure")
 def test_status_bar_day_is_the_today_oracle(six):
     assert f"D:${_saved_six('today')[0]:.2f}" in _status_bar(six)
 
 
-@pytest.mark.xfail(strict=True, reason="P3.4-B3: status-bar W: is Monday-UTC to now over usage "
-                   "rows only, not the rolling 7 d ledger figure")
 def test_status_bar_week_is_the_7d_oracle(six):
     assert f"W:${_saved_six('7d')[0]:.2f}" in _status_bar(six)
 
 
-@pytest.mark.xfail(strict=True, reason="P3.4-B3: status-bar session calls come from usage rows "
-                   "with its own _FREE_PROVIDERS, no proxy rows")
 def test_status_bar_session_calls_are_the_session_mix_oracle(six):
     loc, sub, paid = SESSION_MIX
     assert f"sub:{sub} free:{loc} paid:{paid}" in _status_bar(six)
 
 
-@pytest.mark.xfail(strict=True, reason="P3.4-B3: status-bar prints D:/W:/M: money with no n and "
-                   "no window")
 def test_status_bar_figures_carry_n_and_window(six):
     line = _status_bar(six)
     assert _ungrounded(line, "\u2502") == [], line
-    assert "D:$" in line, line                            # something to check
+    assert "D:$" in line and "sub:" in line, line         # something to check: money and calls present
+    assert re.search(r"D:\$[\d.]+\u00b7today n=\d+", line), line
+    assert re.search(r"W:\$[\d.]+\u00b77d n=\d+", line), line
+    assert re.search(r"M:\$[\d.]+\u00b7month n=\d+", line), line
+
+
+def test_status_bar_baseline_label_is_the_priced_model_not_zero(six):
+    """rv-597: the old private baseline resolved to $0 in the subprocess ("vs Opus:$0")."""
+    from llm_router import pricing
+
+    line = _status_bar(six)
+    assert f"(vs {pricing.savings_baseline_model()})" in line, line
+    assert "vs Opus" not in line and "$0)" not in line, line
 
 
 # -- surfaces 3, 4, 5: dashboard summary, `llm-router summary`, kpi (aligned since part A) -------

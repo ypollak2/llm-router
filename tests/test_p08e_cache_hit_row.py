@@ -208,8 +208,9 @@ def test_provider_classes_is_the_one_definition():
     assert sc_provider == CACHE_PROVIDER
 
 
-@pytest.mark.parametrize("hook", ["status-bar.py", "session-end.py", "session-start.py"])
+@pytest.mark.parametrize("hook", ["session-end.py", "session-start.py"])
 def test_hook_copies_name_the_cache_provider_and_stay_identical(hook):
+    # status-bar.py left this list in P3.4-B3: it reads the ledger, which excludes cache rows
     texts = [(d / hook).read_text() for d in _HOOK_DIRS]
     assert texts[0] == texts[1], f"{hook}: hooks/ and src/llm_router/hooks/ differ"
     assert re.search(rf'^_CACHE_PROVIDER\s*=\s*"{CACHE_PROVIDER}"', texts[0], re.M)
@@ -218,16 +219,6 @@ def test_hook_copies_name_the_cache_provider_and_stay_identical(hook):
 def test_the_clawcode_hook_names_the_cache_provider():
     t = (_HOOK_DIRS[1] / "session-end-clawcode.py").read_text()
     assert re.search(rf'^_CACHE_PROVIDER\s*=\s*"{CACHE_PROVIDER}"', t, re.M)
-
-
-def test_status_bar_session_calls_exclude_cache(tmp_path, monkeypatch):
-    db = _usage_db(tmp_path)
-    mod = _load(_HOOK_DIRS[0] / "status-bar.py", "sb_p08e")
-    start = tmp_path / "start.txt"
-    start.write_text(str(time.time() - 3600))
-    monkeypatch.setattr(mod, "_usage_db", lambda: str(db))
-    monkeypatch.setattr(mod, "_session_start_file", lambda: str(start))
-    assert mod._read_session_calls() == (0, 1, 1)  # (sub, free, paid): the cache row is in none
 
 
 def test_session_end_paid_rows_exclude_cache(tmp_path, monkeypatch):
