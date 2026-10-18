@@ -91,9 +91,9 @@ async def _get_quality_floor(model: str, task_type: str) -> str | None:
 
         # Quality Guard threshold: < 0.6 avg with >= 5 samples
         sample_count = scores.get("sample_count", 0)
-        avg_score = scores.get("avg_score", 1.0)
+        avg_score = scores.get("avg_score")  # None = no judged rows, unknown
 
-        if sample_count >= 5 and avg_score < 0.6:
+        if sample_count >= 5 and avg_score is not None and avg_score < 0.6:
             # Escalate to next tier
             current_idx = _model_index(model.split("-")[-1].lower())
             if current_idx < 2:  # Not already at opus

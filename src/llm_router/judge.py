@@ -227,55 +227,16 @@ def _enforce_queue_cap(path) -> int:
 
 
 def _select_judge_model(answering_model: str) -> str | None:
-    """Pick an INDEPENDENT judge model — one that never matches the model
-    that answered.
+    """Pick an INDEPENDENT judge model, or None when none may grade this answer.
 
-    Grading a response with the same model that produced it is not
-    independent verification; it is the model checking its own homework, and
-    a plausible-sounding score from that is worse than no score at all.
-
-    Prefers what's available with zero API keys: a locally installed Ollama
-    model (via :mod:`llm_router.discover`, the same module the router uses to
-    find what's actually reachable) that differs from the answering model.
-    Among independent candidates, prefers the user's own local-model setting
-    (``LLM_ROUTER_OLLAMA_MODEL``) when it is one of them; otherwise the first
-    independent candidate in discovery order. No model or family is named here
-    (D-205): the judge is whatever the user has.
-
-    Returns:
-        A judge model id, or None if no independent judge is available —
-        callers must leave the row ungraded in that case, never fabricate a
-        score and never write 0.
+    Grading a response with the model that produced it is not independent
+    verification. The decision lives in :mod:`llm_router.judge_select` (canonical
+    identity, strongest other local model, config-only Haiku fallback behind a
+    flag); no model or family is named in code (D-205). None means: leave the row
+    ungraded, never fabricate a score and never write 0.
     """
-    try:
-        from llm_router.discover import get_cached_ollama_models, is_ollama_available
-    except Exception:
-        return None
-
-    try:
-        if not is_ollama_available():
-            return None
-        candidates = get_cached_ollama_models()
-    except Exception:
-        return None
-
-    def _norm(m: str) -> str:
-        return m.split("/", 1)[-1] if "/" in m else m
-
-    answering_norm = _norm(answering_model or "")
-    independent = [c for c in candidates if _norm(c) != answering_norm]
-    if not independent:
-        return None
-
-    try:
-        from llm_router.model_discovery import prefer_first, user_local_model_setting
-        independent = prefer_first(independent, user_local_model_setting())
-    except Exception:  # noqa: BLE001 — a preference is optional; discovery order stands
-        pass
-    # Otherwise keep the original behaviour (first independent candidate in
-    # discovery order) rather than leaving the row ungraded when a perfectly
-    # usable local judge is available.
-    return independent[0]
+    from llm_router import judge_select
+    return judge_select.select_for(answering_model).judge_model
 
 
 #: Marker inserted into every claim's work-file name, so orphan recovery can
@@ -450,19 +411,21 @@ async def _grade_one(item: dict) -> str:
     """
     answering_model = item.get("answering_model") or ""
     judge_model = _select_judge_model(answering_model)
-    # Independence guard: even if _select_judge_model's own filtering were
-    # ever bypassed or misconfigured, grading must refuse outright rather
-    # than let a model grade its own answer.
-    from llm_router import judge_sampler
+    from llm_router import judge_select, judge_sampler
+    judge_kind = judge_select.kind_of(judge_model)
 
     def _record(status: str, score: float | None = None) -> str:
         judge_sampler.record_result(
             door=item.get("door"), answering_model=answering_model,
-            judge_model=judge_model, status=status, score=score,
+            judge_model=judge_model, judge_kind=judge_kind,
+            status=judge_select.STATUS_NO_JUDGE if status == "ungraded" else status,
+            score=score,
         )
         return status
 
-    if judge_model is None or judge_model == answering_model:
+    # Independence guard on canonical identity (name, tag, digest, family); it
+    # refuses on doubt, even if selection were bypassed or misconfigured.
+    if judge_model is None or not judge_select.independent(answering_model, judge_model):
         return _record("ungraded")
 
     outcome: dict = {}
@@ -524,22 +487,25 @@ async def _evaluate_background(
     response: str,
     task_type: str,
     routing_decision_id: int | None = None,
-    model: str = "claude-haiku-4-5-20251001",
+    model: str | None = None,
     outcome: dict | None = None,
 ) -> bool:
     """Background evaluation task — runs independently without blocking caller.
 
     Args:
-        model: The JUDGE model to call. Defaults to the historical hardcoded
-            Haiku model for backward compatibility with direct callers; the
-            queue drain (:func:`_grade_one`) always passes an independently
-            selected model instead.
+        model: The JUDGE model to call. No default model is named in code
+            (D-205): the queue drain (:func:`_grade_one`) passes an independently
+            selected one, and None leaves the row ungraded (recorded via failopen).
 
     Returns:
         True if a score was parsed and stored, False otherwise (including on
         any failure — the caller never learns *which* failure from the return
         value; that detail is in the failopen record).
     """
+    if not model:
+        from llm_router import failopen
+        failopen.record("CHZ-FO-JUDGE-EVAL", ValueError("no judge model supplied"))
+        return False
     try:
         judge_prompt = _build_judge_prompt(prompt, response, task_type)
 
@@ -777,7 +743,8 @@ async def get_judge_scores_for_model(
         days: Number of days to aggregate (default 30)
 
     Returns:
-        dict with avg_score, sample_count, min_score, max_score
+        dict with avg_score, sample_count, min_score, max_score; the three scores
+        are None (unknown, never 0.0) when there is no judged row in the window.
     """
     db = await _get_db()
     try:
@@ -799,10 +766,10 @@ async def get_judge_scores_for_model(
         if not row or row[1] is None:
             return {
                 "model": model,
-                "avg_score": 0.0,
+                "avg_score": None,
                 "sample_count": 0,
-                "min_score": 0.0,
-                "max_score": 0.0,
+                "min_score": None,
+                "max_score": None,
                 "days": days,
             }
 
@@ -810,8 +777,8 @@ async def get_judge_scores_for_model(
             "model": model,
             "avg_score": float(row[1]),
             "sample_count": int(row[0]),
-            "min_score": float(row[2]) if row[2] is not None else 0.0,
-            "max_score": float(row[3]) if row[3] is not None else 0.0,
+            "min_score": float(row[2]) if row[2] is not None else None,
+            "max_score": float(row[3]) if row[3] is not None else None,
             "days": days,
         }
     finally:
@@ -840,17 +807,17 @@ async def reorder_by_quality(models: list[str], days: int = 7) -> list[str]:
 
     try:
         # Get quality scores for each model
-        model_quality: dict[str, float] = {}
+        model_quality: dict[str, float | None] = {}
         model_samples: dict[str, int] = {}
 
         for model in models:
             try:
                 scores = await get_judge_scores_for_model(model, days=days)
-                model_quality[model] = scores.get("avg_score", 0.0)
+                model_quality[model] = scores.get("avg_score")
                 model_samples[model] = scores.get("sample_count", 0)
             except Exception:
                 # If a single model fails, just skip its quality data
-                model_quality[model] = 0.0
+                model_quality[model] = None
                 model_samples[model] = 0
 
         # Partition: high quality (≥0.7 or insufficient data) vs low quality (<0.7 with ≥3 samples)
@@ -859,10 +826,10 @@ async def reorder_by_quality(models: list[str], days: int = 7) -> list[str]:
 
         for model in models:
             samples = model_samples.get(model, 0)
-            quality = model_quality.get(model, 0.0)
+            quality = model_quality.get(model)
 
-            # Keep in original position if: no samples, or quality is acceptable
-            if samples < 3 or quality >= 0.7:
+            # Keep in original position if: no samples, unknown quality, or acceptable
+            if samples < 3 or quality is None or quality >= 0.7:
                 high_quality.append(model)
             else:
                 low_quality.append(model)

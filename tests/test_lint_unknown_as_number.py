@@ -129,7 +129,10 @@ def test_the_fixed_source_is_clean() -> None:
 # 111 -> 112 (Phase 0.2d): edit_survival.py moved from scripts/ into src/, and
 # its CLI-only load_rows() `float(row.get('ts', 0.0))` is now in the scan. Not
 # new code; northstar does not call load_rows.
-BASELINE = 112
+# 112 -> 110 (P3.1-3): get_judge_scores_for_model returns avg_score None (not 0.0)
+# with no judged rows, and its two readers (model_selector, admin.llm_quality_guard)
+# branch on None; reorder_by_quality no longer coerces it either.
+BASELINE = 110
 
 
 def _current_count() -> int:

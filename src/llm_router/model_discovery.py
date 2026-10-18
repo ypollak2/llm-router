@@ -116,14 +116,26 @@ def _read_cache() -> tuple[list[str], float]:
         return [], float("inf")
 
 
+#: Ranking metadata from the last successful probe, by bare model name:
+#: {"parameter_size": "7.6B"|None, "size": bytes|None, "digest": str|None}.
+#: ``_write_cache`` persists it so judge selection can rank "strongest" without a
+#: second request (P3.1-3). Unknown stays None, never 0.
+_last_probe_meta: dict[str, dict] = {}
+
+
 def probe_ollama() -> list[str]:
     """Ask Ollama what it has. Empty list on any failure — never raises."""
     try:
         req = urllib.request.Request(f"{_ollama_url().rstrip('/')}/api/tags")
         with urllib.request.urlopen(req, timeout=_PROBE_TIMEOUT_S) as resp:
             data = json.loads(resp.read())
-        return [m["name"] for m in data.get("models", [])
-                if m.get("name") and _is_completion_model(m["name"])]
+        from llm_router.judge_select import tag_metadata
+        names = []
+        for m in data.get("models", []):
+            if m.get("name") and _is_completion_model(m["name"]):
+                names.append(m["name"])
+                _last_probe_meta[m["name"]] = tag_metadata(m)
+        return names
     except Exception:                                        # noqa: BLE001
         return []
 
@@ -141,9 +153,11 @@ def _write_cache(models: list[str]) -> None:
         merged = {}
         for name in models:
             key = f"ollama/{name}"
-            merged[key] = existing.get(key, {
+            entry = dict(existing.get(key, {
                 "model_id": key, "provider": "ollama", "provider_tier": "local",
-            })
+            }))
+            entry.update({k: v for k, v in _last_probe_meta.get(name, {}).items() if v is not None})
+            merged[key] = entry
         data["models"] = merged
         data["cached_at"] = time.time()
         path.parent.mkdir(parents=True, exist_ok=True)
