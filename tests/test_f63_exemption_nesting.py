@@ -146,6 +146,7 @@ PATHOLOGICAL = [
 ]
 
 
+@pytest.mark.timing  # asserts a wall-clock bound: serial timing lane (TIMING-1)
 @pytest.mark.parametrize("cmd", PATHOLOGICAL)
 def test_pathological_input_is_bounded_and_not_exempt(hook, cmd):
     t0 = time.perf_counter()
