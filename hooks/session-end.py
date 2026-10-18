@@ -2615,14 +2615,17 @@ def _cheap_summary_box(current: dict | None) -> str:
     n = _executed_24h()
     lines = ["  ROUTING  24h  " + (f"{n} executed" if n is not None else "no execution data")]
     if current:
-        session_pct = current.get("session_pct", 0.0) or 0.0
-        weekly_pct = current.get("weekly_pct", 0.0) or 0.0
-        if session_pct > 0 or weekly_pct > 0:
+        # An absent or non-numeric reading is unknown (None), never 0 (lint_unknown_as_number).
+        def _pct(key: str) -> float | None:
+            value = current.get(key)
+            return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+        session_pct, weekly_pct = _pct("session_pct"), _pct("weekly_pct")
+        shown = [(label, v) for label, v in (("5h", session_pct), ("weekly", weekly_pct))
+                 if v is not None and v > 0]
+        if shown:
             lines.append("  QUOTA  Claude Subscription  live")
-            if session_pct > 0:
-                lines.append(f"   5h  {session_pct:.0f}%")
-            if weekly_pct > 0:
-                lines.append(f"   weekly  {weekly_pct:.0f}%")
+            lines.extend(f"   {label}  {v:.0f}%" for label, v in shown)
     return "\n".join(lines) + "\n  " + "═" * (WIDTH - 2)
 
 
