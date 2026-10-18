@@ -342,6 +342,39 @@ def _read_draft_acceptance() -> CounterReading:
         return CounterReading(None, unknown_reason=type(exc).__name__)
 
 
+def _read_judge_sampler() -> CounterReading:
+    """Calls picked for judging, out of eligible calls seen, over all doors (P3.1).
+
+    Alarming when judging has silently stopped (many eligible calls, none picked)
+    or when hook-side lock skips are a large share of what was seen. No counters
+    file, or an unreadable one, is UNKNOWN, never 0.
+    """
+    try:
+        from llm_router.judge_sampler import counters
+
+        state = counters()
+        if not state:
+            return CounterReading(None, unknown_reason="no judge sampler counters yet")
+        def _total(key: str) -> int:
+            # Only counts that are present and integral; an absent key adds nothing.
+            return sum(v for c in state.values() if isinstance(c, dict)
+                       for k, v in c.items() if k == key and isinstance(v, int))
+
+        seen, picked, skipped = _total("seen"), _total("picked"), _total("lock_skipped")
+        if not seen:
+            return CounterReading(None, unknown_reason="no eligible calls seen yet")
+        return CounterReading(
+            float(picked),
+            alarming=(seen >= 100 and picked == 0) or (skipped * 10 > seen + skipped),
+            detail=(
+                f"of {seen} eligible seen across {len(state)} door(s); {skipped} lock-skipped",
+                "judging that stops silently leaves every quality figure unmeasured",
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return CounterReading(None, unknown_reason=type(exc).__name__)
+
+
 REGISTRY: tuple[Counter, ...] = (
     Counter(
         id="fail_open_events",
@@ -421,6 +454,15 @@ REGISTRY: tuple[Counter, ...] = (
         reader=_read_draft_acceptance,
         unit="draft(s) relayed",
         tags=("denominator", "value"),
+    ),
+    Counter(
+        id="judge_sampled",
+        makes_visible="answers picked for quality judging per door — judging that "
+                      "silently stops reads exactly like no answers being judged",
+        source="llm_router.judge_sampler:counters",
+        reader=_read_judge_sampler,
+        unit="call(s) picked",
+        tags=("denominator",),
     ),
 )
 
