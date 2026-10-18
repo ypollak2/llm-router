@@ -1652,6 +1652,23 @@ _ACK_REQUEST_VERB_RE = re.compile(
 # ("I merged it: draft the notes", "I updated the schema. Design the plan") or a
 # report longer than a short object is "report, then ask" (#591 review round 2).
 _ACK_CLAUSE_BREAK_RE = re.compile(r"[:.!]\s+\S|\n")
+# The whole report, as an allow-list (#591 review round 3: "I merged it triage
+# bugs" passed the start-anchored _ACK_REPORT_RE): a past-tense owner action, then
+# at most one short object and one short place, then the end. Anything after that
+# is a request. A false reject only costs a routing check; a false accept skips one.
+_ACK_TOKEN = r"[\w./:@+~-]+"
+_ACK_REPORT_WHOLE_RE = re.compile(
+    r"^(?:(?:i|we)(?:'ve|\s+have|\s+just|\s+already)?\s+)?"
+    r"(?!(?:need|want|feed|seed|proceed)\b)"
+    r"(?:\w+ed|ran|did|made|got|sent|set|put|built|wrote|took|pasted|restarted)"
+    r"(?:\s+(?:it|them|this|that|everything|all|"
+    rf"(?:the|my|our|your|a|an|those|these)\s+{_ACK_TOKEN}|"
+    r"[\w/:@+-]*[./\d_][\w./:@+-]*))?"
+    rf"(?:\s+(?:in|on|to|into|from|for|at|with|via)\s+(?:(?:the|my|our|a|an)\s+)?{_ACK_TOKEN})?"
+    r"(?:\s+(?:again|already|now|too|locally))?"
+    r"[\s.!]*$",
+    re.IGNORECASE,
+)
 _ACK_REPORT_MAX_WORDS = 6
 _ACK_MAX_WORDS = 10
 
@@ -1709,7 +1726,7 @@ def _is_acknowledgement(prompt: str) -> bool:
             or _ACK_CLAUSE_BREAK_RE.search(rest) or _ACK_NEW_REQUEST_RE.search(rest)
             or _ACK_SECOND_CLAUSE_RE.search(rest) or _ACK_REQUEST_VERB_RE.search(rest)):
         return False
-    return bool(_ACK_REPORT_RE.match(rest))
+    return bool(_ACK_REPORT_RE.match(rest) and _ACK_REPORT_WHOLE_RE.match(rest))
 
 
 def _is_coordination_task(prompt: str) -> bool:
