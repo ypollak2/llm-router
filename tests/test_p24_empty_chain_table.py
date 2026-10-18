@@ -464,7 +464,8 @@ def test_a_text_only_request_is_not_refused_as_an_image(path, client, monkeypatc
 
     async def fake(payload):
         seen.append(payload)
-        raise ValueError("No providers available (stub)")
+        from llm_router.types import RouterInputError
+        raise RouterInputError("No providers available (stub)")
 
     monkeypatch.setattr("llm_router.gateway.route_payload_async", fake, raising=False)
     monkeypatch.setattr("llm_router.route_server.route_payload_async", fake)
@@ -528,7 +529,8 @@ def test_an_image_only_in_history_is_flattened_not_refused(path, client, monkeyp
 
     async def fake(payload):
         seen.append(payload)
-        raise ValueError("No providers available (stub)")
+        from llm_router.types import RouterInputError
+        raise RouterInputError("No providers available (stub)")
 
     monkeypatch.setattr("llm_router.route_server.route_payload_async", fake)
     resp = client.post(path, json=_turns(path, image_in="history"))

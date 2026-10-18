@@ -34,15 +34,15 @@ Requests the gateway refuses (hosted tools, images) are an HTTP 400 before any e
 The error event never carries provider error text (it can echo the prompt). A failed route sends the
 exception class name and a fixed message: `<ExceptionClass>: routing failed` (HTTP 502, `api_error`),
 `<ExceptionClass>: upstream rate limit` (HTTP 429, `rate_limit_error`), or `stream failed: <ExceptionClass>`
-for a fault inside the gateway. The secret-scrubbed detail (200 characters) goes to the local log
-(`llm_router.gateway`) only. A 429 is sent only when the exception itself is a provider `RateLimitError`
+for a fault inside the gateway. The local log (`llm_router.gateway`) gets the exception class and the length of its text, never the text:
+exception text can hold the prompt, and a scrubber removes keys, not prompt text. A 429 is sent only when the exception itself is a provider `RateLimitError`
 (by type, also through its `__cause__` / `__context__`); the router's "All models failed" error, budget
 refusals and permanent "quota exceeded" errors stay 502. When the rate limit carries a retry-after, the
 non-streamed 429 has a `Retry-After` header and the message ends `; retry after N s` (so does the stream's
 error event); otherwise neither is sent. The error's `type` is `invalid_request_error` for a 400, and the
 non-streamed endpoints return the same status codes.
 
-The native `POST /route` and `POST /ground` and the zero-dep `llm_router.route_server` follow the same rule: a failure sends `<ExceptionClass>: routing failed` (`/route`, HTTP 502; the gateway's `/route` also sends 429 for a provider rate limit), `<ExceptionClass>: grounding check failed` (`/ground`), `<ExceptionClass>: feedback failed` (`/feedback`, HTTP 500) or `<ExceptionClass>: bad json` (HTTP 400), never the exception text. A 400 for an invalid request (for example a bad `model` format or an unusable `messages` list) carries the router's own message, which is written by the router and holds no provider text.
+The native `POST /route` and `POST /ground` and the zero-dep `llm_router.route_server` follow the same rule: a failure sends `<ExceptionClass>: routing failed` (`/route`, HTTP 502; the gateway's `/route` also sends 429 for a provider rate limit), `<ExceptionClass>: grounding check failed` (`/ground`), `<ExceptionClass>: feedback failed` (`/feedback`, HTTP 500) or `<ExceptionClass>: bad json` (HTTP 400), never the exception text. A 400 for an invalid request (for example a bad `model` format or an unusable `messages` list) carries the router's own message only when the router wrote it (it raises `RouterInputError`, a `ValueError` subclass); any other `ValueError` (a validation library, JSON, a provider SDK) is answered `<ExceptionClass>: invalid request`, and only its class is logged.
 
 **`system` on `/v1/messages`.** A string is forwarded as is. A list of blocks (Claude Code and the Claude
 Agent SDK send one) is reduced to its text blocks, joined with a single space; blocks of any other type

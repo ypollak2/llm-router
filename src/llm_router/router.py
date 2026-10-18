@@ -81,7 +81,7 @@ from llm_router.tracing import set_span_attributes, traced_span
 # serves SDK and hook callers; normal hook DIRECT mode still strips all local.
 from llm_router.qa_policy import QA_STRIP_PROVIDERS as _QA_STRIP_PROVIDERS  # noqa: F401
 from llm_router.qa_policy import strip_local_for_qa as _strip_local_for_qa
-from llm_router.types import BudgetExceededError, Complexity, CostBudgetExceeded, DeadlineExceeded, LLMResponse, RoutingProfile, TaskType, WallClockExceeded
+from llm_router.types import BudgetExceededError, Complexity, CostBudgetExceeded, DeadlineExceeded, LLMResponse, RouterInputError, RoutingProfile, TaskType, WallClockExceeded
 from llm_router.tool_surface import route_call, route_tool# CHZ-SURF-01
 from llm_router.savings import net_saved
 
@@ -107,7 +107,7 @@ _COMPLEXITY_TO_PROFILE: dict[Complexity, RoutingProfile] = {
 log = get_logger("llm_router.router")
 
 
-class NoRoutableModelsError(ValueError):
+class NoRoutableModelsError(RouterInputError):
     """F25 / D-170: the candidate chain for ``task_type``/``profile`` came out empty, so nothing was
     attempted. A ``ValueError`` (every existing handler still catches it) that carries the chain's
     name, so a door can refuse with its own reason instead of a generic ``error_exception``."""
@@ -432,7 +432,7 @@ async def _build_and_filter_chain(
     if model_override:
         _local_prefixes = {"codex", "ollama", "gemini_cli"}
         if "/" not in model_override and model_override not in _local_prefixes:
-            raise ValueError(
+            raise RouterInputError(
                 f"Invalid model_override format: {model_override!r}. "
                 "Use 'provider/model' format (e.g. 'openai/gpt-4o', "
                 "'anthropic/claude-haiku-4-5-20251001', 'gemini/gemini-2.5-flash'). "
@@ -5144,7 +5144,7 @@ async def route_and_call(
             if _cap_excluded:
                 await _release_reservation_if_held()
                 from llm_router import capability_filter as _cf
-                raise ValueError(
+                raise RouterInputError(
                     f"No providers available for {task_type.value}/{profile.value}. "
                     f"Capability filter excluded: {_cf.describe(_cap_excluded)}. "
                     f"Configured providers: {available or 'none'}. "
@@ -6235,7 +6235,7 @@ async def route_and_stream(
         error_detail = f"No models available for {task_type.value} / {profile.value}"
         from llm_router.runtime_offer import runtime_offer
 
-        raise ValueError(
+        raise RouterInputError(
             f"{error_detail}. "
             "Fix: run `llm-router doctor` to diagnose, then:\n"
             f"{runtime_offer()}"
@@ -6257,7 +6257,7 @@ async def route_and_stream(
         failopen.record("CHZ-FO-ROUTER-CAPABILITY-FILTER", _cap_err)
         _cap_excluded = []
     if not models_to_try and _cap_excluded:
-        raise ValueError(
+        raise RouterInputError(
             f"No providers available for {task_type.value}/{profile.value}. "
             f"Capability filter excluded: {_cf.describe(_cap_excluded)}. "
             "Fix: remove the request's images, shorten the prompt, or connect "
