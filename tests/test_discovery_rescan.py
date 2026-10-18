@@ -306,3 +306,19 @@ def test_no_change_means_no_table_rebuild(tmp_path, monkeypatch):
     for _ in range(5):
         profiles.ROUTING_TABLE.get((profiles.RoutingProfile.BALANCED, profiles.TaskType.QUERY))
     assert calls == []
+
+
+def test_env_override_and_restoration_rebuild_despite_throttle(tmp_path, monkeypatch):
+    # Round-2 leak: a temporary OLLAMA_BUDGET_MODELS rebuilt the table, and after the env was
+    # restored the 2 s throttle kept the stale table. The env inputs are part of the key now,
+    # so both the override and its restoration take effect on the very next read.
+    from llm_router import policy
+    write_cache = _hermetic_local(tmp_path, monkeypatch)
+    write_cache(None)
+    monkeypatch.setattr(policy, "_EPOCH_CHECK_S", 60.0)   # throttle really in force
+    table = _fresh_table()
+    assert not _holders(table, "fake-env:1b")
+    monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "fake-env:1b")
+    assert _holders(table, "fake-env:1b")
+    monkeypatch.delenv("OLLAMA_BUDGET_MODELS")
+    assert not _holders(table, "fake-env:1b")

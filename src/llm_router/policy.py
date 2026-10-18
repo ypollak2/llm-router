@@ -142,16 +142,30 @@ _epoch = 0
 _epoch_seen: "str | None" = None
 _epoch_primed = False
 _epoch_checked_at = 0.0
+_epoch_env_key: tuple = ()
+
+# Every environment input that changes what ``ollama/@local`` resolves to (see
+# model_discovery._from_env / _from_env_inventory / user_local_model_setting / _cache_path /
+# _ttl_hours). Compared on EVERY call (a handful of dict lookups, no I/O) so an env change
+# or its restoration re-resolves at once instead of waiting out the throttle. Without this
+# a temporary override (OLLAMA_BUDGET_MODELS in a test, a shell export) left the rebuilt
+# table stale for up to ``_EPOCH_CHECK_S`` after the env was put back.
+_LOCAL_ENV_VARS = (
+    "LLM_ROUTER_OLLAMA_MODEL", "OLLAMA_BUDGET_MODELS", "OLLAMA_MODELS",
+    "LLM_ROUTER_HOME", "LLM_ROUTER_DISCOVERY_TTL_HOURS",
+)
 
 
 def local_epoch() -> int:
-    global _epoch, _epoch_seen, _epoch_primed, _epoch_checked_at
+    global _epoch, _epoch_seen, _epoch_primed, _epoch_checked_at, _epoch_env_key
     import time as _time
 
     now = _time.monotonic()
-    if _epoch_primed and now - _epoch_checked_at < _EPOCH_CHECK_S:
+    env_key = tuple(os.environ.get(v, "") for v in _LOCAL_ENV_VARS)
+    if _epoch_primed and env_key == _epoch_env_key and now - _epoch_checked_at < _EPOCH_CHECK_S:
         return _epoch
     _epoch_checked_at = now
+    _epoch_env_key = env_key
     current = _resolve_local_placeholder()
     if _epoch_primed and current != _epoch_seen:
         _epoch += 1

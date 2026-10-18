@@ -45,6 +45,11 @@ def isolated(repo_cfg=None, *, mock_cost=True):
             ("llm_router.dynamic_routing.get_dynamic_model_chain", lambda *a, **k: None),
             ("llm_router.claude_usage.get_claude_pressure", lambda: 0.0),
             ("llm_router.policy.load_org_policy", lambda *a, **k: None),
+            # ``ollama/@local`` resolves from the on-disk discovery cache, which these fixtures
+            # fill independently of FakeConfig.ollama. The recorded origin/main chains were built
+            # with no @local entry (ROUTING_TABLE was frozen at import), so pin it to "none".
+            ("llm_router.policy.local_placeholder_seen", lambda: None),
+            ("llm_router.policy._resolve_local_placeholder", lambda: None),
             ("llm_router.router.get_repo_config", lambda *a, **k: repo_cfg or RepoConfig()),
             ("llm_router.router.is_codex_available", lambda: False),
             ("llm_router.router.is_gemini_cli_available", lambda: False),

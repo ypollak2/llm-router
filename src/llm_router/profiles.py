@@ -132,10 +132,15 @@ class _LateBoundTable(MutableMapping):
     cache/env only, no network, throttled). A difference builds a complete new mapping and
     swaps ONE reference, so a concurrent reader sees the old or the new table, never a
     half-built one. Every importer holds this same object.
+
+    Writes through the table (``__setitem__``, ``setdefault``, ``pop``, ``__delitem__``)
+    go into the CURRENT snapshot and are dropped at the next rebuild (when the local
+    model or its env inputs change). Fine for tests; not a persistence mechanism.
     """
 
-    def __init__(self, data):
-        self._data = data
+    def __init__(self, build):
+        # ``build`` is a callable. The ``@local`` value is resolved BEFORE building, so a
+        # model that appears in between makes the next read rebuild instead of being adopted.
         try:
             from llm_router.policy import _resolve_local_placeholder
             self._built_with = _resolve_local_placeholder()
@@ -143,6 +148,7 @@ class _LateBoundTable(MutableMapping):
             from llm_router import failopen
             failopen.record("CHZ-FO-ROUTING-TABLE-LATE-BIND", exc)
             self._built_with = None
+        self._data = build() if callable(build) else build
 
     def _snap(self):
         try:
@@ -203,7 +209,7 @@ class _LateBoundTable(MutableMapping):
         return dict(self._snap())
 
 
-ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = _LateBoundTable(_load_routing_table_from_policy())
+ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = _LateBoundTable(_load_routing_table_from_policy)
 
 # Historical literal removed — see git history (commit 2faaa08) for the
 # previous hardcoded chains. To inspect or edit chains, modify
