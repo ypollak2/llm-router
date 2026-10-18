@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 
 import pytest
 
@@ -125,7 +126,17 @@ def test_unknown_is_na_never_blank_or_zero(home):
     (rec,), _ = why.last_decisions(1)
     out = why.render(rec)
     assert out.count(rec["door"] and "n/a (not recorded for") == 6  # tier_reason + the five elements
-    assert "0.00" not in out and ": 0" not in out
+    # Assert on the rendered FIELD lines only. The old whole-output `": 0" not in out` matched the
+    # random `trace: 0<hex>` line (F90: CI flake on 3.11, main run 39162562245; the "0.00" in pytest's
+    # message was the diff of the same `and` expression, not a real match).
+    header, *rest = out.splitlines()
+    assert header.split("| tier_reason: ", 1)[1].startswith(NA)
+    fields = {m.group(1): m.group(2) for m in
+              (re.match(r"\s+\d (\w[\w ]*?):\s+(.*)$", ln) for ln in rest) if m}
+    assert list(fields) == ["class", "confidence", "layer", "quota state", "alternatives"]
+    for label, value in fields.items():
+        assert value.startswith(NA), (label, value)
+        assert not re.fullmatch(r"\s*|0(\.0+)?", value), (label, value)
     for k in why.ELEMENTS:
         assert rec[k] == f"n/a (not recorded for {rec['door']})"
 
