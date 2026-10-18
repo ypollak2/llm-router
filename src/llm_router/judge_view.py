@@ -36,11 +36,13 @@ SAMPLER_FILENAME = "judge_sampler.json"
 CACHE_FILENAME = "judge_summary.json"
 QUEUE_FILENAME = "judge_queue.jsonl"
 DRAIN_CLAIM_FILENAME = "judge_drain.claim"
-#: At most one session-end-triggered drain per this many seconds.
+#: At most one auto-triggered drain (session start or session end, one shared claim) per this many seconds.
 DRAIN_MIN_INTERVAL_S = 1800.0
 #: The window the session-end line and the cache describe.
 DEFAULT_WINDOW_DAYS = 14
 GRADED = "graded"
+#: Display-only relabel of ungraded statuses on the kpi section (the stored status is unchanged).
+_UNGRADED_LABELS = {"failed": "not graded"}
 UNKNOWN_DOOR = "unknown"
 # The closed door set lives in judge_sampler; mirrored here so this module stays import-light.
 _DOORS = ("proxy", "sdk", "gateway", "mcp", "hook", "agent", "technical_ops")
@@ -273,7 +275,7 @@ def render_lines(js: "JudgeSummary | dict | None") -> list[str]:
     else:
         flag = f"; not informative (n<{min_n})" if d.get("not_informative") else ""
         head = f"  judge quality ({win}): mean {_fmt_mean(mean)} (n={n}){flag}"
-    ung = ", ".join(f"{k} {v}" for k, v in sorted((d.get("ungraded") or {}).items())) or "none"
+    ung = ", ".join(f"{_UNGRADED_LABELS.get(k, k)} {v}" for k, v in sorted((d.get("ungraded") or {}).items())) or "none"
     lines = [head,
              f"  judge self-judge: {na(d.get('self_judge'))} (must be 0)   "
              f"ungraded: {ung}   sampler (lifetime): seen {na(d.get('seen'))}, picked {na(d.get('picked'))}"]
@@ -317,14 +319,33 @@ def read_cache() -> dict | None:
     return d if isinstance(d, dict) and d.get("v") == SCHEMA_VERSION else None
 
 
-# -- detached drain trigger (session-end child; never on the Stop sync path) -----
+# -- detached drain trigger (shared by session-start and the session-end child) -----
+
+#: argv tail both triggers spawn: lowest priority, then one drain. One script so the two cannot drift (F101).
+DRAIN_SCRIPT = (
+    "import os\n"
+    "try:\n    os.nice(19)\nexcept (AttributeError, OSError):\n    pass\n"
+    "import asyncio\nfrom llm_router.judge import drain_queue\nasyncio.run(drain_queue())\n"
+)
+
+
+def bench_active() -> bool:
+    """True when the benchmark marker (``daily_offload.bench_marker()``, the ``bench.active`` file) exists.
+    A drain calls a local model, which would perturb a running benchmark."""
+    from llm_router.daily_offload import bench_marker
+
+    return bench_marker().exists()
+
 
 def drain_due(now: float | None = None) -> bool:
-    """True when a drain should start now: auto-drain not opted out, the queue file is
-    non-empty (a stat, no parse), and none was claimed in the last ``DRAIN_MIN_INTERVAL_S``.
-    Taking the claim is part of answering True. Never raises."""
+    """True when a drain should start now: auto-drain not opted out, no benchmark marker, the queue file is
+    non-empty (a stat, no parse), and none was claimed in the last ``DRAIN_MIN_INTERVAL_S`` (by either
+    trigger: session start or session end share the one claim file). Taking the claim is part of answering
+    True. Never raises."""
     try:
         if os.environ.get("LLM_ROUTER_JUDGE_AUTODRAIN", "").strip().lower() in ("0", "off", "false", "no"):
+            return False
+        if bench_active():
             return False
         if os.stat(paths.state_path(QUEUE_FILENAME)).st_size <= 0:
             return False

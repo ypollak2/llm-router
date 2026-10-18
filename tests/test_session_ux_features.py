@@ -104,7 +104,7 @@ def test_warm_ollama_bg_respects_opt_out_env_var(monkeypatch) -> None:
 # ── CHZ-JUDGE-QUEUE: judge grading queue background drain ──────────────────
 
 
-def test_drain_judge_queue_bg_spawns_detached_subprocess(monkeypatch) -> None:
+def test_drain_judge_queue_bg_spawns_detached_subprocess(monkeypatch, tmp_path) -> None:
     """SessionStart must spawn `judge.drain_queue` detached, the same way
     `_warm_ollama_bg` spawns the Ollama warm-up curl — the hot path only
     enqueues, so something has to grade sampled responses out of band, and
@@ -113,6 +113,10 @@ def test_drain_judge_queue_bg_spawns_detached_subprocess(monkeypatch) -> None:
         "_ss_hook_judge_drain", _HOOKS_SRC / "session-start.py"
     )
     monkeypatch.delenv("LLM_ROUTER_JUDGE_AUTODRAIN", raising=False)
+    # F101: the spawn is now guarded (non-empty queue, no bench marker, shared claim).
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    monkeypatch.delenv("LLM_ROUTER_NO_DETACHED_SPAWN", raising=False)
+    (tmp_path / "judge_queue.jsonl").write_text('{"x": 1}\n')
 
     captured: dict = {}
 
