@@ -38,7 +38,7 @@ NOT_COMMAND_SHAPED = [
 ]
 COMMAND_SHAPED = [
     "!git status", "! ls -la", "!kill 1234", "ls | grep foo", "ls | wc -l", "!pkill node",
-    "ls -la | wc -l", "git status && git diff", "ls; git status",
+    "ls -la | wc -l", "git status && git diff", "ls ; git status",
 ]
 
 
