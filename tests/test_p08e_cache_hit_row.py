@@ -239,12 +239,6 @@ def test_session_end_paid_rows_exclude_cache(tmp_path, monkeypatch):
     assert [r["provider"] for r in free] == ["ollama"]
 
 
-def test_statusline_mix_excludes_cache(tmp_path):
-    from llm_router.statusline_segments import mix_segment
-    _usage_db(tmp_path)
-    assert mix_segment(str(tmp_path)) == {"mix_local": "1", "mix_paid": "1"}
-
-
 def test_share_card_and_digest_exclude_cache(tmp_path):
     import asyncio
 

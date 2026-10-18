@@ -130,6 +130,22 @@ STATES = {
 }
 
 
+_LEDGER_GLYPHS = ("\U0001f4b0", "\u2696", "\U0001f500")     # money, mix, last route
+
+
+def _ledger_fragments(line: str) -> dict:
+    out = {}
+    for frag in line.strip().split(" \u00b7 "):
+        for g in _LEDGER_GLYPHS:
+            if frag.startswith(g):
+                out[g] = frag.strip()
+    return out
+
+
+def _without_ledger_fragments(line: str) -> list:
+    return [f for f in line.strip().split(" \u00b7 ") if not f.startswith(_LEDGER_GLYPHS)]
+
+
 def _run(script: Path, home: Path, extra: dict, stdin: dict) -> subprocess.CompletedProcess:
     env = {
         "HOME": str(home), "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TERM": "dumb",
@@ -168,5 +184,13 @@ def test_default_output_matches_the_pre_273_script(tmp_path, name):
     b = render_full(lambda: _run(new, home, extra, stdin), home)
     assert a.returncode == b.returncode == 0, (a.stderr, b.stderr)
     assert a.stdout.strip(), f"{name}: the reference printed nothing, the comparison is empty"
-    assert b.stdout == a.stdout, f"{name}:\n pre-273: {a.stdout!r}\n now:     {b.stdout!r}"
+    # P3.4-B2 (D-218) deliberately changed three fragments: money, route mix and last route now
+    # come from the ledger and print their n and window. Everything else stays byte-identical.
+    assert _without_ledger_fragments(b.stdout) == _without_ledger_fragments(a.stdout), (
+        f"{name}:\n pre-273: {a.stdout!r}\n now:     {b.stdout!r}")
+    old_f, new_f = _ledger_fragments(a.stdout), _ledger_fragments(b.stdout)
+    if "\U0001f4b0" in old_f:     # money: the same figure, now with its window and n
+        assert old_f["\U0001f4b0"].rstrip(".") in new_f["\U0001f4b0"], (old_f, new_f)
+    if "\U0001f500" in old_f:     # last route: same route, then the ledger n/window
+        assert new_f["\U0001f500"].startswith(old_f["\U0001f500"]), (old_f, new_f)
     assert not b.stdout.startswith("llm-router · "), "the default is not the fast line"

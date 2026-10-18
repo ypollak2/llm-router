@@ -312,10 +312,12 @@ _seg_int() {
 
 s_v="" s_written="" s_usage="" s_session_pct="" s_weekly_pct="" s_usage_stale="" s_reset=""
 s_ctx_human="" s_ctx_pct="" s_money="" s_mix_local="" s_mix_paid="" s_proxy_down=""
+s_mix_sub="" s_mix_unc="" s_mix_n="" s_mix_win="" s_money_n="" s_money_win=""
 s_health="" s_last="" s_last_stale="" s_last_tok=""
 _seg_load() {
     s_v="" s_written="" s_usage="" s_session_pct="" s_weekly_pct="" s_usage_stale="" s_reset=""
     s_ctx_human="" s_ctx_pct="" s_money="" s_mix_local="" s_mix_paid="" s_proxy_down=""
+    s_mix_sub="" s_mix_unc="" s_mix_n="" s_mix_win="" s_money_n="" s_money_win=""
     s_health="" s_last="" s_last_stale="" s_last_tok=""
     [ -r "$_seg_file" ] || return 1
     local k v
@@ -330,6 +332,9 @@ _seg_load() {
             proxy_down) s_proxy_down="$v" ;;     health) s_health="$v" ;;
             last) s_last="$v" ;;                 last_stale) s_last_stale="$v" ;;
             last_tok) s_last_tok="$v" ;;
+            mix_sub) s_mix_sub="$v" ;;           mix_unc) s_mix_unc="$v" ;;
+            mix_n) s_mix_n="$v" ;;               mix_win) s_mix_win="$v" ;;
+            money_n) s_money_n="$v" ;;           money_win) s_money_win="$v" ;;
         esac
     done < "$_seg_file"
     # Every value used in arithmetic or a numeric test must be digits only: the file
@@ -340,6 +345,13 @@ _seg_load() {
     _seg_int "$s_ctx_pct" 3;     s_ctx_pct="$_n";     [ -n "$s_ctx_pct" ] && [ "$s_ctx_pct" -gt 100 ] && s_ctx_pct=100
     _seg_int "$s_mix_local" 9;   s_mix_local="$_n"
     _seg_int "$s_mix_paid" 9;    s_mix_paid="$_n"
+    _seg_int "$s_mix_sub" 9;     s_mix_sub="$_n"
+    _seg_int "$s_mix_unc" 9;     s_mix_unc="$_n"
+    _seg_int "$s_mix_n" 9;       s_mix_n="$_n"
+    _seg_int "$s_money_n" 9;     s_money_n="$_n"
+    # A window label is printed, so only the ledger's own names pass (data, never code).
+    case "$s_mix_win" in session|session~) ;; *) s_mix_win="" ;; esac
+    case "$s_money_win" in today|session|24h|7d|month|lifetime) ;; *) s_money_win="" ;; esac
     _seg_int "$s_written" 10;    s_written="$_n"
     [ "$s_v" = "1" ]
 }
@@ -427,15 +439,21 @@ fi
 # labelled "est." -- computed in statusline_segments.py (it needs `import
 # llm_router`, ~170 ms, which is why it can never sit on this path). Omitted when
 # no interpreter can import llm_router or the day is below the spend floor.
-if [ -n "$s_money" ]; then
-    parts+=("💰 ${_GREEN}${s_money}${_RESET}")
+# P3.4-B2 (D-218): the figure is printed with its window and n, or not at all.
+if [ -n "$s_money" ] && [ -n "$s_money_n" ] && [ -n "$s_money_win" ]; then
+    parts+=("💰 ${_GREEN}${s_money}${_RESET}${_DIM}·${s_money_win} n=${s_money_n}${_RESET}")
 fi
 
-# ⚖ route mix — local vs paid over the last 6h. Answers "is routing working
-# right now", which quota does not. Green only when local carries the majority.
-if [ -n "$s_mix_local" ] && [ -n "$s_mix_paid" ]; then
-    if [ "${s_mix_local:-0}" -ge "${s_mix_paid:-0}" ]; then _mixc="$_GREEN"; else _mixc="$_YELLOW"; fi
-    parts+=("⚖ ${_mixc}${s_mix_local:-0}L/${s_mix_paid:-0}P${_RESET}")
+# ⚖ route mix -- this SESSION's executed calls by class (L local / S subscription / P paid,
+# U unclassified only when non-zero), from one ledger_view window_summary computed by the
+# refresher (P3.4-B2, D-218). Printed with its window and n; absent keys print nothing.
+# Green only when local carries the majority.
+if [ -n "$s_mix_local" ] && [ -n "$s_mix_sub" ] && [ -n "$s_mix_paid" ] \
+   && [ -n "$s_mix_n" ] && [ -n "$s_mix_win" ]; then
+    if [ "$s_mix_local" -ge $((s_mix_sub + s_mix_paid)) ]; then _mixc="$_GREEN"; else _mixc="$_YELLOW"; fi
+    _mixu=""
+    [ -n "$s_mix_unc" ] && [ "$s_mix_unc" -gt 0 ] && _mixu="·${s_mix_unc}U"
+    parts+=("⚖ ${_mixc}${s_mix_local}L/${s_mix_sub}S/${s_mix_paid}P${_mixu}·${s_mix_win}${_RESET} ${_DIM}n=${s_mix_n}${_RESET}")
 fi
 
 # ── 🛡 Enforce mode ──────────────────────────────────────────────────────────
@@ -474,7 +492,15 @@ if [ -n "$s_last" ]; then
     [ "$s_last_stale" = "1" ] && stale_marker="${_DIM}°${_RESET}"
     tok_seg=""
     [ -n "$s_last_tok" ] && tok_seg=" ${_DIM}${s_last_tok}${_RESET}"
-    parts+=("🔀 ${_MAUVE}${s_last}${_RESET}${stale_marker}${tok_seg}")
+    # n and window of the route count come from the ledger (the mix's session call).
+    if [ -n "$s_mix_n" ] && [ -n "$s_mix_win" ]; then
+        led_seg=" ${_DIM}(n=${s_mix_n} ${s_mix_win})${_RESET}"
+    else
+        led_seg=" ${_DIM}(n/a)${_RESET}"
+    fi
+    parts+=("🔀 ${_MAUVE}${s_last}${_RESET}${stale_marker}${tok_seg}${led_seg}")
+else
+    parts+=("🔀 ${_DIM}n/a${_RESET}")
 fi
 
 # ── Cache staleness: a cache the refresher stopped updating says so ──────────

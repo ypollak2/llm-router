@@ -25,7 +25,10 @@ values stripped of control characters (a value is data to print, never to run)::
     v=1  written=<epoch s>
     usage=none|fallback|ok  session_pct  weekly_pct  usage_stale=0|1  reset
     ctx_human  ctx_pct
-    money  mix_local  mix_paid
+    money  money_n  money_win              (today's est. saving, its n and window)
+    mix_local  mix_sub  mix_paid  mix_unc  mix_n  mix_win  ledger_as_of
+                                           (this session's executed calls, from ONE
+                                           ``ledger_view.window_summary``; D-218)
     proxy_down
     health=ok|degraded|idle|down
     last  last_stale=0|1  last_tok
@@ -253,48 +256,72 @@ def _last_usage_tokens(path: str) -> int:
         return 0
 
 
-def money_segment(state: str) -> str:
-    db = os.path.join(state, "usage.db")
-    if not os.path.isfile(db):
-        return ""
-    try:
-        import pathlib
+def _ledger(state: str, scope: str, now: float, session: str = ""):
+    """ONE ``ledger_view.window_summary`` call for the refresh (P3.4-B2, D-218).
 
-        from llm_router.dashboard_data import SPEND_FLOOR_USD, summary
+    ``now`` is passed in, never read from the clock: the figure for a frozen ``now`` is the same
+    figure whatever time the refresher runs. Imports lazily (stdlib-only module otherwise); a
+    copy without the package, or no ledger at all, is ``None`` and the segment stays absent."""
+    import pathlib
 
-        s = summary("today", db_path=pathlib.Path(db))
-        return s.compact() + "." if s.estimated_usd >= SPEND_FLOOR_USD else ""
-    except Exception:  # noqa: BLE001 -- never break the line over a reporting figure
-        return ""
+    from llm_router import ledger_view as lv
+
+    root = pathlib.Path(state)
+    db = root / "usage.db"
+    proxy = root / "proxy_calls.jsonl"
+    if not db.is_file() and not proxy.is_file():
+        return None
+    if scope == "session":
+        sid = (session if session not in ("", "default") else None) or lv.read_session_id(root)
+        return lv.window_summary("session", now=now, session_id=sid, db_path=db, proxy_path=proxy,
+                                 session_start=lv.read_session_start(root))
+    return lv.window_summary("today", now=now, db_path=db, proxy_path=proxy)
 
 
-def mix_segment(state: str) -> dict[str, str]:
-    """Local vs paid calls over the last 6 h (the former ``sqlite3`` process)."""
-    db = os.path.join(state, "usage.db")
-    if not os.path.isfile(db):
+def money_segment(state: str, now: float | None = None) -> dict[str, str]:
+    """Today's estimated saving with its n and window (``money``, ``money_n``, ``money_win``)."""
+    now = time.time() if now is None else now
+    if not os.path.isfile(os.path.join(state, "usage.db")):
         return {}
     try:
-        import sqlite3
+        from llm_router import ledger_view as lv
+        from llm_router.dashboard_data import SPEND_FLOOR_USD
 
-        con = sqlite3.connect(db, timeout=2)
-        try:
-            # = provider_classes.not_error_row_sql (stdlib-only hot path; test pins equality)
-            has_reason = any(r[1] == "reason" for r in con.execute("PRAGMA table_info(usage)"))
-            not_error = ("COALESCE(reason, '') NOT LIKE 'error\\_%' ESCAPE '\\' AND COALESCE(reason, '') != 'breaker_open' AND COALESCE(reason, '') != 'refused_no_research_provider'" if has_reason else "1")
-            row = con.execute(
-                "SELECT SUM(CASE WHEN model LIKE 'ollama/%' THEN 1 ELSE 0 END),"
-                " SUM(CASE WHEN model NOT LIKE 'ollama/%' THEN 1 ELSE 0 END)"
-                " FROM usage WHERE timestamp >= datetime('now', '-6 hours')"
-                " AND COALESCE(provider, '') != 'cache'"
-                " AND " + not_error).fetchone()  # cache hits are not calls (provider_classes)
-        finally:
-            con.close()
+        lw = _ledger(state, "today", now)
+        fig = None if lw is None else lw.figures()["saved"]
+        text = lv.show(fig, "~${:,.2f} est")
+        if text is None or fig.value < SPEND_FLOOR_USD:
+            return {}
+        return {"money": text, "money_n": str(fig.n), "money_win": fig.window}
+    except Exception:  # noqa: BLE001 -- never break the line over a reporting figure
+        return {}
+
+
+def mix_segment(state: str, now: float | None = None, session: str = "") -> dict[str, str]:
+    """Executed calls of THIS SESSION by class: local / subscription / paid / unclassified.
+
+    Keys ``mix_local mix_sub mix_paid mix_unc mix_n mix_win ledger_as_of``. Proxy rows included,
+    classes by evidence (``ledger_view.provider_class``), the window by session id. An unknown
+    figure is absent, never 0; an empty session is a real ``0`` with ``mix_n=0``."""
+    now = time.time() if now is None else now
+    try:
+        from llm_router import ledger_view as lv
+
+        lw = _ledger(state, "session", now, session)
+        if lw is None:
+            return {}
+        figs = lw.figures()
+        shown = {k: lv.show(figs[f], "{:.0f}") for k, f in (
+            ("mix_local", "mix_local"), ("mix_sub", "mix_subscription"), ("mix_paid", "mix_paid"),
+            ("mix_unc", "mix_unclassified"), ("mix_n", "executed"))}
     except Exception:  # noqa: BLE001
         return {}
-    local, paid = (row[0] or 0), (row[1] or 0)
-    if local + paid <= 0:
+    if any(v is None for v in shown.values()):
         return {}
-    return {"mix_local": str(local), "mix_paid": str(paid)}
+    out: dict[str, str] = {k: str(v) for k, v in shown.items()}
+    out["mix_win"] = "session" if lw.scope == "session_id" else "session~"   # ~ = by timestamp
+    out["ledger_as_of"] = lw.as_of
+    return out
 
 
 def proxy_segment(state: str) -> dict[str, str]:
@@ -408,15 +435,15 @@ def last_route_segment(state: str, now: float) -> dict[str, str]:
 
 
 def compute(state: str, transcript: str, model_id: str, env: dict[str, str] | None = None,
-            now: float | None = None) -> dict[str, str]:
+            now: float | None = None, session: str = "") -> dict[str, str]:
     env = dict(os.environ) if env is None else env
     now = time.time() if now is None else now
     seg: dict[str, str] = {"v": str(SCHEMA)}
     parts = (
         lambda: usage_segment(state, now, env),
         lambda: context_segment(transcript, model_id, env),
-        lambda: {"money": money_segment(state)},
-        lambda: mix_segment(state),
+        lambda: money_segment(state, now),
+        lambda: mix_segment(state, now, session),
         lambda: proxy_segment(state),
         lambda: {"health": health_segment(state, now, env)},
         lambda: last_route_segment(state, now),
@@ -483,7 +510,7 @@ def main(argv: list[str] | None = None) -> int:
         signal.alarm(RUN_TIMEOUT_S)
     now = time.time()
     maybe_refresh_usage(state, now, dict(os.environ))
-    write_cache(state, session, compute(state, ns.transcript, ns.model, dict(os.environ), now))
+    write_cache(state, session, compute(state, ns.transcript, ns.model, dict(os.environ), now, session))
     _prune(state)
     return 0
 

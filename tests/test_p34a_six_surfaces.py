@@ -85,9 +85,30 @@ HAS_N = re.compile(r"\bn=\d|\bn \d|\d+ executed")
 HAS_WINDOW = re.compile(r"\b(session|today|24h|7d|month|lifetime)\b")
 
 
+#: B2 (rv-597 carry-forward): a dollar-scale saving between local midnight and now-24h. The A seed's
+#: only such row (U8) is worth under a cent, so "money for today" and "money for 24h" printed the same
+#: 2-decimal figure and a wrong money window passed. This row sits 2 h before NOW: before the local
+#: midnight (NOW is 01:30 local, TZ Kiritimati), inside 24h and 7d, outside today.
+EXTRA_SAVED_USD = 4.0
+EXTRA_OFFSET_S = 120 * MIN
+
+
+def _saved_six(window: str) -> tuple[float, int]:
+    """``_saved`` plus the extra row where the window reaches back past local midnight."""
+    usd, n = _saved(window)
+    return (usd + EXTRA_SAVED_USD, n + 1) if window in ("24h", "7d") else (usd, n)
+
+
 async def _seed_six(home: Path) -> Path:  # noqa: F811 -- pytest fixture name
     db = await _seed(home)
     con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO savings_stats (timestamp, session_id, task_type, estimated_claude_cost_saved, "
+        "external_cost, model_used, host, input_tokens, output_tokens, mode, is_simulated) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (_iso(NOW - EXTRA_OFFSET_S), "s-main", "query", EXTRA_SAVED_USD, 0.0, "gemini_cli",
+         "claude_code", 10, 10, "block", 0))
+    con.commit()
     # usage.latency_ms is NOT NULL (a recorded latency); routing_decisions.latency_ms is nullable and
     # the A seed never sets it, so every routing_decisions row is already an unrecorded latency.
     assert con.execute("SELECT COUNT(*) FROM routing_decisions WHERE latency_ms IS NULL").fetchone()[0] > 0
@@ -129,7 +150,7 @@ def _expected_line_six(window: str) -> str:
     ex = EXPECTED_EXEC[window]
     loc, sub, paid, unc = MIX_SIX[window]
     assert loc + sub + paid + unc == sum(ex.values())
-    usd, n = _saved(window)
+    usd, n = _saved_six(window)
     by = " ".join(f"{p} {c}" for p, c in sorted(ex.items(), key=lambda kv: (-kv[1], kv[0])))
     return (f"ledger {window}: {sum(ex.values())} executed ({by}) · mix local {loc} / "
             f"subscription {sub} / paid {paid} / unclassified {unc} · est. saved ${usd:,.2f} (n={n:,})")
@@ -158,20 +179,19 @@ def _statusline(six) -> str:
 
 
 def test_statusline_money_is_the_today_oracle(six):
-    usd, _n = _saved("today")
-    assert f"~${usd:,.2f} est" in _statusline(six)
+    usd, n = _saved_six("today")
+    line = _statusline(six)
+    assert f"~${usd:,.2f} est" in line and f"today n={n}" in line, line
+    # the extra row is outside today but inside 24h: a wrong money window prints another figure
+    assert f"~${_saved_six('24h')[0]:,.2f} est" not in line, line
 
 
-@pytest.mark.xfail(strict=True, reason="P3.4-B2: statusline mix is usage-only over a wall-clock "
-                   "rolling 6 h (no proxy rows, codex/gemini counted paid), not the session ledger mix")
 def test_statusline_mix_is_the_session_oracle(six):
     loc, sub, paid = SESSION_MIX
     seg = next((f for f in _statusline(six).split(" · ") if f.startswith("\u2696")), "")
     assert f"{loc}L/{sub}S/{paid}P" in seg and "session" in seg, seg
 
 
-@pytest.mark.xfail(strict=True, reason="P3.4-B2: statusline prints money and mix with no n and "
-                   "no window suffix")
 def test_statusline_figures_carry_n_and_window(six):
     line = _statusline(six)
     assert _ungrounded(line, " · ") == [], line
@@ -203,13 +223,13 @@ def _status_bar(six) -> str:
 @pytest.mark.xfail(strict=True, reason="P3.4-B3: status-bar D: is a UTC day over usage rows only "
                    "with a private baseline, not the local-day ledger figure")
 def test_status_bar_day_is_the_today_oracle(six):
-    assert f"D:${_saved('today')[0]:.2f}" in _status_bar(six)
+    assert f"D:${_saved_six('today')[0]:.2f}" in _status_bar(six)
 
 
 @pytest.mark.xfail(strict=True, reason="P3.4-B3: status-bar W: is Monday-UTC to now over usage "
                    "rows only, not the rolling 7 d ledger figure")
 def test_status_bar_week_is_the_7d_oracle(six):
-    assert f"W:${_saved('7d')[0]:.2f}" in _status_bar(six)
+    assert f"W:${_saved_six('7d')[0]:.2f}" in _status_bar(six)
 
 
 @pytest.mark.xfail(strict=True, reason="P3.4-B3: status-bar session calls come from usage rows "
@@ -295,7 +315,7 @@ def test_session_end_box_prints_the_24h_executed_oracle_proxy_rows_included(six)
 
 
 def test_session_end_today_money_is_the_oracle(six):
-    usd, _n = _saved("today")
+    usd, _n = _saved_six("today")
     assert _session_end()._compute_ledger_aggregates()["today_compact"] == f"~${usd:,.2f} est"
 
 
