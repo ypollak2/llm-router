@@ -102,9 +102,7 @@ llm-router status               # verify it's routing — est. savings vs baseli
 Works with **no API keys** on a Claude Pro/Max subscription — routing goes
 through MCP tools and local models. Adding provider keys widens the pool;
 nothing requires them. See **[guide/PROVIDERS.md](guide/PROVIDERS.md)**. To
-install into another host, see [Works With](#works-with).
-
-The daily KPI job (`llm-router install --schedule-daily`, or answer Y when asked; `--no-schedule` skips) is never installed without consent; `llm-router uninstall` removes it.
+install into another host, see [Works With](#works-with). The daily KPI job is installed only with consent (`install --schedule-daily`, or Y when asked; `--no-schedule` skips); `uninstall` removes it.
 
 Python agents route in-process, no server: `from llm_router import Router; r = Router(budget_usd=0.50).run("...")` (`await .arun(...)` in async code; `BudgetExceeded` when the cap is spent).
 
