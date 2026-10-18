@@ -5,7 +5,6 @@
 Serves the gateway on the offline fake (examples/fake_backend.py), runs ``index.ts`` with
 OPENAI_BASE_URL pointed at it, then asserts the client's exit status and the ledger rows.
 """
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -16,7 +15,7 @@ import fake_backend as fb  # noqa: E402
 
 fb.install()
 url = fb.start_gateway()
-done = subprocess.run(["node", "index.ts"], cwd=HERE, env={**os.environ, "OPENAI_BASE_URL": url + "/v1"},
+done = subprocess.run(["node", "index.ts"], cwd=HERE, env=fb.child_env({"OPENAI_BASE_URL": url + "/v1"}),
                       capture_output=True, text=True, timeout=120)
 print(done.stdout, done.stderr, sep="")
 fb.expect(done.returncode == 0, f"index.ts failed with {done.returncode}")

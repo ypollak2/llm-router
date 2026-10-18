@@ -31,6 +31,14 @@ streaming, so the first token arrives when the model has finished. If routing fa
 response has started, the HTTP status is still **200** and the failure arrives as an `error` event in
 the endpoint's own shape (a chat stream sends no `[DONE]` after it); official clients raise on it.
 Requests the gateway refuses (hosted tools, images) are an HTTP 400 before any event.
+The error event is scrubbed like the usage ledger's `detail` column (secrets removed, 200 characters
+at most, exception class plus message, never the prompt). Its `type` is `invalid_request_error` for a
+400, `rate_limit_error` for a 429 (a rate limit from the routed call) and `api_error` otherwise; the
+non-streamed endpoints return the same status codes.
+
+**`system` on `/v1/messages`.** A string is forwarded as is. A list of blocks (Claude Code and the Claude
+Agent SDK send one) is reduced to its text blocks, joined with a single space; blocks of any other type
+and `cache_control` markers are dropped, silently.
 
 The thin adapters in `llm_router.frameworks` build the framework's own model object with this URL
 (`LLM_ROUTER_GATEWAY_URL` overrides it) and the gateway token if one is set. They never import a
@@ -127,3 +135,12 @@ pip install -e . -r examples/langgraph/requirements.txt     # the framework, pin
 python examples/langgraph/main.py                           # prints the answer, then OK
 python examples/fake_backend.py                             # or: serve the fake-backed gateway by hand
 ```
+
+### What the examples' offline guarantee covers
+
+`examples/fake_backend.py` refuses every non-loopback `socket.connect` and `connect_ex` made by the
+example's own Python process, and records it. It cannot see inside a child process (the MCP server, the
+proxy, `node`, Claude Code). Those are kept local by configuration: only a loopback gateway or upstream
+URL is passed to them, and `fake_backend.child_env()` points `HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY`
+at a closed loopback port (with `NO_PROXY=127.0.0.1,localhost,::1`). A child that ignores proxy variables
+is not stopped by this, so an example that spawns a new kind of child needs its own check.

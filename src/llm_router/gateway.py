@@ -399,7 +399,12 @@ async def _route(prompt: str, task_type: str | None, complexity: str | None,
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"LLM Router routing failed: {e}")
+        from llm_router.router import _is_rate_limit_error
+
+        # F76: a rate limit is 429 (non-stream and stream agree), not a generic 502.
+        raise HTTPException(
+            status_code=429 if _is_rate_limit_error(e) else 502,
+            detail=f"LLM Router routing failed: {e}")
     return _RoutedResult(out)
 
 
@@ -1045,6 +1050,20 @@ def _sse(data, event: str | None = None) -> bytes:
     return (f"event: {event}\n" if event else "").encode() + f"data: {body}\n\n".encode()
 
 
+def _scrubbed(text: str) -> str:
+    """F76: text that goes to the client inside an error event: secrets scrubbed (as the
+    ledger does) and cut short, so an exception carrying the prompt cannot echo it back."""
+    from llm_router.proxy.ledger import scrub_detail
+
+    return scrub_detail(text) or ""
+
+
+def _error_kind(status: int) -> str:
+    """The wire ``type`` of an error event: 400 invalid_request_error, 429 rate_limit_error
+    (all three formats use this name), anything else api_error."""
+    return {400: "invalid_request_error", 429: "rate_limit_error"}.get(status, "api_error")
+
+
 def _sse_response(route_call, build, error_frame) -> StreamingResponse:
     """Stream ``route_call`` (the same ``_route`` coroutine the non-streamed path awaits).
 
@@ -1064,9 +1083,9 @@ def _sse_response(route_call, build, error_frame) -> StreamingResponse:
             for frame in frames:
                 yield frame
         except HTTPException as e:
-            yield error_frame(e.status_code, str(e.detail))
+            yield error_frame(e.status_code, _scrubbed(str(e.detail)))
         except Exception as e:  # noqa: BLE001 - headers are out: the protocol's error event
-            yield error_frame(500, f"stream failed: {e}")
+            yield error_frame(500, f"stream failed: {type(e).__name__}: {_scrubbed(str(e))}")
         finally:
             if not task.done():
                 task.cancel()  # client gone: the router records the cancelled call
@@ -1101,7 +1120,7 @@ def _chat_frames(body: dict, include_usage: bool):
 
 
 def _openai_error_frame(status: int, message: str) -> bytes:
-    kind = "invalid_request_error" if status == 400 else "api_error"
+    kind = _error_kind(status)
     return _sse({"error": {"message": message, "type": kind, "param": None, "code": str(status)}})
 
 
@@ -1137,7 +1156,7 @@ def _responses_frames(body: dict):
 
 
 def _responses_error_frame(status: int, message: str) -> bytes:
-    kind = "invalid_request_error" if status == 400 else "api_error"
+    kind = _error_kind(status)
     return _sse({"type": "error", "code": str(status), "message": message, "param": None,
                  "error": {"message": message, "type": kind, "code": str(status)}}, event="error")
 
@@ -1170,7 +1189,7 @@ def _anthropic_frames(body: dict):
 
 
 def _anthropic_error_frame(status: int, message: str) -> bytes:
-    kind = "invalid_request_error" if status == 400 else "api_error"
+    kind = _error_kind(status)
     return _sse({"type": "error", "error": {"type": kind, "message": message}}, event="error")
 
 

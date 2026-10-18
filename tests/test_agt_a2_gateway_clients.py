@@ -53,11 +53,14 @@ class Fake:
         self.gate: asyncio.Event | None = None   # A.2-s: hold the call until the test sets it
         self.cancelled = threading.Event()       # A.2-s: the held call was cancelled upstream
         self.fail: Exception | None = None       # A.2-s: the backend raises
+        self.delay = 0.0                         # F76: seconds the backend takes to answer
 
     async def __call__(self, **kw):
         self.calls.append(copy.deepcopy({k: v for k, v in kw.items() if k != "timeout"}))
         if self.fail is not None:
             raise self.fail
+        if self.delay:
+            await asyncio.sleep(self.delay)
         if self.gate is not None:
             try:
                 await self.gate.wait()
@@ -741,3 +744,86 @@ def test_anthropic_system_as_text_blocks_is_accepted_and_forwarded(ant, fake):
     assert reply.content[0].text == FINAL
     sent = fake.calls[0]["messages"]
     assert any(m["role"] == "system" and "be brief" in json.dumps(m["content"]) for m in sent), sent
+
+
+# ── F76: keep-alive, finished-before-disconnect, scrubbed and rate-limit error events ────
+def _raw_lines(base, path, body):
+    with httpx.stream("POST", base + path, json=body, timeout=30) as r:
+        assert r.status_code == 200, r.read()
+        return list(r.iter_lines())
+
+
+def test_stream_sends_keep_alive_comments_while_the_model_works(base, fake, monkeypatch):
+    from llm_router import gateway
+
+    monkeypatch.setattr(gateway, "_KEEPALIVE_S", 0.05)
+    fake.delay = 0.6
+    lines = _raw_lines(base, "/v1/chat/completions", _body("/v1/chat/completions"))
+    first_data = next(i for i, ln in enumerate(lines) if ln.startswith("data:"))
+    assert any(ln == ": keep-alive" for ln in lines[:first_data]), lines[:first_data + 1]
+    assert "data: [DONE]" in lines
+    assert FINAL in "".join(lines)
+
+
+def test_a_call_that_finished_before_the_disconnect_keeps_its_success_row(base, fake):
+    with httpx.stream("POST", base + "/v1/chat/completions", json=_body("/v1/chat/completions"),
+                      timeout=30) as r:
+        assert r.status_code == 200
+        for line in r.iter_lines():             # the first data frame exists only once the call is done
+            if line.startswith("data:"):
+                break
+    time.sleep(0.5)                             # the disconnect has been seen by the gateway
+    rows = _usage_rows()
+    assert len(rows) == 1 and rows[0][4] == 1 and rows[0][5] != "error_cancelled", rows
+    assert not fake.cancelled.is_set()
+
+
+RATE = "429 Too Many Requests: rate limit exceeded"
+
+
+@pytest.mark.parametrize("path", ENDPOINTS)
+def test_rate_limit_is_429_non_stream_and_rate_limit_error_event_when_streaming(
+        base, fake, monkeypatch, path):
+    import llm_router.route_server as route_server
+
+    async def limited(payload):
+        raise RuntimeError(RATE)
+
+    monkeypatch.setattr(route_server, "route_payload_async", limited)
+    plain = {k: v for k, v in _body(path).items() if k != "stream"}
+    assert httpx.post(base + path, json=plain, timeout=30).status_code == 429
+    event, data = _frames(base, path, _body(path))[-1]
+    payload = json.loads(data)
+    err = payload["error"]
+    assert err["type"] == "rate_limit_error"
+    assert (event == "error") == (path != "/v1/chat/completions")
+
+
+def test_a_routing_failure_event_is_scrubbed_and_short(base, fake, monkeypatch):
+    import llm_router.route_server as route_server
+
+    secret = "sk-ant-api03-" + "A" * 40
+    tail = "TAIL-OF-THE-PROMPT"
+
+    async def failing(payload):
+        raise RuntimeError(f"upstream said {secret} " + "x" * 400 + tail)
+
+    monkeypatch.setattr(route_server, "route_payload_async", failing)
+    for path in ENDPOINTS:
+        message = json.loads(_frames(base, path, _body(path))[-1][1])["error"]["message"]
+        assert secret not in message and tail not in message and len(message) <= 260, message
+
+
+def test_an_unexpected_stream_error_names_the_class_and_scrubs_the_message(base, fake, monkeypatch):
+    from llm_router import gateway
+
+    secret = "sk-ant-api03-" + "B" * 40
+
+    def broken(body, include_usage):
+        raise ValueError(f"cannot render {secret}")
+        yield b""  # pragma: no cover - makes this a generator, as the real one is
+
+    monkeypatch.setattr(gateway, "_chat_frames", broken)
+    message = json.loads(_frames(base, "/v1/chat/completions", _body("/v1/chat/completions"))[-1][1]
+                         )["error"]["message"]
+    assert message.startswith("stream failed: ValueError: ") and secret not in message, message

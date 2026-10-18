@@ -7,7 +7,6 @@ routed tool through the official ``mcp`` client, asserts the answer and the ledg
 Code the same server is registered by ``llm-router install``; nothing else changes.
 """
 import asyncio
-import os
 import sys
 from pathlib import Path
 
@@ -24,7 +23,7 @@ from mcp.client.stdio import stdio_client  # noqa: E402
 async def main() -> str:
     server = StdioServerParameters(
         command=sys.executable, args=[str(HERE / "fake_backend.py"), "mcp-server"],
-        env={**os.environ})                                # carries LLM_ROUTER_EXAMPLE_HOME: same ledger
+        env=fb.child_env())                             # carries LLM_ROUTER_EXAMPLE_HOME: same ledger
     async with stdio_client(server) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
