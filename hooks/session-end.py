@@ -1240,7 +1240,7 @@ def _query_cache_hit_stats() -> dict:
         conn = sqlite3.connect(_db_path())
         try:
             row = conn.execute("""
-                SELECT COUNT(*), COALESCE(SUM(hit), 0), COALESCE(SUM(saved_usd), 0)
+                SELECT COUNT(*), COALESCE(SUM(hit), 0), COALESCE(SUM(semantic_cache_lookups.saved_usd), 0)
                 FROM semantic_cache_lookups
                 WHERE date(ts, 'unixepoch', 'localtime') = date('now', 'localtime')
             """).fetchone()
