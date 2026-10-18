@@ -3276,8 +3276,8 @@ def main() -> None:
                 final_summary_output.rstrip("  " + "═" * (WIDTH - 2))
                 + f"\n  {_judge_line}\n" + "  " + "═" * (WIDTH - 2)
             )
-    except Exception:
-        pass  # Graceful failure — never break session-end
+    except Exception as _jexc:  # noqa: BLE001 -- never break session-end; recorded
+        _record_failopen("CHZ-FO-SESSION-END-JUDGE-LINE", _jexc)
 
     _laps.end()
 

@@ -100,7 +100,7 @@ class JudgeSummary:
     v: int = SCHEMA_VERSION
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "v": self.v, "generated_at": self.generated_at, "generated_ts": self.until_ts,
             "window": {"label": self.window, "since_ts": self.since_ts, "until_ts": self.until_ts},
             "session_id": self.session_id, "min_n": self.min_n, "n": self.n, "mean": self.mean,
@@ -108,8 +108,9 @@ class JudgeSummary:
             "skipped_rows": self.skipped_rows, "seen": self.seen, "picked": self.picked,
             "sampler_scope": "lifetime", "not_informative": self.not_informative,
             "doors": {d: s.to_dict() for d, s in self.doors.items()},
-            "line": format_line(self),
         }
+        d["line"] = format_line(d)
+        return d
 
 
 def _to_ts(x, default: float | None = None) -> float | None:

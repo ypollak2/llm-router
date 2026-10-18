@@ -258,7 +258,7 @@ def test_a_stop_run_names_its_phases(hook, state, monkeypatch, tmp_path, armed):
     ph = set(armed._phases)
     assert {"import", "session_io", "session_data", "cc_usage", "savings_sync", "cumulative",
             "render", "unverified_note", "spend", "trends", "notes", "quota_timeline",
-            "routing_section", "northstar", "quality_breaker", "quota_sample", "bg_spawn",
+            "routing_section", "northstar", "quality_breaker", "judge_summary", "quota_sample", "bg_spawn",
             "emit"} <= ph, ph
 
 
