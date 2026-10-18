@@ -1643,9 +1643,16 @@ _ACK_SECOND_CLAUSE_RE = re.compile(
 _ACK_REQUEST_VERB_RE = re.compile(
     r"\b(?:write|fix|find|add|review|refactor|rewrite|summari[sz]e|explain|check|run|"
     r"update|make|create|implement|debug|translate|test|ship|migrate|deploy|show|tell|"
-    r"list|build|generate|remove|delete|merge|push|commit|open|read|look|help)\b",
+    r"list|build|generate|remove|delete|merge|push|commit|open|read|look|help|draft|"
+    r"design|plan|document|optimi[sz]e|convert|split|outline|prepare)\b",
     re.IGNORECASE,
 )
+# The verb list cannot be complete, so the report path is shape-bound too: the
+# report must be the whole prompt. A sentence break with more text after it
+# ("I merged it: draft the notes", "I updated the schema. Design the plan") or a
+# report longer than a short object is "report, then ask" (#591 review round 2).
+_ACK_CLAUSE_BREAK_RE = re.compile(r"[:.!]\s+\S|\n")
+_ACK_REPORT_MAX_WORDS = 6
 _ACK_MAX_WORDS = 10
 
 # F69: a prompt that is just a pasted shell command ("llm-router summary`", with or
@@ -1698,7 +1705,8 @@ def _is_acknowledgement(prompt: str) -> bool:
     if _ACK_ONLY_RE.match(stripped):
         return True
     rest = _ACK_LEAD_RE.sub("", stripped, count=1).strip()
-    if (not rest or _ACK_NEW_REQUEST_RE.search(rest)
+    if (not rest or len(rest.split()) > _ACK_REPORT_MAX_WORDS
+            or _ACK_CLAUSE_BREAK_RE.search(rest) or _ACK_NEW_REQUEST_RE.search(rest)
             or _ACK_SECOND_CLAUSE_RE.search(rest) or _ACK_REQUEST_VERB_RE.search(rest)):
         return False
     return bool(_ACK_REPORT_RE.match(rest))

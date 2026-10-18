@@ -23,7 +23,8 @@ AUTO = ROOT / "src" / "llm_router" / "hooks" / "auto-route.py"
 
 ACK_PROMPTS = [
     "ok", "done", "Yeah, I reconnected the mcp", "yeah I did it", "I ran the command",
-    "copied the hooks", "yes, go ahead", "thanks",
+    "copied the hooks", "yes, go ahead", "thanks", "Yeah, I reconnected the mcp.",
+    "I pushed v1.2.3", "ok, I restarted it!",
 ]
 FOLLOWUP_QUESTIONS = ["why?", "and the tests?", "what about X", "why did it fail",
                       "reconnected the mcp, why does it fail"]
@@ -215,3 +216,24 @@ def test_outward_commands_keep_directive(auto_mod, prompt):
                                     "grep foo src fix"])
 def test_command_plus_request_verb_not_command_shaped(auto_mod, prompt):
     assert not auto_mod._is_command_shaped(prompt)
+
+
+# #591 review round 2: a report followed by a sentence break, or a report longer
+# than a short object, is "report, then ask" even when the verb is not listed.
+REPORT_THEN_ASK_SHAPE = [
+    "I merged it: draft the release notes",
+    "I updated the schema. Design the migration plan",
+    "I restarted it! Now benchmark the cache",
+    "I installed the deps\nwire the parser into main",
+    "I fixed it plan the rollout for the workers",
+    "copied the hooks. Outline the next step",
+    "I merged it, optimise the query",
+    "I updated it so convert the table",
+    "I reverted it; split the module",
+    "I changed the file - document the flag",
+]
+
+
+@pytest.mark.parametrize("prompt", REPORT_THEN_ASK_SHAPE)
+def test_report_then_ask_by_shape_not_ack(auto_mod, prompt):
+    assert not auto_mod._is_acknowledgement(prompt)
