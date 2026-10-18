@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 67
+# llm_router-hook-version: 68
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 67"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 68"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -1700,6 +1700,65 @@ _CMD_SHARED_STATE_RE = re.compile(
 _CMD_MAX_WORDS = 12
 
 
+# F71: the "ambient" continuation paths in ``_is_coordination_task`` (an ack-style
+# opener, or a bare deictic with no anchor) used to be deny-lists: "starts with ok/
+# done/..., remainder has no real-task verb" or "contains it/that, no commit/push".
+# They swallowed real work ("ok add a docstring to foo", "done, review the diff",
+# "Set it to prod", "ran pytest, 3 failures, fix them") because no verb list is
+# complete. Like F69's report path they are now whole-prompt allow-lists: EVERY token
+# must come from a closed vocabulary of function words / acknowledgement fillers /
+# continuation words, so any content verb or noun falls through to normal
+# classification. A false reject costs a routing check; a false accept skips one.
+_AMBIENT_BASE_TOKENS = frozenset((
+    "a an the this that these those it its it's them there they their you your our we us "
+    "i me my is are was were be been am do does did done doesn't don't didn't weren't "
+    "wasn't isn't aren't can could should would will may might just still also again "
+    "too now then so and or but not no yes yep yeah yup ok okay sure please thanks thank "
+    "thx great cool nice perfect alright good right go going continue proceed ahead keep "
+    "on with to of for in at as if when what what's whats why how which who where next "
+    "first second third last one two three rest same other others more another all both "
+    "any every each only up out off over back about from by get started skip "
+    "sounds looks got stop wait hold let let's lets cont carry left else anything "
+    "something lot much very many").split())
+# Words that are also imperative verbs / nouns ("list it", "check it", "report the
+# bug") are allowed only right after the word that makes them a noun or a question
+# ("the list", "can you check on it"), never in imperative position.
+_AMBIENT_AFTER_DET = frozenset("the this that these those your our my".split())
+_AMBIENT_NOUNS = frozenset("list score status".split())
+_AMBIENT_DEICTIC_NOUNS = _AMBIENT_NOUNS | frozenset((
+    "plan audit report presentation demo result results finding findings draft drafts "
+    "recommendation recommendations").split())
+_AMBIENT_AFTER_MODAL = {"check": frozenset(("you", "to"))}
+# "use this plan and get started": "use" only when a determiner follows ("use it" is not).
+_AMBIENT_BEFORE_DET = {"use": _AMBIENT_AFTER_DET}
+# The bare-deictic path also takes a few status verbs ("why is it failing again?").
+_AMBIENT_DEICTIC_TOKENS = _AMBIENT_BASE_TOKENS | frozenset((
+    "fixed failing failed fail fails used work works working worked happens happen "
+    "happened image").split())
+_AMBIENT_IMAGE_MARKER_RE = re.compile(r"\[image\s*#?\d+\]", re.IGNORECASE)
+_AMBIENT_TOKEN_RE = re.compile(r"[\w'\u2019-]+")
+
+
+def _ambient_tokens_within(text: str, vocab: frozenset,
+                           nouns: frozenset = _AMBIENT_NOUNS) -> bool:
+    """True when every word of ``text`` is in ``vocab`` or is a noun right after a
+    determiner / a modal-led verb (see above). Empty text is True: a bare opener
+    ("ok") is a pure acknowledgement."""
+    cleaned = _AMBIENT_IMAGE_MARKER_RE.sub(" ", text).replace("\u2019", "'").lower()
+    prev = ""
+    toks = _AMBIENT_TOKEN_RE.findall(cleaned)
+    for i, tok in enumerate(toks):
+        nxt = toks[i + 1] if i + 1 < len(toks) else ""
+        ok = (tok in vocab
+              or (tok in _AMBIENT_BEFORE_DET and nxt in _AMBIENT_BEFORE_DET[tok])
+              or (tok in nouns and prev in _AMBIENT_AFTER_DET)
+              or (tok in _AMBIENT_AFTER_MODAL and prev in _AMBIENT_AFTER_MODAL[tok]))
+        if not ok:
+            return False
+        prev = tok
+    return True
+
+
 def _is_command_shaped(prompt: str) -> bool:
     """True when the whole prompt is one shell-command line: first token is a
     known executable (or a ./ ~/ / path), optional ``$ `` prefix, optional wrapping
@@ -1782,33 +1841,15 @@ def _is_coordination_task(prompt: str) -> bool:
             return True
         opener = _COORDINATE_CONTINUATION_OPENER_RE.match(stripped)
         if opener:
-            remainder = stripped[opener.end():].strip()
-            has_anchor = bool(_COORDINATE_CONCRETE_ANCHOR_RE.search(remainder))
-            # An imperative+object only counts as a real task when it is not
-            # itself pointing at an unnamed prior artefact ("write THE PLAN
-            # doc" still needs to know which plan).
-            unresolved_object = bool(
-                (_COORDINATE_DEICTIC_RE.search(remainder)
-                    or _COORDINATE_DEMONSTRATIVE_BARE_RE.search(remainder))
-                and not has_anchor
-            )
-            states_real_task = (
-                has_anchor
-                or (_COORDINATE_IMPERATIVE_OBJECT_RE.search(remainder)
-                    and not unresolved_object)
-                # "commit"/"push" are ordinary git shorthand even with a
-                # bare pronoun object (see ``_COORDINATE_OP_VERB_RE``'s own
-                # comment) — mirrors the elif branch's exclusion below.
-                # Needed once "done"/"do also" joined the opener list:
-                # "done, commit and push it" must stay off this path too.
-                or bool(_COORDINATE_OP_VERB_RE.search(remainder))
-            )
-            if not states_real_task:
+            # F71: whole-remainder allow-list, not "no real-task verb found".
+            if _ambient_tokens_within(stripped[opener.end():], _AMBIENT_BASE_TOKENS):
                 return True
         elif (not _COORDINATE_OP_VERB_RE.search(stripped)
                 and not _COORDINATE_CONCRETE_ANCHOR_RE.search(stripped)
                 and (_COORDINATE_DEICTIC_RE.search(stripped)
-                     or _COORDINATE_DEMONSTRATIVE_BARE_RE.search(stripped))):
+                     or _COORDINATE_DEMONSTRATIVE_BARE_RE.search(stripped))
+                and _ambient_tokens_within(stripped, _AMBIENT_DEICTIC_TOKENS,
+                                       _AMBIENT_DEICTIC_NOUNS)):
             return True
     return False
 

@@ -6,13 +6,15 @@ path: wire format -> normalisation -> route_payload_async -> route_and_call -> c
 filter -> call_llm -> fake -> tool_calls -> wire format. One API provider is configured
 (openai, a test key), the CLI backends are off and any non-loopback socket is refused.
 
-Not in this file (A.2-s): streaming. ``stream: true`` with tools keeps the existing 400.
+A.2-s (streaming) is at the end of this file: the same fake, the same two clients, ``stream=True``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
+import sqlite3
 import socket
 import threading
 import time
@@ -48,9 +50,20 @@ class Fake:
         self.mode = "tool"            # "tool": call the tool; "text": ignore the tools
         self.backend_reason = "stop"  # what the backend reports beside a tool call
         self.arguments = json.dumps(ARGS)
+        self.gate: asyncio.Event | None = None   # A.2-s: hold the call until the test sets it
+        self.cancelled = threading.Event()       # A.2-s: the held call was cancelled upstream
+        self.fail: Exception | None = None       # A.2-s: the backend raises
 
     async def __call__(self, **kw):
         self.calls.append(copy.deepcopy({k: v for k, v in kw.items() if k != "timeout"}))
+        if self.fail is not None:
+            raise self.fail
+        if self.gate is not None:
+            try:
+                await self.gate.wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise
         has_result = RESULT in json.dumps(kw.get("messages"))
         if kw.get("tools") and self.mode == "tool" and not has_result:
             message = {"role": "assistant", "content": None, "tool_calls": [
@@ -422,17 +435,6 @@ def test_a_cli_backend_is_never_tried_with_tools(oai, fake, monkeypatch):
     assert fake.calls == []
 
 
-def test_streaming_with_tools_keeps_the_refusal_until_a2s(oai, ant, fake):
-    with pytest.raises(openai.BadRequestError) as exc:
-        oai.chat.completions.create(model="gpt-4o", stream=True, tools=[CHAT_TOOL],
-                                    messages=[{"role": "user", "content": PROMPT}])
-    assert "streaming not supported" in str(exc.value)
-    with pytest.raises(anthropic.BadRequestError):
-        ant.messages.create(model="claude-haiku-4-5", max_tokens=64, stream=True,
-                            tools=[ANTHROPIC_TOOL], messages=[{"role": "user", "content": PROMPT}])
-    assert fake.calls == []
-
-
 def test_hosted_tools_are_refused_not_dropped(oai, ant, fake):
     with pytest.raises(openai.BadRequestError):
         oai.responses.create(model="gpt-4o", input=PROMPT, tools=[{"type": "web_search_preview"}])
@@ -465,3 +467,265 @@ def test_a_request_without_tools_is_unchanged(oai, ant, fake):
                             messages=[{"role": "user", "content": PROMPT + " plain anthropic"}])
     assert a.content[0].text == FINAL and a.stop_reason == "end_turn"
     assert all("tools" not in c and "tool_choice" not in c for c in fake.calls)
+
+
+# ── A.2-s: streaming (SSE) on all three endpoints, official clients ─────────────────────
+# The gateway streams the routed call's complete answer (see gateway._sse_response): the
+# fake is the same non-streaming litellm edge, so a streamed call is routed, gated, cached
+# and ledgered exactly like a non-streamed one.
+
+import httpx  # noqa: E402  (a dependency of both clients)
+
+ENDPOINTS = ("/v1/chat/completions", "/v1/responses", "/v1/messages")
+
+
+def _body(path, tools=False, text=PROMPT):
+    if path == "/v1/chat/completions":
+        b = {"model": "gpt-4o", "stream": True, "messages": [{"role": "user", "content": text}]}
+        return {**b, "tools": [CHAT_TOOL]} if tools else b
+    if path == "/v1/responses":
+        b = {"model": "gpt-4o", "stream": True, "input": text}
+        return {**b, "tools": [RESPONSES_TOOL]} if tools else b
+    b = {"model": "claude-haiku-4-5", "max_tokens": 64, "stream": True,
+         "messages": [{"role": "user", "content": text}]}
+    return {**b, "tools": [ANTHROPIC_TOOL]} if tools else b
+
+
+def _frames(base, path, body):
+    """The raw SSE frames of one request: [(event name or None, data text)]; comments skipped."""
+    out = []
+    with httpx.stream("POST", base + path, json=body, timeout=30) as r:
+        assert r.status_code == 200, r.read()
+        assert r.headers["content-type"].startswith("text/event-stream")
+        event = None
+        for line in r.iter_lines():
+            if line.startswith("event:"):
+                event = line[6:].strip()
+            elif line.startswith("data:"):
+                out.append((event, line[5:].strip()))
+                event = None
+    return out
+
+
+def _usage_rows():
+    from llm_router.config import get_config
+
+    con = sqlite3.connect(str(get_config().llm_router_db_path))
+    try:
+        return con.execute("SELECT model, provider, input_tokens, output_tokens, success, reason "
+                           "FROM usage ORDER BY id").fetchall()
+    finally:
+        con.close()
+
+
+def test_chat_stream_text_chunks_finish_reason_and_ledger(oai, fake):
+    stream = oai.chat.completions.create(
+        model="gpt-4o", stream=True, stream_options={"include_usage": True},
+        messages=[{"role": "user", "content": PROMPT}])
+    chunks = list(stream)
+    assert all(c.object == "chat.completion.chunk" for c in chunks)
+    assert len({c.id for c in chunks}) == 1
+    assert chunks[0].choices[0].delta.role == "assistant"
+    deltas = [c.choices[0].delta.content for c in chunks if c.choices and c.choices[0].delta.content]
+    assert len(deltas) > 1 and "".join(deltas) == FINAL
+    finish = [c.choices[0].finish_reason for c in chunks if c.choices and c.choices[0].finish_reason]
+    assert finish == ["stop"] and chunks[-2].choices[0].finish_reason == "stop"
+    assert not chunks[-1].choices and (chunks[-1].usage.prompt_tokens,
+                                       chunks[-1].usage.completion_tokens) == (11, 7)
+    rows = _usage_rows()
+    assert len(rows) == 1 and rows[0][2:5] == (11, 7, 1)
+
+
+def test_chat_stream_without_include_usage_has_no_usage_chunk(oai, fake):
+    chunks = list(oai.chat.completions.create(
+        model="gpt-4o", stream=True, messages=[{"role": "user", "content": PROMPT}]))
+    assert all(c.usage is None for c in chunks) and chunks[-1].choices[0].finish_reason == "stop"
+
+
+def test_chat_stream_tool_call_round_trip(oai, fake):
+    msgs = [{"role": "user", "content": PROMPT}]
+    chunks = list(oai.chat.completions.create(model="gpt-4o", stream=True, messages=msgs,
+                                              tools=[CHAT_TOOL]))
+    calls = [tc for c in chunks if c.choices for tc in (c.choices[0].delta.tool_calls or [])]
+    assert calls[0].id == "call_abc123" and calls[0].function.name == "get_weather"
+    assert calls[0].index == 0 and len(calls) > 2          # header + argument fragments
+    assert json.loads("".join(tc.function.arguments or "" for tc in calls)) == ARGS
+    assert [c.choices[0].finish_reason for c in chunks if c.choices][-1] == "tool_calls"
+    assert not any(c.choices and c.choices[0].delta.content for c in chunks)
+
+    msgs += [{"role": "assistant", "content": None, "tool_calls": [
+                 {"id": "call_abc123", "type": "function",
+                  "function": {"name": "get_weather", "arguments": json.dumps(ARGS)}}]},
+             {"role": "tool", "tool_call_id": "call_abc123", "content": RESULT}]
+    chunks = list(oai.chat.completions.create(model="gpt-4o", stream=True, messages=msgs,
+                                              tools=[CHAT_TOOL]))
+    assert "".join(c.choices[0].delta.content or "" for c in chunks if c.choices) == FINAL
+    assert [c.choices[0].finish_reason for c in chunks if c.choices][-1] == "stop"
+    assert len(fake.calls) == 2 and RESULT in json.dumps(fake.calls[1]["messages"])
+    assert len(_usage_rows()) == 2
+
+
+def test_responses_stream_text_event_order_final_response_and_ledger(oai, fake):
+    events = list(oai.responses.create(model="gpt-4o", input=PROMPT, stream=True))
+    types = [e.type for e in events]
+    deltas = [e.delta for e in events if e.type == "response.output_text.delta"]
+    assert len(deltas) > 1 and "".join(deltas) == FINAL
+    collapsed = [t for i, t in enumerate(types) if i == 0 or t != types[i - 1]]
+    assert collapsed == ["response.created", "response.in_progress", "response.output_item.added",
+                         "response.content_part.added", "response.output_text.delta",
+                         "response.output_text.done", "response.content_part.done",
+                         "response.output_item.done", "response.completed"]
+    assert [e.sequence_number for e in events] == list(range(len(events)))
+    done = events[-1].response
+    assert done.status == "completed" and done.output_text == FINAL
+    assert (done.usage.input_tokens, done.usage.output_tokens) == (11, 7)
+    assert events[0].response.status == "in_progress" and events[0].response.id == done.id
+    rows = _usage_rows()
+    assert len(rows) == 1 and rows[0][2:5] == (11, 7, 1)
+
+
+def test_responses_stream_helper_tool_call_round_trip(oai, fake):
+    with oai.responses.stream(model="gpt-4o", input=PROMPT, tools=[RESPONSES_TOOL]) as s:
+        types = [e.type for e in s]
+        final = s.get_final_response()
+    calls = [o for o in final.output if o.type == "function_call"]
+    assert len(calls) == 1 and calls[0].call_id == "call_abc123" and calls[0].name == "get_weather"
+    assert json.loads(calls[0].arguments) == ARGS
+    assert types.count("response.function_call_arguments.delta") > 1
+    assert "response.function_call_arguments.done" in types and types[-1] == "response.completed"
+
+    turn2 = [{"role": "user", "content": PROMPT},
+             {"type": "function_call", "call_id": "call_abc123", "name": "get_weather",
+              "arguments": calls[0].arguments},
+             {"type": "function_call_output", "call_id": "call_abc123", "output": RESULT}]
+    with oai.responses.stream(model="gpt-4o", input=turn2, tools=[RESPONSES_TOOL]) as s:
+        final = s.get_final_response()
+    assert final.output_text == FINAL and final.status == "completed"
+    assert len(_usage_rows()) == 2
+
+
+def test_anthropic_stream_text_event_order_stop_reason_and_ledger(ant, fake):
+    events = list(ant.messages.create(model="claude-haiku-4-5", max_tokens=64, stream=True,
+                                      messages=[{"role": "user", "content": PROMPT}]))
+    types = [e.type for e in events]
+    collapsed = [t for i, t in enumerate(types) if i == 0 or t != types[i - 1]]
+    assert collapsed == ["message_start", "content_block_start", "content_block_delta",
+                         "content_block_stop", "message_delta", "message_stop"]
+    assert "".join(e.delta.text for e in events if e.type == "content_block_delta") == FINAL
+    assert types.count("content_block_delta") > 1
+    assert events[0].message.usage.input_tokens == 11
+    md = [e for e in events if e.type == "message_delta"][0]
+    assert md.delta.stop_reason == "end_turn" and md.usage.output_tokens == 7
+    with ant.messages.stream(model="claude-haiku-4-5", max_tokens=64,
+                             messages=[{"role": "user", "content": PROMPT + " again"}]) as s:
+        assert "".join(s.text_stream) == FINAL
+        msg = s.get_final_message()
+    assert msg.stop_reason == "end_turn" and msg.content[0].text == FINAL
+    assert (msg.usage.input_tokens, msg.usage.output_tokens) == (11, 7)
+    rows = _usage_rows()
+    assert len(rows) == 2 and all(r[2:5] == (11, 7, 1) for r in rows)
+
+
+def test_anthropic_stream_tool_call_round_trip(ant, fake):
+    msgs = [{"role": "user", "content": PROMPT}]
+    with ant.messages.stream(model="claude-haiku-4-5", max_tokens=64, tools=[ANTHROPIC_TOOL],
+                             messages=msgs) as s:
+        types = [e.type for e in s]
+        msg = s.get_final_message()
+    assert msg.stop_reason == "tool_use"
+    block = msg.content[0]
+    assert block.type == "tool_use" and block.id == "call_abc123" and block.input == ARGS
+    assert types.count("input_json") > 1 and types[-1] == "message_stop"
+
+    msgs += [{"role": "assistant", "content": [{"type": "tool_use", "id": "call_abc123",
+                                                "name": "get_weather", "input": ARGS}]},
+             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_abc123",
+                                           "content": RESULT}]}]
+    with ant.messages.stream(model="claude-haiku-4-5", max_tokens=64, tools=[ANTHROPIC_TOOL],
+                             messages=msgs) as s:
+        msg = s.get_final_message()
+    assert msg.stop_reason == "end_turn" and msg.content[0].text == FINAL
+    assert len(_usage_rows()) == 2
+
+
+@pytest.mark.parametrize("path", ENDPOINTS)
+@pytest.mark.parametrize("tools", [False, True])
+def test_stream_is_routed_like_the_non_stream_call_and_ledgered_once(base, fake, path, tools):
+    """Same routing decision (the backend sees the same call) and one usage row with the same
+    fields as the non-streamed call, for every endpoint, with and without a tool call."""
+    plain = {k: v for k, v in _body(path, tools=tools).items() if k != "stream"}
+    r = httpx.post(base + path, json=plain, timeout=30)
+    assert r.status_code == 200, r.text
+    assert len(_frames(base, path, _body(path, tools=tools))) > 2
+    assert len(fake.calls) == 2 and fake.calls[0] == fake.calls[1]
+    rows = _usage_rows()
+    assert len(rows) == 2 and rows[0] == rows[1] and rows[1][4] == 1
+
+
+@pytest.mark.parametrize("path", ENDPOINTS)
+def test_stream_with_a_refused_request_is_still_an_http_400_before_any_event(base, fake, path):
+    body = _body(path)
+    body["tools"] = [{"type": "web_search_preview"} if path != "/v1/messages"
+                     else {"type": "web_search_20250305", "name": "web_search"}]
+    r = httpx.post(base + path, json=body, timeout=30)
+    assert r.status_code == 400 and not r.headers["content-type"].startswith("text/event-stream")
+    assert fake.calls == []
+
+
+def test_client_disconnect_cancels_the_upstream_call_and_leaves_one_marked_row(base, fake):
+    fake.gate = asyncio.Event()                  # the backend never answers
+    with httpx.stream("POST", base + "/v1/chat/completions", json=_body("/v1/chat/completions"),
+                      timeout=30) as r:
+        assert r.status_code == 200              # headers are out while the model works
+        for _ in range(200):
+            if fake.calls:
+                break
+            time.sleep(0.05)
+        assert len(fake.calls) == 1
+    for _ in range(200):                         # the connection is closed: the gateway reacts
+        if fake.cancelled.is_set() and _usage_rows():
+            break
+        time.sleep(0.05)
+    assert fake.cancelled.is_set(), "the upstream call was not cancelled"
+    rows = _usage_rows()
+    assert len(rows) == 1 and rows[0][4] == 0 and rows[0][5] == "error_cancelled"
+    assert rows[0][2:4] == (0, 0)
+
+
+@pytest.mark.parametrize("path", ENDPOINTS)
+def test_backend_failure_after_headers_is_a_format_correct_error_event(base, fake, path):
+    fake.fail = RuntimeError("backend down")
+    frames = _frames(base, path, _body(path))
+    event, data = frames[-1]
+    payload = json.loads(data)
+    if path == "/v1/messages":
+        assert event == "error" and payload["type"] == "error"
+        assert payload["error"]["type"] == "api_error" and "failed" in payload["error"]["message"]
+    elif path == "/v1/responses":
+        assert event == "error" and payload["type"] == "error" and payload["error"]["message"]
+    else:
+        assert event is None and payload["error"]["message"] and payload["error"]["type"]
+    assert not any(d == "[DONE]" for _, d in frames)   # an errored chat stream does not end "cleanly"
+    rows = _usage_rows()
+    assert len(rows) == 1 and rows[0][4] == 0
+
+
+def test_official_clients_raise_on_the_error_event(oai, ant, fake):
+    fake.fail = RuntimeError("backend down")
+    with pytest.raises(openai.APIError):
+        list(oai.chat.completions.create(model="gpt-4o", stream=True,
+                                         messages=[{"role": "user", "content": PROMPT}]))
+    with pytest.raises(openai.APIError):
+        list(oai.responses.create(model="gpt-4o", input=PROMPT, stream=True))
+    with pytest.raises(anthropic.APIStatusError):
+        with ant.messages.stream(model="claude-haiku-4-5", max_tokens=64,
+                                 messages=[{"role": "user", "content": PROMPT}]) as s:
+            list(s)
+
+
+def test_anthropic_unparseable_tool_arguments_become_an_error_event_when_streaming(base, fake):
+    fake.arguments = "{not json"
+    frames = _frames(base, "/v1/messages", _body("/v1/messages", tools=True))
+    event, data = frames[-1]
+    assert event == "error" and "not a JSON object" in json.loads(data)["error"]["message"]
+    assert not any(e == "content_block_start" for e, _ in frames)
