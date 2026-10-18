@@ -17,6 +17,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -613,7 +614,8 @@ def test_the_one_line_stop_does_not_render_the_box(hook, state, monkeypatch, tmp
     if mode == "condensed":
         line = json.loads(out)["systemMessage"]
         assert "5h 16%" in line and "wk 40%" in line, line
-        assert "executed (24h)" in line or "no execution data" in line, line
+        # no cache in this state: the Stop prints n/a (it runs no ledger query)
+        assert "executed (24h" in line or "no execution data" in line or "executed n/a" in line, line
 
 
 def test_the_full_stop_still_renders_the_box(hook, state, monkeypatch, tmp_path):
@@ -637,17 +639,22 @@ def test_the_one_line_stop_reads_the_cached_executed_count(hook, state, monkeypa
     _e, out = _run_main(hook, monkeypatch)
     assert "42 executed (24h)" in json.loads(out)["systemMessage"]
     assert live == [], "a cached count must not trigger the live scan"
-    (state / hook._LEDGER_CACHE_FILENAME).unlink()  # no cache: one live call, as before F65
+    (state / hook._LEDGER_CACHE_FILENAME).unlink()  # no cache: n/a, never a live call (P3.4-B4, F73)
     _e, out = _run_main(hook, monkeypatch)
-    assert "7 executed (24h)" in json.loads(out)["systemMessage"] and live == [1]
+    assert "executed n/a (24h)" in json.loads(out)["systemMessage"] and live == []
 
 
 def test_the_child_caches_the_executed_count(hook, state, monkeypatch):
-    import llm_router.routing_report as rr
+    """P3.4-B4: the count is the 24h ``LedgerWindow.n`` (None = no execution source)."""
+    from llm_router import ledger_view as lv
 
-    monkeypatch.setattr(rr, "executed_routes", lambda *a, **k: {"total": 9})
-    assert hook._compute_ledger_aggregates()["executed_24h"] == 9
-    monkeypatch.setattr(rr, "executed_routes", lambda *a, **k: None)
+    real = lv.window_summary
+    monkeypatch.setattr(lv, "window_summary",
+                        lambda name, **k: __import__("dataclasses").replace(real(name, **k), n=9))
+    agg = hook._compute_ledger_aggregates()
+    assert agg["executed_24h"] == 9 and lv.LedgerWindow.from_json(agg["window_24h"]).n == 9
+    monkeypatch.setattr(lv, "window_summary",
+                        lambda name, **k: __import__("dataclasses").replace(real(name, **k), n=None))
     assert hook._compute_ledger_aggregates()["executed_24h"] is None
 
 
@@ -683,51 +690,62 @@ def _write_cache(state: Path, hook, *, age_s: float, day: str | None = None, **e
     (state / hook._LEDGER_CACHE_FILENAME).write_text(json.dumps(data))
 
 
-def _executed_in_stop(hook, state, monkeypatch, live_total=7):
-    """_executed_24h() as a Stop sees it (cache read for this run); returns (value, live_calls)."""
+def _executed_in_stop(hook, state, monkeypatch):
+    """The executed header text as a Stop sees it (cache read for this run); returns
+    (text, live_calls). The live ``executed_routes`` call is gone from the Stop (F73)."""
     import llm_router.routing_report as rr
 
     live: list = []
-    monkeypatch.setattr(rr, "executed_routes",
-                        lambda *a, **k: live.append(1) or ({"total": live_total} if live_total is not None else None))
+    monkeypatch.setattr(rr, "executed_routes", lambda *a, **k: live.append(1) or {"total": 7})
     monkeypatch.setattr(hook, "_STOP_LEDGER", hook._read_ledger_cache())
     return hook._executed_24h(), live
 
 
-def test_f67_stale_same_day_cache_is_shown_without_a_live_call(hook, state, monkeypatch):
-    _write_cache(state, hook, age_s=hook._LEDGER_CACHE_MAX_AGE_S + 600, executed_24h=42)
-    v, live = _executed_in_stop(hook, state, monkeypatch)
-    assert v == 42 and live == []
+def _STALE(hook) -> float:  # noqa: N802 -- past the as-of TTL, still inside the one-hour cache age
+    return hook._LEDGER_ASOF_TTL_S + 600
 
 
-def test_f67_stale_same_day_unknown_stays_none_not_zero(hook, state, monkeypatch):
-    _write_cache(state, hook, age_s=hook._LEDGER_CACHE_MAX_AGE_S + 600, executed_24h=None)
-    v, live = _executed_in_stop(hook, state, monkeypatch)
-    assert v is None and live == []
+def test_f73_fresh_cache_prints_the_plain_count(hook, state, monkeypatch):
+    _write_cache(state, hook, age_s=10, executed_24h=42)
+    text, live = _executed_in_stop(hook, state, monkeypatch)
+    assert text == "42 executed" and live == []
 
 
-def test_f67_stale_other_day_cache_goes_live(hook, state, monkeypatch):
-    _write_cache(state, hook, age_s=hook._LEDGER_CACHE_MAX_AGE_S + 600, day="1999-01-01", executed_24h=42)
-    v, live = _executed_in_stop(hook, state, monkeypatch)
-    assert v == 7 and live == [1]
+def test_f67_stale_same_day_cache_is_shown_with_its_as_of_time(hook, state, monkeypatch):
+    _write_cache(state, hook, age_s=_STALE(hook), executed_24h=42)
+    text, live = _executed_in_stop(hook, state, monkeypatch)
+    assert re.fullmatch(r"42 executed \(as of \d\d:\d\d\)", text) and live == []
 
 
-def test_f67_missing_cache_goes_live(hook, state, monkeypatch):
-    v, live = _executed_in_stop(hook, state, monkeypatch)
-    assert v == 7 and live == [1]
+def test_f67_stale_same_day_unknown_stays_unknown_not_zero(hook, state, monkeypatch):
+    _write_cache(state, hook, age_s=_STALE(hook), executed_24h=None)
+    text, live = _executed_in_stop(hook, state, monkeypatch)
+    assert text == "no execution data" and live == []
 
 
-@pytest.mark.parametrize("body", ["{not json", "[1, 2]", json.dumps({"v": 999, "day": "x"})])
-def test_f67_corrupt_cache_goes_live(hook, state, monkeypatch, body):
+def test_f67_stale_other_day_cache_is_na_not_live(hook, state, monkeypatch):
+    _write_cache(state, hook, age_s=_STALE(hook), day="1999-01-01", executed_24h=42)
+    text, live = _executed_in_stop(hook, state, monkeypatch)
+    assert text == "n/a (no ledger yet)" and live == []
+
+
+def test_f67_missing_cache_is_na_not_live(hook, state, monkeypatch):
+    text, live = _executed_in_stop(hook, state, monkeypatch)
+    assert text == "n/a (no ledger yet)" and live == []
+
+
+@pytest.mark.parametrize("body", ["{not json", "[1, 2]", json.dumps({"v": 999, "day": "x"}),
+                                  json.dumps({"v": 1, "day": "x", "ts": 1, "executed_24h": 5})])
+def test_f67_corrupt_or_old_version_cache_is_na_not_live(hook, state, monkeypatch, body):
     (state / hook._LEDGER_CACHE_FILENAME).write_text(body)
-    v, live = _executed_in_stop(hook, state, monkeypatch)
-    assert v == 7 and live == [1]
+    text, live = _executed_in_stop(hook, state, monkeypatch)
+    assert text == "n/a (no ledger yet)" and live == []
 
 
-def test_f67_stale_cache_without_the_count_goes_live(hook, state, monkeypatch):
-    _write_cache(state, hook, age_s=hook._LEDGER_CACHE_MAX_AGE_S + 600)
-    v, live = _executed_in_stop(hook, state, monkeypatch)
-    assert v == 7 and live == [1]
+def test_f67_stale_cache_without_the_count_is_na_not_live(hook, state, monkeypatch):
+    _write_cache(state, hook, age_s=_STALE(hook))
+    text, live = _executed_in_stop(hook, state, monkeypatch)
+    assert text == "n/a (no ledger yet)" and live == []
 
 
 def test_f67_last_summary_ansi_is_written_atomically(hook, state):

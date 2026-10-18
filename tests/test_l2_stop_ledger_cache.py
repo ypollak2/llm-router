@@ -19,6 +19,7 @@ import io
 import json
 import os
 import random
+import re
 import sqlite3
 import subprocess
 import sys
@@ -258,10 +259,15 @@ def test_child_writes_the_ledger_cache(big_state, monkeypatch):
         monkeypatch.setattr(hook, step, lambda: None)
     hook._run_background_stop_work()
     d = json.loads((big_state / _CACHE).read_text())
-    assert d["v"] == 1 and isinstance(d["ts"], float) and d["day"] == hook._local_day()
+    assert d["v"] == hook._LEDGER_CACHE_VERSION == 2 and isinstance(d["ts"], float) and d["day"] == hook._local_day()
     assert len(d["cumulative"]) == 5 and [r[0] for r in d["cumulative"]][0] == "today"
     assert d["cumulative"][-1][1] > 0, "lifetime calls come from the seeded ledger"
     assert d["today_compact"].startswith("~$") and d["lifetime_compact"].startswith("~$")
+    assert re.search(r" est \(n=[\d,]+, today\)$", d["today_compact"]), d["today_compact"]
+    from llm_router import ledger_view as lv      # the embedded windows are the ledger's own JSON
+    assert lv.LedgerWindow.from_json(d["window_24h"]).window == "24h"
+    assert lv.LedgerWindow.from_json(d["window_today"]).window == "today"
+    assert d["executed_24h"] == lv.LedgerWindow.from_json(d["window_24h"]).n
     assert d["lifetime_note"], "every third savings_stats row is unverified: a note exists"
     assert isinstance(d["daily_14d"], list) and d["daily_14d"]
     assert hook._spawned == [], "no live-usage fetch or child was started"
@@ -274,9 +280,11 @@ def test_child_computes_each_aggregate_once(big_state, monkeypatch):
     hook._refresh_ledger_cache()
     for window in ("today", "week", "14d", "month", "lifetime"):
         assert rec.count("query_window", window) == 1, (window, rec.calls)
-    assert rec.count("query_primary_metric") == 2 and rec.count("query_model_savings") == 2, rec.calls
+    # P3.4-B4: only the lifetime fragment still comes from dashboard_data.summary(); the today
+    # fragment is the ledger window's (ledger_view.window_summary, one call, embedded as JSON).
+    assert rec.count("query_primary_metric") == 1 and rec.count("query_model_savings") == 1, rec.calls
     assert rec.count("query_daily") == 1, rec.calls
-    assert rec.count("summary") == 2, rec.calls
+    assert rec.count("summary") == 1, rec.calls
 
 
 # ── S1: the Stop never runs a ledger-wide aggregate ───────────────────────────
@@ -379,7 +387,7 @@ def test_first_ever_run_renders_a_line_without_ledger_figures(big_state, monkeyp
 
 
 def _write_cache(state: Path, **over):
-    base = {"v": 1, "ts": time.time(), "day": datetime.now().strftime("%Y-%m-%d"),
+    base = {"v": 2, "ts": time.time(), "day": datetime.now().strftime("%Y-%m-%d"),
             "cumulative": [["today", 1, 2, 0, 0.5]], "daily_14d": [["2026-10-17", 1, 2, 0.5, 3]],
             "today_compact": "~$0.50 est", "lifetime_compact": "~$9.00 est", "lifetime_note": ""}
     base.update(over)

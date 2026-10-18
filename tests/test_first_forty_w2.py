@@ -16,6 +16,7 @@ bug-triage-and-fix contract: the repro must fail before the patch and pass after
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -369,9 +370,13 @@ def test_session_summary_labels_money_as_saved():
     )
     line = mod._condense(summary)
 
-    assert "today ~$" in line and "est" in line, (
-        f"the money figure is unlabelled and will be read as spend: {line!r}"
+    # P3.4-B4: the today fragment comes from the ledger window and is left out (n/a, never $0.00)
+    # when this home has no usage database; when present it must be labelled and carry its n.
+    assert "today $" not in line, f"the money figure is unlabelled and will be read as spend: {line!r}"
+    assert "today" not in line or re.search(r"today ~\$[\d,.]+ est \(n=", line), (
+        f"the today figure is unlabelled or has no n: {line!r}"
     )
+    assert "est" in line, f"the money figure is unlabelled and will be read as spend: {line!r}"
     assert "lifetime ~$" in line, (
         f"the lifetime figure is unlabelled and will be read as spend: {line!r}"
     )

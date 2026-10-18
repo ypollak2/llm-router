@@ -315,19 +315,33 @@ def test_session_end_box_prints_the_24h_executed_oracle_proxy_rows_included(six)
 
 
 def test_session_end_today_money_is_the_oracle(six):
-    usd, _n = _saved_six("today")
-    assert _session_end()._compute_ledger_aggregates()["today_compact"] == f"~${usd:,.2f} est"
+    usd, n = _saved_six("today")
+    agg = _session_end()._compute_ledger_aggregates()
+    assert agg["today_compact"] == f"~${usd:,.2f} est (n={n:,}, today)"
+    # rv-597 carry-forward: the 4-dollar row 2 h before NOW is inside 24h and outside today, so a
+    # 24h money window (or the -2h mutant) prints another 2-decimal figure
+    usd24, n24 = _saved_six("24h")
+    assert f"{usd24:,.2f}" != f"{usd:,.2f}" and f"~${usd24:,.2f}" not in agg["today_compact"]
 
 
-@pytest.mark.xfail(strict=True, reason="P3.4-B4: session-end today_compact prints money with no n "
-                   "and no window")
+def test_session_end_embeds_the_ledger_windows_it_prints_from(six):
+    """The cache carries LedgerWindow.to_json() for 24h and today: the Stop's figures ARE the ledger's."""
+    from llm_router import ledger_view as lv
+
+    agg = _session_end()._compute_ledger_aggregates()
+    assert agg["v"] == 2
+    for window in ("24h", "today"):
+        lw = lv.LedgerWindow.from_json(agg[f"window_{window}"])
+        assert lw.window == window and lw.line() == _expected_line_six(window), lw.line()
+    assert agg["executed_24h"] == lv.LedgerWindow.from_json(agg["window_24h"]).n == 9
+
+
 def test_session_end_money_carries_n_and_window(six):
     compact = _session_end()._compute_ledger_aggregates()["today_compact"]
+    assert FIGURE.search(compact)                          # something to check
     assert _ungrounded(compact, "\n") == []
 
 
-@pytest.mark.xfail(strict=True, reason="P3.4-B4 (F73): a ledger cache 3 h old, same local day, "
-                   "renders as live '24h' with no as-of mark")
 def test_session_end_stale_cache_is_marked_as_of(six):
     mod = _session_end()
     stale = {"v": mod._LEDGER_CACHE_VERSION, "ts": NOW - 3 * 3600, "day": mod._local_day(),
@@ -335,7 +349,19 @@ def test_session_end_stale_cache_is_marked_as_of(six):
     (six.home / mod._LEDGER_CACHE_FILENAME).write_text(json.dumps(stale))
     mod._STOP_LEDGER = mod._read_ledger_cache(NOW)         # rejected for age: {}
     assert mod._STOP_LEDGER == {}
-    assert re.search(r"as of \d\d:\d\d", mod._cheap_summary_box(None))
+    box = mod._cheap_summary_box(None)
+    assert re.search(r"7 executed \(as of \d\d:\d\d\)", box), box
+    assert "ROUTING  24h  7 executed\n" not in box + "\n"  # never printed as live
+
+
+def test_session_end_other_day_cache_is_na(six):
+    mod = _session_end()
+    other = {"v": mod._LEDGER_CACHE_VERSION, "ts": NOW - 3 * 3600, "day": "1999-01-01",
+             "executed_24h": 7}
+    (six.home / mod._LEDGER_CACHE_FILENAME).write_text(json.dumps(other))
+    mod._STOP_LEDGER = mod._read_ledger_cache(NOW)
+    box = mod._cheap_summary_box(None)
+    assert "ROUTING  24h  n/a" in box and "7" not in box, box
 
 
 # -- contract: classification by evidence (B1) -----------------------------------------------------
