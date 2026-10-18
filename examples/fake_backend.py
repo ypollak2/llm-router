@@ -8,8 +8,12 @@ edge is replaced:
   with ``FINAL`` otherwise. The same request always gets the same answer.
 * ``urllib.request.urlopen`` (what the in-process SDK's direct executor calls) answers an OpenAI
   chat-completions request with ``FINAL``.
-* Any other non-loopback connection is refused and recorded in ``BLOCKED``; each example asserts the
-  list stayed empty.
+* Any other non-loopback connection made by THIS process (``connect`` and ``connect_ex``) is refused
+  and recorded in ``BLOCKED``; each example asserts the list stayed empty.
+* Child processes (the MCP server, the proxy, node, Claude Code) are not covered by that guard. They
+  are kept local by configuration, and ``child_env()`` adds a second net: HTTPS_PROXY / HTTP_PROXY /
+  ALL_PROXY point at a closed loopback port, so a child that honours proxy variables cannot reach out
+  (NO_PROXY keeps 127.0.0.1 / localhost direct). A child that ignores them is not stopped.
 
     install()          set the environment and patch the edge (call it before importing llm_router)
     start_gateway()    run the real gateway on 127.0.0.1:<free port>, return its URL
@@ -23,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import errno
 import io
 import json
 import os
@@ -90,15 +95,45 @@ def _loopback(host: str) -> bool:
 
 def _guard_sockets() -> None:
     real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
 
-    def guarded(self, address, *a, **kw):
+    def refused(self, address) -> str | None:
         host = address[0] if isinstance(address, tuple) else str(address)
         if not _loopback(host) and self.family != getattr(socket, "AF_UNIX", None):
             BLOCKED.append(host)
+            return host
+        return None
+
+    def guarded(self, address, *a, **kw):
+        host = refused(self, address)
+        if host is not None:
             raise ConnectionRefusedError(f"examples run offline: refused {host}")
         return real_connect(self, address, *a, **kw)
 
+    def guarded_ex(self, address, *a, **kw):
+        if refused(self, address) is not None:
+            return errno.ECONNREFUSED          # connect_ex reports an errno instead of raising
+        return real_connect_ex(self, address, *a, **kw)
+
     socket.socket.connect = guarded
+    socket.socket.connect_ex = guarded_ex
+
+
+def child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """``os.environ`` for a child process, with every proxy variable pointed at a closed loopback port.
+
+    The socket guard lives in this process only. A child that honours HTTPS_PROXY / HTTP_PROXY /
+    ALL_PROXY therefore fails to connect instead of reaching out; loopback stays direct (NO_PROXY).
+    """
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        dead = f"http://127.0.0.1:{s.getsockname()[1]}"      # closed again when ``s`` is
+    env = dict(os.environ)
+    for name in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
+        env[name] = env[name.lower()] = dead
+    env["NO_PROXY"] = env["no_proxy"] = "127.0.0.1,localhost,::1"
+    env.update(extra or {})
+    return env
 
 
 def _patch_urlopen() -> None:

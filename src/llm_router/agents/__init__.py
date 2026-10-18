@@ -6,7 +6,7 @@ boosts), and enforces per-session budget caps.
 
 The agent runtime — plan / act / observe / reflect — lives in the host
 CLI (Claude Code subagents, Cursor Composer) or in an external framework
-(Agno, Hermes, LangGraph, CrewAI). LLM Router makes those calls smarter +
+(Agno, LangGraph, CrewAI). LLM Router makes those calls smarter +
 auditable; it doesn't replace the loop.
 
 Usage:

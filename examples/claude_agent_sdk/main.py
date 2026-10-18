@@ -24,6 +24,7 @@ from llm_router.frameworks.claude_agent_sdk import ClaudeAgentSdkAdapter  # noqa
 
 async def main() -> str:
     options = ClaudeAgentSdkAdapter().wrap_model("claude-haiku-4-5")
+    options.env = fb.child_env(dict(options.env or {}))      # the Claude Code child: proxies dead
     options.allowed_tools = []
     options.max_turns = 1
     text = ""

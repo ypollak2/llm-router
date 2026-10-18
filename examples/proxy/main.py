@@ -8,7 +8,6 @@ forwards each call to Anthropic unchanged and writes one row to the proxy ledger
 is a loopback fake. One call through the proxy, one assertion on the answer, one on the proxy row.
 """
 import json
-import os
 import socket
 import subprocess
 import sys
@@ -29,7 +28,7 @@ with socket.socket() as s:
 proxy = subprocess.Popen(
     [sys.executable, "-m", "llm_router.cli", "proxy", "--port", str(port), "--steps", "off",
      "--no-warm-up", "--ledger", str(ledger)],
-    env={**os.environ, "LLM_ROUTER_PROXY_UPSTREAM": upstream})
+    env=fb.child_env({"LLM_ROUTER_PROXY_UPSTREAM": upstream}))
 try:
     base = f"http://127.0.0.1:{port}"
     deadline = time.monotonic() + 60

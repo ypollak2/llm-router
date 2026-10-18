@@ -2,7 +2,7 @@
 #
 # Each profile tells LLM Router HOW to route on behalf of one type of agent.
 # Profiles are pure data: tier preference, signal boosts, preferred chain,
-# budget envelope. The agent runtime (Claude Code subagents, Agno, Hermes,
+# budget envelope. The agent runtime (Claude Code subagents, Agno,
 # LangGraph, CrewAI, etc.) is responsible for the loop itself.
 #
 # Schema:
