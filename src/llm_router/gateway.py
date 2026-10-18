@@ -16,6 +16,7 @@ Run:  llm_router gateway   (or: python -m llm_router.gateway)
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -24,6 +25,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from llm_router import paths
@@ -1011,19 +1013,165 @@ def _tool_input(tc: dict) -> dict:
     return value
 
 
-STREAM_UNSUPPORTED = "streaming not supported yet (v16 A.2)"
+# ── A.2-s: SSE streaming on /v1/chat/completions, /v1/responses, /v1/messages ─────────
+# WHAT IS STREAMED. The routed call's COMPLETE answer, re-framed as the caller's own SSE
+# protocol. Not provider token streaming, for every provider alike, and on purpose:
+#   * ``route_and_call`` is the only path that carries tools, the caller's history, the
+#     context pack, the semantic cache, the contract gates, quality escalation and the usage
+#     ledger. ``route_and_stream`` does none of that (it ignores ``messages`` and ``tools``
+#     and settles its own accounting), so streaming through it would route differently from
+#     the same request without ``stream`` and could write a different ledger row.
+#   * the gates and the escalation judge the whole answer, so a first byte cannot be committed
+#     before the answer is complete; a passed-through token stream would bypass them.
+# So the decision, the ledger row (written once, inside ``route_and_call``, with the same
+# fields) and the answer are those of the non-streamed call by construction: every stream
+# below is derived from the non-streamed body. Cost of this choice: no time-to-first-token
+# gain; the connection is held open with SSE comment lines while the model works.
+#
+# Client disconnect: Starlette cancels the response generator, whose ``finally`` cancels the
+# routed call; the router then leaves its one ``error_cancelled`` ledger row (LEDGER-ERR-1,
+# ``success=0``). A call that had already finished keeps its normal row (the spend happened).
+# An error once the headers are out is an error event in the protocol's own shape.
+_KEEPALIVE_S = 15.0
+_PIECE = 24  # characters per text / tool-argument delta
 
 
-def _refuse_stream(stream: bool) -> None:
-    """P0.6 (R-AGT-3): ``stream: true`` is refused, not silently dropped.
+def _pieces(text: str) -> list[str]:
+    return [text[i:i + _PIECE] for i in range(0, len(text), _PIECE)]
 
-    The field was undeclared, so Pydantic discarded it and the client got one
-    JSON body where it expected an SSE stream. The OpenAI and Anthropic SDKs
-    then fail inside their stream parser, far from the cause. Until streaming
-    exists (A.2) the gateway says so in the client's own protocol.
+
+def _sse(data, event: str | None = None) -> bytes:
+    body = data if isinstance(data, str) else json.dumps(data, separators=(",", ":"))
+    return (f"event: {event}\n" if event else "").encode() + f"data: {body}\n\n".encode()
+
+
+def _sse_response(route_call, build, error_frame) -> StreamingResponse:
+    """Stream ``route_call`` (the same ``_route`` coroutine the non-streamed path awaits).
+
+    ``build(result)`` returns the SSE frames; ``error_frame(status, message)`` the protocol's
+    error event. Frames are built before the first is sent, so a result that cannot be
+    rendered (``_tool_input``) yields the error event alone, never half a stream.
     """
-    if stream:
-        raise HTTPException(status_code=400, detail=STREAM_UNSUPPORTED)
+    async def body():
+        task = asyncio.ensure_future(route_call)
+        try:
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=_KEEPALIVE_S)
+                if done:
+                    break
+                yield b": keep-alive\n\n"
+            frames = list(build(task.result()))
+            for frame in frames:
+                yield frame
+        except HTTPException as e:
+            yield error_frame(e.status_code, str(e.detail))
+        except Exception as e:  # noqa: BLE001 - headers are out: the protocol's error event
+            yield error_frame(500, f"stream failed: {e}")
+        finally:
+            if not task.done():
+                task.cancel()  # client gone: the router records the cancelled call
+                await asyncio.gather(task, return_exceptions=True)
+
+    return StreamingResponse(body(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def _chat_frames(body: dict, include_usage: bool):
+    base = {"id": body["id"], "object": "chat.completion.chunk",
+            "created": body["created"], "model": body["model"]}
+    choice = body["choices"][0]
+    msg = choice["message"]
+
+    def chunk(delta, finish=None):
+        return _sse({**base, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
+
+    yield chunk({"role": "assistant", "content": ""})
+    for piece in _pieces(msg.get("content") or ""):
+        yield chunk({"content": piece})
+    for i, tc in enumerate(msg.get("tool_calls") or []):
+        fn = tc["function"]
+        yield chunk({"tool_calls": [{"index": i, "id": tc["id"], "type": "function",
+                                     "function": {"name": fn["name"], "arguments": ""}}]})
+        for piece in _pieces(fn["arguments"]):
+            yield chunk({"tool_calls": [{"index": i, "function": {"arguments": piece}}]})
+    yield chunk({}, choice["finish_reason"])
+    if include_usage:
+        yield _sse({**base, "choices": [], "usage": body["usage"]})
+    yield b"data: [DONE]\n\n"
+
+
+def _openai_error_frame(status: int, message: str) -> bytes:
+    kind = "invalid_request_error" if status == 400 else "api_error"
+    return _sse({"error": {"message": message, "type": kind, "param": None, "code": str(status)}})
+
+
+def _responses_frames(body: dict):
+    seq = iter(range(1_000_000))
+
+    def ev(kind, **kw):
+        return _sse({"type": kind, "sequence_number": next(seq), **kw}, event=kind)
+
+    shell = {k: v for k, v in body.items() if k not in ("output_text", "usage")}
+    yield ev("response.created", response={**shell, "status": "in_progress", "output": []})
+    yield ev("response.in_progress", response={**shell, "status": "in_progress", "output": []})
+    for idx, item in enumerate(body["output"]):
+        at = {"item_id": item["id"], "output_index": idx}
+        if item["type"] == "message":
+            part = item["content"][0]
+            yield ev("response.output_item.added", output_index=idx,
+                     item={**item, "status": "in_progress", "content": []})
+            yield ev("response.content_part.added", **at, content_index=0, part={**part, "text": ""})
+            for piece in _pieces(part["text"]):
+                yield ev("response.output_text.delta", **at, content_index=0, delta=piece, logprobs=[])
+            yield ev("response.output_text.done", **at, content_index=0, text=part["text"], logprobs=[])
+            yield ev("response.content_part.done", **at, content_index=0, part=part)
+        else:
+            yield ev("response.output_item.added", output_index=idx,
+                     item={**item, "status": "in_progress", "arguments": ""})
+            for piece in _pieces(item["arguments"]):
+                yield ev("response.function_call_arguments.delta", **at, delta=piece)
+            yield ev("response.function_call_arguments.done", **at, name=item["name"],
+                     arguments=item["arguments"])
+        yield ev("response.output_item.done", output_index=idx, item=item)
+    yield ev("response.completed", response=body)
+
+
+def _responses_error_frame(status: int, message: str) -> bytes:
+    kind = "invalid_request_error" if status == 400 else "api_error"
+    return _sse({"type": "error", "code": str(status), "message": message, "param": None,
+                 "error": {"message": message, "type": kind, "code": str(status)}}, event="error")
+
+
+def _anthropic_frames(body: dict):
+    def ev(kind, **kw):
+        return _sse({"type": kind, **kw}, event=kind)
+
+    usage = body["usage"]
+    yield ev("message_start", message={**body, "content": [], "stop_reason": None,
+                                       "stop_sequence": None,
+                                       "usage": {"input_tokens": usage["input_tokens"],
+                                                 "output_tokens": 0}})
+    yield ev("ping")
+    for i, block in enumerate(body["content"]):
+        if block["type"] == "text":
+            start, deltas = {**block, "text": ""}, [
+                {"type": "text_delta", "text": p} for p in _pieces(block["text"])]
+        else:
+            start, deltas = {**block, "input": {}}, [
+                {"type": "input_json_delta", "partial_json": p}
+                for p in _pieces(json.dumps(block["input"]))]
+        yield ev("content_block_start", index=i, content_block=start)
+        for d in deltas:
+            yield ev("content_block_delta", index=i, delta=d)
+        yield ev("content_block_stop", index=i)
+    yield ev("message_delta", delta={"stop_reason": body["stop_reason"], "stop_sequence": None},
+             usage={"output_tokens": usage["output_tokens"]})
+    yield ev("message_stop")
+
+
+def _anthropic_error_frame(status: int, message: str) -> bytes:
+    kind = "invalid_request_error" if status == 400 else "api_error"
+    return _sse({"type": "error", "error": {"type": kind, "message": message}}, event="error")
 
 
 def _ollama_options(options: dict | None) -> tuple[int | None, float | None]:
@@ -1071,8 +1219,8 @@ class _OAIRequest(BaseModel):
     # so Pydantic dropped it and the request looked like an ordinary completion.
     tools: list | None = None
     tool_choice: object | None = None
-    # P0.6: declared so they are seen. `stream` is refused (A.2 builds it); the
-    # rest are forwarded. `max_completion_tokens` is OpenAI's newer name.
+    # P0.6: declared so they are seen. `stream` selects SSE (A.2-s); the rest are
+    # forwarded. `max_completion_tokens` is OpenAI's newer name.
     stream: bool = False
     max_tokens: int | None = None
     max_completion_tokens: int | None = None
@@ -1084,21 +1232,28 @@ class _OAIRequest(BaseModel):
     store: bool | None = None
 
 
-@app.post("/v1/chat/completions")
-async def openai_chat(req: _OAIRequest, request: Request) -> dict:
-    _refuse_stream(req.stream)
+@app.post("/v1/chat/completions", response_model=None)
+async def openai_chat(req: _OAIRequest, request: Request) -> dict | StreamingResponse:
     tools, tool_choice = _openai_tools(req.tools, req.tool_choice)
     _refuse_images_if_present(req.messages)
     system, messages = _split_system(req.messages)
     prompt, history = _request_and_history(messages)
-    r = await _route(prompt, req.task_type, req.complexity,
-                     prefer_model=_qualify_model(req.model, "openai"),
-                     project_root=_resolve_project_scope(request),
-                     classify_text=_latest_user_turn(req.messages),
-                     system=system,
-                     max_tokens=req.max_completion_tokens or req.max_tokens,
-                     temperature=req.temperature, messages=history,
-                     tools=tools, tool_choice=tool_choice)
+    call = _route(prompt, req.task_type, req.complexity,
+                  prefer_model=_qualify_model(req.model, "openai"),
+                  project_root=_resolve_project_scope(request),
+                  classify_text=_latest_user_turn(req.messages),
+                  system=system,
+                  max_tokens=req.max_completion_tokens or req.max_tokens,
+                  temperature=req.temperature, messages=history,
+                  tools=tools, tool_choice=tool_choice)
+    if req.stream:
+        include_usage = bool((req.stream_options or {}).get("include_usage"))
+        return _sse_response(call, lambda r: _chat_frames(_chat_body(r), include_usage),
+                             _openai_error_frame)
+    return _chat_body(await call)
+
+
+def _chat_body(r) -> dict:
     message: dict = {"role": "assistant", "content": r.text}
     if r.tool_calls:
         message = {"role": "assistant", "content": r.text or None, "tool_calls": r.tool_calls}
@@ -1127,7 +1282,7 @@ class _ResponsesRequest(BaseModel):
     # calling surface, so this was the likeliest of the three to be hit.
     tools: list | None = None
     tool_choice: object | None = None
-    stream: bool = False  # P0.6: refused until A.2
+    stream: bool = False  # A.2-s: SSE
     max_output_tokens: int | None = None
     temperature: float | None = None
     # A.2-t: declared so they are seen; accepted, not acted on (see _OAIRequest).
@@ -1136,9 +1291,8 @@ class _ResponsesRequest(BaseModel):
     include: list | None = None
 
 
-@app.post("/v1/responses")
-async def openai_responses(req: _ResponsesRequest, request: Request) -> dict:
-    _refuse_stream(req.stream)
+@app.post("/v1/responses", response_model=None)
+async def openai_responses(req: _ResponsesRequest, request: Request) -> dict | StreamingResponse:
     tools, tool_choice = _responses_tools(req.tools, req.tool_choice)
     _refuse_images_if_present(req.input)
     # `instructions` is the Responses API's system prompt; system/developer
@@ -1150,14 +1304,21 @@ async def openai_responses(req: _ResponsesRequest, request: Request) -> dict:
     else:
         prompt, history = _request_and_history(input_rest, _flatten_responses_input)
     classify_text = _latest_user_turn_from_responses_input(req.input)
-    r = await _route(prompt, req.task_type, req.complexity,
-                     prefer_model=_qualify_model(req.model, "openai"),
-                     project_root=_resolve_project_scope(request),
-                     classify_text=classify_text,
-                     system=_join_system(req.instructions, input_system),
-                     max_tokens=req.max_output_tokens,
-                     temperature=req.temperature, messages=history,
-                     tools=tools, tool_choice=tool_choice)
+    call = _route(prompt, req.task_type, req.complexity,
+                  prefer_model=_qualify_model(req.model, "openai"),
+                  project_root=_resolve_project_scope(request),
+                  classify_text=classify_text,
+                  system=_join_system(req.instructions, input_system),
+                  max_tokens=req.max_output_tokens,
+                  temperature=req.temperature, messages=history,
+                  tools=tools, tool_choice=tool_choice)
+    if req.stream:
+        return _sse_response(call, lambda r: _responses_frames(_responses_body(r)),
+                             _responses_error_frame)
+    return _responses_body(await call)
+
+
+def _responses_body(r) -> dict:
     output_id = f"msg_{uuid.uuid4().hex[:24]}"
     output = []
     if r.text or not r.tool_calls:
@@ -1202,25 +1363,31 @@ class _AnthropicRequest(BaseModel):
     # H-03: same gap on the Anthropic wire format.
     tools: list | None = None
     tool_choice: object | None = None
-    stream: bool = False  # P0.6: refused until A.2
+    stream: bool = False  # A.2-s: SSE
     temperature: float | None = None
 
 
-@app.post("/v1/messages")
-async def anthropic_messages(req: _AnthropicRequest, request: Request) -> dict:
-    _refuse_stream(req.stream)
+@app.post("/v1/messages", response_model=None)
+async def anthropic_messages(req: _AnthropicRequest, request: Request) -> dict | StreamingResponse:
     tools, tool_choice = _anthropic_tools(req.tools, req.tool_choice)
     _refuse_images_if_present(req.messages)
     # `req.system` is the model's system prompt and is never classified (T-03).
     prompt, history = _request_and_history(req.messages)
-    r = await _route(prompt, None, None,
-                     prefer_model=_qualify_model(req.model, "anthropic"),
-                     project_root=_resolve_project_scope(request),
-                     classify_text=_latest_user_turn(req.messages),
-                     system=req.system or None,
-                     max_tokens=req.max_tokens,
-                     temperature=req.temperature, messages=history,
-                     tools=tools, tool_choice=tool_choice)
+    call = _route(prompt, None, None,
+                  prefer_model=_qualify_model(req.model, "anthropic"),
+                  project_root=_resolve_project_scope(request),
+                  classify_text=_latest_user_turn(req.messages),
+                  system=req.system or None,
+                  max_tokens=req.max_tokens,
+                  temperature=req.temperature, messages=history,
+                  tools=tools, tool_choice=tool_choice)
+    if req.stream:
+        return _sse_response(call, lambda r: _anthropic_frames(_anthropic_body(r)),
+                             _anthropic_error_frame)
+    return _anthropic_body(await call)
+
+
+def _anthropic_body(r) -> dict:
     content: list = [{"type": "text", "text": r.text}] if r.text or not r.tool_calls else []
     content += [{"type": "tool_use", "id": tc["id"], "name": tc["function"]["name"],
                  "input": _tool_input(tc)} for tc in r.tool_calls]

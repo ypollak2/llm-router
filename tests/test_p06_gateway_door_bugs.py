@@ -168,24 +168,22 @@ def test_every_post_route_is_classified_for_stream():
 
 
 @pytest.mark.parametrize("path", SSE_ENDPOINTS)
-def test_stream_true_is_an_explicit_400(client, router_calls, path):
+def test_stream_true_is_served_as_sse_through_the_same_router_call(client, router_calls, path):
+    """A.2-s replaced the P0.6 explicit 400: ``stream: true`` is an SSE response, routed once."""
     r = client.post(path, json=_body(path, stream=True))
-    assert r.status_code == 400
-    assert r.json()["detail"] == "streaming not supported yet (v16 A.2)"
-    assert router_calls == [], "a refused request must not be routed"
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("text/event-stream")
+    assert "ok" in r.text and len(router_calls) == 1
 
 
 @pytest.mark.parametrize("path", SSE_ENDPOINTS)
-def test_stream_true_with_tools_keeps_the_refusal_until_a2s(client, router_calls, path):
-    """A.2-t serves tools without streaming; tools + stream stays the explicit 400 until A.2-s
-    (decision D-168 (iii): then one buffered SSE). The stream check runs before the tools one."""
+def test_stream_true_with_tools_is_served_too(client, router_calls, path):
     tools = {"/v1/messages": [{"name": "f", "input_schema": {"type": "object"}}]}.get(
         path, [{"type": "function", "function": {"name": "f"}}] if path != "/v1/responses"
         else [{"type": "function", "name": "f"}])
     r = client.post(path, json=_body(path, stream=True, tools=tools))
-    assert r.status_code == 400
-    assert r.json()["detail"] == "streaming not supported yet (v16 A.2)"
-    assert router_calls == []
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("text/event-stream") and len(router_calls) == 1
 
 
 @pytest.mark.parametrize("path", SSE_ENDPOINTS)
