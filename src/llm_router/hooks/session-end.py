@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 41
+# llm_router-hook-version: 42
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -134,6 +134,9 @@ except Exception:
 WIDTH = 50
 
 # Model names that indicate test/mock data — never show in production reports.
+# F99 (kept on purpose, not D-205 residue): these are the router's own test-fixture sentinels, not
+# a provider or model the user runs, and no provider_class / seat can say a row is a fixture.
+# tests/test_f99_session_end_followups.py pins the set.
 _TEST_MODEL_PATTERNS = {"mock-model", "test-model", "fake-model", "mock", "test"}
 
 # Known valid model prefixes from configured providers.
@@ -362,13 +365,15 @@ def _session_start_iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
-_FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
 _CACHE_PROVIDER = "cache"  # semantic-cache-served call: not paid/free/subscription (provider_classes.py)
 # D2: providers that have their own dedicated dashboard panel (rendered from
 # their own usage table). Codex is logged to BOTH `usage` (cost.log_usage forces
 # cost_usd=0 for free providers) AND `codex_usage`, so counting it in the
 # model_tracking-derived free split double-counts it against `_format_codex_section`.
 # Exclude these from the free split — the dedicated panel is the single owner.
+# F99 (kept on purpose, not D-205 residue): "has its own panel" is product design, not
+# something a seat or provider_class can derive. tests/test_f99_session_end_followups.py pins the
+# set and that _format_codex_section reads codex_usage. Every other row is split by provider_class.
 _DEDICATED_PANEL_PROVIDERS = {"codex"}
 
 
@@ -386,6 +391,11 @@ def _query_session_data(session_start: float) -> tuple[list[dict], list[dict], l
     session's (``usage.session_id``), not every row since a start time: two sessions
     open at once used to show each other's calls. Without an id (no hook payload, no
     ``--session`` argv) the start-time window is the fallback, as before.
+    F99: the split comes from ``ledger_view.provider_class`` over the discovered, fresh seats, not
+    from provider-name lists (D-205): the host's own ``subscription`` rows are cc; ``local`` and
+    seat-covered ``subscription`` providers are free; ``paid`` and ``unclassified`` stay in the
+    paid list, which prints each call's recorded cost (a stale or missing seat unclassifies a
+    provider, it does not make it free). A provider with a dedicated panel is in none of the three.
     P3.4-B4b: the read is ``ledger_view.session_usage_rows`` (None = no database, no table,
     or a session id the table cannot filter on: no rows, never every row)."""
     try:
@@ -400,12 +410,26 @@ def _query_session_data(session_start: float) -> tuple[list[dict], list[dict], l
     # Exclude rows with test/mock model names at the data level
     clean = [r for r in rows if not _is_test_model(r.get("model", ""))
              and r.get("provider") != _CACHE_PROVIDER]
-    paid  = [r for r in clean
-             if r.get("provider") not in _FREE_PROVIDERS | {"subscription"}]
-    cc    = [r for r in clean if r.get("provider") == "subscription"]
-    free  = [r for r in clean
-             if r.get("provider") in _FREE_PROVIDERS
-             and r.get("provider") not in _DEDICATED_PANEL_PROVIDERS]  # D2
+    try:
+        from llm_router import seats as _seats
+
+        seat_obj = _seats.load_seats()
+    except Exception as _exc:  # noqa: BLE001 -- no seats: classes fall back to row evidence
+        _record_failopen("CHZ-FO-STOP-SESSION-SEATS", _exc)
+        seat_obj = None
+    paid: list[dict] = []
+    cc: list[dict] = []
+    free: list[dict] = []
+    for r in clean:
+        provider = r.get("provider") or ""
+        if provider in _DEDICATED_PANEL_PROVIDERS:  # D2
+            continue
+        if provider == _lv.PROVIDER_SUBSCRIPTION:
+            cc.append(r)
+        elif _lv.provider_class(provider, seats=seat_obj) in ("local", "subscription"):
+            free.append(r)
+        else:
+            paid.append(r)
     return paid, cc, free
 
 
@@ -1224,37 +1248,25 @@ def _query_routing_logic(session_start: float | None = None) -> list[dict]:
 
 
 def _query_cache_hit_stats() -> dict:
-    """Today's semantic-cache hit rate with its n (P0.5, R-CTX-7).
+    """Today's semantic-cache hit rate with its n and window (P0.5, R-CTX-7), from
+    ``ledger_view.cache_hit_stats`` (F99: the hook no longer sums the table itself).
 
-    Reads ``semantic_cache_lookups`` (one row per lookup, hit or miss, written
-    by ``semantic_cache.check``). It used to query ``cache_hit``,
-    ``tokens_saved`` and ``timestamp`` on ``semantic_cache`` — none of which
-    exist — so it raised every time and returned ``{}``.
-
-    Returns {hits, lookups, n, hit_rate_pct, estimated_saved_usd} plus the
-    legacy aliases total_requests/cache_hits; {} when there were no lookups.
-    """
-    if not os.path.exists(_db_path()):
-        return {}
+    Returns {hits, lookups, n, window, hit_rate_pct, estimated_saved_usd} plus the legacy aliases
+    total_requests/cache_hits; ``estimated_saved_usd`` is None when the table records no saving.
+    {} when there were no lookups (or no ledger)."""
     try:
-        conn = sqlite3.connect(_db_path())
-        try:
-            row = conn.execute("""
-                SELECT COUNT(*), COALESCE(SUM(hit), 0), COALESCE(SUM(semantic_cache_lookups.saved_usd), 0)
-                FROM semantic_cache_lookups
-                WHERE date(ts, 'unixepoch', 'localtime') = date('now', 'localtime')
-            """).fetchone()
-        finally:
-            conn.close()
-        if not row or not row[0]:
-            return {}
-        lookups, hits, saved = int(row[0]), int(row[1]), float(row[2])
-        return {"hits": hits, "lookups": lookups, "n": lookups,
-                "hit_rate_pct": hits / lookups * 100,
-                "estimated_saved_usd": round(saved, 6),
-                "total_requests": lookups, "cache_hits": hits}
-    except Exception:
+        from llm_router import ledger_view as _lv
+
+        c = _lv.cache_hit_stats(_lv.resolve("today"), db_path=_db_path())
+    except Exception as _exc:  # noqa: BLE001 -- the line is left out; say so
+        _record_failopen("CHZ-FO-STOP-CACHE-HIT-STATS", _exc)
         return {}
+    if c is None:
+        return {}
+    return {"hits": c.hits, "lookups": c.lookups, "n": c.n, "window": c.window,
+            "hit_rate_pct": c.hits / c.lookups * 100,
+            "estimated_saved_usd": None if c.saved_usd is None else round(c.saved_usd, 6),
+            "total_requests": c.lookups, "cache_hits": c.hits}
 
 
 def _query_session_metrics(session_start: float) -> dict:
@@ -1282,6 +1294,7 @@ def _query_session_metrics(session_start: float) -> dict:
         "fallback_pct": r.downshift_n / r.n * 100, "escalation_pct": r.escalation_n / r.n * 100,
         "p95_latency": r.p95_s, "timed_n": r.timed_n,
         "routing_effectiveness_pct": r.cheap_n / r.n * 100,
+        "unclassified_count": r.unclassified_n,
         "session_cost_ratio": r.cost_ratio, "session_calls_ratio": r.calls_ratio,
         "typical_days": r.typical_days,
     }
@@ -1509,7 +1522,7 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
     if cache_stats:
         hr = cache_stats['hit_rate_pct']
         hr_color = _C_GREEN if hr >= 50 else _C_LABEL
-        quality_parts.append(f"{hr_color}{hr:.0f}%{_RESET} cache hit (n={cache_stats['n']})")
+        quality_parts.append(f"{hr_color}{hr:.0f}%{_RESET} cache hit (n={cache_stats['n']}, {cache_stats['window']})")
 
     if quality_parts:
         lines.append(f"    {' · '.join(quality_parts)}")
@@ -2892,7 +2905,7 @@ def _render_rich_summary(session_start, paid_rows, cc_rows, free_rows, tools,
     # The panel is titled "MODELS this session", so it aggregates EVERY model
     # invoked this session — paid, subscription and free/local alike. It was
     # previously built from `report_data["tools"]`, which is `_aggregate(paid_rows)`:
-    # that silently excluded `_FREE_PROVIDERS` (ollama, codex, gemini_cli), so a
+    # that silently excluded the free providers (local, seat-covered, codex), so a
     # session routed mostly to a local model showed a panel that did not contain
     # it. A "free" cost column already exists precisely to render those rows.
     all_session_rows = paid_rows + cc_rows + free_rows
@@ -2948,6 +2961,8 @@ def _render_rich_summary(session_start, paid_rows, cc_rows, free_rows, tools,
         escalation_count=session_metrics.get("escalation_count", 0),
         p95_latency=session_metrics.get("p95_latency", {}),
         routing_effectiveness_pct=session_metrics.get("routing_effectiveness_pct", 0.0),
+        unclassified_count=session_metrics.get("unclassified_count", 0),
+        decisions_n=session_metrics.get("total_decisions", 0),
         session_cost_ratio=session_metrics.get("session_cost_ratio"),
         session_calls_ratio=session_metrics.get("session_calls_ratio"),
         daily_cache_trend=daily_cache_trend if daily_cache_trend else None,

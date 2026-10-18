@@ -259,6 +259,8 @@ class SessionSummaryDashboard:
         fallback_count: int = 0,
         escalation_count: int = 0,
         routing_effectiveness_pct: float = 0.0,
+        unclassified_count: int = 0,
+        decisions_n: int = 0,
         session_cost_ratio: float | None = None,
         session_calls_ratio: float | None = None,
         executed_routes: dict | None = None,
@@ -352,8 +354,20 @@ class SessionSummaryDashboard:
             (routing_policy, policy_color),
         ))
 
+        # F99: decisions with no evidence and no fresh seat are in neither the cheap nor the
+        # escalated count; say how many, and print n/a when none could be classified.
+        unclassified_note = f" ({unclassified_count} unclassified)" if unclassified_count > 0 else ""
+        all_unclassified = decisions_n > 0 and unclassified_count >= decisions_n
+
         # Routing effectiveness score (cheap routing %)
-        if routing_effectiveness_pct > 0:
+        if all_unclassified:
+            left_lines.append(Text(""))
+            left_lines.append(Text.assemble(
+                ("  Effective:", PALETTE.text_dim),
+                (f" n/a{unclassified_note}", PALETTE.text_dim),
+                (f"  {session_basis}" if session_basis else "", PALETTE.text_dim),
+            ))
+        elif routing_effectiveness_pct > 0:
             eff_bar = self._colored_quota_bar(routing_effectiveness_pct, width=12)
             left_lines.append(Text(""))
             left_lines.append(Text.assemble(
@@ -361,17 +375,22 @@ class SessionSummaryDashboard:
                 (" ", ""),
                 eff_bar,
                 (f" {routing_effectiveness_pct:.0f}%", PALETTE.success),
+                (unclassified_note, PALETTE.text_dim),
                 (f"  {session_basis}" if session_basis else "", PALETTE.text_dim),
             ))
 
         # Fallback / escalation rate
-        if fallback_count > 0 or escalation_count > 0:
+        if fallback_count > 0 or escalation_count > 0 or all_unclassified:
             fb_color = PALETTE.warning if fallback_pct > 10 else PALETTE.text_dim
             esc_color = PALETTE.error if escalation_pct > 10 else PALETTE.text_dim
             left_lines.append(Text(""))
             basis = f"  {session_basis}" if session_basis else ""
             fb_str = f"  Fallback {fallback_count} ({fallback_pct:.0f}%){basis}"
-            esc_str = f"  Escalated {escalation_count} ({escalation_pct:.0f}%){basis}"
+            if all_unclassified:
+                esc_str = f"  Escalated n/a{unclassified_note}{basis}"
+                esc_color = PALETTE.text_dim
+            else:
+                esc_str = f"  Escalated {escalation_count} ({escalation_pct:.0f}%){unclassified_note}{basis}"
             left_lines.append(Text(fb_str, style=fb_color))
             left_lines.append(Text(esc_str, style=esc_color))
 
@@ -1055,6 +1074,8 @@ class SessionSummaryDashboard:
         fallback_count: int = 0,
         escalation_count: int = 0,
         routing_effectiveness_pct: float = 0.0,
+        unclassified_count: int = 0,
+        decisions_n: int = 0,
         session_cost_ratio: float | None = None,
         session_calls_ratio: float | None = None,
         p95_latency: dict[str, float] | None = None,
@@ -1100,6 +1121,8 @@ class SessionSummaryDashboard:
             fallback_count=fallback_count,
             escalation_count=escalation_count,
             routing_effectiveness_pct=routing_effectiveness_pct,
+            unclassified_count=unclassified_count,
+            decisions_n=decisions_n,
             session_cost_ratio=session_cost_ratio,
             session_calls_ratio=session_calls_ratio,
             session_basis=session_basis,
