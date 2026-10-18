@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 70
+# llm_router-hook-version: 71
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 70"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 71"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -1726,7 +1726,7 @@ _CMD_EXECUTABLES = frozenset({
 # the owner's intent to run it locally is explicit; bare "kill 1" / "touch x" keep routing.
 _CMD_BANG_EXECUTABLES = frozenset({
     "kill", "pkill", "killall", "ps", "lsof", "pwd", "mkdir", "touch", "mv", "cp", "chmod",
-    "wc", "diff", "tree", "du", "df", "bash", "sh", "source", "whoami", "jq", "tar", "unzip",
+    "wc", "diff", "tree", "du", "df", "whoami", "jq", "tar", "unzip",
 })
 _CMD_PROSE_WORDS_RE = re.compile(
     r"(?<![\w-])(?:why|what|how|when|where|which|who|is|are|was|were|does|do|did|the|a|an|my|"
@@ -1742,6 +1742,11 @@ _CMD_SHARED_STATE_RE = re.compile(
     r"(?<![\w-])(?:push|merge|deploy|release|commit|publish|tag|rebase|reset|"
     r"(?:--)?force|delete|destroy|upload|apply|rm)(?![\w-])", re.IGNORECASE)
 _CMD_MAX_WORDS = 12
+# F83: a pipe into a shell/interpreter runs arbitrary downloaded text ("curl x | sh"), so
+# it is never command-shaped, bare or behind "!" (command-shaped exempts the whole turn).
+_CMD_PIPE_TO_SHELL_RE = re.compile(
+    r"\|\s*(?:sudo\s+)?(?:\S*/)?(?:ba|z|k|da|fi|c|tc)?sh\b|\|\s*(?:sudo\s+)?(?:\S*/)?"
+    r"(?:python[\d.]*|perl|ruby|node|php|eval|source|xargs|env)\b", re.IGNORECASE)
 
 
 # F71: the "ambient" continuation paths in ``_is_coordination_task`` (an ack-style
@@ -1806,6 +1811,22 @@ def _ambient_tokens_within(text: str, vocab: frozenset,
     return True
 
 
+# F83: allow-list for the text BEFORE a mid-sentence "keep going": only a deferred
+# merge/push/deploy-style op on an unnamed or numbered target ("merge it when green and",
+# "merge 89 when green and", "don't wait between tasks, just"). Anything else
+# ("fix the bug and keep going") is a request and routes.
+_CONTINUE_PREFIX_TOKENS = _AMBIENT_BASE_TOKENS | frozenset((
+    "merge push deploy release ship land tag when once if green checks ci pass passes "
+    "passing ready clean finished complete between tasks task wait don't dont "
+    "keep going").split())
+_CONTINUE_PREFIX_NOUNS = frozenset("pr prs branch branches checks".split())
+
+
+def _continue_prefix_ok(prefix: str) -> bool:
+    cleaned = re.sub(r"(?<![\w#])#?\d+\b", " ", prefix)
+    return _ambient_tokens_within(cleaned, _CONTINUE_PREFIX_TOKENS, _CONTINUE_PREFIX_NOUNS)
+
+
 # F75: _COORDINATE_STATUS_RE matches ANYWHERE, so "ok thanks, what's next? add tests"
 # was claimed on "what's next" although the second clause is a request. When the prompt
 # has more than one clause, EVERY clause must itself be a status shape or pure
@@ -1834,14 +1855,39 @@ _STATUS_BEFORE_SHIP_RE = re.compile(
 _STATUS_SUBJECT_TAIL_RE = re.compile(r"\s+(?:of|on)\b", re.IGNORECASE)
 
 
+# F83: subject-bearing status shapes ("status of X", "did you push X", "you already ...")
+# have a free-text subject that cannot be allow-listed, but a request must not hide in it:
+# at most one determiner-led noun phrase ("did you push the fix the tests" has two), no
+# request verb after the subject's first word ("status of X add tests").
+_STATUS_SUBJECT_OPEN_RE = re.compile(
+    r"(?:did|have|has)\s+(?:you|we)\b|you\s+(?:already|just|earlier|previously|forgot|missed)\b"
+    r"|status\s+(?:of|on)\b", re.IGNORECASE)
+_STATUS_SUBJECT_DETS = frozenset("the this that these those a an my our your its their".split())
+_STATUS_REQUEST_VERBS = frozenset((
+    "add fix write create make implement update remove delete rename refactor rewrite "
+    "review generate install document explain summarize summarise draft change patch "
+    "revert investigate debug resolve build rebase release deploy publish bump migrate "
+    "please try").split())
+
+
+def _status_subject_ok(tail: str) -> bool:
+    toks = _AMBIENT_TOKEN_RE.findall(tail.replace("\u2019", "'").lower())
+    if sum(1 for t in toks if t in _STATUS_SUBJECT_DETS) > 1:
+        return False
+    return not any(t in _STATUS_REQUEST_VERBS for t in toks[1:])
+
+
 def _status_clause_ok(seg: str) -> bool:
     ms = list(_COORDINATE_STATUS_RE.finditer(seg))
     if not ms:
         return _ambient_tokens_within(seg, _AMBIENT_BASE_TOKENS)
     rest, last = [], 0
     for m in ms:
-        if not _STATUS_BARE_RE.fullmatch(m.group(0)) or _STATUS_SUBJECT_TAIL_RE.match(seg, m.end()):
-            return True  # subject-bearing status shape: unchanged
+        if _STATUS_SUBJECT_OPEN_RE.match(m.group(0)) or _STATUS_SUBJECT_TAIL_RE.match(seg, m.end()):
+            return _status_subject_ok(seg[m.end():])
+        if not _STATUS_BARE_RE.fullmatch(m.group(0)):
+            # F83: "is it done now fix the bug": a complete status shape, tail must be filler
+            return _ambient_tokens_within(seg[ms[-1].end():], _STATUS_FILLER_TOKENS)
         rest.append(seg[last:m.start()])
         last = m.end()
     rest.append(seg[last:])
@@ -1946,6 +1992,8 @@ def _is_command_shaped(prompt: str) -> bool:
         bang = True
     if not t or "?" in t or "\n" in t or len(t.split()) > _CMD_MAX_WORDS:
         return False
+    if _CMD_PIPE_TO_SHELL_RE.search(t):
+        return False
     first = t.split()[0]
     if (first not in _CMD_EXECUTABLES and not (bang and first in _CMD_BANG_EXECUTABLES)
             and not first.startswith(("./", "~/", "/"))):
@@ -2018,19 +2066,21 @@ def _is_coordination_task(prompt: str) -> bool:
         ec = _COORDINATE_EXPLICIT_CONTINUE_RE.search(stripped)
         # F78: what FOLLOWS the phrase must be filler too: "keep going and fix the lint
         # errors" / "carry on with the plan but rename the module" are work requests.
-        if ec and _ambient_tokens_within(stripped[ec.end():], _AMBIENT_BASE_TOKENS,
-                                         _AMBIENT_CONTINUE_NOUNS):
+        # F83: and what PRECEDES it: "fix the bug and keep going" is a work request.
+        if (ec and _continue_prefix_ok(stripped[:ec.start()])
+                and _ambient_tokens_within(stripped[ec.end():], _AMBIENT_BASE_TOKENS,
+                                           _AMBIENT_CONTINUE_NOUNS)):
             return True
         if _COORDINATE_STATUS_RE.search(stripped) and _status_segments_ok(stripped):
             return True
         opener = _COORDINATE_CONTINUATION_OPENER_RE.match(stripped)
         if opener:
             # F71: whole-remainder allow-list, not "no real-task verb found".
-            # "Proceed with the plan" is pinned as a request (F71), so only the
-            # continue/carry-on/keep-going openers may name the plan/work/queue.
-            nouns = (_AMBIENT_NOUNS if opener.group(0).lower().startswith("proceed")
-                     else _AMBIENT_CONTINUE_NOUNS)
-            if _ambient_tokens_within(stripped[opener.end():], _AMBIENT_BASE_TOKENS, nouns):
+            # D-222 (F83): "Proceed with the plan" is coordination like "continue the
+            # plan" (F71 had pinned it as a request), so every opener may name the
+            # plan/work/queue/backlog.
+            if _ambient_tokens_within(stripped[opener.end():], _AMBIENT_BASE_TOKENS,
+                                      _AMBIENT_CONTINUE_NOUNS):
                 return True
         elif (not _COORDINATE_OP_VERB_RE.search(stripped)
                 and not _COORDINATE_CONCRETE_ANCHOR_RE.search(stripped)
