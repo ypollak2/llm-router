@@ -87,6 +87,7 @@ async def test_other_readers_exclude_error_and_cache_rows(cache_env, monkeypatch
     assert len(got) == 6
 
 
+@pytest.mark.asyncio
 async def test_feedback_without_an_id_lands_on_the_latest_real_decision(cache_env):
     from llm_router import cost
 

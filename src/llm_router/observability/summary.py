@@ -539,9 +539,14 @@ def _render_sparkline(values: list[float], width: int = 24) -> str:
     return "".join(out)
 
 
+_ZERO_COSTS = frozenset({"$0.00", "0.000¢"})
+
+
 def _fmt_cost(usd: float) -> str:
     if usd < 0:                       # signed, never clamped: a loss must read as a loss
-        return "-" + _fmt_cost(-usd)
+        body = _fmt_cost(-usd)
+        # F95: a loss below the display precision rounds to zero; "-0.000¢" is a sign on nothing
+        return body if body in _ZERO_COSTS else "-" + body
     if usd >= 1.0:
         return f"${usd:.2f}"
     if usd >= 0.01:
