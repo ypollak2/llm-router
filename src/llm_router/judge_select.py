@@ -10,8 +10,9 @@ Rules (OD-4 = A):
                      ``ungraded_no_judge``. Never a cloud judge for a cloud answer.
   * local answer  -> strongest OTHER local model, else the Haiku fallback, else
                      ``ungraded_no_judge``.
-  * The Haiku fallback is behind ``LLM_ROUTER_JUDGE_HAIKU_FALLBACK`` (default OFF)
-    until P3.1-4 lands the privacy and spend gates it must not run without.
+  * The Haiku fallback is behind ``LLM_ROUTER_JUDGE_HAIKU_FALLBACK`` (default OFF);
+    ``judge_ledger.admit_haiku`` re-checks the flag and adds the quota and daily caps
+    at call time (P3.1-4).
 
 "Strongest" = parameter count, then on-disk size (both from ``/api/tags``), then
 the user's own local-model setting, then discovery order. Unknown metadata ranks
@@ -195,6 +196,20 @@ def _no_judge() -> Selection:
     return Selection(None, None, STATUS_NO_JUDGE)
 
 
+def _is_local_answerer(answering_model: str, name_matches_installed: bool) -> bool:
+    """Local means the ``ollama/`` provider, or a bare name that is installed.
+
+    A name carrying any other provider prefix is a cloud answerer even when its last
+    path segment equals an installed local model (F93): it must never reach the Haiku
+    path, which exists only for local answers. Mistaking a local answer for cloud only
+    withholds a fallback; the other mistake would send a cloud prompt to a second cloud.
+    """
+    name = (answering_model or "").strip().lower()
+    if "/" in name:
+        return name.startswith("ollama/")
+    return name_matches_installed
+
+
 def select_judge(
     answering_model: str,
     inventory: list[LocalModel],
@@ -208,7 +223,7 @@ def select_judge(
         return _no_judge()  # cannot prove independence from an unnamed answerer
     digests = _digests(inventory)
     own = [m for m in inventory if same_model(answering_model, m.name, digests)]
-    is_local = answering_model.strip().lower().startswith("ollama/") or bool(own)
+    is_local = _is_local_answerer(answering_model, bool(own))
     # Every alias of the answerer is excluded, by name and by digest.
     banned = [answering_model] + [m.name for m in own]
     others = [m for m in inventory if not any(same_model(b, m.name, digests) for b in banned)]
