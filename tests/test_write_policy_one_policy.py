@@ -640,3 +640,12 @@ def test_m13_exec_runners_removed_is_caught(world, monkeypatch):
     assert all(wp.destructive_reason(c) for c in cmds)
     monkeypatch.setattr(wp, "_PKG_SUBS", {k: v - {"exec", "x", "dlx", "run"} for k, v in wp._PKG_SUBS.items()})
     assert all(wp.destructive_reason(c) is None for c in cmds)
+
+
+import pytest as _pytest_f50  # noqa: E402
+
+
+@_pytest_f50.fixture(autouse=True)
+def _user_local_model_f50(monkeypatch):
+    """D-205: llm_local_task has no built-in model; the user's setting names one."""
+    monkeypatch.setenv("LLM_ROUTER_OLLAMA_MODEL", "usermodel:1b")

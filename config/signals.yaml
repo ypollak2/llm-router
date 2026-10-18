@@ -78,10 +78,9 @@ decisions:
 # will be replaced by the empirical lookup-table selector in v0.0.3+.
 chains:
   local_only_chain:
-    - ollama/qwen3.5:latest
-    - ollama/gemma:7b
+    - ollama/@local
   code_chain:
-    - ollama/qwen3.5:latest
+    - ollama/@local
     - codex/gpt-5-codex
     - openai/gpt-4o
     - anthropic/claude-sonnet-4.6
@@ -89,7 +88,7 @@ chains:
     - perplexity/sonar
     - openai/gpt-4o
   default_chain:
-    - ollama/qwen3.5:latest
+    - ollama/@local
     - codex/gpt-5-codex
     - google/gemini-flash-lite
     - openai/gpt-4o-mini

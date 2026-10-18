@@ -280,3 +280,12 @@ async def test_overlapping_local_tasks_never_leak_apply_writes(tmp_path, monkeyp
     assert seen["apply"] == ["apply", "apply"]
     assert seen["propose"] == [None, None]
     assert "LLM_ROUTER_AGENT_WRITES" not in os.environ
+
+
+import pytest as _pytest_f50  # noqa: E402
+
+
+@_pytest_f50.fixture(autouse=True)
+def _user_local_model_f50(monkeypatch):
+    """D-205: llm_local_task has no built-in model; the user's setting names one."""
+    monkeypatch.setenv("LLM_ROUTER_OLLAMA_MODEL", "usermodel:1b")

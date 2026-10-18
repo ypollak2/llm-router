@@ -397,6 +397,10 @@ def test_all_disconnected_dynamic_table_has_no_disconnected_provider(monkeypatch
     import llm_router.dynamic_routing as dr
 
     monkeypatch.setattr(dr, "_get_quota_pressure", lambda: {})
+    # D-205: the bundled policy names no local model, so the static table holds an Ollama
+    # entry only when the user has one. Give every chain the user's own model (as a
+    # discovered/set local model resolves into it) so "ollama" is really in play.
+    monkeypatch.setattr(dr, "ROUTING_TABLE", {k: ["ollama/usermodel:1b", *c] for k, c in dr.ROUTING_TABLE.items()})
     put(all_gone())
     provs = map_reader.filter_providers({"ollama", "gemini", "openai"})
     table = dr.build_dynamic_routing_table(provs)

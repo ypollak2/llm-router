@@ -6,7 +6,7 @@ description: |
   consult this file is deferred to Phase 1b.2; for now it is the canonical
   *target* the runtime will migrate to, validated by tests/test_standard_policy_mirror.py.
 
-  Local models: BALANCED, PREMIUM and REASONING chains name no `ollama/qwen3:32b`
+  Local models: BALANCED, PREMIUM and REASONING chains name no pinned local model
   (STALE-OLLAMA-1 — a one-machine default that most installs never had, silently
   dropped at runtime). Installed Ollama models are not statically listed: the router
   injects what discovery finds (config.all_ollama_models(), task-ordered by
@@ -14,8 +14,7 @@ description: |
   time. PREMIUM/REASONING get no local entry (they never had an injected one).
   BUDGET names `ollama/@local` (the user's local model, resolved from their
   LLM_ROUTER_OLLAMA_MODEL setting or discovered inventory by policy._resolve_chain,
-  dropped when there is none) and ollama/hermes3:8b, which is subject to the same
-  drift and is filtered the same way (profiles.get_model_chain).
+  dropped when there is none). No local-model name appears in this file (D-205).
 
   Codex (F22): every codex/* entry names a model the Codex CLI accepts
   (codex_agent._load_codex_models). gpt-4o-mini and gpt-4o were listed here and
@@ -58,7 +57,6 @@ chains:
   budget:
     query:
       - ollama/@local
-      - ollama/hermes3:8b
       - codex/gpt-5.5
       - moonshot/moonshot-v1-8k
       - minimax/MiniMax-Text-01
@@ -68,12 +66,12 @@ chains:
       - openai/gpt-4o-mini
       - anthropic/claude-haiku-4-5-20251001
     research:
-      - ollama/hermes3:8b
+      - ollama/@local
       - minimax/MiniMax-Text-01
       - anthropic/claude-haiku-4-5-20251001
       - openai/gpt-4o-mini
     generate:
-      - ollama/hermes3:8b
+      - ollama/@local
       - codex/gpt-5.5
       - moonshot/moonshot-v1-8k
       - arcee/arcee-nova
@@ -82,7 +80,7 @@ chains:
       - openai/gpt-4o-mini
       - anthropic/claude-haiku-4-5-20251001
     analyze:
-      - ollama/hermes3:8b
+      - ollama/@local
       - codex/gpt-5.5
       - zhipu/glm-4-flash
       - deepseek/deepseek-reasoner
@@ -90,7 +88,7 @@ chains:
       - openai/gpt-4o-mini
       - anthropic/claude-haiku-4-5-20251001
     code:
-      - ollama/hermes3:8b
+      - ollama/@local
       - codex/gpt-5.5
       - moonshot/moonshot-v1-8k
       - deepseek/deepseek-chat

@@ -1027,7 +1027,14 @@ def execute_agent(
     # static substring priority below is the tiebreaker AND the fallback when
     # the registry is empty (never probed / Ollama down). Stable sort preserves
     # chain order among equally-ranked models; non-Ollama entries are skipped.
-    _AGENT_PRIORITY = ("hermes", "qwen3-coder", "devstral", "qwen3")
+    # D-205: no family is named here. The only name-based tiebreak is the user's own
+    # local-model setting (LLM_ROUTER_OLLAMA_MODEL), which ranks first among equals.
+    try:
+        from llm_router.model_discovery import user_local_model_setting
+        _user_pick = user_local_model_setting()
+    except Exception:
+        _user_pick = ""
+    _AGENT_PRIORITY = (_user_pick.lower(),) if _user_pick else ()
 
     try:
         from llm_router.agentic_registry import get_registry, rank as _registry_rank
@@ -1043,7 +1050,7 @@ def execute_agent(
 
     def _static_rank(name: str) -> int:
         for idx, sub in enumerate(_AGENT_PRIORITY):
-            if sub in name:
+            if name == sub or name.removesuffix(":latest") == sub.removesuffix(":latest"):
                 return idx
         return len(_AGENT_PRIORITY)
 

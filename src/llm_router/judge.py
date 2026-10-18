@@ -224,19 +224,6 @@ def _enforce_queue_cap(path) -> int:
     return dropped
 
 
-#: Preference order for the LOCAL judge model, most-preferred first, matched
-#: by substring against whatever `discover.get_cached_ollama_models` reports
-#: installed. feat/judge-discrimination (2026-09-25): measured on a 50-item
-#: hand-labelled discrimination set (tests/fixtures/judge_eval_set.py) — a
-#: judge model that reasons more carefully catches a wrong arithmetic/factual
-#: answer more reliably than a smaller, faster one. This is a PREFERENCE, not
-#: a requirement: `_select_judge_model` still falls back to "first available
-#: candidate that differs from the answering model" (the pre-existing
-#: behaviour) when none of these substrings match what's actually installed,
-#: so an operator with a different local model set still gets *a* judge.
-_JUDGE_MODEL_PREFERENCE: tuple[str, ...] = ("qwen3-coder", "qwen3.8", "qwen3.5")
-
-
 def _select_judge_model(answering_model: str) -> str | None:
     """Pick an INDEPENDENT judge model — one that never matches the model
     that answered.
@@ -248,10 +235,10 @@ def _select_judge_model(answering_model: str) -> str | None:
     Prefers what's available with zero API keys: a locally installed Ollama
     model (via :mod:`llm_router.discover`, the same module the router uses to
     find what's actually reachable) that differs from the answering model.
-    Among independent candidates, prefers `_JUDGE_MODEL_PREFERENCE` order
-    (see its docstring); falls back to the first available independent
-    candidate, in whatever order discovery reports, if none of the preferred
-    names are installed.
+    Among independent candidates, prefers the user's own local-model setting
+    (``LLM_ROUTER_OLLAMA_MODEL``) when it is one of them; otherwise the first
+    independent candidate in discovery order. No model or family is named here
+    (D-205): the judge is whatever the user has.
 
     Returns:
         A judge model id, or None if no independent judge is available —
@@ -278,14 +265,14 @@ def _select_judge_model(answering_model: str) -> str | None:
     if not independent:
         return None
 
-    for preferred in _JUDGE_MODEL_PREFERENCE:
-        for candidate in independent:
-            if preferred in _norm(candidate).lower():
-                return candidate
-
-    # No preferred name installed — keep the original behaviour (first
-    # independent candidate in discovery order) rather than leaving the row
-    # ungraded when a perfectly usable local judge is available.
+    try:
+        from llm_router.model_discovery import prefer_first, user_local_model_setting
+        independent = prefer_first(independent, user_local_model_setting())
+    except Exception:  # noqa: BLE001 — a preference is optional; discovery order stands
+        pass
+    # Otherwise keep the original behaviour (first independent candidate in
+    # discovery order) rather than leaving the row ungraded when a perfectly
+    # usable local judge is available.
     return independent[0]
 
 

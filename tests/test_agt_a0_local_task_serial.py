@@ -174,3 +174,12 @@ def test_a_rename_out_of_the_router_state_dir_lists_only_the_destination(tmp_pat
     subprocess.run(["git", "mv", "home/w", "moved"], cwd=tmp_path, check=True)
     files = lt._git_state(tmp_path)["files"]
     assert "home/w" not in files and "moved" in files, files
+
+
+import pytest as _pytest_f50  # noqa: E402
+
+
+@_pytest_f50.fixture(autouse=True)
+def _user_local_model_f50(monkeypatch):
+    """D-205: llm_local_task has no built-in model; the user's setting names one."""
+    monkeypatch.setenv("LLM_ROUTER_OLLAMA_MODEL", "usermodel:1b")

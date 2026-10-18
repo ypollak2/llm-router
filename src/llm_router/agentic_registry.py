@@ -227,15 +227,15 @@ def rank(model_name: str, verdicts: dict[str, bool]) -> int:
 
 
 def best_agentic_model(
-    prefer: tuple[str, ...] = ("qwen3-coder", "devstral", "hermes", "qwen3"),
+    prefer: tuple[str, ...] = (),
     provider_prefix: str = "ollama/",
 ) -> str:
     """Best VERIFIED agentic model as a provider-prefixed string, chosen
     DYNAMICALLY from this machine's registry — never hardcoded, so it adapts to
     each user's installed set. Cache-only (never probes). "" if none verified.
 
-    Selection among verified models: `prefer`-substring priority first (earlier
-    = stronger), then larger parameter size (parsed from a ':NNb' suffix), then
+    Selection among verified models: caller-supplied `prefer`-substring priority first
+    (earlier = stronger; empty by default: no family is named in code, D-205), then larger parameter size (parsed from a ':NNb' suffix), then
     name. A verified model matching no `prefer` token is still eligible, ranked
     after matched ones.
     """
