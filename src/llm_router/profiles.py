@@ -22,6 +22,8 @@ same convention for media models (though media bypasses LiteLLM).
 
 from __future__ import annotations
 
+from collections.abc import MutableMapping
+
 from llm_router.logging import get_logger
 from llm_router.types import Complexity, RoutingProfile, TaskType
 
@@ -122,67 +124,83 @@ def _load_routing_table_from_policy() -> dict[tuple[RoutingProfile, TaskType], l
 # YAML and the in-memory dict is impossible because there is only the YAML.
 # tests/test_standard_policy_mirror.py is the canonical guardrail.
 
-class _LateBoundTable(dict):
+class _LateBoundTable(MutableMapping):
     """ROUTING_TABLE that re-resolves ``ollama/@local`` when the user's local model changes.
 
-    Reads check ``policy.local_epoch()`` (cached lookup, no network, throttled); only a
-    changed answer rebuilds the chains, in place, so every importer sees the same object.
+    Records the resolved ``@local`` value the chains were BUILT with and, on every read,
+    compares it with the current cached resolution (``policy.local_placeholder_seen()``:
+    cache/env only, no network, throttled). A difference builds a complete new mapping and
+    swaps ONE reference, so a concurrent reader sees the old or the new table, never a
+    half-built one. Every importer holds this same object.
     """
 
-    _epoch = None
-
-    def _sync(self) -> None:
+    def __init__(self, data):
+        self._data = data
         try:
-            from llm_router.policy import local_epoch
-            epoch = local_epoch()
+            from llm_router.policy import _resolve_local_placeholder
+            self._built_with = _resolve_local_placeholder()
+        except Exception as exc:  # noqa: BLE001 - never break import on a refresh
+            from llm_router import failopen
+            failopen.record("CHZ-FO-ROUTING-TABLE-LATE-BIND", exc)
+            self._built_with = None
+
+    def _snap(self):
+        try:
+            from llm_router.policy import local_placeholder_seen
+            current = local_placeholder_seen()
         except Exception as exc:  # noqa: BLE001 - never break routing on a refresh
             from llm_router import failopen
             failopen.record("CHZ-FO-ROUTING-TABLE-LATE-BIND", exc)
-            return
-        if self._epoch is None:
-            self._epoch = epoch
-        elif epoch != self._epoch:
-            self._epoch = epoch
+            return self._data
+        if current != self._built_with:
             try:
                 fresh = _load_routing_table_from_policy()
             except Exception as exc:  # noqa: BLE001
                 from llm_router import failopen
                 failopen.record("CHZ-FO-ROUTING-TABLE-RELOAD", exc)
-                return
-            dict.clear(self)
-            dict.update(self, fresh)
-
-    def get(self, key, default=None):
-        self._sync()
-        return dict.get(self, key, default)
+                return self._data
+            self._data = fresh              # single reference swap: atomic for readers
+            self._built_with = current
+        return self._data
 
     def __getitem__(self, key):
-        self._sync()
-        return dict.__getitem__(self, key)
+        return self._snap()[key]
 
-    def __contains__(self, key):
-        self._sync()
-        return dict.__contains__(self, key)
+    def __setitem__(self, key, value):
+        self._snap()[key] = value
 
-    def items(self):
-        self._sync()
-        return dict.items(self)
-
-    def values(self):
-        self._sync()
-        return dict.values(self)
-
-    def keys(self):
-        self._sync()
-        return dict.keys(self)
+    def __delitem__(self, key):
+        del self._snap()[key]
 
     def __iter__(self):
-        self._sync()
-        return dict.__iter__(self)
+        return iter(self._snap())
 
     def __len__(self):
-        self._sync()
-        return dict.__len__(self)
+        return len(self._snap())
+
+    def __contains__(self, key):
+        return key in self._snap()
+
+    def get(self, key, default=None):
+        return self._snap().get(key, default)
+
+    def items(self):
+        return self._snap().items()
+
+    def values(self):
+        return self._snap().values()
+
+    def keys(self):
+        return self._snap().keys()
+
+    def setdefault(self, key, default=None):
+        return self._snap().setdefault(key, default)
+
+    def pop(self, key, *default):
+        return self._snap().pop(key, *default)
+
+    def copy(self):
+        return dict(self._snap())
 
 
 ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = _LateBoundTable(_load_routing_table_from_policy())

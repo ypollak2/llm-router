@@ -216,36 +216,80 @@ def test_interval_validation(raw, expected):
 
 # ── late binding of ollama/@local (D-205) ────────────────────────────────────
 
-def test_local_placeholder_late_binds_without_reimport(tmp_path, monkeypatch):
+def _hermetic_local(tmp_path, monkeypatch):
+    """Scratch LLM_ROUTER_HOME with an EMPTY cache; returns write_cache(name|None)."""
     import json
     import time
 
-    from llm_router import model_discovery, policy
-    from llm_router.profiles import ROUTING_TABLE, RoutingProfile, TaskType
+    from llm_router import policy
 
     for var in ("LLM_ROUTER_OLLAMA_MODEL", "OLLAMA_MODELS", "OLLAMA_BUDGET_MODELS"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
     monkeypatch.setattr(policy, "_EPOCH_CHECK_S", 0.0)
+    monkeypatch.setattr(policy, "_epoch_primed", False)
 
     def write_cache(name):
-        (tmp_path / "discovery.json").write_text(json.dumps({
-            "cached_at": time.time(),
-            "models": {f"ollama/{name}": {"model_id": f"ollama/{name}",
-                                           "provider": "ollama", "provider_tier": "local"}},
-        }))
+        models = {} if name is None else {
+            f"ollama/{name}": {"model_id": f"ollama/{name}",
+                               "provider": "ollama", "provider_tier": "local"}}
+        (tmp_path / "discovery.json").write_text(
+            json.dumps({"cached_at": time.time(), "models": models}))
 
+    return write_cache
+
+
+def _fresh_table():
+    from llm_router import profiles
+    return profiles._LateBoundTable(profiles._load_routing_table_from_policy())
+
+
+def _holders(table, model):
+    return [c for c in table.values() if f"ollama/{model}" in c]
+
+
+def test_late_bind_empty_at_import_then_model_appears(tmp_path, monkeypatch):
+    # Fresh install: table built with no local model; the rescan loop writes the cache later.
+    write_cache = _hermetic_local(tmp_path, monkeypatch)
+    write_cache(None)
+    table = _fresh_table()
+    assert not _holders(table, "fake-a:1b")
     write_cache("fake-a:1b")
-    policy.local_epoch()                       # prime against the first cache
-    ROUTING_TABLE.get((RoutingProfile.BALANCED, TaskType.QUERY))   # sync table to it
-    first = [c for c in ROUTING_TABLE.values() if "ollama/fake-a:1b" in c]
-    assert first, "standard policy must carry an @local slot for this test to mean anything"
-    assert model_discovery.local_model(allow_probe=False) == "fake-a:1b"
+    assert _holders(table, "fake-a:1b"), "table built empty never picked up the new model"
 
-    write_cache("fake-b:2b")                   # what a rescan does after `ollama pull`
-    after = [c for c in ROUTING_TABLE.values() if "ollama/fake-b:2b" in c]
-    assert after, "ROUTING_TABLE did not pick up the new local model"
-    assert not any("ollama/fake-a:1b" in c for c in ROUTING_TABLE.values())
+
+def test_late_bind_model_a_to_b(tmp_path, monkeypatch):
+    write_cache = _hermetic_local(tmp_path, monkeypatch)
+    write_cache("fake-a:1b")
+    table = _fresh_table()
+    assert _holders(table, "fake-a:1b"), "standard policy must carry an @local slot"
+    write_cache("fake-b:2b")
+    assert _holders(table, "fake-b:2b")
+    assert not _holders(table, "fake-a:1b")
+
+
+def test_late_bind_swap_is_one_reference(tmp_path, monkeypatch):
+    write_cache = _hermetic_local(tmp_path, monkeypatch)
+    write_cache("fake-a:1b")
+    table = _fresh_table()
+    old = table._data
+    snapshot = dict(old)
+    write_cache("fake-b:2b")
+    table.get(next(iter(old)))
+    assert table._data is not old and old == snapshot, "old mapping must stay intact"
+    assert table.copy() == table._data and isinstance(table.copy(), dict)
+
+
+def test_late_bind_mutant_epoch_never_refreshes_is_caught(tmp_path, monkeypatch):
+    # Mutant: the probe never sees a change (local_placeholder_seen frozen) -> the table must
+    # stay stale, proving the tests above would fail if late binding were disabled.
+    from llm_router import policy
+    write_cache = _hermetic_local(tmp_path, monkeypatch)
+    write_cache(None)
+    table = _fresh_table()
+    monkeypatch.setattr(policy, "local_placeholder_seen", lambda: None)
+    write_cache("fake-a:1b")
+    assert not _holders(table, "fake-a:1b")
 
 
 def test_no_change_means_no_table_rebuild(tmp_path, monkeypatch):

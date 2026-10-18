@@ -159,6 +159,12 @@ def local_epoch() -> int:
     return _epoch
 
 
+def local_placeholder_seen() -> "str | None":
+    """The ``@local`` resolution as of the latest (throttled) check."""
+    local_epoch()
+    return _epoch_seen
+
+
 def _resolve_local_placeholder() -> "str | None":
     try:
         from llm_router.model_discovery import local_model
