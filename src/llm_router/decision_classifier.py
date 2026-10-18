@@ -53,14 +53,12 @@ CRITERIA = {
 
 
 def _model() -> str:
-    """The user's LLM_ROUTER_DECISION_MODEL, else the discovered local model (cache/env
-    only: this runs on the event loop, so no probe), else "" = the classifier is off."""
-    set_ = os.environ.get("LLM_ROUTER_DECISION_MODEL", "").strip()
-    if set_:
-        return set_
-    from llm_router import model_discovery
+    """The user's LLM_ROUTER_DECISION_MODEL, else "" = the classifier is off.
 
-    return model_discovery.local_model(allow_probe=False) or DEFAULT_MODEL
+    No discovery fallback (rv-583): this model is served on Ollama ``/v1/systemone``,
+    which a generic discovered chat model does not answer, so guessing one would only
+    produce failed requests and misleading timeout rows."""
+    return os.environ.get("LLM_ROUTER_DECISION_MODEL", "").strip() or DEFAULT_MODEL
 
 
 def abstain_below() -> float:

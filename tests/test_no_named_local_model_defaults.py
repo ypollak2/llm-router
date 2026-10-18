@@ -293,7 +293,12 @@ def test_classifier_setting_wins_then_discovery(classifier_quiet, monkeypatch):
     from llm_router import decision_classifier, local_classifier as lc
     classifier_quiet["inv"] = ["found:3b"]
     assert lc._model() == "found:3b"
-    assert decision_classifier._model() == "found:3b"
+    # rv-583: the systemone decision model is never guessed from discovery (a generic
+    # chat model does not serve /v1/systemone); without the setting it is off.
+    assert decision_classifier._model() == ""
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_BACKEND", "systemone")
+    assert lc._model() == ""
+    monkeypatch.delenv("LLM_ROUTER_CLASSIFIER_BACKEND")
     monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_MODEL", "mine:7b")
     monkeypatch.setenv("LLM_ROUTER_DECISION_MODEL", "dec:9b")
     assert lc._model() == "mine:7b"

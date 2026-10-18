@@ -16,7 +16,8 @@ decided. The scheduler never changes that decision and never waits for the model
   the event loop only schedules a task. ``cls_applied`` stays false on every ledger row.
 
 The classifier backend is ``local_classifier``'s: ``LLM_ROUTER_CLASSIFIER_BACKEND=systemone``
-makes the shadow ask the decision model (``decision_classifier``, nimble:9b by default).
+makes the shadow ask the decision model (``decision_classifier``, set by
+``LLM_ROUTER_DECISION_MODEL``; unset means the classifier is off).
 Each record carries the backend, the tier the client really ``requested`` on the call and
 whether the input was ``assemble_capped``; ``shadow_eval`` scores records against the rules.
 
