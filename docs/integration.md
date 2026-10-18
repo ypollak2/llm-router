@@ -42,6 +42,8 @@ non-streamed 429 has a `Retry-After` header and the message ends `; retry after 
 error event); otherwise neither is sent. The error's `type` is `invalid_request_error` for a 400, and the
 non-streamed endpoints return the same status codes.
 
+The native `POST /route` and `POST /ground` and the zero-dep `llm_router.route_server` follow the same rule: a failure sends `<ExceptionClass>: routing failed` (`/route`, HTTP 502; the gateway's `/route` also sends 429 for a provider rate limit), `<ExceptionClass>: grounding check failed` (`/ground`), `<ExceptionClass>: feedback failed` (`/feedback`, HTTP 500) or `<ExceptionClass>: bad json` (HTTP 400), never the exception text. A 400 for an invalid request (for example a bad `model` format or an unusable `messages` list) carries the router's own message, which is written by the router and holds no provider text.
+
 **`system` on `/v1/messages`.** A string is forwarded as is. A list of blocks (Claude Code and the Claude
 Agent SDK send one) is reduced to its text blocks, joined with a single space; blocks of any other type
 and `cache_control` markers are dropped, silently.

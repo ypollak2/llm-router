@@ -50,6 +50,18 @@ def is_auto_model(name: object) -> bool:
     return isinstance(name, str) and name.strip().lower() in AUTO_MODEL_NAMES
 
 
+def _client_failure(what: str, exc: BaseException) -> None:
+    """F87: log the secret-scrubbed detail locally (logger ``llm_router.gateway``, as the
+    gateway does). The client response carries only the exception class and a fixed message,
+    because provider text can echo the prompt."""
+    import logging
+
+    from llm_router.proxy.ledger import scrub_detail
+
+    logging.getLogger("llm_router.gateway").warning(
+        "%s: %s: %s", what, type(exc).__name__, scrub_detail(str(exc)))
+
+
 async def route_payload_async(payload: dict) -> dict:
     """Run one routing call through LLM Router's FULL router and return a JSON-able
     result. This is the single routing core shared by both HTTP surfaces — this
@@ -305,7 +317,8 @@ def make_handler():
                 n = int(self.headers.get("Content-Length", 0) or 0)
                 payload = json.loads(self.rfile.read(n) or b"{}")
             except (ValueError, json.JSONDecodeError) as e:
-                return self._send(400, {"error": "bad json: {}".format(e)})
+                _client_failure("bad json", e)
+                return self._send(400, {"error": "{}: bad json".format(type(e).__name__)})
             if self.path == "/feedback":
                 # Ground-truth routing quality from LoopHole verdicts. Best-effort:
                 # an unusable record is acknowledged (recorded=false), never 5xx'd,
@@ -315,13 +328,15 @@ def make_handler():
                     recorded = record_loophole_verdict(payload)
                     return self._send(200, {"ok": True, "recorded": recorded})
                 except Exception as e:
-                    return self._send(500, {"error": "feedback failed: {}".format(e)})
+                    _client_failure("feedback failed", e)
+                    return self._send(500, {"error": "{}: feedback failed".format(type(e).__name__)})
             try:
                 self._send(200, route_payload(payload))
             except ValueError as e:
                 self._send(400, {"error": str(e)})
             except Exception as e:                      # routing / provider failure
-                self._send(502, {"error": "route failed: {}".format(e)})
+                _client_failure("route failed", e)
+                self._send(502, {"error": "{}: routing failed".format(type(e).__name__)})
 
         def log_message(self, *_a):                     # quiet by default
             pass

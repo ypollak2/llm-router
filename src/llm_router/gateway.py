@@ -748,7 +748,7 @@ async def route(payload: dict, request: Request) -> dict:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"route failed: {e}")
+        raise _routing_failure(e) from e  # F87: class + fixed message, detail to the local log
 
 
 # ── Native: POST /ground (structural check, no model call) ───────────────────
@@ -800,7 +800,11 @@ async def ground(payload: dict, request: Request) -> dict:
         symbol_hits = grounding.symbol_violations(draft, context, prompt)
         relayable = grounding.draft_is_relayable(draft, context, prompt)
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"grounding check failed: {e}")
+        from llm_router.proxy.ledger import scrub_detail
+
+        # F87: the client gets the class and a fixed message; the scrubbed detail stays local.
+        _LOG.warning("grounding check failed: %s: %s", type(e).__name__, scrub_detail(str(e)))
+        raise HTTPException(status_code=502, detail=f"{type(e).__name__}: grounding check failed") from e
     finally:
         # Restore rather than delete: the process may have had a scope already,
         # and leaking this request's project into the next one is the
