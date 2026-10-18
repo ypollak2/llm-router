@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 20
+# llm_router-hook-version: 22
 """PreToolUse[*] hook — enforce routing compliance.
 
 When auto-route.py issues a ⚡ MANDATORY ROUTE directive, it writes a
@@ -442,7 +442,16 @@ def _is_readonly_bash(command: str) -> bool:
     # Command substitution can hide writes inside otherwise-read-only commands.
     if "$(" in command or "`" in command:
         return False
-    return bool(_BASH_READONLY_PREFIX_RE.match(command))
+    # F63: EVERY executed segment must be read-only, after transparent prefixes
+    # (`env X=1 llm-router query`, `ls; llm-router query`, a newline) are removed.
+    segs = _bash_segments(command)
+    if not segs:
+        return False
+    for seg in segs:
+        eff = _effective_command(seg)
+        if not (_BASH_READONLY_PREFIX_RE.match(eff) or seg.strip() == "env"):
+            return False
+    return True
 
 
 # ── Local-only (non-routable) Bash allowlist ──────────────────────────────────
@@ -506,11 +515,352 @@ _PY_PROVIDER_RE = re.compile(
 )
 
 
+# F63: more shell-driven LLM shapes. `python -m openai`, an inline node program
+# that requires/imports a provider SDK, and inline python that shells out to a
+# model-calling router subcommand (`os.system("llm-router run ...")`).
+_PY_MODULE_LLM_RE = re.compile(
+    r"\bpython[0-9.]*\s+(?:-[A-Za-z]+\s+)*-m\s+(?:openai|anthropic|litellm|ollama|"
+    r"mistralai|cohere|groq|llm)\b",
+    re.IGNORECASE,
+)
+_NODE_INLINE_LLM_RE = re.compile(
+    r"\b(?:node|deno|bun)\s+(?:-[A-Za-z-]*[ep]\b|eval\b).*"
+    r"(?:require\(|import\b|from\b)\s*\(?\s*['\"](?:openai|@anthropic-ai/sdk|"
+    r"@google/generative-ai|@google/genai|ollama|groq-sdk|cohere-ai|@mistralai/mistralai)",
+    re.IGNORECASE | re.DOTALL,
+)
+_PY_SHELLOUT_ROUTER_RE = re.compile(
+    r"(?:os\.system|os\.popen|subprocess\.\w+)\s*\([^)]*llm[-_]router",
+    re.IGNORECASE,
+)
+
+
 def _is_shell_llm_call(command: str) -> bool:
     """True when a Bash command drives another LLM from the shell (never exempt)."""
     if _BASH_ROUTABLE_ESCAPE_RE.search(command):
         return True
-    return bool(_PY_INLINE_RE.search(command) and _PY_PROVIDER_RE.search(command))
+    if _PY_MODULE_LLM_RE.search(command) or _NODE_INLINE_LLM_RE.search(command):
+        return True
+    if _PY_INLINE_RE.search(command):
+        return bool(_PY_PROVIDER_RE.search(command)
+                    or _PY_SHELLOUT_ROUTER_RE.search(command))
+    return False
+
+
+# ── F63: classify EVERY executed segment of a Bash command ───────────────────
+# A command is exempt only if each thing it runs is exempt. Segments come from
+# splitting on ; & | && || and newlines OUTSIDE quotes, descending into $(...),
+# backticks, <(...)/>(...) and the expanding body of a heredoc. Review of F60
+# found these slipped through because only the first word / the command-position
+# regex was inspected: `llm-router status $(llm-router query x)`, a newline
+# before the second command, and `xargs|env|nohup|time|nice|timeout|sudo` in
+# front of the real command. Bounded and linear: oversize, too deep or too many
+# segments -> None -> the caller treats the command as NOT exempt (fail closed).
+_SEG_MAX_CHARS = 8192
+_SEG_MAX_DEPTH = 6
+_SEG_MAX_COUNT = 64
+
+
+class _SegOverflow(Exception):
+    """Command too large / deep for the bounded parser."""
+
+
+def _seg_arith_end(s: str, i: int):
+    """`s[i:i+3] == '$(('` -> (end, is_arith). `end` is just past the `)` closing
+    the `$(`; `is_arith` is True only when the paren opened at i+2 closes
+    immediately before it (`$(( ... ))`, not `$((cmd) | cmd2)`). Unterminated
+    input raises _SegOverflow (fail closed)."""
+    depth, n = 1, len(s)
+    j = i + 2
+    inner_close = -1
+    while j < n:
+        c = s[j]
+        if c == "\\":
+            j += 2
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 1 and inner_close < 0:
+                inner_close = j
+            if depth == 0:
+                return j + 1, inner_close == j - 1
+        j += 1
+    raise _SegOverflow
+
+
+_CASE_HDR_RE = re.compile(
+    r"^(?:(?:do|then|else|elif|if|while|until|!|\{|\()\s+)*"
+    r"case\s+(?P<w>.+?)\s+in(?:\s+(?P<p>.*))?$", re.S)
+
+
+def _seg_scan(s: str, i: int, closer: bool, depth: int, segs: list,
+              body: bool = False) -> int:
+    """Scan `s` from `i`, appending executed segments to `segs`.
+
+    closer=True: stop after the ')' that closes a `$(`. body=True: heredoc body
+    text - only substitutions are collected, nothing else splits or is a segment.
+    Returns the index to continue from.
+    """
+    if depth > _SEG_MAX_DEPTH:
+        raise _SegOverflow
+    n = len(s)
+    cur: list = []
+    quote = ""
+    heredocs: list = []  # (delimiter, expanding, strip_tabs) queued for next newline
+    # case state: depth of open `case`; pat=True while reading `pat1|pat2` before
+    # the `)` (those words are patterns, never commands). Arm bodies after `)`
+    # are ordinary segments.
+    case = {"depth": 0, "pat": False}
+
+    def flush() -> None:
+        t = "".join(cur).strip()
+        cur.clear()
+        if t in ("SUBST", "ARITH"):
+            return  # placeholder left by a body-only scan; the real commands are already segments
+        if t and case["pat"]:
+            if t.split()[0] == "esac":
+                case["depth"] -= 1
+                case["pat"] = False
+            return  # a pattern piece, not a command
+        if t and case["depth"] and t.split()[0] == "esac":
+            case["depth"] -= 1
+            return
+        if t:
+            m = _CASE_HDR_RE.match(t)
+            if m:
+                if (m.group("p") or "").strip() != "esac":
+                    case["depth"] += 1
+                    case["pat"] = True
+                return  # the header only names a word; substitutions already descended
+            if len(segs) >= _SEG_MAX_COUNT:
+                raise _SegOverflow
+            segs.append(t)
+
+    while i < n:
+        c = s[i]
+        if quote == "'":
+            cur.append(c)
+            if c == "'":
+                quote = ""
+            i += 1
+            continue
+        if c == "\\":
+            if i + 1 < n and s[i + 1] == "\n":
+                cur.append(" ")
+            else:
+                cur.append(s[i:i + 2])
+            i += 2
+            continue
+        if c == "`":
+            j = i + 1
+            while j < n and s[j] != "`":
+                j += 2 if s[j] == "\\" else 1
+            _seg_scan(s[i + 1:j], 0, False, depth + 1, segs)
+            cur.append(" SUBST ")
+            i = j + 1
+            continue
+        if c == "$" and s.startswith("$((", i):
+            end, is_arith = _seg_arith_end(s, i)
+            if is_arith:
+                # bash executes command substitutions inside arithmetic
+                _seg_scan(s[i + 3:end - 2], 0, False, depth + 1, segs, body=True)
+                cur.append(" ARITH ")
+                i = end
+                continue
+        if (c == "$" or (c in "<>" and not quote)) and s.startswith("(", i + 1):
+            i = _seg_scan(s, i + 2, True, depth + 1, segs)
+            cur.append(" SUBST ")
+            continue
+        if body:
+            i += 1
+            continue
+        if quote == '"':
+            cur.append(c)
+            if c == '"':
+                quote = ""
+            i += 1
+            continue
+        if c in "'\"":
+            quote = c
+            cur.append(c)
+            i += 1
+            continue
+        if c == "#" and (not cur or cur[-1][-1:].isspace()):
+            while i < n and s[i] != "\n":
+                i += 1
+            continue
+        if c == ")" and not closer or c == ")" and case["depth"]:
+            text = "".join(cur).strip()
+            if case["pat"]:
+                cur.clear()
+                case["pat"] = False
+                i += 1
+                continue
+            m = _CASE_HDR_RE.match(text) if text else None
+            if m and (m.group("p") or "").strip() not in ("", "esac"):
+                cur.clear()
+                case["depth"] += 1
+                i += 1
+                continue
+        if c == ")" and closer:
+            flush()
+            return i + 1
+        if c == "<" and s.startswith("<<", i) and not s.startswith("<<<", i):
+            m = _HEREDOC_RE.match(s, i)
+            if m:
+                heredocs.append((m.group(3), not m.group(2), bool(m.group(1))))
+        if c == "&" and (
+                (i > 0 and s[i - 1] in "<>") or s.startswith("&>", i)):
+            cur.append(c)  # redirection: 2>&1, >&2, &>file - not a separator
+            i += 1
+            continue
+        if c == ";" and case["depth"] and not case["pat"] and (
+                s.startswith(";;", i) or s.startswith(";&", i)):
+            flush()
+            i += 3 if s.startswith(";;&", i) else 2
+            case["pat"] = True
+            continue
+        if c in ";&|\n":
+            flush()
+            i += 1
+            if c == "\n" and heredocs:
+                for delim, expanding, strip in heredocs:
+                    start = i
+                    while i < n:
+                        eol = s.find("\n", i)
+                        eol = n if eol < 0 else eol
+                        line = s[i:eol]
+                        i = min(eol + 1, n)
+                        if (line.lstrip("\t") if strip else line) == delim:
+                            break
+                    if expanding:
+                        _seg_scan(s[start:i], 0, False, depth + 1, segs, body=True)
+                heredocs.clear()
+            continue
+        cur.append(c)
+        i += 1
+    flush()
+    return n
+
+
+_HEREDOC_RE = re.compile(r"<<(-?)\s*(['\"]?)([A-Za-z_][\w.-]*)\2")
+
+
+def _bash_segments(command: str):
+    """All executed segments of `command`, or None if it is too big/deep/long."""
+    if len(command) > _SEG_MAX_CHARS:
+        return None
+    segs: list = []
+    try:
+        _seg_scan(command, 0, False, 0, segs)
+    except _SegOverflow:
+        return None
+    except Exception:  # noqa: BLE001 - parser bug must never crash the hook; None = not exempt
+        return None
+    return segs
+
+
+# Prefixes that run their argument as the real command. value = flags that take
+# a following argument (so `xargs -I {} llm-router query` finds the command).
+_TRANSPARENT_PREFIXES = {
+    "xargs": frozenset({"-I", "-i", "-n", "-P", "-L", "-d", "-E", "-s", "-a"}),
+    "env": frozenset({"-u", "-C", "-S", "--unset", "--chdir"}),
+    "nohup": frozenset(), "time": frozenset({"-o", "-f"}), "command": frozenset(),
+    "nice": frozenset({"-n"}), "ionice": frozenset({"-c", "-n", "-p"}),
+    "timeout": frozenset({"-s", "-k", "--signal", "--kill-after"}),
+    "sudo": frozenset({"-u", "-g", "-C", "-h", "-p", "-r", "-t", "-U", "-D"}),
+    "exec": frozenset({"-a"}), "builtin": frozenset(), "stdbuf": frozenset(),
+    "setsid": frozenset(), "caffeinate": frozenset({"-t", "-w"}),
+}
+_SHELL_KEYWORDS = frozenset({"then", "do", "else", "elif", "if", "while", "until",
+                             "!", "{", "(", "{(", "time"})
+_SHELL_HEADERS = frozenset({"for", "select"})  # `case` is split by the scanner
+_SHELL_CLOSERS = frozenset({"fi", "done", "esac", "}", ")", ";;"})
+_ASSIGN_RE = re.compile(r"^[A-Za-z_]\w*=")
+_DURATION_RE = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
+
+
+def _effective_command(segment: str) -> str:
+    """The segment with env assignments, shell keywords and transparent prefixes
+    (and their flags) removed: what is really executed. '' if nothing is."""
+    toks = segment.split()
+    i, n = 0, len(toks)
+    while i < n:
+        t = toks[i].lstrip("({")  # `(llm-router x)` / `{ cmd; }` grouping
+        if not t:
+            i += 1
+            continue
+        if _ASSIGN_RE.match(t) or t in _SHELL_KEYWORDS:
+            i += 1
+            continue
+        base = t.rsplit("/", 1)[-1]
+        if base in _TRANSPARENT_PREFIXES:
+            takes = _TRANSPARENT_PREFIXES[base]
+            i += 1
+            while i < n and toks[i].startswith("-") and toks[i] != "--":
+                i += 2 if toks[i] in takes else 1
+            if i < n and toks[i] == "--":
+                i += 1
+            if base == "timeout" and i < n and _DURATION_RE.match(toks[i]):
+                i += 1
+            continue
+        break
+    rest = " ".join(toks[i:]).lstrip("({ ")
+    if rest.endswith(")") and rest.count("(") < rest.count(")"):
+        rest = rest[:-1].rstrip()  # closing paren of a `( ... )` group
+    return rest
+
+
+# The block message itself tells the user to `export LLM_ROUTER_ENFORCE=soft|off`.
+# Only values that LOWER enforcement (the hook treats off/shadow as observation,
+# advise/soft as never-block). `=hard`, `=strict`, empty or any other var is not an escape.
+_ESCAPE_EXPORT_RE = re.compile(
+    r"^export\s+LLM_ROUTER_ENFORCE=(['\"]?)(?:off|soft|advise|shadow)\1$", re.I)
+
+
+def _segment_exempt(effective: str) -> bool:
+    """One executed command is a local tool / read-only / admin router CLI."""
+    if not effective:
+        return False
+    if effective in _SHELL_CLOSERS or effective.split()[0] in _SHELL_HEADERS:
+        return True  # loop header: only lists words, substitutions descended
+    if _is_shell_llm_call(effective):
+        return False
+    return (bool(_ESCAPE_EXPORT_RE.match(effective))
+            or _is_readonly_bash(effective)
+            or bool(_BASH_LOCAL_TOOL_RE.match(effective))
+            or _router_invocations_admin_only(effective))
+
+
+def _is_bare_env(segment: str) -> bool:
+    """`env`, `env -i`, `env A=1` with no command: prints the environment. `-S`
+    (split-string) executes its argument, so it is excluded."""
+    toks = segment.split()
+    if not toks or toks[0].rsplit("/", 1)[-1] != "env":
+        return False
+    return not any(t.startswith("-S") or t == "--split-string" for t in toks[1:])
+
+
+def _all_segments_exempt(command: str, need_router: bool = False) -> bool:
+    segs = _bash_segments(command)
+    if not segs:
+        return False
+    saw_router = False
+    for seg in segs:
+        eff = _effective_command(seg)
+        if eff in _SHELL_CLOSERS:
+            continue
+        if not eff and _is_bare_env(seg):
+            continue  # `env | sort` only prints the environment
+        if not _segment_exempt(eff):
+            return False
+        # the export counts as a router self command only when it is the whole command
+        if need_router and (_router_invocations_admin_only(eff)
+                            or (len(segs) == 1 and _ESCAPE_EXPORT_RE.match(eff))):
+            saw_router = True
+    return saw_router or not need_router
 
 
 # ── The router's own CLI is never held ────────────────────────────────────────
@@ -589,7 +939,7 @@ def _is_router_self_command(command: str) -> bool:
         return False
     if _is_shell_llm_call(command):
         return False
-    return _router_invocations_admin_only(command)
+    return _all_segments_exempt(command, need_router=True)
 
 
 def _bash_exempt_from_hold(task_type: str, command: str, redirect_fires: bool) -> bool:
@@ -647,8 +997,18 @@ def _smart_ops_bash_exempt(enforce: str, task_type: str, command: str) -> bool:
         return False
     if not command or not command.strip():
         return False
-    return not (_is_shell_llm_call(command)
-                or _SMART_OPS_LLM_ESCAPE_RE.search(command))
+    if _is_shell_llm_call(command) or _SMART_OPS_LLM_ESCAPE_RE.search(command):
+        return False
+    # F63: a model-calling router subcommand anywhere in the command (any
+    # segment, behind $(...), a newline or a transparent prefix) stays eligible.
+    segs = _bash_segments(command)
+    if segs is None:
+        return False
+    for seg in segs:
+        eff = _effective_command(seg)
+        if _ROUTER_SELF_CLI_RE.search(eff) and not _router_invocations_admin_only(eff):
+            return False
+    return True
 
 
 def _is_local_only_bash(command: str) -> bool:
@@ -664,9 +1024,7 @@ def _is_local_only_bash(command: str) -> bool:
         return False
     if _is_shell_llm_call(command):
         return False
-    if _is_readonly_bash(command):
-        return True
-    return bool(_BASH_LOCAL_TOOL_RE.match(command)) or _is_router_self_command(command)
+    return _all_segments_exempt(command)
 
 
 # ── Session-Type Tracking ─────────────────────────────────────────────────────
