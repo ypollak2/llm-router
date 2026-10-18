@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 21
+# llm_router-hook-version: 22
 """PreToolUse[*] hook — enforce routing compliance.
 
 When auto-route.py issues a ⚡ MANDATORY ROUTE directive, it writes a
@@ -565,19 +565,34 @@ class _SegOverflow(Exception):
     """Command too large / deep for the bounded parser."""
 
 
-def _seg_skip_arith(s: str, i: int) -> int:
-    """`s[i:i+3] == '$(('` -> index just past the matching '))' (or end)."""
-    depth, n = 0, len(s)
+def _seg_arith_end(s: str, i: int):
+    """`s[i:i+3] == '$(('` -> (end, is_arith). `end` is just past the `)` closing
+    the `$(`; `is_arith` is True only when the paren opened at i+2 closes
+    immediately before it (`$(( ... ))`, not `$((cmd) | cmd2)`). Unterminated
+    input raises _SegOverflow (fail closed)."""
+    depth, n = 1, len(s)
     j = i + 2
+    inner_close = -1
     while j < n:
-        if s[j] == "(":
+        c = s[j]
+        if c == "\\":
+            j += 2
+            continue
+        if c == "(":
             depth += 1
-        elif s[j] == ")":
+        elif c == ")":
             depth -= 1
+            if depth == 1 and inner_close < 0:
+                inner_close = j
             if depth == 0:
-                return j + 1
+                return j + 1, inner_close == j - 1
         j += 1
-    return n
+    raise _SegOverflow
+
+
+_CASE_HDR_RE = re.compile(
+    r"^(?:(?:do|then|else|elif|if|while|until|!|\{|\()\s+)*"
+    r"case\s+(?P<w>.+?)\s+in(?:\s+(?P<p>.*))?$", re.S)
 
 
 def _seg_scan(s: str, i: int, closer: bool, depth: int, segs: list,
@@ -594,11 +609,31 @@ def _seg_scan(s: str, i: int, closer: bool, depth: int, segs: list,
     cur: list = []
     quote = ""
     heredocs: list = []  # (delimiter, expanding, strip_tabs) queued for next newline
+    # case state: depth of open `case`; pat=True while reading `pat1|pat2` before
+    # the `)` (those words are patterns, never commands). Arm bodies after `)`
+    # are ordinary segments.
+    case = {"depth": 0, "pat": False}
 
     def flush() -> None:
         t = "".join(cur).strip()
         cur.clear()
+        if t in ("SUBST", "ARITH"):
+            return  # placeholder left by a body-only scan; the real commands are already segments
+        if t and case["pat"]:
+            if t.split()[0] == "esac":
+                case["depth"] -= 1
+                case["pat"] = False
+            return  # a pattern piece, not a command
+        if t and case["depth"] and t.split()[0] == "esac":
+            case["depth"] -= 1
+            return
         if t:
+            m = _CASE_HDR_RE.match(t)
+            if m:
+                if (m.group("p") or "").strip() != "esac":
+                    case["depth"] += 1
+                    case["pat"] = True
+                return  # the header only names a word; substitutions already descended
             if len(segs) >= _SEG_MAX_COUNT:
                 raise _SegOverflow
             segs.append(t)
@@ -627,14 +662,17 @@ def _seg_scan(s: str, i: int, closer: bool, depth: int, segs: list,
             i = j + 1
             continue
         if c == "$" and s.startswith("$((", i):
-            cur.append(" ARITH ")
-            i = _seg_skip_arith(s, i)
-            continue
-        if (c == "$" or (c in "<>" and not quote)) and s.startswith("(", i + 1):
-            if not (c == "$" and quote == "" and s.startswith("$((", i)):
-                i = _seg_scan(s, i + 2, True, depth + 1, segs)
-                cur.append(" SUBST ")
+            end, is_arith = _seg_arith_end(s, i)
+            if is_arith:
+                # bash executes command substitutions inside arithmetic
+                _seg_scan(s[i + 3:end - 2], 0, False, depth + 1, segs, body=True)
+                cur.append(" ARITH ")
+                i = end
                 continue
+        if (c == "$" or (c in "<>" and not quote)) and s.startswith("(", i + 1):
+            i = _seg_scan(s, i + 2, True, depth + 1, segs)
+            cur.append(" SUBST ")
+            continue
         if body:
             i += 1
             continue
@@ -653,6 +691,19 @@ def _seg_scan(s: str, i: int, closer: bool, depth: int, segs: list,
             while i < n and s[i] != "\n":
                 i += 1
             continue
+        if c == ")" and not closer or c == ")" and case["depth"]:
+            text = "".join(cur).strip()
+            if case["pat"]:
+                cur.clear()
+                case["pat"] = False
+                i += 1
+                continue
+            m = _CASE_HDR_RE.match(text) if text else None
+            if m and (m.group("p") or "").strip() not in ("", "esac"):
+                cur.clear()
+                case["depth"] += 1
+                i += 1
+                continue
         if c == ")" and closer:
             flush()
             return i + 1
@@ -664,6 +715,12 @@ def _seg_scan(s: str, i: int, closer: bool, depth: int, segs: list,
                 (i > 0 and s[i - 1] in "<>") or s.startswith("&>", i)):
             cur.append(c)  # redirection: 2>&1, >&2, &>file - not a separator
             i += 1
+            continue
+        if c == ";" and case["depth"] and not case["pat"] and (
+                s.startswith(";;", i) or s.startswith(";&", i)):
+            flush()
+            i += 3 if s.startswith(";;&", i) else 2
+            case["pat"] = True
             continue
         if c in ";&|\n":
             flush()
@@ -700,6 +757,8 @@ def _bash_segments(command: str):
         _seg_scan(command, 0, False, 0, segs)
     except _SegOverflow:
         return None
+    except Exception:  # noqa: BLE001 - parser bug must never crash the hook; None = not exempt
+        return None
     return segs
 
 
@@ -717,7 +776,7 @@ _TRANSPARENT_PREFIXES = {
 }
 _SHELL_KEYWORDS = frozenset({"then", "do", "else", "elif", "if", "while", "until",
                              "!", "{", "(", "{(", "time"})
-_SHELL_HEADERS = frozenset({"for", "case", "select"})
+_SHELL_HEADERS = frozenset({"for", "select"})  # `case` is split by the scanner
 _SHELL_CLOSERS = frozenset({"fi", "done", "esac", "}", ")", ";;"})
 _ASSIGN_RE = re.compile(r"^[A-Za-z_]\w*=")
 _DURATION_RE = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
@@ -755,7 +814,10 @@ def _effective_command(segment: str) -> str:
 
 
 # The block message itself tells the user to `export LLM_ROUTER_ENFORCE=soft|off`.
-_ESCAPE_EXPORT_RE = re.compile(r"^export\s+LLM_ROUTER_ENFORCE=['\"]?\w*['\"]?$")
+# Only values that LOWER enforcement (the hook treats off/shadow as observation,
+# advise/soft as never-block). `=hard`, `=strict`, empty or any other var is not an escape.
+_ESCAPE_EXPORT_RE = re.compile(
+    r"^export\s+LLM_ROUTER_ENFORCE=(['\"]?)(?:off|soft|advise|shadow)\1$", re.I)
 
 
 def _segment_exempt(effective: str) -> bool:
@@ -763,13 +825,22 @@ def _segment_exempt(effective: str) -> bool:
     if not effective:
         return False
     if effective in _SHELL_CLOSERS or effective.split()[0] in _SHELL_HEADERS:
-        return True  # loop / case header: only lists words, substitutions descended
+        return True  # loop header: only lists words, substitutions descended
     if _is_shell_llm_call(effective):
         return False
     return (bool(_ESCAPE_EXPORT_RE.match(effective))
             or _is_readonly_bash(effective)
             or bool(_BASH_LOCAL_TOOL_RE.match(effective))
             or _router_invocations_admin_only(effective))
+
+
+def _is_bare_env(segment: str) -> bool:
+    """`env`, `env -i`, `env A=1` with no command: prints the environment. `-S`
+    (split-string) executes its argument, so it is excluded."""
+    toks = segment.split()
+    if not toks or toks[0].rsplit("/", 1)[-1] != "env":
+        return False
+    return not any(t.startswith("-S") or t == "--split-string" for t in toks[1:])
 
 
 def _all_segments_exempt(command: str, need_router: bool = False) -> bool:
@@ -781,10 +852,13 @@ def _all_segments_exempt(command: str, need_router: bool = False) -> bool:
         eff = _effective_command(seg)
         if eff in _SHELL_CLOSERS:
             continue
+        if not eff and _is_bare_env(seg):
+            continue  # `env | sort` only prints the environment
         if not _segment_exempt(eff):
             return False
+        # the export counts as a router self command only when it is the whole command
         if need_router and (_router_invocations_admin_only(eff)
-                            or _ESCAPE_EXPORT_RE.match(eff)):
+                            or (len(segs) == 1 and _ESCAPE_EXPORT_RE.match(eff))):
             saw_router = True
     return saw_router or not need_router
 

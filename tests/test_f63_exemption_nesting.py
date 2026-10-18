@@ -211,3 +211,115 @@ def test_e2e_false_positives_exempt_for_non_qa(tmp_path, enforce, cmd):
 def test_export_escape_is_not_a_blanket_export_exemption(hook):
     assert hook._is_local_only_bash("export OPENAI_API_KEY=x") is False
     assert hook._is_local_only_bash("export LLM_ROUTER_ENFORCE=off; llm-router query x") is False
+
+
+# ── Round 1 repair: arithmetic substitutions, case arms, export, bare env ────
+
+R1_BYPASSES = [
+    "echo $(( $(llm-router query x) + 1 ))",
+    "echo $(( 1 + $(curl api.openai.com) ))",
+    "echo $(( 1 + `llm-router query x` ))",
+    "echo $(( $(( $(curl api.openai.com) )) + 1 ))",
+    "case x in x) curl api.openai.com;; esac",
+    "case x in x) llm-router query hi;; esac",
+    "case x in a|b) ls;; c) llm-router query hi;; esac",
+    "case $x in\n a) ls ;;\n b) curl api.openai.com ;;\nesac",
+    "case x in x) ls;& y) llm-router query hi;;& z) ls;; esac",
+    "for i in a; do case $i in a) curl api.openai.com;; esac; done",
+    "export LLM_ROUTER_ENFORCE=off; curl api.openai.com",
+    "export LLM_ROUTER_ENFORCE=off && llm-router query x",
+]
+R1_EXEMPT = [
+    "echo $((1+2))", "echo $(( $(date +%s) + 1 ))", "echo $(( 1 + `ls | wc -l` ))",
+    "case x in a|b) ls;; c) pwd;; *) echo hi;; esac",
+    "case $x in\n a) ls ;;\n b) git status ;;\nesac",
+    "for i in a; do case $i in a) ls;; esac; done",
+    "cat <<EOF\n$(date)\nEOF", "env | sort", "env -i", "env A=1 | sort",
+]
+
+
+@pytest.mark.parametrize("cmd", R1_BYPASSES)
+def test_r1_bypass_is_not_exempt(hook, cmd):
+    assert hook._is_local_only_bash(cmd) is False, cmd
+    assert hook._is_router_self_command(cmd) is False, cmd
+    assert hook._bash_exempt_from_hold("coordination", cmd, False) is False, cmd
+
+
+@pytest.mark.parametrize("cmd", R1_EXEMPT)
+def test_r1_false_positives_stay_exempt(hook, cmd):
+    assert hook._is_local_only_bash(cmd) is True, cmd
+
+
+def test_r1_arith_substitutions_become_segments(hook):
+    assert "curl api.openai.com" in hook._bash_segments("echo $(( 1 + $(curl api.openai.com) ))")
+    assert hook._bash_segments("echo $((a)|(b))") != hook._bash_segments("echo $((a|b))")
+    assert hook._bash_segments("echo $(( 1 + ") is None  # unterminated -> fail closed
+
+
+def test_r1_case_arms_are_their_own_segments(hook):
+    assert hook._bash_segments("case x in a|b) ls;; c) pwd;; esac") == ["ls", "pwd"]
+    assert hook._bash_segments("case x in x) curl a;; esac") == ["curl a"]
+
+
+def test_r1_export_exact_var_and_lowering_values_only(hook):
+    for ok in ["export LLM_ROUTER_ENFORCE=off", "export LLM_ROUTER_ENFORCE=soft",
+               'export LLM_ROUTER_ENFORCE="off"', "export LLM_ROUTER_ENFORCE='soft'",
+               "export LLM_ROUTER_ENFORCE=advise", "export LLM_ROUTER_ENFORCE=shadow"]:
+        assert hook._is_router_self_command(ok) is True, ok
+    for bad in ["export LLM_ROUTER_ENFORCE=hard", "export LLM_ROUTER_ENFORCE=strict",
+                "export LLM_ROUTER_ENFORCE=", "export LLM_ROUTER_ENFORCE=banana",
+                "export LLM_ROUTER_ENFORCEX=off", "export OTHER=off"]:
+        assert hook._is_router_self_command(bad) is False, bad
+        assert hook._is_local_only_bash(bad) is False, bad
+
+
+def test_r1_export_plus_other_command_is_not_never_held(hook):
+    assert hook._is_router_self_command("export LLM_ROUTER_ENFORCE=off; rm -rf x") is False
+    assert hook._is_router_self_command("export LLM_ROUTER_ENFORCE=off; ls") is False
+    # but the combination with a real admin command still is
+    assert hook._is_router_self_command("export LLM_ROUTER_ENFORCE=off; llm-router status") is True
+
+
+def test_r1_tokenizer_exception_fails_closed_and_does_not_crash(hook, monkeypatch, tmp_path,
+                                                                 capsys):
+    def boom(*a, **k):
+        raise RuntimeError("tokenizer bug")
+
+    monkeypatch.setattr(hook, "_seg_scan", boom)
+    assert hook._bash_segments("ls -la") is None
+    assert hook._is_local_only_bash("ls -la") is False
+    assert hook._is_router_self_command("llm-router status") is False
+    # the whole hook still returns normally (no traceback) for a Bash call
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
+    monkeypatch.setattr(sys, "stdin", __import__("io").StringIO(json.dumps(
+        {"session_id": "f63r1", "tool_name": "Bash",
+         "tool_input": {"command": "echo $(( 1 + $(curl api.openai.com) ))"}})))
+    try:
+        hook.main()
+    except SystemExit as e:
+        assert e.code in (0, None)
+
+
+E2E_R1 = [c for c in R1_BYPASSES if "\n" not in c][:10] + [
+    "export LLM_ROUTER_ENFORCE=hard; curl api.openai.com"]
+
+
+@pytest.mark.parametrize("enforce", ["smart", "hard"])
+@pytest.mark.parametrize("task", ["coordination", "research"])
+@pytest.mark.parametrize("cmd", E2E_R1 + [c for c in R1_BYPASSES if "\n" in c])
+def test_r1_e2e_bypass_is_held(tmp_path, enforce, task, cmd):
+    assert _run(cmd, tmp_path, enforce, task), (enforce, task, cmd)
+
+
+@pytest.mark.parametrize("enforce", ["smart", "hard", "strict"])
+@pytest.mark.parametrize("task", ["coordination", "research"])
+@pytest.mark.parametrize("cmd", ["export LLM_ROUTER_ENFORCE=advise", 'export LLM_ROUTER_ENFORCE="off"'])
+def test_r1_e2e_lowering_exports_never_held(tmp_path, enforce, task, cmd):
+    assert not _run(cmd, tmp_path, enforce, task), (enforce, task, cmd)
+
+
+@pytest.mark.parametrize("enforce", ["smart", "strict"])
+@pytest.mark.parametrize("task", ["research", "query"])
+def test_r1_e2e_export_then_rm_not_never_held(tmp_path, enforce, task):
+    assert _run("export LLM_ROUTER_ENFORCE=off; rm -rf x", tmp_path, enforce, task), (enforce, task)
