@@ -448,7 +448,8 @@ def _counting_perl(tmp_path: Path, log: Path) -> Path:
 @pytest.mark.skipif(shutil.which("perl") is None, reason="needs perl (the macOS clock)")
 def test_the_unsampled_path_starts_no_process_and_a_sampled_call_two_clock_reads(tmp_path):
     """The structural half of "the wrapper adds < 5 ms", independent of load:
-    an unsampled call starts no perl, a sampled call starts exactly two (t0, t1)."""
+    an unsampled call starts no perl and, since F68, neither does a sampled one: the
+    clock is two shell redirects whose mtimes the backgrounded writer reads."""
     home = tmp_path / "h"
     (home / ".llm-router").mkdir(parents=True)
     script = _wrapper_only_script(tmp_path)
@@ -464,10 +465,8 @@ def test_the_unsampled_path_starts_no_process_and_a_sampled_call_two_clock_reads
 
     assert [starts(None) for _ in range(5)] == [0] * 5
     assert [starts("0") for _ in range(5)] == [0] * 5
-    assert [starts("all") for _ in range(5)] == [2] * 5
-    one_in_20 = [starts("1") for _ in range(40)]
-    assert set(one_in_20) <= {0, 2}, one_in_20
-    assert one_in_20.count(2) < 12, one_in_20  # P(>= 12 of 40 at p = 1/20) < 1e-7
+    assert [starts("all") for _ in range(5)] == [0] * 5
+    assert [starts("1") for _ in range(40)] == [0] * 40
 
 
 # Foreground commands the wrapper runs (bash -x lines), per timing setting. The

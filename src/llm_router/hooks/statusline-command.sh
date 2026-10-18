@@ -10,19 +10,26 @@
 # IMPORTANT: Must consume stdin — Claude Code pipes session JSON here.
 # Without reading it, the pipe blocks and Claude Code times out.
 
-# >>> statusline timing (P0.9-c) ─────────────────────────────────────────────
+# >>> statusline timing (P0.9-c, F68) ───────────────────────────────────────
 # LLM_ROUTER_STATUSLINE_TIMING=1 times 1 call in 20 (=all: every call) and
 # appends a hook_latency row (hook "statusline", PRD bar 100 ms) from a
-# BACKGROUNDED `python -m llm_router.hook_latency record-raw`, so the write is
-# not inside the number and never delays the line. Clock: perl Time::HiRes,
-# because macOS /bin/bash 3.2 has no EPOCHREALTIME. Unsampled calls pay only
-# the env test and $RANDOM below (no process). The sampled number excludes the
+# BACKGROUNDED `python -m llm_router.hook_latency record-stamps`, so the write is
+# not inside the number and never delays the line. Clock (F68): the kernel's file
+# mtime. The start and the end are each ONE shell redirect (`: > file`, a builtin,
+# no process); the backgrounded writer reads the two mtimes. This replaced two
+# `perl -MTime::HiRes` processes, whose start-up was inside the number and, at
+# machine load >= 8, was most of the live p95 (F68: p95 425 ms at load >= 8 vs 96
+# ms below 4, with a render that is pure bash). The number still excludes the
 # bash start-up before this line, as the hooks' numbers exclude the interpreter's.
+# Resolution is the filesystem's (ns on APFS; one kernel tick on Linux).
+# Unsampled calls pay only the env test and $RANDOM below (no process).
 _slt_on="${LLM_ROUTER_STATUSLINE_TIMING:-}"
 _slt_t0=""
 if [ -n "$_slt_on" ] && [ "$_slt_on" != "0" ] && [ "$_slt_on" != "off" ]; then
     if [ "$_slt_on" = "all" ] || [ $((RANDOM % 20)) -eq 0 ]; then
-        _slt_t0=$(perl -MTime::HiRes=time -e 'printf "%.0f",time*1000' 2>/dev/null)
+        _slt_s="$HOME/.llm-router/.slt_$$.s"
+        _slt_e="$HOME/.llm-router/.slt_$$.e"
+        if { : > "$_slt_s"; } 2>/dev/null; then _slt_t0=1; else _slt_s=""; fi
     fi
 fi
 # A python that can import llm_router: sets $_chz_py, or leaves it empty. Shared
@@ -45,22 +52,23 @@ _chz_find_py() {
 }
 # The row carries the session id from the session JSON on stdin ($input), so a
 # reader can count sessions and drop research / executor ones (PLAN v16 §1.4
-# rules 4 and 8). Matched in bash (no process). The t1 clock is read inside a
-# freshly started perl, so every sampled number includes one perl start-up
-# (a few ms idle, more under load): a known upward bias against the 100 ms bar,
-# conservative for P0.9-c. The interpreter search runs in
-# the backgrounded child, after the clock stopped: the fast line and a full line
-# without usage.db never set $_chz_py, and a bare python3 that cannot import
-# llm_router would write no row.
+# rules 4 and 8), and a phase (F68) naming the render path taken: cache_hit (a
+# fresh segment cache), cache_stale (rendered a stale cache and asked for a
+# refresh), cache_miss (no cache: "segments pending", build started detached) or
+# fast (the debug tick). It lands in phases_ms as {phase: elapsed_ms}. The
+# interpreter search runs in the backgrounded child, after the clock stopped: the
+# fast line and a full line without usage.db never set $_chz_py, and a bare
+# python3 that cannot import llm_router would write no row (the stamps are then
+# removed by the child, so none leak).
 _slt_finish() {
     [ -n "$_slt_t0" ] || return 0
-    local _t1 _sid="" _re='"session_id"[[:space:]]*:[[:space:]]*"([A-Za-z0-9._-]+)"'
-    _t1=$(perl -MTime::HiRes=time -e 'printf "%.0f",time*1000' 2>/dev/null) || return 0
-    [ -n "$_t1" ] || return 0
+    { : > "$_slt_e"; } 2>/dev/null || return 0
+    local _sid="" _re='"session_id"[[:space:]]*:[[:space:]]*"([A-Za-z0-9._-]+)"'
     [[ "$input" =~ $_re ]] && _sid="${BASH_REMATCH[1]}"
     ( { [ -n "$_chz_py" ] || _chz_find_py
-        [ -n "$_chz_py" ] && "$_chz_py" -m llm_router.hook_latency record-raw \
-            statusline Statusline "$((_t1 - _slt_t0))" "$_sid"
+        [ -n "$_chz_py" ] && "$_chz_py" -m llm_router.hook_latency record-stamps \
+            statusline Statusline "$_slt_s" "$_slt_e" "$_sid" "${_slt_phase:-}"
+        rm -f "$_slt_s" "$_slt_e"
       } </dev/null >/dev/null 2>&1 & )
     return 0
 }
@@ -108,6 +116,7 @@ if [ "$_sl_mode" = "fast" ]; then
         # A timed call cannot exec (the EXIT trap would never run). It reads the
         # session JSON itself so the row can carry the session id, and hands it on.
         if [ -n "$_slt_t0" ]; then
+            _slt_phase="fast"
             input=$(cat)
             printf '%s' "$input" | python3 -I -S "$_tick"
             exit $?
@@ -367,6 +376,11 @@ if [ "$s_v" = "1" ]; then
         fi
     fi
 fi
+
+# F68: which render path this was, for the timing row (see _slt_finish).
+if [ "$s_v" != "1" ]; then _slt_phase="cache_miss"
+elif [ -n "${_want:-}" ]; then _slt_phase="cache_stale"
+else _slt_phase="cache_hit"; fi
 
 parts=()
 

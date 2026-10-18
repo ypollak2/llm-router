@@ -547,21 +547,59 @@ def read_rows(since: float | None = None, until: float | None = None) -> list[di
 # -- command line -------------------------------------------------------------
 
 
+def _stamp_elapsed_ms(start_path: str, end_path: str) -> float | None:
+    """Milliseconds between the mtimes of two stamp files, or None when either is
+    missing. Removes both (they are single-use). The statusline stamps start and end
+    with a shell redirect (``: > file``, no process), so no interpreter start-up is
+    inside the number; the resolution is the filesystem's (ns on APFS, up to one
+    kernel tick on Linux)."""
+    from pathlib import Path
+
+    start, end = Path(start_path), Path(end_path)
+    try:
+        t0, t1 = start.stat().st_mtime_ns, end.stat().st_mtime_ns
+        start.unlink(missing_ok=True)
+        end.unlink(missing_ok=True)
+    except OSError:
+        return None
+    return max(0.0, (t1 - t0) / 1e6)
+
+
 def _main(argv: list[str] | None = None) -> int:
     """``python -m llm_router.hook_latency record-raw <hook> <event> <elapsed_ms> [<session_id>]``
+    or ``... record-stamps <hook> <event> <start_file> <end_file> [<session_id> [<phase>]]``
 
     Appends one row for a process that cannot import this module in-line (the
     statusline shell command). The optional session id goes on the row, so a
     reader can count sessions and drop research / executor ones (PLAN v16 §1.4
-    rules 4 and 8); an empty one is left off. Silent: exit 0 when written, 1
+    rules 4 and 8); an empty one is left off. ``record-stamps`` takes the elapsed
+    time from the mtimes of two files the caller touched (no clock process in the
+    caller) and an optional phase name, written as ``phases_ms={phase: elapsed}``
+    (F68: ``cache_hit`` / ``cache_stale`` / ``cache_miss`` for the statusline), so
+    the render path becomes measurable. Silent: exit 0 when written, 1
     when not, 2 on a usage error. Never prints on success, since a caller may be
     a status line."""
     import sys
 
     args = list(sys.argv[1:] if argv is None else argv)
+    usage = ("usage: python -m llm_router.hook_latency record-raw <hook> <event> <elapsed_ms>"
+             " [<session_id>] | record-stamps <hook> <event> <start_file> <end_file>"
+             " [<session_id> [<phase>]]")
+    if args and args[0] == "record-stamps":
+        if not 5 <= len(args) <= 7:
+            print(usage, file=sys.stderr)
+            return 2
+        hook, event = args[1], args[2]
+        sid = args[5].strip()[:128] if len(args) > 5 else ""
+        phase = args[6].strip()[:32] if len(args) > 6 else ""
+        elapsed = _stamp_elapsed_ms(args[3], args[4])
+        if not hook or elapsed is None:
+            return 1
+        phases = {phase: elapsed} if phase else None
+        return 0 if record(hook, event, elapsed, session_id=sid or None, load1=_load1(),
+                           phases_ms=phases) else 1
     if len(args) not in (4, 5) or args[0] != "record-raw":
-        print("usage: python -m llm_router.hook_latency record-raw <hook> <event> <elapsed_ms>"
-              " [<session_id>]", file=sys.stderr)
+        print(usage, file=sys.stderr)
         return 2
     _cmd, hook, event, raw = args[:4]
     sid = args[4].strip()[:128] if len(args) == 5 else ""
