@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 72
+# llm_router-hook-version: 73
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 72"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 73"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -1751,7 +1751,8 @@ _CMD_SHELL_NAME_RE = re.compile(
     r"(?:(?:ba|z|k|da|fi|c|tc|a)?sh|python[\d.]*|perl|ruby|node|php|eval|source|xargs|env|exec)",
     re.IGNORECASE)
 _CMD_WRAPPERS = frozenset((
-    "sudo doas busybox command nohup time nice setsid stdbuf timeout su chroot").split())
+    "sudo doas busybox command nohup time nice setsid stdbuf timeout su chroot "
+    "ionice systemd-run flock runuser pkexec unshare nsenter").split())
 
 
 def _cmd_pipes_into_shell(t: str) -> bool:
@@ -1907,13 +1908,14 @@ def _status_subject_ok(tail: str, skip: int = 1) -> bool:
 # determiner-led noun phrase of 1-3 words ("the deploy run"), or ONE bare word optionally
 # followed by a number ("X", "PR 89"); only a closing politeness/time token may follow, and
 # no object pronoun ("push it"), second determiner, or action verb ending a multi-word
-# phrase ("the build ship"; a pin: "status on the loop guard PR" is 3 words and stays). Anything longer or odder is a
-# false reject (one routing check); "status of the tests" stays coordination.
+# phrase ("the build ship"; a pin: "status on the loop guard PR" is 3 words and stays).
+# Anything longer or odder is a false reject (one routing check); "status of the tests" stays coordination.
 _STATUS_CLOSING_TOKENS = frozenset("please pls thanks thx thank you yet now today currently".split())
 _STATUS_OBJECT_PRONOUNS = frozenset("it them they him her me us".split())
 _STATUS_ACTION_ENDINGS = frozenset((
     "push deploy merge ship commit release publish optimize optimise handle do check test "
-    "build launch start stop restart kill").split())
+    "build launch start stop restart kill rerun retry rebuild redeploy").split())
+_STATUS_OF_TAIL_RE = re.compile(r"status(?:\s+(?:of|on))?$", re.IGNORECASE)
 
 
 def _status_of_subject_ok(tail: str) -> bool:
@@ -1942,7 +1944,7 @@ def _status_clause_ok(seg: str) -> bool:
     rest, last = [], 0
     for m in ms:
         if _STATUS_SUBJECT_OPEN_RE.match(m.group(0)) or _STATUS_SUBJECT_TAIL_RE.match(seg, m.end()):
-            if re.search(r"status(?:\s+(?:of|on))?$", m.group(0), re.IGNORECASE):
+            if _STATUS_OF_TAIL_RE.search(m.group(0)):
                 return _status_of_subject_ok(seg[m.end():])
             return _status_subject_ok(seg[m.end():])
         if _STATUS_DONE_SHAPE_RE.match(m.group(0)):
