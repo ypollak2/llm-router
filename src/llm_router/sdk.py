@@ -370,7 +370,7 @@ def _route(prompt: str, *, task_type: str | None, complexity: str | None,
     try:  # meter, like the gateway/hook paths
         from llm_router.hooks.savings_logger import log_direct_savings, log_direct_to_db
         log_direct_to_db(result=result, prompt=prompt, task_type=task_type,
-                         complexity=complexity, classifier_type="sdk", session_id=session_id)
+                         complexity=complexity, classifier_type="sdk", session_id=session_id, door="sdk")
         log_direct_savings(result=result, task_type=task_type, complexity=complexity,
                            session_id=session_id, host="sdk")
     except Exception:

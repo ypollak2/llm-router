@@ -2834,6 +2834,7 @@ async def _finalize_successful_route(
             skipped=_skipped,
             served_by_last_resort=skip_causes.served_by_last_resort(
                 response.provider, _cd.get("task_type", task_type.value), _skipped, _failed_before),
+            door=_call_identity.current_door(),  # P3.1-2: judge sampler door tag
         )
         if classification_data:
             if response.provider in {"claude_subscription", "subscription", "anthropic", "claude"}:

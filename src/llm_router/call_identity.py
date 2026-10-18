@@ -98,6 +98,9 @@ UNKNOWN_PREFIX = "unknown:"
 
 _TOOL_USE_ID: ContextVar[str | None] = ContextVar("llm_router_tool_use_id", default=None)
 _IN_MCP_CALL: ContextVar[bool] = ContextVar("llm_router_in_mcp_call", default=False)
+#: The judge-sampler door an HTTP/in-process entry point declares for the routed call it
+#: wraps (``door_scope``); None when no entry point did. P3.1-2.
+_DOOR: ContextVar[str | None] = ContextVar("llm_router_door", default=None)
 _CLIENT_IS_CLAUDE_CODE: ContextVar[bool] = ContextVar("llm_router_client_is_cc", default=False)
 
 #: ``clientInfo.name`` Claude Code sends in ``initialize`` (real handshake, 2.1.267).
@@ -154,6 +157,22 @@ def is_unknown_session(sid: Any) -> bool:
 def in_mcp_call() -> bool:
     """True inside an MCP tool call: ``IdentityMCPServer.call_tool`` is on the stack."""
     return _IN_MCP_CALL.get() or tool_use_id() is not None
+
+
+@contextmanager
+def door_scope(door: str) -> Iterator[None]:
+    """Declare which door (``gateway``, ...) the routed calls inside this block came through."""
+    tok = _DOOR.set(door)
+    try:
+        yield
+    finally:
+        _DOOR.reset(tok)
+
+
+def current_door() -> str | None:
+    """The door of the routed call in progress: the declared one, else ``mcp`` inside an
+    MCP tool call, else None (reported as ``unknown`` by the judge sampler)."""
+    return _DOOR.get() or (DOOR_MCP if in_mcp_call() else None)
 
 
 def call_session_id() -> str | None:

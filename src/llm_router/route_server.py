@@ -98,23 +98,25 @@ async def route_payload_async(payload: dict) -> dict:
     _sc_token = semantic_cache.CALLER_SYSTEM_PROMPT.set(True) if system else None
     # A.2-t: same bypass for a request with tools (see semantic_cache.REQUEST_HAS_TOOLS).
     _tools_token = semantic_cache.REQUEST_HAS_TOOLS.set(True) if tools else None
+    from llm_router import call_identity
     try:
-        resp = await route_and_call(
-            task_type, prompt,
-            complexity_hint=payload.get("complexity") or None,
-            system_prompt=system,
-            model_override=_override,
-            max_tokens=payload.get("max_tokens"),
-            temperature=payload.get("temperature"),
-            # Stage A: the caller's project, for OKF retrieval scope. Both HTTP
-            # surfaces hand the router a plain dict, so this is the only place the
-            # key can survive the trip. Absent → scope falls back to env, then cwd,
-            # which is this process's launch directory and not the asker's.
-            project_root=payload.get("project_root") or None,
-            messages=messages,
-            context_door="gateway",
-            **({"tools": tools, "tool_choice": tool_choice} if tools else {}),
-        )
+        with call_identity.door_scope("gateway"):  # P3.1-2: judge sampler door tag
+            resp = await route_and_call(
+                task_type, prompt,
+                complexity_hint=payload.get("complexity") or None,
+                system_prompt=system,
+                model_override=_override,
+                max_tokens=payload.get("max_tokens"),
+                temperature=payload.get("temperature"),
+                # Stage A: the caller's project, for OKF retrieval scope. Both HTTP
+                # surfaces hand the router a plain dict, so this is the only place the
+                # key can survive the trip. Absent → scope falls back to env, then cwd,
+                # which is this process's launch directory and not the asker's.
+                project_root=payload.get("project_root") or None,
+                messages=messages,
+                context_door="gateway",
+                **({"tools": tools, "tool_choice": tool_choice} if tools else {}),
+            )
     finally:
         if _tools_token is not None:
             semantic_cache.REQUEST_HAS_TOOLS.reset(_tools_token)
